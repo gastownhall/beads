@@ -39,13 +39,21 @@ func TryLock(lockPath string) (*Lock, error) {
 	return &Lock{f: f}, nil
 }
 
+// File returns the underlying *os.File. Useful for fork+exec lock-fd
+// inheritance: pass it via cmd.ExtraFiles, then Close() the parent's fd —
+// the child retains the lock through its inherited fd, which references the
+// same open file description.
+func (l *Lock) File() *os.File {
+	return l.f
+}
+
 // Unlock releases the flock and closes the underlying file. Panics on
 // failure to prevent silent deadlocks.
 //
-// There is intentionally no accessor for the underlying fd: the fork+exec
-// lock-fd handoff it would enable was never wired up — spawned children
-// acquire their own lock and signal contention via proxy.LockHeldExitCode
-// instead.
+// Do NOT call Unlock in fork+exec handoff scenarios where the lock fd has
+// been inherited by a child: flock's LOCK_UN releases the lock from the OFD,
+// which would silently drop the child's lock too. In that case use
+// l.File().Close() to drop only the parent's fd reference.
 func (l *Lock) Unlock() {
 	if err := lockfile.FlockUnlock(l.f); err != nil {
 		panic(fmt.Sprintf("util: failed to release lock: %v", err))

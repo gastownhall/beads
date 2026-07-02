@@ -20,7 +20,7 @@ Configuration can be set via 'bd config' or environment variables:
   gitlab.default_project_id / GITLAB_DEFAULT_PROJECT_ID - Project for creating issues in group mode
 
 ```
-bd gitlab
+bd gitlab [flags]
 ```
 
 ### bd gitlab projects
@@ -28,7 +28,7 @@ bd gitlab
 List GitLab projects that the configured token has access to.
 
 ```
-bd gitlab projects
+bd gitlab projects [flags]
 ```
 
 ### bd gitlab pull
@@ -70,7 +70,7 @@ bd gitlab push [bead-ids...] [flags]
 Display current GitLab configuration and sync status.
 
 ```
-bd gitlab status
+bd gitlab status [flags]
 ```
 
 ### bd gitlab sync

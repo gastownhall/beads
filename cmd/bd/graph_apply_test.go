@@ -361,7 +361,7 @@ func TestValidateGraphApplyPlanIgnoresIDOverridesForLocalCycleValidation(t *test
 	}
 }
 
-func TestGraphApplyEdgeCanSkipSQLCycleCheckOnlyForLocalBlockingEdges(t *testing.T) {
+func TestGraphApplyEdgeIsLocalCycleRelevantOnlyForLocalBlockingEdges(t *testing.T) {
 	tests := []struct {
 		name string
 		edge GraphApplyEdge
@@ -377,9 +377,9 @@ func TestGraphApplyEdgeCanSkipSQLCycleCheckOnlyForLocalBlockingEdges(t *testing.
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := graphApplyEdgeCanSkipSQLCycleCheck(tt.edge, graphApplyDependencyType(tt.typ))
+			got := graphApplyEdgeIsLocalCycleRelevant(tt.edge, graphApplyDependencyType(tt.typ))
 			if got != tt.want {
-				t.Fatalf("skip = %v, want %v", got, tt.want)
+				t.Fatalf("localCycleRelevant = %v, want %v", got, tt.want)
 			}
 		})
 	}

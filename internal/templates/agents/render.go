@@ -49,6 +49,9 @@ type RenderOpts struct {
 	// HasRemote indicates whether a Dolt remote is configured.
 	// When false, "bd dolt push" is omitted from session-completion instructions.
 	HasRemote bool
+	// NoPush indicates the rig is declared local-only (no-push: true in config).
+	// When true, "bd dolt push" is omitted regardless of HasRemote.
+	NoPush bool
 }
 
 // DefaultRenderOpts returns opts that assume a remote is configured,
@@ -211,7 +214,7 @@ func templateBodyWithOpts(profile Profile, opts RenderOpts) string {
 		body = strings.TrimSuffix(body, "\n<!-- END BEADS INTEGRATION -->")
 	}
 
-	if !opts.HasRemote {
+	if !opts.HasRemote || opts.NoPush {
 		body = stripDoltPushReferences(body)
 	}
 
@@ -226,8 +229,14 @@ func normalizeEmbeddedMarkdown(content string) string {
 // Strips the indented code-block line from session completion, and the
 // informational Auto-Sync bullet that references dolt push/pull.
 func stripDoltPushReferences(body string) string {
-	// Session completion code block: "   bd dolt push\n"
-	body = strings.ReplaceAll(body, "   bd dolt push\n", "")
+	// Session completion code block: exactly "   bd dolt push\n" (3-space indent).
+	// Pad both ends with "\n" so a single anchored ReplaceAll handles the line
+	// whether it appears at the start, middle, or end of the body, without
+	// accidentally matching a 4-space indented variant via substring.
+	const pushLine = "   bd dolt push\n"
+	padded := "\n" + body + "\n"
+	padded = strings.ReplaceAll(padded, "\n"+pushLine, "\n")
+	body = padded[1 : len(padded)-1]
 	// Auto-Sync informational bullet (full profile only)
 	body = strings.ReplaceAll(body, "- Use `bd dolt push`/`bd dolt pull` for remote sync\n", "")
 	return body

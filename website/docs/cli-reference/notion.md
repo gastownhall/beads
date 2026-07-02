@@ -13,7 +13,7 @@ Generated from `bd help --doc notion`
 Commands for syncing issues between beads and Notion.
 
 ```
-bd notion
+bd notion [flags]
 ```
 
 ### bd notion connect
@@ -84,7 +84,7 @@ bd notion push [bead-ids...] [flags]
 Show Notion sync status
 
 ```
-bd notion status
+bd notion status [flags]
 ```
 
 ### bd notion sync

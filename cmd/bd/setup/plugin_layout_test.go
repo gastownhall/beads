@@ -47,8 +47,8 @@ func TestPluginLayoutUsesSharedBeadsRoot(t *testing.T) {
 	if codexManifest.Skills != "./skills/" {
 		t.Fatalf("Codex manifest skills path = %q, want ./skills/", codexManifest.Skills)
 	}
-	if codexManifest.Hooks != "./hooks/hooks.json" {
-		t.Fatalf("Codex manifest hooks path = %q, want ./hooks/hooks.json", codexManifest.Hooks)
+	if codexManifest.Hooks != "./.codex-plugin/hooks/hooks.json" {
+		t.Fatalf("Codex manifest hooks path = %q, want ./.codex-plugin/hooks/hooks.json", codexManifest.Hooks)
 	}
 
 	requireRepoFile(t, root, "plugins", "beads", "skills", "beads", "SKILL.md")

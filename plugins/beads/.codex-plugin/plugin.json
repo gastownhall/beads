@@ -1,6 +1,6 @@
 {
   "name": "beads",
-  "version": "1.0.5",
+  "version": "1.1.0-rc.1",
   "description": "AI-supervised issue tracking for coding workflows with agent skills.",
   "author": {
     "name": "Steve Yegge",
@@ -16,7 +16,7 @@
     "agent-memory"
   ],
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
+  "hooks": "./.codex-plugin/hooks/hooks.json",
   "interface": {
     "displayName": "Beads",
     "shortDescription": "Project task tracking with bd",

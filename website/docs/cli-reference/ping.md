@@ -25,5 +25,5 @@ Examples:
   bd ping --json       # Structured output for automation
 
 ```
-bd ping
+bd ping [flags]
 ```

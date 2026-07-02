@@ -4,8 +4,8 @@
 # Between a version bump and the actual release, cmd/bd/version.go can be ahead
 # of the latest released docs snapshot. In normal PR/main CI, keep validating
 # the latest released docs without forcing it to match the unreleased binary
-# version. Set BEADS_REQUIRE_RELEASE_DOCS=1, or run from a v* tag, to require
-# the released docs snapshot to match the current binary version.
+# version. Set BEADS_REQUIRE_RELEASE_DOCS=1, or run from a stable v* tag, to
+# require the released docs snapshot to match the current binary version.
 
 set -euo pipefail
 
@@ -63,10 +63,14 @@ if [ -n "$LATEST_DOCS_VERSION" ]; then
 fi
 
 REQUIRE_RELEASE_DOCS="${BEADS_REQUIRE_RELEASE_DOCS:-}"
-if [ -z "$REQUIRE_RELEASE_DOCS" ] && [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+IS_PRERELEASE=0
+if [[ "$CANONICAL" == *-* ]]; then
+    IS_PRERELEASE=1
+fi
+if [ -z "$REQUIRE_RELEASE_DOCS" ] && [ "$IS_PRERELEASE" -eq 0 ] && [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
     REQUIRE_RELEASE_DOCS=1
 fi
-if [ -z "$REQUIRE_RELEASE_DOCS" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+if [ -z "$REQUIRE_RELEASE_DOCS" ] && [ "$IS_PRERELEASE" -eq 0 ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
     REQUIRE_RELEASE_DOCS=1
 fi
 
@@ -102,7 +106,7 @@ if [ "$MISMATCH" -ne 0 ]; then
             echo "  npx docusaurus docs:version $CANONICAL"
             echo "  cd .."
             echo "  # Ensure website/docusaurus.config.ts lastVersion is '$CANONICAL'"
-            echo "  ./scripts/generate-cli-docs.sh ./bd"
+            echo "  ./scripts/generate-cli-docs.sh --versioned $CANONICAL ./bd"
             echo "  ./scripts/generate-llms-full.sh"
             echo "  BEADS_REQUIRE_RELEASE_DOCS=1 ./scripts/check-docs-version.sh"
             ;;

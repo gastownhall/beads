@@ -21,7 +21,7 @@ TODOs can be promoted to full issues by changing type or priority:
   bd update todo-123 --type bug --priority 0
 
 ```
-bd todo
+bd todo [flags]
 ```
 
 ### bd todo add

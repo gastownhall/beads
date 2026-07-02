@@ -62,5 +62,5 @@ bd comments add [issue-id] [text] [flags]
 Invalid — use bd comments &lt;issue-id&gt; to list comments
 
 ```
-bd comments list
+bd comments list [flags]
 ```

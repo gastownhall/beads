@@ -30,6 +30,62 @@ func TestGetReadyWork_EmptyStore(t *testing.T) {
 	}
 }
 
+func TestRigIssueIsPersistentButHiddenFromReady(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	rig := &types.Issue{
+		ID:        "rw-rig-durable",
+		Title:     "Rig identity",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.IssueType("rig"),
+	}
+	if err := store.CreateIssue(ctx, rig, "tester"); err != nil {
+		t.Fatalf("CreateIssue rig: %v", err)
+	}
+	if rig.Ephemeral {
+		t.Fatal("CreateIssue marked type=rig as ephemeral")
+	}
+
+	got, err := store.GetIssue(ctx, rig.ID)
+	if err != nil {
+		t.Fatalf("GetIssue rig: %v", err)
+	}
+	if got.Ephemeral {
+		t.Fatal("stored type=rig issue is ephemeral")
+	}
+
+	var issueRows int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", rig.ID).Scan(&issueRows); err != nil {
+		t.Fatalf("count rig issue rows: %v", err)
+	}
+	if issueRows != 1 {
+		t.Fatalf("type=rig rows in issues = %d, want 1", issueRows)
+	}
+
+	var wispRows int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisps WHERE id = ?", rig.ID).Scan(&wispRows); err != nil {
+		t.Fatalf("count rig wisp rows: %v", err)
+	}
+	if wispRows != 0 {
+		t.Fatalf("type=rig rows in wisps = %d, want 0", wispRows)
+	}
+
+	work, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, item := range work {
+		if item.ID == rig.ID {
+			t.Fatalf("type=rig issue appeared in ready work: %v", issueIDs(work))
+		}
+	}
+}
+
 func TestGetReadyWork_ExcludesClosedIssues(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

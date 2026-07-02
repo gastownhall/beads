@@ -113,6 +113,15 @@ func (s *EmbeddedDoltStore) CommitWithConfig(ctx context.Context, message string
 	return s.Commit(ctx, message)
 }
 
+// CommitMergeResolution concludes an operator --strategy merge resolution with
+// config included. Embedded Commit already stages everything via DOLT_COMMIT
+// ('-Am'), so config is never dropped here the way server-mode Commit drops it
+// (GH#2455); this alias satisfies the VersionControl interface so cmd/bd can
+// conclude bd vc merge --strategy uniformly across both stores.
+func (s *EmbeddedDoltStore) CommitMergeResolution(ctx context.Context, message string) error {
+	return s.Commit(ctx, message)
+}
+
 func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		_, err := db.ExecContext(ctx, "CALL DOLT_REMOTE('add', ?, ?)", name, url)
@@ -243,6 +252,37 @@ func (s *EmbeddedDoltStore) Merge(ctx context.Context, branch string) ([]storage
 // full-graph recompute.
 func (s *EmbeddedDoltStore) RecomputeBlockedAfterMerge(ctx context.Context, fromCommit string) error {
 	return s.recomputeBlockedAfterPull(ctx, fromCommit)
+}
+
+// RecomputeAllBlocked recomputes is_blocked for every issue and wisp in one full
+// pass and returns the number of rows it corrected. This is the embedded path
+// of the mode-independent repair (bd-6dnrw.37); see DoltStore.RecomputeAllBlocked.
+func (s *EmbeddedDoltStore) RecomputeAllBlocked(ctx context.Context) (int, error) {
+	var changed int64
+	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		// Refuse to derive and commit is_blocked from a dirty graph (see
+		// DoltStore.RecomputeAllBlocked); checked inside the recompute tx so it
+		// sees the same working set the recompute will read (bd-6dnrw.37).
+		if e := issueops.GuardBlockedRecomputeWorkingSet(ctx, tx); e != nil {
+			return e
+		}
+		var e error
+		changed, e = issueops.RecomputeAllIsBlockedInTx(ctx, tx)
+		return e
+	}); err != nil {
+		return 0, err
+	}
+	if changed > 0 {
+		// Stage only issues (wisps are dolt_ignore'd), matching the post-pull
+		// recompute, so an unrelated dirty working set is not swept in.
+		if err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return versioncontrolops.StageAndCommit(ctx, db,
+				map[string]bool{"issues": true}, "bd: recompute is_blocked (full)", commitAuthor)
+		}); err != nil {
+			return int(changed), err
+		}
+	}
+	return int(changed), nil
 }
 
 func (s *EmbeddedDoltStore) GetConflicts(ctx context.Context) ([]storage.Conflict, error) {

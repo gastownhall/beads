@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -53,21 +54,32 @@ Exit codes:
 Examples:
   bd config drift
   bd config drift --json`,
-	Run: func(_ *cobra.Command, _ []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(_ *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("config-drift")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		items := runDriftChecks()
 
 		if jsonOutput {
-			outputJSON(items)
+			if err := outputJSON(items); err != nil {
+				return err
+			}
 		} else {
 			printDriftItems(items)
 		}
 
-		// Exit 1 if any drift detected
 		for _, item := range items {
 			if item.Status == driftStatusDrift {
-				os.Exit(1)
+				return SilentExit()
 			}
 		}
+		return nil
 	},
 }
 

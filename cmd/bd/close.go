@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -30,26 +31,40 @@ When closing multiple issues, provide one --reason for all IDs or repeat
 --reason once per ID. Reasons map positionally: the first --reason applies
 to the first ID, the second --reason to the second ID, regardless of where
 the flags appear in the command line.`,
-	Args: cobra.MinimumNArgs(0),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.MinimumNArgs(0),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("close")
+
+		evt := metrics.NewCommandEvent("close")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			runCloseProxiedServer(cmd, rootCtx, args)
+			return nil
+		}
 
 		// If no IDs provided, use last touched issue
 		if len(args) == 0 {
 			lastTouched := GetLastTouchedID()
 			if lastTouched == "" {
-				FatalErrorRespectJSON("no issue ID provided and no last touched issue")
+				return HandleErrorRespectJSON("no issue ID provided and no last touched issue")
 			}
 			args = []string{lastTouched}
 		}
 		reasons, updatedArgs, err := resolveCloseReasons(cmd, args)
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 		args = updatedArgs
 
 		if err := validateCloseReasons(reasons); err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		force, _ := cmd.Flags().GetBool("force")
@@ -59,7 +74,6 @@ the flags appear in the command line.`,
 
 		claimNext, _ := cmd.Flags().GetBool("claim-next")
 
-		// Get session ID from flag or environment variable
 		session, _ := cmd.Flags().GetString("session")
 		if session == "" {
 			session = os.Getenv("CLAUDE_SESSION_ID")
@@ -67,21 +81,18 @@ the flags appear in the command line.`,
 
 		ctx := rootCtx
 
-		// --continue only works with a single issue
 		if continueFlag && len(args) > 1 {
-			FatalErrorRespectJSON("--continue only works when closing a single issue")
+			return HandleErrorRespectJSON("--continue only works when closing a single issue")
 		}
 
-		// --suggest-next only works with a single issue
 		if suggestNext && len(args) > 1 {
-			FatalErrorRespectJSON("--suggest-next only works when closing a single issue")
+			return HandleErrorRespectJSON("--suggest-next only works when closing a single issue")
 		}
 
-		// Resolve partial IDs with routing fallback (beads-0km).
 		results, cleanup, resolveErr := resolveCloseTargets(ctx, store, args)
 		defer cleanup()
 		if resolveErr != nil {
-			FatalErrorRespectJSON("%v", resolveErr)
+			return HandleErrorRespectJSON("%v", resolveErr)
 		}
 		resolvedIDs := make([]string, 0, len(results))
 		for _, r := range results {
@@ -178,16 +189,14 @@ the flags appear in the command line.`,
 			postCloseStore = results[0].Store
 		}
 
-		// Handle --suggest-next flag in direct mode
 		if suggestNext && len(resolvedIDs) == 1 && closedCount > 0 {
 			unblocked, err := postCloseStore.GetNewlyUnblockedByClose(ctx, resolvedIDs[0])
 			if err == nil && len(unblocked) > 0 {
 				if jsonOutput {
-					outputJSON(map[string]interface{}{
+					return outputJSON(map[string]interface{}{
 						"closed":    closedIssues,
 						"unblocked": unblocked,
 					})
-					return
 				}
 				fmt.Printf("\nNewly unblocked:\n")
 				for _, issue := range unblocked {
@@ -196,7 +205,6 @@ the flags appear in the command line.`,
 			}
 		}
 
-		// Handle --continue flag
 		if continueFlag && len(resolvedIDs) == 1 && closedCount > 0 {
 			autoClaim := !noAuto
 			result, err := AdvanceToNextStep(ctx, postCloseStore, resolvedIDs[0], autoClaim, actor)
@@ -204,12 +212,10 @@ the flags appear in the command line.`,
 				fmt.Fprintf(os.Stderr, "Warning: could not advance to next step: %v\n", err)
 			} else if result != nil {
 				if jsonOutput {
-					// Include continue result in JSON output
-					outputJSON(map[string]interface{}{
+					return outputJSON(map[string]interface{}{
 						"closed":   closedIssues,
 						"continue": result,
 					})
-					return
 				}
 				PrintContinueResult(result)
 			}
@@ -247,12 +253,16 @@ the flags appear in the command line.`,
 
 		if jsonOutput && len(closedIssues) > 0 {
 			if claimedNextIssue != nil {
-				outputJSON(map[string]interface{}{
+				if err := outputJSON(map[string]interface{}{
 					"closed":  closedIssues,
 					"claimed": claimedNextIssue,
-				})
+				}); err != nil {
+					return err
+				}
 			} else {
-				outputJSON(closedIssues)
+				if err := outputJSON(closedIssues); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -265,17 +275,16 @@ the flags appear in the command line.`,
 					Command:  "close",
 					IssueIDs: ids,
 				}); err != nil {
-					FatalErrorRespectJSON("failed to commit: %v", err)
+					return HandleErrorRespectJSON("failed to commit: %v", err)
 				}
 			}
 		}
 
-		// Exit non-zero if no issues were actually closed (close guard
-		// and other soft failures should surface as non-zero exit codes for scripting)
 		totalAttempted := len(resolvedIDs)
 		if totalAttempted > 0 && closedCount == 0 {
-			os.Exit(1)
+			return SilentExit()
 		}
+		return nil
 	},
 }
 
@@ -616,7 +625,7 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 		// Write-intent: a prefix-routed target opens writable so the close
 		// commits on the target head (#4141). Contributor auto-routing below
 		// stays read-only: it hydrates foreign projects that must not be mutated.
-		if r, err := resolveViaPrefixRoutingMode(ctx, id, true); err == nil {
+		if r, err := resolveViaPrefixRoutingWithAccess(ctx, id, true); err == nil {
 			results = append(results, r)
 			continue
 		}

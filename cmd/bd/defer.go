@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -30,19 +31,26 @@ Examples:
   bd defer bd-abc --until=tomorrow # Defer until specific time
   bd defer bd-abc --reason="waiting on API access"
   bd defer bd-abc bd-def           # Defer multiple issues`,
-	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("defer")
 
-		// Parse --until flag (GH#820)
+		evt := metrics.NewCommandEvent("defer")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		var deferUntil *time.Time
 		untilStr, _ := cmd.Flags().GetString("until")
 		if untilStr != "" {
 			t, err := timeparsing.ParseRelativeTime(untilStr, time.Now())
 			if err != nil {
-				FatalError("invalid --until format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", untilStr)
+				return HandleError("invalid --until format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", untilStr)
 			}
-			// Warn if defer date is in the past (user probably meant future)
 			if t.Before(time.Now()) && !jsonOutput {
 				fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
 					ui.RenderWarn("!"), t.Format("2006-01-02 15:04"))
@@ -53,23 +61,20 @@ Examples:
 		reason, _ := cmd.Flags().GetString("reason")
 		reason = strings.TrimSpace(reason)
 		if cmd.Flags().Changed("reason") && reason == "" {
-			FatalError("reason cannot be empty")
+			return HandleError("reason cannot be empty")
 		}
 
 		ctx := rootCtx
 
-		// Resolve partial IDs
 		_, err := utils.ResolvePartialIDs(ctx, store, args)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		deferredIssues := []*types.Issue{}
 
-		// Direct storage access
 		if store == nil {
-			FatalErrorWithHint("database not initialized",
-				diagHint())
+			return HandleErrorWithHint("database not initialized", diagHint())
 		}
 
 		for _, id := range args {
@@ -82,7 +87,6 @@ Examples:
 			updates := map[string]interface{}{
 				"status": string(types.StatusDeferred),
 			}
-			// Add defer_until if --until specified (GH#820)
 			if deferUntil != nil {
 				updates["defer_until"] = *deferUntil
 			}
@@ -119,12 +123,15 @@ Examples:
 		}
 
 		if jsonOutput && len(deferredIssues) > 0 {
-			outputJSON(deferredIssues)
+			if err := outputJSON(deferredIssues); err != nil {
+				return err
+			}
 		}
 
 		if len(args) > 0 {
 			commandDidWrite.Store(true)
 		}
+		return nil
 	},
 }
 

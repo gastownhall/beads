@@ -26,7 +26,7 @@ Examples:
   bd worktree info                          # Show info about current worktree
 
 ```
-bd worktree
+bd worktree [flags]
 ```
 
 ### bd worktree create
@@ -70,7 +70,7 @@ Examples:
   bd worktree info --json   # JSON output
 
 ```
-bd worktree info
+bd worktree info [flags]
 ```
 
 ### bd worktree list
@@ -88,7 +88,7 @@ Examples:
   bd worktree list --json   # JSON output
 
 ```
-bd worktree list
+bd worktree list [flags]
 ```
 
 ### bd worktree remove

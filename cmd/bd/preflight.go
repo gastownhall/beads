@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 // CheckResult represents the result of a single preflight check.
@@ -52,7 +53,9 @@ Examples:
   bd preflight --check --json  # JSON output for programmatic use
   bd preflight --check --skip-lint  # Explicitly skip lint check
 `,
-	Run: runPreflight,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runPreflight,
 }
 
 func init() {
@@ -64,7 +67,14 @@ func init() {
 	rootCmd.AddCommand(preflightCmd)
 }
 
-func runPreflight(cmd *cobra.Command, args []string) {
+func runPreflight(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("preflight")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	check, _ := cmd.Flags().GetBool("check")
 	fix, _ := cmd.Flags().GetBool("fix")
 	jsonOutput, _ := cmd.Flags().GetBool("json")
@@ -77,11 +87,9 @@ func runPreflight(cmd *cobra.Command, args []string) {
 	}
 
 	if check {
-		runChecks(jsonOutput, skipLint)
-		return
+		return runChecks(jsonOutput, skipLint)
 	}
 
-	// Static checklist mode
 	fmt.Println("PR Readiness Checklist:")
 	fmt.Println()
 	fmt.Println("[ ] Tests pass: go test -tags gms_pure_go -short ./...")
@@ -92,10 +100,10 @@ func runPreflight(cmd *cobra.Command, args []string) {
 	fmt.Println("[ ] Version sync: version.go matches default.nix")
 	fmt.Println()
 	fmt.Println("Run 'bd preflight --check' to validate automatically.")
+	return nil
 }
 
-// runChecks executes all preflight checks and reports results.
-func runChecks(jsonOutput, skipLint bool) {
+func runChecks(jsonOutput, skipLint bool) error {
 	var results []CheckResult
 
 	// Run test check
@@ -162,43 +170,43 @@ func runChecks(jsonOutput, skipLint bool) {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(result); err != nil {
-			fmt.Fprintf(os.Stderr, "Error encoding preflight result: %v\n", err)
+			return HandleError("encoding preflight result: %v", err)
 		}
-	} else {
-		// Human-readable output
-		for _, r := range results {
-			if r.Skipped {
-				fmt.Printf("⚠ %s (skipped)\n", r.Name)
-			} else if r.Warning {
-				fmt.Printf("⚠ %s\n", r.Name)
-			} else if r.Passed {
-				fmt.Printf("✓ %s\n", r.Name)
-			} else {
-				fmt.Printf("✗ %s\n", r.Name)
-			}
-			fmt.Printf("  Command: %s\n", r.Command)
-			if r.Skipped && r.Output != "" {
-				// Show skip reason
-				fmt.Printf("  Reason: %s\n", r.Output)
-			} else if r.Warning && r.Output != "" {
-				// Show warning message
-				fmt.Printf("  Warning: %s\n", r.Output)
-			} else if !r.Passed && r.Output != "" {
-				// Truncate output for terminal display
-				output := truncateOutput(r.Output, 500)
-				fmt.Printf("  Output:\n")
-				for _, line := range strings.Split(output, "\n") {
-					fmt.Printf("    %s\n", line)
-				}
-			}
-			fmt.Println()
+		if !allPassed {
+			return SilentExit()
 		}
-		fmt.Println(summary)
+		return nil
 	}
+	for _, r := range results {
+		if r.Skipped {
+			fmt.Printf("⚠ %s (skipped)\n", r.Name)
+		} else if r.Warning {
+			fmt.Printf("⚠ %s\n", r.Name)
+		} else if r.Passed {
+			fmt.Printf("✓ %s\n", r.Name)
+		} else {
+			fmt.Printf("✗ %s\n", r.Name)
+		}
+		fmt.Printf("  Command: %s\n", r.Command)
+		if r.Skipped && r.Output != "" {
+			fmt.Printf("  Reason: %s\n", r.Output)
+		} else if r.Warning && r.Output != "" {
+			fmt.Printf("  Warning: %s\n", r.Output)
+		} else if !r.Passed && r.Output != "" {
+			output := truncateOutput(r.Output, 500)
+			fmt.Printf("  Output:\n")
+			for _, line := range strings.Split(output, "\n") {
+				fmt.Printf("    %s\n", line)
+			}
+		}
+		fmt.Println()
+	}
+	fmt.Println(summary)
 
 	if !allPassed {
-		os.Exit(1)
+		return SilentExit()
 	}
+	return nil
 }
 
 // runTestCheck runs go test -short ./... and returns the result.

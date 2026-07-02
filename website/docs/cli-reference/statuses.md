@@ -31,5 +31,5 @@ Examples:
 
 
 ```
-bd statuses
+bd statuses [flags]
 ```

@@ -18,5 +18,5 @@ Examples:
   bd memories "race flag"  # search for a phrase
 
 ```
-bd memories [search]
+bd memories [search] [flags]
 ```

@@ -104,7 +104,7 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd export](#bd-export) — Export issues to JSONL format
 - [bd federation](#bd-federation) — Manage peer-to-peer federation (requires CGO)
 - [bd import](#bd-import) — Import issues from a JSONL file or stdin into the database
-- [bd restore](#bd-restore) — Restore full history of a compacted issue from Dolt history
+- [bd restore](#bd-restore) — Restore the pre-compaction content of a compacted issue
 - [bd vc](#bd-vc) — Version control operations
   - [bd vc commit](#bd-vc-commit) — Create a commit with all staged changes
   - [bd vc merge](#bd-vc-merge) — Merge a branch into the current branch
@@ -180,6 +180,7 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd preflight](#bd-preflight) — Show PR readiness checklist
 - [bd prune](#bd-prune) — Delete old closed beads to reclaim space and shrink exports
 - [bd purge](#bd-purge) — Delete closed ephemeral beads to reclaim space
+- [bd recompute-blocked](#bd-recompute-blocked) — Recompute is_blocked for all issues (repairs stale flags after a pull)
 - [bd rename-prefix](#bd-rename-prefix) — Rename the issue prefix for all issues in the database
 - [bd rules](#bd-rules) — Audit and compact Claude rules
   - [bd rules audit](#bd-rules-audit) — Scan rules for contradictions and merge opportunities
@@ -256,6 +257,10 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd help](#bd-help) — Help about any command
 - [bd init-safety](#bd-init-safety) — Explain bd init flag semantics and the destroy-token format
 - [bd mail](#bd-mail) — Delegate to mail provider (e.g., gt mail)
+- [bd metrics](#bd-metrics) — Show or change anonymous usage-metrics settings
+  - [bd metrics example](#bd-metrics-example) — Show real examples of the anonymous metrics bd sends
+  - [bd metrics off](#bd-metrics-off) — Turn anonymous usage metrics off
+  - [bd metrics on](#bd-metrics-on) — Turn anonymous usage metrics on
 - [bd mol](#bd-mol) — Molecule commands (work templates)
   - [bd mol bond](#bd-mol-bond) — Bond two protos or molecules together
   - [bd mol burn](#bd-mol-burn) — Delete a molecule without creating a digest
@@ -909,7 +914,7 @@ bd list [flags]
       --has-metadata-key string      Filter issues that have this metadata key set
       --id string                    Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)
       --include-gates                Include gate issues in output (normally hidden)
-      --include-infra                Include infrastructure beads (agent/rig/role/message) in output
+      --include-infra                Include infrastructure beads (agent/role/message) in output
       --include-templates            Include template molecules in output
   -l, --label strings                Filter by labels (AND: must have ALL). Can combine with --label-any
       --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
@@ -938,7 +943,7 @@ bd list [flags]
       --skip-labels                  Skip label hydration. The labels field in output will be empty regardless of actual labels. Use only when the caller does not depend on label data. Cannot combine with --label, --label-any, --label-pattern, --label-regex, --exclude-label, or --no-labels.
       --sort string                  Sort by field: priority, created, updated, closed, status, id, title, type, assignee
       --spec string                  Filter by spec_id prefix
-  -s, --status string                Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress
+  -s, --status string                Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress. Note: repeating -s/--status silently overwrites the previous value — always use the comma-separated form for multi-status filters.
       --title string                 Filter by title text (case-insensitive substring match)
       --title-contains string        Filter by title substring (case-insensitive)
       --tree                         Hierarchical tree format (default: true; use --flat to disable) (default true)
@@ -1199,6 +1204,7 @@ bd query [expression] [flags]
   -a, --all           Include closed issues (default: exclude closed)
   -n, --limit int     Limit results (default: 50, 0 = unlimited) (default 50)
       --long          Show detailed multi-line output for each issue
+      --offset int    Skip the first N matching results (0-based). Only supported under --proxied-server.
       --parse-only    Only parse the query and show the AST (for debugging)
   -r, --reverse       Reverse sort order
       --sort string   Sort by field: priority, created, updated, closed, status, id, title, type, assignee
@@ -2353,7 +2359,7 @@ For supported full backup/restore flows, use 'bd backup init', 'bd backup sync',
 and 'bd backup restore'.
 
 By default, exports only regular issues (excluding infrastructure beads
-like agents, rigs, roles, and messages). Use --all to include everything.
+like agents, roles, and messages). Use --all to include everything.
 
 Memories (from 'bd remember') are excluded by default because they may
 contain sensitive agent context. Use --include-memories or --all to
@@ -2374,7 +2380,7 @@ bd export [flags]
 
 ```
       --all                Include all records (infra, templates, gates, memories)
-      --include-infra      Include infrastructure beads (agents, rigs, roles, messages)
+      --include-infra      Include infrastructure beads (agents, roles, messages)
       --include-memories   Include persistent memories (from 'bd remember') in the export
   -o, --output string      Output file path (default: stdout)
       --scrub              Exclude test/pollution records
@@ -2475,13 +2481,19 @@ bd import [file|-] [flags]
 
 ### bd restore
 
-Restore full history of a compacted issue from Dolt version history.
+Restore the pre-compaction content of a compacted issue.
 
-When an issue is compacted, its description and notes are truncated.
-This command queries Dolt's history tables to find the pre-compaction
-version and displays the full issue content.
+When an issue is compacted, its description/design/notes/acceptance criteria
+are summarized and the originals are archived to a compaction snapshot. This
+command recovers that original content.
 
-This is read-only and does not modify the database.
+By default it is read-only: it displays the archived content without modifying
+the database. Pass --apply to write the original content back into the issue
+and step its compaction level back down.
+
+If no archived snapshot exists (e.g. the issue was compacted by an older bd
+before snapshot archiving), restore falls back to a best-effort reconstruction
+from Dolt version history, which can only be displayed, not applied.
 
 ```
 bd restore <issue-id> [flags]
@@ -2490,7 +2502,8 @@ bd restore <issue-id> [flags]
 **Flags:**
 
 ```
-      --json   Output restore results in JSON format
+      --apply   Write the restored content back into the issue (default: display only)
+      --json    Output restore results in JSON format
 ```
 
 ### bd vc
@@ -3418,7 +3431,8 @@ bd init [flags]
       --discard-remote                                 Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.
       --external                                       Server is externally managed (skip server startup); use with --shared-server or --server
       --force                                          Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence (see 'bd help init-safety').
-      --from-jsonl                                     Import issues from configured import.path instead of git history
+      --from-jsonl                                     Import issues from configured import.path; refuses remote history unless --discard-remote authorizes replacement
+      --init-if-missing                                If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)
       --non-interactive                                Skip all interactive prompts (auto-detected in CI or non-TTY environments)
   -p, --prefix string                                  Issue prefix (default: current directory name)
       --proxied-server                                 [EXPERIMENTAL] Use a per-workspace proxied dolt sql-server (proxy + child dolt) rooted at .beads/proxieddb
@@ -4266,6 +4280,30 @@ bd purge [flags]
       --pattern string      Only purge beads matching ID glob pattern (e.g., *-wisp-*)
 ```
 
+### bd recompute-blocked
+
+Recompute the denormalized is_blocked flag for every issue and wisp.
+
+is_blocked is derived from the dependency graph and maintained automatically by
+local writes and by a post-pull recompute scoped to what the merge changed. If
+that scoped recompute is skipped — a recompute that failed after its merge
+committed, or a conflicted pull resolved by hand — the flag can go stale, and a
+later pull that merges nothing will not refresh it (bd-6dnrw.37). 'bd ready'
+trusts the flag, so stale values silently hide ready work or surface blocked
+work.
+
+This command runs the full recompute unconditionally and commits the result.
+It is idempotent: on a consistent database it changes nothing. Works in both
+embedded and server mode (unlike 'bd doctor', which is server-mode only).
+
+Examples:
+  bd recompute-blocked          # Repair stale is_blocked flags
+  bd recompute-blocked --json   # Machine-parseable &#123;"rows_corrected": N&#125;
+
+```
+bd recompute-blocked
+```
+
 ### bd rename-prefix
 
 Rename the issue prefix for all issues in the database.
@@ -4625,7 +4663,7 @@ Modes:
 
 Tiers:
   - Tier 1: Semantic compression (30 days closed, 70% reduction)
-  - Tier 2: Ultra compression (90 days closed, 95% reduction)
+  - Tier 2: Ultra compression (90 days closed) - planned, not yet implemented
 
 Dolt Garbage Collection:
   With auto-commit per mutation, Dolt commit history grows over time. Use
@@ -4674,7 +4712,7 @@ bd admin compact [flags]
       --limit int        Limit number of candidates (0 = no limit)
       --stats            Show compaction statistics
       --summary string   Path to summary file (use '-' for stdin)
-      --tier int         Compaction tier (1 or 2) (default 1)
+      --tier int         Compaction tier (only tier 1 is implemented) (default 1)
       --workers int      Parallel workers (default 5)
 ```
 
@@ -5827,10 +5865,12 @@ bd help [command] [flags]
 **Flags:**
 
 ```
-      --all          Show help for all commands in a single document
-      --doc string   Generate markdown docs for a single command
-  -h, --help         help for help
-      --list         List all available commands
+      --all                   Show help for all commands in a single document
+      --doc string            Generate markdown docs for a single command
+      --docs-root string      Generate repository CLI docs under this root
+      --docs-version string   Also refresh one versioned website CLI reference, e.g. 1.0.5
+  -h, --help                  help for help
+      --list                  List all available commands
 ```
 
 ### bd init-safety
@@ -5860,6 +5900,11 @@ FLAG SURFACE
   bd init --force               Deprecated alias for --reinit-local.
                                 Kept working for ≥2 releases.
 
+  bd init --from-jsonl          Import from configured import.path. If
+                                origin has Dolt data, this refuses unless
+                                --discard-remote authorizes replacing that
+                                remote history.
+
 ADOPTING A REMOTE
 
   If you want to use the remote's existing history, use:
@@ -5886,7 +5931,7 @@ DESTROY-TOKEN (non-interactive only)
 
 EXIT CODES
 
-  10    refused: remote has Dolt history and you passed --force/--reinit-local
+  10    refused: remote has Dolt history and you selected local history
         without --discard-remote
   11    refused: existing local data and you declined the destroy confirm
   12    refused: --discard-remote passed without a valid --destroy-token
@@ -5927,6 +5972,49 @@ Examples:
 
 ```
 bd mail [subcommand] [args...]
+```
+
+### bd metrics
+
+Show whether anonymous usage metrics are on, see exactly what is sent, and
+turn them on or off.
+
+bd shares anonymous usage metrics to learn how people actually use it — just
+which commands get run, plus the bd version and OS platform. That's how we decide
+what to polish next. We never collect your issues, paths, remotes, identity, or
+any user-supplied text.
+
+  bd metrics            show the current status and what is collected
+  bd metrics on         turn metrics on
+  bd metrics off        turn metrics off
+  bd metrics example    show real examples of the events bd sends
+
+```
+bd metrics
+```
+
+#### bd metrics example
+
+Show real examples of the anonymous metrics bd sends
+
+```
+bd metrics example
+```
+
+#### bd metrics off
+
+Turn anonymous usage metrics off
+
+```
+bd metrics off
+```
+
+#### bd metrics on
+
+Turn anonymous usage metrics on
+
+```
+bd metrics on
 ```
 
 ### bd mol
@@ -6705,6 +6793,7 @@ bd ready [flags]
       --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
       --mol string                   Filter to steps within a specific molecule
       --mol-type string              Filter by molecule type: swarm, patrol, or work
+      --offset int                   Skip the first N matching results (0-based). Only supported under --proxied-server.
       --parent string                Filter to descendants of this bead/epic
       --plain                        Display issues as a plain numbered list
       --pretty                       Display issues in a tree format with status/priority symbols (default true)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -100,4 +101,12 @@ func (r *commentSQLRepositoryImpl) ListByIssueIDs(ctx context.Context, issueIDs 
 		return nil, fmt.Errorf("db: CommentSQLRepository.ListByIssueIDs: rows: %w", err)
 	}
 	return result, nil
+}
+
+func (r *commentSQLRepositoryImpl) IterByIssueID(ctx context.Context, issueID string, opts domain.CommentOpts) (storage.Iter[types.Comment], error) {
+	bulk, err := r.ListByIssueIDs(ctx, []string{issueID}, opts)
+	if err != nil {
+		return nil, err
+	}
+	return storage.NewSliceIter(bulk[issueID]), nil
 }

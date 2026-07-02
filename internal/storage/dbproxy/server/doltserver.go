@@ -93,8 +93,9 @@ func NewDoltServer(doltBinExec, rootDir, configPath, logFilePath string, keepAli
 	if keepAlivePeriod == 0 {
 		keepAlivePeriod = defaultKeepAlivePeriod
 	}
+	sum := sha256.Sum256([]byte(absRootDir))
 	return &DoltServer{
-		id:              LocalDoltServerID(absRootDir),
+		id:              hex.EncodeToString(sum[:]),
 		doltBinExec:     absDoltBinExec,
 		rootDir:         absRootDir,
 		configPath:      absConfigPath,
@@ -106,19 +107,6 @@ func NewDoltServer(doltBinExec, rootDir, configPath, logFilePath string, keepAli
 
 func (s *DoltServer) ID(_ context.Context) string {
 	return s.id
-}
-
-// LocalDoltServerID is the upstream ID a managed local DoltServer advertises
-// for rootDir. Discovery uses it to verify that a proxy found via pidfile
-// actually fronts this workspace's dolt and not some other instance behind a
-// recycled pid/port.
-func LocalDoltServerID(rootDir string) string {
-	abs, err := filepath.Abs(rootDir)
-	if err != nil {
-		abs = rootDir
-	}
-	sum := sha256.Sum256([]byte(abs))
-	return hex.EncodeToString(sum[:])
 }
 
 func (s *DoltServer) DSN(_ context.Context, database, user, password string) string {
@@ -139,10 +127,12 @@ func (s *DoltServer) DSN(_ context.Context, database, user, password string) str
 	return dsn.String()
 }
 
-// committerIdentity resolves the name/email commits in this managed repo
-// should carry: git config when available, beads defaults otherwise.
-func committerIdentity(ctx context.Context) (name, email string) {
-	name, email = "beads", "beads@localhost"
+func (s *DoltServer) doltConfigure(ctx context.Context) error {
+	probe := exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--get", "user.name")
+	if out, err := probe.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
+		return nil
+	}
+	name, email := "beads", "beads@localhost"
 	if out, err := exec.CommandContext(ctx, "git", "config", "user.name").Output(); err == nil {
 		if v := strings.TrimSpace(string(out)); v != "" {
 			name = v
@@ -153,25 +143,11 @@ func committerIdentity(ctx context.Context) (name, email string) {
 			email = v
 		}
 	}
-	return name, email
-}
-
-// doltConfigureLocal pins the committer identity in rootDir's repo-local
-// config so sql-server commits work on machines with no global dolt config.
-// The previous version of this step wrote --global, silently mutating the
-// user's dolt identity from a background server spawn (bd-6dnrw.44 P3).
-func (s *DoltServer) doltConfigureLocal(ctx context.Context, name, email string) error {
-	probe := exec.CommandContext(ctx, s.doltBinExec, "config", "--local", "--get", "user.name")
-	probe.Dir = s.rootDir
-	if out, err := probe.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
-		return nil
+	if out, err := exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--add", "user.name", name).CombinedOutput(); err != nil {
+		return fmt.Errorf("server: DoltServer.doltConfigure: set user.name: %w\n%s", err, out)
 	}
-	for _, kv := range [][2]string{{"user.name", name}, {"user.email", email}} {
-		cmd := exec.CommandContext(ctx, s.doltBinExec, "config", "--local", "--add", kv[0], kv[1])
-		cmd.Dir = s.rootDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("server: DoltServer.doltConfigureLocal: set %s: %w\n%s", kv[0], err, out)
-		}
+	if out, err := exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--add", "user.email", email).CombinedOutput(); err != nil {
+		return fmt.Errorf("server: DoltServer.doltConfigure: set user.email: %w\n%s", err, out)
 	}
 	return nil
 }
@@ -181,18 +157,16 @@ func (s *DoltServer) doltInit(ctx context.Context) error {
 		return fmt.Errorf("server: DoltServer.doltInit: mkdir %q: %w", s.rootDir, err)
 	}
 
-	name, email := committerIdentity(ctx)
-	// --name/--email let init succeed without global dolt config.
-	cmd := exec.CommandContext(ctx, s.doltBinExec, "init", "--name", name, "--email", email)
+	cmd := exec.CommandContext(ctx, s.doltBinExec, "init")
 	cmd.Dir = s.rootDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if strings.Contains(string(out), "already been initialized") {
-			return s.doltConfigureLocal(ctx, name, email)
+			return nil
 		}
 		return fmt.Errorf("server: DoltServer.doltInit: %w\n%s", err, out)
 	}
 
-	return s.doltConfigureLocal(ctx, name, email)
+	return nil
 }
 
 var retryableDoltInitErrSubstrings = []string{
@@ -241,6 +215,11 @@ func (s *DoltServer) Start(ctx context.Context) error {
 	lock, err := util.TryLock(filepath.Join(s.rootDir, LockFileName))
 	if err != nil {
 		return fmt.Errorf("server: DoltServer.Start: acquire %s: %w", LockFileName, err)
+	}
+
+	if err := s.doltConfigure(ctx); err != nil {
+		lock.Unlock()
+		return err
 	}
 
 	if err := s.doltInitWithRetries(ctx); err != nil {

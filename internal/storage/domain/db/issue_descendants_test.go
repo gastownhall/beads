@@ -74,3 +74,47 @@ func (s *testSuite) TestGetDescendantsDottedOrphans() {
 	s.ElementsMatch([]string{"bd-tree-c", "bd-tree-c.7", "bd-tree-r.1", "bd-tree-r.1.2", "bd-tree-m"},
 		ids, "SkipWisps must drop the wisp rows but keep the dotted-ID issue walk")
 }
+
+// TestGetDescendantsFilteredByStatus guards the dolt 2.1.6 analyzer
+// workaround (commit 341c7a5a4): when GetDescendants carries a level filter,
+// each branch of the recursive descendants CTE references the same
+// `id IN (SELECT id FROM <table> WHERE ...)` predicate. Inlining that
+// subquery into 3+ branches trips the analyzer ("unable to find field with
+// index N in row of M columns"); hoisting it into a named non-recursive CTE
+// (issue_matches / wisp_matches) dodges it. The existing dotted-orphans test
+// uses an empty filter and so never builds the predicate — this test does.
+func (s *testSuite) TestGetDescendantsFilteredByStatus() {
+	r := s.issueRepo()
+	deps := s.depRepo()
+
+	mk := func(id string, st types.Status) {
+		iss := newTestIssue(id, "f "+id)
+		iss.Status = st
+		s.Require().NoError(r.Insert(s.Ctx(), iss, "tester", domain.InsertIssueOpts{}))
+	}
+	mk("bd-f-r", types.StatusOpen)     // root
+	mk("bd-f-a", types.StatusOpen)     // open edge child
+	mk("bd-f-b", types.StatusClosed)   // closed edge child (must be filtered out)
+	mk("bd-f-r.1", types.StatusOpen)   // open dotted orphan
+	mk("bd-f-r.2", types.StatusClosed) // closed dotted orphan (must be filtered out)
+
+	for _, e := range []struct{ child, parent string }{
+		{"bd-f-a", "bd-f-r"},
+		{"bd-f-b", "bd-f-r"},
+	} {
+		s.Require().NoError(deps.Insert(s.Ctx(),
+			&types.Dependency{IssueID: e.child, DependsOnID: e.parent, Type: types.DepParentChild},
+			"tester", domain.DepInsertOpts{}))
+	}
+
+	st := types.StatusOpen
+	got, err := r.GetDescendants(s.Ctx(), "bd-f-r", types.IssueFilter{Status: &st})
+	s.Require().NoError(err) // dolt analyzer bug surfaces here without the named-CTE hoist
+
+	ids := make([]string, len(got))
+	for i, g := range got {
+		ids[i] = g.ID
+	}
+	s.ElementsMatch([]string{"bd-f-a", "bd-f-r.1"}, ids,
+		"only open descendants must be returned; the per-level filter must apply across edge and dotted branches")
+}

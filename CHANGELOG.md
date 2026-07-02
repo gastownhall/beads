@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0-rc.1] - 2026-06-23
+
 ### Upgrade Notes
 
 - **Mixed bd versions sharing one Dolt remote.** Pre-1.0.6 binaries record
@@ -21,21 +23,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upgrade all clones of a shared remote together, letting one designated
   machine migrate and `bd dolt push` first.
 
-- **Upgrading from 1.0.4/1.0.5 with multiple clones: sync before AND
-  immediately after.** This release reshapes the `dependencies` primary key
-  (migration `0050`). If two clones cross that boundary with un-synced
-  dependency edits on both sides, their histories become permanently
-  un-mergeable — Dolt refuses the merge outright (`cannot merge because table
-  dependencies has different primary keys in its common ancestor`) before the
-  pull auto-resolver can run. To stay safe: `bd dolt push` + `bd dolt pull`
-  on every clone *before* upgrading, let one designated machine upgrade,
-  migrate, and `bd dolt push`, then on each remaining clone upgrade and
-  `bd dolt pull` *before* doing tracked work. If clones have already forked,
-  see the recovery playbook:
+- **Upgrading a remote-backed database: one machine migrates, the rest adopt.**
+  This release reshapes the `dependencies` primary key (migration `0050`), and
+  `bd` now refuses to silently migrate a database that has a Dolt remote
+  configured. If two clones cross the `0050` boundary with un-synced dependency
+  edits on both sides, their histories become permanently un-mergeable — Dolt
+  refuses the merge outright (`cannot merge because table dependencies has
+  different primary keys in its common ancestor`) before the pull auto-resolver
+  can run. Replacing the binary alone is not enough; follow the ordered recipe:
+
+  1. With your **current** binary, on **every** clone: `bd dolt push` +
+     `bd dolt pull` until all are in sync, then stop editing. Once the new
+     binary is installed, `push`/`pull` are gated too, so this must happen
+     first.
+  2. Designated migrator **only**: install the new binary, then
+     `BD_ALLOW_REMOTE_MIGRATE=1 bd migrate` and `bd dolt push`.
+  3. Every **other** clone: install the new binary, then `bd bootstrap` to adopt
+     the migrated database (`bd dolt pull` is refused while the clone still has
+     pending migrations; do not migrate on these clones).
+  4. Confirm with `bd version`; in server mode, `bd doctor` adds a
+     migration-content-skew check (not available in embedded mode).
+
+  A single clone with a remote follows the same gate (push with the old binary,
+  then migrate and push). Full recipe and the single-clone variant:
+  [Upgrading bd — remote-backed databases and multiple clones](website/docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones).
+  If clones have already forked, see the recovery playbook:
   [docs/RECOVERY.md#pk-fork-refused](docs/RECOVERY.md#pk-fork-refused).
 
 ### Added
 
+- **perf(schema):** composite `(status, updated_at)` and standalone `defer_until` indexes on `issues` (migration 0052). Speeds up `bd stale` and `bd ready` on large rigs. First run after upgrade applies the migration — expect a one-time 10–25 s pause on rigs with >10K issues. Do not interrupt.
 - **Per-migration content hash.** `schema_migrations` now records the SHA-256 of each migration's file content alongside its version (`content_hash`), so two clones at the same `MAX(version)` but with divergent migration content become detectable (reporter fix No.2 for [#4259](https://github.com/gastownhall/beads/issues/4259)). The column is added to fresh databases via the bootstrap schema and idempotently to existing databases at migrate time; already-applied rows keep a NULL hash. The column definition and the hashes are deterministic, so `schema_migrations` still merges cleanly across clones.
 - **`bd doctor` migration-content-skew check.** Using the recorded hashes, `bd doctor` now compares the local `schema_migrations` against the cached remote-tracking ref (no network fetch) and warns when this database and its remote applied different content for the same migration version — the silent schema fork from [#4259](https://github.com/gastownhall/beads/issues/4259), surfaced as a clear advisory instead of a cryptic merge failure. Read-only diagnostic (it does not gate push/pull); the comparison primitive (`schema.ContentHashSkew`) is reusable.
 - **Remote-migrate prevention gate.** `bd` now refuses to silently auto-apply pending schema migrations to an existing database that has a remote configured (in both server and embedded mode), and tells the operator to choose: migrate (as the single designated migrator, then `bd dolt push`) or adopt the already-migrated database from the remote (`bd bootstrap`). Migrating each clone independently forks the schema and breaks `bd dolt pull` ([#4259](https://github.com/gastownhall/beads/issues/4259)). The gate is a no-op for fresh databases, databases already at the binary's version, databases with no remote, and read-only opens. The designated migrator proceeds with `BD_ALLOW_REMOTE_MIGRATE=1`. In server mode the gate also detects remotes persisted on disk in `.dolt/config`, so a freshly (auto-)started server — whose in-memory `dolt_remotes` table is not yet populated — cannot slip a remote-backed database past the gate.
@@ -78,6 +95,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   through the same affected-set logic the local write paths use. Oversized or
   schema-reshaping merges fall back to a full recompute; conflicted pulls skip
   it until the operator resolves. (bd-6dnrw.3, PR 4107 follow-up)
+
+- **Stale `is_blocked` is now repairable — `bd recompute-blocked`.** The
+  post-pull recompute above is scoped to the merge diff and is skipped when a
+  re-pull merges nothing (`HEAD` unchanged), so a recompute that failed *after*
+  its merge committed — or a conflicted pull resolved by hand (which skips the
+  recompute) — could leave `is_blocked` stale with no way to repair it: rerunning
+  `bd dolt pull` merged nothing and recomputed nothing. The new
+  `bd recompute-blocked` command runs a full, unconditional recompute over every
+  issue and wisp and commits the result; it is idempotent and works in **both**
+  embedded and server mode (unlike `bd doctor`, which is server-mode only).
+  Server-mode `bd doctor` also gains a read-only **Blocked State** check that
+  reports stale rows and a `bd doctor --fix` that runs the same repair.
+  (bd-6dnrw.37)
 
 - **Deterministic history-table primary keys (cross-clone merge-safety).**
   Migration `0037` converted the legacy BIGINT primary keys of `events`,

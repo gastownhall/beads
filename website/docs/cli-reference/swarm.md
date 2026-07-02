@@ -16,7 +16,7 @@ A swarm is a structured body of work defined by an epic and its children,
 with dependencies forming a DAG (directed acyclic graph) of work.
 
 ```
-bd swarm
+bd swarm [flags]
 ```
 
 ### bd swarm create
@@ -63,7 +63,7 @@ Examples:
   bd swarm list --json  # Machine-readable output
 
 ```
-bd swarm list
+bd swarm list [flags]
 ```
 
 ### bd swarm status
@@ -89,7 +89,7 @@ Examples:
   bd swarm status gt-epic-123 --json  # Machine-readable output
 
 ```
-bd swarm status [epic-or-swarm-id]
+bd swarm status [epic-or-swarm-id] [flags]
 ```
 
 ### bd swarm validate

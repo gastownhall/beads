@@ -20,5 +20,5 @@ Examples:
   bd branch feature-xyz        # Create a new branch named feature-xyz
 
 ```
-bd branch [name]
+bd branch [name] [flags]
 ```

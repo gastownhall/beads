@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
@@ -89,6 +91,124 @@ func TestSchemaRunsInitWhenStale(t *testing.T) {
 	if maxVersion != schema.LatestVersion() {
 		t.Errorf("max migration version = %d after re-init, want %d", maxVersion, schema.LatestVersion())
 	}
+}
+
+func TestMigration0053PromotesRigWisps(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const rigID = "schema-rig-wisp"
+	const targetID = "schema-rig-target"
+	const sourceID = "schema-rig-source"
+
+	for _, id := range []string{targetID, sourceID} {
+		if _, err := store.db.ExecContext(ctx, `
+			INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+			VALUES (?, ?, '', '', '', '', 'open', 2, 'task')
+		`, id, id); err != nil {
+			t.Fatalf("seed issue %s: %v", id, err)
+		}
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral)
+		VALUES (?, 'Rig identity', '', '', '', '', 'open', 1, 'rig', 1)
+	`, rigID); err != nil {
+		t.Fatalf("seed rig wisp: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`INSERT INTO wisp_labels (issue_id, label) VALUES (?, 'gt:rig')`, rigID); err != nil {
+		t.Fatalf("seed wisp label: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
+		VALUES (?, ?, ?, 'blocks', NOW(), 'tester', JSON_OBJECT())
+	`, depid.New(rigID, targetID), rigID, targetID); err != nil {
+		t.Fatalf("seed outgoing wisp dependency: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
+		VALUES (?, ?, ?, 'blocks', NOW(), 'tester', JSON_OBJECT())
+	`, depid.New(sourceID, rigID), sourceID, rigID); err != nil {
+		t.Fatalf("seed inbound dependency: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO wisp_events (id, issue_id, event_type, actor, created_at)
+		VALUES ('schema-rig-event', ?, 'created', 'tester', NOW())
+	`, rigID); err != nil {
+		t.Fatalf("seed wisp event: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO wisp_comments (id, issue_id, author, text, created_at)
+		VALUES ('schema-rig-comment', ?, 'tester', 'durable identity', NOW())
+	`, rigID); err != nil {
+		t.Fatalf("seed wisp comment: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (?, 7)`, rigID); err != nil {
+		t.Fatalf("seed wisp child counter: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_ADD('issues')"); err != nil {
+		t.Fatalf("stage seeded issues: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_ADD('dependencies')"); err != nil {
+		t.Fatalf("stage seeded dependencies: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'seed rig repair fixture')"); err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+		t.Fatalf("commit seed fixture: %v", err)
+	}
+
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+		t.Fatalf("mark 0053 pending: %v", err)
+	}
+	if _, err := schema.MigrateUp(ctx, store.db); err != nil {
+		t.Fatalf("MigrateUp: %v", err)
+	}
+
+	var issueRows, wispRows int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM issues WHERE id = ? AND issue_type = 'rig' AND ephemeral = 0`, rigID).Scan(&issueRows); err != nil {
+		t.Fatalf("count promoted rig issue: %v", err)
+	}
+	if issueRows != 1 {
+		t.Fatalf("promoted rig issue rows = %d, want 1", issueRows)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM wisps WHERE id = ?`, rigID).Scan(&wispRows); err != nil {
+		t.Fatalf("count remaining rig wisp: %v", err)
+	}
+	if wispRows != 0 {
+		t.Fatalf("remaining rig wisp rows = %d, want 0", wispRows)
+	}
+
+	assertCount := func(name, query string, want int, args ...any) {
+		t.Helper()
+		var got int
+		if err := store.db.QueryRowContext(ctx, query, args...).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got != want {
+			t.Fatalf("%s = %d, want %d", name, got, want)
+		}
+	}
+	assertCount("promoted labels",
+		`SELECT COUNT(*) FROM labels WHERE issue_id = ? AND label = 'gt:rig'`, 1, rigID)
+	assertCount("promoted outgoing dependencies",
+		`SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?`, 1, rigID, targetID)
+	assertCount("retargeted inbound dependencies",
+		`SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ? AND depends_on_wisp_id IS NULL`, 1, sourceID, rigID)
+	assertCount("promoted events",
+		`SELECT COUNT(*) FROM events WHERE issue_id = ?`, 1, rigID)
+	assertCount("promoted comments",
+		`SELECT COUNT(*) FROM comments WHERE issue_id = ?`, 1, rigID)
+	assertCount("promoted child counter",
+		`SELECT COUNT(*) FROM child_counters WHERE parent_id = ? AND last_child = 7`, 1, rigID)
+	assertCount("remaining wisp child counter",
+		`SELECT COUNT(*) FROM wisp_child_counters WHERE parent_id = ?`, 0, rigID)
+	assertCount("remaining source wisp dependencies",
+		`SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?`, 0, rigID)
 }
 
 // TestSchemaRunsInitWhenMissing verifies that initSchemaOnDB runs

@@ -287,8 +287,12 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr,
 				"Warning: %v\n"+
 					"  Read-only command: continuing on schema v%d without migrating.\n"+
-					"  To resolve, the ONE designated migrator runs: %s=1 bd migrate && bd dolt push\n"+
-					"  Everyone else adopts the migrated database: bd bootstrap\n",
+					"  Writes are blocked until the schema is reconciled. This is a\n"+
+					"  coordination decision, not an auto-fix — do NOT run a migration unless\n"+
+					"  you are the single designated migrator (only ONE clone may migrate a\n"+
+					"  shared remote, else the schema forks; #4259):\n"+
+					"    • designated migrator (only ONE machine): %s=1 bd migrate && bd dolt push\n"+
+					"    • every other clone (another already migrated): bd bootstrap\n",
 				gateErr, gateErr.CurrentVersion, schema.AllowRemoteMigrateEnv)
 			return nil
 		}
@@ -595,13 +599,7 @@ func (s *EmbeddedDoltStore) CLIDir() string {
 // implemented in version_control.go via versioncontrolops.
 
 func (s *EmbeddedDoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
-	// Best-effort descriptive message summarizing the accumulated working-set
-	// changes (bd-6dnrw.11); fall back to a generic one if the query fails.
 	msg := fmt.Sprintf("bd: commit pending changes by %s", actor)
-	_ = s.withConn(ctx, false, func(tx *sql.Tx) error {
-		msg = issueops.BuildBatchCommitMessage(ctx, tx, actor)
-		return nil
-	})
 	if err := s.Commit(ctx, msg); err != nil {
 		if issueops.IsNothingToCommitError(err) {
 			return false, nil
@@ -609,19 +607,6 @@ func (s *EmbeddedDoltStore) CommitPending(ctx context.Context, actor string) (bo
 		return false, err
 	}
 	return true, nil
-}
-
-// HasPendingChanges reports whether the working set has committable changes,
-// excluding dolt_ignore'd tables (e.g. wisp tables, which can sit dirty in
-// dolt_status indefinitely without being committable).
-func (s *EmbeddedDoltStore) HasPendingChanges(ctx context.Context) (bool, error) {
-	var pending bool
-	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
-		var err error
-		pending, err = issueops.HasPendingChanges(ctx, tx)
-		return err
-	})
-	return pending, err
 }
 
 // CommitExists is implemented in version_control.go via versioncontrolops.
@@ -867,6 +852,32 @@ func (s *EmbeddedDoltStore) ApplyCompaction(ctx context.Context, issueID string,
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		return issueops.ApplyCompactionInTx(ctx, tx, issueID, tier, originalSize, commitHash)
 	})
+}
+
+func (s *EmbeddedDoltStore) SnapshotIssue(ctx context.Context, issueID string, tier int) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.SnapshotIssueInTx(ctx, tx, issueID, tier)
+	})
+}
+
+func (s *EmbeddedDoltStore) GetCompactionSnapshot(ctx context.Context, issueID string) (*types.IssueSnapshot, error) {
+	var snap *types.IssueSnapshot
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		snap, err = issueops.GetLatestSnapshotInTx(ctx, tx, issueID)
+		return err
+	})
+	return snap, err
+}
+
+func (s *EmbeddedDoltStore) RestoreFromSnapshot(ctx context.Context, issueID string) (*types.IssueSnapshot, error) {
+	var snap *types.IssueSnapshot
+	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		var err error
+		snap, err = issueops.RestoreFromSnapshotInTx(ctx, tx, issueID)
+		return err
+	})
+	return snap, err
 }
 
 func (s *EmbeddedDoltStore) GetTier1Candidates(ctx context.Context) ([]*types.CompactionCandidate, error) {

@@ -2,7 +2,7 @@ package domain
 
 import "github.com/steveyegge/beads/internal/types"
 
-var defaultInfraTypes = []string{"agent", "rig", "role", "message"}
+var defaultInfraTypes = []string{"agent", "role", "message"}
 
 var defaultInfraSet = func() map[string]bool {
 	m := make(map[string]bool, len(defaultInfraTypes))

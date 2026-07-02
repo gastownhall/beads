@@ -900,12 +900,6 @@ func TestEmbeddedCreateCommitPending(t *testing.T) {
 		store := openStore(t, beadsDir, "cp2")
 		ctx := t.Context()
 
-		if pending, err := store.HasPendingChanges(ctx); err != nil {
-			t.Fatalf("HasPendingChanges: %v", err)
-		} else if pending {
-			t.Error("expected clean working set before write")
-		}
-
 		// Create an issue (writes to working set, no dolt commit in embedded mode)
 		issue := &types.Issue{
 			Title:     "Pending issue",
@@ -917,30 +911,12 @@ func TestEmbeddedCreateCommitPending(t *testing.T) {
 			t.Fatalf("CreateIssue: %v", err)
 		}
 
-		if pending, err := store.HasPendingChanges(ctx); err != nil {
-			t.Fatalf("HasPendingChanges: %v", err)
-		} else if !pending {
-			t.Error("expected dirty working set after write")
-		}
-
 		committed, err := store.CommitPending(ctx, "test")
 		if err != nil {
 			t.Fatalf("CommitPending: %v", err)
 		}
 		if !committed {
 			t.Error("expected commit with pending changes")
-		}
-
-		// The batch commit message should describe what changed (bd-6dnrw.11).
-		commits, err := store.Log(ctx, 1)
-		if err != nil {
-			t.Fatalf("Log: %v", err)
-		}
-		if len(commits) == 0 {
-			t.Fatal("expected at least one commit")
-		}
-		if msg := commits[0].Message; !strings.Contains(msg, "1 created") {
-			t.Errorf("expected descriptive batch commit message, got %q", msg)
 		}
 
 		// Second call should be no-op

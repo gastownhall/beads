@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -35,37 +36,51 @@ Use --claim to atomically claim the first ready issue matching the filters:
   bd ready --claim --json
 
 This is useful for agents executing molecules to see which steps can run next.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("ready")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			runReadyProxiedServer(cmd, rootCtx)
+			return nil
+		}
+
+		if offset, _ := cmd.Flags().GetInt("offset"); offset > 0 {
+			return HandleErrorRespectJSON("--offset is only supported under --proxied-server")
+		}
+
 		claimReady, _ := cmd.Flags().GetBool("claim")
 
-		// Handle --gated flag (gate-resume discovery)
 		gated, _ := cmd.Flags().GetBool("gated")
 		if gated {
 			if claimReady {
-				FatalErrorRespectJSON("--claim cannot be combined with --gated")
+				return HandleErrorRespectJSON("--claim cannot be combined with --gated")
 			}
-			runMolReadyGated(cmd, args)
-			return
+			// Delegate to the non-emitting core so `bd ready --gated` records
+			// exactly one cli_command event ("ready"), not also "mol-ready-gated".
+			return runMolReadyGatedCore(cmd, args)
 		}
 
-		// Handle molecule-specific ready query
 		molID, _ := cmd.Flags().GetString("mol")
 		if molID != "" {
 			if claimReady {
-				FatalErrorRespectJSON("--claim cannot be combined with --mol")
+				return HandleErrorRespectJSON("--claim cannot be combined with --mol")
 			}
-			runMoleculeReady(cmd, molID)
-			return
+			return runMoleculeReady(cmd, molID)
 		}
 
-		// Handle --explain flag (dependency-aware reasoning)
 		explain, _ := cmd.Flags().GetBool("explain")
 		if explain {
 			if claimReady {
-				FatalErrorRespectJSON("--claim cannot be combined with --explain")
+				return HandleErrorRespectJSON("--claim cannot be combined with --explain")
 			}
-			runReadyExplain(cmd)
-			return
+			return runReadyExplain(cmd)
 		}
 
 		limit, _ := cmd.Flags().GetInt("limit")
@@ -88,13 +103,12 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if molTypeStr != "" {
 			mt := types.MolType(molTypeStr)
 			if !mt.IsValid() {
-				FatalError("invalid mol-type %q (must be swarm, patrol, or work)", molTypeStr)
+				return HandleErrorRespectJSON("invalid mol-type %q (must be swarm, patrol, or work)", molTypeStr)
 			}
 			molType = &mt
 		}
-		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
 		if claimReady && assignee != "" {
-			FatalErrorRespectJSON("--claim cannot be combined with --assignee")
+			return HandleErrorRespectJSON("--claim cannot be combined with --assignee")
 		}
 
 		// Normalize labels: trim, dedupe, remove empty
@@ -154,12 +168,10 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			for _, mf := range metadataFieldFlags {
 				k, v, ok := strings.Cut(mf, "=")
 				if !ok || k == "" {
-					fmt.Fprintf(os.Stderr, "Error: invalid --metadata-field: expected key=value, got %q\n", mf)
-					os.Exit(1)
+					return HandleErrorRespectJSON("invalid --metadata-field: expected key=value, got %q", mf)
 				}
 				if err := storage.ValidateMetadataKey(k); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid --metadata-field key: %v\n", err)
-					os.Exit(1)
+					return HandleErrorRespectJSON("invalid --metadata-field key: %v", err)
 				}
 				filter.MetadataFields[k] = v
 			}
@@ -167,27 +179,23 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		hasMetadataKey, _ := cmd.Flags().GetString("has-metadata-key")
 		if hasMetadataKey != "" {
 			if err := storage.ValidateMetadataKey(hasMetadataKey); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --has-metadata-key: %v\n", err)
-				os.Exit(1)
+				return HandleErrorRespectJSON("invalid --has-metadata-key: %v", err)
 			}
 			filter.HasMetadataKey = hasMetadataKey
 		}
 
-		// Validate sort policy
 		if !filter.SortPolicy.IsValid() {
-			FatalError("invalid sort policy '%s'. Valid values: hybrid, priority, oldest", sortPolicy)
+			return HandleErrorRespectJSON("invalid sort policy '%s'. Valid values: hybrid, priority, oldest", sortPolicy)
 		}
-		// Direct mode
 		ctx := rootCtx
 
 		activeStore := store
 		if claimReady {
 			CheckReadonly("ready --claim")
 		} else {
-			// Contributor auto-routing: read from the same target repo as bd create.
 			routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
 			if err != nil {
-				FatalError("%v", err)
+				return HandleErrorRespectJSON("%v", err)
 			}
 			if routed {
 				defer func() { _ = routedStore.Close() }()
@@ -198,35 +206,33 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if claimReady {
 			claimed, err := activeStore.ClaimReadyIssue(ctx, filter, actor)
 			if err != nil {
-				FatalErrorRespectJSON("%v", err)
+				return HandleErrorRespectJSON("%v", err)
 			}
 			if claimed == nil {
 				if jsonOutput {
-					outputJSON([]*types.IssueWithCounts{})
-				} else {
-					fmt.Printf("\n%s No ready work to claim\n\n", ui.RenderWarn("○"))
+					return outputJSON([]*types.IssueWithCounts{})
 				}
-				return
+				fmt.Printf("\n%s No ready work to claim\n\n", ui.RenderWarn("○"))
+				return nil
 			}
 			if err := commitPendingIfEmbedded(ctx, activeStore, actor, doltAutoCommitParams{
 				Command:  "ready",
 				IssueIDs: []string{claimed.ID},
 			}); err != nil {
-				FatalErrorRespectJSON("failed to commit: %v", err)
+				return HandleErrorRespectJSON("failed to commit: %v", err)
 			}
 			SetLastTouchedID(claimed.ID)
 			if jsonOutput {
-				outputJSON(buildReadyIssueOutput(ctx, activeStore, []*types.Issue{claimed}))
-			} else {
-				fmt.Printf("%s Claimed issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(claimed.ID, claimed.Title))
+				return outputJSON(buildReadyIssueOutput(ctx, activeStore, []*types.Issue{claimed}))
 			}
-			return
+			fmt.Printf("%s Claimed issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(claimed.ID, claimed.Title))
+			return nil
 		}
 
 		if jsonOutput {
 			results, err := activeStore.GetReadyWorkWithCounts(ctx, filter)
 			if err != nil {
-				FatalError("%v", err)
+				return HandleErrorRespectJSON("%v", err)
 			}
 			totalReady := len(results)
 			truncated := false
@@ -242,16 +248,18 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if results == nil {
 				results = []*types.IssueWithCounts{}
 			}
-			outputJSON(results)
+			if jerr := outputJSON(results); jerr != nil {
+				return jerr
+			}
 			if truncated {
 				fmt.Fprintf(os.Stderr, "Showing %d of %d ready issues. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results), totalReady)
 			}
-			return
+			return nil
 		}
 
 		issues, err := activeStore.GetReadyWork(ctx, filter)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		totalReady := len(issues)
@@ -265,11 +273,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				truncated = true
 			}
 		}
-		// Show upgrade notification if needed
 		maybeShowUpgradeNotification()
 
 		if len(issues) == 0 {
-			// Check if there are any open issues at all
 			hasOpenIssues := false
 			if stats, statsErr := activeStore.GetStatistics(ctx); statsErr == nil {
 				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
@@ -280,14 +286,11 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			} else {
 				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
 			}
-			// Show tip even when no ready work found
 			maybeShowTip(store)
-			return
+			return nil
 		}
-		// Build parent epic map for pretty display
 		parentEpicMap := buildParentEpicMap(ctx, activeStore, issues)
 
-		// Determine display mode: --plain or --pretty=false triggers plain format
 		usePlain := plainFormat || !prettyFormat
 		if usePlain {
 			fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
@@ -308,19 +311,31 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			displayReadyList(issues, parentEpicMap)
 		}
 
-		// Show truncation footer if results were limited
 		if truncated {
 			fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d of %d ready issues. Use -n to show more.", len(issues), totalReady)))
 		}
 
-		// Show tip after successful ready (direct mode only)
 		maybeShowTip(store)
+		return nil
 	},
 }
 var blockedCmd = &cobra.Command{
-	Use:   "blocked",
-	Short: "Show blocked issues",
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "blocked",
+	Short:         "Show blocked issues",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("blocked")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			runBlockedProxiedServer(cmd, rootCtx)
+			return nil
+		}
 		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
 		// Use factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
 		ctx := rootCtx
@@ -331,19 +346,17 @@ var blockedCmd = &cobra.Command{
 		}
 		blocked, err := store.GetBlockedIssues(ctx, blockedFilter)
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 		if jsonOutput {
-			// Always output array, even if empty
 			if blocked == nil {
 				blocked = []*types.BlockedIssue{}
 			}
-			outputJSON(blocked)
-			return
+			return outputJSON(blocked)
 		}
 		if len(blocked) == 0 {
 			fmt.Printf("\n%s No blocked issues\n\n", ui.RenderPass("✨"))
-			return
+			return nil
 		}
 		fmt.Printf("\n%s Blocked issues (%d):\n\n", ui.RenderFail("🚫"), len(blocked))
 		for _, issue := range blocked {
@@ -358,6 +371,7 @@ var blockedCmd = &cobra.Command{
 				issue.BlockedByCount, blockedBy)
 			fmt.Println()
 		}
+		return nil
 	},
 }
 
@@ -473,26 +487,23 @@ func buildReadyIssueOutput(ctx context.Context, s storage.DoltStorage, issues []
 	return issuesWithCounts
 }
 
-// runReadyExplain shows dependency-aware reasoning for why issues are ready or blocked.
-func runReadyExplain(_ *cobra.Command) {
+func runReadyExplain(_ *cobra.Command) error {
 	ctx := rootCtx
 
 	activeStore := store
 
-	// Get ready issues (no limit for explain mode — show everything)
 	filter := types.WorkFilter{
 		Status:     types.StatusOpen,
 		SortPolicy: types.SortPolicyPriority,
 	}
 	readyIssues, err := activeStore.GetReadyWork(ctx, filter)
 	if err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
-	// Get blocked issues
 	blockedIssues, err := activeStore.GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	// Get dependency records for ready issues to find resolved blockers
@@ -540,11 +551,9 @@ func runReadyExplain(_ *cobra.Command) {
 	explanation := types.BuildReadyExplanation(readyIssues, blockedIssues, depCounts, allDeps, blockerMap, cycles)
 
 	if jsonOutput {
-		outputJSON(explanation)
-		return
+		return outputJSON(explanation)
 	}
 
-	// Human-readable output
 	fmt.Printf("\n%s Ready Work Explanation\n\n", ui.RenderAccent("📊"))
 
 	// Ready section
@@ -602,27 +611,24 @@ func runReadyExplain(_ *cobra.Command) {
 		fmt.Printf(", %d cycle(s)", explanation.Summary.CycleCount)
 	}
 	fmt.Printf("\n\n")
+	return nil
 }
 
-// runMoleculeReady shows ready steps within a specific molecule
-func runMoleculeReady(_ *cobra.Command, molIDArg string) {
+func runMoleculeReady(_ *cobra.Command, molIDArg string) error {
 	ctx := rootCtx
 
-	// Molecule-ready requires direct store access for subgraph loading
 	if store == nil {
-		FatalError("no database connection")
+		return HandleErrorRespectJSON("no database connection")
 	}
 
-	// Resolve molecule ID
 	moleculeID, err := utils.ResolvePartialID(ctx, store, molIDArg)
 	if err != nil {
-		FatalError("molecule '%s' not found", molIDArg)
+		return HandleErrorRespectJSON("molecule '%s' not found", molIDArg)
 	}
 
-	// Load molecule subgraph
 	subgraph, err := loadTemplateSubgraph(ctx, store, moleculeID)
 	if err != nil {
-		FatalError("loading molecule: %v", err)
+		return HandleErrorRespectJSON("loading molecule: %v", err)
 	}
 
 	// Get parallel analysis to find ready steps
@@ -642,26 +648,23 @@ func runMoleculeReady(_ *cobra.Command, molIDArg string) {
 	}
 
 	if jsonOutput {
-		output := MoleculeReadyOutput{
+		return outputJSON(MoleculeReadyOutput{
 			MoleculeID:     moleculeID,
 			MoleculeTitle:  subgraph.Root.Title,
 			TotalSteps:     analysis.TotalSteps,
 			ReadySteps:     len(readySteps),
 			Steps:          readySteps,
 			ParallelGroups: analysis.ParallelGroups,
-		}
-		outputJSON(output)
-		return
+		})
 	}
 
-	// Human-readable output
 	fmt.Printf("\n%s Ready steps in molecule: %s\n", ui.RenderAccent("🧪"), subgraph.Root.Title)
 	fmt.Printf("   ID: %s\n", moleculeID)
 	fmt.Printf("   Total: %d steps, %d ready\n", analysis.TotalSteps, len(readySteps))
 
 	if len(readySteps) == 0 {
 		fmt.Printf("\n%s No ready steps (all blocked or completed)\n\n", ui.RenderWarn("✨"))
-		return
+		return nil
 	}
 
 	// Show parallel groups if any
@@ -696,7 +699,6 @@ func runMoleculeReady(_ *cobra.Command, molIDArg string) {
 			step.Issue.Title,
 			groupAnnotation)
 
-		// Show what this step can parallelize with
 		if len(step.ParallelInfo.CanParallel) > 0 {
 			readyParallel := []string{}
 			for _, pID := range step.ParallelInfo.CanParallel {
@@ -710,6 +712,7 @@ func runMoleculeReady(_ *cobra.Command, molIDArg string) {
 		}
 	}
 	fmt.Println()
+	return nil
 }
 
 // MoleculeReadyStep holds a ready step with its parallel info
@@ -731,6 +734,7 @@ type MoleculeReadyOutput struct {
 
 func init() {
 	readyCmd.Flags().IntP("limit", "n", 100, "Maximum issues to show (use 0 for unlimited)")
+	readyCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
 	readyCmd.Flags().IntP("priority", "p", 0, "Filter by priority")
 	readyCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	readyCmd.Flags().BoolP("unassigned", "u", false, "Show only unassigned issues")

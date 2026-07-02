@@ -62,7 +62,7 @@ type createInput struct {
 	validationMode     string
 }
 
-func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
+func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	in := createInput{}
 
 	in.markdownFile, _ = cmd.Flags().GetString("file")
@@ -70,22 +70,26 @@ func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
 	in.dryRun, _ = cmd.Flags().GetBool("dry-run")
 
 	if in.markdownFile != "" && in.graphFile != "" {
-		FatalError("cannot specify both --file and --graph")
+		return in, HandleError("cannot specify both --file and --graph")
 	}
 	if in.markdownFile != "" {
 		if len(args) > 0 {
-			FatalError("cannot specify both title and --file flag")
+			return in, HandleError("cannot specify both title and --file flag")
 		}
 		if in.dryRun {
-			FatalError("--dry-run is not supported with --file flag")
+			return in, HandleError("--dry-run is not supported with --file flag")
 		}
-		rejectSingleIssueFlagsForMarkdown(cmd)
+		if err := rejectSingleIssueFlagsForMarkdown(cmd); err != nil {
+			return in, err
+		}
 	}
 	if in.graphFile != "" {
 		if len(args) > 0 {
-			FatalError("cannot specify both title and --graph flag")
+			return in, HandleError("cannot specify both title and --graph flag")
 		}
-		rejectSingleIssueFlagsForGraph(cmd)
+		if err := rejectSingleIssueFlagsForGraph(cmd); err != nil {
+			return in, err
+		}
 	}
 
 	in.silent, _ = cmd.Flags().GetBool("silent")
@@ -96,13 +100,21 @@ func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
 	in.noHistory, _ = cmd.Flags().GetBool("no-history")
 
 	if in.ephemeral && in.noHistory {
-		FatalError("--ephemeral and --no-history are mutually exclusive")
+		return in, HandleError("--ephemeral and --no-history are mutually exclusive")
 	}
 
 	titleFlag, _ := cmd.Flags().GetString("title")
-	in.title = resolveTitle(args, titleFlag, in.markdownFile, in.graphFile)
+	title, err := resolveTitle(args, titleFlag, in.markdownFile, in.graphFile)
+	if err != nil {
+		return in, err
+	}
+	in.title = title
 
-	in.description, _ = getDescriptionFlag(cmd)
+	desc, _, err := getDescriptionFlag(cmd)
+	if err != nil {
+		return in, err
+	}
+	in.description = desc
 	skills, _ := cmd.Flags().GetString("skills")
 	if skills != "" {
 		if in.description != "" {
@@ -118,7 +130,11 @@ func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
 		in.description += "## Context\n" + ctxStr
 	}
 
-	in.design, _ = getDesignFlag(cmd)
+	design, _, err := getDesignFlag(cmd)
+	if err != nil {
+		return in, err
+	}
+	in.design = design
 	in.acceptanceCriteria, _ = cmd.Flags().GetString("acceptance")
 	in.notes, _ = cmd.Flags().GetString("notes")
 	in.appendNotes, _ = cmd.Flags().GetString("append-notes")
@@ -127,7 +143,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
 	if in.markdownFile == "" && in.graphFile == "" {
 		if in.description == "" && !isTestIssue(in.title) {
 			if config.GetBool("create.require-description") {
-				FatalError("description is required (set create.require-description: false in config.yaml to disable)")
+				return in, HandleError("description is required (set create.require-description: false in config.yaml to disable)")
 			}
 		}
 	}
@@ -135,7 +151,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
 	priorityStr, _ := cmd.Flags().GetString("priority")
 	priority, err := validation.ValidatePriority(priorityStr)
 	if err != nil {
-		FatalError("%v", err)
+		return in, HandleError("%v", err)
 	}
 	in.priority = priority
 
@@ -148,7 +164,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
 	in.waitsForGate, _ = cmd.Flags().GetString("waits-for-gate")
 
 	if in.explicitID != "" && in.parentID != "" {
-		FatalError("cannot specify both --id and --parent flags")
+		return in, HandleError("cannot specify both --id and --parent flags")
 	}
 
 	in.labels, _ = cmd.Flags().GetStringSlice("labels")
@@ -164,14 +180,14 @@ func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
 	if molTypeStr, _ := cmd.Flags().GetString("mol-type"); molTypeStr != "" {
 		mt := types.MolType(molTypeStr)
 		if !mt.IsValid() {
-			FatalError("invalid mol-type %q (must be swarm, patrol, or work)", molTypeStr)
+			return in, HandleError("invalid mol-type %q (must be swarm, patrol, or work)", molTypeStr)
 		}
 		in.molType = mt
 	}
 	if wispTypeStr, _ := cmd.Flags().GetString("wisp-type"); wispTypeStr != "" {
 		wt := types.WispType(wispTypeStr)
 		if !wt.IsValid() {
-			FatalError("invalid wisp-type %q (must be heartbeat, ping, patrol, gc_report, recovery, error, or escalation)", wispTypeStr)
+			return in, HandleError("invalid wisp-type %q (must be heartbeat, ping, patrol, gc_report, recovery, error, or escalation)", wispTypeStr)
 		}
 		in.wispType = wt
 	}
@@ -181,13 +197,13 @@ func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
 	in.eventTarget, _ = cmd.Flags().GetString("event-target")
 	in.eventPayload, _ = cmd.Flags().GetString("event-payload")
 	if (in.eventCategory != "" || in.eventActor != "" || in.eventTarget != "" || in.eventPayload != "") && in.issueType != "event" {
-		FatalError("--event-category, --event-actor, --event-target, and --event-payload flags require --type=event")
+		return in, HandleError("--event-category, --event-actor, --event-target, and --event-payload flags require --type=event")
 	}
 
 	if dueStr, _ := cmd.Flags().GetString("due"); dueStr != "" {
 		t, err := timeparsing.ParseRelativeTime(dueStr, time.Now())
 		if err != nil {
-			FatalError("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
+			return in, HandleError("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
 		}
 		in.dueAt = &t
 	}
@@ -195,7 +211,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
 	if deferStr, _ := cmd.Flags().GetString("defer"); deferStr != "" {
 		t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
 		if err != nil {
-			FatalError("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
+			return in, HandleError("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
 		}
 		if t.Before(time.Now()) && !in.silent && !debug.IsQuiet() {
 			fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
@@ -213,14 +229,14 @@ func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
 			// #nosec G304 -- user explicitly provides file path via @file.json syntax
 			data, err := os.ReadFile(filePath)
 			if err != nil {
-				FatalError("failed to read metadata file %s: %v", filePath, err)
+				return in, HandleError("failed to read metadata file %s: %v", filePath, err)
 			}
 			metadataJSON = string(data)
 		} else {
 			metadataJSON = metadataValue
 		}
 		if !json.Valid([]byte(metadataJSON)) {
-			FatalError("invalid JSON in --metadata: must be valid JSON")
+			return in, HandleError("invalid JSON in --metadata: must be valid JSON")
 		}
 		in.metadata = json.RawMessage(metadataJSON)
 		in.metadataSet = true
@@ -229,7 +245,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
 	if cmd.Flags().Changed("estimate") {
 		est, _ := cmd.Flags().GetInt("estimate")
 		if est < 0 {
-			FatalError("estimate must be a non-negative number of minutes")
+			return in, HandleError("estimate must be a non-negative number of minutes")
 		}
 		in.estimatedMinutes = &est
 	}
@@ -244,7 +260,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) createInput {
 		in.validationMode = "error"
 	}
 
-	return in
+	return in, nil
 }
 
 var singleIssueOnlyFlags = []string{
@@ -260,45 +276,46 @@ var singleIssueOnlyFlags = []string{
 	"metadata", "estimate", "force", "wisp-type",
 }
 
-func rejectSingleIssueFlagsForMarkdown(cmd *cobra.Command) {
+func rejectSingleIssueFlagsForMarkdown(cmd *cobra.Command) error {
 	for _, name := range singleIssueOnlyFlags {
 		if cmd.Flags().Changed(name) {
-			FatalError("--%s is not valid with --file (markdown templates supply per-issue fields)", name)
+			return HandleError("--%s is not valid with --file (markdown templates supply per-issue fields)", name)
 		}
 	}
+	return nil
 }
 
-func rejectSingleIssueFlagsForGraph(cmd *cobra.Command) {
+func rejectSingleIssueFlagsForGraph(cmd *cobra.Command) error {
 	for _, name := range singleIssueOnlyFlags {
 		if cmd.Flags().Changed(name) {
-			FatalError("--%s is not valid with --graph (graph plans supply per-node fields)", name)
+			return HandleError("--%s is not valid with --graph (graph plans supply per-node fields)", name)
 		}
 	}
 	if cmd.Flags().Changed("mol-type") {
-		FatalError("--mol-type is not valid with --graph (graph plans don't carry molecule semantics)")
+		return HandleError("--mol-type is not valid with --graph (graph plans don't carry molecule semantics)")
 	}
+	return nil
 }
 
-func resolveTitle(args []string, titleFlag, markdownFile, graphFile string) string {
+func resolveTitle(args []string, titleFlag, markdownFile, graphFile string) (string, error) {
 	if markdownFile != "" || graphFile != "" {
-		return ""
+		return "", nil
 	}
 
 	switch {
 	case len(args) > 0 && titleFlag != "":
 		if args[0] != titleFlag {
-			FatalError("cannot specify different titles as both positional argument and --title flag\n  Positional: %q\n  --title:    %q", args[0], titleFlag)
+			return "", HandleError("cannot specify different titles as both positional argument and --title flag\n  Positional: %q\n  --title:    %q", args[0], titleFlag)
 		}
-		return args[0]
+		return args[0], nil
 	case len(args) > 0:
 		if strings.HasPrefix(args[0], "-") {
-			FatalError("title %q looks like a flag (starts with '-').\n  Run 'bd create --help' for available options.\n  To use this title anyway, pass it explicitly: bd create --title=%q", args[0], args[0])
+			return "", HandleError("title %q looks like a flag (starts with '-').\n  Run 'bd create --help' for available options.\n  To use this title anyway, pass it explicitly: bd create --title=%q", args[0], args[0])
 		}
-		return args[0]
+		return args[0], nil
 	case titleFlag != "":
-		return titleFlag
+		return titleFlag, nil
 	default:
-		FatalError("title required (or use --file to create from markdown)")
-		return ""
+		return "", HandleError("title required (or use --file to create from markdown)")
 	}
 }

@@ -96,6 +96,7 @@ type AgentsFileParams struct {
 	TemplatePath string
 	Profile      string
 	HasRemote    bool
+	NoPush       bool
 }
 
 type BeadsDirFSAdapters struct {

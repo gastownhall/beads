@@ -29,17 +29,18 @@ See also: `bd help init-safety`, and
 
 ```
 bd init refuses: remote 'origin' already has Dolt history (refs/dolt/data).
-  Why: --force / --reinit-local bypasses only the LOCAL data-safety
-       guard. ...
+  Why: this init mode would create or reuse local history instead of
+       adopting the remote. ...
 ```
 
 **Why this happens**
 
 `bd init --force` (or `--reinit-local`) tells `bd` to bypass the local
-data-safety guard. But the remote already has project history. Proceeding
-would create an orphan local Dolt branch with no common ancestor on
-origin. The next `bd dolt push` would either fail (no common ancestor)
-or — worse, if force-pushed — destroy the team's data.
+data-safety guard. `bd init --from-jsonl` selects a local JSONL export as
+the source. But the remote already has project history. Proceeding would
+create an orphan local Dolt branch with no common ancestor on origin. The
+next `bd dolt push` would either fail (no common ancestor) or — worse, if
+force-pushed — destroy the team's data.
 
 **Recovery paths**
 
@@ -67,10 +68,10 @@ bd dolt status
 ### 3. You intentionally want to overwrite the remote's history (destructive)
 
 This is a cross-boundary operation that affects every collaborator. You
-need to pair `--reinit-local` with `--discard-remote`. In interactive
-mode `bd` will prompt for confirmation; in non-interactive mode you must
-supply a `--destroy-token`. See `bd help init-safety` for the token
-format.
+need to pair the local-source init (`--reinit-local` or `--from-jsonl`)
+with `--discard-remote`. In interactive mode `bd` will prompt for
+confirmation; in non-interactive mode you must supply a `--destroy-token`.
+See `bd help init-safety` for the token format.
 
 After `bd init --reinit-local --discard-remote`, your next
 `bd dolt push` must be a history-replacing push. Coordinate with your
@@ -236,9 +237,14 @@ remote already has are skipped. Spot-check with `bd stats` afterwards.
 ### Prevention (upgrades across PK-reshaping migrations)
 
 - **Sync before upgrading**: `bd dolt push` + `bd dolt pull` on every clone
-  while all clones still run the *old* version.
+  while all clones still run the *old* version, then stop editing. Once the new
+  binary is installed, `bd dolt push`/`bd dolt pull` are gated too, so this must
+  happen first.
 - **One designated migrator**: upgrade one machine, let it migrate, then
   `bd dolt push`.
-- **Sync immediately after**: on every other clone, upgrade the binary, then
-  `bd dolt pull` *before* doing tracked work, so no clone accumulates
-  un-synced rows under the old schema.
+- **Every other clone adopts, does not pull**: after the migrator pushes, each
+  other clone upgrades the binary and runs `bd bootstrap` to adopt the migrated
+  database. `bd dolt pull` is *refused* while the clone still has pending
+  migrations, so do not rely on it; the "sync before" step above is what
+  preserves these clones' work, because `bd bootstrap` replaces the local
+  database.

@@ -11,11 +11,12 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 var (
 	// Version is the current version of bd (overridden by ldflags at build time)
-	Version = "1.0.5"
+	Version = "1.1.0-rc.1"
 	// Build can be set via ldflags at compile time
 	Build = "dev"
 	// Commit and branch the git revision the binary was built from (optional ldflag)
@@ -24,9 +25,18 @@ var (
 )
 
 var versionCmd = &cobra.Command{
-	Use:   "version",
-	Short: "Print version information",
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "version",
+	Short:         "Print version information",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("version")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		commit := resolveCommitHash()
 		branch := resolveBranch()
 
@@ -41,7 +51,9 @@ var versionCmd = &cobra.Command{
 			if branch != "" {
 				result["branch"] = branch
 			}
-			outputJSON(result)
+			if err := outputJSON(result); err != nil {
+				return err
+			}
 		} else {
 			if commit != "" && branch != "" {
 				fmt.Printf("bd version %s (%s: %s@%s)\n", Version, Build, branch, shortCommit(commit))
@@ -60,6 +72,7 @@ var versionCmd = &cobra.Command{
 			}
 			fmt.Fprintf(os.Stderr, "The first one is being used. Remove duplicates to avoid confusion.\n")
 		}
+		return nil
 	},
 }
 

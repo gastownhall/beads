@@ -22,7 +22,7 @@ Examples:
   bd kv list                 # List all key-value pairs
 
 ```
-bd kv
+bd kv [flags]
 ```
 
 ### bd kv clear
@@ -34,7 +34,7 @@ Examples:
   bd kv clear api_endpoint
 
 ```
-bd kv clear <key>
+bd kv clear <key> [flags]
 ```
 
 ### bd kv get
@@ -46,7 +46,7 @@ Examples:
   bd kv get api_endpoint
 
 ```
-bd kv get <key>
+bd kv get <key> [flags]
 ```
 
 ### bd kv list
@@ -58,7 +58,7 @@ Examples:
   bd kv list --json
 
 ```
-bd kv list
+bd kv list [flags]
 ```
 
 ### bd kv set
@@ -74,5 +74,5 @@ Examples:
   bd kv set max_retries 3
 
 ```
-bd kv set <key> <value>
+bd kv set <key> <value> [flags]
 ```

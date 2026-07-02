@@ -9,6 +9,10 @@ on:
   # Allow manual trigger
   workflow_dispatch:
 
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+
 jobs:
   detect-regression-need:
     name: Detect regression need
@@ -17,7 +21,7 @@ jobs:
       run_regression: ${{ steps.detect.outputs.run_regression }}
       reason: ${{ steps.detect.outputs.reason }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
@@ -78,7 +82,7 @@ jobs:
       - name: Show regression trigger reason
         run: echo "${{ needs.detect-regression-need.outputs.reason }}"
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6

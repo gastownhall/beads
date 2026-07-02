@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -456,213 +457,210 @@ var listCmd = &cobra.Command{
 		}
 		return fmt.Errorf("bd list does not accept positional arguments; use flags instead (see bd list --help)")
 	},
-	Run: func(cmd *cobra.Command, args []string) {
-		in := gatherListInput(cmd)
-
-		if usesProxiedServer() {
-			if err := runListProxiedServer(cmd, rootCtx, in); err != nil {
-				FatalError("%v", err)
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("list")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
 			}
-			return
-		}
+		}()
 
-		if in.offset > 0 {
-			FatalError("--offset is only supported under --proxied-server")
-		}
-
-		cfg, err := loadDirectListFilterConfig(rootCtx, store)
-		if err != nil {
-			FatalError("%v", err)
-		}
-		filter, err := buildListFilter(in, cfg)
-		if err != nil {
-			FatalError("%v", err)
-		}
-
-		ctx := rootCtx
-
-		activeStore := store
-		// Contributor auto-routing: read from the same target repo as bd create.
-		routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
-		if err != nil {
-			FatalError("%v", err)
-		}
-		if routed {
-			defer func() { _ = routedStore.Close() }()
-			activeStore = routedStore
-		}
-
-		if in.watchMode {
-			watchIssues(ctx, activeStore, filter, in.readyFlag, in.parentID, in.sortBy, in.reverse, in.effectiveLimit)
-			return
-		}
-
-		if jsonOutput {
-			var iwc []*types.IssueWithCounts
-			var err error
-			if in.readyFlag {
-				iwc, err = activeStore.GetReadyWorkWithCounts(ctx, readyWorkFilterFromIssueFilter(withFetchOneExtra(filter)))
-			} else {
-				iwc, err = activeStore.SearchIssuesWithCounts(ctx, "", withFetchOneExtra(filter))
-			}
-			if err != nil {
-				FatalError("%v", err)
-			}
-			sortIssuesWithCounts(iwc, in.sortBy, in.reverse)
-			truncated := in.effectiveLimit > 0 && len(iwc) > in.effectiveLimit
-			if truncated {
-				iwc = iwc[:in.effectiveLimit]
-			}
-			if iwc == nil {
-				iwc = []*types.IssueWithCounts{}
-			}
-			if in.skipLabels {
-				outputJSON(newSkipLabelsListJSONResponse(iwc))
-				printTruncationHint(truncated, in.effectiveLimit)
-				return
-			}
-			outputJSON(iwc)
-			printTruncationHint(truncated, in.effectiveLimit)
-			return
-		}
-
-		var issues []*types.Issue
-		if in.readyFlag {
-			// Use blocker-aware GetReadyWork semantics (GH#3478).
-			// This ensures bd list --ready matches bd ready behavior,
-			// excluding issues with open blocks dependencies.
-			wf := readyWorkFilterFromIssueFilter(withFetchOneExtra(filter))
-			var err error
-			issues, err = activeStore.GetReadyWork(ctx, wf)
-			if err != nil {
-				FatalError("%v", err)
-			}
-		} else {
-			var err error
-			issues, err = activeStore.SearchIssues(ctx, "", withFetchOneExtra(filter))
-			if err != nil {
-				FatalError("%v", err)
-			}
-		}
-
-		// Apply sorting
-		sortIssues(issues, in.sortBy, in.reverse)
-
-		// Detect truncation (GH#3212). We fetched effectiveLimit+1 above, so any
-		// overflow means more matches exist than we're displaying.
-		truncated := in.effectiveLimit > 0 && len(issues) > in.effectiveLimit
-		if truncated {
-			issues = issues[:in.effectiveLimit]
-		}
-
-		// Handle pretty format (GH#654)
-		// JSON output takes priority over pretty/tree format (bd-list-json-fix, bd-03r)
-		if in.prettyFormat && !jsonOutput {
-			// Special handling for --tree --parent combination (hierarchical descendants)
-			if in.parentID != "" && !in.readyFlag {
-				treeIssues, err := getHierarchicalChildren(ctx, activeStore, "", in.parentID, filter)
-				if err != nil {
-					FatalError("%v", err)
-				}
-
-				if len(treeIssues) == 0 {
-					fmt.Printf("Issue '%s' has no children\n", in.parentID)
-					return
-				}
-
-				// Load dependencies for tree structure
-				// Best effort: display gracefully degrades with empty data
-				allDeps, _ := activeStore.GetAllDependencyRecords(ctx)
-				displayPrettyListWithDeps(treeIssues, false, allDeps)
-				printSkipLabelsFooter(in.skipLabels)
-				return
-			}
-
-			// Regular tree display (no parent filter)
-			// Load dependencies for tree structure
-			// Best effort: display gracefully degrades with empty data
-			allDeps, _ := activeStore.GetAllDependencyRecords(ctx)
-			displayPrettyListWithDeps(issues, false, allDeps)
-			printTruncationHint(truncated, in.effectiveLimit)
-			printSkipLabelsFooter(in.skipLabels)
-			return
-		}
-
-		// Handle format flag (non-json presets handled here; json handled earlier)
-		if in.formatStr != "" {
-			// Best effort: rendering degrades gracefully on dep-load failure.
-			depsByIssueID, _ := activeStore.GetAllDependencyRecords(ctx)
-			if err := outputFormattedList(issues, depsByIssueID, in.formatStr); err != nil {
-				FatalError("%v", err)
-			}
-			printTruncationHint(truncated, in.effectiveLimit)
-			return
-		}
-
-		// Show upgrade notification if needed
-		maybeShowUpgradeNotification()
-
-		issueIDs := make([]string, len(issues))
-		labelsMap := make(map[string][]string, len(issues))
-		for i, issue := range issues {
-			issueIDs[i] = issue.ID
-			if len(issue.Labels) > 0 {
-				labelsMap[issue.ID] = issue.Labels
-			}
-		}
-
-		// Load blocking info for displayed issues only (bd-7di).
-		// Previously loaded ALL dependency records which was O(total_issues) and took 2-4s.
-		// Now scoped to only the displayed issues, making it O(displayed_issues).
-		// Best effort: display gracefully degrades with empty data
-		blockedByMap, blocksMap, parentMap, _ := activeStore.GetBlockingInfoForIssues(ctx, issueIDs)
-
-		// Build output in buffer for pager support (bd-jdz3)
-		var buf strings.Builder
-		if ui.IsAgentMode() {
-			// Agent mode: ultra-compact, no colors, no pager
-			for _, issue := range issues {
-				formatAgentIssue(&buf, issue, blockedByMap[issue.ID], blocksMap[issue.ID], parentMap[issue.ID])
-			}
-			fmt.Print(buf.String())
-			printTruncationHint(truncated, in.effectiveLimit)
-			return
-		} else if in.longFormat {
-			// Long format: multi-line with details
-			buf.WriteString(fmt.Sprintf("\nFound %d issues:\n\n", len(issues)))
-			for _, issue := range issues {
-				labels := labelsMap[issue.ID]
-				formatIssueLong(&buf, issue, labels, in.skipLabels)
-			}
-		} else {
-			// Compact format: one line per issue
-			for _, issue := range issues {
-				labels := labelsMap[issue.ID]
-				formatIssueCompact(&buf, issue, labels, blockedByMap[issue.ID], blocksMap[issue.ID], parentMap[issue.ID])
-			}
-		}
-
-		// AD-02: footer note when --skip-labels is in effect (suppressed under --quiet).
-		if in.skipLabels && !isQuiet() {
-			buf.WriteString(skipLabelsFooterText())
-		}
-
-		// Output with pager support
-		if err := ui.ToPager(buf.String(), ui.PagerOptions{NoPager: in.noPager}); err != nil {
-			if _, writeErr := fmt.Fprint(os.Stdout, buf.String()); writeErr != nil {
-				fmt.Fprintf(os.Stderr, "Error writing output: %v\n", writeErr)
-			}
-		}
-
-		printTruncationHint(truncated, in.effectiveLimit)
-
-		// Show tip after successful list (direct mode only)
-		maybeShowTip(store)
+		return runListCore(cmd, args)
 	},
 }
 
+// runListCore runs the list query and rendering without emitting a metrics
+// event, so the caller owns emission: `bd list` emits "list" exactly once, and
+// the `bd children` alias emits "children" exactly once. children sets listCmd's
+// flags and calls this core directly rather than listCmd.RunE, which would emit
+// a second "list" event for a single user command.
+func runListCore(cmd *cobra.Command, _ []string) error {
+	in, err := gatherListInput(cmd)
+	if err != nil {
+		return err
+	}
+
+	if usesProxiedServer() {
+		if err := runListProxiedServer(cmd, rootCtx, in); err != nil {
+			return HandleError("%v", err)
+		}
+		return nil
+	}
+
+	if in.offset > 0 {
+		return HandleError("--offset is only supported under --proxied-server")
+	}
+
+	cfg, err := loadDirectListFilterConfig(rootCtx, store)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	filter, err := buildListFilter(in, cfg)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+
+	ctx := rootCtx
+
+	activeStore := store
+	routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	if routed {
+		defer func() { _ = routedStore.Close() }()
+		activeStore = routedStore
+	}
+
+	if in.watchMode {
+		watchIssues(ctx, activeStore, filter, in.readyFlag, in.parentID, in.sortBy, in.reverse, in.effectiveLimit)
+		return nil
+	}
+
+	if jsonOutput {
+		var iwc []*types.IssueWithCounts
+		var err error
+		if in.readyFlag {
+			iwc, err = activeStore.GetReadyWorkWithCounts(ctx, readyWorkFilterFromIssueFilter(withFetchOneExtra(filter)))
+		} else {
+			iwc, err = activeStore.SearchIssuesWithCounts(ctx, "", withFetchOneExtra(filter))
+		}
+		if err != nil {
+			return HandleError("%v", err)
+		}
+		sortIssuesWithCounts(iwc, in.sortBy, in.reverse)
+		truncated := in.effectiveLimit > 0 && len(iwc) > in.effectiveLimit
+		if truncated {
+			iwc = iwc[:in.effectiveLimit]
+		}
+		if iwc == nil {
+			iwc = []*types.IssueWithCounts{}
+		}
+		if in.skipLabels {
+			if err := outputJSON(newSkipLabelsListJSONResponse(iwc)); err != nil {
+				return err
+			}
+			printTruncationHint(truncated, in.effectiveLimit)
+			return nil
+		}
+		if err := outputJSON(iwc); err != nil {
+			return err
+		}
+		printTruncationHint(truncated, in.effectiveLimit)
+		return nil
+	}
+
+	var issues []*types.Issue
+	if in.readyFlag {
+		wf := readyWorkFilterFromIssueFilter(withFetchOneExtra(filter))
+		var err error
+		issues, err = activeStore.GetReadyWork(ctx, wf)
+		if err != nil {
+			return HandleError("%v", err)
+		}
+	} else {
+		var err error
+		issues, err = activeStore.SearchIssues(ctx, "", withFetchOneExtra(filter))
+		if err != nil {
+			return HandleError("%v", err)
+		}
+	}
+
+	sortIssues(issues, in.sortBy, in.reverse)
+
+	truncated := in.effectiveLimit > 0 && len(issues) > in.effectiveLimit
+	if truncated {
+		issues = issues[:in.effectiveLimit]
+	}
+
+	if in.prettyFormat && !jsonOutput {
+		if in.parentID != "" && !in.readyFlag {
+			treeIssues, err := getHierarchicalChildren(ctx, activeStore, "", in.parentID, filter)
+			if err != nil {
+				return HandleError("%v", err)
+			}
+
+			if len(treeIssues) == 0 {
+				fmt.Printf("Issue '%s' has no children\n", in.parentID)
+				return nil
+			}
+
+			allDeps, _ := activeStore.GetAllDependencyRecords(ctx)
+			displayPrettyListWithDeps(treeIssues, false, allDeps)
+			printSkipLabelsFooter(in.skipLabels)
+			return nil
+		}
+
+		allDeps, _ := activeStore.GetAllDependencyRecords(ctx)
+		displayPrettyListWithDeps(issues, false, allDeps)
+		printTruncationHint(truncated, in.effectiveLimit)
+		printSkipLabelsFooter(in.skipLabels)
+		return nil
+	}
+
+	if in.formatStr != "" {
+		depsByIssueID, _ := activeStore.GetAllDependencyRecords(ctx)
+		if err := outputFormattedList(issues, depsByIssueID, in.formatStr); err != nil {
+			return HandleError("%v", err)
+		}
+		printTruncationHint(truncated, in.effectiveLimit)
+		return nil
+	}
+
+	maybeShowUpgradeNotification()
+
+	issueIDs := make([]string, len(issues))
+	labelsMap := make(map[string][]string, len(issues))
+	for i, issue := range issues {
+		issueIDs[i] = issue.ID
+		if len(issue.Labels) > 0 {
+			labelsMap[issue.ID] = issue.Labels
+		}
+	}
+
+	blockedByMap, blocksMap, parentMap, _ := activeStore.GetBlockingInfoForIssues(ctx, issueIDs)
+
+	var buf strings.Builder
+	if ui.IsAgentMode() {
+		for _, issue := range issues {
+			formatAgentIssue(&buf, issue, blockedByMap[issue.ID], blocksMap[issue.ID], parentMap[issue.ID])
+		}
+		fmt.Print(buf.String())
+		printTruncationHint(truncated, in.effectiveLimit)
+		return nil
+	} else if in.longFormat {
+		buf.WriteString(fmt.Sprintf("\nFound %d issues:\n\n", len(issues)))
+		for _, issue := range issues {
+			labels := labelsMap[issue.ID]
+			formatIssueLong(&buf, issue, labels, in.skipLabels)
+		}
+	} else {
+		for _, issue := range issues {
+			labels := labelsMap[issue.ID]
+			formatIssueCompact(&buf, issue, labels, blockedByMap[issue.ID], blocksMap[issue.ID], parentMap[issue.ID])
+		}
+	}
+
+	if in.skipLabels && !isQuiet() {
+		buf.WriteString(skipLabelsFooterText())
+	}
+
+	if err := ui.ToPager(buf.String(), ui.PagerOptions{NoPager: in.noPager}); err != nil {
+		if _, writeErr := fmt.Fprint(os.Stdout, buf.String()); writeErr != nil {
+			fmt.Fprintf(os.Stderr, "Error writing output: %v\n", writeErr)
+		}
+	}
+
+	printTruncationHint(truncated, in.effectiveLimit)
+
+	maybeShowTip(store)
+	return nil
+}
+
 func init() {
-	listCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress")
+	listCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress. Note: repeating -s/--status silently overwrites the previous value — always use the comma-separated form for multi-status filters.")
 	listCmd.Flags().String("state", "", "Alias for --status")
 	_ = listCmd.Flags().MarkHidden("state")
 	registerPriorityFlag(listCmd, "")
@@ -723,8 +721,8 @@ func init() {
 	// Gate filtering: exclude gate issues by default (bd-7zka.2)
 	listCmd.Flags().Bool("include-gates", false, "Include gate issues in output (normally hidden)")
 
-	// Infra type filtering: exclude agent/rig/role/message by default
-	listCmd.Flags().Bool("include-infra", false, "Include infrastructure beads (agent/rig/role/message) in output")
+	// Infra type filtering: exclude agent/role/message by default
+	listCmd.Flags().Bool("include-infra", false, "Include infrastructure beads (agent/role/message) in output")
 
 	// Explicit type exclusion
 	listCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")

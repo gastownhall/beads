@@ -290,15 +290,22 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 		return nil
 	}
 
+	// MySQL 8.0+ rejects UPDATE <T> ... WHERE EXISTS (SELECT FROM <T> ...)
+	// even with distinct aliases (Error 1093: can't specify target table
+	// for update in FROM clause), which fires here whenever sourceTable ==
+	// targetTable. Wrapping the inner SELECT in a derived table makes MySQL
+	// treat it as an independent rowset, satisfying the restriction. Dolt
+	// accepts both forms, so this is a no-op there.
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE %s s SET s.is_blocked = 1, s.updated_at = s.updated_at
 		WHERE s.id = ?
 		  AND s.is_blocked = 0
 		  AND s.status <> 'closed' AND s.status <> 'pinned'
 		  AND EXISTS (
-		    SELECT 1 FROM %s t
-		    WHERE t.id = ?
-		      AND t.status <> 'closed' AND t.status <> 'pinned'
+		    SELECT 1 FROM (
+		      SELECT id, status FROM %s WHERE id = ?
+		    ) AS t
+		    WHERE t.status <> 'closed' AND t.status <> 'pinned'
 		  )
 	`, sourceTable, targetTable), source, target)
 	return err
@@ -745,7 +752,7 @@ func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID 
 // reuse it across calls.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func GetIssuesByIDsInTx(ctx context.Context, tx *sql.Tx, ids []string, wispSet map[string]struct{}) ([]*types.Issue, error) {
+func GetIssuesByIDsInTx(ctx context.Context, tx DBTX, ids []string, wispSet map[string]struct{}) ([]*types.Issue, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -843,7 +850,7 @@ func GetIssuesByIDsInTx(ctx context.Context, tx *sql.Tx, ids []string, wispSet m
 // Queries both dependency tables to handle cross-table dependencies.
 //
 //nolint:gosec // G201: table names come from hardcoded constants
-func GetDependenciesWithMetadataInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+func GetDependenciesWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	type depMeta struct {
 		depID, depType string
 	}
@@ -906,7 +913,7 @@ func GetDependenciesWithMetadataInTx(ctx context.Context, tx *sql.Tx, issueID st
 // along with the dependency type. Works within an existing transaction.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func GetDependentsWithMetadataInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+func GetDependentsWithMetadataInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	type depMeta struct {
 		depID, depType string
 	}

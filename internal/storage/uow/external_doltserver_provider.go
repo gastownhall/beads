@@ -51,7 +51,5 @@ func NewExternalDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	// No on-disk remote probe: the external dolt server's data dir may live on
-	// another host, so the remote-migrate gate relies on dolt_remotes alone.
-	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword, nil)
+	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword)
 }

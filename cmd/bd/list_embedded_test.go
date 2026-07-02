@@ -228,12 +228,13 @@ func TestEmbeddedList(t *testing.T) {
 	})
 
 	t.Run("limit_truncation_hint", func(t *testing.T) {
-		// Truncated: --limit < seeded count should emit stderr hint (GH#3212).
+		// GH#4094: hint is suppressed when stderr is not a terminal (piped).
+		// bdListCapture always runs in piped mode, so no hint expected even when truncated.
 		stdout, stderr := bdListCapture(t, bd, dir, "--limit", "2")
-		if !strings.Contains(stderr, "more results matched") {
-			t.Errorf("expected truncation hint on stderr, got:\nstderr: %q\nstdout: %q", stderr, stdout)
+		if strings.Contains(stderr, "more results matched") {
+			t.Errorf("truncation hint must not appear on piped stderr (GH#4094):\nstderr: %q\nstdout: %q", stderr, stdout)
 		}
-		// The hint must go to stderr only, not stdout, so JSON consumers can parse stdout cleanly.
+		// Hint must never appear in stdout.
 		if strings.Contains(stdout, "more results matched") {
 			t.Errorf("truncation hint leaked into stdout:\n%s", stdout)
 		}

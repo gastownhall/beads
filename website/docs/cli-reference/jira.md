@@ -34,7 +34,7 @@ Examples:
   bd jira status              # Show sync status
 
 ```
-bd jira
+bd jira [flags]
 ```
 
 ### bd jira pull
@@ -80,7 +80,7 @@ Show the current Jira sync status, including:
   - Issues pending push (no external_ref)
 
 ```
-bd jira status
+bd jira status [flags]
 ```
 
 ### bd jira sync

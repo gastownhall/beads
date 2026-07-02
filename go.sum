@@ -439,6 +439,8 @@ github.com/dolthub/dolt/go v0.40.5-0.20260605230755-1bf533220ab0 h1:oPg5f5bYFy5x
 github.com/dolthub/dolt/go v0.40.5-0.20260605230755-1bf533220ab0/go.mod h1:XwB+rt1QwszYYQIqFzIh6GyI5wUCWsmcgmGC/noAEcc=
 github.com/dolthub/driver/v2 v2.1.4 h1:0x3FoR9Aq75wd5sWSnWoaYKMusjYOsDn4zj2zl5hbQk=
 github.com/dolthub/driver/v2 v2.1.4/go.mod h1:9banWL0wE+Xmu4+c7Ukukyrx+H6BiI668Ok7e/SZBwo=
+github.com/dolthub/eventkit v0.0.0-20260611184414-99f5693e696a h1:qNecLF0XIN1BD0RfS/UmlN8ObC3G7bFUJtEyqJeBea4=
+github.com/dolthub/eventkit v0.0.0-20260611184414-99f5693e696a/go.mod h1:eHUkm69YMO2/v7bzwwYCEkd+3Xu7+KUpP7jFWAbpDlM=
 github.com/dolthub/eventsapi_schema v0.0.0-20260310172945-37a9265ade69 h1:JShhbqMw26nKx3pqqu/cFxOpzBkN+4elVhzuUfgDw2k=
 github.com/dolthub/eventsapi_schema v0.0.0-20260310172945-37a9265ade69/go.mod h1:SSLraQS/jGLYFgff3vuZ+JbVUct6vyEeMzjLBqWqoyM=
 github.com/dolthub/flatbuffers/v23 v23.3.3-dh.2 h1:u3PMzfF8RkKd3lB9pZ2bfn0qEG+1Gms9599cr0REMww=
@@ -544,8 +546,8 @@ github.com/go-viper/mapstructure/v2 v2.4.0/go.mod h1:oJDH3BJKyqBA2TXFhDsKDGDTlnd
 github.com/gobwas/httphead v0.0.0-20180130184737-2c6c146eadee/go.mod h1:L0fX3K22YWvt/FAX9NnzrNzcI4wNYi9Yku4O0LKYflo=
 github.com/gobwas/pool v0.2.0/go.mod h1:q8bcK0KcYlCgd9e7WYLm9LpyS+YeLd8JVDW6WezmKEw=
 github.com/gobwas/ws v1.0.2/go.mod h1:szmBTxLgaFppYjEmNtny/v3w89xOydFnnZMcgRRu/EM=
-github.com/goccy/go-json v0.10.2 h1:CrxCmQqYDkv1z7lO7Wbh2HN93uovUHgrECaO5ZrCXAU=
-github.com/goccy/go-json v0.10.2/go.mod h1:6MelG93GURQebXPDq3khkgXZkazVtN9CRI+MGFi0w8I=
+github.com/goccy/go-json v0.10.5 h1:Fq85nIqj+gXn/S5ahsiTlK3TmC85qgirsdTP/+DeaC4=
+github.com/goccy/go-json v0.10.5/go.mod h1:oq7eo15ShAhp70Anwd5lgX2pLfOS3QCiwU/PULtXL6M=
 github.com/gocraft/dbr/v2 v2.7.6 h1:ASHKFgCbTLODbb9f756Cl8VAlnvQLKqIzx9E1Cfb7eo=
 github.com/gocraft/dbr/v2 v2.7.6/go.mod h1:8IH98S8M8J0JSEiYk0MPH26ZDUKemiQ/GvmXL5jo+Uw=
 github.com/godbus/dbus/v5 v5.0.4/go.mod h1:xhWf0FNVPg57R7Z0UbKHbJfkEywrmjJnf7w5xrFpKfA=

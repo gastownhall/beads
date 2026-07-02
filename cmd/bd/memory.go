@@ -8,10 +8,13 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage/kvkeys"
 )
 
 // memoryPrefix is prepended (after kvPrefix) to all memory keys.
-const memoryPrefix = "memory."
+const memoryPrefix = kvkeys.MemoryPrefix
 
 // memoryKeyFlag allows explicit key override for bd remember.
 var memoryKeyFlag string
@@ -54,34 +57,41 @@ Examples:
   bd remember "always run tests with -race flag"
   bd remember "Dolt phantom DBs hide in three places" --key dolt-phantoms
   bd remember "auth module uses JWT not sessions" --key auth-jwt`,
-	GroupID: "setup",
-	Args:    cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	GroupID:       "setup",
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("remember")
 
+		evt := metrics.NewCommandEvent("remember")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := ensureDirectMode("remember requires direct database access"); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		insight := args[0]
 		if strings.TrimSpace(insight) == "" {
-			FatalErrorRespectJSON("memory content cannot be empty")
+			return HandleErrorRespectJSON("memory content cannot be empty")
 		}
 
-		// Generate or use provided key
 		key := memoryKeyFlag
 		if key == "" {
 			key = slugify(insight)
 		}
 		if key == "" {
-			FatalErrorRespectJSON("could not generate key from content; use --key to specify one")
+			return HandleErrorRespectJSON("could not generate key from content; use --key to specify one")
 		}
 
 		storageKey := kvPrefix + memoryPrefix + key
 
 		ctx := rootCtx
 
-		// Check if updating an existing memory
 		existing, _ := store.GetConfig(ctx, storageKey)
 		verb := "Remembered"
 		if existing != "" {
@@ -89,19 +99,19 @@ Examples:
 		}
 
 		if err := store.SetConfig(ctx, storageKey, insight); err != nil {
-			FatalErrorRespectJSON("storing memory: %v", err)
+			return HandleErrorRespectJSON("storing memory: %v", err)
 		}
 		commandDidWrite.Store(true)
 
 		if jsonOutput {
-			outputJSON(map[string]string{
+			return outputJSON(map[string]string{
 				"key":    key,
 				"value":  insight,
 				"action": strings.ToLower(verb),
 			})
-		} else {
-			fmt.Printf("%s [%s]: %s\n", verb, key, truncateMemory(insight, 80))
 		}
+		fmt.Printf("%s [%s]: %s\n", verb, key, truncateMemory(insight, 80))
+		return nil
 	},
 }
 
@@ -115,21 +125,30 @@ Examples:
   bd memories              # list all memories
   bd memories dolt         # search for memories about dolt
   bd memories "race flag"  # search for a phrase`,
-	GroupID: "setup",
-	Args:    cobra.MaximumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	GroupID:       "setup",
+	Args:          cobra.MaximumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("memories")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := ensureDirectMode("memories requires direct database access"); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		ctx := rootCtx
 		allConfig, err := store.GetAllConfig(ctx)
 		if err != nil {
-			FatalErrorRespectJSON("listing memories: %v", err)
+			return HandleErrorRespectJSON("listing memories: %v", err)
 		}
 
 		// Filter for kv.memory.* keys
-		fullPrefix := kvPrefix + memoryPrefix
+		fullPrefix := kvkeys.MemoryConfigKeyPrefix
 		memories := make(map[string]string)
 		for k, v := range allConfig {
 			if strings.HasPrefix(k, fullPrefix) {
@@ -138,7 +157,6 @@ Examples:
 			}
 		}
 
-		// Apply search filter if provided
 		var search string
 		if len(args) > 0 {
 			search = strings.ToLower(args[0])
@@ -155,8 +173,7 @@ Examples:
 		}
 
 		if jsonOutput {
-			outputJSON(memories)
-			return
+			return outputJSON(memories)
 		}
 
 		if len(memories) == 0 {
@@ -165,10 +182,9 @@ Examples:
 			} else {
 				fmt.Println("No memories stored. Use 'bd remember \"insight\"' to add one.")
 			}
-			return
+			return nil
 		}
 
-		// Sort keys for consistent output
 		keys := make([]string, 0, len(memories))
 		for k := range memories {
 			keys = append(keys, k)
@@ -183,9 +199,9 @@ Examples:
 		for _, k := range keys {
 			v := memories[k]
 			fmt.Printf("  %s\n", k)
-			// Indent the value, wrapping long lines
 			fmt.Printf("    %s\n\n", truncateMemory(v, 120))
 		}
+		return nil
 	},
 }
 
@@ -200,13 +216,22 @@ Use 'bd memories' to see available keys.
 Examples:
   bd forget dolt-phantoms
   bd forget auth-jwt`,
-	GroupID: "setup",
-	Args:    cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	GroupID:       "setup",
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("forget")
 
+		evt := metrics.NewCommandEvent("forget")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := ensureDirectMode("forget requires direct database access"); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		key := args[0]
@@ -214,33 +239,34 @@ Examples:
 
 		ctx := rootCtx
 
-		// Check if it exists first
 		existing, _ := store.GetConfig(ctx, storageKey)
 		if existing == "" {
 			if jsonOutput {
-				outputJSON(map[string]string{
+				if jerr := outputJSON(map[string]string{
 					"key":   key,
 					"found": "false",
-				})
-				os.Exit(1)
+				}); jerr != nil {
+					return jerr
+				}
+				return SilentExit()
 			}
 			fmt.Fprintf(os.Stderr, "No memory with key %q\n", key)
-			os.Exit(1)
+			return SilentExit()
 		}
 
 		if err := store.DeleteConfig(ctx, storageKey); err != nil {
-			FatalErrorRespectJSON("forgetting memory: %v", err)
+			return HandleErrorRespectJSON("forgetting memory: %v", err)
 		}
 		commandDidWrite.Store(true)
 
 		if jsonOutput {
-			outputJSON(map[string]string{
+			return outputJSON(map[string]string{
 				"key":     key,
 				"deleted": "true",
 			})
-		} else {
-			fmt.Printf("Forgot [%s]: %s\n", key, truncateMemory(existing, 80))
 		}
+		fmt.Printf("Forgot [%s]: %s\n", key, truncateMemory(existing, 80))
+		return nil
 	},
 }
 
@@ -253,11 +279,20 @@ var recallCmd = &cobra.Command{
 Examples:
   bd recall dolt-phantoms
   bd recall auth-jwt`,
-	GroupID: "setup",
-	Args:    cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	GroupID:       "setup",
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("recall")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := ensureDirectMode("recall requires direct database access"); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		key := args[0]
@@ -266,26 +301,28 @@ Examples:
 		ctx := rootCtx
 		value, err := store.GetConfig(ctx, storageKey)
 		if err != nil {
-			FatalErrorRespectJSON("recalling memory: %v", err)
+			return HandleErrorRespectJSON("recalling memory: %v", err)
 		}
 
 		if jsonOutput {
-			result := map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"key":   key,
 				"value": value,
 				"found": value != "",
+			}); jerr != nil {
+				return jerr
 			}
-			outputJSON(result)
 			if value == "" {
-				os.Exit(1)
+				return SilentExit()
 			}
-		} else {
-			if value == "" {
-				fmt.Fprintf(os.Stderr, "No memory with key %q\n", key)
-				os.Exit(1)
-			}
-			fmt.Printf("%s\n", value)
+			return nil
 		}
+		if value == "" {
+			fmt.Fprintf(os.Stderr, "No memory with key %q\n", key)
+			return SilentExit()
+		}
+		fmt.Printf("%s\n", value)
+		return nil
 	},
 }
 

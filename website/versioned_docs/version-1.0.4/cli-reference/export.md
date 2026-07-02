@@ -22,7 +22,7 @@ For supported full backup/restore flows, use 'bd backup init', 'bd backup sync',
 and 'bd backup restore'.
 
 By default, exports only regular issues (excluding infrastructure beads
-like agents, rigs, roles, and messages). Use --all to include everything.
+like agents, roles, and messages). Use --all to include everything.
 
 Memories (from 'bd remember') are excluded by default because they may
 contain sensitive agent context. Use --include-memories or --all to
@@ -43,7 +43,7 @@ bd export [flags]
 
 ```
       --all                Include all records (infra, templates, gates, memories)
-      --include-infra      Include infrastructure beads (agents, rigs, roles, messages)
+      --include-infra      Include infrastructure beads (agents, roles, messages)
       --include-memories   Include persistent memories (from 'bd remember') in the export
   -o, --output string      Output file path (default: stdout)
       --scrub              Exclude test/pollution records

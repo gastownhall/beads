@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/gitlab"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -52,23 +53,29 @@ By default, performs bidirectional sync:
 - Pushes local beads issues to GitLab
 
 Use --pull-only or --push-only to limit direction.`,
-	RunE: runGitLabSync,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGitLabSync,
 }
 
 // gitlabStatusCmd displays GitLab configuration and sync status.
 var gitlabStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show GitLab sync status",
-	Long:  `Display current GitLab configuration and sync status.`,
-	RunE:  runGitLabStatus,
+	Use:           "status",
+	Short:         "Show GitLab sync status",
+	Long:          `Display current GitLab configuration and sync status.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGitLabStatus,
 }
 
 // gitlabProjectsCmd lists accessible GitLab projects.
 var gitlabProjectsCmd = &cobra.Command{
-	Use:   "projects",
-	Short: "List accessible GitLab projects",
-	Long:  `List GitLab projects that the configured token has access to.`,
-	RunE:  runGitLabProjects,
+	Use:           "projects",
+	Short:         "List accessible GitLab projects",
+	Long:          `List GitLab projects that the configured token has access to.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGitLabProjects,
 }
 
 var (
@@ -317,6 +324,13 @@ func getGitLabClient(config GitLabConfig) *gitlab.Client {
 
 // runGitLabStatus implements the gitlab status command.
 func runGitLabStatus(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("gitlab-status")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	config := getGitLabConfig()
 
 	out := cmd.OutOrStdout()
@@ -370,9 +384,16 @@ func runGitLabStatus(cmd *cobra.Command, args []string) error {
 
 // runGitLabProjects implements the gitlab projects command.
 func runGitLabProjects(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("gitlab-projects")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	config := getGitLabConfig()
 	if err := validateGitLabConfig(config); err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 
 	out := cmd.OutOrStdout()
@@ -381,7 +402,7 @@ func runGitLabProjects(cmd *cobra.Command, args []string) error {
 
 	projects, err := client.ListProjects(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to fetch projects: %w", err)
+		return HandleError("failed to fetch projects: %v", err)
 	}
 
 	_, _ = fmt.Fprintln(out, "Accessible GitLab Projects")
@@ -404,9 +425,16 @@ func runGitLabProjects(cmd *cobra.Command, args []string) error {
 // runGitLabSync implements the gitlab sync command.
 // Uses the tracker.Engine for all sync operations.
 func runGitLabSync(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("gitlab-sync")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	config := getGitLabConfig()
 	if err := validateGitLabConfig(config); err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 
 	if !gitlabSyncDryRun {
@@ -414,26 +442,24 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	}
 
 	if gitlabSyncPullOnly && gitlabSyncPushOnly {
-		return fmt.Errorf("cannot use both --pull-only and --push-only")
+		return HandleError("cannot use both --pull-only and --push-only")
 	}
 
-	// Validate conflict flags
 	conflictStrategy, err := getConflictStrategy(gitlabPreferLocal, gitlabPreferGitLab, gitlabPreferNewer)
 	if err != nil {
-		return fmt.Errorf("%w (--prefer-local, --prefer-gitlab, --prefer-newer)", err)
+		return HandleError("%v (--prefer-local, --prefer-gitlab, --prefer-newer)", err)
 	}
 
 	if err := ensureStoreActive(); err != nil {
-		return fmt.Errorf("database not available: %w", err)
+		return HandleError("database not available: %v", err)
 	}
 
 	out := cmd.OutOrStdout()
 	ctx := context.Background()
 
-	// Create and initialize the GitLab tracker
 	gt := &gitlab.Tracker{}
 	if err := gt.Init(ctx, store); err != nil {
-		return fmt.Errorf("initializing GitLab tracker: %w", err)
+		return HandleError("initializing GitLab tracker: %v", err)
 	}
 
 	// Apply CLI filter overrides (take precedence over config defaults)
@@ -474,10 +500,9 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := applySelectiveSyncFlags(cmd, &opts, push); err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 
-	// Map conflict resolution
 	switch conflictStrategy {
 	case ConflictStrategyPreferLocal:
 		opts.ConflictResolution = tracker.ConflictLocal
@@ -492,11 +517,9 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintln(out)
 	}
 
-	// Run sync
 	result, err := engine.Sync(ctx, opts)
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return err
+		return HandleError("%v", err)
 	}
 
 	// Output results

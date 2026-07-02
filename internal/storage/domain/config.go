@@ -13,12 +13,15 @@ type ConfigSQLRepository interface {
 	SetLocalMetadata(ctx context.Context, key, value string) error
 	GetConfig(ctx context.Context, key string) (string, error)
 	SetConfig(ctx context.Context, key, value string) error
+	DeleteConfig(ctx context.Context, key string) error
+	GetAllConfig(ctx context.Context) (map[string]string, error)
 
 	GetCustomTypes(ctx context.Context) ([]string, error)
 	GetAllowedPrefixes(ctx context.Context) (string, error)
 	GetAdaptiveIDConfig(ctx context.Context) (AdaptiveIDConfig, error)
 
 	GetCustomStatuses(ctx context.Context) ([]types.CustomStatus, error)
+	ListAllStatusNames(ctx context.Context) ([]string, error)
 	GetInfraTypes(ctx context.Context) (map[string]bool, error)
 }
 
@@ -28,8 +31,14 @@ type ConfigUseCase interface {
 	LoadCreateContext(ctx context.Context) (CreateContext, error)
 
 	GetCustomStatuses(ctx context.Context) ([]types.CustomStatus, error)
+	ListAllStatusNames(ctx context.Context) ([]string, error)
 	GetInfraTypes(ctx context.Context) (map[string]bool, error)
 	IsInfraTypeCtx(ctx context.Context, t types.IssueType) (bool, error)
+
+	GetConfig(ctx context.Context, key string) (string, error)
+	SetConfig(ctx context.Context, key, value string) error
+	DeleteConfig(ctx context.Context, key string) error
+	GetAllConfig(ctx context.Context) (map[string]string, error)
 }
 
 // CreateContext bundles the read-only config inputs that bd create needs
@@ -106,6 +115,14 @@ func (u *configUseCaseImpl) GetCustomStatuses(ctx context.Context) ([]types.Cust
 	return out, nil
 }
 
+func (u *configUseCaseImpl) ListAllStatusNames(ctx context.Context) ([]string, error) {
+	out, err := u.cfgRepo.ListAllStatusNames(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ListAllStatusNames: %w", err)
+	}
+	return out, nil
+}
+
 func (u *configUseCaseImpl) GetInfraTypes(ctx context.Context) (map[string]bool, error) {
 	out, err := u.cfgRepo.GetInfraTypes(ctx)
 	if err != nil {
@@ -120,6 +137,36 @@ func (u *configUseCaseImpl) IsInfraTypeCtx(ctx context.Context, t types.IssueTyp
 		return false, err
 	}
 	return infra[string(t)], nil
+}
+
+func (u *configUseCaseImpl) GetConfig(ctx context.Context, key string) (string, error) {
+	out, err := u.cfgRepo.GetConfig(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("GetConfig: %w", err)
+	}
+	return out, nil
+}
+
+func (u *configUseCaseImpl) SetConfig(ctx context.Context, key, value string) error {
+	if err := u.cfgRepo.SetConfig(ctx, key, value); err != nil {
+		return fmt.Errorf("SetConfig: %w", err)
+	}
+	return nil
+}
+
+func (u *configUseCaseImpl) DeleteConfig(ctx context.Context, key string) error {
+	if err := u.cfgRepo.DeleteConfig(ctx, key); err != nil {
+		return fmt.Errorf("DeleteConfig: %w", err)
+	}
+	return nil
+}
+
+func (u *configUseCaseImpl) GetAllConfig(ctx context.Context) (map[string]string, error) {
+	out, err := u.cfgRepo.GetAllConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetAllConfig: %w", err)
+	}
+	return out, nil
 }
 
 func (u *configUseCaseImpl) LoadCreateContext(ctx context.Context) (CreateContext, error) {

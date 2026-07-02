@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -16,9 +17,24 @@ var reopenCmd = &cobra.Command{
 	Short:   "Reopen one or more closed issues",
 	Long: `Reopen closed issues by setting status to 'open' and clearing the closed_at timestamp.
 This is more explicit than 'bd update --status open' and emits a Reopened event.`,
-	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("reopen")
+
+		evt := metrics.NewCommandEvent("reopen")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			runReopenProxiedServer(cmd, rootCtx, args)
+			return nil
+		}
+
 		reason, _ := cmd.Flags().GetString("reason")
 		ctx := rootCtx
 
@@ -27,13 +43,11 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 		mutatedStores := map[storage.DoltStorage][]string{}
 		pendingCloseResults := []*RoutedResult{}
 		if store == nil {
-			FatalErrorWithHint("database not initialized",
-				diagHint())
+			return HandleErrorWithHint("database not initialized", diagHint())
 		}
 		for _, id := range args {
-			// Resolve with prefix routing (supports cross-rig reopens like `bd reopen xe-5ls`).
-			// Write-intent: reopen commits through the routed target store (#4141).
-			result, err := resolveAndGetIssueWithRoutingForWrite(ctx, store, id)
+			// Resolve with prefix routing (supports cross-rig reopens like `bd reopen xe-5ls`)
+			result, err := resolveAndGetIssueForMutation(ctx, store, id)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
 				hasError = true
@@ -43,7 +57,6 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 			issueStore := result.Store
 			issue := result.Issue
 
-			// Skip if already open — avoid false "Reopened" message
 			if issue.Status == types.StatusOpen {
 				fmt.Fprintf(os.Stderr, "%s is already open\n", fullID)
 				result.Close()
@@ -79,7 +92,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 				for _, result := range pendingCloseResults {
 					result.Close()
 				}
-				FatalErrorRespectJSON("failed to commit: %v", err)
+				return HandleErrorRespectJSON("failed to commit: %v", err)
 			}
 		}
 		for _, result := range pendingCloseResults {
@@ -87,12 +100,15 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 		}
 
 		if jsonOutput && len(reopenedIssues) > 0 {
-			outputJSON(reopenedIssues)
+			if jerr := outputJSON(reopenedIssues); jerr != nil {
+				return jerr
+			}
 		}
 
 		if hasError {
-			os.Exit(1)
+			return SilentExit()
 		}
+		return nil
 	},
 }
 

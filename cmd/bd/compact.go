@@ -51,7 +51,7 @@ Modes:
 
 Tiers:
   - Tier 1: Semantic compression (30 days closed, 70% reduction)
-  - Tier 2: Ultra compression (90 days closed, 95% reduction)
+  - Tier 2: Ultra compression (90 days closed) - planned, not yet implemented
 
 Dolt Garbage Collection:
   With auto-commit per mutation, Dolt commit history grows over time. Use
@@ -122,6 +122,13 @@ Examples:
 		}
 		if activeModes > 1 {
 			fmt.Fprintf(os.Stderr, "Error: cannot use multiple modes together (--analyze, --apply, --auto are mutually exclusive)\n")
+			os.Exit(1)
+		}
+
+		// Only Tier 1 compaction is implemented. Reject other tiers up front with
+		// a clear message rather than failing deep inside a mode.
+		if compactTier != 1 {
+			fmt.Fprintf(os.Stderr, "Error: Tier %d compaction is not yet implemented; only --tier 1 is available\n", compactTier)
 			os.Exit(1)
 		}
 
@@ -252,7 +259,9 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store s
 					"total_content_bytes": originalSize,
 				},
 			}
-			outputJSON(output)
+			if err := outputJSON(output); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
 			return
 		}
 
@@ -301,7 +310,9 @@ func runCompactSingle(ctx context.Context, compactor *compact.Compactor, store s
 			"reduction_pct":  float64(savingBytes) / float64(originalSize) * 100,
 			"elapsed_ms":     elapsed.Milliseconds(),
 		}
-		outputJSON(output)
+		if err := outputJSON(output); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		return
 	}
 
@@ -338,11 +349,13 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store stor
 
 	if len(candidates) == 0 {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if err := outputJSON(map[string]interface{}{
 				"success": true,
 				"count":   0,
 				"message": "No eligible candidates",
-			})
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
 			return
 		}
 		fmt.Println("No eligible candidates for compaction")
@@ -394,7 +407,9 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store stor
 					"total_content_bytes": totalSize,
 				},
 			}
-			outputJSON(output)
+			if err := outputJSON(output); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
 			return
 		}
 
@@ -453,7 +468,9 @@ func runCompactAll(ctx context.Context, compactor *compact.Compactor, store stor
 			"original_size": totalOriginal,
 			"elapsed_ms":    elapsed.Milliseconds(),
 		}
-		outputJSON(output)
+		if err := outputJSON(output); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		return
 	}
 
@@ -496,11 +513,14 @@ func runCompactStats(ctx context.Context, store storage.DoltStorage) {
 				"total_size": tier1Size,
 			},
 			"tier2": map[string]interface{}{
-				"candidates": len(tier2),
-				"total_size": tier2Size,
+				"candidates":  len(tier2),
+				"total_size":  tier2Size,
+				"implemented": false,
 			},
 		}
-		outputJSON(output)
+		if err := outputJSON(output); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		return
 	}
 
@@ -512,12 +532,9 @@ func runCompactStats(ctx context.Context, store storage.DoltStorage) {
 		fmt.Printf("  Estimated savings: %d bytes (70%%)\n\n", tier1Size*7/10)
 	}
 
-	fmt.Printf("Tier 2 (90+ days closed, Tier 1 compacted):\n")
+	fmt.Printf("Tier 2 (90+ days closed, Tier 1 compacted): not yet implemented\n")
 	fmt.Printf("  Candidates: %d\n", len(tier2))
 	fmt.Printf("  Total size: %d bytes\n", tier2Size)
-	if tier2Size > 0 {
-		fmt.Printf("  Estimated savings: %d bytes (95%%)\n", tier2Size*95/100)
-	}
 }
 
 func runCompactAnalyze(ctx context.Context, store storage.DoltStorage) {
@@ -617,7 +634,9 @@ func runCompactAnalyze(ctx context.Context, store storage.DoltStorage) {
 				"total_content_bytes": totalSize,
 			},
 		}
-		outputJSON(output)
+		if err := outputJSON(output); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		return
 	}
 
@@ -740,7 +759,9 @@ func runCompactApply(ctx context.Context, store storage.DoltStorage) {
 			"reduction_pct":  reductionPct,
 			"elapsed_ms":     elapsed.Milliseconds(),
 		}
-		outputJSON(output)
+		if err := outputJSON(output); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		return
 	}
 
@@ -769,7 +790,9 @@ func runCompactDolt() {
 					"dolt_path": doltPath,
 					"available": false,
 				}
-				outputJSON(output)
+				if err := outputJSON(output); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
 				return
 			}
 			fmt.Printf("DRY RUN - Dolt garbage collection\n\n")
@@ -797,7 +820,9 @@ func runCompactDolt() {
 				"size_before":  sizeBefore,
 				"size_display": formatBytes(sizeBefore),
 			}
-			outputJSON(output)
+			if err := outputJSON(output); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
 			return
 		}
 		fmt.Printf("DRY RUN - Dolt garbage collection\n\n")
@@ -853,7 +878,9 @@ func runCompactDolt() {
 			"freed_display": formatBytes(freed),
 			"elapsed_ms":    elapsed.Milliseconds(),
 		}
-		outputJSON(result)
+		if err := outputJSON(result); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		return
 	}
 
@@ -911,7 +938,7 @@ func progressBar(current, total int) string {
 
 func init() {
 	compactCmd.Flags().BoolVar(&compactDryRun, "dry-run", false, "Preview without compacting")
-	compactCmd.Flags().IntVar(&compactTier, "tier", 1, "Compaction tier (1 or 2)")
+	compactCmd.Flags().IntVar(&compactTier, "tier", 1, "Compaction tier (only tier 1 is implemented)")
 	compactCmd.Flags().BoolVar(&compactAll, "all", false, "Process all candidates")
 	compactCmd.Flags().StringVar(&compactID, "id", "", "Compact specific issue")
 	compactCmd.Flags().BoolVar(&compactForce, "force", false, "Force compact (bypass checks, requires --id)")
