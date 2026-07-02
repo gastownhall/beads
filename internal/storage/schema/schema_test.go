@@ -216,29 +216,47 @@ func TestMigration0053RepairsRigWispsShape(t *testing.T) {
 	}
 }
 
-func TestMigration0053EnsuresLegacyIssueRigColumns(t *testing.T) {
-	sql, err := os.ReadFile("migrations/0053_repair_rig_wisps.up.sql")
+func TestEnsureIssuesRigColumnsAddsOnlyMissing(t *testing.T) {
+	db, mock, err := sqlmock.New()
 	if err != nil {
-		t.Fatalf("read 0053 up migration: %v", err)
+		t.Fatalf("sqlmock.New: %v", err)
 	}
+	defer db.Close()
 
 	// #4502: issues tables bootstrapped before the rig/agent columns landed
-	// in 0001 reach v52 without them; 0053 must add any that are missing
-	// before copying them from wisps.
-	body := string(sql)
-	for _, want := range []string{
-		"ALTER TABLE issues ADD COLUMN hook_bead VARCHAR(255) DEFAULT ''''",
-		"ALTER TABLE issues ADD COLUMN role_bead VARCHAR(255) DEFAULT ''''",
-		"ALTER TABLE issues ADD COLUMN agent_state VARCHAR(32) DEFAULT ''''",
-		"ALTER TABLE issues ADD COLUMN last_activity DATETIME",
-		"ALTER TABLE issues ADD COLUMN role_type VARCHAR(32) DEFAULT ''''",
-		"ALTER TABLE issues ADD COLUMN rig VARCHAR(255) DEFAULT ''''",
-		"COLUMN_NAME = 'hook_bead'",
-		"COLUMN_NAME = 'rig'",
+	// in 0001 reach v52 without them; the 0053 pre-repair must add exactly
+	// the missing ones. Simulate hook_bead present, the other five absent.
+	countQuery := `SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS`
+	mock.ExpectQuery(countQuery).WithArgs("hook_bead").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	for _, col := range []struct{ name, ddl string }{
+		{"role_bead", "ALTER TABLE issues ADD COLUMN role_bead VARCHAR\\(255\\) DEFAULT ''"},
+		{"agent_state", "ALTER TABLE issues ADD COLUMN agent_state VARCHAR\\(32\\) DEFAULT ''"},
+		{"last_activity", "ALTER TABLE issues ADD COLUMN last_activity DATETIME"},
+		{"role_type", "ALTER TABLE issues ADD COLUMN role_type VARCHAR\\(32\\) DEFAULT ''"},
+		{"rig", "ALTER TABLE issues ADD COLUMN rig VARCHAR\\(255\\) DEFAULT ''"},
 	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("0053 migration missing legacy issues column guard %q", want)
-		}
+		mock.ExpectQuery(countQuery).WithArgs(col.name).
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+		mock.ExpectExec(col.ddl).WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+
+	if err := ensureIssuesRigColumns(context.Background(), db); err != nil {
+		t.Fatalf("ensureIssuesRigColumns: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestPreMigrationRepairScopedToMain0053(t *testing.T) {
+	// The repair must not fire for other versions or for the ignored source
+	// (whose cursor table differs); nil DB proves no queries are attempted.
+	if err := mainSource.preMigrationRepair(context.Background(), nil, 52); err != nil {
+		t.Fatalf("main v52 repair = %v, want nil no-op", err)
+	}
+	if err := ignoredSource.preMigrationRepair(context.Background(), nil, 53); err != nil {
+		t.Fatalf("ignored v53 repair = %v, want nil no-op", err)
 	}
 }
 

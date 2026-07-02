@@ -942,6 +942,9 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 		if err != nil {
 			return count, columnAdded, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}
+		if err := m.preMigrationRepair(ctx, db, mf.version); err != nil {
+			return count, columnAdded, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
+		}
 		if _, err := db.ExecContext(ctx, string(data)); err != nil {
 			return count, columnAdded, fmt.Errorf("migration %s: %w", mf.name, err)
 		}

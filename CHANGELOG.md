@@ -14,12 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `BD_ALLOW_REMOTE_MIGRATE=1 bd migrate`. The two fixes below repair real
   databases that reached a migration with drifted state; an export is the
   cheap insurance while such drift is being repaired.
-- **Migration 0053 content changed.** Databases that already applied v53 with
-  a 1.1.0-rc.1 binary recorded the old content hash; clones migrating with
-  this version record the new one. `bd doctor`'s migration-content-skew check
-  (server mode) may flag the difference against a shared remote — for this
-  specific version pair it is expected and harmless, not a
-  [#4259](https://github.com/gastownhall/beads/issues/4259) fork.
 
 ### Fixed
 
@@ -31,8 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   from `wisps`, failed with `Unknown column 'agent_state' in 'issues'` even
   with zero rig wisps to repair
   ([#4502](https://github.com/gastownhall/beads/issues/4502)). The migration
-  now ensures each of the six columns exists on `issues` (databases in the
-  wild may have some but not all) before running the copy.
+  runner now repairs the drift in code immediately before applying v53,
+  adding whichever of the six columns are missing (databases in the wild may
+  have some but not all). Shipped migration files stay frozen — the repair
+  lives in the runner because a failing migration can never be fixed forward
+  by a later migration file.
 - **One orphaned `child_counters` row no longer bricks every `bd create`.**
   Migration 0039 dropped `fk_counter_parent` and clone-local migration 0002
   re-added it under `FOREIGN_KEY_CHECKS = 0`, so a counter row orphaned during
