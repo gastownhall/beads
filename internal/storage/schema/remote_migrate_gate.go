@@ -315,12 +315,13 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 
 	latest := LatestVersion()
 
-	// Smart gate (#4516): opt-in. Once the blunt gate would fire and the
-	// designated-migrator escape hatch is not set, consult the remote's cached
-	// schema state and auto-resolve the one provably-safe case (first-mover
-	// migrate). The undetermined/below-floor verdicts fall through to the blunt
-	// #4515 block below, so disabling smart mode (or an unreadable remote ref)
-	// is always at least as safe as before.
+	// Smart gate (#4516): on by default, BD_SMART_GATE=0 opts out. Once the
+	// blunt gate would fire and the designated-migrator escape hatch is not
+	// set, consult the remote's cached schema state and auto-resolve the one
+	// provably-safe case (first-mover migrate). The undetermined/below-floor
+	// verdicts fall through to the blunt #4515 block below, so opting out of
+	// smart mode (or an unreadable remote ref) is always at least as safe as
+	// before.
 	if SmartGateEnabled() {
 		decision, skew := routeSmartGate(ctx, db, current, remoteName)
 		switch decision {

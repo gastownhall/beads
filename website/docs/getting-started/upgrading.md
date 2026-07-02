@@ -135,6 +135,23 @@ This applies to **every** upgrade that crosses a pending migration on a
 remote-backed database — the same procedure whether you are moving to a
 prerelease or to a stable release.
 
+The gate is **state-aware by default**
+([#4516](https://github.com/gastownhall/beads/issues/4516)): before blocking,
+`bd` consults the remote's *cached* schema state and
+
+- **auto-migrates** when the remote is at the same schema version as this
+  clone — no one has migrated yet, so this clone is a safe first-mover
+  (concurrent first-movers converge to identical tables). It reminds you to
+  `bd dolt push` afterwards.
+- **stops and directs you to adopt** (`bd bootstrap`) when the remote has
+  already been migrated by another clone.
+- **stops for a human decision** when this clone and the remote applied
+  different content for the same migration (a genuine fork), or when the
+  remote's schema state cannot be read from the cached ref.
+
+Set `BD_SMART_GATE=0` to opt out and make the gate block unconditionally.
+The recipes below are the explicit path and work the same in either mode.
+
 **Important ordering:** once the new binary is installed, a database with
 pending migrations is gated on **every** open — `bd dolt push` and `bd dolt
 pull` are refused too, not just `bd migrate`. So do all syncing with your

@@ -29,6 +29,8 @@ import (
 func TestDoltNew_RemoteMigrateGate_BlocksReopen(t *testing.T) {
 	skipIfNoDolt(t)
 	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	// Blunt-gate coverage: pin the (default-on) smart router off.
+	t.Setenv(schema.SmartGateEnv, "0")
 
 	ctx, cancel := testContext(t)
 	defer cancel()

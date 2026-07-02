@@ -260,8 +260,8 @@ func TestSmartGateRouting(t *testing.T) {
 		}
 	})
 
-	t.Run("smart disabled: no extra reads, blunt block", func(t *testing.T) {
-		// SmartGateEnv unset.
+	t.Run("smart opted out (BD_SMART_GATE=0): no extra reads, blunt block", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "0")
 		t.Setenv(AllowRemoteMigrateEnv, "0")
 		db, mock, _ := sqlmock.New()
 		defer db.Close()
@@ -277,11 +277,64 @@ func TestSmartGateRouting(t *testing.T) {
 		}
 		// mock would error if the smart reads had been issued (none expected).
 		if err := mock.ExpectationsWereMet(); err != nil {
-			t.Fatalf("unmet expectations (smart reads must not run when disabled): %v", err)
+			t.Fatalf("unmet expectations (smart reads must not run when opted out): %v", err)
+		}
+	})
+
+	t.Run("default (env unset): smart routing runs and resolves the safe first-mover", func(t *testing.T) {
+		// t.Setenv registers restoration of any inherited value; then clear it
+		// so this subtest sees the true unset default.
+		t.Setenv(SmartGateEnv, "")
+		os.Unsetenv(SmartGateEnv)
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		hashes := map[int]string{floor: "aaaa"}
+		expectSmartRemoteRead(mock, hashes, hashes)
+
+		if err := CheckRemoteMigrateGate(context.Background(), db); err != nil {
+			t.Fatalf("smart gate must be on by default and allow the safe first-mover, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations (smart reads must run by default): %v", err)
 		}
 	})
 
 	_ = latest
+}
+
+// TestSmartGateEnabled pins the default-on contract: unset and unparseable
+// values keep the smart gate active; only an explicit boolean false opts out.
+func TestSmartGateEnabled(t *testing.T) {
+	cases := []struct {
+		value string
+		unset bool
+		want  bool
+	}{
+		{unset: true, want: true},
+		{value: "1", want: true},
+		{value: "true", want: true},
+		{value: "0", want: false},
+		{value: "false", want: false},
+		{value: "FALSE", want: false},
+		{value: "banana", want: true}, // unparseable keeps the default, never silently disables
+	}
+	for _, c := range cases {
+		name := c.value
+		if c.unset {
+			name = "(unset)"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(SmartGateEnv, c.value)
+			if c.unset {
+				os.Unsetenv(SmartGateEnv)
+			}
+			if got := SmartGateEnabled(); got != c.want {
+				t.Errorf("SmartGateEnabled() with %s = %v, want %v", name, got, c.want)
+			}
+		})
+	}
 }
 
 // TestConvergenceFloorMatchesAllowlist cross-checks LastNonDeterministicMigration

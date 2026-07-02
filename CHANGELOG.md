@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The state-aware remote-migrate gate is now on by default.** rc.2 shipped
+  the smart gate behind an opt-in env var, but nothing in the gate's block
+  message or docs surfaced that the var existed, so in practice everyone kept
+  hitting the blunt always-block behavior. The provably-safe first-mover case
+  (remote at the same schema version as this clone) now auto-migrates without
+  `BD_ALLOW_REMOTE_MIGRATE`; remote-ahead still stops with an adopt directive
+  and content skew still stops for a human. Set `BD_SMART_GATE=0` to opt out
+  and restore the unconditional block
+  ([#4516](https://github.com/gastownhall/beads/issues/4516)).
+
 ## [1.1.0-rc.2] - 2026-07-02
 
 Second release candidate for 1.1.0. Fixes the two upgrade-breaking migration
