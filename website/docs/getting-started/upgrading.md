@@ -140,14 +140,28 @@ pending migrations is gated on **every** open — `bd dolt push` and `bd dolt
 pull` are refused too, not just `bd migrate`. So do all syncing with your
 **current** binary, *before* you install the new one.
 
+**Back up before you migrate.** Schema migrations assume the database matches
+the shape the previous migrations left behind; real databases sometimes drift
+(interrupted writes, tooling bugs, very old bootstraps). A JSONL export is
+cheap, issue-complete, and importable by any bd version:
+
+```bash
+bd export --all -o .beads/backup/pre-migrate-$(date +%Y%m%d).jsonl
+```
+
+`bd export` captures issues, not Dolt history or config — for a full snapshot
+also copy the `.beads` directory (or `dolt backup` in server mode) while no
+`bd` command is running.
+
 **Single clone (including a solo user with a remote):**
 
 ```bash
 bd dolt push                              # 1. CURRENT binary: publish all local work
-# 2. install the new binary (see Upgrading above)
-BD_ALLOW_REMOTE_MIGRATE=1 bd migrate      # 3. migrate as the designated migrator
-bd dolt push                              # 4. publish the migrated schema
-bd version                                # 5. confirm the new version is active
+bd export --all -o .beads/backup/pre-migrate.jsonl   # 2. backup (see above)
+# 3. install the new binary (see Upgrading above)
+BD_ALLOW_REMOTE_MIGRATE=1 bd migrate      # 4. migrate as the designated migrator
+bd dolt push                              # 5. publish the migrated schema
+bd version                                # 6. confirm the new version is active
 ```
 
 **Multiple clones sharing one remote:**
@@ -158,7 +172,9 @@ bd version                                # 5. confirm the new version is active
 bd dolt push
 bd dolt pull
 
-# 2. Designated migrator ONLY: install the new binary, then migrate and publish.
+# 2. Designated migrator ONLY: back up, install the new binary, then migrate
+#    and publish.
+bd export --all -o .beads/backup/pre-migrate.jsonl
 BD_ALLOW_REMOTE_MIGRATE=1 bd migrate
 bd dolt push
 

@@ -216,6 +216,55 @@ func TestMigration0053RepairsRigWispsShape(t *testing.T) {
 	}
 }
 
+func TestMigration0053EnsuresLegacyIssueRigColumns(t *testing.T) {
+	sql, err := os.ReadFile("migrations/0053_repair_rig_wisps.up.sql")
+	if err != nil {
+		t.Fatalf("read 0053 up migration: %v", err)
+	}
+
+	// #4502: issues tables bootstrapped before the rig/agent columns landed
+	// in 0001 reach v52 without them; 0053 must add any that are missing
+	// before copying them from wisps.
+	body := string(sql)
+	for _, want := range []string{
+		"ALTER TABLE issues ADD COLUMN hook_bead VARCHAR(255) DEFAULT ''''",
+		"ALTER TABLE issues ADD COLUMN role_bead VARCHAR(255) DEFAULT ''''",
+		"ALTER TABLE issues ADD COLUMN agent_state VARCHAR(32) DEFAULT ''''",
+		"ALTER TABLE issues ADD COLUMN last_activity DATETIME",
+		"ALTER TABLE issues ADD COLUMN role_type VARCHAR(32) DEFAULT ''''",
+		"ALTER TABLE issues ADD COLUMN rig VARCHAR(255) DEFAULT ''''",
+		"COLUMN_NAME = 'hook_bead'",
+		"COLUMN_NAME = 'rig'",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("0053 migration missing legacy issues column guard %q", want)
+		}
+	}
+}
+
+func TestIgnoredMigration0011CleansOrphanedChildCountersShape(t *testing.T) {
+	sql, err := os.ReadFile("migrations/ignored/0011_cleanup_orphaned_child_counters.up.sql")
+	if err != nil {
+		t.Fatalf("read ignored 0011 up migration: %v", err)
+	}
+
+	// #4534: counter rows orphaned while fk_counter_parent was dropped brick
+	// all inserts once the FK returns; the cleanup must preserve live-wisp
+	// counters and delete only rows dangling from issues.
+	body := string(sql)
+	for _, want := range []string{
+		"@has_child_counters",
+		"INSERT IGNORE INTO wisp_child_counters",
+		"GREATEST(wcc.last_child, cc.last_child)",
+		"DELETE cc FROM child_counters cc INNER JOIN wisps w ON w.id = cc.parent_id",
+		"DELETE cc FROM child_counters cc LEFT JOIN issues i ON i.id = cc.parent_id WHERE i.id IS NULL",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("ignored 0011 migration missing cleanup marker %q", want)
+		}
+	}
+}
+
 func TestMigration0053NoopsWithoutWispTablesThroughDoltCLI(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
