@@ -84,6 +84,10 @@ Examples:
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runQueryProxiedServer(cmd, rootCtx, args)
+		}
+
 		if len(args) == 0 {
 			fmt.Fprintf(os.Stderr, "Error: query expression is required\n\n")
 			if err := cmd.Help(); err != nil {
@@ -100,6 +104,13 @@ Examples:
 		sortBy, _ := cmd.Flags().GetString("sort")
 		reverse, _ := cmd.Flags().GetBool("reverse")
 		parseOnly, _ := cmd.Flags().GetBool("parse-only")
+		offset, _ := cmd.Flags().GetInt("offset")
+		if offset < 0 {
+			return HandleErrorRespectJSON("--offset must be non-negative")
+		}
+		if offset > 0 {
+			return HandleErrorRespectJSON("--offset is only supported under --proxied-server")
+		}
 
 		node, err := query.Parse(queryStr)
 		if err != nil {
@@ -270,6 +281,7 @@ func formatQueryIssue(buf *strings.Builder, issue *types.Issue) {
 
 func init() {
 	queryCmd.Flags().IntP("limit", "n", 50, "Limit results (default: 50, 0 = unlimited)")
+	queryCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
 	queryCmd.Flags().BoolP("all", "a", false, "Include closed issues (default: exclude closed)")
 	queryCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	queryCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")

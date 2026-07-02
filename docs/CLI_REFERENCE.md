@@ -1204,6 +1204,7 @@ bd query [expression] [flags]
   -a, --all           Include closed issues (default: exclude closed)
   -n, --limit int     Limit results (default: 50, 0 = unlimited) (default 50)
       --long          Show detailed multi-line output for each issue
+      --offset int    Skip the first N matching results (0-based). Only supported under --proxied-server.
       --parse-only    Only parse the query and show the AST (for debugging)
   -r, --reverse       Reverse sort order
       --sort string   Sort by field: priority, created, updated, closed, status, id, title, type, assignee
@@ -3630,10 +3631,16 @@ Store a memory that persists across sessions and account rotations.
 Memories are injected at prime time (bd prime) so you have them
 in every session without manual loading.
 
+The positional arg is the memory CONTENT (the key is auto-generated from it
+unless --key is given). As a convenience, if the arg is a bare key naming an
+existing memory, it is RECALLED instead of stored (same as 'bd recall');
+a bare key naming nothing is refused. Use --key to store slug-like content.
+
 Examples:
   bd remember "always run tests with -race flag"
   bd remember "Dolt phantom DBs hide in three places" --key dolt-phantoms
   bd remember "auth module uses JWT not sessions" --key auth-jwt
+  bd remember dolt-phantoms        # bare existing key: reads it (= bd recall)
 
 ```
 bd remember "<insight>" [flags]

@@ -214,6 +214,18 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.1.0-rc.2",
+		Date:    "2026-07-02",
+		Changes: []string{
+			"RC: fixes the two upgrade-breaking migration regressions reported against rc.1 (#4502, #4534); back up with bd export --all before migrating a remote-backed database.",
+			"FIX: the v53 migration no longer fails with Unknown column on databases whose issues table predates the rig/agent columns; the runner repairs the drift before applying (#4502).",
+			"FIX: an orphaned child_counters row no longer bricks every bd create after the fk_counter_parent constraint returned; a clone-local cleanup migration heals affected databases automatically (#4534).",
+			"FIX: old binaries fail fast on writable opens of a schema-newer database instead of proceeding blind (#4531).",
+			"NEW: the remote-migrate gate is state-aware and agent-safe — provably safe migrations auto-resolve; risky states still require BD_ALLOW_REMOTE_MIGRATE=1 by the designated migrator (#4515, #4516).",
+			"UPGRADE: the upgrade guide now carries a validated remote-backed / multi-clone recipe with a pre-migrate backup step (#4514).",
+		},
+	},
+	{
 		Version: "1.1.0-rc.1",
 		Date:    "2026-06-23",
 		Changes: []string{

@@ -55,6 +55,10 @@ Examples:
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runContextProxiedServer(cmd, rootCtx)
+		}
+
 		info := ContextInfo{
 			Backend:   configfile.BackendDolt,
 			BdVersion: Version,

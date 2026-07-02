@@ -250,3 +250,52 @@ func TestCheckRemoteMigrateGateWithRemoteCheck(t *testing.T) {
 		}
 	})
 }
+
+// TestRemoteMigrateGateAgentSafety locks the agent-facing safety contract at the
+// source layer: the directive surfaced as the JSON hint is not runnable, and the
+// runnable escape command appears only inside the conditional "migrate" option.
+func TestRemoteMigrateGateAgentSafety(t *testing.T) {
+	e := &RemoteMigrateGateError{CurrentVersion: 49, LatestVersion: 53, Pending: 4}
+
+	// The directive must not be the escape command (the agent footgun).
+	if e.AgentDirective() == e.EscapeHint() {
+		t.Fatalf("AgentDirective must not equal the runnable escape command %q", e.EscapeHint())
+	}
+	if strings.Contains(e.AgentDirective(), AllowRemoteMigrateEnv+"=1 bd migrate") {
+		t.Errorf("AgentDirective must not embed the runnable migrate command: %q", e.AgentDirective())
+	}
+
+	opts := e.Options()
+	if len(opts) != 2 {
+		t.Fatalf("Options len = %d, want 2", len(opts))
+	}
+	byID := map[string]GateOption{}
+	for _, o := range opts {
+		if o.When == "" || o.Risk == "" {
+			t.Errorf("option %q missing When/Risk", o.ID)
+		}
+		byID[o.ID] = o
+	}
+	migrate, ok := byID["migrate"]
+	if !ok {
+		t.Fatal("missing migrate option")
+	}
+	if _, ok := byID["adopt"]; !ok {
+		t.Fatal("missing adopt option")
+	}
+	// The escape command must live under migrate, and nowhere else.
+	foundUnderMigrate := false
+	for _, c := range migrate.Commands {
+		if c == e.EscapeHint() {
+			foundUnderMigrate = true
+		}
+	}
+	if !foundUnderMigrate {
+		t.Errorf("migrate option commands %v must include %q", migrate.Commands, e.EscapeHint())
+	}
+	for _, c := range byID["adopt"].Commands {
+		if c == e.EscapeHint() {
+			t.Errorf("adopt option must not contain the migrate escape command")
+		}
+	}
+}

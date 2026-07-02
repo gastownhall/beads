@@ -81,6 +81,11 @@ fi
 
 # Get current version
 CURRENT_VERSION=$(grep 'Version = ' cmd/bd/version.go | sed 's/.*"\(.*\)".*/\1/')
+# Base (prerelease-stripped) form of the current version. The Windows PE
+# numeric fields (file_version/product_version, manifest version) only ever
+# hold the base form, so they must be matched on the base, not on the full
+# CURRENT_VERSION which may carry a -rc.N suffix.
+CURRENT_BASE="${CURRENT_VERSION%%-*}"
 echo -e "${YELLOW}Bumping: $CURRENT_VERSION → $NEW_VERSION${NC}"
 echo ""
 
@@ -132,12 +137,12 @@ update_file "default.nix" "version = \"$CURRENT_VERSION\";" "version = \"$NEW_VE
 
 # 8. Windows PE resource metadata
 echo "  • cmd/bd/winres/winres.json"
-update_file "cmd/bd/winres/winres.json" "\"file_version\": \"$CURRENT_VERSION\"" "\"file_version\": \"$BASE_VERSION\""
-update_file "cmd/bd/winres/winres.json" "\"product_version\": \"$CURRENT_VERSION\"" "\"product_version\": \"$BASE_VERSION\""
+update_file "cmd/bd/winres/winres.json" "\"file_version\": \"$CURRENT_BASE\"" "\"file_version\": \"$BASE_VERSION\""
+update_file "cmd/bd/winres/winres.json" "\"product_version\": \"$CURRENT_BASE\"" "\"product_version\": \"$BASE_VERSION\""
 update_file "cmd/bd/winres/winres.json" "\"FileVersion\": \"$CURRENT_VERSION\"" "\"FileVersion\": \"$NEW_VERSION\""
 update_file "cmd/bd/winres/winres.json" "\"ProductVersion\": \"$CURRENT_VERSION\"" "\"ProductVersion\": \"$NEW_VERSION\""
 echo "  • cmd/bd/winres/manifest.xml"
-update_file "cmd/bd/winres/manifest.xml" "version=\"$CURRENT_VERSION.0\"" "version=\"$BASE_VERSION.0\""
+update_file "cmd/bd/winres/manifest.xml" "version=\"$CURRENT_BASE.0\"" "version=\"$BASE_VERSION.0\""
 
 echo ""
 echo -e "${GREEN}✓ Version constants updated to $NEW_VERSION${NC}"

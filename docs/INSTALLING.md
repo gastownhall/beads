@@ -1,3 +1,7 @@
+<!-- This GitHub-rendered install guide and the website install page
+     (website/docs/getting-started/installation.md) are deliberate parallel
+     docs for different audiences. When you change platform commands or install
+     methods here, update the website page too so they do not drift. -->
 # Installing bd
 
 Complete installation guide for all platforms.
@@ -42,6 +46,9 @@ brew install beads
 Homebrew core's `beads` formula is the supported Homebrew package. If you
 previously installed the old tap formula as `bd`, migrate to the core formula:
 
+<!-- Tap-migration snippet mirrored from the canonical copy in
+     website/docs/getting-started/upgrading.md (### Homebrew). This file is
+     GitHub-rendered, so the block is inlined rather than linked. Keep in sync. -->
 ```bash
 brew uninstall bd
 brew untap gastownhall/beads 2>/dev/null || true
@@ -595,6 +602,16 @@ bd info --whats-new
 bd hooks install
 bd version
 ```
+
+If your database syncs to a Dolt remote (a single clone or several), upgrading
+across a schema migration needs an explicit, ordered procedure — `bd` refuses
+to silently migrate a remote-backed database, so replacing the binary alone is
+not enough. See [Upgrading bd — remote-backed databases and multiple
+clones](../website/docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones).
+
+Prereleases (e.g. release candidates) are published only as GitHub prereleases
+and are not pushed to the stable Homebrew/npm/PyPI channels, so `brew upgrade`
+and friends will not move you onto them — fetch the prerelease build explicitly.
 
 ## Uninstalling
 

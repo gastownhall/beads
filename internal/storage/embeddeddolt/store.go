@@ -273,6 +273,17 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 		}
 	}
 
+	// Forward-drift guard: if this database's schema is AHEAD of the binary,
+	// fail fast with a clear "upgrade bd" message before MigrateUp no-ops and a
+	// later query dies on a dropped/renamed column. Embedded mode is the mode
+	// the stale-binary incident (#4135/#4137) was observed in. The read-only
+	// embedded open (OpenReadOnly) already guards this; the writable open did
+	// not. Runs after the USE switch so the version read resolves against the
+	// target database.
+	if err := schema.CheckForwardDrift(ctx, conn); err != nil {
+		return err
+	}
+
 	// #4259: refuse to silently apply pending migrations to a remote-backed,
 	// already-initialized database — independently migrating each clone forks the
 	// schema. Embedded mode (the mode the original report was filed against) syncs
@@ -287,8 +298,12 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr,
 				"Warning: %v\n"+
 					"  Read-only command: continuing on schema v%d without migrating.\n"+
-					"  To resolve, the ONE designated migrator runs: %s=1 bd migrate && bd dolt push\n"+
-					"  Everyone else adopts the migrated database: bd bootstrap\n",
+					"  Writes are blocked until the schema is reconciled. This is a\n"+
+					"  coordination decision, not an auto-fix — do NOT run a migration unless\n"+
+					"  you are the single designated migrator (only ONE clone may migrate a\n"+
+					"  shared remote, else the schema forks; #4259):\n"+
+					"    • designated migrator (only ONE machine): %s=1 bd migrate && bd dolt push\n"+
+					"    • every other clone (another already migrated): bd bootstrap\n",
 				gateErr, gateErr.CurrentVersion, schema.AllowRemoteMigrateEnv)
 			return nil
 		}

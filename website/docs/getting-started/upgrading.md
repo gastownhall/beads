@@ -52,6 +52,8 @@ irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 brew upgrade beads
 ```
 
+<!-- Canonical Homebrew tap-migration snippet. The installation page links
+     here; docs/INSTALLING.md mirrors this block. Keep all three in sync. -->
 If you still have the old tap formula installed as `bd`, switch to the
 Homebrew core formula:
 
@@ -118,6 +120,83 @@ bd migrate
 # Migrate and clean up old files
 bd migrate --cleanup --yes
 ```
+
+### Remote-backed databases and multiple clones
+
+`bd` refuses to silently apply pending schema migrations to a database that has
+a Dolt remote configured. Migrating more than one clone of a shared remote
+independently forks the schema, after which `bd dolt pull` can no longer merge —
+the break is silent and, across a primary-key-reshaping migration, unrecoverable
+([#4259](https://github.com/gastownhall/beads/issues/4259)). The supported flow
+is: one machine migrates and publishes; every other clone re-clones the migrated
+database.
+
+This applies to **every** upgrade that crosses a pending migration on a
+remote-backed database — the same procedure whether you are moving to a
+prerelease or to a stable release.
+
+**Important ordering:** once the new binary is installed, a database with
+pending migrations is gated on **every** open — `bd dolt push` and `bd dolt
+pull` are refused too, not just `bd migrate`. So do all syncing with your
+**current** binary, *before* you install the new one.
+
+**Back up before you migrate.** Schema migrations assume the database matches
+the shape the previous migrations left behind; real databases sometimes drift
+(interrupted writes, tooling bugs, very old bootstraps). A JSONL export is
+cheap, issue-complete, and importable by any bd version:
+
+```bash
+bd export --all -o .beads/backup/pre-migrate-$(date +%Y%m%d).jsonl
+```
+
+`bd export` captures issues, not Dolt history or config — for a full snapshot
+also copy the `.beads` directory (or `dolt backup` in server mode) while no
+`bd` command is running.
+
+**Single clone (including a solo user with a remote):**
+
+```bash
+bd dolt push                              # 1. CURRENT binary: publish all local work
+bd export --all -o .beads/backup/pre-migrate.jsonl   # 2. backup (see above)
+# 3. install the new binary (see Upgrading above)
+BD_ALLOW_REMOTE_MIGRATE=1 bd migrate      # 4. migrate as the designated migrator
+bd dolt push                              # 5. publish the migrated schema
+bd version                                # 6. confirm the new version is active
+```
+
+**Multiple clones sharing one remote:**
+
+```bash
+# 1. With your CURRENT (old) binary, on EVERY clone: publish all work and get in
+#    sync, then stop editing until the upgrade is done.
+bd dolt push
+bd dolt pull
+
+# 2. Designated migrator ONLY: back up, install the new binary, then migrate
+#    and publish.
+bd export --all -o .beads/backup/pre-migrate.jsonl
+BD_ALLOW_REMOTE_MIGRATE=1 bd migrate
+bd dolt push
+
+# 3. Every OTHER clone: install the new binary, then ADOPT the migrated database.
+#    (bd dolt pull is refused here — the clone still has pending migrations — so
+#    re-clone instead. Safe because step 1 already pushed all work.)
+bd bootstrap
+```
+
+`bd bootstrap` replaces the local database, so any work not pushed in step 1 is
+lost — that is why step 1 publishes everything first. If a clone was instead
+migrated independently and `bd dolt pull` later fails with `cannot merge because
+table dependencies has different primary keys in its common ancestor`, the
+schema has already forked — follow the recovery playbook:
+[RECOVERY.md#pk-fork-refused](https://github.com/gastownhall/beads/blob/main/docs/RECOVERY.md#pk-fork-refused).
+
+:::note
+In **server mode**, `bd doctor` adds a migration-content-skew check that flags a
+forked schema against the cached remote ref — a useful post-upgrade
+verification. It is not available in embedded mode; there, confirm the upgrade
+with `bd version` and a normal read such as `bd ready`.
+:::
 
 ## Cross-era Upgrades
 

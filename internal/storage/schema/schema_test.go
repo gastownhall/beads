@@ -216,6 +216,73 @@ func TestMigration0053RepairsRigWispsShape(t *testing.T) {
 	}
 }
 
+func TestEnsureIssuesRigColumnsAddsOnlyMissing(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// #4502: issues tables bootstrapped before the rig/agent columns landed
+	// in 0001 reach v52 without them; the 0053 pre-repair must add exactly
+	// the missing ones. Simulate hook_bead present, the other five absent.
+	countQuery := `SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS`
+	mock.ExpectQuery(countQuery).WithArgs("hook_bead").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	for _, col := range []struct{ name, ddl string }{
+		{"role_bead", "ALTER TABLE issues ADD COLUMN role_bead VARCHAR\\(255\\) DEFAULT ''"},
+		{"agent_state", "ALTER TABLE issues ADD COLUMN agent_state VARCHAR\\(32\\) DEFAULT ''"},
+		{"last_activity", "ALTER TABLE issues ADD COLUMN last_activity DATETIME"},
+		{"role_type", "ALTER TABLE issues ADD COLUMN role_type VARCHAR\\(32\\) DEFAULT ''"},
+		{"rig", "ALTER TABLE issues ADD COLUMN rig VARCHAR\\(255\\) DEFAULT ''"},
+	} {
+		mock.ExpectQuery(countQuery).WithArgs(col.name).
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+		mock.ExpectExec(col.ddl).WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+
+	if err := ensureIssuesRigColumns(context.Background(), db); err != nil {
+		t.Fatalf("ensureIssuesRigColumns: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestPreMigrationRepairScopedToMain0053(t *testing.T) {
+	// The repair must not fire for other versions or for the ignored source
+	// (whose cursor table differs); nil DB proves no queries are attempted.
+	if err := mainSource.preMigrationRepair(context.Background(), nil, 52); err != nil {
+		t.Fatalf("main v52 repair = %v, want nil no-op", err)
+	}
+	if err := ignoredSource.preMigrationRepair(context.Background(), nil, 53); err != nil {
+		t.Fatalf("ignored v53 repair = %v, want nil no-op", err)
+	}
+}
+
+func TestIgnoredMigration0011CleansOrphanedChildCountersShape(t *testing.T) {
+	sql, err := os.ReadFile("migrations/ignored/0011_cleanup_orphaned_child_counters.up.sql")
+	if err != nil {
+		t.Fatalf("read ignored 0011 up migration: %v", err)
+	}
+
+	// #4534: counter rows orphaned while fk_counter_parent was dropped brick
+	// all inserts once the FK returns; the cleanup must preserve live-wisp
+	// counters and delete only rows dangling from issues.
+	body := string(sql)
+	for _, want := range []string{
+		"@has_child_counters",
+		"INSERT IGNORE INTO wisp_child_counters",
+		"GREATEST(wcc.last_child, cc.last_child)",
+		"DELETE cc FROM child_counters cc INNER JOIN wisps w ON w.id = cc.parent_id",
+		"DELETE cc FROM child_counters cc LEFT JOIN issues i ON i.id = cc.parent_id WHERE i.id IS NULL",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("ignored 0011 migration missing cleanup marker %q", want)
+		}
+	}
+}
+
 func TestMigration0053NoopsWithoutWispTablesThroughDoltCLI(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 

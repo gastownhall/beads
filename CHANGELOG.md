@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0-rc.2] - 2026-07-02
+
+Second release candidate for 1.1.0. Fixes the two upgrade-breaking migration
+regressions reported against rc.1 (#4502, #4534), hardens the remote-migrate
+gate that rc.1 introduced, and ships the validated upgrade documentation.
+
+### Upgrade Notes
+
+- **Back up before migrating.** The upgrade guide's remote-backed recipes now
+  start with a JSONL export (`bd export --all -o ...`) before
+  `BD_ALLOW_REMOTE_MIGRATE=1 bd migrate`. The two fixes below repair real
+  databases that reached a migration with drifted state; an export is the
+  cheap insurance while such drift is being repaired.
+
+### Fixed
+
+- **v53 migration no longer fails on pre-rig `issues` tables.** The rig/agent
+  columns (`hook_bead`, `role_bead`, `agent_state`, `last_activity`,
+  `role_type`, `rig`) were only ever added to the squashed bootstrap
+  `0001_create_issues`, so a database bootstrapped before they existed sits at
+  schema v52 without them — and migration 0053, which copies those columns
+  from `wisps`, failed with `Unknown column 'agent_state' in 'issues'` even
+  with zero rig wisps to repair
+  ([#4502](https://github.com/gastownhall/beads/issues/4502)). The migration
+  runner now repairs the drift in code immediately before applying v53,
+  adding whichever of the six columns are missing (databases in the wild may
+  have some but not all). Shipped migration files stay frozen — the repair
+  lives in the runner because a failing migration can never be fixed forward
+  by a later migration file.
+- **One orphaned `child_counters` row no longer bricks every `bd create`.**
+  Migration 0039 dropped `fk_counter_parent` and clone-local migration 0002
+  re-added it under `FOREIGN_KEY_CHECKS = 0`, so a counter row orphaned during
+  the FK-less window (an interrupted create, a parent deleted without cascade)
+  survived the constraint's return — and Dolt then failed constraint
+  validation on every subsequent insert, including brand-new top-level issues,
+  on an otherwise healthy database
+  ([#4534](https://github.com/gastownhall/beads/issues/4534)). A new
+  clone-local migration moves any live-wisp counters to `wisp_child_counters`
+  and deletes rows dangling from `issues` — the same rows the FK's
+  `ON DELETE CASCADE` would have removed had it been in force. Runs
+  automatically on the next command with the new binary; already-bitten
+  databases are healed in place.
+- **Old binaries fail fast on writable opens of a schema-newer database**
+  instead of proceeding against a schema they do not understand
+  ([#4531](https://github.com/gastownhall/beads/pull/4531)) — the guard rail
+  for the mixed-version window during multi-clone upgrades.
+- **Prerelease GitHub releases now ship prerelease-correct install
+  instructions.** The release notes header previously showed the stable
+  install methods (brew, install scripts), three of which do not deliver a
+  prerelease ([#4530](https://github.com/gastownhall/beads/pull/4530)).
+- **`bd remember` no longer clobbers a memory whose content is its own key**,
+  and a bare `bd remember <existing-key>` now recalls instead of overwriting.
+
+### Added
+
+- **Smarter remote-migrate gate.** The gate introduced in rc.1 is now
+  state-aware and agent-safe: cases that are provably safe to migrate
+  auto-resolve instead of stopping every agent at the wall, while genuinely
+  risky states still require the designated migrator
+  ([#4515](https://github.com/gastownhall/beads/pull/4515),
+  [#4516](https://github.com/gastownhall/beads/pull/4516)).
+- **Backend-agnostic storage conformance test suite**
+  ([#4414](https://github.com/gastownhall/beads/pull/4414)).
+
+### Documentation
+
+- **Validated upgrade recipe for remote-backed / multi-clone databases** in
+  the upgrade guide, exercised end-to-end on a live database
+  ([#4514](https://github.com/gastownhall/beads/pull/4514)), plus a
+  consolidated Homebrew tap-migration snippet across install docs, a README
+  pointer to the upgrade guide, and a pre-migrate backup step in the
+  recipes (this release).
+
 ## [1.1.0-rc.1] - 2026-06-23
 
 ### Upgrade Notes
@@ -23,17 +96,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upgrade all clones of a shared remote together, letting one designated
   machine migrate and `bd dolt push` first.
 
-- **Upgrading from 1.0.4/1.0.5 with multiple clones: sync before AND
-  immediately after.** This release reshapes the `dependencies` primary key
-  (migration `0050`). If two clones cross that boundary with un-synced
-  dependency edits on both sides, their histories become permanently
-  un-mergeable — Dolt refuses the merge outright (`cannot merge because table
-  dependencies has different primary keys in its common ancestor`) before the
-  pull auto-resolver can run. To stay safe: `bd dolt push` + `bd dolt pull`
-  on every clone *before* upgrading, let one designated machine upgrade,
-  migrate, and `bd dolt push`, then on each remaining clone upgrade and
-  `bd dolt pull` *before* doing tracked work. If clones have already forked,
-  see the recovery playbook:
+- **Upgrading a remote-backed database: one machine migrates, the rest adopt.**
+  This release reshapes the `dependencies` primary key (migration `0050`), and
+  `bd` now refuses to silently migrate a database that has a Dolt remote
+  configured. If two clones cross the `0050` boundary with un-synced dependency
+  edits on both sides, their histories become permanently un-mergeable — Dolt
+  refuses the merge outright (`cannot merge because table dependencies has
+  different primary keys in its common ancestor`) before the pull auto-resolver
+  can run. Replacing the binary alone is not enough; follow the ordered recipe:
+
+  1. With your **current** binary, on **every** clone: `bd dolt push` +
+     `bd dolt pull` until all are in sync, then stop editing. Once the new
+     binary is installed, `push`/`pull` are gated too, so this must happen
+     first.
+  2. Designated migrator **only**: install the new binary, then
+     `BD_ALLOW_REMOTE_MIGRATE=1 bd migrate` and `bd dolt push`.
+  3. Every **other** clone: install the new binary, then `bd bootstrap` to adopt
+     the migrated database (`bd dolt pull` is refused while the clone still has
+     pending migrations; do not migrate on these clones).
+  4. Confirm with `bd version`; in server mode, `bd doctor` adds a
+     migration-content-skew check (not available in embedded mode).
+
+  A single clone with a remote follows the same gate (push with the old binary,
+  then migrate and push). Full recipe and the single-clone variant:
+  [Upgrading bd — remote-backed databases and multiple clones](website/docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones).
+  If clones have already forked, see the recovery playbook:
   [docs/RECOVERY.md#pk-fork-refused](docs/RECOVERY.md#pk-fork-refused).
 
 ### Added

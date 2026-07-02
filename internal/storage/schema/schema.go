@@ -78,10 +78,13 @@ func IsSchemaSkewError(err error) bool {
 // *SchemaSkewError if the DB is ahead of the binary. Returns nil for a fresh
 // DB (version=0) or when BD_IGNORE_SCHEMA_SKEW=1 (prints a warning instead).
 func checkSchemaSkew(ctx context.Context, db DBConn) error {
-	var currentVersion int
-	if err := db.QueryRowContext(ctx,
-		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-	).Scan(&currentVersion); err != nil {
+	// CurrentVersion treats a missing schema_migrations table as version 0, so
+	// this is safe to call before migrations have created the table: a
+	// brand-new database (version 0) falls through the no-op check below. That
+	// matters on the writable open path, where the guard runs before initSchema
+	// creates the table on a fresh database.
+	currentVersion, err := CurrentVersion(ctx, db)
+	if err != nil {
 		return fmt.Errorf("schema skew check: %w", err)
 	}
 	if currentVersion == 0 || currentVersion <= LatestVersion() {
@@ -96,9 +99,13 @@ func checkSchemaSkew(ctx context.Context, db DBConn) error {
 	return &SchemaSkewError{DBVersion: currentVersion, BinaryVersion: LatestVersion()}
 }
 
-// CheckForwardDrift checks for forward schema drift on an existing *sql.DB
-// connection. Used by the read-only store path where MigrateUp is skipped.
-func CheckForwardDrift(ctx context.Context, db *sql.DB) error {
+// CheckForwardDrift reports a *SchemaSkewError when the database's schema
+// version is AHEAD of the binary's (forward drift). It accepts any DBConn (a
+// pooled *sql.DB or a pinned *sql.Conn), so both the read-only store path
+// (where MigrateUp is skipped) and the writable open path (where MigrateUp
+// no-ops on a forward-drifted DB rather than erroring) can fail fast before a
+// query hits a dropped or renamed column.
+func CheckForwardDrift(ctx context.Context, db DBConn) error {
 	return checkSchemaSkew(ctx, db)
 }
 
@@ -934,6 +941,9 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 		data, err := m.files.ReadFile(m.dir + "/" + mf.name)
 		if err != nil {
 			return count, columnAdded, fmt.Errorf("reading migration %s: %w", mf.name, err)
+		}
+		if err := m.preMigrationRepair(ctx, db, mf.version); err != nil {
+			return count, columnAdded, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
 		}
 		if _, err := db.ExecContext(ctx, string(data)); err != nil {
 			return count, columnAdded, fmt.Errorf("migration %s: %w", mf.name, err)
