@@ -41,8 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bd codex-hook UserPromptSubmit",
-            "statusMessage": "Refreshing Beads context"
+            "command": "bd codex-hook UserPromptSubmit"
           }
         ]
       }
