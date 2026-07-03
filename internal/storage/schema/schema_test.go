@@ -323,6 +323,44 @@ func TestFailed0053DirtyTablesAreRecoverable(t *testing.T) {
 	}
 }
 
+func TestFailed0053DirtyTablesAreRecoverableWithDirtySnapshotAuxTables(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(52))
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
+		WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`).
+		WithArgs("wisp_dependencies", "depends_on_issue_id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+
+	// 0051's DROP DEFAULT on the legacy UUID() default leaves these aux
+	// snapshot tables dirty too when a v49->v53 batch trips over 0053
+	// (#4555); the gate must still recover.
+	recoverable, err := failed0053DirtyTablesAreRecoverable(context.Background(), db, map[string]dirtyTableState{
+		"comments":             {},
+		"dependencies":         {},
+		"events":               {},
+		"issues":               {},
+		"issue_snapshots":      {},
+		"compaction_snapshots": {},
+	})
+	if err != nil {
+		t.Fatalf("failed0053DirtyTablesAreRecoverable: %v", err)
+	}
+	if !recoverable {
+		t.Fatal("recoverable = false, want true")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 func TestFailed0053DirtyTablesRejectsUnrelatedDirtyTable(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {

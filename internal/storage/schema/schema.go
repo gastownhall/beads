@@ -422,6 +422,14 @@ func failed0053DirtyTablesAreRecoverable(ctx context.Context, db DBConn, dirtyBe
 		"events":         {},
 		"issues":         {},
 		"labels":         {},
+		// 0051 drops the legacy DEFAULT (UUID()) on these aux tables. In a
+		// single-pass v49->v53 batch (MigrateUp commits once at the end),
+		// that DROP DEFAULT is still uncommitted when 0053 fails, so a
+		// legacy-default DB trips this gate with these tables dirty too.
+		// The change is an idempotent, schema-only DROP DEFAULT, so it is
+		// safe to fold into the recovery commit (#4555).
+		"issue_snapshots":      {},
+		"compaction_snapshots": {},
 	}
 	for table := range dirtyBefore {
 		if _, ok := allowed[table]; !ok {
