@@ -294,6 +294,14 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 			delete(dirtyBefore, t.name)
 		}
 	}
+	if recoverable, err := failed0053DirtyTablesAreRecoverable(ctx, db, dirtyBefore); err != nil {
+		return 0, fmt.Errorf("checking failed v53 migration recovery: %w", err)
+	} else if recoverable {
+		log.Printf("schema migration recovering known failed v53 dirty tables: %s", strings.Join(sortedDirtyTableNames(dirtyBefore), ", "))
+		for table := range dirtyBefore {
+			delete(dirtyBefore, table)
+		}
+	}
 	touchedDirtyTables, err := mainSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
 	if err != nil {
 		return 0, fmt.Errorf("checking dirty tables against pending migrations: %w", err)
@@ -393,6 +401,59 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	}
 
 	return applied, nil
+}
+
+func failed0053DirtyTablesAreRecoverable(ctx context.Context, db DBConn, dirtyBefore map[string]dirtyTableState) (bool, error) {
+	if len(dirtyBefore) == 0 {
+		return false, nil
+	}
+	current, err := mainSource.currentVersion(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	if current != 52 {
+		return false, nil
+	}
+
+	allowed := map[string]struct{}{
+		"child_counters": {},
+		"comments":       {},
+		"dependencies":   {},
+		"events":         {},
+		"issues":         {},
+		"labels":         {},
+	}
+	for table := range dirtyBefore {
+		if _, ok := allowed[table]; !ok {
+			return false, nil
+		}
+	}
+
+	needsRepair, err := wispDependenciesNeed0053Repair(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	return needsRepair, nil
+}
+
+func wispDependenciesNeed0053Repair(ctx context.Context, db DBConn) (bool, error) {
+	table, err := schemaTableExists(ctx, db, "wisp_dependencies")
+	if err != nil {
+		return false, err
+	}
+	if !table {
+		return false, nil
+	}
+	for _, column := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
+		present, err := schemaColumnExists(ctx, db, "wisp_dependencies", column)
+		if err != nil {
+			return false, err
+		}
+		if !present {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func migrationWorkNeeded(ctx context.Context, db DBConn) (bool, error) {

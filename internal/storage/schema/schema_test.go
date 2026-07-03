@@ -249,6 +249,105 @@ func TestEnsureIssuesRigColumnsAddsOnlyMissing(t *testing.T) {
 	}
 }
 
+func TestEnsureWispDependenciesSplitTargetsAddsMissingAndBackfills(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	tableQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
+	columnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
+	mock.ExpectQuery(tableQuery).WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
+		mock.ExpectQuery(columnQuery).WithArgs("wisp_dependencies", col).
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	}
+	for _, ddl := range []string{
+		"ALTER TABLE wisp_dependencies ADD COLUMN depends_on_issue_id VARCHAR\\(255\\) NULL",
+		"ALTER TABLE wisp_dependencies ADD COLUMN depends_on_wisp_id VARCHAR\\(255\\) NULL",
+		"ALTER TABLE wisp_dependencies ADD COLUMN depends_on_external VARCHAR\\(255\\) NULL",
+	} {
+		mock.ExpectExec(ddl).WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+	mock.ExpectQuery(columnQuery).WithArgs("wisp_dependencies", "depends_on_id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	for _, update := range []string{
+		`UPDATE wisp_dependencies SET depends_on_external = depends_on_id`,
+		`UPDATE wisp_dependencies wd JOIN wisps w ON w\.id = wd\.depends_on_id`,
+		`UPDATE wisp_dependencies wd JOIN issues i ON i\.id = wd\.depends_on_id`,
+		`UPDATE wisp_dependencies SET depends_on_external = depends_on_id WHERE depends_on_external IS NULL`,
+	} {
+		mock.ExpectExec(update).WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+
+	if err := ensureWispDependenciesSplitTargets(context.Background(), db); err != nil {
+		t.Fatalf("ensureWispDependenciesSplitTargets: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestFailed0053DirtyTablesAreRecoverable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(52))
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
+		WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`).
+		WithArgs("wisp_dependencies", "depends_on_issue_id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+
+	recoverable, err := failed0053DirtyTablesAreRecoverable(context.Background(), db, map[string]dirtyTableState{
+		"comments":     {},
+		"dependencies": {},
+		"events":       {},
+		"issues":       {},
+	})
+	if err != nil {
+		t.Fatalf("failed0053DirtyTablesAreRecoverable: %v", err)
+	}
+	if !recoverable {
+		t.Fatal("recoverable = false, want true")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestFailed0053DirtyTablesRejectsUnrelatedDirtyTable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(52))
+
+	recoverable, err := failed0053DirtyTablesAreRecoverable(context.Background(), db, map[string]dirtyTableState{
+		"comments": {},
+		"settings": {},
+	})
+	if err != nil {
+		t.Fatalf("failed0053DirtyTablesAreRecoverable: %v", err)
+	}
+	if recoverable {
+		t.Fatal("recoverable = true, want false")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 func TestPreMigrationRepairScopedToMain0053(t *testing.T) {
 	// The repair must not fire for other versions or for the ignored source
 	// (whose cursor table differs); nil DB proves no queries are attempted.
