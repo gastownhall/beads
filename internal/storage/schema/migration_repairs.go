@@ -43,14 +43,11 @@ func ensureIssuesRigColumns(ctx context.Context, db DBConn) error {
 		{"rig", "VARCHAR(255) DEFAULT ''"},
 	}
 	for _, col := range columns {
-		var present int
-		if err := db.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
-			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'issues' AND COLUMN_NAME = ?
-		`, col.name).Scan(&present); err != nil {
+		present, err := schemaColumnExists(ctx, db, "issues", col.name)
+		if err != nil {
 			return fmt.Errorf("checking issues.%s: %w", col.name, err)
 		}
-		if present > 0 {
+		if present {
 			continue
 		}
 		if _, err := db.ExecContext(ctx, "ALTER TABLE issues ADD COLUMN "+col.name+" "+col.definition); err != nil {
@@ -74,11 +71,7 @@ func ensureWispDependenciesSplitTargets(ctx context.Context, db DBConn) error {
 		return nil
 	}
 
-	columns := []struct{ name, definition string }{
-		{"depends_on_issue_id", "VARCHAR(255) NULL"},
-		{"depends_on_wisp_id", "VARCHAR(255) NULL"},
-		{"depends_on_external", "VARCHAR(255) NULL"},
-	}
+	columns := wispDependenciesSplitTargetColumns()
 	missing := make([]struct{ name, definition string }, 0, len(columns))
 	for _, col := range columns {
 		present, err := schemaColumnExists(ctx, db, "wisp_dependencies", col.name)
@@ -107,18 +100,29 @@ func ensureWispDependenciesSplitTargets(ctx context.Context, db DBConn) error {
 		return nil
 	}
 
-	repairs := []string{
-		"UPDATE wisp_dependencies SET depends_on_external = depends_on_id WHERE depends_on_external IS NULL AND depends_on_id LIKE 'external:%'",
-		"UPDATE wisp_dependencies wd JOIN wisps w ON w.id = wd.depends_on_id SET wd.depends_on_wisp_id = wd.depends_on_id WHERE wd.depends_on_wisp_id IS NULL AND wd.depends_on_external IS NULL",
-		"UPDATE wisp_dependencies wd JOIN issues i ON i.id = wd.depends_on_id SET wd.depends_on_issue_id = wd.depends_on_id WHERE wd.depends_on_issue_id IS NULL AND wd.depends_on_external IS NULL AND wd.depends_on_wisp_id IS NULL",
-		"UPDATE wisp_dependencies SET depends_on_external = depends_on_id WHERE depends_on_external IS NULL AND depends_on_wisp_id IS NULL AND depends_on_issue_id IS NULL",
-	}
-	for _, repair := range repairs {
+	for _, repair := range wispDependenciesSplitTargetBackfillSQL() {
 		if _, err := db.ExecContext(ctx, repair); err != nil {
 			return fmt.Errorf("backfilling wisp_dependencies split targets for migration 0053: %w", err)
 		}
 	}
 	return nil
+}
+
+func wispDependenciesSplitTargetColumns() []struct{ name, definition string } {
+	return []struct{ name, definition string }{
+		{"depends_on_issue_id", "VARCHAR(255) NULL"},
+		{"depends_on_wisp_id", "VARCHAR(255) NULL"},
+		{"depends_on_external", "VARCHAR(255) NULL"},
+	}
+}
+
+func wispDependenciesSplitTargetBackfillSQL() []string {
+	return []string{
+		"UPDATE wisp_dependencies SET depends_on_external = depends_on_id WHERE depends_on_external IS NULL AND depends_on_id LIKE 'external:%'",
+		"UPDATE wisp_dependencies wd JOIN wisps w ON w.id = wd.depends_on_id SET wd.depends_on_wisp_id = wd.depends_on_id WHERE wd.depends_on_wisp_id IS NULL AND wd.depends_on_external IS NULL",
+		"UPDATE wisp_dependencies wd JOIN issues i ON i.id = wd.depends_on_id SET wd.depends_on_issue_id = wd.depends_on_id WHERE wd.depends_on_issue_id IS NULL AND wd.depends_on_external IS NULL AND wd.depends_on_wisp_id IS NULL",
+		"UPDATE wisp_dependencies SET depends_on_external = depends_on_id WHERE depends_on_external IS NULL AND depends_on_wisp_id IS NULL AND depends_on_issue_id IS NULL",
+	}
 }
 
 func schemaTableExists(ctx context.Context, db DBConn, table string) (bool, error) {

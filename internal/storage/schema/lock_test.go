@@ -121,7 +121,7 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 		// issue columns and no local wisp_dependencies table, so no ALTERs follow.
 		for _, col := range []string{"hook_bead", "role_bead", "agent_state", "last_activity", "role_type", "rig"} {
 			mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS`).
-				WithArgs(col).
+				WithArgs("issues", col).
 				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 		}
 		mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).

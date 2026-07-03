@@ -227,7 +227,7 @@ func TestEnsureIssuesRigColumnsAddsOnlyMissing(t *testing.T) {
 	// in 0001 reach v52 without them; the 0053 pre-repair must add exactly
 	// the missing ones. Simulate hook_bead present, the other five absent.
 	countQuery := `SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS`
-	mock.ExpectQuery(countQuery).WithArgs("hook_bead").
+	mock.ExpectQuery(countQuery).WithArgs("issues", "hook_bead").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
 	for _, col := range []struct{ name, ddl string }{
 		{"role_bead", "ALTER TABLE issues ADD COLUMN role_bead VARCHAR\\(255\\) DEFAULT ''"},
@@ -236,7 +236,7 @@ func TestEnsureIssuesRigColumnsAddsOnlyMissing(t *testing.T) {
 		{"role_type", "ALTER TABLE issues ADD COLUMN role_type VARCHAR\\(32\\) DEFAULT ''"},
 		{"rig", "ALTER TABLE issues ADD COLUMN rig VARCHAR\\(255\\) DEFAULT ''"},
 	} {
-		mock.ExpectQuery(countQuery).WithArgs(col.name).
+		mock.ExpectQuery(countQuery).WithArgs("issues", col.name).
 			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 		mock.ExpectExec(col.ddl).WillReturnResult(sqlmock.NewResult(0, 0))
 	}
@@ -336,6 +336,68 @@ func TestFailed0053DirtyTablesRejectsUnrelatedDirtyTable(t *testing.T) {
 	recoverable, err := failed0053DirtyTablesAreRecoverable(context.Background(), db, map[string]dirtyTableState{
 		"comments": {},
 		"settings": {},
+	})
+	if err != nil {
+		t.Fatalf("failed0053DirtyTablesAreRecoverable: %v", err)
+	}
+	if recoverable {
+		t.Fatal("recoverable = true, want false")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestFailed0053DirtyTablesRejectsWhenWispDependenciesAlreadyRepaired(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(52))
+	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
+		WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
+		mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`).
+			WithArgs("wisp_dependencies", col).
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	}
+
+	recoverable, err := failed0053DirtyTablesAreRecoverable(context.Background(), db, map[string]dirtyTableState{
+		"comments":     {},
+		"dependencies": {},
+		"events":       {},
+		"issues":       {},
+	})
+	if err != nil {
+		t.Fatalf("failed0053DirtyTablesAreRecoverable: %v", err)
+	}
+	if recoverable {
+		t.Fatal("recoverable = true, want false")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestFailed0053DirtyTablesRejectsWrongVersion(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(51))
+
+	recoverable, err := failed0053DirtyTablesAreRecoverable(context.Background(), db, map[string]dirtyTableState{
+		"comments":     {},
+		"dependencies": {},
+		"events":       {},
+		"issues":       {},
 	})
 	if err != nil {
 		t.Fatalf("failed0053DirtyTablesAreRecoverable: %v", err)
@@ -473,6 +535,52 @@ INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (%s, 7);
 		`SELECT COUNT(*) AS c FROM child_counters WHERE parent_id = 'schema-cli-rig' AND last_child = 7`, "1")
 	requireDoltCount(t, dir,
 		`SELECT COUNT(*) AS c FROM wisp_child_counters WHERE parent_id = 'schema-cli-rig'`, "0")
+}
+
+func TestWispDependenciesSplitTargetBackfillPrefersWispOverIssueThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "wisp-dependency-split")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create wisp dependency split dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+
+	var repairSQL strings.Builder
+	for _, col := range wispDependenciesSplitTargetColumns() {
+		fmt.Fprintf(&repairSQL, "ALTER TABLE wisp_dependencies ADD COLUMN %s %s;\n", col.name, col.definition)
+	}
+	for _, stmt := range wispDependenciesSplitTargetBackfillSQL() {
+		repairSQL.WriteString(stmt)
+		repairSQL.WriteString(";\n")
+	}
+
+	const sourceID = "source-wisp"
+	const ambiguousID = "ambiguous-target"
+	seedSQL := fmt.Sprintf(`
+CREATE TABLE issues (
+    id VARCHAR(255) PRIMARY KEY
+);
+CREATE TABLE wisps (
+    id VARCHAR(255) PRIMARY KEY
+);
+CREATE TABLE wisp_dependencies (
+    issue_id VARCHAR(255) NOT NULL,
+    depends_on_id VARCHAR(255) NOT NULL,
+    PRIMARY KEY (issue_id, depends_on_id)
+);
+INSERT INTO issues (id) VALUES (%s);
+INSERT INTO wisps (id) VALUES (%s), (%s);
+INSERT INTO wisp_dependencies (issue_id, depends_on_id) VALUES (%s, %s);
+`, doltSQLString(ambiguousID),
+		doltSQLString(sourceID), doltSQLString(ambiguousID),
+		doltSQLString(sourceID), doltSQLString(ambiguousID))
+	runDoltSQL(t, dir, seedSQL+repairSQL.String())
+
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM wisp_dependencies WHERE issue_id = 'source-wisp' AND depends_on_wisp_id = 'ambiguous-target' AND depends_on_issue_id IS NULL AND depends_on_external IS NULL`, "1")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM wisp_dependencies WHERE issue_id = 'source-wisp' AND depends_on_issue_id = 'ambiguous-target'`, "0")
 }
 
 func TestMigration0047HandlesLegacyWispDependenciesShape(t *testing.T) {
