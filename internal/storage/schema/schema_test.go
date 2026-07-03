@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,6 +39,68 @@ func TestPendingMigrationDirtyTablesDetectsMigration0043Dependencies(t *testing.
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
+}
+
+// TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable exercises the
+// full MigrateUp pre-flight guard (gastownhall/beads#4566): a pre-existing
+// dirty `dependencies` table collides with pending migration 0043, which
+// alters it (confirmed against the real migration content by
+// TestPendingMigrationDirtyTablesDetectsMigration0043Dependencies above).
+// MigrateUp must report this with the typed *DirtyTablesError so
+// working-set-reconcile opens can detect it via errors.As and skip the
+// migration instead of failing outright.
+func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// migrationWorkNeeded: mainSource.atLatest reads the current cursor; v42
+	// is behind LatestVersion(), so the || short-circuits before checking
+	// ignoredSource.atLatest or the content-hash/backfill probes.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
+
+	// dirtyTables(ctx, db, false): `dependencies` has an uncommitted, unstaged
+	// change in the working set.
+	expectDirtyDoltStatusRow(mock, "dependencies", false)
+	// committableDirtyTables -> dirtyTables(ctx, db, true): same dirty state.
+	expectDirtyDoltStatusRow(mock, "dependencies", false)
+
+	// auxRekeyResumePending: no local_metadata table, so no resume in flight.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	// failed0053DirtyTablesAreRecoverable: current version (42) is not 52, so
+	// this is not the known failed-v53-migration recovery case.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
+
+	// pendingMigrationDirtyTables re-reads the current version and finds
+	// migration 0043 touches the dirty `dependencies` table.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
+
+	_, err = MigrateUp(context.Background(), db)
+	if err == nil {
+		t.Fatal("MigrateUp() error = nil, want *DirtyTablesError")
+	}
+	var dirtyErr *DirtyTablesError
+	if !errors.As(err, &dirtyErr) {
+		t.Fatalf("MigrateUp() error = %v (%T), want *DirtyTablesError", err, err)
+	}
+	if len(dirtyErr.Tables) != 1 || dirtyErr.Tables[0] != "dependencies" {
+		t.Fatalf("DirtyTablesError.Tables = %v, want [dependencies]", dirtyErr.Tables)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// expectDirtyDoltStatusRow mocks a dolt_status query returning a single dirty
+// table row. The regex matches both the plain and dolt_ignore-filtered forms
+// of the dirtyTables query (see lock_test.go's expectDoltStatusRows).
+func expectDirtyDoltStatusRow(mock sqlmock.Sqlmock, table string, staged bool) {
+	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
+		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}).AddRow(table, staged))
 }
 
 func TestIgnoredPendingMigrationDirtyTablesDetectsWispDependencies(t *testing.T) {

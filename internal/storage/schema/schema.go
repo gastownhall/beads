@@ -307,7 +307,7 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 		return 0, fmt.Errorf("checking dirty tables against pending migrations: %w", err)
 	}
 	if len(touchedDirtyTables) > 0 {
-		return 0, fmt.Errorf("pending schema migrations alter pre-existing dirty tables: %s", strings.Join(touchedDirtyTables, ", "))
+		return 0, &DirtyTablesError{Tables: touchedDirtyTables}
 	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
@@ -365,6 +365,16 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 		return applied, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
 	}
 	if len(touchedIgnoredDirtyTables) > 0 {
+		// Deliberately a plain, untyped error (unlike the main-source guard
+		// above, which returns *DirtyTablesError): this check fires mid-pass,
+		// after the main-source migrations have already applied. A lenient
+		// caller (embeddeddolt's openReadOnlyCommand / openWorkingSetReconcile
+		// intents) skipping this and returning as if the open succeeded would
+		// let a reconcile commit checkpoint a half-applied migration pass.
+		// The ignored source also tracks bd-internal state (dolt_ignore'd
+		// tables like ignored_schema_migrations), not expected user data, so
+		// there is no dirty-commit recovery story to support here the way
+		// there is for the main-source guard (#4566 scope).
 		return applied, fmt.Errorf("pending ignored schema migrations alter pre-existing dirty tables: %s", strings.Join(touchedIgnoredDirtyTables, ", "))
 	}
 

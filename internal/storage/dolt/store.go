@@ -207,6 +207,14 @@ type Config struct {
 	Database       string // Database name within Dolt (default: "beads")
 	ReadOnly       bool   // Open in read-only mode (skip schema init)
 
+	// LenientOpen opens the store leniently: embedded mode only. A migration
+	// gate refusal (#4259) or a dirty-working-set refusal (#4566) skips the
+	// migration instead of failing the open. Set for working-set-reconcile
+	// commands (bd dolt commit, bd vc commit; #4566), whose entire purpose is
+	// to clear the working set that the migration would otherwise refuse to
+	// touch. Ignored in server mode.
+	LenientOpen bool
+
 	// Server connection options
 	ServerSocket   string // Unix domain socket path (overrides Host/Port when set)
 	ServerHost     string // Server host (default: 127.0.0.1)
