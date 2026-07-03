@@ -645,7 +645,7 @@ func codexManagedHooks() map[string]interface{} {
 		"SessionStart":     []interface{}{codexHookEntry("startup|resume|clear", "bd codex-hook SessionStart", "Loading Beads context")},
 		"PreCompact":       []interface{}{codexHookEntry("manual|auto", "bd codex-hook PreCompact", "Checking Beads context")},
 		"PostCompact":      []interface{}{codexHookEntry("manual|auto", "bd codex-hook PostCompact", "Scheduling Beads context refresh")},
-		"UserPromptSubmit": []interface{}{codexHookEntry("", "bd codex-hook UserPromptSubmit", "")},
+		"UserPromptSubmit": []interface{}{codexHookEntry("", "bd codex-hook UserPromptSubmit", "Refreshing Beads context")},
 	}
 }
 
@@ -653,18 +653,14 @@ func codexHookEntry(matcher, command, status string) map[string]interface{} {
 	entry := map[string]interface{}{
 		"hooks": []interface{}{
 			map[string]interface{}{
-				"type":    "command",
-				"command": command,
+				"type":          "command",
+				"command":       command,
+				"statusMessage": status,
 			},
 		},
 	}
 	if matcher != "" {
 		entry["matcher"] = matcher
-	}
-	if status != "" {
-		hooks := entry["hooks"].([]interface{})
-		hook := hooks[0].(map[string]interface{})
-		hook["statusMessage"] = status
 	}
 	return entry
 }

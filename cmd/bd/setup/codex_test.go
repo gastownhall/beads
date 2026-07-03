@@ -2,7 +2,6 @@ package setup
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -301,30 +300,6 @@ func TestCodexHooksConfigMergeIsIdempotent(t *testing.T) {
 	}
 	if !strings.Contains(string(secondHooks), "echo keep") || !strings.Contains(string(secondHooks), "bd codex-hook SessionStart") {
 		t.Fatalf("expected existing and managed hooks preserved:\n%s", string(secondHooks))
-	}
-}
-
-func TestCodexUserPromptSubmitHookHasNoStaticStatusMessage(t *testing.T) {
-	env, _, _ := newCodexTestEnv(t)
-	if err := installCodexNativeHooks(env, false); err != nil {
-		t.Fatalf("install native hooks: %v", err)
-	}
-	data, err := os.ReadFile(codexHooksPath(env, false))
-	if err != nil {
-		t.Fatalf("read hooks: %v", err)
-	}
-
-	var config map[string]interface{}
-	if err := json.Unmarshal(data, &config); err != nil {
-		t.Fatalf("parse hooks: %v", err)
-	}
-	hooks := config["hooks"].(map[string]interface{})
-	userPromptEntries := hooks["UserPromptSubmit"].([]interface{})
-	entry := userPromptEntries[0].(map[string]interface{})
-	commands := entry["hooks"].([]interface{})
-	command := commands[0].(map[string]interface{})
-	if _, ok := command["statusMessage"]; ok {
-		t.Fatalf("UserPromptSubmit should stay visually silent until bd codex-hook emits context: %#v", command)
 	}
 }
 
