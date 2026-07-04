@@ -342,7 +342,9 @@ The remote must already exist (see 'bd dolt remote add').`,
 		}
 		if isDoltLocalOnly() {
 			if jsonOutput {
-				outputJSONRaw(map[string]string{"status": "disabled", "reason": "dolt.local-only=true"})
+				if err := outputJSONRaw(map[string]string{"status": "disabled", "reason": "dolt.local-only=true"}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
 				return
 			}
 			fmt.Println("Remote sync is disabled for this project (dolt.local-only=true).")
@@ -425,7 +427,9 @@ The remote must already exist (see 'bd dolt remote add').`,
 	Run: func(cmd *cobra.Command, args []string) {
 		if isDoltLocalOnly() {
 			if jsonOutput {
-				outputJSONRaw(map[string]string{"status": "disabled", "reason": "dolt.local-only=true"})
+				if err := outputJSONRaw(map[string]string{"status": "disabled", "reason": "dolt.local-only=true"}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
 				return
 			}
 			fmt.Println("Remote sync is disabled for this project (dolt.local-only=true).")
