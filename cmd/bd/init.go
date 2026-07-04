@@ -935,7 +935,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			ProxiedServer:   initProxiedServer,
 			CreateIfMissing: true, // bd init is the only path that should create databases
 			AutoStart:       initServerMode && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
-			ServerTLS:       os.Getenv("BEADS_DOLT_SERVER_TLS") != "0",
+			ServerTLS:       initDoltServerTLSFromEnv(),
 		}
 		if serverHost != "" {
 			doltCfg.ServerHost = serverHost
@@ -2411,6 +2411,10 @@ func initRemoteCloneMode(initServerMode, externalServer bool) remoteCloneMode {
 		return remoteCloneExternalServer
 	}
 	return remoteCloneCLI
+}
+
+func initDoltServerTLSFromEnv() bool {
+	return (&configfile.Config{}).GetDoltServerTLS()
 }
 
 func initTimeCloneConfig(serverMode bool, serverHost string, serverPort int, serverSocket, serverUser, dbName string) *configfile.Config {
