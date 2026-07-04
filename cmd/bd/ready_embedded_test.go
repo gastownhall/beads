@@ -257,6 +257,19 @@ func TestEmbeddedReady(t *testing.T) {
 			t.Fatalf("second bd ready (no -C) should have failed in tmpDir, got: %s", out2)
 		}
 	})
+
+	t.Run("offset_rejected_outside_proxied", func(t *testing.T) {
+		cmd := exec.Command(bd, "ready", "--offset", "1")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("bd ready --offset 1 in embedded mode should have failed, got: %s", out)
+		}
+		if !strings.Contains(string(out), "--offset is only supported under --proxied-server") {
+			t.Errorf("expected '--offset is only supported under --proxied-server' error, got: %s", out)
+		}
+	})
 }
 
 func TestEmbeddedReadyConcurrent(t *testing.T) {

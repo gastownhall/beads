@@ -51,26 +51,29 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 		return out, nil
 	}
 
-	seen := make(map[string]struct{}, len(out))
-	for _, iwc := range out {
-		if iwc != nil && iwc.Issue != nil {
-			seen[iwc.Issue.ID] = struct{}{}
+	// Prefer the canonical wisp record when an ID exists in both tables (be-iabdi).
+	wispByID := make(map[string]struct{}, len(wisps))
+	for _, w := range wisps {
+		if w != nil && w.Issue != nil {
+			wispByID[w.Issue.ID] = struct{}{}
 		}
 	}
-	for _, w := range wisps {
-		if w == nil || w.Issue == nil {
+	var kept []*types.IssueWithCounts
+	for _, iwc := range out {
+		if iwc == nil || iwc.Issue == nil {
+			kept = append(kept, iwc)
 			continue
 		}
-		if _, dup := seen[w.Issue.ID]; dup {
-			return nil, fmt.Errorf("get ready work with counts: id %q exists in both issues and wisps", w.Issue.ID)
+		if _, dup := wispByID[iwc.Issue.ID]; !dup {
+			kept = append(kept, iwc)
 		}
-		out = append(out, w)
 	}
-	sortIssuesWithCountsByPolicy(out, filter.SortPolicy)
-	if filter.Limit > 0 && len(out) > filter.Limit {
-		out = out[:filter.Limit]
+	kept = append(kept, wisps...)
+	sortIssuesWithCountsByPolicy(kept, filter.SortPolicy)
+	if filter.Limit > 0 && len(kept) > filter.Limit {
+		kept = kept[:filter.Limit]
 	}
-	return out, nil
+	return kept, nil
 }
 
 func sortIssuesWithCountsByPolicy(items []*types.IssueWithCounts, policy types.SortPolicy) {

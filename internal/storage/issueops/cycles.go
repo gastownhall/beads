@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -12,7 +11,7 @@ import (
 // DetectCyclesInTx finds dependency cycles across both the dependencies and
 // wisp_dependencies tables. Returns slices of issues forming each cycle.
 // Only considers "blocks" and "conditional-blocks" dependencies for cycle detection.
-func DetectCyclesInTx(ctx context.Context, tx *sql.Tx) ([][]*types.Issue, error) {
+func DetectCyclesInTx(ctx context.Context, tx DBTX) ([][]*types.Issue, error) {
 	// Build adjacency list from both dependency tables.
 	graph := make(map[string][]string)
 	if err := AppendBlockingGraphInTx(ctx, tx, []string{"dependencies", "wisp_dependencies"}, graph); err != nil {
@@ -82,7 +81,7 @@ func DetectCyclesInTx(ctx context.Context, tx *sql.Tx) ([][]*types.Issue, error)
 // separate ignored tx).
 //
 //nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-func AppendBlockingGraphInTx(ctx context.Context, tx *sql.Tx, depTables []string, graph map[string][]string) error {
+func AppendBlockingGraphInTx(ctx context.Context, tx DBTX, depTables []string, graph map[string][]string) error {
 	for _, depTable := range depTables {
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT issue_id, %s AS depends_on_id, type

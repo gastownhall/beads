@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
@@ -29,78 +30,79 @@ Subcommands:
   schema      Apply pending schema migrations (idempotent)
   sync        Set up sync.branch workflow for multi-clone setups
 `,
-	Run: func(cmd *cobra.Command, _ []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("migrate")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		autoYes, _ := cmd.Flags().GetBool("yes")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		updateRepoID, _ := cmd.Flags().GetBool("update-repo-id")
 		inspect, _ := cmd.Flags().GetBool("inspect")
 
-		// Block writes in readonly mode (migration modifies data, --inspect is read-only)
 		if !dryRun && !inspect {
 			CheckReadonly("migrate")
 		}
 
-		// Handle --update-repo-id first
 		if updateRepoID {
-			handleUpdateRepoID(dryRun, autoYes)
-			return
+			return handleUpdateRepoID(dryRun, autoYes)
 		}
 
-		// Handle --inspect flag (show migration plan for AI agents)
 		if inspect {
-			handleInspect()
-			return
+			return handleInspect()
 		}
 
-		// Find .beads directory
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if jerr := outputJSON(map[string]interface{}{
 					"error":   "no_beads_directory",
 					"message": activeWorkspaceNotFoundMessage() + " " + diagHint() + ".",
-				})
-				os.Exit(1)
-			} else {
-				FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+				}); jerr != nil {
+					return jerr
+				}
+				return SilentExit()
 			}
+			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 		}
 
-		// Load config
 		cfg, err := loadOrCreateConfig(beadsDir)
 		if err != nil {
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if jerr := outputJSON(map[string]interface{}{
 					"error":   "config_load_failed",
 					"message": err.Error(),
-				})
-				os.Exit(1)
+				}); jerr != nil {
+					return jerr
+				}
+				return SilentExit()
 			}
-			FatalError("failed to load config: %v", err)
+			return HandleError("failed to load config: %v", err)
 		}
 
-		// Handle Dolt metadata update
-		handleDoltMetadataUpdate(cfg, dryRun)
+		return handleDoltMetadataUpdate(cfg, dryRun)
 	},
 }
 
-// handleDoltMetadataUpdate handles version metadata updates for Dolt backends.
-func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) {
+func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) error {
 	ctx := rootCtx
 	store := getStore()
 	if store == nil {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"status":  "no_databases",
 				"message": "No Dolt database found in .beads/",
 			})
-		} else {
-			fmt.Fprintf(os.Stderr, "No Dolt database found. Run 'bd init' to create a new database.\n")
 		}
-		return
+		fmt.Fprintf(os.Stderr, "No Dolt database found. Run 'bd init' to create a new database.\n")
+		return nil
 	}
 
-	// Check current state of all metadata fields
 	currentVersion, _ := store.GetLocalMetadata(ctx, "bd_version")
 	currentRepoID, _ := store.GetMetadata(ctx, "repo_id")
 	currentCloneID, _ := store.GetMetadata(ctx, "clone_id")
@@ -109,19 +111,17 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) {
 	needsRepoID := currentRepoID == ""
 	needsCloneID := currentCloneID == ""
 
-	// If everything is already current, return early
 	if !needsVersionUpdate && !needsRepoID && !needsCloneID {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"status":  "current",
 				"message": fmt.Sprintf("Dolt database already at version %s", Version),
 			})
-		} else {
-			fmt.Printf("Dolt database version: %s\n", currentVersion)
-			fmt.Printf("%s\n", ui.RenderPass("✓ Version matches"))
-			fmt.Printf("%s\n", ui.RenderPass("✓ All metadata fields present"))
 		}
-		return
+		fmt.Printf("Dolt database version: %s\n", currentVersion)
+		fmt.Printf("%s\n", ui.RenderPass("✓ Version matches"))
+		fmt.Printf("%s\n", ui.RenderPass("✓ All metadata fields present"))
+		return nil
 	}
 
 	if dryRun {
@@ -136,20 +136,19 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) {
 			dryRunResult["target_version"] = Version
 		}
 		if jsonOutput {
-			outputJSON(dryRunResult)
-		} else {
-			fmt.Println("Dry run mode - no changes will be made")
-			if needsVersionUpdate {
-				fmt.Printf("Would update Dolt version: %s → %s\n", currentVersion, Version)
-			}
-			if needsRepoID {
-				fmt.Println("Would set repo_id")
-			}
-			if needsCloneID {
-				fmt.Println("Would set clone_id")
-			}
+			return outputJSON(dryRunResult)
 		}
-		return
+		fmt.Println("Dry run mode - no changes will be made")
+		if needsVersionUpdate {
+			fmt.Printf("Would update Dolt version: %s → %s\n", currentVersion, Version)
+		}
+		if needsRepoID {
+			fmt.Println("Would set repo_id")
+		}
+		if needsCloneID {
+			fmt.Println("Would set clone_id")
+		}
+		return nil
 	}
 
 	versionUpdated := false
@@ -180,16 +179,17 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) {
 			}
 		}
 
-		// Update version metadata (fatal on failure — version is critical)
 		if err := store.SetLocalMetadata(ctx, "bd_version", Version); err != nil {
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if jerr := outputJSON(map[string]interface{}{
 					"error":   "version_update_failed",
 					"message": err.Error(),
-				})
-				os.Exit(1)
+				}); jerr != nil {
+					return jerr
+				}
+				return SilentExit()
 			}
-			FatalError("failed to update version: %v", err)
+			return HandleError("failed to update version: %v", err)
 		}
 		versionUpdated = true
 
@@ -240,8 +240,12 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) {
 		}
 	}
 
+	if versionUpdated || repoIDSet || cloneIDSet {
+		commandDidWrite.Store(true)
+	}
+
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"status":           "success",
 			"current_database": cfg.Database,
 			"backend":          "dolt",
@@ -250,13 +254,9 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) {
 			"repo_id_set":      repoIDSet,
 			"clone_id_set":     cloneIDSet,
 		})
-	} else {
-		fmt.Printf("\nDolt database: %s (version %s)\n", cfg.Database, Version)
 	}
-
-	if versionUpdated || repoIDSet || cloneIDSet {
-		commandDidWrite.Store(true)
-	}
+	fmt.Printf("\nDolt database: %s (version %s)\n", cfg.Database, Version)
+	return nil
 }
 
 // truncateID safely truncates an ID string to maxLen characters.
@@ -282,50 +282,53 @@ func loadOrCreateConfig(beadsDir string) (*configfile.Config, error) {
 	return cfg, nil
 }
 
-func handleUpdateRepoID(dryRun bool, autoYes bool) {
-	// Find .beads directory
+func handleUpdateRepoID(dryRun bool, autoYes bool) error {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error":   "no_database",
 				"message": "No beads database found. " + diagHint() + ".",
-			})
-			os.Exit(1)
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		FatalErrorWithHint("no beads database found", diagHint())
+		return HandleErrorWithHint("no beads database found", diagHint())
 	}
 
-	// Compute new repo ID
 	newRepoID, err := beads.ComputeRepoID()
 	if err != nil {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error":   "compute_failed",
 				"message": err.Error(),
-			})
-			os.Exit(1)
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		FatalError("failed to compute repository ID: %v", err)
+		return HandleError("failed to compute repository ID: %v", err)
 	}
 
 	store := getStore()
 	if store == nil {
-		FatalError("no database — run 'bd init' first")
+		return HandleError("no database — run 'bd init' first")
 	}
 
-	// Get old repo ID
 	ctx := rootCtx
 	oldRepoID, err := store.GetMetadata(ctx, "repo_id")
 	if err != nil && err.Error() != "metadata key not found: repo_id" {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error":   "read_failed",
 				"message": err.Error(),
-			})
-			os.Exit(1)
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		FatalError("failed to read repo_id: %v", err)
+		return HandleError("failed to read repo_id: %v", err)
 	}
 
 	oldDisplay := "none"
@@ -335,21 +338,19 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 
 	if dryRun {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"dry_run":     true,
 				"old_repo_id": oldDisplay,
 				"new_repo_id": truncateID(newRepoID, 8),
 			})
-		} else {
-			fmt.Println("Dry run mode - no changes will be made")
-			fmt.Printf("Would update repository ID:\n")
-			fmt.Printf("  Old: %s\n", oldDisplay)
-			fmt.Printf("  New: %s\n", truncateID(newRepoID, 8))
 		}
-		return
+		fmt.Println("Dry run mode - no changes will be made")
+		fmt.Printf("Would update repository ID:\n")
+		fmt.Printf("  Old: %s\n", oldDisplay)
+		fmt.Printf("  New: %s\n", truncateID(newRepoID, 8))
+		return nil
 	}
 
-	// Prompt for confirmation if repo_id exists and differs
 	if oldRepoID != "" && oldRepoID != newRepoID && !autoYes && !jsonOutput {
 		fmt.Printf("WARNING: Changing repository ID can break sync if other clones exist.\n\n")
 		fmt.Printf("Current repo ID: %s\n", oldDisplay)
@@ -359,56 +360,55 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) {
 		_, _ = fmt.Scanln(&response)
 		if strings.ToLower(response) != "y" && strings.ToLower(response) != "yes" {
 			fmt.Println("Canceled")
-			return
+			return nil
 		}
 	}
 
-	// Update repo ID
 	if err := store.SetMetadata(ctx, "repo_id", newRepoID); err != nil {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error":   "update_failed",
 				"message": err.Error(),
-			})
-			os.Exit(1)
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		FatalError("failed to update repo_id: %v", err)
+		return HandleError("failed to update repo_id: %v", err)
 	}
 
+	commandDidWrite.Store(true)
+
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"status":      "success",
 			"old_repo_id": oldDisplay,
 			"new_repo_id": truncateID(newRepoID, 8),
 		})
-	} else {
-		fmt.Printf("%s\n\n", ui.RenderPass("✓ Repository ID updated"))
-		fmt.Printf("  Old: %s\n", oldDisplay)
-		fmt.Printf("  New: %s\n", truncateID(newRepoID, 8))
 	}
-
-	commandDidWrite.Store(true)
+	fmt.Printf("%s\n\n", ui.RenderPass("✓ Repository ID updated"))
+	fmt.Printf("  Old: %s\n", oldDisplay)
+	fmt.Printf("  New: %s\n", truncateID(newRepoID, 8))
+	return nil
 }
 
-// handleInspect shows migration plan and database state for AI agent analysis
-func handleInspect() {
-	// Find .beads directory
+func handleInspect() error {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error":   "no_beads_directory",
 				"message": activeWorkspaceNotFoundMessage() + " " + diagHint() + ".",
-			})
-			os.Exit(1)
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
-	// Check if database is available via the global store
 	dbExists := getStore() != nil
 
-	// If database doesn't exist, return inspection with defaults
 	if !dbExists {
 		result := map[string]interface{}{
 			"registered_migrations": listMigrations(),
@@ -424,19 +424,18 @@ func handleInspect() {
 		}
 
 		if jsonOutput {
-			outputJSON(result)
-		} else {
-			fmt.Println("\nMigration Inspection")
-			fmt.Println("====================")
-			fmt.Println("Database: missing")
-			fmt.Println("\n⚠ Database does not exist - " + diagHint())
+			return outputJSON(result)
 		}
-		return
+		fmt.Println("\nMigration Inspection")
+		fmt.Println("====================")
+		fmt.Println("Database: missing")
+		fmt.Println("\n⚠ Database does not exist - " + diagHint())
+		return nil
 	}
 
 	store := getStore()
 	if store == nil {
-		FatalError("no database — run 'bd init' first")
+		return HandleError("no database — run 'bd init' first")
 	}
 
 	ctx := rootCtx
@@ -497,78 +496,86 @@ func handleInspect() {
 	}
 
 	if jsonOutput {
-		outputJSON(result)
-	} else {
-		fmt.Println("\nMigration Inspection")
-		fmt.Println("====================")
-		fmt.Printf("Schema Version: %s\n", schemaVersion)
-		fmt.Printf("Issue Count: %d\n", issueCount)
-		fmt.Printf("Registered Migrations: %d\n", len(registeredMigrations))
-
-		if len(warnings) > 0 {
-			fmt.Println("\nWarnings:")
-			for _, w := range warnings {
-				fmt.Printf("  ⚠ %s\n", w)
-			}
-		}
-
-		if len(missingConfig) > 0 {
-			fmt.Println("\nMissing Config:")
-			for _, k := range missingConfig {
-				fmt.Printf("  - %s\n", k)
-			}
-		}
-		fmt.Println()
+		return outputJSON(result)
 	}
+	fmt.Println("\nMigration Inspection")
+	fmt.Println("====================")
+	fmt.Printf("Schema Version: %s\n", schemaVersion)
+	fmt.Printf("Issue Count: %d\n", issueCount)
+	fmt.Printf("Registered Migrations: %d\n", len(registeredMigrations))
+
+	if len(warnings) > 0 {
+		fmt.Println("\nWarnings:")
+		for _, w := range warnings {
+			fmt.Printf("  ⚠ %s\n", w)
+		}
+	}
+
+	if len(missingConfig) > 0 {
+		fmt.Println("\nMissing Config:")
+		for _, k := range missingConfig {
+			fmt.Printf("  - %s\n", k)
+		}
+	}
+	fmt.Println()
+	return nil
 }
 
-func handleSchemaMigrate() {
+func handleSchemaMigrate() error {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error":   "no_beads_directory",
 				"message": activeWorkspaceNotFoundMessage() + " " + diagHint() + ".",
-			})
-			os.Exit(1)
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	store := getStore()
 	if store == nil {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error":   "no_database",
 				"message": "No database found. Run 'bd init' to create a new database.",
-			})
-			os.Exit(1)
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		FatalErrorWithHint("no database", "Run 'bd init' to create a new database")
+		return HandleErrorWithHint("no database", "Run 'bd init' to create a new database")
 	}
 
 	migrator, ok := storage.UnwrapStore(store).(storage.SchemaMigrator)
 	if !ok {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error":   "unsupported_backend",
 				"message": "current storage backend does not support schema migration",
-			})
-			os.Exit(1)
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		FatalError("current storage backend does not support schema migration")
+		return HandleError("current storage backend does not support schema migration")
 	}
 
 	applied, err := migrator.ApplySchemaMigrations(rootCtx)
 	if err != nil {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error":   "schema_migration_failed",
 				"message": err.Error(),
-			})
-			os.Exit(1)
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		FatalError("schema migration failed: %v", err)
+		return HandleError("schema migration failed: %v", err)
 	}
 
 	latest := schema.LatestVersion()
@@ -579,126 +586,120 @@ func handleSchemaMigrate() {
 	}
 
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"status":         status,
 			"applied":        applied,
 			"latest_version": latest,
 		})
-		return
 	}
 
 	if applied == 0 {
 		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Schema already at v%d", latest)))
-		return
+		return nil
 	}
 	fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ Applied %d schema migration(s); schema now at v%d", applied, latest)))
+	return nil
 }
 
-// handleToSeparateBranch configures separate branch workflow for existing repos
-func handleToSeparateBranch(branch string, dryRun bool) {
-	// Validate branch name
+func handleToSeparateBranch(branch string, dryRun bool) error {
 	b := strings.TrimSpace(branch)
 	if b == "" || strings.ContainsAny(b, " \t\n") {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error":   "invalid_branch",
 				"message": "Branch name cannot be empty or contain whitespace",
-			})
-			os.Exit(1)
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		FatalErrorWithHint(fmt.Sprintf("invalid branch name '%s'", branch), "branch name cannot be empty or contain whitespace")
+		return HandleErrorWithHint(fmt.Sprintf("invalid branch name '%s'", branch), "branch name cannot be empty or contain whitespace")
 	}
 
-	// Find .beads directory
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error":   "no_beads_directory",
 				"message": activeWorkspaceNotFoundMessage() + " " + diagHint() + ".",
-			})
-			os.Exit(1)
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		FatalErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
 	store := getStore()
 	if store == nil {
-		FatalError("no database — run 'bd init' first")
+		return HandleError("no database — run 'bd init' first")
 	}
 
-	// Get current sync.branch config
 	ctx := rootCtx
 	current, _ := store.GetConfig(ctx, "sync.branch")
 
-	// Dry-run mode
 	if dryRun {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"dry_run":  true,
 				"previous": current,
 				"branch":   b,
 				"changed":  current != b,
 			})
-		} else {
-			fmt.Println("Dry run mode - no changes will be made")
-			if current == b {
-				fmt.Printf("sync.branch already set to '%s'\n", b)
-			} else {
-				fmt.Printf("Would set sync.branch: '%s' → '%s'\n", current, b)
-			}
 		}
-		return
+		fmt.Println("Dry run mode - no changes will be made")
+		if current == b {
+			fmt.Printf("sync.branch already set to '%s'\n", b)
+		} else {
+			fmt.Printf("Would set sync.branch: '%s' → '%s'\n", current, b)
+		}
+		return nil
 	}
 
-	// Check if already set
 	if current == b {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"status":  "noop",
 				"branch":  b,
 				"message": "sync.branch already set to this value",
 			})
-		} else {
-			fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ sync.branch already set to '%s'", b)))
-			fmt.Println("No changes needed")
 		}
-		return
+		fmt.Printf("%s\n", ui.RenderPass(fmt.Sprintf("✓ sync.branch already set to '%s'", b)))
+		fmt.Println("No changes needed")
+		return nil
 	}
 
-	// Update sync.branch config
 	if err := store.SetConfig(ctx, "sync.branch", b); err != nil {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error":   "config_update_failed",
 				"message": err.Error(),
-			})
-			os.Exit(1)
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		FatalError("failed to set sync.branch: %v", err)
+		return HandleError("failed to set sync.branch: %v", err)
 	}
 
-	// Success output
+	commandDidWrite.Store(true)
+
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"status":   "success",
 			"previous": current,
 			"branch":   b,
 			"message":  "Enabled separate branch workflow",
 		})
-	} else {
-		fmt.Printf("%s\n\n", ui.RenderPass("✓ Enabled separate branch workflow"))
-		fmt.Printf("Set sync.branch to '%s'\n\n", b)
-		fmt.Println("Next steps:")
-		fmt.Println("  1. No restart required. sync.branch is active immediately.")
-		fmt.Printf("     bd dolt push\n\n")
-		fmt.Println("  2. Your existing data is preserved - no changes to git history")
-		fmt.Println("  3. Future issue updates are stored in Dolt directly")
 	}
-
-	if !dryRun {
-		commandDidWrite.Store(true)
-	}
+	fmt.Printf("%s\n\n", ui.RenderPass("✓ Enabled separate branch workflow"))
+	fmt.Printf("Set sync.branch to '%s'\n\n", b)
+	fmt.Println("Next steps:")
+	fmt.Println("  1. No restart required. sync.branch is active immediately.")
+	fmt.Printf("     bd dolt push\n\n")
+	fmt.Println("  2. Your existing data is preserved - no changes to git history")
+	fmt.Println("  3. Future issue updates are stored in Dolt directly")
+	return nil
 }
 
 // listMigrations returns registered Dolt schema migrations. The compat runner
@@ -722,13 +723,22 @@ to a dedicated branch, keeping your main branch clean.
 
 Example:
   bd migrate sync beads-sync`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("migrate-sync")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		if !dryRun {
 			CheckReadonly("migrate sync")
 		}
-		handleToSeparateBranch(args[0], dryRun)
+		return handleToSeparateBranch(args[0], dryRun)
 	},
 }
 
@@ -744,10 +754,20 @@ in CI, release gates, and recovery scenarios.
 Example:
   bd migrate schema
   bd migrate schema --json`,
-	Args: cobra.NoArgs,
-	Run: func(cmd *cobra.Command, _ []string) {
+	Args:          cobra.NoArgs,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
 		CheckReadonly("migrate schema")
-		handleSchemaMigrate()
+
+		evt := metrics.NewCommandEvent("migrate-schema")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		return handleSchemaMigrate()
 	},
 }
 

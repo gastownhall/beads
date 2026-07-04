@@ -50,7 +50,26 @@ func TestNormalizeRemoteURL(t *testing.T) {
 
 func TestCommitBeadsConfigSkipsGitHooks(t *testing.T) {
 	repo := t.TempDir()
-	runGitForCommitConfigTest(t, repo, "init")
+
+	// Pin bd's repo resolution to this temp repo. commitBeadsConfig resolves the
+	// target repo via GetRepoContext -> FindBeadsDir, which walks UP the
+	// directory tree. When the test runs from a checkout nested inside another
+	// beads repo (e.g. a verification worktree under the coordination repo),
+	// FindBeadsDir escapes the temp repo and resolves to the OUTER repo's
+	// .beads; commitBeadsConfig then commits against the wrong repository and
+	// fails (observed as `git commit` exit 128 and "branch has no commits yet").
+	// os.Chdir below is not enough because resolution is not purely CWD-based.
+	// BEADS_DIR pins it deterministically regardless of where the test runs.
+	t.Setenv("BEADS_DIR", filepath.Join(repo, ".beads"))
+
+	// Isolate git config and pin the initial branch so the commit never depends
+	// on the developer's ~/.gitconfig or the ambient init.defaultBranch.
+	gitHome := t.TempDir()
+	t.Setenv("HOME", gitHome)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(gitHome, ".gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	runGitForCommitConfigTest(t, repo, "init", "--initial-branch=main")
 	runGitForCommitConfigTest(t, repo, "config", "user.email", "test@example.com")
 	runGitForCommitConfigTest(t, repo, "config", "user.name", "Test User")
 

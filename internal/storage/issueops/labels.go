@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -12,7 +11,7 @@ import (
 // GetLabelsInTx retrieves all labels for an issue within an existing transaction.
 // Automatically routes to wisp_labels if the ID is an active wisp.
 // Returns labels sorted alphabetically.
-func GetLabelsInTx(ctx context.Context, tx *sql.Tx, table, issueID string) ([]string, error) {
+func GetLabelsInTx(ctx context.Context, tx DBTX, table, issueID string) ([]string, error) {
 	if table == "" {
 		isWisp := IsActiveWispInTx(ctx, tx, issueID)
 		_, table, _, _ = WispTableRouting(isWisp)
@@ -44,7 +43,7 @@ func GetLabelsInTx(ctx context.Context, tx *sql.Tx, table, issueID string) ([]st
 //
 // Callers hydrating multiple batches inside one tx may pass a precomputed
 // active-wisp set scoped to issueIDs to avoid rebuilding it.
-func GetLabelsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string, wispSetOpt ...map[string]struct{}) (map[string][]string, error) {
+func GetLabelsForIssuesInTx(ctx context.Context, tx DBTX, issueIDs []string, wispSetOpt ...map[string]struct{}) (map[string][]string, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string][]string), nil
 	}
@@ -79,7 +78,7 @@ func GetLabelsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string, 
 // which queries either the issues or wisps table exclusively). It skips the
 // wisp-partition round-trip entirely. labelTable must be "labels" or
 // "wisp_labels"; callers route via FilterTables.
-func GetLabelsForIssuesFromTableInTx(ctx context.Context, tx *sql.Tx, labelTable string, issueIDs []string) (map[string][]string, error) {
+func GetLabelsForIssuesFromTableInTx(ctx context.Context, tx DBTX, labelTable string, issueIDs []string) (map[string][]string, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string][]string), nil
 	}
@@ -94,7 +93,7 @@ func GetLabelsForIssuesFromTableInTx(ctx context.Context, tx *sql.Tx, labelTable
 // and accumulates results into the provided map.
 //
 //nolint:gosec // G201: labelTable is "labels" or "wisp_labels" (hardcoded by callers).
-func getLabelsIntoFromTable(ctx context.Context, tx *sql.Tx, labelTable string, ids []string, result map[string][]string) error {
+func getLabelsIntoFromTable(ctx context.Context, tx DBTX, labelTable string, ids []string, result map[string][]string) error {
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
 		if end > len(ids) {
@@ -132,7 +131,7 @@ func getLabelsIntoFromTable(ctx context.Context, tx *sql.Tx, labelTable string, 
 // AddLabelInTx adds a label to an issue and records an event within an existing
 // transaction. Automatically routes to wisp tables if the ID is an active wisp.
 // Uses INSERT IGNORE for idempotency.
-func AddLabelInTx(ctx context.Context, tx *sql.Tx, labelTable, eventTable, issueID, label, actor string) error {
+func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string) error {
 	if labelTable == "" || eventTable == "" {
 		isWisp := IsActiveWispInTx(ctx, tx, issueID)
 		_, lt, et, _ := WispTableRouting(isWisp)
@@ -161,7 +160,7 @@ func AddLabelInTx(ctx context.Context, tx *sql.Tx, labelTable, eventTable, issue
 // an active wisp.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func RemoveLabelInTx(ctx context.Context, tx *sql.Tx, labelTable, eventTable, issueID, label, actor string) error {
+func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string) error {
 	if labelTable == "" || eventTable == "" {
 		isWisp := IsActiveWispInTx(ctx, tx, issueID)
 		_, lt, et, _ := WispTableRouting(isWisp)

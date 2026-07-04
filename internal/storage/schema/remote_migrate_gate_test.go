@@ -19,6 +19,9 @@ func expectGateCurrentVersion(mock sqlmock.Sqlmock, version int) {
 }
 
 func TestCheckRemoteMigrateGate(t *testing.T) {
+	// These tests cover the blunt #4515 gate; pin the (default-on) smart
+	// router off so no cached-remote reads hit the sqlmock expectations.
+	t.Setenv(SmartGateEnv, "0")
 	latest := LatestVersion()
 
 	// expectFiringGate mocks the probe sequence for a behind, remote-backed
@@ -165,6 +168,8 @@ func TestCheckRemoteMigrateGate(t *testing.T) {
 // table even when a remote is configured, so the gate must fall back to a probe of
 // the persisted CLI remotes before allowing migration (gastownhall/beads#4268).
 func TestCheckRemoteMigrateGateWithRemoteCheck(t *testing.T) {
+	// Blunt-gate coverage; keep the smart router out of the mock expectations.
+	t.Setenv(SmartGateEnv, "0")
 	t.Run("no SQL remote but fallback reports a remote is blocked", func(t *testing.T) {
 		t.Setenv(AllowRemoteMigrateEnv, "0")
 		db, mock, _ := sqlmock.New()
@@ -249,4 +254,53 @@ func TestCheckRemoteMigrateGateWithRemoteCheck(t *testing.T) {
 			t.Fatalf("unmet expectations: %v", err)
 		}
 	})
+}
+
+// TestRemoteMigrateGateAgentSafety locks the agent-facing safety contract at the
+// source layer: the directive surfaced as the JSON hint is not runnable, and the
+// runnable escape command appears only inside the conditional "migrate" option.
+func TestRemoteMigrateGateAgentSafety(t *testing.T) {
+	e := &RemoteMigrateGateError{CurrentVersion: 49, LatestVersion: 53, Pending: 4}
+
+	// The directive must not be the escape command (the agent footgun).
+	if e.AgentDirective() == e.EscapeHint() {
+		t.Fatalf("AgentDirective must not equal the runnable escape command %q", e.EscapeHint())
+	}
+	if strings.Contains(e.AgentDirective(), AllowRemoteMigrateEnv+"=1 bd migrate") {
+		t.Errorf("AgentDirective must not embed the runnable migrate command: %q", e.AgentDirective())
+	}
+
+	opts := e.Options()
+	if len(opts) != 2 {
+		t.Fatalf("Options len = %d, want 2", len(opts))
+	}
+	byID := map[string]GateOption{}
+	for _, o := range opts {
+		if o.When == "" || o.Risk == "" {
+			t.Errorf("option %q missing When/Risk", o.ID)
+		}
+		byID[o.ID] = o
+	}
+	migrate, ok := byID["migrate"]
+	if !ok {
+		t.Fatal("missing migrate option")
+	}
+	if _, ok := byID["adopt"]; !ok {
+		t.Fatal("missing adopt option")
+	}
+	// The escape command must live under migrate, and nowhere else.
+	foundUnderMigrate := false
+	for _, c := range migrate.Commands {
+		if c == e.EscapeHint() {
+			foundUnderMigrate = true
+		}
+	}
+	if !foundUnderMigrate {
+		t.Errorf("migrate option commands %v must include %q", migrate.Commands, e.EscapeHint())
+	}
+	for _, c := range byID["adopt"].Commands {
+		if c == e.EscapeHint() {
+			t.Errorf("adopt option must not contain the migrate escape command")
+		}
+	}
 }

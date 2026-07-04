@@ -336,6 +336,10 @@ uncommitted changes in its working set).
 Use --remote to push to a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').`,
 	Run: func(cmd *cobra.Command, args []string) {
+		if config.GetBool("no-push") {
+			fmt.Println("skipping push: rig is local-only (no-push: true)")
+			return
+		}
 		if isDoltLocalOnly() {
 			if jsonOutput {
 				outputJSONRaw(map[string]string{"status": "disabled", "reason": "dolt.local-only=true"})
@@ -589,10 +593,10 @@ var doltStatusCmd = &cobra.Command{
 In embedded mode, reports that the Dolt engine runs in-process and shows
 the on-disk data directory. For beads-managed (local) servers, displays
 PID, port, and data directory from the local PID file. For externally-
-managed servers — either a remote dolt_server_host or a local server
-managed outside bd (dolt.auto-start: false, e.g. an orchestrator-shared
-sql-server) — pings the configured endpoint via SQL and reports
-reachability, server version, and database.`,
+managed servers — a shared server (dolt.shared-server: true), a remote
+dolt_server_host, or a local server managed outside bd (dolt.auto-start:
+false, e.g. an orchestrator-shared sql-server) — pings the configured
+endpoint via SQL and reports reachability, server version, and database.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
@@ -624,7 +628,7 @@ reachability, server version, and database.`,
 			// — which is the exact failure mode this PR addresses.
 			fmt.Fprintf(os.Stderr, "Warning: cannot load .beads config (%v); falling back to PID-file status path\n", cfgErr)
 		}
-		if cfg != nil && shouldUseExternalDoltStatus(cfg, doltserver.IsAutoStartDisabled()) {
+		if cfg != nil && shouldUseExternalDoltStatus(cfg, doltserver.IsAutoStartDisabled(), doltserver.IsSharedServerMode()) {
 			runExternalDoltStatus(beadsDir, cfg)
 			return
 		}
@@ -647,7 +651,9 @@ reachability, server version, and database.`,
 // is exercised by TestRunExternalDoltStatus_Unreachable).
 func renderLocalDoltStatus(state *doltserver.State, serverDir string) {
 	if jsonOutput {
-		outputJSON(state)
+		if err := outputJSON(state); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		return
 	}
 	if state == nil || !state.Running {
@@ -676,6 +682,18 @@ func renderLocalDoltStatus(state *doltserver.State, serverDir string) {
 // shouldUseExternalDoltStatus reports whether bd dolt status should treat
 // the server as externally-managed and probe via SQL instead of consulting
 // the local PID file. Returns true when:
+//   - shared-server mode is enabled (and not proxied) — a shared server's
+//     lifecycle is owned by something other than bd (a Homebrew service,
+//     systemd/launchd unit, or a sibling clone), so bd has no PID file for
+//     it even when the host is local and auto-start is enabled. Without this
+//     branch, status reports "not running" while bd CRUD commands, bd dolt
+//     test, and bd dolt show all connect to the server fine (GH#3218). This
+//     is checked BEFORE the server-mode guard because shared-server mode
+//     wins over a stale metadata.json that still pins dolt_mode="embedded"
+//     — mirroring the loadServerMode override in main.go (GH#2946). That
+//     stale-metadata case (dolt.shared-server: true in config.yaml, which
+//     IsDoltServerMode does not consult) is exactly where the residual
+//     GH#3218 bug lived.
 //   - dolt_mode=server with a non-local host (Hosted Dolt, remote shared
 //     sql-server) — the PID file is on a different machine.
 //   - dolt_mode=server with a local host but bd auto-start is disabled —
@@ -687,10 +705,23 @@ func renderLocalDoltStatus(state *doltserver.State, serverDir string) {
 // When false, the caller falls back to the PID-file path that reports
 // PID, port, log path, and data directory for bd-managed servers.
 //
-// autoStartDisabled is passed in (rather than read here) so the predicate
-// is pure and unit-testable without manipulating package-level config.
-func shouldUseExternalDoltStatus(cfg *configfile.Config, autoStartDisabled bool) bool {
-	if cfg == nil || !cfg.IsDoltServerMode() {
+// autoStartDisabled and sharedServerMode are passed in (rather than read
+// here) so the predicate is pure and unit-testable without manipulating
+// package-level config or process env.
+func shouldUseExternalDoltStatus(cfg *configfile.Config, autoStartDisabled, sharedServerMode bool) bool {
+	if cfg == nil {
+		return false
+	}
+	// Shared-server mode wins even over an explicit metadata.json
+	// dolt_mode="embedded" (loadServerMode override, main.go, GH#2946), so
+	// this must precede the IsDoltServerMode guard — otherwise a workspace
+	// with dolt.shared-server: true in config.yaml and stale embedded
+	// metadata still falls through to the PID-file "not running" path.
+	// Proxied-server mode is excluded, matching that override's !psm guard.
+	if sharedServerMode && !cfg.IsDoltProxiedServerMode() {
+		return true
+	}
+	if !cfg.IsDoltServerMode() {
 		return false
 	}
 	if !isLocalHost(cfg.GetDoltServerHost()) {
@@ -772,7 +803,9 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	}
 
 	if jsonOutput {
-		outputJSON(result)
+		if err := outputJSON(result); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		return
 	}
 
@@ -805,7 +838,7 @@ func showEmbeddedDoltStatus(beadsDir string) {
 	}
 
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		if err := outputJSON(map[string]interface{}{
 			"mode": "embedded",
 			// Embedded mode has an active in-process engine, but no
 			// separate server process. Use a server-specific field so
@@ -813,7 +846,9 @@ func showEmbeddedDoltStatus(beadsDir string) {
 			"server_running":  false,
 			"data_dir":        dataDir,
 			"data_dir_exists": dataDirExists,
-		})
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		return
 	}
 
@@ -1105,7 +1140,7 @@ var doltRemoteAddCmd = &cobra.Command{
 		result, err := ensureDoltRemote(ctx, st, name, url, confirmDoltRemoteOverwrite)
 		if err != nil {
 			if jsonOutput {
-				outputJSONError(err, "remote_add_failed")
+				_ = outputJSONError(err, "remote_add_failed")
 			} else {
 				fmt.Fprintf(os.Stderr, "Error adding remote: %v\n", err)
 			}
@@ -1126,10 +1161,12 @@ var doltRemoteAddCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if err := outputJSON(map[string]interface{}{
 				"name": name,
 				"url":  url,
-			})
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
 		} else {
 			fmt.Printf("Added remote %q → %s\n", name, url)
 		}
@@ -1150,7 +1187,7 @@ var doltRemoteListCmd = &cobra.Command{
 		remotes, err := st.ListRemotes(ctx)
 		if err != nil {
 			if jsonOutput {
-				outputJSONError(err, "remote_list_failed")
+				_ = outputJSONError(err, "remote_list_failed")
 			} else {
 				fmt.Fprintf(os.Stderr, "Error listing remotes: %v\n", err)
 			}
@@ -1158,7 +1195,9 @@ var doltRemoteListCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
-			outputJSON(formatDoltRemoteListJSON(remotes))
+			if err := outputJSON(formatDoltRemoteListJSON(remotes)); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
 			return
 		}
 
@@ -1209,7 +1248,7 @@ var doltRemoteRemoveCmd = &cobra.Command{
 
 		if err := st.RemoveRemote(ctx, name); err != nil {
 			if jsonOutput {
-				outputJSONError(err, "remote_remove_failed")
+				_ = outputJSONError(err, "remote_remove_failed")
 			} else {
 				fmt.Fprintf(os.Stderr, "Error removing remote: %v\n", err)
 			}
@@ -1228,10 +1267,12 @@ var doltRemoteRemoveCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if err := outputJSON(map[string]interface{}{
 				"name":    name,
 				"removed": true,
-			})
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
 		} else {
 			fmt.Printf("Removed remote %q\n", name)
 		}
@@ -1341,7 +1382,9 @@ func showDoltConfig(testConnection bool) {
 				}
 			}
 		}
-		outputJSON(result)
+		if err := outputJSON(result); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		return
 	}
 
@@ -1512,11 +1555,13 @@ func setDoltConfig(key, value string, updateConfig bool) {
 			os.Exit(1)
 		}
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if err := outputJSON(map[string]interface{}{
 				"key":      "shared-server",
 				"value":    lower,
 				"location": "config.yaml",
-			})
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
 			return
 		}
 		if lower == "true" {
@@ -1552,7 +1597,9 @@ func setDoltConfig(key, value string, updateConfig bool) {
 		if updateConfig {
 			result["config_yaml_updated"] = true
 		}
-		outputJSON(result)
+		if err := outputJSON(result); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		return
 	}
 
@@ -1594,11 +1641,13 @@ func testDoltConnection() {
 
 	if jsonOutput {
 		ok := testServerConnection(host, port)
-		outputJSON(map[string]interface{}{
+		if err := outputJSON(map[string]interface{}{
 			"host":          host,
 			"port":          port,
 			"connection_ok": ok,
-		})
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
 		if !ok {
 			os.Exit(1)
 		}

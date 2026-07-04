@@ -312,6 +312,11 @@ bd setup claude --check   # or cursor, aider
 
 # Installing bd
 
+<!-- This website install page and the GitHub-rendered docs/INSTALLING.md are
+     deliberate parallel docs for different audiences. When you change platform
+     commands or install methods here, update docs/INSTALLING.md too so they do
+     not drift. -->
+
 Complete installation guide for all platforms.
 
 ## Quick Install (Recommended)
@@ -321,6 +326,11 @@ Complete installation guide for all platforms.
 ```bash
 brew install beads
 ```
+
+Homebrew core's `beads` formula is the supported Homebrew package. If you
+previously installed the old tap formula as `bd`, see
+[Migrating from the old Homebrew tap](/getting-started/upgrading#homebrew) to
+switch to the core formula.
 
 **Why Homebrew?**
 - Simple one-command install
@@ -1004,6 +1014,18 @@ irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 brew upgrade beads
 ```
 
+<!-- Canonical Homebrew tap-migration snippet. The installation page links
+     here; docs/INSTALLING.md mirrors this block. Keep all three in sync. -->
+If you still have the old tap formula installed as `bd`, switch to the
+Homebrew core formula:
+
+```bash
+brew uninstall bd
+brew untap gastownhall/beads 2>/dev/null || true
+brew untap steveyegge/beads 2>/dev/null || true
+brew install beads
+```
+
 ### go install
 
 ```bash
@@ -1060,6 +1082,100 @@ bd migrate
 # Migrate and clean up old files
 bd migrate --cleanup --yes
 ```
+
+### Remote-backed databases and multiple clones
+
+`bd` refuses to silently apply pending schema migrations to a database that has
+a Dolt remote configured. Migrating more than one clone of a shared remote
+independently forks the schema, after which `bd dolt pull` can no longer merge —
+the break is silent and, across a primary-key-reshaping migration, unrecoverable
+([#4259](https://github.com/gastownhall/beads/issues/4259)). The supported flow
+is: one machine migrates and publishes; every other clone re-clones the migrated
+database.
+
+This applies to **every** upgrade that crosses a pending migration on a
+remote-backed database — the same procedure whether you are moving to a
+prerelease or to a stable release.
+
+The gate is **state-aware by default**
+([#4516](https://github.com/gastownhall/beads/issues/4516)): before blocking,
+`bd` consults the remote's *cached* schema state and
+
+- **auto-migrates** when the remote is at the same schema version as this
+  clone — no one has migrated yet, so this clone is a safe first-mover
+  (concurrent first-movers converge to identical tables). It reminds you to
+  `bd dolt push` afterwards.
+- **stops and directs you to adopt** (`bd bootstrap`) when the remote has
+  already been migrated by another clone.
+- **stops for a human decision** when this clone and the remote applied
+  different content for the same migration (a genuine fork), or when the
+  remote's schema state cannot be read from the cached ref.
+
+Set `BD_SMART_GATE=0` to opt out and make the gate block unconditionally.
+The recipes below are the explicit path and work the same in either mode.
+
+**Important ordering:** once the new binary is installed, a database with
+pending migrations is gated on **every** open — `bd dolt push` and `bd dolt
+pull` are refused too, not just `bd migrate`. So do all syncing with your
+**current** binary, *before* you install the new one.
+
+**Back up before you migrate.** Schema migrations assume the database matches
+the shape the previous migrations left behind; real databases sometimes drift
+(interrupted writes, tooling bugs, very old bootstraps). A JSONL export is
+cheap, issue-complete, and importable by any bd version:
+
+```bash
+bd export --all -o .beads/backup/pre-migrate-$(date +%Y%m%d).jsonl
+```
+
+`bd export` captures issues, not Dolt history or config — for a full snapshot
+also copy the `.beads` directory (or `dolt backup` in server mode) while no
+`bd` command is running.
+
+**Single clone (including a solo user with a remote):**
+
+```bash
+bd dolt push                              # 1. CURRENT binary: publish all local work
+bd export --all -o .beads/backup/pre-migrate.jsonl   # 2. backup (see above)
+# 3. install the new binary (see Upgrading above)
+BD_ALLOW_REMOTE_MIGRATE=1 bd migrate      # 4. migrate as the designated migrator
+bd dolt push                              # 5. publish the migrated schema
+bd version                                # 6. confirm the new version is active
+```
+
+**Multiple clones sharing one remote:**
+
+```bash
+# 1. With your CURRENT (old) binary, on EVERY clone: publish all work and get in
+#    sync, then stop editing until the upgrade is done.
+bd dolt push
+bd dolt pull
+
+# 2. Designated migrator ONLY: back up, install the new binary, then migrate
+#    and publish.
+bd export --all -o .beads/backup/pre-migrate.jsonl
+BD_ALLOW_REMOTE_MIGRATE=1 bd migrate
+bd dolt push
+
+# 3. Every OTHER clone: install the new binary, then ADOPT the migrated database.
+#    (bd dolt pull is refused here — the clone still has pending migrations — so
+#    re-clone instead. Safe because step 1 already pushed all work.)
+bd bootstrap
+```
+
+`bd bootstrap` replaces the local database, so any work not pushed in step 1 is
+lost — that is why step 1 publishes everything first. If a clone was instead
+migrated independently and `bd dolt pull` later fails with `cannot merge because
+table dependencies has different primary keys in its common ancestor`, the
+schema has already forked — follow the recovery playbook:
+[RECOVERY.md#pk-fork-refused](https://github.com/gastownhall/beads/blob/main/docs/RECOVERY.md#pk-fork-refused).
+
+:::note
+In **server mode**, `bd doctor` adds a migration-content-skew check that flags a
+forked schema against the cached remote ref — a useful post-upgrade
+verification. It is not available in embedded mode; there, confirm the upgrade
+with `bd version` and a normal read such as `bd ready`.
+:::
 
 ## Cross-era Upgrades
 
@@ -2748,9 +2864,9 @@ For these use cases, consider GitHub Issues, Linear, or Jira.
 # CLI Reference
 
 <!-- AUTO-GENERATED: do not edit manually -->
-Reference for bd Latest. Generated from `bd help --list` and `bd help --doc <command>`.
+Reference for bd Latest. Generated from `bd help --docs-root`.
 
-This reference covers all 106 live top-level `bd` commands. Regenerate it with:
+This reference covers all 108 live top-level `bd` commands. Regenerate it with:
 
 ```bash
 ./scripts/generate-cli-docs.sh
@@ -2817,6 +2933,7 @@ This reference covers all 106 live top-level `bd` commands. Regenerate it with:
 - [`bd mail`](./mail.md)
 - [`bd memories`](./memories.md)
 - [`bd merge-slot`](./merge-slot.md)
+- [`bd metrics`](./metrics.md)
 - [`bd migrate`](./migrate.md)
 - [`bd mol`](./mol.md)
 - [`bd note`](./note.md)
@@ -2835,6 +2952,7 @@ This reference covers all 106 live top-level `bd` commands. Regenerate it with:
 - [`bd quickstart`](./quickstart.md)
 - [`bd ready`](./ready.md)
 - [`bd recall`](./recall.md)
+- [`bd recompute-blocked`](./recompute-blocked.md)
 - [`bd remember`](./remember.md)
 - [`bd rename`](./rename.md)
 - [`bd rename-prefix`](./rename-prefix.md)
@@ -2886,7 +3004,7 @@ For routine maintenance, prefer 'bd doctor --fix' which handles common repairs
 automatically. Use these admin commands for targeted database operations.
 
 ```
-bd admin
+bd admin [flags]
 ```
 
 ### bd admin cleanup
@@ -2946,7 +3064,7 @@ Modes:
 
 Tiers:
   - Tier 1: Semantic compression (30 days closed, 70% reduction)
-  - Tier 2: Ultra compression (90 days closed, 95% reduction)
+  - Tier 2: Ultra compression (90 days closed) - planned, not yet implemented
 
 Dolt Garbage Collection:
   With auto-commit per mutation, Dolt commit history grows over time. Use
@@ -2995,7 +3113,7 @@ bd admin compact [flags]
       --limit int        Limit number of candidates (0 = no limit)
       --stats            Show compaction statistics
       --summary string   Path to summary file (use '-' for stdin)
-      --tier int         Compaction tier (1 or 2) (default 1)
+      --tier int         Compaction tier (only tier 1 is implemented) (default 1)
       --workers int      Parallel workers (default 5)
 ```
 
@@ -3045,7 +3163,7 @@ Configuration can be set via 'bd config' or environment variables:
   ado.url / AZURE_DEVOPS_URL              - Custom base URL (on-prem)
 
 ```
-bd ado
+bd ado [flags]
 ```
 
 ### bd ado projects
@@ -3053,7 +3171,7 @@ bd ado
 List Azure DevOps projects that the configured token has access to.
 
 ```
-bd ado projects
+bd ado projects [flags]
 ```
 
 ### bd ado pull
@@ -3095,7 +3213,7 @@ bd ado push [bead-ids...] [flags]
 Display current Azure DevOps configuration and sync status.
 
 ```
-bd ado status
+bd ado status [flags]
 ```
 
 ### bd ado sync
@@ -3161,7 +3279,7 @@ Examples:
   bd assign bd-123 ""      # unassign
 
 ```
-bd assign <id> <name>
+bd assign <id> <name> [flags]
 ```
 
 </document>
@@ -3183,7 +3301,7 @@ Each line is one event. This file is intended to be versioned in git and used fo
 Entries are append-only. Labeling creates a new "label" entry that references a parent entry.
 
 ```
-bd audit
+bd audit [flags]
 ```
 
 ### bd audit label
@@ -3252,7 +3370,7 @@ DoltHub is recommended for cloud backup:
   Set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD for authentication.
 
 ```
-bd backup
+bd backup [flags]
 ```
 
 ### bd backup init
@@ -3273,7 +3391,7 @@ DoltHub (recommended for cloud backup):
 After adding, run 'bd backup sync' to push your data.
 
 ```
-bd backup init <path>
+bd backup init <path> [flags]
 ```
 
 **Aliases:** add
@@ -3286,7 +3404,7 @@ This unregisters the backup remote from Dolt and removes the local
 backup configuration. The backup data at the destination is not deleted.
 
 ```
-bd backup remove
+bd backup remove [flags]
 ```
 
 **Aliases:** rm
@@ -3322,7 +3440,7 @@ bd backup restore [path] [flags]
 Show last backup status
 
 ```
-bd backup status
+bd backup status [flags]
 ```
 
 ### bd backup sync
@@ -3337,7 +3455,7 @@ The backup is atomic — if the sync fails, the previous backup state is preserv
 Run 'bd backup init &lt;path&gt;' first to configure a destination.
 
 ```
-bd backup sync
+bd backup sync [flags]
 ```
 
 </document>
@@ -3495,7 +3613,7 @@ Examples:
   bd branch feature-xyz        # Create a new branch named feature-xyz
 
 ```
-bd branch [name]
+bd branch [name] [flags]
 ```
 
 </document>
@@ -3661,7 +3779,7 @@ bd comments add [issue-id] [text] [flags]
 Invalid — use bd comments &lt;issue-id&gt; to list comments
 
 ```
-bd comments list
+bd comments list [flags]
 ```
 
 </document>
@@ -3723,7 +3841,7 @@ See each sub-command's help for details on how to use the generated script.
 
 
 ```
-bd completion
+bd completion [flags]
 ```
 
 ### bd completion bash
@@ -3922,7 +4040,7 @@ Examples:
   bd config unset jira.url
 
 ```
-bd config
+bd config [flags]
 ```
 
 ### bd config apply
@@ -3974,7 +4092,7 @@ Examples:
   bd config drift --json
 
 ```
-bd config drift
+bd config drift [flags]
 ```
 
 ### bd config get
@@ -3982,7 +4100,7 @@ bd config drift
 Get a configuration value
 
 ```
-bd config get <key>
+bd config get <key> [flags]
 ```
 
 ### bd config list
@@ -3990,7 +4108,7 @@ bd config get <key>
 List all configuration
 
 ```
-bd config list
+bd config list [flags]
 ```
 
 ### bd config set
@@ -4064,7 +4182,7 @@ bd config show [flags]
 Delete a configuration value
 
 ```
-bd config unset <key>
+bd config unset <key> [flags]
 ```
 
 ### bd config validate
@@ -4082,7 +4200,7 @@ Checks:
 	  bd config validate --json
 
 ```
-bd config validate
+bd config validate [flags]
 ```
 
 </document>
@@ -4107,7 +4225,7 @@ Examples:
 
 
 ```
-bd context
+bd context [flags]
 ```
 
 </document>
@@ -4518,7 +4636,7 @@ bd dep add [issue-id] [depends-on-id] [flags]
 Detect dependency cycles
 
 ```
-bd dep cycles
+bd dep cycles [flags]
 ```
 
 ### bd dep list
@@ -4563,7 +4681,7 @@ Examples:
   bd relate bd-123 bd-456    # Create see-also connection
 
 ```
-bd dep relate <id1> <id2>
+bd dep relate <id1> <id2> [flags]
 ```
 
 ### bd dep remove
@@ -4571,7 +4689,7 @@ bd dep relate <id1> <id2>
 Remove a dependency
 
 ```
-bd dep remove [issue-id] [depends-on-id]
+bd dep remove [issue-id] [depends-on-id] [flags]
 ```
 
 **Aliases:** rm
@@ -4616,7 +4734,7 @@ Example:
   bd unrelate bd-abc bd-xyz
 
 ```
-bd dep unrelate <id1> <id2>
+bd dep unrelate <id1> <id2> [flags]
 ```
 
 </document>
@@ -4642,7 +4760,7 @@ Examples:
   bd diff abc123 def456         # Compare two specific commits
 
 ```
-bd diff <from-ref> <to-ref>
+bd diff <from-ref> <to-ref> [flags]
 ```
 
 </document>
@@ -4850,7 +4968,7 @@ Examples:
   bd dolt test
 
 ```
-bd dolt
+bd dolt [flags]
 ```
 
 ### bd dolt clean-databases
@@ -4910,7 +5028,7 @@ project's Dolt data directory are eligible for cleanup. Other projects'
 servers are preserved.
 
 ```
-bd dolt killall
+bd dolt killall [flags]
 ```
 
 ### bd dolt pull
@@ -4969,7 +5087,7 @@ Subcommands:
   remove &lt;name&gt;      Remove a remote
 
 ```
-bd dolt remote
+bd dolt remote [flags]
 ```
 
 #### bd dolt remote add
@@ -4991,7 +5109,7 @@ bd dolt remote add <name> <url> [flags]
 List configured Dolt remotes
 
 ```
-bd dolt remote list
+bd dolt remote list [flags]
 ```
 
 #### bd dolt remote remove
@@ -5042,7 +5160,7 @@ bd dolt set <key> <value> [flags]
 Show current Dolt configuration with connection status
 
 ```
-bd dolt show
+bd dolt show [flags]
 ```
 
 ### bd dolt start
@@ -5056,7 +5174,7 @@ The server auto-starts transparently when needed, so manual start is rarely
 required. Use this command for explicit control or diagnostics.
 
 ```
-bd dolt start
+bd dolt start [flags]
 ```
 
 ### bd dolt status
@@ -5072,7 +5190,7 @@ sql-server) — pings the configured endpoint via SQL and reports
 reachability, server version, and database.
 
 ```
-bd dolt status
+bd dolt status [flags]
 ```
 
 ### bd dolt stop
@@ -5103,7 +5221,7 @@ This verifies that:
 Use this before switching to server mode to ensure the server is running.
 
 ```
-bd dolt test
+bd dolt test [flags]
 ```
 
 </document>
@@ -5214,7 +5332,7 @@ Generated from `bd help --doc epic`
 Epic management commands
 
 ```
-bd epic
+bd epic [flags]
 ```
 
 ### bd epic close-eligible
@@ -5267,7 +5385,7 @@ For supported full backup/restore flows, use 'bd backup init', 'bd backup sync',
 and 'bd backup restore'.
 
 By default, exports only regular issues (excluding infrastructure beads
-like agents, rigs, roles, and messages). Use --all to include everything.
+like agents, roles, and messages). Use --all to include everything.
 
 Memories (from 'bd remember') are excluded by default because they may
 contain sensitive agent context. Use --include-memories or --all to
@@ -5288,7 +5406,7 @@ bd export [flags]
 
 ```
       --all                Include all records (infra, templates, gates, memories)
-      --include-infra      Include infrastructure beads (agents, rigs, roles, messages)
+      --include-infra      Include infrastructure beads (agents, roles, messages)
       --include-memories   Include persistent memories (from 'bd remember') in the export
   -o, --output string      Output file path (default: stdout)
       --scrub              Exclude test/pollution records
@@ -5314,7 +5432,7 @@ Federation enables synchronized issue tracking across multiple workspaces,
 each maintaining their own Dolt database while sharing updates via remotes.
 
 ```
-bd federation
+bd federation [flags]
 ```
 
 </document>
@@ -5431,7 +5549,7 @@ Examples:
   bd forget auth-jwt
 
 ```
-bd forget <key>
+bd forget <key> [flags]
 ```
 
 </document>
@@ -5460,7 +5578,7 @@ Commands:
   show   Show formula details, steps, and composition rules
 
 ```
-bd formula
+bd formula [flags]
 ```
 
 ### bd formula convert
@@ -5539,7 +5657,7 @@ Examples:
   bd formula show security-audit --json
 
 ```
-bd formula show <formula-name>
+bd formula show <formula-name> [flags]
 ```
 
 </document>
@@ -5574,7 +5692,7 @@ Examples:
   bd gate resolve &lt;id&gt;   # Close a gate manually
 
 ```
-bd gate
+bd gate [flags]
 ```
 
 ### bd gate add-waiter
@@ -5587,7 +5705,7 @@ The waiter is typically the worker's address (e.g., "my-project/workers/agent-1"
 This is used by 'bd done --phase-complete' to register for gate wake notifications.
 
 ```
-bd gate add-waiter <gate-id> <waiter>
+bd gate add-waiter <gate-id> <waiter> [flags]
 ```
 
 ### bd gate check
@@ -5745,7 +5863,7 @@ Display details of a gate issue including its waiters.
 This is similar to 'bd show' but validates that the issue is a gate.
 
 ```
-bd gate show <gate-id>
+bd gate show <gate-id> [flags]
 ```
 
 </document>
@@ -5810,7 +5928,7 @@ Configuration can be set via 'bd config' or environment variables:
   github.url / GITHUB_API_URL           - Custom API URL (GitHub Enterprise)
 
 ```
-bd github
+bd github [flags]
 ```
 
 ### bd github pull
@@ -5852,7 +5970,7 @@ bd github push [bead-ids...] [flags]
 List GitHub repositories that the configured token has access to.
 
 ```
-bd github repos
+bd github repos [flags]
 ```
 
 ### bd github status
@@ -5860,7 +5978,7 @@ bd github repos
 Display current GitHub configuration and sync status.
 
 ```
-bd github status
+bd github status [flags]
 ```
 
 ### bd github sync
@@ -5910,7 +6028,7 @@ Configuration can be set via 'bd config' or environment variables:
   gitlab.default_project_id / GITLAB_DEFAULT_PROJECT_ID - Project for creating issues in group mode
 
 ```
-bd gitlab
+bd gitlab [flags]
 ```
 
 ### bd gitlab projects
@@ -5918,7 +6036,7 @@ bd gitlab
 List GitLab projects that the configured token has access to.
 
 ```
-bd gitlab projects
+bd gitlab projects [flags]
 ```
 
 ### bd gitlab pull
@@ -5960,7 +6078,7 @@ bd gitlab push [bead-ids...] [flags]
 Display current GitLab configuration and sync status.
 
 ```
-bd gitlab status
+bd gitlab status [flags]
 ```
 
 ### bd gitlab sync
@@ -6057,7 +6175,7 @@ Check the dependency graph for cycles, orphans, and other integrity issues.
 Returns exit code 0 if the graph is clean, 1 if issues are found.
 
 ```
-bd graph check
+bd graph check [flags]
 ```
 
 </document>
@@ -6107,7 +6225,7 @@ The hooks provide:
 - prepare-commit-msg: Add agent identity trailers for forensics
 
 ```
-bd hooks
+bd hooks [flags]
 ```
 
 ### bd hooks install
@@ -6147,7 +6265,7 @@ bd hooks install [flags]
 Show the status of bd git hooks (installed, outdated, missing).
 
 ```
-bd hooks list
+bd hooks list [flags]
 ```
 
 ### bd hooks run
@@ -6166,7 +6284,7 @@ The thin shim pattern ensures hook logic is always in sync with the
 installed bd version - upgrading bd automatically updates hook behavior.
 
 ```
-bd hooks run <hook-name> [args...]
+bd hooks run <hook-name> [args...] [flags]
 ```
 
 ### bd hooks uninstall
@@ -6174,7 +6292,7 @@ bd hooks run <hook-name> [args...]
 Remove bd git hooks from .git/hooks/ directory.
 
 ```
-bd hooks uninstall
+bd hooks uninstall [flags]
 ```
 
 </document>
@@ -6201,7 +6319,7 @@ SUBCOMMANDS:
   human stats             Show summary statistics for human-needed beads
 
 ```
-bd human
+bd human [flags]
 ```
 
 ### bd human dismiss
@@ -6276,7 +6394,7 @@ Example:
   bd human stats
 
 ```
-bd human stats
+bd human stats [flags]
 ```
 
 </document>
@@ -6439,6 +6557,11 @@ FLAG SURFACE
   bd init --force               Deprecated alias for --reinit-local.
                                 Kept working for ≥2 releases.
 
+  bd init --from-jsonl          Import from configured import.path. If
+                                origin has Dolt data, this refuses unless
+                                --discard-remote authorizes replacing that
+                                remote history.
+
 ADOPTING A REMOTE
 
   If you want to use the remote's existing history, use:
@@ -6465,7 +6588,7 @@ DESTROY-TOKEN (non-interactive only)
 
 EXIT CODES
 
-  10    refused: remote has Dolt history and you passed --force/--reinit-local
+  10    refused: remote has Dolt history and you selected local history
         without --discard-remote
   11    refused: existing local data and you declined the destroy confirm
   12    refused: --discard-remote passed without a valid --destroy-token
@@ -6478,7 +6601,7 @@ RECOVERY
 
 
 ```
-bd init-safety
+bd init-safety [flags]
 ```
 
 </document>
@@ -6543,7 +6666,8 @@ bd init [flags]
       --discard-remote                                 Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.
       --external                                       Server is externally managed (skip server startup); use with --shared-server or --server
       --force                                          Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence (see 'bd help init-safety').
-      --from-jsonl                                     Import issues from configured import.path instead of git history
+      --from-jsonl                                     Import issues from configured import.path; refuses remote history unless --discard-remote authorizes replacement
+      --init-if-missing                                If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)
       --non-interactive                                Skip all interactive prompts (auto-detected in CI or non-TTY environments)
   -p, --prefix string                                  Issue prefix (default: current directory name)
       --proxied-server                                 [EXPERIMENTAL] Use a per-workspace proxied dolt sql-server (proxy + child dolt) rooted at .beads/proxieddb
@@ -6609,7 +6733,7 @@ Examples:
   bd jira status              # Show sync status
 
 ```
-bd jira
+bd jira [flags]
 ```
 
 ### bd jira pull
@@ -6655,7 +6779,7 @@ Show the current Jira sync status, including:
   - Issues pending push (no external_ref)
 
 ```
-bd jira status
+bd jira status [flags]
 ```
 
 ### bd jira sync
@@ -6719,7 +6843,7 @@ Examples:
   bd kv list                 # List all key-value pairs
 
 ```
-bd kv
+bd kv [flags]
 ```
 
 ### bd kv clear
@@ -6731,7 +6855,7 @@ Examples:
   bd kv clear api_endpoint
 
 ```
-bd kv clear <key>
+bd kv clear <key> [flags]
 ```
 
 ### bd kv get
@@ -6743,7 +6867,7 @@ Examples:
   bd kv get api_endpoint
 
 ```
-bd kv get <key>
+bd kv get <key> [flags]
 ```
 
 ### bd kv list
@@ -6755,7 +6879,7 @@ Examples:
   bd kv list --json
 
 ```
-bd kv list
+bd kv list [flags]
 ```
 
 ### bd kv set
@@ -6771,7 +6895,7 @@ Examples:
   bd kv set max_retries 3
 
 ```
-bd kv set <key> <value>
+bd kv set <key> <value> [flags]
 ```
 
 </document>
@@ -6787,7 +6911,7 @@ Generated from `bd help --doc label`
 Manage issue labels
 
 ```
-bd label
+bd label [flags]
 ```
 
 ### bd label add
@@ -6795,7 +6919,7 @@ bd label
 Add a label to one or more issues
 
 ```
-bd label add [issue-id...] [label]
+bd label add [issue-id...] [label] [flags]
 ```
 
 ### bd label list
@@ -6803,7 +6927,7 @@ bd label add [issue-id...] [label]
 List labels for an issue
 
 ```
-bd label list [issue-id]
+bd label list [issue-id] [flags]
 ```
 
 ### bd label list-all
@@ -6811,7 +6935,7 @@ bd label list [issue-id]
 List all unique labels in the database
 
 ```
-bd label list-all
+bd label list-all [flags]
 ```
 
 ### bd label propagate
@@ -6819,7 +6943,7 @@ bd label list-all
 Push a label from a parent down to all direct children that don't already have it. Useful for applying branch: labels across an epic's subtasks.
 
 ```
-bd label propagate [parent-id] [label]
+bd label propagate [parent-id] [label] [flags]
 ```
 
 ### bd label remove
@@ -6827,7 +6951,7 @@ bd label propagate [parent-id] [label]
 Remove a label from one or more issues
 
 ```
-bd label remove [issue-id...] [label]
+bd label remove [issue-id...] [label] [flags]
 ```
 
 </document>
@@ -6903,7 +7027,7 @@ Examples:
   bd linear status              # Show sync status
 
 ```
-bd linear
+bd linear [flags]
 ```
 
 ### bd linear pull
@@ -6950,7 +7074,7 @@ Show the current Linear sync status, including:
   - Issues pending push (no external_ref)
 
 ```
-bd linear status
+bd linear status [flags]
 ```
 
 ### bd linear sync
@@ -7040,7 +7164,7 @@ Example:
   bd config set linear.team_id "12345678-1234-1234-1234-123456789abc"
 
 ```
-bd linear teams
+bd linear teams [flags]
 ```
 
 </document>
@@ -7152,7 +7276,7 @@ bd list [flags]
       --has-metadata-key string      Filter issues that have this metadata key set
       --id string                    Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)
       --include-gates                Include gate issues in output (normally hidden)
-      --include-infra                Include infrastructure beads (agent/rig/role/message) in output
+      --include-infra                Include infrastructure beads (agent/role/message) in output
       --include-templates            Include template molecules in output
   -l, --label strings                Filter by labels (AND: must have ALL). Can combine with --label-any
       --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
@@ -7181,7 +7305,7 @@ bd list [flags]
       --skip-labels                  Skip label hydration. The labels field in output will be empty regardless of actual labels. Use only when the caller does not depend on label data. Cannot combine with --label, --label-any, --label-pattern, --label-regex, --exclude-label, or --no-labels.
       --sort string                  Sort by field: priority, created, updated, closed, status, id, title, type, assignee
       --spec string                  Filter by spec_id prefix
-  -s, --status string                Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress
+  -s, --status string                Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress. Note: repeating -s/--status silently overwrites the previous value — always use the comma-separated form for multi-status filters.
       --title string                 Filter by title text (case-insensitive substring match)
       --title-contains string        Filter by title substring (case-insensitive)
       --tree                         Hierarchical tree format (default: true; use --flat to disable) (default true)
@@ -7224,7 +7348,7 @@ Examples:
   bd mail read msg-123             # Reads a message
 
 ```
-bd mail [subcommand] [args...]
+bd mail [subcommand] [args...] [flags]
 ```
 
 </document>
@@ -7245,7 +7369,7 @@ Examples:
   bd memories "race flag"  # search for a phrase
 
 ```
-bd memories [search]
+bd memories [search] [flags]
 ```
 
 </document>
@@ -7278,7 +7402,7 @@ Examples:
   bd merge-slot release             # Release the slot
 
 ```
-bd merge-slot
+bd merge-slot [flags]
 ```
 
 ### bd merge-slot acquire
@@ -7315,7 +7439,7 @@ Returns:
   - not found: no merge slot exists for this rig
 
 ```
-bd merge-slot check
+bd merge-slot check [flags]
 ```
 
 ### bd merge-slot create
@@ -7326,7 +7450,7 @@ The slot ID is automatically generated based on the beads prefix (e.g., gt-merge
 The slot is created with status=open (available).
 
 ```
-bd merge-slot create
+bd merge-slot create [flags]
 ```
 
 ### bd merge-slot release
@@ -7344,6 +7468,57 @@ bd merge-slot release [flags]
 
 ```
       --holder string   Who is releasing the slot (for verification)
+```
+
+</document>
+
+<document path="docs/cli-reference/metrics.md">
+
+
+<!-- AUTO-GENERATED: do not edit manually -->
+Generated from `bd help --doc metrics`
+
+## bd metrics
+
+Show whether anonymous usage metrics are on, see exactly what is sent, and
+turn them on or off.
+
+bd shares anonymous usage metrics to learn how people actually use it — just
+which commands get run, plus the bd version and OS platform. That's how we decide
+what to polish next. We never collect your issues, paths, remotes, identity, or
+any user-supplied text.
+
+  bd metrics            show the current status and what is collected
+  bd metrics on         turn metrics on
+  bd metrics off        turn metrics off
+  bd metrics example    show real examples of the events bd sends
+
+```
+bd metrics [flags]
+```
+
+### bd metrics example
+
+Show real examples of the anonymous metrics bd sends
+
+```
+bd metrics example [flags]
+```
+
+### bd metrics off
+
+Turn anonymous usage metrics off
+
+```
+bd metrics off [flags]
+```
+
+### bd metrics on
+
+Turn anonymous usage metrics on
+
+```
+bd metrics on [flags]
 ```
 
 </document>
@@ -7529,7 +7704,7 @@ Commands:
 Use "bd formula list" to list available formulas.
 
 ```
-bd mol
+bd mol [flags]
 ```
 
 **Aliases:** protomolecule
@@ -7728,7 +7903,7 @@ Examples:
   bd mol last-activity hq-wisp-0laki --json
 
 ```
-bd mol last-activity <molecule-id>
+bd mol last-activity <molecule-id> [flags]
 ```
 
 ### bd mol pour
@@ -7792,7 +7967,7 @@ Example:
   bd mol progress bd-hanoi-xyz
 
 ```
-bd mol progress [molecule-id]
+bd mol progress [molecule-id] [flags]
 ```
 
 ### bd mol ready
@@ -7813,7 +7988,7 @@ Examples:
   bd mol ready --gated --json    # JSON output for automation
 
 ```
-bd mol ready --gated
+bd mol ready --gated [flags]
 ```
 
 ### bd mol seed
@@ -8151,7 +8326,7 @@ Generated from `bd help --doc notion`
 Commands for syncing issues between beads and Notion.
 
 ```
-bd notion
+bd notion [flags]
 ```
 
 ### bd notion connect
@@ -8222,7 +8397,7 @@ bd notion push [bead-ids...] [flags]
 Show Notion sync status
 
 ```
-bd notion status
+bd notion status [flags]
 ```
 
 ### bd notion sync
@@ -8276,7 +8451,7 @@ For agents or environments that do not auto-inject hook output, use
 'bd init --agents-profile=full' to embed the complete command reference.
 
 ```
-bd onboard
+bd onboard [flags]
 ```
 
 </document>
@@ -8339,7 +8514,7 @@ Examples:
   bd ping --json       # Structured output for automation
 
 ```
-bd ping
+bd ping [flags]
 ```
 
 </document>
@@ -8452,7 +8627,7 @@ Examples:
   bd priority bd-123 2    # Medium
 
 ```
-bd priority <id> <n>
+bd priority <id> <n> [flags]
 ```
 
 </document>
@@ -8688,6 +8863,7 @@ bd query [expression] [flags]
   -a, --all           Include closed issues (default: exclude closed)
   -n, --limit int     Limit results (default: 50, 0 = unlimited) (default 50)
       --long          Show detailed multi-line output for each issue
+      --offset int    Skip the first N matching results (0-based). Only supported under --proxied-server.
       --parse-only    Only parse the query and show the AST (for debugging)
   -r, --reverse       Reverse sort order
       --sort string   Sort by field: priority, created, updated, closed, status, id, title, type, assignee
@@ -8706,7 +8882,7 @@ Generated from `bd help --doc quickstart`
 Display a quick start guide showing common bd workflows and patterns.
 
 ```
-bd quickstart
+bd quickstart [flags]
 ```
 
 </document>
@@ -8759,6 +8935,7 @@ bd ready [flags]
       --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
       --mol string                   Filter to steps within a specific molecule
       --mol-type string              Filter by molecule type: swarm, patrol, or work
+      --offset int                   Skip the first N matching results (0-based). Only supported under --proxied-server.
       --parent string                Filter to descendants of this bead/epic
       --plain                        Display issues as a plain numbered list
       --pretty                       Display issues in a tree format with status/priority symbols (default true)
@@ -8785,7 +8962,39 @@ Examples:
   bd recall auth-jwt
 
 ```
-bd recall <key>
+bd recall <key> [flags]
+```
+
+</document>
+
+<document path="docs/cli-reference/recompute-blocked.md">
+
+
+<!-- AUTO-GENERATED: do not edit manually -->
+Generated from `bd help --doc recompute-blocked`
+
+## bd recompute-blocked
+
+Recompute the denormalized is_blocked flag for every issue and wisp.
+
+is_blocked is derived from the dependency graph and maintained automatically by
+local writes and by a post-pull recompute scoped to what the merge changed. If
+that scoped recompute is skipped — a recompute that failed after its merge
+committed, or a conflicted pull resolved by hand — the flag can go stale, and a
+later pull that merges nothing will not refresh it (bd-6dnrw.37). 'bd ready'
+trusts the flag, so stale values silently hide ready work or surface blocked
+work.
+
+This command runs the full recompute unconditionally and commits the result.
+It is idempotent: on a consistent database it changes nothing. Works in both
+embedded and server mode (unlike 'bd doctor', which is server-mode only).
+
+Examples:
+  bd recompute-blocked          # Repair stale is_blocked flags
+  bd recompute-blocked --json   # Machine-parseable &#123;"rows_corrected": N&#125;
+
+```
+bd recompute-blocked [flags]
 ```
 
 </document>
@@ -8803,10 +9012,16 @@ Store a memory that persists across sessions and account rotations.
 Memories are injected at prime time (bd prime) so you have them
 in every session without manual loading.
 
+The positional arg is the memory CONTENT (the key is auto-generated from it
+unless --key is given). As a convenience, if the arg is a bare key naming an
+existing memory, it is RECALLED instead of stored (same as 'bd recall');
+a bare key naming nothing is refused. Use --key to store slug-like content.
+
 Examples:
   bd remember "always run tests with -race flag"
   bd remember "Dolt phantom DBs hide in three places" --key dolt-phantoms
   bd remember "auth module uses JWT not sessions" --key auth-jwt
+  bd remember dolt-phantoms        # bare existing key: reads it (= bd recall)
 
 ```
 bd remember "<insight>" [flags]
@@ -8892,7 +9107,7 @@ Examples:
 Note: The new ID must use a valid prefix for this database.
 
 ```
-bd rename <old-id> <new-id>
+bd rename <old-id> <new-id> [flags]
 ```
 
 </document>
@@ -8949,7 +9164,7 @@ Examples:
   bd repo sync                       # Sync from all configured repos
 
 ```
-bd repo
+bd repo [flags]
 ```
 
 ### bd repo add
@@ -9040,13 +9255,19 @@ Generated from `bd help --doc restore`
 
 ## bd restore
 
-Restore full history of a compacted issue from Dolt version history.
+Restore the pre-compaction content of a compacted issue.
 
-When an issue is compacted, its description and notes are truncated.
-This command queries Dolt's history tables to find the pre-compaction
-version and displays the full issue content.
+When an issue is compacted, its description/design/notes/acceptance criteria
+are summarized and the originals are archived to a compaction snapshot. This
+command recovers that original content.
 
-This is read-only and does not modify the database.
+By default it is read-only: it displays the archived content without modifying
+the database. Pass --apply to write the original content back into the issue
+and step its compaction level back down.
+
+If no archived snapshot exists (e.g. the issue was compacted by an older bd
+before snapshot archiving), restore falls back to a best-effort reconstruction
+from Dolt version history, which can only be displayed, not applied.
 
 ```
 bd restore <issue-id> [flags]
@@ -9055,7 +9276,8 @@ bd restore <issue-id> [flags]
 **Flags:**
 
 ```
-      --json   Output restore results in JSON format
+      --apply   Write the restored content back into the issue (default: display only)
+      --json    Output restore results in JSON format
 ```
 
 </document>
@@ -9071,7 +9293,7 @@ Generated from `bd help --doc rules`
 Audit and compact Claude rules
 
 ```
-bd rules
+bd rules [flags]
 ```
 
 ### bd rules audit
@@ -9422,7 +9644,7 @@ Examples:
   bd state witness-abc health     # Output: healthy
 
 ```
-bd state <issue-id> <dimension>
+bd state <issue-id> <dimension> [flags]
 ```
 
 ### bd state list
@@ -9439,7 +9661,7 @@ Example:
   #   health: healthy
 
 ```
-bd state list <issue-id>
+bd state list <issue-id> [flags]
 ```
 
 </document>
@@ -9519,7 +9741,7 @@ Examples:
 
 
 ```
-bd statuses
+bd statuses [flags]
 ```
 
 </document>
@@ -9566,7 +9788,7 @@ A swarm is a structured body of work defined by an epic and its children,
 with dependencies forming a DAG (directed acyclic graph) of work.
 
 ```
-bd swarm
+bd swarm [flags]
 ```
 
 ### bd swarm create
@@ -9613,7 +9835,7 @@ Examples:
   bd swarm list --json  # Machine-readable output
 
 ```
-bd swarm list
+bd swarm list [flags]
 ```
 
 ### bd swarm status
@@ -9639,7 +9861,7 @@ Examples:
   bd swarm status gt-epic-123 --json  # Machine-readable output
 
 ```
-bd swarm status [epic-or-swarm-id]
+bd swarm status [epic-or-swarm-id] [flags]
 ```
 
 ### bd swarm validate
@@ -9692,7 +9914,7 @@ Examples:
   bd tag bd-123 needs-review
 
 ```
-bd tag <id> <label>
+bd tag <id> <label> [flags]
 ```
 
 </document>
@@ -9716,7 +9938,7 @@ TODOs can be promoted to full issues by changing type or priority:
   bd update todo-123 --type bug --priority 0
 
 ```
-bd todo
+bd todo [flags]
 ```
 
 ### bd todo add
@@ -9783,7 +10005,7 @@ Examples:
 
 
 ```
-bd types
+bd types [flags]
 ```
 
 </document>
@@ -9806,7 +10028,7 @@ Examples:
   bd undefer bd-abc bd-def # Undefer multiple issues
 
 ```
-bd undefer [id...]
+bd undefer [id...] [flags]
 ```
 
 </document>
@@ -9886,7 +10108,7 @@ The upgrade command helps you stay aware of bd version changes:
 Version tracking is automatic - bd updates metadata.json on every run.
 
 ```
-bd upgrade
+bd upgrade [flags]
 ```
 
 ### bd upgrade ack
@@ -9905,7 +10127,7 @@ Examples:
   bd upgrade ack --json
 
 ```
-bd upgrade ack
+bd upgrade ack [flags]
 ```
 
 ### bd upgrade review
@@ -9923,7 +10145,7 @@ Examples:
   bd upgrade review --json
 
 ```
-bd upgrade review
+bd upgrade review [flags]
 ```
 
 ### bd upgrade status
@@ -9938,7 +10160,7 @@ Examples:
   bd upgrade status --json
 
 ```
-bd upgrade status
+bd upgrade status [flags]
 ```
 
 </document>
@@ -9960,7 +10182,7 @@ Note: 'bd history', 'bd diff', and 'bd branch' also work for quick access.
 This subcommand provides additional operations like merge and commit.
 
 ```
-bd vc
+bd vc [flags]
 ```
 
 ### bd vc commit
@@ -10013,7 +10235,7 @@ Examples:
   bd vc status
 
 ```
-bd vc status
+bd vc status [flags]
 ```
 
 </document>
@@ -10029,7 +10251,7 @@ Generated from `bd help --doc version`
 Print version information
 
 ```
-bd version
+bd version [flags]
 ```
 
 </document>
@@ -10053,7 +10275,7 @@ Examples:
 
 
 ```
-bd where
+bd where [flags]
 ```
 
 </document>
@@ -10082,7 +10304,7 @@ Examples:
   bd worktree info                          # Show info about current worktree
 
 ```
-bd worktree
+bd worktree [flags]
 ```
 
 ### bd worktree create
@@ -10126,7 +10348,7 @@ Examples:
   bd worktree info --json   # JSON output
 
 ```
-bd worktree info
+bd worktree info [flags]
 ```
 
 ### bd worktree list
@@ -10144,7 +10366,7 @@ Examples:
   bd worktree list --json   # JSON output
 
 ```
-bd worktree list
+bd worktree list [flags]
 ```
 
 ### bd worktree remove
@@ -13629,7 +13851,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `types.custom` | Comma-separated list of custom issue types |
 | `types.infra` | Infra types routed to wisps table |
 | `import.orphan_handling` | `allow` (default) \| `resurrect` \| `skip` \| `strict` |
-| `compact_*` | Compaction tuning (see `docs/EXTENDING.md`) |
+| `compact_*` | Compaction tuning (see [docs/CONFIG.md](https://github.com/gastownhall/beads/blob/main/docs/CONFIG.md)) |
 | `issue_id_mode` | `hash` (default) \| `counter` (sequential) |
 | `min_hash_length`, `max_hash_length` | Adaptive ID bounds (defaults `4` and `8`) |
 | `max_collision_prob` | Hash ID collision tolerance (default `0.25`) |

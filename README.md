@@ -94,6 +94,12 @@ npm install -g @beads/bd     # Node.js users
 
 **Requirements:** macOS, Linux, Windows, or FreeBSD. See [docs/INSTALLING.md](docs/INSTALLING.md) for complete installation guide.
 
+**Upgrading?** Replacing the binary is not always the whole story: releases can
+carry schema migrations, and a database that syncs to a Dolt remote must be
+migrated by exactly one designated clone. Back up first (`bd export --all`),
+then follow the [upgrade guide](https://gastownhall.github.io/beads/docs/getting-started/upgrading)
+(also summarized in [docs/INSTALLING.md](docs/INSTALLING.md#updating-bd)).
+
 ### Security And Verification
 
 Before trusting any downloaded binary, verify its checksum against the release `checksums.txt`.

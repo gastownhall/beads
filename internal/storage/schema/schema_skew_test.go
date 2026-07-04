@@ -159,6 +159,59 @@ func TestCheckSchemaSkew_EscapeHatch_ReturnsNilAndWarns(t *testing.T) {
 	}
 }
 
+// TestCheckSchemaSkew_MissingTable_NoError covers the writable open path, where
+// CheckForwardDrift runs before initSchema creates schema_migrations on a fresh
+// database. A table-not-exist error must be treated as version 0 (no forward
+// drift), not surfaced as a skew-check failure.
+func TestCheckSchemaSkew_MissingTable_NoError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
+		WillReturnError(errors.New("Error 1146 (42S02): Table 'beads.schema_migrations' doesn't exist"))
+
+	if err := checkSchemaSkew(context.Background(), db); err != nil {
+		t.Fatalf("checkSchemaSkew = %v, want nil when schema_migrations is absent (fresh DB)", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestCheckForwardDrift_Conn_Ahead confirms the exported guard accepts a DBConn
+// (so the embedded writable path can pass a pinned *sql.Conn) and still reports
+// forward drift.
+func TestCheckForwardDrift_Conn_Ahead(t *testing.T) {
+	ctx := context.Background()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("db.Conn: %v", err)
+	}
+	defer conn.Close()
+
+	dbVersion := LatestVersion() + 2
+	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
+		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(dbVersion))
+
+	got := CheckForwardDrift(ctx, conn)
+	if !IsSchemaSkewError(got) {
+		t.Fatalf("CheckForwardDrift = %v (%T), want *SchemaSkewError", got, got)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 // -- SchemaSkewError message copy tests --
 
 func TestSchemaSkewError_Error_Singular(t *testing.T) {

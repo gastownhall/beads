@@ -45,14 +45,26 @@ func (p *doltSQLProvider) Close(ctx context.Context) error {
 }
 
 func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
-	conn, err := p.db.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("uow: pin connection: %w", err)
+	var conn *sql.Conn
+	bo := backoff.NewExponentialBackOff()
+	bo.InitialInterval = 50 * time.Millisecond
+	bo.MaxElapsedTime = 3 * time.Second
+	if err := backoff.Retry(func() error {
+		var connErr error
+		conn, connErr = p.db.Conn(ctx)
+		if connErr != nil {
+			if isSerializationError(connErr) || isInvalidConnectionError(connErr) {
+				return fmt.Errorf("uow: pin connection: %w", connErr)
+			}
+			return backoff.Permanent(fmt.Errorf("uow: pin connection: %w", connErr))
+		}
+		return nil
+	}, backoff.WithContext(bo, ctx)); err != nil {
+		return nil, err
 	}
 
-	_, err = conn.ExecContext(ctx, "START TRANSACTION;")
+	_, err := conn.ExecContext(ctx, "START TRANSACTION;")
 	if err != nil {
-		_ = conn.Close()
 		return nil, fmt.Errorf("uow: failed to start transaction: %w", err)
 	}
 
@@ -61,18 +73,14 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	}, nil
 }
 
-func (p *doltSQLProvider) initSchema(ctx context.Context, database string, hasRemoteProbe func() bool) error {
+func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error {
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = 25 * time.Millisecond
 	bo.MaxElapsedTime = 15 * time.Second
 	return backoff.Retry(func() error {
-		// Dial/handshake failures here are the NORMAL warmup case — the
-		// freshly spawned child server can accept TCP before the SQL engine
-		// answers — so only mark genuinely permanent errors Permanent
-		// (bd-6dnrw.44 item 8).
 		conn, err := p.db.Conn(ctx)
 		if err != nil {
-			if isRetryableWarmupError(err) {
+			if isSerializationError(err) {
 				return fmt.Errorf("uow: pin connection: %w", err)
 			}
 			return backoff.Permanent(fmt.Errorf("uow: pin connection: %w", err))
@@ -81,35 +89,14 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string, hasRe
 
 		ddl := db.NewDDLSQLRepository(conn)
 		if err := ddl.CreateDatabaseIfNotExists(ctx, database); err != nil {
-			if isRetryableWarmupError(err) {
-				return fmt.Errorf("uow: creating database: %w", err)
-			}
 			return backoff.Permanent(fmt.Errorf("uow: creating database: %w", err))
 		}
 		if err := ddl.UseDatabase(ctx, database); err != nil {
-			if isRetryableWarmupError(err) {
-				return fmt.Errorf("uow: switching to database: %w", err)
-			}
 			return backoff.Permanent(fmt.Errorf("uow: switching to database: %w", err))
 		}
 
-		// #4259: refuse to silently auto-apply pending migrations to a
-		// remote-backed database — the same gate the dolt and embeddeddolt
-		// store opens run (bd-6dnrw.28: this third store-open path used to
-		// bypass it). hasRemoteProbe is the on-disk fallback for a freshly
-		// started child server whose dolt_remotes table is still empty
-		// (GH#2315); nil disables it (e.g. external servers with no local
-		// data dir). A gate refusal is permanent — never retried into a
-		// migration.
-		if err := schema.CheckRemoteMigrateGateWithRemoteCheck(ctx, conn, hasRemoteProbe); err != nil {
-			if isRetryableWarmupError(err) {
-				return fmt.Errorf("uow: remote-migrate gate: %w", err)
-			}
-			return backoff.Permanent(fmt.Errorf("uow: remote-migrate gate: %w", err))
-		}
-
 		if _, err := schema.MigrateUpWithLock(ctx, conn, database); err != nil {
-			if isRetryableWarmupError(err) || schema.IsMigrationLockError(err) {
+			if isSerializationError(err) || schema.IsMigrationLockError(err) {
 				return fmt.Errorf("uow: migrate: %w", err)
 			}
 			return backoff.Permanent(fmt.Errorf("uow: migrate: %w", err))
@@ -139,10 +126,7 @@ func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	return conn, nil
 }
 
-// openAndInitSchema connects to the proxied server, initializes the schema,
-// and returns a ready provider. hasRemoteProbe is the remote-migrate gate's
-// on-disk remote probe (nil to rely on dolt_remotes alone — see initSchema).
-func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword string, hasRemoteProbe func() bool) (UnitOfWorkProvider, error) {
+func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword string) (UnitOfWorkProvider, error) {
 	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword))
 	if err != nil {
 		return nil, err
@@ -153,7 +137,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 		db:            initDB,
 	}
 
-	if err := initProvider.initSchema(ctx, database, hasRemoteProbe); err != nil {
+	if err := initProvider.initSchema(ctx, database); err != nil {
 		_ = initDB.Close()
 		return nil, fmt.Errorf("uow: init schema: %w", err)
 	}

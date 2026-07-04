@@ -303,20 +303,18 @@ func parseMarkdownFile(path string) ([]*IssueTemplate, error) {
 }
 
 // createIssuesFromMarkdown parses a markdown file and creates multiple issues from it
-func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
-	// Parse markdown file first (doesn't require store access)
+func createIssuesFromMarkdown(_ *cobra.Command, filepath string) error {
 	templates, err := parseMarkdownFile(filepath)
 	if err != nil {
-		FatalError("parsing markdown file: %v", err)
+		return HandleError("parsing markdown file: %v", err)
 	}
 
 	if len(templates) == 0 {
-		FatalError("no issues found in markdown file")
+		return HandleError("no issues found in markdown file")
 	}
 
-	// Ensure globals are initialized
 	if store == nil {
-		FatalErrorWithHint("database not initialized",
+		return HandleErrorWithHint("database not initialized",
 			diagHint())
 	}
 	if actor == "" {
@@ -354,7 +352,7 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 			if strings.Contains(depSpec, ":") {
 				parts := strings.SplitN(depSpec, ":", 2)
 				if len(parts) != 2 {
-					FatalError("invalid dependency format '%s' for issue '%s'", depSpec, template.Title)
+					return HandleError("invalid dependency format '%s' for issue '%s'", depSpec, template.Title)
 				}
 				depType = types.DependencyType(strings.TrimSpace(parts[0]))
 				dependsOnID = strings.TrimSpace(parts[1])
@@ -364,7 +362,7 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 			}
 
 			if !depType.IsValid() {
-				FatalError("invalid dependency type '%s' for issue '%s'", depType, template.Title)
+				return HandleError("invalid dependency type '%s' for issue '%s'", depType, template.Title)
 			}
 
 			// IssueID left empty — PersistDependencies defaults it to issue.ID
@@ -379,7 +377,7 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 	}
 
 	if err := store.CreateIssues(ctx, issues, actor); err != nil {
-		FatalError("creating issues from markdown: %v", err)
+		return HandleError("creating issues from markdown: %v", err)
 	}
 	commitMsg := fmt.Sprintf("bd: create %d issue(s) from %s", len(templates), filepath)
 	issueIDs := make([]string, 0, len(issues))
@@ -396,11 +394,11 @@ func createIssuesFromMarkdown(_ *cobra.Command, filepath string) {
 	createdIssues = append(createdIssues, issues...)
 
 	if jsonOutput {
-		outputJSON(createdIssues)
-	} else {
-		fmt.Printf("%s Created %d issues from %s:\n", ui.RenderPass("✓"), len(createdIssues), filepath)
-		for _, issue := range createdIssues {
-			fmt.Printf("  %s: %s [P%d, %s]\n", issue.ID, issue.Title, issue.Priority, issue.IssueType)
-		}
+		return outputJSON(createdIssues)
 	}
+	fmt.Printf("%s Created %d issues from %s:\n", ui.RenderPass("✓"), len(createdIssues), filepath)
+	for _, issue := range createdIssues {
+		fmt.Printf("  %s: %s [P%d, %s]\n", issue.ID, issue.Title, issue.Priority, issue.IssueType)
+	}
+	return nil
 }

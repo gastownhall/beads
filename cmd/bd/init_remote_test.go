@@ -62,6 +62,34 @@ func TestInitServerExternalRemoteUsesServerCloneMode(t *testing.T) {
 	}
 }
 
+func TestInitDoltServerTLSFromEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want bool
+	}{
+		{name: "unset", want: false},
+		{name: "zero", env: "0", want: false},
+		{name: "false", env: "false", want: false},
+		{name: "one", env: "1", want: true},
+		{name: "true", env: "true", want: true},
+		{name: "mixed case true", env: "TrUe", want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env == "" {
+				t.Setenv("BEADS_DOLT_SERVER_TLS", "")
+			} else {
+				t.Setenv("BEADS_DOLT_SERVER_TLS", tc.env)
+			}
+			if got := initDoltServerTLSFromEnv(); got != tc.want {
+				t.Fatalf("initDoltServerTLSFromEnv() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestInitExplicitEmptyRemoteSkipsAmbientConfig(t *testing.T) {
 	called := false
 	resolveConfiguredRemote := func() string {

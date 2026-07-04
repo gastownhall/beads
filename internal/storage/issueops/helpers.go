@@ -142,7 +142,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 // RecordEventInTable records an event in the specified events table.
 //
 //nolint:gosec // G201: table is a hardcoded constant ("events" or "wisp_events")
-func RecordEventInTable(ctx context.Context, tx *sql.Tx, table, issueID string, eventType types.EventType, actor, newValue string) error {
+func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eventType types.EventType, actor, newValue string) error {
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, issue_id, event_type, actor, old_value, new_value)
 		VALUES (?, ?, ?, ?, ?, ?)

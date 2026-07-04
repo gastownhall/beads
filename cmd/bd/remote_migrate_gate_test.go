@@ -11,8 +11,9 @@ import (
 )
 
 // TestHandleRemoteMigrateGateJSON_Shape verifies the JSON written to stderr has
-// the expected shape: error one-liner, hint (escape-hatch string), and a
-// remote_migrate_gate subobject with current/latest/pending.
+// the expected shape: error one-liner, a non-runnable directive hint (NOT the
+// escape-hatch command), and a remote_migrate_gate subobject carrying the
+// current/latest/pending versions plus the agent-decision fields and options.
 func TestHandleRemoteMigrateGateJSON_Shape(t *testing.T) {
 	gate := &schema.RemoteMigrateGateError{CurrentVersion: 48, LatestVersion: 50, Pending: 2}
 
@@ -42,8 +43,13 @@ func TestHandleRemoteMigrateGateJSON_Shape(t *testing.T) {
 	if got, ok := parsed["error"].(string); !ok || got != gate.Error() {
 		t.Errorf("error = %v, want %q", parsed["error"], gate.Error())
 	}
-	if got, ok := parsed["hint"].(string); !ok || got != gate.EscapeHint() {
-		t.Errorf("hint = %v, want %q", parsed["hint"], gate.EscapeHint())
+	// hint is the non-runnable directive, and must NOT be the runnable escape
+	// command — that swap is the whole point of this change (the agent footgun).
+	if got, ok := parsed["hint"].(string); !ok || got != gate.AgentDirective() {
+		t.Errorf("hint = %v, want directive %q", parsed["hint"], gate.AgentDirective())
+	}
+	if parsed["hint"] == gate.EscapeHint() {
+		t.Errorf("hint must not be the runnable escape command %q (agent footgun)", gate.EscapeHint())
 	}
 
 	obj, ok := parsed["remote_migrate_gate"].(map[string]interface{})
@@ -58,5 +64,46 @@ func TestHandleRemoteMigrateGateJSON_Shape(t *testing.T) {
 	}
 	if got, ok := obj["pending"].(float64); !ok || int(got) != 2 {
 		t.Errorf("pending = %v, want 2", obj["pending"])
+	}
+	if got, ok := obj["human_decision_required"].(bool); !ok || !got {
+		t.Errorf("human_decision_required = %v, want true", obj["human_decision_required"])
+	}
+	if got, ok := obj["severity"].(string); !ok || got != "blocking" {
+		t.Errorf("severity = %v, want \"blocking\"", obj["severity"])
+	}
+
+	// options must carry both paths, and the runnable migrate command must live
+	// ONLY inside the conditional migrate option, never surfaced unconditionally.
+	rawOpts, ok := obj["options"].([]interface{})
+	if !ok || len(rawOpts) != 2 {
+		t.Fatalf("options = %v, want 2 entries", obj["options"])
+	}
+	ids := map[string]bool{}
+	migrateCmdFound := false
+	for _, ro := range rawOpts {
+		o, ok := ro.(map[string]interface{})
+		if !ok {
+			t.Fatalf("option wrong type: %T", ro)
+		}
+		id, _ := o["id"].(string)
+		ids[id] = true
+		if o["when"] == nil || o["risk"] == nil {
+			t.Errorf("option %q missing when/risk: %v", id, o)
+		}
+		cmds, _ := o["commands"].([]interface{})
+		for _, c := range cmds {
+			if c == gate.EscapeHint() {
+				migrateCmdFound = true
+				if id != "migrate" {
+					t.Errorf("escape command appears under option %q, want only \"migrate\"", id)
+				}
+			}
+		}
+	}
+	if !ids["migrate"] || !ids["adopt"] {
+		t.Errorf("options ids = %v, want migrate+adopt", ids)
+	}
+	if !migrateCmdFound {
+		t.Errorf("migrate option must contain the escape command %q", gate.EscapeHint())
 	}
 }

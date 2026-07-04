@@ -20,4 +20,6 @@ type RecordEventOpts struct {
 
 type EventsSQLRepository interface {
 	Record(ctx context.Context, evt Event, opts RecordEventOpts) error
+	DeleteAllForIDs(ctx context.Context, ids []string, opts RecordEventOpts) (int, error)
+	CountAllForIDs(ctx context.Context, ids []string, opts RecordEventOpts) (int, error)
 }

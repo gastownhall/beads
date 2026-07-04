@@ -9,6 +9,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -34,7 +35,16 @@ Examples:
   bd where           # Show active beads location
   bd where --json    # Output in JSON format
 `,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("where")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		result := WhereResult{}
 
 		if selected := selectedNoDBBeadsDir(cmd); selected != "" {
@@ -44,16 +54,16 @@ Examples:
 		beadsDir := resolveWhereBeadsDir(cmd)
 		if beadsDir == "" {
 			if jsonOutput {
-				outputJSON(map[string]string{
+				if jerr := outputJSON(map[string]string{
 					"error":   "no_beads_directory",
 					"message": activeWorkspaceNotFoundMessage(),
 					"hint":    whereDiagHint(),
-				})
-			} else {
-				fmt.Fprintln(os.Stderr, "Error: "+activeWorkspaceNotFoundMessage())
-				fmt.Fprintln(os.Stderr, "Hint: "+whereDiagHint())
+				}); jerr != nil {
+					return jerr
+				}
+				return SilentExit()
 			}
-			os.Exit(1)
+			return HandleErrorWithHint(activeWorkspaceNotFoundMessage(), whereDiagHint())
 		}
 
 		result.Path = beadsDir
@@ -88,21 +98,20 @@ Examples:
 			})
 		}
 
-		// Output results
 		if jsonOutput {
-			outputJSON(result)
-		} else {
-			fmt.Println(result.Path)
-			if result.RedirectedFrom != "" {
-				fmt.Printf("  (via redirect from %s)\n", result.RedirectedFrom)
-			}
-			if result.Prefix != "" {
-				fmt.Printf("  prefix: %s\n", result.Prefix)
-			}
-			if result.DatabasePath != "" {
-				fmt.Printf("  database: %s\n", result.DatabasePath)
-			}
+			return outputJSON(result)
 		}
+		fmt.Println(result.Path)
+		if result.RedirectedFrom != "" {
+			fmt.Printf("  (via redirect from %s)\n", result.RedirectedFrom)
+		}
+		if result.Prefix != "" {
+			fmt.Printf("  prefix: %s\n", result.Prefix)
+		}
+		if result.DatabasePath != "" {
+			fmt.Printf("  database: %s\n", result.DatabasePath)
+		}
+		return nil
 	},
 }
 

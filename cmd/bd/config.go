@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -94,32 +95,33 @@ Examples:
 var forceGitTracked bool
 
 var configSetCmd = &cobra.Command{
-	Use:   "set <key> <value>",
-	Short: "Set a configuration value",
-	Args:  cobra.ExactArgs(2),
-	Run: func(_ *cobra.Command, args []string) {
+	Use:           "set <key> <value>",
+	Short:         "Set a configuration value",
+	Args:          cobra.ExactArgs(2),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(_ *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("config-set")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		key := args[0]
 		value := args[1]
 
-		// Reject keys that look like init-only state so the user does not
-		// silently land a write in a store that 'bd create' never reads.
-		// 'bd config set issue-prefix' used to write DB key "issue-prefix"
-		// (dash) while 'bd create' only reads YAML "issue-prefix" or DB
-		// "issue_prefix" (underscore) — three divergent stores, write never
-		// visible.
 		if msg, rejected := rejectProtectedConfigKey(key); rejected {
 			fmt.Fprintln(os.Stderr, msg)
-			os.Exit(1)
+			return SilentExit()
 		}
 
 		if key == "dolt.debug" && !usesSQLServer() {
 			fmt.Fprintln(os.Stderr, "Error: dolt.debug requires a sql-server-backed project (embedded mode has no managed server).")
 			fmt.Fprintln(os.Stderr, "  To migrate: re-init with 'bd init --server' or 'bd init --shared-server'.")
-			os.Exit(1)
+			return SilentExit()
 		}
 
-		// Warn on unrecognized config keys so typos don't silently become
-		// no-ops. The custom.* namespace is exempt (user-extensible). GH#3293.
 		if !isRecognizedConfigKey(key) {
 			suggestion := suggestConfigKey(key)
 			if suggestion != "" {
@@ -130,126 +132,158 @@ var configSetCmd = &cobra.Command{
 			fmt.Fprintf(os.Stderr, "Run 'bd config --help' for valid namespaces.\n")
 		}
 
-		// Refuse to write secret keys to git-tracked config files unless
-		// --force-git-tracked is set. This prevents accidental exposure of
-		// API keys and tokens in git history.
 		if !forceGitTracked {
 			if err := config.CheckSecretKeyGitSafety(key); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				return HandleError("%v", err)
 			}
 		}
 
-		// Check if this is a yaml-only key (startup settings like no-db, etc.)
-		// These must be written to config.yaml, not SQLite, because they're read
-		// before the database is opened. (GH#536)
 		if config.IsYamlOnlyKey(key) {
-			if err := config.SetYamlConfig(key, value); err != nil {
-				fmt.Fprintf(os.Stderr, "Error setting config: %v\n", err)
-				os.Exit(1)
+			var setErr error
+			location := "config.yaml"
+			if config.IsUserGlobalKey(key) {
+				setErr = config.SetUserYamlConfig(key, value)
+				location = config.UserConfigYamlPath()
+			} else {
+				setErr = config.SetYamlConfig(key, value)
+			}
+			if setErr != nil {
+				return HandleError("setting config: %v", setErr)
 			}
 
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if err := outputJSON(map[string]interface{}{
 					"key":      key,
 					"value":    value,
-					"location": "config.yaml",
-				})
+					"location": location,
+				}); err != nil {
+					return err
+				}
 			} else {
-				fmt.Printf("Set %s = %s (in config.yaml)\n", key, value)
+				fmt.Printf("Set %s = %s (in %s)\n", key, value, location)
 			}
 			printConfigSideEffects(checkConfigSetSideEffects(key, value))
-			return
+			return nil
 		}
 
-		// beads.role is stored in git config, not SQLite (GH#1531).
-		// bd doctor reads it from git config, so we write there for consistency.
 		if key == "beads.role" {
 			validRoles := map[string]bool{"maintainer": true, "contributor": true}
 			if !validRoles[value] {
-				fmt.Fprintf(os.Stderr, "Error: invalid role %q (valid values: maintainer, contributor)\n", value)
-				os.Exit(1)
+				return HandleError("invalid role %q (valid values: maintainer, contributor)", value)
 			}
 			cmd := exec.Command("git", "config", "beads.role", value) //nolint:gosec // value is validated against allowlist above
 			if err := cmd.Run(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error setting beads.role in git config: %v\n", err)
-				os.Exit(1)
+				return HandleError("setting beads.role in git config: %v", err)
 			}
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if err := outputJSON(map[string]interface{}{
 					"key":      key,
 					"value":    value,
 					"location": "git config",
-				})
+				}); err != nil {
+					return err
+				}
 			} else {
 				fmt.Printf("Set %s = %s (in git config)\n", key, value)
 			}
-			return
+			return nil
+		}
+
+		if usesProxiedServer() {
+			runConfigSetProxiedServer(rootCtx, key, value)
+			return nil
 		}
 
 		// Database-stored config requires direct mode
 		if err := ensureDirectMode("config set requires direct database access"); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return HandleError("%v", err)
 		}
 
 		ctx := rootCtx
 
-		// Validate status.custom config before writing
 		if key == "status.custom" && value != "" {
 			if _, err := types.ParseCustomStatusConfig(value); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid status.custom value: %v\n", err)
-				os.Exit(1)
+				return HandleError("invalid status.custom value: %v", err)
 			}
 		}
 
 		if err := store.SetConfig(ctx, key, value); err != nil {
-			fmt.Fprintf(os.Stderr, "Error setting config: %v\n", err)
-			os.Exit(1)
+			return HandleError("setting config: %v", err)
 		}
 		commandDidWrite.Store(true)
 
 		if jsonOutput {
-			outputJSON(map[string]string{
+			if err := outputJSON(map[string]string{
 				"key":   key,
 				"value": value,
-			})
+			}); err != nil {
+				return err
+			}
 		} else {
 			fmt.Printf("Set %s = %s\n", key, value)
 		}
 		printConfigSideEffects(checkConfigSetSideEffects(key, value))
+		return nil
 	},
 }
 
 var configGetCmd = &cobra.Command{
-	Use:   "get <key>",
-	Short: "Get a configuration value",
-	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "get <key>",
+	Short:         "Get a configuration value",
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("config-get")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		key := args[0]
 
-		// Check if this is a yaml-only key (startup settings)
-		// These are read from config.yaml via viper, not SQLite. (GH#536)
 		if config.IsYamlOnlyKey(key) {
+			// User-global keys (e.g. metrics.*) must be read from the user-global
+			// config.yaml only — the same source the runtime uses for metrics
+			// consent and endpoint. Reading the merged value here would let a
+			// project's .beads/config.yaml shadow the effective value and report the
+			// opposite of what `bd metrics` actually honors.
+			if config.IsUserGlobalKey(key) {
+				value := config.GetUserYamlConfig(key)
+				location := config.UserConfigYamlPath()
+				if jsonOutput {
+					return outputJSON(map[string]interface{}{
+						"key":      key,
+						"value":    value,
+						"location": location,
+					})
+				}
+				if value == "" {
+					fmt.Printf("%s (not set in %s)\n", key, location)
+				} else {
+					fmt.Printf("%s\n", value)
+				}
+				return nil
+			}
+
 			value := config.GetYamlConfig(key)
 
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				return outputJSON(map[string]interface{}{
 					"key":      key,
 					"value":    value,
 					"location": "config.yaml",
 				})
-			} else {
-				if value == "" {
-					fmt.Printf("%s (not set in config.yaml)\n", key)
-				} else {
-					fmt.Printf("%s\n", value)
-				}
 			}
-			return
+			if value == "" {
+				fmt.Printf("%s (not set in config.yaml)\n", key)
+			} else {
+				fmt.Printf("%s\n", value)
+			}
+			return nil
 		}
 
-		// beads.role is stored in git config, not SQLite (GH#1531).
 		if key == "beads.role" {
 			cmd := exec.Command("git", "config", "--get", "beads.role")
 			output, err := cmd.Output()
@@ -258,25 +292,28 @@ var configGetCmd = &cobra.Command{
 				value = ""
 			}
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				return outputJSON(map[string]interface{}{
 					"key":      key,
 					"value":    value,
 					"location": "git config",
 				})
-			} else {
-				if value == "" {
-					fmt.Printf("%s (not set in git config)\n", key)
-				} else {
-					fmt.Printf("%s\n", value)
-				}
 			}
-			return
+			if value == "" {
+				fmt.Printf("%s (not set in git config)\n", key)
+			} else {
+				fmt.Printf("%s\n", value)
+			}
+			return nil
+		}
+
+		if usesProxiedServer() {
+			runConfigGetProxiedServer(rootCtx, key)
+			return nil
 		}
 
 		// Database-stored config requires direct mode
 		if err := ensureDirectMode("config get requires direct database access"); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return HandleError("%v", err)
 		}
 
 		ctx := rootCtx
@@ -286,53 +323,62 @@ var configGetCmd = &cobra.Command{
 		value, err = store.GetConfig(ctx, key)
 
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error getting config: %v\n", err)
-			os.Exit(1)
+			return HandleError("getting config: %v", err)
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]string{
+			return outputJSON(map[string]string{
 				"key":   key,
 				"value": value,
 			})
-		} else {
-			if value == "" {
-				fmt.Printf("%s (not set)\n", key)
-			} else {
-				fmt.Printf("%s\n", value)
-			}
 		}
+		if value == "" {
+			fmt.Printf("%s (not set)\n", key)
+		} else {
+			fmt.Printf("%s\n", value)
+		}
+		return nil
 	},
 }
 
 var configListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all configuration",
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "list",
+	Short:         "List all configuration",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("config-list")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			runConfigListProxiedServer(rootCtx)
+			return nil
+		}
+
 		// Config operations work in direct mode only
 		if err := ensureDirectMode("config list requires direct database access"); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return HandleError("%v", err)
 		}
 
 		ctx := rootCtx
 		config, err := store.GetAllConfig(ctx)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error listing config: %v\n", err)
-			os.Exit(1)
+			return HandleError("listing config: %v", err)
 		}
 
 		if jsonOutput {
-			outputJSON(config)
-			return
+			return outputJSON(config)
 		}
 
 		if len(config) == 0 {
 			fmt.Println("No configuration set")
-			return
+			return nil
 		}
 
-		// Sort keys for consistent output
 		keys := make([]string, 0, len(config))
 		for k := range config {
 			keys = append(keys, k)
@@ -344,9 +390,8 @@ var configListCmd = &cobra.Command{
 			fmt.Printf("  %s = %s\n", k, config[k])
 		}
 
-		// Check for config.yaml overrides that take precedence (bd-20j)
-		// This helps diagnose when effective config differs from database config
 		showConfigYAMLOverrides(config)
+		return nil
 	},
 }
 
@@ -423,71 +468,93 @@ func showConfigYAMLOverrides(dbConfig map[string]string) {
 }
 
 var configUnsetCmd = &cobra.Command{
-	Use:   "unset <key>",
-	Short: "Delete a configuration value",
-	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "unset <key>",
+	Short:         "Delete a configuration value",
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("config-unset")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		key := args[0]
 
-		// Check if this is a yaml-only key (startup settings like backup.*, routing.*, etc.)
-		// These must be removed from config.yaml, not the database. (GH#2727)
 		if config.IsYamlOnlyKey(key) {
-			if err := config.UnsetYamlConfig(key); err != nil {
-				fmt.Fprintf(os.Stderr, "Error unsetting config: %v\n", err)
-				os.Exit(1)
+			location := "config.yaml"
+			var unsetErr error
+			if config.IsUserGlobalKey(key) {
+				unsetErr = config.UnsetUserYamlConfig(key)
+				location = config.UserConfigYamlPath()
+			} else {
+				unsetErr = config.UnsetYamlConfig(key)
+			}
+			if unsetErr != nil {
+				return HandleError("unsetting config: %v", unsetErr)
 			}
 
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if err := outputJSON(map[string]interface{}{
 					"key":      key,
-					"location": "config.yaml",
-				})
+					"location": location,
+				}); err != nil {
+					return err
+				}
 			} else {
-				fmt.Printf("Unset %s (in config.yaml)\n", key)
+				fmt.Printf("Unset %s (in %s)\n", key, location)
 			}
 			printConfigSideEffects(checkConfigUnsetSideEffects(key))
-			return
+			return nil
 		}
 
-		// beads.role is stored in git config, not the database (GH#1531).
 		if key == "beads.role" {
 			gitCmd := exec.Command("git", "config", "--unset", "beads.role")
 			if err := gitCmd.Run(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error unsetting beads.role in git config: %v\n", err)
-				os.Exit(1)
+				return HandleError("unsetting beads.role in git config: %v", err)
 			}
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if err := outputJSON(map[string]interface{}{
 					"key":      key,
 					"location": "git config",
-				})
+				}); err != nil {
+					return err
+				}
 			} else {
 				fmt.Printf("Unset %s (in git config)\n", key)
 			}
-			return
+			return nil
+		}
+
+		if usesProxiedServer() {
+			runConfigUnsetProxiedServer(rootCtx, key)
+			return nil
 		}
 
 		// Database-stored config requires direct mode
 		if err := ensureDirectMode("config unset requires direct database access"); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return HandleError("%v", err)
 		}
 
 		ctx := rootCtx
 		if err := store.DeleteConfig(ctx, key); err != nil {
-			fmt.Fprintf(os.Stderr, "Error deleting config: %v\n", err)
-			os.Exit(1)
+			return HandleError("deleting config: %v", err)
 		}
 		commandDidWrite.Store(true)
 
 		if jsonOutput {
-			outputJSON(map[string]string{
+			if err := outputJSON(map[string]string{
 				"key": key,
-			})
+			}); err != nil {
+				return err
+			}
 		} else {
 			fmt.Printf("Unset %s\n", key)
 		}
 		printConfigSideEffects(checkConfigUnsetSideEffects(key))
+		return nil
 	},
 }
 
@@ -505,38 +572,41 @@ Checks:
 	Examples:
 	  bd config validate
 	  bd config validate --json`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("config-validate")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		repoPath, err := resolvedConfigRepoRoot()
 		if err != nil {
-			FatalErrorWithHintRespectJSON(activeWorkspaceNotFoundError(), diagHint())
+			return HandleErrorWithHintRespectJSON(activeWorkspaceNotFoundError(), diagHint())
 		}
 
-		// Run the existing doctor config values check
 		doctorCheck := doctor.CheckConfigValues(repoPath)
 
-		// Run additional sync-related validations
 		syncIssues := validateSyncConfig(repoPath)
 
-		// Combine results
 		allIssues := []string{}
 		if doctorCheck.Detail != "" {
 			allIssues = append(allIssues, strings.Split(doctorCheck.Detail, "\n")...)
 		}
 		allIssues = append(allIssues, syncIssues...)
 
-		// Output results
 		if jsonOutput {
-			result := map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"valid":  len(allIssues) == 0,
 				"issues": allIssues,
-			}
-			outputJSON(result)
-			return
+			})
 		}
 
 		if len(allIssues) == 0 {
 			fmt.Println("✓ All sync-related configuration is valid")
-			return
+			return nil
 		}
 
 		fmt.Println("Configuration validation found issues:")
@@ -546,7 +616,7 @@ Checks:
 			}
 		}
 		fmt.Println("\nRun 'bd config set <key> <value>' to fix configuration issues.")
-		os.Exit(1)
+		return SilentExit()
 	},
 }
 
@@ -656,9 +726,17 @@ calls, especially in CI.
 Examples:
   bd config set-many ado.state_map.open=New ado.state_map.closed=Closed
   bd config set-many jira.url=https://example.atlassian.net jira.project=PROJ`,
-	Args: cobra.MinimumNArgs(1),
-	Run: func(_ *cobra.Command, args []string) {
-		// Phase 1: Parse all key=value pairs
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(_ *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("config-set-many")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		type kvPair struct {
 			key, value string
 		}
@@ -666,30 +744,25 @@ Examples:
 		for _, arg := range args {
 			idx := strings.Index(arg, "=")
 			if idx <= 0 {
-				fmt.Fprintf(os.Stderr, "Error: invalid argument %q (expected key=value format)\n", arg)
-				os.Exit(1)
+				return HandleError("invalid argument %q (expected key=value format)", arg)
 			}
 			pairs = append(pairs, kvPair{key: arg[:idx], value: arg[idx+1:]})
 		}
 
-		// Phase 2: Validate all pairs before writing any
 		for _, p := range pairs {
 			if p.key == "beads.role" {
 				validRoles := map[string]bool{"maintainer": true, "contributor": true}
 				if !validRoles[p.value] {
-					fmt.Fprintf(os.Stderr, "Error: invalid role %q (valid values: maintainer, contributor)\n", p.value)
-					os.Exit(1)
+					return HandleError("invalid role %q (valid values: maintainer, contributor)", p.value)
 				}
 			}
 			if p.key == "status.custom" && p.value != "" {
 				if _, err := types.ParseCustomStatusConfig(p.value); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid status.custom value: %v\n", err)
-					os.Exit(1)
+					return HandleError("invalid status.custom value: %v", err)
 				}
 			}
 		}
 
-		// Phase 3: Separate into categories
 		var yamlPairs, gitPairs, dbPairs []kvPair
 		for _, p := range pairs {
 			if config.IsYamlOnlyKey(p.key) {
@@ -701,56 +774,64 @@ Examples:
 			}
 		}
 
-		// Phase 3b: Check git-tracked secret safety for yaml keys
 		if !forceGitTracked {
 			for _, p := range yamlPairs {
 				if err := config.CheckSecretKeyGitSafety(p.key); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-					os.Exit(1)
+					return HandleError("%v", err)
 				}
 			}
 		}
 
-		// Phase 4: Write yaml-only keys
 		for _, p := range yamlPairs {
-			if err := config.SetYamlConfig(p.key, p.value); err != nil {
-				fmt.Fprintf(os.Stderr, "Error setting config %s: %v\n", p.key, err)
-				os.Exit(1)
+			var setErr error
+			if config.IsUserGlobalKey(p.key) {
+				setErr = config.SetUserYamlConfig(p.key, p.value)
+			} else {
+				setErr = config.SetYamlConfig(p.key, p.value)
+			}
+			if setErr != nil {
+				return HandleError("setting config %s: %v", p.key, setErr)
 			}
 		}
 
-		// Phase 5: Write git config keys
 		for _, p := range gitPairs {
 			cmd := exec.Command("git", "config", "beads.role", p.value) //nolint:gosec // value is validated against allowlist above
 			if err := cmd.Run(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error setting %s in git config: %v\n", p.key, err)
-				os.Exit(1)
+				return HandleError("setting %s in git config: %v", p.key, err)
 			}
 		}
 
-		// Phase 6: Write DB keys in batch
 		if len(dbPairs) > 0 {
-			if err := ensureDirectMode("config set-many requires direct database access"); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-
-			ctx := rootCtx
-			for _, p := range dbPairs {
-				if err := store.SetConfig(ctx, p.key, p.value); err != nil {
-					fmt.Fprintf(os.Stderr, "Error setting config %s: %v\n", p.key, err)
-					os.Exit(1)
+			if usesProxiedServer() {
+				keys := make([]string, len(dbPairs))
+				values := make([]string, len(dbPairs))
+				for i, p := range dbPairs {
+					keys[i] = p.key
+					values[i] = p.value
 				}
+				runConfigSetManyProxiedServer(rootCtx, keys, values)
+			} else {
+				if err := ensureDirectMode("config set-many requires direct database access"); err != nil {
+					return HandleError("%v", err)
+				}
+
+				ctx := rootCtx
+				for _, p := range dbPairs {
+					if err := store.SetConfig(ctx, p.key, p.value); err != nil {
+						return HandleError("setting config %s: %v", p.key, err)
+					}
+				}
+				commandDidWrite.Store(true)
 			}
-			commandDidWrite.Store(true)
 		}
 
-		// Phase 7: Output results
 		if jsonOutput {
 			results := make([]map[string]string, 0, len(pairs))
 			for _, p := range pairs {
 				location := "database"
-				if config.IsYamlOnlyKey(p.key) {
+				if config.IsUserGlobalKey(p.key) {
+					location = config.UserConfigYamlPath()
+				} else if config.IsYamlOnlyKey(p.key) {
 					location = "config.yaml"
 				} else if p.key == "beads.role" {
 					location = "git config"
@@ -761,11 +842,15 @@ Examples:
 					"location": location,
 				})
 			}
-			outputJSON(results)
+			if err := outputJSON(results); err != nil {
+				return err
+			}
 		} else {
 			for _, p := range pairs {
 				location := ""
-				if config.IsYamlOnlyKey(p.key) {
+				if config.IsUserGlobalKey(p.key) {
+					location = fmt.Sprintf(" (in %s)", config.UserConfigYamlPath())
+				} else if config.IsYamlOnlyKey(p.key) {
 					location = " (in config.yaml)"
 				} else if p.key == "beads.role" {
 					location = " (in git config)"
@@ -773,6 +858,7 @@ Examples:
 				fmt.Printf("Set %s = %s%s\n", p.key, p.value, location)
 			}
 		}
+		return nil
 	},
 }
 
@@ -782,7 +868,7 @@ var recognizedConfigPrefixes = []string{
 	"export.", "import.", "dolt.", "jira.", "linear.", "github.", "custom.",
 	"status.", "doctor.suppress.", "routing.", "sync.", "git.",
 	"directory.", "repos.", "external_projects.", "validation.",
-	"hierarchy.", "ai.", "backup.", "federation.",
+	"hierarchy.", "ai.", "backup.", "federation.", "metrics.",
 }
 
 // recognizedConfigKeys lists valid non-namespaced config keys.

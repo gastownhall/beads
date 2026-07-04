@@ -3,11 +3,12 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
-	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -20,36 +21,6 @@ const (
 	proxiedServerConfigName = "server_config.yaml"
 	proxiedServerLogName    = "server.log"
 )
-
-// proxiedServerCommands lists the top-level commands that have a
-// proxied-server dispatch path (a usesProxiedServer() branch in their Run
-// func). Every other store-backed command reads the global store, which
-// stays nil in proxied-server mode — PersistentPreRun rejects them up front
-// so they fail with a clear error instead of a nil-pointer panic.
-// doctor and init also work in proxied-server mode, but they skip store
-// init entirely and never reach the guard.
-var proxiedServerCommands = map[string]bool{
-	"create": true,
-	"list":   true,
-}
-
-// commandSupportsProxiedServer reports whether cmd can run in proxied-server
-// mode. Subcommands (e.g. "dep add") are judged by their top-level ancestor.
-func commandSupportsProxiedServer(cmd *cobra.Command) bool {
-	for cmd.Parent() != nil && cmd.Parent().Parent() != nil {
-		cmd = cmd.Parent()
-	}
-	return proxiedServerCommands[cmd.Name()]
-}
-
-// proxiedServerInitUngated reports whether the dark-launch gate on
-// `bd init --proxied-server` is bypassed for this process. Test-only: the
-// proxied integration suites set it so they can bootstrap real proxied
-// workspaces while the user-facing init surface stays gated on the open
-// bd-6dnrw.44 P1 decisions (TLS, auth).
-func proxiedServerInitUngated() bool {
-	return os.Getenv("BEADS_TEST_PROXIED_SERVER_INIT") == "1"
-}
 
 func proxiedServerRoot(beadsDir string) string {
 	return filepath.Join(beadsDir, proxiedServerRootName)
@@ -237,3 +208,84 @@ func renderProxiedServerConfig(port int) ([]byte, error) {
 }
 
 const proxiedServerListenerHost = "127.0.0.1"
+
+// TODO: this needs to return a dolt server uow provider as the global
+// uow provider used by all commands
+
+//	func newProxiedServerStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {
+//		if cfg == nil {
+//			return nil, fmt.Errorf("newProxiedServerStore: cfg is nil")
+//		}
+//		if cfg.BeadsDir == "" {
+//			return nil, fmt.Errorf("newProxiedServerStore: cfg.BeadsDir must be set")
+//		}
+//		if cfg.Database == "" {
+//			return nil, fmt.Errorf("newProxiedServerStore: cfg.Database must be set")
+//		}
+//
+//		doltBin, err := exec.LookPath("dolt")
+//		if err != nil {
+//			return nil, fmt.Errorf("newProxiedServerStore: dolt is not installed (not found in PATH); install from https://docs.dolthub.com/introduction/installation: %w", err)
+//		}
+//
+//		persisted, _ := configfile.Load(cfg.BeadsDir)
+//
+//		rootPath, isCustomRoot := resolveProxiedServerRootPath(cfg.BeadsDir, persisted)
+//		if isCustomRoot {
+//			if err := validateProxiedServerRootPath(rootPath); err != nil {
+//				return nil, err
+//			}
+//		}
+//
+//		configPath, err := ensureProxiedServerConfig(cfg.BeadsDir, persisted)
+//		if err != nil {
+//			return nil, err
+//		}
+//
+//		logPath, isCustomLog := resolveProxiedServerLogPath(cfg.BeadsDir, persisted)
+//		if isCustomLog {
+//			if err := validateProxiedServerLogPath(logPath); err != nil {
+//				return nil, err
+//			}
+//		}
+//
+//		name, email := cfg.CommitterName, cfg.CommitterEmail
+//		if name == "" || email == "" {
+//			fallbackName, fallbackEmail := proxiedServerCommitter()
+//			if name == "" {
+//				name = fallbackName
+//			}
+//			if email == "" {
+//				email = fallbackEmail
+//			}
+//		}
+//
+//		return doltserver.NewDoltServerStore(
+//			ctx,
+//			rootPath,
+//			cfg.BeadsDir,
+//			cfg.Database,
+//			name, email,
+//			logPath,
+//			configPath,
+//			proxy.BackendLocalServer,
+//			false, // autoSyncToOriginRemote — wired in a future iteration
+//			"root",
+//			"", // rootPassword: proxy is loopback-only, no auth
+//			doltBin,
+//		)
+//	}
+func proxiedServerCommitter() (string, string) {
+	name, email := "beads", "beads@localhost"
+	if out, err := exec.Command("git", "config", "user.name").Output(); err == nil {
+		if v := strings.TrimSpace(string(out)); v != "" {
+			name = v
+		}
+	}
+	if out, err := exec.Command("git", "config", "user.email").Output(); err == nil {
+		if v := strings.TrimSpace(string(out)); v != "" {
+			email = v
+		}
+	}
+	return name, email
+}

@@ -60,6 +60,20 @@ func (s *DoltStore) GetCurrentCommit(ctx context.Context) (string, error) {
 	return hash, nil
 }
 
+// GetStateHash returns a hash of the entire database including the working
+// set. Unlike GetCurrentCommit it moves on uncommitted writes, so callers can
+// detect changes even when dolt auto-commit is off (SQL-server mode, where
+// writes land in the working set and HEAD does not advance).
+// Implements storage.StateHasher.
+func (s *DoltStore) GetStateHash(ctx context.Context) (string, error) {
+	var hash string
+	if err := s.db.QueryRowContext(ctx, "SELECT DOLT_HASHOF_DB()").Scan(&hash); err == nil {
+		return hash, nil
+	}
+	// Older servers predate DOLT_HASHOF_DB; degrade to HEAD-based detection.
+	return s.GetCurrentCommit(ctx)
+}
+
 // GetConflicts returns any merge conflicts in the current state.
 // Implements storage.VersionedStorage.
 func (s *DoltStore) GetConflicts(ctx context.Context) ([]storage.Conflict, error) {

@@ -1,11 +1,8 @@
 package uow
 
 import (
-	"database/sql/driver"
 	"errors"
-	"io"
-	"net"
-	"syscall"
+	"strings"
 
 	mysql "github.com/go-sql-driver/mysql"
 )
@@ -22,27 +19,35 @@ func isSerializationError(err error) bool {
 	return mysqlErr.Number == 1213 || mysqlErr.Number == 1205
 }
 
-// isRetryableWarmupError reports whether an error during provider warmup is
-// plausibly transient. The managed dolt child (or the proxy relaying to it)
-// can accept TCP before the SQL engine is ready, so dial, reset, and
-// handshake failures must retry within the warmup window rather than abort
-// it (bd-6dnrw.44 item 8). Serialization failures are retryable everywhere;
-// anything else (auth refusal, SQL errors, the remote-migrate gate) is
-// genuinely permanent.
-func isRetryableWarmupError(err error) bool {
+// isInvalidConnectionError returns true if the error is a transient MySQL
+// driver connection failure (the dolt sql-server reaped an idle pooled
+// connection, the server restarted, the pipe broke, a brief network blip, etc.).
+//
+// This deliberately mirrors the connection-failure substrings recognized by the
+// DoltStore-layer classifier (internal/storage/dolt isRetryableError). The two
+// retry layers run over independent *sql.DB handles on parallel write paths —
+// uow.RunInTx backs the proxied-server create/init writes, withRetryTx backs the
+// DoltStore API writes — so they must agree on what "transient connection
+// failure" means, or the same server restart would retry on one path and surface
+// on the other. Storage-state transients that are NOT connection failures
+// (e.g. "database is read only", migration-lock) stay a DoltStore-layer concern
+// and are intentionally out of scope here.
+//
+// Whether retrying is SAFE depends on WHEN this fires, not just that it did:
+//   - Before commit (pinning a connection, starting the tx, or a write inside
+//     fn): nothing was committed, so replaying the whole sequence is safe.
+//   - At/after commit: the result is AMBIGUOUS — the commit may have landed on
+//     the server before the connection dropped. Callers must NOT blindly replay
+//     a commit-phase failure; see RunInTx for the phase-aware handling.
+func isInvalidConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if isSerializationError(err) {
-		return true
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return true
-	}
-	return errors.Is(err, driver.ErrBadConn) ||
-		errors.Is(err, mysql.ErrInvalidConn) ||
-		errors.Is(err, io.EOF) ||
-		errors.Is(err, syscall.ECONNREFUSED) ||
-		errors.Is(err, syscall.ECONNRESET)
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "invalid connection") ||
+		strings.Contains(s, "driver: bad connection") ||
+		strings.Contains(s, "lost connection") ||
+		strings.Contains(s, "broken pipe") ||
+		strings.Contains(s, "connection reset") ||
+		strings.Contains(s, "connection refused")
 }

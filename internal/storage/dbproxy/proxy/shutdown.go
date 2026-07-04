@@ -39,11 +39,8 @@ func shutdownPair(rootDir, lockName, pidName string) error {
 	lockPath := filepath.Join(rootDir, lockName)
 
 	if l, err := util.TryLock(lockPath); err == nil {
-		// No live lock holder — but a SIGKILLed holder can leave the process
-		// its pidfile names still running (the orphaned-dolt case). Kill it
-		// too, or the no-survivors guarantee above does not hold.
-		reapPidfileProcess(rootDir, pidName)
 		l.Unlock()
+		_ = pidfile.Remove(rootDir, pidName)
 		return nil
 	} else if !lockfile.IsLocked(err) {
 		return fmt.Errorf("probe %s: %w", lockName, err)

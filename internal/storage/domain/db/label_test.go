@@ -14,6 +14,15 @@ func (s *testSuite) TestLabelSQLRepository() {
 		s.Run("RejectsEmptyLabel", s.labelInsertEmptyLabel)
 		s.Run("MissingIssueIDFailsFK", s.labelInsertFKViolation)
 	})
+	s.Run("Delete", func() {
+		s.Run("RemovesLabelRow", s.labelDeleteRemoves)
+		s.Run("RecordsLabelRemovedEvent", s.labelDeleteRecordsEvent)
+		s.Run("MissingLabelIsNoop", s.labelDeleteMissingNoop)
+		s.Run("OnlyTargetLabelRemoved", s.labelDeleteSpecificLabel)
+		s.Run("RejectsEmptyIssueID", s.labelDeleteEmptyIssueID)
+		s.Run("RejectsEmptyLabel", s.labelDeleteEmptyLabel)
+		s.Run("WispRoutesToWispLabels", s.labelDeleteWispRouting)
+	})
 	s.Run("List", func() {
 		s.Run("OrdersByLabelAlpha", s.labelListAlphaOrder)
 		s.Run("UnknownIssueReturnsEmpty", s.labelListUnknown)
@@ -213,4 +222,95 @@ func (s *testSuite) labelWispBulkIsolated() {
 	s.Require().NoError(err)
 	s.Equal([]string{"a", "b"}, out["bd-lbl-wbulk-1"])
 	s.Equal([]string{"c"}, out["bd-lbl-wbulk-2"])
+}
+
+func (s *testSuite) labelDeleteRemoves() {
+	s.seedIssueRow("bd-lbl-del-1")
+	r := s.labelRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), "bd-lbl-del-1", "tech-debt", "tester", domain.LabelOpts{}))
+
+	s.Require().NoError(r.Delete(s.Ctx(), "bd-lbl-del-1", "tech-debt", "tester", domain.LabelOpts{}))
+
+	out, err := r.List(s.Ctx(), "bd-lbl-del-1", domain.LabelOpts{})
+	s.Require().NoError(err)
+	s.Empty(out, "deleted label should no longer appear in List")
+}
+
+func (s *testSuite) labelDeleteRecordsEvent() {
+	s.seedIssueRow("bd-lbl-del-evt")
+	r := s.labelRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), "bd-lbl-del-evt", "perf", "alice", domain.LabelOpts{}))
+	s.Require().NoError(r.Delete(s.Ctx(), "bd-lbl-del-evt", "perf", "bob", domain.LabelOpts{}))
+
+	var actor, oldValue string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT actor, old_value FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-lbl-del-evt", string(types.EventLabelRemoved),
+	).Scan(&actor, &oldValue))
+	s.Equal("bob", actor)
+	s.Equal("perf", oldValue, "event old_value should carry the removed label name (symmetric with Insert's new_value)")
+}
+
+func (s *testSuite) labelDeleteMissingNoop() {
+	s.seedIssueRow("bd-lbl-del-miss")
+	r := s.labelRepo()
+	s.Require().NoError(r.Delete(s.Ctx(), "bd-lbl-del-miss", "never-there", "tester", domain.LabelOpts{}))
+
+	out, err := r.List(s.Ctx(), "bd-lbl-del-miss", domain.LabelOpts{})
+	s.Require().NoError(err)
+	s.Empty(out)
+}
+
+func (s *testSuite) labelDeleteSpecificLabel() {
+	s.seedIssueRow("bd-lbl-del-specific")
+	r := s.labelRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), "bd-lbl-del-specific", "keep", "tester", domain.LabelOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), "bd-lbl-del-specific", "drop", "tester", domain.LabelOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), "bd-lbl-del-specific", "stay", "tester", domain.LabelOpts{}))
+
+	s.Require().NoError(r.Delete(s.Ctx(), "bd-lbl-del-specific", "drop", "tester", domain.LabelOpts{}))
+
+	out, err := r.List(s.Ctx(), "bd-lbl-del-specific", domain.LabelOpts{})
+	s.Require().NoError(err)
+	s.Equal([]string{"keep", "stay"}, out, "Delete must target only the named label, not siblings on the same issue")
+}
+
+func (s *testSuite) labelDeleteEmptyIssueID() {
+	err := s.labelRepo().Delete(s.Ctx(), "", "x", "tester", domain.LabelOpts{})
+	s.Require().Error(err)
+}
+
+func (s *testSuite) labelDeleteEmptyLabel() {
+	err := s.labelRepo().Delete(s.Ctx(), "bd-lbl-del-x", "", "tester", domain.LabelOpts{})
+	s.Require().Error(err)
+}
+
+func (s *testSuite) labelDeleteWispRouting() {
+	s.seedIssueRow("bd-lbl-del-cross-perm")
+	s.seedWispRow("bd-lbl-del-cross-wisp")
+	r := s.labelRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), "bd-lbl-del-cross-perm", "shared", "tester", domain.LabelOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), "bd-lbl-del-cross-wisp", "shared", "tester", domain.LabelOpts{UseWispsTable: true}))
+
+	s.Require().NoError(r.Delete(s.Ctx(), "bd-lbl-del-cross-wisp", "shared", "tester", domain.LabelOpts{UseWispsTable: true}))
+
+	var wispCount, permCount int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ?", "bd-lbl-del-cross-wisp").Scan(&wispCount))
+	s.Equal(0, wispCount, "wisp-routed Delete must remove the wisp_labels row")
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM labels WHERE issue_id = ?", "bd-lbl-del-cross-perm").Scan(&permCount))
+	s.Equal(1, permCount, "wisp-routed Delete must not touch the labels table")
+
+	var wispEvt, permEvt int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM wisp_events WHERE issue_id = ? AND event_type = ?",
+		"bd-lbl-del-cross-wisp", string(types.EventLabelRemoved),
+	).Scan(&wispEvt))
+	s.Equal(1, wispEvt)
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-lbl-del-cross-wisp", string(types.EventLabelRemoved),
+	).Scan(&permEvt))
+	s.Equal(0, permEvt, "wisp-routed Delete must record the event in wisp_events, not events")
 }
