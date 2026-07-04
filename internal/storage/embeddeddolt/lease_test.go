@@ -79,7 +79,7 @@ func TestLeaseLifecycleEmbedded(t *testing.T) {
 func TestHeartbeatRejectsWispEmbedded(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 
-	te := newTestEnv(t, "lease-wisp")
+	te := newTestEnv(t, "lease_wisp")
 	ctx := t.Context()
 
 	wisp := &types.Issue{
