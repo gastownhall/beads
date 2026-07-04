@@ -50,6 +50,11 @@ var YamlOnlyKeys = map[string]bool{
 	// Create command settings
 	"create.require-description": true,
 
+	// Prime memory-injection caps (read at session start, possibly before
+	// the database is reachable, so they must live in yaml)
+	"prime.max-memories":     true,
+	"prime.max-memory-chars": true,
+
 	// Validation settings (bd-t7jq)
 	// Values: "warn" | "error" | "none"
 	"validation.on-create": true,
