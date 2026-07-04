@@ -75,3 +75,25 @@ func TestLeaseLifecycleEmbedded(t *testing.T) {
 		t.Errorf("assignee = %q after reclaim, want empty", got.Assignee)
 	}
 }
+
+func TestHeartbeatRejectsWispEmbedded(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	te := newTestEnv(t, "lease-wisp")
+	ctx := t.Context()
+
+	wisp := &types.Issue{
+		ID:        "lease-wisp-1",
+		Title:     "ephemeral work",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := te.store.CreateIssue(ctx, wisp, "seeder"); err != nil {
+		t.Fatalf("CreateIssue wisp: %v", err)
+	}
+	if err := te.store.HeartbeatIssue(ctx, "lease-wisp-1", "alice"); !errors.Is(err, storage.ErrNotClaimable) {
+		t.Fatalf("wisp heartbeat err = %v, want ErrNotClaimable", err)
+	}
+}

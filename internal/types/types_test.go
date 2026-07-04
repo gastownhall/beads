@@ -938,6 +938,26 @@ func TestIssueLeaseJSONSerialization(t *testing.T) {
 	}
 }
 
+func TestReclaimedLeaseJSONSerialization(t *testing.T) {
+	b, err := json.Marshal(ReclaimedLease{ID: "bd-1", PreviousOwner: "worker-a"})
+	if err != nil {
+		t.Fatalf("marshal reclaimed lease: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal reclaimed lease: %v", err)
+	}
+	if m["id"] != "bd-1" || m["previous_owner"] != "worker-a" {
+		t.Fatalf("reclaimed lease JSON = %s, want snake_case id/previous_owner", b)
+	}
+	if _, ok := m["ID"]; ok {
+		t.Fatalf("reclaimed lease JSON leaked Go field name: %s", b)
+	}
+	if _, ok := m["PreviousOwner"]; ok {
+		t.Fatalf("reclaimed lease JSON leaked Go field name: %s", b)
+	}
+}
+
 func TestBlockedIssueEmbedding(t *testing.T) {
 	blocked := BlockedIssue{
 		Issue: Issue{

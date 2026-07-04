@@ -162,16 +162,18 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, ac
 	for rows.Next() {
 		var r types.ReclaimedLease
 		if err := rows.Scan(&r.ID, &r.PreviousOwner); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("scan stale lease row: %w", err)
 		}
 		stale = append(stale, r)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return nil, fmt.Errorf("iterate stale leases: %w", err)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close stale lease rows: %w", err)
+	}
 	if len(stale) == 0 {
 		return nil, nil
 	}

@@ -128,6 +128,44 @@ func TestHeartbeatExtendsLeaseAndGuardsOwnership(t *testing.T) {
 	}
 }
 
+func TestUpdateIssueMaintainsLeaseOwnership(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seedClaimedIssue(t, ctx, store, "lease-update", "alice", time.Hour)
+	before := readLeaseState(t, ctx, store, "lease-update")
+
+	if err := store.UpdateIssue(ctx, "lease-update", map[string]interface{}{"assignee": "bob"}, "dispatcher"); err != nil {
+		t.Fatalf("transfer assignee: %v", err)
+	}
+	transferred := readLeaseState(t, ctx, store, "lease-update")
+	if transferred.assignee.String != "bob" {
+		t.Fatalf("assignee after transfer = %q, want bob", transferred.assignee.String)
+	}
+	if !transferred.leaseExpires.Valid || !transferred.heartbeatAt.Valid {
+		t.Fatalf("transfer did not stamp a fresh lease: %+v", transferred)
+	}
+	if !transferred.heartbeatAt.Time.After(before.heartbeatAt.Time) && transferred.rowLock == before.rowLock {
+		t.Fatalf("transfer did not refresh heartbeat or row_lock: before=%+v after=%+v", before, transferred)
+	}
+	if err := store.HeartbeatIssue(ctx, "lease-update", "alice"); !errors.Is(err, storage.ErrAlreadyClaimed) {
+		t.Fatalf("old owner heartbeat err = %v, want ErrAlreadyClaimed", err)
+	}
+	if err := store.HeartbeatIssue(ctx, "lease-update", "bob"); err != nil {
+		t.Fatalf("new owner heartbeat: %v", err)
+	}
+
+	if err := store.UpdateIssue(ctx, "lease-update", map[string]interface{}{"status": string(types.StatusOpen)}, "dispatcher"); err != nil {
+		t.Fatalf("reopen through update: %v", err)
+	}
+	open := readLeaseState(t, ctx, store, "lease-update")
+	if open.leaseExpires.Valid || open.heartbeatAt.Valid {
+		t.Fatalf("status away from in_progress did not clear lease: %+v", open)
+	}
+}
+
 // TestReclaimRevertsExpiredOnly verifies reclaim reverts an expired lease to
 // ready (clearing the owner) and leaves a still-valid lease untouched, and that
 // the grace window is honored.

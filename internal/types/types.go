@@ -1334,8 +1334,8 @@ func (s SortPolicy) IsValid() bool {
 // callers (the CLI, a supervisor) can report which dead workers' work was
 // recovered.
 type ReclaimedLease struct {
-	ID            string
-	PreviousOwner string
+	ID            string `json:"id"`
+	PreviousOwner string `json:"previous_owner"`
 }
 
 // WorkFilter is used to filter ready work queries

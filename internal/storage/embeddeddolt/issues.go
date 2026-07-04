@@ -58,6 +58,10 @@ func (s *EmbeddedDoltStore) UpdateIssue(ctx context.Context, id string, updates 
 // Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
 func (s *EmbeddedDoltStore) HeartbeatIssue(ctx context.Context, id, actor string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		if issueops.IsActiveWispInTx(ctx, tx, id) {
+			// Wisps are ephemeral and never leased; nothing to heartbeat.
+			return fmt.Errorf("%w: %s is ephemeral", storage.ErrNotClaimable, id)
+		}
 		return issueops.HeartbeatIssueInTx(ctx, tx, id, actor)
 	})
 }
