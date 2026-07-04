@@ -48,20 +48,47 @@ const smartGateDefaultRemote = "origin"
 // allowlist so the two cannot drift if a new entry is ever added.
 const LastNonDeterministicMigration = 43
 
+// smartGateEnvState classifies the raw BD_SMART_GATE value.
+type smartGateEnvState int
+
+const (
+	smartGateEnvUnset smartGateEnvState = iota
+	smartGateEnvEnabled
+	smartGateEnvDisabled
+	// smartGateEnvUnparseable: set but strconv.ParseBool rejected it. Treated
+	// the same as smartGateEnvEnabled by SmartGateEnabled (the default holds),
+	// but callers building the fallback-block message (gastownhall/beads#4551
+	// follow-up) still want to tell the operator their value was ignored.
+	smartGateEnvUnparseable
+)
+
+// smartGateEnvValue reads and classifies BD_SMART_GATE, returning the raw
+// value alongside the classification so a caller can quote it back to the
+// operator. Split out of SmartGateEnabled so "unset"/"valid true" (silently
+// fine) can be told apart from "set but unparseable" (worth a note) without
+// re-parsing.
+func smartGateEnvValue() (smartGateEnvState, string) {
+	v := os.Getenv(SmartGateEnv)
+	if v == "" {
+		return smartGateEnvUnset, ""
+	}
+	on, err := strconv.ParseBool(v)
+	if err != nil {
+		return smartGateEnvUnparseable, v
+	}
+	if on {
+		return smartGateEnvEnabled, v
+	}
+	return smartGateEnvDisabled, v
+}
+
 // SmartGateEnabled reports whether the smart gate is active. It defaults to
 // true; the operator opts out with BD_SMART_GATE=0 (any parseable boolean
 // false). An unparseable value keeps the default rather than silently
 // disabling the gate.
 func SmartGateEnabled() bool {
-	v := os.Getenv(SmartGateEnv)
-	if v == "" {
-		return true
-	}
-	on, err := strconv.ParseBool(v)
-	if err != nil {
-		return true
-	}
-	return on
+	state, _ := smartGateEnvValue()
+	return state != smartGateEnvDisabled
 }
 
 // smartGateDecision is the routing verdict for a remote-backed database with

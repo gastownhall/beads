@@ -122,6 +122,12 @@ func TestSmartGateRouting(t *testing.T) {
 		if gateErr.Decision != "" {
 			t.Errorf("remote-behind should fall back to the blunt block (Decision \"\"), got %q", gateErr.Decision)
 		}
+		if gateErr.FallbackReason != fallbackReasonUnreadableState {
+			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonUnreadableState)
+		}
+		if !strings.Contains(gateErr.UserMessage(), "could not read the remote's cached schema state") {
+			t.Errorf("UserMessage should explain the unreadable-state fallback:\n%s", gateErr.UserMessage())
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet expectations: %v", err)
 		}
@@ -194,6 +200,12 @@ func TestSmartGateRouting(t *testing.T) {
 		if gateErr.Decision != "" {
 			t.Errorf("below-floor should fall back to the blunt block (Decision \"\"), got %q", gateErr.Decision)
 		}
+		if gateErr.FallbackReason != fallbackReasonBelowFloor {
+			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonBelowFloor)
+		}
+		if !strings.Contains(gateErr.UserMessage(), "below the convergence floor") {
+			t.Errorf("UserMessage should explain the below-floor fallback:\n%s", gateErr.UserMessage())
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet expectations: %v", err)
 		}
@@ -220,6 +232,9 @@ func TestSmartGateRouting(t *testing.T) {
 		if gateErr.Decision != "" {
 			t.Errorf("uncached remote ref should fall back to the blunt block, got Decision %q", gateErr.Decision)
 		}
+		if gateErr.FallbackReason != fallbackReasonUnreadableState {
+			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonUnreadableState)
+		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet expectations: %v", err)
 		}
@@ -235,8 +250,12 @@ func TestSmartGateRouting(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"version", "content_hash"}))
 
 		err := CheckRemoteMigrateGate(context.Background(), db)
-		if !IsRemoteMigrateGateError(err) {
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
 			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.FallbackReason != fallbackReasonUnreadableState {
+			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonUnreadableState)
 		}
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet expectations: %v", err)
@@ -275,9 +294,53 @@ func TestSmartGateRouting(t *testing.T) {
 		if gateErr.Decision != "" {
 			t.Errorf("smart disabled must produce the blunt block, got Decision %q", gateErr.Decision)
 		}
+		if gateErr.FallbackReason != fallbackReasonOptedOut {
+			t.Errorf("FallbackReason = %q, want %q", gateErr.FallbackReason, fallbackReasonOptedOut)
+		}
+		if !strings.Contains(gateErr.UserMessage(), SmartGateEnv+"=0") {
+			t.Errorf("UserMessage should explain the opted-out fallback:\n%s", gateErr.UserMessage())
+		}
 		// mock would error if the smart reads had been issued (none expected).
 		if err := mock.ExpectationsWereMet(); err != nil {
 			t.Fatalf("unmet expectations (smart reads must not run when opted out): %v", err)
+		}
+	})
+
+	t.Run("unparseable BD_SMART_GATE value: gate stays enabled but the blunt block names the parse failure", func(t *testing.T) {
+		if floor < 2 {
+			t.Skip("floor too low to construct a below-floor case")
+		}
+		t.Setenv(SmartGateEnv, "banana")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		current := floor - 1
+		expectSmartFiringGate(mock, current)
+		hashes := map[int]string{current: "h"}
+		// Unparseable defaults to enabled, so smart routing still runs (same
+		// reads as the below-floor case above).
+		expectSmartRemoteRead(mock, hashes, hashes)
+
+		err := CheckRemoteMigrateGate(context.Background(), db)
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.Decision != "" {
+			t.Errorf("unparseable env should still fall back to the blunt block (Decision \"\"), got %q", gateErr.Decision)
+		}
+		if gateErr.FallbackReason != fallbackReasonUnparseableEnv {
+			t.Errorf("FallbackReason = %q, want %q (takes priority over the underlying technical routing reason)", gateErr.FallbackReason, fallbackReasonUnparseableEnv)
+		}
+		if gateErr.UnrecognizedSmartGateEnv != "banana" {
+			t.Errorf("UnrecognizedSmartGateEnv = %q, want %q", gateErr.UnrecognizedSmartGateEnv, "banana")
+		}
+		msg := gateErr.UserMessage()
+		if !strings.Contains(msg, SmartGateEnv+"=banana") || !strings.Contains(msg, "was not recognized") {
+			t.Errorf("UserMessage should quote the unparseable value:\n%s", msg)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
 		}
 	})
 

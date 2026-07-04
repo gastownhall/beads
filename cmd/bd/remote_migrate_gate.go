@@ -53,6 +53,14 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 			gate["observed"] = fmt.Sprintf("this clone and the remote applied different content for migration(s) %s — already forked", schema.FormatMigrationVersions(e.SkewVersions))
 			gate["expected"] = "pick one canonical clone and re-bootstrap the others (data-loss decision)"
 			gate["skew_versions"] = e.SkewVersions
+		default:
+			// Blunt #4515 stop — name WHY the smart gate (#4516) could not do
+			// better (gastownhall/beads#4551 follow-up), so an agent/operator can
+			// tell "unreadable remote state" apart from "below the convergence
+			// floor" apart from "opted out" apart from "unparseable BD_SMART_GATE".
+			if e.FallbackReason != "" {
+				gate["fallback_reason"] = e.FallbackReason
+			}
 		}
 		m["remote_migrate_gate"] = gate
 	}

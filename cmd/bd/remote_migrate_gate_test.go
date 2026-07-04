@@ -107,3 +107,62 @@ func TestHandleRemoteMigrateGateJSON_Shape(t *testing.T) {
 		t.Errorf("migrate option must contain the escape command %q", gate.EscapeHint())
 	}
 }
+
+// TestHandleRemoteMigrateGateJSON_FallbackReason verifies the blunt-block JSON
+// carries the machine-readable fallback_reason field (gastownhall/beads#4551
+// follow-up), and that the smart-tailored adopt/fork-skew decisions never gain
+// it — those already explain themselves via "decision".
+func TestHandleRemoteMigrateGateJSON_FallbackReason(t *testing.T) {
+	captureJSON := func(gate *schema.RemoteMigrateGateError) map[string]interface{} {
+		origStderr := os.Stderr
+		r, w, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			t.Fatal(pipeErr)
+		}
+		os.Stderr = w
+		handleRemoteMigrateGateJSON(gate)
+		_ = w.Close()
+		os.Stderr = origStderr
+
+		var buf bytes.Buffer
+		if _, err := io.Copy(&buf, r); err != nil {
+			t.Fatal(err)
+		}
+		_ = r.Close()
+
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
+			t.Fatalf("json.Unmarshal stderr: %v\nstderr was: %s", err, buf.String())
+		}
+		obj, ok := parsed["remote_migrate_gate"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("remote_migrate_gate key missing or wrong type: %T", parsed["remote_migrate_gate"])
+		}
+		return obj
+	}
+
+	t.Run("blunt block carries fallback_reason", func(t *testing.T) {
+		gate := &schema.RemoteMigrateGateError{
+			CurrentVersion: 48, LatestVersion: 50, Pending: 2,
+			FallbackReason: "below-convergence-floor",
+		}
+		obj := captureJSON(gate)
+		if got, ok := obj["fallback_reason"].(string); !ok || got != "below-convergence-floor" {
+			t.Errorf("fallback_reason = %v, want %q", obj["fallback_reason"], "below-convergence-floor")
+		}
+		if _, ok := obj["decision"]; ok {
+			t.Errorf("blunt block must not carry a decision key, got %v", obj["decision"])
+		}
+	})
+
+	t.Run("adopt decision never carries fallback_reason", func(t *testing.T) {
+		gate := &schema.RemoteMigrateGateError{
+			CurrentVersion: 48, LatestVersion: 50, Pending: 2,
+			Decision: "adopt",
+		}
+		obj := captureJSON(gate)
+		if _, ok := obj["fallback_reason"]; ok {
+			t.Errorf("adopt decision must not carry fallback_reason, got %v", obj["fallback_reason"])
+		}
+	})
+}

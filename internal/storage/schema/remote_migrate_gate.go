@@ -46,11 +46,47 @@ type RemoteMigrateGateError struct {
 	// SkewVersions lists the migration versions whose content diverged between
 	// this clone and the remote (Decision == "fork-skew").
 	SkewVersions []int
+
+	// FallbackReason names why the smart gate (#4516) could not do better than
+	// this blunt stop, when Decision is empty (gastownhall/beads#4551
+	// follow-up: every fallback path used to produce the byte-identical #4515
+	// block with no way to tell them apart). See the fallbackReason* constants
+	// for the recognized values. Always empty when Decision is "adopt" or
+	// "fork-skew" — those stops already explain themselves.
+	FallbackReason string
+	// UnrecognizedSmartGateEnv carries a BD_SMART_GATE value that was set but
+	// not understood (only boolean values are recognized), mirroring
+	// UnrecognizedEnv above but for the smart gate's own opt-out variable, so
+	// a typo'd BD_SMART_GATE is surfaced instead of only its silent effect
+	// (the gate staying enabled by default). Set only when
+	// FallbackReason == fallbackReasonUnparseableEnv.
+	UnrecognizedSmartGateEnv string
 }
 
 const (
 	gateDecisionAdopt    = "adopt"
 	gateDecisionForkSkew = "fork-skew"
+)
+
+// fallbackReason* enumerates why the smart gate (#4516) fell back to the
+// blunt #4515 stop instead of resolving or tailoring it. Exactly one applies
+// per blunt stop (gastownhall/beads#4551 follow-up).
+const (
+	// fallbackReasonUnreadableState: the remote's cached schema state could
+	// not be read (no cached ref, a stale/pre-content_hash one, or the cached
+	// remote is simply behind this clone and so not a safe first-mover).
+	fallbackReasonUnreadableState = "unreadable-remote-state"
+	// fallbackReasonBelowFloor: remote and local agree, but a legacy
+	// non-deterministic migration is still pending (below the convergence
+	// floor the smart gate trusts for an unattended first-mover migrate).
+	fallbackReasonBelowFloor = "below-convergence-floor"
+	// fallbackReasonOptedOut: the operator disabled the smart gate outright
+	// (BD_SMART_GATE=0).
+	fallbackReasonOptedOut = "opted-out"
+	// fallbackReasonUnparseableEnv: BD_SMART_GATE was set but not a
+	// recognized boolean, so the gate stayed enabled by default (same as
+	// unset) but still could not resolve this particular stop.
+	fallbackReasonUnparseableEnv = "unparseable-env"
 )
 
 func (e *RemoteMigrateGateError) Error() string {
@@ -86,12 +122,35 @@ func FormatMigrationVersions(versions []int) string {
 // UserMessage returns the full multi-line error block for terminal output.
 func (e *RemoteMigrateGateError) UserMessage() string {
 	msg := e.Error() + "\n" + e.userBody()
+	msg += e.fallbackReasonNote()
 	if e.UnrecognizedEnv != "" {
 		msg += "\n" +
 			"  Note: " + AllowRemoteMigrateEnv + "=" + e.UnrecognizedEnv + " is set but was not recognized —\n" +
 			"  use " + AllowRemoteMigrateEnv + "=1 to unlock.\n"
 	}
 	return msg
+}
+
+// fallbackReasonNote returns the self-explaining line naming why the smart
+// gate (#4516) fell back to this blunt stop instead of resolving or
+// tailoring it (gastownhall/beads#4551 follow-up). Empty when FallbackReason
+// is unset — the smart-tailored adopt and fork-skew stops never set it and
+// already explain themselves in userBody.
+func (e *RemoteMigrateGateError) fallbackReasonNote() string {
+	var why string
+	switch e.FallbackReason {
+	case fallbackReasonUnreadableState:
+		why = "it could not read the remote's cached schema state (no cached ref, a stale/pre-content_hash one, or the cached remote is behind this clone)"
+	case fallbackReasonBelowFloor:
+		why = "this database is below the convergence floor — a legacy non-deterministic migration is still pending, so an unattended first-mover migrate is not safe to trust"
+	case fallbackReasonOptedOut:
+		why = "it is disabled (" + SmartGateEnv + "=0)"
+	case fallbackReasonUnparseableEnv:
+		why = SmartGateEnv + "=" + e.UnrecognizedSmartGateEnv + " is set but was not recognized (only boolean values enable/disable it), so it stayed enabled by default but still could not resolve this stop"
+	default:
+		return ""
+	}
+	return "\n  Smart gate (#4516): " + why + ".\n"
 }
 
 // userBody returns the decision-specific guidance block. The default (blunt
@@ -322,6 +381,15 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 	// verdicts fall through to the blunt #4515 block below, so opting out of
 	// smart mode (or an unreadable remote ref) is always at least as safe as
 	// before.
+	//
+	// fallbackReason/unrecognizedSmartGateEnv record WHY, for the blunt block
+	// below: an operator hitting it otherwise cannot tell "couldn't read the
+	// remote's cached state" apart from "below the convergence floor" apart
+	// from "opted out" apart from "unparseable BD_SMART_GATE value" — every
+	// path used to produce the byte-identical #4515 text (gastownhall/beads#4551
+	// follow-up).
+	fallbackReason := ""
+	unrecognizedSmartGateEnv := ""
 	if SmartGateEnabled() {
 		decision, skew := routeSmartGate(ctx, db, current, remoteName)
 		switch decision {
@@ -345,16 +413,30 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 				Decision:        gateDecisionForkSkew,
 				SkewVersions:    skew,
 			}
-		case smartUndetermined, smartBelowFloor:
-			// fall through to the blunt block
+		case smartBelowFloor:
+			fallbackReason = fallbackReasonBelowFloor
+		case smartUndetermined:
+			fallbackReason = fallbackReasonUnreadableState
 		}
+		// An unparseable BD_SMART_GATE value defaults to enabled (same as
+		// unset), so routing above still ran — but it is a more actionable
+		// fact for the operator than the technical routing outcome, so it
+		// takes priority as the surfaced reason.
+		if envState, envValue := smartGateEnvValue(); envState == smartGateEnvUnparseable {
+			fallbackReason = fallbackReasonUnparseableEnv
+			unrecognizedSmartGateEnv = envValue
+		}
+	} else {
+		fallbackReason = fallbackReasonOptedOut
 	}
 
 	return &RemoteMigrateGateError{
-		CurrentVersion:  current,
-		LatestVersion:   latest,
-		Pending:         len(pending),
-		UnrecognizedEnv: unrecognizedEnv,
+		CurrentVersion:           current,
+		LatestVersion:            latest,
+		Pending:                  len(pending),
+		UnrecognizedEnv:          unrecognizedEnv,
+		FallbackReason:           fallbackReason,
+		UnrecognizedSmartGateEnv: unrecognizedSmartGateEnv,
 	}
 }
 
