@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 // stubPrimeStoreUnavailable temporarily disconnects prime from any ambient
@@ -49,6 +51,7 @@ func TestOutputContextFunction(t *testing.T) {
 		ephemeralMode bool
 		localOnlyMode bool
 		noPushMode    bool
+		profile       config.AgentProfile // "" stubs config.ProfileConservative (default)
 		expectText    []string
 		rejectText    []string
 	}{
@@ -60,6 +63,16 @@ func TestOutputContextFunction(t *testing.T) {
 			localOnlyMode: false,
 			expectText:    []string{"Beads Workflow Context", "bd dolt push", "Team-maintainer behavior is opt-in", "conservative by default"},
 			rejectText:    []string{"bd export", "--from-main"},
+		},
+		{
+			name:          "CLI team-maintainer profile (non-ephemeral)",
+			mcpMode:       false,
+			stealthMode:   false,
+			ephemeralMode: false,
+			localOnlyMode: false,
+			profile:       config.ProfileTeamMaintainer,
+			expectText:    []string{"Beads Workflow Context", "agent.profile=team-maintainer", "bd dolt push", "git push"},
+			rejectText:    []string{"bd export", "--from-main", "Team-maintainer behavior is opt-in"},
 		},
 		{
 			name:          "CLI Normal (ephemeral)",
@@ -126,6 +139,16 @@ func TestOutputContextFunction(t *testing.T) {
 			rejectText:    []string{"bd export", "--from-main"},
 		},
 		{
+			name:          "MCP team-maintainer profile (non-ephemeral)",
+			mcpMode:       true,
+			stealthMode:   false,
+			ephemeralMode: false,
+			localOnlyMode: false,
+			profile:       config.ProfileTeamMaintainer,
+			expectText:    []string{"Beads Issue Tracker Active", "agent.profile=team-maintainer", "bd dolt push"},
+			rejectText:    []string{"bd export", "--from-main", "Team-maintainer behavior is opt-in"},
+		},
+		{
 			name:          "MCP Normal (ephemeral)",
 			mcpMode:       true,
 			stealthMode:   false,
@@ -187,6 +210,11 @@ func TestOutputContextFunction(t *testing.T) {
 			defer stubIsEphemeralBranch(tt.ephemeralMode)()
 			defer stubPrimeHasGitRemote(!tt.localOnlyMode)() // localOnly = !primeHasGitRemote
 			defer stubPrimeNoPushConfigured(tt.noPushMode)()
+			profile := tt.profile
+			if profile == "" {
+				profile = config.ProfileConservative
+			}
+			defer stubPrimeAgentProfile(profile)()
 
 			var buf bytes.Buffer
 			err := outputPrimeContext(&buf, tt.mcpMode, tt.stealthMode)
@@ -361,6 +389,18 @@ func stubPrimeNoPushConfigured(noPush bool) func() {
 	}
 	return func() {
 		primeNoPushConfigured = original
+	}
+}
+
+// stubPrimeAgentProfile temporarily replaces primeAgentProfile with a stub
+// returning profile (gh#3423 agent.profile knob).
+func stubPrimeAgentProfile(profile config.AgentProfile) func() {
+	original := primeAgentProfile
+	primeAgentProfile = func() config.AgentProfile {
+		return profile
+	}
+	return func() {
+		primeAgentProfile = original
 	}
 }
 

@@ -42,6 +42,7 @@ Common tool-level settings you can configure:
 |---------|------|---------------------|---------|-------------|
 | `json` | `--json` | `BD_JSON` | `false` | Output in JSON format |
 | `no-push` | `--no-push` | `BD_NO_PUSH` | `false` | Skip pushing to remote in `bd dolt push` |
+| `agent.profile` | - | `BD_AGENT_PROFILE` | `conservative` | Policy profile `bd prime` uses for git/commit authority wording: `conservative`, `minimal`, `team-maintainer` (see [SETUP.md](SETUP.md#policy-profiles)); invalid values fall back to `conservative` |
 | `federation.remote` | - | `BD_FEDERATION_REMOTE` | (none) | Dolt remote URL for federation |
 | `federation.sovereignty` | - | `BD_FEDERATION_SOVEREIGNTY` | (none) | Data sovereignty tier: `T1`, `T2`, `T3`, `T4` |
 | `dolt.auto-commit` | `--dolt-auto-commit` | `BD_DOLT_AUTO_COMMIT` | `on` | (Dolt backend) Automatically create a Dolt commit after successful write commands |

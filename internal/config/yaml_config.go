@@ -35,6 +35,7 @@ var YamlOnlyKeys = map[string]bool{
 	"git.no-gpg-sign": true,
 	"no-push":         true,
 	"no-git-ops":      true, // Disable git ops in bd prime session close protocol (GH#593)
+	"agent.profile":   true, // Explicit policy profile for bd prime's close protocol (GH#3423)
 
 	// Sync settings
 	"sync.remote":     true, // Primary: any Dolt-compatible remote URL
