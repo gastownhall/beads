@@ -7,7 +7,7 @@ Beads exports metrics via OTLP HTTP. Telemetry is **disabled by default** — ze
 | Service | Port | Role |
 |---------|------|------|
 | VictoriaMetrics | 8428 | OTLP metrics storage |
-| VictoriaLogs | 9428 | OTLP log storage |
+| VictoriaLogs | 9428 | Reserved for future OTLP log storage |
 | Grafana | 9429 | Dashboards |
 
 ```bash
@@ -25,6 +25,9 @@ export BD_OTEL_METRICS_URL=http://localhost:8428/opentelemetry/api/v1/push
 
 Every `bd` command will then automatically push its metrics.
 
+Log export is not implemented yet. `BD_OTEL_LOGS_URL` is reserved for a future
+VictoriaLogs exporter and does not activate telemetry today.
+
 ### Shell profile (recommended)
 
 ```bash
@@ -37,6 +40,7 @@ export BD_OTEL_METRICS_URL=http://localhost:8428/opentelemetry/api/v1/push
 | Variable | Example | Description |
 |----------|---------|-------------|
 | `BD_OTEL_METRICS_URL` | `http://localhost:8428/opentelemetry/api/v1/push` | Push metrics to VictoriaMetrics. Activates telemetry. |
+| `BD_OTEL_LOGS_URL` | `http://localhost:9428/insert/opentelemetry/v1/logs` | Reserved for future log export. Does not activate telemetry today. |
 | `BD_OTEL_STDOUT` | `true` | Write spans and metrics to stderr (dev/debug). Also activates telemetry. |
 
 ### Local debug mode
