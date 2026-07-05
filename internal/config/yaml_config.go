@@ -94,7 +94,7 @@ func IsYamlOnlyKey(key string) bool {
 	}
 
 	// Check prefix matches for nested keys
-	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics."}
+	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics.", "list."}
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(key, prefix) {
 			return true

@@ -293,17 +293,21 @@ func TestEmbeddedList(t *testing.T) {
 		if len(allIssues) <= 1 {
 			t.Errorf("--limit 0 should override BD_LIST_LIMIT=1, got %d", len(allIssues))
 		}
+
+		// --all is also an explicit list request and should override the configured default.
+		allFlagIssues := bdListJSONWithEnv(t, bd, dir, []string{"BD_LIST_LIMIT=1"}, "--all")
+		if len(allFlagIssues) <= 1 {
+			t.Errorf("--all should override BD_LIST_LIMIT=1, got %d", len(allFlagIssues))
+		}
 	})
 
 	t.Run("list_limit_config_file", func(t *testing.T) {
-		// Write config.yaml with list.limit: 1 (HOME=dir so ~/.config/bd/config.yaml).
-		configDir := filepath.Join(dir, ".config", "bd")
-		if err := os.MkdirAll(configDir, 0o755); err != nil {
-			t.Fatalf("mkdir config dir: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("list:\n  limit: 1\n"), 0o644); err != nil {
+		// Write project config.yaml with list.limit: 1.
+		configPath := filepath.Join(dir, ".beads", "config.yaml")
+		if err := os.WriteFile(configPath, []byte("list:\n  limit: 1\n"), 0o644); err != nil {
 			t.Fatalf("write config.yaml: %v", err)
 		}
+		defer func() { _ = os.Remove(configPath) }()
 
 		// Config file should limit to at most 1 issue.
 		limitedIssues := bdListJSON(t, bd, dir)
@@ -315,6 +319,12 @@ func TestEmbeddedList(t *testing.T) {
 		allIssues := bdListJSON(t, bd, dir, "--limit", "0")
 		if len(allIssues) <= 1 {
 			t.Errorf("--limit 0 should override config list.limit=1, got %d", len(allIssues))
+		}
+
+		// --all is also an explicit list request and should override the configured default.
+		allFlagIssues := bdListJSON(t, bd, dir, "--all")
+		if len(allFlagIssues) <= 1 {
+			t.Errorf("--all should override config list.limit=1, got %d", len(allFlagIssues))
 		}
 	})
 
