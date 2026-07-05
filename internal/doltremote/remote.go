@@ -1,6 +1,9 @@
 package doltremote
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
 // NativeSchemes are URL schemes that Dolt understands natively and should not
 // be converted through FromGitURL.
@@ -19,23 +22,23 @@ var NativeSchemes = []string{
 // Dolt-native URLs (dolthub://, file://, aws://, gs://, git+...) are returned
 // as-is. Git URLs (https://, ssh://, git@...) are converted via FromGitURL.
 // Unknown schemes are returned as-is and let dolt clone decide.
-func Normalize(url string) string {
+func Normalize(rawURL string) string {
 	for _, scheme := range NativeSchemes {
-		if strings.HasPrefix(url, scheme) {
-			return url
+		if strings.HasPrefix(rawURL, scheme) {
+			return rawURL
 		}
 	}
-	if strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://") ||
-		strings.HasPrefix(url, "ssh://") {
-		return FromGitURL(url)
+	if strings.HasPrefix(rawURL, "https://") || strings.HasPrefix(rawURL, "http://") ||
+		strings.HasPrefix(rawURL, "ssh://") {
+		return FromGitURL(rawURL)
 	}
-	if isWindowsDrivePath(url) {
-		return FromGitURL(url)
+	if isWindowsDrivePath(rawURL) {
+		return FromGitURL(rawURL)
 	}
-	if isSCPStyleGitURL(url) {
-		return FromGitURL(url)
+	if isSCPStyleGitURL(rawURL) {
+		return FromGitURL(rawURL)
 	}
-	return url
+	return rawURL
 }
 
 // FromGitURL converts a git remote URL to Dolt's remote format.
@@ -43,27 +46,27 @@ func Normalize(url string) string {
 // SCP-style SSH URLs are converted: git@host:path -> git+ssh://git@host/path
 // SSH URLs get "git+" prefix: ssh://... -> git+ssh://...
 // URLs that already have "git+" prefix are returned as-is.
-func FromGitURL(url string) string {
-	if strings.HasPrefix(url, "git+") {
-		return url
+func FromGitURL(rawURL string) string {
+	if strings.HasPrefix(rawURL, "git+") {
+		return rawURL
 	}
-	if strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://") {
-		return "git+" + url
+	if strings.HasPrefix(rawURL, "https://") || strings.HasPrefix(rawURL, "http://") {
+		return "git+" + rawURL
 	}
-	if strings.HasPrefix(url, "ssh://") {
-		return "git+" + url
+	if strings.HasPrefix(rawURL, "ssh://") {
+		return "git+" + rawURL
 	}
-	if isWindowsDrivePath(url) {
-		return "git+" + url
+	if isWindowsDrivePath(rawURL) {
+		return "git+" + rawURL
 	}
-	if idx := strings.Index(url, ":"); idx > 0 && !strings.Contains(url[:idx], "/") {
-		return "git+ssh://" + url[:idx] + "/" + url[idx+1:]
+	if idx := strings.Index(rawURL, ":"); idx > 0 && !strings.Contains(rawURL[:idx], "/") {
+		return "git+ssh://" + rawURL[:idx] + "/" + rawURL[idx+1:]
 	}
-	return "git+" + url
+	return "git+" + rawURL
 }
 
-func isSCPStyleGitURL(url string) bool {
-	if idx := strings.Index(url, ":"); idx > 0 && !strings.Contains(url[:idx], "/") && strings.Contains(url, "@") {
+func isSCPStyleGitURL(rawURL string) bool {
+	if idx := strings.Index(rawURL, ":"); idx > 0 && !strings.Contains(rawURL[:idx], "/") {
 		return true
 	}
 	return false
@@ -75,12 +78,18 @@ func isSCPStyleGitURL(url string) bool {
 //   - https://github.com/org/repo.git  ≡  git+https://github.com/org/repo.git
 //   - git@github.com:org/repo.git      ≡  git+ssh://git@github.com/org/repo.git
 //
-// Algorithm: normalize to Dolt's git+ prefix form, strip trailing slashes and .git.
-func CanonicalForComparison(url string) string {
-	url = Normalize(url)
-	url = strings.TrimRight(url, "/")
-	url = strings.TrimSuffix(url, ".git")
-	return url
+// Algorithm: normalize to Dolt's git+ prefix form, strip credentials, lowercase
+// the host, and strip trailing slashes and .git.
+func CanonicalForComparison(rawURL string) string {
+	rawURL = Normalize(rawURL)
+	if parsed, err := url.Parse(rawURL); err == nil && parsed.Host != "" {
+		parsed.User = nil
+		parsed.Host = strings.ToLower(parsed.Host)
+		rawURL = parsed.String()
+	}
+	rawURL = strings.TrimRight(rawURL, "/")
+	rawURL = strings.TrimSuffix(rawURL, ".git")
+	return rawURL
 }
 
 func isWindowsDrivePath(path string) bool {

@@ -98,6 +98,31 @@ func TestCanonicalForComparison_TrailingSlashAndDotGit(t *testing.T) {
 	}
 }
 
+func TestCanonicalForComparison_LowercasesHost(t *testing.T) {
+	lower := doltremote.CanonicalForComparison("https://github.com/org/repo.git")
+	mixed := doltremote.CanonicalForComparison("https://GitHub.com/org/repo.git")
+	if lower != mixed {
+		t.Errorf("mixed-case host canonical mismatch: %q vs %q", lower, mixed)
+	}
+}
+
+func TestCanonicalForComparison_StripsCredentials(t *testing.T) {
+	clean := doltremote.CanonicalForComparison("https://github.com/org/repo.git")
+	withToken := doltremote.CanonicalForComparison("https://token@github.com/org/repo.git")
+	withUserPass := doltremote.CanonicalForComparison("https://user:pass@github.com/org/repo.git")
+	if clean != withToken || clean != withUserPass {
+		t.Errorf("credential variants differ: %q %q %q", clean, withToken, withUserPass)
+	}
+}
+
+func TestCanonicalForComparison_UserlessSCPAndGitSSH(t *testing.T) {
+	scp := doltremote.CanonicalForComparison("github.com:org/repo.git")
+	ssh := doltremote.CanonicalForComparison("git+ssh://github.com/org/repo.git")
+	if scp != ssh {
+		t.Errorf("user-less SCP and git+ssh canonical mismatch: %q vs %q", scp, ssh)
+	}
+}
+
 // --- doltRemoteMatchesGitOrigin ---
 
 func TestDoltRemoteMatchesGitOrigin_NoGitDir_ReturnsFalse(t *testing.T) {
