@@ -87,6 +87,51 @@ func ManageStartedAt(oldIssue *types.Issue, updates map[string]interface{}, setC
 	return setClauses, args
 }
 
+// ManageLeaseOnUpdate keeps lease ownership coherent when generic updates alter
+// status or assignee. Claim/heartbeat own the normal lease lifecycle, but bd
+// update can transfer or reopen work directly.
+func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}, ctx context.Context) ([]string, []interface{}) {
+	rawStatus, hasStatus := updates["status"]
+	rawAssignee, hasAssignee := updates["assignee"]
+	if !hasStatus && !hasAssignee {
+		return setClauses, args
+	}
+
+	newStatus := string(oldIssue.Status)
+	if hasStatus {
+		switch v := rawStatus.(type) {
+		case string:
+			newStatus = v
+		case types.Status:
+			newStatus = string(v)
+		default:
+			return setClauses, args
+		}
+	}
+
+	newAssignee := oldIssue.Assignee
+	if hasAssignee {
+		switch v := rawAssignee.(type) {
+		case nil:
+			newAssignee = ""
+		case string:
+			newAssignee = v
+		default:
+			newAssignee = fmt.Sprint(v)
+		}
+	}
+
+	if newStatus != string(types.StatusInProgress) || newAssignee == "" {
+		setClauses = append(setClauses, "lease_expires_at = NULL", "heartbeat_at = NULL")
+		return setClauses, args
+	}
+
+	now := time.Now().UTC()
+	setClauses = append(setClauses, "lease_expires_at = ?", "heartbeat_at = ?")
+	args = append(args, now.Add(leaseTTL(ctx)), now)
+	return setClauses, args
+}
+
 // DetermineEventType returns the appropriate event type for an update.
 func DetermineEventType(oldIssue *types.Issue, updates map[string]interface{}) types.EventType {
 	statusVal, hasStatus := updates["status"]
@@ -214,6 +259,17 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 
 	// Auto-manage started_at (set on transition to in_progress). (GH#2796)
 	setClauses, args = ManageStartedAt(oldIssue, updates, setClauses, args)
+
+	// Auto-manage leases when direct updates change status or assignee.
+	setClauses, args = ManageLeaseOnUpdate(oldIssue, updates, setClauses, args, ctx)
+
+	// Rewrite row_lock on every update so a concurrent lease mutation (heartbeat/
+	// reclaim) collides on this shared cell and is forced to conflict-and-retry
+	// rather than silently cell-merging two writes to different columns of the
+	// same row (see lease.go). This is the "every mutating path writes row_lock"
+	// invariant the lease scheme depends on.
+	setClauses = append(setClauses, "row_lock = ?")
+	args = append(args, freshRowLock())
 
 	args = append(args, id)
 

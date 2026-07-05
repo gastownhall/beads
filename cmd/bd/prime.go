@@ -168,6 +168,10 @@ Config options:
 			}
 			return nil
 		}
+		// Append the AGENTS.md/CLAUDE.md divergence reminder only when both
+		// files are independent regulars carrying the bd marker; otherwise this
+		// adds nothing (zero output, negligible cost).
+		buf.WriteString(primeDivergenceReminder(""))
 		emit(buf.String())
 		return nil
 	},

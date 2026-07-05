@@ -127,6 +127,7 @@ var readOnlyCommands = map[string]bool{
 	"blocked":    true,
 	"count":      true,
 	"search":     true,
+	"query":      true,
 	"graph":      true,
 	"duplicates": true,
 	"comments":   true, // list comments (not add)
@@ -141,6 +142,25 @@ var readOnlyCommands = map[string]bool{
 // that would trigger file watchers. See GH#804.
 func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
+}
+
+// isWorkingSetReconcileCommand reports whether cmd's whole purpose is to
+// reconcile the Dolt working set: "bd dolt commit" or "bd vc commit". These
+// commands are the documented recovery from a pending-migration dirty-table
+// refusal, but they also open the store, and an open runs the migration -
+// hitting that same refusal before the commit that would clear the dirty
+// state ever runs. Opening leniently (embeddeddolt.OpenForWorkingSetReconcile)
+// breaks that deadlock by skipping the migration instead of failing the open
+// (gastownhall/beads#4566).
+func isWorkingSetReconcileCommand(cmd *cobra.Command) bool {
+	if cmd.Name() != "commit" {
+		return false
+	}
+	parent := cmd.Parent()
+	if parent == nil {
+		return false
+	}
+	return parent.Name() == "dolt" || parent.Name() == "vc"
 }
 
 // loadBeadsEnvFile loads .beads/.env into process environment for per-project
@@ -985,8 +1005,9 @@ var rootCmd = &cobra.Command{
 		// on a different filesystem (e.g., ext4 for performance on WSL).
 		doltPath := doltserver.ResolveDoltDir(beadsDir)
 		doltCfg := &dolt.Config{
-			ReadOnly: useReadOnly,
-			BeadsDir: beadsDir,
+			ReadOnly:    useReadOnly,
+			BeadsDir:    beadsDir,
+			LenientOpen: isWorkingSetReconcileCommand(cmd),
 		}
 
 		// Load config to get database name and server connection settings
@@ -1262,7 +1283,7 @@ var rootCmd = &cobra.Command{
 			// Read-only commands must not perform post-run maintenance writes or emit
 			// sync guidance after machine-readable output.
 			if shouldRunPostCommandAutoExport(cmd) {
-				if err := maybeAutoExport(rootCtx, serverMode, commandAllowsEmptyAutoExport(cmd)); err != nil {
+				if err := maybeAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd)); err != nil {
 					return HandleError("%v", err)
 				}
 			}

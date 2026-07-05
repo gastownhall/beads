@@ -935,6 +935,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			ProxiedServer:   initProxiedServer,
 			CreateIfMissing: true, // bd init is the only path that should create databases
 			AutoStart:       initServerMode && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
+			ServerTLS:       initDoltServerTLSFromEnv(),
 		}
 		if serverHost != "" {
 			doltCfg.ServerHost = serverHost
@@ -2314,10 +2315,6 @@ func shouldConfigureInitDoltRemote(syncURL string, syncFromRemote, syncURLFromCo
 	return !localOnly && shouldWireInitRemote(syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin)
 }
 
-func isDoltLocalOnly() bool {
-	return config.GetBool("dolt.local-only")
-}
-
 // handleRemoteSafetyDecision applies a CheckRemoteSafety decision at an init
 // remote-divergence checkpoint. It returns (bootstrap, err): bootstrap is true
 // when the caller should clone/bootstrap from the remote, and err is a non-nil
@@ -2410,6 +2407,10 @@ func initRemoteCloneMode(initServerMode, externalServer bool) remoteCloneMode {
 		return remoteCloneExternalServer
 	}
 	return remoteCloneCLI
+}
+
+func initDoltServerTLSFromEnv() bool {
+	return (&configfile.Config{}).GetDoltServerTLS()
 }
 
 func initTimeCloneConfig(serverMode bool, serverHost string, serverPort int, serverSocket, serverUser, dbName string) *configfile.Config {

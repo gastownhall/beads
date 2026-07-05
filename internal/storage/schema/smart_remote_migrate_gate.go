@@ -7,13 +7,19 @@ import (
 	"strconv"
 )
 
-// SmartGateEnv opts a clone into the state-aware ("smart") remote-migrate gate
-// (gastownhall/beads#4516). When unset/false, the gate keeps its blunt #4515
-// behavior: any remote-backed database with pending migrations refuses every
-// write and hands the operator the migrate-or-adopt decision. When set to a
-// boolean true, the gate instead consults the remote's cached schema state and
+// SmartGateEnv controls the state-aware ("smart") remote-migrate gate
+// (gastownhall/beads#4516). The smart gate is ON by default: when the blunt
+// gate would fire, it consults the remote's cached schema state and
 // auto-resolves the one provably-safe case (first-mover migrate), while still
 // stopping — with sharper guidance — on the cases that genuinely need a human.
+// Every fallback path (unreadable remote state, below the convergence floor)
+// degrades to the blunt #4515 block, so the default is never less safe than
+// the blunt gate; it only resolves cases the blunt gate cannot distinguish.
+//
+// Set BD_SMART_GATE=0 (or any boolean false) to opt out and keep the blunt
+// #4515 behavior unconditionally: any remote-backed database with pending
+// migrations refuses every write and hands the operator the
+// migrate-or-adopt decision.
 //
 // It is consulted only once the blunt gate would otherwise fire, so exporting it
 // permanently costs nothing on the common open path.
@@ -42,14 +48,47 @@ const smartGateDefaultRemote = "origin"
 // allowlist so the two cannot drift if a new entry is ever added.
 const LastNonDeterministicMigration = 43
 
-// SmartGateEnabled reports whether the operator opted into the smart gate.
-func SmartGateEnabled() bool {
+// smartGateEnvState classifies the raw BD_SMART_GATE value.
+type smartGateEnvState int
+
+const (
+	smartGateEnvUnset smartGateEnvState = iota
+	smartGateEnvEnabled
+	smartGateEnvDisabled
+	// smartGateEnvUnparseable: set but strconv.ParseBool rejected it. Treated
+	// the same as smartGateEnvEnabled by SmartGateEnabled (the default holds),
+	// but callers building the fallback-block message (gastownhall/beads#4551
+	// follow-up) still want to tell the operator their value was ignored.
+	smartGateEnvUnparseable
+)
+
+// smartGateEnvValue reads and classifies BD_SMART_GATE, returning the raw
+// value alongside the classification so a caller can quote it back to the
+// operator. Split out of SmartGateEnabled so "unset"/"valid true" (silently
+// fine) can be told apart from "set but unparseable" (worth a note) without
+// re-parsing.
+func smartGateEnvValue() (smartGateEnvState, string) {
 	v := os.Getenv(SmartGateEnv)
 	if v == "" {
-		return false
+		return smartGateEnvUnset, ""
 	}
 	on, err := strconv.ParseBool(v)
-	return err == nil && on
+	if err != nil {
+		return smartGateEnvUnparseable, v
+	}
+	if on {
+		return smartGateEnvEnabled, v
+	}
+	return smartGateEnvDisabled, v
+}
+
+// SmartGateEnabled reports whether the smart gate is active. It defaults to
+// true; the operator opts out with BD_SMART_GATE=0 (any parseable boolean
+// false). An unparseable value keeps the default rather than silently
+// disabling the gate.
+func SmartGateEnabled() bool {
+	state, _ := smartGateEnvValue()
+	return state != smartGateEnvDisabled
 }
 
 // smartGateDecision is the routing verdict for a remote-backed database with

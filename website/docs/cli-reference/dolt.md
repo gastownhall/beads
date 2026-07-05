@@ -183,6 +183,12 @@ Add a Dolt remote
 bd dolt remote add <name> <url> [flags]
 ```
 
+**Flags:**
+
+```
+      --allow-git-origin   Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)
+```
+
 #### bd dolt remote list
 
 List configured Dolt remotes
@@ -257,10 +263,10 @@ Show the status of the Dolt engine for the current project.
 In embedded mode, reports that the Dolt engine runs in-process and shows
 the on-disk data directory. For beads-managed (local) servers, displays
 PID, port, and data directory from the local PID file. For externally-
-managed servers — either a remote dolt_server_host or a local server
-managed outside bd (dolt.auto-start: false, e.g. an orchestrator-shared
-sql-server) — pings the configured endpoint via SQL and reports
-reachability, server version, and database.
+managed servers — a shared server (dolt.shared-server: true), a remote
+dolt_server_host, or a local server managed outside bd (dolt.auto-start:
+false, e.g. an orchestrator-shared sql-server) — pings the configured
+endpoint via SQL and reports reachability, server version, and database.
 
 ```
 bd dolt status [flags]

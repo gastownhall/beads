@@ -180,7 +180,13 @@ bd dolt remote
 Add a Dolt remote
 
 ```
-bd dolt remote add <name> <url>
+bd dolt remote add <name> <url> [flags]
+```
+
+**Flags:**
+
+```
+      --allow-git-origin   Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)
 ```
 
 #### bd dolt remote list
@@ -196,7 +202,13 @@ bd dolt remote list
 Remove a Dolt remote
 
 ```
-bd dolt remote remove <name>
+bd dolt remote remove <name> [flags]
+```
+
+**Flags:**
+
+```
+      --force   Force remove even when SQL and CLI URLs conflict
 ```
 
 ### bd dolt set

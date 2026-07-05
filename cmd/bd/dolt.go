@@ -340,6 +340,18 @@ The remote must already exist (see 'bd dolt remote add').`,
 			fmt.Println("skipping push: rig is local-only (no-push: true)")
 			return
 		}
+		if isDoltLocalOnly() {
+			if jsonOutput {
+				if err := outputJSONRaw(map[string]string{"status": "disabled", "reason": "dolt.local-only=true"}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
+				return
+			}
+			fmt.Println("Remote sync is disabled for this project (dolt.local-only=true).")
+			fmt.Println("Your issues are stored locally in .beads/.")
+			fmt.Println("To re-enable remote sync: bd config unset dolt.local-only")
+			return
+		}
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
@@ -413,6 +425,18 @@ variables for authentication.
 Use --remote to pull from a specific named remote instead of the default.
 The remote must already exist (see 'bd dolt remote add').`,
 	Run: func(cmd *cobra.Command, args []string) {
+		if isDoltLocalOnly() {
+			if jsonOutput {
+				if err := outputJSONRaw(map[string]string{"status": "disabled", "reason": "dolt.local-only=true"}); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
+				return
+			}
+			fmt.Println("Remote sync is disabled for this project (dolt.local-only=true).")
+			fmt.Println("Nothing to pull.")
+			fmt.Println("To re-enable remote sync: bd config unset dolt.local-only")
+			return
+		}
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
@@ -573,10 +597,10 @@ var doltStatusCmd = &cobra.Command{
 In embedded mode, reports that the Dolt engine runs in-process and shows
 the on-disk data directory. For beads-managed (local) servers, displays
 PID, port, and data directory from the local PID file. For externally-
-managed servers — either a remote dolt_server_host or a local server
-managed outside bd (dolt.auto-start: false, e.g. an orchestrator-shared
-sql-server) — pings the configured endpoint via SQL and reports
-reachability, server version, and database.`,
+managed servers — a shared server (dolt.shared-server: true), a remote
+dolt_server_host, or a local server managed outside bd (dolt.auto-start:
+false, e.g. an orchestrator-shared sql-server) — pings the configured
+endpoint via SQL and reports reachability, server version, and database.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
@@ -608,7 +632,7 @@ reachability, server version, and database.`,
 			// — which is the exact failure mode this PR addresses.
 			fmt.Fprintf(os.Stderr, "Warning: cannot load .beads config (%v); falling back to PID-file status path\n", cfgErr)
 		}
-		if cfg != nil && shouldUseExternalDoltStatus(cfg, doltserver.IsAutoStartDisabled()) {
+		if cfg != nil && shouldUseExternalDoltStatus(cfg, doltserver.IsAutoStartDisabled(), doltserver.IsSharedServerMode()) {
 			runExternalDoltStatus(beadsDir, cfg)
 			return
 		}
@@ -654,11 +678,26 @@ func renderLocalDoltStatus(state *doltserver.State, serverDir string) {
 		fmt.Println("  Debug: on (loglevel=debug, --prof cpu)")
 		fmt.Printf("  Profile dir: %s\n", doltserver.DebugProfileDir(serverDir))
 	}
+	if isDoltLocalOnly() {
+		fmt.Println("  Remote sync: disabled (dolt.local-only=true)")
+	}
 }
 
 // shouldUseExternalDoltStatus reports whether bd dolt status should treat
 // the server as externally-managed and probe via SQL instead of consulting
 // the local PID file. Returns true when:
+//   - shared-server mode is enabled (and not proxied) — a shared server's
+//     lifecycle is owned by something other than bd (a Homebrew service,
+//     systemd/launchd unit, or a sibling clone), so bd has no PID file for
+//     it even when the host is local and auto-start is enabled. Without this
+//     branch, status reports "not running" while bd CRUD commands, bd dolt
+//     test, and bd dolt show all connect to the server fine (GH#3218). This
+//     is checked BEFORE the server-mode guard because shared-server mode
+//     wins over a stale metadata.json that still pins dolt_mode="embedded"
+//     — mirroring the loadServerMode override in main.go (GH#2946). That
+//     stale-metadata case (dolt.shared-server: true in config.yaml, which
+//     IsDoltServerMode does not consult) is exactly where the residual
+//     GH#3218 bug lived.
 //   - dolt_mode=server with a non-local host (Hosted Dolt, remote shared
 //     sql-server) — the PID file is on a different machine.
 //   - dolt_mode=server with a local host but bd auto-start is disabled —
@@ -670,10 +709,23 @@ func renderLocalDoltStatus(state *doltserver.State, serverDir string) {
 // When false, the caller falls back to the PID-file path that reports
 // PID, port, log path, and data directory for bd-managed servers.
 //
-// autoStartDisabled is passed in (rather than read here) so the predicate
-// is pure and unit-testable without manipulating package-level config.
-func shouldUseExternalDoltStatus(cfg *configfile.Config, autoStartDisabled bool) bool {
-	if cfg == nil || !cfg.IsDoltServerMode() {
+// autoStartDisabled and sharedServerMode are passed in (rather than read
+// here) so the predicate is pure and unit-testable without manipulating
+// package-level config or process env.
+func shouldUseExternalDoltStatus(cfg *configfile.Config, autoStartDisabled, sharedServerMode bool) bool {
+	if cfg == nil {
+		return false
+	}
+	// Shared-server mode wins even over an explicit metadata.json
+	// dolt_mode="embedded" (loadServerMode override, main.go, GH#2946), so
+	// this must precede the IsDoltServerMode guard — otherwise a workspace
+	// with dolt.shared-server: true in config.yaml and stale embedded
+	// metadata still falls through to the PID-file "not running" path.
+	// Proxied-server mode is excluded, matching that override's !psm guard.
+	if sharedServerMode && !cfg.IsDoltProxiedServerMode() {
+		return true
+	}
+	if !cfg.IsDoltServerMode() {
 		return false
 	}
 	if !isLocalHost(cfg.GetDoltServerHost()) {
@@ -808,6 +860,9 @@ func showEmbeddedDoltStatus(beadsDir string) {
 	fmt.Printf("  Data: %s\n", dataDir)
 	if !dataDirExists {
 		fmt.Printf("  %s\n", ui.RenderWarn("Data directory does not exist — run 'bd init' to create it"))
+	}
+	if isDoltLocalOnly() {
+		fmt.Println("  Remote sync: disabled (dolt.local-only=true)")
 	}
 }
 
@@ -1063,6 +1118,21 @@ var doltRemoteAddCmd = &cobra.Command{
 	Short: "Add a Dolt remote",
 	Args:  cobra.ExactArgs(2),
 	Run: func(cmd *cobra.Command, args []string) {
+		if isDoltLocalOnly() {
+			fmt.Fprintln(os.Stderr, "Error: cannot add Dolt remote: remote sync is disabled (dolt.local-only=true).")
+			fmt.Fprintln(os.Stderr, "To re-enable remote sync: bd config unset dolt.local-only")
+			os.Exit(1)
+		}
+		allowGitOrigin, _ := cmd.Flags().GetBool("allow-git-origin")
+		if doltRemoteMatchesGitOrigin(args[1]) {
+			if !allowGitOrigin {
+				fmt.Fprintf(os.Stderr, "Error: refusing to add %q as a Dolt remote — this URL matches the git origin.\n", args[1])
+				fmt.Fprintln(os.Stderr, "  Hint: use --allow-git-origin to proceed anyway (e.g. monorepo layout).")
+				fmt.Fprintln(os.Stderr, "  Hint: or set dolt.local-only=true to disable remote sync entirely.")
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "Warning: %q matches the git origin — proceeding because --allow-git-origin is set.\n", args[1])
+		}
 		ctx := context.Background()
 		st := getStore()
 		if st == nil {
@@ -1238,6 +1308,7 @@ func init() {
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
+	doltRemoteAddCmd.Flags().Bool("allow-git-origin", false, "Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)")
 	doltRemoteCmd.AddCommand(doltRemoteAddCmd)
 	doltRemoteCmd.AddCommand(doltRemoteListCmd)
 	doltRemoteCmd.AddCommand(doltRemoteRemoveCmd)

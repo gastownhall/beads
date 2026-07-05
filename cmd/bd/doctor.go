@@ -551,6 +551,10 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Check 7f1: Dolt remote URL collision with git origin (be-7eu1d)
+	doltOriginCheck := convertWithCategory(doctor.CheckDoltRemoteGitOrigin(path), doctor.CategoryDolt)
+	result.Checks = append(result.Checks, doltOriginCheck)
+
 	// Check 7f: Migration content skew vs the cached remote ref (#4259). Advisory.
 	skewCheck := convertWithCategory(doctor.CheckMigrationContentSkew(sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, skewCheck)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -44,10 +45,16 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 
 	now := time.Now().UTC()
 
+	// row_lock is rewritten on close so a concurrent reclaim (which also rewrites
+	// row_lock) collides on this cell and is forced to conflict-and-retry rather
+	// than silently cell-merging a revert-to-ready over a completed close (see
+	// lease.go). lease_expires_at/heartbeat_at are cleared: a closed issue holds
+	// no lease.
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		UPDATE %s SET status = ?, closed_at = ?, updated_at = ?, close_reason = ?, closed_by_session = ?
+		UPDATE %s SET status = ?, closed_at = ?, updated_at = ?, close_reason = ?, closed_by_session = ?,
+			lease_expires_at = NULL, heartbeat_at = NULL, row_lock = ?
 		WHERE id = ? AND status != ?
-	`, issueTable), types.StatusClosed, now, now, reason, session, id, types.StatusClosed)
+	`, issueTable), types.StatusClosed, now, now, reason, session, freshRowLock(), id, types.StatusClosed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to close issue: %w", err)
 	}
@@ -62,7 +69,7 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 			fmt.Sprintf(`SELECT status FROM %s WHERE id = ?`, issueTable), id,
 		).Scan(&status)
 		if qerr == sql.ErrNoRows {
-			return nil, fmt.Errorf("issue not found: %s", id)
+			return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 		}
 		if qerr != nil {
 			return nil, fmt.Errorf("failed to check issue existence: %w", qerr)

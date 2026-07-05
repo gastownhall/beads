@@ -294,12 +294,20 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 			delete(dirtyBefore, t.name)
 		}
 	}
+	if recoverable, err := failed0053DirtyTablesAreRecoverable(ctx, db, dirtyBefore); err != nil {
+		return 0, fmt.Errorf("checking failed v53 migration recovery: %w", err)
+	} else if recoverable {
+		log.Printf("schema migration recovering known failed v53 dirty tables: %s", strings.Join(sortedDirtyTableNames(dirtyBefore), ", "))
+		for table := range dirtyBefore {
+			delete(dirtyBefore, table)
+		}
+	}
 	touchedDirtyTables, err := mainSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
 	if err != nil {
 		return 0, fmt.Errorf("checking dirty tables against pending migrations: %w", err)
 	}
 	if len(touchedDirtyTables) > 0 {
-		return 0, fmt.Errorf("pending schema migrations alter pre-existing dirty tables: %s", strings.Join(touchedDirtyTables, ", "))
+		return 0, &DirtyTablesError{Tables: touchedDirtyTables}
 	}
 	dirtyBeforeSignatures, err := dirtyTableSignatures(ctx, db, dirtyBefore)
 	if err != nil {
@@ -357,6 +365,16 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 		return applied, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
 	}
 	if len(touchedIgnoredDirtyTables) > 0 {
+		// Deliberately a plain, untyped error (unlike the main-source guard
+		// above, which returns *DirtyTablesError): this check fires mid-pass,
+		// after the main-source migrations have already applied. A lenient
+		// caller (embeddeddolt's openReadOnlyCommand / openWorkingSetReconcile
+		// intents) skipping this and returning as if the open succeeded would
+		// let a reconcile commit checkpoint a half-applied migration pass.
+		// The ignored source also tracks bd-internal state (dolt_ignore'd
+		// tables like ignored_schema_migrations), not expected user data, so
+		// there is no dirty-commit recovery story to support here the way
+		// there is for the main-source guard (#4566 scope).
 		return applied, fmt.Errorf("pending ignored schema migrations alter pre-existing dirty tables: %s", strings.Join(touchedIgnoredDirtyTables, ", "))
 	}
 
@@ -393,6 +411,67 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	}
 
 	return applied, nil
+}
+
+func failed0053DirtyTablesAreRecoverable(ctx context.Context, db DBConn, dirtyBefore map[string]dirtyTableState) (bool, error) {
+	if len(dirtyBefore) == 0 {
+		return false, nil
+	}
+	current, err := mainSource.currentVersion(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	if current != 52 {
+		return false, nil
+	}
+
+	allowed := map[string]struct{}{
+		"child_counters": {},
+		"comments":       {},
+		"dependencies":   {},
+		"events":         {},
+		"issues":         {},
+		"labels":         {},
+		// 0051 drops the legacy DEFAULT (UUID()) on these aux tables. In a
+		// single-pass v49->v53 batch (MigrateUp commits once at the end),
+		// that DROP DEFAULT is still uncommitted when 0053 fails, so a
+		// legacy-default DB trips this gate with these tables dirty too.
+		// The change is an idempotent, schema-only DROP DEFAULT, so it is
+		// safe to fold into the recovery commit (#4555).
+		"issue_snapshots":      {},
+		"compaction_snapshots": {},
+	}
+	for table := range dirtyBefore {
+		if _, ok := allowed[table]; !ok {
+			return false, nil
+		}
+	}
+
+	needsRepair, err := wispDependenciesNeed0053Repair(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	return needsRepair, nil
+}
+
+func wispDependenciesNeed0053Repair(ctx context.Context, db DBConn) (bool, error) {
+	table, err := schemaTableExists(ctx, db, "wisp_dependencies")
+	if err != nil {
+		return false, err
+	}
+	if !table {
+		return false, nil
+	}
+	for _, column := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
+		present, err := schemaColumnExists(ctx, db, "wisp_dependencies", column)
+		if err != nil {
+			return false, err
+		}
+		if !present {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func migrationWorkNeeded(ctx context.Context, db DBConn) (bool, error) {
@@ -737,16 +816,50 @@ func (m migrationSource) bootstrapSQL() string {
 }
 
 // hasContentHashColumn reports whether the cursor table already carries the
-// content_hash column. It probes INFORMATION_SCHEMA, so a not-yet-created table
-// simply reports false.
+// content_hash column. A not-yet-created table simply reports false.
+//
+// It probes a single table with SHOW COLUMNS rather than INFORMATION_SCHEMA.COLUMNS,
+// whose predicate Dolt does not push down. The LIKE narrows the result set, but
+// we still compare the Field name exactly because '_' is a LIKE single-character
+// wildcard.
 func (m migrationSource) hasContentHashColumn(ctx context.Context, db DBConn) (bool, error) {
-	var count int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'content_hash'`,
-		m.cursorTable).Scan(&count); err != nil {
+	//nolint:gosec // G201: m.cursorTable is a hardcoded constant; the LIKE literal is fixed.
+	rows, err := db.QueryContext(ctx, "SHOW COLUMNS FROM "+m.cursorTable+" LIKE 'content_hash'")
+	if err != nil {
+		// SHOW COLUMNS errors on a missing table; the old INFORMATION_SCHEMA
+		// probe returned count 0 instead. Preserve that: an absent cursor table
+		// has no content_hash column.
+		if dberrors.IsTableNotExist(err) {
+			return false, nil
+		}
 		return false, fmt.Errorf("checking %s.content_hash: %w", m.cursorTable, err)
 	}
-	return count > 0, nil
+	defer func() { _ = rows.Close() }()
+
+	cols, err := rows.Columns()
+	if err != nil {
+		return false, fmt.Errorf("checking %s.content_hash: %w", m.cursorTable, err)
+	}
+	// SHOW COLUMNS returns Field, Type, Null, Key, Default, Extra (and possibly
+	// more on some servers); scan every column into RawBytes and read the first
+	// ("Field"), which is the column name.
+	cells := make([]sql.RawBytes, len(cols))
+	dest := make([]any, len(cols))
+	for i := range cells {
+		dest[i] = &cells[i]
+	}
+	for rows.Next() {
+		if err := rows.Scan(dest...); err != nil {
+			return false, fmt.Errorf("checking %s.content_hash: %w", m.cursorTable, err)
+		}
+		if len(cells) > 0 && string(cells[0]) == "content_hash" {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("checking %s.content_hash: %w", m.cursorTable, err)
+	}
+	return false, nil
 }
 
 // ensureContentHashColumn adds the content_hash column to an existing cursor

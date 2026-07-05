@@ -214,6 +214,17 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.1.0",
+		Date:    "2026-07-04",
+		Changes: []string{
+			"STABLE: first stable 1.1.x release; includes the rc.1 and rc.2 cross-clone migration-safety work plus post-rc.2 recovery fixes.",
+			"UPGRADE: back up with bd export --all before migrating older or remote-backed databases; the upgrade docs now carry the stable 1.1.0 recipes.",
+			"FIX: failed v53 migrations can self-heal on the next open, including wisp_dependencies split-column drift and dirty snapshot tables left by a half-applied pass (#4555, #4558).",
+			"FIX: bd dolt commit and bd vc commit can commit a dirty embedded working set that is blocking a pending schema migration; after that, bd migrate can proceed (#4566, #4567).",
+			"NEW: the state-aware remote-migrate gate is enabled by default; safe first-mover migrations proceed, while remote-ahead or content-skew cases still stop for adoption or human review (#4516).",
+		},
+	},
+	{
 		Version: "1.1.0-rc.2",
 		Date:    "2026-07-02",
 		Changes: []string{

@@ -204,6 +204,17 @@ func (s *InstrumentedStorage) SearchIssuesWithCounts(ctx context.Context, query 
 	return v, err
 }
 
+func (s *InstrumentedStorage) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
+	ctx, span, t := s.op(ctx, "SearchIssueIDs", attrs...)
+	ids, err := s.inner.SearchIssueIDs(ctx, query, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(ids)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return ids, err
+}
+
 // ── Dependencies ────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {

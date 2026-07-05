@@ -161,7 +161,13 @@ func TestMigration0053PromotesRigWisps(t *testing.T) {
 		t.Fatalf("commit seed fixture: %v", err)
 	}
 
-	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+	// This test exercises the rig-wisp promotion in migration 0053 specifically.
+	// MigrateUp only re-applies versions strictly greater than MAX(applied), so to
+	// replay 0053 we delete every row >= 53 (not just LatestVersion(), which now
+	// points past 0053 as later migrations like 0054 land). 0053 re-runs the
+	// promotion; any later migration replays as a guarded no-op.
+	const rigWispsMigrationVersion = 53
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= ?", rigWispsMigrationVersion); err != nil {
 		t.Fatalf("mark 0053 pending: %v", err)
 	}
 	if _, err := schema.MigrateUp(ctx, store.db); err != nil {

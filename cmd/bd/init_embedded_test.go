@@ -98,6 +98,18 @@ func bdEnv(dir string) []string {
 	)
 }
 
+// envWithout returns env minus any entries for the named variable.
+func envWithout(env []string, name string) []string {
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		if strings.HasPrefix(e, name+"=") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
 func isEmbeddedLockOutput(out string) bool {
 	out = strings.ToLower(out)
 	return strings.Contains(out, "one writer at a time") ||
@@ -671,11 +683,16 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 	})
 
-	t.Run("remote_behind_schema_gates_with_guidance", func(t *testing.T) {
-		// bd-4mpy7: bootstrapping from a remote whose database is behind this
-		// binary's schema must fail with designated-migrator guidance and
-		// leave a finalized workspace where the guidance commands can run —
-		// not a half-initialized directory with a raw gate error.
+	t.Run("remote_behind_schema_gate", func(t *testing.T) {
+		// bd-4mpy7 / #4516: bootstrapping from a remote whose database is
+		// behind this binary's schema. Shared fixture: a published remote
+		// regressed one migration below LatestVersion. Two paths against it:
+		// the default smart gate auto-migrates the clone as a safe
+		// first-mover (remote at the same version — no one has migrated),
+		// while the BD_SMART_GATE=0 opt-out must fail with
+		// designated-migrator guidance and leave a finalized workspace where
+		// the guidance commands can run — not a half-initialized directory
+		// with a raw gate error.
 		remoteDir := filepath.Join(t.TempDir(), "behind-remote")
 		remoteURL := "file://" + remoteDir
 
@@ -705,53 +722,84 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 		_ = cleanupSQL()
 
-		cloneDir := t.TempDir()
-		initGitRepoAt(t, cloneDir)
-		cmd := exec.Command(bd, "init", "--quiet", "--prefix", "bclone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
-		cmd.Dir = cloneDir
-		cmd.Env = append(bdEnv(cloneDir), schema.AllowRemoteMigrateEnv+"=0")
-		out, err := cmd.CombinedOutput()
-		if err == nil {
-			t.Fatalf("bd init --remote against a behind-schema remote should fail; output:\n%s", out)
-		}
-		for _, want := range []string{
-			"Re-running `bd init` will NOT fix this",
-			schema.AllowRemoteMigrateEnv + "=1",
-			"bd dolt push",
-		} {
-			if !strings.Contains(string(out), want) {
-				t.Fatalf("init output missing %q:\n%s", want, out)
+		t.Run("default_smart_gate_auto_migrates_first_mover", func(t *testing.T) {
+			cloneDir := t.TempDir()
+			initGitRepoAt(t, cloneDir)
+			cmd := exec.Command(bd, "init", "--quiet", "--prefix", "bclone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+			cmd.Dir = cloneDir
+			// Exercise the true default: strip any ambient opt-out so
+			// BD_SMART_GATE is genuinely unset.
+			cmd.Env = envWithout(append(bdEnv(cloneDir), schema.AllowRemoteMigrateEnv+"=0"), schema.SmartGateEnv)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("default smart gate should auto-migrate the safe first-mover during init: %v\n%s", err, out)
 			}
-		}
-
-		// The failed init must leave a finalized workspace (metadata.json,
-		// config.yaml) so the guidance commands can open the cloned database.
-		cloneBeads := filepath.Join(cloneDir, ".beads")
-		for _, f := range []string{"metadata.json", "config.yaml"} {
-			if _, err := os.Stat(filepath.Join(cloneBeads, f)); err != nil {
-				t.Fatalf("failed init should leave %s behind: %v", f, err)
+			if !strings.Contains(string(out), "Smart gate") || !strings.Contains(string(out), "bd dolt push") {
+				t.Fatalf("smart auto-migrate should announce itself and direct a follow-up push:\n%s", out)
 			}
-		}
 
-		// Recovery per the guidance: the designated migrator unlocks,
-		// migrates, and the workspace is usable.
-		cmd = exec.Command(bd, "migrate")
-		cmd.Dir = cloneDir
-		cmd.Env = append(bdEnv(cloneDir), schema.AllowRemoteMigrateEnv+"=1")
-		if migOut, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("%s=1 bd migrate failed: %v\n%s", schema.AllowRemoteMigrateEnv, err, migOut)
-		}
+			// The clone is migrated and immediately usable, no unlock needed.
+			cmd = exec.Command(bd, "list")
+			cmd.Dir = cloneDir
+			cmd.Env = bdEnv(cloneDir)
+			listOut, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("bd list after smart auto-migrate failed: %v\n%s", err, listOut)
+			}
+			if !strings.Contains(string(listOut), "Behind remote issue") {
+				t.Fatalf("auto-migrated clone missing source issue:\n%s", listOut)
+			}
+		})
 
-		cmd = exec.Command(bd, "list")
-		cmd.Dir = cloneDir
-		cmd.Env = bdEnv(cloneDir)
-		listOut, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("bd list after migrate failed: %v\n%s", err, listOut)
-		}
-		if !strings.Contains(string(listOut), "Behind remote issue") {
-			t.Fatalf("migrated clone missing source issue:\n%s", listOut)
-		}
+		t.Run("opt_out_gates_with_guidance", func(t *testing.T) {
+			cloneDir := t.TempDir()
+			initGitRepoAt(t, cloneDir)
+			cmd := exec.Command(bd, "init", "--quiet", "--prefix", "bclone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+			cmd.Dir = cloneDir
+			cmd.Env = append(bdEnv(cloneDir), schema.AllowRemoteMigrateEnv+"=0", schema.SmartGateEnv+"=0")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("bd init --remote against a behind-schema remote should fail; output:\n%s", out)
+			}
+			for _, want := range []string{
+				"Re-running `bd init` will NOT fix this",
+				schema.AllowRemoteMigrateEnv + "=1",
+				"bd dolt push",
+			} {
+				if !strings.Contains(string(out), want) {
+					t.Fatalf("init output missing %q:\n%s", want, out)
+				}
+			}
+
+			// The failed init must leave a finalized workspace (metadata.json,
+			// config.yaml) so the guidance commands can open the cloned database.
+			cloneBeads := filepath.Join(cloneDir, ".beads")
+			for _, f := range []string{"metadata.json", "config.yaml"} {
+				if _, err := os.Stat(filepath.Join(cloneBeads, f)); err != nil {
+					t.Fatalf("failed init should leave %s behind: %v", f, err)
+				}
+			}
+
+			// Recovery per the guidance: the designated migrator unlocks,
+			// migrates, and the workspace is usable.
+			cmd = exec.Command(bd, "migrate")
+			cmd.Dir = cloneDir
+			cmd.Env = append(bdEnv(cloneDir), schema.AllowRemoteMigrateEnv+"=1")
+			if migOut, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%s=1 bd migrate failed: %v\n%s", schema.AllowRemoteMigrateEnv, err, migOut)
+			}
+
+			cmd = exec.Command(bd, "list")
+			cmd.Dir = cloneDir
+			cmd.Env = bdEnv(cloneDir)
+			listOut, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("bd list after migrate failed: %v\n%s", err, listOut)
+			}
+			if !strings.Contains(string(listOut), "Behind remote issue") {
+				t.Fatalf("migrated clone missing source issue:\n%s", listOut)
+			}
+		})
 	})
 
 	t.Run("remote_empty_initializes_fresh_and_wires_origin", func(t *testing.T) {

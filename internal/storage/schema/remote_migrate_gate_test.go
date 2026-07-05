@@ -19,6 +19,9 @@ func expectGateCurrentVersion(mock sqlmock.Sqlmock, version int) {
 }
 
 func TestCheckRemoteMigrateGate(t *testing.T) {
+	// These tests cover the blunt #4515 gate; pin the (default-on) smart
+	// router off so no cached-remote reads hit the sqlmock expectations.
+	t.Setenv(SmartGateEnv, "0")
 	latest := LatestVersion()
 
 	// expectFiringGate mocks the probe sequence for a behind, remote-backed
@@ -165,6 +168,8 @@ func TestCheckRemoteMigrateGate(t *testing.T) {
 // table even when a remote is configured, so the gate must fall back to a probe of
 // the persisted CLI remotes before allowing migration (gastownhall/beads#4268).
 func TestCheckRemoteMigrateGateWithRemoteCheck(t *testing.T) {
+	// Blunt-gate coverage; keep the smart router out of the mock expectations.
+	t.Setenv(SmartGateEnv, "0")
 	t.Run("no SQL remote but fallback reports a remote is blocked", func(t *testing.T) {
 		t.Setenv(AllowRemoteMigrateEnv, "0")
 		db, mock, _ := sqlmock.New()
