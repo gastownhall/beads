@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -98,6 +99,32 @@ func bdListCapture(t *testing.T, bd, dir string, args ...string) (string, string
 		t.Fatalf("bd list %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	return stdout.String(), stderr.String()
+}
+
+// bdListJSONWithEnv runs "bd list --json" with extra environment variables.
+func bdListJSONWithEnv(t *testing.T, bd, dir string, extraEnv []string, args ...string) []*types.IssueWithCounts {
+	t.Helper()
+	fullArgs := append([]string{"list", "--json"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), extraEnv...)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd list --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	s := stdout.String()
+	start := strings.Index(s, "[")
+	if start < 0 {
+		if strings.Contains(s, "null") || strings.TrimSpace(s) == "" {
+			return nil
+		}
+		t.Fatalf("no JSON array found in output:\n%s", s)
+	}
+	var issues []*types.IssueWithCounts
+	if err := json.Unmarshal([]byte(s[start:]), &issues); err != nil {
+		t.Fatalf("failed to parse JSON list output: %v\nraw: %s", err, s[start:])
+	}
+	return issues
 }
 
 // bdListFail runs "bd list" expecting failure.
@@ -250,6 +277,54 @@ func TestEmbeddedList(t *testing.T) {
 		_, stderrHigh := bdListCapture(t, bd, dir, "--limit", "1000")
 		if strings.Contains(stderrHigh, "more results matched") {
 			t.Errorf("false-positive truncation hint when under limit:\n%s", stderrHigh)
+		}
+	})
+
+	t.Run("list_limit_config_env", func(t *testing.T) {
+		// BD_LIST_LIMIT env var sets the default limit when --limit not passed.
+		// With BD_LIST_LIMIT=1, default list should return at most 1 issue.
+		limitedIssues := bdListJSONWithEnv(t, bd, dir, []string{"BD_LIST_LIMIT=1"})
+		if len(limitedIssues) > 1 {
+			t.Errorf("BD_LIST_LIMIT=1 should limit to at most 1, got %d", len(limitedIssues))
+		}
+
+		// --limit flag still takes precedence over env var.
+		allIssues := bdListJSONWithEnv(t, bd, dir, []string{"BD_LIST_LIMIT=1"}, "--limit", "0")
+		if len(allIssues) <= 1 {
+			t.Errorf("--limit 0 should override BD_LIST_LIMIT=1, got %d", len(allIssues))
+		}
+
+		// --all is also an explicit list request and should override the configured default.
+		allFlagIssues := bdListJSONWithEnv(t, bd, dir, []string{"BD_LIST_LIMIT=1"}, "--all")
+		if len(allFlagIssues) <= 1 {
+			t.Errorf("--all should override BD_LIST_LIMIT=1, got %d", len(allFlagIssues))
+		}
+	})
+
+	t.Run("list_limit_config_file", func(t *testing.T) {
+		// Write project config.yaml with list.limit: 1.
+		configPath := filepath.Join(dir, ".beads", "config.yaml")
+		if err := os.WriteFile(configPath, []byte("list:\n  limit: 1\n"), 0o644); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+		defer func() { _ = os.Remove(configPath) }()
+
+		// Config file should limit to at most 1 issue.
+		limitedIssues := bdListJSON(t, bd, dir)
+		if len(limitedIssues) > 1 {
+			t.Errorf("list.limit=1 in config should limit to at most 1, got %d", len(limitedIssues))
+		}
+
+		// --limit flag still takes precedence over config file.
+		allIssues := bdListJSON(t, bd, dir, "--limit", "0")
+		if len(allIssues) <= 1 {
+			t.Errorf("--limit 0 should override config list.limit=1, got %d", len(allIssues))
+		}
+
+		// --all is also an explicit list request and should override the configured default.
+		allFlagIssues := bdListJSON(t, bd, dir, "--all")
+		if len(allFlagIssues) <= 1 {
+			t.Errorf("--all should override config list.limit=1, got %d", len(allFlagIssues))
 		}
 	})
 

@@ -29,6 +29,7 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		{"directory.labels", true},
 		{"repos.primary", true},
 		{"external_projects.beads", true},
+		{"list.limit", true},
 
 		// Hierarchy settings (GH#995)
 		{"hierarchy.max-depth", true},

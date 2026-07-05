@@ -22,18 +22,22 @@ type GraphApplyPlan struct {
 
 // GraphApplyNode describes a single bead to create.
 type GraphApplyNode struct {
-	Key               string            `json:"key"`
-	Title             string            `json:"title"`
-	Type              string            `json:"type,omitempty"`
-	Description       string            `json:"description,omitempty"`
-	Assignee          string            `json:"assignee,omitempty"`
-	AssignAfterCreate bool              `json:"assign_after_create,omitempty"`
-	Priority          *int              `json:"priority,omitempty"` // nil defaults to P2
-	Labels            []string          `json:"labels,omitempty"`
-	Metadata          map[string]string `json:"metadata,omitempty"`
-	MetadataRefs      map[string]string `json:"metadata_refs,omitempty"`
-	ParentKey         string            `json:"parent_key,omitempty"`
-	ParentID          string            `json:"parent_id,omitempty"`
+	Key               string              `json:"key"`
+	Title             string              `json:"title"`
+	Type              string              `json:"type,omitempty"`
+	Description       string              `json:"description,omitempty"`
+	Assignee          string              `json:"assignee,omitempty"`
+	AssignAfterCreate bool                `json:"assign_after_create,omitempty"`
+	Priority          *int                `json:"priority,omitempty"` // nil defaults to P2
+	Estimate          *int                `json:"estimate,omitempty"` // minutes
+	Labels            []string            `json:"labels,omitempty"`
+	Metadata          map[string]string   `json:"metadata,omitempty"`
+	MetadataRefs      map[string]string   `json:"metadata_refs,omitempty"`
+	ExternalRef       string              `json:"external_ref,omitempty"`
+	Parent            string              `json:"parent,omitempty"` // alias for parent_key
+	ParentKey         string              `json:"parent_key,omitempty"`
+	ParentID          string              `json:"parent_id,omitempty"`
+	Deps              []GraphApplyNodeDep `json:"deps,omitempty"`
 }
 
 // GraphApplyEdge describes a dependency edge.
@@ -43,6 +47,13 @@ type GraphApplyEdge struct {
 	ToKey   string `json:"to_key,omitempty"`
 	ToID    string `json:"to_id,omitempty"`
 	Type    string `json:"type,omitempty"`
+}
+
+// GraphApplyNodeDep describes an inline dependency on a single graph node.
+// Target is resolved as a plan key first, then treated as a literal issue ID.
+type GraphApplyNodeDep struct {
+	Type   string `json:"type,omitempty"`
+	Target string `json:"target"`
 }
 
 // GraphApplyResult returns the concrete bead IDs assigned to each symbolic key.
@@ -107,11 +118,15 @@ var knownGraphNodeFields = map[string]struct{}{
 	"assignee":            {},
 	"assign_after_create": {},
 	"priority":            {},
+	"estimate":            {},
 	"labels":              {},
 	"metadata":            {},
 	"metadata_refs":       {},
+	"external_ref":        {},
+	"parent":              {},
 	"parent_key":          {},
 	"parent_id":           {},
+	"deps":                {},
 }
 
 // knownGraphEdgeFields lists the JSON keys recognized on a GraphApplyEdge.
@@ -130,10 +145,9 @@ var knownGraphEdgeFields = map[string]struct{}{
 // a "parent" string instead of "parent_key", or "blocks" arrays instead of
 // the top-level edges array). (GH#3367)
 var graphFieldHints = map[string]string{
-	"parent":   "use 'parent_key' (referencing another node's 'key') or 'parent_id' (an existing issue ID)",
-	"blocks":   "use the top-level 'edges' array, e.g. {\"from_key\": \"a\", \"to_key\": \"b\", \"type\": \"blocks\"}",
-	"depends":  "use the top-level 'edges' array with type 'blocks'",
-	"children": "set 'parent_key' on each child instead of listing children on the parent",
+	"blocks":   "use the top-level 'edges' array or per-node 'deps', e.g. {\"deps\": [{\"target\": \"key\", \"type\": \"blocks\"}]}",
+	"depends":  "use the top-level 'edges' array or per-node 'deps' with type 'blocks'",
+	"children": "set 'parent_key' or 'parent' on each child instead of listing children on the parent",
 }
 
 // detectUnknownGraphFields scans the raw plan JSON and returns unknown field
@@ -210,10 +224,14 @@ func unknownKeys(have map[string]json.RawMessage, known map[string]struct{}) []s
 
 // warnUnknownGraphFields prints a single warning line per location in the
 // plan with one or more unknown fields, plus a per-field hint when one is
-// available. Output goes to w (typically os.Stderr). (GH#3367)
-func warnUnknownGraphFields(w io.Writer, unknown map[string][]string) {
+// available. Output goes to w (typically os.Stderr). Returns the sorted
+// list of distinct unknown field names for test assertion; production
+// callers may safely ignore the result. (GH#3367)
+//
+//nolint:unparam // return value used by tests for assertion; production callers ignore
+func warnUnknownGraphFields(w io.Writer, unknown map[string][]string) []string {
 	if len(unknown) == 0 {
-		return
+		return nil
 	}
 
 	locations := make([]string, 0, len(unknown))
@@ -242,6 +260,8 @@ func warnUnknownGraphFields(w io.Writer, unknown map[string][]string) {
 			fmt.Fprintf(w, "  hint: %q is not part of the schema; %s\n", f, hint)
 		}
 	}
+
+	return hintFields
 }
 
 func loadEmbeddedCustomTypes() []string {
@@ -308,7 +328,11 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan) error {
 		if node.Priority != nil {
 			priority = *node.Priority
 		}
-		if node.ParentKey != "" || node.ParentID != "" {
+		effectiveParentKey := node.ParentKey
+		if effectiveParentKey == "" {
+			effectiveParentKey = node.Parent
+		}
+		if effectiveParentKey != "" || node.ParentID != "" {
 			parentDeps++
 		}
 		rows = append(rows, GraphApplyDryRunRow{
@@ -316,7 +340,7 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan) error {
 			Title:     node.Title,
 			Type:      issueType,
 			Priority:  priority,
-			ParentKey: node.ParentKey,
+			ParentKey: effectiveParentKey,
 			ParentID:  node.ParentID,
 		})
 	}
@@ -388,16 +412,34 @@ func validateGraphApplyPlan(plan *GraphApplyPlan, customTypes []string) error {
 				}
 			}
 		}
-		if node.ParentKey != "" && !seenKeys[node.ParentKey] {
+		parentKey := node.ParentKey
+		if parentKey == "" {
+			parentKey = node.Parent
+		}
+		if parentKey != "" && !seenKeys[parentKey] {
 			found := false
 			for _, other := range plan.Nodes {
-				if other.Key == node.ParentKey {
+				if other.Key == parentKey {
 					found = true
 					break
 				}
 			}
 			if !found {
-				return fmt.Errorf("node %q: parent key %q not found in plan", node.Key, node.ParentKey)
+				return fmt.Errorf("node %q: parent key %q not found in plan", node.Key, parentKey)
+			}
+		}
+		if node.Estimate != nil && *node.Estimate < 0 {
+			return fmt.Errorf("node %q: estimate cannot be negative", node.Key)
+		}
+		for j, dep := range node.Deps {
+			if dep.Target == "" {
+				return fmt.Errorf("node %q: dep %d has empty target", node.Key, j)
+			}
+			if dep.Type != "" {
+				dt := types.DependencyType(dep.Type)
+				if !dt.IsValid() {
+					return fmt.Errorf("node %q: dep %d: invalid dependency type %q", node.Key, j, dep.Type)
+				}
 			}
 		}
 	}
@@ -528,6 +570,12 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphAppl
 			if node.Description != "" {
 				issue.Description = node.Description
 			}
+			if node.Estimate != nil {
+				issue.EstimatedMinutes = node.Estimate
+			}
+			if node.ExternalRef != "" {
+				issue.ExternalRef = &node.ExternalRef
+			}
 			if node.Assignee != "" {
 				if node.AssignAfterCreate {
 					pendingAssignees[i] = node.Assignee
@@ -611,9 +659,13 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphAppl
 
 		// Add parent-child dependencies.
 		for i, node := range plan.Nodes {
+			parentKey := node.ParentKey
+			if parentKey == "" {
+				parentKey = node.Parent
+			}
 			parentID := node.ParentID
-			if node.ParentKey != "" {
-				parentID = keyToID[node.ParentKey]
+			if parentKey != "" {
+				parentID = keyToID[parentKey]
 			}
 			if parentID != "" {
 				dep := &types.Dependency{
@@ -623,6 +675,31 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphAppl
 				}
 				if err := tx.AddDependency(ctx, dep, actor); err != nil {
 					return fmt.Errorf("node %q: adding parent-child dep: %w", node.Key, err)
+				}
+			}
+		}
+
+		// Add per-node inline dependencies.
+		for i, node := range plan.Nodes {
+			for _, dep := range node.Deps {
+				depType := types.DependencyType(dep.Type)
+				if depType == "" {
+					depType = types.DepBlocks
+				}
+				targetID := keyToID[dep.Target]
+				if targetID == "" {
+					targetID = dep.Target
+				}
+				if targetID == "" {
+					return fmt.Errorf("node %q: dep target %q not found", node.Key, dep.Target)
+				}
+				d := &types.Dependency{
+					IssueID:     issues[i].ID,
+					DependsOnID: targetID,
+					Type:        depType,
+				}
+				if err := tx.AddDependency(ctx, d, actor); err != nil {
+					return fmt.Errorf("node %q: adding dep to %q: %w", node.Key, dep.Target, err)
 				}
 			}
 		}

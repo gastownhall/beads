@@ -447,8 +447,8 @@ dolt:
 | `BEADS_DOLT_SERVER_TLS` | Enable TLS (set to "1" or "true") |
 | `BEADS_DOLT_SERVER_USER` | MySQL connection user |
 | `BEADS_DOLT_SHARED_SERVER` | Enable shared server mode (set to "1" or "true") |
-| `DOLT_REMOTE_USER` | Push/pull auth user |
-| `DOLT_REMOTE_PASSWORD` | Push/pull auth password |
+| `DOLT_REMOTE_USER` | Clone/push/pull auth user |
+| `DOLT_REMOTE_PASSWORD` | Clone/push/pull auth password |
 | `BD_DOLT_AUTO_COMMIT` | Override auto-commit setting |
 
 ### Credentials File

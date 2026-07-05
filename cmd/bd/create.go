@@ -162,6 +162,16 @@ var createCmd = &cobra.Command{
 
 		issueType, _ := cmd.Flags().GetString("type")
 		assignee, _ := cmd.Flags().GetString("assignee")
+		statusFlag, _ := cmd.Flags().GetString("status")
+		if statusFlag != "" {
+			var customStatuses []string
+			if cs, err := store.GetCustomStatuses(rootCtx); err == nil {
+				customStatuses = cs
+			}
+			if !types.Status(statusFlag).IsValidWithCustom(customStatuses) {
+				return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", statusFlag)
+			}
+		}
 
 		labels, _ := cmd.Flags().GetStringSlice("labels")
 		labelAlias, _ := cmd.Flags().GetStringSlice("label")
@@ -344,6 +354,7 @@ var createCmd = &cobra.Command{
 				Labels:             labels,
 				MolType:            molType,
 				WispType:           wispType,
+				InitialStatus:      statusFlag,
 				DueAt:              dueAt,
 				DeferUntil:         deferUntil,
 				Metadata:           metadata,
@@ -503,6 +514,7 @@ var createCmd = &cobra.Command{
 			Actor:              eventActor,
 			Target:             eventTarget,
 			Payload:            eventPayload,
+			InitialStatus:      statusFlag,
 			DueAt:              dueAt,
 			DeferUntil:         deferUntil,
 			Metadata:           metadata,
@@ -727,6 +739,7 @@ type createIssueParams struct {
 	Actor              string
 	Target             string
 	Payload            string
+	InitialStatus      string
 	DueAt              *time.Time
 	DeferUntil         *time.Time
 	Metadata           json.RawMessage
@@ -739,7 +752,9 @@ func buildCreateIssue(params createIssueParams) *types.Issue {
 	}
 
 	status := types.StatusOpen
-	if params.DeferUntil != nil && params.DeferUntil.After(time.Now()) {
+	if params.InitialStatus != "" {
+		status = types.Status(params.InitialStatus)
+	} else if params.DeferUntil != nil && params.DeferUntil.After(time.Now()) {
 		status = types.StatusDeferred
 	}
 
@@ -856,6 +871,7 @@ func init() {
 	createCmd.Flags().Bool("dry-run", false, "Preview what would be created without actually creating")
 	registerPriorityFlag(createCmd, "2")
 	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|decision); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision")
+	createCmd.Flags().StringP("status", "s", "", "Initial status")
 	registerCommonIssueFlags(createCmd)
 	createCmd.Flags().String("spec-id", "", "Link to specification document")
 	createCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels (comma-separated)")

@@ -100,6 +100,23 @@ func TestBuildCreateIssueFromInput_EmptyExternalRefIsNilPointer(t *testing.T) {
 	}
 }
 
+func TestBuildCreateIssueFromInput_ExplicitStatusWinsOverDefer(t *testing.T) {
+	deferUntil := time.Now().UTC().Add(24 * time.Hour)
+	got := buildCreateIssueFromInput(createInput{
+		title:      "T",
+		priority:   2,
+		issueType:  "task",
+		status:     "blocked",
+		deferUntil: &deferUntil,
+	})
+	if got.Status != types.StatusBlocked {
+		t.Errorf("Status = %q, want %q", got.Status, types.StatusBlocked)
+	}
+	if got.DeferUntil == nil || !got.DeferUntil.Equal(deferUntil) {
+		t.Errorf("DeferUntil = %v, want %v", got.DeferUntil, deferUntil)
+	}
+}
+
 func TestMaterializeGraphNodeIssue_DefaultsAndOpts(t *testing.T) {
 	t.Run("type and priority defaults", func(t *testing.T) {
 		issue := materializeGraphNodeIssue(GraphApplyNode{Key: "n", Title: "N"}, createInput{createdBy: "t"})

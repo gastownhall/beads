@@ -108,7 +108,6 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 
 	// Load create context (read-only) to validate input before the write tx.
 	configUW, cctx := proxiedOpenUOW(ctx)
-	configUW.Close(ctx)
 
 	customTypes := resolveProxiedCustomTypes(cctx.CustomTypes)
 	if in.issueType != "" {
@@ -117,6 +116,16 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 			FatalError("invalid type %q (allowed: built-ins plus configured custom types)", in.issueType)
 		}
 	}
+	if in.status != "" {
+		customStatuses, err := configUW.ConfigUseCase().GetCustomStatuses(ctx)
+		if err != nil {
+			FatalError("failed to get custom statuses: %v", err)
+		}
+		if !types.Status(in.status).IsValidWithCustom(types.CustomStatusNames(customStatuses)) {
+			FatalErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", in.status)
+		}
+	}
+	configUW.Close(ctx)
 	if in.explicitID != "" {
 		effectivePrefix := overlayYAMLPrefix(cctx.IssuePrefix)
 		if err := validation.ValidateIDPrefixAllowed(in.explicitID, effectivePrefix, cctx.AllowedPrefixes, in.force); err != nil {
@@ -208,6 +217,7 @@ func buildCreateIssueFromInput(in createInput) *types.Issue {
 		Actor:              in.eventActor,
 		Target:             in.eventTarget,
 		Payload:            in.eventPayload,
+		InitialStatus:      in.status,
 		DueAt:              in.dueAt,
 		DeferUntil:         in.deferUntil,
 		Metadata:           in.metadata,
