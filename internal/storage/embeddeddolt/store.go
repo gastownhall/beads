@@ -310,7 +310,24 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	// already-initialized database — independently migrating each clone forks the
 	// schema. Embedded mode (the mode the original report was filed against) syncs
 	// via Dolt remotes too, so it needs the same gate as server mode.
-	if err := schema.CheckRemoteMigrateGate(ctx, conn); err != nil {
+	//
+	// adopt injects the driver-side fast-forward ancestry primitives
+	// (mybd-ae1i piece 2) so the smart gate can distinguish a losslessly
+	// fast-forwardable remote-ahead case (smartAdoptFastForward) from the
+	// plain destructive adopt. FastForward itself is not yet invoked — piece
+	// 2 only detects and directs; piece 3 wires the auto fast-forward.
+	adopt := &schema.FastForwardAdopter{
+		IsStrictAncestor: func(ctx context.Context, db schema.DBConn, ref string) (bool, error) {
+			return versioncontrolops.LocalIsStrictAncestorOf(ctx, db, ref)
+		},
+		WorkingSetClean: func(ctx context.Context, db schema.DBConn) (bool, error) {
+			return versioncontrolops.WorkingSetClean(ctx, db)
+		},
+		FastForward: func(ctx context.Context, db schema.DBConn, ref string) error {
+			return versioncontrolops.FastForwardAdopt(ctx, db, ref)
+		},
+	}
+	if err := schema.CheckRemoteMigrateGateWithAdopt(ctx, conn, adopt); err != nil {
 		var gateErr *schema.RemoteMigrateGateError
 		if s.intent != openStrict && errors.As(err, &gateErr) {
 			// The gate exists to stop in-place migration on a remote-backed,

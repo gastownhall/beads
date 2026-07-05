@@ -1629,8 +1629,25 @@ func (s *DoltStore) initSchema(ctx context.Context) error {
 	// empty dolt_remotes table even though remotes are persisted in .dolt/config
 	// (GH#2315), so an SQL-only check would miss the remote on the first write
 	// open after an upgrade.
+	//
+	// adopt injects the driver-side fast-forward ancestry primitives
+	// (mybd-ae1i piece 2) so the smart gate can distinguish a losslessly
+	// fast-forwardable remote-ahead case (smartAdoptFastForward) from the
+	// plain destructive adopt. FastForward itself is not yet invoked — piece
+	// 2 only detects and directs; piece 3 wires the auto fast-forward.
+	adopt := &schema.FastForwardAdopter{
+		IsStrictAncestor: func(ctx context.Context, db schema.DBConn, ref string) (bool, error) {
+			return versioncontrolops.LocalIsStrictAncestorOf(ctx, db, ref)
+		},
+		WorkingSetClean: func(ctx context.Context, db schema.DBConn) (bool, error) {
+			return versioncontrolops.WorkingSetClean(ctx, db)
+		},
+		FastForward: func(ctx context.Context, db schema.DBConn, ref string) error {
+			return versioncontrolops.FastForwardAdopt(ctx, db, ref)
+		},
+	}
 	gate := func(ctx context.Context, db *sql.DB) error {
-		return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheck(ctx, db, s.remote, s.hasPersistedCLIRemote)
+		return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
 	}
 	_, err = initSchemaOnDBWithRetryAndGate(ctx, migDB, gate)
 	return err

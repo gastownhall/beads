@@ -367,6 +367,233 @@ func TestSmartGateRouting(t *testing.T) {
 	_ = latest
 }
 
+// fakeAdopter builds a *FastForwardAdopter from canned bool/error results and
+// counts how many times each callback is invoked, so tests can assert the
+// router short-circuits (never calling WorkingSetClean once ancestry has
+// already failed) and never calls a callback with a nil adopt.
+type fakeAdopter struct {
+	ancestorResult bool
+	ancestorErr    error
+	ancestorCalls  int
+
+	cleanResult bool
+	cleanErr    error
+	cleanCalls  int
+}
+
+func (f *fakeAdopter) adopter() *FastForwardAdopter {
+	return &FastForwardAdopter{
+		IsStrictAncestor: func(_ context.Context, _ DBConn, _ string) (bool, error) {
+			f.ancestorCalls++
+			return f.ancestorResult, f.ancestorErr
+		},
+		WorkingSetClean: func(_ context.Context, _ DBConn) (bool, error) {
+			f.cleanCalls++
+			return f.cleanResult, f.cleanErr
+		},
+	}
+}
+
+// TestSmartGateRoutingFastForward covers the smartAdoptFastForward refinement
+// (mybd-ae1i piece 2): every input that previously reached smartAdopt still
+// does whenever the injected ancestry callbacks are absent, unavailable, or
+// fail their precondition — the new verdict is only reachable when BOTH
+// callbacks succeed and report a losslessly fast-forwardable state.
+func TestSmartGateRoutingFastForward(t *testing.T) {
+	floor := LastNonDeterministicMigration
+
+	t.Run("adopt-ff: remote ahead, no skew, strict ancestor, clean working set", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		local := map[int]string{floor: "h1"}
+		remote := map[int]string{floor: "h1", floor + 1: "h2"}
+		expectSmartRemoteRead(mock, local, remote)
+
+		fa := &fakeAdopter{ancestorResult: true, cleanResult: true}
+		err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter())
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.Decision != gateDecisionAdoptFastForward {
+			t.Errorf("Decision = %q, want %q", gateErr.Decision, gateDecisionAdoptFastForward)
+		}
+		if fa.ancestorCalls != 1 {
+			t.Errorf("IsStrictAncestor calls = %d, want 1", fa.ancestorCalls)
+		}
+		if fa.cleanCalls != 1 {
+			t.Errorf("WorkingSetClean calls = %d, want 1", fa.cleanCalls)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("plain adopt: remote ahead, no skew, dirty working set degrades from adopt-ff", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		local := map[int]string{floor: "h1"}
+		remote := map[int]string{floor: "h1", floor + 1: "h2"}
+		expectSmartRemoteRead(mock, local, remote)
+
+		fa := &fakeAdopter{ancestorResult: true, cleanResult: false}
+		err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter())
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.Decision != gateDecisionAdopt {
+			t.Errorf("Decision = %q, want %q (a dirty working set must fall back to the plain destructive adopt)", gateErr.Decision, gateDecisionAdopt)
+		}
+		if fa.ancestorCalls != 1 || fa.cleanCalls != 1 {
+			t.Errorf("expected both callbacks invoked exactly once, got ancestor=%d clean=%d", fa.ancestorCalls, fa.cleanCalls)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("plain adopt: not a strict ancestor short-circuits before the working-set check", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		local := map[int]string{floor: "h1"}
+		remote := map[int]string{floor: "h1", floor + 1: "h2"}
+		expectSmartRemoteRead(mock, local, remote)
+
+		fa := &fakeAdopter{ancestorResult: false, cleanResult: true}
+		err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter())
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.Decision != gateDecisionAdopt {
+			t.Errorf("Decision = %q, want %q (a non-ancestor must fall back to the plain adopt)", gateErr.Decision, gateDecisionAdopt)
+		}
+		if fa.ancestorCalls != 1 {
+			t.Errorf("IsStrictAncestor calls = %d, want 1", fa.ancestorCalls)
+		}
+		if fa.cleanCalls != 0 {
+			t.Errorf("WorkingSetClean calls = %d, want 0 (must not run once ancestry already failed)", fa.cleanCalls)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("plain adopt: ancestry callback error is treated as not fast-forwardable", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		local := map[int]string{floor: "h1"}
+		remote := map[int]string{floor: "h1", floor + 1: "h2"}
+		expectSmartRemoteRead(mock, local, remote)
+
+		fa := &fakeAdopter{ancestorErr: errors.New("dolt_log AS OF: branch not found")}
+		err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter())
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.Decision != gateDecisionAdopt {
+			t.Errorf("Decision = %q, want %q (an inconclusive ancestry read must never promote past the plain adopt)", gateErr.Decision, gateDecisionAdopt)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("plain adopt: working-set callback error is treated as not fast-forwardable", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		local := map[int]string{floor: "h1"}
+		remote := map[int]string{floor: "h1", floor + 1: "h2"}
+		expectSmartRemoteRead(mock, local, remote)
+
+		fa := &fakeAdopter{ancestorResult: true, cleanErr: errors.New("query dolt_status: table not found")}
+		err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter())
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.Decision != gateDecisionAdopt {
+			t.Errorf("Decision = %q, want %q (an inconclusive working-set read must never promote past the plain adopt)", gateErr.Decision, gateDecisionAdopt)
+		}
+		if fa.ancestorCalls != 1 || fa.cleanCalls != 1 {
+			t.Errorf("expected both callbacks invoked exactly once, got ancestor=%d clean=%d", fa.ancestorCalls, fa.cleanCalls)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("plain adopt: nil adopt callbacks behave exactly like the pre-piece-2 gate", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		local := map[int]string{floor: "h1"}
+		remote := map[int]string{floor: "h1", floor + 1: "h2"}
+		expectSmartRemoteRead(mock, local, remote)
+
+		// No adopter wired at all (nil) — the injection site is not updated,
+		// or ancestry checks are unavailable (e.g. a read-only open). Fallback
+		// safety: identical to CheckRemoteMigrateGate before piece 2 existed.
+		err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, nil)
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.Decision != gateDecisionAdopt {
+			t.Errorf("Decision = %q, want %q", gateErr.Decision, gateDecisionAdopt)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("fork-skew is unaffected by adopt callbacks: skew short-circuits before the ancestry check", func(t *testing.T) {
+		t.Setenv(SmartGateEnv, "1")
+		t.Setenv(AllowRemoteMigrateEnv, "0")
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		expectSmartFiringGate(mock, floor)
+		local := map[int]string{floor: "local-hash"}
+		remote := map[int]string{floor: "remote-hash"}
+		expectSmartRemoteRead(mock, local, remote)
+
+		fa := &fakeAdopter{ancestorResult: true, cleanResult: true}
+		err := CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(context.Background(), db, "", nil, fa.adopter())
+		var gateErr *RemoteMigrateGateError
+		if !errors.As(err, &gateErr) {
+			t.Fatalf("expected gate error, got %v", err)
+		}
+		if gateErr.Decision != gateDecisionForkSkew {
+			t.Errorf("Decision = %q, want %q (skew must never reach the fast-forward refinement)", gateErr.Decision, gateDecisionForkSkew)
+		}
+		if fa.ancestorCalls != 0 || fa.cleanCalls != 0 {
+			t.Errorf("adopt callbacks must not run once skew is detected, got ancestor=%d clean=%d", fa.ancestorCalls, fa.cleanCalls)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+}
+
 // TestSmartGateEnabled pins the default-on contract: unset and unparseable
 // values keep the smart gate active; only an explicit boolean false opts out.
 func TestSmartGateEnabled(t *testing.T) {

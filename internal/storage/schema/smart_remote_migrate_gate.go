@@ -115,13 +115,73 @@ const (
 	// smartBelowFloor: remote == local but a legacy non-deterministic migration
 	// is still pending (very old database). Conservative human block.
 	smartBelowFloor
+	// smartAdoptFastForward (mybd-ae1i piece 2): a strict refinement of
+	// smartAdopt. Remote is ahead with no skew (same precondition as
+	// smartAdopt) AND local HEAD is a strict ancestor of the cached remote
+	// ref AND the working set is clean — adopting loses nothing. Only
+	// reachable when the caller wired a *FastForwardAdopter; any missing
+	// callback, failed precondition, or query error degrades to smartAdopt,
+	// so this verdict can never be less safe than today's default. Piece 2
+	// only detects and surfaces this as a directive (still a stop, with
+	// sharper guidance); piece 3 flips it to an auto fast-forward.
+	smartAdoptFastForward
 )
+
+// FastForwardAdopter injects the driver-side fast-forward primitives that
+// live in internal/storage/versioncontrolops (LocalIsStrictAncestorOf,
+// WorkingSetClean, FastForwardAdopt). The schema package sits below the
+// driver layer and must not import versioncontrolops (import cycle), so the
+// mode-specific store — which already imports both packages — constructs
+// this from its own db handle and passes it in, mirroring the existing
+// extraHasRemote func() bool callback on CheckRemoteMigrateGateWithRemoteCheck.
+//
+// A nil *FastForwardAdopter, or any nil field, is always safe: routing
+// degrades to the pre-existing smartAdopt directive exactly as if this
+// refinement did not exist. FastForward itself is not yet invoked by the
+// router (mybd-ae1i piece 2 only detects and directs); piece 3 wires it into
+// an auto fast-forward.
+type FastForwardAdopter struct {
+	// IsStrictAncestor reports whether local HEAD is a strict ancestor of
+	// ref (versioncontrolops.LocalIsStrictAncestorOf).
+	IsStrictAncestor func(ctx context.Context, db DBConn, ref string) (bool, error)
+	// WorkingSetClean reports whether the working set has no uncommitted
+	// changes, dolt-ignored wisp tables excepted
+	// (versioncontrolops.WorkingSetClean).
+	WorkingSetClean func(ctx context.Context, db DBConn) (bool, error)
+	// FastForward performs the actual fast-forward-only adopt
+	// (versioncontrolops.FastForwardAdopt). Unused until piece 3.
+	FastForward func(ctx context.Context, db DBConn, ref string) error
+}
+
+// routeAdoptFastForward reports whether a remote-ahead, no-skew case
+// additionally qualifies for the non-destructive fast-forward refinement:
+// local HEAD is a strict ancestor of ref AND the working set is clean.
+// adopt may be nil (no callback wired at this injection site) — treated
+// the same as any failing precondition. Any callback error is treated
+// conservatively as "not fast-forwardable": an inconclusive read must never
+// promote past the existing smartAdopt directive.
+func routeAdoptFastForward(ctx context.Context, db DBConn, ref string, adopt *FastForwardAdopter) bool {
+	if adopt == nil || adopt.IsStrictAncestor == nil || adopt.WorkingSetClean == nil {
+		return false
+	}
+	ancestor, err := adopt.IsStrictAncestor(ctx, db, ref)
+	if err != nil || !ancestor {
+		return false
+	}
+	clean, err := adopt.WorkingSetClean(ctx, db)
+	if err != nil || !clean {
+		return false
+	}
+	return true
+}
 
 // routeSmartGate inspects the remote's cached schema state and returns the smart
 // routing verdict plus the content-skew versions (for smartForkSkew). It performs
 // no network I/O: it reads only the already-cached remote-tracking ref, exactly
 // like the doctor migration-skew check. current is the local schema version.
-func routeSmartGate(ctx context.Context, db DBConn, current int, remoteName string) (smartGateDecision, []int) {
+// adopt (optionally nil) injects the fast-forward ancestry callbacks; see
+// FastForwardAdopter.
+func routeSmartGate(ctx context.Context, db DBConn, current int, remoteName string, adopt *FastForwardAdopter) (smartGateDecision, []int) {
 	local, err := ReadMigrationContentHashes(ctx, db, "")
 	if err != nil || len(local) == 0 {
 		// No local hashes to compare (old database) — cannot assess safely.
@@ -149,6 +209,9 @@ func routeSmartGate(ctx context.Context, db DBConn, current int, remoteName stri
 
 	remoteMax := maxVersion(remote)
 	if remoteMax > current {
+		if routeAdoptFastForward(ctx, db, ref, adopt) {
+			return smartAdoptFastForward, nil
+		}
 		return smartAdopt, nil // remote already migrated — adopt, don't migrate
 	}
 	if remoteMax < current {
