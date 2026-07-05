@@ -24,7 +24,9 @@ const processListHint = "pgrep -la 'dolt sql-server'"
 // procAttrDetached returns SysProcAttr to detach a child process from the parent
 // process group so it survives parent exit.
 func procAttrDetached() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{Setpgid: true}
+	attr := &syscall.SysProcAttr{Setpgid: true}
+	applyTestModeParentDeathSignal(attr)
+	return attr
 }
 
 // findPIDOnPort returns the PID of the process listening on a TCP port.
