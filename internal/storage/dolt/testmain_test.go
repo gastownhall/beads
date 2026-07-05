@@ -7,6 +7,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -27,6 +28,17 @@ func TestMain(m *testing.M) {
 
 func testMainInner(m *testing.M) int {
 	os.Setenv("BEADS_TEST_MODE", "1")
+
+	// Suite-owned root for the orphan-server sweep below. Must never be a
+	// shared/global temp dir (see SweepOrphanedTestServers) — this one is
+	// unique to this test run and removed when it exits.
+	suiteTempRoot, tempRootErr := os.MkdirTemp("", "beads-storage-dolt-tests-*")
+	if tempRootErr != nil {
+		fmt.Fprintf(os.Stderr, "WARN: failed to create suite temp root: %v\n", tempRootErr)
+	} else {
+		defer os.RemoveAll(suiteTempRoot)
+	}
+
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
@@ -52,6 +64,12 @@ func testMainInner(m *testing.M) int {
 	}
 
 	code := m.Run()
+
+	// Best-effort reap of any dolt sql-server left running under this
+	// suite's own temp root (e.g. a SIGKILLed run of the multiprocess
+	// schema init tests, which call doltserver.Start directly) — see
+	// gastownhall/beads mybd-q6cz.
+	doltserver.SweepOrphanedTestServers(suiteTempRoot)
 
 	testServerPort = 0
 	os.Unsetenv("BEADS_DOLT_PORT")
