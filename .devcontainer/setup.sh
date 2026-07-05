@@ -1,6 +1,18 @@
 #!/bin/bash
 set -e
 
+# Persist -tags=gms_pure_go in the go env config file (`go env -w`), so a
+# bare `go build`/`go test` run later from a shell that never sourced
+# .buildflags still picks up the tag (see docs/ICU-POLICY.md and
+# `make doctor-build`). Read the persisted value here, before sourcing
+# .buildflags below, since that export would otherwise shadow the on-disk
+# go env value for the rest of this script.
+echo "⚙️  Persisting -tags=gms_pure_go in go env..."
+PERSISTED_GOFLAGS="$(go env GOFLAGS)"
+if [[ "$PERSISTED_GOFLAGS" != *gms_pure_go* ]]; then
+  go env -w GOFLAGS="${PERSISTED_GOFLAGS:+$PERSISTED_GOFLAGS }-tags=gms_pure_go"
+fi
+
 # Canonical build flags (GOFLAGS=-tags=gms_pure_go, CGO_ENABLED=1).
 # shellcheck source=../.buildflags
 source "$(dirname "$0")/../.buildflags"
