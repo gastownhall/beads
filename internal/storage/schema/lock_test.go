@@ -120,10 +120,10 @@ func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
 	// The seed inserted rows and no migration pass follows to commit them, so
 	// MigrateUp must commit the heal itself, scoped and labeled.
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 
 	applied, err := MigrateUp(context.Background(), db)
 	if err != nil {
@@ -202,10 +202,10 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	// The seed changed rows (expectIgnorePatternSeed reports RowsAffected=1),
 	// so MigrateUp commits it scoped+labeled before the pass runs (#4566: the
 	// seed must not ride the per-step pass commits).
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 	expectDoltStatusRows(mock)
 	// MigrateUp probes the aux-rekey crash sentinel (bd-578h9.16); this
 	// mocked world has no local_metadata table, so no crashed pass.
@@ -242,12 +242,12 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	// Per-step commit (#4566): re-read the working set (no table newly dirtied
 	// in this mocked world), force-stage the cursor table, and commit the step.
 	expectDoltStatusRows(mock)
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('-f', ?)")).
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('-f', ?)")).
 		WithArgs("schema_migrations").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
 		WithArgs(sqlmock.AnyArg()).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
 	// rekeyDependencyIDs probes whether each edge table has an id column; this
@@ -266,11 +266,13 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	expectDoltStatusRows(mock)
 	mock.ExpectQuery("(?s)SELECT t\\.TABLE_NAME\\s+FROM INFORMATION_SCHEMA\\.TABLES t").
 		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("schema_migrations"))
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('-f', ?)")).
+	// DOLT_ADD and DOLT_COMMIT run through drainCall (QueryContext) so their
+	// proc result sets are consumed on the pinned conn; mock them as queries.
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('-f', ?)")).
 		WithArgs("schema_migrations").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: apply migrations')")).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: apply migrations')")).
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 }
 
 // expectColumnExists mocks the INFORMATION_SCHEMA.COLUMNS probe still used by
@@ -404,8 +406,8 @@ func TestMigrateUpWithLockFreshBootstrapHealResetsAndRetries(t *testing.T) {
 	// First MigrateUp: refused by the dirty guard.
 	expectDirtyGuardRefusal(t, mock)
 	// Heal: discard the bootstrap debris on the same locked session.
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_RESET('--hard')")).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET('--hard')")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	// Second MigrateUp: clean working set, one pending migration applies.
 	expectOnePendingMigration(t, mock)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
