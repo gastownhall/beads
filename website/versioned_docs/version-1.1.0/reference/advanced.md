@@ -74,33 +74,40 @@ bd restore bd-42 --to-file issue.json
 # Schema info
 bd info --schema --json
 
-# Raw database query (advanced — requires dolt sql-server running)
-bd dolt sql "SELECT * FROM issues LIMIT 5"
+# Raw database query
+bd sql "SELECT * FROM issues LIMIT 5"
 ```
 
-## Custom Tables
+## Extension Data
 
-Extend the database with custom tables:
-
-```go
-// In Go code using beads as library
-storage.UnderlyingDB().Exec(`
-  CREATE TABLE IF NOT EXISTS custom_table (...)
-`)
-```
-
-See the [bd-example-extension-go example](https://github.com/gastownhall/beads/blob/main/examples/bd-example-extension-go/README.md) for a working extension.
-
-## Event System
-
-Subscribe to beads events:
+For Dolt-backed projects, keep extension state outside the beads database and
+connect it to beads through stable CLI surfaces:
 
 ```bash
-# View recent events
-bd events list --since 1h
+# Query issues for integration workflows
+bd list --json
+bd query "status=open AND priority<=2" --json
 
-# Watch events in real-time
-bd events watch
+# Run direct SQL for inspection
+bd sql "SELECT id, title, status FROM issues LIMIT 5"
+```
+
+Custom tables through direct storage access are a legacy SQLite-only pattern.
+See the [bd-example-extension-go example](https://github.com/gastownhall/beads/blob/main/examples/bd-example-extension-go/README.md)
+only if you are maintaining a SQLite-backed extension.
+
+## Audit Data
+
+Beads records issue lifecycle events in the database for audit and recovery
+workflows. There is no standalone `bd events` command; inspect current issue
+state through JSON output, or query the audit tables directly when needed:
+
+```bash
+# Current issue state
+bd show bd-a1b2 --json
+
+# Recent stored events for one issue
+bd sql "SELECT event_type, actor, created_at FROM events WHERE issue_id = 'bd-a1b2' ORDER BY created_at DESC LIMIT 20"
 ```
 
 Events:
@@ -135,17 +142,22 @@ bd list --label "sprint-1" --status open --json | \
   xargs -I {} bd close {} --reason "Sprint complete"
 ```
 
-## API Access
+## Integration Access
 
-Use beads as a Go library:
+Use the CLI as the supported integration boundary:
 
-```go
-import "github.com/steveyegge/beads/internal/storage/embeddeddolt"
+```bash
+# Machine-readable issue data
+bd show bd-a1b2 --json
 
-store, _ := embeddeddolt.New(ctx, ".beads", "beads", "main")
-defer store.Close()
-issue, _ := store.GetIssue(ctx, "bd-a1b2")
+# Ready-work queue for automation
+bd ready --json
+
+# Direct SQL inspection against the active Dolt database
+bd sql "SELECT id, priority, status FROM issues WHERE status != 'closed'"
 ```
+
+The storage packages under `internal/` are not a public Go API.
 
 ## Performance Tuning
 
