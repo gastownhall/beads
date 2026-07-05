@@ -1387,6 +1387,18 @@ func exportJSONLForCommit() {
 		exportPath = "issues.jsonl"
 	}
 	fullPath := filepath.Join(beadsDir, exportPath)
+
+	// If the export file is staged for deletion (user ran `git rm`), do not
+	// re-export or re-stage it. GIT_INDEX_FILE is set during an actual commit,
+	// so git-diff-index reads the pending index — where the deletion lives.
+	// Without this guard, git add fullPath would convert the staged deletion
+	// back to a modification and the file would never be removed from the
+	// repo. Reimplements gastownhall/beads#3838 (ckumar1).
+	if isExportFileStagedForDeletion(fullPath) {
+		debug.Logf("pre-commit: %s staged for deletion — skipping export\n", exportPath)
+		return
+	}
+
 	if !preCommitHasStagedBeadsFiles(beadsDir) {
 		debug.Logf("pre-commit: skipping JSONL export — no staged .beads paths\n")
 		return
@@ -1426,6 +1438,26 @@ func exportJSONLForCommit() {
 			debug.Logf("pre-commit: git add failed: %v\n", err)
 		}
 	}
+}
+
+// isExportFileStagedForDeletion reports whether the beads export file at
+// fullPath is staged for deletion (the user ran `git rm` on it). When true,
+// exportJSONLForCommit must skip re-exporting and re-staging it: running
+// `git add` on a freshly regenerated file would convert the staged deletion
+// back into a modification, silently reviving a file the user intentionally
+// removed.
+//
+// Unlike preCommitHasStagedBeadsFiles and gitAddFile, this deliberately runs
+// git with the hook's inherited environment intact rather than scrubbing
+// GIT_* vars. GIT_INDEX_FILE is set during an actual commit and points at
+// the pending index — where the staged deletion lives — so scrubbing it
+// here would make git fall back to the on-disk index and miss the
+// deletion. Reimplements gastownhall/beads#3838 (ckumar1).
+func isExportFileStagedForDeletion(fullPath string) bool {
+	checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", filepath.Base(fullPath))
+	checkCmd.Dir = filepath.Dir(fullPath)
+	out, _ := checkCmd.Output()
+	return len(out) > 0
 }
 
 func preCommitHasStagedBeadsFiles(beadsDir string) bool {
