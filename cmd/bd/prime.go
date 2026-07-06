@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -111,7 +110,9 @@ Memory injection caps:
 	prime.max-memory-chars config keys; an explicit flag wins, and an explicit
 	0 forces unlimited). Caps apply at whole-memory boundaries, at least one
 	memory is always emitted, and a banner ahead of the entries reports how
-	many were elided and how to browse the rest with bd memories.`,
+	many were elided and how to browse the rest with bd memories.
+	--max-memory-chars caps the total bytes of the injected memory entries;
+	the section header and elision banner are excluded from the budget.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -202,7 +203,7 @@ func init() {
 	primeCmd.Flags().BoolVar(&primeMemoriesOnly, "memories-only", false, "Output only persistent memories for compact hook contexts")
 	primeCmd.Flags().BoolVar(&primeHookJSONMode, "hook-json", false, "Wrap output in the SessionStart hook JSON envelope (Claude Code, Gemini CLI, Codex)")
 	primeCmd.Flags().IntVar(&primeMaxMemories, "max-memories", 0, "Cap injected persistent memories to N entries (0 = unlimited; falls back to the prime.max-memories config key)")
-	primeCmd.Flags().IntVar(&primeMaxMemoryChars, "max-memory-chars", 0, "Cap the total characters of injected persistent memories, at whole-memory boundaries (0 = unlimited; falls back to the prime.max-memory-chars config key)")
+	primeCmd.Flags().IntVar(&primeMaxMemoryChars, "max-memory-chars", 0, "Cap the total bytes of injected memory entries, at whole-memory boundaries; section header and banner are not counted (0 = unlimited; falls back to the prime.max-memory-chars config key)")
 	rootCmd.AddCommand(primeCmd)
 }
 
@@ -413,37 +414,36 @@ func primeMemoryCaps() (maxCount, maxChars int) {
 
 // renderPrimeMemories formats memories for injection, applying the given
 // caps. maxCount bounds how many memories are emitted; maxChars bounds the
-// total size of the emitted entries. Both are 0 when uncapped. Caps apply at
-// whole-memory boundaries and at least one memory is always emitted, so a
-// single oversized memory can exceed maxChars rather than vanish. Keys are
-// emitted in sorted order (the memory store keeps no timestamps, so
-// alphabetical is the only stable order available); when entries are elided
-// a banner ahead of the entries says how many and how to reach the rest, so
-// a capped prime never silently drops context.
+// total bytes of the emitted memory entries (the section header and elision
+// banner are not counted against this budget). Both are 0 when uncapped.
+// Caps apply at whole-memory boundaries and at least one memory is always
+// emitted, so a single oversized memory can exceed maxChars rather than
+// vanish. Keys are emitted in sorted order (the memory store keeps no
+// timestamps, so alphabetical is the only stable order available); when
+// entries are elided a banner ahead of the entries says how many and how to
+// reach the rest, so a capped prime never silently drops context. The banner
+// names only the cap that actually fired.
 func renderPrimeMemories(memories map[string]string, compact bool, maxCount, maxChars int) string {
-	keys := make([]string, 0, len(memories))
-	for k := range memories {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := sortedKeys(memories)
 
 	entries := make([]string, 0, len(keys))
 	used := 0
+	var countCapHit, charCapHit bool
 	for _, k := range keys {
 		if maxCount > 0 && len(entries) >= maxCount {
+			countCapHit = true
 			break
 		}
 		var entry string
 		if compact {
 			v := strings.ReplaceAll(memories[k], "\n", " ")
-			if len(v) > 150 {
-				v = v[:147] + "..."
-			}
+			v = truncate(v, 150)
 			entry = fmt.Sprintf("- **%s**: %s\n", k, v)
 		} else {
 			entry = fmt.Sprintf("### %s\n%s\n\n", k, memories[k])
 		}
 		if maxChars > 0 && len(entries) > 0 && used+len(entry) > maxChars {
+			charCapHit = true
 			break
 		}
 		entries = append(entries, entry)
@@ -451,11 +451,18 @@ func renderPrimeMemories(memories map[string]string, compact bool, maxCount, max
 	}
 
 	elided := len(keys) - len(entries)
+	var noteCount, noteChars int
+	if countCapHit {
+		noteCount = maxCount
+	}
+	if charCapHit {
+		noteChars = maxChars
+	}
 	var sb strings.Builder
 	if compact {
 		if elided > 0 {
 			sb.WriteString(fmt.Sprintf("\n## Memories (showing %d of %d)\n", len(entries), len(keys)))
-			sb.WriteString(fmt.Sprintf("- %d more not shown (%s); browse with `bd memories <keyword>`\n", elided, primeMemoryCapNote(maxCount, maxChars)))
+			sb.WriteString(fmt.Sprintf("- %d more not shown (%s); browse with `bd memories <keyword>`\n", elided, primeMemoryCapNote(noteCount, noteChars)))
 		} else {
 			sb.WriteString("\n## Memories\n")
 		}
@@ -467,7 +474,7 @@ func renderPrimeMemories(memories map[string]string, compact bool, maxCount, max
 		}
 		sb.WriteString("Stored via `bd remember`. Update in place with `bd remember --key <key> \"new content\"`. Search with `bd memories <keyword>`. Remove with `bd forget <key>`.\n\n")
 		if elided > 0 {
-			sb.WriteString(fmt.Sprintf("> %d more memories are not shown here (%s). Browse the full set with `bd memories <keyword>` or recall one with `bd remember <key>`.\n\n", elided, primeMemoryCapNote(maxCount, maxChars)))
+			sb.WriteString(fmt.Sprintf("> %d more memories are not shown here (%s). Browse the full set with `bd memories <keyword>` or recall one with `bd remember <key>`.\n\n", elided, primeMemoryCapNote(noteCount, noteChars)))
 		}
 	}
 	for _, entry := range entries {

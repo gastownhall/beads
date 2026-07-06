@@ -820,6 +820,22 @@ func validateYamlConfigValue(key, value string) error {
 		if lower != "server" && lower != "embedded" {
 			return fmt.Errorf("dolt.mode must be \"server\" or \"embedded\", got %q", value)
 		}
+	case "prime.max-memories":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("prime.max-memories must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+		if n < 0 {
+			return fmt.Errorf("prime.max-memories must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+	case "prime.max-memory-chars":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("prime.max-memory-chars must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+		if n < 0 {
+			return fmt.Errorf("prime.max-memory-chars must be a non-negative integer (0 = unlimited), got %q", value)
+		}
 	}
 	return nil
 }

@@ -101,6 +101,24 @@ func TestRenderPrimeMemoriesCompactUncappedUnchanged(t *testing.T) {
 	}
 }
 
+func TestRenderPrimeMemoriesBannerNamesOnlyBindingCap(t *testing.T) {
+	// 5 memories, count cap = 50 (won't bind), char cap small enough to stop at ~2 entries.
+	// One entry is roughly: "### mem-00\ninsight body for mem-00\n\n" ~ 40+ bytes.
+	// Set char cap to allow only 1 entry so char cap fires, not count cap.
+	memories := testMemories(5)
+	firstEntry := fmt.Sprintf("### mem-00\n%s\n\n", memories["mem-00"])
+	smallCharBudget := len(firstEntry) + 5 // fits exactly 1 entry
+
+	out := renderPrimeMemories(memories, false, 50, smallCharBudget)
+
+	if !strings.Contains(out, "capped by max-memory-chars=") {
+		t.Fatalf("banner must name the char cap that fired, got %q", out)
+	}
+	if strings.Contains(out, "max-memories") {
+		t.Fatalf("banner must NOT name max-memories when it did not fire, got %q", out)
+	}
+}
+
 func TestPrimeMemoryCapsResolution(t *testing.T) {
 	oldMax, oldChars := primeMaxMemories, primeMaxMemoryChars
 	oldMaxSet, oldCharsSet := primeMaxMemoriesSet, primeMaxMemoryCharsSet
