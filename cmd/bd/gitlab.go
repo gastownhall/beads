@@ -574,7 +574,7 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	}
 
 	if jsonOutput {
-		outputJSON(gitlabSyncResult{
+		return outputJSON(gitlabSyncResult{
 			DryRun:              gitlabSyncDryRun,
 			Pulled:              result.Stats.Pulled,
 			Pushed:              result.Stats.Pushed,
@@ -588,7 +588,6 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 			MilestonesUpdated:   milestonesUpdated,
 			Warnings:            append(result.Warnings, linkWarnings...),
 		})
-		return nil
 	}
 
 	// Output results
