@@ -73,11 +73,56 @@ func BootstrapFromRemoteWithDB(ctx context.Context, doltDir, remoteURL, database
 	cloneTarget := filepath.Join(doltDir, database)
 	cmd := exec.CommandContext(ctx, "dolt", doltCloneArgs(remoteURL, cloneTarget)...)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		return false, fmt.Errorf("dolt clone failed: %w\nOutput: %s", err, output)
+		cleaned, cleanupErr := removeFailedCloneTargetWithRetry(cloneTarget)
+		return false, formatFailedCloneTargetError(err, output, cloneTarget, cleaned, cleanupErr)
 	}
 
 	fmt.Fprintf(os.Stderr, "Bootstrapped from remote: %s\n", remoteURL)
 	return true, nil
+}
+
+var failedCloneCleanupRetryDelays = []time.Duration{
+	50 * time.Millisecond,
+	100 * time.Millisecond,
+	250 * time.Millisecond,
+	500 * time.Millisecond,
+}
+
+func removeFailedCloneTargetWithRetry(path string) (bool, error) {
+	info, err := os.Lstat(filepath.Join(path, ".dolt"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false, nil
+	}
+
+	for attempt := 0; ; attempt++ {
+		err := os.RemoveAll(path)
+		if err == nil || os.IsNotExist(err) {
+			return true, nil
+		}
+		if attempt >= len(failedCloneCleanupRetryDelays) {
+			return true, err
+		}
+		time.Sleep(failedCloneCleanupRetryDelays[attempt])
+	}
+}
+
+func formatFailedCloneTargetError(cloneErr error, output []byte, cloneTarget string, cleaned bool, cleanupErr error) error {
+	if cleanupErr == nil && cleaned {
+		return fmt.Errorf("dolt clone failed: %w\nOutput: %s\nCleaned up failed clone target %q; fix the clone error above and retry `bd bootstrap`", cloneErr, output, cloneTarget)
+	}
+	if cleanupErr == nil {
+		return fmt.Errorf("dolt clone failed: %w\nOutput: %s", cloneErr, output)
+	}
+	if !cleaned {
+		return fmt.Errorf("dolt clone failed: %w\nOutput: %s\nCould not inspect failed clone target %q before cleanup: %v\nOn Windows this usually means a dolt or bd process, or antivirus scanner, still has a file handle open under `.dolt/noms/LOCK`. Stop stuck dolt/bd processes, wait a moment, delete the directory manually if it remains, then retry `bd bootstrap`", cloneErr, output, cloneTarget, cleanupErr)
+	}
+	return fmt.Errorf("dolt clone failed: %w\nOutput: %s\nCould not clean up failed clone target %q after retrying: %v\nOn Windows this usually means a dolt or bd process, or antivirus scanner, still has a file handle open under `.dolt/noms/LOCK`. Stop stuck dolt/bd processes, wait a moment, delete the directory manually if it remains, then retry `bd bootstrap`", cloneErr, output, cloneTarget, cleanupErr)
 }
 
 func doltCloneArgs(remoteURL, target string) []string {
