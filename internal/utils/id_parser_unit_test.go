@@ -63,3 +63,31 @@ func TestHashSegmentPrefixMatch(t *testing.T) {
 		}
 	}
 }
+
+// TestHashSegmentPrefixMatchPlainHashPrefixOnly pins the intentional
+// behavior change from strings.Contains to prefix-only matching: a plain
+// (non-wisp, no-dash) hash matches a prefix fragment but no longer matches
+// a tail or middle fragment. Previously "f8e9" (tail of "a3f8e9") would
+// match via substring; that broadening was the source of the gcy-g4o
+// wrong-bead resolution and is deliberately removed.
+func TestHashSegmentPrefixMatchPlainHashPrefixOnly(t *testing.T) {
+	tests := []struct {
+		issueHash string
+		hashPart  string
+		want      bool
+	}{
+		// Prefix fragments of a plain hash still match
+		{"a3f8e9", "a3", true},
+		{"a3f8e9", "a3f8", true},
+		// Tail fragment no longer matches (old Contains behavior)
+		{"a3f8e9", "f8e9", false},
+		// Middle fragment no longer matches
+		{"a3f8e9", "3f8", false},
+	}
+	for _, tt := range tests {
+		got := hashSegmentPrefixMatch(tt.issueHash, tt.hashPart)
+		if got != tt.want {
+			t.Errorf("hashSegmentPrefixMatch(%q, %q) = %v; want %v", tt.issueHash, tt.hashPart, got, tt.want)
+		}
+	}
+}
