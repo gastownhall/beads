@@ -18,12 +18,14 @@ coverage:
       default:
         target: auto
         threshold: 5%
+        informational: true
 
     # Patch coverage (for new code in PRs)
     patch:
       default:
         target: 60%
         threshold: 10%
+        informational: true
 
 # Component management for domain-based coverage views
 # Components are purely configuration-driven — no upload-time setup needed

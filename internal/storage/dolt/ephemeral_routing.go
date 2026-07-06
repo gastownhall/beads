@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -18,16 +18,12 @@ func IsEphemeralID(id string) bool {
 	return strings.Contains(id, "-wisp-")
 }
 
-// DefaultInfraTypes returns a copy of the built-in infrastructure types.
-// Delegates to storage.DefaultInfraTypes.
 func DefaultInfraTypes() []string {
-	return storage.DefaultInfraTypes()
+	return domain.DefaultInfraTypes()
 }
 
-// IsInfraType returns true if the issue type is infrastructure.
-// Delegates to storage.IsInfraType.
 func IsInfraType(t types.IssueType) bool {
-	return storage.IsInfraType(t)
+	return domain.IsInfraType(t)
 }
 
 // IsInfraTypeCtx returns true if the issue type is infrastructure, using the
@@ -191,7 +187,6 @@ func (s *DoltStore) PromoteFromEphemeral(ctx context.Context, id string, actor s
 	}); err != nil {
 		return err
 	}
-	s.invalidateBlockedIDsCache()
 	return nil
 }
 
@@ -227,9 +222,13 @@ func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[str
 			return fmt.Errorf("delete copied labels for demoted issue %s: %w", id, err)
 		}
 
+		// Demotion is the inverse of promotion: carry id across so the wisp edge
+		// keeps the deterministic key its dependency had. Both tables key id on
+		// (issue_id, target), and wisp_dependencies.id also has no DEFAULT now, so
+		// the copy is both consistent and required (#4259).
 		if _, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO wisp_dependencies (issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id)
-		SELECT issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id
+		INSERT IGNORE INTO wisp_dependencies (id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id)
+		SELECT id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id
 		FROM dependencies WHERE issue_id = ?
 	`, id); err != nil {
 			return fmt.Errorf("copy dependencies for demoted issue %s: %w", id, err)
@@ -239,8 +238,8 @@ func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[str
 		}
 
 		if _, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO wisp_events (issue_id, event_type, actor, old_value, new_value, comment, created_at)
-		SELECT issue_id, event_type, actor, old_value, new_value, comment, created_at
+		INSERT IGNORE INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value, comment, created_at)
+		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
 		FROM events WHERE issue_id = ?
 	`, id); err != nil {
 			return fmt.Errorf("copy events for demoted issue %s: %w", id, err)
@@ -250,8 +249,8 @@ func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[str
 		}
 
 		if _, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO wisp_comments (issue_id, author, text, created_at)
-		SELECT issue_id, author, text, created_at
+		INSERT IGNORE INTO wisp_comments (id, issue_id, author, text, created_at)
+		SELECT id, issue_id, author, text, created_at
 		FROM comments WHERE issue_id = ?
 	`, id); err != nil {
 			return fmt.Errorf("copy comments for demoted issue %s: %w", id, err)
@@ -261,9 +260,9 @@ func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[str
 		}
 
 		if _, err := tx.ExecContext(ctx, `
-		INSERT INTO wisp_events (issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?)
-	`, id, types.EventUpdated, actor, "", "demoted to wisp"); err != nil {
+		INSERT INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, issueops.NewEventID(), id, types.EventUpdated, actor, "", "demoted to wisp"); err != nil {
 			return fmt.Errorf("record demotion event for demoted issue %s: %w", id, err)
 		}
 
@@ -275,11 +274,18 @@ func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[str
 			return fmt.Errorf("failed to delete issue from issues: %w", err)
 		}
 
+		affectedIssues, affectedWisps, aerr := issueops.AffectedByStatusChangeForWispInTx(ctx, tx, id)
+		if aerr != nil {
+			return fmt.Errorf("affected by demote for %s: %w", id, aerr)
+		}
+		if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+			return fmt.Errorf("recompute is_blocked after demote for %s: %w", id, err)
+		}
+
 		return s.doltAddAndCommitInTx(ctx, tx, permanentIssueAuxTables, fmt.Sprintf("bd: demote %s to wisp", id))
 	}); err != nil {
 		return err
 	}
-	s.invalidateBlockedIDsCache()
 	return nil
 }
 

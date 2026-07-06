@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -161,5 +163,55 @@ func TestHelpDocFlagTextDoesNotClaimDashMeansStdout(t *testing.T) {
 	}
 	if strings.Contains(flag.Usage, "use - for stdout") {
 		t.Fatalf("help --doc flag still documents unsupported '-' stdout sentinel: %q", flag.Usage)
+	}
+}
+
+func TestWriteGeneratedCLIDocsWritesLiveAndRequestedVersionedDocs(t *testing.T) {
+	root := &cobra.Command{Use: "bd"}
+	root.AddCommand(
+		testHelpCmd("show <id>", "Show an issue"),
+		testHelpCmd("create", "Create an issue"),
+	)
+	dir := t.TempDir()
+
+	if err := writeGeneratedCLIDocs(root, dir, "1.2.3"); err != nil {
+		t.Fatalf("writeGeneratedCLIDocs() error = %v", err)
+	}
+
+	assertFileContains(t, filepath.Join(dir, "docs", "CLI_REFERENCE.md"), "# bd — Complete Command Reference")
+	assertFileContains(t, filepath.Join(dir, "website", "docs", "cli-reference", "index.md"), "Reference for bd Latest")
+	assertFileContains(t, filepath.Join(dir, "website", "docs", "cli-reference", "create.md"), "Generated from `bd help --doc create`")
+	assertFileContains(t, filepath.Join(dir, "website", "versioned_docs", "version-1.2.3", "cli-reference", "index.md"), "Reference for bd v1.2.3")
+	assertFileContains(t, filepath.Join(dir, "website", "versioned_docs", "version-1.2.3", "cli-reference", "show.md"), "## bd show")
+}
+
+func TestWriteGeneratedCLIDocsDoesNotTouchVersionedDocsWithoutVersion(t *testing.T) {
+	root := &cobra.Command{Use: "bd"}
+	root.AddCommand(testHelpCmd("show <id>", "Show an issue"))
+	dir := t.TempDir()
+
+	versioned := filepath.Join(dir, "website", "versioned_docs", "version-1.0.0", "cli-reference")
+	if err := os.MkdirAll(versioned, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(versioned, "sentinel.md")
+	if err := os.WriteFile(sentinel, []byte("keep me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeGeneratedCLIDocs(root, dir, ""); err != nil {
+		t.Fatalf("writeGeneratedCLIDocs() error = %v", err)
+	}
+	assertFileContains(t, sentinel, "keep me")
+}
+
+func assertFileContains(t *testing.T, path, want string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("%s missing %q in:\n%s", path, want, string(data))
 	}
 }

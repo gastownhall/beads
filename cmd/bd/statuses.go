@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -48,10 +48,18 @@ Examples:
   bd statuses            # List all statuses with icons and categories
   bd statuses --json     # Output as JSON
 `,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("statuses")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := ensureDirectMode("statuses command requires direct database access"); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return
+			return HandleError("%v", err)
 		}
 
 		var customStatuses []types.CustomStatus
@@ -77,11 +85,9 @@ Examples:
 				})
 			}
 			result.CustomStatuses = customStatuses
-			outputJSON(result)
-			return
+			return outputJSON(result)
 		}
 
-		// Text output
 		fmt.Println("Built-in statuses:")
 		for _, s := range builtInStatuses {
 			icon := ui.RenderStatusIcon(string(s.Status))
@@ -99,6 +105,7 @@ Examples:
 			fmt.Println("Configure with: bd config set status.custom \"name:category,...\"")
 			fmt.Println("Categories: active, wip, done, frozen")
 		}
+		return nil
 	},
 }
 

@@ -218,3 +218,47 @@ func TestEmbeddedPrune(t *testing.T) {
 		}
 	})
 }
+
+// TestPrune_protectsBeadCitedByCustomStatusBead is a regression test for the
+// maphew review of PR #4023 (be-e2nb): reference-aware prune must scan beads in
+// active *custom* statuses, not only the built-in non-closed statuses. A closed
+// bead cited by a bead in an active custom status must be protected from prune,
+// exactly like one cited by a built-in open bead.
+func TestPrune_protectsBeadCitedByCustomStatusBead(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "rcs")
+
+	// Define an active custom status.
+	bdRunWithFlockRetry(t, bd, dir, "config", "set", "status.custom", "in_review:active") //nolint:errcheck
+
+	// A closed bead that will be cited, and a closed bead nobody cites.
+	cited := createAndClose(t, bd, dir, "Closed bead cited by a reviewer bead")
+	orphan := createAndClose(t, bd, dir, "Closed orphan bead")
+
+	// An open bead moved into the active custom status, whose description cites
+	// the closed bead. With the fix this protects `cited`; without it `cited`
+	// is pruned because the custom status is never scanned.
+	citing := bdCreate(t, bd, dir, "Reviewer bead", "--description", "depends on "+cited)
+	bdRunWithFlockRetry(t, bd, dir, "update", citing.ID, "--status", "in_review") //nolint:errcheck
+
+	// Guard the test's own premise: the citing bead must really be in the custom
+	// status, not a built-in non-closed status (which would protect `cited`
+	// regardless of the fix and make this test vacuous).
+	if got := bdShow(t, bd, dir, citing.ID); got.Status != "in_review" {
+		t.Fatalf("setup: expected citing bead %s in custom status in_review, got %q", citing.ID, got.Status)
+	}
+
+	bdPrune(t, bd, dir, "--pattern", "rcs-*", "--force")
+
+	// `cited` must survive (protected by the in_review reference); `orphan` must
+	// be gone (proving prune actually deleted something).
+	if got := bdShow(t, bd, dir, cited); got.ID != cited {
+		t.Errorf("expected cited bead %s to survive prune, got %q", cited, got.ID)
+	}
+	bdShowFail(t, bd, dir, orphan)
+}

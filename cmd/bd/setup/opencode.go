@@ -11,36 +11,24 @@ var opencodeIntegration = agentsIntegration{
 
 var opencodeEnvProvider = defaultAgentsEnv
 
-// InstallOpenCode installs OpenCode integration.
-func InstallOpenCode() {
-	env := opencodeEnvProvider()
-	if err := installOpenCode(env); err != nil {
-		setupExit(1)
-	}
+func InstallOpenCode() error {
+	return installOpenCode(opencodeEnvProvider())
 }
 
 func installOpenCode(env agentsEnv) error {
 	return installAgents(env, opencodeIntegration)
 }
 
-// CheckOpenCode checks if OpenCode integration is installed.
-func CheckOpenCode() {
-	env := opencodeEnvProvider()
-	if err := checkOpenCode(env); err != nil {
-		setupExit(1)
-	}
+func CheckOpenCode() error {
+	return checkOpenCode(opencodeEnvProvider())
 }
 
 func checkOpenCode(env agentsEnv) error {
 	return checkAgents(env, opencodeIntegration)
 }
 
-// RemoveOpenCode removes OpenCode integration.
-func RemoveOpenCode() {
-	env := opencodeEnvProvider()
-	if err := removeOpenCode(env); err != nil {
-		setupExit(1)
-	}
+func RemoveOpenCode() error {
+	return removeOpenCode(opencodeEnvProvider())
 }
 
 func removeOpenCode(env agentsEnv) error {

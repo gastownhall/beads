@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -12,7 +11,7 @@ import (
 // InProgressIssues, ClosedIssues, DeferredIssues, PinnedIssues) of stats from
 // the issues table. It does NOT compute BlockedIssues or ReadyIssues — callers
 // fill those in using their own blocked-ID computation strategy.
-func ScanIssueCountsInTx(ctx context.Context, tx *sql.Tx, stats *types.Statistics) error {
+func ScanIssueCountsInTx(ctx context.Context, tx DBTX, stats *types.Statistics) error {
 	if err := tx.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*) AS total,

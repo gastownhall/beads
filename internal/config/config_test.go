@@ -1690,3 +1690,33 @@ func TestInitialize_ExternalBEADSDirDoesNotMergeCallerProjectConfig(t *testing.T
 		t.Fatalf("GetBool(json) = %v, want false", got)
 	}
 }
+
+func TestViperIssuePrefixKeysAreDistinct(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create .beads: %v", err)
+	}
+
+	// ReadConfigPrefix diagnostics rely on viper keeping these YAML keys distinct.
+	content := "issue-prefix: canonical\nissue_prefix: legacy_underscore\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write config.yaml: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if got := GetString("issue-prefix"); got != "canonical" {
+		t.Fatalf("GetString(issue-prefix) = %q, want %q", got, "canonical")
+	}
+	if got := GetString("issue_prefix"); got != "legacy_underscore" {
+		t.Fatalf("GetString(issue_prefix) = %q, want %q", got, "legacy_underscore")
+	}
+}

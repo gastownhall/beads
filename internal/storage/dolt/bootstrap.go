@@ -71,13 +71,21 @@ func BootstrapFromRemoteWithDB(ctx context.Context, doltDir, remoteURL, database
 	// Clone into <doltDir>/<database>/ so the embedded driver can find it.
 	// `dolt clone <url> <target>` creates <target>/.dolt/ directly.
 	cloneTarget := filepath.Join(doltDir, database)
-	cmd := exec.CommandContext(ctx, "dolt", "clone", remoteURL, cloneTarget)
+	cmd := exec.CommandContext(ctx, "dolt", doltCloneArgs(remoteURL, cloneTarget)...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return false, fmt.Errorf("dolt clone failed: %w\nOutput: %s", err, output)
 	}
 
 	fmt.Fprintf(os.Stderr, "Bootstrapped from remote: %s\n", remoteURL)
 	return true, nil
+}
+
+func doltCloneArgs(remoteURL, target string) []string {
+	args := []string{"clone"}
+	if user := os.Getenv("DOLT_REMOTE_USER"); user != "" {
+		args = append(args, "--user", user)
+	}
+	return append(args, remoteURL, target)
 }
 
 // BootstrapFromGitRemoteWithDB is deprecated. Use BootstrapFromRemoteWithDB instead.

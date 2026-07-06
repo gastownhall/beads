@@ -178,6 +178,22 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+	t.Run("close_multiple_ids_with_per_id_reasons", func(t *testing.T) {
+		issue1 := bdCreate(t, bd, dir, "Multi close reason 1", "--type", "task")
+		issue2 := bdCreate(t, bd, dir, "Multi close reason 2", "--type", "task")
+
+		bdClose(t, bd, dir, issue1.ID, "--reason", "fixed A", issue2.ID, "--reason", "fixed B")
+
+		got1 := bdShow(t, bd, dir, issue1.ID)
+		got2 := bdShow(t, bd, dir, issue2.ID)
+		if got1.CloseReason != "fixed A" {
+			t.Errorf("issue1 close_reason = %q, want %q", got1.CloseReason, "fixed A")
+		}
+		if got2.CloseReason != "fixed B" {
+			t.Errorf("issue2 close_reason = %q, want %q", got2.CloseReason, "fixed B")
+		}
+	})
+
 	t.Run("close_already_closed", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Double close", "--type", "task")
 		bdClose(t, bd, dir, issue.ID)

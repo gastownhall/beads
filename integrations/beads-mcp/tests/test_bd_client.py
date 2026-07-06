@@ -197,9 +197,7 @@ async def test_ready_with_issue_type(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_ready_invalid_response(bd_client, mock_process):
     """Test ready method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process):
         params = ReadyWorkParams(limit=10)
@@ -235,9 +233,7 @@ async def test_list_issues(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_list_issues_invalid_response(bd_client, mock_process):
     """Test list_issues method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process):
         params = ListIssuesParams(status="open")
@@ -492,9 +488,7 @@ async def test_close(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_close_invalid_response(bd_client, mock_process):
     """Test close method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with (
         patch("asyncio.create_subprocess_exec", return_value=mock_process),
@@ -596,9 +590,7 @@ async def test_reopen_with_reason(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_reopen_invalid_response(bd_client, mock_process):
     """Test reopen method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with (
         patch("asyncio.create_subprocess_exec", return_value=mock_process),
@@ -744,9 +736,7 @@ async def test_blocked(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_blocked_invalid_response(bd_client, mock_process):
     """Test blocked method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process):
         result = await bd_client.blocked()
@@ -780,3 +770,43 @@ async def test_init_failure(bd_client, mock_process):
         pytest.raises(BdCommandError, match="bd init failed"),
     ):
         await bd_client.init()
+
+
+@pytest.mark.asyncio
+async def test_validate_routes_to_doctor(bd_client):
+    """validate() routes to `bd doctor --check=validate` (GH#4037)."""
+    with patch.object(bd_client, "_run_command", new=AsyncMock(return_value={})) as run:
+        await bd_client.validate()
+    run.assert_awaited_once_with("doctor", "--check=validate")
+
+
+@pytest.mark.asyncio
+async def test_validate_fix_all_adds_fix_yes(bd_client):
+    """validate(fix_all=True) appends --fix --yes for non-interactive fixing."""
+    with patch.object(bd_client, "_run_command", new=AsyncMock(return_value={})) as run:
+        await bd_client.validate(fix_all=True)
+    run.assert_awaited_once_with("doctor", "--check=validate", "--fix", "--yes")
+
+
+@pytest.mark.asyncio
+async def test_validate_ignores_checks_arg(bd_client):
+    """The legacy `checks` arg is accepted but no longer forwarded to bd."""
+    with patch.object(bd_client, "_run_command", new=AsyncMock(return_value={})) as run:
+        await bd_client.validate(checks="orphans,duplicates")
+    run.assert_awaited_once_with("doctor", "--check=validate")
+
+
+@pytest.mark.asyncio
+async def test_detect_pollution_routes_to_doctor(bd_client):
+    """detect_pollution() routes to `bd doctor --check=pollution` (GH#4037)."""
+    with patch.object(bd_client, "_run_command", new=AsyncMock(return_value={})) as run:
+        await bd_client.detect_pollution()
+    run.assert_awaited_once_with("doctor", "--check=pollution")
+
+
+@pytest.mark.asyncio
+async def test_detect_pollution_clean_adds_flags(bd_client):
+    """detect_pollution(clean=True) appends --clean --yes."""
+    with patch.object(bd_client, "_run_command", new=AsyncMock(return_value={})) as run:
+        await bd_client.detect_pollution(clean=True)
+    run.assert_awaited_once_with("doctor", "--check=pollution", "--clean", "--yes")

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -24,30 +25,39 @@ Activity sources:
 Examples:
   bd mol last-activity hq-wisp-0laki
   bd mol last-activity hq-wisp-0laki --json`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("mol-last-activity")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 
 		if store == nil {
-			FatalError("no database connection")
+			return HandleErrorRespectJSON("no database connection")
 		}
 
 		moleculeID, err := utils.ResolvePartialID(ctx, store, args[0])
 		if err != nil {
-			FatalError("molecule '%s' not found", args[0])
+			return HandleErrorRespectJSON("molecule '%s' not found", args[0])
 		}
 
 		activity, err := store.GetMoleculeLastActivity(ctx, moleculeID)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		if jsonOutput {
-			outputJSON(activity)
-			return
+			return outputJSON(activity)
 		}
 
 		fmt.Println(activity.LastActivity.UTC().Format(time.RFC3339))
+		return nil
 	},
 }
 

@@ -9,9 +9,6 @@ import (
 )
 
 // GetEpicsEligibleForClosureInTx returns epics whose children are all closed.
-// Uses separate single-table queries to avoid Dolt's joinIter panic on
-// multi-table JOINs, and batches IN clauses for performance.
-//
 // nolint:gosec // G201: table names are hardcoded, placeholders contain only ? markers
 func GetEpicsEligibleForClosureInTx(ctx context.Context, tx *sql.Tx) ([]*types.EpicStatus, error) {
 	// Step 1: Get open epic IDs (single-table scan)

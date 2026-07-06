@@ -98,7 +98,7 @@ func TestMaybeAutoPush_NilStore(t *testing.T) {
 
 func TestAutoPush_SkippedForReadOnlyCommands(t *testing.T) {
 	// Read-only commands should not trigger auto-push (GH#2191).
-	readOnly := []string{"list", "ready", "show", "stats", "blocked", "search", "graph"}
+	readOnly := []string{"list", "ready", "show", "stats", "blocked", "search", "query", "graph"}
 	for _, cmd := range readOnly {
 		if !isReadOnlyCommand(cmd) {
 			t.Errorf("isReadOnlyCommand(%q) = false, want true", cmd)

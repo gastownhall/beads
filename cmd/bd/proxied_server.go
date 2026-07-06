@@ -34,40 +34,72 @@ func proxiedServerLogPath(beadsDir string) string {
 	return filepath.Join(proxiedServerRoot(beadsDir), proxiedServerLogName)
 }
 
-func resolveProxiedServerRootPath(beadsDir string, cfg *configfile.Config) string {
-	if cfg == nil {
-		cfg = &configfile.Config{}
+func envOrAbsJoin(envName, beadsDir string) string {
+	p := os.Getenv(envName)
+	if p == "" {
+		return ""
 	}
-	if custom := cfg.GetDoltProxiedServerRootPath(beadsDir); custom != "" {
-		return custom
+	if filepath.IsAbs(p) {
+		return p
 	}
-	return proxiedServerRoot(beadsDir)
+	return filepath.Join(beadsDir, p)
 }
 
-func resolveProxiedServerConfigPath(beadsDir string, cfg *configfile.Config) (path string, isCustom bool) {
-	if cfg == nil {
-		cfg = &configfile.Config{}
+func resolveProxiedServerRootPath(beadsDir string) (string, error) {
+	if p := envOrAbsJoin("BEADS_PROXIED_SERVER_ROOT_PATH", beadsDir); p != "" {
+		return p, nil
 	}
-	if custom := cfg.GetDoltProxiedServerConfig(beadsDir); custom != "" {
-		return custom, true
+	info, err := configfile.LoadProxiedServerClientInfo(beadsDir)
+	if err != nil {
+		return "", err
 	}
-	root := resolveProxiedServerRootPath(beadsDir, cfg)
-	return filepath.Join(root, proxiedServerConfigName), false
+	if p := info.ResolvedRootPath(beadsDir); p != "" {
+		return p, nil
+	}
+	return proxiedServerRoot(beadsDir), nil
 }
 
-func resolveProxiedServerLogPath(beadsDir string, cfg *configfile.Config) (path string, isCustom bool) {
-	if cfg == nil {
-		cfg = &configfile.Config{}
+func resolveProxiedServerConfigPath(beadsDir string) (path string, isCustom bool, err error) {
+	if p := envOrAbsJoin("BEADS_PROXIED_SERVER_CONFIG", beadsDir); p != "" {
+		return p, true, nil
 	}
-	if custom := cfg.GetDoltProxiedServerLog(beadsDir); custom != "" {
-		return custom, true
+	info, err := configfile.LoadProxiedServerClientInfo(beadsDir)
+	if err != nil {
+		return "", false, err
 	}
-	root := resolveProxiedServerRootPath(beadsDir, cfg)
-	return filepath.Join(root, proxiedServerLogName), false
+	if p := info.ResolvedConfigPath(beadsDir); p != "" {
+		return p, true, nil
+	}
+	root, err := resolveProxiedServerRootPath(beadsDir)
+	if err != nil {
+		return "", false, err
+	}
+	return filepath.Join(root, proxiedServerConfigName), false, nil
 }
 
-func ensureProxiedServerConfig(beadsDir string, cfg *configfile.Config) (string, error) {
-	path, isCustom := resolveProxiedServerConfigPath(beadsDir, cfg)
+func resolveProxiedServerLogPath(beadsDir string) (path string, isCustom bool, err error) {
+	if p := envOrAbsJoin("BEADS_PROXIED_SERVER_LOG", beadsDir); p != "" {
+		return p, true, nil
+	}
+	info, err := configfile.LoadProxiedServerClientInfo(beadsDir)
+	if err != nil {
+		return "", false, err
+	}
+	if p := info.ResolvedLogPath(beadsDir); p != "" {
+		return p, true, nil
+	}
+	root, err := resolveProxiedServerRootPath(beadsDir)
+	if err != nil {
+		return "", false, err
+	}
+	return filepath.Join(root, proxiedServerLogName), false, nil
+}
+
+func ensureProxiedServerConfig(beadsDir string) (string, error) {
+	path, isCustom, err := resolveProxiedServerConfigPath(beadsDir)
+	if err != nil {
+		return "", err
+	}
 
 	if isCustom {
 		info, err := os.Stat(path)
@@ -110,16 +142,22 @@ func ensureProxiedServerConfig(beadsDir string, cfg *configfile.Config) (string,
 	return path, nil
 }
 
+// Validators below emit source-neutral errors. Callers wrap with whichever
+// label is meaningful at their site: CLI callers prepend the flag name
+// (e.g. "--proxied-server-config-path"); runtime callers (uow factory, etc.)
+// prepend whatever label fits — the path may have come from env var or
+// the proxied_server_client_info.json sidecar, not necessarily a flag.
+
 func validateProxiedServerConfig(path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("--proxied-server-config %s: %w", path, err)
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("--proxied-server-config %s: not a regular file", path)
+		return fmt.Errorf("%s: not a regular file", path)
 	}
 	if _, err := servercfg.YamlConfigFromFile(filesys.LocalFS, path); err != nil {
-		return fmt.Errorf("--proxied-server-config %s: parse: %w", path, err)
+		return fmt.Errorf("%s: parse: %w", path, err)
 	}
 	return nil
 }
@@ -128,10 +166,10 @@ func validateProxiedServerRootPath(path string) error {
 	switch info, err := os.Stat(path); {
 	case err == nil:
 		if !info.IsDir() {
-			return fmt.Errorf("--proxied-server-root-path %s: not a directory", path)
+			return fmt.Errorf("%s: not a directory", path)
 		}
 	case !os.IsNotExist(err):
-		return fmt.Errorf("--proxied-server-root-path %s: %w", path, err)
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	return nil
 }
@@ -140,18 +178,18 @@ func validateProxiedServerLogPath(path string) error {
 	parent := filepath.Dir(path)
 	parentInfo, err := os.Stat(parent)
 	if err != nil {
-		return fmt.Errorf("--proxied-server-log-path %s: parent directory: %w", path, err)
+		return fmt.Errorf("%s: parent directory: %w", path, err)
 	}
 	if !parentInfo.IsDir() {
-		return fmt.Errorf("--proxied-server-log-path %s: parent %s is not a directory", path, parent)
+		return fmt.Errorf("%s: parent %s is not a directory", path, parent)
 	}
 	switch info, err := os.Stat(path); {
 	case err == nil:
 		if !info.Mode().IsRegular() {
-			return fmt.Errorf("--proxied-server-log-path %s: not a regular file", path)
+			return fmt.Errorf("%s: not a regular file", path)
 		}
 	case !os.IsNotExist(err):
-		return fmt.Errorf("--proxied-server-log-path %s: %w", path, err)
+		return fmt.Errorf("%s: %w", path, err)
 	}
 	return nil
 }

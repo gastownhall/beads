@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,13 +9,28 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
+var errRefuseSymlinkWrite = errors.New("refusing to write through symlink")
+
 // atomicWriteFile writes data to a file atomically using a unique temporary file.
 // This prevents race conditions when multiple processes write to the same file.
-// If path is a symlink, writes to the resolved target (preserving the symlink).
+// If path is a symlink, the write is refused; callers that deliberately want
+// write-through behavior should use atomicWriteFileFollowingSymlink.
 // An optional permissions argument sets the file mode (default 0644).
 //
 //nolint:unparam // perm is intentionally variadic for callers that need non-default permissions
 func atomicWriteFile(path string, data []byte, perm ...os.FileMode) error {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: %s", errRefuseSymlinkWrite, path)
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspect path: %w", err)
+	}
+
+	return atomicWriteFileFollowingSymlink(path, data, perm...)
+}
+
+// atomicWriteFileFollowingSymlink writes atomically to the resolved target.
+// Keep this helper named at call sites so symlink write-through is explicit.
+func atomicWriteFileFollowingSymlink(path string, data []byte, perm ...os.FileMode) error {
 	mode := os.FileMode(0644)
 	if len(perm) > 0 {
 		mode = perm[0]

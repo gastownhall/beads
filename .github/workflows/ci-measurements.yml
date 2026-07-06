@@ -1,0 +1,791 @@
+name: CI Measurements
+
+on:
+  workflow_call:
+    inputs:
+      suite:
+        description: "Suite to measure"
+        required: true
+        type: string
+      smoke_version:
+        description: "Optional previous release for cross-version-smoke"
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Suite to measure"
+        required: true
+        type: choice
+        default: pr-linux
+        options:
+          - pr-linux
+          - macos-short
+          - macos-candidates
+          - linux-integration
+          - linux-integration-sharded
+          - linux-integration-hybrid-sharded
+          - linux-integration-hybrid-16-sharded
+          - linux-integration-hybrid-prebuilt-sharded
+          - linux-integration-coverage
+          - cross-version-smoke
+          - nix
+          - mcp-package
+          - npm-package
+          - website
+      smoke_version:
+        description: "Optional previous release for cross-version-smoke"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.suite }}
+  cancel-in-progress: false
+
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+
+jobs:
+  pr-linux:
+    name: Measure PR Linux commands
+    if: ${{ inputs.suite == 'pr-linux' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Measure commands
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          source scripts/ci/lib/timing.sh
+          source ./.buildflags
+
+          ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
+          ci_time "install golangci-lint" -- go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+          status=0
+          ci_time "pr-policy wrapper" -- make ci-pr-policy || status=$?
+          ci_time "pr-core gotestsum" -- gotestsum --junitfile artifacts/pr-core-junit.xml --format testdox -- -race -short -skip '^TestEmbedded' ./... || status=$?
+          ci_time "pr-lint wrapper" -- make ci-pr-lint || status=$?
+          exit "$status"
+
+      - name: Upload measurement artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-measure-pr-linux
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  macos-short:
+    name: Measure macOS short Go tests
+    if: ${{ inputs.suite == 'macos-short' }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Measure commands
+        run: |
+          set -euo pipefail
+          source scripts/ci/lib/timing.sh
+          source ./.buildflags
+
+          ci_time "macos short go test" -- go test -v -race -short -skip '^TestEmbedded' ./...
+
+  macos-candidates:
+    name: Measure macOS no-short candidates
+    if: ${{ inputs.suite == 'macos-candidates' }}
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Measure commands
+        run: |
+          set -euo pipefail
+          source scripts/ci/lib/timing.sh
+
+          status=0
+          ci_time "macos no-short go test" -- go test -tags=gms_pure_go -v -race -timeout=30m -skip '^TestEmbedded' ./... || status=$?
+          ci_time "macos integration go test" -- go test -tags=integration,gms_pure_go -v -race -timeout=30m -skip '^TestEmbedded' ./... || status=$?
+          exit "$status"
+
+  linux-integration:
+    name: Measure Linux integration tests
+    if: ${{ inputs.suite == 'linux-integration' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Measure commands
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          source scripts/ci/lib/timing.sh
+
+          ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
+          ci_time "linux integration go test" -- env BEADS_TEST_SKIP=dolt gotestsum --junitfile artifacts/linux-integration-junit.xml --format testdox -- -v -race -tags=integration,gms_pure_go -timeout=30m ./...
+
+      - name: Upload measurement artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-measure-linux-integration
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  linux-integration-sharded:
+    name: Measure Linux integration shard ${{ matrix.shard }}/6
+    if: ${{ inputs.suite == 'linux-integration-sharded' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Measure shard
+        env:
+          SHARD: ${{ matrix.shard }}
+          TOTAL_SHARDS: 6
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          source scripts/ci/lib/timing.sh
+
+          ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
+
+          mapfile -t packages < <(
+            GO_TEST_SHARD_TAGS=integration,gms_pure_go \
+              scripts/ci/go-test-shard-packages.sh "$SHARD" "$TOTAL_SHARDS"
+          )
+          package_manifest="artifacts/linux-integration-packages-${SHARD}-of-${TOTAL_SHARDS}.txt"
+          printf '%s\n' "${packages[@]}" | tee "$package_manifest"
+
+          if [[ "${#packages[@]}" -eq 0 ]]; then
+            echo "No packages assigned to shard ${SHARD}/${TOTAL_SHARDS}; skipping go test"
+            exit 0
+          fi
+
+          ci_time "linux integration shard ${SHARD}/${TOTAL_SHARDS} go test" -- \
+            env BEADS_TEST_SKIP=dolt gotestsum \
+              --junitfile "artifacts/linux-integration-shard-${SHARD}-of-${TOTAL_SHARDS}.xml" \
+              --format testdox \
+              -- -v -race -tags=integration,gms_pure_go -timeout=30m "${packages[@]}"
+
+      - name: Upload measurement artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-measure-linux-integration-shard-${{ matrix.shard }}-of-6
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  linux-integration-hybrid-packages:
+    name: Measure Linux integration package shard ${{ matrix.shard }}/6 (no cmd/bd)
+    if: ${{ inputs.suite == 'linux-integration-hybrid-sharded' || inputs.suite == 'linux-integration-hybrid-16-sharded' || inputs.suite == 'linux-integration-hybrid-prebuilt-sharded' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Measure shard
+        env:
+          SHARD: ${{ matrix.shard }}
+          TOTAL_SHARDS: 6
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          source scripts/ci/lib/timing.sh
+
+          ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
+
+          package_manifest="artifacts/linux-integration-hybrid-packages-${SHARD}-of-${TOTAL_SHARDS}.txt"
+          write_package_manifest() {
+            GO_TEST_SHARD_TAGS=integration,gms_pure_go \
+              GO_TEST_SHARD_EXCLUDE_REGEX="^github.com/steveyegge/beads/cmd/bd$" \
+              scripts/ci/go-test-shard-packages.sh "$SHARD" "$TOTAL_SHARDS" > "$package_manifest"
+          }
+          ci_time "list integration package shard ${SHARD}/${TOTAL_SHARDS}" -- write_package_manifest
+          cat "$package_manifest"
+          mapfile -t packages < "$package_manifest"
+
+          if [[ "${#packages[@]}" -eq 0 ]]; then
+            echo "No packages assigned to shard ${SHARD}/${TOTAL_SHARDS}; skipping go test"
+            exit 0
+          fi
+
+          ci_time "linux integration package shard ${SHARD}/${TOTAL_SHARDS} go test" -- \
+            env BEADS_TEST_SKIP=dolt gotestsum \
+              --junitfile "artifacts/linux-integration-hybrid-packages-${SHARD}-of-${TOTAL_SHARDS}.xml" \
+              --format testdox \
+              -- -v -race -tags=integration,gms_pure_go -timeout=30m "${packages[@]}"
+
+      - name: Upload measurement artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-measure-linux-integration-hybrid-packages-${{ matrix.shard }}-of-6
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  linux-integration-hybrid-cmd-bd:
+    name: Measure Linux integration cmd/bd shard ${{ matrix.shard }}/8
+    if: ${{ inputs.suite == 'linux-integration-hybrid-sharded' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Measure shard
+        env:
+          SHARD: ${{ matrix.shard }}
+          TOTAL_SHARDS: 8
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          source scripts/ci/lib/timing.sh
+
+          ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
+
+          test_manifest="artifacts/linux-integration-cmd-bd-tests-${SHARD}-of-${TOTAL_SHARDS}.txt"
+          write_test_manifest() {
+            GO_TEST_SHARD_TAGS=integration,gms_pure_go \
+              scripts/ci/go-test-shard-names.sh "$SHARD" "$TOTAL_SHARDS" ./cmd/bd > "$test_manifest"
+          }
+          ci_time "list cmd/bd test shard ${SHARD}/${TOTAL_SHARDS}" -- write_test_manifest
+          cat "$test_manifest"
+          mapfile -t tests < "$test_manifest"
+
+          if [[ "${#tests[@]}" -eq 0 ]]; then
+            echo "No tests assigned to shard ${SHARD}/${TOTAL_SHARDS}; skipping go test"
+            exit 0
+          fi
+
+          run_regex="^($(IFS='|'; echo "${tests[*]}"))$"
+          ci_time "linux integration cmd/bd shard ${SHARD}/${TOTAL_SHARDS} go test" -- \
+            env BEADS_TEST_SKIP=dolt gotestsum \
+              --junitfile "artifacts/linux-integration-cmd-bd-${SHARD}-of-${TOTAL_SHARDS}.xml" \
+              --format testdox \
+              -- -v -race -tags=integration,gms_pure_go -timeout=30m -run "$run_regex" ./cmd/bd
+
+      - name: Upload measurement artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-measure-linux-integration-cmd-bd-${{ matrix.shard }}-of-8
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  linux-integration-hybrid-16-cmd-bd:
+    name: Measure Linux integration cmd/bd shard ${{ matrix.shard }}/16
+    if: ${{ inputs.suite == 'linux-integration-hybrid-16-sharded' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Measure shard
+        env:
+          SHARD: ${{ matrix.shard }}
+          TOTAL_SHARDS: 16
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          source scripts/ci/lib/timing.sh
+
+          ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
+
+          test_manifest="artifacts/linux-integration-cmd-bd-tests-${SHARD}-of-${TOTAL_SHARDS}.txt"
+          write_test_manifest() {
+            GO_TEST_SHARD_TAGS=integration,gms_pure_go \
+              scripts/ci/go-test-shard-names.sh "$SHARD" "$TOTAL_SHARDS" ./cmd/bd > "$test_manifest"
+          }
+          ci_time "list cmd/bd test shard ${SHARD}/${TOTAL_SHARDS}" -- write_test_manifest
+          cat "$test_manifest"
+          mapfile -t tests < "$test_manifest"
+
+          if [[ "${#tests[@]}" -eq 0 ]]; then
+            echo "No tests assigned to shard ${SHARD}/${TOTAL_SHARDS}; skipping go test"
+            exit 0
+          fi
+
+          run_regex="^($(IFS='|'; echo "${tests[*]}"))$"
+          ci_time "linux integration cmd/bd shard ${SHARD}/${TOTAL_SHARDS} go test" -- \
+            env BEADS_TEST_SKIP=dolt gotestsum \
+              --junitfile "artifacts/linux-integration-cmd-bd-${SHARD}-of-${TOTAL_SHARDS}.xml" \
+              --format testdox \
+              -- -v -race -tags=integration,gms_pure_go -timeout=30m -run "$run_regex" ./cmd/bd
+
+      - name: Upload measurement artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-measure-linux-integration-cmd-bd-${{ matrix.shard }}-of-16
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  linux-integration-hybrid-prebuilt-bd:
+    name: Measure Linux integration prebuild cmd/bd binary
+    if: ${{ inputs.suite == 'linux-integration-hybrid-prebuilt-sharded' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Measure build
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          source scripts/ci/lib/timing.sh
+          source ./.buildflags
+
+          ci_time "build cmd/bd subprocess binary" -- go build -tags "$BEADS_BUILD_TAGS" -o artifacts/bd ./cmd/bd
+
+      - name: Upload prebuilt bd
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-measure-linux-integration-prebuilt-bd
+          path: artifacts/bd
+          retention-days: 7
+          if-no-files-found: error
+
+  linux-integration-hybrid-prebuilt-cmd-bd:
+    name: Measure Linux integration prebuilt cmd/bd shard ${{ matrix.shard }}/8
+    if: ${{ inputs.suite == 'linux-integration-hybrid-prebuilt-sharded' }}
+    needs: linux-integration-hybrid-prebuilt-bd
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Download prebuilt bd
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-measure-linux-integration-prebuilt-bd
+          path: prebuilt-bd
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Measure shard
+        env:
+          SHARD: ${{ matrix.shard }}
+          TOTAL_SHARDS: 8
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/prebuilt-bd/bd
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          chmod +x "$BEADS_TEST_BD_BINARY"
+          source scripts/ci/lib/timing.sh
+
+          ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
+
+          test_manifest="artifacts/linux-integration-cmd-bd-tests-${SHARD}-of-${TOTAL_SHARDS}.txt"
+          write_test_manifest() {
+            GO_TEST_SHARD_TAGS=integration,gms_pure_go \
+              scripts/ci/go-test-shard-names.sh "$SHARD" "$TOTAL_SHARDS" ./cmd/bd > "$test_manifest"
+          }
+          ci_time "list cmd/bd test shard ${SHARD}/${TOTAL_SHARDS}" -- write_test_manifest
+          cat "$test_manifest"
+          mapfile -t tests < "$test_manifest"
+
+          if [[ "${#tests[@]}" -eq 0 ]]; then
+            echo "No tests assigned to shard ${SHARD}/${TOTAL_SHARDS}; skipping go test"
+            exit 0
+          fi
+
+          run_regex="^($(IFS='|'; echo "${tests[*]}"))$"
+          ci_time "linux integration prebuilt cmd/bd shard ${SHARD}/${TOTAL_SHARDS} go test" -- \
+            env BEADS_TEST_SKIP=dolt gotestsum \
+              --junitfile "artifacts/linux-integration-prebuilt-cmd-bd-${SHARD}-of-${TOTAL_SHARDS}.xml" \
+              --format testdox \
+              -- -v -race -tags=integration,gms_pure_go -timeout=30m -run "$run_regex" ./cmd/bd
+
+      - name: Upload measurement artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-measure-linux-integration-prebuilt-cmd-bd-${{ matrix.shard }}-of-8
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  linux-integration-coverage:
+    name: Measure Linux integration coverage
+    if: ${{ inputs.suite == 'linux-integration-coverage' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Measure commands
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          source scripts/ci/lib/timing.sh
+
+          ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
+          status=0
+          ci_time "linux integration coverage go test" -- env BEADS_TEST_SKIP=dolt gotestsum --junitfile artifacts/linux-integration-coverage-junit.xml --format testdox -- -v -race -tags=integration,gms_pure_go -coverprofile=artifacts/coverage.out -timeout=30m ./... || status=$?
+          if [[ -f artifacts/coverage.out ]]; then
+            ci_time "coverage summary" -- go tool cover -func=artifacts/coverage.out || status=$?
+          else
+            echo "coverage.out was not generated; skipping coverage summary"
+          fi
+          exit "$status"
+
+      - name: Upload measurement artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-measure-linux-integration-coverage
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  cross-version-smoke:
+    name: Measure cross-version smoke
+    if: ${{ inputs.suite == 'cross-version-smoke' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Cache previous release binaries
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.cache/beads-regression
+          key: smoke-binaries-measure-${{ runner.os }}
+
+      - name: Measure commands
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SMOKE_VERSION: ${{ inputs.smoke_version }}
+        run: |
+          set -euo pipefail
+          source scripts/ci/lib/timing.sh
+          source ./.buildflags
+
+          ci_time "build candidate binary" -- go build -o /tmp/bd-candidate ./cmd/bd
+          export CANDIDATE_BIN=/tmp/bd-candidate
+          if [[ -z "$SMOKE_VERSION" ]]; then
+            SMOKE_VERSION="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName --jq '.[0].tagName')"
+          fi
+          if [[ -z "$SMOKE_VERSION" ]]; then
+            echo "Could not resolve a previous release tag for cross-version smoke"
+            exit 1
+          fi
+          ci_time "upgrade smoke ${SMOKE_VERSION}" -- ./scripts/upgrade-smoke-test.sh "$SMOKE_VERSION"
+
+  nix:
+    name: Measure nix build
+    if: ${{ inputs.suite == 'nix' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@9adf02b41cfdac2632e1c16f0480ff5bf3b05dd6 # v3
+
+      - name: Measure commands
+        run: |
+          set -euo pipefail
+          source scripts/ci/lib/timing.sh
+
+          ci_time "nix build .#default" -- nix build .#default --print-build-logs
+
+  mcp-package:
+    name: Measure MCP package checks
+    if: ${{ inputs.suite == 'mcp-package' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.14'
+
+      - name: Measure commands
+        run: |
+          set -euo pipefail
+          source scripts/ci/lib/timing.sh
+
+          ci_time "install uv" -- pip install uv==0.11.16
+          ci_time "mcp package gate" -- make ci-package-mcp
+
+      - name: Upload measurement artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-measure-mcp-package
+          path: integrations/beads-mcp/dist/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  npm-package:
+    name: Measure npm package checks
+    if: ${{ inputs.suite == 'npm-package' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+
+      - name: Measure commands
+        run: |
+          set -euo pipefail
+          source scripts/ci/lib/timing.sh
+          ci_time "npm package gate" -- make ci-package-npm
+
+      - name: Upload measurement artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-measure-npm-package
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  website:
+    name: Measure website checks
+    if: ${{ inputs.suite == 'website' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: website/package-lock.json
+
+      - name: Measure commands
+        run: |
+          set -euo pipefail
+          source scripts/ci/lib/timing.sh
+
+          ci_time "website package gate" -- make ci-website
+
+      - name: Upload measurement artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-measure-website
+          path: website/build/
+          retention-days: 7
+          if-no-files-found: ignore

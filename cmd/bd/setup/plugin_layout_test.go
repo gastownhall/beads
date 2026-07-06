@@ -47,15 +47,16 @@ func TestPluginLayoutUsesSharedBeadsRoot(t *testing.T) {
 	if codexManifest.Skills != "./skills/" {
 		t.Fatalf("Codex manifest skills path = %q, want ./skills/", codexManifest.Skills)
 	}
-	if codexManifest.Hooks != "./hooks/hooks.json" {
-		t.Fatalf("Codex manifest hooks path = %q, want ./hooks/hooks.json", codexManifest.Hooks)
+	if codexManifest.Hooks != "./.codex-plugin/hooks/hooks.json" {
+		t.Fatalf("Codex manifest hooks path = %q, want ./.codex-plugin/hooks/hooks.json", codexManifest.Hooks)
 	}
 
 	requireRepoFile(t, root, "plugins", "beads", "skills", "beads", "SKILL.md")
 	requireRepoFile(t, root, "plugins", "beads", "skills", "beads", "agents", "openai.yaml")
 	requireRepoFile(t, root, "plugins", "beads", "agents", "task-agent.md")
 	requireRepoFile(t, root, "plugins", "beads", "skills", "beads", "commands", "ready.md")
-	requireRepoFile(t, root, "plugins", "beads", "hooks", "hooks.json")
+	requireRepoFile(t, root, "plugins", "beads", ".codex-plugin", "hooks", "hooks.json")
+	requireNoRepoPath(t, root, "plugins", "beads", "hooks", "hooks.json")
 }
 
 func readJSONFile(t *testing.T, path string, dest interface{}) {
@@ -76,5 +77,15 @@ func requireRepoFile(t *testing.T, root string, parts ...string) {
 		t.Fatalf("expected file %s: %v", path, err)
 	} else if info.IsDir() {
 		t.Fatalf("expected file %s, got directory", path)
+	}
+}
+
+func requireNoRepoPath(t *testing.T, root string, parts ...string) {
+	t.Helper()
+	path := filepath.Join(append([]string{root}, parts...)...)
+	if _, err := os.Stat(path); err == nil {
+		t.Fatalf("expected path %s not to exist", path)
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat %s: %v", path, err)
 	}
 }

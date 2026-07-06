@@ -46,7 +46,7 @@ func TestSchemaMigrationDoesNotCommitPreExistingDirtyData(t *testing.T) {
 		t.Fatalf("insert dirty label: %v", err)
 	}
 
-	if err := initSchemaOnDB(ctx, store.db); err != nil {
+	if _, err := initSchemaOnDB(ctx, store.db); err != nil {
 		t.Fatalf("initSchemaOnDB: %v", err)
 	}
 
@@ -136,7 +136,7 @@ func TestSchemaMigrationDoesNotCommitPreExistingStagedData(t *testing.T) {
 		t.Fatalf("stage label: %v", err)
 	}
 
-	if err := initSchemaOnDB(ctx, store.db); err != nil {
+	if _, err := initSchemaOnDB(ctx, store.db); err != nil {
 		t.Fatalf("initSchemaOnDB: %v", err)
 	}
 
@@ -224,7 +224,7 @@ func TestSchemaMigrationDoesNotCommitIgnoredDirtyWispTables(t *testing.T) {
 		t.Fatalf("CreateIssue no-history wisp: %v", err)
 	}
 
-	if err := initSchemaOnDB(ctx, store.db); err != nil {
+	if _, err := initSchemaOnDB(ctx, store.db); err != nil {
 		t.Fatalf("initSchemaOnDB: %v", err)
 	}
 
@@ -300,7 +300,7 @@ func TestSchemaMigrationRejectsChangedPreExistingDirtyTable(t *testing.T) {
 		t.Fatalf("dirty dolt_ignore: %v", err)
 	}
 
-	err := initSchemaOnDB(ctx, store.db)
+	_, err := initSchemaOnDB(ctx, store.db)
 	if err == nil || !strings.Contains(err.Error(), "pre-existing dirty tables changed") {
 		t.Fatalf("initSchemaOnDB error = %v, want changed dirty table error", err)
 	}

@@ -1,0 +1,978 @@
+name: Main
+
+on:
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+
+jobs:
+  detect-ci-tier:
+    name: Detect CI tier
+    runs-on: ubuntu-latest
+    outputs:
+      full_embedded: ${{ steps.tier.outputs.full_embedded }}
+      reason: ${{ steps.tier.outputs.reason }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Decide embedded Dolt coverage
+        id: tier
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash .github/scripts/ci-embedded-tier.sh
+
+  # Same guard as pr.yml's check-migration-hygiene: direct pushes to main
+  # (and PR merges whose base moved) must not bypass the migration lints.
+  # BASE_SHA is the pre-push tip; on force pushes or history rewrites the
+  # script warns and skips the frozen-migrations diff but still runs the
+  # duplicate-version and nondeterministic-SQL checks.
+  check-migration-hygiene:
+    name: Check migration hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Run migration hygiene checks
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: ./scripts/check-migration-hygiene.sh
+
+  build-artifacts:
+    name: Build Artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+
+      - name: Run policy checks
+        run: make ci-pr-policy
+
+      - name: Run lint checks
+        run: make ci-pr-lint
+
+      - name: Build reusable Linux artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          source ./.buildflags
+          go_version="$(go version)"
+          commit="$(git rev-parse HEAD)"
+          go build -tags "$BEADS_BUILD_TAGS" -o artifacts/bd-linux-gms-pure ./cmd/bd
+          chmod +x artifacts/bd-linux-gms-pure
+          (
+            cd artifacts
+            sha256sum bd-linux-gms-pure > SHA256SUMS
+          )
+          {
+            echo "commit=${commit}"
+            echo "go_version=${go_version}"
+            echo "build_tags=${BEADS_BUILD_TAGS}"
+            echo "artifact=bd-linux-gms-pure"
+          } > artifacts/build-manifest.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ci-build-artifacts
+          path: artifacts/
+          retention-days: 1
+          if-no-files-found: error
+
+  # Fast check: every `go build|test|run|generate|install` invocation in
+  # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
+  # regressions from re-entering the build (see docs/ICU-POLICY.md).
+  check-build-tags:
+    name: Check build-tag policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - run: ./scripts/check-build-tags.sh
+      - run: ./scripts/check-go-install-guidance.sh
+
+  # Lock in the cgo-test-contamination fix (mybd-ycx / GH#3683 follow-up).
+  # cmd/bd carries a mix of cgo-only test helpers (embedded Dolt, sql.DB) and
+  # pure-Go tests. Untagged test files that reach for cgo-only helpers break
+  # the entire package's CGO_ENABLED=0 compile, silently neutering pure-Go
+  # tests (the original symptom in PR #3704). This job compiles the cmd/bd
+  # test binary with CGO_ENABLED=0 and runs the pure-Go subset, so a
+  # regression that re-introduces cgo coupling fails fast.
+  check-cmd-bd-puregeo-tests:
+    name: Check cmd/bd pure-Go tests compile (CGO_ENABLED=0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build cmd/bd (CGO_ENABLED=0, gms_pure_go)
+        env:
+          CGO_ENABLED: "0"
+        run: go build -tags gms_pure_go -o /tmp/bd-puregeo ./cmd/bd
+
+      - name: Compile pure-Go test binaries (CGO_ENABLED=0, gms_pure_go)
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go test -tags gms_pure_go -c -o /tmp/bd-cmd-puregeo-test ./cmd/bd
+          go test -tags gms_pure_go -c -o /tmp/bd-embeddeddolt-puregeo-test ./internal/storage/embeddeddolt
+          go test -tags gms_pure_go -c -o /tmp/bd-tracker-puregeo-test ./internal/tracker
+
+      - name: Run pure-Go cmd/bd test subset (CGO_ENABLED=0)
+        env:
+          CGO_ENABLED: "0"
+        # Restrict to tests that exercise pure-Go code paths. Tests that
+        # need a Dolt store skip themselves at runtime when no test server
+        # is available; the goal here is to catch compile-time contamination,
+        # not run the full suite.
+        run: |
+          go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir)' ./cmd/bd
+
+  # Fast check to ensure all version files are in sync
+  check-version-consistency:
+    name: Check version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Check all versions match
+        run: ./scripts/check-versions.sh
+
+  # Catch duplicate migration version numbers before any Go build.
+  # Two long-lived branches both claiming 'the next number' produce a silent
+  # under-apply when merged; this job fails at PR time with the conflicting
+  # filenames so it is caught before any test even compiles.
+  check-no-duplicate-migrations:
+    name: Check no duplicate migration versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Check for duplicate migration version numbers
+        run: |
+          dup=$(
+            find internal/storage/schema/migrations -maxdepth 1 -name '*.up.sql' -printf '%f\n' \
+              | sed 's/^\([0-9]*\)_.*/\1/' \
+              | sort | uniq -d
+          )
+          if [ -n "$dup" ]; then
+            echo "Duplicate migration version(s) detected: $dup"
+            echo "Conflicting files:"
+            while IFS= read -r v; do
+              find internal/storage/schema/migrations -name "${v}_*.up.sql" -print
+            done <<< "$dup"
+            echo "Renumber one of the colliding files before merging."
+            exit 1
+          fi
+
+  # Check documentation references match actual CLI flags
+  check-doc-flags:
+    name: Check doc flags freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build bd
+        run: CGO_ENABLED=0 go build -tags gms_pure_go -o bd ./cmd/bd/
+
+      - name: Validate docs against CLI
+        run: |
+          ./scripts/check-doc-flags.sh ./bd
+          ./scripts/check-doc-freshness.sh
+
+  detect-package-gates:
+    name: Detect package gates
+    runs-on: ubuntu-latest
+    outputs:
+      mcp_package: ${{ steps.detect.outputs.mcp_package }}
+      npm_package: ${{ steps.detect.outputs.npm_package }}
+      website: ${{ steps.detect.outputs.website }}
+      reason: ${{ steps.detect.outputs.reason }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Decide package gates
+        id: detect
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: ./scripts/ci/detect-package-gates.sh
+
+  package-mcp:
+    name: Package Gate (MCP)
+    runs-on: ubuntu-latest
+    needs: [detect-package-gates, build-artifacts]
+    steps:
+      - name: Check applicability
+        id: applicability
+        run: |
+          echo "run=${{ needs.detect-package-gates.outputs.mcp_package }}" >> "$GITHUB_OUTPUT"
+          if [[ "${{ needs.detect-package-gates.outputs.mcp_package }}" != "true" ]]; then
+            echo "MCP package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        if: steps.applicability.outputs.run == 'true'
+
+      - name: Set up Python
+        if: steps.applicability.outputs.run == 'true'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        if: steps.applicability.outputs.run == 'true'
+        run: python -m pip install uv==0.11.16
+
+      - name: Download build artifacts
+        if: steps.applicability.outputs.run == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        if: steps.applicability.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure
+
+      - name: Run MCP package gate
+        if: steps.applicability.outputs.run == 'true'
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+        run: make ci-package-mcp
+
+  package-npm:
+    name: Package Gate (npm)
+    runs-on: ubuntu-latest
+    needs: [detect-package-gates, build-artifacts]
+    steps:
+      - name: Check applicability
+        id: applicability
+        run: |
+          echo "run=${{ needs.detect-package-gates.outputs.npm_package }}" >> "$GITHUB_OUTPUT"
+          if [[ "${{ needs.detect-package-gates.outputs.npm_package }}" != "true" ]]; then
+            echo "npm package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        if: steps.applicability.outputs.run == 'true'
+
+      - name: Set up Node.js
+        if: steps.applicability.outputs.run == 'true'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+
+      - name: Download build artifacts
+        if: steps.applicability.outputs.run == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        if: steps.applicability.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure
+
+      - name: Run npm package gate
+        if: steps.applicability.outputs.run == 'true'
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+        run: make ci-package-npm
+
+  package-website:
+    name: Package Gate (website)
+    runs-on: ubuntu-latest
+    needs: detect-package-gates
+    steps:
+      - name: Check applicability
+        id: applicability
+        run: |
+          echo "run=${{ needs.detect-package-gates.outputs.website }}" >> "$GITHUB_OUTPUT"
+          if [[ "${{ needs.detect-package-gates.outputs.website }}" != "true" ]]; then
+            echo "website package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
+          fi
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        if: steps.applicability.outputs.run == 'true'
+
+      - name: Set up Node.js
+        if: steps.applicability.outputs.run == 'true'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: website/package-lock.json
+
+      - name: Run website package gate
+        if: steps.applicability.outputs.run == 'true'
+        run: make ci-website
+
+  pr-policy-wrapper:
+    name: PR Policy (wrapper timing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run PR policy wrapper
+        run: make ci-pr-policy
+
+  pr-core-wrapper:
+    name: PR Core (wrapper timing)
+    runs-on: ubuntu-latest
+    needs: build-artifacts
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure
+
+      - name: Run PR core wrapper
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+        run: make ci-pr-core
+
+  pr-lint-wrapper:
+    name: PR Lint (wrapper timing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+
+      - name: Run PR lint wrapper
+        run: make ci-pr-lint
+
+  # Cross-platform test matrix (Linux/macOS only - Windows uses smoke tests)
+  test:
+    name: Test (${{ matrix.os }})
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.os }}
+    needs: build-artifacts
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        include:
+          # Linux: full test suite with coverage
+          - os: ubuntu-latest
+            coverage: true
+            test-flags: '-v -race -short -coverprofile=coverage.out'
+          # macOS: full test suite, no coverage (faster)
+          - os: macos-latest
+            coverage: false
+            test-flags: '-v -race -short'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt (Linux/macOS)
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Verify dolt on PATH
+        run: dolt version
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Install gotestsum
+        if: matrix.coverage
+        run: go install gotest.tools/gotestsum@v1.13.0
+
+      - name: Download build artifacts
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure
+
+      - name: Build
+        if: matrix.os != 'ubuntu-latest'
+        run: go build -v -tags gms_pure_go ./cmd/bd
+
+      - name: Test (with coverage + JUnit XML)
+        if: matrix.coverage
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+        run: |
+          gotestsum \
+            --junitfile junit.xml \
+            --format testdox \
+            -- -tags gms_pure_go -race -short -coverprofile=coverage.out -skip '^TestEmbedded' ./...
+
+      - name: Test
+        if: ${{ !matrix.coverage }}
+        run: go test -tags gms_pure_go ${{ matrix.test-flags }} -skip '^TestEmbedded' ./...
+
+      - name: Upload coverage to Codecov
+        if: matrix.coverage && !cancelled()
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
+        continue-on-error: true
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+      - name: Upload test results to Codecov
+        if: matrix.coverage && !cancelled()
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
+        continue-on-error: true
+        with:
+          files: junit.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          fail_ci_if_error: false
+
+  # Focused job for the hexagonal storage layer (internal/storage/domain/* and
+  # internal/storage/uow). These packages back the proxied-server init path and
+  # also live behind the existing ./... matrix, but TestDomainDB requires the
+  # Dolt sql-server image cached locally (testcontainers checks `docker image
+  # inspect` and skips otherwise). Pulling the image up front guarantees the
+  # suite actually runs and surfaces failures here with a clear job name.
+  test-domain-uow:
+    name: Test (storage domain + uow)
+    runs-on: ubuntu-latest
+    needs: build-artifacts
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt CLI
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Verify dolt on PATH
+        run: dolt version
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Pull Dolt sql-server image
+        # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
+        # Without this, RequireDoltContainer reports doltNoImage and TestDomainDB skips.
+        run: docker pull dolthub/dolt-sql-server:2.1.0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure
+
+      - name: Test domain + uow + tracker
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+        run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
+
+  main-linux-integration-packages:
+    name: Main Linux integration packages (${{ matrix.shard }}/6)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: build-artifacts
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Test package shard
+        env:
+          SHARD: ${{ matrix.shard }}
+          TOTAL_SHARDS: 6
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          source scripts/ci/lib/timing.sh
+
+          ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
+
+          package_manifest="artifacts/main-linux-integration-packages-${SHARD}-of-${TOTAL_SHARDS}.txt"
+          write_package_manifest() {
+            GO_TEST_SHARD_TAGS=integration,gms_pure_go \
+              GO_TEST_SHARD_EXCLUDE_REGEX="^github.com/steveyegge/beads/cmd/bd$" \
+              scripts/ci/go-test-shard-packages.sh "$SHARD" "$TOTAL_SHARDS" > "$package_manifest"
+          }
+          ci_time "list integration package shard ${SHARD}/${TOTAL_SHARDS}" -- write_package_manifest
+          cat "$package_manifest"
+          mapfile -t packages < "$package_manifest"
+
+          if [[ "${#packages[@]}" -eq 0 ]]; then
+            echo "No packages assigned to shard ${SHARD}/${TOTAL_SHARDS}; skipping go test"
+            exit 0
+          fi
+
+          ci_time "main linux integration package shard ${SHARD}/${TOTAL_SHARDS} go test" -- \
+            env BEADS_TEST_SKIP=dolt gotestsum \
+              --junitfile "artifacts/main-linux-integration-packages-${SHARD}-of-${TOTAL_SHARDS}.xml" \
+              --format testdox \
+              -- -v -race -tags=integration,gms_pure_go -timeout=30m "${packages[@]}"
+
+      - name: Upload integration artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: main-linux-integration-packages-${{ matrix.shard }}-of-6
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  main-linux-integration-cmd-bd:
+    name: Main Linux integration cmd/bd (${{ matrix.shard }}/8)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: build-artifacts
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Test cmd/bd shard
+        env:
+          SHARD: ${{ matrix.shard }}
+          TOTAL_SHARDS: 8
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          source scripts/ci/lib/timing.sh
+
+          ci_time "install gotestsum" -- go install gotest.tools/gotestsum@v1.13.0
+
+          test_manifest="artifacts/main-linux-integration-cmd-bd-tests-${SHARD}-of-${TOTAL_SHARDS}.txt"
+          write_test_manifest() {
+            GO_TEST_SHARD_TAGS=integration,gms_pure_go \
+              scripts/ci/go-test-shard-names.sh "$SHARD" "$TOTAL_SHARDS" ./cmd/bd > "$test_manifest"
+          }
+          ci_time "list cmd/bd test shard ${SHARD}/${TOTAL_SHARDS}" -- write_test_manifest
+          cat "$test_manifest"
+          mapfile -t tests < "$test_manifest"
+
+          if [[ "${#tests[@]}" -eq 0 ]]; then
+            echo "No tests assigned to shard ${SHARD}/${TOTAL_SHARDS}; skipping go test"
+            exit 0
+          fi
+
+          run_regex="^($(IFS='|'; echo "${tests[*]}"))$"
+          ci_time "main linux integration cmd/bd shard ${SHARD}/${TOTAL_SHARDS} go test" -- \
+            env BEADS_TEST_SKIP=dolt gotestsum \
+              --junitfile "artifacts/main-linux-integration-cmd-bd-${SHARD}-of-${TOTAL_SHARDS}.xml" \
+              --format testdox \
+              -- -v -race -tags=integration,gms_pure_go -timeout=30m -run "$run_regex" ./cmd/bd
+
+      - name: Upload integration artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: main-linux-integration-cmd-bd-${{ matrix.shard }}-of-8
+          path: artifacts/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # # End-to-end coverage for proxied-server CLI subcommands. Each sub-test
+  # # spawns a real dolt sql-server via the proxy and exercises the bd CLI
+  # # subprocess against it (see cmd/bd/*_proxied_integration_test.go).
+  # #
+  # # The -run pattern intentionally matches the TestProxiedServer* prefix so
+  # # new proxied integration suites (TestProxiedServerCreate, ...Update,
+  # # ...Show, etc.) are auto-included without further CI edits. Adopt the
+  # # `TestProxiedServer<Subcommand>` naming convention for any new entry
+  # # points and they will be picked up here.
+  # #
+  # # Companion to test-domain-uow (which tests the storage/uow layer); this
+  # # job is the CLI-side gate that ensures the proxied path stays at parity
+  # # with the embedded path's behavior.
+  # #
+  # # The package-level testcontainers Dolt singleton (started by
+  # # cmd/bd/test_dolt_server_cgo_test.go) is automatically skipped when
+  # # BEADS_TEST_PROXIED_SERVER=1 is set, so this lane is ~50s faster than
+  # # it would otherwise be.
+  # test-proxied-server-cmd:
+  #   name: Test (proxied-server cmd)
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+  #
+  #     - name: Set up Go
+  #       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+  #       with:
+  #         go-version-file: 'go.mod'
+  #
+  #     - name: Install Dolt CLI
+  #       run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+  #
+  #     - name: Verify dolt on PATH
+  #       run: dolt version
+  #
+  #     - name: Configure Git and Dolt identity
+  #       run: |
+  #         git config --global user.name "CI Bot"
+  #         git config --global user.email "ci@beads.test"
+  #         dolt config --global --add user.name "CI Bot"
+  #         dolt config --global --add user.email "ci@beads.test"
+  #
+  #     - name: Pre-build bd binary for proxied integration tests
+  #       # The test's buildEmbeddedBD helper picks up BEADS_TEST_BD_BINARY,
+  #       # skipping a per-test ~45s rebuild for each invocation.
+  #       run: go build -tags gms_pure_go -o /tmp/bd-proxied-test ./cmd/bd
+  #
+  #     - name: Test proxied-server bd subcommands
+  #       env:
+  #         BEADS_TEST_PROXIED_SERVER: "1"
+  #         BEADS_TEST_BD_BINARY: /tmp/bd-proxied-test
+  #       # ^TestProxiedServer matches every proxied-server top-level test
+  #       # (Create today; future Update/Show/etc. auto-join without edits).
+  #       run: go test -tags gms_pure_go -count=1 -timeout=10m -v -run '^TestProxiedServer' ./cmd/bd/
+
+  # Embedded Dolt tests - test the in-process Dolt engine (no server required)
+  #
+  # Split into: build → storage tests + parallel cmd test shards.
+  # cmd/bd embedded tests use a committed shard manifest; newly-added tests
+  # still auto-distribute via hash fallback until the manifest is updated.
+
+  build-embedded:
+    name: Build (Embedded Dolt)
+    needs: detect-ci-tier
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build embedded bd binary
+        run: go build -tags gms_pure_go -race -o /tmp/bd-embedded-test ./cmd/bd/
+
+      - name: Build embedded storage test binary
+        run: go test -tags gms_pure_go -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
+
+      - name: Build embedded cmd test binary
+        run: go test -tags gms_pure_go -race -c -o /tmp/bd-cmd-test ./cmd/bd/
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: embedded-test-binaries
+          path: |
+            /tmp/bd-embedded-test
+            /tmp/embeddeddolt-test
+            /tmp/bd-cmd-test
+          retention-days: 1
+
+  test-embedded-storage:
+    name: Test (Embedded Dolt Storage)
+    needs: [detect-ci-tier, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: embedded-test-binaries
+          path: /tmp/
+
+      - name: Fix permissions
+        run: chmod +x /tmp/embeddeddolt-test
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Test
+        env:
+          BEADS_TEST_EMBEDDED_DOLT: "1"
+          BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=20m
+
+  test-embedded-cmd:
+    name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: [detect-ci-tier, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: embedded-test-binaries
+          path: /tmp/
+
+      - name: Fix permissions
+        run: chmod +x /tmp/bd-embedded-test /tmp/embeddeddolt-test /tmp/bd-cmd-test
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Test
+        env:
+          BEADS_TEST_EMBEDDED_DOLT: "1"
+          BEADS_TEST_BD_BINARY: /tmp/bd-embedded-test
+        run: bash .github/scripts/embedded-test-shard.sh ${{ matrix.shard }} 20
+
+  # Windows smoke tests only - full test suite times out (see bd-bmev)
+  # Linux/macOS run comprehensive tests; Windows just verifies binary works
+  #
+  # Windows uses -tags gms_pure_go to avoid the ICU regex dependency.
+  # go-icu-regex's regex_windows.go also uses Go stdlib regexp (build tag: windows).
+  # CGO is still required for gozstd (bundled C source) and the embedded dolt engine.
+  test-windows:
+    name: Test (Windows - smoke)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Build (pure Go regex)
+        run: go build -v -tags gms_pure_go -o bd.exe ./cmd/bd
+
+      - name: Smoke test - version
+        run: ./bd.exe version
+
+      - name: Smoke test - help
+        run: ./bd.exe help
+
+  fmt-check:
+    name: Check formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Check gofmt
+        run: make fmt-check
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9
+        with:
+          version: latest
+          args: --timeout=5m --build-tags=gms_pure_go
+
+  test-nix:
+    name: Test Nix Flake
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: DeterminateSystems/determinate-nix-action@9adf02b41cfdac2632e1c16f0480ff5bf3b05dd6 # v3
+      - name: Run bd help via Nix
+        id: nix_help
+        run: |
+          nix run .#default -- --help > help.txt
+      - name: Verify help text
+        if: steps.nix_help.outcome == 'success'
+        run: |
+          FIRST_LINE=$(head -n 1 help.txt)
+          EXPECTED="Issues chained together like beads. A lightweight issue tracker with first-class dependency support."
+          if [ "$FIRST_LINE" != "$EXPECTED" ]; then
+            echo "First line of help.txt doesn't match expected output"
+            echo "Expected: $EXPECTED"
+            echo "Got: $FIRST_LINE"
+            exit 1
+          fi
+          echo "Help text first line is correct"

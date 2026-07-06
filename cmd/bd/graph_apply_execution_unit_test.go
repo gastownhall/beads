@@ -12,9 +12,10 @@ import (
 
 type graphApplyFakeStore struct {
 	storage.DoltStorage
-	issues map[string]*types.Issue
-	deps   []*types.Dependency
-	nextID int
+	issues  map[string]*types.Issue
+	deps    []*types.Dependency
+	addOpts []storage.DependencyAddOptions
+	nextID  int
 }
 
 func newGraphApplyFakeStore() *graphApplyFakeStore {
@@ -81,15 +82,17 @@ func (s *graphApplyFakeStore) RunInTransaction(ctx context.Context, _ string, fn
 	}
 	s.issues = txStore.issues
 	s.deps = txStore.deps
+	s.addOpts = txStore.addOpts
 	s.nextID = txStore.nextID
 	return nil
 }
 
 func (s *graphApplyFakeStore) clone() *graphApplyFakeStore {
 	cp := &graphApplyFakeStore{
-		issues: make(map[string]*types.Issue, len(s.issues)),
-		deps:   make([]*types.Dependency, 0, len(s.deps)),
-		nextID: s.nextID,
+		issues:  make(map[string]*types.Issue, len(s.issues)),
+		deps:    make([]*types.Dependency, 0, len(s.deps)),
+		addOpts: append([]storage.DependencyAddOptions(nil), s.addOpts...),
+		nextID:  s.nextID,
 	}
 	for id, issue := range s.issues {
 		issueCopy := *issue
@@ -129,6 +132,7 @@ func (tx *graphApplyFakeTx) AddDependency(ctx context.Context, dep *types.Depend
 }
 
 func (tx *graphApplyFakeTx) AddDependencyWithOptions(_ context.Context, dep *types.Dependency, _ string, opts storage.DependencyAddOptions) error {
+	tx.store.addOpts = append(tx.store.addOpts, opts)
 	for _, existing := range tx.store.deps {
 		if existing.IssueID == dep.IssueID && existing.DependsOnID == dep.DependsOnID {
 			if existing.Type == dep.Type {
@@ -234,6 +238,117 @@ func TestExecuteGraphApplyUnitRejectsMixedLocalExternalBlockingCycle(t *testing.
 	_, err := executeGraphApply(ctx, plan, GraphApplyOptions{})
 	if err == nil {
 		t.Fatal("expected mixed local/external blocking cycle to be rejected")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("error = %q, want cycle rejection", err.Error())
+	}
+}
+
+func TestExecuteGraphApplyUnitSkipsSQLCycleChecksAfterGraphPreflight(t *testing.T) {
+	ctx, fakeStore := withGraphApplyFakeStore(t)
+	if err := fakeStore.CreateIssue(ctx, &types.Issue{
+		ID:        "ga-existing",
+		Title:     "Existing",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}, actor); err != nil {
+		t.Fatalf("CreateIssue(existing): %v", err)
+	}
+
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A", Type: "task"},
+			{Key: "b", Title: "B", Type: "task"},
+		},
+		Edges: []GraphApplyEdge{
+			{FromID: "ga-existing", ToKey: "a", Type: "blocks"},
+			{FromKey: "a", ToKey: "b", Type: "blocks"},
+			{FromKey: "b", ToID: "external:other:shipped", Type: "blocks"},
+		},
+	}
+
+	if _, err := executeGraphApply(ctx, plan, GraphApplyOptions{}); err != nil {
+		t.Fatalf("executeGraphApply: %v", err)
+	}
+	if len(fakeStore.addOpts) != len(plan.Edges) {
+		t.Fatalf("AddDependencyWithOptions calls = %d, want %d", len(fakeStore.addOpts), len(plan.Edges))
+	}
+	for i, opts := range fakeStore.addOpts {
+		if !opts.SkipCycleCheck {
+			t.Fatalf("edge %d SkipCycleCheck = false, want true", i)
+		}
+	}
+}
+
+// TestExecuteGraphApplyUnitAllowsBlockingThroughExistingParentChild pins the
+// rule that the whole-graph blocking-cycle preflight mirrors the storage SQL
+// cycle check: a planned blocking edge whose only return path runs through an
+// existing parent-child dep must be allowed (plain `bd dep add` allows it), so
+// the preflight's existing-edge walk is restricted to blocking dep types.
+func TestExecuteGraphApplyUnitAllowsBlockingThroughExistingParentChild(t *testing.T) {
+	ctx, fakeStore := withGraphApplyFakeStore(t)
+	for _, id := range []string{"ga-parent", "ga-child"} {
+		if err := fakeStore.CreateIssue(ctx, &types.Issue{
+			ID:        id,
+			Title:     id,
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}, actor); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	// Existing parent-child dep: ga-child is a child of ga-parent.
+	fakeStore.deps = append(fakeStore.deps, &types.Dependency{
+		IssueID:     "ga-child",
+		DependsOnID: "ga-parent",
+		Type:        types.DepParentChild,
+	})
+
+	plan := &GraphApplyPlan{
+		Edges: []GraphApplyEdge{
+			{FromID: "ga-parent", ToID: "ga-child", Type: "blocks"},
+		},
+	}
+
+	if _, err := executeGraphApply(ctx, plan, GraphApplyOptions{}); err != nil {
+		t.Fatalf("blocking edge closing a cycle only through an existing parent-child dep must be allowed, got: %v", err)
+	}
+}
+
+// TestExecuteGraphApplyUnitRejectsBlockingThroughExistingBlocking is the
+// companion guard: a planned blocking edge that closes a cycle through an
+// existing blocking dep must still be rejected by the preflight.
+func TestExecuteGraphApplyUnitRejectsBlockingThroughExistingBlocking(t *testing.T) {
+	ctx, fakeStore := withGraphApplyFakeStore(t)
+	for _, id := range []string{"ga-x", "ga-y"} {
+		if err := fakeStore.CreateIssue(ctx, &types.Issue{
+			ID:        id,
+			Title:     id,
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}, actor); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", id, err)
+		}
+	}
+	// Existing blocking dep: ga-y blocks ga-x.
+	fakeStore.deps = append(fakeStore.deps, &types.Dependency{
+		IssueID:     "ga-y",
+		DependsOnID: "ga-x",
+		Type:        types.DepBlocks,
+	})
+
+	plan := &GraphApplyPlan{
+		Edges: []GraphApplyEdge{
+			{FromID: "ga-x", ToID: "ga-y", Type: "blocks"},
+		},
+	}
+
+	_, err := executeGraphApply(ctx, plan, GraphApplyOptions{})
+	if err == nil {
+		t.Fatal("expected blocking cycle through existing blocking dep to be rejected")
 	}
 	if !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("error = %q, want cycle rejection", err.Error())

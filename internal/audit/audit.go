@@ -158,7 +158,8 @@ func LogFieldChange(issueID, field, oldValue, newValue, actor, reason string) {
 }
 
 func newID() (string, error) {
-	var b [4]byte
+	// 16 bytes (128-bit) of entropy — birthday probability for 8000 IDs is ~9e-32.
+	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("failed to generate id: %w", err)
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -50,7 +51,9 @@ Examples:
   bd gate discover           # Auto-discover run IDs for all matching gates
   bd gate discover --dry-run # Preview what would be matched (no updates)
   bd gate discover --branch main --limit 10  # Only match runs on 'main' branch`,
-	Run: runGateDiscover,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGateDiscover,
 }
 
 func init() {
@@ -62,8 +65,15 @@ func init() {
 	gateCmd.AddCommand(gateDiscoverCmd)
 }
 
-func runGateDiscover(cmd *cobra.Command, args []string) {
+func runGateDiscover(cmd *cobra.Command, args []string) error {
 	CheckReadonly("gate discover")
+
+	evt := metrics.NewCommandEvent("gate-discover")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	branchFilter, _ := cmd.Flags().GetString("branch")
@@ -72,33 +82,30 @@ func runGateDiscover(cmd *cobra.Command, args []string) {
 
 	ctx := rootCtx
 
-	// Step 1: Find open gh:run gates without await_id
 	gates, err := findPendingGates()
 	if err != nil {
-		FatalError("finding gates: %v", err)
+		return HandleError("finding gates: %v", err)
 	}
 
 	if len(gates) == 0 {
 		fmt.Println("No pending gh:run gates found (all gates have numeric run IDs)")
-		return
+		return nil
 	}
 
 	fmt.Printf("%s Found %d gate(s) awaiting run ID discovery\n\n", ui.RenderAccent("🔍"), len(gates))
 
-	// Get current branch if not specified
 	if branchFilter == "" {
 		branchFilter = getGitBranchForGateDiscovery()
 	}
 
-	// Step 2: Query recent GitHub workflow runs
 	runs, err := queryGitHubRuns(branchFilter, limit)
 	if err != nil {
-		FatalError("querying GitHub runs: %v", err)
+		return HandleError("querying GitHub runs: %v", err)
 	}
 
 	if len(runs) == 0 {
 		fmt.Println("No recent workflow runs found on GitHub")
-		return
+		return nil
 	}
 
 	fmt.Printf("Found %d recent workflow run(s) on branch '%s'\n\n", len(runs), branchFilter)
@@ -142,6 +149,7 @@ func runGateDiscover(cmd *cobra.Command, args []string) {
 	} else {
 		fmt.Printf("Updated %d gate(s) with discovered run IDs.\n", matchCount)
 	}
+	return nil
 }
 
 // isNumericRunID returns true if the string looks like a GitHub numeric run ID.

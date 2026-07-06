@@ -12,6 +12,7 @@ var NativeSchemes = []string{
 	"git+https://",
 	"git+ssh://",
 	"git+http://",
+	"git+file://",
 }
 
 // Normalize converts a remote URL to a Dolt-compatible format.
@@ -66,6 +67,20 @@ func isSCPStyleGitURL(url string) bool {
 		return true
 	}
 	return false
+}
+
+// CanonicalForComparison returns a form of url suitable for equality checks
+// between URLs that refer to the same repository but may use different schemes
+// or representations. Concretely:
+//   - https://github.com/org/repo.git  ≡  git+https://github.com/org/repo.git
+//   - git@github.com:org/repo.git      ≡  git+ssh://git@github.com/org/repo.git
+//
+// Algorithm: normalize to Dolt's git+ prefix form, strip trailing slashes and .git.
+func CanonicalForComparison(url string) string {
+	url = Normalize(url)
+	url = strings.TrimRight(url, "/")
+	url = strings.TrimSuffix(url, ".git")
+	return url
 }
 
 func isWindowsDrivePath(path string) bool {

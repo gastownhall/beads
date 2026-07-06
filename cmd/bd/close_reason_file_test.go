@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -17,7 +18,7 @@ func newCloseLikeCmd() *cobra.Command {
 		Use: "close",
 		Run: func(cmd *cobra.Command, args []string) {},
 	}
-	cmd.Flags().StringP("reason", "r", "", "Reason for closing")
+	registerCloseReasonFlag(cmd)
 	cmd.Flags().String("resolution", "", "")
 	cmd.Flags().StringP("message", "m", "", "")
 	cmd.Flags().String("comment", "", "")
@@ -38,7 +39,7 @@ func TestCloseResolveReasonFile_FileWithContent(t *testing.T) {
 		t.Fatalf("parse flags: %v", err)
 	}
 
-	got, ok, err := resolveReasonFile(cmd, "")
+	got, ok, err := resolveReasonFile(cmd, false)
 	if err != nil {
 		t.Fatalf("resolveReasonFile: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestCloseResolveReasonFile_StdinDash(t *testing.T) {
 		t.Fatalf("parse flags: %v", err)
 	}
 
-	got, ok, err := resolveReasonFile(cmd, "")
+	got, ok, err := resolveReasonFile(cmd, false)
 	if err != nil {
 		t.Fatalf("resolveReasonFile: %v", err)
 	}
@@ -89,7 +90,7 @@ func TestCloseResolveReasonFile_FileNotFound(t *testing.T) {
 		t.Fatalf("parse flags: %v", err)
 	}
 
-	_, ok, err := resolveReasonFile(cmd, "")
+	_, ok, err := resolveReasonFile(cmd, false)
 	if err == nil {
 		t.Fatal("expected error for missing file, got nil")
 	}
@@ -116,7 +117,7 @@ func TestCloseResolveReasonFile_ConflictWithReason(t *testing.T) {
 
 	// Caller has already collected the inline reason from the various aliases,
 	// so we pass it in directly to mirror how close.go invokes the helper.
-	_, ok, err := resolveReasonFile(cmd, "from flag")
+	_, ok, err := resolveReasonFile(cmd, true)
 	if err == nil {
 		t.Fatal("expected conflict error, got nil")
 	}
@@ -140,7 +141,7 @@ func TestCloseResolveReasonFile_EmptyFile(t *testing.T) {
 		t.Fatalf("parse flags: %v", err)
 	}
 
-	_, ok, err := resolveReasonFile(cmd, "")
+	_, ok, err := resolveReasonFile(cmd, false)
 	if err == nil {
 		t.Fatal("expected error for whitespace-only file, got nil")
 	}
@@ -158,7 +159,7 @@ func TestCloseResolveReasonFile_FlagNotSet(t *testing.T) {
 		t.Fatalf("parse flags: %v", err)
 	}
 
-	got, ok, err := resolveReasonFile(cmd, "inline")
+	got, ok, err := resolveReasonFile(cmd, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -167,5 +168,125 @@ func TestCloseResolveReasonFile_FlagNotSet(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("expected empty content, got %q", got)
+	}
+}
+
+func TestCloseResolveReasons_PerIDReasons(t *testing.T) {
+	cmd := newCloseLikeCmd()
+	cmd.SetArgs([]string{"issue-a", "--reason", "reason A", "issue-b", "--reason", "reason B"})
+
+	var gotReasons, gotArgs []string
+	cmd.Run = func(cmd *cobra.Command, args []string) {
+		var err error
+		gotReasons, gotArgs, err = resolveCloseReasons(cmd, args)
+		if err != nil {
+			t.Fatalf("resolveCloseReasons: %v", err)
+		}
+	}
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if !slices.Equal(gotArgs, []string{"issue-a", "issue-b"}) {
+		t.Fatalf("args = %v, want [issue-a issue-b]", gotArgs)
+	}
+	if !slices.Equal(gotReasons, []string{"reason A", "reason B"}) {
+		t.Fatalf("reasons = %v, want per-ID reasons", gotReasons)
+	}
+}
+
+func TestCloseResolveReasons_SharedReasonForMultipleIDs(t *testing.T) {
+	cmd := newCloseLikeCmd()
+	cmd.SetArgs([]string{"issue-a", "issue-b", "--reason", "same reason"})
+
+	var gotReasons, gotArgs []string
+	cmd.Run = func(cmd *cobra.Command, args []string) {
+		var err error
+		gotReasons, gotArgs, err = resolveCloseReasons(cmd, args)
+		if err != nil {
+			t.Fatalf("resolveCloseReasons: %v", err)
+		}
+	}
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if !slices.Equal(gotArgs, []string{"issue-a", "issue-b"}) {
+		t.Fatalf("args = %v, want [issue-a issue-b]", gotArgs)
+	}
+	if !slices.Equal(gotReasons, []string{"same reason"}) {
+		t.Fatalf("reasons = %v, want one shared reason", gotReasons)
+	}
+}
+
+func TestCloseResolveReasons_EmptyReasonFallsBackToDefault(t *testing.T) {
+	cmd := newCloseLikeCmd()
+	cmd.SetArgs([]string{"issue-a", "--reason", ""})
+
+	var gotReasons, gotArgs []string
+	cmd.Run = func(cmd *cobra.Command, args []string) {
+		var err error
+		gotReasons, gotArgs, err = resolveCloseReasons(cmd, args)
+		if err != nil {
+			t.Fatalf("resolveCloseReasons: %v", err)
+		}
+	}
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if !slices.Equal(gotArgs, []string{"issue-a"}) {
+		t.Fatalf("args = %v, want [issue-a]", gotArgs)
+	}
+	if !slices.Equal(gotReasons, []string{"Closed"}) {
+		t.Fatalf("reasons = %v, want default reason", gotReasons)
+	}
+}
+
+func TestCloseResolveReasons_EmptyReasonDoesNotConflictWithReasonFile(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "reason.md")
+	if err := os.WriteFile(path, []byte("from file"), 0644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	cmd := newCloseLikeCmd()
+	cmd.SetArgs([]string{"issue-a", "--reason", "", "--reason-file", path})
+
+	var gotReasons, gotArgs []string
+	cmd.Run = func(cmd *cobra.Command, args []string) {
+		var err error
+		gotReasons, gotArgs, err = resolveCloseReasons(cmd, args)
+		if err != nil {
+			t.Fatalf("resolveCloseReasons: %v", err)
+		}
+	}
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	if !slices.Equal(gotArgs, []string{"issue-a"}) {
+		t.Fatalf("args = %v, want [issue-a]", gotArgs)
+	}
+	if !slices.Equal(gotReasons, []string{"from file"}) {
+		t.Fatalf("reasons = %v, want file reason", gotReasons)
+	}
+}
+
+func TestCloseResolveReasons_RejectsMismatchedPerIDReasons(t *testing.T) {
+	cmd := newCloseLikeCmd()
+	cmd.SetArgs([]string{"issue-a", "--reason", "reason A", "issue-b", "--reason", "reason B", "issue-c"})
+
+	cmd.Run = func(cmd *cobra.Command, args []string) {
+		_, _, err := resolveCloseReasons(cmd, args)
+		if err == nil {
+			t.Fatal("expected mismatch error, got nil")
+		}
+		if !strings.Contains(err.Error(), "2 close reasons for 3 issue IDs") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
 	}
 }
