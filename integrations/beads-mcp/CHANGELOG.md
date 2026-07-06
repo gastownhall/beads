@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- New `comment`, `comments`, and `note` MCP tools, wrapping the existing
+  `bd comment` / `bd comments` / `bd note` CLI commands. Previously the MCP
+  server exposed no way to add or read comments, so MCP-only agents could only
+  overwrite the single `notes` field — `show()` reports `comment_count` but not
+  the bodies. `comment` leaves a durable, timestamped work trail, `comments`
+  reads them back, and `note` appends to the notes field.
+
 ### Fixed
 - `mcp__beads__show()` no longer crashes with `pydantic literal_error` when an
   issue has dependency types beyond the original four (`blocks`, `related`,
