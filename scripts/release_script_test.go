@@ -19,7 +19,7 @@ echo "stale repo bd should not run" >&2
 exit 42
 `)
 
-	bin := filepath.Join(t.TempDir(), "bin")
+	bin := filepath.Join(repo, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ exit 99
 func TestReleaseScriptInstalledBDSelectionDoesNotRequireJQ(t *testing.T) {
 	repo := copyReleaseScriptFixture(t)
 
-	bin := filepath.Join(t.TempDir(), "bin")
+	bin := filepath.Join(repo, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ exit 99
 
 func TestReleaseScriptRejectsExplicitBDThatDoesNotResolveRepoFormula(t *testing.T) {
 	repo := copyReleaseScriptFixture(t)
-	bin := filepath.Join(t.TempDir(), "bin")
+	bin := filepath.Join(repo, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func copyReleaseScriptFixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 
-	repo := t.TempDir()
+	repo := releaseTestTempDir(t)
 	if err := os.MkdirAll(filepath.Join(repo, "scripts"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -193,6 +193,20 @@ func copyReleaseScriptFixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return repo
+}
+
+func releaseTestTempDir(t *testing.T) string {
+	t.Helper()
+	root := filepath.Join(sourceRepoRoot(t), ".tmp-release-tests")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(root, "case-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 func sourceRepoRoot(t *testing.T) string {
@@ -211,19 +225,85 @@ func runReleaseDryRun(t *testing.T, repo, bin string) (string, error) {
 
 func runReleaseDryRunWithEnv(t *testing.T, repo, bin string, extraEnv ...string) (string, error) {
 	t.Helper()
-	cmd := exec.Command("bash", filepath.Join(repo, "scripts", "release.sh"), "1.2.3", "--dry-run")
+	assignments := []string{
+		"PATH=" + shSingleQuote(shellPath(t, bin)+":/usr/bin:/bin"),
+		"BD_FAKE_FORMULA_SOURCE=" + shSingleQuote(shellPath(t, filepath.Join(repo, ".beads", "formulas", "beads-release.formula.toml"))),
+	}
+	for _, env := range extraEnv {
+		key, value, ok := strings.Cut(env, "=")
+		if !ok {
+			continue
+		}
+		if key == "BD" && value != "" {
+			value = shellPath(t, value)
+		}
+		assignments = append(assignments, key+"="+shSingleQuote(value))
+	}
+	cmd := exec.Command("bash", "-lc", strings.Join(assignments, " ")+" bash scripts/release.sh 1.2.3 --dry-run")
 	cmd.Dir = repo
-	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
+func msysPath(path string) string {
+	path = filepath.Clean(path)
+	path = filepath.ToSlash(path)
+	if len(path) >= 3 && path[1] == ':' && path[2] == '/' {
+		return "/" + strings.ToLower(path[:1]) + path[2:]
+	}
+	return path
+}
+
+func shellPath(t *testing.T, path string) string {
+	t.Helper()
+	clean := filepath.Clean(path)
+	dir := clean
+	base := ""
+	if info, err := os.Stat(clean); err == nil && !info.IsDir() {
+		dir = filepath.Dir(clean)
+		base = filepath.Base(clean)
+	}
+	cmd := exec.Command("bash", "-lc", "pwd")
+	cmd.Dir = dir
+	if out, err := cmd.Output(); err == nil {
+		converted := strings.TrimSpace(string(out))
+		if converted != "" {
+			if base != "" {
+				return converted + "/" + filepath.ToSlash(base)
+			}
+			return converted
+		}
+	}
+	for _, tool := range []string{"wslpath", "cygpath"} {
+		out, err := exec.Command(tool, "-u", path).Output()
+		if err == nil {
+			converted := strings.TrimSpace(string(out))
+			if converted != "" {
+				return converted
+			}
+		}
+	}
+	return msysPath(path)
+}
+
+func shSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
 func writeFakeBD(t *testing.T, bin, repo string) {
 	t.Helper()
-	source := filepath.Join(repo, ".beads", "formulas", "beads-release.formula.toml")
+	// Let bash itself canonicalize the formula path. release.sh derives
+	// FORMULA_PATH from `pwd`, which on Windows under Git Bash/MSYS produces
+	// mount-aware forms. Keep the fake bd path repo-relative so bash can
+	// `cd` there portably, then let `pwd` resolve it to the exact form that
+	// release.sh will compare against.
+	formulaDir := ".beads/formulas"
 	body := fmt.Sprintf(`#!/bin/sh
-SOURCE=%q
+if [ -n "${BD_FAKE_FORMULA_SOURCE:-}" ]; then
+  SOURCE="$BD_FAKE_FORMULA_SOURCE"
+else
+  SOURCE="$(cd %q && pwd)/beads-release.formula.toml"
+fi
 if [ "$1 $2 $3 $4" = "formula show beads-release --json" ]; then
   printf '%%s\n' "{\"source\":\"$SOURCE\"}"
   exit 0
@@ -235,7 +315,7 @@ if [ "$1 $2 $3" = "formula show beads-release" ]; then
 fi
 echo "unexpected fake bd invocation: $*" >&2
 exit 64
-`, source)
+`, formulaDir)
 	writeExecutable(t, filepath.Join(bin, "bd"), body)
 }
 
@@ -243,5 +323,17 @@ func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if runtime.GOOS == "windows" {
+		chmodPath := shellPath(t, path)
+		if wd, err := os.Getwd(); err == nil {
+			if rel, relErr := filepath.Rel(wd, path); relErr == nil {
+				chmodPath = filepath.ToSlash(rel)
+			}
+		}
+		cmd := exec.Command("bash", "-lc", "chmod +x "+shSingleQuote(chmodPath))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("chmod +x %s failed: %v\n%s", path, err, out)
+		}
 	}
 }

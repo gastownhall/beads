@@ -65,6 +65,10 @@ func newDoltServer(t *testing.T) (*server.DoltServer, string) {
 	log := filepath.Join(t.TempDir(), "server.log")
 	s, err := server.NewDoltServer(bin, rootDir, cfg, log, 0)
 	require.NoError(t, err)
+	// Close the log file handle before t.TempDir's RemoveAll runs.
+	// On Windows, an open handle prevents directory removal; Stop is
+	// idempotent so this is safe even when the test calls Stop itself.
+	t.Cleanup(func() { _ = s.Stop(context.Background()) })
 	return s, rootDir
 }
 
