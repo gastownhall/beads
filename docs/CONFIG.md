@@ -358,7 +358,7 @@ Configuration keys use dot-notation namespaces to organize settings:
 - `export.skip_encoding_errors` - Skip issues that fail JSON encoding (default: false)
 - `export.write_manifest` - Write .manifest.json with export metadata (default: false)
 - `auto_export.error_policy` - Override error policy for auto-exports (default: `best-effort`)
-- `import.auto` - Legacy hook fallback that imports JSONL after git merge/checkout only when no Dolt remote is configured (default: `true`)
+- `import.auto` - Master switch for automatic JSONL imports (default: `true`). Gates both the legacy hook fallback that imports JSONL after git merge/checkout when no Dolt remote is configured, and the empty-database recovery import that write commands run when `.beads/issues.jsonl` exists but the database is empty. Set to `false` to disable all auto-imports; explicit `bd import` always works.
 - `sync.branch` - Name of the dedicated sync branch for beads data (see docs/PROTECTED_BRANCHES.md)
 - `sync.require_confirmation_on_mass_delete` - Require interactive confirmation before pushing when >50% of issues vanish during a merge AND more than 5 issues existed before (default: `false`)
 

@@ -1342,6 +1342,14 @@ func shouldRunAutoImportJSONL(cmd *cobra.Command, s storage.DoltStorage, useRead
 	if cmd == nil || s == nil || useReadOnly || globalFlag || serverMode {
 		return false
 	}
+	// import.auto=false (or BD_IMPORT_AUTO=false) must disable ALL auto-import
+	// behavior, not just the git-hook sync path (importJSONLForSync). Without
+	// this check, a fresh/empty database would silently auto-import stale
+	// issues.jsonl on every write command regardless of the config setting
+	// (GH#4304).
+	if !config.GetBool("import.auto") {
+		return false
+	}
 	return cmd.Name() != "import"
 }
 

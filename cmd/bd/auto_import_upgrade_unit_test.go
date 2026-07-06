@@ -162,6 +162,7 @@ func TestMaybeAutoImportJSONL_FallbackImporter_SkipsWhenStatisticsReportNonEmpty
 }
 
 func TestShouldRunAutoImportJSONL(t *testing.T) {
+	initConfigForTest(t)
 	store := &fakeFallbackStore{}
 	writeCmd := &cobra.Command{Use: "update"}
 
@@ -190,6 +191,36 @@ func TestShouldRunAutoImportJSONL(t *testing.T) {
 				t.Fatalf("shouldRunAutoImportJSONL() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestShouldRunAutoImportJSONL_RespectsImportAutoFalse is the regression test
+// for GH#4304: bd update (and any other write command) auto-imported
+// issues.jsonl into an empty database even when import.auto was explicitly
+// set to false (via config.yaml or BD_IMPORT_AUTO=false). shouldRunAutoImportJSONL
+// previously never consulted the import.auto config key at all — only the
+// separate git-hook sync path (importJSONLForSync) checked it. This test fails
+// on the buggy code (want=true) and passes once the config check is restored.
+func TestShouldRunAutoImportJSONL_RespectsImportAutoFalse(t *testing.T) {
+	initConfigForTest(t)
+	store := &fakeFallbackStore{}
+	writeCmd := &cobra.Command{Use: "update"}
+	importCmd := &cobra.Command{Use: "import"}
+
+	config.Set("import.auto", false)
+	if got := shouldRunAutoImportJSONL(writeCmd, store, false, false, false); got {
+		t.Fatalf("regression GH#4304: shouldRunAutoImportJSONL() = %v with import.auto=false, want false", got)
+	}
+	// The explicit "bd import" command must remain unaffected either way —
+	// confirm it's still gated off (for a different reason) so the config
+	// check above isn't the only thing keeping it from double-running.
+	if got := shouldRunAutoImportJSONL(importCmd, store, false, false, false); got {
+		t.Fatalf("shouldRunAutoImportJSONL() = %v for the import command with import.auto=false, want false", got)
+	}
+
+	config.Set("import.auto", true)
+	if got := shouldRunAutoImportJSONL(writeCmd, store, false, false, false); !got {
+		t.Fatalf("shouldRunAutoImportJSONL() = %v with import.auto=true, want true (negative control)", got)
 	}
 }
 
