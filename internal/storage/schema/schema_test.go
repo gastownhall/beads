@@ -1,7 +1,9 @@
 package schema
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -1164,5 +1166,79 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s' AND COLUMN_NAME = 'content
 	}
 	if got, want := showColumnsHas(), infoSchemaHas(); got != want {
 		t.Fatalf("without content_hash: SHOW COLUMNS=%v, INFORMATION_SCHEMA=%v", got, want)
+	}
+}
+
+type mockDB struct{}
+
+func (m *mockDB) ExecContext(_ context.Context, _ string, _ ...any) (sql.Result, error) {
+	return nil, nil
+}
+
+func (m *mockDB) QueryContext(_ context.Context, _ string, _ ...any) (*sql.Rows, error) {
+	panic("not called")
+}
+
+func (m *mockDB) QueryRowContext(_ context.Context, _ string, _ ...any) *sql.Row {
+	panic("not called")
+}
+
+func TestRunMigrationsStderrOutput(t *testing.T) {
+	var buf bytes.Buffer
+	orig := stderr
+	stderr = &buf
+	defer func() { stderr = orig }()
+
+	// Bounded below migration 53: that version's preMigrationRepair issues real
+	// INFORMATION_SCHEMA probes (see TestPreMigrationRepairScopedToMain0053),
+	// which mockDB.QueryRowContext doesn't support. This test only exercises
+	// the stderr line, not the repair path.
+	n, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 52)
+	if err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("expected at least one migration to run")
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "migrating schema: ") {
+		t.Errorf("expected stderr to contain 'migrating schema: ', got: %q", got)
+	}
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	if len(lines) != n {
+		t.Errorf("expected %d stderr lines, got %d", n, len(lines))
+	}
+}
+
+// TestRunMigrationsUsesProvidedSource verifies that runMigrations operates on
+// the supplied migrationSource rather than always falling back to mainSource.
+// Regression test for the bug where ignoredSource.migrate() silently ran main
+// migrations and left ignored_schema_migrations empty (no wisp tables).
+func TestRunMigrationsUsesProvidedSource(t *testing.T) {
+	orig := stderr
+	stderr = &bytes.Buffer{}
+	defer func() { stderr = orig }()
+
+	// Bounded below migration 53 for the same reason as
+	// TestRunMigrationsStderrOutput: mockDB can't answer the real
+	// INFORMATION_SCHEMA queries preMigrationRepair issues for that version.
+	main, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 52)
+	if err != nil {
+		t.Fatalf("runMigrations(mainSource): %v", err)
+	}
+	// Same upTo cap as the mainSource call: the source-threading regression
+	// this test guards (hardcoding mainSource) is only detectable when both
+	// calls share a bound, so their counts collapse to equal under the bug.
+	// ignoredSource has 11 migrations, so 52 is a no-op on correct behavior.
+	ignored, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 52)
+	if err != nil {
+		t.Fatalf("runMigrations(ignoredSource): %v", err)
+	}
+	if main == 0 || ignored == 0 {
+		t.Fatalf("expected non-zero counts; main=%d ignored=%d", main, ignored)
+	}
+	if main == ignored {
+		t.Errorf("runMigrations ignored its source argument: main and ignored both returned %d", main)
 	}
 }

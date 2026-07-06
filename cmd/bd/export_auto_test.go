@@ -216,6 +216,13 @@ func (f *fakeStateHashStore) GetCurrentCommit(_ context.Context) (string, error)
 
 func (f *fakeStateHashStore) GetInfraTypes(_ context.Context) map[string]bool { return nil }
 
+// GetConfig lets buildOwnerExcludeSet's database fallback lookup (for
+// export.exclude_owners / export.exclude_owner) run without panicking;
+// this fake has no config store, so every key is unset.
+func (f *fakeStateHashStore) GetConfig(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+
 func (f *fakeStateHashStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
 	return f.issues, nil
 }

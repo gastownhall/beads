@@ -158,6 +158,7 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd kv list](#bd-kv-list) — List all key-value pairs
   - [bd kv set](#bd-kv-set) — Set a key-value pair
 - [bd memories](#bd-memories) — List or search persistent memories
+- [bd migrate-personal](#bd-migrate-personal) — Move personal planning issues from the project database to your planning repo
 - [bd onboard](#bd-onboard) — Display minimal snippet for agent instructions file
 - [bd prime](#bd-prime) — Output AI-optimized workflow context
 - [bd quickstart](#bd-quickstart) — Quick start guide for bd
@@ -2438,11 +2439,13 @@ bd export [flags]
 **Flags:**
 
 ```
-      --all                Include all records (infra, templates, gates, memories)
-      --include-infra      Include infrastructure beads (agents, roles, messages)
-      --include-memories   Include persistent memories (from 'bd remember') in the export
-  -o, --output string      Output file path (default: stdout)
-      --scrub              Exclude test/pollution records
+      --all                         Include all records (infra, templates, gates, memories)
+      --exclude-owner stringArray   Exclude issues created by this identity (repeatable; also reads export.exclude_owners config)
+      --include-infra               Include infrastructure beads (agents, roles, messages)
+      --include-memories            Include persistent memories (from 'bd remember') in the export
+  -o, --output string               Output file path (default: stdout)
+      --scrub                       Exclude test/pollution records
+      --verbose                     Print filtered issue count when owners are excluded
 ```
 
 ### bd federation
@@ -3611,6 +3614,33 @@ Examples:
 bd memories [search]
 ```
 
+### bd migrate-personal
+
+Identify issues you created in the project database and move them to your
+personal planning repository (~/.beads-planning by default).
+
+This is a one-time migration for contributors who created personal planning
+issues before contributor routing was configured.
+
+The command:
+  1. Finds all issues in the project database created by your git identity
+  2. Shows you the list and asks for confirmation
+  3. Moves them to the planning repo configured in routing.contributor
+
+EXAMPLES:
+  bd migrate-personal        # Interactive: show list and prompt
+  bd migrate-personal -y     # Non-interactive: skip confirmation
+
+```
+bd migrate-personal [flags]
+```
+
+**Flags:**
+
+```
+  -y, --yes   Skip confirmation prompt
+```
+
 ### bd onboard
 
 Display a minimal snippet to add to your agent instructions file for bd integration.
@@ -4289,6 +4319,12 @@ Use `--pattern '*'` if you really do want to sweep everything closed.
 Deletes: issues, dependencies, labels, events, and comments for matching beads.
 Skips: pinned beads (protected), open/in-progress beads, and ephemeral beads.
 
+Also skips closed beads whose ID appears in the description, notes, or
+comments of any open / in-progress bead. This protects ADR / decision /
+verification trails that downstream beads still cite. Use
+--ignore-references to override (e.g., when bulk-decommissioning a
+retired label across the rig).
+
 To delete closed ephemeral beads (wisps, transient molecules) use
 `bd purge` instead.
 
@@ -4311,6 +4347,7 @@ bd prune [flags]
 ```
       --dry-run             Preview what would be pruned with stats
   -f, --force               Actually prune (without this, shows preview)
+      --ignore-references   Delete closed beads even when referenced by open beads (use with care; see --help for details)
       --older-than string   Only prune beads closed more than N ago (e.g., 30d, 2w, 60)
       --pattern string      Only prune beads matching ID glob pattern (e.g., 'gm-old-*')
 ```

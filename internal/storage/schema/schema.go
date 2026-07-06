@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -18,8 +19,24 @@ import (
 	"sync"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
+	"golang.org/x/term"
 )
 
+// stderr is the writer for migration progress messages. Defaults to os.Stderr
+// when stderr is a terminal so humans see progress, and to io.Discard otherwise
+// so the lines don't pollute machine-parsed output (tests, CI, piped callers).
+// Overridable in tests.
+var stderr io.Writer = defaultStderr()
+
+func defaultStderr() io.Writer {
+	if term.IsTerminal(int(os.Stderr.Fd())) {
+		return os.Stderr
+	}
+	return io.Discard
+}
+
+// DBConn is the minimal interface satisfied by *sql.DB, *sql.Tx, and *sql.Conn.
+// It provides query and exec methods needed by the migration runner.
 type DBConn interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
@@ -1046,27 +1063,40 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 		return 0, columnAdded, nil
 	}
 
+	count, err := runMigrations(ctx, db, m, current, target)
+	return count, columnAdded, err
+}
+
+// runMigrations applies migration files from src where minVersion < version <= upTo.
+// Pass upTo=0 to apply through the latest version. It is package-private so
+// tests can call it directly without needing a live cursor table.
+func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersion, upTo int) (int, error) {
+	if upTo == 0 {
+		upTo = src.latest()
+	}
 	count := 0
-	for _, mf := range m.list() {
-		if mf.version <= current || mf.version > target {
+	for _, mf := range src.list() {
+		if mf.version <= minVersion || mf.version > upTo {
 			continue
 		}
-		data, err := m.files.ReadFile(m.dir + "/" + mf.name)
+		data, err := src.files.ReadFile(src.dir + "/" + mf.name)
 		if err != nil {
-			return count, columnAdded, fmt.Errorf("reading migration %s: %w", mf.name, err)
+			return count, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}
-		if err := m.preMigrationRepair(ctx, db, mf.version); err != nil {
-			return count, columnAdded, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
+		if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
+			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
 		}
+
+		fmt.Fprintf(stderr, "migrating schema: %s\n", mf.name)
 		if _, err := db.ExecContext(ctx, string(data)); err != nil {
-			return count, columnAdded, fmt.Errorf("migration %s: %w", mf.name, err)
+			return count, fmt.Errorf("migration %s: %w", mf.name, err)
 		}
 		sum := sha256.Sum256(data)
 		contentHash := hex.EncodeToString(sum[:])
-		if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO "+m.cursorTable+" (version, content_hash) VALUES (?, ?)", mf.version, contentHash); err != nil {
-			return count, columnAdded, fmt.Errorf("recording %s in %s: %w", mf.name, m.cursorTable, err)
+		if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO "+src.cursorTable+" (version, content_hash) VALUES (?, ?)", mf.version, contentHash); err != nil {
+			return count, fmt.Errorf("recording %s in %s: %w", mf.name, src.cursorTable, err)
 		}
 		count++
 	}
-	return count, columnAdded, nil
+	return count, nil
 }
