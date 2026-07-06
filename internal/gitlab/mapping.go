@@ -13,7 +13,6 @@ type MappingConfig struct {
 	PriorityMap  map[string]int    // priority label value → beads priority (0-4)
 	StateMap     map[string]string // GitLab state → beads status
 	LabelTypeMap map[string]string // type label value → beads issue type
-	RelationMap  map[string]string // GitLab link type → beads dependency type
 }
 
 // DefaultMappingConfig returns the default mapping configuration.
@@ -41,11 +40,6 @@ func DefaultMappingConfig() *MappingConfig {
 			"reopened": StatusMapping["open"], // reopened maps to open
 		},
 		LabelTypeMap: labelTypeMap,
-		RelationMap: map[string]string{
-			"blocks":        "blocks",
-			"is_blocked_by": "blocks",
-			"relates_to":    "related",
-		},
 	}
 }
 

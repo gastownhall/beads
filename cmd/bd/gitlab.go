@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -569,49 +570,7 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	var linksLicenseSkipped int
 	var milestonesUpdated int
 	if push {
-		linkData, collectWarnings := collectGitLabLinkSyncData(ctx, store, opts)
-		for _, warning := range collectWarnings {
-			warnLink(warning)
-		}
-
-		if client := gt.GitLabClient(); client != nil && len(linkData.DesiredLinks) > 0 {
-			resolver := gitlab.NewLinkResolver(client)
-			res := resolver.PushLinks(ctx, linkData.DesiredLinks, gitlab.PushLinkOptions{
-				DryRun: gitlabSyncDryRun,
-				OnPlan: func(link gitlab.DependencyLink) {
-					if !jsonOutput {
-						_, _ = fmt.Fprintf(out, "  [dry-run] Would create GitLab dependency link: #%d %s #%d\n",
-							link.SourceIID, link.LinkType, link.TargetIID)
-					}
-				},
-			})
-			linksPushed = res.Created
-			linksLicenseSkipped = res.LicenseSkipped
-			// Curated, license-aware degradation: one actionable line instead of
-			// a raw per-link API error, kept distinct from genuine failures.
-			if res.LicenseSkipped > 0 {
-				warnLink(gitLabLicenseSkipMessage(res.LicenseSkipped))
-			}
-			for _, err := range res.Errors {
-				warnLink(fmt.Sprintf("GitLab dependency link sync: %v", err))
-			}
-		}
-
-		if client := gt.GitLabClient(); client != nil && len(linkData.ScopedIssues) > 0 {
-			count, errs := gt.PushEpicMilestones(ctx, linkData.ScopedIssues, gitlab.EpicMilestoneOptions{
-				DryRun: gitlabSyncDryRun,
-				OnPlan: func(issueID string, issueIID int, milestoneID int) {
-					if !jsonOutput {
-						_, _ = fmt.Fprintf(out, "  [dry-run] Would set GitLab milestone %d on %s (#%d)\n",
-							milestoneID, issueID, issueIID)
-					}
-				},
-			})
-			milestonesUpdated = count
-			for _, err := range errs {
-				warnLink(fmt.Sprintf("GitLab epic milestone sync: %v", err))
-			}
-		}
+		linksPushed, linksLicenseSkipped, milestonesUpdated = pushGitLabDependencyLinks(ctx, gt, store, opts, gitlabSyncDryRun, out, warnLink)
 	}
 
 	if jsonOutput {
@@ -673,6 +632,66 @@ func gitLabLicenseSkipMessage(n int) string {
 	return fmt.Sprintf(
 		"Skipped %d dependency 'blocks' %s: GitLab 'blocks'/'is_blocked_by' requires Premium/Ultimate. "+
 			"'relates_to' links and milestones were applied normally.", n, noun)
+}
+
+// pushGitLabDependencyLinks runs the dependency-link + epic-milestone push pass:
+// it converts beads dependencies among the scoped issues (per opts) into GitLab
+// issue links (additive — stale remote links are left untouched) and repairs
+// epic-child milestones. Shared by `bd gitlab sync` and `bd gitlab push` so both
+// reach the same link parity. Dry-run plan lines are written to out (unless
+// --json); warnings are delivered via warn. Returns the number of links created,
+// license-skipped, and milestones updated.
+func pushGitLabDependencyLinks(ctx context.Context, gt *gitlab.Tracker, st storage.Storage, opts tracker.SyncOptions, dryRun bool, out io.Writer, warn func(string)) (linksPushed, linksLicenseSkipped, milestonesUpdated int) {
+	linkData, collectWarnings := collectGitLabLinkSyncData(ctx, st, opts)
+	for _, warning := range collectWarnings {
+		warn(warning)
+	}
+
+	client := gt.GitLabClient()
+	if client == nil {
+		return 0, 0, 0
+	}
+
+	if len(linkData.DesiredLinks) > 0 {
+		resolver := gitlab.NewLinkResolver(client)
+		res := resolver.PushLinks(ctx, linkData.DesiredLinks, gitlab.PushLinkOptions{
+			DryRun: dryRun,
+			OnPlan: func(link gitlab.DependencyLink) {
+				if !jsonOutput {
+					_, _ = fmt.Fprintf(out, "  [dry-run] Would create GitLab dependency link: #%d %s #%d\n",
+						link.SourceIID, link.LinkType, link.TargetIID)
+				}
+			},
+		})
+		linksPushed = res.Created
+		linksLicenseSkipped = res.LicenseSkipped
+		// Curated, license-aware degradation: one actionable line instead of
+		// a raw per-link API error, kept distinct from genuine failures.
+		if res.LicenseSkipped > 0 {
+			warn(gitLabLicenseSkipMessage(res.LicenseSkipped))
+		}
+		for _, err := range res.Errors {
+			warn(fmt.Sprintf("GitLab dependency link sync: %v", err))
+		}
+	}
+
+	if len(linkData.ScopedIssues) > 0 {
+		count, errs := gt.PushEpicMilestones(ctx, linkData.ScopedIssues, gitlab.EpicMilestoneOptions{
+			DryRun: dryRun,
+			OnPlan: func(issueID string, issueIID int, milestoneID int) {
+				if !jsonOutput {
+					_, _ = fmt.Fprintf(out, "  [dry-run] Would set GitLab milestone %d on %s (#%d)\n",
+						milestoneID, issueID, issueIID)
+				}
+			},
+		})
+		milestonesUpdated = count
+		for _, err := range errs {
+			warn(fmt.Sprintf("GitLab epic milestone sync: %v", err))
+		}
+	}
+
+	return linksPushed, linksLicenseSkipped, milestonesUpdated
 }
 
 type gitlabLinkSyncData struct {

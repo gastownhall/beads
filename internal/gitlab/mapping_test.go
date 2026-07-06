@@ -38,15 +38,6 @@ func TestDefaultGitLabMappingConfig(t *testing.T) {
 	if typ, ok := config.LabelTypeMap["bug"]; !ok || typ != "bug" {
 		t.Errorf("LabelTypeMap[\"bug\"] = %q, want \"bug\"", typ)
 	}
-
-	// Verify relation mappings exist
-	if len(config.RelationMap) == 0 {
-		t.Error("RelationMap is empty, want default relation mappings")
-	}
-	// "blocks" should map to "blocks"
-	if r, ok := config.RelationMap["blocks"]; !ok || r != "blocks" {
-		t.Errorf("RelationMap[\"blocks\"] = %q, want \"blocks\"", r)
-	}
 }
 
 // TestpriorityFromLabels verifies parsing priority::* labels.
