@@ -312,10 +312,13 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	// via Dolt remotes too, so it needs the same gate as server mode.
 	//
 	// adopt injects the driver-side fast-forward ancestry primitives
-	// (mybd-ae1i piece 2) so the smart gate can distinguish a losslessly
+	// (mybd-ae1i) so the smart gate can distinguish a losslessly
 	// fast-forwardable remote-ahead case (smartAdoptFastForward) from the
-	// plain destructive adopt. FastForward itself is not yet invoked — piece
-	// 2 only detects and directs; piece 3 wires the auto fast-forward.
+	// plain destructive adopt, and auto-execute it: CheckRemoteMigrateGate*
+	// calls FastForward and returns nil (proceed, nothing pending) once HEAD
+	// has actually advanced; any execution failure (dirty working set raced
+	// in, non-fast-forward, concurrent writer) falls back to the plain
+	// destructive adopt directive instead of forcing the write.
 	adopt := &schema.FastForwardAdopter{
 		IsStrictAncestor: func(ctx context.Context, db schema.DBConn, ref string) (bool, error) {
 			return versioncontrolops.LocalIsStrictAncestorOf(ctx, db, ref)
@@ -326,6 +329,16 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 		FastForward: func(ctx context.Context, db schema.DBConn, ref string) error {
 			return versioncontrolops.FastForwardAdopt(ctx, db, ref)
 		},
+		// ReadOnly is deliberately left unset (false) here: this initSchema
+		// path is only ever reached via newStore (openStrict,
+		// openReadOnlyCommand, or openWorkingSetReconcile intents), all of
+		// which perform a writable open — s.readOnly is never true for any
+		// of them. The genuinely read-only embedded open, OpenReadOnly,
+		// skips initSchema (and this gate) entirely, so there is no
+		// read-only signal to plumb through at this injection site the way
+		// server mode's cfg.ReadOnly is (dolt/store.go initSchema). If that
+		// ever changes — e.g. initSchema starts running on a store that can
+		// report readOnly true — wire it here too.
 	}
 	if err := schema.CheckRemoteMigrateGateWithAdopt(ctx, conn, adopt); err != nil {
 		var gateErr *schema.RemoteMigrateGateError

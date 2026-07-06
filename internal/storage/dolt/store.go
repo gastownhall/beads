@@ -1631,10 +1631,13 @@ func (s *DoltStore) initSchema(ctx context.Context) error {
 	// open after an upgrade.
 	//
 	// adopt injects the driver-side fast-forward ancestry primitives
-	// (mybd-ae1i piece 2) so the smart gate can distinguish a losslessly
+	// (mybd-ae1i) so the smart gate can distinguish a losslessly
 	// fast-forwardable remote-ahead case (smartAdoptFastForward) from the
-	// plain destructive adopt. FastForward itself is not yet invoked — piece
-	// 2 only detects and directs; piece 3 wires the auto fast-forward.
+	// plain destructive adopt, and auto-execute it: CheckRemoteMigrateGate*
+	// calls FastForward and returns nil (proceed, nothing pending) once HEAD
+	// has actually advanced; any execution failure (dirty working set raced
+	// in, non-fast-forward, concurrent writer) falls back to the plain
+	// destructive adopt directive instead of forcing the write.
 	adopt := &schema.FastForwardAdopter{
 		IsStrictAncestor: func(ctx context.Context, db schema.DBConn, ref string) (bool, error) {
 			return versioncontrolops.LocalIsStrictAncestorOf(ctx, db, ref)
@@ -1645,6 +1648,12 @@ func (s *DoltStore) initSchema(ctx context.Context) error {
 		FastForward: func(ctx context.Context, db schema.DBConn, ref string) error {
 			return versioncontrolops.FastForwardAdopt(ctx, db, ref)
 		},
+		// s.initSchema is only ever invoked from the writable-open path (the
+		// caller guards it on !cfg.ReadOnly), so this is always false in
+		// practice today — wired explicitly anyway so the adopter's safety
+		// invariant (ReadOnly means "cannot write here") does not silently
+		// depend on that external guard alone.
+		ReadOnly: s.readOnly,
 	}
 	gate := func(ctx context.Context, db *sql.DB) error {
 		return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)

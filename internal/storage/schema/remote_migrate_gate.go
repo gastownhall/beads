@@ -446,7 +446,7 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 	fallbackReason := ""
 	unrecognizedSmartGateEnv := ""
 	if SmartGateEnabled() {
-		decision, skew := routeSmartGate(ctx, db, current, remoteName, adopt)
+		decision, skew, ref, atLatest := routeSmartGate(ctx, db, current, latest, remoteName, adopt)
 		switch decision {
 		case smartAutoMigrate:
 			smartGateAllowMigrate(len(pending), current)
@@ -460,12 +460,44 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 				Decision:        gateDecisionAdopt,
 			}
 		case smartAdoptFastForward:
-			// Piece 2 (mybd-ae1i): detection + directive only. The verdict
-			// proves this clone COULD fast-forward losslessly, but the router
-			// does not yet act on it — no write, no auto motion. That lands
-			// in piece 3's AUTO fast-forward, which will call
-			// adopt.FastForward and return nil only after HEAD has actually
-			// advanced (never reusing this nil-then-migrate path).
+			// mybd-ae1i piece 3 (+ follow-up fix): turn a detected
+			// smartAdoptFastForward verdict into action, but ONLY when the
+			// fast-forward would land exactly at this binary's latest
+			// migration (atLatest). Landing short of latest would leave
+			// MigrateUp to apply the remainder unconditionally in place
+			// right after, with no gate re-evaluation — reintroducing the
+			// #4259 fork risk this gate exists to prevent. Landing past
+			// latest would mean a newer binary already migrated the remote
+			// further than this one understands (#4135/#4137 class).
+			if atLatest && canAutoFastForward(adopt) {
+				// attemptFastForward re-verifies the ancestry/clean/
+				// remoteMax-at-latest preconditions in this SAME db session
+				// immediately before the write (TOCTOU guard) and performs
+				// CALL DOLT_MERGE('--ff-only', ref) — never forcing it.
+				if attemptFastForward(ctx, db, ref, adopt, latest) {
+					smartGateNotifyFastForward(current, latest)
+					return nil
+				}
+				// A re-check miss or the merge itself refused (a dirty
+				// working set raced in, non-fast-forward, concurrent
+				// writer): the loss-free guarantee no longer holds
+				// confidently — degrade to the plain destructive adopt,
+				// never adopt-ff.
+				return &RemoteMigrateGateError{
+					CurrentVersion:  current,
+					LatestVersion:   latest,
+					Pending:         len(pending),
+					UnrecognizedEnv: unrecognizedEnv,
+					Decision:        gateDecisionAdopt,
+				}
+			}
+			// Disqualified from auto-execution — read-only store, no
+			// FastForward callback wired, or the fast-forward would not
+			// land exactly at latest — but routeSmartGate already proved
+			// this clone a strict ancestor of ref with a clean working set,
+			// so adopting is still loss-free. Give the operator the
+			// accurate adopt-ff directive instead of the generic
+			// destructive-adopt text.
 			return &RemoteMigrateGateError{
 				CurrentVersion:  current,
 				LatestVersion:   latest,
