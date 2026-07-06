@@ -63,17 +63,27 @@ bd doctor --fix
 
 ## Protected Branches
 
-Dolt stores data under `refs/dolt/data`, separate from Git refs. This means beads data doesn't conflict with protected Git branches — no special branch flag is needed. On new projects with a git `origin`, `bd init` configures that origin as the Dolt remote automatically.
+Dolt stores data under `refs/dolt/data`, separate from Git refs. This means
+beads data does not conflict with protected Git branches, and no separate
+`beads-sync` branch or protected-branch exception is needed. On new projects
+with a Git `origin`, `bd init` configures that origin as the Dolt remote
+automatically.
 
 ## Git Worktrees
 
-Beads works in git worktrees using embedded mode:
+Beads works in Git worktrees without extra setup. Linked worktrees discover the
+repository's `.beads` workspace and sync issue data through Dolt:
 
 ```bash
-# In worktree — just run commands directly
+# In a linked worktree
 bd create "Task"
 bd list
+bd dolt pull
+bd dolt push
 ```
+
+Older beads versions documented a `sync.branch` workflow that created hidden
+Git worktrees. That workflow has been removed; current sync uses Dolt remotes.
 
 ## Branch Workflows
 
@@ -118,4 +128,4 @@ bd duplicates --auto-merge
 1. **Install hooks** - `bd hooks install`
 2. **Push regularly** - `bd dolt push` at session end
 3. **Pull before work** - `bd dolt pull` to get latest issues
-4. **Worktrees use embedded mode automatically**
+4. **Use normal Git worktrees** - no sync branch is required
