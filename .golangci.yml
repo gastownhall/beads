@@ -85,7 +85,7 @@ linters:
           - gosec
         text: "G115"
       # G117: Exported struct fields matching secret patterns are intentional API fields
-      - path: 'internal/compact/compactor\.go|internal/jira/client\.go|internal/linear/types\.go|internal/storage/versioned\.go'
+      - path: 'internal/compact/compactor\.go|internal/jira/client\.go|internal/linear/types\.go|internal/linear/oauth\.go|internal/storage/versioned\.go'
         linters:
           - gosec
         text: "G117"
@@ -104,12 +104,12 @@ linters:
           - gosec
         text: "G703"
       # G704: SSRF via taint in API clients with user-configured URLs
-      - path: 'cmd/bd/doctor/(claude|version)\.go|internal/gitlab/client\.go|internal/jira/client\.go|internal/linear/client\.go'
+      - path: 'cmd/bd/doctor/(claude|version)\.go|internal/github/client\.go|internal/gitlab/client\.go|internal/jira/client\.go|internal/linear/client\.go|internal/linear/oauth\.go'
         linters:
           - gosec
         text: "G704"
       # G705: XSS via taint in CLI template rendering (no browser context)
-      - path: 'cmd/bd/compact\.go'
+      - path: 'cmd/bd/compact\.go|internal/linear/client\.go'
         linters:
           - gosec
         text: "G705"

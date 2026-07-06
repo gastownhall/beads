@@ -265,7 +265,7 @@ func openWorkspace(ctx context.Context, cfg config, dir string) (*workspace, err
 }
 
 func isPortOpen(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second) // #nosec G704 -- loopback probe of a locally started dolt server; not attacker-controlled
 	if err != nil {
 		return false
 	}
@@ -287,7 +287,7 @@ func createWorkspace(ctx context.Context, cfg config) (*workspace, error) {
 	defer cancel()
 
 	fmt.Printf("initializing server workspace timeout=%s\n", initTimeout)
-	cmd := exec.CommandContext(initCtx, cfg.BDPath,
+	cmd := exec.CommandContext(initCtx, cfg.BDPath, // #nosec G702 -- fixed subcommand args; cfg.BDPath is an operator-supplied local binary path, not attacker input
 		"init",
 		"--server",
 		"--prefix=perf",
@@ -325,7 +325,7 @@ func startWorkspaceDolt(ctx context.Context, cfg config, dir string) error {
 	startCtx, cancel := context.WithTimeout(ctx, startTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(startCtx, cfg.BDPath, "dolt", "start")
+	cmd := exec.CommandContext(startCtx, cfg.BDPath, "dolt", "start") // #nosec G702 -- fixed subcommand args; cfg.BDPath is an operator-supplied local binary path, not attacker input
 	cmd.Dir = dir
 	cmd.Env = subprocessEnv("BD_NON_INTERACTIVE=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
