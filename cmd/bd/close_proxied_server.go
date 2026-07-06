@@ -168,7 +168,7 @@ func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, 
 		return closeProxiedOutcome{}, false
 	}
 
-	if err := validateIssueClosable(id, current, in.force); err != nil {
+	if err := validateIssueClosable(id, current, actor, in.force); err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", err)
 		return closeProxiedOutcome{}, false
 	}
