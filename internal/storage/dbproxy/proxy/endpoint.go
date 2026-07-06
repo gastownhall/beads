@@ -33,7 +33,7 @@ func IsUpstreamMismatch(err error) bool {
 }
 
 func intendedUpstreamID(opts OpenOpts) string {
-	if opts.Backend == BackendExternal {
+	if opts.Backend == BackendExternal || opts.Backend == BackendExternalPooled {
 		return server.ExternalDoltServerID(opts.External)
 	}
 	return ""
@@ -42,11 +42,21 @@ func intendedUpstreamID(opts OpenOpts) string {
 type Endpoint struct {
 	Host string
 	Port int
+	// Socket, when non-empty, is the unix-domain socket the pooled proxy
+	// listens on. Callers route clients here (Host/Port are unset in this case).
+	Socket string
 }
 
 func (e Endpoint) Address() string {
+	if e.Socket != "" {
+		return e.Socket
+	}
 	return net.JoinHostPort(e.Host, strconv.Itoa(e.Port))
 }
+
+// IsSocket reports whether the endpoint is a unix socket (pooled mode) rather
+// than a TCP host:port (passthrough mode).
+func (e Endpoint) IsSocket() bool { return e.Socket != "" }
 
 type OpenOpts struct {
 	IdleTimeout    time.Duration
@@ -55,6 +65,10 @@ type OpenOpts struct {
 	LogFilePath    string
 	DoltBinPath    string
 	External       configfile.ExternalDoltConfig
+	// PoolSocket is the unix socket the pooled proxy listens on (required for
+	// BackendExternalPooled). PoolSize overrides the default backend count.
+	PoolSocket string
+	PoolSize   int
 }
 
 const (
@@ -93,6 +107,16 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 	case BackendExternal:
 		if opts.LogFilePath == "" {
 			return Endpoint{}, fmt.Errorf("OpenOpts.LogFilePath is required for backend %q", opts.Backend)
+		}
+		if err := opts.External.Validate(); err != nil {
+			return Endpoint{}, fmt.Errorf("OpenOpts.External: %w", err)
+		}
+	case BackendExternalPooled:
+		if opts.LogFilePath == "" {
+			return Endpoint{}, fmt.Errorf("OpenOpts.LogFilePath is required for backend %q", opts.Backend)
+		}
+		if opts.PoolSocket == "" {
+			return Endpoint{}, fmt.Errorf("OpenOpts.PoolSocket is required for backend %q", opts.Backend)
 		}
 		if err := opts.External.Validate(); err != nil {
 			return Endpoint{}, fmt.Errorf("OpenOpts.External: %w", err)
@@ -238,7 +262,9 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, lock *util.Lock) (*e
 	if opts.DoltBinPath != "" {
 		args = append(args, "--dolt-bin", opts.DoltBinPath)
 	}
-	if opts.Backend == BackendExternal {
+	// Both external (passthrough) and external-pooled fronts need the upstream
+	// Dolt connection details.
+	if opts.Backend == BackendExternal || opts.Backend == BackendExternalPooled {
 		ext := opts.External
 		if ext.Host != "" {
 			args = append(args, "--external-host", ext.Host)
@@ -260,6 +286,12 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, lock *util.Lock) (*e
 		}
 		if ext.KeepAlivePeriod != 0 {
 			args = append(args, "--external-keep-alive", ext.KeepAlivePeriod.String())
+		}
+	}
+	if opts.Backend == BackendExternalPooled {
+		args = append(args, "--pool-socket", opts.PoolSocket)
+		if opts.PoolSize > 0 {
+			args = append(args, "--pool-size", strconv.Itoa(opts.PoolSize))
 		}
 	}
 
@@ -297,15 +329,26 @@ func readAndDial(rootDir string) (Endpoint, *pidfile.PidFile, bool) {
 	if err != nil || pf == nil {
 		return Endpoint{}, nil, false
 	}
-	ep := Endpoint{Host: "127.0.0.1", Port: pf.Port}
-	if !probePort(ep, 500*time.Millisecond) {
+	var ep Endpoint
+	if pf.Socket != "" {
+		ep = Endpoint{Socket: pf.Socket}
+	} else {
+		ep = Endpoint{Host: "127.0.0.1", Port: pf.Port}
+	}
+	if !probe(ep, 500*time.Millisecond) {
 		return Endpoint{}, nil, false
 	}
 	return ep, pf, true
 }
 
-func probePort(ep Endpoint, timeout time.Duration) bool {
-	conn, err := net.DialTimeout("tcp", ep.Address(), timeout)
+// probe dials the endpoint (TCP or unix socket) to confirm a server is
+// listening.
+func probe(ep Endpoint, timeout time.Duration) bool {
+	network := "tcp"
+	if ep.IsSocket() {
+		network = "unix"
+	}
+	conn, err := net.DialTimeout(network, ep.Address(), timeout)
 	if err != nil {
 		return false
 	}

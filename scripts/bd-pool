@@ -1,0 +1,37 @@
+#!/bin/sh
+# bd-pool — town-wide wrapper that routes EVERY bd process through the SHARED
+# Dolt connection pooler (gt-ye21 / #4292).
+#
+# It sets BEADS_DOLT_POOL=1 and execs the real bd. On first use per Dolt
+# endpoint, bd spawns ONE shared, long-lived pooler child under
+# ~/.beads/pool/<host>_<port>/ (lock + pidfile + pool.sock); all subsequent bd
+# processes — gastown-daemon-spawned and interactive agent sessions alike —
+# reuse it, so Dolt sees ~K persistent connections instead of ~3 per bd
+# invocation.
+#
+# DEPLOYMENT (town-wide, zero per-caller config):
+#   1. Install the pooler-enabled bd binary somewhere stable, e.g.:
+#        cp /path/to/bd /Users/bbriski/.local/bin/bd-pooler
+#   2. Install this wrapper next to it and point it at that binary:
+#        cp scripts/bd-pool /Users/bbriski/.local/bin/bd-pool
+#        # edit REAL_BD below if your install path differs
+#   3. Repoint the bd symlink at the wrapper:
+#        ln -sf /Users/bbriski/.local/bin/bd-pool /opt/homebrew/bin/bd
+#
+# REVERT (instant, no rebuild):
+#   - Repoint the symlink back at the previous bd binary:
+#        ln -sf <previous-bd> /opt/homebrew/bin/bd
+#   - OR force-disable the pooler for a single call / globally:
+#        BEADS_DOLT_POOL=0 bd ...        # this call only
+#        export BEADS_DOLT_POOL=0        # whole shell
+#     With BEADS_DOLT_POOL unset/0 the same binary behaves exactly as before.
+#
+# TUNABLES (optional env, all have safe defaults):
+#   BEADS_DOLT_POOL_SIZE=16        # persistent backends (default 16, min 4)
+#   BEADS_DOLT_POOL_SOCKET=/path   # override the client socket path
+#
+# Point this at your pooler-enabled bd binary.
+REAL_BD="${BD_POOL_REAL_BD:-/Users/bbriski/.local/bin/bd-pooler}"
+
+# Default ON, but honor an explicit override (BEADS_DOLT_POOL=0 disables).
+BEADS_DOLT_POOL="${BEADS_DOLT_POOL:-1}" exec "$REAL_BD" "$@"

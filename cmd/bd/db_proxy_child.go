@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -29,6 +30,8 @@ var (
 	dbProxyChildExternalTLSCertPath string
 	dbProxyChildExternalTLSKeyPath  string
 	dbProxyChildExternalKeepAlive   time.Duration
+	dbProxyChildPoolSocket          string
+	dbProxyChildPoolSize            int
 )
 
 var dbProxyChildCmd = &cobra.Command{
@@ -58,6 +61,13 @@ not intended to be invoked directly by users.`,
 			KeepAlivePeriod: dbProxyChildExternalKeepAlive,
 		}
 
+		// Pooled mode: serve the QUERY-LEVEL connection pooler on a unix socket
+		// instead of the TCP byte-passthrough proxy, reusing the same lifecycle
+		// scaffolding (lock, pidfile, log, signal handling, idle shutdown).
+		if backend == proxy.BackendExternalPooled {
+			return runPooledProxyChild(cmd.Context(), external)
+		}
+
 		srv, err := newDatabaseServer(backend, dbProxyChildRoot, dbProxyChildConfig, dbProxyChildLogPath, dbProxyChildDoltBin, external)
 		if err != nil {
 			return err
@@ -77,6 +87,35 @@ not intended to be invoked directly by users.`,
 		}
 		return nil
 	},
+}
+
+// runPooledProxyChild runs the pooled (query-level) serving mode. The upstream
+// Dolt address comes from the external config; clients are served on the
+// pool socket recorded in the pidfile.
+func runPooledProxyChild(ctx context.Context, external configfile.ExternalDoltConfig) error {
+	if dbProxyChildPoolSocket == "" {
+		return fmt.Errorf("backend %q requires --pool-socket", proxy.BackendExternalPooled)
+	}
+	doltAddr := ""
+	if external.Host != "" {
+		doltAddr = fmt.Sprintf("%s:%d", external.Host, external.Port)
+	}
+	p := proxy.NewPooledServer(proxy.PooledOpts{
+		RootDir:     dbProxyChildRoot,
+		Socket:      dbProxyChildPoolSocket,
+		DoltAddr:    doltAddr,
+		DoltSocket:  external.Socket,
+		DoltUser:    external.User,
+		PoolSize:    dbProxyChildPoolSize,
+		IdleTimeout: dbProxyChildIdleTimeout,
+	})
+	if err := p.ListenAndServe(ctx); err != nil {
+		if errors.Is(err, proxy.ErrLockHeld) {
+			os.Exit(proxy.LockHeldExitCode)
+		}
+		return err
+	}
+	return nil
 }
 
 func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, doltBin string, external configfile.ExternalDoltConfig) (server.DatabaseServer, error) {
@@ -107,6 +146,8 @@ func init() {
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalTLSCertPath, "external-tls-cert-path", "", "external backend: absolute path to client TLS certificate (mTLS)")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalTLSKeyPath, "external-tls-key-path", "", "external backend: absolute path to client TLS private key (mTLS)")
 	dbProxyChildCmd.Flags().DurationVar(&dbProxyChildExternalKeepAlive, "external-keep-alive", 0, "external backend: TCP keepalive period (default 30s)")
+	dbProxyChildCmd.Flags().StringVar(&dbProxyChildPoolSocket, "pool-socket", "", "pooled backend: unix socket path the pooler listens on for clients")
+	dbProxyChildCmd.Flags().IntVar(&dbProxyChildPoolSize, "pool-size", 0, "pooled backend: number of persistent backend connections (default 16, min 4)")
 	_ = dbProxyChildCmd.MarkFlagRequired("root")
 	_ = dbProxyChildCmd.MarkFlagRequired("port")
 	_ = dbProxyChildCmd.MarkFlagRequired("backend")

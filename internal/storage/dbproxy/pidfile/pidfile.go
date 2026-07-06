@@ -14,6 +14,10 @@ type PidFile struct {
 	Pid        int    `json:"pid"`
 	Port       int    `json:"port"`
 	UpstreamID string `json:"upstream_id,omitempty"`
+	// Socket is the unix-domain socket path a server listens on, used by the
+	// pooled (query-level) proxy mode instead of a TCP port. Empty for the TCP
+	// byte-passthrough proxy.
+	Socket string `json:"socket,omitempty"`
 }
 
 func Path(rootDir, name string) string {

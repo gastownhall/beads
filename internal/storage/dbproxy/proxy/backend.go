@@ -16,6 +16,10 @@ const (
 	BackendExternal          Backend = "external"
 	BackendLocalServer       Backend = "local-server"
 	BackendLocalSharedServer Backend = "local-shared-server"
+	// BackendExternalPooled fronts an already-running external Dolt sql-server
+	// with the QUERY-LEVEL connection pooler (vitess Listener on a unix socket)
+	// instead of the TCP byte-passthrough proxy. Opt-in via BEADS_DOLT_POOL=1.
+	BackendExternalPooled Backend = "external-pooled"
 )
 
 // knownBackends is the dispatchable set, ordered for stable error messages
@@ -24,6 +28,7 @@ var knownBackends = []Backend{
 	BackendExternal,
 	BackendLocalServer,
 	BackendLocalSharedServer,
+	BackendExternalPooled,
 }
 
 func (b Backend) String() string { return string(b) }
