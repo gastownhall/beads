@@ -178,6 +178,22 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+	t.Run("close_multiple_ids_with_per_id_reasons", func(t *testing.T) {
+		issue1 := bdCreate(t, bd, dir, "Multi close reason 1", "--type", "task")
+		issue2 := bdCreate(t, bd, dir, "Multi close reason 2", "--type", "task")
+
+		bdClose(t, bd, dir, issue1.ID, "--reason", "fixed A", issue2.ID, "--reason", "fixed B")
+
+		got1 := bdShow(t, bd, dir, issue1.ID)
+		got2 := bdShow(t, bd, dir, issue2.ID)
+		if got1.CloseReason != "fixed A" {
+			t.Errorf("issue1 close_reason = %q, want %q", got1.CloseReason, "fixed A")
+		}
+		if got2.CloseReason != "fixed B" {
+			t.Errorf("issue2 close_reason = %q, want %q", got2.CloseReason, "fixed B")
+		}
+	})
+
 	t.Run("close_already_closed", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Double close", "--type", "task")
 		bdClose(t, bd, dir, issue.ID)
@@ -236,6 +252,66 @@ func TestEmbeddedClose(t *testing.T) {
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.Status != types.StatusClosed {
 			t.Errorf("expected closed with --force, got %s", got.Status)
+		}
+	})
+
+	// be-035: silent-data-loss bug. Without an authority check, actor A could
+	// close a bead claimed by actor B and bd would print "✓ Closed" with no
+	// indication the actor mismatched. The fix refuses the close (non-zero
+	// exit, stderr message) unless --force is set.
+	t.Run("close_assignee_mismatch_refuses_without_force", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Mismatch guard", "--type", "task")
+		// Bob claims the bead.
+		bdUpdate(t, bd, dir, issue.ID, "--actor", "bob", "--claim")
+
+		// Alice tries to close it — must fail loudly, not silently succeed.
+		out := bdCloseFail(t, bd, dir, issue.ID, "--actor", "alice")
+		if !strings.Contains(out, "assignee is") {
+			t.Errorf("expected stderr to mention assignee mismatch, got: %s", out)
+		}
+		if !strings.Contains(out, "bob") || !strings.Contains(out, "alice") {
+			t.Errorf("expected stderr to name both assignee and actor, got: %s", out)
+		}
+
+		// Bead must remain open.
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status == types.StatusClosed {
+			t.Error("expected bead to remain open after refused close")
+		}
+	})
+
+	t.Run("close_assignee_mismatch_with_force", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Mismatch force", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--actor", "bob", "--claim")
+
+		// --force overrides the authority check.
+		bdClose(t, bd, dir, issue.ID, "--actor", "alice", "--force")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("expected closed with --force despite mismatch, got %s", got.Status)
+		}
+	})
+
+	t.Run("close_same_actor_succeeds", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Same actor", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--actor", "alice", "--claim")
+
+		// Same actor — no authority issue.
+		bdClose(t, bd, dir, issue.ID, "--actor", "alice")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("expected closed when actor matches assignee, got %s", got.Status)
+		}
+	})
+
+	t.Run("close_unassigned_bead_succeeds", func(t *testing.T) {
+		// Lots of bd's normal flow involves closing unclaimed beads;
+		// the authority check must not break this.
+		issue := bdCreate(t, bd, dir, "Unassigned", "--type", "task")
+		bdClose(t, bd, dir, issue.ID, "--actor", "carol")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("expected unassigned bead to close, got %s", got.Status)
 		}
 	})
 
@@ -336,11 +412,11 @@ func TestEmbeddedClose(t *testing.T) {
 		cmd := exec.Command(bd, "close", blocker.ID, "--suggest-next", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd close --suggest-next --json failed: %v\n%s", err, out)
+			t.Fatalf("bd close --suggest-next --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := string(out)
+		s := stdout.String()
 		if !strings.Contains(s, "unblocked") {
 			t.Logf("JSON output did not contain 'unblocked' key: %s", s)
 		}
@@ -376,11 +452,11 @@ func TestEmbeddedClose(t *testing.T) {
 		cmd := exec.Command(bd, "close", toClose.ID, "--claim-next", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd close --claim-next --json failed: %v\n%s", err, out)
+			t.Fatalf("bd close --claim-next --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := string(out)
+		s := stdout.String()
 		start := strings.Index(s, "{")
 		if start < 0 {
 			start = strings.Index(s, "[")
@@ -408,9 +484,9 @@ func TestEmbeddedClose(t *testing.T) {
 		env := bdEnv(dir)
 		env = append(env, "CLAUDE_SESSION_ID=env-sess")
 		cmd.Env = env
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd close with env session failed: %v\n%s", err, out)
+			t.Fatalf("bd close with env session failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 		session := querySessionSQL(t, beadsDir, issue.ID)
 		if session != "env-sess" {
@@ -425,11 +501,11 @@ func TestEmbeddedClose(t *testing.T) {
 		cmd := exec.Command(bd, "close", issue.ID, "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd close --json failed: %v\n%s", err, out)
+			t.Fatalf("bd close --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := string(out)
+		s := stdout.String()
 		start := strings.Index(s, "[")
 		if start < 0 {
 			start = strings.Index(s, "{")
@@ -447,9 +523,9 @@ func TestEmbeddedClose(t *testing.T) {
 		cmd := exec.Command(bd, "done", issue.ID)
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd done failed: %v\n%s", err, out)
+			t.Fatalf("bd done failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.Status != types.StatusClosed {
@@ -462,9 +538,9 @@ func TestEmbeddedClose(t *testing.T) {
 		cmd := exec.Command(bd, "done", issue.ID, "the reason")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd done with reason failed: %v\n%s", err, out)
+			t.Fatalf("bd done with reason failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.CloseReason != "the reason" {
@@ -513,6 +589,39 @@ func TestEmbeddedClose(t *testing.T) {
 		bdCloseFail(t, bd, dir, issue1.ID, issue2.ID, "--continue")
 	})
 
+	// Reproduces gastownhall/beads#3769: --continue auto-advances + claims
+	// the next molecule step inside AdvanceToNextStep, but only --claim-next
+	// was calling SetLastTouchedID. Without the fix, .beads/last-touched
+	// stayed pointed at the just-closed step.
+	t.Run("close_continue_updates_last_touched", func(t *testing.T) {
+		// Template-shaped epic so AdvanceToNextStep recognizes it as a molecule.
+		root := bdCreate(t, bd, dir, "Continue last-touched root", "--type", "epic", "--labels", "template")
+		step1 := bdCreate(t, bd, dir, "Step one", "--type", "task", "--parent", root.ID)
+		step2 := bdCreate(t, bd, dir, "Step two", "--type", "task", "--parent", root.ID)
+		// step2 blocks on step1, so step1 closes first and step2 becomes ready.
+		bdDepAdd(t, bd, dir, step2.ID, step1.ID)
+
+		// Claim step1 first (mirrors the natural workflow); this seeds last-touched
+		// with step1's ID via the update --claim path, isolating the close-flow's
+		// responsibility for advancing it.
+		_, err := bdRunWithFlockRetry(t, bd, dir, "update", step1.ID, "--claim")
+		if err != nil {
+			t.Fatalf("seed claim failed: %v", err)
+		}
+
+		_ = bdClose(t, bd, dir, step1.ID, "--reason", "test", "--continue")
+
+		got, err := os.ReadFile(filepath.Join(beadsDir, "last-touched"))
+		if err != nil {
+			t.Fatalf("read .beads/last-touched: %v", err)
+		}
+		gotID := strings.TrimSpace(string(got))
+		if gotID != step2.ID {
+			t.Errorf(".beads/last-touched = %q after `bd close %s --continue`, want %q (the auto-advanced step)",
+				gotID, step1.ID, step2.ID)
+		}
+	})
+
 	t.Run("close_suggest_next_multiple_ids_fails", func(t *testing.T) {
 		issue1 := bdCreate(t, bd, dir, "Suggest multi 1", "--type", "task")
 		issue2 := bdCreate(t, bd, dir, "Suggest multi 2", "--type", "task")
@@ -556,10 +665,7 @@ func TestEmbeddedCloseConcurrent(t *testing.T) {
 			for i := 0; i < issuesPerWorker; i++ {
 				// Create an issue.
 				title := fmt.Sprintf("w%d-close-%d", worker, i)
-				cmd := exec.Command(bd, "create", "--silent", title)
-				cmd.Dir = dir
-				cmd.Env = bdEnv(dir)
-				out, err := cmd.CombinedOutput()
+				out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--silent", title)
 				if err != nil {
 					r.err = fmt.Errorf("create %d: %v\n%s", i, err, out)
 					results[worker] = r
@@ -589,13 +695,13 @@ func TestEmbeddedCloseConcurrent(t *testing.T) {
 				listCmd := exec.Command(bd, "list", "--json", "--limit", "0", "--all")
 				listCmd.Dir = dir
 				listCmd.Env = bdEnv(dir)
-				listOut, err := listCmd.CombinedOutput()
+				listStdout, listStderr, err := runCommandBuffers(t, listCmd)
 				if err != nil {
-					r.err = fmt.Errorf("list after close %d: %v\n%s", i, err, listOut)
+					r.err = fmt.Errorf("list after close %d: %v\nstdout:\n%s\nstderr:\n%s", i, err, listStdout.String(), listStderr.String())
 					results[worker] = r
 					return
 				}
-				s := string(listOut)
+				s := listStdout.String()
 				start := strings.Index(s, "[")
 				if start < 0 {
 					r.listCounts = append(r.listCounts, 0)
@@ -603,7 +709,7 @@ func TestEmbeddedCloseConcurrent(t *testing.T) {
 				}
 				var issues []json.RawMessage
 				if jsonErr := json.Unmarshal([]byte(s[start:]), &issues); jsonErr != nil {
-					r.err = fmt.Errorf("list parse %d: %v\nraw: %s", i, jsonErr, s)
+					r.err = fmt.Errorf("list parse %d: %v\nstdout:\n%s\nstderr:\n%s", i, jsonErr, s, listStderr.String())
 					results[worker] = r
 					return
 				}

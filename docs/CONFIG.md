@@ -1,9 +1,14 @@
 # Configuration System
 
+Last reviewed: 2026-05-08
+
+Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, and
+`internal/configfile/`.
+
 bd has two complementary configuration systems:
 
-1. **Tool-level configuration** (Viper): User preferences for tool behavior (flags, output format)
-2. **Project-level configuration** (`bd config`): Integration data and project-specific settings
+1. **Tool-level configuration** (Viper): startup settings, flags, output format, and other CLI behaviour
+2. **Project-level configuration** (`bd config`): integration data and project-specific settings; startup-sensitive keys are routed to `config.yaml`
 
 ## Tool-Level Configuration (Viper)
 
@@ -14,19 +19,24 @@ Tool preferences control how `bd` behaves globally or per-user. These are stored
 **Configuration precedence** (highest to lowest):
 1. Command-line flags (`--json`, `--dolt-auto-commit`, etc.)
 2. Environment variables (`BD_JSON`, `BD_DOLT_AUTO_COMMIT`, etc.)
-3. Config file (`~/.config/bd/config.yaml` or `.beads/config.yaml`)
+3. Merged config files (`~/.beads/config.yaml`, `~/.config/bd/config.yaml`, `.beads/config.yaml`, and `BEADS_DIR/config.yaml`)
 4. Defaults
 
 ### Config File Locations
 
-Viper searches for `config.yaml` in these locations (in order):
-1. `.beads/config.yaml` - Project-specific tool settings (version-controlled)
-2. `~/.config/bd/config.yaml` - User-specific tool settings
-3. `~/.beads/config.yaml` - Legacy user settings
+Config files are merged from lowest to highest priority:
+
+1. `~/.beads/config.yaml` - legacy user settings
+2. `~/.config/bd/config.yaml` - user settings; this path is checked explicitly even on platforms whose native user-config directory differs
+3. `.beads/config.yaml` - project-specific tool settings, discovered by walking up from the current directory
+4. `BEADS_DIR/config.yaml` - highest-priority runtime workspace override when `BEADS_DIR` points at a different `.beads` directory
+
+When a project config exists, `.beads/config.local.yaml` is merged last for
+machine-specific overrides that should not be committed.
 
 ### Supported Settings
 
-Tool-level settings you can configure:
+Common tool-level settings you can configure:
 
 | Setting | Flag | Environment Variable | Default | Description |
 |---------|------|---------------------|---------|-------------|
@@ -40,12 +50,14 @@ Tool-level settings you can configure:
 | `validation.on-sync` | - | `BD_VALIDATION_ON_SYNC` | `none` | Template validation before sync: `none`, `warn`, `error` |
 | `git.author` | - | `BD_GIT_AUTHOR` | (none) | Override commit author for beads commits |
 | `git.no-gpg-sign` | - | `BD_GIT_NO_GPG_SIGN` | `false` | Disable GPG signing for beads commits |
+| `list.limit` | `--limit` / `-n` | `BD_LIST_LIMIT` | `50` | Default limit for `bd list` results |
 | `directory.labels` | - | - | (none) | Map directories to labels for automatic filtering |
 | `external_projects` | - | - | (none) | Map project names to paths for cross-project deps |
 | `backup.enabled` | - | `BD_BACKUP_ENABLED` | `false` | Enable periodic Dolt-native backup to `.beads/backup/` |
 | `backup.interval` | - | `BD_BACKUP_INTERVAL` | `15m` | Minimum time between auto-backups |
 | `dolt.auto-push` | - | `BD_DOLT_AUTO_PUSH` | `false` | Auto-push to Dolt remote after writes (explicit opt-in) |
 | `dolt.auto-push-interval` | - | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time between auto-pushes |
+| `dolt.auto-push-timeout` | - | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share a single Dolt server across all projects at `~/.beads/shared-server/` |
 | `db` | `--db` | `BD_DB` | (auto-discover) | Database path |
 | `actor` | `--actor` | `BEADS_ACTOR` | `git config user.name` | Actor name for audit trail (see below) |
@@ -81,6 +93,10 @@ dolt:
 
 Periodic Dolt-native backup to `.beads/backup/` provides an off-machine recovery path. Local Dolt snapshots (via `dolt.auto-commit`) remain the primary safety net; backup is a secondary layer.
 
+This is a full database backup, unlike `bd export` or `.beads/issues.jsonl`.
+It preserves Dolt state such as tables, branches, commit history, and
+working-set data.
+
 ```yaml
 backup:
   enabled: true    # Enable auto-backup after write commands
@@ -90,7 +106,7 @@ backup:
 **How it works:**
 - After each write command (in PersistentPostRun), `bd` checks the Dolt HEAD commit hash against the last backup state
 - If data changed and the throttle interval has passed, a Dolt-native backup is synced to `.beads/backup/`
-- Full commit history is preserved in the backup
+- Full database state and commit history are preserved in the backup
 - State is tracked in `.beads/backup/backup_state.json`
 
 **Manual commands:**
@@ -108,6 +124,7 @@ By default, `bd` does not push automatically after write commands. Auto-push is 
 dolt:
   auto-push: false      # Explicit opt-in only; set true for single-writer setups
   auto-push-interval: 5m  # Minimum time between auto-pushes
+  auto-push-timeout: 30s  # Bound one push attempt when the remote is unreachable
 ```
 
 **How it works:**
@@ -330,18 +347,34 @@ Configuration keys use dot-notation namespaces to organize settings:
 - `min_hash_length` - Minimum hash ID length (default: 4)
 - `max_hash_length` - Maximum hash ID length (default: 8)
 - `import.orphan_handling` - How to handle hierarchical issues with missing parents during import (default: `allow`)
-- `export.auto` - Refresh the git-tracked JSONL file after every write command (default: `true`)
+- `import.path` - Input filename relative to `.beads/` for implied JSONL imports, including `bd init --from-jsonl` and empty-DB auto-import (default: `issues.jsonl`). Use a relative filename/path such as `beads.jsonl` so the import remains project-local and portable across machines.
+- `export.auto` - Refresh the JSONL export after every write command (default: `false`). This is for viewers, interchange, and issue-level migration; it is not cross-machine sync and not a full database backup.
 - `export.path` - Output filename relative to `.beads/` (default: `issues.jsonl`)
 - `export.interval` - Minimum time between auto-exports (default: `60s`)
-- `export.git-add` - Run `git add` on the export file after writing (default: `true`)
+- `export.git-add` - Run `git add` on the export file after writing (default: `false`)
 - `export.error_policy` - Error handling strategy for exports (default: `strict`)
 - `export.retry_attempts` - Number of retry attempts for transient errors (default: 3)
 - `export.retry_backoff_ms` - Initial backoff in milliseconds for retries (default: 100)
 - `export.skip_encoding_errors` - Skip issues that fail JSON encoding (default: false)
 - `export.write_manifest` - Write .manifest.json with export metadata (default: false)
 - `auto_export.error_policy` - Override error policy for auto-exports (default: `best-effort`)
+- `import.auto` - Legacy hook fallback that imports JSONL after git merge/checkout only when no Dolt remote is configured (default: `true`)
 - `sync.branch` - Name of the dedicated sync branch for beads data (see docs/PROTECTED_BRANCHES.md)
 - `sync.require_confirmation_on_mass_delete` - Require interactive confirmation before pushing when >50% of issues vanish during a merge AND more than 5 issues existed before (default: `false`)
+
+**Upgrade note:** `export.auto` and `export.git-add` are opt-in. Older releases
+briefly made `.beads/issues.jsonl` look like the default git-tracked source of
+truth; current releases treat it as an optional export for viewers,
+interchange, and issue-level migration. If your workflow depends on fresh JSONL
+or on the pre-commit hook staging that file, set both values explicitly:
+
+```bash
+bd config set export.auto true
+bd config set export.git-add true
+```
+
+Use `bd dolt push` / `bd dolt pull` for cross-machine sync and `bd backup` for
+restorable database backups.
 
 ### Integration Namespaces
 
@@ -631,7 +664,17 @@ bd config set jira.status_map.closed "Done"
 bd config set jira.type_map.bug "Bug"
 bd config set jira.type_map.feature "Story"
 bd config set jira.type_map.task "Task"
+
+# Set Jira custom fields on pushed issues
+bd config set jira.custom_fields.customfield_10042 '{"value":"AI Platform"}'
+bd config set jira.custom_fields.Story.customfield_10042 '{"value":"AI Platform"}'
 ```
+
+`jira.custom_fields.<field>` applies to every issue pushed to Jira.
+`jira.custom_fields.<JiraType>.<field>` applies only when the mapped Jira issue
+type matches `<JiraType>`; per-type fields override global fields with the same
+field key. Values beginning with `{` or `[` are sent as JSON, which is useful
+for select-like fields. Other values are sent as strings.
 
 ### Example: Linear Integration
 
@@ -761,13 +804,13 @@ bd linear status
 
 **Staleness detection:**
 
-After each successful pull, `bd` writes the current timestamp to `.beads/last_pull`. This enables ambient staleness detection:
+After each successful pull, `bd` writes the current timestamp to `.beads/last_pull` (a local-only, per-machine file covered by the `.beads/.gitignore` template). This enables opt-in staleness detection on `bd linear sync`:
 
 - **`--pull-if-stale`**: Only pull if data is older than the threshold (default 20m). When data is fresh, prints "Linear data is fresh" and exits. In `--json` mode, includes `"is_fresh": true/false`.
 - **`--threshold`**: Override the default 20-minute staleness threshold (e.g., `--threshold 5m`).
 - **Debounce**: A 5-minute debounce prevents agent loops — if a pull completed within the last 5 minutes, data is always treated as fresh regardless of the threshold.
-- **`bd prime` auto-pull**: When `LINEAR_API_KEY` is set and data is stale, `bd prime` automatically pulls from Linear before emitting orientation output.
-- **Per-session warning**: On any `bd` command, if data is stale, a one-time warning is emitted to stderr: `⚠ Linear data is 45m stale — run 'bd linear sync --pull' to refresh`. Suppressed in subsequent commands within the same shell session.
+
+To keep Linear data fresh in agent sessions, run `bd linear sync --pull-if-stale` explicitly (e.g., from a session-start hook). `bd prime` and other core commands do not contact Linear.
 
 **Automatic sync tracking:**
 

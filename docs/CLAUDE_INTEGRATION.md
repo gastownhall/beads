@@ -6,7 +6,7 @@ This document explains design decisions for Claude Code integration in beads.
 
 **Recommended: CLI + Hooks** - Beads uses a simple, universal approach to Claude Code integration:
 - `bd prime` command for context injection (~1-2k tokens)
-- Hooks (SessionStart/PreCompact) for automatic context refresh
+- Hooks (SessionStart) for automatic context refresh
 - Direct CLI commands with `--json` flags
 - Optional: Plugin for slash commands and enhanced UX
 
@@ -102,7 +102,7 @@ bd setup claude --remove
 
 **What it installs:**
 - SessionStart hook: Runs `bd prime` when Claude Code starts a session
-- PreCompact hook: Runs `bd prime` before context compaction to preserve workflow instructions
+- SessionStart hook: Runs `bd prime` when Claude Code starts a session and after compaction
 
 ## Related Files
 

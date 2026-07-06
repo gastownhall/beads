@@ -19,12 +19,9 @@ CREATE TABLE IF NOT EXISTS repo_mtimes_tmp (
 INSERT IGNORE INTO repo_mtimes_tmp SELECT * FROM repo_mtimes;
 
 -- Phase 2: Drop the committed repo_mtimes and register dolt_ignore patterns.
--- dolt_ignore entries must be committed BEFORE creating ignored tables.
 DROP TABLE IF EXISTS repo_mtimes;
 REPLACE INTO dolt_ignore VALUES ('local_metadata', true);
 REPLACE INTO dolt_ignore VALUES ('repo_mtimes', true);
-CALL DOLT_ADD('repo_mtimes', 'dolt_ignore');
-CALL DOLT_COMMIT('-m', 'chore: move repo_mtimes and local_metadata to dolt_ignore');
 
 -- Phase 3: Recreate repo_mtimes in the working set (now dolt-ignored).
 CREATE TABLE IF NOT EXISTS repo_mtimes (

@@ -3,33 +3,52 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// GetAllDependencyRecordsInTx returns all dependency records from the dependencies table.
-func GetAllDependencyRecordsInTx(ctx context.Context, tx *sql.Tx) (map[string][]*types.Dependency, error) {
-	rows, err := tx.QueryContext(ctx, `
-		SELECT issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id
-		FROM dependencies
-		ORDER BY issue_id
-	`)
+// GetAllDependencyRecordsInTx returns all dependency records from permanent and
+// wisp dependency tables.
+func GetAllDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*types.Dependency, error) {
+	result := make(map[string][]*types.Dependency)
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		if err := getAllDependencyRecordsIntoFromTable(ctx, tx, depTable, result); err != nil {
+			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+				continue
+			}
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+//nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller).
+func getAllDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, result map[string][]*types.Dependency) error {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+			SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
+			FROM %s
+			ORDER BY issue_id
+		`, DepTargetExpr, depTable))
 	if err != nil {
-		return nil, fmt.Errorf("get all dependency records: %w", err)
+		return fmt.Errorf("get all dependency records from %s: %w", depTable, err)
 	}
 	defer rows.Close()
 
-	result := make(map[string][]*types.Dependency)
 	for rows.Next() {
 		dep, scanErr := scanDependencyRow(rows)
 		if scanErr != nil {
-			return nil, fmt.Errorf("get all dependency records: %w", scanErr)
+			return fmt.Errorf("get all dependency records from %s: %w", depTable, scanErr)
 		}
 		result[dep.IssueID] = append(result[dep.IssueID], dep)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("get all dependency records from %s: %w", depTable, err)
+	}
+	return nil
 }
 
 // GetDependencyRecordsForIssuesInTx returns dependency records for specific issues,
@@ -37,7 +56,7 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx *sql.Tx) (map[string][]
 // Uses a single batched wisp-partition query + batched IN clauses, so cost is
 // O(1 + N/queryBatchSize) round-trips rather than O(N) — important on remote
 // backends (see GH#3414).
-func GetDependencyRecordsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string][]*types.Dependency, error) {
+func GetDependencyRecordsForIssuesInTx(ctx context.Context, tx DBTX, issueIDs []string) (map[string][]*types.Dependency, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string][]*types.Dependency), nil
 	}
@@ -64,7 +83,7 @@ func GetDependencyRecordsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs
 // GetDependencyRecordsForIssuesFromTableInTx is a fast-path variant used by
 // callers that already know every ID belongs to a single dep table (e.g.
 // searchTableInTx). Skips the wisp-partition round-trip.
-func GetDependencyRecordsForIssuesFromTableInTx(ctx context.Context, tx *sql.Tx, depTable string, issueIDs []string) (map[string][]*types.Dependency, error) {
+func GetDependencyRecordsForIssuesFromTableInTx(ctx context.Context, tx DBTX, depTable string, issueIDs []string) (map[string][]*types.Dependency, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string][]*types.Dependency), nil
 	}
@@ -76,7 +95,7 @@ func GetDependencyRecordsForIssuesFromTableInTx(ctx context.Context, tx *sql.Tx,
 }
 
 //nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by callers).
-func getDependencyRecordsIntoFromTable(ctx context.Context, tx *sql.Tx, depTable string, ids []string, result map[string][]*types.Dependency) error {
+func getDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, ids []string, result map[string][]*types.Dependency) error {
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
 		if end > len(ids) {
@@ -90,9 +109,9 @@ func getDependencyRecordsIntoFromTable(ctx context.Context, tx *sql.Tx, depTable
 			args[i] = id
 		}
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-			`SELECT issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id
+			`SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
 			 FROM %s WHERE issue_id IN (%s) ORDER BY issue_id`,
-			depTable, strings.Join(placeholders, ",")), args...)
+			DepTargetExpr, depTable, strings.Join(placeholders, ",")), args...)
 		if err != nil {
 			return fmt.Errorf("get dependency records from %s: %w", depTable, err)
 		}
@@ -112,9 +131,7 @@ func getDependencyRecordsIntoFromTable(ctx context.Context, tx *sql.Tx, depTable
 	return nil
 }
 
-// GetDependencyCountsInTx returns dependency counts for multiple issues within a transaction.
-// Uses batched IN clauses (queryBatchSize) to avoid query-planner spikes.
-func GetDependencyCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string]*types.DependencyCounts, error) {
+func GetDependencyCountsInTx(ctx context.Context, tx DBTX, issueIDs []string) (map[string]*types.DependencyCounts, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string]*types.DependencyCounts), nil
 	}
@@ -122,6 +139,13 @@ func GetDependencyCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string)
 	result := make(map[string]*types.DependencyCounts)
 	for _, id := range issueIDs {
 		result[id] = &types.DependencyCounts{}
+	}
+
+	depTables := []string{"dependencies", "wisp_dependencies"}
+	if empty, probeErr := wispsTableEmptyOrMissingInTx(ctx, tx); probeErr != nil {
+		return nil, fmt.Errorf("get dependency counts: probe: %w", probeErr)
+	} else if empty {
+		depTables = []string{"dependencies"}
 	}
 
 	for start := 0; start < len(issueIDs); start += queryBatchSize {
@@ -139,58 +163,64 @@ func GetDependencyCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string)
 		}
 		inClause := strings.Join(placeholders, ",")
 
-		// Blockers: issues that block the given IDs
-		//nolint:gosec // G201: inClause contains only ? placeholders
-		depRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-			SELECT issue_id, COUNT(*) as cnt
-			FROM dependencies
-			WHERE issue_id IN (%s) AND type = 'blocks'
-			GROUP BY issue_id
-		`, inClause), args...)
-		if err != nil {
-			return nil, fmt.Errorf("get dependency counts (blockers): %w", err)
-		}
-		for depRows.Next() {
-			var id string
-			var cnt int
-			if err := depRows.Scan(&id, &cnt); err != nil {
-				_ = depRows.Close()
-				return nil, fmt.Errorf("get dependency counts: scan blocker: %w", err)
+		for _, depTable := range depTables {
+			//nolint:gosec // G201: depTable is hardcoded and inClause contains only ? placeholders.
+			depRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+				SELECT issue_id, COUNT(*) as cnt
+				FROM %s
+				WHERE issue_id IN (%s) AND type = 'blocks'
+				GROUP BY issue_id
+			`, depTable, inClause), args...)
+			if err != nil {
+				if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+					continue
+				}
+				return nil, fmt.Errorf("get dependency counts (blockers from %s): %w", depTable, err)
 			}
-			if c, ok := result[id]; ok {
-				c.DependencyCount = cnt
+			for depRows.Next() {
+				var id string
+				var cnt int
+				if err := depRows.Scan(&id, &cnt); err != nil {
+					_ = depRows.Close()
+					return nil, fmt.Errorf("get dependency counts: scan blocker: %w", err)
+				}
+				if c, ok := result[id]; ok {
+					c.DependencyCount += cnt
+				}
 			}
-		}
-		_ = depRows.Close()
-		if err := depRows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependency counts: blocker rows: %w", err)
-		}
+			_ = depRows.Close()
+			if err := depRows.Err(); err != nil {
+				return nil, fmt.Errorf("get dependency counts: blocker rows: %w", err)
+			}
 
-		// Dependents: issues blocked by the given IDs
-		//nolint:gosec // G201: inClause contains only ? placeholders
-		blockingRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-			SELECT depends_on_id, COUNT(*) as cnt
-			FROM dependencies
-			WHERE depends_on_id IN (%s) AND type = 'blocks'
-			GROUP BY depends_on_id
-		`, inClause), args...)
-		if err != nil {
-			return nil, fmt.Errorf("get dependency counts (dependents): %w", err)
-		}
-		for blockingRows.Next() {
-			var id string
-			var cnt int
-			if err := blockingRows.Scan(&id, &cnt); err != nil {
-				_ = blockingRows.Close()
-				return nil, fmt.Errorf("get dependency counts: scan dependent: %w", err)
+			//nolint:gosec // G201: depTable is hardcoded and inClause contains only ? placeholders.
+			blockingRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+				SELECT %s AS depends_on_id, COUNT(*) as cnt
+				FROM %s
+				WHERE %s AND type = 'blocks'
+				GROUP BY %s
+			`, DepTargetExpr, depTable, depTargetIn("", inClause), DepTargetExpr), args...)
+			if err != nil {
+				if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+					continue
+				}
+				return nil, fmt.Errorf("get dependency counts (dependents from %s): %w", depTable, err)
 			}
-			if c, ok := result[id]; ok {
-				c.DependentCount = cnt
+			for blockingRows.Next() {
+				var id string
+				var cnt int
+				if err := blockingRows.Scan(&id, &cnt); err != nil {
+					_ = blockingRows.Close()
+					return nil, fmt.Errorf("get dependency counts: scan dependent: %w", err)
+				}
+				if c, ok := result[id]; ok {
+					c.DependentCount += cnt
+				}
 			}
-		}
-		_ = blockingRows.Close()
-		if err := blockingRows.Err(); err != nil {
-			return nil, fmt.Errorf("get dependency counts: dependent rows: %w", err)
+			_ = blockingRows.Close()
+			if err := blockingRows.Err(); err != nil {
+				return nil, fmt.Errorf("get dependency counts: dependent rows: %w", err)
+			}
 		}
 	}
 
@@ -202,7 +232,7 @@ func GetDependencyCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string)
 //   - blockedByMap: issueID -> list of IDs blocking it
 //   - blocksMap: issueID -> list of IDs it blocks
 //   - parentMap: childID -> parentID (parent-child deps)
-func GetBlockingInfoForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (
+func GetBlockingInfoForIssuesInTx(ctx context.Context, tx DBTX, issueIDs []string) (
 	blockedByMap map[string][]string,
 	blocksMap map[string][]string,
 	parentMap map[string]string,
@@ -226,29 +256,40 @@ func GetBlockingInfoForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []st
 
 	// Process wisp IDs against wisp_dependencies.
 	if len(wispIDs) > 0 {
-		if err := queryBlockingInfo(ctx, tx, wispIDs, "wisp_dependencies", "wisps", blockedByMap, blocksMap, parentMap); err != nil {
+		if err := queryBlockedByInfo(ctx, tx, wispIDs, "wisp_dependencies", blockedByMap, parentMap); err != nil {
 			return nil, nil, nil, err
 		}
 	}
 
 	// Process perm IDs against dependencies.
 	if len(permIDs) > 0 {
-		if err := queryBlockingInfo(ctx, tx, permIDs, "dependencies", "issues", blockedByMap, blocksMap, parentMap); err != nil {
+		if err := queryBlockedByInfo(ctx, tx, permIDs, "dependencies", blockedByMap, parentMap); err != nil {
 			return nil, nil, nil, err
 		}
+	}
+
+	// "Blocks" is target-oriented, so scan both dependency tables regardless of
+	// the target issue's storage class.
+	if err := queryBlocksInfo(ctx, tx, issueIDs, []string{"dependencies", "wisp_dependencies"}, blocksMap); err != nil {
+		return nil, nil, nil, err
 	}
 
 	return blockedByMap, blocksMap, parentMap, nil
 }
 
-// queryBlockingInfo queries blocking info from a specific dep table + issue table pair.
+type blockingInfoRow struct {
+	issueID, blockerID, depType string
+}
+
+// queryBlockedByInfo queries outbound blocking info from a specific dependency
+// table. Blocker status is resolved against both issue storage classes so
+// cross-class closed blockers do not appear active.
 // Uses batched IN clauses (queryBatchSize) to avoid query-planner spikes.
-func queryBlockingInfo(
-	ctx context.Context, tx *sql.Tx,
+func queryBlockedByInfo(
+	ctx context.Context, tx DBTX,
 	issueIDs []string,
-	depTable, issueTable string,
+	depTable string,
 	blockedByMap map[string][]string,
-	blocksMap map[string][]string,
 	parentMap map[string]string,
 ) error {
 	for start := 0; start < len(issueIDs); start += queryBatchSize {
@@ -266,92 +307,187 @@ func queryBlockingInfo(
 		}
 		inClause := strings.Join(placeholders, ",")
 
-		// Query 1: "blocked by" — deps where issue_id is in our set
-		//nolint:gosec // G201: depTable and issueTable are caller-controlled constants
+		// Query: "blocked by" — deps where issue_id is in our set.
+		//nolint:gosec // G201: depTable is a caller-controlled constant.
 		blockedByQuery := fmt.Sprintf(`
-			SELECT d.issue_id, d.depends_on_id, d.type, COALESCE(i.status, '') AS blocker_status
+			SELECT d.issue_id, %s AS depends_on_id, d.type
 			FROM %s d
-			LEFT JOIN %s i ON i.id = d.depends_on_id
 			WHERE d.issue_id IN (%s) AND d.type IN ('blocks', 'parent-child')
-		`, depTable, issueTable, inClause)
+		`, depTargetExpr("d"), depTable, inClause)
 
 		rows, err := tx.QueryContext(ctx, blockedByQuery, args...)
 		if err != nil {
+			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+				continue
+			}
 			return fmt.Errorf("get blocked-by info from %s: %w", depTable, err)
 		}
+		var depRows []blockingInfoRow
+		var blockerIDs []string
 		for rows.Next() {
-			var issueID, blockerID, depType, blockerStatus string
-			if scanErr := rows.Scan(&issueID, &blockerID, &depType, &blockerStatus); scanErr != nil {
+			var row blockingInfoRow
+			if scanErr := rows.Scan(&row.issueID, &row.blockerID, &row.depType); scanErr != nil {
 				_ = rows.Close()
 				return fmt.Errorf("get blocking info: scan blocked-by: %w", scanErr)
 			}
-			if types.Status(blockerStatus) == types.StatusClosed {
-				continue
-			}
-			if depType == "parent-child" {
-				parentMap[issueID] = blockerID
-			} else {
-				blockedByMap[issueID] = append(blockedByMap[issueID], blockerID)
-			}
+			depRows = append(depRows, row)
+			blockerIDs = append(blockerIDs, row.blockerID)
 		}
 		_ = rows.Close()
 		if err := rows.Err(); err != nil {
 			return fmt.Errorf("get blocking info: blocked-by rows: %w", err)
 		}
 
-		// Query 2: "blocks" — deps where depends_on_id is in our set
-		//nolint:gosec // G201: depTable and issueTable are caller-controlled constants
-		blocksQuery := fmt.Sprintf(`
-			SELECT d.depends_on_id, d.issue_id, d.type, COALESCE(i.status, '') AS blocker_status
-			FROM %s d
-			LEFT JOIN %s i ON i.id = d.depends_on_id
-			WHERE d.depends_on_id IN (%s) AND d.type IN ('blocks', 'parent-child')
-		`, depTable, issueTable, inClause)
-
-		rows2, err := tx.QueryContext(ctx, blocksQuery, args...)
+		statusByID, err := loadStatusByIDInTx(ctx, tx, blockerIDs)
 		if err != nil {
-			return fmt.Errorf("get blocks info from %s: %w", depTable, err)
+			return fmt.Errorf("get blocking info: blocker status: %w", err)
 		}
-		for rows2.Next() {
-			var blockerID, blockedID, depType, blockerStatus string
-			if scanErr := rows2.Scan(&blockerID, &blockedID, &depType, &blockerStatus); scanErr != nil {
-				_ = rows2.Close()
-				return fmt.Errorf("get blocking info: scan blocks: %w", scanErr)
-			}
-			if types.Status(blockerStatus) == types.StatusClosed {
+		for _, row := range depRows {
+			if statusByID[row.blockerID] == types.StatusClosed {
 				continue
 			}
-			if depType == "parent-child" {
-				continue
+			if row.depType == "parent-child" {
+				parentMap[row.issueID] = row.blockerID
+			} else {
+				blockedByMap[row.issueID] = append(blockedByMap[row.issueID], row.blockerID)
 			}
-			blocksMap[blockerID] = append(blocksMap[blockerID], blockedID)
-		}
-		_ = rows2.Close()
-		if err := rows2.Err(); err != nil {
-			return fmt.Errorf("get blocking info: blocks rows: %w", err)
 		}
 	}
 
 	return nil
 }
 
+// queryBlocksInfo queries inbound blocking info across dependency tables.
+func queryBlocksInfo(
+	ctx context.Context, tx DBTX,
+	issueIDs []string,
+	depTables []string,
+	blocksMap map[string][]string,
+) error {
+	for start := 0; start < len(issueIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(issueIDs) {
+			end = len(issueIDs)
+		}
+		batch := issueIDs[start:end]
+
+		placeholders := make([]string, len(batch))
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			placeholders[i] = "?"
+			args[i] = id
+		}
+		inClause := strings.Join(placeholders, ",")
+		statusByID, err := loadStatusByIDInTx(ctx, tx, batch)
+		if err != nil {
+			return fmt.Errorf("get blocking info: blocker status: %w", err)
+		}
+
+		for _, depTable := range depTables {
+			// Query: "blocks" — deps where depends_on_id is in our set.
+			//nolint:gosec // G201: depTable is a caller-controlled constant.
+			blocksQuery := fmt.Sprintf(`
+				SELECT %s AS depends_on_id, d.issue_id, d.type
+				FROM %s d
+				WHERE %s AND d.type IN ('blocks', 'parent-child')
+			`, depTargetExpr("d"), depTable, depTargetIn("d", inClause))
+
+			rows, err := tx.QueryContext(ctx, blocksQuery, args...)
+			if err != nil {
+				if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+					continue
+				}
+				return fmt.Errorf("get blocks info from %s: %w", depTable, err)
+			}
+			for rows.Next() {
+				var blockerID, blockedID, depType string
+				if scanErr := rows.Scan(&blockerID, &blockedID, &depType); scanErr != nil {
+					_ = rows.Close()
+					return fmt.Errorf("get blocking info: scan blocks: %w", scanErr)
+				}
+				if statusByID[blockerID] == types.StatusClosed {
+					continue
+				}
+				if depType == "parent-child" {
+					continue
+				}
+				blocksMap[blockerID] = append(blocksMap[blockerID], blockedID)
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return fmt.Errorf("get blocking info: blocks rows: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func loadStatusByIDInTx(ctx context.Context, tx DBTX, ids []string) (map[string]types.Status, error) {
+	statusByID := make(map[string]types.Status)
+	if len(ids) == 0 {
+		return statusByID, nil
+	}
+
+	sourceByID := make(map[string]string)
+	for _, issueTable := range []string{"issues", "wisps"} {
+		for start := 0; start < len(ids); start += queryBatchSize {
+			end := start + queryBatchSize
+			if end > len(ids) {
+				end = len(ids)
+			}
+			placeholders, args := buildSQLInClause(ids[start:end])
+			rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+				SELECT id, status FROM %s WHERE id IN (%s)
+			`, issueTable, placeholders), args...)
+			if err != nil {
+				if optionalBlockedTable(issueTable) && isTableNotExistError(err) {
+					break
+				}
+				return nil, fmt.Errorf("status from %s: %w", issueTable, err)
+			}
+			for rows.Next() {
+				var id string
+				var status types.Status
+				if err := rows.Scan(&id, &status); err != nil {
+					_ = rows.Close()
+					return nil, fmt.Errorf("scan status: %w", err)
+				}
+				if _, exists := sourceByID[id]; exists {
+					// Prefer wisps-table status on cross-table dup (be-iabdi).
+					// Tables iterate issues→wisps so the second encounter is always wisps.
+					sourceByID[id] = issueTable
+					statusByID[id] = status
+					continue
+				}
+				sourceByID[id] = issueTable
+				statusByID[id] = status
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("status rows from %s: %w", issueTable, err)
+			}
+		}
+	}
+	return statusByID, nil
+}
+
 // GetNewlyUnblockedByCloseInTx finds issues that become unblocked when the
 // given issue is closed. Works within an existing transaction.
 // Returns full issue objects for the newly-unblocked issues.
-// Uses separate single-table queries (no JOINs) to avoid Dolt's mergeJoinKvIter
-// panic when joining across tables with different tuple formats.
 //
 //nolint:gosec // G201: table names come from hardcoded constants
-func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID string) ([]*types.Issue, error) {
-	// Step 1: Find issue IDs that depend on the closed issue via "blocks" deps.
-	// Query both dep tables to cover cross-table dependencies.
+func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx DBTX, closedIssueID string) ([]*types.Issue, error) {
 	candidateSet := make(map[string]bool)
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT issue_id FROM %s
-			WHERE depends_on_id = ? AND type = 'blocks'
-		`, depTable), closedIssueID)
+			WHERE %s AND type = 'blocks'
+		`, depTable, depTargetEquals("")), closedIssueID)
 		if err != nil {
+			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+				continue
+			}
 			return nil, fmt.Errorf("find blocked candidates from %s: %w", depTable, err)
 		}
 		for rows.Next() {
@@ -367,75 +503,91 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID
 			return nil, fmt.Errorf("candidate rows from %s: %w", depTable, err)
 		}
 	}
-
 	if len(candidateSet) == 0 {
 		return nil, nil
 	}
 
-	// Filter to only open/active candidates (check both tables, no JOINs).
-	var candidateIDs []string
+	candidateIDs := make([]string, 0, len(candidateSet))
 	for id := range candidateSet {
-		var status string
-		found := false
-		for _, table := range []string{"issues", "wisps"} {
-			err := tx.QueryRowContext(ctx, fmt.Sprintf(
-				`SELECT status FROM %s WHERE id = ?`, table), id).Scan(&status)
-			if err == nil {
-				found = true
-				break
-			}
-		}
-		if !found || status == "closed" || status == "pinned" {
-			continue
-		}
 		candidateIDs = append(candidateIDs, id)
 	}
+	sort.Strings(candidateIDs)
 
+	candidateStatusByID, err := loadStatusByIDInTx(ctx, tx, candidateIDs)
+	if err != nil {
+		return nil, fmt.Errorf("check candidate status: %w", err)
+	}
+	activeCandidateIDs := candidateIDs[:0]
+	for _, id := range candidateIDs {
+		status, ok := candidateStatusByID[id]
+		if !ok || status == types.StatusClosed || status == types.StatusPinned {
+			continue
+		}
+		activeCandidateIDs = append(activeCandidateIDs, id)
+	}
+	candidateIDs = activeCandidateIDs
 	if len(candidateIDs) == 0 {
 		return nil, nil
 	}
 
-	// Step 2: Filter out candidates that still have other open blockers.
-	// For each candidate, get all its blocking deps (excluding the closed issue),
-	// then check if any of those blockers are still active.
 	stillBlocked := make(map[string]bool)
-	for _, candidateID := range candidateIDs {
-		// Determine which dep table this candidate uses.
-		isWisp := IsActiveWispInTx(ctx, tx, candidateID)
-		_, _, _, depTable := WispTableRouting(isWisp)
-
-		//nolint:gosec // G201: depTable from WispTableRouting (hardcoded)
-		depRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-			SELECT depends_on_id FROM %s
-			WHERE issue_id = ? AND type = 'blocks' AND depends_on_id != ?
-		`, depTable), candidateID, closedIssueID)
-		if err != nil {
-			return nil, fmt.Errorf("check remaining blockers for %s: %w", candidateID, err)
+	for start := 0; start < len(candidateIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(candidateIDs) {
+			end = len(candidateIDs)
 		}
-		for depRows.Next() {
-			var blockerID string
-			if err := depRows.Scan(&blockerID); err != nil {
-				_ = depRows.Close()
-				return nil, fmt.Errorf("scan remaining blocker: %w", err)
+		batch := candidateIDs[start:end]
+		placeholders, batchArgs := buildSQLInClause(batch)
+
+		remainingByCandidate := make(map[string][]string, len(batch))
+		remainingBlockerSet := make(map[string]struct{})
+		for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+			//nolint:gosec // G201: depTable is hardcoded.
+			depRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+				SELECT issue_id, %s AS depends_on_id FROM %s
+				WHERE issue_id IN (%s) AND type = 'blocks' AND %s != ?
+			`, DepTargetExpr, depTable, placeholders, DepTargetExpr), append(batchArgs, closedIssueID)...)
+			if err != nil {
+				if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+					continue
+				}
+				return nil, fmt.Errorf("check remaining blockers from %s: %w", depTable, err)
 			}
-			// Check if this blocker is still active (in either table).
-			var blockerStatus string
-			for _, table := range []string{"issues", "wisps"} {
-				err := tx.QueryRowContext(ctx, fmt.Sprintf(
-					`SELECT status FROM %s WHERE id = ?`, table), blockerID).Scan(&blockerStatus)
-				if err == nil {
+			for depRows.Next() {
+				var candidateID, blockerID string
+				if err := depRows.Scan(&candidateID, &blockerID); err != nil {
+					_ = depRows.Close()
+					return nil, fmt.Errorf("scan remaining blocker: %w", err)
+				}
+				remainingByCandidate[candidateID] = append(remainingByCandidate[candidateID], blockerID)
+				remainingBlockerSet[blockerID] = struct{}{}
+			}
+			_ = depRows.Close()
+			if err := depRows.Err(); err != nil {
+				return nil, fmt.Errorf("remaining blocker rows from %s: %w", depTable, err)
+			}
+		}
+
+		remainingBlockerIDs := make([]string, 0, len(remainingBlockerSet))
+		for blockerID := range remainingBlockerSet {
+			remainingBlockerIDs = append(remainingBlockerIDs, blockerID)
+		}
+		sort.Strings(remainingBlockerIDs)
+		statusByID, err := loadStatusByIDInTx(ctx, tx, remainingBlockerIDs)
+		if err != nil {
+			return nil, fmt.Errorf("check remaining blocker status: %w", err)
+		}
+		for candidateID, blockerIDs := range remainingByCandidate {
+			for _, blockerID := range blockerIDs {
+				status, ok := statusByID[blockerID]
+				if ok && status != types.StatusClosed && status != types.StatusPinned {
+					stillBlocked[candidateID] = true
 					break
 				}
 			}
-			if blockerStatus != "" && blockerStatus != "closed" && blockerStatus != "pinned" {
-				stillBlocked[candidateID] = true
-				break
-			}
 		}
-		_ = depRows.Close()
 	}
 
-	// Step 3: Collect unblocked issues.
 	var unblocked []*types.Issue
 	for _, id := range candidateIDs {
 		if stillBlocked[id] {
@@ -447,69 +599,86 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID
 		}
 		unblocked = append(unblocked, issue)
 	}
-
 	return unblocked, nil
 }
 
 // IsBlockedInTx checks if an issue is blocked by active dependencies within
 // an existing transaction. Returns whether the issue is blocked and, if so,
 // a list of blocker descriptions for display.
-// Uses separate single-table queries (no JOINs) to avoid Dolt's mergeJoinKvIter
-// panic when joining across tables with different tuple formats.
 //
-//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func IsBlockedInTx(ctx context.Context, tx *sql.Tx, issueID string) (bool, []string, error) {
-	isWisp := IsActiveWispInTx(ctx, tx, issueID)
-	_, _, _, depTable := WispTableRouting(isWisp)
-
-	// Step 1: Get all blocking dependency targets from the dep table.
-	type depEdge struct {
-		dependsOnID, depType string
-	}
-	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-		SELECT depends_on_id, type FROM %s
-		WHERE issue_id = ? AND type IN ('blocks', 'waits-for', 'conditional-blocks')
-	`, depTable), issueID)
-	if err != nil {
-		return false, nil, fmt.Errorf("check blockers: %w", err)
-	}
-	var edges []depEdge
-	for rows.Next() {
-		var e depEdge
-		if err := rows.Scan(&e.dependsOnID, &e.depType); err != nil {
-			_ = rows.Close()
-			return false, nil, fmt.Errorf("scan blocker edge: %w", err)
+//nolint:gosec // G201: table names are hardcoded constants.
+func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string, error) {
+	var blocked bool
+	found := false
+	for _, table := range []string{"issues", "wisps"} {
+		var b int
+		//nolint:gosec // G201: table is a hardcoded "issues" or "wisps".
+		err := tx.QueryRowContext(ctx, "SELECT is_blocked FROM "+table+" WHERE id = ?", issueID).Scan(&b)
+		if err == nil {
+			blocked = b != 0
+			found = true
+			break
 		}
-		edges = append(edges, e)
+		if !errors.Is(err, sql.ErrNoRows) {
+			if optionalBlockedTable(table) && isTableNotExistError(err) {
+				continue
+			}
+			return false, nil, fmt.Errorf("read is_blocked from %s: %w", table, err)
+		}
 	}
-	_ = rows.Close()
-	if err := rows.Err(); err != nil {
-		return false, nil, fmt.Errorf("blocker edge rows: %w", err)
-	}
-
-	if len(edges) == 0 {
+	if !found || !blocked {
 		return false, nil, nil
 	}
 
-	// Step 2: Check each blocker's status in both issues and wisps tables.
-	// Uses single-row queries to avoid cross-table JOINs.
+	type depEdge struct {
+		dependsOnID, depType string
+	}
+	var edges []depEdge
+	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+			SELECT %s AS depends_on_id, type FROM %s
+			WHERE issue_id = ? AND type IN ('blocks', 'waits-for', 'conditional-blocks')
+		`, DepTargetExpr, depTable), issueID)
+		if err != nil {
+			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
+				continue
+			}
+			return false, nil, fmt.Errorf("check blockers from %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			var e depEdge
+			if err := rows.Scan(&e.dependsOnID, &e.depType); err != nil {
+				_ = rows.Close()
+				return false, nil, fmt.Errorf("scan blocker edge: %w", err)
+			}
+			edges = append(edges, e)
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return false, nil, fmt.Errorf("blocker edge rows from %s: %w", depTable, err)
+		}
+	}
+
+	if len(edges) == 0 {
+		return true, nil, nil
+	}
+
+	blockerIDs := make([]string, 0, len(edges))
+	for _, e := range edges {
+		blockerIDs = append(blockerIDs, e.dependsOnID)
+	}
+	statusByID, err := loadStatusByIDInTx(ctx, tx, blockerIDs)
+	if err != nil {
+		return false, nil, fmt.Errorf("check blocker status: %w", err)
+	}
 	var blockers []string
 	for _, e := range edges {
-		var status string
-		found := false
-		for _, table := range []string{"issues", "wisps"} {
-			err := tx.QueryRowContext(ctx, fmt.Sprintf(
-				`SELECT status FROM %s WHERE id = ?`, table), e.dependsOnID).Scan(&status)
-			if err == nil {
-				found = true
-				break
-			}
+		status, ok := statusByID[e.dependsOnID]
+		if !ok {
+			continue
 		}
-		if !found {
-			continue // Blocker not found in either table
-		}
-		if status == "closed" || status == "pinned" {
-			continue // Not an active blocker
+		if status == types.StatusClosed || status == types.StatusPinned {
+			continue
 		}
 		if e.depType != "blocks" {
 			blockers = append(blockers, e.dependsOnID+" ("+e.depType+")")
@@ -518,7 +687,7 @@ func IsBlockedInTx(ctx context.Context, tx *sql.Tx, issueID string) (bool, []str
 		}
 	}
 
-	return len(blockers) > 0, blockers, nil
+	return true, blockers, nil
 }
 
 // scanDependencyRow scans a single dependency row from a *sql.Rows.

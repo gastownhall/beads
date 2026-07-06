@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 // bdFederation runs "bd federation" with extra args. Returns combined output.
@@ -19,11 +21,11 @@ func bdFederation(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd federation %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd federation %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdFederationFail runs "bd federation" expecting failure.
@@ -38,6 +40,25 @@ func bdFederationFail(t *testing.T, bd, dir string, args ...string) string {
 		t.Fatalf("bd federation %s should have failed, got: %s", strings.Join(args, " "), out)
 	}
 	return string(out)
+}
+
+func TestFormatFederationPeerListJSONPreservesLegacyKeys(t *testing.T) {
+	formatted := formatFederationPeerListJSON([]storage.RemoteInfo{{
+		Name: "town-beta",
+		URL:  "file:///tmp/town-beta",
+	}})
+
+	raw, err := json.Marshal(formatted)
+	if err != nil {
+		t.Fatalf("marshal federation peer JSON: %v", err)
+	}
+	body := string(raw)
+	if !strings.Contains(body, `"Name":"town-beta"`) || !strings.Contains(body, `"URL":"file:///tmp/town-beta"`) {
+		t.Fatalf("formatted JSON should preserve legacy Name/URL keys, got %s", body)
+	}
+	if strings.Contains(body, `"name"`) || strings.Contains(body, `"url"`) {
+		t.Fatalf("formatted JSON should not expose lowercase RemoteInfo storage tags, got %s", body)
+	}
 }
 
 func TestEmbeddedFederation(t *testing.T) {

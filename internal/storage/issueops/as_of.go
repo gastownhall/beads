@@ -33,7 +33,7 @@ func ValidateRef(ref string) error {
 // Uses Dolt's AS OF syntax which works in both server and embedded modes.
 //
 // nolint:gosec // G201: ref is validated by ValidateRef() above - AS OF requires literal
-func AsOfInTx(ctx context.Context, tx *sql.Tx, issueID string, ref string) (*types.Issue, error) {
+func AsOfInTx(ctx context.Context, tx DBTX, issueID string, ref string) (*types.Issue, error) {
 	if err := ValidateRef(ref); err != nil {
 		return nil, fmt.Errorf("invalid ref: %w", err)
 	}

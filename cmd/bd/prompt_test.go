@@ -89,3 +89,85 @@ func TestReadLineWithContextCanceled(t *testing.T) {
 		t.Fatal("timeout waiting for readLineWithContext")
 	}
 }
+
+func TestPromptAutoExportDefaultsOff(t *testing.T) {
+	got, output, err := runPromptAutoExport(t, "\n")
+	if err != nil {
+		t.Fatalf("promptAutoExport returned error: %v", err)
+	}
+	if got {
+		t.Fatal("empty response should leave auto-export disabled")
+	}
+	if !strings.Contains(output, "Enable auto-export? [y/N]:") {
+		t.Fatalf("prompt did not show opt-in default:\n%s", output)
+	}
+	if !strings.Contains(output, "optional JSONL export") {
+		t.Fatalf("prompt should describe JSONL as optional export:\n%s", output)
+	}
+	if !strings.Contains(output, "Dolt remotes/backups handle cross-machine sync and backup") {
+		t.Fatalf("prompt should direct sync to Dolt remotes:\n%s", output)
+	}
+}
+
+func TestPromptAutoExportAcceptsYes(t *testing.T) {
+	got, _, err := runPromptAutoExport(t, "yes\n")
+	if err != nil {
+		t.Fatalf("promptAutoExport returned error: %v", err)
+	}
+	if !got {
+		t.Fatal("yes response should enable auto-export")
+	}
+}
+
+func runPromptAutoExport(t *testing.T, input string) (bool, string, error) {
+	t.Helper()
+
+	stdinFile, err := os.CreateTemp(t.TempDir(), "stdin-*")
+	if err != nil {
+		t.Fatalf("create temp stdin: %v", err)
+	}
+	if _, err := stdinFile.WriteString(input); err != nil {
+		t.Fatalf("write temp stdin: %v", err)
+	}
+	if _, err := stdinFile.Seek(0, 0); err != nil {
+		t.Fatalf("rewind temp stdin: %v", err)
+	}
+
+	oldStdin := os.Stdin
+	oldStdout := os.Stdout
+	oldRootCtx := rootCtx
+	oldRootCancel := rootCancel
+	var oldCmdRootCtx context.Context
+	var oldCmdRootCancel context.CancelFunc
+	if cmdCtx != nil {
+		oldCmdRootCtx = cmdCtx.RootCtx
+		oldCmdRootCancel = cmdCtx.RootCancel
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	setRootContext(ctx, cancel)
+	os.Stdin = stdinFile
+	os.Stdout = w
+
+	got, promptErr := promptAutoExport()
+
+	_ = w.Close()
+	var b strings.Builder
+	_, _ = io.Copy(&b, r)
+	_ = r.Close()
+	os.Stdin = oldStdin
+	os.Stdout = oldStdout
+	cancel()
+	rootCtx = oldRootCtx
+	rootCancel = oldRootCancel
+	if cmdCtx != nil {
+		cmdCtx.RootCtx = oldCmdRootCtx
+		cmdCtx.RootCancel = oldCmdRootCancel
+	}
+	_ = stdinFile.Close()
+
+	return got, b.String(), promptErr
+}

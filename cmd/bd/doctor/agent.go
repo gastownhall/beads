@@ -242,7 +242,7 @@ func enrichCLIVersion(dc DoctorCheck) agentEnrichment {
 func enrichGitHooks(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "degraded",
-		explanation: fmt.Sprintf("Git hooks issue: %s. Beads git hooks auto-sync the database on commit/merge/push. Without them, changes won't propagate to other clones.", dc.Message),
+		explanation: fmt.Sprintf("Git hooks issue: %s. Beads git hooks refresh JSONL exports and run legacy fallback checks, while cross-clone sync uses Dolt remotes via bd dolt push/pull.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "Git hooks installed and version matches CLI version",
 		commands:    []string{"bd hooks install"},
@@ -255,7 +255,7 @@ func enrichGitHooksDolt(dc DoctorCheck) agentEnrichment {
 		severity:    "blocking",
 		explanation: fmt.Sprintf("Git hooks are incompatible with Dolt backend: %s. Hooks that predate the Dolt migration may run SQLite operations on a Dolt database, causing errors on every git operation.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "Git hooks contain Dolt-compatible sync commands",
+		expected:    "Git hooks contain Dolt-compatible commands",
 		commands:    []string{"bd hooks install"},
 		sourceFiles: []string{"cmd/bd/doctor/git.go:CheckGitHooksDoltCompatibility"},
 	}
@@ -525,7 +525,7 @@ func enrichStaleMolecules(dc DoctorCheck) agentEnrichment {
 func enrichClaude(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "advisory",
-		explanation: fmt.Sprintf("Claude integration: %s. Beads integrates with Claude Code via hooks (SessionStart, PreCompact) defined in .claude/settings.json.", dc.Message),
+		explanation: fmt.Sprintf("Claude integration: %s. Beads integrates with Claude Code via SessionStart hooks defined in .claude/settings.json.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "Claude Code hooks configured for beads (bd prime on SessionStart)",
 		commands:    []string{"bd hooks install"},
@@ -547,9 +547,9 @@ func enrichClaudeSettings(dc DoctorCheck) agentEnrichment {
 func enrichClaudeHooks(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "advisory",
-		explanation: fmt.Sprintf("Claude hook completeness: %s. Beads needs both SessionStart and PreCompact hooks to function properly in Claude Code sessions.", dc.Message),
+		explanation: fmt.Sprintf("Claude hook completeness: %s. Beads needs a SessionStart hook to inject context in Claude Code sessions, including after compaction.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "Both SessionStart and PreCompact hooks configured for beads",
+		expected:    "SessionStart hook configured for beads",
 		commands:    []string{"bd hooks install"},
 		sourceFiles: []string{"cmd/bd/doctor/claude.go:CheckClaudeHookCompleteness"},
 	}

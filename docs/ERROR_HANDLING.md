@@ -1,5 +1,10 @@
 # Error Handling Guidelines
 
+Last reviewed: 2026-05-08
+
+Freshness source: `cmd/bd/*.go`, especially command error exits and JSON error
+helpers in `cmd/bd/errors.go`.
+
 This document describes the error handling patterns used throughout the beads codebase and provides guidelines for when each pattern should be applied.
 
 ## Overview

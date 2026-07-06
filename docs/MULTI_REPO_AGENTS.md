@@ -415,5 +415,5 @@ bd info --json
 
 - **[MULTI_REPO_MIGRATION.md](MULTI_REPO_MIGRATION.md)** - Complete guide for humans with interactive wizards
 - **[ROUTING.md](ROUTING.md)** - Technical details of routing implementation
-- **[MULTI_REPO_HYDRATION.md](MULTI_REPO_HYDRATION.md)** - Hydration layer internals
+- **[ROUTING.md#multi-repo-hydration](ROUTING.md#multi-repo-hydration)** - Hydration layer internals
 - **[AGENTS.md](../AGENTS.md)** - Main AI agent guide

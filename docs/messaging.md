@@ -111,6 +111,14 @@ Scripts in `.beads/hooks/` run after certain events:
 
 Hooks receive event data as JSON on stdin. This enables orchestrator integration (e.g., notifying services of new messages) without beads knowing about the orchestrator.
 
+Creates with initial labels preserve the legacy hook sequence: `on_create` receives the issue snapshot before labels, followed by one or more `on_update` events with cumulative label snapshots. The labels are already persisted before those hooks run, so hook scripts that need the create-time sequence should rely on the JSON payload instead of re-reading the issue from the store during the hook.
+
+Batch creates with initial dependencies emit `on_update` for each persisted
+dependency after the create-time hooks. Each payload carries a cumulative
+dependency snapshot in request order, matching the event shape produced by
+explicit post-create dependency additions; dependencies skipped because their
+target was not persisted do not produce hooks.
+
 ## See Also
 
 - [Graph Links](graph-links.md) - relates_to, duplicates, supersedes, replies_to

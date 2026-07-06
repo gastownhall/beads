@@ -1,4 +1,4 @@
-//go:build cgo
+//go:build cgo && integration
 
 package main
 
@@ -266,9 +266,6 @@ func adoTestStore(t *testing.T, prefix string) *dolt.DoltStore {
 // TestADORoundTripCoreFields tests push→pull fidelity for core fields:
 // title, description, priority, status, type, and external_ref.
 func TestADORoundTripCoreFields(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
 
 	ctx := context.Background()
 	project := "TestProject"
@@ -449,9 +446,6 @@ func TestADORoundTripCoreFields(t *testing.T) {
 // TestADORoundTripBlockedStatus tests that blocked status survives a round-trip
 // via the beads:blocked tag mechanism (ADO has no native blocked state).
 func TestADORoundTripBlockedStatus(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
 
 	ctx := context.Background()
 	project := "TestProject"
@@ -533,9 +527,6 @@ func TestADORoundTripBlockedStatus(t *testing.T) {
 //   - P3 survives round-trip (ADO 4 → beads 3)
 //   - P4 degrades to P3 (ADO 4 → beads 3) — this is a known lossy mapping
 func TestADORoundTripLossyPriority(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
 
 	ctx := context.Background()
 	project := "TestProject"
@@ -630,9 +621,6 @@ func TestADORoundTripLossyPriority(t *testing.T) {
 // TestADORoundTripLabels tests that user labels survive a round-trip and
 // internal beads:* tags are correctly filtered on pull.
 func TestADORoundTripLabels(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
 
 	ctx := context.Background()
 	project := "TestProject"

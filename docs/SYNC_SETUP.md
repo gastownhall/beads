@@ -9,13 +9,13 @@ You need two tools installed on every machine:
 | Tool | Minimum Version | Install |
 |------|-----------------|---------|
 | **bd** (beads CLI) | 0.59.0+ | See [INSTALLING.md](INSTALLING.md) |
-| **Dolt** | 1.81.8+ | `brew install dolt` or [dolt install script](https://github.com/dolthub/dolt/releases/latest/download/install.sh) |
+| **Dolt** | 2.1.0+ | `brew install dolt` or [dolt install script](https://github.com/dolthub/dolt/releases/latest/download/install.sh) |
 
 Verify both are installed:
 
 ```bash
 bd version     # must be 0.59.0+
-dolt version   # must be 1.81.8+
+dolt version   # must be 2.1.0+
 ```
 
 ## Initial Setup (First Computer)
@@ -27,7 +27,10 @@ cd your-project
 bd init
 ```
 
-This creates the `.beads/` directory with a Dolt database and starts a background `dolt sql-server`.
+This creates the `.beads/` directory with a Dolt database. If the git repo has
+an `origin` remote, `bd init` also configures a Dolt remote named `origin`
+pointing at that same git URL. Dolt stores issue data under `refs/dolt/data`,
+separate from normal source branches.
 
 ### 2. Create some issues
 
@@ -37,19 +40,27 @@ bd create "Add authentication" -p 2 -t feature
 bd list
 ```
 
-### 3. Add a Dolt remote
+### 3. Verify or add a Dolt remote
 
-Point beads at your Git remote for sync. Dolt stores data under `refs/dolt/data`, separate from your normal Git refs — so you can use the same remote as your source code.
+In a normal git repo with `origin`, this should already be configured:
+
+```bash
+bd dolt remote list
+# Expected: origin  <your git origin URL>
+```
+
+If the repo had no `origin` during init, point beads at your Git remote for
+sync:
 
 ```bash
 # GitHub (SSH — recommended)
 bd dolt remote add origin git+ssh://git@github.com/org/repo.git
 
 # GitHub (HTTPS)
-bd dolt remote add origin https://github.com/org/repo.git
+bd dolt remote add origin git+https://github.com/org/repo.git
 
 # Other options: DoltHub, S3, GCS, local path
-# See DOLT-BACKEND.md for all remote types
+# See DOLT.md for all remote types
 ```
 
 ### 4. Push your issues
@@ -64,6 +75,24 @@ Verify the push worked:
 git ls-remote origin | grep dolt
 # Expected: <hash>  refs/dolt/data
 ```
+
+## Existing Projects Without a Dolt Remote
+
+Projects initialized by older versions of `bd init` may have a local embedded
+Dolt database and a committed `.beads/issues.jsonl`, but no Dolt remote. Fix
+that from the machine whose local database is authoritative:
+
+```bash
+bd dolt remote list
+bd export -o .beads/issues.pre-remote.jsonl   # optional issue audit export
+bd dolt remote add origin git+ssh://git@github.com/org/repo.git
+bd dolt push
+```
+
+`bd dolt remote add origin ...` writes `sync.remote` to `.beads/config.yaml`.
+Commit and push that config file with your normal git workflow. Other clones can
+then run `bd bootstrap` if their database is missing/stale, or `bd dolt pull`
+when they already have the right database.
 
 ## Cloning to a New Computer
 
@@ -191,6 +220,7 @@ bd list                            # sees the closed task
 - **Always use `bd dolt ...` commands** — never run raw `dolt` CLI commands while the Dolt server is running. It causes journal corruption.
 - **Commit before pulling** — if you have uncommitted working set changes, `bd dolt pull` will fail with "cannot merge with uncommitted changes". Run `bd dolt commit` first.
 - **Push before switching machines** — unpushed changes only exist locally.
+- **Do not use JSONL as sync** — `.beads/issues.jsonl` is an export for viewers and interchange. It is not the source of truth, not a full database backup, and cannot safely reconcile deletes or pruning.
 
 ## Troubleshooting
 
@@ -246,9 +276,9 @@ bd dolt start
 
 ## See Also
 
+- [SYNC_CONCEPTS.md](SYNC_CONCEPTS.md) — The conceptual model behind this setup (why Dolt is the source of truth, what JSONL is for)
 - [QUICKSTART.md](QUICKSTART.md) — Getting started with beads
-- [DOLT.md](DOLT.md) — Dolt backend details, server modes, federation
-- [DOLT-BACKEND.md](DOLT-BACKEND.md) — Remote types, sync modes, advanced usage
+- [DOLT.md](DOLT.md) — Dolt backend details, server modes, federation, remote types, and sync modes
 - [INSTALLING.md](INSTALLING.md) — Installation for all platforms
 
 ## Attribution

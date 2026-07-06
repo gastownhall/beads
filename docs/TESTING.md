@@ -2,14 +2,17 @@
 
 ## Overview
 
-The beads project has a comprehensive test suite with **~41,000 lines of code** across **205 files** in `cmd/bd` alone.
+The beads project uses Go tests plus repository wrapper scripts. Prefer the
+wrapper scripts for local validation because they apply the repository's normal
+local build flags, skip policy, and timeout policy. The current GitHub Actions
+PR contract still runs direct `go test` commands; the CI cleanup plan will move
+that contract behind dedicated `scripts/ci/*` wrappers.
 
 ## Test Performance
 
-- **Total test time:** ~3 minutes (excluding broken tests)
-- **Package count:** 20+ packages with tests
-- **Compilation overhead:** ~180 seconds (most of the total time)
-- **Individual test time:** Only ~3.8 seconds combined for all 313 tests in cmd/bd
+- Go compilation dominates full-suite runtime.
+- Target package/test runs are usually the fastest way to validate focused changes.
+- Docker-backed Dolt integration tests auto-detect prerequisites and skip when unavailable.
 
 ## Running Tests
 
@@ -80,11 +83,29 @@ BEADS_TEST_SKIP=dolt ./scripts/test.sh
 BEADS_TEST_SKIP=dolt,slow ./scripts/test.sh
 ```
 
+### Short Mode and Test Boundaries
+
+`testing.Short()` is reserved for true runtime, stress, and large-fixture skips.
+It must not be used as an implicit integration, e2e, API, Docker, or external
+dependency boundary.
+
+Use these mechanisms instead:
+
+- `//go:build integration` or `//go:build e2e` for named suites.
+- Environment readiness checks such as `BEADS_TEST_SKIP=dolt`,
+  `BEADS_TEST_EMBEDDED_DOLT=1`, or required API-key checks.
+- Named wrappers such as `make ci-pr-core`, the main integration shards, and the
+  package gate wrappers.
+
+Run `make check-testing-short` to verify that new `testing.Short()` usage stays
+within the approved runtime/stress/large-fixture allowlist. The PR policy wrapper
+runs the same check.
+
 #### Enabling Dolt tests
 
 ```bash
 # Pull the exact Dolt image to enable integration tests
-docker pull dolthub/dolt-sql-server:1.43.0
+docker pull dolthub/dolt-sql-server:2.1.0
 
 # Point tests at an existing Dolt server (skips container startup)
 BEADS_DOLT_PORT=3308 ./scripts/test.sh
@@ -108,12 +129,12 @@ starting a container. Port 3307 is hardcoded as production and always rejected.
 
 ## Known Broken Tests
 
-Tests in `.test-skip` are automatically skipped. Current broken tests:
+Tests in `.test-skip` are automatically skipped by `scripts/test.sh`.
 
-1. **TestFallbackToDirectModeEnablesFlush** (GH #355)
-   - Location: `cmd/bd/direct_mode_test.go:14`
-   - Issue: Database deadlock, hangs for 5 minutes
-   - Impact: Makes test suite extremely slow
+At the time of this review, `.test-skip` contains only comments and no active
+test-name patterns. Treat any new skip as a temporary exception: file the
+upstream issue first, record it in `.test-skip`, and remove the skip when the
+test is fixed.
 
 ## For Claude Code / AI Agents
 
@@ -124,7 +145,8 @@ When running tests during development:
 1. **Use the test script:** Always use `./scripts/test.sh` instead of `go test` directly
    - Automatically skips known broken tests
    - Uses appropriate timeouts
-   - Consistent with CI/CD
+   - Matches local default validation; use future `scripts/ci/*` wrappers when
+     reproducing exact CI jobs
    - Only if intentionally exercising the ICU regex path, use `./scripts/test-icu-path.sh` (or deprecated `make test-full-cgo`)
 
 2. **Target specific tests when possible:**
@@ -183,13 +205,48 @@ internal/*/       - Various internal package tests
 
 ## Continuous Integration
 
-The test script is designed to work seamlessly with CI/CD:
+The current CI workflow does not yet call the `scripts/ci/*` wrappers for every
+job. Until workflow migration is complete, use the command documented in the
+failing workflow when reproducing an existing status check exactly.
 
-```yaml
-# Example GitHub Actions
-- name: Run tests
-  run: make test
+Use `scripts/test.sh` for local default validation and targeted development
+runs.
+
+Use the CI wrappers for the accepted target PR contracts:
+
+```bash
+make ci-pr-core
+make ci-pr-policy
+make ci-pr-lint
 ```
+
+Use the package gate wrappers when touching package or docs surfaces:
+
+```bash
+make ci-package-mcp
+make ci-package-npm
+make ci-website
+```
+
+### Coverage Signal Policy
+
+PR confidence is based on behavior checks, not raw coverage percentage.
+
+- Treat Codecov percentages as informational trend data.
+- Prefer focused tests for risky paths (storage, sync/git, migrations, state
+  transitions, and corruption/integrity handling) over broad line-coverage
+  churn.
+- Add or extend at least one targeted regression test when fixing risky logic.
+- Do not block a change solely on overall coverage movement when behavioral
+  checks are strong.
+
+For the current CI/test-surface inventory and cleanup roadmap, see
+[CI_TEST_SURFACE_AUDIT.md](CI_TEST_SURFACE_AUDIT.md). That audit documents
+where local commands and GitHub Actions currently diverge before the CI cleanup
+work starts changing workflow behavior.
+
+For accepted CI tier decisions and the implementation order, see
+[CI_CLEANUP_PLAN.md](CI_CLEANUP_PLAN.md).
 
 ## Debugging Test Failures
 

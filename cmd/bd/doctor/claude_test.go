@@ -671,8 +671,8 @@ func TestCheckClaudeHookCompleteness(t *testing.T) {
 		}
 
 		check := CheckClaudeHookCompleteness(tmpDir)
-		if check.Status != StatusWarning {
-			t.Errorf("Expected warning for missing PreCompact, got %s", check.Status)
+		if check.Status != StatusOK {
+			t.Errorf("Expected OK for SessionStart hook, got %s", check.Status)
 		}
 	})
 

@@ -1,5 +1,11 @@
 # OpenTelemetry Data Model
 
+Last reviewed: 2026-05-08
+
+Freshness source: `internal/telemetry/`, `internal/storage/dolt/store.go`,
+`internal/compact/haiku.go`, `cmd/bd/find_duplicates.go`, and hook execution
+code under `internal/hooks/`.
+
 Complete schema of all telemetry events emitted by Beads. Each event consists of:
 
 1. **Span** (→ any OTLP v1.x+ backend, stdout when `BD_OTEL_STDOUT=true`) with full structured attributes
@@ -60,7 +66,7 @@ Each `bd` command execution generates a span with full context.
 | Attribute | Type | Source |
 |---|---|---|
 | `bd.command` | string | Subcommand name (`create`, `list`, `show`, etc.) |
-| `bd.version` | string | bd version (e.g., `"0.9.3"`) |
+| `bd.version` | string | Current bd version string |
 | `bd.args` | string | Full argument list |
 | `bd.actor` | string | Actor identity — set after actor resolution (may lag span start) |
 

@@ -1,0 +1,4 @@
+-- Reverse of 0042: not reversible without code regression. Removing ON UPDATE
+-- CASCADE would force the rename code to reintroduce a SET FOREIGN_KEY_CHECKS=0
+-- wrap (or manually update referencing tables before the parent), which was
+-- the whole point of this migration to retire. Intentional no-op.

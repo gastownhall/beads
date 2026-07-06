@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Pre-push hook: when pushing a release tag (refs/tags/v*), refuse the push if
+# version constants and the Docusaurus docs snapshot disagree. This stops a
+# release from being tagged/published with drifted docs (the failure mode that
+# left main red after the 1.0.5 release) before it ever reaches CI.
+#
+# Installed via: git config core.hooksPath .githooks
+# See also: make install (sets hooksPath automatically)
+#
+# Bypass (not recommended for release tags): git push --no-verify
+
+set -euo pipefail
+
+# git feeds "<local ref> <local sha> <remote ref> <remote sha>" lines on stdin.
+pushing_version_tag=0
+while read -r local_ref _local_sha _remote_ref _remote_sha; do
+    case "$local_ref" in
+        refs/tags/v[0-9]*) pushing_version_tag=1 ;;
+    esac
+done
+
+[ "$pushing_version_tag" -eq 0 ] && exit 0
+
+repo_root="$(git rev-parse --show-toplevel)"
+if [ ! -x "$repo_root/scripts/check-versions.sh" ]; then
+    # Older checkout without the consistency check; do not block.
+    exit 0
+fi
+
+echo "Release tag push detected — verifying version + docs consistency..."
+if ! (cd "$repo_root" && ./scripts/check-versions.sh); then
+    echo ""
+    echo "❌ Refusing to push release tag: version/docs are inconsistent." >&2
+    echo "   Fix with: scripts/update-versions.sh <version>" >&2
+    echo "   (or scripts/snapshot-release-docs.sh <version> for the docs side)." >&2
+    echo "   Override with --no-verify only if you know what you are doing." >&2
+    exit 1
+fi

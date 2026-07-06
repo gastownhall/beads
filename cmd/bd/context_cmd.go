@@ -2,12 +2,12 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 // ContextInfo contains the effective backend identity and repository context.
@@ -21,6 +21,7 @@ type ContextInfo struct {
 	DoltMode      string `json:"dolt_mode"`
 	ServerHost    string `json:"server_host,omitempty"`
 	ServerPort    int    `json:"server_port,omitempty"`
+	ProxiedDir    string `json:"proxied_dir,omitempty"`
 	Database      string `json:"database"`
 	DataDir       string `json:"data_dir,omitempty"`
 	ProjectID     string `json:"project_id,omitempty"`
@@ -44,13 +45,25 @@ Examples:
   bd context           # Show context information
   bd context --json    # Output in JSON format
 `,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("context")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			return runContextProxiedServer(cmd, rootCtx)
+		}
+
 		info := ContextInfo{
 			Backend:   configfile.BackendDolt,
 			BdVersion: Version,
 		}
 
-		// Resolve repo context (works without DB open)
 		if selected := selectedNoDBBeadsDir(cmd); selected != "" {
 			prepareSelectedNoDBContext(selected)
 		}
@@ -58,11 +71,12 @@ Examples:
 		rc, err := beads.GetRepoContext()
 		if err != nil {
 			if jsonOutput {
-				outputJSON(map[string]string{"error": fmt.Sprintf("cannot resolve repo context: %v", err)})
-			} else {
-				fmt.Fprintf(os.Stderr, "Error: cannot resolve repo context: %v\n", err)
+				if jerr := outputJSON(map[string]string{"error": fmt.Sprintf("cannot resolve repo context: %v", err)}); jerr != nil {
+					return jerr
+				}
+				return SilentExit()
 			}
-			os.Exit(1)
+			return HandleError("cannot resolve repo context: %v", err)
 		}
 
 		info.BeadsDir = rc.BeadsDir
@@ -71,12 +85,10 @@ Examples:
 		info.IsRedirected = rc.IsRedirected
 		info.IsWorktree = rc.IsWorktree
 
-		// Read role from repo context
 		if role, ok := rc.Role(); ok {
 			info.Role = string(role)
 		}
 
-		// Load metadata.json config (does not require DB)
 		cfg, err := configfile.Load(rc.BeadsDir)
 		if err != nil {
 			cfg = configfile.DefaultConfig()
@@ -91,28 +103,31 @@ Examples:
 
 		if cfg.IsDoltServerMode() {
 			info.ServerHost = cfg.GetDoltServerHost()
-			// Use doltserver.DefaultConfig to resolve the actual runtime port
-			// (from port file, env var, etc.) instead of the static config default.
-			// This matches what "bd dolt show" does (GH#2555).
 			dsCfg := doltserver.DefaultConfig(rc.BeadsDir)
 			info.ServerPort = dsCfg.Port
+		}
+		if cfg.IsDoltProxiedServerMode() {
+			p, err := resolveProxiedServerRootPath(rc.BeadsDir)
+			if err != nil {
+				return HandleError("resolve proxied server root: %v", err)
+			}
+			info.ProxiedDir = p
 		}
 
 		if dataDir := cfg.GetDoltDataDir(); dataDir != "" {
 			info.DataDir = dataDir
 		}
 
-		// Read sync remote from the selected repo's config.yaml.
 		if remote := resolveSyncRemoteFromDir(rc.BeadsDir); remote != "" {
 			info.SyncRemote = remote
-			info.SyncGitRemote = remote // Deprecated: kept for backwards compat
+			info.SyncGitRemote = remote
 		}
 
 		if jsonOutput {
-			outputJSON(info)
-		} else {
-			printContextText(info)
+			return outputJSON(info)
 		}
+		printContextText(info)
+		return nil
 	},
 }
 
@@ -145,6 +160,9 @@ func printContextText(info ContextInfo) {
 	fmt.Printf("  database:     %s\n", info.Database)
 	if info.ServerHost != "" {
 		fmt.Printf("  server:       %s:%d\n", info.ServerHost, info.ServerPort)
+	}
+	if info.ProxiedDir != "" {
+		fmt.Printf("  proxied dir:  %s\n", info.ProxiedDir)
 	}
 	if info.DataDir != "" {
 		fmt.Printf("  data dir:     %s\n", info.DataDir)

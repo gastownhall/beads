@@ -6,7 +6,7 @@ Common questions about bd (beads) and how to use it effectively.
 
 ### What is bd?
 
-bd is a lightweight, version-controlled issue tracker designed for AI coding agents. It provides dependency-aware task management with built-in sync across machines, so agents and humans can collaborate from the same task graph.
+bd is a lightweight, Dolt-powered issue tracker designed for AI coding agents. It provides dependency-aware task management with built-in sync across machines, so agents and humans can collaborate from the same task graph.
 
 ### Why not just use GitHub Issues?
 
@@ -58,15 +58,14 @@ Absolutely! bd is a great CLI issue tracker for humans too. The `bd ready` comma
 
 ### Is this production-ready?
 
-**Current status: Alpha (v0.9.11)**
+**Current status: Active development with 1.x releases**
 
-bd is in active development and being dogfooded on real projects. The core functionality (create, update, dependencies, ready work, collision resolution) is stable and well-tested. However:
+bd is in active development and being dogfooded on real projects. The core functionality (create, update, dependencies, ready work, Dolt-backed sync) is stable and well-tested. However:
 
-- ⚠️ **Alpha software** - No 1.0 release yet
-- ⚠️ **API may change** - Command flags and data format may evolve before 1.0
-- ✅ **Safe for development** - Use for development/internal projects
-- ✅ **Data is portable** - `bd export` produces human-readable JSONL for easy migration
-- 📈 **Rapid iteration** - Expect frequent updates and improvements
+- **CLI/API changes still happen** - command flags and data formats can evolve
+- **Safe for development/internal projects** - use normal backup and sync hygiene
+- **Data is portable** - `bd export` produces human-readable JSONL for migration
+- **Rapid iteration** - expect frequent updates and improvements
 
 **When to use bd:**
 - ✅ AI-assisted development workflows
@@ -75,11 +74,11 @@ bd is in active development and being dogfooded on real projects. The core funct
 - ✅ Experimenting with agent-first tools
 
 **When to wait:**
-- ❌ Mission-critical production systems (wait for 1.0)
-- ❌ Large enterprise deployments (wait for stability guarantees)
-- ❌ Long-term archival (though `bd export` makes migration easy)
+- Mission-critical production systems without a tested backup/restore plan
+- Large enterprise deployments that need formal compatibility guarantees
+- Long-term archival as the only system of record
 
-Follow the repo for updates and the path to 1.0!
+Follow the repo for updates and compatibility notes.
 
 ## Usage Questions
 
@@ -194,12 +193,15 @@ bd ready --json  # Start using bd normally
 All writes go directly to the Dolt database and are automatically committed to Dolt history. To sync with Dolt remotes:
 
 ```bash
-bd init --remote http://myserver:7007/mydb  # Configure remote during first init
+bd init       # Auto-configures git origin as the Dolt remote when present
+# or: bd init --remote http://myserver:7007/mydb  # Explicit non-origin remote
 bd dolt push    # Push changes to Dolt remote
 bd dolt pull    # Pull changes from Dolt remote
 ```
 
 The `bd export` command exists for issue portability and interchange. For backup and restore, use `bd backup init <path>` / `bd backup sync` to push Dolt-native backups, and `bd backup restore <path>` to restore from them. None of these are needed for day-to-day Dolt sync.
+
+For the full conceptual model — why the local Dolt database is the source of truth, what `issues.jsonl` is and is not for, and which sync patterns to avoid — see [SYNC_CONCEPTS.md](SYNC_CONCEPTS.md).
 
 ### What if my database feels stale after a colleague pushes changes?
 

@@ -14,6 +14,23 @@ type CompactionCandidate struct {
 	DependentCount int
 }
 
+// IssueSnapshot is a pre-compaction copy of an issue's mutable text content,
+// archived (into compaction_snapshots) before compaction destructively
+// overwrites it. It is the source of truth for `bd restore`. The JSON tags are
+// the on-disk snapshot_json wire format and must not be renamed: older archived
+// rows are decoded with these names.
+type IssueSnapshot struct {
+	// CompactionLevel is the tier the issue was being compacted *to* when this
+	// snapshot was taken, i.e. the level whose pre-compaction content this row
+	// preserves. It is stored in its own column, not in snapshot_json.
+	CompactionLevel    int    `json:"-"`
+	Title              string `json:"title"`
+	Description        string `json:"description"`
+	Design             string `json:"design"`
+	Notes              string `json:"notes"`
+	AcceptanceCriteria string `json:"acceptance_criteria"`
+}
+
 // DeleteIssuesResult contains statistics from a batch delete operation.
 // Used when deleting multiple issues with cascade/force options.
 type DeleteIssuesResult struct {

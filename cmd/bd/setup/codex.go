@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,8 @@ const (
 	codexEndMarker         = "<!-- END " + codexInstructionMarker + " -->"
 	codexInstructionsFile  = "AGENTS.md"
 	codexConfigDir         = ".codex"
+	codexConfigFile        = "config.toml"
+	codexHooksFile         = "hooks.json"
 	codexHomeEnvVar        = "CODEX_HOME"
 )
 
@@ -25,6 +28,9 @@ var (
 	errCodexInstructionsMissing  = errors.New("codex instructions not installed")
 	errCodexInstructionsStale    = errors.New("codex instructions are stale")
 	errCodexInstructionsNoMarker = errors.New("codex instructions section missing")
+	errCodexHooksMissing         = errors.New("codex hooks not installed")
+	errCodexHooksStale           = errors.New("codex hooks are stale")
+	errCodexFeatureMissing       = errors.New("codex hooks feature flag not enabled")
 )
 
 type codexEnv struct {
@@ -63,61 +69,66 @@ func defaultCodexEnv() (codexEnv, error) {
 	}, nil
 }
 
-// InstallCodex installs Codex integration.
-func InstallCodex(global bool) {
+func InstallCodex(global bool) error {
 	env, err := codexEnvProvider()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := installCodex(env, global); err != nil {
-		setupExit(1)
+	return installCodex(env, global)
+}
+
+// InstallCodexProject installs project-local Codex integration, returning an
+// error instead of exiting. Used by bd init to integrate Codex setup
+// automatically.
+func InstallCodexProject() error {
+	env, err := codexEnvProvider()
+	if err != nil {
+		return err
 	}
+	return installCodex(env, false)
 }
 
 func installCodex(env codexEnv, global bool) error {
 	if err := installAgentSkill(codexAgentSkillEnv(env, global)); err != nil {
 		return err
 	}
+	if err := installCodexNativeHooks(env, global); err != nil {
+		return err
+	}
 	return installCodexInstructions(env, global)
 }
 
-// CheckCodex checks if Codex integration is installed.
-func CheckCodex(global bool) {
+func CheckCodex(global bool) error {
 	env, err := codexEnvProvider()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := checkCodex(env, global); err != nil {
-		setupExit(1)
-	}
+	return checkCodex(env, global)
 }
 
 func checkCodex(env codexEnv, global bool) error {
 	if err := checkAgentSkill(codexAgentSkillEnv(env, global), codexSetupCommand(global)); err != nil {
 		return err
 	}
+	if err := checkCodexNativeHooks(env, global); err != nil {
+		return err
+	}
 	return checkCodexInstructions(env, global)
 }
 
-// RemoveCodex removes Codex integration.
-func RemoveCodex(global bool) {
+func RemoveCodex(global bool) error {
 	env, err := codexEnvProvider()
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := removeCodex(env, global); err != nil {
-		setupExit(1)
-	}
+	return removeCodex(env, global)
 }
 
 func removeCodex(env codexEnv, global bool) error {
 	if err := removeAgentSkill(codexAgentSkillEnv(env, global)); err != nil {
+		return err
+	}
+	if err := removeCodexNativeHooks(env, global); err != nil {
 		return err
 	}
 	return removeCodexInstructions(env, global)
@@ -151,6 +162,21 @@ func codexInstructionsPath(env codexEnv, global bool) string {
 		return filepath.Join(codexHomeDir(env), codexInstructionsFile)
 	}
 	return filepath.Join(env.projectDir, codexInstructionsFile)
+}
+
+func codexConfigRoot(env codexEnv, global bool) string {
+	if global {
+		return codexHomeDir(env)
+	}
+	return filepath.Join(env.projectDir, codexConfigDir)
+}
+
+func codexConfigPath(env codexEnv, global bool) string {
+	return filepath.Join(codexConfigRoot(env, global), codexConfigFile)
+}
+
+func codexHooksPath(env codexEnv, global bool) string {
+	return filepath.Join(codexConfigRoot(env, global), codexHooksFile)
 }
 
 func codexAgentSkillEnv(env codexEnv, global bool) agentSkillEnv {
@@ -299,4 +325,436 @@ func removeCodexManagedSection(content string) (string, bool) {
 		end++
 	}
 	return content[:start] + content[end:], true
+}
+
+func installCodexNativeHooks(env codexEnv, global bool) error {
+	if global {
+		_, _ = fmt.Fprintln(env.stdout, "Installing Codex native hooks globally...")
+	} else {
+		_, _ = fmt.Fprintln(env.stdout, "Installing Codex native hooks for this project...")
+	}
+	if err := installCodexFeatureFlag(env, global); err != nil {
+		return err
+	}
+	if codexBeadsPluginEnabled(env, global) {
+		_, _ = fmt.Fprintln(env.stdout, "✓ Beads Codex plugin detected — hooks are plugin-managed, skipping hooks.json fallback")
+		return nil
+	}
+	if err := installCodexHooksJSON(env, global); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintln(env.stdout, "✓ Codex native hooks installed")
+	return nil
+}
+
+func checkCodexNativeHooks(env codexEnv, global bool) error {
+	if !codexConfigHasHooksFeature(env, global) {
+		_, _ = fmt.Fprintf(env.stdout, "✗ Codex hooks feature flag not enabled: %s\n", codexConfigPath(env, global))
+		_, _ = fmt.Fprintf(env.stdout, "  Run: %s\n", codexSetupCommand(global))
+		return errCodexFeatureMissing
+	}
+	if codexBeadsPluginEnabled(env, global) {
+		_, _ = fmt.Fprintln(env.stdout, "✓ Codex native hooks provided by beads plugin (plugin-managed)")
+		return nil
+	}
+	if !codexHooksJSONCurrent(env, global) {
+		_, _ = fmt.Fprintf(env.stdout, "⚠ Codex hooks missing or stale: %s\n", codexHooksPath(env, global))
+		_, _ = fmt.Fprintf(env.stdout, "  Run: %s\n", codexSetupCommand(global))
+		return errCodexHooksStale
+	}
+	_, _ = fmt.Fprintf(env.stdout, "✓ Codex native hooks installed: %s\n", codexHooksPath(env, global))
+	return nil
+}
+
+func removeCodexNativeHooks(env codexEnv, global bool) error {
+	if err := removeCodexHooksJSON(env, global); err != nil {
+		return err
+	}
+	return removeCodexFeatureFlag(env, global)
+}
+
+func installCodexFeatureFlag(env codexEnv, global bool) error {
+	path := codexConfigPath(env, global)
+	if err := env.ensureDir(filepath.Dir(path), 0o755); err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: %v\n", err)
+		return err
+	}
+	current := ""
+	if data, err := env.readFile(path); err == nil {
+		current = string(data)
+	} else if !os.IsNotExist(err) {
+		_, _ = fmt.Fprintf(env.stderr, "Error: read %s: %v\n", path, err)
+		return err
+	}
+	next := upsertCodexHooksFeature(current)
+	if err := env.writeFile(path, []byte(next)); err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", path, err)
+		return err
+	}
+	return nil
+}
+
+func removeCodexFeatureFlag(env codexEnv, global bool) error {
+	path := codexConfigPath(env, global)
+	data, err := env.readFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: read %s: %v\n", path, err)
+		return err
+	}
+	next := removeCodexHooksFeature(string(data))
+	if err := env.writeFile(path, []byte(next)); err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", path, err)
+		return err
+	}
+	return nil
+}
+
+func codexConfigHasHooksFeature(env codexEnv, global bool) bool {
+	data, err := env.readFile(codexConfigPath(env, global))
+	if err != nil {
+		return false
+	}
+	return codexHooksFeatureEnabled(string(data))
+}
+
+func codexBeadsPluginEnabled(env codexEnv, global bool) bool {
+	paths := []string{codexConfigPath(env, global)}
+	if !global {
+		paths = append(paths, codexConfigPath(env, true))
+	}
+	for _, path := range paths {
+		data, err := env.readFile(path)
+		if err != nil {
+			continue
+		}
+		if codexConfigEnablesBeadsPlugin(string(data)) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexConfigEnablesBeadsPlugin(content string) bool {
+	inBeadsPlugin := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			table := strings.Trim(trimmed, "[]")
+			// Plugin tables are [plugins.<name>] or [plugins."<name>@<marketplace>"]
+			// (TOML quotes a key containing "@"). Match the <name> segment
+			// exactly: a substring test (GH#4244) mistakes any "*beads*" plugin
+			// (e.g. design-to-beads) for the beads hook plugin and wrongly skips
+			// the hooks write.
+			inBeadsPlugin = false
+			if rest, ok := strings.CutPrefix(table, "plugins."); ok {
+				name, _, _ := strings.Cut(strings.ToLower(strings.Trim(rest, "\"'")), "@")
+				inBeadsPlugin = name == "beads"
+			}
+			continue
+		}
+		if inBeadsPlugin && codexConfigLineKey(trimmed) == "enabled" {
+			parts := strings.SplitN(trimmed, "=", 2)
+			return len(parts) == 2 && strings.TrimSpace(parts[1]) == "true"
+		}
+	}
+	return false
+}
+
+func installCodexHooksJSON(env codexEnv, global bool) error {
+	path := codexHooksPath(env, global)
+	if err := env.ensureDir(filepath.Dir(path), 0o755); err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: %v\n", err)
+		return err
+	}
+	current := map[string]interface{}{}
+	if data, err := env.readFile(path); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &current); err != nil {
+			_, _ = fmt.Fprintf(env.stderr, "Error: parse %s: %v\n", path, err)
+			return err
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		_, _ = fmt.Fprintf(env.stderr, "Error: read %s: %v\n", path, err)
+		return err
+	}
+	upsertCodexManagedHooks(current)
+	data, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: marshal %s: %v\n", path, err)
+		return err
+	}
+	data = append(data, '\n')
+	if err := env.writeFile(path, data); err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", path, err)
+		return err
+	}
+	return nil
+}
+
+func removeCodexHooksJSON(env codexEnv, global bool) error {
+	path := codexHooksPath(env, global)
+	data, err := env.readFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: read %s: %v\n", path, err)
+		return err
+	}
+	current := map[string]interface{}{}
+	if len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &current); err != nil {
+			_, _ = fmt.Fprintf(env.stderr, "Error: parse %s: %v\n", path, err)
+			return err
+		}
+	}
+	removeCodexManagedHooks(current)
+	if len(current) == 0 {
+		if err := env.removeFile(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	next, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
+		return err
+	}
+	next = append(next, '\n')
+	return env.writeFile(path, next)
+}
+
+func codexHooksJSONCurrent(env codexEnv, global bool) bool {
+	data, err := env.readFile(codexHooksPath(env, global))
+	if err != nil {
+		return false
+	}
+	current := map[string]interface{}{}
+	if err := json.Unmarshal(data, &current); err != nil {
+		return false
+	}
+	return codexManagedHooksCurrent(current)
+}
+
+func upsertCodexHooksFeature(content string) string {
+	lines := strings.Split(content, "\n")
+	inFeatures := false
+	featuresSeen := false
+	flagSeen := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inFeatures = trimmed == "[features]"
+			if inFeatures {
+				featuresSeen = true
+			}
+			continue
+		}
+		key := codexConfigLineKey(trimmed)
+		if inFeatures && key == "codex_hooks" {
+			lines[i] = ""
+			continue
+		}
+		if inFeatures && key == "hooks" {
+			lines[i] = "hooks = true"
+			flagSeen = true
+		}
+	}
+	if featuresSeen && !flagSeen {
+		out := make([]string, 0, len(lines)+1)
+		inserted := false
+		inFeatures = false
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+				if inFeatures && !inserted {
+					out = append(out, "hooks = true")
+					inserted = true
+				}
+				inFeatures = trimmed == "[features]"
+			}
+			if strings.TrimSpace(line) != "" {
+				out = append(out, line)
+			}
+		}
+		if inFeatures && !inserted {
+			out = append(out, "hooks = true")
+		}
+		lines = out
+	}
+	next := strings.TrimRight(strings.Join(lines, "\n"), "\n")
+	if !featuresSeen {
+		if strings.TrimSpace(next) != "" {
+			next += "\n\n"
+		}
+		next += "[features]\nhooks = true"
+	}
+	return next + "\n"
+}
+
+func removeCodexHooksFeature(content string) string {
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	inFeatures := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inFeatures = trimmed == "[features]"
+			out = append(out, line)
+			continue
+		}
+		key := codexConfigLineKey(trimmed)
+		if inFeatures && (key == "hooks" || key == "codex_hooks") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n"
+}
+
+func codexHooksFeatureEnabled(content string) bool {
+	inFeatures := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inFeatures = trimmed == "[features]"
+			continue
+		}
+		if inFeatures && codexConfigLineKey(trimmed) == "hooks" {
+			parts := strings.SplitN(trimmed, "=", 2)
+			return len(parts) == 2 && strings.TrimSpace(parts[1]) == "true"
+		}
+	}
+	return false
+}
+
+func codexConfigLineKey(trimmed string) string {
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return ""
+	}
+	parts := strings.SplitN(trimmed, "=", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[0])
+}
+
+func codexManagedHooks() map[string]interface{} {
+	return map[string]interface{}{
+		"SessionStart":     []interface{}{codexHookEntry("startup|resume|clear", "bd codex-hook SessionStart", "Loading Beads context")},
+		"PreCompact":       []interface{}{codexHookEntry("manual|auto", "bd codex-hook PreCompact", "Checking Beads context")},
+		"PostCompact":      []interface{}{codexHookEntry("manual|auto", "bd codex-hook PostCompact", "Scheduling Beads context refresh")},
+		"UserPromptSubmit": []interface{}{codexHookEntry("", "bd codex-hook UserPromptSubmit", "Refreshing Beads context")},
+	}
+}
+
+func codexHookEntry(matcher, command, status string) map[string]interface{} {
+	entry := map[string]interface{}{
+		"hooks": []interface{}{
+			map[string]interface{}{
+				"type":          "command",
+				"command":       command,
+				"statusMessage": status,
+			},
+		},
+	}
+	if matcher != "" {
+		entry["matcher"] = matcher
+	}
+	return entry
+}
+
+func upsertCodexManagedHooks(config map[string]interface{}) {
+	hooks, ok := config["hooks"].(map[string]interface{})
+	if !ok {
+		hooks = map[string]interface{}{}
+		config["hooks"] = hooks
+	}
+	for event, entries := range codexManagedHooks() {
+		removeCodexManagedHookEvent(hooks, event)
+		hooks[event] = append(toInterfaceSlice(hooks[event]), entries.([]interface{})...)
+	}
+}
+
+func removeCodexManagedHooks(config map[string]interface{}) {
+	hooks, ok := config["hooks"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	for event := range codexManagedHooks() {
+		removeCodexManagedHookEvent(hooks, event)
+	}
+	if len(hooks) == 0 {
+		delete(config, "hooks")
+	}
+}
+
+func codexManagedHooksCurrent(config map[string]interface{}) bool {
+	hooks, ok := config["hooks"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for event, wantEntries := range codexManagedHooks() {
+		want, _ := wantEntries.([]interface{})
+		for _, wantEntry := range want {
+			if !codexHookEntriesContain(toInterfaceSlice(hooks[event]), wantEntry) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func removeCodexManagedHookEvent(hooks map[string]interface{}, event string) {
+	entries := toInterfaceSlice(hooks[event])
+	filtered := entries[:0]
+	for _, entry := range entries {
+		if !codexHookEntryManaged(entry) {
+			filtered = append(filtered, entry)
+		}
+	}
+	if len(filtered) == 0 {
+		delete(hooks, event)
+	} else {
+		hooks[event] = filtered
+	}
+}
+
+func codexHookEntriesContain(entries []interface{}, want interface{}) bool {
+	wantJSON, _ := json.Marshal(want)
+	for _, entry := range entries {
+		gotJSON, _ := json.Marshal(entry)
+		if string(gotJSON) == string(wantJSON) {
+			return true
+		}
+	}
+	return false
+}
+
+func codexHookEntryManaged(entry interface{}) bool {
+	entryMap, ok := entry.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	commands := toInterfaceSlice(entryMap["hooks"])
+	for _, command := range commands {
+		commandMap, ok := command.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if commandString, _ := commandMap["command"].(string); strings.HasPrefix(commandString, "bd codex-hook ") {
+			return true
+		}
+	}
+	return false
+}
+
+func toInterfaceSlice(value interface{}) []interface{} {
+	switch typed := value.(type) {
+	case []interface{}:
+		return typed
+	default:
+		return nil
+	}
 }

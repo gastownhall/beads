@@ -67,7 +67,7 @@ if [ -n "${1:-}" ]; then
     PREV_VERSION="$1"
 else
     # Default: fetch the latest release tag before the current version
-    CURRENT_VERSION=$(grep 'Version = ' "$PROJECT_ROOT/cmd/bd/root.go" \
+    CURRENT_VERSION=$(grep 'Version = ' "$PROJECT_ROOT/cmd/bd/version.go" \
         | head -1 | sed 's/.*"\(.*\)".*/\1/')
     # Try to get the previous release tag from git
     PREV_VERSION=$(git -C "$PROJECT_ROOT" tag --sort=-version:refname \
@@ -138,7 +138,7 @@ get_previous_binary() {
 
 build_candidate() {
     if [ -n "${CANDIDATE_BIN:-}" ] && [ -x "${CANDIDATE_BIN}" ]; then
-        echo "$CANDIDATE_BIN"
+        echo "$(cd "$(dirname "$CANDIDATE_BIN")" && pwd)/$(basename "$CANDIDATE_BIN")"
         return
     fi
 
@@ -209,6 +209,9 @@ new_workspace() {
 prev() { (cd "$WS" && "$PREV_BIN" "$@"); }
 cand() { (cd "$WS" && "$CAND_BIN" "$@"); }
 
+prev_init() { prev init --quiet --non-interactive --skip-hooks --skip-agents; }
+cand_init() { cand init --quiet --non-interactive --skip-hooks --skip-agents; }
+
 # Create an issue with the previous binary, tolerating missing --silent flag.
 # Older binaries don't have --silent; we just need to know creation succeeded.
 # Sets _CREATED_ID to a non-empty value on success.
@@ -237,7 +240,7 @@ scenario "Embedded maintainer: init → create → upgrade → verify"
 WS=$(new_workspace)
 
 # Init with previous version (run from $WS so git ops use $WS's repo)
-prev init --quiet --non-interactive 2>/dev/null || true
+prev_init 2>/dev/null || true
 git -C "$WS" config beads.role maintainer
 
 # Create test data (prev_create handles missing --silent in older binaries)
@@ -247,7 +250,7 @@ ID1="${_CREATED_ID}"
 prev_create --title "Another issue" --type bug || true
 
 # Upgrade: run candidate init (simulates upgrade)
-cand init --quiet --non-interactive 2>/dev/null || true
+cand_init 2>/dev/null || true
 
 # Verify
 ROLE=$(git -C "$WS" config --get beads.role 2>/dev/null || echo "MISSING")
@@ -289,11 +292,11 @@ scenario "Contributor: init --contributor → upgrade → verify role preserved"
 WS=$(new_workspace)
 
 # Init as contributor with previous version
-prev init --quiet --non-interactive 2>/dev/null || true
+prev_init 2>/dev/null || true
 git -C "$WS" config beads.role contributor
 
 # Upgrade
-cand init --quiet --non-interactive 2>/dev/null || true
+cand_init 2>/dev/null || true
 
 ROLE=$(git -C "$WS" config --get beads.role 2>/dev/null || echo "MISSING")
 if [ "$ROLE" = "contributor" ]; then
@@ -314,7 +317,7 @@ scenario "Mode preservation: embedded init must not switch to shared-server"
 WS=$(new_workspace)
 
 # Init with previous version
-prev init --quiet --non-interactive 2>/dev/null || true
+prev_init 2>/dev/null || true
 git -C "$WS" config beads.role maintainer
 
 # Check if old binary was able to initialize .beads/.
@@ -327,7 +330,7 @@ else
 fi
 
 # Upgrade with candidate (always runs — verifies candidate defaults to embedded)
-cand init --quiet --non-interactive 2>/dev/null || true
+cand_init 2>/dev/null || true
 
 # Verify candidate created an embedded DB
 if embedded_db_exists; then
@@ -359,7 +362,7 @@ WS=$(new_workspace)
 
 # Fresh init with candidate (no previous version; runs from $WS so git
 # config is written to $WS's repo, not the repo this script runs from)
-cand init --quiet --non-interactive 2>/dev/null || true
+cand_init 2>/dev/null || true
 
 ROLE=$(git -C "$WS" config --get beads.role 2>/dev/null || echo "MISSING")
 if [ "$ROLE" != "MISSING" ] && [ -n "$ROLE" ]; then
@@ -380,7 +383,7 @@ scenario "MUTATION: init with old → create → upgrade → bd update → verif
 WS=$(new_workspace)
 
 # Init and create an issue with the previous version
-prev init --quiet --non-interactive 2>/dev/null || true
+prev_init 2>/dev/null || true
 git -C "$WS" config beads.role maintainer
 
 _CREATED_ID=""
@@ -398,7 +401,7 @@ else
     pass "Issue created with previous binary (id: $MUT_ID)"
 
     # Upgrade: run candidate init
-    cand init --quiet --non-interactive 2>/dev/null || true
+    cand_init 2>/dev/null || true
 
     # Mutate using the candidate binary
     cand update "$MUT_ID" --notes "smoke test mutation" 2>/dev/null || true
@@ -410,6 +413,98 @@ else
         pass "Updated notes persisted and visible after mutation"
     else
         fail "Updated notes NOT visible after bd update (mutation did not persist)"
+    fi
+
+    rm -rf "$WS"
+    finish_scenario
+fi
+
+# ---------------------------------------------------------------------------
+# Scenario 6: Dependency blocker paths must survive upgrade
+# ---------------------------------------------------------------------------
+#
+# Release gate for the dependencies-split migrations (0035, 0041–0045, 0047).
+# Earlier scenarios create issues but no dependencies, so the data-copy in
+# 0041_split_dependencies_target only ever runs as DDL on an empty table and
+# the rewritten ready_issues/blocked_issues views never get queried on a
+# migrated DB. This scenario populates a dependency with the OLD binary (so the
+# row is written in the pre-0041 schema), upgrades, then exercises the exact
+# blocker paths that fail when the data-copy is wrong: bd ready, bd blocked,
+# bd close — the surface of the current Dolt errno 1105 on a stale schema.
+
+scenario "Dependency blocker paths survive upgrade (ready/blocked/close on migrated deps)"
+
+WS=$(new_workspace)
+
+prev_init 2>/dev/null || true
+git -C "$WS" config beads.role maintainer
+
+# Blocker (task) and a dependent (bug depends-on task → bug is blocked).
+_CREATED_ID=""
+prev_create --title "Blocker task" --type task --priority 1 || true
+BLOCKER_ID="${_CREATED_ID}"
+_CREATED_ID=""
+prev_create --title "Blocked bug" --type bug --priority 2 || true
+BLOCKED_ID="${_CREATED_ID}"
+
+# Wire the dependency with the previous binary so the dependencies table is
+# populated in the old (pre-split) schema. `dep add <blocked> <blocker>` means
+# blocked depends on blocker; default type is "blocks".
+DEP_CREATED=false
+if [ -n "${BLOCKER_ID:-}" ] && [ -n "${BLOCKED_ID:-}" ] \
+    && [ "$BLOCKER_ID" != "created" ] && [ "$BLOCKED_ID" != "created" ]; then
+    if prev dep add "$BLOCKED_ID" "$BLOCKER_ID" >/dev/null 2>&1; then
+        DEP_CREATED=true
+    fi
+fi
+
+if ! $DEP_CREATED; then
+    # Old binary could not create a parseable dependency — early releases lack
+    # --silent (so IDs aren't captured) or predate positional dep add. The
+    # data-copy is still covered by the migration-test harness; skip gracefully.
+    pass "Dependency blocker-path check skipped (old binary could not add a parseable dependency)"
+    rm -rf "$WS"
+    finish_scenario
+else
+    pass "Dependency created with previous binary ($BLOCKED_ID depends on $BLOCKER_ID)"
+
+    # Upgrade (runs migrations 0041–0047, including the data-copy).
+    cand_init 2>/dev/null || true
+
+    # 1. Blocker queries must not error on the migrated dependency rows.
+    if cand ready >/dev/null 2>&1; then
+        pass "bd ready succeeds after upgrade"
+    else
+        fail "bd ready errors after upgrade (migrated dependency schema regression)"
+    fi
+    if cand blocked >/dev/null 2>&1; then
+        pass "bd blocked succeeds after upgrade"
+    else
+        fail "bd blocked errors after upgrade (migrated dependency schema regression)"
+    fi
+
+    # 2. The dependent must still be reported blocked post-migration — proves
+    #    the data-copy populated depends_on_issue_id, not just the DDL.
+    BLOCKED_OUT=$(cand blocked 2>/dev/null || echo "")
+    if echo "$BLOCKED_OUT" | grep -q "$BLOCKED_ID"; then
+        pass "Migrated dependency still blocks dependent (blocked issue listed)"
+    else
+        fail "Blocked issue '$BLOCKED_ID' not reported blocked after upgrade (data-copy may have dropped the row)"
+    fi
+
+    # 3. Closing the blocker must succeed (this is the bd close errno 1105
+    #    surface) and must unblock the dependent (is_blocked recompute).
+    if cand close "$BLOCKER_ID" >/dev/null 2>&1; then
+        pass "bd close on blocker succeeds after upgrade"
+    else
+        fail "bd close errors after upgrade (errno 1105 / stale depends_on_id regression)"
+    fi
+
+    READY_OUT=$(cand ready 2>/dev/null || echo "")
+    if echo "$READY_OUT" | grep -q "$BLOCKED_ID"; then
+        pass "Dependent becomes ready after blocker closed (unblock path works)"
+    else
+        fail "Dependent '$BLOCKED_ID' not ready after closing blocker (is_blocked recompute wrong)"
     fi
 
     rm -rf "$WS"

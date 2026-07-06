@@ -136,6 +136,8 @@ func TestCodexSectionBody(t *testing.T) {
 		"bd ready",
 		"bd prime",
 		"bd remember",
+		"refs/dolt/data",
+		"SYNC_CONCEPTS.md",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("CodexSectionBody missing %q", want)

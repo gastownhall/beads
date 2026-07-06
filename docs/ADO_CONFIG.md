@@ -1,5 +1,9 @@
 # Azure DevOps (ADO) Integration Configuration
 
+Last reviewed: 2026-05-08
+
+Freshness source: `cmd/bd/ado*.go` and `internal/ado/`.
+
 This guide covers all configuration options for the `bd ado sync` command, which synchronizes beads issues with Azure DevOps work items.
 
 ## Quick Start

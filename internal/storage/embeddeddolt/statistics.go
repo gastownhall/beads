@@ -18,11 +18,14 @@ func (s *EmbeddedDoltStore) GetStatistics(ctx context.Context) (*types.Statistic
 			return err
 		}
 
-		blockedIDs, _, err := issueops.ComputeBlockedIDsInTx(ctx, tx, true)
-		if err != nil {
+		var blockedCount int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM issues
+			WHERE is_blocked = 1 AND status <> 'closed' AND status <> 'pinned'
+		`).Scan(&blockedCount); err != nil {
 			return err
 		}
-		stats.BlockedIssues = len(blockedIDs)
+		stats.BlockedIssues = blockedCount
 		stats.ReadyIssues = stats.OpenIssues - stats.BlockedIssues
 		if stats.ReadyIssues < 0 {
 			stats.ReadyIssues = 0

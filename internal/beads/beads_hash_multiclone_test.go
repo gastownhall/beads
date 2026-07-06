@@ -16,67 +16,9 @@ import (
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
-var testBDBinary string
-
-// testDoltPort is the port of the isolated test Dolt server (0 = not running).
-var testDoltPort int
-
-func TestMain(m *testing.M) {
-	os.Setenv("BEADS_TEST_MODE", "1")
-
-	// Start an isolated Dolt server so integration tests don't hit production.
-	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
-	} else {
-		defer testutil.TerminateDoltContainer()
-		testDoltPort = testutil.DoltContainerPortInt()
-	}
-
-	// Build bd binary once for all tests
-	binName := "bd"
-	if runtime.GOOS == "windows" {
-		binName = "bd.exe"
-	}
-
-	tmpDir, err := os.MkdirTemp("", "bd-test-bin-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to create temp dir for bd binary: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Find module root directory (where go.mod lives)
-	modRootCmd := exec.Command("go", "list", "-m", "-f", "{{.Dir}}")
-	modRootOut, err := modRootCmd.Output()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to find module root: %v\n", err)
-		os.RemoveAll(tmpDir)
-		os.Exit(1)
-	}
-	modRoot := strings.TrimSpace(string(modRootOut))
-
-	testBDBinary = filepath.Join(tmpDir, binName)
-	cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", testBDBinary, "./cmd/bd")
-	cmd.Dir = modRoot // Build from module root where ./cmd/bd exists
-	if out, err := cmd.CombinedOutput(); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to build bd binary: %v\n%s\n", err, out)
-		os.RemoveAll(tmpDir)
-		os.Exit(1)
-	}
-
-	// Optimize git for tests
-	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-
-	code := m.Run()
-
-	os.RemoveAll(tmpDir)
-	os.Unsetenv("BEADS_DOLT_PORT")
-	os.Unsetenv("BEADS_TEST_MODE")
-	os.Exit(code)
-}
-
 // getBDPath returns the test bd binary path
 func getBDPath() string {
-	if testBDBinary != "" {
+	if testBDBinary := os.Getenv("BEADS_TEST_BD_BINARY"); testBDBinary != "" {
 		return testBDBinary
 	}
 	// Fallback for non-TestMain runs
@@ -95,23 +37,29 @@ func getBDCommand() string {
 	return "./bd"
 }
 
-// TestHashIDs_MultiCloneConverge verifies that hash-based IDs work correctly
-// across multiple clones creating different issues. With hash IDs, each unique
-// issue gets a unique ID, so no collision resolution is needed.
-func TestHashIDs_MultiCloneConverge(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow git e2e test")
-	}
-	if testDoltPort == 0 {
+func hasDoltTestPort() bool {
+	return os.Getenv("BEADS_DOLT_PORT") != ""
+}
+
+func requireHashIDIntegration(t *testing.T) string {
+	t.Helper()
+	if !hasDoltTestPort() {
 		t.Skip("skipping: Dolt test container not available")
 	}
-	t.Parallel()
-	tmpDir := testutil.TempDirInMemory(t)
-
 	bdPath := getBDPath()
 	if _, err := os.Stat(bdPath); err != nil {
 		t.Fatalf("bd binary not found at %s", bdPath)
 	}
+	return bdPath
+}
+
+// TestHashIDs_MultiCloneConverge verifies that hash-based IDs work correctly
+// across multiple clones creating different issues. With hash IDs, each unique
+// issue gets a unique ID, so no collision resolution is needed.
+func TestHashIDs_MultiCloneConverge(t *testing.T) {
+	bdPath := requireHashIDIntegration(t)
+	t.Parallel()
+	tmpDir := testutil.TempDirInMemory(t)
 
 	// Setup remote and 3 clones
 	remoteDir := setupBareRepo(t, tmpDir)
@@ -155,19 +103,9 @@ func TestHashIDs_MultiCloneConverge(t *testing.T) {
 // TestHashIDs_IdenticalContentDedup verifies that when two clones create
 // identical issues, they get the same hash ID and deduplicate correctly.
 func TestHashIDs_IdenticalContentDedup(t *testing.T) {
-	if testing.Short() {
-		t.Skip("slow git e2e test")
-	}
-	if testDoltPort == 0 {
-		t.Skip("skipping: Dolt test container not available")
-	}
+	bdPath := requireHashIDIntegration(t)
 	t.Parallel()
 	tmpDir := testutil.TempDirInMemory(t)
-
-	bdPath := getBDPath()
-	if _, err := os.Stat(bdPath); err != nil {
-		t.Fatalf("bd binary not found at %s", bdPath)
-	}
 
 	// Setup remote and 2 clones
 	remoteDir := setupBareRepo(t, tmpDir)
