@@ -14,14 +14,18 @@ var remoteSchemes = []string{
 	"dolthub://",
 	"gs://",
 	"s3://",
+	"aws://",
 	"az://",
+	"oci://",
 	"file://",
 	"https://",
 	"http://",
 	"ssh://",
+	"git://",
 	"git+ssh://",
 	"git+https://",
 	"git+http://",
+	"git+file://",
 }
 
 // allowedSchemes is the set of recognized URL schemes for validation.
@@ -29,14 +33,18 @@ var allowedSchemes = map[string]bool{
 	"dolthub":   true,
 	"gs":        true,
 	"s3":        true,
+	"aws":       true,
 	"az":        true,
+	"oci":       true,
 	"file":      true,
 	"https":     true,
 	"http":      true,
 	"ssh":       true,
+	"git":       true,
 	"git+ssh":   true,
 	"git+https": true,
 	"git+http":  true,
+	"git+file":  true,
 }
 
 // gitSSHPattern matches SCP-style git remote URLs (user@host:path).
@@ -139,12 +147,12 @@ func validateSchemeURL(rawURL string) error {
 		if parsed.Host == "" {
 			return fmt.Errorf("%s:// URL must include a hostname", scheme)
 		}
-	case "ssh", "git+ssh":
+	case "ssh", "git", "git+ssh":
 		if parsed.Host == "" {
 			return fmt.Errorf("%s:// URL must include a hostname", scheme)
 		}
-	case "s3", "gs":
-		// s3://bucket/path, gs://bucket/path — host is the bucket
+	case "s3", "aws", "gs":
+		// s3://bucket/path, aws://bucket/path, gs://bucket/path — host is the bucket
 		if parsed.Host == "" {
 			return fmt.Errorf("%s:// URL must include a bucket name", scheme)
 		}
@@ -153,8 +161,14 @@ func validateSchemeURL(rawURL string) error {
 		if parsed.Host == "" {
 			return fmt.Errorf("az:// URL must include a storage account hostname")
 		}
+	case "oci":
+		if parsed.Host == "" {
+			return fmt.Errorf("oci:// URL must include a namespace or bucket host")
+		}
 	case "file":
 		// file:// is allowed with any path
+	case "git+file":
+		// git+file:// is Dolt's normalized form for local git remotes.
 	}
 
 	return nil
@@ -221,7 +235,7 @@ func ValidateRemoteURLWithPatterns(rawURL string, patterns []string) error {
 
 func sortedSchemes() []string {
 	// Return in a consistent display order
-	return []string{"dolthub", "https", "http", "ssh", "git+ssh", "git+https", "git+http", "s3", "gs", "az", "file"}
+	return []string{"dolthub", "https", "http", "ssh", "git", "git+ssh", "git+https", "git+http", "git+file", "s3", "aws", "gs", "az", "oci", "file"}
 }
 
 // CacheKey returns a filesystem-safe identifier for a remote URL.

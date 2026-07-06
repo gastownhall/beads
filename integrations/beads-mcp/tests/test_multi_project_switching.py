@@ -21,9 +21,7 @@ import pytest
 from beads_mcp.tools import (
     _canonicalize_path,
     _connection_pool,
-    _pool_lock,
     _resolve_workspace_root,
-    beads_create_issue,
     beads_list_issues,
     beads_ready_work,
     current_workspace,
@@ -106,7 +104,7 @@ class TestConcurrentMultiProject:
                 current_workspace.reset(token)
 
         # Call all three projects concurrently
-        results = await asyncio.gather(
+        await asyncio.gather(
             call_ready(temp_projects["a"]),
             call_ready(temp_projects["b"]),
             call_ready(temp_projects["c"]),
@@ -144,7 +142,7 @@ class TestConcurrentMultiProject:
                 current_workspace.reset(token)
 
         # Call same project multiple times concurrently
-        results = await asyncio.gather(
+        await asyncio.gather(
             call_ready(temp_projects["a"]),
             call_ready(temp_projects["a"]),
             call_ready(temp_projects["a"]),
@@ -337,7 +335,6 @@ class TestCrossProjectIsolation:
 
         # Mock different responses for each project
         canonical_a = os.path.realpath(temp_projects["a"])
-        canonical_b = os.path.realpath(temp_projects["b"])
 
         def create_client_with_data(**kwargs: Any) -> AsyncMock:
             client = get_mock(kwargs["working_dir"])
@@ -478,6 +475,7 @@ class TestEdgeCases:
     async def test_no_workspace_raises_error(self):
         """Test calling without workspace raises helpful error."""
         import os
+
         from beads_mcp import tools
 
         # Clear context and env
@@ -485,9 +483,11 @@ class TestEdgeCases:
         os.environ.pop("BEADS_WORKING_DIR", None)
 
         # No ContextVar set, no env var, and auto-detect fails
-        with pytest.raises(Exception) as exc_info:
-            with patch("beads_mcp.tools._find_beads_db_in_tree", return_value=None):
-                await beads_ready_work()
+        with (
+            pytest.raises(Exception) as exc_info,
+            patch("beads_mcp.tools._find_beads_db_in_tree", return_value=None),
+        ):
+            await beads_ready_work()
 
         assert "No beads workspace found" in str(exc_info.value)
 

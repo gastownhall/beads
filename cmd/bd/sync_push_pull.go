@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/gitlab"
 	"github.com/steveyegge/beads/internal/jira"
 	"github.com/steveyegge/beads/internal/linear"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/notion"
 	"github.com/steveyegge/beads/internal/tracker"
 )
@@ -30,7 +31,9 @@ var adoPushCmd = &cobra.Command{
 
 Accepts bead IDs as positional arguments.
 Equivalent to: bd ado sync --push-only --issues <ids>`,
-	RunE: runADOPush,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runADOPush,
 }
 
 var adoPullCmd = &cobra.Command{
@@ -40,7 +43,9 @@ var adoPullCmd = &cobra.Command{
 
 Accepts bead IDs or external references as positional arguments.
 Equivalent to: bd ado sync --pull-only --issues <refs>`,
-	RunE: runADOPull,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runADOPull,
 }
 
 // --- Jira push/pull ---
@@ -52,7 +57,9 @@ var jiraPushCmd = &cobra.Command{
 
 Accepts bead IDs as positional arguments.
 Equivalent to: bd jira sync --push --issues <ids>`,
-	Run: runJiraPush,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runJiraPush,
 }
 
 var jiraPullCmd = &cobra.Command{
@@ -62,7 +69,9 @@ var jiraPullCmd = &cobra.Command{
 
 Accepts bead IDs or external references as positional arguments.
 Equivalent to: bd jira sync --pull --issues <refs>`,
-	Run: runJiraPull,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runJiraPull,
 }
 
 // --- Linear push/pull ---
@@ -74,7 +83,9 @@ var linearPushCmd = &cobra.Command{
 
 Accepts bead IDs as positional arguments.
 Equivalent to: bd linear sync --push --issues <ids>`,
-	Run: runLinearPush,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runLinearPush,
 }
 
 var linearPullCmd = &cobra.Command{
@@ -84,7 +95,9 @@ var linearPullCmd = &cobra.Command{
 
 Accepts bead IDs or external references as positional arguments.
 Equivalent to: bd linear sync --pull --issues <refs>`,
-	Run: runLinearPull,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runLinearPull,
 }
 
 // --- GitHub push/pull ---
@@ -96,7 +109,9 @@ var githubPushCmd = &cobra.Command{
 
 Accepts bead IDs as positional arguments.
 Equivalent to: bd github sync --push-only --issues <ids>`,
-	RunE: runGitHubPush,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGitHubPush,
 }
 
 var githubPullCmd = &cobra.Command{
@@ -106,7 +121,9 @@ var githubPullCmd = &cobra.Command{
 
 Accepts bead IDs or external references as positional arguments.
 Equivalent to: bd github sync --pull-only --issues <refs>`,
-	RunE: runGitHubPull,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGitHubPull,
 }
 
 // --- GitLab push/pull ---
@@ -118,7 +135,9 @@ var gitlabPushCmd = &cobra.Command{
 
 Accepts bead IDs as positional arguments.
 Equivalent to: bd gitlab sync --push-only --issues <ids>`,
-	RunE: runGitLabPush,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGitLabPush,
 }
 
 var gitlabPullCmd = &cobra.Command{
@@ -128,7 +147,9 @@ var gitlabPullCmd = &cobra.Command{
 
 Accepts bead IDs or external references as positional arguments.
 Equivalent to: bd gitlab sync --pull-only --issues <refs>`,
-	RunE: runGitLabPull,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGitLabPull,
 }
 
 // --- Notion push/pull ---
@@ -140,7 +161,9 @@ var notionPushCmd = &cobra.Command{
 
 Accepts bead IDs as positional arguments.
 Equivalent to: bd notion sync --push --issues <ids>`,
-	RunE: runNotionPush,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runNotionPush,
 }
 
 var notionPullCmd = &cobra.Command{
@@ -150,7 +173,9 @@ var notionPullCmd = &cobra.Command{
 
 Accepts bead IDs or external references as positional arguments.
 Equivalent to: bd notion sync --pull --issues <refs>`,
-	RunE: runNotionPull,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runNotionPull,
 }
 
 func init() {
@@ -218,6 +243,13 @@ func outputSyncResult(result *tracker.SyncResult, dryRun bool) {
 // --- ADO implementations ---
 
 func runADOPush(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("ado-push")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if len(args) == 0 {
 		return fmt.Errorf("at least one bead ID is required")
 	}
@@ -258,6 +290,13 @@ func runADOPush(cmd *cobra.Command, args []string) error {
 }
 
 func runADOPull(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("ado-pull")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if len(args) == 0 {
 		return fmt.Errorf("at least one bead ID or external reference is required")
 	}
@@ -300,9 +339,16 @@ func runADOPull(cmd *cobra.Command, args []string) error {
 
 // --- Jira implementations ---
 
-func runJiraPush(cmd *cobra.Command, args []string) {
+func runJiraPush(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("jira-push")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if len(args) == 0 {
-		FatalError("at least one bead ID is required")
+		return HandleError("at least one bead ID is required")
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	if !dryRun {
@@ -310,16 +356,16 @@ func runJiraPush(cmd *cobra.Command, args []string) {
 	}
 
 	if err := ensureStoreActive(); err != nil {
-		FatalError("database not available: %v", err)
+		return HandleError("database not available: %v", err)
 	}
 	if err := validateJiraConfig(); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
 	ctx := rootCtx
 	jt := &jira.Tracker{}
 	if err := jt.Init(ctx, store); err != nil {
-		FatalError("initializing Jira tracker: %v", err)
+		return HandleError("initializing Jira tracker: %v", err)
 	}
 
 	engine := tracker.NewEngine(jt, store, actor)
@@ -334,14 +380,22 @@ func runJiraPush(cmd *cobra.Command, args []string) {
 		IssueIDs: args,
 	})
 	if err != nil {
-		FatalError("sync failed: %v", err)
+		return HandleError("sync failed: %v", err)
 	}
 	outputSyncResult(result, dryRun)
+	return nil
 }
 
-func runJiraPull(cmd *cobra.Command, args []string) {
+func runJiraPull(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("jira-pull")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if len(args) == 0 {
-		FatalError("at least one bead ID or external reference is required")
+		return HandleError("at least one bead ID or external reference is required")
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	if !dryRun {
@@ -349,16 +403,16 @@ func runJiraPull(cmd *cobra.Command, args []string) {
 	}
 
 	if err := ensureStoreActive(); err != nil {
-		FatalError("database not available: %v", err)
+		return HandleError("database not available: %v", err)
 	}
 	if err := validateJiraConfig(); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
 	ctx := rootCtx
 	jt := &jira.Tracker{}
 	if err := jt.Init(ctx, store); err != nil {
-		FatalError("initializing Jira tracker: %v", err)
+		return HandleError("initializing Jira tracker: %v", err)
 	}
 
 	engine := tracker.NewEngine(jt, store, actor)
@@ -372,16 +426,24 @@ func runJiraPull(cmd *cobra.Command, args []string) {
 		IssueIDs: args,
 	})
 	if err != nil {
-		FatalError("sync failed: %v", err)
+		return HandleError("sync failed: %v", err)
 	}
 	outputSyncResult(result, dryRun)
+	return nil
 }
 
 // --- Linear implementations ---
 
-func runLinearPush(cmd *cobra.Command, args []string) {
+func runLinearPush(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("linear-push")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if len(args) == 0 {
-		FatalError("at least one bead ID is required")
+		return HandleError("at least one bead ID is required")
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	if !dryRun {
@@ -391,7 +453,7 @@ func runLinearPush(cmd *cobra.Command, args []string) {
 	if lockDir := beads.FindBeadsDir(); lockDir != "" {
 		syncLock, err := linear.AcquireSyncLock(lockDir, true)
 		if err != nil {
-			FatalError("acquiring sync lock: %v", err)
+			return HandleError("acquiring sync lock: %v", err)
 		}
 		defer func() {
 			if err := syncLock.Release(); err != nil {
@@ -401,25 +463,25 @@ func runLinearPush(cmd *cobra.Command, args []string) {
 	}
 
 	if err := ensureStoreActive(); err != nil {
-		FatalError("database not available: %v", err)
+		return HandleError("database not available: %v", err)
 	}
 	if err := validateLinearConfig(nil); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
 	ctx := rootCtx
 	teamIDs := getLinearTeamIDs(ctx, nil)
 	if len(teamIDs) > 1 {
-		FatalError("linear push does not support multiple configured teams\nUse: bd linear sync --push --team <TEAM_ID>")
+		return HandleError("linear push does not support multiple configured teams\nUse: bd linear sync --push --team <TEAM_ID>")
 	}
 
 	lt := &linear.Tracker{}
 	lt.SetTeamIDs(teamIDs)
 	if err := lt.Init(ctx, store); err != nil {
-		FatalError("initializing Linear tracker: %v", err)
+		return HandleError("initializing Linear tracker: %v", err)
 	}
 	if err := lt.ValidatePushStateMappings(ctx); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
 	engine := tracker.NewEngine(lt, store, actor)
@@ -435,14 +497,22 @@ func runLinearPush(cmd *cobra.Command, args []string) {
 		IssueIDs:         args,
 	})
 	if err != nil {
-		FatalError("sync failed: %v", err)
+		return HandleError("sync failed: %v", err)
 	}
 	outputSyncResult(result, dryRun)
+	return nil
 }
 
-func runLinearPull(cmd *cobra.Command, args []string) {
+func runLinearPull(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("linear-pull")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if len(args) == 0 {
-		FatalError("at least one bead ID or external reference is required")
+		return HandleError("at least one bead ID or external reference is required")
 	}
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	relations, _ := cmd.Flags().GetBool("relations")
@@ -453,7 +523,7 @@ func runLinearPull(cmd *cobra.Command, args []string) {
 	if lockDir := beads.FindBeadsDir(); lockDir != "" {
 		syncLock, err := linear.AcquireSyncLock(lockDir, true)
 		if err != nil {
-			FatalError("acquiring sync lock: %v", err)
+			return HandleError("acquiring sync lock: %v", err)
 		}
 		defer func() {
 			if err := syncLock.Release(); err != nil {
@@ -463,10 +533,10 @@ func runLinearPull(cmd *cobra.Command, args []string) {
 	}
 
 	if err := ensureStoreActive(); err != nil {
-		FatalError("database not available: %v", err)
+		return HandleError("database not available: %v", err)
 	}
 	if err := validateLinearConfig(nil); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
 	ctx := rootCtx
@@ -475,7 +545,7 @@ func runLinearPull(cmd *cobra.Command, args []string) {
 	lt := &linear.Tracker{}
 	lt.SetTeamIDs(teamIDs)
 	if err := lt.Init(ctx, store); err != nil {
-		FatalError("initializing Linear tracker: %v", err)
+		return HandleError("initializing Linear tracker: %v", err)
 	}
 
 	engine := tracker.NewEngine(lt, store, actor)
@@ -494,14 +564,22 @@ func runLinearPull(cmd *cobra.Command, args []string) {
 		DependencySources: linearPullDependencySources(relations),
 	})
 	if err != nil {
-		FatalError("sync failed: %v", err)
+		return HandleError("sync failed: %v", err)
 	}
 	outputSyncResult(result, dryRun)
+	return nil
 }
 
 // --- GitHub implementations ---
 
 func runGitHubPush(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("github-push")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if len(args) == 0 {
 		return fmt.Errorf("at least one bead ID is required")
 	}
@@ -542,6 +620,13 @@ func runGitHubPush(cmd *cobra.Command, args []string) error {
 }
 
 func runGitHubPull(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("github-pull")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if len(args) == 0 {
 		return fmt.Errorf("at least one bead ID or external reference is required")
 	}
@@ -585,6 +670,13 @@ func runGitHubPull(cmd *cobra.Command, args []string) error {
 // --- GitLab implementations ---
 
 func runGitLabPush(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("gitlab-push")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if len(args) == 0 {
 		return fmt.Errorf("at least one bead ID is required")
 	}
@@ -625,6 +717,13 @@ func runGitLabPush(cmd *cobra.Command, args []string) error {
 }
 
 func runGitLabPull(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("gitlab-pull")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if len(args) == 0 {
 		return fmt.Errorf("at least one bead ID or external reference is required")
 	}
@@ -668,6 +767,13 @@ func runGitLabPull(cmd *cobra.Command, args []string) error {
 // --- Notion implementations ---
 
 func runNotionPush(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("notion-push")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if len(args) == 0 {
 		return fmt.Errorf("at least one bead ID is required")
 	}
@@ -715,6 +821,13 @@ func runNotionPush(cmd *cobra.Command, args []string) error {
 }
 
 func runNotionPull(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("notion-pull")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if len(args) == 0 {
 		return fmt.Errorf("at least one bead ID or external reference is required")
 	}

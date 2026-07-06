@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -21,7 +20,7 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 	if err != nil {
 		return nil, err
 	}
-	out, err := runSearchQueryInTx(ctx, tx, IssuesFilterTables, issuePreds.whereSQL, issuePreds.orderBySQL, issuePreds.limitSQL, issuePreds.args, wispDepsExist)
+	out, err := runSearchQueryInTx(ctx, tx, IssuesFilterTables, issuePreds.whereSQL, issuePreds.orderBySQL, issuePreds.limitSQL, issuePreds.args, wispDepsExist, false)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +40,7 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 	if err != nil {
 		return nil, err
 	}
-	wisps, err := runSearchQueryInTx(ctx, tx, WispsFilterTables, wispPreds.whereSQL, wispPreds.orderBySQL, wispPreds.limitSQL, wispPreds.args, true)
+	wisps, err := runSearchQueryInTx(ctx, tx, WispsFilterTables, wispPreds.whereSQL, wispPreds.orderBySQL, wispPreds.limitSQL, wispPreds.args, true, false)
 	if err != nil {
 		if isTableNotExistError(err) {
 			return out, nil
@@ -52,26 +51,29 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 		return out, nil
 	}
 
-	seen := make(map[string]struct{}, len(out))
-	for _, iwc := range out {
-		if iwc != nil && iwc.Issue != nil {
-			seen[iwc.Issue.ID] = struct{}{}
+	// Prefer the canonical wisp record when an ID exists in both tables (be-iabdi).
+	wispByID := make(map[string]struct{}, len(wisps))
+	for _, w := range wisps {
+		if w != nil && w.Issue != nil {
+			wispByID[w.Issue.ID] = struct{}{}
 		}
 	}
-	for _, w := range wisps {
-		if w == nil || w.Issue == nil {
+	var kept []*types.IssueWithCounts
+	for _, iwc := range out {
+		if iwc == nil || iwc.Issue == nil {
+			kept = append(kept, iwc)
 			continue
 		}
-		if _, dup := seen[w.Issue.ID]; dup {
-			return nil, fmt.Errorf("get ready work with counts: id %q exists in both issues and wisps", w.Issue.ID)
+		if _, dup := wispByID[iwc.Issue.ID]; !dup {
+			kept = append(kept, iwc)
 		}
-		out = append(out, w)
 	}
-	sortIssuesWithCountsByPolicy(out, filter.SortPolicy)
-	if filter.Limit > 0 && len(out) > filter.Limit {
-		out = out[:filter.Limit]
+	kept = append(kept, wisps...)
+	sortIssuesWithCountsByPolicy(kept, filter.SortPolicy)
+	if filter.Limit > 0 && len(kept) > filter.Limit {
+		kept = kept[:filter.Limit]
 	}
-	return out, nil
+	return kept, nil
 }
 
 func sortIssuesWithCountsByPolicy(items []*types.IssueWithCounts, policy types.SortPolicy) {
@@ -100,27 +102,11 @@ func sortIssuesWithCountsByPolicy(items []*types.IssueWithCounts, policy types.S
 	copy(items, sorted)
 }
 
-var readyWorkIssueColumns = func() string {
-	raw := strings.ReplaceAll(IssueSelectColumns, "\n", " ")
-	raw = strings.ReplaceAll(raw, "\t", " ")
-	parts := strings.Split(raw, ",")
-	for i, p := range parts {
-		parts[i] = "i." + strings.TrimSpace(p)
-	}
-	return strings.Join(parts, ", ")
-}()
-
-const readyWorkDepJSONObject = `JSON_OBJECT(
-	'issue_id', issue_id,
-	'depends_on_id', COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external),
-	'type', type,
-	'created_at', DATE_FORMAT(created_at, '%Y-%m-%dT%H:%i:%sZ'),
-	'created_by', created_by,
-	'metadata', CAST(metadata AS CHAR),
-	'thread_id', thread_id
-)`
-
-func scanReadyWorkRowWithCounts(rows *sql.Rows) (*types.IssueWithCounts, error) {
+// ScanReadyWorkRowWithCounts scans one row of the counts mega-query
+// (sqlbuild.SearchCountsSQL): IssueSelectColumns followed by labels JSON,
+// dep/rdep/comment counts, parent ID, and dependency JSON. Exported so the
+// domain/db stack hydrates counts rows through the exact same code path.
+func ScanReadyWorkRowWithCounts(rows *sql.Rows) (*types.IssueWithCounts, error) {
 	var labelsJSON, depsJSON sql.NullString
 	var parentID sql.NullString
 	var depCount, rdepCount, commentCount sql.NullInt64

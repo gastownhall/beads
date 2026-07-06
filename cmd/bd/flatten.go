@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -38,7 +39,16 @@ Examples:
   bd flatten --dry-run               # Preview: show commit count and disk usage
   bd flatten --force                 # Actually squash all history
   bd flatten --force --json          # JSON output`,
-	Run: func(_ *cobra.Command, _ []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(_ *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("flatten")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if !flattenDryRun {
 			CheckReadonly("flatten")
 		}
@@ -47,32 +57,28 @@ Examples:
 
 		flattener, ok := storage.UnwrapStore(store).(storage.Flattener)
 		if !ok {
-			FatalError("storage backend does not support flatten")
+			return HandleErrorRespectJSON("storage backend does not support flatten")
 		}
 
-		// Get commit count and initial hash for reporting.
-		// Use store.Log() which works across both backends.
 		logEntries, logErr := store.Log(ctx, 0)
 		if logErr != nil {
-			FatalError("failed to read commit log: %v", logErr)
+			return HandleErrorRespectJSON("failed to read commit log: %v", logErr)
 		}
 		commitCount := len(logEntries)
 
 		var initialHash string
 		if commitCount > 0 {
-			initialHash = logEntries[commitCount-1].Hash // oldest is last
+			initialHash = logEntries[commitCount-1].Hash
 		}
 
 		if flattenDryRun {
 			if jsonOutput {
-				result := map[string]interface{}{
+				return outputJSON(map[string]interface{}{
 					"dry_run":       true,
 					"commit_count":  commitCount,
 					"initial_hash":  initialHash,
 					"would_flatten": commitCount > 1,
-				}
-				outputJSON(result)
-				return
+				})
 			}
 			fmt.Printf("DRY RUN — Flatten preview\n\n")
 			fmt.Printf("  Commits:        %d\n", commitCount)
@@ -83,24 +89,23 @@ Examples:
 				fmt.Printf("\n  Would squash %d commits into 1.\n", commitCount)
 				fmt.Printf("  Run with --force to proceed.\n")
 			}
-			return
+			return nil
 		}
 
 		if commitCount <= 1 {
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				return outputJSON(map[string]interface{}{
 					"success":      true,
 					"message":      "already flat",
 					"commit_count": commitCount,
 				})
-				return
 			}
 			fmt.Println("Already flat (1 commit). Nothing to do.")
-			return
+			return nil
 		}
 
 		if !flattenForce {
-			FatalErrorWithHint(
+			return HandleErrorWithHintRespectJSON(
 				fmt.Sprintf("would squash %d commits into 1 (irreversible)", commitCount),
 				"Use --force to confirm or --dry-run to preview.")
 		}
@@ -110,10 +115,9 @@ Examples:
 		}
 
 		if err := flattener.Flatten(ctx); err != nil {
-			FatalError("flatten failed: %v", err)
+			return HandleErrorRespectJSON("flatten failed: %v", err)
 		}
 
-		// Reclaim disk space from the now-orphaned old history.
 		if gc, ok := storage.UnwrapStore(store).(storage.GarbageCollector); ok {
 			if err := gc.DoltGC(ctx); err != nil {
 				WarnError("dolt gc after flatten failed: %v", err)
@@ -123,16 +127,16 @@ Examples:
 		elapsed := time.Since(start)
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"success":        true,
 				"commits_before": commitCount,
 				"commits_after":  1,
 				"elapsed_ms":     elapsed.Milliseconds(),
 			})
-			return
 		}
 		fmt.Printf("✓ Flattened %d commits → 1\n", commitCount)
 		fmt.Printf("  Time: %v\n", elapsed.Round(time.Millisecond))
+		return nil
 	},
 }
 

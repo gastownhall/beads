@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -88,6 +87,51 @@ func ManageStartedAt(oldIssue *types.Issue, updates map[string]interface{}, setC
 	return setClauses, args
 }
 
+// ManageLeaseOnUpdate keeps lease ownership coherent when generic updates alter
+// status or assignee. Claim/heartbeat own the normal lease lifecycle, but bd
+// update can transfer or reopen work directly.
+func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}, ctx context.Context) ([]string, []interface{}) {
+	rawStatus, hasStatus := updates["status"]
+	rawAssignee, hasAssignee := updates["assignee"]
+	if !hasStatus && !hasAssignee {
+		return setClauses, args
+	}
+
+	newStatus := string(oldIssue.Status)
+	if hasStatus {
+		switch v := rawStatus.(type) {
+		case string:
+			newStatus = v
+		case types.Status:
+			newStatus = string(v)
+		default:
+			return setClauses, args
+		}
+	}
+
+	newAssignee := oldIssue.Assignee
+	if hasAssignee {
+		switch v := rawAssignee.(type) {
+		case nil:
+			newAssignee = ""
+		case string:
+			newAssignee = v
+		default:
+			newAssignee = fmt.Sprint(v)
+		}
+	}
+
+	if newStatus != string(types.StatusInProgress) || newAssignee == "" {
+		setClauses = append(setClauses, "lease_expires_at = NULL", "heartbeat_at = NULL")
+		return setClauses, args
+	}
+
+	now := time.Now().UTC()
+	setClauses = append(setClauses, "lease_expires_at = ?", "heartbeat_at = ?")
+	args = append(args, now.Add(leaseTTL(ctx)), now)
+	return setClauses, args
+}
+
 // DetermineEventType returns the appropriate event type for an update.
 func DetermineEventType(oldIssue *types.Issue, updates map[string]interface{}) types.EventType {
 	statusVal, hasStatus := updates["status"]
@@ -125,18 +169,18 @@ type UpdateResult struct {
 // The caller is responsible for Dolt versioning (DOLT_ADD/COMMIT) if needed.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func UpdateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
+func UpdateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
 	return updateIssueInTx(ctx, tx, id, updates, actor, true)
 }
 
 // UpdateIssueWithoutEventInTx applies normal update semantics without recording
 // an intermediate event. Demotion uses this to preserve the historical event
 // stream: create/update history is copied, then a single demotion event is added.
-func UpdateIssueWithoutEventInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
+func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
 	return updateIssueInTx(ctx, tx, id, updates, actor, false)
 }
 
-func updateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string, recordEvent bool) (*UpdateResult, error) {
+func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool) (*UpdateResult, error) {
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
@@ -216,6 +260,17 @@ func updateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 	// Auto-manage started_at (set on transition to in_progress). (GH#2796)
 	setClauses, args = ManageStartedAt(oldIssue, updates, setClauses, args)
 
+	// Auto-manage leases when direct updates change status or assignee.
+	setClauses, args = ManageLeaseOnUpdate(oldIssue, updates, setClauses, args, ctx)
+
+	// Rewrite row_lock on every update so a concurrent lease mutation (heartbeat/
+	// reclaim) collides on this shared cell and is forced to conflict-and-retry
+	// rather than silently cell-merging two writes to different columns of the
+	// same row (see lease.go). This is the "every mutating path writes row_lock"
+	// invariant the lease scheme depends on.
+	setClauses = append(setClauses, "row_lock = ?")
+	args = append(args, freshRowLock())
+
 	args = append(args, id)
 
 	//nolint:gosec // G201: issueTable comes from WispTableRouting (hardcoded constants)
@@ -267,11 +322,11 @@ func updateIssueInTx(ctx context.Context, tx *sql.Tx, id string, updates map[str
 // RecordFullEventInTable records an event with both old and new values.
 //
 //nolint:gosec // G201: table is from WispTableRouting ("events" or "wisp_events")
-func RecordFullEventInTable(ctx context.Context, tx *sql.Tx, table, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
+func RecordFullEventInTable(ctx context.Context, tx DBTX, table, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?)
-	`, table), issueID, eventType, actor, oldValue, newValue)
+		INSERT INTO %s (id, issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, table), NewEventID(), issueID, eventType, actor, oldValue, newValue)
 	if err != nil {
 		return fmt.Errorf("record event in %s: %w", table, err)
 	}

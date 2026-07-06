@@ -1,3 +1,7 @@
+<!-- This GitHub-rendered install guide and the website install page
+     (website/docs/getting-started/installation.md) are deliberate parallel
+     docs for different audiences. When you change platform commands or install
+     methods here, update the website page too so they do not drift. -->
 # Installing bd
 
 Complete installation guide for all platforms.
@@ -36,6 +40,19 @@ Beads has several components - here's what they are and when you need them:
 ### Homebrew (macOS/Linux)
 
 ```bash
+brew install beads
+```
+
+Homebrew core's `beads` formula is the supported Homebrew package. If you
+previously installed the old tap formula as `bd`, migrate to the core formula:
+
+<!-- Tap-migration snippet mirrored from the canonical copy in
+     website/docs/getting-started/upgrading.md (### Homebrew). This file is
+     GitHub-rendered, so the block is inlined rather than linked. Keep in sync. -->
+```bash
+brew uninstall bd
+brew untap gastownhall/beads 2>/dev/null || true
+brew untap steveyegge/beads 2>/dev/null || true
 brew install beads
 ```
 
@@ -104,6 +121,8 @@ BEADS_INSTALL_RESIGN_MACOS=1 curl -fsSL https://raw.githubusercontent.com/gastow
 
 - **Nocgo (simplest, default in this doc):** `CGO_ENABLED=0 go install ...`. Works on any machine with a Go toolchain, no C compiler needed. Produces a **server-mode-only** binary — you must run an external `dolt sql-server` and use `bd init --server`. See [DOLT.md](DOLT.md) for server-mode setup.
 - **Cgo (embedded-capable):** `CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install ...`. Requires a C compiler (gcc/clang on Unix, MinGW on Windows). Produces a binary with the default embedded-Dolt backend — `bd init` Just Works.
+
+Use the `github.com/steveyegge/beads` path for `go install`. The repository now lives under `gastownhall/beads`, but released Go modules still declare `github.com/steveyegge/beads` for compatibility.
 
 If you don't have a preference, `brew install beads` / `install.sh` give you the embedded-capable build with no fuss.
 
@@ -287,7 +306,7 @@ bd setup mux      # Mux - creates/updates AGENTS.md
 ```
 
 **How it works:**
-- `bd init` creates or updates `AGENTS.md` by default unless you use `--skip-agents` or `--stealth`
+- `bd init` creates or updates `AGENTS.md` and installs project Claude/Codex integrations by default unless you use `--skip-agents` or `--stealth`
 - Editor hooks/rules inject `bd prime` automatically on session start
 - Codex 0.129.0+ uses native `/hooks`: SessionStart injects `bd prime`, compact hooks mark context stale, and the next prompt after compaction refreshes Beads context once
 - `bd prime` provides ~1-2k tokens of workflow context
@@ -517,7 +536,7 @@ See the "Claude Code Plugin" section above for alternative installation methods 
 After installation:
 
 1. **Initialize a project**: `cd your-project && bd init`
-2. **Configure your agent**: `bd init` creates/updates `AGENTS.md` by default; run `bd setup --list` for richer integrations or `bd onboard` for a manual fallback snippet
+2. **Configure your agent**: `bd init` creates/updates `AGENTS.md` and installs project Claude/Codex integrations by default; run `bd setup --list` for richer integrations or `bd onboard` for a manual fallback snippet
 3. **Learn the basics**: See [QUICKSTART.md](QUICKSTART.md) for a tutorial
 4. **Explore examples**: Check out the [examples/](../examples/) directory
 
@@ -583,6 +602,16 @@ bd info --whats-new
 bd hooks install
 bd version
 ```
+
+If your database syncs to a Dolt remote (a single clone or several), upgrading
+across a schema migration needs an explicit, ordered procedure — `bd` refuses
+to silently migrate a remote-backed database, so replacing the binary alone is
+not enough. See [Upgrading bd — remote-backed databases and multiple
+clones](../website/docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones).
+
+Prereleases (e.g. release candidates) are published only as GitHub prereleases
+and are not pushed to the stable Homebrew/npm/PyPI channels, so `brew upgrade`
+and friends will not move you onto them — fetch the prerelease build explicitly.
 
 ## Uninstalling
 

@@ -50,6 +50,10 @@ type Storage interface {
 	DeleteIssue(ctx context.Context, id string) error
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error)
+	// SearchIssueIDs is a narrow-projection variant of SearchIssues that
+	// returns only matching issue IDs. Use when full row hydration is wasted
+	// (e.g., partial-ID resolution in internal/utils/id_parser.go).
+	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
 
 	// Dependencies
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
@@ -88,6 +92,9 @@ type Storage interface {
 
 	// CountIssues returns the number of issues matching query and filter.
 	CountIssues(ctx context.Context, query string, filter types.IssueFilter) (int64, error)
+	// CountIssuesByGroup returns per-group counts. groupBy is one of:
+	// status, priority, type, assignee, label.
+	CountIssuesByGroup(ctx context.Context, filter types.IssueFilter, groupBy string) (map[string]int, error)
 	// CountDependents returns the number of issues that depend on issueID.
 	CountDependents(ctx context.Context, issueID string) (int64, error)
 	// CountDependencies returns the number of issues that issueID depends on.
@@ -235,10 +242,37 @@ type Flattener interface {
 	Flatten(ctx context.Context) error
 }
 
+type SchemaMigrator interface {
+	ApplySchemaMigrations(ctx context.Context) (applied int, err error)
+}
+
 // Compactor squashes old Dolt commits while preserving recent ones.
 // Callers should type-assert to this interface for selective history compaction.
 type Compactor interface {
 	Compact(ctx context.Context, initialHash, boundaryHash string, oldCommits int, recentHashes []string) error
+}
+
+// BlockedRecomputer recomputes the denormalized is_blocked column for every
+// issue and wisp in one full pass and reports how many rows it corrected.
+// Callers should type-assert to this interface for the is_blocked repair
+// (bd-6dnrw.37): unlike the scoped post-pull recompute, it does not depend on a
+// merge advancing HEAD, so it can recover a column a skipped recompute (a
+// recompute that failed after its merge committed, or a hand-resolved
+// conflicted pull) left stale. It is idempotent — a consistent database
+// corrects nothing.
+type BlockedRecomputer interface {
+	RecomputeAllBlocked(ctx context.Context) (int, error)
+}
+
+// StateHasher returns a hash covering committed history plus the working set.
+// Unlike GetCurrentCommit (HEAD only), the hash moves on uncommitted writes.
+// Change detection against a SQL server must use this when available: server
+// mode runs with dolt auto-commit off, so writes sit in the working set and
+// HEAD does not advance.
+// Callers should type-assert to this interface and fall back to
+// GetCurrentCommit when the store does not implement it.
+type StateHasher interface {
+	GetStateHash(ctx context.Context) (string, error)
 }
 
 // LifecycleManager provides lifecycle inspection beyond Close().
@@ -307,12 +341,21 @@ type Transaction interface {
 	DeleteIssue(ctx context.Context, id string) error
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)                                    // For read-your-writes within transaction
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) // For read-your-writes within transaction
+	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)     // Narrow projection: returns ids only
 
 	// Dependency operations
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
 	AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, opts DependencyAddOptions) error
 	RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error
 	GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error)
+	// CycleThroughEdges reports a rendered blocking-dependency cycle that
+	// traverses one of the given new edges (issueID -> dependsOnID pairs), or
+	// "" when none does. It sees the transaction's own uncommitted dependency
+	// writes, which must already include the edges. Lets bulk paths that add
+	// edges with SkipCycleCheck run one whole-graph check before commit and
+	// roll back instead of committing cycles (bd-6dnrw.8); pre-existing
+	// cycles not using any of the new edges never block (bd-578h9.9).
+	CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error)
 
 	// Label operations
 	AddLabel(ctx context.Context, issueID, label, actor string) error
@@ -341,7 +384,10 @@ type Transaction interface {
 
 // DependencyAddOptions controls transaction-scoped dependency insertion.
 type DependencyAddOptions struct {
-	// SkipCycleCheck bypasses the recursive pre-insert cycle check. This is
-	// intended for bulk wiring paths that perform a final graph check separately.
+	// SkipCycleCheck bypasses the recursive pre-insert cycle check. Callers
+	// that set it MUST run Transaction.DetectCycles before commit and fail
+	// the transaction on new cycles — skipping the per-edge check trades
+	// per-edge cost for one whole-graph check, never graph integrity
+	// (bd-6dnrw.8).
 	SkipCycleCheck bool
 }

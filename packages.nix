@@ -12,6 +12,9 @@ let
 
     phases = [ "installPhase" ];
 
+    env.BD_DISABLE_METRICS = "1";
+    env.BD_DISABLE_EVENT_FLUSH = "1";
+
     installPhase = ''
       mkdir -p $out/bin
       cp ${bdBase}/bin/bd $out/bin/bd

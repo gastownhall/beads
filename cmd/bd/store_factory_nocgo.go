@@ -16,6 +16,11 @@ func usesSQLServer() bool {
 	return true
 }
 
+// isEmbeddedMode reports whether the command is using embedded Dolt storage.
+func isEmbeddedMode() bool {
+	return false
+}
+
 func usesProxiedServer() bool {
 	if shouldUseGlobals() {
 		return proxiedServerMode

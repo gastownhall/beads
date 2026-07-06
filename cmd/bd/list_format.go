@@ -80,8 +80,10 @@ func formatPrettyIssueWithContext(issue *types.Issue, parentEpic string) string 
 	return base + " " + ui.RenderMuted("← "+parentEpic)
 }
 
-// formatIssueLong formats a single issue in long format to a buffer
-func formatIssueLong(buf *strings.Builder, issue *types.Issue, labels []string) {
+// formatIssueLong formats a single issue in long format to a buffer.
+// When labelsSkipped is true (AD-02 --skip-labels), the Labels: line shows
+// "(suppressed by --skip-labels)" instead of the (empty) hydration result.
+func formatIssueLong(buf *strings.Builder, issue *types.Issue, labels []string, labelsSkipped bool) {
 	status := string(issue.Status)
 	if status == "closed" {
 		line := fmt.Sprintf("%s%s [P%d] [%s] %s\n  %s",
@@ -107,7 +109,9 @@ func formatIssueLong(buf *strings.Builder, issue *types.Issue, labels []string) 
 			buf.WriteString(fmt.Sprintf("    %s\n", line))
 		}
 	}
-	if len(labels) > 0 {
+	if labelsSkipped {
+		buf.WriteString("  Labels: (suppressed by --skip-labels)\n")
+	} else if len(labels) > 0 {
 		buf.WriteString(fmt.Sprintf("  Labels: %v\n", labels))
 	}
 	if hasCustomMetadata(issue) {

@@ -31,6 +31,11 @@ func usesSQLServer() bool {
 	return false // default: embedded
 }
 
+// isEmbeddedMode reports whether the command is using embedded Dolt storage.
+func isEmbeddedMode() bool {
+	return !usesSQLServer()
+}
+
 func usesProxiedServer() bool {
 	if shouldUseGlobals() {
 		return proxiedServerMode
@@ -48,6 +53,19 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, e
 	}
 	if cfg.ServerMode {
 		return dolt.New(ctx, cfg)
+	}
+	if cfg.ReadOnly {
+		// Read-only commands must not be bricked by the #4259
+		// remote-migrate gate (bd-578h9.5); server mode's ReadOnly opens
+		// already skip migration entirely.
+		return embeddeddolt.OpenForReadOnlyCommand(ctx, cfg.BeadsDir, cfg.Database, "main")
+	}
+	if cfg.LenientOpen {
+		// Working-set-reconcile commands (bd dolt commit, bd vc commit) must
+		// not be bricked by a pending-migration dirty-table refusal: that
+		// refusal's documented recovery is exactly the commit these commands
+		// run, so failing the open here would deadlock (#4566).
+		return embeddeddolt.OpenForWorkingSetReconcile(ctx, cfg.BeadsDir, cfg.Database, "main")
 	}
 	return embeddeddolt.Open(ctx, cfg.BeadsDir, cfg.Database, "main")
 }
@@ -174,5 +192,9 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		database = sanitized
 	}
-	return embeddeddolt.Open(ctx, beadsDir, database, "main")
+	// OpenReadOnly, not Open: a read-only open of a foreign project must not
+	// run the remote-migrate gate (a behind, remote-backed database would fail
+	// hard) and must not write migrations into the target's history
+	// (bd-6dnrw.32, GH#3231).
+	return embeddeddolt.OpenReadOnly(ctx, beadsDir, database, "main")
 }

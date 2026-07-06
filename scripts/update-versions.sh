@@ -19,24 +19,58 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-if [ $# -ne 1 ]; then
-    echo "Usage: $0 <version>"
+usage() {
+    echo "Usage: $0 <version> [--skip-docs]"
     echo ""
-    echo "Updates version numbers across all components (no git operations)."
+    echo "Updates version numbers across all components (no git operations),"
+    echo "and snapshots the Docusaurus release docs so version.go and the docs"
+    echo "snapshot cannot drift apart for stable releases."
     echo ""
-    echo "Example: $0 0.47.1"
+    echo "  --skip-docs   Skip the Docusaurus snapshot (e.g. on a host without"
+    echo "                Node.js). You must then run scripts/snapshot-release-docs.sh"
+    echo "                <version> elsewhere before tagging a stable release, or CI"
+    echo "                will fail. Prereleases skip docs snapshots by default."
+    echo ""
+    echo "Examples:"
+    echo "  $0 0.47.1"
+    echo "  $0 1.1.0-rc.1"
     echo ""
     echo "For full releases, use: bd mol wisp beads-release --var version=X.Y.Z"
+}
+
+NEW_VERSION=""
+SKIP_DOCS=0
+for arg in "$@"; do
+    case "$arg" in
+        --skip-docs) SKIP_DOCS=1 ;;
+        -h|--help) usage; exit 0 ;;
+        -*) echo "Unknown option: $arg" >&2; usage; exit 1 ;;
+        *)
+            if [ -n "$NEW_VERSION" ]; then
+                echo "Error: multiple versions given" >&2; usage; exit 1
+            fi
+            NEW_VERSION="$arg"
+            ;;
+    esac
+done
+
+if [ -z "$NEW_VERSION" ]; then
+    usage
     exit 1
 fi
 
-NEW_VERSION=$1
-
-# Validate semantic versioning
-if ! [[ $NEW_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+# Validate semantic versioning. Accept prerelease identifiers so release
+# candidates can be cut without pretending to be stable package releases.
+if ! [[ $NEW_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
     echo -e "${RED}Error: Invalid version format '$NEW_VERSION'${NC}"
-    echo "Expected: MAJOR.MINOR.PATCH (e.g., 0.47.1)"
+    echo "Expected: MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-prerelease (e.g., 0.47.1 or 1.1.0-rc.1)"
     exit 1
+fi
+
+BASE_VERSION="${NEW_VERSION%%-*}"
+IS_PRERELEASE=0
+if [ "$BASE_VERSION" != "$NEW_VERSION" ]; then
+    IS_PRERELEASE=1
 fi
 
 # Check we're in repo root
@@ -47,6 +81,11 @@ fi
 
 # Get current version
 CURRENT_VERSION=$(grep 'Version = ' cmd/bd/version.go | sed 's/.*"\(.*\)".*/\1/')
+# Base (prerelease-stripped) form of the current version. The Windows PE
+# numeric fields (file_version/product_version, manifest version) only ever
+# hold the base form, so they must be matched on the base, not on the full
+# CURRENT_VERSION which may carry a -rc.N suffix.
+CURRENT_BASE="${CURRENT_VERSION%%-*}"
 echo -e "${YELLOW}Bumping: $CURRENT_VERSION → $NEW_VERSION${NC}"
 echo ""
 
@@ -98,15 +137,36 @@ update_file "default.nix" "version = \"$CURRENT_VERSION\";" "version = \"$NEW_VE
 
 # 8. Windows PE resource metadata
 echo "  • cmd/bd/winres/winres.json"
-update_file "cmd/bd/winres/winres.json" "\"file_version\": \"$CURRENT_VERSION\"" "\"file_version\": \"$NEW_VERSION\""
-update_file "cmd/bd/winres/winres.json" "\"product_version\": \"$CURRENT_VERSION\"" "\"product_version\": \"$NEW_VERSION\""
+update_file "cmd/bd/winres/winres.json" "\"file_version\": \"$CURRENT_BASE\"" "\"file_version\": \"$BASE_VERSION\""
+update_file "cmd/bd/winres/winres.json" "\"product_version\": \"$CURRENT_BASE\"" "\"product_version\": \"$BASE_VERSION\""
 update_file "cmd/bd/winres/winres.json" "\"FileVersion\": \"$CURRENT_VERSION\"" "\"FileVersion\": \"$NEW_VERSION\""
 update_file "cmd/bd/winres/winres.json" "\"ProductVersion\": \"$CURRENT_VERSION\"" "\"ProductVersion\": \"$NEW_VERSION\""
 echo "  • cmd/bd/winres/manifest.xml"
-update_file "cmd/bd/winres/manifest.xml" "version=\"$CURRENT_VERSION.0\"" "version=\"$NEW_VERSION.0\""
+update_file "cmd/bd/winres/manifest.xml" "version=\"$CURRENT_BASE.0\"" "version=\"$BASE_VERSION.0\""
 
 echo ""
-echo -e "${GREEN}✓ Versions updated to $NEW_VERSION${NC}"
+echo -e "${GREEN}✓ Version constants updated to $NEW_VERSION${NC}"
+echo ""
+
+# Snapshot the Docusaurus release docs as part of the same bump so version.go
+# and the published docs cannot diverge. This is the failure mode that left
+# main red after the 1.0.5 release (version bumped, docs snapshot missing).
+if [ "$SKIP_DOCS" -eq 1 ]; then
+    echo -e "${YELLOW}Skipping docs snapshot (--skip-docs).${NC}"
+    if [ "$IS_PRERELEASE" -eq 1 ]; then
+        echo "  Prerelease CI does not require a stable docs snapshot for $NEW_VERSION."
+    else
+        echo "  Run scripts/snapshot-release-docs.sh $NEW_VERSION before tagging,"
+        echo "  or CI (check-version-consistency) will fail."
+    fi
+elif [ "$IS_PRERELEASE" -eq 1 ]; then
+    echo -e "${YELLOW}Skipping docs snapshot for prerelease $NEW_VERSION.${NC}"
+    echo "  Stable docs stay on the latest stable release until $BASE_VERSION ships."
+else
+    echo "Snapshotting release docs..."
+    ./scripts/snapshot-release-docs.sh "$NEW_VERSION"
+fi
+
 echo ""
 echo "Changed files:"
 git diff --stat 2>/dev/null || true
@@ -114,7 +174,4 @@ echo ""
 echo "Next steps:"
 echo "  • Update CHANGELOG.md with release notes"
 echo "  • Update cmd/bd/info.go versionChanges"
-echo "  • Snapshot release docs: cd website && npm ci && npx docusaurus docs:version $NEW_VERSION"
-echo "  • Set website/docusaurus.config.ts lastVersion to $NEW_VERSION"
-echo "  • Regenerate docs artifacts: ./scripts/generate-cli-docs.sh ./bd && ./scripts/generate-llms-full.sh"
 echo "  • Or use: bd mol wisp beads-release --var version=$NEW_VERSION"

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -44,18 +45,26 @@ TIP: Formulas can specify phase:"vapor" to recommend wisp usage.
 Examples:
   bd mol pour mol-feature --var name=auth    # Persistent feature work
   bd mol pour mol-review --var pr=123        # Persistent code review`,
-	Args: cobra.ExactArgs(1),
-	Run:  runPour,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runPour,
 }
 
-func runPour(cmd *cobra.Command, args []string) {
+func runPour(cmd *cobra.Command, args []string) error {
 	CheckReadonly("pour")
+
+	evt := metrics.NewCommandEvent("pour")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
 
 	ctx := rootCtx
 
-	// Pour requires direct store access for cloning
 	if store == nil {
-		FatalError("no database connection")
+		return HandleError("no database connection")
 	}
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -69,7 +78,7 @@ func runPour(cmd *cobra.Command, args []string) {
 	for _, v := range varFlags {
 		parts := strings.SplitN(v, "=", 2)
 		if len(parts) != 2 {
-			FatalError("invalid variable format '%s', expected 'key=value'", v)
+			return HandleError("invalid variable format '%s', expected 'key=value'", v)
 		}
 		vars[parts[0]] = parts[1]
 	}
@@ -106,23 +115,21 @@ func runPour(cmd *cobra.Command, args []string) {
 		// Try to load as existing proto bead (legacy path)
 		resolvedID, err := utils.ResolvePartialID(ctx, store, args[0])
 		if err != nil {
-			FatalError("%s not found as formula or proto ID", args[0])
+			return HandleError("%s not found as formula or proto ID", args[0])
 		}
 		protoID = resolvedID
 
-		// Verify it's a proto
 		protoIssue, err := store.GetIssue(ctx, protoID)
 		if err != nil {
-			FatalError("loading proto %s: %v", protoID, err)
+			return HandleError("loading proto %s: %v", protoID, err)
 		}
 		if !isProto(protoIssue) {
-			FatalError("%s is not a proto (missing '%s' label)", protoID, MoleculeLabel)
+			return HandleError("%s is not a proto (missing '%s' label)", protoID, MoleculeLabel)
 		}
 
-		// Load the proto subgraph from DB
 		subgraph, err = loadTemplateSubgraph(ctx, store, protoID)
 		if err != nil {
-			FatalError("loading proto: %v", err)
+			return HandleError("loading proto: %v", err)
 		}
 	}
 
@@ -138,18 +145,18 @@ func runPour(cmd *cobra.Command, args []string) {
 	for _, attachArg := range attachFlags {
 		attachID, err := utils.ResolvePartialID(ctx, store, attachArg)
 		if err != nil {
-			FatalError("resolving attachment ID %s: %v", attachArg, err)
+			return HandleError("resolving attachment ID %s: %v", attachArg, err)
 		}
 		attachIssue, err := store.GetIssue(ctx, attachID)
 		if err != nil {
-			FatalError("loading attachment %s: %v", attachID, err)
+			return HandleError("loading attachment %s: %v", attachID, err)
 		}
 		if !isProto(attachIssue) {
-			FatalError("%s is not a proto (missing '%s' label)", attachID, MoleculeLabel)
+			return HandleError("%s is not a proto (missing '%s' label)", attachID, MoleculeLabel)
 		}
 		attachSubgraph, err := loadTemplateSubgraph(ctx, store, attachID)
 		if err != nil {
-			FatalError("loading attachment subgraph %s: %v", attachID, err)
+			return HandleError("loading attachment subgraph %s: %v", attachID, err)
 		}
 		attachments = append(attachments, attachmentInfo{
 			id:       attachID,
@@ -185,7 +192,7 @@ func runPour(cmd *cobra.Command, args []string) {
 		}
 	}
 	if len(missingVars) > 0 {
-		FatalErrorWithHint(
+		return HandleErrorWithHint(
 			fmt.Sprintf("missing required variables: %s", strings.Join(missingVars, ", ")),
 			fmt.Sprintf("Provide them with: --var %s=<value>", missingVars[0]),
 		)
@@ -208,14 +215,12 @@ func runPour(cmd *cobra.Command, args []string) {
 				fmt.Printf("  + %s (%d issues)\n", attach.issue.Title, len(attach.subgraph.Issues))
 			}
 		}
-		return
+		return nil
 	}
 
-	// Spawn as persistent mol (ephemeral=false)
-	// Use mol prefix for distinct visual recognition (see types.IDPrefixMol)
 	result, err := spawnMolecule(ctx, store, subgraph, vars, assignee, actor, false, types.IDPrefixMol)
 	if err != nil {
-		FatalError("pouring proto: %v", err)
+		return HandleError("pouring proto: %v", err)
 	}
 
 	// Attach bonded protos
@@ -223,14 +228,13 @@ func runPour(cmd *cobra.Command, args []string) {
 	if len(attachments) > 0 {
 		spawnedMol, err := store.GetIssue(ctx, result.NewEpicID)
 		if err != nil {
-			FatalError("loading spawned mol: %v", err)
+			return HandleError("loading spawned mol: %v", err)
 		}
 
 		for _, attach := range attachments {
-			// pour command always creates persistent (Wisp=false) issues
 			bondResult, err := bondProtoMol(ctx, store, attach.issue, spawnedMol, attachType, vars, "", actor, false, true)
 			if err != nil {
-				FatalError("attaching %s: %v", attach.id, err)
+				return HandleError("attaching %s: %v", attach.id, err)
 			}
 			totalAttached += bondResult.Spawned
 		}
@@ -242,8 +246,7 @@ func runPour(cmd *cobra.Command, args []string) {
 			Attached int    `json:"attached"`
 			Phase    string `json:"phase"`
 		}
-		outputJSON(pourResult{result, totalAttached, "liquid"})
-		return
+		return outputJSON(pourResult{result, totalAttached, "liquid"})
 	}
 
 	fmt.Printf("%s Poured mol: created %d issues\n", ui.RenderPass("✓"), result.Created)
@@ -252,6 +255,7 @@ func runPour(cmd *cobra.Command, args []string) {
 	if totalAttached > 0 {
 		fmt.Printf("  Attached: %d issues from %d protos\n", totalAttached, len(attachments))
 	}
+	return nil
 }
 
 func init() {

@@ -290,6 +290,7 @@ def test_find_beads_db_prefers_redirect_over_parent():
 
 # --- GH#2997: embedded Dolt and other backend detection ---
 
+
 def test_find_beads_db_embedded_dolt():
     """Embedded Dolt projects have no *.db file; detect via metadata.json."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -334,9 +335,7 @@ def test_find_beads_db_redirect_to_dolt():
         main_dir.mkdir()
         main_beads = main_dir / ".beads"
         main_beads.mkdir()
-        (main_beads / "metadata.json").write_text(
-            '{"backend":"dolt","dolt_mode":"embedded"}'
-        )
+        (main_beads / "metadata.json").write_text('{"backend":"dolt","dolt_mode":"embedded"}')
         (main_beads / "embeddeddolt").mkdir()
 
         worker = Path(tmpdir) / "worker"

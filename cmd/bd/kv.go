@@ -7,10 +7,13 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage/kvkeys"
 )
 
 // kvPrefix is prepended to all user keys to separate them from internal config
-const kvPrefix = "kv."
+const kvPrefix = kvkeys.Prefix
 
 // validateKVKey checks if a key is valid for the KV store.
 // Returns an error if the key is invalid.
@@ -22,8 +25,17 @@ func validateKVKey(key string) error {
 		return fmt.Errorf("key cannot be only whitespace")
 	}
 	// Prevent keys that would create nested kv.kv.* prefixes
-	if strings.HasPrefix(key, "kv.") {
+	if strings.HasPrefix(key, kvPrefix) {
 		return fmt.Errorf("key cannot start with 'kv.' (would create nested prefix)")
+	}
+	// Reserve the persistent-memory namespace: a generic memory.* key would
+	// store to kv.memory.*, indistinguishable from a `bd remember` memory, and
+	// the merge resolver auto-resolves kv.memory.* conflicts with --theirs
+	// (GH#2474). Without this guard a user's deliberate kv value could be
+	// silently overridden by a remote on pull. Keep the namespace owned by
+	// bd remember / bd forget.
+	if strings.HasPrefix(key, kvkeys.MemoryPrefix) {
+		return fmt.Errorf("key cannot start with %q (reserved for persistent memories; use 'bd remember' / 'bd forget')", kvkeys.MemoryPrefix)
 	}
 	// Prevent keys that look like internal config
 	if strings.HasPrefix(key, "sync.") || strings.HasPrefix(key, "conflict.") ||
@@ -65,34 +77,43 @@ Examples:
   bd kv set feature_flag true
   bd kv set api_endpoint https://api.example.com
   bd kv set max_retries 3`,
-	Args: cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(2),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("kv set")
 
+		evt := metrics.NewCommandEvent("kv-set")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := ensureDirectMode("kv set requires direct database access"); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		key := args[0]
 		if err := validateKVKey(key); err != nil {
-			FatalErrorRespectJSON("invalid key: %v", err)
+			return HandleErrorRespectJSON("invalid key: %v", err)
 		}
 		value := args[1]
 		storageKey := kvPrefix + key
 
 		ctx := rootCtx
 		if err := store.SetConfig(ctx, storageKey, value); err != nil {
-			FatalErrorRespectJSON("setting key: %v", err)
+			return HandleErrorRespectJSON("setting key: %v", err)
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]string{
+			return outputJSON(map[string]string{
 				"key":   key,
 				"value": value,
 			})
-		} else {
-			fmt.Printf("Set %s = %s\n", key, value)
 		}
+		fmt.Printf("Set %s = %s\n", key, value)
+		return nil
 	},
 }
 
@@ -105,10 +126,19 @@ var kvGetCmd = &cobra.Command{
 Examples:
   bd kv get feature_flag
   bd kv get api_endpoint`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("kv-get")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := ensureDirectMode("kv get requires direct database access"); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		key := args[0]
@@ -117,27 +147,28 @@ Examples:
 		ctx := rootCtx
 		value, err := store.GetConfig(ctx, storageKey)
 		if err != nil {
-			FatalErrorRespectJSON("getting key: %v", err)
+			return HandleErrorRespectJSON("getting key: %v", err)
 		}
 
 		if jsonOutput {
-			result := map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"key":   key,
 				"value": value,
 				"found": value != "",
+			}); jerr != nil {
+				return jerr
 			}
-			outputJSON(result)
 			if value == "" {
-				os.Exit(1)
+				return SilentExit()
 			}
-		} else {
-			if value == "" {
-				fmt.Fprintf(os.Stderr, "%s (not set)\n", key)
-				os.Exit(1)
-			} else {
-				fmt.Printf("%s\n", value)
-			}
+			return nil
 		}
+		if value == "" {
+			fmt.Fprintf(os.Stderr, "%s (not set)\n", key)
+			return SilentExit()
+		}
+		fmt.Printf("%s\n", value)
+		return nil
 	},
 }
 
@@ -150,33 +181,42 @@ var kvClearCmd = &cobra.Command{
 Examples:
   bd kv clear feature_flag
   bd kv clear api_endpoint`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("kv clear")
 
+		evt := metrics.NewCommandEvent("kv-clear")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := ensureDirectMode("kv clear requires direct database access"); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		key := args[0]
 		if err := validateKVKey(key); err != nil {
-			FatalErrorRespectJSON("invalid key: %v", err)
+			return HandleErrorRespectJSON("invalid key: %v", err)
 		}
 		storageKey := kvPrefix + key
 
 		ctx := rootCtx
 		if err := store.DeleteConfig(ctx, storageKey); err != nil {
-			FatalErrorRespectJSON("deleting key: %v", err)
+			return HandleErrorRespectJSON("deleting key: %v", err)
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]string{
+			return outputJSON(map[string]string{
 				"key":     key,
 				"deleted": "true",
 			})
-		} else {
-			fmt.Printf("Cleared %s\n", key)
 		}
+		fmt.Printf("Cleared %s\n", key)
+		return nil
 	},
 }
 
@@ -189,18 +229,26 @@ var kvListCmd = &cobra.Command{
 Examples:
   bd kv list
   bd kv list --json`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("kv-list")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := ensureDirectMode("kv list requires direct database access"); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		ctx := rootCtx
 		allConfig, err := store.GetAllConfig(ctx)
 		if err != nil {
-			FatalErrorRespectJSON("listing keys: %v", err)
+			return HandleErrorRespectJSON("listing keys: %v", err)
 		}
 
-		// Filter for kv.* keys and strip prefix
 		kvPairs := make(map[string]string)
 		for k, v := range allConfig {
 			if strings.HasPrefix(k, kvPrefix) {
@@ -210,16 +258,14 @@ Examples:
 		}
 
 		if jsonOutput {
-			outputJSON(kvPairs)
-			return
+			return outputJSON(kvPairs)
 		}
 
 		if len(kvPairs) == 0 {
 			fmt.Println("No key-value pairs set")
-			return
+			return nil
 		}
 
-		// Sort keys for consistent output
 		keys := make([]string, 0, len(kvPairs))
 		for k := range kvPairs {
 			keys = append(keys, k)
@@ -230,6 +276,7 @@ Examples:
 		for _, k := range keys {
 			fmt.Printf("  %s = %s\n", k, kvPairs[k])
 		}
+		return nil
 	},
 }
 

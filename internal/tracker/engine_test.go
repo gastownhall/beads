@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
@@ -42,205 +41,6 @@ func newTestStore(t *testing.T) *dolt.DoltStore {
 		store.Close()
 	})
 	return store
-}
-
-// mockTracker implements IssueTracker for testing.
-type mockTracker struct {
-	name            string
-	issues          []TrackerIssue
-	created         []*types.Issue
-	updated         map[string]*types.Issue
-	fetchErr        error
-	fetchIssueErr   error
-	createErr       error
-	createFailAfter int // fail after this many successful creates (0 = fail immediately)
-	updateErr       error
-	fieldMapper     FieldMapper
-	fetchIssues     func(context.Context, FetchOptions) ([]TrackerIssue, error)
-}
-
-type mockExternalRefTracker struct {
-	*mockTracker
-	buildRef func(*TrackerIssue) string
-	extract  func(string) string
-	isRef    func(string) bool
-}
-
-type mockBatchTracker struct {
-	*mockTracker
-	batchResult   *BatchPushResult
-	batchDryRun   *BatchPushResult
-	batchErr      error
-	batchCalls    int
-	batchDryCalls int
-	batchIssues   []*types.Issue
-	batchForceIDs map[string]bool
-}
-
-func newMockTracker(name string) *mockTracker {
-	return &mockTracker{
-		name:        name,
-		updated:     make(map[string]*types.Issue),
-		fieldMapper: &mockMapper{},
-	}
-}
-
-func (m *mockExternalRefTracker) IsExternalRef(ref string) bool {
-	if m.isRef != nil {
-		return m.isRef(ref)
-	}
-	return m.mockTracker.IsExternalRef(ref)
-}
-
-func (m *mockExternalRefTracker) ExtractIdentifier(ref string) string {
-	if m.extract != nil {
-		return m.extract(ref)
-	}
-	return m.mockTracker.ExtractIdentifier(ref)
-}
-
-func (m *mockExternalRefTracker) BuildExternalRef(issue *TrackerIssue) string {
-	if m.buildRef != nil {
-		return m.buildRef(issue)
-	}
-	return m.mockTracker.BuildExternalRef(issue)
-}
-
-func (m *mockTracker) Name() string                                    { return m.name }
-func (m *mockTracker) DisplayName() string                             { return m.name }
-func (m *mockTracker) ConfigPrefix() string                            { return m.name }
-func (m *mockTracker) Init(_ context.Context, _ storage.Storage) error { return nil }
-func (m *mockTracker) Validate() error                                 { return nil }
-func (m *mockTracker) Close() error                                    { return nil }
-func (m *mockTracker) FieldMapper() FieldMapper                        { return m.fieldMapper }
-func (m *mockTracker) IsExternalRef(ref string) bool                   { return len(ref) > 0 }
-func (m *mockTracker) ExtractIdentifier(ref string) string {
-	// Extract "EXT-1" from "https://test.test/EXT-1"
-	if i := strings.LastIndex(ref, "/"); i >= 0 {
-		return ref[i+1:]
-	}
-	return ref
-}
-func (m *mockTracker) BuildExternalRef(issue *TrackerIssue) string {
-	return fmt.Sprintf("https://%s.test/%s", m.name, issue.Identifier)
-}
-
-func (m *mockBatchTracker) BatchPush(_ context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error) {
-	if m.batchErr != nil {
-		return nil, m.batchErr
-	}
-	m.batchCalls++
-	m.batchIssues = append(m.batchIssues, issues...)
-	m.batchForceIDs = forceIDs
-	if m.batchResult != nil {
-		return m.batchResult, nil
-	}
-	return &BatchPushResult{}, nil
-}
-
-func (m *mockBatchTracker) BatchPushDryRun(_ context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error) {
-	if m.batchErr != nil {
-		return nil, m.batchErr
-	}
-	m.batchDryCalls++
-	m.batchIssues = append(m.batchIssues, issues...)
-	m.batchForceIDs = forceIDs
-	if m.batchDryRun != nil {
-		return m.batchDryRun, nil
-	}
-	return &BatchPushResult{}, nil
-}
-
-func (m *mockTracker) FetchIssues(ctx context.Context, opts FetchOptions) ([]TrackerIssue, error) {
-	if m.fetchErr != nil {
-		return nil, m.fetchErr
-	}
-	if m.fetchIssues != nil {
-		return m.fetchIssues(ctx, opts)
-	}
-	return m.issues, nil
-}
-
-func (m *mockTracker) FetchIssue(_ context.Context, identifier string) (*TrackerIssue, error) {
-	if m.fetchIssueErr != nil {
-		return nil, m.fetchIssueErr
-	}
-	if m.fetchErr != nil {
-		return nil, m.fetchErr
-	}
-	for i := range m.issues {
-		if m.issues[i].Identifier == identifier {
-			return &m.issues[i], nil
-		}
-	}
-	return nil, nil
-}
-
-func (m *mockTracker) CreateIssue(_ context.Context, issue *types.Issue) (*TrackerIssue, error) {
-	if m.createErr != nil {
-		if m.createFailAfter > 0 && len(m.created) < m.createFailAfter {
-			// Allow first N creates to succeed
-		} else {
-			return nil, m.createErr
-		}
-	}
-	m.created = append(m.created, issue)
-	return &TrackerIssue{
-		ID:         "ext-" + issue.ID,
-		Identifier: "EXT-" + issue.ID,
-		URL:        fmt.Sprintf("https://%s.test/EXT-%s", m.name, issue.ID),
-		Title:      issue.Title,
-	}, nil
-}
-
-func (m *mockTracker) UpdateIssue(_ context.Context, externalID string, issue *types.Issue) (*TrackerIssue, error) {
-	if m.updateErr != nil {
-		return nil, m.updateErr
-	}
-	m.updated[externalID] = issue
-	return &TrackerIssue{
-		ID:         externalID,
-		Identifier: externalID,
-		Title:      issue.Title,
-	}, nil
-}
-
-// mockMapper implements FieldMapper for testing.
-type mockMapper struct {
-	issueToBeads func(*TrackerIssue) *IssueConversion
-}
-
-func (m *mockMapper) PriorityToBeads(p interface{}) int {
-	if v, ok := p.(int); ok {
-		return v
-	}
-	return 2
-}
-func (m *mockMapper) PriorityToTracker(p int) interface{}         { return p }
-func (m *mockMapper) StatusToBeads(_ interface{}) types.Status    { return types.StatusOpen }
-func (m *mockMapper) StatusToTracker(s types.Status) interface{}  { return string(s) }
-func (m *mockMapper) TypeToBeads(_ interface{}) types.IssueType   { return types.TypeTask }
-func (m *mockMapper) TypeToTracker(t types.IssueType) interface{} { return string(t) }
-func (m *mockMapper) IssueToTracker(issue *types.Issue) map[string]interface{} {
-	return map[string]interface{}{
-		"title":       issue.Title,
-		"description": issue.Description,
-	}
-}
-
-func (m *mockMapper) IssueToBeads(ti *TrackerIssue) *IssueConversion {
-	if m.issueToBeads != nil {
-		return m.issueToBeads(ti)
-	}
-	return &IssueConversion{
-		Issue: &types.Issue{
-			Title:       ti.Title,
-			Description: ti.Description,
-			Priority:    2,
-			Status:      types.StatusOpen,
-			IssueType:   types.TypeTask,
-		},
-	}
 }
 
 func TestEnginePullMatchesExistingIssueByLocalID(t *testing.T) {
@@ -1094,10 +894,11 @@ func TestEngineConflictResolution(t *testing.T) {
 	store := newTestStore(t)
 	defer store.Close()
 
-	// Set up last_sync (use UTC to avoid DATETIME timezone round-trip issues)
+	// Set up last_sync (use UTC to avoid DATETIME timezone round-trip issues).
+	// The engine reads last_sync from local metadata, not config.
 	lastSync := time.Now().UTC().Add(-1 * time.Hour)
-	if err := store.SetConfig(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
-		t.Fatalf("SetConfig() error: %v", err)
+	if err := store.SetLocalMetadata(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetLocalMetadata() error: %v", err)
 	}
 
 	// Create a local issue that was modified after last_sync
@@ -1146,8 +947,8 @@ func TestEngineSyncDoesNotCreateFalseConflictsAfterPull(t *testing.T) {
 	defer store.Close()
 
 	lastSync := time.Now().UTC().Add(-1 * time.Hour)
-	if err := store.SetConfig(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
-		t.Fatalf("SetConfig() error: %v", err)
+	if err := store.SetLocalMetadata(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetLocalMetadata() error: %v", err)
 	}
 
 	issue := &types.Issue{

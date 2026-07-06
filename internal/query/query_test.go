@@ -115,6 +115,36 @@ func TestLexer(t *testing.T) {
 			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"label", "=", "gt:merge-request", ""},
 		},
+		{
+			name:     "digit-led identifier on the value side",
+			input:    "assignee=1-alpha",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"assignee", "=", "1-alpha", ""},
+		},
+		{
+			name:     "digit-led identifier in a compound expression",
+			input:    "assignee=2-bravo AND status=open",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"assignee", "=", "2-bravo", "AND", "status", "=", "open", ""},
+		},
+		{
+			name:     "digit-led identifier with duration-suffix prefix",
+			input:    "label=7day-window",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "7day-window", ""},
+		},
+		{
+			name:     "duration still wins when the suffix stands alone",
+			input:    "updated>30d",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenEOF},
+			values:   []string{"updated", ">", "30d", ""},
+		},
+		{
+			name:     "duration with trailing space stays a duration",
+			input:    "updated>30d AND status=open",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"updated", ">", "30d", "AND", "status", "=", "open", ""},
+		},
 	}
 
 	for _, tt := range tests {

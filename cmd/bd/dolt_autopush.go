@@ -107,6 +107,10 @@ func maybeAutoPush(ctx context.Context) {
 		debug.Logf("dolt auto-push: skipped (sandbox mode)\n")
 		return
 	}
+	if isDoltLocalOnly() {
+		debug.Logf("dolt auto-push: skipped (dolt.local-only=true)\n")
+		return
+	}
 	if !isDoltAutoPushEnabled(ctx) {
 		return
 	}
@@ -171,7 +175,9 @@ func maybeAutoPush(ctx context.Context) {
 			} else {
 				fmt.Fprintf(os.Stderr, "Warning: dolt auto-push failed: %v\n", err)
 			}
-			if isDivergedHistoryErr(err) {
+			if isAncestorPKMismatchErr(err) {
+				printAncestorPKMismatchGuidance(err)
+			} else if isDivergedHistoryErr(err) {
 				printDivergedHistoryGuidance("push")
 			}
 		}

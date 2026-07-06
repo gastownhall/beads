@@ -47,6 +47,15 @@ func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.D
 					continue
 				}
 
+				// relates-to is a loose graph link, not a hierarchical edge:
+				// treating it as parent-child causes incorrect nesting and, when
+				// bidirectional, marks both endpoints as children of each other
+				// — collapsing them out of the root set and silently dropping
+				// whole subtrees from `bd list`. See gastownhall/beads#3936.
+				if dep.Type == types.DepRelatesTo {
+					continue
+				}
+
 				// Treat as parent-child if:
 				// 1. Explicit parent-child dependency type, OR
 				// 2. Any dependency where the target is an epic

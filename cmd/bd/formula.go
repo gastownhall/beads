@@ -12,6 +12,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -54,7 +55,9 @@ Examples:
   bd formula list --json
   bd formula list --type workflow
   bd formula list --type convoy`,
-	Run: runFormulaList,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runFormulaList,
 }
 
 // formulaShowCmd shows details of a specific formula.
@@ -74,8 +77,10 @@ Examples:
   bd formula show shiny
   bd formula show rule-of-five
   bd formula show security-audit --json`,
-	Args: cobra.ExactArgs(1),
-	Run:  runFormulaShow,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runFormulaShow,
 }
 
 // FormulaListEntry represents a formula in the list output.
@@ -88,30 +93,33 @@ type FormulaListEntry struct {
 	Vars        int    `json:"vars"`
 }
 
-func runFormulaList(cmd *cobra.Command, args []string) {
+func runFormulaList(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("formula-list")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	typeFilter, _ := cmd.Flags().GetString("type")
 
-	// Get all search paths
 	searchPaths := getFormulaSearchPaths()
 
-	// Track seen formulas (first occurrence wins)
 	seen := make(map[string]bool)
 	var entries []FormulaListEntry
 
-	// Scan each search path
 	for _, dir := range searchPaths {
 		formulas, err := scanFormulaDir(dir)
 		if err != nil {
-			continue // Skip inaccessible directories
+			continue
 		}
 
 		for _, f := range formulas {
 			if seen[f.Formula] {
-				continue // Skip shadowed formulas
+				continue
 			}
 			seen[f.Formula] = true
 
-			// Apply type filter
 			if typeFilter != "" && string(f.Type) != typeFilter {
 				continue
 			}
@@ -127,14 +135,12 @@ func runFormulaList(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Sort by name
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Name < entries[j].Name
 	})
 
 	if jsonOutput {
-		outputJSON(entries)
-		return
+		return outputJSON(entries)
 	}
 
 	if len(entries) == 0 {
@@ -143,18 +149,16 @@ func runFormulaList(cmd *cobra.Command, args []string) {
 		for _, p := range searchPaths {
 			fmt.Printf("  %s\n", p)
 		}
-		return
+		return nil
 	}
 
 	fmt.Printf("📜 Formulas (%d found)\n\n", len(entries))
 
-	// Group by type
 	byType := make(map[string][]FormulaListEntry)
 	for _, e := range entries {
 		byType[e.Type] = append(byType[e.Type], e)
 	}
 
-	// Print in type order: workflow, expansion, aspect, convoy
 	typeOrder := []string{"workflow", "expansion", "aspect", "convoy"}
 	for _, t := range typeOrder {
 		typeEntries := byType[t]
@@ -174,15 +178,21 @@ func runFormulaList(cmd *cobra.Command, args []string) {
 		}
 		fmt.Println()
 	}
+	return nil
 }
 
-func runFormulaShow(cmd *cobra.Command, args []string) {
+func runFormulaShow(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("formula-show")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	name := args[0]
 
-	// Create parser with default search paths
 	parser := formula.NewParser()
 
-	// Try to load the formula
 	f, err := parser.LoadByName(name)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -190,15 +200,13 @@ func runFormulaShow(cmd *cobra.Command, args []string) {
 		for _, p := range getFormulaSearchPaths() {
 			fmt.Fprintf(os.Stderr, "  %s\n", p)
 		}
-		os.Exit(1)
+		return SilentExit()
 	}
 
 	if jsonOutput {
-		outputJSON(f)
-		return
+		return outputJSON(f)
 	}
 
-	// Print header
 	typeIcon := getTypeIcon(string(f.Type))
 	fmt.Printf("\n%s %s\n", typeIcon, f.Formula)
 	fmt.Printf("   Type: %s\n", f.Type)
@@ -342,6 +350,7 @@ func runFormulaShow(cmd *cobra.Command, args []string) {
 	}
 
 	fmt.Println()
+	return nil
 }
 
 // getFormulaSearchPaths returns the formula search paths in priority order.
@@ -481,7 +490,9 @@ Examples:
   bd formula convert --all              # Convert all JSON formulas
   bd formula convert shiny --delete     # Convert and remove JSON file
   bd formula convert shiny --stdout     # Print TOML to stdout`,
-	Run: runFormulaConvert,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runFormulaConvert,
 }
 
 var (
@@ -490,27 +501,31 @@ var (
 	convertStdout bool
 )
 
-func runFormulaConvert(cmd *cobra.Command, args []string) {
+func runFormulaConvert(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("formula-convert")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if convertAll {
 		convertAllFormulas()
-		return
+		return nil
 	}
 
 	if len(args) == 0 {
-		FatalErrorWithHint("formula name or path required", "Usage: bd formula convert <name|path> [--all]")
+		return HandleErrorWithHint("formula name or path required", "Usage: bd formula convert <name|path> [--all]")
 	}
 
 	name := args[0]
 
-	// Determine the JSON file path
 	var jsonPath string
 	if strings.HasSuffix(name, formula.FormulaExtJSON) {
-		// Direct path provided
 		jsonPath = name
 	} else if strings.HasSuffix(name, formula.FormulaExtTOML) {
-		FatalError("%s is already a TOML file", name)
+		return HandleError("%s is already a TOML file", name)
 	} else {
-		// Search for the formula in search paths
 		jsonPath = findFormulaJSON(name)
 		if jsonPath == "" {
 			fmt.Fprintf(os.Stderr, "Error: JSON formula %q not found\n", name)
@@ -518,34 +533,30 @@ func runFormulaConvert(cmd *cobra.Command, args []string) {
 			for _, p := range getFormulaSearchPaths() {
 				fmt.Fprintf(os.Stderr, "  %s\n", p)
 			}
-			os.Exit(1)
+			return SilentExit()
 		}
 	}
 
-	// Parse the JSON file
 	parser := formula.NewParser()
 	f, err := parser.ParseFile(jsonPath)
 	if err != nil {
-		FatalError("parsing %s: %v", jsonPath, err)
+		return HandleError("parsing %s: %v", jsonPath, err)
 	}
 
-	// Convert to TOML
 	tomlData, err := formulaToTOML(f)
 	if err != nil {
-		FatalError("converting to TOML: %v", err)
+		return HandleError("converting to TOML: %v", err)
 	}
 
 	if convertStdout {
 		fmt.Print(string(tomlData))
-		return
+		return nil
 	}
 
-	// Determine output path
 	tomlPath := strings.TrimSuffix(jsonPath, formula.FormulaExtJSON) + formula.FormulaExtTOML
 
-	// Write the TOML file
 	if err := os.WriteFile(tomlPath, tomlData, 0600); err != nil {
-		FatalError("writing %s: %v", tomlPath, err)
+		return HandleError("writing %s: %v", tomlPath, err)
 	}
 
 	fmt.Printf("✓ Converted: %s\n", tomlPath)
@@ -557,6 +568,7 @@ func runFormulaConvert(cmd *cobra.Command, args []string) {
 			fmt.Printf("✓ Deleted: %s\n", jsonPath)
 		}
 	}
+	return nil
 }
 
 func convertAllFormulas() {

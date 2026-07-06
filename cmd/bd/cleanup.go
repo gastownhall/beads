@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -45,9 +46,18 @@ SAFETY:
 SEE ALSO:
   bd doctor --fix    Automatic health checks and repairs (recommended for routine maintenance)
   bd admin compact   Compact old closed issues to save space`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("admin-cleanup")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := requireServerMode("cleanup"); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 		force, _ := cmd.Flags().GetBool("force")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -55,40 +65,34 @@ SEE ALSO:
 		olderThanDays, _ := cmd.Flags().GetInt("older-than")
 		wispOnly, _ := cmd.Flags().GetBool("ephemeral")
 
-		// Ensure we have storage
 		if store == nil {
 			if err := ensureStoreActive(); err != nil {
-				FatalError("%v", err)
+				return HandleError("%v", err)
 			}
 		}
 
 		ctx := rootCtx
 
-		// Build filter for closed issues
 		statusClosed := types.StatusClosed
 		filter := types.IssueFilter{
 			Status: &statusClosed,
 		}
 
-		// Add age filter if specified
 		if olderThanDays > 0 {
 			cutoffTime := time.Now().AddDate(0, 0, -olderThanDays)
 			filter.ClosedBefore = &cutoffTime
 		}
 
-		// Add wisp filter if specified (bd-kwro.9)
 		if wispOnly {
 			wispTrue := true
 			filter.Ephemeral = &wispTrue
 		}
 
-		// Get all closed issues matching filter
 		closedIssues, err := store.SearchIssues(ctx, "", filter)
 		if err != nil {
-			FatalError("listing issues: %v", err)
+			return HandleError("listing issues: %v", err)
 		}
 
-		// Filter out pinned issues - they are protected from cleanup (bd-b2k)
 		pinnedCount := 0
 		filteredIssues := make([]*types.Issue, 0, len(closedIssues))
 		for _, issue := range closedIssues {
@@ -116,7 +120,9 @@ SEE ALSO:
 				if wispOnly {
 					result.Ephemeral = true
 				}
-				outputJSON(result)
+				if err := outputJSON(result); err != nil {
+					return err
+				}
 			} else {
 				msg := "No closed issues to delete"
 				if wispOnly && olderThanDays > 0 {
@@ -128,22 +134,20 @@ SEE ALSO:
 				}
 				fmt.Println(msg)
 			}
-			return
+			return nil
 		}
 
-		// Extract IDs
 		issueIDs := make([]string, len(closedIssues))
 		for i, issue := range closedIssues {
 			issueIDs[i] = issue.ID
 		}
 
-		// Show preview
 		if !force && !dryRun {
 			issueType := "closed"
 			if wispOnly {
 				issueType = "closed wisp"
 			}
-			FatalErrorWithHint(
+			return HandleErrorWithHint(
 				fmt.Sprintf("would delete %d %s issue(s)", len(issueIDs), issueType),
 				"Use --force to confirm or --dry-run to preview.")
 		}
@@ -164,8 +168,10 @@ SEE ALSO:
 			fmt.Println()
 		}
 
-		// Use the existing batch deletion logic
-		deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false, "cleanup")
+		if err := deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false, "cleanup"); err != nil {
+			return HandleError("%v", err)
+		}
+		return nil
 	},
 }
 

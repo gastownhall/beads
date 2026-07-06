@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/validation"
 )
@@ -20,24 +21,33 @@ Example:
   bd q "Fix login bug"           # Outputs: bd-a1b2
   ISSUE=$(bd q "New feature")    # Capture ID in variable
   bd q "Task" | xargs bd show    # Pipe to other commands`,
-	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		CheckReadonly("create")
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// Create the event before the readonly guard so the operation label
+		// matches this command ("q", not "create") and the readonly exit path
+		// still flushes queued metrics via CheckReadonly's CloseAndFlush.
+		evt := metrics.NewCommandEvent("q")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		CheckReadonly("q")
 
 		title := strings.Join(args, " ")
 
-		// Get optional flags
 		priorityStr, _ := cmd.Flags().GetString("priority")
 		issueType, _ := cmd.Flags().GetString("type")
 		labels, _ := cmd.Flags().GetStringSlice("labels")
 
-		// Parse priority
 		priority, err := validation.ValidatePriority(priorityStr)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
-		// Direct mode
 		issue := &types.Issue{
 			Title:     title,
 			Status:    types.StatusOpen,
@@ -48,13 +58,13 @@ Example:
 
 		ctx := rootCtx
 		if err := store.CreateIssue(ctx, issue, actor); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		commandDidWrite.Store(true)
 
-		// Output only the ID
 		fmt.Println(issue.ID)
+		return nil
 	},
 }
 

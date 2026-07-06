@@ -80,6 +80,39 @@ func bdCreateFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
+type graphCreateResult struct {
+	IDs map[string]string `json:"ids"`
+}
+
+func writeGraphCreatePlan(t *testing.T, dir string) string {
+	t.Helper()
+	plan := `{
+		"nodes": [
+			{"key": "root", "title": "Graph root", "type": "task"},
+			{"key": "child", "title": "Graph child", "type": "task", "parent_key": "root"}
+		]
+	}`
+	planFile := filepath.Join(dir, "graph-plan.json")
+	if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
+		t.Fatalf("write graph plan: %v", err)
+	}
+	return planFile
+}
+
+func bdCreateGraph(t *testing.T, bd, dir, planFile string, args ...string) graphCreateResult {
+	t.Helper()
+	fullArgs := append([]string{"create", "--json", "--graph", planFile}, args...)
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd create --graph %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	var result graphCreateResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse graph create result: %v\n%s", err, out)
+	}
+	return result
+}
+
 // bdShow runs "bd show <id> --json" and returns the parsed issue.
 func bdShow(t *testing.T, bd, dir, id string) *types.Issue {
 	t.Helper()
@@ -412,6 +445,42 @@ func TestEmbeddedCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("initial_status_builtin", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sb")
+		issue := bdCreate(t, bd, dir, "Blocked issue", "--status", "blocked")
+		if issue.Status != types.StatusBlocked {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusBlocked)
+		}
+	})
+
+	t.Run("initial_status_custom", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sc")
+		bdConfig(t, bd, dir, "set", "status.custom", "review:wip")
+		issue := bdCreate(t, bd, dir, "Review issue", "--status", "review")
+		if issue.Status != types.Status("review") {
+			t.Errorf("status: got %q, want review", issue.Status)
+		}
+	})
+
+	t.Run("initial_status_invalid", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "si")
+		out := bdCreateFail(t, bd, dir, "Invalid status issue", "--status", "not_a_status")
+		if !strings.Contains(out, `invalid status "not_a_status"`) {
+			t.Fatalf("expected invalid status error, got:\n%s", out)
+		}
+	})
+
+	t.Run("initial_status_wins_over_defer", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sd")
+		issue := bdCreate(t, bd, dir, "Deferred but blocked issue", "--status", "blocked", "--defer", "+2h")
+		if issue.Status != types.StatusBlocked {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusBlocked)
+		}
+		if issue.DeferUntil == nil {
+			t.Fatal("expected DeferUntil to be set")
+		}
+	})
+
 	t.Run("ephemeral", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ep")
 		issue := bdCreate(t, bd, dir, "Ephemeral issue", "--ephemeral")
@@ -438,6 +507,62 @@ func TestEmbeddedCreate(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "No history issue", "--no-history")
 		if issue.ID == "" {
 			t.Fatal("expected issue ID")
+		}
+	})
+
+	t.Run("graph_ephemeral", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ge")
+		planFile := writeGraphCreatePlan(t, dir)
+		result := bdCreateGraph(t, bd, dir, planFile, "--ephemeral")
+		rootID := result.IDs["root"]
+		childID := result.IDs["child"]
+		if rootID == "" || childID == "" {
+			t.Fatalf("expected root and child IDs, got %#v", result.IDs)
+		}
+
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "ge", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+
+		for _, id := range []string{rootID, childID} {
+			var ephemeral, noHistory int
+			if err := db.QueryRowContext(t.Context(), "SELECT ephemeral, no_history FROM wisps WHERE id = ?", id).Scan(&ephemeral, &noHistory); err != nil {
+				t.Fatalf("query graph ephemeral bead %s: %v", id, err)
+			}
+			if ephemeral != 1 || noHistory != 0 {
+				t.Fatalf("graph ephemeral bead %s flags = ephemeral:%d no_history:%d, want 1/0", id, ephemeral, noHistory)
+			}
+		}
+	})
+
+	t.Run("graph_no_history", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gn")
+		planFile := writeGraphCreatePlan(t, dir)
+		result := bdCreateGraph(t, bd, dir, planFile, "--no-history")
+		rootID := result.IDs["root"]
+		childID := result.IDs["child"]
+		if rootID == "" || childID == "" {
+			t.Fatalf("expected root and child IDs, got %#v", result.IDs)
+		}
+
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gn", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+
+		for _, id := range []string{rootID, childID} {
+			var ephemeral, noHistory int
+			if err := db.QueryRowContext(t.Context(), "SELECT ephemeral, no_history FROM wisps WHERE id = ?", id).Scan(&ephemeral, &noHistory); err != nil {
+				t.Fatalf("query graph no-history bead %s: %v", id, err)
+			}
+			if ephemeral != 0 || noHistory != 1 {
+				t.Fatalf("graph no-history bead %s flags = ephemeral:%d no_history:%d, want 0/1", id, ephemeral, noHistory)
+			}
 		}
 	})
 

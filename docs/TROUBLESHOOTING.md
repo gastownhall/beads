@@ -639,6 +639,41 @@ chmod +x .git/hooks/post-merge
 chmod +x .git/hooks/post-checkout
 ```
 
+### Corrupted symlinked `CLAUDE.md`
+
+**Symptom:** Git reports `CLAUDE.md` as a symlink entry (`mode 120000`), but
+the indexed blob contains multi-line Markdown instead of a one-line symlink
+target. On macOS this can make clones or checkouts fail because symlink targets
+cannot contain newline-separated Markdown content.
+
+This affects repositories that were already corrupted by older setup behavior.
+The setup bug has been fixed ([#4192](https://github.com/gastownhall/beads/pull/4192));
+the recipe below repairs an existing bad Git index entry.
+
+**Confirm the bad entry:**
+
+```bash
+git ls-files -s CLAUDE.md
+git cat-file -p :CLAUDE.md | sed -n '1,5p'
+```
+
+If `git ls-files -s` starts with `120000` and `git cat-file` prints Markdown,
+convert the existing blob to a regular tracked file without changing its
+content:
+
+```bash
+sha=$(git rev-parse :CLAUDE.md)
+git update-index --cacheinfo 100644,$sha,CLAUDE.md
+git checkout-index -f -- CLAUDE.md
+
+# Verify that the index now records a normal file.
+git ls-files -s CLAUDE.md
+git diff -- CLAUDE.md
+```
+
+Commit the mode repair after review. The first column from `git ls-files -s`
+should now be `100644`.
+
 ### "Branch already checked out" when switching branches
 
 **Symptom:**

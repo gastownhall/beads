@@ -891,6 +891,73 @@ func TestIssueStructFields(t *testing.T) {
 	}
 }
 
+// TestIssueLeaseJSONSerialization verifies the leasing columns (migration 0054)
+// are surfaced in JSON when present and omitted when absent, while the internal
+// row_lock is never exposed. Backs `bd show <id> --json` (wy-9cdw).
+func TestIssueLeaseJSONSerialization(t *testing.T) {
+	now := time.Now().UTC()
+	expires := now.Add(15 * time.Minute)
+
+	// With an active lease: both keys appear, row_lock never does.
+	leased := IssueDetails{Issue: Issue{
+		ID:             "test-1",
+		Title:          "Leased",
+		Status:         StatusInProgress,
+		LeaseExpiresAt: &expires,
+		HeartbeatAt:    &now,
+	}}
+	b, err := json.Marshal(leased)
+	if err != nil {
+		t.Fatalf("marshal leased issue: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := m["lease_expires_at"]; !ok {
+		t.Errorf("expected lease_expires_at in JSON, got: %s", b)
+	}
+	if _, ok := m["heartbeat_at"]; !ok {
+		t.Errorf("expected heartbeat_at in JSON, got: %s", b)
+	}
+	if _, ok := m["row_lock"]; ok {
+		t.Errorf("row_lock must never be surfaced, got: %s", b)
+	}
+
+	// Without a lease (the common case): keys are omitted, not null.
+	unleased := IssueDetails{Issue: Issue{ID: "test-2", Title: "Open", Status: StatusOpen}}
+	b2, err := json.Marshal(unleased)
+	if err != nil {
+		t.Fatalf("marshal unleased issue: %v", err)
+	}
+	if strings.Contains(string(b2), "lease_expires_at") {
+		t.Errorf("lease_expires_at should be omitted when nil, got: %s", b2)
+	}
+	if strings.Contains(string(b2), "heartbeat_at") {
+		t.Errorf("heartbeat_at should be omitted when nil, got: %s", b2)
+	}
+}
+
+func TestReclaimedLeaseJSONSerialization(t *testing.T) {
+	b, err := json.Marshal(ReclaimedLease{ID: "bd-1", PreviousOwner: "worker-a"})
+	if err != nil {
+		t.Fatalf("marshal reclaimed lease: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal reclaimed lease: %v", err)
+	}
+	if m["id"] != "bd-1" || m["previous_owner"] != "worker-a" {
+		t.Fatalf("reclaimed lease JSON = %s, want snake_case id/previous_owner", b)
+	}
+	if _, ok := m["ID"]; ok {
+		t.Fatalf("reclaimed lease JSON leaked Go field name: %s", b)
+	}
+	if _, ok := m["PreviousOwner"]; ok {
+		t.Fatalf("reclaimed lease JSON leaked Go field name: %s", b)
+	}
+}
+
 func TestBlockedIssueEmbedding(t *testing.T) {
 	blocked := BlockedIssue{
 		Issue: Issue{

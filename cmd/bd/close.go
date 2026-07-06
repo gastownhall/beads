@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -24,62 +25,46 @@ var closeCmd = &cobra.Command{
 	Long: `Close one or more issues.
 
 If no issue ID is provided, closes the last touched issue (from most recent
-create, update, show, or close operation).`,
-	Args: cobra.MinimumNArgs(0),
-	Run: func(cmd *cobra.Command, args []string) {
+create, update, show, or close operation).
+
+When closing multiple issues, provide one --reason for all IDs or repeat
+--reason once per ID. Reasons map positionally: the first --reason applies
+to the first ID, the second --reason to the second ID, regardless of where
+the flags appear in the command line.`,
+	Args:          cobra.MinimumNArgs(0),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("close")
+
+		evt := metrics.NewCommandEvent("close")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			runCloseProxiedServer(cmd, rootCtx, args)
+			return nil
+		}
 
 		// If no IDs provided, use last touched issue
 		if len(args) == 0 {
 			lastTouched := GetLastTouchedID()
 			if lastTouched == "" {
-				FatalErrorRespectJSON("no issue ID provided and no last touched issue")
+				return HandleErrorRespectJSON("no issue ID provided and no last touched issue")
 			}
 			args = []string{lastTouched}
 		}
-		reason, _ := cmd.Flags().GetString("reason")
-		if reason == "" {
-			// Check --resolution alias (Jira CLI convention)
-			reason, _ = cmd.Flags().GetString("resolution")
+		reasons, updatedArgs, err := resolveCloseReasons(cmd, args)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
-		if reason == "" {
-			// Check -m alias (git commit convention)
-			reason, _ = cmd.Flags().GetString("message")
-		}
-		if reason == "" {
-			// Check --comment alias (desire-path from hq-ftpg)
-			reason, _ = cmd.Flags().GetString("comment")
-		}
+		args = updatedArgs
 
-		// --reason-file <path> (with - for stdin) mirrors `bd create --body-file`,
-		// so agents can pass structured close templates without shell-escaping hell (#3512).
-		if fileReason, ok, err := resolveReasonFile(cmd, reason); err != nil {
-			FatalErrorRespectJSON("%v", err)
-		} else if ok {
-			reason = fileReason
-		}
-
-		// Desire-path: "bd done <id> <message>" treats last positional arg as reason
-		// when no reason flag was explicitly provided (hq-pe8ce)
-		if reason == "" && cmd.CalledAs() == "done" && len(args) >= 2 {
-			reason = args[len(args)-1]
-			args = args[:len(args)-1]
-		}
-
-		if reason == "" {
-			reason = "Closed"
-		}
-
-		// Validate close reason if configured
-		closeValidation := config.GetString("validation.on-close")
-		if closeValidation == "error" || closeValidation == "warn" {
-			if err := validation.ValidateCloseReason(reason); err != nil {
-				if closeValidation == "error" {
-					FatalErrorRespectJSON("%v", err)
-				}
-				// warn mode: print warning but proceed
-				fmt.Fprintf(os.Stderr, "%s %v\n", ui.RenderWarn("⚠"), err)
-			}
+		if err := validateCloseReasons(reasons); err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		force, _ := cmd.Flags().GetBool("force")
@@ -89,7 +74,6 @@ create, update, show, or close operation).`,
 
 		claimNext, _ := cmd.Flags().GetBool("claim-next")
 
-		// Get session ID from flag or environment variable
 		session, _ := cmd.Flags().GetString("session")
 		if session == "" {
 			session = os.Getenv("CLAUDE_SESSION_ID")
@@ -97,21 +81,18 @@ create, update, show, or close operation).`,
 
 		ctx := rootCtx
 
-		// --continue only works with a single issue
 		if continueFlag && len(args) > 1 {
-			FatalErrorRespectJSON("--continue only works when closing a single issue")
+			return HandleErrorRespectJSON("--continue only works when closing a single issue")
 		}
 
-		// --suggest-next only works with a single issue
 		if suggestNext && len(args) > 1 {
-			FatalErrorRespectJSON("--suggest-next only works when closing a single issue")
+			return HandleErrorRespectJSON("--suggest-next only works when closing a single issue")
 		}
 
-		// Resolve partial IDs with routing fallback (beads-0km).
 		results, cleanup, resolveErr := resolveCloseTargets(ctx, store, args)
 		defer cleanup()
 		if resolveErr != nil {
-			FatalErrorRespectJSON("%v", resolveErr)
+			return HandleErrorRespectJSON("%v", resolveErr)
 		}
 		resolvedIDs := make([]string, 0, len(results))
 		for _, r := range results {
@@ -120,7 +101,7 @@ create, update, show, or close operation).`,
 
 		// Track which stores were mutated so routed closes can commit before
 		// cleanup closes the routed handle. Deduped by pointer.
-		mutatedStores := map[storage.DoltStorage]struct{}{}
+		mutatedStores := map[storage.DoltStorage][]string{}
 
 		// Direct mode
 		closedIssues := []*types.Issue{}
@@ -129,10 +110,11 @@ create, update, show, or close operation).`,
 		for i, id := range resolvedIDs {
 			result := results[i]
 			activeStore := result.Store
+			reason := reasonForCloseIndex(reasons, i)
 			// Get issue for checks (nil issue is handled by validateIssueClosable)
 			issue := result.Issue
 
-			if err := validateIssueClosable(id, issue, force); err != nil {
+			if err := validateIssueClosable(id, issue, actor, force); err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", err)
 				continue
 			}
@@ -171,7 +153,7 @@ create, update, show, or close operation).`,
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				continue
 			}
-			mutatedStores[activeStore] = struct{}{}
+			mutatedStores[activeStore] = append(mutatedStores[activeStore], id)
 
 			// Audit log the close (survives Dolt GC flatten)
 			oldStatus := "open"
@@ -207,16 +189,14 @@ create, update, show, or close operation).`,
 			postCloseStore = results[0].Store
 		}
 
-		// Handle --suggest-next flag in direct mode
 		if suggestNext && len(resolvedIDs) == 1 && closedCount > 0 {
 			unblocked, err := postCloseStore.GetNewlyUnblockedByClose(ctx, resolvedIDs[0])
 			if err == nil && len(unblocked) > 0 {
 				if jsonOutput {
-					outputJSON(map[string]interface{}{
+					return outputJSON(map[string]interface{}{
 						"closed":    closedIssues,
 						"unblocked": unblocked,
 					})
-					return
 				}
 				fmt.Printf("\nNewly unblocked:\n")
 				for _, issue := range unblocked {
@@ -225,7 +205,6 @@ create, update, show, or close operation).`,
 			}
 		}
 
-		// Handle --continue flag
 		if continueFlag && len(resolvedIDs) == 1 && closedCount > 0 {
 			autoClaim := !noAuto
 			result, err := AdvanceToNextStep(ctx, postCloseStore, resolvedIDs[0], autoClaim, actor)
@@ -241,12 +220,10 @@ create, update, show, or close operation).`,
 					SetLastTouchedID(result.NextStep.ID)
 				}
 				if jsonOutput {
-					// Include continue result in JSON output
-					outputJSON(map[string]interface{}{
+					return outputJSON(map[string]interface{}{
 						"closed":   closedIssues,
 						"continue": result,
 					})
-					return
 				}
 				PrintContinueResult(result)
 			}
@@ -267,7 +244,7 @@ create, update, show, or close operation).`,
 				err := postCloseStore.ClaimIssue(ctx, nextIssue.ID, actor)
 				if err == nil {
 					claimedNextIssue = nextIssue
-					mutatedStores[postCloseStore] = struct{}{}
+					mutatedStores[postCloseStore] = append(mutatedStores[postCloseStore], nextIssue.ID)
 					if jsonOutput {
 						// JSON handled below
 					} else {
@@ -284,52 +261,43 @@ create, update, show, or close operation).`,
 
 		if jsonOutput && len(closedIssues) > 0 {
 			if claimedNextIssue != nil {
-				outputJSON(map[string]interface{}{
+				if err := outputJSON(map[string]interface{}{
 					"closed":  closedIssues,
 					"claimed": claimedNextIssue,
-				})
+				}); err != nil {
+					return err
+				}
 			} else {
-				outputJSON(closedIssues)
+				if err := outputJSON(closedIssues); err != nil {
+					return err
+				}
 			}
 		}
 
 		if closedCount > 0 {
-			hasRoutedMutation := false
-			for s := range mutatedStores {
-				if s != nil && s != store {
-					hasRoutedMutation = true
-					break
+			for s, ids := range mutatedStores {
+				if s == nil {
+					continue
 				}
-			}
-			if hasRoutedMutation {
-				for s := range mutatedStores {
-					if s == nil {
-						continue
-					}
-					if err := maybeAutoCommitStore(ctx, s, doltAutoCommitParams{
-						Command:  cmd.Name(),
-						IssueIDs: resolvedIDs,
-					}); err != nil {
-						FatalErrorRespectJSON("dolt auto-commit failed: %v", err)
-					}
+				if err := commitPendingIfEmbedded(ctx, s, actor, doltAutoCommitParams{
+					Command:  "close",
+					IssueIDs: ids,
+				}); err != nil {
+					return HandleErrorRespectJSON("failed to commit: %v", err)
 				}
-				commandDidExplicitDoltCommit = true
-			} else {
-				commandDidWrite.Store(true)
 			}
 		}
 
-		// Exit non-zero if no issues were actually closed (close guard
-		// and other soft failures should surface as non-zero exit codes for scripting)
 		totalAttempted := len(resolvedIDs)
 		if totalAttempted > 0 && closedCount == 0 {
-			os.Exit(1)
+			return SilentExit()
 		}
+		return nil
 	},
 }
 
 func init() {
-	closeCmd.Flags().StringP("reason", "r", "", "Reason for closing")
+	registerCloseReasonFlag(closeCmd)
 	closeCmd.Flags().String("resolution", "", "Alias for --reason (Jira CLI convention)")
 	_ = closeCmd.Flags().MarkHidden("resolution") // Hidden alias for agent/CLI ergonomics
 	closeCmd.Flags().StringP("message", "m", "", "Alias for --reason (git commit convention)")
@@ -345,6 +313,120 @@ func init() {
 	closeCmd.Flags().String("session", "", "Claude Code session ID (or set CLAUDE_SESSION_ID env var)")
 	closeCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(closeCmd)
+}
+
+type closeReasonFlagValue struct {
+	values []string
+}
+
+func registerCloseReasonFlag(cmd *cobra.Command) {
+	cmd.Flags().VarP(&closeReasonFlagValue{}, "reason", "r", "Reason for closing")
+}
+
+func (v *closeReasonFlagValue) Set(s string) error {
+	v.values = append(v.values, s)
+	return nil
+}
+
+func (v *closeReasonFlagValue) String() string {
+	if len(v.values) == 0 {
+		return ""
+	}
+	return v.values[len(v.values)-1]
+}
+
+func (v *closeReasonFlagValue) Type() string {
+	return "string"
+}
+
+func (v *closeReasonFlagValue) Values() []string {
+	out := make([]string, len(v.values))
+	copy(out, v.values)
+	return out
+}
+
+func resolveCloseReasons(cmd *cobra.Command, args []string) ([]string, []string, error) {
+	reasons, err := collectCloseReasonFlags(cmd)
+	if err != nil {
+		return nil, args, err
+	}
+
+	if fileReason, ok, err := resolveReasonFile(cmd, len(reasons) > 0); err != nil {
+		return nil, args, err
+	} else if ok {
+		reasons = []string{fileReason}
+	}
+
+	// Desire-path: "bd done <id> <message>" treats last positional arg as reason
+	// when no reason flag was explicitly provided (hq-pe8ce)
+	if len(reasons) == 0 && cmd.CalledAs() == "done" && len(args) >= 2 {
+		reasons = []string{args[len(args)-1]}
+		args = args[:len(args)-1]
+	}
+
+	if len(reasons) == 0 {
+		reasons = []string{"Closed"}
+	}
+	if len(reasons) > 1 && len(reasons) != len(args) {
+		return nil, args, fmt.Errorf("got %d close reasons for %d issue IDs; provide exactly one shared reason or one reason per issue", len(reasons), len(args))
+	}
+	return reasons, args, nil
+}
+
+func collectCloseReasonFlags(cmd *cobra.Command) ([]string, error) {
+	if flag := cmd.Flags().Lookup("reason"); flag != nil {
+		if v, ok := flag.Value.(interface{ Values() []string }); ok {
+			if reasons := nonEmptyCloseReasons(v.Values()); len(reasons) > 0 {
+				return reasons, nil
+			}
+		}
+	}
+
+	for _, name := range []string{"resolution", "message", "comment"} {
+		reason, err := cmd.Flags().GetString(name)
+		if err != nil {
+			return nil, err
+		}
+		if reason != "" {
+			return []string{reason}, nil
+		}
+	}
+	return nil, nil
+}
+
+func nonEmptyCloseReasons(reasons []string) []string {
+	out := make([]string, 0, len(reasons))
+	for _, reason := range reasons {
+		if reason != "" {
+			out = append(out, reason)
+		}
+	}
+	return out
+}
+
+func reasonForCloseIndex(reasons []string, i int) string {
+	if len(reasons) == 1 {
+		return reasons[0]
+	}
+	return reasons[i]
+}
+
+func validateCloseReasons(reasons []string) error {
+	closeValidation := config.GetString("validation.on-close")
+	if closeValidation != "error" && closeValidation != "warn" {
+		return nil
+	}
+
+	for _, reason := range reasons {
+		if err := validation.ValidateCloseReason(reason); err != nil {
+			if closeValidation == "error" {
+				return err
+			}
+			// warn mode: print warning but proceed
+			fmt.Fprintf(os.Stderr, "%s %v\n", ui.RenderWarn("⚠"), err)
+		}
+	}
+	return nil
 }
 
 // isMachineCheckableGate returns true if the issue is a gate with a machine-checkable await type.
@@ -479,11 +561,11 @@ func shouldAutoCloseCompletedRoot(root *types.Issue) bool {
 // Returns an error on conflict with an existing reason, file read failure, or empty content.
 // Mirrors the --body-file pattern from `bd create` so agents can pass structured close
 // templates without shell-escaping hell.
-func resolveReasonFile(cmd *cobra.Command, existingReason string) (string, bool, error) {
+func resolveReasonFile(cmd *cobra.Command, hasExistingReason bool) (string, bool, error) {
 	if !cmd.Flags().Changed("reason-file") {
 		return "", false, nil
 	}
-	if existingReason != "" {
+	if hasExistingReason {
 		return "", false, fmt.Errorf("cannot specify both --reason-file and --reason/--resolution/--message/--comment")
 	}
 	path, _ := cmd.Flags().GetString("reason-file")
@@ -548,7 +630,10 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			cleanup()
 			return nil, func() {}, fmt.Errorf("resolving ID %s: %w", id, err)
 		}
-		if r, err := resolveViaPrefixRouting(ctx, id); err == nil {
+		// Write-intent: a prefix-routed target opens writable so the close
+		// commits on the target head (#4141). Contributor auto-routing below
+		// stays read-only: it hydrates foreign projects that must not be mutated.
+		if r, err := resolveViaPrefixRoutingWithAccess(ctx, id, true); err == nil {
 			results = append(results, r)
 			continue
 		}

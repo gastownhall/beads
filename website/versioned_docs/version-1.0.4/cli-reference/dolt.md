@@ -177,15 +177,21 @@ bd dolt remote
 
 #### bd dolt remote add
 
-Add a Dolt remote (both SQL server and CLI)
+Add a Dolt remote
 
 ```
-bd dolt remote add <name> <url>
+bd dolt remote add <name> <url> [flags]
+```
+
+**Flags:**
+
+```
+      --allow-git-origin   Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)
 ```
 
 #### bd dolt remote list
 
-List configured Dolt remotes (SQL server + CLI)
+List configured Dolt remotes
 
 ```
 bd dolt remote list
@@ -193,7 +199,7 @@ bd dolt remote list
 
 #### bd dolt remote remove
 
-Remove a Dolt remote (both SQL server and CLI)
+Remove a Dolt remote
 
 ```
 bd dolt remote remove <name> [flags]

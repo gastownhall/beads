@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
@@ -45,6 +46,13 @@ DoltHub (recommended for cloud backup):
 After adding, run 'bd backup sync' to push your data.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("backup-init")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 		rawPath := args[0]
 
@@ -88,12 +96,11 @@ After adding, run 'bd backup sync' to push your data.`,
 		commandDidWrite.Store(true)
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"backup_url":  backupURL,
 				"backup_name": defaultDoltBackupName,
 				"initialized": true,
 			})
-			return nil
 		}
 
 		fmt.Printf("Backup destination configured: %s\n", backupURL)
@@ -114,6 +121,13 @@ The backup is atomic — if the sync fails, the previous backup state is preserv
 
 Run 'bd backup init <path>' first to configure a destination.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("backup-sync")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 		if store == nil {
 			return fmt.Errorf("no store available")
@@ -149,11 +163,10 @@ Run 'bd backup init <path>' first to configure a destination.`,
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"synced":   true,
 				"duration": elapsed.String(),
 			})
-			return nil
 		}
 
 		fmt.Printf("Backup synced in %s\n", elapsed.Round(time.Millisecond))
@@ -390,6 +403,13 @@ This unregisters the backup remote from Dolt and removes the local
 backup configuration. The backup data at the destination is not deleted.`,
 	Aliases: []string{"rm"},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("backup-remove")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 		if store == nil {
 			return fmt.Errorf("no store available")
@@ -419,8 +439,7 @@ backup configuration. The backup data at the destination is not deleted.`,
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{"removed": true})
-			return nil
+			return outputJSON(map[string]interface{}{"removed": true})
 		}
 
 		fmt.Println("Backup destination removed.")

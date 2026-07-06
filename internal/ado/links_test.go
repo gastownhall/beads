@@ -388,7 +388,7 @@ func TestPushLinks_AddMissing(t *testing.T) {
 		{FromExternalID: "100", ToExternalID: "300", Type: "parent"},
 	}
 
-	errs := resolver.PushLinks(context.Background(), 100, nil, desired)
+	errs := resolver.PushLinks(context.Background(), 100, nil, desired, nil)
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -453,8 +453,9 @@ func TestPushLinks_RemoveStale(t *testing.T) {
 		},
 	}
 
-	// No desired deps → both should be removed.
-	errs := resolver.PushLinks(context.Background(), 100, currentRelations, nil)
+	// No desired deps, but both targets are tracked → both should be removed.
+	managedTargets := map[int]bool{200: true, 300: true}
+	errs := resolver.PushLinks(context.Background(), 100, currentRelations, nil, managedTargets)
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -477,6 +478,65 @@ func TestPushLinks_RemoveStale(t *testing.T) {
 		if call.ops[0].Op != "remove" {
 			t.Errorf("call %d: op = %q, want %q", i, call.ops[0].Op, "remove")
 		}
+	}
+}
+
+// TestPushLinks_PreservesUnmanagedLinks is the regression test for GH#4522:
+// a push must not delete links beads does not own. That includes
+// reverse-direction links (Dependency-Reverse predecessor/successor and
+// Hierarchy-Reverse parent), which beads represents via the forward link on
+// the other work item, and forward links pointing at items beads does not
+// track (e.g. human-created Related links to work items outside the synced
+// set). None of these may be removed even though they are absent from the
+// desired set.
+func TestPushLinks_PreservesUnmanagedLinks(t *testing.T) {
+	var mu sync.Mutex
+	var patchCalls []patchCall
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var ops []PatchOperation
+		_ = json.Unmarshal(body, &ops)
+		mu.Lock()
+		patchCalls = append(patchCalls, patchCall{ops: ops})
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(ts.Close)
+
+	client, err := NewClient(NewSecretString("pat"), "org", "proj").
+		WithBaseURL(ts.URL)
+	if err != nil {
+		t.Fatalf("WithBaseURL error: %v", err)
+	}
+	client = client.WithHTTPClient(ts.Client())
+	resolver := NewLinkResolver(client)
+
+	currentRelations := []WorkItemRelation{
+		// Reverse-direction predecessor/successor link to a tracked item.
+		{Rel: RelDependencyOf, URL: ts.URL + "/proj/_apis/wit/workitems/200"},
+		// Reverse-direction parent link to a tracked item.
+		{Rel: RelParent, URL: ts.URL + "/proj/_apis/wit/workitems/300"},
+		// Forward Related link to an UNtracked item (e.g. created by a human).
+		{Rel: RelRelated, URL: ts.URL + "/proj/_apis/wit/workitems/400"},
+	}
+
+	// 200 and 300 are tracked; 400 is not. No desired deps at all.
+	managedTargets := map[int]bool{200: true, 300: true}
+	errs := resolver.PushLinks(context.Background(), 100, currentRelations, nil, managedTargets)
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(patchCalls) != 0 {
+		t.Fatalf("got %d PATCH calls, want 0 (no unmanaged link should be removed): %+v", len(patchCalls), patchCalls)
 	}
 }
 
@@ -508,7 +568,7 @@ func TestPushLinks_Idempotent(t *testing.T) {
 		{FromExternalID: "100", ToExternalID: "200", Type: "blocks"},
 	}
 
-	errs := resolver.PushLinks(context.Background(), 100, currentRelations, desired)
+	errs := resolver.PushLinks(context.Background(), 100, currentRelations, desired, map[int]bool{200: true})
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -552,7 +612,7 @@ func TestPushLinks_PartialFailure(t *testing.T) {
 		{FromExternalID: "100", ToExternalID: "300", Type: "related"},
 	}
 
-	errs := resolver.PushLinks(context.Background(), 100, nil, desired)
+	errs := resolver.PushLinks(context.Background(), 100, nil, desired, nil)
 
 	// Should have exactly 1 error (first call failed, second succeeded).
 	if len(errs) != 1 {
@@ -719,7 +779,7 @@ func TestPushLinks_InvalidExternalID(t *testing.T) {
 		{FromExternalID: "100", ToExternalID: "200", Type: "related"},
 	}
 
-	errs := resolver.PushLinks(context.Background(), 100, nil, desired)
+	errs := resolver.PushLinks(context.Background(), 100, nil, desired, nil)
 	if len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -770,8 +830,9 @@ func TestPushLinks_RemoveFailure(t *testing.T) {
 		},
 	}
 
-	// No desired deps → both should be removed, but first fails.
-	errs := resolver.PushLinks(context.Background(), 100, currentRelations, nil)
+	// No desired deps, both targets tracked → both should be removed, first fails.
+	managedTargets := map[int]bool{200: true, 300: true}
+	errs := resolver.PushLinks(context.Background(), 100, currentRelations, nil, managedTargets)
 
 	if len(errs) != 1 {
 		t.Fatalf("got %d errors, want 1: %v", len(errs), errs)
