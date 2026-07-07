@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 // initSafetyHelpCmd documents the init flag surface and the destroy-token
@@ -39,6 +41,11 @@ FLAG SURFACE
   bd init --force               Deprecated alias for --reinit-local.
                                 Kept working for ≥2 releases.
 
+  bd init --from-jsonl          Import from configured import.path. If
+                                origin has Dolt data, this refuses unless
+                                --discard-remote authorizes replacing that
+                                remote history.
+
 ADOPTING A REMOTE
 
   If you want to use the remote's existing history, use:
@@ -65,7 +72,7 @@ DESTROY-TOKEN (non-interactive only)
 
 EXIT CODES
 
-  10    refused: remote has Dolt history and you passed --force/--reinit-local
+  10    refused: remote has Dolt history and you selected local history
         without --discard-remote
   11    refused: existing local data and you declined the destroy confirm
   12    refused: --discard-remote passed without a valid --destroy-token
@@ -77,6 +84,13 @@ RECOVERY
   playbooks for each exit code.
 `,
 	Run: func(cmd *cobra.Command, _ []string) {
+		evt := metrics.NewCommandEvent("init-safety")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		fmt.Print(cmd.Long)
 	},
 }

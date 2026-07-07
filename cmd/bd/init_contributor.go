@@ -263,6 +263,107 @@ Created by: bd init --contributor
 	return nil
 }
 
+// autoConfigureForkContributor configures contributor routing when bd init
+// detects a fork (upstream remote present) and routing is not yet set.
+// Non-interactive and idempotent. roleFlag is the --role flag value (if any).
+func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage, quiet bool, roleFlag string) error {
+	isFork, upstreamURL := detectForkSetup()
+	if !isFork {
+		return nil
+	}
+
+	// Explicit --role=maintainer on a fork: acknowledge fork, skip routing.
+	if roleFlag == "maintainer" {
+		if !quiet {
+			fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
+			fmt.Printf("    Contributor routing skipped (--role=maintainer).\n")
+			fmt.Printf("    To set up contributor routing later: bd init --contributor\n")
+		}
+		return nil
+	}
+
+	// Already configured: idempotent re-init.
+	if existing, err := store.GetConfig(ctx, "routing.contributor"); err == nil && existing != "" {
+		if !quiet {
+			fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
+			fmt.Printf("    Contributor routing already configured → %s\n", existing)
+			fmt.Printf("    Skipping auto-setup. To reconfigure: bd init --contributor\n")
+		}
+		return nil
+	}
+	if src := config.GetValueSource("routing.contributor"); src != config.SourceDefault {
+		if yamlVal := strings.TrimSpace(config.GetString("routing.contributor")); yamlVal != "" {
+			if !quiet {
+				fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)
+				fmt.Printf("    Contributor routing configured via config.yaml → %s\n", yamlVal)
+				fmt.Printf("    Skipping auto-setup. To reconfigure: bd init --contributor\n")
+			}
+			return nil
+		}
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+	planningPath := filepath.Join(homeDir, ".beads-planning")
+
+	createdPlanning := false
+	if _, err := os.Stat(planningPath); os.IsNotExist(err) {
+		createdPlanning = true
+		if err := os.MkdirAll(planningPath, 0750); err != nil {
+			return fmt.Errorf("failed to create planning repo: %w", err)
+		}
+		gitInit := exec.Command("git", "init")
+		gitInit.Dir = planningPath
+		if err := gitInit.Run(); err != nil {
+			return fmt.Errorf("failed to init git in planning repo: %w", err)
+		}
+		planningBeadsDir := filepath.Join(planningPath, ".beads")
+		if err := os.MkdirAll(planningBeadsDir, 0750); err != nil {
+			return fmt.Errorf("failed to create .beads in planning repo: %w", err)
+		}
+		// Initialize the planning Dolt schema so commands like bd migrate-personal
+		// can open the store immediately without hitting an uninitialized DB.
+		// Non-fatal: no-CGO and server-mode builds skip this silently; the schema
+		// initializes on first use once a Dolt server is running for that path.
+		if planningStore, storeErr := newDoltStoreFromConfig(ctx, planningBeadsDir); storeErr == nil {
+			_ = planningStore.Close()
+		}
+	}
+
+	if err := store.SetConfig(ctx, "routing.mode", "auto"); err != nil {
+		return fmt.Errorf("failed to set routing.mode: %w", err)
+	}
+	if err := store.SetConfig(ctx, "routing.contributor", planningPath); err != nil {
+		return fmt.Errorf("failed to set routing.contributor: %w", err)
+	}
+	if err := store.SetConfig(ctx, "sync.remote", "upstream"); err != nil {
+		return fmt.Errorf("failed to set sync.remote: %w", err)
+	}
+
+	_ = exec.Command("git", "config", "beads.role", "contributor").Run()
+
+	if configPath, err := config.FindConfigYAMLPath(); err == nil {
+		if addErr := config.AddRepo(configPath, planningPath); addErr != nil && !strings.Contains(addErr.Error(), "already exists") {
+			// Non-fatal: hydration config failure doesn't block routing setup
+		}
+	}
+
+	if !quiet {
+		fmt.Printf("\n%s Fork detected — configuring contributor routing\n", ui.RenderAccent("▶"))
+		fmt.Printf("  upstream: %s\n\n", upstreamURL)
+		fmt.Printf("  %s Planning repo: %s\n", ui.RenderPass("✓"), planningPath)
+		fmt.Printf("  %s Issues will route to planning repo (routing.mode=auto)\n", ui.RenderPass("✓"))
+		fmt.Printf("  %s Sync remote set to upstream\n", ui.RenderPass("✓"))
+		if createdPlanning {
+			fmt.Printf("  %s Added .beads/ to planning repo\n", ui.RenderPass("✓"))
+		}
+		fmt.Printf("\n  To use maintainer mode instead: bd init --role=maintainer\n")
+	}
+	return nil
+}
+
 // detectForkSetup checks if we're in a fork by looking for upstream remote
 func detectForkSetup() (isFork bool, upstreamURL string) {
 	cmd := exec.Command("git", "remote", "get-url", "upstream")

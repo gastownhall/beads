@@ -20,16 +20,15 @@ import (
 func (s *EmbeddedDoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
 	var tracker versioncontrolops.DirtyTableTracker
 
-	if err := s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
-		tx := &embeddedTransaction{regularTx: regularTx, ignoredTx: ignoredTx, dirty: &tracker}
-		return fn(tx)
+	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return fn(&embeddedTransaction{tx: tx, dirty: &tracker})
 	}); err != nil {
 		return err
 	}
 
 	// Create a Dolt version commit from the working set changes.
 	if commitMsg != "" && len(tracker.DirtyTables()) > 0 {
-		return s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return versioncontrolops.StageAndCommit(ctx, db, tracker.DirtyTables(), commitMsg, commitAuthor)
 		})
 	}
@@ -37,26 +36,35 @@ func (s *EmbeddedDoltStore) RunInTransaction(ctx context.Context, commitMsg stri
 }
 
 type embeddedTransaction struct {
-	regularTx *sql.Tx
-	ignoredTx *sql.Tx
-	dirty     *versioncontrolops.DirtyTableTracker
+	tx    *sql.Tx
+	dirty *versioncontrolops.DirtyTableTracker
 }
 
 func (t *embeddedTransaction) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
-	bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{SkipPrefixValidation: true})
+	bc, err := issueops.NewBatchContext(ctx, t.tx, storage.BatchCreateOptions{SkipPrefixValidation: true})
 	if err != nil {
 		return err
 	}
-	t.dirty.MarkDirty("issues")
-	t.dirty.MarkDirty("events")
-	return issueops.CreateIssueInTx(ctx, t.regularTx, t.ignoredTx, bc, issue, actor)
+	result, err := issueops.CreateIssueInTxWithResult(ctx, t.tx, bc, issue, actor)
+	if err != nil {
+		return err
+	}
+	for table := range issueops.CreateIssueDirtyTables(ctx, issue, result) {
+		t.dirty.MarkDirty(table)
+	}
+	return nil
 }
 
 func (t *embeddedTransaction) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
-	for _, issue := range issues {
-		if err := t.CreateIssue(ctx, issue, actor); err != nil {
-			return err
-		}
+	result, err := issueops.CreateIssuesInTxWithResult(ctx, t.tx, issues, actor, storage.BatchCreateOptions{
+		OrphanHandling:       storage.OrphanAllow,
+		SkipPrefixValidation: true,
+	})
+	if err != nil {
+		return err
+	}
+	for table := range issueops.CreateIssuesDirtyTables(ctx, issues, result) {
+		t.dirty.MarkDirty(table)
 	}
 	return nil
 }
@@ -64,14 +72,14 @@ func (t *embeddedTransaction) CreateIssues(ctx context.Context, issues []*types.
 func (t *embeddedTransaction) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	t.dirty.MarkDirty("issues")
 	t.dirty.MarkDirty("events")
-	_, err := issueops.UpdateIssueInTx(ctx, t.regularTx, id, updates, actor)
+	_, err := issueops.UpdateIssueInTx(ctx, t.tx, id, updates, actor)
 	return err
 }
 
 func (t *embeddedTransaction) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	t.dirty.MarkDirty("issues")
 	t.dirty.MarkDirty("events")
-	_, err := issueops.CloseIssueInTx(ctx, t.regularTx, id, reason, actor, session)
+	_, err := issueops.CloseIssueInTx(ctx, t.tx, id, reason, actor, session)
 	return err
 }
 
@@ -81,15 +89,20 @@ func (t *embeddedTransaction) DeleteIssue(ctx context.Context, id string) error 
 	t.dirty.MarkDirty("labels")
 	t.dirty.MarkDirty("comments")
 	t.dirty.MarkDirty("events")
-	return issueops.DeleteIssueInTx(ctx, t.regularTx, t.ignoredTx, id)
+	return issueops.DeleteIssueInTx(ctx, t.tx, id)
 }
 
 func (t *embeddedTransaction) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
-	return issueops.GetIssueInTx(ctx, t.regularTx, id)
+	return issueops.GetIssueInTx(ctx, t.tx, id)
 }
 
 func (t *embeddedTransaction) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	return issueops.SearchIssuesInTx(ctx, t.regularTx, query, filter)
+	return issueops.SearchIssuesInTx(ctx, t.tx, query, filter)
+}
+
+// SearchIssueIDs returns matching IDs only via issueops.SearchIssueIDsInTx.
+func (t *embeddedTransaction) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	return issueops.SearchIssueIDsInTx(ctx, t.tx, query, filter)
 }
 
 func (t *embeddedTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
@@ -97,20 +110,35 @@ func (t *embeddedTransaction) AddDependency(ctx context.Context, dep *types.Depe
 }
 
 func (t *embeddedTransaction) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
-	t.dirty.MarkDirty("dependencies")
-	return issueops.AddDependencyInTx(ctx, t.regularTx, dep, actor, issueops.AddDependencyOpts{
+	_, _, _, depTable := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, dep.IssueID))
+	if err := issueops.AddDependencyInTx(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{
 		IsCrossPrefix:  types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID),
 		SkipCycleCheck: addOpts.SkipCycleCheck,
-	})
+	}); err != nil {
+		return err
+	}
+	t.dirty.MarkDirty(depTable)
+	return nil
+}
+
+// CycleThroughEdges reports a blocking cycle through one of the new edges,
+// including the transaction's own uncommitted dependency writes
+// (bd-6dnrw.8, bd-578h9.9).
+func (t *embeddedTransaction) CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error) {
+	graph := make(map[string][]string)
+	if err := issueops.AppendBlockingGraphInTx(ctx, t.tx, []string{"dependencies", "wisp_dependencies"}, graph); err != nil {
+		return "", err
+	}
+	return issueops.CycleThroughEdgesInGraph(graph, edges), nil
 }
 
 func (t *embeddedTransaction) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
 	t.dirty.MarkDirty("dependencies")
-	return issueops.RemoveDependencyInTx(ctx, t.regularTx, issueID, dependsOnID)
+	return issueops.RemoveDependencyInTx(ctx, t.tx, issueID, dependsOnID)
 }
 
 func (t *embeddedTransaction) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
-	m, err := issueops.GetDependencyRecordsForIssuesInTx(ctx, t.regularTx, []string{issueID})
+	m, err := issueops.GetDependencyRecordsForIssuesInTx(ctx, t.tx, []string{issueID})
 	if err != nil {
 		return nil, err
 	}
@@ -119,33 +147,33 @@ func (t *embeddedTransaction) GetDependencyRecords(ctx context.Context, issueID 
 
 func (t *embeddedTransaction) AddLabel(ctx context.Context, issueID, label, actor string) error {
 	t.dirty.MarkDirty("labels")
-	return issueops.AddLabelInTx(ctx, t.regularTx, "", "", issueID, label, actor)
+	return issueops.AddLabelInTx(ctx, t.tx, "", "", issueID, label, actor)
 }
 
 func (t *embeddedTransaction) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
 	t.dirty.MarkDirty("labels")
-	return issueops.RemoveLabelInTx(ctx, t.regularTx, "", "", issueID, label, actor)
+	return issueops.RemoveLabelInTx(ctx, t.tx, "", "", issueID, label, actor)
 }
 
 func (t *embeddedTransaction) GetLabels(ctx context.Context, issueID string) ([]string, error) {
-	return issueops.GetLabelsInTx(ctx, t.regularTx, "", issueID)
+	return issueops.GetLabelsInTx(ctx, t.tx, "", issueID)
 }
 
 func (t *embeddedTransaction) SetConfig(ctx context.Context, key, value string) error {
 	t.dirty.MarkDirty("config")
-	if err := issueops.SetConfigInTx(ctx, t.regularTx, key, value); err != nil {
+	if err := issueops.SetConfigInTx(ctx, t.tx, key, value); err != nil {
 		return err
 	}
 	// Sync normalized tables when config keys change
 	switch key {
 	case "status.custom":
 		t.dirty.MarkDirty("custom_statuses")
-		if err := issueops.SyncCustomStatusesTable(ctx, t.regularTx, value); err != nil {
+		if err := issueops.SyncCustomStatusesTable(ctx, t.tx, value); err != nil {
 			return fmt.Errorf("syncing custom_statuses table: %w", err)
 		}
 	case "types.custom":
 		t.dirty.MarkDirty("custom_types")
-		if err := issueops.SyncCustomTypesTable(ctx, t.regularTx, value); err != nil {
+		if err := issueops.SyncCustomTypesTable(ctx, t.tx, value); err != nil {
 			return fmt.Errorf("syncing custom_types table: %w", err)
 		}
 	}
@@ -153,24 +181,24 @@ func (t *embeddedTransaction) SetConfig(ctx context.Context, key, value string) 
 }
 
 func (t *embeddedTransaction) GetConfig(ctx context.Context, key string) (string, error) {
-	return issueops.GetConfigInTx(ctx, t.regularTx, key)
+	return issueops.GetConfigInTx(ctx, t.tx, key)
 }
 
 func (t *embeddedTransaction) SetMetadata(ctx context.Context, key, value string) error {
 	t.dirty.MarkDirty("metadata")
-	return issueops.SetMetadataInTx(ctx, t.regularTx, key, value)
+	return issueops.SetMetadataInTx(ctx, t.tx, key, value)
 }
 
 func (t *embeddedTransaction) GetMetadata(ctx context.Context, key string) (string, error) {
-	return issueops.GetMetadataInTx(ctx, t.regularTx, key)
+	return issueops.GetMetadataInTx(ctx, t.tx, key)
 }
 
 func (t *embeddedTransaction) SetLocalMetadata(ctx context.Context, key, value string) error {
-	return issueops.SetLocalMetadataInTx(ctx, t.ignoredTx, key, value)
+	return issueops.SetLocalMetadataInTx(ctx, t.tx, key, value)
 }
 
 func (t *embeddedTransaction) GetLocalMetadata(ctx context.Context, key string) (string, error) {
-	return issueops.GetLocalMetadataInTx(ctx, t.ignoredTx, key)
+	return issueops.GetLocalMetadataInTx(ctx, t.tx, key)
 }
 
 func (t *embeddedTransaction) AddComment(ctx context.Context, issueID, actor, comment string) error {
@@ -186,11 +214,16 @@ func (t *embeddedTransaction) GetIssueComments(ctx context.Context, issueID stri
 }
 
 func (t *embeddedTransaction) CreateIssueImport(ctx context.Context, issue *types.Issue, actor string, skipPrefixValidation bool) error {
-	bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{SkipPrefixValidation: skipPrefixValidation})
+	bc, err := issueops.NewBatchContext(ctx, t.tx, storage.BatchCreateOptions{SkipPrefixValidation: skipPrefixValidation})
 	if err != nil {
 		return err
 	}
-	t.dirty.MarkDirty("issues")
-	t.dirty.MarkDirty("events")
-	return issueops.CreateIssueInTx(ctx, t.regularTx, t.ignoredTx, bc, issue, actor)
+	result, err := issueops.CreateIssueInTxWithResult(ctx, t.tx, bc, issue, actor)
+	if err != nil {
+		return err
+	}
+	for table := range issueops.CreateIssueDirtyTables(ctx, issue, result) {
+		t.dirty.MarkDirty(table)
+	}
+	return nil
 }

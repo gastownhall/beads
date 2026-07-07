@@ -54,13 +54,6 @@ func newTestDoltStore(t *testing.T, prefix string) *dolt.DoltStore {
 	// Create isolated branch for this test on the store's own connection
 	_, branchCleanup := testutil.StartTestBranch(t, store.DB(), testSharedDB)
 
-	// Create ignored tables on this branch
-	if err := dolt.CreateIgnoredTables(store.DB()); err != nil {
-		branchCleanup()
-		store.Close()
-		t.Fatalf("CreateIgnoredTables: %v", err)
-	}
-
 	// Set prefix for this test (overrides the shared schema's default)
 	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		branchCleanup()

@@ -12,9 +12,30 @@ import (
 
 func (s *EmbeddedDoltStore) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
 	var result []*types.Issue
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.SearchIssuesInTx(ctx, regularTx, query, filter)
+		result, err = issueops.SearchIssuesInTx(ctx, tx, query, filter)
+		return err
+	})
+	return result, err
+}
+
+// SearchIssueIDs is the narrow-projection variant of SearchIssues.
+func (s *EmbeddedDoltStore) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	var result []string
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchIssueIDsInTx(ctx, tx, query, filter)
+		return err
+	})
+	return result, err
+}
+
+func (s *EmbeddedDoltStore) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
+	var result []*types.IssueWithCounts
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchIssuesWithCountsInTx(ctx, tx, query, filter)
 		return err
 	})
 	return result, err
@@ -23,9 +44,9 @@ func (s *EmbeddedDoltStore) SearchIssues(ctx context.Context, query string, filt
 func (s *EmbeddedDoltStore) ListWisps(ctx context.Context, filter types.WispFilter) ([]*types.Issue, error) {
 	issueFilter := issueops.WispFilterToIssueFilter(filter)
 	var result []*types.Issue
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.SearchIssuesInTx(ctx, ignoredTx, "", issueFilter)
+		result, err = issueops.SearchIssuesInTx(ctx, tx, "", issueFilter)
 		return err
 	})
 	return result, err
@@ -33,9 +54,9 @@ func (s *EmbeddedDoltStore) ListWisps(ctx context.Context, filter types.WispFilt
 
 func (s *EmbeddedDoltStore) GetLabelsForIssues(ctx context.Context, issueIDs []string) (map[string][]string, error) {
 	var result map[string][]string
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetLabelsForIssuesInTx(ctx, regularTx, issueIDs)
+		result, err = issueops.GetLabelsForIssuesInTx(ctx, tx, issueIDs)
 		return err
 	})
 	return result, err
@@ -43,9 +64,9 @@ func (s *EmbeddedDoltStore) GetLabelsForIssues(ctx context.Context, issueIDs []s
 
 func (s *EmbeddedDoltStore) GetCommentCounts(ctx context.Context, issueIDs []string) (map[string]int, error) {
 	var result map[string]int
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetCommentCountsInTx(ctx, regularTx, issueIDs)
+		result, err = issueops.GetCommentCountsInTx(ctx, tx, issueIDs)
 		return err
 	})
 	return result, err
@@ -53,9 +74,9 @@ func (s *EmbeddedDoltStore) GetCommentCounts(ctx context.Context, issueIDs []str
 
 func (s *EmbeddedDoltStore) GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
 	var result map[string][]*types.Dependency
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetAllDependencyRecordsInTx(ctx, regularTx)
+		result, err = issueops.GetAllDependencyRecordsInTx(ctx, tx)
 		return err
 	})
 	return result, err
@@ -63,9 +84,9 @@ func (s *EmbeddedDoltStore) GetAllDependencyRecords(ctx context.Context) (map[st
 
 func (s *EmbeddedDoltStore) GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {
 	var result map[string][]*types.Dependency
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetDependencyRecordsForIssuesInTx(ctx, regularTx, issueIDs)
+		result, err = issueops.GetDependencyRecordsForIssuesInTx(ctx, tx, issueIDs)
 		return err
 	})
 	return result, err
@@ -73,9 +94,9 @@ func (s *EmbeddedDoltStore) GetDependencyRecordsForIssues(ctx context.Context, i
 
 func (s *EmbeddedDoltStore) GetDependencyCounts(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error) {
 	var result map[string]*types.DependencyCounts
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetDependencyCountsInTx(ctx, regularTx, issueIDs)
+		result, err = issueops.GetDependencyCountsInTx(ctx, tx, issueIDs)
 		return err
 	})
 	return result, err
@@ -87,9 +108,9 @@ func (s *EmbeddedDoltStore) GetBlockingInfoForIssues(ctx context.Context, issueI
 	parentMap map[string]string,
 	err error,
 ) {
-	err = s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err = s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var txErr error
-		blockedByMap, blocksMap, parentMap, txErr = issueops.GetBlockingInfoForIssuesInTx(ctx, regularTx, issueIDs)
+		blockedByMap, blocksMap, parentMap, txErr = issueops.GetBlockingInfoForIssuesInTx(ctx, tx, issueIDs)
 		return txErr
 	})
 	return

@@ -113,12 +113,12 @@ func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage
 		return fmt.Errorf("encrypt password: %w", err)
 	}
 
-	if err := s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
-		if err := issueops.AddFederationPeerInTx(ctx, regularTx, peer, encryptedPwd); err != nil {
+	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		if err := issueops.AddFederationPeerInTx(ctx, tx, peer, encryptedPwd); err != nil {
 			return err
 		}
 		// Also add the Dolt remote.
-		return issueops.AddRemoteIfNotExists(ctx, regularTx, peer.Name, peer.RemoteURL)
+		return issueops.AddRemoteIfNotExists(ctx, tx, peer.Name, peer.RemoteURL)
 	}); err != nil {
 		return err
 	}
@@ -127,9 +127,9 @@ func (s *EmbeddedDoltStore) AddFederationPeer(ctx context.Context, peer *storage
 
 func (s *EmbeddedDoltStore) GetFederationPeer(ctx context.Context, name string) (*storage.FederationPeer, error) {
 	var row *issueops.FederationPeerRow
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		row, err = issueops.GetFederationPeerInTx(ctx, regularTx, name)
+		row, err = issueops.GetFederationPeerInTx(ctx, tx, name)
 		return err
 	})
 	if err != nil {
@@ -147,9 +147,9 @@ func (s *EmbeddedDoltStore) GetFederationPeer(ctx context.Context, name string) 
 
 func (s *EmbeddedDoltStore) ListFederationPeers(ctx context.Context) ([]*storage.FederationPeer, error) {
 	var rows []*issueops.FederationPeerRow
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		rows, err = issueops.ListFederationPeersInTx(ctx, regularTx)
+		rows, err = issueops.ListFederationPeersInTx(ctx, tx)
 		return err
 	})
 	if err != nil {
@@ -171,8 +171,8 @@ func (s *EmbeddedDoltStore) ListFederationPeers(ctx context.Context) ([]*storage
 }
 
 func (s *EmbeddedDoltStore) RemoveFederationPeer(ctx context.Context, name string) error {
-	if err := s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
-		return issueops.RemoveFederationPeerInTx(ctx, regularTx, name)
+	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.RemoveFederationPeerInTx(ctx, tx, name)
 	}); err != nil {
 		return err
 	}
@@ -199,6 +199,17 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 	result := &storage.SyncResult{
 		Peer:      peer,
 		StartTime: time.Now(),
+	}
+
+	// GH#2474 / bd-578h9.2: commit pending changes before the merge, matching
+	// embedded Pull/PullRemote/PullFrom and server-mode Sync. Embedded Commit is
+	// DOLT_COMMIT('-Am'), so it stages config — where kv.memory.* memories live —
+	// and a leftover dirty working set (e.g. a `bd remember` write) would
+	// otherwise make DOLT_MERGE refuse to start ("cannot merge with uncommitted
+	// changes"). CommitPending is a no-op when the working set is already clean.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		result.Error = fmt.Errorf("commit pending before sync: %w", err)
+		return result, result.Error
 	}
 
 	// Step 1: Fetch
@@ -238,6 +249,14 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 
 		if err := s.Commit(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
 			result.Error = fmt.Errorf("commit conflict resolution: %w", err)
+			return result, result.Error
+		}
+
+		// bd-578h9.11: the conflicted merge skipped the automatic is_blocked
+		// recompute (unresolved rows would have fed it garbage); now that the
+		// resolution is committed, cover the whole merge+resolution window.
+		if err := s.RecomputeBlockedAfterMerge(ctx, beforeCommit); err != nil {
+			result.Error = fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
 			return result, result.Error
 		}
 	}
@@ -309,8 +328,8 @@ func (s *EmbeddedDoltStore) SyncStatus(ctx context.Context, peer string) (*stora
 func (s *EmbeddedDoltStore) setLastSyncTime(ctx context.Context, peer string) error {
 	key := "last_sync_" + peer
 	value := time.Now().Format(time.RFC3339)
-	return s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
-		_, err := regularTx.ExecContext(ctx,
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
 			"REPLACE INTO metadata (`key`, value) VALUES (?, ?)", key, value)
 		return err
 	})
@@ -320,8 +339,8 @@ func (s *EmbeddedDoltStore) setLastSyncTime(ctx context.Context, peer string) er
 func (s *EmbeddedDoltStore) getLastSyncTime(ctx context.Context, peer string) time.Time {
 	key := "last_sync_" + peer
 	var value string
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
-		return regularTx.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = ?", key).Scan(&value)
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = ?", key).Scan(&value)
 	})
 	if err != nil {
 		return time.Time{}

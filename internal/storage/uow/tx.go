@@ -2,16 +2,17 @@ package uow
 
 import (
 	"context"
-	"database/sql"
+
+	"github.com/steveyegge/beads/internal/storage/domain/db"
 )
 
 type Tx interface {
-	Begin(ctx context.Context) (*sql.Tx, error)
+	Runner() db.Runner
 	Commit(ctx context.Context, message string) error
 	Rollback(ctx context.Context) error
 	RollbackUnlessCommitted(ctx context.Context)
 }
 
 type TxProvider interface {
-	NewTx(ctx context.Context) (Tx, error)
+	BeginTx(ctx context.Context) (Tx, error)
 }

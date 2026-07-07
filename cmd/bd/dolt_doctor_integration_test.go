@@ -11,9 +11,6 @@ import (
 )
 
 func TestDoltDoctor_NoSQLiteWarningsAfterInitAndCreate(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow integration test in short mode")
-	}
 	if runtime.GOOS == windowsOS {
 		t.Skip("dolt doctor integration test not supported on windows")
 	}

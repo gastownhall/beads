@@ -63,6 +63,12 @@ into temp repos and produce flaky test behavior.
 
 **Warning:** bd will warn you when creating issues with "Test" prefix in the production database. Always use `BEADS_DB` for manual testing.
 
+**Tmpfs hosts:** the `cmd/bd` test suite creates an isolated `$HOME` and several
+test binaries under `$TMPDIR`. They are normally cleaned by the test process,
+but a SIGKILLed or OOMed run can leave orphans behind. On hosts where `/tmp`
+is tmpfs (e.g. Fedora Atomic / Bluefin), run `make clean-test-tmp` between
+test runs if `du -sh /tmp/beads-* /tmp/bd-*` shows accumulation. See bd-3q2u.
+
 ### Before Committing
 
 1. **Run tests**: `make test` (or `./scripts/test.sh`)
@@ -82,11 +88,16 @@ git commit -m "Add retry logic for database locks (bd-xyz)"
 
 This enables `bd doctor` to detect **orphaned issues** - work that was committed but the issue wasn't closed. The doctor check cross-references open issues against git history to find these orphans.
 
+For agent-prepared commits, also include the
+`Agent-Signature:` trailer described in
+[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md). Use `unknown-model` or
+`unknown-reasoning` when reliable runtime metadata is unavailable.
+
 ### Git Workflow
 
 bd uses **Dolt** as its primary database. Changes are committed to Dolt history automatically (one Dolt commit per write command).
 
-**Install git hooks** for automatic sync:
+**Install git hooks** for commit integration and legacy fallback behavior:
 ```bash
 bd hooks install
 ```
@@ -120,6 +131,9 @@ read [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md). The
 maintainer policy is to maximize community throughput: find useful contributor
 value, absorb or transform it locally when practical, preserve attribution, and
 use request-changes only as a last resort.
+
+Sign agent-written GitHub comments and reviews using
+[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md).
 
 ### External Contributor PRs: Check Before You Build
 
@@ -278,6 +292,11 @@ echo 'Updated description with $variables' | bd update <id> --description=-
 bd create "Title" --body-file=description.md
 ```
 
+**GitHub body hygiene.** For GitHub PR, issue, comment, and review bodies,
+write Markdown to a file and pass it with `gh ... --body-file`. Run
+`scripts/gh-body-lint <body-file>` first to catch literal `\n` sequences and
+non-linking `GH#123` references.
+
 **Example agent session:**
 
 ```bash
@@ -296,7 +315,7 @@ bd dolt push
 This installs:
 
 - **pre-commit** — Commits pending Dolt changes
-- **post-merge** — Pulls remote Dolt changes after git merge
+- **post-merge** — Runs chained hooks and a legacy JSONL import fallback only when no Dolt remote is configured
 
 **Note:** Hooks are embedded in the bd binary and work for all bd users (not just source repo users).
 
@@ -532,7 +551,7 @@ This handles the entire release workflow automatically, including waiting ~5 min
 6. Update Homebrew: `./scripts/update-homebrew.sh <version>` (waits for GitHub Actions)
 7. Verify: `brew update && brew upgrade beads && bd version`
 
-See [docs/RELEASING.md](docs/RELEASING.md) for complete manual instructions.
+See [RELEASING.md](RELEASING.md) for complete manual instructions.
 
 ## Checking GitHub Issues and PRs
 
@@ -566,6 +585,20 @@ gh issue view 201
 - Better for quick triage and prioritization
 
 **Do NOT use:** `browser_navigate`, `browser_snapshot`, or other playwright tools for GitHub PR/issue reviews unless specifically requested by the user.
+
+## Telemetry
+
+`bd` collects anonymous command-usage metrics. Each event is a `cli_command`
+record carrying only the command name; each batch also carries the bd version
+and OS platform, keyed by a machine-derived, HMAC-protected distinct ID. No
+email, repo path, remote URL, issue content, or user-supplied strings are
+collected. Events are written under `~/.beads/eventsData` and POSTed to
+`https://gastownhall-eventsapi.com/mp/collect`.
+
+Metrics are enabled by default (opt-out). The friendliest way to see or change
+them is `bd metrics` (`bd metrics on` / `bd metrics off` / `bd metrics example`),
+which takes effect on the next command with no restart. `BD_DISABLE_METRICS=1`
+still works as a one-off, shell-scoped override.
 
 ## Questions?
 

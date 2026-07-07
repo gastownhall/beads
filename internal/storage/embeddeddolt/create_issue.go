@@ -21,16 +21,16 @@ func (s *EmbeddedDoltStore) CreateIssue(ctx context.Context, issue *types.Issue,
 		issue.Ephemeral = true
 	}
 
-	return s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		// SkipPrefixValidation matches DoltStore.CreateIssue, which does not
 		// validate prefixes for explicit IDs on the single-issue path.
-		bc, err := issueops.NewBatchContext(ctx, regularTx, storage.BatchCreateOptions{
+		bc, err := issueops.NewBatchContext(ctx, tx, storage.BatchCreateOptions{
 			SkipPrefixValidation: true,
 		})
 		if err != nil {
 			return err
 		}
-		return issueops.CreateIssueInTx(ctx, regularTx, ignoredTx, bc, issue, actor)
+		return issueops.CreateIssueInTx(ctx, tx, bc, issue, actor)
 	})
 }
 
@@ -54,12 +54,12 @@ func (s *EmbeddedDoltStore) CreateIssuesWithFullOptions(ctx context.Context, iss
 			if !issue.NoHistory {
 				issue.Ephemeral = true
 			}
-			if err := s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
-				bc, err := issueops.NewBatchContext(ctx, regularTx, opts)
+			if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+				bc, err := issueops.NewBatchContext(ctx, tx, opts)
 				if err != nil {
 					return err
 				}
-				return issueops.CreateIssueInTx(ctx, regularTx, ignoredTx, bc, issue, actor)
+				return issueops.CreateIssueInTx(ctx, tx, bc, issue, actor)
 			}); err != nil {
 				return err
 			}
@@ -67,7 +67,7 @@ func (s *EmbeddedDoltStore) CreateIssuesWithFullOptions(ctx context.Context, iss
 		return nil
 	}
 
-	return s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
-		return issueops.CreateIssuesInTx(ctx, regularTx, ignoredTx, issues, actor, opts)
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.CreateIssuesInTx(ctx, tx, issues, actor, opts)
 	})
 }

@@ -10,6 +10,7 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // newTestDoltDB creates a temporary database on the test Dolt server.
@@ -46,6 +47,13 @@ func newTestDoltDB(t *testing.T) (*sql.DB, func()) {
 		db.Close()
 		// Skip DROP DATABASE — rapid CREATE/DROP cycles crash the Dolt container.
 		// Orphan databases are cleaned up when the container terminates.
+	}
+}
+
+func TestIsRetryableErrorSchemaMigrationLock(t *testing.T) {
+	err := fmt.Errorf("schema migration: %w", schema.ErrMigrationLockUnavailable)
+	if !isRetryableError(err) {
+		t.Fatal("schema migration lock errors should be retryable")
 	}
 }
 
@@ -347,6 +355,35 @@ func TestApplyConfigDefaults_ProductionFallback(t *testing.T) {
 	if cfg.ServerPort != 0 {
 		t.Errorf("expected ServerPort=0 (ephemeral, resolved by auto-start), got %d", cfg.ServerPort)
 	}
+}
+
+func TestShouldPersistResolvedPortFile(t *testing.T) {
+	t.Run("default runtime port may be persisted", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
+
+		if !shouldPersistResolvedPortFile() {
+			t.Fatal("expected local resolved port to be persisted")
+		}
+	})
+
+	t.Run("explicit server port is runtime override only", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "15432")
+		t.Setenv("BEADS_DOLT_PORT", "")
+
+		if shouldPersistResolvedPortFile() {
+			t.Fatal("expected BEADS_DOLT_SERVER_PORT to suppress port file persistence")
+		}
+	})
+
+	t.Run("legacy orchestrator port is runtime override only", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "15433")
+
+		if shouldPersistResolvedPortFile() {
+			t.Fatal("expected BEADS_DOLT_PORT to suppress port file persistence")
+		}
+	})
 }
 
 // TestApplyConfigDefaults_SocketFromEnv verifies that BEADS_DOLT_SERVER_SOCKET

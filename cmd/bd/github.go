@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/github"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -49,23 +50,29 @@ By default, performs bidirectional sync:
 - Pushes local beads issues to GitHub
 
 Use --pull-only or --push-only to limit direction.`,
-	RunE: runGitHubSync,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGitHubSync,
 }
 
 // githubStatusCmd displays GitHub configuration and sync status.
 var githubStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show GitHub sync status",
-	Long:  `Display current GitHub configuration and sync status.`,
-	RunE:  runGitHubStatus,
+	Use:           "status",
+	Short:         "Show GitHub sync status",
+	Long:          `Display current GitHub configuration and sync status.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGitHubStatus,
 }
 
 // githubReposCmd lists accessible GitHub repositories.
 var githubReposCmd = &cobra.Command{
-	Use:   "repos",
-	Short: "List accessible GitHub repositories",
-	Long:  `List GitHub repositories that the configured token has access to.`,
-	RunE:  runGitHubRepos,
+	Use:           "repos",
+	Short:         "List accessible GitHub repositories",
+	Long:          `List GitHub repositories that the configured token has access to.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runGitHubRepos,
 }
 
 var (
@@ -287,6 +294,13 @@ func getGitHubClient(config GitHubConfig) *github.Client {
 
 // runGitHubStatus implements the github status command.
 func runGitHubStatus(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("github-status")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	config := getGitHubConfig()
 
 	out := cmd.OutOrStdout()
@@ -312,9 +326,16 @@ func runGitHubStatus(cmd *cobra.Command, args []string) error {
 
 // runGitHubRepos implements the github repos command.
 func runGitHubRepos(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("github-repos")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	config := getGitHubConfig()
 	if config.Token == "" {
-		return fmt.Errorf("github.token is not configured. Set via 'bd config set github.token <token>' or GITHUB_TOKEN environment variable")
+		return HandleError("github.token is not configured. Set via 'bd config set github.token <token>' or GITHUB_TOKEN environment variable")
 	}
 
 	out := cmd.OutOrStdout()
@@ -323,7 +344,7 @@ func runGitHubRepos(cmd *cobra.Command, args []string) error {
 
 	repos, err := client.ListRepositories(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to fetch repositories: %w", err)
+		return HandleError("failed to fetch repositories: %v", err)
 	}
 
 	_, _ = fmt.Fprintln(out, "Accessible GitHub Repositories")
@@ -347,9 +368,16 @@ func runGitHubRepos(cmd *cobra.Command, args []string) error {
 // runGitHubSync implements the github sync command.
 // Uses the tracker.Engine for all sync operations.
 func runGitHubSync(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("github-sync")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	config := getGitHubConfig()
 	if err := validateGitHubConfig(config); err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 
 	if !githubSyncDryRun {
@@ -357,26 +385,24 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 	}
 
 	if githubSyncPullOnly && githubSyncPushOnly {
-		return fmt.Errorf("cannot use both --pull-only and --push-only")
+		return HandleError("cannot use both --pull-only and --push-only")
 	}
 
-	// Validate conflict flags
 	conflictStrategy, err := getGitHubConflictStrategy(githubPreferLocal, githubPreferGitHub, githubPreferNewer)
 	if err != nil {
-		return fmt.Errorf("%w (--prefer-local, --prefer-github, --prefer-newer)", err)
+		return HandleError("%v (--prefer-local, --prefer-github, --prefer-newer)", err)
 	}
 
 	if err := ensureStoreActive(); err != nil {
-		return fmt.Errorf("database not available: %w", err)
+		return HandleError("database not available: %v", err)
 	}
 
 	out := cmd.OutOrStdout()
 	ctx := context.Background()
 
-	// Create and initialize the GitHub tracker
 	gt := &github.Tracker{}
 	if err := gt.Init(ctx, store); err != nil {
-		return fmt.Errorf("initializing GitHub tracker: %w", err)
+		return HandleError("initializing GitHub tracker: %v", err)
 	}
 
 	// Create the sync engine
@@ -398,10 +424,9 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := applySelectiveSyncFlags(cmd, &opts, push); err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 
-	// Map conflict resolution
 	switch conflictStrategy {
 	case GitHubConflictPreferLocal:
 		opts.ConflictResolution = tracker.ConflictLocal
@@ -416,11 +441,9 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintln(out)
 	}
 
-	// Run sync
 	result, err := engine.Sync(ctx, opts)
 	if err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		return err
+		return HandleError("%v", err)
 	}
 
 	// Output results

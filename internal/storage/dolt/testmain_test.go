@@ -88,6 +88,9 @@ func initSharedSchema(port int) error {
 	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('--allow-empty', '-m', 'test: init shared schema')"); err != nil {
 		return fmt.Errorf("DOLT_COMMIT: %w", err)
 	}
+	if err := testutil.MaterializeLocalTableSchemasForBranchTests(ctx, store.db); err != nil {
+		return fmt.Errorf("materialize local table schemas: %w", err)
+	}
 
 	return nil
 }

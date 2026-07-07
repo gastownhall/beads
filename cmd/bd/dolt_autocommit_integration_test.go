@@ -121,9 +121,6 @@ func doltHeadAuthor(t *testing.T, dir string) string {
 }
 
 func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow integration test in short mode")
-	}
 	if testDoltServerPort == 0 {
 		t.Skip("skipping: Dolt test container not available")
 	}
@@ -183,9 +180,6 @@ func TestDoltAutoCommit_On_WritesAdvanceHead(t *testing.T) {
 }
 
 func TestDoltAutoCommit_Batch_DefersCommit(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow integration test in short mode")
-	}
 	if testDoltServerPort == 0 {
 		t.Skip("skipping: Dolt test container not available")
 	}
@@ -243,9 +237,6 @@ func TestDoltAutoCommit_Batch_DefersCommit(t *testing.T) {
 }
 
 func TestDoltAutoCommit_Off_DoesNotAdvanceHead(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow integration test in short mode")
-	}
 	if testDoltServerPort == 0 {
 		t.Skip("skipping: Dolt test container not available")
 	}

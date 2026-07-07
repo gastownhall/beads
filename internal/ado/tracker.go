@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
@@ -325,7 +326,23 @@ func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
 }
 
 // getConfig reads a config value from storage, falling back to an environment variable.
+// For yaml-only keys (e.g. ado.pat), reads from config.yaml first
+// to avoid leaking secrets when pushing the Dolt database to remotes.
 func (t *Tracker) getConfig(ctx context.Context, key, envVar string) string {
+	// Secret keys are stored in config.yaml, not the Dolt database,
+	// to avoid leaking secrets when pushing to remotes.
+	if config.IsYamlOnlyKey(key) {
+		if val := config.GetString(key); val != "" {
+			return val
+		}
+		if envVar != "" {
+			if envVal := os.Getenv(envVar); envVal != "" {
+				return envVal
+			}
+		}
+		return ""
+	}
+
 	val, err := t.store.GetConfig(ctx, key)
 	if err == nil && val != "" {
 		return val

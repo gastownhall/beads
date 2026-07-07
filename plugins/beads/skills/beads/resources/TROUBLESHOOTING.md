@@ -453,7 +453,7 @@ If the **bd-issue-tracking skill** provides incorrect guidance:
 
 ## Related Documentation
 
-- [CLI Reference](CLI_REFERENCE.md) - Complete command documentation
+- [CLI Reference](CLI_REFERENCE.md) - Live command reference pointers
 - [Dependencies Guide](DEPENDENCIES.md) - Understanding dependency types
 - [Workflows](WORKFLOWS.md) - Step-by-step workflow guides
 - [beads GitHub](https://github.com/gastownhall/beads) - Official documentation

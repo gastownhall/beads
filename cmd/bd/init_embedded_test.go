@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,8 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -40,7 +43,7 @@ func buildEmbeddedBD(t *testing.T) string {
 			embeddedBD = prebuilt
 			return
 		}
-		tmpDir, err := os.MkdirTemp("", "bd-embedded-init-test-*")
+		tmpDir, err := testTempDir("bd-embedded-init-test-*")
 		if err != nil {
 			embeddedBDErr = fmt.Errorf("failed to create temp dir: %w", err)
 			return
@@ -86,7 +89,25 @@ func bdEnv(dir string) []string {
 		}
 		env = append(env, e)
 	}
-	return append(env, "HOME="+dir, "BEADS_DOLT_AUTO_START=0", "BEADS_NO_DAEMON=1")
+	return append(env,
+		"HOME="+dir,
+		"BEADS_DOLT_AUTO_START=0",
+		"BEADS_NO_DAEMON=1",
+		"BD_DISABLE_METRICS=1",
+		"BD_DISABLE_EVENT_FLUSH=1",
+	)
+}
+
+// envWithout returns env minus any entries for the named variable.
+func envWithout(env []string, name string) []string {
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		if strings.HasPrefix(e, name+"=") {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func isEmbeddedLockOutput(out string) bool {
@@ -96,9 +117,17 @@ func isEmbeddedLockOutput(out string) bool {
 		strings.Contains(out, "locked by another dolt process")
 }
 
+func runCommandBuffers(t *testing.T, cmd *exec.Cmd) (stdout, stderr bytes.Buffer, err error) {
+	t.Helper()
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	return stdout, stderr, err
+}
+
 // bdRunWithFlockRetry runs a bd command with retry on flock contention.
-// Returns the combined output and nil on success, or the last output and error
-// after all retries are exhausted or a non-flock error occurs.
+// Returns stdout and nil on success, or combined stdout/stderr and the last
+// error after retries are exhausted or a non-flock error occurs.
 func bdRunWithFlockRetry(t *testing.T, bd, dir string, args ...string) ([]byte, error) {
 	t.Helper()
 	var out []byte
@@ -107,10 +136,14 @@ func bdRunWithFlockRetry(t *testing.T, bd, dir string, args ...string) ([]byte, 
 		cmd := exec.Command(bd, args...)
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err = cmd.CombinedOutput()
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err = cmd.Run()
 		if err == nil {
-			return out, nil
+			return stdout.Bytes(), nil
 		}
+		out = append(stdout.Bytes(), stderr.Bytes()...)
 		if !isEmbeddedLockOutput(string(out)) {
 			return out, err
 		}
@@ -139,11 +172,11 @@ func runBDInit(t *testing.T, bd, dir string, extraArgs ...string) string {
 	cmd := exec.Command(bd, args...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd init %s failed: %v\n%s", strings.Join(extraArgs, " "), err, out)
+		t.Fatalf("bd init %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(extraArgs, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdInitFail runs bd init --quiet expecting failure. Returns combined output.
@@ -300,6 +333,69 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 	})
 
+	t.Run("fork_auto_contributor", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		origin := filepath.Join(dir, "origin.git")
+		upstream := filepath.Join(dir, "upstream.git")
+		for _, bareRepo := range []string{origin, upstream} {
+			if err := os.MkdirAll(bareRepo, 0755); err != nil {
+				t.Fatalf("mkdir %s: %v", bareRepo, err)
+			}
+			cmd := exec.Command("git", "init", "--bare")
+			cmd.Dir = bareRepo
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git init --bare %s failed: %v\n%s", bareRepo, err, out)
+			}
+		}
+		for name, url := range map[string]string{"origin": origin, "upstream": upstream} {
+			cmd := exec.Command("git", "remote", "add", name, url)
+			cmd.Dir = dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git remote add %s failed: %v\n%s", name, err, out)
+			}
+		}
+
+		out := runBDInit(t, bd, dir, "--prefix", "forkauto")
+		if strings.Contains(out, "Fork detected") {
+			t.Errorf("--quiet should suppress fork auto-routing output, got:\n%s", out)
+		}
+
+		beadsDir := filepath.Join(dir, ".beads")
+		planningDir := filepath.Join(dir, ".beads-planning")
+		if val := readBack(t, beadsDir, "forkauto", "routing.mode", false); val != "auto" {
+			t.Errorf("routing.mode: got %q, want %q", val, "auto")
+		}
+		if val := readBack(t, beadsDir, "forkauto", "routing.contributor", false); val != planningDir {
+			t.Errorf("routing.contributor: got %q, want %q", val, planningDir)
+		}
+		if val := readBack(t, beadsDir, "forkauto", "sync.remote", false); val != "upstream" {
+			t.Errorf("sync.remote: got %q, want %q", val, "upstream")
+		}
+		if _, err := os.Stat(filepath.Join(planningDir, ".beads")); err != nil {
+			t.Errorf("planning .beads missing: %v", err)
+		}
+
+		// Regression: autoConfigureForkContributor must initialize the planning
+		// Dolt schema, not just create the .beads directory. An uninitialized
+		// store causes "Dolt server unreachable" on first use (e.g. bd migrate-personal).
+		planningEmbeddedDir := filepath.Join(planningDir, ".beads", "embeddeddolt")
+		if _, err := os.Stat(planningEmbeddedDir); err != nil {
+			t.Errorf("planning embeddeddolt dir missing (planning store not pre-initialized): %v", err)
+		}
+
+		roleCmd := exec.Command("git", "config", "--get", "beads.role")
+		roleCmd.Dir = dir
+		roleOut, err := roleCmd.Output()
+		if err != nil {
+			t.Fatalf("git config --get beads.role failed: %v", err)
+		}
+		if role := strings.TrimSpace(string(roleOut)); role != "contributor" {
+			t.Errorf("beads.role: got %q, want %q", role, "contributor")
+		}
+	})
+
 	t.Run("prefix_trailing_hyphen", func(t *testing.T) {
 		_, beadsDir, _ := bdInit(t, bd, "--prefix", "test-")
 		if val := readBack(t, beadsDir, "test", "issue_prefix", false); val != "test" {
@@ -320,28 +416,66 @@ func TestEmbeddedInit(t *testing.T) {
 		cmd := exec.Command(bd, "init", "--prefix", "nq")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd init failed: %v\n%s", err, out)
+			t.Fatalf("bd init failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		if !strings.Contains(string(out), "bd initialized successfully") {
-			t.Errorf("expected success message, got: %s", out)
+		if !strings.Contains(stdout.String(), "bd initialized successfully") {
+			t.Errorf("expected success message, got: %s", stdout.String())
 		}
 	})
 
-	t.Run("plain_git_origin_not_registered_as_dolt_remote", func(t *testing.T) {
+	t.Run("git_origin_registered_as_dolt_remote", func(t *testing.T) {
 		bareDir := filepath.Join(t.TempDir(), "plain.git")
-		runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+		runGitForBootstrapTest(t, "", "init", "--bare", "-b", "main", bareDir)
+
+		seedDir := t.TempDir()
+		initGitRepoAt(t, seedDir)
+		runGitForBootstrapTest(t, seedDir, "branch", "-M", "main")
+		runGitForBootstrapTest(t, seedDir, "commit", "--allow-empty", "-m", "init")
+		runGitForBootstrapTest(t, seedDir, "remote", "add", "origin", "file://"+bareDir)
+		runGitForBootstrapTest(t, seedDir, "push", "-u", "origin", "main")
 
 		dir := t.TempDir()
 		initGitRepoAt(t, dir)
-		runGitForBootstrapTest(t, dir, "remote", "add", "origin", bareDir)
+		remoteURL := "file://" + bareDir
+		runGitForBootstrapTest(t, dir, "remote", "add", "origin", remoteURL)
 
 		runBDInit(t, bd, dir, "--prefix", "pg", "--skip-hooks", "--skip-agents")
 
 		out := bdDolt(t, bd, dir, "remote", "list")
+		if !strings.Contains(out, "origin") || !strings.Contains(out, remoteURL) {
+			t.Fatalf("git origin should be registered as a Dolt remote %q; remote list:\n%s", remoteURL, out)
+		}
+
+		configYAML, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		if !strings.Contains(string(configYAML), remoteURL) {
+			t.Fatalf("git origin should be persisted as sync.remote; config.yaml:\n%s", configYAML)
+		}
+
+		bdDolt(t, bd, dir, "push")
+		ls := exec.Command("git", "ls-remote", remoteURL, "refs/dolt/data")
+		lsOut, err := ls.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git ls-remote refs/dolt/data failed: %v\n%s", err, lsOut)
+		}
+		if !strings.Contains(string(lsOut), "refs/dolt/data") {
+			t.Fatalf("bd dolt push did not publish refs/dolt/data:\n%s", lsOut)
+		}
+	})
+
+	t.Run("no_git_origin_stays_local", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		runBDInit(t, bd, dir, "--prefix", "local", "--skip-hooks", "--skip-agents")
+
+		out := bdDolt(t, bd, dir, "remote", "list")
 		if strings.Contains(out, "origin") {
-			t.Fatalf("plain git origin should not be registered as a Dolt remote; remote list:\n%s", out)
+			t.Fatalf("init without git origin should not configure a Dolt remote; remote list:\n%s", out)
 		}
 
 		configYAML, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
@@ -349,7 +483,108 @@ func TestEmbeddedInit(t *testing.T) {
 			t.Fatalf("read config.yaml: %v", err)
 		}
 		if strings.Contains(string(configYAML), "sync.remote:") || strings.Contains(string(configYAML), "sync-remote:") {
-			t.Fatalf("plain git origin should not be persisted as sync.remote; config.yaml:\n%s", configYAML)
+			t.Fatalf("init without git origin should not persist sync.remote; config.yaml:\n%s", configYAML)
+		}
+	})
+
+	t.Run("dolt_push_lazily_adopts_later_git_origin", func(t *testing.T) {
+		bareDir := filepath.Join(t.TempDir(), "later-origin.git")
+		runGitForBootstrapTest(t, "", "init", "--bare", "-b", "main", bareDir)
+		remoteURL := "file://" + bareDir
+
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		runGitForBootstrapTest(t, dir, "branch", "-M", "main")
+		runGitForBootstrapTest(t, dir, "commit", "--allow-empty", "-m", "init")
+		runBDInit(t, bd, dir, "--prefix", "late", "--skip-hooks", "--skip-agents")
+		bdCreate(t, bd, dir, "Lazy remote adoption", "--type", "task")
+
+		runGitForBootstrapTest(t, dir, "remote", "add", "origin", remoteURL)
+		runGitForBootstrapTest(t, dir, "push", "-u", "origin", "main")
+
+		bdDolt(t, bd, dir, "push")
+
+		out := bdDolt(t, bd, dir, "remote", "list")
+		if !strings.Contains(out, "origin") || !strings.Contains(out, remoteURL) {
+			t.Fatalf("bd dolt push should adopt later git origin %q; remote list:\n%s", remoteURL, out)
+		}
+
+		configYAML, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		if !strings.Contains(string(configYAML), remoteURL) {
+			t.Fatalf("bd dolt push should persist sync.remote; config.yaml:\n%s", configYAML)
+		}
+
+		ls := exec.Command("git", "ls-remote", remoteURL, "refs/dolt/data")
+		lsOut, err := ls.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git ls-remote refs/dolt/data failed: %v\n%s", err, lsOut)
+		}
+		if !strings.Contains(string(lsOut), "refs/dolt/data") {
+			t.Fatalf("bd dolt push did not publish refs/dolt/data:\n%s", lsOut)
+		}
+	})
+
+	t.Run("dolt_push_adopts_target_origin_with_dash_c", func(t *testing.T) {
+		targetBare := filepath.Join(t.TempDir(), "target-origin.git")
+		ambientBare := filepath.Join(t.TempDir(), "ambient-origin.git")
+		runGitForBootstrapTest(t, "", "init", "--bare", "-b", "main", targetBare)
+		runGitForBootstrapTest(t, "", "init", "--bare", "-b", "main", ambientBare)
+		targetURL := "file://" + targetBare
+		ambientURL := "file://" + ambientBare
+
+		targetDir := t.TempDir()
+		initGitRepoAt(t, targetDir)
+		runGitForBootstrapTest(t, targetDir, "branch", "-M", "main")
+		runGitForBootstrapTest(t, targetDir, "commit", "--allow-empty", "-m", "init")
+		runBDInit(t, bd, targetDir, "--prefix", "dc", "--skip-hooks", "--skip-agents")
+		bdCreate(t, bd, targetDir, "Dash C remote adoption", "--type", "task")
+		runGitForBootstrapTest(t, targetDir, "remote", "add", "origin", targetURL)
+		runGitForBootstrapTest(t, targetDir, "push", "-u", "origin", "main")
+
+		ambientDir := t.TempDir()
+		initGitRepoAt(t, ambientDir)
+		runGitForBootstrapTest(t, ambientDir, "remote", "add", "origin", ambientURL)
+
+		cmd := exec.Command(bd, "-C", targetDir, "dolt", "push")
+		cmd.Dir = ambientDir
+		cmd.Env = bdEnv(ambientDir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd -C target dolt push failed: %v\n%s", err, out)
+		}
+
+		out := bdDolt(t, bd, targetDir, "remote", "list")
+		if !strings.Contains(out, "origin") || !strings.Contains(out, targetURL) {
+			t.Fatalf("bd -C target dolt push should adopt target origin %q; remote list:\n%s", targetURL, out)
+		}
+		if strings.Contains(out, ambientURL) {
+			t.Fatalf("bd -C target dolt push adopted ambient origin %q; remote list:\n%s", ambientURL, out)
+		}
+	})
+
+	t.Run("stealth_skips_git_origin_remote_synthesis", func(t *testing.T) {
+		bareDir := filepath.Join(t.TempDir(), "stealth.git")
+		runGitForBootstrapTest(t, "", "init", "--bare", "-b", "main", bareDir)
+
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		runGitForBootstrapTest(t, dir, "remote", "add", "origin", "file://"+bareDir)
+
+		runBDInit(t, bd, dir, "--prefix", "st", "--stealth", "--skip-agents")
+
+		out := bdDolt(t, bd, dir, "remote", "list")
+		if strings.Contains(out, "origin") {
+			t.Fatalf("stealth init should not synthesize a Dolt remote; remote list:\n%s", out)
+		}
+
+		configYAML, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		if strings.Contains(string(configYAML), "sync.remote:") || strings.Contains(string(configYAML), "sync-remote:") {
+			t.Fatalf("stealth init should not persist sync.remote; config.yaml:\n%s", configYAML)
 		}
 	})
 
@@ -425,12 +660,12 @@ func TestEmbeddedInit(t *testing.T) {
 		cmd = exec.Command(bd, "list")
 		cmd.Dir = cloneDir
 		cmd.Env = bdEnv(cloneDir)
-		listOut, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd list failed: %v\n%s", err, listOut)
+			t.Fatalf("bd list failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		if !strings.Contains(string(listOut), "Remote issue") {
-			t.Fatalf("cloned database missing remote issue:\n%s", listOut)
+		if !strings.Contains(stdout.String(), "Remote issue") {
+			t.Fatalf("cloned database missing remote issue:\n%s", stdout.String())
 		}
 
 		cloneBeadsDir := filepath.Join(cloneDir, ".beads")
@@ -446,6 +681,125 @@ func TestEmbeddedInit(t *testing.T) {
 		if !strings.Contains(string(configYAML), remoteURL) {
 			t.Fatalf("config.yaml should persist --remote URL %q:\n%s", remoteURL, configYAML)
 		}
+	})
+
+	t.Run("remote_behind_schema_gate", func(t *testing.T) {
+		// bd-4mpy7 / #4516: bootstrapping from a remote whose database is
+		// behind this binary's schema. Shared fixture: a published remote
+		// regressed one migration below LatestVersion. Two paths against it:
+		// the default smart gate auto-migrates the clone as a safe
+		// first-mover (remote at the same version — no one has migrated),
+		// while the BD_SMART_GATE=0 opt-out must fail with
+		// designated-migrator guidance and leave a finalized workspace where
+		// the guidance commands can run — not a half-initialized directory
+		// with a raw gate error.
+		remoteDir := filepath.Join(t.TempDir(), "behind-remote")
+		remoteURL := "file://" + remoteDir
+
+		sourceDir, sourceBeads, _ := bdInit(t, bd, "--prefix", "bsrc", "--skip-hooks", "--skip-agents")
+		bdCreate(t, bd, sourceDir, "Behind remote issue", "--type", "task")
+		bdDolt(t, bd, sourceDir, "commit")
+
+		// Regress the source database one migration and publish it, all in
+		// one raw SQL session — running bd against the regressed database
+		// would just auto-migrate it back (it has no remote registered yet).
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		db, cleanupSQL, err := embeddeddolt.OpenSQL(ctx, filepath.Join(sourceBeads, "embeddeddolt"), "bsrc", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		for _, q := range []string{
+			fmt.Sprintf("DELETE FROM schema_migrations WHERE version = %d", schema.LatestVersion()),
+			"CALL DOLT_COMMIT('-am', 'regress schema one version')",
+			fmt.Sprintf("CALL DOLT_REMOTE('add', 'origin', '%s')", remoteURL),
+			"CALL DOLT_PUSH('--force', 'origin', 'main')",
+		} {
+			if _, err := db.ExecContext(ctx, q); err != nil {
+				_ = cleanupSQL()
+				t.Fatalf("%s: %v", q, err)
+			}
+		}
+		_ = cleanupSQL()
+
+		t.Run("default_smart_gate_auto_migrates_first_mover", func(t *testing.T) {
+			cloneDir := t.TempDir()
+			initGitRepoAt(t, cloneDir)
+			cmd := exec.Command(bd, "init", "--quiet", "--prefix", "bclone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+			cmd.Dir = cloneDir
+			// Exercise the true default: strip any ambient opt-out so
+			// BD_SMART_GATE is genuinely unset.
+			cmd.Env = envWithout(append(bdEnv(cloneDir), schema.AllowRemoteMigrateEnv+"=0"), schema.SmartGateEnv)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("default smart gate should auto-migrate the safe first-mover during init: %v\n%s", err, out)
+			}
+			if !strings.Contains(string(out), "Smart gate") || !strings.Contains(string(out), "bd dolt push") {
+				t.Fatalf("smart auto-migrate should announce itself and direct a follow-up push:\n%s", out)
+			}
+
+			// The clone is migrated and immediately usable, no unlock needed.
+			cmd = exec.Command(bd, "list")
+			cmd.Dir = cloneDir
+			cmd.Env = bdEnv(cloneDir)
+			listOut, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("bd list after smart auto-migrate failed: %v\n%s", err, listOut)
+			}
+			if !strings.Contains(string(listOut), "Behind remote issue") {
+				t.Fatalf("auto-migrated clone missing source issue:\n%s", listOut)
+			}
+		})
+
+		t.Run("opt_out_gates_with_guidance", func(t *testing.T) {
+			cloneDir := t.TempDir()
+			initGitRepoAt(t, cloneDir)
+			cmd := exec.Command(bd, "init", "--quiet", "--prefix", "bclone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+			cmd.Dir = cloneDir
+			cmd.Env = append(bdEnv(cloneDir), schema.AllowRemoteMigrateEnv+"=0", schema.SmartGateEnv+"=0")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("bd init --remote against a behind-schema remote should fail; output:\n%s", out)
+			}
+			for _, want := range []string{
+				"Re-running `bd init` will NOT fix this",
+				schema.AllowRemoteMigrateEnv + "=1",
+				"bd dolt push",
+			} {
+				if !strings.Contains(string(out), want) {
+					t.Fatalf("init output missing %q:\n%s", want, out)
+				}
+			}
+
+			// The failed init must leave a finalized workspace (metadata.json,
+			// config.yaml) so the guidance commands can open the cloned database.
+			cloneBeads := filepath.Join(cloneDir, ".beads")
+			for _, f := range []string{"metadata.json", "config.yaml"} {
+				if _, err := os.Stat(filepath.Join(cloneBeads, f)); err != nil {
+					t.Fatalf("failed init should leave %s behind: %v", f, err)
+				}
+			}
+
+			// Recovery per the guidance: the designated migrator unlocks,
+			// migrates, and the workspace is usable.
+			cmd = exec.Command(bd, "migrate")
+			cmd.Dir = cloneDir
+			cmd.Env = append(bdEnv(cloneDir), schema.AllowRemoteMigrateEnv+"=1")
+			if migOut, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("%s=1 bd migrate failed: %v\n%s", schema.AllowRemoteMigrateEnv, err, migOut)
+			}
+
+			cmd = exec.Command(bd, "list")
+			cmd.Dir = cloneDir
+			cmd.Env = bdEnv(cloneDir)
+			listOut, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("bd list after migrate failed: %v\n%s", err, listOut)
+			}
+			if !strings.Contains(string(listOut), "Behind remote issue") {
+				t.Fatalf("migrated clone missing source issue:\n%s", listOut)
+			}
+		})
 	})
 
 	t.Run("remote_empty_initializes_fresh_and_wires_origin", func(t *testing.T) {
@@ -574,9 +928,126 @@ func TestEmbeddedInit(t *testing.T) {
 		requireNoFile(t, filepath.Join(beadsDir, "hooks"))
 	})
 
-	t.Run("stealth", func(t *testing.T) {
-		dir, _, _ := bdInit(t, bd, "--prefix", "st", "--stealth")
+	t.Run("skip_agents", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sa", "--skip-agents")
 		requireNoFile(t, filepath.Join(dir, "AGENTS.md"))
+		requireNoFile(t, filepath.Join(dir, "CLAUDE.md"))
+		requireNoFile(t, filepath.Join(dir, ".claude"))
+		requireNoFile(t, filepath.Join(dir, ".agents"))
+		requireNoFile(t, filepath.Join(dir, ".codex"))
+	})
+
+	t.Run("stealth", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "st", "--stealth")
+		requireNoFile(t, filepath.Join(dir, "AGENTS.md"))
+		requireNoFile(t, filepath.Join(dir, "CLAUDE.md"))
+		requireNoFile(t, filepath.Join(dir, ".claude"))
+		requireNoFile(t, filepath.Join(dir, ".agents"))
+		requireNoFile(t, filepath.Join(dir, ".codex"))
+
+		// Stealth must stay invisible: it should create .beads/ but route everything else into
+		// .git/info/exclude so the database lives there without git seeing it.
+		requireFile(t, beadsDir)
+		excludeContent, err := os.ReadFile(filepath.Join(dir, ".git", "info", "exclude"))
+		if err != nil {
+			t.Fatalf("failed to read .git/info/exclude: %v", err)
+		}
+		for _, want := range []string{".beads/", ".dolt/", "*.db"} {
+			if !strings.Contains(string(excludeContent), want) {
+				t.Errorf(".git/info/exclude missing %q:\n%s", want, excludeContent)
+			}
+		}
+	})
+
+	// Regression: bd init --stealth must not touch any git-visible files. Previously it
+	// created/modified the tracked project-root .gitignore via doctor.EnsureProjectGitignore, which
+	// showed up in `git status` and defeated stealth. Everything beads adds must be excluded
+	// (.beads/) or live in .git/info/exclude, leaving the working tree clean from git's view.
+	t.Run("stealth_leaves_worktree_clean", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		// Commit a baseline so the repo has a clean, non-empty starting state.
+		gitignorePath := filepath.Join(dir, ".gitignore")
+		if err := os.WriteFile(gitignorePath, []byte("node_modules/\n"), 0644); err != nil {
+			t.Fatalf("seed .gitignore: %v", err)
+		}
+		for _, args := range [][]string{
+			{"add", "-A"},
+			{"commit", "-m", "baseline"},
+		} {
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
+			}
+		}
+
+		runBDInit(t, bd, dir, "--prefix", "stc", "--stealth")
+
+		// git status --porcelain must be empty: stealth touched no visible files.
+		cmd := exec.Command("git", "-c", "core.hooksPath=", "status", "--porcelain")
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git status failed: %v\n%s", err, out)
+		}
+		if strings.TrimSpace(string(out)) != "" {
+			t.Errorf("bd init --stealth left git-visible changes (should be invisible):\n%s", out)
+		}
+
+		// And the seeded .gitignore must be byte-for-byte unchanged.
+		got, err := os.ReadFile(gitignorePath)
+		if err != nil {
+			t.Fatalf("read .gitignore: %v", err)
+		}
+		if string(got) != "node_modules/\n" {
+			t.Errorf("stealth modified project .gitignore:\ngot: %q", string(got))
+		}
+	})
+
+	// Regression: bd doctor --fix on a stealth repo must stay invisible too. Previously the
+	// "Project Gitignore" fix called FixProjectGitignore unconditionally and re-created the tracked
+	// .gitignore that stealth init deliberately avoided.
+	t.Run("stealth_doctor_fix_keeps_worktree_clean", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		gitignorePath := filepath.Join(dir, ".gitignore")
+		if err := os.WriteFile(gitignorePath, []byte("node_modules/\n"), 0644); err != nil {
+			t.Fatalf("seed .gitignore: %v", err)
+		}
+		for _, args := range [][]string{{"add", "-A"}, {"commit", "-m", "baseline"}} {
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
+			}
+		}
+
+		runBDInit(t, bd, dir, "--prefix", "sdf", "--stealth")
+
+		// bd doctor --fix may exit non-zero for unrelated checks; we only care that it does not
+		// introduce git-visible changes on a stealth repo.
+		fixCmd := exec.Command(bd, "doctor", "--fix", "--yes")
+		fixCmd.Dir = dir
+		fixCmd.Env = bdEnv(dir)
+		if out, err := fixCmd.CombinedOutput(); err != nil {
+			t.Logf("bd doctor --fix exited non-zero (tolerated): %v\n%s", err, out)
+		}
+
+		statusCmd := exec.Command("git", "-c", "core.hooksPath=", "status", "--porcelain")
+		statusCmd.Dir = dir
+		out, err := statusCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git status failed: %v\n%s", err, out)
+		}
+		if strings.TrimSpace(string(out)) != "" {
+			t.Errorf("bd doctor --fix left git-visible changes on a stealth repo:\n%s", out)
+		}
+		if got, _ := os.ReadFile(gitignorePath); string(got) != "node_modules/\n" {
+			t.Errorf("bd doctor --fix modified project .gitignore on a stealth repo:\ngot: %q", string(got))
+		}
 	})
 
 	t.Run("force_reinit", func(t *testing.T) {
@@ -661,12 +1132,12 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 		logCmd := exec.Command("git", "log", "--oneline", "-n", "1")
 		logCmd.Dir = dir
-		logOut, err := logCmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, logCmd)
 		if err != nil {
-			t.Fatalf("git log failed: %v\n%s", err, logOut)
+			t.Fatalf("git log failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		if !strings.Contains(string(logOut), "bd init: initialize beads issue tracking") {
-			t.Fatalf("expected init commit to succeed, got log: %s", logOut)
+		if !strings.Contains(stdout.String(), "bd init: initialize beads issue tracking") {
+			t.Fatalf("expected init commit to succeed, got log: %s", stdout.String())
 		}
 	})
 
@@ -677,8 +1148,22 @@ func TestEmbeddedInit(t *testing.T) {
 		if err := os.MkdirAll(beadsDir, 0750); err != nil {
 			t.Fatal(err)
 		}
+		commentTime := time.Date(2026, 5, 22, 12, 0, 0, 0, time.UTC)
+		preservedCommentID := "018f13f1-1111-7111-8111-111111111111"
 		issues := []types.Issue{
-			{ID: "jl-abc123", Title: "One", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+			{
+				ID:        "jl-abc123",
+				Title:     "One",
+				Status:    types.StatusOpen,
+				Priority:  2,
+				IssueType: types.TypeTask,
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
+				Comments: []*types.Comment{
+					{ID: preservedCommentID, IssueID: "jl-abc123", Author: "alice", Text: "preserve this id", CreatedAt: commentTime},
+					{IssueID: "jl-abc123", Author: "bob", Text: "generate an id", CreatedAt: commentTime.Add(time.Minute)},
+				},
+			},
 			{ID: "jl-def456", Title: "Two", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeBug, CreatedAt: time.Now(), UpdatedAt: time.Now()},
 		}
 		var lines []string
@@ -703,21 +1188,184 @@ func TestEmbeddedInit(t *testing.T) {
 		cmd := exec.Command(bd, "init", "--prefix", "jl", "--from-jsonl", "--quiet")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("--from-jsonl should succeed now that CreateIssuesWithFullOptions is implemented: %v\n%s", err, out)
+			t.Fatalf("--from-jsonl should succeed now that CreateIssuesWithFullOptions is implemented: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 		if _, err := os.Stat(filepath.Join(dir, ".hook-ran")); err == nil {
 			t.Fatal("expected --from-jsonl auto-commit to bypass git hooks")
 		}
 		logCmd := exec.Command("git", "log", "--oneline", "-n", "1")
 		logCmd.Dir = dir
-		logOut, err := logCmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git log failed: %v\n%s", err, logOut)
+		stdout.Reset()
+		stderr.Reset()
+		logCmd.Stdout = &stdout
+		logCmd.Stderr = &stderr
+		if err := logCmd.Run(); err != nil {
+			t.Fatalf("git log failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		if !strings.Contains(string(logOut), "bd init: initialize beads issue tracking") {
-			t.Fatalf("expected init commit to succeed, got log: %s", logOut)
+		if !strings.Contains(stdout.String(), "bd init: initialize beads issue tracking") {
+			t.Fatalf("expected init commit to succeed, got log: %s", stdout.String())
+		}
+
+		exportCommentIDs := func(t *testing.T, repoDir, outFile string) []string {
+			t.Helper()
+			exportCmd := exec.Command(bd, "export", "-o", outFile)
+			exportCmd.Dir = repoDir
+			exportCmd.Env = bdEnv(repoDir)
+			if out, err := exportCmd.CombinedOutput(); err != nil {
+				t.Fatalf("bd export failed: %v\n%s", err, out)
+			}
+			data, err := os.ReadFile(outFile)
+			if err != nil {
+				t.Fatalf("read export: %v", err)
+			}
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				var issue types.Issue
+				if err := json.Unmarshal([]byte(line), &issue); err != nil {
+					t.Fatalf("parse exported issue: %v\n%s", err, line)
+				}
+				if issue.ID != "jl-abc123" {
+					continue
+				}
+				if len(issue.Comments) != 2 {
+					t.Fatalf("exported comments = %d, want 2", len(issue.Comments))
+				}
+				return []string{issue.Comments[0].ID, issue.Comments[1].ID}
+			}
+			t.Fatal("jl-abc123 missing from export")
+			return nil
+		}
+
+		firstExport := filepath.Join(dir, "first.jsonl")
+		firstIDs := exportCommentIDs(t, dir, firstExport)
+		if firstIDs[0] != preservedCommentID {
+			t.Fatalf("preserved comment ID = %q, want %q", firstIDs[0], preservedCommentID)
+		}
+		if firstIDs[1] == "" {
+			t.Fatal("missing-ID comment was exported without generated ID")
+		}
+		if _, err := uuid.Parse(firstIDs[1]); err != nil {
+			t.Fatalf("generated comment ID %q is not a valid UUID: %v", firstIDs[1], err)
+		}
+
+		reimportDir := t.TempDir()
+		initGitRepoAt(t, reimportDir)
+		reimportBeadsDir := filepath.Join(reimportDir, ".beads")
+		if err := os.MkdirAll(reimportBeadsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		exportedJSONL, err := os.ReadFile(firstExport)
+		if err != nil {
+			t.Fatalf("read first export: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(reimportBeadsDir, "issues.jsonl"), exportedJSONL, 0644); err != nil {
+			t.Fatal(err)
+		}
+		reimportCmd := exec.Command(bd, "init", "--prefix", "jl", "--from-jsonl", "--quiet")
+		reimportCmd.Dir = reimportDir
+		reimportCmd.Env = bdEnv(reimportDir)
+		if stdout, stderr, err := runCommandBuffers(t, reimportCmd); err != nil {
+			t.Fatalf("reimport exported JSONL failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		secondIDs := exportCommentIDs(t, reimportDir, filepath.Join(reimportDir, "second.jsonl"))
+		if firstIDs[0] != secondIDs[0] || firstIDs[1] != secondIDs[1] {
+			t.Fatalf("comment IDs changed after reimport: first=%v second=%v", firstIDs, secondIDs)
+		}
+	})
+
+	t.Run("from_jsonl_with_remote_data_requires_discard_and_skips_clone", func(t *testing.T) {
+		bareDir := filepath.Join(t.TempDir(), "remote.git")
+		runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+
+		sourceDir := t.TempDir()
+		runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+		runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+		runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+		runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+		runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
+		runGitForBootstrapTest(t, sourceDir, "push", "origin", "main")
+		runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		runGitForBootstrapTest(t, dir, "remote", "add", "origin", bareDir)
+
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		issue := types.Issue{
+			ID:        "jlremote-abc123",
+			Title:     "JSONL authoritative",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		line, _ := json.Marshal(issue)
+		if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), append(line, '\n'), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := exec.Command(bd, "init", "--prefix", "jlremote", "--from-jsonl", "--discard-remote", "--destroy-token=DESTROY-jlremote", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("--from-jsonl with authorized remote discard should import without cloning: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		showCmd := exec.Command(bd, "show", "jlremote-abc123", "--json")
+		showCmd.Dir = dir
+		showCmd.Env = bdEnv(dir)
+		out, err := showCmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("imported issue not found: %v\n%s", err, out)
+		}
+		if !strings.Contains(string(out), "JSONL authoritative") {
+			t.Fatalf("imported issue title missing from show output:\n%s", out)
+		}
+	})
+
+	t.Run("from_jsonl_uses_import_path", func(t *testing.T) {
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		beadsDir := filepath.Join(dir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("import:\n  path: beads.jsonl\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		issue := types.Issue{
+			ID:        "jlcfg-abc123",
+			Title:     "Configured JSONL",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		line, _ := json.Marshal(issue)
+		if err := os.WriteFile(filepath.Join(beadsDir, "beads.jsonl"), append(line, '\n'), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := exec.Command(bd, "init", "--prefix", "jlcfg", "--from-jsonl", "--quiet")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("--from-jsonl with import.path failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		showCmd := exec.Command(bd, "show", "jlcfg-abc123", "--json")
+		showCmd.Dir = dir
+		showCmd.Env = bdEnv(dir)
+		if out, err := showCmd.CombinedOutput(); err != nil {
+			t.Fatalf("imported issue not found: %v\n%s", err, out)
 		}
 	})
 
@@ -803,6 +1451,10 @@ func TestEmbeddedInit(t *testing.T) {
 		requireFile(t, filepath.Join(beadsDir, "config.yaml"))
 		requireFile(t, filepath.Join(beadsDir, "interactions.jsonl"))
 		requireFile(t, filepath.Join(dir, "AGENTS.md"))
+		requireFile(t, filepath.Join(dir, ".agents", "skills", "beads", "SKILL.md"))
+		requireFile(t, filepath.Join(dir, ".agents", "skills", "beads", "agents", "openai.yaml"))
+		requireFile(t, filepath.Join(dir, ".codex", "config.toml"))
+		requireFile(t, filepath.Join(dir, ".codex", "hooks.json"))
 
 		content, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore"))
 		if err != nil {
@@ -978,6 +1630,222 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 		if val := readBack(t, beadsDir, want, "issue_prefix", false); val != want {
 			t.Errorf("issue_prefix: got %q, want %q", val, want)
+		}
+	})
+
+	t.Run("remote_host_without_server_mode_fails", func(t *testing.T) {
+		// When dolt.host is set to a remote address but server mode is not
+		// enabled, bd init must hard-fail (not fall through to embedded).
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		xdgDir := filepath.Join(dir, ".config", "bd")
+		if err := os.MkdirAll(xdgDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(xdgDir, "config.yaml"),
+			[]byte("dolt.host: 100.111.197.110\ndolt.port: 3306\n"), 0o600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+
+		cmd := exec.Command(bd, "init", "--prefix", "ambi", "--non-interactive")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected bd init to fail with remote host and no server mode, but it succeeded:\n%s", out)
+		}
+		output := string(out)
+		if !strings.Contains(output, "server mode is not enabled") {
+			t.Errorf("expected error about server mode not enabled, got:\n%s", output)
+		}
+		if !strings.Contains(output, "100.111.197.110") {
+			t.Errorf("error should mention the configured host, got:\n%s", output)
+		}
+	})
+
+	t.Run("port_only_without_server_mode_succeeds", func(t *testing.T) {
+		// dolt.port alone is ambient test plumbing — not server-mode intent.
+		// bd init should succeed and create an embedded database.
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		xdgDir := filepath.Join(dir, ".config", "bd")
+		if err := os.MkdirAll(xdgDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(xdgDir, "config.yaml"),
+			[]byte("dolt.port: 3306\n"), 0o600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+
+		cmd := exec.Command(bd, "init", "--prefix", "ponly", "--non-interactive")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("expected bd init to succeed with port-only config, but it failed:\n%s", out)
+		}
+	})
+
+	t.Run("host_only_without_server_mode_fails", func(t *testing.T) {
+		// Remote dolt.host without dolt.port must still hard-fail
+		// when server mode is not enabled.
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		xdgDir := filepath.Join(dir, ".config", "bd")
+		if err := os.MkdirAll(xdgDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(xdgDir, "config.yaml"),
+			[]byte("dolt.host: 100.111.197.110\n"), 0o600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+
+		cmd := exec.Command(bd, "init", "--prefix", "honly", "--non-interactive")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected bd init to fail with remote host and no server mode, but it succeeded:\n%s", out)
+		}
+		output := string(out)
+		if !strings.Contains(output, "server mode is not enabled") {
+			t.Errorf("expected error about server mode not enabled, got:\n%s", output)
+		}
+		if !strings.Contains(output, "100.111.197.110") {
+			t.Errorf("error should mention the configured host, got:\n%s", output)
+		}
+	})
+
+	t.Run("ambiguous_host_local_no_warning", func(t *testing.T) {
+		// When dolt.host is localhost, no warning should appear even without --quiet.
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		xdgDir := filepath.Join(dir, ".config", "bd")
+		if err := os.MkdirAll(xdgDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(xdgDir, "config.yaml"),
+			[]byte("dolt.host: 127.0.0.1\n"), 0o600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+
+		cmd := exec.Command(bd, "init", "--prefix", "ahloc", "--non-interactive")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd init failed: %v\n%s", err, out)
+		}
+		if strings.Contains(string(out), "Warning: dolt.host") {
+			t.Errorf("local host should not trigger warning, got:\n%s", out)
+		}
+	})
+
+	t.Run("local_env_host_overrides_remote_config_host", func(t *testing.T) {
+		// Env host has higher precedence than config.yaml host. A local env
+		// host should not inherit or report a lower-precedence remote config host.
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		xdgDir := filepath.Join(dir, ".config", "bd")
+		if err := os.MkdirAll(xdgDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(xdgDir, "config.yaml"),
+			[]byte("dolt.host: 100.111.197.110\n"), 0o600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+
+		cmd := exec.Command(bd, "init", "--prefix", "envlocal", "--non-interactive")
+		cmd.Dir = dir
+		cmd.Env = append(bdEnv(dir), "BEADS_DOLT_SERVER_HOST=127.0.0.1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("local env host should override remote config host, but init failed:\n%s", out)
+		}
+	})
+
+	t.Run("config_yaml_dolt_mode_server_metadata", func(t *testing.T) {
+		// When dolt.mode: server is set in config.yaml and init runs in
+		// embedded mode (no server available), the metadata.json should
+		// still reflect that server mode was requested. We verify by
+		// checking that the init process attempted server mode.
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		xdgDir := filepath.Join(dir, ".config", "bd")
+		if err := os.MkdirAll(xdgDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(xdgDir, "config.yaml"),
+			[]byte("dolt.mode: server\n"), 0o600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+
+		// With dolt.mode: server and no actual server, init should fail
+		// with a connection error — proving that config.yaml triggered
+		// server mode.
+		cmd := exec.Command(bd, "init", "--prefix", "srvmode", "--non-interactive", "--quiet")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		// We expect failure because there's no server to connect to.
+		// The key assertion is that it tried server mode at all.
+		if err == nil {
+			// If it succeeded, it created an embedded DB — meaning
+			// config.yaml dolt.mode was ignored.
+			beadsDir := filepath.Join(dir, ".beads")
+			cfg, loadErr := configfile.Load(beadsDir)
+			if loadErr != nil {
+				t.Fatalf("bd init succeeded but cannot load metadata: %v", loadErr)
+			}
+			if strings.ToLower(cfg.DoltMode) != "server" {
+				t.Errorf("expected DoltMode=server in metadata, got %q (config.yaml dolt.mode: server was ignored)", cfg.DoltMode)
+			}
+		} else {
+			// Init failed — check that the error is connection-related,
+			// which proves server mode was attempted.
+			output := string(out)
+			if !strings.Contains(output, "connect") && !strings.Contains(output, "server") &&
+				!strings.Contains(output, "dial") && !strings.Contains(output, "refused") {
+				t.Errorf("expected server connection error, got:\n%s", output)
+			}
+		}
+	})
+
+	t.Run("config_yaml_server_mode_allows_hyphenated_database_name", func(t *testing.T) {
+		// Server mode allows hyphens in database names. dolt.mode: server from
+		// config.yaml must be applied before embedded-mode database validation.
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+
+		xdgDir := filepath.Join(dir, ".config", "bd")
+		if err := os.MkdirAll(xdgDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(xdgDir, "config.yaml"),
+			[]byte("dolt.mode: server\n"), 0o600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+
+		cmd := exec.Command(bd, "init", "--prefix", "hyphendb", "--database", "server-db", "--non-interactive", "--quiet")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected server init to fail without a server, but it succeeded:\n%s", out)
+		}
+		output := string(out)
+		if strings.Contains(output, "hyphens which are invalid in embedded mode") {
+			t.Fatalf("config.yaml dolt.mode: server was applied too late:\n%s", output)
+		}
+		if !strings.Contains(output, "connect") && !strings.Contains(output, "server") &&
+			!strings.Contains(output, "dial") && !strings.Contains(output, "refused") {
+			t.Errorf("expected server connection error, got:\n%s", output)
 		}
 	})
 }

@@ -1222,6 +1222,54 @@ func TestDetectCycles_MixedBlocksAndConditionalBlocks(t *testing.T) {
 	}
 }
 
+func TestAddDependencyCycleCheckTerminatesOnExistingCycleAndDiamond(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	ids := []string{"union-term-a", "union-term-b", "union-term-c", "union-term-d", "union-term-e"}
+	for _, id := range ids {
+		if err := store.CreateIssue(ctx, &types.Issue{
+			ID:        id,
+			Title:     id,
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+		}, "tester"); err != nil {
+			t.Fatalf("create issue %s: %v", id, err)
+		}
+	}
+
+	for _, dep := range []struct {
+		from string
+		to   string
+	}{
+		{"union-term-a", "union-term-b"},
+		{"union-term-a", "union-term-c"},
+		{"union-term-b", "union-term-d"},
+		{"union-term-c", "union-term-d"},
+		{"union-term-d", "union-term-b"},
+	} {
+		if _, err := store.db.ExecContext(ctx, `
+			INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
+			VALUES (UUID(), ?, ?, 'blocks', NOW(), 'tester', '{}')
+		`, dep.from, dep.to); err != nil {
+			t.Fatalf("seed dependency %s->%s: %v", dep.from, dep.to, err)
+		}
+	}
+
+	err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     "union-term-e",
+		DependsOnID: "union-term-a",
+		Type:        types.DepBlocks,
+	}, "tester")
+	if err != nil {
+		t.Fatalf("cycle check should terminate on cyclic diamond graph: %v", err)
+	}
+}
+
 func TestDetectCycles_WaitsForDoesNotCreateCycle(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

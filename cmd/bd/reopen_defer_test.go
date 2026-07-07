@@ -17,9 +17,6 @@ import (
 // This documents the decision: reopen means "I want to work on this NOW",
 // so defer_until is cleared.
 func TestCLI_ReopenClearsDeferUntil(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	if testDoltServerPort == 0 {
 		t.Skip("skipping: Dolt test container not available")
 	}

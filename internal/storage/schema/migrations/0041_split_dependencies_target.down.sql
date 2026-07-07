@@ -1,0 +1,6 @@
+-- Reverse of 0041: not reversible. Recreating the polymorphic depends_on_id
+-- column would require collapsing the three typed columns back into a single
+-- VARCHAR, which the storage layer no longer knows how to populate (writes go
+-- through the typed columns). The CHECK constraint and FKs would also have to
+-- be unwound first. Intentional no-op; restore from a prior dolt commit if a
+-- rollback is needed.

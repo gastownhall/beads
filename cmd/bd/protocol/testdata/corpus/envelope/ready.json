@@ -1,0 +1,56 @@
+{
+  "data": [
+    {
+      "comment_count": 0,
+      "created_at": "<TS>",
+      "created_by": "protocol-test",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "description": "deterministic corpus closeable",
+      "id": "corpus-closed",
+      "issue_type": "task",
+      "owner": "test@protocol.test",
+      "priority": 3,
+      "status": "open",
+      "title": "Corpus closeable issue",
+      "updated_at": "<TS>"
+    },
+    {
+      "comment_count": 0,
+      "created_at": "<TS>",
+      "created_by": "protocol-test",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "description": "deterministic corpus dependency",
+      "id": "corpus-dep",
+      "issue_type": "task",
+      "owner": "test@protocol.test",
+      "priority": 2,
+      "status": "open",
+      "title": "Corpus dependency issue",
+      "updated_at": "<TS>"
+    },
+    {
+      "comment_count": 0,
+      "created_at": "<TS>",
+      "created_by": "protocol-test",
+      "dependency_count": 0,
+      "dependent_count": 0,
+      "description": "updated corpus root",
+      "id": "corpus-root",
+      "issue_type": "feature",
+      "labels": [
+        "corpus-label"
+      ],
+      "metadata": {
+        "phase": 2
+      },
+      "owner": "test@protocol.test",
+      "priority": 0,
+      "status": "open",
+      "title": "Corpus root issue",
+      "updated_at": "<TS>"
+    }
+  ],
+  "schema_version": 1
+}

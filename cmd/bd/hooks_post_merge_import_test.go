@@ -1,8 +1,10 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -62,6 +64,72 @@ func TestImportJSONLForSync_GuardClauses(t *testing.T) {
 		// Empty file: os.Stat.Size==0 fast path returns before subprocess.
 		importJSONLForSync("test")
 	})
+
+	t.Run("sync.remote suppresses jsonl import", func(t *testing.T) {
+		beadsDir := filepath.Join(tmp, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "issues.jsonl"), []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		config.Set("import.auto", true)
+		config.Set("sync.remote", "git+ssh://git@example.com/acme/repo.git")
+		t.Cleanup(func() { config.Set("sync.remote", "") })
+
+		stderr := captureHookStderr(t, func() {
+			importJSONLForSync("test")
+		})
+		if strings.Contains(stderr, "import warning") || strings.Contains(stderr, "no Dolt remote") {
+			t.Fatalf("sync.remote should skip JSONL import without warning, got stderr:\n%s", stderr)
+		}
+	})
+}
+
+func TestSyncImportJSONLPath(t *testing.T) {
+	t.Run("falls back to export path when import path is default", func(t *testing.T) {
+		initConfigForTest(t)
+		beadsDir := t.TempDir()
+		config.Set("export.path", "beads.jsonl")
+
+		got := syncImportJSONLPath(beadsDir)
+		want := filepath.Join(beadsDir, "beads.jsonl")
+		if got != want {
+			t.Fatalf("sync import path = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("explicit import path wins over export path", func(t *testing.T) {
+		initConfigForTest(t)
+		beadsDir := t.TempDir()
+		config.Set("export.path", "legacy.jsonl")
+		config.Set("import.path", "incoming.jsonl")
+
+		got := syncImportJSONLPath(beadsDir)
+		want := filepath.Join(beadsDir, "incoming.jsonl")
+		if got != want {
+			t.Fatalf("sync import path = %q, want %q", got, want)
+		}
+	})
+}
+
+func captureHookStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = old }()
+
+	fn()
+	_ = w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
 }
 
 // TestRunPostCheckoutHook_FileModeSkipsImport asserts that file-mode
