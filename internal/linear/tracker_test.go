@@ -174,6 +174,8 @@ func TestBatchPush_SkipsUnchangedIssueWithPreformattedDescription(t *testing.T) 
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "IssueByIdentifier"):
 			json.NewEncoder(w).Encode(issueByIdentifierResp(
 				"remote-uuid", "TEAM-1", "My Issue", formattedDescription, 0,
