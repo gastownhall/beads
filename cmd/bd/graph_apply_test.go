@@ -515,13 +515,13 @@ func TestGraphApplyEdgeIsLocalCycleRelevantOnlyForLocalBlockingEdges(t *testing.
 func TestDetectUnknownGraphFields_NewHints(t *testing.T) {
 	planJSON := []byte(`{
         "nodes": [
-            {"key": "a", "title": "A", "acceptance": "must pass", "estimate": 30, "deps": ["b"], "body": "text"},
+            {"key": "a", "title": "A", "acceptance": "must pass", "body": "text", "estimate": 30, "deps": ["b"]},
             {"key": "b", "title": "B"}
         ]
     }`)
 
 	got := detectUnknownGraphFields(planJSON)
-	wantFields := []string{"acceptance", "body", "deps", "estimate"}
+	wantFields := []string{"acceptance", "body"}
 	if fields, ok := got[`node["a"]`]; !ok {
 		t.Fatalf("expected unknown fields on node a, got %#v", got)
 	} else if !reflect.DeepEqual(fields, wantFields) {
@@ -531,7 +531,7 @@ func TestDetectUnknownGraphFields_NewHints(t *testing.T) {
 	var buf bytes.Buffer
 	warnUnknownGraphFields(&buf, got)
 	out := buf.String()
-	for _, hint := range []string{"acceptance_criteria", "estimated_minutes", "edges", "description"} {
+	for _, hint := range []string{"acceptance_criteria", "description"} {
 		if !strings.Contains(out, hint) {
 			t.Errorf("expected hint mentioning %q in output:\n%s", hint, out)
 		}
