@@ -83,6 +83,7 @@ type ReopenRowResult struct {
 
 type DeleteIssuesParams struct {
 	IDs                  []string
+	Cascade              bool
 	DryRun               bool
 	UpdateTextReferences bool
 }

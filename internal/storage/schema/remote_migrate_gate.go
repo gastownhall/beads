@@ -212,7 +212,12 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"        bd bootstrap\n" +
 			"      Re-cloning replaces your local database: any local issues you have not\n" +
 			"      pushed are LOST. Push first (`bd dolt push`) or save a copy\n" +
-			"      (`bd export --all -o backup.jsonl`) before re-cloning.\n"
+			"      (`bd export --all -o backup.jsonl`) before re-cloning.\n" +
+			"\n" +
+			"  Several machines on one remote? Only ONE migrates. Get every other clone\n" +
+			"  fully in sync on its current binary, then after the migrator pushes run\n" +
+			"  `bd dolt pull` on each before upgrading it — its upgrade then has nothing\n" +
+			"  to migrate and needs no re-clone.\n"
 	}
 }
 

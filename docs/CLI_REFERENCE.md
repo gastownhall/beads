@@ -6531,7 +6531,13 @@ Examples:
   bd mol ready --gated --json    # JSON output for automation
 
 ```
-bd mol ready --gated
+bd mol ready --gated [flags]
+```
+
+**Flags:**
+
+```
+      --gated   Find molecules ready for gate-resume dispatch (always on for this subcommand)
 ```
 
 #### bd mol seed

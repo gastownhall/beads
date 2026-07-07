@@ -353,7 +353,9 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 				"  you are the single designated migrator (only ONE clone may migrate a\n" +
 				"  shared remote, else the schema forks; #4259):\n" +
 				"    • designated migrator (only ONE machine): %[3]s=1 bd migrate && bd dolt push\n" +
-				"    • every other clone (another already migrated): bd bootstrap\n"
+				"    • every other clone (another already migrated): bd bootstrap\n" +
+				"    • several machines: only ONE migrates; sync each other clone and run\n" +
+				"      bd dolt pull after the migrator pushes, before upgrading it\n"
 			switch s.intent {
 			case openWorkingSetReconcile:
 				fmt.Fprintf(os.Stderr,

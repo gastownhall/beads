@@ -215,6 +215,10 @@ func isASCIIWordByte(b byte) bool {
 // both `bd purge` (ephemeral scope) and `bd prune` (non-ephemeral scope).
 // The caller's scope controls the filter, messaging, and safety gate.
 func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
+	if usesProxiedServer() {
+		return runPurgeOrPruneProxied(cmd, scope)
+	}
+
 	CheckReadonly(scope.cmdName)
 
 	force, _ := cmd.Flags().GetBool("force")

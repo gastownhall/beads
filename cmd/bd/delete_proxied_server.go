@@ -78,6 +78,7 @@ func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 
 	res, err := issueUC.DeleteIssues(ctx, domain.DeleteIssuesParams{
 		IDs:                  in.ids,
+		Cascade:              true,
 		UpdateTextReferences: true,
 	}, actor)
 	if err != nil {
@@ -105,8 +106,9 @@ func runDeleteProxiedPreview(ctx context.Context, issueUC domain.IssueUseCase, i
 	}
 
 	res, err := issueUC.DeleteIssues(ctx, domain.DeleteIssuesParams{
-		IDs:    in.ids,
-		DryRun: true,
+		IDs:     in.ids,
+		Cascade: true,
+		DryRun:  true,
 	}, actor)
 	if err != nil {
 		FatalErrorRespectJSON("preview counts: %v", err)

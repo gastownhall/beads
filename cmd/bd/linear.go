@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -744,6 +745,18 @@ func isLinearMilestoneIssue(issue *types.Issue) bool {
 // buildLinearPushHooks creates PushHooks for Linear-specific push behavior.
 func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectCreates bool) *tracker.PushHooks {
 	config := lt.MappingConfig()
+	var labelOnce sync.Once
+	var labelCache *linear.LabelCache
+	var labelCacheErr error
+	loadPushLabelCache := func() *linear.LabelCache {
+		labelOnce.Do(func() {
+			labelCache, labelCacheErr = linear.BuildLabelCacheFromTracker(ctx, lt)
+		})
+		if labelCacheErr != nil {
+			return nil
+		}
+		return labelCache
+	}
 	return &tracker.PushHooks{
 		FormatDescription: func(issue *types.Issue) string {
 			return linear.BuildLinearDescription(issue)
@@ -751,7 +764,7 @@ func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectC
 		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
 			remoteIssue, ok := remote.Raw.(*linear.Issue)
 			if ok && remoteIssue != nil {
-				return linear.PushFieldsEqual(local, remoteIssue, config)
+				return linear.PushFieldsEqual(local, remoteIssue, config, loadPushLabelCache())
 			}
 			remoteConv := lt.FieldMapper().IssueToBeads(remote)
 			if remoteConv == nil || remoteConv.Issue == nil {
