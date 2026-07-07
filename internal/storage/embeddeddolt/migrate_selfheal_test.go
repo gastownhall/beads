@@ -31,6 +31,15 @@ import (
 // schema.SetMigrateStepFaultHookForTest, which models a process killed between
 // operations (the working set is whatever the last completed SQL statement
 // left) — the faithful shape of a SIGKILL/timeout that a supervisor restarts.
+//
+// Scope caveat: these repros call schema.MigrateUp directly, below the
+// remote-migrate gate. On a remote-backed store the retry's open path re-runs
+// the #4516 smart gate first, and a killed pass leaves the working-set cursor
+// ahead of the remote, which routes to the undetermined verdict and blocks the
+// unattended retry at RemoteMigrateGateError (a pre-existing gate limitation,
+// not introduced here). "Plain retry converges" therefore holds for local
+// stores and for gate-sanctioned paths, not for an unattended supervisor loop
+// on a remote-backed store.
 
 const selfHealSeedVersion = 48 // migrations 49..LatestVersion() form the killed jump
 

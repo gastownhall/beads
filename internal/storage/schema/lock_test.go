@@ -142,7 +142,8 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('-f', ?)")).
 		WithArgs("schema_migrations").
 		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: apply migration step')")).
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+		WithArgs(sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)

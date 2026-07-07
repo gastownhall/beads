@@ -1010,8 +1010,12 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 // When commitEachStep is set, each numbered migration is committed atomically
 // as it applies (see commitMigrationStep): its ALTERs and cursor row land in a
 // Dolt commit before the next migration runs, so a crash/kill/timeout anywhere
-// in MigrateUp's later backfill/rekey/ignored tail can never strand this pass's
-// applied migrations uncommitted for a retry to trip over (#4566).
+// in MigrateUp's later backfill/rekey/ignored tail cannot strand this pass's
+// applied migrations uncommitted for a retry to trip over (#4566). A residual
+// window remains within a single step: a kill between a migration's SQL and
+// its commitMigrationStep still leaves that one step's debris in the working
+// set for the dirty-table guard to refuse. The window shrinks from the whole
+// pass tail to one step; it does not close entirely.
 func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersion, upTo int, commitEachStep bool) (int, error) {
 	if upTo == 0 {
 		upTo = src.latest()
@@ -1052,7 +1056,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		count++
 
 		if commitEachStep {
-			if err := commitMigrationStep(ctx, db, src.cursorTable, dirtyBeforeStep); err != nil {
+			if err := commitMigrationStep(ctx, db, src.cursorTable, mf.name, dirtyBeforeStep); err != nil {
 				return count, fmt.Errorf("committing migration %s: %w", mf.name, err)
 			}
 		}
@@ -1091,7 +1095,7 @@ func SetMigrateStepFaultHookForTest(fn func(ctx context.Context, db DBConn, vers
 // MigrateUp's pre-flight guard proves no table a pending migration touches
 // holds uncommitted user rows before the pass runs, so every table this step
 // newly dirties is the migration's own DDL/DML — safe to commit on its own.
-func commitMigrationStep(ctx context.Context, db DBConn, cursorTable string, dirtyBeforeStep map[string]dirtyTableState) error {
+func commitMigrationStep(ctx context.Context, db DBConn, cursorTable, migrationName string, dirtyBeforeStep map[string]dirtyTableState) error {
 	dirtyAfter, err := dirtyTables(ctx, db, true)
 	if err != nil {
 		return err
@@ -1113,7 +1117,7 @@ func commitMigrationStep(ctx context.Context, db DBConn, cursorTable string, dir
 			return fmt.Errorf("dolt add %s: %w", table, err)
 		}
 	}
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: apply migration step')"); err != nil {
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", "schema: apply migration "+migrationName); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
 			return fmt.Errorf("committing migration step: %w", err)
 		}
