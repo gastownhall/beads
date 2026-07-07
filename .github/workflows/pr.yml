@@ -173,7 +173,9 @@ jobs:
 
       # When the drift check fails, it writes the exact regenerated-docs fix
       # (produced with CI's canonical build) so contributors can apply it with
-      # `git apply` instead of reproducing CI's environment locally.
+      # `git apply` instead of reproducing CI's environment locally. The
+      # docs-autofix.yml workflow_run job consumes this same artifact to push
+      # the fix to same-repo PR branches automatically.
       - name: Upload docs fix patch
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
