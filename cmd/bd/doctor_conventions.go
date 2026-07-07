@@ -10,13 +10,13 @@ import (
 
 // runConventionsCheck runs a composite conventions check: lint, stale, and orphans.
 // All findings are advisory (warning, never error) - conventions are a choice.
-func runConventionsCheck(path string) {
+func runConventionsCheck(path string) error {
 	// doctor is in noDbCommands so PersistentPreRun doesn't open the store.
 	// The lint/stale/orphans primitives all require the global store, so
-	// initialize it lazily here. ensureDirectMode routes to embedded or
+	// initialize it lazily here; ensureDirectMode routes to embedded or
 	// server based on metadata.json (GH#3597).
 	if err := ensureDirectMode("conventions check requires direct mode"); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
 	var checks []doctorCheck
@@ -33,7 +33,7 @@ func runConventionsCheck(path string) {
 				break
 			}
 		}
-		outputJSON(struct {
+		return outputJSON(struct {
 			Path      string        `json:"path"`
 			Checks    []doctorCheck `json:"checks"`
 			OverallOK bool          `json:"overall_ok"`
@@ -42,7 +42,6 @@ func runConventionsCheck(path string) {
 			Checks:    checks,
 			OverallOK: overallOK,
 		})
-		return
 	}
 
 	// Human-readable output
@@ -85,6 +84,7 @@ func runConventionsCheck(path string) {
 		fmt.Println()
 		fmt.Printf("%s\n", ui.RenderPass("✓ All convention checks passed"))
 	}
+	return nil
 }
 
 // runConventionsLint checks open issues for missing template sections.

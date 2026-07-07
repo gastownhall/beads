@@ -14,7 +14,7 @@ type ServerDSN struct {
 	Host     string
 	Port     int
 	User     string
-	Password string
+	Password string        //nolint:gosec // G117: MySQL DSN password field; required by the connection-string builder, not serialized as JSON
 	Database string        // optional; empty connects without selecting a database
 	Timeout  time.Duration // connect timeout; 0 defaults to 5s
 	TLS      bool

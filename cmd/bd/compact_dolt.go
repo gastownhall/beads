@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -39,7 +40,16 @@ Examples:
   bd compact --force                 # Squash commits older than 30 days
   bd compact --days 7 --force        # Keep only last 7 days of history
   bd compact --days 90 --force       # Conservative: squash 90+ day old commits`,
-	Run: func(_ *cobra.Command, _ []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(_ *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("compact")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if !compactDoltDryRun {
 			CheckReadonly("compact")
 		}
@@ -47,58 +57,50 @@ Examples:
 		start := time.Now()
 
 		if compactDoltDays < 0 {
-			FatalError("--days must be non-negative")
+			return HandleError("--days must be non-negative")
 		}
 
-		// Get commit log via store interface
 		logEntries, logErr := store.Log(ctx, 0)
 		if logErr != nil {
-			FatalError("failed to read commit log: %v", logErr)
+			return HandleError("failed to read commit log: %v", logErr)
 		}
 
 		totalCommits := len(logEntries)
 		if totalCommits <= 1 {
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				return outputJSON(map[string]interface{}{
 					"success":       true,
 					"message":       "nothing to compact",
 					"total_commits": totalCommits,
 				})
-				return
 			}
 			fmt.Printf("Only %d commit(s). Nothing to compact.\n", totalCommits)
-			return
+			return nil
 		}
 
-		// Find cutoff and partition commits
 		cutoff := time.Now().AddDate(0, 0, -compactDoltDays)
 
 		var oldCommits int
 		var recentHashes []string
 		var initialHash, boundaryHash string
 
-		// Log is ordered newest-first (ORDER BY date DESC)
 		for _, entry := range logEntries {
 			if entry.Date.Before(cutoff) {
 				oldCommits++
-				boundaryHash = entry.Hash // keeps getting overwritten; last = most recent old
+				boundaryHash = entry.Hash
 			} else {
 				recentHashes = append(recentHashes, entry.Hash)
 			}
 		}
-		// Initial hash is the oldest commit (last in DESC-ordered log)
 		initialHash = logEntries[totalCommits-1].Hash
-		// boundaryHash is the most recent old commit — but we iterated DESC,
-		// so the first old commit we saw is the most recent. Re-scan:
 		boundaryHash = ""
 		for _, entry := range logEntries {
 			if entry.Date.Before(cutoff) {
 				boundaryHash = entry.Hash
-				break // first match in DESC order = most recent old commit
+				break
 			}
 		}
 
-		// Recent hashes need to be in chronological order (oldest first) for cherry-pick
 		for i, j := 0, len(recentHashes)-1; i < j; i, j = i+1, j-1 {
 			recentHashes[i], recentHashes[j] = recentHashes[j], recentHashes[i]
 		}
@@ -107,7 +109,7 @@ Examples:
 
 		if compactDoltDryRun {
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				return outputJSON(map[string]interface{}{
 					"dry_run":        true,
 					"total_commits":  totalCommits,
 					"old_commits":    oldCommits,
@@ -117,7 +119,6 @@ Examples:
 					"initial_hash":   initialHash,
 					"boundary_hash":  boundaryHash,
 				})
-				return
 			}
 			fmt.Printf("DRY RUN — Compact preview\n\n")
 			fmt.Printf("  Total commits:  %d\n", totalCommits)
@@ -130,29 +131,28 @@ Examples:
 				fmt.Printf("\n  Result: %d commits → %d commits\n", totalCommits, recentCommits+1)
 				fmt.Printf("  Run with --force to proceed.\n")
 			}
-			return
+			return nil
 		}
 
 		if oldCommits <= 1 {
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				return outputJSON(map[string]interface{}{
 					"success":       true,
 					"message":       "nothing to compact",
 					"total_commits": totalCommits,
 					"old_commits":   oldCommits,
 				})
-				return
 			}
 			fmt.Printf("Only %d old commit(s). Nothing to compact.\n", oldCommits)
-			return
+			return nil
 		}
 
 		if boundaryHash == "" {
-			FatalError("could not find boundary commit for compaction")
+			return HandleError("could not find boundary commit for compaction")
 		}
 
 		if !compactDoltForce {
-			FatalErrorWithHint(
+			return HandleErrorWithHint(
 				fmt.Sprintf("would squash %d old commits into 1, preserving %d recent commits",
 					oldCommits, recentCommits),
 				"Use --force to confirm or --dry-run to preview.")
@@ -165,11 +165,11 @@ Examples:
 
 		compactor, ok := storage.UnwrapStore(store).(storage.Compactor)
 		if !ok {
-			FatalError("storage backend does not support compact")
+			return HandleError("storage backend does not support compact")
 		}
 
 		if err := compactor.Compact(ctx, initialHash, boundaryHash, oldCommits, recentHashes); err != nil {
-			FatalError("compact failed: %v", err)
+			return HandleError("compact failed: %v", err)
 		}
 
 		// Reclaim disk space from orphaned old history
@@ -183,7 +183,7 @@ Examples:
 		resultCommits := len(recentHashes) + 1
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"success":        true,
 				"commits_before": totalCommits,
 				"commits_after":  resultCommits,
@@ -191,12 +191,12 @@ Examples:
 				"recent_kept":    len(recentHashes),
 				"elapsed_ms":     elapsed.Milliseconds(),
 			})
-			return
 		}
 		fmt.Printf("✓ Compacted %d commits → %d\n", totalCommits, resultCommits)
 		fmt.Printf("  Squashed: %d old commits → 1 base\n", oldCommits)
 		fmt.Printf("  Preserved: %d recent commits\n", len(recentHashes))
 		fmt.Printf("  Time: %v\n", elapsed.Round(time.Millisecond))
+		return nil
 	},
 }
 

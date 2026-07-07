@@ -1,7 +1,7 @@
 """Pydantic models for beads issue tracker types."""
 
 from datetime import datetime
-from typing import Literal, Any
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -38,12 +38,14 @@ OperationAction = Literal["created", "updated", "claimed", "closed", "reopened"]
 # These lightweight models reduce context window usage by ~80% for list operations.
 # Use full Issue model only when detailed information is needed (show command).
 
+
 class IssueMinimal(BaseModel):
     """Minimal issue model for list views (~80% smaller than full Issue).
-    
+
     Use this for ready_work, list_issues, and other bulk operations.
     For full details including dependencies, use Issue model via show().
     """
+
     id: str
     title: str
     status: IssueStatus
@@ -68,6 +70,7 @@ class CompactedResult(BaseModel):
     When results exceed threshold, returns preview + metadata instead of full data.
     This prevents context window overflow for large issue lists.
     """
+
     compacted: bool = True
     total_count: int
     preview: list[IssueMinimal]
@@ -81,6 +84,7 @@ class BriefIssue(BaseModel):
     Use for quick scans where only identification + priority needed.
     ~95% smaller than full Issue.
     """
+
     id: str
     title: str
     status: IssueStatus
@@ -93,6 +97,7 @@ class BriefDep(BaseModel):
     Use with brief_deps=True to get full issue but compact dependencies.
     ~90% smaller than full LinkedIssue.
     """
+
     id: str
     title: str
     status: IssueStatus
@@ -106,6 +111,7 @@ class OperationResult(BaseModel):
     Default response for create/update/close/reopen when verbose=False.
     ~97% smaller than returning full Issue object.
     """
+
     id: str
     action: OperationAction
     message: str | None = None
@@ -114,6 +120,7 @@ class OperationResult(BaseModel):
 # =============================================================================
 # ORIGINAL MODELS (unchanged for backward compatibility)
 # =============================================================================
+
 
 class IssueBase(BaseModel):
     """Base issue model with shared fields."""

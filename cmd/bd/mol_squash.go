@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -44,8 +45,10 @@ Example:
   bd mol squash bd-abc123 --dry-run          # Preview what would be squashed
   bd mol squash bd-abc123 --keep-children    # Keep wisps after digest
   bd mol squash bd-abc123 --summary "Agent-generated summary of work done"`,
-	Args: cobra.ExactArgs(1),
-	Run:  runMolSquash,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runMolSquash,
 }
 
 // SquashResult holds the result of a squash operation
@@ -59,37 +62,40 @@ type SquashResult struct {
 	WispSquash    bool     `json:"wisp_squash,omitempty"` // True if this was a wisp→digest squash
 }
 
-func runMolSquash(cmd *cobra.Command, args []string) {
+func runMolSquash(cmd *cobra.Command, args []string) error {
 	CheckReadonly("mol squash")
+
+	evt := metrics.NewCommandEvent("mol-squash")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
 
 	ctx := rootCtx
 
-	// mol squash requires direct store access
 	if store == nil {
-		FatalErrorWithHint("no database connection", diagHint())
+		return HandleErrorWithHint("no database connection", diagHint())
 	}
 
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	keepChildren, _ := cmd.Flags().GetBool("keep-children")
 	summary, _ := cmd.Flags().GetString("summary")
 
-	// Resolve molecule ID in main store
 	moleculeID, err := utils.ResolvePartialID(ctx, store, args[0])
 	if err != nil {
-		FatalError("resolving molecule ID %s: %v", args[0], err)
+		return HandleErrorRespectJSON("resolving molecule ID %s: %v", args[0], err)
 	}
 
-	// Load the molecule subgraph from main store
 	subgraph, err := loadTemplateSubgraph(ctx, store, moleculeID)
 	if err != nil {
-		FatalError("loading molecule: %v", err)
+		return HandleErrorRespectJSON("loading molecule: %v", err)
 	}
 
-	// Filter to only ephemeral children (exclude root)
 	var wispChildren []*types.Issue
 	for _, issue := range subgraph.Issues {
 		if issue.ID == subgraph.Root.ID {
-			continue // Skip root
+			continue
 		}
 		if issue.Ephemeral {
 			wispChildren = append(wispChildren, issue)
@@ -98,14 +104,13 @@ func runMolSquash(cmd *cobra.Command, args []string) {
 
 	if len(wispChildren) == 0 {
 		if jsonOutput {
-			outputJSON(SquashResult{
+			return outputJSON(SquashResult{
 				MoleculeID:    moleculeID,
 				SquashedCount: 0,
 			})
-		} else {
-			fmt.Printf("No ephemeral children found for molecule %s\n", moleculeID)
 		}
-		return
+		fmt.Printf("No ephemeral children found for molecule %s\n", moleculeID)
+		return nil
 	}
 
 	if dryRun {
@@ -118,7 +123,6 @@ func runMolSquash(cmd *cobra.Command, args []string) {
 		}
 		fmt.Printf("\nDigest preview:\n")
 		digest := generateDigest(subgraph.Root, wispChildren)
-		// Show first 500 chars of digest
 		if len(digest) > 500 {
 			fmt.Printf("%s...\n", digest[:500])
 		} else {
@@ -129,18 +133,16 @@ func runMolSquash(cmd *cobra.Command, args []string) {
 		} else {
 			fmt.Printf("\nChildren would be deleted after digest creation.\n")
 		}
-		return
+		return nil
 	}
 
-	// Perform the squash
 	result, err := squashMolecule(ctx, store, subgraph.Root, wispChildren, keepChildren, summary, actor)
 	if err != nil {
-		FatalError("squashing molecule: %v", err)
+		return HandleErrorRespectJSON("squashing molecule: %v", err)
 	}
 
 	if jsonOutput {
-		outputJSON(result)
-		return
+		return outputJSON(result)
 	}
 
 	fmt.Printf("%s Squashed molecule: %d children → 1 digest\n", ui.RenderPass("✓"), result.SquashedCount)
@@ -153,6 +155,7 @@ func runMolSquash(cmd *cobra.Command, args []string) {
 	if result.WispSquash {
 		fmt.Printf("  Root auto-closed: %s\n", result.MoleculeID)
 	}
+	return nil
 }
 
 // generateDigest creates a summary from the molecule execution

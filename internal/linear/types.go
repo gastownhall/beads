@@ -119,21 +119,22 @@ type GraphQLError struct {
 
 // Issue represents an issue from the Linear API.
 type Issue struct {
-	ID          string     `json:"id"`
-	Identifier  string     `json:"identifier"` // e.g., "TEAM-123"
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	URL         string     `json:"url"`
-	Priority    int        `json:"priority"` // 0=no priority, 1=urgent, 2=high, 3=medium, 4=low
-	State       *State     `json:"state"`
-	Assignee    *User      `json:"assignee"`
-	Labels      *Labels    `json:"labels"`
-	Project     *Project   `json:"project,omitempty"`
-	Parent      *Parent    `json:"parent,omitempty"`
-	Relations   *Relations `json:"relations,omitempty"`
-	CreatedAt   string     `json:"createdAt"`
-	UpdatedAt   string     `json:"updatedAt"`
-	CompletedAt string     `json:"completedAt,omitempty"`
+	ID               string            `json:"id"`
+	Identifier       string            `json:"identifier"` // e.g., "TEAM-123"
+	Title            string            `json:"title"`
+	Description      string            `json:"description"`
+	URL              string            `json:"url"`
+	Priority         int               `json:"priority"` // 0=no priority, 1=urgent, 2=high, 3=medium, 4=low
+	State            *State            `json:"state"`
+	Assignee         *User             `json:"assignee"`
+	Labels           *Labels           `json:"labels"`
+	Project          *Project          `json:"project,omitempty"`
+	ProjectMilestone *ProjectMilestone `json:"projectMilestone,omitempty"`
+	Parent           *Parent           `json:"parent,omitempty"`
+	Relations        *Relations        `json:"relations,omitempty"`
+	CreatedAt        string            `json:"createdAt"`
+	UpdatedAt        string            `json:"updatedAt"`
+	CompletedAt      string            `json:"completedAt,omitempty"`
 }
 
 // State represents a workflow state in Linear.
@@ -238,6 +239,15 @@ type Project struct {
 	CreatedAt   string  `json:"createdAt"`
 	UpdatedAt   string  `json:"updatedAt"`
 	CompletedAt string  `json:"completedAt,omitempty"`
+}
+
+// ProjectMilestone represents a milestone within a Linear project.
+type ProjectMilestone struct {
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Progress    float64 `json:"progress"`
+	TargetDate  string  `json:"targetDate,omitempty"`
 }
 
 // ProjectsResponse represents the response from projects query.

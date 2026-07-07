@@ -1714,6 +1714,172 @@ func TestFindParentMoleculesBatch(t *testing.T) {
 	}
 }
 
+// TestFindParentMolecule_RootShapes covers every shape of molecule root that
+// findParentMolecule(s) needs to recognize:
+//   - TypeEpic + BeadsTemplateLabel  (distilled / older formula path)
+//   - TypeMolecule with no label     (`bd mol pour` path — gastownhall/beads#3719)
+//   - TypeTask + BeadsTemplateLabel  (template-label-only fallback)
+//   - TypeTask, no label             (not a molecule)
+//
+// Before the fix for #3719 the TypeMolecule case returned "", which caused
+// `bd close --continue` to silently no-op for any poured molecule.
+func TestFindParentMolecule_RootShapes(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		rootType   types.IssueType
+		rootLabels []string
+		isMolecule bool
+	}{
+		{"epic with template label", types.TypeEpic, []string{BeadsTemplateLabel}, true},
+		{"poured molecule (no label)", types.TypeMolecule, nil, true},
+		{"task with template label", types.TypeTask, []string{BeadsTemplateLabel}, true},
+		{"plain task is not a molecule", types.TypeTask, nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := &types.Issue{
+				Title:     tt.name + " root",
+				Status:    types.StatusOpen,
+				Priority:  1,
+				IssueType: tt.rootType,
+				Labels:    tt.rootLabels,
+			}
+			if err := s.CreateIssue(ctx, root, "test"); err != nil {
+				t.Fatalf("Failed to create root: %v", err)
+			}
+
+			child := &types.Issue{
+				Title:     tt.name + " child",
+				Status:    types.StatusOpen,
+				Priority:  2,
+				IssueType: types.TypeTask,
+			}
+			if err := s.CreateIssue(ctx, child, "test"); err != nil {
+				t.Fatalf("Failed to create child: %v", err)
+			}
+			if err := s.AddDependency(ctx, &types.Dependency{
+				IssueID:     child.ID,
+				DependsOnID: root.ID,
+				Type:        types.DepParentChild,
+			}, "test"); err != nil {
+				t.Fatalf("Failed to add parent-child: %v", err)
+			}
+
+			wantSingle := ""
+			if tt.isMolecule {
+				wantSingle = root.ID
+			}
+			if got := findParentMolecule(ctx, s, child.ID); got != wantSingle {
+				t.Errorf("findParentMolecule(child) = %q, want %q", got, wantSingle)
+			}
+
+			wantBatch := map[string]string{child.ID: wantSingle}
+			gotBatch := findParentMolecules(ctx, s, []string{child.ID})
+			if got := gotBatch[child.ID]; got != wantBatch[child.ID] {
+				t.Errorf("findParentMolecules(child) = %q, want %q", got, wantBatch[child.ID])
+			}
+		})
+	}
+}
+
+// TestAdvanceToNextStep_PouredMolecule reproduces gastownhall/beads#3719: when a
+// step lives under a TypeMolecule root (as `bd mol pour` creates), AdvanceToNextStep
+// must find the parent molecule and (with autoClaim=true) claim the next ready step.
+// Before the fix it silently returned (nil, nil).
+func TestAdvanceToNextStep_PouredMolecule(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Root shaped like `bd mol pour` output: TypeMolecule, no template label.
+	root := &types.Issue{
+		Title:     "Poured Molecule",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeMolecule,
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	step1 := &types.Issue{
+		Title:     "Step 1",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	step2 := &types.Issue{
+		Title:     "Step 2",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	for _, step := range []*types.Issue{step1, step2} {
+		if err := s.CreateIssue(ctx, step, "test"); err != nil {
+			t.Fatalf("Failed to create step: %v", err)
+		}
+		if err := s.AddDependency(ctx, &types.Dependency{
+			IssueID:     step.ID,
+			DependsOnID: root.ID,
+			Type:        types.DepParentChild,
+		}, "test"); err != nil {
+			t.Fatalf("Failed to add parent-child: %v", err)
+		}
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     step2.ID,
+		DependsOnID: step1.ID,
+		Type:        types.DepBlocks,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add blocking dep: %v", err)
+	}
+
+	result, err := AdvanceToNextStep(ctx, s, step1.ID, true, "test")
+	if err != nil {
+		t.Fatalf("AdvanceToNextStep failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("AdvanceToNextStep returned nil result; expected molecule advance for TypeMolecule root")
+	}
+	if result.MoleculeID != root.ID {
+		t.Errorf("MoleculeID = %q, want %q", result.MoleculeID, root.ID)
+	}
+	if result.NextStep == nil || result.NextStep.ID != step2.ID {
+		t.Errorf("NextStep = %v, want step2 (%s)", result.NextStep, step2.ID)
+	}
+	if !result.AutoAdvanced {
+		t.Errorf("AutoAdvanced = false; want true (autoClaim was on)")
+	}
+
+	// Confirm step2 is in_progress now.
+	got, err := s.GetIssue(ctx, step2.ID)
+	if err != nil {
+		t.Fatalf("GetIssue(step2) failed: %v", err)
+	}
+	if got.Status != types.StatusInProgress {
+		t.Errorf("step2 status = %q, want %q", got.Status, types.StatusInProgress)
+	}
+}
+
 // TestFindHookedMolecules tests finding molecules bonded to hooked issues
 func TestFindHookedMolecules(t *testing.T) {
 	ctx := context.Background()

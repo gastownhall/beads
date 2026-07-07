@@ -11,8 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdDep runs "bd dep" with the given args and returns raw stdout.
@@ -22,11 +20,11 @@ func bdDep(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd dep %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd dep %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdDepFail runs "bd dep" expecting failure.
@@ -51,11 +49,11 @@ func bdDepJSON(t *testing.T, bd, dir string, args ...string) map[string]interfac
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd dep --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd dep --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(stdout.String())
 	start := strings.IndexAny(s, "{[")
 	if start < 0 {
 		t.Fatalf("no JSON in dep output: %s", s)
@@ -74,46 +72,26 @@ func bdDepWithInput(t *testing.T, bd, dir, input string, args ...string) string 
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
 	cmd.Stdin = strings.NewReader(input)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd dep %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd dep %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	return stdout.String()
+}
+
+// bdDepWithInputFail runs "bd dep" with stdin input expecting failure.
+func bdDepWithInputFail(t *testing.T, bd, dir, input string, args ...string) string {
+	t.Helper()
+	fullArgs := append([]string{"dep"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected bd dep %s to fail, but succeeded:\n%s", strings.Join(args, " "), out)
 	}
 	return string(out)
-}
-
-func dropEmbeddedWispDependencies(t *testing.T, beadsDir, database string) {
-	t.Helper()
-	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
-	if err != nil {
-		t.Fatalf("OpenSQL: %v", err)
-	}
-	defer cleanup()
-	if _, err := db.ExecContext(t.Context(), "DROP TABLE IF EXISTS wisp_dependencies"); err != nil {
-		t.Fatalf("drop table wisp_dependencies: %v", err)
-	}
-}
-
-func TestEmbeddedDepMissingWispDependencies(t *testing.T) {
-	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
-		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
-	}
-
-	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "mw")
-	blocker := bdCreate(t, bd, dir, "Missing wisp dep blocker", "--type", "task")
-	blocked := bdCreate(t, bd, dir, "Missing wisp dep blocked", "--type", "task")
-
-	dropEmbeddedWispDependencies(t, beadsDir, "mw")
-
-	out := bdDep(t, bd, dir, "add", blocked.ID, blocker.ID)
-	if !strings.Contains(out, "Added dependency") {
-		t.Fatalf("expected dep add to succeed after recreating wisp_dependencies: %s", out)
-	}
-
-	tree := bdDep(t, bd, dir, "tree", blocked.ID)
-	if !strings.Contains(tree, blocker.ID) {
-		t.Fatalf("expected dep tree to include blocker %s after wisp_dependencies repair:\n%s", blocker.ID, tree)
-	}
 }
 
 func TestEmbeddedDep(t *testing.T) {
@@ -332,12 +310,12 @@ func TestEmbeddedDep(t *testing.T) {
 		cmd := exec.Command(bd, fullArgs...)
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("dep list --json failed: %v\n%s", err, out)
+			t.Fatalf("dep list --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		if !strings.Contains(string(out), issueD.ID) {
-			t.Errorf("expected dependency ID in JSON: %s", out)
+		if !strings.Contains(stdout.String(), issueD.ID) {
+			t.Errorf("expected dependency ID in JSON: %s", stdout.String())
 		}
 	})
 
@@ -390,12 +368,40 @@ func TestEmbeddedDep(t *testing.T) {
 		cmd := exec.Command(bd, fullArgs...)
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("dep tree --json failed: %v\n%s", err, out)
+			t.Fatalf("dep tree --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		if !strings.Contains(string(out), epic.ID) {
-			t.Errorf("expected epic ID in JSON tree: %s", out)
+		if !strings.Contains(stdout.String(), epic.ID) {
+			t.Errorf("expected epic ID in JSON tree: %s", stdout.String())
+		}
+	})
+
+	t.Run("tree_ignores_bidirectional_relates_to", func(t *testing.T) {
+		root := bdCreate(t, bd, dir, "Tree relates root", "--type", "task")
+		blocker := bdCreate(t, bd, dir, "Tree real blocker", "--type", "task")
+		related := bdCreate(t, bd, dir, "Tree loose relation", "--type", "task")
+
+		bdDep(t, bd, dir, "add", root.ID, blocker.ID, "--type", "blocks")
+		bdDep(t, bd, dir, "add", root.ID, related.ID, "--type", "relates-to")
+		bdDep(t, bd, dir, "add", related.ID, root.ID, "--type", "relates-to")
+
+		listOut := bdDep(t, bd, dir, "list", root.ID)
+		if !strings.Contains(listOut, related.ID) || !strings.Contains(listOut, "relates-to") {
+			t.Fatalf("expected relates-to edge in dep list output: %s", listOut)
+		}
+
+		treeOut := bdDep(t, bd, dir, "tree", root.ID)
+		if !strings.Contains(treeOut, root.ID) || !strings.Contains(treeOut, blocker.ID) {
+			t.Fatalf("expected root and real blocker in dep tree: %s", treeOut)
+		}
+		if strings.Contains(treeOut, related.ID) {
+			t.Fatalf("relates-to edge should not render as a dependency tree edge: %s", treeOut)
+		}
+
+		upOut := bdDep(t, bd, dir, "tree", related.ID, "--direction", "up")
+		if strings.Contains(upOut, root.ID) {
+			t.Fatalf("reverse relates-to edge should not render as a dependent tree edge: %s", upOut)
 		}
 	})
 
@@ -417,8 +423,8 @@ func TestEmbeddedDep(t *testing.T) {
 		b := bdCreate(t, bd, dir2, "No cycle B", "--type", "task")
 		bdDep(t, bd, dir2, "add", a.ID, b.ID)
 		out := bdDep(t, bd, dir2, "cycles")
-		if !strings.Contains(out, "No cycles") && !strings.Contains(out, "no cycles") {
-			t.Logf("expected 'No cycles' message: %s", out)
+		if !strings.Contains(out, "No dependency cycles detected") {
+			t.Errorf("expected no-cycle message: %s", out)
 		}
 	})
 }
@@ -532,7 +538,12 @@ func TestEmbeddedDepNoCycleCheck(t *testing.T) {
 	bdDep(t, bd, dir, extra.ID, "--blocks", ids[n-1], "--no-cycle-check")
 }
 
-func TestEmbeddedDepBulkNoCycleCheckSkipsPerEdgeCycleValidation(t *testing.T) {
+// TestEmbeddedDepBulkNoCycleCheckKeepsWholeGraphGate pins the bd-6dnrw.8
+// contract: bulk --no-cycle-check skips the per-edge recursive check for
+// speed, but one whole-graph cycle check still gates the commit, so a bulk
+// add that would introduce a cycle rolls back atomically instead of landing
+// and poisoning ready-work.
+func TestEmbeddedDepBulkNoCycleCheckKeepsWholeGraphGate(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
@@ -543,15 +554,25 @@ func TestEmbeddedDepBulkNoCycleCheckSkipsPerEdgeCycleValidation(t *testing.T) {
 
 	a := bdCreate(t, bd, dir, "Bulk cycle A", "--type", "task")
 	b := bdCreate(t, bd, dir, "Bulk cycle B", "--type", "task")
-	input := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":%q}\n", a.ID, b.ID, b.ID, a.ID)
+	c := bdCreate(t, bd, dir, "Bulk cycle C", "--type", "task")
 
-	out := bdDepWithInput(t, bd, dir, input, "add", "--file", "-", "--no-cycle-check")
+	// Cycle-free bulk wiring succeeds with the per-edge check skipped.
+	okInput := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n{\"from\":%q,\"to\":%q}\n", a.ID, b.ID, b.ID, c.ID)
+	out := bdDepWithInput(t, bd, dir, okInput, "add", "--file", "-", "--no-cycle-check")
 	if !strings.Contains(out, "Added 2 dependencies") {
 		t.Fatalf("expected bulk add summary, got: %s", out)
 	}
 
+	// Closing the chain into a cycle is refused by the final whole-graph
+	// check, and the refused batch commits nothing.
+	cycleInput := fmt.Sprintf("{\"from\":%q,\"to\":%q}\n", c.ID, a.ID)
+	failOut := bdDepWithInputFail(t, bd, dir, cycleInput, "add", "--file", "-", "--no-cycle-check")
+	if !strings.Contains(failOut, "dependency cycle would be created") || !strings.Contains(failOut, "no edges added") {
+		t.Fatalf("expected whole-graph cycle rejection, got: %s", failOut)
+	}
+
 	cycles := bdDep(t, bd, dir, "cycles")
-	if !strings.Contains(cycles, "Found") {
-		t.Fatalf("expected skipped cycle validation to leave detectable cycle, got: %s", cycles)
+	if !strings.Contains(cycles, "No dependency cycles detected") {
+		t.Fatalf("expected rolled-back bulk add to leave the graph acyclic, got: %s", cycles)
 	}
 }

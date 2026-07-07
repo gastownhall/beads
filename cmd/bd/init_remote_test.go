@@ -44,7 +44,7 @@ func TestInitExplicitRemoteDrivesCloneAndPersistence(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("# Beads Config\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := persistInitSyncRemote(beadsDir, remote, syncURL, syncFromRemote, syncURLFromConfig); err != nil {
+	if err := persistInitSyncRemote(beadsDir, remote, syncURL, syncFromRemote, syncURLFromConfig, false); err != nil {
 		t.Fatalf("persistInitSyncRemote failed: %v", err)
 	}
 	configBytes, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
@@ -59,6 +59,34 @@ func TestInitExplicitRemoteDrivesCloneAndPersistence(t *testing.T) {
 func TestInitServerExternalRemoteUsesServerCloneMode(t *testing.T) {
 	if got := initRemoteCloneMode(true, true); got != remoteCloneExternalServer {
 		t.Fatalf("initRemoteCloneMode(server=true, external=true) = %v, want external server clone mode", got)
+	}
+}
+
+func TestInitDoltServerTLSFromEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want bool
+	}{
+		{name: "unset", want: false},
+		{name: "zero", env: "0", want: false},
+		{name: "false", env: "false", want: false},
+		{name: "one", env: "1", want: true},
+		{name: "true", env: "true", want: true},
+		{name: "mixed case true", env: "TrUe", want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env == "" {
+				t.Setenv("BEADS_DOLT_SERVER_TLS", "")
+			} else {
+				t.Setenv("BEADS_DOLT_SERVER_TLS", tc.env)
+			}
+			if got := initDoltServerTLSFromEnv(); got != tc.want {
+				t.Fatalf("initDoltServerTLSFromEnv() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -115,7 +143,7 @@ func TestPersistInitSyncRemoteExplicitRemoteWritesTargetDir(t *testing.T) {
 	}
 
 	const remote = "git+ssh://git@example.com/right/repo.git"
-	if err := persistInitSyncRemote(targetBeadsDir, remote, remote, false, true); err != nil {
+	if err := persistInitSyncRemote(targetBeadsDir, remote, remote, false, true, false); err != nil {
 		t.Fatalf("persistInitSyncRemote failed: %v", err)
 	}
 

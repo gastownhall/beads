@@ -2,7 +2,6 @@ package fix
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -23,8 +22,7 @@ func DoltFormat(path string) error {
 		return nil // Already OK or no .dolt/ directory
 	}
 
-	markerPath := filepath.Join(doltDir, ".bd-dolt-ok")
-	if err := os.WriteFile(markerPath, []byte("ok\n"), 0600); err != nil {
+	if err := doltserver.MarkDoltDirCompatible(doltDir); err != nil {
 		return fmt.Errorf("creating .bd-dolt-ok marker: %w", err)
 	}
 

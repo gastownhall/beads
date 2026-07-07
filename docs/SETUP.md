@@ -1,7 +1,12 @@
 # Setup Command Reference
 
+Last reviewed: 2026-05-08
+
+Freshness source: `cmd/bd/setup*.go` and `internal/recipes/`.
+
 **For:** Setting up beads integration with AI coding tools
-**Version:** 0.30.0+
+**Version:** current CLI behaviour; verify recipe lists against the freshness
+source above.
 
 ## Overview
 
@@ -9,20 +14,32 @@ The `bd setup` command uses a **recipe-based architecture** to configure beads i
 
 ### `bd prime` as SSOT
 
-`bd prime` is the **single source of truth** for operational workflow commands. The beads section in each tool's instruction file provides a pointer to `bd prime` for hook-enabled agents (Claude, Gemini) or the full command reference for hookless agents (Factory, Codex, Mux).
+`bd prime` is the **single source of truth** for operational workflow commands. The beads section in each tool's instruction file provides a pointer to `bd prime` for hook-enabled agents (Claude, Gemini) or the full command reference for AGENTS-first agents (Factory, Mux). Codex uses a Beads skill, generated `AGENTS.md` guidance, and native Codex hooks.
 
-### Profiles
+### Template Profiles
 
-Each integration uses one of two **profiles** that control how much content is written to tool instruction files (`AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`):
+Each integration uses one of two **profiles** that control how much content is written to tool instruction files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, or `.github/copilot-instructions.md`):
 
 | Profile | Used By | Content |
 |---------|---------|---------|
 | `full` | Factory, Codex, Mux, OpenCode | Complete command reference, issue types, priorities, workflow |
-| `minimal` | Claude Code, Gemini CLI | Pointer to `bd prime`, quick reference only (~60% smaller) |
+| `minimal` | Claude Code, GitHub Copilot CLI, Gemini CLI | Pointer to `bd prime`, quick reference only (~60% smaller) |
 
-Hook-enabled agents (Claude, Gemini) use the `minimal` profile because `bd prime` injects full context at session start. Hookless agents need the `full` profile because their instruction file is their only source of instructions.
+Hook-enabled agents (Claude, Copilot CLI, Gemini) use the `minimal` profile because `bd prime` injects full context at session start. AGENTS-first agents use the `full` profile because their instruction file remains the primary integration surface. Skill-aware agents use `.agents/skills/beads/SKILL.md`, with project `AGENTS.md` or global `$CODEX_HOME/AGENTS.md`/`~/.codex/AGENTS.md` telling Codex when to use the skill.
 
 **Profile precedence:** If a file already has a `full` profile section and a `minimal` profile tool installs to the same file (e.g., via symlinks), the `full` profile is preserved to avoid information loss.
+
+### Policy Profiles
+
+Template profiles control how much text gets installed. Policy profiles control what an agent is authorized to do at handoff:
+
+| Policy | Default Scope | Commit/Push Guidance |
+|--------|---------------|----------------------|
+| `conservative` | Standalone projects, unknown projects, and one-off assistance | Use `bd` for task tracking, then report changed files, validation, and proposed commands. Do not commit, push, or run Dolt remote sync without explicit user or orchestrator approval. |
+| `minimal` | Hook-first integrations where `bd prime` carries the detailed workflow | Same git authority as conservative; the installed file stays short and points to `bd prime`. |
+| `team-maintainer` | Repositories that explicitly delegate session close to agents | Agents may close beads, run quality gates, commit, run `bd dolt push`, and `git push` only when repository/user/orchestrator instructions grant that authority. Current "do not commit" or "do not push" instructions override the profile. |
+
+The generated Beads block and `bd prime` default to conservative git authority. Projects that want team-maintainer behavior should say so in their own top-level instructions; Beads does not infer that authority merely because a remote exists.
 
 ### Built-in Recipes
 
@@ -33,9 +50,10 @@ Hook-enabled agents (Claude, Gemini) use the `minimal` profile because `bd prime
 | `cody` | `.cody/rules/beads.md` | Rules file |
 | `kilocode` | `.kilocode/rules/beads.md` | Rules file |
 | `claude` | `~/.claude/settings.json` + `CLAUDE.md` | SessionStart/PreCompact hooks + minimal section |
+| `copilot` | `.copilot-plugin/plugin.json` + `.github/copilot-instructions.md` | native Copilot plugin hooks + repository instructions |
 | `gemini` | `~/.gemini/settings.json` + `GEMINI.md` | SessionStart/PreCompress hooks + minimal section |
 | `factory` | `AGENTS.md` | Marked section |
-| `codex` | `AGENTS.md` | Marked section |
+| `codex` | `.agents/skills/beads/SKILL.md` + `AGENTS.md` + `.codex/` | Beads agent skill + generated guidance + native hooks |
 | `mux` | `AGENTS.md` | Marked section |
 | `aider` | `.aider.conf.yml` + `.aider/` | Multi-file config |
 
@@ -50,9 +68,10 @@ bd setup cursor     # Cursor IDE
 bd setup windsurf   # Windsurf
 bd setup kilocode   # Kilo Code
 bd setup claude     # Claude Code
+bd setup copilot    # GitHub Copilot CLI plugin + instructions
 bd setup gemini     # Gemini CLI
 bd setup factory    # Factory.ai Droid
-bd setup codex      # Codex CLI
+bd setup codex      # Beads agent skill + AGENTS.md guidance + native hooks
 bd setup mux        # Mux
 bd setup aider      # Aider
 
@@ -88,10 +107,10 @@ Creates or updates `AGENTS.md` in your project root with:
 - Issue tracking workflow instructions
 - Quick command reference
 - Issue types and priorities
-- Auto-sync explanation
+- Dolt remote sync explanation
 - Important rules for AI agents
 
-The beads section is wrapped in HTML comments (`<!-- BEGIN/END BEADS INTEGRATION -->`) with metadata for safe updates. The begin marker includes profile and hash metadata (e.g., `<!-- BEGIN BEADS INTEGRATION profile:full hash:d4f96305 -->`) for freshness detection. Legacy markers without metadata are auto-upgraded on the next install or update.
+The beads section is wrapped in HTML comments (`<!-- BEGIN/END BEADS INTEGRATION -->`) with metadata for safe updates. The begin marker includes version, profile, and hash metadata (e.g., `<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:19cc25d9 -->`) for freshness detection. Legacy markers without metadata are auto-upgraded on the next install or update.
 
 ### AGENTS.md Standard
 
@@ -136,7 +155,7 @@ Factory Droid and other AGENTS.md-compatible tools automatically read `AGENTS.md
 The beads section teaches AI agents:
 - To use `bd ready` for finding work
 - To use `bd create` for tracking new issues
-- To use `bd dolt push` at session end
+- To treat commit, push, and Dolt remote sync as policy-controlled handoff actions
 - The complete workflow pattern and best practices
 
 ### Updating Existing AGENTS.md
@@ -162,22 +181,45 @@ You can use multiple integrations simultaneously - they complement each other!
 
 ## Codex CLI
 
-Codex reads `AGENTS.md` instructions at the start of each run/session. Adding the beads section is enough to get Codex and beads working together.
+Codex reads project instructions from `AGENTS.md` in the current working directory or project root, and global instructions from `$CODEX_HOME/AGENTS.md` when `CODEX_HOME` is set, otherwise `~/.codex/AGENTS.md`. The Codex setup path installs the generic `beads` agent skill, writes managed Codex guidance, enables native hooks, and installs a fallback hooks file when the Beads Codex plugin is not managing hooks.
 
 ### Installation
 
 ```bash
-bd setup codex
+bd setup codex          # Project Beads skill + AGENTS.md guidance + native hooks
+bd setup codex --global # Global Beads skill + guidance + native hooks
 ```
 
 ### What Gets Installed
 
-Creates or updates `AGENTS.md` with the beads integration section (same markers as Factory.ai).
+**Project install** (`bd setup codex`):
+- Creates or updates `.agents/skills/beads/SKILL.md`
+- Creates or updates `.agents/skills/beads/agents/openai.yaml`
+- Creates or updates project `AGENTS.md` with a marked section generated by `bd setup codex`
+- Creates or updates `.codex/config.toml` with native hooks enabled
+- Creates or updates `.codex/hooks.json` unless hooks are plugin-managed
+
+**Global install** (`bd setup codex --global`):
+- Creates or updates `~/.agents/skills/beads/SKILL.md`
+- Creates or updates `~/.agents/skills/beads/agents/openai.yaml`
+- Creates or updates `$CODEX_HOME/AGENTS.md` when `CODEX_HOME` is set, otherwise `~/.codex/AGENTS.md`, with a marked section generated by `bd setup codex --global`
+- Creates or updates global Codex hook configuration under `$CODEX_HOME` when set, otherwise `~/.codex`
+
+### Flags
+
+| Flag | Description |
+|------|-------------|
+| `--check` | Check the Beads agent skill, managed Codex `AGENTS.md` guidance, and native hooks |
+| `--remove` | Remove the Beads agent skill, managed Codex `AGENTS.md` guidance, and native hooks |
+| `--global` | Install/check/remove the global skill, global Codex guidance, and native hooks |
 
 ### Notes
 
 - Restart Codex if it's already running to pick up the new instructions.
+- The plugin package under `plugins/beads/` is separate from `bd setup codex`. The setup command writes a small setup-only skill and managed guidance into the target repository or user-level `.agents` directory.
+- `bd init` runs project `bd setup codex` automatically unless `--skip-agents` or `--stealth` is used.
 - In worktree/shared/`BEADS_DIR` setups, use `bd where` to confirm the resolved workspace; the integration does not require a local `./.beads`.
+- `bd setup codex` uses its own marker pair (`BEGIN/END BEADS CODEX SETUP`), distinct from the `BEGIN/END BEADS INTEGRATION` markers used by `bd setup factory` and `bd setup mux`. Running both `bd setup codex` and `bd setup factory`/`mux` against the same `AGENTS.md` will leave two managed sections side by side; each `bd setup … --check` only inspects its own section, and `bd setup … --remove` only removes its own section.
 
 ## Mux
 
@@ -229,8 +271,7 @@ bd setup claude --stealth
 ### What Gets Installed
 
 **Global installation** (`~/.claude/settings.json`):
-- `SessionStart` hook: Runs `bd prime` when a new session starts
-- `PreCompact` hook: Runs `bd prime` before context compaction
+- `SessionStart` hook: Runs `bd prime --hook-json` when a session starts, resumes, clears, or restarts after compaction
 
 **Project installation** (`.claude/settings.local.json`):
 - Same hooks, but only active for this project
@@ -265,17 +306,20 @@ bd setup claude --project --stealth
 
 ### How It Works
 
-The hooks call `bd prime` which:
-1. Outputs workflow context for Claude to read
-2. Syncs any pending changes
-3. Ensures Claude always knows how to use beads
-4. Follows resolved workspace semantics, so `bd where` is the right diagnostic check when local `./.beads` is absent
+The hook calls `bd prime --hook-json` which:
+1. Outputs workflow context wrapped in the SessionStart JSON envelope Claude Code expects
+2. Prints persistent memories near the top so hook-output previews do not hide them
+3. Starts with a truncation warning telling agents to read the full persisted hook output when the host caps previews
+4. Ensures Claude always knows how to use beads
+5. Follows resolved workspace semantics, so `bd where` is the right diagnostic check when local `./.beads` is absent
+
+For low-token hooks that only need durable project facts, use `bd prime --memories-only`.
 
 This is more context-efficient than MCP tools (~1-2k tokens vs 10-50k for MCP schemas).
 
 ## Gemini CLI
 
-Gemini CLI integration uses hooks to automatically inject beads workflow context at session start and before context compression.
+Gemini CLI integration uses a SessionStart hook to automatically inject beads workflow context when a session opens.
 
 ### Installation
 
@@ -293,8 +337,7 @@ bd setup gemini --stealth
 ### What Gets Installed
 
 **Global installation** (`~/.gemini/settings.json`):
-- `SessionStart` hook: Runs `bd prime` when a new session starts
-- `PreCompress` hook: Runs `bd prime` before context compression
+- `SessionStart` hook: Runs `bd prime --hook-json` when a new session starts, wrapped in the JSON envelope Gemini's hook contract requires
 
 **Project installation** (`.gemini/settings.json`):
 - Same hooks, but only active for this project
@@ -331,10 +374,13 @@ bd setup gemini --project --stealth
 
 The hooks call `bd prime` which:
 1. Outputs workflow context for Gemini to read
-2. Syncs any pending changes
-3. Ensures Gemini always knows how to use beads
+2. Prints persistent memories near the top so hook-output previews do not hide them
+3. Starts with a truncation warning telling agents to read the full persisted hook output when the host caps previews
+4. Ensures Gemini always knows how to use beads
 
-This works identically to Claude Code integration, using Gemini CLI's hook system (SessionStart and PreCompress events).
+For low-token hooks that only need durable project facts, use `bd prime --memories-only`.
+
+This works similarly to Claude Code integration, using Gemini CLI's hook system (SessionStart event). Unlike Claude Code, Gemini requires hook stdout to be valid JSON — `bd prime --hook-json` wraps the markdown in the required envelope.
 
 ## Cursor IDE
 
@@ -377,7 +423,7 @@ bd setup cursor --remove
 Cursor reads `.cursor/rules/*.mdc` files and includes them in the AI's context. The beads rules file teaches the AI:
 - To use `bd ready` for finding work
 - To use `bd create` for tracking new issues
-- To use `bd dolt push` at session end
+- To treat commit, push, and Dolt remote sync as policy-controlled handoff actions
 - The basic workflow pattern
 
 ## Aider
@@ -439,7 +485,7 @@ This respects Aider's philosophy of keeping humans in control while still levera
 | Feature | Factory.ai | Codex | Mux | Claude Code | Gemini CLI | Cursor | Aider |
 |---------|-----------|-------|-----|-------------|------------|--------|-------|
 | Command execution | Automatic | Automatic | Automatic | Automatic | Automatic | Automatic | Manual (/run) |
-| Context injection | AGENTS.md | AGENTS.md | AGENTS.md | Hooks + CLAUDE.md | Hooks + GEMINI.md | Rules file | Config file |
+| Context injection | AGENTS.md | Skill + AGENTS.md | AGENTS.md | Hooks + CLAUDE.md | Hooks + GEMINI.md | Rules file | Config file |
 | Global install | No (per-project) | No (per-project) | No (per-project) | Yes | Yes | No (per-project) | No (per-project) |
 | Stealth mode | N/A | N/A | N/A | Yes | Yes | N/A | N/A |
 | Standard format | Yes (AGENTS.md) | Yes (AGENTS.md) | Yes (AGENTS.md) | No (proprietary) | No (proprietary) | No (proprietary) | No (proprietary) |

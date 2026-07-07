@@ -55,6 +55,12 @@ type PullHooks struct {
 	// Called on the raw TrackerIssue before conversion to beads format.
 	// If nil, all issues are imported.
 	ShouldImport func(issue *TrackerIssue) bool
+
+	// AfterConvert is called after the external issue has been converted to
+	// a beads issue, transformed, and assigned an ID, but before it is stored.
+	// Hooks may mutate the conversion, for example by adding dependencies that
+	// should be created after all pulled issues have been saved.
+	AfterConvert func(ctx context.Context, extIssue *TrackerIssue, conv *IssueConversion, ref string, existing *types.Issue, opts SyncOptions) error
 }
 
 // PushHooks contains optional callbacks that customize push (export) behavior.
@@ -155,7 +161,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 
 	// Phase 2: Pull
 	if opts.Pull {
-		pullStats, err := e.doPull(ctx, opts, allowPullOverwriteIDs)
+		pullStats, err := e.doPull(ctx, opts, allowPullOverwriteIDs, skipPushIDs)
 		if err != nil {
 			result.Success = false
 			result.Error = fmt.Sprintf("pull failed: %v", err)
@@ -201,9 +207,13 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		attribute.Int("sync.errors", result.Stats.Errors),
 	)
 
-	// Update last_sync timestamp
+	// Update last_sync timestamp. Dolt DATETIME columns round sub-second
+	// values, so rows this sync just wrote can carry updated_at values up
+	// to half a second in the future of wall clock. Record last_sync at
+	// the next whole second so the engine's own writes are never misread
+	// as local edits by the next pull's conflict guard.
 	if !opts.DryRun {
-		lastSync := time.Now().UTC().Format(time.RFC3339Nano)
+		lastSync := time.Now().UTC().Truncate(time.Second).Add(time.Second).Format(time.RFC3339Nano)
 		key := e.Tracker.ConfigPrefix() + ".last_sync"
 		if err := e.Store.SetLocalMetadata(ctx, key, lastSync); err != nil {
 			e.warn("Failed to update last_sync: %v", err)
@@ -211,7 +221,9 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.LastSync = lastSync
 	}
 
-	result.Warnings = e.warnings
+	// Batch-push warnings were already appended above; e.warn-collected
+	// warnings join them rather than replacing them.
+	result.Warnings = append(result.Warnings, e.warnings...)
 	return result, nil
 }
 
@@ -282,7 +294,10 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 }
 
 // doPull imports issues from the external tracker into beads.
-func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs map[string]bool) (*PullStats, error) {
+// doPull imports tracker issues. IDs of issues it creates or updates are
+// added to pulledIDs so a bidirectional sync's push phase does not echo the
+// freshly pulled content straight back to the tracker.
+func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs, pulledIDs map[string]bool) (*PullStats, error) {
 	ctx, span := syncTracer.Start(ctx, "tracker.pull",
 		trace.WithAttributes(
 			attribute.String("sync.tracker", e.Tracker.DisplayName()),
@@ -450,6 +465,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 
+		if e.PullHooks != nil && e.PullHooks.AfterConvert != nil {
+			if err := e.PullHooks.AfterConvert(ctx, &extIssue, conv, ref, existing, opts); err != nil {
+				e.warn("Failed to prepare %s: %v", extIssue.Identifier, err)
+				stats.Skipped++
+				continue
+			}
+		}
+
 		pendingDeps = appendFilteredDependencies(pendingDeps, conv.Dependencies, opts.DependencyTypes, opts.DependencySources)
 		if opts.DryRun {
 			dryRunIssue := *conv.Issue
@@ -491,6 +514,9 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Updated++
+			if pulledIDs != nil {
+				pulledIDs[existing.ID] = true
+			}
 		} else {
 			// Create new issue
 			conv.Issue.ExternalRef = strPtr(ref)
@@ -502,6 +528,9 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Created++
+			if pulledIDs != nil {
+				pulledIDs[conv.Issue.ID] = true
+			}
 		}
 	}
 
@@ -1241,11 +1270,14 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 			continue
 		}
 		ref := strings.TrimSpace(*candidate.ExternalRef)
-		if ref == "" || !e.Tracker.IsExternalRef(ref) {
+		if ref == "" {
 			continue
 		}
 		if _, exists := byExternal[ref]; !exists {
 			byExternal[ref] = candidate
+		}
+		if !e.Tracker.IsExternalRef(ref) {
+			continue
 		}
 		identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(ref))
 		if identifier != "" {
@@ -1269,6 +1301,19 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 		}
 		if issue := byExternal[strings.ToLower(externalID)]; issue != nil {
 			return issue, nil
+		}
+		// Tracker refs come in URL variants (e.g. Linear URLs with and
+		// without the title slug); match on the extracted identifier the
+		// same way the index above was built.
+		if e.Tracker.IsExternalRef(externalID) {
+			if identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(externalID)); identifier != "" {
+				if issue := byExternal[identifier]; issue != nil {
+					return issue, nil
+				}
+				if issue := byExternal[strings.ToLower(identifier)]; issue != nil {
+					return issue, nil
+				}
+			}
 		}
 		if strings.Contains(externalID, "://") {
 			return e.Store.GetIssueByExternalRef(ctx, externalID)

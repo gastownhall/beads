@@ -28,16 +28,42 @@ func TestEmbeddedReady(t *testing.T) {
 
 	// ===== Default =====
 
+	t.Run("ready_includes_open_issue_with_zero_dependencies", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "GH3268 zero dependency ready issue", "--type", "task", "--label", "gh3268-zero-deps")
+
+		cmd := exec.Command(bd, "ready", "--json", "--label", "gh3268-zero-deps")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd ready --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		var ready []types.IssueWithCounts
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &ready); err != nil {
+			t.Fatalf("parse ready JSON: %v\n%s", err, stdout.String())
+		}
+		if len(ready) != 1 {
+			t.Fatalf("ready count = %d, want 1: %s", len(ready), stdout.String())
+		}
+		if ready[0].ID != issue.ID {
+			t.Fatalf("ready ID = %s, want %s", ready[0].ID, issue.ID)
+		}
+		if ready[0].DependencyCount != 0 {
+			t.Fatalf("dependency_count = %d, want 0", ready[0].DependencyCount)
+		}
+	})
+
 	t.Run("ready_default", func(t *testing.T) {
 		cmd := exec.Command(bd, "ready")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd ready failed: %v\n%s", err, out)
+			t.Fatalf("bd ready failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		if !strings.Contains(string(out), "Ready test issue") {
-			t.Errorf("expected issue in ready output: %s", out)
+		if !strings.Contains(stdout.String(), "Ready test issue") {
+			t.Errorf("expected issue in ready output: %s", stdout.String())
 		}
 	})
 
@@ -47,11 +73,11 @@ func TestEmbeddedReady(t *testing.T) {
 		cmd := exec.Command(bd, "ready", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd ready --json failed: %v\n%s", err, out)
+			t.Fatalf("bd ready --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(stdout.String())
 		start := strings.IndexAny(s, "[{")
 		if start < 0 {
 			t.Fatalf("no JSON in ready --json output: %s", s)
@@ -89,13 +115,13 @@ func TestEmbeddedReady(t *testing.T) {
 		cmd := exec.Command(bd, "ready", "--claim", "--json", "--label", "missing-label")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd ready --claim --json with no matches failed: %v\n%s", err, out)
+			t.Fatalf("bd ready --claim --json with no matches failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 		var empty []types.IssueWithCounts
-		if err := json.Unmarshal(bytes.TrimSpace(out), &empty); err != nil {
-			t.Fatalf("parse empty claim JSON: %v\n%s", err, out)
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &empty); err != nil {
+			t.Fatalf("parse empty claim JSON: %v\n%s", err, stdout.String())
 		}
 		if len(empty) != 0 {
 			t.Fatalf("expected no claimed issues for unmatched label, got %d", len(empty))
@@ -104,16 +130,19 @@ func TestEmbeddedReady(t *testing.T) {
 		cmd = exec.Command(bd, "ready", "--claim", "--json", "--label", "ready-claim-json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err = cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("bd ready --claim --json failed: %v\n%s", err, out)
+		stdout.Reset()
+		stderr.Reset()
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("bd ready --claim --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 		var claimed []types.IssueWithCounts
-		if err := json.Unmarshal(bytes.TrimSpace(out), &claimed); err != nil {
-			t.Fatalf("parse claim JSON: %v\n%s", err, out)
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &claimed); err != nil {
+			t.Fatalf("parse claim JSON: %v\n%s", err, stdout.String())
 		}
 		if len(claimed) != 1 {
-			t.Fatalf("expected one claimed issue, got %d: %s", len(claimed), out)
+			t.Fatalf("expected one claimed issue, got %d: %s", len(claimed), stdout.String())
 		}
 		if claimed[0].ID != issue.ID {
 			t.Fatalf("claimed ID = %s, want %s", claimed[0].ID, issue.ID)
@@ -143,13 +172,13 @@ func TestEmbeddedReady(t *testing.T) {
 		cmd = exec.Command(bd, "ready")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd ready failed: %v\n%s", err, out)
+			t.Fatalf("bd ready failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 		// The blocked issue should not appear in ready output
-		if strings.Contains(string(out), "Blocked by blocker") {
-			t.Errorf("blocked issue should not appear in ready output: %s", out)
+		if strings.Contains(stdout.String(), "Blocked by blocker") {
+			t.Errorf("blocked issue should not appear in ready output: %s", stdout.String())
 		}
 	})
 
@@ -162,15 +191,15 @@ func TestEmbeddedReady(t *testing.T) {
 		cmd := exec.Command(bd, "ready", "--exclude-label", "triage:pending")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd ready --exclude-label failed: %v\n%s", err, out)
+			t.Fatalf("bd ready --exclude-label failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		if strings.Contains(string(out), "Triage pending item") {
-			t.Errorf("triage:pending issue should not appear with --exclude-label: %s", out)
+		if strings.Contains(stdout.String(), "Triage pending item") {
+			t.Errorf("triage:pending issue should not appear with --exclude-label: %s", stdout.String())
 		}
-		if !strings.Contains(string(out), "Normal ready item") {
-			t.Errorf("normal issue should still appear with --exclude-label: %s", out)
+		if !strings.Contains(stdout.String(), "Normal ready item") {
+			t.Errorf("normal issue should still appear with --exclude-label: %s", stdout.String())
 		}
 	})
 
@@ -182,12 +211,12 @@ func TestEmbeddedReady(t *testing.T) {
 		cmd := exec.Command(bd, "-C", dir, "ready")
 		cmd.Dir = tmpDir // Run from a directory with no .beads/
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd -C %s ready failed: %v\n%s", dir, err, out)
+			t.Fatalf("bd -C %s ready failed: %v\nstdout:\n%s\nstderr:\n%s", dir, err, stdout.String(), stderr.String())
 		}
-		if !strings.Contains(string(out), "Ready test issue") {
-			t.Errorf("expected issue in ready -C output: %s", out)
+		if !strings.Contains(stdout.String(), "Ready test issue") {
+			t.Errorf("expected issue in ready -C output: %s", stdout.String())
 		}
 	})
 
@@ -226,6 +255,19 @@ func TestEmbeddedReady(t *testing.T) {
 		out2, err2 := cmd2.CombinedOutput()
 		if err2 == nil {
 			t.Fatalf("second bd ready (no -C) should have failed in tmpDir, got: %s", out2)
+		}
+	})
+
+	t.Run("offset_rejected_outside_proxied", func(t *testing.T) {
+		cmd := exec.Command(bd, "ready", "--offset", "1")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("bd ready --offset 1 in embedded mode should have failed, got: %s", out)
+		}
+		if !strings.Contains(string(out), "--offset is only supported under --proxied-server") {
+			t.Errorf("expected '--offset is only supported under --proxied-server' error, got: %s", out)
 		}
 	})
 }

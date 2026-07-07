@@ -43,6 +43,60 @@ func TestApplyRemoteDryRun(t *testing.T) {
 	}
 }
 
+func TestRemoteApplyStoreConfigUsesReadOnlyForDryRun(t *testing.T) {
+	dryRunConfig := remoteApplyStoreConfig(true)
+	if !dryRunConfig.ReadOnly {
+		t.Fatal("dry-run remote apply must open the Dolt store read-only")
+	}
+	if !dryRunConfig.DisableAutoStart {
+		t.Fatal("remote apply diagnostics must not auto-start Dolt")
+	}
+
+	applyConfig := remoteApplyStoreConfig(false)
+	if applyConfig.ReadOnly {
+		t.Fatal("non-dry-run remote apply must remain writable")
+	}
+	if !applyConfig.DisableAutoStart {
+		t.Fatal("remote apply writes must not auto-start Dolt")
+	}
+}
+
+func TestRemoteURLMatchesConfigNormalizesEquivalentGitURLs(t *testing.T) {
+	tests := []struct {
+		name       string
+		current    string
+		configured string
+		want       bool
+	}{
+		{
+			name:       "https normalized to git https",
+			current:    "git+https://github.com/gastownhall/beads.git",
+			configured: "https://github.com/gastownhall/beads.git",
+			want:       true,
+		},
+		{
+			name:       "ssh normalized to git ssh",
+			current:    "git+ssh://github.com/gastownhall/beads.git",
+			configured: "ssh://github.com/gastownhall/beads.git",
+			want:       true,
+		},
+		{
+			name:       "different repos still differ",
+			current:    "git+https://github.com/gastownhall/beads.git",
+			configured: "https://github.com/gastownhall/other.git",
+			want:       false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := remoteURLMatchesConfig(tt.current, tt.configured); got != tt.want {
+				t.Fatalf("remoteURLMatchesConfig(%q, %q) = %v, want %v", tt.current, tt.configured, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestApplyServerNoDrift(t *testing.T) {
 	result := applyServer(false, false)
 	if result.Status != applyStatusOK {
@@ -98,6 +152,118 @@ func TestRunApplyDryRun(t *testing.T) {
 		if r.Status == applyStatusApplied {
 			t.Errorf("dry-run should not apply actions, but check %q was applied", r.Check)
 		}
+	}
+}
+
+func TestDriftDomainsGroupsDottedChecks(t *testing.T) {
+	items := []DriftItem{
+		{Check: "hooks.missing", Status: driftStatusDrift},
+		{Check: "remote", Status: driftStatusDrift},
+		{Check: "server", Status: driftStatusOK},
+	}
+	got := driftDomains(items)
+	if !got["hooks"] {
+		t.Fatal("expected hooks.missing drift to mark hooks domain drifted")
+	}
+	if !got["remote"] {
+		t.Fatal("expected remote drift to mark remote domain drifted")
+	}
+	if got["server"] {
+		t.Fatal("did not expect ok server check to mark server domain drifted")
+	}
+}
+
+func TestShouldRecheckRemoteAfterServerStart(t *testing.T) {
+	appliedServer := ApplyResult{Check: "server", Status: applyStatusApplied}
+	if !shouldRecheckRemoteAfterServerStart(true, appliedServer) {
+		t.Fatal("expected remote recheck after skipped remote drift and applied server start")
+	}
+	dryRunServer := ApplyResult{Check: "server", Status: applyStatusDryRun}
+	if shouldRecheckRemoteAfterServerStart(true, dryRunServer) {
+		t.Fatal("did not expect remote recheck when server was not actually started")
+	}
+	if shouldRecheckRemoteAfterServerStart(false, appliedServer) {
+		t.Fatal("did not expect remote recheck when initial remote drift was not skipped")
+	}
+}
+
+func TestRemoteApplyResultPreservesSkippedRemoteWithoutRecheck(t *testing.T) {
+	skippedRemote := DriftItem{
+		Check:   "remote",
+		Status:  driftStatusSkipped,
+		Message: "Cannot open Dolt store: server unavailable",
+	}
+	serverOK := ApplyResult{Check: "server", Status: applyStatusOK}
+
+	result := remoteApplyResult([]DriftItem{skippedRemote}, serverOK, false, func() []DriftItem {
+		t.Fatal("remote should not be rechecked unless the server was started")
+		return nil
+	})
+
+	if result.Check != "remote" {
+		t.Fatalf("expected remote result, got %q", result.Check)
+	}
+	if result.Status != applyStatusSkipped {
+		t.Fatalf("expected skipped remote result, got %q", result.Status)
+	}
+	if result.Message != skippedRemote.Message {
+		t.Fatalf("message = %q, want %q", result.Message, skippedRemote.Message)
+	}
+}
+
+func TestRemoteApplyResultPreservesSkippedRemoteAfterRecheck(t *testing.T) {
+	initialSkipped := DriftItem{
+		Check:   "remote",
+		Status:  driftStatusSkipped,
+		Message: "Cannot open Dolt store: server unavailable",
+	}
+	recheckedSkipped := DriftItem{
+		Check:   "remote",
+		Status:  driftStatusSkipped,
+		Message: "Cannot list remotes: access denied",
+	}
+	serverApplied := ApplyResult{Check: "server", Status: applyStatusApplied}
+	rechecked := false
+
+	result := remoteApplyResult([]DriftItem{initialSkipped}, serverApplied, false, func() []DriftItem {
+		rechecked = true
+		return []DriftItem{recheckedSkipped}
+	})
+
+	if !rechecked {
+		t.Fatal("expected remote recheck after server start")
+	}
+	if result.Status != applyStatusSkipped {
+		t.Fatalf("expected skipped remote result, got %q", result.Status)
+	}
+	if result.Message != recheckedSkipped.Message {
+		t.Fatalf("message = %q, want %q", result.Message, recheckedSkipped.Message)
+	}
+}
+
+func TestRemoteApplyResultUsesSuccessfulRemoteRecheck(t *testing.T) {
+	initialSkipped := DriftItem{
+		Check:   "remote",
+		Status:  driftStatusSkipped,
+		Message: "Cannot open Dolt store: server unavailable",
+	}
+	serverApplied := ApplyResult{Check: "server", Status: applyStatusApplied}
+	rechecked := false
+
+	result := remoteApplyResult([]DriftItem{initialSkipped}, serverApplied, false, func() []DriftItem {
+		rechecked = true
+		return []DriftItem{{
+			Check:   "remote",
+			Status:  driftStatusOK,
+			Message: "Dolt origin remote matches federation.remote",
+		}}
+	})
+
+	if !rechecked {
+		t.Fatal("expected remote recheck after server start")
+	}
+	if result.Status != applyStatusOK {
+		t.Fatalf("expected ok remote result after successful recheck, got %q", result.Status)
 	}
 }
 

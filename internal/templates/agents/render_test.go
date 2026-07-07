@@ -66,6 +66,34 @@ func TestRenderSectionFullSingleMarkers(t *testing.T) {
 	}
 }
 
+// TestRenderSectionFullIncludesArchPointer guards GH#3683: the rich
+// architecture blockquote in agents.md.tmpl only reaches greenfield
+// AGENTS.md files. For users running `bd init` over an existing AGENTS.md,
+// ReplaceSection only swaps content between the BEGIN/END markers — so a
+// one-line architecture pointer must live inside beads-section.md too, so
+// hash-freshness re-renders propagate it on subsequent runs.
+func TestRenderSectionFullIncludesArchPointer(t *testing.T) {
+	section := RenderSection(ProfileFull)
+	for _, want := range []string{"refs/dolt/data", "SYNC_CONCEPTS.md"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("full profile missing architecture pointer fragment %q", want)
+		}
+	}
+}
+
+// TestRenderSectionMinimalIncludesArchPointer guards GH#3683 for the
+// minimal profile. The minimal body is intentionally pointer-only, but a
+// single architecture sentence with the canonical SYNC_CONCEPTS.md URL
+// fits the profile's "point at the docs" character.
+func TestRenderSectionMinimalIncludesArchPointer(t *testing.T) {
+	section := RenderSection(ProfileMinimal)
+	for _, want := range []string{"refs/dolt/data", "SYNC_CONCEPTS.md"} {
+		if !strings.Contains(section, want) {
+			t.Errorf("minimal profile missing architecture pointer fragment %q", want)
+		}
+	}
+}
+
 func TestRenderSectionMinimal(t *testing.T) {
 	section := RenderSection(ProfileMinimal)
 	if section == "" {
@@ -94,6 +122,29 @@ func TestRenderSectionMinimal(t *testing.T) {
 	}
 	if strings.Contains(section, "### Priorities") {
 		t.Error("minimal profile should not contain full priorities section")
+	}
+}
+
+func TestCodexSectionBody(t *testing.T) {
+	body := CodexSectionBody()
+	if body == "" {
+		t.Fatal("CodexSectionBody returned empty string")
+	}
+	for _, want := range []string{
+		"## Beads Issue Tracker",
+		"`beads` skill",
+		"bd ready",
+		"bd prime",
+		"bd remember",
+		"refs/dolt/data",
+		"SYNC_CONCEPTS.md",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("CodexSectionBody missing %q", want)
+		}
+	}
+	if strings.Contains(body, "BEGIN BEADS") || strings.Contains(body, "END BEADS") {
+		t.Error("CodexSectionBody should not include managed markers")
 	}
 }
 

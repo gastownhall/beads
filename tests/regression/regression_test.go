@@ -13,6 +13,7 @@ package regression
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -21,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -247,8 +249,15 @@ type workspace struct {
 
 func newWorkspace(t *testing.T, bdPath string) *workspace {
 	t.Helper()
-	dir := t.TempDir()
+	dir, err := os.MkdirTemp("", "bd-regression-workspace-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		removeWorkspaceDir(t, dir)
+	})
 	w := &workspace{dir: dir, bdPath: bdPath, t: t}
+	w.cleanupBaselineDaemon()
 
 	w.git("init")
 	w.git("config", "user.name", "regression-test")
@@ -271,11 +280,58 @@ func newWorkspace(t *testing.T, bdPath string) *workspace {
 	return w
 }
 
+func removeWorkspaceDir(t *testing.T, dir string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var err error
+	for {
+		err = os.RemoveAll(dir)
+		if err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("remove workspace dir %s: %v", dir, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (w *workspace) cleanupBaselineDaemon() {
+	w.t.Helper()
+	if baselineBin == "" || w.bdPath != baselineBin {
+		return
+	}
+
+	w.t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		cmd := exec.CommandContext(ctx, w.bdPath, "daemon", "stop")
+		cmd.Dir = w.dir
+		cmd.Env = w.runEnv()
+		_ = cmd.Run()
+
+		if pkill, err := exec.LookPath("pkill"); err == nil {
+			pkillCtx, pkillCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer pkillCancel()
+
+			pattern := "^" + regexp.QuoteMeta(w.bdPath) + " daemon start$"
+			_ = exec.CommandContext(pkillCtx, pkill, "-f", pattern).Run()
+		}
+	})
+}
+
 func (w *workspace) runEnv() []string {
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + w.dir,
 		"BEADS_TEST_MODE=1",
+		// The pinned v0.49.6 baseline still has daemon mode. Disable it
+		// up front so it cannot race t.TempDir cleanup by writing .beads files.
+		"BD_NO_DAEMON=1",
+		"BEADS_NO_DAEMON=1",
+		"BD_DISABLE_METRICS=1",
+		"BD_DISABLE_EVENT_FLUSH=1",
 		"GIT_CONFIG_NOSYSTEM=1",
 	}
 	if testDoltServerPort != 0 {
@@ -381,7 +437,7 @@ func (w *workspace) snapshot(listArgs ...string) string {
 		if !ok || id == "" {
 			continue
 		}
-		showOut := w.run("show", id, "--json")
+		showOut := w.showJSONForSnapshot(id)
 
 		// bd show --json may return a JSON array or single object
 		var showArr []map[string]any
@@ -397,6 +453,18 @@ func (w *workspace) snapshot(listArgs ...string) string {
 		w.t.Logf("WARNING: snapshot: bd show %s returned unparseable JSON: %s", id, showOut)
 	}
 	return buf.String()
+}
+
+func (w *workspace) showJSONForSnapshot(id string) string {
+	args := []string{"show", id, "--json"}
+	if w.supportsStreamedShowPayloads() {
+		args = append(args, "--include-dependents", "--include-comments")
+	}
+	return w.run(args...)
+}
+
+func (w *workspace) supportsStreamedShowPayloads() bool {
+	return candidateBin != "" && w.bdPath == candidateBin
 }
 
 // export returns a JSONL snapshot of the workspace. This replaces the removed
@@ -564,14 +632,11 @@ func normalizeIssue(m map[string]any) {
 	}
 
 	// normalizeDepSubobject strips volatile/internal fields from a dependency
-	// or dependent sub-object as returned by bd show --json.
+	// or dependent sub-object as returned by bd show --json. The candidate's
+	// streamed show payload intentionally returns shallow related issues, while
+	// the old baseline export included deeper issue fields. Compare the stable
+	// relationship identity, not the nested issue's full payload.
 	normalizeDepSubobject := func(dm map[string]any) {
-		delete(dm, "created_at")
-		delete(dm, "updated_at")
-		delete(dm, "closed_at")
-		delete(dm, "close_reason")
-		delete(dm, "thread_id")
-		delete(dm, "created_by")
 		// Normalize dependency_type → type
 		if dt, ok := dm["dependency_type"]; ok {
 			if _, hasType := dm["type"]; !hasType {
@@ -583,6 +648,22 @@ func normalizeIssue(m map[string]any) {
 		if md, ok := dm["metadata"]; ok {
 			if mdStr, _ := md.(string); mdStr == "" || mdStr == "{}" {
 				delete(dm, "metadata")
+			}
+		}
+		keep := map[string]bool{
+			"id":            true,
+			"issue_id":      true,
+			"depends_on_id": true,
+			"title":         true,
+			"status":        true,
+			"issue_type":    true,
+			"priority":      true,
+			"type":          true,
+			"metadata":      true,
+		}
+		for k := range dm {
+			if !keep[k] {
+				delete(dm, k)
 			}
 		}
 	}

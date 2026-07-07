@@ -8,7 +8,7 @@ Beads (`bd`) is an issue tracker designed specifically for AI-supervised coding 
 - Track work with a simple CLI
 - Discover and link related tasks during development
 - Maintain context across coding sessions
-- Auto-sync issues via Dolt for distributed workflows
+- Sync issues via Dolt remotes for distributed workflows
 
 ## Installation
 

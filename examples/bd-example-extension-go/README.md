@@ -1,6 +1,8 @@
 # BD Extension Example (Go)
 
-This example demonstrates how to extend bd with custom tables for application-specific orchestration, following the patterns described in [EXTENDING.md](../../docs/EXTENDING.md).
+This legacy example demonstrates how to extend SQLite-backed bd databases with custom tables for application-specific orchestration.
+
+> **Note:** Custom SQLite table extensions are a legacy pattern. Current Dolt-backed beads workflows should prefer standalone integration tools that call `bd --json` commands or use `bd query` for SQL access. See [Extensible Database](../../docs/ADVANCED.md#extensible-database) for the current guidance.
 
 ## What This Example Shows
 
@@ -224,8 +226,6 @@ This pattern is used in production by:
 - **CI/CD Systems**: Build tracking and artifact management
 - **Task Runners**: Parallel execution with dependency resolution
 
-See [EXTENDING.md](../../EXTENDING.md) for more patterns and the VC implementation example.
-
 ## Next Steps
 
 1. **Add Your Own Tables**: Extend the schema with application-specific tables
@@ -236,6 +236,5 @@ See [EXTENDING.md](../../EXTENDING.md) for more patterns and the VC implementati
 
 ## See Also
 
-- [EXTENDING.md](../../EXTENDING.md) - Complete extension guide
 - [../../README.md](../../README.md) - bd documentation
 - [QUICKSTART.md](../../docs/QUICKSTART.md) - Quick start tutorial

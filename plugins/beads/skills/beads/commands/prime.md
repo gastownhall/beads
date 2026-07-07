@@ -4,4 +4,7 @@ Outputs essential beads workflow rules and command reference to help agents reme
 
 ```bash
 bd prime
+bd prime --memories-only
 ```
+
+Use `--memories-only` when a hook should inject durable project memories without the full workflow guide.

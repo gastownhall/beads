@@ -41,7 +41,7 @@ beads/
 │   └── 0001-bd-prime-as-source-of-truth.md
 └── resources/               # Detailed documentation (loaded on demand)
     ├── BOUNDARIES.md        # When to use bd vs TodoWrite
-    ├── CLI_REFERENCE.md     # CLI command reference
+    ├── CLI_REFERENCE.md     # Live CLI reference pointers
     ├── DEPENDENCIES.md      # Dependency semantics (A blocks B vs B blocks A)
     ├── INTEGRATION_PATTERNS.md # TodoWrite and other tool integration
     ├── ISSUE_CREATION.md    # When and how to create issues

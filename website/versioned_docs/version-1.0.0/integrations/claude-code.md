@@ -18,7 +18,7 @@ bd setup claude
 
 This installs:
 - **SessionStart hook** - Runs `bd prime` on session start
-- **PreCompact hook** - Runs `bd prime` before context compaction
+- **SessionStart compact refresh** - Runs `bd prime` after context compaction
 
 ### Manual Setup
 
@@ -28,7 +28,7 @@ Add to your Claude Code hooks configuration:
 {
   "hooks": {
     "SessionStart": ["bd prime"],
-    "PreCompact": ["bd prime"]
+    "SessionStart": ["bd prime"]
   }
 }
 ```

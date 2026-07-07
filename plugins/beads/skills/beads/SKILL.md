@@ -99,7 +99,7 @@ bd close <id> --reason "Implemented with refresh tokens" --json
 
 | Category | Files |
 |----------|-------|
-| **Getting Started** | [BOUNDARIES.md](resources/BOUNDARIES.md), [CLI_REFERENCE.md](resources/CLI_REFERENCE.md), [WORKFLOWS.md](resources/WORKFLOWS.md) |
+| **Getting Started** | [BOUNDARIES.md](resources/BOUNDARIES.md), [CLI_REFERENCE.md](resources/CLI_REFERENCE.md) (live reference pointers), [WORKFLOWS.md](resources/WORKFLOWS.md) |
 | **Core Concepts** | [DEPENDENCIES.md](resources/DEPENDENCIES.md), [ISSUE_CREATION.md](resources/ISSUE_CREATION.md), [PATTERNS.md](resources/PATTERNS.md) |
 | **Resilience** | [RESUMABILITY.md](resources/RESUMABILITY.md), [TROUBLESHOOTING.md](resources/TROUBLESHOOTING.md) |
 | **Advanced** | [MOLECULES.md](resources/MOLECULES.md), [CHEMISTRY_PATTERNS.md](resources/CHEMISTRY_PATTERNS.md), [AGENTS.md](resources/AGENTS.md), [ASYNC_GATES.md](resources/ASYNC_GATES.md), [WORKTREES.md](resources/WORKTREES.md) |

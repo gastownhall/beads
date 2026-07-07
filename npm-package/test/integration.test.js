@@ -146,7 +146,7 @@ async function testBinaryFunctionality(npmPrefix) {
     // Test help command
     logInfo('Testing help command...');
     const help = exec(`"${bdCmd}" --help`, { env });
-    if (!help.includes('Available Commands')) {
+    if (!help.includes('Usage:') || !help.includes('Working With Issues')) {
       throw new Error('Help command did not return expected output');
     }
     logSuccess('Help command works');
@@ -290,25 +290,29 @@ async function testClaudeCodeWebSimulation(npmPrefix) {
     const existingIssue = JSON.parse(createOutput);
     logSuccess(`Created issue in first session: ${existingIssue.id}`);
 
-    // Simulate sync to git (bd automatically exports to JSONL)
+    // Simulate sync to git. The default auto-export policy is intentionally
+    // disabled, so make the package workflow's JSONL handoff explicit.
     const beadsDir = path.join(sessionDir, '.beads');
     const jsonlPath = path.join(beadsDir, 'issues.jsonl');
-
-    // Wait a moment for auto-export
-    execSync('sleep 1');
+    exec(`"${bdCmd}" export -o "${jsonlPath}"`, { cwd: sessionDir, env });
 
     // Verify JSONL exists
     if (!fs.existsSync(jsonlPath)) {
       throw new Error('JSONL file not created');
     }
 
-    // Remove the database to simulate a fresh clone
-    const dbFiles = fs.readdirSync(beadsDir).filter(f => f.endsWith('.db'));
-    dbFiles.forEach(f => fs.unlinkSync(path.join(beadsDir, f)));
+    // Remove local-only database state to simulate a fresh clone that kept the
+    // committed JSONL export but not the gitignored embedded Dolt database.
+    for (const entry of fs.readdirSync(beadsDir)) {
+      if (entry === 'issues.jsonl') {
+        continue;
+      }
+      fs.rmSync(path.join(beadsDir, entry), { recursive: true, force: true });
+    }
 
     // Session 2: Re-initialize (simulating SessionStart hook in new session)
     logInfo('Session 2: Re-initialize from JSONL...');
-    exec(`"${bdCmd}" init --quiet`, { cwd: sessionDir, env });
+    exec(`"${bdCmd}" init --quiet --from-jsonl`, { cwd: sessionDir, env });
     logSuccess('bd init re-imported from JSONL');
 
     // Verify issue was imported
@@ -329,6 +333,10 @@ async function testClaudeCodeWebSimulation(npmPrefix) {
     }
     logSuccess(`Found ${readyIssues.length} ready issue(s)`);
 
+    // The default auto-export interval is throttled for normal use. Disable
+    // the interval so this test can assert the next write updates JSONL.
+    exec(`"${bdCmd}" config set export.interval 0s`, { cwd: sessionDir, env });
+
     // Simulate agent creating a new issue
     const newCreateOutput = exec(
       `"${bdCmd}" create "Bug discovered during session" -t bug -p 0 --json`,
@@ -337,7 +345,8 @@ async function testClaudeCodeWebSimulation(npmPrefix) {
     const newIssue = JSON.parse(newCreateOutput);
     logSuccess(`Agent created new issue: ${newIssue.id}`);
 
-    // Verify JSONL was updated
+    // Verify JSONL export works after the imported session creates more work.
+    exec(`"${bdCmd}" export -o "${jsonlPath}"`, { cwd: sessionDir, env });
     const jsonlContent = fs.readFileSync(
       path.join(beadsDir, 'issues.jsonl'),
       'utf8'
@@ -347,7 +356,7 @@ async function testClaudeCodeWebSimulation(npmPrefix) {
     if (jsonlLines.length < 2) {
       throw new Error('JSONL not updated with new issue');
     }
-    logSuccess('JSONL auto-export working');
+    logSuccess('JSONL export working');
 
     return true;
   } catch (err) {

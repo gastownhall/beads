@@ -475,7 +475,7 @@ bd create "Issue" -p 1
 - **CLI Reference:** See [README.md](../README.md) for command details
 - **Configuration Guide:** See [CONFIG.md](CONFIG.md) for all config options
 - **Troubleshooting:** See [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
-- **Multi-Repo Internals:** See [MULTI_REPO_HYDRATION.md](MULTI_REPO_HYDRATION.md) and [ROUTING.md](ROUTING.md)
+- **Multi-Repo Internals:** See [ROUTING.md#multi-repo-hydration](ROUTING.md#multi-repo-hydration)
 
 ## Related Issues
 

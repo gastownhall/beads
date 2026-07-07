@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -21,24 +22,30 @@ Issues will appear in 'bd ready' if they have no blockers.
 Examples:
   bd undefer bd-abc        # Undefer a single issue
   bd undefer bd-abc bd-def # Undefer multiple issues`,
-	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("undefer")
+
+		evt := metrics.NewCommandEvent("undefer")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
 
 		ctx := rootCtx
 
-		// Resolve partial IDs
 		_, err := utils.ResolvePartialIDs(ctx, store, args)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		undeferredIssues := []*types.Issue{}
 
-		// Direct storage access
 		if store == nil {
-			FatalErrorWithHint("database not initialized",
-				diagHint())
+			return HandleErrorWithHint("database not initialized", diagHint())
 		}
 
 		for _, id := range args {
@@ -48,7 +55,6 @@ Examples:
 				continue
 			}
 
-			// Skip if not deferred — avoid false "Undeferred" message
 			issue, err := store.GetIssue(ctx, fullID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error getting %s: %v\n", fullID, err)
@@ -61,7 +67,7 @@ Examples:
 
 			updates := map[string]interface{}{
 				"status":      string(types.StatusOpen),
-				"defer_until": nil, // Clear defer_until timestamp (GH#820)
+				"defer_until": nil,
 			}
 
 			if err := store.UpdateIssue(ctx, fullID, updates, actor); err != nil {
@@ -79,13 +85,15 @@ Examples:
 			}
 		}
 
-		if jsonOutput && len(undeferredIssues) > 0 {
-			outputJSON(undeferredIssues)
-		}
-
 		if len(args) > 0 {
 			commandDidWrite.Store(true)
 		}
+
+		if jsonOutput && len(undeferredIssues) > 0 {
+			return outputJSON(undeferredIssues)
+		}
+
+		return nil
 	},
 }
 

@@ -209,18 +209,30 @@ func TestGenerateHookSection_Timeout(t *testing.T) {
 	if !strings.Contains(section, "command -v timeout") {
 		t.Error("section missing timeout availability check")
 	}
+	if !strings.Contains(section, "command -v gtimeout") {
+		t.Error("section missing gtimeout fallback for macOS coreutils")
+	}
+	if !strings.Contains(section, "perl -e 'alarm shift; exec @ARGV'") {
+		t.Error("section missing perl alarm fallback for stock macOS")
+	}
+	if !strings.Contains(section, "_bd_used_perl=1") {
+		t.Error("section missing perl branch marker")
+	}
 
 	// Timeout exit code (124) must be handled gracefully — continue, don't block git
 	if !strings.Contains(section, "_bd_exit -eq 124") {
 		t.Error("section missing timeout exit code handling")
 	}
+	if !strings.Contains(section, "[ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]") {
+		t.Error("section missing perl-scoped SIGALRM timeout exit code handling")
+	}
 	if !strings.Contains(section, "timed out") {
 		t.Error("section missing timeout warning message")
 	}
 
-	// Fallback path when timeout command is not available (e.g. macOS without coreutils)
-	if !strings.Contains(section, "else") {
-		t.Error("section missing fallback for systems without timeout command")
+	// Last-resort path is explicit when no timeout implementation is available.
+	if !strings.Contains(section, "running without timeout") {
+		t.Error("section missing clear fallback warning for systems without timeout support")
 	}
 }
 
@@ -736,6 +748,12 @@ func TestInstallHooksBeads_WorktreeAccess(t *testing.T) {
 			t.Fatalf("Failed to create metadata.json: %v", err)
 		}
 
+		cmd := exec.Command("git", "commit", "--allow-empty", "--no-verify", "-m", "init")
+		cmd.Dir = tmpDir
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git commit failed: %v\n%s", err, string(output))
+		}
+
 		// Install hooks with --beads
 		if err := installHooksWithOptions(managedHookNames, false, false, false, true); err != nil {
 			t.Fatalf("installHooksWithOptions(beads=true) failed: %v", err)
@@ -761,7 +779,7 @@ func TestInstallHooksBeads_WorktreeAccess(t *testing.T) {
 
 		// Create a worktree and verify hooks are accessible from it
 		worktreeDir := filepath.Join(t.TempDir(), "worktree")
-		cmd := exec.Command("git", "worktree", "add", worktreeDir, "-b", "test-worktree")
+		cmd = exec.Command("git", "worktree", "add", worktreeDir, "-b", "test-worktree")
 		cmd.Dir = tmpDir
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Fatalf("git worktree add failed: %v\n%s", err, string(output))

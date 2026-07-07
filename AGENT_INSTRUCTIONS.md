@@ -63,6 +63,12 @@ into temp repos and produce flaky test behavior.
 
 **Warning:** bd will warn you when creating issues with "Test" prefix in the production database. Always use `BEADS_DB` for manual testing.
 
+**Tmpfs hosts:** the `cmd/bd` test suite creates an isolated `$HOME` and several
+test binaries under `$TMPDIR`. They are normally cleaned by the test process,
+but a SIGKILLed or OOMed run can leave orphans behind. On hosts where `/tmp`
+is tmpfs (e.g. Fedora Atomic / Bluefin), run `make clean-test-tmp` between
+test runs if `du -sh /tmp/beads-* /tmp/bd-*` shows accumulation. See bd-3q2u.
+
 ### Before Committing
 
 1. **Run tests**: `make test` (or `./scripts/test.sh`)
@@ -82,18 +88,23 @@ git commit -m "Add retry logic for database locks (bd-xyz)"
 
 This enables `bd doctor` to detect **orphaned issues** - work that was committed but the issue wasn't closed. The doctor check cross-references open issues against git history to find these orphans.
 
+For agent-prepared commits, also include the
+`Agent-Signature:` trailer described in
+[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md). Use `unknown-model` or
+`unknown-reasoning` when reliable runtime metadata is unavailable.
+
 ### Git Workflow
 
 bd uses **Dolt** as its primary database. Changes are committed to Dolt history automatically (one Dolt commit per write command).
 
-**Install git hooks** for automatic sync:
+**Install git hooks** for commit integration and legacy fallback behavior:
 ```bash
 bd hooks install
 ```
 
 ### Git Integration
 
-**Dolt sync**: Dolt handles sync natively via `bd dolt push` / `bd dolt pull`. No JSONL export/import needed.
+**Dolt sync**: Dolt handles sync natively via `bd dolt push` / `bd dolt pull`. No export/import round-trip needed for normal sync.
 
 **Protected branches**: Dolt stores data under `refs/dolt/data`, separate from standard Git refs. See [docs/PROTECTED_BRANCHES.md](docs/PROTECTED_BRANCHES.md).
 
@@ -120,6 +131,9 @@ read [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md). The
 maintainer policy is to maximize community throughput: find useful contributor
 value, absorb or transform it locally when practical, preserve attribution, and
 use request-changes only as a last resort.
+
+Sign agent-written GitHub comments and reviews using
+[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md).
 
 ### External Contributor PRs: Check Before You Build
 
@@ -278,6 +292,11 @@ echo 'Updated description with $variables' | bd update <id> --description=-
 bd create "Title" --body-file=description.md
 ```
 
+**GitHub body hygiene.** For GitHub PR, issue, comment, and review bodies,
+write Markdown to a file and pass it with `gh ... --body-file`. Run
+`scripts/gh-body-lint <body-file>` first to catch literal `\n` sequences and
+non-linking `GH#123` references.
+
 **Example agent session:**
 
 ```bash
@@ -296,11 +315,102 @@ bd dolt push
 This installs:
 
 - **pre-commit** — Commits pending Dolt changes
-- **post-merge** — Pulls remote Dolt changes after git merge
+- **post-merge** — Runs chained hooks and a legacy JSONL import fallback only when no Dolt remote is configured
 
 **Note:** Hooks are embedded in the bd binary and work for all bd users (not just source repo users).
 
 ## Common Development Tasks
+
+### Visual Design System
+
+When adding CLI output features, follow these design principles for consistent,
+cognitively friendly visuals.
+
+#### No Emoji-Style Icons
+
+Do not use large colored emoji icons like red/orange/yellow/blue/white circles
+for priorities or status. They cause cognitive overload and break visual
+consistency.
+
+Use small Unicode symbols with semantic colors applied via lipgloss:
+
+- Status: `○ ◐ ● ✓ ❄`
+- Priority: `●` (filled circle with color)
+
+#### Status Icons
+
+Use these symbols consistently across all commands:
+
+```text
+○ open        - Available to work (white/default)
+◐ in_progress - Currently being worked (yellow)
+● blocked     - Waiting on dependencies (red)
+✓ closed      - Completed (muted gray)
+❄ deferred    - Scheduled for later (blue/muted)
+```
+
+#### Priority Icons and Colors
+
+Format priority as `● P0` (filled circle icon plus label, colored by priority):
+
+- `● P0`: Red + bold (critical)
+- `● P1`: Orange (high)
+- `● P2-P4`: Default text (normal)
+
+#### Issue Type Colors
+
+- `bug`: Red (problems need attention)
+- `epic`: Purple (larger scope)
+- Others: Default text
+
+#### Design Principles
+
+1. Small Unicode symbols only; avoid emoji blobs.
+2. Semantic colors only for actionable items; do not color everything.
+3. Closed items fade using muted gray.
+4. Prefer icons over text labels for scanability.
+5. Keep icons consistent across list, graph, show, and related commands.
+6. Use tree connectors (`├──`, `└──`, `│`) for hierarchies.
+7. Reduce cognitive noise; do not show `needs:1` when it is just the parent epic.
+
+#### Semantic Styles
+
+Use exported styles from `internal/ui/styles.go`:
+
+```go
+// Status styles
+ui.StatusInProgressStyle  // Yellow - active work
+ui.StatusBlockedStyle     // Red - needs attention
+ui.StatusClosedStyle      // Muted gray - done
+
+// Priority styles
+ui.PriorityP0Style        // Red + bold
+ui.PriorityP1Style        // Orange
+
+// Type styles
+ui.TypeBugStyle           // Red
+ui.TypeEpicStyle          // Purple
+
+// General styles
+ui.PassStyle, ui.WarnStyle, ui.FailStyle
+ui.MutedStyle, ui.AccentStyle
+ui.RenderMuted(text), ui.RenderAccent(text)
+```
+
+Example:
+
+```go
+switch issue.Status {
+case types.StatusOpen:
+    icon = "○"
+case types.StatusInProgress:
+    icon = ui.StatusInProgressStyle.Render("◐")
+case types.StatusBlocked:
+    icon = ui.StatusBlockedStyle.Render("●")
+case types.StatusClosed:
+    icon = ui.StatusClosedStyle.Render("✓")
+}
+```
 
 ### CLI Design Principles
 
@@ -441,7 +551,7 @@ This handles the entire release workflow automatically, including waiting ~5 min
 6. Update Homebrew: `./scripts/update-homebrew.sh <version>` (waits for GitHub Actions)
 7. Verify: `brew update && brew upgrade beads && bd version`
 
-See [docs/RELEASING.md](docs/RELEASING.md) for complete manual instructions.
+See [RELEASING.md](RELEASING.md) for complete manual instructions.
 
 ## Checking GitHub Issues and PRs
 
@@ -475,6 +585,20 @@ gh issue view 201
 - Better for quick triage and prioritization
 
 **Do NOT use:** `browser_navigate`, `browser_snapshot`, or other playwright tools for GitHub PR/issue reviews unless specifically requested by the user.
+
+## Telemetry
+
+`bd` collects anonymous command-usage metrics. Each event is a `cli_command`
+record carrying only the command name; each batch also carries the bd version
+and OS platform, keyed by a machine-derived, HMAC-protected distinct ID. No
+email, repo path, remote URL, issue content, or user-supplied strings are
+collected. Events are written under `~/.beads/eventsData` and POSTed to
+`https://gastownhall-eventsapi.com/mp/collect`.
+
+Metrics are enabled by default (opt-out). The friendliest way to see or change
+them is `bd metrics` (`bd metrics on` / `bd metrics off` / `bd metrics example`),
+which takes effect on the next command with no restart. `BD_DISABLE_METRICS=1`
+still works as a one-off, shell-scoped override.
 
 ## Questions?
 

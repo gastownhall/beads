@@ -9,7 +9,8 @@ SHELL := $(subst cmd,bin,$(subst git.exe,bash.exe,$(GIT_BASH)))
 endif
 endif
 
-.PHONY: all build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration bench bench-quick clean install install-force help check-up-to-date fmt fmt-check
+.PHONY: all build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
+.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-package-mcp ci-package-npm ci-website
 
 # Default target
 all: build
@@ -46,6 +47,7 @@ endif
 # ICU flags are only needed for scripts/test-icu-path.sh (which exercises the
 # opt-in ICU regex path).
 BUILD_TAGS := gms_pure_go
+REGRESSION_TIMEOUT ?= 20m
 
 # Build the bd binary
 build:
@@ -78,12 +80,30 @@ test-full-cgo:
 	@echo "WARNING: make test-full-cgo is deprecated; use make test-icu-path for the explicit ICU-only path." >&2
 	@$(MAKE) test-icu-path
 
+ci-pr-core:
+	@./scripts/ci/pr-core.sh
+
+ci-pr-policy:
+	@./scripts/ci/pr-policy.sh
+
+ci-pr-lint:
+	@./scripts/ci/pr-lint.sh
+
+ci-package-mcp:
+	@./scripts/ci/package-mcp.sh
+
+ci-package-npm:
+	@./scripts/ci/package-npm.sh
+
+ci-website:
+	@./scripts/ci/website.sh
+
 # Run differential regression tests (baseline v0.49.6 vs current worktree).
 # Downloads baseline binary on first run; cached in ~/Library/Caches/beads-regression/.
 # Override baseline: BD_REGRESSION_BASELINE_BIN=/path/to/bd make test-regression
 test-regression:
 	@echo "Running regression tests (baseline vs candidate)..."
-	go test -tags=regression,$(BUILD_TAGS) -timeout=10m -v ./tests/regression/...
+	go test -tags=regression,$(BUILD_TAGS) -timeout=$(REGRESSION_TIMEOUT) -v ./tests/regression/...
 
 # Run upgrade smoke tests (release stability gate).
 # Tests that upgrading from previous release preserves data, role, and mode.
@@ -108,6 +128,13 @@ test-cross-version: build
 test-migration: build
 	@echo "Running migration test harness..."
 	@CANDIDATE_BIN=./bd ./scripts/migration-test/run.sh
+
+# Regenerate the golden-JSON contract corpus (cmd/bd/protocol/testdata/corpus/).
+# Run after any deliberate bd --json wire change; review the diff, then commit.
+# Gas City vendors this corpus to detect cross-version drift. Needs Docker (Dolt).
+corpus-regen:
+	@echo "Regenerating contract corpus..."
+	go test -tags "$(BUILD_TAGS)" ./cmd/bd/protocol -run TestCorpusGolden -corpus.update -count=1
 
 
 # Run performance benchmarks against Dolt storage backend
@@ -183,8 +210,15 @@ fmt-check:
 	@echo "All Go files are properly formatted"
 
 # Validate documentation references against actual CLI flags
-check-docs: build
+check-docs:
+	@echo "Building bd for docs checks..."
+	@CGO_ENABLED=0 go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
 	@./scripts/check-doc-flags.sh ./bd
+	@./scripts/check-doc-freshness.sh
+
+# Ensure -short is not used as an implicit CI tier boundary.
+check-testing-short:
+	@./scripts/check-testing-short.sh
 
 # Clean build artifacts and benchmark profiles
 clean:
@@ -194,6 +228,13 @@ clean:
 	rm -f internal/storage/dolt/bench-cpu-*.prof
 	rm -f beads-perf-*.prof
 
+# Sweep orphaned cmd/bd test temp dirs (e.g. when a test run was SIGKILLed
+# before its TestMain cleanup ran). Safe to run between test runs; will
+# skip dirs in use by a live test process. See bd-3q2u.
+clean-test-tmp:
+	@echo "Sweeping orphaned cmd/bd test temp dirs from $${TMPDIR:-/tmp}..."
+	@./scripts/clean-test-tmp.sh
+
 # Show help
 help:
 	@echo "Beads Makefile targets:"
@@ -201,6 +242,12 @@ help:
 	@echo "  make test         - Run all tests"
 	@echo "  make test-icu-path - Run opt-in ICU regex path tests (maintainer-only)"
 	@echo "  make test-full-cgo - Deprecated alias for make test-icu-path"
+	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"
+	@echo "  make ci-pr-policy - Run required PR policy wrapper"
+	@echo "  make ci-pr-lint  - Run required PR formatting and lint wrapper"
+	@echo "  make ci-package-mcp - Run MCP Python package gate"
+	@echo "  make ci-package-npm - Run npm package gate"
+	@echo "  make ci-website - Run website typecheck/build gate"
 	@echo "  make test-regression - Run differential regression tests (baseline vs candidate)"
 	@echo "  make test-upgrade  - Run upgrade smoke tests (release stability gate)"
 	@echo "  make test-cross-version - Run cross-version smoke tests (last 30 tags)"
@@ -213,4 +260,5 @@ help:
 	@echo "  make fmt-check    - Check Go formatting (for CI)"
 	@echo "  make check-docs   - Validate docs against CLI flags"
 	@echo "  make clean        - Remove build artifacts and profile files"
+	@echo "  make clean-test-tmp - Sweep orphaned cmd/bd test temp dirs from \$$TMPDIR"
 	@echo "  make help         - Show this help message"

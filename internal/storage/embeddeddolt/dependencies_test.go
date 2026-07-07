@@ -64,6 +64,70 @@ func TestAddDependency(t *testing.T) {
 		}
 	})
 
+	t.Run("mixed_table_cycle_permanent_endpoints", func(t *testing.T) {
+		te := newTestEnv(t, "mp")
+		ctx := t.Context()
+
+		for _, issue := range []*types.Issue{
+			{ID: "mp-a", Title: "A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			{ID: "mp-x", Title: "X", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+			{ID: "mp-wisp-w", Title: "W", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true},
+		} {
+			if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+				t.Fatalf("CreateIssue %s: %v", issue.ID, err)
+			}
+		}
+
+		for _, dep := range []*types.Dependency{
+			{IssueID: "mp-x", DependsOnID: "mp-wisp-w", Type: types.DepBlocks},
+			{IssueID: "mp-wisp-w", DependsOnID: "mp-a", Type: types.DepBlocks},
+		} {
+			if err := te.store.AddDependency(ctx, dep, "tester"); err != nil {
+				t.Fatalf("AddDependency %s->%s: %v", dep.IssueID, dep.DependsOnID, err)
+			}
+		}
+
+		err := te.store.AddDependency(ctx, &types.Dependency{IssueID: "mp-a", DependsOnID: "mp-x", Type: types.DepBlocks}, "tester")
+		if err == nil {
+			t.Fatal("expected mixed-table cycle detection error")
+		}
+		if !strings.Contains(err.Error(), "cycle") {
+			t.Errorf("expected cycle error, got: %v", err)
+		}
+	})
+
+	t.Run("mixed_table_cycle_wisp_endpoints", func(t *testing.T) {
+		te := newTestEnv(t, "mw")
+		ctx := t.Context()
+
+		for _, issue := range []*types.Issue{
+			{ID: "mw-wisp-a", Title: "A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true},
+			{ID: "mw-wisp-x", Title: "X", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true},
+			{ID: "mw-b", Title: "B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		} {
+			if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+				t.Fatalf("CreateIssue %s: %v", issue.ID, err)
+			}
+		}
+
+		for _, dep := range []*types.Dependency{
+			{IssueID: "mw-wisp-x", DependsOnID: "mw-b", Type: types.DepBlocks},
+			{IssueID: "mw-b", DependsOnID: "mw-wisp-a", Type: types.DepBlocks},
+		} {
+			if err := te.store.AddDependency(ctx, dep, "tester"); err != nil {
+				t.Fatalf("AddDependency %s->%s: %v", dep.IssueID, dep.DependsOnID, err)
+			}
+		}
+
+		err := te.store.AddDependency(ctx, &types.Dependency{IssueID: "mw-wisp-a", DependsOnID: "mw-wisp-x", Type: types.DepBlocks}, "tester")
+		if err == nil {
+			t.Fatal("expected mixed-table cycle detection error")
+		}
+		if !strings.Contains(err.Error(), "cycle") {
+			t.Errorf("expected cycle error, got: %v", err)
+		}
+	})
+
 	t.Run("cross_type_validation", func(t *testing.T) {
 		te := newTestEnv(t, "ct")
 		ctx := t.Context()

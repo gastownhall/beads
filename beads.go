@@ -4,7 +4,7 @@
 // This package exports only the essential types and functions needed for
 // Go-based extensions that want to use bd's storage layer programmatically.
 //
-// For detailed guidance on extending bd, see docs/EXTENDING.md.
+// For a working extension example, see examples/bd-example-extension-go.
 package beads
 
 import (

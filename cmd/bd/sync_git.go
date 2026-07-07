@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/doltremote"
 )
 
 // isGitRepo checks if the current working directory is in a git repository.
@@ -79,14 +80,31 @@ func gitOriginGetURL() (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
+func gitOriginGetURLForActiveRepo(ctx context.Context) (string, error) {
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return "", err
+	}
+	cmd := rc.GitCmd(ctx, "remote", "get-url", "origin")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
 // gitOriginHasDoltDataRef checks if origin has refs/dolt/data.
 // Returns false on any error (network, no remote, timeout, etc).
 // Uses a 10s timeout since this is a network call used for auto-detection,
 // and suppresses credential prompts to avoid blocking on SSH remotes.
 func gitOriginHasDoltDataRef() bool {
+	return gitRemoteHasDoltDataRef("origin")
+}
+
+func gitRemoteHasDoltDataRef(remote string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "origin", "refs/dolt/data")
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitRemoteURLForLsRemote(remote), "refs/dolt/data")
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	if err != nil {
@@ -95,27 +113,17 @@ func gitOriginHasDoltDataRef() bool {
 	return strings.TrimSpace(string(output)) != ""
 }
 
+func gitRemoteURLForLsRemote(remote string) string {
+	return strings.TrimPrefix(remote, "git+")
+}
+
 // gitURLToDoltRemote converts a git remote URL to dolt's remote format.
 // HTTPS URLs get "git+" prefix: https://... → git+https://...
 // SCP-style SSH URLs are converted: git@host:path → git+ssh://git@host/path
 // SSH URLs get "git+" prefix: ssh://... → git+ssh://...
 // URLs that already have "git+" prefix are returned as-is.
 func gitURLToDoltRemote(url string) string {
-	if strings.HasPrefix(url, "git+") {
-		return url
-	}
-	if strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://") {
-		return "git+" + url
-	}
-	if strings.HasPrefix(url, "ssh://") {
-		return "git+" + url
-	}
-	// SCP-style: git@github.com:org/repo.git → git+ssh://git@github.com/org/repo.git
-	if idx := strings.Index(url, ":"); idx > 0 && !strings.Contains(url[:idx], "/") {
-		return "git+ssh://" + url[:idx] + "/" + url[idx+1:]
-	}
-	// Fallback: just prepend git+
-	return "git+" + url
+	return doltremote.FromGitURL(url)
 }
 
 // gitBranchHasUpstream checks if a specific branch has an upstream configured.

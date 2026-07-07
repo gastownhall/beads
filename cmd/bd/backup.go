@@ -7,12 +7,18 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 var backupCmd = &cobra.Command{
 	Use:   "backup",
 	Short: "Back up your beads database",
 	Long: `Back up your beads database for off-machine recovery.
+
+This is a Dolt-native database backup. It preserves the database state,
+including tables, branches, commit history, and working-set data. This is
+different from 'bd export', which writes issue records to JSONL for migration
+and interoperability.
 
 Commands:
   bd backup init <path>    Set up a backup destination (filesystem or DoltHub)
@@ -31,6 +37,13 @@ var backupStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show last backup status",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("backup-status")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		dir, err := backupDir()
 		if err != nil {
 			return err

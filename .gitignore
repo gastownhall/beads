@@ -128,8 +128,13 @@ bd_test
 
 # Orchestrator (added by gt)
 .logs/
-.beads/
+.beads/*
+!.beads/formulas/
+!.beads/formulas/**
 .opencode/
 
 # Beads / Dolt files (added by bd init)
 .beads-credential-key
+
+# Beads / Dolt files (added by bd init)
+.beads/proxieddb/

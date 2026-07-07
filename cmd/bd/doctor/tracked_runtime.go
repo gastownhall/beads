@@ -14,6 +14,9 @@ import (
 //
 // Each entry is matched against the relative path within .beads/ using
 // filepath.Match or prefix matching for directory patterns (trailing /).
+//
+// Note: interactions.jsonl is intentionally omitted — it may be versioned
+// per bd audit policy (see `bd audit` help text).
 var trackedRuntimePatterns = []string{
 	// Lock files
 	"*.lock",
@@ -34,11 +37,11 @@ var trackedRuntimePatterns = []string{
 	".exclusive-lock",
 
 	// Runtime state
-	"interactions.jsonl",
 	"push-state.json",
 	"export-state.json",
 	"sync-state.json",
 	"last-touched",
+	"last_pull", // bd-578h9.6: gitignored since 7ebf4df6a, but gitignore cannot untrack already-committed copies
 	".local_version",
 	"redirect",
 

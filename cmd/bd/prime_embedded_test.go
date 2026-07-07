@@ -18,11 +18,11 @@ func bdPrime(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd prime %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd prime %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 func TestEmbeddedPrime(t *testing.T) {
@@ -72,15 +72,32 @@ func TestEmbeddedPrime(t *testing.T) {
 		cmd := exec.Command(bd, "remember", "always use -race flag in tests", "--key", "prime-test-mem")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd remember failed: %v\n%s", err, out)
+			t.Fatalf("bd remember failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 
 		// Prime should include the memory
 		primeOut := bdPrime(t, bd, dir, "--full")
 		if !strings.Contains(primeOut, "race") {
 			t.Errorf("expected memory content in prime output: %s", primeOut[:min(500, len(primeOut))])
+		}
+		memoryIdx := strings.Index(primeOut, "prime-test-mem")
+		sessionIdx := strings.Index(primeOut, "SESSION CLOSE PROTOCOL")
+		if memoryIdx == -1 || sessionIdx == -1 || memoryIdx > sessionIdx {
+			t.Errorf("expected memories before session protocol in prime output")
+		}
+	})
+
+	// ===== Memories Only =====
+
+	t.Run("prime_memories_only", func(t *testing.T) {
+		out := bdPrime(t, bd, dir, "--memories-only")
+		if !strings.Contains(out, "prime-test-mem") {
+			t.Errorf("expected memory content in --memories-only output: %s", out)
+		}
+		if strings.Contains(out, "Essential Commands") {
+			t.Errorf("expected --memories-only to omit full command guide: %s", out)
 		}
 	})
 }

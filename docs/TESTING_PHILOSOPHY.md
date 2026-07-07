@@ -256,5 +256,4 @@ TestPriority(5)  // boundary - first invalid
 ## Related Docs
 
 - [TESTING.md](TESTING.md) - How to run tests
-- [README_TESTING.md](README_TESTING.md) - Fast vs integration test strategy
-- [dev-notes/TEST_SUITE_AUDIT.md](dev-notes/TEST_SUITE_AUDIT.md) - Test refactoring progress
+- [README_TESTING.md](README_TESTING.md) - Stable pointer to the active testing docs

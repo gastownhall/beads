@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -21,51 +22,51 @@ where the issue was modified.
 Examples:
   bd history bd-123           # Show all history for issue bd-123
   bd history bd-123 --limit 5 # Show last 5 changes`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("history")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 		issueID := args[0]
 
-		// Get issue history
 		history, err := store.History(ctx, issueID)
 		if err != nil {
-			FatalErrorRespectJSON("failed to get history: %v", err)
+			return HandleErrorRespectJSON("failed to get history: %v", err)
 		}
 
-		// Empty-history short-circuit handles both formats: --json gets []
-		// (so consumers piping to jq don't break), human format gets prose.
 		if len(history) == 0 {
 			if jsonOutput {
-				outputJSON(history)
-				return
+				return outputJSON(history)
 			}
 			fmt.Printf("No history found for issue %s\n", issueID)
-			return
+			return nil
 		}
 
-		// Apply limit only to non-empty history; slicing an empty slice is a no-op.
 		if historyLimit > 0 && historyLimit < len(history) {
 			history = history[:historyLimit]
 		}
 
 		if jsonOutput {
-			outputJSON(history)
-			return
+			return outputJSON(history)
 		}
 
-		// Display history in human-readable format
 		fmt.Printf("\n%s History for %s (%d entries)\n\n",
 			ui.RenderAccent("📜"), issueID, len(history))
 
 		for i, entry := range history {
-			// Commit info line
 			fmt.Printf("%s %s\n",
 				ui.RenderMuted(entry.CommitHash[:8]),
 				ui.RenderMuted(entry.CommitDate.Format("2006-01-02 15:04:05")))
 			fmt.Printf("  Author: %s\n", entry.Committer)
 
 			if entry.Issue != nil {
-				// Show issue state at this commit
 				statusIcon := ui.GetStatusIcon(string(entry.Issue.Status))
 				fmt.Printf("  %s %s: %s [P%d - %s]\n",
 					statusIcon,
@@ -75,12 +76,12 @@ Examples:
 					entry.Issue.Status)
 			}
 
-			// Separator between entries
 			if i < len(history)-1 {
 				fmt.Println()
 			}
 		}
 		fmt.Println()
+		return nil
 	},
 }
 

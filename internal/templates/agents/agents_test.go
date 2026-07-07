@@ -28,6 +28,37 @@ func TestEmbeddedDefault(t *testing.T) {
 	}
 }
 
+// TestEmbeddedDefaultArchitectureSummary guards GH#3683: agents reading the
+// generated AGENTS.md need an architecture statement at the top so they don't
+// build wrong mental models (treating JSONL as source of truth, manually
+// running bd import, etc.) and have to discover the four deeper architecture
+// docs the hard way. The summary must appear before the Quick Reference and
+// link to the canonical SYNC_CONCEPTS.md entry-point.
+func TestEmbeddedDefaultArchitectureSummary(t *testing.T) {
+	content := EmbeddedDefault()
+
+	required := []string{
+		"Architecture in one line",
+		"refs/dolt/data",
+		"passive export",
+		"SYNC_CONCEPTS.md",
+	}
+	for _, want := range required {
+		if !strings.Contains(content, want) {
+			t.Errorf("EmbeddedDefault() missing architecture-summary fragment %q", want)
+		}
+	}
+
+	archIdx := strings.Index(content, "Architecture in one line")
+	quickRefIdx := strings.Index(content, "## Quick Reference")
+	if archIdx == -1 || quickRefIdx == -1 {
+		t.Fatal("missing required anchors")
+	}
+	if archIdx > quickRefIdx {
+		t.Error("architecture summary should appear before Quick Reference (so agents see it first)")
+	}
+}
+
 func TestEmbeddedBeadsSection(t *testing.T) {
 	section := EmbeddedBeadsSection()
 
@@ -79,5 +110,32 @@ func TestDefaultContainsBothSections(t *testing.T) {
 	}
 	if beadsIdx > completionIdx {
 		t.Error("beads section should come before session completion section")
+	}
+}
+
+func TestEmbeddedDefaultManagedMarkerIsCurrent(t *testing.T) {
+	content := EmbeddedDefault()
+
+	idx := strings.Index(content, "<!-- BEGIN BEADS INTEGRATION")
+	if idx == -1 {
+		t.Fatal("missing managed section marker")
+	}
+	line := content[idx:]
+	if nl := strings.Index(line, "\n"); nl != -1 {
+		line = line[:nl]
+	}
+
+	meta := ParseMarker(line)
+	if meta == nil {
+		t.Fatalf("failed to parse managed marker %q", line)
+	}
+	if meta.Version != MarkerVersion {
+		t.Errorf("marker version = %d, want %d", meta.Version, MarkerVersion)
+	}
+	if meta.Profile != ProfileFull {
+		t.Errorf("marker profile = %q, want %q", meta.Profile, ProfileFull)
+	}
+	if meta.Hash != CurrentHash(ProfileFull) {
+		t.Errorf("marker hash = %q, want %q", meta.Hash, CurrentHash(ProfileFull))
 	}
 }

@@ -1098,9 +1098,6 @@ func TestFetchIssueByIdentifierSendsNumericFilter(t *testing.T) {
 }
 
 func TestLinearClientFetchIssues(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1136,6 +1133,13 @@ func TestLinearClientFetchIssues(t *testing.T) {
 								"nodes": [
 									{"id": "label-1", "name": "bug"}
 								]
+							},
+							"projectMilestone": {
+								"id": "milestone-1",
+								"name": "M7: Team-Ready",
+								"description": "Team-ready milestone",
+								"progress": 60.61,
+								"targetDate": "2026-05-12"
 							},
 							"createdAt": "2025-01-15T10:00:00Z",
 							"updatedAt": "2025-01-16T10:00:00Z"
@@ -1196,12 +1200,12 @@ func TestLinearClientFetchIssues(t *testing.T) {
 	if issue1.State.Type != "started" {
 		t.Errorf("expected state type 'started', got %s", issue1.State.Type)
 	}
+	if issue1.ProjectMilestone == nil || issue1.ProjectMilestone.ID != "milestone-1" {
+		t.Fatalf("expected projectMilestone milestone-1, got %#v", issue1.ProjectMilestone)
+	}
 }
 
 func TestLinearClientCreateIssue(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server for create mutation
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1252,9 +1256,6 @@ func TestLinearClientCreateIssue(t *testing.T) {
 }
 
 func TestLinearClientUpdateIssue(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server for update mutation
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1311,9 +1312,6 @@ func TestLinearClientUpdateIssue(t *testing.T) {
 }
 
 func TestLinearClientGetTeamStates(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server for team states query
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1368,9 +1366,6 @@ func TestLinearClientGetTeamStates(t *testing.T) {
 }
 
 func TestLinearClientRateLimitHandling(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock server that returns 429 then succeeds
 	attempts := 0
@@ -1427,9 +1422,6 @@ func TestLinearClientRateLimitHandling(t *testing.T) {
 }
 
 func TestLinearClientGraphQLError(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock server that returns a GraphQL error
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1626,9 +1618,6 @@ func TestBuildLinearToLocalUpdatesWithClosedAt(t *testing.T) {
 }
 
 func TestLinearClientFetchTeams(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server for teams query
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -87,7 +87,15 @@ bd linear sync --pull --relations
 bd linear sync --pull --state open    # Only open issues
 bd linear sync --pull --state closed  # Only closed issues
 bd linear sync --pull --state all     # All issues (default)
+
+# Reconstruct Linear project milestones as local epic parents
+bd linear sync --pull --milestones
 ```
+
+With `--milestones`, bd creates or reuses one local epic per Linear
+`projectMilestone`, then adds parent-child links from each pulled issue to its
+milestone epic. Milestone epics are marked as Linear milestone records and are
+skipped by later Linear pushes.
 
 ### Push Only (bd → Linear)
 

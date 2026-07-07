@@ -128,7 +128,7 @@ func maybeShowUpgradeNotification() {
 	// Display notification
 	fmt.Printf("🔄 bd upgraded from v%s to v%s since last use\n", previousVersion, Version)
 	fmt.Println("💡 Run 'bd upgrade review' to see what changed")
-	if !isEmbeddedMode() {
+	if usesSQLServer() {
 		fmt.Println("💊 Run 'bd doctor' to verify upgrade completed cleanly")
 	}
 
@@ -162,6 +162,11 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
+	}
+
+	if cfg.IsDoltProxiedServerMode() {
+		debug.Logf("auto-migrate: skipping embedded migration, proxied-server handled after UOW provider init")
+		return
 	}
 
 	// Check if database exists at the backend-appropriate path

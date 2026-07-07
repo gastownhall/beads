@@ -19,11 +19,11 @@ func bdStatus(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd status %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd status %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdStatusJSON runs "bd status --json" and parses the result.
@@ -33,11 +33,11 @@ func bdStatusJSON(t *testing.T, bd, dir string, args ...string) map[string]inter
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd status --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd status --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(stdout.String())
 	start := strings.Index(s, "{")
 	if start < 0 {
 		t.Fatalf("no JSON object in status output: %s", s)
@@ -129,12 +129,12 @@ func TestEmbeddedStatus(t *testing.T) {
 		cmd := exec.Command(bd, args...)
 		cmd.Dir = dir
 		cmd.Env = env
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd status --assigned --json failed: %v\n%s", err, out)
+			t.Fatalf("bd status --assigned --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(stdout.String())
 		start := strings.Index(s, "{")
 		if start < 0 {
 			t.Fatalf("no JSON: %s", s)
@@ -183,12 +183,12 @@ func TestEmbeddedStatus(t *testing.T) {
 		cmd := exec.Command(bd, "stats", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd stats alias failed: %v\n%s", err, out)
+			t.Fatalf("bd stats alias failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		if !strings.Contains(string(out), "summary") {
-			t.Errorf("expected 'summary' in stats alias output: %s", out)
+		if !strings.Contains(stdout.String(), "summary") {
+			t.Errorf("expected 'summary' in stats alias output: %s", stdout.String())
 		}
 	})
 
@@ -254,15 +254,15 @@ func TestEmbeddedStatusConcurrent(t *testing.T) {
 			cmd := exec.Command(bd, args...)
 			cmd.Dir = dir
 			cmd.Env = bdEnv(dir)
-			out, err := cmd.CombinedOutput()
+			stdout, stderr, err := runCommandBuffers(t, cmd)
 			if err != nil {
-				r.err = fmt.Errorf("worker %d status: %v\n%s", worker, err, out)
+				r.err = fmt.Errorf("worker %d status: %v\nstdout:\n%s\nstderr:\n%s", worker, err, stdout.String(), stderr.String())
 				results[worker] = r
 				return
 			}
 
 			// Verify JSON parses
-			s := strings.TrimSpace(string(out))
+			s := strings.TrimSpace(stdout.String())
 			start := strings.Index(s, "{")
 			if start < 0 {
 				r.err = fmt.Errorf("worker %d: no JSON: %s", worker, s)

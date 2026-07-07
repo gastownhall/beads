@@ -54,7 +54,7 @@ func CheckClaude(repoPath string) DoctorCheck {
 			Detail: "MCP-only mode: relies on tools for every query (~10.5k tokens)\n" +
 				"  bd prime hooks provide much better token efficiency",
 			Fix: "Add bd prime hooks for better token efficiency:\n" +
-				"  1. Run 'bd setup claude' to add SessionStart/PreCompact hooks\n" +
+				"  1. Run 'bd setup claude' to add SessionStart hooks\n" +
 				"\n" +
 				"Benefits:\n" +
 				"  • MCP mode: ~50 tokens vs ~10.5k for full tool scan (99% reduction)\n" +
@@ -85,7 +85,7 @@ func CheckClaude(repoPath string) DoctorCheck {
 				"    • See: https://github.com/steveyegge/beads/blob/main/docs/PLUGIN.md\n" +
 				"\n" +
 				"  Option 2: CLI-only mode\n" +
-				"    • Run 'bd setup claude' to add SessionStart/PreCompact hooks\n" +
+				"    • Run 'bd setup claude' to add SessionStart hooks\n" +
 				"    • No slash commands, but hooks provide workflow context\n" +
 				"\n" +
 				"Benefits:\n" +
@@ -270,7 +270,9 @@ func hasBeadsHooks(settingsPath string) bool {
 					continue
 				}
 				cmdStr, _ := cmdMap["command"].(string)
-				if cmdStr == "bd prime" || cmdStr == "bd prime --stealth" {
+				switch cmdStr {
+				case "bd prime", "bd prime --stealth",
+					"bd prime --hook-json", "bd prime --stealth --hook-json":
 					return true
 				}
 			}
@@ -698,9 +700,10 @@ func CheckClaudeSettingsHealth(repoPath string) DoctorCheck {
 	}
 }
 
-// CheckClaudeHookCompleteness verifies that when hooks are installed, both
-// SessionStart and PreCompact events are covered. Having only one means
-// context injection works on session start but not after compaction (or vice versa).
+// CheckClaudeHookCompleteness verifies that when hooks are installed,
+// SessionStart is covered. Claude Code fires SessionStart on startup, resume,
+// clear, and after compaction, so current bd prime context injection only needs
+// SessionStart.
 // repoPath is the project root directory.
 func CheckClaudeHookCompleteness(repoPath string) DoctorCheck {
 	home, err := os.UserHomeDir()
@@ -718,9 +721,8 @@ func CheckClaudeHookCompleteness(repoPath string) DoctorCheck {
 		filepath.Join(repoPath, ".claude", "settings.local.json"),
 	}
 
-	// Check if any settings file has hooks at all
 	var hasAnyHook bool
-	var hasSessionStart, hasPreCompact bool
+	var hasSessionStart bool
 
 	for _, sf := range settingsFiles {
 		ss, pc := checkHookEvents(sf)
@@ -729,9 +731,6 @@ func CheckClaudeHookCompleteness(repoPath string) DoctorCheck {
 		}
 		if ss {
 			hasSessionStart = true
-		}
-		if pc {
-			hasPreCompact = true
 		}
 	}
 
@@ -744,30 +743,20 @@ func CheckClaudeHookCompleteness(repoPath string) DoctorCheck {
 		}
 	}
 
-	if hasSessionStart && hasPreCompact {
+	if hasSessionStart {
 		return DoctorCheck{
 			Name:    "Claude Hook Completeness",
 			Status:  StatusOK,
-			Message: "Both SessionStart and PreCompact hooks present",
+			Message: "SessionStart hook present",
 		}
-	}
-
-	var missing []string
-	if !hasSessionStart {
-		missing = append(missing, "SessionStart")
-	}
-	if !hasPreCompact {
-		missing = append(missing, "PreCompact")
 	}
 
 	return DoctorCheck{
 		Name:    "Claude Hook Completeness",
 		Status:  StatusWarning,
-		Message: fmt.Sprintf("Missing hook event(s): %s", strings.Join(missing, ", ")),
-		Detail: "SessionStart injects context on new sessions.\n" +
-			"PreCompact preserves context before compaction.\n" +
-			"Both are needed for reliable workflow context.",
-		Fix: "Run 'bd setup claude' to install both hooks, or\n" +
+		Message: "Missing hook event(s): SessionStart",
+		Detail:  "SessionStart injects context on new sessions and after compaction.",
+		Fix: "Run 'bd setup claude' to install hooks, or\n" +
 			"install the beads plugin which includes hooks automatically.",
 	}
 }
@@ -809,7 +798,9 @@ func checkHookEvents(settingsPath string) (hasSessionStart, hasPreCompact bool) 
 					continue
 				}
 				cmdStr, _ := cmdMap["command"].(string)
-				if cmdStr == "bd prime" || cmdStr == "bd prime --stealth" {
+				switch cmdStr {
+				case "bd prime", "bd prime --stealth",
+					"bd prime --hook-json", "bd prime --stealth --hook-json":
 					return true
 				}
 			}

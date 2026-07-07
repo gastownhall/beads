@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -26,27 +27,43 @@ TODOs are regular task-type issues with convenient shortcuts:
 
 TODOs can be promoted to full issues by changing type or priority:
   bd update todo-123 --type bug --priority 0`,
-	Run: func(cmd *cobra.Command, args []string) {
-		// Default action: list todos
-		listTodosCmd.Run(cmd, args)
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("todo")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		// Delegate to the shared, non-emitting list core so a single `bd todo`
+		// records exactly one cli_command event ("todo"), not also "todo-list".
+		return runTodoListCore(cmd, args)
 	},
 }
 
 var addTodoCmd = &cobra.Command{
-	Use:   "add <title>",
-	Short: "Add a new TODO item",
-	Args:  cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "add <title>",
+	Short:         "Add a new TODO item",
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("todo add")
+
+		evt := metrics.NewCommandEvent("todo-add")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		title := strings.Join(args, " ")
 
-		// Get priority flag, default to 2
 		priority, _ := cmd.Flags().GetInt("priority")
-
-		// Get description flag
 		description, _ := cmd.Flags().GetString("description")
 
-		// Create the issue as a task type
 		ctx := rootCtx
 
 		issueType := types.TypeTask
@@ -61,9 +78,8 @@ var addTodoCmd = &cobra.Command{
 			CreatedBy:   getActorWithGit(),
 		}
 
-		// Generate ID
 		if err := getStore().CreateIssue(ctx, issue, getActorWithGit()); err != nil {
-			FatalError("failed to create TODO: %v", err)
+			return HandleError("failed to create TODO: %v", err)
 		}
 
 		commandDidWrite.Store(true)
@@ -71,76 +87,100 @@ var addTodoCmd = &cobra.Command{
 		if jsonOutput {
 			data, err := json.MarshalIndent(issue, "", "  ")
 			if err != nil {
-				FatalError("failed to marshal JSON: %v", err)
+				return HandleError("failed to marshal JSON: %v", err)
 			}
 			fmt.Println(string(data))
-		} else {
-			fmt.Printf("Created %s: %s\n", ui.RenderID(issue.ID), issue.Title)
+			return nil
 		}
+		fmt.Printf("Created %s: %s\n", ui.RenderID(issue.ID), issue.Title)
+		return nil
 	},
 }
 
 var listTodosCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List TODO items",
-	Run: func(cmd *cobra.Command, args []string) {
-		// Get show-all flag
-		showAll, _ := cmd.Flags().GetBool("all")
-
-		ctx := rootCtx
-
-		// Build filter for task-type issues
-		taskType := types.TypeTask
-		filter := types.IssueFilter{
-			IssueType: &taskType,
-		}
-		if !showAll {
-			openStatus := types.StatusOpen
-			filter.Status = &openStatus
-		}
-
-		issues, err := getStore().SearchIssues(ctx, "", filter)
-		if err != nil {
-			FatalError("failed to list TODOs: %v", err)
-		}
-
-		if jsonOutput {
-			data, err := json.MarshalIndent(issues, "", "  ")
-			if err != nil {
-				FatalError("failed to marshal JSON: %v", err)
+	Use:           "list",
+	Short:         "List TODO items",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("todo-list")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
 			}
-			fmt.Println(string(data))
-		} else {
-			if len(issues) == 0 {
-				fmt.Println("No TODOs found")
-				return
-			}
+		}()
 
-			// Sort by priority then ID
-			todoSortIssues(issues)
-
-			// Pretty print
-			for _, issue := range issues {
-				statusIcon := ui.RenderStatusIcon(string(issue.Status))
-				priority := ui.RenderPriority(issue.Priority)
-				fmt.Printf("  %s %s  %-40s  %s  %s\n",
-					statusIcon,
-					ui.RenderID(issue.ID),
-					todoTruncate(issue.Title, 40),
-					priority,
-					issue.Status)
-			}
-			fmt.Printf("\nTotal: %d TODOs\n", len(issues))
-		}
+		return runTodoListCore(cmd, args)
 	},
 }
 
+// runTodoListCore lists TODO (task) issues. It deliberately emits no metrics
+// event so callers own event emission: `bd todo list` emits "todo-list" and the
+// bare `bd todo` alias emits "todo", each exactly once.
+func runTodoListCore(cmd *cobra.Command, _ []string) error {
+	showAll, _ := cmd.Flags().GetBool("all")
+
+	ctx := rootCtx
+
+	taskType := types.TypeTask
+	filter := types.IssueFilter{
+		IssueType: &taskType,
+	}
+	if !showAll {
+		openStatus := types.StatusOpen
+		filter.Status = &openStatus
+	}
+
+	issues, err := getStore().SearchIssues(ctx, "", filter)
+	if err != nil {
+		return HandleError("failed to list TODOs: %v", err)
+	}
+
+	if jsonOutput {
+		data, err := json.MarshalIndent(issues, "", "  ")
+		if err != nil {
+			return HandleError("failed to marshal JSON: %v", err)
+		}
+		fmt.Println(string(data))
+		return nil
+	}
+	if len(issues) == 0 {
+		fmt.Println("No TODOs found")
+		return nil
+	}
+
+	todoSortIssues(issues)
+
+	for _, issue := range issues {
+		statusIcon := ui.RenderStatusIcon(string(issue.Status))
+		priority := ui.RenderPriority(issue.Priority)
+		fmt.Printf("  %s %s  %-40s  %s  %s\n",
+			statusIcon,
+			ui.RenderID(issue.ID),
+			todoTruncate(issue.Title, 40),
+			priority,
+			issue.Status)
+	}
+	fmt.Printf("\nTotal: %d TODOs\n", len(issues))
+	return nil
+}
+
 var doneTodoCmd = &cobra.Command{
-	Use:   "done <id> [<id>...]",
-	Short: "Mark TODO(s) as done",
-	Args:  cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "done <id> [<id>...]",
+	Short:         "Mark TODO(s) as done",
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("todo done")
+
+		evt := metrics.NewCommandEvent("todo-done")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 
 		reason, _ := cmd.Flags().GetString("reason")
@@ -150,7 +190,6 @@ var doneTodoCmd = &cobra.Command{
 
 		var closedIDs []string
 		for _, issueID := range args {
-			// Verify it exists
 			issue, err := getStore().GetIssue(ctx, issueID)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to get issue %s: %v\n", issueID, err)
@@ -161,7 +200,6 @@ var doneTodoCmd = &cobra.Command{
 				continue
 			}
 
-			// Close the issue (session is empty string for CLI operations)
 			if err := getStore().CloseIssue(ctx, issueID, reason, getActorWithGit(), ""); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: failed to close %s: %v\n", issueID, err)
 				continue
@@ -179,14 +217,15 @@ var doneTodoCmd = &cobra.Command{
 				"reason": reason,
 			}, "", "  ")
 			if err != nil {
-				FatalError("failed to marshal JSON: %v", err)
+				return HandleError("failed to marshal JSON: %v", err)
 			}
 			fmt.Println(string(data))
-		} else {
-			for _, id := range closedIDs {
-				fmt.Printf("Closed %s\n", ui.RenderID(id))
-			}
+			return nil
 		}
+		for _, id := range closedIDs {
+			fmt.Printf("Closed %s\n", ui.RenderID(id))
+		}
+		return nil
 	},
 }
 

@@ -85,5 +85,7 @@ See [CONTRIBUTING.md](https://github.com/gastownhall/beads/blob/main/CONTRIBUTIN
 
 1. **Initialize a project**: `cd your-project && bd init`
 2. **Learn the basics**: [Quick Start](/getting-started/quickstart)
-3. **Configure your editor**: [IDE Setup](/getting-started/ide-setup)
+3. **Configure your agent**: `bd init` creates or updates `AGENTS.md` by default; run `bd setup --list` for integrations like `bd setup codex`, `bd setup factory`, `bd setup claude`, and `bd setup mux`
 4. **Upgrading later**: [Upgrading](/getting-started/upgrading)
+
+Use `bd onboard` only as the manual snippet fallback for unsupported agents, custom instruction files, or existing projects where you cannot rerun `bd init`/`bd setup`.

@@ -92,7 +92,7 @@ const config: Config = {
           editUrl: `https://github.com/${orgName}/${projectName}/tree/main/website/`,
           showLastUpdateTime: true,
           // Default site view is the latest released snapshot, not unreleased "Next"
-          lastVersion: '1.0.0',
+          lastVersion: '1.1.0',
           versions: {
             current: {
               label: 'Next',
@@ -167,18 +167,74 @@ const config: Config = {
           title: 'Integrations',
           items: [
             {
+              label: 'Overview',
+              to: '/integrations',
+            },
+            {
+              label: 'Aider',
+              to: '/integrations/aider',
+            },
+            {
               label: 'Claude Code',
               to: '/integrations/claude-code',
             },
             {
+              label: 'Codex',
+              to: '/integrations/codex',
+            },
+            {
+              label: 'Cody',
+              to: '/integrations/cody',
+            },
+            {
+              label: 'Cursor',
+              to: '/integrations/cursor',
+            },
+            {
+              label: 'Factory.ai Droid',
+              to: '/integrations/factory',
+            },
+            {
+              label: 'Gemini CLI',
+              to: '/integrations/gemini',
+            },
+            {
+              label: 'Junie',
+              to: '/integrations/junie',
+            },
+            {
+              label: 'Kilo Code',
+              to: '/integrations/kilocode',
+            },
+            {
+              label: 'Mux',
+              to: '/integrations/mux',
+            },
+            {
+              label: 'OpenCode',
+              to: '/integrations/opencode',
+            },
+            {
+              label: 'Windsurf',
+              to: '/integrations/windsurf',
+            },
+            {
               label: 'MCP Server',
               to: '/integrations/mcp-server',
+            },
+            {
+              label: 'GitHub Copilot',
+              to: '/integrations/github-copilot',
             },
           ],
         },
         {
           title: 'Resources',
           items: [
+            {
+              label: 'Community Tools',
+              to: '/community-tools',
+            },
             {
               label: 'GitHub',
               href: `https://github.com/${orgName}/${projectName}`,

@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -400,18 +399,6 @@ func TestDetectBootstrapAction_InitWhenOriginHasNoDoltRef(t *testing.T) {
 
 	if plan.Action != "init" {
 		t.Errorf("action = %q, want %q (no dolt ref on origin)", plan.Action, "init")
-	}
-}
-
-func runGitForBootstrapTest(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v failed: %v\n%s", args, err, string(output))
 	}
 }
 
@@ -1226,6 +1213,17 @@ func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
 	}
 	if !strings.Contains(yaml, syncRemote) {
 		t.Errorf("config.yaml does not contain sync remote URL %q:\n%s", syncRemote, yaml)
+	}
+
+	gitignoreBytes, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore"))
+	if err != nil {
+		t.Fatalf(".beads/.gitignore missing after finalize: %v", err)
+	}
+	gitignore := string(gitignoreBytes)
+	for _, pattern := range []string{".local_version", "backup/", "export-state.json", "last-touched"} {
+		if !strings.Contains(gitignore, pattern) {
+			t.Errorf(".beads/.gitignore missing runtime pattern %q:\n%s", pattern, gitignore)
+		}
 	}
 }
 

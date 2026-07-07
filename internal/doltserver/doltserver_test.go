@@ -1113,6 +1113,94 @@ func TestEnsureDoltInit_SeedsMarker(t *testing.T) {
 	}
 }
 
+func TestMarkDoltDirCompatible(t *testing.T) {
+	t.Run("empty path errors", func(t *testing.T) {
+		if err := MarkDoltDirCompatible(""); err == nil {
+			t.Fatal("expected empty path to error")
+		}
+	})
+
+	t.Run("missing dot-dolt is noop", func(t *testing.T) {
+		doltDir := t.TempDir()
+		if err := MarkDoltDirCompatible(doltDir); err != nil {
+			t.Fatalf("MarkDoltDirCompatible: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(doltDir, bdDoltMarker)); !os.IsNotExist(err) {
+			t.Fatalf("marker should not be created without .dolt/, stat err=%v", err)
+		}
+	})
+
+	t.Run("dot-dolt file errors", func(t *testing.T) {
+		doltDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(doltDir, ".dolt"), []byte("not a dir"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkDoltDirCompatible(doltDir); err == nil {
+			t.Fatal("expected .dolt file to error")
+		}
+	})
+
+	t.Run("writes missing marker", func(t *testing.T) {
+		doltDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(doltDir, ".dolt"), 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkDoltDirCompatible(doltDir); err != nil {
+			t.Fatalf("MarkDoltDirCompatible: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(doltDir, bdDoltMarker))
+		if err != nil {
+			t.Fatalf("reading marker: %v", err)
+		}
+		if string(got) != "ok\n" {
+			t.Fatalf("marker content = %q, want %q", string(got), "ok\n")
+		}
+		if IsPreV56DoltDir(doltDir) {
+			t.Fatal("marked dolt dir should not report as pre-v56")
+		}
+	})
+
+	t.Run("existing marker is preserved", func(t *testing.T) {
+		doltDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(doltDir, ".dolt"), 0750); err != nil {
+			t.Fatal(err)
+		}
+		markerPath := filepath.Join(doltDir, bdDoltMarker)
+		if err := os.WriteFile(markerPath, []byte("custom\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkDoltDirCompatible(doltDir); err != nil {
+			t.Fatalf("MarkDoltDirCompatible: %v", err)
+		}
+		got, err := os.ReadFile(markerPath)
+		if err != nil {
+			t.Fatalf("reading marker: %v", err)
+		}
+		if string(got) != "custom\n" {
+			t.Fatalf("existing marker content = %q, want %q", string(got), "custom\n")
+		}
+	})
+
+	t.Run("marker directory is preserved", func(t *testing.T) {
+		doltDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(doltDir, ".dolt"), 0750); err != nil {
+			t.Fatal(err)
+		}
+		markerPath := filepath.Join(doltDir, bdDoltMarker)
+		if err := os.MkdirAll(markerPath, 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkDoltDirCompatible(doltDir); err != nil {
+			t.Fatalf("MarkDoltDirCompatible: %v", err)
+		}
+		if info, err := os.Stat(markerPath); err != nil {
+			t.Fatalf("stat marker path: %v", err)
+		} else if !info.IsDir() {
+			t.Fatal("existing marker path should be preserved as-is")
+		}
+	})
+}
+
 func TestRecoverPreV56DoltDir(t *testing.T) {
 	doltDir := t.TempDir()
 	dotDolt := filepath.Join(doltDir, ".dolt", "noms")
@@ -1618,7 +1706,7 @@ func TestBuildDoltServerArgs(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			args := buildDoltServerArgs(tc.host, tc.port)
+			args := buildDoltServerArgs(tc.host, tc.port, false, "")
 
 			if len(args) == 0 || args[0] != "sql-server" {
 				t.Fatalf("args[0] = %q, want %q; full args: %v",
@@ -1667,6 +1755,76 @@ func TestBuildDoltServerArgs(t *testing.T) {
 					logLevel)
 			}
 		})
+	}
+}
+
+// TestBuildDoltServerArgs_DebugMode verifies argv shape when debug mode
+// is enabled. The top-level dolt flags (--prof, --prof-path) MUST come
+// before the sql-server subcommand — dolt's argv scanner terminates on
+// the first unknown token (see ~/cursor_src/dolt/go/cmd/dolt/dolt.go
+// runMain). Placing --prof after sql-server silently drops profiling.
+func TestBuildDoltServerArgs_DebugMode(t *testing.T) {
+	const profDir = "/tmp/test-pprof"
+	args := buildDoltServerArgs("127.0.0.1", 3308, true, profDir)
+
+	// --prof and --prof-path must precede sql-server.
+	subIdx := indexOf(args, "sql-server")
+	if subIdx < 0 {
+		t.Fatalf("missing sql-server in args: %v", args)
+	}
+
+	profIdx := indexOf(args, "--prof")
+	if profIdx < 0 {
+		t.Fatalf("missing --prof in debug args: %v", args)
+	}
+	if profIdx >= subIdx {
+		t.Errorf("--prof at idx %d must precede sql-server at idx %d (dolt argv scanner stops at unknown tokens); got: %v",
+			profIdx, subIdx, args)
+	}
+	if got := args[profIdx+1]; got != "cpu" {
+		t.Errorf("--prof value = %q, want %q", got, "cpu")
+	}
+
+	pathIdx := indexOf(args, "--prof-path")
+	if pathIdx < 0 {
+		t.Fatalf("missing --prof-path in debug args: %v", args)
+	}
+	if pathIdx >= subIdx {
+		t.Errorf("--prof-path at idx %d must precede sql-server at idx %d; got: %v",
+			pathIdx, subIdx, args)
+	}
+	if got := args[pathIdx+1]; got != profDir {
+		t.Errorf("--prof-path value = %q, want %q", got, profDir)
+	}
+
+	// Debug forces --loglevel=debug, overriding the normal warning floor.
+	logLevel, ok := findLogLevel(args)
+	if !ok {
+		t.Fatalf("missing --loglevel in debug args: %v", args)
+	}
+	if logLevel != "debug" {
+		t.Errorf("debug mode --loglevel = %q, want %q", logLevel, "debug")
+	}
+}
+
+// TestBuildDoltServerArgs_NoDebugFlagsWhenDisabled guards against a
+// regression where debug-only argv leaks into a non-debug invocation.
+// The warning loglevel floor is also reasserted here so a future
+// refactor can't silently degrade only the non-debug path.
+func TestBuildDoltServerArgs_NoDebugFlagsWhenDisabled(t *testing.T) {
+	args := buildDoltServerArgs("127.0.0.1", 3308, false, "")
+	if indexOf(args, "--prof") >= 0 {
+		t.Errorf("non-debug args should not contain --prof: %v", args)
+	}
+	if indexOf(args, "--prof-path") >= 0 {
+		t.Errorf("non-debug args should not contain --prof-path: %v", args)
+	}
+	logLevel, ok := findLogLevel(args)
+	if !ok {
+		t.Fatalf("missing --loglevel in non-debug args: %v", args)
+	}
+	if logLevel == "debug" {
+		t.Errorf("non-debug mode must not use --loglevel=debug; got: %v", args)
 	}
 }
 

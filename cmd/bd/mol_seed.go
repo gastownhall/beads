@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 var molSeedCmd = &cobra.Command{
@@ -18,43 +20,51 @@ attempting to spawn work from a formula.
 
 Formula search paths (checked in order):
   1. <resolved-beads-dir>/formulas/ (active project)
-  2. ~/.beads/formulas/ (user level)
-  3. $GT_ROOT/.beads/formulas/ (orchestrator level, if GT_ROOT set)
+  2. <checkout-root>/.beads/formulas/ (repo-local formulas)
+  3. ~/.beads/formulas/ (user level)
+  4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
 
 Examples:
   bd mol seed mol-feature                 # Verify specific formula
   bd mol seed mol-review --var name=test  # Verify with variable substitution`,
-	Args: cobra.ExactArgs(1),
-	Run:  runMolSeed,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runMolSeed,
 }
 
-func runMolSeed(cmd *cobra.Command, args []string) {
+func runMolSeed(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("mol-seed")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	varFlags, _ := cmd.Flags().GetStringArray("var")
 
-	// Parse variables (for formula condition filtering if needed)
 	vars := make(map[string]string)
 	for _, v := range varFlags {
 		parts := strings.SplitN(v, "=", 2)
 		if len(parts) != 2 {
-			FatalError("invalid variable format '%s', expected 'key=value'", v)
+			return HandleErrorRespectJSON("invalid variable format '%s', expected 'key=value'", v)
 		}
 		vars[parts[0]] = parts[1]
 	}
 
-	// Verify single formula
 	formulaName := args[0]
 	if err := verifyFormula(formulaName, vars); err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
-	if !jsonOutput {
-		fmt.Printf("✓ Formula %q accessible\n", formulaName)
-	} else {
-		outputJSON(map[string]interface{}{
+	if jsonOutput {
+		return outputJSON(map[string]interface{}{
 			"status":  "ok",
 			"formula": formulaName,
 		})
 	}
+	fmt.Printf("✓ Formula %q accessible\n", formulaName)
+	return nil
 }
 
 // verifyFormula checks if a formula can be loaded and cooked

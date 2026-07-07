@@ -83,6 +83,13 @@ const issuesQuery = `
 					id
 					identifier
 				}
+				projectMilestone {
+					id
+					name
+					description
+					progress
+					targetDate
+				}
 				relations {
 					nodes {
 						id
@@ -895,7 +902,7 @@ func (c *Client) BatchCreateIssues(ctx context.Context, inputs []IssueCreateInpu
 	}
 
 	query := `
-		mutation BatchCreateIssues($input: [IssueCreateInput!]!) {
+		mutation BatchCreateIssues($input: IssueBatchCreateInput!) {
 			issueBatchCreate(input: $input) {
 				success
 				issues {
@@ -927,7 +934,9 @@ func (c *Client) BatchCreateIssues(ctx context.Context, inputs []IssueCreateInpu
 		req := &GraphQLRequest{
 			Query: query,
 			Variables: map[string]interface{}{
-				"input": chunk,
+				"input": map[string]interface{}{
+					"issues": chunk,
+				},
 			},
 		}
 
@@ -1112,6 +1121,17 @@ func (c *Client) FetchIssueByIdentifier(ctx context.Context, identifier string) 
 							id
 							name
 						}
+					}
+					parent {
+						id
+						identifier
+					}
+					projectMilestone {
+						id
+						name
+						description
+						progress
+						targetDate
 					}
 					createdAt
 					updatedAt
