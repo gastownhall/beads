@@ -197,16 +197,10 @@ func copyReleaseScriptFixture(t *testing.T) string {
 
 func releaseTestTempDir(t *testing.T) string {
 	t.Helper()
-	root := filepath.Join(sourceRepoRoot(t), ".tmp-release-tests")
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	dir, err := os.MkdirTemp(root, "case-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
+	// Keep fixtures out of the source tree (t.TempDir handles cleanup and
+	// works from read-only checkouts); shellPath converts the resulting
+	// host path for Bash separately at the call sites that need it.
+	return t.TempDir()
 }
 
 func sourceRepoRoot(t *testing.T) string {
@@ -226,7 +220,10 @@ func runReleaseDryRun(t *testing.T, repo, bin string) (string, error) {
 func runReleaseDryRunWithEnv(t *testing.T, repo, bin string, extraEnv ...string) (string, error) {
 	t.Helper()
 	assignments := []string{
-		"PATH=" + shSingleQuote(shellPath(t, bin)+":/usr/bin:/bin"),
+		// Fake bin first, then the caller's PATH (Nix/Guix coreutils), then a
+		// /usr/bin:/bin baseline: on Windows git-bash the coreutils release.sh
+		// needs live there but are absent from the Go process's PATH.
+		"PATH=" + shSingleQuote(shellPath(t, bin)+":"+bashPathList(t, os.Getenv("PATH"))+":/usr/bin:/bin"),
 		"BD_FAKE_FORMULA_SOURCE=" + shSingleQuote(shellPath(t, filepath.Join(repo, ".beads", "formulas", "beads-release.formula.toml"))),
 	}
 	for _, env := range extraEnv {
@@ -284,6 +281,24 @@ func shellPath(t *testing.T, path string) string {
 		}
 	}
 	return msysPath(path)
+}
+
+// bashPathList converts a host-style PATH value (entries separated by
+// os.PathListSeparator) into a Bash-visible, colon-separated PATH so the
+// caller's PATH is preserved (not just /usr/bin:/bin) when it is prepended
+// with the fake bd directory. This matters on systems such as Nix/Guix
+// where bash and core utilities live outside /usr/bin and /bin.
+func bashPathList(t *testing.T, hostPath string) string {
+	t.Helper()
+	entries := filepath.SplitList(hostPath)
+	converted := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry == "" {
+			continue
+		}
+		converted = append(converted, shellPath(t, entry))
+	}
+	return strings.Join(converted, ":")
 }
 
 func shSingleQuote(s string) string {
