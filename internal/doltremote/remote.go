@@ -67,6 +67,17 @@ func FromGitURL(url string) string {
 // (host:path). The user-less form is only recognized when the pre-colon
 // token looks like a hostname (contains a ".") so that dotless tokens such
 // as a Windows drive letter ("C:foo") are not mistaken for a host.
+//
+// Known limitation: git itself also accepts dotless SSH config aliases in
+// this position (e.g. "github:org/repo.git", "localhost:repo.git"), which
+// the "." check above rejects. Those origins pass through unconverted and
+// won't canonically match an equivalent git+ssh://alias/... or
+// user@alias:path Dolt remote. This is a deliberate trade-off to keep
+// isWindowsDrivePath's single-letter-drive check from being the only guard
+// against misreading "C:foo" as a host; widening the rule (e.g. following
+// git's own convention of treating anything host:path as SCP-style unless
+// the pre-colon token is a single-letter drive) is tracked as a follow-up
+// rather than fixed here.
 func isSCPStyleGitURL(url string) bool {
 	idx := strings.Index(url, ":")
 	if idx <= 0 || strings.Contains(url[:idx], "/") {
@@ -99,10 +110,20 @@ func CanonicalForComparison(url string) string {
 	return url
 }
 
-// stripCredentialsAndFoldHostCase removes any embedded user[:pass]@ from the
+// stripCredentialsAndFoldHostCase removes embedded userinfo from the
 // authority of a scheme://authority/path URL and lowercases the host. The
 // scheme and path are left untouched. URLs without "://" (e.g. an unknown
 // scheme passthrough) are returned unchanged rather than risking corruption.
+//
+// For HTTP(S) authorities, user[:pass]@ is transport credentials, not an
+// account selector, and is stripped unconditionally. For SSH authorities
+// (ssh://, git+ssh://) the userinfo selects the remote account or home
+// directory - alice@host and bob@host on the same host are different
+// endpoints - so it is preserved, except the conventional "git@" user, which
+// git hosting services treat as the default account and which
+// FromGitURL/isSCPStyleGitURL already fold bare host:path forms to (see
+// CanonicalForComparison's github.com:org/repo.git ≡ git@github.com:org/repo.git
+// example).
 //
 // Case is folded for the authority of every scheme://... form. This is correct
 // for DNS hosts (git+https/git+ssh/http/https). For native non-DNS schemes
@@ -116,6 +137,7 @@ func stripCredentialsAndFoldHostCase(url string) string {
 	if schemeEnd < 0 {
 		return url
 	}
+	scheme := url[:schemeEnd]
 	authorityStart := schemeEnd + len("://")
 	rest := url[authorityStart:]
 
@@ -127,11 +149,20 @@ func stripCredentialsAndFoldHostCase(url string) string {
 	}
 
 	if atIdx := strings.LastIndex(authority, "@"); atIdx >= 0 {
-		authority = authority[atIdx+1:]
+		if !isSSHScheme(scheme) || authority[:atIdx] == "git" {
+			authority = authority[atIdx+1:]
+		}
 	}
 	authority = strings.ToLower(authority)
 
 	return url[:authorityStart] + authority + tail
+}
+
+// isSSHScheme reports whether scheme (the part of a URL before "://")
+// identifies an SSH transport, where userinfo selects the remote account
+// rather than carrying transport credentials.
+func isSSHScheme(scheme string) bool {
+	return scheme == "ssh" || scheme == "git+ssh"
 }
 
 func isWindowsDrivePath(path string) bool {
