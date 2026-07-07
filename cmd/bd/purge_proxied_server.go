@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"regexp"
-	"sort"
 	"strings"
 	"time"
 
@@ -147,17 +145,15 @@ func runPurgeOrPruneProxied(cmd *cobra.Command, scope purgeScope) error {
 
 // buildReferencedSetProxied mirrors buildReferencedSet using the domain use
 // cases behind a UnitOfWork. It scans every non-done bead's description,
-// notes, and comments for literal occurrences of any candidate ID.
+// notes, and comments for literal occurrences of any candidate ID, using the
+// same linear candidateIDMatcher as the embedded path (the regexp-alternation
+// scan it replaces was the ~15s-on-10K-beads profile behind the
+// TestPruneLargeFixture CI failures).
 func buildReferencedSetProxied(ctx context.Context, uw uow.UnitOfWork, candidateIDs map[string]bool) (map[string]bool, error) {
 	if len(candidateIDs) == 0 {
 		return nil, nil
 	}
-	ids := make([]string, 0, len(candidateIDs))
-	for id := range candidateIDs {
-		ids = append(ids, regexp.QuoteMeta(id))
-	}
-	sort.Strings(ids)
-	pat := regexp.MustCompile(`\b(` + strings.Join(ids, "|") + `)\b`)
+	matcher := newCandidateIDMatcher(candidateIDs)
 
 	notClosedStatuses := []types.Status{
 		types.StatusOpen,
@@ -194,9 +190,7 @@ func buildReferencedSetProxied(ctx context.Context, uw uow.UnitOfWork, candidate
 
 	refSet := make(map[string]bool)
 	scanText := func(text string) {
-		for _, m := range pat.FindAllString(text, -1) {
-			refSet[m] = true
-		}
+		matcher.findAll(text, refSet)
 	}
 
 	for _, iss := range openBeads {
