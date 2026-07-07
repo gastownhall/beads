@@ -224,6 +224,49 @@ func TestShouldRunAutoImportJSONL_RespectsImportAutoFalse(t *testing.T) {
 	}
 }
 
+// TestIsDisablingImportAutoViaConfigCommand is the regression test for the
+// P2 finding on gastownhall/beads#4595 (Codex cross-vendor review,
+// 2026-07-07): shouldRunAutoImportJSONL runs in PersistentPreRun before
+// "bd config set import.auto false" writes the new value, so the command
+// meant to disable auto-import triggered it on its own invocation whenever a
+// stale .beads/issues.jsonl sat next to an empty database (GH#4304). This
+// exemption must fire for "config set import.auto false"/"0" and for
+// "config set-many ... import.auto=false", but not for unrelated config
+// keys, truthy values, or commands outside the config subtree.
+func TestIsDisablingImportAutoViaConfigCommand(t *testing.T) {
+	configCmd := &cobra.Command{Use: "config"}
+	setCmd := &cobra.Command{Use: "set"}
+	setManyCmd := &cobra.Command{Use: "set-many"}
+	configCmd.AddCommand(setCmd, setManyCmd)
+	writeCmd := &cobra.Command{Use: "update"}
+
+	tests := []struct {
+		name string
+		cmd  *cobra.Command
+		args []string
+		want bool
+	}{
+		{name: "config set import.auto false", cmd: setCmd, args: []string{"import.auto", "false"}, want: true},
+		{name: "config set import.auto 0", cmd: setCmd, args: []string{"import.auto", "0"}, want: true},
+		{name: "config set import.auto true", cmd: setCmd, args: []string{"import.auto", "true"}, want: false},
+		{name: "config set other key", cmd: setCmd, args: []string{"export.auto", "false"}, want: false},
+		{name: "config set-many import.auto=false", cmd: setManyCmd, args: []string{"jira.url=x", "import.auto=false"}, want: true},
+		{name: "config set-many import.auto=true", cmd: setManyCmd, args: []string{"import.auto=true"}, want: false},
+		{name: "unrelated command", cmd: writeCmd, args: []string{"import.auto", "false"}, want: false},
+		{name: "set without config parent", cmd: &cobra.Command{Use: "set"}, args: []string{"import.auto", "false"}, want: false},
+		{name: "nil command", cmd: nil, args: []string{"import.auto", "false"}, want: false},
+		{name: "too few args", cmd: setCmd, args: []string{"import.auto"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isDisablingImportAutoViaConfigCommand(tt.cmd, tt.args); got != tt.want {
+				t.Fatalf("isDisablingImportAutoViaConfigCommand(%v, %v) = %v, want %v", tt.cmd, tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestMaybeAutoImportJSONL_FallbackImporter_SkipsWhenStatisticsNil covers
 // the defensive nil-statistics guard: if the store reports no error but also
 // no counts, auto-import should skip rather than panic or assume emptiness.

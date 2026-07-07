@@ -11,6 +11,7 @@ import (
 	"runtime/pprof"
 	"runtime/trace"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1181,7 +1182,8 @@ var rootCmd = &cobra.Command{
 		// Skip auto-import when the user is explicitly running "bd import" —
 		// the import command handles JSONL files itself and auto-importing
 		// first would interfere (double-import / upsert confusion).
-		if shouldRunAutoImportJSONL(cmd, store, useReadOnly, globalFlag, doltCfg.ServerMode) {
+		if shouldRunAutoImportJSONL(cmd, store, useReadOnly, globalFlag, doltCfg.ServerMode) &&
+			!isDisablingImportAutoViaConfigCommand(cmd, args) {
 			maybeAutoImportJSONL(rootCtx, store, beadsDir)
 		}
 
@@ -1351,6 +1353,38 @@ func shouldRunAutoImportJSONL(cmd *cobra.Command, s storage.DoltStorage, useRead
 		return false
 	}
 	return cmd.Name() != "import"
+}
+
+// isDisablingImportAutoViaConfigCommand reports whether the command about to
+// run is "bd config set import.auto false" (or an equivalent
+// "bd config set-many ... import.auto=false" pair). shouldRunAutoImportJSONL
+// runs in PersistentPreRun before configSetCmd/configSetManyCmd write the new
+// value to config.yaml, so without this exemption the master switch would
+// trigger the very auto-import it is meant to disable on its own invocation
+// when a stale .beads/issues.jsonl sits next to an empty database (GH#4304).
+func isDisablingImportAutoViaConfigCommand(cmd *cobra.Command, args []string) bool {
+	if cmd == nil || cmd.Parent() == nil || cmd.Parent().Name() != "config" {
+		return false
+	}
+	switch cmd.Name() {
+	case "set":
+		return len(args) >= 2 && args[0] == "import.auto" && isFalsyConfigValue(args[1])
+	case "set-many":
+		for _, arg := range args {
+			key, value, ok := strings.Cut(arg, "=")
+			if ok && key == "import.auto" && isFalsyConfigValue(value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isFalsyConfigValue reports whether a config value string parses as a
+// boolean false (e.g. "false", "0", "f").
+func isFalsyConfigValue(value string) bool {
+	parsed, err := strconv.ParseBool(value)
+	return err == nil && !parsed
 }
 
 func commandAllowsEmptyAutoExport(cmd *cobra.Command) bool {
