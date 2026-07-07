@@ -856,7 +856,41 @@ jobs:
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
           BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
-        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=20m
+        # Conformance runs in the dedicated test-embedded-conformance job
+        # below (mirrors pr-risk.yml); skip it here so this job stays inside
+        # its 20m envelope as the base embedded suite grows.
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=20m -test.skip '^TestConformance$'
+
+  test-embedded-conformance:
+    name: Test (Embedded Dolt Conformance)
+    needs: [detect-ci-tier, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: embedded-test-binaries
+          path: /tmp/
+
+      - name: Fix permissions
+        run: chmod +x /tmp/embeddeddolt-test
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Test
+        env:
+          BEADS_TEST_EMBEDDED_DOLT: "1"
+          BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
+        # Conformance suite (conformance.RunAll via TestConformance) against
+        # the embedded Dolt backend, split from test-embedded-storage so each
+        # job stays well under its timeout - same structure as pr-risk.yml.
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=15m -test.run '^TestConformance$'
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
