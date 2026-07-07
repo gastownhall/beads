@@ -61,7 +61,7 @@ bd dolt [flags]
 Identify and drop leftover test and agent databases that accumulate
 on the shared Dolt server from interrupted test runs and terminated agents.
 
-Stale database prefixes: testdb_*, doctest_*, doctortest_*, beads_pt*, beads_vr*, beads_t*
+Stale database prefixes: testdb_*, beads_test*, beads_pt*, beads_vr*, doctest_*, doctortest_*, benchdb_*
 
 These waste server memory and can degrade performance under concurrent load.
 Use --dry-run to see what would be dropped without actually dropping.
