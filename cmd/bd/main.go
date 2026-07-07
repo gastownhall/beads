@@ -166,6 +166,20 @@ func isWorkingSetReconcileCommand(cmd *cobra.Command) bool {
 	return parent.Name() == "dolt" || parent.Name() == "vc"
 }
 
+// isForcedMigrate reports whether cmd is `bd migrate` or `bd migrate schema`
+// invoked with --force: the operator confirming they are the single designated
+// migrator, so the remote-migrate gate (#4259) must not block this run's store
+// opens. Consulted in the root PersistentPreRunE because the gate fires during
+// store open (and during autoMigrateOnVersionBump), long before the migrate
+// command's own RunE.
+func isForcedMigrate(cmd *cobra.Command) bool {
+	if cmd != migrateCmd && cmd != migrateSchemaCmd {
+		return false
+	}
+	force, _ := cmd.Flags().GetBool("force")
+	return force
+}
+
 // loadBeadsEnvFile loads .beads/.env into process environment for per-project
 // Dolt credentials (GH#2520). Uses gotenv.Load which is non-overriding —
 // existing shell env vars always take precedence.
@@ -1031,6 +1045,14 @@ var rootCmd = &cobra.Command{
 		// Read-only commands open the store in read-only mode to avoid modifying
 		// the database (which breaks file watchers).
 		useReadOnly := isReadOnlyCommand(cmd.Name())
+
+		// If the operator passed --force on `bd migrate` or `bd migrate schema`,
+		// set the programmatic gate override before both autoMigrateOnVersionBump
+		// and the main store open — both open their own store connections and the
+		// gate fires on each.
+		if isForcedMigrate(cmd) {
+			schema.SetForceAllowRemoteMigrate(true)
+		}
 
 		// Auto-migrate database on version bump (bd-jgxi).
 		// Runs for ALL commands (including read-only ones) because the migration

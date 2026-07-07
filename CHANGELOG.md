@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `bd migrate --force` (and `bd migrate schema --force`): CLI flag twin of
+  `BD_ALLOW_REMOTE_MIGRATE=1` for bypassing the remote-migrate gate (#4259)
+  as the single designated migrator; process-local so it cannot leak into
+  child processes (git hooks, dolt subprocesses).
+
 ### Changed
 
 - **Remote-ahead adopts fast-forward automatically when it is provably

@@ -763,7 +763,7 @@ func TestEmbeddedInit(t *testing.T) {
 			}
 			for _, want := range []string{
 				"Re-running `bd init` will NOT fix this",
-				schema.AllowRemoteMigrateEnv + "=1",
+				"bd migrate --force",
 				"bd dolt push",
 			} {
 				if !strings.Contains(string(out), want) {

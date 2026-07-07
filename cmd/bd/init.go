@@ -1024,7 +1024,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				if bootstrappedFromRemote {
 					// Leave the workspace in the same finalized state the
 					// bd bootstrap sync path produces (GH#3201) so
-					// `BD_ALLOW_REMOTE_MIGRATE=1 bd migrate` and
+					// `bd migrate --force` (or BD_ALLOW_REMOTE_MIGRATE=1) and
 					// `bd dolt push` can open the cloned database.
 					fcfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
 					if ferr := finalizeSyncedBootstrap(beadsDir, syncURL, fcfg, dbName); ferr != nil {

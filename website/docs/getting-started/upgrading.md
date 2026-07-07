@@ -176,10 +176,14 @@ also copy the `.beads` directory (or `dolt backup` in server mode) while no
 bd dolt push                              # 1. CURRENT binary: publish all local work
 bd export --all -o .beads/backup/pre-migrate.jsonl   # 2. backup (see above)
 # 3. install the new binary (see Upgrading above)
-BD_ALLOW_REMOTE_MIGRATE=1 bd migrate      # 4. migrate as the designated migrator
+bd migrate --force                        # 4. migrate as the designated migrator
 bd dolt push                              # 5. publish the migrated schema
 bd version                                # 6. confirm the new version is active
 ```
+
+`--force` confirms you are the single designated migrator so this run may
+migrate the remote-backed database. For scripted or CI use,
+`BD_ALLOW_REMOTE_MIGRATE=1 bd migrate` is the env-var equivalent.
 
 **Multiple clones sharing one remote:**
 
@@ -192,7 +196,7 @@ bd dolt pull
 # 2. Designated migrator ONLY: back up, install the new binary, then migrate
 #    and publish.
 bd export --all -o .beads/backup/pre-migrate.jsonl
-BD_ALLOW_REMOTE_MIGRATE=1 bd migrate
+bd migrate --force
 bd dolt push
 
 # 3. Every OTHER clone: install the new binary, then ADOPT the migrated database.

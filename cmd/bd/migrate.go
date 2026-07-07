@@ -29,6 +29,13 @@ Subcommands:
   issues      Move issues between repositories
   schema      Apply pending schema migrations (idempotent)
   sync        Set up sync.branch workflow for multi-clone setups
+
+On a remote-backed database with pending schema migrations bd refuses to
+migrate in place (#4259): migrating two clones independently forks the schema
+so bd dolt pull can no longer merge — the break is silent and unrecoverable.
+Use --force to confirm you are the single designated migrator, after which you
+should publish the migrated schema with 'bd dolt push'. The env-var equivalent
+BD_ALLOW_REMOTE_MIGRATE=1 remains supported for scripted/CI use.
 `,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -777,6 +784,9 @@ func init() {
 	migrateCmd.Flags().Bool("update-repo-id", false, "Update repository ID (use after changing git remote)")
 	migrateCmd.Flags().Bool("inspect", false, "Show migration plan and database state for AI agent analysis")
 	migrateCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output migration statistics in JSON format")
+	// --force bypasses the remote-migrate gate (#4259) as the single designated
+	// migrator. No -f shorthand: deliberate typing for a fork-risk bypass.
+	migrateCmd.Flags().Bool("force", false, "Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)")
 
 	migrateSyncCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
 	migrateSyncCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
@@ -789,6 +799,9 @@ func init() {
 	migrateCmd.AddCommand(migrateHooksCmd)
 
 	migrateSchemaCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+	// --force on migrate schema mirrors the parent command's flag; both trip the
+	// same isForcedMigrate check in main.go's PersistentPreRunE.
+	migrateSchemaCmd.Flags().Bool("force", false, "Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)")
 	migrateCmd.AddCommand(migrateSchemaCmd)
 
 	rootCmd.AddCommand(migrateCmd)

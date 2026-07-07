@@ -33,6 +33,24 @@ func TestCheckRemoteMigrateGate(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	}
 
+	t.Run("programmatic override (SetForceAllowRemoteMigrate) bypasses gate", func(t *testing.T) {
+		t.Setenv(AllowRemoteMigrateEnv, "0") // env-var escape hatch disabled
+		SetForceAllowRemoteMigrate(true)
+		defer SetForceAllowRemoteMigrate(false) // reset so subsequent tests are unaffected
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		expectFiringGate(mock)
+		if err := CheckRemoteMigrateGate(context.Background(), db); err != nil {
+			t.Fatalf("SetForceAllowRemoteMigrate(true): expected nil, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("SetForceAllowRemoteMigrate: unmet expectations: %v", err)
+		}
+		db.Close()
+	})
+
 	t.Run("escape hatch allows migration when the gate would fire", func(t *testing.T) {
 		for _, v := range []string{"1", "true", "TRUE"} {
 			t.Setenv(AllowRemoteMigrateEnv, v)
