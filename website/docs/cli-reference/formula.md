@@ -118,7 +118,7 @@ Curated smoke-tested fixtures for wired primitives live in
 examples/formulas/primitives/ (with a smoke harness that proves they work).
 
 ```
-bd formula schema [primitive]
+bd formula schema [primitive] [flags]
 ```
 
 **Aliases:** primitives

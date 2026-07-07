@@ -321,6 +321,12 @@ Examples:
 bd mol ready --gated [flags]
 ```
 
+**Flags:**
+
+```
+      --gated   Find molecules ready for gate-resume dispatch (always on for this subcommand)
+```
+
 ### bd mol seed
 
 Verify that a formula is accessible and can be cooked.

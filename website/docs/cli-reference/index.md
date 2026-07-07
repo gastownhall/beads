@@ -9,7 +9,7 @@ sidebar_position: 0
 <!-- AUTO-GENERATED: do not edit manually -->
 Reference for bd Latest. Generated from `bd help --docs-root`.
 
-This reference covers all 111 live top-level `bd` commands. Regenerate it with:
+This reference covers all 112 live top-level `bd` commands. Regenerate it with:
 
 ```bash
 ./scripts/generate-cli-docs.sh
@@ -121,6 +121,7 @@ This reference covers all 111 live top-level `bd` commands. Regenerate it with:
 - [`bd tag`](./tag.md)
 - [`bd todo`](./todo.md)
 - [`bd types`](./types.md)
+- [`bd unclaim`](./unclaim.md)
 - [`bd undefer`](./undefer.md)
 - [`bd update`](./update.md)
 - [`bd upgrade`](./upgrade.md)
