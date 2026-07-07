@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,7 +23,7 @@ func TestBootstrapFromRemoteWithDB_RejectsEmptyDatabase(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty database name, got nil")
 	}
-	if !strings.Contains(err.Error(), "database name must not be empty") {
+	if !strings.Contains(err.Error(), "invalid database name") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -36,8 +37,28 @@ func TestBootstrapFromRemoteWithDB_RejectsWhitespaceDatabase(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for whitespace-only database name, got nil")
 	}
-	if !strings.Contains(err.Error(), "database name must not be empty") {
+	if !strings.Contains(err.Error(), "invalid database name") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestBootstrapFromRemoteWithDB_RejectsPathLikeDatabase verifies that
+// database names containing path separators or traversal segments are
+// rejected before a clone is attempted. Such names would let the pre-clone
+// doltExists() existence check miss a database that was already cloned
+// under a different-looking path, which previously allowed the
+// failed-clone cleanup to RemoveAll a pre-existing Dolt repo
+// (P1 data-loss finding, cross-vendor review 2026-07-07).
+func TestBootstrapFromRemoteWithDB_RejectsPathLikeDatabase(t *testing.T) {
+	for _, name := range []string{"foo/bar", "../other-db", "foo\\bar"} {
+		doltDir := t.TempDir()
+		_, err := BootstrapFromRemoteWithDB(context.Background(), doltDir, "file:///dev/null", name)
+		if err == nil {
+			t.Fatalf("expected error for path-like database name %q, got nil", name)
+		}
+		if !strings.Contains(err.Error(), "invalid database name") {
+			t.Errorf("database name %q: unexpected error message: %v", name, err)
+		}
 	}
 }
 
@@ -49,14 +70,14 @@ func TestBootstrapFromRemote_UsesDefaultDatabase(t *testing.T) {
 	// returns early (skips clone) without needing the dolt CLI.
 	doltDir := t.TempDir()
 
-	// BootstrapFromRemote should not error with "database name must not be empty"
+	// BootstrapFromRemote should not error with "invalid database name"
 	// because it passes configfile.DefaultDoltDatabase explicitly.
 	// It will return false (skipped) because doltExists returns false for an
 	// empty dir, then it will fail trying to run dolt clone — but the error
-	// should be about dolt CLI, not about empty database name.
+	// should be about dolt CLI, not about an invalid database name.
 	_, err := BootstrapFromRemote(context.Background(), doltDir, "file:///dev/null")
-	if err != nil && strings.Contains(err.Error(), "database name must not be empty") {
-		t.Fatal("BootstrapFromRemote should pass an explicit database name, not empty string")
+	if err != nil && strings.Contains(err.Error(), "invalid database name") {
+		t.Fatal("BootstrapFromRemote should pass an explicit, valid database name")
 	}
 	// Any other error (dolt CLI not found, clone failure) is fine — we only care
 	// that the empty-database guard didn't fire.
@@ -71,8 +92,42 @@ func TestBootstrapFromGitRemoteWithDB_DeprecatedWrapper(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for empty database name, got nil")
 	}
-	if !strings.Contains(err.Error(), "database name must not be empty") {
+	if !strings.Contains(err.Error(), "invalid database name") {
 		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// TestBootstrapFromRemoteWithDB_PreservesPreExistingCloneTarget verifies
+// that a failed clone never runs cleanup on a clone target that already
+// existed before this bootstrap attempt started. This is the defense in
+// depth requested alongside database-name validation for the P1 data-loss
+// finding (cross-vendor review 2026-07-07): a target directory not created
+// by this attempt must be left untouched, even if `dolt clone` fails
+// because the target already exists.
+func TestBootstrapFromRemoteWithDB_PreservesPreExistingCloneTarget(t *testing.T) {
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt CLI not available")
+	}
+
+	doltDir := t.TempDir()
+	cloneTarget := filepath.Join(doltDir, "beads")
+	if err := os.MkdirAll(cloneTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(cloneTarget, "README.txt")
+	if err := os.WriteFile(marker, []byte("pre-existing content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := BootstrapFromRemoteWithDB(context.Background(), doltDir, "file:///dev/null", "beads")
+	if err == nil {
+		t.Fatal("expected error from failed clone, got nil")
+	}
+	if !strings.Contains(err.Error(), "already existed before this attempt") {
+		t.Errorf("expected error to note the pre-existing target, got: %v", err)
+	}
+	if data, statErr := os.ReadFile(marker); statErr != nil || string(data) != "pre-existing content" {
+		t.Fatalf("pre-existing clone target content was not preserved: data=%q err=%v", data, statErr)
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -54,8 +53,8 @@ func BootstrapFromRemoteWithDB(ctx context.Context, doltDir, remoteURL, database
 		return false, fmt.Errorf("invalid remote URL: %w", err)
 	}
 
-	if strings.TrimSpace(database) == "" {
-		return false, fmt.Errorf("database name must not be empty; use cfg.GetDoltDatabase() to resolve the configured name")
+	if err := ValidateDatabaseName(database); err != nil {
+		return false, fmt.Errorf("invalid database name %q (use cfg.GetDoltDatabase() to resolve the configured name): %w", database, err)
 	}
 
 	// Verify dolt CLI is available
@@ -71,8 +70,17 @@ func BootstrapFromRemoteWithDB(ctx context.Context, doltDir, remoteURL, database
 	// Clone into <doltDir>/<database>/ so the embedded driver can find it.
 	// `dolt clone <url> <target>` creates <target>/.dolt/ directly.
 	cloneTarget := filepath.Join(doltDir, database)
+	// Record whether the target already existed before this clone attempt.
+	// If it did, the failed-clone cleanup below must never touch it: it
+	// wasn't created by us, so it could be a pre-existing Dolt repo (e.g.
+	// from an earlier bootstrap that a stale/empty doltExists() check
+	// missed) that we must not delete.
+	targetPreExisted := pathExists(cloneTarget)
 	cmd := exec.CommandContext(ctx, "dolt", doltCloneArgs(remoteURL, cloneTarget)...)
 	if output, err := cmd.CombinedOutput(); err != nil {
+		if targetPreExisted {
+			return false, fmt.Errorf("dolt clone failed: %w\nOutput: %s\nClone target %q already existed before this attempt; left untouched to avoid deleting a pre-existing Dolt repo", err, output, cloneTarget)
+		}
 		cleaned, cleanupErr := removeFailedCloneTargetWithRetry(cloneTarget)
 		return false, formatFailedCloneTargetError(err, output, cloneTarget, cleaned, cleanupErr)
 	}
@@ -136,6 +144,15 @@ func doltCloneArgs(remoteURL, target string) []string {
 // BootstrapFromGitRemoteWithDB is deprecated. Use BootstrapFromRemoteWithDB instead.
 func BootstrapFromGitRemoteWithDB(ctx context.Context, doltDir, gitRemoteURL, database string) (bool, error) {
 	return BootstrapFromRemoteWithDB(ctx, doltDir, gitRemoteURL, database)
+}
+
+// pathExists reports whether path exists (of any type), without following
+// symlinks. Used to detect whether a clone target pre-existed before a
+// clone attempt, so failed-clone cleanup never deletes something it didn't
+// create.
+func pathExists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
 }
 
 // doltExists checks if a Dolt database directory exists
