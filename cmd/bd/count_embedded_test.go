@@ -13,17 +13,19 @@ import (
 )
 
 // bdCount runs "bd count" with the given args and returns raw stdout.
+// Stderr (warnings, tips) is captured separately so it does not pollute
+// callers that parse stdout.
 func bdCount(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"count"}, args...)
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd count %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd count %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdCountFail runs "bd count" expecting failure.
@@ -41,24 +43,25 @@ func bdCountFail(t *testing.T, bd, dir string, args ...string) string {
 }
 
 // bdCountJSON runs "bd count --json" and parses the result.
+// Stderr is captured separately so warnings do not corrupt JSON parsing.
 func bdCountJSON(t *testing.T, bd, dir string, args ...string) map[string]interface{} {
 	t.Helper()
 	fullArgs := append([]string{"count", "--json"}, args...)
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd count --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd count --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(stdout.String())
 	start := strings.IndexAny(s, "{")
 	if start < 0 {
-		t.Fatalf("no JSON object in count output: %s", s)
+		t.Fatalf("no JSON object in count output: %s\nstderr:\n%s", s, stderr.String())
 	}
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(s[start:]), &m); err != nil {
-		t.Fatalf("parse count JSON: %v\n%s", err, s)
+		t.Fatalf("parse count JSON: %v\n%s\nstderr:\n%s", err, s, stderr.String())
 	}
 	return m
 }
@@ -78,7 +81,11 @@ func TestEmbeddedCount(t *testing.T) {
 	bdCreate(t, bd, dir, "Count task one", "--type", "task", "--priority", "3", "--assignee", "alice")
 	bdCreate(t, bd, dir, "Count feature one", "--type", "feature", "--priority", "1")
 	closedIssue := bdCreate(t, bd, dir, "Count closed one", "--type", "task", "--priority", "2", "--assignee", "alice")
-	bdClose(t, bd, dir, closedIssue.ID)
+	// --force: closedIssue is assigned to alice, so the be-035 close-authority
+	// guard refuses this cross-actor close (test actor != alice) without it.
+	// The fixture must stay assigned to alice for the --assignee alice count
+	// assertion below (expects >=3), so we override rather than drop the assignee.
+	bdClose(t, bd, dir, closedIssue.ID, "--force")
 	bdCreate(t, bd, dir, "Count labeled", "--type", "task", "--label", "frontend", "--label", "urgent")
 	bdCreate(t, bd, dir, "Count labeled two", "--type", "task", "--label", "backend")
 	bdCreate(t, bd, dir, "Count notes issue", "--type", "task", "--description", "notes keyword here")
@@ -462,6 +469,113 @@ func TestEmbeddedCount(t *testing.T) {
 	})
 }
 
+// TestEmbeddedCountIncludeInfra is the CLI-level guard for GH#4387:
+// `bd count --include-infra <filters>` must return exactly the cardinality of
+// `bd list --include-infra <filters> --all` (modulo list's --limit), including
+// the wisps tier (no_history + ephemeral beads) and honoring list's default
+// template exclusion. Without the flag, bd count keeps today's durable-only
+// semantics.
+func TestEmbeddedCountIncludeInfra(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ci")
+
+	// Durable issues tier.
+	bdCreate(t, bd, dir, "Infra durable task one", "--type", "task")
+	bdCreate(t, bd, dir, "Infra durable task two", "--type", "task")
+	bdCreate(t, bd, dir, "Infra durable bug", "--type", "bug")
+	closedIssue := bdCreate(t, bd, dir, "Infra durable task closed", "--type", "task")
+	bdClose(t, bd, dir, closedIssue.ID)
+	// Wisps tier: no_history beads are durable work that bd list --include-infra
+	// returns; ephemeral beads are GC-eligible wisps.
+	bdCreate(t, bd, dir, "Infra nohistory task one", "--type", "task", "--no-history")
+	bdCreate(t, bd, dir, "Infra nohistory task two", "--type", "task", "--no-history")
+	bdCreate(t, bd, dir, "Infra ephemeral task", "--type", "task", "--ephemeral")
+
+	countOf := func(args ...string) int {
+		t.Helper()
+		m := bdCountJSON(t, bd, dir, args...)
+		return int(m["count"].(float64))
+	}
+	listCardinality := func(args ...string) int {
+		t.Helper()
+		fullArgs := append([]string{"--include-infra", "--all", "--limit", "0"}, args...)
+		return len(bdListJSON(t, bd, dir, fullArgs...))
+	}
+
+	t.Run("default_stays_durable_only", func(t *testing.T) {
+		if got := countOf("--type", "task"); got != 3 {
+			t.Errorf("bd count --type task = %d, want 3 (durable tasks only; default must stay byte-identical)", got)
+		}
+	})
+
+	t.Run("include_infra_counts_wisps_tier", func(t *testing.T) {
+		// 3 durable tasks + 2 no_history tasks + 1 ephemeral task.
+		if got := countOf("--include-infra", "--type", "task"); got != 6 {
+			t.Errorf("bd count --include-infra --type task = %d, want 6", got)
+		}
+	})
+
+	t.Run("include_infra_matches_list_cardinality", func(t *testing.T) {
+		for _, filters := range [][]string{
+			nil,
+			{"--type", "task"},
+			{"--type", "bug"},
+			{"--status", "open"},
+			{"--status", "closed"},
+		} {
+			want := listCardinality(filters...)
+			got := countOf(append([]string{"--include-infra"}, filters...)...)
+			if got != want {
+				t.Errorf("bd count --include-infra %v = %d, but bd list --include-infra --all %v returned %d rows", filters, got, filters, want)
+			}
+		}
+	})
+
+	t.Run("include_infra_grouped_by_type", func(t *testing.T) {
+		m := bdCountJSON(t, bd, dir, "--include-infra", "--by-type")
+		total := int(m["total"].(float64))
+		if want := listCardinality(); total != want {
+			t.Errorf("bd count --include-infra --by-type total = %d, want list cardinality %d", total, want)
+		}
+		groups, ok := m["groups"].([]interface{})
+		if !ok {
+			t.Fatal("expected groups array")
+		}
+		byType := make(map[string]int)
+		for _, g := range groups {
+			gm := g.(map[string]interface{})
+			byType[gm["group"].(string)] = int(gm["count"].(float64))
+		}
+		if byType["task"] != 6 {
+			t.Errorf("grouped task count = %d, want 6 (wisps tier missing from --by-type)", byType["task"])
+		}
+		if byType["bug"] != 1 {
+			t.Errorf("grouped bug count = %d, want 1", byType["bug"])
+		}
+	})
+
+	t.Run("grouped_without_flag_stays_durable_only", func(t *testing.T) {
+		m := bdCountJSON(t, bd, dir, "--by-type")
+		groups, ok := m["groups"].([]interface{})
+		if !ok {
+			t.Fatal("expected groups array")
+		}
+		for _, g := range groups {
+			gm := g.(map[string]interface{})
+			if gm["group"] == "task" {
+				if got := int(gm["count"].(float64)); got != 3 {
+					t.Errorf("bd count --by-type task = %d, want 3 (durable only)", got)
+				}
+			}
+		}
+	})
+}
+
 // TestEmbeddedCountConcurrent exercises count operations concurrently.
 func TestEmbeddedCountConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
@@ -519,24 +633,24 @@ func TestEmbeddedCountConcurrent(t *testing.T) {
 			cmd := exec.Command(bd, args...)
 			cmd.Dir = dir
 			cmd.Env = bdEnv(dir)
-			out, err := cmd.CombinedOutput()
+			stdout, stderr, err := runCommandBuffers(t, cmd)
 			if err != nil {
-				r.err = fmt.Errorf("worker %d count %v: %v\n%s", worker, q, err, out)
+				r.err = fmt.Errorf("worker %d count %v: %v\nstdout:\n%s\nstderr:\n%s", worker, q, err, stdout.String(), stderr.String())
 				results[worker] = r
 				return
 			}
 
-			// Verify JSON is parseable
-			s := strings.TrimSpace(string(out))
+			// Verify JSON is parseable (parse stdout only; stderr may carry warnings).
+			s := strings.TrimSpace(stdout.String())
 			start := strings.IndexAny(s, "{")
 			if start < 0 {
-				r.err = fmt.Errorf("worker %d: no JSON in output: %s", worker, s)
+				r.err = fmt.Errorf("worker %d: no JSON in stdout: %s\nstderr: %s", worker, s, stderr.String())
 				results[worker] = r
 				return
 			}
 			var m map[string]interface{}
 			if err := json.Unmarshal([]byte(s[start:]), &m); err != nil {
-				r.err = fmt.Errorf("worker %d: JSON parse: %v\n%s", worker, err, s)
+				r.err = fmt.Errorf("worker %d: JSON parse: %v\nstdout: %s\nstderr: %s", worker, err, s, stderr.String())
 				results[worker] = r
 				return
 			}

@@ -1,0 +1,7 @@
+{
+  "depends_on_id": "corpus-dep",
+  "issue_id": "corpus-root",
+  "schema_version": 1,
+  "status": "added",
+  "type": "blocks"
+}

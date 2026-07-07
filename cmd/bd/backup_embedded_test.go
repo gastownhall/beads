@@ -19,11 +19,11 @@ func bdBackup(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd backup %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd backup %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdBackupFail runs "bd backup" expecting failure. Returns combined output.

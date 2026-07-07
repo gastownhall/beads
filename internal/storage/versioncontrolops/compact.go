@@ -55,8 +55,14 @@ func Compact(ctx context.Context, conn DBConn, initialHash, boundaryHash string,
 		return err
 	}
 
+	// --allow-empty: the preserved window can contain empty commits (a Dolt
+	// auto-commit with no table change, or a bd create double-commit whose
+	// leading member has 0 changed tables). Without this flag DOLT_CHERRY_PICK
+	// aborts the entire replay at the first empty commit with Error 1105
+	// ("The previous cherry-pick commit is empty. Use --allow-empty ..."),
+	// leaving compaction permanently blocked on active databases. See #3815.
 	for _, hash := range recentHashes {
-		if err := execSQL(fmt.Sprintf("cherry-pick %s", hash[:min(8, len(hash))]), "CALL DOLT_CHERRY_PICK(?)", hash); err != nil {
+		if err := execSQL(fmt.Sprintf("cherry-pick %s", hash[:min(8, len(hash))]), "CALL DOLT_CHERRY_PICK('--allow-empty', ?)", hash); err != nil {
 			return err
 		}
 	}

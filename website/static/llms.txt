@@ -25,7 +25,7 @@ bd update bd-42 --claim                   # Start work
 bd close bd-42 --reason "Done"            # Close issue
 bd ready --json                           # Show unblocked work
 bd dolt push                              # Push to Dolt remote
-bd backup export-git                      # Publish backup snapshot to a git branch
+bd backup sync                            # Push a Dolt-native backup
 ```
 
 ## For AI Agents
@@ -34,7 +34,7 @@ bd backup export-git                      # Publish backup snapshot to a git bra
 - Always include `--description` when creating issues
 - Use `--deps discovered-from:<id>` to link found issues
 - Use `bd dolt push` / `bd dolt pull` for Dolt remotes
-- Use `bd backup` / `bd backup export-git` for portable backups
+- Use `bd backup init` / `bd backup sync` / `bd backup restore` for portable backups
 
 ## Key Concepts
 
@@ -43,13 +43,13 @@ bd backup export-git                      # Publish backup snapshot to a git bra
 - **Formulas**: Declarative workflow templates (TOML/JSON)
 - **Molecules**: Work graphs from formulas
 - **Gates**: Async coordination (human/timer/github)
-- **Wisps**: Ephemeral workflows (excluded from JSONL backups)
+- **Wisps**: Ephemeral workflows (excluded from issue JSONL exports)
 
 ## Recovery
 
 Quick fixes for common issues:
 
-- Database Recovery: `bd backup restore` or `bd backup fetch-git`
+- Database Recovery: `bd backup restore`
 - Merge Conflicts: Use Dolt merge/recovery tools, then `bd dolt pull`
 - Circular Dependencies: `bd doctor` (diagnose only, NEVER --fix)
 - Sync Failures: `bd dolt pull`
@@ -69,7 +69,9 @@ WARNING: Skipping sync or backup publication causes stale state in multi-agent w
 
 - Full docs: https://gastownhall.github.io/beads/
 - CLI reference: https://gastownhall.github.io/beads/cli-reference
+- Sync concepts: https://gastownhall.github.io/beads/core-concepts/sync-concepts
 - Agent guide: https://gastownhall.github.io/beads/integrations/claude-code
+- Community tools: https://gastownhall.github.io/beads/community-tools
 - Complete LLM context: https://gastownhall.github.io/beads/llms-full.txt
 
 ## Links

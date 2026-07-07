@@ -282,10 +282,10 @@ func TestGetCommentsForIssues_MixedWispAndPermanent(t *testing.T) {
 	createPerm(t, ctx, store, "mix-cmt-perm")
 	createWisp(t, ctx, store, "mix-cmt-wisp")
 
-	if err := store.AddComment(ctx, "mix-cmt-perm", "alice", "on perm"); err != nil {
+	if _, err := store.AddIssueComment(ctx, "mix-cmt-perm", "alice", "on perm"); err != nil {
 		t.Fatalf("add comment on perm: %v", err)
 	}
-	if err := store.AddComment(ctx, "mix-cmt-wisp", "bob", "on wisp"); err != nil {
+	if _, err := store.AddIssueComment(ctx, "mix-cmt-wisp", "bob", "on wisp"); err != nil {
 		t.Fatalf("add comment on wisp: %v", err)
 	}
 
@@ -344,6 +344,45 @@ func TestGetDependencyRecordsForIssues_MixedWispAndPermanent(t *testing.T) {
 	}
 	if ds := got["mix-dep-wisp-src"]; len(ds) != 1 || ds[0].DependsOnID != "mix-dep-perm-tgt" {
 		t.Errorf("wisp deps: want 1 record targeting mix-dep-perm-tgt, got %+v", ds)
+	}
+}
+
+func TestGetAllDependencyRecordsIncludesWispDependencies(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	createPerm(t, ctx, store, "mix-all-dep-perm-src")
+	createPerm(t, ctx, store, "mix-all-dep-perm-tgt")
+	createWisp(t, ctx, store, "mix-all-dep-wisp-src")
+	createWisp(t, ctx, store, "mix-all-dep-wisp-tgt")
+
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     "mix-all-dep-perm-src",
+		DependsOnID: "mix-all-dep-perm-tgt",
+		Type:        types.DepBlocks,
+	}, "tester"); err != nil {
+		t.Fatalf("add perm dep: %v", err)
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     "mix-all-dep-wisp-src",
+		DependsOnID: "mix-all-dep-wisp-tgt",
+		Type:        types.DepParentChild,
+	}, "tester"); err != nil {
+		t.Fatalf("add wisp dep: %v", err)
+	}
+
+	got, err := store.GetAllDependencyRecords(ctx)
+	if err != nil {
+		t.Fatalf("GetAllDependencyRecords: %v", err)
+	}
+	if ds := got["mix-all-dep-perm-src"]; len(ds) != 1 || ds[0].DependsOnID != "mix-all-dep-perm-tgt" {
+		t.Fatalf("perm deps: want 1 record targeting mix-all-dep-perm-tgt, got %+v", ds)
+	}
+	if ds := got["mix-all-dep-wisp-src"]; len(ds) != 1 || ds[0].DependsOnID != "mix-all-dep-wisp-tgt" {
+		t.Fatalf("wisp deps: want 1 record targeting mix-all-dep-wisp-tgt, got %+v", ds)
 	}
 }
 

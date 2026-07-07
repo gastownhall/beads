@@ -22,7 +22,7 @@ echo ""
 MISMATCH=0
 
 check_version() {
-    local file=$1
+    local _file=$1
     local version=$2
     local description=$3
 
@@ -78,5 +78,5 @@ if [ $MISMATCH -eq 1 ]; then
     echo "Or manually update the mismatched files."
     exit 1
 else
-    echo -e "${GREEN}✓ All versions match: $CANONICAL${NC}"
+    echo -e "${GREEN}✓ Version files and released-docs policy pass for: $CANONICAL${NC}"
 fi

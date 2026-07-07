@@ -192,36 +192,43 @@ func TestListCommandSuite(t *testing.T) {
 				t.Fatalf("Failed to add dependency: %v", err)
 			}
 
-			err := outputDotFormat(h.ctx, h.store, h.issues)
+			deps, derr := h.store.GetAllDependencyRecords(h.ctx)
+			if derr != nil {
+				t.Fatalf("GetAllDependencyRecords: %v", derr)
+			}
+			err := outputDotFormat(h.issues, deps)
 			if err != nil {
 				t.Errorf("outputDotFormat failed: %v", err)
 			}
 		})
 
 		t.Run("output formatted list dot", func(t *testing.T) {
-			err := outputFormattedList(h.ctx, h.store, h.issues, "dot")
+			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
+			err := outputFormattedList(h.issues, deps, "dot")
 			if err != nil {
 				t.Errorf("outputFormattedList with dot format failed: %v", err)
 			}
 		})
 
 		t.Run("output formatted list digraph preset", func(t *testing.T) {
-			// Dependency already added in previous test, just use it
-			err := outputFormattedList(h.ctx, h.store, h.issues, "digraph")
+			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
+			err := outputFormattedList(h.issues, deps, "digraph")
 			if err != nil {
 				t.Errorf("outputFormattedList with digraph format failed: %v", err)
 			}
 		})
 
 		t.Run("output formatted list custom template", func(t *testing.T) {
-			err := outputFormattedList(h.ctx, h.store, h.issues, "{{.ID}} {{.Title}}")
+			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
+			err := outputFormattedList(h.issues, deps, "{{.ID}} {{.Title}}")
 			if err != nil {
 				t.Errorf("outputFormattedList with custom template failed: %v", err)
 			}
 		})
 
 		t.Run("output formatted list invalid template", func(t *testing.T) {
-			err := outputFormattedList(h.ctx, h.store, h.issues, "{{.ID")
+			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
+			err := outputFormattedList(h.issues, deps, "{{.ID")
 			if err == nil {
 				t.Error("Expected error for invalid template")
 			}
@@ -368,6 +375,42 @@ func TestListQueryCapabilitiesSuite(t *testing.T) {
 		}
 		if len(results) > 0 && results[0].ID != issue2.ID {
 			t.Errorf("Expected issue2, got %s", results[0].ID)
+		}
+	})
+
+	// AD-02: hydration toggle. SkipLabels=true means SearchIssues skips the
+	// labels JOIN entirely; rows are returned but Labels stays nil. Distinct
+	// from NoLabels (filter rows where labels=[]).
+	t.Run("skip labels hydration", func(t *testing.T) {
+		// Default hydration: issue1 has labels populated.
+		hydrated, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			IDs: []string{issue1.ID},
+		})
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		if len(hydrated) != 1 {
+			t.Fatalf("Expected 1 issue, got %d", len(hydrated))
+		}
+		if len(hydrated[0].Labels) == 0 {
+			t.Fatalf("precondition: issue1 should have labels in default hydration, got none")
+		}
+		// SkipLabels=true: same row, but Labels is left nil.
+		skipped, err := s.SearchIssues(ctx, "", types.IssueFilter{
+			IDs:        []string{issue1.ID},
+			SkipLabels: true,
+		})
+		if err != nil {
+			t.Fatalf("Search with SkipLabels failed: %v", err)
+		}
+		if len(skipped) != 1 {
+			t.Fatalf("Expected 1 issue with SkipLabels, got %d", len(skipped))
+		}
+		if len(skipped[0].Labels) != 0 {
+			t.Errorf("SkipLabels=true should leave Labels empty, got %v", skipped[0].Labels)
+		}
+		if skipped[0].ID != issue1.ID {
+			t.Errorf("SkipLabels must not change row identity, got %s want %s", skipped[0].ID, issue1.ID)
 		}
 	})
 
@@ -680,6 +723,56 @@ func TestStableTreeOrdering(t *testing.T) {
 	})
 }
 
+func TestTreeViewUsesWispDependencyRecords(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStoreWithPrefix(t, filepath.Join(t.TempDir(), "test.db"), "test")
+
+	parent := &types.Issue{
+		ID:        "tree-wisp-parent",
+		Title:     "Parent epic",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+	}
+	child := &types.Issue{
+		ID:        "tree-wisp-child",
+		Title:     "Wisp child",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	for _, issue := range []*types.Issue{parent, child} {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", issue.ID, err)
+		}
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: parent.ID,
+		Type:        types.DepParentChild,
+	}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+
+	allDeps, err := store.GetAllDependencyRecords(ctx)
+	if err != nil {
+		t.Fatalf("GetAllDependencyRecords: %v", err)
+	}
+	if ds := allDeps[child.ID]; len(ds) != 1 || ds[0].DependsOnID != parent.ID {
+		t.Fatalf("wisp dependency records = %+v, want child -> parent", ds)
+	}
+
+	roots, childrenMap := buildIssueTreeWithDeps([]*types.Issue{parent, child}, allDeps)
+	if len(roots) != 1 || roots[0].ID != parent.ID {
+		t.Fatalf("roots = %+v, want only parent root", roots)
+	}
+	children := childrenMap[parent.ID]
+	if len(children) != 1 || children[0].ID != child.ID {
+		t.Fatalf("children[%s] = %+v, want wisp child", parent.ID, children)
+	}
+}
+
 // Helper function to compare string slices for equality
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
@@ -755,7 +848,7 @@ func TestFormatIssueLong(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf strings.Builder
-			formatIssueLong(&buf, tt.issue, tt.labels)
+			formatIssueLong(&buf, tt.issue, tt.labels, false)
 			result := buf.String()
 			if !strings.Contains(result, tt.want) {
 				t.Errorf("formatIssueLong() = %q, want to contain %q", result, tt.want)

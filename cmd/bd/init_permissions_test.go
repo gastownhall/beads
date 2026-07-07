@@ -22,7 +22,16 @@ var (
 func buildBDForInitPermissionTests(t *testing.T) string {
 	t.Helper()
 	initPermissionTestBDOnce.Do(func() {
-		tmpDir, err := os.MkdirTemp("", "bd-init-permissions-test-*")
+		prebuilt, err := findPrebuiltBDBinary()
+		if err != nil {
+			initPermissionTestBDErr = err
+			return
+		}
+		if prebuilt != "" {
+			initPermissionTestBD = prebuilt
+			return
+		}
+		tmpDir, err := testTempDir("bd-init-permissions-test-*")
 		if err != nil {
 			initPermissionTestBDErr = fmt.Errorf("failed to create temp dir: %w", err)
 			return

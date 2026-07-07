@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -23,26 +24,33 @@ Examples:
   bd diff main feature-branch   # Compare main to feature branch
   bd diff HEAD~5 HEAD           # Show changes in last 5 commits
   bd diff abc123 def456         # Compare two specific commits`,
-	Args: cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(2),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("diff")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 		fromRef := args[0]
 		toRef := args[1]
 
-		// Get diff between refs
 		entries, err := store.Diff(ctx, fromRef, toRef)
 		if err != nil {
-			FatalErrorRespectJSON("failed to get diff: %v", err)
+			return HandleErrorRespectJSON("failed to get diff: %v", err)
 		}
 
 		if len(entries) == 0 {
 			fmt.Printf("No changes between %s and %s\n", fromRef, toRef)
-			return
+			return nil
 		}
 
 		if jsonOutput {
-			outputJSON(entries)
-			return
+			return outputJSON(entries)
 		}
 
 		// Display diff in human-readable format
@@ -111,7 +119,6 @@ Examples:
 			fmt.Println()
 		}
 
-		// Display removed issues
 		if len(removed) > 0 {
 			fmt.Printf("%s Removed (%d):\n", ui.RenderAccent("-"), len(removed))
 			for _, entry := range removed {
@@ -125,6 +132,7 @@ Examples:
 			}
 			fmt.Println()
 		}
+		return nil
 	},
 }
 

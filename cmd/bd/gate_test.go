@@ -609,7 +609,9 @@ func TestGateCheck_GHRunWorkflowDiscoveryPersistence(t *testing.T) {
 			}
 
 			output := captureGateStdout(t, func() {
-				gateCheckCmd.Run(gateCheckCmd, nil)
+				if err := gateCheckCmd.RunE(gateCheckCmd, nil); err != nil {
+					t.Fatalf("gateCheckCmd.RunE: %v", err)
+				}
 			})
 
 			if updateCalls != tt.wantUpdateCalls {

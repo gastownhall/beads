@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
@@ -25,15 +26,29 @@ var updateCmd = &cobra.Command{
 
 If no issue ID is provided, updates the last touched issue (from most recent
 create, update, show, or close operation).`,
-	Args: cobra.MinimumNArgs(0),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.MinimumNArgs(0),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("update")
+
+		evt := metrics.NewCommandEvent("update")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			runUpdateProxiedServer(cmd, rootCtx, args)
+			return nil
+		}
 
 		// If no IDs provided, use last touched issue
 		if len(args) == 0 {
 			lastTouched := GetLastTouchedID()
 			if lastTouched == "" {
-				FatalErrorRespectJSON("no issue ID provided and no last touched issue")
+				return HandleErrorRespectJSON("no issue ID provided and no last touched issue")
 			}
 			args = []string{lastTouched}
 		}
@@ -58,7 +73,7 @@ create, update, show, or close operation).`,
 				}
 			}
 			if !types.Status(status).IsValidWithCustom(customStatuses) {
-				FatalErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", status)
+				return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", status)
 			}
 			updates["status"] = status
 
@@ -77,7 +92,7 @@ create, update, show, or close operation).`,
 			priorityStr, _ := cmd.Flags().GetString("priority")
 			priority, err := validation.ValidatePriority(priorityStr)
 			if err != nil {
-				FatalErrorRespectJSON("%v", err)
+				return HandleErrorRespectJSON("%v", err)
 			}
 			updates["priority"] = priority
 		}
@@ -85,7 +100,7 @@ create, update, show, or close operation).`,
 			title, _ := cmd.Flags().GetString("title")
 			title = strings.TrimSpace(title)
 			if title == "" {
-				FatalErrorRespectJSON("title cannot be empty")
+				return HandleErrorRespectJSON("title cannot be empty")
 			}
 			updates["title"] = title
 		}
@@ -93,19 +108,25 @@ create, update, show, or close operation).`,
 			assignee, _ := cmd.Flags().GetString("assignee")
 			updates["assignee"] = assignee
 		}
-		description, descChanged := getDescriptionFlag(cmd)
+		description, descChanged, err := getDescriptionFlag(cmd)
+		if err != nil {
+			return err
+		}
 		if descChanged {
 			if err := validateDescriptionUpdate(cmd, description, descChanged); err != nil {
-				FatalErrorRespectJSON("%v", err)
+				return HandleErrorRespectJSON("%v", err)
 			}
 			updates["description"] = description
 		}
-		design, designChanged := getDesignFlag(cmd)
+		design, designChanged, err := getDesignFlag(cmd)
+		if err != nil {
+			return err
+		}
 		if designChanged {
 			updates["design"] = design
 		}
 		if cmd.Flags().Changed("notes") && cmd.Flags().Changed("append-notes") {
-			FatalErrorRespectJSON("cannot specify both --notes and --append-notes")
+			return HandleErrorRespectJSON("cannot specify both --notes and --append-notes")
 		}
 		if cmd.Flags().Changed("notes") {
 			notes, _ := cmd.Flags().GetString("notes")
@@ -126,7 +147,14 @@ create, update, show, or close operation).`,
 		}
 		if cmd.Flags().Changed("external-ref") {
 			externalRef, _ := cmd.Flags().GetString("external-ref")
-			updates["external_ref"] = externalRef
+			// Empty string clears the ref to SQL NULL, mirroring buildCreateIssue's
+			// nil-when-empty pointer semantics so cleared refs round-trip as a
+			// missing field (omitempty) instead of an empty string. GH#3902.
+			if externalRef == "" {
+				updates["external_ref"] = nil
+			} else {
+				updates["external_ref"] = externalRef
+			}
 		}
 		if cmd.Flags().Changed("spec-id") {
 			specID, _ := cmd.Flags().GetString("spec-id")
@@ -135,7 +163,7 @@ create, update, show, or close operation).`,
 		if cmd.Flags().Changed("estimate") {
 			estimate, _ := cmd.Flags().GetInt("estimate")
 			if estimate < 0 {
-				FatalErrorRespectJSON("estimate must be a non-negative number of minutes")
+				return HandleErrorRespectJSON("estimate must be a non-negative number of minutes")
 			}
 			updates["estimated_minutes"] = estimate
 		}
@@ -177,7 +205,7 @@ create, update, show, or close operation).`,
 			} else {
 				t, err := timeparsing.ParseRelativeTime(dueStr, time.Now())
 				if err != nil {
-					FatalErrorRespectJSON("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
+					return HandleErrorRespectJSON("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
 				}
 				updates["due_at"] = t
 			}
@@ -194,7 +222,7 @@ create, update, show, or close operation).`,
 			} else {
 				t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
 				if err != nil {
-					FatalErrorRespectJSON("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
+					return HandleErrorRespectJSON("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
 				}
 				// Warn if defer date is in the past (user probably meant future)
 				inPast := t.Before(time.Now())
@@ -220,13 +248,13 @@ create, update, show, or close operation).`,
 		noHistoryChanged := cmd.Flags().Changed("no-history")
 		historyChanged := cmd.Flags().Changed("history")
 		if ephemeralChanged && persistentChanged {
-			FatalErrorRespectJSON("cannot specify both --ephemeral and --persistent flags")
+			return HandleErrorRespectJSON("cannot specify both --ephemeral and --persistent flags")
 		}
 		if noHistoryChanged && ephemeralChanged {
-			FatalErrorRespectJSON("cannot specify both --no-history and --ephemeral flags")
+			return HandleErrorRespectJSON("cannot specify both --no-history and --ephemeral flags")
 		}
 		if noHistoryChanged && historyChanged {
-			FatalErrorRespectJSON("cannot specify both --no-history and --history flags")
+			return HandleErrorRespectJSON("cannot specify both --no-history and --history flags")
 		}
 		if ephemeralChanged {
 			updates["wisp"] = true
@@ -250,7 +278,7 @@ create, update, show, or close operation).`,
 				// #nosec G304 -- user explicitly provides file path via @file.json syntax
 				data, err := os.ReadFile(filePath)
 				if err != nil {
-					FatalErrorRespectJSON("failed to read metadata file %s: %v", filePath, err)
+					return HandleErrorRespectJSON("failed to read metadata file %s: %v", filePath, err)
 				}
 				metadataJSON = string(data)
 			} else {
@@ -258,7 +286,7 @@ create, update, show, or close operation).`,
 			}
 			// Validate JSON
 			if !json.Valid([]byte(metadataJSON)) {
-				FatalErrorRespectJSON("invalid JSON in --metadata: must be valid JSON")
+				return HandleErrorRespectJSON("invalid JSON in --metadata: must be valid JSON")
 			}
 			updates["metadata"] = json.RawMessage(metadataJSON)
 		}
@@ -267,7 +295,7 @@ create, update, show, or close operation).`,
 		setMetadataFlags, _ := cmd.Flags().GetStringArray("set-metadata")
 		unsetMetadataFlags, _ := cmd.Flags().GetStringArray("unset-metadata")
 		if (len(setMetadataFlags) > 0 || len(unsetMetadataFlags) > 0) && cmd.Flags().Changed("metadata") {
-			FatalErrorRespectJSON("cannot combine --metadata with --set-metadata or --unset-metadata")
+			return HandleErrorRespectJSON("cannot combine --metadata with --set-metadata or --unset-metadata")
 		}
 		if len(setMetadataFlags) > 0 || len(unsetMetadataFlags) > 0 {
 			updates["_set_metadata"] = setMetadataFlags
@@ -279,16 +307,44 @@ create, update, show, or close operation).`,
 
 		if len(updates) == 0 && !claimFlag {
 			fmt.Println("No updates specified")
-			return
+			return nil
 		}
 
 		ctx := rootCtx
 
 		updatedIssues := []*types.Issue{}
 		var firstUpdatedID string // Track first successful update for last-touched
+		mutatedStores := map[storage.DoltStorage][]string{}
+		mutatedResults := map[*RoutedResult]bool{}
+		pendingCloseResults := []*RoutedResult{}
+		trackMutation := func(result *RoutedResult) {
+			if result == nil || result.Store == nil {
+				return
+			}
+			if !mutatedResults[result] {
+				pendingCloseResults = append(pendingCloseResults, result)
+				mutatedResults[result] = true
+			}
+			mutatedStores[result.Store] = append(mutatedStores[result.Store], result.ResolvedID)
+		}
+		closeIfUnmutated := func(result *RoutedResult) {
+			if result == nil {
+				return
+			}
+			if mutatedResults[result] {
+				return
+			}
+			result.Close()
+		}
+		closePendingResults := func() {
+			for _, result := range pendingCloseResults {
+				result.Close()
+			}
+			pendingCloseResults = nil
+		}
 		for _, id := range args {
 			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
-			result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+			result, err := resolveAndGetIssueForMutation(ctx, store, id)
 			if err != nil {
 				if result != nil {
 					result.Close()
@@ -308,7 +364,7 @@ create, update, show, or close operation).`,
 
 			if err := validateIssueUpdatable(id, issue); err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", err)
-				result.Close()
+				closeIfUnmutated(result)
 				continue
 			}
 
@@ -316,9 +372,10 @@ create, update, show, or close operation).`,
 			if claimFlag {
 				if err := issueStore.ClaimIssue(ctx, result.ResolvedID, actor); err != nil {
 					fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
-					result.Close()
+					closeIfUnmutated(result)
 					continue
 				}
+				trackMutation(result)
 			}
 
 			// Apply regular field updates if any
@@ -340,7 +397,7 @@ create, update, show, or close operation).`,
 			if newMeta, ok := regularUpdates["metadata"].(json.RawMessage); ok && len(issue.Metadata) > 0 {
 				merged, err := mergeMetadata(issue.Metadata, newMeta)
 				if err != nil {
-					FatalErrorRespectJSON("metadata merge failed for %s: %v", id, err)
+					return HandleErrorRespectJSON("metadata merge failed for %s: %v", id, err)
 				}
 				regularUpdates["metadata"] = merged
 			}
@@ -349,7 +406,7 @@ create, update, show, or close operation).`,
 				unsetMeta, _ := updates["_unset_metadata"].([]string)
 				merged, err := applyMetadataEdits(issue.Metadata, setMeta, unsetMeta)
 				if err != nil {
-					FatalErrorRespectJSON("metadata edit failed for %s: %v", id, err)
+					return HandleErrorRespectJSON("metadata edit failed for %s: %v", id, err)
 				}
 				regularUpdates["metadata"] = merged
 			}
@@ -365,9 +422,10 @@ create, update, show, or close operation).`,
 			if len(regularUpdates) > 0 {
 				if err := issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor); err != nil {
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
-					result.Close()
+					closeIfUnmutated(result)
 					continue
 				}
+				trackMutation(result)
 				// Audit log key field changes (survives Dolt GC flatten)
 				if s, ok := regularUpdates["status"].(string); ok {
 					audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), s, actor, "")
@@ -394,9 +452,10 @@ create, update, show, or close operation).`,
 			if len(setLabels) > 0 || len(addLabels) > 0 || len(removeLabels) > 0 {
 				if err := applyLabelUpdates(ctx, issueStore, result.ResolvedID, actor, setLabels, addLabels, removeLabels); err != nil {
 					fmt.Fprintf(os.Stderr, "Error updating labels for %s: %v\n", id, err)
-					result.Close()
+					closeIfUnmutated(result)
 					continue
 				}
+				trackMutation(result)
 			}
 
 			// Handle parent reparenting
@@ -406,12 +465,12 @@ create, update, show, or close operation).`,
 					parentIssue, err := issueStore.GetIssue(ctx, newParent)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "Error getting parent %s: %v\n", newParent, err)
-						result.Close()
+						closeIfUnmutated(result)
 						continue
 					}
 					if parentIssue == nil {
 						fmt.Fprintf(os.Stderr, "Error: parent issue %s not found\n", newParent)
-						result.Close()
+						closeIfUnmutated(result)
 						continue
 					}
 				}
@@ -420,13 +479,15 @@ create, update, show, or close operation).`,
 				deps, err := issueStore.GetDependencyRecords(ctx, result.ResolvedID)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error getting dependencies for %s: %v\n", id, err)
-					result.Close()
+					closeIfUnmutated(result)
 					continue
 				}
 				for _, dep := range deps {
 					if dep.Type == types.DepParentChild {
 						if err := issueStore.RemoveDependency(ctx, result.ResolvedID, dep.DependsOnID, actor); err != nil {
 							fmt.Fprintf(os.Stderr, "Error removing old parent dependency: %v\n", err)
+						} else {
+							trackMutation(result)
 						}
 						break
 					}
@@ -441,9 +502,10 @@ create, update, show, or close operation).`,
 					}
 					if err := issueStore.AddDependency(ctx, newDep, actor); err != nil {
 						fmt.Fprintf(os.Stderr, "Error adding parent dependency: %v\n", err)
-						result.Close()
+						closeIfUnmutated(result)
 						continue
 					}
+					trackMutation(result)
 				}
 			}
 
@@ -466,12 +528,24 @@ create, update, show, or close operation).`,
 			if firstUpdatedID == "" {
 				firstUpdatedID = result.ResolvedID
 			}
-			result.Close()
+			closeIfUnmutated(result)
 		}
 
-		if firstUpdatedID != "" {
-			commandDidWrite.Store(true)
+		if len(mutatedStores) > 0 {
+			for s, ids := range mutatedStores {
+				if s == nil {
+					continue
+				}
+				if err := commitPendingIfEmbedded(ctx, s, actor, doltAutoCommitParams{
+					Command:  "update",
+					IssueIDs: ids,
+				}); err != nil {
+					closePendingResults()
+					return HandleErrorRespectJSON("failed to commit: %v", err)
+				}
+			}
 		}
+		closePendingResults()
 
 		// Set last touched after all updates complete
 		if firstUpdatedID != "" {
@@ -479,14 +553,15 @@ create, update, show, or close operation).`,
 		}
 
 		if jsonOutput && len(updatedIssues) > 0 {
-			outputJSON(updatedIssues)
+			if jerr := outputJSON(updatedIssues); jerr != nil {
+				return jerr
+			}
 		}
 
-		// Exit non-zero if no issues were actually updated (claim failures
-		// and other soft errors should surface as non-zero exit codes for scripting)
 		if len(args) > 0 && firstUpdatedID == "" {
-			os.Exit(1)
+			return SilentExit()
 		}
+		return nil
 	},
 }
 

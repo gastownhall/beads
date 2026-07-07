@@ -22,7 +22,7 @@ from beads_mcp.models import CompactedResult, Issue, IssueMinimal
 @pytest.fixture
 def sample_issues(count=25):
     """Create a list of sample issues for testing compaction.
-    
+
     Default creates 25 issues to exceed the COMPACTION_THRESHOLD (20).
     """
     now = datetime(2024, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -64,7 +64,7 @@ def _apply_compaction(
     hint_prefix: str = "",
 ) -> list[IssueMinimal] | CompactedResult:
     """Apply compaction logic - copy of server's compaction for testing.
-    
+
     This function contains the core compaction logic that's used in the MCP tools.
     """
     if len(minimal_issues) > threshold:
@@ -73,7 +73,10 @@ def _apply_compaction(
             total_count=len(minimal_issues),
             preview=minimal_issues[:preview_count],
             preview_count=preview_count,
-            hint=f"{hint_prefix}Showing {preview_count} of {len(minimal_issues)} issues. Use show(issue_id) for full details.",
+            hint=(
+                f"{hint_prefix}Showing {preview_count} of {len(minimal_issues)} issues. "
+                "Use show(issue_id) for full details."
+            ),
         )
     return minimal_issues
 
@@ -386,7 +389,7 @@ class TestConversionToMinimal:
 
         # Minimal should be significantly smaller
         ratio = minimal_size / issue_size
-        assert ratio < 0.3, f"Minimal {ratio*100:.1f}% of full size (expected <30%)"
+        assert ratio < 0.3, f"Minimal {ratio * 100:.1f}% of full size (expected <30%)"
 
 
 class TestCompactionWithFilters:

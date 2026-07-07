@@ -24,6 +24,7 @@ Examples:
   bd count --by-assignee            # Group count by assignee
   bd count --by-label               # Group count by label
   bd count --assignee alice --by-status  # Count alice's issues by status
+  bd count --include-infra          # Count issues + wisps tier (matches 'bd list --include-infra --all' cardinality)
 
 
 ```
@@ -46,6 +47,7 @@ bd count [flags]
       --desc-contains string    Filter by description substring
       --empty-description       Filter issues with empty description
       --id string               Filter by specific issue IDs (comma-separated)
+      --include-infra           Include infrastructure beads and the wisps tier (matches 'bd list --include-infra --all' cardinality)
   -l, --label strings           Filter by labels (AND: must have ALL)
       --label-any strings       Filter by labels (OR: must have AT LEAST ONE)
       --no-assignee             Filter issues with no assignee

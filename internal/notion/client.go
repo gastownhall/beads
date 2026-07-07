@@ -124,7 +124,6 @@ func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string) ([]Pa
 		request := map[string]interface{}{
 			"page_size":   maxPageSize,
 			"result_type": "page",
-			"in_trash":    false,
 		}
 		if cursor != "" {
 			request["start_cursor"] = cursor

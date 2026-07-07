@@ -29,8 +29,8 @@ type CommandContext struct {
 	Verbose      bool
 	Quiet        bool
 
-	// Storage mode — true when connected to an external dolt sql-server.
-	ServerMode bool
+	ServerMode        bool
+	ProxiedServerMode bool
 
 	// Runtime state
 	Store      storage.DoltStorage
@@ -362,6 +362,10 @@ func syncCommandContext() {
 	cmdCtx.LockTimeout = lockTimeout
 	cmdCtx.Verbose = verboseFlag
 	cmdCtx.Quiet = quietFlag
+
+	// Storage mode
+	cmdCtx.ServerMode = serverMode
+	cmdCtx.ProxiedServerMode = proxiedServerMode
 
 	// Runtime state
 	cmdCtx.Store = store

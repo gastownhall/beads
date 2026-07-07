@@ -110,6 +110,7 @@ Secrets in this list are refused on git-tracked `config.yaml` files unless you p
 | `backup.git-repo` | — | `BD_BACKUP_GIT_REPO` | (none) | Backup git repo URL |
 | `export.auto` | — | — | `true` | Refresh `.beads/issues.jsonl` after every write |
 | `export.path` | — | — | `issues.jsonl` | Output filename relative to `.beads/` |
+| `import.path` | — | — | `issues.jsonl` | Input filename relative to `.beads/` for implied JSONL imports; use relative paths for portability |
 | `export.interval` | — | — | `60s` | Minimum time between auto-exports |
 | `export.git-add` | — | — | `true` | Run `git add` on the export file |
 | `routing.mode` | — | — | (none) | Multi-repo routing: `auto`, `maintainer`, `contributor`, `explicit` |
@@ -144,7 +145,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `types.custom` | Comma-separated list of custom issue types |
 | `types.infra` | Infra types routed to wisps table |
 | `import.orphan_handling` | `allow` (default) \| `resurrect` \| `skip` \| `strict` |
-| `compact_*` | Compaction tuning (see `docs/EXTENDING.md`) |
+| `compact_*` | Compaction tuning (see [docs/CONFIG.md](https://github.com/gastownhall/beads/blob/main/docs/CONFIG.md)) |
 | `issue_id_mode` | `hash` (default) \| `counter` (sequential) |
 | `min_hash_length`, `max_hash_length` | Adaptive ID bounds (defaults `4` and `8`) |
 | `max_collision_prob` | Hash ID collision tolerance (default `0.25`) |

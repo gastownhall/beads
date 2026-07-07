@@ -74,10 +74,10 @@ func TestPullAutoResolveMetadataConflicts(t *testing.T) {
 	// mergeErr may or may not be nil depending on Dolt version.
 
 	// Try auto-resolve.
-	resolved, resolveErr := store.tryAutoResolveMetadataConflicts(ctx, tx)
+	resolved, resolveErr := store.tryAutoResolveMergeConflicts(ctx, tx)
 	if resolveErr != nil {
 		_ = tx.Rollback()
-		t.Fatalf("tryAutoResolveMetadataConflicts error: %v (mergeErr: %v)", resolveErr, mergeErr)
+		t.Fatalf("tryAutoResolveMergeConflicts error: %v (mergeErr: %v)", resolveErr, mergeErr)
 	}
 	if !resolved {
 		_ = tx.Rollback()
@@ -168,7 +168,7 @@ func TestPullAutoResolveSkipsNonMetadataConflicts(t *testing.T) {
 	_, mergeErr := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", remoteBranch)
 
 	// Issues table conflict should NOT be auto-resolved.
-	resolved, resolveErr := store.tryAutoResolveMetadataConflicts(ctx, tx)
+	resolved, resolveErr := store.tryAutoResolveMergeConflicts(ctx, tx)
 	_ = tx.Rollback()
 
 	if mergeErr == nil && resolveErr == nil && !resolved {
@@ -179,11 +179,72 @@ func TestPullAutoResolveSkipsNonMetadataConflicts(t *testing.T) {
 
 	if resolveErr != nil {
 		// Error checking conflicts is acceptable for some Dolt versions.
-		t.Logf("tryAutoResolveMetadataConflicts returned error: %v", resolveErr)
+		t.Logf("tryAutoResolveMergeConflicts returned error: %v", resolveErr)
 		return
 	}
 
 	if resolved {
 		t.Error("expected non-metadata conflicts NOT to be auto-resolved")
+	}
+}
+
+// TestAutoResolveConflictsAfterCLIPull_DependencyAuditOnly verifies the post-CLI-pull
+// resolver (used for git-protocol / credentialed remotes, #4259 finding 1) resolves an
+// audit-only dependency conflict left by an out-of-transaction merge. CLI `dolt pull`
+// performs the merge in a subprocess and leaves conflicts in the working set, so the
+// resolver never runs in the transaction that produced the merge — unlike the SQL
+// DOLT_PULL path. Here the conflict is persisted into the working set (what a CLI pull
+// leaves behind) and then resolved via finishCLIPull's helper on the store connection,
+// which stays on the pull's branch (a brand-new connection would default to the base
+// branch and miss the conflict).
+func TestAutoResolveConflictsAfterCLIPull_DependencyAuditOnly(t *testing.T) {
+	store, peerBranch := setupDependencyMergeConflict(t, "blocks", "alice", "blocks", "bob")
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	// Persist the merge conflict into the working set (mirroring a CLI pull), then
+	// resolve it from a brand-new connection rather than this transaction.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("allow commit conflicts: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch); err != nil {
+		t.Logf("merge returned: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("persist conflicted working set: %v", err)
+	}
+
+	// A fresh connection must observe the persisted conflict, else this test would
+	// not be exercising the cross-connection (post-CLI-pull) resolver path.
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_conflicts_dependencies").Scan(&n); err != nil {
+		t.Fatalf("count conflicts on fresh conn: %v", err)
+	}
+	if n == 0 {
+		t.Skip("merge auto-resolved without persisted conflicts — cannot exercise post-CLI-pull resolver")
+	}
+
+	resolved, err := store.autoResolveConflictsAfterCLIPull(ctx)
+	if err != nil {
+		t.Fatalf("autoResolveConflictsAfterCLIPull: %v", err)
+	}
+	if !resolved {
+		t.Fatal("expected audit-only dependency conflict to auto-resolve after a CLI pull")
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = 'depc-x' AND depends_on_issue_id = 'depc-y'").Scan(&count); err != nil {
+		t.Fatalf("count edges: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected 1 dependency row after resolve, got %d", count)
 	}
 }

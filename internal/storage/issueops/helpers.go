@@ -14,11 +14,25 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// NewEventID mints the app-side primary key for an events/wisp_events row.
+// Events have no natural identity (the same logical event can legitimately
+// occur twice), so the id is random — but minted app-side, once, at creation.
+// Insert sites must never fall back to the DB-side DEFAULT (UUID()): that is
+// the 0043-era pattern that let bulk/import paths silently mint clone-random
+// keys for logically identical rows, the same failure class as #4259 on
+// dependencies (bd-6dnrw.18). UUIDv7 matches the comments-table convention
+// and keeps ids time-sortable.
+func NewEventID() string {
+	return uuid.Must(uuid.NewV7()).String()
+}
 
 // IsWisp returns true if the issue should be routed to the wisps table.
 // Routes based on flags only — not the ID pattern. The "-wisp-" ID prefix is
@@ -38,11 +52,52 @@ func TableRouting(issue *types.Issue) (issueTable, eventTable string) {
 	return "issues", "events"
 }
 
+// issueUpsertColumns are the columns rewritten by the issue UPSERT's
+// ON DUPLICATE KEY UPDATE clause. updated_at is deliberately last: the
+// stale-guarded variant compares VALUES(updated_at) against the stored
+// updated_at in every assignment, and ON DUPLICATE KEY UPDATE assignments are
+// evaluated in order, so the comparison column must not be reassigned until
+// all other columns have been decided.
+var issueUpsertColumns = []string{
+	"content_hash", "title", "description", "design", "acceptance_criteria",
+	"notes", "status", "priority", "issue_type", "assignee",
+	"estimated_minutes", "started_at", "closed_at", "external_ref",
+	"source_repo", "close_reason", "metadata", "updated_at",
+}
+
+// issueUpsertAssignments renders the ON DUPLICATE KEY UPDATE clause. With
+// rejectStaleUpdate, each assignment keeps the stored value unless the
+// incoming row is strictly newer (VALUES(updated_at) > updated_at) — the
+// transactional import stale guard (bd-pkim8). Strictly-older AND
+// equal-timestamp rows keep every stored column: updated_at is DATETIME with
+// second granularity, so two distinct updates in the same second tie, and an
+// incoming tie row with an empty field (e.g. notes) must not wipe the
+// populated local value (bd-hj85c). Re-importing an identical snapshot stays
+// idempotent either way — the rewrite would have written identical values.
+// Tie rows are deliberately NOT short-circuited by the staleRejected
+// pre-check in InsertIssueIfNew, so their aux data (labels/comments/deps,
+// which never bump updated_at) still merges additively.
+func issueUpsertAssignments(rejectStaleUpdate bool) string {
+	assignments := make([]string, 0, len(issueUpsertColumns))
+	for _, col := range issueUpsertColumns {
+		if rejectStaleUpdate {
+			assignments = append(assignments,
+				fmt.Sprintf("%s = IF(VALUES(updated_at) > updated_at, VALUES(%s), %s)", col, col, col))
+		} else {
+			assignments = append(assignments, fmt.Sprintf("%s = VALUES(%s)", col, col))
+		}
+	}
+	return strings.Join(assignments, ",\n\t\t\t")
+}
+
 // InsertIssueIntoTable inserts an issue into the specified table ("issues" or "wisps"),
 // using ON DUPLICATE KEY UPDATE to handle pre-existing records gracefully.
-//
-//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
 func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *types.Issue) error {
+	return insertIssueIntoTable(ctx, tx, table, issue, false)
+}
+
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
+func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *types.Issue, rejectStaleUpdate bool) error {
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -66,25 +121,8 @@ func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			?, ?, ?
 		)
 		ON DUPLICATE KEY UPDATE
-			content_hash = VALUES(content_hash),
-			title = VALUES(title),
-			description = VALUES(description),
-			design = VALUES(design),
-			acceptance_criteria = VALUES(acceptance_criteria),
-			notes = VALUES(notes),
-			status = VALUES(status),
-			priority = VALUES(priority),
-			issue_type = VALUES(issue_type),
-			assignee = VALUES(assignee),
-			estimated_minutes = VALUES(estimated_minutes),
-			updated_at = VALUES(updated_at),
-			started_at = VALUES(started_at),
-			closed_at = VALUES(closed_at),
-			external_ref = VALUES(external_ref),
-			source_repo = VALUES(source_repo),
-			close_reason = VALUES(close_reason),
-			metadata = VALUES(metadata)
-	`, table),
+			%s
+	`, table, issueUpsertAssignments(rejectStaleUpdate)),
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		issue.Status, issue.Priority, issue.IssueType, NullString(issue.Assignee), NullInt(issue.EstimatedMinutes),
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, NullStringPtr(issue.ExternalRef), issue.SpecID,
@@ -104,11 +142,11 @@ func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 // RecordEventInTable records an event in the specified events table.
 //
 //nolint:gosec // G201: table is a hardcoded constant ("events" or "wisp_events")
-func RecordEventInTable(ctx context.Context, tx *sql.Tx, table, issueID string, eventType types.EventType, actor, newValue string) error {
+func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eventType types.EventType, actor, newValue string) error {
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?)
-	`, table), issueID, eventType, actor, "", newValue)
+		INSERT INTO %s (id, issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, table), NewEventID(), issueID, eventType, actor, "", newValue)
 	if err != nil {
 		return fmt.Errorf("record event in %s: %w", table, err)
 	}
@@ -341,25 +379,11 @@ func ComputeAdaptiveLength(numIssues int, cfg AdaptiveIDConfig) int {
 
 // GetCustomStatusesTx reads custom statuses from config within a transaction.
 func GetCustomStatusesTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
-	var raw string
-	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "status.custom").Scan(&raw)
-	if err == sql.ErrNoRows || raw == "" {
-		return nil, nil
-	}
+	detailed, err := ResolveCustomStatusesDetailedInTx(ctx, tx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read status.custom config: %w", err)
+		return nil, err
 	}
-	var statuses []string
-	if err := json.Unmarshal([]byte(raw), &statuses); err != nil {
-		// Try comma-separated fallback
-		for _, s := range strings.Split(raw, ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				statuses = append(statuses, s)
-			}
-		}
-	}
-	return statuses, nil
+	return types.CustomStatusNames(detailed), nil
 }
 
 // GetCustomTypesTx reads custom types from config within a transaction.
@@ -501,7 +525,11 @@ func ReadConfigPrefix(ctx context.Context, tx *sql.Tx) (string, error) {
 	var configPrefix string
 	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_prefix").Scan(&configPrefix)
 	if err == sql.ErrNoRows || configPrefix == "" {
-		return "", fmt.Errorf("%w: issue_prefix config is missing (run 'bd init --prefix <prefix>' for a new project, or 'bd bootstrap' to clone an existing remote)", storage.ErrNotInitialized)
+		yamlPrefix := strings.TrimSpace(config.GetString("issue-prefix"))
+		underscoreYamlPrefix := strings.TrimSpace(config.GetString("issue_prefix"))
+		debug.Logf("Debug: missing config.issue_prefix in database (err=%v, db value=%q, yaml issue-prefix=%q, yaml issue_prefix=%q)\n",
+			err, configPrefix, yamlPrefix, underscoreYamlPrefix)
+		return "", fmt.Errorf("%w: issue_prefix config is missing (run 'bd init --prefix <prefix>' for a new project, or 'bd bootstrap' to clone an existing remote; if using config.yaml, use key 'issue-prefix', not 'issue_prefix')", storage.ErrNotInitialized)
 	} else if err != nil {
 		return "", fmt.Errorf("failed to get config: %w", err)
 	}

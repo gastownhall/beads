@@ -550,6 +550,226 @@ func TestFindDatabasePath_WorktreeServerModeSharesMainRepo(t *testing.T) {
 	}
 }
 
+// TestFindBeadsDir_JJSecondaryWithInheritedArtifacts covers the case where a
+// jujutsu secondary workspace (created via `jj workspace add` without
+// --colocate from a colocated jj+git primary workspace) is placed inside the
+// primary's git working tree. The secondary's .beads/ contains git-tracked
+// metadata files but no database, while the primary has the real database.
+// FindBeadsDir must return the primary's .beads/, not the secondary's.
+func TestFindBeadsDir_JJSecondaryWithInheritedArtifacts(t *testing.T) {
+	originalEnv := os.Getenv("BEADS_DIR")
+	defer func() {
+		if originalEnv != "" {
+			os.Setenv("BEADS_DIR", originalEnv)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+	}()
+	os.Unsetenv("BEADS_DIR")
+
+	tmpDir, err := os.MkdirTemp("", "beads-jj-secondary-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	// Primary workspace: colocated jj+git, has .jj/repo as a directory and .git.
+	primaryDir := filepath.Join(tmpDir, "primary")
+	if err := os.MkdirAll(filepath.Join(primaryDir, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Secondary workspace: inside the primary's tree (like `jj workspace add ./workspaces/secondary`).
+	// Has .jj/repo as a FILE pointing to primary's .jj/repo.
+	secondaryDir := filepath.Join(primaryDir, "workspaces", "secondary")
+	if err := os.MkdirAll(filepath.Join(secondaryDir, ".jj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	primaryRepoPath := filepath.Join(primaryDir, ".jj", "repo")
+	if err := os.WriteFile(filepath.Join(secondaryDir, ".jj", "repo"), []byte(primaryRepoPath+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set up git in the primary (so git rev-parse works from the secondary).
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, gitErr := cmd.CombinedOutput()
+		if gitErr != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, gitErr, out)
+		}
+	}
+	if err := func() error {
+		cmd := exec.Command("git", "init")
+		cmd.Dir = primaryDir
+		return cmd.Run()
+	}(); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	runGit(primaryDir, "config", "user.email", "test@example.com")
+	runGit(primaryDir, "config", "user.name", "Test User")
+
+	mustWrite := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Primary .beads/: real database + config.
+	primaryBeadsDir := filepath.Join(primaryDir, ".beads")
+	if err := os.MkdirAll(primaryBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(filepath.Join(primaryBeadsDir, "metadata.json"), `{"database":"dolt"}`)
+	mustWrite(filepath.Join(primaryBeadsDir, "config.yaml"), "issue-prefix: \"proj\"\n")
+	mustWrite(filepath.Join(primaryBeadsDir, "beads.db"), "")
+	mustWrite(filepath.Join(primaryBeadsDir, ".gitignore"), "*.db\ndolt/\nembeddeddolt/\n")
+
+	// Commit the metadata so the secondary inherits it via git checkout.
+	mustWrite(filepath.Join(primaryDir, "README.md"), "# Test\n")
+	runGit(primaryDir, "add", "README.md", ".beads/metadata.json", ".beads/config.yaml", ".beads/.gitignore")
+	runGit(primaryDir, "commit", "-m", "initial")
+
+	// Simulate the secondary workspace inheriting tracked .beads/ artifacts (no DB).
+	secondaryBeadsDir := filepath.Join(secondaryDir, ".beads")
+	if err := os.MkdirAll(secondaryBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(filepath.Join(secondaryBeadsDir, "metadata.json"), `{"database":"dolt"}`)
+	mustWrite(filepath.Join(secondaryBeadsDir, "config.yaml"), "issue-prefix: \"proj\"\n")
+	// No database in secondary — this is the inherited-artifacts scenario.
+
+	t.Chdir(secondaryDir)
+	git.ResetCaches()
+
+	result := FindBeadsDir()
+
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	primaryBeadsDirResolved, _ := filepath.EvalSymlinks(primaryBeadsDir)
+	secondaryBeadsDirResolved, _ := filepath.EvalSymlinks(secondaryBeadsDir)
+
+	if resultResolved == secondaryBeadsDirResolved {
+		t.Fatalf("FindBeadsDir() returned secondary workspace's inherited .beads/ (%q); "+
+			"expected primary workspace's .beads/ (%q). "+
+			"Secondary has config files but no database; bd should use the primary's DB.",
+			result, primaryBeadsDir)
+	}
+	if resultResolved != primaryBeadsDirResolved {
+		t.Errorf("FindBeadsDir() = %q, want primary workspace .beads %q", result, primaryBeadsDir)
+	}
+
+	fromResult := FindBeadsDirFrom(secondaryDir)
+	fromResultResolved, _ := filepath.EvalSymlinks(fromResult)
+	if fromResultResolved == secondaryBeadsDirResolved {
+		t.Fatalf("FindBeadsDirFrom() returned secondary workspace's inherited .beads/ (%q); "+
+			"expected primary workspace's .beads/ (%q).",
+			fromResult, primaryBeadsDir)
+	}
+	if fromResultResolved != primaryBeadsDirResolved {
+		t.Errorf("FindBeadsDirFrom() = %q, want primary workspace .beads %q", fromResult, primaryBeadsDir)
+	}
+}
+
+// TestFindBeadsDir_JJSecondarySeparateDBPreservesLocal verifies that when a jj
+// secondary workspace genuinely has its own database (separate-DB mode),
+// FindBeadsDir returns the secondary's .beads/ — not the primary's.
+func TestFindBeadsDir_JJSecondarySeparateDBPreservesLocal(t *testing.T) {
+	originalEnv := os.Getenv("BEADS_DIR")
+	defer func() {
+		if originalEnv != "" {
+			os.Setenv("BEADS_DIR", originalEnv)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+	}()
+	os.Unsetenv("BEADS_DIR")
+
+	tmpDir, err := os.MkdirTemp("", "beads-jj-secondary-sep-db-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	primaryDir := filepath.Join(tmpDir, "primary")
+	if err := os.MkdirAll(filepath.Join(primaryDir, ".jj", "repo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	secondaryDir := filepath.Join(primaryDir, "workspaces", "secondary")
+	if err := os.MkdirAll(filepath.Join(secondaryDir, ".jj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	primaryRepoPath := filepath.Join(primaryDir, ".jj", "repo")
+	if err := os.WriteFile(filepath.Join(secondaryDir, ".jj", "repo"), []byte(primaryRepoPath+"\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := func() error {
+		cmd := exec.Command("git", "init")
+		cmd.Dir = primaryDir
+		return cmd.Run()
+	}(); err != nil {
+		t.Skipf("git not available: %v", err)
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, gitErr := cmd.CombinedOutput()
+		if gitErr != nil {
+			t.Fatalf("git %v in %s: %v\n%s", args, dir, gitErr, out)
+		}
+	}
+	runGit(primaryDir, "config", "user.email", "test@example.com")
+	runGit(primaryDir, "config", "user.name", "Test User")
+
+	// Primary has a real DB.
+	primaryBeadsDir := filepath.Join(primaryDir, ".beads")
+	if err := os.MkdirAll(primaryBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(primaryBeadsDir, "beads.db"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(primaryDir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(primaryDir, "add", "README.md")
+	runGit(primaryDir, "commit", "-m", "initial")
+
+	// Secondary ALSO has a real DB — separate-DB mode.
+	secondaryBeadsDir := filepath.Join(secondaryDir, ".beads")
+	if err := os.MkdirAll(secondaryBeadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secondaryBeadsDir, "beads.db"), []byte{}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(secondaryDir)
+	git.ResetCaches()
+
+	result := FindBeadsDir()
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	secondaryBeadsDirResolved, _ := filepath.EvalSymlinks(secondaryBeadsDir)
+
+	if resultResolved != secondaryBeadsDirResolved {
+		t.Errorf("FindBeadsDir() = %q, want secondary workspace .beads %q (separate-DB mode)",
+			result, secondaryBeadsDir)
+	}
+
+	fromResult := FindBeadsDirFrom(secondaryDir)
+	fromResultResolved, _ := filepath.EvalSymlinks(fromResult)
+	if fromResultResolved != secondaryBeadsDirResolved {
+		t.Errorf("FindBeadsDirFrom() = %q, want secondary workspace .beads %q (separate-DB mode)",
+			fromResult, secondaryBeadsDir)
+	}
+}
+
 // TestFindDatabasePath_WorktreeServerModeFromSubdir is the same scenario as
 // TestFindDatabasePath_WorktreeServerModeSharesMainRepo but with the CWD set
 // to a subdirectory of the worktree rather than the worktree root. This

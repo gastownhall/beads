@@ -254,7 +254,7 @@ func TestStaleSuite(t *testing.T) {
 }
 
 func TestStaleCommandInit(t *testing.T) {
-	t.Parallel()
+	// Not parallel: InheritedFlags mutates Cobra flag state on the global command tree.
 	if staleCmd == nil {
 		t.Fatal("staleCmd should be initialized")
 	}

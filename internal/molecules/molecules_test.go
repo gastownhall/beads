@@ -32,12 +32,6 @@ func newTestMoleculeStore(t *testing.T) *dolt.DoltStore {
 
 	_, branchCleanup := testutil.StartTestBranch(t, store.DB(), testSharedDB)
 
-	if err := dolt.CreateIgnoredTables(store.DB()); err != nil {
-		branchCleanup()
-		store.Close()
-		t.Fatalf("CreateIgnoredTables failed: %v", err)
-	}
-
 	t.Cleanup(func() {
 		branchCleanup()
 		store.Close()

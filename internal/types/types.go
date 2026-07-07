@@ -45,6 +45,12 @@ type Issue struct {
 	CloseReason     string     `json:"close_reason,omitempty"`      // Reason provided when closing
 	ClosedBySession string     `json:"closed_by_session,omitempty"` // Claude Code session that closed this issue
 
+	// ===== Leasing (claim TTL + heartbeat; migration 0054) =====
+	// NULL when there is no active lease. row_lock is an internal serialization
+	// mechanism and is intentionally NOT surfaced here.
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"` // When the current claim's lease expires
+	HeartbeatAt    *time.Time `json:"heartbeat_at,omitempty"`     // Last heartbeat from the lease owner
+
 	// ===== Time-Based Scheduling (GH#820) =====
 	DueAt      *time.Time `json:"due_at,omitempty"`      // When this issue should be completed
 	DeferUntil *time.Time `json:"defer_until,omitempty"` // Hide from bd ready until this time
@@ -759,6 +765,13 @@ type IssueDetails struct {
 	Comments     []*Comment                     `json:"comments,omitempty"`
 	Parent       *string                        `json:"parent,omitempty"`
 
+	// Cardinality fields — emitted by default (count-only mode).
+	// Slice fields (Dependents, Comments) are nil when count-only is active.
+	// Use --include-dependents / --include-comments to populate the slices.
+	DependentCount  *int64 `json:"dependent_count,omitempty"`
+	DependencyCount *int64 `json:"dependency_count,omitempty"`
+	CommentCount    *int64 `json:"comment_count,omitempty"`
+
 	// Epic progress fields (populated only for issue_type=epic with children)
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
 	EpicClosedChildren *int  `json:"epic_closed_children,omitempty"`
@@ -999,6 +1012,9 @@ const (
 	EventLabelAdded        EventType = "label_added"
 	EventLabelRemoved      EventType = "label_removed"
 	EventCompacted         EventType = "compacted"
+	// EventLeaseReclaimed records that a stale lease was reverted to ready by
+	// bd reclaim (dead-worker recovery). old_value is the previous owner.
+	EventLeaseReclaimed EventType = "lease_reclaimed"
 )
 
 // BlockedIssue extends Issue with blocking information
@@ -1270,6 +1286,19 @@ type IssueFilter struct {
 	// Hydration options — control which relational data is populated on returned issues.
 	// Labels are always hydrated. Dependencies are not by default (for performance).
 	IncludeDependencies bool // When true, populate Issue.Dependencies with []*Dependency records
+
+	// SkipLabels suppresses label hydration. When true, the labels JOIN is
+	// skipped and Issue.Labels is left nil (callers MUST treat as empty).
+	// Opt-in performance flag for the bd list --skip-labels code path.
+	SkipLabels bool
+
+	// Performance escape hatches
+	SkipWisps  bool // Q2: skip wisps table merge entirely (for callers that never return ephemeral results)
+	NoIDShrink bool // Q3: force Pattern A (full 47-col scan) even when Limit > 0
+
+	Offset   int
+	SortBy   string
+	SortDesc bool
 }
 
 // SortPolicy determines how ready work is ordered
@@ -1298,6 +1327,15 @@ func (s SortPolicy) IsValid() bool {
 		return true
 	}
 	return false
+}
+
+// ReclaimedLease names an issue whose stale lease was reverted to ready by
+// bd reclaim, together with the owner the lease was taken from. Returned so
+// callers (the CLI, a supervisor) can report which dead workers' work was
+// recovered.
+type ReclaimedLease struct {
+	ID            string `json:"id"`
+	PreviousOwner string `json:"previous_owner"`
 }
 
 // WorkFilter is used to filter ready work queries
@@ -1331,8 +1369,9 @@ type WorkFilter struct {
 	IncludeDeferred bool // If true, include issues with future defer_until timestamps
 
 	// Ephemeral issue filtering
-	// By default, GetReadyWork excludes ephemeral issues (wisps).
-	// Set to true to include them (e.g., for merge-request processing).
+	// By default, GetReadyWork excludes ephemeral wisps but includes
+	// no-history wisps because they are durable work items without Dolt history.
+	// Set to true to include ephemeral wisps too (e.g., for merge-request processing).
 	IncludeEphemeral bool
 
 	// Type exclusion: exclude issues with these types from results.
@@ -1343,6 +1382,8 @@ type WorkFilter struct {
 	// Metadata field filtering (GH#1406)
 	MetadataFields map[string]string // Top-level key=value equality; AND semantics (all must match)
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
+
+	Offset int
 }
 
 // StaleFilter is used to filter stale issue queries

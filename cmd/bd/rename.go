@@ -7,6 +7,7 @@ import (
 	"regexp"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -28,8 +29,10 @@ Examples:
   bd rename gt-abc123 gt-auth    # Use descriptive ID
 
 Note: The new ID must use a valid prefix for this database.`,
-	Args: cobra.ExactArgs(2),
-	RunE: runRename,
+	Args:          cobra.ExactArgs(2),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runRename,
 }
 
 func init() {
@@ -37,53 +40,53 @@ func init() {
 }
 
 func runRename(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("rename")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	oldID := args[0]
 	newID := args[1]
 
-	// Validate IDs
 	if oldID == newID {
-		return fmt.Errorf("old and new IDs are the same")
+		return HandleError("old and new IDs are the same")
 	}
 
-	// Basic ID format validation
 	idPattern := regexp.MustCompile(`^[a-z]+-[a-zA-Z0-9._-]+$`)
 	if !idPattern.MatchString(newID) {
-		return fmt.Errorf("invalid new ID format %q: must be prefix-suffix (e.g., bd-dolt)", newID)
+		return HandleError("invalid new ID format %q: must be prefix-suffix (e.g., bd-dolt)", newID)
 	}
 
 	ctx := context.Background()
 	if err := ensureStoreActive(); err != nil {
-		return fmt.Errorf("failed to get storage: %w", err)
+		return HandleError("failed to get storage: %v", err)
 	}
 
-	// Check if old issue exists
 	oldIssue, err := store.GetIssue(ctx, oldID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
-			return fmt.Errorf("issue %s not found", oldID)
+			return HandleError("issue %s not found", oldID)
 		}
-		return fmt.Errorf("failed to get issue %s: %w", oldID, err)
+		return HandleError("failed to get issue %s: %v", oldID, err)
 	}
 
-	// Check if new ID already exists
 	_, err = store.GetIssue(ctx, newID)
 	if err == nil {
-		return fmt.Errorf("issue %s already exists", newID)
+		return HandleError("issue %s already exists", newID)
 	}
 	if !errors.Is(err, storage.ErrNotFound) {
-		return fmt.Errorf("failed to check for existing issue: %w", err)
+		return HandleError("failed to check for existing issue: %v", err)
 	}
 
-	// Update the issue ID
 	oldIssue.ID = newID
 	actor := getActorWithGit()
 	if err := store.UpdateIssueID(ctx, oldID, newID, oldIssue, actor); err != nil {
-		return fmt.Errorf("failed to rename issue: %w", err)
+		return HandleError("failed to rename issue: %v", err)
 	}
 
-	// Update references in other issues
 	if err := updateReferencesInAllIssues(ctx, store, oldID, newID, actor); err != nil {
-		// Non-fatal - the primary rename succeeded
 		fmt.Printf("Warning: failed to update some references: %v\n", err)
 	}
 

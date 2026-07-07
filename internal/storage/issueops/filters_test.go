@@ -1,10 +1,12 @@
 package issueops
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -128,6 +130,43 @@ func TestBuildIssueFilterClauses_ExcludeStatus(t *testing.T) {
 	}
 }
 
+func TestBuildIssueFilterClausesUsesDirectIssueTypePredicates(t *testing.T) {
+	t.Parallel()
+
+	issueType := types.TypeTask
+	clauses, args, err := BuildIssueFilterClauses("", types.IssueFilter{IssueType: &issueType}, WispsFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got := strings.Join(clauses, " AND ")
+	if strings.Contains(got, "id IN (SELECT id FROM wisps WHERE issue_type") {
+		t.Fatalf("issue type filter should not use self-subquery: %s", got)
+	}
+	if !strings.Contains(got, "issue_type = ?") {
+		t.Fatalf("issue type filter missing direct predicate: %s", got)
+	}
+	if !reflect.DeepEqual(args, []interface{}{issueType}) {
+		t.Fatalf("args = %#v", args)
+	}
+
+	clauses, args, err = BuildIssueFilterClauses("", types.IssueFilter{
+		ExcludeTypes: []types.IssueType{types.TypeTask, types.TypeBug},
+	}, WispsFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got = strings.Join(clauses, " AND ")
+	if strings.Contains(got, "id IN (SELECT id FROM wisps WHERE issue_type") {
+		t.Fatalf("issue type exclusion should not use self-subquery: %s", got)
+	}
+	if !strings.Contains(got, "issue_type NOT IN") {
+		t.Fatalf("issue type exclusion missing direct predicate: %s", got)
+	}
+	if !reflect.DeepEqual(args, []interface{}{"task", "bug"}) {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
 func TestBuildIssueFilterClauses_PriorityRange(t *testing.T) {
 	t.Parallel()
 
@@ -176,6 +215,36 @@ func TestBuildIssueFilterClauses_LabelsAny(t *testing.T) {
 	}
 	if len(args) != 3 {
 		t.Errorf("expected 3 args for 3 OR labels, got %d", len(args))
+	}
+}
+
+func TestBuildLabelDrivenSearchUsesLabelJoins(t *testing.T) {
+	t.Parallel()
+
+	filter := types.IssueFilter{
+		Labels:    []string{"bug", "urgent"},
+		LabelsAny: []string{"frontend", "backend"},
+	}
+
+	plan := sqlbuild.BuildLabelDrivenSearch(filter, IssuesFilterTables)
+
+	if !strings.Contains(plan.FromSQL, "JOIN labels label_filter_0 ON label_filter_0.issue_id = issues.id") {
+		t.Fatalf("fromSQL missing first label join: %s", plan.FromSQL)
+	}
+	if !strings.Contains(plan.FromSQL, "JOIN labels label_filter_any ON label_filter_any.issue_id = issues.id") {
+		t.Fatalf("fromSQL missing any-label join: %s", plan.FromSQL)
+	}
+	if got, want := strings.Join(plan.Where, " AND "), "label_filter_0.label = ? AND label_filter_1.label = ? AND label_filter_any.label IN (?, ?)"; got != want {
+		t.Fatalf("where = %q, want %q", got, want)
+	}
+	if !reflect.DeepEqual(plan.Args, []interface{}{"bug", "urgent", "frontend", "backend"}) {
+		t.Fatalf("args = %#v", plan.Args)
+	}
+	if !plan.Distinct {
+		t.Fatal("Distinct = false, want true")
+	}
+	if len(plan.Filter.Labels) != 0 || len(plan.Filter.LabelsAny) != 0 {
+		t.Fatalf("label filters should be removed before generic clause build: %#v", plan.Filter)
 	}
 }
 

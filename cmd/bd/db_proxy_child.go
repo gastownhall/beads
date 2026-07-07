@@ -1,33 +1,34 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/lockfile"
-	"github.com/steveyegge/beads/internal/storage/db/proxy"
-	"github.com/steveyegge/beads/internal/storage/db/server"
-	"github.com/steveyegge/beads/internal/storage/db/util"
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 )
 
-// proxyChildLockHeldExitCode is returned when another proxy already holds
-// proxy.lock — the spawning parent treats this as "lost the spawn race" and
-// loops back to readAndDial. EX_TEMPFAIL by convention.
-const proxyChildLockHeldExitCode = 75
-
 var (
-	dbProxyChildRoot        string
-	dbProxyChildPort        int
-	dbProxyChildIdleTimeout time.Duration
-	dbProxyChildBackend     string
-	dbProxyChildConfig      string
-	dbProxyChildLogPath     string
-	dbProxyChildDoltBin     string
+	dbProxyChildRoot                string
+	dbProxyChildPort                int
+	dbProxyChildIdleTimeout         time.Duration
+	dbProxyChildBackend             string
+	dbProxyChildConfig              string
+	dbProxyChildLogPath             string
+	dbProxyChildDoltBin             string
+	dbProxyChildExternalHost        string
+	dbProxyChildExternalPort        int
+	dbProxyChildExternalSocketPath  string
+	dbProxyChildExternalTLS         bool
+	dbProxyChildExternalTLSCertPath string
+	dbProxyChildExternalTLSKeyPath  string
+	dbProxyChildExternalKeepAlive   time.Duration
 )
 
 var dbProxyChildCmd = &cobra.Command{
@@ -38,9 +39,6 @@ var dbProxyChildCmd = &cobra.Command{
 DatabaseServer. It is spawned by the parent bd process via fork+exec and is
 not intended to be invoked directly by users.`,
 
-	// Skip the root PersistentPreRun/PostRun. Those initialize the bd issue
-	// store, telemetry spans, Dolt auto-commit tracking, etc. — none of which
-	// apply to a long-running proxy daemon with its own lifecycle.
 	PersistentPreRun:  func(cmd *cobra.Command, args []string) {},
 	PersistentPostRun: func(cmd *cobra.Command, args []string) {},
 
@@ -50,19 +48,17 @@ not intended to be invoked directly by users.`,
 			return err
 		}
 
-		// Acquire proxy.lock. If already held, another proxy is alive — exit
-		// cleanly with EX_TEMPFAIL so the spawning parent retries via
-		// readAndDial.
-		lock, err := util.TryLock(filepath.Join(dbProxyChildRoot, "proxy.lock"))
-		if err != nil {
-			if lockfile.IsLocked(err) {
-				os.Exit(proxyChildLockHeldExitCode)
-			}
-			return fmt.Errorf("acquire proxy lock: %w", err)
+		external := configfile.ExternalDoltConfig{
+			Host:            dbProxyChildExternalHost,
+			Port:            dbProxyChildExternalPort,
+			Socket:          dbProxyChildExternalSocketPath,
+			TLSRequired:     dbProxyChildExternalTLS,
+			TLSCert:         dbProxyChildExternalTLSCertPath,
+			TLSKey:          dbProxyChildExternalTLSKeyPath,
+			KeepAlivePeriod: dbProxyChildExternalKeepAlive,
 		}
-		defer lock.Unlock()
 
-		srv, err := newDatabaseServer(backend, dbProxyChildRoot, dbProxyChildConfig, dbProxyChildLogPath, dbProxyChildDoltBin)
+		srv, err := newDatabaseServer(backend, dbProxyChildRoot, dbProxyChildConfig, dbProxyChildLogPath, dbProxyChildDoltBin, external)
 		if err != nil {
 			return err
 		}
@@ -73,15 +69,23 @@ not intended to be invoked directly by users.`,
 			IdleTimeout: dbProxyChildIdleTimeout,
 			Server:      srv,
 		})
-		return p.Start(cmd.Context())
+		if err := p.ListenAndServe(cmd.Context()); err != nil {
+			if errors.Is(err, proxy.ErrLockHeld) {
+				os.Exit(proxy.LockHeldExitCode)
+			}
+			return err
+		}
+		return nil
 	},
 }
 
-func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, doltBin string) (server.DatabaseServer, error) {
+func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, doltBin string, external configfile.ExternalDoltConfig) (server.DatabaseServer, error) {
 	switch backend {
 	case proxy.BackendLocalServer:
 		return server.NewDoltServer(doltBin, rootDir, configPath, logPath, 0)
-	case proxy.BackendExternal, proxy.BackendLocalSharedServer:
+	case proxy.BackendExternal:
+		return server.NewExternalDoltServer(external)
+	case proxy.BackendLocalSharedServer:
 		return nil, fmt.Errorf("backend %q: not yet implemented", backend)
 	}
 	return nil, fmt.Errorf("unknown backend %q", backend)
@@ -90,12 +94,19 @@ func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, dolt
 func init() {
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildRoot, "root", "", "root directory holding proxy.lock, proxy.pid, proxy.log")
 	dbProxyChildCmd.Flags().IntVar(&dbProxyChildPort, "port", 0, "port to listen on")
-	dbProxyChildCmd.Flags().DurationVar(&dbProxyChildIdleTimeout, "idle-timeout", 5*time.Minute, "idle timeout before shutdown (0 disables)")
+	dbProxyChildCmd.Flags().DurationVar(&dbProxyChildIdleTimeout, "idle-timeout", 30*time.Second, "idle timeout before shutdown (0 disables)")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildBackend, "backend", "",
 		"backend kind: "+strings.Join(proxy.KnownBackendNames(), " | "))
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildConfig, "config", "", "path to backend server config (e.g. dolt sql-server YAML)")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildLogPath, "logpath", "", "path the backend server should write its stdout/stderr to")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildDoltBin, "dolt-bin", "", "path to the dolt executable")
+	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalHost, "external-host", "", "external backend: hostname or IP of the dolt sql-server")
+	dbProxyChildCmd.Flags().IntVar(&dbProxyChildExternalPort, "external-port", 0, "external backend: TCP port of the dolt sql-server")
+	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalSocketPath, "external-socket-path", "", "external backend: absolute path to a unix domain socket (overrides host/port)")
+	dbProxyChildCmd.Flags().BoolVar(&dbProxyChildExternalTLS, "external-tls", false, "external backend: require TLS in the MySQL handshake")
+	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalTLSCertPath, "external-tls-cert-path", "", "external backend: absolute path to client TLS certificate (mTLS)")
+	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalTLSKeyPath, "external-tls-key-path", "", "external backend: absolute path to client TLS private key (mTLS)")
+	dbProxyChildCmd.Flags().DurationVar(&dbProxyChildExternalKeepAlive, "external-keep-alive", 0, "external backend: TCP keepalive period (default 30s)")
 	_ = dbProxyChildCmd.MarkFlagRequired("root")
 	_ = dbProxyChildCmd.MarkFlagRequired("port")
 	_ = dbProxyChildCmd.MarkFlagRequired("backend")

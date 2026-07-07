@@ -1,0 +1,4 @@
+-- Reverse migration 0037: not reversible. AUTO_INCREMENT BIGINT IDs are
+-- assigned at INSERT time and have no relationship to the UUIDs that replaced
+-- them. Reverting would lose all foreign references to the original IDs.
+-- Intentional no-op.

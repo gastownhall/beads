@@ -169,6 +169,66 @@ func TestInitialize_WorktreeFallbackUsesMainRepoConfig(t *testing.T) {
 	}
 }
 
+func TestInitialize_IgnoresWorktreeFallbackConfigWhenRequested(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	_, _, mainConfigPath := setupConfigWorktree(t)
+	if err := os.WriteFile(mainConfigPath, []byte("json: true\nactor: shared-user\n"), 0o644); err != nil {
+		t.Fatalf("failed to write main config.yaml: %v", err)
+	}
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetBool("json"); got {
+		t.Fatalf("GetBool(json) = %v, want false when worktree fallback config is ignored", got)
+	}
+	if got := GetString("actor"); got != "" {
+		t.Fatalf("GetString(actor) = %q, want empty default when worktree fallback config is ignored", got)
+	}
+	if got := ConfigFileUsed(); got != "" {
+		t.Fatalf("ConfigFileUsed() = %q, want empty when worktree fallback config is ignored", got)
+	}
+}
+
+func TestInitialize_BEADS_DIRDoesNotMergeWorktreeFallbackConfig(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	_, _, mainConfigPath := setupConfigWorktree(t)
+	if err := os.WriteFile(mainConfigPath, []byte("json: true\nactor: shared-user\n"), 0o644); err != nil {
+		t.Fatalf("failed to write main config.yaml: %v", err)
+	}
+
+	runtimeBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(runtimeBeadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create runtime .beads dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeBeadsDir, "config.yaml"), []byte("actor: runtime-user\n"), 0o644); err != nil {
+		t.Fatalf("failed to write runtime config.yaml: %v", err)
+	}
+	t.Setenv("BEADS_DIR", runtimeBeadsDir)
+
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetBool("json"); got {
+		t.Fatalf("GetBool(json) = %v, want false because worktree fallback config must not merge under BEADS_DIR", got)
+	}
+	if got := GetString("actor"); got != "runtime-user" {
+		t.Fatalf("GetString(actor) = %q, want %q", got, "runtime-user")
+	}
+	if got := filepath.Clean(ConfigFileUsed()); got != filepath.Clean(filepath.Join(runtimeBeadsDir, "config.yaml")) {
+		t.Fatalf("ConfigFileUsed() = %q, want runtime BEADS_DIR config", got)
+	}
+}
+
 func TestInitialize_WorktreeFallbackMergesSharedLocalOverride(t *testing.T) {
 	restore := envSnapshot(t)
 	defer restore()

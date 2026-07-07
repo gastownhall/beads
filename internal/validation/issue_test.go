@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -105,6 +106,72 @@ func TestNotPinned(t *testing.T) {
 			err := NotPinned(tt.force)("bd-test", tt.issue)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("NotPinned() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestAssigneeMatches(t *testing.T) {
+	tests := []struct {
+		name        string
+		issue       *types.Issue
+		actor       string
+		force       bool
+		wantErr     bool
+		wantErrFrag string
+	}{
+		{
+			name:    "nil issue passes (delegated check)",
+			issue:   nil,
+			actor:   "alice",
+			wantErr: false,
+		},
+		{
+			name:    "unassigned issue passes for any actor",
+			issue:   &types.Issue{ID: "bd-test", Assignee: ""},
+			actor:   "alice",
+			wantErr: false,
+		},
+		{
+			name:    "matching assignee passes",
+			issue:   &types.Issue{ID: "bd-test", Assignee: "alice"},
+			actor:   "alice",
+			wantErr: false,
+		},
+		{
+			name:        "mismatched assignee without force fails",
+			issue:       &types.Issue{ID: "bd-test", Assignee: "bob"},
+			actor:       "alice",
+			force:       false,
+			wantErr:     true,
+			wantErrFrag: "assignee is",
+		},
+		{
+			name:    "mismatched assignee with force passes",
+			issue:   &types.Issue{ID: "bd-test", Assignee: "bob"},
+			actor:   "alice",
+			force:   true,
+			wantErr: false,
+		},
+		{
+			name:        "empty actor with assigned bead fails",
+			issue:       &types.Issue{ID: "bd-test", Assignee: "bob"},
+			actor:       "",
+			wantErr:     true,
+			wantErrFrag: "assignee is",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := AssigneeMatches(tt.actor, tt.force)("bd-test", tt.issue)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("AssigneeMatches() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErrFrag != "" && err != nil {
+				if !strings.Contains(err.Error(), tt.wantErrFrag) {
+					t.Errorf("AssigneeMatches() error %q should contain %q", err.Error(), tt.wantErrFrag)
+				}
 			}
 		})
 	}

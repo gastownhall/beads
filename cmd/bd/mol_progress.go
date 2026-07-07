@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -29,46 +30,49 @@ Output includes:
 
 Example:
   bd mol progress bd-hanoi-xyz`,
-	Args: cobra.MaximumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.MaximumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("mol-progress")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 
-		// mol progress requires direct store access
 		if store == nil {
-			FatalError("no database connection")
+			return HandleErrorRespectJSON("no database connection")
 		}
 
 		var moleculeID string
 		if len(args) == 1 {
-			// Explicit molecule ID given
 			resolved, err := utils.ResolvePartialID(ctx, store, args[0])
 			if err != nil {
-				FatalError("molecule '%s' not found", args[0])
+				return HandleErrorRespectJSON("molecule '%s' not found", args[0])
 			}
 			moleculeID = resolved
 		} else {
-			// Infer from in_progress work - use lightweight discovery
 			moleculeIDs := findInProgressMoleculeIDs(ctx, store, actor)
 			if len(moleculeIDs) == 0 {
 				if jsonOutput {
-					outputJSON([]interface{}{})
-					return
+					return outputJSON([]interface{}{})
 				}
 				fmt.Println("No molecules in progress.")
 				fmt.Println("\nUse: bd mol progress <molecule-id>")
-				return
+				return nil
 			}
-			// Show progress for first molecule
 			moleculeID = moleculeIDs[0]
 		}
 
 		stats, err := store.GetMoleculeProgress(ctx, moleculeID)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		if jsonOutput {
-			// Add computed fields for JSON output
 			output := map[string]interface{}{
 				"molecule_id":     stats.MoleculeID,
 				"molecule_title":  stats.MoleculeTitle,
@@ -92,12 +96,11 @@ Example:
 					}
 				}
 			}
-			outputJSON(output)
-			return
+			return outputJSON(output)
 		}
 
-		// Human-readable output
 		printMoleculeProgressStats(stats)
+		return nil
 	},
 }
 
