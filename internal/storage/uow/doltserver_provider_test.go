@@ -20,10 +20,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// shutdownOnInterrupt installs a SIGINT/SIGTERM handler that runs
-// proxy.Shutdown(rootDir) and exits, so the proxy and child dolt sql-server
-// don't survive an early test abort (e.g. Ctrl+C). The handler is removed via
-// t.Cleanup on normal test completion.
 func shutdownOnInterrupt(t *testing.T, rootDir string) {
 	t.Helper()
 	ch := make(chan os.Signal, 1)
@@ -111,8 +107,74 @@ func TestNewDoltServerUOWProvider_HappyPath(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, provider)
-	impl := provider.(*doltServerProvider)
-	t.Cleanup(func() { _ = impl.db.Close() })
+	t.Cleanup(func() { _ = provider.Close(context.Background()) })
+}
+
+func TestNewDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+	bin, err := exec.LookPath("dolt")
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+
+	t.Setenv("HOME", t.TempDir())
+
+	port, err := proxy.PickFreePort()
+	require.NoError(t, err)
+	storeRootDir := t.TempDir()
+	shutdownOnInterrupt(t, storeRootDir)
+	t.Cleanup(func() {
+		if err := proxy.Shutdown(storeRootDir); err != nil {
+			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
+		}
+	})
+	cfgPath := writeServerConfig(t, port)
+	logPath := filepath.Join(t.TempDir(), "server.log")
+
+	const concurrency = 10
+	type result struct {
+		provider UnitOfWorkProvider
+		err      error
+	}
+	results := make([]result, concurrency)
+
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for i := 0; i < concurrency; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			p, err := NewDoltServerUOWProvider(
+				context.Background(),
+				storeRootDir,
+				"beads",
+				logPath,
+				cfgPath,
+				proxy.BackendLocalServer,
+				"root",
+				"",
+				bin,
+			)
+			results[i] = result{provider: p, err: err}
+		}()
+	}
+	wg.Wait()
+
+	t.Cleanup(func() {
+		for _, r := range results {
+			if r.provider != nil {
+				_ = r.provider.Close(context.Background())
+			}
+		}
+	})
+
+	for i, r := range results {
+		assert.NoErrorf(t, r.err, "provider %d", i)
+		assert.NotNilf(t, r.provider, "provider %d", i)
+	}
 }
 
 var (

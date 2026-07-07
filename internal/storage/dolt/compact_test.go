@@ -788,3 +788,81 @@ func TestGetTier1Candidates_DependentCount(t *testing.T) {
 		t.Errorf("expected dependent_count 1, got %d", candidates[0].DependentCount)
 	}
 }
+
+func TestSnapshotRestoreRoundTrip(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:                 "snap-rt",
+		Title:              "Round Trip",
+		Description:        "the original description",
+		Design:             "the original design",
+		Notes:              "the original notes",
+		AcceptanceCriteria: "the original acceptance criteria",
+		Status:             types.StatusOpen,
+		Priority:           2,
+		IssueType:          types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	// No snapshot yet.
+	if snap, err := store.GetCompactionSnapshot(ctx, issue.ID); err != nil || snap != nil {
+		t.Fatalf("expected no snapshot, got snap=%v err=%v", snap, err)
+	}
+
+	// Archive, then simulate the destructive compaction overwrite.
+	if err := store.SnapshotIssue(ctx, issue.ID, 1); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	updates := map[string]interface{}{
+		"description": "summary", "design": "", "notes": "", "acceptance_criteria": "",
+	}
+	if err := store.UpdateIssue(ctx, issue.ID, updates, "compactor"); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	if err := store.ApplyCompaction(ctx, issue.ID, 1, 100, 7, "deadbeef"); err != nil {
+		t.Fatalf("apply compaction: %v", err)
+	}
+
+	// Snapshot preserves the originals.
+	snap, err := store.GetCompactionSnapshot(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("get snapshot: %v", err)
+	}
+	if snap == nil {
+		t.Fatalf("expected snapshot after archiving")
+	}
+	if snap.Description != "the original description" || snap.Design != "the original design" ||
+		snap.Notes != "the original notes" || snap.AcceptanceCriteria != "the original acceptance criteria" {
+		t.Fatalf("snapshot content mismatch: %+v", snap)
+	}
+	if snap.CompactionLevel != 1 {
+		t.Fatalf("expected snapshot level 1, got %d", snap.CompactionLevel)
+	}
+
+	// Restore writes the originals back and clears compaction bookkeeping.
+	applied, err := store.RestoreFromSnapshot(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if applied == nil {
+		t.Fatalf("expected restore to apply a snapshot")
+	}
+	got, err := store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("get restored issue: %v", err)
+	}
+	if got.Description != "the original description" || got.Design != "the original design" ||
+		got.Notes != "the original notes" || got.AcceptanceCriteria != "the original acceptance criteria" {
+		t.Fatalf("restored content mismatch: %+v", got)
+	}
+	if got.CompactionLevel != 0 {
+		t.Fatalf("expected compaction_level reset to 0, got %d", got.CompactionLevel)
+	}
+}

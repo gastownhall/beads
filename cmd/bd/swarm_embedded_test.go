@@ -13,17 +13,19 @@ import (
 )
 
 // bdSwarm runs "bd swarm" with the given args and returns raw stdout.
+// Stderr (warnings, tips) is captured separately so it does not pollute
+// callers that parse stdout.
 func bdSwarm(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"swarm"}, args...)
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd swarm %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd swarm %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdSwarmFail runs "bd swarm" expecting failure.
@@ -41,6 +43,7 @@ func bdSwarmFail(t *testing.T, bd, dir string, args ...string) string {
 }
 
 // bdSwarmJSON runs "bd swarm" with --json and parses the result as a map.
+// Stderr is captured separately so warnings do not corrupt JSON parsing.
 func bdSwarmJSON(t *testing.T, bd, dir string, args ...string) map[string]interface{} {
 	t.Helper()
 	fullArgs := append([]string{"swarm"}, args...)
@@ -48,18 +51,18 @@ func bdSwarmJSON(t *testing.T, bd, dir string, args ...string) map[string]interf
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd swarm --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd swarm --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(stdout.String())
 	start := strings.IndexAny(s, "{[")
 	if start < 0 {
-		t.Fatalf("no JSON in swarm output: %s", s)
+		t.Fatalf("no JSON in swarm stdout: %s\nstderr:\n%s", s, stderr.String())
 	}
 	var m map[string]interface{}
 	if err := json.Unmarshal([]byte(s[start:]), &m); err != nil {
-		t.Fatalf("parse swarm JSON: %v\n%s", err, s)
+		t.Fatalf("parse swarm JSON: %v\n%s\nstderr:\n%s", err, s, stderr.String())
 	}
 	return m
 }
@@ -213,14 +216,14 @@ func TestEmbeddedSwarm(t *testing.T) {
 		cmd := exec.Command(bd, fullArgs...)
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("swarm list --json failed: %v\n%s", err, out)
+			t.Fatalf("swarm list --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		// Should be valid JSON
-		s := strings.TrimSpace(string(out))
+		// Should be valid JSON on stdout (warnings, if any, are on stderr).
+		s := strings.TrimSpace(stdout.String())
 		if !strings.HasPrefix(s, "{") && !strings.HasPrefix(s, "[") {
-			t.Errorf("expected JSON output: %s", s)
+			t.Errorf("expected JSON output on stdout: %s\nstderr: %s", s, stderr.String())
 		}
 	})
 

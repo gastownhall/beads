@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -263,4 +264,124 @@ func bdListJSONAllowError(t *testing.T, bd, dir string, args ...string) []*types
 		return nil
 	}
 	return issues
+}
+
+// TestEmbeddedAutoImportFallback_ConflictSkip_DoesNotClobber asserts the
+// GH#3955 Layer 2 guarantee against a real embedded store: the auto-import
+// server-mode fallback importer (importFromLocalJSONLConflictSkip, the
+// production fallbackImporter) never overwrites an existing issue row.
+//
+// We invoke it directly against a NON-empty store — deliberately modelling
+// a regressed emptiness guard — and verify the live row is untouched while
+// a brand-new id from the JSONL is still inserted.
+func TestEmbeddedAutoImportFallback_ConflictSkip_DoesNotClobber(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cs")
+
+	live := bdCreate(t, bd, dir, "live issue title", "--type", "task")
+	if live.ID == "" {
+		t.Fatal("expected a created issue ID")
+	}
+
+	const newID = "cs-new-9999"
+	now := time.Now().UTC()
+	jsonlIssues := []types.Issue{
+		// Mutated copy of the live issue: UPSERT would clobber it.
+		{ID: live.ID, Title: "CLOBBERED", Status: types.StatusClosed, Priority: 0, IssueType: types.TypeBug, CreatedAt: now, UpdatedAt: now},
+		// Brand-new issue: must still be inserted.
+		{ID: newID, Title: "freshly imported", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+	}
+	var lines []string
+	for _, issue := range jsonlIssues {
+		b, err := json.Marshal(issue)
+		if err != nil {
+			t.Fatalf("marshal fixture: %v", err)
+		}
+		lines = append(lines, string(b))
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openStore(t, beadsDir, "cs")
+	ctx := context.Background()
+
+	// Exactly the code path fallbackImporter points at; running it on a
+	// non-empty store models a guard regression (GH#3955 / PR #3630).
+	if _, err := importFromLocalJSONLConflictSkip(ctx, store, jsonlPath); err != nil {
+		t.Fatalf("importFromLocalJSONLConflictSkip: %v", err)
+	}
+
+	got, err := store.GetIssue(ctx, live.ID)
+	if err != nil {
+		t.Fatalf("GetIssue(%s): %v", live.ID, err)
+	}
+	if got.Title != "live issue title" {
+		t.Errorf("live issue title was clobbered: got %q, want %q", got.Title, "live issue title")
+	}
+	if got.Status != types.StatusOpen {
+		t.Errorf("live issue status was clobbered: got %q, want %q", got.Status, types.StatusOpen)
+	}
+
+	inserted, err := store.GetIssue(ctx, newID)
+	if err != nil {
+		t.Fatalf("brand-new issue %s was not inserted by conflict-skip import: %v", newID, err)
+	}
+	if inserted.Title != "freshly imported" {
+		t.Errorf("new issue title: got %q, want %q", inserted.Title, "freshly imported")
+	}
+}
+
+// TestEmbeddedAutoImportFallback_ConflictSkip_EmptyDBImportsAll is the
+// negative control for GH#3955: conflict-skip must NOT regress the
+// legitimate upgrade-recovery path. Against an empty store the fallback
+// still imports every issue from the JSONL.
+func TestEmbeddedAutoImportFallback_ConflictSkip_EmptyDBImportsAll(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	_, beadsDir, _ := bdInit(t, bd, "--prefix", "ce")
+
+	now := time.Now().UTC()
+	jsonlIssues := []types.Issue{
+		{ID: "ce-1", Title: "recovered one", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		{ID: "ce-2", Title: "recovered two", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeBug, CreatedAt: now, UpdatedAt: now},
+	}
+	var lines []string
+	for _, issue := range jsonlIssues {
+		b, err := json.Marshal(issue)
+		if err != nil {
+			t.Fatalf("marshal fixture: %v", err)
+		}
+		lines = append(lines, string(b))
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := openStore(t, beadsDir, "ce")
+	ctx := context.Background()
+
+	res, err := importFromLocalJSONLConflictSkip(ctx, store, jsonlPath)
+	if err != nil {
+		t.Fatalf("importFromLocalJSONLConflictSkip: %v", err)
+	}
+	if res.Issues != 2 {
+		t.Errorf("expected 2 issues imported, got %d", res.Issues)
+	}
+	for _, id := range []string{"ce-1", "ce-2"} {
+		if _, err := store.GetIssue(ctx, id); err != nil {
+			t.Errorf("empty-DB recovery dropped issue %s: %v", id, err)
+		}
+	}
 }

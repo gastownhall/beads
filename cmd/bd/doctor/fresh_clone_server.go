@@ -105,3 +105,40 @@ func freshCloneServerResult(dbExists bool, dbName, host string, port int, syncRe
 		Fix:     fix,
 	}
 }
+
+// freshCloneServerUnreachableResult builds the DoctorCheck for the case where
+// dolt_mode=server is configured but the server cannot be reached (TCP refused,
+// TLS mismatch, auth failure, etc.). Falling through to the legacy "Fresh clone
+// detected (no database)" warning is misleading in server mode because the
+// absence of a local database is expected — see GH#35.
+//
+// The message identifies that we're in server mode, points at the configured
+// host:port, surfaces the underlying connection error for diagnostics, and
+// suggests connectivity/credential checks rather than bd bootstrap (which
+// won't help when the server itself is unreachable).
+func freshCloneServerUnreachableResult(dbName, host string, port int, connErr error) DoctorCheck {
+	var msg strings.Builder
+	fmt.Fprintf(&msg, "Dolt server unreachable at %s:%d (database %q, server mode configured).", host, port, dbName)
+	msg.WriteString(" The local database directory is not expected in server mode, so this is not a fresh clone — it's a connectivity or auth problem.")
+
+	var detail strings.Builder
+	detail.WriteString("dolt_mode=server is configured but the doctor check could not reach the server.\n")
+	detail.WriteString("  In server mode, beads stores data on the Dolt server, so no local .beads/dolt directory is expected.\n")
+	if connErr != nil {
+		fmt.Fprintf(&detail, "  Underlying error: %v\n", connErr)
+	}
+	detail.WriteString("  Common causes: server not running, wrong host/port, TLS misconfiguration, or invalid credentials.")
+
+	return DoctorCheck{
+		Name:    "Fresh Clone",
+		Status:  StatusWarning,
+		Message: msg.String(),
+		Detail:  detail.String(),
+		Fix: "Verify Dolt server connectivity:\n" +
+			"  1. Confirm the server is running and reachable from this host\n" +
+			"  2. Check .beads/metadata.json: dolt_server_host, dolt_server_port, dolt_server_tls\n" +
+			"  3. Verify credentials in ~/.config/beads/credentials (or BEADS_DOLT_PASSWORD)\n" +
+			"  4. Try a CRUD command (e.g. 'bd ready') to confirm the server is usable\n" +
+			"  5. Re-run 'bd doctor' once connectivity is restored",
+	}
+}

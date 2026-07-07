@@ -1214,6 +1214,17 @@ func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
 	if !strings.Contains(yaml, syncRemote) {
 		t.Errorf("config.yaml does not contain sync remote URL %q:\n%s", syncRemote, yaml)
 	}
+
+	gitignoreBytes, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore"))
+	if err != nil {
+		t.Fatalf(".beads/.gitignore missing after finalize: %v", err)
+	}
+	gitignore := string(gitignoreBytes)
+	for _, pattern := range []string{".local_version", "backup/", "export-state.json", "last-touched"} {
+		if !strings.Contains(gitignore, pattern) {
+			t.Errorf(".beads/.gitignore missing runtime pattern %q:\n%s", pattern, gitignore)
+		}
+	}
 }
 
 func TestFinalizeSyncedBootstrap_WorktreeStubDoesNotShadowTargetConfig(t *testing.T) {

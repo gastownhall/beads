@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -26,9 +27,18 @@ A comment is added recording the promotion and optional reason.
 Examples:
   bd promote bd-wisp-abc123
   bd promote bd-wisp-abc123 --reason "Worth tracking long-term"`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("promote")
+
+		evt := metrics.NewCommandEvent("promote")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
 
 		id := args[0]
 		reason, _ := cmd.Flags().GetString("reason")
@@ -36,34 +46,29 @@ Examples:
 		ctx := rootCtx
 
 		if store == nil {
-			FatalErrorWithHint("database not initialized",
-				diagHint())
+			return HandleErrorWithHint("database not initialized", diagHint())
 		}
 
 		fullID, err := utils.ResolvePartialID(ctx, store, id)
 		if err != nil {
-			FatalErrorRespectJSON("resolving %s: %v", id, err)
+			return HandleErrorRespectJSON("resolving %s: %v", id, err)
 		}
 
-		// Verify the issue is actually a wisp
 		issue, err := store.GetIssue(ctx, fullID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
-				FatalErrorRespectJSON("issue %s not found", fullID)
+				return HandleErrorRespectJSON("issue %s not found", fullID)
 			}
-			FatalErrorRespectJSON("getting issue %s: %v", fullID, err)
+			return HandleErrorRespectJSON("getting issue %s: %v", fullID, err)
 		}
 		if !issue.Ephemeral {
-			FatalErrorRespectJSON("%s is not a wisp (already persistent)", fullID)
+			return HandleErrorRespectJSON("%s is not a wisp (already persistent)", fullID)
 		}
 
-		// Promote: copy from wisps to issues table, preserving labels/deps/events/comments
 		if err := store.PromoteFromEphemeral(ctx, fullID, actor); err != nil {
-			FatalErrorRespectJSON("promoting %s: %v", fullID, err)
+			return HandleErrorRespectJSON("promoting %s: %v", fullID, err)
 		}
 
-		// Add promotion comment (issue is now in permanent table, AddComment routes correctly
-		// via GetIssue fallback)
 		comment := "Promoted from wisp to permanent bead"
 		if reason != "" {
 			comment += ": " + reason
@@ -77,11 +82,12 @@ Examples:
 		if jsonOutput {
 			updated, _ := store.GetIssue(ctx, fullID)
 			if updated != nil {
-				outputJSON(updated)
+				return outputJSON(updated)
 			}
-		} else {
-			fmt.Printf("%s Promoted %s to permanent bead\n", ui.RenderPass("✓"), fullID)
+			return nil
 		}
+		fmt.Printf("%s Promoted %s to permanent bead\n", ui.RenderPass("✓"), fullID)
+		return nil
 	},
 }
 

@@ -12,6 +12,11 @@ Generated from `bd help --doc backup`
 
 Back up your beads database for off-machine recovery.
 
+This is a Dolt-native database backup. It preserves the database state,
+including tables, branches, commit history, and working-set data. This is
+different from 'bd export', which writes issue records to JSONL for migration
+and interoperability.
+
 Commands:
   bd backup init &lt;path&gt;    Set up a backup destination (filesystem or DoltHub)
   bd backup sync           Push to configured backup destination
@@ -69,6 +74,10 @@ Restore the beads database from a Dolt-native backup.
 
 By default, reads from .beads/backup/ (or the configured backup directory).
 Optionally specify a path to a directory containing a Dolt backup.
+
+This restores a full database backup created by 'bd backup sync' or an
+equivalent Dolt backup. JSONL files produced by 'bd export' are issue exports,
+not restore targets for this command.
 
 Use --force to overwrite an existing database with the backup contents.
 

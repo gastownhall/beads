@@ -1,6 +1,8 @@
-# GitHub Copilot Integration Guide
+# GitHub Copilot VS Code MCP Integration Guide
 
-This guide explains how to use beads with GitHub Copilot in VS Code.
+This guide explains how to use beads with GitHub Copilot in **VS Code via MCP**.
+
+For the **GitHub Copilot CLI** integration installed by `bd setup copilot`, see [COPILOT_CLI_INTEGRATION.md](COPILOT_CLI_INTEGRATION.md).
 
 ## Overview
 

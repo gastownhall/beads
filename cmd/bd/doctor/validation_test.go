@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -454,7 +455,7 @@ func TestCheckChildParentDependenciesDB_BlockingDetected(t *testing.T) {
 
 	// Add blocking dependency: child depends on parent
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) VALUES (?, ?, 'blocks', NOW(), 'test')`,
+		`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, 'blocks', NOW(), 'test')`,
 		childID, parent.ID)
 	if err != nil {
 		t.Fatalf("Failed to insert dependency: %v", err)
@@ -494,7 +495,7 @@ func TestCheckChildParentDependenciesDB_NonBlockingIgnored(t *testing.T) {
 
 	// Add parent-child type dependency (NOT blocking — should be ignored)
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) VALUES (?, ?, 'parent-child', NOW(), 'test')`,
+		`INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, 'parent-child', NOW(), 'test')`,
 		childID, parent.ID)
 	if err != nil {
 		t.Fatalf("Failed to insert dependency: %v", err)
@@ -504,6 +505,104 @@ func TestCheckChildParentDependenciesDB_NonBlockingIgnored(t *testing.T) {
 
 	if check.Status != StatusOK {
 		t.Errorf("Status = %q, want %q (parent-child type should be ignored)", check.Status, StatusOK)
+	}
+}
+
+func TestCheckOrphanedDependenciesDB_IssueToWispTargetIsNotOrphan(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	issue := &types.Issue{ID: "test-mixed-source", Title: "Source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("CreateIssue source: %v", err)
+	}
+
+	wisp := &types.Issue{ID: "test-wisp-target", Title: "Target wisp", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, NoHistory: true}
+	if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
+		t.Fatalf("CreateIssue wisp: %v", err)
+	}
+
+	dep := &types.Dependency{
+		IssueID:     issue.ID,
+		DependsOnID: wisp.ID,
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("AddDependency issue->wisp: %v", err)
+	}
+
+	check := checkOrphanedDependenciesDB(store.DB())
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q; detail=%s", check.Status, StatusOK, check.Detail)
+	}
+}
+
+func TestCheckOrphanedDependenciesDB_WispDependencyMissingTargetDetected(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	wisp := &types.Issue{ID: "test-wisp-source", Title: "Source wisp", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, NoHistory: true}
+	if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
+		t.Fatalf("CreateIssue wisp: %v", err)
+	}
+
+	db := store.DB()
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by)
+		 VALUES (UUID(), ?, ?, 'blocks', NOW(), 'test')`,
+		wisp.ID, "test-missing-target")
+	if err != nil {
+		t.Fatalf("insert wisp orphan dependency: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkOrphanedDependenciesDB(db)
+	if check.Status != StatusWarning {
+		t.Fatalf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if !strings.Contains(check.Detail, wisp.ID+"→test-missing-target") {
+		t.Fatalf("Detail = %q, want missing wisp dependency", check.Detail)
+	}
+}
+
+func TestCheckChildParentDependenciesDB_WispChildBlockingParentDetected(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	parent := &types.Issue{ID: "test-parent", Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("CreateIssue parent: %v", err)
+	}
+
+	child := &types.Issue{ID: "test-parent.1", Title: "Child wisp", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, NoHistory: true}
+	if err := store.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("CreateIssue child wisp: %v", err)
+	}
+
+	dep := &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: parent.ID,
+		Type:        types.DepBlocks,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("AddDependency wisp child->parent: %v", err)
+	}
+
+	check := checkChildParentDependenciesDB(store.DB())
+	if check.Status != StatusWarning {
+		t.Fatalf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+	if !strings.Contains(check.Detail, child.ID+"→"+parent.ID) {
+		t.Fatalf("Detail = %q, want child-parent dependency", check.Detail)
 	}
 }
 

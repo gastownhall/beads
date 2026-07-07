@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/linear"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
@@ -138,7 +139,9 @@ Examples:
   bd linear sync --push --parent=bd-abc123      # Push one ticket tree
   bd linear sync --dry-run                      # Preview without changes
   bd linear sync --prefer-local                 # Bidirectional, local wins`,
-	Run: runLinearSync,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runLinearSync,
 }
 
 // linearStatusCmd shows the current sync status.
@@ -150,7 +153,9 @@ var linearStatusCmd = &cobra.Command{
   - Configuration status
   - Number of issues with Linear links
   - Issues pending push (no external_ref)`,
-	Run: runLinearStatus,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runLinearStatus,
 }
 
 // linearTeamsCmd lists available teams.
@@ -164,7 +169,9 @@ Use this to find the team ID (UUID) needed for configuration.
 Example:
   bd linear teams
   bd config set linear.team_id "12345678-1234-1234-1234-123456789abc"`,
-	Run: runLinearTeams,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runLinearTeams,
 }
 
 func init() {
@@ -194,7 +201,14 @@ func init() {
 	rootCmd.AddCommand(linearCmd)
 }
 
-func runLinearSync(cmd *cobra.Command, args []string) {
+func runLinearSync(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("linear-sync")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	pull, _ := cmd.Flags().GetBool("pull")
 	push, _ := cmd.Flags().GetBool("push")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -212,46 +226,40 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	threshold, _ := cmd.Flags().GetDuration("threshold")
 	noWait, _ := cmd.Flags().GetBool("no-wait")
 
-	// Handle --pull-if-stale: skip pull if data is fresh
 	if pullIfStale {
 		beadsDir := resolveBeadsDirForStaleness()
 		if beadsDir != "" {
-			// Debounce: if a pull completed within 5 minutes, always fresh
 			if linear.IsWithinDebounce(beadsDir) {
 				info := linear.GetStalenessInfo(beadsDir, threshold)
 				if jsonOutput {
-					outputJSON(map[string]interface{}{
+					return outputJSON(map[string]interface{}{
 						"is_fresh":  true,
 						"last_pull": info.LastPull.Format(time.RFC3339),
 						"age":       linear.FormatAge(info.Age),
 						"skipped":   true,
 					})
-				} else {
-					fmt.Printf("Linear data is fresh (last pull %s ago, within debounce)\n", linear.FormatAge(info.Age))
 				}
-				return
+				fmt.Printf("Linear data is fresh (last pull %s ago, within debounce)\n", linear.FormatAge(info.Age))
+				return nil
 			}
 
 			if !linear.IsPullStale(beadsDir, threshold) {
 				info := linear.GetStalenessInfo(beadsDir, threshold)
 				if jsonOutput {
-					outputJSON(map[string]interface{}{
+					return outputJSON(map[string]interface{}{
 						"is_fresh":  true,
 						"last_pull": info.LastPull.Format(time.RFC3339),
 						"age":       linear.FormatAge(info.Age),
 						"skipped":   true,
 					})
-				} else {
-					fmt.Printf("Linear data is fresh (last pull %s ago)\n", linear.FormatAge(info.Age))
 				}
-				return
+				fmt.Printf("Linear data is fresh (last pull %s ago)\n", linear.FormatAge(info.Age))
+				return nil
 			}
 		}
-		// Data is stale — proceed with pull
 		pull = true
 	}
 
-	// Acquire per-workspace concurrency lock to serialize sync invocations.
 	if lockDir := beads.FindBeadsDir(); lockDir != "" {
 		wait := !noWait
 		if !wait {
@@ -263,12 +271,12 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 		if err != nil {
 			if held, ok := err.(*linear.SyncLockHeldError); ok {
 				if held.Info != nil {
-					FatalError("another bd linear sync is already running (PID %d, started %s)",
+					return HandleError("another bd linear sync is already running (PID %d, started %s)",
 						held.Info.PID, held.Info.Started.Format("15:04:05"))
 				}
-				FatalError("another bd linear sync is already running")
+				return HandleError("another bd linear sync is already running")
 			}
-			FatalError("acquiring sync lock: %v", err)
+			return HandleError("acquiring sync lock: %v", err)
 		}
 		defer func() {
 			if err := syncLock.Release(); err != nil {
@@ -282,55 +290,50 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	}
 
 	if preferLocal && preferLinear {
-		FatalError("cannot use both --prefer-local and --prefer-linear")
+		return HandleErrorRespectJSON("cannot use both --prefer-local and --prefer-linear")
 	}
 	if milestones && push && !pull {
-		FatalError("--milestones only applies when pulling from Linear")
+		return HandleErrorRespectJSON("--milestones only applies when pulling from Linear")
 	}
 
 	if err := ensureStoreActive(); err != nil {
-		FatalError("database not available: %v", err)
+		return HandleErrorRespectJSON("database not available: %v", err)
 	}
 
 	if err := validateLinearConfig(cliTeams); err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	ctx := rootCtx
 	teamIDs := getLinearTeamIDs(ctx, cliTeams)
 	willPush := push || !pull
 
-	// Require explicit --team for push when multiple teams are configured.
 	if willPush && len(teamIDs) > 1 && len(cliTeams) == 0 {
-		FatalError("push requires explicit --team flag when multiple teams are configured\n" +
+		return HandleErrorRespectJSON("push requires explicit --team flag when multiple teams are configured\n" +
 			"Use: bd linear sync --push --team <TEAM_ID>")
 	}
 
-	// Create and initialize the Linear tracker
 	lt := &linear.Tracker{}
 	lt.SetTeamIDs(teamIDs)
 	if err := lt.Init(ctx, store); err != nil {
-		FatalError("initializing Linear tracker: %v", err)
+		return HandleErrorRespectJSON("initializing Linear tracker: %v", err)
 	}
 	if willPush {
 		if err := lt.ValidatePushStateMappings(ctx); err != nil {
-			FatalError("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 	}
 
-	// Create the sync engine
 	engine := tracker.NewEngine(lt, store, actor)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
-	// Set up Linear-specific pull hooks
 	engine.PullHooks = buildLinearPullHooks(ctx, linearPullHookOptions{
 		Milestones: milestones,
 		DryRun:     dryRun,
 		Actor:      actor,
 	})
 
-	// Build sync options from CLI flags
 	opts := tracker.SyncOptions{
 		Pull:       pull,
 		Push:       push,
@@ -340,7 +343,6 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	}
 	opts.DependencySources = linearPullDependencySources(relations)
 
-	// Convert type filters
 	for _, t := range typeFilters {
 		opts.TypeFilter = append(opts.TypeFilter, types.IssueType(strings.ToLower(t)))
 	}
@@ -352,14 +354,12 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 	}
 
 	if err := applySelectiveSyncFlags(cmd, &opts, push); err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 	allowProjectCreates := opts.ParentID != "" || len(opts.IssueIDs) > 0
 
-	// Set up Linear-specific push hooks
 	engine.PushHooks = buildLinearPushHooks(ctx, lt, allowProjectCreates)
 
-	// Map conflict resolution
 	if preferLocal {
 		opts.ConflictResolution = tracker.ConflictLocal
 	} else if preferLinear {
@@ -368,59 +368,56 @@ func runLinearSync(cmd *cobra.Command, args []string) {
 		opts.ConflictResolution = tracker.ConflictTimestamp
 	}
 
-	// Run sync
 	result, err := engine.Sync(ctx, opts)
 	if err != nil {
 		if jsonOutput {
-			outputJSON(result)
-		} else {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			if jerr := outputJSON(result); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		os.Exit(1)
+		return HandleError("%v", err)
 	}
 
-	// Record successful pull timestamp
 	if (pull || !push) && !dryRun {
 		if beadsDir := resolveBeadsDirForStaleness(); beadsDir != "" {
 			_ = linear.WriteLastPullTimestamp(beadsDir)
 		}
 	}
 
-	// Output results
 	if jsonOutput {
 		if pullIfStale {
-			// Augment JSON output with staleness info
-			resultMap := map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"stats":    result.Stats,
 				"warnings": result.Warnings,
 				"is_fresh": true,
 				"skipped":  false,
-			}
-			outputJSON(resultMap)
-		} else {
-			outputJSON(result)
+			})
 		}
-	} else if dryRun {
+		return outputJSON(result)
+	}
+	if dryRun {
 		fmt.Println("\n✓ Dry run complete (no changes made)")
-	} else {
-		if result.Stats.Pulled > 0 {
-			fmt.Printf("✓ Pulled %d issues (%d created, %d updated)\n",
-				result.Stats.Pulled, result.Stats.Created, result.Stats.Updated)
-		}
-		if result.Stats.Pushed > 0 {
-			fmt.Printf("✓ Pushed %d issues\n", result.Stats.Pushed)
-		}
-		if result.Stats.Conflicts > 0 {
-			fmt.Printf("→ Resolved %d conflicts\n", result.Stats.Conflicts)
-		}
-		fmt.Println("\n✓ Linear sync complete")
-		if len(result.Warnings) > 0 {
-			fmt.Println("\nWarnings:")
-			for _, w := range result.Warnings {
-				fmt.Printf("  - %s\n", w)
-			}
+		return nil
+	}
+	if result.Stats.Pulled > 0 {
+		fmt.Printf("✓ Pulled %d issues (%d created, %d updated)\n",
+			result.Stats.Pulled, result.Stats.Created, result.Stats.Updated)
+	}
+	if result.Stats.Pushed > 0 {
+		fmt.Printf("✓ Pushed %d issues\n", result.Stats.Pushed)
+	}
+	if result.Stats.Conflicts > 0 {
+		fmt.Printf("→ Resolved %d conflicts\n", result.Stats.Conflicts)
+	}
+	fmt.Println("\n✓ Linear sync complete")
+	if len(result.Warnings) > 0 {
+		fmt.Println("\nWarnings:")
+		for _, w := range result.Warnings {
+			fmt.Printf("  - %s\n", w)
 		}
 	}
+	return nil
 }
 
 func linearPullDependencySources(includeRelations bool) []tracker.DependencySource {
@@ -761,11 +758,18 @@ func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectC
 	}
 }
 
-func runLinearStatus(cmd *cobra.Command, args []string) {
+func runLinearStatus(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("linear-status")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	ctx := rootCtx
 
 	if err := ensureStoreActive(); err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	apiKey, _ := getLinearConfig(ctx, "linear.api_key")
@@ -779,7 +783,7 @@ func runLinearStatus(cmd *cobra.Command, args []string) {
 
 	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	withLinearRef := 0
@@ -794,7 +798,6 @@ func runLinearStatus(cmd *cobra.Command, args []string) {
 
 	if jsonOutput {
 		hasAPIKey := apiKey != ""
-		// Backward compat: include team_id as first team, plus full list.
 		teamID := ""
 		if len(teamIDs) > 0 {
 			teamID = teamIDs[0]
@@ -805,7 +808,7 @@ func runLinearStatus(cmd *cobra.Command, args []string) {
 		} else if hasAPIKey {
 			authMode = "api_key"
 		}
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"configured":      configured,
 			"has_api_key":     hasAPIKey,
 			"has_oauth":       hasOAuth,
@@ -817,7 +820,6 @@ func runLinearStatus(cmd *cobra.Command, args []string) {
 			"with_linear_ref": withLinearRef,
 			"pending_push":    pendingPush,
 		})
-		return
 	}
 
 	fmt.Println("Linear Sync Status")
@@ -839,7 +841,7 @@ func runLinearStatus(cmd *cobra.Command, args []string) {
 		fmt.Println("For CI/OAuth authentication:")
 		fmt.Println("  export LINEAR_OAUTH_CLIENT_ID=\"...\"")
 		fmt.Println("  export LINEAR_OAUTH_CLIENT_SECRET=\"...\"")
-		return
+		return nil
 	}
 
 	if len(teamIDs) == 1 {
@@ -866,30 +868,36 @@ func runLinearStatus(cmd *cobra.Command, args []string) {
 		fmt.Println()
 		fmt.Printf("Run 'bd linear sync --push' to push %d local issue(s) to Linear\n", pendingPush)
 	}
+	return nil
 }
 
-func runLinearTeams(cmd *cobra.Command, args []string) {
+func runLinearTeams(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("linear-teams")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	ctx := rootCtx
 
 	client, err := buildLinearClient(ctx, "")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return HandleError("%v", err)
 	}
 
 	teams, err := client.FetchTeams(ctx)
 	if err != nil {
-		FatalError("fetching teams: %v", err)
+		return HandleError("fetching teams: %v", err)
 	}
 
 	if len(teams) == 0 {
 		fmt.Println("No teams found (check your API key permissions)")
-		return
+		return nil
 	}
 
 	if jsonOutput {
-		outputJSON(teams)
-		return
+		return outputJSON(teams)
 	}
 
 	fmt.Println("Available Linear Teams")
@@ -904,6 +912,7 @@ func runLinearTeams(cmd *cobra.Command, args []string) {
 	fmt.Println("To configure:")
 	fmt.Println("  bd config set linear.team_id \"<ID>\"")
 	fmt.Println("  bd config set linear.team_ids \"<ID1>,<ID2>\"  # multiple teams")
+	return nil
 }
 
 // resolveBeadsDirForStaleness returns the active beads directory for

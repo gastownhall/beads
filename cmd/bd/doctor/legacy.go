@@ -21,6 +21,7 @@ func agentDocFiles(repoPath string) []string {
 	files := []string{
 		filepath.Join(repoPath, agentsFile),
 		filepath.Join(repoPath, "CLAUDE.md"),
+		filepath.Join(repoPath, ".github", "copilot-instructions.md"),
 		filepath.Join(repoPath, ".claude", "CLAUDE.md"),
 		// Local-only variants (not committed to repo)
 		filepath.Join(repoPath, "claude.local.md"),
@@ -498,7 +499,13 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 				}
 				return freshCloneServerResult(result.Exists, dbName, host, port, syncRemote)
 			}
-			// Server unreachable — fall through to existing behavior (FR-030).
+			// Server unreachable in server mode — emit a server-aware warning
+			// instead of falling through to the legacy "Fresh clone detected
+			// (no database)" message, which is a false positive when
+			// dolt_mode=server (the local DB absence is expected). See GH#35.
+			// FR-030 only requires that we don't panic on unreachable; it does
+			// not mandate the misleading fall-through.
+			return freshCloneServerUnreachableResult(dbName, host, port, result.Err)
 		}
 	default:
 		// SQLite (default): check configured .db file path.

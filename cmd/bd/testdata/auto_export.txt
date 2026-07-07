@@ -8,6 +8,7 @@ stdout 'initialized successfully'
 ! exists .beads/export-state.json
 
 # First real write must export immediately, not wait for throttle to expire.
+bd config set export.auto true
 bd create 'First issue'
 exists .beads/issues.jsonl
 grep 'First issue' .beads/issues.jsonl

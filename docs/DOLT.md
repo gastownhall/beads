@@ -12,6 +12,23 @@ Beads uses Dolt as its storage backend. Dolt provides a version-controlled SQL d
 
 ## Getting Started
 
+### Install Dolt (Server Mode Only)
+
+Embedded mode includes everything in the `bd` binary; no separate Dolt install
+is needed. Install the standalone `dolt` CLI only when you want to run server
+mode or work directly with the database via `dolt sql`.
+
+```bash
+# macOS
+brew install dolt
+
+# Linux
+curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | bash
+
+# Verify installation
+dolt version
+```
+
 ### New Project
 
 ```bash
@@ -46,7 +63,7 @@ In-process Dolt engine — no separate server needed. This is the default for
 standalone Beads users. The `bd` binary includes everything; just `bd init` and go.
 
 - Single-writer (one process at a time)
-- Data lives in `.beads/dolt/` alongside your code
+- Data lives in `.beads/embeddeddolt/` alongside your code
 - Push to GitHub with `bd dolt push` — code and issues in one repo
 - Zero ops: no server, no ports, no PID files
 
@@ -88,6 +105,12 @@ Switch to server mode when you need:
 
 You can migrate data between embedded mode and server mode using `bd backup`.
 Both directions preserve full Dolt commit history.
+
+`bd export` is not a substitute for this flow. JSONL exports contain issue
+records from the issues table for migration and interoperability; they do not
+capture Dolt branches, full commit history, working-set state, or non-issue
+tables. Use `bd backup` or a manual Dolt backup when you need a restorable
+database backup.
 
 ### Server → Embedded
 
@@ -158,7 +181,7 @@ Both directions preserve full Dolt commit history.
 ### Notes
 
 - Data locations differ between modes: `.beads/embeddeddolt/` (embedded) vs `.beads/dolt/` (server)
-- The backup directory is a full Dolt backup — it can be on a local drive, NAS, or DoltHub
+- The backup directory is a full Dolt backup, not an `issues.jsonl` export — it can be on a local drive, NAS, or DoltHub
 - You can also migrate via Dolt remotes (`bd dolt push` / `bd dolt pull`) if both projects share a remote
 
 The sections below are the canonical backend migration reference.
@@ -230,6 +253,64 @@ bd doctor --deep
 bd federation status
 ```
 
+## Dolt Remotes
+
+Use `bd dolt remote add` to configure remotes. This ensures the running Dolt SQL
+server sees the remote immediately. Remotes added directly with the `dolt` CLI
+are written to filesystem config and may not be visible to the server until
+restart.
+
+```bash
+# DoltHub (public or private)
+bd dolt remote add origin https://doltremoteapi.dolthub.com/org/beads
+
+# S3
+bd dolt remote add origin aws://[bucket]/path/to/repo
+
+# GCS
+bd dolt remote add origin gs://[bucket]/path/to/repo
+
+# Git SSH (GitHub, GitLab, etc.)
+bd dolt remote add origin git+ssh://git@github.com/org/repo.git
+
+# Local file system
+bd dolt remote add origin file:///path/to/remote
+```
+
+### Push/Pull
+
+```bash
+bd dolt push
+bd dolt pull
+```
+
+`bd dolt remote add` registers the remote through the Dolt store API. SQL
+remotes are the source of truth for `bd dolt remote list`, `bd dolt push`, and
+`bd dolt pull`.
+
+For git-protocol remotes, credentialed external-server remotes, and cloud
+remotes whose credentials are only present in the current shell, `bd dolt push`
+and `bd dolt pull` automatically materialize a matching local CLI remote before
+using the `dolt` CLI transport. The CLI remote is a local transport mirror, not
+a separate configuration source.
+
+If you are upgrading from an older beads version and previously added remotes
+with raw `dolt remote add`, re-register them with `bd dolt remote add <name>
+<url>` so they are visible through SQL. `bd doctor` reports legacy CLI-only or
+mismatched CLI remotes under `Dolt Remote Migration`.
+
+> **Sharing a Git repo**: Dolt stores data under `refs/dolt/data`, separate
+> from standard Git refs (`refs/heads/`, `refs/tags/`). You can safely point a
+> `git+ssh://` remote at the same repository as your project source code. See
+> [Dolt Git Remotes](https://docs.dolthub.com/concepts/dolt/git/remotes).
+
+### List/Remove Remotes
+
+```bash
+bd dolt remote list            # Shows SQL-configured remotes
+bd dolt remote remove origin   # Removes the remote
+```
+
 ## Contributor Onboarding (Clone Bootstrap)
 
 When someone clones a repository that uses Dolt backend:
@@ -246,8 +327,9 @@ When someone clones a repository that uses Dolt backend:
 
 If `sync.remote` is set in `.beads/config.yaml`, that takes precedence
 over auto-detection. Any Dolt-compatible remote URL is supported (DoltHub,
-S3, GCS, file, or git). `bd init` will warn if it detects `refs/dolt/data`
-on origin and suggest using `bd bootstrap` instead.
+S3, GCS, file, or git). On brand-new projects, `bd init` auto-detects
+`git origin` and persists it as `sync.remote`, so the first `bd dolt push`
+publishes Dolt history to `refs/dolt/data` on the same git remote.
 
 ### Verifying Bootstrap Worked
 
@@ -313,6 +395,15 @@ bd doctor --server         # Server mode checks (if applicable)
    bd list                  # Re-triggers bootstrap
    ```
 
+### Already Committed `.beads/dolt/` to Git
+
+If you accidentally committed a Dolt data directory:
+
+1. Update gitignore: `bd doctor --fix`
+2. Remove it from git tracking: `git rm --cached -r .beads/dolt/` (or `.beads/embeddeddolt/`)
+3. Commit the removal: `git commit -m "fix: remove accidentally committed dolt data"`
+4. To purge from history, use [BFG Repo-Cleaner](https://rtyley.github.io/bfg-repo-cleaner/) or `git filter-repo`
+
 ### Lock Contention (Embedded Mode)
 
 **Symptom:** "database is locked" errors.
@@ -356,8 +447,8 @@ dolt:
 | `BEADS_DOLT_SERVER_TLS` | Enable TLS (set to "1" or "true") |
 | `BEADS_DOLT_SERVER_USER` | MySQL connection user |
 | `BEADS_DOLT_SHARED_SERVER` | Enable shared server mode (set to "1" or "true") |
-| `DOLT_REMOTE_USER` | Push/pull auth user |
-| `DOLT_REMOTE_PASSWORD` | Push/pull auth password |
+| `DOLT_REMOTE_USER` | Clone/push/pull auth user |
+| `DOLT_REMOTE_PASSWORD` | Clone/push/pull auth password |
 | `BD_DOLT_AUTO_COMMIT` | Override auto-commit setting |
 
 ### Credentials File
@@ -452,6 +543,45 @@ gt dolt sql              # Open SQL shell
 
 Server runs on port 3307 (avoids MySQL conflict on 3306).
 
+### Standalone-to-managed-city handoff
+
+When an existing standalone project is later added to a managed city or
+orchestrator, avoid letting two Dolt servers become sources of truth for the
+same beads database name. A common split-brain symptom is that `.beads/dolt-server.port`
+points at the old standalone server while the shell environment points `bd` at
+the managed server with `BEADS_DOLT_PORT` or `BEADS_DOLT_SERVER_PORT`.
+
+Check before migrating:
+
+```bash
+bd doctor
+bd dolt status
+```
+
+`bd doctor` warns when the runtime managed port differs from the local port
+file. The warning is intentionally diagnostic only; do not delete the local port
+file until the standalone store has been exported and imported into the managed
+server.
+
+Safe manual handoff:
+
+```bash
+# From the standalone project, without managed-city port overrides:
+unset BEADS_DOLT_PORT BEADS_DOLT_SERVER_PORT
+bd backup
+bd export > /tmp/beads-standalone.jsonl
+bd dolt stop
+
+# Then enter the managed-city environment and import into its Dolt server:
+bd import /tmp/beads-standalone.jsonl
+bd doctor
+```
+
+After `bd doctor` shows one healthy store and the imported issue count is
+correct, archive the old local Dolt data directory instead of deleting it
+immediately. Keep the backup until the managed city has been pushed or otherwise
+snapshotted.
+
 ### Shared Server Mode
 
 On machines with multiple beads projects, each project normally starts its own Dolt server.
@@ -503,6 +633,134 @@ bd dolt show
 └── other-project/       # Other rig (op-*)
 ```
 
+### Central Dolt Server (macOS LaunchAgent)
+
+If you do not use the orchestrator but still want a single persistent Dolt
+server for multiple projects on macOS, run a custom `LaunchAgent` instead of
+spawning per-project embedded instances.
+
+#### Why Not `brew services start dolt`?
+
+After installing Dolt with `brew install dolt`, the natural next step is
+`brew services start dolt`. However, the Homebrew formula runs
+`dolt sql-server` without the `--config` flag, and Dolt does not auto-discover
+`config.yaml` from its working directory. The config file must be passed
+explicitly with `--config <file>`.
+
+#### Setup with a Custom LaunchAgent
+
+Install Dolt and initialize its data directory:
+
+```bash
+brew install dolt
+cd /opt/homebrew/var/dolt && dolt init
+```
+
+Configure Dolt for port 3307:
+
+```yaml
+# /opt/homebrew/var/dolt/config.yaml
+log_level: info
+
+listener:
+  host: 127.0.0.1
+  port: 3307
+  max_connections: 100
+
+behavior:
+  autocommit: true
+```
+
+Create the LaunchAgent plist:
+
+```bash
+cat > ~/Library/LaunchAgents/com.local.dolt-server.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.local.dolt-server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/dolt</string>
+        <string>sql-server</string>
+        <string>--config</string>
+        <string>/opt/homebrew/var/dolt/config.yaml</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/opt/homebrew/var/dolt</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/opt/homebrew/var/log/dolt.log</string>
+    <key>StandardErrorPath</key>
+    <string>/opt/homebrew/var/log/dolt-error.log</string>
+</dict>
+</plist>
+EOF
+```
+
+Load and verify the service:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.local.dolt-server.plist
+mysql -h 127.0.0.1 -P 3307 -u root -e "SELECT 1"
+```
+
+Point beads at the central server:
+
+```bash
+export BEADS_DOLT_SERVER_MODE=1
+export BEADS_DOLT_SERVER_PORT=3307
+```
+
+Manage the service:
+
+```bash
+# Stop
+launchctl unload ~/Library/LaunchAgents/com.local.dolt-server.plist
+
+# Restart
+launchctl unload ~/Library/LaunchAgents/com.local.dolt-server.plist
+launchctl load ~/Library/LaunchAgents/com.local.dolt-server.plist
+
+# Check logs
+tail -f /opt/homebrew/var/log/dolt.log
+```
+
+## Advanced Dolt Usage
+
+The `dolt` CLI lets you operate directly on the database for power-user
+workflows. The data directory depends on your mode: `.beads/embeddeddolt/`
+(embedded) or `.beads/dolt/` (server).
+
+### Branching
+
+```bash
+cd .beads/dolt   # or .beads/embeddeddolt for embedded mode
+dolt branch feature-x
+dolt checkout feature-x
+```
+
+### Time Travel
+
+```bash
+dolt log
+dolt checkout <commit-hash>
+dolt sql -q "SELECT * FROM issues"
+```
+
+### Diff and Blame
+
+```bash
+dolt diff main feature-x
+dolt blame issues
+```
+
 ## Migration Cleanup
 
 After successful migration from SQLite, you may have backup files:
@@ -527,6 +785,7 @@ rm .beads/*.backup-*.db
 
 ## See Also
 
+- [SYNC_CONCEPTS.md](SYNC_CONCEPTS.md) - The conceptual model behind cross-machine sync (Dolt source of truth, wire format, anti-patterns)
 - [SYNC_SETUP.md](SYNC_SETUP.md) - Setting up sync across multiple computers
 - [CONFIG.md](CONFIG.md) - Full configuration reference
 - [DEPENDENCIES.md](DEPENDENCIES.md) - Dependencies and gates

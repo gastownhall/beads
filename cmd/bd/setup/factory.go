@@ -13,36 +13,24 @@ type factoryEnv = agentsEnv
 
 var factoryEnvProvider = defaultAgentsEnv
 
-// InstallFactory installs Factory.ai/Droid integration.
-func InstallFactory() {
-	env := factoryEnvProvider()
-	if err := installAgents(env, factoryIntegration); err != nil {
-		setupExit(1)
-	}
+func InstallFactory() error {
+	return installAgents(factoryEnvProvider(), factoryIntegration)
 }
 
 func installFactory(env factoryEnv) error {
 	return installAgents(env, factoryIntegration)
 }
 
-// CheckFactory checks if Factory.ai integration is installed.
-func CheckFactory() {
-	env := factoryEnvProvider()
-	if err := checkAgents(env, factoryIntegration); err != nil {
-		setupExit(1)
-	}
+func CheckFactory() error {
+	return checkAgents(factoryEnvProvider(), factoryIntegration)
 }
 
 func checkFactory(env factoryEnv) error {
 	return checkAgents(env, factoryIntegration)
 }
 
-// RemoveFactory removes Factory.ai integration.
-func RemoveFactory() {
-	env := factoryEnvProvider()
-	if err := removeAgents(env, factoryIntegration); err != nil {
-		setupExit(1)
-	}
+func RemoveFactory() error {
+	return removeAgents(factoryEnvProvider(), factoryIntegration)
 }
 
 func removeFactory(env factoryEnv) error {

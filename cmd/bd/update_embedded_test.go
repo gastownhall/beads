@@ -45,17 +45,35 @@ func bdUpdateFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
+func embeddedCurrentCommit(t *testing.T, beadsDir, database string) string {
+	t.Helper()
+	store, err := embeddeddolt.Open(t.Context(), beadsDir, database, "main")
+	if err != nil {
+		t.Fatalf("open embedded store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	head, err := store.GetCurrentCommit(t.Context())
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+	if head == "" {
+		t.Fatal("GetCurrentCommit returned empty hash")
+	}
+	return head
+}
+
 // bdShowJSON runs "bd show <id> --json" and returns the raw JSON output.
 func bdShowJSON(t *testing.T, bd, dir, id string) string {
 	t.Helper()
 	cmd := exec.Command(bd, "show", id, "--json")
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd show %s --json failed: %v\n%s", id, err, out)
+		t.Fatalf("bd show %s --json failed: %v\nstdout:\n%s\nstderr:\n%s", id, err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // hasLabel checks if a label is present in the issue's labels.
@@ -119,6 +137,71 @@ func showDeps(t *testing.T, bd, dir, id string) []struct {
 }
 
 // ===== Update tests =====
+
+func TestEmbeddedUpdateBatchAutoCommitDoesNotAdvanceHead(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt update tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ub")
+	issue := bdCreate(t, bd, dir, "Batch update")
+	before := embeddedCurrentCommit(t, beadsDir, "ub")
+
+	cmd := exec.Command(bd, "--dolt-auto-commit", "batch", "update", issue.ID, "--title", "Deferred batch update")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd --dolt-auto-commit batch update failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	after := embeddedCurrentCommit(t, beadsDir, "ub")
+	if after != before {
+		t.Fatalf("batch-mode update advanced HEAD; before=%s after=%s", before, after)
+	}
+}
+
+func TestEmbeddedUpdateRoutedStoreCommitsTargetHead(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt update tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	targetDir := filepath.Join(dir, "target-repo")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+	runBDInit(t, bd, targetDir, "--prefix", "tgt")
+
+	issue := bdCreate(t, bd, targetDir, "Routed target issue")
+	route := `{"prefix":"tgt-","path":"target-repo"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "routes.jsonl"), []byte(route), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	before := embeddedCurrentCommit(t, targetBeadsDir, "tgt")
+	bdUpdate(t, bd, dir, issue.ID, "--title", "Updated through route")
+	after := embeddedCurrentCommit(t, targetBeadsDir, "tgt")
+	if after == before {
+		t.Fatalf("routed update did not advance target HEAD; before=%s after=%s", before, after)
+	}
+
+	targetStore := openStore(t, targetBeadsDir, "tgt")
+	got, err := targetStore.GetIssue(t.Context(), issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue in target: %v", err)
+	}
+	if got.Title != "Updated through route" {
+		t.Fatalf("target title = %q, want routed update title", got.Title)
+	}
+}
 
 func TestEmbeddedUpdate(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
@@ -265,6 +348,36 @@ func TestEmbeddedUpdate(t *testing.T) {
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.ExternalRef == nil || *got.ExternalRef != "gh-42" {
 			t.Errorf("expected external_ref 'gh-42', got %v", got.ExternalRef)
+		}
+	})
+
+	// GH#3902: --external-ref "" must clear to SQL NULL (matching buildCreateIssue's
+	// pointer semantics), not write an empty string. Otherwise sync/tracker code
+	// that checks ExternalRef == nil silently misclassifies cleared refs as still
+	// tracked, and two cleared issues round-trip with different JSON shapes
+	// (cleared via CLI emits "external_ref":"" while never-set issues omit the field).
+	t.Run("update_external_ref_clear", func(t *testing.T) {
+		a := bdCreate(t, bd, dir, "ExtRef clear A", "--type", "task", "--external-ref", "ref-a")
+		b := bdCreate(t, bd, dir, "ExtRef clear B", "--type", "task", "--external-ref", "ref-b")
+
+		bdUpdate(t, bd, dir, a.ID, "--external-ref", "")
+		// Repeat clear must succeed for a second issue — historical UNIQUE
+		// constraint repro from the issue report.
+		bdUpdate(t, bd, dir, b.ID, "--external-ref", "")
+
+		gotA := bdShow(t, bd, dir, a.ID)
+		gotB := bdShow(t, bd, dir, b.ID)
+		if gotA.ExternalRef != nil {
+			t.Errorf("expected A.external_ref to be nil after clear, got %q", *gotA.ExternalRef)
+		}
+		if gotB.ExternalRef != nil {
+			t.Errorf("expected B.external_ref to be nil after clear, got %q", *gotB.ExternalRef)
+		}
+
+		// JSON output: cleared ref should be omitted via omitempty, not emitted as "".
+		rawA := bdShowJSON(t, bd, dir, a.ID)
+		if strings.Contains(rawA, `"external_ref"`) {
+			t.Errorf("expected external_ref field to be omitted from JSON after clear, got: %s", rawA)
 		}
 	})
 
@@ -712,11 +825,11 @@ func TestEmbeddedUpdate(t *testing.T) {
 		cmd := exec.Command(bd, "update", issue.ID, "--status", "in_progress", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd update --json failed: %v\n%s", err, out)
+			t.Fatalf("bd update --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := string(out)
+		s := stdout.String()
 		start := strings.Index(s, "[")
 		if start < 0 {
 			start = strings.Index(s, "{")
@@ -829,10 +942,7 @@ func TestEmbeddedUpdateConcurrent(t *testing.T) {
 			for i := 0; i < issuesPerWorker; i++ {
 				// Create an issue.
 				title := fmt.Sprintf("w%d-issue-%d", worker, i)
-				cmd := exec.Command(bd, "create", "--silent", title)
-				cmd.Dir = dir
-				cmd.Env = bdEnv(dir)
-				out, err := cmd.CombinedOutput()
+				out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--silent", title)
 				if err != nil {
 					r.err = fmt.Errorf("create %d: %v\n%s", i, err, out)
 					results[worker] = r
@@ -883,13 +993,13 @@ func TestEmbeddedUpdateConcurrent(t *testing.T) {
 				listCmd := exec.Command(bd, "list", "--json", "--limit", "0")
 				listCmd.Dir = dir
 				listCmd.Env = bdEnv(dir)
-				listOut, err := listCmd.CombinedOutput()
+				listStdout, listStderr, err := runCommandBuffers(t, listCmd)
 				if err != nil {
-					r.err = fmt.Errorf("list after update %d: %v\n%s", i, err, listOut)
+					r.err = fmt.Errorf("list after update %d: %v\nstdout:\n%s\nstderr:\n%s", i, err, listStdout.String(), listStderr.String())
 					results[worker] = r
 					return
 				}
-				s := string(listOut)
+				s := listStdout.String()
 				start := strings.Index(s, "[")
 				if start < 0 {
 					r.listCounts = append(r.listCounts, 0)
@@ -897,7 +1007,7 @@ func TestEmbeddedUpdateConcurrent(t *testing.T) {
 				}
 				var issues []json.RawMessage
 				if jsonErr := json.Unmarshal([]byte(s[start:]), &issues); jsonErr != nil {
-					r.err = fmt.Errorf("list parse %d: %v\nraw: %s", i, jsonErr, s)
+					r.err = fmt.Errorf("list parse %d: %v\nstdout:\n%s\nstderr:\n%s", i, jsonErr, s, listStderr.String())
 					results[worker] = r
 					return
 				}

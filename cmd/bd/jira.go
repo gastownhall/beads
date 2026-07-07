@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/jira"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -60,7 +61,9 @@ Examples:
   bd jira sync --push --create-only  # Push new issues only
   bd jira sync --dry-run             # Preview without changes
   bd jira sync --prefer-local        # Bidirectional, local wins`,
-	Run: runJiraSync,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runJiraSync,
 }
 
 var jiraStatusCmd = &cobra.Command{
@@ -71,7 +74,9 @@ var jiraStatusCmd = &cobra.Command{
   - Configuration status
   - Number of issues with Jira links
   - Issues pending push (no external_ref)`,
-	Run: runJiraStatus,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runJiraStatus,
 }
 
 func init() {
@@ -90,7 +95,14 @@ func init() {
 	rootCmd.AddCommand(jiraCmd)
 }
 
-func runJiraSync(cmd *cobra.Command, args []string) {
+func runJiraSync(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("jira-sync")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	pull, _ := cmd.Flags().GetBool("pull")
 	push, _ := cmd.Flags().GetBool("push")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
@@ -104,38 +116,34 @@ func runJiraSync(cmd *cobra.Command, args []string) {
 	}
 
 	if preferLocal && preferJira {
-		FatalError("cannot use both --prefer-local and --prefer-jira")
+		return HandleErrorRespectJSON("cannot use both --prefer-local and --prefer-jira")
 	}
 
 	if err := ensureStoreActive(); err != nil {
-		FatalError("database not available: %v", err)
+		return HandleErrorRespectJSON("database not available: %v", err)
 	}
 
 	if err := validateJiraConfig(); err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	ctx := rootCtx
 
-	// Create and initialize the Jira tracker
 	jt := &jira.Tracker{}
 	cliProjects, _ := cmd.Flags().GetStringSlice("project")
 	if len(cliProjects) > 0 {
 		jt.SetProjectKeys(tracker.DeduplicateStrings(cliProjects))
 	}
 	if err := jt.Init(ctx, store); err != nil {
-		FatalError("initializing Jira tracker: %v", err)
+		return HandleErrorRespectJSON("initializing Jira tracker: %v", err)
 	}
 
-	// Create the sync engine
 	engine := tracker.NewEngine(jt, store, actor)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
-	// Set up Jira-specific push hooks (prefix filtering)
 	engine.PushHooks = buildJiraPushHooks(ctx)
 
-	// Build sync options from CLI flags
 	opts := tracker.SyncOptions{
 		Pull:       pull,
 		Push:       push,
@@ -145,10 +153,9 @@ func runJiraSync(cmd *cobra.Command, args []string) {
 	}
 
 	if err := applySelectiveSyncFlags(cmd, &opts, push); err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
-	// Map conflict resolution
 	if preferLocal {
 		opts.ConflictResolution = tracker.ConflictLocal
 	} else if preferJira {
@@ -157,41 +164,42 @@ func runJiraSync(cmd *cobra.Command, args []string) {
 		opts.ConflictResolution = tracker.ConflictTimestamp
 	}
 
-	// Run sync
 	result, err := engine.Sync(ctx, opts)
 	if err != nil {
 		if jsonOutput {
-			outputJSON(result)
-		} else {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			if jerr := outputJSON(result); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		os.Exit(1)
+		return HandleError("%v", err)
 	}
 
-	// Output results
 	if jsonOutput {
-		outputJSON(result)
-	} else if dryRun {
+		return outputJSON(result)
+	}
+	if dryRun {
 		fmt.Println("\n✓ Dry run complete (no changes made)")
-	} else {
-		if result.Stats.Pulled > 0 {
-			fmt.Printf("✓ Pulled %d issues (%d created, %d updated)\n",
-				result.Stats.Pulled, result.Stats.Created, result.Stats.Updated)
-		}
-		if result.Stats.Pushed > 0 {
-			fmt.Printf("✓ Pushed %d issues\n", result.Stats.Pushed)
-		}
-		if result.Stats.Conflicts > 0 {
-			fmt.Printf("→ Resolved %d conflicts\n", result.Stats.Conflicts)
-		}
-		fmt.Println("\n✓ Jira sync complete")
-		if len(result.Warnings) > 0 {
-			fmt.Println("\nWarnings:")
-			for _, w := range result.Warnings {
-				fmt.Printf("  - %s\n", w)
-			}
+		return nil
+	}
+	if result.Stats.Pulled > 0 {
+		fmt.Printf("✓ Pulled %d issues (%d created, %d updated)\n",
+			result.Stats.Pulled, result.Stats.Created, result.Stats.Updated)
+	}
+	if result.Stats.Pushed > 0 {
+		fmt.Printf("✓ Pushed %d issues\n", result.Stats.Pushed)
+	}
+	if result.Stats.Conflicts > 0 {
+		fmt.Printf("→ Resolved %d conflicts\n", result.Stats.Conflicts)
+	}
+	fmt.Println("\n✓ Jira sync complete")
+	if len(result.Warnings) > 0 {
+		fmt.Println("\nWarnings:")
+		for _, w := range result.Warnings {
+			fmt.Printf("  - %s\n", w)
 		}
 	}
+	return nil
 }
 
 // buildJiraPushHooks creates PushHooks for Jira-specific push behavior.
@@ -214,17 +222,23 @@ func buildJiraPushHooks(ctx context.Context) *tracker.PushHooks {
 	}
 }
 
-func runJiraStatus(cmd *cobra.Command, args []string) {
+func runJiraStatus(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("jira-status")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	ctx := rootCtx
 
 	if err := ensureStoreActive(); err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	jiraURL, _ := store.GetConfig(ctx, "jira.url")
 	lastSync, _ := store.GetConfig(ctx, "jira.last_sync")
 
-	// Resolve project keys from all config sources.
 	pluralProjects, _ := store.GetConfig(ctx, "jira.projects")
 	singularProject, _ := store.GetConfig(ctx, "jira.project")
 	projectKeys := tracker.ResolveProjectIDs(nil, pluralProjects, singularProject)
@@ -233,7 +247,7 @@ func runJiraStatus(cmd *cobra.Command, args []string) {
 
 	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	withJiraRef := 0
@@ -247,12 +261,11 @@ func runJiraStatus(cmd *cobra.Command, args []string) {
 	}
 
 	if jsonOutput {
-		// Backward compat: include jira_project as first project, plus full list.
 		primaryProject := ""
 		if len(projectKeys) > 0 {
 			primaryProject = projectKeys[0]
 		}
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"configured":    configured,
 			"jira_url":      jiraURL,
 			"jira_project":  primaryProject,
@@ -262,7 +275,6 @@ func runJiraStatus(cmd *cobra.Command, args []string) {
 			"with_jira_ref": withJiraRef,
 			"pending_push":  pendingPush,
 		})
-		return
 	}
 
 	fmt.Println("Jira Sync Status")
@@ -278,7 +290,7 @@ func runJiraStatus(cmd *cobra.Command, args []string) {
 		fmt.Println("  bd config set jira.projects \"PROJ1,PROJ2\"  # multiple projects")
 		fmt.Println("  bd config set jira.api_token \"YOUR_TOKEN\"")
 		fmt.Println("  bd config set jira.username \"your@email.com\"")
-		return
+		return nil
 	}
 
 	fmt.Printf("Jira URL:     %s\n", jiraURL)
@@ -301,6 +313,7 @@ func runJiraStatus(cmd *cobra.Command, args []string) {
 		fmt.Println()
 		fmt.Printf("Run 'bd jira sync --push' to push %d local issue(s) to Jira\n", pendingPush)
 	}
+	return nil
 }
 
 // validateJiraConfig checks that required Jira configuration is present.

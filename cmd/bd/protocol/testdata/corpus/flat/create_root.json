@@ -1,0 +1,13 @@
+{
+  "created_at": "<TS>",
+  "created_by": "protocol-test",
+  "description": "deterministic corpus root",
+  "id": "corpus-root",
+  "issue_type": "feature",
+  "owner": "test@protocol.test",
+  "priority": 1,
+  "schema_version": 1,
+  "status": "open",
+  "title": "Corpus root issue",
+  "updated_at": "<TS>"
+}

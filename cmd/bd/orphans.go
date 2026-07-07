@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -40,7 +41,16 @@ Examples:
   bd orphans --fix        # Close orphaned issues with confirmation
   bd orphans --label theme:personal             # Only orphans with this label
   bd orphans --label-any theme:personal,theme:ventures  # Orphans with either label`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("orphans")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		path := "."
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
@@ -48,25 +58,23 @@ Examples:
 		labelsAny = utils.NormalizeLabels(labelsAny)
 		orphans, err := findOrphanedIssues(path, labels, labelsAny)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		fix, _ := cmd.Flags().GetBool("fix")
 		details, _ := cmd.Flags().GetBool("details")
 
 		if jsonOutput {
-			outputJSON(orphans)
-			return
+			return outputJSON(orphans)
 		}
 
 		if len(orphans) == 0 {
 			fmt.Printf("%s No orphaned issues found\n", ui.RenderPass("✓"))
-			return
+			return nil
 		}
 
 		fmt.Printf("\n%s Found %d orphaned issue(s):\n\n", ui.RenderWarn("⚠"), len(orphans))
 
-		// Sort by issue ID for consistent output
 		sort.Slice(orphans, func(i, j int) bool {
 			return orphans[i].IssueID < orphans[j].IssueID
 		})
@@ -87,10 +95,9 @@ Examples:
 			response = strings.ToLower(strings.TrimSpace(response))
 			if response != "" && response != "y" && response != "yes" {
 				fmt.Println("Canceled.")
-				return
+				return nil
 			}
 
-			// Close orphaned issues
 			closedCount := 0
 			for _, orphan := range orphans {
 				err := closeIssue(orphan.IssueID)
@@ -103,6 +110,7 @@ Examples:
 			}
 			fmt.Printf("\nClosed %d issue(s)\n", closedCount)
 		}
+		return nil
 	},
 }
 

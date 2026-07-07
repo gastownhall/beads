@@ -242,7 +242,7 @@ func enrichCLIVersion(dc DoctorCheck) agentEnrichment {
 func enrichGitHooks(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "degraded",
-		explanation: fmt.Sprintf("Git hooks issue: %s. Beads git hooks auto-sync the database on commit/merge/push. Without them, changes won't propagate to other clones.", dc.Message),
+		explanation: fmt.Sprintf("Git hooks issue: %s. Beads git hooks refresh JSONL exports and run legacy fallback checks, while cross-clone sync uses Dolt remotes via bd dolt push/pull.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "Git hooks installed and version matches CLI version",
 		commands:    []string{"bd hooks install"},
@@ -255,7 +255,7 @@ func enrichGitHooksDolt(dc DoctorCheck) agentEnrichment {
 		severity:    "blocking",
 		explanation: fmt.Sprintf("Git hooks are incompatible with Dolt backend: %s. Hooks that predate the Dolt migration may run SQLite operations on a Dolt database, causing errors on every git operation.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
-		expected:    "Git hooks contain Dolt-compatible sync commands",
+		expected:    "Git hooks contain Dolt-compatible commands",
 		commands:    []string{"bd hooks install"},
 		sourceFiles: []string{"cmd/bd/doctor/git.go:CheckGitHooksDoltCompatibility"},
 	}

@@ -1,0 +1,4 @@
+-- Reverse of 0045: not reversible while the depends_on_id generated column is
+-- gone (dropped in 0043). Reapplying the prior view definition would fail
+-- because it references the dropped column. Intentional no-op; restore from a
+-- prior dolt commit if a rollback is needed.

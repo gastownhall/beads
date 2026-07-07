@@ -11,13 +11,23 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
 )
+
+func benchDatabaseName() string {
+	return fmt.Sprintf("beads_test_bench_%d", time.Now().UnixNano())
+}
 
 // setupBenchStore creates a store for benchmarks
 func setupBenchStore(b *testing.B) (*DoltStore, func()) {
@@ -42,7 +52,7 @@ func setupBenchStore(b *testing.B) (*DoltStore, func()) {
 		Path:            tmpDir,
 		CommitterName:   "bench",
 		CommitterEmail:  "bench@example.com",
-		Database:        "benchdb",
+		Database:        benchDatabaseName(),
 		CreateIfMissing: true,
 	}
 
@@ -94,7 +104,7 @@ func BenchmarkBootstrapEmbedded(b *testing.B) {
 		Path:            tmpDir,
 		CommitterName:   "bench",
 		CommitterEmail:  "bench@example.com",
-		Database:        "benchdb",
+		Database:        benchDatabaseName(),
 		CreateIfMissing: true,
 	}
 
@@ -136,13 +146,14 @@ func BenchmarkColdStart(b *testing.B) {
 
 	// Get the path for reopening
 	tmpDir := store.dbPath
+	dbName := store.database
 	store.Close()
 
 	cfg := &Config{
 		Path:            tmpDir,
 		CommitterName:   "bench",
 		CommitterEmail:  "bench@example.com",
-		Database:        "benchdb",
+		Database:        dbName,
 		CreateIfMissing: true,
 	}
 
@@ -220,13 +231,14 @@ func BenchmarkCLIWorkflow(b *testing.B) {
 	}
 
 	tmpDir := store.dbPath
+	dbName := store.database
 	store.Close()
 
 	cfg := &Config{
 		Path:            tmpDir,
 		CommitterName:   "bench",
 		CommitterEmail:  "bench@example.com",
-		Database:        "benchdb",
+		Database:        dbName,
 		CreateIfMissing: true,
 	}
 
@@ -910,6 +922,801 @@ func BenchmarkGetReadyWork(b *testing.B) {
 }
 
 // =============================================================================
+// Recent production hot-path regression benchmarks (May 2026 perf stack)
+// =============================================================================
+
+func createBenchIssueBatch(b *testing.B, store *DoltStore, issues []*types.Issue) {
+	b.Helper()
+	ctx := context.Background()
+	now := time.Now().UTC()
+	err := store.withRetryTx(ctx, func(tx *sql.Tx) error {
+		issuesByTable := map[string][]*types.Issue{
+			"issues": nil,
+			"wisps":  nil,
+		}
+		for _, issue := range issues {
+			if issue.Status == "" {
+				issue.Status = types.StatusOpen
+			}
+			if issue.Priority == 0 {
+				issue.Priority = 2
+			}
+			if issue.IssueType == "" {
+				issue.IssueType = types.TypeTask
+			}
+			if issue.CreatedAt.IsZero() {
+				issue.CreatedAt = now
+			}
+			if issue.UpdatedAt.IsZero() {
+				issue.UpdatedAt = issue.CreatedAt
+			}
+			issue.ContentHash = issue.ComputeContentHash()
+
+			issueTable, _ := issueops.TableRouting(issue)
+			issuesByTable[issueTable] = append(issuesByTable[issueTable], issue)
+		}
+		for table, tableIssues := range issuesByTable {
+			if err := insertBenchIssues(ctx, tx, table, tableIssues); err != nil {
+				return err
+			}
+			if err := insertBenchLabels(ctx, tx, table, tableIssues); err != nil {
+				return err
+			}
+		}
+
+		if err := insertBenchDependencies(ctx, tx, "dependencies", issuesByTable["issues"], now); err != nil {
+			return err
+		}
+		if err := insertBenchDependencies(ctx, tx, "wisp_dependencies", issuesByTable["wisps"], now); err != nil {
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		b.Fatalf("failed to create %d benchmark issues: %v", len(issues), err)
+	}
+}
+
+func ptrString(s string) *string {
+	return &s
+}
+
+func insertBenchIssues(ctx context.Context, tx *sql.Tx, table string, issues []*types.Issue) error {
+	const batchSize = 500
+	for start := 0; start < len(issues); start += batchSize {
+		end := start + batchSize
+		if end > len(issues) {
+			end = len(issues)
+		}
+		var placeholders []string
+		var args []interface{}
+		for _, issue := range issues[start:end] {
+			metadata := string(issue.Metadata)
+			if metadata == "" {
+				metadata = "{}"
+			}
+			placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			args = append(args,
+				issue.ID,
+				issue.ContentHash,
+				issue.Title,
+				issue.Description,
+				issue.Design,
+				issue.AcceptanceCriteria,
+				issue.Notes,
+				issue.Status,
+				issue.Priority,
+				issue.IssueType,
+				issue.Assignee,
+				issue.CreatedAt,
+				issue.UpdatedAt,
+				issue.DeferUntil,
+				issue.Ephemeral,
+				issue.NoHistory,
+				issue.Pinned,
+				metadata,
+			)
+		}
+		//nolint:gosec // G201: table is selected from fixed issue table names.
+		query := fmt.Sprintf(`
+			INSERT INTO %s (
+				id, content_hash, title, description, design, acceptance_criteria, notes,
+				status, priority, issue_type, assignee, created_at, updated_at, defer_until,
+				ephemeral, no_history, pinned, metadata
+			) VALUES %s
+			ON DUPLICATE KEY UPDATE title = VALUES(title)
+		`, table, strings.Join(placeholders, ","))
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("insert benchmark issues into %s: %w", table, err)
+		}
+	}
+	return nil
+}
+
+func insertBenchLabels(ctx context.Context, tx *sql.Tx, issueTable string, issues []*types.Issue) error {
+	const batchSize = 500
+	labelTable := "labels"
+	if issueTable == "wisps" {
+		labelTable = "wisp_labels"
+	}
+	var issueIDs []string
+	var labels []string
+	for _, issue := range issues {
+		for _, label := range issue.Labels {
+			issueIDs = append(issueIDs, issue.ID)
+			labels = append(labels, label)
+		}
+	}
+	for start := 0; start < len(labels); start += batchSize {
+		end := start + batchSize
+		if end > len(labels) {
+			end = len(labels)
+		}
+		var placeholders []string
+		var args []interface{}
+		for i := start; i < end; i++ {
+			placeholders = append(placeholders, "(?, ?)")
+			args = append(args, issueIDs[i], labels[i])
+		}
+		//nolint:gosec // G201: labelTable is selected from fixed label table names.
+		query := fmt.Sprintf(`
+			INSERT INTO %s (issue_id, label)
+			VALUES %s
+			ON DUPLICATE KEY UPDATE label = label
+		`, labelTable, strings.Join(placeholders, ","))
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("insert benchmark labels into %s: %w", labelTable, err)
+		}
+	}
+	return nil
+}
+
+func insertBenchDependencies(ctx context.Context, tx *sql.Tx, depTable string, issues []*types.Issue, now time.Time) error {
+	type benchDependencyRow struct {
+		issueID     string
+		dependsOnID string
+		depType     types.DependencyType
+		createdAt   time.Time
+	}
+
+	const batchSize = 500
+	rowsByColumn := map[string][]benchDependencyRow{}
+	for _, issue := range issues {
+		for _, dep := range issue.Dependencies {
+			if dep.IssueID == "" {
+				dep.IssueID = issue.ID
+			}
+			createdAt := dep.CreatedAt
+			if createdAt.IsZero() {
+				createdAt = now
+			}
+			column := issueops.ClassifyDepTarget(ctx, tx, dep, false).Column()
+			rowsByColumn[column] = append(rowsByColumn[column], benchDependencyRow{
+				issueID:     dep.IssueID,
+				dependsOnID: dep.DependsOnID,
+				depType:     dep.Type,
+				createdAt:   createdAt,
+			})
+		}
+	}
+	for column, rows := range rowsByColumn {
+		for start := 0; start < len(rows); start += batchSize {
+			end := start + batchSize
+			if end > len(rows) {
+				end = len(rows)
+			}
+			var placeholders []string
+			var args []interface{}
+			for _, row := range rows[start:end] {
+				placeholders = append(placeholders, "(?, ?, ?, 'bench', ?, '{}')")
+				args = append(args, row.issueID, row.dependsOnID, row.depType, row.createdAt)
+			}
+			//nolint:gosec // G201: depTable is fixed and column comes from issueops.DepTargetKind.Column.
+			query := fmt.Sprintf(`
+				INSERT INTO %s (issue_id, %s, type, created_by, created_at, metadata)
+				VALUES %s
+				ON DUPLICATE KEY UPDATE type = type
+			`, depTable, column, strings.Join(placeholders, ","))
+			if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+				return fmt.Errorf("insert benchmark dependencies into %s: %w", depTable, err)
+			}
+		}
+	}
+	return nil
+}
+
+func BenchmarkPerfSearchTypedLabelFilter_5K(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	const total = 5000
+	issues := make([]*types.Issue, 0, total)
+	for i := 0; i < total; i++ {
+		labels := []string{fmt.Sprintf("bucket-%03d", i%500)}
+		issueType := types.TypeBug
+		if i%3 == 0 {
+			issueType = types.TypeFeature
+		}
+		if i%40 == 0 {
+			issueType = types.TypeTask
+			labels = append(labels, "perf-hot")
+		}
+		issues = append(issues, &types.Issue{
+			ID:        fmt.Sprintf("bench-perf-search-%05d", i),
+			Title:     fmt.Sprintf("Search label benchmark issue %05d", i),
+			Status:    types.StatusOpen,
+			Priority:  (i % 4) + 1,
+			IssueType: issueType,
+			Labels:    labels,
+		})
+	}
+	createBenchIssueBatch(b, store, issues)
+
+	ctx := context.Background()
+	taskType := types.TypeTask
+	filter := types.IssueFilter{IssueType: &taskType, Labels: []string{"perf-hot"}, Limit: 200}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		results, err := store.SearchIssues(ctx, "", filter)
+		if err != nil {
+			b.Fatalf("SearchIssues label filter: %v", err)
+		}
+		if len(results) == 0 {
+			b.Fatal("SearchIssues label filter returned no issues")
+		}
+	}
+}
+
+func BenchmarkPerfResolvePartialIDInvalidInput_5K(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	const total = 5000
+	issues := make([]*types.Issue, 0, total)
+	for i := 0; i < total; i++ {
+		issues = append(issues, &types.Issue{
+			ID:        fmt.Sprintf("bench-perf-partial-%05d", i),
+			Title:     fmt.Sprintf("Partial ID benchmark issue %05d", i),
+			Status:    types.StatusOpen,
+			Priority:  (i % 4) + 1,
+			IssueType: types.TypeTask,
+		})
+	}
+	createBenchIssueBatch(b, store, issues)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := utils.ResolvePartialID(ctx, store, "not/a/valid/id"); err == nil {
+			b.Fatal("ResolvePartialID invalid input unexpectedly succeeded")
+		}
+	}
+}
+
+// BenchmarkPerfIDProjectionVsHydration_5K isolates the value of the narrow
+// id-only projection (SearchIssueIDs) against the two hydration alternatives on
+// an identical, large result set. All three arms share the same WHERE clause
+// via issueops.searchInTx, so the only variable is projection + row hydration:
+//
+//   - SearchIssueIDs          — projects only `id`; no row structs, no labels.
+//   - SearchIssues+SkipLabels — full IssueSelectColumns scan into *types.Issue
+//     (description/design/notes/metadata/...), but skips the labels JOIN.
+//   - SearchIssues (full)     — full column scan plus label hydration.
+//
+// The narrow-vs-SkipLabels delta is the figure that justifies the projection
+// over simply reusing upstream's SkipLabels: SkipLabels suppresses labels but
+// still materializes every heavy TEXT column, which this fixture populates.
+func BenchmarkPerfIDProjectionVsHydration_5K(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	const total = 5000
+	// Heavy TEXT payloads approximate real issues. The narrow projection never
+	// scans these columns; SkipLabels does not help with them.
+	bigText := strings.Repeat("lorem ipsum dolor sit amet consectetur ", 24) // ~936 B
+	bigJSON := json.RawMessage(`{"k":"` + strings.Repeat("v", 256) + `"}`)
+
+	issues := make([]*types.Issue, 0, total)
+	for i := 0; i < total; i++ {
+		issues = append(issues, &types.Issue{
+			ID:                 fmt.Sprintf("narrowbench-%05d", i),
+			Title:              fmt.Sprintf("narrowbench issue %05d", i),
+			Description:        bigText,
+			Design:             bigText,
+			AcceptanceCriteria: bigText,
+			Notes:              bigText,
+			Metadata:           bigJSON,
+			Status:             types.StatusOpen,
+			Priority:           (i % 4) + 1,
+			IssueType:          types.TypeTask,
+			Labels:             []string{"area-narrow", fmt.Sprintf("bucket-%03d", i%100)},
+		})
+	}
+	createBenchIssueBatch(b, store, issues)
+
+	ctx := context.Background()
+	// "narrowbench" appears in every id and title, so id/title LIKE matches the
+	// full set — maximizing per-row hydration cost, the dimension under test.
+	const query = "narrowbench"
+
+	// Guard: all three arms must see the same cardinality, else the comparison
+	// would be measuring row count rather than projection.
+	if ids, err := store.SearchIssueIDs(ctx, query, types.IssueFilter{}); err != nil {
+		b.Fatalf("setup SearchIssueIDs: %v", err)
+	} else if len(ids) != total {
+		b.Fatalf("fixture: expected %d matches, got %d", total, len(ids))
+	}
+
+	b.Run("SearchIssueIDs_narrow", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssueIDs(ctx, query, types.IssueFilter{}); err != nil {
+				b.Fatalf("SearchIssueIDs: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssueIDs: got %d want %d", len(got), total)
+			}
+		}
+	})
+
+	b.Run("SearchIssues_SkipLabels", func(b *testing.B) {
+		b.ReportAllocs()
+		filter := types.IssueFilter{SkipLabels: true}
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssues(ctx, query, filter); err != nil {
+				b.Fatalf("SearchIssues SkipLabels: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssues SkipLabels: got %d want %d", len(got), total)
+			}
+		}
+	})
+
+	b.Run("SearchIssues_full", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssues(ctx, query, types.IssueFilter{}); err != nil {
+				b.Fatalf("SearchIssues full: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssues full: got %d want %d", len(got), total)
+			}
+		}
+	})
+}
+
+func BenchmarkPerfAddDependencyCycleCheck_DiamondDAG(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	const layers = 10
+	issues := make([]*types.Issue, 0, 2*layers+1)
+	issues = append(issues, &types.Issue{
+		ID:        "bench-perf-cycle-source",
+		Title:     "Cycle source",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	})
+	for layer := 0; layer < layers; layer++ {
+		for _, suffix := range []string{"a", "b"} {
+			issue := &types.Issue{
+				ID:        fmt.Sprintf("bench-perf-cycle-l%02d-%s", layer, suffix),
+				Title:     fmt.Sprintf("Cycle diamond layer %02d %s", layer, suffix),
+				Status:    types.StatusOpen,
+				Priority:  2,
+				IssueType: types.TypeTask,
+			}
+			if layer < layers-1 {
+				issue.Dependencies = []*types.Dependency{
+					{DependsOnID: fmt.Sprintf("bench-perf-cycle-l%02d-a", layer+1), Type: types.DepBlocks},
+					{DependsOnID: fmt.Sprintf("bench-perf-cycle-l%02d-b", layer+1), Type: types.DepBlocks},
+				}
+			}
+			issues = append(issues, issue)
+		}
+	}
+	createBenchIssueBatch(b, store, issues)
+
+	ctx := context.Background()
+	dep := &types.Dependency{
+		IssueID:     "bench-perf-cycle-source",
+		DependsOnID: "bench-perf-cycle-l00-a",
+		Type:        types.DepBlocks,
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := store.AddDependency(ctx, dep, "bench"); err != nil {
+			b.Fatalf("AddDependency cycle check: %v", err)
+		}
+		b.StopTimer()
+		if err := store.RemoveDependency(ctx, dep.IssueID, dep.DependsOnID, "bench"); err != nil {
+			b.Fatalf("RemoveDependency cycle check fixture reset: %v", err)
+		}
+		if i < b.N-1 {
+			b.StartTimer()
+		}
+	}
+}
+
+func BenchmarkPerfReadyWorkLimited_LargeBlockedGraph(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	const (
+		readyCount        = 100
+		blockedPairCount  = 2500
+		estimatedRowCount = readyCount + 2*blockedPairCount
+	)
+	issues := make([]*types.Issue, 0, estimatedRowCount)
+	for i := 0; i < readyCount; i++ {
+		issues = append(issues, &types.Issue{
+			ID:        fmt.Sprintf("bench-perf-ready-clear-%04d", i),
+			Title:     fmt.Sprintf("Ready issue %04d", i),
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+		})
+	}
+	for i := 0; i < blockedPairCount; i++ {
+		blockerID := fmt.Sprintf("bench-perf-ready-blocker-%05d", i)
+		issues = append(issues, &types.Issue{
+			ID:        blockerID,
+			Title:     fmt.Sprintf("Ready blocker %05d", i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		})
+		issues = append(issues, &types.Issue{
+			ID:        fmt.Sprintf("bench-perf-ready-blocked-%05d", i),
+			Title:     fmt.Sprintf("Blocked ready issue %05d", i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Dependencies: []*types.Dependency{
+				{DependsOnID: blockerID, Type: types.DepBlocks},
+			},
+		})
+	}
+	createBenchIssueBatch(b, store, issues)
+
+	ctx := context.Background()
+	filter := types.WorkFilter{Limit: 50, SortPolicy: types.SortPolicyPriority}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		results, err := store.GetReadyWork(ctx, filter)
+		if err != nil {
+			b.Fatalf("GetReadyWork limited blocked graph: %v", err)
+		}
+		if len(results) != filter.Limit {
+			b.Fatalf("GetReadyWork limited blocked graph returned %d issues, want %d", len(results), filter.Limit)
+		}
+	}
+}
+
+func BenchmarkPerfReadyWorkLimited_GasCityWispHeavy(b *testing.B) {
+	const (
+		wispCount    = 8000
+		readyLimit   = 20
+		gcAssignee   = "gascity/workflows.codex-min-11"
+		gcRoute      = "gascity/workflows.codex-min-11"
+		routeJSON    = `{"gc.routed_to":"gascity/workflows.codex-min-11"}`
+		emptyJSON    = `{}`
+		closedStatus = types.StatusClosed
+	)
+	future := time.Now().UTC().Add(24 * time.Hour)
+
+	makeWisp := func(id string, priority int, assignee string, metadata string, deferUntil *time.Time) *types.Issue {
+		return &types.Issue{
+			ID:         id,
+			Title:      id,
+			Status:     types.StatusOpen,
+			Priority:   priority,
+			IssueType:  types.TypeTask,
+			Assignee:   assignee,
+			Ephemeral:  true,
+			Metadata:   []byte(metadata),
+			DeferUntil: deferUntil,
+		}
+	}
+
+	cases := []struct {
+		name   string
+		filter types.WorkFilter
+		issues func() []*types.Issue
+	}{
+		{
+			name: "AssignedDenseLimit20Of8000",
+			filter: types.WorkFilter{
+				Assignee:         ptrString(gcAssignee),
+				IncludeEphemeral: true,
+				Limit:            readyLimit,
+				SortPolicy:       types.SortPolicyPriority,
+			},
+			issues: func() []*types.Issue {
+				issues := make([]*types.Issue, 0, wispCount)
+				for i := 0; i < wispCount; i++ {
+					issues = append(issues, makeWisp(
+						fmt.Sprintf("bench-perf-gc-assigned-wisp-%05d", i),
+						(i%4)+1,
+						gcAssignee,
+						emptyJSON,
+						nil,
+					))
+				}
+				return issues
+			},
+		},
+		{
+			name: "MetadataRouteDenseLimit20Of8000",
+			filter: types.WorkFilter{
+				Unassigned:       true,
+				MetadataFields:   map[string]string{"gc.routed_to": gcRoute},
+				IncludeEphemeral: true,
+				Limit:            readyLimit,
+				SortPolicy:       types.SortPolicyPriority,
+			},
+			issues: func() []*types.Issue {
+				issues := make([]*types.Issue, 0, wispCount)
+				for i := 0; i < wispCount; i++ {
+					issues = append(issues, makeWisp(
+						fmt.Sprintf("bench-perf-gc-routed-wisp-%05d", i),
+						(i%4)+1,
+						"",
+						routeJSON,
+						nil,
+					))
+				}
+				return issues
+			},
+		},
+		{
+			name: "AssignedSparseAfterDeferredLimit20Of8000",
+			filter: types.WorkFilter{
+				Assignee:         ptrString(gcAssignee),
+				IncludeEphemeral: true,
+				Limit:            readyLimit,
+				SortPolicy:       types.SortPolicyPriority,
+			},
+			issues: func() []*types.Issue {
+				issues := make([]*types.Issue, 0, wispCount)
+				for i := 0; i < wispCount-readyLimit; i++ {
+					issues = append(issues, makeWisp(
+						fmt.Sprintf("bench-perf-gc-deferred-wisp-%05d", i),
+						1,
+						gcAssignee,
+						emptyJSON,
+						&future,
+					))
+				}
+				for i := wispCount - readyLimit; i < wispCount; i++ {
+					issues = append(issues, makeWisp(
+						fmt.Sprintf("bench-perf-gc-ready-tail-wisp-%05d", i),
+						4,
+						gcAssignee,
+						emptyJSON,
+						nil,
+					))
+				}
+				return issues
+			},
+		},
+		{
+			name: "AssignedClosedNoiseLimit20Of8000",
+			filter: types.WorkFilter{
+				Assignee:         ptrString(gcAssignee),
+				IncludeEphemeral: true,
+				Limit:            readyLimit,
+				SortPolicy:       types.SortPolicyPriority,
+			},
+			issues: func() []*types.Issue {
+				issues := make([]*types.Issue, 0, wispCount)
+				for i := 0; i < wispCount-readyLimit; i++ {
+					wisp := makeWisp(
+						fmt.Sprintf("bench-perf-gc-closed-wisp-%05d", i),
+						1,
+						gcAssignee,
+						emptyJSON,
+						nil,
+					)
+					wisp.Status = closedStatus
+					issues = append(issues, wisp)
+				}
+				for i := wispCount - readyLimit; i < wispCount; i++ {
+					issues = append(issues, makeWisp(
+						fmt.Sprintf("bench-perf-gc-ready-closed-noise-wisp-%05d", i),
+						4,
+						gcAssignee,
+						emptyJSON,
+						nil,
+					))
+				}
+				return issues
+			},
+		},
+	}
+
+	ctx := context.Background()
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			store, cleanup := setupBenchStore(b)
+			defer cleanup()
+			createBenchIssueBatch(b, store, tc.issues())
+			b.ReportAllocs()
+			b.ReportMetric(float64(wispCount), "wisps")
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				results, err := store.GetReadyWork(ctx, tc.filter)
+				if err != nil {
+					b.Fatalf("GetReadyWork gascity wisps: %v", err)
+				}
+				if len(results) != readyLimit {
+					b.Fatalf("GetReadyWork gascity wisps returned %d issues, want %d", len(results), readyLimit)
+				}
+			}
+		})
+	}
+}
+
+func BenchmarkPerfBlockedIssues_ClosedDependencySkew(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	const (
+		closedPairCount = 2500
+		activePairCount = 10
+	)
+	issues := make([]*types.Issue, 0, 2*(closedPairCount+activePairCount))
+	for i := 0; i < closedPairCount; i++ {
+		blockerID := fmt.Sprintf("bench-perf-closed-blocker-%05d", i)
+		issues = append(issues, &types.Issue{
+			ID:        blockerID,
+			Title:     fmt.Sprintf("Closed blocker %05d", i),
+			Status:    types.StatusClosed,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		})
+		issues = append(issues, &types.Issue{
+			ID:        fmt.Sprintf("bench-perf-closed-blocked-%05d", i),
+			Title:     fmt.Sprintf("Closed blocked issue %05d", i),
+			Status:    types.StatusClosed,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Dependencies: []*types.Dependency{
+				{DependsOnID: blockerID, Type: types.DepBlocks},
+			},
+		})
+	}
+	for i := 0; i < activePairCount; i++ {
+		blockerID := fmt.Sprintf("bench-perf-active-blocker-%02d", i)
+		issues = append(issues, &types.Issue{
+			ID:        blockerID,
+			Title:     fmt.Sprintf("Active blocker %02d", i),
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+		})
+		issues = append(issues, &types.Issue{
+			ID:        fmt.Sprintf("bench-perf-active-blocked-%02d", i),
+			Title:     fmt.Sprintf("Active blocked issue %02d", i),
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			Dependencies: []*types.Dependency{
+				{DependsOnID: blockerID, Type: types.DepBlocks},
+			},
+		})
+	}
+	createBenchIssueBatch(b, store, issues)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		results, err := store.GetBlockedIssues(ctx, types.WorkFilter{})
+		if err != nil {
+			b.Fatalf("GetBlockedIssues closed skew: %v", err)
+		}
+		if len(results) != activePairCount {
+			b.Fatalf("GetBlockedIssues closed skew returned %d issues, want %d", len(results), activePairCount)
+		}
+	}
+}
+
+func BenchmarkPerfReadyWorkDeferredParentExclusion_5K(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	future := time.Now().UTC().Add(24 * time.Hour)
+	const (
+		readyCount          = 100
+		deferredParentCount = 5000
+		deferredChildCount  = 50
+	)
+	issues := make([]*types.Issue, 0, readyCount+deferredParentCount+deferredChildCount)
+	for i := 0; i < readyCount; i++ {
+		issues = append(issues, &types.Issue{
+			ID:        fmt.Sprintf("bench-perf-deferred-ready-%03d", i),
+			Title:     fmt.Sprintf("Ready non-deferred issue %03d", i),
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+		})
+	}
+	for i := 0; i < deferredParentCount; i++ {
+		issues = append(issues, &types.Issue{
+			ID:         fmt.Sprintf("bench-perf-deferred-parent-%05d", i),
+			Title:      fmt.Sprintf("Future deferred parent %05d", i),
+			Status:     types.StatusOpen,
+			Priority:   2,
+			IssueType:  types.TypeTask,
+			DeferUntil: &future,
+		})
+	}
+	for i := 0; i < deferredChildCount; i++ {
+		issues = append(issues, &types.Issue{
+			ID:        fmt.Sprintf("bench-perf-deferred-child-%03d", i),
+			Title:     fmt.Sprintf("Child of deferred parent %03d", i),
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			Dependencies: []*types.Dependency{
+				{DependsOnID: fmt.Sprintf("bench-perf-deferred-parent-%05d", i), Type: types.DepParentChild},
+			},
+		})
+	}
+	createBenchIssueBatch(b, store, issues)
+
+	ctx := context.Background()
+	filter := types.WorkFilter{Limit: 50, SortPolicy: types.SortPolicyPriority}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		results, err := store.GetReadyWork(ctx, filter)
+		if err != nil {
+			b.Fatalf("GetReadyWork deferred parent exclusion: %v", err)
+		}
+		if len(results) != filter.Limit {
+			b.Fatalf("GetReadyWork deferred parent exclusion returned %d issues, want %d", len(results), filter.Limit)
+		}
+	}
+}
+
+func BenchmarkPerfGetIssuePrimaryFirst_PermanentWithWisps(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	const wispCount = 5000
+	issues := make([]*types.Issue, 0, wispCount+1)
+	issues = append(issues, &types.Issue{
+		ID:        "bench-perf-get-primary",
+		Title:     "Permanent issue fetched from primary table",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	})
+	for i := 0; i < wispCount; i++ {
+		issues = append(issues, &types.Issue{
+			ID:        fmt.Sprintf("bench-perf-get-wisp-%04d", i),
+			Title:     fmt.Sprintf("Wisp noise issue %04d", i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		})
+	}
+	createBenchIssueBatch(b, store, issues)
+
+	ctx := context.Background()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		issue, err := store.GetIssue(ctx, "bench-perf-get-primary")
+		if err != nil {
+			b.Fatalf("GetIssue permanent with wisps: %v", err)
+		}
+		if issue == nil || issue.ID != "bench-perf-get-primary" {
+			b.Fatalf("GetIssue permanent with wisps returned %v", issue)
+		}
+	}
+}
+
+// =============================================================================
 // Label Benchmarks
 // =============================================================================
 
@@ -1188,4 +1995,47 @@ func BenchmarkGetIssuesByIDs_SmallNLargeW_10_10K(b *testing.B) {
 }
 func BenchmarkGetIssuesByIDs_SmallNLargeW_100_5K(b *testing.B) {
 	benchmarkGetIssuesByIDsSmallN(b, 5000, 100)
+}
+
+// =============================================================================
+// Schema Probe Benchmarks
+// =============================================================================
+
+// BenchmarkContentHashColumnProbe compares the retired INFORMATION_SCHEMA.COLUMNS
+// existence probe against the SHOW COLUMNS probe that replaced it.
+// schema.MigrateUp's migrationWorkNeeded runs this probe twice on every
+// connection. INFORMATION_SCHEMA.COLUMNS forces Dolt to materialize the full
+// column catalog because the predicate is not pushed down; SHOW COLUMNS reads a
+// single table's schema directly. The gap measured here understates production:
+// on a multi-database deployment the old probe was measured at 19-60 ms/conn
+// versus ~0 ms on the new one.
+func BenchmarkContentHashColumnProbe(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+	ctx := context.Background()
+
+	b.Run("InformationSchema", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var count int
+			if err := store.db.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'content_hash'`,
+				"schema_migrations").Scan(&count); err != nil {
+				b.Fatalf("information_schema probe: %v", err)
+			}
+		}
+	})
+
+	b.Run("ShowColumns", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			rows, err := store.db.QueryContext(ctx, "SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'")
+			if err != nil {
+				b.Fatalf("show columns probe: %v", err)
+			}
+			for rows.Next() { //nolint:revive // draining the result set is the point
+			}
+			_ = rows.Close()
+		}
+	})
 }

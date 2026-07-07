@@ -18,12 +18,17 @@ func validateIssueUpdatable(id string, issue *types.Issue) error {
 
 // validateIssueClosable checks if an issue can be closed.
 // Uses the centralized validation package for consistency.
-func validateIssueClosable(id string, issue *types.Issue, force bool) error {
+//
+// actor is the current actor identity (may be empty in early-init contexts);
+// AssigneeMatches refuses the close when the bead is assigned to someone else
+// unless force is true. This is the authority guard for be-035.
+func validateIssueClosable(id string, issue *types.Issue, actor string, force bool) error {
 	// Note: We use individual validators instead of ForClose() to maintain
 	// backward compatibility - the original didn't check for nil issues.
 	return validation.Chain(
 		validation.NotTemplate(),
 		validation.NotPinned(force),
+		validation.AssigneeMatches(actor, force),
 	)(id, issue)
 }
 

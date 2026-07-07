@@ -348,3 +348,56 @@ func TestInstallCodexNativeHooksSkipsFallbackWhenPluginEnabled(t *testing.T) {
 		t.Fatalf("plugin-managed check should pass: %v", err)
 	}
 }
+
+func TestCodexConfigEnablesBeadsPlugin(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			// GH#4244: a plugin whose name merely contains "beads" (here
+			// design-to-beads) must NOT be taken for the beads hook plugin, or
+			// the hooks fallback write is wrongly skipped.
+			name:    "design-to-beads not mistaken for beads plugin",
+			content: "[plugins.\"design-to-beads@xexr-marketplace\"]\nenabled = true\n",
+			want:    false,
+		},
+		{
+			name:    "bare design-to-beads not mistaken for beads plugin",
+			content: "[plugins.design-to-beads]\nenabled = true\n",
+			want:    false,
+		},
+		{
+			// The exact-name match must still find a real beads@<marketplace>;
+			// this is the quoted form bd setup codex actually writes.
+			name:    "real quoted beads plugin detected",
+			content: "[plugins.\"beads@local\"]\nenabled = true\n",
+			want:    true,
+		},
+		{
+			name:    "bare beads plugin detected",
+			content: "[plugins.beads]\nenabled = true\n",
+			want:    true,
+		},
+		{
+			// GH#3192 preserved: a real beads plugin is still found alongside a
+			// *beads*-named decoy.
+			name:    "real beads plugin detected past a decoy",
+			content: "[plugins.\"design-to-beads@xexr-marketplace\"]\nenabled = true\n[plugins.\"beads@local\"]\nenabled = true\n",
+			want:    true,
+		},
+		{
+			name:    "beads plugin present but disabled",
+			content: "[plugins.\"beads@local\"]\nenabled = false\n",
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexConfigEnablesBeadsPlugin(tc.content); got != tc.want {
+				t.Errorf("codexConfigEnablesBeadsPlugin() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

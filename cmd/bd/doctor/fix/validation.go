@@ -36,11 +36,12 @@ func OrphanedDependencies(path string, verbose bool) error {
 	defer db.Close()
 
 	// Find orphaned dependencies (exclude external: cross-rig tracking refs, #1593)
+	//nolint:gosec // G202: fixDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
-		SELECT d.issue_id, d.depends_on_id
-		FROM dependencies d
-		LEFT JOIN issues i ON d.depends_on_id = i.id
-		WHERE i.id IS NULL
+		SELECT d.dep_table, d.issue_id, d.depends_on_id
+		FROM (` + fixDependencyUnionSQL() + `) d
+		WHERE NOT EXISTS (SELECT 1 FROM issues i WHERE i.id = d.depends_on_id)
+		  AND NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_id)
 		  AND d.depends_on_id NOT LIKE 'external:%'
 	`
 	rows, err := db.Query(query)
@@ -50,6 +51,7 @@ func OrphanedDependencies(path string, verbose bool) error {
 	defer rows.Close()
 
 	type orphan struct {
+		depTable    string
 		issueID     string
 		dependsOnID string
 	}
@@ -57,7 +59,7 @@ func OrphanedDependencies(path string, verbose bool) error {
 
 	for rows.Next() {
 		var o orphan
-		if err := rows.Scan(&o.issueID, &o.dependsOnID); err == nil {
+		if err := rows.Scan(&o.depTable, &o.issueID, &o.dependsOnID); err == nil {
 			orphans = append(orphans, o)
 		}
 	}
@@ -80,8 +82,16 @@ func OrphanedDependencies(path string, verbose bool) error {
 	}
 	var removed int
 	for _, o := range orphans {
-		_, err := tx.Exec("DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
-			o.issueID, o.dependsOnID)
+		var err error
+		switch o.depTable {
+		case "dependencies":
+			_, err = tx.Exec("DELETE FROM dependencies WHERE issue_id = ? AND "+fixDependencyTargetExpr+" = ?", o.issueID, o.dependsOnID)
+		case "wisp_dependencies":
+			_, err = tx.Exec("DELETE FROM wisp_dependencies WHERE issue_id = ? AND "+fixDependencyTargetExpr+" = ?", o.issueID, o.dependsOnID)
+		default:
+			fmt.Printf("  Warning: skipped orphaned dependency from unexpected table %s\n", o.depTable)
+			continue
+		}
 		if err != nil {
 			fmt.Printf("  Warning: failed to remove %s→%s: %v\n", o.issueID, o.dependsOnID, err)
 		} else {
@@ -122,9 +132,10 @@ func ChildParentDependencies(path string, verbose bool) error {
 	// Find child→parent BLOCKING dependencies where issue_id starts with depends_on_id + "."
 	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
 	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.
+	//nolint:gosec // G202: fixDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
-		SELECT d.issue_id, d.depends_on_id, d.type
-		FROM dependencies d
+		SELECT d.dep_table, d.issue_id, d.depends_on_id, d.type
+		FROM (` + fixDependencyUnionSQL() + `) d
 		WHERE d.issue_id LIKE CONCAT(d.depends_on_id, '.%')
 		  AND d.type IN ('blocks', 'conditional-blocks', 'waits-for')
 	`
@@ -135,6 +146,7 @@ func ChildParentDependencies(path string, verbose bool) error {
 	defer rows.Close()
 
 	type badDep struct {
+		depTable    string
 		issueID     string
 		dependsOnID string
 		depType     string
@@ -143,7 +155,7 @@ func ChildParentDependencies(path string, verbose bool) error {
 
 	for rows.Next() {
 		var d badDep
-		if err := rows.Scan(&d.issueID, &d.dependsOnID, &d.depType); err == nil {
+		if err := rows.Scan(&d.depTable, &d.issueID, &d.dependsOnID, &d.depType); err == nil {
 			badDeps = append(badDeps, d)
 		}
 	}
@@ -166,8 +178,16 @@ func ChildParentDependencies(path string, verbose bool) error {
 	}
 	var removed int
 	for _, d := range badDeps {
-		_, err := tx.Exec("DELETE FROM dependencies WHERE issue_id = ? AND depends_on_id = ? AND type = ?",
-			d.issueID, d.dependsOnID, d.depType)
+		var err error
+		switch d.depTable {
+		case "dependencies":
+			_, err = tx.Exec("DELETE FROM dependencies WHERE issue_id = ? AND "+fixDependencyTargetExpr+" = ? AND type = ?", d.issueID, d.dependsOnID, d.depType)
+		case "wisp_dependencies":
+			_, err = tx.Exec("DELETE FROM wisp_dependencies WHERE issue_id = ? AND "+fixDependencyTargetExpr+" = ? AND type = ?", d.issueID, d.dependsOnID, d.depType)
+		default:
+			fmt.Printf("  Warning: skipped child→parent dependency from unexpected table %s\n", d.depTable)
+			continue
+		}
 		if err != nil {
 			fmt.Printf("  Warning: failed to remove %s→%s: %v\n", d.issueID, d.dependsOnID, err)
 		} else {
@@ -186,6 +206,102 @@ func ChildParentDependencies(path string, verbose bool) error {
 
 	fmt.Printf("  Fixed %d child→parent dependency anti-pattern(s)\n", removed)
 	return nil
+}
+
+// CrossTableDuplicates removes issues-table rows whose IDs also exist in the
+// wisps table. The wisps copy is canonical (be-iabdi); stale issues rows are
+// deleted along with their child rows (labels, events, dependencies, comments).
+func CrossTableDuplicates(path string, verbose bool) error {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
+		return err
+	}
+
+	db, err := openDoltDB(beadsDir)
+	if err != nil {
+		fmt.Printf("  Cross-table duplicates fix skipped (%v)\n", err)
+		return nil
+	}
+	defer db.Close()
+
+	// Find IDs present in both tables — the wisp copy is canonical.
+	rows, err := db.Query(`SELECT id FROM issues WHERE id IN (SELECT id FROM wisps)`)
+	if err != nil {
+		return fmt.Errorf("failed to query cross-table duplicates: %w", err)
+	}
+	var dupIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			dupIDs = append(dupIDs, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("row iteration error: %w", err)
+	}
+	_ = rows.Close()
+
+	if len(dupIDs) == 0 {
+		fmt.Println("  No cross-table duplicates to fix")
+		return nil
+	}
+
+	showIndividual := verbose || len(dupIDs) < 20
+	tx, txErr := db.Begin()
+	if txErr != nil {
+		return fmt.Errorf("failed to begin transaction: %w", txErr)
+	}
+
+	var removed int
+	for _, id := range dupIDs {
+		// Delete child rows first (FK-safe order), then the issues row.
+		for _, childTable := range []string{"labels", "events", "dependencies", "comments"} {
+			//nolint:gosec // G202: childTable is from a hardcoded list above.
+			if _, err := tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE issue_id = ?", childTable), id); err != nil {
+				fmt.Printf("  Warning: failed to delete %s rows for %s: %v\n", childTable, id, err)
+			}
+		}
+		if _, err := tx.Exec("DELETE FROM issues WHERE id = ?", id); err != nil {
+			fmt.Printf("  Warning: failed to delete issues row for %s: %v\n", id, err)
+		} else {
+			removed++
+			if showIndividual {
+				fmt.Printf("  Removed stale issues-table copy of %s (canonical in wisps)\n", id)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit cross-table duplicate removals: %w", err)
+	}
+
+	_, _ = db.Exec("CALL DOLT_COMMIT('-Am', 'doctor: remove stale issues copies of wisps (be-iabdi)')") // Best effort
+
+	fmt.Printf("  Fixed %d cross-table duplicate(s)\n", removed)
+	return nil
+}
+
+// CountCrossTableDuplicates returns the number of IDs present in both the
+// issues and wisps tables. Returns 0 and an error if the database is
+// unreachable. Used by CheckCrossTableDuplicates in the doctor package.
+func CountCrossTableDuplicates(path string) (int, error) {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
+		return 0, err
+	}
+
+	db, err := openDoltDB(beadsDir)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issues WHERE id IN (SELECT id FROM wisps)`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("query cross-table duplicates: %w", err)
+	}
+	return count, nil
 }
 
 // openDoltDB opens a Dolt database connection via MySQL protocol.

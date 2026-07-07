@@ -10,7 +10,7 @@ import (
 
 // runConventionsCheck runs a composite conventions check: lint, stale, and orphans.
 // All findings are advisory (warning, never error) - conventions are a choice.
-func runConventionsCheck(path string) {
+func runConventionsCheck(path string) error {
 	var checks []doctorCheck
 
 	checks = append(checks, runConventionsLint()...)
@@ -25,7 +25,7 @@ func runConventionsCheck(path string) {
 				break
 			}
 		}
-		outputJSON(struct {
+		return outputJSON(struct {
 			Path      string        `json:"path"`
 			Checks    []doctorCheck `json:"checks"`
 			OverallOK bool          `json:"overall_ok"`
@@ -34,7 +34,6 @@ func runConventionsCheck(path string) {
 			Checks:    checks,
 			OverallOK: overallOK,
 		})
-		return
 	}
 
 	// Human-readable output
@@ -77,6 +76,7 @@ func runConventionsCheck(path string) {
 		fmt.Println()
 		fmt.Printf("%s\n", ui.RenderPass("✓ All convention checks passed"))
 	}
+	return nil
 }
 
 // runConventionsLint checks open issues for missing template sections.
