@@ -56,6 +56,7 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd todo add](#bd-todo-add) — Add a new TODO item
   - [bd todo done](#bd-todo-done) — Mark TODO(s) as done
   - [bd todo list](#bd-todo-list) — List TODO items
+- [bd unclaim](#bd-unclaim) — Release a claimed issue
 - [bd update](#bd-update) — Update one or more issues
 
 ### Views & Reports:
@@ -1509,6 +1510,28 @@ bd todo list [flags]
 
 ```
       --all   Show all TODOs including completed
+```
+
+### bd unclaim
+
+Release a claimed issue by clearing the assignee and resetting status to 'open'.
+
+Use this when an agent crashes mid-work or you need to abandon a claimed task.
+The issue becomes available for re-claiming by other agents.
+
+Examples:
+  bd unclaim bd-123
+  bd unclaim bd-123 --reason "Agent crashed"
+  bd unclaim bd-123 bd-456
+
+```
+bd unclaim [id...] [flags]
+```
+
+**Flags:**
+
+```
+  -r, --reason string   Reason for unclaiming
 ```
 
 ### bd update
