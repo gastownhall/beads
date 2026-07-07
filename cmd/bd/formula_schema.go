@@ -43,7 +43,10 @@ func runFormulaSchema(cmd *cobra.Command, args []string) {
 
 func runFormulaSchemaList() {
 	if jsonOutput {
-		outputJSON(formula.Primitives)
+		if err := outputJSON(formula.Primitives); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -68,7 +71,10 @@ func runFormulaSchemaShow(name string) {
 	}
 
 	if jsonOutput {
-		outputJSON(p)
+		if err := outputJSON(p); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
