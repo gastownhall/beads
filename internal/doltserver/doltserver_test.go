@@ -1113,6 +1113,94 @@ func TestEnsureDoltInit_SeedsMarker(t *testing.T) {
 	}
 }
 
+func TestMarkDoltDirCompatible(t *testing.T) {
+	t.Run("empty path errors", func(t *testing.T) {
+		if err := MarkDoltDirCompatible(""); err == nil {
+			t.Fatal("expected empty path to error")
+		}
+	})
+
+	t.Run("missing dot-dolt is noop", func(t *testing.T) {
+		doltDir := t.TempDir()
+		if err := MarkDoltDirCompatible(doltDir); err != nil {
+			t.Fatalf("MarkDoltDirCompatible: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(doltDir, bdDoltMarker)); !os.IsNotExist(err) {
+			t.Fatalf("marker should not be created without .dolt/, stat err=%v", err)
+		}
+	})
+
+	t.Run("dot-dolt file errors", func(t *testing.T) {
+		doltDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(doltDir, ".dolt"), []byte("not a dir"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkDoltDirCompatible(doltDir); err == nil {
+			t.Fatal("expected .dolt file to error")
+		}
+	})
+
+	t.Run("writes missing marker", func(t *testing.T) {
+		doltDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(doltDir, ".dolt"), 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkDoltDirCompatible(doltDir); err != nil {
+			t.Fatalf("MarkDoltDirCompatible: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(doltDir, bdDoltMarker))
+		if err != nil {
+			t.Fatalf("reading marker: %v", err)
+		}
+		if string(got) != "ok\n" {
+			t.Fatalf("marker content = %q, want %q", string(got), "ok\n")
+		}
+		if IsPreV56DoltDir(doltDir) {
+			t.Fatal("marked dolt dir should not report as pre-v56")
+		}
+	})
+
+	t.Run("existing marker is preserved", func(t *testing.T) {
+		doltDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(doltDir, ".dolt"), 0750); err != nil {
+			t.Fatal(err)
+		}
+		markerPath := filepath.Join(doltDir, bdDoltMarker)
+		if err := os.WriteFile(markerPath, []byte("custom\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkDoltDirCompatible(doltDir); err != nil {
+			t.Fatalf("MarkDoltDirCompatible: %v", err)
+		}
+		got, err := os.ReadFile(markerPath)
+		if err != nil {
+			t.Fatalf("reading marker: %v", err)
+		}
+		if string(got) != "custom\n" {
+			t.Fatalf("existing marker content = %q, want %q", string(got), "custom\n")
+		}
+	})
+
+	t.Run("marker directory is preserved", func(t *testing.T) {
+		doltDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(doltDir, ".dolt"), 0750); err != nil {
+			t.Fatal(err)
+		}
+		markerPath := filepath.Join(doltDir, bdDoltMarker)
+		if err := os.MkdirAll(markerPath, 0750); err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkDoltDirCompatible(doltDir); err != nil {
+			t.Fatalf("MarkDoltDirCompatible: %v", err)
+		}
+		if info, err := os.Stat(markerPath); err != nil {
+			t.Fatalf("stat marker path: %v", err)
+		} else if !info.IsDir() {
+			t.Fatal("existing marker path should be preserved as-is")
+		}
+	})
+}
+
 func TestRecoverPreV56DoltDir(t *testing.T) {
 	doltDir := t.TempDir()
 	dotDolt := filepath.Join(doltDir, ".dolt", "noms")

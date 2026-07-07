@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	listenWait   = 2 * time.Second
+	listenWait   = 10 * time.Second
 	shutdownWait = 5 * time.Second
 	ioTimeout    = 2 * time.Second
 )

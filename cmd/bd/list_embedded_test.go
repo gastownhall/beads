@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -57,6 +58,35 @@ func bdListJSON(t *testing.T, bd, dir string, args ...string) []*types.IssueWith
 	return issues
 }
 
+type bdListSkipLabelsJSON struct {
+	SchemaVersion int `json:"schema_version"`
+	Issues        []struct {
+		ID     string   `json:"id"`
+		Labels []string `json:"labels"`
+	} `json:"issues"`
+	Meta struct {
+		SkipLabels bool `json:"skip_labels"`
+		Count      int  `json:"count"`
+	} `json:"meta"`
+}
+
+func bdListSkipLabelsJSONOutput(t *testing.T, bd, dir string, args ...string) bdListSkipLabelsJSON {
+	t.Helper()
+	fullArgs := append([]string{"list", "--json", "--skip-labels"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd list --json --skip-labels %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	var out bdListSkipLabelsJSON
+	if err := json.Unmarshal(stdout.Bytes(), &out); err != nil {
+		t.Fatalf("failed to parse skip-labels JSON output: %v\nraw: %s", err, stdout.String())
+	}
+	return out
+}
+
 // bdListCapture runs "bd list" and returns (stdout, stderr) separately.
 func bdListCapture(t *testing.T, bd, dir string, args ...string) (string, string) {
 	t.Helper()
@@ -69,6 +99,32 @@ func bdListCapture(t *testing.T, bd, dir string, args ...string) (string, string
 		t.Fatalf("bd list %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	return stdout.String(), stderr.String()
+}
+
+// bdListJSONWithEnv runs "bd list --json" with extra environment variables.
+func bdListJSONWithEnv(t *testing.T, bd, dir string, extraEnv []string, args ...string) []*types.IssueWithCounts {
+	t.Helper()
+	fullArgs := append([]string{"list", "--json"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = append(bdEnv(dir), extraEnv...)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd list --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	s := stdout.String()
+	start := strings.Index(s, "[")
+	if start < 0 {
+		if strings.Contains(s, "null") || strings.TrimSpace(s) == "" {
+			return nil
+		}
+		t.Fatalf("no JSON array found in output:\n%s", s)
+	}
+	var issues []*types.IssueWithCounts
+	if err := json.Unmarshal([]byte(s[start:]), &issues); err != nil {
+		t.Fatalf("failed to parse JSON list output: %v\nraw: %s", err, s[start:])
+	}
+	return issues
 }
 
 // bdListFail runs "bd list" expecting failure.
@@ -199,12 +255,13 @@ func TestEmbeddedList(t *testing.T) {
 	})
 
 	t.Run("limit_truncation_hint", func(t *testing.T) {
-		// Truncated: --limit < seeded count should emit stderr hint (GH#3212).
+		// GH#4094: hint is suppressed when stderr is not a terminal (piped).
+		// bdListCapture always runs in piped mode, so no hint expected even when truncated.
 		stdout, stderr := bdListCapture(t, bd, dir, "--limit", "2")
-		if !strings.Contains(stderr, "more results matched") {
-			t.Errorf("expected truncation hint on stderr, got:\nstderr: %q\nstdout: %q", stderr, stdout)
+		if strings.Contains(stderr, "more results matched") {
+			t.Errorf("truncation hint must not appear on piped stderr (GH#4094):\nstderr: %q\nstdout: %q", stderr, stdout)
 		}
-		// The hint must go to stderr only, not stdout, so JSON consumers can parse stdout cleanly.
+		// Hint must never appear in stdout.
 		if strings.Contains(stdout, "more results matched") {
 			t.Errorf("truncation hint leaked into stdout:\n%s", stdout)
 		}
@@ -220,6 +277,54 @@ func TestEmbeddedList(t *testing.T) {
 		_, stderrHigh := bdListCapture(t, bd, dir, "--limit", "1000")
 		if strings.Contains(stderrHigh, "more results matched") {
 			t.Errorf("false-positive truncation hint when under limit:\n%s", stderrHigh)
+		}
+	})
+
+	t.Run("list_limit_config_env", func(t *testing.T) {
+		// BD_LIST_LIMIT env var sets the default limit when --limit not passed.
+		// With BD_LIST_LIMIT=1, default list should return at most 1 issue.
+		limitedIssues := bdListJSONWithEnv(t, bd, dir, []string{"BD_LIST_LIMIT=1"})
+		if len(limitedIssues) > 1 {
+			t.Errorf("BD_LIST_LIMIT=1 should limit to at most 1, got %d", len(limitedIssues))
+		}
+
+		// --limit flag still takes precedence over env var.
+		allIssues := bdListJSONWithEnv(t, bd, dir, []string{"BD_LIST_LIMIT=1"}, "--limit", "0")
+		if len(allIssues) <= 1 {
+			t.Errorf("--limit 0 should override BD_LIST_LIMIT=1, got %d", len(allIssues))
+		}
+
+		// --all is also an explicit list request and should override the configured default.
+		allFlagIssues := bdListJSONWithEnv(t, bd, dir, []string{"BD_LIST_LIMIT=1"}, "--all")
+		if len(allFlagIssues) <= 1 {
+			t.Errorf("--all should override BD_LIST_LIMIT=1, got %d", len(allFlagIssues))
+		}
+	})
+
+	t.Run("list_limit_config_file", func(t *testing.T) {
+		// Write project config.yaml with list.limit: 1.
+		configPath := filepath.Join(dir, ".beads", "config.yaml")
+		if err := os.WriteFile(configPath, []byte("list:\n  limit: 1\n"), 0o644); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+		defer func() { _ = os.Remove(configPath) }()
+
+		// Config file should limit to at most 1 issue.
+		limitedIssues := bdListJSON(t, bd, dir)
+		if len(limitedIssues) > 1 {
+			t.Errorf("list.limit=1 in config should limit to at most 1, got %d", len(limitedIssues))
+		}
+
+		// --limit flag still takes precedence over config file.
+		allIssues := bdListJSON(t, bd, dir, "--limit", "0")
+		if len(allIssues) <= 1 {
+			t.Errorf("--limit 0 should override config list.limit=1, got %d", len(allIssues))
+		}
+
+		// --all is also an explicit list request and should override the configured default.
+		allFlagIssues := bdListJSON(t, bd, dir, "--all")
+		if len(allFlagIssues) <= 1 {
+			t.Errorf("--all should override config list.limit=1, got %d", len(allFlagIssues))
 		}
 	})
 
@@ -282,6 +387,25 @@ func TestEmbeddedList(t *testing.T) {
 		// openBug has both backend and urgent — should be excluded
 		if containsID(issues, seed.openBug) {
 			t.Error("openBug with backend+urgent should be excluded when --exclude-label urgent")
+		}
+	})
+
+	t.Run("skip_labels_json_suppresses_labeled_issue", func(t *testing.T) {
+		out := bdListSkipLabelsJSONOutput(t, bd, dir, "--id", seed.openBug)
+		if !out.Meta.SkipLabels {
+			t.Fatal("expected meta.skip_labels=true")
+		}
+		if out.Meta.Count != 1 || len(out.Issues) != 1 {
+			t.Fatalf("expected one issue and matching count, got count=%d issues=%d", out.Meta.Count, len(out.Issues))
+		}
+		if out.Issues[0].ID != seed.openBug {
+			t.Fatalf("expected issue %s, got %s", seed.openBug, out.Issues[0].ID)
+		}
+		if out.Issues[0].Labels == nil {
+			t.Fatal("expected labels field to be present as an empty array, got nil")
+		}
+		if len(out.Issues[0].Labels) != 0 {
+			t.Fatalf("--skip-labels JSON leaked labels: %v", out.Issues[0].Labels)
 		}
 	})
 
@@ -369,6 +493,30 @@ func TestEmbeddedList(t *testing.T) {
 		}
 		if strings.Contains(out, blockedChild.ID) {
 			t.Errorf("blocked child %s should not appear in ready parent tree:\n%s", blockedChild.ID, out)
+		}
+	})
+
+	// Regression for gastownhall/beads#3936: relates-to between two epics
+	// must not nest them in `bd list` tree mode, and a bidirectional
+	// relates-to must not silently drop both epics from the output.
+	t.Run("tree_relates_to_does_not_nest_or_drop_epics", func(t *testing.T) {
+		epicA := bdCreate(t, bd, dir, "Relates Epic A", "--type", "epic", "--priority", "2")
+		epicB := bdCreate(t, bd, dir, "Relates Epic B", "--type", "epic", "--priority", "2")
+
+		bdDep(t, bd, dir, "add", epicA.ID, epicB.ID, "--type", "relates-to")
+		out := bdList(t, bd, dir, "--no-pager", "--type", "epic")
+		if !strings.Contains(out, epicA.ID) || !strings.Contains(out, epicB.ID) {
+			t.Fatalf("one-direction relates-to should keep both epics visible:\n%s", out)
+		}
+		if strings.Contains(out, "└── "+epicA.ID) || strings.Contains(out, "└── "+epicB.ID) ||
+			strings.Contains(out, "├── "+epicA.ID) || strings.Contains(out, "├── "+epicB.ID) {
+			t.Fatalf("relates-to must not nest epics under each other:\n%s", out)
+		}
+
+		bdDep(t, bd, dir, "add", epicB.ID, epicA.ID, "--type", "relates-to")
+		out = bdList(t, bd, dir, "--no-pager", "--type", "epic")
+		if !strings.Contains(out, epicA.ID) || !strings.Contains(out, epicB.ID) {
+			t.Fatalf("bidirectional relates-to must not drop epics from tree output:\n%s", out)
 		}
 	})
 
@@ -616,6 +764,15 @@ func TestEmbeddedList(t *testing.T) {
 		out := bdListFail(t, bd, dir, "--status", "nonexistent")
 		if !strings.Contains(out, "invalid status") {
 			t.Errorf("expected 'invalid status' error, got: %s", out)
+		}
+	})
+
+	t.Run("reject_offset_in_direct_mode", func(t *testing.T) {
+		// --offset is only honored under --proxied-server; the direct
+		// (embedded) path must fatal before touching the store.
+		out := bdListFail(t, bd, dir, "--offset", "1")
+		if !strings.Contains(out, "--offset is only supported under --proxied-server") {
+			t.Errorf("expected --offset direct-mode rejection, got: %s", out)
 		}
 	})
 }

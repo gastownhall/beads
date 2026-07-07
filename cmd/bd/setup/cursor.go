@@ -50,40 +50,37 @@ For detailed docs: see AGENTS.md, QUICKSTART.md, or run ` + "`bd --help`" + `
 # END BEADS INTEGRATION
 `
 
-// InstallCursor installs Cursor IDE integration
-func InstallCursor() {
+func InstallCursor() error {
 	rulesPath := ".cursor/rules/beads.mdc"
 
 	fmt.Println("Installing Cursor integration...")
 
-	// Ensure parent directory exists
 	if err := EnsureDir(filepath.Dir(rulesPath), 0755); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
-	// Write beads rules file (overwrite if exists)
 	if err := atomicWriteFile(rulesPath, []byte(cursorRulesTemplate)); err != nil {
-		FatalError("write rules: %v", err)
+		return HandleError("write rules: %v", err)
 	}
 
 	fmt.Printf("\n✓ Cursor integration installed\n")
 	fmt.Printf("  Rules: %s\n", rulesPath)
 	fmt.Println("\nRestart Cursor for changes to take effect.")
+	return nil
 }
 
-// CheckCursor checks if Cursor integration is installed
-func CheckCursor() {
+func CheckCursor() error {
 	rulesPath := ".cursor/rules/beads.mdc"
 
 	if !FileExists(rulesPath) {
-		FatalErrorWithHint("Cursor integration not installed", "Run: bd setup cursor")
+		return HandleErrorWithHint("Cursor integration not installed", "Run: bd setup cursor")
 	}
 
 	fmt.Println("✓ Cursor integration installed:", rulesPath)
+	return nil
 }
 
-// RemoveCursor removes Cursor integration
-func RemoveCursor() {
+func RemoveCursor() error {
 	rulesPath := ".cursor/rules/beads.mdc"
 
 	fmt.Println("Removing Cursor integration...")
@@ -91,10 +88,11 @@ func RemoveCursor() {
 	if err := os.Remove(rulesPath); err != nil {
 		if os.IsNotExist(err) {
 			fmt.Println("No rules file found")
-			return
+			return nil
 		}
-		FatalError("failed to remove file: %v", err)
+		return HandleError("failed to remove file: %v", err)
 	}
 
 	fmt.Println("✓ Removed Cursor integration")
+	return nil
 }

@@ -11,6 +11,7 @@ import (
 	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 )
 
 // Sentinel errors for the dolt storage layer.
@@ -34,6 +35,13 @@ var (
 	// prevent propagating the corruption to the remote. Run bd dolt verify
 	// to diagnose and recover.
 	ErrDanglingReference = errors.New("dangling chunk reference")
+
+	// errCommitPhase marks an error as having occurred during tx.Commit (as
+	// opposed to BeginTx or the transaction body). A connection failure during
+	// commit is ambiguous — the commit may have landed on the server before the
+	// connection dropped — so withRetryTx must NOT blindly replay it, or it
+	// could double-apply the write. Pre-commit failures carry no such risk.
+	errCommitPhase = errors.New("write commit phase")
 )
 
 // isTableNotExistError returns true if the error indicates a MySQL/Dolt
@@ -41,8 +49,7 @@ var (
 // fallthrough (pre-migration databases without wisps table) from real errors
 // (timeouts, connection failures, corrupt data).
 func isTableNotExistError(err error) bool {
-	var mysqlErr *mysql.MySQLError
-	return errors.As(err, &mysqlErr) && mysqlErr.Number == 1146
+	return dberrors.IsTableNotExist(err)
 }
 
 // isBranchTrackingError returns true if the error indicates that DOLT_PULL

@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -29,7 +30,9 @@ Use --force to actually perform the reset.
 Examples:
   bd reset              # Show what would be deleted
   bd reset --force      # Actually delete everything`,
-	Run: runReset,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runReset,
 }
 
 func init() {
@@ -37,53 +40,54 @@ func init() {
 	// Note: resetCmd is added to adminCmd in admin.go
 }
 
-func runReset(cmd *cobra.Command, args []string) {
+func runReset(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("admin-reset")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if err := requireServerMode("reset"); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 	CheckReadonly("reset")
 
 	force, _ := cmd.Flags().GetBool("force")
 
-	// Get common git directory (for hooks and beads-worktrees, which are shared across worktrees)
 	gitCommonDir, err := git.GetGitCommonDir()
 	if err != nil {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if jerr := outputJSON(map[string]interface{}{
 				"error": "not a git repository",
-			})
-		} else {
-			fmt.Fprintf(os.Stderr, "Error: not a git repository\n")
+			}); jerr != nil {
+				return jerr
+			}
+			return SilentExit()
 		}
-		os.Exit(1)
+		return HandleError("not a git repository")
 	}
 
-	// Resolve .beads directory (worktree-aware)
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"message": "beads not initialized",
 				"reset":   false,
 			})
-		} else {
-			fmt.Println("Beads is not initialized in this repository.")
-			fmt.Println("Nothing to reset.")
 		}
-		return
+		fmt.Println("Beads is not initialized in this repository.")
+		fmt.Println("Nothing to reset.")
+		return nil
 	}
 
-	// Collect what would be deleted
 	items := collectResetItems(gitCommonDir, beadsDir)
 
 	if !force {
-		// Dry-run mode: show what would be deleted
-		showResetPreview(items)
-		return
+		return showResetPreview(items)
 	}
 
-	// Actually perform the reset
-	performReset(items, gitCommonDir, beadsDir)
+	return performReset(items, gitCommonDir, beadsDir)
 }
 
 type resetItem struct {
@@ -152,13 +156,12 @@ func isBdHook(hookPath string) bool {
 	return false
 }
 
-func showResetPreview(items []resetItem) {
+func showResetPreview(items []resetItem) error {
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"dry_run": true,
 			"items":   items,
 		})
-		return
 	}
 
 	fmt.Println(ui.RenderWarn("Reset preview (dry-run mode)"))
@@ -177,9 +180,10 @@ func showResetPreview(items []resetItem) {
 	fmt.Println(ui.RenderFail("⚠ This operation cannot be undone!"))
 	fmt.Println()
 	fmt.Printf("To proceed, run: %s\n", ui.RenderWarn("bd reset --force"))
+	return nil
 }
 
-func performReset(items []resetItem, _, _ string) {
+func performReset(items []resetItem, _, _ string) error {
 
 	var errors []string
 
@@ -223,8 +227,7 @@ func performReset(items []resetItem, _, _ string) {
 		if len(errors) > 0 {
 			result["errors"] = errors
 		}
-		outputJSON(result)
-		return
+		return outputJSON(result)
 	}
 
 	fmt.Println()
@@ -238,4 +241,5 @@ func performReset(items []resetItem, _, _ string) {
 		fmt.Println()
 		fmt.Println("To reinitialize beads, run: bd init")
 	}
+	return nil
 }

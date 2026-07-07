@@ -108,24 +108,45 @@ Secrets in this list are refused on git-tracked `config.yaml` files unless you p
 | `backup.interval` | — | `BD_BACKUP_INTERVAL` | `15m` | Minimum time between auto-backups |
 | `backup.git-push` | — | — | `false` | Auto-push backup repo |
 | `backup.git-repo` | — | `BD_BACKUP_GIT_REPO` | (none) | Backup git repo URL |
-| `export.auto` | — | — | `true` | Refresh `.beads/issues.jsonl` export after every write; not cross-machine sync |
+| `export.auto` | — | — | `false` | Refresh `.beads/issues.jsonl` export after every write; not cross-machine sync |
 | `export.path` | — | — | `issues.jsonl` | Output filename relative to `.beads/` |
+| `import.path` | — | — | `issues.jsonl` | Input filename relative to `.beads/` for implied JSONL imports; use relative paths for portability |
 | `export.interval` | — | — | `60s` | Minimum time between auto-exports |
-| `export.git-add` | — | — | `true` | Run `git add` on the export file |
+| `export.git-add` | — | — | `false` | Run `git add` on the export file |
 | `routing.mode` | — | — | (none) | Multi-repo routing: `auto`, `maintainer`, `contributor`, `explicit` |
 | `routing.default` | — | — | `.` | Default routing target |
 | `routing.maintainer` | — | — | `.` | Maintainer-routed path |
 | `routing.contributor` | — | — | `~/.beads-planning` | Contributor-routed path |
+| `list.limit` | `--limit` / `-n` | `BD_LIST_LIMIT` | `50` | Default limit for `bd list` results |
+| `directory.labels` | — | — | `{}` | Map directory patterns → labels for monorepos |
+| `external_projects` | — | — | `{}` | Map project names → paths for cross-project deps |
 | `federation.remote` | — | `BD_FEDERATION_REMOTE` | (none) | Dolt remote URL (`dolthub://`, `gs://`, `s3://`, `az://`, `file://`) |
 | `federation.sovereignty` | — | `BD_FEDERATION_SOVEREIGNTY` | (none) | Sovereignty tier: `T1`, `T2`, `T3`, `T4` |
 | `federation.allowed-remote-patterns` | — | — | `[]` | Glob patterns restricting allowed remote URLs |
 | `federation.exclude_types` | — | — | `[wisp]` | Issue types excluded from federation push |
 | `sync.require_confirmation_on_mass_delete` | — | — | `false` | Prompt before pushing >50% issue deletions |
-| `directory.labels` | — | — | `{}` | Map directory patterns → labels for monorepos |
-| `external_projects` | — | — | `{}` | Map project names → paths for cross-project deps |
 | `output.title-length` | — | — | `255` | Title display in feedback (`0` hides); see routing note below |
 | `ai.model` | — | `BD_AI_MODEL` | `claude-haiku-4-5-20251001` | Default AI model |
 | `agents.file` | — | — | `AGENTS.md` | Agents instruction filename; see routing note below |
+
+:::important JSONL export is opt-in
+
+`export.auto` and `export.git-add` are disabled unless configured explicitly.
+`.beads/issues.jsonl` is an optional export for viewers, interchange, and
+issue-level migration. It is not the canonical source of truth, not
+cross-machine sync, and not a full database backup.
+
+Workflows that depend on a fresh, git-staged JSONL file should opt in:
+
+```bash
+bd config set export.auto true
+bd config set export.git-add true
+```
+
+Use `bd dolt push` / `bd dolt pull` for sync and `bd backup` for restorable
+database backups.
+
+:::
 
 Routing note: `output.title-length` and `agents.file` are functionally tool-level settings, but `bd config set` writes them to the Dolt database. They are typically read from `config.yaml` when set there directly.
 
@@ -146,7 +167,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `types.custom` | Comma-separated list of custom issue types |
 | `types.infra` | Infra types routed to wisps table |
 | `import.orphan_handling` | `allow` (default) \| `resurrect` \| `skip` \| `strict` |
-| `compact_*` | Compaction tuning (see `docs/EXTENDING.md`) |
+| `compact_*` | Compaction tuning (see [docs/CONFIG.md](https://github.com/gastownhall/beads/blob/main/docs/CONFIG.md)) |
 | `issue_id_mode` | `hash` (default) \| `counter` (sequential) |
 | `min_hash_length`, `max_hash_length` | Adaptive ID bounds (defaults `4` and `8`) |
 | `max_collision_prob` | Hash ID collision tolerance (default `0.25`) |
@@ -212,12 +233,12 @@ backup:
   enabled: true
   interval: 15m
 
-# Auto-export issues.jsonl after writes for viewers/interchange/backup
+# Optional auto-export of issues.jsonl after writes for viewers/interchange
 export:
-  auto: true
+  auto: false
   path: issues.jsonl
   interval: 60s
-  git-add: true
+  git-add: false
 
 # Optional Dolt federation
 federation:

@@ -482,7 +482,9 @@ install_with_go() {
         bin_dir="$(go env GOPATH)/bin"
     fi
 
-    if CGO_ENABLED=1 GOFLAGS="${GOFLAGS:+$GOFLAGS }-tags=gms_pure_go" go install github.com/gastownhall/beads/cmd/bd@latest; then
+    # The repository lives under gastownhall, but the Go module path remains
+    # github.com/steveyegge/beads for compatibility with released tags.
+    if CGO_ENABLED=1 GOFLAGS="${GOFLAGS:+$GOFLAGS }-tags=gms_pure_go" go install github.com/steveyegge/beads/cmd/bd@latest; then
         log_success "bd installed via go install (embedded-capable)"
         LAST_INSTALL_PATH="$bin_dir/bd"
 
@@ -491,7 +493,7 @@ install_with_go() {
         fi
     else
         log_warning "go install with CGO failed; retrying without CGO (server-mode-only binary)"
-        if CGO_ENABLED=0 go install github.com/gastownhall/beads/cmd/bd@latest; then
+        if CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest; then
             log_success "bd installed via go install (CGO_ENABLED=0, server mode only)"
             log_warning "This bd cannot use embedded Dolt. Run 'bd init --server' to use an external dolt sql-server, or reinstall with a C toolchain for embedded mode."
             LAST_INSTALL_PATH="$bin_dir/bd"
@@ -751,7 +753,7 @@ main() {
     echo ""
     echo "Or install from source:"
     echo "  1. Install Go from https://go.dev/dl/"
-    echo "  2. Run: CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/gastownhall/beads/cmd/bd@latest"
+    echo "  2. Run: CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest"
     echo ""
     exit 1
 }

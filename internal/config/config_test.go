@@ -66,6 +66,8 @@ func TestDefaults(t *testing.T) {
 		{"json", false, func(k string) interface{} { return GetBool(k) }},
 		{"db", "", func(k string) interface{} { return GetString(k) }},
 		{"actor", "", func(k string) interface{} { return GetString(k) }},
+		{"export.auto", false, func(k string) interface{} { return GetBool(k) }},
+		{"export.git-add", false, func(k string) interface{} { return GetBool(k) }},
 	}
 
 	for _, tt := range tests {
@@ -1315,6 +1317,94 @@ types:
 	}
 }
 
+// TestGetCustomTypesFromYAML_ListForm verifies that the YAML sequence form
+// (e.g. `types: { custom: [step, wisp] }`) is honored equivalently to the
+// legacy comma-separated string form. Before the fix, viper.GetString on a
+// list-typed value returned "" and getConfigList silently produced an empty
+// slice, so list-form .beads/config.yaml declarations were ignored — defeating
+// the gastownhall/beads#4024 overlay goal for projects that prefer YAML
+// list syntax.
+func TestGetCustomTypesFromYAML_ListForm(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create .beads directory: %v", err)
+	}
+
+	// YAML list form — the syntax shown in gastownhall/beads#4024.
+	configContent := `
+types:
+  custom:
+    - step
+    - wisp
+    - convoy
+`
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	got := GetCustomTypesFromYAML()
+	want := []string{"step", "wisp", "convoy"}
+	if len(got) != len(want) {
+		t.Fatalf("GetCustomTypesFromYAML() = %v, want %v", got, want)
+	}
+	for i, expected := range want {
+		if got[i] != expected {
+			t.Errorf("GetCustomTypesFromYAML()[%d] = %q, want %q", i, got[i], expected)
+		}
+	}
+}
+
+// TestGetCustomTypesFromYAML_InlineListForm covers the inline-flow YAML list
+// syntax (`types: { custom: [step, wisp] }`) which is what gastownhall/beads#4024
+// names explicitly as a form that must work. Stored alongside the block-list
+// test so both YAML representations are pinned.
+func TestGetCustomTypesFromYAML_InlineListForm(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create .beads directory: %v", err)
+	}
+
+	configContent := `
+types: { custom: [step, wisp] }
+`
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0o644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	got := GetCustomTypesFromYAML()
+	want := []string{"step", "wisp"}
+	if len(got) != len(want) {
+		t.Fatalf("GetCustomTypesFromYAML() = %v, want %v", got, want)
+	}
+	for i, expected := range want {
+		if got[i] != expected {
+			t.Errorf("GetCustomTypesFromYAML()[%d] = %q, want %q", i, got[i], expected)
+		}
+	}
+}
+
 func TestGetCustomTypesFromYAML_NotSet(t *testing.T) {
 	// Isolate from environment variables
 	restore := envSnapshot(t)
@@ -1598,5 +1688,35 @@ func TestInitialize_ExternalBEADSDirDoesNotMergeCallerProjectConfig(t *testing.T
 	}
 	if got := GetBool("json"); got {
 		t.Fatalf("GetBool(json) = %v, want false", got)
+	}
+}
+
+func TestViperIssuePrefixKeysAreDistinct(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create .beads: %v", err)
+	}
+
+	// ReadConfigPrefix diagnostics rely on viper keeping these YAML keys distinct.
+	content := "issue-prefix: canonical\nissue_prefix: legacy_underscore\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(content), 0o600); err != nil {
+		t.Fatalf("failed to write config.yaml: %v", err)
+	}
+
+	t.Chdir(tmpDir)
+	ResetForTesting()
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if got := GetString("issue-prefix"); got != "canonical" {
+		t.Fatalf("GetString(issue-prefix) = %q, want %q", got, "canonical")
+	}
+	if got := GetString("issue_prefix"); got != "legacy_underscore" {
+		t.Fatalf("GetString(issue_prefix) = %q, want %q", got, "legacy_underscore")
 	}
 }

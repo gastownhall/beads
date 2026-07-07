@@ -11,7 +11,7 @@ import (
 )
 
 // showIssueRefs displays issues that reference the given issue(s), grouped by relationship type
-func showIssueRefs(ctx context.Context, args []string, jsonOut bool) {
+func showIssueRefs(ctx context.Context, args []string, jsonOut bool) error {
 	// Collect all refs for all issues
 	allRefs := make(map[string][]*types.IssueWithDependencyMetadata)
 
@@ -47,8 +47,7 @@ func showIssueRefs(ctx context.Context, args []string, jsonOut bool) {
 
 	// Output results
 	if jsonOut {
-		outputJSON(allRefs)
-		return
+		return outputJSON(allRefs)
 	}
 
 	// Display refs grouped by issue and relationship type
@@ -91,6 +90,7 @@ func showIssueRefs(ctx context.Context, args []string, jsonOut bool) {
 		}
 		fmt.Println()
 	}
+	return nil
 }
 
 // displayRefGroup displays a group of references with a given type

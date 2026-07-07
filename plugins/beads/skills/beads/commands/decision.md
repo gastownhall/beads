@@ -9,7 +9,7 @@ Decisions use `--type decision`. The description field holds the structured deci
 
 ## Record a Decision
 
-When the user wants to record a decision (or you invoke `bd decision record`):
+When the user wants to record a decision (i.e. the `record` action of this command):
 
 1. Gather the following (ask if not provided):
    - **Title**: Short summary of what was decided (required)

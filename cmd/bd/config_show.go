@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 // configEntry represents a single configuration key with its effective value and source.
@@ -40,7 +41,16 @@ Examples:
   bd config show
   bd config show --json
   bd config show --source config.yaml`,
-	Run: func(cmd *cobra.Command, _ []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("config-show")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		sourceFilter, _ := cmd.Flags().GetString("source")
 
 		entries := collectConfigEntries()
@@ -50,16 +60,16 @@ Examples:
 		}
 
 		if jsonOutput {
-			outputJSON(entries)
-			return
+			return outputJSON(entries)
 		}
 
 		if len(entries) == 0 {
 			fmt.Println("No configuration found")
-			return
+			return nil
 		}
 
 		printConfigEntries(entries)
+		return nil
 	},
 }
 
@@ -120,8 +130,23 @@ func collectViperEntries() []configEntry {
 
 		value := formatViperValue(config.GetString(key))
 		source := config.GetValueSource(key)
-
 		sourceLabel := viperSourceLabel(key, source)
+
+		// User-global keys (metrics.*) are honored at runtime from the user-global
+		// config.yaml only, never merged project config; report that authoritative
+		// value AND its user-global source so the listing matches what bd actually
+		// uses (and `bd config get`), not a project value/source that has no
+		// runtime effect. The viper source label alone is ambiguous: a project
+		// .beads/config.yaml that also sets a metrics key makes GetValueSource
+		// report SourceConfigFile ("config.yaml"), which would attribute the
+		// displayed user-global value to the project file the runtime ignores.
+		if config.IsUserGlobalKey(key) {
+			value = formatViperValue(config.GetUserYamlConfig(key))
+			if value == "" {
+				continue // unset in user-global; runtime uses the built-in default
+			}
+			sourceLabel = config.UserConfigYamlPath()
+		}
 
 		// Skip empty defaults — they add noise without information
 		if source == config.SourceDefault && value == "" {

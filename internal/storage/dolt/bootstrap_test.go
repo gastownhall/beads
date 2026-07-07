@@ -71,3 +71,19 @@ func TestBootstrapFromGitRemoteWithDB_DeprecatedWrapper(t *testing.T) {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
+
+func TestDoltCloneArgs(t *testing.T) {
+	t.Setenv("DOLT_REMOTE_USER", "")
+	got := doltCloneArgs("https://example.com/repo", "/tmp/clone")
+	want := []string{"clone", "https://example.com/repo", "/tmp/clone"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("doltCloneArgs() = %q, want %q", got, want)
+	}
+
+	t.Setenv("DOLT_REMOTE_USER", "alice")
+	got = doltCloneArgs("https://example.com/repo", "/tmp/clone")
+	want = []string{"clone", "--user", "alice", "https://example.com/repo", "/tmp/clone"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("doltCloneArgs() = %q, want %q", got, want)
+	}
+}

@@ -702,3 +702,48 @@ func checkSharedServerHealth(beadsDir string) DoctorCheck {
 		Category: CategoryRuntime,
 	}
 }
+
+// CheckCorruptManifest reports the GH#3290 corrupt-manifest condition: the
+// dolt server log tail shows "root hash doesn't exist" and the affected
+// databases hold no recoverable data (empty journal, empty oldgen). The
+// repair (backup + reinitialize) is destructive, so it only runs via
+// bd doctor --fix with explicit confirmation — never automatically
+// (bd-6dnrw.6).
+func CheckCorruptManifest(path string) DoctorCheck {
+	beadsDir := ResolveBeadsDirForRepo(path)
+	if !IsDoltBackend(beadsDir) {
+		return DoctorCheck{
+			Name:     "Corrupt Manifest",
+			Status:   StatusOK,
+			Message:  "N/A (not using Dolt backend)",
+			Category: CategoryRuntime,
+		}
+	}
+
+	dirs, err := doltserver.DetectCorruptManifest(beadsDir)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Corrupt Manifest",
+			Status:   StatusWarning,
+			Message:  "Could not scan for corrupt-manifest state",
+			Detail:   err.Error(),
+			Category: CategoryRuntime,
+		}
+	}
+	if len(dirs) == 0 {
+		return DoctorCheck{
+			Name:     "Corrupt Manifest",
+			Status:   StatusOK,
+			Message:  "No corrupt-manifest state detected",
+			Category: CategoryRuntime,
+		}
+	}
+	return DoctorCheck{
+		Name:     "Corrupt Manifest",
+		Status:   StatusError,
+		Message:  fmt.Sprintf("%d dolt database(s) have a corrupt manifest with no recoverable data (GH#3290)", len(dirs)),
+		Detail:   strings.Join(dirs, "\n"),
+		Fix:      "Run 'bd doctor --fix' to back up the corrupt database(s) and reinitialize",
+		Category: CategoryRuntime,
+	}
+}

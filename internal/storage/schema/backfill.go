@@ -23,6 +23,66 @@ func ensureBackfilledCustomStatusesCustomTypes(ctx context.Context, db DBConn) (
 	return typesWrote || statusesWrote, nil
 }
 
+func needsBackfilledCustomStatusesCustomTypes(ctx context.Context, db DBConn) (bool, error) {
+	typesNeed, err := needsCustomTypesBackfill(ctx, db)
+	if err != nil {
+		return false, fmt.Errorf("custom_types: %w", err)
+	}
+	statusesNeed, err := needsCustomStatusesBackfill(ctx, db)
+	if err != nil {
+		return false, fmt.Errorf("custom_statuses: %w", err)
+	}
+	return typesNeed || statusesNeed, nil
+}
+
+func needsCustomTypesBackfill(ctx context.Context, db DBConn) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM custom_types").Scan(&count); err != nil {
+		return false, err
+	}
+	if count > 0 {
+		return false, nil
+	}
+
+	var value string
+	err := db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'types.custom'").Scan(&value)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return len(parseTypesValue(value)) > 0, nil
+}
+
+func needsCustomStatusesBackfill(ctx context.Context, db DBConn) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM custom_statuses").Scan(&count); err != nil {
+		return false, err
+	}
+	if count > 0 {
+		return false, nil
+	}
+
+	var value string
+	err := db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'status.custom'").Scan(&value)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if strings.TrimSpace(value) == "" {
+		return false, nil
+	}
+
+	parsed, parseErr := types.ParseCustomStatusConfig(value)
+	if parseErr != nil {
+		return false, nil
+	}
+	return len(parsed) > 0, nil
+}
+
 func backfillCustomTypes(ctx context.Context, db DBConn) (bool, error) {
 	var count int
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM custom_types").Scan(&count); err != nil {

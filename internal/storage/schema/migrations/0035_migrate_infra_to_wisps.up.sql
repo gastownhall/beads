@@ -31,10 +31,20 @@ SET @sql = IF(
 );
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
+SET @has_split_wisp_dependencies = (
+    SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'wisp_dependencies'
+      AND COLUMN_NAME IN ('depends_on_issue_id', 'depends_on_wisp_id', 'depends_on_external')
+);
 SET @sql = IF(
     (SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisp_dependencies') > 0,
-    'INSERT IGNORE INTO wisp_dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id) SELECT d.issue_id, d.depends_on_id, d.type, d.created_at, d.created_by, d.metadata, d.thread_id FROM dependencies d JOIN issues i ON i.id = d.issue_id WHERE i.issue_type IN (''agent'', ''rig'', ''role'', ''message'')',
+    IF(
+        @has_split_wisp_dependencies = 3,
+        'INSERT IGNORE INTO wisp_dependencies (issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id) SELECT d.issue_id, CASE WHEN d.depends_on_id LIKE ''external:%'' THEN NULL WHEN EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_id) THEN NULL WHEN EXISTS (SELECT 1 FROM issues target_issue WHERE target_issue.id = d.depends_on_id) THEN d.depends_on_id ELSE NULL END, CASE WHEN d.depends_on_id LIKE ''external:%'' THEN NULL WHEN EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_id) THEN d.depends_on_id ELSE NULL END, CASE WHEN d.depends_on_id LIKE ''external:%'' THEN d.depends_on_id WHEN NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_id) AND NOT EXISTS (SELECT 1 FROM issues target_issue WHERE target_issue.id = d.depends_on_id) THEN d.depends_on_id ELSE NULL END, d.type, d.created_at, d.created_by, d.metadata, d.thread_id FROM dependencies d JOIN issues i ON i.id = d.issue_id WHERE i.issue_type IN (''agent'', ''rig'', ''role'', ''message'')',
+        'INSERT IGNORE INTO wisp_dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id) SELECT d.issue_id, d.depends_on_id, d.type, d.created_at, d.created_by, d.metadata, d.thread_id FROM dependencies d JOIN issues i ON i.id = d.issue_id WHERE i.issue_type IN (''agent'', ''rig'', ''role'', ''message'')'
+    ),
     'SELECT 1'
 );
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;

@@ -1,13 +1,19 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestGitAddFile_InWorktreeHook_StagesCorrectPath is a regression test for
@@ -184,6 +190,217 @@ func TestShouldRunPostCommandAutoExportSkipsReadOnlyCommands(t *testing.T) {
 	}
 	if !shouldRunPostCommandAutoExport(&cobra.Command{Use: "create"}) {
 		t.Fatal("write commands should still trigger post-command auto-export")
+	}
+}
+
+// fakeStateHashStore implements the storage.StateHasher optional interface
+// plus the minimal DoltStorage surface maybeAutoExport touches. Any
+// non-overridden method panics via the embedded nil interface.
+type fakeStateHashStore struct {
+	storage.DoltStorage
+	stateHash          string
+	stateHashCalls     int
+	currentCommitCalls int
+	issues             []*types.Issue
+}
+
+func (f *fakeStateHashStore) GetStateHash(_ context.Context) (string, error) {
+	f.stateHashCalls++
+	return f.stateHash, nil
+}
+
+func (f *fakeStateHashStore) GetCurrentCommit(_ context.Context) (string, error) {
+	f.currentCommitCalls++
+	return "head-commit-hash", nil
+}
+
+func (f *fakeStateHashStore) GetInfraTypes(_ context.Context) map[string]bool { return nil }
+
+// GetConfig lets buildOwnerExcludeSet's database fallback lookup (for
+// export.exclude_owners / export.exclude_owner) run without panicking;
+// this fake has no config store, so every key is unset.
+func (f *fakeStateHashStore) GetConfig(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeStateHashStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
+	return f.issues, nil
+}
+
+// fakeHeadOnlyStore does NOT implement storage.StateHasher, forcing the
+// GetCurrentCommit fallback.
+type fakeHeadOnlyStore struct {
+	storage.DoltStorage
+	currentCommitCalls int
+}
+
+func (f *fakeHeadOnlyStore) GetCurrentCommit(_ context.Context) (string, error) {
+	f.currentCommitCalls++
+	return "head-commit-hash", nil
+}
+
+func autoExportTestDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"beads","backend":"dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	t.Setenv("BEADS_DIR", beadsDir)
+	return dir
+}
+
+// Regression test for wy-4ope: server-mode clients used to skip auto-export
+// entirely, so `git push` published stale JSONL. maybeAutoExport must reach
+// change detection and consult the working-set-aware state hash, not HEAD —
+// server mode runs with dolt auto-commit off, so HEAD does not advance on
+// writes.
+func TestMaybeAutoExportUsesStateHashForChangeDetection(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeStateHashStore{stateHash: "working-set-hash"}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "working-set-hash",
+		Timestamp:      time.Now(),
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
+	}
+
+	if fake.stateHashCalls != 1 {
+		t.Fatalf("GetStateHash calls = %d, want 1", fake.stateHashCalls)
+	}
+	if fake.currentCommitCalls != 0 {
+		t.Fatalf("GetCurrentCommit calls = %d, want 0 (StateHasher must take precedence)", fake.currentCommitCalls)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads", "issues.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("unchanged state hash must not export, stat err=%v", err)
+	}
+}
+
+func TestMaybeAutoExportExportsOnStateHashChange(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeStateHashStore{stateHash: "hash-after-write"}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "hash-before-write",
+		Timestamp:      time.Time{}, // zero: throttle window open
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
+	}
+
+	state := loadExportAutoState(filepath.Join(dir, ".beads"))
+	if state.LastDoltCommit != "hash-after-write" {
+		t.Fatalf("state LastDoltCommit = %q, want %q (export must run when the state hash moves)",
+			state.LastDoltCommit, "hash-after-write")
+	}
+}
+
+func TestMaybeAutoExportFallsBackToHeadCommit(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeHeadOnlyStore{}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "head-commit-hash",
+		Timestamp:      time.Now(),
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
+	}
+
+	if fake.currentCommitCalls != 1 {
+		t.Fatalf("GetCurrentCommit calls = %d, want 1 (fallback when StateHasher is absent)", fake.currentCommitCalls)
+	}
+}
+
+func TestGuardAutoExportOverwriteAllowsViewerScopedJSONL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	writeJSONLLines(t, path,
+		map[string]any{"_type": "issue", "id": "bd-1", "issue_type": "task", "title": "kept"},
+		map[string]any{"id": "bd-legacy", "issue_type": "bug", "title": "legacy issue record"},
+	)
+
+	if err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false); err != nil {
+		t.Fatalf("guardAutoExportOverwrite: %v", err)
+	}
+}
+
+func TestGuardAutoExportOverwriteBlocksRicherJSONL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	writeJSONLLines(t, path,
+		map[string]any{"_type": "issue", "id": "bd-1", "issue_type": "task", "title": "kept"},
+		map[string]any{"_type": "memory", "key": "keep-me", "value": "private context"},
+		map[string]any{"_type": "issue", "id": "bd-agent", "issue_type": "agent", "title": "infra"},
+		map[string]any{"_type": "issue", "id": "bd-template", "issue_type": "task", "is_template": true},
+		map[string]any{"_type": "issue", "id": "bd-wisp", "issue_type": "task", "ephemeral": true},
+		map[string]any{"_type": "event", "id": "bd-event"},
+	)
+
+	err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false)
+	if err == nil {
+		t.Fatal("expected guardAutoExportOverwrite to reject richer JSONL, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"refusing to overwrite",
+		"5 record(s) outside auto-export scope",
+		"1 memories",
+		"3 infra/template/ephemeral issues",
+		"1 unknown",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("guard error %q does not contain %q", msg, want)
+		}
+	}
+}
+
+func TestGuardAutoExportOverwriteAllowsMemoriesWhenIncluded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	writeJSONLLines(t, path,
+		map[string]any{"_type": "memory", "key": "keep-me", "value": "private context"},
+	)
+
+	if err := guardAutoExportOverwrite(path, nil, true); err != nil {
+		t.Fatalf("guardAutoExportOverwrite with memories included: %v", err)
+	}
+}
+
+func writeJSONLLines(t *testing.T, path string, records ...map[string]any) {
+	t.Helper()
+	var b strings.Builder
+	for _, rec := range records {
+		data, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -434,6 +651,138 @@ func TestGitAddFile_CapturesStderrOnFailure(t *testing.T) {
 	}
 }
 
+// TestGitAddFile_CapturesLockedIndexFailure verifies that a locked git index
+// is surfaced as a rich, caller-visible error rather than a bare exit status.
+func TestGitAddFile_CapturesLockedIndexFailure(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "bd-index-lock-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+	tmpDir, err = filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repo := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = repo
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "-q")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+
+	target := filepath.Join(repo, ".beads", "issues.jsonl")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"id":"x"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lockPath := filepath.Join(repo, ".git", "index.lock")
+	if err := os.WriteFile(lockPath, []byte("held by another git process"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Unsetenv("GIT_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(repo)
+
+	err = gitAddFile(target)
+	if err == nil {
+		t.Fatal("expected gitAddFile to fail while index.lock exists, got nil")
+	}
+	if msg := err.Error(); !strings.Contains(msg, "index is locked") || !strings.Contains(msg, "index.lock") {
+		t.Fatalf("expected index.lock error, got: %q", msg)
+	}
+
+	c := exec.Command("git", "ls-files", "--stage")
+	c.Dir = repo
+	data, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("ls-files: %v\n%s", err, data)
+	}
+	if strings.Contains(string(data), ".beads/issues.jsonl") {
+		t.Fatalf("gitAddFile staged target despite index.lock:\n%s", data)
+	}
+}
+
+func TestAutoExportGitAddFailureExitsNonZero(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	bd := buildBDForInitTests(t)
+	dir := t.TempDir()
+	env := append(autoExportDataLossTestEnv(dir), "BD_NON_INTERACTIVE=1")
+
+	runGit := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "-q")
+
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd %v failed: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+
+	run("init", "--prefix", "agf", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".beads/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("config", "set", "export.interval", "1ms")
+	run("config", "set", "export.auto", "true")
+	run("config", "set", "export.git-add", "true")
+	if err := os.Remove(filepath.Join(dir, ".beads", exportAutoStateFile)); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	cmd := exec.Command(bd, "create", "caller visible git add failure", "-p", "2")
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("bd create succeeded despite auto-export git add failure:\n%s", out)
+	}
+	output := string(out)
+	if !strings.Contains(output, "Error: auto-export: git add failed") {
+		t.Fatalf("expected caller-visible auto-export git add error, got:\n%s", output)
+	}
+	if !strings.Contains(strings.ToLower(output), "ignored") {
+		t.Fatalf("expected git add stderr to explain ignored path, got:\n%s", output)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads", exportAutoStateFile)); !os.IsNotExist(err) {
+		t.Fatalf("git-add failure should not save export state, stat err=%v", err)
+	}
+}
+
 // TestGitAddFile_RedirectCase_DoesNotStageInMainRepo regresses the
 // silent-stage-in-main follow-up from the GH#3311 review: when a worktree
 // has .beads/redirect -> main/.beads, the worktree's pre-commit hook must
@@ -546,4 +895,263 @@ func TestGitAddFile_RedirectCase_DoesNotStageInMainRepo(t *testing.T) {
 	}
 	checkNoStage("worktree", worktree)
 	checkNoStage("main", mainRepo)
+}
+
+func TestPreCommitHasStagedBeadsFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "bd-staged-beads-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+	tmpDir, err = filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repo := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = repo
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "-q")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+
+	readme := filepath.Join(repo, "README.md")
+	if err := os.WriteFile(readme, []byte("code\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "README.md")
+	if preCommitHasStagedBeadsFiles(filepath.Join(repo, ".beads")) {
+		t.Fatal("staged non-.beads file should not trigger pre-commit JSONL export")
+	}
+
+	configPath := filepath.Join(repo, ".beads", "config.yaml")
+	if err := os.WriteFile(configPath, []byte("export:\n  auto: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", ".beads/config.yaml")
+	if !preCommitHasStagedBeadsFiles(filepath.Join(repo, ".beads")) {
+		t.Fatal("staged .beads file should trigger pre-commit JSONL export")
+	}
+}
+
+func TestCommandAllowsEmptyAutoExport(t *testing.T) {
+	commandMayEmptyJSONLExport.Store(false)
+	t.Cleanup(func() { commandMayEmptyJSONLExport.Store(false) })
+
+	if commandAllowsEmptyAutoExport(&cobra.Command{Use: "prune"}) {
+		t.Fatal("prune should not allow an empty auto-export before deleting rows")
+	}
+
+	commandMayEmptyJSONLExport.Store(true)
+	if !commandAllowsEmptyAutoExport(&cobra.Command{Use: "prune"}) {
+		t.Fatal("prune should allow an intentional empty auto-export")
+	}
+	if !commandAllowsEmptyAutoExport(&cobra.Command{Use: "purge"}) {
+		t.Fatal("purge should allow an intentional empty auto-export")
+	}
+	if commandAllowsEmptyAutoExport(&cobra.Command{Use: "create"}) {
+		t.Fatal("create should not bypass empty auto-export protection")
+	}
+}
+
+// TestShouldExport covers the pure throttle-window decision used by
+// maybeAutoExport. Adapted from Jeremy Longshore's GH#4061 refactor.
+func TestShouldExport(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name     string
+		state    *exportAutoState
+		interval time.Duration
+		want     bool
+	}{
+		{
+			name:     "first run always exports",
+			state:    &exportAutoState{},
+			interval: time.Minute,
+			want:     true,
+		},
+		{
+			name:     "throttle window active blocks",
+			state:    &exportAutoState{Timestamp: now.Add(-10 * time.Second)},
+			interval: time.Minute,
+			want:     false,
+		},
+		{
+			name:     "throttle window elapsed allows",
+			state:    &exportAutoState{Timestamp: now.Add(-2 * time.Minute)},
+			interval: time.Minute,
+			want:     true,
+		},
+		{
+			name:     "at interval boundary allows",
+			state:    &exportAutoState{Timestamp: now.Add(-time.Minute)},
+			interval: time.Minute,
+			want:     true,
+		},
+		{
+			name:     "zero interval allows",
+			state:    &exportAutoState{Timestamp: now.Add(-time.Microsecond)},
+			interval: 0,
+			want:     true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldExport(tc.state, tc.interval); got != tc.want {
+				t.Errorf("shouldExport(%+v, %s) = %v, want %v", tc.state, tc.interval, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCountIssueRecordsInJSONL(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "issues.jsonl")
+	data := strings.Join([]string{
+		`{"_type":"issue","id":"bd-1","status":"open"}`,
+		`{"id":"bd-2","status":"closed"}`,
+		`{"_type":"issue","id":"bd-2","status":"closed"}`,
+		`{"_type":"memory","key":"note","value":"private"}`,
+		`{"_type":"issue","id":"bd-3","status":"tombstone"}`,
+		`{"_type":"issue","title":"missing id"}`,
+		``,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := countIssueRecordsInJSONL(path)
+	if err != nil {
+		t.Fatalf("countIssueRecordsInJSONL: %v", err)
+	}
+	if got != 2 {
+		t.Fatalf("countIssueRecordsInJSONL = %d, want 2", got)
+	}
+
+	ids, err := issueIDsInJSONL(path)
+	if err != nil {
+		t.Fatalf("issueIDsInJSONL: %v", err)
+	}
+	if got := strings.Join(ids, ","); got != "bd-1,bd-2" {
+		t.Fatalf("issueIDsInJSONL = %q, want bd-1,bd-2", got)
+	}
+}
+
+func TestAutoExportSkipsEmptyExportOverPopulatedJSONL(t *testing.T) {
+	bd := buildBDForInitTests(t)
+	dir := t.TempDir()
+	env := autoExportDataLossTestEnv(dir)
+
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd %v failed: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+
+	run("init", "--prefix", "dl", "--non-interactive")
+	run("config", "set", "export.path", "custom.jsonl")
+
+	jsonlPath := filepath.Join(dir, ".beads", "custom.jsonl")
+	original := []byte(`{"_type":"issue","id":"dl-1","title":"Recovered issue","priority":1,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}` + "\n")
+	if err := os.WriteFile(jsonlPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run("config", "set", "export.auto", "true")
+	out := run("remember", "private context that should not be auto-exported")
+	if !strings.Contains(out, "refusing to overwrite") {
+		t.Fatalf("expected auto-export refusal warning, got:\n%s", out)
+	}
+
+	got, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		t.Fatalf("expected populated JSONL to remain: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("populated JSONL was modified:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads", exportAutoStateFile)); !os.IsNotExist(err) {
+		t.Fatalf("empty skipped auto-export should not save export state, stat err=%v", err)
+	}
+}
+
+func TestAutoExportSkipsWhenExistingJSONLHasIDsMissingFromStore(t *testing.T) {
+	bd := buildBDForInitTests(t)
+	dir := t.TempDir()
+	env := autoExportDataLossTestEnv(dir)
+
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd %v failed: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+
+	run("init", "--prefix", "dl", "--non-interactive")
+	run("config", "set", "export.path", "custom.jsonl")
+	run("create", "local issue", "-p", "2")
+
+	jsonlPath := filepath.Join(dir, ".beads", "custom.jsonl")
+	original := []byte(strings.Join([]string{
+		`{"_type":"issue","id":"dl-1","title":"Local issue","priority":2,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`,
+		`{"_type":"issue","id":"dl-jsonl-only","title":"Only in JSONL","priority":1,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}`,
+		``,
+	}, "\n"))
+	if err := os.WriteFile(jsonlPath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	run("config", "set", "export.interval", "1ms")
+	run("config", "set", "export.auto", "true")
+	out := run("create", "another local issue", "-p", "2")
+	if !strings.Contains(out, "JSONL-only issue record") || !strings.Contains(out, "dl-jsonl-only") {
+		t.Fatalf("expected JSONL-only refusal warning, got:\n%s", out)
+	}
+
+	got, err := os.ReadFile(jsonlPath)
+	if err != nil {
+		t.Fatalf("expected JSONL to remain: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("JSONL-only records were overwritten:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads", exportAutoStateFile)); !os.IsNotExist(err) {
+		t.Fatalf("skipped auto-export should not save export state, stat err=%v", err)
+	}
+}
+
+func autoExportDataLossTestEnv(home string) []string {
+	env := make([]string, 0, len(os.Environ())+3)
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "BEADS_") {
+			continue
+		}
+		env = append(env, e)
+	}
+	return append(env, "HOME="+home, "BEADS_DOLT_AUTO_START=0", "BEADS_NO_DAEMON=1", "BD_DISABLE_METRICS=1", "BD_DISABLE_EVENT_FLUSH=1")
 }

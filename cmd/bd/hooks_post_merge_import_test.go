@@ -86,6 +86,33 @@ func TestImportJSONLForSync_GuardClauses(t *testing.T) {
 	})
 }
 
+func TestSyncImportJSONLPath(t *testing.T) {
+	t.Run("falls back to export path when import path is default", func(t *testing.T) {
+		initConfigForTest(t)
+		beadsDir := t.TempDir()
+		config.Set("export.path", "beads.jsonl")
+
+		got := syncImportJSONLPath(beadsDir)
+		want := filepath.Join(beadsDir, "beads.jsonl")
+		if got != want {
+			t.Fatalf("sync import path = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("explicit import path wins over export path", func(t *testing.T) {
+		initConfigForTest(t)
+		beadsDir := t.TempDir()
+		config.Set("export.path", "legacy.jsonl")
+		config.Set("import.path", "incoming.jsonl")
+
+		got := syncImportJSONLPath(beadsDir)
+		want := filepath.Join(beadsDir, "incoming.jsonl")
+		if got != want {
+			t.Fatalf("sync import path = %q, want %q", got, want)
+		}
+	})
+}
+
 func captureHookStderr(t *testing.T, fn func()) string {
 	t.Helper()
 	old := os.Stderr

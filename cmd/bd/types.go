@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -38,14 +38,20 @@ Examples:
   bd types              # List all types with descriptions
   bd types --json       # Output as JSON
 `,
-	Run: func(cmd *cobra.Command, args []string) {
-		// Ensure database access is active (types command needs to read config).
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("types")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := ensureDirectMode("types command requires direct database access"); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return
+			return HandleError("%v", err)
 		}
 
-		// Get custom types from config
 		var customTypes []string
 		ctx := context.Background()
 		if store != nil {
@@ -67,11 +73,9 @@ Examples:
 				})
 			}
 			result.CustomTypes = customTypes
-			outputJSON(result)
-			return
+			return outputJSON(result)
 		}
 
-		// Text output
 		fmt.Println("Core work types (built-in):")
 		for _, t := range coreWorkTypes {
 			fmt.Printf("  %-14s %s\n", t.Type, t.Description)
@@ -86,6 +90,7 @@ Examples:
 			fmt.Println("\nNo custom types configured.")
 			fmt.Println("Configure with: bd config set types.custom \"type1,type2,...\"")
 		}
+		return nil
 	},
 }
 

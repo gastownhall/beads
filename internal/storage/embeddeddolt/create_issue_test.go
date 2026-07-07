@@ -4,13 +4,17 @@ package embeddeddolt_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/hooks"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -851,6 +855,43 @@ func TestCreateIssues(t *testing.T) {
 		te.assertEventCount(t, ctx, "events", "ud-dup", "created", 1) // still just 1
 	})
 
+	t.Run("upsert_records_events_for_new_labels", func(t *testing.T) {
+		te := newTestEnv(t, "ul")
+		ctx := t.Context()
+
+		issues := []*types.Issue{
+			{
+				ID:        "ul-dup",
+				Title:     "Original",
+				Status:    types.StatusOpen,
+				Priority:  2,
+				IssueType: types.TypeTask,
+				Labels:    []string{"existing"},
+			},
+		}
+		if err := te.store.CreateIssues(ctx, issues, "tester"); err != nil {
+			t.Fatalf("first CreateIssues: %v", err)
+		}
+		te.assertEventCount(t, ctx, "events", "ul-dup", string(types.EventLabelAdded), 1)
+
+		issues2 := []*types.Issue{
+			{
+				ID:        "ul-dup",
+				Title:     "Updated",
+				Status:    types.StatusOpen,
+				Priority:  2,
+				IssueType: types.TypeTask,
+				Labels:    []string{"existing", "new"},
+			},
+		}
+		if err := te.store.CreateIssues(ctx, issues2, "tester"); err != nil {
+			t.Fatalf("second CreateIssues: %v", err)
+		}
+
+		te.assertLabelCount(t, ctx, "labels", "ul-dup", 2)
+		te.assertEventCount(t, ctx, "events", "ul-dup", string(types.EventLabelAdded), 2)
+	})
+
 	t.Run("all_ephemeral", func(t *testing.T) {
 		te := newTestEnv(t, "ae")
 		ctx := t.Context()
@@ -886,6 +927,237 @@ func TestCreateIssues(t *testing.T) {
 		te.assertRowExists(t, ctx, "issues", "mx-reg1")
 		te.assertRowExists(t, ctx, "wisps", "mx-wisp-1")
 		te.assertRowNotExists(t, ctx, "issues", "mx-wisp-1")
+	})
+
+	t.Run("rejects_regular_to_wisp_batch_dependency", func(t *testing.T) {
+		te := newTestEnv(t, "rw")
+		ctx := t.Context()
+
+		regular := &types.Issue{
+			ID:        "rw-regular-source",
+			Title:     "Regular source",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Dependencies: []*types.Dependency{{
+				DependsOnID: "rw-wisp-target",
+				Type:        types.DepBlocks,
+			}},
+		}
+		wisp := &types.Issue{
+			ID:        "rw-wisp-target",
+			Title:     "Wisp target",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		}
+
+		err := te.store.CreateIssues(ctx, []*types.Issue{regular, wisp}, "tester")
+		if err == nil || !strings.Contains(err.Error(), "cross-bucket dependency") {
+			t.Fatalf("CreateIssues error = %v, want cross-bucket dependency", err)
+		}
+		te.assertRowNotExists(t, ctx, "issues", regular.ID)
+		te.assertRowNotExists(t, ctx, "wisps", wisp.ID)
+	})
+
+	t.Run("rejects_wisp_to_regular_batch_dependency", func(t *testing.T) {
+		te := newTestEnv(t, "wr")
+		ctx := t.Context()
+
+		regular := &types.Issue{
+			ID:        "wr-regular-target",
+			Title:     "Regular target",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		wisp := &types.Issue{
+			ID:        "wr-wisp-source",
+			Title:     "Wisp source",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+			Dependencies: []*types.Dependency{{
+				DependsOnID: regular.ID,
+				Type:        types.DepBlocks,
+			}},
+		}
+
+		err := te.store.CreateIssues(ctx, []*types.Issue{regular, wisp}, "tester")
+		if err == nil || !strings.Contains(err.Error(), "cross-bucket dependency") {
+			t.Fatalf("CreateIssues error = %v, want cross-bucket dependency", err)
+		}
+		te.assertRowNotExists(t, ctx, "issues", regular.ID)
+		te.assertRowNotExists(t, ctx, "wisps", wisp.ID)
+	})
+
+	t.Run("skips_mixed_batch_dependency_when_validation_errors_are_tolerated", func(t *testing.T) {
+		te := newTestEnv(t, "sk")
+		ctx := t.Context()
+
+		regular := &types.Issue{
+			ID:        "sk-regular-source",
+			Title:     "Regular source",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Dependencies: []*types.Dependency{{
+				DependsOnID: "sk-wisp-target",
+				Type:        types.DepBlocks,
+			}},
+		}
+		wisp := &types.Issue{
+			ID:        "sk-wisp-target",
+			Title:     "Wisp target",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		}
+		var skipped []string
+
+		err := te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{regular, wisp}, "tester", storage.BatchCreateOptions{
+			OrphanHandling:                 storage.OrphanAllow,
+			SkipPrefixValidation:           true,
+			SkipDependencyValidationErrors: true,
+			OnSkippedDependency: func(issueID, dependsOnID, reason string) {
+				skipped = append(skipped, fmt.Sprintf("%s -> %s: %s", issueID, dependsOnID, reason))
+			},
+		})
+		if err != nil {
+			t.Fatalf("CreateIssuesWithFullOptions: %v", err)
+		}
+		te.assertRowExists(t, ctx, "issues", regular.ID)
+		te.assertRowExists(t, ctx, "wisps", wisp.ID)
+		if len(skipped) != 1 ||
+			!strings.Contains(skipped[0], "sk-regular-source -> sk-wisp-target") ||
+			!strings.Contains(skipped[0], "cross-bucket dependency") {
+			t.Fatalf("skipped = %#v, want cross-bucket dependency detail", skipped)
+		}
+
+		var regularDeps, wispDeps int
+		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", []any{regular.ID}, &regularDeps)
+		te.queryScalar(t, ctx, "SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?", []any{regular.ID}, &wispDeps)
+		if regularDeps != 0 || wispDeps != 0 {
+			t.Fatalf("persisted dependency counts = regular:%d wisp:%d, want none", regularDeps, wispDeps)
+		}
+	})
+
+	t.Run("rejects_wisp_dependency_cycle", func(t *testing.T) {
+		te := newTestEnv(t, "wc")
+		ctx := t.Context()
+
+		wispA := &types.Issue{
+			ID:        "wc-wisp-a",
+			Title:     "Wisp A",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+			Dependencies: []*types.Dependency{{
+				DependsOnID: "wc-wisp-b",
+				Type:        types.DepBlocks,
+			}},
+		}
+		wispB := &types.Issue{
+			ID:        "wc-wisp-b",
+			Title:     "Wisp B",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+			Dependencies: []*types.Dependency{{
+				DependsOnID: "wc-wisp-a",
+				Type:        types.DepBlocks,
+			}},
+		}
+
+		err := te.store.RunInTransaction(ctx, "test: reject wisp dependency cycle", func(tx storage.Transaction) error {
+			return tx.CreateIssues(ctx, []*types.Issue{wispA, wispB}, "tester")
+		})
+		if err == nil || !strings.Contains(err.Error(), "cycle") {
+			t.Fatalf("CreateIssues error = %v, want cycle rejection", err)
+		}
+		te.assertRowNotExists(t, ctx, "wisps", wispA.ID)
+		te.assertRowNotExists(t, ctx, "wisps", wispB.ID)
+	})
+
+	t.Run("transaction_wisp_dependency_does_not_stage_regular_dependency_rows", func(t *testing.T) {
+		te := newTestEnv(t, "ws")
+		ctx := t.Context()
+
+		dirtyOwner := &types.Issue{
+			ID:        "ws-dirty-owner",
+			Title:     "Dirty dependency owner",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		dirtyTarget := &types.Issue{
+			ID:        "ws-dirty-target",
+			Title:     "Dirty dependency target",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := te.store.CreateIssues(ctx, []*types.Issue{dirtyOwner, dirtyTarget}, "tester"); err != nil {
+			t.Fatalf("CreateIssues seed regular issues: %v", err)
+		}
+		if err := te.store.Commit(ctx, "test: seed regular issues"); err != nil {
+			t.Fatalf("Commit seed regular issues: %v", err)
+		}
+
+		te.exec(t, ctx,
+			"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, ?, ?)",
+			dirtyOwner.ID, dirtyTarget.ID, types.DepBlocks, time.Now().UTC(), "tester")
+
+		wispSource := &types.Issue{
+			ID:        "ws-wisp-source",
+			Title:     "Wisp dependency source",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		}
+		wispTarget := &types.Issue{
+			ID:        "ws-wisp-target",
+			Title:     "Wisp dependency target",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		}
+		err := te.store.RunInTransaction(ctx, "test: add wisp dependency", func(tx storage.Transaction) error {
+			if err := tx.CreateIssues(ctx, []*types.Issue{wispSource, wispTarget}, "tester"); err != nil {
+				return err
+			}
+			return tx.AddDependency(ctx, &types.Dependency{
+				IssueID:     wispSource.ID,
+				DependsOnID: wispTarget.ID,
+				Type:        types.DepBlocks,
+			}, "tester")
+		})
+		if err != nil {
+			t.Fatalf("RunInTransaction add wisp dependency: %v", err)
+		}
+
+		var committedDirtyDependencies int
+		te.queryScalar(t, ctx,
+			"SELECT COUNT(*) FROM dependencies AS OF 'HEAD' WHERE issue_id = ? AND depends_on_issue_id = ?",
+			[]any{dirtyOwner.ID, dirtyTarget.ID}, &committedDirtyDependencies)
+		if committedDirtyDependencies != 0 {
+			t.Fatalf("committed dirty dependencies = %d, want 0", committedDirtyDependencies)
+		}
+
+		var workingDirtyDependencies int
+		te.queryScalar(t, ctx,
+			"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
+			[]any{dirtyOwner.ID, dirtyTarget.ID}, &workingDirtyDependencies)
+		if workingDirtyDependencies != 1 {
+			t.Fatalf("working dirty dependencies = %d, want 1", workingDirtyDependencies)
+		}
 	})
 
 	t.Run("with_labels", func(t *testing.T) {
@@ -990,4 +1262,133 @@ func TestCreateIssues(t *testing.T) {
 			t.Errorf("expected prefix error, got: %v", err)
 		}
 	})
+}
+
+func TestHookFiringStoreCreateIssuesFiresDependencyUpdatesFromEmbeddedStore(t *testing.T) {
+	t.Run("non_transactional", func(t *testing.T) {
+		te := newTestEnv(t, "hk")
+		ctx := t.Context()
+		store, logPath := newEmbeddedHookStore(t, te)
+
+		source := &types.Issue{
+			ID:        "hk-source",
+			Title:     "Source",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Dependencies: []*types.Dependency{
+				{DependsOnID: "hk-target-a", Type: types.DepBlocks},
+				{DependsOnID: "hk-target-b", Type: types.DepBlocks},
+			},
+		}
+		targetA := &types.Issue{ID: "hk-target-a", Title: "Target A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		targetB := &types.Issue{ID: "hk-target-b", Title: "Target B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+
+		if err := store.CreateIssues(ctx, []*types.Issue{source, targetA, targetB}, "tester"); err != nil {
+			t.Fatalf("CreateIssues: %v", err)
+		}
+
+		assertDependencyHookPayloads(t, logPath, []string{"hk-target-a", "hk-target-b"})
+	})
+
+	t.Run("transactional", func(t *testing.T) {
+		te := newTestEnv(t, "txh")
+		ctx := t.Context()
+		store, logPath := newEmbeddedHookStore(t, te)
+
+		source := &types.Issue{
+			ID:        "txh-source",
+			Title:     "Source",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Dependencies: []*types.Dependency{
+				{DependsOnID: "txh-target-a", Type: types.DepBlocks},
+				{DependsOnID: "txh-target-b", Type: types.DepBlocks},
+			},
+		}
+		targetA := &types.Issue{ID: "txh-target-a", Title: "Target A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		targetB := &types.Issue{ID: "txh-target-b", Title: "Target B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+
+		err := store.RunInTransaction(ctx, "test: hook batch deps", func(tx storage.Transaction) error {
+			return tx.CreateIssues(ctx, []*types.Issue{source, targetA, targetB}, "tester")
+		})
+		if err != nil {
+			t.Fatalf("RunInTransaction: %v", err)
+		}
+
+		assertDependencyHookPayloads(t, logPath, []string{"txh-target-a", "txh-target-b"})
+	})
+}
+
+func newEmbeddedHookStore(t *testing.T, te *testEnv) (storage.DoltStorage, string) {
+	t.Helper()
+	hooksDir := filepath.Join(t.TempDir(), "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll hooks: %v", err)
+	}
+	logPath := filepath.Join(t.TempDir(), "updates.jsonl")
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$2" = "update" ]; then
+  payload="$(cat)"
+  printf '%%s\n' "$payload" >> %q
+else
+  cat >/dev/null
+fi
+`, logPath)
+	if err := os.WriteFile(filepath.Join(hooksDir, hooks.HookOnUpdate), []byte(script), 0o755); err != nil {
+		t.Fatalf("write update hook: %v", err)
+	}
+	return storage.NewHookFiringStore(te.store, hooks.NewRunner(hooksDir)), logPath
+}
+
+func assertDependencyHookPayloads(t *testing.T, logPath string, targets []string) {
+	t.Helper()
+	var payloads []types.Issue
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		payloads = readHookPayloads(t, logPath)
+		if len(payloads) >= len(targets) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(payloads) != len(targets) {
+		t.Fatalf("dependency update hook count = %d, want %d", len(payloads), len(targets))
+	}
+	sort.Slice(payloads, func(i, j int) bool {
+		return len(payloads[i].Dependencies) < len(payloads[j].Dependencies)
+	})
+	for i, target := range targets {
+		if got := len(payloads[i].Dependencies); got != i+1 {
+			t.Fatalf("payload %d dependency count = %d, want %d", i, got, i+1)
+		}
+		if got := payloads[i].Dependencies[i].DependsOnID; got != target {
+			t.Fatalf("payload %d dependency target = %q, want %q", i, got, target)
+		}
+	}
+}
+
+func readHookPayloads(t *testing.T, logPath string) []types.Issue {
+	t.Helper()
+	data, err := os.ReadFile(logPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("read hook log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	var payloads []types.Issue
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
+		var issue types.Issue
+		if err := json.Unmarshal([]byte(line), &issue); err != nil {
+			t.Fatalf("decode hook payload %q: %v", line, err)
+		}
+		payloads = append(payloads, issue)
+	}
+	return payloads
 }

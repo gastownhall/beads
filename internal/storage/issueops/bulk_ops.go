@@ -192,6 +192,11 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		return 0, nil
 	}
 
+	affectedIssues, affectedWisps, aerr := AffectedByDeletionInTx(ctx, tx, issueIDs, nil)
+	if aerr != nil {
+		return 0, fmt.Errorf("affected by source-repo delete: %w", aerr)
+	}
+
 	result, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE source_repo = ?`, sourceRepo)
 	if err != nil {
 		return 0, fmt.Errorf("delete issues: %w", err)
@@ -201,6 +206,11 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 	if err != nil {
 		return 0, fmt.Errorf("rows affected: %w", err)
 	}
+
+	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+		return int(rowsAffected), fmt.Errorf("recompute is_blocked after source-repo delete: %w", err)
+	}
+
 	return int(rowsAffected), nil
 }
 
@@ -226,14 +236,14 @@ func updateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, iss
 		return fmt.Errorf("issue not found: %s", oldID)
 	}
 
-	if err := UpdateIssueIDInDependencyTargetsInTx(ctx, tx, oldID, newID); err != nil {
+	if err := UpdateIssueIDInDependenciesInTx(ctx, tx, oldID, newID); err != nil {
 		return err
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO events (issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, 'renamed', ?, ?, ?)
-	`, newID, actor, oldID, newID)
+		INSERT INTO events (id, issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, ?, 'renamed', ?, ?, ?)
+	`, NewEventID(), newID, actor, oldID, newID)
 	return err
 }
 
@@ -252,9 +262,9 @@ func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issu
 	}
 
 	if _, err = tx.ExecContext(ctx, `
-		INSERT INTO wisp_events (issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, 'renamed', ?, ?, ?)
-	`, newID, actor, oldID, newID); err != nil {
+		INSERT INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, ?, 'renamed', ?, ?, ?)
+	`, NewEventID(), newID, actor, oldID, newID); err != nil {
 		return err
 	}
 

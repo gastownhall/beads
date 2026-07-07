@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -67,16 +68,25 @@ func generateHookSection(hookName string) string {
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
 		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
+		"  _bd_used_perl=0\n" +
 		"  if command -v timeout >/dev/null 2>&1; then\n" +
 		"    timeout \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
 		"    _bd_exit=$?\n" +
-		"    if [ $_bd_exit -eq 124 ]; then\n" +
-		"      echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
-		"      _bd_exit=0\n" +
-		"    fi\n" +
+		"  elif command -v gtimeout >/dev/null 2>&1; then\n" +
+		"    gtimeout \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
+		"    _bd_exit=$?\n" +
+		"  elif command -v perl >/dev/null 2>&1; then\n" +
+		"    _bd_used_perl=1\n" +
+		"    perl -e 'alarm shift; exec @ARGV' \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
+		"    _bd_exit=$?\n" +
 		"  else\n" +
+		"    echo >&2 \"beads: hook '" + hookName + "' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT\"\n" +
 		"    bd hooks run " + hookName + " \"$@\"\n" +
 		"    _bd_exit=$?\n" +
+		"  fi\n" +
+		"  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then\n" +
+		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
+		"    _bd_exit=0\n" +
 		"  fi\n" +
 		"  if [ $_bd_exit -eq 3 ]; then\n" +
 		"    echo >&2 \"beads: database not initialized — skipping hook '" + hookName + "'\"\n" +
@@ -632,14 +642,23 @@ Installed hooks:
   - pre-push: Run chained hooks before push
   - post-checkout: Run chained hooks after branch checkout
   - prepare-commit-msg: Add agent identity trailers (for orchestrator agents)`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-install")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		force, _ := cmd.Flags().GetBool("force")
 		shared, _ := cmd.Flags().GetBool("shared")
 		chain, _ := cmd.Flags().GetBool("chain")
 		beadsHooks, _ := cmd.Flags().GetBool("beads")
 
 		if err := installHooksWithOptions(managedHookNames, force, shared, chain, beadsHooks); err != nil {
-			FatalErrorRespectJSON("installing hooks: %v", err)
+			return HandleErrorRespectJSON("installing hooks: %v", err)
 		}
 
 		if jsonOutput {
@@ -671,16 +690,26 @@ Installed hooks:
 				fmt.Printf("  - %s\n", hookName)
 			}
 		}
+		return nil
 	},
 }
 
 var hooksUninstallCmd = &cobra.Command{
-	Use:   "uninstall",
-	Short: "Uninstall bd git hooks",
-	Long:  `Remove bd git hooks from .git/hooks/ directory.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "uninstall",
+	Short:         "Uninstall bd git hooks",
+	Long:          `Remove bd git hooks from .git/hooks/ directory.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-uninstall")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := uninstallHooks(); err != nil {
-			FatalErrorRespectJSON("uninstalling hooks: %v", err)
+			return HandleErrorRespectJSON("uninstalling hooks: %v", err)
 		}
 
 		if jsonOutput {
@@ -693,14 +722,24 @@ var hooksUninstallCmd = &cobra.Command{
 		} else {
 			fmt.Println("✓ Git hooks uninstalled successfully")
 		}
+		return nil
 	},
 }
 
 var hooksListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List installed git hooks status",
-	Long:  `Show the status of bd git hooks (installed, outdated, missing).`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "list",
+	Short:         "List installed git hooks status",
+	Long:          `Show the status of bd git hooks (installed, outdated, missing).`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-list")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		statuses := CheckGitHooks()
 
 		if jsonOutput {
@@ -724,6 +763,7 @@ var hooksListCmd = &cobra.Command{
 				}
 			}
 		}
+		return nil
 	},
 }
 
@@ -1348,6 +1388,22 @@ func exportJSONLForCommit() {
 	}
 	fullPath := filepath.Join(beadsDir, exportPath)
 
+	// If the export file is staged for deletion (user ran `git rm`), do not
+	// re-export or re-stage it. GIT_INDEX_FILE is set during an actual commit,
+	// so git-diff-index reads the pending index — where the deletion lives.
+	// Without this guard, git add fullPath would convert the staged deletion
+	// back to a modification and the file would never be removed from the
+	// repo. Reimplements gastownhall/beads#3838 (ckumar1).
+	if isExportFileStagedForDeletion(fullPath) {
+		debug.Logf("pre-commit: %s staged for deletion — skipping export\n", exportPath)
+		return
+	}
+
+	if !preCommitHasStagedBeadsFiles(beadsDir) {
+		debug.Logf("pre-commit: skipping JSONL export — no staged .beads paths\n")
+		return
+	}
+
 	debug.Logf("pre-commit: exporting JSONL to %s\n", fullPath)
 	warnJSONLWithoutDoltRemote("pre-commit auto-export")
 
@@ -1384,11 +1440,61 @@ func exportJSONLForCommit() {
 	}
 }
 
+// isExportFileStagedForDeletion reports whether the beads export file at
+// fullPath is staged for deletion (the user ran `git rm` on it). When true,
+// exportJSONLForCommit must skip re-exporting and re-staging it: running
+// `git add` on a freshly regenerated file would convert the staged deletion
+// back into a modification, silently reviving a file the user intentionally
+// removed.
+//
+// Unlike preCommitHasStagedBeadsFiles and gitAddFile, this deliberately runs
+// git with the hook's inherited environment intact rather than scrubbing
+// GIT_* vars. GIT_INDEX_FILE is set during an actual commit and points at
+// the pending index — where the staged deletion lives — so scrubbing it
+// here would make git fall back to the on-disk index and miss the
+// deletion. Reimplements gastownhall/beads#3838 (ckumar1).
+func isExportFileStagedForDeletion(fullPath string) bool {
+	checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", filepath.Base(fullPath))
+	checkCmd.Dir = filepath.Dir(fullPath)
+	out, _ := checkCmd.Output()
+	return len(out) > 0
+}
+
+func preCommitHasStagedBeadsFiles(beadsDir string) bool {
+	cmdDir := exportSubprocessDir(beadsDir)
+	if hookRoot := hookWorkTreeRoot(); hookRoot != "" {
+		cmdDir = hookRoot
+	}
+	cmd := exec.Command("git", "diff", "--cached", "--name-only", "--", ".beads")
+	cmd.Dir = cmdDir
+	cmd.Env = scrubGitHookEnv(os.Environ())
+	out, err := cmd.Output()
+	if err != nil {
+		debug.Logf("pre-commit: failed to inspect staged .beads paths: %v\n", err)
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
+}
+
 func exportSubprocessDir(beadsDir string) string {
 	return filepath.Dir(beadsDir)
 }
 
-// importJSONLForSync imports .beads/issues.jsonl into Dolt after a git
+// syncImportJSONLPath returns the JSONL path used by the legacy git-hook sync
+// import path. Existing projects may have customized export.path before
+// import.path existed, so keep importing from export.path unless import.path is
+// explicitly configured.
+func syncImportJSONLPath(beadsDir string) string {
+	if config.GetValueSource("import.path") == config.SourceDefault {
+		exportPath := config.GetString("export.path")
+		if exportPath != "" {
+			return filepath.Join(beadsDir, exportPath)
+		}
+	}
+	return configuredImportJSONLPath(beadsDir)
+}
+
+// importJSONLForSync imports JSONL into Dolt after a git
 // pull/merge/branch-checkout only for legacy projects with no Dolt remote.
 // When sync.remote is configured, Dolt remains the source of truth and JSONL
 // import is skipped because upsert-only import cannot reconcile stale exports.
@@ -1412,11 +1518,7 @@ func importJSONLForSync(reason string) {
 		return
 	}
 
-	exportPath := config.GetString("export.path")
-	if exportPath == "" {
-		exportPath = "issues.jsonl"
-	}
-	fullPath := filepath.Join(beadsDir, exportPath)
+	fullPath := syncImportJSONLPath(beadsDir)
 
 	if info, err := os.Stat(fullPath); err != nil || info.Size() == 0 {
 		return
@@ -1606,13 +1708,17 @@ Supported hooks:
 
 The thin shim pattern ensures hook logic is always in sync with the
 installed bd version - upgrading bd automatically updates hook behavior.`,
-	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		// Disable terminal color probing to prevent OSC 11 escape sequence leaks (GH#1303).
-		// Our shell shims set BD_GIT_HOOK=1 before invoking bd, but third-party hook
-		// runners (lefthook, husky, etc.) call 'bd hooks run' directly without it.
-		// By this point ui.init() has already run, so we must also reset styles
-		// to suppress ANSI output — the env var alone only helps if set before process start.
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-run")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		_ = os.Setenv("BD_GIT_HOOK", "1")
 		ui.DisableColors()
 
@@ -1632,10 +1738,13 @@ installed bd version - upgrading bd automatically updates hook behavior.`,
 		case "prepare-commit-msg":
 			exitCode = runPrepareCommitMsgHook(hookArgs)
 		default:
-			FatalError("unknown hook: %s", hookName)
+			return HandleError("unknown hook: %s", hookName)
 		}
 
-		os.Exit(exitCode)
+		if exitCode != 0 {
+			return &exitError{Code: exitCode}
+		}
+		return nil
 	},
 }
 

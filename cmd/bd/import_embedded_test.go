@@ -89,6 +89,28 @@ func TestEmbeddedImport(t *testing.T) {
 		}
 	})
 
+	t.Run("from_configured_import_path", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "imcfg")
+
+		cmd := exec.Command(bd, "config", "set", "import.path", "beads.jsonl")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("bd config set import.path failed: %v\n%s", err, out)
+		}
+
+		jsonlPath := filepath.Join(dir, ".beads", "beads.jsonl")
+		now := time.Now().UTC()
+		writeJSONLFile(t, jsonlPath, []types.Issue{
+			{ID: "imcfg-xxx", Title: "Configured Import Path Issue", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		})
+
+		out := bdImport(t, bd, dir)
+		if !strings.Contains(out, "Imported 1 issue") {
+			t.Errorf("expected 'Imported 1 issue', got: %s", out)
+		}
+	})
+
 	t.Run("dry_run", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "imdry")
 
@@ -163,9 +185,11 @@ func TestEmbeddedImport(t *testing.T) {
 		// Create an issue via bd create
 		id := bdCreateSilent(t, bd, dir, "Original Title")
 
-		// Import with updated title for the same ID
+		// Import with updated title for the same ID. UpdatedAt must be
+		// strictly newer than the created row's second-granularity
+		// updated_at: equal-timestamp rows keep the local row (bd-hj85c).
 		jsonlPath := filepath.Join(t.TempDir(), "upsert.jsonl")
-		now := time.Now().UTC()
+		now := time.Now().UTC().Add(time.Hour)
 		writeJSONLFile(t, jsonlPath, []types.Issue{
 			{ID: id, Title: "Updated Title", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
 		})

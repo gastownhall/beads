@@ -73,13 +73,24 @@ func renderInitConfigYAML(prefix string, noDbMode bool) []byte {
 #     - ~/beads-planning  # Personal planning repo
 #     - ~/work-planning   # Work planning repo
 
-# JSONL backup (periodic export for off-machine recovery)
-# This is backup/export only. Cross-machine sync uses Dolt remotes.
+# Dolt-native backup (periodic backup for off-machine recovery)
+# This is full database backup only. Cross-machine sync uses Dolt remotes.
 # backup:
 #   enabled: false     # Disable auto-backup entirely
-#   interval: 15m      # Minimum time between auto-exports
-#   git-push: false    # Disable git push (export locally only)
+#   interval: 15m      # Minimum time between auto-backups
+#   git-push: false    # Disable git push (backup locally only)
 #   git-repo: ""       # Separate git repo for backups (default: project repo)
+
+# Optional JSONL auto-export for viewers, interchange, and issue-level migration.
+# Disabled by default; enable only when an integration needs fresh .beads/issues.jsonl.
+# Use relative paths under .beads/ for JSONL import/export filenames.
+# export:
+#   auto: false
+#   path: issues.jsonl
+#   interval: 60s
+#   git-add: false
+# import:
+#   path: issues.jsonl
 
 # Integration settings (access with 'bd config get/set')
 # Non-secret keys (stored in the database):

@@ -47,7 +47,7 @@ machine with the authoritative local Dolt database first. Then run:
 
 ```bash
 bd dolt remote list
-bd export -o .beads/issues.pre-remote.jsonl   # optional audit backup
+bd export -o .beads/issues.pre-remote.jsonl   # optional issue audit export
 bd dolt remote add origin <git-origin-url>
 bd dolt push
 ```

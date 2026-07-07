@@ -39,6 +39,18 @@ func acquireTestSlot() { testSem <- struct{}{} }
 // releaseTestSlot returns a semaphore slot.
 func releaseTestSlot() { <-testSem }
 
+func acquireAllTestSlots() {
+	for i := 0; i < cap(testSem); i++ {
+		acquireTestSlot()
+	}
+}
+
+func releaseAllTestSlots() {
+	for i := 0; i < cap(testSem); i++ {
+		releaseTestSlot()
+	}
+}
+
 // testContext returns a context with timeout for test operations
 func testContext(t *testing.T) (context.Context, context.CancelFunc) {
 	t.Helper()
@@ -113,7 +125,7 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 
 	// Create an isolated branch for this test
 	_, branchCleanup := testutil.StartTestBranch(t, store.db, testSharedDB)
-	if err := initSchemaOnDB(ctx, store.db); err != nil {
+	if _, err := initSchemaOnDB(ctx, store.db); err != nil {
 		branchCleanup()
 		store.Close()
 		os.RemoveAll(tmpDir)
@@ -612,6 +624,26 @@ func TestDoltStoreIssueClose(t *testing.T) {
 	}
 	if retrieved.ClosedAt == nil {
 		t.Error("expected closed_at to be set")
+	}
+}
+
+// TestCloseIssueNotFound verifies that closing a non-existent issue returns an
+// error that wraps storage.ErrNotFound, for parity with GetIssue/UpdateIssue/
+// DeleteIssue. Guards against the regression where CloseIssue returned a bare
+// fmt.Errorf that errors.Is(err, storage.ErrNotFound) could not match (mybd-fv7r).
+func TestCloseIssueNotFound(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	err := store.CloseIssue(ctx, "does-not-exist", "completed", "tester", "session123")
+	if err == nil {
+		t.Fatal("expected error closing non-existent issue, got nil")
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected error to wrap storage.ErrNotFound, got: %v", err)
 	}
 }
 
@@ -1430,8 +1462,8 @@ func TestDeleteIssuesCircularDeps(t *testing.T) {
 	// the cycle detection in AddDependency -- this test exercises DeleteIssues'
 	// ability to handle cycles that may exist in the database, not AddDependency.
 	if _, err := store.execContext(ctx, `
-		INSERT INTO dependencies (issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
-		VALUES (?, ?, 'blocks', NOW(), 'tester', '{}')
+		INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
+		VALUES (UUID(), ?, ?, 'blocks', NOW(), 'tester', '{}')
 	`, "circ-a", "circ-c"); err != nil {
 		t.Fatalf("failed to insert cycle-completing dep circ-a->circ-c: %v", err)
 	}
@@ -1821,9 +1853,6 @@ func TestDoltStoreGetReadyWork(t *testing.T) {
 }
 
 func TestDoltStoreGetReadyWorkWaitsForChildrenOfSpawner(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow Dolt integration test in short mode")
-	}
 
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

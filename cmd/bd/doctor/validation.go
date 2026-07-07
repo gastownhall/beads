@@ -57,12 +57,13 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 	// Exclude external: refs — these are synthetic cross-rig tracking deps
 	// injected by the JSONL exporter and intentionally reference issues not
 	// present in the local database (#1593).
+	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
-		SELECT d.issue_id, COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) AS depends_on_id, d.type
-		FROM dependencies d
-		LEFT JOIN issues i ON i.id = COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)
-		WHERE i.id IS NULL
-		  AND d.depends_on_external IS NULL
+		SELECT d.issue_id, d.depends_on_id, d.type
+		FROM (` + doctorDependencyUnionSQL() + `) d
+		WHERE d.depends_on_id NOT LIKE 'external:%'
+		  AND NOT EXISTS (SELECT 1 FROM issues i WHERE i.id = d.depends_on_id)
+		  AND NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_id)
 	`
 	rows, err := db.Query(query)
 	if err != nil {
@@ -419,10 +420,11 @@ func checkChildParentDependenciesDB(db *sql.DB) DoctorCheck {
 	// Query for child→parent BLOCKING dependencies where issue_id starts with target id + "."
 	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
 	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.
+	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
-		SELECT d.issue_id, COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) AS depends_on_id
-		FROM dependencies d
-		WHERE d.issue_id LIKE CONCAT(COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external), '.%')
+		SELECT d.issue_id, d.depends_on_id
+		FROM (` + doctorDependencyUnionSQL() + `) d
+		WHERE d.issue_id LIKE CONCAT(d.depends_on_id, '.%')
 		  AND d.type IN ('blocks', 'conditional-blocks', 'waits-for')
 	`
 	rows, err := db.Query(query)

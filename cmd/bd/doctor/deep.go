@@ -84,6 +84,10 @@ func RunDeepValidation(path string) DeepValidationResult {
 	// Get counts for progress reporting
 	_ = db.QueryRow("SELECT COUNT(*) FROM issues").Scan(&result.TotalIssues)             // Best effort: zero counts are safe defaults for diagnostic display
 	_ = db.QueryRow("SELECT COUNT(*) FROM dependencies").Scan(&result.TotalDependencies) // Best effort: zero counts are safe defaults for diagnostic display
+	var wispDependencyCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM wisp_dependencies").Scan(&wispDependencyCount); err == nil {
+		result.TotalDependencies += wispDependencyCount
+	}
 
 	// Run all deep checks
 	result.ParentConsistency = checkParentConsistency(db)
@@ -127,13 +131,18 @@ func checkParentConsistency(db *sql.DB) DoctorCheck {
 	}
 
 	// Find parent-child deps where either side doesn't exist
+	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
-		SELECT d.issue_id, COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) AS depends_on_id
-		FROM dependencies d
+		SELECT d.issue_id, d.depends_on_id
+		FROM (` + doctorDependencyUnionSQL() + `) d
 		WHERE d.type = 'parent-child'
 		  AND (
-		    NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id)
-		    OR NOT EXISTS (SELECT 1 FROM issues WHERE id = COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external))
+		    (d.dep_table = 'dependencies' AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id))
+		    OR (d.dep_table = 'wisp_dependencies' AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.issue_id))
+		    OR (
+		      NOT EXISTS (SELECT 1 FROM issues WHERE id = d.depends_on_id)
+		      AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.depends_on_id)
+		    )
 		  )
 		LIMIT 10`
 
@@ -181,12 +190,18 @@ func checkDependencyIntegrity(db *sql.DB) DoctorCheck {
 	}
 
 	// Find any deps where either side is missing
+	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
-		SELECT d.issue_id, COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) AS depends_on_id, d.type
-		FROM dependencies d
+		SELECT d.issue_id, d.depends_on_id, d.type
+		FROM (` + doctorDependencyUnionSQL() + `) d
 		WHERE (
-		    NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id)
-		    OR NOT EXISTS (SELECT 1 FROM issues WHERE id = COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external))
+		    (d.dep_table = 'dependencies' AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id))
+		    OR (d.dep_table = 'wisp_dependencies' AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.issue_id))
+		    OR (
+		      d.depends_on_id NOT LIKE 'external:%'
+		      AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.depends_on_id)
+		      AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.depends_on_id)
+		    )
 		  )
 		LIMIT 10`
 
@@ -234,15 +249,18 @@ func checkEpicCompleteness(db *sql.DB) DoctorCheck {
 	}
 
 	// Find epics where all children are closed but epic is still open
+	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT e.id, e.title,
-		       COUNT(c.id) as total_children,
-		       SUM(CASE WHEN c.status = 'closed' THEN 1 ELSE 0 END) as closed_children
+		       COUNT(COALESCE(c.id, cw.id)) as total_children,
+		       SUM(CASE WHEN COALESCE(c.status, cw.status) = 'closed' THEN 1 ELSE 0 END) as closed_children
 		FROM issues e
-		JOIN dependencies d ON d.depends_on_issue_id = e.id AND d.type = 'parent-child'
-		JOIN issues c ON c.id = d.issue_id
+		JOIN (` + doctorDependencyUnionSQL() + `) d ON d.depends_on_id = e.id AND d.type = 'parent-child'
+		LEFT JOIN issues c ON c.id = d.issue_id
+		LEFT JOIN wisps cw ON cw.id = d.issue_id
 		WHERE e.issue_type = 'epic'
 		  AND e.status != 'closed'
+		  AND COALESCE(c.id, cw.id) IS NOT NULL
 		GROUP BY e.id
 		HAVING total_children > 0 AND total_children = closed_children
 		LIMIT 20`
@@ -291,25 +309,36 @@ func checkMailThreadIntegrity(db *sql.DB) DoctorCheck {
 		Category: CategoryMetadata,
 	}
 
-	// Check if thread_id column exists
+	// Check if both dependency tables can supply thread_id before using the
+	// union query below.
 	var hasThreadID bool
 	err := db.QueryRow(`
-		SELECT COUNT(*) > 0 FROM INFORMATION_SCHEMA.COLUMNS
-		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dependencies' AND COLUMN_NAME = 'thread_id'
+		SELECT COUNT(DISTINCT TABLE_NAME) = 2 FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE()
+		  AND TABLE_NAME IN ('dependencies', 'wisp_dependencies')
+		  AND COLUMN_NAME = 'thread_id'
 	`).Scan(&hasThreadID)
-	if err != nil || !hasThreadID {
+	if err != nil {
+		check.Status = StatusWarning
+		check.Message = "Unable to check thread integrity schema"
+		check.Detail = err.Error()
+		return check
+	}
+	if !hasThreadID {
 		check.Status = StatusOK
 		check.Message = "N/A (schema doesn't support thread_id)"
 		return check
 	}
 
 	// Find thread_ids that don't point to existing issues
+	//nolint:gosec // G202: doctorDependencyUnionWithThreadSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.thread_id, COUNT(*) as refs
-		FROM dependencies d
+		FROM (` + doctorDependencyUnionWithThreadSQL() + `) d
 		WHERE d.thread_id != ''
 		  AND d.thread_id IS NOT NULL
 		  AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.thread_id)
+		  AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.thread_id)
 		GROUP BY d.thread_id
 		LIMIT 10`
 
@@ -425,12 +454,13 @@ func checkMoleculeIntegrity(db *sql.DB) DoctorCheck {
 
 		// nolint:gosec // G201: placeholders contains only ? markers, actual values passed via args
 		brokenQuery := fmt.Sprintf(`
-			SELECT d.depends_on_issue_id, COUNT(*) AS orphan_count
-			FROM dependencies d
-			WHERE d.depends_on_issue_id IN (%s)
+			SELECT d.depends_on_id, COUNT(*) AS orphan_count
+			FROM (`+doctorDependencyUnionSQL()+`) d
+			WHERE d.depends_on_id IN (%s)
 			  AND d.type = 'parent-child'
 			  AND NOT EXISTS (SELECT 1 FROM issues WHERE id = d.issue_id)
-			GROUP BY d.depends_on_issue_id`, strings.Join(placeholders, ","))
+			  AND NOT EXISTS (SELECT 1 FROM wisps WHERE id = d.issue_id)
+			GROUP BY d.depends_on_id`, strings.Join(placeholders, ","))
 
 		brokenRows, err := db.Query(brokenQuery, molIDs...)
 		if err == nil {

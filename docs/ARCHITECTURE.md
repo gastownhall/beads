@@ -358,6 +358,7 @@ The `bd mol squash` command uses hard delete intentionally - tombstones would be
 
 ## Related Documentation
 
+- [SYNC_CONCEPTS.md](SYNC_CONCEPTS.md) - How cross-machine sync works (Dolt source of truth, wire format, anti-patterns)
 - [PROJECT_CHARTER.md](PROJECT_CHARTER.md) - Product scope and boundaries
 - [MOLECULES.md](MOLECULES.md) - Molecular chemistry metaphor (protos, pour, bond, squash, burn)
 - [INTERNALS.md](INTERNALS.md) - FlushManager, Blocked Cache implementation details

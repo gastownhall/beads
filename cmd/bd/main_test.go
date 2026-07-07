@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -266,5 +267,74 @@ func TestListUsesRepoBeadsDirWhenDoltDataDirEscapesDotBeads(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "Port-proof issue") {
 		t.Fatalf("expected list output to include created issue\n%s", output)
+	}
+}
+
+// bd-6dnrw.5: shared-server mode overriding a pinned dolt_mode=embedded must
+// warn and win for the session, but must never rewrite the committed
+// metadata.json (per-machine env must not leak into shared config).
+func TestSharedServerEmbeddedMismatchDoesNotRewriteMetadata(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	cfg := configfile.DefaultConfig()
+	cfg.Backend = configfile.BackendDolt
+	cfg.DoltMode = configfile.DoltModeEmbedded
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+	before, err := os.ReadFile(configfile.ConfigPath(beadsDir))
+	if err != nil {
+		t.Fatalf("read metadata.json: %v", err)
+	}
+
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+
+	oldServerMode, oldWarned := serverMode, sharedServerEmbeddedMismatchWarned
+	defer func() {
+		serverMode = oldServerMode
+		sharedServerEmbeddedMismatchWarned = oldWarned
+	}()
+	sharedServerEmbeddedMismatchWarned = false
+
+	captureStderr := func(fn func()) string {
+		r, w, pipeErr := os.Pipe()
+		if pipeErr != nil {
+			t.Fatalf("pipe: %v", pipeErr)
+		}
+		oldStderr := os.Stderr
+		os.Stderr = w
+		defer func() { os.Stderr = oldStderr }()
+		fn()
+		_ = w.Close()
+		out, readErr := io.ReadAll(r)
+		if readErr != nil {
+			t.Fatalf("read stderr: %v", readErr)
+		}
+		return string(out)
+	}
+
+	stderr := captureStderr(func() { loadServerModeFromBeadsDir(beadsDir) })
+
+	if !serverMode {
+		t.Error("expected shared-server env to win for the session (serverMode=true)")
+	}
+	if !strings.Contains(stderr, "dolt_mode=\"embedded\"") {
+		t.Errorf("expected mismatch notice on stderr, got: %q", stderr)
+	}
+	after, err := os.ReadFile(configfile.ConfigPath(beadsDir))
+	if err != nil {
+		t.Fatalf("re-read metadata.json: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("metadata.json was rewritten on disk:\nbefore: %s\nafter: %s", before, after)
+	}
+
+	// The notice is once-per-process: a second load must stay quiet.
+	stderr = captureStderr(func() { loadServerModeFromBeadsDir(beadsDir) })
+	if strings.Contains(stderr, "dolt_mode") {
+		t.Errorf("expected no repeat notice, got: %q", stderr)
 	}
 }

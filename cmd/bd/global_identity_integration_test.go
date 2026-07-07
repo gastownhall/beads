@@ -58,6 +58,8 @@ func TestGlobalDBIdentityCheck(t *testing.T) {
 		"BEADS_DOLT_SERVER_PORT=" + strconv.Itoa(containerPort),
 		"BEADS_DOLT_AUTO_START=0",
 		"BEADS_TEST_MODE=1",
+		"BD_DISABLE_METRICS=1",
+		"BD_DISABLE_EVENT_FLUSH=1",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ASKPASS=",
 		"SSH_ASKPASS=",

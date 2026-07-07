@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -33,17 +34,24 @@ Examples:
 
   # Move issues with label filter
   bd migrate-issues --from . --to ~/feature-work --label frontend --label urgent`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("migrate-issues")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 
-		// Block writes in readonly mode
 		if !dryRun {
 			CheckReadonly("migrate-issues")
 		}
 
 		ctx := rootCtx
 
-		// Parse flags
 		from, _ := cmd.Flags().GetString("from")
 		to, _ := cmd.Flags().GetString("to")
 		statusStr, _ := cmd.Flags().GetString("status")
@@ -57,49 +65,22 @@ Examples:
 		strict, _ := cmd.Flags().GetBool("strict")
 		yes, _ := cmd.Flags().GetBool("yes")
 
-		// Validate required flags
 		if from == "" || to == "" {
-			if jsonOutput {
-				outputJSON(map[string]interface{}{
-					"error":   "missing_required_flags",
-					"message": "Both --from and --to are required",
-				})
-			} else {
-				fmt.Fprintln(os.Stderr, "Error: both --from and --to flags are required")
-			}
-			os.Exit(1)
+			return HandleErrorRespectJSON("both --from and --to flags are required")
 		}
 
 		if from == to {
-			if jsonOutput {
-				outputJSON(map[string]interface{}{
-					"error":   "same_source_and_dest",
-					"message": "Source and destination repositories must be different",
-				})
-			} else {
-				fmt.Fprintln(os.Stderr, "Error: --from and --to must be different repositories")
-			}
-			os.Exit(1)
+			return HandleErrorRespectJSON("--from and --to must be different repositories")
 		}
 
-		// Load IDs from file if specified
 		if idsFile != "" {
 			fileIDs, err := loadIDsFromFile(idsFile)
 			if err != nil {
-				if jsonOutput {
-					outputJSON(map[string]interface{}{
-						"error":   "ids_file_read_failed",
-						"message": err.Error(),
-					})
-				} else {
-					fmt.Fprintf(os.Stderr, "Error reading IDs file: %v\n", err)
-				}
-				os.Exit(1)
+				return HandleErrorRespectJSON("reading IDs file: %v", err)
 			}
 			ids = append(ids, fileIDs...)
 		}
 
-		// Execute migration
 		if err := executeMigrateIssues(ctx, migrateIssuesParams{
 			from:           from,
 			to:             to,
@@ -114,16 +95,9 @@ Examples:
 			strict:         strict,
 			yes:            yes,
 		}); err != nil {
-			if jsonOutput {
-				outputJSON(map[string]interface{}{
-					"error":   "migration_failed",
-					"message": err.Error(),
-				})
-			} else {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			}
-			os.Exit(1)
+			return HandleErrorRespectJSON("%v", err)
 		}
+		return nil
 	},
 }
 
@@ -170,12 +144,11 @@ func executeMigrateIssues(ctx context.Context, p migrateIssuesParams) error {
 
 	if len(candidates) == 0 {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"message": "No issues match the specified filters",
 			})
-		} else {
-			fmt.Println("Nothing to do: no issues match the specified filters")
 		}
+		fmt.Println("Nothing to do: no issues match the specified filters")
 		return nil
 	}
 
@@ -217,14 +190,13 @@ func executeMigrateIssues(ctx context.Context, p migrateIssuesParams) error {
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"success": true,
 				"message": fmt.Sprintf("Migrated %d issues from %s to %s", len(migrationSet), p.from, p.to),
 				"plan":    plan,
 			})
-		} else {
-			fmt.Printf("\n✓ Successfully migrated %d issues from %s to %s\n", len(migrationSet), p.from, p.to)
 		}
+		fmt.Printf("\n✓ Successfully migrated %d issues from %s to %s\n", len(migrationSet), p.from, p.to)
 	}
 
 	return nil
@@ -556,15 +528,12 @@ func buildMigrationPlan(candidates, migrationSet []string, stats dependencyStats
 
 func displayMigrationPlan(plan migrationPlan, dryRun bool) error {
 	if jsonOutput {
-		output := map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"plan":    plan,
 			"dry_run": dryRun,
-		}
-		outputJSON(output)
-		return nil
+		})
 	}
 
-	// Human-readable output
 	fmt.Println("\n=== Migration Plan ===")
 	fmt.Printf("From: %s\n", plan.From)
 	fmt.Printf("To:   %s\n", plan.To)

@@ -420,8 +420,29 @@ func readPortFile(beadsDir string) int {
 }
 
 // writePortFile records the actual port the server is listening on.
+// Write-temp-then-rename: a plain os.WriteFile truncates in place, so a
+// concurrent readPortFile can observe an empty or partial file and resolve
+// port 0 (or a truncated port). Rename within .beads is atomic.
 func writePortFile(beadsDir string, port int) error {
-	return os.WriteFile(portPath(beadsDir), []byte(strconv.Itoa(port)), 0600)
+	path := portPath(beadsDir)
+	tmp, err := os.CreateTemp(beadsDir, PortFileName+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck // no-op after successful rename
+	if _, err := tmp.WriteString(strconv.Itoa(port)); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // EnsurePortFile makes the repo-local port file match the connected server port.
@@ -775,17 +796,14 @@ func Start(beadsDir string) (*State, error) {
 		}
 	}
 
-	// Launch dolt sql-server, retrying once after an automatic corrupt-
-	// manifest recovery (GH#3290).
+	// Launch dolt sql-server.
 	var (
-		pid               int
-		actualPort        int
-		lastErr           error
-		attempts          int
-		recoveryAttempted bool
+		pid        int
+		actualPort int
+		lastErr    error
+		attempts   int
 	)
-startupLoop:
-	for {
+	{
 		// Ensure dolt database directory is initialized
 		if err := ensureDoltInit(doltDir); err != nil {
 			return nil, fmt.Errorf("initializing dolt database: %w", err)
@@ -878,25 +896,18 @@ startupLoop:
 		_ = logFile.Close()
 
 		if lastErr != nil {
-			// GH#3290: detect unclean-shutdown manifest corruption and auto-
-			// recover when the journal is empty (no data to lose). Recovery
-			// backs up the corrupt .dolt/ with a timestamped suffix and
-			// reinitializes in place, then the outer loop retries startup.
-			if !recoveryAttempted {
-				recoveryAttempted = true
-				if backups, recErr := recoverCorruptManifest(beadsDir, doltDir); recErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: corrupt manifest recovery failed: %v\n", recErr)
-				} else if len(backups) > 0 {
-					for _, b := range backups {
-						fmt.Fprintf(os.Stderr, "Info: backed up corrupt dolt database to %s and reinitialized (GH#3290)\n", filepath.Base(b))
-					}
-					continue startupLoop
-				}
+			// GH#3290 / bd-6dnrw.6: unclean-shutdown manifest corruption is
+			// detected here but never auto-repaired — reinitializing .dolt is
+			// destructive, so repair stays behind explicit bd doctor --fix.
+			if dirs, detErr := detectCorruptManifest(beadsDir, doltDir); detErr == nil && len(dirs) > 0 {
+				return nil, fmt.Errorf("failed to start dolt server after %d attempts: %w\n"+
+					"Corrupt manifest with no recoverable data detected (GH#3290) in:\n  %s\n"+
+					"Run 'bd doctor --fix' to back up the corrupt database(s) and reinitialize.\nCheck logs: %s",
+					attempts, lastErr, strings.Join(dirs, "\n  "), logPath(beadsDir))
 			}
 			return nil, fmt.Errorf("failed to start dolt server after %d attempts: %w\nCheck logs: %s",
 				attempts, lastErr, logPath(beadsDir))
 		}
-		break
 	}
 
 	// Write PID and port files
@@ -1268,11 +1279,39 @@ func ensureDoltIdentity() error {
 	return nil
 }
 
-// bdDoltMarker is a file written after ensureDoltInit successfully creates a
-// dolt database. Its absence in an existing .dolt/ directory indicates the
-// database was created by a pre-0.56 bd version (which used embedded mode).
+// bdDoltMarker is written after a current bd process creates or acknowledges a
+// local Dolt repository. Its absence in an existing .dolt/ directory indicates
+// the database was created by a pre-0.56 bd version (which used embedded mode).
 // Those databases are incompatible with the current server-only architecture.
 const bdDoltMarker = ".bd-dolt-ok"
+
+// MarkDoltDirCompatible writes the canonical bd compatibility marker when
+// doltDir contains a local Dolt repository. It no-ops when there is no .dolt/
+// directory, which lets server and repair paths call it defensively.
+func MarkDoltDirCompatible(doltDir string) error {
+	if doltDir == "" {
+		return errors.New("dolt directory is required")
+	}
+	dotDolt := filepath.Join(doltDir, ".dolt")
+	if info, err := os.Stat(dotDolt); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("checking dolt metadata directory %s: %w", dotDolt, err)
+	} else if !info.IsDir() {
+		return fmt.Errorf("dolt metadata path %s is not a directory", dotDolt)
+	}
+	markerPath := filepath.Join(doltDir, bdDoltMarker)
+	if _, err := os.Stat(markerPath); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking dolt compatibility marker %s: %w", markerPath, err)
+	}
+	if err := os.WriteFile(markerPath, []byte("ok\n"), 0600); err != nil {
+		return fmt.Errorf("writing dolt compatibility marker %s: %w", markerPath, err)
+	}
+	return nil
+}
 
 // ensureDoltInit initializes a dolt database directory if .dolt/ doesn't exist.
 // If .dolt/ exists, seeds the .bd-dolt-ok marker for existing working databases.
@@ -1283,16 +1322,13 @@ func ensureDoltInit(doltDir string) error {
 	}
 
 	dotDolt := filepath.Join(doltDir, ".dolt")
-	markerPath := filepath.Join(doltDir, bdDoltMarker)
 
 	if _, err := os.Stat(dotDolt); err == nil {
 		// .dolt/ exists — seed the marker if missing.
 		// This is the non-destructive path: we just mark existing databases
 		// as known. The destructive recovery path (RecoverPreV56DoltDir) is
 		// triggered separately during version upgrades.
-		if _, markerErr := os.Stat(markerPath); os.IsNotExist(markerErr) {
-			_ = os.WriteFile(markerPath, []byte("ok\n"), 0600) // Seed marker
-		}
+		_ = MarkDoltDirCompatible(doltDir)
 		return nil // Already initialized
 	}
 
@@ -1302,8 +1338,8 @@ func ensureDoltInit(doltDir string) error {
 		return fmt.Errorf("dolt init: %w\n%s", err, out)
 	}
 
-	// Write version marker so future runs know this database is compatible
-	_ = os.WriteFile(markerPath, []byte("ok\n"), 0600)
+	// Write version marker so future runs know this database is compatible.
+	_ = MarkDoltDirCompatible(doltDir)
 
 	return nil
 }

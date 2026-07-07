@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -49,15 +50,22 @@ Paths can be absolute or relative (they are stored as-is).
 
 This modifies .beads/config.yaml, which is version-controlled and
 shared across all clones of this repository.`,
-	Args: cobra.ExactArgs(1),
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("repo-add")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		repoPath := args[0]
 
 		if remotecache.IsRemoteURL(repoPath) {
-			// Remote URL: skip local .beads directory validation
 			fmt.Fprintf(os.Stderr, "Adding remote repository: %s\n", repoPath)
 		} else {
-			// Local path: validate .beads directory exists
 			expandedPath := repoPath
 			if len(repoPath) > 0 && repoPath[0] == '~' {
 				home, err := os.UserHomeDir()
@@ -68,19 +76,17 @@ shared across all clones of this repository.`,
 
 			beadsDir := filepath.Join(expandedPath, ".beads")
 			if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-				return fmt.Errorf("no beads workspace found at %s", expandedPath)
+				return HandleError("no beads workspace found at %s", expandedPath)
 			}
 		}
 
-		// Find config.yaml
 		configPath, err := config.FindConfigYAMLPath()
 		if err != nil {
-			return fmt.Errorf("failed to find config.yaml: %w", err)
+			return HandleError("failed to find config.yaml: %v", err)
 		}
 
-		// Add the repo (use original path to preserve ~ etc.)
 		if err := config.AddRepo(configPath, repoPath); err != nil {
-			return fmt.Errorf("failed to add repository: %w", err)
+			return HandleError("failed to add repository: %v", err)
 		}
 
 		if jsonOutput {
@@ -107,39 +113,41 @@ you must remove "~/foo", not "/home/user/foo").
 
 This command also removes any previously-hydrated issues from the database
 that came from the removed repository.`,
-	Args: cobra.ExactArgs(1),
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("repo-remove")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		repoPath := args[0]
 
-		// Ensure we have direct database access for cleanup
 		if err := ensureDirectMode("repo remove requires direct database access"); err != nil {
-			return err
+			return HandleError("%v", err)
 		}
 
 		ctx := rootCtx
 
-		// Delete issues from the removed repo before removing from config
-		// The source_repo field uses the original path (e.g., "~/foo")
 		deletedCount, err := store.DeleteIssuesBySourceRepo(ctx, repoPath)
 		if err != nil {
-			return fmt.Errorf("failed to delete issues from repo: %w", err)
+			return HandleError("failed to delete issues from repo: %v", err)
 		}
 
-		// Also clear the mtime cache entry
 		if err := store.ClearRepoMtime(ctx, repoPath); err != nil {
-			// Non-fatal: just log a warning
 			fmt.Fprintf(os.Stderr, "Warning: failed to clear mtime cache: %v\n", err)
 		}
 
-		// Find config.yaml
 		configPath, err := config.FindConfigYAMLPath()
 		if err != nil {
-			return fmt.Errorf("failed to find config.yaml: %w", err)
+			return HandleError("failed to find config.yaml: %v", err)
 		}
 
-		// Remove the repo from config
 		if err := config.RemoveRepo(configPath, repoPath); err != nil {
-			return fmt.Errorf("failed to remove repository: %w", err)
+			return HandleError("failed to remove repository: %v", err)
 		}
 
 		// Evict remote cache if applicable
@@ -175,17 +183,24 @@ var repoListCmd = &cobra.Command{
 
 Shows the primary repository (always ".") and any additional
 repositories configured for hydration.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Find config.yaml
+		evt := metrics.NewCommandEvent("repo-list")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		configPath, err := config.FindConfigYAMLPath()
 		if err != nil {
-			return fmt.Errorf("failed to find config.yaml: %w", err)
+			return HandleError("failed to find config.yaml: %v", err)
 		}
 
-		// Get repos from YAML
 		repos, err := config.ListRepos(configPath)
 		if err != nil {
-			return fmt.Errorf("failed to load config: %w", err)
+			return HandleError("failed to load config: %v", err)
 		}
 
 		if jsonOutput {
@@ -227,23 +242,31 @@ the primary database with their original prefixes and source_repo set.
 Uses mtime caching to skip repos whose JSONL hasn't changed.
 
 Also triggers Dolt push/pull if a remote is configured.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("repo-sync")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := ensureDirectMode("repo sync requires direct database access"); err != nil {
-			return err
+			return HandleError("%v", err)
 		}
 
 		ctx := rootCtx
 		verbose, _ := cmd.Flags().GetBool("verbose")
 
-		// Find config.yaml and get additional repos
 		configPath, err := config.FindConfigYAMLPath()
 		if err != nil {
-			return fmt.Errorf("failed to find config.yaml: %w", err)
+			return HandleError("failed to find config.yaml: %v", err)
 		}
 
 		repos, err := config.ListRepos(configPath)
 		if err != nil {
-			return fmt.Errorf("failed to load repo config: %w", err)
+			return HandleError("failed to load repo config: %v", err)
 		}
 
 		totalImported := 0

@@ -81,7 +81,7 @@ Modes:
 
 Tiers:
   - Tier 1: Semantic compression (30 days closed, 70% reduction)
-  - Tier 2: Ultra compression (90 days closed, 95% reduction)
+  - Tier 2: Ultra compression (90 days closed) - planned, not yet implemented
 
 Dolt Garbage Collection:
   With auto-commit per mutation, Dolt commit history grows over time. Use
@@ -130,7 +130,7 @@ bd admin compact [flags]
       --limit int        Limit number of candidates (0 = no limit)
       --stats            Show compaction statistics
       --summary string   Path to summary file (use '-' for stdin)
-      --tier int         Compaction tier (1 or 2) (default 1)
+      --tier int         Compaction tier (only tier 1 is implemented) (default 1)
       --workers int      Parallel workers (default 5)
 ```
 

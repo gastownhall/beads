@@ -14,6 +14,12 @@ type UnitOfWork interface {
 	ConfigUseCase() domain.ConfigUseCase
 	DoltRemoteUseCase() domain.DoltRemoteUseCase
 	BootstrapUseCase() domain.BootstrapUseCase
+
+	IssueUseCase() domain.IssueUseCase
+	DependencyUseCase() domain.DependencyUseCase
+	LabelUseCase() domain.LabelUseCase
+	CommentUseCase() domain.CommentUseCase
+	RawSQLUseCase() domain.RawSQLUseCase
 }
 
 type UnitOfWorkProvider interface {
@@ -35,6 +41,12 @@ type baseUOW struct {
 	configUseCase    domain.ConfigUseCase
 	remoteUseCase    domain.DoltRemoteUseCase
 	bootstrapUseCase domain.BootstrapUseCase
+
+	issueUseCase      domain.IssueUseCase
+	dependencyUseCase domain.DependencyUseCase
+	labelUseCase      domain.LabelUseCase
+	commentUseCase    domain.CommentUseCase
+	rawSQLUseCase     domain.RawSQLUseCase
 }
 
 func (u *baseUOW) Commit(ctx context.Context, message string) error {
@@ -67,4 +79,50 @@ func (u *baseUOW) BootstrapUseCase() domain.BootstrapUseCase {
 		)
 	}
 	return u.bootstrapUseCase
+}
+
+func (u *baseUOW) IssueUseCase() domain.IssueUseCase {
+	if u.issueUseCase == nil {
+		runner := u.tx.Runner()
+		u.issueUseCase = domain.NewIssueUseCase(
+			db.NewIssueSQLRepository(runner),
+			db.NewDependencySQLRepository(runner),
+			db.NewLabelSQLRepository(runner),
+			db.NewChildCounterSQLRepository(runner),
+			db.NewCommentSQLRepository(runner),
+			db.NewConfigSQLRepository(runner),
+			db.NewEventsSQLRepository(runner),
+			u.LabelUseCase(),
+			u.DependencyUseCase(),
+		)
+	}
+	return u.issueUseCase
+}
+
+func (u *baseUOW) DependencyUseCase() domain.DependencyUseCase {
+	if u.dependencyUseCase == nil {
+		u.dependencyUseCase = domain.NewDependencyUseCase(db.NewDependencySQLRepository(u.tx.Runner()))
+	}
+	return u.dependencyUseCase
+}
+
+func (u *baseUOW) LabelUseCase() domain.LabelUseCase {
+	if u.labelUseCase == nil {
+		u.labelUseCase = domain.NewLabelUseCase(db.NewLabelSQLRepository(u.tx.Runner()))
+	}
+	return u.labelUseCase
+}
+
+func (u *baseUOW) CommentUseCase() domain.CommentUseCase {
+	if u.commentUseCase == nil {
+		u.commentUseCase = domain.NewCommentUseCase(db.NewCommentSQLRepository(u.tx.Runner()))
+	}
+	return u.commentUseCase
+}
+
+func (u *baseUOW) RawSQLUseCase() domain.RawSQLUseCase {
+	if u.rawSQLUseCase == nil {
+		u.rawSQLUseCase = domain.NewRawSQLUseCase(db.NewRawSQLRepository(u.tx.Runner()))
+	}
+	return u.rawSQLUseCase
 }

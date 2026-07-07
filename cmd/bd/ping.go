@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -29,64 +30,69 @@ Exit 0 on success, exit 1 on failure.
 Examples:
   bd ping              # Quick connectivity check
   bd ping --json       # Structured output for automation`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("ping")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		start := time.Now()
 
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
-			pingFail(start, "no .beads directory found")
-			return
+			return pingFail(start, "no .beads directory found")
 		}
 		resolveMs := time.Since(start).Milliseconds()
 
 		st := getStore()
 		if st == nil {
-			pingFail(start, "store not initialized")
-			return
+			return pingFail(start, "store not initialized")
 		}
 		if lm, ok := storage.UnwrapStore(st).(storage.LifecycleManager); ok && lm.IsClosed() {
-			pingFail(start, "store is closed")
-			return
+			return pingFail(start, "store is closed")
 		}
 		storeMs := time.Since(start).Milliseconds()
 
 		filter := types.IssueFilter{Limit: 1}
 		_, err := st.SearchIssues(rootCtx, "", filter)
 		if err != nil {
-			pingFail(start, fmt.Sprintf("query failed: %v", err))
-			return
+			return pingFail(start, fmt.Sprintf("query failed: %v", err))
 		}
 		totalMs := time.Since(start).Milliseconds()
 		queryMs := totalMs - storeMs
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"status":     "ok",
 				"resolve_ms": resolveMs,
 				"store_ms":   storeMs - resolveMs,
 				"query_ms":   queryMs,
 				"total_ms":   totalMs,
 			})
-			return
 		}
 
 		fmt.Fprintf(os.Stdout, "%s bd ping: ok (%dms)\n", ui.RenderPass("✓"), totalMs)
+		return nil
 	},
 }
 
-func pingFail(start time.Time, reason string) {
+func pingFail(start time.Time, reason string) error {
 	totalMs := time.Since(start).Milliseconds()
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		if jerr := outputJSON(map[string]interface{}{
 			"status":   "error",
 			"error":    reason,
 			"total_ms": totalMs,
-		})
-		os.Exit(1)
-		return
+		}); jerr != nil {
+			return jerr
+		}
+		return SilentExit()
 	}
-	fmt.Fprintf(os.Stderr, "%s bd ping: %s (%dms)\n", ui.RenderFail("✗"), reason, totalMs)
-	os.Exit(1)
+	return HandleError("bd ping: %s (%dms)", reason, totalMs)
 }
 
 func init() {

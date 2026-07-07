@@ -385,9 +385,9 @@ docker run --rm -v $(pwd):/workspace -w /workspace nixos/nix \
   sh -c 'echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf && nix build .#default && ./result/bin/bd version'
 ```
 
-If the build fails with a `vendorHash` mismatch, update `default.nix` with the `got:` hash from the error message and rebuild.
+If the build fails with a `vendorHash` mismatch, run `./scripts/update-nix-vendorhash.sh` to recompute and update `default.nix`, or update it manually with the `got:` hash from the error message and rebuild.
 
-The `nix build` CI job (`.github/workflows/nix-build.yml`) runs on any PR that touches `go.mod`, `go.sum`, `default.nix`, `flake.nix`, or `flake.lock`, so dependabot bumps that invalidate `vendorHash` fail loudly instead of silently breaking Nix users on main.
+The `nix build` CI job (`.github/workflows/nix-build.yml`) runs on any PR that touches `go.mod`, `go.sum`, `default.nix`, `flake.nix`, or `flake.lock`, so dependabot bumps that invalidate `vendorHash` fail loudly instead of silently breaking Nix users on main. For dependabot Go-module bumps specifically, `.github/workflows/update-vendor-hash.yml` runs the same `update-nix-vendorhash.sh` script and pushes the hash bump back to the dependabot branch automatically (note: GitHub does not retrigger `pull_request` workflows for `GITHUB_TOKEN`-authored commits, so a maintainer may need to re-run `nix build .#default` once after the auto-fix push to mark the gate green).
 
 ### Debugging
 

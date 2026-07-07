@@ -9,13 +9,13 @@ You need two tools installed on every machine:
 | Tool | Minimum Version | Install |
 |------|-----------------|---------|
 | **bd** (beads CLI) | 0.59.0+ | See [INSTALLING.md](INSTALLING.md) |
-| **Dolt** | 1.88.1+ | `brew install dolt` or [dolt install script](https://github.com/dolthub/dolt/releases/latest/download/install.sh) |
+| **Dolt** | 2.1.10+ | `brew install dolt` or [dolt install script](https://github.com/dolthub/dolt/releases/latest/download/install.sh) |
 
 Verify both are installed:
 
 ```bash
 bd version     # must be 0.59.0+
-dolt version   # must be 1.88.1+
+dolt version   # must be 2.1.10+
 ```
 
 ## Initial Setup (First Computer)
@@ -84,7 +84,7 @@ that from the machine whose local database is authoritative:
 
 ```bash
 bd dolt remote list
-bd export -o .beads/issues.pre-remote.jsonl   # optional audit backup
+bd export -o .beads/issues.pre-remote.jsonl   # optional issue audit export
 bd dolt remote add origin git+ssh://git@github.com/org/repo.git
 bd dolt push
 ```
@@ -220,7 +220,7 @@ bd list                            # sees the closed task
 - **Always use `bd dolt ...` commands** — never run raw `dolt` CLI commands while the Dolt server is running. It causes journal corruption.
 - **Commit before pulling** — if you have uncommitted working set changes, `bd dolt pull` will fail with "cannot merge with uncommitted changes". Run `bd dolt commit` first.
 - **Push before switching machines** — unpushed changes only exist locally.
-- **Do not use JSONL as sync** — `.beads/issues.jsonl` is an export for viewers, interchange, and backup. It is not the source of truth and cannot safely reconcile deletes or pruning.
+- **Do not use JSONL as sync** — `.beads/issues.jsonl` is an export for viewers and interchange. It is not the source of truth, not a full database backup, and cannot safely reconcile deletes or pruning.
 
 ## Troubleshooting
 
@@ -276,9 +276,9 @@ bd dolt start
 
 ## See Also
 
+- [SYNC_CONCEPTS.md](SYNC_CONCEPTS.md) — The conceptual model behind this setup (why Dolt is the source of truth, what JSONL is for)
 - [QUICKSTART.md](QUICKSTART.md) — Getting started with beads
-- [DOLT.md](DOLT.md) — Dolt backend details, server modes, federation
-- [DOLT.md](DOLT.md) — Remote types, sync modes, advanced usage
+- [DOLT.md](DOLT.md) — Dolt backend details, server modes, federation, remote types, and sync modes
 - [INSTALLING.md](INSTALLING.md) — Installation for all platforms
 
 ## Attribution

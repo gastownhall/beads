@@ -23,10 +23,18 @@ SELECT issue_id, label FROM wisp_labels wl
 WHERE EXISTS (SELECT 1 FROM issues i WHERE i.id = wl.issue_id
               AND i.issue_type IN ('agent', 'rig', 'role', 'message'));
 
-INSERT IGNORE INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id)
-SELECT issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id FROM wisp_dependencies wd
-WHERE EXISTS (SELECT 1 FROM issues i WHERE i.id = wd.issue_id
-              AND i.issue_type IN ('agent', 'rig', 'role', 'message'));
+SET @has_split_wisp_dependencies = (
+    SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'wisp_dependencies'
+      AND COLUMN_NAME IN ('depends_on_issue_id', 'depends_on_wisp_id', 'depends_on_external')
+);
+SET @sql = IF(
+    @has_split_wisp_dependencies = 3,
+    'INSERT IGNORE INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id) SELECT issue_id, COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external), type, created_at, created_by, metadata, thread_id FROM wisp_dependencies wd WHERE EXISTS (SELECT 1 FROM issues i WHERE i.id = wd.issue_id AND i.issue_type IN (''agent'', ''rig'', ''role'', ''message''))',
+    'INSERT IGNORE INTO dependencies (issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id) SELECT issue_id, depends_on_id, type, created_at, created_by, metadata, thread_id FROM wisp_dependencies wd WHERE EXISTS (SELECT 1 FROM issues i WHERE i.id = wd.issue_id AND i.issue_type IN (''agent'', ''rig'', ''role'', ''message''))'
+);
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 INSERT IGNORE INTO events (id, issue_id, event_type, actor, old_value, new_value, comment, created_at)
 SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at FROM wisp_events we

@@ -9,262 +9,103 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// GetReadyWorkInTx returns issues that are ready to work on (not blocked).
-// computeBlockedFn is the caller's function for computing blocked IDs (since
-// the DoltStore and EmbeddedDoltStore have different caching strategies).
-//
-//nolint:gosec // G201: whereSQL/orderBySQL built from hardcoded strings and ? placeholders
-func GetReadyWorkInTx(
-	ctx context.Context,
-	tx *sql.Tx,
-	filter types.WorkFilter,
-	computeBlockedFn func(ctx context.Context, tx *sql.Tx, includeWisps bool) ([]string, error),
-) ([]*types.Issue, error) {
-	// Status filtering: default to open OR in_progress.
-	var statusClause string
-	if filter.Status != "" {
-		statusClause = "status = ?"
-	} else {
-		statusClause = "status IN ('open', 'in_progress')"
-	}
-	whereClauses := []string{
-		statusClause,
-		"(pinned = 0 OR pinned IS NULL)",
-	}
-	if !filter.IncludeEphemeral {
-		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
-	}
-	var args []interface{}
-	if filter.Status != "" {
-		args = append(args, string(filter.Status))
-	}
+type readyWorkPredicates struct {
+	whereSQL         string
+	orderBySQL       string
+	limitSQL         string
+	args             []interface{}
+	deferredChildIDs []string
+}
 
-	if filter.Priority != nil {
-		whereClauses = append(whereClauses, "priority = ?")
-		args = append(args, *filter.Priority)
+func readyWorkPageSize(limit int) int {
+	if limit <= 0 {
+		return 0
 	}
-	if filter.Type != "" {
-		// Keep the type predicate isolated from other indexed predicates to
-		// avoid Dolt's mergeJoinIter panic on type+status+priority queries.
-		whereClauses = append(whereClauses, "id IN (SELECT id FROM issues WHERE issue_type = ?)")
-		args = append(args, filter.Type)
-	} else {
-		excludeTypes := readyWorkExcludeTypes(filter.ExcludeTypes)
-		placeholders := make([]string, len(excludeTypes))
-		for i, t := range excludeTypes {
-			placeholders[i] = "?"
-			args = append(args, string(t))
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT id FROM issues WHERE issue_type NOT IN (%s))", strings.Join(placeholders, ",")))
+	const minPageSize = 100
+	if limit < minPageSize {
+		return minPageSize
 	}
-	// Unassigned takes precedence over Assignee filter.
-	if filter.Unassigned {
-		whereClauses = append(whereClauses, "(assignee IS NULL OR assignee = '')")
-	} else if filter.Assignee != nil {
-		whereClauses = append(whereClauses, "assignee = ?")
-		args = append(args, *filter.Assignee)
-	}
-	// Exclude future-deferred issues unless IncludeDeferred is set.
-	if !filter.IncludeDeferred {
-		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= UTC_TIMESTAMP())")
-	}
-	// Exclude children of future-deferred parents.
+	return limit
+}
+
+func buildReadyWorkOrder(policy types.SortPolicy) sqlbuild.ReadyWorkOrder {
+	return sqlbuild.BuildReadyWorkOrder(policy, "created_at", "priority")
+}
+
+// buildReadyWorkPredicates computes the ID sets the ready-work WHERE clause
+// needs (children of deferred parents, parent descendants), then delegates
+// the clause text to sqlbuild so both stacks share ready semantics.
+func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFilter, tables FilterTables) (*readyWorkPredicates, error) {
+	var inputs sqlbuild.ReadyWorkWhereInputs
 	if !filter.IncludeDeferred {
 		deferredChildIDs, dcErr := getChildrenOfDeferredParentsInTx(ctx, tx)
 		if dcErr != nil {
 			return nil, fmt.Errorf("get ready work: compute deferred parent children: %w", dcErr)
 		}
-		if len(deferredChildIDs) > 0 {
-			for start := 0; start < len(deferredChildIDs); start += queryBatchSize {
-				end := start + queryBatchSize
-				if end > len(deferredChildIDs) {
-					end = len(deferredChildIDs)
-				}
-				placeholders, batchArgs := buildSQLInClause(deferredChildIDs[start:end])
-				args = append(args, batchArgs...)
-				whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
-			}
-		}
-	}
-	if len(filter.Labels) > 0 {
-		for _, label := range filter.Labels {
-			whereClauses = append(whereClauses, "id IN (SELECT issue_id FROM labels WHERE label = ?)")
-			args = append(args, label)
-		}
-	}
-	if len(filter.ExcludeLabels) > 0 {
-		placeholders := make([]string, len(filter.ExcludeLabels))
-		for i, label := range filter.ExcludeLabels {
-			placeholders[i] = "?"
-			args = append(args, label)
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT issue_id FROM labels WHERE label IN (%s))", strings.Join(placeholders, ", ")))
+		inputs.DeferredChildIDs = deferredChildIDs
 	}
 	// Parent filtering: return all transitive descendants of parentID.
 	// GH#3396: previously was a one-hop subquery against dependencies, so
 	// grandchildren were silently dropped despite the help text and
 	// WorkFilter.ParentID godoc both promising "descendants (recursive)".
 	if filter.ParentID != nil {
-		parentID := *filter.ParentID
-		descendantIDs, descErr := GetDescendantIDsInTx(ctx, tx, parentID, 0)
+		descendantIDs, descErr := GetDescendantIDsInTx(ctx, tx, *filter.ParentID, 0)
 		if descErr != nil {
 			return nil, fmt.Errorf("get parent descendants: %w", descErr)
 		}
-		parentClauses := []string{"(id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child'))"}
-		args = append(args, parentID)
-		for start := 0; start < len(descendantIDs); start += queryBatchSize {
-			end := start + queryBatchSize
-			if end > len(descendantIDs) {
-				end = len(descendantIDs)
-			}
-			placeholders, batchArgs := buildSQLInClause(descendantIDs[start:end])
-			parentClauses = append(parentClauses, fmt.Sprintf("id IN (%s)", placeholders))
-			args = append(args, batchArgs...)
-		}
-		whereClauses = append(whereClauses, "("+strings.Join(parentClauses, " OR ")+")")
+		inputs.ParentDescendantIDs = descendantIDs
 	}
 
-	// Molecule filtering: filter to direct children of the specified molecule.
-	if filter.MoleculeID != "" {
-		whereClauses = append(whereClauses, fmt.Sprintf("(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND %s = ?) OR (id LIKE CONCAT(?, '.%%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))", DepTargetExpr))
-		args = append(args, filter.MoleculeID, filter.MoleculeID)
+	whereSQL, args, err := sqlbuild.BuildReadyWorkWhere(filter, tables, inputs)
+	if err != nil {
+		return nil, err
 	}
 
-	// Metadata existence check.
-	if filter.HasMetadataKey != "" {
-		if err := storage.ValidateMetadataKey(filter.HasMetadataKey); err != nil {
-			return nil, err
-		}
-		whereClauses = append(whereClauses, "JSON_EXTRACT(metadata, ?) IS NOT NULL")
-		args = append(args, storage.JSONMetadataPath(filter.HasMetadataKey))
-	}
+	orderBy := buildReadyWorkOrder(filter.SortPolicy)
+	args = append(args, orderBy.Args...)
 
-	// Metadata field equality filters.
-	if len(filter.MetadataFields) > 0 {
-		metaKeys := make([]string, 0, len(filter.MetadataFields))
-		for k := range filter.MetadataFields {
-			metaKeys = append(metaKeys, k)
-		}
-		sort.Strings(metaKeys)
-		for _, k := range metaKeys {
-			if err := storage.ValidateMetadataKey(k); err != nil {
-				return nil, err
-			}
-			whereClauses = append(whereClauses, "JSON_UNQUOTE(JSON_EXTRACT(metadata, ?)) = ?")
-			args = append(args, storage.JSONMetadataPath(k), filter.MetadataFields[k])
-		}
-	}
-
-	// Exclude blocked issues eagerly for unbounded queries. Limited queries page
-	// candidate IDs first and filter blockers per page below, avoiding a full
-	// dependency graph scan when the caller only needs a small ready set.
-	if filter.Limit == 0 {
-		blockedIDs, err := computeBlockedFn(ctx, tx, filter.IncludeEphemeral)
-		if err != nil {
-			return nil, fmt.Errorf("compute blocked IDs: %w", err)
-		}
-		if len(blockedIDs) > 0 {
-			// Also exclude children of blocked parents.
-			childrenOfBlocked, childErr := getChildrenOfIssuesInTx(ctx, tx, blockedIDs)
-			if childErr != nil {
-				return nil, fmt.Errorf("compute blocked children: %w", childErr)
-			}
-			blockedIDs = append(blockedIDs, childrenOfBlocked...)
-
-			for start := 0; start < len(blockedIDs); start += queryBatchSize {
-				end := start + queryBatchSize
-				if end > len(blockedIDs) {
-					end = len(blockedIDs)
-				}
-				placeholders, batchArgs := buildSQLInClause(blockedIDs[start:end])
-				args = append(args, batchArgs...)
-				whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
-			}
-		}
-	}
-
-	whereSQL := "WHERE " + strings.Join(whereClauses, " AND ")
-
-	// Build ORDER BY clause based on SortPolicy.
-	var orderBySQL string
-	switch filter.SortPolicy {
-	case types.SortPolicyOldest:
-		orderBySQL = "ORDER BY created_at ASC, id ASC"
-	case types.SortPolicyPriority:
-		orderBySQL = "ORDER BY priority ASC, created_at DESC, id ASC"
-	case types.SortPolicyHybrid, "":
-		recentCutoff := time.Now().UTC().Add(-48 * time.Hour)
-		orderBySQL = `ORDER BY
-			CASE WHEN created_at >= ? THEN 0 ELSE 1 END ASC,
-			CASE WHEN created_at >= ? THEN priority ELSE 999 END ASC,
-			created_at ASC, id ASC`
-		args = append(args, recentCutoff, recentCutoff)
-	default:
-		orderBySQL = "ORDER BY priority ASC, created_at DESC, id ASC"
-	}
-
-	var issueIDs []string
+	var limitSQL string
 	if filter.Limit > 0 {
-		pageSize := readyWorkPageSize(filter.Limit)
-		for offset := 0; len(issueIDs) < filter.Limit; offset += pageSize {
-			//nolint:gosec // G201: whereSQL/orderBySQL are hardcoded, pageSize/offset are integers
-			query := fmt.Sprintf(`
-				SELECT id FROM issues
-				%s
-				%s
-				LIMIT %d OFFSET %d
-			`, whereSQL, orderBySQL, pageSize, offset)
-
-			pageIDs, err := queryReadyIssueIDPage(ctx, tx, query, args)
-			if err != nil {
-				return nil, err
-			}
-			if len(pageIDs) == 0 {
-				break
-			}
-
-			blockedPageIDs, err := ComputeBlockedCandidateIDsInTx(ctx, tx, pageIDs, filter.IncludeEphemeral)
-			if err != nil {
-				return nil, fmt.Errorf("get ready work: filter blocked candidates: %w", err)
-			}
-			blockedPageSet := make(map[string]struct{}, len(blockedPageIDs))
-			for _, id := range blockedPageIDs {
-				blockedPageSet[id] = struct{}{}
-			}
-
-			for _, id := range pageIDs {
-				if _, blocked := blockedPageSet[id]; blocked {
-					continue
-				}
-				issueIDs = append(issueIDs, id)
-				if len(issueIDs) >= filter.Limit {
-					break
-				}
-			}
-			if len(pageIDs) < pageSize {
-				break
-			}
-		}
-	} else {
-		//nolint:gosec // G201: whereSQL/orderBySQL are hardcoded strings and ? placeholders
-		query := fmt.Sprintf(`
-			SELECT id FROM issues
-			%s
-			%s
-		`, whereSQL, orderBySQL)
-
-		var err error
-		issueIDs, err = queryReadyIssueIDPage(ctx, tx, query, args)
-		if err != nil {
-			return nil, err
-		}
+		limitSQL = fmt.Sprintf("LIMIT %d", filter.Limit)
 	}
 
-	// Batch-fetch full issues preserving order.
+	return &readyWorkPredicates{
+		whereSQL:         whereSQL,
+		orderBySQL:       orderBy.SQL,
+		limitSQL:         limitSQL,
+		args:             args,
+		deferredChildIDs: inputs.DeferredChildIDs,
+	}, nil
+}
+
+//nolint:gosec // G201: whereSQL/orderBySQL built from hardcoded strings and ? placeholders
+func GetReadyWorkInTx(
+	ctx context.Context,
+	tx DBTX,
+	filter types.WorkFilter,
+) ([]*types.Issue, error) {
+	preds, err := buildReadyWorkPredicates(ctx, tx, filter, IssuesFilterTables)
+	if err != nil {
+		return nil, err
+	}
+
+	//nolint:gosec // G201: fragments are hardcoded; only ? placeholders carry user input.
+	query := fmt.Sprintf(`
+		SELECT id FROM issues
+		%s
+		%s
+		%s
+	`, preds.whereSQL, preds.orderBySQL, preds.limitSQL)
+
+	issueIDs, err := queryReadyIssueIDPage(ctx, tx, query, preds.args)
+	if err != nil {
+		return nil, err
+	}
+
 	issues, err := GetIssuesByIDsInTx(ctx, tx, issueIDs, nil)
 	if err != nil {
 		return nil, fmt.Errorf("get ready work: fetch issues: %w", err)
@@ -280,55 +121,170 @@ func GetReadyWorkInTx(
 		}
 	}
 
-	// When IncludeEphemeral is set, also query the wisps table.
-	if filter.IncludeEphemeral {
-		wispFilter := readyWorkWispIssueFilter(filter)
-		// Ready-only wisp predicates are applied after search, so avoid limiting
-		// before that filtering can drop non-ready candidates.
-		wispFilter.Limit = 0
-		wisps, wErr := SearchIssuesInTx(ctx, tx, "", wispFilter)
-		if wErr != nil {
-			return nil, fmt.Errorf("search wisps (ready work): %w", wErr)
-		}
-		wisps, wErr = filterReadyWispsInTx(ctx, tx, filter, wisps)
-		if wErr != nil {
-			return nil, wErr
-		}
-		ordered = append(ordered, wisps...)
-		if filter.Limit > 0 && len(ordered) > filter.Limit {
-			ordered = ordered[:filter.Limit]
-		}
+	wisps, wErr := getReadyWispsInTx(ctx, tx, filter, preds.deferredChildIDs)
+	if wErr != nil {
+		return nil, wErr
+	}
+	if len(wisps) > 0 {
+		ordered = mergeReadyWisps(ordered, wisps, filter)
 	}
 
 	return ordered, nil
 }
 
-func readyWorkExcludeTypes(extra []types.IssueType) []types.IssueType {
-	excludeTypes := []types.IssueType{
-		types.IssueType("merge-request"),
-		types.TypeGate,
-		types.TypeMolecule,
-		types.TypeMessage,
-		types.IssueType("agent"),
-		types.IssueType("role"),
-		types.IssueType("rig"),
+func mergeReadyWisps(ordered []*types.Issue, wisps []*types.Issue, filter types.WorkFilter) []*types.Issue {
+	// Prefer the canonical wisp record when an ID exists in both tables (be-iabdi).
+	wispByID := make(map[string]*types.Issue, len(wisps))
+	for _, w := range wisps {
+		wispByID[w.ID] = w
 	}
-	seen := make(map[types.IssueType]bool, len(excludeTypes)+len(extra))
-	for _, t := range excludeTypes {
-		seen[t] = true
-	}
-	for _, t := range extra {
-		if t == "" || seen[t] {
-			continue
+	var kept []*types.Issue
+	for _, issue := range ordered {
+		if wispByID[issue.ID] == nil {
+			kept = append(kept, issue)
 		}
-		seen[t] = true
-		excludeTypes = append(excludeTypes, t)
 	}
-	return excludeTypes
+	kept = append(kept, wisps...)
+	sortReadyIssues(kept, filter.SortPolicy)
+	if filter.Limit > 0 && len(kept) > filter.Limit {
+		kept = kept[:filter.Limit]
+	}
+	return kept
+}
+
+func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, deferredChildIDs []string) ([]*types.Issue, error) {
+	empty, err := wispsTableEmptyOrMissingInTx(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("search wisps (ready work): probe: %w", err)
+	}
+	if empty {
+		return nil, nil
+	}
+
+	wispFilter := readyWorkWispIssueFilter(filter)
+	if filter.Limit <= 0 {
+		wispFilter.Limit = 0
+		wisps, err := searchTableInTxT(ctx, tx, "", wispFilter, WispsFilterTables, issueProjection)
+		if err != nil {
+			if isTableNotExistError(err) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("search wisps (ready work): %w", err)
+		}
+		return filterReadyWispsInTx(ctx, tx, filter, wisps, deferredChildIDs)
+	}
+
+	pageSize := readyWorkPageSize(filter.Limit)
+	orderBy := buildReadyWorkOrder(filter.SortPolicy)
+	ready := make([]*types.Issue, 0, filter.Limit)
+	for offset := 0; len(ready) < filter.Limit; offset += pageSize {
+		pageIDs, err := queryReadyWispIssueIDPage(ctx, tx, wispFilter, !filter.IncludeDeferred, orderBy, pageSize, offset)
+		if err != nil {
+			if isTableNotExistError(err) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("search wisps (ready work): %w", err)
+		}
+		if len(pageIDs) == 0 {
+			break
+		}
+
+		pageWisps, err := getWispIssuesByIDsInOrderInTx(ctx, tx, pageIDs)
+		if err != nil {
+			return nil, fmt.Errorf("search wisps (ready work): %w", err)
+		}
+		pageReady, err := filterReadyWispsInTx(ctx, tx, filter, pageWisps, deferredChildIDs)
+		if err != nil {
+			return nil, err
+		}
+		for _, wisp := range pageReady {
+			ready = append(ready, wisp)
+			if len(ready) >= filter.Limit {
+				break
+			}
+		}
+		if len(pageIDs) < pageSize {
+			break
+		}
+	}
+	return ready, nil
+}
+
+func queryReadyWispIssueIDPage(ctx context.Context, tx DBTX, filter types.IssueFilter, excludeDeferred bool, orderBy sqlbuild.ReadyWorkOrder, limit, offset int) ([]string, error) {
+	plan := sqlbuild.BuildLabelDrivenSearch(filter, WispsFilterTables)
+	whereClauses, args, err := BuildIssueFilterClauses("", plan.Filter, WispsFilterTables)
+	if err != nil {
+		return nil, err
+	}
+	whereClauses, args = plan.MergeInto(whereClauses, args)
+	if excludeDeferred {
+		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= UTC_TIMESTAMP())")
+	}
+
+	whereSQL := ""
+	if len(whereClauses) > 0 {
+		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	selectSQL := "SELECT "
+	if plan.Distinct {
+		selectSQL = "SELECT DISTINCT "
+	}
+	args = append(args, orderBy.Args...)
+	//nolint:gosec // G201: SQL fragments are fixed table/column names and parameterized filters; limit/offset are ints.
+	query := fmt.Sprintf(`%sid FROM %s %s %s LIMIT %d OFFSET %d`,
+		selectSQL, plan.FromSQL, whereSQL, orderBy.SQL, limit, offset)
+
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search wisps: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("search wisps: scan id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("search wisps: rows: %w", err)
+	}
+	return ids, nil
+}
+
+func getWispIssuesByIDsInOrderInTx(ctx context.Context, tx DBTX, ids []string) ([]*types.Issue, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	wispSet := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		wispSet[id] = struct{}{}
+	}
+	issues, err := GetIssuesByIDsInTx(ctx, tx, ids, wispSet)
+	if err != nil {
+		return nil, err
+	}
+	issueMap := make(map[string]*types.Issue, len(issues))
+	for _, issue := range issues {
+		issueMap[issue.ID] = issue
+	}
+	ordered := make([]*types.Issue, 0, len(ids))
+	for _, id := range ids {
+		if issue, ok := issueMap[id]; ok {
+			ordered = append(ordered, issue)
+		}
+	}
+	return ordered, nil
+}
+
+func readyWorkExcludeTypes(extra []types.IssueType) []types.IssueType {
+	return sqlbuild.ReadyWorkExcludeTypes(extra)
 }
 
 func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
-	ephTrue := true
 	pinnedFalse := false
 	wispFilter := types.IssueFilter{
 		Priority:       filter.Priority,
@@ -338,7 +294,6 @@ func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 		Limit:          filter.Limit,
 		MolType:        filter.MolType,
 		WispType:       filter.WispType,
-		Ephemeral:      &ephTrue,
 		Pinned:         &pinnedFalse,
 		MetadataFields: filter.MetadataFields,
 		HasMetadataKey: filter.HasMetadataKey,
@@ -364,10 +319,14 @@ func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 		moleculeID := filter.MoleculeID
 		wispFilter.ParentID = &moleculeID
 	}
+	if !filter.IncludeEphemeral {
+		ephFalse := false
+		wispFilter.Ephemeral = &ephFalse
+	}
 	return wispFilter
 }
 
-func filterReadyWispsInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilter, wisps []*types.Issue) ([]*types.Issue, error) {
+func filterReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, wisps []*types.Issue, deferredChildIDs []string) ([]*types.Issue, error) {
 	if len(wisps) == 0 {
 		return wisps, nil
 	}
@@ -412,21 +371,36 @@ func filterReadyWispsInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilt
 				excluded[wisp.ID] = struct{}{}
 			}
 		}
-		deferredChildIDs, err := getChildrenOfDeferredParentsInTx(ctx, tx)
-		if err != nil {
-			return nil, err
-		}
 		for _, id := range deferredChildIDs {
 			excluded[id] = struct{}{}
 		}
 	}
 
-	blockedIDs, err := ComputeBlockedCandidateIDsInTx(ctx, tx, wispIDs, true)
-	if err != nil {
-		return nil, fmt.Errorf("get ready work: filter blocked wisps: %w", err)
-	}
-	for _, id := range blockedIDs {
-		excluded[id] = struct{}{}
+	for start := 0; start < len(wispIDs); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(wispIDs) {
+			end = len(wispIDs)
+		}
+		placeholders, args := buildSQLInClause(wispIDs[start:end])
+		//nolint:gosec // G201: only IN-clause placeholders are formatted in.
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+			SELECT id FROM wisps WHERE id IN (%s) AND is_blocked = 1
+		`, placeholders), args...)
+		if err != nil {
+			return nil, fmt.Errorf("get ready work: filter blocked wisps: %w", err)
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan blocked wisp: %w", err)
+			}
+			excluded[id] = struct{}{}
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("blocked wisp rows: %w", err)
+		}
 	}
 
 	ready := wisps[:0]
@@ -442,18 +416,49 @@ func filterReadyWispsInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilt
 	return ready, nil
 }
 
-func readyWorkPageSize(limit int) int {
-	pageSize := limit * 4
-	if pageSize < 100 {
-		return 100
-	}
-	if pageSize > 1000 {
-		return 1000
-	}
-	return pageSize
+func sortReadyIssues(issues []*types.Issue, policy types.SortPolicy) {
+	recentCutoff := time.Now().UTC().Add(-48 * time.Hour)
+	sort.SliceStable(issues, func(i, j int) bool {
+		a, b := issues[i], issues[j]
+		switch policy {
+		case types.SortPolicyOldest:
+			return issueCreatedBefore(a, b)
+		case types.SortPolicyPriority:
+			return issuePriorityBefore(a, b)
+		case types.SortPolicyHybrid, "":
+			aRecent := !a.CreatedAt.Before(recentCutoff)
+			bRecent := !b.CreatedAt.Before(recentCutoff)
+			if aRecent != bRecent {
+				return aRecent
+			}
+			if aRecent && a.Priority != b.Priority {
+				return a.Priority < b.Priority
+			}
+			return issueCreatedBefore(a, b)
+		default:
+			return issuePriorityBefore(a, b)
+		}
+	})
 }
 
-func queryReadyIssueIDPage(ctx context.Context, tx *sql.Tx, query string, args []interface{}) ([]string, error) {
+func issuePriorityBefore(a, b *types.Issue) bool {
+	if a.Priority != b.Priority {
+		return a.Priority < b.Priority
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ID < b.ID
+}
+
+func issueCreatedBefore(a, b *types.Issue) bool {
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.Before(b.CreatedAt)
+	}
+	return a.ID < b.ID
+}
+
+func queryReadyIssueIDPage(ctx context.Context, tx DBTX, query string, args []interface{}) ([]string, error) {
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get ready work: %w", err)
@@ -479,7 +484,7 @@ func queryReadyIssueIDPage(ctx context.Context, tx *sql.Tx, query string, args [
 // future defer_until. Works within an existing transaction.
 //
 //nolint:gosec // G201: depTable is selected from a hardcoded list below.
-func getChildrenOfDeferredParentsInTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
+func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, error) {
 	hasDeferredParent := false
 	for _, issueTable := range []string{"issues", "wisps"} {
 		//nolint:gosec // G201: issueTable is hardcoded to "issues" or "wisps"
@@ -548,7 +553,7 @@ func getChildrenOfDeferredParentsInTx(ctx context.Context, tx *sql.Tx) ([]string
 }
 
 //nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-func getParentedIDSetInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string]struct{}, error) {
+func getParentedIDSetInTx(ctx context.Context, tx DBTX, issueIDs []string) (map[string]struct{}, error) {
 	parented := make(map[string]struct{})
 	if len(issueIDs) == 0 {
 		return parented, nil
@@ -586,52 +591,6 @@ func getParentedIDSetInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (m
 		}
 	}
 	return parented, nil
-}
-
-// getChildrenOfIssuesInTx returns IDs of direct children (parent-child deps)
-// of the given issue IDs. Scans both dependencies and wisp_dependencies tables.
-//
-//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-func getChildrenOfIssuesInTx(ctx context.Context, tx *sql.Tx, parentIDs []string) ([]string, error) {
-	if len(parentIDs) == 0 {
-		return nil, nil
-	}
-	var children []string
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-		for start := 0; start < len(parentIDs); start += queryBatchSize {
-			end := start + queryBatchSize
-			if end > len(parentIDs) {
-				end = len(parentIDs)
-			}
-			placeholders, args := buildSQLInClause(parentIDs[start:end])
-
-			query := fmt.Sprintf(`
-				SELECT issue_id FROM %s
-				WHERE type = 'parent-child' AND %s IN (%s)
-			`, depTable, DepTargetExpr, placeholders)
-			rows, err := tx.QueryContext(ctx, query, args...)
-			if err != nil {
-				// wisp_dependencies table may not exist on pre-migration databases.
-				if depTable == "wisp_dependencies" {
-					break
-				}
-				return nil, fmt.Errorf("get children of issues from %s: %w", depTable, err)
-			}
-			for rows.Next() {
-				var childID string
-				if err := rows.Scan(&childID); err != nil {
-					_ = rows.Close()
-					return nil, fmt.Errorf("get children of issues: scan: %w", err)
-				}
-				children = append(children, childID)
-			}
-			_ = rows.Close()
-			if err := rows.Err(); err != nil {
-				return nil, fmt.Errorf("get children of issues: rows from %s: %w", depTable, err)
-			}
-		}
-	}
-	return children, nil
 }
 
 // buildSQLInClause builds a parameterized IN clause from a slice of IDs.
