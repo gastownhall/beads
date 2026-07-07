@@ -28,6 +28,13 @@ func TestMain(m *testing.M) {
 
 func testMainInner(m *testing.M) int {
 	os.Setenv("BEADS_TEST_MODE", "1")
+	// BEADS_TEST_PDEATHSIG=1 protects TestMultiProcessSchemaInit_DoltVerify
+	// (initschema_multiprocess_test.go), which calls doltserver.Start
+	// directly (in-process, no exec boundary) and this TestMain's own
+	// process stays alive for the server's whole lifetime. See
+	// internal/doltserver/procattr_linux.go for why this is a narrower,
+	// separate flag from BEADS_TEST_MODE.
+	os.Setenv("BEADS_TEST_PDEATHSIG", "1")
 
 	// Suite-owned root for the orphan-server sweep below. Must never be a
 	// shared/global temp dir (see SweepOrphanedTestServers) — this one is
@@ -74,6 +81,7 @@ func testMainInner(m *testing.M) int {
 	testServerPort = 0
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")
+	os.Unsetenv("BEADS_TEST_PDEATHSIG")
 	return code
 }
 

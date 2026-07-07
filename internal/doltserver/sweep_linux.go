@@ -54,6 +54,15 @@ func SweepOrphanedTestServers(suiteTempRoots ...string) []int {
 		if pid == self {
 			continue
 		}
+		// Revalidate identity right before signaling: candidate selection
+		// above already did its own /proc read, and in a PID-reuse window
+		// the kernel could have recycled this PID to an unrelated process
+		// in between. isDoltServerProcess re-reads /proc/<pid>/cmdline so
+		// we only ever signal something that still looks like the
+		// dolt sql-server we selected.
+		if !isDoltServerProcess(pid) {
+			continue
+		}
 		if err := syscall.Kill(pid, syscall.SIGTERM); err == nil {
 			killed = append(killed, pid)
 		}
@@ -69,10 +78,32 @@ func SweepOrphanedTestServers(suiteTempRoots ...string) []int {
 	// suite exit, so a short bounded wait here is acceptable.
 	time.Sleep(300 * time.Millisecond)
 	for _, pid := range killed {
+		// Revalidate again before escalating to SIGKILL: the original
+		// server may have exited cleanly during the grace period, and in
+		// a PID-reuse window (the kernel cycling the whole PID space
+		// within 300ms) this PID could now belong to an unrelated
+		// process. Recheck it still looks like a dolt sql-server before
+		// force-killing it.
+		if !isDoltServerProcess(pid) {
+			continue
+		}
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	}
 
 	return killed
+}
+
+// isDoltServerProcess re-reads /proc/<pid>/cmdline and reports whether pid
+// still refers to a dolt sql-server process. Used to revalidate a PID
+// immediately before signaling it, guarding against the kernel having
+// recycled the PID to an unrelated process since it was first observed.
+func isDoltServerProcess(pid int) bool {
+	cmdlineRaw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil || len(cmdlineRaw) == 0 {
+		return false
+	}
+	cmdline := strings.ReplaceAll(strings.Trim(string(cmdlineRaw), "\x00"), "\x00", " ")
+	return isDoltServerCmdline(cmdline)
 }
 
 // gatherDoltServerCandidates scans /proc for processes whose cmdline

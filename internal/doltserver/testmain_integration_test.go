@@ -22,8 +22,15 @@ import (
 // Previously this package (unlike the others in this tree) had no TestMain
 // at all, so BEADS_TEST_MODE was never set here and nothing swept orphans
 // on exit — both gaps this closes.
+//
+// BEADS_TEST_PDEATHSIG=1 is set alongside BEADS_TEST_MODE because this
+// TestMain's own process calls doltserver.Start directly (in-process, no
+// exec boundary) and stays alive for the server's whole lifetime — exactly
+// the case Pdeathsig is meant to protect. See procattr_linux.go for why
+// this is a narrower, separate flag from BEADS_TEST_MODE.
 func TestMain(m *testing.M) {
 	os.Setenv("BEADS_TEST_MODE", "1")
+	os.Setenv("BEADS_TEST_PDEATHSIG", "1")
 
 	code := m.Run()
 
@@ -37,5 +44,6 @@ func TestMain(m *testing.M) {
 	}
 
 	os.Unsetenv("BEADS_TEST_MODE")
+	os.Unsetenv("BEADS_TEST_PDEATHSIG")
 	os.Exit(code)
 }
