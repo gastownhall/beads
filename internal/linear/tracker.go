@@ -527,11 +527,36 @@ func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
 	return fmt.Sprintf("https://linear.app/issue/%s", issue.Identifier)
 }
 
+func skipOptionalPushStateMapping(status types.Status, err error, custom []types.CustomStatus) bool {
+	if !strings.Contains(err.Error(), "has no configured Linear state") {
+		return false
+	}
+	switch status {
+	case types.StatusBlocked, types.StatusDeferred, types.StatusPinned, types.StatusHooked:
+		return true
+	}
+	for _, cs := range custom {
+		if types.Status(cs.Name) == status {
+			return true
+		}
+	}
+	return false
+}
+
 // ValidatePushStateMappings ensures push has explicit, non-ambiguous status
 // mappings for every configured team before any mutation occurs.
 func (t *Tracker) ValidatePushStateMappings(ctx context.Context) error {
 	if t.config == nil || len(t.config.ExplicitStateMap) == 0 {
 		return fmt.Errorf("%s", missingExplicitStateMapMessage)
+	}
+	statuses := []types.Status{
+		types.StatusOpen,
+		types.StatusInProgress,
+		types.StatusBlocked,
+		types.StatusClosed,
+		types.StatusDeferred,
+		types.StatusPinned,
+		types.StatusHooked,
 	}
 	for _, teamID := range t.teamIDs {
 		client := t.clients[teamID]
@@ -542,12 +567,18 @@ func (t *Tracker) ValidatePushStateMappings(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("fetching workflow states for team %s: %w", teamID, err)
 		}
-		for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked, types.StatusClosed} {
+		for _, status := range statuses {
 			if _, err := ResolveStateIDForBeadsStatus(cache, status, t.config); err != nil {
-				// Only fail for statuses the config explicitly tries to map or when
-				// mappings are entirely absent. Missing blocked mappings are allowed
-				// until a blocked issue is actually pushed.
-				if status == types.StatusBlocked && strings.Contains(err.Error(), "has no configured Linear state") {
+				if skipOptionalPushStateMapping(status, err, t.config.CustomStatuses) {
+					continue
+				}
+				return err
+			}
+		}
+		for _, cs := range t.config.CustomStatuses {
+			st := types.Status(cs.Name)
+			if _, err := ResolveStateIDForBeadsStatus(cache, st, t.config); err != nil {
+				if skipOptionalPushStateMapping(st, err, t.config.CustomStatuses) {
 					continue
 				}
 				return err

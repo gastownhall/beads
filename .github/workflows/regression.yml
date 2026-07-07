@@ -109,7 +109,7 @@ jobs:
         # has a known cleanup race (see beads issue: TestCreateWithParentFlag
         # TempDir RemoveAll "directory not empty" flake). Keep the tag in sync
         # with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: docker pull dolthub/dolt-sql-server:2.1.0
+        run: docker pull dolthub/dolt-sql-server:2.1.10
 
       - name: Cache baseline binary
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5

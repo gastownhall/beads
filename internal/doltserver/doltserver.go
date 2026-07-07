@@ -420,8 +420,29 @@ func readPortFile(beadsDir string) int {
 }
 
 // writePortFile records the actual port the server is listening on.
+// Write-temp-then-rename: a plain os.WriteFile truncates in place, so a
+// concurrent readPortFile can observe an empty or partial file and resolve
+// port 0 (or a truncated port). Rename within .beads is atomic.
 func writePortFile(beadsDir string, port int) error {
-	return os.WriteFile(portPath(beadsDir), []byte(strconv.Itoa(port)), 0600)
+	path := portPath(beadsDir)
+	tmp, err := os.CreateTemp(beadsDir, PortFileName+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck // no-op after successful rename
+	if _, err := tmp.WriteString(strconv.Itoa(port)); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // EnsurePortFile makes the repo-local port file match the connected server port.

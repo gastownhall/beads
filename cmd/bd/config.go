@@ -866,7 +866,7 @@ Examples:
 // Keys under custom.* are always accepted (user-extensible).
 var recognizedConfigPrefixes = []string{
 	"export.", "import.", "dolt.", "jira.", "linear.", "github.", "custom.",
-	"status.", "doctor.suppress.", "routing.", "sync.", "git.",
+	"status.", "types.", "doctor.suppress.", "routing.", "sync.", "git.",
 	"directory.", "repos.", "external_projects.", "validation.",
 	"hierarchy.", "ai.", "backup.", "federation.", "metrics.",
 }
@@ -878,6 +878,7 @@ var recognizedConfigKeys = map[string]bool{
 	"create.require-description": true, "beads.role": true,
 	"auto_compact_enabled": true, "schema_version": true,
 	"output.title-length": true,
+	"prime.max-memories":  true, "prime.max-memory-chars": true,
 }
 
 func isRecognizedConfigKey(key string) bool {

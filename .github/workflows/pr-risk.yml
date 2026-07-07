@@ -231,7 +231,7 @@ jobs:
         # Presence of this image flips isDoltImageCached() true, so the suite
         # exercises server Dolt instead of self-skipping. Keep the tag in sync
         # with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: docker pull dolthub/dolt-sql-server:2.1.0
+        run: docker pull dolthub/dolt-sql-server:2.1.10
 
       - name: Test
         # Server twin of test-embedded-conformance: same conformance.RunAll, but

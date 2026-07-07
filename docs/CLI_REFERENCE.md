@@ -56,6 +56,7 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd todo add](#bd-todo-add) — Add a new TODO item
   - [bd todo done](#bd-todo-done) — Mark TODO(s) as done
   - [bd todo list](#bd-todo-list) — List TODO items
+- [bd unclaim](#bd-unclaim) — Release a claimed issue
 - [bd update](#bd-update) — Update one or more issues
 
 ### Views & Reports:
@@ -244,6 +245,7 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd formula](#bd-formula) — Manage workflow formulas
   - [bd formula convert](#bd-formula-convert) — Convert formula from JSON to TOML
   - [bd formula list](#bd-formula-list) — List available formulas
+  - [bd formula schema](#bd-formula-schema) — Show the formula schema index (every exported struct in types.go)
   - [bd formula show](#bd-formula-show) — Show formula details
 - [bd github](#bd-github) — GitHub integration commands
   - [bd github pull](#bd-github-pull) — Pull specific items from GitHub
@@ -516,7 +518,7 @@ bd create [title] [flags]
   -s, --status string           Initial status
       --stdin                   Read description from stdin (alias for --body-file -)
       --title string            Issue title (alternative to positional argument)
-  -t, --type string             Issue type (bug|feature|task|epic|chore|decision); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision (default "task")
+  -t, --type string             Issue type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision (default "task")
       --validate                Validate description contains required sections for issue type
       --waits-for string        Spawner issue ID to wait for (creates waits-for dependency for fanout gate)
       --waits-for-gate string   Gate type: all-children (wait for all) or any-children (wait for first) (default "all-children")
@@ -1150,6 +1152,7 @@ Example:
   bd q "Fix login bug"           # Outputs: bd-a1b2
   ISSUE=$(bd q "New feature")    # Capture ID in variable
   bd q "Task" | xargs bd show    # Pipe to other commands
+  bd q "Subtask" --parent=bd-a1b2  # Hierarchical child (outputs: bd-a1b2.1)
 
 ```
 bd q [title] [flags]
@@ -1159,6 +1162,7 @@ bd q [title] [flags]
 
 ```
   -l, --labels strings    Labels
+      --parent string     Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')
   -p, --priority string   Priority (0-4 or P0-P4) (default "2")
   -t, --type string       Issue type (default "task")
 ```
@@ -1510,6 +1514,28 @@ bd todo list [flags]
       --all   Show all TODOs including completed
 ```
 
+### bd unclaim
+
+Release a claimed issue by clearing the assignee and resetting status to 'open'.
+
+Use this when an agent crashes mid-work or you need to abandon a claimed task.
+The issue becomes available for re-claiming by other agents.
+
+Examples:
+  bd unclaim bd-123
+  bd unclaim bd-123 --reason "Agent crashed"
+  bd unclaim bd-123 bd-456
+
+```
+bd unclaim [id...] [flags]
+```
+
+**Flags:**
+
+```
+  -r, --reason string   Reason for unclaiming
+```
+
 ### bd update
 
 Update one or more issues.
@@ -1727,7 +1753,7 @@ bd lint [issue-id...] [flags]
 
 ```
   -s, --status string   Filter by status (default: open, use 'all' for all)
-  -t, --type string     Filter by issue type (bug, task, feature, epic)
+  -t, --type string     Filter by issue type (bug, task, feature, epic, decision, spike, story, chore, milestone)
 ```
 
 ### bd stale
@@ -1818,16 +1844,23 @@ bd statuses
 
 List all valid issue types that can be used with bd create --type.
 
-Core work types (bug, task, feature, chore, epic, decision) are always valid.
+Core work types (bug, task, feature, chore, epic, decision, spike, story, milestone) are always valid.
 Additional types require configuration via types.custom in .beads/config.yaml.
 
 Examples:
   bd types              # List all types with descriptions
+  bd types --sections   # List required sections for each type
   bd types --json       # Output as JSON
 
 
 ```
-bd types
+bd types [flags]
+```
+
+**Flags:**
+
+```
+      --sections   Show required sections for each issue type
 ```
 
 ## Dependencies & Structure:
@@ -3684,6 +3717,17 @@ Config options:
 	- Use --export to dump the default content for customization.
 	- Use --memories-only for hook contexts that should inject only persistent memories.
 
+Memory injection caps:
+	Large memory sets can exceed what a session-start hook host will ingest,
+	and hosts truncate silently. Cap what prime injects with --max-memories N
+	and/or --max-memory-chars N (or the prime.max-memories /
+	prime.max-memory-chars config keys; an explicit flag wins, and an explicit
+	0 forces unlimited). Caps apply at whole-memory boundaries, at least one
+	memory is always emitted, and a banner ahead of the entries reports how
+	many were elided and how to browse the rest with bd memories.
+	--max-memory-chars caps the total bytes of the injected memory entries;
+	the section header and elision banner are excluded from the budget.
+
 ```
 bd prime [flags]
 ```
@@ -3691,12 +3735,14 @@ bd prime [flags]
 **Flags:**
 
 ```
-      --export          Output default content (ignores PRIME.md override)
-      --full            Force full CLI output (ignore MCP detection)
-      --hook-json       Wrap output in the SessionStart hook JSON envelope (Claude Code, Gemini CLI, Codex)
-      --mcp             Force MCP mode (minimal output)
-      --memories-only   Output only persistent memories for compact hook contexts
-      --stealth         Stealth mode (no git operations, flush only)
+      --export                 Output default content (ignores PRIME.md override)
+      --full                   Force full CLI output (ignore MCP detection)
+      --hook-json              Wrap output in the SessionStart hook JSON envelope (Claude Code, Gemini CLI, Codex)
+      --max-memories int       Cap injected persistent memories to N entries (0 = unlimited; falls back to the prime.max-memories config key)
+      --max-memory-chars int   Cap the total bytes of injected memory entries, at whole-memory boundaries; section header and banner are not counted (0 = unlimited; falls back to the prime.max-memory-chars config key)
+      --mcp                    Force MCP mode (minimal output)
+      --memories-only          Output only persistent memories for compact hook contexts
+      --stealth                Stealth mode (no git operations, flush only)
 ```
 
 ### bd quickstart
@@ -4299,7 +4345,7 @@ bd preflight [flags]
 
 ```
       --check       Run checks automatically
-      --fix         Auto-fix issues where possible (not yet implemented)
+      --fix         Auto-fix issues where possible (vendorHash, version sync)
       --json        Output results as JSON
       --skip-lint   Skip lint check explicitly
 ```
@@ -5110,6 +5156,18 @@ Type Filtering (--push only):
   --parent TICKET           Only push this ticket and its descendants
   --relations               Import Linear relations as bd dependencies on pull
 
+Persistent push-direction ID filters (workflow artifacts, sandbox beads, etc.):
+  bd config set linear.exclude_id_prefix "hw-mol-"
+  bd config set linear.exclude_id_patterns "-wisp-,sandbox-,scratch-"
+
+  exclude_id_prefix is a single case-sensitive prefix on the bead ID.
+  exclude_id_patterns is a comma-separated list of case-sensitive substrings
+  (matched anywhere in the ID). Both are combined as a union: a bead
+  matching either rule is skipped from push (no create, no update). Beads
+  with an existing external_ref that NOW match are silently skipped on
+  future syncs; the Linear-side issue persists — archive/delete it manually
+  if desired.
+
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
   --prefer-local    Always prefer local beads version
@@ -5684,8 +5742,16 @@ Search paths (in order):
   4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
 
 Commands:
-  list   List available formulas from all search paths
-  show   Show formula details, steps, and composition rules
+  list    List available formulas from all search paths
+  show    Show formula details, steps, and composition rules
+  schema  Show the formula schema index (alias: primitives)
+
+Discovering primitives:
+  bd formula schema                 # list every declared formula struct
+  bd formula schema loop            # show LoopSpec fields, types, and tags
+  bd formula primitives gate        # alias; same handler as 'schema'
+  examples/formulas/primitives/     # curated, smoke-tested wired fixtures
+  website/docs/workflows/formulas.md  # narrative reference
 
 ```
 bd formula
@@ -5734,6 +5800,9 @@ Search paths (in order of priority):
 
 Formulas in earlier paths shadow those with the same name in later paths.
 
+To list the declared formula schema structs an agent can write inside a .formula.toml,
+use 'bd formula schema' (alias: 'bd formula primitives').
+
 Examples:
   bd formula list
   bd formula list --json
@@ -5750,6 +5819,30 @@ bd formula list [flags]
       --type string   Filter by type (workflow, expansion, aspect, convoy)
 ```
 
+#### bd formula schema
+
+Show the formula schema index: every exported struct declared
+in a .formula.toml/.formula.json, with field names, types, and tags.
+
+The index is generated from internal/formula/types.go via go:generate; the
+struct definitions are the source of truth, so this list cannot drift. It is
+structural reference, not proof that every declared runtime behavior is wired.
+
+Examples:
+  bd formula schema                 # list every declared schema struct
+  bd formula schema loop            # show LoopSpec fields
+  bd formula primitives gate        # alias; shows Gate fields
+  bd formula schema --json          # machine-readable index
+
+Curated smoke-tested fixtures for wired primitives live in
+examples/formulas/primitives/ (with a smoke harness that proves they work).
+
+```
+bd formula schema [primitive]
+```
+
+**Aliases:** primitives
+
 #### bd formula show
 
 Show detailed information about a formula.
@@ -5760,6 +5853,9 @@ Displays:
   - Steps with dependencies
   - Composition rules (extends, aspects, expansions)
   - Bond points for external composition
+
+To inspect the structure of an individual primitive (e.g. LoopSpec, Gate)
+rather than a user-authored formula, use 'bd formula schema &lt;primitive&gt;'.
 
 Examples:
   bd formula show shiny

@@ -310,7 +310,37 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	// already-initialized database — independently migrating each clone forks the
 	// schema. Embedded mode (the mode the original report was filed against) syncs
 	// via Dolt remotes too, so it needs the same gate as server mode.
-	if err := schema.CheckRemoteMigrateGate(ctx, conn); err != nil {
+	//
+	// adopt injects the driver-side fast-forward ancestry primitives
+	// (mybd-ae1i) so the smart gate can distinguish a losslessly
+	// fast-forwardable remote-ahead case (smartAdoptFastForward) from the
+	// plain destructive adopt, and auto-execute it: CheckRemoteMigrateGate*
+	// calls FastForward and returns nil (proceed, nothing pending) once HEAD
+	// has actually advanced; any execution failure (dirty working set raced
+	// in, non-fast-forward, concurrent writer) falls back to the plain
+	// destructive adopt directive instead of forcing the write.
+	adopt := &schema.FastForwardAdopter{
+		IsStrictAncestor: func(ctx context.Context, db schema.DBConn, ref string) (bool, error) {
+			return versioncontrolops.LocalIsStrictAncestorOf(ctx, db, ref)
+		},
+		WorkingSetClean: func(ctx context.Context, db schema.DBConn) (bool, error) {
+			return versioncontrolops.WorkingSetClean(ctx, db)
+		},
+		FastForward: func(ctx context.Context, db schema.DBConn, ref string) error {
+			return versioncontrolops.FastForwardAdopt(ctx, db, ref)
+		},
+		// ReadOnly is deliberately left unset (false) here: this initSchema
+		// path is only ever reached via newStore (openStrict,
+		// openReadOnlyCommand, or openWorkingSetReconcile intents), all of
+		// which perform a writable open — s.readOnly is never true for any
+		// of them. The genuinely read-only embedded open, OpenReadOnly,
+		// skips initSchema (and this gate) entirely, so there is no
+		// read-only signal to plumb through at this injection site the way
+		// server mode's cfg.ReadOnly is (dolt/store.go initSchema). If that
+		// ever changes — e.g. initSchema starts running on a store that can
+		// report readOnly true — wire it here too.
+	}
+	if err := schema.CheckRemoteMigrateGateWithAdopt(ctx, conn, adopt); err != nil {
 		var gateErr *schema.RemoteMigrateGateError
 		if s.intent != openStrict && errors.As(err, &gateErr) {
 			// The gate exists to stop in-place migration on a remote-backed,

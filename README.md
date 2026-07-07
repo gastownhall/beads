@@ -207,6 +207,8 @@ branches, commit history, working-set state, or non-issue tables. Use
 
 See [docs/COMMUNITY_TOOLS.md](docs/COMMUNITY_TOOLS.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.
 
+See [docs/RELATED_PROJECTS.md](docs/RELATED_PROJECTS.md) for adjacent or complementary projects that solve different problems in the same neighborhood.
+
 ## 🚀 Git-Free Usage
 
 Beads works without git. The Dolt database is the storage backend — git

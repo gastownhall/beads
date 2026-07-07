@@ -1629,8 +1629,34 @@ func (s *DoltStore) initSchema(ctx context.Context) error {
 	// empty dolt_remotes table even though remotes are persisted in .dolt/config
 	// (GH#2315), so an SQL-only check would miss the remote on the first write
 	// open after an upgrade.
+	//
+	// adopt injects the driver-side fast-forward ancestry primitives
+	// (mybd-ae1i) so the smart gate can distinguish a losslessly
+	// fast-forwardable remote-ahead case (smartAdoptFastForward) from the
+	// plain destructive adopt, and auto-execute it: CheckRemoteMigrateGate*
+	// calls FastForward and returns nil (proceed, nothing pending) once HEAD
+	// has actually advanced; any execution failure (dirty working set raced
+	// in, non-fast-forward, concurrent writer) falls back to the plain
+	// destructive adopt directive instead of forcing the write.
+	adopt := &schema.FastForwardAdopter{
+		IsStrictAncestor: func(ctx context.Context, db schema.DBConn, ref string) (bool, error) {
+			return versioncontrolops.LocalIsStrictAncestorOf(ctx, db, ref)
+		},
+		WorkingSetClean: func(ctx context.Context, db schema.DBConn) (bool, error) {
+			return versioncontrolops.WorkingSetClean(ctx, db)
+		},
+		FastForward: func(ctx context.Context, db schema.DBConn, ref string) error {
+			return versioncontrolops.FastForwardAdopt(ctx, db, ref)
+		},
+		// s.initSchema is only ever invoked from the writable-open path (the
+		// caller guards it on !cfg.ReadOnly), so this is always false in
+		// practice today — wired explicitly anyway so the adopter's safety
+		// invariant (ReadOnly means "cannot write here") does not silently
+		// depend on that external guard alone.
+		ReadOnly: s.readOnly,
+	}
 	gate := func(ctx context.Context, db *sql.DB) error {
-		return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheck(ctx, db, s.remote, s.hasPersistedCLIRemote)
+		return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
 	}
 	_, err = initSchemaOnDBWithRetryAndGate(ctx, migDB, gate)
 	return err

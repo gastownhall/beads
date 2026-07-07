@@ -68,9 +68,8 @@ SUBCOMMANDS:
 		fmt.Println()
 
 		// Setup & Maintenance
-		fmt.Printf("%s\n", ui.RenderAccent("Setup & Sync:"))
+		fmt.Printf("%s\n", ui.RenderAccent("Setup & Maintenance:"))
 		printCmd("init", "Initialize bd in current directory")
-		printCmd("sync", "Sync issues with git remote")
 		printCmd("doctor", "Check installation health")
 		fmt.Println()
 

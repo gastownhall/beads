@@ -332,10 +332,32 @@ func TestEmbeddedClose(t *testing.T) {
 		child := bdCreate(t, bd, dir, "Epic child force", "--type", "task")
 		bdDepAdd(t, bd, dir, child.ID, epic.ID, "--type", "parent-child")
 
-		bdClose(t, bd, dir, epic.ID, "--force")
+		cmd := exec.Command(bd, "close", epic.ID, "--force")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd close --force failed: %v\n%s", err, out)
+		}
 		got := bdShow(t, bd, dir, epic.ID)
 		if got.Status != types.StatusClosed {
 			t.Errorf("expected epic closed with --force, got %s", got.Status)
+		}
+		if !strings.Contains(string(out), "warning:") || !strings.Contains(string(out), "open child") {
+			t.Errorf("expected warning about open children on --force, got: %s", out)
+		}
+		_ = child
+	})
+
+	t.Run("close_non_epic_parent_open_children_refuses", func(t *testing.T) {
+		parent := bdCreate(t, bd, dir, "Task parent guard", "--type", "task")
+		child := bdCreate(t, bd, dir, "Task child guard", "--type", "task")
+		bdDepAdd(t, bd, dir, child.ID, parent.ID, "--type", "parent-child")
+
+		bdCloseFail(t, bd, dir, parent.ID)
+		got := bdShow(t, bd, dir, parent.ID)
+		if got.Status == types.StatusClosed {
+			t.Error("expected non-epic parent with open children to remain open without --force")
 		}
 		_ = child
 	})
@@ -565,6 +587,39 @@ func TestEmbeddedClose(t *testing.T) {
 		issue1 := bdCreate(t, bd, dir, "Continue multi 1", "--type", "task")
 		issue2 := bdCreate(t, bd, dir, "Continue multi 2", "--type", "task")
 		bdCloseFail(t, bd, dir, issue1.ID, issue2.ID, "--continue")
+	})
+
+	// Reproduces gastownhall/beads#3769: --continue auto-advances + claims
+	// the next molecule step inside AdvanceToNextStep, but only --claim-next
+	// was calling SetLastTouchedID. Without the fix, .beads/last-touched
+	// stayed pointed at the just-closed step.
+	t.Run("close_continue_updates_last_touched", func(t *testing.T) {
+		// Template-shaped epic so AdvanceToNextStep recognizes it as a molecule.
+		root := bdCreate(t, bd, dir, "Continue last-touched root", "--type", "epic", "--labels", "template")
+		step1 := bdCreate(t, bd, dir, "Step one", "--type", "task", "--parent", root.ID)
+		step2 := bdCreate(t, bd, dir, "Step two", "--type", "task", "--parent", root.ID)
+		// step2 blocks on step1, so step1 closes first and step2 becomes ready.
+		bdDepAdd(t, bd, dir, step2.ID, step1.ID)
+
+		// Claim step1 first (mirrors the natural workflow); this seeds last-touched
+		// with step1's ID via the update --claim path, isolating the close-flow's
+		// responsibility for advancing it.
+		_, err := bdRunWithFlockRetry(t, bd, dir, "update", step1.ID, "--claim")
+		if err != nil {
+			t.Fatalf("seed claim failed: %v", err)
+		}
+
+		_ = bdClose(t, bd, dir, step1.ID, "--reason", "test", "--continue")
+
+		got, err := os.ReadFile(filepath.Join(beadsDir, "last-touched"))
+		if err != nil {
+			t.Fatalf("read .beads/last-touched: %v", err)
+		}
+		gotID := strings.TrimSpace(string(got))
+		if gotID != step2.ID {
+			t.Errorf(".beads/last-touched = %q after `bd close %s --continue`, want %q (the auto-advanced step)",
+				gotID, step1.ID, step2.ID)
+		}
 	})
 
 	t.Run("close_suggest_next_multiple_ids_fails", func(t *testing.T) {

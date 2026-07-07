@@ -99,7 +99,15 @@ func acquireEmbeddedLock(beadsDir string, serverMode bool) (util.Unlocker, error
 // auto-sanitized to underscores and the fix is persisted to metadata.json.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
-	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
+	if err != nil {
+		// A present-but-unloadable metadata.json must not degrade to the
+		// embedded default: on server-mode deployments the embedded
+		// directory is an empty relic, and opening it silently turns every
+		// query into an empty result set with exit 0 (false-empty). Absent
+		// metadata.json (cfg == nil, err == nil) keeps the embedded default.
+		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
+	}
+	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
 		return nil, fmt.Errorf("proxy server store should be uow provider")
 		// 	return newProxiedServerStore(ctx, &dolt.Config{
@@ -108,7 +116,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 		// 		ProxiedServer: true,
 		// 	})
 	}
-	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
+	if cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfig(ctx, beadsDir)
 	}
 	database := configfile.DefaultDoltDatabase
@@ -172,7 +180,14 @@ func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newNa
 // hydration from mutating foreign projects (GH#3231).
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
-	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
+	if err != nil {
+		// Same contract as newDoltStoreFromConfig: a present-but-unloadable
+		// metadata.json is a hard error, not a silent embedded fallback —
+		// and the error must name the real cause rather than the downstream
+		// "database not found" the embedded open would produce.
+		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
+	}
+	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
 		return nil, fmt.Errorf("proxy server store needs to be uow provider")
 		// return newProxiedServerStore(ctx, &dolt.Config{
@@ -182,7 +197,7 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 		// 	ReadOnly:      true,
 		// })
 	}
-	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
+	if cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	}
 	database := configfile.DefaultDoltDatabase

@@ -115,54 +115,213 @@ const (
 	// smartBelowFloor: remote == local but a legacy non-deterministic migration
 	// is still pending (very old database). Conservative human block.
 	smartBelowFloor
+	// smartAdoptFastForward (mybd-ae1i): a strict refinement of smartAdopt.
+	// Remote is ahead with no skew (same precondition as smartAdopt) AND
+	// local HEAD is a strict ancestor of the cached remote ref AND the
+	// working set is clean — adopting loses nothing. Only reachable when the
+	// caller wired a *FastForwardAdopter; any missing callback, failed
+	// precondition, or query error degrades to smartAdopt, so this verdict
+	// can never be less safe than today's default. The caller
+	// (checkRemoteMigrateGate) turns this verdict into action via
+	// attemptFastForward: on success it auto fast-forwards silently (no
+	// error, no directive); any execution failure (read-only, unwired write,
+	// a TOCTOU miss, or the merge itself refusing) falls through to the
+	// plain smartAdopt directive instead, never forcing the write.
+	smartAdoptFastForward
 )
 
-// routeSmartGate inspects the remote's cached schema state and returns the smart
-// routing verdict plus the content-skew versions (for smartForkSkew). It performs
-// no network I/O: it reads only the already-cached remote-tracking ref, exactly
-// like the doctor migration-skew check. current is the local schema version.
-func routeSmartGate(ctx context.Context, db DBConn, current int, remoteName string) (smartGateDecision, []int) {
+// FastForwardAdopter injects the driver-side fast-forward primitives that
+// live in internal/storage/versioncontrolops (LocalIsStrictAncestorOf,
+// WorkingSetClean, FastForwardAdopt). The schema package sits below the
+// driver layer and must not import versioncontrolops (import cycle), so the
+// mode-specific store — which already imports both packages — constructs
+// this from its own db handle and passes it in, mirroring the existing
+// extraHasRemote func() bool callback on CheckRemoteMigrateGateWithRemoteCheck.
+//
+// A nil *FastForwardAdopter, or any nil field, is always safe: routing
+// degrades to the pre-existing smartAdopt directive exactly as if this
+// refinement did not exist. mybd-ae1i piece 3 additionally acts on a
+// detected smartAdoptFastForward verdict by invoking FastForward; a nil
+// FastForward field or ReadOnly=true both mean "cannot write here" and
+// degrade the SAME way — the destructive smartAdopt directive, never a
+// forced write.
+type FastForwardAdopter struct {
+	// IsStrictAncestor reports whether local HEAD is a strict ancestor of
+	// ref (versioncontrolops.LocalIsStrictAncestorOf).
+	IsStrictAncestor func(ctx context.Context, db DBConn, ref string) (bool, error)
+	// WorkingSetClean reports whether the working set has no uncommitted
+	// changes, dolt-ignored wisp tables excepted
+	// (versioncontrolops.WorkingSetClean).
+	WorkingSetClean func(ctx context.Context, db DBConn) (bool, error)
+	// FastForward performs the actual fast-forward-only adopt
+	// (versioncontrolops.FastForwardAdopt). A nil FastForward means this
+	// injection site never wired write execution (e.g. detection-only);
+	// the router then never attempts it, exactly like ReadOnly below.
+	FastForward func(ctx context.Context, db DBConn, ref string) error
+	// ReadOnly marks that the store this adopter was built for was opened
+	// read-only: IsStrictAncestor/WorkingSetClean may still run (they only
+	// read), but FastForward must never be called — a read-only store
+	// cannot accept the merge write. The router checks this before ever
+	// invoking FastForward and falls back to the destructive smartAdopt
+	// directive instead of attempting (and failing) the write.
+	ReadOnly bool
+}
+
+// routeAdoptFastForward reports whether a remote-ahead, no-skew case
+// additionally qualifies for the non-destructive fast-forward refinement:
+// local HEAD is a strict ancestor of ref AND the working set is clean.
+// adopt may be nil (no callback wired at this injection site) — treated
+// the same as any failing precondition. Any callback error is treated
+// conservatively as "not fast-forwardable": an inconclusive read must never
+// promote past the existing smartAdopt directive.
+//
+// This only checks the read-side preconditions (used both for the initial
+// routing verdict and, again, as the TOCTOU re-check immediately before the
+// write — see attemptFastForward); whether the write itself can even be
+// attempted is canAutoFastForward's job.
+func routeAdoptFastForward(ctx context.Context, db DBConn, ref string, adopt *FastForwardAdopter) bool {
+	if adopt == nil || adopt.IsStrictAncestor == nil || adopt.WorkingSetClean == nil {
+		return false
+	}
+	ancestor, err := adopt.IsStrictAncestor(ctx, db, ref)
+	if err != nil || !ancestor {
+		return false
+	}
+	clean, err := adopt.WorkingSetClean(ctx, db)
+	if err != nil || !clean {
+		return false
+	}
+	return true
+}
+
+// canAutoFastForward reports whether adopt is actually able to EXECUTE the
+// fast-forward once the read-side preconditions (routeAdoptFastForward) are
+// satisfied: a FastForward callback must be wired, and the store must not be
+// read-only. Both failures mean "cannot write here" — the caller degrades to
+// the destructive smartAdopt directive rather than attempting the write.
+func canAutoFastForward(adopt *FastForwardAdopter) bool {
+	return adopt != nil && adopt.FastForward != nil && !adopt.ReadOnly
+}
+
+// remoteMaxAtRef re-reads the remote's cached content hashes at ref and
+// returns the highest migration version found there, or ok=false if the ref
+// cannot be read (absent/stale cache, or a query error). It mirrors the read
+// routeSmartGate already performs, and exists so attemptFastForward's TOCTOU
+// re-check can confirm remoteMax is STILL exactly the binary's latest
+// immediately before the write, not just at the original routing decision
+// (mybd-ae1i: the cached ref could in principle advance between routing and
+// write — e.g. a concurrent `dolt fetch` in another session — and landing
+// anywhere short of or past latest must never auto-execute; see
+// routeSmartGate's remoteMax == latest gate).
+func remoteMaxAtRef(ctx context.Context, db DBConn, ref string) (int, bool) {
+	remote, err := ReadMigrationContentHashes(ctx, db, ref)
+	if err != nil || len(remote) == 0 {
+		return 0, false
+	}
+	return maxVersion(remote), true
+}
+
+// attemptFastForward performs the TOCTOU-guarded auto fast-forward once the
+// smart router has already picked the smartAdoptFastForward verdict for ref
+// AND confirmed the fast-forward would land exactly at the binary's latest
+// migration (mybd-ae1i piece 3: turning detection into action; the
+// remoteMax == latest gate is mybd-ae1i's follow-up fix — landing short of
+// latest would leave MigrateUp to run unconditionally afterward with no gate
+// re-evaluation, and landing past latest means a newer binary already
+// migrated the remote further than this one understands). It re-verifies
+// the exact ancestry/clean/remoteMax-at-latest preconditions in the SAME db
+// session immediately before the write — a concurrent local writer or a
+// cached-ref advance between the first check (inside routeSmartGate) and now
+// would otherwise race the merge — and never forces it: any failure (a
+// store that cannot write, a re-check miss, or DOLT_MERGE('--ff-only', ...)
+// itself refusing a dirty working set, non-fast-forward, or concurrent
+// writer) reports false so the caller falls through to the destructive
+// smartAdopt directive instead of erroring out or silently skipping the
+// migrate-or-adopt decision.
+func attemptFastForward(ctx context.Context, db DBConn, ref string, adopt *FastForwardAdopter, latest int) bool {
+	if !canAutoFastForward(adopt) {
+		return false
+	}
+	if !routeAdoptFastForward(ctx, db, ref, adopt) {
+		return false
+	}
+	remoteMax, ok := remoteMaxAtRef(ctx, db, ref)
+	if !ok || remoteMax != latest {
+		return false
+	}
+	return adopt.FastForward(ctx, db, ref) == nil
+}
+
+// routeSmartGate inspects the remote's cached schema state and returns the
+// smart routing verdict, the content-skew versions (for smartForkSkew), the
+// cached remote-tracking ref it compared against (needed by the caller to
+// re-verify and execute a smartAdoptFastForward verdict — see
+// attemptFastForward), and atLatest — whether the remote's max version is
+// exactly the binary's latest (only meaningful, and only set, for the
+// smartAdoptFastForward/smartAdopt verdicts; see below). It performs no
+// network I/O: it reads only the already-cached remote-tracking ref, exactly
+// like the doctor migration-skew check. current is the local schema
+// version, latest is the binary's own maximum migration version
+// (schema.LatestVersion()). adopt (optionally nil) injects the fast-forward
+// ancestry callbacks; see FastForwardAdopter.
+//
+// atLatest gates whether the caller may EXECUTE a detected
+// smartAdoptFastForward verdict (mybd-ae1i follow-up fix): fast-forwarding
+// to a remote that is not exactly at latest would either leave pending
+// migrations for MigrateUp to apply unconditionally in place afterward with
+// no gate re-evaluation (remoteMax < latest — the #4259 fork risk this gate
+// exists to prevent), or land past what this binary understands (remoteMax
+// > latest — the #4135/#4137 stale-binary class). The verdict itself
+// (smartAdoptFastForward vs smartAdopt) is still keyed only on the ancestor
+// + clean preconditions, exactly as pre-piece-3, so the "loss-free adopt"
+// directive stays reachable and accurate even when atLatest is false — only
+// the AUTOMATIC fast-forward is conditioned on it (checkRemoteMigrateGate).
+func routeSmartGate(ctx context.Context, db DBConn, current, latest int, remoteName string, adopt *FastForwardAdopter) (decision smartGateDecision, skewVersions []int, ref string, atLatest bool) {
 	local, err := ReadMigrationContentHashes(ctx, db, "")
 	if err != nil || len(local) == 0 {
 		// No local hashes to compare (old database) — cannot assess safely.
-		return smartUndetermined, nil
+		return smartUndetermined, nil, "", false
 	}
 
 	if remoteName == "" {
 		remoteName = smartGateDefaultRemote
 	}
 	branch := smartGateActiveBranch(ctx, db)
-	ref := "remotes/" + remoteName + "/" + branch
+	ref = "remotes/" + remoteName + "/" + branch
 	remote, err := ReadMigrationContentHashes(ctx, db, ref)
 	if err != nil {
 		// Cached ref absent/stale (never pushed/pulled) or pre-content_hash:
 		// nothing to compare — fall back to the blunt block.
-		return smartUndetermined, nil
+		return smartUndetermined, nil, "", false
 	}
 	if len(remote) == 0 {
-		return smartUndetermined, nil
+		return smartUndetermined, nil, "", false
 	}
 
 	if skew := ContentHashSkew(local, remote); len(skew) > 0 {
-		return smartForkSkew, skew
+		return smartForkSkew, skew, ref, false
 	}
 
 	remoteMax := maxVersion(remote)
 	if remoteMax > current {
-		return smartAdopt, nil // remote already migrated — adopt, don't migrate
+		atLatest = remoteMax == latest
+		if routeAdoptFastForward(ctx, db, ref, adopt) {
+			return smartAdoptFastForward, nil, ref, atLatest
+		}
+		return smartAdopt, nil, ref, atLatest // remote already migrated — adopt, don't migrate
 	}
 	if remoteMax < current {
 		// The cached remote is behind this clone. That is not the first-mover
 		// state the smart gate is allowed to auto-resolve, so keep the human
 		// coordination block rather than silently moving farther ahead.
-		return smartUndetermined, nil
+		return smartUndetermined, nil, "", false
 	}
 
 	// remote == local on every shared version and at the same max version: a first-mover.
 	if current >= LastNonDeterministicMigration {
-		return smartAutoMigrate, nil
+		return smartAutoMigrate, nil, ref, false
 	}
-	return smartBelowFloor, nil
+	return smartBelowFloor, nil, ref, false
 }
 
 // smartGateActiveBranch returns the active branch, defaulting to "main" — the
@@ -196,4 +355,19 @@ func smartGateAllowMigrate(pending int, current int) {
 		"Smart gate (%s): auto-applying %d pending deterministic schema %s to a remote-backed database "+
 			"(v%d, remote at same version — safe first-mover, concurrent migrators converge; #4516). Run `bd dolt push` after.\n",
 		SmartGateEnv, pending, unit, current)
+}
+
+// smartGateNotifyFastForward logs the auto fast-forward adopt decision
+// (mybd-ae1i piece 3): local HEAD already advanced to the remote's migrated
+// schema via a lossless DOLT_MERGE('--ff-only', ...), so nothing local was
+// discarded — unlike a plain destructive adopt. Mirrors
+// smartGateAllowMigrate's shape. latest is accurate here specifically
+// because checkRemoteMigrateGate only calls this after attemptFastForward
+// succeeds, which itself only ever executes once remoteMax == latest (see
+// routeSmartGate's atLatest gate) — so the printed "->v%d" is always the
+// binary's latest, matching what actually landed.
+func smartGateNotifyFastForward(current, latest int) {
+	fmt.Fprintf(os.Stderr,
+		"Smart gate (%s): fast-forwarded to remote's migrated schema (v%d->v%d), nothing discarded (#4259).\n",
+		SmartGateEnv, current, latest)
 }

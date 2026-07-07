@@ -665,8 +665,8 @@ func TestEmbeddedUpdate(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Claim fail test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--assignee", "alice")
 		out := bdUpdateFail(t, bd, dir, issue.ID, "--claim")
-		if !strings.Contains(out, "already claimed") {
-			t.Errorf("expected 'already claimed' error, got: %s", out)
+		if !strings.Contains(out, "already assigned to") {
+			t.Errorf("expected 'already assigned to' error, got: %s", out)
 		}
 	})
 

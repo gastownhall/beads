@@ -28,6 +28,8 @@ import (
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/molecules"
+	"github.com/steveyegge/beads/internal/remotecache"
+	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -272,13 +274,22 @@ func warnSharedServerEmbeddedMismatch(cfg *configfile.Config) {
 // loadServerModeFromBeadsDir loads the storage mode (embedded vs server vs
 // proxied-server) from the given beads directory's metadata.json so that
 // usesSQLServer() and usesProxiedServer() return the correct values.
-func loadServerModeFromBeadsDir(beadsDir string) {
+//
+// A metadata.json that exists but cannot be loaded is a hard error: treating
+// it like an absent file silently flips server-mode deployments onto the
+// embedded store, where every query answers from an empty relic with exit 0
+// (false-empty). Absent metadata.json (cfg == nil) keeps the fresh-repo
+// embedded default.
+func loadServerModeFromBeadsDir(beadsDir string) error {
 	if beadsDir == "" {
-		return
+		return nil
 	}
 	cfg, err := configfile.Load(beadsDir)
-	if err != nil || cfg == nil {
-		return
+	if err != nil {
+		return fmt.Errorf("load %s: %w (storage mode unknown; data commands will refuse to run rather than fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
+	}
+	if cfg == nil {
+		return nil
 	}
 	warnSharedServerEmbeddedMismatch(cfg)
 	psm := cfg.IsDoltProxiedServerMode()
@@ -293,14 +304,15 @@ func loadServerModeFromBeadsDir(beadsDir string) {
 		cmdCtx.ServerMode = sm
 		cmdCtx.ProxiedServerMode = psm
 	}
+	return nil
 }
 
 // loadServerModeFromConfig loads the storage mode (embedded vs server vs
 // proxied-server) from metadata.json so that usesSQLServer() and
 // usesProxiedServer() return the correct values. Called for commands that
 // skip full DB init but still need to know the mode.
-func loadServerModeFromConfig() {
-	loadServerModeFromBeadsDir(beads.FindBeadsDir())
+func loadServerModeFromConfig() error {
+	return loadServerModeFromBeadsDir(beads.FindBeadsDir())
 }
 
 func preserveRedirectSourceDatabase(beadsDir string) {
@@ -415,7 +427,13 @@ func prepareSelectedCommandContext(beadsDir string, loadEnv bool) {
 		fmt.Fprintf(os.Stderr, "Warning: failed to reinitialize config for selected beads dir: %v\n", err)
 	}
 	config.CheckBeadsDirPermissions(beadsDir)
-	loadServerModeFromBeadsDir(beadsDir)
+	if err := loadServerModeFromBeadsDir(beadsDir); err != nil {
+		// Warn, don't fatal: this context also serves no-DB commands —
+		// doctor, init, bootstrap, config — which are exactly the repair
+		// paths for a corrupt metadata.json. Data commands stay protected
+		// by the hard error at store init and in the store factories.
+		fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+	}
 }
 
 func prepareSelectedNoDBContext(beadsDir string) {
@@ -873,7 +891,13 @@ var rootCmd = &cobra.Command{
 			refreshBoundCommandConfig(cmd)
 			if beadsDir := os.Getenv("BEADS_DIR"); beadsDir == "" {
 				loadEnvironment()
-				loadServerModeFromConfig()
+				if err := loadServerModeFromConfig(); err != nil {
+					// Warn, don't fatal: skipsStoreInit commands (doctor,
+					// init, bootstrap, version, ...) never select a store,
+					// and several of them are the repair path for the very
+					// corruption being reported.
+					fmt.Fprintf(os.Stderr, "warning: %v\n", err)
+				}
 			}
 			if _, err := getDoltAutoCommitMode(); err != nil {
 				return HandleError("%v", err)
@@ -943,7 +967,21 @@ var rootCmd = &cobra.Command{
 					return nil
 				}
 
-				if cmd.Name() != "import" && cmd.Name() != "setup" {
+				// GH#3686: `bd create --repo=<local path>` targets a different
+				// repo's workspace. Without this, PreRun exits with "no beads
+				// database found" before create.go's --repo handling runs, even
+				// when the target repo has a valid .beads/. Resolve the target
+				// workspace here so store initialization points at it. Remote
+				// --repo URLs are handled by create.go via the remote cache, so
+				// only local paths are resolved here.
+				if cmd.Name() == "create" && cmd.Flags().Changed("repo") {
+					if repoVal, _ := cmd.Flags().GetString("repo"); repoVal != "" && !remotecache.IsRemoteURL(repoVal) {
+						targetBeadsDir := filepath.Join(routing.ExpandPath(repoVal), ".beads")
+						dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
+					}
+				}
+
+				if dbPath == "" && cmd.Name() != "import" && cmd.Name() != "setup" {
 					// No database found - provide context-aware error message
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
@@ -951,19 +989,22 @@ var rootCmd = &cobra.Command{
 					metrics.CloseAndFlush()
 					os.Exit(1)
 				}
-				// For import/setup commands, set default database path
-				// Invariant: dbPath must always be absolute. Use CanonicalizePath for OS-agnostic
-				// handling (symlinks, case normalization on macOS).
-				//
-				// IMPORTANT: Use FindBeadsDir() to get the correct .beads directory,
-				// which follows redirect files. Without this, a redirected .beads
-				// would create a local database instead of using the redirect target.
-				// (GH#bd-0qel)
-				targetBeadsDir := beads.FindBeadsDir()
-				if targetBeadsDir == "" {
-					targetBeadsDir = ".beads"
+
+				if dbPath == "" {
+					// For import/setup commands, set default database path
+					// Invariant: dbPath must always be absolute. Use CanonicalizePath for OS-agnostic
+					// handling (symlinks, case normalization on macOS).
+					//
+					// IMPORTANT: Use FindBeadsDir() to get the correct .beads directory,
+					// which follows redirect files. Without this, a redirected .beads
+					// would create a local database instead of using the redirect target.
+					// (GH#bd-0qel)
+					targetBeadsDir := beads.FindBeadsDir()
+					if targetBeadsDir == "" {
+						targetBeadsDir = ".beads"
+					}
+					dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
 				}
-				dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
 			}
 		}
 
@@ -1010,10 +1051,17 @@ var rootCmd = &cobra.Command{
 			LenientOpen: isWorkingSetReconcileCommand(cmd),
 		}
 
-		// Load config to get database name and server connection settings
+		// Load config to get database name and server connection settings.
+		// A present-but-unloadable metadata.json must stop the command here:
+		// continuing with the zero-value config silently selects the embedded
+		// store with the default database name, and on server-mode
+		// deployments that empty relic answers every query with an empty
+		// result set and exit 0 (false-empty), which readers misinterpret as
+		// "no work". Absent metadata.json (cfg == nil, cfgErr == nil) keeps
+		// the fresh-repo embedded default below.
 		cfg, cfgErr := configfile.Load(beadsDir)
 		if cfgErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to load beads config from %s: %v\n", beadsDir, cfgErr)
+			FatalError("failed to load beads config from %s: %v (refusing to fall back to the embedded store; fix or restore metadata.json and retry)", beadsDir, cfgErr)
 		}
 		if cfg != nil {
 			warnSharedServerEmbeddedMismatch(cfg)
@@ -1078,10 +1126,8 @@ var rootCmd = &cobra.Command{
 				cmdCtx.ServerMode = doltCfg.ServerMode
 			}
 		}
-		// If config parse failed (cfgErr != nil), still default the database
-		// name so the store-open error is about the real problem (the parse
-		// failure warning already printed) rather than a confusing "database
-		// name must not be empty" downstream.
+		// Defensive: embeddeddolt.New rejects an empty database name, so
+		// default it even on paths that never set one.
 		if doltCfg.Database == "" {
 			doltCfg.Database = configfile.DefaultDoltDatabase
 		}
@@ -1106,6 +1152,8 @@ var rootCmd = &cobra.Command{
 				return HandleError("failed to open uow provider: %v", err)
 			}
 			uowProvider = p
+
+			reconcileVersionProxiedServer(rootCtx)
 
 			syncCommandContext()
 			return nil
@@ -1200,14 +1248,12 @@ var rootCmd = &cobra.Command{
 			hookRunner = hooks.NewRunner(filepath.Join(beadsDir, "hooks"))
 		}
 
-		// Wrap store with hook-firing decorator so ALL mutations
-		// automatically fire on_create/on_update/on_close hooks.
-		// Set BD_NO_HOOKS=1 to disable all hook firing (useful for
-		// bulk imports, migrations, or environments where hooks
-		// should not run).
-		if hookRunner != nil && store != nil && !config.GetBool("no-hooks") {
-			store = storage.NewHookFiringStore(store, hookRunner)
-		}
+		// Compose the storage decorator chain: OTel instrumentation (no-op
+		// when telemetry is off) wrapped by hook firing (skipped when
+		// BD_NO_HOOKS=1, which is useful for bulk imports, migrations, or
+		// environments where on_create/on_update/on_close hooks should not
+		// run). Order matters — see wireStorageDecorators in storage_chain.go.
+		store = wireStorageDecorators(store, hookRunner, config.GetBool("no-hooks"))
 
 		// Warn if multiple databases detected in directory hierarchy
 		warnMultipleDatabases(dbPath)

@@ -311,6 +311,9 @@ func TestDoltServerMode(t *testing.T) {
 	})
 
 	t.Run("GetDoltServerPort", func(t *testing.T) {
+		// Clear port env vars so the table-driven configs are the source of truth.
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
 		tests := []struct {
 			name string
 			cfg  *Config
@@ -705,6 +708,9 @@ func TestGetCapabilities(t *testing.T) {
 
 // TestDoltServerModeRoundtrip tests that server mode config survives save/load
 func TestDoltServerModeRoundtrip(t *testing.T) {
+	// Clear port env vars so saved/loaded port comes from config, not ambient env.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0750); err != nil {

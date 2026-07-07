@@ -613,6 +613,7 @@ func TestLoadMappingConfig(t *testing.T) {
 			"linear.state_map.custom":     "in_progress",
 			"linear.label_type_map.story": "feature",
 			"linear.relation_map.parent":  "parent-child",
+			"status.custom":               "review:active",
 		},
 	}
 
@@ -644,6 +645,10 @@ func TestLoadMappingConfig(t *testing.T) {
 	// Check that defaults are preserved
 	if config.StateMap["started"] != "in_progress" {
 		t.Errorf("StateMap[started] = %s, want in_progress (default preserved)", config.StateMap["started"])
+	}
+
+	if len(config.CustomStatuses) != 1 || config.CustomStatuses[0].Name != "review" {
+		t.Fatalf("CustomStatuses = %#v, want one entry named review", config.CustomStatuses)
 	}
 }
 
@@ -771,6 +776,180 @@ func TestResolveStateIDForBeadsStatusPrefersExplicitStateName(t *testing.T) {
 	}
 	if got != "state-1" {
 		t.Fatalf("ResolveStateIDForBeadsStatus() = %q, want state-1", got)
+	}
+}
+
+func TestResolveStateIDForBeadsStatusOutboundOverrideResolvesAmbiguousType(t *testing.T) {
+	// Reproduces the be-9gt scenario: Linear's default workspace has two
+	// "started"-type states. Without an outbound override the push would error
+	// with the ambiguity message; with one it resolves cleanly.
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-progress", Name: "In Progress", Type: "started"},
+			{ID: "state-review", Name: "In Review", Type: "started"},
+		},
+	}
+	config := DefaultMappingConfig()
+	config.ExplicitStateMap["started"] = "in_progress"
+	config.OutboundStateMap["in_progress"] = "In Progress"
+
+	got, err := ResolveStateIDForBeadsStatus(cache, types.StatusInProgress, config)
+	if err != nil {
+		t.Fatalf("ResolveStateIDForBeadsStatus() error = %v", err)
+	}
+	if got != "state-progress" {
+		t.Fatalf("ResolveStateIDForBeadsStatus() = %q, want state-progress", got)
+	}
+}
+
+func TestResolveStateIDForBeadsStatusOutboundOverrideIsCaseInsensitive(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-progress", Name: "In Progress", Type: "started"},
+		},
+	}
+	config := DefaultMappingConfig()
+	config.ExplicitStateMap["started"] = "in_progress"
+	config.OutboundStateMap["in_progress"] = "  in progress  " // mixed case, padding
+
+	got, err := ResolveStateIDForBeadsStatus(cache, types.StatusInProgress, config)
+	if err != nil {
+		t.Fatalf("ResolveStateIDForBeadsStatus() error = %v", err)
+	}
+	if got != "state-progress" {
+		t.Fatalf("ResolveStateIDForBeadsStatus() = %q, want state-progress", got)
+	}
+}
+
+func TestResolveStateIDForBeadsStatusOutboundOverrideUnknownStateNameErrors(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-progress", Name: "In Progress", Type: "started"},
+			{ID: "state-review", Name: "In Review", Type: "started"},
+		},
+	}
+	config := DefaultMappingConfig()
+	config.ExplicitStateMap["started"] = "in_progress"
+	config.OutboundStateMap["in_progress"] = "Doing"
+
+	_, err := ResolveStateIDForBeadsStatus(cache, types.StatusInProgress, config)
+	if err == nil {
+		t.Fatal("expected error for unknown outbound state name")
+	}
+	if got := err.Error(); !strings.Contains(got, "linear.outbound_state_map.in_progress") || !strings.Contains(got, `"Doing"`) {
+		t.Fatalf("error message should name the bad config key and value, got: %v", err)
+	}
+}
+
+func TestResolveStateIDForBeadsStatusOutboundOverrideWinsOverExplicitStateName(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-progress", Name: "In Progress", Type: "started"},
+			{ID: "state-review", Name: "In Review", Type: "started"},
+		},
+	}
+	config := DefaultMappingConfig()
+	// ExplicitStateMap would route in_progress to "In Review" by name match,
+	// but OutboundStateMap takes precedence and picks "In Progress".
+	config.ExplicitStateMap["in review"] = "in_progress"
+	config.OutboundStateMap["in_progress"] = "In Progress"
+
+	got, err := ResolveStateIDForBeadsStatus(cache, types.StatusInProgress, config)
+	if err != nil {
+		t.Fatalf("ResolveStateIDForBeadsStatus() error = %v", err)
+	}
+	if got != "state-progress" {
+		t.Fatalf("ResolveStateIDForBeadsStatus() = %q, want state-progress (outbound override should win over explicit name match)", got)
+	}
+}
+
+func TestResolveStateIDForBeadsStatusAmbiguousErrorPointsAtOutboundOverride(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-progress", Name: "In Progress", Type: "started"},
+			{ID: "state-review", Name: "In Review", Type: "started"},
+		},
+	}
+	config := DefaultMappingConfig()
+	config.ExplicitStateMap["started"] = "in_progress"
+
+	_, err := ResolveStateIDForBeadsStatus(cache, types.StatusInProgress, config)
+	if err == nil {
+		t.Fatal("expected ambiguous mapping to fail")
+	}
+	if got := err.Error(); !strings.Contains(got, "linear.outbound_state_map.in_progress") {
+		t.Fatalf("ambiguity error should mention the outbound_state_map escape hatch, got: %v", err)
+	}
+}
+
+func TestLoadMappingConfigParsesOutboundStateMap(t *testing.T) {
+	loader := &mockConfigLoader{
+		config: map[string]string{
+			"linear.state_map.started":              "in_progress",
+			"linear.outbound_state_map.in_progress": "In Progress",
+			"linear.outbound_state_map.blocked":     "Blocked",
+		},
+	}
+
+	config := LoadMappingConfig(loader)
+
+	if got := config.OutboundStateMap["in_progress"]; got != "In Progress" {
+		t.Errorf("OutboundStateMap[in_progress] = %q, want %q", got, "In Progress")
+	}
+	if got := config.OutboundStateMap["blocked"]; got != "Blocked" {
+		t.Errorf("OutboundStateMap[blocked] = %q, want %q", got, "Blocked")
+	}
+	// Defaults still empty for unset keys.
+	if got, ok := config.OutboundStateMap["closed"]; ok {
+		t.Errorf("OutboundStateMap[closed] = %q, want unset", got)
+	}
+}
+
+// Regression GH#3754: explicit state_map values that are custom status names
+// must not parse as StatusOpen and create phantom matches for beads "open".
+func TestResolveStateIDForBeadsStatusCustomValueDoesNotFalseMatchOpen(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-todo", Name: "Todo", Type: "unstarted"},
+			{ID: "state-review", Name: "In Review", Type: "unstarted"},
+		},
+	}
+	config := DefaultMappingConfig()
+	config.ExplicitStateMap["todo"] = "open"
+	config.ExplicitStateMap["in review"] = "review"
+
+	got, err := ResolveStateIDForBeadsStatus(cache, types.StatusOpen, config)
+	if err != nil {
+		t.Fatalf("ResolveStateIDForBeadsStatus(open) error = %v", err)
+	}
+	if got != "state-todo" {
+		t.Fatalf("ResolveStateIDForBeadsStatus(open) = %q, want state-todo", got)
+	}
+
+	got2, err := ResolveStateIDForBeadsStatus(cache, types.Status("review"), config)
+	if err != nil {
+		t.Fatalf("ResolveStateIDForBeadsStatus(review) error = %v", err)
+	}
+	if got2 != "state-review" {
+		t.Fatalf("ResolveStateIDForBeadsStatus(review) = %q, want state-review", got2)
+	}
+}
+
+func TestResolveStateIDForBeadsStatusDeferredExplicitMapping(t *testing.T) {
+	cache := &StateCache{
+		States: []State{
+			{ID: "state-icebox", Name: "Icebox", Type: "unstarted"},
+		},
+	}
+	config := DefaultMappingConfig()
+	config.ExplicitStateMap["icebox"] = "deferred"
+
+	got, err := ResolveStateIDForBeadsStatus(cache, types.StatusDeferred, config)
+	if err != nil {
+		t.Fatalf("ResolveStateIDForBeadsStatus() error = %v", err)
+	}
+	if got != "state-icebox" {
+		t.Fatalf("ResolveStateIDForBeadsStatus() = %q, want state-icebox", got)
 	}
 }
 

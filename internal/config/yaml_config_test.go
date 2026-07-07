@@ -698,6 +698,76 @@ func TestValidateYamlConfigValue_DoltMode(t *testing.T) {
 	}
 }
 
+// TestValidateYamlConfigValue_PrimeMaxMemories tests validation of prime.max-memories
+func TestValidateYamlConfigValue_PrimeMaxMemories(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		expectErr bool
+		errMsg    string
+	}{
+		{"valid zero (unlimited)", "0", false, ""},
+		{"valid positive", "10", false, ""},
+		{"valid large value", "1000", false, ""},
+		{"invalid negative", "-1", true, "prime.max-memories must be a non-negative integer (0 = unlimited), got \"-1\""},
+		{"invalid non-integer", "abc", true, "prime.max-memories must be a non-negative integer (0 = unlimited), got \"abc\""},
+		{"invalid float", "3.5", true, "prime.max-memories must be a non-negative integer (0 = unlimited), got \"3.5\""},
+		{"invalid empty", "", true, "prime.max-memories must be a non-negative integer (0 = unlimited), got \"\""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateYamlConfigValue("prime.max-memories", tt.value)
+			if tt.expectErr {
+				if err == nil {
+					t.Errorf("expected error for value %q, got nil", tt.value)
+				} else if err.Error() != tt.errMsg {
+					t.Errorf("expected error %q, got %q", tt.errMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error for value %q: %v", tt.value, err)
+				}
+			}
+		})
+	}
+}
+
+// TestValidateYamlConfigValue_PrimeMaxMemoryChars tests validation of prime.max-memory-chars
+func TestValidateYamlConfigValue_PrimeMaxMemoryChars(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		expectErr bool
+		errMsg    string
+	}{
+		{"valid zero (unlimited)", "0", false, ""},
+		{"valid positive", "25000", false, ""},
+		{"valid large value", "1000000", false, ""},
+		{"invalid negative", "-1", true, "prime.max-memory-chars must be a non-negative integer (0 = unlimited), got \"-1\""},
+		{"invalid non-integer", "abc", true, "prime.max-memory-chars must be a non-negative integer (0 = unlimited), got \"abc\""},
+		{"invalid float", "3.5", true, "prime.max-memory-chars must be a non-negative integer (0 = unlimited), got \"3.5\""},
+		{"invalid empty", "", true, "prime.max-memory-chars must be a non-negative integer (0 = unlimited), got \"\""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateYamlConfigValue("prime.max-memory-chars", tt.value)
+			if tt.expectErr {
+				if err == nil {
+					t.Errorf("expected error for value %q, got nil", tt.value)
+				} else if err.Error() != tt.errMsg {
+					t.Errorf("expected error %q, got %q", tt.errMsg, err.Error())
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error for value %q: %v", tt.value, err)
+				}
+			}
+		})
+	}
+}
+
 func TestIsSecretKey(t *testing.T) {
 	tests := []struct {
 		key      string

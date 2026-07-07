@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -27,6 +26,11 @@ var (
 	primeExportMode   bool
 	primeMemoriesOnly bool
 	primeHookJSONMode bool
+
+	primeMaxMemories       int
+	primeMaxMemoryChars    int
+	primeMaxMemoriesSet    bool
+	primeMaxMemoryCharsSet bool
 )
 
 const (
@@ -97,7 +101,18 @@ Config options:
 	Workflow customization:
 	- Place a .beads/PRIME.md file in the local clone or resolved workspace to override the default output entirely.
 	- Use --export to dump the default content for customization.
-	- Use --memories-only for hook contexts that should inject only persistent memories.`,
+	- Use --memories-only for hook contexts that should inject only persistent memories.
+
+Memory injection caps:
+	Large memory sets can exceed what a session-start hook host will ingest,
+	and hosts truncate silently. Cap what prime injects with --max-memories N
+	and/or --max-memory-chars N (or the prime.max-memories /
+	prime.max-memory-chars config keys; an explicit flag wins, and an explicit
+	0 forces unlimited). Caps apply at whole-memory boundaries, at least one
+	memory is always emitted, and a banner ahead of the entries reports how
+	many were elided and how to browse the rest with bd memories.
+	--max-memory-chars caps the total bytes of the injected memory entries;
+	the section header and elision banner are excluded from the budget.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -107,6 +122,9 @@ Config options:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		primeMaxMemoriesSet = cmd.Flags().Changed("max-memories")
+		primeMaxMemoryCharsSet = cmd.Flags().Changed("max-memory-chars")
 
 		emit := func(content string) {
 			if primeHookJSONMode {
@@ -184,6 +202,8 @@ func init() {
 	primeCmd.Flags().BoolVar(&primeExportMode, "export", false, "Output default content (ignores PRIME.md override)")
 	primeCmd.Flags().BoolVar(&primeMemoriesOnly, "memories-only", false, "Output only persistent memories for compact hook contexts")
 	primeCmd.Flags().BoolVar(&primeHookJSONMode, "hook-json", false, "Wrap output in the SessionStart hook JSON envelope (Claude Code, Gemini CLI, Codex)")
+	primeCmd.Flags().IntVar(&primeMaxMemories, "max-memories", 0, "Cap injected persistent memories to N entries (0 = unlimited; falls back to the prime.max-memories config key)")
+	primeCmd.Flags().IntVar(&primeMaxMemoryChars, "max-memory-chars", 0, "Cap the total bytes of injected memory entries, at whole-memory boundaries; section header and banner are not counted (0 = unlimited; falls back to the prime.max-memory-chars config key)")
 	rootCmd.AddCommand(primeCmd)
 }
 
@@ -352,39 +372,127 @@ func formatMemoriesForPrime(compact bool) string {
 	}
 
 	fullPrefix := kvPrefix + memoryPrefix
-	var keys []string
 	memories := make(map[string]string)
 	for k, v := range allConfig {
 		if strings.HasPrefix(k, fullPrefix) {
-			userKey := strings.TrimPrefix(k, fullPrefix)
-			memories[userKey] = v
-			keys = append(keys, userKey)
+			memories[strings.TrimPrefix(k, fullPrefix)] = v
 		}
 	}
 	if len(memories) == 0 {
 		return ""
 	}
-	sort.Strings(keys)
+	maxCount, maxChars := primeMemoryCaps()
+	return renderPrimeMemories(memories, compact, maxCount, maxChars)
+}
 
+// primeConfigInt reads an integer config key (stubbable for tests).
+var primeConfigInt = func(key string) int {
+	return config.GetInt(key)
+}
+
+// primeMemoryCaps resolves the memory-injection caps. An explicitly passed
+// flag wins, including an explicit 0 meaning "force unlimited"; otherwise the
+// prime.max-memories / prime.max-memory-chars config keys apply. 0 or unset
+// means uncapped.
+func primeMemoryCaps() (maxCount, maxChars int) {
+	maxCount = primeMaxMemories
+	if !primeMaxMemoriesSet && maxCount == 0 {
+		maxCount = primeConfigInt("prime.max-memories")
+	}
+	maxChars = primeMaxMemoryChars
+	if !primeMaxMemoryCharsSet && maxChars == 0 {
+		maxChars = primeConfigInt("prime.max-memory-chars")
+	}
+	if maxCount < 0 {
+		maxCount = 0
+	}
+	if maxChars < 0 {
+		maxChars = 0
+	}
+	return maxCount, maxChars
+}
+
+// renderPrimeMemories formats memories for injection, applying the given
+// caps. maxCount bounds how many memories are emitted; maxChars bounds the
+// total bytes of the emitted memory entries (the section header and elision
+// banner are not counted against this budget). Both are 0 when uncapped.
+// Caps apply at whole-memory boundaries and at least one memory is always
+// emitted, so a single oversized memory can exceed maxChars rather than
+// vanish. Keys are emitted in sorted order (the memory store keeps no
+// timestamps, so alphabetical is the only stable order available); when
+// entries are elided a banner ahead of the entries says how many and how to
+// reach the rest, so a capped prime never silently drops context. The banner
+// names only the cap that actually fired.
+func renderPrimeMemories(memories map[string]string, compact bool, maxCount, maxChars int) string {
+	keys := sortedKeys(memories)
+
+	entries := make([]string, 0, len(keys))
+	used := 0
+	var countCapHit, charCapHit bool
+	for _, k := range keys {
+		if maxCount > 0 && len(entries) >= maxCount {
+			countCapHit = true
+			break
+		}
+		var entry string
+		if compact {
+			v := strings.ReplaceAll(memories[k], "\n", " ")
+			v = truncate(v, 150)
+			entry = fmt.Sprintf("- **%s**: %s\n", k, v)
+		} else {
+			entry = fmt.Sprintf("### %s\n%s\n\n", k, memories[k])
+		}
+		if maxChars > 0 && len(entries) > 0 && used+len(entry) > maxChars {
+			charCapHit = true
+			break
+		}
+		entries = append(entries, entry)
+		used += len(entry)
+	}
+
+	elided := len(keys) - len(entries)
+	var noteCount, noteChars int
+	if countCapHit {
+		noteCount = maxCount
+	}
+	if charCapHit {
+		noteChars = maxChars
+	}
 	var sb strings.Builder
 	if compact {
-		sb.WriteString("\n## Memories\n")
-		for _, k := range keys {
-			// Compact: one line per memory
-			v := strings.ReplaceAll(memories[k], "\n", " ")
-			if len(v) > 150 {
-				v = v[:147] + "..."
-			}
-			sb.WriteString(fmt.Sprintf("- **%s**: %s\n", k, v))
+		if elided > 0 {
+			sb.WriteString(fmt.Sprintf("\n## Memories (showing %d of %d)\n", len(entries), len(keys)))
+			sb.WriteString(fmt.Sprintf("- %d more not shown (%s); browse with `bd memories <keyword>`\n", elided, primeMemoryCapNote(noteCount, noteChars)))
+		} else {
+			sb.WriteString("\n## Memories\n")
 		}
 	} else {
-		sb.WriteString(fmt.Sprintf("\n## Persistent Memories (%d)\n\n", len(memories)))
+		if elided > 0 {
+			sb.WriteString(fmt.Sprintf("\n## Persistent Memories (showing %d of %d, alphabetical)\n\n", len(entries), len(keys)))
+		} else {
+			sb.WriteString(fmt.Sprintf("\n## Persistent Memories (%d)\n\n", len(keys)))
+		}
 		sb.WriteString("Stored via `bd remember`. Update in place with `bd remember --key <key> \"new content\"`. Search with `bd memories <keyword>`. Remove with `bd forget <key>`.\n\n")
-		for _, k := range keys {
-			sb.WriteString(fmt.Sprintf("### %s\n%s\n\n", k, memories[k]))
+		if elided > 0 {
+			sb.WriteString(fmt.Sprintf("> %d more memories are not shown here (%s). Browse the full set with `bd memories <keyword>` or recall one with `bd remember <key>`.\n\n", elided, primeMemoryCapNote(noteCount, noteChars)))
 		}
 	}
+	for _, entry := range entries {
+		sb.WriteString(entry)
+	}
 	return sb.String()
+}
+
+// primeMemoryCapNote names the active cap(s) for the elision banner.
+func primeMemoryCapNote(maxCount, maxChars int) string {
+	var parts []string
+	if maxCount > 0 {
+		parts = append(parts, fmt.Sprintf("max-memories=%d", maxCount))
+	}
+	if maxChars > 0 {
+		parts = append(parts, fmt.Sprintf("max-memory-chars=%d", maxChars))
+	}
+	return "capped by " + strings.Join(parts, ", ")
 }
 
 func formatPrimeMemoryTimeout(compact bool, timeout time.Duration) string {
@@ -587,6 +695,7 @@ git status                  # Check changed files
   - Priority: 0-4 or P0-P4 (0=critical, 2=medium, 4=backlog). NOT "high"/"medium"/"low"
 - ` + "`bd create ... --parent=<id>`" + ` - Hierarchical child (task under epic, subtask under task; inherits parent labels)
 - ` + "`bd update <id> --claim`" + ` - Claim work
+- ` + "`bd unclaim <id>`" + ` - Release stuck issue (agent crashed)
 - ` + "`bd update <id> --assignee=username`" + ` - Assign to someone
 - ` + "`bd update <id> --title/--description/--notes/--design`" + ` - Update fields inline
 - ` + "`bd close <id>`" + ` - Mark complete

@@ -703,9 +703,9 @@ var createCmd = &cobra.Command{
 		} else if silent {
 			fmt.Println(issue.ID)
 		} else {
-			fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(issue.ID, issue.Title))
-			fmt.Printf("  Priority: P%d\n", issue.Priority)
-			fmt.Printf("  Status: %s\n", issue.Status)
+			debug.PrintNormal("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(issue.ID, issue.Title))
+			debug.PrintNormal("  Priority: P%d\n", issue.Priority)
+			debug.PrintNormal("  Status: %s\n", issue.Status)
 
 			maybeShowTip(store)
 		}
@@ -870,7 +870,7 @@ func init() {
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")
 	createCmd.Flags().Bool("dry-run", false, "Preview what would be created without actually creating")
 	registerPriorityFlag(createCmd, "2")
-	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|decision); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision")
+	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision")
 	createCmd.Flags().StringP("status", "s", "", "Initial status")
 	registerCommonIssueFlags(createCmd)
 	createCmd.Flags().String("spec-id", "", "Link to specification document")

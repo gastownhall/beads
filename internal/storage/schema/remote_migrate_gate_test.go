@@ -304,3 +304,41 @@ func TestRemoteMigrateGateAgentSafety(t *testing.T) {
 		}
 	}
 }
+
+// TestRemoteMigrateGateAdoptFastForward locks the "adopt-ff" (mybd-ae1i piece
+// 2) messaging contract: it must read as strictly safer than the plain
+// "adopt" decision (loss-free), must never surface the migrate escape
+// command, and — like every non-blunt decision — must not carry a
+// FallbackReason (it already explains itself).
+func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
+	e := &RemoteMigrateGateError{CurrentVersion: 49, LatestVersion: 53, Pending: 4, Decision: gateDecisionAdoptFastForward}
+
+	if e.FallbackReason != "" {
+		t.Errorf("FallbackReason should stay empty for a tailored decision, got %q", e.FallbackReason)
+	}
+
+	if e.AgentDirective() == e.EscapeHint() {
+		t.Fatalf("AgentDirective must not equal the runnable escape command %q", e.EscapeHint())
+	}
+	if strings.Contains(e.AgentDirective(), AllowRemoteMigrateEnv+"=1 bd migrate") {
+		t.Errorf("AgentDirective must not embed the runnable migrate command: %q", e.AgentDirective())
+	}
+
+	opts := e.Options()
+	if len(opts) != 1 {
+		t.Fatalf("Options len = %d, want 1 (adopt-ff is a single unconditional-once-detected path)", len(opts))
+	}
+	if opts[0].ID != "adopt-fast-forward" {
+		t.Errorf("Options[0].ID = %q, want %q", opts[0].ID, "adopt-fast-forward")
+	}
+	for _, c := range opts[0].Commands {
+		if strings.Contains(c, AllowRemoteMigrateEnv) {
+			t.Errorf("adopt-ff option must not surface the migrate escape command, got %q", c)
+		}
+	}
+
+	msg := e.UserMessage()
+	if !strings.Contains(msg, "losslessly") && !strings.Contains(msg, "loss-free") {
+		t.Errorf("UserMessage should explain the fast-forward is loss-free:\n%s", msg)
+	}
+}

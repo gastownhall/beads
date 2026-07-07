@@ -9,13 +9,13 @@ You need two tools installed on every machine:
 | Tool | Minimum Version | Install |
 |------|-----------------|---------|
 | **bd** (beads CLI) | 0.59.0+ | See [INSTALLING.md](INSTALLING.md) |
-| **Dolt** | 2.1.0+ | `brew install dolt` or [dolt install script](https://github.com/dolthub/dolt/releases/latest/download/install.sh) |
+| **Dolt** | 2.1.10+ | `brew install dolt` or [dolt install script](https://github.com/dolthub/dolt/releases/latest/download/install.sh) |
 
 Verify both are installed:
 
 ```bash
 bd version     # must be 0.59.0+
-dolt version   # must be 2.1.0+
+dolt version   # must be 2.1.10+
 ```
 
 ## Initial Setup (First Computer)

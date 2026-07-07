@@ -121,11 +121,40 @@ func (c *Config) Save(beadsDir string) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+	// Write-temp-then-rename: a plain os.WriteFile truncates in place, so a
+	// concurrent Load can observe an empty or partial metadata.json and feed
+	// store selection a corrupt config. Rename within the same directory is
+	// atomic, so readers see either the old or the new file, never a torn one.
+	if err := writeFileAtomic(configPath, data, 0o600); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 
 	return nil
+}
+
+// writeFileAtomic writes data to a temp file in path's directory and renames
+// it over path, so concurrent readers never observe a truncated or partial
+// file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck // no-op after successful rename
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func (c *Config) DatabasePath(beadsDir string) string {
