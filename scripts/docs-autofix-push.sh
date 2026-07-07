@@ -21,8 +21,11 @@
 #   PATCH_FILE   path to the downloaded cli-docs-freshness.patch
 #   RUN_ID       workflow run id that produced the patch (for comment text)
 #   RUN_URL      html url of that run (for commit/comment provenance)
-#   GH_TOKEN     token for gh api calls and same-repo pushes
-#   AUTOFIX_TOKEN_KIND  "pat" when a dedicated token is in use, "default"
+#   GH_TOKEN     token for gh api calls (PR lookup, comments) - needs the
+#                workflow's pull-requests:write; never the PAT
+#   PUSH_TOKEN   token for the git push only (optional; defaults to GH_TOKEN),
+#                so a dedicated DOCS_AUTOFIX_TOKEN needs contents:write only
+#   AUTOFIX_TOKEN_KIND  "pat" when a dedicated push token is in use, "default"
 #                       for the workflow's GITHUB_TOKEN (retrigger caveat)
 #
 # Exit 0 on every non-actionable outcome (PR closed, head moved, no patch);
@@ -37,6 +40,7 @@ fi
 : "${BASE_REPO:?}" "${HEAD_SHA:?}"
 : "${PATCH_FILE:?}" "${RUN_ID:?}" "${RUN_URL:?}" "${GH_TOKEN:?}"
 AUTOFIX_TOKEN_KIND="${AUTOFIX_TOKEN_KIND:-default}"
+PUSH_TOKEN="${PUSH_TOKEN:-$GH_TOKEN}"
 PATCH_FILE="$(readlink -f "$PATCH_FILE")"
 
 COMMENT_MARKER="<!-- cli-docs-autofix -->"
@@ -176,7 +180,8 @@ fi
 # --- Same-repo PRs: push the regen commit -------------------------------------
 
 # Keep the token out of on-disk .git/config: pass the auth header per command.
-AUTH_CONFIG="http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+# Uses PUSH_TOKEN (the optional contents:write PAT), not the API token.
+AUTH_CONFIG="http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$PUSH_TOKEN" | base64 -w0)"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

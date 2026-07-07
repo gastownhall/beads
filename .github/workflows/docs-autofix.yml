@@ -78,6 +78,11 @@ jobs:
           PATCH_FILE: ${{ runner.temp }}/docs-patch/cli-docs-freshness.patch
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
-          GH_TOKEN: ${{ secrets.DOCS_AUTOFIX_TOKEN || github.token }}
+          # Split tokens: gh api calls (PR lookup, comments) always use the
+          # workflow token, which carries this job's pull-requests:write; the
+          # optional PAT is used ONLY for the git push, so it needs no more
+          # than contents:write.
+          GH_TOKEN: ${{ github.token }}
+          PUSH_TOKEN: ${{ secrets.DOCS_AUTOFIX_TOKEN || github.token }}
           AUTOFIX_TOKEN_KIND: ${{ secrets.DOCS_AUTOFIX_TOKEN && 'pat' || 'default' }}
         run: ./scripts/docs-autofix-push.sh
