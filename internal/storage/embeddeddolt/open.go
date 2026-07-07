@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	doltembed "github.com/dolthub/driver"
+	doltembed "github.com/dolthub/driver/v2"
 )
 
 // validIdentifier matches safe SQL identifiers (letters, digits, underscores).
@@ -48,8 +48,8 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	}
 
 	db := sql.OpenDB(connector)
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	db.SetMaxOpenConns(2)
+	db.SetMaxIdleConns(2)
 	db.SetConnMaxIdleTime(0)
 	db.SetConnMaxLifetime(0)
 

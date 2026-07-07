@@ -181,7 +181,7 @@ func runDoltDiagnosticQueries(ctx context.Context, db *sql.DB, metrics *DoltPerf
 		WHERE status IN ('open', 'in_progress')
 		AND id NOT IN (
 			SELECT issue_id FROM dependencies
-			WHERE depends_on_id IN (SELECT id FROM issues WHERE status != 'closed')
+			WHERE depends_on_issue_id IN (SELECT id FROM issues WHERE status != 'closed')
 		)
 		LIMIT 100
 	`)

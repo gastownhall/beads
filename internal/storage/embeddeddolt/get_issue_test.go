@@ -4,6 +4,7 @@ package embeddeddolt_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -101,6 +102,35 @@ func TestGetIssue(t *testing.T) {
 		// Labels should be sorted
 		if got.Labels[0] != "bug" || got.Labels[1] != "urgent" {
 			t.Errorf("Labels: got %v, want [bug urgent]", got.Labels)
+		}
+	})
+
+	t.Run("wisp_label_table_error_propagates", func(t *testing.T) {
+		te := newTestEnv(t, "wl")
+		ctx := t.Context()
+
+		wisp := &types.Issue{
+			ID:        "wl-wisp",
+			Title:     "Wisp with missing labels table",
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Ephemeral: true,
+		}
+		if err := te.store.CreateIssue(ctx, wisp, "tester"); err != nil {
+			t.Fatalf("CreateIssue: %v", err)
+		}
+		te.exec(t, ctx, "DROP TABLE wisp_labels")
+
+		_, err := te.store.GetIssue(ctx, "wl-wisp")
+		if err == nil {
+			t.Fatal("expected error for missing wisp_labels table")
+		}
+		if errors.Is(err, storage.ErrNotFound) {
+			t.Fatalf("expected table error, got ErrNotFound: %v", err)
+		}
+		if !strings.Contains(err.Error(), "wisp_labels") {
+			t.Fatalf("expected error to mention wisp_labels, got: %v", err)
 		}
 	})
 }

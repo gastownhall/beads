@@ -12,23 +12,26 @@ Generated from `bd help --doc formula`
 
 Manage workflow formulas - the source layer for molecule templates.
 
-Formulas are YAML/JSON files that define workflows with composition rules.
-They are "cooked" into proto beads which can then be poured or wisped.
-
-The Rig → Cook → Run lifecycle:
-  - Rig: Compose formulas (extends, compose)
-  - Cook: Transform to proto (bd cook expands macros, applies aspects)
-  - Run: Agents execute poured mols or wisps
+Formulas are TOML/JSON files that define workflows with composition rules.
+Define formulas, cook them into protos, then pour or wisp them into work.
 
 Search paths (in order):
   1. &lt;resolved-beads-dir&gt;/formulas/ (active project)
   2. &lt;checkout-root&gt;/.beads/formulas/ (repo-local formulas)
   3. ~/.beads/formulas/ (user)
-  4. $GT_ROOT/.beads/formulas/ (orchestrator, if GT_ROOT set)
+  4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
 
 Commands:
-  list   List available formulas from all search paths
-  show   Show formula details, steps, and composition rules
+  list    List available formulas from all search paths
+  show    Show formula details, steps, and composition rules
+  schema  Show the formula schema index (alias: primitives)
+
+Discovering primitives:
+  bd formula schema                 # list every declared formula struct
+  bd formula schema loop            # show LoopSpec fields, types, and tags
+  bd formula primitives gate        # alias; same handler as 'schema'
+  examples/formulas/primitives/     # curated, smoke-tested wired fixtures
+  website/docs/workflows/formulas.md  # narrative reference
 
 ```
 bd formula
@@ -73,9 +76,12 @@ Search paths (in order of priority):
   1. &lt;resolved-beads-dir&gt;/formulas/ (active project - highest priority)
   2. &lt;checkout-root&gt;/.beads/formulas/ (repo-local formulas)
   3. ~/.beads/formulas/ (user)
-  4. $GT_ROOT/.beads/formulas/ (orchestrator, if GT_ROOT set)
+  4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
 
 Formulas in earlier paths shadow those with the same name in later paths.
+
+To list the declared formula schema structs an agent can write inside a .formula.toml,
+use 'bd formula schema' (alias: 'bd formula primitives').
 
 Examples:
   bd formula list
@@ -93,6 +99,30 @@ bd formula list [flags]
       --type string   Filter by type (workflow, expansion, aspect, convoy)
 ```
 
+### bd formula schema
+
+Show the formula schema index: every exported struct declared
+in a .formula.toml/.formula.json, with field names, types, and tags.
+
+The index is generated from internal/formula/types.go via go:generate; the
+struct definitions are the source of truth, so this list cannot drift. It is
+structural reference, not proof that every declared runtime behavior is wired.
+
+Examples:
+  bd formula schema                 # list every declared schema struct
+  bd formula schema loop            # show LoopSpec fields
+  bd formula primitives gate        # alias; shows Gate fields
+  bd formula schema --json          # machine-readable index
+
+Curated smoke-tested fixtures for wired primitives live in
+examples/formulas/primitives/ (with a smoke harness that proves they work).
+
+```
+bd formula schema [primitive]
+```
+
+**Aliases:** primitives
+
 ### bd formula show
 
 Show detailed information about a formula.
@@ -103,6 +133,9 @@ Displays:
   - Steps with dependencies
   - Composition rules (extends, aspects, expansions)
   - Bond points for external composition
+
+To inspect the structure of an individual primitive (e.g. LoopSpec, Gate)
+rather than a user-authored formula, use 'bd formula schema &lt;primitive&gt;'.
 
 Examples:
   bd formula show shiny

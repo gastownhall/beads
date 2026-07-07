@@ -35,6 +35,18 @@ func checkConfigSetSideEffects(key, value string) []configSideEffect {
 			Command: "bd dolt server stop",
 		})
 
+	case key == "dolt.debug" && strings.EqualFold(value, "true"):
+		effects = append(effects, configSideEffect{
+			Message: "Debug mode will apply on the next Dolt server start (loglevel=debug, --prof cpu).",
+			Command: "bd dolt stop && bd dolt start",
+		})
+
+	case key == "dolt.debug" && !strings.EqualFold(value, "true"):
+		effects = append(effects, configSideEffect{
+			Message: "Debug mode disabled. Restart the server to drop --prof and --loglevel=debug.",
+			Command: "bd dolt stop && bd dolt start",
+		})
+
 	case key == "routing.mode":
 		validModes := map[string]bool{"maintainer": true, "contributor": true, "auto": true, "explicit": true}
 		if !validModes[value] {
@@ -73,6 +85,12 @@ func checkConfigUnsetSideEffects(key string) []configSideEffect {
 		effects = append(effects, configSideEffect{
 			Message: "Shared server config removed. Stop any running server if no longer needed.",
 			Command: "bd dolt server stop",
+		})
+
+	case "dolt.debug":
+		effects = append(effects, configSideEffect{
+			Message: "Debug config removed. Restart the server to drop --prof and --loglevel=debug.",
+			Command: "bd dolt stop && bd dolt start",
 		})
 
 	case "backup.enabled":

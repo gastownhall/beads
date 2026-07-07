@@ -104,6 +104,9 @@ func TestListRecipes_NoWorkspaceShowsBuiltinOnlyNote(t *testing.T) {
 	if !strings.Contains(out, "cursor") {
 		t.Fatalf("expected built-in recipes in output, got:\n%s", out)
 	}
+	if !strings.Contains(out, "copilot") {
+		t.Fatalf("expected copilot recipe in output, got:\n%s", out)
+	}
 	if strings.Contains(out, "myeditor") {
 		t.Fatalf("unexpected orphan custom recipe in output:\n%s", out)
 	}
@@ -183,5 +186,78 @@ func TestRunRecipe_BuiltinFileRecipeWorksWithoutWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(tmpDir, ".beads")); !os.IsNotExist(err) {
 		t.Fatalf("expected no local .beads directory to be created, got err=%v", err)
+	}
+}
+
+func TestRunRecipe_CopilotWorksWithoutWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	out := captureStdout(t, func() error {
+		runRecipe("copilot")
+		return nil
+	})
+
+	if !strings.Contains(out, "GitHub Copilot CLI integration installed") {
+		t.Fatalf("expected copilot install output, got:\n%s", out)
+	}
+
+	if _, err := os.Stat(filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")); err != nil {
+		t.Fatalf("expected copilot plugin manifest: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, ".github", "copilot-instructions.md")); err != nil {
+		t.Fatalf("expected copilot instructions: %v", err)
+	}
+}
+
+func TestRunRecipe_CopilotCheckWorksWithoutWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	runRecipe("copilot")
+
+	resetSetupGlobals(t)
+	setupCheck = true
+
+	out := captureStdout(t, func() error {
+		runRecipe("copilot")
+		return nil
+	})
+
+	if !strings.Contains(out, ".copilot-plugin/plugin.json") {
+		t.Fatalf("expected plugin manifest in check output, got:\n%s", out)
+	}
+	if !strings.Contains(out, ".github/copilot-instructions.md") {
+		t.Fatalf("expected instructions file in check output, got:\n%s", out)
+	}
+}
+
+func TestRunRecipe_CopilotRemoveWorksWithoutWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("BEADS_DIR", "")
+	resetSetupResolutionCaches(t)
+	resetSetupGlobals(t)
+
+	runRecipe("copilot")
+
+	resetSetupGlobals(t)
+	setupRemove = true
+	runRecipe("copilot")
+
+	if _, err := os.Stat(filepath.Join(tmpDir, ".copilot-plugin", "plugin.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected plugin manifest to be removed, got err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, ".github", "copilot-instructions.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected copilot instructions to be removed, got err=%v", err)
 	}
 }

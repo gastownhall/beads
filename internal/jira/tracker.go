@@ -2,11 +2,13 @@ package jira
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
@@ -21,14 +23,16 @@ func init() {
 
 // Tracker implements tracker.IssueTracker for Jira.
 type Tracker struct {
-	client      *Client
-	store       storage.Storage
-	jiraURL     string
-	projectKeys []string          // one or more project keys (first is primary)
-	apiVersion  string            // "2" or "3" (default: "3")
-	statusMap   map[string]string // beads status → Jira status name (from jira.status_map.* config)
-	typeMap     map[string]string // beads type → Jira type (from jira.type_map.* config)
-	priorityMap map[string]string // beads priority → Jira priority name (from jira.priority_map.* config)
+	client           *Client
+	store            storage.Storage
+	jiraURL          string
+	projectKeys      []string                          // one or more project keys (first is primary)
+	apiVersion       string                            // "2" or "3" (default: "3")
+	statusMap        map[string]string                 // beads status → Jira status name (from jira.status_map.* config)
+	typeMap          map[string]string                 // beads type → Jira type (from jira.type_map.* config)
+	priorityMap      map[string]string                 // beads priority → Jira priority name (from jira.priority_map.* config)
+	customFields     map[string]interface{}            // Jira field name/id → value (from jira.custom_fields.* config)
+	typeCustomFields map[string]map[string]interface{} // Jira issue type → Jira field name/id → value
 }
 
 // SetProjectKeys sets project keys before Init(). When set, Init() uses these
@@ -123,6 +127,44 @@ func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 		if len(priorityMap) > 0 {
 			t.priorityMap = priorityMap
 		}
+
+		const customFieldPrefix = "jira.custom_fields."
+		customFields := make(map[string]interface{})
+		typeCustomFields := make(map[string]map[string]interface{})
+		for key, val := range allConfig {
+			if !strings.HasPrefix(key, customFieldPrefix) || strings.TrimSpace(val) == "" {
+				continue
+			}
+
+			suffix := strings.TrimPrefix(key, customFieldPrefix)
+			if suffix == "" {
+				continue
+			}
+
+			parsed, err := parseJiraCustomFieldValue(val)
+			if err != nil {
+				return fmt.Errorf("parse %s: %w", key, err)
+			}
+
+			parts := strings.SplitN(suffix, ".", 2)
+			if len(parts) == 2 {
+				if parts[0] == "" || parts[1] == "" {
+					continue
+				}
+				if typeCustomFields[parts[0]] == nil {
+					typeCustomFields[parts[0]] = make(map[string]interface{})
+				}
+				typeCustomFields[parts[0]][parts[1]] = parsed
+				continue
+			}
+			customFields[suffix] = parsed
+		}
+		if len(customFields) > 0 {
+			t.customFields = customFields
+		}
+		if len(typeCustomFields) > 0 {
+			t.typeCustomFields = typeCustomFields
+		}
 	}
 
 	return nil
@@ -165,7 +207,7 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 
 	// Incremental sync
 	if opts.Since != nil {
-		jql += fmt.Sprintf(" AND updated >= %q", opts.Since.Format("2006-01-02 15:04"))
+		jql += fmt.Sprintf(` AND updated >= "%s"`, opts.Since.UTC().Format("2006-01-02 15:04 UTC"))
 	}
 
 	jql += " ORDER BY updated DESC"
@@ -272,7 +314,14 @@ func (t *Tracker) applyTransition(ctx context.Context, key string, status types.
 }
 
 func (t *Tracker) FieldMapper() tracker.FieldMapper {
-	return &jiraFieldMapper{apiVersion: t.apiVersion, statusMap: t.statusMap, typeMap: t.typeMap, priorityMap: t.priorityMap}
+	return &jiraFieldMapper{
+		apiVersion:       t.apiVersion,
+		statusMap:        t.statusMap,
+		typeMap:          t.typeMap,
+		priorityMap:      t.priorityMap,
+		customFields:     t.customFields,
+		typeCustomFields: t.typeCustomFields,
+	}
 }
 
 func (t *Tracker) IsExternalRef(ref string) bool {
@@ -288,7 +337,23 @@ func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
 }
 
 // getConfig reads a config value from storage, falling back to env var.
+// For yaml-only keys (e.g. jira.api_token), reads from config.yaml first
+// to avoid leaking secrets when pushing the Dolt database to remotes.
 func (t *Tracker) getConfig(ctx context.Context, key, envVar string) (string, error) {
+	// Secret keys are stored in config.yaml, not the Dolt database,
+	// to avoid leaking secrets when pushing to remotes.
+	if config.IsYamlOnlyKey(key) {
+		if val := config.GetString(key); val != "" {
+			return val, nil
+		}
+		if envVar != "" {
+			if envVal := os.Getenv(envVar); envVal != "" {
+				return envVal, nil
+			}
+		}
+		return "", nil
+	}
+
 	val, err := t.store.GetConfig(ctx, key)
 	if err == nil && val != "" {
 		return val, nil
@@ -299,6 +364,21 @@ func (t *Tracker) getConfig(ctx context.Context, key, envVar string) (string, er
 		}
 	}
 	return "", nil
+}
+
+func parseJiraCustomFieldValue(value string) (interface{}, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", nil
+	}
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+			return nil, err
+		}
+		return parsed, nil
+	}
+	return trimmed, nil
 }
 
 // jiraToTrackerIssue converts a Jira API Issue to the generic TrackerIssue format.

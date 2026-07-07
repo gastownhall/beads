@@ -96,6 +96,21 @@ bd_storage_operations_total                              # raw counter
 sum(rate(bd_storage_operations_total[5m]))               # operation rate
 ```
 
+### Confirm storage instrumentation locally
+
+To verify the storage decorator chain is wired up without standing up a
+collector, run `bd` with stdout exporters and look for `bd.storage.*`
+records on stderr:
+
+```bash
+BD_OTEL_STDOUT=true bd list 2>&1 | grep -F bd.storage.operations
+```
+
+Expect at least one line per storage call (`GetReadyWork`, `GetIssue`, …).
+If `bd.storage.*` and `bd.issue.count` are absent but `bd.db.pool_*` is
+present, the storage decorator is not in the chain — check
+`wireStorageDecorators` in `cmd/bd/storage_chain.go`.
+
 ---
 
 ## Metrics

@@ -15,6 +15,26 @@ import (
 // (e.g., starting a shared test Dolt server). Returns a cleanup function.
 var beforeTestsHook func() func()
 
+// testTempRoot is the parent directory for per-process test temp dirs.
+// It is set by testMainInner and used by the package-level sync.Once
+// helpers (build binaries, isolated HOMEs) that previously called
+// os.MkdirTemp("", ...) and leaked on every run. Anchoring those temp
+// dirs under testTempRoot means the defer in testMainInner cleans them
+// all up in one place (bd-3q2u / gastownhall/beads#4106).
+//
+// When tests run without TestMain (e.g. a single test invoked with the
+// internal test binary directly), testTempRoot is empty and helpers
+// fall back to os.TempDir().
+var testTempRoot string
+
+// testTempDir returns os.MkdirTemp under testTempRoot when it is set,
+// otherwise it falls back to the system temp dir (os.MkdirTemp's
+// default). Use this in package-level sync.Once builders so leaked
+// directories get reaped by testMainInner's deferred cleanup.
+func testTempDir(pattern string) (string, error) {
+	return os.MkdirTemp(testTempRoot, pattern)
+}
+
 // Guardrail: ensure the cmd/bd test suite does not touch the real repo .beads state.
 // Disable with BEADS_TEST_GUARD_DISABLE=1 (useful when running tests while actively using beads).
 func TestMain(m *testing.M) {
@@ -36,6 +56,12 @@ func testMainInner(m *testing.M) int {
 	}
 	defer func() { _ = forceRemoveAll(tmp) }()
 
+	// Anchor package-level sync.Once builders (test binaries, isolated
+	// HOMEs) under this directory so the defer above sweeps them up too.
+	// Without this, those helpers leaked ~179MB-1.4GB per test run into
+	// /tmp and exhausted tmpfs over time (bd-3q2u).
+	testTempRoot = tmp
+
 	// Preserve Go build cache before changing HOME.
 	// On macOS, GOCACHE defaults to $HOME/Library/Caches/go-build.
 	// Changing HOME would cause tests that run `go build` (e.g., TestShow)
@@ -43,6 +69,16 @@ func testMainInner(m *testing.M) int {
 	if os.Getenv("GOCACHE") == "" {
 		if out, err := exec.Command("go", "env", "GOCACHE").Output(); err == nil {
 			_ = os.Setenv("GOCACHE", strings.TrimSpace(string(out)))
+		}
+	}
+
+	// Same for the module cache: GOMODCACHE defaults to $HOME/go/pkg/mod,
+	// so without this the in-test `go build` (buildEmbeddedBD) re-downloads
+	// every dependency into the temp HOME on each run — slow, and a hard
+	// failure when the network is unavailable.
+	if os.Getenv("GOMODCACHE") == "" {
+		if out, err := exec.Command("go", "env", "GOMODCACHE").Output(); err == nil {
+			_ = os.Setenv("GOMODCACHE", strings.TrimSpace(string(out)))
 		}
 	}
 

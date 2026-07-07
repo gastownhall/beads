@@ -19,11 +19,11 @@ func bdDefer(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd defer %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd defer %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdUndefer runs "bd undefer" with the given args and returns stdout.
@@ -33,11 +33,11 @@ func bdUndefer(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd undefer %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd undefer %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // getIssueStatus returns the status of an issue via bd show --json.
@@ -46,11 +46,11 @@ func getIssueStatus(t *testing.T, bd, dir, id string) string {
 	cmd := exec.Command(bd, "show", id, "--json")
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd show %s --json failed: %v\n%s", id, err, out)
+		t.Fatalf("bd show %s --json failed: %v\nstdout:\n%s\nstderr:\n%s", id, err, stdout.String(), stderr.String())
 	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(stdout.String())
 	// show --json may return an array or object
 	start := strings.IndexAny(s, "[{")
 	if start < 0 {

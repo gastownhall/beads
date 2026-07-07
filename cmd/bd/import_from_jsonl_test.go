@@ -6,7 +6,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestImportFromLocalJSONL(t *testing.T) {
@@ -87,6 +91,38 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 	})
 
+	t.Run("skips beads-jsonl metadata header line", func(t *testing.T) {
+		// Canonical beads-jsonl exports prepend a schema/provenance
+		// header record (no _type, no issue fields). Without the
+		// header-skip guard it falls through to the issue path and
+		// aborts the whole import with
+		// "validation failed for issue : title is required",
+		// stranding every command on an empty auto-imported DB.
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		jsonlContent := `{"_dolt_branch":"main","_dolt_commit":"abc123","_project_id":"p1","_schema":"beads-jsonl/1","_sort":"stable-v1"}
+{"id":"test-hdr1","title":"After header","type":"bug","status":"open","priority":2,"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONL failed on header line: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("Expected 1 issue imported (header skipped), got %d", count)
+		}
+		if _, err := store.GetIssue(ctx, "test-hdr1"); err != nil {
+			t.Fatalf("issue after header was not imported: %v", err)
+		}
+	})
+
 	t.Run("invalid JSON returns error", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		dbPath := filepath.Join(tmpDir, "dolt")
@@ -159,6 +195,57 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 	})
 
+	t.Run("stale JSONL does not clobber newer local issue", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		ctx := context.Background()
+		createdAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+		localUpdatedAt := createdAt.Add(2 * time.Hour)
+		local := &types.Issue{
+			ID:        "test-stale-import",
+			Title:     "newer local title",
+			Status:    types.StatusInProgress,
+			IssueType: types.TypeTask,
+			Priority:  1,
+			CreatedAt: createdAt,
+			UpdatedAt: localUpdatedAt,
+		}
+		if err := store.CreateIssue(ctx, local, "test"); err != nil {
+			t.Fatalf("CreateIssue local: %v", err)
+		}
+
+		jsonlContent := `{"id":"test-stale-import","title":"stale exported title","status":"open","priority":3,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T01:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONL failed: %v", err)
+		}
+		if count != 0 {
+			t.Fatalf("Expected stale import to import 0 issues, got %d", count)
+		}
+
+		got, err := store.GetIssue(ctx, "test-stale-import")
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if got.Title != "newer local title" {
+			t.Fatalf("stale JSONL clobbered title: got %q", got.Title)
+		}
+		if got.Status != types.StatusInProgress {
+			t.Fatalf("stale JSONL clobbered status: got %q", got.Status)
+		}
+		if got.Priority != 1 {
+			t.Fatalf("stale JSONL clobbered priority: got %d", got.Priority)
+		}
+	})
+
 	t.Run("child counter reconciled after JSONL import prevents overwrites", func(t *testing.T) {
 		// Regression test for GH#2166: bd create --parent after bd init --from-jsonl
 		// must not overwrite existing child issues. The child_counters table
@@ -209,6 +296,183 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 		if child2.Title != "Child 2" {
 			t.Errorf("Child 2 title changed unexpectedly: got %q", child2.Title)
+		}
+	})
+
+	t.Run("skips cyclic and self dependencies instead of aborting import", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		ctx := context.Background()
+		now := time.Now().UTC()
+		issues := []*types.Issue{
+			{
+				ID:        "test-cycle-a",
+				Title:     "Cycle A",
+				Status:    types.StatusOpen,
+				IssueType: types.TypeTask,
+				Priority:  2,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Dependencies: []*types.Dependency{{
+					DependsOnID: "test-cycle-b",
+					Type:        types.DepBlocks,
+				}},
+			},
+			{
+				ID:        "test-cycle-b",
+				Title:     "Cycle B",
+				Status:    types.StatusOpen,
+				IssueType: types.TypeTask,
+				Priority:  2,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Dependencies: []*types.Dependency{{
+					DependsOnID: "test-cycle-a",
+					Type:        types.DepBlocks,
+				}},
+			},
+			{
+				ID:        "test-self",
+				Title:     "Self dependency",
+				Status:    types.StatusOpen,
+				IssueType: types.TypeTask,
+				Priority:  2,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Dependencies: []*types.Dependency{{
+					DependsOnID: "test-self",
+					Type:        types.DepBlocks,
+				}},
+			},
+		}
+
+		result, err := importIssuesCore(ctx, "", store, issues, ImportOptions{SkipPrefixValidation: true})
+		if err != nil {
+			t.Fatalf("importIssuesCore failed: %v", err)
+		}
+		if result.Created != 3 {
+			t.Fatalf("Created = %d, want 3", result.Created)
+		}
+		if got := strings.Join(result.SkippedDependencies, "\n"); !strings.Contains(got, "test-cycle-b -> test-cycle-a") ||
+			!strings.Contains(got, "test-self -> test-self") {
+			t.Fatalf("SkippedDependencies = %#v, want cycle and self-dependency details", result.SkippedDependencies)
+		}
+
+		for _, id := range []string{"test-cycle-a", "test-cycle-b", "test-self"} {
+			if _, err := store.GetIssue(ctx, id); err != nil {
+				t.Fatalf("imported issue %s missing: %v", id, err)
+			}
+		}
+		deps, err := store.GetDependencyRecords(ctx, "test-cycle-a")
+		if err != nil {
+			t.Fatalf("GetDependencyRecords(test-cycle-a): %v", err)
+		}
+		if len(deps) != 1 || deps[0].DependsOnID != "test-cycle-b" {
+			t.Fatalf("test-cycle-a deps = %#v, want only test-cycle-a -> test-cycle-b", deps)
+		}
+		for _, id := range []string{"test-cycle-b", "test-self"} {
+			deps, err := store.GetDependencyRecords(ctx, id)
+			if err != nil {
+				t.Fatalf("GetDependencyRecords(%s): %v", id, err)
+			}
+			if len(deps) != 0 {
+				t.Fatalf("%s deps = %#v, want none", id, deps)
+			}
+		}
+	})
+
+	t.Run("skips mixed regular and wisp in-batch dependencies instead of aborting import", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		ctx := context.Background()
+		now := time.Now().UTC()
+		issues := []*types.Issue{
+			{
+				ID:        "test-mixed-regular",
+				Title:     "Regular source",
+				Status:    types.StatusOpen,
+				IssueType: types.TypeTask,
+				Priority:  2,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Dependencies: []*types.Dependency{{
+					DependsOnID: "test-mixed-wisp",
+					Type:        types.DepBlocks,
+				}},
+			},
+			{
+				ID:        "test-mixed-wisp",
+				Title:     "Wisp target",
+				Status:    types.StatusOpen,
+				IssueType: types.TypeTask,
+				Priority:  2,
+				CreatedAt: now,
+				UpdatedAt: now,
+				Ephemeral: true,
+			},
+		}
+
+		result, err := importIssuesCore(ctx, "", store, issues, ImportOptions{SkipPrefixValidation: true})
+		if err != nil {
+			t.Fatalf("importIssuesCore failed: %v", err)
+		}
+		if result.Created != 2 {
+			t.Fatalf("Created = %d, want 2", result.Created)
+		}
+		if got := strings.Join(result.SkippedDependencies, "\n"); !strings.Contains(got, "test-mixed-regular -> test-mixed-wisp") ||
+			!strings.Contains(got, "cross-bucket dependency") {
+			t.Fatalf("SkippedDependencies = %#v, want mixed regular/wisp dependency detail", result.SkippedDependencies)
+		}
+
+		for _, id := range []string{"test-mixed-regular", "test-mixed-wisp"} {
+			if _, err := store.GetIssue(ctx, id); err != nil {
+				t.Fatalf("imported issue %s missing: %v", id, err)
+			}
+		}
+		deps, err := store.GetDependencyRecords(ctx, "test-mixed-regular")
+		if err != nil {
+			t.Fatalf("GetDependencyRecords(test-mixed-regular): %v", err)
+		}
+		if len(deps) != 0 {
+			t.Fatalf("test-mixed-regular deps = %#v, want none", deps)
+		}
+	})
+
+	t.Run("preserves dependency created_by from JSONL import", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		store := newTestStore(t, dbPath)
+
+		jsonlContent := `{"id":"test-dep-target","title":"Dependency target","status":"open","priority":2,"issue_type":"task","created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+{"id":"test-dep-source","title":"Dependency source","status":"open","priority":2,"issue_type":"task","dependencies":[{"depends_on_id":"test-dep-target","type":"blocks","created_by":"someone.else","created_at":"2025-01-01T00:00:00Z"}],"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONL failed: %v", err)
+		}
+		if count != 2 {
+			t.Fatalf("imported count = %d, want 2", count)
+		}
+
+		deps, err := store.GetDependencyRecords(ctx, "test-dep-source")
+		if err != nil {
+			t.Fatalf("GetDependencyRecords(test-dep-source): %v", err)
+		}
+		if len(deps) != 1 {
+			t.Fatalf("deps = %#v, want one dependency", deps)
+		}
+		if deps[0].CreatedBy != "someone.else" {
+			t.Fatalf("dependency created_by = %q, want someone.else", deps[0].CreatedBy)
 		}
 	})
 

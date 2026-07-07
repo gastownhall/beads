@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes bd's overall architecture - the data model, sync mechanism, and how components fit together. For internal implementation details (FlushManager, Blocked Cache), see [INTERNALS.md](INTERNALS.md).
+This document describes bd's overall architecture - the data model, sync mechanism, and how components fit together. For product scope boundaries, see [PROJECT_CHARTER.md](PROJECT_CHARTER.md). For internal implementation details (FlushManager, Blocked Cache), see [INTERNALS.md](INTERNALS.md).
 
 ## The Two-Layer Data Model
 
@@ -213,6 +213,10 @@ open ──▶ in_progress ──▶ closed
 
 Each issue in the Dolt database (and in JSONL exports via `bd export`) has the following fields. Fields marked with `(optional)` use `omitempty` and are excluded when empty/zero.
 
+The schema is stable by default. Prefer issue metadata for integration,
+orchestration, or team-specific data before adding new first-class fields; see
+[Project Charter: Schema Boundary](PROJECT_CHARTER.md#schema-boundary).
+
 **Core Identification:**
 
 | Field | Type | Description |
@@ -354,6 +358,8 @@ The `bd mol squash` command uses hard delete intentionally - tombstones would be
 
 ## Related Documentation
 
+- [SYNC_CONCEPTS.md](SYNC_CONCEPTS.md) - How cross-machine sync works (Dolt source of truth, wire format, anti-patterns)
+- [PROJECT_CHARTER.md](PROJECT_CHARTER.md) - Product scope and boundaries
 - [MOLECULES.md](MOLECULES.md) - Molecular chemistry metaphor (protos, pour, bond, squash, burn)
 - [INTERNALS.md](INTERNALS.md) - FlushManager, Blocked Cache implementation details
 - [ADVANCED.md](ADVANCED.md) - Advanced features and configuration

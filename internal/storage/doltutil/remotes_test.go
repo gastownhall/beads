@@ -73,6 +73,9 @@ func TestIsGitProtocolURL(t *testing.T) {
 		// Git-over-HTTP
 		{"git+http://localhost:3000/user/repo.git", true},
 
+		// Local git transport
+		{"git+file:///tmp/repo.git", true},
+
 		// Plain git protocol
 		{"git://github.com/org/repo.git", true},
 
@@ -90,6 +93,31 @@ func TestIsGitProtocolURL(t *testing.T) {
 		t.Run(tt.url, func(t *testing.T) {
 			if got := IsGitProtocolURL(tt.url); got != tt.want {
 				t.Errorf("IsGitProtocolURL(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRemoteURLsMatchNormalizesGitURLs(t *testing.T) {
+	tests := []struct {
+		name string
+		got  string
+		want string
+		ok   bool
+	}{
+		{"exact", "git+https://github.com/org/repo.git", "git+https://github.com/org/repo.git", true},
+		{"https normalizes", "https://github.com/org/repo.git", "git+https://github.com/org/repo.git", true},
+		{"ssh normalizes", "ssh://git@github.com/org/repo.git", "git+ssh://git@github.com/org/repo.git", true},
+		{"scp normalizes", "git@github.com:org/repo.git", "git+ssh://git@github.com/org/repo.git", true},
+		{"file native and git transport differ", "git+file:///tmp/repo.git", "file:///tmp/repo.git", false},
+		{"file native and git transport differ reversed", "file:///tmp/repo.git", "git+file:///tmp/repo.git", false},
+		{"unknown git prefix differs", "git+foo://host/repo", "foo://host/repo", false},
+		{"different", "git+https://github.com/org/other.git", "git+https://github.com/org/repo.git", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := RemoteURLsMatch(tt.got, tt.want); got != tt.ok {
+				t.Errorf("RemoteURLsMatch(%q, %q) = %v, want %v", tt.got, tt.want, got, tt.ok)
 			}
 		})
 	}

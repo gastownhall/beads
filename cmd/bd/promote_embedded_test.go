@@ -19,11 +19,11 @@ func bdPromote(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd promote %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd promote %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdPromoteFail runs "bd promote" expecting failure.
@@ -95,11 +95,11 @@ func TestEmbeddedPromoteCLI(t *testing.T) {
 		cmd := exec.Command(bd, "promote", issue.ID, "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd promote --json failed: %v\n%s", err, out)
+			t.Fatalf("bd promote --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(stdout.String())
 		start := strings.Index(s, "{")
 		if start < 0 {
 			t.Fatalf("no JSON object in output: %s", s)

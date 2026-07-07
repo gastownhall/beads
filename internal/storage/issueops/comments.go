@@ -53,13 +53,9 @@ func GetCommentCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (m
 
 	result := make(map[string]int)
 
-	var wispIDs, permIDs []string
-	for _, id := range issueIDs {
-		if IsActiveWispInTx(ctx, tx, id) {
-			wispIDs = append(wispIDs, id)
-		} else {
-			permIDs = append(permIDs, id)
-		}
+	wispIDs, permIDs, err := PartitionWispIDsInTx(ctx, tx, issueIDs)
+	if err != nil {
+		return nil, fmt.Errorf("partition comment issue IDs: %w", err)
 	}
 
 	for _, pair := range []struct {
@@ -161,14 +157,14 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 // Routes to events or wisp_events based on wisp status.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func AddCommentEventInTx(ctx context.Context, tx *sql.Tx, issueID, actor, comment string) error {
+func AddCommentEventInTx(ctx context.Context, tx DBTX, issueID, actor, comment string) error {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	_, _, eventTable, _ := WispTableRouting(isWisp)
 
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?)
-	`, eventTable), issueID, types.EventCommented, actor, comment); err != nil {
+		INSERT INTO %s (id, issue_id, event_type, actor, comment)
+		VALUES (?, ?, ?, ?, ?)
+	`, eventTable), NewEventID(), issueID, types.EventCommented, actor, comment); err != nil {
 		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
 	}
 	return nil

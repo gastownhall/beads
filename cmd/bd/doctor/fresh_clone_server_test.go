@@ -113,12 +113,15 @@ func TestCheckFreshCloneDB_ServerUnreachable(t *testing.T) {
 }
 
 func TestCheckFreshClone_ServerModeUnreachable(t *testing.T) {
-	// bd-tzo9: When metadata.json declares dolt_mode=server but the server
-	// is unreachable, CheckFreshClone must resolve credentials by the
-	// *resolved runtime port* (not the deprecated metadata port default),
-	// invoke checkFreshCloneDB, observe Reachable=false, and fall through
-	// to the existing JSONL-based warning. This exercises the
-	// GetDoltServerPasswordForPort(port) code path.
+	// GH#35 + bd-tzo9: When metadata.json declares dolt_mode=server but the
+	// server is unreachable, CheckFreshClone must:
+	//   1. Resolve credentials by the resolved runtime port (bd-tzo9), not
+	//      the deprecated metadata port default — exercised by going through
+	//      the GetDoltServerPasswordForPort(port) call before the failed ping.
+	//   2. Surface a server-mode-aware warning instead of the misleading
+	//      legacy "Fresh clone detected (no database)" message (GH#35). In
+	//      server mode the local DB absence is expected; suggesting bd
+	//      bootstrap is wrong when the actual problem is connectivity/auth.
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -132,9 +135,7 @@ func TestCheckFreshClone_ServerModeUnreachable(t *testing.T) {
 	}
 
 	// metadata.json declaring server mode pointed at an unreachable host:port.
-	// Port 1 is guaranteed-unreachable on loopback; Reachable=false exercises
-	// the FR-030 fall-through branch that contains the fixed password-resolution
-	// line.
+	// Port 1 is guaranteed-unreachable on loopback.
 	meta := `{
   "database": "beads.db",
   "dolt_mode": "server",
@@ -149,15 +150,92 @@ func TestCheckFreshClone_ServerModeUnreachable(t *testing.T) {
 
 	check := CheckFreshClone(tmpDir)
 
-	// Server unreachable → falls through to legacy JSONL-based warning.
 	if check.Status != StatusWarning {
-		t.Fatalf("expected %q on unreachable server fall-through, got %q (message: %s)",
+		t.Fatalf("expected %q on unreachable server, got %q (message: %s)",
 			StatusWarning, check.Status, check.Message)
 	}
-	if !strings.Contains(check.Fix, "bd bootstrap") {
-		t.Errorf("expected fall-through fix to mention 'bd bootstrap', got: %s", check.Fix)
+
+	// GH#35: must NOT emit the misleading legacy "Fresh clone detected
+	// (N issues in issues.jsonl, no database)" message in server mode.
+	if strings.Contains(check.Message, "issues in issues.jsonl, no database") {
+		t.Errorf("server-mode unreachable should not emit legacy fresh-clone message; got: %s", check.Message)
+	}
+
+	// Must call out server-mode connectivity, not "fresh clone".
+	wantSubstrings := []string{"server", "127.0.0.1:1"}
+	for _, want := range wantSubstrings {
+		if !strings.Contains(strings.ToLower(check.Message), strings.ToLower(want)) {
+			t.Errorf("expected message to mention %q, got: %s", want, check.Message)
+		}
+	}
+
+	// Fix should suggest connectivity/credential checks, not bd bootstrap
+	// (which won't help when the server itself is unreachable).
+	if strings.Contains(check.Fix, "bd bootstrap") {
+		t.Errorf("server-mode unreachable fix should not suggest 'bd bootstrap'; got: %s", check.Fix)
+	}
+	for _, want := range []string{"server", "credentials"} {
+		if !strings.Contains(strings.ToLower(check.Fix), want) {
+			t.Errorf("expected fix to mention %q, got: %s", want, check.Fix)
+		}
 	}
 }
+
+func TestFreshCloneServerUnreachableResult(t *testing.T) {
+	// Pure-function coverage for the server-unreachable branch (GH#35).
+	// Verifies the message identifies server mode, includes host:port and
+	// the underlying error, and avoids the misleading bd bootstrap fix.
+	check := freshCloneServerUnreachableResult(
+		"acf_beads",
+		"dolt.example.com",
+		3306,
+		errSentinelForTest{msg: "dial tcp: i/o timeout"},
+	)
+
+	if check.Name != "Fresh Clone" {
+		t.Errorf("expected Name %q, got %q", "Fresh Clone", check.Name)
+	}
+	if check.Status != StatusWarning {
+		t.Errorf("expected Status %q, got %q", StatusWarning, check.Status)
+	}
+
+	wantInMsg := []string{
+		"unreachable",
+		"dolt.example.com:3306",
+		`"acf_beads"`,
+		"server mode",
+	}
+	for _, want := range wantInMsg {
+		if !strings.Contains(check.Message, want) {
+			t.Errorf("expected message to contain %q, got: %s", want, check.Message)
+		}
+	}
+
+	if !strings.Contains(check.Detail, "dial tcp: i/o timeout") {
+		t.Errorf("expected detail to surface underlying error, got: %s", check.Detail)
+	}
+
+	// Must NOT recommend bd bootstrap — the problem is connectivity, not
+	// missing local state.
+	if strings.Contains(check.Fix, "bd bootstrap") {
+		t.Errorf("server-unreachable fix should not suggest 'bd bootstrap'; got: %s", check.Fix)
+	}
+
+	// Nil error path should still produce a usable message and not panic.
+	checkNil := freshCloneServerUnreachableResult("beads", "127.0.0.1", 3307, nil)
+	if checkNil.Status != StatusWarning {
+		t.Errorf("nil-err path: expected Status %q, got %q", StatusWarning, checkNil.Status)
+	}
+	if !strings.Contains(checkNil.Message, "unreachable") {
+		t.Errorf("nil-err path: expected message to mention 'unreachable', got: %s", checkNil.Message)
+	}
+}
+
+// errSentinelForTest is a minimal error type used to drive the server-unreachable
+// helper without depending on the network/MySQL driver. Local to this test file.
+type errSentinelForTest struct{ msg string }
+
+func (e errSentinelForTest) Error() string { return e.msg }
 
 func TestCheckFreshClone_EmbeddedMode(t *testing.T) {
 	// AC-005: Embedded mode (not server mode) uses only filesystem checks.

@@ -50,13 +50,16 @@ var doltNewMutex sync.Mutex
 // These process-global file descriptors cannot be safely redirected from
 // concurrent goroutines.
 //
-// IMPORTANT: Any test that calls cobra's Help(), Execute(), or Print*()
-// MUST NOT be parallel (no t.Parallel()), OR must serialize those calls
-// under stdioMutex. Setting cmd.SetOut() is NOT sufficient because cobra's
-// OutOrStdout() eagerly evaluates os.Stdout as the default argument even
-// when outWriter is set — the Go race detector catches this read.
+// IMPORTANT: Any test that calls Cobra methods which read stdio or lazily
+// merge inherited flags (Help, Execute, Print*, Find, InheritedFlags, etc.)
+// MUST NOT be parallel (no t.Parallel()), OR must serialize those calls under
+// stdioMutex. Setting cmd.SetOut() is NOT sufficient for output methods
+// because cobra's OutOrStdout() eagerly evaluates os.Stdout as the default
+// argument even when outWriter is set — the Go race detector catches this read.
 //
-// TestCobraParallelPolicyGuard in stdio_race_guard_test.go enforces this.
+// The name is historical; this mutex also serializes Cobra command-tree lazy
+// mutations on shared commands. TestCobraParallelPolicyGuard in
+// stdio_race_guard_test.go enforces this.
 var stdioMutex sync.Mutex
 
 // uniqueTestDBName generates a unique database name for test isolation.
@@ -82,8 +85,13 @@ func generateUniqueTestID(t *testing.T, prefix string, index int) string {
 // TestMain resets viper, but any test calling config.Initialize() re-loads the real config.
 // This helper ensures viper is reset after the test completes, preventing state pollution
 // (e.g., repo config values leaking into JSONL export tests).
+//
+// Tests automatically opt out of <module-root>/.beads/config.yaml via
+// BEADS_TEST_IGNORE_REPO_CONFIG; tests that want the repo config must override
+// before calling this helper.
 func initConfigForTest(t *testing.T) {
 	t.Helper()
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	config.ResetForTesting()
 	if err := config.Initialize(); err != nil {
 		t.Fatalf("config.Initialize: %v", err)
@@ -205,17 +213,24 @@ func captureStdout(t *testing.T, fn func() error) string {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r)
+		done <- buf.String()
+	}()
+
 	err := fn()
 
 	w.Close()
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
 	os.Stdout = oldStdout
+	out := <-done
+	_ = r.Close()
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	return buf.String()
+	return out
 }
 
 // captureStderr captures stderr output from fn and returns it as a string.
@@ -257,6 +272,16 @@ var (
 	initTestBDErr  error
 )
 
+func findPrebuiltBDBinary() (string, error) {
+	if configured := os.Getenv("BEADS_TEST_BD_BINARY"); configured != "" {
+		if _, err := os.Stat(configured); err != nil {
+			return "", fmt.Errorf("BEADS_TEST_BD_BINARY %q is not usable: %w", configured, err)
+		}
+		return filepath.Abs(configured)
+	}
+	return "", nil
+}
+
 // buildBDForInitTests builds (or locates) a bd binary suitable for subprocess
 // tests. Uses the gms_pure_go tag so the resulting binary works in either
 // CGO mode. Lives in the pure-Go helpers file so subprocess-style tests can
@@ -264,19 +289,28 @@ var (
 func buildBDForInitTests(t *testing.T) string {
 	t.Helper()
 	initTestBDOnce.Do(func() {
-		// Check if bd binary exists in repo root (../../bd from cmd/bd/)
+		prebuilt, err := findPrebuiltBDBinary()
+		if err != nil {
+			initTestBDErr = err
+			return
+		}
+		if prebuilt != "" {
+			initTestBD = prebuilt
+			return
+		}
 		bdBinary := "bd"
 		if runtime.GOOS == windowsOS {
 			bdBinary = "bd.exe"
 		}
-		repoRoot := filepath.Join("..", "..")
-		existingBD := filepath.Join(repoRoot, bdBinary)
+		// Preserve the existing local optimization: if a bd binary exists in
+		// the repository root, init-style subprocess tests can reuse it.
+		existingBD := filepath.Join("..", "..", bdBinary)
 		if _, err := os.Stat(existingBD); err == nil {
 			initTestBD, _ = filepath.Abs(existingBD)
 			return
 		}
-		// Fall back to building
-		tmpDir, err := os.MkdirTemp("", "bd-init-test-*")
+		// Fall back to building.
+		tmpDir, err := testTempDir("bd-init-test-*")
 		if err != nil {
 			initTestBDErr = fmt.Errorf("failed to create temp dir: %w", err)
 			return

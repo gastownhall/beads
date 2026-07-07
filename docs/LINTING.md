@@ -1,119 +1,62 @@
 # Linting Policy
 
-Last reviewed: 2026-05-08
+Last reviewed: 2026-05-29
 
-Freshness source: `.golangci.yml` and current `golangci-lint run ./...`
-output.
+Freshness source: `.golangci.yml`, `.github/workflows/pr.yml`,
+`.github/workflows/main.yml`, and
+`golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...` returning zero
+issues.
 
-This document explains our approach to `golangci-lint` warnings in this codebase.
+This document explains the required Go lint gate for this codebase.
 
 ## Current Status
 
-Running `golangci-lint run ./...` reports a small number of remaining issues. These are not actual code quality problems - they are false positives or intentional patterns that reflect idiomatic Go practice. Run the command locally to see the current count and breakdown.
+Lint is a required CI gate. The PR and main workflows run `golangci-lint` with
+the repository configuration and `--build-tags=gms_pure_go`; it is expected to
+pass with zero issues.
 
-## Issue Breakdown
+Run the same check locally with:
 
-### errcheck
-
-**Pattern**: Unchecked errors from `defer` cleanup operations
-**Status**: Intentional and idiomatic
-
-Examples:
-```go
-defer rows.Close()
-defer tx.Rollback()
-defer os.RemoveAll(tmpDir)  // in tests
+```bash
+golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...
 ```
 
-**Rationale**: In Go, it's standard practice to ignore errors from deferred cleanup operations:
-- `rows.Close()` - closing already-consumed result sets rarely errors
-- `tx.Rollback()` - rollback on defer is a safety net; if commit succeeded, rollback is a no-op
-- Test cleanup - errors during test cleanup don't affect test outcomes
+Formatting is a separate required gate:
 
-Fixing these would add noise without improving code quality. The critical cleanup operations (where errors matter) are already checked explicitly.
+```bash
+make fmt-check
+```
 
-### gosec
+## Policy
 
-**Pattern 1**: G204 - Subprocess launched with variable
-**Status**: Intentional - launching editor and git commands with user-specified paths
+Treat new lint findings as defects to fix before merge. Do not add a tolerated
+failing baseline, and do not configure CI with `--issues-exit-code=0`.
 
-Examples:
-- Launching `$EDITOR` for issue editing
-- Executing git commands
-- Running external commands (e.g., git, dolt)
+When a linter reports an intentional or false-positive pattern:
 
-**Pattern 2**: G304 - File inclusion via variable
-**Status**: Intended feature - user-specified file paths for import/export
+- Prefer a narrow `.golangci.yml` exclusion tied to a path, linter, and message.
+- Use `//nolint:<linter>` only when the reason is local to a specific line and
+  the comment explains why the warning is not actionable.
+- Keep broad linter disables as a last resort.
 
-All file paths are either:
-- User-provided CLI arguments (expected for import/export commands)
-- Test fixtures in controlled test environments
-- Validated paths with security checks
+The current configuration already encodes accepted exclusions for intentional
+patterns such as deferred cleanup errors, controlled subprocess execution,
+test-fixture file reads, and documented security false positives.
 
-**Pattern 3**: G301/G302/G306 - File permissions
-**Status**: Acceptable for user-facing database files
+## CI Cleanup Decision
 
-- G301: 0755 for database directories (allows other users to read)
-- G302: 0644 for data files (needs to be readable)
-- G306: 0644 for new data files (consistency with existing files)
+`pr-lint` should stay separate from `pr-policy` and `pr-core` so failures are
+easy to identify and rerun. It should include:
 
-**Pattern 4**: G201/G202 - SQL string formatting/concatenation
-**Status**: Safe - using placeholders and bounded queries
+- `make fmt-check`
+- `golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...`
 
-All SQL concatenation uses proper placeholders and is bounded by controlled input (issue ID lists).
-
-### misspell
-
-**Pattern**: British vs American spelling - `cancelled` vs `canceled`
-**Status**: Acceptable spelling variation
-
-The codebase uses "cancelled" (British spelling) in user-facing messages. Both spellings are correct.
-
-### unparam
-
-**Pattern**: Function parameters or return values that are always the same
-**Status**: Interface compliance and future-proofing
-
-These functions maintain consistent signatures for:
-- Interface implementations
-- Future extensibility
-- Code clarity and documentation
-
-## golangci-lint Configuration Challenges
-
-We've attempted to configure `.golangci.yml` to exclude these false positives, but golangci-lint's exclusion mechanisms have proven challenging:
-- `exclude-functions` works for some errcheck patterns
-- `exclude` patterns with regex don't match as expected
-- `exclude-rules` with text matching doesn't work reliably
-
-This appears to be a known limitation of golangci-lint's configuration system.
-
-## Recommendation
-
-**For contributors**: Don't be alarmed by the lint warnings reported. The code quality is high.
-
-**For code review**: Focus on:
-- New issues introduced by changes (not the existing baseline)
-- Actual logic errors
-- Missing error checks on critical operations (file writes, database commits)
-- Security concerns beyond gosec's false positives
-
-**For CI/CD**: The current GitHub Actions workflow runs linting but doesn't fail on these known issues. We may add `--issues-exit-code=0` or configure the workflow to check for regressions only.
+See [`CI_CLEANUP_PLAN.md`](CI_CLEANUP_PLAN.md) for the full CI tier policy.
 
 ## Future Work
 
-Potential approaches to reduce noise:
-1. Disable specific linters (errcheck, revive) if the signal-to-noise ratio doesn't improve
-2. Use `//nolint` directives sparingly for clear false positives
-3. Investigate alternative linters with better exclusion support
-4. Contribute to golangci-lint to improve exclusion mechanisms
-
-## Summary
-
-These "issues" are not technical debt - they represent intentional, idiomatic Go code. The codebase maintains high quality through:
-- Comprehensive test coverage (>80%)
-- Careful error handling where it matters
-- Security validation of user input
-- Clear documentation
-
-Don't let the linter count distract from the actual code quality.
+- Pin the `golangci-lint` version in CI instead of using `version: latest`.
+- Move the final CI shape behind a repository-owned `scripts/ci/pr-lint.sh`
+  wrapper.
+- Periodically audit `.golangci.yml` exclusions and remove entries that are no
+  longer needed.

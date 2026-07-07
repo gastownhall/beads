@@ -20,8 +20,8 @@ This project uses [Beads (bd)](https://github.com/steveyegge/beads) for issue tr
 - Track ALL work in bd (never use markdown TODOs or comment-based task lists)
 - Use ` + "`bd ready`" + ` to find available work
 - Use ` + "`bd create`" + ` to track new issues/tasks/bugs
-- Use ` + "`bd dolt push`" + ` at end of session to sync with git remote
-- Git hooks auto-sync on commit/merge
+- Use ` + "`bd dolt push`" + ` at end of session to sync with the Dolt remote
+- Git hooks refresh exports and legacy fallbacks; Dolt remotes handle sync
 
 ## Quick Reference
 ` + "```bash" + `
@@ -32,7 +32,7 @@ bd create --title="..." --type=task  # Create new issue
 bd update <id> --claim               # Claim work atomically
 bd close <id>                         # Mark complete
 bd dep add <issue> <depends-on>       # Add dependency (issue depends on depends-on)
-bd dolt push                               # Sync with git remote
+bd dolt push                               # Sync with Dolt remote
 ` + "```" + `
 
 ## Workflow
@@ -40,7 +40,7 @@ bd dolt push                               # Sync with git remote
 2. Claim an issue atomically: ` + "`bd update <id> --claim`" + `
 3. Do the work
 4. Mark complete: ` + "`bd close <id>`" + `
-5. Sync: ` + "`bd dolt push`" + ` (or let git hooks handle it)
+5. Sync: ` + "`bd dolt push`" + `
 
 ## Context Loading
 Run ` + "`bd prime`" + ` to get complete workflow documentation in AI-optimized format (~1-2k tokens).
@@ -50,40 +50,37 @@ For detailed docs: see AGENTS.md, QUICKSTART.md, or run ` + "`bd --help`" + `
 # END BEADS INTEGRATION
 `
 
-// InstallCursor installs Cursor IDE integration
-func InstallCursor() {
+func InstallCursor() error {
 	rulesPath := ".cursor/rules/beads.mdc"
 
 	fmt.Println("Installing Cursor integration...")
 
-	// Ensure parent directory exists
 	if err := EnsureDir(filepath.Dir(rulesPath), 0755); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
-	// Write beads rules file (overwrite if exists)
 	if err := atomicWriteFile(rulesPath, []byte(cursorRulesTemplate)); err != nil {
-		FatalError("write rules: %v", err)
+		return HandleError("write rules: %v", err)
 	}
 
 	fmt.Printf("\n✓ Cursor integration installed\n")
 	fmt.Printf("  Rules: %s\n", rulesPath)
 	fmt.Println("\nRestart Cursor for changes to take effect.")
+	return nil
 }
 
-// CheckCursor checks if Cursor integration is installed
-func CheckCursor() {
+func CheckCursor() error {
 	rulesPath := ".cursor/rules/beads.mdc"
 
 	if !FileExists(rulesPath) {
-		FatalErrorWithHint("Cursor integration not installed", "Run: bd setup cursor")
+		return HandleErrorWithHint("Cursor integration not installed", "Run: bd setup cursor")
 	}
 
 	fmt.Println("✓ Cursor integration installed:", rulesPath)
+	return nil
 }
 
-// RemoveCursor removes Cursor integration
-func RemoveCursor() {
+func RemoveCursor() error {
 	rulesPath := ".cursor/rules/beads.mdc"
 
 	fmt.Println("Removing Cursor integration...")
@@ -91,10 +88,11 @@ func RemoveCursor() {
 	if err := os.Remove(rulesPath); err != nil {
 		if os.IsNotExist(err) {
 			fmt.Println("No rules file found")
-			return
+			return nil
 		}
-		FatalError("failed to remove file: %v", err)
+		return HandleError("failed to remove file: %v", err)
 	}
 
 	fmt.Println("✓ Removed Cursor integration")
+	return nil
 }

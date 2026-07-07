@@ -112,3 +112,30 @@ func TestDefaultContainsBothSections(t *testing.T) {
 		t.Error("beads section should come before session completion section")
 	}
 }
+
+func TestEmbeddedDefaultManagedMarkerIsCurrent(t *testing.T) {
+	content := EmbeddedDefault()
+
+	idx := strings.Index(content, "<!-- BEGIN BEADS INTEGRATION")
+	if idx == -1 {
+		t.Fatal("missing managed section marker")
+	}
+	line := content[idx:]
+	if nl := strings.Index(line, "\n"); nl != -1 {
+		line = line[:nl]
+	}
+
+	meta := ParseMarker(line)
+	if meta == nil {
+		t.Fatalf("failed to parse managed marker %q", line)
+	}
+	if meta.Version != MarkerVersion {
+		t.Errorf("marker version = %d, want %d", meta.Version, MarkerVersion)
+	}
+	if meta.Profile != ProfileFull {
+		t.Errorf("marker profile = %q, want %q", meta.Profile, ProfileFull)
+	}
+	if meta.Hash != CurrentHash(ProfileFull) {
+		t.Errorf("marker hash = %q, want %q", meta.Hash, CurrentHash(ProfileFull))
+	}
+}
