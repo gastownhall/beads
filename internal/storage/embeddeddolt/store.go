@@ -352,7 +352,7 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 				"  coordination decision, not an auto-fix - do NOT run a migration unless\n" +
 				"  you are the single designated migrator (only ONE clone may migrate a\n" +
 				"  shared remote, else the schema forks; #4259):\n" +
-				"    • designated migrator (only ONE machine): %[3]s=1 bd migrate && bd dolt push\n" +
+				"    • designated migrator (only ONE machine): bd migrate --force && bd dolt push\n" +
 				"    • every other clone (another already migrated): bd bootstrap\n" +
 				"    • several machines: only ONE migrates; sync each other clone and run\n" +
 				"      bd dolt pull after the migrator pushes, before upgrading it\n"
@@ -363,13 +363,13 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 						"  Working-set reconcile command: continuing on schema v%[2]d without\n"+
 						"  migrating; the commit applies to the working set at the current\n"+
 						"  schema."+sharedGuidance,
-					gateErr, gateErr.CurrentVersion, schema.AllowRemoteMigrateEnv)
+					gateErr, gateErr.CurrentVersion)
 			default: // openReadOnlyCommand
 				fmt.Fprintf(os.Stderr,
 					"Warning: %[1]v\n"+
 						"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
 						"  Writes are blocked until the schema is reconciled."+sharedGuidance,
-					gateErr, gateErr.CurrentVersion, schema.AllowRemoteMigrateEnv)
+					gateErr, gateErr.CurrentVersion)
 			}
 			return nil
 		}
