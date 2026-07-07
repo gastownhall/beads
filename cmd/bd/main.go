@@ -967,15 +967,22 @@ var rootCmd = &cobra.Command{
 					return nil
 				}
 
-				// GH#3686: `bd create --repo=<local path>` targets a different
+				// GH#3686: `bd create --repo=<path-or-URL>` targets a different
 				// repo's workspace. Without this, PreRun exits with "no beads
 				// database found" before create.go's --repo handling runs, even
-				// when the target repo has a valid .beads/. Resolve the target
-				// workspace here so store initialization points at it. Remote
-				// --repo URLs are handled by create.go via the remote cache, so
-				// only local paths are resolved here.
+				// when the target has a valid workspace of its own. Resolve
+				// local targets here so store initialization points at them.
+				// Remote --repo URLs need no local database at all: create.go
+				// opens the remote store itself via the remote cache and never
+				// touches the local `store` global on that path (a gap left by
+				// #4615, which only handled local paths), so skip local
+				// discovery entirely instead of falling through to the "no
+				// beads database found" exit below.
 				if cmd.Name() == "create" && cmd.Flags().Changed("repo") {
-					if repoVal, _ := cmd.Flags().GetString("repo"); repoVal != "" && !remotecache.IsRemoteURL(repoVal) {
+					if repoVal, _ := cmd.Flags().GetString("repo"); repoVal != "" {
+						if remotecache.IsRemoteURL(repoVal) {
+							return nil
+						}
 						targetBeadsDir := filepath.Join(routing.ExpandPath(repoVal), ".beads")
 						dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
 					}
