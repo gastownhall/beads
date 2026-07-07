@@ -47,11 +47,7 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 			IsCrossPrefix: isCrossPrefix,
 			TargetKind:    &kind,
 		}
-		if err := issueops.AddDependencyInTx(ctx, tx, dep, actor, opts); err != nil {
-			return err
-		}
-		s.invalidateBlockedIDsCache()
-		return nil
+		return issueops.AddDependencyInTx(ctx, tx, dep, actor, opts)
 	}); err != nil {
 		return err
 	}
@@ -72,7 +68,6 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 		if err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID); err != nil {
 			return err
 		}
-		s.invalidateBlockedIDsCache()
 		return wrapTransactionError("commit remove wisp dependency", tx.Commit())
 	}
 
@@ -86,7 +81,6 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 		return err
 	}
 
-	s.invalidateBlockedIDsCache()
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("sql commit: %w", err)
 	}
@@ -296,48 +290,21 @@ func (s *DoltStore) DetectCycles(ctx context.Context) ([][]*types.Issue, error) 
 	return result, err
 }
 
-// IsBlocked checks if an issue has open blockers.
-// Uses computeBlockedIDs for authoritative blocked status, consistent with
-// GetReadyWork. This covers all blocking dependency types (blocks, waits-for)
-// with full gate evaluation semantics. (GH#1524)
 func (s *DoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
-	// Use computeBlockedIDs as the single source of truth for blocked status.
-	// This ensures the close guard is consistent with ready work calculation.
-	_, err := s.computeBlockedIDs(ctx, true)
-	if err != nil {
-		return false, nil, fmt.Errorf("failed to compute blocked IDs: %w", err)
-	}
-
-	s.cacheMu.Lock()
-	isBlocked := s.blockedIDsCacheMap[issueID]
-	s.cacheMu.Unlock()
-
-	if !isBlocked {
-		return false, nil, nil
-	}
-
+	var blocked bool
 	var blockers []string
-	if err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		blocked, got, err := issueops.IsBlockedInTx(ctx, tx, issueID)
-		if err != nil {
-			return err
-		}
-		if blocked {
-			blockers = got
-		}
-		return nil
-	}); err != nil {
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		blocked, blockers, err = issueops.IsBlockedInTx(ctx, tx, issueID)
+		return err
+	})
+	if err != nil {
 		return false, nil, fmt.Errorf("failed to check blockers: %w", err)
 	}
-
-	return true, blockers, nil
+	return blocked, blockers, nil
 }
 
 // GetNewlyUnblockedByClose finds issues that become unblocked when an issue is closed.
-//
-// Rewritten from a single query with nested JOIN + correlated NOT EXISTS to two
-// sequential queries to avoid Dolt query-planner issues with nested JOIN subqueries.
-// See bd-o23 / hq-g4nxe for the SQL audit that identified this pattern.
 func (s *DoltStore) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID string) ([]*types.Issue, error) {
 	var result []*types.Issue
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {

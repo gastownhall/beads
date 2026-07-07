@@ -50,6 +50,7 @@ bd ready [flags]
       --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
       --mol string                   Filter to steps within a specific molecule
       --mol-type string              Filter by molecule type: swarm, patrol, or work
+      --offset int                   Skip the first N matching results (0-based). Only supported under --proxied-server.
       --parent string                Filter to descendants of this bead/epic
       --plain                        Display issues as a plain numbered list
       --pretty                       Display issues in a tree format with status/priority symbols (default true)

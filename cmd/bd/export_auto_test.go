@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +11,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestGitAddFile_InWorktreeHook_StagesCorrectPath is a regression test for
@@ -185,6 +190,217 @@ func TestShouldRunPostCommandAutoExportSkipsReadOnlyCommands(t *testing.T) {
 	}
 	if !shouldRunPostCommandAutoExport(&cobra.Command{Use: "create"}) {
 		t.Fatal("write commands should still trigger post-command auto-export")
+	}
+}
+
+// fakeStateHashStore implements the storage.StateHasher optional interface
+// plus the minimal DoltStorage surface maybeAutoExport touches. Any
+// non-overridden method panics via the embedded nil interface.
+type fakeStateHashStore struct {
+	storage.DoltStorage
+	stateHash          string
+	stateHashCalls     int
+	currentCommitCalls int
+	issues             []*types.Issue
+}
+
+func (f *fakeStateHashStore) GetStateHash(_ context.Context) (string, error) {
+	f.stateHashCalls++
+	return f.stateHash, nil
+}
+
+func (f *fakeStateHashStore) GetCurrentCommit(_ context.Context) (string, error) {
+	f.currentCommitCalls++
+	return "head-commit-hash", nil
+}
+
+func (f *fakeStateHashStore) GetInfraTypes(_ context.Context) map[string]bool { return nil }
+
+// GetConfig lets buildOwnerExcludeSet's database fallback lookup (for
+// export.exclude_owners / export.exclude_owner) run without panicking;
+// this fake has no config store, so every key is unset.
+func (f *fakeStateHashStore) GetConfig(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeStateHashStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
+	return f.issues, nil
+}
+
+// fakeHeadOnlyStore does NOT implement storage.StateHasher, forcing the
+// GetCurrentCommit fallback.
+type fakeHeadOnlyStore struct {
+	storage.DoltStorage
+	currentCommitCalls int
+}
+
+func (f *fakeHeadOnlyStore) GetCurrentCommit(_ context.Context) (string, error) {
+	f.currentCommitCalls++
+	return "head-commit-hash", nil
+}
+
+func autoExportTestDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"beads","backend":"dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	t.Setenv("BEADS_DIR", beadsDir)
+	return dir
+}
+
+// Regression test for wy-4ope: server-mode clients used to skip auto-export
+// entirely, so `git push` published stale JSONL. maybeAutoExport must reach
+// change detection and consult the working-set-aware state hash, not HEAD —
+// server mode runs with dolt auto-commit off, so HEAD does not advance on
+// writes.
+func TestMaybeAutoExportUsesStateHashForChangeDetection(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeStateHashStore{stateHash: "working-set-hash"}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "working-set-hash",
+		Timestamp:      time.Now(),
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
+	}
+
+	if fake.stateHashCalls != 1 {
+		t.Fatalf("GetStateHash calls = %d, want 1", fake.stateHashCalls)
+	}
+	if fake.currentCommitCalls != 0 {
+		t.Fatalf("GetCurrentCommit calls = %d, want 0 (StateHasher must take precedence)", fake.currentCommitCalls)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads", "issues.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("unchanged state hash must not export, stat err=%v", err)
+	}
+}
+
+func TestMaybeAutoExportExportsOnStateHashChange(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeStateHashStore{stateHash: "hash-after-write"}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "hash-before-write",
+		Timestamp:      time.Time{}, // zero: throttle window open
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
+	}
+
+	state := loadExportAutoState(filepath.Join(dir, ".beads"))
+	if state.LastDoltCommit != "hash-after-write" {
+		t.Fatalf("state LastDoltCommit = %q, want %q (export must run when the state hash moves)",
+			state.LastDoltCommit, "hash-after-write")
+	}
+}
+
+func TestMaybeAutoExportFallsBackToHeadCommit(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeHeadOnlyStore{}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "head-commit-hash",
+		Timestamp:      time.Now(),
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
+	}
+
+	if fake.currentCommitCalls != 1 {
+		t.Fatalf("GetCurrentCommit calls = %d, want 1 (fallback when StateHasher is absent)", fake.currentCommitCalls)
+	}
+}
+
+func TestGuardAutoExportOverwriteAllowsViewerScopedJSONL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	writeJSONLLines(t, path,
+		map[string]any{"_type": "issue", "id": "bd-1", "issue_type": "task", "title": "kept"},
+		map[string]any{"id": "bd-legacy", "issue_type": "bug", "title": "legacy issue record"},
+	)
+
+	if err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false); err != nil {
+		t.Fatalf("guardAutoExportOverwrite: %v", err)
+	}
+}
+
+func TestGuardAutoExportOverwriteBlocksRicherJSONL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	writeJSONLLines(t, path,
+		map[string]any{"_type": "issue", "id": "bd-1", "issue_type": "task", "title": "kept"},
+		map[string]any{"_type": "memory", "key": "keep-me", "value": "private context"},
+		map[string]any{"_type": "issue", "id": "bd-agent", "issue_type": "agent", "title": "infra"},
+		map[string]any{"_type": "issue", "id": "bd-template", "issue_type": "task", "is_template": true},
+		map[string]any{"_type": "issue", "id": "bd-wisp", "issue_type": "task", "ephemeral": true},
+		map[string]any{"_type": "event", "id": "bd-event"},
+	)
+
+	err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false)
+	if err == nil {
+		t.Fatal("expected guardAutoExportOverwrite to reject richer JSONL, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"refusing to overwrite",
+		"5 record(s) outside auto-export scope",
+		"1 memories",
+		"3 infra/template/ephemeral issues",
+		"1 unknown",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("guard error %q does not contain %q", msg, want)
+		}
+	}
+}
+
+func TestGuardAutoExportOverwriteAllowsMemoriesWhenIncluded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	writeJSONLLines(t, path,
+		map[string]any{"_type": "memory", "key": "keep-me", "value": "private context"},
+	)
+
+	if err := guardAutoExportOverwrite(path, nil, true); err != nil {
+		t.Fatalf("guardAutoExportOverwrite with memories included: %v", err)
+	}
+}
+
+func writeJSONLLines(t *testing.T, path string, records ...map[string]any) {
+	t.Helper()
+	var b strings.Builder
+	for _, rec := range records {
+		data, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -435,7 +651,9 @@ func TestGitAddFile_CapturesStderrOnFailure(t *testing.T) {
 	}
 }
 
-func TestGitAddFile_SkipsWhenIndexLocked(t *testing.T) {
+// TestGitAddFile_CapturesLockedIndexFailure verifies that a locked git index
+// is surfaced as a rich, caller-visible error rather than a bare exit status.
+func TestGitAddFile_CapturesLockedIndexFailure(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -500,6 +718,68 @@ func TestGitAddFile_SkipsWhenIndexLocked(t *testing.T) {
 	}
 	if strings.Contains(string(data), ".beads/issues.jsonl") {
 		t.Fatalf("gitAddFile staged target despite index.lock:\n%s", data)
+	}
+}
+
+func TestAutoExportGitAddFailureExitsNonZero(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	bd := buildBDForInitTests(t)
+	dir := t.TempDir()
+	env := append(autoExportDataLossTestEnv(dir), "BD_NON_INTERACTIVE=1")
+
+	runGit := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "-q")
+
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("bd %v failed: %v\n%s", args, err, out)
+		}
+		return string(out)
+	}
+
+	run("init", "--prefix", "agf", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".beads/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("config", "set", "export.interval", "1ms")
+	run("config", "set", "export.auto", "true")
+	run("config", "set", "export.git-add", "true")
+	if err := os.Remove(filepath.Join(dir, ".beads", exportAutoStateFile)); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+
+	cmd := exec.Command(bd, "create", "caller visible git add failure", "-p", "2")
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("bd create succeeded despite auto-export git add failure:\n%s", out)
+	}
+	output := string(out)
+	if !strings.Contains(output, "Error: auto-export: git add failed") {
+		t.Fatalf("expected caller-visible auto-export git add error, got:\n%s", output)
+	}
+	if !strings.Contains(strings.ToLower(output), "ignored") {
+		t.Fatalf("expected git add stderr to explain ignored path, got:\n%s", output)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads", exportAutoStateFile)); !os.IsNotExist(err) {
+		t.Fatalf("git-add failure should not save export state, stat err=%v", err)
 	}
 }
 
@@ -873,5 +1153,5 @@ func autoExportDataLossTestEnv(home string) []string {
 		}
 		env = append(env, e)
 	}
-	return append(env, "HOME="+home, "BEADS_DOLT_AUTO_START=0", "BEADS_NO_DAEMON=1")
+	return append(env, "HOME="+home, "BEADS_DOLT_AUTO_START=0", "BEADS_NO_DAEMON=1", "BD_DISABLE_METRICS=1", "BD_DISABLE_EVENT_FLUSH=1")
 }

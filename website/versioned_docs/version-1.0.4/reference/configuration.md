@@ -145,7 +145,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `types.custom` | Comma-separated list of custom issue types |
 | `types.infra` | Infra types routed to wisps table |
 | `import.orphan_handling` | `allow` (default) \| `resurrect` \| `skip` \| `strict` |
-| `compact_*` | Compaction tuning (see `docs/EXTENDING.md`) |
+| `compact_*` | Compaction tuning (see [docs/CONFIG.md](https://github.com/gastownhall/beads/blob/main/docs/CONFIG.md)) |
 | `issue_id_mode` | `hash` (default) \| `counter` (sequential) |
 | `min_hash_length`, `max_hash_length` | Adaptive ID bounds (defaults `4` and `8`) |
 | `max_collision_prob` | Hash ID collision tolerance (default `0.25`) |

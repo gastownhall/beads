@@ -153,7 +153,11 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return fmt.Errorf("database server not ready: %w", err)
 	}
 
-	if err := pidfile.Write(p.rootDir, PIDFileName, pidfile.PidFile{Pid: os.Getpid(), Port: p.port}); err != nil {
+	if err := pidfile.Write(p.rootDir, PIDFileName, pidfile.PidFile{
+		Pid:        os.Getpid(),
+		Port:       p.port,
+		UpstreamID: p.server.ID(ctx),
+	}); err != nil {
 		p.stats.IncBackendStop()
 		_ = stopBackendBounded(p.server)
 		return fmt.Errorf("write pid file: %w", err)

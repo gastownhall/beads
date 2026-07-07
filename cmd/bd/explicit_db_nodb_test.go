@@ -32,7 +32,16 @@ var (
 func buildBDUnderTest(t *testing.T) string {
 	t.Helper()
 	buildBDOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "bd-testbin-*")
+		prebuilt, err := findPrebuiltBDBinary()
+		if err != nil {
+			buildBDErr = err
+			return
+		}
+		if prebuilt != "" {
+			buildBDPath = prebuilt
+			return
+		}
+		dir, err := testTempDir("bd-testbin-*")
 		if err != nil {
 			buildBDErr = err
 			return

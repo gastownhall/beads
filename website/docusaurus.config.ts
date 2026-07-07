@@ -92,7 +92,7 @@ const config: Config = {
           editUrl: `https://github.com/${orgName}/${projectName}/tree/main/website/`,
           showLastUpdateTime: true,
           // Default site view is the latest released snapshot, not unreleased "Next"
-          lastVersion: '1.0.4',
+          lastVersion: '1.1.0',
           versions: {
             current: {
               label: 'Next',
@@ -231,6 +231,10 @@ const config: Config = {
         {
           title: 'Resources',
           items: [
+            {
+              label: 'Community Tools',
+              to: '/community-tools',
+            },
             {
               label: 'GitHub',
               href: `https://github.com/${orgName}/${projectName}`,

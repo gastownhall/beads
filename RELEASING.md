@@ -13,6 +13,7 @@ This document describes the complete release process for beads, including GitHub
 - [4. PyPI Release (MCP Server)](#4-pypi-release-mcp-server)
 - [5. npm Package Release](#5-npm-package-release)
 - [6. Verify Release](#6-verify-release)
+- [Prerelease / Release Candidate (RC) Workflow](#prerelease--release-candidate-rc-workflow)
 - [Hotfix Releases](#hotfix-releases)
 - [Rollback Procedure](#rollback-procedure)
 
@@ -24,6 +25,20 @@ A beads release involves multiple distribution channels:
 2. **Homebrew** - macOS/Linux package manager
 3. **PyPI** - Python MCP server (`beads-mcp`)
 4. **npm** - Node.js package for Claude Code for Web (`@beads/bd`)
+
+### The Easy Way (Recommended)
+
+For routine releases, use the fully automated release script:
+
+```bash
+./scripts/release.sh 0.22.0
+```
+
+This handles version bump, tests, git tag, Homebrew update, and local
+installation in one shot. See [scripts/README.md](scripts/README.md#releasesh--the-easy-button)
+for details. The rest of this document is the manual / step-by-step process,
+useful for understanding what `release.sh` does and for handling edge cases
+(hotfixes, rollbacks, manual PyPI/npm publishes).
 
 ## Prerequisites
 
@@ -155,6 +170,18 @@ The `--commit --tag --push` flags will:
 
 This triggers GitHub Actions to build release artifacts automatically.
 
+The tag workflow re-runs release-critical package gates before publishing:
+
+- `make ci-package-mcp` builds and validates the MCP package, then the PyPI job
+  publishes the validated `dist/*` artifact from that gate.
+- `make ci-package-npm` validates the npm wrapper package before npm publish.
+- `make ci-website` validates the release docs/website build before GoReleaser
+  publishes GitHub release assets.
+
+The npm publish job also waits for the macOS release assets, because the npm
+`postinstall` script downloads platform-specific archives from the GitHub
+release.
+
 **Recommended workflow:**
 
 ```bash
@@ -241,7 +268,13 @@ gh release create v0.22.0 \
 
 ## 3. Homebrew Update
 
-Homebrew formula is now in homebrew-core. Updates are handled automatically via GitHub Release artifacts.
+Homebrew uses the `beads` formula in homebrew-core. Do not publish or revive
+the old `bd` formula in `gastownhall/homebrew-beads`; having two independently
+updated Homebrew formulas causes version drift and installs the wrong binary for
+some users.
+
+Updates to the supported Homebrew formula are handled through Homebrew core
+after GitHub Release artifacts are available.
 
 ### Verify Homebrew
 
@@ -332,6 +365,25 @@ git commit -m "chore: Update plugin marketplaces to v0.22.0"
 ```
 
 **Note:** These files define how beads appears in Claude Code and Codex plugin marketplaces. Version should match the release version.
+
+### Documentation Site (Docusaurus)
+
+The published docs at GitHub Pages are versioned. Unreleased edits live in
+`website/docs/` (**Next**); each release should add a snapshot:
+
+```bash
+cd website
+npm ci
+npm run docusaurus docs:version X.Y.Z
+```
+
+Then set `lastVersion` in `website/docusaurus.config.ts` to `X.Y.Z` so
+visitors default to the latest stable docs (not **Next**).
+
+Commit `website/versioned_docs/`, `website/versioned_sidebars/`, and
+`website/versions.json` with the release. The
+`scripts/generate-llms-full.sh` script pulls from the latest entry in
+`versions.json` so `llms-full.txt` stays aligned with that snapshot.
 
 ## 6. npm Package Release
 
@@ -461,6 +513,74 @@ bd version
 curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 bd version
 ```
+
+## Prerelease / Release Candidate (RC) Workflow
+
+Release candidates let a build be validated through the full release pipeline
+without promoting it to the stable channels. An RC carries a SemVer prerelease
+identifier (e.g. `1.1.0-rc.1`); Python tooling normalizes this to PEP 440 form
+(`1.1.0rc1`).
+
+**How a prerelease tag differs from a stable release:**
+
+- **GitHub release** is published and **marked as a prerelease** (goreleaser
+  `release.prerelease: auto`), with binaries for all platforms.
+- **Homebrew** is not updated (goreleaser `brews.skip_upload: true`; the core
+  formula only tracks stable releases).
+- **PyPI** and **npm** publish jobs are **skipped**. The `publish-pypi` and
+  `publish-npm` jobs are gated with `!contains(github.ref_name, '-')`, so a tag
+  containing a `-` never reaches the stable package channels.
+- **The stable docs snapshot is not required.** `verify-version-consistency`
+  runs `scripts/check-versions.sh` without `BEADS_REQUIRE_RELEASE_DOCS=1` for
+  prerelease tags, and `scripts/check-docs-version.sh` treats a prerelease
+  canonical version as non-strict. The versioned docs stay on the latest stable
+  release until the base `X.Y.Z` ships.
+
+### Cut an RC
+
+```bash
+# 1. Update CHANGELOG.md and cmd/bd/info.go with the RC notes (manual step),
+#    same as a stable release. Date the CHANGELOG section.
+
+# 2. Bump versions. update-versions.sh accepts a prerelease identifier and,
+#    for prereleases, skips the Docusaurus docs snapshot automatically.
+./scripts/update-versions.sh 1.1.0-rc.1
+#    Windows PE numeric fields (winres file_version/product_version and the
+#    manifest <assemblyIdentity> version) are set to the base version 1.1.0,
+#    because PE versions must be purely numeric; gen-winres.sh strips the
+#    prerelease suffix the same way at build time.
+
+# 3. Keep the MCP lockfile in sync (PEP 440 normalizes to 1.1.0rc1), or the
+#    Package Gate (MCP) check goes red:
+(cd integrations/beads-mcp && uv lock)
+
+# 4. Validate locally.
+./scripts/check-versions.sh
+
+# 5. Open a PR for the RC prep and have it reviewed. RC prep should land
+#    through normal review, not auto-merge.
+```
+
+After the RC prep is merged to `main`, cut the tag from the merge commit:
+
+```bash
+git checkout main && git pull
+git tag -a v1.1.0-rc.1 -m "Release candidate v1.1.0-rc.1"
+git push origin v1.1.0-rc.1
+```
+
+Pushing the `v*` tag triggers the release workflow with the prerelease behavior
+above. Tag creation is restricted to release maintainers; see
+[Prerequisites](#prerequisites).
+
+### Validate and promote
+
+- Install the RC from the GitHub prerelease assets and exercise the changes it
+  is gating before promoting.
+- To promote to stable, bump to the base version with no suffix
+  (`./scripts/update-versions.sh 1.1.0`). The stable bump **does** require the
+  docs snapshot and **does** publish to Homebrew/PyPI/npm, so follow the
+  standard [Prepare Release](#1-prepare-release) steps from there.
 
 ## Hotfix Releases
 
@@ -664,6 +784,11 @@ Examples:
 - `0.21.5` → `0.22.0`: New features (minor bump)
 - `0.22.0` → `0.22.1`: Bug fix (patch bump)
 - `0.22.1` → `1.0.0`: Stable release (major bump)
+
+**Prereleases:** append a SemVer prerelease identifier for release candidates,
+e.g. `1.1.0-rc.1`. Prerelease tags publish a GitHub prerelease only and stay
+off the stable Homebrew/PyPI/npm channels — see
+[Prerelease / Release Candidate (RC) Workflow](#prerelease--release-candidate-rc-workflow).
 
 ## Release Cadence
 

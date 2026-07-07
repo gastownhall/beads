@@ -15,21 +15,24 @@ func TestValidateGraphApplyPlanAcceptsCustomTypes(t *testing.T) {
 			{Key: "spec", Title: "Step spec", Type: "spec"},
 		},
 	}
-	// Without custom types loaded, "spec" would fail IsValid().
-	// With the fix, validateGraphApplyPlan loads custom types from
-	// store/config and accepts them.
-	//
-	// In test context store is nil, so it falls back to
-	// config.GetCustomTypesFromYAML() which may also be empty.
-	// If both are empty, "spec" is still not in the built-in set.
-	// The test verifies the code path doesn't panic and that built-in
-	// types still work.
-	err := validateGraphApplyPlan(plan)
-	// "spec" may or may not be valid depending on whether config.yaml
-	// exists in the test environment. The important thing is that
-	// built-in types are accepted and the custom type code path runs.
-	if err != nil && err.Error() != `node "spec": invalid type "spec"` {
-		t.Fatalf("unexpected error: %v", err)
+	if err := validateGraphApplyPlan(plan, []string{"spec"}); err != nil {
+		t.Fatalf("expected custom type %q to validate, got %v", "spec", err)
+	}
+}
+
+func TestValidateGraphApplyPlanRejectsTypeWhenCustomTypesAbsent(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "spec", Title: "Step spec", Type: "spec"},
+		},
+	}
+	err := validateGraphApplyPlan(plan, nil)
+	if err == nil {
+		t.Fatal("expected custom type to fail when nil customTypes")
+	}
+	want := `node "spec": invalid type "spec"`
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
 	}
 }
 
@@ -39,7 +42,7 @@ func TestValidateGraphApplyPlanRejectsInvalidTypes(t *testing.T) {
 			{Key: "root", Title: "Root", Type: "definitely-not-a-type"},
 		},
 	}
-	err := validateGraphApplyPlan(plan)
+	err := validateGraphApplyPlan(plan, nil)
 	if err == nil {
 		t.Fatal("expected error for invalid type")
 	}
@@ -56,7 +59,7 @@ func TestValidateGraphApplyPlanAcceptsBuiltInTypes(t *testing.T) {
 				{Key: "n1", Title: "Node", Type: typ},
 			},
 		}
-		if err := validateGraphApplyPlan(plan); err != nil {
+		if err := validateGraphApplyPlan(plan, nil); err != nil {
 			t.Errorf("type %q rejected: %v", typ, err)
 		}
 	}
@@ -68,8 +71,123 @@ func TestValidateGraphApplyPlanAcceptsEmptyType(t *testing.T) {
 			{Key: "n1", Title: "Node", Type: ""},
 		},
 	}
-	if err := validateGraphApplyPlan(plan); err != nil {
+	if err := validateGraphApplyPlan(plan, nil); err != nil {
 		t.Fatalf("empty type rejected: %v", err)
+	}
+}
+
+// TestValidateGraphApplyPlanAcceptsNewFields verifies that estimate,
+// external_ref, parent (alias), and deps are accepted without error. (GH#4064)
+func TestValidateGraphApplyPlanAcceptsNewFields(t *testing.T) {
+	est := 120
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{
+				Key:         "epic",
+				Title:       "Epic node",
+				Type:        "epic",
+				Estimate:    &est,
+				ExternalRef: "gh-42",
+			},
+			{
+				Key:    "child",
+				Title:  "Child node",
+				Parent: "epic",
+				Deps: []GraphApplyNodeDep{
+					{Target: "epic", Type: "blocks"},
+				},
+			},
+		},
+	}
+	if err := validateGraphApplyPlan(plan, nil); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
+// TestValidateGraphApplyPlanRejectsNegativeEstimate verifies that a negative
+// estimate is caught at validation time. (GH#4064)
+func TestValidateGraphApplyPlanRejectsNegativeEstimate(t *testing.T) {
+	neg := -5
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "n", Title: "Node", Estimate: &neg},
+		},
+	}
+	err := validateGraphApplyPlan(plan, nil)
+	if err == nil {
+		t.Fatal("expected error for negative estimate")
+	}
+	if !strings.Contains(err.Error(), "estimate cannot be negative") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestValidateGraphApplyPlanRejectsEmptyDepTarget verifies that a dep with an
+// empty target is caught at validation time. (GH#4064)
+func TestValidateGraphApplyPlanRejectsEmptyDepTarget(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "n", Title: "Node", Deps: []GraphApplyNodeDep{{Target: ""}}},
+		},
+	}
+	err := validateGraphApplyPlan(plan, nil)
+	if err == nil {
+		t.Fatal("expected error for empty dep target")
+	}
+	if !strings.Contains(err.Error(), "empty target") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestValidateGraphApplyPlanParentAliasResolvesCorrectly verifies that the
+// "parent" field works as an alias for "parent_key" in validation. (GH#4064)
+func TestValidateGraphApplyPlanParentAliasResolvesCorrectly(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "root", Title: "Root"},
+			{Key: "child", Title: "Child", Parent: "root"},
+		},
+	}
+	if err := validateGraphApplyPlan(plan, nil); err != nil {
+		t.Fatalf("parent alias should resolve: %v", err)
+	}
+}
+
+// TestValidateGraphApplyPlanParentAliasRejectsUnknownKey verifies that the
+// "parent" field rejects unknown keys just like "parent_key". (GH#4064)
+func TestValidateGraphApplyPlanParentAliasRejectsUnknownKey(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "child", Title: "Child", Parent: "nonexistent"},
+		},
+	}
+	err := validateGraphApplyPlan(plan, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown parent key via alias")
+	}
+	if !strings.Contains(err.Error(), "parent key") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestEmitGraphApplyDryRun_ParentAlias verifies that the "parent" alias
+// is counted and displayed in dry-run output. (GH#4064)
+func TestEmitGraphApplyDryRun_ParentAlias(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "root", Title: "Root", Type: "epic"},
+			{Key: "c1", Title: "Child 1", Parent: "root"},
+		},
+	}
+	out := captureStdout(t, func() error {
+		emitGraphApplyDryRun(plan)
+		return nil
+	})
+	if !strings.Contains(out, "1 parent-child link(s)") {
+		t.Errorf("dry-run should count parent alias as parent-child link:\n%s", out)
+	}
+	if !strings.Contains(out, "parent_key=root") {
+		t.Errorf("dry-run should display resolved parent_key from alias:\n%s", out)
 	}
 }
 
@@ -79,6 +197,8 @@ func TestValidateGraphApplyPlanAcceptsEmptyType(t *testing.T) {
 // json.Unmarshal silently drops them. detectUnknownGraphFields must surface
 // both fields, scoped to the offending nodes.
 func TestDetectUnknownGraphFields_ReporterRepro(t *testing.T) {
+	// After GH#4064, "parent" is a recognized alias for "parent_key".
+	// Only "blocks" (an array, not an edge or dep) remains unknown.
 	planJSON := []byte(`{
         "nodes": [
             {"key": "root",   "type": "epic", "title": "Root epic",    "priority": 2},
@@ -89,8 +209,7 @@ func TestDetectUnknownGraphFields_ReporterRepro(t *testing.T) {
 
 	got := detectUnknownGraphFields(planJSON)
 	want := map[string][]string{
-		`node["child1"]`: {"blocks", "parent"},
-		`node["child2"]`: {"parent"},
+		`node["child1"]`: {"blocks"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("detectUnknownGraphFields:\n got=%#v\nwant=%#v", got, want)
@@ -107,9 +226,11 @@ func TestDetectUnknownGraphFields_KnownSchemaIsClean(t *testing.T) {
         "nodes": [
             {"key": "root", "title": "Root", "type": "epic", "priority": 2,
              "description": "d", "assignee": "alice", "assign_after_create": false,
-             "labels": ["a"], "metadata": {"k": "v"}, "metadata_refs": {"r": "root"}},
+             "estimate": 60, "labels": ["a"], "metadata": {"k": "v"},
+             "metadata_refs": {"r": "root"}, "external_ref": "gh-1",
+             "deps": [{"target": "child", "type": "blocks"}]},
             {"key": "child", "title": "Child", "parent_key": "root",
-             "parent_id": "ext-1"}
+             "parent_id": "ext-1", "parent": "root"}
         ],
         "edges": [
             {"from_key": "child", "to_key": "root", "type": "blocks"},
@@ -153,25 +274,23 @@ func TestDetectUnknownGraphFields_BadJSON(t *testing.T) {
 // text for the two highest-friction fields ('parent', 'blocks' from GH#3367)
 // is emitted and points the user at the canonical schema field.
 func TestWarnUnknownGraphFields_HintsForReporterFields(t *testing.T) {
+	// After GH#4064, "parent" is a recognized field. Only "blocks" triggers a hint.
 	var buf bytes.Buffer
 	hinted := warnUnknownGraphFields(&buf, map[string][]string{
-		`node["c1"]`: {"parent", "blocks"},
+		`node["c1"]`: {"blocks"},
 	})
 
 	out := buf.String()
-	if !strings.Contains(out, `unknown field(s): [blocks parent]`) {
+	if !strings.Contains(out, `unknown field(s): [blocks]`) {
 		t.Errorf("warning missing field list: %q", out)
 	}
-	if !strings.Contains(out, "parent_key") {
-		t.Errorf("expected 'parent' hint to mention parent_key: %q", out)
-	}
-	if !strings.Contains(out, "edges") {
-		t.Errorf("expected 'blocks' hint to mention edges array: %q", out)
+	if !strings.Contains(out, "deps") {
+		t.Errorf("expected 'blocks' hint to mention deps: %q", out)
 	}
 
 	got := append([]string(nil), hinted...)
 	sort.Strings(got)
-	want := []string{"blocks", "parent"}
+	want := []string{"blocks"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("hinted fields: got=%v want=%v", got, want)
 	}
@@ -280,7 +399,7 @@ func TestValidateGraphApplyPlanRejectsLocalBlockingCycle(t *testing.T) {
 		},
 	}
 
-	err := validateGraphApplyPlan(plan)
+	err := validateGraphApplyPlan(plan, nil)
 	if err == nil {
 		t.Fatal("expected local graph cycle to be rejected")
 	}
@@ -303,7 +422,7 @@ func TestValidateGraphApplyPlanReportsDeterministicCycleNode(t *testing.T) {
 		},
 	}
 
-	err := validateGraphApplyPlan(plan)
+	err := validateGraphApplyPlan(plan, nil)
 	if err == nil {
 		t.Fatal("expected local graph cycle to be rejected")
 	}
@@ -324,7 +443,7 @@ func TestValidateGraphApplyPlanAllowsNonBlockingLocalCycle(t *testing.T) {
 		},
 	}
 
-	if err := validateGraphApplyPlan(plan); err != nil {
+	if err := validateGraphApplyPlan(plan, nil); err != nil {
 		t.Fatalf("non-blocking cycle rejected: %v", err)
 	}
 }
@@ -340,7 +459,7 @@ func TestValidateGraphApplyPlanRejectsImplicitParentChildReverseBlockingCycle(t 
 		},
 	}
 
-	err := validateGraphApplyPlan(plan)
+	err := validateGraphApplyPlan(plan, nil)
 	if err == nil {
 		t.Fatal("expected implicit parent-child plus reverse blocking edge to be rejected")
 	}
@@ -361,12 +480,12 @@ func TestValidateGraphApplyPlanIgnoresIDOverridesForLocalCycleValidation(t *test
 		},
 	}
 
-	if err := validateGraphApplyPlan(plan); err != nil {
+	if err := validateGraphApplyPlan(plan, nil); err != nil {
 		t.Fatalf("ID override edge should not be treated as a local key cycle: %v", err)
 	}
 }
 
-func TestGraphApplyEdgeCanSkipSQLCycleCheckOnlyForLocalBlockingEdges(t *testing.T) {
+func TestGraphApplyEdgeIsLocalCycleRelevantOnlyForLocalBlockingEdges(t *testing.T) {
 	tests := []struct {
 		name string
 		edge GraphApplyEdge
@@ -382,9 +501,9 @@ func TestGraphApplyEdgeCanSkipSQLCycleCheckOnlyForLocalBlockingEdges(t *testing.
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := graphApplyEdgeCanSkipSQLCycleCheck(tt.edge, graphApplyDependencyType(tt.typ))
+			got := graphApplyEdgeIsLocalCycleRelevant(tt.edge, graphApplyDependencyType(tt.typ))
 			if got != tt.want {
-				t.Fatalf("skip = %v, want %v", got, tt.want)
+				t.Fatalf("localCycleRelevant = %v, want %v", got, tt.want)
 			}
 		})
 	}

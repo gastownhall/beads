@@ -357,6 +357,35 @@ func TestApplyConfigDefaults_ProductionFallback(t *testing.T) {
 	}
 }
 
+func TestShouldPersistResolvedPortFile(t *testing.T) {
+	t.Run("default runtime port may be persisted", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
+
+		if !shouldPersistResolvedPortFile() {
+			t.Fatal("expected local resolved port to be persisted")
+		}
+	})
+
+	t.Run("explicit server port is runtime override only", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "15432")
+		t.Setenv("BEADS_DOLT_PORT", "")
+
+		if shouldPersistResolvedPortFile() {
+			t.Fatal("expected BEADS_DOLT_SERVER_PORT to suppress port file persistence")
+		}
+	})
+
+	t.Run("legacy orchestrator port is runtime override only", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "15433")
+
+		if shouldPersistResolvedPortFile() {
+			t.Fatal("expected BEADS_DOLT_PORT to suppress port file persistence")
+		}
+	})
+}
+
 // TestApplyConfigDefaults_SocketFromEnv verifies that BEADS_DOLT_SERVER_SOCKET
 // populates ServerSocket when not already set.
 func TestApplyConfigDefaults_SocketFromEnv(t *testing.T) {

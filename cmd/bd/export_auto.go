@@ -34,31 +34,31 @@ const gitAddTimeout = 5 * time.Second
 
 // maybeAutoExport writes a git-tracked JSONL file if enabled and due.
 // Called from PersistentPostRun after auto-backup.
-func maybeAutoExport(ctx context.Context, serverMode, allowEmptyOverwrite bool) {
-	if serverMode {
-		debug.Logf("auto-export: skipping — server mode\n")
-		return
-	}
-
+//
+// This runs in server mode too: clients of a shared dolt sql-server rely on
+// the JSONL export for git-durable state exactly like embedded users do — in
+// topologies without a Dolt remote it is the only durability. Skipping here
+// made `git push` silently publish stale issue state (wy-4ope).
+func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	// Skip when running as a git hook to avoid re-export during pre-commit.
 	if os.Getenv("BD_GIT_HOOK") == "1" {
 		debug.Logf("auto-export: skipping — running as git hook\n")
-		return
+		return nil
 	}
 
 	if !config.GetBool("export.auto") {
-		return
+		return nil
 	}
 	if store == nil {
-		return
+		return nil
 	}
 	if lm, ok := storage.UnwrapStore(store).(storage.LifecycleManager); ok && lm.IsClosed() {
-		return
+		return nil
 	}
 
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
-		return
+		return nil
 	}
 
 	// Resolve the export path before throttle/check detection so all decisions
@@ -80,40 +80,40 @@ func maybeAutoExport(ctx context.Context, serverMode, allowEmptyOverwrite bool) 
 		interval = 60 * time.Second
 	}
 
-	// Change detection via Dolt commit hash. This is cheap, so do it before
+	// Change detection via Dolt state hash. This is cheap, so do it before
 	// throttle: when there are no changes, there is nothing to throttle.
-	currentCommit, err := store.GetCurrentCommit(ctx)
+	currentCommit, err := storeStateHash(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
-		return
+		return nil
 	}
 	if currentCommit == state.LastDoltCommit && state.LastDoltCommit != "" {
 		debug.Logf("auto-export: no changes since last export\n")
-		return
+		return nil
 	}
 
 	if !shouldExport(state, interval) {
 		debug.Logf("auto-export: throttled (last export %s ago, interval %s)\n",
 			time.Since(state.Timestamp).Round(time.Second), interval)
-		return
+		return nil
 	}
 
 	if !allowEmptyOverwrite {
 		if skip, existingCount, err := shouldSkipEmptyAutoExport(ctx, fullPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to check existing JSONL: %v\n", err)
-			return
+			return nil
 		} else if skip {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: current database would export 0 issues, but %s already contains %d issue(s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, existingCount)
-			return
+			return nil
 		}
 	}
 	if !allowEmptyOverwrite {
 		if missingIDs, err := missingJSONLIssueIDsInStore(ctx, fullPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to compare existing JSONL against local store: %v\n", err)
-			return
+			return nil
 		} else if len(missingIDs) > 0 {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: %s contains %d JSONL-only issue record(s) absent from the local Dolt store (%s); refusing to overwrite. Run `bd init --from-jsonl` to import the JSONL file, or move it aside and retry.\n", fullPath, len(missingIDs), strings.Join(sampleStrings(missingIDs, 5), ", "))
-			return
+			return nil
 		}
 	}
 
@@ -122,7 +122,7 @@ func maybeAutoExport(ctx context.Context, serverMode, allowEmptyOverwrite bool) 
 	issueCount, memoryCount, err := exportToFile(ctx, fullPath, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: auto-export failed: %v\n", err)
-		return
+		return nil
 	}
 
 	debug.Logf("auto-export: wrote %d issues and %d memories to %s\n",
@@ -141,7 +141,7 @@ func maybeAutoExport(ctx context.Context, serverMode, allowEmptyOverwrite bool) 
 			Issues:         0,
 			Memories:       0,
 		})
-		return
+		return nil
 	}
 	warnJSONLWithoutDoltRemote("auto-export")
 
@@ -149,7 +149,7 @@ func maybeAutoExport(ctx context.Context, serverMode, allowEmptyOverwrite bool) 
 	// git repo (standalone BEADS_DIR flow), or when export.git-add is false.
 	if config.GetBool("export.git-add") && !config.GetBool("no-git-ops") && isGitRepo() {
 		if err := gitAddFile(fullPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: auto-export: git add failed: %v\n", err)
+			return fmt.Errorf("auto-export: git add failed: %w", err)
 		}
 	}
 
@@ -161,6 +161,19 @@ func maybeAutoExport(ctx context.Context, serverMode, allowEmptyOverwrite bool) 
 		Memories:       memoryCount,
 	}
 	saveExportAutoState(beadsDir, &newState)
+	return nil
+}
+
+// storeStateHash returns the hash used for auto-export change detection.
+// It prefers a working-set-aware hash (storage.StateHasher) over the HEAD
+// commit: in server mode dolt auto-commit is off, so writes stay in the
+// working set and HEAD does not advance — HEAD-based detection would go
+// permanently quiet after the first export.
+func storeStateHash(ctx context.Context) (string, error) {
+	if sh, ok := storage.UnwrapStore(store).(storage.StateHasher); ok {
+		return sh.GetStateHash(ctx)
+	}
+	return store.GetCurrentCommit(ctx)
 }
 
 // shouldExport reports whether the throttle window has elapsed, or whether
@@ -300,6 +313,11 @@ func sampleStrings(values []string, limit int) []string {
 }
 
 func autoExportFilter(ctx context.Context) types.IssueFilter {
+	filter, _ := buildAutoExportFilter(ctx)
+	return filter
+}
+
+func buildAutoExportFilter(ctx context.Context) (types.IssueFilter, map[string]bool) {
 	filter := types.IssueFilter{Limit: 0}
 	var infraTypes []string
 	if store != nil {
@@ -313,6 +331,11 @@ func autoExportFilter(ctx context.Context) types.IssueFilter {
 	if len(infraTypes) == 0 {
 		infraTypes = dolt.DefaultInfraTypes()
 	}
+	infraTypeSet := make(map[string]bool, len(infraTypes))
+	for _, t := range infraTypes {
+		infraTypeSet[t] = true
+	}
+	sort.Strings(infraTypes)
 	for _, t := range infraTypes {
 		filter.ExcludeTypes = append(filter.ExcludeTypes, types.IssueType(t))
 	}
@@ -324,7 +347,7 @@ func autoExportFilter(ctx context.Context) types.IssueFilter {
 	persistentOnly := false
 	filter.Ephemeral = &persistentOnly
 
-	return filter
+	return filter, infraTypeSet
 }
 
 // exportToFile atomically exports issues + memories to the given file path.
@@ -341,9 +364,24 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 		}
 	}()
 
-	issues, err := store.SearchIssues(ctx, "", autoExportFilter(ctx))
+	filter, infraTypeSet := buildAutoExportFilter(ctx)
+	issues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to search issues: %w", err)
+	}
+
+	// Owner-exclusion safety net: auto-export writes the git-committed
+	// .beads/issues.jsonl, so the export.exclude_owners config (and legacy
+	// export.exclude_owner) must filter here too. Otherwise contributor/personal
+	// issues that the manual `bd export` path excludes can still leak into git
+	// history and PRs via auto-export (maphew review, be-e2nb). Auto-export has
+	// no --exclude-owner flag, so only config-sourced owners apply here.
+	if ownerExcludes := buildOwnerExcludeSet(ctx, nil); len(ownerExcludes) > 0 {
+		issues = filterOutOwners(issues, ownerExcludes)
+	}
+
+	if err := guardAutoExportOverwrite(path, infraTypeSet, includeMemories); err != nil {
+		return 0, 0, err
 	}
 
 	// Bulk-load relational data
@@ -429,6 +467,84 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 	}
 
 	return issueCount, memoryCount, nil
+}
+
+func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMemories bool) error {
+	f, err := os.Open(path) //nolint:gosec
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("auto-export shrink guard: inspect existing JSONL: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var stats autoExportOverwriteStats
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		if err := classifyExistingAutoExportRecord([]byte(line), infraTypes, includeMemories, &stats); err != nil {
+			return fmt.Errorf("auto-export shrink guard: inspect existing JSONL line %d: %w", lineNo, err)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("auto-export shrink guard: inspect existing JSONL: %w", err)
+	}
+
+	if stats.FilteredRecords == 0 {
+		return nil
+	}
+	return fmt.Errorf("auto-export shrink guard: refusing to overwrite %s because it contains %d record(s) outside auto-export scope (%d memories, %d infra/template/ephemeral issues, %d unknown); run an explicit export if you want to replace it", path, stats.FilteredRecords, stats.Memories, stats.FilteredIssues, stats.UnknownRecords)
+}
+
+type autoExportOverwriteStats struct {
+	FilteredRecords int
+	Memories        int
+	FilteredIssues  int
+	UnknownRecords  int
+}
+
+func classifyExistingAutoExportRecord(line []byte, infraTypes map[string]bool, includeMemories bool, stats *autoExportOverwriteStats) error {
+	var record struct {
+		Type       string          `json:"_type"`
+		IssueType  types.IssueType `json:"issue_type"`
+		IsTemplate bool            `json:"is_template"`
+		Ephemeral  bool            `json:"ephemeral"`
+		ID         string          `json:"id"`
+	}
+	if err := json.Unmarshal(line, &record); err != nil {
+		return err
+	}
+
+	switch record.Type {
+	case "memory":
+		if !includeMemories {
+			stats.FilteredRecords++
+			stats.Memories++
+		}
+		return nil
+	case "", "issue":
+		if record.ID == "" {
+			stats.FilteredRecords++
+			stats.UnknownRecords++
+			return nil
+		}
+		if infraTypes[string(record.IssueType)] || record.IsTemplate || record.Ephemeral {
+			stats.FilteredRecords++
+			stats.FilteredIssues++
+		}
+		return nil
+	default:
+		stats.FilteredRecords++
+		stats.UnknownRecords++
+		return nil
+	}
 }
 
 func loadExportAutoState(beadsDir string) *exportAutoState {

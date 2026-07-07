@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -24,46 +25,46 @@ Example:
   bd duplicates                    # Show all duplicate groups
   bd duplicates --auto-merge       # Automatically merge all duplicates
   bd duplicates --dry-run          # Show what would be merged`,
-	Run: func(cmd *cobra.Command, _ []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("duplicates")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		autoMerge, _ := cmd.Flags().GetBool("auto-merge")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
-		// Block writes in readonly mode (merging modifies data)
 		if autoMerge && !dryRun {
 			CheckReadonly("duplicates --auto-merge")
 		}
-		// Use global jsonOutput set by PersistentPreRun
 		ctx := rootCtx
 
-		// Get all issues
 		allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 		if err != nil {
-			FatalError("fetching issues: %v", err)
+			return HandleError("fetching issues: %v", err)
 		}
-		// Filter out closed issues - they're done, no point detecting duplicates
 		openIssues := make([]*types.Issue, 0, len(allIssues))
 		for _, issue := range allIssues {
 			if issue.Status != types.StatusClosed {
 				openIssues = append(openIssues, issue)
 			}
 		}
-		// Find duplicates (only among open issues)
 		duplicateGroups := findDuplicateGroups(openIssues)
 		if len(duplicateGroups) == 0 {
 			if !jsonOutput {
 				fmt.Println("No duplicates found!")
-			} else {
-				outputJSON(map[string]interface{}{
-					"duplicate_groups": 0,
-					"groups":           []interface{}{},
-				})
+				return nil
 			}
-			return
+			return outputJSON(map[string]interface{}{
+				"duplicate_groups": 0,
+				"groups":           []interface{}{},
+			})
 		}
-		// Count references for each issue
 		refCounts := countReferences(allIssues)
-		// Count structural relationships (children, dependencies) for duplicate groups
 		structuralScores := countStructuralRelationships(duplicateGroups)
-		// Prepare output
 		var mergeCommands []string
 		var mergeResults []map[string]interface{}
 		for _, group := range duplicateGroups {
@@ -74,7 +75,6 @@ Example:
 					sources = append(sources, issue.ID)
 				}
 			}
-			// Generate actionable command suggestion
 			cmd := fmt.Sprintf("# Duplicate: %s (same content as %s)\n# Suggested action: bd close %s && bd dep add %s %s --type related",
 				strings.Join(sources, " "),
 				target.ID,
@@ -93,7 +93,6 @@ Example:
 		if autoMerge && !dryRun {
 			commandDidWrite.Store(true)
 		}
-		// Output results
 		if jsonOutput {
 			output := map[string]interface{}{
 				"duplicate_groups": len(duplicateGroups),
@@ -105,45 +104,45 @@ Example:
 					output["merge_results"] = mergeResults
 				}
 			}
-			outputJSON(output)
-		} else {
-			fmt.Printf("%s Found %d duplicate group(s):\n\n", ui.RenderWarn("🔍"), len(duplicateGroups))
-			for i, group := range duplicateGroups {
-				target := chooseMergeTarget(group, refCounts, structuralScores)
-				fmt.Printf("%s Group %d: %s\n", ui.RenderAccent("━━"), i+1, group[0].Title)
-				for _, issue := range group {
-					refs := refCounts[issue.ID]
-					weight := 0
-					if score, ok := structuralScores[issue.ID]; ok {
-						weight = score.dependentCount*3 + score.dependsOnCount
-					}
-					marker := "  "
-					if issue.ID == target.ID {
-						marker = ui.RenderPass("→ ")
-					}
-					fmt.Printf("%s%s (%s, P%d, weight=%d, %d refs)\n",
-						marker, issue.ID, issue.Status, issue.Priority, weight, refs)
-				}
-				sources := make([]string, 0, len(group)-1)
-				for _, issue := range group {
-					if issue.ID != target.ID {
-						sources = append(sources, issue.ID)
-					}
-				}
-				fmt.Printf("  %s Duplicate: %s (same content as %s)\n", ui.RenderAccent("Note:"), strings.Join(sources, " "), target.ID)
-				fmt.Printf("  %s bd close %s && bd dep add %s %s --type related\n\n",
-					ui.RenderAccent("Suggested:"), strings.Join(sources, " "), strings.Join(sources, " "), target.ID)
-			}
-			if autoMerge {
-				if dryRun {
-					fmt.Printf("%s Dry run - would execute %d merge(s)\n", ui.RenderWarn("⚠"), len(mergeCommands))
-				} else {
-					fmt.Printf("%s Merged %d group(s)\n", ui.RenderPass("✓"), len(mergeCommands))
-				}
-			} else {
-				fmt.Printf("%s Run with --auto-merge to execute all suggested merges\n", ui.RenderAccent("💡"))
-			}
+			return outputJSON(output)
 		}
+		fmt.Printf("%s Found %d duplicate group(s):\n\n", ui.RenderWarn("🔍"), len(duplicateGroups))
+		for i, group := range duplicateGroups {
+			target := chooseMergeTarget(group, refCounts, structuralScores)
+			fmt.Printf("%s Group %d: %s\n", ui.RenderAccent("━━"), i+1, group[0].Title)
+			for _, issue := range group {
+				refs := refCounts[issue.ID]
+				weight := 0
+				if score, ok := structuralScores[issue.ID]; ok {
+					weight = score.dependentCount*3 + score.dependsOnCount
+				}
+				marker := "  "
+				if issue.ID == target.ID {
+					marker = ui.RenderPass("→ ")
+				}
+				fmt.Printf("%s%s (%s, P%d, weight=%d, %d refs)\n",
+					marker, issue.ID, issue.Status, issue.Priority, weight, refs)
+			}
+			sources := make([]string, 0, len(group)-1)
+			for _, issue := range group {
+				if issue.ID != target.ID {
+					sources = append(sources, issue.ID)
+				}
+			}
+			fmt.Printf("  %s Duplicate: %s (same content as %s)\n", ui.RenderAccent("Note:"), strings.Join(sources, " "), target.ID)
+			fmt.Printf("  %s bd close %s && bd dep add %s %s --type related\n\n",
+				ui.RenderAccent("Suggested:"), strings.Join(sources, " "), strings.Join(sources, " "), target.ID)
+		}
+		if autoMerge {
+			if dryRun {
+				fmt.Printf("%s Dry run - would execute %d merge(s)\n", ui.RenderWarn("⚠"), len(mergeCommands))
+			} else {
+				fmt.Printf("%s Merged %d group(s)\n", ui.RenderPass("✓"), len(mergeCommands))
+			}
+		} else {
+			fmt.Printf("%s Run with --auto-merge to execute all suggested merges\n", ui.RenderAccent("💡"))
+		}
+		return nil
 	},
 }
 

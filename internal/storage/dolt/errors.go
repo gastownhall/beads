@@ -35,6 +35,13 @@ var (
 	// prevent propagating the corruption to the remote. Run bd dolt verify
 	// to diagnose and recover.
 	ErrDanglingReference = errors.New("dangling chunk reference")
+
+	// errCommitPhase marks an error as having occurred during tx.Commit (as
+	// opposed to BeginTx or the transaction body). A connection failure during
+	// commit is ambiguous — the commit may have landed on the server before the
+	// connection dropped — so withRetryTx must NOT blindly replay it, or it
+	// could double-apply the write. Pre-commit failures carry no such risk.
+	errCommitPhase = errors.New("write commit phase")
 )
 
 // isTableNotExistError returns true if the error indicates a MySQL/Dolt

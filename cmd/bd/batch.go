@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -78,6 +80,13 @@ normal 'bd' subcommands for interactive/read operations.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("batch")
 
+		evt := metrics.NewCommandEvent("batch")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if store == nil {
 			return fmt.Errorf("no database connection available (%s)", diagHint())
 		}
@@ -110,10 +119,12 @@ normal 'bd' subcommands for interactive/read operations.`,
 				fmt.Fprintf(cmd.OutOrStdout(), "line %d: %s\n", op.line, op.raw)
 			}
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if err := outputJSON(map[string]interface{}{
 					"dry_run":    true,
 					"operations": len(ops),
-				})
+				}); err != nil {
+					return err
+				}
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "%d operations parsed (dry-run, nothing executed)\n", len(ops))
 			}
@@ -124,10 +135,12 @@ normal 'bd' subcommands for interactive/read operations.`,
 			// Empty input is a no-op success, matching 'bd list | bd batch' on
 			// an empty list.
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if err := outputJSON(map[string]interface{}{
 					"operations": 0,
 					"status":     "ok",
-				})
+				}); err != nil {
+					return err
+				}
 			} else {
 				fmt.Fprintln(cmd.OutOrStdout(), "batch: 0 operations (no-op)")
 			}
@@ -156,7 +169,9 @@ normal 'bd' subcommands for interactive/read operations.`,
 		})
 		if err != nil {
 			if jsonOutput {
-				outputJSONError(err, "batch_error")
+				if jerr := outputJSONError(err, "batch_error"); jerr != nil {
+					return errors.Join(err, jerr)
+				}
 			}
 			return err
 		}
@@ -164,11 +179,13 @@ normal 'bd' subcommands for interactive/read operations.`,
 		commandDidWrite.Store(true)
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if err := outputJSON(map[string]interface{}{
 				"operations": len(results),
 				"status":     "ok",
 				"results":    results,
-			})
+			}); err != nil {
+				return err
+			}
 		} else {
 			fmt.Fprintf(cmd.OutOrStdout(), "batch: %d operations committed\n", len(results))
 			for _, r := range results {

@@ -366,8 +366,9 @@ func TestCheckJunie_NotInstalled(t *testing.T) {
 		}
 	}()
 
-	// CheckJunie calls os.Exit(1) when not installed
-	// We can't easily test that, but we document expected behavior
+	if err := CheckJunie(); err == nil {
+		t.Fatal("CheckJunie should return error when not installed")
+	}
 }
 
 func TestCheckJunie_Installed(t *testing.T) {
@@ -417,8 +418,9 @@ func TestCheckJunie_PartialInstall_GuidelinesOnly(t *testing.T) {
 		t.Fatalf("failed to create guidelines file: %v", err)
 	}
 
-	// CheckJunie calls os.Exit(1) for partial installation
-	// We can't easily test that, but we document expected behavior
+	if err := CheckJunie(); err == nil {
+		t.Fatal("CheckJunie should return error for partial installation")
+	}
 }
 
 func TestCheckJunie_PartialInstall_MCPOnly(t *testing.T) {
@@ -447,8 +449,9 @@ func TestCheckJunie_PartialInstall_MCPOnly(t *testing.T) {
 		t.Fatalf("failed to create MCP config file: %v", err)
 	}
 
-	// CheckJunie calls os.Exit(1) for partial installation
-	// We can't easily test that, but we document expected behavior
+	if err := CheckJunie(); err == nil {
+		t.Fatal("CheckJunie should return error for partial installation")
+	}
 }
 
 func TestJunieFilePaths(t *testing.T) {

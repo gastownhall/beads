@@ -24,10 +24,6 @@ func deferredChildrenQueryRegex(depTable, issueTable string) string {
 	return `SELECT dep\.issue_id\s+FROM ` + depTable + ` dep\s+JOIN ` + issueTable + ` parent ON parent\.id = dep\.` + targetCol + `\s+WHERE dep\.type = 'parent-child'\s+AND parent\.defer_until IS NOT NULL\s+AND parent\.defer_until > UTC_TIMESTAMP\(\)`
 }
 
-func childrenOfIssuesQueryRegex(depTable string) string {
-	return `SELECT issue_id FROM ` + depTable + `\s+WHERE type = 'parent-child' AND COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) IN \(\?\)`
-}
-
 func beginMockTx(t *testing.T) (*sql.DB, sqlmock.Sqlmock, *sql.Tx) {
 	t.Helper()
 
@@ -100,51 +96,6 @@ func TestBuildSQLInClause(t *testing.T) {
 	}
 }
 
-func TestGetReadyWorkInTx_UnboundedPropagatesBlockedComputationError(t *testing.T) {
-	t.Parallel()
-
-	blockedErr := errors.New("blocked graph unavailable")
-	_, err := GetReadyWorkInTx(
-		context.Background(),
-		nil,
-		types.WorkFilter{IncludeDeferred: true},
-		func(context.Context, *sql.Tx, bool) ([]string, error) {
-			return nil, blockedErr
-		},
-	)
-	if err == nil {
-		t.Fatal("expected blocked computation error")
-	}
-	if !errors.Is(err, blockedErr) {
-		t.Fatalf("expected wrapped blocked computation error, got %v", err)
-	}
-	if !strings.Contains(err.Error(), "compute blocked IDs") {
-		t.Fatalf("expected compute blocked IDs context, got %v", err)
-	}
-}
-
-func TestGetReadyWorkInTx_UnboundedComputesBlockersAcrossWispsByDefault(t *testing.T) {
-	t.Parallel()
-
-	stopErr := errors.New("stop after blocker computation")
-	var gotIncludeWisps bool
-	_, err := GetReadyWorkInTx(
-		context.Background(),
-		nil,
-		types.WorkFilter{IncludeDeferred: true},
-		func(_ context.Context, _ *sql.Tx, includeWisps bool) ([]string, error) {
-			gotIncludeWisps = includeWisps
-			return nil, stopErr
-		},
-	)
-	if !errors.Is(err, stopErr) {
-		t.Fatalf("error = %v, want stop error", err)
-	}
-	if !gotIncludeWisps {
-		t.Fatal("computeBlockedFn includeWisps = false, want true")
-	}
-}
-
 func TestGetReadyWorkInTx_PropagatesDeferredParentChildError(t *testing.T) {
 	t.Parallel()
 
@@ -156,10 +107,6 @@ func TestGetReadyWorkInTx_PropagatesDeferredParentChildError(t *testing.T) {
 		context.Background(),
 		tx,
 		types.WorkFilter{},
-		func(context.Context, *sql.Tx, bool) ([]string, error) {
-			t.Fatal("blocked computation should not run after deferred parent child failure")
-			return nil, nil
-		},
 	)
 	if err == nil {
 		t.Fatal("expected deferred parent child error")
@@ -175,83 +122,7 @@ func TestGetReadyWorkInTx_PropagatesDeferredParentChildError(t *testing.T) {
 	}
 }
 
-func TestIsBlockedInTxErrorsOnIssueWispCollision(t *testing.T) {
-	t.Parallel()
-
-	_, mock, tx := beginMockTx(t)
-	mock.ExpectQuery(`(?s)SELECT COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type FROM dependencies\s+WHERE issue_id = \? AND type IN`).
-		WithArgs("blocked-id").
-		WillReturnRows(sqlmock.NewRows([]string{"depends_on_id", "type"}).AddRow("dup-id", "blocks"))
-	mock.ExpectQuery(`(?s)SELECT COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type FROM wisp_dependencies\s+WHERE issue_id = \? AND type IN`).
-		WithArgs("blocked-id").
-		WillReturnRows(sqlmock.NewRows([]string{"depends_on_id", "type"}))
-	mock.ExpectQuery("SELECT id, status FROM issues").
-		WithArgs("dup-id").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "status"}).AddRow("dup-id", types.StatusOpen))
-	mock.ExpectQuery("SELECT id, status FROM wisps").
-		WithArgs("dup-id").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "status"}).AddRow("dup-id", types.StatusOpen))
-
-	_, _, err := IsBlockedInTx(context.Background(), tx, "blocked-id")
-	if err == nil {
-		t.Fatal("expected duplicate issue/wisp status error")
-	}
-	if !strings.Contains(err.Error(), `id "dup-id" exists in both issues and wisps`) {
-		t.Fatalf("error = %v, want duplicate issue/wisp context", err)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
-	}
-}
-
-func TestGetNewlyUnblockedByCloseInTxChecksRemainingBlockersInBatches(t *testing.T) {
-	t.Parallel()
-
-	_, mock, tx := beginMockTx(t)
-	mock.ExpectQuery(`(?s)SELECT issue_id FROM dependencies\s+WHERE COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) = \? AND type = 'blocks'`).
-		WithArgs("closed-blocker").
-		WillReturnRows(sqlmock.NewRows([]string{"issue_id"}).
-			AddRow("candidate-a").
-			AddRow("candidate-b"))
-	mock.ExpectQuery(`(?s)SELECT issue_id FROM wisp_dependencies\s+WHERE COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) = \? AND type = 'blocks'`).
-		WithArgs("closed-blocker").
-		WillReturnRows(sqlmock.NewRows([]string{"issue_id"}))
-	mock.ExpectQuery(`SELECT id, status FROM issues WHERE id IN \(\?,\?\)`).
-		WithArgs("candidate-a", "candidate-b").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "status"}).
-			AddRow("candidate-a", types.StatusOpen).
-			AddRow("candidate-b", types.StatusOpen))
-	mock.ExpectQuery(`SELECT id, status FROM wisps WHERE id IN \(\?,\?\)`).
-		WithArgs("candidate-a", "candidate-b").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "status"}))
-	mock.ExpectQuery(`(?s)SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id FROM dependencies\s+WHERE issue_id IN \(\?,\?\) AND type = 'blocks' AND COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) != \?`).
-		WithArgs("candidate-a", "candidate-b", "closed-blocker").
-		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "depends_on_id"}).
-			AddRow("candidate-a", "other-blocker").
-			AddRow("candidate-b", "other-blocker"))
-	mock.ExpectQuery(`(?s)SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id FROM wisp_dependencies\s+WHERE issue_id IN \(\?,\?\) AND type = 'blocks' AND COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) != \?`).
-		WithArgs("candidate-a", "candidate-b", "closed-blocker").
-		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "depends_on_id"}))
-	mock.ExpectQuery(`SELECT id, status FROM issues WHERE id IN \(\?\)`).
-		WithArgs("other-blocker").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "status"}).AddRow("other-blocker", types.StatusOpen))
-	mock.ExpectQuery(`SELECT id, status FROM wisps WHERE id IN \(\?\)`).
-		WithArgs("other-blocker").
-		WillReturnRows(sqlmock.NewRows([]string{"id", "status"}))
-
-	got, err := GetNewlyUnblockedByCloseInTx(context.Background(), tx, "closed-blocker")
-	if err != nil {
-		t.Fatalf("GetNewlyUnblockedByCloseInTx: %v", err)
-	}
-	if len(got) != 0 {
-		t.Fatalf("unblocked = %v, want none because both candidates still have an open blocker", got)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
-	}
-}
-
-func TestLoadStatusByIDInTxErrorsOnIssueWispCollision(t *testing.T) {
+func TestLoadStatusByIDInTxPrefersWispOnCollision(t *testing.T) {
 	t.Parallel()
 
 	_, mock, tx := beginMockTx(t)
@@ -262,31 +133,34 @@ func TestLoadStatusByIDInTxErrorsOnIssueWispCollision(t *testing.T) {
 		WithArgs("dup-id").
 		WillReturnRows(sqlmock.NewRows([]string{"id", "status"}).AddRow("dup-id", types.StatusClosed))
 
-	_, err := loadStatusByIDInTx(context.Background(), tx, []string{"dup-id"})
-	if err == nil {
-		t.Fatal("expected duplicate issue/wisp status error")
+	got, err := loadStatusByIDInTx(context.Background(), tx, []string{"dup-id"})
+	if err != nil {
+		t.Fatalf("loadStatusByIDInTx error = %v, want no error on cross-table dup", err)
 	}
-	if !strings.Contains(err.Error(), `id "dup-id" exists in both issues and wisps`) {
-		t.Fatalf("error = %v, want duplicate issue/wisp context", err)
+	if got["dup-id"] != types.StatusClosed {
+		t.Errorf("status = %v, want %v (wisp canonical preferred over issues)", got["dup-id"], types.StatusClosed)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
 
-func TestMergeReadyWispsErrorsOnIssueWispCollision(t *testing.T) {
+func TestMergeReadyWispsPrefersWispOnCollision(t *testing.T) {
 	t.Parallel()
 
-	_, err := mergeReadyWisps(
-		[]*types.Issue{{ID: "dup-id", Status: types.StatusOpen}},
-		[]*types.Issue{{ID: "dup-id", Status: types.StatusClosed}},
+	issuesCopy := &types.Issue{ID: "dup-id", Status: types.StatusOpen, Title: "issues copy"}
+	wispCopy := &types.Issue{ID: "dup-id", Status: types.StatusClosed, Title: "wisp canonical"}
+
+	got := mergeReadyWisps(
+		[]*types.Issue{issuesCopy},
+		[]*types.Issue{wispCopy},
 		types.WorkFilter{},
 	)
-	if err == nil {
-		t.Fatal("expected duplicate issue/wisp ready-work error")
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1 (deduped)", len(got))
 	}
-	if !strings.Contains(err.Error(), `id "dup-id" exists in both issues and wisps`) {
-		t.Fatalf("error = %v, want duplicate issue/wisp context", err)
+	if got[0].Title != "wisp canonical" {
+		t.Errorf("title = %q, want %q (wisp preferred over issues copy)", got[0].Title, "wisp canonical")
 	}
 }
 
@@ -364,30 +238,6 @@ func TestGetChildrenOfDeferredParentsInTx_IgnoresMissingWispDependenciesTable(t 
 	want := []string{"child-from-dependencies-issues", "child-from-dependencies-wisps"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("children = %v, want %v", got, want)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet SQL expectations: %v", err)
-	}
-}
-
-func TestGetChildrenOfIssuesInTxPropagatesWispDependencyReadError(t *testing.T) {
-	t.Parallel()
-
-	_, mock, tx := beginMockTx(t)
-	readErr := errors.New("permission denied reading wisp_dependencies")
-	mock.ExpectQuery(childrenOfIssuesQueryRegex("dependencies")).
-		WithArgs("parent-id").
-		WillReturnRows(sqlmock.NewRows([]string{"issue_id"}))
-	mock.ExpectQuery(childrenOfIssuesQueryRegex("wisp_dependencies")).
-		WithArgs("parent-id").
-		WillReturnError(readErr)
-
-	_, err := getChildrenOfIssuesInTx(context.Background(), tx, []string{"parent-id"})
-	if err == nil {
-		t.Fatal("expected wisp_dependencies read error")
-	}
-	if !errors.Is(err, readErr) {
-		t.Fatalf("error = %v, want wrapped read error", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)

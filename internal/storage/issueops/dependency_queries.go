@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -12,7 +13,7 @@ import (
 
 // GetAllDependencyRecordsInTx returns all dependency records from permanent and
 // wisp dependency tables.
-func GetAllDependencyRecordsInTx(ctx context.Context, tx *sql.Tx) (map[string][]*types.Dependency, error) {
+func GetAllDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*types.Dependency, error) {
 	result := make(map[string][]*types.Dependency)
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
 		if err := getAllDependencyRecordsIntoFromTable(ctx, tx, depTable, result); err != nil {
@@ -26,7 +27,7 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx *sql.Tx) (map[string][]
 }
 
 //nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller).
-func getAllDependencyRecordsIntoFromTable(ctx context.Context, tx *sql.Tx, depTable string, result map[string][]*types.Dependency) error {
+func getAllDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, result map[string][]*types.Dependency) error {
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
 			FROM %s
@@ -55,7 +56,7 @@ func getAllDependencyRecordsIntoFromTable(ctx context.Context, tx *sql.Tx, depTa
 // Uses a single batched wisp-partition query + batched IN clauses, so cost is
 // O(1 + N/queryBatchSize) round-trips rather than O(N) — important on remote
 // backends (see GH#3414).
-func GetDependencyRecordsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string][]*types.Dependency, error) {
+func GetDependencyRecordsForIssuesInTx(ctx context.Context, tx DBTX, issueIDs []string) (map[string][]*types.Dependency, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string][]*types.Dependency), nil
 	}
@@ -82,7 +83,7 @@ func GetDependencyRecordsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs
 // GetDependencyRecordsForIssuesFromTableInTx is a fast-path variant used by
 // callers that already know every ID belongs to a single dep table (e.g.
 // searchTableInTx). Skips the wisp-partition round-trip.
-func GetDependencyRecordsForIssuesFromTableInTx(ctx context.Context, tx *sql.Tx, depTable string, issueIDs []string) (map[string][]*types.Dependency, error) {
+func GetDependencyRecordsForIssuesFromTableInTx(ctx context.Context, tx DBTX, depTable string, issueIDs []string) (map[string][]*types.Dependency, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string][]*types.Dependency), nil
 	}
@@ -94,7 +95,7 @@ func GetDependencyRecordsForIssuesFromTableInTx(ctx context.Context, tx *sql.Tx,
 }
 
 //nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by callers).
-func getDependencyRecordsIntoFromTable(ctx context.Context, tx *sql.Tx, depTable string, ids []string, result map[string][]*types.Dependency) error {
+func getDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, ids []string, result map[string][]*types.Dependency) error {
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
 		if end > len(ids) {
@@ -130,9 +131,7 @@ func getDependencyRecordsIntoFromTable(ctx context.Context, tx *sql.Tx, depTable
 	return nil
 }
 
-// GetDependencyCountsInTx returns dependency counts for multiple issues within a transaction.
-// Uses batched IN clauses (queryBatchSize) to avoid query-planner spikes.
-func GetDependencyCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (map[string]*types.DependencyCounts, error) {
+func GetDependencyCountsInTx(ctx context.Context, tx DBTX, issueIDs []string) (map[string]*types.DependencyCounts, error) {
 	if len(issueIDs) == 0 {
 		return make(map[string]*types.DependencyCounts), nil
 	}
@@ -140,6 +139,13 @@ func GetDependencyCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string)
 	result := make(map[string]*types.DependencyCounts)
 	for _, id := range issueIDs {
 		result[id] = &types.DependencyCounts{}
+	}
+
+	depTables := []string{"dependencies", "wisp_dependencies"}
+	if empty, probeErr := wispsTableEmptyOrMissingInTx(ctx, tx); probeErr != nil {
+		return nil, fmt.Errorf("get dependency counts: probe: %w", probeErr)
+	} else if empty {
+		depTables = []string{"dependencies"}
 	}
 
 	for start := 0; start < len(issueIDs); start += queryBatchSize {
@@ -157,8 +163,7 @@ func GetDependencyCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string)
 		}
 		inClause := strings.Join(placeholders, ",")
 
-		for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-			// Blockers: issues that block the given IDs.
+		for _, depTable := range depTables {
 			//nolint:gosec // G201: depTable is hardcoded and inClause contains only ? placeholders.
 			depRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 				SELECT issue_id, COUNT(*) as cnt
@@ -227,7 +232,7 @@ func GetDependencyCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string)
 //   - blockedByMap: issueID -> list of IDs blocking it
 //   - blocksMap: issueID -> list of IDs it blocks
 //   - parentMap: childID -> parentID (parent-child deps)
-func GetBlockingInfoForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (
+func GetBlockingInfoForIssuesInTx(ctx context.Context, tx DBTX, issueIDs []string) (
 	blockedByMap map[string][]string,
 	blocksMap map[string][]string,
 	parentMap map[string]string,
@@ -281,7 +286,7 @@ type blockingInfoRow struct {
 // cross-class closed blockers do not appear active.
 // Uses batched IN clauses (queryBatchSize) to avoid query-planner spikes.
 func queryBlockedByInfo(
-	ctx context.Context, tx *sql.Tx,
+	ctx context.Context, tx DBTX,
 	issueIDs []string,
 	depTable string,
 	blockedByMap map[string][]string,
@@ -354,7 +359,7 @@ func queryBlockedByInfo(
 
 // queryBlocksInfo queries inbound blocking info across dependency tables.
 func queryBlocksInfo(
-	ctx context.Context, tx *sql.Tx,
+	ctx context.Context, tx DBTX,
 	issueIDs []string,
 	depTables []string,
 	blocksMap map[string][]string,
@@ -418,7 +423,7 @@ func queryBlocksInfo(
 	return nil
 }
 
-func loadStatusByIDInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[string]types.Status, error) {
+func loadStatusByIDInTx(ctx context.Context, tx DBTX, ids []string) (map[string]types.Status, error) {
 	statusByID := make(map[string]types.Status)
 	if len(ids) == 0 {
 		return statusByID, nil
@@ -448,9 +453,12 @@ func loadStatusByIDInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[stri
 					_ = rows.Close()
 					return nil, fmt.Errorf("scan status: %w", err)
 				}
-				if existingTable, exists := sourceByID[id]; exists {
-					_ = rows.Close()
-					return nil, fmt.Errorf("status id %q exists in both %s and %s", id, existingTable, issueTable)
+				if _, exists := sourceByID[id]; exists {
+					// Prefer wisps-table status on cross-table dup (be-iabdi).
+					// Tables iterate issues→wisps so the second encounter is always wisps.
+					sourceByID[id] = issueTable
+					statusByID[id] = status
+					continue
 				}
 				sourceByID[id] = issueTable
 				statusByID[id] = status
@@ -467,13 +475,9 @@ func loadStatusByIDInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[stri
 // GetNewlyUnblockedByCloseInTx finds issues that become unblocked when the
 // given issue is closed. Works within an existing transaction.
 // Returns full issue objects for the newly-unblocked issues.
-// Uses separate single-table queries (no JOINs) to avoid Dolt's mergeJoinKvIter
-// panic when joining across tables with different tuple formats.
 //
 //nolint:gosec // G201: table names come from hardcoded constants
-func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID string) ([]*types.Issue, error) {
-	// Step 1: Find issue IDs that depend on the closed issue via "blocks" deps.
-	// Query both dep tables to cover cross-table dependencies.
+func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx DBTX, closedIssueID string) ([]*types.Issue, error) {
 	candidateSet := make(map[string]bool)
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
@@ -499,12 +503,10 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID
 			return nil, fmt.Errorf("candidate rows from %s: %w", depTable, err)
 		}
 	}
-
 	if len(candidateSet) == 0 {
 		return nil, nil
 	}
 
-	// Filter to only open/active candidates (check both tables, no JOINs).
 	candidateIDs := make([]string, 0, len(candidateSet))
 	for id := range candidateSet {
 		candidateIDs = append(candidateIDs, id)
@@ -524,14 +526,10 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID
 		activeCandidateIDs = append(activeCandidateIDs, id)
 	}
 	candidateIDs = activeCandidateIDs
-
 	if len(candidateIDs) == 0 {
 		return nil, nil
 	}
 
-	// Step 2: Filter out candidates that still have other open blockers.
-	// Batch by candidate to avoid one dependency/status round-trip per
-	// candidate on remote Dolt backends.
 	stillBlocked := make(map[string]bool)
 	for start := 0; start < len(candidateIDs); start += queryBatchSize {
 		end := start + queryBatchSize
@@ -590,7 +588,6 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID
 		}
 	}
 
-	// Step 3: Collect unblocked issues.
 	var unblocked []*types.Issue
 	for _, id := range candidateIDs {
 		if stillBlocked[id] {
@@ -602,19 +599,37 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx *sql.Tx, closedIssueID
 		}
 		unblocked = append(unblocked, issue)
 	}
-
 	return unblocked, nil
 }
 
 // IsBlockedInTx checks if an issue is blocked by active dependencies within
 // an existing transaction. Returns whether the issue is blocked and, if so,
 // a list of blocker descriptions for display.
-// Uses separate single-table queries (no JOINs) to avoid Dolt's mergeJoinKvIter
-// panic when joining across tables with different tuple formats.
 //
 //nolint:gosec // G201: table names are hardcoded constants.
-func IsBlockedInTx(ctx context.Context, tx *sql.Tx, issueID string) (bool, []string, error) {
-	// Step 1: Get all blocking dependency targets from both dep tables.
+func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string, error) {
+	var blocked bool
+	found := false
+	for _, table := range []string{"issues", "wisps"} {
+		var b int
+		//nolint:gosec // G201: table is a hardcoded "issues" or "wisps".
+		err := tx.QueryRowContext(ctx, "SELECT is_blocked FROM "+table+" WHERE id = ?", issueID).Scan(&b)
+		if err == nil {
+			blocked = b != 0
+			found = true
+			break
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			if optionalBlockedTable(table) && isTableNotExistError(err) {
+				continue
+			}
+			return false, nil, fmt.Errorf("read is_blocked from %s: %w", table, err)
+		}
+	}
+	if !found || !blocked {
+		return false, nil, nil
+	}
+
 	type depEdge struct {
 		dependsOnID, depType string
 	}
@@ -645,10 +660,9 @@ func IsBlockedInTx(ctx context.Context, tx *sql.Tx, issueID string) (bool, []str
 	}
 
 	if len(edges) == 0 {
-		return false, nil, nil
+		return true, nil, nil
 	}
 
-	// Step 2: Check each blocker's status in both issues and wisps tables.
 	blockerIDs := make([]string, 0, len(edges))
 	for _, e := range edges {
 		blockerIDs = append(blockerIDs, e.dependsOnID)
@@ -659,12 +673,12 @@ func IsBlockedInTx(ctx context.Context, tx *sql.Tx, issueID string) (bool, []str
 	}
 	var blockers []string
 	for _, e := range edges {
-		status, found := statusByID[e.dependsOnID]
-		if !found {
-			continue // Blocker not found in either table
+		status, ok := statusByID[e.dependsOnID]
+		if !ok {
+			continue
 		}
 		if status == types.StatusClosed || status == types.StatusPinned {
-			continue // Not an active blocker
+			continue
 		}
 		if e.depType != "blocks" {
 			blockers = append(blockers, e.dependsOnID+" ("+e.depType+")")
@@ -673,7 +687,7 @@ func IsBlockedInTx(ctx context.Context, tx *sql.Tx, issueID string) (bool, []str
 		}
 	}
 
-	return len(blockers) > 0, blockers, nil
+	return true, blockers, nil
 }
 
 // scanDependencyRow scans a single dependency row from a *sql.Rows.

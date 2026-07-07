@@ -80,6 +80,39 @@ func bdCreateFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
+type graphCreateResult struct {
+	IDs map[string]string `json:"ids"`
+}
+
+func writeGraphCreatePlan(t *testing.T, dir string) string {
+	t.Helper()
+	plan := `{
+		"nodes": [
+			{"key": "root", "title": "Graph root", "type": "task"},
+			{"key": "child", "title": "Graph child", "type": "task", "parent_key": "root"}
+		]
+	}`
+	planFile := filepath.Join(dir, "graph-plan.json")
+	if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
+		t.Fatalf("write graph plan: %v", err)
+	}
+	return planFile
+}
+
+func bdCreateGraph(t *testing.T, bd, dir, planFile string, args ...string) graphCreateResult {
+	t.Helper()
+	fullArgs := append([]string{"create", "--json", "--graph", planFile}, args...)
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd create --graph %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	var result graphCreateResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse graph create result: %v\n%s", err, out)
+	}
+	return result
+}
+
 // bdShow runs "bd show <id> --json" and returns the parsed issue.
 func bdShow(t *testing.T, bd, dir, id string) *types.Issue {
 	t.Helper()
@@ -412,6 +445,42 @@ func TestEmbeddedCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("initial_status_builtin", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sb")
+		issue := bdCreate(t, bd, dir, "Blocked issue", "--status", "blocked")
+		if issue.Status != types.StatusBlocked {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusBlocked)
+		}
+	})
+
+	t.Run("initial_status_custom", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sc")
+		bdConfig(t, bd, dir, "set", "status.custom", "review:wip")
+		issue := bdCreate(t, bd, dir, "Review issue", "--status", "review")
+		if issue.Status != types.Status("review") {
+			t.Errorf("status: got %q, want review", issue.Status)
+		}
+	})
+
+	t.Run("initial_status_invalid", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "si")
+		out := bdCreateFail(t, bd, dir, "Invalid status issue", "--status", "not_a_status")
+		if !strings.Contains(out, `invalid status "not_a_status"`) {
+			t.Fatalf("expected invalid status error, got:\n%s", out)
+		}
+	})
+
+	t.Run("initial_status_wins_over_defer", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sd")
+		issue := bdCreate(t, bd, dir, "Deferred but blocked issue", "--status", "blocked", "--defer", "+2h")
+		if issue.Status != types.StatusBlocked {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusBlocked)
+		}
+		if issue.DeferUntil == nil {
+			t.Fatal("expected DeferUntil to be set")
+		}
+	})
+
 	t.Run("ephemeral", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ep")
 		issue := bdCreate(t, bd, dir, "Ephemeral issue", "--ephemeral")
@@ -438,6 +507,62 @@ func TestEmbeddedCreate(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "No history issue", "--no-history")
 		if issue.ID == "" {
 			t.Fatal("expected issue ID")
+		}
+	})
+
+	t.Run("graph_ephemeral", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ge")
+		planFile := writeGraphCreatePlan(t, dir)
+		result := bdCreateGraph(t, bd, dir, planFile, "--ephemeral")
+		rootID := result.IDs["root"]
+		childID := result.IDs["child"]
+		if rootID == "" || childID == "" {
+			t.Fatalf("expected root and child IDs, got %#v", result.IDs)
+		}
+
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "ge", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+
+		for _, id := range []string{rootID, childID} {
+			var ephemeral, noHistory int
+			if err := db.QueryRowContext(t.Context(), "SELECT ephemeral, no_history FROM wisps WHERE id = ?", id).Scan(&ephemeral, &noHistory); err != nil {
+				t.Fatalf("query graph ephemeral bead %s: %v", id, err)
+			}
+			if ephemeral != 1 || noHistory != 0 {
+				t.Fatalf("graph ephemeral bead %s flags = ephemeral:%d no_history:%d, want 1/0", id, ephemeral, noHistory)
+			}
+		}
+	})
+
+	t.Run("graph_no_history", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gn")
+		planFile := writeGraphCreatePlan(t, dir)
+		result := bdCreateGraph(t, bd, dir, planFile, "--no-history")
+		rootID := result.IDs["root"]
+		childID := result.IDs["child"]
+		if rootID == "" || childID == "" {
+			t.Fatalf("expected root and child IDs, got %#v", result.IDs)
+		}
+
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gn", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+
+		for _, id := range []string{rootID, childID} {
+			var ephemeral, noHistory int
+			if err := db.QueryRowContext(t.Context(), "SELECT ephemeral, no_history FROM wisps WHERE id = ?", id).Scan(&ephemeral, &noHistory); err != nil {
+				t.Fatalf("query graph no-history bead %s: %v", id, err)
+			}
+			if ephemeral != 0 || noHistory != 1 {
+				t.Fatalf("graph no-history bead %s flags = ephemeral:%d no_history:%d, want 0/1", id, ephemeral, noHistory)
+			}
 		}
 	})
 
@@ -512,6 +637,39 @@ func TestEmbeddedCreate(t *testing.T) {
 		// the dry-run issue doesn't exist.
 		if strings.Contains(stdout.String(), "error") {
 			t.Errorf("dry-run produced error output: %s", stdout.String())
+		}
+	})
+
+	t.Run("dry_run_parent_label_inheritance", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "dp")
+		parent := bdCreate(t, bd, dir, "Parent with labels", "-t", "epic", "-l", "team-a,shared")
+
+		cmd := exec.Command(bd, "create", "--dry-run", "Preview child", "--json",
+			"--parent", parent.ID, "-l", "child,shared")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd create --dry-run --parent failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		preview := parseIssueJSON(t, stdout.Bytes())
+		labelMap := make(map[string]bool)
+		for _, label := range preview.Labels {
+			labelMap[label] = true
+		}
+		for _, want := range []string{"team-a", "shared", "child"} {
+			if !labelMap[want] {
+				t.Fatalf("dry-run labels = %v, want %q", preview.Labels, want)
+			}
+		}
+		if len(preview.Labels) != 3 {
+			t.Fatalf("dry-run labels = %v, want 3 deduped labels", preview.Labels)
+		}
+
+		child := bdCreate(t, bd, dir, "Real child after dry-run", "--parent", parent.ID)
+		if child.ID != parent.ID+".1" {
+			t.Fatalf("child ID after dry-run = %q, want %q", child.ID, parent.ID+".1")
 		}
 	})
 
@@ -591,6 +749,62 @@ A new feature
 		}
 		if stats.TotalIssues < 2 {
 			t.Errorf("expected at least 2 issues from markdown, got %d", stats.TotalIssues)
+		}
+	})
+
+	t.Run("graph_initial_labels_not_duplicated", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gl")
+		plan := `{
+  "nodes": [
+    {"key": "root", "title": "Graph root", "type": "task", "labels": ["team-a", "shared"]}
+  ]
+}`
+		planFile := filepath.Join(dir, "graph-labels.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := exec.Command(bd, "create", "--graph", planFile, "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd create --graph failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		var result GraphApplyResult
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("parse graph result: %v\nstdout:\n%s", err, stdout.String())
+		}
+		id := result.IDs["root"]
+		if id == "" {
+			t.Fatalf("graph result missing root ID: %#v", result.IDs)
+		}
+
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gl", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+
+		var labelCount int
+		if err := db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = ?", id).Scan(&labelCount); err != nil {
+			t.Fatalf("count labels: %v", err)
+		}
+		if labelCount != 2 {
+			t.Fatalf("label count = %d, want 2", labelCount)
+		}
+
+		var labelEventCount int
+		if err := db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ?",
+			id, types.EventLabelAdded).Scan(&labelEventCount); err != nil {
+			t.Fatalf("count label events: %v", err)
+		}
+		if labelEventCount != 2 {
+			t.Fatalf("label_added event count = %d, want 2", labelEventCount)
 		}
 	})
 
@@ -752,6 +966,47 @@ func TestEmbeddedCreateCommitPending(t *testing.T) {
 	})
 }
 
+func TestEmbeddedCreateFormCommitsLabelOnlyCreate(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	_, beadsDir, _ := bdInit(t, bd, "--prefix", "cfl")
+	store := openStore(t, beadsDir, "cfl")
+
+	issue, err := CreateIssueFromFormValues(t.Context(), store, &createFormValues{
+		Title:     "Form labels commit",
+		Priority:  2,
+		IssueType: "task",
+		Labels:    []string{"form", "initial"},
+	}, "tester")
+	if err != nil {
+		t.Fatalf("CreateIssueFromFormValues: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close store: %v", err)
+	}
+
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "cfl", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+
+	var labelCount int
+	if err := db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = ?",
+		issue.ID,
+	).Scan(&labelCount); err != nil {
+		t.Fatalf("count committed labels: %v", err)
+	}
+	if labelCount != 2 {
+		t.Fatalf("committed label count = %d, want 2", labelCount)
+	}
+}
+
 // TestEmbeddedCreateCrossRepo verifies that bd create --repo routes to a different
 // repo's embedded dolt store, creates the issue there, and commits it.
 func TestEmbeddedCreateCrossRepo(t *testing.T) {
@@ -835,6 +1090,77 @@ func TestEmbeddedCreateCrossRepoWithParent(t *testing.T) {
 	// Verify parent-child dependency exists in the target store
 	targetBeadsDir := filepath.Join(targetDir, ".beads")
 	assertDepExists(t, targetBeadsDir, "tgt", child.ID, parent.ID)
+}
+
+func TestEmbeddedCreateDryRunRepoDoesNotInitializeTarget(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	dir, _, _ := bdInit(t, bd, "--prefix", "dr")
+	targetDir := filepath.Join(dir, "uninit-dry-run-target")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+
+	cmd := exec.Command(bd, "create", "--dry-run", "Preview only", "--json", "--repo", targetDir)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd create --dry-run --repo failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	if _, err := os.Stat(filepath.Join(targetDir, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run target .beads stat err = %v, want not exist", err)
+	}
+}
+
+func TestEmbeddedCreateCrossRepoDryRunWithParent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	dir, _, _ := bdInit(t, bd, "--prefix", "drp")
+	targetDir := filepath.Join(dir, "target-repo")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+	runBDInit(t, bd, targetDir, "--prefix", "tgt")
+
+	parent := bdCreate(t, bd, dir, "Parent epic", "-t", "epic", "-l", "team-a,shared", "--repo", targetDir)
+	cmd := exec.Command(bd, "create", "--dry-run", "Preview child", "--json",
+		"--parent", parent.ID, "-l", "child,shared", "--repo", targetDir)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd create --dry-run --repo --parent failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	preview := parseIssueJSON(t, stdout.Bytes())
+	labelMap := make(map[string]bool)
+	for _, label := range preview.Labels {
+		labelMap[label] = true
+	}
+	for _, want := range []string{"team-a", "shared", "child"} {
+		if !labelMap[want] {
+			t.Fatalf("dry-run labels = %v, want %q", preview.Labels, want)
+		}
+	}
+
+	child := bdCreate(t, bd, dir, "Real child after dry-run", "--parent", parent.ID, "--repo", targetDir)
+	if child.ID != parent.ID+".1" {
+		t.Fatalf("child ID after dry-run = %q, want %q", child.ID, parent.ID+".1")
+	}
 }
 
 // TestEmbeddedCreateCrossRepoUninit verifies that bd create --repo works when

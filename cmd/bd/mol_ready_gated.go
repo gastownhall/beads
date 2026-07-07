@@ -6,6 +6,7 @@ import (
 	"sort"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -42,21 +43,37 @@ The patrol system uses this to find and dispatch gate-ready molecules.
 Examples:
   bd mol ready --gated           # Find all gate-ready molecules
   bd mol ready --gated --json    # JSON output for automation`,
-	Run: runMolReadyGated,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runMolReadyGated,
 }
 
-func runMolReadyGated(cmd *cobra.Command, args []string) {
+func runMolReadyGated(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("mol-ready-gated")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
+	return runMolReadyGatedCore(cmd, args)
+}
+
+// runMolReadyGatedCore runs the gate-ready molecule discovery and rendering
+// without emitting a metrics event, so the caller owns emission. `bd ready
+// --gated` delegates here after recording its own "ready" event, while the
+// standalone runMolReadyGated entrypoint records "mol-ready-gated"; this keeps a
+// single `bd ready --gated` invocation to exactly one cli_command event.
+func runMolReadyGatedCore(_ *cobra.Command, _ []string) error {
 	ctx := rootCtx
 
-	// --gated mode requires direct store access
 	if store == nil {
-		FatalError("no database connection")
+		return HandleErrorRespectJSON("no database connection")
 	}
 
-	// Find gate-ready molecules
 	molecules, err := findGateReadyMolecules(ctx, store)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if jsonOutput {
@@ -67,14 +84,12 @@ func runMolReadyGated(cmd *cobra.Command, args []string) {
 		if output.Molecules == nil {
 			output.Molecules = []*GatedMolecule{}
 		}
-		outputJSON(output)
-		return
+		return outputJSON(output)
 	}
 
-	// Human-readable output
 	if len(molecules) == 0 {
 		fmt.Printf("\n%s No molecules ready for gate-resume dispatch\n\n", ui.RenderWarn(""))
-		return
+		return nil
 	}
 
 	fmt.Printf("\n%s Molecules ready for gate-resume dispatch (%d):\n\n",
@@ -93,6 +108,7 @@ func runMolReadyGated(cmd *cobra.Command, args []string) {
 
 	fmt.Println("To dispatch a molecule:")
 	fmt.Println("  bd sling <agent> --mol <molecule-id>")
+	return nil
 }
 
 // findGateReadyMolecules finds molecules where a gate has closed and work can resume.

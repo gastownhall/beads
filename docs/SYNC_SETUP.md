@@ -9,13 +9,13 @@ You need two tools installed on every machine:
 | Tool | Minimum Version | Install |
 |------|-----------------|---------|
 | **bd** (beads CLI) | 0.59.0+ | See [INSTALLING.md](INSTALLING.md) |
-| **Dolt** | 1.88.1+ | `brew install dolt` or [dolt install script](https://github.com/dolthub/dolt/releases/latest/download/install.sh) |
+| **Dolt** | 2.1.10+ | `brew install dolt` or [dolt install script](https://github.com/dolthub/dolt/releases/latest/download/install.sh) |
 
 Verify both are installed:
 
 ```bash
 bd version     # must be 0.59.0+
-dolt version   # must be 1.88.1+
+dolt version   # must be 2.1.10+
 ```
 
 ## Initial Setup (First Computer)
@@ -276,9 +276,9 @@ bd dolt start
 
 ## See Also
 
+- [SYNC_CONCEPTS.md](SYNC_CONCEPTS.md) — The conceptual model behind this setup (why Dolt is the source of truth, what JSONL is for)
 - [QUICKSTART.md](QUICKSTART.md) — Getting started with beads
-- [DOLT.md](DOLT.md) — Dolt backend details, server modes, federation
-- [DOLT.md](DOLT.md) — Remote types, sync modes, advanced usage
+- [DOLT.md](DOLT.md) — Dolt backend details, server modes, federation, remote types, and sync modes
 - [INSTALLING.md](INSTALLING.md) — Installation for all platforms
 
 ## Attribution

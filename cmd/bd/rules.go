@@ -11,6 +11,8 @@ import (
 	"unicode"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 // --- Types ---
@@ -633,15 +635,19 @@ var rulesCmd = &cobra.Command{
 }
 
 var rulesAuditCmd = &cobra.Command{
-	Use:   "audit",
-	Short: "Scan rules for contradictions and merge opportunities",
-	Run:   runRulesAudit,
+	Use:           "audit",
+	Short:         "Scan rules for contradictions and merge opportunities",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runRulesAudit,
 }
 
 var rulesCompactCmd = &cobra.Command{
-	Use:   "compact",
-	Short: "Merge related rules into composites",
-	Run:   runRulesCompact,
+	Use:           "compact",
+	Short:         "Merge related rules into composites",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runRulesCompact,
 }
 
 func init() {
@@ -661,21 +667,26 @@ func init() {
 	rootCmd.AddCommand(rulesCmd)
 }
 
-func runRulesAudit(cmd *cobra.Command, args []string) {
+func runRulesAudit(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("rules-audit")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	rulesPath, _ := cmd.Flags().GetString("path")
 	threshold, _ := cmd.Flags().GetFloat64("threshold")
 
 	result, err := RunAudit(rulesPath, threshold)
 	if err != nil {
-		FatalErrorRespectJSON("rules audit failed: %v", err)
+		return HandleErrorRespectJSON("rules audit failed: %v", err)
 	}
 
 	if jsonOutput {
-		outputJSON(result)
-		return
+		return outputJSON(result)
 	}
 
-	// Human-readable output
 	fmt.Printf("Rules Audit — %s\n", rulesPath)
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Println()
@@ -723,10 +734,18 @@ func runRulesAudit(cmd *cobra.Command, args []string) {
 		}
 		fmt.Printf("Run `bd rules compact --auto` to apply suggested merges.\n")
 	}
+	return nil
 }
 
-func runRulesCompact(cmd *cobra.Command, args []string) {
+func runRulesCompact(cmd *cobra.Command, args []string) error {
 	CheckReadonly("rules compact")
+
+	evt := metrics.NewCommandEvent("rules-compact")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
 
 	rulesPath, _ := cmd.Flags().GetString("path")
 	groupNames, _ := cmd.Flags().GetStringSlice("group")
@@ -734,23 +753,21 @@ func runRulesCompact(cmd *cobra.Command, args []string) {
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 
 	if !autoMode && len(groupNames) == 0 {
-		FatalErrorRespectJSON("specify --group <rule1,rule2,...> or --auto")
+		return HandleErrorRespectJSON("specify --group <rule1,rule2,...> or --auto")
 	}
 
 	if autoMode {
-		// Run audit to get merge candidates
 		result, err := RunAudit(rulesPath, 0.6)
 		if err != nil {
-			FatalErrorRespectJSON("audit for auto-compact failed: %v", err)
+			return HandleErrorRespectJSON("audit for auto-compact failed: %v", err)
 		}
 
 		if len(result.MergeCandidates) == 0 {
 			if jsonOutput {
-				outputJSON(map[string]string{"status": "no merge candidates found"})
-			} else {
-				fmt.Println("No merge candidates found.")
+				return outputJSON(map[string]string{"status": "no merge candidates found"})
 			}
-			return
+			fmt.Println("No merge candidates found.")
+			return nil
 		}
 
 		type compactResult struct {
@@ -817,12 +834,11 @@ func runRulesCompact(cmd *cobra.Command, args []string) {
 		}
 
 		if jsonOutput {
-			outputJSON(results)
+			return outputJSON(results)
 		}
-		return
+		return nil
 	}
 
-	// Manual --group mode
 	var groupRules []RuleFile
 	for _, name := range groupNames {
 		if !strings.HasSuffix(name, ".md") {
@@ -831,29 +847,28 @@ func runRulesCompact(cmd *cobra.Command, args []string) {
 		path := filepath.Join(rulesPath, name)
 		rf, err := ParseRuleFile(path)
 		if err != nil {
-			FatalErrorRespectJSON("cannot read rule %s: %v", name, err)
+			return HandleErrorRespectJSON("cannot read rule %s: %v", name, err)
 		}
 		groupRules = append(groupRules, rf)
 	}
 
 	if len(groupRules) < 2 {
-		FatalErrorRespectJSON("need at least 2 rules to merge")
+		return HandleErrorRespectJSON("need at least 2 rules to merge")
 	}
 
 	label := findGroupLabel(groupRules, makeRange(len(groupRules)))
 	merged, err := CompactRules(groupRules, label)
 	if err != nil {
-		FatalErrorRespectJSON("compact failed: %v", err)
+		return HandleErrorRespectJSON("compact failed: %v", err)
 	}
 
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"group":   label,
 			"output":  merged,
 			"rules":   len(groupRules),
 			"dry_run": dryRun,
 		})
-		return
 	}
 
 	outName := strings.ReplaceAll(label, " ", "-") + ".md"
@@ -869,13 +884,14 @@ func runRulesCompact(cmd *cobra.Command, args []string) {
 	if !dryRun {
 		outPath := filepath.Join(rulesPath, outName)
 		if err := os.WriteFile(outPath, []byte(merged), 0o600); err != nil {
-			FatalErrorRespectJSON("write merged file: %v", err)
+			return HandleErrorRespectJSON("write merged file: %v", err)
 		}
 		for _, rf := range groupRules {
 			_ = os.Remove(rf.Path)
 		}
 		fmt.Printf("\nCreated %s, deleted %d source files.\n", outName, len(groupRules))
 	}
+	return nil
 }
 
 // titleCase capitalizes the first letter of each word.

@@ -5,11 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -153,61 +153,66 @@ Reports:
 Examples:
   bd swarm validate gt-epic-123           # Validate epic structure
   bd swarm validate gt-epic-123 --verbose # Include detailed issue graph`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("swarm-validate")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 		verbose, _ := cmd.Flags().GetBool("verbose")
 
-		// Swarm commands require direct store access
 		if store == nil {
-			FatalErrorRespectJSON("no database connection")
+			return HandleErrorRespectJSON("no database connection")
 		}
 
-		// Resolve epic ID
 		epicID, err := utils.ResolvePartialID(ctx, store, args[0])
 		if err != nil {
-			FatalErrorRespectJSON("epic '%s' not found: %v", args[0], err)
+			return HandleErrorRespectJSON("epic '%s' not found: %v", args[0], err)
 		}
 
-		// Get the epic
 		epic, err := store.GetIssue(ctx, epicID)
 		if err != nil {
-			FatalErrorRespectJSON("failed to get epic: %v", err)
+			return HandleErrorRespectJSON("failed to get epic: %v", err)
 		}
 		if epic == nil {
-			FatalErrorRespectJSON("epic '%s' not found", epicID)
+			return HandleErrorRespectJSON("epic '%s' not found", epicID)
 		}
 
-		// Verify it's an epic
 		if epic.IssueType != types.TypeEpic && epic.IssueType != "molecule" {
-			FatalErrorRespectJSON("'%s' is not an epic or molecule (type: %s)", epicID, epic.IssueType)
+			return HandleErrorRespectJSON("'%s' is not an epic or molecule (type: %s)", epicID, epic.IssueType)
 		}
 
-		// Analyze the epic structure
 		analysis, err := analyzeEpicForSwarm(ctx, store, epic)
 		if err != nil {
-			FatalErrorRespectJSON("failed to analyze epic: %v", err)
+			return HandleErrorRespectJSON("failed to analyze epic: %v", err)
 		}
 
-		// Include detailed graph only in verbose mode
 		if !verbose {
 			analysis.Issues = nil
 		}
 
 		if jsonOutput {
-			outputJSON(analysis)
-			if !analysis.Swarmable {
-				os.Exit(1)
+			if jerr := outputJSON(analysis); jerr != nil {
+				return jerr
 			}
-			return
+			if !analysis.Swarmable {
+				return SilentExit()
+			}
+			return nil
 		}
 
-		// Human-readable output
 		renderSwarmAnalysis(analysis)
 
 		if !analysis.Swarmable {
-			os.Exit(1)
+			return SilentExit()
 		}
+		return nil
 	},
 }
 
@@ -611,70 +616,72 @@ Examples:
   bd swarm status gt-epic-123       # Show swarm status by epic
   bd swarm status gt-swarm-456      # Show status via swarm molecule
   bd swarm status gt-epic-123 --json  # Machine-readable output`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("swarm-status")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 
-		// Swarm commands require direct store access
 		if store == nil {
-			FatalErrorRespectJSON("no database connection")
+			return HandleErrorRespectJSON("no database connection")
 		}
 
-		// Resolve ID
 		issueID, err := utils.ResolvePartialID(ctx, store, args[0])
 		if err != nil {
-			FatalErrorRespectJSON("issue '%s' not found: %v", args[0], err)
+			return HandleErrorRespectJSON("issue '%s' not found: %v", args[0], err)
 		}
 
-		// Get the issue
 		issue, err := store.GetIssue(ctx, issueID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
-				FatalErrorRespectJSON("issue '%s' not found", issueID)
+				return HandleErrorRespectJSON("issue '%s' not found", issueID)
 			}
-			FatalErrorRespectJSON("failed to get issue: %v", err)
+			return HandleErrorRespectJSON("failed to get issue: %v", err)
 		}
 
 		var epic *types.Issue
 
-		// Check if it's a swarm molecule - if so, follow the link to the epic
 		if issue.IssueType == "molecule" && issue.MolType == types.MolTypeSwarm {
-			// Find linked epic via relates-to dependency
 			deps, err := store.GetDependencyRecords(ctx, issue.ID)
 			if err != nil {
-				FatalErrorRespectJSON("failed to get swarm dependencies: %v", err)
+				return HandleErrorRespectJSON("failed to get swarm dependencies: %v", err)
 			}
 			for _, dep := range deps {
 				if dep.Type == types.DepRelatesTo {
 					epic, err = store.GetIssue(ctx, dep.DependsOnID)
 					if err != nil {
-						FatalErrorRespectJSON("failed to get linked epic: %v", err)
+						return HandleErrorRespectJSON("failed to get linked epic: %v", err)
 					}
 					break
 				}
 			}
 			if epic == nil {
-				FatalErrorRespectJSON("swarm molecule '%s' has no linked epic", issueID)
+				return HandleErrorRespectJSON("swarm molecule '%s' has no linked epic", issueID)
 			}
 		} else if issue.IssueType == types.TypeEpic || issue.IssueType == "molecule" {
 			epic = issue
 		} else {
-			FatalErrorRespectJSON("'%s' is not an epic or swarm molecule (type: %s)", issueID, issue.IssueType)
+			return HandleErrorRespectJSON("'%s' is not an epic or swarm molecule (type: %s)", issueID, issue.IssueType)
 		}
 
-		// Get swarm status
 		status, err := getSwarmStatus(ctx, store, epic)
 		if err != nil {
-			FatalErrorRespectJSON("failed to get swarm status: %v", err)
+			return HandleErrorRespectJSON("failed to get swarm status: %v", err)
 		}
 
 		if jsonOutput {
-			outputJSON(status)
-			return
+			return outputJSON(status)
 		}
 
-		// Human-readable output
 		renderSwarmStatus(status)
+		return nil
 	},
 }
 
@@ -893,42 +900,47 @@ Examples:
   bd swarm create bd-epic-123                          # Create swarm for epic
   bd swarm create bd-epic-123 --coordinator=observer/   # With specific coordinator
   bd swarm create bd-task-456                          # Auto-wrap single issue`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("swarm create")
+
+		evt := metrics.NewCommandEvent("swarm-create")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 		coordinator, _ := cmd.Flags().GetString("coordinator")
 		force, _ := cmd.Flags().GetBool("force")
 
-		// Swarm commands require direct store access
 		if store == nil {
-			FatalErrorRespectJSON("no database connection")
+			return HandleErrorRespectJSON("no database connection")
 		}
 
-		// Resolve the input ID
 		inputID, err := utils.ResolvePartialID(ctx, store, args[0])
 		if err != nil {
-			FatalErrorRespectJSON("issue '%s' not found: %v", args[0], err)
+			return HandleErrorRespectJSON("issue '%s' not found: %v", args[0], err)
 		}
 
-		// Get the issue
 		issue, err := store.GetIssue(ctx, inputID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
-				FatalErrorRespectJSON("issue '%s' not found", inputID)
+				return HandleErrorRespectJSON("issue '%s' not found", inputID)
 			}
-			FatalErrorRespectJSON("failed to get issue: %v", err)
+			return HandleErrorRespectJSON("failed to get issue: %v", err)
 		}
 
 		var epicID string
 		var epicTitle string
 
-		// Check if it's an epic or single issue that needs wrapping
 		if issue.IssueType == types.TypeEpic || issue.IssueType == "molecule" {
 			epicID = issue.ID
 			epicTitle = issue.Title
 		} else {
-			// Auto-wrap: create an epic with this issue as child
 			if !jsonOutput {
 				fmt.Printf("Auto-wrapping single issue as epic...\n")
 			}
@@ -943,10 +955,9 @@ Examples:
 			}
 
 			if err := store.CreateIssue(ctx, wrapperEpic, actor); err != nil {
-				FatalErrorRespectJSON("failed to create wrapper epic: %v", err)
+				return HandleErrorRespectJSON("failed to create wrapper epic: %v", err)
 			}
 
-			// Add parent-child dependency: issue depends on epic (epic is parent)
 			dep := &types.Dependency{
 				IssueID:     issue.ID,
 				DependsOnID: wrapperEpic.ID,
@@ -954,7 +965,7 @@ Examples:
 				CreatedBy:   actor,
 			}
 			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				FatalErrorRespectJSON("failed to link issue to epic: %v", err)
+				return HandleErrorRespectJSON("failed to link issue to epic: %v", err)
 			}
 
 			epicID = wrapperEpic.ID
@@ -965,52 +976,53 @@ Examples:
 			}
 		}
 
-		// Check for existing swarm molecule
 		existingSwarm, err := findExistingSwarm(ctx, store, epicID)
 		if err != nil {
-			FatalErrorRespectJSON("failed to check for existing swarm: %v", err)
+			return HandleErrorRespectJSON("failed to check for existing swarm: %v", err)
 		}
 		if existingSwarm != nil && !force {
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if jerr := outputJSON(map[string]interface{}{
 					"error":          "swarm already exists",
 					"existing_id":    existingSwarm.ID,
 					"existing_title": existingSwarm.Title,
-				})
-			} else {
-				fmt.Printf("%s Swarm already exists: %s\n", ui.RenderWarn("⚠"), ui.RenderID(existingSwarm.ID))
-				fmt.Printf("   Use --force to create another.\n")
+				}); jerr != nil {
+					return jerr
+				}
+				return SilentExit()
 			}
-			os.Exit(1)
+			fmt.Printf("%s Swarm already exists: %s\n", ui.RenderWarn("⚠"), ui.RenderID(existingSwarm.ID))
+			fmt.Printf("   Use --force to create another.\n")
+			return SilentExit()
 		}
 
-		// Validate the epic structure
 		epic, err := store.GetIssue(ctx, epicID)
 		if err != nil {
-			FatalErrorRespectJSON("failed to get epic: %v", err)
+			return HandleErrorRespectJSON("failed to get epic: %v", err)
 		}
 
 		analysis, err := analyzeEpicForSwarm(ctx, store, epic)
 		if err != nil {
-			FatalErrorRespectJSON("failed to analyze epic: %v", err)
+			return HandleErrorRespectJSON("failed to analyze epic: %v", err)
 		}
 
 		if !analysis.Swarmable {
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if jerr := outputJSON(map[string]interface{}{
 					"error":    "epic is not swarmable",
 					"analysis": analysis,
-				})
-			} else {
-				fmt.Printf("\n%s Epic is not swarmable. Fix errors first:\n", ui.RenderFail("✗"))
-				for _, e := range analysis.Errors {
-					fmt.Printf("  • %s\n", e)
+				}); jerr != nil {
+					return jerr
 				}
+				return SilentExit()
 			}
-			os.Exit(1)
+			fmt.Printf("\n%s Epic is not swarmable. Fix errors first:\n", ui.RenderFail("✗"))
+			for _, e := range analysis.Errors {
+				fmt.Printf("  • %s\n", e)
+			}
+			return SilentExit()
 		}
 
-		// Create the swarm molecule
 		swarmMol := &types.Issue{
 			Title:       fmt.Sprintf("Swarm: %s", epicTitle),
 			Description: fmt.Sprintf("Swarm molecule orchestrating epic %s.\n\nEpic: %s\nCoordinator: %s", epicID, epicID, coordinator),
@@ -1023,10 +1035,9 @@ Examples:
 		}
 
 		if err := store.CreateIssue(ctx, swarmMol, actor); err != nil {
-			FatalErrorRespectJSON("failed to create swarm molecule: %v", err)
+			return HandleErrorRespectJSON("failed to create swarm molecule: %v", err)
 		}
 
-		// Link swarm molecule to epic with relates-to dependency
 		dep := &types.Dependency{
 			IssueID:     swarmMol.ID,
 			DependsOnID: epicID,
@@ -1034,28 +1045,28 @@ Examples:
 			CreatedBy:   actor,
 		}
 		if err := store.AddDependency(ctx, dep, actor); err != nil {
-			FatalErrorRespectJSON("failed to link swarm to epic: %v", err)
+			return HandleErrorRespectJSON("failed to link swarm to epic: %v", err)
 		}
 
 		commandDidWrite.Store(true)
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"swarm_id":    swarmMol.ID,
 				"epic_id":     epicID,
 				"coordinator": coordinator,
 				"analysis":    analysis,
 			})
-		} else {
-			fmt.Printf("\n%s Created swarm molecule: %s\n", ui.RenderPass("✓"), ui.RenderID(swarmMol.ID))
-			fmt.Printf("   Epic: %s (%s)\n", epicID, epicTitle)
-			if coordinator != "" {
-				fmt.Printf("   Coordinator: %s\n", coordinator)
-			}
-			fmt.Printf("   Total issues: %d\n", analysis.TotalIssues)
-			fmt.Printf("   Max parallelism: %d\n", analysis.MaxParallelism)
-			fmt.Printf("   Waves: %d\n", len(analysis.ReadyFronts))
 		}
+		fmt.Printf("\n%s Created swarm molecule: %s\n", ui.RenderPass("✓"), ui.RenderID(swarmMol.ID))
+		fmt.Printf("   Epic: %s (%s)\n", epicID, epicTitle)
+		if coordinator != "" {
+			fmt.Printf("   Coordinator: %s\n", coordinator)
+		}
+		fmt.Printf("   Total issues: %d\n", analysis.TotalIssues)
+		fmt.Printf("   Max parallelism: %d\n", analysis.MaxParallelism)
+		fmt.Printf("   Waves: %d\n", len(analysis.ReadyFronts))
+		return nil
 	},
 }
 
@@ -1072,31 +1083,37 @@ Shows each swarm molecule with:
 Examples:
   bd swarm list         # List all swarms
   bd swarm list --json  # Machine-readable output`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("swarm-list")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 
-		// Swarm commands require direct store access
 		if store == nil {
-			FatalErrorRespectJSON("no database connection")
+			return HandleErrorRespectJSON("no database connection")
 		}
 
-		// Query for all swarm molecules
 		swarmType := types.MolTypeSwarm
 		filter := types.IssueFilter{
 			MolType: &swarmType,
 		}
 		swarms, err := store.SearchIssues(ctx, "", filter)
 		if err != nil {
-			FatalErrorRespectJSON("failed to list swarms: %v", err)
+			return HandleErrorRespectJSON("failed to list swarms: %v", err)
 		}
 
 		if len(swarms) == 0 {
 			if jsonOutput {
-				outputJSON(map[string]interface{}{"swarms": []interface{}{}})
-			} else {
-				fmt.Printf("No swarm molecules found.\n")
+				return outputJSON(map[string]interface{}{"swarms": []interface{}{}})
 			}
-			return
+			fmt.Printf("No swarm molecules found.\n")
+			return nil
 		}
 
 		// Build output with status for each swarm
@@ -1149,14 +1166,11 @@ Examples:
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{"swarms": items})
-			return
+			return outputJSON(map[string]interface{}{"swarms": items})
 		}
 
-		// Human-readable output
 		fmt.Printf("\n%s Active Swarms (%d)\n\n", ui.RenderAccent("🐝"), len(items))
 		for _, item := range items {
-			// Progress indicator
 			progressStr := fmt.Sprintf("%d/%d", item.Completed, item.Total)
 			if item.Active > 0 {
 				progressStr += fmt.Sprintf(", %d active", item.Active)
@@ -1172,6 +1186,7 @@ Examples:
 			}
 			fmt.Println()
 		}
+		return nil
 	},
 }
 

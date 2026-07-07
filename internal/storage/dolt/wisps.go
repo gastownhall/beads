@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -224,6 +225,11 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	affectedIssues, affectedWisps, aerr := issueops.AffectedByDeletionInTx(ctx, tx, nil, []string{id})
+	if aerr != nil {
+		return fmt.Errorf("affected by wisp delete for %s: %w", id, aerr)
+	}
+
 	result, err := tx.ExecContext(ctx, "DELETE FROM wisps WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("failed to delete wisp: %w", err)
@@ -239,6 +245,10 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 
 	if err := issueops.DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
 		return err
+	}
+
+	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+		return fmt.Errorf("recompute is_blocked after wisp delete for %s: %w", id, err)
 	}
 
 	return wrapTransactionError("commit delete wisp", tx.Commit())
@@ -288,6 +298,11 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	affectedIssues, affectedWisps, aerr := issueops.AffectedByDeletionInTx(ctx, tx, nil, ids)
+	if aerr != nil {
+		return 0, fmt.Errorf("affected by batched wisp delete: %w", aerr)
+	}
+
 	inClause, args := doltBuildSQLInClause(ids)
 
 	//nolint:gosec // G201: inClause contains only ? markers
@@ -301,6 +316,10 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 
 	if err := issueops.DeleteWispsFromDependenciesInTx(ctx, tx, ids); err != nil {
 		return 0, err
+	}
+
+	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+		return 0, fmt.Errorf("recompute is_blocked after batched wisp delete: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -542,12 +561,23 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 		return fmt.Errorf("failed to check existing wisp dependency: %w", err)
 	}
 
+	// Deterministic id keyed on (issue_id, target), same derivation as the
+	// dependencies table, so a wisp edge promoted to a real dependency keeps a
+	// clone-stable primary key and wisp_dependencies.id needs no DEFAULT (#4259).
 	//nolint:gosec // G201: targetCol from DepTargetKind.Column()
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO wisp_dependencies (issue_id, %s, type, created_at, created_by, metadata, thread_id)
-		VALUES (?, ?, ?, NOW(), ?, ?, ?)
-	`, targetCol), dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
+		INSERT INTO wisp_dependencies (id, issue_id, %s, type, created_at, created_by, metadata, thread_id)
+		VALUES (?, ?, ?, ?, NOW(), ?, ?, ?)
+	`, targetCol), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
 		return fmt.Errorf("failed to add wisp dependency: %w", err)
+	}
+
+	affectedIssues, affectedWisps, aerr := issueops.AffectedByDepChangeForWispInTx(ctx, tx, dep.IssueID, dep.DependsOnID, dep.Type)
+	if aerr != nil {
+		return fmt.Errorf("affected by add wisp dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, aerr)
+	}
+	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+		return fmt.Errorf("recompute is_blocked after add wisp dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 	}
 
 	return wrapTransactionError("commit add wisp dependency", tx.Commit())
