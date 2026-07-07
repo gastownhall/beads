@@ -39,7 +39,7 @@ func filteredEnvForContextBinding(keys ...string) []string {
 			filtered = append(filtered, entry)
 		}
 	}
-	return filtered
+	return append(filtered, "BD_DISABLE_METRICS=1", "BD_DISABLE_EVENT_FLUSH=1")
 }
 
 func TestListExplicitDBPathRebindsTargetContext(t *testing.T) {

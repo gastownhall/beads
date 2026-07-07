@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -225,25 +226,25 @@ func TestBuildLabelDrivenSearchUsesLabelJoins(t *testing.T) {
 		LabelsAny: []string{"frontend", "backend"},
 	}
 
-	fromSQL, where, args, labelDriven, filterForClauses := buildLabelDrivenSearch(filter, IssuesFilterTables)
+	plan := sqlbuild.BuildLabelDrivenSearch(filter, IssuesFilterTables)
 
-	if !strings.Contains(fromSQL, "JOIN labels label_filter_0 ON label_filter_0.issue_id = issues.id") {
-		t.Fatalf("fromSQL missing first label join: %s", fromSQL)
+	if !strings.Contains(plan.FromSQL, "JOIN labels label_filter_0 ON label_filter_0.issue_id = issues.id") {
+		t.Fatalf("fromSQL missing first label join: %s", plan.FromSQL)
 	}
-	if !strings.Contains(fromSQL, "JOIN labels label_filter_any ON label_filter_any.issue_id = issues.id") {
-		t.Fatalf("fromSQL missing any-label join: %s", fromSQL)
+	if !strings.Contains(plan.FromSQL, "JOIN labels label_filter_any ON label_filter_any.issue_id = issues.id") {
+		t.Fatalf("fromSQL missing any-label join: %s", plan.FromSQL)
 	}
-	if got, want := strings.Join(where, " AND "), "label_filter_0.label = ? AND label_filter_1.label = ? AND label_filter_any.label IN (?, ?)"; got != want {
+	if got, want := strings.Join(plan.Where, " AND "), "label_filter_0.label = ? AND label_filter_1.label = ? AND label_filter_any.label IN (?, ?)"; got != want {
 		t.Fatalf("where = %q, want %q", got, want)
 	}
-	if !reflect.DeepEqual(args, []interface{}{"bug", "urgent", "frontend", "backend"}) {
-		t.Fatalf("args = %#v", args)
+	if !reflect.DeepEqual(plan.Args, []interface{}{"bug", "urgent", "frontend", "backend"}) {
+		t.Fatalf("args = %#v", plan.Args)
 	}
-	if !labelDriven {
-		t.Fatal("labelDriven = false, want true")
+	if !plan.Distinct {
+		t.Fatal("Distinct = false, want true")
 	}
-	if len(filterForClauses.Labels) != 0 || len(filterForClauses.LabelsAny) != 0 {
-		t.Fatalf("label filters should be removed before generic clause build: %#v", filterForClauses)
+	if len(plan.Filter.Labels) != 0 || len(plan.Filter.LabelsAny) != 0 {
+		t.Fatalf("label filters should be removed before generic clause build: %#v", plan.Filter)
 	}
 }
 

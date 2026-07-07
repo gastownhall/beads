@@ -48,8 +48,11 @@ Common tool-level settings you can configure:
 | `create.require-description` | - | `BD_CREATE_REQUIRE_DESCRIPTION` | `false` | Require description when creating issues |
 | `validation.on-create` | - | `BD_VALIDATION_ON_CREATE` | `none` | Template validation on create: `none`, `warn`, `error` |
 | `validation.on-sync` | - | `BD_VALIDATION_ON_SYNC` | `none` | Template validation before sync: `none`, `warn`, `error` |
+| `prime.max-memories` | `--max-memories` | `BD_PRIME_MAX_MEMORIES` | `0` | Max persistent memories injected by bd prime (0 = unlimited) |
+| `prime.max-memory-chars` | `--max-memory-chars` | `BD_PRIME_MAX_MEMORY_CHARS` | `0` | Max total bytes of memory entries injected by bd prime, whole-memory boundaries (0 = unlimited) |
 | `git.author` | - | `BD_GIT_AUTHOR` | (none) | Override commit author for beads commits |
 | `git.no-gpg-sign` | - | `BD_GIT_NO_GPG_SIGN` | `false` | Disable GPG signing for beads commits |
+| `list.limit` | `--limit` / `-n` | `BD_LIST_LIMIT` | `50` | Default limit for `bd list` results |
 | `directory.labels` | - | - | (none) | Map directories to labels for automatic filtering |
 | `external_projects` | - | - | (none) | Map project names to paths for cross-project deps |
 | `backup.enabled` | - | `BD_BACKUP_ENABLED` | `false` | Enable periodic Dolt-native backup to `.beads/backup/` |
@@ -663,7 +666,17 @@ bd config set jira.status_map.closed "Done"
 bd config set jira.type_map.bug "Bug"
 bd config set jira.type_map.feature "Story"
 bd config set jira.type_map.task "Task"
+
+# Set Jira custom fields on pushed issues
+bd config set jira.custom_fields.customfield_10042 '{"value":"AI Platform"}'
+bd config set jira.custom_fields.Story.customfield_10042 '{"value":"AI Platform"}'
 ```
+
+`jira.custom_fields.<field>` applies to every issue pushed to Jira.
+`jira.custom_fields.<JiraType>.<field>` applies only when the mapped Jira issue
+type matches `<JiraType>`; per-type fields override global fields with the same
+field key. Values beginning with `{` or `[` are sent as JSON, which is useful
+for select-like fields. Other values are sent as strings.
 
 ### Example: Linear Integration
 
@@ -793,13 +806,13 @@ bd linear status
 
 **Staleness detection:**
 
-After each successful pull, `bd` writes the current timestamp to `.beads/last_pull`. This enables ambient staleness detection:
+After each successful pull, `bd` writes the current timestamp to `.beads/last_pull` (a local-only, per-machine file covered by the `.beads/.gitignore` template). This enables opt-in staleness detection on `bd linear sync`:
 
 - **`--pull-if-stale`**: Only pull if data is older than the threshold (default 20m). When data is fresh, prints "Linear data is fresh" and exits. In `--json` mode, includes `"is_fresh": true/false`.
 - **`--threshold`**: Override the default 20-minute staleness threshold (e.g., `--threshold 5m`).
 - **Debounce**: A 5-minute debounce prevents agent loops — if a pull completed within the last 5 minutes, data is always treated as fresh regardless of the threshold.
-- **`bd prime` auto-pull**: When `LINEAR_API_KEY` is set and data is stale, `bd prime` automatically pulls from Linear before emitting orientation output.
-- **Per-session warning**: On any `bd` command, if data is stale, a one-time warning is emitted to stderr: `⚠ Linear data is 45m stale — run 'bd linear sync --pull' to refresh`. Suppressed in subsequent commands within the same shell session.
+
+To keep Linear data fresh in agent sessions, run `bd linear sync --pull-if-stale` explicitly (e.g., from a session-start hook). `bd prime` and other core commands do not contact Linear.
 
 **Automatic sync tracking:**
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -28,21 +29,27 @@ Examples:
   bd info --whats-new
   bd info --whats-new --json
   bd info --thanks`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("info")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		schemaFlag, _ := cmd.Flags().GetBool("schema")
 		whatsNewFlag, _ := cmd.Flags().GetBool("whats-new")
 		thanksFlag, _ := cmd.Flags().GetBool("thanks")
 
-		// Handle --thanks flag
 		if thanksFlag {
 			printThanksPage()
-			return
+			return nil
 		}
 
-		// Handle --whats-new flag
 		if whatsNewFlag {
-			showWhatsNew()
-			return
+			return showWhatsNew()
 		}
 
 		// Get database path (absolute)
@@ -126,13 +133,10 @@ Examples:
 			}
 		}
 
-		// JSON output
 		if jsonOutput {
-			outputJSON(info)
-			return
+			return outputJSON(info)
 		}
 
-		// Human-readable output
 		fmt.Println("\nBeads Database Information")
 		fmt.Println("===========================")
 		fmt.Printf("Database: %s\n", absDBPath)
@@ -160,13 +164,13 @@ Examples:
 			}
 		}
 
-		// Check git hooks status
 		hookStatuses := CheckGitHooks()
 		if warning := FormatHookWarnings(hookStatuses); warning != "" {
 			fmt.Printf("\n%s\n", warning)
 		}
 
 		fmt.Println()
+		return nil
 	},
 }
 
@@ -209,6 +213,55 @@ type VersionChange struct {
 
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
+	{
+		Version: "1.1.0",
+		Date:    "2026-07-04",
+		Changes: []string{
+			"STABLE: first stable 1.1.x release; includes the rc.1 and rc.2 cross-clone migration-safety work plus post-rc.2 recovery fixes.",
+			"UPGRADE: back up with bd export --all before migrating older or remote-backed databases; the upgrade docs now carry the stable 1.1.0 recipes.",
+			"FIX: failed v53 migrations can self-heal on the next open, including wisp_dependencies split-column drift and dirty snapshot tables left by a half-applied pass (#4555, #4558).",
+			"FIX: bd dolt commit and bd vc commit can commit a dirty embedded working set that is blocking a pending schema migration; after that, bd migrate can proceed (#4566, #4567).",
+			"NEW: the state-aware remote-migrate gate is enabled by default; safe first-mover migrations proceed, while remote-ahead or content-skew cases still stop for adoption or human review (#4516).",
+		},
+	},
+	{
+		Version: "1.1.0-rc.2",
+		Date:    "2026-07-02",
+		Changes: []string{
+			"RC: fixes the two upgrade-breaking migration regressions reported against rc.1 (#4502, #4534); back up with bd export --all before migrating a remote-backed database.",
+			"FIX: the v53 migration no longer fails with Unknown column on databases whose issues table predates the rig/agent columns; the runner repairs the drift before applying (#4502).",
+			"FIX: an orphaned child_counters row no longer bricks every bd create after the fk_counter_parent constraint returned; a clone-local cleanup migration heals affected databases automatically (#4534).",
+			"FIX: old binaries fail fast on writable opens of a schema-newer database instead of proceeding blind (#4531).",
+			"NEW: the remote-migrate gate is state-aware and agent-safe — provably safe migrations auto-resolve; risky states still require BD_ALLOW_REMOTE_MIGRATE=1 by the designated migrator (#4515, #4516).",
+			"UPGRADE: the upgrade guide now carries a validated remote-backed / multi-clone recipe with a pre-migrate backup step (#4514).",
+		},
+	},
+	{
+		Version: "1.1.0-rc.1",
+		Date:    "2026-06-23",
+		Changes: []string{
+			"RC: v1.0.5 was pulled from the default release path after #4259; this candidate carries the cross-clone data-safety fixes for validation before stable promotion.",
+			"UPGRADE: For multiple clones sharing one Dolt remote, sync every clone before upgrading, designate one machine to migrate and push, then upgrade/pull the remaining clones before doing tracked work.",
+			"NEW: bd refuses silent in-place schema migrations on existing remote-backed databases unless BD_ALLOW_REMOTE_MIGRATE=1 is set by the designated migrator.",
+			"NEW: schema_migrations records per-migration content hashes, and bd doctor reports migration-content skew against the cached remote-tracking ref.",
+			"FIX: dependencies and wisp_dependencies now use deterministic natural-key-derived IDs, with migration 0050 rekeying existing rows and same-edge pull conflicts auto-resolved when only audit columns differ.",
+			"FIX: Dolt primary-key merge refusals are classified with recovery guidance instead of surfacing only a raw Error 1105.",
+		},
+	},
+	{
+		Version: "1.0.5",
+		Date:    "2026-05-28",
+		Changes: []string{
+			"CHANGE: dependencies.depends_on_id is now a STORED generated column — writes must target exactly one of depends_on_issue_id/depends_on_wisp_id/depends_on_external (enforced by ck_dep_one_target); inserting into depends_on_id fails. Migrations 0041–0042 are intentionally irreversible (restore from a prior Dolt commit to roll back).",
+			"CHANGE: JSONL auto-export and auto-staging are now opt-in — set export.auto=true and export.git-add=true to keep the old behavior. Dolt is the canonical store; use bd dolt push/pull for sync and bd backup for restorable backups.",
+			"CHANGE: Foreign keys with ON DELETE/UPDATE CASCADE now span issue and wisp tables, so parent delete/rename cascades automatically.",
+			"NEW: dolt.mode config key (server|embedded) with validation; bd init warns on ambiguous configs and hard-fails when dolt.host/dolt.port are set without server mode.",
+			"NEW: forward schema-skew guard hard-fails when a binary opens a database migrated to a newer schema than it understands.",
+			"NEW: bd list --skip-labels toggle; bd show --json count-only details with opt-in streamed payloads.",
+			"FIX: bd close supports per-id reasons and idempotent re-close; bd create --defer <future> creates a deferred issue; bd create commits labels atomically.",
+			"FIX: migrations run on a connection with no read timeout; duplicate migration version numbers hard-fail instead of silently under-applying.",
+		},
+	},
 	{
 		Version: "1.0.4",
 		Date:    "2026-05-07",
@@ -1363,16 +1416,14 @@ var versionChanges = []VersionChange{
 	},
 }
 
-// showWhatsNew displays agent-relevant changes from recent versions
-func showWhatsNew() {
-	currentVersion := Version // from version.go
+func showWhatsNew() error {
+	currentVersion := Version
 
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"current_version": currentVersion,
 			"recent_changes":  versionChanges,
 		})
-		return
 	}
 
 	// Human-readable output
@@ -1397,6 +1448,7 @@ func showWhatsNew() {
 
 	fmt.Println("💡 Tip: Use `bd info --whats-new --json` for machine-readable output")
 	fmt.Println()
+	return nil
 }
 
 func init() {

@@ -92,3 +92,94 @@ func TestGetReadyWork_MetadataSuite(t *testing.T) {
 		}
 	})
 }
+
+func TestGetReadyWork_IncludeEphemeralAssigneeIsSuperset(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	store := newTestStore(t, tmpDir)
+	ctx := context.Background()
+	worker := "control-dispatcher"
+
+	issues := []*types.Issue{
+		{
+			ID:        "mr-assignee-persistent",
+			Title:     "Persistent assigned task",
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Status:    types.StatusOpen,
+			Assignee:  worker,
+		},
+		{
+			ID:        "mr-assignee-no-history",
+			Title:     "No-history assigned task",
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Status:    types.StatusOpen,
+			Assignee:  worker,
+			NoHistory: true,
+		},
+		{
+			ID:        "mr-assignee-ephemeral",
+			Title:     "Ephemeral assigned task",
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Status:    types.StatusOpen,
+			Assignee:  worker,
+			Ephemeral: true,
+		},
+		{
+			ID:        "mr-assignee-other",
+			Title:     "Other assigned task",
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Status:    types.StatusOpen,
+			Assignee:  "someone-else",
+			Ephemeral: true,
+		},
+	}
+	for _, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", issue.ID, err)
+		}
+	}
+
+	defaultResults, err := store.GetReadyWork(ctx, types.WorkFilter{
+		Status:   types.StatusOpen,
+		Assignee: &worker,
+	})
+	if err != nil {
+		t.Fatalf("GetReadyWork default: %v", err)
+	}
+	if got := issueIDs(defaultResults); !sameStringSet(got, []string{"mr-assignee-persistent", "mr-assignee-no-history"}) {
+		t.Fatalf("default ready IDs = %v, want persistent and no-history only", got)
+	}
+
+	allResults, err := store.GetReadyWork(ctx, types.WorkFilter{
+		Status:           types.StatusOpen,
+		Assignee:         &worker,
+		IncludeEphemeral: true,
+	})
+	if err != nil {
+		t.Fatalf("GetReadyWork include ephemeral: %v", err)
+	}
+	if got := issueIDs(allResults); !sameStringSet(got, []string{"mr-assignee-persistent", "mr-assignee-no-history", "mr-assignee-ephemeral"}) {
+		t.Fatalf("include-ephemeral ready IDs = %v, want persistent, no-history, and ephemeral for assignee", got)
+	}
+}
+
+func sameStringSet(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	counts := make(map[string]int, len(want))
+	for _, v := range want {
+		counts[v]++
+	}
+	for _, v := range got {
+		counts[v]--
+		if counts[v] < 0 {
+			return false
+		}
+	}
+	return true
+}

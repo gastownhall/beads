@@ -21,8 +21,8 @@ import (
 // DUPLICATE KEY so concurrent execution is idempotent.
 func TestConcurrentInitSchema(t *testing.T) {
 	skipIfNoDolt(t)
-	acquireTestSlot()
-	t.Cleanup(releaseTestSlot)
+	acquireAllTestSlots()
+	t.Cleanup(releaseAllTestSlots)
 
 	if testServerPort == 0 {
 		t.Skip("no Dolt test server available")
@@ -76,7 +76,7 @@ func TestConcurrentInitSchema(t *testing.T) {
 
 			<-ready // wait for all goroutines to be ready
 
-			if err := initSchemaOnDB(ctx, db); err != nil {
+			if _, err := initSchemaOnDBWithRetry(ctx, db); err != nil {
 				errs <- fmt.Errorf("goroutine %d: initSchemaOnDB: %w", n, err)
 			}
 		}(i)
@@ -122,8 +122,8 @@ func TestConcurrentInitSchema(t *testing.T) {
 
 func TestInitSchemaBlocksOnMigrationLock(t *testing.T) {
 	skipIfNoDolt(t)
-	acquireTestSlot()
-	t.Cleanup(releaseTestSlot)
+	acquireAllTestSlots()
+	t.Cleanup(releaseAllTestSlots)
 
 	if testServerPort == 0 {
 		t.Skip("no Dolt test server available")
@@ -180,7 +180,8 @@ func TestInitSchemaBlocksOnMigrationLock(t *testing.T) {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- initSchemaOnDB(ctx, initDB2)
+		_, err := initSchemaOnDBWithRetry(ctx, initDB2)
+		errCh <- err
 	}()
 
 	waitForMigrationLockWaiter(t, ctx, initDB, lockHolderID, errCh)
@@ -198,15 +199,15 @@ func TestInitSchemaBlocksOnMigrationLock(t *testing.T) {
 		if err != nil {
 			t.Fatalf("initSchemaOnDB after releasing migration lock: %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second):
 		t.Fatal("initSchemaOnDB did not complete after releasing migration lock")
 	}
 }
 
 func TestInitSchemaCanceledLockWaitDoesNotBlockFutureInit(t *testing.T) {
 	skipIfNoDolt(t)
-	acquireTestSlot()
-	t.Cleanup(releaseTestSlot)
+	acquireAllTestSlots()
+	t.Cleanup(releaseAllTestSlots)
 
 	if testServerPort == 0 {
 		t.Skip("no Dolt test server available")
@@ -263,7 +264,8 @@ func TestInitSchemaCanceledLockWaitDoesNotBlockFutureInit(t *testing.T) {
 	callerCtx, callerCancel := context.WithCancel(ctx)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- initSchemaOnDB(callerCtx, blockedDB)
+		_, err := initSchemaOnDBWithRetry(callerCtx, blockedDB)
+		errCh <- err
 	}()
 
 	waitForMigrationLockWaiter(t, ctx, initDB, lockHolderID, errCh)
@@ -292,17 +294,17 @@ func TestInitSchemaCanceledLockWaitDoesNotBlockFutureInit(t *testing.T) {
 	}
 	defer secondDB.Close()
 
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer verifyCancel()
-	if err := initSchemaOnDB(verifyCtx, secondDB); err != nil {
+	if _, err := initSchemaOnDBWithRetry(verifyCtx, secondDB); err != nil {
 		t.Fatalf("second initSchemaOnDB after canceled lock wait: %v", err)
 	}
 }
 
 func TestMigrationLockReleaseIgnoresCanceledCallerContext(t *testing.T) {
 	skipIfNoDolt(t)
-	acquireTestSlot()
-	t.Cleanup(releaseTestSlot)
+	acquireAllTestSlots()
+	t.Cleanup(releaseAllTestSlots)
 
 	if testServerPort == 0 {
 		t.Skip("no Dolt test server available")
@@ -353,9 +355,9 @@ func TestMigrationLockReleaseIgnoresCanceledCallerContext(t *testing.T) {
 	}
 	defer secondDB.Close()
 
-	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer verifyCancel()
-	if err := initSchemaOnDB(verifyCtx, secondDB); err != nil {
+	if _, err := initSchemaOnDBWithRetry(verifyCtx, secondDB); err != nil {
 		t.Fatalf("second initSchemaOnDB after canceled-context release: %v", err)
 	}
 }

@@ -117,13 +117,14 @@ Secrets in this list are refused on git-tracked `config.yaml` files unless you p
 | `routing.default` | — | — | `.` | Default routing target |
 | `routing.maintainer` | — | — | `.` | Maintainer-routed path |
 | `routing.contributor` | — | — | `~/.beads-planning` | Contributor-routed path |
+| `list.limit` | `--limit` / `-n` | `BD_LIST_LIMIT` | `50` | Default limit for `bd list` results |
+| `directory.labels` | — | — | `{}` | Map directory patterns → labels for monorepos |
+| `external_projects` | — | — | `{}` | Map project names → paths for cross-project deps |
 | `federation.remote` | — | `BD_FEDERATION_REMOTE` | (none) | Dolt remote URL (`dolthub://`, `gs://`, `s3://`, `az://`, `file://`) |
 | `federation.sovereignty` | — | `BD_FEDERATION_SOVEREIGNTY` | (none) | Sovereignty tier: `T1`, `T2`, `T3`, `T4` |
 | `federation.allowed-remote-patterns` | — | — | `[]` | Glob patterns restricting allowed remote URLs |
 | `federation.exclude_types` | — | — | `[wisp]` | Issue types excluded from federation push |
 | `sync.require_confirmation_on_mass_delete` | — | — | `false` | Prompt before pushing >50% issue deletions |
-| `directory.labels` | — | — | `{}` | Map directory patterns → labels for monorepos |
-| `external_projects` | — | — | `{}` | Map project names → paths for cross-project deps |
 | `output.title-length` | — | — | `255` | Title display in feedback (`0` hides); see routing note below |
 | `ai.model` | — | `BD_AI_MODEL` | `claude-haiku-4-5-20251001` | Default AI model |
 | `agents.file` | — | — | `AGENTS.md` | Agents instruction filename; see routing note below |
@@ -166,7 +167,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `types.custom` | Comma-separated list of custom issue types |
 | `types.infra` | Infra types routed to wisps table |
 | `import.orphan_handling` | `allow` (default) \| `resurrect` \| `skip` \| `strict` |
-| `compact_*` | Compaction tuning (see `docs/EXTENDING.md`) |
+| `compact_*` | Compaction tuning (see [docs/CONFIG.md](https://github.com/gastownhall/beads/blob/main/docs/CONFIG.md)) |
 | `issue_id_mode` | `hash` (default) \| `counter` (sequential) |
 | `min_hash_length`, `max_hash_length` | Adaptive ID bounds (defaults `4` and `8`) |
 | `max_collision_prob` | Hash ID collision tolerance (default `0.25`) |

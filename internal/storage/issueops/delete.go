@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -54,7 +55,10 @@ func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool)
 		return fmt.Errorf("get rows affected: %w", err)
 	}
 	if rows == 0 {
-		return fmt.Errorf("issue not found: %s", id)
+		// Wrap the sentinel so callers can errors.Is(..., storage.ErrNotFound),
+		// matching GetIssue/UpdateIssue. The storage conformance suite asserts
+		// this parity across not-found paths.
+		return fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 	}
 	if isWisp {
 		if err := DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
@@ -84,7 +88,7 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 
 	expandedRegularIDs := regularIDs
 	if cascade {
-		allToDelete, err := findAllDependentsRecursiveInTx(ctx, tx, regularIDs)
+		allToDelete, err := FindAllDependentsInTx(ctx, tx, regularIDs)
 		if err != nil {
 			return nil, fmt.Errorf("find dependents: %w", err)
 		}
@@ -159,28 +163,28 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 	}
 
 	var depsCount, labelsCount, eventsCount int
-	if depsCount, err = countRowsForIssueIDsInTx(ctx, tx, "dependencies", finalRegularIDs); err != nil {
+	if depsCount, err = CountRowsForIssueIDsInTx(ctx, tx, "dependencies", finalRegularIDs); err != nil {
 		return nil, fmt.Errorf("count dependencies: %w", err)
 	}
-	wispDepsCount, err := countRowsForIssueIDsInTx(ctx, tx, "wisp_dependencies", cascadeWispIDs)
+	wispDepsCount, err := CountRowsForIssueIDsInTx(ctx, tx, "wisp_dependencies", cascadeWispIDs)
 	if err != nil {
 		return nil, fmt.Errorf("count wisp dependencies: %w", err)
 	}
 	depsCount += wispDepsCount
 
-	if labelsCount, err = countRowsForIssueIDsInTx(ctx, tx, "labels", finalRegularIDs); err != nil {
+	if labelsCount, err = CountRowsForIssueIDsInTx(ctx, tx, "labels", finalRegularIDs); err != nil {
 		return nil, fmt.Errorf("count labels: %w", err)
 	}
-	wispLabelsCount, err := countRowsForIssueIDsInTx(ctx, tx, "wisp_labels", cascadeWispIDs)
+	wispLabelsCount, err := CountRowsForIssueIDsInTx(ctx, tx, "wisp_labels", cascadeWispIDs)
 	if err != nil {
 		return nil, fmt.Errorf("count wisp labels: %w", err)
 	}
 	labelsCount += wispLabelsCount
 
-	if eventsCount, err = countRowsForIssueIDsInTx(ctx, tx, "events", finalRegularIDs); err != nil {
+	if eventsCount, err = CountRowsForIssueIDsInTx(ctx, tx, "events", finalRegularIDs); err != nil {
 		return nil, fmt.Errorf("count events: %w", err)
 	}
-	wispEventsCount, err := countRowsForIssueIDsInTx(ctx, tx, "wisp_events", cascadeWispIDs)
+	wispEventsCount, err := CountRowsForIssueIDsInTx(ctx, tx, "wisp_events", cascadeWispIDs)
 	if err != nil {
 		return nil, fmt.Errorf("count wisp events: %w", err)
 	}
@@ -273,7 +277,7 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 // at maxRecursiveResults total discovered IDs.
 //
 //nolint:gosec // G201: inClause contains only ? placeholders
-func findAllDependentsRecursiveInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[string]bool, error) {
+func FindAllDependentsInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
 	result := make(map[string]bool)
 	for _, id := range ids {
 		result[id] = true
@@ -375,7 +379,7 @@ func findExternalDependentsBatchedInTx(ctx context.Context, tx *sql.Tx, ids []st
 }
 
 //nolint:gosec // G201: table is selected by callers from fixed issue/wisp auxiliary tables.
-func countRowsForIssueIDsInTx(ctx context.Context, tx *sql.Tx, table string, ids []string) (int, error) {
+func CountRowsForIssueIDsInTx(ctx context.Context, tx DBTX, table string, ids []string) (int, error) {
 	total := 0
 	for i := 0; i < len(ids); i += deleteBatchSize {
 		end := i + deleteBatchSize

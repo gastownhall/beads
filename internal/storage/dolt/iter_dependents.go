@@ -49,15 +49,22 @@ func (s *DoltStore) IterDependentsWithMetadata(ctx context.Context, issueID stri
 		SELECT %s, d.type
 		FROM issues i
 		JOIN dependencies d ON d.issue_id = i.id
-		WHERE d.depends_on_id = ?
+		WHERE %s = ?
 		UNION ALL
 		SELECT %s, d.type
 		FROM wisps w
 		JOIN wisp_dependencies d ON d.issue_id = w.id
-		WHERE d.depends_on_id = ?
+		WHERE %s = ?
 		ORDER BY created_at ASC
-	`, prefixedIssueColumns("i"), prefixedIssueColumns("w"))
+	`, prefixedIssueColumns("i"), depTargetExprWithAlias("d"), prefixedIssueColumns("w"), depTargetExprWithAlias("d"))
 	return s.iterIssuesWithDepType(ctx, q, issueID, issueID)
+}
+
+func depTargetExprWithAlias(alias string) string {
+	if alias == "" {
+		return depTargetExpr
+	}
+	return fmt.Sprintf("COALESCE(%s.depends_on_issue_id, %s.depends_on_wisp_id, %s.depends_on_external)", alias, alias, alias)
 }
 
 // IterDependenciesWithMetadata streams dependencies (issues issueID depends

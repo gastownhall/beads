@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unicode"
@@ -21,6 +23,12 @@ var helpDocFlag string
 // helpListFlag is the --list flag for listing available commands
 var helpListFlag bool
 
+// helpDocsRootFlag is the --docs-root flag for generating repository docs in one process.
+var helpDocsRootFlag string
+
+// helpDocsVersionFlag is the --docs-version flag for refreshing one versioned docs snapshot.
+var helpDocsVersionFlag string
+
 // registerHelpAllFlag adds the --all, --doc, and --list flags to Cobra's auto-generated help command.
 // Must be called after rootCmd.InitDefaultHelpCmd() has run (i.e., after first Execute
 // or explicit init). We hook it in init() after all subcommands are registered.
@@ -34,10 +42,19 @@ func registerHelpAllFlag() {
 			cmd.Flags().BoolVar(&helpAllFlag, "all", false, "Show help for all commands in a single document")
 			cmd.Flags().StringVar(&helpDocFlag, "doc", "", "Generate markdown docs for a single command")
 			cmd.Flags().BoolVar(&helpListFlag, "list", false, "List all available commands")
+			cmd.Flags().StringVar(&helpDocsRootFlag, "docs-root", "", "Generate repository CLI docs under this root")
+			cmd.Flags().StringVar(&helpDocsVersionFlag, "docs-version", "", "Also refresh one versioned website CLI reference, e.g. 1.0.5")
 
 			// Wrap the existing Run to check --all, --doc, and --list first
 			originalRun := cmd.Run
 			cmd.Run = func(cmd *cobra.Command, args []string) {
+				if helpDocsRootFlag != "" {
+					if err := writeGeneratedCLIDocs(rootCmd, helpDocsRootFlag, helpDocsVersionFlag); err != nil {
+						fmt.Fprintln(os.Stderr, err)
+						os.Exit(1)
+					}
+					return
+				}
 				if helpListFlag {
 					// Handle --list flag: list all available commands
 					listAllCommands(os.Stdout, rootCmd)
@@ -271,6 +288,102 @@ func writeSingleCommandDoc(w io.Writer, root *cobra.Command, cmdName string) err
 	// Generate the command help (using h2 for single command)
 	parentPath := strings.TrimSuffix(commandPath(cmd), " "+cmd.Name())
 	writeCommandHelp(w, cmd, parentPath, 2)
+	return nil
+}
+
+func writeGeneratedCLIDocs(root *cobra.Command, repoRoot, docsVersion string) error {
+	repoRoot = filepath.Clean(repoRoot)
+
+	var all bytes.Buffer
+	writeAllHelp(&all, root)
+	if err := writeMarkdownFile(filepath.Join(repoRoot, "docs", "CLI_REFERENCE.md"), all.String()); err != nil {
+		return err
+	}
+
+	if err := writeCLIReferenceDir(filepath.Join(repoRoot, "website", "docs", "cli-reference"), root, "Latest"); err != nil {
+		return err
+	}
+
+	if docsVersion != "" {
+		versionDir := filepath.Join(repoRoot, "website", "versioned_docs", "version-"+docsVersion, "cli-reference")
+		if err := writeCLIReferenceDir(versionDir, root, "v"+docsVersion); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func writeCLIReferenceDir(outDir string, root *cobra.Command, versionLabel string) error {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
+	}
+	if err := removeMarkdownFiles(outDir); err != nil {
+		return err
+	}
+
+	commands := availableCommandNames(root)
+	if err := writeMarkdownFile(filepath.Join(outDir, "index.md"), cliReferenceIndex(commands, versionLabel)); err != nil {
+		return err
+	}
+
+	for _, name := range commands {
+		var out bytes.Buffer
+		if err := writeSingleCommandDoc(&out, root, name); err != nil {
+			return err
+		}
+		path := filepath.Join(outDir, commandDocID(name)+".md")
+		if err := writeMarkdownFile(path, out.String()); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func cliReferenceIndex(commands []string, versionLabel string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "---\n")
+	fmt.Fprintf(&b, "id: index\n")
+	fmt.Fprintf(&b, "title: CLI Reference\n")
+	fmt.Fprintf(&b, "sidebar_position: 0\n")
+	fmt.Fprintf(&b, "---\n\n")
+	fmt.Fprintf(&b, "# CLI Reference\n\n")
+	fmt.Fprintf(&b, "<!-- AUTO-GENERATED: do not edit manually -->\n")
+	fmt.Fprintf(&b, "Reference for bd %s. Generated from `bd help --docs-root`.\n\n", versionLabel)
+	fmt.Fprintf(&b, "This reference covers all %d live top-level `bd` commands. Regenerate it with:\n\n", len(commands))
+	fmt.Fprintf(&b, "```bash\n")
+	fmt.Fprintf(&b, "./scripts/generate-cli-docs.sh\n")
+	fmt.Fprintf(&b, "```\n\n")
+	fmt.Fprintf(&b, "## Commands\n\n")
+	for _, cmd := range commands {
+		fmt.Fprintf(&b, "- [`bd %s`](./%s.md)\n", cmd, commandDocID(cmd))
+	}
+	return b.String()
+}
+
+func writeMarkdownFile(path, content string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	content = strings.TrimRight(content, "\n") + "\n"
+	// #nosec G306: generated repository Markdown should be readable like source files.
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func removeMarkdownFiles(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

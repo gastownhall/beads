@@ -30,6 +30,62 @@ func TestGetReadyWork_EmptyStore(t *testing.T) {
 	}
 }
 
+func TestRigIssueIsPersistentButHiddenFromReady(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	rig := &types.Issue{
+		ID:        "rw-rig-durable",
+		Title:     "Rig identity",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.IssueType("rig"),
+	}
+	if err := store.CreateIssue(ctx, rig, "tester"); err != nil {
+		t.Fatalf("CreateIssue rig: %v", err)
+	}
+	if rig.Ephemeral {
+		t.Fatal("CreateIssue marked type=rig as ephemeral")
+	}
+
+	got, err := store.GetIssue(ctx, rig.ID)
+	if err != nil {
+		t.Fatalf("GetIssue rig: %v", err)
+	}
+	if got.Ephemeral {
+		t.Fatal("stored type=rig issue is ephemeral")
+	}
+
+	var issueRows int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", rig.ID).Scan(&issueRows); err != nil {
+		t.Fatalf("count rig issue rows: %v", err)
+	}
+	if issueRows != 1 {
+		t.Fatalf("type=rig rows in issues = %d, want 1", issueRows)
+	}
+
+	var wispRows int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisps WHERE id = ?", rig.ID).Scan(&wispRows); err != nil {
+		t.Fatalf("count rig wisp rows: %v", err)
+	}
+	if wispRows != 0 {
+		t.Fatalf("type=rig rows in wisps = %d, want 0", wispRows)
+	}
+
+	work, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, item := range work {
+		if item.ID == rig.ID {
+			t.Fatalf("type=rig issue appeared in ready work: %v", issueIDs(work))
+		}
+	}
+}
+
 func TestGetReadyWork_ExcludesClosedIssues(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -682,6 +738,57 @@ func TestGetReadyWork_LimitIncludeEphemeralWispBlocker(t *testing.T) {
 	}
 	if !ids[ready.ID] {
 		t.Fatalf("ready issue missing from limited ready work with wisps: %v", issueIDs(work))
+	}
+}
+
+func TestGetReadyWork_LimitIncludeEphemeralHonorsOldestSortAcrossWispPages(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	now := time.Now().UTC()
+	lowPriorityOld := &types.Issue{
+		ID:        "rw-eph-oldest-low-priority",
+		Title:     "Oldest low priority wisp",
+		Status:    types.StatusOpen,
+		Priority:  4,
+		IssueType: types.TypeTask,
+		CreatedAt: now.Add(-72 * time.Hour),
+		Ephemeral: true,
+	}
+	if err := store.CreateIssue(ctx, lowPriorityOld, "tester"); err != nil {
+		t.Fatalf("create old wisp: %v", err)
+	}
+
+	for i := 0; i < 101; i++ {
+		iss := &types.Issue{
+			ID:        fmt.Sprintf("rw-eph-priority-noise-%03d", i),
+			Title:     fmt.Sprintf("Priority noise %03d", i),
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(time.Duration(i) * time.Minute),
+			Ephemeral: true,
+		}
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create priority noise %03d: %v", i, err)
+		}
+	}
+
+	work, err := store.GetReadyWork(ctx, types.WorkFilter{
+		Limit:            1,
+		IncludeEphemeral: true,
+		SortPolicy:       types.SortPolicyOldest,
+	})
+	if err != nil {
+		t.Fatalf("limited oldest ready work with wisps: %v", err)
+	}
+	ids := issueIDs(work)
+	want := []string{lowPriorityOld.ID}
+	if fmt.Sprint(ids) != fmt.Sprint(want) {
+		t.Fatalf("limited oldest ready work = %v, want %v", ids, want)
 	}
 }
 

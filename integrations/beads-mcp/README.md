@@ -248,18 +248,30 @@ All MCP tools now load correctly in Claude Code with v0.24.0+.
 
 ## Development
 
+Baseline validation:
+```bash
+uv sync
+uv run pytest
+uv run python -m build
+```
+
+Integration tests require a current `bd` binary from this repository. In
+particular, `bd init --help` must include `--non-interactive`, `--skip-agents`,
+and `--skip-hooks`; older installed versions are skipped with a clear pytest
+message.
+
 Run MCP inspector:
 ```bash
 # inside beads-mcp dir
 uv run fastmcp dev src/beads_mcp/server.py
 ```
 
-Type checking:
+Type checking (source maintenance, not part of baseline validation yet):
 ```bash
 uv run mypy src/beads_mcp
 ```
 
-Linting and formatting:
+Linting and formatting (source maintenance, not part of baseline validation yet):
 ```bash
 uv run ruff check src/beads_mcp
 uv run ruff format src/beads_mcp

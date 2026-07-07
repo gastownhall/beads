@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -19,29 +20,35 @@ it lists all branches. With an argument, it creates a new branch.
 Examples:
   bd branch                    # List all branches
   bd branch feature-xyz        # Create a new branch named feature-xyz`,
-	Args: cobra.MaximumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.MaximumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("branch")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 
-		// If no args, list branches
 		if len(args) == 0 {
 			branches, err := store.ListBranches(ctx)
 			if err != nil {
-				FatalErrorRespectJSON("failed to list branches: %v", err)
+				return HandleErrorRespectJSON("failed to list branches: %v", err)
 			}
 
 			currentBranch, err := store.CurrentBranch(ctx)
 			if err != nil {
-				// Non-fatal, just don't show current marker
 				currentBranch = ""
 			}
 
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				return outputJSON(map[string]interface{}{
 					"current":  currentBranch,
 					"branches": branches,
 				})
-				return
 			}
 
 			fmt.Printf("\n%s Branches:\n\n", ui.RenderAccent("🌿"))
@@ -53,23 +60,22 @@ Examples:
 				}
 			}
 			fmt.Println()
-			return
+			return nil
 		}
 
-		// Create new branch
 		branchName := args[0]
 		if err := store.Branch(ctx, branchName); err != nil {
-			FatalErrorRespectJSON("failed to create branch: %v", err)
+			return HandleErrorRespectJSON("failed to create branch: %v", err)
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"created": branchName,
 			})
-			return
 		}
 
 		fmt.Printf("Created branch: %s\n", ui.RenderAccent(branchName))
+		return nil
 	},
 }
 

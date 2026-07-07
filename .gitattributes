@@ -8,3 +8,9 @@ cmd/bd/templates/hooks/* text eol=lf
 # bytes, which breaks LF-only marker stripping in templateBody() and produces
 # doubled BEGIN/END BEADS INTEGRATION markers in installed AGENTS.md (#3552).
 internal/templates/agents/defaults/*.md text eol=lf
+
+# Migration SQL is embedded into the binary and content-hashed after apply
+# (schema_migrations.content_hash, PR 4270). Pin LF so from-source builds on
+# Windows checkouts (core.autocrlf=true) hash identically to release builds
+# instead of reporting false migration-content skew.
+internal/storage/schema/migrations/**/*.sql text eol=lf

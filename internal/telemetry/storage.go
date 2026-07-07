@@ -204,6 +204,17 @@ func (s *InstrumentedStorage) SearchIssuesWithCounts(ctx context.Context, query 
 	return v, err
 }
 
+func (s *InstrumentedStorage) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
+	ctx, span, t := s.op(ctx, "SearchIssueIDs", attrs...)
+	ids, err := s.inner.SearchIssueIDs(ctx, query, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(ids)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return ids, err
+}
+
 // ── Dependencies ────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
@@ -547,6 +558,13 @@ func (s *InstrumentedStorage) IterWisps(ctx context.Context, filter types.WispFi
 func (s *InstrumentedStorage) CountIssues(ctx context.Context, query string, filter types.IssueFilter) (int64, error) {
 	ctx, span, t := s.op(ctx, "CountIssues")
 	v, err := s.inner.CountIssues(ctx, query, filter)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) CountIssuesByGroup(ctx context.Context, filter types.IssueFilter, groupBy string) (map[string]int, error) {
+	ctx, span, t := s.op(ctx, "CountIssuesByGroup")
+	v, err := s.inner.CountIssuesByGroup(ctx, filter, groupBy)
 	s.done(ctx, span, t, err)
 	return v, err
 }

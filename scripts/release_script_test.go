@@ -116,6 +116,60 @@ func TestReleaseFormulaCleanupStaleDoltOrphansHandlesLocalModeWithoutJQ(t *testi
 	}
 }
 
+func TestReleaseFormulaHomebrewCoreProcedureCoversTemplateAndBottles(t *testing.T) {
+	repoRoot := sourceRepoRoot(t)
+	formulaPath := filepath.Join(repoRoot, ".beads", "formulas", "beads-release.formula.toml")
+	if _, err := formula.NewParser().ParseFile(formulaPath); err != nil {
+		t.Fatalf("beads-release formula does not parse: %v", err)
+	}
+
+	homebrewStep := releaseFormulaStep(t, formulaPath, `id = "verify-homebrew-core"`)
+	for _, want := range []string{
+		"brew bump-formula-pr",
+		"--url=\"https://github.com/gastownhall/beads/archive/refs/tags/v{{version}}.tar.gz\"",
+		"Homebrew's current PR template",
+		"Do not remove or hand-edit the bottle block.",
+		"Do not open a duplicate manual PR.",
+		"homepage \"https://github.com/gastownhall/beads\"",
+		"Homebrew/homebrew-core@main",
+	} {
+		if !strings.Contains(homebrewStep, want) {
+			t.Fatalf("verify-homebrew-core step missing %q:\n%s", want, homebrewStep)
+		}
+	}
+
+	localInstallStep := releaseFormulaStep(t, formulaPath, `id = "local-install"`)
+	for _, want := range []string{
+		`needs = ["verify-github", "verify-npm", "verify-pypi", "verify-homebrew-core"]`,
+		"brew upgrade beads",
+	} {
+		if !strings.Contains(localInstallStep, want) {
+			t.Fatalf("local-install step missing %q:\n%s", want, localInstallStep)
+		}
+	}
+	if strings.Contains(localInstallStep, "brew upgrade bd") {
+		t.Fatalf("local-install step still references old Homebrew formula name:\n%s", localInstallStep)
+	}
+}
+
+func releaseFormulaStep(t *testing.T, formulaPath, marker string) string {
+	t.Helper()
+	data, err := os.ReadFile(formulaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	start := strings.Index(text, marker)
+	if start < 0 {
+		t.Fatalf("release formula step marker not found: %s", marker)
+	}
+	step := text[start:]
+	if next := strings.Index(step[len(marker):], "\n[[steps]]"); next >= 0 {
+		step = step[:len(marker)+next]
+	}
+	return step
+}
+
 func copyReleaseScriptFixture(t *testing.T) string {
 	t.Helper()
 

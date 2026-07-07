@@ -420,6 +420,98 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Scenario 6: Dependency blocker paths must survive upgrade
+# ---------------------------------------------------------------------------
+#
+# Release gate for the dependencies-split migrations (0035, 0041–0045, 0047).
+# Earlier scenarios create issues but no dependencies, so the data-copy in
+# 0041_split_dependencies_target only ever runs as DDL on an empty table and
+# the rewritten ready_issues/blocked_issues views never get queried on a
+# migrated DB. This scenario populates a dependency with the OLD binary (so the
+# row is written in the pre-0041 schema), upgrades, then exercises the exact
+# blocker paths that fail when the data-copy is wrong: bd ready, bd blocked,
+# bd close — the surface of the current Dolt errno 1105 on a stale schema.
+
+scenario "Dependency blocker paths survive upgrade (ready/blocked/close on migrated deps)"
+
+WS=$(new_workspace)
+
+prev_init 2>/dev/null || true
+git -C "$WS" config beads.role maintainer
+
+# Blocker (task) and a dependent (bug depends-on task → bug is blocked).
+_CREATED_ID=""
+prev_create --title "Blocker task" --type task --priority 1 || true
+BLOCKER_ID="${_CREATED_ID}"
+_CREATED_ID=""
+prev_create --title "Blocked bug" --type bug --priority 2 || true
+BLOCKED_ID="${_CREATED_ID}"
+
+# Wire the dependency with the previous binary so the dependencies table is
+# populated in the old (pre-split) schema. `dep add <blocked> <blocker>` means
+# blocked depends on blocker; default type is "blocks".
+DEP_CREATED=false
+if [ -n "${BLOCKER_ID:-}" ] && [ -n "${BLOCKED_ID:-}" ] \
+    && [ "$BLOCKER_ID" != "created" ] && [ "$BLOCKED_ID" != "created" ]; then
+    if prev dep add "$BLOCKED_ID" "$BLOCKER_ID" >/dev/null 2>&1; then
+        DEP_CREATED=true
+    fi
+fi
+
+if ! $DEP_CREATED; then
+    # Old binary could not create a parseable dependency — early releases lack
+    # --silent (so IDs aren't captured) or predate positional dep add. The
+    # data-copy is still covered by the migration-test harness; skip gracefully.
+    pass "Dependency blocker-path check skipped (old binary could not add a parseable dependency)"
+    rm -rf "$WS"
+    finish_scenario
+else
+    pass "Dependency created with previous binary ($BLOCKED_ID depends on $BLOCKER_ID)"
+
+    # Upgrade (runs migrations 0041–0047, including the data-copy).
+    cand_init 2>/dev/null || true
+
+    # 1. Blocker queries must not error on the migrated dependency rows.
+    if cand ready >/dev/null 2>&1; then
+        pass "bd ready succeeds after upgrade"
+    else
+        fail "bd ready errors after upgrade (migrated dependency schema regression)"
+    fi
+    if cand blocked >/dev/null 2>&1; then
+        pass "bd blocked succeeds after upgrade"
+    else
+        fail "bd blocked errors after upgrade (migrated dependency schema regression)"
+    fi
+
+    # 2. The dependent must still be reported blocked post-migration — proves
+    #    the data-copy populated depends_on_issue_id, not just the DDL.
+    BLOCKED_OUT=$(cand blocked 2>/dev/null || echo "")
+    if echo "$BLOCKED_OUT" | grep -q "$BLOCKED_ID"; then
+        pass "Migrated dependency still blocks dependent (blocked issue listed)"
+    else
+        fail "Blocked issue '$BLOCKED_ID' not reported blocked after upgrade (data-copy may have dropped the row)"
+    fi
+
+    # 3. Closing the blocker must succeed (this is the bd close errno 1105
+    #    surface) and must unblock the dependent (is_blocked recompute).
+    if cand close "$BLOCKER_ID" >/dev/null 2>&1; then
+        pass "bd close on blocker succeeds after upgrade"
+    else
+        fail "bd close errors after upgrade (errno 1105 / stale depends_on_id regression)"
+    fi
+
+    READY_OUT=$(cand ready 2>/dev/null || echo "")
+    if echo "$READY_OUT" | grep -q "$BLOCKED_ID"; then
+        pass "Dependent becomes ready after blocker closed (unblock path works)"
+    else
+        fail "Dependent '$BLOCKED_ID' not ready after closing blocker (is_blocked recompute wrong)"
+    fi
+
+    rm -rf "$WS"
+    finish_scenario
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 

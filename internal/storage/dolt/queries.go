@@ -21,6 +21,18 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	return result, err
 }
 
+// SearchIssueIDs is the narrow-projection variant of SearchIssues; returns
+// only matching IDs.
+func (s *DoltStore) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	var result []string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchIssueIDsInTx(ctx, tx, query, filter)
+		return err
+	})
+	return result, err
+}
+
 func (s *DoltStore) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
 	var result []*types.IssueWithCounts
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {

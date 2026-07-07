@@ -83,6 +83,15 @@ SET @sql = IF(@needs_migrate = 1,
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
+-- NOTE: the FK on depends_on_issue_id must be added BEFORE the generated
+-- depends_on_id column exists. Dolt 2.0.6 rejects adding a foreign key on the
+-- base column of a stored generated column (errno 1105). The final schema is
+-- identical to adding it last.
+SET @sql = IF(@needs_migrate = 1,
+    'ALTER TABLE dependencies ADD CONSTRAINT fk_dep_issue_target FOREIGN KEY (depends_on_issue_id) REFERENCES issues(id) ON DELETE CASCADE ON UPDATE CASCADE',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
 SET @sql = IF(@needs_migrate = 1,
     'ALTER TABLE dependencies ADD COLUMN depends_on_id VARCHAR(255) AS (COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)) STORED',
     'SELECT 1');
@@ -110,11 +119,6 @@ PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 SET @sql = IF(@needs_migrate = 1,
     'ALTER TABLE dependencies ADD INDEX idx_dep_type_target (type, depends_on_id)',
-    'SELECT 1');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
-SET @sql = IF(@needs_migrate = 1,
-    'ALTER TABLE dependencies ADD CONSTRAINT fk_dep_issue_target FOREIGN KEY (depends_on_issue_id) REFERENCES issues(id) ON DELETE CASCADE ON UPDATE CASCADE',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 

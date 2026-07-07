@@ -53,10 +53,28 @@ func (u *doltRemoteUseCaseImpl) UpdateRemote(ctx context.Context, name, url stri
 	if url == "" {
 		return fmt.Errorf("UpdateRemote: url must not be empty")
 	}
+	// Dolt has no atomic remote update, so this is remove-then-add. Capture
+	// the old URL first so a failed add can restore the remote instead of
+	// leaving it deleted (bd-6dnrw.44 P3).
+	var oldURL string
+	if remotes, err := u.remoteRepo.ListRemotes(ctx); err == nil {
+		for _, rem := range remotes {
+			if rem.Name == name {
+				oldURL = rem.URL
+				break
+			}
+		}
+	}
 	if err := u.remoteRepo.RemoveRemote(ctx, name); err != nil {
 		return fmt.Errorf("UpdateRemote %s: remove: %w", name, err)
 	}
 	if err := u.remoteRepo.AddRemote(ctx, name, url); err != nil {
+		if oldURL != "" {
+			if restoreErr := u.remoteRepo.AddRemote(ctx, name, oldURL); restoreErr != nil {
+				return fmt.Errorf("UpdateRemote %s: add: %w (restoring previous URL %s also failed: %v)", name, err, oldURL, restoreErr)
+			}
+			return fmt.Errorf("UpdateRemote %s: add: %w (previous URL %s restored)", name, err, oldURL)
+		}
 		return fmt.Errorf("UpdateRemote %s: add: %w", name, err)
 	}
 	return nil

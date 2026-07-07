@@ -328,6 +328,45 @@ func TestIsBlocked_WaitsForAnyChildrenGate(t *testing.T) {
 	}
 }
 
+func TestIsBlocked_AddClosedChildUnblocksAnyChildrenGate(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "isb-wf-any-add-waiter")
+	createPerm(t, ctx, store, "isb-wf-any-add-spawner")
+	createPerm(t, ctx, store, "isb-wf-any-add-active-child")
+	createPerm(t, ctx, store, "isb-wf-any-add-closed-child")
+
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "isb-wf-any-add-active-child", DependsOnID: "isb-wf-any-add-spawner", Type: types.DepParentChild,
+	}, "tester"); err != nil {
+		t.Fatalf("parent-child active: %v", err)
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "isb-wf-any-add-waiter", DependsOnID: "isb-wf-any-add-spawner",
+		Type: types.DepWaitsFor, Metadata: `{"gate":"any-children"}`,
+	}, "tester"); err != nil {
+		t.Fatalf("waits-for any-children: %v", err)
+	}
+	if !getIsBlocked(t, ctx, store, "issues", "isb-wf-any-add-waiter") {
+		t.Fatal("expected waiter blocked before any child is closed")
+	}
+
+	if err := store.CloseIssue(ctx, "isb-wf-any-add-closed-child", "done", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue closed child: %v", err)
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "isb-wf-any-add-closed-child", DependsOnID: "isb-wf-any-add-spawner", Type: types.DepParentChild,
+	}, "tester"); err != nil {
+		t.Fatalf("parent-child closed: %v", err)
+	}
+	if getIsBlocked(t, ctx, store, "issues", "isb-wf-any-add-waiter") {
+		t.Fatal("expected waiter unblocked after linking an already-closed child")
+	}
+}
+
 func TestIsBlocked_ClosedDependerNotRemarkedActive(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

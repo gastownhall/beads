@@ -70,7 +70,7 @@ func TestCheckParentConsistency_OrphanedDeps(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := db.ExecContext(ctx,
-		"INSERT INTO dependencies (issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (?, ?, ?, NOW(), ?)",
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, NOW(), ?)",
 		"bd-1", "bd-missing", "parent-child", "test")
 	if err != nil {
 		t.Fatal(err)
@@ -257,7 +257,7 @@ func TestCheckMailThreadIntegrity_ValidThreads(t *testing.T) {
 	// Insert a dependency with valid thread_id via raw SQL (replies-to with thread_id)
 	db := store.UnderlyingDB()
 	_, err := db.ExecContext(ctx,
-		"INSERT INTO dependencies (issue_id, depends_on_issue_id, type, thread_id, created_at, created_by) VALUES (?, ?, ?, ?, NOW(), ?)",
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, thread_id, created_at, created_by) VALUES (UUID(), ?, ?, ?, ?, NOW(), ?)",
 		"thread-reply", "thread-root", "replies-to", "thread-root", "test")
 	if err != nil {
 		t.Fatalf("Failed to insert thread dep: %v", err)

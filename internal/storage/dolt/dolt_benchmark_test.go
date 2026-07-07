@@ -12,6 +12,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -977,6 +978,10 @@ func createBenchIssueBatch(b *testing.B, store *DoltStore, issues []*types.Issue
 	}
 }
 
+func ptrString(s string) *string {
+	return &s
+}
+
 func insertBenchIssues(ctx context.Context, tx *sql.Tx, table string, issues []*types.Issue) error {
 	const batchSize = 500
 	for start := 0; start < len(issues); start += batchSize {
@@ -987,28 +992,38 @@ func insertBenchIssues(ctx context.Context, tx *sql.Tx, table string, issues []*
 		var placeholders []string
 		var args []interface{}
 		for _, issue := range issues[start:end] {
-			placeholders = append(placeholders, "(?, ?, ?, '', '', '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			metadata := string(issue.Metadata)
+			if metadata == "" {
+				metadata = "{}"
+			}
+			placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 			args = append(args,
 				issue.ID,
 				issue.ContentHash,
 				issue.Title,
+				issue.Description,
+				issue.Design,
+				issue.AcceptanceCriteria,
+				issue.Notes,
 				issue.Status,
 				issue.Priority,
 				issue.IssueType,
+				issue.Assignee,
 				issue.CreatedAt,
 				issue.UpdatedAt,
 				issue.DeferUntil,
 				issue.Ephemeral,
 				issue.NoHistory,
 				issue.Pinned,
+				metadata,
 			)
 		}
 		//nolint:gosec // G201: table is selected from fixed issue table names.
 		query := fmt.Sprintf(`
 			INSERT INTO %s (
 				id, content_hash, title, description, design, acceptance_criteria, notes,
-				status, priority, issue_type, created_at, updated_at, defer_until,
-				ephemeral, no_history, pinned
+				status, priority, issue_type, assignee, created_at, updated_at, defer_until,
+				ephemeral, no_history, pinned, metadata
 			) VALUES %s
 			ON DUPLICATE KEY UPDATE title = VALUES(title)
 		`, table, strings.Join(placeholders, ","))
@@ -1179,6 +1194,95 @@ func BenchmarkPerfResolvePartialIDInvalidInput_5K(b *testing.B) {
 	}
 }
 
+// BenchmarkPerfIDProjectionVsHydration_5K isolates the value of the narrow
+// id-only projection (SearchIssueIDs) against the two hydration alternatives on
+// an identical, large result set. All three arms share the same WHERE clause
+// via issueops.searchInTx, so the only variable is projection + row hydration:
+//
+//   - SearchIssueIDs          — projects only `id`; no row structs, no labels.
+//   - SearchIssues+SkipLabels — full IssueSelectColumns scan into *types.Issue
+//     (description/design/notes/metadata/...), but skips the labels JOIN.
+//   - SearchIssues (full)     — full column scan plus label hydration.
+//
+// The narrow-vs-SkipLabels delta is the figure that justifies the projection
+// over simply reusing upstream's SkipLabels: SkipLabels suppresses labels but
+// still materializes every heavy TEXT column, which this fixture populates.
+func BenchmarkPerfIDProjectionVsHydration_5K(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	const total = 5000
+	// Heavy TEXT payloads approximate real issues. The narrow projection never
+	// scans these columns; SkipLabels does not help with them.
+	bigText := strings.Repeat("lorem ipsum dolor sit amet consectetur ", 24) // ~936 B
+	bigJSON := json.RawMessage(`{"k":"` + strings.Repeat("v", 256) + `"}`)
+
+	issues := make([]*types.Issue, 0, total)
+	for i := 0; i < total; i++ {
+		issues = append(issues, &types.Issue{
+			ID:                 fmt.Sprintf("narrowbench-%05d", i),
+			Title:              fmt.Sprintf("narrowbench issue %05d", i),
+			Description:        bigText,
+			Design:             bigText,
+			AcceptanceCriteria: bigText,
+			Notes:              bigText,
+			Metadata:           bigJSON,
+			Status:             types.StatusOpen,
+			Priority:           (i % 4) + 1,
+			IssueType:          types.TypeTask,
+			Labels:             []string{"area-narrow", fmt.Sprintf("bucket-%03d", i%100)},
+		})
+	}
+	createBenchIssueBatch(b, store, issues)
+
+	ctx := context.Background()
+	// "narrowbench" appears in every id and title, so id/title LIKE matches the
+	// full set — maximizing per-row hydration cost, the dimension under test.
+	const query = "narrowbench"
+
+	// Guard: all three arms must see the same cardinality, else the comparison
+	// would be measuring row count rather than projection.
+	if ids, err := store.SearchIssueIDs(ctx, query, types.IssueFilter{}); err != nil {
+		b.Fatalf("setup SearchIssueIDs: %v", err)
+	} else if len(ids) != total {
+		b.Fatalf("fixture: expected %d matches, got %d", total, len(ids))
+	}
+
+	b.Run("SearchIssueIDs_narrow", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssueIDs(ctx, query, types.IssueFilter{}); err != nil {
+				b.Fatalf("SearchIssueIDs: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssueIDs: got %d want %d", len(got), total)
+			}
+		}
+	})
+
+	b.Run("SearchIssues_SkipLabels", func(b *testing.B) {
+		b.ReportAllocs()
+		filter := types.IssueFilter{SkipLabels: true}
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssues(ctx, query, filter); err != nil {
+				b.Fatalf("SearchIssues SkipLabels: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssues SkipLabels: got %d want %d", len(got), total)
+			}
+		}
+	})
+
+	b.Run("SearchIssues_full", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssues(ctx, query, types.IssueFilter{}); err != nil {
+				b.Fatalf("SearchIssues full: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssues full: got %d want %d", len(got), total)
+			}
+		}
+	})
+}
+
 func BenchmarkPerfAddDependencyCycleCheck_DiamondDAG(b *testing.B) {
 	store, cleanup := setupBenchStore(b)
 	defer cleanup()
@@ -1285,6 +1389,170 @@ func BenchmarkPerfReadyWorkLimited_LargeBlockedGraph(b *testing.B) {
 		if len(results) != filter.Limit {
 			b.Fatalf("GetReadyWork limited blocked graph returned %d issues, want %d", len(results), filter.Limit)
 		}
+	}
+}
+
+func BenchmarkPerfReadyWorkLimited_GasCityWispHeavy(b *testing.B) {
+	const (
+		wispCount    = 8000
+		readyLimit   = 20
+		gcAssignee   = "gascity/workflows.codex-min-11"
+		gcRoute      = "gascity/workflows.codex-min-11"
+		routeJSON    = `{"gc.routed_to":"gascity/workflows.codex-min-11"}`
+		emptyJSON    = `{}`
+		closedStatus = types.StatusClosed
+	)
+	future := time.Now().UTC().Add(24 * time.Hour)
+
+	makeWisp := func(id string, priority int, assignee string, metadata string, deferUntil *time.Time) *types.Issue {
+		return &types.Issue{
+			ID:         id,
+			Title:      id,
+			Status:     types.StatusOpen,
+			Priority:   priority,
+			IssueType:  types.TypeTask,
+			Assignee:   assignee,
+			Ephemeral:  true,
+			Metadata:   []byte(metadata),
+			DeferUntil: deferUntil,
+		}
+	}
+
+	cases := []struct {
+		name   string
+		filter types.WorkFilter
+		issues func() []*types.Issue
+	}{
+		{
+			name: "AssignedDenseLimit20Of8000",
+			filter: types.WorkFilter{
+				Assignee:         ptrString(gcAssignee),
+				IncludeEphemeral: true,
+				Limit:            readyLimit,
+				SortPolicy:       types.SortPolicyPriority,
+			},
+			issues: func() []*types.Issue {
+				issues := make([]*types.Issue, 0, wispCount)
+				for i := 0; i < wispCount; i++ {
+					issues = append(issues, makeWisp(
+						fmt.Sprintf("bench-perf-gc-assigned-wisp-%05d", i),
+						(i%4)+1,
+						gcAssignee,
+						emptyJSON,
+						nil,
+					))
+				}
+				return issues
+			},
+		},
+		{
+			name: "MetadataRouteDenseLimit20Of8000",
+			filter: types.WorkFilter{
+				Unassigned:       true,
+				MetadataFields:   map[string]string{"gc.routed_to": gcRoute},
+				IncludeEphemeral: true,
+				Limit:            readyLimit,
+				SortPolicy:       types.SortPolicyPriority,
+			},
+			issues: func() []*types.Issue {
+				issues := make([]*types.Issue, 0, wispCount)
+				for i := 0; i < wispCount; i++ {
+					issues = append(issues, makeWisp(
+						fmt.Sprintf("bench-perf-gc-routed-wisp-%05d", i),
+						(i%4)+1,
+						"",
+						routeJSON,
+						nil,
+					))
+				}
+				return issues
+			},
+		},
+		{
+			name: "AssignedSparseAfterDeferredLimit20Of8000",
+			filter: types.WorkFilter{
+				Assignee:         ptrString(gcAssignee),
+				IncludeEphemeral: true,
+				Limit:            readyLimit,
+				SortPolicy:       types.SortPolicyPriority,
+			},
+			issues: func() []*types.Issue {
+				issues := make([]*types.Issue, 0, wispCount)
+				for i := 0; i < wispCount-readyLimit; i++ {
+					issues = append(issues, makeWisp(
+						fmt.Sprintf("bench-perf-gc-deferred-wisp-%05d", i),
+						1,
+						gcAssignee,
+						emptyJSON,
+						&future,
+					))
+				}
+				for i := wispCount - readyLimit; i < wispCount; i++ {
+					issues = append(issues, makeWisp(
+						fmt.Sprintf("bench-perf-gc-ready-tail-wisp-%05d", i),
+						4,
+						gcAssignee,
+						emptyJSON,
+						nil,
+					))
+				}
+				return issues
+			},
+		},
+		{
+			name: "AssignedClosedNoiseLimit20Of8000",
+			filter: types.WorkFilter{
+				Assignee:         ptrString(gcAssignee),
+				IncludeEphemeral: true,
+				Limit:            readyLimit,
+				SortPolicy:       types.SortPolicyPriority,
+			},
+			issues: func() []*types.Issue {
+				issues := make([]*types.Issue, 0, wispCount)
+				for i := 0; i < wispCount-readyLimit; i++ {
+					wisp := makeWisp(
+						fmt.Sprintf("bench-perf-gc-closed-wisp-%05d", i),
+						1,
+						gcAssignee,
+						emptyJSON,
+						nil,
+					)
+					wisp.Status = closedStatus
+					issues = append(issues, wisp)
+				}
+				for i := wispCount - readyLimit; i < wispCount; i++ {
+					issues = append(issues, makeWisp(
+						fmt.Sprintf("bench-perf-gc-ready-closed-noise-wisp-%05d", i),
+						4,
+						gcAssignee,
+						emptyJSON,
+						nil,
+					))
+				}
+				return issues
+			},
+		},
+	}
+
+	ctx := context.Background()
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			store, cleanup := setupBenchStore(b)
+			defer cleanup()
+			createBenchIssueBatch(b, store, tc.issues())
+			b.ReportAllocs()
+			b.ReportMetric(float64(wispCount), "wisps")
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				results, err := store.GetReadyWork(ctx, tc.filter)
+				if err != nil {
+					b.Fatalf("GetReadyWork gascity wisps: %v", err)
+				}
+				if len(results) != readyLimit {
+					b.Fatalf("GetReadyWork gascity wisps returned %d issues, want %d", len(results), readyLimit)
+				}
+			}
+		})
 	}
 }
 
@@ -1727,4 +1995,47 @@ func BenchmarkGetIssuesByIDs_SmallNLargeW_10_10K(b *testing.B) {
 }
 func BenchmarkGetIssuesByIDs_SmallNLargeW_100_5K(b *testing.B) {
 	benchmarkGetIssuesByIDsSmallN(b, 5000, 100)
+}
+
+// =============================================================================
+// Schema Probe Benchmarks
+// =============================================================================
+
+// BenchmarkContentHashColumnProbe compares the retired INFORMATION_SCHEMA.COLUMNS
+// existence probe against the SHOW COLUMNS probe that replaced it.
+// schema.MigrateUp's migrationWorkNeeded runs this probe twice on every
+// connection. INFORMATION_SCHEMA.COLUMNS forces Dolt to materialize the full
+// column catalog because the predicate is not pushed down; SHOW COLUMNS reads a
+// single table's schema directly. The gap measured here understates production:
+// on a multi-database deployment the old probe was measured at 19-60 ms/conn
+// versus ~0 ms on the new one.
+func BenchmarkContentHashColumnProbe(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+	ctx := context.Background()
+
+	b.Run("InformationSchema", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var count int
+			if err := store.db.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'content_hash'`,
+				"schema_migrations").Scan(&count); err != nil {
+				b.Fatalf("information_schema probe: %v", err)
+			}
+		}
+	})
+
+	b.Run("ShowColumns", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			rows, err := store.db.QueryContext(ctx, "SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'")
+			if err != nil {
+				b.Fatalf("show columns probe: %v", err)
+			}
+			for rows.Next() { //nolint:revive // draining the result set is the point
+			}
+			_ = rows.Close()
+		}
+	})
 }

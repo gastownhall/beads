@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"os"
@@ -14,17 +15,25 @@ var epicCmd = &cobra.Command{
 	Short:   "Epic management commands",
 }
 var epicStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show epic completion status",
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "status",
+	Short:         "Show epic completion status",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("epic-status")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		eligibleOnly, _ := cmd.Flags().GetBool("eligible-only")
-		// Use global jsonOutput set by PersistentPreRun
 		var epics []*types.EpicStatus
 		var err error
 		ctx := rootCtx
 		epics, err = store.GetEpicsEligibleForClosure(ctx)
 		if err != nil {
-			FatalErrorRespectJSON("getting epic status: %v", err)
+			return HandleErrorRespectJSON("getting epic status: %v", err)
 		}
 		if eligibleOnly {
 			filtered := []*types.EpicStatus{}
@@ -39,13 +48,11 @@ var epicStatusCmd = &cobra.Command{
 			if epics == nil {
 				epics = []*types.EpicStatus{}
 			}
-			outputJSON(epics)
-			return
+			return outputJSON(epics)
 		}
-		// Human-readable output
 		if len(epics) == 0 {
 			fmt.Println("No open epics found")
-			return
+			return nil
 		}
 		for _, epicStatus := range epics {
 			epic := epicStatus.Epic
@@ -69,23 +76,31 @@ var epicStatusCmd = &cobra.Command{
 			}
 			fmt.Println()
 		}
+		return nil
 	},
 }
 var closeEligibleEpicsCmd = &cobra.Command{
-	Use:   "close-eligible",
-	Short: "Close epics where all children are complete",
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "close-eligible",
+	Short:         "Close epics where all children are complete",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("epic-close-eligible")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
-		// Block writes in readonly mode (closing modifies data)
 		if !dryRun {
 			CheckReadonly("epic close-eligible")
 		}
-		// Use global jsonOutput set by PersistentPreRun
 		var eligibleEpics []*types.EpicStatus
 		ctx := rootCtx
 		epics, err := store.GetEpicsEligibleForClosure(ctx)
 		if err != nil {
-			FatalErrorRespectJSON("getting eligible epics: %v", err)
+			return HandleErrorRespectJSON("getting eligible epics: %v", err)
 		}
 		for _, epic := range epics {
 			if epic.EligibleForClose {
@@ -94,24 +109,21 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		}
 		if len(eligibleEpics) == 0 {
 			if jsonOutput {
-				outputJSON([]*types.EpicStatus{})
-			} else {
-				fmt.Println("No epics eligible for closure")
+				return outputJSON([]*types.EpicStatus{})
 			}
-			return
+			fmt.Println("No epics eligible for closure")
+			return nil
 		}
 		if dryRun {
 			if jsonOutput {
-				outputJSON(eligibleEpics)
-			} else {
-				fmt.Printf("Would close %d epic(s):\n", len(eligibleEpics))
-				for _, epicStatus := range eligibleEpics {
-					fmt.Printf("  - %s: %s\n", epicStatus.Epic.ID, epicStatus.Epic.Title)
-				}
+				return outputJSON(eligibleEpics)
 			}
-			return
+			fmt.Printf("Would close %d epic(s):\n", len(eligibleEpics))
+			for _, epicStatus := range eligibleEpics {
+				fmt.Printf("  - %s: %s\n", epicStatus.Epic.ID, epicStatus.Epic.Title)
+			}
+			return nil
 		}
-		// Actually close the epics
 		closedIDs := []string{}
 		for _, epicStatus := range eligibleEpics {
 			err := store.CloseIssue(ctx, epicStatus.Epic.ID, "All children completed", "system", "")
@@ -125,16 +137,16 @@ var closeEligibleEpicsCmd = &cobra.Command{
 			commandDidWrite.Store(true)
 		}
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"closed": closedIDs,
 				"count":  len(closedIDs),
 			})
-		} else {
-			fmt.Printf("✓ Closed %d epic(s)\n", len(closedIDs))
-			for _, id := range closedIDs {
-				fmt.Printf("  - %s\n", id)
-			}
 		}
+		fmt.Printf("✓ Closed %d epic(s)\n", len(closedIDs))
+		for _, id := range closedIDs {
+			fmt.Printf("  - %s\n", id)
+		}
+		return nil
 	},
 }
 

@@ -137,6 +137,15 @@ type MappingConfig struct {
 	// mappings from type-based fallbacks.
 	ExplicitStateMap map[string]string
 
+	// OutboundStateMap maps a Beads status to the Linear workflow state NAME to
+	// use when pushing. Populated from linear.outbound_state_map.<beads_status>
+	// config keys. Used to disambiguate cases where multiple Linear states share
+	// the same state type (e.g. "In Progress" and "In Review" are both
+	// "started"), which would otherwise fail the push with an ambiguity error.
+	// Keys are lowercase beads status strings; values are Linear state names
+	// matched case-insensitively against the workflow state cache.
+	OutboundStateMap map[string]string
+
 	// LabelTypeMap maps Linear label names to Beads issue types.
 	// Key is lowercase label name, value is Beads issue type.
 	LabelTypeMap map[string]string
@@ -144,6 +153,10 @@ type MappingConfig struct {
 	// RelationMap maps Linear relation types to Beads dependency types.
 	// Key is Linear relation type, value is Beads dependency type.
 	RelationMap map[string]string
+
+	// CustomStatuses holds typed entries from status.custom (beads config).
+	// Used for push-time state_map validation and matching non-built-in statuses.
+	CustomStatuses []types.CustomStatus
 }
 
 // DefaultMappingConfig returns sensible default mappings.
@@ -167,6 +180,7 @@ func DefaultMappingConfig() *MappingConfig {
 			"canceled":  "closed",
 		},
 		ExplicitStateMap: make(map[string]string),
+		OutboundStateMap: make(map[string]string),
 		// Label patterns for issue type inference
 		LabelTypeMap: map[string]string{
 			"bug":         "bug",
@@ -204,6 +218,7 @@ type ConfigLoader interface {
 //
 //	linear.priority_map.0 = 4       (Linear "no priority" -> Beads backlog)
 //	linear.state_map.started = in_progress
+//	linear.outbound_state_map.in_progress = "In Progress"
 //	linear.label_type_map.bug = bug
 //	linear.relation_map.blocks = blocks
 func LoadMappingConfig(loader ConfigLoader) *MappingConfig {
@@ -220,6 +235,16 @@ func LoadMappingConfig(loader ConfigLoader) *MappingConfig {
 	}
 
 	for key, value := range allConfig {
+		if key == "status.custom" {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				if custom, err := types.ParseCustomStatusConfig(value); err == nil {
+					config.CustomStatuses = custom
+				}
+			}
+			continue
+		}
+
 		// Parse priority mappings: linear.priority_map.<linear_priority>
 		if strings.HasPrefix(key, "linear.priority_map.") {
 			linearPriority := strings.TrimPrefix(key, "linear.priority_map.")
@@ -233,6 +258,13 @@ func LoadMappingConfig(loader ConfigLoader) *MappingConfig {
 			stateKey := strings.ToLower(strings.TrimPrefix(key, "linear.state_map."))
 			config.StateMap[stateKey] = value
 			config.ExplicitStateMap[stateKey] = value
+		}
+
+		// Parse outbound state mappings: linear.outbound_state_map.<beads_status>
+		// Value is the Linear workflow state name to use for that status on push.
+		if strings.HasPrefix(key, "linear.outbound_state_map.") {
+			statusKey := strings.ToLower(strings.TrimPrefix(key, "linear.outbound_state_map."))
+			config.OutboundStateMap[statusKey] = value
 		}
 
 		// Parse label-to-type mappings: linear.label_type_map.<label_name>
@@ -320,7 +352,14 @@ func stateMapMatchesStatus(mapped string, status types.Status) bool {
 	if normalizedMapped == normalizedStatus {
 		return true
 	}
-	if status.IsValid() && ParseBeadsStatus(mapped) == status {
+	parsed := ParseBeadsStatus(mapped)
+	if parsed == status {
+		// ParseBeadsStatus returns StatusOpen for unrecognized strings; do not
+		// treat those as matching built-in open (avoids false "ambiguous mapping"
+		// when state_map values are custom status names like "review").
+		if parsed == types.StatusOpen && normalizedMapped != "open" {
+			return false
+		}
 		return true
 	}
 	return false
@@ -336,6 +375,21 @@ func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config
 	}
 	if config == nil || len(config.ExplicitStateMap) == 0 {
 		return "", fmt.Errorf("%s", missingExplicitStateMapMessage)
+	}
+
+	// Outbound override: an explicit linear.outbound_state_map.<status> entry
+	// names the exact Linear workflow state to push to and short-circuits the
+	// name/type matching below. This is the escape hatch when multiple Linear
+	// states share a type (e.g. "In Progress" and "In Review" are both
+	// "started") and the type-based fallback would otherwise be ambiguous.
+	if outboundName, ok := config.OutboundStateMap[strings.ToLower(strings.TrimSpace(string(status)))]; ok {
+		want := strings.ToLower(strings.TrimSpace(outboundName))
+		for _, state := range cache.States {
+			if strings.ToLower(strings.TrimSpace(state.Name)) == want {
+				return state.ID, nil
+			}
+		}
+		return "", fmt.Errorf("linear.outbound_state_map.%s = %q does not match any Linear workflow state", status, outboundName)
 	}
 
 	var nameMatches []State
@@ -371,7 +425,7 @@ func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config
 		for _, state := range typeMatches {
 			names = append(names, state.Name)
 		}
-		return "", fmt.Errorf("linear.state_map type fallback is ambiguous for beads status %q across Linear states: %s", status, strings.Join(names, ", "))
+		return "", fmt.Errorf("linear.state_map type fallback is ambiguous for beads status %q across Linear states: %s. Set linear.outbound_state_map.%s = \"<state name>\" to disambiguate", status, strings.Join(names, ", "), status)
 	}
 
 	return "", fmt.Errorf("linear.state_map has no configured Linear state for beads status %q", status)
