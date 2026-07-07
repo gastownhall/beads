@@ -19,7 +19,7 @@ Commit the small tracked configuration files if your project policy requires
 them:
 
 ```bash
-git add .beads/.gitignore .beads/metadata.json .beads/config.yaml .gitattributes
+git add .beads/.gitignore .beads/metadata.json .beads/config.yaml .gitignore
 git commit -m "Initialize beads issue tracker"
 ```
 
@@ -98,10 +98,10 @@ bd dolt push
 ### Conflicts During `bd dolt pull`
 
 Dolt reports database-level conflicts separately from Git branch conflicts. Use
-the conflict commands or doctor guidance printed by the failed command:
+the merge strategy or doctor guidance printed by the failed command:
 
 ```bash
-bd vc conflicts
+bd vc merge <branch> --strategy [ours|theirs]
 bd doctor --fix
 ```
 
