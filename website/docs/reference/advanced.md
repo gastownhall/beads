@@ -70,11 +70,14 @@ bd restore bd-42 --to-file issue.json
 
 ## Database Inspection
 
+`bd sql` requires Dolt server mode (`bd dolt start`, see Performance Tuning
+below); it is not available against the default embedded-mode database.
+
 ```bash
 # Schema info
 bd info --schema --json
 
-# Raw database query
+# Raw database query (server mode only)
 bd sql "SELECT * FROM issues LIMIT 5"
 ```
 
@@ -88,7 +91,7 @@ connect it to beads through stable CLI surfaces:
 bd list --json
 bd query "status=open AND priority<=2" --json
 
-# Run direct SQL for inspection
+# Run direct SQL for inspection (server mode only)
 bd sql "SELECT id, title, status FROM issues LIMIT 5"
 ```
 
@@ -106,7 +109,7 @@ state through JSON output, or query the audit tables directly when needed:
 # Current issue state
 bd show bd-a1b2 --json
 
-# Recent stored events for one issue
+# Recent stored events for one issue (server mode only)
 bd sql "SELECT event_type, actor, created_at FROM events WHERE issue_id = 'bd-a1b2' ORDER BY created_at DESC LIMIT 20"
 ```
 
@@ -153,7 +156,7 @@ bd show bd-a1b2 --json
 # Ready-work queue for automation
 bd ready --json
 
-# Direct SQL inspection against the active Dolt database
+# Direct SQL inspection against the active Dolt database (server mode only)
 bd sql "SELECT id, priority, status FROM issues WHERE status != 'closed'"
 ```
 
