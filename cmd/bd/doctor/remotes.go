@@ -1,123 +1,92 @@
 package doctor
 
 import (
+	"context"
 	"fmt"
-	"path/filepath"
+	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltremote"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
-// CheckRemoteConsistency compares remotes registered in the SQL server
-// vs the filesystem CLI config and reports discrepancies.
-// Returns a check with Fix set for cases where --fix can resolve it.
-func CheckRemoteConsistency(repoPath string) DoctorCheck {
+var querySQLRemotesForDoctor = querySQLRemotes
+
+// CheckDoltRemoteGitOrigin warns when any configured Dolt remote URL matches
+// the git origin — a likely misconfiguration since beads syncs via Dolt, not git.
+func CheckDoltRemoteGitOrigin(repoPath string) DoctorCheck {
+	name := "Dolt Remote vs Git Origin"
 	beadsDir := ResolveBeadsDirForRepo(repoPath)
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil || cfg.GetBackend() != configfile.BackendDolt {
 		return DoctorCheck{
-			Name:     "Remote Consistency",
+			Name:     name,
 			Status:   StatusOK,
 			Message:  "N/A (not using Dolt backend)",
-			Category: CategoryData,
+			Category: CategoryDolt,
 		}
 	}
 
-	// Get SQL remotes via direct connection
-	sqlRemotes, sqlErr := querySQLRemotes(beadsDir)
-	if sqlErr != nil {
+	originURL := gitOriginRemoteURL(repoPath)
+	if originURL == "" {
 		return DoctorCheck{
-			Name:     "Remote Consistency",
-			Status:   StatusWarning,
-			Message:  "Could not query SQL remotes (server may not be running)",
-			Category: CategoryData,
-		}
-	}
-
-	// Get CLI remotes
-	doltDir := doltserver.ResolveDoltDir(beadsDir)
-	dbName := cfg.GetDoltDatabase()
-	dbDir := filepath.Join(doltDir, dbName)
-	cliRemotes, cliErr := doltutil.ListCLIRemotes(dbDir)
-	if cliErr != nil {
-		return DoctorCheck{
-			Name:     "Remote Consistency",
-			Status:   StatusWarning,
-			Message:  fmt.Sprintf("Could not query CLI remotes: %v", cliErr),
-			Category: CategoryData,
-		}
-	}
-
-	// No remotes at all
-	if len(sqlRemotes) == 0 && len(cliRemotes) == 0 {
-		return DoctorCheck{
-			Name:     "Remote Consistency",
-			Status:   StatusWarning,
-			Message:  "No remotes configured",
-			Detail:   "Add a remote with: bd dolt remote add origin <url>",
-			Category: CategoryData,
-		}
-	}
-
-	// Compare (convert to maps for O(1) lookup)
-	sqlMap := doltutil.ToRemoteNameMap(sqlRemotes)
-	cliMap := doltutil.ToRemoteNameMap(cliRemotes)
-
-	var issues []string
-	hasConflict := false
-
-	// Check all SQL remotes
-	for name, sqlURL := range sqlMap {
-		cliURL, inCLI := cliMap[name]
-		if !inCLI {
-			issues = append(issues, fmt.Sprintf("%s: SQL only (%s)", name, sqlURL))
-		} else if sqlURL != cliURL {
-			issues = append(issues, fmt.Sprintf("%s: CONFLICT — SQL=%s, CLI=%s", name, sqlURL, cliURL))
-			hasConflict = true
-		}
-	}
-
-	// Check CLI-only remotes
-	for name, cliURL := range cliMap {
-		if _, inSQL := sqlMap[name]; !inSQL {
-			issues = append(issues, fmt.Sprintf("%s: CLI only (%s)", name, cliURL))
-		}
-	}
-
-	if len(issues) == 0 {
-		msg := fmt.Sprintf("%d remote(s) in sync", len(sqlRemotes))
-		// Add refs/dolt/data note for git+ssh remotes
-		for _, r := range sqlRemotes {
-			if doltutil.IsSSHURL(r.URL) {
-				msg += " — git+ssh remotes also support refs/dolt/data (see https://docs.dolthub.com/concepts/dolt/git/remotes)"
-				break
-			}
-		}
-		return DoctorCheck{
-			Name:     "Remote Consistency",
+			Name:     name,
 			Status:   StatusOK,
-			Message:  msg,
-			Category: CategoryData,
+			Message:  "No git origin configured",
+			Category: CategoryDolt,
 		}
 	}
 
-	fix := ""
-	if !hasConflict {
-		fix = "Run 'bd doctor --fix' to sync remotes"
+	sqlRemotes, sqlErr := querySQLRemotesForDoctor(beadsDir)
+	if sqlErr != nil {
+		// Can't check; skip silently.
+		return DoctorCheck{
+			Name:     name,
+			Status:   StatusOK,
+			Message:  "Could not query Dolt remotes (server may not be running)",
+			Category: CategoryDolt,
+		}
+	}
+
+	normalizedOrigin := doltremote.CanonicalForComparison(originURL)
+	var colliding []string
+	for _, r := range sqlRemotes {
+		if doltremote.CanonicalForComparison(r.URL) == normalizedOrigin {
+			colliding = append(colliding, r.Name)
+		}
+	}
+
+	if len(colliding) == 0 {
+		return DoctorCheck{
+			Name:     name,
+			Status:   StatusOK,
+			Message:  "No Dolt remote matches git origin",
+			Category: CategoryDolt,
+		}
 	}
 
 	return DoctorCheck{
-		Name:     "Remote Consistency",
+		Name:     name,
 		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d discrepancies found", len(issues)),
-		Detail:   strings.Join(issues, "\n"),
-		Fix:      fix,
-		Category: CategoryData,
+		Message:  fmt.Sprintf("%d Dolt remote(s) match the git origin URL: %s", len(colliding), strings.Join(colliding, ", ")),
+		Detail:   "Using the git origin as a Dolt remote causes git and Dolt sync to share the same endpoint, which can cause conflicts.",
+		Fix:      "Remove the conflicting remote(s) with 'bd dolt remote remove <name>', or set dolt.local-only=true to disable remote sync.",
+		Category: CategoryDolt,
 	}
+}
+
+func gitOriginRemoteURL(repoPath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "remote", "get-url", "origin")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // querySQLRemotes gets remotes from the SQL server.

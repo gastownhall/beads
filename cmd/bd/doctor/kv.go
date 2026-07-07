@@ -6,10 +6,11 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/kvkeys"
 )
 
 // kvPrefix matches the prefix used in cmd/bd/kv.go
-const kvPrefix = "kv."
+const kvPrefix = kvkeys.Prefix
 
 // CheckKVSyncStatus checks if KV data exists and reports sync status.
 func CheckKVSyncStatus(path string) DoctorCheck {

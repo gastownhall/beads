@@ -52,7 +52,8 @@ Every build path that produces a binary for users must include `-tags gms_pure_g
 | Release builds | `.goreleaser.yml` (all build targets) |
 | Install script | `scripts/install.sh` |
 | Windows installer | `install.ps1` |
-| CI test matrix | `.github/workflows/ci.yml` (Linux, macOS, Windows) |
+| PR CI | `.github/workflows/pr.yml`, `.github/workflows/pr-risk.yml` |
+| Main CI test matrix | `.github/workflows/main.yml` (Linux, macOS, Windows) |
 | macOS release | `.github/workflows/release.yml` |
 | Migration tests | `.github/workflows/migration-test.yml` |
 | Nightly tests | `.github/workflows/nightly.yml` |
@@ -83,8 +84,8 @@ passes the tag inline (`-tags gms_pure_go`).
 
 ### Source-time guard: `scripts/check-build-tags.sh`
 
-CI runs `scripts/check-build-tags.sh` on every PR (see `check-build-tags`
-job in `.github/workflows/ci.yml`). It fails if any tracked shell script,
+CI runs `scripts/check-build-tags.sh` on every PR (see the `Check build-tag
+policy` job in `.github/workflows/pr.yml`). It fails if any tracked shell script,
 CI workflow, git hook, or the Makefile contains a
 `go build|test|run|generate|install` invocation that:
 

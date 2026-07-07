@@ -19,7 +19,7 @@
         "x86_64-linux"
       ];
 
-      overlay = import ./overlay.nix;
+      overlay = import ./overlay.nix self;
 
       forAllSystems =
         f:

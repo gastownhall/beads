@@ -193,6 +193,28 @@ func (s *InstrumentedStorage) SearchIssues(ctx context.Context, query string, fi
 	return issues, err
 }
 
+func (s *InstrumentedStorage) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
+	ctx, span, t := s.op(ctx, "SearchIssuesWithCounts", attrs...)
+	v, err := s.inner.SearchIssuesWithCounts(ctx, query, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(v)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return v, err
+}
+
+func (s *InstrumentedStorage) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
+	ctx, span, t := s.op(ctx, "SearchIssueIDs", attrs...)
+	ids, err := s.inner.SearchIssueIDs(ctx, query, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(ids)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return ids, err
+}
+
 // ── Dependencies ────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
@@ -306,6 +328,16 @@ func (s *InstrumentedStorage) GetIssuesByLabel(ctx context.Context, label string
 func (s *InstrumentedStorage) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
 	ctx, span, t := s.op(ctx, "GetReadyWork")
 	v, err := s.inner.GetReadyWork(ctx, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(v)))
+	}
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
+	ctx, span, t := s.op(ctx, "GetReadyWorkWithCounts")
+	v, err := s.inner.GetReadyWorkWithCounts(ctx, filter)
 	if err == nil {
 		span.SetAttributes(attribute.Int("bd.result.count", len(v)))
 	}
@@ -441,6 +473,126 @@ func (s *InstrumentedStorage) RunInTransaction(ctx context.Context, commitMsg st
 func (s *InstrumentedStorage) ListWisps(ctx context.Context, filter types.WispFilter) ([]*types.Issue, error) {
 	ctx, span, t := s.op(ctx, "ListWisps")
 	v, err := s.inner.ListWisps(ctx, filter)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+// ── Streaming iterators ─────────────────────────────────────────────────────
+//
+// Iter* methods record a single span covering iterator CONSTRUCTION (the
+// SQL query setup). Per-row work is NOT traced — the returned iterator is
+// the inner store's iterator, unwrapped. Adding per-row tracing would
+// require a wrapper type that ends a long-lived span on Close; that
+// optimization is intentionally deferred until callers need it.
+
+func (s *InstrumentedStorage) IterIssues(ctx context.Context, query string, filter types.IssueFilter) (storage.Iter[types.Issue], error) {
+	ctx, span, t := s.op(ctx, "IterIssues")
+	it, err := s.inner.IterIssues(ctx, query, filter)
+	s.done(ctx, span, t, err)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterDependentsWithMetadata(ctx context.Context, issueID string) (storage.Iter[types.IssueWithDependencyMetadata], error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "IterDependentsWithMetadata", attrs...)
+	it, err := s.inner.IterDependentsWithMetadata(ctx, issueID)
+	s.done(ctx, span, t, err, attrs...)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterDependenciesWithMetadata(ctx context.Context, issueID string) (storage.Iter[types.IssueWithDependencyMetadata], error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "IterDependenciesWithMetadata", attrs...)
+	it, err := s.inner.IterDependenciesWithMetadata(ctx, issueID)
+	s.done(ctx, span, t, err, attrs...)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterIssueComments(ctx context.Context, issueID string) (storage.Iter[types.Comment], error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "IterIssueComments", attrs...)
+	it, err := s.inner.IterIssueComments(ctx, issueID)
+	s.done(ctx, span, t, err, attrs...)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterEvents(ctx context.Context, issueID string, limit int) (storage.Iter[types.Event], error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "IterEvents", attrs...)
+	it, err := s.inner.IterEvents(ctx, issueID, limit)
+	s.done(ctx, span, t, err, attrs...)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterAllEventsSince(ctx context.Context, since time.Time) (storage.Iter[types.Event], error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.since", since.Format(time.RFC3339))}
+	ctx, span, t := s.op(ctx, "IterAllEventsSince", attrs...)
+	it, err := s.inner.IterAllEventsSince(ctx, since)
+	s.done(ctx, span, t, err, attrs...)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterReadyWork(ctx context.Context, filter types.WorkFilter) (storage.Iter[types.Issue], error) {
+	ctx, span, t := s.op(ctx, "IterReadyWork")
+	it, err := s.inner.IterReadyWork(ctx, filter)
+	s.done(ctx, span, t, err)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterBlockedIssues(ctx context.Context, filter types.WorkFilter) (storage.Iter[types.BlockedIssue], error) {
+	ctx, span, t := s.op(ctx, "IterBlockedIssues")
+	it, err := s.inner.IterBlockedIssues(ctx, filter)
+	s.done(ctx, span, t, err)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterWisps(ctx context.Context, filter types.WispFilter) (storage.Iter[types.Issue], error) {
+	ctx, span, t := s.op(ctx, "IterWisps")
+	it, err := s.inner.IterWisps(ctx, filter)
+	s.done(ctx, span, t, err)
+	return it, err
+}
+
+// ── Count* aggregates ─────────────────────────────────────────────────────────
+
+func (s *InstrumentedStorage) CountIssues(ctx context.Context, query string, filter types.IssueFilter) (int64, error) {
+	ctx, span, t := s.op(ctx, "CountIssues")
+	v, err := s.inner.CountIssues(ctx, query, filter)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) CountIssuesByGroup(ctx context.Context, filter types.IssueFilter, groupBy string) (map[string]int, error) {
+	ctx, span, t := s.op(ctx, "CountIssuesByGroup")
+	v, err := s.inner.CountIssuesByGroup(ctx, filter, groupBy)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) CountDependents(ctx context.Context, issueID string) (int64, error) {
+	ctx, span, t := s.op(ctx, "CountDependents", attribute.String("issue.id", issueID))
+	v, err := s.inner.CountDependents(ctx, issueID)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) CountDependencies(ctx context.Context, issueID string) (int64, error) {
+	ctx, span, t := s.op(ctx, "CountDependencies", attribute.String("issue.id", issueID))
+	v, err := s.inner.CountDependencies(ctx, issueID)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) CountIssueComments(ctx context.Context, issueID string) (int64, error) {
+	ctx, span, t := s.op(ctx, "CountIssueComments", attribute.String("issue.id", issueID))
+	v, err := s.inner.CountIssueComments(ctx, issueID)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) CountEvents(ctx context.Context, issueID string, limit int) (int64, error) {
+	ctx, span, t := s.op(ctx, "CountEvents", attribute.String("issue.id", issueID))
+	v, err := s.inner.CountEvents(ctx, issueID, limit)
 	s.done(ctx, span, t, err)
 	return v, err
 }

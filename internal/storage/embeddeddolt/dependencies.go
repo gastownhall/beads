@@ -11,8 +11,8 @@ import (
 )
 
 func (s *EmbeddedDoltStore) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
-	return s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
-		return issueops.AddDependencyInTx(ctx, regularTx, dep, actor, issueops.AddDependencyOpts{
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.AddDependencyInTx(ctx, tx, dep, actor, issueops.AddDependencyOpts{
 			IsCrossPrefix: types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID),
 		})
 	})
@@ -20,17 +20,17 @@ func (s *EmbeddedDoltStore) AddDependency(ctx context.Context, dep *types.Depend
 
 // RemoveDependency removes a dependency between two issues.
 func (s *EmbeddedDoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	return s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
-		return issueops.RemoveDependencyInTx(ctx, regularTx, issueID, dependsOnID)
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID)
 	})
 }
 
 // GetIssuesByIDs retrieves multiple issues by ID.
 func (s *EmbeddedDoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
 	var result []*types.Issue
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetIssuesByIDsInTx(ctx, regularTx, ids, nil)
+		result, err = issueops.GetIssuesByIDsInTx(ctx, tx, ids, nil)
 		return err
 	})
 	return result, err
@@ -40,9 +40,9 @@ func (s *EmbeddedDoltStore) GetIssuesByIDs(ctx context.Context, ids []string) ([
 // along with the dependency type.
 func (s *EmbeddedDoltStore) GetDependenciesWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	var result []*types.IssueWithDependencyMetadata
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetDependenciesWithMetadataInTx(ctx, regularTx, issueID)
+		result, err = issueops.GetDependenciesWithMetadataInTx(ctx, tx, issueID)
 		return err
 	})
 	return result, err
@@ -52,9 +52,9 @@ func (s *EmbeddedDoltStore) GetDependenciesWithMetadata(ctx context.Context, iss
 // along with the dependency type.
 func (s *EmbeddedDoltStore) GetDependentsWithMetadata(ctx context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
 	var result []*types.IssueWithDependencyMetadata
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetDependentsWithMetadataInTx(ctx, regularTx, issueID)
+		result, err = issueops.GetDependentsWithMetadataInTx(ctx, tx, issueID)
 		return err
 	})
 	return result, err
@@ -63,9 +63,9 @@ func (s *EmbeddedDoltStore) GetDependentsWithMetadata(ctx context.Context, issue
 // DetectCycles finds dependency cycles across both permanent and wisp dependencies.
 func (s *EmbeddedDoltStore) DetectCycles(ctx context.Context) ([][]*types.Issue, error) {
 	var result [][]*types.Issue
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.DetectCyclesInTx(ctx, regularTx)
+		result, err = issueops.DetectCyclesInTx(ctx, tx)
 		return err
 	})
 	return result, err

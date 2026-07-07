@@ -15,6 +15,18 @@ while IFS= read -r hit; do
     file="${hit%%:*}"
     rest="${hit#*:}"
     line_no="${rest%%:*}"
+
+    printf 'error: %s:%s: unsupported go install module path\n' "$file" "$line_no" >&2
+    printf '       use github.com/steveyegge/beads/cmd/bd because go.mod still declares that module path\n' >&2
+    fail=1
+done < <(
+    git grep -n -E 'go install github\.com/gastownhall/beads/cmd/bd@latest' -- . || true
+)
+
+while IFS= read -r hit; do
+    file="${hit%%:*}"
+    rest="${hit#*:}"
+    line_no="${rest%%:*}"
     line="${rest#*:}"
 
     case "$file" in

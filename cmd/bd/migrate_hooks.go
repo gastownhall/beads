@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/steveyegge/beads/internal/metrics"
 	"golang.org/x/term"
 )
 
@@ -25,15 +26,24 @@ Examples:
   bd migrate hooks --apply
   bd migrate hooks --apply --yes
   bd migrate hooks --dry-run --json`,
-	Args: cobra.MaximumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.MaximumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("migrate-hooks")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		requestedDryRun, _ := cmd.Flags().GetBool("dry-run")
 		requestedApply, _ := cmd.Flags().GetBool("apply")
 		requestedYes, _ := cmd.Flags().GetBool("yes")
 
 		mode, err := validateHookMigrationMode(requestedDryRun, requestedApply, requestedYes)
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		if mode.RequestedApply {
@@ -47,23 +57,23 @@ Examples:
 
 		absPath, err := filepath.Abs(targetPath)
 		if err != nil {
-			FatalErrorRespectJSON("resolving path: %v", err)
+			return HandleErrorRespectJSON("resolving path: %v", err)
 		}
 
 		plan, err := doctor.PlanHookMigration(absPath)
 		if err != nil {
-			FatalErrorRespectJSON("building hook migration plan: %v", err)
+			return HandleErrorRespectJSON("building hook migration plan: %v", err)
 		}
 
 		execPlan := buildHookMigrationExecutionPlan(plan)
 
 		if mode.RequestedApply {
 			if len(execPlan.BlockingErrors) > 0 {
-				FatalErrorRespectJSON("hook migration is blocked:\n- %s", strings.Join(execPlan.BlockingErrors, "\n- "))
+				return HandleErrorRespectJSON("hook migration is blocked:\n- %s", strings.Join(execPlan.BlockingErrors, "\n- "))
 			}
 			if execPlan.operationCount() > 0 {
 				if err := validateHookMigrationApplyConsent(mode.RequestedYes, term.IsTerminal(int(os.Stdin.Fd())), jsonOutput); err != nil {
-					FatalErrorRespectJSON("%v", err)
+					return HandleErrorRespectJSON("%v", err)
 				}
 			}
 		}
@@ -72,17 +82,15 @@ Examples:
 			if mode.RequestedApply {
 				summary, applied, applyErr := maybeApplyHookMigration(execPlan, mode.RequestedYes)
 				if applyErr != nil {
-					FatalErrorRespectJSON("applying hook migration: %v", applyErr)
+					return HandleErrorRespectJSON("applying hook migration: %v", applyErr)
 				}
 				if !applied {
 					summary.SkippedArtifacts = append(summary.SkippedArtifacts, "canceled")
 					summary.SkippedCount = len(summary.SkippedArtifacts)
 				}
-				outputJSON(buildHookMigrationJSON(plan, mode, execPlan, &summary))
-				return
+				return outputJSON(buildHookMigrationJSON(plan, mode, execPlan, &summary))
 			}
-			outputJSON(buildHookMigrationJSON(plan, mode, execPlan, nil))
-			return
+			return outputJSON(buildHookMigrationJSON(plan, mode, execPlan, nil))
 		}
 
 		fmt.Println(strings.Join(formatHookMigrationPlan(plan, mode), "\n"))
@@ -90,22 +98,23 @@ Examples:
 		fmt.Println(strings.Join(formatHookMigrationOperations(execPlan), "\n"))
 
 		if mode.RequestedDryRun {
-			return
+			return nil
 		}
 
 		summary, applied, applyErr := maybeApplyHookMigration(execPlan, mode.RequestedYes)
 		if applyErr != nil {
-			FatalErrorRespectJSON("applying hook migration: %v", applyErr)
+			return HandleErrorRespectJSON("applying hook migration: %v", applyErr)
 		}
 		if !applied {
 			fmt.Println()
 			fmt.Println("Migration canceled.")
-			return
+			return nil
 		}
 
 		for _, line := range formatHookMigrationApplySummary(summary) {
 			fmt.Println(line)
 		}
+		return nil
 	},
 }
 

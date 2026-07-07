@@ -107,37 +107,32 @@ func junieMCPConfig() map[string]interface{} {
 	}
 }
 
-// InstallJunie installs Junie integration
-func InstallJunie() {
+func InstallJunie() error {
 	guidelinesPath := ".junie/guidelines.md"
 	mcpPath := ".junie/mcp/mcp.json"
 
 	fmt.Println("Installing Junie integration...")
 
-	// Ensure .junie directory exists
 	if err := EnsureDir(".junie", 0755); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
-	// Ensure .junie/mcp directory exists
 	if err := EnsureDir(".junie/mcp", 0755); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
-	// Write guidelines file
 	if err := atomicWriteFile(guidelinesPath, []byte(junieGuidelinesTemplate)); err != nil {
-		FatalError("write guidelines: %v", err)
+		return HandleError("write guidelines: %v", err)
 	}
 
-	// Write MCP config file
 	mcpConfig := junieMCPConfig()
 	mcpData, err := json.MarshalIndent(mcpConfig, "", "  ")
 	if err != nil {
-		FatalError("marshal MCP config: %v", err)
+		return HandleError("marshal MCP config: %v", err)
 	}
 
 	if err := atomicWriteFile(mcpPath, mcpData); err != nil {
-		FatalError("write MCP config: %v", err)
+		return HandleError("write MCP config: %v", err)
 	}
 
 	fmt.Printf("\n✓ Junie integration installed\n")
@@ -145,10 +140,10 @@ func InstallJunie() {
 	fmt.Printf("  MCP Config: %s (MCP server configuration)\n", mcpPath)
 	fmt.Println("\nJunie will automatically read these files on session start.")
 	fmt.Println("The MCP server provides direct access to beads tools.")
+	return nil
 }
 
-// CheckJunie checks if Junie integration is installed
-func CheckJunie() {
+func CheckJunie() error {
 	guidelinesPath := ".junie/guidelines.md"
 	mcpPath := ".junie/mcp/mcp.json"
 
@@ -166,28 +161,27 @@ func CheckJunie() {
 		fmt.Println("✓ Junie integration installed")
 		fmt.Printf("  Guidelines: %s\n", guidelinesPath)
 		fmt.Printf("  MCP Config: %s\n", mcpPath)
-		return
+		return nil
 	}
 
 	if guidelinesExists {
 		fmt.Println("⚠ Partial Junie integration (guidelines only)")
 		fmt.Printf("  Guidelines: %s\n", guidelinesPath)
 		fmt.Println("  Missing: MCP config")
-		FatalErrorWithHint("partial Junie integration", "Run: bd setup junie (to complete installation)")
+		return HandleErrorWithHint("partial Junie integration", "Run: bd setup junie (to complete installation)")
 	}
 
 	if mcpExists {
 		fmt.Println("⚠ Partial Junie integration (MCP only)")
 		fmt.Printf("  MCP Config: %s\n", mcpPath)
 		fmt.Println("  Missing: Guidelines")
-		FatalErrorWithHint("partial Junie integration", "Run: bd setup junie (to complete installation)")
+		return HandleErrorWithHint("partial Junie integration", "Run: bd setup junie (to complete installation)")
 	}
 
-	FatalErrorWithHint("Junie integration not installed", "Run: bd setup junie")
+	return HandleErrorWithHint("Junie integration not installed", "Run: bd setup junie")
 }
 
-// RemoveJunie removes Junie integration
-func RemoveJunie() {
+func RemoveJunie() error {
 	guidelinesPath := ".junie/guidelines.md"
 	mcpPath := ".junie/mcp/mcp.json"
 	mcpDir := ".junie/mcp"
@@ -197,34 +191,30 @@ func RemoveJunie() {
 
 	removed := false
 
-	// Remove guidelines
 	if err := os.Remove(guidelinesPath); err != nil {
 		if !os.IsNotExist(err) {
-			FatalError("failed to remove guidelines: %v", err)
+			return HandleError("failed to remove guidelines: %v", err)
 		}
 	} else {
 		removed = true
 	}
 
-	// Remove MCP config
 	if err := os.Remove(mcpPath); err != nil {
 		if !os.IsNotExist(err) {
-			FatalError("failed to remove MCP config: %v", err)
+			return HandleError("failed to remove MCP config: %v", err)
 		}
 	} else {
 		removed = true
 	}
 
-	// Try to remove .junie/mcp directory if empty
 	_ = os.Remove(mcpDir)
-
-	// Try to remove .junie directory if empty
 	_ = os.Remove(junieDir)
 
 	if !removed {
 		fmt.Println("No Junie integration files found")
-		return
+		return nil
 	}
 
 	fmt.Println("✓ Removed Junie integration")
+	return nil
 }

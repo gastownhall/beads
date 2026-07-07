@@ -11,7 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -585,7 +587,7 @@ func TestExportMemoryDeterminism(t *testing.T) {
 	// Seed 5 memories with keys that would sort differently than insertion order.
 	memKeys := []string{"zeta-config", "alpha-note", "mu-decision", "beta-lesson", "omega-context"}
 	for _, mk := range memKeys {
-		storageKey := "kv.memory." + mk
+		storageKey := kvkeys.MemoryConfigKeyPrefix + mk
 		if err := s.SetConfig(ctx, storageKey, "value-for-"+mk); err != nil {
 			t.Fatalf("SetConfig(%s): %v", storageKey, err)
 		}
@@ -637,6 +639,191 @@ func TestExportMemoryDeterminism(t *testing.T) {
 		if memoryKeys[i] < memoryKeys[i-1] {
 			t.Errorf("memory keys not sorted: %q appears after %q", memoryKeys[i], memoryKeys[i-1])
 		}
+	}
+}
+
+func TestExportByteStabilityAllRecordTypes(t *testing.T) {
+	// Follow-up to gh beads 3787 / GH#3474: TestExportMemoryDeterminism only
+	// proves memory lines are stable. This generalizes the invariant — running
+	// `bd export` repeatedly over unchanged data must produce byte-identical
+	// output for EVERY record type (issues + their labels, dependencies, and
+	// comments, plus memories). Go's randomized map iteration is the usual
+	// source of phantom diffs, so any collection serialized without a total
+	// order (a sort key that ends in a unique tiebreaker) would surface here.
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+
+	ensureTestMode(t)
+	saved := saveAndRestoreGlobals(t)
+	_ = saved
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+
+	dbName := uniqueTestDBName(t)
+	testDBPath := filepath.Join(beadsDir, "dolt")
+	writeTestMetadata(t, testDBPath, dbName)
+	s := newTestStore(t, testDBPath)
+	store = s
+	storeMutex.Lock()
+	storeActive = true
+	storeMutex.Unlock()
+	t.Cleanup(func() {
+		store = nil
+		storeMutex.Lock()
+		storeActive = false
+		storeMutex.Unlock()
+	})
+
+	ctx := context.Background()
+	rootCtx = ctx
+
+	// Seed several issues at the SAME priority and creation time so the export's
+	// ORDER BY priority, created_at DESC, id ASC must fall through to the id
+	// tiebreaker — exactly the total-order property the principle depends on.
+	created := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	titles := []string{
+		"zeta epic", "alpha task", "mu feature", "beta bug", "omega chore",
+	}
+	var issues []*types.Issue
+	for _, title := range titles {
+		issue := &types.Issue{
+			Title:     title,
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			CreatedAt: created,
+		}
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("CreateIssue(%q): %v", title, err)
+		}
+		issues = append(issues, issue)
+	}
+
+	// Labels: multiple per issue, added in non-alphabetical order so an
+	// unsorted label serialization would reorder between runs.
+	for _, issue := range issues {
+		for _, label := range []string{"gamma", "alpha", "delta", "beta"} {
+			if err := s.AddLabel(ctx, issue.ID, label, "test"); err != nil {
+				t.Fatalf("AddLabel(%s, %s): %v", issue.ID, label, err)
+			}
+		}
+	}
+
+	// Dependencies: fan the other issues onto the first as children, so a
+	// single issue is referenced by multiple edges. Parent-child is used (as in
+	// children_test) to stay on the issues-table dependency path.
+	for _, issue := range issues[1:] {
+		if err := s.AddDependency(ctx, &types.Dependency{
+			IssueID:     issue.ID,
+			DependsOnID: issues[0].ID,
+			Type:        types.DepParentChild,
+		}, "test"); err != nil {
+			t.Fatalf("AddDependency(%s -> %s): %v", issue.ID, issues[0].ID, err)
+		}
+	}
+
+	// Comments: several per issue. AddIssueComment writes to the comments table
+	// that export reads (AddComment records an event instead and would not show).
+	for _, issue := range issues {
+		for _, c := range []string{"first note", "second note", "third note"} {
+			if _, err := s.AddIssueComment(ctx, issue.ID, "test", c); err != nil {
+				t.Fatalf("AddIssueComment(%s): %v", issue.ID, err)
+			}
+		}
+	}
+
+	// Memories, keyed so insertion order differs from sorted order.
+	for _, mk := range []string{"zeta-config", "alpha-note", "mu-decision", "beta-lesson"} {
+		if err := s.SetConfig(ctx, kvkeys.MemoryConfigKeyPrefix+mk, "value-for-"+mk); err != nil {
+			t.Fatalf("SetConfig(%s): %v", mk, err)
+		}
+	}
+
+	doExport := func(path string) []byte {
+		t.Helper()
+		exportOutput = path
+		exportAll = false
+		exportIncludeInfra = false
+		exportScrub = false
+		exportNoMemories = false
+		exportIncludeMemories = true
+		if err := runExport(nil, nil); err != nil {
+			t.Fatalf("runExport(%s): %v", path, err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		return data
+	}
+
+	// Export several times; randomized map iteration means a non-determinism
+	// bug may only manifest on some runs, so compare multiple exports.
+	const runs = 5
+	first := doExport(filepath.Join(tmpDir, "export-0.jsonl"))
+	for i := 1; i < runs; i++ {
+		next := doExport(filepath.Join(tmpDir, fmt.Sprintf("export-%d.jsonl", i)))
+		if string(next) != string(first) {
+			t.Errorf("export run %d is not byte-identical to run 0 — serialization is non-deterministic", i)
+			t.Logf("run 0:\n%s", first)
+			t.Logf("run %d:\n%s", i, next)
+			break
+		}
+	}
+
+	// Sanity: confirm the export actually contained the record types we seeded,
+	// so a future change that silently drops a section can't make the stability
+	// check pass vacuously.
+	var issueCount, memoryCount, labeled, withDeps, withComments int
+	for _, line := range splitJSONL(first) {
+		var rec map[string]interface{}
+		if err := json.Unmarshal(line, &rec); err != nil {
+			t.Fatalf("parse line: %v", err)
+		}
+		switch rec["_type"] {
+		case "memory":
+			memoryCount++
+		case "issue":
+			issueCount++
+			if labels, ok := rec["labels"].([]interface{}); ok && len(labels) > 0 {
+				labeled++
+			}
+			if deps, ok := rec["dependencies"].([]interface{}); ok && len(deps) > 0 {
+				withDeps++
+			}
+			if comments, ok := rec["comments"].([]interface{}); ok && len(comments) > 0 {
+				withComments++
+			}
+		}
+	}
+	if issueCount != len(issues) {
+		t.Errorf("expected %d issue lines, got %d", len(issues), issueCount)
+	}
+	if memoryCount != 4 {
+		t.Errorf("expected 4 memory lines, got %d", memoryCount)
+	}
+	if labeled == 0 {
+		t.Error("no exported issue carried labels — label serialization was not exercised")
+	}
+	if withDeps == 0 {
+		t.Error("no exported issue carried dependencies — dependency serialization was not exercised")
+	}
+	if withComments == 0 {
+		t.Error("no exported issue carried comments — comment serialization was not exercised")
 	}
 }
 
@@ -828,7 +1015,7 @@ func TestExportExcludesMemoriesByDefault(t *testing.T) {
 
 	// Seed memories.
 	for _, mk := range []string{"secret-api-pattern", "debug-session-notes"} {
-		storageKey := "kv.memory." + mk
+		storageKey := kvkeys.MemoryConfigKeyPrefix + mk
 		if err := s.SetConfig(ctx, storageKey, "sensitive-value-for-"+mk); err != nil {
 			t.Fatalf("SetConfig(%s): %v", storageKey, err)
 		}

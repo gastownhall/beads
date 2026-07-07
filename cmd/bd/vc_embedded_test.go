@@ -19,11 +19,11 @@ func bdVC(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd vc %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd vc %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdVCFail runs "bd vc" expecting failure.
@@ -97,14 +97,14 @@ func TestEmbeddedVC(t *testing.T) {
 		cmd := exec.Command(bd, "vc", "commit", "-m", "json commit", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd vc commit --json failed unexpectedly: %v\n%s", err, out)
+			t.Fatalf("bd vc commit --json failed unexpectedly: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 		// Verify valid JSON with committed field (true or false are both valid)
 		var result map[string]interface{}
-		if jsonErr := json.Unmarshal(out, &result); jsonErr != nil {
-			t.Fatalf("failed to parse JSON: %v\n%s", jsonErr, out)
+		if jsonErr := json.Unmarshal(stdout.Bytes(), &result); jsonErr != nil {
+			t.Fatalf("failed to parse JSON: %v\n%s", jsonErr, stdout.String())
 		}
 		if _, ok := result["committed"]; !ok {
 			t.Error("expected 'committed' field in JSON output")

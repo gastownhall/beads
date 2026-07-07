@@ -19,11 +19,11 @@ func bdTypes(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd types %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd types %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdTypesJSON runs "bd types --json" and parses the result.
@@ -33,11 +33,11 @@ func bdTypesJSON(t *testing.T, bd, dir string, args ...string) map[string]interf
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd types --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd types --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(stdout.String())
 	start := strings.Index(s, "{")
 	if start < 0 {
 		t.Fatalf("no JSON object in types output: %s", s)
@@ -139,9 +139,9 @@ func TestEmbeddedTypes(t *testing.T) {
 		cmd := exec.Command(bd, "config", "set", "types.custom", "spike,research,ops")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd config set failed: %v\n%s", err, out)
+			t.Fatalf("bd config set failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 
 		m := bdTypesJSON(t, bd, dir)
@@ -206,16 +206,16 @@ func TestEmbeddedTypesConcurrent(t *testing.T) {
 			cmd := exec.Command(bd, args...)
 			cmd.Dir = dir
 			cmd.Env = bdEnv(dir)
-			out, err := cmd.CombinedOutput()
+			stdout, stderr, err := runCommandBuffers(t, cmd)
 			if err != nil {
-				r.err = fmt.Errorf("worker %d types: %v\n%s", worker, err, out)
+				r.err = fmt.Errorf("worker %d types: %v\nstdout:\n%s\nstderr:\n%s", worker, err, stdout.String(), stderr.String())
 				results[worker] = r
 				return
 			}
 
 			// For JSON workers, verify parse
 			if worker%2 == 0 {
-				s := strings.TrimSpace(string(out))
+				s := strings.TrimSpace(stdout.String())
 				start := strings.Index(s, "{")
 				if start < 0 {
 					r.err = fmt.Errorf("worker %d: no JSON: %s", worker, s)

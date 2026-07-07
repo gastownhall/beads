@@ -1,0 +1,722 @@
+# gh-issue-to-pr — Full triage-to-PR workflow for a GitHub issue
+#
+# An ephemeral (wisp/vapor) workflow that takes a GitHub issue through
+# triage, context gathering, implementation, testing, review, and PR
+# creation. Designed for maintainer-supervised agent work.
+#
+# Key design decisions:
+#   - Wisp (vapor phase): no git pollution in .beads/ or git history
+#   - Clean worktree: created OUTSIDE repo root, synced to upstream base
+#   - Abort-early: stops and comments on the issue if it's a feature
+#     request (frozen), needs more info, is out of scope, already
+#     claimed, or already has a linked PR
+#   - Contributor protection: runs PR preflight to avoid duplicating
+#     existing contributor work
+#   - Two-pass review: council automated review + human maintainer gate
+#   - Cleanup: worktree + wisp removed after PR creation
+#   - Fork-aware: push to writable remote, PR targets upstream
+#   - Trivial-change fast path: lighter planning/review for simple fixes
+#
+# Usage:
+#   bd mol wisp gh-issue-to-pr --var issue_number=123
+#   bd mol wisp gh-issue-to-pr --var issue_number=123 --var repo=myorg/myrepo
+#
+# The worktree is created at ../<repo-basename>--gh-<issue_number>
+# (sibling of repo root, outside the repo, no .gitignore pollution).
+#
+# Environment assumptions:
+#   - `gh` CLI authenticated with sufficient scopes (issues:write,
+#     contents:write, pull_requests:write)
+#   - Git configured with remotes for upstream and (if fork) push target
+#   - `bd` (beads) installed with molecule/wisp support
+#   - `council` installed (or rubber-duck agent available as fallback)
+#   - `make`, `golangci-lint` available for quality gates
+#   - `make test` may take 3-5 minutes on a full run
+#
+# Pager safety (CRITICAL for non-interactive execution):
+#   - ALL `gh` commands MUST use: GH_PAGER=cat gh ...
+#   - ALL read-only `git` commands MUST use: git --no-pager ...
+#   - Failure to do this will cause workflow hangs in agent/CI contexts
+#
+# Security notes:
+#   - All user-supplied variables are validated with regex patterns
+#   - GitHub issue content (attacker-controlled) is NEVER interpolated
+#     directly into shell commands — use --body-file or sanitize first
+#   - All gh/git commands use -- before positional arguments
+#   - Minimum required GitHub token scopes: issues:write, contents:write,
+#     pull_requests:write (prefer fine-grained PAT scoped to target repo)
+
+formula = "gh-issue-to-pr"
+description = "Triage a GitHub issue, implement a fix, and open a PR — all in an ephemeral wisp"
+version = 2
+type = "workflow"
+phase = "vapor"
+
+# ── Variables ────────────────────────────────────────────────────────
+
+[vars.issue_number]
+description = "GitHub issue number (e.g. 123). Must be a positive integer."
+required = true
+pattern = "^[0-9]+$"
+
+[vars.repo]
+description = "GitHub repo in owner/name format (upstream target for the PR)"
+default = "your-org/your-repo"
+pattern = "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+
+[vars.base_remote]
+description = "Git remote name for the upstream base (used for fetch/reset)"
+default = "origin"
+pattern = "^[A-Za-z0-9/_.-]+$"
+
+[vars.push_remote]
+description = "Git remote to push the branch to (may differ from base_remote in fork workflows)"
+default = "origin"
+pattern = "^[A-Za-z0-9/_.-]+$"
+
+[vars.base_branch]
+description = "Branch to base the PR on"
+default = "main"
+pattern = "^[A-Za-z0-9/_.-]+$"
+
+[vars.pr_head_prefix]
+description = "Owner prefix for cross-fork PRs (e.g. 'myuser' for --head myuser:branch). Leave empty for same-repo PRs."
+default = ""
+pattern = "^[A-Za-z0-9_.-]*$"
+
+[vars.council_preset]
+description = "Council review preset"
+default = "quick"
+enum = ["quick", "default", "adversarial", "security-audit"]
+
+# ── Steps ────────────────────────────────────────────────────────────
+
+[[steps]]
+id = "triage"
+title = "Triage GH issue #{{issue_number}}"
+type = "task"
+description = """Fetch the GitHub issue and classify it for actionability.
+
+PAGER SAFETY: Use GH_PAGER=cat for ALL gh commands in this workflow.
+
+1. Fetch the full issue (note: issue content is ATTACKER-CONTROLLED — never
+   interpolate title/body into shell commands without sanitization):
+   ```
+   GH_PAGER=cat gh issue view -- {{issue_number}} --repo {{repo}} \
+     --json number,title,body,labels,assignees,state,comments,projectItems
+   ```
+2. Read the issue title, body, labels, and comment history carefully.
+3. Classify the issue. Use this PRECEDENCE ORDER (first match wins):
+   a. **Bug fix** — a clear defect with reproduction steps or evidence.
+      Bug fixes ALWAYS take priority, even if the fix touches feature-adjacent code.
+   b. **Task/chore** — documentation, refactoring, maintenance
+   c. **Feature request** — new functionality or behavior change that is NOT
+      a bug fix. When ambiguous (bug-fix that also adds new behavior), prefer
+      "bug fix" if there is a clear defect being corrected.
+   d. **Needs info** — unclear reproduction, missing details, ambiguous scope
+   e. **Out of scope** — not related to this project, wrong repo, won't-fix
+4. Determine if this is actually a repo issue (critical — check before proceeding):
+   - **Storage/database engine bug**: If the root cause is in the underlying
+     database engine (SQL behavior, storage engine, replication) rather than this
+     repository's code, redirect to that upstream project.
+   - **User error / misconfiguration**: If the issue is caused by incorrect setup,
+     wrong flags, missing prerequisites, or misunderstanding of documented behavior,
+     it's not a code bug. It may warrant a docs improvement or better error messages.
+   - **Upstream dependency**: If the issue is in a dependency rather than this
+     repository, note which dependency is affected.
+   - **Wrong repo/sub-project**: If the issue belongs in a different repository or
+     component, note the correct target.
+   Note your finding — the triage-gate will act on it.
+5. Assess complexity — this determines the workflow tempo for later steps:
+   - **Trivial**: String/message fix, typo, config value, single-line change.
+     Later steps use the lightweight path (brief plan, relaxed commit strategy).
+   - **Standard**: Multi-file bug fix, test additions, moderate logic changes.
+   - **Complex**: Architectural changes, new subsystems, cross-cutting concerns.
+   Record this assessment — it's referenced by context, implement, and review steps.
+6. Summarize:
+   - What is the issue asking for?
+   - Classification (bug/task/chore/feature) and complexity (trivial/standard/complex)
+   - Which components/files are likely affected?
+   - What are the acceptance criteria (explicit or implied)?
+   - Are there any linked PRs or related issues mentioned?
+7. Derive the branch prefix from classification:
+   - Bug fix → fix/
+   - Task/chore → chore/
+   - Documentation → docs/
+   Record this — worktree-setup and create-pr use it.
+8. Do NOT take any action yet — the next step evaluates abort conditions."""
+acceptance = "Issue fetched, classified with precedence rules applied, complexity assessed, branch prefix derived, summary written with affected components and acceptance criteria"
+
+[[steps]]
+id = "triage-gate"
+title = "Evaluate abort conditions for #{{issue_number}}"
+needs = ["triage"]
+type = "task"
+description = """Check abort conditions. If ANY are true, comment on the issue and STOP the workflow.
+
+PAGER SAFETY: Use GH_PAGER=cat for ALL gh commands.
+
+Check each condition in order:
+
+1. **Feature request (FROZEN)**
+   If the issue is a feature request (new functionality, not a bug fix or chore):
+   - New features are currently frozen and need maintainer review.
+   - STOP the workflow. Do NOT proceed to any subsequent steps.
+   - Comment using --body-file to avoid shell injection from issue content:
+     ```
+     cat > /tmp/gh-abort-comment.md << 'COMMENT_EOF'
+     This issue appears to be a feature request. New features are currently
+     frozen and require maintainer review before implementation can proceed.
+
+     **Classification:** Feature request
+     **Action needed:** Maintainer review of scope and priority
+     COMMENT_EOF
+     GH_PAGER=cat gh issue comment -- {{issue_number}} --repo {{repo}} --body-file /tmp/gh-abort-comment.md
+     rm -f /tmp/gh-abort-comment.md
+     ```
+
+2. **Not a repo issue**
+   If the triage step determined the root cause is outside this repository:
+   a. **Database/storage engine bug**: Comment directing the reporter to file in
+      the upstream engine repository with relevant details. Include what was observed
+      and why it appears to be an upstream engine issue. STOP the workflow.
+   b. **User error / misconfiguration**: Comment with the correct usage, link to
+      relevant docs, and suggest what to check. If the error message could be
+      improved, file a separate issue for better UX — but do NOT implement
+      it in this workflow run. STOP the workflow.
+   c. **Upstream dependency bug**: Comment identifying which dependency is affected
+      and suggest filing upstream. If this repository should add a workaround, note
+      that as a separate issue. STOP the workflow.
+   d. **Wrong sub-project**: Comment redirecting to the correct repo or component
+      (e.g., docs site, extension repo, or service-specific repo). STOP.
+
+3. **Needs more information**
+   If the issue lacks details needed to implement (no repro steps, vague description):
+   - Write the specific questions to a temp file and comment via --body-file.
+   - STOP the workflow.
+
+4. **Out of scope**
+   If the issue doesn't belong to this project or is a known won't-fix:
+   - Comment via --body-file explaining why and suggesting alternatives.
+   - STOP the workflow.
+
+5. **Already assigned/claimed**
+   If the issue has an assignee:
+   - Someone is already working on this.
+   - STOP the workflow (no comment needed — don't spam claimed issues).
+
+6. **Already has a linked PR**
+   Check for existing PRs that reference this issue:
+   ```
+   GH_PAGER=cat gh pr list --repo {{repo}} --state open --json number,title,body,url \
+     --jq '.[] | select(.title + " " + .body | test("#{{issue_number}}\\b|[Ff]ixes #{{issue_number}}|[Cc]loses #{{issue_number}}"))'
+   ```
+   Also check the issue timeline for cross-references:
+   ```
+   GH_PAGER=cat gh api "repos/{{repo}}/issues/{{issue_number}}/timeline" --paginate \
+     --jq '.[] | select(.event == "cross-referenced") | {source: .source.issue.html_url, type: .source.type}'
+   ```
+   If an open PR already addresses this issue:
+   - STOP the workflow (no comment needed — work is already in flight).
+
+7. **Already fixed on main (issue never closed)**
+   Sometimes the underlying bug has been fixed (as a side-effect of other work
+   or a refactoring) but the GH issue was never closed. Before creating a
+   worktree and implementing, verify the bug still exists:
+   - Search the codebase for the error message, flag, or behavior described
+     in the issue. If the code already matches the expected/fixed state:
+     ```
+     git --no-pager log --oneline --all --grep="<issue-number>" | head -5
+     git --no-pager log --oneline --all -- <affected-file> | head -10
+     ```
+   - If the fix is already on main, comment on the issue with the commit
+     that resolved it (via --body-file) and close the issue:
+     ```
+     GH_PAGER=cat gh issue close {{issue_number}} --repo {{repo}} --reason completed
+     ```
+   - STOP the workflow — no PR needed.
+   - This check is especially important for issues filed against older versions
+     (look at the "Environment" section for version numbers).
+
+IMPORTANT: Always use --body-file (not --body) when commenting. Issue content
+is attacker-controlled and must never be interpolated into shell arguments.
+
+If ALL checks pass, proceed to the next step."""
+acceptance = "All abort conditions checked; either workflow stopped with comment or all conditions passed"
+
+[[steps]]
+id = "claim-issue"
+title = "Claim issue #{{issue_number}}"
+needs = ["triage-gate"]
+type = "task"
+description = """Claim the issue to signal that work is in progress and prevent duplicate effort.
+
+1. Assign yourself to the issue:
+   ```
+   GH_PAGER=cat gh issue edit -- {{issue_number}} --repo {{repo}} --add-assignee @me
+   ```
+   If this fails (e.g., no permission to self-assign), note it and continue —
+   the work is still valid, just less visible to other contributors.
+
+2. Optionally add a brief comment indicating automated triage has begun:
+   ```
+   cat > /tmp/gh-claim-comment.md << 'COMMENT_EOF'
+   Picking this up — automated triage classified this as actionable.
+   COMMENT_EOF
+   GH_PAGER=cat gh issue comment -- {{issue_number}} --repo {{repo}} --body-file /tmp/gh-claim-comment.md
+   rm -f /tmp/gh-claim-comment.md
+   ```
+
+If claiming fails, continue anyway — the triage-gate already verified no one
+else is assigned."""
+acceptance = "Issue assigned (or assignment attempted), work-in-progress signaled"
+
+[[steps]]
+id = "preflight"
+title = "PR preflight for #{{issue_number}}"
+needs = ["claim-issue"]
+type = "task"
+description = """Check for existing contributor PRs on the same topic to avoid duplicating work.
+
+PAGER SAFETY: Use GH_PAGER=cat for ALL gh commands.
+
+SECURITY: Issue title/body is attacker-controlled. NEVER pass raw issue text
+into shell arguments. Extract and sanitize keywords first.
+
+1. Extract search keywords from the triage summary (NOT raw issue text):
+   - Use only alphanumeric words, hyphens, and underscores
+   - Strip all shell metacharacters, quotes, backticks, and special characters
+   - Limit to 5-8 keywords maximum
+   Example sanitization:
+   ```
+   KEYWORDS=$(echo "<your extracted keywords>" | tr -cd 'a-zA-Z0-9 _-' | head -c 200)
+   ```
+2. Search for related open PRs using sanitized keywords:
+   ```
+   GH_PAGER=cat gh pr list --repo {{repo}} --state open --json number,title,author,labels,url \
+     --search "$KEYWORDS"
+   ```
+3. For each potentially related PR, check:
+   - Does it address the same root cause or feature area?
+   - Is it from an external contributor? (author is not a maintainer)
+4. If an external contributor PR exists on the same topic:
+   - Contributor PRs have priority (per your maintainer guidelines)
+   - Comment on the issue (via --body-file) noting the existing PR
+   - STOP the workflow — build on the contributor's branch instead
+   - If aborting here, no worktree cleanup is needed (not yet created)
+5. If no conflicts found, proceed."""
+acceptance = "No competing contributor PRs found, repo in good state for development"
+
+[[steps]]
+id = "worktree-setup"
+title = "Create clean worktree for #{{issue_number}}"
+needs = ["preflight"]
+type = "task"
+description = """Set up an isolated worktree synced to the upstream base branch.
+
+WORKING DIRECTORY: Run this step from the main repo root.
+
+The worktree is created OUTSIDE the repo root (as a sibling directory) to
+avoid polluting .gitignore or the working tree.
+
+1. Fetch the latest base branch:
+   ```
+   git fetch -- {{base_remote}} {{base_branch}}
+   ```
+2. Determine the worktree path (sibling of repo root) and validate it:
+   ```
+   REPO_ROOT=$(git rev-parse --show-toplevel)
+   REPO_NAME=$(basename "$REPO_ROOT")
+   WORKTREE_PATH="../${REPO_NAME}--gh-{{issue_number}}"
+   # Canonicalize and verify the path stays in the expected parent directory
+   EXPECTED_PARENT=$(dirname "$REPO_ROOT")
+   CANONICAL_PATH=$(realpath --canonicalize-missing "$WORKTREE_PATH")
+   if [[ "$CANONICAL_PATH" != "$EXPECTED_PARENT"/* ]]; then
+     echo "ERROR: worktree path escapes expected parent directory" >&2
+     exit 1
+   fi
+   ```
+3. Determine the branch name using the prefix from the triage step:
+   - Bug fix → fix/gh-{{issue_number}}
+   - Task/chore → chore/gh-{{issue_number}}
+   - Documentation → docs/gh-{{issue_number}}
+4. Create the worktree. Prefer bd, fall back to git:
+   ```
+   bd worktree create "$WORKTREE_PATH" --branch <branch-name>
+   ```
+   If `bd worktree create` fails, fall back immediately:
+   ```
+   git worktree add -b <branch-name> "$WORKTREE_PATH"
+   ```
+5. Reset the worktree to the upstream base to ensure NO other changes:
+   ```
+   cd "$WORKTREE_PATH"
+   git reset --hard -- {{base_remote}}/{{base_branch}}
+   ```
+6. Verify clean state:
+   ```
+   git --no-pager status
+   git --no-pager log --oneline -1
+   ```
+   Should show clean working tree matching {{base_remote}}/{{base_branch}} HEAD.
+
+WORKING DIRECTORY: All subsequent steps (context through council-review) run
+from within the worktree directory. Make this transition explicit.
+
+IMPORTANT: If ANY subsequent step fails and requires aborting, you MUST
+clean up the worktree before stopping:
+```
+cd "$REPO_ROOT"
+bd worktree remove "$WORKTREE_PATH" || git worktree remove "$WORKTREE_PATH" --force
+git worktree prune
+```"""
+acceptance = "Worktree exists outside repo root, on correctly-prefixed branch, synced to {{base_remote}}/{{base_branch}}, clean state verified, CWD is worktree"
+
+[[steps]]
+id = "context"
+title = "Gather implementation context for #{{issue_number}}"
+needs = ["worktree-setup"]
+type = "task"
+description = """In the worktree, gather all context needed before writing code.
+
+WORKING DIRECTORY: This step runs in the worktree.
+
+1. From the triage summary, identify the files and components affected
+2. Read the relevant source files — understand current behavior
+3. Read existing tests for the affected areas
+4. Check CONTRIBUTING.md for relevant guidelines (code style, test patterns)
+5. If the issue references specific behavior, trace the code path end-to-end
+6. Note edge cases, risks, and anything that might complicate the fix
+
+7. Draft an implementation plan — scale it to the complexity assessed in triage:
+
+   **Trivial** (string fix, typo, config value):
+   - List the touch points (file:line) and the intended change
+   - One sentence on what to verify
+   - No formal plan document needed
+
+   **Standard** (multi-file bug fix, test additions):
+   - What files will change
+   - What the fix looks like
+   - What tests need to be added or updated
+   - What docs need updating (if any)
+
+   **Complex** (architectural, cross-cutting):
+   - Full implementation plan with risks, alternatives, and rollback
+   - Consider using rubber-duck agent for plan validation before proceeding
+
+Do NOT start coding yet — this step is purely about understanding and planning.
+
+If you need to abort after this step, clean up the worktree first (see worktree-setup)."""
+acceptance = "Implementation plan drafted (proportional to complexity), affected files identified, risks noted"
+
+[[steps]]
+id = "implement"
+title = "Implement fix for #{{issue_number}}"
+needs = ["context"]
+type = "task"
+description = """Execute the implementation plan in the worktree.
+
+WORKING DIRECTORY: This step runs in the worktree.
+
+1. Make the code changes identified in the context step
+2. Follow repo code style and conventions:
+   - Use gofmt for formatting
+   - Follow patterns in CONTRIBUTING.md
+   - Keep changes focused — one issue per PR, no piggybacking
+3. Do NOT include:
+   - Local tracker metadata/data artifacts (for beads, this includes `.beads/` DB/JSONL files)
+   - Unrelated changes, cleanup, or "while I'm here" improvements
+   - Generated or garbage files
+4. Tests — scale to the change:
+   - **Trivial changes** (error messages, strings, comments): New tests are
+     usually NOT needed. Briefly note why (e.g., "text-only change, no
+     behavior affected"). Existing tests covering the area should still pass.
+   - **Behavioral changes**: Write or update tests. Use table-driven tests
+     for multiple scenarios. Use t.TempDir() for test isolation. Mark slow
+     tests with testing.Short() skip.
+   - If unsure, err on the side of writing a test.
+5. Update documentation if behavior changed
+6. Commit strategy — scale to the change:
+   - **Trivial**: A single commit is fine.
+   - **Standard/Complex**: Commit logically — group related changes so each
+     commit is reviewable on its own. Don't create artificial micro-commits.
+   - All commits must reference the issue number.
+   - Include the Co-authored-by trailer:
+     ```
+     Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
+     ```
+
+If you discover pre-existing bugs tightly coupled to your changes, fix them.
+If you find unrelated issues, note them for later filing — do NOT fix them here.
+
+If you need to abort after this step, clean up the worktree first (see worktree-setup)."""
+acceptance = "All planned changes implemented, tests written (if behavioral change) or justified as unnecessary, code compiles, changes focused on the issue"
+
+[[steps]]
+id = "test"
+title = "Run tests and lint for #{{issue_number}}"
+needs = ["implement"]
+type = "task"
+description = """Validate the implementation passes all quality gates.
+
+WORKING DIRECTORY: This step runs in the worktree.
+
+ALL THREE quality gates are MANDATORY — do not skip any without explicit justification:
+
+1. Run the test suite (expect 3-5 minutes):
+   ```
+   make test
+   ```
+2. Run the linter:
+   ```
+   golangci-lint run ./...
+   ```
+   (Ignore baseline warnings documented in docs/LINTING.md — focus on NEW issues)
+3. Build the project:
+   ```
+   make build
+   ```
+
+Handling failures:
+
+**Your changes broke something:**
+- Fix the issue, re-run ALL quality gates, do NOT proceed with failures.
+- If tests reveal the fix is incomplete, return to the implement step.
+
+**Pre-existing / flaky test failure (NOT caused by your change):**
+- Re-run the specific failing test in isolation:
+  ```
+  go test -tags gms_pure_go -run TestExactName -v ./path/to/package/...
+  ```
+- If it passes in isolation → flaky test. Document it in the PR description
+  ("Note: TestFoo is flaky — passes in isolation, fails in full suite") and
+  proceed.
+- If it fails consistently in isolation AND is clearly unrelated to your
+  change (different package, different feature area) → document it and
+  proceed. Consider filing a separate issue.
+- If you can't determine whether the failure is related → treat it as your
+  bug and investigate before proceeding.
+
+For changes touching Dolt/CGO-relevant code, also run:
+```
+CGO_ENABLED=1 go test -tags gms_pure_go ./cmd/bd/...
+```
+
+If you need to abort after this step, clean up the worktree first (see worktree-setup)."""
+acceptance = "make test passes (or failures documented as pre-existing/flaky), golangci-lint clean (no new warnings), make build succeeds"
+
+[[steps]]
+id = "council-review"
+title = "Council code review for #{{issue_number}}"
+needs = ["test"]
+type = "task"
+description = """Run automated council review on the changes.
+
+WORKING DIRECTORY: This step runs in the worktree.
+
+IMPORTANT: The council_review tool operates on the CURRENT WORKING DIRECTORY.
+You must either:
+  (a) Run from the worktree with staged (uncommitted) changes, OR
+  (b) Point the council at specific changed files by path
+
+Recommended approach — review by file path (works whether changes are
+committed or staged):
+  - Use council_review with target set to the worktree path of changed files
+  - Example: council_review target="/path/to/worktree/cmd/bd/init.go"
+  - For multiple files, review the most significant ones individually
+
+Alternative — review staged diff (requires uncommitted changes):
+  1. If changes are already committed, soft-reset first:
+     ```
+     git reset --soft HEAD~1   # Unstage the commit but keep changes
+     git add -A                # Stage everything
+     ```
+  2. Run council_review with target="diff" from the worktree directory
+
+If council runs degraded (some agents time out):
+  - Continue with the findings you DID get
+  - Supplement with rubber-duck agent review on the diff for coverage:
+    ```
+    git --no-pager diff {{base_remote}}/{{base_branch}}...HEAD
+    ```
+  - Ask the rubber-duck for correctness, edge cases, and regression risk
+
+If council is completely unavailable:
+  - Use the rubber-duck agent as the sole automated reviewer
+  - Provide the full diff and ask for thorough review
+
+Evaluate the verdict:
+- **LGTM / Approve**: Proceed to human review
+- **Request Changes**: Address critical and high-severity findings only
+  - Re-run tests after fixes
+  - Re-run council review to verify
+  - Repeat until no critical/high findings remain
+- **Needs Discussion**: Use judgment — fix what clearly prevents bugs
+
+Commit any council-driven fixes with clear messages.
+
+If you need to abort after this step, clean up the worktree first (see worktree-setup)."""
+acceptance = "Council review passes with no unaddressed critical/high findings, or critic review completed as fallback"
+
+[[steps]]
+id = "human-review"
+title = "Maintainer review gate for #{{issue_number}}"
+needs = ["council-review"]
+type = "human"
+description = """A human maintainer reviews the changes before PR creation.
+
+Present to the reviewer (choose the format that best fits the change size):
+
+**Trivial changes:**
+- One-line summary of what changed and why
+- The diff (usually small enough to show inline)
+
+**Standard/Complex changes:**
+- The issue summary (from triage)
+- The implementation approach
+- Council review findings and how they were addressed
+- Either the full diff or a structured summary:
+  - Files changed with brief description of each change
+  - Behavioral impact (what works differently now)
+  - Test coverage summary
+- Note any pre-existing/flaky test failures documented during testing
+
+The maintainer will:
+- Approve to proceed with PR creation
+- Request changes (return to implement step)
+- Reject (clean up and stop)
+
+If changes are requested, address them, re-run tests and council review,
+then return to this gate."""
+acceptance = "Maintainer approved the changes"
+
+[[steps]]
+id = "create-pr"
+title = "Create PR for #{{issue_number}}"
+needs = ["human-review"]
+type = "task"
+description = """Create the pull request from the worktree branch.
+
+WORKING DIRECTORY: This step runs in the worktree.
+
+1. Ensure all changes are committed with a clear message:
+   ```
+   git add -A
+   git --no-pager diff --cached --stat   # Verify what's staged
+   ```
+   If there are uncommitted changes, commit them:
+   ```
+   git commit -m "<prefix> #{{issue_number}}: <concise summary>
+
+   Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+   ```
+   Use the branch prefix from triage (fix/feat/chore/docs) as the commit prefix.
+
+2. Push the branch to the WRITABLE remote:
+   ```
+   git push -u -- {{push_remote}} <branch-name>
+   ```
+   NOTE: In fork workflows, {{push_remote}} may differ from {{base_remote}}.
+   Push goes to YOUR fork; the PR targets upstream.
+
+3. Write the PR body to a temp file (avoids shell injection from issue content):
+   ```
+   cat > /tmp/gh-pr-body.md << 'PR_BODY_EOF'
+   ## Summary
+   <concise description of what was changed and why — write this yourself,
+    do NOT copy-paste raw issue text>
+
+   ## Changes
+   - <list of key changes>
+
+   ## Testing
+   - All tests pass (make test)
+   - Linter clean (golangci-lint)
+   - Build succeeds (make build)
+   <If any flaky/pre-existing failures were noted, document them here>
+
+   Fixes #{{issue_number}}
+   PR_BODY_EOF
+   ```
+
+4. Create the PR using --body-file. Handle fork vs same-repo:
+   ```
+   # For fork workflow (pr_head_prefix is set):
+   GH_PAGER=cat gh pr create --repo {{repo}} \
+     --base {{base_branch}} \
+     --head {{pr_head_prefix}}:<branch-name> \
+     --title "<prefix>: <descriptive title>" \
+     --body-file /tmp/gh-pr-body.md
+
+   # For same-repo workflow (pr_head_prefix is empty):
+   GH_PAGER=cat gh pr create --repo {{repo}} \
+     --base {{base_branch}} \
+     --head <branch-name> \
+     --title "<prefix>: <descriptive title>" \
+     --body-file /tmp/gh-pr-body.md
+   ```
+   rm -f /tmp/gh-pr-body.md
+
+5. Verify the PR was created:
+   ```
+   GH_PAGER=cat gh pr view --json number,url
+   ```"""
+acceptance = "PR created against {{base_branch}}, references Fixes #{{issue_number}}, CI triggered"
+
+[[steps]]
+id = "cleanup"
+title = "Clean up worktree and wisp for #{{issue_number}}"
+needs = ["create-pr"]
+type = "task"
+description = """Remove the worktree, burn the wisp, and clean up all temporary artifacts.
+
+WORKING DIRECTORY: Return to the main repo root for this step.
+
+1. Return to the main repo root:
+   ```
+   REPO_ROOT=$(git worktree list | head -1 | awk '{print $1}')
+   cd "$REPO_ROOT"
+   ```
+
+2. Remove the worktree. Prefer bd, fall back to git:
+   ```
+   REPO_NAME=$(basename "$REPO_ROOT")
+   WORKTREE_PATH="../${REPO_NAME}--gh-{{issue_number}}"
+   bd worktree remove "$WORKTREE_PATH"
+   ```
+   If bd worktree remove fails, fall back to:
+   ```
+   git worktree remove "$WORKTREE_PATH" --force
+   git worktree prune
+   ```
+
+3. Remove any temporary files created during the workflow:
+   ```
+   rm -f /tmp/gh-abort-comment.md /tmp/gh-claim-comment.md /tmp/gh-pr-body.md
+   ```
+
+4. Burn the wisp (the ephemeral tracking bead for this workflow run).
+   Use --force or pipe confirmation to avoid hanging on the prompt:
+   ```
+   echo y | bd mol burn <wisp-id>
+   ```
+   (The wisp-id was returned when the wisp was created with `bd mol wisp`)
+
+5. Verify cleanup:
+   - `git worktree list` should not show the removed worktree
+   - The worktree directory should not exist
+   - The branch should still exist on the remote (it's the PR source)
+
+6. File any follow-up issues discovered during implementation (use stdin
+   for descriptions with special characters):
+   ```
+   echo 'Discovered during work on GH#{{issue_number}}: <details>' | \
+     bd create "Follow-up: <title>" --description=- -p 3 --json
+   ```
+
+7. If your workflow uses local tracker data with remote sync, sync it now:
+   ```
+   bd dolt push 2>/dev/null || true
+   ```"""
+acceptance = "Worktree removed, wisp burned, no temp files remain, branch exists on remote, follow-ups filed"

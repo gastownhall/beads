@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"time"
@@ -97,13 +98,109 @@ func ApplyCompactionInTx(ctx context.Context, tx *sql.Tx, issueID string, tier i
 	return nil
 }
 
+// SnapshotIssueInTx archives an issue's current text content into
+// compaction_snapshots before a destructive compaction overwrites it. The row
+// is tagged with the tier the issue is being compacted *to* (so a later restore
+// of a tier-N issue finds the pre-N content) and is the source of truth for
+// bd restore. Callers MUST invoke this before clearing/overwriting the fields
+// so the archive captures the originals.
+func SnapshotIssueInTx(ctx context.Context, tx *sql.Tx, issueID string, tier int) error {
+	snap := types.IssueSnapshot{CompactionLevel: tier}
+	err := tx.QueryRowContext(ctx,
+		`SELECT title, description, design, notes, acceptance_criteria FROM issues WHERE id = ?`, issueID,
+	).Scan(&snap.Title, &snap.Description, &snap.Design, &snap.Notes, &snap.AcceptanceCriteria)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("snapshot issue %s: not found", issueID)
+	}
+	if err != nil {
+		return fmt.Errorf("snapshot issue %s: read content: %w", issueID, err)
+	}
+
+	payload, err := json.Marshal(&snap)
+	if err != nil {
+		return fmt.Errorf("snapshot issue %s: marshal: %w", issueID, err)
+	}
+
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO compaction_snapshots (id, issue_id, compaction_level, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?)`,
+		NewEventID(), issueID, tier, payload, now,
+	); err != nil {
+		return fmt.Errorf("snapshot issue %s: insert: %w", issueID, err)
+	}
+	return nil
+}
+
+// GetLatestSnapshotInTx returns the most recent compaction snapshot for an
+// issue, or (nil, nil) when none exists.
+func GetLatestSnapshotInTx(ctx context.Context, tx *sql.Tx, issueID string) (*types.IssueSnapshot, error) {
+	var payload []byte
+	var level int
+	err := tx.QueryRowContext(ctx,
+		`SELECT compaction_level, snapshot_json FROM compaction_snapshots WHERE issue_id = ? ORDER BY created_at DESC LIMIT 1`,
+		issueID,
+	).Scan(&level, &payload)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get snapshot for %s: %w", issueID, err)
+	}
+	snap := &types.IssueSnapshot{}
+	if err := json.Unmarshal(payload, snap); err != nil {
+		return nil, fmt.Errorf("get snapshot for %s: unmarshal: %w", issueID, err)
+	}
+	snap.CompactionLevel = level
+	return snap, nil
+}
+
+// RestoreFromSnapshotInTx restores an issue's text content from its most recent
+// compaction snapshot and steps its compaction level back down by one. It
+// returns the snapshot that was applied, or (nil, nil) when no snapshot exists.
+// The snapshot row is left in place as an audit trail.
+func RestoreFromSnapshotInTx(ctx context.Context, tx *sql.Tx, issueID string) (*types.IssueSnapshot, error) {
+	snap, err := GetLatestSnapshotInTx(ctx, tx, issueID)
+	if err != nil {
+		return nil, err
+	}
+	if snap == nil {
+		return nil, nil
+	}
+
+	now := time.Now().UTC()
+	newLevel := max(snap.CompactionLevel-1, 0)
+
+	if newLevel == 0 {
+		// Fully restored: clear the compaction bookkeeping so the issue looks
+		// uncompacted again.
+		_, err = tx.ExecContext(ctx, `
+			UPDATE issues
+			SET description = ?, design = ?, notes = ?, acceptance_criteria = ?,
+			    compaction_level = 0, compacted_at = NULL, compacted_at_commit = '', original_size = 0,
+			    updated_at = ?
+			WHERE id = ?`,
+			snap.Description, snap.Design, snap.Notes, snap.AcceptanceCriteria, now, issueID)
+	} else {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE issues
+			SET description = ?, design = ?, notes = ?, acceptance_criteria = ?,
+			    compaction_level = ?, updated_at = ?
+			WHERE id = ?`,
+			snap.Description, snap.Design, snap.Notes, snap.AcceptanceCriteria, newLevel, now, issueID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("restore issue %s: %w", issueID, err)
+	}
+	return snap, nil
+}
+
 // GetTier1CandidatesInTx returns issues eligible for tier 1 compaction.
 func GetTier1CandidatesInTx(ctx context.Context, tx *sql.Tx) ([]*types.CompactionCandidate, error) {
 	days := getCompactDaysInTx(ctx, tx, 1)
 	rows, err := tx.QueryContext(ctx, `
 		SELECT i.id, i.closed_at,
 			CHAR_LENGTH(i.description) + CHAR_LENGTH(i.design) + CHAR_LENGTH(i.notes) + CHAR_LENGTH(i.acceptance_criteria) AS original_size,
-			COALESCE((SELECT COUNT(*) FROM dependencies d WHERE d.depends_on_id = i.id AND d.type = 'blocks'), 0) AS dependent_count
+			COALESCE((SELECT COUNT(*) FROM dependencies d WHERE d.depends_on_issue_id = i.id AND d.type = 'blocks'), 0) AS dependent_count
 		FROM issues i
 		WHERE i.status = ?
 			AND i.closed_at IS NOT NULL
@@ -124,7 +221,7 @@ func GetTier2CandidatesInTx(ctx context.Context, tx *sql.Tx) ([]*types.Compactio
 	rows, err := tx.QueryContext(ctx, `
 		SELECT i.id, i.closed_at,
 			CHAR_LENGTH(i.description) + CHAR_LENGTH(i.design) + CHAR_LENGTH(i.notes) + CHAR_LENGTH(i.acceptance_criteria) AS original_size,
-			COALESCE((SELECT COUNT(*) FROM dependencies d WHERE d.depends_on_id = i.id AND d.type = 'blocks'), 0) AS dependent_count
+			COALESCE((SELECT COUNT(*) FROM dependencies d WHERE d.depends_on_issue_id = i.id AND d.type = 'blocks'), 0) AS dependent_count
 		FROM issues i
 		WHERE i.status = ?
 			AND i.closed_at IS NOT NULL
@@ -158,12 +255,16 @@ func scanCompactionCandidates(rows *sql.Rows) ([]*types.CompactionCandidate, err
 func GetMoleculeLastActivityInTx(ctx context.Context, tx *sql.Tx, moleculeID string) (*types.MoleculeLastActivity, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, moleculeID)
 	issueTable, _, _, depTable := WispTableRouting(isWisp)
+	parentCol := "depends_on_issue_id"
+	if isWisp {
+		parentCol = "depends_on_wisp_id"
+	}
 
 	// Get child IDs
 	depRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 		SELECT issue_id FROM %s
-		WHERE depends_on_id = ? AND type = 'parent-child'
-	`, depTable), moleculeID)
+		WHERE %s = ? AND type = 'parent-child'
+	`, depTable, parentCol), moleculeID)
 	if err != nil {
 		return nil, fmt.Errorf("get molecule children: %w", err)
 	}

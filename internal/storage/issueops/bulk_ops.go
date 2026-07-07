@@ -192,17 +192,9 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		return 0, nil
 	}
 
-	for _, table := range []string{"dependencies", "events", "comments", "labels"} {
-		for _, id := range issueIDs {
-			if table == "dependencies" {
-				_, err = tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE issue_id = ? OR depends_on_id = ?", table), id, id)
-			} else {
-				_, err = tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE issue_id = ?", table), id)
-			}
-			if err != nil {
-				return 0, fmt.Errorf("delete from %s for %s: %w", table, id, err)
-			}
-		}
+	affectedIssues, affectedWisps, aerr := AffectedByDeletionInTx(ctx, tx, issueIDs, nil)
+	if aerr != nil {
+		return 0, fmt.Errorf("affected by source-repo delete: %w", aerr)
 	}
 
 	result, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE source_repo = ?`, sourceRepo)
@@ -214,37 +206,25 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 	if err != nil {
 		return 0, fmt.Errorf("rows affected: %w", err)
 	}
+
+	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+		return int(rowsAffected), fmt.Errorf("recompute is_blocked after source-repo delete: %w", err)
+	}
+
 	return int(rowsAffected), nil
 }
 
 //nolint:gosec // G201: table names are hardcoded
-func UpdateIssueIDInTx(ctx context.Context, regularTx, ignoredTx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
-	isWisp := IsActiveWispInTx(ctx, ignoredTx, oldID)
-
-	if isWisp {
-		if _, err := ignoredTx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS = 0`); err != nil {
-			return fmt.Errorf("disable FK checks: %w", err)
-		}
-		defer func() { _, _ = ignoredTx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS = 1`) }()
-		return updateWispIDInTx(ctx, ignoredTx, oldID, newID, issue, actor)
+func UpdateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
+	if IsActiveWispInTx(ctx, tx, oldID) {
+		return updateWispIDInTx(ctx, tx, oldID, newID, issue, actor)
 	}
-
-	if _, err := regularTx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS = 0`); err != nil {
-		return fmt.Errorf("disable FK checks on regular tx: %w", err)
-	}
-	defer func() { _, _ = regularTx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS = 1`) }()
-	if regularTx != ignoredTx {
-		if _, err := ignoredTx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS = 0`); err != nil {
-			return fmt.Errorf("disable FK checks on ignored tx: %w", err)
-		}
-		defer func() { _, _ = ignoredTx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS = 1`) }()
-	}
-	return updateIssueIDInTx(ctx, regularTx, ignoredTx, oldID, newID, issue, actor)
+	return updateIssueIDInTx(ctx, tx, oldID, newID, issue, actor)
 }
 
-func updateIssueIDInTx(ctx context.Context, regularTx, ignoredTx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
+func updateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
 	now := time.Now().UTC()
-	result, err := regularTx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		UPDATE issues
 		SET id = ?, title = ?, description = ?, design = ?, acceptance_criteria = ?, notes = ?, updated_at = ?
 		WHERE id = ?
@@ -256,39 +236,14 @@ func updateIssueIDInTx(ctx context.Context, regularTx, ignoredTx *sql.Tx, oldID,
 		return fmt.Errorf("issue not found: %s", oldID)
 	}
 
-	regularRefs := []struct{ table, col string }{
-		{"dependencies", "issue_id"},
-		{"dependencies", "depends_on_id"},
-		{"events", "issue_id"},
-		{"labels", "issue_id"},
-		{"comments", "issue_id"},
-		{"issue_snapshots", "issue_id"},
-		{"compaction_snapshots", "issue_id"},
-		{"child_counters", "parent_id"},
-	}
-	for _, r := range regularRefs {
-		if _, err := regularTx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?", r.table, r.col, r.col), newID, oldID); err != nil {
-			return fmt.Errorf("update %s.%s: %w", r.table, r.col, err)
-		}
+	if err := UpdateIssueIDInDependenciesInTx(ctx, tx, oldID, newID); err != nil {
+		return err
 	}
 
-	ignoredRefs := []struct{ table, col string }{
-		{"wisp_dependencies", "issue_id"},
-		{"wisp_dependencies", "depends_on_id"},
-		{"wisp_events", "issue_id"},
-		{"wisp_labels", "issue_id"},
-		{"wisp_comments", "issue_id"},
-	}
-	for _, r := range ignoredRefs {
-		if _, err := ignoredTx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?", r.table, r.col, r.col), newID, oldID); err != nil {
-			return fmt.Errorf("update %s.%s: %w", r.table, r.col, err)
-		}
-	}
-
-	_, err = regularTx.ExecContext(ctx, `
-		INSERT INTO events (issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, 'renamed', ?, ?, ?)
-	`, newID, actor, oldID, newID)
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO events (id, issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, ?, 'renamed', ?, ?, ?)
+	`, NewEventID(), newID, actor, oldID, newID)
 	return err
 }
 
@@ -306,46 +261,14 @@ func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issu
 		return fmt.Errorf("wisp not found: %s", oldID)
 	}
 
-	refs := []struct{ table, col string }{
-		{"wisp_dependencies", "issue_id"},
-		{"wisp_dependencies", "depends_on_id"},
-		{"wisp_events", "issue_id"},
-		{"wisp_labels", "issue_id"},
-		{"wisp_comments", "issue_id"},
-	}
-	for _, r := range refs {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?", r.table, r.col, r.col), newID, oldID); err != nil {
-			return fmt.Errorf("update %s.%s: %w", r.table, r.col, err)
-		}
+	if _, err = tx.ExecContext(ctx, `
+		INSERT INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, ?, 'renamed', ?, ?, ?)
+	`, NewEventID(), newID, actor, oldID, newID); err != nil {
+		return err
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO wisp_events (issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, 'renamed', ?, ?, ?)
-	`, newID, actor, oldID, newID)
-	return err
-}
-
-// RenameDependencyPrefixInTx updates the prefix in all dependency records.
-func RenameDependencyPrefixInTx(ctx context.Context, tx *sql.Tx, oldPrefix, newPrefix string) error {
-	_, err := tx.ExecContext(ctx, `
-		UPDATE dependencies
-		SET issue_id = CONCAT(?, SUBSTRING(issue_id, LENGTH(?) + 1))
-		WHERE issue_id LIKE CONCAT(?, '%')
-	`, newPrefix, oldPrefix, oldPrefix)
-	if err != nil {
-		return fmt.Errorf("update issue_id prefix in dependencies: %w", err)
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		UPDATE dependencies
-		SET depends_on_id = CONCAT(?, SUBSTRING(depends_on_id, LENGTH(?) + 1))
-		WHERE depends_on_id LIKE CONCAT(?, '%')
-	`, newPrefix, oldPrefix, oldPrefix)
-	if err != nil {
-		return fmt.Errorf("update depends_on_id prefix in dependencies: %w", err)
-	}
-	return nil
+	return UpdateWispIDInDependenciesInTx(ctx, tx, oldID, newID)
 }
 
 // FindWispDependentsRecursiveInTx walks wisp_dependencies to find all transitive
@@ -381,7 +304,7 @@ func FindWispDependentsRecursiveInTx(ctx context.Context, tx *sql.Tx, ids []stri
 
 		placeholders, args := buildSQLInClause(batch)
 		rows, err := tx.QueryContext(ctx,
-			fmt.Sprintf(`SELECT issue_id FROM wisp_dependencies WHERE depends_on_id IN (%s)`, placeholders),
+			fmt.Sprintf(`SELECT issue_id FROM wisp_dependencies WHERE %s IN (%s)`, DepTargetExpr, placeholders),
 			args...)
 		if err != nil {
 			return discovered, fmt.Errorf("query wisp dependents: %w", err)

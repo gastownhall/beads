@@ -1,4 +1,8 @@
-final: prev: {
+# Curried on the flake's `self` so default.nix's `src = self;` keeps working
+# outside the `pkgs.callPackage` auto-argument machinery (callPackage cannot
+# supply a flake output on its own). flake.nix applies this as
+# `import ./overlay.nix self`.
+self: final: prev: {
   # Unwrapped Go build of the bd binary. Exposed so downstream consumers can
   # override inputs (vendorHash, buildGoModule, etc.) via the standard
   # callPackage `.override` pattern, e.g.
@@ -10,6 +14,7 @@ final: prev: {
   #     });
   #   }
   beads-unwrapped = final.callPackage ./default.nix {
+    inherit self;
     buildGoModule = final.buildGo126Module;
   };
 
@@ -19,6 +24,9 @@ final: prev: {
     version = final.beads-unwrapped.version;
 
     phases = [ "installPhase" ];
+
+    env.BD_DISABLE_METRICS = "1";
+    env.BD_DISABLE_EVENT_FLUSH = "1";
 
     installPhase = ''
       mkdir -p $out/bin

@@ -12,9 +12,9 @@ import (
 
 func (s *EmbeddedDoltStore) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
 	var issue *types.Issue
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		issue, err = issueops.GetIssueInTx(ctx, regularTx, id)
+		issue, err = issueops.GetIssueInTx(ctx, tx, id)
 		return err
 	})
 	return issue, err

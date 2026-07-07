@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -16,8 +17,8 @@ import (
 // ClaimIssue atomically claims an issue using compare-and-swap semantics.
 // Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
 func (s *EmbeddedDoltStore) ClaimIssue(ctx context.Context, id string, actor string) error {
-	return s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
-		_, err := issueops.ClaimIssueInTx(ctx, regularTx, id, actor)
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := issueops.ClaimIssueInTx(ctx, tx, id, actor)
 		return err
 	})
 }
@@ -25,9 +26,9 @@ func (s *EmbeddedDoltStore) ClaimIssue(ctx context.Context, id string, actor str
 // ClaimReadyIssue atomically claims the first ready issue matching filter.
 func (s *EmbeddedDoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error) {
 	var claimed *types.Issue
-	err := s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
 		var err error
-		claimed, err = issueops.ClaimReadyIssueInTx(ctx, regularTx, filter, actor, computeBlockedIDsWrapper)
+		claimed, err = issueops.ClaimReadyIssueInTx(ctx, tx, filter, actor)
 		return err
 	})
 	return claimed, err
@@ -47,10 +48,35 @@ func (s *EmbeddedDoltStore) UpdateIssue(ctx context.Context, id string, updates 
 		}
 	}
 
-	return s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
-		_, err := issueops.UpdateIssueInTx(ctx, regularTx, id, updates, actor)
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
 		return err
 	})
+}
+
+// HeartbeatIssue refreshes the lease on an issue actor holds in_progress.
+// Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
+func (s *EmbeddedDoltStore) HeartbeatIssue(ctx context.Context, id, actor string) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		if issueops.IsActiveWispInTx(ctx, tx, id) {
+			// Wisps are ephemeral and never leased; nothing to heartbeat.
+			return fmt.Errorf("%w: %s is ephemeral", storage.ErrNotClaimable, id)
+		}
+		return issueops.HeartbeatIssueInTx(ctx, tx, id, actor)
+	})
+}
+
+// ReclaimExpiredLeases reverts in_progress issues whose lease expired more than
+// olderThan ago back to ready, recovering work stranded by dead workers.
+func (s *EmbeddedDoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error) {
+	cutoff := time.Now().UTC().Add(-olderThan)
+	var reclaimed []types.ReclaimedLease
+	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		var err error
+		reclaimed, err = issueops.ReclaimExpiredLeasesInTx(ctx, tx, cutoff, actor)
+		return err
+	})
+	return reclaimed, err
 }
 
 // ReopenIssue reopens a closed issue, setting status to open and clearing
@@ -81,8 +107,8 @@ func (s *EmbeddedDoltStore) UpdateIssueType(ctx context.Context, id string, issu
 // CloseIssue closes an issue with a reason.
 // Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
 func (s *EmbeddedDoltStore) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
-	return s.withConn(ctx, true, func(regularTx, ignoredTx *sql.Tx) error {
-		_, err := issueops.CloseIssueInTx(ctx, regularTx, id, reason, actor, session)
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := issueops.CloseIssueInTx(ctx, tx, id, reason, actor, session)
 		return err
 	})
 }
@@ -91,9 +117,9 @@ func (s *EmbeddedDoltStore) CloseIssue(ctx context.Context, id string, reason st
 func (s *EmbeddedDoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
 	var blocked bool
 	var blockers []string
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		blocked, blockers, err = issueops.IsBlockedInTx(ctx, regularTx, issueID)
+		blocked, blockers, err = issueops.IsBlockedInTx(ctx, tx, issueID)
 		return err
 	})
 	return blocked, blockers, err
@@ -102,9 +128,9 @@ func (s *EmbeddedDoltStore) IsBlocked(ctx context.Context, issueID string) (bool
 // GetNewlyUnblockedByClose finds issues that become unblocked when closedIssueID is closed.
 func (s *EmbeddedDoltStore) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID string) ([]*types.Issue, error) {
 	var result []*types.Issue
-	err := s.withConn(ctx, false, func(regularTx, ignoredTx *sql.Tx) error {
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.GetNewlyUnblockedByCloseInTx(ctx, regularTx, closedIssueID)
+		result, err = issueops.GetNewlyUnblockedByCloseInTx(ctx, tx, closedIssueID)
 		return err
 	})
 	return result, err

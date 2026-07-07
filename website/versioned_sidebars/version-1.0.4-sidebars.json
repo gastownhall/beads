@@ -78,17 +78,28 @@
         "multi-agent/coordination"
       ]
     },
-    {
-      "type": "category",
-      "label": "Integrations",
-      "collapsed": true,
-      "items": [
-        "integrations/claude-code",
-        "integrations/mcp-server",
-        "integrations/aider",
-        "integrations/junie"
-      ]
-    },
+      {
+        "type": "category",
+        "label": "Integrations",
+        "collapsed": true,
+        "items": [
+          "integrations/index",
+          "integrations/aider",
+          "integrations/claude-code",
+          "integrations/codex",
+          "integrations/cody",
+          "integrations/cursor",
+          "integrations/factory",
+          "integrations/gemini",
+          "integrations/junie",
+          "integrations/kilocode",
+          "integrations/mux",
+          "integrations/opencode",
+          "integrations/windsurf",
+          "integrations/mcp-server",
+          "integrations/github-copilot"
+        ]
+      },
     {
       "type": "category",
       "label": "Reference",

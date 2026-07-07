@@ -4,11 +4,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	beadsplugin "github.com/steveyegge/beads/plugins/beads"
 )
 
 func TestBuiltinRecipes(t *testing.T) {
 	// Ensure all expected built-in recipes exist
-	expected := []string{"cursor", "windsurf", "cody", "kilocode", "claude", "gemini", "factory", "codex", "mux", "aider", "junie"}
+	expected := []string{"cursor", "windsurf", "cody", "kilocode", "claude", "copilot", "gemini", "factory", "codex", "mux", "aider", "junie"}
 
 	for _, name := range expected {
 		recipe, ok := BuiltinRecipes[name]
@@ -168,6 +170,26 @@ func TestTemplate(t *testing.T) {
 	// Check for key content
 	if !containsAll(Template, "Beads", "bd ready", "bd create", "bd close") {
 		t.Error("Template missing expected content")
+	}
+}
+
+func TestContentForPathCopilot(t *testing.T) {
+	recipe := BuiltinRecipes["copilot"]
+
+	manifest, err := ContentForPath(recipe, ".copilot-plugin/plugin.json")
+	if err != nil {
+		t.Fatalf("ContentForPath(plugin.json): %v", err)
+	}
+	if manifest != beadsplugin.CopilotPluginManifest() {
+		t.Fatalf("copilot manifest does not match embedded shared plugin manifest")
+	}
+
+	instructions, err := ContentForPath(recipe, ".github/copilot-instructions.md")
+	if err != nil {
+		t.Fatalf("ContentForPath(copilot-instructions.md): %v", err)
+	}
+	if !containsAll(instructions, "GitHub Copilot Instructions", "bd ready", "bd prime") {
+		t.Fatalf("unexpected Copilot instructions:\n%s", instructions)
 	}
 }
 

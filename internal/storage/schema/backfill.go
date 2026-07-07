@@ -11,86 +11,155 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func EnsureBackfilledCustomStatusesCustomTypes(ctx context.Context, db DBConn) error {
-	if err := backfillCustomTypes(ctx, db); err != nil {
-		return fmt.Errorf("backfill custom_types: %w", err)
+func ensureBackfilledCustomStatusesCustomTypes(ctx context.Context, db DBConn) (bool, error) {
+	typesWrote, err := backfillCustomTypes(ctx, db)
+	if err != nil {
+		return typesWrote, fmt.Errorf("backfill custom_types: %w", err)
 	}
-	if err := backfillCustomStatuses(ctx, db); err != nil {
-		return fmt.Errorf("backfill custom_statuses: %w", err)
+	statusesWrote, err := backfillCustomStatuses(ctx, db)
+	if err != nil {
+		return typesWrote || statusesWrote, fmt.Errorf("backfill custom_statuses: %w", err)
 	}
-	return nil
+	return typesWrote || statusesWrote, nil
 }
 
-func backfillCustomTypes(ctx context.Context, db DBConn) error {
+func needsBackfilledCustomStatusesCustomTypes(ctx context.Context, db DBConn) (bool, error) {
+	typesNeed, err := needsCustomTypesBackfill(ctx, db)
+	if err != nil {
+		return false, fmt.Errorf("custom_types: %w", err)
+	}
+	statusesNeed, err := needsCustomStatusesBackfill(ctx, db)
+	if err != nil {
+		return false, fmt.Errorf("custom_statuses: %w", err)
+	}
+	return typesNeed || statusesNeed, nil
+}
+
+func needsCustomTypesBackfill(ctx context.Context, db DBConn) (bool, error) {
 	var count int
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM custom_types").Scan(&count); err != nil {
-		return err
+		return false, err
 	}
 	if count > 0 {
-		return nil
+		return false, nil
 	}
 
 	var value string
 	err := db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'types.custom'").Scan(&value)
 	if err == sql.ErrNoRows {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	if value == "" {
-		return nil
-	}
-
-	for _, name := range parseTypesValue(value) {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO custom_types (name) VALUES (?)", name); err != nil {
-			return fmt.Errorf("inserting type %q: %w", name, err)
-		}
-	}
-	return nil
+	return len(parseTypesValue(value)) > 0, nil
 }
 
-func backfillCustomStatuses(ctx context.Context, db DBConn) error {
+func needsCustomStatusesBackfill(ctx context.Context, db DBConn) (bool, error) {
 	var count int
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM custom_statuses").Scan(&count); err != nil {
-		return err
+		return false, err
 	}
 	if count > 0 {
-		return nil
+		return false, nil
 	}
 
 	var value string
 	err := db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'status.custom'").Scan(&value)
 	if err == sql.ErrNoRows {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
+	}
+	if strings.TrimSpace(value) == "" {
+		return false, nil
+	}
+
+	parsed, parseErr := types.ParseCustomStatusConfig(value)
+	if parseErr != nil {
+		return false, nil
+	}
+	return len(parsed) > 0, nil
+}
+
+func backfillCustomTypes(ctx context.Context, db DBConn) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM custom_types").Scan(&count); err != nil {
+		return false, err
+	}
+	if count > 0 {
+		return false, nil
+	}
+
+	var value string
+	err := db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'types.custom'").Scan(&value)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 	if value == "" {
-		return nil
+		return false, nil
+	}
+
+	wrote := false
+	for _, name := range parseTypesValue(value) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		res, err := db.ExecContext(ctx, "INSERT IGNORE INTO custom_types (name) VALUES (?)", name)
+		if err != nil {
+			return wrote, fmt.Errorf("inserting type %q: %w", name, err)
+		}
+		if n, err := res.RowsAffected(); err == nil && n > 0 {
+			wrote = true
+		}
+	}
+	return wrote, nil
+}
+
+func backfillCustomStatuses(ctx context.Context, db DBConn) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM custom_statuses").Scan(&count); err != nil {
+		return false, err
+	}
+	if count > 0 {
+		return false, nil
+	}
+
+	var value string
+	err := db.QueryRowContext(ctx, "SELECT `value` FROM config WHERE `key` = 'status.custom'").Scan(&value)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if value == "" {
+		return false, nil
 	}
 
 	parsed, parseErr := types.ParseCustomStatusConfig(value)
 	if parseErr != nil {
 		log.Printf("schema: skipping invalid status.custom entries: %v", parseErr)
-		return nil
+		return false, nil
 	}
+	wrote := false
 	for _, s := range parsed {
-		if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO custom_statuses (name, category) VALUES (?, ?)", s.Name, string(s.Category)); err != nil {
-			return fmt.Errorf("inserting status %q: %w", s.Name, err)
+		res, err := db.ExecContext(ctx, "INSERT IGNORE INTO custom_statuses (name, category) VALUES (?, ?)", s.Name, string(s.Category))
+		if err != nil {
+			return wrote, fmt.Errorf("inserting status %q: %w", s.Name, err)
+		}
+		if n, err := res.RowsAffected(); err == nil && n > 0 {
+			wrote = true
 		}
 	}
-	return nil
+	return wrote, nil
 }
 
-// parseTypesValue interprets types.custom as a JSON array first, falling back
-// to a comma-separated list. Matches the behavior of the former compat
-// migration helper of the same name.
 func parseTypesValue(value string) []string {
 	value = strings.TrimSpace(value)
 	if value == "" {

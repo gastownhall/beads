@@ -163,9 +163,9 @@ func checkDependencyCyclesWithStore(store *dolt.DoltStore) DoctorCheck {
 		WITH RECURSIVE paths AS (
 			SELECT
 				issue_id,
-				depends_on_id,
+				COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id,
 				issue_id as start_id,
-				CONCAT(issue_id, '→', depends_on_id) as path,
+				CONCAT(issue_id, '→', COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)) as path,
 				0 as depth
 			FROM dependencies
 
@@ -173,14 +173,14 @@ func checkDependencyCyclesWithStore(store *dolt.DoltStore) DoctorCheck {
 
 			SELECT
 				d.issue_id,
-				d.depends_on_id,
+				COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) AS depends_on_id,
 				p.start_id,
-				CONCAT(p.path, '→', d.depends_on_id),
+				CONCAT(p.path, '→', COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)),
 				p.depth + 1
 			FROM dependencies d
 			JOIN paths p ON d.issue_id = p.depends_on_id
 			WHERE p.depth < 100
-			  AND p.path NOT LIKE CONCAT('%', d.depends_on_id, '→%')
+			  AND p.path NOT LIKE CONCAT('%', COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external), '→%')
 		)
 		SELECT DISTINCT start_id
 		FROM paths

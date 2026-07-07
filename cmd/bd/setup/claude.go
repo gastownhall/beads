@@ -77,17 +77,12 @@ func claudeAgentsEnv(env claudeEnv) agentsEnv {
 	}
 }
 
-// InstallClaude installs Claude Code hooks
-func InstallClaude(global bool, stealth bool) {
+func InstallClaude(global bool, stealth bool) error {
 	env, err := claudeEnvProvider()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := installClaude(env, global, stealth); err != nil {
-		setupExit(1)
-	}
+	return installClaude(env, global, stealth)
 }
 
 // InstallClaudeProject installs project-local Claude hooks, returning an error
@@ -204,12 +199,20 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 
 	// Install minimal beads section in CLAUDE.md.
 	// Hooks handle the heavy lifting via bd prime; CLAUDE.md just needs a pointer.
-	if err := installAgents(claudeAgentsEnv(env), claudeAgentsIntegration); err != nil {
+	agentsEnv := claudeAgentsEnv(env)
+	agentsSkipped := false
+	agentsEnv.skipped = &agentsSkipped
+	if err := installAgents(agentsEnv, claudeAgentsIntegration); err != nil {
 		// Non-fatal: hooks are already installed
 		_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", claudeInstructionsFile, err)
 	}
 
-	_, _ = fmt.Fprintln(env.stdout, "\n✓ Claude Code integration installed")
+	if agentsSkipped {
+		_, _ = fmt.Fprintln(env.stdout, "\n✓ Claude Code hooks installed")
+		_, _ = fmt.Fprintf(env.stdout, "  Agent instructions skipped: %s is a symlink\n", claudeInstructionsFile)
+	} else {
+		_, _ = fmt.Fprintln(env.stdout, "\n✓ Claude Code integration installed")
+	}
 	_, _ = fmt.Fprintf(env.stdout, "  Settings: %s\n", settingsPath)
 	_, _ = fmt.Fprintln(env.stdout, "\nRestart Claude Code for changes to take effect.")
 	return nil
@@ -273,17 +276,12 @@ func warnIfClaudeHooksUseRemovedSync(env claudeEnv) {
 	}
 }
 
-// CheckClaude checks if Claude integration is installed
-func CheckClaude() {
+func CheckClaude() error {
 	env, err := claudeEnvProvider()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := checkClaude(env); err != nil {
-		setupExit(1)
-	}
+	return checkClaude(env)
 }
 
 func checkClaude(env claudeEnv) error {
@@ -313,17 +311,12 @@ func checkClaude(env claudeEnv) error {
 	return checkAgents(claudeAgentsEnv(env), claudeAgentsIntegration)
 }
 
-// RemoveClaude removes Claude Code hooks
-func RemoveClaude(global bool) {
+func RemoveClaude(global bool) error {
 	env, err := claudeEnvProvider()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := removeClaude(env, global); err != nil {
-		setupExit(1)
-	}
+	return removeClaude(env, global)
 }
 
 func removeClaude(env claudeEnv, global bool) error {
@@ -537,7 +530,12 @@ func checkBeadsPluginInFile(readFile func(string) ([]byte, error), path string) 
 		return false
 	}
 	for key, value := range enabledPlugins {
-		if strings.Contains(strings.ToLower(key), "beads") {
+		// enabledPlugins keys are "<pluginName>@<marketplace>". Match the
+		// plugin-name segment exactly: a substring test (GH#4244) mistakes any
+		// "*beads*" plugin (e.g. design-to-beads) for the beads hook plugin and
+		// wrongly skips the SessionStart hook write.
+		name, _, _ := strings.Cut(strings.ToLower(key), "@")
+		if name == "beads" {
 			if enabled, ok := value.(bool); ok && enabled {
 				return true
 			}

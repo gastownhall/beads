@@ -195,13 +195,6 @@ func newTestStoreSharedBranch(t *testing.T, dbPath string, prefix string) *dolt.
 	// Create isolated branch for this test
 	_, branchCleanup := testutil.StartTestBranch(t, s.DB(), testSharedDB)
 
-	// Create ignored tables on this branch
-	if err := dolt.CreateIgnoredTables(s.DB()); err != nil {
-		branchCleanup()
-		s.Close()
-		t.Fatalf("CreateIgnoredTables: %v", err)
-	}
-
 	// Set prefix for this test (overrides the shared schema's default)
 	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		branchCleanup()
