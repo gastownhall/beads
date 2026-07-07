@@ -97,8 +97,12 @@ func TestPruneLargeFixture(t *testing.T) {
 		t.Fatalf("buildReferencedSet error: %v", err)
 	}
 
-	// Performance assertion (NFR-02).
-	if elapsed > maxDurationSeconds*time.Second {
+	// Performance assertion (NFR-02). The race detector adds multi-x overhead
+	// that invalidates a wall-clock budget (buildReferencedSet measures ~4x
+	// slower under -race), so only enforce the bound in non-race builds. The
+	// correctness assertions below still run under -race, which is where the
+	// large-fixture pass earns its keep as a data-race check.
+	if !raceEnabled && elapsed > maxDurationSeconds*time.Second {
 		t.Errorf("buildReferencedSet took %v; must complete in <%ds on 10K-bead fixture", elapsed, maxDurationSeconds)
 	}
 

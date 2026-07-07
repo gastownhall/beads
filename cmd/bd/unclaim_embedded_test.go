@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"strings"
@@ -99,11 +100,24 @@ func TestEmbeddedUnclaim(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "JSON test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--claim")
 		out := bdUnclaim(t, bd, dir, issue.ID, "--json")
-		if !strings.Contains(out, `"assignee":""`) && !strings.Contains(out, `"assignee": null`) {
-			t.Errorf("expected empty assignee in JSON output, got: %s", out)
+		// bd unclaim --json emits an array of the affected issues. A cleared
+		// assignee is empty and omitempty drops it from the payload, so parse
+		// and assert on the decoded fields rather than raw substrings.
+		var unclaimed []struct {
+			Assignee string `json:"assignee"`
+			Status   string `json:"status"`
 		}
-		if !strings.Contains(out, `"status":"open"`) {
-			t.Errorf("expected status open in JSON output, got: %s", out)
+		if err := json.Unmarshal([]byte(out), &unclaimed); err != nil {
+			t.Fatalf("failed to parse unclaim --json output: %v\n%s", err, out)
+		}
+		if len(unclaimed) != 1 {
+			t.Fatalf("expected 1 issue in unclaim --json output, got %d:\n%s", len(unclaimed), out)
+		}
+		if unclaimed[0].Assignee != "" {
+			t.Errorf("expected empty assignee after unclaim, got %q", unclaimed[0].Assignee)
+		}
+		if unclaimed[0].Status != "open" {
+			t.Errorf("expected status open after unclaim, got %q", unclaimed[0].Status)
 		}
 	})
 

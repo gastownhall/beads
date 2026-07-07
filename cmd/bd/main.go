@@ -28,6 +28,8 @@ import (
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/molecules"
+	"github.com/steveyegge/beads/internal/remotecache"
+	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -965,7 +967,21 @@ var rootCmd = &cobra.Command{
 					return nil
 				}
 
-				if cmd.Name() != "import" && cmd.Name() != "setup" {
+				// GH#3686: `bd create --repo=<local path>` targets a different
+				// repo's workspace. Without this, PreRun exits with "no beads
+				// database found" before create.go's --repo handling runs, even
+				// when the target repo has a valid .beads/. Resolve the target
+				// workspace here so store initialization points at it. Remote
+				// --repo URLs are handled by create.go via the remote cache, so
+				// only local paths are resolved here.
+				if cmd.Name() == "create" && cmd.Flags().Changed("repo") {
+					if repoVal, _ := cmd.Flags().GetString("repo"); repoVal != "" && !remotecache.IsRemoteURL(repoVal) {
+						targetBeadsDir := filepath.Join(routing.ExpandPath(repoVal), ".beads")
+						dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
+					}
+				}
+
+				if dbPath == "" && cmd.Name() != "import" && cmd.Name() != "setup" {
 					// No database found - provide context-aware error message
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
@@ -973,19 +989,22 @@ var rootCmd = &cobra.Command{
 					metrics.CloseAndFlush()
 					os.Exit(1)
 				}
-				// For import/setup commands, set default database path
-				// Invariant: dbPath must always be absolute. Use CanonicalizePath for OS-agnostic
-				// handling (symlinks, case normalization on macOS).
-				//
-				// IMPORTANT: Use FindBeadsDir() to get the correct .beads directory,
-				// which follows redirect files. Without this, a redirected .beads
-				// would create a local database instead of using the redirect target.
-				// (GH#bd-0qel)
-				targetBeadsDir := beads.FindBeadsDir()
-				if targetBeadsDir == "" {
-					targetBeadsDir = ".beads"
+
+				if dbPath == "" {
+					// For import/setup commands, set default database path
+					// Invariant: dbPath must always be absolute. Use CanonicalizePath for OS-agnostic
+					// handling (symlinks, case normalization on macOS).
+					//
+					// IMPORTANT: Use FindBeadsDir() to get the correct .beads directory,
+					// which follows redirect files. Without this, a redirected .beads
+					// would create a local database instead of using the redirect target.
+					// (GH#bd-0qel)
+					targetBeadsDir := beads.FindBeadsDir()
+					if targetBeadsDir == "" {
+						targetBeadsDir = ".beads"
+					}
+					dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
 				}
-				dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
 			}
 		}
 

@@ -3,20 +3,22 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
 )
 
-// TestQuietFlagSuppressesSuccessOutput verifies that --quiet suppresses success
-// output on create, close, and update while still exiting 0.
+// TestEmbeddedQuietFlagSuppressesSuccessOutput verifies that --quiet suppresses
+// success output on create, close, and update while still exiting 0.
 //
 // Each sub-test: run the command with --quiet, capture stdout+stderr separately,
 // assert stdout is empty and exit code is 0. Errors still flow to stderr (not
 // tested here — the contract is "success output suppressed", not "all output").
-func TestQuietFlagSuppressesSuccessOutput(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow embedded-bd quiet-mode tests in short mode")
+func TestEmbeddedQuietFlagSuppressesSuccessOutput(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 
 	bd := buildEmbeddedBD(t)
@@ -53,30 +55,16 @@ func TestQuietFlagSuppressesSuccessOutput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bd list --json failed: %v", err)
 	}
-	issueID := ""
-	for _, line := range strings.Split(listStdout.String(), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, `"id"`) {
-			parts := strings.SplitN(line, `"`, 4)
-			if len(parts) >= 4 {
-				issueID = parts[3]
-			}
-			break
-		}
+	var listed []struct {
+		ID string `json:"id"`
 	}
-	if issueID == "" {
-		// Fallback: scan for first `"id": "..."` pattern
-		s := listStdout.String()
-		if idx := strings.Index(s, `"id": "`); idx >= 0 {
-			rest := s[idx+7:]
-			if end := strings.Index(rest, `"`); end >= 0 {
-				issueID = rest[:end]
-			}
-		}
+	if err := json.Unmarshal(listStdout.Bytes(), &listed); err != nil {
+		t.Fatalf("failed to parse bd list --json output: %v\n%s", err, listStdout.String())
 	}
-	if issueID == "" {
-		t.Skip("could not determine created issue ID; skipping close/update quiet tests")
+	if len(listed) == 0 || listed[0].ID == "" {
+		t.Fatalf("bd list --json returned no usable issue ID:\n%s", listStdout.String())
 	}
+	issueID := listed[0].ID
 
 	t.Run("update", func(t *testing.T) {
 		cmd := exec.Command(bd, "--quiet", "update", issueID, "--priority", "1")
