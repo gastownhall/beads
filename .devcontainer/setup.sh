@@ -10,7 +10,15 @@ set -e
 echo "⚙️  Persisting -tags=gms_pure_go in go env..."
 PERSISTED_GOFLAGS="$(go env GOFLAGS)"
 if [[ "$PERSISTED_GOFLAGS" != *gms_pure_go* ]]; then
-  go env -w GOFLAGS="${PERSISTED_GOFLAGS:+$PERSISTED_GOFLAGS }-tags=gms_pure_go"
+  if [[ "$PERSISTED_GOFLAGS" == *-tags=* ]]; then
+    # Merge into the existing -tags value instead of appending a second
+    # -tags flag: Go does not merge repeated -tags flags, so a second one
+    # would silently replace the first and disable the existing tags.
+    PERSISTED_GOFLAGS="$(printf '%s' "$PERSISTED_GOFLAGS" | sed -E 's/-tags=([^[:space:]]*)/-tags=\1,gms_pure_go/')"
+  else
+    PERSISTED_GOFLAGS="${PERSISTED_GOFLAGS:+$PERSISTED_GOFLAGS }-tags=gms_pure_go"
+  fi
+  go env -w GOFLAGS="$PERSISTED_GOFLAGS"
 fi
 
 # Canonical build flags (GOFLAGS=-tags=gms_pure_go, CGO_ENABLED=1).

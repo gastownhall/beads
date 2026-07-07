@@ -82,8 +82,9 @@ doctor-build:
 		echo "  CC on PATH:  NO - $$CC_VAL not found"; \
 	fi; \
 	echo ""; \
-	case "$$GOFLAGS_VAL" in \
-		*gms_pure_go*) \
+	EFFECTIVE_TAGS="$$(printf '%s\n' "$$GOFLAGS_VAL" | tr ' ' '\n' | sed -n 's/^-tags=//p' | tail -n 1)"; \
+	case ",$$EFFECTIVE_TAGS," in \
+		*,gms_pure_go,*) \
 			echo "PASS: GOFLAGS carries -tags=gms_pure_go; bare 'go build'/'go test' are safe." ;; \
 		*) \
 			echo "WARN: GOFLAGS is missing -tags=gms_pure_go."; \
