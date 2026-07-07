@@ -354,6 +354,13 @@ tracking is worth the DB overhead. Patrol formulas should NOT set this.`,
 				JSONName: "source",
 				Doc:      `Source tracks where this formula was loaded from (set by parser).`,
 			},
+			{
+				Name:     "Intent",
+				Type:     "string",
+				JSONName: "intent",
+				Doc: `Intent is an optional caller-defined hint about the formula's runtime
+intent (e.g. "mail_only"). Opaque to bd; consumed by downstream tools.`,
+			},
 		},
 	},
 	{
