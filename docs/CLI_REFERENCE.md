@@ -518,7 +518,7 @@ bd create [title] [flags]
   -s, --status string           Initial status
       --stdin                   Read description from stdin (alias for --body-file -)
       --title string            Issue title (alternative to positional argument)
-  -t, --type string             Issue type (bug|feature|task|epic|chore|decision); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision (default "task")
+  -t, --type string             Issue type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision (default "task")
       --validate                Validate description contains required sections for issue type
       --waits-for string        Spawner issue ID to wait for (creates waits-for dependency for fanout gate)
       --waits-for-gate string   Gate type: all-children (wait for all) or any-children (wait for first) (default "all-children")
@@ -1733,11 +1733,7 @@ Section requirements by type:
   task:     Acceptance Criteria
   feature:  Acceptance Criteria
   epic:     Success Criteria
-  decision: Decision, Rationale, Alternatives Considered
-  spike:    Goal, Findings
-  story:    Acceptance Criteria
   chore:    (none)
-  milestone: (none)
 
 Examples:
   bd lint                    # Lint all open issues
@@ -1755,7 +1751,7 @@ bd lint [issue-id...] [flags]
 
 ```
   -s, --status string   Filter by status (default: open, use 'all' for all)
-  -t, --type string     Filter by issue type (bug, task, feature, epic)
+  -t, --type string     Filter by issue type (bug, task, feature, epic, decision, spike, story, chore, milestone)
 ```
 
 ### bd stale
@@ -1846,16 +1842,23 @@ bd statuses
 
 List all valid issue types that can be used with bd create --type.
 
-Core work types (bug, task, feature, chore, epic, decision) are always valid.
+Core work types (bug, task, feature, chore, epic, decision, spike, story, milestone) are always valid.
 Additional types require configuration via types.custom in .beads/config.yaml.
 
 Examples:
   bd types              # List all types with descriptions
+  bd types --sections   # List required sections for each type
   bd types --json       # Output as JSON
 
 
 ```
-bd types
+bd types [flags]
+```
+
+**Flags:**
+
+```
+      --sections   Show required sections for each issue type
 ```
 
 ## Dependencies & Structure:
@@ -5150,6 +5153,18 @@ Type Filtering (--push only):
   --include-ephemeral       Include ephemeral issues (wisps, etc.); default is to exclude
   --parent TICKET           Only push this ticket and its descendants
   --relations               Import Linear relations as bd dependencies on pull
+
+Persistent push-direction ID filters (workflow artifacts, sandbox beads, etc.):
+  bd config set linear.exclude_id_prefix "hw-mol-"
+  bd config set linear.exclude_id_patterns "-wisp-,sandbox-,scratch-"
+
+  exclude_id_prefix is a single case-sensitive prefix on the bead ID.
+  exclude_id_patterns is a comma-separated list of case-sensitive substrings
+  (matched anywhere in the ID). Both are combined as a union: a bead
+  matching either rule is skipped from push (no create, no update). Beads
+  with an existing external_ref that NOW match are silently skipped on
+  future syncs; the Linear-side issue persists — archive/delete it manually
+  if desired.
 
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
