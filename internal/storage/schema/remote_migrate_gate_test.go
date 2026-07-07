@@ -287,6 +287,9 @@ func TestRemoteMigrateGateAgentSafety(t *testing.T) {
 	if strings.Contains(e.AgentDirective(), AllowRemoteMigrateEnv+"=1 bd migrate") {
 		t.Errorf("AgentDirective must not embed the runnable migrate command: %q", e.AgentDirective())
 	}
+	if strings.Contains(e.AgentDirective(), "bd migrate --force") {
+		t.Errorf("AgentDirective must not embed the runnable --force migrate command: %q", e.AgentDirective())
+	}
 
 	opts := e.Options()
 	if len(opts) != 2 {
@@ -340,6 +343,9 @@ func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
 	}
 	if strings.Contains(e.AgentDirective(), AllowRemoteMigrateEnv+"=1 bd migrate") {
 		t.Errorf("AgentDirective must not embed the runnable migrate command: %q", e.AgentDirective())
+	}
+	if strings.Contains(e.AgentDirective(), "bd migrate --force") {
+		t.Errorf("AgentDirective must not embed the runnable --force migrate command: %q", e.AgentDirective())
 	}
 
 	opts := e.Options()
