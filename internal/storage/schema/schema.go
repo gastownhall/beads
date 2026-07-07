@@ -311,14 +311,6 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 			delete(dirtyBefore, t.name)
 		}
 	}
-	if recoverable, err := failed0053DirtyTablesAreRecoverable(ctx, db, dirtyBefore); err != nil {
-		return 0, fmt.Errorf("checking failed v53 migration recovery: %w", err)
-	} else if recoverable {
-		log.Printf("schema migration recovering known failed v53 dirty tables: %s", strings.Join(sortedDirtyTableNames(dirtyBefore), ", "))
-		for table := range dirtyBefore {
-			delete(dirtyBefore, table)
-		}
-	}
 	touchedDirtyTables, err := mainSource.pendingMigrationDirtyTables(ctx, db, dirtyBefore)
 	if err != nil {
 		return 0, fmt.Errorf("checking dirty tables against pending migrations: %w", err)
@@ -428,67 +420,6 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	}
 
 	return applied, nil
-}
-
-func failed0053DirtyTablesAreRecoverable(ctx context.Context, db DBConn, dirtyBefore map[string]dirtyTableState) (bool, error) {
-	if len(dirtyBefore) == 0 {
-		return false, nil
-	}
-	current, err := mainSource.currentVersion(ctx, db)
-	if err != nil {
-		return false, err
-	}
-	if current != 52 {
-		return false, nil
-	}
-
-	allowed := map[string]struct{}{
-		"child_counters": {},
-		"comments":       {},
-		"dependencies":   {},
-		"events":         {},
-		"issues":         {},
-		"labels":         {},
-		// 0051 drops the legacy DEFAULT (UUID()) on these aux tables. In a
-		// single-pass v49->v53 batch (MigrateUp commits once at the end),
-		// that DROP DEFAULT is still uncommitted when 0053 fails, so a
-		// legacy-default DB trips this gate with these tables dirty too.
-		// The change is an idempotent, schema-only DROP DEFAULT, so it is
-		// safe to fold into the recovery commit (#4555).
-		"issue_snapshots":      {},
-		"compaction_snapshots": {},
-	}
-	for table := range dirtyBefore {
-		if _, ok := allowed[table]; !ok {
-			return false, nil
-		}
-	}
-
-	needsRepair, err := wispDependenciesNeed0053Repair(ctx, db)
-	if err != nil {
-		return false, err
-	}
-	return needsRepair, nil
-}
-
-func wispDependenciesNeed0053Repair(ctx context.Context, db DBConn) (bool, error) {
-	table, err := schemaTableExists(ctx, db, "wisp_dependencies")
-	if err != nil {
-		return false, err
-	}
-	if !table {
-		return false, nil
-	}
-	for _, column := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
-		present, err := schemaColumnExists(ctx, db, "wisp_dependencies", column)
-		if err != nil {
-			return false, err
-		}
-		if !present {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 func migrationWorkNeeded(ctx context.Context, db DBConn) (bool, error) {
@@ -1063,14 +994,25 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 		return 0, columnAdded, nil
 	}
 
-	count, err := runMigrations(ctx, db, m, current, target)
+	// commitEachStep gates the per-migration commit to the production path
+	// (upTo==0) on the main source. MigrateUpTo's test-support path (upTo>0)
+	// and the dolt-ignored source (its cursor and tables are never committed to
+	// shared history) both keep the single terminal commit MigrateUp runs.
+	commitEachStep := upTo == 0 && m.cursorTable == mainSource.cursorTable
+	count, err := runMigrations(ctx, db, m, current, target, commitEachStep)
 	return count, columnAdded, err
 }
 
 // runMigrations applies migration files from src where minVersion < version <= upTo.
 // Pass upTo=0 to apply through the latest version. It is package-private so
 // tests can call it directly without needing a live cursor table.
-func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersion, upTo int) (int, error) {
+//
+// When commitEachStep is set, each numbered migration is committed atomically
+// as it applies (see commitMigrationStep): its ALTERs and cursor row land in a
+// Dolt commit before the next migration runs, so a crash/kill/timeout anywhere
+// in MigrateUp's later backfill/rekey/ignored tail can never strand this pass's
+// applied migrations uncommitted for a retry to trip over (#4566).
+func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersion, upTo int, commitEachStep bool) (int, error) {
 	if upTo == 0 {
 		upTo = src.latest()
 	}
@@ -1087,6 +1029,17 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
 		}
 
+		// Snapshot the working set before the migration runs so the per-step
+		// commit can force-stage only the tables this migration newly dirties,
+		// leaving pre-existing writes to untouched tables in the working set.
+		var dirtyBeforeStep map[string]dirtyTableState
+		if commitEachStep {
+			dirtyBeforeStep, err = dirtyTables(ctx, db, true)
+			if err != nil {
+				return count, fmt.Errorf("snapshotting dirty tables before %s: %w", mf.name, err)
+			}
+		}
+
 		fmt.Fprintf(stderr, "migrating schema: %s\n", mf.name)
 		if _, err := db.ExecContext(ctx, string(data)); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
@@ -1097,6 +1050,73 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			return count, fmt.Errorf("recording %s in %s: %w", mf.name, src.cursorTable, err)
 		}
 		count++
+
+		if commitEachStep {
+			if err := commitMigrationStep(ctx, db, src.cursorTable, dirtyBeforeStep); err != nil {
+				return count, fmt.Errorf("committing migration %s: %w", mf.name, err)
+			}
+		}
+
+		if migrateStepFaultHook != nil {
+			if err := migrateStepFaultHook(ctx, db, mf.version); err != nil {
+				return count, err
+			}
+		}
 	}
 	return count, nil
+}
+
+// migrateStepFaultHook is a test-only seam. When non-nil it runs at the end of
+// each applied migration step (after the step's per-step commit on the
+// production path); returning an error aborts the pass, emulating a
+// crash/kill/timeout mid-migration so tests can prove the retry converges.
+// Production leaves it nil.
+var migrateStepFaultHook func(ctx context.Context, db DBConn, version int) error
+
+// SetMigrateStepFaultHookForTest installs fn as the per-step migration fault
+// hook and returns a function that restores the previous value. Test-only.
+func SetMigrateStepFaultHookForTest(fn func(ctx context.Context, db DBConn, version int) error) func() {
+	prev := migrateStepFaultHook
+	migrateStepFaultHook = fn
+	return func() { migrateStepFaultHook = prev }
+}
+
+// commitMigrationStep commits one numbered migration atomically: the tables it
+// newly dirtied (diffed against dirtyBeforeStep, the working set snapshotted
+// before the migration ran) plus the cursor row that records it. It force-
+// stages only those tables, so pre-existing writes to tables the migration did
+// not touch stay in the working set, and tolerates "nothing to commit" for a
+// migration whose SQL was an idempotent no-op.
+//
+// MigrateUp's pre-flight guard proves no table a pending migration touches
+// holds uncommitted user rows before the pass runs, so every table this step
+// newly dirties is the migration's own DDL/DML — safe to commit on its own.
+func commitMigrationStep(ctx context.Context, db DBConn, cursorTable string, dirtyBeforeStep map[string]dirtyTableState) error {
+	dirtyAfter, err := dirtyTables(ctx, db, true)
+	if err != nil {
+		return err
+	}
+	tableSet := map[string]struct{}{cursorTable: {}}
+	for table := range dirtyAfter {
+		if _, wasDirty := dirtyBeforeStep[table]; wasDirty {
+			continue
+		}
+		tableSet[table] = struct{}{}
+	}
+	tables := make([]string, 0, len(tableSet))
+	for table := range tableSet {
+		tables = append(tables, table)
+	}
+	sort.Strings(tables)
+	for _, table := range tables {
+		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('-f', ?)", table); err != nil {
+			return fmt.Errorf("dolt add %s: %w", table, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: apply migration step')"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+			return fmt.Errorf("committing migration step: %w", err)
+		}
+	}
+	return nil
 }

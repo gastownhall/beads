@@ -73,10 +73,6 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 
-	// failed0053DirtyTablesAreRecoverable: current version (42) is not 52, so
-	// this is not the known failed-v53-migration recovery case.
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
-
 	// pendingMigrationDirtyTables re-reads the current version and finds
 	// migration 0043 touches the dirty `dependencies` table.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
@@ -349,164 +345,6 @@ func TestEnsureWispDependenciesSplitTargetsAddsMissingAndBackfills(t *testing.T)
 
 	if err := ensureWispDependenciesSplitTargets(context.Background(), db); err != nil {
 		t.Fatalf("ensureWispDependenciesSplitTargets: %v", err)
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet sql expectations: %v", err)
-	}
-}
-
-func TestFailed0053DirtyTablesAreRecoverable(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
-	}
-	defer db.Close()
-
-	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
-		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(52))
-	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
-		WithArgs("wisp_dependencies").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`).
-		WithArgs("wisp_dependencies", "depends_on_issue_id").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
-
-	recoverable, err := failed0053DirtyTablesAreRecoverable(context.Background(), db, map[string]dirtyTableState{
-		"comments":     {},
-		"dependencies": {},
-		"events":       {},
-		"issues":       {},
-	})
-	if err != nil {
-		t.Fatalf("failed0053DirtyTablesAreRecoverable: %v", err)
-	}
-	if !recoverable {
-		t.Fatal("recoverable = false, want true")
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet sql expectations: %v", err)
-	}
-}
-
-func TestFailed0053DirtyTablesAreRecoverableWithDirtySnapshotAuxTables(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
-	}
-	defer db.Close()
-
-	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
-		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(52))
-	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
-		WithArgs("wisp_dependencies").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`).
-		WithArgs("wisp_dependencies", "depends_on_issue_id").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
-
-	// 0051's DROP DEFAULT on the legacy UUID() default leaves these aux
-	// snapshot tables dirty too when a v49->v53 batch trips over 0053
-	// (#4555); the gate must still recover.
-	recoverable, err := failed0053DirtyTablesAreRecoverable(context.Background(), db, map[string]dirtyTableState{
-		"comments":             {},
-		"dependencies":         {},
-		"events":               {},
-		"issues":               {},
-		"issue_snapshots":      {},
-		"compaction_snapshots": {},
-	})
-	if err != nil {
-		t.Fatalf("failed0053DirtyTablesAreRecoverable: %v", err)
-	}
-	if !recoverable {
-		t.Fatal("recoverable = false, want true")
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet sql expectations: %v", err)
-	}
-}
-
-func TestFailed0053DirtyTablesRejectsUnrelatedDirtyTable(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
-	}
-	defer db.Close()
-
-	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
-		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(52))
-
-	recoverable, err := failed0053DirtyTablesAreRecoverable(context.Background(), db, map[string]dirtyTableState{
-		"comments": {},
-		"settings": {},
-	})
-	if err != nil {
-		t.Fatalf("failed0053DirtyTablesAreRecoverable: %v", err)
-	}
-	if recoverable {
-		t.Fatal("recoverable = true, want false")
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet sql expectations: %v", err)
-	}
-}
-
-func TestFailed0053DirtyTablesRejectsWhenWispDependenciesAlreadyRepaired(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
-	}
-	defer db.Close()
-
-	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
-		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(52))
-	mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`).
-		WithArgs("wisp_dependencies").
-		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
-		mock.ExpectQuery(`(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`).
-			WithArgs("wisp_dependencies", col).
-			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
-	}
-
-	recoverable, err := failed0053DirtyTablesAreRecoverable(context.Background(), db, map[string]dirtyTableState{
-		"comments":     {},
-		"dependencies": {},
-		"events":       {},
-		"issues":       {},
-	})
-	if err != nil {
-		t.Fatalf("failed0053DirtyTablesAreRecoverable: %v", err)
-	}
-	if recoverable {
-		t.Fatal("recoverable = true, want false")
-	}
-	if err := mock.ExpectationsWereMet(); err != nil {
-		t.Fatalf("unmet sql expectations: %v", err)
-	}
-}
-
-func TestFailed0053DirtyTablesRejectsWrongVersion(t *testing.T) {
-	db, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("sqlmock.New: %v", err)
-	}
-	defer db.Close()
-
-	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM schema_migrations`).
-		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(51))
-
-	recoverable, err := failed0053DirtyTablesAreRecoverable(context.Background(), db, map[string]dirtyTableState{
-		"comments":     {},
-		"dependencies": {},
-		"events":       {},
-		"issues":       {},
-	})
-	if err != nil {
-		t.Fatalf("failed0053DirtyTablesAreRecoverable: %v", err)
-	}
-	if recoverable {
-		t.Fatal("recoverable = true, want false")
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
@@ -1193,7 +1031,7 @@ func TestRunMigrationsStderrOutput(t *testing.T) {
 	// INFORMATION_SCHEMA probes (see TestPreMigrationRepairScopedToMain0053),
 	// which mockDB.QueryRowContext doesn't support. This test only exercises
 	// the stderr line, not the repair path.
-	n, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 52)
+	n, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 52, false)
 	if err != nil {
 		t.Fatalf("runMigrations: %v", err)
 	}
@@ -1223,7 +1061,7 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	// Bounded below migration 53 for the same reason as
 	// TestRunMigrationsStderrOutput: mockDB can't answer the real
 	// INFORMATION_SCHEMA queries preMigrationRepair issues for that version.
-	main, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 52)
+	main, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 52, false)
 	if err != nil {
 		t.Fatalf("runMigrations(mainSource): %v", err)
 	}
@@ -1231,7 +1069,7 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	// this test guards (hardcoding mainSource) is only detectable when both
 	// calls share a bound, so their counts collapse to equal under the bug.
 	// ignoredSource has 11 migrations, so 52 is a no-op on correct behavior.
-	ignored, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 52)
+	ignored, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 52, false)
 	if err != nil {
 		t.Fatalf("runMigrations(ignoredSource): %v", err)
 	}

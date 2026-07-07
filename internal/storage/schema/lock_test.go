@@ -128,11 +128,22 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 			WithArgs("wisp_dependencies").
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	}
+	// Per-step commit (#4566) snapshots the working set before the migration
+	// runs so it can force-stage only the tables this step newly dirties.
+	expectDoltStatusRows(mock)
 	mock.ExpectExec("(?s).*").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO schema_migrations (version, content_hash) VALUES (?, ?)")).
 		WithArgs(latest, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// Per-step commit (#4566): re-read the working set (no table newly dirtied
+	// in this mocked world), force-stage the cursor table, and commit the step.
+	expectDoltStatusRows(mock)
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('-f', ?)")).
+		WithArgs("schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: apply migration step')")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
 	// rekeyDependencyIDs probes whether each edge table has an id column; this
