@@ -56,7 +56,9 @@ func TestCreateRemoteRepoSkipsLocalDatabaseGuard(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(originalWD) })
 
 	// Hide the `dolt` CLI so remotecache.Ensure fails fast and
-	// deterministically, without attempting a real network call.
+	// deterministically in CGO-enabled builds, without attempting a real network
+	// call. Pure-Go builds can fail earlier when the remote cache store tries to
+	// use embedded Dolt, which is also downstream of the guard under test.
 	emptyPathDir := t.TempDir()
 	t.Setenv("PATH", emptyPathDir)
 
@@ -96,7 +98,8 @@ func TestCreateRemoteRepoSkipsLocalDatabaseGuard(t *testing.T) {
 		t.Fatalf("guard was not bypassed for remote --repo: got the pre-fix error.\nOutput:\n%s", combined)
 	}
 
-	if !strings.Contains(combined, "dolt CLI not found") {
-		t.Fatalf("expected downstream remote-cache failure (dolt CLI not found), got:\n%s", combined)
+	if !strings.Contains(combined, "dolt CLI not found") &&
+		!strings.Contains(combined, "embedded Dolt requires a CGO build") {
+		t.Fatalf("expected downstream remote-cache/open failure, got:\n%s", combined)
 	}
 }
