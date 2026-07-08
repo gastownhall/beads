@@ -78,6 +78,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `ERROR_HANDLING.md` | Keep with freshness | Pattern guide with code-linked examples; marker added. |
 | `EXCLUSIVE_LOCK.md` | Keep | Behaviour/design doc for lock protocol. |
 | `FAQ.md` | Revise | Opening wording now describes beads as Dolt-powered; stale pre-1.0 status removed. |
+| `FEDERATION.md` | Keep/canonical | Canonical federation (peer-to-peer sync) guide; moved from root `FEDERATION-SETUP.md`, which is now a stable pointer. Absorbed the duplicate federation section previously in `DOLT.md`. |
 | `GIT_INTEGRATION.md` | Keep | User-facing git/worktree/hook behaviour. |
 | `graph-links.md` | Keep | Behaviour/design doc for graph links. |
 | `ICU-POLICY.md` | Revise | Link updated to canonical Dolt doc. |
