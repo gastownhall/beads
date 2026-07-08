@@ -969,6 +969,12 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				// Note: issue WAS created externally, so we still count Created
 				// but also flag the error so the user knows the link is broken
 			}
+			// Surface any partial-success warnings from the create (e.g. a
+			// follow-up state change that failed) through the sync result so a
+			// degraded push is visible rather than silently swallowed.
+			for _, w := range created.Warnings {
+				e.warn("%s (%s)", w, issue.ID)
+			}
 			stats.Created++
 		} else if !opts.CreateOnly || forceIDs[issue.ID] {
 			// Update existing external issue

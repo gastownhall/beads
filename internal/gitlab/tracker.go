@@ -233,7 +233,27 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 		}
 	}
 
+	// GitLab's POST /issues cannot set state, so a closed bead is created
+	// "opened". Close it with a follow-up update so the state carries. On
+	// failure we keep the created issue and its external_ref (returning an error
+	// here would strand the issue and re-create a duplicate on the next push).
+	// The trade-off: the push skip-guard treats the just-created remote as
+	// up-to-date, so a failed close is not retried until the bead is next
+	// modified — hence the warning. A closed-state push is the common bulk case
+	// and this call rarely fails.
+	var warnings []string
+	if issue.Status == types.StatusClosed {
+		if closed, err := t.client.UpdateIssue(ctx, created.IID, map[string]interface{}{
+			"state_event": "close",
+		}); err == nil {
+			created = closed
+		} else {
+			warnings = append(warnings, fmt.Sprintf("created GitLab issue %d but failed to close it (left open): %v", created.IID, err))
+		}
+	}
+
 	ti := gitlabToTrackerIssue(created)
+	ti.Warnings = warnings
 	return &ti, nil
 }
 
@@ -272,7 +292,24 @@ func (t *Tracker) createMilestone(ctx context.Context, issue *types.Issue) (*tra
 	if err != nil {
 		return nil, fmt.Errorf("creating milestone for epic: %w", err)
 	}
-	return milestoneToTrackerIssue(ms), nil
+
+	// Milestones are created active; close it with a follow-up update if the
+	// epic is closed so its state carries. Best effort with the same failure
+	// trade-off as CreateIssue (a failed close is not retried until the epic is
+	// next modified).
+	var warnings []string
+	if issue.Status == types.StatusClosed {
+		if closed, err := t.client.UpdateMilestone(ctx, ms.ID, map[string]interface{}{
+			"state_event": "close",
+		}); err == nil {
+			ms = closed
+		} else {
+			warnings = append(warnings, fmt.Sprintf("created GitLab milestone %d but failed to close it (left active): %v", ms.ID, err))
+		}
+	}
+	ti := milestoneToTrackerIssue(ms)
+	ti.Warnings = warnings
+	return ti, nil
 }
 
 // updateMilestone updates a GitLab milestone for an epic bead.
@@ -375,13 +412,26 @@ func (t *Tracker) createTaskWorkItem(ctx context.Context, issue *types.Issue, pa
 	// Build URL from project path and IID
 	webURL := fmt.Sprintf("%s/%s/-/work_items/%s", t.client.BaseURL, t.projectPath, wi.IID)
 
+	iid, _ := strconv.Atoi(wi.IID)
+
 	// Also set milestone if there's a grandparent epic
 	if milestoneID := t.findParentEpicMilestone(ctx, issue.ID); milestoneID > 0 {
-		iid, _ := strconv.Atoi(wi.IID)
 		if iid > 0 {
 			_, _ = t.client.UpdateIssue(ctx, iid, map[string]interface{}{
 				"milestone_id": milestoneID,
 			})
+		}
+	}
+
+	// Work items are created open; close via the issues API (work items share
+	// the project IID space, as the milestone assignment above relies on) if the
+	// bead is closed. Best effort with the same failure trade-off as CreateIssue.
+	var warnings []string
+	if issue.Status == types.StatusClosed && iid > 0 {
+		if _, err := t.client.UpdateIssue(ctx, iid, map[string]interface{}{
+			"state_event": "close",
+		}); err != nil {
+			warnings = append(warnings, fmt.Sprintf("created GitLab work item %s but failed to close it (left open): %v", wi.IID, err))
 		}
 	}
 
@@ -390,6 +440,7 @@ func (t *Tracker) createTaskWorkItem(ctx context.Context, issue *types.Issue, pa
 		Identifier: wi.IID,
 		URL:        webURL,
 		Title:      wi.Title,
+		Warnings:   warnings,
 	}, nil
 }
 

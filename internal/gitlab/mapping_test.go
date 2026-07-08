@@ -389,19 +389,32 @@ func TestBeadsIssueToGitLabFields(t *testing.T) {
 	}
 }
 
-// TestBeadsIssueToGitLabFields_StateEvent verifies state_event is set for closed issues.
+// TestBeadsIssueToGitLabFields_StateEvent verifies state_event tracks the bead
+// status in both directions: closed issues close, non-closed issues reopen. The
+// reopen direction ensures a bead reopened after being synced closed does not
+// stay closed in GitLab on update.
 func TestBeadsIssueToGitLabFields_StateEvent(t *testing.T) {
 	config := DefaultMappingConfig()
 
-	closedIssue := &types.Issue{
-		Title:  "Completed task",
-		Status: types.StatusClosed,
+	tests := []struct {
+		name   string
+		status types.Status
+		want   string
+	}{
+		{"closed", types.StatusClosed, "close"},
+		{"open", types.StatusOpen, "reopen"},
+		{"in_progress", types.StatusInProgress, "reopen"},
+		// deferred is deliberately NOT closed in GitLab: only truly-done work
+		// counts toward milestone completion.
+		{"deferred", types.StatusDeferred, "reopen"},
 	}
-
-	fields := BeadsIssueToGitLabFields(closedIssue, config)
-
-	if fields["state_event"] != "close" {
-		t.Errorf("fields[\"state_event\"] = %v, want \"close\"", fields["state_event"])
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fields := BeadsIssueToGitLabFields(&types.Issue{Title: "t", Status: tt.status}, config)
+			if fields["state_event"] != tt.want {
+				t.Errorf("state_event = %v, want %q", fields["state_event"], tt.want)
+			}
+		})
 	}
 }
 
