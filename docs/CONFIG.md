@@ -60,6 +60,7 @@ Common tool-level settings you can configure:
 | `dolt.auto-push` | - | `BD_DOLT_AUTO_PUSH` | `false` | Auto-push to Dolt remote after writes (explicit opt-in) |
 | `dolt.auto-push-interval` | - | `BD_DOLT_AUTO_PUSH_INTERVAL` | `5m` | Minimum time between auto-pushes |
 | `dolt.auto-push-timeout` | - | `BD_DOLT_AUTO_PUSH_TIMEOUT` | `30s` | Timeout for a single auto-push attempt |
+| pre-push fsck timeout | - | `BEADS_FSCK_TIMEOUT` | `30s` | Runtime-only timeout for the pre-push `dolt fsck --quiet` integrity check |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share a single Dolt server across all projects at `~/.beads/shared-server/` |
 | `db` | `--db` | `BD_DB` | (auto-discover) | Database path |
 | `actor` | `--actor` | `BEADS_ACTOR` | `git config user.name` | Actor name for audit trail (see below) |
