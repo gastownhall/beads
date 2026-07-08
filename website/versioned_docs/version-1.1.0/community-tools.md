@@ -21,11 +21,15 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 
 ## Web UIs
 
+- **[bd-board](https://github.com/jeanpfs/bd-board)** - Local-first web dashboard for browsing Beads projects, viewing kanban boards by status or epic swimlanes, and filtering by priority, text search, or sort order. Uses the `bd` CLI for Dolt compatibility, with writes disabled unless explicitly enabled. Built by [@jeanpfs](https://github.com/jeanpfs). (TanStack Start/React)
+
 - **[beads-ui](https://github.com/mantoni/beads-ui)** - Local web interface with live updates and kanban board. Uses the `bd` CLI for Dolt compatibility. Run with `npx beads-ui start`. Built by [@mantoni](https://github.com/mantoni). (Node.js)
 
 - **[BeadBoard](https://github.com/zenchantlive/beadboard)** - Multi-agent orchestration and communication system with a live dashboard. Agent-to-agent messaging (HANDOFF/BLOCKED/DECISION/INFO), DAG dependency graph, swarm coordination with archetypes and templates, scope-based work reservations, and an embedded execution runtime (bb-pi) built on [Pi](https://github.com/badlogic/pi-mono) that spawns typed worker agents. Cross-platform (macOS, Linux, Windows). Includes the `beadboard-driver` skill for agent integration (`npx skills add zenchantlive/beadboard --skill beadboard-driver`). Built by [@zenchantlive](https://github.com/zenchantlive). (Next.js/TypeScript)
 
 - **[beads-web](https://github.com/weselow/beads-web)** - Actively maintained fork of beads-kanban-ui. Cross-platform single-binary distribution (macOS, Linux, Windows), 7 visual themes, Dolt direct SQL integration, Windows multi-drive path support, drag-and-drop status updates. Download from [GitHub Releases](https://github.com/weselow/beads-web/releases). Built by [@weselow](https://github.com/weselow). (TypeScript/Rust)
+
+- **[Bead Me Up, Scotty](https://github.com/brendan-appstart/bead-me-up-scotty)** - Polished multi-project web UI for creating, updating, and prioritizing beads across all your repos from one place. Kanban board with drag-and-drop status changes and reordering, plus list, epics (with progress bars), and dependency-graph views; faceted filtering and full-text search; live updates via SSE that react the moment `.beads/` changes; and human-vs-agent attribution throughout. Uses the `bd` CLI for full Dolt compatibility. Global install (`scotty`) opens the current directory's project in your browser, and a built-in Publish view generates a shareable static showcase site from your beads. Live demo at [beadmeupscotty.com](https://beadmeupscotty.com). Built by [@brendan-appstart](https://github.com/brendan-appstart). (Next.js/TypeScript)
 
 ## Editor Extensions
 
@@ -36,6 +40,7 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 - **[Lista Beads](https://marketplace.visualstudio.com/items?itemName=ListaDev.lista-beads)** - Full-featured VS Code extension: filterable tree view, issue detail panel, dashboard with metrics, dependency graph, Dolt push/pull, CodeLens for bead references, wisps & formula support, stale issue management, and multi-tracker sync (Azure DevOps, GitHub, Jira, Linear, GitLab). Built by [@harry-miller-trimble](https://github.com/harry-miller-trimble). (TypeScript)
 
 - **[nvim-beads (fancypantalons)](https://github.com/fancypantalons/nvim-beads)** - Neovim plugin for managing Beads issues. By [@fancypantalons](https://github.com/fancypantalons). (Lua)
+- **[beads.nvim](https://github.com/tomfordweb/beads.nvim)** - Neovim UI for managing Beads issues — ready queue, editable floating detail view, create/quick-capture, Telescope pickers, memories, and dependency graph. Uses the `bd` CLI for Dolt compatibility. By [@tomfordweb](https://github.com/tomfordweb). (Lua)
 
 - **[beads-manager](https://plugins.jetbrains.com/plugin/30089-beads-manager)** - Jetbrains IDE plugin to manage and view bead details. Maintained by [@developmeh](https://github.com/developmeh). (Kotlin)
 
@@ -44,6 +49,8 @@ A curated list of community-built UIs, extensions, and integrations for Beads. R
 - **[Beads Task-Issue Tracker](https://github.com/w3dev33/beads-task-issue-tracker)** - Cross-platform desktop application (macOS, Windows, Linux) for browsing, creating, and managing Beads issues with a visual interface. Features multi-project support with favorites, image attachments, dashboard with statistics, advanced filtering, and dark/light theme. Built by [@w3dev33](https://github.com/w3dev33). (Tauri/Vue)
 
 - **[Beadbox](https://github.com/beadbox/beadbox)** - Native macOS dashboard with real-time sync, epic tree progress bars, multi-workspace support, and inline editing. Install with `brew tap beadbox/cask && brew install --cask beadbox`. Built by [@nmelo](https://github.com/nmelo). (Tauri/Next.js)
+
+- **[BeadSpec](https://github.com/boardthatpowder/BeadSpec)** - Cross-platform native desktop app (macOS, Windows, Linux) with first-class [OpenSpec](https://github.com/gastownhall/openspec) integration — the only Beads GUI that surfaces in-flight change proposals alongside the task list, lets you open spec artifacts in side-by-side tabs, imports a change's task list to Beads in one click, and shows which OpenSpec change each issue was imported from. Also includes an interactive dependency graph (React Flow + Cytoscape), IDE-style workspace tabs with split panes, a global quick-capture shortcut, system tray, command palette, TipTap Markdown description editor, human decision queue, and optional [Ruflo](https://github.com/gastownhall/ruflo) memory integration. Reads Dolt SQL directly for speed; writes through `bd` to preserve hook logic and ID assignment. Download from [GitHub Releases](https://github.com/boardthatpowder/BeadSpec/releases). Built by [@boardthatpowder](https://github.com/boardthatpowder). (Tauri/React/TypeScript)
 
 ## Data Source Middleware
 
@@ -68,6 +75,8 @@ Install with `uv tool install git+https://github.com/jklenk/thread`. Built by [@
 - **[claude-handoff](https://github.com/REMvisual/claude-handoff)** - Session handoff skills for Claude Code. Captures decisions, failed approaches, measurements, and next steps into structured files so the next session picks up where you left off. Uses bead IDs as chain tags for multi-session continuity, auto-detects active beads, and updates bead notes on close. Includes `/handoff`, `/handoffplan`, and a PreCompact safety-net hook. Built by [@REMvisual](https://github.com/REMvisual). (Markdown/Bash)
 - **[claude-workspace-snapshot](https://github.com/REMvisual/claude-workspace-snapshot)** - Snapshot and restore live Claude Code sessions as named, color-coded Windows Terminal tabs. Detects running sessions via process inspection and .jsonl file activity. Restores tab layout after any restart. Pairs with claude-handoff for full session continuity. Built by [@REMvisual](https://github.com/REMvisual). (PowerShell/Batch)
 - **[claude-protocol](https://github.com/weselow/claude-protocol)** - Actively maintained fork of beads-orchestration. Ground-up rewrite optimized for Claude 4.6 family models: trigger-based dev rules (TDD, logging, resilience), cross-platform Node.js hooks (replaced 19 bash scripts with 8 .cjs hooks), mandatory checklist verification, session-start dashboard, knowledge base with auto-capture. Install via `npx claude-protocol init`. Built by [@weselow](https://github.com/weselow). (Node.js/Python)
+
+- **[LoopTroop](https://github.com/looptroop-ai/LoopTroop)** - Local AI coding orchestrator for automated task planning, execution, and feedback loops. Uses a Beads-inspired methodology with LLM Council consensus and worktree isolation. Built by [@looptroop-ai](https://github.com/looptroop-ai). (Node.js/TypeScript)
 
 ## Coordination Servers
 
