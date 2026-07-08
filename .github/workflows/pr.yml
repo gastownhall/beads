@@ -171,6 +171,14 @@ jobs:
           ./scripts/check-doc-flags.sh ./bd
           ./scripts/check-doc-freshness.sh
 
+      # Website doc mirrors (website/docs/... and, when applicable,
+      # website/versioned_docs/version-<latest>/...) are a pure text
+      # transform of their docs/ sources, so this needs no bd build and no
+      # merge-base attribution: it just fails if scripts/sync-website-docs.sh
+      # produces any diff against the committed mirrors.
+      - name: Validate website doc mirrors
+        run: ./scripts/check-website-docs-drift.sh
+
       # When the drift check fails, it writes the exact regenerated-docs fix
       # (produced with CI's canonical build) so contributors can apply it with
       # `git apply` instead of reproducing CI's environment locally. The
