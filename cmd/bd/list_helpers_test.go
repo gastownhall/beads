@@ -156,6 +156,44 @@ func TestListBuildIssueTree_NoDuplicateChildrenFromMultipleDeps(t *testing.T) {
 	}
 }
 
+// A non-parent-child dependency on an epic (blocks / waits-for / discovered-from)
+// is a workflow edge, not membership. It must not nest the source under the epic
+// in `bd list --tree`. The storage layer already scopes an epic's children to
+// parent-child edges only (epic_closure.go), so the tree view must match: nesting
+// a mere blocker as a child made 2-layer parent trees render as 6+ level tangles
+// and triggered false "the hierarchy is broken" conclusions during grooming.
+func TestListBuildIssueTree_NonParentChildDepOnEpicDoesNotNest(t *testing.T) {
+	epic := &types.Issue{ID: "bd-epic", Title: "Epic", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic}
+
+	// Each non-parent-child edge type that AffectsReadyWork or is otherwise a
+	// legitimate cross-cutting link to an epic — none of these imply parenthood.
+	for _, depType := range []types.DependencyType{
+		types.DepBlocks,
+		types.DepWaitsFor,
+		types.DepConditionalBlocks,
+		types.DepDiscoveredFrom,
+		types.DepRelated,
+	} {
+		t.Run(string(depType), func(t *testing.T) {
+			task := &types.Issue{ID: "bd-task", Title: "Task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+			allDeps := map[string][]*types.Dependency{
+				"bd-task": {
+					{IssueID: "bd-task", DependsOnID: "bd-epic", Type: depType},
+				},
+			}
+
+			roots, children := buildIssueTreeWithDeps([]*types.Issue{epic, task}, allDeps)
+
+			if len(roots) != 2 {
+				t.Fatalf("expected both epic and task as roots (no nesting), got %d: %+v", len(roots), roots)
+			}
+			if len(children["bd-epic"]) != 0 {
+				t.Fatalf("%s edge on an epic must not nest the source as a child, got: %+v", depType, children["bd-epic"])
+			}
+		})
+	}
+}
+
 func TestFormatPrettyIssueWithContext(t *testing.T) {
 	t.Parallel()
 
