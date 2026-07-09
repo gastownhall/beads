@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
@@ -53,7 +54,7 @@ var worktreeCreateCmd = &cobra.Command{
 	Long: `Create a git worktree for parallel development.
 
 This command:
-1. Creates a git worktree at ./<name> (or specified path)
+1. Creates a git worktree at ./<name> or worktree.dir/<name> when configured
 2. Adds the worktree path to .gitignore (if inside repo root)
 
 The worktree automatically shares the same beads database as the main
@@ -61,6 +62,7 @@ repository via git common directory discovery — no redirect file needed.
 
 Examples:
   bd worktree create feature-auth           # Create at ./feature-auth
+  bd config set worktree.dir .worktrees     # Put bare worktree names under .worktrees/
   bd worktree create bugfix --branch fix-1  # Create with branch name
   bd worktree create ../agents/worker-1     # Create at relative path`,
 	Args:          cobra.ExactArgs(1),
@@ -160,17 +162,6 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 
 	name := args[0]
 
-	// Determine worktree path
-	worktreePath, err := filepath.Abs(name)
-	if err != nil {
-		return fmt.Errorf("failed to resolve path: %w", err)
-	}
-
-	// Check if path already exists
-	if _, err := os.Stat(worktreePath); err == nil {
-		return fmt.Errorf("path already exists: %s", worktreePath)
-	}
-
 	// Get repository context (validates .beads exists and resolves paths)
 	rc, err := beads.GetRepoContext()
 	if err != nil {
@@ -181,6 +172,21 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 	repoRoot := rc.CWDRepoRoot
 	if repoRoot == "" {
 		return fmt.Errorf("not in a git repository")
+	}
+	if err := checkCanCreateWorktree(repoRoot, rc.IsWorktree); err != nil {
+		return err
+	}
+
+	// Determine worktree path after repository context is known, so a
+	// repo-relative worktree.dir can be honored for bare names.
+	worktreePath, err := resolveCreateWorktreePath(name, repoRoot)
+	if err != nil {
+		return fmt.Errorf("failed to resolve path: %w", err)
+	}
+
+	// Check if path already exists
+	if _, err := os.Stat(worktreePath); err == nil {
+		return fmt.Errorf("path already exists: %s", worktreePath)
 	}
 
 	// Determine branch name
@@ -227,6 +233,58 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Created worktree: %s\n", ui.RenderPass("✓"), worktreePath)
 	fmt.Printf("  Branch: %s\n", branch)
 	return nil
+}
+
+func resolveCreateWorktreePath(name, repoRoot string) (string, error) {
+	target := name
+	if isBareWorktreeName(name) {
+		worktreeDir := strings.TrimSpace(config.GetString("worktree.dir"))
+		if worktreeDir != "" {
+			if expanded, ok := expandHomeDir(worktreeDir); ok {
+				worktreeDir = expanded
+			}
+			if filepath.IsAbs(worktreeDir) {
+				target = filepath.Join(worktreeDir, name)
+			} else {
+				target = filepath.Join(repoRoot, worktreeDir, name)
+			}
+		}
+	}
+
+	return filepath.Abs(target)
+}
+
+func checkCanCreateWorktree(repoRoot string, isWorktree bool) error {
+	if !isWorktree {
+		return nil
+	}
+	return fmt.Errorf("refusing to create a worktree from inside an existing git worktree; run this command from the main repository at %s", repoRoot)
+}
+
+func isBareWorktreeName(name string) bool {
+	cleaned := filepath.Clean(strings.TrimSpace(name))
+	if cleaned == "" || cleaned == "." || cleaned == ".." {
+		return false
+	}
+	return cleaned == filepath.Base(cleaned)
+}
+
+func expandHomeDir(path string) (string, bool) {
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path, false
+		}
+		return home, true
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path, false
+		}
+		return filepath.Join(home, path[2:]), true
+	}
+	return path, true
 }
 
 func runWorktreeList(cmd *cobra.Command, args []string) error {

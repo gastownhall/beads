@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -85,6 +86,77 @@ func TestGetRedirectTarget(t *testing.T) {
 			t.Errorf("expected empty string for missing redirect, got %q", got)
 		}
 	})
+}
+
+func TestResolveCreateWorktreePath(t *testing.T) {
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	repoRoot := t.TempDir()
+	t.Chdir(repoRoot)
+
+	config.ResetForTesting()
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize failed: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+
+	t.Run("bare name uses configured worktree dir", func(t *testing.T) {
+		config.Set("worktree.dir", ".worktrees")
+
+		got, err := resolveCreateWorktreePath("feature-auth", repoRoot)
+		if err != nil {
+			t.Fatalf("resolveCreateWorktreePath failed: %v", err)
+		}
+
+		want := filepath.Join(repoRoot, ".worktrees", "feature-auth")
+		if got != want {
+			t.Fatalf("resolveCreateWorktreePath() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("explicit relative path is unchanged", func(t *testing.T) {
+		config.Set("worktree.dir", ".worktrees")
+
+		got, err := resolveCreateWorktreePath("../agents/worker-1", repoRoot)
+		if err != nil {
+			t.Fatalf("resolveCreateWorktreePath failed: %v", err)
+		}
+
+		want, err := filepath.Abs("../agents/worker-1")
+		if err != nil {
+			t.Fatalf("filepath.Abs failed: %v", err)
+		}
+		if got != want {
+			t.Fatalf("resolveCreateWorktreePath() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("bare name keeps old cwd default when unset", func(t *testing.T) {
+		config.Set("worktree.dir", "")
+
+		got, err := resolveCreateWorktreePath("feature-auth", repoRoot)
+		if err != nil {
+			t.Fatalf("resolveCreateWorktreePath failed: %v", err)
+		}
+
+		want := filepath.Join(repoRoot, "feature-auth")
+		if got != want {
+			t.Fatalf("resolveCreateWorktreePath() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestCheckCanCreateWorktree(t *testing.T) {
+	if err := checkCanCreateWorktree("/repo", false); err != nil {
+		t.Fatalf("checkCanCreateWorktree returned unexpected error: %v", err)
+	}
+
+	err := checkCanCreateWorktree("/repo", true)
+	if err == nil {
+		t.Fatal("checkCanCreateWorktree should reject creating from an existing worktree")
+	}
+	if !strings.Contains(err.Error(), "inside an existing git worktree") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
 
 func TestAddToGitignore(t *testing.T) {

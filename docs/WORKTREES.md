@@ -42,6 +42,25 @@ bd ready
 bd create "Implement feature X" -t feature -p 1
 ```
 
+Or let `bd` create them. By default, a bare worktree name is created relative to
+the current directory. Configure `worktree.dir` in a repository to make bare
+names default under a shared parent such as `.worktrees/`:
+
+```bash
+bd config set worktree.dir .worktrees
+bd worktree create feature-branch --branch feature-branch
+```
+
+Explicit paths still win:
+
+```bash
+bd worktree create ../agents/worker-1 --branch worker-1
+bd worktree create .custom-trees/worker-2 --branch worker-2
+```
+
+Run `bd worktree create` from the main repository, not from inside an existing
+linked worktree.
+
 Sync issue data through the configured Dolt remote:
 
 ```bash
