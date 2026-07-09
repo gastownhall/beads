@@ -13,9 +13,11 @@ import (
 )
 
 var provenanceCmd = &cobra.Command{
-	Use:     "provenance",
-	GroupID: "issues",
-	Short:   "Append-only provenance event log",
+	Use:           "provenance",
+	GroupID:       "issues",
+	Short:         "Append-only provenance event log",
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	Long: `Record and read provenance events: typed bindings from an issue to an
 opaque external artifact (a git SHA, PR, work-id, transcript, or branch).
 
@@ -40,8 +42,10 @@ var (
 )
 
 var provenanceRecordCmd = &cobra.Command{
-	Use:   "record --issue <id> --kind <k> --source <s>",
-	Short: "Record a provenance event (idempotent)",
+	Use:           "record --issue <id> --kind <k> --source <s>",
+	Short:         "Record a provenance event (idempotent)",
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	Long: `Record a provenance event. The event is appended idempotently: a
 deterministic id is computed from source:issue:kind:(ref or --at), so re-running
 the same record is a no-op.
@@ -97,13 +101,12 @@ An event recorded without --ref requires --at so the id is caller-owned.`,
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"id":       id,
 				"inserted": inserted,
 				"issue_id": issueID,
 				"kind":     provKind,
 			})
-			return nil
 		}
 		if inserted {
 			fmt.Printf("%s Recorded %s provenance %s on %s\n", ui.RenderPass("✓"), provKind, id, issueID)
@@ -115,9 +118,11 @@ An event recorded without --ref requires --at so the id is caller-owned.`,
 }
 
 var provenanceLogCmd = &cobra.Command{
-	Use:   "log <issue-id>",
-	Short: "List provenance events for an issue",
-	Args:  cobra.ExactArgs(1),
+	Use:           "log <issue-id>",
+	Short:         "List provenance events for an issue",
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := rootCtx
 		issueID, err := utils.ResolvePartialID(ctx, store, args[0])
@@ -128,37 +133,36 @@ var provenanceLogCmd = &cobra.Command{
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		outputProvenanceEvents(events)
-		return nil
+		return outputProvenanceEvents(events)
 	},
 }
 
 var provenanceByRefCmd = &cobra.Command{
-	Use:   "by-ref <ref>",
-	Short: "List provenance events bound to a ref",
-	Args:  cobra.ExactArgs(1),
+	Use:           "by-ref <ref>",
+	Short:         "List provenance events bound to a ref",
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := rootCtx
 		events, err := store.GetProvenanceByRef(ctx, args[0])
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		outputProvenanceEvents(events)
-		return nil
+		return outputProvenanceEvents(events)
 	},
 }
 
-func outputProvenanceEvents(events []types.ProvenanceEvent) {
+func outputProvenanceEvents(events []types.ProvenanceEvent) error {
 	if jsonOutput {
 		if events == nil {
 			events = []types.ProvenanceEvent{}
 		}
-		outputJSON(events)
-		return
+		return outputJSON(events)
 	}
 	if len(events) == 0 {
 		fmt.Println("No provenance events")
-		return
+		return nil
 	}
 	for _, ev := range events {
 		when := "—"
@@ -179,6 +183,7 @@ func outputProvenanceEvents(events []types.ProvenanceEvent) {
 		line += fmt.Sprintf("  (%s)", ev.Source)
 		fmt.Println(line)
 	}
+	return nil
 }
 
 func init() {

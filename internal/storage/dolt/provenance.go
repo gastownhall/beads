@@ -10,10 +10,10 @@ import (
 )
 
 // RecordProvenanceEvent validates and appends a provenance event, then commits
-// the provenance_events table. The id is derived deterministically (or taken
-// from ev.ID when the caller supplies one) so a duplicate insert is ignored:
-// inserted is false when the id already existed. Append-only — there is no
-// update or delete path.
+// the provenance_events table. The id is always derived deterministically from
+// the event's idempotency basis, so a duplicate insert is ignored: inserted is
+// false when the id already existed. Append-only — there is no update or delete
+// path.
 func (s *DoltStore) RecordProvenanceEvent(ctx context.Context, ev types.ProvenanceEvent) (id string, inserted bool, err error) {
 	err = s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		var txErr error

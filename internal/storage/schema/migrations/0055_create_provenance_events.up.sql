@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS provenance_events (
     source VARCHAR(64) NOT NULL,
     occurred_at DATETIME,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_provenance_events_issue (issue_id),
+    INDEX idx_provenance_events_issue_occurred (issue_id, occurred_at),
     INDEX idx_provenance_events_ref (ref),
     INDEX idx_provenance_events_kind (kind),
     CONSTRAINT fk_provenance_events_issue FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE ON UPDATE CASCADE
