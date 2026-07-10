@@ -229,14 +229,18 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     are resolved row-wise by last-write-wins (updated_at) — whichever side
 //     has the strictly newer timestamp wins the whole row. add/add (no base
 //     row) and delete/modify are left for the operator, as are rows where both
-//     sides share the same updated_at (ambiguous). This eliminates the biggest
-//     manual wall in multi-clone sync: the issues-table conflicts that follow
-//     routine cross-clone pulls (GH#4698). LWW on the whole row loses
-//     field-level changes from the losing side (local updates notes at T1,
-//     remote updates status at T2 → remote row wins, local notes lost), the
-//     same convergent trade-off metadata and config already make; bd is
-//     primarily single-user-multi-machine so concurrent same-issue edits are
-//     rare.
+//     sides share the same updated_at (ambiguous). A row is only auto-resolved
+//     when the losing side's updated_at predates the merge base (equals the
+//     base row's updated_at): if the losing side also moved its updated_at past
+//     the base value, both sides made real edits since the last sync and LWW
+//     would silently drop the losing side's field-level changes, so the row is
+//     left for the operator. This eliminates the biggest manual wall in
+//     multi-clone sync: the issues-table conflicts that follow routine
+//     cross-clone pulls (GH#4698), while preserving the common case where one
+//     side's conflict is a migration artifact (the row was rewritten by a
+//     schema change but updated_at did not move) and the other side made the
+//     only real edit. bd is primarily single-user-multi-machine so concurrent
+//     same-issue edits since a shared merge base are rare.
 //
 // Any conflict on another table, or an unresolvable dependencies,
 // schema_migrations, config, or issues conflict, returns (false, nil) so the
@@ -381,13 +385,16 @@ func CommitResolvedConflicts(ctx context.Context, db DBConn) error {
 
 // issuesConflictsAreLWWSafe reports whether every conflicted row in the issues
 // table is a modify/modify conflict (the row existed at the merge base and was
-// modified on both sides) with strictly different updated_at timestamps — the
-// only class safe to auto-resolve by last-write-wins. add/add conflicts (no
-// base row), delete/modify conflicts (one side deleted), and rows where both
-// sides share the same updated_at (ambiguous) are left for the operator.
+// modified on both sides) with strictly different updated_at timestamps where
+// the losing side's timestamp predates the merge base — the only class safe to
+// auto-resolve by last-write-wins. add/add conflicts (no base row),
+// delete/modify conflicts (one side deleted), rows where both sides share the
+// same updated_at (ambiguous), and rows where the losing side's updated_at
+// moved past the base value (both sides made real edits since the last sync)
+// are left for the operator.
 func issuesConflictsAreLWWSafe(ctx context.Context, db DBConn) (bool, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT base_id, our_id, their_id, our_updated_at, their_updated_at
+		SELECT base_id, our_id, their_id, base_updated_at, our_updated_at, their_updated_at
 		FROM dolt_conflicts_issues`)
 	if err != nil {
 		return false, fmt.Errorf("query issues conflicts: %w", err)
@@ -396,8 +403,8 @@ func issuesConflictsAreLWWSafe(ctx context.Context, db DBConn) (bool, error) {
 
 	for rows.Next() {
 		var baseID, ourID, theirID sql.NullString
-		var ourUpdatedAt, theirUpdatedAt sql.NullTime
-		if err := rows.Scan(&baseID, &ourID, &theirID, &ourUpdatedAt, &theirUpdatedAt); err != nil {
+		var baseUpdatedAt, ourUpdatedAt, theirUpdatedAt sql.NullTime
+		if err := rows.Scan(&baseID, &ourID, &theirID, &baseUpdatedAt, &ourUpdatedAt, &theirUpdatedAt); err != nil {
 			return false, fmt.Errorf("scan issues conflict: %w", err)
 		}
 		// One side deleted the row (delete/modify): leave for the operator.
@@ -414,6 +421,25 @@ func issuesConflictsAreLWWSafe(ctx context.Context, db DBConn) (bool, error) {
 		}
 		// Equal timestamps are ambiguous: leave for the operator.
 		if ourUpdatedAt.Time.Equal(theirUpdatedAt.Time) {
+			return false, nil
+		}
+		// The base row exists (modify/modify was confirmed above), so its
+		// updated_at should always be valid (the column is NOT NULL). Guard
+		// defensively: if it is somehow absent we cannot evaluate the
+		// predates check, so leave the row for the operator.
+		if !baseUpdatedAt.Valid {
+			return false, nil
+		}
+		// The losing side (older updated_at) must not have edited the issue
+		// since the merge base. If its updated_at moved past the base value,
+		// both sides made real edits since the last sync and row-level LWW
+		// would silently drop the losing side's field-level changes — leave
+		// that concurrent-edit case for the operator (GH#4698 Risk).
+		losing := ourUpdatedAt.Time
+		if theirUpdatedAt.Time.Before(losing) {
+			losing = theirUpdatedAt.Time
+		}
+		if losing.After(baseUpdatedAt.Time) {
 			return false, nil
 		}
 	}
