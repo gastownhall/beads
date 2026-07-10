@@ -650,25 +650,23 @@ func TestLifecycle_CombinedTCPProbeSurvival(t *testing.T) {
 		t.Fatal("Server died during connection burst")
 	}
 
-	// Phase 2: 60s idle wait
-	// Only run idle wait when not -short
-	if !testing.Short() {
-		const idleDuration = 60 * time.Second
-		db := connectMySQL(t, state.Port)
-		defer db.Close()
+	// Phase 2: 60s idle wait. This file is already integration-tagged, so
+	// the complete reproduction always runs whenever the integration suite runs.
+	const idleDuration = 60 * time.Second
+	db := connectMySQL(t, state.Port)
+	defer db.Close()
 
-		for remaining := idleDuration; remaining > 0; remaining -= 15 * time.Second {
-			time.Sleep(15 * time.Second)
-			if !integration.IsProcessAlive(state.PID) {
-				t.Fatalf("Server died during idle at %v remaining", remaining)
-			}
-			var one int
-			if err := db.QueryRow("SELECT 1").Scan(&one); err != nil {
-				t.Fatalf("SQL engine died during idle: %v", err)
-			}
+	for remaining := idleDuration; remaining > 0; remaining -= 15 * time.Second {
+		time.Sleep(15 * time.Second)
+		if !integration.IsProcessAlive(state.PID) {
+			t.Fatalf("Server died during idle at %v remaining", remaining)
 		}
-		t.Log("Phase 2: idle wait complete")
+		var one int
+		if err := db.QueryRow("SELECT 1").Scan(&one); err != nil {
+			t.Fatalf("SQL engine died during idle: %v", err)
+		}
 	}
+	t.Log("Phase 2: idle wait complete")
 
 	if err := doltserver.Stop(beadsDir); err != nil {
 		t.Fatalf("Stop: %v", err)
