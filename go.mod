@@ -14,6 +14,7 @@ require (
 	github.com/dolthub/driver/v2 v2.1.10
 	github.com/dolthub/eventkit v0.0.0-20260611184414-99f5693e696a
 	github.com/go-sql-driver/mysql v1.10.0
+	github.com/mattn/go-sqlite3 v1.14.8
 	github.com/olebedev/when v1.1.0
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0

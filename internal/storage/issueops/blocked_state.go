@@ -140,42 +140,42 @@ func markIsBlockedPassForIssuesInTx(ctx context.Context, tx DBTX, ids []string) 
 // An explicit assignment suppresses the ON UPDATE clause.
 func markBlockedTemplateForIssues() string {
 	return fmt.Sprintf(`
-		UPDATE issues i SET i.is_blocked = 1, i.updated_at = i.updated_at
-		WHERE i.id IN (%%s)
-		  AND i.is_blocked = 0
-		  AND i.status <> 'closed' AND i.status <> 'pinned'
+		UPDATE issues SET is_blocked = 1, updated_at = updated_at
+		WHERE issues.id IN (%%s)
+		  AND issues.is_blocked = 0
+		  AND issues.status <> 'closed' AND issues.status <> 'pinned'
 		  AND (
 		    EXISTS (
 		      SELECT 1 FROM dependencies d
 		      JOIN issues t ON t.id = d.depends_on_issue_id
-		      WHERE d.issue_id = i.id
+		      WHERE d.issue_id = issues.id
 		        AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
 		        AND t.status <> 'closed' AND t.status <> 'pinned'
 		    )
 		    OR EXISTS (
 		      SELECT 1 FROM dependencies d
 		      JOIN wisps t ON t.id = d.depends_on_wisp_id
-		      WHERE d.issue_id = i.id
+		      WHERE d.issue_id = issues.id
 		        AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
 		        AND t.status <> 'closed' AND t.status <> 'pinned'
 		    )
 		    OR EXISTS (
 		      SELECT 1 FROM dependencies d
 		      JOIN issues p ON p.id = d.depends_on_issue_id
-		      WHERE d.issue_id = i.id
+		      WHERE d.issue_id = issues.id
 		        AND d.type = 'parent-child'
 		        AND p.is_blocked = 1
 		    )
 		    OR EXISTS (
 		      SELECT 1 FROM dependencies d
 		      JOIN wisps p ON p.id = d.depends_on_wisp_id
-		      WHERE d.issue_id = i.id
+		      WHERE d.issue_id = issues.id
 		        AND d.type = 'parent-child'
 		        AND p.is_blocked = 1
 		    )
 		    OR EXISTS (
 		      SELECT 1 FROM dependencies d
-		      WHERE d.issue_id = i.id AND d.type = 'waits-for'
+		      WHERE d.issue_id = issues.id AND d.type = 'waits-for'
 		        AND (%s)
 		    )
 		  )
@@ -184,43 +184,43 @@ func markBlockedTemplateForIssues() string {
 
 func unmarkBlockedTemplateForIssues() string {
 	return fmt.Sprintf(`
-		UPDATE issues i SET i.is_blocked = 0, i.updated_at = i.updated_at
-		WHERE i.id IN (%%s)
-		  AND i.is_blocked = 1
+		UPDATE issues SET is_blocked = 0, updated_at = updated_at
+		WHERE issues.id IN (%%s)
+		  AND issues.is_blocked = 1
 		  AND (
-		    i.status = 'closed' OR i.status = 'pinned'
+		    issues.status = 'closed' OR issues.status = 'pinned'
 		    OR (
 		      NOT EXISTS (
 		        SELECT 1 FROM dependencies d
 		        JOIN issues t ON t.id = d.depends_on_issue_id
-		        WHERE d.issue_id = i.id
+		        WHERE d.issue_id = issues.id
 		          AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
 		          AND t.status <> 'closed' AND t.status <> 'pinned'
 		      )
 		      AND NOT EXISTS (
 		        SELECT 1 FROM dependencies d
 		        JOIN wisps t ON t.id = d.depends_on_wisp_id
-		        WHERE d.issue_id = i.id
+		        WHERE d.issue_id = issues.id
 		          AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
 		          AND t.status <> 'closed' AND t.status <> 'pinned'
 		      )
 		      AND NOT EXISTS (
 		        SELECT 1 FROM dependencies d
 		        JOIN issues p ON p.id = d.depends_on_issue_id
-		        WHERE d.issue_id = i.id
+		        WHERE d.issue_id = issues.id
 		          AND d.type = 'parent-child'
 		          AND p.is_blocked = 1
 		      )
 		      AND NOT EXISTS (
 		        SELECT 1 FROM dependencies d
 		        JOIN wisps p ON p.id = d.depends_on_wisp_id
-		        WHERE d.issue_id = i.id
+		        WHERE d.issue_id = issues.id
 		          AND d.type = 'parent-child'
 		          AND p.is_blocked = 1
 		      )
 		      AND NOT EXISTS (
 		        SELECT 1 FROM dependencies d
-		        WHERE d.issue_id = i.id AND d.type = 'waits-for'
+		        WHERE d.issue_id = issues.id AND d.type = 'waits-for'
 		          AND (%s)
 		      )
 		    )
@@ -246,42 +246,42 @@ func markIsBlockedPassForWispsInTx(ctx context.Context, tx DBTX, ids []string) (
 
 func markBlockedTemplateForWisps() string {
 	return fmt.Sprintf(`
-		UPDATE wisps w SET w.is_blocked = 1, w.updated_at = w.updated_at
-		WHERE w.id IN (%%s)
-		  AND w.is_blocked = 0
-		  AND w.status <> 'closed' AND w.status <> 'pinned'
+		UPDATE wisps SET is_blocked = 1, updated_at = updated_at
+		WHERE wisps.id IN (%%s)
+		  AND wisps.is_blocked = 0
+		  AND wisps.status <> 'closed' AND wisps.status <> 'pinned'
 		  AND (
 		    EXISTS (
 		      SELECT 1 FROM wisp_dependencies d
 		      JOIN issues t ON t.id = d.depends_on_issue_id
-		      WHERE d.issue_id = w.id
+		      WHERE d.issue_id = wisps.id
 		        AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
 		        AND t.status <> 'closed' AND t.status <> 'pinned'
 		    )
 		    OR EXISTS (
 		      SELECT 1 FROM wisp_dependencies d
 		      JOIN wisps t ON t.id = d.depends_on_wisp_id
-		      WHERE d.issue_id = w.id
+		      WHERE d.issue_id = wisps.id
 		        AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
 		        AND t.status <> 'closed' AND t.status <> 'pinned'
 		    )
 		    OR EXISTS (
 		      SELECT 1 FROM wisp_dependencies d
 		      JOIN issues p ON p.id = d.depends_on_issue_id
-		      WHERE d.issue_id = w.id
+		      WHERE d.issue_id = wisps.id
 		        AND d.type = 'parent-child'
 		        AND p.is_blocked = 1
 		    )
 		    OR EXISTS (
 		      SELECT 1 FROM wisp_dependencies d
 		      JOIN wisps p ON p.id = d.depends_on_wisp_id
-		      WHERE d.issue_id = w.id
+		      WHERE d.issue_id = wisps.id
 		        AND d.type = 'parent-child'
 		        AND p.is_blocked = 1
 		    )
 		    OR EXISTS (
 		      SELECT 1 FROM wisp_dependencies d
-		      WHERE d.issue_id = w.id AND d.type = 'waits-for'
+		      WHERE d.issue_id = wisps.id AND d.type = 'waits-for'
 		        AND (%s)
 		    )
 		  )
@@ -290,43 +290,43 @@ func markBlockedTemplateForWisps() string {
 
 func unmarkBlockedTemplateForWisps() string {
 	return fmt.Sprintf(`
-		UPDATE wisps w SET w.is_blocked = 0, w.updated_at = w.updated_at
-		WHERE w.id IN (%%s)
-		  AND w.is_blocked = 1
+		UPDATE wisps SET is_blocked = 0, updated_at = updated_at
+		WHERE wisps.id IN (%%s)
+		  AND wisps.is_blocked = 1
 		  AND (
-		    w.status = 'closed' OR w.status = 'pinned'
+		    wisps.status = 'closed' OR wisps.status = 'pinned'
 		    OR (
 		      NOT EXISTS (
 		        SELECT 1 FROM wisp_dependencies d
 		        JOIN issues t ON t.id = d.depends_on_issue_id
-		        WHERE d.issue_id = w.id
+		        WHERE d.issue_id = wisps.id
 		          AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
 		          AND t.status <> 'closed' AND t.status <> 'pinned'
 		      )
 		      AND NOT EXISTS (
 		        SELECT 1 FROM wisp_dependencies d
 		        JOIN wisps t ON t.id = d.depends_on_wisp_id
-		        WHERE d.issue_id = w.id
+		        WHERE d.issue_id = wisps.id
 		          AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
 		          AND t.status <> 'closed' AND t.status <> 'pinned'
 		      )
 		      AND NOT EXISTS (
 		        SELECT 1 FROM wisp_dependencies d
 		        JOIN issues p ON p.id = d.depends_on_issue_id
-		        WHERE d.issue_id = w.id
+		        WHERE d.issue_id = wisps.id
 		          AND d.type = 'parent-child'
 		          AND p.is_blocked = 1
 		      )
 		      AND NOT EXISTS (
 		        SELECT 1 FROM wisp_dependencies d
 		        JOIN wisps p ON p.id = d.depends_on_wisp_id
-		        WHERE d.issue_id = w.id
+		        WHERE d.issue_id = wisps.id
 		          AND d.type = 'parent-child'
 		          AND p.is_blocked = 1
 		      )
 		      AND NOT EXISTS (
 		        SELECT 1 FROM wisp_dependencies d
-		        WHERE d.issue_id = w.id AND d.type = 'waits-for'
+		        WHERE d.issue_id = wisps.id AND d.type = 'waits-for'
 		          AND (%s)
 		      )
 		    )
