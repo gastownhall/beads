@@ -199,6 +199,7 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //
 //   - metadata: machine-local rows (e.g. dolt_auto_push_*) that routinely diverge
 //     across clones (GH#2466). Resolved with "theirs".
+//
 //   - dependencies: with deterministic ids (#4259) the same logical edge has the
 //     same primary key on every clone, so a same-PK conflict is the SAME edge.
 //     When the two sides differ only in audit columns (created_at, created_by,
@@ -207,6 +208,7 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     convergent across clones pulling from the same remote). A conflict where the
 //     dependency type differs, or one side deleted the edge, is a real semantic
 //     conflict and is left for the operator.
+//
 //   - schema_migrations: pre-#4270 binaries record (version, NULL content_hash)
 //     while post-#4270 binaries record (version, sha256), so two clones applying
 //     the SAME migration with mixed binary vintages conflict on the cursor row
@@ -215,6 +217,7 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     provenance beats its absence, and the result converges across clones.
 //     Two DIFFERENT non-empty hashes are the #4259 schema fork itself and are
 //     left for the operator (bd doctor reports them as Migration Content Skew).
+//
 //   - config: persistent memories live in config as kv.memory.* rows (the
 //     pre-pull auto-commit now commits config so they sync). Like metadata,
 //     same-key memory edits across clones are machine-convergent: resolved with
@@ -222,9 +225,22 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     value. A conflict touching ANY non-memory config key (issue_prefix above
 //     all) is a real semantic conflict and is left for the operator.
 //
+//   - issues: modify/modify conflicts where both sides updated the same issue
+//     are resolved row-wise by last-write-wins (updated_at) — whichever side
+//     has the strictly newer timestamp wins the whole row. add/add (no base
+//     row) and delete/modify are left for the operator, as are rows where both
+//     sides share the same updated_at (ambiguous). This eliminates the biggest
+//     manual wall in multi-clone sync: the issues-table conflicts that follow
+//     routine cross-clone pulls (GH#4698). LWW on the whole row loses
+//     field-level changes from the losing side (local updates notes at T1,
+//     remote updates status at T2 → remote row wins, local notes lost), the
+//     same convergent trade-off metadata and config already make; bd is
+//     primarily single-user-multi-machine so concurrent same-issue edits are
+//     rare.
+//
 // Any conflict on another table, or an unresolvable dependencies,
-// schema_migrations, or config conflict, returns (false, nil) so the caller
-// fails the pull and the operator resolves it.
+// schema_migrations, config, or issues conflict, returns (false, nil) so the
+// caller fails the pull and the operator resolves it.
 //
 // The resolved tables are staged but NOT committed: the caller must run
 // CommitResolvedConflicts after the FK cascade repair, because DOLT_COMMIT
@@ -291,6 +307,15 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 				return false, nil
 			}
 			resolvable = append(resolvable, "config")
+		case "issues":
+			lwwSafe, err := issuesConflictsAreLWWSafe(ctx, db)
+			if err != nil {
+				return false, err
+			}
+			if !lwwSafe {
+				return false, nil
+			}
+			resolvable = append(resolvable, "issues")
 		default:
 			return false, nil
 		}
@@ -321,6 +346,10 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 			if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'config')"); err != nil {
 				return false, fmt.Errorf("failed to resolve config conflicts: %w", err)
 			}
+		case "issues":
+			if err := resolveIssuesLWWConflicts(ctx, db); err != nil {
+				return false, err
+			}
 		default:
 			//nolint:gosec // G201: table is one of the hardcoded constants above.
 			if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', '"+table+"')"); err != nil {
@@ -344,8 +373,114 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 // cascade violation could never settle while the resolver committed first
 // (bd-578h9.14).
 func CommitResolvedConflicts(ctx context.Context, db DBConn) error {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts (GH#2466, #4259, GH#2474)')"); err != nil {
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts (GH#2466, #4259, GH#2474, GH#4698)')"); err != nil {
 		return fmt.Errorf("failed to commit resolved conflicts: %w", err)
+	}
+	return nil
+}
+
+// issuesConflictsAreLWWSafe reports whether every conflicted row in the issues
+// table is a modify/modify conflict (the row existed at the merge base and was
+// modified on both sides) with strictly different updated_at timestamps — the
+// only class safe to auto-resolve by last-write-wins. add/add conflicts (no
+// base row), delete/modify conflicts (one side deleted), and rows where both
+// sides share the same updated_at (ambiguous) are left for the operator.
+func issuesConflictsAreLWWSafe(ctx context.Context, db DBConn) (bool, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT base_id, our_id, their_id, our_updated_at, their_updated_at
+		FROM dolt_conflicts_issues`)
+	if err != nil {
+		return false, fmt.Errorf("query issues conflicts: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var baseID, ourID, theirID sql.NullString
+		var ourUpdatedAt, theirUpdatedAt sql.NullTime
+		if err := rows.Scan(&baseID, &ourID, &theirID, &ourUpdatedAt, &theirUpdatedAt); err != nil {
+			return false, fmt.Errorf("scan issues conflict: %w", err)
+		}
+		// One side deleted the row (delete/modify): leave for the operator.
+		if !ourID.Valid || !theirID.Valid {
+			return false, nil
+		}
+		// No base row means both sides added (add/add): leave for the operator.
+		if !baseID.Valid {
+			return false, nil
+		}
+		// Both timestamps must be present to compare.
+		if !ourUpdatedAt.Valid || !theirUpdatedAt.Valid {
+			return false, nil
+		}
+		// Equal timestamps are ambiguous: leave for the operator.
+		if ourUpdatedAt.Time.Equal(theirUpdatedAt.Time) {
+			return false, nil
+		}
+	}
+	return true, rows.Err()
+}
+
+// resolveIssuesLWWConflicts resolves modify/modify issues-table conflicts
+// (validated by issuesConflictsAreLWWSafe) row-wise by last-write-wins: for
+// each conflicted row, whichever side has the strictly newer updated_at wins
+// the whole row. DOLT_CONFLICTS_RESOLVE is table-level (--ours/--theirs), so
+// per-row resolution uses Dolt's manual-resolution path: for rows where ours
+// wins, deleting the conflict row from dolt_conflicts_issues signals resolution
+// (the working set already holds our values); the remaining rows (theirs wins)
+// are then resolved with a single --theirs call.
+func resolveIssuesLWWConflicts(ctx context.Context, db DBConn) error {
+	rows, err := db.QueryContext(ctx, `
+		SELECT our_id, our_updated_at, their_updated_at
+		FROM dolt_conflicts_issues`)
+	if err != nil {
+		return fmt.Errorf("query issues conflicts for LWW: %w", err)
+	}
+
+	type oursWin struct {
+		id string
+	}
+	var oursWins []oursWin
+	theirsCount := 0
+	for rows.Next() {
+		var ourID sql.NullString
+		var ourUpdatedAt, theirUpdatedAt sql.NullTime
+		if err := rows.Scan(&ourID, &ourUpdatedAt, &theirUpdatedAt); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan issues conflict for LWW: %w", err)
+		}
+		if !ourID.Valid || !ourUpdatedAt.Valid || !theirUpdatedAt.Valid {
+			// issuesConflictsAreLWWSafe already screened these out; a row
+			// that slipped through must not be silently resolved.
+			_ = rows.Close()
+			return fmt.Errorf("unexpected invalid conflict row in dolt_conflicts_issues (safety check bypassed)")
+		}
+		if ourUpdatedAt.Time.After(theirUpdatedAt.Time) {
+			oursWins = append(oursWins, oursWin{id: ourID.String})
+		} else {
+			theirsCount++
+		}
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+
+	// For rows where ours wins: delete the conflict row. The working set
+	// already holds our values, so deleting the conflict entry signals
+	// resolution. Dolt applies this per-row using the primary key.
+	for _, w := range oursWins {
+		if _, err := db.ExecContext(ctx,
+			"DELETE FROM dolt_conflicts_issues WHERE our_id = ?", w.id); err != nil {
+			return fmt.Errorf("delete ours-wins conflict for issue %s: %w", w.id, err)
+		}
+	}
+
+	// For the remaining rows (theirs wins): resolve with --theirs. If there
+	// are none, skip the call — DOLT_CONFLICTS_RESOLVE on a conflict-free
+	// table is a no-op but skipping it avoids an unnecessary round-trip.
+	if theirsCount > 0 {
+		if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'issues')"); err != nil {
+			return fmt.Errorf("failed to resolve theirs-wins issues conflicts: %w", err)
+		}
 	}
 	return nil
 }
