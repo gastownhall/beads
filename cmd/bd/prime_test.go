@@ -112,6 +112,16 @@ func TestOutputContextFunction(t *testing.T) {
 			rejectText:    []string{"git push", "git pull", "bd dolt push", "bd dolt pull", "--from-main", "bd export", "Git authority: no git operations in this context"},
 		},
 		{
+			name:          "CLI Local-only team-maintainer profile",
+			mcpMode:       false,
+			stealthMode:   false,
+			ephemeralMode: false,
+			localOnlyMode: true,
+			profile:       config.ProfileTeamMaintainer,
+			expectText:    []string{"Beads Workflow Context", "Git authority: local-only/no-remote", "agent.profile=team-maintainer", "git commit"},
+			rejectText:    []string{"git push", "git pull", "bd dolt push", "bd dolt pull", "wait for authority", "Git authority: no git operations in this context"},
+		},
+		{
 			name:          "CLI Local-only overrides ephemeral",
 			mcpMode:       false,
 			stealthMode:   false,
@@ -186,6 +196,16 @@ func TestOutputContextFunction(t *testing.T) {
 			rejectText:    []string{"git push", "git pull", "bd dolt push", "bd dolt pull", "--from-main", "bd export", "Git authority: no git operations in this context"},
 		},
 		{
+			name:          "MCP Local-only team-maintainer profile",
+			mcpMode:       true,
+			stealthMode:   false,
+			ephemeralMode: false,
+			localOnlyMode: true,
+			profile:       config.ProfileTeamMaintainer,
+			expectText:    []string{"Beads Issue Tracker Active", "Git authority: local-only/no-remote", "No git remote configured", "agent.profile=team-maintainer", "commit local changes"},
+			rejectText:    []string{"git push", "git pull", "bd dolt push", "bd dolt pull", "proposed handoff", "Git authority: no git operations in this context"},
+		},
+		{
 			name:          "MCP Local-only overrides ephemeral",
 			mcpMode:       true,
 			stealthMode:   false,
@@ -240,6 +260,9 @@ func TestOutputContextFunction(t *testing.T) {
 }
 
 func TestPrimeLocalOnlyDoesNotClaimNoGitAuthority(t *testing.T) {
+	defer stubPrimeStoreUnavailable()()
+	defer stubPrimeAgentProfile(config.ProfileConservative)()
+
 	for _, tc := range []struct {
 		name    string
 		mcpMode bool
