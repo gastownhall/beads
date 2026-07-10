@@ -8,14 +8,47 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 CHECK_MODE=0
-if [ "${1:-}" = "--check" ]; then
-    CHECK_MODE=1
-    shift
-fi
-
-BD_ARG="${1:-}"
+VERSIONED_VERSION=""
+BD_ARG=""
 TMP_BUILD_DIR=""
 TMP_OUTPUT_DIR=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --check)
+            CHECK_MODE=1
+            shift
+            ;;
+        --versioned)
+            [ "$#" -ge 2 ] || { echo "Error: --versioned needs a version" >&2; exit 2; }
+            VERSIONED_VERSION="$2"
+            shift 2
+            ;;
+        -h|--help)
+            cat <<'EOF'
+Usage: scripts/generate-cli-docs.sh [--check] [--versioned VERSION] [path-to-bd]
+
+Generate live CLI docs from one bd process. Historical Docusaurus snapshots are
+left untouched unless --versioned VERSION is supplied by the release snapshot
+workflow.
+
+If the resolved bd binary is CGO-enabled it emits the full `bd federation` help
+tree that CI (CGO_ENABLED=0) stubs out; the script rebuilds a pinned pure-go
+binary to keep committed docs in sync. Set BD_DOCS_ALLOW_CGO=1 to bypass that
+rebuild and trust the supplied binary as-is.
+EOF
+            exit 0
+            ;;
+        *)
+            if [ -n "$BD_ARG" ]; then
+                echo "Error: multiple bd binaries supplied: $BD_ARG and $1" >&2
+                exit 2
+            fi
+            BD_ARG="$1"
+            shift
+            ;;
+    esac
+done
 
 cleanup() {
     if [ -n "$TMP_BUILD_DIR" ]; then
@@ -38,107 +71,49 @@ else
     (cd "$PROJECT_ROOT" && CGO_ENABLED=0 go build -tags gms_pure_go -o "$BD" ./cmd/bd/)
 fi
 
+# Guard against a CGO-enabled bd: it exposes the full `bd federation` subcommand tree
+# that CI never produces (scripts/ci/pr-policy.sh build_docs_binary uses env
+# CGO_ENABLED=0 go build). A CGO build therefore emits ~hundreds of lines of federation
+# help that the committed, CI-built docs stub out ("built without CGO support"), so a
+# naive regen on a machine with a C compiler produces spurious federation churn.
+#
+# The pure-go federation stub prints "Federation commands require CGO" (see
+# cmd/bd/federation_nocgo.go); a CGO build does not. If the resolved binary is missing
+# that stub marker, warn and rebuild a pinned CGO_ENABLED=0 -tags gms_pure_go binary so
+# the committed docs always match CI. Set BD_DOCS_ALLOW_CGO=1 to bypass the rebuild and
+# trust the supplied binary as-is (e.g. to deliberately regenerate the full federation
+# tree); you then own any federation churn the diff introduces.
+if [ -x "$BD" ] && ! "$BD" federation --help 2>&1 | grep -q "Federation commands require CGO"; then
+    if [ "${BD_DOCS_ALLOW_CGO:-0}" = "1" ]; then
+        echo "WARNING: $BD looks CGO-enabled and emits the full 'bd federation' help tree," >&2
+        echo "         which CI's pure-go docs build stubs out. BD_DOCS_ALLOW_CGO=1 is set," >&2
+        echo "         using it anyway; expect federation doc churn unless that is intended." >&2
+    else
+        echo "WARNING: $BD looks CGO-enabled; its 'bd federation' help differs from CI's" >&2
+        echo "         pure-go build and would add spurious federation doc churn." >&2
+        echo "         Rebuilding a pinned pure-go (CGO_ENABLED=0 -tags gms_pure_go) binary" >&2
+        echo "         for CI-consistent docs. Set BD_DOCS_ALLOW_CGO=1 to use it as-is." >&2
+        if [ -z "$TMP_BUILD_DIR" ]; then
+            TMP_BUILD_DIR="$(mktemp -d)"
+        fi
+        BD="$TMP_BUILD_DIR/bd-pure"
+        (cd "$PROJECT_ROOT" && CGO_ENABLED=0 go build -tags gms_pure_go -o "$BD" ./cmd/bd/)
+    fi
+fi
+
 if [ ! -x "$BD" ]; then
     echo "Error: bd binary not found or not executable: $BD" >&2
-    echo "Usage: $0 [--check] [path-to-bd]" >&2
+    echo "Usage: $0 [--check] [--versioned VERSION] [path-to-bd]" >&2
     exit 1
 fi
 
-command_doc_id() {
-    printf '%s' "$1" \
-        | tr '[:upper:] ' '[:lower:]-' \
-        | sed -E 's/[^a-z0-9-]+/-/g; s/-+/-/g; s/^-//; s/-$//'
-}
-
-trim_trailing_blank_lines() {
-    perl -0pi -e 's/\n+\z/\n/' "$1"
-}
-
-generate_index() {
-    local out_dir="$1"
-    local commands_file="$2"
-    local version_label="$3"
-    local count
-    count="$(wc -l < "$commands_file" | tr -d ' ')"
-
-    cat > "$out_dir/index.md" << EOF
----
-id: index
-title: CLI Reference
-sidebar_position: 0
----
-
-# CLI Reference
-
-<!-- AUTO-GENERATED: do not edit manually -->
-Reference for bd ${version_label}. Generated from \`bd help --list\` and \`bd help --doc <command>\`.
-
-This reference covers all ${count} live top-level \`bd\` commands. Regenerate it with:
-
-\`\`\`bash
-./scripts/generate-cli-docs.sh
-\`\`\`
-
-## Commands
-
-EOF
-
-    while IFS= read -r cmd; do
-        cmd="${cmd%$'\r'}"
-        local doc_id
-        doc_id="$(command_doc_id "$cmd")"
-        printf -- "- [\`bd %s\`](./%s.md)\n" "$cmd" "$doc_id" >> "$out_dir/index.md"
-    done < "$commands_file"
-}
-
-generate_cli_dir() {
-    local out_dir="$1"
-    local commands_file="$2"
-    local version_label="$3"
-
-    mkdir -p "$out_dir"
-    rm -f "$out_dir"/*.md
-    generate_index "$out_dir" "$commands_file" "$version_label"
-
-    while IFS= read -r cmd; do
-        cmd="${cmd%$'\r'}"
-        local doc_id
-        doc_id="$(command_doc_id "$cmd")"
-        "$BD" help --doc "$cmd" < /dev/null > "$out_dir/$doc_id.md"
-        trim_trailing_blank_lines "$out_dir/$doc_id.md"
-    done < "$commands_file"
-}
-
 generate_all() {
     local root="$1"
-    local commands_file="$root/.cli-commands.txt"
-
-    mkdir -p "$root/docs"
-    "$BD" help --list > "$commands_file"
-    "$BD" help --all > "$root/docs/CLI_REFERENCE.md"
-    trim_trailing_blank_lines "$root/docs/CLI_REFERENCE.md"
-
-    generate_cli_dir "$root/website/docs/cli-reference" "$commands_file" "Latest"
-
-    # Versioned snapshots: parse the semver tag from the directory name
-    # (e.g. "version-1.0.0" -> "v1.0.0") so a release bump alone produces
-    # zero diff on the dev tree.
-    local versioned_parent="$PROJECT_ROOT/website/versioned_docs"
-    if [ -d "$versioned_parent" ]; then
-        local versioned_dir
-        for versioned_dir in "$versioned_parent"/version-*; do
-            [ -d "$versioned_dir" ] || continue
-            local dir_name
-            dir_name="$(basename "$versioned_dir")"
-            local version_tag="v${dir_name#version-}"
-            generate_cli_dir \
-                "$root/website/versioned_docs/$dir_name/cli-reference" \
-                "$commands_file" \
-                "$version_tag"
-        done
+    local args=(help --docs-root "$root")
+    if [ -n "$VERSIONED_VERSION" ]; then
+        args+=(--docs-version "$VERSIONED_VERSION")
     fi
-
-    rm -f "$commands_file"
+    "$BD" "${args[@]}"
 }
 
 if [ "$CHECK_MODE" -eq 1 ]; then
@@ -164,11 +139,8 @@ if [ "$CHECK_MODE" -eq 1 ]; then
     fi
 
     check_dirs=("website/docs/cli-reference")
-    if [ -d "$PROJECT_ROOT/website/versioned_docs" ]; then
-        for vdir in "$PROJECT_ROOT/website/versioned_docs"/version-*; do
-            [ -d "$vdir" ] || continue
-            check_dirs+=("website/versioned_docs/$(basename "$vdir")/cli-reference")
-        done
+    if [ -n "$VERSIONED_VERSION" ]; then
+        check_dirs+=("website/versioned_docs/version-$VERSIONED_VERSION/cli-reference")
     fi
 
     for rel in "${check_dirs[@]}"; do
@@ -188,5 +160,9 @@ if [ "$CHECK_MODE" -eq 1 ]; then
 else
     generate_all "$PROJECT_ROOT"
     echo "Generated CLI docs from: $($BD version 2>/dev/null | head -1 || echo "$BD")"
-    echo "Updated docs/CLI_REFERENCE.md and website CLI reference pages"
+    if [ -n "$VERSIONED_VERSION" ]; then
+        echo "Updated docs/CLI_REFERENCE.md, website CLI reference pages, and version-$VERSIONED_VERSION CLI snapshot"
+    else
+        echo "Updated docs/CLI_REFERENCE.md and live website CLI reference pages"
+    fi
 fi

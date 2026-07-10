@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -23,14 +24,22 @@ Examples:
   bd comment bd-123 Working on this now
   echo "comment from pipe" | bd comment bd-123 --stdin
   bd comment bd-123 --file notes.txt`,
-	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("comment")
+
+		evt := metrics.NewCommandEvent("comment")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
 
 		id := args[0]
 		textArgs := args[1:]
 
-		// Determine comment text from args, stdin, or file
 		stdinFlag, _ := cmd.Flags().GetBool("stdin")
 		fileFlag, _ := cmd.Flags().GetString("file")
 
@@ -39,68 +48,68 @@ Examples:
 		case stdinFlag:
 			content, err := io.ReadAll(os.Stdin)
 			if err != nil {
-				FatalErrorRespectJSON("reading from stdin: %v", err)
+				return HandleErrorRespectJSON("reading from stdin: %v", err)
 			}
 			commentText = strings.TrimRight(string(content), "\n")
 		case fileFlag != "":
 			content, err := readBodyFile(fileFlag)
 			if err != nil {
-				FatalErrorRespectJSON("reading file: %v", err)
+				return HandleErrorRespectJSON("reading file: %v", err)
 			}
 			commentText = content
 		case len(textArgs) > 0:
 			commentText = strings.Join(textArgs, " ")
 		default:
-			FatalErrorRespectJSON("no comment text provided (use positional args, --stdin, or --file)")
+			return HandleErrorRespectJSON("no comment text provided (use positional args, --stdin, or --file)")
 		}
 
 		if strings.TrimSpace(commentText) == "" {
-			FatalErrorRespectJSON("comment text cannot be empty")
+			return HandleErrorRespectJSON("comment text cannot be empty")
 		}
 
 		author := getActorWithGit()
 
 		ctx := rootCtx
 
-		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+		result, err := resolveAndGetIssueForMutation(ctx, store, id)
 		if err != nil {
 			if result != nil {
 				result.Close()
 			}
-			FatalErrorRespectJSON("resolving %s: %v", id, err)
+			return HandleErrorRespectJSON("resolving %s: %v", id, err)
 		}
 		if result == nil || result.Issue == nil {
 			if result != nil {
 				result.Close()
 			}
-			FatalErrorRespectJSON("issue %s not found", id)
+			return HandleErrorRespectJSON("issue %s not found", id)
 		}
 		defer result.Close()
 
 		issueStore := result.Store
 
 		if err := validateIssueUpdatable(id, result.Issue); err != nil {
-			FatalErrorRespectJSON("%s", err)
+			return HandleErrorRespectJSON("%s", err)
 		}
 
 		comment, err := issueStore.AddIssueComment(ctx, result.ResolvedID, author, commentText)
 		if err != nil {
-			FatalErrorRespectJSON("adding comment: %v", err)
+			return HandleErrorRespectJSON("adding comment: %v", err)
 		}
 		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
 			Command:  "comment",
 			IssueIDs: []string{result.ResolvedID},
 		}); err != nil {
-			FatalErrorRespectJSON("failed to commit: %v", err)
+			return HandleErrorRespectJSON("failed to commit: %v", err)
 		}
 
 		SetLastTouchedID(result.ResolvedID)
 
 		if jsonOutput {
-			outputJSON(comment)
-		} else {
-			fmt.Printf("%s Comment added to %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, result.Issue.Title))
+			return outputJSON(comment)
 		}
+		fmt.Printf("%s Comment added to %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, result.Issue.Title))
+		return nil
 	},
 }
 

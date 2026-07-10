@@ -303,3 +303,101 @@ func TestRunVersionSyncCheck_ScriptFallback(t *testing.T) {
 		t.Fatal("expected fallback logic, not script invocation")
 	}
 }
+
+// writeMarkerDir creates a temp dir containing the given marker files (each
+// with trivial content) and returns its path. Used to exercise project-type
+// detection in the preflight checklist (GH#4364).
+func writeMarkerDir(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	return dir
+}
+
+func TestBuildPreflightChecklist(t *testing.T) {
+	beadsGoMod := "module github.com/steveyegge/beads\n\ngo 1.22\n"
+	otherGoMod := "module example.com/foo\n\ngo 1.22\n"
+
+	cases := []struct {
+		name        string
+		files       map[string]string
+		wantContain []string // substring present in at least one item
+		wantAbsent  []string // substring present in no item
+	}{
+		{
+			name:        "beads repo keeps rich Go+Nix checklist",
+			files:       map[string]string{"go.mod": beadsGoMod, "default.nix": "{}", ".beads": ""},
+			wantContain: []string{"gms_pure_go", "Version sync", "Nix hash", "No beads pollution"},
+		},
+		{
+			name:        "generic Go project gets plain go commands",
+			files:       map[string]string{"go.mod": otherGoMod},
+			wantContain: []string{"go test ./...", "golangci-lint run ./...", "gofmt -l ."},
+			wantAbsent:  []string{"gms_pure_go", "Version sync", "Nix hash"},
+		},
+		{
+			name:        "node project",
+			files:       map[string]string{"package.json": "{}"},
+			wantContain: []string{"npm test", "tsc --noEmit"},
+			wantAbsent:  []string{"go test", "gofmt"},
+		},
+		{
+			name:        "rust project",
+			files:       map[string]string{"Cargo.toml": "[package]\n"},
+			wantContain: []string{"cargo test", "cargo clippy"},
+			wantAbsent:  []string{"go test ./...", "npm test"},
+		},
+		{
+			name:        "python pyproject",
+			files:       map[string]string{"pyproject.toml": "[project]\n"},
+			wantContain: []string{"pytest", "ruff check"},
+		},
+		{
+			name:        "python setup.py",
+			files:       map[string]string{"setup.py": "", ".beads": ""},
+			wantContain: []string{"pytest", "No beads pollution"},
+		},
+		{
+			name:        "unknown stack gets generic reminder",
+			files:       map[string]string{"README.md": "hi"},
+			wantContain: []string{"run your project's test suite"},
+			wantAbsent:  []string{"go test", "npm test", "cargo test", "pytest"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := writeMarkerDir(t, tc.files)
+			joined := strings.Join(buildPreflightChecklist(dir), "\n")
+			for _, want := range tc.wantContain {
+				if !strings.Contains(joined, want) {
+					t.Errorf("checklist missing %q\ngot:\n%s", want, joined)
+				}
+			}
+			for _, absent := range tc.wantAbsent {
+				if strings.Contains(joined, absent) {
+					t.Errorf("checklist unexpectedly contains %q\ngot:\n%s", absent, joined)
+				}
+			}
+		})
+	}
+}
+
+func TestIsBeadsRepo(t *testing.T) {
+	beads := writeMarkerDir(t, map[string]string{"go.mod": "module github.com/steveyegge/beads\n"})
+	if !isBeadsRepo(beads) {
+		t.Error("expected beads module to be detected as the beads repo")
+	}
+	other := writeMarkerDir(t, map[string]string{"go.mod": "module example.com/foo\n"})
+	if isBeadsRepo(other) {
+		t.Error("non-beads module should not be detected as the beads repo")
+	}
+	empty := t.TempDir()
+	if isBeadsRepo(empty) {
+		t.Error("dir without go.mod should not be detected as the beads repo")
+	}
+}

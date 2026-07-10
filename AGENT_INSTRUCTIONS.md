@@ -88,6 +88,11 @@ git commit -m "Add retry logic for database locks (bd-xyz)"
 
 This enables `bd doctor` to detect **orphaned issues** - work that was committed but the issue wasn't closed. The doctor check cross-references open issues against git history to find these orphans.
 
+For agent-prepared commits, also include the
+`Agent-Signature:` trailer described in
+[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md). Use `unknown-model` or
+`unknown-reasoning` when reliable runtime metadata is unavailable.
+
 ### Git Workflow
 
 bd uses **Dolt** as its primary database. Changes are committed to Dolt history automatically (one Dolt commit per write command).
@@ -127,6 +132,9 @@ maintainer policy is to maximize community throughput: find useful contributor
 value, absorb or transform it locally when practical, preserve attribution, and
 use request-changes only as a last resort.
 
+Sign agent-written GitHub comments and reviews using
+[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md).
+
 ### External Contributor PRs: Check Before You Build
 
 **Read [CONTRIBUTING.md](CONTRIBUTING.md)** — it contains promises we've made to contributors. Violating them damages trust and community.
@@ -159,87 +167,9 @@ gate for PR handling.
 
 ## Landing the Plane
 
-**When the user says "let's land the plane"**, you MUST complete ALL steps below. The plane is NOT landed until `git push` succeeds. NEVER stop before pushing. NEVER say "ready to push when you are!" - that is a FAILURE.
-
-**MANDATORY WORKFLOW - COMPLETE ALL STEPS:**
-
-1. **File beads issues for any remaining work** that needs follow-up
-2. **Ensure all quality gates pass** (only if code changes were made):
-   - Run `golangci-lint run ./...` (if pre-commit installed: `pre-commit run --all-files`)
-   - Run `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
-   - File P0 issues if quality gates are broken
-3. **Update beads issues** - close finished work, update status
-4. **PUSH TO REMOTE - NON-NEGOTIABLE** - This step is MANDATORY. Execute ALL commands below:
-   ```bash
-   # Pull first to catch any remote changes
-   git pull --rebase
-
-   # MANDATORY: Push everything to remote
-   # DO NOT STOP BEFORE THIS COMMAND COMPLETES
-   git push
-
-   # MANDATORY: Verify push succeeded
-   git status  # MUST show "up to date with origin/main"
-   ```
-
-   **CRITICAL RULES:**
-   - The plane has NOT landed until `git push` completes successfully
-   - NEVER stop before `git push` - that leaves work stranded locally
-   - NEVER say "ready to push when you are!" - YOU must push, not the user
-   - If `git push` fails, resolve the issue and retry until it succeeds
-   - The user is managing multiple agents - unpushed work breaks their coordination workflow
-
-5. **Clean up git state** - Clear old stashes and prune dead remote branches:
-   ```bash
-   git stash clear                    # Remove old stashes
-   git remote prune origin            # Clean up deleted remote branches
-   ```
-6. **Verify clean state** - Ensure all changes are committed AND PUSHED, no untracked files remain
-7. **Choose a follow-up issue for next session**
-   - Provide a prompt for the user to give to you in the next session
-   - Format: "Continue work on bd-X: [issue title]. [Brief context about what's been done and what's next]"
-
-**REMEMBER: Landing the plane means EVERYTHING is pushed to remote. No exceptions. No "ready when you are". PUSH IT.**
-
-**Example "land the plane" session:**
-
-```bash
-# 1. File remaining work
-bd create "Add integration tests for sync" -t task -p 2 --json
-
-# 2. Run quality gates (only if code changes were made)
-make test
-golangci-lint run ./...
-
-# 3. Close finished issues
-bd close bd-42 bd-43 --reason "Completed" --json
-
-# 4. PUSH TO REMOTE - MANDATORY, NO STOPPING BEFORE THIS IS DONE
-git pull --rebase
-git push       # MANDATORY - THE PLANE IS STILL IN THE AIR UNTIL THIS SUCCEEDS
-git status     # MUST verify "up to date with origin/main"
-
-# 5. Clean up git state
-git stash clear
-git remote prune origin
-
-# 6. Verify everything is clean and pushed
-git status
-
-# 7. Choose next work
-bd ready --json
-bd show bd-44 --json
-```
-
-**Then provide the user with:**
-
-- Summary of what was completed this session
-- What issues were filed for follow-up
-- Status of quality gates (all passing / issues filed)
-- Confirmation that ALL changes have been pushed to remote
-- Recommended prompt for next session
-
-**CRITICAL: Never end a "land the plane" session without successfully pushing. The user is coordinating multiple agents and unpushed work causes severe rebase conflicts.**
+See [AGENTS.md](AGENTS.md#landing-the-plane-session-completion) for the
+canonical session-completion protocol (quality gates, mandatory `git push`,
+cleanup, and next-session hand-off).
 
 ## Agent Session Workflow
 
@@ -283,6 +213,11 @@ echo 'Updated description with $variables' | bd update <id> --description=-
 # Or use --body-file for longer content
 bd create "Title" --body-file=description.md
 ```
+
+**GitHub body hygiene.** For GitHub PR, issue, comment, and review bodies,
+write Markdown to a file and pass it with `gh ... --body-file`. Run
+`scripts/gh-body-lint <body-file>` first to catch literal `\n` sequences and
+non-linking `GH#123` references.
 
 **Example agent session:**
 
@@ -519,26 +454,9 @@ See `scripts/README.md` for more details.
 
 ## Release Process (Maintainers)
 
-**Automated (Recommended):**
-
-```bash
-# One command to do everything (version bump, tests, tag, Homebrew update, local install)
-./scripts/release.sh 0.9.3
-```
-
-This handles the entire release workflow automatically, including waiting ~5 minutes for GitHub Actions to build release artifacts. See [scripts/README.md](scripts/README.md) for details.
-
-**Manual (Step-by-Step):**
-
-1. Bump version: `./scripts/bump-version.sh <version> --commit`
-2. Update CHANGELOG.md with release notes
-3. Run tests: `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
-4. Push version bump: `git push origin main`
-5. Tag release: `git tag v<version> && git push origin v<version>`
-6. Update Homebrew: `./scripts/update-homebrew.sh <version>` (waits for GitHub Actions)
-7. Verify: `brew update && brew upgrade beads && bd version`
-
-See [RELEASING.md](RELEASING.md) for complete manual instructions.
+See [RELEASING.md](RELEASING.md) for the complete release process, including
+the automated `./scripts/release.sh <version>` script and the manual,
+step-by-step channel-by-channel instructions.
 
 ## Checking GitHub Issues and PRs
 
@@ -572,6 +490,20 @@ gh issue view 201
 - Better for quick triage and prioritization
 
 **Do NOT use:** `browser_navigate`, `browser_snapshot`, or other playwright tools for GitHub PR/issue reviews unless specifically requested by the user.
+
+## Telemetry
+
+`bd` collects anonymous command-usage metrics. Each event is a `cli_command`
+record carrying only the command name; each batch also carries the bd version
+and OS platform, keyed by a machine-derived, HMAC-protected distinct ID. No
+email, repo path, remote URL, issue content, or user-supplied strings are
+collected. Events are written under `~/.beads/eventsData` and POSTed to
+`https://gastownhall-eventsapi.com/mp/collect`.
+
+Metrics are enabled by default (opt-out). The friendliest way to see or change
+them is `bd metrics` (`bd metrics on` / `bd metrics off` / `bd metrics example`),
+which takes effect on the next command with no restart. `BD_DISABLE_METRICS=1`
+still works as a one-off, shell-scoped override.
 
 ## Questions?
 

@@ -9,23 +9,27 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+
 jobs:
 
   build-artifacts:
     name: Build Artifacts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
       - name: Run policy checks
         run: make ci-pr-policy
@@ -68,7 +72,7 @@ jobs:
     name: Check build-tag policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
       - run: ./scripts/check-build-tags.sh
       - run: ./scripts/check-go-install-guidance.sh
 
@@ -83,10 +87,10 @@ jobs:
     name: Check cmd/bd pure-Go tests compile (CGO_ENABLED=0)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -118,47 +122,42 @@ jobs:
     name: Check version consistency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Check all versions match
         run: ./scripts/check-versions.sh
 
-  # Catch duplicate migration version numbers before any Go build.
-  # Two long-lived branches both claiming 'the next number' produce a silent
-  # under-apply when merged; this job fails at PR time with the conflicting
-  # filenames so it is caught before any test even compiles.
-  check-no-duplicate-migrations:
-    name: Check no duplicate migration versions
+  # Migration hygiene: duplicate version numbers, nondeterministic SQL
+  # (UUID()/NOW()/RAND(), the #4259 root-cause class), and edits to migration
+  # files that already exist on the base branch (shipped migrations are
+  # frozen; fix forward with a new version). Fails at PR time, before any
+  # test even compiles. Details: scripts/check-migration-hygiene.sh.
+  check-migration-hygiene:
+    name: Check migration hygiene
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          fetch-depth: 0
 
-      - name: Check for duplicate migration version numbers
-        run: |
-          dup=$(
-            find internal/storage/schema/migrations -maxdepth 1 -name '*.up.sql' -printf '%f\n' \
-              | sed 's/^\([0-9]*\)_.*/\1/' \
-              | sort | uniq -d
-          )
-          if [ -n "$dup" ]; then
-            echo "Duplicate migration version(s) detected: $dup"
-            echo "Conflicting files:"
-            while IFS= read -r v; do
-              find internal/storage/schema/migrations -name "${v}_*.up.sql" -print
-            done <<< "$dup"
-            echo "Renumber one of the colliding files before merging."
-            exit 1
-          fi
+      - name: Run migration hygiene checks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: ./scripts/check-migration-hygiene.sh
 
   # Check documentation references match actual CLI flags
   check-doc-flags:
     name: Check doc flags freshness
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          # Full history so check-cli-docs-drift.sh can regenerate docs at the
+          # merge-base and only fail PRs for drift they actually introduced.
+          fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -166,9 +165,32 @@ jobs:
         run: CGO_ENABLED=0 go build -tags gms_pure_go -o bd ./cmd/bd/
 
       - name: Validate docs against CLI
+        env:
+          DOC_DRIFT_PATCH_OUT: ${{ runner.temp }}/cli-docs-freshness.patch
         run: |
           ./scripts/check-doc-flags.sh ./bd
           ./scripts/check-doc-freshness.sh
+
+      # Website doc mirrors (website/docs/... and, when applicable,
+      # website/versioned_docs/version-<latest>/...) are a pure text
+      # transform of their docs/ sources, so this needs no bd build and no
+      # merge-base attribution: it just fails if scripts/sync-website-docs.sh
+      # produces any diff against the committed mirrors.
+      - name: Validate website doc mirrors
+        run: ./scripts/check-website-docs-drift.sh
+
+      # When the drift check fails, it writes the exact regenerated-docs fix
+      # (produced with CI's canonical build) so contributors can apply it with
+      # `git apply` instead of reproducing CI's environment locally. The
+      # docs-autofix.yml workflow_run job consumes this same artifact to push
+      # the fix to same-repo PR branches automatically.
+      - name: Upload docs fix patch
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cli-docs-freshness-patch
+          path: ${{ runner.temp }}/cli-docs-freshness.patch
+          if-no-files-found: ignore
 
   # Fast check to catch accidental .beads/issues.jsonl changes from contributors
   check-no-beads-changes:
@@ -176,7 +198,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
@@ -205,7 +227,7 @@ jobs:
       website: ${{ steps.detect.outputs.website }}
       reason: ${{ steps.detect.outputs.reason }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
@@ -231,12 +253,12 @@ jobs:
             echo "MCP package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
           fi
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         if: steps.applicability.outputs.run == 'true'
 
       - name: Set up Python
         if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.14'
 
@@ -278,7 +300,7 @@ jobs:
             echo "npm package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
           fi
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         if: steps.applicability.outputs.run == 'true'
 
       - name: Set up Node.js
@@ -321,7 +343,7 @@ jobs:
             echo "website package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
           fi
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         if: steps.applicability.outputs.run == 'true'
 
       - name: Set up Node.js
@@ -340,12 +362,12 @@ jobs:
     name: PR Policy (wrapper timing)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -357,10 +379,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-artifacts
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -396,15 +418,15 @@ jobs:
     name: PR Lint (wrapper timing)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
       - name: Run PR lint wrapper
         run: make ci-pr-lint
@@ -420,10 +442,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-artifacts
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -443,7 +465,7 @@ jobs:
       - name: Pull Dolt sql-server image
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
         # Without this, RequireDoltContainer reports doltNoImage and TestDomainDB skips.
-        run: docker pull dolthub/dolt-sql-server:1.88.1
+        run: docker pull dolthub/dolt-sql-server:2.1.10
 
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -458,19 +480,57 @@ jobs:
           sha256sum -c SHA256SUMS
           chmod +x bd-linux-gms-pure
 
-      - name: Test domain + uow
+      - name: Test domain + uow + tracker
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-        run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/...
+        run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
+
+  # Producer-side guard for the Beads<->Gas City contract corpus. Regenerates
+  # the canonicalized golden corpus from this branch's bd and byte-compares it
+  # to the committed testdata/corpus/; an unreviewed wire change is a hard
+  # failure (run `make corpus-regen`). The double-run test proves determinism.
+  # Needs the Dolt sql-server image (the protocol harness spins a container).
+  contract-corpus:
+    name: Contract corpus (golden + determinism)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt CLI
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Pull Dolt sql-server image
+        # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
+        run: docker pull dolthub/dolt-sql-server:2.1.10
+
+      - name: Corpus golden + determinism
+        # Require a live Dolt store here: this is the gate that must exercise the
+        # golden + double-run checks, so a failed container is a hard failure,
+        # not a silent skip (see requireDoltStore in cmd/bd/protocol tests).
+        env:
+          BEADS_PROTOCOL_REQUIRE_DOLT: "1"
+        run: go test -tags gms_pure_go -count=1 -run 'TestCorpusGolden|TestCanonicalize|TestCorpusDoubleRunByteIdentical|TestCheckCaptureExit' ./cmd/bd/protocol
 
   fmt-check:
     name: Check formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -481,15 +541,15 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           version: latest
           args: --timeout=5m --build-tags=gms_pure_go
@@ -502,7 +562,7 @@ jobs:
       - check-build-tags
       - check-cmd-bd-puregeo-tests
       - check-version-consistency
-      - check-no-duplicate-migrations
+      - check-migration-hygiene
       - check-doc-flags
       - check-no-beads-changes
       - detect-package-gates
@@ -513,11 +573,12 @@ jobs:
       - pr-core-wrapper
       - pr-lint-wrapper
       - test-domain-uow
+      - contract-corpus
       - fmt-check
       - lint
     if: ${{ always() }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Evaluate CI gate
         env:
@@ -527,7 +588,7 @@ jobs:
             CHECK_BUILD_TAGS
             CHECK_CMD_BD_PUREGEO_TESTS
             CHECK_VERSION_CONSISTENCY
-            CHECK_NO_DUPLICATE_MIGRATIONS
+            CHECK_MIGRATION_HYGIENE
             CHECK_DOC_FLAGS
             CHECK_NO_BEADS_CHANGES
             DETECT_PACKAGE_GATES
@@ -538,13 +599,14 @@ jobs:
             PR_CORE_WRAPPER
             PR_LINT_WRAPPER
             TEST_DOMAIN_UOW
+            CONTRACT_CORPUS
             FMT_CHECK
             LINT
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
           CHECK_BUILD_TAGS: ${{ needs.check-build-tags.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
           CHECK_VERSION_CONSISTENCY: ${{ needs.check-version-consistency.result }}
-          CHECK_NO_DUPLICATE_MIGRATIONS: ${{ needs.check-no-duplicate-migrations.result }}
+          CHECK_MIGRATION_HYGIENE: ${{ needs.check-migration-hygiene.result }}
           CHECK_DOC_FLAGS: ${{ needs.check-doc-flags.result }}
           CHECK_NO_BEADS_CHANGES: ${{ needs.check-no-beads-changes.result }}
           DETECT_PACKAGE_GATES: ${{ needs.detect-package-gates.result }}
@@ -555,6 +617,7 @@ jobs:
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
           PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
           TEST_DOMAIN_UOW: ${{ needs.test-domain-uow.result }}
+          CONTRACT_CORPUS: ${{ needs.contract-corpus.result }}
           FMT_CHECK: ${{ needs.fmt-check.result }}
           LINT: ${{ needs.lint.result }}
         run: |

@@ -596,13 +596,18 @@ func TestProxiedServerList(t *testing.T) {
 		}
 	})
 
-	t.Run("truncation_hint_on_stderr_when_more_results", func(t *testing.T) {
-		stdout, stderr := bdProxiedListCapture(t, bd, p, "--all", "--limit", "2")
-		if !strings.Contains(stderr, "more results matched") {
-			t.Errorf("expected truncation hint on stderr, got:\nstderr: %q\nstdout: %q", stderr, stdout)
+	t.Run("limit_truncates_and_hint_stays_off_stdout", func(t *testing.T) {
+		full := bdProxiedListJSON(t, bd, p, "--all", "--limit", "0")
+		if len(full) <= 2 {
+			t.Fatalf("fixture should have > 2 issues, got %d", len(full))
 		}
+		page := bdProxiedListJSON(t, bd, p, "--all", "--limit", "2")
+		if len(page) != 2 {
+			t.Errorf("--limit 2 should cap at 2 rows, got %d", len(page))
+		}
+		stdout, _ := bdProxiedListCapture(t, bd, p, "--all", "--limit", "2")
 		if strings.Contains(stdout, "more results matched") {
-			t.Errorf("truncation hint leaked into stdout:\n%s", stdout)
+			t.Errorf("truncation hint must not leak into stdout:\n%s", stdout)
 		}
 	})
 
@@ -618,24 +623,21 @@ func TestProxiedServerList(t *testing.T) {
 	// --- M. Pagination across the issues+wisps UNION ALL ---
 
 	t.Run("ready_returns_both_perm_and_wisp", func(t *testing.T) {
-		// Create three ephemeral wisps as ready candidates. The proxied
-		// union path forces IncludeEphemeral=true on the wisp side, so
-		// these must surface in --ready alongside permanent issues.
 		var wispIDs []string
 		for i := 0; i < 3; i++ {
 			w := bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Wisp ready %d", i), "--ephemeral")
 			wispIDs = append(wispIDs, w.ID)
 		}
 
-		issues := bdProxiedListJSON(t, bd, p, "--ready", "--limit", "0")
+		issues := bdProxiedReadyJSON(t, bd, p, "--include-ephemeral", "--limit", "0")
 		ids := listIssueIDs(issues)
 		for _, wid := range wispIDs {
 			if !containsID(issues, wid) {
-				t.Errorf("ephemeral wisp %s should appear in --ready (UNION path), got %v", wid, ids)
+				t.Errorf("ephemeral wisp %s should appear in ready --include-ephemeral (UNION path), got %v", wid, ids)
 			}
 		}
 		if !containsID(issues, seed.readyTask) {
-			t.Errorf("permanent readyTask %s should still appear in --ready, got %v", seed.readyTask, ids)
+			t.Errorf("permanent readyTask %s should still appear in ready --include-ephemeral, got %v", seed.readyTask, ids)
 		}
 	})
 

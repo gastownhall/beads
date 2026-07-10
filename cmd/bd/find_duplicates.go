@@ -16,6 +16,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -53,7 +54,9 @@ Examples:
   bd find-duplicates --status open         # Only check open issues
   bd find-duplicates --limit 20            # Show top 20 pairs
   bd find-duplicates --json                # JSON output`,
-	Run: runFindDuplicates,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runFindDuplicates,
 }
 
 func init() {
@@ -74,7 +77,14 @@ type duplicatePair struct {
 	Reason     string       `json:"reason,omitempty"`
 }
 
-func runFindDuplicates(cmd *cobra.Command, _ []string) {
+func runFindDuplicates(cmd *cobra.Command, _ []string) error {
+	evt := metrics.NewCommandEvent("find-duplicates")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	method, _ := cmd.Flags().GetString("method")
 	threshold, _ := cmd.Flags().GetFloat64("threshold")
 	status, _ := cmd.Flags().GetString("status")
@@ -86,19 +96,16 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) {
 
 	ctx := rootCtx
 
-	// Validate method
 	if method != "mechanical" && method != "ai" {
-		FatalError("invalid method %q (use: mechanical, ai)", method)
+		return HandleErrorRespectJSON("invalid method %q (use: mechanical, ai)", method)
 	}
 
-	// AI method requires API key
 	if method == "ai" {
 		if os.Getenv("ANTHROPIC_API_KEY") == "" && config.GetString("ai.api_key") == "" {
-			FatalError("--method ai requires ANTHROPIC_API_KEY environment variable or ai.api_key in config")
+			return HandleErrorRespectJSON("--method ai requires ANTHROPIC_API_KEY environment variable or ai.api_key in config")
 		}
 	}
 
-	// Fetch issues
 	filter := types.IssueFilter{}
 	if status != "" && status != "all" {
 		s := types.Status(status)
@@ -110,10 +117,9 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) {
 
 	issues, err = store.SearchIssues(ctx, "", filter)
 	if err != nil {
-		FatalError("fetching issues: %v", err)
+		return HandleErrorRespectJSON("fetching issues: %v", err)
 	}
 
-	// Default: filter out closed issues unless status flag is set
 	if status == "" {
 		var filtered []*types.Issue
 		for _, issue := range issues {
@@ -126,14 +132,13 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) {
 
 	if len(issues) < 2 {
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"pairs": []interface{}{},
 				"count": 0,
 			})
-		} else {
-			fmt.Println("Not enough issues to compare (need at least 2)")
 		}
-		return
+		fmt.Println("Not enough issues to compare (need at least 2)")
+		return nil
 	}
 
 	// Find duplicate pairs
@@ -178,18 +183,17 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) {
 				Reason:      p.Reason,
 			}
 		}
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"pairs":     jsonPairs,
 			"count":     len(jsonPairs),
 			"method":    method,
 			"threshold": threshold,
 		})
-		return
 	}
 
 	if len(pairs) == 0 {
 		fmt.Printf("No similar issues found (threshold: %.0f%%)\n", threshold*100)
-		return
+		return nil
 	}
 
 	fmt.Printf("%s Found %d potential duplicate pair(s) (threshold: %.0f%%):\n\n",
@@ -205,6 +209,7 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) {
 		}
 		fmt.Printf("  %s bd show %s %s\n\n", ui.RenderAccent("Compare:"), p.IssueA.ID, p.IssueB.ID)
 	}
+	return nil
 }
 
 // tokenize splits text into lowercase word tokens, removing punctuation.

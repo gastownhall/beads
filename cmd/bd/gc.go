@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -38,7 +39,16 @@ Examples:
   bd gc --skip-decay                 # Skip issue deletion, just compact+GC
   bd gc --skip-dolt                  # Skip Dolt GC, just decay+compact
   bd gc --force                      # Skip confirmation prompt`,
-	Run: func(cmd *cobra.Command, _ []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("gc")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if !gcDryRun {
 			CheckReadonly("gc")
 		}
@@ -46,10 +56,9 @@ Examples:
 		start := time.Now()
 
 		if gcOlderThan < 0 {
-			FatalError("--older-than must be non-negative")
+			return HandleErrorRespectJSON("--older-than must be non-negative")
 		}
 
-		// Phase tracking for summary
 		type phaseResult struct {
 			name    string
 			skipped bool
@@ -57,7 +66,6 @@ Examples:
 		}
 		var results []phaseResult
 
-		// ── Phase 1: DECAY ──
 		if gcSkipDecay {
 			results = append(results, phaseResult{name: "Decay", skipped: true})
 		} else {
@@ -75,7 +83,7 @@ Examples:
 
 			closedIssues, err := store.SearchIssues(ctx, "", filter)
 			if err != nil {
-				FatalError("searching closed issues: %v", err)
+				return HandleErrorRespectJSON("searching closed issues: %v", err)
 			}
 
 			var stats closedDeletionCandidateStats
@@ -97,7 +105,7 @@ Examples:
 					results = append(results, phaseResult{name: "Decay", detail: fmt.Sprintf("%d issues (dry-run)", len(closedIssues))})
 				} else {
 					if !gcForce {
-						FatalErrorWithHint(
+						return HandleErrorWithHintRespectJSON(
 							fmt.Sprintf("would delete %d closed issue(s) older than %d days", len(closedIssues), cutoffDays),
 							"Use --force to confirm or --dry-run to preview.")
 					}
@@ -127,7 +135,6 @@ Examples:
 			}
 		}
 
-		// ── Phase 2: COMPACT (report only — actual squashing is bd flatten) ──
 		if !jsonOutput {
 			fmt.Println("Phase 2/3: Compact (Dolt commit history info)")
 		}
@@ -160,7 +167,6 @@ Examples:
 			}
 		}
 
-		// ── Phase 3: Dolt GC ──
 		if gcSkipDolt {
 			results = append(results, phaseResult{name: "Dolt GC", skipped: true})
 		} else {
@@ -197,7 +203,6 @@ Examples:
 
 		elapsed := time.Since(start)
 
-		// ── Summary ──
 		if jsonOutput {
 			summaryMap := make(map[string]interface{})
 			summaryMap["dry_run"] = gcDryRun
@@ -214,8 +219,7 @@ Examples:
 				phases = append(phases, p)
 			}
 			summaryMap["phases"] = phases
-			outputJSON(summaryMap)
-			return
+			return outputJSON(summaryMap)
 		}
 
 		mode := "✓ GC complete"
@@ -230,6 +234,7 @@ Examples:
 				fmt.Printf("  %s: %s\n", r.name, r.detail)
 			}
 		}
+		return nil
 	},
 }
 

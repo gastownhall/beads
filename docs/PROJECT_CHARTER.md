@@ -56,6 +56,13 @@ If the current storage interface cannot express a needed operation, widen the
 interface or route the issue to the driver instead of embedding storage-engine
 logic in core.
 
+This boundary is mechanically enforced for non-test code by a `depguard`
+rule in `.golangci.yml` that denies `github.com/dolthub/` imports outside
+`internal/storage/` and `internal/doltserver/` (the linter config does not
+analyze `_test.go` files). The rule's `files` list documents the only
+justified exceptions (the proxied-server surface and DoltHub's `eventkit`
+telemetry client) alongside why each one is allowed.
+
 ## Schema Boundary
 
 The database schema is considered stable. Schema changes are allowed when there

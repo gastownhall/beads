@@ -10,10 +10,12 @@ func TestShouldUseColor(t *testing.T) {
 	origNoColor := os.Getenv("NO_COLOR")
 	origCliColor := os.Getenv("CLICOLOR")
 	origCliColorForce := os.Getenv("CLICOLOR_FORCE")
+	origTerm := os.Getenv("TERM")
 	defer func() {
 		setEnv("NO_COLOR", origNoColor)
 		setEnv("CLICOLOR", origCliColor)
 		setEnv("CLICOLOR_FORCE", origCliColorForce)
+		setEnv("TERM", origTerm)
 	}()
 
 	tests := []struct {
@@ -21,6 +23,7 @@ func TestShouldUseColor(t *testing.T) {
 		noColor         string
 		cliColor        string
 		cliColorForce   string
+		term            string
 		wantColor       bool
 		skipTTYDepCheck bool // Some tests don't depend on TTY state
 	}{
@@ -51,6 +54,19 @@ func TestShouldUseColor(t *testing.T) {
 			skipTTYDepCheck: true,
 		},
 		{
+			name:            "TERM dumb disables color",
+			term:            "dumb",
+			wantColor:       false,
+			skipTTYDepCheck: true,
+		},
+		{
+			name:            "CLICOLOR_FORCE overrides TERM dumb",
+			cliColorForce:   "1",
+			term:            "dumb",
+			wantColor:       true,
+			skipTTYDepCheck: true,
+		},
+		{
 			name:            "NO_COLOR takes precedence over CLICOLOR_FORCE",
 			noColor:         "1",
 			cliColorForce:   "1",
@@ -65,6 +81,7 @@ func TestShouldUseColor(t *testing.T) {
 			os.Unsetenv("NO_COLOR")
 			os.Unsetenv("CLICOLOR")
 			os.Unsetenv("CLICOLOR_FORCE")
+			os.Unsetenv("TERM")
 
 			// Set test-specific vars
 			if tt.noColor != "" {
@@ -76,12 +93,83 @@ func TestShouldUseColor(t *testing.T) {
 			if tt.cliColorForce != "" {
 				os.Setenv("CLICOLOR_FORCE", tt.cliColorForce)
 			}
+			if tt.term != "" {
+				os.Setenv("TERM", tt.term)
+			}
 
 			got := ShouldUseColor()
 			if tt.skipTTYDepCheck && got != tt.wantColor {
 				t.Errorf("ShouldUseColor() = %v, want %v", got, tt.wantColor)
 			}
 		})
+	}
+}
+
+func TestShouldUseHyperlinks(t *testing.T) {
+	envKeys := []string{
+		"BD_GIT_HOOK",
+		"NO_COLOR",
+		"CLICOLOR",
+		"FORCE_HYPERLINK",
+		"TERM",
+		"TERM_PROGRAM",
+		"WT_SESSION",
+	}
+	orig := map[string]string{}
+	for _, key := range envKeys {
+		orig[key] = os.Getenv(key)
+		os.Unsetenv(key)
+	}
+	defer func() {
+		for _, key := range envKeys {
+			setEnv(key, orig[key])
+		}
+	}()
+
+	if ShouldUseHyperlinks() {
+		t.Fatal("hyperlinks should be disabled for non-TTY output by default")
+	}
+
+	os.Setenv("FORCE_HYPERLINK", "1")
+	if !ShouldUseHyperlinks() {
+		t.Fatal("FORCE_HYPERLINK should enable hyperlinks")
+	}
+
+	os.Setenv("NO_COLOR", "1")
+	if ShouldUseHyperlinks() {
+		t.Fatal("NO_COLOR should disable hyperlinks even when forced")
+	}
+
+	os.Unsetenv("NO_COLOR")
+	os.Setenv("TERM", "dumb")
+	if ShouldUseHyperlinks() {
+		t.Fatal("TERM=dumb should disable hyperlinks even when forced")
+	}
+
+	os.Setenv("TERM", "xterm-256color")
+	os.Setenv("BD_GIT_HOOK", "1")
+	if ShouldUseHyperlinks() {
+		t.Fatal("BD_GIT_HOOK should disable hyperlinks")
+	}
+
+	os.Unsetenv("BD_GIT_HOOK")
+	os.Unsetenv("FORCE_HYPERLINK")
+	os.Setenv("TERM", "xterm-256color")
+	os.Setenv("WT_SESSION", "windows-terminal-session")
+	if !shouldUseHyperlinks(true) {
+		t.Fatal("WT_SESSION should enable hyperlinks for Windows Terminal when stdout is a TTY")
+	}
+
+	os.Unsetenv("WT_SESSION")
+	os.Setenv("TERM_PROGRAM", "vscode")
+	if !shouldUseHyperlinks(true) {
+		t.Fatal("TERM_PROGRAM=vscode should enable hyperlinks when stdout is a TTY")
+	}
+
+	os.Unsetenv("TERM_PROGRAM")
+	os.Setenv("TERM", "xterm-kitty")
+	if !shouldUseHyperlinks(true) {
+		t.Fatal("xterm-kitty should enable hyperlinks when stdout is a TTY")
 	}
 }
 

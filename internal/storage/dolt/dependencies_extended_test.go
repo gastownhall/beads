@@ -1253,8 +1253,8 @@ func TestAddDependencyCycleCheckTerminatesOnExistingCycleAndDiamond(t *testing.T
 		{"union-term-d", "union-term-b"},
 	} {
 		if _, err := store.db.ExecContext(ctx, `
-			INSERT INTO dependencies (issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
-			VALUES (?, ?, 'blocks', NOW(), 'tester', '{}')
+			INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
+			VALUES (UUID(), ?, ?, 'blocks', NOW(), 'tester', '{}')
 		`, dep.from, dep.to); err != nil {
 			t.Fatalf("seed dependency %s->%s: %v", dep.from, dep.to, err)
 		}

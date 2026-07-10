@@ -23,9 +23,12 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 	if t.done {
 		return errors.New("uow: commit: already done")
 	}
-	t.done = true
-	defer t.releaseConn()
 	_, err := t.conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?);", message)
+	if err != nil && isSerializationError(err) {
+		return err
+	}
+	t.done = true
+	t.releaseConn()
 	return err
 }
 

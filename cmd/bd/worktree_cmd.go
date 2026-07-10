@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -62,8 +63,10 @@ Examples:
   bd worktree create feature-auth           # Create at ./feature-auth
   bd worktree create bugfix --branch fix-1  # Create with branch name
   bd worktree create ../agents/worker-1     # Create at relative path`,
-	Args: cobra.ExactArgs(1),
-	RunE: runWorktreeCreate,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runWorktreeCreate,
 }
 
 var worktreeListCmd = &cobra.Command{
@@ -80,8 +83,10 @@ Shows each worktree with:
 Examples:
   bd worktree list          # List all worktrees
   bd worktree list --json   # JSON output`,
-	Args: cobra.NoArgs,
-	RunE: runWorktreeList,
+	Args:          cobra.NoArgs,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runWorktreeList,
 }
 
 var worktreeRemoveCmd = &cobra.Command{
@@ -99,8 +104,10 @@ Use --force to skip safety checks (not recommended).
 Examples:
   bd worktree remove feature-auth         # Remove with safety checks
   bd worktree remove feature-auth --force # Skip safety checks`,
-	Args: cobra.ExactArgs(1),
-	RunE: runWorktreeRemove,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runWorktreeRemove,
 }
 
 var worktreeInfoCmd = &cobra.Command{
@@ -117,8 +124,10 @@ If the current directory is in a git worktree, shows:
 Examples:
   bd worktree info          # Show current worktree info
   bd worktree info --json   # JSON output`,
-	Args: cobra.NoArgs,
-	RunE: runWorktreeInfo,
+	Args:          cobra.NoArgs,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runWorktreeInfo,
 }
 
 var (
@@ -139,6 +148,14 @@ func init() {
 
 func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 	CheckReadonly("worktree create")
+
+	evt := metrics.NewCommandEvent("worktree-create")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	ctx := context.Background()
 
 	name := args[0]
@@ -213,6 +230,13 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runWorktreeList(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("worktree-list")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	ctx := context.Background()
 
 	// Get repository context
@@ -286,6 +310,14 @@ func runWorktreeList(cmd *cobra.Command, args []string) error {
 
 func runWorktreeRemove(cmd *cobra.Command, args []string) error {
 	CheckReadonly("worktree remove")
+
+	evt := metrics.NewCommandEvent("worktree-remove")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	ctx := context.Background()
 
 	name := args[0]
@@ -360,6 +392,13 @@ func runWorktreeRemove(cmd *cobra.Command, args []string) error {
 }
 
 func runWorktreeInfo(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("worktree-info")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	ctx := context.Background()
 	cwd, err := os.Getwd()
 	if err != nil {

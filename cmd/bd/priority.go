@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
 )
@@ -26,57 +27,65 @@ Priority levels:
 Examples:
   bd priority bd-123 0    # Critical
   bd priority bd-123 2    # Medium`,
-	Args: cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(2),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("priority")
+
+		evt := metrics.NewCommandEvent("priority")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
 
 		id := args[0]
 		priorityStr := args[1]
 
 		priority, err := validation.ValidatePriority(priorityStr)
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		ctx := rootCtx
 
-		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+		result, err := resolveAndGetIssueForMutation(ctx, store, id)
 		if err != nil {
 			if result != nil {
 				result.Close()
 			}
-			FatalErrorRespectJSON("resolving %s: %v", id, err)
+			return HandleErrorRespectJSON("resolving %s: %v", id, err)
 		}
 		if result == nil || result.Issue == nil {
 			if result != nil {
 				result.Close()
 			}
-			FatalErrorRespectJSON("issue %s not found", id)
+			return HandleErrorRespectJSON("issue %s not found", id)
 		}
 		defer result.Close()
 
 		issueStore := result.Store
 
 		if err := validateIssueUpdatable(id, result.Issue); err != nil {
-			FatalErrorRespectJSON("%s", err)
+			return HandleErrorRespectJSON("%s", err)
 		}
 
 		updates := map[string]interface{}{
 			"priority": priority,
 		}
 		if err := issueStore.UpdateIssue(ctx, result.ResolvedID, updates, actor); err != nil {
-			FatalErrorRespectJSON("updating %s: %v", id, err)
+			return HandleErrorRespectJSON("updating %s: %v", id, err)
 		}
 		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
 			Command:  "priority",
 			IssueIDs: []string{result.ResolvedID},
 		}); err != nil {
-			FatalErrorRespectJSON("failed to commit: %v", err)
+			return HandleErrorRespectJSON("failed to commit: %v", err)
 		}
 
 		SetLastTouchedID(result.ResolvedID)
 
-		// Re-fetch for display
 		updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
 		title := ""
 		if updatedIssue != nil {
@@ -84,11 +93,12 @@ Examples:
 		}
 		if jsonOutput {
 			if updatedIssue != nil {
-				outputJSON(updatedIssue)
+				return outputJSON(updatedIssue)
 			}
-		} else {
-			fmt.Printf("%s Set priority of %s to P%d\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, title), priority)
+			return nil
 		}
+		fmt.Printf("%s Set priority of %s to P%d\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, title), priority)
+		return nil
 	},
 }
 

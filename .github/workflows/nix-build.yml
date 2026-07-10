@@ -8,6 +8,8 @@ on:
       - 'default.nix'
       - 'flake.nix'
       - 'flake.lock'
+      - 'overlay.nix'
+      - 'packages.nix'
   push:
     branches: [main]
     paths:
@@ -16,7 +18,13 @@ on:
       - 'default.nix'
       - 'flake.nix'
       - 'flake.lock'
+      - 'overlay.nix'
+      - 'packages.nix'
   workflow_dispatch:
+
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
 
 jobs:
   nix-build:
@@ -25,8 +33,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
       - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@f4c468f2287f0f14a113841b41f2dc8957119519 # v3
+        uses: DeterminateSystems/determinate-nix-action@629b284231c2a82554b724e357e47fc6020833c8 # v3
       - name: Build
         run: nix build .#default --print-build-logs

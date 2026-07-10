@@ -245,3 +245,114 @@ func TestEmbeddedRoutedSiblingWritesCommitTargetHead(t *testing.T) {
 		}
 	})
 }
+
+// TestEmbeddedRoutedMutatingSiblingWritesCommitTargetHead pins the rest of the
+// prefix-routed mutating command surface to the same write-through contract as
+// comment/note/reopen above. These commands (the assign/tag shorthands plus
+// dep/delete/close) resolve a prefix-routed target through the write-intent
+// router and must commit on the target head, not fail "store is read-only"
+// (#4141). Each subtest creates the bead in the target rig, runs the command
+// from the source rig so resolution must route, and asserts both that the
+// target HEAD advanced and that the mutation persisted in the target store.
+func TestEmbeddedRoutedMutatingSiblingWritesCommitTargetHead(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt auto-commit tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	t.Run("assign", func(t *testing.T) {
+		sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "sas", "tas")
+		issue := bdCreate(t, bd, targetDir, "Routed assign target")
+		before := embeddedCurrentCommit(t, targetBeadsDir, "tas")
+
+		bdCommand(t, bd, sourceDir, "assign", issue.ID, "alice")
+
+		assertEmbeddedHeadAdvanced(t, targetBeadsDir, "tas", before, "routed assign")
+		targetStore := openStore(t, targetBeadsDir, "tas")
+		got, err := targetStore.GetIssue(t.Context(), issue.ID)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if got.Assignee != "alice" {
+			t.Fatalf("target assignee = %q, want alice", got.Assignee)
+		}
+	})
+
+	t.Run("tag", func(t *testing.T) {
+		sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "stg", "ttg")
+		issue := bdCreate(t, bd, targetDir, "Routed tag target")
+		before := embeddedCurrentCommit(t, targetBeadsDir, "ttg")
+
+		bdCommand(t, bd, sourceDir, "tag", issue.ID, "routed-label")
+
+		assertEmbeddedHeadAdvanced(t, targetBeadsDir, "ttg", before, "routed tag")
+		targetStore := openStore(t, targetBeadsDir, "ttg")
+		labels, err := targetStore.GetLabelsForIssues(t.Context(), []string{issue.ID})
+		if err != nil {
+			t.Fatalf("GetLabelsForIssues: %v", err)
+		}
+		if !slices.Contains(labels[issue.ID], "routed-label") {
+			t.Fatalf("target labels = %v, want routed-label", labels[issue.ID])
+		}
+	})
+
+	t.Run("dep_add", func(t *testing.T) {
+		sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "sdp", "tdp")
+		from := bdCreate(t, bd, targetDir, "Routed dep source")
+		to := bdCreate(t, bd, targetDir, "Routed dep target")
+		before := embeddedCurrentCommit(t, targetBeadsDir, "tdp")
+
+		bdCommand(t, bd, sourceDir, "dep", "add", from.ID, to.ID)
+
+		assertEmbeddedHeadAdvanced(t, targetBeadsDir, "tdp", before, "routed dep add")
+		targetStore := openStore(t, targetBeadsDir, "tdp")
+		deps, err := targetStore.GetDependencies(t.Context(), from.ID)
+		if err != nil {
+			t.Fatalf("GetDependencies: %v", err)
+		}
+		found := false
+		for _, d := range deps {
+			if d.ID == to.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("routed dep add did not persist %s -> %s in target store (deps=%v)", from.ID, to.ID, deps)
+		}
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "sdl", "tdl")
+		issue := bdCreate(t, bd, targetDir, "Routed delete target")
+		before := embeddedCurrentCommit(t, targetBeadsDir, "tdl")
+
+		bdCommand(t, bd, sourceDir, "delete", issue.ID, "--force")
+
+		assertEmbeddedHeadAdvanced(t, targetBeadsDir, "tdl", before, "routed delete")
+		targetStore := openStore(t, targetBeadsDir, "tdl")
+		if _, err := targetStore.GetIssue(t.Context(), issue.ID); err == nil {
+			t.Fatalf("routed delete did not remove %s from target store", issue.ID)
+		}
+	})
+
+	t.Run("close", func(t *testing.T) {
+		sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "scl", "tcl")
+		issue := bdCreate(t, bd, targetDir, "Routed close target")
+		before := embeddedCurrentCommit(t, targetBeadsDir, "tcl")
+
+		bdCommand(t, bd, sourceDir, "close", issue.ID, "--reason", "routed close")
+
+		assertEmbeddedHeadAdvanced(t, targetBeadsDir, "tcl", before, "routed close")
+		targetStore := openStore(t, targetBeadsDir, "tcl")
+		got, err := targetStore.GetIssue(t.Context(), issue.ID)
+		if err != nil {
+			t.Fatalf("GetIssue: %v", err)
+		}
+		if got.Status != types.StatusClosed {
+			t.Fatalf("target status = %s, want %s", got.Status, types.StatusClosed)
+		}
+	})
+}

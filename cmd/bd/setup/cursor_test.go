@@ -239,8 +239,9 @@ func TestCheckCursor_NotInstalled(t *testing.T) {
 		}
 	}()
 
-	// CheckCursor calls os.Exit(1) when not installed
-	// We can't easily test that, but we document expected behavior
+	if err := CheckCursor(); err == nil {
+		t.Fatal("CheckCursor should return error when not installed")
+	}
 }
 
 func TestCheckCursor_Installed(t *testing.T) {

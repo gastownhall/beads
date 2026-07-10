@@ -97,6 +97,157 @@ func TestRunInTransactionWispCreatePersistsInitialSideTables(t *testing.T) {
 	}
 }
 
+func TestRunInTransactionCloseIssueEmitsEvent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:          "test-tx-close-event",
+		Title:       "transaction close emits event",
+		Description: "exercise doltTransaction.CloseIssue",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	if err := store.RunInTransaction(ctx, "test: close emits event", func(tx storage.Transaction) error {
+		return tx.CloseIssue(ctx, issue.ID, "done", "tester", "session-1")
+	}); err != nil {
+		t.Fatalf("RunInTransaction CloseIssue: %v", err)
+	}
+
+	assertCommittedEventCount(ctx, t, store.db, issue.ID, types.EventClosed, 1)
+}
+
+func TestRunInTransactionAlreadyClosedDoesNotCommitUnrelatedEvent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:          "test-tx-close-noop-event",
+		Title:       "transaction no-op close leaves events alone",
+		Description: "exercise doltTransaction.CloseIssue already-closed path",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.CloseIssue(ctx, issue.ID, "done", "tester", "session-1"); err != nil {
+		t.Fatalf("CloseIssue seed: %v", err)
+	}
+
+	const strayComment = "uncommitted stray event"
+	if _, err := store.db.ExecContext(ctx,
+		"INSERT INTO events (id, issue_id, event_type, actor, comment) VALUES (?, ?, ?, ?, ?)",
+		issueops.NewEventID(), issue.ID, types.EventCommented, "tester", strayComment,
+	); err != nil {
+		t.Fatalf("insert stray event: %v", err)
+	}
+
+	if err := store.RunInTransaction(ctx, "test: already closed does not stage events", func(tx storage.Transaction) error {
+		return tx.CloseIssue(ctx, issue.ID, "still done", "tester", "session-2")
+	}); err != nil {
+		t.Fatalf("RunInTransaction CloseIssue already closed: %v", err)
+	}
+
+	var got int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ? AND comment = ?",
+		issue.ID, types.EventCommented, strayComment,
+	).Scan(&got); err != nil {
+		t.Fatalf("count committed stray events: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("committed stray event count = %d, want 0", got)
+	}
+	assertCommittedEventCount(ctx, t, store.db, issue.ID, types.EventClosed, 1)
+}
+
+func TestRunInTransactionAddLabelEmitsEvent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:          "test-tx-add-label-event",
+		Title:       "transaction add label emits event",
+		Description: "exercise doltTransaction.AddLabel",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	if err := store.RunInTransaction(ctx, "test: add label emits event", func(tx storage.Transaction) error {
+		return tx.AddLabel(ctx, issue.ID, "triaged", "tester")
+	}); err != nil {
+		t.Fatalf("RunInTransaction AddLabel: %v", err)
+	}
+
+	assertCommittedEventCount(ctx, t, store.db, issue.ID, types.EventLabelAdded, 1)
+}
+
+func TestRunInTransactionRemoveLabelEmitsEvent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:          "test-tx-remove-label-event",
+		Title:       "transaction remove label emits event",
+		Description: "exercise doltTransaction.RemoveLabel",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.AddLabel(ctx, issue.ID, "triaged", "tester"); err != nil {
+		t.Fatalf("AddLabel seed: %v", err)
+	}
+
+	if err := store.RunInTransaction(ctx, "test: remove label emits event", func(tx storage.Transaction) error {
+		return tx.RemoveLabel(ctx, issue.ID, "triaged", "tester")
+	}); err != nil {
+		t.Fatalf("RunInTransaction RemoveLabel: %v", err)
+	}
+
+	assertCommittedEventCount(ctx, t, store.db, issue.ID, types.EventLabelRemoved, 1)
+}
+
+func assertCommittedEventCount(ctx context.Context, t *testing.T, db *sql.DB, issueID string, eventType types.EventType, want int) {
+	t.Helper()
+
+	var got int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ?",
+		issueID, eventType,
+	).Scan(&got); err != nil {
+		t.Fatalf("count committed %s events for %s: %v", eventType, issueID, err)
+	}
+	if got != want {
+		t.Fatalf("committed %s event count for %s = %d, want %d", eventType, issueID, got, want)
+	}
+}
+
 func TestRunInTransactionCreateIssuesMixedWispReadYourWrites(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

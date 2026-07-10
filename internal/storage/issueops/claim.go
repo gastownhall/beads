@@ -28,7 +28,7 @@ type ClaimResult struct {
 // The caller is responsible for Dolt versioning (DOLT_ADD/COMMIT) if needed.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func ClaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) (*ClaimResult, error) {
+func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*ClaimResult, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 
@@ -40,6 +40,13 @@ func ClaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) (*
 
 	now := time.Now().UTC()
 
+	// Stamp a lease on the claim: lease_expires_at = now + TTL, heartbeat_at =
+	// now, and a fresh row_lock (see lease.go). The lease is what makes a claim
+	// recoverable — a worker that dies stops heartbeating and bd reclaim later
+	// reverts the issue. row_lock here also forces a concurrent reclaim/heartbeat
+	// to conflict rather than silently cell-merge.
+	leaseClause, leaseArgs := leaseSetClause(now, leaseTTL(ctx))
+
 	// Conditional UPDATE: only succeeds while the issue is still claimable.
 	// Also set started_at on first transition to in_progress (GH#2796); preserve
 	// any existing value so re-claims don't overwrite the original start time.
@@ -47,17 +54,21 @@ func ClaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) (*
 		result sql.Result
 	)
 	if oldIssue.StartedAt == nil {
+		args := append([]interface{}{actor, now, now}, leaseArgs...)
+		args = append(args, id, actor)
 		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?
+			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
 			WHERE id = ? AND status = 'open' AND (assignee = '' OR assignee IS NULL OR assignee = ?)
-		`, issueTable), actor, now, now, id, actor)
+		`, issueTable, leaseClause), args...)
 	} else {
+		args := append([]interface{}{actor, now}, leaseArgs...)
+		args = append(args, id, actor)
 		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?
+			SET assignee = ?, status = 'in_progress', updated_at = ?, %s
 			WHERE id = ? AND status = 'open' AND (assignee = '' OR assignee IS NULL OR assignee = ?)
-		`, issueTable), actor, now, id, actor)
+		`, issueTable, leaseClause), args...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to claim issue: %w", err)
@@ -88,6 +99,9 @@ func ClaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) (*
 			return &ClaimResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
 		}
 		if assignee != "" && assignee != actor {
+			if currentStatus == types.StatusOpen {
+				return nil, fmt.Errorf("issue already assigned to %q. Use `bd unclaim %s` to release it before re-claiming", assignee, id)
+			}
 			return nil, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, assignee)
 		}
 		return nil, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, currentStatus)
@@ -113,7 +127,7 @@ func ClaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string) (*
 // ready issue can be claimed.
 func ClaimReadyIssueInTx(
 	ctx context.Context,
-	tx *sql.Tx,
+	tx DBTX,
 	filter types.WorkFilter,
 	actor string,
 ) (*types.Issue, error) {

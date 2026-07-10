@@ -53,7 +53,7 @@ Examples:
   bd dolt test
 
 ```
-bd dolt
+bd dolt [flags]
 ```
 
 ### bd dolt clean-databases
@@ -61,7 +61,7 @@ bd dolt
 Identify and drop leftover test and agent databases that accumulate
 on the shared Dolt server from interrupted test runs and terminated agents.
 
-Stale database prefixes: testdb_*, doctest_*, doctortest_*, beads_pt*, beads_vr*, beads_t*
+Stale database prefixes: testdb_*, beads_test*, beads_pt*, beads_vr*, doctest_*, doctortest_*, benchdb_*
 
 These waste server memory and can degrade performance under concurrent load.
 Use --dry-run to see what would be dropped without actually dropping.
@@ -113,7 +113,7 @@ project's Dolt data directory are eligible for cleanup. Other projects'
 servers are preserved.
 
 ```
-bd dolt killall
+bd dolt killall [flags]
 ```
 
 ### bd dolt pull
@@ -172,7 +172,7 @@ Subcommands:
   remove &lt;name&gt;      Remove a remote
 
 ```
-bd dolt remote
+bd dolt remote [flags]
 ```
 
 #### bd dolt remote add
@@ -180,7 +180,13 @@ bd dolt remote
 Add a Dolt remote
 
 ```
-bd dolt remote add <name> <url>
+bd dolt remote add <name> <url> [flags]
+```
+
+**Flags:**
+
+```
+      --allow-git-origin   Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)
 ```
 
 #### bd dolt remote list
@@ -188,7 +194,7 @@ bd dolt remote add <name> <url>
 List configured Dolt remotes
 
 ```
-bd dolt remote list
+bd dolt remote list [flags]
 ```
 
 #### bd dolt remote remove
@@ -196,7 +202,7 @@ bd dolt remote list
 Remove a Dolt remote
 
 ```
-bd dolt remote remove <name>
+bd dolt remote remove <name> [flags]
 ```
 
 ### bd dolt set
@@ -233,7 +239,7 @@ bd dolt set <key> <value> [flags]
 Show current Dolt configuration with connection status
 
 ```
-bd dolt show
+bd dolt show [flags]
 ```
 
 ### bd dolt start
@@ -247,7 +253,7 @@ The server auto-starts transparently when needed, so manual start is rarely
 required. Use this command for explicit control or diagnostics.
 
 ```
-bd dolt start
+bd dolt start [flags]
 ```
 
 ### bd dolt status
@@ -257,13 +263,13 @@ Show the status of the Dolt engine for the current project.
 In embedded mode, reports that the Dolt engine runs in-process and shows
 the on-disk data directory. For beads-managed (local) servers, displays
 PID, port, and data directory from the local PID file. For externally-
-managed servers — either a remote dolt_server_host or a local server
-managed outside bd (dolt.auto-start: false, e.g. an orchestrator-shared
-sql-server) — pings the configured endpoint via SQL and reports
-reachability, server version, and database.
+managed servers — a shared server (dolt.shared-server: true), a remote
+dolt_server_host, or a local server managed outside bd (dolt.auto-start:
+false, e.g. an orchestrator-shared sql-server) — pings the configured
+endpoint via SQL and reports reachability, server version, and database.
 
 ```
-bd dolt status
+bd dolt status [flags]
 ```
 
 ### bd dolt stop
@@ -294,5 +300,5 @@ This verifies that:
 Use this before switching to server mode to ensure the server is running.
 
 ```
-bd dolt test
+bd dolt test [flags]
 ```

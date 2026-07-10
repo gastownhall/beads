@@ -28,6 +28,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -264,7 +265,7 @@ func openWorkspace(ctx context.Context, cfg config, dir string) (*workspace, err
 }
 
 func isPortOpen(port int) bool {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second) // #nosec G704 -- loopback probe of a locally started dolt server; not attacker-controlled
 	if err != nil {
 		return false
 	}
@@ -286,7 +287,7 @@ func createWorkspace(ctx context.Context, cfg config) (*workspace, error) {
 	defer cancel()
 
 	fmt.Printf("initializing server workspace timeout=%s\n", initTimeout)
-	cmd := exec.CommandContext(initCtx, cfg.BDPath,
+	cmd := exec.CommandContext(initCtx, cfg.BDPath, // #nosec G702 -- fixed subcommand args; cfg.BDPath is an operator-supplied local binary path, not attacker input
 		"init",
 		"--server",
 		"--prefix=perf",
@@ -324,7 +325,7 @@ func startWorkspaceDolt(ctx context.Context, cfg config, dir string) error {
 	startCtx, cancel := context.WithTimeout(ctx, startTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(startCtx, cfg.BDPath, "dolt", "start")
+	cmd := exec.CommandContext(startCtx, cfg.BDPath, "dolt", "start") // #nosec G702 -- fixed subcommand args; cfg.BDPath is an operator-supplied local binary path, not attacker input
 	cmd.Dir = dir
 	cmd.Env = subprocessEnv("BD_NON_INTERACTIVE=1")
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -519,14 +520,14 @@ func insertDependencies(ctx context.Context, db *sql.DB, count, issueCount int) 
 		}
 		var q strings.Builder
 		q.WriteString(`INSERT INTO dependencies
-			(issue_id, depends_on_issue_id, type, created_by, metadata)
+			(id, issue_id, depends_on_issue_id, type, created_by, metadata)
 			VALUES `)
-		args := make([]any, 0, (end-start)*5)
+		args := make([]any, 0, (end-start)*6)
 		for i := start; i < end; i++ {
 			if i > start {
 				q.WriteByte(',')
 			}
-			q.WriteString("(?,?,?,?,?)")
+			q.WriteString("(?,?,?,?,?,?)")
 			issueID, dependsOnID := dependencyEndpoints(i, issueCount, 1000, 300)
 			depType := "parent-child"
 			if i < 20 || (i >= 40 && i < 60) {
@@ -535,7 +536,7 @@ func insertDependencies(ctx context.Context, db *sql.DB, count, issueCount int) 
 			} else if i < 5000 {
 				depType = "blocks"
 			}
-			args = append(args, issueID, dependsOnID, depType, "bench", "{}")
+			args = append(args, depid.New(issueID, dependsOnID), issueID, dependsOnID, depType, "bench", "{}")
 		}
 		if _, err := db.ExecContext(ctx, q.String(), args...); err != nil {
 			return fmt.Errorf("insert dependencies %d-%d: %w", start, end, err)
@@ -583,20 +584,20 @@ func insertDepAddChains(ctx context.Context, db *sql.DB, ops, depth int) error {
 		}
 		var q strings.Builder
 		q.WriteString(`INSERT INTO dependencies
-			(issue_id, depends_on_issue_id, type, created_by, metadata)
+			(id, issue_id, depends_on_issue_id, type, created_by, metadata)
 			VALUES `)
-		args := make([]any, 0, (end-start)*5)
+		args := make([]any, 0, (end-start)*6)
 		for i := start; i < end; i++ {
 			if i > start {
 				q.WriteByte(',')
 			}
-			q.WriteString("(?,?,?,?,?)")
+			q.WriteString("(?,?,?,?,?,?)")
 			op := i / depth
 			step := i % depth
 			base := depBase(op, depth)
 			issueID := depIssueID(base + 1 + step)
 			dependsOnID := depIssueID(base + 2 + step)
-			args = append(args, issueID, dependsOnID, "blocks", "bench", "{}")
+			args = append(args, depid.New(issueID, dependsOnID), issueID, dependsOnID, "blocks", "bench", "{}")
 		}
 		if _, err := db.ExecContext(ctx, q.String(), args...); err != nil {
 			return fmt.Errorf("insert dep-add chains %d-%d: %w", start, end, err)

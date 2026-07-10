@@ -12,19 +12,29 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
+var restoreApply bool
+
 var restoreCmd = &cobra.Command{
-	Use:     "restore <issue-id>",
-	GroupID: "sync",
-	Short:   "Restore full history of a compacted issue from Dolt history",
-	Long: `Restore full history of a compacted issue from Dolt version history.
+	Use:           "restore <issue-id>",
+	GroupID:       "sync",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	Short:         "Restore the pre-compaction content of a compacted issue",
+	Long: `Restore the pre-compaction content of a compacted issue.
 
-When an issue is compacted, its description and notes are truncated.
-This command queries Dolt's history tables to find the pre-compaction
-version and displays the full issue content.
+When an issue is compacted, its description/design/notes/acceptance criteria
+are summarized and the originals are archived to a compaction snapshot. This
+command recovers that original content.
 
-This is read-only and does not modify the database.`,
+By default it is read-only: it displays the archived content without modifying
+the database. Pass --apply to write the original content back into the issue
+and step its compaction level back down.
+
+If no archived snapshot exists (e.g. the issue was compacted by an older bd
+before snapshot archiving), restore falls back to a best-effort reconstruction
+from Dolt version history, which can only be displayed, not applied.`,
 	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		issueID := args[0]
 		ctx := rootCtx
 
@@ -36,27 +46,78 @@ This is read-only and does not modify the database.`,
 			} else {
 				fmt.Fprintf(os.Stderr, "Error: issue '%s' not found: %v\n", issueID, err)
 			}
-			os.Exit(1)
+			return SilentExit()
 		}
 
 		// Check if issue is compacted
 		if issue.CompactionLevel == 0 {
 			fmt.Fprintf(os.Stderr, "Error: issue %s is not compacted\n", issueID)
 			fmt.Fprintf(os.Stderr, "Hint: only compacted issues need restoration\n")
-			os.Exit(1)
+			return SilentExit()
+		}
+
+		// Prefer the archived snapshot: it is the authoritative pre-compaction
+		// copy and the only source that can be safely written back.
+		snap, err := store.GetCompactionSnapshot(ctx, issueID)
+		if err != nil {
+			return HandleError("failed to read compaction snapshot: %v", err)
+		}
+
+		if restoreApply {
+			if snap == nil {
+				fmt.Fprintf(os.Stderr, "Error: no archived snapshot for %s; cannot safely restore content\n", issueID)
+				fmt.Fprintf(os.Stderr, "Hint: this issue was compacted before snapshot archiving existed.\n")
+				fmt.Fprintf(os.Stderr, "      Run 'bd restore %s' (without --apply) to view the best-effort\n", issueID)
+				fmt.Fprintf(os.Stderr, "      version reconstructed from Dolt history.\n")
+				return SilentExit()
+			}
+			applied, err := store.RestoreFromSnapshot(ctx, issueID)
+			if err != nil {
+				return HandleError("failed to restore issue: %v", err)
+			}
+			if applied == nil {
+				return HandleError("no archived snapshot for %s", issueID)
+			}
+			restored, err := store.GetIssue(ctx, issueID)
+			if err != nil {
+				return HandleError("restored, but failed to re-read issue: %v", err)
+			}
+			if jsonOutput {
+				if err := outputJSON(restored); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
+				return nil
+			}
+			fmt.Printf("%s Restored %s from archived snapshot (compaction level %d → %d)\n",
+				ui.RenderPass("✓"), issueID, issue.CompactionLevel, restored.CompactionLevel)
+			return nil
+		}
+
+		// Read-only display path. Prefer the archived snapshot; fall back to the
+		// Dolt-history heuristic when no snapshot exists.
+		if snap != nil {
+			view := snapshotView(issue, snap)
+			if jsonOutput {
+				if err := outputJSON(view); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				}
+			} else {
+				displayRestoredIssue(view, "archived snapshot")
+				fmt.Printf("%s\n", ui.RenderMuted("Run 'bd restore "+issueID+" --apply' to write this content back."))
+			}
+			return nil
 		}
 
 		// Query Dolt history for the pre-compaction version
 		history, err := store.History(ctx, issueID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: failed to query history: %v\n", err)
-			os.Exit(1)
+			return HandleError("failed to query history: %v", err)
 		}
 
 		if len(history) == 0 {
 			fmt.Fprintf(os.Stderr, "Error: no history found for issue %s\n", issueID)
 			fmt.Fprintf(os.Stderr, "Hint: issue may have been compacted before Dolt history was available\n")
-			os.Exit(1)
+			return SilentExit()
 		}
 
 		// Find the pre-compaction version: the history entry with the most content.
@@ -74,15 +135,36 @@ This is read-only and does not modify the database.`,
 		if best == nil || bestSize <= issueContentSize(issue) {
 			fmt.Fprintf(os.Stderr, "Error: no pre-compaction version found in Dolt history\n")
 			fmt.Fprintf(os.Stderr, "Hint: issue may have been compacted before Dolt history was available\n")
-			os.Exit(1)
+			return SilentExit()
 		}
 
 		if jsonOutput {
-			outputJSON(best.Issue)
+			if err := outputJSON(best.Issue); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
 		} else {
-			displayRestoredIssue(best.Issue, best.CommitHash)
+			hashDisplay := best.CommitHash
+			if len(hashDisplay) > 8 {
+				hashDisplay = hashDisplay[:8]
+			}
+			displayRestoredIssue(best.Issue, "Dolt commit "+hashDisplay)
 		}
+		return nil
 	},
+}
+
+// snapshotView returns a copy of the current issue with its text content
+// overlaid by the archived pre-compaction snapshot, for read-only display.
+func snapshotView(issue *types.Issue, snap *types.IssueSnapshot) *types.Issue {
+	view := *issue
+	if snap.Title != "" {
+		view.Title = snap.Title
+	}
+	view.Description = snap.Description
+	view.Design = snap.Design
+	view.Notes = snap.Notes
+	view.AcceptanceCriteria = snap.AcceptanceCriteria
+	return &view
 }
 
 // issueContentSize returns the total text content size of an issue.
@@ -92,16 +174,15 @@ func issueContentSize(issue *types.Issue) int {
 
 func init() {
 	restoreCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output restore results in JSON format")
+	restoreCmd.Flags().BoolVar(&restoreApply, "apply", false, "Write the restored content back into the issue (default: display only)")
 	rootCmd.AddCommand(restoreCmd)
 }
 
-// displayRestoredIssue displays the restored issue in a readable format
-func displayRestoredIssue(issue *types.Issue, commitHash string) {
-	hashDisplay := commitHash
-	if len(hashDisplay) > 8 {
-		hashDisplay = hashDisplay[:8]
-	}
-	fmt.Printf("\n%s %s (restored from Dolt commit %s)\n", ui.RenderAccent("📜"), ui.RenderBold(issue.ID), ui.RenderWarn(hashDisplay))
+// displayRestoredIssue displays the restored issue in a readable format.
+// provenance describes where the content came from (e.g. "archived snapshot"
+// or "Dolt commit abc12345").
+func displayRestoredIssue(issue *types.Issue, provenance string) {
+	fmt.Printf("\n%s %s (restored from %s)\n", ui.RenderAccent("📜"), ui.RenderBold(issue.ID), ui.RenderWarn(provenance))
 	fmt.Printf("%s\n\n", ui.RenderBold(issue.Title))
 
 	if issue.Description != "" {

@@ -8,18 +8,32 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
 )
 
 var showCmd = &cobra.Command{
-	Use:     "show [id...] [--id=<id>...] [--current]",
-	Aliases: []string{"view"},
-	GroupID: "issues",
-	Short:   "Show issue details",
-	Args:    cobra.ArbitraryArgs, // Allow zero positional args when --id is used
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "show [id...] [--id=<id>...] [--current]",
+	Aliases:       []string{"view"},
+	GroupID:       "issues",
+	Short:         "Show issue details",
+	Args:          cobra.ArbitraryArgs, // Allow zero positional args when --id is used
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("show")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			return runShowProxiedServer(cmd, rootCtx, args)
+		}
+
 		showThread, _ := cmd.Flags().GetBool("thread")
 		shortMode, _ := cmd.Flags().GetBool("short")
 		longMode, _ := cmd.Flags().GetBool("long")
@@ -46,69 +60,54 @@ var showCmd = &cobra.Command{
 		// This allows IDs that look like flags (e.g., --xyz or gt--abc) to be passed safely
 		args = append(args, idFlags...)
 
-		// Handle --current: resolve the active issue (GH#2184)
 		if currentMode {
 			if len(args) > 0 {
-				FatalErrorRespectJSON("--current cannot be combined with explicit issue IDs")
+				return HandleErrorRespectJSON("--current cannot be combined with explicit issue IDs")
 			}
 			currentID := resolveCurrentIssueID(ctx)
 			if currentID == "" {
-				FatalErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
+				return HandleErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
 			}
 			args = []string{currentID}
 		}
 
-		// Validate that at least one ID is provided
 		if len(args) == 0 {
-			FatalErrorRespectJSON("at least one issue ID is required (use positional args, --id flag, or --current)")
+			return HandleErrorRespectJSON("at least one issue ID is required (use positional args, --id flag, or --current)")
 		}
 
-		// Handle --as-of flag: show issue at a specific point in history
 		if asOfRef != "" {
-			showIssueAsOf(ctx, args, asOfRef, shortMode)
-			return
+			return showIssueAsOf(ctx, args, asOfRef, shortMode)
 		}
 
-		// Handle --watch mode (GH#654)
-		// Watch mode requires direct store access for file watching
 		if watchMode {
 			if err := ensureDirectMode("watch mode requires direct database access"); err != nil {
-				FatalErrorRespectJSON("%v", err)
+				return HandleErrorRespectJSON("%v", err)
 			}
 			if len(args) != 1 {
-				FatalErrorRespectJSON("watch mode requires exactly one issue ID")
+				return HandleErrorRespectJSON("watch mode requires exactly one issue ID")
 			}
 			watchIssue(ctx, args[0])
-			return
+			return nil
 		}
 
-		// Note: Direct mode uses resolveAndGetIssueWithRouting for prefix-based routing
-
-		// Handle --thread flag: show full conversation thread
 		if showThread {
 			if len(args) > 0 {
-				// Direct mode - resolve first arg with routing
 				result, err := resolveAndGetIssueWithRouting(ctx, store, args[0])
 				if result != nil {
 					defer result.Close()
 				}
 				if err == nil && result != nil && result.ResolvedID != "" {
-					showMessageThread(ctx, result.ResolvedID, jsonOutput)
-					return
+					return showMessageThread(ctx, result.ResolvedID, jsonOutput)
 				}
 			}
 		}
 
-		// Handle --refs flag: show issues that reference this issue
 		if showRefs {
-			showIssueRefs(ctx, args, jsonOutput)
-			return
+			return showIssueRefs(ctx, args, jsonOutput)
 		}
 
-		// Handle --children flag: show only children of this issue
 		if showChildren {
-			showIssueChildren(ctx, args, jsonOutput, shortMode)
-			return
+			return showIssueChildren(ctx, args, jsonOutput, shortMode)
 		}
 
 		// Direct mode - use routed resolution for cross-repo lookups
@@ -411,24 +410,25 @@ var showCmd = &cobra.Command{
 
 		if jsonOutput {
 			if len(allDetails) > 0 {
-				outputJSON(allDetails)
+				if jerr := outputJSON(allDetails); jerr != nil {
+					return jerr
+				}
 			} else {
-				// No issues found - exit non-zero with structured JSON error
-				// so downstream consumers (e.g., gt bd move) get a proper error
-				// instead of empty stdout causing "unexpected end of JSON input"
-				FatalErrorRespectJSON("no issues found matching the provided IDs")
+				return HandleErrorRespectJSON("no issues found matching the provided IDs")
 			}
 		} else if foundCount > 0 {
-			// Show tip after successful show (non-JSON mode)
 			maybeShowTip(store)
 		} else {
-			os.Exit(1)
+			if len(args) > 0 {
+				SetLastTouchedID(args[0])
+			}
+			return SilentExit()
 		}
 
-		// Track first shown issue as last touched
 		if len(args) > 0 {
 			SetLastTouchedID(args[0])
 		}
+		return nil
 	},
 }
 

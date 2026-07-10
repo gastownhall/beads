@@ -3,7 +3,6 @@ package db
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -30,6 +29,16 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("EmptyUpdatesIsNoop", s.issueUpdateEmpty)
 		s.Run("NormalizesStatusType", s.issueUpdateStatusType)
 		s.Run("NormalizesTimestampToUTC", s.issueUpdateNormalizesTimestamp)
+		s.Run("MissingIDWithStatusChangeReturnsErrNoRows", s.issueUpdateMissingIDWithStatus)
+	})
+	s.Run("Claim", func() {
+		s.Run("FreshOpenSetsAssigneeAndStartedAt", s.issueClaimFresh)
+		s.Run("IdempotentReclaimBySameActor", s.issueClaimIdempotent)
+		s.Run("PreservesStartedAtOnReclaim", s.issueClaimPreservesStartedAt)
+		s.Run("ConflictReturnsForeignAssignee", s.issueClaimConflict)
+		s.Run("NotClaimableWhenClosed", s.issueClaimClosed)
+		s.Run("EmptyIDReturnsError", s.issueClaimEmptyID)
+		s.Run("RecordsClaimedEvent", s.issueClaimRecordsEvent)
 	})
 	s.Run("Get", func() {
 		s.Run("MissingIDReturnsErrNoRows", s.issueGetMissing)
@@ -39,19 +48,10 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("EmptySliceReturnsNil", s.issueGetByIDsEmpty)
 		s.Run("ReturnsOnlyExistingRows", s.issueGetByIDsPartial)
 	})
-	s.Run("Search", func() {
-		s.Run("NoFilterReturnsAll", s.issueSearchAll)
-		s.Run("FilterByStatus", s.issueSearchByStatus)
-		s.Run("FilterByIssueType", s.issueSearchByIssueType)
-		s.Run("FilterByIDPrefix", s.issueSearchByIDPrefix)
-		s.Run("FilterByIDs", s.issueSearchByIDs)
-		s.Run("LimitRespected", s.issueSearchLimit)
-	})
 	s.Run("Wisp", func() {
 		s.Run("InsertRoutesToWispsTable", s.issueWispInsertRouting)
 		s.Run("GetReadsFromWispsTable", s.issueWispGet)
 		s.Run("UpdateWritesToWispsTable", s.issueWispUpdate)
-		s.Run("SearchReadsFromWispsTable", s.issueWispSearch)
 		s.Run("CrossRoutedLookupsAreEmpty", s.issueWispIsolated)
 	})
 	s.Run("Exists", func() {
@@ -316,85 +316,6 @@ func (s *testSuite) issueGetByIDsPartial() {
 	s.True(ids["bd-pres-2"])
 }
 
-func (s *testSuite) issueSearchAll() {
-	r := s.issueRepo()
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-srch-1", "a"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-srch-2", "b"), "tester", domain.InsertIssueOpts{}))
-
-	out, err := r.Search(s.Ctx(), types.IssueFilter{}, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.GreaterOrEqual(len(out), 2)
-}
-
-func (s *testSuite) issueSearchByStatus() {
-	r := s.issueRepo()
-
-	open1 := newTestIssue("bd-stat-open", "open one")
-	s.Require().NoError(r.Insert(s.Ctx(), open1, "tester", domain.InsertIssueOpts{}))
-
-	closed := newTestIssue("bd-stat-closed", "closed one")
-	closed.Status = types.StatusClosed
-	s.Require().NoError(r.Insert(s.Ctx(), closed, "tester", domain.InsertIssueOpts{}))
-
-	// Scope by ID prefix — earlier subtests share the DB state and may have
-	// created closed rows.
-	closedStatus := types.StatusClosed
-	out, err := r.Search(s.Ctx(), types.IssueFilter{Status: &closedStatus, IDPrefix: "bd-stat-"}, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.Len(out, 1)
-	s.Equal("bd-stat-closed", out[0].ID)
-}
-
-func (s *testSuite) issueSearchByIssueType() {
-	r := s.issueRepo()
-
-	bug := newTestIssue("bd-type-bug", "bug")
-	bug.IssueType = types.TypeBug
-	s.Require().NoError(r.Insert(s.Ctx(), bug, "tester", domain.InsertIssueOpts{}))
-
-	task := newTestIssue("bd-type-task", "task")
-	s.Require().NoError(r.Insert(s.Ctx(), task, "tester", domain.InsertIssueOpts{}))
-
-	// Scope by ID prefix to isolate from earlier subtests.
-	bugType := types.TypeBug
-	out, err := r.Search(s.Ctx(), types.IssueFilter{IssueType: &bugType, IDPrefix: "bd-type-"}, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.Len(out, 1)
-	s.Equal("bd-type-bug", out[0].ID)
-}
-
-func (s *testSuite) issueSearchByIDPrefix() {
-	r := s.issueRepo()
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-pfx-a", "a"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-pfx-b", "b"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("other-1", "other"), "tester", domain.InsertIssueOpts{}))
-
-	out, err := r.Search(s.Ctx(), types.IssueFilter{IDPrefix: "bd-pfx-"}, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.Len(out, 2)
-}
-
-func (s *testSuite) issueSearchByIDs() {
-	r := s.issueRepo()
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-ids-1", "a"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-ids-2", "b"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-ids-3", "c"), "tester", domain.InsertIssueOpts{}))
-
-	out, err := r.Search(s.Ctx(), types.IssueFilter{IDs: []string{"bd-ids-1", "bd-ids-3"}}, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.Len(out, 2)
-}
-
-func (s *testSuite) issueSearchLimit() {
-	r := s.issueRepo()
-	for i := 0; i < 5; i++ {
-		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(fmt.Sprintf("bd-lim-%d", i), "x"), "tester", domain.InsertIssueOpts{}))
-	}
-	out, err := r.Search(s.Ctx(), types.IssueFilter{Limit: 3, IDPrefix: "bd-lim-"}, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.Len(out, 3)
-}
-
 func (s *testSuite) issueWispInsertRouting() {
 	r := s.issueRepo()
 	wisp := newTestIssue("bd-iss-wisp-1", "wisp issue")
@@ -447,21 +368,6 @@ func (s *testSuite) issueWispUpdate() {
 		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		"bd-iss-wisp-upd", string(types.EventUpdated)).Scan(&permEvtCount))
 	s.Equal(0, permEvtCount)
-}
-
-func (s *testSuite) issueWispSearch() {
-	r := s.issueRepo()
-	for i := 0; i < 3; i++ {
-		w := newTestIssue(fmt.Sprintf("bd-iss-wsrch-%d", i), "x")
-		w.Ephemeral = true
-		s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
-	}
-	out, err := r.Search(s.Ctx(),
-		types.IssueFilter{IDPrefix: "bd-iss-wsrch-"},
-		domain.IssueTableOpts{UseWispsTable: true},
-	)
-	s.Require().NoError(err)
-	s.Len(out, 3)
 }
 
 func (s *testSuite) issueWispIsolated() {
@@ -630,4 +536,119 @@ func (s *testSuite) issueNextCounterIDEmptyPrefix() {
 	_, err := r.NextCounterID(s.Ctx(), "")
 	s.Require().Error(err)
 	s.Contains(err.Error(), "prefix must not be empty")
+}
+
+func (s *testSuite) issueUpdateMissingIDWithStatus() {
+	r := s.issueRepo()
+	err := r.Update(s.Ctx(), "bd-status-missing",
+		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{})
+	s.Require().Error(err)
+	s.True(errors.Is(err, sql.ErrNoRows), "expected sql.ErrNoRows, got %v", err)
+}
+
+func (s *testSuite) issueClaimFresh() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-fresh", "x"), "tester", domain.InsertIssueOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-fresh", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.True(res.Updated, "fresh open+unassigned must claim")
+	s.True(res.StartedAtWasZero, "fresh row has no prior started_at")
+	s.Equal("alice", res.CurrentAssignee)
+	s.Equal(types.StatusInProgress, res.CurrentStatus)
+	s.Require().NotNil(res.OldIssue)
+	s.Equal(types.StatusOpen, res.OldIssue.Status)
+
+	out, err := r.Get(s.Ctx(), "bd-claim-fresh", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal("alice", out.Assignee)
+	s.Equal(types.StatusInProgress, out.Status)
+	s.Require().NotNil(out.StartedAt, "first claim must set started_at")
+}
+
+func (s *testSuite) issueClaimIdempotent() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-idem", "x"), "tester", domain.InsertIssueOpts{}))
+	_, err := r.Claim(s.Ctx(), "bd-claim-idem", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-idem", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(res.Updated, "re-claim by same actor must not flip rows")
+	s.Equal("alice", res.CurrentAssignee)
+	s.Equal(types.StatusInProgress, res.CurrentStatus)
+}
+
+func (s *testSuite) issueClaimPreservesStartedAt() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-sa", "x"), "tester", domain.InsertIssueOpts{}))
+
+	res1, err := r.Claim(s.Ctx(), "bd-claim-sa", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().True(res1.Updated)
+
+	first, err := r.Get(s.Ctx(), "bd-claim-sa", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().NotNil(first.StartedAt)
+	originalStart := *first.StartedAt
+
+	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-sa",
+		map[string]any{"status": string(types.StatusOpen)}, "tester", domain.IssueTableOpts{}))
+
+	res2, err := r.Claim(s.Ctx(), "bd-claim-sa", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.True(res2.Updated)
+	s.False(res2.StartedAtWasZero, "second claim must see prior started_at")
+
+	second, err := r.Get(s.Ctx(), "bd-claim-sa", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().NotNil(second.StartedAt)
+	s.Equal(originalStart.Unix(), second.StartedAt.Unix(), "started_at must not be overwritten")
+}
+
+func (s *testSuite) issueClaimConflict() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-conflict", "x"), "tester", domain.InsertIssueOpts{}))
+	_, err := r.Claim(s.Ctx(), "bd-claim-conflict", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-conflict", "bob", domain.IssueTableOpts{})
+	s.Require().NoError(err, "conflict surfaces via Updated=false, not as a SQL error")
+	s.False(res.Updated)
+	s.Equal("alice", res.CurrentAssignee, "must surface the existing assignee for use-case error wrapping")
+	s.Equal(types.StatusInProgress, res.CurrentStatus)
+}
+
+func (s *testSuite) issueClaimClosed() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-closed", "x"), "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-closed",
+		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-closed", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(res.Updated)
+	s.Equal(types.StatusClosed, res.CurrentStatus, "closed issues are not claimable; CurrentStatus drives ErrNotClaimable in the use case")
+	s.Equal("", res.CurrentAssignee)
+}
+
+func (s *testSuite) issueClaimEmptyID() {
+	_, err := s.issueRepo().Claim(s.Ctx(), "", "alice", domain.IssueTableOpts{})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "id must not be empty")
+}
+
+func (s *testSuite) issueClaimRecordsEvent() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-evt", "x"), "tester", domain.InsertIssueOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-evt", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().True(res.Updated)
+
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-claim-evt", "claimed").Scan(&count))
+	s.Equal(1, count, "successful claim must record exactly one 'claimed' event")
 }

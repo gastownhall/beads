@@ -29,6 +29,32 @@ type cacheEntry struct {
 // This prevents redundant engine initializations when multiple code paths open
 // connectors against the same data directory in the same process.
 func Open(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openCached(ctx, beadsDir, database, branch, openStrict)
+}
+
+// OpenForReadOnlyCommand opens like Open, except that a #4259 remote-migrate
+// gate refusal skips the pending migrations with a stderr warning instead of
+// failing the open (bd-578h9.5): the gate exists to stop in-place migration,
+// not reads, and server mode's read-only opens already skip migration. The
+// returned store is otherwise a normal writable store (read-only commands
+// can still write incidentally, e.g. the post-command autocommit net).
+func OpenForReadOnlyCommand(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openCached(ctx, beadsDir, database, branch, openReadOnlyCommand)
+}
+
+// OpenForWorkingSetReconcile opens like Open, except that a schema.
+// DirtyTablesError refusal skips the pending migrations with a stderr
+// warning instead of failing the open (#4566): commands whose entire purpose
+// is to reconcile the Dolt working set (bd dolt commit, bd vc commit) must be
+// able to open the store even when pending migrations touch dirty tables -
+// otherwise the commit that would clear the dirty state and unblock the
+// migration can never run. The returned store is otherwise a normal writable
+// store.
+func OpenForWorkingSetReconcile(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openCached(ctx, beadsDir, database, branch, openWorkingSetReconcile)
+}
+
+func openCached(ctx context.Context, beadsDir, database, branch string, intent openIntent) (*EmbeddedDoltStore, error) {
 	key, err := cacheKey(beadsDir)
 	if err != nil {
 		return nil, err
@@ -36,6 +62,18 @@ func Open(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDolt
 
 	cacheMu.Lock()
 	if entry, ok := cache[key]; ok {
+		// Cache hit: the requested intent is ignored - the store keeps
+		// whatever intent it was opened with on the slow path below. This is
+		// safe today because intent is derived once per process from the
+		// command classification (isReadOnlyCommand / isWorkingSetReconcileCommand
+		// in cmd/bd/main.go), so a single process never opens the same data
+		// directory under two different intents, and autoMigrateOnVersionBump
+		// (cmd/bd/version_tracking.go) always opens its own openStrict store
+		// and closes it before the main command's open runs, so it never
+		// races a cache hit either. A future caller needing a genuinely
+		// different intent on a cache hit would have to plumb intent through
+		// here instead of silently reusing the first store's; it is load-
+		// bearing that no current caller does.
 		entry.refCount++
 		cacheMu.Unlock()
 		return entry.store, nil
@@ -43,7 +81,7 @@ func Open(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDolt
 	cacheMu.Unlock()
 
 	// Slow path: create a new store outside the lock.
-	s, err := newStore(ctx, beadsDir, database, branch)
+	s, err := newStore(ctx, beadsDir, database, branch, intent)
 	if err != nil {
 		return nil, err
 	}

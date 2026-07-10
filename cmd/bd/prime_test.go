@@ -4,13 +4,46 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
+// stubPrimeStoreUnavailable temporarily disconnects prime from any ambient
+// workspace store, so tests assert against prime's own text rather than
+// whatever database (and persistent memories) happens to exist in an ancestor
+// directory of the test process. Without this, a developer or verify runner
+// whose checkout is nested under a real beads workspace gets that workspace's
+// live memory text injected into the output under test — e.g. a memory
+// containing "git pull" fails the stealth-mode rejectText assertions. CI never
+// sees the leak because its checkouts have no ancestor database.
+//
+// Returns a function to restore the original store wiring.
+// Usage:
+//
+//	defer stubPrimeStoreUnavailable()()
+func stubPrimeStoreUnavailable() func() {
+	origStore := store
+	origActive := storeActive
+	origEnsure := ensureStoreActiveForPrime
+	store = nil
+	storeActive = false
+	ensureStoreActiveForPrime = func(context.Context) error {
+		return errors.New("prime store stubbed out in test")
+	}
+	return func() {
+		store = origStore
+		storeActive = origActive
+		ensureStoreActiveForPrime = origEnsure
+	}
+}
+
 func TestOutputContextFunction(t *testing.T) {
+	defer stubPrimeStoreUnavailable()()
 	tests := []struct {
 		name          string
 		mcpMode       bool
@@ -18,6 +51,7 @@ func TestOutputContextFunction(t *testing.T) {
 		ephemeralMode bool
 		localOnlyMode bool
 		noPushMode    bool
+		profile       config.AgentProfile // "" stubs config.ProfileConservative (default)
 		expectText    []string
 		rejectText    []string
 	}{
@@ -29,6 +63,16 @@ func TestOutputContextFunction(t *testing.T) {
 			localOnlyMode: false,
 			expectText:    []string{"Beads Workflow Context", "bd dolt push", "Team-maintainer behavior is opt-in", "conservative by default"},
 			rejectText:    []string{"bd export", "--from-main"},
+		},
+		{
+			name:          "CLI team-maintainer profile (non-ephemeral)",
+			mcpMode:       false,
+			stealthMode:   false,
+			ephemeralMode: false,
+			localOnlyMode: false,
+			profile:       config.ProfileTeamMaintainer,
+			expectText:    []string{"Beads Workflow Context", "agent.profile=team-maintainer", "bd dolt push", "git push"},
+			rejectText:    []string{"bd export", "--from-main", "Team-maintainer behavior is opt-in"},
 		},
 		{
 			name:          "CLI Normal (ephemeral)",
@@ -95,6 +139,16 @@ func TestOutputContextFunction(t *testing.T) {
 			rejectText:    []string{"bd export", "--from-main"},
 		},
 		{
+			name:          "MCP team-maintainer profile (non-ephemeral)",
+			mcpMode:       true,
+			stealthMode:   false,
+			ephemeralMode: false,
+			localOnlyMode: false,
+			profile:       config.ProfileTeamMaintainer,
+			expectText:    []string{"Beads Issue Tracker Active", "agent.profile=team-maintainer", "bd dolt push"},
+			rejectText:    []string{"bd export", "--from-main", "Team-maintainer behavior is opt-in"},
+		},
+		{
 			name:          "MCP Normal (ephemeral)",
 			mcpMode:       true,
 			stealthMode:   false,
@@ -156,6 +210,11 @@ func TestOutputContextFunction(t *testing.T) {
 			defer stubIsEphemeralBranch(tt.ephemeralMode)()
 			defer stubPrimeHasGitRemote(!tt.localOnlyMode)() // localOnly = !primeHasGitRemote
 			defer stubPrimeNoPushConfigured(tt.noPushMode)()
+			profile := tt.profile
+			if profile == "" {
+				profile = config.ProfileConservative
+			}
+			defer stubPrimeAgentProfile(profile)()
 
 			var buf bytes.Buffer
 			err := outputPrimeContext(&buf, tt.mcpMode, tt.stealthMode)
@@ -226,6 +285,7 @@ func TestPrimeLocalOnlyDoesNotClaimNoGitAuthority(t *testing.T) {
 }
 
 func TestPrimeClaimGuidanceUsesAtomicClaim(t *testing.T) {
+	defer stubPrimeStoreUnavailable()()
 	defer stubIsEphemeralBranch(false)()
 	defer stubPrimeHasGitRemote(true)()
 
@@ -244,6 +304,7 @@ func TestPrimeClaimGuidanceUsesAtomicClaim(t *testing.T) {
 }
 
 func TestPrimeStartsWithTruncationDirective(t *testing.T) {
+	defer stubPrimeStoreUnavailable()()
 	defer stubIsEphemeralBranch(false)()
 	defer stubPrimeHasGitRemote(true)()
 
@@ -259,6 +320,7 @@ func TestPrimeStartsWithTruncationDirective(t *testing.T) {
 }
 
 func TestPrimeMemoriesOnlyNoMemories(t *testing.T) {
+	defer stubPrimeStoreUnavailable()()
 	var buf bytes.Buffer
 	if err := outputPrimeContextWithOptions(&buf, false, false, true); err != nil {
 		t.Fatalf("outputPrimeContextWithOptions failed: %v", err)
@@ -311,6 +373,7 @@ func TestPrimeStoreTimeoutNonPositiveUsesDefault(t *testing.T) {
 }
 
 func TestPrimeContextUsesWorkspaceLanguage(t *testing.T) {
+	defer stubPrimeStoreUnavailable()()
 	defer stubIsEphemeralBranch(false)()
 	defer stubPrimeHasGitRemote(true)()
 
@@ -371,6 +434,18 @@ func stubPrimeNoPushConfigured(noPush bool) func() {
 	}
 	return func() {
 		primeNoPushConfigured = original
+	}
+}
+
+// stubPrimeAgentProfile temporarily replaces primeAgentProfile with a stub
+// returning profile (gh#3423 agent.profile knob).
+func stubPrimeAgentProfile(profile config.AgentProfile) func() {
+	original := primeAgentProfile
+	primeAgentProfile = func() config.AgentProfile {
+		return profile
+	}
+	return func() {
+		primeAgentProfile = original
 	}
 }
 
@@ -469,6 +544,7 @@ func TestOutputHookJSON_EmptyContent(t *testing.T) {
 // any hook-free integrations). It would be a regression if the JSON envelope
 // leaked into the default path.
 func TestPrime_RawMarkdown_NotJSON_WithoutFlag(t *testing.T) {
+	defer stubPrimeStoreUnavailable()()
 	defer stubIsEphemeralBranch(false)()
 	defer stubPrimeHasGitRemote(true)()
 

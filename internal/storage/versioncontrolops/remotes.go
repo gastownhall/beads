@@ -3,7 +3,6 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -40,10 +39,11 @@ func RemoveRemote(ctx context.Context, db DBConn, name string) error {
 // If user is non-empty, authenticates with that user — DOLT_REMOTE_PASSWORD
 // must be set in the in-process Dolt server's environment.
 //
-// On failure, a best-effort GC is run to clean up any orphaned tmp_pack_*
-// files that DOLT_FETCH may have left in the git-remote-cache. These files
-// accumulate unboundedly across repeated failures and can consume hundreds of
-// gigabytes over time.
+// A failed DOLT_FETCH can leave orphaned tmp_pack_* files in the
+// git-remote-cache; the embedded store's connection teardown sweeps those
+// (cleanGitRemoteCacheGarbage). Do NOT run DOLT_GC here: dolt_gc invalidates
+// every other open session on the same engine, so a failed fetch would break
+// concurrent in-flight connections (bd-6dnrw.10).
 func Fetch(ctx context.Context, db DBConn, peer, user string) error {
 	var err error
 	if user != "" {
@@ -52,10 +52,6 @@ func Fetch(ctx context.Context, db DBConn, peer, user string) error {
 		_, err = db.ExecContext(ctx, "CALL DOLT_FETCH(?)", peer)
 	}
 	if err != nil {
-		// Best-effort: ignore GC errors — the original fetch error is what matters.
-		// DoltGC requires a non-transactional connection; if db is a tx it will
-		// fail silently here, which is acceptable.
-		_ = DoltGC(ctx, db)
 		return fmt.Errorf("fetch from %s: %w", peer, err)
 	}
 	return nil
@@ -96,10 +92,13 @@ func ForcePush(ctx context.Context, db DBConn, remote, branch, user string) erro
 // Pull pulls changes from the named remote by fetching the branch and merging
 // the remote tracking ref. This is equivalent to DOLT_PULL(remote, branch) but
 // avoids a nil-pointer panic in embedded Dolt when upstream branch tracking is
-// not configured in repo_state.json (GH#3144).
+// not configured in repo_state.json (GH#3144). The merge runs through
+// MergeAndSettle (bd-6dnrw.40), so safe conflict classes are auto-resolved and
+// FK cascade violations repaired, matching server-mode pulls.
 //
-// See Push for the user/auth contract; only the fetch step authenticates,
-// since the merge step is local.
+// db must be a single session (see MergeAndSettle). See Push for the
+// user/auth contract; only the fetch step authenticates, since the merge step
+// is local.
 func Pull(ctx context.Context, db DBConn, remote, branch, user string) error {
 	if user != "" {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_FETCH('--user', ?, ?, ?)", user, remote, branch); err != nil {
@@ -111,12 +110,7 @@ func Pull(ctx context.Context, db DBConn, remote, branch, user string) error {
 		}
 	}
 	trackingRef := remote + "/" + branch
-	if _, err := db.ExecContext(ctx, "CALL DOLT_MERGE(?)", trackingRef); err != nil {
-		// DOLT_MERGE returns "Already up to date." when there is nothing
-		// to merge; DOLT_PULL swallows this internally, so we do the same.
-		if strings.Contains(err.Error(), "up to date") {
-			return nil
-		}
+	if err := MergeAndSettle(ctx, db, trackingRef); err != nil {
 		return fmt.Errorf("merge %s: %w", trackingRef, err)
 	}
 	return nil

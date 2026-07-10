@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -33,6 +34,15 @@ func (s *EmbeddedDoltStore) ClaimReadyIssue(ctx context.Context, filter types.Wo
 	return claimed, err
 }
 
+// UnclaimIssue atomically unclaims an issue by clearing the assignee
+// and resetting status to "open". Records an "unclaimed" event.
+// Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
+func (s *EmbeddedDoltStore) UnclaimIssue(ctx context.Context, id string, actor string) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		return issueops.UnclaimIssueInTx(ctx, tx, id, actor)
+	})
+}
+
 // UpdateIssue updates fields on an issue.
 // Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
 func (s *EmbeddedDoltStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
@@ -51,6 +61,31 @@ func (s *EmbeddedDoltStore) UpdateIssue(ctx context.Context, id string, updates 
 		_, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
 		return err
 	})
+}
+
+// HeartbeatIssue refreshes the lease on an issue actor holds in_progress.
+// Delegates SQL work to issueops; EmbeddedDolt auto-commits the transaction.
+func (s *EmbeddedDoltStore) HeartbeatIssue(ctx context.Context, id, actor string) error {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		if issueops.IsActiveWispInTx(ctx, tx, id) {
+			// Wisps are ephemeral and never leased; nothing to heartbeat.
+			return fmt.Errorf("%w: %s is ephemeral", storage.ErrNotClaimable, id)
+		}
+		return issueops.HeartbeatIssueInTx(ctx, tx, id, actor)
+	})
+}
+
+// ReclaimExpiredLeases reverts in_progress issues whose lease expired more than
+// olderThan ago back to ready, recovering work stranded by dead workers.
+func (s *EmbeddedDoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error) {
+	cutoff := time.Now().UTC().Add(-olderThan)
+	var reclaimed []types.ReclaimedLease
+	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
+		var err error
+		reclaimed, err = issueops.ReclaimExpiredLeasesInTx(ctx, tx, cutoff, actor)
+		return err
+	})
+	return reclaimed, err
 }
 
 // ReopenIssue reopens a closed issue, setting status to open and clearing

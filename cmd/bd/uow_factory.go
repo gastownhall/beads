@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -24,17 +25,25 @@ func newProxiedServerUOWProvider(ctx context.Context, beadsDir string) (uow.Unit
 	}
 
 	info, _ := configfile.LoadProxiedServerClientInfo(beadsDir)
+	var proxyPort int
+	var proxyIdleTimeout time.Duration
+	if info != nil {
+		proxyPort = info.Port
+		proxyIdleTimeout = info.IdleTimeout
+	}
 	if info != nil && info.External != nil {
-		return newExternalProxiedServerUOWProvider(ctx, beadsDir, database, info.External)
+		return newExternalProxiedServerUOWProvider(ctx, beadsDir, database, info.External, proxyPort, proxyIdleTimeout)
 	}
 
-	return newManagedProxiedServerUOWProvider(ctx, beadsDir, database)
+	return newManagedProxiedServerUOWProvider(ctx, beadsDir, database, proxyPort, proxyIdleTimeout)
 }
 
 func newExternalProxiedServerUOWProvider(
 	ctx context.Context,
 	beadsDir, database string,
 	external *configfile.ExternalDoltConfig,
+	proxyPort int,
+	proxyIdleTimeout time.Duration,
 ) (uow.UnitOfWorkProvider, error) {
 	rootPath, err := resolveProxiedServerRootPath(beadsDir)
 	if err != nil {
@@ -66,12 +75,16 @@ func newExternalProxiedServerUOWProvider(
 		*external,
 		external.ResolvedUser(),
 		os.Getenv(configfile.ExternalDoltPasswordEnvVar),
+		proxyPort,
+		proxyIdleTimeout,
 	)
 }
 
 func newManagedProxiedServerUOWProvider(
 	ctx context.Context,
 	beadsDir, database string,
+	proxyPort int,
+	proxyIdleTimeout time.Duration,
 ) (uow.UnitOfWorkProvider, error) {
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
@@ -111,5 +124,7 @@ func newManagedProxiedServerUOWProvider(
 		"root",
 		"", // proxy is loopback-only, no auth
 		doltBin,
+		proxyPort,
+		proxyIdleTimeout,
 	)
 }

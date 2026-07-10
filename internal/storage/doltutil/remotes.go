@@ -1,8 +1,12 @@
 package doltutil
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -41,6 +45,38 @@ func IsGitProtocolURL(url string) bool {
 		strings.HasPrefix(url, "git+http://") ||
 		strings.HasPrefix(url, "git+file://") ||
 		strings.HasPrefix(url, "git://")
+}
+
+// PersistedRemotes reads the Dolt remotes recorded in
+// <dbPath>/.dolt/repo_state.json directly, without shelling out to the dolt
+// CLI — so it works when the dolt binary is absent and its failure modes are
+// distinguishable (bd-6dnrw.33). A missing .dolt directory or repo_state.json
+// means "not a dolt repository here" and returns (nil, nil); an unreadable or
+// unparseable file returns an error so callers can tell "definitely none"
+// from "could not tell". Results are sorted by name.
+func PersistedRemotes(dbPath string) ([]storage.RemoteInfo, error) {
+	path := filepath.Join(dbPath, ".dolt", "repo_state.json")
+	data, err := os.ReadFile(path) // #nosec G304 -- repo-local dolt state file
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var state struct {
+		Remotes map[string]struct {
+			URL string `json:"url"`
+		} `json:"remotes"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	remotes := make([]storage.RemoteInfo, 0, len(state.Remotes))
+	for name, r := range state.Remotes {
+		remotes = append(remotes, storage.RemoteInfo{Name: name, URL: r.URL})
+	}
+	sort.Slice(remotes, func(i, j int) bool { return remotes[i].Name < remotes[j].Name })
+	return remotes, nil
 }
 
 // ListCLIRemotes parses `dolt remote -v` output from the given database

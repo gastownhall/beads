@@ -218,6 +218,9 @@ await beads_ready_work(workspace_root="/Users/you/project-a")
 - `update` - Update issue (status, priority, design, notes, etc). Note: `status="closed"` or `status="open"` automatically route to `close` or `reopen` tools to respect approval workflows
 - `close` - Close completed issue
 - `dep` - Add dependency (blocks, related, parent-child, discovered-from)
+- `comment` - Add a durable, timestamped comment to an issue (a record of work/decisions)
+- `comments` - List all comments on an issue (`show` reports comment_count but not the bodies)
+- `note` - Append a note to an issue's notes field
 - `blocked` - Get blocked issues
 - `stats` - Get project statistics
 - `reopen` - Reopen a closed issue with optional reason
@@ -248,18 +251,30 @@ All MCP tools now load correctly in Claude Code with v0.24.0+.
 
 ## Development
 
+Baseline validation:
+```bash
+uv sync
+uv run pytest
+uv run python -m build
+```
+
+Integration tests require a current `bd` binary from this repository. In
+particular, `bd init --help` must include `--non-interactive`, `--skip-agents`,
+and `--skip-hooks`; older installed versions are skipped with a clear pytest
+message.
+
 Run MCP inspector:
 ```bash
 # inside beads-mcp dir
 uv run fastmcp dev src/beads_mcp/server.py
 ```
 
-Type checking:
+Type checking (source maintenance, not part of baseline validation yet):
 ```bash
 uv run mypy src/beads_mcp
 ```
 
-Linting and formatting:
+Linting and formatting (source maintenance, not part of baseline validation yet):
 ```bash
 uv run ruff check src/beads_mcp
 uv run ruff format src/beads_mcp

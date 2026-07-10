@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -586,7 +587,7 @@ func TestExportMemoryDeterminism(t *testing.T) {
 	// Seed 5 memories with keys that would sort differently than insertion order.
 	memKeys := []string{"zeta-config", "alpha-note", "mu-decision", "beta-lesson", "omega-context"}
 	for _, mk := range memKeys {
-		storageKey := "kv.memory." + mk
+		storageKey := kvkeys.MemoryConfigKeyPrefix + mk
 		if err := s.SetConfig(ctx, storageKey, "value-for-"+mk); err != nil {
 			t.Fatalf("SetConfig(%s): %v", storageKey, err)
 		}
@@ -747,7 +748,7 @@ func TestExportByteStabilityAllRecordTypes(t *testing.T) {
 
 	// Memories, keyed so insertion order differs from sorted order.
 	for _, mk := range []string{"zeta-config", "alpha-note", "mu-decision", "beta-lesson"} {
-		if err := s.SetConfig(ctx, "kv.memory."+mk, "value-for-"+mk); err != nil {
+		if err := s.SetConfig(ctx, kvkeys.MemoryConfigKeyPrefix+mk, "value-for-"+mk); err != nil {
 			t.Fatalf("SetConfig(%s): %v", mk, err)
 		}
 	}
@@ -1014,7 +1015,7 @@ func TestExportExcludesMemoriesByDefault(t *testing.T) {
 
 	// Seed memories.
 	for _, mk := range []string{"secret-api-pattern", "debug-session-notes"} {
-		storageKey := "kv.memory." + mk
+		storageKey := kvkeys.MemoryConfigKeyPrefix + mk
 		if err := s.SetConfig(ctx, storageKey, "sensitive-value-for-"+mk); err != nil {
 			t.Fatalf("SetConfig(%s): %v", storageKey, err)
 		}

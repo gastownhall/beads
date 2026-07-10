@@ -676,10 +676,12 @@ func (s *testSuite) paginationReadyUnionInterleaves() {
 		s.Require().NoError(r.Insert(s.Ctx(), iss, "tester", domain.InsertIssueOpts{}))
 		s.Require().NoError(labelRepo.Insert(s.Ctx(), iss.ID, label, "tester", domain.LabelOpts{}))
 
+		// NoHistory wisp (ephemeral=0): default ready work excludes true
+		// ephemerals on both stacks, and the interleaving under test is
+		// about the union page walk, not the ephemeral predicate.
 		w := newTestIssue(fmt.Sprintf("bd-pgr-int-w-%d", i), "wisp")
 		w.Priority = 1
 		w.CreatedAt = now.Add(time.Duration(2*i+1) * time.Second)
-		w.Ephemeral = true
 		s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
 		s.Require().NoError(labelRepo.Insert(s.Ctx(), w.ID, label, "tester", domain.LabelOpts{UseWispsTable: true}))
 	}

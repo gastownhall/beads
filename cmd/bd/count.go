@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -29,8 +30,18 @@ Examples:
   bd count --by-assignee            # Group count by assignee
   bd count --by-label               # Group count by label
   bd count --assignee alice --by-status  # Count alice's issues by status
+  bd count --include-infra          # Count issues + wisps tier (matches 'bd list --include-infra --all' cardinality)
 `,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("count")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		status, _ := cmd.Flags().GetString("status")
 		assignee, _ := cmd.Flags().GetString("assignee")
 		issueType, _ := cmd.Flags().GetString("type")
@@ -93,7 +104,7 @@ Examples:
 		}
 
 		if groupCount > 1 {
-			FatalError("only one --by-* flag can be specified")
+			return HandleErrorRespectJSON("only one --by-* flag can be specified")
 		}
 
 		// Normalize labels
@@ -144,42 +155,42 @@ Examples:
 		if createdAfter != "" {
 			t, err := parseTimeFlag(createdAfter)
 			if err != nil {
-				FatalError("parsing --created-after: %v", err)
+				return HandleErrorRespectJSON("parsing --created-after: %v", err)
 			}
 			filter.CreatedAfter = &t
 		}
 		if createdBefore != "" {
 			t, err := parseTimeFlag(createdBefore)
 			if err != nil {
-				FatalError("parsing --created-before: %v", err)
+				return HandleErrorRespectJSON("parsing --created-before: %v", err)
 			}
 			filter.CreatedBefore = &t
 		}
 		if updatedAfter != "" {
 			t, err := parseTimeFlag(updatedAfter)
 			if err != nil {
-				FatalError("parsing --updated-after: %v", err)
+				return HandleErrorRespectJSON("parsing --updated-after: %v", err)
 			}
 			filter.UpdatedAfter = &t
 		}
 		if updatedBefore != "" {
 			t, err := parseTimeFlag(updatedBefore)
 			if err != nil {
-				FatalError("parsing --updated-before: %v", err)
+				return HandleErrorRespectJSON("parsing --updated-before: %v", err)
 			}
 			filter.UpdatedBefore = &t
 		}
 		if closedAfter != "" {
 			t, err := parseTimeFlag(closedAfter)
 			if err != nil {
-				FatalError("parsing --closed-after: %v", err)
+				return HandleErrorRespectJSON("parsing --closed-after: %v", err)
 			}
 			filter.ClosedAfter = &t
 		}
 		if closedBefore != "" {
 			t, err := parseTimeFlag(closedBefore)
 			if err != nil {
-				FatalError("parsing --closed-before: %v", err)
+				return HandleErrorRespectJSON("parsing --closed-before: %v", err)
 			}
 			filter.ClosedBefore = &t
 		}
@@ -197,28 +208,33 @@ Examples:
 			filter.PriorityMax = &priorityMax
 		}
 
-		filter.SkipWisps = true // bd count never needs ephemeral wisp results
+		if includeInfra, _ := cmd.Flags().GetBool("include-infra"); includeInfra {
+			cfg, err := loadDirectListFilterConfig(ctx, store)
+			if err != nil {
+				return HandleError("%v", err)
+			}
+			applyCountIncludeInfra(&filter, issueType, cfg)
+		} else {
+			filter.SkipWisps = true // durable tier only; bd count's historical default
+		}
 
-		// Q1: SQL COUNT(*) aggregate — avoids materializing all rows.
 		if groupBy == "" {
 			count, err := store.CountIssues(ctx, "", filter)
 			if err != nil {
-				FatalError("%v", err)
+				return HandleErrorRespectJSON("%v", err)
 			}
 			if jsonOutput {
-				result := struct {
+				return outputJSON(struct {
 					Count int64 `json:"count"`
-				}{Count: count}
-				outputJSON(result)
-			} else {
-				fmt.Println(count)
+				}{Count: count})
 			}
-			return
+			fmt.Println(count)
+			return nil
 		}
 
 		counts, err := store.CountIssuesByGroup(ctx, filter, groupBy)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		type GroupCount struct {
@@ -231,34 +247,66 @@ Examples:
 			groups = append(groups, GroupCount{Group: group, Count: count})
 		}
 
-		// Use CountIssues for the total so multi-label issues aren't double-counted
-		// (--by-label buckets are not mutually exclusive, unlike status/priority/type).
+		// --by-label buckets are not mutually exclusive, so use CountIssues for the total
+		// to avoid double-counting multi-label issues.
 		total, err := store.CountIssues(ctx, "", filter)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		// Sort for consistent output
 		slices.SortFunc(groups, func(a, b GroupCount) int {
 			return cmp.Compare(a.Group, b.Group)
 		})
 
 		if jsonOutput {
-			result := struct {
+			return outputJSON(struct {
 				Total  int64        `json:"total"`
 				Groups []GroupCount `json:"groups"`
 			}{
 				Total:  total,
 				Groups: groups,
-			}
-			outputJSON(result)
-		} else {
-			fmt.Printf("Total: %d\n\n", total)
-			for _, g := range groups {
-				fmt.Printf("%s: %d\n", g.Group, g.Count)
-			}
+			})
 		}
+		fmt.Printf("Total: %d\n\n", total)
+		for _, g := range groups {
+			fmt.Printf("%s: %d\n", g.Group, g.Count)
+		}
+		return nil
 	},
+}
+
+// applyCountIncludeInfra switches the count filter to the wisps-inclusive
+// mode of `bd list --include-infra` (GH#4387). It mirrors the buildListFilter
+// defaults that determine list's cardinality so that, for any filter set,
+// `bd count --include-infra <filters>` returns exactly the number of rows
+// `bd list --include-infra <filters> --all` materializes:
+//
+//   - the wisps table is merged into the count (SkipWisps=false), picking up
+//     no_history beads (durable work stored in the wisps tier) and ephemeral
+//     wisps, exactly like list's merge path;
+//   - template molecules are excluded (list's default without
+//     --include-templates);
+//   - gate beads are excluded unless gates are explicitly requested via
+//     --type gate (list's default without --include-gates);
+//   - counting an infra type (agent/role/message, or the store-configured
+//     set) routes to the ephemeral wisps tier, like list's infra-type listing.
+//
+// The non-flag path never calls this function: bd count without
+// --include-infra keeps its historical durable-only semantics.
+func applyCountIncludeInfra(filter *types.IssueFilter, issueType string, cfg listFilterConfig) {
+	filter.SkipWisps = false
+
+	isTemplate := false
+	filter.IsTemplate = &isTemplate
+
+	if issueType != "gate" {
+		filter.ExcludeTypes = append(filter.ExcludeTypes, "gate")
+	}
+
+	if issueType != "" && cfg.isInfra(issueType) {
+		ephemeral := true
+		filter.Ephemeral = &ephemeral
+	}
 }
 
 func init() {
@@ -293,6 +341,11 @@ func init() {
 	// Priority ranges
 	countCmd.Flags().Int("priority-min", 0, "Filter by minimum priority (inclusive)")
 	countCmd.Flags().Int("priority-max", 0, "Filter by maximum priority (inclusive)")
+
+	// Wisps tier (GH#4387): mirrors bd list's flag of the same name so
+	// `bd count --include-infra <filters>` returns exactly the cardinality of
+	// `bd list --include-infra <filters> --all`.
+	countCmd.Flags().Bool("include-infra", false, "Include infrastructure beads and the wisps tier (matches 'bd list --include-infra --all' cardinality)")
 
 	// Grouping flags
 	countCmd.Flags().Bool("by-status", false, "Group count by status")

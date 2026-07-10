@@ -6,25 +6,22 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 const queryBatchSize = 200
 
-type filterTables struct {
-	Main         string
-	Labels       string
-	Dependencies string
-	Comments     string
-}
+// filterTables aliases the shared table-name config so both stacks build
+// against the same definitions (bd-6dnrw.46).
+type filterTables = sqlbuild.FilterTables
 
 var (
-	issuesFilterTables = filterTables{Main: "issues", Labels: "labels", Dependencies: "dependencies", Comments: "comments"}
-	wispsFilterTables  = filterTables{Main: "wisps", Labels: "wisp_labels", Dependencies: "wisp_dependencies", Comments: "wisp_comments"}
+	issuesFilterTables = sqlbuild.IssuesFilterTables
+	wispsFilterTables  = sqlbuild.WispsFilterTables
 )
 
 func (r *issueSQLRepositoryImpl) searchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (domain.SearchPage, error) {
@@ -107,22 +104,22 @@ func (r *issueSQLRepositoryImpl) searchUnion(ctx context.Context, query string, 
 
 func (r *issueSQLRepositoryImpl) buildUnionSubquery(query string, filter types.IssueFilter, tables filterTables, srcTag string) (string, []any, error) {
 	plan := buildLabelDrivenSearch(filter, tables)
-	whereClauses, args, err := buildIssueFilterClauses(query, plan.filter, tables)
+	whereClauses, args, err := buildIssueFilterClauses(query, plan.Filter, tables)
 	if err != nil {
 		return "", nil, err
 	}
-	whereClauses, args = plan.mergeInto(whereClauses, args)
+	whereClauses, args = plan.MergeInto(whereClauses, args)
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
 	selectKw := "SELECT"
-	if plan.distinct {
+	if plan.Distinct {
 		selectKw = "SELECT DISTINCT"
 	}
 	//nolint:gosec // G201: srcTag is a hardcoded 'i' or 'w'; fromSQL/whereSQL composed from fixed table names and ? placeholders.
 	sub := fmt.Sprintf("%s id, '%s' AS src, %s FROM %s %s",
-		selectKw, srcTag, unionSortColumnsSQL, plan.fromSQL, whereSQL)
+		selectKw, srcTag, unionSortColumnsSQL, plan.FromSQL, whereSQL)
 	return sub, args, nil
 }
 
@@ -166,11 +163,11 @@ func (r *issueSQLRepositoryImpl) fetchIssuesByIDs(ctx context.Context, ids []str
 
 func (r *issueSQLRepositoryImpl) searchTable(ctx context.Context, query string, filter types.IssueFilter, tables filterTables) (domain.SearchPage, error) {
 	plan := buildLabelDrivenSearch(filter, tables)
-	whereClauses, args, err := buildIssueFilterClauses(query, plan.filter, tables)
+	whereClauses, args, err := buildIssueFilterClauses(query, plan.Filter, tables)
 	if err != nil {
 		return domain.SearchPage{}, err
 	}
-	whereClauses, args = plan.mergeInto(whereClauses, args)
+	whereClauses, args = plan.MergeInto(whereClauses, args)
 
 	whereSQL := ""
 	if len(whereClauses) > 0 {
@@ -178,12 +175,12 @@ func (r *issueSQLRepositoryImpl) searchTable(ctx context.Context, query string, 
 	}
 
 	selectKw := "SELECT "
-	if plan.distinct {
+	if plan.Distinct {
 		selectKw = "SELECT DISTINCT "
 	}
 
 	if filter.Limit > 0 && !filter.NoIDShrink {
-		ids, hasMore, err := r.scanFilterIDs(ctx, selectKw, plan.fromSQL, whereSQL, args, filter, tables)
+		ids, hasMore, err := r.scanFilterIDs(ctx, selectKw, plan.FromSQL, whereSQL, args, filter, tables)
 		if err != nil {
 			return domain.SearchPage{}, err
 		}
@@ -202,7 +199,7 @@ func (r *issueSQLRepositoryImpl) searchTable(ctx context.Context, query string, 
 
 	//nolint:gosec // G201: SQL fragments from fixed table names and parameterized filters.
 	querySQL := fmt.Sprintf(`%s%s FROM %s %s %s %s`,
-		selectKw, issueSelectColumns, plan.fromSQL, whereSQL, orderBy, limitSQL)
+		selectKw, issueSelectColumns, plan.FromSQL, whereSQL, orderBy, limitSQL)
 
 	rows, err := r.runner.QueryContext(ctx, querySQL, args...)
 	if err != nil {
@@ -403,207 +400,12 @@ func (r *issueSQLRepositoryImpl) wispsTableEmptyOrMissing(ctx context.Context) (
 	}
 }
 
-type labelSearchPlan struct {
-	fromSQL  string
-	where    []string
-	args     []any
-	distinct bool
-	filter   types.IssueFilter
-}
-
-func (p labelSearchPlan) mergeInto(where []string, args []any) ([]string, []any) {
-	if len(p.where) == 0 {
-		return where, args
-	}
-	return append(p.where, where...), append(p.args, args...)
-}
-
-func buildLabelDrivenSearch(filter types.IssueFilter, tables filterTables) labelSearchPlan {
-	labels := compactNonEmptyStrings(filter.Labels)
-	labelsAny := compactNonEmptyStrings(filter.LabelsAny)
-	if len(labels) == 0 && len(labelsAny) == 0 {
-		return labelSearchPlan{fromSQL: tables.Main, filter: filter}
-	}
-
-	filterForClauses := filter
-	filterForClauses.Labels = nil
-	filterForClauses.LabelsAny = nil
-
-	var joins, where []string
-	var args []any
-
-	for i, label := range labels {
-		alias := fmt.Sprintf("label_filter_%d", i)
-		joins = append(joins, fmt.Sprintf("JOIN %s %s ON %s.issue_id = %s.id", tables.Labels, alias, alias, tables.Main))
-		where = append(where, fmt.Sprintf("%s.label = ?", alias))
-		args = append(args, label)
-	}
-
-	if len(labelsAny) > 0 {
-		alias := "label_filter_any"
-		joins = append(joins, fmt.Sprintf("JOIN %s %s ON %s.issue_id = %s.id", tables.Labels, alias, alias, tables.Main))
-		ph, anyArgs := buildInPlaceholders(labelsAny)
-		where = append(where, fmt.Sprintf("%s.label IN (%s)", alias, ph))
-		args = append(args, anyArgs...)
-	}
-
-	return labelSearchPlan{
-		fromSQL:  tables.Main + " " + strings.Join(joins, " "),
-		where:    where,
-		args:     args,
-		distinct: true,
-		filter:   filterForClauses,
-	}
-}
-
-func compactNonEmptyStrings(values []string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		if value != "" {
-			out = append(out, value)
-		}
-	}
-	return out
+func buildLabelDrivenSearch(filter types.IssueFilter, tables filterTables) sqlbuild.LabelSearchPlan {
+	return sqlbuild.BuildLabelDrivenSearch(filter, tables)
 }
 
 func buildIssueFilterClauses(query string, filter types.IssueFilter, tables filterTables) ([]string, []any, error) {
-	var c clauseBuf
-
-	if query != "" {
-		lowerQuery := strings.ToLower(query)
-		if looksLikeIssueID(query) {
-			c.and("(id = ? OR id LIKE ? OR LOWER(title) LIKE ? OR LOWER(external_ref) LIKE ?)",
-				lowerQuery, lowerQuery+"%", "%"+lowerQuery+"%", "%"+lowerQuery+"%")
-		} else {
-			pattern := "%" + lowerQuery + "%"
-			c.and("(LOWER(title) LIKE ? OR id LIKE ?)", pattern, pattern)
-		}
-	}
-
-	likeLowerContains(&c, "title", filter.TitleSearch)
-	likeLowerContains(&c, "title", filter.TitleContains)
-	likeLowerContains(&c, "description", filter.DescriptionContains)
-	likeLowerContains(&c, "notes", filter.NotesContains)
-	likeLowerContains(&c, "external_ref", filter.ExternalRefContains)
-
-	eqStrPtr(&c, "status", filter.Status)
-	inList(&c, "status", filter.Statuses)
-	notInList(&c, "status", filter.ExcludeStatus)
-
-	eqStrPtr(&c, "issue_type", filter.IssueType)
-	notInList(&c, "issue_type", filter.ExcludeTypes)
-
-	eqStrPtr(&c, "assignee", filter.Assignee)
-
-	eqIntPtr(&c, "priority", filter.Priority)
-	if filter.PriorityMin != nil {
-		c.and("priority >= ?", *filter.PriorityMin)
-	}
-	if filter.PriorityMax != nil {
-		c.and("priority <= ?", *filter.PriorityMax)
-	}
-
-	inList(&c, "id", filter.IDs)
-	if filter.IDPrefix != "" {
-		c.and("id LIKE ?", filter.IDPrefix+"%")
-	}
-	if filter.SpecIDPrefix != "" {
-		c.and("spec_id LIKE ?", filter.SpecIDPrefix+"%")
-	}
-
-	if filter.ParentID != nil {
-		parentID := *filter.ParentID
-		c.and(fmt.Sprintf("(id IN (SELECT issue_id FROM %s WHERE type = 'parent-child' AND %s = ?) OR (id LIKE CONCAT(?, '.%%') AND id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child')))",
-			tables.Dependencies, depTargetExpr, tables.Dependencies),
-			parentID, parentID)
-	}
-	if filter.NoParent {
-		c.and(fmt.Sprintf("id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child')", tables.Dependencies))
-	}
-
-	eqStrPtr(&c, "mol_type", filter.MolType)
-	eqStrPtr(&c, "wisp_type", filter.WispType)
-
-	for _, label := range filter.Labels {
-		c.and(fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label = ?)", tables.Labels), label)
-	}
-	if len(filter.LabelsAny) > 0 {
-		ph, a := buildInPlaceholders(filter.LabelsAny)
-		c.and(fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label IN (%s))", tables.Labels, ph), a...)
-	}
-	if len(filter.ExcludeLabels) > 0 {
-		ph, a := buildInPlaceholders(filter.ExcludeLabels)
-		c.and(fmt.Sprintf("id NOT IN (SELECT issue_id FROM %s WHERE label IN (%s))", tables.Labels, ph), a...)
-	}
-	if filter.NoLabels {
-		c.and(fmt.Sprintf("id NOT IN (SELECT DISTINCT issue_id FROM %s)", tables.Labels))
-	}
-
-	boolFlag(&c, "pinned", filter.Pinned)
-	eqStrPtr(&c, "source_repo", filter.SourceRepo)
-	boolFlag(&c, "ephemeral", filter.Ephemeral)
-	boolFlag(&c, "is_template", filter.IsTemplate)
-
-	if filter.EmptyDescription {
-		nullOrEmpty(&c, "description")
-	}
-	if filter.NoAssignee {
-		nullOrEmpty(&c, "assignee")
-	}
-
-	for _, tc := range []struct {
-		col, op string
-		v       *time.Time
-	}{
-		{"created_at", ">", filter.CreatedAfter},
-		{"created_at", "<", filter.CreatedBefore},
-		{"updated_at", ">", filter.UpdatedAfter},
-		{"updated_at", "<", filter.UpdatedBefore},
-		{"closed_at", ">", filter.ClosedAfter},
-		{"closed_at", "<", filter.ClosedBefore},
-		{"started_at", ">", filter.StartedAfter},
-		{"started_at", "<", filter.StartedBefore},
-		{"defer_until", ">", filter.DeferAfter},
-		{"defer_until", "<", filter.DeferBefore},
-		{"due_at", ">", filter.DueAfter},
-		{"due_at", "<", filter.DueBefore},
-	} {
-		timeOp(&c, tc.col, tc.op, tc.v)
-	}
-
-	if filter.Deferred {
-		c.and("(defer_until IS NOT NULL OR status = ?)", types.StatusDeferred)
-	}
-	if filter.Overdue {
-		c.and("due_at IS NOT NULL AND due_at < ? AND status != ?",
-			time.Now().UTC().Format(time.RFC3339), types.StatusClosed)
-	}
-
-	if err := c.metadata(filter.HasMetadataKey, filter.MetadataFields); err != nil {
-		return nil, nil, err
-	}
-	return c.where, c.args, nil
-}
-
-func looksLikeIssueID(query string) bool {
-	idx := strings.Index(query, "-")
-	if idx <= 0 || idx >= len(query)-1 {
-		return false
-	}
-	return strings.IndexFunc(query, func(c rune) bool {
-		switch {
-		case c >= '0' && c <= '9',
-			c >= 'a' && c <= 'z',
-			c >= 'A' && c <= 'Z',
-			c == '-', c == '.':
-			return false
-		default:
-			return true
-		}
-	}) == -1
+	return sqlbuild.BuildIssueFilterClauses(query, filter, tables)
 }
 
 type idSrcPage struct {
@@ -691,64 +493,10 @@ func (p *idSrcPage) trimToLimit(limit int) bool {
 
 type idSrcRef struct{ id, src string }
 
-type sortDef struct {
-	column     string
-	defaultDir string
-}
-
-var sortDefs = map[string]sortDef{
-	"":         {"priority", "ASC"},
-	"priority": {"priority", "ASC"},
-	"created":  {"created_at", "DESC"},
-	"updated":  {"updated_at", "DESC"},
-	"closed":   {"closed_at", "DESC"},
-	"status":   {"status", "ASC"},
-	"type":     {"issue_type", "ASC"},
-	"assignee": {"assignee", "ASC"},
-	"title":    {"title", "ASC"},
-}
-
-const unionSortColumnsSQL = `priority AS sort_priority,
-	created_at AS sort_created,
-	updated_at AS sort_updated,
-	closed_at AS sort_closed,
-	status AS sort_status,
-	issue_type AS sort_type,
-	assignee AS sort_assignee,
-	LOWER(title) AS sort_title`
-
-func isGoSideSort(sortBy string) bool {
-	return sortBy == "id"
-}
-
-func flipDir(dir string) string {
-	if dir == "ASC" {
-		return "DESC"
-	}
-	return "ASC"
-}
-
-func orderBySQLForColumns(sortBy string, sortDesc bool, col func(sortKey string) string) string {
-	if isGoSideSort(sortBy) {
-		return ""
-	}
-	def, ok := sortDefs[sortBy]
-	if !ok {
-		def = sortDefs[""]
-		sortBy = ""
-	}
-	dir := def.defaultDir
-	if sortDesc {
-		dir = flipDir(dir)
-	}
-	if sortBy == "" || sortBy == "priority" {
-		return fmt.Sprintf("ORDER BY %s %s, %s DESC, %s ASC", col("priority"), dir, col("created"), col("id"))
-	}
-	return fmt.Sprintf("ORDER BY %s %s, %s ASC", col(sortBy), dir, col("id"))
-}
+const unionSortColumnsSQL = sqlbuild.UnionSortColumnsSQL
 
 func unionOrderBySQL(sortBy string, sortDesc bool) string {
-	return orderBySQLForColumns(sortBy, sortDesc, func(k string) string {
+	return sqlbuild.OrderByForColumns(sortBy, sortDesc, func(k string) string {
 		if k == "id" {
 			return "id"
 		}
@@ -757,19 +505,7 @@ func unionOrderBySQL(sortBy string, sortDesc bool) string {
 }
 
 func orderBySQL(sortBy string, sortDesc bool, prefix string) string {
-	qual := ""
-	if prefix != "" {
-		qual = prefix + "."
-	}
-	return orderBySQLForColumns(sortBy, sortDesc, func(k string) string {
-		switch k {
-		case "id":
-			return qual + "id"
-		case "title":
-			return "LOWER(" + qual + "title)"
-		}
-		return qual + sortDefs[k].column
-	})
+	return sqlbuild.OrderBy(sortBy, sortDesc, prefix)
 }
 
 func limitOffsetSQL(limit, offset int) string {

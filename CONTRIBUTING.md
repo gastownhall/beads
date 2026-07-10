@@ -139,131 +139,24 @@ If you are contributing code that involves AI decision-making or orchestration, 
 
 ## Testing Guidelines
 
-### Test Strategy
+For how to run tests, see [docs/TESTING.md](docs/TESTING.md). For what to
+test and why (the test pyramid and tiering we follow), see
+[docs/TESTING_PHILOSOPHY.md](docs/TESTING_PHILOSOPHY.md).
 
-We use a two-tier testing approach:
+### Before Opening a PR
 
-- **Fast tests** (unit tests): Run on every PR via CI with `-short` flag (~2s)
-- **Slow tests** (integration tests): Run nightly with full git operations (~14s)
-
-Slow tests use `testing.Short()` to skip when `-short` flag is present.
-
-### Running Tests
-
-```bash
-# Fast tests (recommended for development - skips slow tests)
-# Use this for rapid iteration during development
-make test
-
-# Full test suite (before committing - includes all tests)
-# Run this before pushing to ensure nothing breaks
-make test
-
-# With race detection and coverage
-CGO_ENABLED=1 go test -tags gms_pure_go -race -coverprofile=coverage.out ./...
-```
-
-**When to use `-short`:**
-- During active development for fast feedback loops
-- When making small changes that don't affect integration points
-- When you want to quickly verify unit tests pass
-
-**When to use full test suite:**
-- Before committing and pushing changes
-- After modifying git operations or multi-clone scenarios
-- When preparing a pull request
-
-### Writing Tests
-
-- Write table-driven tests when testing multiple scenarios
-- Use descriptive test names that explain what is being tested
-- Clean up resources (database files, etc.) in test teardown
-- Use `t.Run()` for subtests to organize related test cases
-- Mark slow tests with `if testing.Short() { t.Skip("slow test") }`
-
-### CGO vs Non-CGO Tests
-
-Tests are split into two categories based on whether they need the embedded Dolt database (which requires CGO):
-
-- **Non-CGO tests** (no build tag): Unit tests for CLI parsing, helpers, and pure logic. These run everywhere.
-- **CGO tests** (`//go:build cgo`): Integration tests that create a real Dolt database. Files often use the `_embedded_test.go` suffix.
-
-```bash
-# Fast non-CGO tests (recommended for development)
-make test                     # or: ./scripts/test.sh
-
-# Opt-in ICU regex path (maintainer-only)
-make test-icu-path            # or: ./scripts/test-icu-path.sh ./...
-
-# Run a specific package or test with shipped config
-CGO_ENABLED=1 go test -tags gms_pure_go ./cmd/bd/...
-CGO_ENABLED=1 go test -tags gms_pure_go -run '^TestMyFeature$' ./cmd/bd/...
-```
-
-On macOS, use the Make target or script for the opt-in ICU regex path -- they configure the required ICU linker flags automatically.
-
-### ICU and Build Tags
-
-All production builds use `-tags gms_pure_go` to avoid ICU runtime dependencies.
-**Do not add ICU linker flags to the Makefile or `.buildflags`.**
-See [docs/ICU-POLICY.md](docs/ICU-POLICY.md) for the full policy and rationale.
-
-### Test Isolation with `t.TempDir()`
-
-Database tests use `t.TempDir()` for isolation so each test gets a clean environment and nothing touches the production database:
-
-```go
-func TestMyFeature(t *testing.T) {
-    tmpDir := t.TempDir()
-    dbPath := filepath.Join(tmpDir, "test.db")
-    store := newTestStoreWithPrefix(t, dbPath, "bd")
-
-    ctx := context.Background()
-    issue := &types.Issue{
-        ID:     "bd-1",
-        Title:  "Test issue",
-        Status: types.StatusOpen,
-    }
-    if err := store.CreateIssue(ctx, issue, "test"); err != nil {
-        t.Fatalf("CreateIssue failed: %v", err)
-    }
-    // ... assertions ...
-}
-```
-
-Test helpers in `cmd/bd/test_helpers_test.go` provide database setup functions like `newTestStore`, `newTestStoreWithPrefix`, and `newTestStoreSharedBranch` (which uses branch-per-test isolation to avoid expensive CREATE/DROP DATABASE overhead).
-
-### Table-Driven Test Example
-
-```go
-func TestIssueValidation(t *testing.T) {
-    tests := []struct {
-        name    string
-        issue   *types.Issue
-        wantErr bool
-    }{
-        {
-            name:    "valid issue",
-            issue:   &types.Issue{Title: "Test", Status: types.StatusOpen, Priority: 2},
-            wantErr: false,
-        },
-        {
-            name:    "missing title",
-            issue:   &types.Issue{Status: types.StatusOpen, Priority: 2},
-            wantErr: true,
-        },
-    }
-
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            err := tt.issue.Validate()
-            if (err != nil) != tt.wantErr {
-                t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-            }
-        })
-    }
-}
-```
+- Run `make test` (or `./scripts/test.sh`) locally and make sure it passes.
+- Add tests for new functionality; extend existing tests when fixing bugs.
+- Write table-driven tests for multiple scenarios, use descriptive test
+  names, use `t.Run()` for subtests, and clean up resources (database
+  files, etc.) in test teardown.
+- If you hit a test failure unrelated to your change, don't silently skip
+  it -- check `.test-skip` and file an issue if it's not already tracked
+  (see [docs/TESTING.md](docs/TESTING.md#known-broken-tests)).
+- Ensure CI passes (`make ci-pr-core`, `make ci-pr-policy`, `make
+  ci-pr-lint`) before requesting review.
+- If your change touches ICU or build tags, see
+  [docs/ICU-POLICY.md](docs/ICU-POLICY.md) for the policy and rationale.
 
 ## Documentation
 

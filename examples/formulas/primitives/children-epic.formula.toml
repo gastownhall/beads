@@ -1,0 +1,24 @@
+# Step.Children — nested steps form an epic with sub-tasks.
+#
+# A step with `children` becomes an epic; each child becomes a sub-issue
+# whose parent is the outer step. `needs` between siblings still wires
+# blocking dependencies. The smoke harness asserts the parent epic + 2
+# children exist and that `polish` blocks on `draft` (sibling needs).
+formula = "children-epic"
+description = "Step.Children: epic step with two children where polish needs draft."
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "ship-feature"
+title = "Ship the feature"
+type = "epic"
+
+[[steps.children]]
+id = "draft"
+title = "Draft the implementation"
+
+[[steps.children]]
+id = "polish"
+title = "Polish and document"
+needs = ["draft"]

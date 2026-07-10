@@ -8,6 +8,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+
 jobs:
   detect-ci-tier:
     name: Detect CI tier
@@ -16,7 +20,7 @@ jobs:
       full_embedded: ${{ steps.tier.outputs.full_embedded }}
       reason: ${{ steps.tier.outputs.reason }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
@@ -27,21 +31,39 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash .github/scripts/ci-embedded-tier.sh
 
+  # Same guard as pr.yml's check-migration-hygiene: direct pushes to main
+  # (and PR merges whose base moved) must not bypass the migration lints.
+  # BASE_SHA is the pre-push tip; on force pushes or history rewrites the
+  # script warns and skips the frozen-migrations diff but still runs the
+  # duplicate-version and nondeterministic-SQL checks.
+  check-migration-hygiene:
+    name: Check migration hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Run migration hygiene checks
+        env:
+          BASE_SHA: ${{ github.event.before }}
+        run: ./scripts/check-migration-hygiene.sh
+
   build-artifacts:
     name: Build Artifacts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
       - name: Run policy checks
         run: make ci-pr-policy
@@ -84,7 +106,7 @@ jobs:
     name: Check build-tag policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
       - run: ./scripts/check-build-tags.sh
       - run: ./scripts/check-go-install-guidance.sh
 
@@ -99,10 +121,10 @@ jobs:
     name: Check cmd/bd pure-Go tests compile (CGO_ENABLED=0)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -134,7 +156,7 @@ jobs:
     name: Check version consistency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Check all versions match
         run: ./scripts/check-versions.sh
@@ -147,7 +169,7 @@ jobs:
     name: Check no duplicate migration versions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Check for duplicate migration version numbers
         run: |
@@ -171,10 +193,10 @@ jobs:
     name: Check doc flags freshness
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -195,7 +217,7 @@ jobs:
       website: ${{ steps.detect.outputs.website }}
       reason: ${{ steps.detect.outputs.reason }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
@@ -221,12 +243,12 @@ jobs:
             echo "MCP package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
           fi
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         if: steps.applicability.outputs.run == 'true'
 
       - name: Set up Python
         if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.14'
 
@@ -268,7 +290,7 @@ jobs:
             echo "npm package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
           fi
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         if: steps.applicability.outputs.run == 'true'
 
       - name: Set up Node.js
@@ -311,7 +333,7 @@ jobs:
             echo "website package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
           fi
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         if: steps.applicability.outputs.run == 'true'
 
       - name: Set up Node.js
@@ -330,12 +352,12 @@ jobs:
     name: PR Policy (wrapper timing)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -347,10 +369,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-artifacts
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -386,15 +408,15 @@ jobs:
     name: PR Lint (wrapper timing)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
       - name: Run PR lint wrapper
         run: make ci-pr-lint
@@ -419,10 +441,10 @@ jobs:
             coverage: false
             test-flags: '-v -race -short'
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -478,7 +500,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: matrix.coverage && !cancelled()
-        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         continue-on-error: true
         with:
           files: coverage.out
@@ -487,7 +509,7 @@ jobs:
 
       - name: Upload test results to Codecov
         if: matrix.coverage && !cancelled()
-        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         continue-on-error: true
         with:
           files: junit.xml
@@ -506,10 +528,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-artifacts
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -529,7 +551,7 @@ jobs:
       - name: Pull Dolt sql-server image
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
         # Without this, RequireDoltContainer reports doltNoImage and TestDomainDB skips.
-        run: docker pull dolthub/dolt-sql-server:1.88.1
+        run: docker pull dolthub/dolt-sql-server:2.1.10
 
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -544,10 +566,10 @@ jobs:
           sha256sum -c SHA256SUMS
           chmod +x bd-linux-gms-pure
 
-      - name: Test domain + uow
+      - name: Test domain + uow + tracker
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-        run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/...
+        run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
 
   main-linux-integration-packages:
     name: Main Linux integration packages (${{ matrix.shard }}/6)
@@ -560,10 +582,10 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6]
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -643,10 +665,10 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -737,10 +759,10 @@ jobs:
   #   name: Test (proxied-server cmd)
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+  #     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
   #
   #     - name: Set up Go
-  #       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+  #       uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
   #       with:
   #         go-version-file: 'go.mod'
   #
@@ -782,10 +804,10 @@ jobs:
     if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -814,7 +836,7 @@ jobs:
     if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Download binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -834,7 +856,41 @@ jobs:
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
           BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
-        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=10m
+        # Conformance runs in the dedicated test-embedded-conformance job
+        # below (mirrors pr-risk.yml); skip it here so this job stays inside
+        # its 20m envelope as the base embedded suite grows.
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=20m -test.skip '^TestConformance$'
+
+  test-embedded-conformance:
+    name: Test (Embedded Dolt Conformance)
+    needs: [detect-ci-tier, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: embedded-test-binaries
+          path: /tmp/
+
+      - name: Fix permissions
+        run: chmod +x /tmp/embeddeddolt-test
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Test
+        env:
+          BEADS_TEST_EMBEDDED_DOLT: "1"
+          BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
+        # Conformance suite (conformance.RunAll via TestConformance) against
+        # the embedded Dolt backend, split from test-embedded-storage so each
+        # job stays well under its timeout - same structure as pr-risk.yml.
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=15m -test.run '^TestConformance$'
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
@@ -846,7 +902,7 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Download binaries
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -879,10 +935,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -904,10 +960,10 @@ jobs:
     name: Check formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -918,15 +974,15 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           version: latest
           args: --timeout=5m --build-tags=gms_pure_go
@@ -936,8 +992,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - uses: DeterminateSystems/determinate-nix-action@f4c468f2287f0f14a113841b41f2dc8957119519 # v3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: DeterminateSystems/determinate-nix-action@629b284231c2a82554b724e357e47fc6020833c8 # v3
       - name: Run bd help via Nix
         id: nix_help
         run: |

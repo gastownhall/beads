@@ -73,7 +73,7 @@ func (s *testSuite) readyCountsComment() {
 	s.Require().NoError(r.Insert(s.Ctx(), issue, "tester", domain.InsertIssueOpts{}))
 	for i := 0; i < 3; i++ {
 		_, err := s.Runner().ExecContext(s.Ctx(),
-			"INSERT INTO comments (issue_id, author, text) VALUES (?, ?, ?)",
+			"INSERT INTO comments (id, issue_id, author, text) VALUES (UUID(), ?, ?, ?)",
 			"bd-rdyc-cmt-1", "tester", "comment")
 		s.Require().NoError(err)
 	}

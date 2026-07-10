@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
 )
@@ -80,6 +81,11 @@ func testMainInner(m *testing.M) int {
 	}
 
 	code := m.Run()
+
+	// Best-effort reap of any dolt sql-server left running under a temp dir
+	// this suite created (e.g. a SIGKILLed run) — see
+	// gastownhall/beads mybd-q6cz.
+	doltserver.SweepOrphanedTestServers(testBDDir)
 
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")

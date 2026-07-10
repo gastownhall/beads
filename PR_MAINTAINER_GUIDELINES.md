@@ -56,6 +56,38 @@ Use these recommendations after review:
 
 Other outcomes are possible, including rerouting a PR to the right project or banning a contributor, but the list above covers the normal cases.
 
+## Merge Discipline and Review Requirements
+
+These rules apply to everyone who can merge — human maintainers and agents alike. They exist because a two-month audit of 440 merged PRs (epic bd-6dnrw) found the project's worst defects entered through merges that skipped review, hid their real contents, or overrode an outstanding objection. A merge is an irreversible act of trust; treat it as one.
+
+### Self-merge and outstanding objections
+
+- Do not self-merge a nontrivial PR. "Nontrivial" is anything beyond a typo, comment, or pure-docs fix: any code, schema, migration, build, CI, dependency, or sync-path change. Nontrivial work authored by a maintainer or agent must be merged by a different reviewer.
+- Never merge over an unresolved `CHANGES_REQUESTED` review. The requested changes must be addressed and the reviewer's objection withdrawn (or explicitly overridden by the project owner, recorded in the thread) before merge. A new approval does not erase a standing change request from someone else.
+- A WIP- or draft-titled branch is not mergeable. Finish it, retitle it, and get it reviewed.
+
+### The PR body must match the diff
+
+- The title and body must describe the riskiest thing the diff actually does. A docs or test title may not carry a storage-, schema-, migration-, or sync-layer change underneath it.
+- One PR, one coherent concern. Do not bundle unrelated commits behind a small-sounding claim ("19-line fix" that drags in six commits). Split grab-bags before merge.
+- If the body and the diff disagree, the PR is not ready — fix the body or shrink the diff. Reviewers and future auditors rely on the body being true.
+
+### Review must be real and accountable
+
+- A merge needs a substantive human review, not a rubber stamp. An approval that engaged with the change is required; an empty approval or a bot-only approval does not satisfy the review requirement for nontrivial PRs.
+- Reviews posted by an automated agent must say so plainly and must not impersonate a maintainer. If a review was posted in error by an agent under a human's account, it does not count and must be retracted.
+- Approvals from unidentified or unestablished accounts do not satisfy the review requirement. The reviewer must be a known, accountable participant.
+
+### Schema, migration, and sync paths are protected
+
+- Any change touching `migrations/`, the schema, destructive data paths, or the Dolt sync/clone/merge paths requires a filled-out PR template and a real human review before merge — no exceptions, no self-merge, no bot-only approval.
+- These paths should be enforced by branch protection (review-required), not just convention. (Configuring branch protection and defining which agent identities may merge are owner actions tracked in bd-6dnrw.23.)
+
+### Revert ping-pong
+
+- If a change to a sync-critical file is reverted, stop merging in that area. Do not re-merge, re-revert, and re-merge in a tight loop; that pattern (five merges in two hours on the same sync files) is how regressions get laundered into `main`.
+- After a revert, open an issue, diagnose the root cause, and land a single reviewed fix. Escalate to the project owner rather than continuing a revert cycle.
+
 ## Operating Rules
 
 - Prefer landing or transforming useful work over asking the contributor to do more rounds.
@@ -66,4 +98,6 @@ Other outcomes are possible, including rerouting a PR to the right project or ba
 - Consider the entire PR thread. Valuable clarifying info are often in the comments.
 - File follow-up work as beads issues instead of hidden notes.
 - When code changes result from PR maintenance, follow repo quality gates and session completion rules in `AGENTS.md`.
-- Post multi-line PR comments from a real Markdown body file or a shell heredoc, not from strings with escaped `\n` sequences. After posting or editing, verify the rendered body with `gh pr view --comments --json comments --jq ...` before moving on.
+- Post multi-line PR comments from a real Markdown body file or a shell heredoc, not from strings with escaped `\n` sequences. Run `scripts/gh-body-lint <body-file>` before posting body files; after posting or editing, verify the rendered body with `gh pr view --comments --json comments --jq ...` before moving on.
+- Sign agent-written GitHub comments, reviews, and commits using [docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md).
+- Before finishing, re-read the PR, latest comments, review threads, and linked issues; address or explicitly note any unresolved action items.

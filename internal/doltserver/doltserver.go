@@ -376,7 +376,7 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 
 	// Check if it's a dolt sql-server process
 	if !isDoltProcess(pid) {
-		return 0, fmt.Errorf("port %d is in use by a non-dolt process (PID %d).\n\nFree the port or configure a different one with: bd dolt set port <port>", port, pid)
+		return 0, fmt.Errorf("port %d is in use by a non-dolt process (PID %d).\n\n%s\n\nFree the port or configure a different one with: bd dolt set port <port>", port, pid, portConflictDiagnostics(port))
 	}
 
 	// It's a dolt process. Check if it's one we should adopt.
@@ -389,7 +389,24 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 	}
 
 	// Another beads project's Dolt server is on this port.
-	return 0, fmt.Errorf("port %d is in use by another project's dolt server (PID %d).\n\nFree the port or use a different one with: bd dolt set port <port>", port, pid)
+	return 0, fmt.Errorf("port %d is in use by another project's dolt server (PID %d).\n\n%s\n\nFree the port or use a different one with: bd dolt set port <port>", port, pid, portConflictDiagnostics(port))
+}
+
+// portConflictDiagnostics returns a multi-line block of operator-actionable
+// hints for diagnosing what's holding a port. Combines the platform-specific
+// listener-discovery command with a docker-in-the-loop hint that frequently
+// applies in practice — operators running their own dolt sql-server in a
+// container don't realize bd would otherwise try to start a competing
+// instance and lose the race (GH#3516).
+func portConflictDiagnostics(port int) string {
+	return fmt.Sprintf("Identify the listener:\n  %s\n\n"+
+		"If the listener is YOUR own Dolt instance (e.g., a docker container "+
+		"or systemd unit you manage), bd does not need to start a new server. "+
+		"Configure bd to talk to the existing server instead:\n"+
+		"  export BEADS_DOLT_SERVER_HOST=<host>  # 127.0.0.1 for local container\n"+
+		"  export BEADS_DOLT_SERVER_PORT=%d\n"+
+		"  bd dolt status   # verify reachable",
+		fmt.Sprintf(portConflictHint, port), port)
 }
 
 // countDoltProcesses returns the number of running dolt sql-server processes.
@@ -420,8 +437,29 @@ func readPortFile(beadsDir string) int {
 }
 
 // writePortFile records the actual port the server is listening on.
+// Write-temp-then-rename: a plain os.WriteFile truncates in place, so a
+// concurrent readPortFile can observe an empty or partial file and resolve
+// port 0 (or a truncated port). Rename within .beads is atomic.
 func writePortFile(beadsDir string, port int) error {
-	return os.WriteFile(portPath(beadsDir), []byte(strconv.Itoa(port)), 0600)
+	path := portPath(beadsDir)
+	tmp, err := os.CreateTemp(beadsDir, PortFileName+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck // no-op after successful rename
+	if _, err := tmp.WriteString(strconv.Itoa(port)); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // EnsurePortFile makes the repo-local port file match the connected server port.
@@ -775,17 +813,14 @@ func Start(beadsDir string) (*State, error) {
 		}
 	}
 
-	// Launch dolt sql-server, retrying once after an automatic corrupt-
-	// manifest recovery (GH#3290).
+	// Launch dolt sql-server.
 	var (
-		pid               int
-		actualPort        int
-		lastErr           error
-		attempts          int
-		recoveryAttempted bool
+		pid        int
+		actualPort int
+		lastErr    error
+		attempts   int
 	)
-startupLoop:
-	for {
+	{
 		// Ensure dolt database directory is initialized
 		if err := ensureDoltInit(doltDir); err != nil {
 			return nil, fmt.Errorf("initializing dolt database: %w", err)
@@ -878,25 +913,18 @@ startupLoop:
 		_ = logFile.Close()
 
 		if lastErr != nil {
-			// GH#3290: detect unclean-shutdown manifest corruption and auto-
-			// recover when the journal is empty (no data to lose). Recovery
-			// backs up the corrupt .dolt/ with a timestamped suffix and
-			// reinitializes in place, then the outer loop retries startup.
-			if !recoveryAttempted {
-				recoveryAttempted = true
-				if backups, recErr := recoverCorruptManifest(beadsDir, doltDir); recErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: corrupt manifest recovery failed: %v\n", recErr)
-				} else if len(backups) > 0 {
-					for _, b := range backups {
-						fmt.Fprintf(os.Stderr, "Info: backed up corrupt dolt database to %s and reinitialized (GH#3290)\n", filepath.Base(b))
-					}
-					continue startupLoop
-				}
+			// GH#3290 / bd-6dnrw.6: unclean-shutdown manifest corruption is
+			// detected here but never auto-repaired — reinitializing .dolt is
+			// destructive, so repair stays behind explicit bd doctor --fix.
+			if dirs, detErr := detectCorruptManifest(beadsDir, doltDir); detErr == nil && len(dirs) > 0 {
+				return nil, fmt.Errorf("failed to start dolt server after %d attempts: %w\n"+
+					"Corrupt manifest with no recoverable data detected (GH#3290) in:\n  %s\n"+
+					"Run 'bd doctor --fix' to back up the corrupt database(s) and reinitialize.\nCheck logs: %s",
+					attempts, lastErr, strings.Join(dirs, "\n  "), logPath(beadsDir))
 			}
 			return nil, fmt.Errorf("failed to start dolt server after %d attempts: %w\nCheck logs: %s",
 				attempts, lastErr, logPath(beadsDir))
 		}
-		break
 	}
 
 	// Write PID and port files

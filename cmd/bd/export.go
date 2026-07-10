@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/atomicfile"
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -30,7 +33,7 @@ For supported full backup/restore flows, use 'bd backup init', 'bd backup sync',
 and 'bd backup restore'.
 
 By default, exports only regular issues (excluding infrastructure beads
-like agents, rigs, roles, and messages). Use --all to include everything.
+like agents, roles, and messages). Use --all to include everything.
 
 Memories (from 'bd remember') are excluded by default because they may
 contain sensitive agent context. Use --include-memories or --all to
@@ -42,8 +45,10 @@ EXAMPLES:
   bd export --include-memories           # Export issues + memories
   bd export --all -o full.jsonl          # Include infra + templates + gates + memories
   bd export --scrub -o clean.jsonl       # Exclude test/pollution records`,
-	GroupID: "sync",
-	RunE:    runExport,
+	GroupID:       "sync",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runExport,
 }
 
 var (
@@ -53,20 +58,31 @@ var (
 	exportScrub           bool
 	exportNoMemories      bool
 	exportIncludeMemories bool
+	exportExcludeOwners   []string
+	exportVerbose         bool
 )
 
 func init() {
 	exportCmd.Flags().StringVarP(&exportOutput, "output", "o", "", "Output file path (default: stdout)")
 	exportCmd.Flags().BoolVar(&exportAll, "all", false, "Include all records (infra, templates, gates, memories)")
-	exportCmd.Flags().BoolVar(&exportIncludeInfra, "include-infra", false, "Include infrastructure beads (agents, rigs, roles, messages)")
+	exportCmd.Flags().BoolVar(&exportIncludeInfra, "include-infra", false, "Include infrastructure beads (agents, roles, messages)")
 	exportCmd.Flags().BoolVar(&exportScrub, "scrub", false, "Exclude test/pollution records")
 	exportCmd.Flags().BoolVar(&exportIncludeMemories, "include-memories", false, "Include persistent memories (from 'bd remember') in the export")
 	exportCmd.Flags().BoolVar(&exportNoMemories, "no-memories", false, "Exclude persistent memories (deprecated: now the default)")
 	_ = exportCmd.Flags().MarkHidden("no-memories")
+	exportCmd.Flags().StringArrayVar(&exportExcludeOwners, "exclude-owner", nil, "Exclude issues created by this identity (repeatable; also reads export.exclude_owners config)")
+	exportCmd.Flags().BoolVar(&exportVerbose, "verbose", false, "Print filtered issue count when owners are excluded")
 	rootCmd.AddCommand(exportCmd)
 }
 
 func runExport(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("export")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	ctx := rootCtx
 
 	// Determine output destination. File output uses atomic writes
@@ -78,7 +94,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 		var err error
 		aw, err = atomicfile.Create(exportOutput, 0o644)
 		if err != nil {
-			return fmt.Errorf("failed to create output file: %w", err)
+			return HandleErrorRespectJSON("failed to create output file: %v", err)
 		}
 		defer func() {
 			// Abort is a no-op if Close was already called.
@@ -92,7 +108,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 	// Build filter for issues table. Export all statuses by default.
 	filter := types.IssueFilter{Limit: 0}
 
-	// Exclude infra types by default (agents, rigs, roles, messages)
+	// Exclude infra types by default (agents, roles, messages).
 	if !exportAll && !exportIncludeInfra {
 		var infraTypes []string
 		if store != nil {
@@ -127,12 +143,22 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 	issues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
-		return fmt.Errorf("failed to search issues: %w", err)
+		return HandleErrorRespectJSON("failed to search issues: %v", err)
 	}
 
 	// Scrub test/pollution records if requested
 	if exportScrub {
 		issues = filterOutPollution(issues)
+	}
+
+	// Owner-keyed filtering: exclude issues by created_by identity.
+	// Merges --exclude-owner flag values with export.exclude_owners config.
+	ownerExcludes := buildOwnerExcludeSet(ctx, exportExcludeOwners)
+	filteredOwnerCount := 0
+	if len(ownerExcludes) > 0 {
+		before := len(issues)
+		issues = filterOutOwners(issues, ownerExcludes)
+		filteredOwnerCount = before - len(issues)
 	}
 
 	if len(issues) == 0 && exportNoMemories {
@@ -186,13 +212,13 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 		data, err := json.Marshal(record)
 		if err != nil {
-			return fmt.Errorf("failed to marshal issue %s: %w", issue.ID, err)
+			return HandleErrorRespectJSON("failed to marshal issue %s: %v", issue.ID, err)
 		}
 		if _, err := w.Write(data); err != nil {
-			return fmt.Errorf("failed to write: %w", err)
+			return HandleErrorRespectJSON("failed to write: %v", err)
 		}
 		if _, err := w.Write([]byte{'\n'}); err != nil {
-			return fmt.Errorf("failed to write newline: %w", err)
+			return HandleErrorRespectJSON("failed to write newline: %v", err)
 		}
 		count++
 	}
@@ -203,7 +229,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 	if (exportIncludeMemories || exportAll) && !exportNoMemories {
 		allConfig, err := store.GetAllConfig(ctx)
 		if err != nil {
-			return fmt.Errorf("failed to read config for memories: %w", err)
+			return HandleErrorRespectJSON("failed to read config for memories: %v", err)
 		}
 		fullPrefix := kvPrefix + memoryPrefix
 		// Sort keys for deterministic output order (GH#3474).
@@ -224,13 +250,13 @@ func runExport(cmd *cobra.Command, args []string) error {
 			}
 			data, err := json.Marshal(record)
 			if err != nil {
-				return fmt.Errorf("failed to marshal memory %s: %w", userKey, err)
+				return HandleErrorRespectJSON("failed to marshal memory %s: %v", userKey, err)
 			}
 			if _, err := w.Write(data); err != nil {
-				return fmt.Errorf("failed to write: %w", err)
+				return HandleErrorRespectJSON("failed to write: %v", err)
 			}
 			if _, err := w.Write([]byte{'\n'}); err != nil {
-				return fmt.Errorf("failed to write newline: %w", err)
+				return HandleErrorRespectJSON("failed to write newline: %v", err)
 			}
 			memoryCount++
 		}
@@ -239,7 +265,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 	// Finalize atomic write if writing to file (fsync + rename).
 	if aw != nil {
 		if err := aw.Close(); err != nil {
-			return fmt.Errorf("failed to finalize export file: %w", err)
+			return HandleErrorRespectJSON("failed to finalize export file: %v", err)
 		}
 	}
 
@@ -249,6 +275,9 @@ func runExport(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "Exported %d issues and %d memories to %s\n", count, memoryCount, exportOutput)
 		} else {
 			fmt.Fprintf(os.Stderr, "Exported %d issues to %s\n", count, exportOutput)
+		}
+		if exportVerbose && filteredOwnerCount > 0 {
+			fmt.Fprintf(os.Stderr, "  (%d filtered as personal by owner exclusion)\n", filteredOwnerCount)
 		}
 	}
 
@@ -285,4 +314,55 @@ func filterOutPollution(issues []*types.Issue) []*types.Issue {
 		}
 	}
 	return clean
+}
+
+// buildOwnerExcludeSet merges --exclude-owner flag values with the
+// export.exclude_owners (and legacy export.exclude_owner) config entries.
+// Returns the combined set as a map for O(1) lookup.
+func buildOwnerExcludeSet(ctx context.Context, flagOwners []string) map[string]struct{} {
+	set := make(map[string]struct{})
+	for _, o := range flagOwners {
+		if o != "" {
+			set[o] = struct{}{}
+		}
+	}
+	// export.* keys are YAML-only (config.IsYamlOnlyKey returns true for the
+	// "export." prefix), so bd config set stores them in config.yaml rather than
+	// the database. Read from YAML first, then fall back to the database for any
+	// instance that was written directly to the store.
+	addOwners := func(val string) {
+		for _, o := range strings.Split(val, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				set[o] = struct{}{}
+			}
+		}
+	}
+	if val := config.GetYamlConfig("export.exclude_owners"); val != "" {
+		addOwners(val)
+	}
+	if val := config.GetYamlConfig("export.exclude_owner"); val != "" {
+		set[strings.TrimSpace(val)] = struct{}{}
+	}
+	if store == nil {
+		return set
+	}
+	// Also read from database for any value stored there directly.
+	if val, err := store.GetConfig(ctx, "export.exclude_owners"); err == nil && val != "" {
+		addOwners(val)
+	}
+	if val, err := store.GetConfig(ctx, "export.exclude_owner"); err == nil && val != "" {
+		set[strings.TrimSpace(val)] = struct{}{}
+	}
+	return set
+}
+
+// filterOutOwners removes issues whose created_by identity is in the exclude set.
+func filterOutOwners(issues []*types.Issue, exclude map[string]struct{}) []*types.Issue {
+	var keep []*types.Issue
+	for _, issue := range issues {
+		if _, excluded := exclude[issue.CreatedBy]; !excluded {
+			keep = append(keep, issue)
+		}
+	}
+	return keep
 }

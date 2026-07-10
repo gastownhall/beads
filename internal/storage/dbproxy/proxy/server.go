@@ -24,6 +24,8 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 )
 
+const IdleTimeoutNever time.Duration = -1
+
 type ProxyOpts struct {
 	RootDir     string
 	Port        int
@@ -71,7 +73,7 @@ const (
 	readyInitialBackoff    = 50 * time.Millisecond
 	readyMaxBackoff        = 1 * time.Second
 	idleWatcherMinInterval = 1 * time.Second
-	backendStopTimeout     = 10 * time.Second
+	backendStopTimeout     = 5 * time.Minute
 	tcpKeepAlivePeriod     = 30 * time.Second
 )
 
@@ -176,13 +178,14 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	runErr := g.Wait()
 	_ = p.conns.Wait()
 	p.stats.IncBackendStop()
-	if stopErr := stopBackendBounded(p.server); stopErr != nil && runErr == nil {
-		runErr = fmt.Errorf("stop database server: %w", stopErr)
+	stopErr := stopBackendBounded(p.server)
+	if stopErr != nil {
+		stopErr = fmt.Errorf("stop database server: %w", stopErr)
 	}
 	if errors.Is(runErr, errIdleTimeout) || sigReceived.Load() {
-		return nil
+		runErr = nil
 	}
-	return runErr
+	return errors.Join(runErr, stopErr)
 }
 
 func stopBackendBounded(s server.DatabaseServer) error {

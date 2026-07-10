@@ -264,6 +264,23 @@ func (t *doltTransaction) GetIssue(ctx context.Context, id string) (*types.Issue
 	return scanIssueTxFromTable(ctx, t.txFor(table), table, id)
 }
 
+// SearchIssueIDs returns matching IDs only, projected in Go from SearchIssues.
+// It skips the issueops.SearchIssueIDsInTx fast path because that merges
+// issues+wisps over one *sql.Tx, while doltTransaction splits them across
+// regularTx/ignoredTx (see txFor). Not worth re-implementing: partial-ID
+// resolution calls the (fast) store path, never a transaction, so this is cold.
+func (t *doltTransaction) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	issues, err := t.SearchIssues(ctx, query, filter)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(issues))
+	for i, issue := range issues {
+		ids[i] = issue.ID
+	}
+	return ids, nil
+}
+
 // SearchIssues searches for issues within the transaction.
 // Supports the same filter fields as DoltStore.SearchIssues (bd-v6v8).
 func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
@@ -627,14 +644,21 @@ func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates ma
 
 func (t *doltTransaction) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	table := "issues"
+	eventTable := "events"
 	if t.isActiveWisp(ctx, id) {
 		table = "wisps"
+		eventTable = "wisp_events"
 	}
 
-	if _, err := issueops.CloseIssueWithoutEventInTx(ctx, t.txFor(table), id, reason, actor, session); err != nil {
+	result, err := issueops.CloseIssueInTx(ctx, t.txFor(table), id, reason, actor, session)
+	if err != nil {
 		return wrapExecError("close issue in tx", err)
 	}
+	if result.AlreadyClosed {
+		return nil
+	}
 	t.dirty.MarkDirty(table)
+	t.dirty.MarkDirty(eventTable)
 	return nil
 }
 
@@ -692,6 +716,22 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 	return nil
 }
 
+// CycleThroughEdges reports a blocking cycle through one of the new edges.
+// The graph merges the regular tx's dependencies with the ignored tx's
+// wisp_dependencies, so uncommitted writes on both sides are gated — the
+// previous DetectCycles ran only on the regular tx and let bulk wisp edges
+// commit blocking cycles (bd-578h9.9).
+func (t *doltTransaction) CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error) {
+	graph := make(map[string][]string)
+	if err := issueops.AppendBlockingGraphInTx(ctx, t.txFor("dependencies"), []string{"dependencies"}, graph); err != nil {
+		return "", err
+	}
+	if err := issueops.AppendBlockingGraphInTx(ctx, t.txFor("wisp_dependencies"), []string{"wisp_dependencies"}, graph); err != nil {
+		return "", err
+	}
+	return issueops.CycleThroughEdgesInGraph(graph, edges), nil
+}
+
 func (t *doltTransaction) GetDependencyRecords(ctx context.Context, issueID string) ([]*types.Dependency, error) {
 	table := "dependencies"
 	if t.isActiveWisp(ctx, issueID) {
@@ -743,18 +783,18 @@ func (t *doltTransaction) RemoveDependency(ctx context.Context, issueID, depends
 // AddLabel adds a label within the transaction
 func (t *doltTransaction) AddLabel(ctx context.Context, issueID, label, actor string) error {
 	table := "labels"
+	eventTable := "events"
 	if t.isActiveWisp(ctx, issueID) {
 		table = "wisp_labels"
+		eventTable = "wisp_events"
 	}
 
-	//nolint:gosec // G201: table is hardcoded
-	_, err := t.txFor(table).ExecContext(ctx, fmt.Sprintf(`
-		INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)
-	`, table), issueID, label)
-	if err == nil {
-		t.dirty.MarkDirty(table)
+	if err := issueops.AddLabelInTx(ctx, t.txFor(table), table, eventTable, issueID, label, actor); err != nil {
+		return wrapExecError("add label in tx", err)
 	}
-	return wrapExecError("add label in tx", err)
+	t.dirty.MarkDirty(table)
+	t.dirty.MarkDirty(eventTable)
+	return nil
 }
 
 func (t *doltTransaction) GetLabels(ctx context.Context, issueID string) ([]string, error) {
@@ -783,18 +823,18 @@ func (t *doltTransaction) GetLabels(ctx context.Context, issueID string) ([]stri
 // RemoveLabel removes a label within the transaction
 func (t *doltTransaction) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
 	table := "labels"
+	eventTable := "events"
 	if t.isActiveWisp(ctx, issueID) {
 		table = "wisp_labels"
+		eventTable = "wisp_events"
 	}
 
-	//nolint:gosec // G201: table is hardcoded
-	_, err := t.txFor(table).ExecContext(ctx, fmt.Sprintf(`
-		DELETE FROM %s WHERE issue_id = ? AND label = ?
-	`, table), issueID, label)
-	if err == nil {
-		t.dirty.MarkDirty(table)
+	if err := issueops.RemoveLabelInTx(ctx, t.txFor(table), table, eventTable, issueID, label, actor); err != nil {
+		return wrapExecError("remove label in tx", err)
 	}
-	return wrapExecError("remove label in tx", err)
+	t.dirty.MarkDirty(table)
+	t.dirty.MarkDirty(eventTable)
+	return nil
 }
 
 // SetConfig sets a config value within the transaction
@@ -920,9 +960,9 @@ func (t *doltTransaction) AddComment(ctx context.Context, issueID, actor, commen
 
 	//nolint:gosec // G201: table is hardcoded
 	_, err := t.txFor(table).ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?)
-	`, table), issueID, types.EventCommented, actor, comment)
+		INSERT INTO %s (id, issue_id, event_type, actor, comment)
+		VALUES (?, ?, ?, ?, ?)
+	`, table), issueops.NewEventID(), issueID, types.EventCommented, actor, comment)
 	if err == nil {
 		t.dirty.MarkDirty(table)
 	}

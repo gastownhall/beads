@@ -204,11 +204,8 @@ func removeMuxProjectHooks(env agentsEnv) error {
 // InstallMux installs Mux integration.
 // When project=true, it also installs .mux/AGENTS.md.
 // When global=true, it also installs ~/.mux/AGENTS.md.
-func InstallMux(project bool, global bool) {
-	env := muxEnvProvider()
-	if err := installMux(env, project, global); err != nil {
-		setupExit(1)
-	}
+func InstallMux(project bool, global bool) error {
+	return installMux(muxEnvProvider(), project, global)
 }
 
 func installMux(env agentsEnv, project bool, global bool) error {
@@ -270,11 +267,8 @@ func installMux(env agentsEnv, project bool, global bool) error {
 // CheckMux checks if Mux integration is installed.
 // When project=true, it also verifies .mux/AGENTS.md.
 // When global=true, it also verifies ~/.mux/AGENTS.md.
-func CheckMux(project bool, global bool) {
-	env := muxEnvProvider()
-	if err := checkMux(env, project, global); err != nil {
-		setupExit(1)
-	}
+func CheckMux(project bool, global bool) error {
+	return checkMux(muxEnvProvider(), project, global)
 }
 
 func checkMux(env agentsEnv, project bool, global bool) error {
@@ -309,11 +303,8 @@ func checkMux(env agentsEnv, project bool, global bool) error {
 // RemoveMux removes Mux integration.
 // When project=true, it also removes section from .mux/AGENTS.md.
 // When global=true, it also removes section from ~/.mux/AGENTS.md.
-func RemoveMux(project bool, global bool) {
-	env := muxEnvProvider()
-	if err := removeMux(env, project, global); err != nil {
-		setupExit(1)
-	}
+func RemoveMux(project bool, global bool) error {
+	return removeMux(muxEnvProvider(), project, global)
 }
 
 func removeMux(env agentsEnv, project bool, global bool) error {

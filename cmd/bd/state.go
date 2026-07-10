@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -31,28 +32,34 @@ Examples:
   bd state witness-abc patrol     # Output: active
   bd state witness-abc mode       # Output: normal
   bd state witness-abc health     # Output: healthy`,
-	Args: cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(2),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("state")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 		issueID := args[0]
 		dimension := args[1]
 
-		// Resolve partial ID
 		var fullID string
 		var err error
 		fullID, err = utils.ResolvePartialID(ctx, store, issueID)
 		if err != nil {
-			FatalErrorRespectJSON("resolving %s: %v", issueID, err)
+			return HandleErrorRespectJSON("resolving %s: %v", issueID, err)
 		}
 
-		// Get labels for the issue
 		var labels []string
 		labels, err = store.GetLabels(ctx, fullID)
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		// Find label matching dimension:*
 		prefix := dimension + ":"
 		var value string
 		for _, label := range labels {
@@ -71,8 +78,7 @@ Examples:
 			if value == "" {
 				result["value"] = nil
 			}
-			outputJSON(result)
-			return
+			return outputJSON(result)
 		}
 
 		if value == "" {
@@ -80,6 +86,7 @@ Examples:
 		} else {
 			fmt.Println(value)
 		}
+		return nil
 	},
 }
 
@@ -105,39 +112,45 @@ Examples:
   bd set-state agent-abc health=healthy
 
 The --reason flag provides context for the event bead (recommended).`,
-	Args: cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(2),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("set-state")
+
+		evt := metrics.NewCommandEvent("set-state")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 		issueID := args[0]
 		stateSpec := args[1]
 
-		// Parse dimension=value
 		parts := strings.SplitN(stateSpec, "=", 2)
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-			FatalErrorRespectJSON("invalid state format %q, expected <dimension>=<value>", stateSpec)
+			return HandleErrorRespectJSON("invalid state format %q, expected <dimension>=<value>", stateSpec)
 		}
 		dimension := parts[0]
 		newValue := parts[1]
 
 		reason, _ := cmd.Flags().GetString("reason")
 
-		// Resolve partial ID
 		var fullID string
 		var err error
 		fullID, err = utils.ResolvePartialID(ctx, store, issueID)
 		if err != nil {
-			FatalErrorRespectJSON("resolving %s: %v", issueID, err)
+			return HandleErrorRespectJSON("resolving %s: %v", issueID, err)
 		}
 
-		// Get current labels to find existing dimension value
 		var labels []string
 		labels, err = store.GetLabels(ctx, fullID)
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		// Find existing label for this dimension
 		prefix := dimension + ":"
 		var oldLabel string
 		var oldValue string
@@ -151,22 +164,19 @@ The --reason flag provides context for the event bead (recommended).`,
 
 		newLabel := dimension + ":" + newValue
 
-		// Skip if no change
 		if oldLabel == newLabel {
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				return outputJSON(map[string]interface{}{
 					"issue_id":  fullID,
 					"dimension": dimension,
 					"value":     newValue,
 					"changed":   false,
 				})
-			} else {
-				fmt.Printf("(no change: %s already set to %s)\n", dimension, newValue)
 			}
-			return
+			fmt.Printf("(no change: %s already set to %s)\n", dimension, newValue)
+			return nil
 		}
 
-		// 1. Create event bead recording the state change
 		eventTitle := fmt.Sprintf("State change: %s → %s", dimension, newValue)
 		eventDesc := ""
 		if oldValue != "" {
@@ -179,26 +189,24 @@ The --reason flag provides context for the event bead (recommended).`,
 		}
 
 		var eventID string
-		// Get next child ID for the event
 		childID, err := store.GetNextChildID(ctx, fullID)
 		if err != nil {
-			FatalErrorRespectJSON("generating child ID: %v", err)
+			return HandleErrorRespectJSON("generating child ID: %v", err)
 		}
 
 		event := &types.Issue{
 			ID:          childID,
 			Title:       eventTitle,
 			Description: eventDesc,
-			Status:      types.StatusClosed, // Events are immediately closed
+			Status:      types.StatusClosed,
 			Priority:    4,
 			IssueType:   types.TypeEvent,
 			CreatedBy:   getActorWithGit(),
 		}
 		if err := store.CreateIssue(ctx, event, actor); err != nil {
-			FatalErrorRespectJSON("creating event: %v", err)
+			return HandleErrorRespectJSON("creating event: %v", err)
 		}
 
-		// Add parent-child dependency
 		dep := &types.Dependency{
 			IssueID:     childID,
 			DependsOnID: fullID,
@@ -210,16 +218,14 @@ The --reason flag provides context for the event bead (recommended).`,
 
 		eventID = childID
 
-		// 2. Remove old label if exists
 		if oldLabel != "" {
 			if err := store.RemoveLabel(ctx, fullID, oldLabel, actor); err != nil {
 				WarnError("failed to remove old label %s: %v", oldLabel, err)
 			}
 		}
 
-		// 3. Add new label
 		if err := store.AddLabel(ctx, fullID, newLabel, actor); err != nil {
-			FatalErrorRespectJSON("adding label: %v", err)
+			return HandleErrorRespectJSON("adding label: %v", err)
 		}
 
 		commandDidWrite.Store(true)
@@ -236,8 +242,7 @@ The --reason flag provides context for the event bead (recommended).`,
 			if oldValue == "" {
 				result["old_value"] = nil
 			}
-			outputJSON(result)
-			return
+			return outputJSON(result)
 		}
 
 		fmt.Printf("%s Set %s = %s on %s\n", ui.RenderPass("✓"), dimension, newValue, fullID)
@@ -245,6 +250,7 @@ The --reason flag provides context for the event bead (recommended).`,
 			fmt.Printf("  Previous: %s\n", oldValue)
 		}
 		fmt.Printf("  Event: %s\n", eventID)
+		return nil
 	},
 }
 
@@ -262,27 +268,33 @@ Example:
   #   patrol: active
   #   mode: normal
   #   health: healthy`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("state-list")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 		issueID := args[0]
 
-		// Resolve partial ID
 		var fullID string
 		var err error
 		fullID, err = utils.ResolvePartialID(ctx, store, issueID)
 		if err != nil {
-			FatalErrorRespectJSON("resolving %s: %v", issueID, err)
+			return HandleErrorRespectJSON("resolving %s: %v", issueID, err)
 		}
 
-		// Get labels for the issue
 		var labels []string
 		labels, err = store.GetLabels(ctx, fullID)
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		// Extract state labels (those with colon)
 		states := make(map[string]string)
 		for _, label := range labels {
 			if idx := strings.Index(label, ":"); idx > 0 {
@@ -293,17 +305,15 @@ Example:
 		}
 
 		if jsonOutput {
-			result := map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"issue_id": fullID,
 				"states":   states,
-			}
-			outputJSON(result)
-			return
+			})
 		}
 
 		if len(states) == 0 {
 			fmt.Printf("\n%s has no state labels\n", fullID)
-			return
+			return nil
 		}
 
 		fmt.Printf("\n%s State for %s:\n", ui.RenderAccent("📊"), fullID)
@@ -311,6 +321,7 @@ Example:
 			fmt.Printf("  %s: %s\n", dimension, value)
 		}
 		fmt.Println()
+		return nil
 	},
 }
 

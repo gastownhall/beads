@@ -13,5 +13,5 @@ var ErrLockBusy = errors.New("lock busy: held by another process")
 
 // IsLocked returns true if the error indicates a lock is held by another process.
 func IsLocked(err error) bool {
-	return err == errProcessLocked
+	return errors.Is(err, errProcessLocked)
 }

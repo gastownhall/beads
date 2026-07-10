@@ -602,6 +602,80 @@ func (c *Client) GetTeamStates(ctx context.Context) ([]State, error) {
 	return teamResp.Team.States.Nodes, nil
 }
 
+// GetTeamLabels returns all issue labels defined for the team (paginated).
+func (c *Client) GetTeamLabels(ctx context.Context) ([]Label, error) {
+	const pageSize = 250
+	query := `
+		query TeamLabels($teamId: String!, $first: Int!, $after: String) {
+			team(id: $teamId) {
+				labels(first: $first, after: $after) {
+					nodes {
+						id
+						name
+					}
+					pageInfo {
+						hasNextPage
+						endCursor
+					}
+				}
+			}
+		}
+	`
+
+	var all []Label
+	var after *string
+	for {
+		vars := map[string]interface{}{
+			"teamId": c.TeamID,
+			"first":  pageSize,
+			"after":  nil,
+		}
+		if after != nil {
+			vars["after"] = *after
+		}
+
+		req := &GraphQLRequest{
+			Query:     query,
+			Variables: vars,
+		}
+
+		data, err := c.Execute(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch team labels: %w", err)
+		}
+
+		var page struct {
+			Team struct {
+				Labels *struct {
+					Nodes    []Label `json:"nodes"`
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+				} `json:"labels"`
+			} `json:"team"`
+		}
+		if err := json.Unmarshal(data, &page); err != nil {
+			return nil, fmt.Errorf("failed to parse team labels response: %w", err)
+		}
+		if page.Team.Labels == nil {
+			return nil, fmt.Errorf("no labels connection found for team")
+		}
+
+		all = append(all, page.Team.Labels.Nodes...)
+		if !page.Team.Labels.PageInfo.HasNextPage {
+			break
+		}
+		if page.Team.Labels.PageInfo.EndCursor == "" {
+			break
+		}
+		cursor := page.Team.Labels.PageInfo.EndCursor
+		after = &cursor
+	}
+
+	return all, nil
+}
+
 // FindIssueByDescriptionContains searches for an issue whose description
 // contains the given text. This powers idempotency dedup: we embed a
 // deterministic marker in the description and search for it before creating.

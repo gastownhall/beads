@@ -10,14 +10,18 @@ from typing import Any
 
 from .config import load_config
 from .models import (
+    AddCommentParams,
     AddDependencyParams,
+    AddNoteParams,
     BlockedIssue,
     BlockedParams,
     ClaimIssueParams,
     CloseIssueParams,
+    Comment,
     CreateIssueParams,
     InitParams,
     Issue,
+    ListCommentsParams,
     ListIssuesParams,
     ReadyWorkParams,
     ReopenIssueParams,
@@ -139,6 +143,21 @@ class BdClientBase(ABC):
     @abstractmethod
     async def add_dependency(self, params: AddDependencyParams) -> None:
         """Add a dependency between issues."""
+        pass
+
+    @abstractmethod
+    async def add_comment(self, params: AddCommentParams) -> str:
+        """Add a comment to an issue."""
+        pass
+
+    @abstractmethod
+    async def list_comments(self, params: ListCommentsParams) -> list[Comment]:
+        """List comments on an issue."""
+        pass
+
+    @abstractmethod
+    async def add_note(self, params: AddNoteParams) -> str:
+        """Append a note to an issue's notes field."""
         pass
 
     @abstractmethod
@@ -674,6 +693,80 @@ class BdCliClient(BdClientBase):
                 stderr=stderr.decode(),
                 returncode=process.returncode or 1,
             )
+
+    async def _run_text_command(self, *args: str) -> str:
+        """Run a bd command that returns plain text (not JSON) and return stdout.
+
+        Used for subcommands like `comment`/`note` that print a confirmation
+        line rather than JSON. Mirrors _run_command's env and error handling.
+        """
+        cmd = [self.bd_path, *args, *self._global_flags()]
+
+        env = os.environ.copy()
+        if self.beads_dir:
+            env["BEADS_DIR"] = self.beads_dir
+        elif self.beads_db:
+            env["BEADS_DB"] = self.beads_db
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.DEVNULL,  # Prevent inheriting MCP's stdin
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._get_working_dir(),
+                env=env,
+            )
+            stdout, stderr = await process.communicate()
+        except FileNotFoundError as e:
+            raise BdNotFoundError(BdNotFoundError.installation_message(self.bd_path)) from e
+
+        if process.returncode != 0:
+            raise BdCommandError(
+                f"bd {args[0]} failed: {stderr.decode()}",
+                stderr=stderr.decode(),
+                returncode=process.returncode or 1,
+            )
+
+        return stdout.decode().strip()
+
+    async def add_comment(self, params: AddCommentParams) -> str:
+        """Add a comment to an issue via `bd comment <id> <text>`.
+
+        Args:
+            params: Comment parameters (issue_id, text)
+
+        Returns:
+            Confirmation message
+        """
+        await self._run_text_command("comment", params.issue_id, params.text)
+        return f"Added comment to {params.issue_id}"
+
+    async def list_comments(self, params: ListCommentsParams) -> list[Comment]:
+        """List comments on an issue via `bd comments <id>`.
+
+        Args:
+            params: Parameters containing the issue_id
+
+        Returns:
+            List of comments in chronological order
+        """
+        data = await self._run_command("comments", params.issue_id)
+        if not isinstance(data, list):
+            return []
+        return [Comment.model_validate(comment) for comment in data]
+
+    async def add_note(self, params: AddNoteParams) -> str:
+        """Append a note to an issue's notes field via `bd note <id> <text>`.
+
+        Args:
+            params: Note parameters (issue_id, text)
+
+        Returns:
+            Confirmation message
+        """
+        await self._run_text_command("note", params.issue_id, params.text)
+        return f"Appended note to {params.issue_id}"
 
     async def quickstart(self) -> str:
         """Get bd quickstart guide.

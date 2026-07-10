@@ -955,3 +955,127 @@ func TestSerializationConflictRetry(t *testing.T) {
 		t.Fatalf("expected %d labels, got %d: %v", numGoroutines, len(labels), labels)
 	}
 }
+
+// =============================================================================
+// Test: Concurrent Work-Queue Drain (the "Gas Station" scenario)
+//
+// N workers concurrently dequeue from ONE shared ready-front via
+// ClaimReadyIssue until it returns nil, exactly as N agent clones draining a
+// shared Beads work queue would. This is the core Gas Station claim-queue
+// invariant and the scenario the multi-agent port harness depends on:
+//
+//   - every issue is claimed by EXACTLY ONE worker (no double-claim / lost work)
+//   - every issue is claimed (no stranded ready work left behind)
+//   - the count of distinct claims equals the number of issues
+//
+// Dolt has no SKIP LOCKED, so the safety comes from the claim CAS (UPDATE ...
+// SET assignee WHERE assignee IS NULL) colliding on the same cell, surfacing as
+// a 1213/1205 serialization conflict, which ClaimReadyIssue's withRetryTx
+// re-scans and retries. This test is the regression guard for that guarantee.
+// =============================================================================
+
+func TestConcurrentWorkQueueDrain(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping work-queue drain test in short mode")
+	}
+
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := concurrentTestContext(t)
+	defer cancel()
+
+	// Seed a ready-front: all open, unassigned, no blockers => all ready.
+	const numIssues = 40
+	want := make(map[string]bool, numIssues)
+	for i := 0; i < numIssues; i++ {
+		id := fmt.Sprintf("queue-%03d", i)
+		issue := &types.Issue{
+			ID:          id,
+			Title:       fmt.Sprintf("Queue item %d", i),
+			Description: "ready work for the shared drain",
+			Status:      types.StatusOpen,
+			Priority:    (i % 4) + 1,
+			IssueType:   types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, issue, "seeder"); err != nil {
+			t.Fatalf("seed issue %s: %v", id, err)
+		}
+		want[id] = true
+	}
+
+	const numWorkers = 6
+
+	var mu sync.Mutex
+	claimedBy := make(map[string]string, numIssues) // issueID -> worker that claimed it
+	var doubleClaim atomic.Int32
+	var claimErrs atomic.Int32
+	var wg sync.WaitGroup
+
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			actor := fmt.Sprintf("worker-%d", workerID)
+			for {
+				issue, err := store.ClaimReadyIssue(ctx, types.WorkFilter{}, actor)
+				if err != nil {
+					claimErrs.Add(1)
+					return
+				}
+				if issue == nil {
+					return // ready-front drained from this worker's snapshot
+				}
+				mu.Lock()
+				if prev, ok := claimedBy[issue.ID]; ok {
+					t.Errorf("issue %s double-claimed: first by %s, then by %s", issue.ID, prev, actor)
+					doubleClaim.Add(1)
+				} else {
+					claimedBy[issue.ID] = actor
+				}
+				mu.Unlock()
+			}
+		}(w)
+	}
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("work-queue drain timeout — possible deadlock or claim livelock")
+	}
+
+	if n := claimErrs.Load(); n != 0 {
+		t.Errorf("got %d claim errors; ClaimReadyIssue should retry serialization conflicts internally and never surface one", n)
+	}
+	if n := doubleClaim.Load(); n != 0 {
+		t.Errorf("got %d double-claims; the claim CAS must give each issue to exactly one worker", n)
+	}
+
+	// No stranded work: every seeded issue claimed exactly once.
+	if len(claimedBy) != numIssues {
+		t.Errorf("claimed %d distinct issues, want %d (stranded ready work)", len(claimedBy), numIssues)
+	}
+	for id := range want {
+		if _, ok := claimedBy[id]; !ok {
+			t.Errorf("issue %s was never claimed (stranded)", id)
+		}
+	}
+
+	// Cross-check against the store: nothing should remain ready/open.
+	remaining, err := store.ClaimReadyIssue(ctx, types.WorkFilter{}, "final-sweeper")
+	if err != nil {
+		t.Fatalf("final sweep: %v", err)
+	}
+	if remaining != nil {
+		t.Errorf("ready-front not fully drained: %s still claimable after all workers finished", remaining.ID)
+	}
+
+	// Distribution sanity (informational): how evenly work spread across workers.
+	perWorker := make(map[string]int)
+	for _, actor := range claimedBy {
+		perWorker[actor]++
+	}
+	t.Logf("drain complete: %d issues across %d workers: %v", len(claimedBy), numWorkers, perWorker)
+}

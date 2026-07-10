@@ -1,6 +1,7 @@
 package db
 
 import (
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -11,9 +12,17 @@ func (s *testSuite) TestDependencySQLRepository() {
 		s.Run("RejectsSelfDependency", s.depInsertSelfDep)
 		s.Run("RejectsEmptyIDs", s.depInsertEmptyIDs)
 		s.Run("SameTypeIsIdempotentMetadataRefresh", s.depInsertIdempotentSameType)
+		s.Run("UsesDeterministicID", s.depInsertUsesDeterministicID)
 		s.Run("DifferentTypeIsRejected", s.depInsertConflictingType)
 		s.Run("MissingTargetIssueFailsFK", s.depInsertFKViolation)
 		s.Run("ThreadIDPersists", s.depInsertThreadID)
+	})
+	s.Run("Delete", func() {
+		s.Run("ReturnsFoundFalseOnMissingEdge", s.depDeleteMissingEdge)
+		s.Run("ReturnsTypeAndDependsOnID", s.depDeleteReturnsMetadata)
+		s.Run("RemovesRow", s.depDeleteRemovesRow)
+		s.Run("RejectsEmptyIDs", s.depDeleteEmptyIDs)
+		s.Run("WispRoutesToWispDependencies", s.depDeleteWispRouting)
 	})
 	s.Run("HasCycle", func() {
 		s.Run("StraightLineIsAcyclic", s.depCycleAcyclic)
@@ -61,6 +70,23 @@ func newDep(issueID, dependsOnID string, t types.DependencyType) *types.Dependen
 		DependsOnID: dependsOnID,
 		Type:        t,
 	}
+}
+
+// depInsertUsesDeterministicID guards the #4259 fix on the server-mode (use-case)
+// insert path: the row must carry the deterministic id derived from
+// (issue_id, target), not a random UUID — otherwise the table is merge-unsafe and,
+// after the DEFAULT (UUID()) is dropped, the insert fails outright.
+func (s *testSuite) depInsertUsesDeterministicID() {
+	s.seedIssueRow("bd-dep-det-a")
+	s.seedIssueRow("bd-dep-det-b")
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("bd-dep-det-a", "bd-dep-det-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+
+	var gotID string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT id FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
+		"bd-dep-det-a", "bd-dep-det-b").Scan(&gotID))
+	s.Equal(depid.New("bd-dep-det-a", "bd-dep-det-b"), gotID)
 }
 
 func (s *testSuite) depInsertRoundTrip() {
@@ -382,8 +408,8 @@ func (s *testSuite) depWispHasCycleCrossTable() {
 	// with depends_on_wisp_id set. We need to insert via raw SQL because our
 	// Insert path writes to depends_on_issue_id only.
 	_, err := s.Runner().ExecContext(s.Ctx(), `
-		INSERT INTO dependencies (issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
-		VALUES (?, ?, 'blocks', NOW(), 'tester', '{}')
+		INSERT INTO dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
+		VALUES (UUID(), ?, ?, 'blocks', NOW(), 'tester', '{}')
 	`, "bd-dep-cx-a", "bd-dep-cx-s")
 	s.Require().NoError(err)
 	// s -> b: source s is wisp, target is permanent. Stored in wisp_dependencies.
@@ -462,8 +488,8 @@ func (s *testSuite) depBlockingInfoAcrossUnions() {
 		newDep("bd-bi-x-target", "bd-bi-x-permblocker", types.DepBlocks), "tester",
 		domain.DepInsertOpts{}))
 	_, err := s.Runner().ExecContext(s.Ctx(), `
-		INSERT INTO wisp_dependencies (issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
-		VALUES (?, ?, 'blocks', NOW(), 'tester', '{}')
+		INSERT INTO wisp_dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
+		VALUES (UUID(), ?, ?, 'blocks', NOW(), 'tester', '{}')
 	`, "bd-bi-x-target", "bd-bi-x-wispblocker")
 	s.Require().NoError(err)
 
@@ -483,4 +509,75 @@ func (s *testSuite) depWispDirectBackEdge() {
 	cycle, err := r.HasCycle(s.Ctx(), "bd-dep-wd-t", "bd-dep-wd-s")
 	s.Require().NoError(err)
 	s.True(cycle, "fast path must probe wisp_dependencies too")
+}
+
+func (s *testSuite) depDeleteMissingEdge() {
+	s.seedIssueRow("bd-dep-del-miss-a")
+	s.seedIssueRow("bd-dep-del-miss-b")
+	r := s.depRepo()
+
+	res, err := r.Delete(s.Ctx(), "bd-dep-del-miss-a", "bd-dep-del-miss-b", "tester", domain.DepInsertOpts{})
+	s.Require().NoError(err, "Delete on a non-existent edge must succeed (mirrors RemoveDependencyInTx)")
+	s.False(res.Found, "Found must be false so callers like Reparent can distinguish no-op from removal")
+}
+
+func (s *testSuite) depDeleteReturnsMetadata() {
+	s.seedIssueRow("bd-dep-del-meta-a")
+	s.seedIssueRow("bd-dep-del-meta-b")
+	r := s.depRepo()
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-dep-del-meta-a", "bd-dep-del-meta-b", types.DepParentChild), "tester", domain.DepInsertOpts{}))
+
+	res, err := r.Delete(s.Ctx(), "bd-dep-del-meta-a", "bd-dep-del-meta-b", "tester", domain.DepInsertOpts{})
+	s.Require().NoError(err)
+	s.True(res.Found)
+	s.Equal(types.DepParentChild, res.Type)
+	s.Equal("bd-dep-del-meta-b", res.DependsOnID)
+}
+
+func (s *testSuite) depDeleteRemovesRow() {
+	s.seedIssueRow("bd-dep-del-row-a")
+	s.seedIssueRow("bd-dep-del-row-b")
+	r := s.depRepo()
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-dep-del-row-a", "bd-dep-del-row-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+
+	_, err := r.Delete(s.Ctx(), "bd-dep-del-row-a", "bd-dep-del-row-b", "tester", domain.DepInsertOpts{})
+	s.Require().NoError(err)
+
+	out, err := r.ListByIssueIDs(s.Ctx(), []string{"bd-dep-del-row-a"}, domain.DepListOpts{Direction: domain.DepDirectionOut})
+	s.Require().NoError(err)
+	s.Empty(out.Outgoing["bd-dep-del-row-a"], "deleted dep must disappear from outgoing list")
+}
+
+func (s *testSuite) depDeleteEmptyIDs() {
+	r := s.depRepo()
+	_, err := r.Delete(s.Ctx(), "", "bd-x", "tester", domain.DepInsertOpts{})
+	s.Require().Error(err)
+	_, err = r.Delete(s.Ctx(), "bd-x", "", "tester", domain.DepInsertOpts{})
+	s.Require().Error(err)
+}
+
+func (s *testSuite) depDeleteWispRouting() {
+	s.seedIssueRow("bd-dep-del-wisp-issuesrc")
+	s.seedIssueRow("bd-dep-del-wisp-issuetgt")
+	s.seedWispRow("bd-dep-del-wisp-wispsrc")
+	s.seedWispRow("bd-dep-del-wisp-wisptgt")
+	r := s.depRepo()
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-dep-del-wisp-issuesrc", "bd-dep-del-wisp-issuetgt", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-dep-del-wisp-wispsrc", "bd-dep-del-wisp-wisptgt", types.DepBlocks), "tester", domain.DepInsertOpts{UseWispsTable: true}))
+
+	res, err := r.Delete(s.Ctx(), "bd-dep-del-wisp-wispsrc", "bd-dep-del-wisp-wisptgt", "tester", domain.DepInsertOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.True(res.Found)
+
+	var permCount, wispCount int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", "bd-dep-del-wisp-issuesrc").Scan(&permCount))
+	s.Equal(1, permCount, "wisp-routed Delete must not touch the dependencies table")
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?", "bd-dep-del-wisp-wispsrc").Scan(&wispCount))
+	s.Equal(0, wispCount, "wisp-routed Delete must remove from wisp_dependencies")
 }

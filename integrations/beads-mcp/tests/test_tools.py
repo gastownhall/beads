@@ -5,14 +5,17 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from beads_mcp.models import BlockedIssue, Issue, Stats, StatsSummary
+from beads_mcp.models import BlockedIssue, Comment, Issue, Stats, StatsSummary
 from beads_mcp.tools import (
+    beads_add_comment,
     beads_add_dependency,
+    beads_add_note,
     beads_blocked,
     beads_claim_issue,
     beads_close_issue,
     beads_create_issue,
     beads_init,
+    beads_list_comments,
     beads_list_issues,
     beads_quickstart,
     beads_ready_work,
@@ -276,6 +279,122 @@ async def test_beads_add_dependency_error():
 
     assert "Error" in result
     mock_client.add_dependency.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_beads_add_comment_success():
+    """Test beads_add_comment tool success."""
+    mock_client = AsyncMock()
+    mock_client.add_comment = AsyncMock(return_value="Added comment to bd-1")
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        result = await beads_add_comment(issue_id="bd-1", text="Fixed the race; tests pass")
+
+    assert result == "Added comment to bd-1"
+    mock_client.add_comment.assert_called_once()
+    params = mock_client.add_comment.call_args[0][0]
+    assert params.issue_id == "bd-1"
+    assert params.text == "Fixed the race; tests pass"
+
+
+@pytest.mark.asyncio
+async def test_beads_add_comment_error_propagates():
+    """Test that a BdError from the client propagates out of beads_add_comment."""
+    from beads_mcp.bd_client import BdError
+
+    mock_client = AsyncMock()
+    mock_client.add_comment = AsyncMock(side_effect=BdError("Issue not found: bd-404"))
+
+    with (
+        patch("beads_mcp.tools._get_client", return_value=mock_client),
+        pytest.raises(BdError, match="not found"),
+    ):
+        await beads_add_comment(issue_id="bd-404", text="orphan comment")
+
+    mock_client.add_comment.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_beads_list_comments_success():
+    """Test beads_list_comments tool success."""
+    comments = [
+        Comment(
+            id="c-1",
+            issue_id="bd-1",
+            author="agent",
+            text="First comment",
+            created_at=datetime(2026, 7, 7, 12, 0, 0, tzinfo=timezone.utc),
+        ),
+        Comment(
+            id="c-2",
+            issue_id="bd-1",
+            author=None,
+            text="Second comment",
+            created_at=datetime(2026, 7, 7, 12, 5, 0, tzinfo=timezone.utc),
+        ),
+    ]
+    mock_client = AsyncMock()
+    mock_client.list_comments = AsyncMock(return_value=comments)
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        result = await beads_list_comments(issue_id="bd-1")
+
+    assert len(result) == 2
+    assert result[0].text == "First comment"
+    assert result[1].author is None
+    mock_client.list_comments.assert_called_once()
+    params = mock_client.list_comments.call_args[0][0]
+    assert params.issue_id == "bd-1"
+
+
+@pytest.mark.asyncio
+async def test_beads_list_comments_error_propagates():
+    """Test that a BdError from the client propagates out of beads_list_comments."""
+    from beads_mcp.bd_client import BdError
+
+    mock_client = AsyncMock()
+    mock_client.list_comments = AsyncMock(side_effect=BdError("Issue not found: bd-404"))
+
+    with (
+        patch("beads_mcp.tools._get_client", return_value=mock_client),
+        pytest.raises(BdError, match="not found"),
+    ):
+        await beads_list_comments(issue_id="bd-404")
+
+    mock_client.list_comments.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_beads_add_note_success():
+    """Test beads_add_note tool success."""
+    mock_client = AsyncMock()
+    mock_client.add_note = AsyncMock(return_value="Appended note to bd-1")
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        result = await beads_add_note(issue_id="bd-1", text="Blocked on upstream PR")
+
+    assert result == "Appended note to bd-1"
+    mock_client.add_note.assert_called_once()
+    params = mock_client.add_note.call_args[0][0]
+    assert params.issue_id == "bd-1"
+    assert params.text == "Blocked on upstream PR"
+
+
+@pytest.mark.asyncio
+async def test_beads_add_note_error_propagates():
+    """Test that a BdError from the client propagates out of beads_add_note."""
+    from beads_mcp.bd_client import BdError
+
+    mock_client = AsyncMock()
+    mock_client.add_note = AsyncMock(side_effect=BdError("Issue not found: bd-404"))
+
+    with (
+        patch("beads_mcp.tools._get_client", return_value=mock_client),
+        pytest.raises(BdError, match="not found"),
+    ):
+        await beads_add_note(issue_id="bd-404", text="orphan note")
+
+    mock_client.add_note.assert_called_once()
 
 
 @pytest.mark.asyncio

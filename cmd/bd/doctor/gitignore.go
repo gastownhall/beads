@@ -47,6 +47,7 @@ redirect
 .sync.lock
 export-state/
 export-state.json
+last_pull
 
 # Ephemeral store (SQLite - wisps/molecules, intentionally not versioned)
 ephemeral.sqlite3
@@ -109,6 +110,7 @@ var requiredPatterns = []string{
 	".sync.lock",
 	"export-state/",
 	"export-state.json",
+	"last_pull",
 	"dolt/",
 	"embeddeddolt/",
 	"proxieddb/",

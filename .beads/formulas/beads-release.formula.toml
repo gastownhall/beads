@@ -7,7 +7,7 @@
 # Phases:
 #   1. Prep & Push: preflight -> push-tag (polecat work)
 #   2. Gate: await-ci (async wait for release.yml)
-#   3. Verify: verify-github, verify-npm, verify-pypi (parallel)
+#   3. Verify: verify-github, verify-npm, verify-pypi, verify-homebrew-core (parallel)
 #   4. Install: local-install -> cleanup-stale-dolt-orphans -> release-complete
 
 formula = "beads-release"
@@ -26,7 +26,7 @@ Gate (Async Wait):
   5. await-ci: Gate on GitHub Actions release.yml completion
 
 Phase 2 (Parallel Verification):
-  6. Verify GitHub release, npm package, PyPI package (concurrent)
+  6. Verify GitHub release, npm package, PyPI package, Homebrew core formula (concurrent)
 
 Phase 3 (Installation):
   7. Local installation update
@@ -726,6 +726,66 @@ Should show {{version}}.
 Note: PyPI may have a small propagation delay (1-2 min).
 """
 
+[[steps]]
+id = "verify-homebrew-core"
+title = "Verify Homebrew core formula"
+needs = ["await-ci"]
+description = """
+Confirm Homebrew core has the stable formula update.
+
+Release candidates are not published to Homebrew. If `{{version}}` contains a
+hyphen, record that Homebrew intentionally remains on the latest stable release
+and skip the rest of this step.
+
+Stable releases:
+
+1. Check whether Homebrew already opened the canonical bump PR:
+   ```bash
+   gh pr list \
+     --repo Homebrew/homebrew-core \
+     --search "beads {{version}} in:title" \
+     --state all
+   ```
+
+2. If a BrewTestBot or `brew bump-formula-pr` PR already exists, track that PR.
+   Do not open a duplicate manual PR. Do not push to the PR branch before
+   Homebrew's bottle commits are pushed.
+
+3. If no PR exists, open it with Homebrew's bump tool:
+   ```bash
+   brew bump-formula-pr \
+     --url="https://github.com/gastownhall/beads/archive/refs/tags/v{{version}}.tar.gz" \
+     beads
+   ```
+
+   This computes the source checksum and lets Homebrew/BrewTestBot manage the
+   bottle block. Do not remove or hand-edit the bottle block.
+
+4. If a manual PR is unavoidable, fill in Homebrew's current PR template before
+   opening or editing the PR:
+   ```bash
+   gh api repos/Homebrew/homebrew-core/contents/.github/PULL_REQUEST_TEMPLATE.md \
+     -H 'Accept: application/vnd.github.raw'
+   ```
+
+   Do not leave the checklist/body blank. An incomplete or stale template causes
+   Homebrew automation to close the PR.
+
+5. Verify the merged formula on `Homebrew/homebrew-core@main`:
+   ```bash
+   gh api '/repos/Homebrew/homebrew-core/contents/Formula/b/beads.rb?ref=main' \
+     -H 'Accept: application/vnd.github.raw' | tee /tmp/homebrew-beads.rb
+
+   grep -F 'homepage "https://github.com/gastownhall/beads"' /tmp/homebrew-beads.rb
+   grep -F 'url "https://github.com/gastownhall/beads/archive/refs/tags/v{{version}}.tar.gz"' /tmp/homebrew-beads.rb
+   grep -F 'bottle do' /tmp/homebrew-beads.rb
+   ```
+
+6. Record the merged Homebrew PR on the release tracker. If a duplicate manual
+   PR was closed by Homebrew automation after the canonical PR merged, leave it
+   closed and note which PR is canonical.
+"""
+
 # =============================================================================
 # Phase 3: Installation (Fan-in)
 # =============================================================================
@@ -733,7 +793,7 @@ Note: PyPI may have a small propagation delay (1-2 min).
 [[steps]]
 id = "local-install"
 title = "Update local installation"
-needs = ["verify-github", "verify-npm", "verify-pypi"]
+needs = ["verify-github", "verify-npm", "verify-pypi", "verify-homebrew-core"]
 description = """
 Update local bd to the new version.
 
@@ -741,7 +801,7 @@ Step 1: Install release binary
 
 Option A - Homebrew:
 ```bash
-brew upgrade bd
+brew upgrade beads
 ```
 
 Option B - Install script:

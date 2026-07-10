@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -50,21 +51,33 @@ Examples:
   bd config apply
   bd config apply --dry-run
   bd config apply --json`,
-	Run: func(cmd *cobra.Command, _ []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("config-apply")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		results := runApply(dryRun)
 
 		if jsonOutput {
-			outputJSON(results)
+			if err := outputJSON(results); err != nil {
+				return err
+			}
 		} else {
 			printApplyResults(results)
 		}
 
 		for _, r := range results {
 			if r.Status == applyStatusError {
-				os.Exit(1)
+				return SilentExit()
 			}
 		}
+		return nil
 	},
 }
 

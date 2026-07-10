@@ -73,7 +73,7 @@ Examples:
   bd linear status              # Show sync status
 
 ```
-bd linear
+bd linear [flags]
 ```
 
 ### bd linear pull
@@ -120,7 +120,7 @@ Show the current Linear sync status, including:
   - Issues pending push (no external_ref)
 
 ```
-bd linear status
+bd linear status [flags]
 ```
 
 ### bd linear sync
@@ -153,6 +153,18 @@ Type Filtering (--push only):
   --include-ephemeral       Include ephemeral issues (wisps, etc.); default is to exclude
   --parent TICKET           Only push this ticket and its descendants
   --relations               Import Linear relations as bd dependencies on pull
+
+Persistent push-direction ID filters (workflow artifacts, sandbox beads, etc.):
+  bd config set linear.exclude_id_prefix "hw-mol-"
+  bd config set linear.exclude_id_patterns "-wisp-,sandbox-,scratch-"
+
+  exclude_id_prefix is a single case-sensitive prefix on the bead ID.
+  exclude_id_patterns is a comma-separated list of case-sensitive substrings
+  (matched anywhere in the ID). Both are combined as a union: a bead
+  matching either rule is skipped from push (no create, no update). Beads
+  with an existing external_ref that NOW match are silently skipped on
+  future syncs; the Linear-side issue persists — archive/delete it manually
+  if desired.
 
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
@@ -210,5 +222,5 @@ Example:
   bd config set linear.team_id "12345678-1234-1234-1234-123456789abc"
 
 ```
-bd linear teams
+bd linear teams [flags]
 ```
