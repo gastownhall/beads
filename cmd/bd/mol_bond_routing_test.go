@@ -7,59 +7,53 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
-// TestResolveBondStore is the regression test for GH#4220: `bd mol bond` resolved
-// its operands only against the active store, so when the target issue lived in a
-// different (routed) database — e.g. invoked from the town root where the active store
-// is the town DB but the target lives in a rig DB — the bond failed with
-// "'<id>' not found", even though `bd show`/`bd update`/`bd close` routed the same ID
-// fine. resolveBondStore performs the same routing fallback and returns the database
-// the bond must operate on, so spawned wisps land in the target's database.
+// TestResolveMolBondOperandRouting is the regression test for the mol-bond
+// routing bug: `bd mol bond <formula> <bead>` failed with
+// "'<bead>' not found (not an issue ID or formula name)" whenever <bead> lived
+// in a routed store (a prefix-routed rig, or the contributor planning store),
+// even though `bd show <bead>` resolved it. mol bond resolved operands with
+// utils.ResolvePartialID against the local store only and never fell through to
+// the routing fallback that show/update/close use.
 //
-// Cases:
-//   - local target (no routing) → returns the local primary store
-//   - routed target → returns the routed store, not the local one
-//   - formula operand + routed target → formula is skipped, routed target wins
-//   - nothing resolvable (formula only) → falls back to the local store
-func TestResolveBondStore(t *testing.T) {
+// resolveMolBondOperand now routes operand resolution through
+// resolveAndGetIssueForMutation, so an operand that exists only in a routed
+// store resolves and reports the routed store as its owner. The bond mutation
+// then runs against that store instead of the local one.
+//
+// The cases mirror TestResolveCloseTargets:
+//   - maintainer-mode local resolution (no routing involved)
+//   - contributor-mode operand that lives only in the routed planning store
+func TestResolveMolBondOperandRouting(t *testing.T) {
 	cases := []struct {
 		name          string
-		role          string
-		enableRouting bool
-		localSeed     []string
-		planningSeed  []string
-		operands      []string
-		wantRouted    bool // true: expect a store != local; false: expect the local store
+		role          string // git config beads.role value
+		enableRouting bool   // set routing.mode=auto + routing.contributor=<planningDir>
+		localSeed     string // issue ID to create in the primary (local) store, if non-empty
+		planningSeed  string // issue ID to create in the routed planning store, if non-empty
+		operand       string // argument to resolveMolBondOperand
+		wantRouted    bool   // expected molBondOperand.routed
+		wantStore     string // "local" (== primaryStore) or "planning" (routed handle)
 	}{
 		{
-			name:       "local_target_uses_local_store",
+			name:       "maintainer_local_issue",
 			role:       "maintainer",
-			localSeed:  []string{"shared-here"},
-			operands:   []string{"mol-some-formula", "shared-here"},
+			localSeed:  "shared-local",
+			operand:    "shared-local",
 			wantRouted: false,
+			wantStore:  "local",
 		},
 		{
-			name:          "routed_target_uses_routed_store",
+			name:          "contributor_routed_issue",
 			role:          "contributor",
 			enableRouting: true,
-			planningSeed:  []string{"shared-there"},
-			operands:      []string{"mol-some-formula", "shared-there"},
+			planningSeed:  "shared-routed",
+			operand:       "shared-routed",
 			wantRouted:    true,
-		},
-		{
-			name:          "formula_operand_skipped_routed_target_wins",
-			role:          "contributor",
-			enableRouting: true,
-			planningSeed:  []string{"shared-target"},
-			operands:      []string{"shared-target", "mol-polecat-work"},
-			wantRouted:    true,
-		},
-		{
-			name:       "no_resolvable_operand_falls_back_to_local",
-			role:       "maintainer",
-			operands:   []string{"mol-a", "mol-b"},
-			wantRouted: false,
+			wantStore:     "planning",
 		},
 	}
 
@@ -86,15 +80,14 @@ func TestResolveBondStore(t *testing.T) {
 				}
 			}
 
-			for _, id := range tc.localSeed {
-				seedIssue(t, ctx, primaryStore, id)
+			if tc.localSeed != "" {
+				seedIssue(t, ctx, primaryStore, tc.localSeed)
 			}
-
-			if len(tc.planningSeed) > 0 {
+			if tc.planningSeed != "" {
 				planningStore := newTestStoreIsolatedDB(t, filepath.Join(planningDir, ".beads", "beads.db"), "shared")
-				for _, id := range tc.planningSeed {
-					seedIssue(t, ctx, planningStore, id)
-				}
+				seedIssue(t, ctx, planningStore, tc.planningSeed)
+				// Release the planning store so resolveMolBondOperand can open the
+				// routed store through the normal command path.
 				if err := planningStore.Close(); err != nil {
 					t.Fatalf("close planning store: %v", err)
 				}
@@ -109,21 +102,45 @@ func TestResolveBondStore(t *testing.T) {
 				t.Fatalf("chdir repoDir: %v", err)
 			}
 
-			workStore, closeWorkStore := resolveBondStore(ctx, primaryStore, tc.operands)
-			defer closeWorkStore()
+			op, err := resolveMolBondOperand(ctx, primaryStore, tc.operand, nil)
+			if err != nil {
+				t.Fatalf("resolveMolBondOperand(%q): %v", tc.operand, err)
+			}
+			defer op.Close()
 
-			if workStore == nil {
-				t.Fatal("resolveBondStore returned a nil store")
+			if op.subgraph == nil || op.subgraph.Root == nil {
+				t.Fatalf("operand %q: missing resolved subgraph", tc.operand)
 			}
-			if tc.wantRouted {
-				if workStore == primaryStore {
-					t.Errorf("expected a routed store, got the local primary store")
-				}
-			} else {
-				if workStore != primaryStore {
-					t.Errorf("expected the local primary store, got a routed store")
-				}
+			if op.subgraph.Root.ID != tc.operand {
+				t.Errorf("operand %q: Root.ID = %q, want %q", tc.operand, op.subgraph.Root.ID, tc.operand)
 			}
+			if op.cooked {
+				t.Errorf("operand %q: cooked = true, want false (it is an existing issue)", tc.operand)
+			}
+			if op.routed != tc.wantRouted {
+				t.Errorf("operand %q: routed = %v, want %v", tc.operand, op.routed, tc.wantRouted)
+			}
+
+			assertStoreOrigin(t, tc.operand, tc.wantStore, op.store, primaryStore)
 		})
+	}
+}
+
+func assertStoreOrigin(t *testing.T, operand, want string, got, local storage.DoltStorage) {
+	t.Helper()
+	switch want {
+	case "local":
+		if got != local {
+			t.Errorf("operand %q: store should be the local primary store", operand)
+		}
+	case "planning":
+		if got == nil {
+			t.Errorf("operand %q: store is nil", operand)
+		}
+		if got == local {
+			t.Errorf("operand %q: store should be the routed planning store, not the local one", operand)
+		}
+	default:
+		t.Fatalf("operand %q: unknown wantStore %q", operand, want)
 	}
 }

@@ -90,6 +90,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every remote-ahead case, as before
   ([#4259](https://github.com/gastownhall/beads/issues/4259)).
 
+### Fixed
+
+- **`bd mol bond <A> <B>` ignored prefix routing** — operand resolution now uses
+  the same routing fallback as `bd show`/`bd update`/`bd close`, so a bead that
+  lives in a routed store (a prefix-routed rig via `routes.jsonl`, or the
+  contributor planning store) resolves instead of failing with `'<id>' not found
+  (not an issue ID or formula name)`. Previously `bd mol bond` resolved operands
+  against the local store only, so `gt sling <bead> <rig>` — which cooks the
+  default formula and bonds it to a rig-routed bead — died at `bd mol bond` even
+  though `bd show <bead>` resolved the same ID. Resolution is write-intent: a
+  prefix-routed target opens writable and the bond commits where the bead lives.
+  A bond whose two operands resolve to different stores is rejected rather than
+  written to the wrong database. Same routing-parity fix as
+  [#3608](https://github.com/gastownhall/beads/issues/3608) for `bd close`.
+  Fixes [#4714](https://github.com/gastownhall/beads/issues/4714).
+
 ## [1.1.0] - 2026-07-04
 
 First stable release of the 1.1.0 line. It consolidates everything from
