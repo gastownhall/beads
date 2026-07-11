@@ -228,6 +228,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emphasis (`**bold**`, `*italic*`), `SELECT * FROM t`, code spans and fenced
   blocks all render exactly as before.
 
+- **`bd mol bond <A> <B>` ignored prefix routing** — operand resolution now uses
+  the same routing fallback as `bd show`/`bd update`/`bd close`, so a bead that
+  lives in a routed store (a prefix-routed rig via `routes.jsonl`, or the
+  contributor planning store) resolves instead of failing with `'<id>' not found
+  as issue or formula`. Previously `bd mol bond` resolved operands
+  against the local store only, so `gt sling <bead> <rig>` — which cooks the
+  default formula and bonds it to a rig-routed bead — died at `bd mol bond` even
+  though `bd show <bead>` resolved the same ID. Resolution is write-intent: a
+  prefix-routed target opens writable and the bond commits where the bead lives.
+  A bond whose two operands resolve to different stores is rejected rather than
+  written to the wrong database. Same routing-parity fix as
+  [#3608](https://github.com/gastownhall/beads/issues/3608) for `bd close`.
+  Fixes [#4714](https://github.com/gastownhall/beads/issues/4714).
+
 ### Documentation
 
 - **The heartbeat/re-home invariant and the two states it can strand are now
