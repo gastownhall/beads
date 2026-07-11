@@ -25,11 +25,12 @@ Routes define which repository handles which issues:
 
 ### Work Assignment
 
-Pin work to specific agents:
+Assign or atomically claim work:
 
 ```bash
-bd pin bd-42 --for agent-1 --start
-bd hook --agent agent-1  # Show pinned work
+bd assign bd-42 agent-1        # shorthand for bd update bd-42 --assignee agent-1
+bd update bd-42 --claim        # atomically set assignee + in_progress
+bd ready --claim --json        # claim the first ready match
 ```
 
 ### Cross-repo Dependencies
@@ -37,7 +38,7 @@ bd hook --agent agent-1  # Show pinned work
 Track dependencies across repositories:
 
 ```bash
-bd dep add bd-42 external:other-repo/bd-100
+bd dep add bd-42 external:other-repo:api-ready
 ```
 
 ## Architecture
@@ -62,7 +63,13 @@ bd dep add bd-42 external:other-repo/bd-100
 2. **Multi-repo**: Configure routes and cross-repo deps
 3. **Multi-agent**: Add work assignment and handoff
 
-## Navigation
+## Pages in this section
 
-- [Routing](/multi-agent/routing) - Auto-routing configuration
-- [Coordination](/multi-agent/coordination) - Agent coordination patterns
+- [Routing](/multi-agent/routing) — automatic issue routing across
+  repositories and `BEADS_DIR` resolution.
+- [Coordination](/multi-agent/coordination) — work assignment and handoff
+  patterns between agents.
+- [Federation](/multi-agent/federation) — peer-to-peer sharing of beads
+  across repos and organizations.
+- [Multi-Repo Migration](/multi-agent/multi-repo-migration) — moving an
+  existing single-repo setup to multi-repo routing.

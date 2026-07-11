@@ -34,5 +34,16 @@ bd setup --list
 
 These integrations use the Beads MCP server rather than a dedicated `bd setup` recipe:
 
-- [MCP Server](/integrations/mcp-server)
-- [GitHub Copilot](/integrations/github-copilot)
+- [MCP Server](/integrations/mcp-server) — the beads MCP server for any
+  MCP-capable client.
+- [GitHub Copilot](/integrations/github-copilot) — Copilot in VS Code via
+  MCP.
+- [GitHub Copilot CLI](/integrations/copilot-cli) — the Copilot coding-agent
+  CLI.
+
+## Other Integration Surfaces
+
+- [Claude Code Plugin](/integrations/claude-code-plugin) — the packaged
+  plugin with slash commands and MCP tools (`/plugin install beads`).
+- [Azure DevOps](/integrations/azure-devops) — configuration reference for
+  syncing beads with ADO work items.

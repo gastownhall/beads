@@ -279,7 +279,7 @@ bd dolt start
 ## See Also
 
 - [SYNC_CONCEPTS.md](/core-concepts/sync-concepts) — The conceptual model behind this setup (why Dolt is the source of truth, what JSONL is for)
-- [QUICKSTART.md](/getting-started/quickstart) — Getting started with beads
+- [Quick Start](/getting-started/quickstart) — Getting started with beads
 - [DOLT.md](/architecture/dolt) — Dolt backend details, server modes, federation, remote types, and sync modes
 - [INSTALLING.md](/getting-started/installation) — Installation for all platforms
 

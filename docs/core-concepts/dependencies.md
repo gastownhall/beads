@@ -321,7 +321,7 @@ bd ready                         # Only "Design" is ready
 
 ## See Also
 
-- [QUICKSTART.md](/getting-started/quickstart) — First steps with dependencies
+- [Quick Start](/getting-started/quickstart) — First steps with dependencies
 - [MOLECULES.md](/workflows/molecules) — Molecule workflows using gates and dependencies
 - [MULTI_REPO_AGENTS.md](/multi-agent/coordination) — Cross-repo dependency patterns
 - [DOLT.md](/architecture/dolt) — Dolt backend configuration

@@ -276,4 +276,4 @@ jobs:
 
 - [docs/reference/protected-branches.md](../../docs/reference/protected-branches.md) - Complete guide
 - [AGENTS.md](../../AGENTS.md) - Agent integration instructions
-- [docs/QUICKSTART.md](../../docs/QUICKSTART.md) - `bd dolt push` / `bd dolt pull` usage
+- [docs/getting-started/quickstart.md](../../docs/getting-started/quickstart.md) - `bd dolt push` / `bd dolt pull` usage

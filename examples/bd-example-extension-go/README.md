@@ -237,4 +237,4 @@ This pattern is used in production by:
 ## See Also
 
 - [../../README.md](../../README.md) - bd documentation
-- [QUICKSTART.md](../../docs/QUICKSTART.md) - Quick start tutorial
+- [quickstart](../../docs/getting-started/quickstart.md) - Quick start tutorial

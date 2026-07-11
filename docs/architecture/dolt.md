@@ -59,6 +59,18 @@ Migration creates backups automatically. Your original SQLite database is preser
 
 ## Modes of Operation
 
+```mermaid
+flowchart LR
+    subgraph embedded["Embedded mode (default) — bd init"]
+        bd1["bd process<br/>Dolt runs in-process"] --> d1[(".beads/embeddeddolt/<br/>single writer, file-locked")]
+    end
+    subgraph server["Server mode — bd init --server"]
+        bd2["bd (agent 1)"] --> srv["dolt sql-server"]
+        bd3["bd (agent 2)"] --> srv
+        srv --> d2[(".beads/dolt/<br/>concurrent writers")]
+    end
+```
+
 ### Embedded Mode (Solo / Standalone)
 
 In-process Dolt engine — no separate server needed. This is the default for

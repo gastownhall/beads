@@ -12,7 +12,7 @@ This guide helps you adopt beads' multi-repo workflow for OSS contributions, tea
 - [Multi-Phase Development](#multi-phase-development) - Separate repos per phase
 - [Multiple Personas](#multiple-personas) - Architect vs. implementer separation
 
-**New to beads?** See [QUICKSTART.md](/getting-started/quickstart) first.
+**New to beads?** See [Quick Start](/getting-started/quickstart) first.
 
 ## What is Multi-Repo Mode?
 

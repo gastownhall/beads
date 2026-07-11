@@ -9,10 +9,12 @@ This section provides step-by-step recovery procedures for common Beads issues. 
 
 | Issue | Symptoms | Runbook |
 |-------|----------|---------|
-| Database Corruption | SQLite errors, missing data | [Database Corruption](/recovery/database-corruption) |
+| Init Safety Refusals | `bd init` or `bd dolt` refuses with a pattern code like `pk-fork-refused` | [Recovery Playbooks](/recovery/init-safety) |
+| Database Corruption | Database errors, missing data | [Database Corruption](/recovery/database-corruption) |
 | Merge Conflicts | Dolt conflicts during sync | [Merge Conflicts](/recovery/merge-conflicts) |
 | Circular Dependencies | Cycle detection errors | [Circular Dependencies](/recovery/circular-dependencies) |
 | Sync Failures | `bd dolt push`/`bd dolt pull` errors | [Sync Failures](/recovery/sync-failures) |
+| Removing beads | Uninstall bd or strip beads from a repo | [Uninstalling](/recovery/uninstalling) |
 
 ## Quick Diagnostic
 

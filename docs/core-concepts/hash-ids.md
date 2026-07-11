@@ -11,6 +11,18 @@ Traditional sequential IDs (`#1`, `#2`, `#3`) break when:
 - Different branches have independent numbering
 - Forks diverge and later merge
 
+```mermaid
+flowchart TD
+    subgraph seq["Sequential IDs — collision on merge"]
+        a1["agent A creates #7"] --> m1["merge: two different #7s ✗"]
+        b1["agent B creates #7"] --> m1
+    end
+    subgraph hash["Hash IDs — no coordination needed"]
+        a2["agent A creates bd-a1b2"] --> m2["merge: both IDs survive ✓"]
+        b2["agent B creates bd-f14c"] --> m2
+    end
+```
+
 ## The Solution
 
 Beads uses hash-based IDs:

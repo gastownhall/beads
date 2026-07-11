@@ -246,6 +246,7 @@
       {
         "group": "Reference",
         "pages": [
+          "reference/index",
           "reference/configuration",
           "reference/git-integration",
           "reference/worktrees",
