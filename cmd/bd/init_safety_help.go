@@ -12,7 +12,7 @@ import (
 // format. Its contents are the authoritative runtime reference for the
 // error-message-no-echo invariant: refusal texts point here rather than
 // constructing copy-pasteable destructive invocations. See
-// docs/adr/0002-init-safety-invariants.md.
+// engdocs/adr/0002-init-safety-invariants.md.
 var initSafetyHelpCmd = &cobra.Command{
 	Use:   "init-safety",
 	Short: "Explain bd init flag semantics and the destroy-token format",

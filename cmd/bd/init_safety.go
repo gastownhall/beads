@@ -2,7 +2,7 @@ package main
 
 // Init-safety decision logic.
 //
-// See docs/adr/0002-init-safety-invariants.md for the ADR this encodes.
+// See engdocs/adr/0002-init-safety-invariants.md for the ADR this encodes.
 // The invariant: every `bd init` resolves `project_id` from exactly one
 // explicitly-named source; ambiguous sources refuse. `--force` (or its
 // replacement `--reinit-local`) bypasses the local data-safety guard only;

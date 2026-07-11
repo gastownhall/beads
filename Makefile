@@ -67,7 +67,7 @@ endif
 # -tags=gms_pure_go fails with a C-linker error from go-icu-regex
 # (unicode/uregex.h: No such file or directory) because go-mysql-server
 # links ICU by default under cgo; CGO_ENABLED=0 avoids that but can't open
-# embedded Dolt at runtime. See docs/ICU-POLICY.md.
+# embedded Dolt at runtime. See engdocs/ICU-POLICY.md.
 doctor-build:
 	@echo "Build environment diagnostic (doctor-build):"
 	@GOFLAGS_VAL="$$(go env GOFLAGS)"; \

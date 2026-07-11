@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes bd's overall architecture - the data model, sync mechanism, and how components fit together. For product scope boundaries, see [PROJECT_CHARTER.md](PROJECT_CHARTER.md). For internal implementation details (FlushManager, Blocked Cache), see [INTERNALS.md](INTERNALS.md).
+This document describes bd's overall architecture - the data model, sync mechanism, and how components fit together. For product scope boundaries, see [PROJECT_CHARTER.md](../engdocs/PROJECT_CHARTER.md). For internal implementation details (FlushManager, Blocked Cache), see [INTERNALS.md](../engdocs/INTERNALS.md).
 
 ## The Two-Layer Data Model
 
@@ -135,7 +135,7 @@ Branch B: bd create "Add Stripe"  → bd-f14c (no collision)
 
 This eliminates the need for central coordination while ensuring all machines converge to the same state.
 
-See [COLLISION_MATH.md](COLLISION_MATH.md) for birthday paradox calculations on hash length vs collision probability.
+See [COLLISION_MATH.md](../engdocs/COLLISION_MATH.md) for birthday paradox calculations on hash length vs collision probability.
 
 ## Server Architecture
 
@@ -215,7 +215,7 @@ Each issue in the Dolt database (and in JSONL exports via `bd export`) has the f
 
 The schema is stable by default. Prefer issue metadata for integration,
 orchestration, or team-specific data before adding new first-class fields; see
-[Project Charter: Schema Boundary](PROJECT_CHARTER.md#schema-boundary).
+[Project Charter: Schema Boundary](../engdocs/PROJECT_CHARTER.md#schema-boundary).
 
 **Core Identification:**
 
@@ -359,10 +359,10 @@ The `bd mol squash` command uses hard delete intentionally - tombstones would be
 ## Related Documentation
 
 - [SYNC_CONCEPTS.md](SYNC_CONCEPTS.md) - How cross-machine sync works (Dolt source of truth, wire format, anti-patterns)
-- [PROJECT_CHARTER.md](PROJECT_CHARTER.md) - Product scope and boundaries
+- [PROJECT_CHARTER.md](../engdocs/PROJECT_CHARTER.md) - Product scope and boundaries
 - [MOLECULES.md](MOLECULES.md) - Molecular chemistry metaphor (protos, pour, bond, squash, burn)
-- [INTERNALS.md](INTERNALS.md) - FlushManager, Blocked Cache implementation details
+- [INTERNALS.md](../engdocs/INTERNALS.md) - FlushManager, Blocked Cache implementation details
 - [ADVANCED.md](ADVANCED.md) - Advanced features and configuration
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md) - Recovery procedures and common issues
 - [FAQ.md](FAQ.md) - Common questions about the architecture
-- [COLLISION_MATH.md](COLLISION_MATH.md) - Hash collision probability analysis
+- [COLLISION_MATH.md](../engdocs/COLLISION_MATH.md) - Hash collision probability analysis

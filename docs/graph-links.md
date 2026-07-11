@@ -274,6 +274,6 @@ Build conversation chains (via orchestrator mail):
 
 ## See Also
 
-- [Messaging](messaging.md) - Mail commands and threading
+- [Messaging](../engdocs/messaging.md) - Mail commands and threading
 - [Dependencies](QUICKSTART.md#dependencies) - Blocking dependencies
 - [CLI Reference](CLI_REFERENCE.md) - All commands

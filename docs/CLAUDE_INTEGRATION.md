@@ -109,7 +109,7 @@ bd setup claude --remove
 - `cmd/bd/prime.go` - Context generation
 - `cmd/bd/setup/claude.go` - Hook installation
 - `cmd/bd/doctor/claude.go` - Integration verification
-- `docs/CLAUDE.md` - General project guidance for Claude
+- `engdocs/CLAUDE.md` - General project guidance for Claude
 
 ## References
 

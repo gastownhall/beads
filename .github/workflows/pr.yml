@@ -67,7 +67,7 @@ jobs:
 
   # Fast check: every `go build|test|run|generate|install` invocation in
   # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
-  # regressions from re-entering the build (see docs/ICU-POLICY.md).
+  # regressions from re-entering the build (see engdocs/ICU-POLICY.md).
   check-build-tags:
     name: Check build-tag policy
     runs-on: ubuntu-latest

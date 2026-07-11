@@ -69,7 +69,7 @@ exists only as an opt-in maintainer path.
 
 ### Go Test Runner
 
-`scripts/test.sh` is the local wrapper recommended by `docs/TESTING.md`.
+`scripts/test.sh` is the local wrapper recommended by `engdocs/TESTING.md`.
 
 It:
 
@@ -282,9 +282,9 @@ than a repeatable CI path.
 
 Examples:
 
-- `docs/TESTING.md` says the wrapper script is consistent with CI, but PR CI
+- `engdocs/TESTING.md` says the wrapper script is consistent with CI, but PR CI
   uses direct `go test`.
-- `docs/LINTING.md` says CI may not fail on known lint issues, while the
+- `engdocs/LINTING.md` says CI may not fail on known lint issues, while the
   workflow uses the standard `golangci-lint` action without an explicit
   non-failing issues exit code.
 - Older staged audit docs contain obsolete test counts.
@@ -372,5 +372,5 @@ For every tier, capture enough artifacts to debug failures without rerunning:
    focused cmd/bd subset is enough.
 5. Add path-gated MCP, npm package, and website checks before touching the main
    Go matrix.
-6. Keep `docs/TESTING.md` aligned with the wrapper commands as direct workflow
+6. Keep `engdocs/TESTING.md` aligned with the wrapper commands as direct workflow
    commands are replaced.

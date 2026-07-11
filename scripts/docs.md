@@ -61,7 +61,7 @@ Validates marker-based freshness for reference-shaped docs that are not generate
 make check-docs
 ```
 
-The script currently checks the reference docs named in `docs/DOC_INVENTORY.md`: `CONFIG.md`, `SETUP.md`, `ADO_CONFIG.md`, `JSON_SCHEMA.md`, `RECOVERY.md`, `ERROR_HANDLING.md`, `LINTING.md`, and `design/otel/otel-data-model.md`. Each doc must be listed in the inventory, include a recent `Last reviewed:` marker, include a `Freshness source:` marker, and name source paths or globs that exist in the repository.
+The script currently checks the reference docs named in `engdocs/DOC_INVENTORY.md`: `CONFIG.md`, `SETUP.md`, `ADO_CONFIG.md`, `JSON_SCHEMA.md`, `RECOVERY.md`, `ERROR_HANDLING.md`, `LINTING.md`, and `design/otel/otel-data-model.md`. Each doc must be listed in the inventory, include a recent `Last reviewed:` marker, include a `Freshness source:` marker, and name source paths or globs that exist in the repository.
 
 Set `DOC_FRESHNESS_MAX_AGE_DAYS` to override the default 90-day review window. Set `DOC_FRESHNESS_TODAY=YYYY-MM-DD` when testing date behaviour.
 

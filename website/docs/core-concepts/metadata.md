@@ -11,7 +11,7 @@ The `metadata` field on issues accepts arbitrary JSON. Any valid JSON value is s
 Metadata is the preferred extension point for data that is specific to an
 integration, orchestrator, team workflow, or experimental automation. Before
 adding first-class fields, commands, or schema changes, check the
-[Project Charter](https://github.com/gastownhall/beads/blob/main/docs/PROJECT_CHARTER.md#schema-boundary).
+[Project Charter](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md#schema-boundary).
 
 ## Example: Agent Execution Metadata
 
@@ -89,5 +89,5 @@ Avoid these prefixes in user-defined keys to prevent conflicts with future Beads
 
 ## Related
 
-- [Project Charter](https://github.com/gastownhall/beads/blob/main/docs/PROJECT_CHARTER.md) - Product scope and schema boundary
+- [Project Charter](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md) - Product scope and schema boundary
 - [#1416](https://github.com/gastownhall/beads/issues/1416) - Optional schema enforcement (future)

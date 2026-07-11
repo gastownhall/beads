@@ -257,7 +257,7 @@ bd version
 
 Building from source requires a C compiler (for CGO / embedded Dolt). **ICU is
 not required** -- all builds use the `gms_pure_go` tag which selects Go's
-stdlib `regexp` instead of ICU regex. See [ICU-POLICY.md](ICU-POLICY.md) for
+stdlib `regexp` instead of ICU regex. See [ICU-POLICY.md](../engdocs/ICU-POLICY.md) for
 details.
 
 macOS (Homebrew):

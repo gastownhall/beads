@@ -46,7 +46,7 @@ rewrite_links() {
             ;;
         docs/METADATA.md)
             sed \
-                -e 's#](PROJECT_CHARTER.md#](https://github.com/gastownhall/beads/blob/main/docs/PROJECT_CHARTER.md#g' \
+                -e 's#](../engdocs/PROJECT_CHARTER.md#](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md#g' \
                 "$source"
             ;;
         *)

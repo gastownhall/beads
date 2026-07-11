@@ -14,7 +14,7 @@ expected and should not be flagged.
 
 - **Issue Tracking** - How to use bd for work management
 - **Development Guidelines** - Code standards and testing
-- **Project Scope** - Read [docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md) before adding new feature surface area
+- **Project Scope** - Read [engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md) before adding new feature surface area
 - **Visual Design System** - Status icons, colors, and semantic styling for CLI output
 - **Contributor Protection** - Read [CONTRIBUTING.md](CONTRIBUTING.md) before handling external PRs
 - **Maintainer PR Guidelines** - Read [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md) before triaging, landing, or closing PRs
@@ -22,7 +22,7 @@ expected and should not be flagged.
 ## Project Scope
 
 Before adding new feature surface area, read
-[docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md). Beads owns issue tracking
+[engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md). Beads owns issue tracking
 primitives and should not encode orchestration-layer policy, become a storage
 engine, or casually expand the database schema when metadata would work.
 
@@ -59,7 +59,7 @@ See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full development guidelin
 ## Storage Boundary
 
 The canonical storage boundary is in
-[docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md#storage-boundary). In short:
+[engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md#storage-boundary). In short:
 Beads talks to storage through a driver interface (`dolthub/driver` for Dolt).
 Do not add beads-side flocks, engine introspection, storage-specific retry or
 crash-recovery logic, or public SDK return types that leak driver internals.

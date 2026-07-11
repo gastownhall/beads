@@ -115,7 +115,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// --force is a deprecated alias for --reinit-local. They share
 		// semantics for the local data-safety guard; both refuse remote
 		// divergence unless --discard-remote is also passed. See
-		// docs/adr/0002-init-safety-invariants.md.
+		// engdocs/adr/0002-init-safety-invariants.md.
 		if force && !reinitLocal {
 			fmt.Fprintf(os.Stderr, "%s --force is deprecated; use --reinit-local instead.\n", ui.RenderWarn("DeprecationWarning:"))
 			fmt.Fprintf(os.Stderr, "  See 'bd help init-safety' for the init flag surface.\n\n")
@@ -448,7 +448,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// --reinit-local both bypass this local-only guard; they do NOT
 		// authorize cross-boundary operations on remote history (see
 		// CheckRemoteSafety at cmd/bd/init_safety.go and
-		// docs/adr/0002-init-safety-invariants.md).
+		// engdocs/adr/0002-init-safety-invariants.md).
 		if !reinitLocal {
 			if err := checkExistingBeadsData(prefix); err != nil {
 				// --init-if-missing makes init idempotent, but ONLY for the
@@ -506,7 +506,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				} else {
 					// Non-interactive (piped input, AI agent, etc.)
 					//
-					// ADR invariant (docs/adr/0002-init-safety-invariants.md):
+					// ADR invariant (engdocs/adr/0002-init-safety-invariants.md):
 					// runtime error text must not echo a complete destructive
 					// invocation. See 'bd help init-safety' for the token
 					// format. This closes the 58f5989bf failure class where

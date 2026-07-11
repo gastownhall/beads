@@ -9,7 +9,7 @@ This document contains detailed operational instructions for AI agents working o
 ### Code Standards
 
 - **Go version**: see `go.mod` for the required version (currently 1.26+)
-- **Linting**: `golangci-lint run ./...` (baseline warnings documented in [docs/LINTING.md](docs/LINTING.md))
+- **Linting**: `golangci-lint run ./...` (baseline warnings documented in [engdocs/LINTING.md](engdocs/LINTING.md))
 - **Testing**: All new features need tests (`make test` for the normal local/CI path, `make test-icu-path` only when intentionally exercising the opt-in ICU regex path)
 - **Documentation**: Update relevant .md files
 
@@ -90,7 +90,7 @@ This enables `bd doctor` to detect **orphaned issues** - work that was committed
 
 For agent-prepared commits, also include the
 `Agent-Signature:` trailer described in
-[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md). Use `unknown-model` or
+[engdocs/AGENT_SIGNING.md](engdocs/AGENT_SIGNING.md). Use `unknown-model` or
 `unknown-reasoning` when reliable runtime metadata is unavailable.
 
 ### Git Workflow
@@ -133,7 +133,7 @@ value, absorb or transform it locally when practical, preserve attribution, and
 use request-changes only as a last resort.
 
 Sign agent-written GitHub comments and reviews using
-[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md).
+[engdocs/AGENT_SIGNING.md](engdocs/AGENT_SIGNING.md).
 
 ### External Contributor PRs: Check Before You Build
 

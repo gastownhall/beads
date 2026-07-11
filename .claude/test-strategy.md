@@ -99,5 +99,5 @@ TEST_RUN=TestSomething ./scripts/test.sh
 
 - The test script is in `.gitignore` path: `scripts/test.sh`
 - Skip list is in repo root: `.test-skip`
-- Full documentation: `docs/TESTING.md`
+- Full documentation: `engdocs/TESTING.md`
 - Current broken tests: See GH issues #355, #356

@@ -19,7 +19,7 @@ linters:
     depguard:
       rules:
         # Mechanical enforcement of the Storage Boundary in
-        # docs/PROJECT_CHARTER.md: only the storage adapter packages may
+        # engdocs/PROJECT_CHARTER.md: only the storage adapter packages may
         # depend on the Dolt engine directly.
         dolt-storage-boundary:
           list-mode: lax
@@ -41,7 +41,7 @@ linters:
             - "!**/internal/metrics/metrics.go"
           deny:
             - pkg: github.com/dolthub
-              desc: "Dolt engine access is restricted to the storage adapter packages (internal/storage, internal/doltserver) - see docs/PROJECT_CHARTER.md 'Storage Boundary'"
+              desc: "Dolt engine access is restricted to the storage adapter packages (internal/storage, internal/doltserver) - see engdocs/PROJECT_CHARTER.md 'Storage Boundary'"
         # Companion rule for the two files excluded above: allow only
         # DoltHub's eventkit telemetry client, still deny the Dolt engine
         # (or any other dolthub package) so metrics can't become a backdoor
@@ -59,7 +59,7 @@ linters:
             - github.com/dolthub/eventkit
           deny:
             - pkg: github.com/dolthub
-              desc: "Dolt engine access is restricted to the storage adapter packages (internal/storage, internal/doltserver) - see docs/PROJECT_CHARTER.md 'Storage Boundary'"
+              desc: "Dolt engine access is restricted to the storage adapter packages (internal/storage, internal/doltserver) - see engdocs/PROJECT_CHARTER.md 'Storage Boundary'"
     errcheck:
       exclude-functions:
         - (*database/sql.DB).Close

@@ -2,7 +2,7 @@
 
 Last reviewed: 2026-05-29
 
-Freshness source: `docs/CI_TEST_SURFACE_AUDIT.md`, `.github/workflows/*.yml`,
+Freshness source: `engdocs/CI_TEST_SURFACE_AUDIT.md`, `.github/workflows/*.yml`,
 `.buildflags`, `.golangci.yml`, package test manifests, and maintainer decision
 review on 2026-05-28.
 
@@ -682,7 +682,7 @@ Plan:
 2. Keep `testing.Short()` only for runtime, stress, or large-fixture skips.
 3. Move integration, e2e, API, Docker, and external dependency boundaries to
    explicit build tags, environment checks, or named wrappers.
-4. Update `docs/TESTING.md` after wrapper commands exist.
+4. Update `engdocs/TESTING.md` after wrapper commands exist.
 
 Initial cleanup on branch `ci/bd-am3.1-wrapper-commands` leaves
 `testing.Short()` only in approved timeout, stress, and large-fixture tests:

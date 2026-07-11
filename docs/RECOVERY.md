@@ -10,7 +10,7 @@ error messages: each named refusal in `bd init` and `bd dolt push`/`pull`
 points here to a labeled anchor with step-by-step recovery instructions.
 
 See also: `bd help init-safety`, and
-[ADR 0002 — `bd init` safety invariants](adr/0002-init-safety-invariants.md).
+[ADR 0002 — `bd init` safety invariants](../engdocs/adr/0002-init-safety-invariants.md).
 
 ## Table of contents
 
@@ -112,7 +112,7 @@ bd init --reinit-local --discard-remote --destroy-token=DESTROY-bd
 ```
 
 Automation should template the token from project state, not from error
-output. See [ADR 0002 — Invariant 4](adr/0002-init-safety-invariants.md)
+output. See [ADR 0002 — Invariant 4](../engdocs/adr/0002-init-safety-invariants.md)
 for why the token is never echoed in `bd`'s error messages.
 
 ---
