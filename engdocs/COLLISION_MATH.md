@@ -142,5 +142,5 @@ This generates the tables above and shows adaptive scaling strategy for any thre
 
 ## Related Documentation
 
-- [ADAPTIVE_IDS.md](ADAPTIVE_IDS.md) - Configuration and usage guide
-- [CONFIG.md](CONFIG.md) - All configuration options
+- [ADAPTIVE_IDS.md](../docs/core-concepts/adaptive-ids.md) - Configuration and usage guide
+- [CONFIG.md](../docs/reference/configuration.md) - All configuration options

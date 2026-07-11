@@ -32,7 +32,7 @@ bd setup factory  # Factory.ai Droid - creates/updates AGENTS.md
 
 **Note:** Beads is a CLI tool you install once and use everywhere. You don't need to clone this repository into your project.
 
-`bd init` creates or updates `AGENTS.md` by default so agents can discover the beads workflow, and also installs project Claude/Codex integrations unless you pass `--skip-agents` or `--stealth`. Use `bd setup --list` to see supported integrations, including `bd setup codex`, `bd setup factory`, `bd setup claude`, `bd setup mux`, `bd setup cursor`, and more. See [Agent and IDE setup](docs/SETUP.md).
+`bd init` creates or updates `AGENTS.md` by default so agents can discover the beads workflow, and also installs project Claude/Codex integrations unless you pass `--skip-agents` or `--stealth`. Use `bd setup --list` to see supported integrations, including `bd setup codex`, `bd setup factory`, `bd setup claude`, `bd setup mux`, `bd setup cursor`, and more. See [Agent and IDE setup](docs/getting-started/ide-setup.md).
 
 Manual copy-paste is only for unsupported agents, existing projects where you cannot rerun `bd init`/`bd setup`, or custom instruction files. In those cases, run `bd onboard` and paste the printed snippet into the file your agent reads.
 
@@ -90,9 +90,9 @@ brew install beads           # macOS / Linux (recommended)
 npm install -g @beads/bd     # Node.js users
 ```
 
-**Other methods:** [install script](docs/INSTALLING.md#quick-install-script-all-platforms) | [go install](docs/INSTALLING.md#a-note-on-go-install-capability) | [from source](docs/INSTALLING.md#build-dependencies-contributors-only) | [Windows](docs/INSTALLING.md#windows-11) | [Arch AUR](docs/INSTALLING.md#linux)
+**Other methods:** [install script](docs/getting-started/installation.md#quick-install-script-all-platforms) | [go install](docs/getting-started/installation.md#a-note-on-go-install-capability) | [from source](docs/getting-started/installation.md#build-dependencies-contributors-only) | [Windows](docs/getting-started/installation.md#windows-11) | [Arch AUR](docs/getting-started/installation.md#linux)
 
-**Requirements:** macOS, Linux, Windows, or FreeBSD. See [docs/INSTALLING.md](docs/INSTALLING.md) for complete installation guide.
+**Requirements:** macOS, Linux, Windows, or FreeBSD. See [docs/getting-started/installation.md](docs/getting-started/installation.md) for complete installation guide.
 
 **Upgrading?** Replacing the binary is not always the whole story. Short
 version: sync remote-backed databases with your current `bd`, back up with
@@ -102,7 +102,7 @@ migration on a remote-backed database, exactly one designated clone runs
 `bd migrate --force` and `bd dolt push`; other clones install the new binary
 and run `bd bootstrap`. See the full
 [upgrade guide](https://gastownhall.github.io/beads/docs/getting-started/upgrading)
-or [docs/INSTALLING.md](docs/INSTALLING.md#updating-bd).
+or [docs/getting-started/installation.md](docs/getting-started/installation.md#updating-bd).
 
 ### Security And Verification
 
@@ -112,7 +112,7 @@ The install scripts verify release checksums before install. For manual installs
 
 On macOS, `scripts/install.sh` preserves the downloaded signature by default. Local ad-hoc re-signing is explicit opt-in via `BEADS_INSTALL_RESIGN_MACOS=1`.
 
-See [docs/ANTIVIRUS.md](docs/ANTIVIRUS.md) for Windows AV false-positive guidance and verification workflow.
+See [docs/reference/antivirus.md](docs/reference/antivirus.md) for Windows AV false-positive guidance and verification workflow.
 
 ## 💾 Storage Modes
 
@@ -213,9 +213,9 @@ branches, commit history, working-set state, or non-issue tables. Use
 
 ## 🌐 Community Tools
 
-See [docs/COMMUNITY_TOOLS.md](docs/COMMUNITY_TOOLS.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.
+See [docs/community-tools.md](docs/community-tools.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.
 
-See [docs/RELATED_PROJECTS.md](docs/RELATED_PROJECTS.md) for adjacent or complementary projects that solve different problems in the same neighborhood.
+See [docs/related-projects.md](docs/related-projects.md) for adjacent or complementary projects that solve different problems in the same neighborhood.
 
 ## 🚀 Git-Free Usage
 
@@ -250,5 +250,5 @@ For daemon mode without git, use `bd daemon start --local`
 
 ## 📝 Documentation
 
-* [Documentation site](https://gastownhall.github.io/beads/) (versioned) | [Installing](docs/INSTALLING.md) | [Sync Concepts](docs/SYNC_CONCEPTS.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Copilot CLI Setup](docs/COPILOT_CLI_INTEGRATION.md) | [Copilot VS Code MCP](docs/COPILOT_INTEGRATION.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/PROTECTED_BRANCHES.md) | [Troubleshooting](docs/TROUBLESHOOTING.md) | [FAQ](docs/FAQ.md)
+* [Documentation site](https://gastownhall.github.io/beads/) (versioned) | [Installing](docs/getting-started/installation.md) | [Sync Concepts](docs/core-concepts/sync-concepts.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Copilot CLI Setup](docs/integrations/copilot-cli.md) | [Copilot VS Code MCP](docs/integrations/github-copilot.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/reference/protected-branches.md) | [Troubleshooting](docs/reference/troubleshooting.md) | [FAQ](docs/reference/faq.md)
 * [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/gastownhall/beads)

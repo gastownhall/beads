@@ -142,8 +142,8 @@ accordingly:
    Creates `~/.beads-planning/` and configures routing.
 
 5. **Documentation**:
-   - `docs/ROUTING.md` - Auto-routing mechanics
-   - `docs/MULTI_REPO_MIGRATION.md` - Contributor workflow guide
+   - `docs/multi-agent/routing.md` - Auto-routing mechanics
+   - `docs/multi-agent/multi-repo-migration.md` - Contributor workflow guide
 
 ### What's NOT Implemented (Gaps)
 

@@ -121,7 +121,7 @@ export BEADS_DOLT_SHARED_SERVER=1
 
 Shared server state lives in `~/.beads/shared-server/` and uses port 3308 by default
 (avoiding conflict with the orchestrator on 3307). Each project's data remains isolated in its
-own database (named by project prefix). See [DOLT.md](../DOLT.md) for details.
+own database (named by project prefix). See [DOLT.md](../../docs/architecture/dolt.md) for details.
 
 ## Central Dolt Server (macOS)
 
@@ -328,7 +328,7 @@ If upgrading from an older version that used SQLite:
 > scripts/migrate-jsonl-to-dolt.sh
 > ```
 >
-> See [Troubleshooting](../TROUBLESHOOTING.md#circuit-breaker-server-appears-down-failing-fast) if you encounter connection errors after migration.
+> See [Troubleshooting](../../docs/reference/troubleshooting.md#circuit-breaker-server-appears-down-failing-fast) if you encounter connection errors after migration.
 
 ### Option 2: Fresh Start
 
@@ -484,7 +484,7 @@ federation:
 ## Migrating Between Backends
 
 Use `bd backup` to migrate data between embedded and server mode. Both
-directions preserve full Dolt commit history. See [DOLT.md](../DOLT.md#migrating-between-backends)
+directions preserve full Dolt commit history. See [DOLT.md](../../docs/architecture/dolt.md#migrating-between-backends)
 for step-by-step instructions.
 
 **Quick reference:**
@@ -512,6 +512,6 @@ bd list
 
 ## See Also
 
-- [DOLT.md](../DOLT.md) - Dolt backend overview, federation, and mode details
-- [Troubleshooting](../TROUBLESHOOTING.md) - General troubleshooting
+- [DOLT.md](../../docs/architecture/dolt.md) - Dolt backend overview, federation, and mode details
+- [Troubleshooting](../../docs/reference/troubleshooting.md) - General troubleshooting
 - [Dolt Documentation](https://docs.dolthub.com/) - Official Dolt docs

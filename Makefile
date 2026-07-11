@@ -252,6 +252,11 @@ check-docs:
 	@CGO_ENABLED=0 go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
 	@./scripts/check-doc-flags.sh ./bd
 	@./scripts/check-doc-freshness.sh
+	@go test ./test/docsync
+
+# Live preview of the Mintlify docs site (docs/) at http://localhost:3000
+docs-dev:
+	./mint.sh dev
 
 # Ensure -short is not used as an implicit CI tier boundary.
 check-testing-short:

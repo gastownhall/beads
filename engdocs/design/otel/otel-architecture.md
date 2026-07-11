@@ -310,7 +310,7 @@ OTel SDK uses dot-notation internally. Prometheus-compatible backends (VictoriaM
 | `DOLT_REMOTE_USER` | Push/pull auth user |
 | `DOLT_REMOTE_PASSWORD` | Push/pull auth password |
 
-> **Note**: Dolt-specific configuration variables are documented in [DOLT.md](../../DOLT.md) and are out of scope for OTEL design documentation.
+> **Note**: Dolt-specific configuration variables are documented in [DOLT.md](../../../docs/architecture/dolt.md) and are out of scope for OTEL design documentation.
 
 ---
 
@@ -480,8 +480,8 @@ FROM dolt_conflicts;
 ## Related Documentation
 
 - [OTel Data Model](otel-data-model.md) — Complete event schema
-- [OBSERVABILITY.md](../../OBSERVABILITY.md) — Quick reference for metrics
-- [Dolt Backend](../../DOLT.md) — Dolt configuration and usage
+- [OBSERVABILITY.md](../../../docs/reference/observability.md) — Quick reference for metrics
+- [Dolt Backend](../../../docs/architecture/dolt.md) — Dolt configuration and usage
 - [Dolt Concurrency](../dolt-concurrency.md) — Concurrency model and transactions
 
 ## Backends Compatible with OTLP

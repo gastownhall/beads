@@ -77,7 +77,7 @@ bd setup copilot --remove
 - `plugins/beads/copilot_manifest.go` - Embedded manifest source used by `bd setup copilot`
 - `internal/recipes/recipes.go` - Lightweight `copilot` recipe definition
 - `internal/recipes/template.go` - Static Copilot instructions template used by `bd setup`
-- `docs/COPILOT_INTEGRATION.md` - VS Code MCP integration
+- [GitHub Copilot integration](/integrations/github-copilot) - VS Code MCP integration
 
 ## References
 

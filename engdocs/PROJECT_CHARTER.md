@@ -110,7 +110,7 @@ absorb, transform, or reroute the useful part.
 ## Related Documents
 
 - [Integration Charter](INTEGRATION_CHARTER.md) - tracker integration scope
-- [Issue Metadata](METADATA.md) - metadata extension point
-- [Architecture](ARCHITECTURE.md) - data model and storage architecture
+- [Issue Metadata](../docs/core-concepts/metadata.md) - metadata extension point
+- [Architecture](../docs/architecture/index.md) - data model and storage architecture
 - [Maintainer PR Guidelines](../PR_MAINTAINER_GUIDELINES.md) - PR triage and
   contributor handling

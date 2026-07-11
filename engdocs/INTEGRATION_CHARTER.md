@@ -87,6 +87,6 @@ When adding support for a new tracker or extending an existing one:
 ## Related Documents
 
 - [Project Charter](PROJECT_CHARTER.md) - Overall product scope and boundaries
-- [CLI Reference](CLI_REFERENCE.md) — Full command documentation
+- [CLI Reference](../docs/CLI_REFERENCE.md) — Full command documentation
 - [SECURITY.md](../SECURITY.md) — Security considerations for tracker tokens
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — How to contribute new integrations

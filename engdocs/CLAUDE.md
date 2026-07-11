@@ -86,8 +86,8 @@ generation.
 - **AGENTS.md** - Complete workflow and development guide (READ THIS!)
 - **README.md** - User-facing documentation
 - **ADVANCED.md** - Advanced features (rename, merge, compaction)
-- **docs/LABELS.md** - Complete label system guide
-- **docs/CONFIG.md** - Configuration system
+- **docs/core-concepts/labels.md** - Complete label system guide
+- **docs/reference/configuration.md** - Configuration system
 
 ## When Adding Features
 

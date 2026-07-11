@@ -69,8 +69,8 @@ irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 brew upgrade beads
 ```
 
-<!-- Canonical Homebrew tap-migration snippet. The installation page links
-     here; docs/INSTALLING.md mirrors this block. Keep all three in sync. -->
+{/* Canonical Homebrew tap-migration snippet. The installation page links
+    here; keep the two in sync. */}
 If you still have the old tap formula installed as `bd`, switch to the
 Homebrew core formula:
 
@@ -227,7 +227,7 @@ lost — that is why step 1 publishes everything first. If a clone was instead
 migrated independently and `bd dolt pull` later fails with `cannot merge because
 table dependencies has different primary keys in its common ancestor`, the
 schema has already forked — follow the recovery playbook:
-[RECOVERY.md#pk-fork-refused](https://github.com/gastownhall/beads/blob/main/docs/RECOVERY.md#pk-fork-refused).
+[the pk-fork-refused runbook](/recovery/init-safety#pk-fork-refused).
 
 <Note>
 In **server mode**, `bd doctor` adds a migration-content-skew check that flags a

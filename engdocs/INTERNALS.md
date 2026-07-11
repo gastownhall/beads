@@ -2,7 +2,7 @@
 
 This document describes internal implementation details of bd, with particular focus on concurrency guarantees and data consistency.
 
-For the overall architecture (data model, sync mechanism, component overview), see [ARCHITECTURE.md](ARCHITECTURE.md).
+For the overall architecture (data model, sync mechanism, component overview), see [ARCHITECTURE.md](../docs/architecture/index.md).
 
 ## Auto-Flush Architecture
 

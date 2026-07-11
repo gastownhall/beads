@@ -255,7 +255,7 @@ This allows releases to work before a certificate is acquired.
 
 Windows code signing helps reduce antivirus false positives that affect Go binaries.
 Kaspersky and other AV software commonly flag unsigned Go executables as potentially
-malicious due to heuristic detection. See `docs/ANTIVIRUS.md` for details.
+malicious due to heuristic detection. See `docs/reference/antivirus.md` for details.
 
 ---
 

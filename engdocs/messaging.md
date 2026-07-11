@@ -121,5 +121,5 @@ target was not persisted do not produce hooks.
 
 ## See Also
 
-- [Graph Links](graph-links.md) - relates_to, duplicates, supersedes, replies_to
-- [CLI Reference](CLI_REFERENCE.md) - All commands
+- [Graph Links](../docs/core-concepts/graph-links.md) - relates_to, duplicates, supersedes, replies_to
+- [CLI Reference](../docs/CLI_REFERENCE.md) - All commands

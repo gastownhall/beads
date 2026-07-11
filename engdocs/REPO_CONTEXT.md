@@ -243,9 +243,9 @@ func TestSomething(t *testing.T) {
 
 ## Related Documentation
 
-- [WORKTREES.md](WORKTREES.md) - Git worktree integration
-- [ROUTING.md](ROUTING.md) - Multi-repository routing
-- [CONFIG.md](CONFIG.md) - BEADS_DIR and environment variables
+- [WORKTREES.md](../docs/reference/worktrees.md) - Git worktree integration
+- [ROUTING.md](../docs/multi-agent/routing.md) - Multi-repository routing
+- [CONFIG.md](../docs/reference/configuration.md) - BEADS_DIR and environment variables
 
 ## Implementation Notes
 

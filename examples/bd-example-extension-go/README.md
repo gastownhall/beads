@@ -2,7 +2,7 @@
 
 This legacy example demonstrates how to extend SQLite-backed bd databases with custom tables for application-specific orchestration.
 
-> **Note:** Custom SQLite table extensions are a legacy pattern. Current Dolt-backed beads workflows should prefer standalone integration tools that call `bd --json` commands or use `bd query` for SQL access. See [Extensible Database](../../docs/ADVANCED.md#extensible-database) for the current guidance.
+> **Note:** Custom SQLite table extensions are a legacy pattern. Current Dolt-backed beads workflows should prefer standalone integration tools that call `bd --json` commands or use `bd query` for SQL access. See [Extensible Database](../../docs/reference/advanced.md#extensible-database) for the current guidance.
 
 ## What This Example Shows
 

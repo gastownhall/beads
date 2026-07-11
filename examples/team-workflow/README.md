@@ -368,7 +368,7 @@ bd sql "CALL dolt_conflicts_resolve('--ours')"
 bd dolt push
 ```
 
-See [GIT_INTEGRATION.md](../../docs/GIT_INTEGRATION.md) for details.
+See [GIT_INTEGRATION.md](../../docs/reference/git-integration.md) for details.
 
 ### Issue: Issues not syncing
 
@@ -390,5 +390,5 @@ bd validate --checks=conflicts
 
 - [Protected Branch Setup](../protected-branch/)
 - [Contributor Workflow](../contributor-workflow/)
-- [Multi-Repo Migration Guide](../../docs/MULTI_REPO_MIGRATION.md)
-- [Git Integration Guide](../../docs/GIT_INTEGRATION.md)
+- [Multi-Repo Migration Guide](../../docs/multi-agent/multi-repo-migration.md)
+- [Git Integration Guide](../../docs/reference/git-integration.md)

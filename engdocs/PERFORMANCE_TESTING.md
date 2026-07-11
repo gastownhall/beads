@@ -261,5 +261,5 @@ rm -rf /tmp/beads-bench-cache/
 ## See Also
 
 - [TESTING.md](TESTING.md) - General testing guide
-- [ARCHITECTURE.md](ARCHITECTURE.md) - System architecture
+- [ARCHITECTURE.md](../docs/architecture/index.md) - System architecture
 - [INTERNALS.md](INTERNALS.md) - Implementation details

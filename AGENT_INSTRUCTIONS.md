@@ -106,9 +106,9 @@ bd hooks install
 
 **Dolt sync**: Dolt handles sync natively via `bd dolt push` / `bd dolt pull`. No export/import round-trip needed for normal sync.
 
-**Protected branches**: Dolt stores data under `refs/dolt/data`, separate from standard Git refs. See [docs/PROTECTED_BRANCHES.md](docs/PROTECTED_BRANCHES.md).
+**Protected branches**: Dolt stores data under `refs/dolt/data`, separate from standard Git refs. See [docs/reference/protected-branches.md](docs/reference/protected-branches.md).
 
-**Git worktrees**: Work directly with Dolt — no special flags needed. See [docs/ADVANCED.md](docs/ADVANCED.md).
+**Git worktrees**: Work directly with Dolt — no special flags needed. See [docs/reference/advanced.md](docs/reference/advanced.md).
 
 **Merge conflicts**: Rare with hash IDs. Dolt uses cell-level 3-way merge for conflict resolution.
 
@@ -509,7 +509,7 @@ still works as a one-off, shell-scoped override.
 
 - Check existing issues: `bd list`
 - Look at recent commits: `git log --oneline -20`
-- Read the docs: README.md, ADVANCED.md, docs/CONFIG.md
+- Read the docs: README.md, ADVANCED.md, docs/reference/configuration.md
 - Create an issue if unsure: `bd create "Question: ..." -t task -p 2`
 
 ## Important Files
