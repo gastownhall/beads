@@ -14,6 +14,16 @@
 
 Beads provides a persistent, structured memory for coding agents. It replaces messy markdown plans with a dependency-aware graph, allowing agents to handle long-horizon tasks without losing context.
 
+```mermaid
+flowchart LR
+    create["bd create<br/>new bead"] --> graph["dependency<br/>graph"]
+    graph --> ready["bd ready<br/>claimable work"]
+    ready --> claim["bd update --claim<br/>agent takes it"]
+    claim --> close["bd close<br/>work done"]
+    close -->|blockers released| ready
+    graph <-->|"bd dolt push / pull"| remote[("other machines<br/>and agents")]
+```
+
 ## ⚡ Quick Start
 
 ```bash
@@ -116,100 +126,24 @@ See [docs/reference/antivirus.md](docs/reference/antivirus.md) for Windows AV fa
 
 ## 💾 Storage Modes
 
-Beads uses [Dolt](https://github.com/dolthub/dolt) as its database. Two modes
-are available:
+Beads uses [Dolt](https://github.com/dolthub/dolt) as its database. Two modes:
 
-### Embedded Mode (default)
+- **Embedded (default)** — `bd init`. Dolt runs in-process, data lives in
+  `.beads/embeddeddolt/`, single writer. Recommended for most users.
+- **Server** — `bd init --server`. Connects to an external `dolt sql-server`
+  for multiple concurrent writers; data lives in `.beads/dolt/`.
 
-```bash
-bd init
-```
+Cross-machine sync uses `bd dolt push` / `bd dolt pull` against
+`refs/dolt/data` on your git remote; `.beads/issues.jsonl` is an export for
+viewers and interchange, not the source of truth or a backup. Back up and
+migrate between modes with `bd backup`; reclaim space with `bd prune` /
+`bd purge`.
 
-Dolt runs in-process — no external server needed. Data lives in
-`.beads/embeddeddolt/`. Single-writer only (file locking enforced).
-This is the recommended mode for most users.
-
-When the git repo has an `origin` remote, `bd init` configures a Dolt remote
-named `origin` automatically. Cross-machine sync uses `bd dolt push` and
-`bd dolt pull` against `refs/dolt/data`; `.beads/issues.jsonl` is an export
-for viewers and interchange, not the source of truth or a full database
-backup.
-
-### Server Mode
-
-```bash
-bd init --server
-```
-
-Connects to an external `dolt sql-server`. Data lives in `.beads/dolt/`.
-Supports multiple concurrent writers. Configure the connection with flags
-or environment variables:
-
-| Flag | Env Var | Default |
-|------|---------|---------|
-| `--server-host` | `BEADS_DOLT_SERVER_HOST` | `127.0.0.1` |
-| `--server-port` | `BEADS_DOLT_SERVER_PORT` | `3307` |
-| `--server-socket` | `BEADS_DOLT_SERVER_SOCKET` | (none; uses TCP) |
-| `--server-user` | `BEADS_DOLT_SERVER_USER` | `root` |
-| | `BEADS_DOLT_PASSWORD` | (none) |
-
-**Unix domain sockets:** Use `--server-socket` to connect via a Unix socket
-instead of TCP. This avoids port conflicts between concurrent projects and
-is useful in sandboxed environments (e.g., Claude Code) where file-level
-access control is simpler than network allowlists. The Dolt server must be
-started with `dolt sql-server --socket <path>`. Auto-start is not supported
-in socket mode.
-
-### Maintenance — `bd prune` and `bd purge`
-
-`bd prune` permanently deletes closed non-ephemeral beads to reclaim storage
-and shrink auto-exports. `bd purge` does the same for ephemeral beads (wisps,
-transient molecules). Both require `--force` to execute.
-
-```bash
-bd prune --older-than 30d              # Preview closed beads >30d old
-bd prune --older-than 30d --force      # Delete them
-bd prune --older-than 90d --dry-run    # Detailed preview with stats
-bd purge --force                       # Delete all closed ephemeral beads
-```
-
-**Reference-aware protection:** `bd prune` automatically skips closed beads
-whose ID appears in the description, notes, or comments of any open or
-in-progress bead. This prevents accidental deletion of ADR, decision, and
-verification beads that downstream work still cites. Use `--ignore-references`
-to override when cleaning up known-stale references:
-
-```bash
-bd prune --older-than 90d --ignore-references --force
-```
-
-`bd purge` is unaffected — ephemeral beads' references are themselves transient.
-
-### Backup & Migration
-
-Back up your database and migrate between modes using `bd backup`:
-
-```bash
-# Set up a backup destination and push
-bd backup init /path/to/backup
-bd backup sync
-
-# Restore into a new project (any mode)
-bd init           # or bd init --server
-bd backup restore --force /path/to/backup
-```
-
-See [docs/DOLT.md](docs/DOLT.md#migrating-between-backends) for full
-migration instructions.
-
-Prefer a different database? [docs/STORAGE-BACKENDS.md](docs/STORAGE-BACKENDS.md)
-covers running `bd` on Postgres, MySQL, or SQLite. Dolt stays the default and the
-only backend with history.
-
-`bd export` and `.beads/issues.jsonl` are issue-table exports. They are useful
-for review, migration, and interoperability, but they do not capture Dolt
-branches, commit history, working-set state, or non-issue tables. Use
-`bd backup` or a manual Dolt backup when you need a restorable database backup.
+Full detail — connection flags, sockets, maintenance, backup, and migration —
+in the [Dolt backend guide](docs/architecture/dolt.md). Prefer a different
+database? [Storage Backends](docs/architecture/storage-backends.md) covers
+Postgres, MySQL, and SQLite (Dolt stays the default and the only backend
+with history).
 
 ## 🌐 Community Tools
 
