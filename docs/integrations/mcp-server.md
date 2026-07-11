@@ -113,15 +113,23 @@ The MCP server exposes these tools:
 
 | Tool | Description |
 |------|-------------|
-| `beads_create` | Create new issue |
-| `beads_list` | List issues |
-| `beads_show` | Show issue details |
-| `beads_update` | Update issue |
-| `beads_close` | Close issue |
-| `beads_ready` | Show ready work |
-| `beads_sync` | Sync to git |
-| `beads_dep_add` | Add dependency |
-| `beads_dep_tree` | Show dependency tree |
+| `ready` | Show ready work (no open blockers) |
+| `list` | List issues with filters |
+| `show` | Show issue details, dependencies, and dependents |
+| `create` | Create a new issue |
+| `claim` | Atomically claim an issue |
+| `update` | Update an issue |
+| `close` / `reopen` | Close or reopen an issue |
+| `dep` | Manage dependencies |
+| `comment` / `comments` | Add or list comments |
+| `note` | Append to an issue's notes |
+| `blocked` | Show blocked issues and their blockers |
+| `stats` / `context` | Database stats and workspace context |
+| `admin` | Administrative operations |
+| `discover_tools` / `get_tool_info` | Tool discovery and schemas |
+
+There is no MCP sync tool — syncing stays on the CLI (`bd dolt push` /
+`bd dolt pull`).
 
 ## Usage
 

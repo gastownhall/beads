@@ -16,7 +16,7 @@ This guide helps you adopt beads' multi-repo workflow for OSS contributions, tea
 
 ## What is Multi-Repo Mode?
 
-By default, beads stores issues in its Dolt database within `.beads/dolt/` in your current repository. Multi-repo mode lets you:
+By default, beads stores issues in its Dolt database under `.beads/` in your current repository (`.beads/embeddeddolt/` in the default embedded mode). Multi-repo mode lets you:
 
 - **Route issues to different repositories** based on your role (maintainer vs. contributor)
 - **Aggregate issues from multiple repos** into a unified view
@@ -371,7 +371,7 @@ bd config get routing.maintainer
 bd config get routing.contributor
 
 # Check detected role
-bd info --json | jq '.role'
+bd config get beads.role
 
 # Override with explicit flag
 bd create "Issue" -p 1 --repo .

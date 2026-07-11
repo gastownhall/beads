@@ -43,6 +43,9 @@ var docsPublishExemptions = map[string]bool{
 	"RECOVERY.md":         true, // pointer stub; bd dolt output references its runbook anchors
 	"JSON_SCHEMA.md":      true, // pointer stub; bd schema-migration output references it
 	"SYNC_CONCEPTS.md":    true, // pointer stub; bd init agent templates link it on GitHub
+	"SETUP.md":            true, // pointer stub; bd prime help prints docs/SETUP.md#policy-profiles
+	"INSTALLING.md":       true, // pointer stub; bd storage-backend help references it
+	"GIT_INTEGRATION.md":  true, // pointer stub; bd jj-alias output links its jujutsu section
 }
 
 // rootDocFiles are the curated root-level markdown files whose local links

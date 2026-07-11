@@ -1,6 +1,6 @@
 # Documentation Disposition Inventory
 
-Reviewed: 2026-07-07
+Reviewed: 2026-07-07 (paths updated 2026-07-10 for the Mintlify port: user docs now live in the docs/ site tree; this ledger and other internal docs live in engdocs/)
 
 CI cleanup entry added: 2026-05-28
 
@@ -28,11 +28,11 @@ freshness source.
 |---|---|
 | `CLI_REFERENCE.md` | Generated from `bd help --all`. |
 | `plugins/beads/skills/beads/resources/CLI_REFERENCE.md` | Pointer-only doc: must link to live CLI help and canonical generated `docs/CLI_REFERENCE.md`; do not duplicate generated command tables. |
-| `CONFIG.md` | `Last reviewed:` marker tied to `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`. |
-| `SETUP.md` | `Last reviewed:` marker tied to `cmd/bd/setup*.go` and `internal/recipes/`. |
-| `ADO_CONFIG.md` | `Last reviewed:` marker tied to `cmd/bd/ado*.go` and `internal/ado/`. |
-| `JSON_SCHEMA.md` | `Last reviewed:` marker tied to `cmd/bd/output.go`, `cmd/bd/errors.go`, and protocol tests. |
-| `RECOVERY.md` | `Last reviewed:` marker tied to `cmd/bd/init*.go` safety code and tests. |
+| `reference/configuration.md` | `Last reviewed:` marker tied to `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`. (Mintlify port: absorbed `CONFIG.md`.) |
+| `getting-started/ide-setup.md` | `Last reviewed:` marker tied to `cmd/bd/setup*.go` and `internal/recipes/`. (Mintlify port: absorbed `SETUP.md`.) |
+| `integrations/azure-devops.md` | `Last reviewed:` marker tied to `cmd/bd/ado*.go` and `internal/ado/`. (Mintlify port: was `ADO_CONFIG.md`.) |
+| `reference/json-schema.md` | `Last reviewed:` marker tied to `cmd/bd/output.go`, `cmd/bd/errors.go`, and protocol tests. (Mintlify port: was `JSON_SCHEMA.md`.) |
+| `recovery/init-safety.md` | `Last reviewed:` marker tied to `cmd/bd/init*.go` safety code and tests. (Mintlify port: was `RECOVERY.md`.) |
 | `ERROR_HANDLING.md` | `Last reviewed:` marker tied to current command error exits and JSON error helpers. |
 | `LINTING.md` | `Last reviewed:` marker tied to `.golangci.yml` and current lint output. |
 | `CI_CLEANUP_PLAN.md` | `Last reviewed:` marker tied to CI audit, workflow files, package manifests, and maintainer decision review. |

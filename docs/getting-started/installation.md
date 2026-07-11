@@ -168,7 +168,7 @@ brew install beads
 CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-**Via go install** (embedded-capable):
+**Via go install** (embedded-capable, needs Xcode CLI tools):
 ```bash
 CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
@@ -196,12 +196,14 @@ yay -S beads-git
 paru -S beads-git
 ```
 
+Thanks to [@v4rgas](https://github.com/v4rgas) for maintaining the AUR package!
+
 **Via go install** (server-mode only):
 ```bash
 CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-**Via go install** (embedded-capable):
+**Via go install** (embedded-capable, needs gcc):
 ```bash
 CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
@@ -231,17 +233,31 @@ Beads ships with native Windows support—no MSYS or MinGW required.
 irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 ```
 
-The script installs a prebuilt Windows release if available. Go is only required for `go install` or building from source.
+The script installs a prebuilt Windows release if available and verifies the downloaded ZIP checksum against release `checksums.txt`. Go is only required for `go install` or building from source.
 
 **Via go install** (server-mode only):
 ```pwsh
 $env:CGO_ENABLED="0"; go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-**Via go install** (embedded-capable):
+This produces a server-mode-only binary with no C compiler requirement — the fastest path to a working `bd` on Windows.
+
+**Via go install** (embedded-capable, needs MinGW-w64 gcc on your PATH):
 ```pwsh
 $env:CGO_ENABLED="1"; $env:GOFLAGS="-tags=gms_pure_go"; go install github.com/steveyegge/beads/cmd/bd@latest
 ```
+
+**From source**:
+```pwsh
+git clone https://github.com/gastownhall/beads
+cd beads
+make build
+Move-Item bd.exe $env:USERPROFILE\AppData\Local\Microsoft\WindowsApps\
+```
+
+**Windows notes:**
+- The Dolt server listens on a loopback TCP endpoint
+- Allow `bd.exe` loopback traffic through any host firewall
 
 ## IDE and Editor Integrations
 
@@ -259,6 +275,7 @@ bd init --quiet
 
 # 3. Setup editor integration (choose one)
 bd setup claude   # Claude Code - installs SessionStart hooks
+bd setup copilot  # GitHub Copilot CLI - creates .copilot-plugin/plugin.json + .github/copilot-instructions.md
 bd setup cursor   # Cursor IDE - creates .cursor/rules/beads.mdc
 bd setup aider    # Aider - creates .aider.conf.yml
 bd setup codex    # Codex CLI - installs Beads skill, AGENTS.md guidance, and native hooks
@@ -269,7 +286,7 @@ bd setup mux      # Mux - creates/updates AGENTS.md
 **How it works:**
 - `bd init` creates or updates `AGENTS.md` and installs project Claude/Codex integrations by default unless you use `--skip-agents` or `--stealth`
 - Editor hooks/rules inject `bd prime` automatically on session start
-- Codex 0.129.0+ uses native `/hooks` for startup and compaction-aware context refresh
+- Codex 0.129.0+ uses native `/hooks`: SessionStart injects `bd prime`, compact hooks mark context stale, and the next prompt after compaction refreshes Beads context once
 - `bd prime` provides ~1-2k tokens of workflow context
 - You use `bd` CLI commands directly
 - Git hooks (installed by `bd init`) refresh exports and legacy fallbacks; `bd dolt push/pull` syncs the database
@@ -279,6 +296,38 @@ bd setup mux      # Mux - creates/updates AGENTS.md
 - **Context efficient** - ~1-2k tokens vs 10-50k for MCP tool schemas
 - **Lower latency** - Direct CLI calls, no MCP protocol overhead
 - **Universal** - Works with any editor that has shell access
+
+**Verify installation:** every recipe supports a check flag, e.g. `bd setup claude --check` or `bd setup copilot --check`.
+
+### Claude Code Plugin (Optional)
+
+For enhanced UX with slash commands:
+
+```bash
+# In Claude Code
+/plugin marketplace add gastownhall/beads
+/plugin install beads
+# Restart Claude Code
+```
+
+The plugin adds:
+- Slash commands: `/beads:ready`, `/beads:create`, `/beads:show`, `/beads:update`, `/beads:close`, etc.
+- Task agent for autonomous execution
+
+See [Claude Code Plugin](/integrations/claude-code-plugin) for complete plugin documentation.
+
+### GitHub Copilot
+
+For **VS Code with GitHub Copilot**, install the MCP server (`uv tool install beads-mcp`) and create `.vscode/mcp.json` in your project — or add it to the VS Code user-level MCP config to enable it for all projects. See [GitHub Copilot](/integrations/github-copilot) for the complete setup guide, including the user-level config paths per platform.
+
+For the **GitHub Copilot CLI** terminal integration:
+
+```bash
+bd setup copilot         # Install project Copilot plugin + repository instructions
+bd setup copilot --check # Verify the project integration files exist
+```
+
+This setup is currently project-scoped only. It writes `.copilot-plugin/plugin.json` and `.github/copilot-instructions.md`; there is no separate `--global` or `--project` mode for Copilot today, and it does not manage `~/.copilot/...` paths. See [Copilot CLI](/integrations/copilot-cli) for the full guide.
 
 ### MCP Server (Alternative)
 
@@ -306,6 +355,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
+For Sourcegraph Amp configuration and detailed MCP server documentation, see [MCP Server](/integrations/mcp-server).
+
 ## Verifying Installation
 
 After installing, verify bd is working:
@@ -316,6 +367,8 @@ bd help
 ```
 
 ## Troubleshooting
+
+For additional troubleshooting, see [Troubleshooting](/reference/troubleshooting).
 
 ### `bd: command not found`
 
@@ -340,6 +393,33 @@ This is typically caused by CGO/SQLite compatibility issues:
 # Install an embedded-capable build
 CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
+
+If you installed via Homebrew, this shouldn't be necessary as the formula already enables CGO. If you're still seeing crashes with the Homebrew version, please [file an issue](https://github.com/gastownhall/beads/issues).
+
+### Claude Code Plugin: MCP server fails to start
+
+If the Claude Code plugin's MCP server fails immediately after installation, it's likely that `uv` is not installed or not in your PATH.
+
+**Symptoms:**
+- Plugin slash commands work, but MCP tools are unavailable
+- Error logs show `command not found: uv`
+- Server fails silently on startup
+
+**Solution:**
+```bash
+# Install uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Restart your shell or update PATH
+source ~/.local/bin/env
+
+# Verify uv is available
+which uv
+
+# Restart Claude Code
+```
+
+See [Claude Code Plugin](/integrations/claude-code-plugin) for alternative installation methods.
 
 ## Updating bd
 
@@ -382,7 +462,21 @@ irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 brew upgrade beads
 ```
 
+### npm
+
+```bash
+npm update -g @beads/bd
+```
+
+### bun
+
+```bash
+bun install -g --trust @beads/bd
+```
+
 ### go install
+
+Use whichever mode you installed with originally:
 
 ```bash
 # Server-mode only
@@ -392,7 +486,24 @@ CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
 CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
+### From source
+
+```bash
+cd beads
+git pull
+make build
+sudo mv bd /usr/local/bin/
+```
+
+Prereleases (e.g. release candidates) are published only as GitHub prereleases
+and are not pushed to the stable Homebrew/npm/PyPI channels, so `brew upgrade`
+and friends will not move you onto them — fetch the prerelease build explicitly.
+
 For post-upgrade steps (hooks, migrations), see [Upgrading](/getting-started/upgrading).
+
+## Uninstalling
+
+To completely remove Beads from a repository, see [Uninstalling](/recovery/uninstalling).
 
 ## Next Steps
 
@@ -401,3 +512,4 @@ After installation:
 1. **Initialize a project**: `cd your-project && bd init`
 2. **Learn the basics**: See [Quick Start](/getting-started/quickstart)
 3. **Configure your agent**: See [IDE Setup](/getting-started/ide-setup), or run `bd setup --list`
+4. **Explore examples**: Check out the [examples/](https://github.com/gastownhall/beads/tree/main/examples) directory

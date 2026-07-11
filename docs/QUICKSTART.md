@@ -2,7 +2,7 @@
 
 **Canonical documentation:** [Quick Start (published)](https://gastownhall.github.io/beads/getting-started/quickstart) — browse the full tutorial with navigation and search.
 
-**Source in this repo:** [website/docs/getting-started/quickstart.md](../website/docs/getting-started/quickstart.md) (what GitHub Pages builds from; the `docs/` copy here is a pointer for deep links and agents).
+**Source in this repo:** [docs/getting-started/quickstart.md](getting-started/quickstart.md) (the Mintlify site source; this file is a pointer for old deep links and agents).
 
 ## Ultra-short path
 

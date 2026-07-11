@@ -17,11 +17,11 @@ TODAY="${DOC_FRESHNESS_TODAY:-$(date +%F)}"
 ERRORS=0
 
 DOCS=(
-    "docs/CONFIG.md|cmd/bd/main.go;cmd/bd/config.go;internal/configfile/"
-    "docs/SETUP.md|cmd/bd/setup*.go;internal/recipes/"
-    "docs/ADO_CONFIG.md|cmd/bd/ado*.go;internal/ado/"
-    "docs/JSON_SCHEMA.md|cmd/bd/output.go;cmd/bd/errors.go;cmd/bd/protocol/json_contract_test.go"
-    "docs/RECOVERY.md|cmd/bd/init.go;cmd/bd/init_safety.go;cmd/bd/init_safety_test.go"
+    "docs/reference/configuration.md|cmd/bd/main.go;cmd/bd/config.go;internal/configfile/"
+    "docs/getting-started/ide-setup.md|cmd/bd/setup*.go;internal/recipes/"
+    "docs/integrations/azure-devops.md|cmd/bd/ado*.go;internal/ado/"
+    "docs/reference/json-schema.md|cmd/bd/output.go;cmd/bd/errors.go;cmd/bd/protocol/json_contract_test.go"
+    "docs/recovery/init-safety.md|cmd/bd/init.go;cmd/bd/init_safety.go;cmd/bd/init_safety_test.go"
     "engdocs/ERROR_HANDLING.md|cmd/bd/*.go;cmd/bd/errors.go"
     "engdocs/LINTING.md|.golangci.yml"
     "engdocs/design/otel/otel-data-model.md|internal/telemetry/;internal/storage/dolt/store.go;internal/compact/haiku.go;cmd/bd/find_duplicates.go;internal/hooks/"

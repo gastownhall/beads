@@ -6,32 +6,35 @@ Patterns for coordinating work between multiple AI agents.
 
 ## Work Assignment
 
-### Pinning Work
+### Assigning and Claiming Work
 
-Assign work to a specific agent:
+Assign work to a specific agent, or claim it atomically for yourself:
 
 ```bash
-# Pin issue to agent
-bd pin bd-42 --for agent-1
+# Assign issue to an agent
+bd assign bd-42 agent-1
 
-# Pin and start work
-bd pin bd-42 --for agent-1 --start
+# Atomically claim an issue (sets assignee to you, status to in_progress)
+bd update bd-42 --claim
 
-# Unpin work
-bd unpin bd-42
+# Claim the first ready issue matching your filters
+bd ready --claim --json
+
+# Release a claimed issue
+bd unclaim bd-42
 ```
 
-### Checking Pinned Work
+### Checking Assigned Work
 
 ```bash
-# What's on my hook?
-bd hook
+# What is agent-1 working on?
+bd list --assignee agent-1 --status in_progress
 
-# What's on agent-1's hook?
-bd hook --agent agent-1
+# What is ready for agent-1?
+bd ready --assignee agent-1
 
 # JSON output
-bd hook --json
+bd list --assignee agent-1 --json
 ```
 
 ## Handoff Patterns
@@ -42,11 +45,11 @@ Agent A completes work, hands off to Agent B:
 
 ```bash
 # Agent A
-bd close bd-42 --reason "Ready for review"
-bd pin bd-42 --for agent-b
+bd comment bd-42 "API complete, ready for review"
+bd assign bd-42 agent-b
 
 # Agent B picks up
-bd hook  # Sees bd-42
+bd list --assignee agent-b  # Sees bd-42
 bd update bd-42 --claim
 ```
 
@@ -56,11 +59,13 @@ Multiple agents work on different issues:
 
 ```bash
 # Coordinator
-bd pin bd-42 --for agent-a --start
-bd pin bd-43 --for agent-b --start
-bd pin bd-44 --for agent-c --start
+bd assign bd-42 agent-a
+bd assign bd-43 agent-b
+bd assign bd-44 agent-c
 
-# Each agent works independently
+# Each agent claims its issue and works independently
+bd update bd-42 --claim
+
 # Coordinator monitors progress
 bd list --status in_progress --json
 ```
@@ -75,51 +80,59 @@ bd create "Part A" --parent bd-epic
 bd create "Part B" --parent bd-epic
 bd create "Part C" --parent bd-epic
 
-bd pin bd-epic.1 --for agent-a
-bd pin bd-epic.2 --for agent-b
-bd pin bd-epic.3 --for agent-c
+bd assign bd-epic.1 agent-a
+bd assign bd-epic.2 agent-b
+bd assign bd-epic.3 agent-c
 
-# Fan-in: wait for all parts
-bd dep add bd-merge bd-epic.1 bd-epic.2 bd-epic.3
+# Fan-in: wait for all parts (one dependency per call)
+bd dep add bd-merge bd-epic.1
+bd dep add bd-merge bd-epic.2
+bd dep add bd-merge bd-epic.3
 ```
+
+<Tip>
+For structured epic fan-out, `bd swarm` creates and tracks a swarm molecule
+from an epic (`bd swarm create`, `bd swarm status`).
+</Tip>
 
 ## Agent Discovery
 
-Find available agents:
+Beads has no agent registry — assignees are plain strings. To see which
+agents are active, group in-progress work by assignee:
 
 ```bash
-# List known agents (if using agent registry)
-bd agents list
-
-# Check agent status
-bd agents status agent-1
+bd list --status in_progress --json
 ```
 
 ## Conflict Prevention
 
-### File Reservations
+### Atomic Claims
 
-Prevent concurrent edits:
+`--claim` is atomic: when multiple agents pull from the same ready queue,
+the first claim wins, and repeating a claim you already hold is idempotent.
+Prefer claiming over assigning when agents self-select work:
 
 ```bash
-# Reserve files before editing
-bd reserve auth.go --for agent-1
-
-# Check reservations
-bd reservations list
-
-# Release when done
-bd reserve --release auth.go
+bd ready --claim --json
 ```
 
-### Issue Locking
+### Merge Slots
+
+Serialize conflict-prone work (such as merge-queue conflict resolution) with
+a merge slot — an exclusive-access primitive only one agent can hold at a
+time. Each project has one merge slot bead, named from the issue prefix
+(e.g. `bd-merge-slot`):
 
 ```bash
-# Lock issue for exclusive work
-bd lock bd-42 --for agent-1
+# Create the merge slot for this project
+bd merge-slot create
 
-# Unlock when done
-bd unlock bd-42
+# Check availability
+bd merge-slot check
+
+# Acquire before starting; release when done
+bd merge-slot acquire
+bd merge-slot release
 ```
 
 ## Communication Patterns
@@ -128,10 +141,10 @@ bd unlock bd-42
 
 ```bash
 # Agent A leaves note
-bd comment add bd-42 "Completed API, needs frontend integration"
+bd comment bd-42 "Completed API, needs frontend integration"
 
 # Agent B reads
-bd show bd-42 --full
+bd comments bd-42
 ```
 
 ### Via Labels
@@ -144,10 +157,26 @@ bd update bd-42 --add-label "needs-review"
 bd list --label-any needs-review
 ```
 
+## Coordinating Across Repositories
+
+Agents can coordinate work that spans repositories:
+
+```bash
+# Depend on a capability delivered by another project
+bd dep add bd-42 external:backend:api-ready
+```
+
+Multi-repo routing, aggregated views, and contributor/team workflows are
+covered in [Routing](/multi-agent/routing) and
+[Multi-Repo Migration](/multi-agent/multi-repo-migration).
+
 ## Best Practices
 
-1. **Clear ownership** - Always pin work to specific agent
+1. **Clear ownership** - Assign or claim work so every issue has one owner
 2. **Document handoffs** - Use comments to explain context
 3. **Use labels for status** - `needs-review`, `blocked`, `ready`
-4. **Avoid conflicts** - Use reservations for shared files
+4. **Avoid conflicts** - Claim atomically; use merge slots to serialize
+   conflict-prone work
 5. **Monitor progress** - Regular status checks
+6. **Sync at session end** - Run `bd dolt push` so other agents see your
+   updates

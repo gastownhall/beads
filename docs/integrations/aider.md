@@ -66,6 +66,24 @@ aider
 bd prime | aider --message-file -
 ```
 
+### Inside Aider
+
+Aider's own commands start with `/` (`/run`, `/add`, `/help`); anything else is a message to the AI. The AI suggests bd commands, and you execute the ones you approve with `/run`:
+
+```text
+You: What issues are ready to work on?
+
+Aider: Let me check the available work. Run:
+/run bd ready
+
+You: Let's work on bd-42
+
+Aider: To claim it, run:
+/run bd update bd-42 --claim
+```
+
+To give the AI full bd context mid-session, run `/run bd prime` — the AI reads the output and picks up the complete workflow guide.
+
 ### During Work
 
 Use bd commands alongside aider:
@@ -75,6 +93,9 @@ Use bd commands alongside aider:
 bd create "Found bug during work" --deps discovered-from:bd-42 --json
 bd update bd-42 --claim
 bd ready
+
+# Link an already-created issue as discovered work
+bd dep add bd-77 bd-42 --type discovered-from
 ```
 
 ### End Session
@@ -89,6 +110,7 @@ bd dolt push
 2. **Push regularly** - Run `bd dolt push` after significant changes
 3. **Use discovered-from** - Track issues found during work
 4. **Document context** - Include descriptions in issues
+5. **Aider commits, bd syncs** - Aider auto-commits your code changes; issue data moves separately with `bd dolt push`
 
 ## Example Workflow
 
@@ -121,6 +143,8 @@ cat .aider.conf.yml
 bd setup aider
 ```
 
+Aider reads `.aider.conf.yml` at startup, so restart aider (`/exit`, then `aider`) after regenerating.
+
 ### Issues not visible
 
 ```bash
@@ -135,3 +159,6 @@ bd doctor
 
 - [Claude Code](/integrations/claude-code)
 - [IDE Setup](/getting-started/ide-setup)
+- [Quickstart](/getting-started/quickstart)
+- [Aider documentation](https://aider.chat/docs/)
+- [AGENTS.md](https://github.com/gastownhall/beads/blob/main/AGENTS.md) - the full bd agent workflow guide

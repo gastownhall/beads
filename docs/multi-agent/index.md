@@ -13,15 +13,12 @@ Multi-agent features enable:
 
 ## Key Concepts
 
-### Routes
+### Routing
 
-Routes define which repository handles which issues:
-
-```jsonl
-{"pattern": "frontend/*", "target": "frontend-repo"}
-{"pattern": "backend/*", "target": "backend-repo"}
-{"pattern": "*", "target": "main-repo"}
-```
+Routing decides which repository a new bead lands in, based on your role
+(contributor vs maintainer) and the `routing.*` config keys — an explicit
+`--repo` flag always wins. See [Multi-Repo Routing](/multi-agent/routing)
+for the decision flow and configuration reference.
 
 ### Work Assignment
 

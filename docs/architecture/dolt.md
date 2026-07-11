@@ -589,8 +589,8 @@ On machines with multiple beads projects, each project normally starts its own D
 Shared server mode runs a single Dolt server at `~/.beads/shared-server/` that serves all projects:
 
 ```bash
-# Enable for this project
-bd dolt set shared-server true
+# Enable for this project (config.yaml key)
+bd config set dolt.shared-server true
 
 # Or enable machine-wide via environment variable
 export BEADS_DOLT_SHARED_SERVER=1

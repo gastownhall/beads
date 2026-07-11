@@ -18,19 +18,49 @@ Updates:
 - All references in other issues
 - Comments and descriptions
 
-## Issue Merge
+## Prefix Rename
 
-Merge duplicate issues:
+Change the issue prefix for every issue in the database — for example,
+shortening `knowledge-work-` to `kw-`:
 
 ```bash
-bd merge bd-42 bd-43 --into bd-41
-bd merge bd-42 bd-43 --into bd-41 --dry-run
+bd rename-prefix kw- --dry-run  # Preview without applying
+bd rename-prefix kw-            # Every knowledge-work-* ID becomes kw-*
 ```
 
-What gets merged:
-- Dependencies → target
-- Text references updated across all issues
-- Source issues closed with merge reason
+The rename updates all issue IDs and all text references across all fields.
+Prefixes are at most 8 characters of lowercase letters, numbers, and hyphens,
+must start with a letter, and must end with a hyphen. If a corrupted database
+contains issues with multiple prefixes, `bd rename-prefix <prefix> --repair`
+consolidates them. See [bd rename-prefix](/cli-reference/rename-prefix).
+
+## Duplicate Detection and Merge
+
+Find issues with identical content (title, description, design, acceptance
+criteria) and consolidate them:
+
+```bash
+bd duplicates              # Report duplicate groups with suggested actions
+bd duplicates --dry-run    # Preview what --auto-merge would do
+bd duplicates --auto-merge # Merge every duplicate group
+```
+
+Issues are grouped by content hash, and only when their statuses match (open
+with open, closed with closed). The merge target is the most-referenced issue
+in each group, falling back to the smallest ID. For each group, `--auto-merge`:
+
+- Re-parents children of the duplicates onto the target
+- Closes the duplicates with reason `Duplicate of <target>`
+- Links each duplicate to the target with a `related` dependency
+
+To mark a single known duplicate manually:
+
+```bash
+bd duplicate bd-42 --of bd-41  # Close bd-42 as a duplicate of bd-41
+```
+
+Closing is permanent, but Dolt version history preserves the original state.
+Verify results with `bd show bd-41` and `bd dep tree bd-41`.
 
 ## Database Compaction
 
@@ -57,12 +87,16 @@ bd admin cleanup --force
 
 ## Restore from History
 
-View deleted or compacted issues from git:
+Recover the pre-compaction content of a compacted issue:
 
 ```bash
-bd restore bd-42 --show
-bd restore bd-42 --to-file issue.json
+bd restore bd-42          # Display the archived original content
+bd restore bd-42 --apply  # Write the original content back into the issue
 ```
+
+If no archived snapshot exists, `bd restore` falls back to a best-effort
+reconstruction from Dolt version history, which can only be displayed, not
+applied.
 
 ## Database Inspection
 
@@ -77,7 +111,38 @@ bd info --schema --json
 bd sql "SELECT * FROM issues LIMIT 5"
 ```
 
-## Extension Data
+## Database Redirects
+
+Multiple git clones can share one beads database — useful when several agents
+or checkout directories work the same issues. Create a `.beads/redirect` file
+in the secondary clone containing a single path (relative or absolute) to the
+target `.beads` directory:
+
+```bash
+# In the secondary clone
+mkdir -p .beads
+echo "../main-clone/.beads" > .beads/redirect
+```
+
+Check which database is actually in use:
+
+```bash
+bd where          # Active .beads location, including redirect info
+bd where --json
+```
+
+Limitations and guidance:
+
+- Redirect chains are not followed — only a single level works, so a redirect
+  must point directly at the real `.beads` directory.
+- The target directory must exist and contain a valid database.
+- Give separate projects and long-lived forks their own databases instead of
+  redirects.
+- Git worktrees don't need redirects — linked worktrees discover the
+  repository's `.beads` workspace automatically. See
+  [Git Worktrees](/reference/worktrees).
+
+## Extensible Database
 
 For Dolt-backed projects, keep extension state outside the beads database and
 connect it to beads through stable CLI surfaces:
@@ -120,10 +185,20 @@ Events:
 
 ### Create Multiple
 
+Bootstrap a new database from a JSONL export:
+
 ```bash
-# Bootstrap a new database from JSONL
-bd init --from-jsonl issues.jsonl
+# In the source project
+bd export -o issues.jsonl
+
+# In the new project: place the export at .beads/issues.jsonl
+# (or the configured import.path), then initialize from it
+bd init --from-jsonl
 ```
+
+Importing records whose IDs already exist updates those issues in place —
+hash IDs are content-derived and stable, so a matching ID is an update, not a
+collision.
 
 ### Update Multiple
 
@@ -158,16 +233,25 @@ bd sql "SELECT id, priority, status FROM issues WHERE status != 'closed'"
 
 The storage packages under `internal/` are not a public Go API.
 
+The [MCP server](/integrations/mcp-server) is a stateless adapter over the
+same boundary: it translates MCP calls into `bd` CLI invocations and routes
+each call to the correct `.beads` workspace based on the working directory.
+It never caches or stores issue data itself.
+
 ## Performance Tuning
 
 ### Large Databases
 
 ```bash
-# Enable WAL mode
-bd config set database.wal_mode true
+# Summarize old closed issues (see Database Compaction above)
+bd admin compact --stats
 
-# Increase cache
-bd config set database.cache_size 10000
+# Reclaim disk space with Dolt garbage collection
+bd admin compact --dolt
+
+# Squash Dolt commits older than 30 days (preview first)
+bd compact --dry-run
+bd compact --force
 ```
 
 ### Many Concurrent Agents
