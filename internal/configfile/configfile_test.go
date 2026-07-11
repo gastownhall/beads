@@ -311,6 +311,9 @@ func TestDoltServerMode(t *testing.T) {
 	})
 
 	t.Run("GetDoltServerPort", func(t *testing.T) {
+		// Clear port env vars so the table-driven configs are the source of truth.
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
 		tests := []struct {
 			name string
 			cfg  *Config
@@ -626,28 +629,38 @@ func TestProxiedServerClientInfo_ResolvedPaths(t *testing.T) {
 	})
 }
 
-// TestGetBackend tests that legacy backend names default to Dolt while
-// explicit plugin-capable backend names are preserved.
-func TestGetBackend(t *testing.T) {
-	tests := []struct {
+// TestGetBackendNormalization verifies that only an empty value defaults to
+// Dolt. Unknown non-empty names must survive normalization so configured open
+// can resolve an external provider or fail closed instead of opening Dolt.
+func TestGetBackendNormalization(t *testing.T) {
+	fallsBackToDolt := []struct {
 		name string
 		cfg  *Config
-		want string
 	}{
-		{name: "explicit dolt", cfg: &Config{Backend: BackendDolt}, want: BackendDolt},
-		{name: "empty backend", cfg: &Config{Backend: ""}, want: BackendDolt},
-		{name: "legacy config", cfg: &Config{}, want: BackendDolt},
-		{name: "stale sqlite value", cfg: &Config{Backend: "sqlite"}, want: BackendDolt},
-		{name: "normalizes case and whitespace", cfg: &Config{Backend: " DoltLite "}, want: "doltlite"},
-		{name: "plugin backend", cfg: &Config{Backend: "postgres"}, want: "postgres"},
+		{name: "explicit dolt", cfg: &Config{Backend: BackendDolt}},
+		{name: "empty backend", cfg: &Config{Backend: ""}},
+		{name: "legacy config", cfg: &Config{}},
 	}
-
-	for _, tt := range tests {
+	for _, tt := range fallsBackToDolt {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.cfg.GetBackend(); got != tt.want {
-				t.Errorf("GetBackend() = %q, want %q", got, tt.want)
+			if got := tt.cfg.GetBackend(); got != BackendDolt {
+				t.Errorf("GetBackend() = %q, want %q", got, BackendDolt)
 			}
 		})
+	}
+
+	honored := []string{BackendPostgres, BackendMySQL, BackendSQLite, "mystery"}
+	for _, backend := range honored {
+		t.Run(backend+" honored", func(t *testing.T) {
+			cfg := &Config{Backend: backend}
+			if got := cfg.GetBackend(); got != backend {
+				t.Errorf("GetBackend() = %q, want %q", got, backend)
+			}
+		})
+	}
+
+	if got := (&Config{Backend: " DoltLite "}).GetBackend(); got != "doltlite" {
+		t.Errorf("GetBackend() = %q, want normalized external backend", got)
 	}
 }
 
@@ -708,6 +721,9 @@ func TestGetCapabilities(t *testing.T) {
 
 // TestDoltServerModeRoundtrip tests that server mode config survives save/load
 func TestDoltServerModeRoundtrip(t *testing.T) {
+	// Clear port env vars so saved/loaded port comes from config, not ambient env.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0750); err != nil {

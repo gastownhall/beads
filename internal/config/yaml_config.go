@@ -35,6 +35,7 @@ var YamlOnlyKeys = map[string]bool{
 	"git.no-gpg-sign": true,
 	"no-push":         true,
 	"no-git-ops":      true, // Disable git ops in bd prime session close protocol (GH#593)
+	"agent.profile":   true, // Explicit policy profile for bd prime's close protocol (GH#3423)
 
 	// Sync settings
 	"sync.remote":     true, // Primary: any Dolt-compatible remote URL
@@ -49,6 +50,11 @@ var YamlOnlyKeys = map[string]bool{
 
 	// Create command settings
 	"create.require-description": true,
+
+	// Prime memory-injection caps (read at session start, possibly before
+	// the database is reachable, so they must live in yaml)
+	"prime.max-memories":     true,
+	"prime.max-memory-chars": true,
 
 	// Validation settings (bd-t7jq)
 	// Values: "warn" | "error" | "none"
@@ -66,6 +72,7 @@ var YamlOnlyKeys = map[string]bool{
 	"backup.git-repo": true,
 
 	// Import settings
+	"import.auto": true,
 	"import.path": true,
 
 	// Dolt server settings
@@ -94,7 +101,7 @@ func IsYamlOnlyKey(key string) bool {
 	}
 
 	// Check prefix matches for nested keys
-	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics."}
+	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics.", "list."}
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(key, prefix) {
 			return true
@@ -814,6 +821,22 @@ func validateYamlConfigValue(key, value string) error {
 		lower := strings.ToLower(value)
 		if lower != "server" && lower != "embedded" {
 			return fmt.Errorf("dolt.mode must be \"server\" or \"embedded\", got %q", value)
+		}
+	case "prime.max-memories":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("prime.max-memories must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+		if n < 0 {
+			return fmt.Errorf("prime.max-memories must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+	case "prime.max-memory-chars":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("prime.max-memory-chars must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+		if n < 0 {
+			return fmt.Errorf("prime.max-memory-chars must be a non-negative integer (0 = unlimited), got %q", value)
 		}
 	}
 	return nil

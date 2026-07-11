@@ -3,13 +3,16 @@ package domain
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 type ConfigSQLRepository interface {
 	GetMetadata(ctx context.Context, key string) (string, error)
 	SetMetadata(ctx context.Context, key, value string) error
+	GetLocalMetadata(ctx context.Context, key string) (string, error)
 	SetLocalMetadata(ctx context.Context, key, value string) error
 	GetConfig(ctx context.Context, key string) (string, error)
 	SetConfig(ctx context.Context, key, value string) error
@@ -39,6 +42,16 @@ type ConfigUseCase interface {
 	SetConfig(ctx context.Context, key, value string) error
 	DeleteConfig(ctx context.Context, key string) error
 	GetAllConfig(ctx context.Context) (map[string]string, error)
+	GetMetadata(ctx context.Context, key string) (string, error)
+
+	ReconcileVersion(ctx context.Context, cliVersion string) (VersionReconcileResult, error)
+}
+
+type VersionReconcileResult struct {
+	Previous  string
+	Current   string
+	Migrated  bool
+	Downgrade bool
 }
 
 // CreateContext bundles the read-only config inputs that bd create needs
@@ -128,6 +141,22 @@ func (u *configUseCaseImpl) GetInfraTypes(ctx context.Context) (map[string]bool,
 	if err != nil {
 		return nil, fmt.Errorf("GetInfraTypes: %w", err)
 	}
+	// The repo returns only the DB `types.infra` config; an unset/empty value
+	// yields an empty map. Embedded resolves the same way but then falls back to
+	// config.yaml and finally the hardcoded defaults (["agent","role","message"])
+	// via issueops.ResolveInfraTypesInTx / DoltStore.GetInfraTypes. Reproduce that
+	// fallback here so `-t message` auto-routes to ephemeral on this seam exactly
+	// as on the embedded store, instead of being treated as a plain type (#4547 F-3).
+	if len(out) == 0 {
+		typeList := config.GetInfraTypesFromYAML()
+		if len(typeList) == 0 {
+			typeList = DefaultInfraTypes()
+		}
+		out = make(map[string]bool, len(typeList))
+		for _, t := range typeList {
+			out[t] = true
+		}
+	}
 	return out, nil
 }
 
@@ -143,6 +172,14 @@ func (u *configUseCaseImpl) GetConfig(ctx context.Context, key string) (string, 
 	out, err := u.cfgRepo.GetConfig(ctx, key)
 	if err != nil {
 		return "", fmt.Errorf("GetConfig: %w", err)
+	}
+	return out, nil
+}
+
+func (u *configUseCaseImpl) GetMetadata(ctx context.Context, key string) (string, error) {
+	out, err := u.cfgRepo.GetMetadata(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("GetMetadata: %w", err)
 	}
 	return out, nil
 }
@@ -167,6 +204,70 @@ func (u *configUseCaseImpl) GetAllConfig(ctx context.Context) (map[string]string
 		return nil, fmt.Errorf("GetAllConfig: %w", err)
 	}
 	return out, nil
+}
+
+func (u *configUseCaseImpl) ReconcileVersion(ctx context.Context, cliVersion string) (VersionReconcileResult, error) {
+	if cliVersion == "" {
+		return VersionReconcileResult{}, fmt.Errorf("ReconcileVersion: cliVersion must be set")
+	}
+
+	dbVersion, err := u.cfgRepo.GetLocalMetadata(ctx, "bd_version")
+	if err != nil {
+		return VersionReconcileResult{}, fmt.Errorf("ReconcileVersion: read bd_version: %w", err)
+	}
+	if dbVersion == cliVersion {
+		return VersionReconcileResult{Previous: dbVersion, Current: dbVersion}, nil
+	}
+
+	maxVersion, err := u.cfgRepo.GetLocalMetadata(ctx, "bd_version_max")
+	if err != nil {
+		return VersionReconcileResult{}, fmt.Errorf("ReconcileVersion: read bd_version_max: %w", err)
+	}
+
+	if dbVersion != "" && compareVersions(cliVersion, dbVersion) < 0 {
+		return VersionReconcileResult{Previous: dbVersion, Current: dbVersion, Downgrade: true}, nil
+	}
+	if maxVersion != "" && compareVersions(cliVersion, maxVersion) < 0 {
+		return VersionReconcileResult{Previous: dbVersion, Current: dbVersion, Downgrade: true}, nil
+	}
+
+	if err := u.cfgRepo.SetLocalMetadata(ctx, "bd_version", cliVersion); err != nil {
+		return VersionReconcileResult{}, fmt.Errorf("ReconcileVersion: set bd_version: %w", err)
+	}
+	if maxVersion == "" || compareVersions(cliVersion, maxVersion) > 0 {
+		if err := u.cfgRepo.SetLocalMetadata(ctx, "bd_version_max", cliVersion); err != nil {
+			return VersionReconcileResult{}, fmt.Errorf("ReconcileVersion: set bd_version_max: %w", err)
+		}
+	}
+
+	return VersionReconcileResult{Previous: dbVersion, Current: cliVersion, Migrated: true}, nil
+}
+
+func compareVersions(v1, v2 string) int {
+	parts1 := strings.Split(v1, ".")
+	parts2 := strings.Split(v2, ".")
+
+	maxLen := len(parts1)
+	if len(parts2) > maxLen {
+		maxLen = len(parts2)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		var p1, p2 int
+		if i < len(parts1) {
+			_, _ = fmt.Sscanf(parts1[i], "%d", &p1)
+		}
+		if i < len(parts2) {
+			_, _ = fmt.Sscanf(parts2[i], "%d", &p2)
+		}
+		if p1 < p2 {
+			return -1
+		}
+		if p1 > p2 {
+			return 1
+		}
+	}
+	return 0
 }
 
 func (u *configUseCaseImpl) LoadCreateContext(ctx context.Context) (CreateContext, error) {

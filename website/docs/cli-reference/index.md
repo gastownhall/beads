@@ -9,7 +9,7 @@ sidebar_position: 0
 <!-- AUTO-GENERATED: do not edit manually -->
 Reference for bd Latest. Generated from `bd help --docs-root`.
 
-This reference covers all 108 live top-level `bd` commands. Regenerate it with:
+This reference covers all 112 live top-level `bd` commands. Regenerate it with:
 
 ```bash
 ./scripts/generate-cli-docs.sh
@@ -59,6 +59,7 @@ This reference covers all 108 live top-level `bd` commands. Regenerate it with:
 - [`bd github`](./github.md)
 - [`bd gitlab`](./gitlab.md)
 - [`bd graph`](./graph.md)
+- [`bd heartbeat`](./heartbeat.md)
 - [`bd history`](./history.md)
 - [`bd hooks`](./hooks.md)
 - [`bd human`](./human.md)
@@ -78,6 +79,7 @@ This reference covers all 108 live top-level `bd` commands. Regenerate it with:
 - [`bd merge-slot`](./merge-slot.md)
 - [`bd metrics`](./metrics.md)
 - [`bd migrate`](./migrate.md)
+- [`bd migrate-personal`](./migrate-personal.md)
 - [`bd mol`](./mol.md)
 - [`bd note`](./note.md)
 - [`bd notion`](./notion.md)
@@ -95,6 +97,7 @@ This reference covers all 108 live top-level `bd` commands. Regenerate it with:
 - [`bd quickstart`](./quickstart.md)
 - [`bd ready`](./ready.md)
 - [`bd recall`](./recall.md)
+- [`bd reclaim`](./reclaim.md)
 - [`bd recompute-blocked`](./recompute-blocked.md)
 - [`bd remember`](./remember.md)
 - [`bd rename`](./rename.md)
@@ -118,6 +121,7 @@ This reference covers all 108 live top-level `bd` commands. Regenerate it with:
 - [`bd tag`](./tag.md)
 - [`bd todo`](./todo.md)
 - [`bd types`](./types.md)
+- [`bd unclaim`](./unclaim.md)
 - [`bd undefer`](./undefer.md)
 - [`bd update`](./update.md)
 - [`bd upgrade`](./upgrade.md)

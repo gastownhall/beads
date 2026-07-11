@@ -153,8 +153,7 @@ Examples:
 
 			ctx := rootCtx
 			if usesProxiedServer() {
-				runDepBlocksProxiedServer(cmd, ctx, blockerID, blocksID)
-				return nil
+				return runDepBlocksProxiedServer(cmd, ctx, blockerID, blocksID)
 			}
 			depType := "blocks"
 
@@ -297,8 +296,7 @@ Examples:
 		}()
 
 		if usesProxiedServer() {
-			runDepAddProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runDepAddProxiedServer(cmd, rootCtx, args)
 		}
 
 		depType, _ := cmd.Flags().GetString("type")
@@ -719,8 +717,7 @@ Examples:
 		}()
 
 		if usesProxiedServer() {
-			runDepListProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runDepListProxiedServer(cmd, rootCtx, args)
 		}
 
 		ctx := rootCtx
@@ -912,8 +909,7 @@ var depRemoveCmd = &cobra.Command{
 		}()
 
 		if usesProxiedServer() {
-			runDepRemoveProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runDepRemoveProxiedServer(cmd, rootCtx, args)
 		}
 
 		ctx := rootCtx
@@ -1007,8 +1003,7 @@ Examples:
 		}()
 
 		if usesProxiedServer() {
-			runDepTreeProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runDepTreeProxiedServer(cmd, rootCtx, args)
 		}
 
 		ctx := rootCtx
@@ -1122,8 +1117,7 @@ var depCyclesCmd = &cobra.Command{
 		}()
 
 		if usesProxiedServer() {
-			runDepCyclesProxiedServer(cmd, rootCtx)
-			return nil
+			return runDepCyclesProxiedServer(cmd, rootCtx)
 		}
 
 		ctx := rootCtx

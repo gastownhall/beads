@@ -81,7 +81,11 @@ func TestEmbeddedCount(t *testing.T) {
 	bdCreate(t, bd, dir, "Count task one", "--type", "task", "--priority", "3", "--assignee", "alice")
 	bdCreate(t, bd, dir, "Count feature one", "--type", "feature", "--priority", "1")
 	closedIssue := bdCreate(t, bd, dir, "Count closed one", "--type", "task", "--priority", "2", "--assignee", "alice")
-	bdClose(t, bd, dir, closedIssue.ID)
+	// --force: closedIssue is assigned to alice, so the be-035 close-authority
+	// guard refuses this cross-actor close (test actor != alice) without it.
+	// The fixture must stay assigned to alice for the --assignee alice count
+	// assertion below (expects >=3), so we override rather than drop the assignee.
+	bdClose(t, bd, dir, closedIssue.ID, "--force")
 	bdCreate(t, bd, dir, "Count labeled", "--type", "task", "--label", "frontend", "--label", "urgent")
 	bdCreate(t, bd, dir, "Count labeled two", "--type", "task", "--label", "backend")
 	bdCreate(t, bd, dir, "Count notes issue", "--type", "task", "--description", "notes keyword here")

@@ -95,8 +95,12 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			}
 			return nil
 		}
-		return fmt.Errorf("db: DependencySQLRepository.Insert: %s -> %s already exists with type %q (requested %q)",
-			dep.IssueID, dep.DependsOnID, existingType, dep.Type)
+		return &domain.DependencyTypeConflictError{
+			IssueID:       dep.IssueID,
+			DependsOnID:   dep.DependsOnID,
+			ExistingType:  existingType,
+			RequestedType: string(dep.Type),
+		}
 	case errors.Is(err, sql.ErrNoRows):
 	default:
 		return fmt.Errorf("db: DependencySQLRepository.Insert: check existing: %w", err)

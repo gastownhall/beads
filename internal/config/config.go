@@ -206,6 +206,13 @@ func Initialize() error {
 	// Push configuration defaults
 	v.SetDefault("no-push", false)
 
+	// Agent profile configuration (gh#3423, follow-up to #4220)
+	// Explicit runtime knob for the policy profile (git/commit authority)
+	// documented in docs/SETUP.md. `bd prime` uses this to select its
+	// close-protocol wording. Values: conservative | minimal | team-maintainer.
+	// Invalid values fall back to "conservative" (see GetAgentProfile).
+	v.SetDefault("agent.profile", string(ProfileConservative))
+
 	// Create command defaults
 	v.SetDefault("create.require-description", false)
 
@@ -259,6 +266,9 @@ func Initialize() error {
 
 	// AI configuration defaults
 	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")
+
+	// List command defaults
+	v.SetDefault("list.limit", 50)
 
 	// Output configuration (GH#1384)
 	// Controls title display in command feedback messages.

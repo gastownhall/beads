@@ -14,7 +14,11 @@ import (
 )
 
 type readyWorkPredicates struct {
-	whereSQL         string
+	whereSQL string
+	// whereArgs binds only the WHERE placeholders (no ORDER BY params); it is
+	// what a bare COUNT(*) over the ready predicate needs. args carries the
+	// WHERE params followed by the ORDER BY params for the full page query.
+	whereArgs        []interface{}
 	orderBySQL       string
 	limitSQL         string
 	args             []interface{}
@@ -60,12 +64,14 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 		inputs.ParentDescendantIDs = descendantIDs
 	}
 
-	whereSQL, args, err := sqlbuild.BuildReadyWorkWhere(filter, tables, inputs)
+	whereSQL, whereArgs, err := sqlbuild.BuildReadyWorkWhere(filter, tables, inputs)
 	if err != nil {
 		return nil, err
 	}
 
 	orderBy := buildReadyWorkOrder(filter.SortPolicy)
+	args := make([]interface{}, 0, len(whereArgs)+len(orderBy.Args))
+	args = append(args, whereArgs...)
 	args = append(args, orderBy.Args...)
 
 	var limitSQL string
@@ -75,6 +81,7 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 
 	return &readyWorkPredicates{
 		whereSQL:         whereSQL,
+		whereArgs:        whereArgs,
 		orderBySQL:       orderBy.SQL,
 		limitSQL:         limitSQL,
 		args:             args,
@@ -164,7 +171,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 	wispFilter := readyWorkWispIssueFilter(filter)
 	if filter.Limit <= 0 {
 		wispFilter.Limit = 0
-		wisps, err := searchTableInTx(ctx, tx, "", wispFilter, WispsFilterTables)
+		wisps, err := searchTableInTxT(ctx, tx, "", wispFilter, WispsFilterTables, issueProjection)
 		if err != nil {
 			if isTableNotExistError(err) {
 				return nil, nil

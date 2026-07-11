@@ -54,6 +54,8 @@ type OpenOpts struct {
 	ConfigFilePath string
 	LogFilePath    string
 	DoltBinPath    string
+	Database       string
+	Port           int
 	External       configfile.ExternalDoltConfig
 }
 
@@ -78,6 +80,9 @@ func PickFreePort() (int, error) {
 func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoint, error) {
 	if err := opts.Backend.Validate(); err != nil {
 		return Endpoint{}, fmt.Errorf("OpenOpts.Backend: %w", err)
+	}
+	if opts.Port != 0 && (opts.Port < 1 || opts.Port > 65535) {
+		return Endpoint{}, fmt.Errorf("OpenOpts.Port: must be 0 or 1-65535, got %d", opts.Port)
 	}
 	switch opts.Backend {
 	case BackendLocalServer:
@@ -169,9 +174,12 @@ func spawnAndHandoff(rootDir string, opts OpenOpts, deadline time.Time, lock *ut
 		}
 	}
 
-	port, err := PickFreePort()
-	if err != nil {
-		return Endpoint{}, fmt.Errorf("pick port: %w", err)
+	port := opts.Port
+	if port == 0 {
+		var err error
+		if port, err = PickFreePort(); err != nil {
+			return Endpoint{}, fmt.Errorf("pick port: %w", err)
+		}
 	}
 
 	handedOff = true
@@ -219,7 +227,7 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, lock *util.Lock) (*e
 
 	idleTimeout := opts.IdleTimeout
 	if idleTimeout < 0 {
-		idleTimeout = 0
+		idleTimeout = IdleTimeoutNever
 	}
 
 	args := []string{
@@ -237,6 +245,9 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, lock *util.Lock) (*e
 	}
 	if opts.DoltBinPath != "" {
 		args = append(args, "--dolt-bin", opts.DoltBinPath)
+	}
+	if opts.Database != "" {
+		args = append(args, "--database", opts.Database)
 	}
 	if opts.Backend == BackendExternal {
 		ext := opts.External

@@ -1,0 +1,35 @@
+# Compose.Branch — fork-join parallel execution with a join step.
+#
+# `compose.branch` creates a fork-join pattern: every step in `steps` runs
+# after `from` completes, and `join` runs after every parallel step
+# completes. The smoke harness asserts `deploy` blocks on each of `test`,
+# `lint`, and `build`.
+formula = "branch-fanin"
+description = "Compose.Branch: deploy fans in after parallel test/lint/build."
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "prepare"
+title = "Prepare workspace"
+
+[[steps]]
+id = "test"
+title = "Run tests"
+
+[[steps]]
+id = "lint"
+title = "Run linter"
+
+[[steps]]
+id = "build"
+title = "Build artifacts"
+
+[[steps]]
+id = "deploy"
+title = "Deploy build"
+
+[[compose.branch]]
+from = "prepare"
+steps = ["test", "lint", "build"]
+join = "deploy"

@@ -1,12 +1,11 @@
 # Backend Plugin Architecture Sketch
 
-This branch starts the backend plugin seam without changing user-facing backend
-behavior.
+This branch makes backend construction reusable by the CLI and public Go API.
 
 The first hook point is the configured store open path:
 
 ```text
-metadata.json backend name -> trusted local plugin config -> provider.Open -> storage.DoltStorage
+metadata.json backend name -> configured factory -> built-in or trusted plugin -> storage.DoltStorage
 ```
 
 Dolt remains the default backend. Future plugin-shaped backends should enter
@@ -17,12 +16,15 @@ branches to command code.
 
 - `internal/backend` defines provider registration, capabilities, and open
   options.
-- Built-in providers register `dolt`.
+- Built-in providers register `dolt`, `postgres`, `mysql`, and `sqlite`.
 - `cmd/bd/store_factory.go` routes configured backend opens through the
   provider registry.
-- `metadata.json` preserves non-legacy backend names so plugins can be looked
-  up by name; only empty and old `sqlite` values are normalized to `dolt`.
-  It does not authorize an executable.
+- The public `beads.OpenConfigured` API uses the same configured factory and
+  returns the core `Storage` plus a backend-neutral descriptor. The legacy
+  `OpenFromConfig` and `OpenBestAvailable` entry points delegate to it.
+- `metadata.json` preserves every non-empty backend name so the factory can
+  resolve a built-in or external provider. Unknown names fail closed rather
+  than silently opening Dolt. Metadata does not authorize an executable.
 - Trusted plugin commands resolve from local-only sources: the
   `BEADS_BACKEND_PLUGIN_COMMAND` environment variable, `.beads/config.local.yaml`,
   or user-global config. This keeps clone-time metadata from becoming code
@@ -32,16 +34,23 @@ branches to command code.
 - `internal/backend/pluginprocess` can launch an external backend process,
   open a read/write or read-only session over the v1alpha1 newline-delimited JSON protocol, and expose
   the first storage methods needed by basic issue/config/ready-work flows.
-- Existing direct `dolt.Config` construction is intentionally left alone for
-  now because bootstrap/server/proxy paths carry extra behavior that should be
-  split into later reviewable PRs.
+- Command-scoped direct `dolt.Config` construction remains for the main CLI
+  Dolt path because it carries auto-start, gateway credential, and proxy state.
+  Configured helper opens and all non-Dolt command opens use the reusable
+  factory.
 
 ## Plugin Implications
 
-The registry remains the in-process seam for Beads' built-in Dolt backend. The
-external process path lets maintainers evaluate plugin boundaries without
-shipping backend-specific code in core. DoltLite demonstrates that shape in an
-out-of-tree plugin:
+The registry is the in-process seam for every built-in backend. External
+providers enter through the same selection path after local trust resolution.
+DoltLite demonstrates that shape in an out-of-tree plugin:
+
+```go
+store, info, err := beads.OpenConfigured(ctx, beadsDir, beads.OpenConfiguredOptions{})
+```
+
+`info` reports the selected backend and optional behavior without exposing a
+driver connection or concrete storage implementation.
 
 ```text
 https://github.com/duncan4123/beads-backend-doltlite

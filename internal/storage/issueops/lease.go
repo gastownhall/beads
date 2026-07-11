@@ -44,13 +44,22 @@ func leaseTTL(ctx context.Context) time.Duration {
 // that touch DIFFERENT cells of the same issue row (a heartbeat writing
 // heartbeat_at, a close writing status) merge silently instead of conflicting —
 // which would let a reclaim quietly revert an issue the owner just closed. By
-// having EVERY mutating path rewrite this one shared cell to a fresh random
-// value, concurrent writers always collide on row_lock, surfacing the 1213/1205
-// serialization conflict that withRetryTx replays. The value's only job is to
-// differ from whatever a concurrent writer wrote, so any source of entropy
-// works; we use crypto/rand to avoid seeding concerns. Never 0 (the column
-// default) so a freshly-claimed row is always distinguishable from a never-
-// touched one.
+// having every status/ownership/lease-mutating path rewrite this one shared cell
+// to a fresh random value, those writers always collide on row_lock, surfacing
+// the 1213/1205 serialization conflict that withRetryTx replays. The value's
+// only job is to differ from whatever a concurrent writer wrote, so any source
+// of entropy works; we use crypto/rand to avoid seeding concerns. Never 0 (the
+// column default) so a freshly-claimed row is always distinguishable from a
+// never-touched one.
+//
+// INVARIANT: any path that mutates status, assignee, started_at, or the lease
+// columns on an in_progress issue MUST rewrite row_lock — that is the set the
+// reclaim/heartbeat races care about (claim, close, updateIssueInTx, heartbeat,
+// reclaim all do). Paths that touch only orthogonal cells (is_blocked,
+// compaction_level, dependency metadata, rename, or reopen — which acts on
+// closed rows) are safe to merge with a reclaim and intentionally do NOT rewrite
+// it. Adding a new path that sets status/assignee/lease outside updateIssueInTx
+// without rewriting row_lock would silently reintroduce the zombie-merge bug.
 func freshRowLock() int64 {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -91,10 +100,16 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 	now := time.Now().UTC()
 	leaseClause, leaseArgs := leaseSetClause(now, leaseTTL(ctx))
 
+	// Stamp updated_at = now on the heartbeat. On Dolt/MySQL the issues/wisps
+	// ON UPDATE CURRENT_TIMESTAMP trigger bumps updated_at on every heartbeat;
+	// Postgres and SQLite have no such trigger, so without an explicit stamp an
+	// actively-heartbeated issue keeps a stale updated_at and bd stale (which
+	// filters in_progress rows on updated_at < cutoff) diverges from the Dolt
+	// oracle. Claim already stamps updated_at explicitly, so this is heartbeat-only.
 	args := append([]interface{}{}, leaseArgs...)
-	args = append(args, id, actor)
+	args = append(args, now, id, actor)
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		UPDATE %s SET %s
+		UPDATE %s SET %s, updated_at = ?
 		WHERE id = ? AND status = 'in_progress' AND assignee = ?
 	`, issueTable, leaseClause), args...)
 	if err != nil {
@@ -153,16 +168,18 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, ac
 	for rows.Next() {
 		var r types.ReclaimedLease
 		if err := rows.Scan(&r.ID, &r.PreviousOwner); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, fmt.Errorf("scan stale lease row: %w", err)
 		}
 		stale = append(stale, r)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return nil, fmt.Errorf("iterate stale leases: %w", err)
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close stale lease rows: %w", err)
+	}
 	if len(stale) == 0 {
 		return nil, nil
 	}

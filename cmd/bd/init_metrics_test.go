@@ -583,14 +583,10 @@ func TestMetricsRootVersionFlagSuppressesFirstRunNotice(t *testing.T) {
 	}
 }
 
-// TestInitProxiedServerRejectedKeepsMetricsGapLatent documents and tests the
-// containment of the proxied-server metrics-flush gap flagged on PR #4419:
-// proxied-server handlers exit via FatalError*/os.Exit, which would bypass the
-// deferred per-command metrics close. That gap is harmless only while
-// proxied-server mode cannot be entered. This asserts `bd init --proxied-server`
-// is rejected as "not yet implemented", so usesProxiedServer() is never true and
-// those FatalError* paths never run. See the FatalError doc comment in errors.go.
-func TestInitProxiedServerRejectedKeepsMetricsGapLatent(t *testing.T) {
+// TestInitProxiedServerRejectedNotYetImplemented asserts `bd init
+// --proxied-server` is rejected as "not yet implemented", keeping
+// proxied-server mode gated off so usesProxiedServer() is never true.
+func TestInitProxiedServerRejectedNotYetImplemented(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	home, err := testTempDir("bd-proxied-gate-home-*")
 	if err != nil {

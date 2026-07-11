@@ -29,6 +29,13 @@ Subcommands:
   issues      Move issues between repositories
   schema      Apply pending schema migrations (idempotent)
   sync        Set up sync.branch workflow for multi-clone setups
+
+On a remote-backed database with pending schema migrations bd refuses to
+migrate in place (#4259): migrating two clones independently forks the schema
+so bd dolt pull can no longer merge — the break is silent and unrecoverable.
+Use --force to confirm you are the single designated migrator, after which you
+should publish the migrated schema with 'bd dolt push'. The env-var equivalent
+BD_ALLOW_REMOTE_MIGRATE=1 remains supported for scripted/CI use.
 `,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -85,11 +92,15 @@ Subcommands:
 			return HandleError("failed to load config: %v", err)
 		}
 
-		return handleDoltMetadataUpdate(cfg, dryRun)
+		return handleDoltMetadataUpdate(cfg, beadsDir, dryRun)
 	},
 }
 
-func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) error {
+// handleDoltMetadataUpdate handles version metadata updates for Dolt backends.
+// beadsDir is the resolved .beads directory (honoring -C); repo-derived metadata
+// is computed from it rather than the process cwd so `bd -C <dir> migrate`
+// fingerprints the target repo, not the caller's (GH#4361).
+func handleDoltMetadataUpdate(cfg *configfile.Config, beadsDir string, dryRun bool) error {
 	ctx := rootCtx
 	store := getStore()
 	if store == nil {
@@ -200,7 +211,7 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) error {
 
 	// Set repo_id if missing (non-fatal — may fail in non-git environments)
 	if needsRepoID {
-		computed, err := beads.ComputeRepoID()
+		computed, err := beads.ComputeRepoIDForPath(beadsDir)
 		if err != nil {
 			if !jsonOutput {
 				fmt.Fprintf(os.Stderr, "Warning: could not compute repo_id: %v\n", err)
@@ -221,7 +232,7 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) error {
 
 	// Set clone_id if missing (non-fatal — may fail in non-git environments)
 	if needsCloneID {
-		computed, err := beads.GetCloneID()
+		computed, err := beads.GetCloneIDForPath(beadsDir)
 		if err != nil {
 			if !jsonOutput {
 				fmt.Fprintf(os.Stderr, "Warning: could not compute clone_id: %v\n", err)
@@ -297,7 +308,11 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) error {
 		return HandleErrorWithHint("no beads database found", diagHint())
 	}
 
-	newRepoID, err := beads.ComputeRepoID()
+	// Compute new repo ID from the resolved .beads directory (honoring -C),
+	// not the process cwd. Otherwise `bd -C <dir> migrate --update-repo-id`
+	// stamps the target DB with the caller repo's fingerprint and the bad
+	// value propagates to every clone on the next sync (GH#4361).
+	newRepoID, err := beads.ComputeRepoIDForPath(beadsDir)
 	if err != nil {
 		if jsonOutput {
 			if jerr := outputJSON(map[string]interface{}{
@@ -777,6 +792,9 @@ func init() {
 	migrateCmd.Flags().Bool("update-repo-id", false, "Update repository ID (use after changing git remote)")
 	migrateCmd.Flags().Bool("inspect", false, "Show migration plan and database state for AI agent analysis")
 	migrateCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output migration statistics in JSON format")
+	// --force bypasses the remote-migrate gate (#4259) as the single designated
+	// migrator. No -f shorthand: deliberate typing for a fork-risk bypass.
+	migrateCmd.Flags().Bool("force", false, "Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)")
 
 	migrateSyncCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
 	migrateSyncCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
@@ -789,6 +807,9 @@ func init() {
 	migrateCmd.AddCommand(migrateHooksCmd)
 
 	migrateSchemaCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+	// --force on migrate schema mirrors the parent command's flag; both trip the
+	// same isForcedMigrate check in main.go's PersistentPreRunE.
+	migrateSchemaCmd.Flags().Bool("force", false, "Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)")
 	migrateCmd.AddCommand(migrateSchemaCmd)
 
 	rootCmd.AddCommand(migrateCmd)

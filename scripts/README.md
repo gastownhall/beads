@@ -104,8 +104,8 @@ This master script automates the **entire release process**:
 3. ✅ Bumps version in all files
 4. ✅ Commits and pushes version bump
 5. ✅ Creates and pushes git tag
-6. ✅ Updates Homebrew formula
-7. ✅ Upgrades local brew installation
+6. ✅ Verifies or opens the Homebrew core formula PR
+7. ✅ Upgrades local Homebrew installation
 8. ✅ Verifies everything works
 
 **After this script completes, your system is running the new version!**
@@ -141,7 +141,8 @@ The script provides colorful, step-by-step progress output:
 After the script finishes:
 - GitHub Actions builds binaries for all platforms (~5 minutes)
 - PyPI package is published automatically
-- Users can `brew upgrade beads` to get the new version
+- Homebrew core formula is verified or tracked through its canonical PR
+- Users can `brew upgrade beads` to get the new version after Homebrew merges
 - GitHub Release is created with binaries and changelog
 
 ---

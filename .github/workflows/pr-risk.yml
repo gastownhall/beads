@@ -57,7 +57,7 @@ jobs:
   #     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
   #
   #     - name: Set up Go
-  #       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+  #       uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
   #       with:
   #         go-version-file: 'go.mod'
   #
@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -193,7 +193,9 @@ jobs:
         # Conformance suite (conformance.RunAll via TestConformance) against the
         # embedded Dolt backend. Split from test-embedded-storage so each job
         # stays well under its timeout; the server twin runs in mybd-665b's job.
-        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=15m -test.run '^TestConformance$'
+        # 30m matches the repo's integration timeout: the audit suite is large and
+        # embedded Dolt under -race is slow, so 15m no longer left headroom.
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.run '^TestConformance$'
 
   test-server-storage:
     name: Test (Server Dolt Conformance)
@@ -231,7 +233,7 @@ jobs:
         # Presence of this image flips isDoltImageCached() true, so the suite
         # exercises server Dolt instead of self-skipping. Keep the tag in sync
         # with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: docker pull dolthub/dolt-sql-server:2.1.0
+        run: docker pull dolthub/dolt-sql-server:2.1.10
 
       - name: Test
         # Server twin of test-embedded-conformance: same conformance.RunAll, but
@@ -278,7 +280,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
-      - uses: DeterminateSystems/determinate-nix-action@9adf02b41cfdac2632e1c16f0480ff5bf3b05dd6 # v3
+      - uses: DeterminateSystems/determinate-nix-action@629b284231c2a82554b724e357e47fc6020833c8 # v3
       - name: Run bd help via Nix
         id: nix_help
         run: |

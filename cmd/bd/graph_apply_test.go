@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -75,12 +76,129 @@ func TestValidateGraphApplyPlanAcceptsEmptyType(t *testing.T) {
 	}
 }
 
+// TestValidateGraphApplyPlanAcceptsNewFields verifies that estimate,
+// external_ref, parent (alias), and deps are accepted without error. (GH#4064)
+func TestValidateGraphApplyPlanAcceptsNewFields(t *testing.T) {
+	est := 120
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{
+				Key:         "epic",
+				Title:       "Epic node",
+				Type:        "epic",
+				Estimate:    &est,
+				ExternalRef: "gh-42",
+			},
+			{
+				Key:    "child",
+				Title:  "Child node",
+				Parent: "epic",
+				Deps: []GraphApplyNodeDep{
+					{Target: "epic", Type: "blocks"},
+				},
+			},
+		},
+	}
+	if err := validateGraphApplyPlan(plan, nil); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+}
+
+// TestValidateGraphApplyPlanRejectsNegativeEstimate verifies that a negative
+// estimate is caught at validation time. (GH#4064)
+func TestValidateGraphApplyPlanRejectsNegativeEstimate(t *testing.T) {
+	neg := -5
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "n", Title: "Node", Estimate: &neg},
+		},
+	}
+	err := validateGraphApplyPlan(plan, nil)
+	if err == nil {
+		t.Fatal("expected error for negative estimate")
+	}
+	if !strings.Contains(err.Error(), "estimate cannot be negative") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestValidateGraphApplyPlanRejectsEmptyDepTarget verifies that a dep with an
+// empty target is caught at validation time. (GH#4064)
+func TestValidateGraphApplyPlanRejectsEmptyDepTarget(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "n", Title: "Node", Deps: []GraphApplyNodeDep{{Target: ""}}},
+		},
+	}
+	err := validateGraphApplyPlan(plan, nil)
+	if err == nil {
+		t.Fatal("expected error for empty dep target")
+	}
+	if !strings.Contains(err.Error(), "empty target") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestValidateGraphApplyPlanParentAliasResolvesCorrectly verifies that the
+// "parent" field works as an alias for "parent_key" in validation. (GH#4064)
+func TestValidateGraphApplyPlanParentAliasResolvesCorrectly(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "root", Title: "Root"},
+			{Key: "child", Title: "Child", Parent: "root"},
+		},
+	}
+	if err := validateGraphApplyPlan(plan, nil); err != nil {
+		t.Fatalf("parent alias should resolve: %v", err)
+	}
+}
+
+// TestValidateGraphApplyPlanParentAliasRejectsUnknownKey verifies that the
+// "parent" field rejects unknown keys just like "parent_key". (GH#4064)
+func TestValidateGraphApplyPlanParentAliasRejectsUnknownKey(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "child", Title: "Child", Parent: "nonexistent"},
+		},
+	}
+	err := validateGraphApplyPlan(plan, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown parent key via alias")
+	}
+	if !strings.Contains(err.Error(), "parent key") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestEmitGraphApplyDryRun_ParentAlias verifies that the "parent" alias
+// is counted and displayed in dry-run output. (GH#4064)
+func TestEmitGraphApplyDryRun_ParentAlias(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "root", Title: "Root", Type: "epic"},
+			{Key: "c1", Title: "Child 1", Parent: "root"},
+		},
+	}
+	out := captureStdout(t, func() error {
+		emitGraphApplyDryRun(plan)
+		return nil
+	})
+	if !strings.Contains(out, "1 parent-child link(s)") {
+		t.Errorf("dry-run should count parent alias as parent-child link:\n%s", out)
+	}
+	if !strings.Contains(out, "parent_key=root") {
+		t.Errorf("dry-run should display resolved parent_key from alias:\n%s", out)
+	}
+}
+
 // TestDetectUnknownGraphFields_ReporterRepro reproduces the schema-mismatch
 // pattern from GH#3367: the user passes 'parent' (a string) and 'blocks' (an
 // array) directly on nodes, expecting them to wire hierarchy/dependencies.
 // json.Unmarshal silently drops them. detectUnknownGraphFields must surface
 // both fields, scoped to the offending nodes.
 func TestDetectUnknownGraphFields_ReporterRepro(t *testing.T) {
+	// After GH#4064, "parent" is a recognized alias for "parent_key".
+	// Only "blocks" (an array, not an edge or dep) remains unknown.
 	planJSON := []byte(`{
         "nodes": [
             {"key": "root",   "type": "epic", "title": "Root epic",    "priority": 2},
@@ -91,8 +209,7 @@ func TestDetectUnknownGraphFields_ReporterRepro(t *testing.T) {
 
 	got := detectUnknownGraphFields(planJSON)
 	want := map[string][]string{
-		`node["child1"]`: {"blocks", "parent"},
-		`node["child2"]`: {"parent"},
+		`node["child1"]`: {"blocks"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("detectUnknownGraphFields:\n got=%#v\nwant=%#v", got, want)
@@ -109,9 +226,11 @@ func TestDetectUnknownGraphFields_KnownSchemaIsClean(t *testing.T) {
         "nodes": [
             {"key": "root", "title": "Root", "type": "epic", "priority": 2,
              "description": "d", "assignee": "alice", "assign_after_create": false,
-             "labels": ["a"], "metadata": {"k": "v"}, "metadata_refs": {"r": "root"}},
+             "estimate": 60, "labels": ["a"], "metadata": {"k": "v"},
+             "metadata_refs": {"r": "root"}, "external_ref": "gh-1",
+             "deps": [{"target": "child", "type": "blocks"}]},
             {"key": "child", "title": "Child", "parent_key": "root",
-             "parent_id": "ext-1"}
+             "parent_id": "ext-1", "parent": "root"}
         ],
         "edges": [
             {"from_key": "child", "to_key": "root", "type": "blocks"},
@@ -155,20 +274,25 @@ func TestDetectUnknownGraphFields_BadJSON(t *testing.T) {
 // text for the two highest-friction fields ('parent', 'blocks' from GH#3367)
 // is emitted and points the user at the canonical schema field.
 func TestWarnUnknownGraphFields_HintsForReporterFields(t *testing.T) {
+	// After GH#4064, "parent" is a recognized field. Only "blocks" triggers a hint.
 	var buf bytes.Buffer
-	warnUnknownGraphFields(&buf, map[string][]string{
-		`node["c1"]`: {"parent", "blocks"},
+	hinted := warnUnknownGraphFields(&buf, map[string][]string{
+		`node["c1"]`: {"blocks"},
 	})
 
 	out := buf.String()
-	if !strings.Contains(out, `unknown field(s): [blocks parent]`) {
+	if !strings.Contains(out, `unknown field(s): [blocks]`) {
 		t.Errorf("warning missing field list: %q", out)
 	}
-	if !strings.Contains(out, "parent_key") {
-		t.Errorf("expected 'parent' hint to mention parent_key: %q", out)
+	if !strings.Contains(out, "deps") {
+		t.Errorf("expected 'blocks' hint to mention deps: %q", out)
 	}
-	if !strings.Contains(out, "edges") {
-		t.Errorf("expected 'blocks' hint to mention edges array: %q", out)
+
+	got := append([]string(nil), hinted...)
+	sort.Strings(got)
+	want := []string{"blocks"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("hinted fields: got=%v want=%v", got, want)
 	}
 }
 

@@ -7,6 +7,7 @@ run:
 linters:
   default: 'none'
   enable:
+    - depguard
     - errcheck
     - gosec
     - misspell
@@ -15,6 +16,50 @@ linters:
     - sloglint
 
   settings:
+    depguard:
+      rules:
+        # Mechanical enforcement of the Storage Boundary in
+        # docs/PROJECT_CHARTER.md: only the storage adapter packages may
+        # depend on the Dolt engine directly.
+        dolt-storage-boundary:
+          list-mode: lax
+          files:
+            - "$all"
+            # Storage adapter packages are the intended home for Dolt access.
+            - "!**/internal/storage/**"
+            - "!**/internal/doltserver/**"
+            # Exception: the proxied-server surface needs Dolt server config
+            # (servercfg, filesys) to launch/manage a real `dolt sql-server`
+            # process. Candidate for migration behind the storage adapter.
+            - "!**/cmd/bd/proxied_server.go"
+            # Exception: eventkit is DoltHub's analytics/telemetry client,
+            # not the Dolt storage engine - dropped here so the narrower
+            # dolt-storage-boundary-metrics-exception rule below can allow
+            # eventkit specifically while still denying any other dolthub
+            # import (e.g. the engine itself) in these two files.
+            - "!**/internal/metrics/flusher.go"
+            - "!**/internal/metrics/metrics.go"
+          deny:
+            - pkg: github.com/dolthub
+              desc: "Dolt engine access is restricted to the storage adapter packages (internal/storage, internal/doltserver) - see docs/PROJECT_CHARTER.md 'Storage Boundary'"
+        # Companion rule for the two files excluded above: allow only
+        # DoltHub's eventkit telemetry client, still deny the Dolt engine
+        # (or any other dolthub package) so metrics can't become a backdoor
+        # around the storage boundary.
+        dolt-storage-boundary-metrics-exception:
+          list-mode: lax
+          # No "$all" here: this rule's files list is a plain allowlist
+          # (not "!$all" + inclusions) because depguard expands "$all" to
+          # "**/*.go" even when negated, which would match every file
+          # (including these two) and make the rule apply nowhere.
+          files:
+            - "**/internal/metrics/flusher.go"
+            - "**/internal/metrics/metrics.go"
+          allow:
+            - github.com/dolthub/eventkit
+          deny:
+            - pkg: github.com/dolthub
+              desc: "Dolt engine access is restricted to the storage adapter packages (internal/storage, internal/doltserver) - see docs/PROJECT_CHARTER.md 'Storage Boundary'"
     errcheck:
       exclude-functions:
         - (*database/sql.DB).Close
@@ -85,7 +130,7 @@ linters:
           - gosec
         text: "G115"
       # G117: Exported struct fields matching secret patterns are intentional API fields
-      - path: 'internal/compact/compactor\.go|internal/jira/client\.go|internal/linear/types\.go|internal/storage/versioned\.go'
+      - path: 'internal/compact/compactor\.go|internal/jira/client\.go|internal/linear/types\.go|internal/linear/oauth\.go|internal/storage/versioned\.go'
         linters:
           - gosec
         text: "G117"
@@ -104,12 +149,12 @@ linters:
           - gosec
         text: "G703"
       # G704: SSRF via taint in API clients with user-configured URLs
-      - path: 'cmd/bd/doctor/(claude|version)\.go|internal/gitlab/client\.go|internal/jira/client\.go|internal/linear/client\.go'
+      - path: 'cmd/bd/doctor/(claude|version)\.go|internal/github/client\.go|internal/gitlab/client\.go|internal/jira/client\.go|internal/linear/client\.go|internal/linear/oauth\.go'
         linters:
           - gosec
         text: "G704"
       # G705: XSS via taint in CLI template rendering (no browser context)
-      - path: 'cmd/bd/compact\.go'
+      - path: 'cmd/bd/compact\.go|internal/linear/client\.go'
         linters:
           - gosec
         text: "G705"

@@ -87,6 +87,51 @@ func ManageStartedAt(oldIssue *types.Issue, updates map[string]interface{}, setC
 	return setClauses, args
 }
 
+// ManageLeaseOnUpdate keeps lease ownership coherent when generic updates alter
+// status or assignee. Claim/heartbeat own the normal lease lifecycle, but bd
+// update can transfer or reopen work directly.
+func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}, ctx context.Context) ([]string, []interface{}) {
+	rawStatus, hasStatus := updates["status"]
+	rawAssignee, hasAssignee := updates["assignee"]
+	if !hasStatus && !hasAssignee {
+		return setClauses, args
+	}
+
+	newStatus := string(oldIssue.Status)
+	if hasStatus {
+		switch v := rawStatus.(type) {
+		case string:
+			newStatus = v
+		case types.Status:
+			newStatus = string(v)
+		default:
+			return setClauses, args
+		}
+	}
+
+	newAssignee := oldIssue.Assignee
+	if hasAssignee {
+		switch v := rawAssignee.(type) {
+		case nil:
+			newAssignee = ""
+		case string:
+			newAssignee = v
+		default:
+			newAssignee = fmt.Sprint(v)
+		}
+	}
+
+	if newStatus != string(types.StatusInProgress) || newAssignee == "" {
+		setClauses = append(setClauses, "lease_expires_at = NULL", "heartbeat_at = NULL")
+		return setClauses, args
+	}
+
+	now := time.Now().UTC()
+	setClauses = append(setClauses, "lease_expires_at = ?", "heartbeat_at = ?")
+	args = append(args, now.Add(leaseTTL(ctx)), now)
+	return setClauses, args
+}
+
 // DetermineEventType returns the appropriate event type for an update.
 func DetermineEventType(oldIssue *types.Issue, updates map[string]interface{}) types.EventType {
 	statusVal, hasStatus := updates["status"]
@@ -125,23 +170,17 @@ type UpdateResult struct {
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func UpdateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, true, false)
-}
-
-// UpdateIssueSQLiteInTx updates an issue using SQLite-compatible derived-state
-// recompute SQL for embedded DoltLite stores.
-func UpdateIssueSQLiteInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, true, true)
+	return updateIssueInTx(ctx, tx, id, updates, actor, true)
 }
 
 // UpdateIssueWithoutEventInTx applies normal update semantics without recording
 // an intermediate event. Demotion uses this to preserve the historical event
 // stream: create/update history is copied, then a single demotion event is added.
 func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, false, false)
+	return updateIssueInTx(ctx, tx, id, updates, actor, false)
 }
 
-func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool, sqlite bool) (*UpdateResult, error) {
+func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool) (*UpdateResult, error) {
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
@@ -220,6 +259,9 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 
 	// Auto-manage started_at (set on transition to in_progress). (GH#2796)
 	setClauses, args = ManageStartedAt(oldIssue, updates, setClauses, args)
+
+	// Auto-manage leases when direct updates change status or assignee.
+	setClauses, args = ManageLeaseOnUpdate(oldIssue, updates, setClauses, args, ctx)
 
 	// Rewrite row_lock on every update so a concurrent lease mutation (heartbeat/
 	// reclaim) collides on this shared cell and is forced to conflict-and-retry

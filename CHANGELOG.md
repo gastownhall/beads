@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Work leases: claim-TTL, heartbeat, and reclaim for dead-worker recovery**
+  (schema v54, migration `0054`)
+  ([#4537](https://github.com/gastownhall/beads/pull/4537)). A claim was
+  previously permanent — a worker that died mid-task stranded its issue
+  `in_progress` forever. Claims now carry a lease:
+  - Claiming stamps `lease_expires_at = now + TTL` (default 5m) and
+    `heartbeat_at`.
+  - `bd heartbeat <id>` — owner-only; pushes the lease forward. Fails once
+    the lease is gone.
+  - `bd reclaim --older-than <dur>` — reverts `in_progress` issues whose
+    lease expired more than `<dur>` ago back to ready (clears
+    assignee/started_at, records a `lease_reclaimed` event). Default grace
+    2×TTL.
+
+  Because Dolt has no row locking and merges concurrent commits
+  cell-by-cell, every status/ownership/lease-mutating path also rewrites a
+  shared `row_lock` cell, forcing a racing heartbeat vs. reclaim to a
+  serialization conflict that the retry layer replays — instead of silently
+  cell-merging into a zombie claim. The same landing wraps the work-queue
+  hot paths (`bd ready --claim`, claim, update, close) in serialization-
+  conflict retry, so N concurrent workers draining one queue no longer
+  surface MySQL 1213/1205 errors.
+- `bd migrate --force` (and `bd migrate schema --force`): CLI flag twin of
+  `BD_ALLOW_REMOTE_MIGRATE=1` for bypassing the remote-migrate gate (#4259)
+  as the single designated migrator; process-local so it cannot leak into
+  child processes (git hooks, dolt subprocesses).
+- **Cursor agent hooks.** `bd setup cursor` now installs `.cursor/hooks.json`
+  alongside the existing rules file, wiring three Cursor lifecycle events to a
+  new hidden `bd cursor-hook` command:
+  - `sessionStart` injects full `bd prime` context into every new agent session.
+  - `preCompact` arms a one-shot refresh marker (and notifies the user).
+  - `postToolUse` re-injects `bd prime` exactly once after a compaction, then
+    no-ops.
+
+  This brings Cursor (IDE and recent `cursor-agent` CLI builds — verified on the
+  2026.06 line; early-2026 CLI builds only fired shell hooks) to parity with
+  the Claude Code / Codex hook integrations, so Beads context survives context
+  compaction instead of being forgotten. Existing user hooks in
+  `.cursor/hooks.json` are preserved, and `bd setup cursor --remove` only
+  removes the Beads-managed entries.
+
+  The integration now matches Claude/Codex on several more fronts:
+  - **`bd init` auto-installs Cursor** (rules + skill + hooks) the same way it
+    auto-sets up Claude Code and Codex, and stages `.cursor/` for commit.
+  - **`bd setup cursor --global`** writes hooks to `~/.cursor/hooks.json` (and the
+    agent skill to `~/.agents/skills/beads`) so they apply to every project.
+    (Global scope is hooks + skill only; Cursor has no reliable file-based global
+    *rules* location — those live in Cursor Settings.)
+  - **Canonical rules content.** `.cursor/rules/beads.mdc` now wraps the shared
+    `recipes.Template` (the same content every other file-based recipe uses)
+    instead of a hand-maintained copy, so it no longer drifts or omits the Issue
+    Types / Priorities / git-authority sections.
+  - **Agent skill.** `bd setup cursor` installs the shared
+    `.agents/skills/beads/SKILL.md` (which Cursor loads natively), so Cursor-only
+    users get the same progressive-disclosure skill Codex installs. The skill is
+    shared with Codex and is only removed once no integration still relies on it.
+  - **`bd doctor`** reports `Cursor Integration`, `Cursor Settings Health`
+    (malformed `.cursor/hooks.json` → error), and `Cursor Hook Completeness`
+  (all three lifecycle events present) checks — with agent-mode enrichment —
+  paralleling the Claude integration checks.
+
+### Changed
+
+- **Remote-ahead adopts fast-forward automatically when it is provably
+  loss-free AND lands exactly at this binary's latest migration.** When the
+  smart remote-migrate gate
+  ([#4516](https://github.com/gastownhall/beads/issues/4516)) finds the
+  remote ahead with no content skew, this clone's local Dolt history a
+  strict ancestor of the remote's with a clean working set, AND the
+  fast-forward would land exactly at the binary's own latest migration
+  (nothing pending after it, nothing beyond what this binary supports), `bd`
+  now fast-forwards to the remote's migrated schema automatically instead of
+  stopping with an adopt directive — nothing local is discarded. An unpushed
+  local commit, a dirty working set, or a remote that is not exactly at this
+  binary's latest migration all disqualify the automatic fast-forward and
+  fall back to the existing manual `bd bootstrap` adopt directive (with the
+  sharper loss-free guidance whenever ancestor+clean still hold), never a
+  forced write. Set `BD_SMART_GATE=0` to opt out and keep the manual wall for
+  every remote-ahead case, as before
+  ([#4259](https://github.com/gastownhall/beads/issues/4259)).
+
+## [1.1.0] - 2026-07-04
+
+First stable release of the 1.1.0 line. It consolidates everything from
+[1.1.0-rc.1] and [1.1.0-rc.2] (see those sections below for the full feature
+set) plus the post-rc.2 migration-recovery fixes listed here. The theme of
+1.1.0 is a safe schema-migration and upgrade path: it repairs the v52/v53
+drift classes that broke real-world rc.1/rc.2 upgrades, makes an interrupted
+migration recoverable in-tool instead of a dead end, and turns the
+remote-migrate gate from a blunt block into a state-aware one.
+
+### Upgrade Notes
+
+- **Back up before migrating** (`bd export --all -o backup.jsonl`) before
+  running `bd migrate` on an older, especially remote-backed, database. The
+  fixes below repair databases that reached a migration with drifted state;
+  an export is cheap insurance while such drift is being repaired.
+
 ### Changed
 
 - **The state-aware remote-migrate gate is now on by default.** rc.2 shipped
@@ -18,6 +118,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and content skew still stops for a human. Set `BD_SMART_GATE=0` to opt out
   and restore the unconditional block
   ([#4516](https://github.com/gastownhall/beads/issues/4516)).
+
+### Fixed
+
+- **A failed v53 migration no longer traps the database, and the v53 repair
+  now covers `wisp_dependencies` split-column drift.** rc.2 repaired the
+  `issues` rig columns, but a database coming from schema v49 could still fail
+  v53 when its `wisp_dependencies` table was missing the split target columns
+  (`depends_on_issue_id`, `depends_on_wisp_id`, `depends_on_external`) — and a
+  half-applied v53 then bricked every subsequent command on open
+  ([#4555](https://github.com/gastownhall/beads/issues/4555)). The migration
+  runner now adds and backfills the missing split columns before v53, and a
+  narrow recovery gate lets an already-failed-v53 database self-heal on the
+  next open — including the `issue_snapshots` / `compaction_snapshots` tables
+  that migration 0051 leaves dirty during a single-pass v49→v53 upgrade
+  ([#4558](https://github.com/gastownhall/beads/pull/4558)).
+- **A dirty working set no longer deadlocks migration recovery in embedded
+  mode.** Every store open runs the migration, which correctly refuses to
+  alter tables that have uncommitted working-set changes — but the documented
+  recovery (commit the working set) is itself a command that opens the store
+  and hits the same refusal, a deadlock with no in-tool escape
+  ([#4566](https://github.com/gastownhall/beads/issues/4566)). `bd dolt commit`
+  and `bd vc commit` now open past that guard, commit at the current schema,
+  after which a normal `bd migrate` applies cleanly; the refusal message now
+  names the recovery path
+  ([#4567](https://github.com/gastownhall/beads/pull/4567)).
 
 ## [1.1.0-rc.2] - 2026-07-02
 

@@ -44,6 +44,18 @@ func (r *configSQLRepositoryImpl) SetMetadata(ctx context.Context, key, value st
 	return nil
 }
 
+func (r *configSQLRepositoryImpl) GetLocalMetadata(ctx context.Context, key string) (string, error) {
+	var value string
+	err := r.runner.QueryRowContext(ctx, "SELECT value FROM local_metadata WHERE `key` = ?", key).Scan(&value)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("db: GetLocalMetadata %s: %w", key, err)
+	}
+	return value, nil
+}
+
 func (r *configSQLRepositoryImpl) SetLocalMetadata(ctx context.Context, key, value string) error {
 	if _, err := r.runner.ExecContext(ctx, "REPLACE INTO local_metadata (`key`, value) VALUES (?, ?)", key, value); err != nil {
 		return fmt.Errorf("db: SetLocalMetadata %s: %w", key, err)

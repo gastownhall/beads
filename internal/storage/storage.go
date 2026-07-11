@@ -45,11 +45,16 @@ type Storage interface {
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
 	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
 	ReopenIssue(ctx context.Context, id string, reason string, actor string) error
+	UnclaimIssue(ctx context.Context, id string, actor string) error
 	UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
 	DeleteIssue(ctx context.Context, id string) error
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
 	SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error)
+	// SearchIssueIDs is a narrow-projection variant of SearchIssues that
+	// returns only matching issue IDs. Use when full row hydration is wasted
+	// (e.g., partial-ID resolution in internal/utils/id_parser.go).
+	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
 
 	// Dependencies
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
@@ -311,6 +316,17 @@ type BackupStore interface {
 	RestoreDatabase(ctx context.Context, dir string, force bool) error
 }
 
+// ReadyWorkCounter sizes the total ready-work count for a filter without
+// materializing the counts mega-query. It is identical to
+// len(GetReadyWorkWithCounts(filter with Limit=0)) but computed with cheap
+// indexed COUNT(*)s over the ready predicate. `bd ready --json` type-asserts to
+// this (via UnwrapStore) to render the "Showing X of N" total when a page is
+// capped, and falls back to the unbounded GetReadyWorkWithCounts when a store
+// does not implement it.
+type ReadyWorkCounter interface {
+	CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error)
+}
+
 // Transaction provides atomic multi-operation support within a single database transaction.
 //
 // The Transaction interface exposes a subset of storage methods that execute within
@@ -351,6 +367,7 @@ type Transaction interface {
 	DeleteIssue(ctx context.Context, id string) error
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)                                    // For read-your-writes within transaction
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) // For read-your-writes within transaction
+	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)     // Narrow projection: returns ids only
 
 	// Dependency operations
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error

@@ -119,7 +119,10 @@ func TestBuildReadyWorkWhereBatchesIDSets(t *testing.T) {
 func TestSearchCountsSQLShape(t *testing.T) {
 	t.Parallel()
 
-	sql := SearchCountsSQL(WispsFilterTables, "WHERE x = ?", "ORDER BY y", "LIMIT 5", true, false)
+	sql, args := SearchCountsSQL(WispsFilterTables, nil, "WHERE x = ?", "ORDER BY y", "LIMIT 5", true, false)
+	if args != nil {
+		t.Errorf("predicate form must not return generated args, got %d", len(args))
+	}
 	for _, want := range []string{
 		"FROM wisps i",
 		"FROM wisp_dependencies",
@@ -135,7 +138,7 @@ func TestSearchCountsSQLShape(t *testing.T) {
 		}
 	}
 
-	noWispDeps := SearchCountsSQL(IssuesFilterTables, "", "", "", false, true)
+	noWispDeps, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", false, true)
 	if strings.Contains(noWispDeps, "UNION ALL") {
 		t.Error("counts SQL must not union wisp reverse deps when probe says absent")
 	}
@@ -144,5 +147,26 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 	if !strings.Contains(noWispDeps, "NULL AS labels_json") {
 		t.Error("counts SQL must project NULL labels_json when skipLabels is set")
+	}
+
+	// By-IDs form: driver and every subquery are constrained to the ids, and the
+	// arg count matches the placeholder injection points (labels, dc, rc-deps,
+	// rc-wisp, cc, pc, d, driver = 8 for the wisp family with labels).
+	byIDs, idArgs := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, false)
+	if !strings.Contains(byIDs, "WHERE i.id IN (?,?)") {
+		t.Errorf("by-IDs counts SQL missing driver id filter:\n%s", byIDs)
+	}
+	if strings.Contains(byIDs, "ORDER BY") || strings.Contains(byIDs, "LIMIT") {
+		t.Error("by-IDs counts SQL must not carry ORDER BY / LIMIT (order restored in Go)")
+	}
+	if len(idArgs) != 8*2 {
+		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 8*2)
+	}
+
+	// skipLabels drops the labels point and !includeWispReverseDeps drops the
+	// rc-wisp point, leaving 6 injection points (dc, rc-deps, cc, pc, d, driver).
+	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, true)
+	if len(idArgsNoLabels) != 6*2 {
+		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
 	}
 }

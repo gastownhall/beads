@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -74,7 +75,7 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 			fmt.Sprintf(`SELECT status FROM %s WHERE id = ?`, issueTable), id,
 		).Scan(&status)
 		if qerr == sql.ErrNoRows {
-			return nil, fmt.Errorf("issue not found: %s", id)
+			return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 		}
 		if qerr != nil {
 			return nil, fmt.Errorf("failed to check issue existence: %w", qerr)

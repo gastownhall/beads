@@ -25,7 +25,7 @@ bd setup --list
 | `claude` | [Claude Code](/integrations/claude-code) | Claude hooks and `CLAUDE.md` |
 | `codex` | [Codex](/integrations/codex) | Beads skill, `AGENTS.md`, and Codex hooks |
 | `cody` | [Sourcegraph Cody](/integrations/cody) | `.cody/rules/beads.md` |
-| `cursor` | [Cursor](/integrations/cursor) | `.cursor/rules/beads.mdc` |
+| `cursor` | [Cursor](/integrations/cursor) | `.cursor/rules/beads.mdc` + `.cursor/hooks.json` |
 | `factory` | [Factory.ai Droid](/integrations/factory) | `AGENTS.md` |
 | `gemini` | [Gemini CLI](/integrations/gemini) | Gemini hooks and `GEMINI.md` |
 | `junie` | [Junie](/integrations/junie) | `.junie/guidelines.md` and MCP config |

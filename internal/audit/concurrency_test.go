@@ -13,7 +13,7 @@ import (
 // TestAppend_ConcurrentWritersUniqueIDs proves the audit log's uniqueness
 // invariant under concurrent writers.
 //
-// Background: a related bug in gascity's events.jsonl recorder uses an
+// Background: a related bug in a downstream consumer's events.jsonl recorder uses an
 // in-process sequence counter that is seeded by scanning the file. Two
 // FileRecorder instances sharing a file race on the seed and produce
 // duplicate sequence numbers.

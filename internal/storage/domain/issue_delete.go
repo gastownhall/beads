@@ -15,6 +15,7 @@ func (u *issueUseCaseImpl) DeleteIssue(ctx context.Context, id, actor string) (D
 	}
 	return u.deleteMany(ctx, DeleteIssuesParams{
 		IDs:                  []string{id},
+		Cascade:              true,
 		UpdateTextReferences: true,
 	}, actor)
 }
@@ -25,6 +26,7 @@ func (u *issueUseCaseImpl) DeleteWisp(ctx context.Context, id, actor string) (De
 	}
 	return u.deleteMany(ctx, DeleteIssuesParams{
 		IDs:                  []string{id},
+		Cascade:              true,
 		UpdateTextReferences: true,
 	}, actor)
 }
@@ -50,9 +52,13 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		return DeleteIssuesResult{}, nil
 	}
 
-	allIDs, err := u.issueRepo.FindAllDependents(ctx, params.IDs)
-	if err != nil {
-		return DeleteIssuesResult{}, fmt.Errorf("delete: cascade expansion: %w", err)
+	allIDs := params.IDs
+	if params.Cascade {
+		expanded, err := u.issueRepo.FindAllDependents(ctx, params.IDs)
+		if err != nil {
+			return DeleteIssuesResult{}, fmt.Errorf("delete: cascade expansion: %w", err)
+		}
+		allIDs = expanded
 	}
 	if len(allIDs) == 0 {
 		return DeleteIssuesResult{}, nil

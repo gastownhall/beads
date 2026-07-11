@@ -1,7 +1,10 @@
 package linear
 
 import (
+	"context"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -137,6 +140,15 @@ type MappingConfig struct {
 	// mappings from type-based fallbacks.
 	ExplicitStateMap map[string]string
 
+	// OutboundStateMap maps a Beads status to the Linear workflow state NAME to
+	// use when pushing. Populated from linear.outbound_state_map.<beads_status>
+	// config keys. Used to disambiguate cases where multiple Linear states share
+	// the same state type (e.g. "In Progress" and "In Review" are both
+	// "started"), which would otherwise fail the push with an ambiguity error.
+	// Keys are lowercase beads status strings; values are Linear state names
+	// matched case-insensitively against the workflow state cache.
+	OutboundStateMap map[string]string
+
 	// LabelTypeMap maps Linear label names to Beads issue types.
 	// Key is lowercase label name, value is Beads issue type.
 	LabelTypeMap map[string]string
@@ -144,6 +156,10 @@ type MappingConfig struct {
 	// RelationMap maps Linear relation types to Beads dependency types.
 	// Key is Linear relation type, value is Beads dependency type.
 	RelationMap map[string]string
+
+	// CustomStatuses holds typed entries from status.custom (beads config).
+	// Used for push-time state_map validation and matching non-built-in statuses.
+	CustomStatuses []types.CustomStatus
 }
 
 // DefaultMappingConfig returns sensible default mappings.
@@ -167,6 +183,7 @@ func DefaultMappingConfig() *MappingConfig {
 			"canceled":  "closed",
 		},
 		ExplicitStateMap: make(map[string]string),
+		OutboundStateMap: make(map[string]string),
 		// Label patterns for issue type inference
 		LabelTypeMap: map[string]string{
 			"bug":         "bug",
@@ -204,6 +221,7 @@ type ConfigLoader interface {
 //
 //	linear.priority_map.0 = 4       (Linear "no priority" -> Beads backlog)
 //	linear.state_map.started = in_progress
+//	linear.outbound_state_map.in_progress = "In Progress"
 //	linear.label_type_map.bug = bug
 //	linear.relation_map.blocks = blocks
 func LoadMappingConfig(loader ConfigLoader) *MappingConfig {
@@ -220,6 +238,16 @@ func LoadMappingConfig(loader ConfigLoader) *MappingConfig {
 	}
 
 	for key, value := range allConfig {
+		if key == "status.custom" {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				if custom, err := types.ParseCustomStatusConfig(value); err == nil {
+					config.CustomStatuses = custom
+				}
+			}
+			continue
+		}
+
 		// Parse priority mappings: linear.priority_map.<linear_priority>
 		if strings.HasPrefix(key, "linear.priority_map.") {
 			linearPriority := strings.TrimPrefix(key, "linear.priority_map.")
@@ -233,6 +261,13 @@ func LoadMappingConfig(loader ConfigLoader) *MappingConfig {
 			stateKey := strings.ToLower(strings.TrimPrefix(key, "linear.state_map."))
 			config.StateMap[stateKey] = value
 			config.ExplicitStateMap[stateKey] = value
+		}
+
+		// Parse outbound state mappings: linear.outbound_state_map.<beads_status>
+		// Value is the Linear workflow state name to use for that status on push.
+		if strings.HasPrefix(key, "linear.outbound_state_map.") {
+			statusKey := strings.ToLower(strings.TrimPrefix(key, "linear.outbound_state_map."))
+			config.OutboundStateMap[statusKey] = value
 		}
 
 		// Parse label-to-type mappings: linear.label_type_map.<label_name>
@@ -320,7 +355,14 @@ func stateMapMatchesStatus(mapped string, status types.Status) bool {
 	if normalizedMapped == normalizedStatus {
 		return true
 	}
-	if status.IsValid() && ParseBeadsStatus(mapped) == status {
+	parsed := ParseBeadsStatus(mapped)
+	if parsed == status {
+		// ParseBeadsStatus returns StatusOpen for unrecognized strings; do not
+		// treat those as matching built-in open (avoids false "ambiguous mapping"
+		// when state_map values are custom status names like "review").
+		if parsed == types.StatusOpen && normalizedMapped != "open" {
+			return false
+		}
 		return true
 	}
 	return false
@@ -336,6 +378,21 @@ func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config
 	}
 	if config == nil || len(config.ExplicitStateMap) == 0 {
 		return "", fmt.Errorf("%s", missingExplicitStateMapMessage)
+	}
+
+	// Outbound override: an explicit linear.outbound_state_map.<status> entry
+	// names the exact Linear workflow state to push to and short-circuits the
+	// name/type matching below. This is the escape hatch when multiple Linear
+	// states share a type (e.g. "In Progress" and "In Review" are both
+	// "started") and the type-based fallback would otherwise be ambiguous.
+	if outboundName, ok := config.OutboundStateMap[strings.ToLower(strings.TrimSpace(string(status)))]; ok {
+		want := strings.ToLower(strings.TrimSpace(outboundName))
+		for _, state := range cache.States {
+			if strings.ToLower(strings.TrimSpace(state.Name)) == want {
+				return state.ID, nil
+			}
+		}
+		return "", fmt.Errorf("linear.outbound_state_map.%s = %q does not match any Linear workflow state", status, outboundName)
 	}
 
 	var nameMatches []State
@@ -371,7 +428,7 @@ func ResolveStateIDForBeadsStatus(cache *StateCache, status types.Status, config
 		for _, state := range typeMatches {
 			names = append(names, state.Name)
 		}
-		return "", fmt.Errorf("linear.state_map type fallback is ambiguous for beads status %q across Linear states: %s", status, strings.Join(names, ", "))
+		return "", fmt.Errorf("linear.state_map type fallback is ambiguous for beads status %q across Linear states: %s. Set linear.outbound_state_map.%s = \"<state name>\" to disambiguate", status, strings.Join(names, ", "), status)
 	}
 
 	return "", fmt.Errorf("linear.state_map has no configured Linear state for beads status %q", status)
@@ -416,10 +473,111 @@ func StatusToLinearStateType(status types.Status) string {
 	}
 }
 
+// LabelCache maps normalized Linear label names (lowercase) to Linear label IDs
+// for a single team.
+type LabelCache struct {
+	IDByLowerName map[string]string
+}
+
+// BuildLabelCache fetches team labels and indexes them by lowercase trimmed name.
+func BuildLabelCache(ctx context.Context, client *Client) (*LabelCache, error) {
+	if client == nil {
+		return nil, fmt.Errorf("no linear client")
+	}
+	labels, err := client.GetTeamLabels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c := &LabelCache{
+		IDByLowerName: make(map[string]string, len(labels)),
+	}
+	for _, lb := range labels {
+		k := strings.ToLower(strings.TrimSpace(lb.Name))
+		if k != "" && lb.ID != "" {
+			c.IDByLowerName[k] = lb.ID
+		}
+	}
+	return c, nil
+}
+
+// IssueTypeToLinearLabelLookupKey returns the label_type_map key (lowercase) for
+// the given beads issue type, inverting linear.label_type_map.<label>=<type>.
+// When multiple labels map to the same type, the smallest key lexicographically wins.
+func IssueTypeToLinearLabelLookupKey(issueType types.IssueType, config *MappingConfig) string {
+	if config == nil || len(config.LabelTypeMap) == 0 {
+		return ""
+	}
+	want := strings.ToLower(strings.TrimSpace(string(issueType)))
+	if want == "" {
+		return ""
+	}
+	var keys []string
+	for labelKey, typeStr := range config.LabelTypeMap {
+		if strings.ToLower(strings.TrimSpace(typeStr)) == want {
+			keys = append(keys, labelKey)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	return keys[0]
+}
+
+// ResolveLabelIDs maps beads issue_type (via inverted label_type_map) and
+// issue.Labels to Linear label UUIDs. Names not present on the team are returned
+// in missing (deduplicated by display string order of discovery).
+func ResolveLabelIDs(issue *types.Issue, cache *LabelCache, config *MappingConfig) (ids []string, missing []string) {
+	if issue == nil || cache == nil || len(cache.IDByLowerName) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{})
+
+	tryAdd := func(lowerName, display string) {
+		if lowerName == "" {
+			return
+		}
+		id, ok := cache.IDByLowerName[lowerName]
+		if !ok {
+			missing = append(missing, display)
+			return
+		}
+		if _, dup := seen[id]; dup {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+
+	if lk := IssueTypeToLinearLabelLookupKey(issue.IssueType, config); lk != "" {
+		tryAdd(lk, lk)
+	}
+	for _, raw := range issue.Labels {
+		ln := strings.ToLower(strings.TrimSpace(raw))
+		tryAdd(ln, raw)
+	}
+	return ids, missing
+}
+
+func linearIssueLabelIDs(remote *Issue) []string {
+	if remote == nil || remote.Labels == nil {
+		return nil
+	}
+	out := make([]string, 0, len(remote.Labels.Nodes))
+	for _, n := range remote.Labels.Nodes {
+		if n.ID != "" {
+			out = append(out, n.ID)
+		}
+	}
+	return out
+}
+
 // PushFieldsEqual compares only the fields that a Linear push can actually
 // mutate. This avoids repeated updates caused by local-only fields such as
-// issue type, metadata, or labels that are preserved elsewhere.
-func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig) bool {
+// issue type and metadata. When labelCache is non-nil, resolved Linear label ID
+// sets are compared so label drift is detected; when nil, labels are ignored
+// (callers that can build a LabelCache should pass it for accurate skip logic).
+func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig, labelCache *LabelCache) bool {
 	if local == nil || remote == nil {
 		return false
 	}
@@ -432,7 +590,19 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig) b
 	if PriorityToLinear(local.Priority, config) != remote.Priority {
 		return false
 	}
-	return StateToBeadsStatus(remote.State, config) == local.Status
+	if StateToBeadsStatus(remote.State, config) != local.Status {
+		return false
+	}
+	if labelCache != nil {
+		wantIDs, _ := ResolveLabelIDs(local, labelCache, config)
+		remoteIDs := linearIssueLabelIDs(remote)
+		slices.Sort(wantIDs)
+		slices.Sort(remoteIDs)
+		if !slices.Equal(wantIDs, remoteIDs) {
+			return false
+		}
+	}
+	return true
 }
 
 // PushFieldsEqualToBeads is a fallback comparator for cases where Linear's raw

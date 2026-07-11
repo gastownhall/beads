@@ -110,6 +110,12 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 		}
 	}
 
+	if skip, err := checkCrossTableIDCollision(ctx, tx, issue.ID, issueTable, bc.Opts); err != nil {
+		return result, err
+	} else if skip {
+		return result, nil
+	}
+
 	if skip, err := CheckOrphan(ctx, tx, issue, issueTable, bc.Opts.OrphanHandling); err != nil {
 		return result, err
 	} else if skip {
@@ -514,6 +520,44 @@ func CheckOrphan(ctx context.Context, tx *sql.Tx, issue *types.Issue, issueTable
 	}
 }
 
+// checkCrossTableIDCollision rejects a create whose ID already lives in the
+// sibling table (GH#4455). Issues and wisps share one ID space but live in
+// separate tables; an ID present in both makes the merge-based lookups
+// (bd ready/search) hard-error for the whole store. The target-table
+// existence check in InsertIssueIfNew only sees one table, so nothing else in
+// the create path closes this hole.
+//
+// Promotion (PromoteFromEphemeralInTx) deliberately inserts into issues while
+// the wisp row still exists, then deletes the wisp — but it calls
+// InsertIssueIfNew directly and never routes through here, so its transient
+// dual-presence window is unaffected.
+//
+// ConflictSkip is the auto-import upgrade-recovery path (GH#3955), which must
+// never hard-fail; there we skip the colliding row instead (lookups stay
+// tolerant via GH#4163).
+//
+//nolint:gosec // G201: siblingTable is one of two hardcoded constants
+func checkCrossTableIDCollision(ctx context.Context, tx *sql.Tx, id, issueTable string, opts storage.BatchCreateOptions) (skip bool, err error) {
+	if id == "" {
+		return false, nil
+	}
+	siblingTable := "wisps"
+	if issueTable == "wisps" {
+		siblingTable = "issues"
+	}
+	var siblingCount int
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, siblingTable), id).Scan(&siblingCount); err != nil {
+		return false, fmt.Errorf("failed to check cross-table ID collision for %s: %w", id, err)
+	}
+	if siblingCount == 0 {
+		return false, nil
+	}
+	if opts.ConflictSkip {
+		return true, nil
+	}
+	return false, fmt.Errorf("cannot create %q: ID already exists in the %s table (issues and wisps share one ID space)", id, siblingTable)
+}
+
 // InsertIssueIfNew inserts the issue and returns whether it was genuinely new,
 // and whether the RejectStaleUpserts guard rejected it.
 //
@@ -823,10 +867,14 @@ func ReconcileChildCounters(ctx context.Context, tx *sql.Tx, issues []*types.Iss
 		if err == nil && current >= b.maxChild {
 			continue
 		}
+		// Qualify the existing-row column with the table name. Bare `last_child`
+		// on the update RHS is a valid MySQL "current row value" reference, but
+		// Postgres sees it as ambiguous between the target row and EXCLUDED
+		// (SQLSTATE 42702); table-qualifying it is unambiguous on every backend.
 		//nolint:gosec // G201: table is one of two hardcoded constants.
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (parent_id, last_child) VALUES (?, ?)
-			ON DUPLICATE KEY UPDATE last_child = GREATEST(last_child, ?)
+			INSERT INTO %[1]s (parent_id, last_child) VALUES (?, ?)
+			ON DUPLICATE KEY UPDATE last_child = GREATEST(%[1]s.last_child, ?)
 		`, table), parentID, b.maxChild, b.maxChild); err != nil {
 			return nil, fmt.Errorf("failed to reconcile child counter for %s: %w", parentID, err)
 		}

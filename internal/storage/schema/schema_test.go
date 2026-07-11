@@ -1,8 +1,11 @@
 package schema
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -38,6 +41,64 @@ func TestPendingMigrationDirtyTablesDetectsMigration0043Dependencies(t *testing.
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
+}
+
+// TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable exercises the
+// full MigrateUp pre-flight guard (gastownhall/beads#4566): a pre-existing
+// dirty `dependencies` table collides with pending migration 0043, which
+// alters it (confirmed against the real migration content by
+// TestPendingMigrationDirtyTablesDetectsMigration0043Dependencies above).
+// MigrateUp must report this with the typed *DirtyTablesError so
+// working-set-reconcile opens can detect it via errors.As and skip the
+// migration instead of failing outright.
+func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// migrationWorkNeeded: mainSource.atLatest reads the current cursor; v42
+	// is behind LatestVersion(), so the || short-circuits before checking
+	// ignoredSource.atLatest or the content-hash/backfill probes.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
+
+	// dirtyTables(ctx, db, false): `dependencies` has an uncommitted, unstaged
+	// change in the working set.
+	expectDirtyDoltStatusRow(mock, "dependencies", false)
+	// committableDirtyTables -> dirtyTables(ctx, db, true): same dirty state.
+	expectDirtyDoltStatusRow(mock, "dependencies", false)
+
+	// auxRekeyResumePending: no local_metadata table, so no resume in flight.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	// pendingMigrationDirtyTables re-reads the current version and finds
+	// migration 0043 touches the dirty `dependencies` table.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", 42)
+
+	_, err = MigrateUp(context.Background(), db)
+	if err == nil {
+		t.Fatal("MigrateUp() error = nil, want *DirtyTablesError")
+	}
+	var dirtyErr *DirtyTablesError
+	if !errors.As(err, &dirtyErr) {
+		t.Fatalf("MigrateUp() error = %v (%T), want *DirtyTablesError", err, err)
+	}
+	if len(dirtyErr.Tables) != 1 || dirtyErr.Tables[0] != "dependencies" {
+		t.Fatalf("DirtyTablesError.Tables = %v, want [dependencies]", dirtyErr.Tables)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// expectDirtyDoltStatusRow mocks a dolt_status query returning a single dirty
+// table row. The regex matches both the plain and dolt_ignore-filtered forms
+// of the dirtyTables query (see lock_test.go's expectDoltStatusRows).
+func expectDirtyDoltStatusRow(mock sqlmock.Sqlmock, table string, staged bool) {
+	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
+		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}).AddRow(table, staged))
 }
 
 func TestIgnoredPendingMigrationDirtyTablesDetectsWispDependencies(t *testing.T) {
@@ -227,7 +288,7 @@ func TestEnsureIssuesRigColumnsAddsOnlyMissing(t *testing.T) {
 	// in 0001 reach v52 without them; the 0053 pre-repair must add exactly
 	// the missing ones. Simulate hook_bead present, the other five absent.
 	countQuery := `SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS`
-	mock.ExpectQuery(countQuery).WithArgs("hook_bead").
+	mock.ExpectQuery(countQuery).WithArgs("issues", "hook_bead").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
 	for _, col := range []struct{ name, ddl string }{
 		{"role_bead", "ALTER TABLE issues ADD COLUMN role_bead VARCHAR\\(255\\) DEFAULT ''"},
@@ -236,13 +297,54 @@ func TestEnsureIssuesRigColumnsAddsOnlyMissing(t *testing.T) {
 		{"role_type", "ALTER TABLE issues ADD COLUMN role_type VARCHAR\\(32\\) DEFAULT ''"},
 		{"rig", "ALTER TABLE issues ADD COLUMN rig VARCHAR\\(255\\) DEFAULT ''"},
 	} {
-		mock.ExpectQuery(countQuery).WithArgs(col.name).
+		mock.ExpectQuery(countQuery).WithArgs("issues", col.name).
 			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 		mock.ExpectExec(col.ddl).WillReturnResult(sqlmock.NewResult(0, 0))
 	}
 
 	if err := ensureIssuesRigColumns(context.Background(), db); err != nil {
 		t.Fatalf("ensureIssuesRigColumns: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestEnsureWispDependenciesSplitTargetsAddsMissingAndBackfills(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	tableQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
+	columnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
+	mock.ExpectQuery(tableQuery).WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
+		mock.ExpectQuery(columnQuery).WithArgs("wisp_dependencies", col).
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	}
+	for _, ddl := range []string{
+		"ALTER TABLE wisp_dependencies ADD COLUMN depends_on_issue_id VARCHAR\\(255\\) NULL",
+		"ALTER TABLE wisp_dependencies ADD COLUMN depends_on_wisp_id VARCHAR\\(255\\) NULL",
+		"ALTER TABLE wisp_dependencies ADD COLUMN depends_on_external VARCHAR\\(255\\) NULL",
+	} {
+		mock.ExpectExec(ddl).WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+	mock.ExpectQuery(columnQuery).WithArgs("wisp_dependencies", "depends_on_id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	for _, update := range []string{
+		`UPDATE wisp_dependencies SET depends_on_external = depends_on_id`,
+		`UPDATE wisp_dependencies wd JOIN wisps w ON w\.id = wd\.depends_on_id`,
+		`UPDATE wisp_dependencies wd JOIN issues i ON i\.id = wd\.depends_on_id`,
+		`UPDATE wisp_dependencies SET depends_on_external = depends_on_id WHERE depends_on_external IS NULL`,
+	} {
+		mock.ExpectExec(update).WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+
+	if err := ensureWispDependenciesSplitTargets(context.Background(), db); err != nil {
+		t.Fatalf("ensureWispDependenciesSplitTargets: %v", err)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
@@ -374,6 +476,52 @@ INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (%s, 7);
 		`SELECT COUNT(*) AS c FROM child_counters WHERE parent_id = 'schema-cli-rig' AND last_child = 7`, "1")
 	requireDoltCount(t, dir,
 		`SELECT COUNT(*) AS c FROM wisp_child_counters WHERE parent_id = 'schema-cli-rig'`, "0")
+}
+
+func TestWispDependenciesSplitTargetBackfillPrefersWispOverIssueThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "wisp-dependency-split")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create wisp dependency split dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+
+	var repairSQL strings.Builder
+	for _, col := range wispDependenciesSplitTargetColumns() {
+		fmt.Fprintf(&repairSQL, "ALTER TABLE wisp_dependencies ADD COLUMN %s %s;\n", col.name, col.definition)
+	}
+	for _, stmt := range wispDependenciesSplitTargetBackfillSQL() {
+		repairSQL.WriteString(stmt)
+		repairSQL.WriteString(";\n")
+	}
+
+	const sourceID = "source-wisp"
+	const ambiguousID = "ambiguous-target"
+	seedSQL := fmt.Sprintf(`
+CREATE TABLE issues (
+    id VARCHAR(255) PRIMARY KEY
+);
+CREATE TABLE wisps (
+    id VARCHAR(255) PRIMARY KEY
+);
+CREATE TABLE wisp_dependencies (
+    issue_id VARCHAR(255) NOT NULL,
+    depends_on_id VARCHAR(255) NOT NULL,
+    PRIMARY KEY (issue_id, depends_on_id)
+);
+INSERT INTO issues (id) VALUES (%s);
+INSERT INTO wisps (id) VALUES (%s), (%s);
+INSERT INTO wisp_dependencies (issue_id, depends_on_id) VALUES (%s, %s);
+`, doltSQLString(ambiguousID),
+		doltSQLString(sourceID), doltSQLString(ambiguousID),
+		doltSQLString(sourceID), doltSQLString(ambiguousID))
+	runDoltSQL(t, dir, seedSQL+repairSQL.String())
+
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM wisp_dependencies WHERE issue_id = 'source-wisp' AND depends_on_wisp_id = 'ambiguous-target' AND depends_on_issue_id IS NULL AND depends_on_external IS NULL`, "1")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM wisp_dependencies WHERE issue_id = 'source-wisp' AND depends_on_issue_id = 'ambiguous-target'`, "0")
 }
 
 func TestMigration0047HandlesLegacyWispDependenciesShape(t *testing.T) {
@@ -706,5 +854,229 @@ func TestUnstageIgnoredTablesResetsExistingIgnoredTables(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// showColumnsRows builds a SHOW COLUMNS result with one row per supplied field
+// name, mirroring the Field/Type/Null/Key/Default/Extra shape Dolt returns.
+func showColumnsRows(fields ...string) *sqlmock.Rows {
+	rows := sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"})
+	for _, f := range fields {
+		rows.AddRow(f, "char(64)", "YES", "", nil, "")
+	}
+	return rows
+}
+
+func TestHasContentHashColumnUsesShowColumns(t *testing.T) {
+	t.Run("column present", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		defer db.Close()
+
+		mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'`).
+			WillReturnRows(showColumnsRows("content_hash"))
+
+		has, err := mainSource.hasContentHashColumn(context.Background(), db)
+		if err != nil {
+			t.Fatalf("hasContentHashColumn: %v", err)
+		}
+		if !has {
+			t.Fatal("has = false, want true when SHOW COLUMNS returns the column")
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet sql expectations: %v", err)
+		}
+	})
+
+	t.Run("column absent", func(t *testing.T) {
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations`).
+			WillReturnRows(showColumnsRows())
+
+		has, err := mainSource.hasContentHashColumn(context.Background(), db)
+		if err != nil {
+			t.Fatalf("hasContentHashColumn: %v", err)
+		}
+		if has {
+			t.Fatal("has = true, want false when SHOW COLUMNS returns no rows")
+		}
+	})
+
+	t.Run("missing table reports false without error", func(t *testing.T) {
+		// The old INFORMATION_SCHEMA probe returned count 0 for an absent table;
+		// SHOW COLUMNS errors with 1146 instead. That error must be swallowed so a
+		// not-yet-created cursor table still reports "no content_hash column".
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations`).
+			WillReturnError(errors.New("Error 1146: Table 'beads.schema_migrations' doesn't exist"))
+
+		has, err := mainSource.hasContentHashColumn(context.Background(), db)
+		if err != nil {
+			t.Fatalf("hasContentHashColumn returned error for missing table, want nil: %v", err)
+		}
+		if has {
+			t.Fatal("has = true, want false for a missing cursor table")
+		}
+	})
+
+	t.Run("non-matching field is rejected", func(t *testing.T) {
+		// '_' is a LIKE single-char wildcard, so 'contentXhash' could slip past
+		// the server-side filter; the exact Field comparison must reject it.
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations`).
+			WillReturnRows(showColumnsRows("contentXhash"))
+
+		has, err := mainSource.hasContentHashColumn(context.Background(), db)
+		if err != nil {
+			t.Fatalf("hasContentHashColumn: %v", err)
+		}
+		if has {
+			t.Fatal("has = true, want false for a column that only matches the LIKE wildcard")
+		}
+	})
+
+	t.Run("propagates unexpected errors", func(t *testing.T) {
+		db, mock, _ := sqlmock.New()
+		defer db.Close()
+		mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations`).
+			WillReturnError(errors.New("connection refused"))
+
+		if _, err := mainSource.hasContentHashColumn(context.Background(), db); err == nil {
+			t.Fatal("expected unexpected error to propagate, got nil")
+		}
+	})
+}
+
+// TestHasContentHashColumnMatchesInformationSchemaOnDolt proves on a real Dolt
+// database that the SHOW COLUMNS probe returns the same answer as the retired
+// INFORMATION_SCHEMA.COLUMNS probe, in both the present and absent states.
+func TestHasContentHashColumnMatchesInformationSchemaOnDolt(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "content-hash-probe")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create probe dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+
+	const table = "schema_migrations"
+
+	// The retired probe: COUNT(*) over INFORMATION_SCHEMA.COLUMNS.
+	infoSchemaHas := func() bool {
+		rows := queryDoltCSV(t, dir, fmt.Sprintf(`
+SELECT COUNT(*) AS cnt
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '%s' AND COLUMN_NAME = 'content_hash'`, table))
+		return len(rows) == 1 && rows[0]["cnt"] == "1"
+	}
+	// The new probe: SHOW COLUMNS ... LIKE, matching the Field name exactly.
+	showColumnsHas := func() bool {
+		rows := queryDoltCSV(t, dir, fmt.Sprintf("SHOW COLUMNS FROM %s LIKE 'content_hash'", table))
+		for _, r := range rows {
+			for _, v := range r {
+				if v == "content_hash" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// State 1: cursor table carries content_hash (matches bootstrapSQL).
+	runDoltSQL(t, dir, fmt.Sprintf(
+		"CREATE TABLE %s (version INT PRIMARY KEY, applied_at DATETIME, content_hash CHAR(64))", table))
+	if !showColumnsHas() {
+		t.Fatal("SHOW COLUMNS reported no content_hash on a table that has it")
+	}
+	if got, want := showColumnsHas(), infoSchemaHas(); got != want {
+		t.Fatalf("with content_hash: SHOW COLUMNS=%v, INFORMATION_SCHEMA=%v", got, want)
+	}
+
+	// State 2: same table without content_hash.
+	runDoltSQL(t, dir, fmt.Sprintf("ALTER TABLE %s DROP COLUMN content_hash", table))
+	if showColumnsHas() {
+		t.Fatal("SHOW COLUMNS reported content_hash on a table that lacks it")
+	}
+	if got, want := showColumnsHas(), infoSchemaHas(); got != want {
+		t.Fatalf("without content_hash: SHOW COLUMNS=%v, INFORMATION_SCHEMA=%v", got, want)
+	}
+}
+
+type mockDB struct{}
+
+func (m *mockDB) ExecContext(_ context.Context, _ string, _ ...any) (sql.Result, error) {
+	return nil, nil
+}
+
+func (m *mockDB) QueryContext(_ context.Context, _ string, _ ...any) (*sql.Rows, error) {
+	panic("not called")
+}
+
+func (m *mockDB) QueryRowContext(_ context.Context, _ string, _ ...any) *sql.Row {
+	panic("not called")
+}
+
+func TestRunMigrationsStderrOutput(t *testing.T) {
+	var buf bytes.Buffer
+	orig := stderr
+	stderr = &buf
+	defer func() { stderr = orig }()
+
+	// Bounded below migration 53: that version's preMigrationRepair issues real
+	// INFORMATION_SCHEMA probes (see TestPreMigrationRepairScopedToMain0053),
+	// which mockDB.QueryRowContext doesn't support. This test only exercises
+	// the stderr line, not the repair path.
+	n, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 52, false)
+	if err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("expected at least one migration to run")
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "migrating schema: ") {
+		t.Errorf("expected stderr to contain 'migrating schema: ', got: %q", got)
+	}
+	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
+	if len(lines) != n {
+		t.Errorf("expected %d stderr lines, got %d", n, len(lines))
+	}
+}
+
+// TestRunMigrationsUsesProvidedSource verifies that runMigrations operates on
+// the supplied migrationSource rather than always falling back to mainSource.
+// Regression test for the bug where ignoredSource.migrate() silently ran main
+// migrations and left ignored_schema_migrations empty (no wisp tables).
+func TestRunMigrationsUsesProvidedSource(t *testing.T) {
+	orig := stderr
+	stderr = &bytes.Buffer{}
+	defer func() { stderr = orig }()
+
+	// Bounded below migration 53 for the same reason as
+	// TestRunMigrationsStderrOutput: mockDB can't answer the real
+	// INFORMATION_SCHEMA queries preMigrationRepair issues for that version.
+	main, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 52, false)
+	if err != nil {
+		t.Fatalf("runMigrations(mainSource): %v", err)
+	}
+	// Same upTo cap as the mainSource call: the source-threading regression
+	// this test guards (hardcoding mainSource) is only detectable when both
+	// calls share a bound, so their counts collapse to equal under the bug.
+	// ignoredSource has 11 migrations, so 52 is a no-op on correct behavior.
+	ignored, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 52, false)
+	if err != nil {
+		t.Fatalf("runMigrations(ignoredSource): %v", err)
+	}
+	if main == 0 || ignored == 0 {
+		t.Fatalf("expected non-zero counts; main=%d ignored=%d", main, ignored)
+	}
+	if main == ignored {
+		t.Errorf("runMigrations ignored its source argument: main and ignored both returned %d", main)
 	}
 }

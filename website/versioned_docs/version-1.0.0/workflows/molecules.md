@@ -117,16 +117,10 @@ position = "before"
 
 ### Hooks
 
-Execute actions on step completion:
-
-```toml
-[[steps]]
-id = "build"
-title = "Build project"
-
-[steps.on_complete]
-run = "make build"
-```
+Step-completion hooks are not currently exposed as runnable formula
+actions. The historical `on_complete.run` example was invalid: `run` is
+not a formula field, and `on_complete` runtime expansion is tracked
+separately until it is wired end to end.
 
 ### Pinning Work
 

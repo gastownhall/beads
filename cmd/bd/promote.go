@@ -69,7 +69,9 @@ Examples:
 			return HandleErrorRespectJSON("promoting %s: %v", fullID, err)
 		}
 
-		comment := "Promoted from wisp to permanent bead"
+		// Add promotion comment (issue is now in permanent table, AddComment routes correctly
+		// via GetIssue fallback)
+		comment := "Promoted from Level 0"
 		if reason != "" {
 			comment += ": " + reason
 		}

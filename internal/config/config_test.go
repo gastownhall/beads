@@ -1165,6 +1165,141 @@ func TestSovereigntyConstants(t *testing.T) {
 	}
 }
 
+// Agent profile knob (gh#3423, follow-up to #4220): agent.profile config key
+// with a BD_AGENT_PROFILE env override, defaulting to "conservative".
+
+func TestAgentProfileConstants(t *testing.T) {
+	if ProfileConservative != "conservative" {
+		t.Errorf("ProfileConservative = %q, want \"conservative\"", ProfileConservative)
+	}
+	if ProfileMinimal != "minimal" {
+		t.Errorf("ProfileMinimal = %q, want \"minimal\"", ProfileMinimal)
+	}
+	if ProfileTeamMaintainer != "team-maintainer" {
+		t.Errorf("ProfileTeamMaintainer = %q, want \"team-maintainer\"", ProfileTeamMaintainer)
+	}
+}
+
+func TestGetAgentProfileDefault(t *testing.T) {
+	// Isolate from environment variables
+	restore := envSnapshot(t)
+	defer restore()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if got := GetAgentProfile(); got != ProfileConservative {
+		t.Errorf("GetAgentProfile() default = %q, want %q", got, ProfileConservative)
+	}
+}
+
+func TestGetAgentProfileFromConfigFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	configContent := `
+agent:
+  profile: team-maintainer
+`
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads directory: %v", err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	// Isolate from environment variables so BD_AGENT_PROFILE from the host
+	// (or a prior test) can't leak in and shadow the config-file value.
+	restore := envSnapshot(t)
+	defer restore()
+
+	t.Chdir(tmpDir)
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if got := GetAgentProfile(); got != ProfileTeamMaintainer {
+		t.Errorf("GetAgentProfile() from config file = %q, want %q", got, ProfileTeamMaintainer)
+	}
+}
+
+func TestGetAgentProfileEnvOverridesConfigFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Config file says "team-maintainer"; the env var below should win.
+	configContent := `
+agent:
+  profile: team-maintainer
+`
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatalf("failed to create .beads directory: %v", err)
+	}
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	restore := envSnapshot(t)
+	defer restore()
+	t.Setenv("BD_AGENT_PROFILE", "minimal")
+
+	t.Chdir(tmpDir)
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if got := GetAgentProfile(); got != ProfileMinimal {
+		t.Errorf("GetAgentProfile() with BD_AGENT_PROFILE set = %q, want %q (env should override config file)", got, ProfileMinimal)
+	}
+}
+
+func TestGetAgentProfileInvalidFallsBackToConservative(t *testing.T) {
+	// Isolate from environment variables
+	restore := envSnapshot(t)
+	defer restore()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	Set("agent.profile", "yolo")
+	if got := GetAgentProfile(); got != ProfileConservative {
+		t.Errorf("GetAgentProfile() with invalid value = %q, want %q (fallback)", got, ProfileConservative)
+	}
+}
+
+func TestGetAgentProfileInvalidEnvFallsBackToConservative(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+	t.Setenv("BD_AGENT_PROFILE", "not-a-real-profile")
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+
+	if got := GetAgentProfile(); got != ProfileConservative {
+		t.Errorf("GetAgentProfile() with invalid BD_AGENT_PROFILE = %q, want %q (fallback)", got, ProfileConservative)
+	}
+}
+
+func TestIsValidAgentProfile(t *testing.T) {
+	for _, valid := range []string{"conservative", "minimal", "team-maintainer", "CONSERVATIVE", " team-maintainer "} {
+		if !IsValidAgentProfile(valid) {
+			t.Errorf("IsValidAgentProfile(%q) = false, want true", valid)
+		}
+	}
+	for _, invalid := range []string{"", "yolo", "full"} {
+		if IsValidAgentProfile(invalid) {
+			t.Errorf("IsValidAgentProfile(%q) = true, want false", invalid)
+		}
+	}
+}
+
 func TestFederationConfigDefaults(t *testing.T) {
 	// Isolate from environment variables
 	restore := envSnapshot(t)

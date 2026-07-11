@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -31,11 +32,12 @@ var typesCmd = &cobra.Command{
 	Short:   "List valid issue types",
 	Long: `List all valid issue types that can be used with bd create --type.
 
-Core work types (bug, task, feature, chore, epic, decision) are always valid.
+Core work types (bug, task, feature, chore, epic, decision, spike, story, milestone) are always valid.
 Additional types require configuration via types.custom in .beads/config.yaml.
 
 Examples:
   bd types              # List all types with descriptions
+  bd types --sections   # List required sections for each type
   bd types --json       # Output as JSON
 `,
 	SilenceUsage:  true,
@@ -47,6 +49,11 @@ Examples:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		showSections, _ := cmd.Flags().GetBool("sections")
+		if showSections {
+			return printSections(jsonOutput)
+		}
 
 		if err := ensureDirectMode("types command requires direct database access"); err != nil {
 			return HandleError("%v", err)
@@ -94,11 +101,60 @@ Examples:
 	},
 }
 
+// typeSectionsInfo holds section data for JSON output.
+type typeSectionsInfo struct {
+	Name     string   `json:"name"`
+	Sections []string `json:"sections,omitempty"`
+	Hint     string   `json:"hint,omitempty"`
+}
+
 type typeInfo struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 }
 
+// printSections prints the required sections for each type.
+func printSections(jsonOut bool) error {
+	if jsonOut {
+		var results []typeSectionsInfo
+		for _, t := range coreWorkTypes {
+			sections := t.Type.RequiredSections()
+			if len(sections) == 0 {
+				results = append(results, typeSectionsInfo{
+					Name: string(t.Type),
+					Hint: "no required sections",
+				})
+			} else {
+				var names []string
+				for _, s := range sections {
+					names = append(names, s.Heading)
+				}
+				results = append(results, typeSectionsInfo{
+					Name:     string(t.Type),
+					Sections: names,
+				})
+			}
+		}
+		return outputJSON(results)
+	}
+
+	fmt.Println("Required sections by type:")
+	for _, t := range coreWorkTypes {
+		sections := t.Type.RequiredSections()
+		if len(sections) == 0 {
+			fmt.Printf("  %-14s %s\n", t.Type, "(none)")
+		} else {
+			var names []string
+			for _, s := range sections {
+				names = append(names, s.Heading)
+			}
+			fmt.Printf("  %-14s %s\n", t.Type, strings.Join(names, ", "))
+		}
+	}
+	return nil
+}
+
 func init() {
 	rootCmd.AddCommand(typesCmd)
+	typesCmd.Flags().Bool("sections", false, "Show required sections for each issue type")
 }

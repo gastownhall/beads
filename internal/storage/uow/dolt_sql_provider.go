@@ -45,26 +45,14 @@ func (p *doltSQLProvider) Close(ctx context.Context) error {
 }
 
 func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
-	var conn *sql.Conn
-	bo := backoff.NewExponentialBackOff()
-	bo.InitialInterval = 50 * time.Millisecond
-	bo.MaxElapsedTime = 3 * time.Second
-	if err := backoff.Retry(func() error {
-		var connErr error
-		conn, connErr = p.db.Conn(ctx)
-		if connErr != nil {
-			if isSerializationError(connErr) || isInvalidConnectionError(connErr) {
-				return fmt.Errorf("uow: pin connection: %w", connErr)
-			}
-			return backoff.Permanent(fmt.Errorf("uow: pin connection: %w", connErr))
-		}
-		return nil
-	}, backoff.WithContext(bo, ctx)); err != nil {
-		return nil, err
+	conn, err := p.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("uow: pin connection: %w", err)
 	}
 
-	_, err := conn.ExecContext(ctx, "START TRANSACTION;")
+	_, err = conn.ExecContext(ctx, "START TRANSACTION;")
 	if err != nil {
+		_ = conn.Close()
 		return nil, fmt.Errorf("uow: failed to start transaction: %w", err)
 	}
 

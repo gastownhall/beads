@@ -30,7 +30,7 @@ jobs:
           token: ${{ steps.flake-token.outputs.token }}
 
       - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@9adf02b41cfdac2632e1c16f0480ff5bf3b05dd6 # v3
+        uses: DeterminateSystems/determinate-nix-action@629b284231c2a82554b724e357e47fc6020833c8 # v3
 
       - name: Update flake.lock
         run: nix flake update

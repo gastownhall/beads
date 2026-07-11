@@ -37,9 +37,17 @@ Template profiles control how much text gets installed. Policy profiles control 
 |--------|---------------|----------------------|
 | `conservative` | Standalone projects, unknown projects, and one-off assistance | Use `bd` for task tracking, then report changed files, validation, and proposed commands. Do not commit, push, or run Dolt remote sync without explicit user or orchestrator approval. |
 | `minimal` | Hook-first integrations where `bd prime` carries the detailed workflow | Same git authority as conservative; the installed file stays short and points to `bd prime`. |
-| `team-maintainer` | Repositories that explicitly delegate session close to agents | Agents may close beads, run quality gates, commit, run `bd dolt push`, and `git push` only when repository/user/orchestrator instructions grant that authority. Current "do not commit" or "do not push" instructions override the profile. |
+| `team-maintainer` | Repositories that explicitly delegate session close to agents | Agents may close beads, run quality gates, commit, run `bd dolt push`, and `git push` as part of routine work. Current "do not commit" or "do not push" instructions still override the profile. |
 
-The generated Beads block and `bd prime` default to conservative git authority. Projects that want team-maintainer behavior should say so in their own top-level instructions; Beads does not infer that authority merely because a remote exists.
+The generated Beads block and `bd prime` default to conservative git authority. Set the profile explicitly with the `agent.profile` config key or the `BD_AGENT_PROFILE` environment variable (values: `conservative`, `minimal`, `team-maintainer`; env var takes precedence; an unrecognized value falls back to `conservative`):
+
+```bash
+bd config set agent.profile team-maintainer
+# or, for a single session/process:
+BD_AGENT_PROFILE=team-maintainer bd prime
+```
+
+`bd prime` layers this explicit knob on top of its existing per-branch git-authority checks (stealth mode, no git remote, ephemeral branch, `no-push`); those hard constraints still take precedence, and `team-maintainer` remains subordinate to any explicit "do not commit"/"do not push" instruction. Beads does not infer team-maintainer authority merely because a remote exists; it must be set via this knob (or, for tools without config access, via top-level project instructions).
 
 ### Built-in Recipes
 

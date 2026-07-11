@@ -29,7 +29,7 @@ reimplementing the use case in a smaller design.
 ## Orchestration Boundary
 
 Beads should not know about orchestration layers built on top of it. Systems
-such as Gastown, Gas City, schedulers, swarms, release coordinators, and future
+such as schedulers, swarms, release coordinators, and future
 workflow engines may use beads, but beads should not encode their concepts in
 core.
 
@@ -55,6 +55,13 @@ schema poking that belongs in Dolt or the Dolt driver.
 If the current storage interface cannot express a needed operation, widen the
 interface or route the issue to the driver instead of embedding storage-engine
 logic in core.
+
+This boundary is mechanically enforced for non-test code by a `depguard`
+rule in `.golangci.yml` that denies `github.com/dolthub/` imports outside
+`internal/storage/` and `internal/doltserver/` (the linter config does not
+analyze `_test.go` files). The rule's `files` list documents the only
+justified exceptions (the proxied-server surface and DoltHub's `eventkit`
+telemetry client) alongside why each one is allowed.
 
 ## Schema Boundary
 

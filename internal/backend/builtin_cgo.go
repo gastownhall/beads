@@ -58,5 +58,8 @@ func (doltProvider) Open(ctx context.Context, opts OpenOptions) (storage.DoltSto
 	if opts.ReadOnly {
 		return embeddeddolt.OpenReadOnly(ctx, opts.BeadsDir, database, branch)
 	}
+	if opts.LenientOpen {
+		return embeddeddolt.OpenForWorkingSetReconcile(ctx, opts.BeadsDir, database, branch)
+	}
 	return embeddeddolt.Open(ctx, opts.BeadsDir, database, branch)
 }

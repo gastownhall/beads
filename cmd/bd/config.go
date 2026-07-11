@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
+	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -33,6 +34,9 @@ Common namespaces:
   - jira.*            Jira integration settings
   - linear.*          Linear integration settings
   - github.*          GitHub integration settings
+  - gitlab.*          GitLab integration settings
+  - ado.*             Azure DevOps integration settings
+  - notion.*          Notion integration settings
   - custom.*          Custom integration settings
   - status.*          Issue status configuration
   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
@@ -190,8 +194,7 @@ var configSetCmd = &cobra.Command{
 		}
 
 		if usesProxiedServer() {
-			runConfigSetProxiedServer(rootCtx, key, value)
-			return nil
+			return runConfigSetProxiedServer(rootCtx, key, value)
 		}
 
 		// Database-stored config requires direct mode
@@ -307,8 +310,7 @@ var configGetCmd = &cobra.Command{
 		}
 
 		if usesProxiedServer() {
-			runConfigGetProxiedServer(rootCtx, key)
-			return nil
+			return runConfigGetProxiedServer(rootCtx, key)
 		}
 
 		// Database-stored config requires direct mode
@@ -355,8 +357,7 @@ var configListCmd = &cobra.Command{
 		}()
 
 		if usesProxiedServer() {
-			runConfigListProxiedServer(rootCtx)
-			return nil
+			return runConfigListProxiedServer(rootCtx)
 		}
 
 		// Config operations work in direct mode only
@@ -529,8 +530,7 @@ var configUnsetCmd = &cobra.Command{
 		}
 
 		if usesProxiedServer() {
-			runConfigUnsetProxiedServer(rootCtx, key)
-			return nil
+			return runConfigUnsetProxiedServer(rootCtx, key)
 		}
 
 		// Database-stored config requires direct mode
@@ -809,7 +809,9 @@ Examples:
 					keys[i] = p.key
 					values[i] = p.value
 				}
-				runConfigSetManyProxiedServer(rootCtx, keys, values)
+				if err := runConfigSetManyProxiedServer(rootCtx, keys, values); err != nil {
+					return err
+				}
 			} else {
 				if err := ensureDirectMode("config set-many requires direct database access"); err != nil {
 					return HandleError("%v", err)
@@ -864,11 +866,30 @@ Examples:
 
 // recognizedConfigPrefixes lists valid top-level config namespaces.
 // Keys under custom.* are always accepted (user-extensible).
+//
+// Tracker namespaces (jira., linear., github., ado., ...) are NOT listed here:
+// they are derived from the tracker registry at runtime via
+// allRecognizedConfigPrefixes, so the recognizer cannot drift out of sync when
+// a new tracker is added (GH#4427).
 var recognizedConfigPrefixes = []string{
-	"export.", "import.", "dolt.", "jira.", "linear.", "github.", "custom.",
-	"status.", "doctor.suppress.", "routing.", "sync.", "git.",
+	"export.", "import.", "dolt.", "custom.",
+	"status.", "types.", "doctor.suppress.", "routing.", "sync.", "git.",
 	"directory.", "repos.", "external_projects.", "validation.",
-	"hierarchy.", "ai.", "backup.", "federation.", "metrics.",
+	"hierarchy.", "ai.", "backup.", "federation.", "metrics.", "agent.",
+}
+
+// allRecognizedConfigPrefixes returns the static namespaces plus the prefix of
+// every registered tracker ("ado.", "jira.", ...). Deriving tracker prefixes
+// from the registry keeps config-key recognition in sync with the set of
+// trackers compiled into bd instead of a hand-maintained allowlist (GH#4427).
+func allRecognizedConfigPrefixes() []string {
+	names := tracker.List()
+	prefixes := make([]string, 0, len(recognizedConfigPrefixes)+len(names))
+	prefixes = append(prefixes, recognizedConfigPrefixes...)
+	for _, name := range names {
+		prefixes = append(prefixes, name+".")
+	}
+	return prefixes
 }
 
 // recognizedConfigKeys lists valid non-namespaced config keys.
@@ -878,13 +899,14 @@ var recognizedConfigKeys = map[string]bool{
 	"create.require-description": true, "beads.role": true,
 	"auto_compact_enabled": true, "schema_version": true,
 	"output.title-length": true,
+	"prime.max-memories":  true, "prime.max-memory-chars": true,
 }
 
 func isRecognizedConfigKey(key string) bool {
 	if recognizedConfigKeys[key] {
 		return true
 	}
-	for _, prefix := range recognizedConfigPrefixes {
+	for _, prefix := range allRecognizedConfigPrefixes() {
 		if strings.HasPrefix(key, prefix) {
 			return true
 		}
@@ -923,7 +945,7 @@ func suggestConfigKey(key string) string {
 
 	bestMatch := ""
 	bestDist := 3 // max edit distance to suggest
-	for _, known := range recognizedConfigPrefixes {
+	for _, known := range allRecognizedConfigPrefixes() {
 		knownPrefix := strings.TrimSuffix(known, ".")
 		d := levenshteinDistance(parts[0], knownPrefix)
 		if d > 0 && d < bestDist {

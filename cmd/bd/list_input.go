@@ -110,6 +110,11 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 
 	limit, _ := cmd.Flags().GetInt("limit")
 	in.limitChanged = cmd.Flags().Changed("limit")
+	listLimitConfigured := false
+	if !in.limitChanged {
+		listLimitConfigured = config.GetValueSource("list.limit") != config.SourceDefault
+		limit = config.GetInt("list.limit")
+	}
 	in.allFlag, _ = cmd.Flags().GetBool("all")
 
 	in.formatStr, _ = cmd.Flags().GetString("format")
@@ -307,6 +312,8 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		in.effectiveLimit = limit
 	case in.allFlag:
 		in.effectiveLimit = 0
+	case listLimitConfigured:
+		in.effectiveLimit = limit
 	case !ui.IsTerminal():
 		in.effectiveLimit = 0 // Piped stdout should not truncate (GH#4094)
 	case ui.IsAgentMode():

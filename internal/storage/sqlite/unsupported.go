@@ -1,0 +1,11 @@
+package sqlite
+
+import "github.com/steveyegge/beads/internal/storage"
+
+//go:generate go run ../unsupportedgen -pkg sqlite -src .. -out unsupported_gen.go -type DoltStorage -skip AddDependency,AddIssueComment,AddLabel,ClaimIssue,ClaimReadyIssue,Close,CloseIssue,Commit,CommitMergeResolution,CommitPending,CommitWithConfig,CountDependencies,CountDependents,CountEvents,CountIssueComments,CountIssues,CountIssuesByGroup,CreateIssue,CreateIssues,DeleteConfig,DeleteIssue,DeleteIssues,DetectCycles,GetAllConfig,GetBlockedIssues,GetBlockingInfoForIssues,GetCommentCounts,GetCommentsForIssues,GetConfig,GetCustomStatuses,GetCustomStatusesDetailed,GetCustomTypes,GetDependencies,GetDependenciesWithMetadata,GetDependencyCounts,GetDependencyRecords,GetDependencyRecordsForIssues,GetDependencyTree,GetDependents,GetDependentsWithMetadata,GetEpicsEligibleForClosure,GetEvents,GetInfraTypes,GetIssue,GetIssueByExternalRef,GetIssueComments,GetIssuesByIDs,GetIssuesByLabel,GetLabels,GetLabelsForIssues,GetLocalMetadata,GetMetadata,GetNewlyUnblockedByClose,GetNextChildID,GetReadyWork,GetReadyWorkWithCounts,GetStaleIssues,GetStatistics,IsBlocked,IsInfraTypeCtx,IterBlockedIssues,IterDependenciesWithMetadata,IterDependentsWithMetadata,IterEvents,IterIssueComments,IterIssues,IterReadyWork,IterWisps,ListWisps,RemoveDependency,RemoveLabel,ReopenIssue,RunInTransaction,SearchIssues,SearchIssuesWithCounts,SetConfig,SetLocalMetadata,SetMetadata,UpdateIssue,UpdateIssueType,AddComment,ClearRepoMtime,CountDependentsByStatus,DeleteIssuesBySourceRepo,FindWispDependentsRecursive,GetAllDependencyRecords,GetAllEventsSince,GetMoleculeLastActivity,GetMoleculeProgress,GetRepoMtime,ImportIssueComment,IterAllDependencyRecords,IterAllEventsSince,PromoteFromEphemeral,SetRepoMtime,UpdateIssueID,CreateIssuesWithFullOptions,SlotClear,SlotGet,SlotSet,SearchIssueIDs,HeartbeatIssue,ReclaimExpiredLeases,UnclaimIssue
+
+// errUnsupported returns the backend-agnostic *storage.ErrUnsupported sentinel; Backend
+// is "sqlite". Same allowlist as postgres/mysql (identical sqlkit base + overrides).
+func errUnsupported(op string) error {
+	return &storage.ErrUnsupported{Op: op, Backend: Backend}
+}

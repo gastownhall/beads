@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
@@ -60,7 +62,7 @@ Examples:
 
 func init() {
 	preflightCmd.Flags().Bool("check", false, "Run checks automatically")
-	preflightCmd.Flags().Bool("fix", false, "Auto-fix issues where possible (not yet implemented)")
+	preflightCmd.Flags().Bool("fix", false, "Auto-fix issues where possible (vendorHash, version sync)")
 	preflightCmd.Flags().Bool("json", false, "Output results as JSON")
 	preflightCmd.Flags().Bool("skip-lint", false, "Skip lint check explicitly")
 
@@ -81,28 +83,114 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 	skipLint, _ := cmd.Flags().GetBool("skip-lint")
 
 	if fix {
-		fmt.Println("Note: --fix is not yet implemented.")
-		fmt.Println("See bd-lfak.3 through bd-lfak.5 for implementation roadmap.")
-		fmt.Println()
+		return runFixes(jsonOutput)
 	}
 
 	if check {
 		return runChecks(jsonOutput, skipLint)
 	}
 
+	// Static checklist mode — tailor the checklist to the detected project
+	// stack so non-Go projects don't get a misleading Go/Nix checklist (GH#4364).
+	root := git.GetRepoRoot()
+	if root == "" {
+		if wd, err := os.Getwd(); err == nil {
+			root = wd
+		}
+	}
+
 	fmt.Println("PR Readiness Checklist:")
 	fmt.Println()
-	fmt.Println("[ ] Tests pass: go test -tags gms_pure_go -short ./...")
-	fmt.Println("[ ] Lint passes: golangci-lint run --build-tags=gms_pure_go ./...")
-	fmt.Println("[ ] Formatting: gofmt -l .")
-	fmt.Println("[ ] No beads pollution: check .beads/issues.jsonl diff")
-	fmt.Println("[ ] Nix hash current: go.sum unchanged or vendorHash updated")
-	fmt.Println("[ ] Version sync: version.go matches default.nix")
+	for _, item := range buildPreflightChecklist(root) {
+		fmt.Printf("[ ] %s\n", item)
+	}
 	fmt.Println()
 	fmt.Println("Run 'bd preflight --check' to validate automatically.")
 	return nil
 }
 
+// fileExists reports whether name exists directly under dir.
+func fileExists(dir, name string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, name))
+	return err == nil
+}
+
+// buildPreflightChecklist returns PR-readiness checklist items tailored to the
+// project's language stack, detected from standard marker files in dir. A
+// project with no recognized stack gets a generic reminder rather than a
+// misleading Go checklist, and the repo's own Go+Nix specific items
+// (gms_pure_go build tags, nix vendorHash, version.go vs default.nix) only
+// appear where they apply (GH#4364).
+func buildPreflightChecklist(dir string) []string {
+	// Preserve the exact rich checklist when run inside the beads repo itself
+	// (its primary audience), so the gms_pure_go build tags and nix/version
+	// reminders beads contributors rely on are not lost.
+	if isBeadsRepo(dir) {
+		return []string{
+			"Tests pass: go test -tags gms_pure_go -short ./...",
+			"Lint passes: golangci-lint run --build-tags=gms_pure_go ./...",
+			"Formatting: gofmt -l .",
+			"No beads pollution: check .beads/issues.jsonl diff",
+			"Nix hash current: go.sum unchanged or vendorHash updated",
+			"Version sync: version.go matches default.nix",
+		}
+	}
+
+	var items []string
+	switch {
+	case fileExists(dir, "go.mod"):
+		items = append(items,
+			"Tests pass: go test ./...",
+			"Lint passes: golangci-lint run ./...",
+			"Formatting: gofmt -l .",
+		)
+	case fileExists(dir, "package.json"):
+		items = append(items,
+			"Tests pass: npm test",
+			"Types check: tsc --noEmit",
+		)
+	case fileExists(dir, "pyproject.toml"), fileExists(dir, "setup.py"):
+		items = append(items,
+			"Tests pass: pytest",
+			"Lint passes: ruff check",
+		)
+	case fileExists(dir, "Cargo.toml"):
+		items = append(items,
+			"Tests pass: cargo test",
+			"Lint passes: cargo clippy",
+		)
+	default:
+		items = append(items, "Tests pass: run your project's test suite, linter, and formatter")
+	}
+
+	// Relevant to any beads workspace, regardless of language.
+	if fileExists(dir, ".beads") {
+		items = append(items, "No beads pollution: check .beads/issues.jsonl diff")
+	}
+
+	return items
+}
+
+// isBeadsRepo reports whether dir is the beads source repo, detected by the
+// module path in go.mod. Used to keep preflight's repo-specific checklist.
+func isBeadsRepo(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod")) //nolint:gosec // path is constructed internally (repo root + fixed filename)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module ")) == "github.com/steveyegge/beads"
+		}
+	}
+	return false
+}
+
+// runChecks executes all preflight checks and reports results.
 func runChecks(jsonOutput, skipLint bool) error {
 	var results []CheckResult
 
@@ -564,4 +652,215 @@ func truncateOutput(s string, maxLen int) string {
 		return strings.TrimSpace(s)
 	}
 	return strings.TrimSpace(s[:maxLen]) + "\n... (truncated)"
+}
+
+// fixResult reports the outcome of one auto-fix operation.
+type fixResult struct {
+	Name    string `json:"name"`
+	Fixed   bool   `json:"fixed"`
+	Skipped bool   `json:"skipped,omitempty"`
+	Detail  string `json:"detail,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// runFixes executes auto-fix operations for fixable preflight checks.
+func runFixes(jsonOutput bool) error {
+	var results []fixResult
+	hasError := false
+
+	nixFixed, nixOld, nixNew, nixErr := fixNixHash()
+	nr := fixResult{Name: "Nix vendorHash"}
+	if nixErr != nil {
+		nr.Error = nixErr.Error()
+		hasError = true
+	} else if nixFixed {
+		nr.Fixed = true
+		nr.Detail = fmt.Sprintf("%s → %s", nixOld, nixNew)
+	} else {
+		nr.Skipped = true
+	}
+	results = append(results, nr)
+
+	versionFixed, versionOld, versionNew, versionErr := fixVersionSync()
+	vr := fixResult{Name: "Version sync"}
+	if versionErr != nil {
+		vr.Error = versionErr.Error()
+		hasError = true
+	} else if versionFixed {
+		vr.Fixed = true
+		vr.Detail = fmt.Sprintf("version.go: %s → %s", versionOld, versionNew)
+	} else {
+		vr.Skipped = true
+	}
+	results = append(results, vr)
+
+	if jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(results); err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding fix results: %v\n", err)
+		}
+		if hasError {
+			return SilentExit()
+		}
+		return nil
+	}
+
+	for _, r := range results {
+		switch {
+		case r.Error != "":
+			fmt.Printf("✗ %s\n  %s\n\n", r.Name, r.Error)
+		case r.Fixed:
+			fmt.Printf("✓ %s\n", r.Name)
+			if r.Detail != "" {
+				fmt.Printf("  %s\n", r.Detail)
+			}
+			fmt.Println()
+		default:
+			fmt.Printf("- %s (nothing to fix)\n\n", r.Name)
+		}
+	}
+
+	if hasError {
+		return SilentExit()
+	}
+	return nil
+}
+
+// fixNixHash computes and updates the vendorHash in default.nix.
+// It uses a sentinel hash to trigger nix to report the correct hash.
+// Returns (fixed, oldHash, newHash, err).
+func fixNixHash() (bool, string, string, error) {
+	// Check if go.sum has uncommitted changes (same heuristic as runNixHashCheck)
+	cmd1 := exec.Command("git", "diff", "--name-only", "HEAD", "--", "go.sum")
+	out1, _ := cmd1.Output()
+	cmd2 := exec.Command("git", "diff", "--name-only", "--cached", "--", "go.sum")
+	out2, _ := cmd2.Output()
+	if len(strings.TrimSpace(string(out1))) == 0 && len(strings.TrimSpace(string(out2))) == 0 {
+		return false, "", "", nil
+	}
+
+	if _, err := exec.LookPath("nix"); err != nil {
+		return false, "", "", fmt.Errorf(
+			"nix not found in PATH\n  Manual fix:\n" +
+				"    1. Edit default.nix: set vendorHash = \"sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\"\n" +
+				"    2. Run: nix build .#default\n" +
+				"    3. Copy the 'got:' hash from the error into default.nix",
+		)
+	}
+
+	nixPath := "default.nix"
+	nixInfo, err := os.Stat(nixPath)
+	if err != nil {
+		return false, "", "", fmt.Errorf("cannot stat default.nix: %v", err)
+	}
+	nixPerm := nixInfo.Mode().Perm()
+
+	content, err := os.ReadFile(nixPath)
+	if err != nil {
+		return false, "", "", fmt.Errorf("cannot read default.nix: %v", err)
+	}
+
+	re := regexp.MustCompile(`(vendorHash\s*=\s*)"([^"]+)"`)
+	loc := re.FindSubmatchIndex(content)
+	if loc == nil {
+		return false, "", "", fmt.Errorf("vendorHash not found in default.nix")
+	}
+	oldHash := string(content[loc[4]:loc[5]])
+
+	const sentinel = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+	probed := append(append([]byte{}, content[:loc[4]]...), append([]byte(sentinel), content[loc[5]:]...)...)
+	if err := os.WriteFile(nixPath, probed, nixPerm); err != nil {
+		return false, "", "", fmt.Errorf("cannot write default.nix: %v", err)
+	}
+
+	restored := false
+	defer func() {
+		if !restored {
+			_ = os.WriteFile(nixPath, content, nixPerm)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	nixCmd := exec.CommandContext(ctx, "nix", "build", ".#default", "--no-link")
+	nixOut, _ := nixCmd.CombinedOutput()
+
+	// Nix prints the correct hash in lines like "got:    sha256-..."
+	hashRe := regexp.MustCompile(`got:\s+(sha256-[A-Za-z0-9+/]+=)`)
+	m := hashRe.FindSubmatch(nixOut)
+	if m == nil {
+		// Fallback: pick any sha256-... that isn't our sentinel
+		altRe := regexp.MustCompile(`sha256-([A-Za-z0-9+/]+=)`)
+		for _, am := range altRe.FindAllSubmatch(nixOut, -1) {
+			h := "sha256-" + string(am[1])
+			if h != sentinel {
+				m = [][]byte{nil, []byte(h)}
+				break
+			}
+		}
+	}
+	if m == nil {
+		return false, oldHash, "", fmt.Errorf("could not parse correct hash from nix output:\n%s", string(nixOut))
+	}
+	newHash := string(m[1])
+
+	if newHash == oldHash {
+		_ = os.WriteFile(nixPath, content, nixPerm)
+		restored = true
+		return false, oldHash, newHash, nil
+	}
+
+	updated := append(append([]byte{}, content[:loc[4]]...), append([]byte(newHash), content[loc[5]:]...)...)
+	if err := os.WriteFile(nixPath, updated, nixPerm); err != nil {
+		return false, oldHash, newHash, fmt.Errorf("cannot update default.nix: %v", err)
+	}
+	restored = true
+	return true, oldHash, newHash, nil
+}
+
+// fixVersionSync updates cmd/bd/version.go to match the version in default.nix.
+// default.nix is the source of truth. Returns (fixed, oldVersion, newVersion, err).
+func fixVersionSync() (bool, string, string, error) {
+	vgoPath := "cmd/bd/version.go"
+	vgoInfo, err := os.Stat(vgoPath)
+	if err != nil {
+		return false, "", "", fmt.Errorf("cannot read cmd/bd/version.go: %v", err)
+	}
+	vgoPerm := vgoInfo.Mode().Perm()
+
+	vgoContent, err := os.ReadFile(vgoPath)
+	if err != nil {
+		return false, "", "", fmt.Errorf("cannot read cmd/bd/version.go: %v", err)
+	}
+
+	vgoRe := regexp.MustCompile(`(Version\s*=\s*)"([^"]+)"`)
+	vgoLoc := vgoRe.FindSubmatchIndex(vgoContent)
+	if vgoLoc == nil {
+		return false, "", "", fmt.Errorf("cannot parse Version from cmd/bd/version.go")
+	}
+	oldVersion := string(vgoContent[vgoLoc[4]:vgoLoc[5]])
+
+	nixContent, err := os.ReadFile("default.nix")
+	if err != nil {
+		// No default.nix — nothing to sync against
+		return false, "", "", nil
+	}
+
+	nixRe := regexp.MustCompile(`version\s*=\s*"([^"]+)"`)
+	nixM := nixRe.FindSubmatch(nixContent)
+	if nixM == nil {
+		return false, "", "", fmt.Errorf("cannot parse version from default.nix")
+	}
+	newVersion := string(nixM[1])
+
+	if oldVersion == newVersion {
+		return false, oldVersion, newVersion, nil
+	}
+
+	updated := append(append([]byte{}, vgoContent[:vgoLoc[4]]...), append([]byte(newVersion), vgoContent[vgoLoc[5]:]...)...)
+	if err := os.WriteFile(vgoPath, updated, vgoPerm); err != nil {
+		return false, oldVersion, newVersion, fmt.Errorf("cannot update cmd/bd/version.go: %v", err)
+	}
+	return true, oldVersion, newVersion, nil
 }

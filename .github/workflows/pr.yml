@@ -24,12 +24,12 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
       - name: Run policy checks
         run: make ci-pr-policy
@@ -90,7 +90,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -157,7 +157,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -171,9 +171,19 @@ jobs:
           ./scripts/check-doc-flags.sh ./bd
           ./scripts/check-doc-freshness.sh
 
+      # Website doc mirrors (website/docs/... and, when applicable,
+      # website/versioned_docs/version-<latest>/...) are a pure text
+      # transform of their docs/ sources, so this needs no bd build and no
+      # merge-base attribution: it just fails if scripts/sync-website-docs.sh
+      # produces any diff against the committed mirrors.
+      - name: Validate website doc mirrors
+        run: ./scripts/check-website-docs-drift.sh
+
       # When the drift check fails, it writes the exact regenerated-docs fix
       # (produced with CI's canonical build) so contributors can apply it with
-      # `git apply` instead of reproducing CI's environment locally.
+      # `git apply` instead of reproducing CI's environment locally. The
+      # docs-autofix.yml workflow_run job consumes this same artifact to push
+      # the fix to same-repo PR branches automatically.
       - name: Upload docs fix patch
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -248,7 +258,7 @@ jobs:
 
       - name: Set up Python
         if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.14'
 
@@ -357,7 +367,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -372,7 +382,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -411,12 +421,12 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
       - name: Run PR lint wrapper
         run: make ci-pr-lint
@@ -435,7 +445,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -455,7 +465,7 @@ jobs:
       - name: Pull Dolt sql-server image
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
         # Without this, RequireDoltContainer reports doltNoImage and TestDomainDB skips.
-        run: docker pull dolthub/dolt-sql-server:2.1.0
+        run: docker pull dolthub/dolt-sql-server:2.1.10
 
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -475,6 +485,44 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
         run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
 
+  # Producer-side guard for the Beads<->consumer contract corpus. Regenerates
+  # the canonicalized golden corpus from this branch's bd and byte-compares it
+  # to the committed testdata/corpus/; an unreviewed wire change is a hard
+  # failure (run `make corpus-regen`). The double-run test proves determinism.
+  # Needs the Dolt sql-server image (the protocol harness spins a container).
+  contract-corpus:
+    name: Contract corpus (golden + determinism)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt CLI
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Pull Dolt sql-server image
+        # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
+        run: docker pull dolthub/dolt-sql-server:2.1.10
+
+      - name: Corpus golden + determinism
+        # Require a live Dolt store here: this is the gate that must exercise the
+        # golden + double-run checks, so a failed container is a hard failure,
+        # not a silent skip (see requireDoltStore in cmd/bd/protocol tests).
+        env:
+          BEADS_PROTOCOL_REQUIRE_DOLT: "1"
+        run: go test -tags gms_pure_go -count=1 -run 'TestCorpusGolden|TestCanonicalize|TestCorpusDoubleRunByteIdentical|TestCheckCaptureExit' ./cmd/bd/protocol
+
   fmt-check:
     name: Check formatting
     runs-on: ubuntu-latest
@@ -482,7 +530,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -496,12 +544,12 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           version: latest
           args: --timeout=5m --build-tags=gms_pure_go
@@ -525,6 +573,7 @@ jobs:
       - pr-core-wrapper
       - pr-lint-wrapper
       - test-domain-uow
+      - contract-corpus
       - fmt-check
       - lint
     if: ${{ always() }}
@@ -550,6 +599,7 @@ jobs:
             PR_CORE_WRAPPER
             PR_LINT_WRAPPER
             TEST_DOMAIN_UOW
+            CONTRACT_CORPUS
             FMT_CHECK
             LINT
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
@@ -567,6 +617,7 @@ jobs:
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
           PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
           TEST_DOMAIN_UOW: ${{ needs.test-domain-uow.result }}
+          CONTRACT_CORPUS: ${{ needs.contract-corpus.result }}
           FMT_CHECK: ${{ needs.fmt-check.result }}
           LINT: ${{ needs.lint.result }}
         run: |

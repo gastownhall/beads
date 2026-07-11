@@ -1,0 +1,17 @@
+{
+  "data": [
+    {
+      "created_at": "<TS>",
+      "created_by": "protocol-test",
+      "description": "deterministic corpus closeable",
+      "id": "corpus-closed",
+      "issue_type": "task",
+      "owner": "test@protocol.test",
+      "priority": 3,
+      "status": "open",
+      "title": "Corpus closeable issue",
+      "updated_at": "<TS>"
+    }
+  ],
+  "schema_version": 1
+}

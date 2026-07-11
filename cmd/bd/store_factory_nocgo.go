@@ -6,7 +6,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/backend"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -45,41 +45,17 @@ func acquireEmbeddedLock(_ string, _ bool) (util.Unlocker, error) {
 	return util.NoopLock{}, nil
 }
 
-// newDoltStoreFromConfig creates a SQL-server-backed storage backend from config.
+// newDoltStoreFromConfig opens the configured pure-Go or external backend. The
+// legacy function name is retained for compatibility with existing call sites.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	cfg, err := configfile.Load(beadsDir)
-	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
-		// TODO: this needs to be uow provider
-		return nil, fmt.Errorf("proxy server store should be uow provider")
-		// 	return newProxiedServerStore(ctx, &dolt.Config{
-		// 		BeadsDir:      beadsDir,
-		// 		Database:      cfg.GetDoltDatabase(),
-		// 		ProxiedServer: true,
-		// 	})
-	}
-	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
-		return dolt.NewFromConfig(ctx, beadsDir)
-	}
-	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
+	store, _, err := backend.OpenConfigured(ctx, beadsDir, backend.ConfiguredOpenOptions{})
+	return store, err
 }
 
-// newReadOnlyStoreFromConfig creates a read-only SQL-server-backed storage backend.
+// newReadOnlyStoreFromConfig opens the configured backend in read-only mode.
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	cfg, err := configfile.Load(beadsDir)
-	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
-		// TODO: this needs to be uow provider
-		return nil, fmt.Errorf("proxy server store needs to be uow provider")
-		// return newProxiedServerStore(ctx, &dolt.Config{
-		// 	BeadsDir:      beadsDir,
-		// 	Database:      cfg.GetDoltDatabase(),
-		// 	ProxiedServer: true,
-		// 	ReadOnly:      true,
-		// })
-	}
-	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
-		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
-	}
-	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
+	store, _, err := backend.OpenConfigured(ctx, beadsDir, backend.ConfiguredOpenOptions{ReadOnly: true})
+	return store, err
 }
 
 const nocgoEmbeddedErrMsg = `embedded Dolt requires a CGO build, but this bd binary was built with CGO_ENABLED=0.

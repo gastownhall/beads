@@ -65,6 +65,7 @@ func TestExtractIdentifier(t *testing.T) {
 		{"https://gitlab.com/group/project/-/issues/42", "42"},
 		{"https://gitlab.example.com/team/repo/-/issues/123", "123"},
 		{"https://gitlab.com/group/project/-/work_items/42", "42"},
+		{"https://gitlab.com/group/project/-/milestones/4", "milestone:4"},
 		{"not-a-url", ""},
 		// Shorthand format
 		{"gitlab:681509", "681509"},

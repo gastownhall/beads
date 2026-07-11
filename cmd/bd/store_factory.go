@@ -5,11 +5,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/steveyegge/beads/internal/backend"
-	"github.com/steveyegge/beads/internal/backend/pluginprocess"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
@@ -62,6 +60,13 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, e
 		// already skip migration entirely.
 		return embeddeddolt.OpenForReadOnlyCommand(ctx, cfg.BeadsDir, cfg.Database, "main")
 	}
+	if cfg.LenientOpen {
+		// Working-set-reconcile commands (bd dolt commit, bd vc commit) must
+		// not be bricked by a pending-migration dirty-table refusal: that
+		// refusal's documented recovery is exactly the commit these commands
+		// run, so failing the open here would deadlock (#4566).
+		return embeddeddolt.OpenForWorkingSetReconcile(ctx, cfg.BeadsDir, cfg.Database, "main")
+	}
 	return embeddeddolt.Open(ctx, cfg.BeadsDir, cfg.Database, "main")
 }
 
@@ -86,75 +91,15 @@ func acquireEmbeddedLock(beadsDir string, serverMode bool) (util.Unlocker, error
 	return lock, nil
 }
 
-// newDoltStoreFromConfig creates a storage backend from the beads directory's
-// persisted metadata.json configuration. Uses embedded Dolt by default;
-// connects to dolt sql-server when dolt_mode is "server".
+// newDoltStoreFromConfig creates the storage backend selected by the beads
+// directory's persisted metadata.json configuration. The legacy function name
+// is retained for command call sites that predate configurable backends.
 //
 // For embedded mode, legacy hyphenated database names (pre-GH#2142) are
 // auto-sanitized to underscores and the fix is persisted to metadata.json.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	cfg, err := configfile.Load(beadsDir)
-	providerName := configfile.BackendDolt
-	if cfg != nil {
-		providerName = cfg.GetBackend()
-	}
-	if providerName != configfile.BackendDolt {
-		pluginCfg, err := configfile.ResolveBackendPluginConfig(beadsDir, providerName)
-		if err != nil {
-			return nil, err
-		}
-		if pluginCfg == nil {
-			return nil, fmt.Errorf("backend plugin %q is configured in metadata.json but no trusted local command was found; run 'bd backend install %s --command <path>' or set BEADS_BACKEND_PLUGIN_COMMAND", providerName, providerName)
-		}
-		return pluginprocess.Open(ctx, pluginprocess.OpenOptions{
-			Config: pluginprocess.Config{
-				Backend: providerName,
-				Command: pluginCfg.Command,
-				Args:    pluginCfg.Args,
-			},
-			BeadsDir: beadsDir,
-			Database: cfg.GetDoltDatabase(),
-			Branch:   "main",
-		})
-	}
-	provider, lookupErr := backend.MustLookup(providerName)
-	if lookupErr != nil {
-		return nil, lookupErr
-	}
-	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
-		// TODO: this needs to be uow provider
-		return nil, fmt.Errorf("proxy server store should be uow provider")
-		// 	return newProxiedServerStore(ctx, &dolt.Config{
-		// 		BeadsDir:      beadsDir,
-		// 		Database:      cfg.GetDoltDatabase(),
-		// 		ProxiedServer: true,
-		// 	})
-	}
-	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
-		return provider.Open(ctx, backend.OpenOptions{
-			BeadsDir:   beadsDir,
-			Database:   cfg.GetDoltDatabase(),
-			Branch:     "main",
-			ServerMode: true,
-		})
-	}
-	database := configfile.DefaultDoltDatabase
-	if cfg != nil {
-		database = cfg.GetDoltDatabase()
-	}
-	if providerName == configfile.BackendDolt {
-		if sanitized := sanitizeDBName(database); sanitized != database {
-			if err := migrateHyphenatedDB(beadsDir, cfg, database, sanitized); err != nil {
-				return nil, fmt.Errorf("auto-sanitize database name %q → %q: %w", database, sanitized, err)
-			}
-			database = sanitized
-		}
-	}
-	return provider.Open(ctx, backend.OpenOptions{
-		BeadsDir: beadsDir,
-		Database: database,
-		Branch:   "main",
-	})
+	store, _, err := backend.OpenConfigured(ctx, beadsDir, backend.ConfiguredOpenOptions{})
+	return store, err
 }
 
 // migrateHyphenatedDB renames a legacy hyphenated database directory and
@@ -162,39 +107,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 // This handles projects initialized before GH#2142 that upgrade to
 // embedded-mode-default builds (GH#3231).
 func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newName string) error {
-	dataDir := filepath.Join(beadsDir, "embeddeddolt")
-	oldDir := filepath.Join(dataDir, oldName)
-	newDir := filepath.Join(dataDir, newName)
-
-	oldExists := false
-	if info, err := os.Stat(oldDir); err == nil && info.IsDir() {
-		oldExists = true
-	}
-
-	if oldExists {
-		_, newErr := os.Stat(newDir)
-		switch {
-		case newErr == nil:
-			return fmt.Errorf("cannot auto-migrate database: both %q and %q exist under %s; remove one manually and retry",
-				oldName, newName, dataDir)
-		case !os.IsNotExist(newErr):
-			return fmt.Errorf("checking target directory %q: %w", newDir, newErr)
-		default:
-			if err := os.Rename(oldDir, newDir); err != nil {
-				return fmt.Errorf("renaming database directory: %w", err)
-			}
-			fmt.Fprintf(os.Stderr, "bd: migrated database directory %q → %q (GH#3231)\n", oldName, newName)
-		}
-	}
-
-	if cfg != nil && cfg.DoltDatabase != newName {
-		cfg.DoltDatabase = newName
-		if err := cfg.Save(beadsDir); err != nil {
-			return fmt.Errorf("persisting sanitized database name to metadata.json: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "bd: updated metadata.json dolt_database %q → %q (GH#3231)\n", oldName, newName)
-	}
-	return nil
+	return backend.MigrateHyphenatedDatabase(beadsDir, cfg, oldName, newName)
 }
 
 // newReadOnlyStoreFromConfig creates a read-only storage backend from the beads
@@ -204,67 +117,6 @@ func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newNa
 // only — no directory renames or metadata.json writes. This prevents cross-repo
 // hydration from mutating foreign projects (GH#3231).
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
-	cfg, err := configfile.Load(beadsDir)
-	providerName := configfile.BackendDolt
-	if cfg != nil {
-		providerName = cfg.GetBackend()
-	}
-	if providerName != configfile.BackendDolt {
-		pluginCfg, err := configfile.ResolveBackendPluginConfig(beadsDir, providerName)
-		if err != nil {
-			return nil, err
-		}
-		if pluginCfg == nil {
-			return nil, fmt.Errorf("backend plugin %q is configured in metadata.json but no trusted local command was found; run 'bd backend install %s --command <path>' or set BEADS_BACKEND_PLUGIN_COMMAND", providerName, providerName)
-		}
-		return pluginprocess.Open(ctx, pluginprocess.OpenOptions{
-			Config: pluginprocess.Config{
-				Backend: providerName,
-				Command: pluginCfg.Command,
-				Args:    pluginCfg.Args,
-			},
-			BeadsDir: beadsDir,
-			Database: cfg.GetDoltDatabase(),
-			Branch:   "main",
-			ReadOnly: true,
-		})
-	}
-	provider, lookupErr := backend.MustLookup(providerName)
-	if lookupErr != nil {
-		return nil, lookupErr
-	}
-	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
-		// TODO: this needs to be uow provider
-		return nil, fmt.Errorf("proxy server store needs to be uow provider")
-		// return newProxiedServerStore(ctx, &dolt.Config{
-		// 	BeadsDir:      beadsDir,
-		// 	Database:      cfg.GetDoltDatabase(),
-		// 	ProxiedServer: true,
-		// 	ReadOnly:      true,
-		// })
-	}
-	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
-		return provider.Open(ctx, backend.OpenOptions{
-			BeadsDir:   beadsDir,
-			Database:   cfg.GetDoltDatabase(),
-			Branch:     "main",
-			ServerMode: true,
-			ReadOnly:   true,
-		})
-	}
-	database := configfile.DefaultDoltDatabase
-	if cfg != nil {
-		database = cfg.GetDoltDatabase()
-	}
-	if providerName == configfile.BackendDolt {
-		if sanitized := sanitizeDBName(database); sanitized != database {
-			database = sanitized
-		}
-	}
-	return provider.Open(ctx, backend.OpenOptions{
-		BeadsDir: beadsDir,
-		Database: database,
-		Branch:   "main",
-		ReadOnly: true,
-	})
+	store, _, err := backend.OpenConfigured(ctx, beadsDir, backend.ConfiguredOpenOptions{ReadOnly: true})
+	return store, err
 }

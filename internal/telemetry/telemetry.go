@@ -10,7 +10,7 @@
 //	    Presence of this variable enables telemetry.
 //
 //	BD_OTEL_LOGS_URL=http://localhost:9428/insert/opentelemetry/v1/logs
-//	    Push logs to VictoriaLogs (reserved for future log export).
+//	    Reserved for future log export to VictoriaLogs.
 //
 //	BD_OTEL_STDOUT=true
 //	    Write spans and metrics to stderr (dev/debug mode).
@@ -19,7 +19,7 @@
 // # Recommended local stack
 //
 //	VictoriaMetrics :8428  — metrics storage
-//	VictoriaLogs    :9428  — log storage
+//	VictoriaLogs    :9428  — future log storage
 //	Grafana         :9429  — dashboards
 //
 // See docs/OBSERVABILITY.md for the full reference.

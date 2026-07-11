@@ -627,6 +627,26 @@ func TestDoltStoreIssueClose(t *testing.T) {
 	}
 }
 
+// TestCloseIssueNotFound verifies that closing a non-existent issue returns an
+// error that wraps storage.ErrNotFound, for parity with GetIssue/UpdateIssue/
+// DeleteIssue. Guards against the regression where CloseIssue returned a bare
+// fmt.Errorf that errors.Is(err, storage.ErrNotFound) could not match (mybd-fv7r).
+func TestCloseIssueNotFound(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	err := store.CloseIssue(ctx, "does-not-exist", "completed", "tester", "session123")
+	if err == nil {
+		t.Fatal("expected error closing non-existent issue, got nil")
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected error to wrap storage.ErrNotFound, got: %v", err)
+	}
+}
+
 // TestClosePromotedWisp verifies that bd close works for wisps that were
 // promoted to the issues table via PromoteFromEphemeral (bd-ftc).
 // Promoted wisps have -wisp- in their ID but live in the issues table,

@@ -35,6 +35,24 @@ type OpenOptions struct {
 	ProxiedServer   bool
 	ReadOnly        bool
 	ReadOnlyCommand bool
+	LenientOpen     bool
+}
+
+// Descriptor describes the backend selected for a configured open. It exposes
+// backend-neutral behavior only; concrete driver and connection types remain
+// behind the storage boundary.
+type Descriptor struct {
+	Name         string
+	External     bool
+	Capabilities Capabilities
+}
+
+// ConfiguredOpenOptions controls behavior that must be chosen by the caller
+// rather than inferred from workspace metadata.
+type ConfiguredOpenOptions struct {
+	ReadOnly        bool
+	ReadOnlyCommand bool
+	LenientOpen     bool
 }
 
 // Provider is the core seam for built-in and future plugin-shaped backends.

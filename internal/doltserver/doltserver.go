@@ -376,7 +376,7 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 
 	// Check if it's a dolt sql-server process
 	if !isDoltProcess(pid) {
-		return 0, fmt.Errorf("port %d is in use by a non-dolt process (PID %d).\n\nFree the port or configure a different one with: bd dolt set port <port>", port, pid)
+		return 0, fmt.Errorf("port %d is in use by a non-dolt process (PID %d).\n\n%s\n\nFree the port or configure a different one with: bd dolt set port <port>", port, pid, portConflictDiagnostics(port))
 	}
 
 	// It's a dolt process. Check if it's one we should adopt.
@@ -389,7 +389,24 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 	}
 
 	// Another beads project's Dolt server is on this port.
-	return 0, fmt.Errorf("port %d is in use by another project's dolt server (PID %d).\n\nFree the port or use a different one with: bd dolt set port <port>", port, pid)
+	return 0, fmt.Errorf("port %d is in use by another project's dolt server (PID %d).\n\n%s\n\nFree the port or use a different one with: bd dolt set port <port>", port, pid, portConflictDiagnostics(port))
+}
+
+// portConflictDiagnostics returns a multi-line block of operator-actionable
+// hints for diagnosing what's holding a port. Combines the platform-specific
+// listener-discovery command with a docker-in-the-loop hint that frequently
+// applies in practice — operators running their own dolt sql-server in a
+// container don't realize bd would otherwise try to start a competing
+// instance and lose the race (GH#3516).
+func portConflictDiagnostics(port int) string {
+	return fmt.Sprintf("Identify the listener:\n  %s\n\n"+
+		"If the listener is YOUR own Dolt instance (e.g., a docker container "+
+		"or systemd unit you manage), bd does not need to start a new server. "+
+		"Configure bd to talk to the existing server instead:\n"+
+		"  export BEADS_DOLT_SERVER_HOST=<host>  # 127.0.0.1 for local container\n"+
+		"  export BEADS_DOLT_SERVER_PORT=%d\n"+
+		"  bd dolt status   # verify reachable",
+		fmt.Sprintf(portConflictHint, port), port)
 }
 
 // countDoltProcesses returns the number of running dolt sql-server processes.
@@ -420,8 +437,29 @@ func readPortFile(beadsDir string) int {
 }
 
 // writePortFile records the actual port the server is listening on.
+// Write-temp-then-rename: a plain os.WriteFile truncates in place, so a
+// concurrent readPortFile can observe an empty or partial file and resolve
+// port 0 (or a truncated port). Rename within .beads is atomic.
 func writePortFile(beadsDir string, port int) error {
-	return os.WriteFile(portPath(beadsDir), []byte(strconv.Itoa(port)), 0600)
+	path := portPath(beadsDir)
+	tmp, err := os.CreateTemp(beadsDir, PortFileName+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck // no-op after successful rename
+	if _, err := tmp.WriteString(strconv.Itoa(port)); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // EnsurePortFile makes the repo-local port file match the connected server port.

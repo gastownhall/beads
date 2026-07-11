@@ -21,6 +21,8 @@ Before implementing a feature/fix or opening a replacement PR:
 What this checks:
   - whether an existing PR is external/cross-repository contributor work
   - draft, review, mergeability, and check status
+  - CI health of the base branch (red base makes "failures are pre-existing"
+    reasoning unsafe; set PR_PREFLIGHT_BLOCK_RED_BASE=1 to block instead of warn)
   - risky diff signals: .beads data, missing tests for code changes, large diffs
   - contributor-protection next steps and attribution reminders
 
@@ -205,6 +207,35 @@ esac
 
 if [[ "$mergeable" == "CONFLICTING" ]]; then
   block "GitHub reports merge conflicts."
+fi
+
+# Base-branch CI health. Merging onto a red base is how breakage stacks:
+# every open PR inherits the red checks, "failures are pre-existing" becomes
+# the default reasoning, and new failures ride in under that cover. Cancelled
+# runs (superseded by a newer push) carry no signal, so judge by the newest
+# completed run that finished with a decisive green or red conclusion.
+base_ref=$(jq -r .baseRefName <<<"$json")
+base_runs=$(gh run list --repo "$repo" --branch "$base_ref" --status completed \
+  --limit 30 --json conclusion,workflowName,createdAt,url 2>/dev/null) || base_runs=""
+# Latest decisive run per workflow, so a green unrelated workflow that happened
+# to run last cannot mask a red test workflow (and vice versa).
+base_latest_per_wf=$(jq '[group_by(.workflowName)[]
+  | [.[] | select((.conclusion // "") == "success" or ((.conclusion // "") | test("^(failure|timed_out|action_required)$")))][0]
+  | select(. != null)]' <<<"${base_runs:-[]}")
+base_red=$(jq '[.[] | select((.conclusion // "") | test("^(failure|timed_out|action_required)$"))]' <<<"$base_latest_per_wf")
+base_red_count=$(jq 'length' <<<"$base_red")
+base_green_count=$(jq '[.[] | select(.conclusion == "success")] | length' <<<"$base_latest_per_wf")
+if [[ "$base_red_count" -gt 0 ]]; then
+  red_base_msg="Base branch ${base_ref} CI is RED: $(jq -r 'map("\(.workflowName) failed at \(.createdAt) (\(.url))") | join("; ")' <<<"$base_red"). Check failures on this PR may be pre-existing base breakage, and merging onto a red base hides new failures. Merge only the fix for ${base_ref} while it is red; for everything else wait, then update the branch and re-run checks."
+  if [[ "${PR_PREFLIGHT_BLOCK_RED_BASE:-0}" == "1" ]]; then
+    block "$red_base_msg"
+  else
+    warn "$red_base_msg"
+  fi
+elif [[ "$base_green_count" -gt 0 ]]; then
+  pass "Base branch ${base_ref} CI is green (latest completed run of each of ${base_green_count} workflow(s) succeeded)."
+else
+  warn "Could not determine CI health of base branch ${base_ref}; check it manually before merging."
 fi
 
 failed_checks=$(jq '[.statusCheckRollup[]? | select(

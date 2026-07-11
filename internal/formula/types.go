@@ -117,6 +117,10 @@ type Formula struct {
 
 	// Source tracks where this formula was loaded from (set by parser).
 	Source string `json:"source,omitempty"`
+
+	// Intent is an optional caller-defined hint about the formula's runtime
+	// intent (e.g. "mail_only"). Opaque to bd; consumed by downstream tools.
+	Intent string `json:"intent,omitempty" toml:"intent,omitempty"`
 }
 
 // VarDef defines a template variable with optional validation.

@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -45,8 +46,7 @@ the flags appear in the command line.`,
 		}()
 
 		if usesProxiedServer() {
-			runCloseProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runCloseProxiedServer(cmd, rootCtx, args)
 		}
 
 		// If no IDs provided, use last touched issue
@@ -114,17 +114,23 @@ the flags appear in the command line.`,
 			// Get issue for checks (nil issue is handled by validateIssueClosable)
 			issue := result.Issue
 
-			if err := validateIssueClosable(id, issue, force); err != nil {
+			if err := validateIssueClosable(id, issue, actor, force); err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", err)
 				continue
 			}
 
-			// Epic close guard: prevent closing epics with open children (mw-local-4so.5.2)
-			if !force && issue != nil && issue.IssueType == types.TypeEpic {
-				openChildren := countEpicOpenChildren(ctx, activeStore, id)
+			// Open-children close guard: prevent closing any issue with open
+			// parent-child dependents (GH#3681). With --force the close proceeds
+			// but a warning is emitted so orphaned children are never silent.
+			if issue != nil {
+				openChildren := countOpenChildren(ctx, activeStore, id)
 				if openChildren > 0 {
-					fmt.Fprintf(os.Stderr, "cannot close epic %s: %d open child issue(s); close children first or use --force to override\n", id, openChildren)
-					continue
+					if force {
+						fmt.Fprintf(os.Stderr, "warning: closing %s with %d open child issue(s) still active\n", id, openChildren)
+					} else {
+						fmt.Fprintf(os.Stderr, "cannot close %s: %d open child issue(s); close children first or use --force to override\n", id, openChildren)
+						continue
+					}
 				}
 			}
 
@@ -176,7 +182,7 @@ the flags appear in the command line.`,
 					closedIssues = append(closedIssues, closedIssue)
 				}
 			} else {
-				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
+				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
 			}
 		}
 
@@ -211,6 +217,14 @@ the flags appear in the command line.`,
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not advance to next step: %v\n", err)
 			} else if result != nil {
+				// Mirror --claim-next: when AdvanceToNextStep auto-claims the
+				// next step, update .beads/last-touched so subsequent default-
+				// target commands (e.g. bare `bd update`, `bd close`) target
+				// it. Without this, last-touched stays pointed at the just-
+				// closed step. See gastownhall/beads#3769.
+				if result.AutoAdvanced && result.NextStep != nil {
+					SetLastTouchedID(result.NextStep.ID)
+				}
 				if jsonOutput {
 					return outputJSON(map[string]interface{}{
 						"closed":   closedIssues,
@@ -240,14 +254,14 @@ the flags appear in the command line.`,
 					if jsonOutput {
 						// JSON handled below
 					} else {
-						fmt.Printf("%s Auto-claimed next ready issue: %s (P%d)\n", ui.RenderPass("✓"), formatFeedbackID(nextIssue.ID, nextIssue.Title), nextIssue.Priority)
+						debug.PrintNormal("%s Auto-claimed next ready issue: %s (P%d)\n", ui.RenderPass("✓"), formatFeedbackID(nextIssue.ID, nextIssue.Title), nextIssue.Priority)
 					}
 					SetLastTouchedID(nextIssue.ID)
 				} else {
 					fmt.Fprintf(os.Stderr, "Warning: could not claim next issue %s: %v\n", nextIssue.ID, err)
 				}
 			} else if !jsonOutput {
-				fmt.Printf("\n%s No ready issues available to claim.\n", ui.RenderWarn("✨"))
+				debug.PrintNormal("\n%s No ready issues available to claim.\n", ui.RenderWarn("✨"))
 			}
 		}
 
@@ -517,7 +531,7 @@ func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, clos
 	}
 
 	if !jsonOutput {
-		fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
+		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
 	}
 }
 
@@ -643,12 +657,13 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 	return results, cleanup, nil
 }
 
-// countEpicOpenChildren returns the number of open (non-closed) children for an epic.
+// countOpenChildren returns the number of open (non-closed) parent-child
+// dependents for any issue (epics, tasks, etc.).
 // Uses GetDependentsWithMetadata to find parent-child relationships.
-// Takes an explicit store so callers can route to the store actually holding the epic
-// (relevant for contributor auto-routing where the epic lives in the planning repo).
-func countEpicOpenChildren(ctx context.Context, s storage.DoltStorage, epicID string) int {
-	dependents, err := s.GetDependentsWithMetadata(ctx, epicID)
+// Takes an explicit store so callers can route to the store actually holding the issue
+// (relevant for contributor auto-routing where the issue lives in the planning repo).
+func countOpenChildren(ctx context.Context, s storage.DoltStorage, issueID string) int {
+	dependents, err := s.GetDependentsWithMetadata(ctx, issueID)
 	if err != nil {
 		return 0
 	}

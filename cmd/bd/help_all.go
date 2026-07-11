@@ -47,18 +47,21 @@ func registerHelpAllFlag() {
 
 			// Wrap the existing Run to check --all, --doc, and --list first
 			originalRun := cmd.Run
-			cmd.Run = func(cmd *cobra.Command, args []string) {
+			cmd.Run = nil
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			cmd.RunE = func(cmd *cobra.Command, args []string) error {
 				if helpDocsRootFlag != "" {
 					if err := writeGeneratedCLIDocs(rootCmd, helpDocsRootFlag, helpDocsVersionFlag); err != nil {
 						fmt.Fprintln(os.Stderr, err)
-						os.Exit(1)
+						return SilentExit()
 					}
-					return
+					return nil
 				}
 				if helpListFlag {
 					// Handle --list flag: list all available commands
 					listAllCommands(os.Stdout, rootCmd)
-					return
+					return nil
 				}
 				if helpDocFlag != "" {
 					// Handle --doc flag: generate single command docs
@@ -69,17 +72,18 @@ func registerHelpAllFlag() {
 					if err := writeSingleCommandDoc(os.Stdout, rootCmd, cmdPath); err != nil {
 						fmt.Fprintln(os.Stderr, err)
 						fmt.Fprintf(os.Stderr, "Available commands: %s\n", strings.Join(availableCommandNames(rootCmd), " "))
-						os.Exit(1)
+						return SilentExit()
 					}
-					return
+					return nil
 				}
 				if helpAllFlag {
 					writeAllHelp(os.Stdout, rootCmd)
-					return
+					return nil
 				}
 				if originalRun != nil {
 					originalRun(cmd, args)
 				}
+				return nil
 			}
 			return
 		}

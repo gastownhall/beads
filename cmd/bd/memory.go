@@ -44,6 +44,29 @@ func slugify(s string) string {
 	return slug
 }
 
+// matchesKnownCommand reports whether insight is a single bare word that
+// matches the name or an alias of a top-level bd command. It is used to catch
+// `bd remember <subcommand>` mistakes before they become accidental memories.
+// Multi-word insights (the normal case) always pass, since they contain
+// whitespace and so cannot be a single command token.
+func matchesKnownCommand(cmd *cobra.Command, insight string) (string, bool) {
+	word := strings.TrimSpace(insight)
+	if word == "" || strings.ContainsAny(word, " \t\r\n") {
+		return "", false
+	}
+	for _, c := range cmd.Root().Commands() {
+		if strings.EqualFold(c.Name(), word) {
+			return c.Name(), true
+		}
+		for _, alias := range c.Aliases {
+			if strings.EqualFold(alias, word) {
+				return c.Name(), true
+			}
+		}
+	}
+	return "", false
+}
+
 // rememberCmd stores a memory.
 var rememberCmd = &cobra.Command{
 	Use:   `remember "<insight>"`,
@@ -86,6 +109,23 @@ Examples:
 			return HandleErrorRespectJSON("memory content cannot be empty")
 		}
 
+		// Guard against a subcommand-like first argument being silently stored
+		// as memory content. `bd remember` is a leaf command, so a mistaken
+		// `bd remember recall` (or any bare bd command name) would otherwise
+		// store the word "recall" as a memory instead of doing what the user
+		// intended (GH#4401). A genuine insight is a phrase, so only a single
+		// bare word that matches a known command is treated as suspect, and an
+		// explicit --key signals deliberate intent and bypasses the guard.
+		if memoryKeyFlag == "" {
+			if name, ok := matchesKnownCommand(cmd, insight); ok {
+				return HandleErrorWithHintRespectJSON(
+					fmt.Sprintf("%q looks like a command, not something to remember", insight),
+					fmt.Sprintf("Did you mean 'bd %s'? To store %q as a memory anyway, give it an explicit key: bd remember %q --key <key>", name, insight, insight),
+				)
+			}
+		}
+
+		// Generate or use provided key
 		key := memoryKeyFlag
 		if key == "" {
 			key = slugify(insight)

@@ -31,8 +31,7 @@ var showCmd = &cobra.Command{
 		}()
 
 		if usesProxiedServer() {
-			runShowProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runShowProxiedServer(cmd, rootCtx, args)
 		}
 
 		showThread, _ := cmd.Flags().GetBool("thread")

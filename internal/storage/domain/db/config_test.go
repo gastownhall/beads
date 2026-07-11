@@ -16,6 +16,12 @@ func (s *testSuite) TestConfigSQLRepository() {
 	s.Run("SetLocalMetadata", func() {
 		s.Run("WritesToLocalMetadataTable", s.configSetLocalMetadataWrites)
 	})
+	s.Run("GetLocalMetadata", func() {
+		s.Run("MissingKeyReturnsEmpty", s.configGetLocalMetadataMissingKey)
+		s.Run("RoundTrip", s.configGetLocalMetadataRoundTrip)
+		s.Run("Overwrite", s.configGetLocalMetadataOverwrite)
+		s.Run("ReadsFromLocalMetadataNotMetadata", s.configGetLocalMetadataIsolatedFromMetadata)
+	})
 	s.Run("GetConfig", func() {
 		s.Run("MissingKeyReturnsEmpty", s.configGetConfigMissingKey)
 		s.Run("RoundTrip", s.configGetConfigRoundTrip)
@@ -32,6 +38,15 @@ func (s *testSuite) TestConfigSQLRepository() {
 	s.Run("GetAllConfig", func() {
 		s.Run("EmptyReturnsEmptyMap", s.configGetAllConfigEmpty)
 		s.Run("ReturnsAllRows", s.configGetAllConfigAllRows)
+	})
+	s.Run("ReconcileVersion", func() {
+		s.Run("EmptyCliVersionErrors", s.configReconcileVersionEmptyErrors)
+		s.Run("FreshInstallMigratesAndSetsMax", s.configReconcileVersionFreshInstall)
+		s.Run("AlreadyCurrentIsNoop", s.configReconcileVersionAlreadyCurrent)
+		s.Run("UpgradeAdvancesVersionAndMax", s.configReconcileVersionUpgrade)
+		s.Run("DowngradeBelowCurrentRefused", s.configReconcileVersionDowngradeRefused)
+		s.Run("DowngradeBelowMaxRefused", s.configReconcileVersionDowngradeBelowMaxRefused)
+		s.Run("CatchUpToMaxMigrates", s.configReconcileVersionCatchUpToMax)
 	})
 	s.Run("UseCase", func() {
 		s.Run("GetConfigMissingKey", s.configUseCaseGetConfigMissing)
@@ -115,6 +130,43 @@ func (s *testSuite) configSetLocalMetadataWrites() {
 		Scan(&v)
 	s.Require().NoError(err)
 	s.Equal("1.2.3", v)
+}
+
+func (s *testSuite) configGetLocalMetadataMissingKey() {
+	v, err := s.configRepo().GetLocalMetadata(s.Ctx(), "no_such_key")
+	s.Require().NoError(err)
+	s.Equal("", v)
+}
+
+func (s *testSuite) configGetLocalMetadataRoundTrip() {
+	r := s.configRepo()
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.2.3"))
+	v, err := r.GetLocalMetadata(s.Ctx(), "bd_version")
+	s.Require().NoError(err)
+	s.Equal("1.2.3", v)
+}
+
+func (s *testSuite) configGetLocalMetadataOverwrite() {
+	r := s.configRepo()
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.2.3"))
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.3.0"))
+	v, err := r.GetLocalMetadata(s.Ctx(), "bd_version")
+	s.Require().NoError(err)
+	s.Equal("1.3.0", v)
+}
+
+func (s *testSuite) configGetLocalMetadataIsolatedFromMetadata() {
+	r := s.configRepo()
+	s.Require().NoError(r.SetMetadata(s.Ctx(), "shared_key", "from_metadata"))
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "shared_key", "from_local"))
+
+	local, err := r.GetLocalMetadata(s.Ctx(), "shared_key")
+	s.Require().NoError(err)
+	s.Equal("from_local", local)
+
+	global, err := r.GetMetadata(s.Ctx(), "shared_key")
+	s.Require().NoError(err)
+	s.Equal("from_metadata", global)
 }
 
 func (s *testSuite) configGetConfigMissingKey() {
@@ -380,6 +432,110 @@ func (s *testSuite) configUseCaseListAllStatusNames() {
 
 func (s *testSuite) configUC() domain.ConfigUseCase {
 	return domain.NewConfigUseCase(NewConfigSQLRepository(s.Runner()))
+}
+
+func (s *testSuite) localMeta(key string) string {
+	v, err := s.configRepo().GetLocalMetadata(s.Ctx(), key)
+	s.Require().NoError(err)
+	return v
+}
+
+func (s *testSuite) resetLocalMetadata() {
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM local_metadata")
+	s.Require().NoError(err)
+}
+
+func (s *testSuite) configReconcileVersionEmptyErrors() {
+	_, err := s.configUC().ReconcileVersion(s.Ctx(), "")
+	s.Require().Error(err)
+}
+
+func (s *testSuite) configReconcileVersionFreshInstall() {
+	s.resetLocalMetadata()
+	res, err := s.configUC().ReconcileVersion(s.Ctx(), "1.2.0")
+	s.Require().NoError(err)
+	s.Equal("", res.Previous)
+	s.Equal("1.2.0", res.Current)
+	s.True(res.Migrated)
+	s.False(res.Downgrade)
+	s.Equal("1.2.0", s.localMeta("bd_version"))
+	s.Equal("1.2.0", s.localMeta("bd_version_max"))
+}
+
+func (s *testSuite) configReconcileVersionAlreadyCurrent() {
+	s.resetLocalMetadata()
+	r := s.configRepo()
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.2.0"))
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version_max", "1.2.0"))
+
+	res, err := s.configUC().ReconcileVersion(s.Ctx(), "1.2.0")
+	s.Require().NoError(err)
+	s.Equal("1.2.0", res.Previous)
+	s.Equal("1.2.0", res.Current)
+	s.False(res.Migrated)
+	s.False(res.Downgrade)
+}
+
+func (s *testSuite) configReconcileVersionUpgrade() {
+	s.resetLocalMetadata()
+	r := s.configRepo()
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.2.0"))
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version_max", "1.2.0"))
+
+	res, err := s.configUC().ReconcileVersion(s.Ctx(), "1.3.0")
+	s.Require().NoError(err)
+	s.Equal("1.2.0", res.Previous)
+	s.Equal("1.3.0", res.Current)
+	s.True(res.Migrated)
+	s.False(res.Downgrade)
+	s.Equal("1.3.0", s.localMeta("bd_version"))
+	s.Equal("1.3.0", s.localMeta("bd_version_max"))
+}
+
+func (s *testSuite) configReconcileVersionDowngradeRefused() {
+	s.resetLocalMetadata()
+	r := s.configRepo()
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.3.0"))
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version_max", "1.3.0"))
+
+	res, err := s.configUC().ReconcileVersion(s.Ctx(), "1.2.0")
+	s.Require().NoError(err)
+	s.Equal("1.3.0", res.Previous)
+	s.Equal("1.3.0", res.Current)
+	s.False(res.Migrated)
+	s.True(res.Downgrade)
+	s.Equal("1.3.0", s.localMeta("bd_version"))
+	s.Equal("1.3.0", s.localMeta("bd_version_max"))
+}
+
+func (s *testSuite) configReconcileVersionDowngradeBelowMaxRefused() {
+	s.resetLocalMetadata()
+	r := s.configRepo()
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.1.0"))
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version_max", "1.3.0"))
+
+	res, err := s.configUC().ReconcileVersion(s.Ctx(), "1.2.0")
+	s.Require().NoError(err)
+	s.False(res.Migrated)
+	s.True(res.Downgrade)
+	s.Equal("1.1.0", s.localMeta("bd_version"))
+	s.Equal("1.3.0", s.localMeta("bd_version_max"))
+}
+
+func (s *testSuite) configReconcileVersionCatchUpToMax() {
+	s.resetLocalMetadata()
+	r := s.configRepo()
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version", "1.1.0"))
+	s.Require().NoError(r.SetLocalMetadata(s.Ctx(), "bd_version_max", "1.3.0"))
+
+	res, err := s.configUC().ReconcileVersion(s.Ctx(), "1.3.0")
+	s.Require().NoError(err)
+	s.Equal("1.1.0", res.Previous)
+	s.Equal("1.3.0", res.Current)
+	s.True(res.Migrated)
+	s.False(res.Downgrade)
+	s.Equal("1.3.0", s.localMeta("bd_version"))
+	s.Equal("1.3.0", s.localMeta("bd_version_max"))
 }
 
 func (s *testSuite) configUseCaseGetConfigMissing() {

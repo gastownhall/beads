@@ -30,6 +30,12 @@ type Store struct {
 	closeOnce sync.Once
 }
 
+// Capabilities returns the behavior advertised by the plugin hello. The
+// configured factory exposes a backend-neutral copy to public consumers.
+func (s *Store) Capabilities() backendplugin.Capabilities {
+	return s.client.Hello().Capabilities
+}
+
 func Open(ctx context.Context, opts OpenOptions) (*Store, error) {
 	client, err := Start(ctx, opts.Config)
 	if err != nil {
@@ -307,6 +313,20 @@ func (t *transactionStore) SearchIssues(ctx context.Context, query string, filte
 	return out, nil
 }
 
+func (t *transactionStore) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	issues, err := t.SearchIssues(ctx, query, filter)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		if issue != nil {
+			ids = append(ids, issue.ID)
+		}
+	}
+	return ids, nil
+}
+
 func (t *transactionStore) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
 	return t.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{})
 }
@@ -447,6 +467,20 @@ func (s *Store) SearchIssues(ctx context.Context, query string, filter types.Iss
 	return out, nil
 }
 
+func (s *Store) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	issues, err := s.SearchIssues(ctx, query, filter)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		if issue != nil {
+			ids = append(ids, issue.ID)
+		}
+	}
+	return ids, nil
+}
+
 func (s *Store) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
 	var out []*types.IssueWithCounts
 	if err := s.client.request(ctx, "search_issues_with_counts", searchIssuesParams{SessionID: s.sessionID, Query: query, Filter: filter}, &out); err != nil {
@@ -500,6 +534,10 @@ func (s *Store) UpdateIssueID(ctx context.Context, oldID, newID string, issue *t
 
 func (s *Store) ClaimIssue(ctx context.Context, id string, actor string) error {
 	return s.client.request(ctx, "claim_issue", claimIssueParams{SessionID: s.sessionID, ID: id, Actor: actor}, nil)
+}
+
+func (s *Store) UnclaimIssue(ctx context.Context, id string, actor string) error {
+	return s.client.request(ctx, "unclaim_issue", claimIssueParams{SessionID: s.sessionID, ID: id, Actor: actor}, nil)
 }
 
 func (s *Store) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error) {

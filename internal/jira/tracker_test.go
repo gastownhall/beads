@@ -660,6 +660,9 @@ func (s *configStore) SearchIssuesWithCounts(_ context.Context, _ string, _ type
 func (s *configStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
 	return nil, nil
 }
+func (s *configStore) SearchIssueIDs(_ context.Context, _ string, _ types.IssueFilter) ([]string, error) {
+	return nil, nil
+}
 func (s *configStore) AddDependency(_ context.Context, _ *types.Dependency, _ string) error {
 	return nil
 }
@@ -732,7 +735,8 @@ func (s *configStore) SlotSet(_ context.Context, _, _, _, _ string) error    { r
 func (s *configStore) SlotGet(_ context.Context, _, _ string) (string, error) {
 	return "", nil
 }
-func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error { return nil }
+func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error        { return nil }
+func (s *configStore) UnclaimIssue(_ context.Context, _ string, _ string) error { return nil }
 
 func (s *configStore) CountIssues(_ context.Context, _ string, _ types.IssueFilter) (int64, error) {
 	return 0, nil
