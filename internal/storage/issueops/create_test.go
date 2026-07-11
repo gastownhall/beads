@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"strings"
 	"testing"
@@ -13,6 +14,16 @@ import (
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+type utcTimeBetween struct {
+	before time.Time
+	after  time.Time
+}
+
+func (m utcTimeBetween) Match(value driver.Value) bool {
+	timestamp, ok := value.(time.Time)
+	return ok && timestamp.Location() == time.UTC && !timestamp.Before(m.before) && !timestamp.After(m.after)
+}
 
 func offsetTime(t *testing.T, value string) time.Time {
 	t.Helper()
@@ -324,6 +335,74 @@ func TestDependencyCreatedAtNormalizesToUTC(t *testing.T) {
 	after := time.Now().UTC().Add(time.Second)
 	if defaulted.Before(before) || defaulted.After(after) || defaulted.Location() != time.UTC {
 		t.Fatalf("default dependency time = %v, want current UTC instant", defaulted)
+	}
+}
+
+func TestAddDependencyInTxBindsCreatedAtUTC(t *testing.T) {
+	ctx := context.Background()
+	kind := DepTargetIssue
+	opts := AddDependencyOpts{
+		SourceTable:    "issues",
+		TargetTable:    "issues",
+		WriteTable:     "dependencies",
+		SkipCycleCheck: true,
+		TargetKind:     &kind,
+	}
+
+	t.Run("preserves supplied instant", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		createdAt := offsetTime(t, "2026-07-11T18:41:00+10:00")
+		dep := &types.Dependency{
+			IssueID: "source", DependsOnID: "target", Type: types.DepRelated, CreatedAt: createdAt,
+		}
+
+		expectAddDependencyInsert(mock, dep, createdAt.UTC())
+		if err := AddDependencyInTx(ctx, tx, dep, "current.user", opts); err != nil {
+			t.Fatalf("AddDependencyInTx: %v", err)
+		}
+		finishMockTx(t, mock, tx)
+	})
+
+	t.Run("defaults zero time to current UTC", func(t *testing.T) {
+		db, mock, tx := beginMockTx(t)
+		defer db.Close()
+		dep := &types.Dependency{IssueID: "source", DependsOnID: "target", Type: types.DepRelated}
+		before := time.Now().UTC()
+		createdAt := utcTimeBetween{before: before, after: before.Add(5 * time.Second)}
+
+		expectAddDependencyInsert(mock, dep, createdAt)
+		if err := AddDependencyInTx(ctx, tx, dep, "current.user", opts); err != nil {
+			t.Fatalf("AddDependencyInTx: %v", err)
+		}
+		finishMockTx(t, mock, tx)
+	})
+}
+
+func expectAddDependencyInsert(mock sqlmock.Sqlmock, dep *types.Dependency, createdAt driver.Value) {
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+		WithArgs(dep.IssueID).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow(types.TypeTask))
+	mock.ExpectQuery("SELECT issue_type FROM issues WHERE id = \\?").
+		WithArgs(dep.DependsOnID).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_type"}).AddRow(types.TypeTask))
+	mock.ExpectQuery("SELECT type FROM dependencies").
+		WithArgs(dep.IssueID, dep.DependsOnID).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectExec("INSERT INTO dependencies").
+		WithArgs(depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type,
+			createdAt, "current.user", "{}", "").
+		WillReturnResult(sqlmock.NewResult(0, 1))
+}
+
+func finishMockTx(t *testing.T, mock sqlmock.Sqlmock, tx *sql.Tx) {
+	t.Helper()
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
 	}
 }
 
