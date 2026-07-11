@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -41,6 +42,23 @@ func (s *DoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]*storage
 		return err
 	})
 	return result, err
+}
+
+// PreviousExternalRef returns the external_ref value recorded for issueID
+// as of the most recent commit at or before asOf.
+// Implements storage.ExternalRefHistoryQuerier.
+func (s *DoltStore) PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (string, bool, error) {
+	var ref string
+	var found bool
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		ref, found, err = issueops.PreviousExternalRefInTx(ctx, tx, issueID, asOf)
+		if err != nil {
+			return wrapQueryError("get previous external ref", err)
+		}
+		return nil
+	})
+	return ref, found, err
 }
 
 // ListBranches returns the names of all branches.

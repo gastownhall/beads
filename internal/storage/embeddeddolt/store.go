@@ -29,6 +29,7 @@ var _ storage.GarbageCollector = (*EmbeddedDoltStore)(nil)
 var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
+var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
 // Each method call opens a short-lived connection, executes within an explicit
@@ -756,6 +757,20 @@ func (s *EmbeddedDoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]
 		return err
 	})
 	return result, err
+}
+
+// PreviousExternalRef returns the external_ref value recorded for issueID
+// as of the most recent commit at or before asOf.
+// Implements storage.ExternalRefHistoryQuerier.
+func (s *EmbeddedDoltStore) PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (string, bool, error) {
+	var ref string
+	var found bool
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		ref, found, err = issueops.PreviousExternalRefInTx(ctx, tx, issueID, asOf)
+		return err
+	})
+	return ref, found, err
 }
 
 // ---------------------------------------------------------------------------
