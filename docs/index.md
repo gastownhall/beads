@@ -36,14 +36,16 @@ bd ready
 
 ## Core Concepts
 
+The whole model on one page: [How Beads Works](/core-concepts/index).
+
 | Concept | Description |
 |---------|-------------|
-| **Issues** | Work items with priorities, types, labels, and dependencies |
-| **Dependencies** | `blocks`, `parent-child`, `discovered-from`, `related` |
-| **Dolt Server** | Database server for multi-writer access and performance |
-| **Formulas** | Declarative workflow templates (TOML or JSON) |
-| **Molecules** | Work graphs with parent-child relationships |
-| **Gates** | Async coordination primitives (human, timer, GitHub) |
+| [**Beads (issues)**](/core-concepts/issues) | Work items with priorities, types, labels, and dependencies |
+| [**Dependencies**](/core-concepts/dependencies) | `blocks`, `parent-child`, `discovered-from`, `related` |
+| [**Sync**](/core-concepts/sync-concepts) | Dolt push/pull over your git remote — no server to run |
+| [**Formulas**](/workflows/formulas) | Declarative workflow templates (TOML or JSON) |
+| [**Molecules**](/workflows/molecules) | Work graphs instantiated from formulas |
+| [**Gates**](/workflows/gates) | Async coordination primitives (human, timer, GitHub) |
 
 ## For AI Agents
 
@@ -81,5 +83,6 @@ The magic is automatic synchronization via Dolt's version-controlled database wi
 
 - [Installation](/getting-started/installation) - Get bd installed
 - [Quick Start](/getting-started/quickstart) - Create your first issues
+- [How Beads Works](/core-concepts/index) - The concept model on one page
 - [CLI Reference](/cli-reference/index) - All available commands
 - [Workflows](/workflows/index) - Formulas, molecules, and gates

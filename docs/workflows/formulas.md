@@ -190,20 +190,21 @@ Formulas are searched in order:
 
 ```bash
 # List available formulas
-bd mol list
+bd formula list
 
-# Pour formula into molecule
-bd pour <formula-name> --var key=value
+# Cook the formula into a proto, then pour it into a molecule
+bd cook <formula-file>
+bd mol pour <proto-id> --var key=value
 
 # Preview what would be created
-bd pour <formula-name> --dry-run
+bd mol pour <proto-id> --dry-run
 ```
 
 ## Creating Custom Formulas
 
 1. Create file: `.beads/formulas/my-workflow.formula.toml`
 2. Define structure (see examples above)
-3. Use with: `bd pour my-workflow`
+3. Use with: `bd cook my-workflow` then `bd mol pour <proto-id>`
 
 ## Example: Release Formula
 

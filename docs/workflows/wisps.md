@@ -1,125 +1,74 @@
 ---
 title: Wisps
+description: Ephemeral molecules for operational work that has no audit value once it's done.
 ---
 
-Wisps are ephemeral workflows that don't sync to git.
+Operational workflows — release checklists, health patrols, diagnostics —
+create beads that are worthless the moment they close. **Wisps** are
+molecules instantiated in the *vapor phase*: real beads you work through
+normally, flagged `Ephemeral=true` so they stay out of sync and can be
+deleted wholesale later.
 
 ## What are Wisps?
 
-Wisps are "vapor phase" molecules:
-- Stored in `.beads-wisp/` (gitignored)
-- Don't sync with git
-- Auto-expire after completion
-- Perfect for temporary operations
+- Issues in the main database with the ephemeral flag set — worked on with
+  normal `bd` commands.
+- Local by design: excluded from federation push by default
+  (`federation.exclude_types` defaults to `[wisp]`) and not part of the
+  shared audit trail.
+- Deleted in bulk by `bd purge` or `bd mol wisp gc` once closed.
 
-## Use Cases
+## Wisp vs Pour
 
-| Scenario | Why Wisp? |
-|----------|-----------|
-| Local experiments | No need to pollute git history |
-| CI/CD pipelines | Ephemeral by nature |
-| Scratch workflows | Quick throwaway work |
-| Agent coordination | Local-only coordination |
+| Aspect | Molecule (`bd mol pour`) | Wisp (`bd mol wisp`) |
+|--------|--------------------------|----------------------|
+| Persistence | permanent, part of history | ephemeral, purged when done |
+| Sync | synced like any bead | excluded from federation push |
+| Use case | feature work, anything worth referencing later | release runs, operational loops, health checks |
 
-## Creating Wisps
+Formulas can declare `phase = "vapor"` to recommend wisp instantiation —
+pouring a vapor-phase formula warns.
 
-```bash
-# Create wisp from formula
-bd wisp create <formula> [--var key=value]
-
-# Example
-bd wisp create quick-check --var target=auth-module
-```
-
-## Wisp Commands
+## The Wisp Lifecycle
 
 ```bash
-# List wisps
-bd wisp list
-bd wisp list --json
+# 1. Create — from a proto, or ad-hoc
+bd mol wisp <proto-id> [--var key=value]
+bd create "One-off check" --ephemeral
 
-# Show wisp details
-bd wisp show <wisp-id>
+# 2. Execute — normal bd operations work on wisp issues
+bd ready --mol <wisp-id>
+bd update <id> --claim
+bd close <id>
 
-# Delete wisp
-bd wisp delete <wisp-id>
+# 3a. Keep it after all: squash promotes to persistent (clears the flag)
+bd mol squash <wisp-id>
 
-# Delete all completed wisps
-bd wisp cleanup
+# 3b. Or burn: delete without creating a digest
+bd mol burn <wisp-id>
 ```
 
-## Wisp vs Molecule
-
-| Aspect | Molecule | Wisp |
-|--------|----------|------|
-| Storage | `.beads/` | `.beads-wisp/` |
-| Git sync | Yes | No |
-| Persistence | Permanent | Ephemeral |
-| Use case | Tracked work | Temporary ops |
-
-## Phase Control
-
-Use `bd mol bond` to control phase:
+## Managing Wisps
 
 ```bash
-# Force liquid (persistent molecule)
-bd mol bond <formula> <target> --pour
-
-# Force vapor (ephemeral wisp)
-bd mol bond <formula> <target> --wisp
+bd mol wisp list      # list all wisps in the current context
+bd mol wisp gc        # garbage collect old/abandoned wisps
+bd purge --force      # delete all closed ephemeral beads
 ```
 
-## Example: Quick Check Workflow
+## Forcing a Phase
 
-Create a wisp for running checks:
-
-```toml
-# .beads/formulas/quick-check.formula.toml
-formula = "quick-check"
-description = "Quick local checks"
-
-[[steps]]
-id = "lint"
-title = "Run linter"
-
-[[steps]]
-id = "test"
-title = "Run tests"
-needs = ["lint"]
-
-[[steps]]
-id = "build"
-title = "Build project"
-needs = ["test"]
-```
-
-Use as wisp:
+`bd mol bond` accepts phase overrides when combining work:
 
 ```bash
-bd wisp create quick-check
-# Work through steps...
-bd wisp cleanup  # Remove when done
-```
-
-## Auto-Expiration
-
-Wisps can auto-expire:
-
-```toml
-[wisp]
-expires_after = "24h"  # Auto-delete after 24 hours
-```
-
-Or cleanup manually:
-
-```bash
-bd wisp cleanup --all  # Remove all wisps
-bd wisp cleanup --completed  # Remove only completed
+bd mol bond mol-critical-bug wisp-patrol --pour   # persist a bug found during a patrol
 ```
 
 ## Best Practices
 
-1. **Use wisps for local-only work** - Don't sync to git
-2. **Clean up regularly** - `bd wisp cleanup`
-3. **Use molecules for tracked work** - Wisps are ephemeral
-4. **Consider CI/CD wisps** - Perfect for pipeline steps
+1. **Wisps for operational loops** — patrols, release runs, diagnostics.
+2. **Molecules for tracked work** — anything with audit value gets poured,
+   not wisped.
+3. **Squash before you delete** — if a wisp surfaced something durable,
+   `bd mol squash` promotes it; burning is irreversible.
+4. **Garbage collect regularly** — `bd mol wisp gc` or `bd purge --force`.

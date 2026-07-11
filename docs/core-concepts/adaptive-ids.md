@@ -2,11 +2,6 @@
 title: Adaptive ID Length
 ---
 
-**Feature:** bd-ea2a13  
-**Status:** Implemented (v0.21+)
-
-## Overview
-
 Beads uses adaptive hash ID lengths that automatically scale based on database size, optimizing for readability in small databases while preventing collisions as databases grow.
 
 ## Motivation
