@@ -2,7 +2,6 @@ package tracker
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -693,36 +692,53 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 	return hydrated, hydratedLocalIDs, nil
 }
 
-type dbProvider interface {
-	DB() *sql.DB
-}
-
+// externalRefChangedAfter reports whether local's external_ref differed
+// from currentRef as of lastSync. When the backing store can answer this
+// precisely (storage.ExternalRefHistoryQuerier — Dolt-shaped stores that
+// expose dolt_history_issues), it does; otherwise it falls back to a
+// coarser timestamp heuristic.
+//
+// The fast path is gated on the ExternalRefHistoryQuerier capability, not on
+// whether the store happens to expose a raw *sql.DB: some Dolt-shaped
+// backends (e.g. embeddeddolt.EmbeddedDoltStore) support the
+// dolt_history_issues query without a pooled *sql.DB, and a non-Dolt SQL
+// backend could expose *sql.DB without having that Dolt system table at
+// all. Gating on the capability keeps this correct in both directions.
 func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (bool, error) {
 	if local == nil {
 		return false, nil
 	}
-	provider, ok := e.Store.(dbProvider)
-	if !ok || provider.DB() == nil {
+	querier, ok := externalRefHistoryQuerier(e.Store)
+	if !ok {
 		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), nil
 	}
 
-	var previousRef sql.NullString
-	err := provider.DB().QueryRowContext(ctx, `
-		SELECT external_ref
-		FROM (
-			SELECT id, external_ref, commit_date FROM dolt_history_issues
-		) h
-		WHERE h.id = ? AND h.commit_date <= ?
-		ORDER BY h.commit_date DESC
-		LIMIT 1
-	`, local.ID, lastSync.UTC()).Scan(&previousRef)
-	if err == sql.ErrNoRows {
-		return true, nil
-	}
+	previousRef, found, err := querier.PreviousExternalRef(ctx, local.ID, lastSync)
 	if err != nil {
 		return false, err
 	}
-	return !previousRef.Valid || strings.TrimSpace(previousRef.String) != strings.TrimSpace(currentRef), nil
+	if !found {
+		return true, nil
+	}
+	return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef), nil
+}
+
+// externalRefHistoryQuerier type-asserts store to storage.ExternalRefHistoryQuerier,
+// unwrapping storage decorators (HookFiringStore, telemetry.InstrumentedStorage,
+// etc.) first if needed. Decorators embed only the base storage.DoltStorage
+// interface for passthrough, so a direct assertion on a decorated store would
+// never see this optional capability even when the concrete store underneath
+// implements it — the same reason cmd/bd type-asserts through
+// storage.UnwrapStore for RawDBAccessor, StoreLocator, and friends.
+func externalRefHistoryQuerier(store storage.Storage) (storage.ExternalRefHistoryQuerier, bool) {
+	if q, ok := store.(storage.ExternalRefHistoryQuerier); ok {
+		return q, true
+	}
+	if dolt, ok := store.(storage.DoltStorage); ok {
+		q, ok := storage.UnwrapStore(dolt).(storage.ExternalRefHistoryQuerier)
+		return q, ok
+	}
+	return nil, false
 }
 
 func syncIssueLabels(ctx context.Context, tx storage.Transaction, issueID string, desired []string, actor string) error {
