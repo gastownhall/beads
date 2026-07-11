@@ -476,6 +476,21 @@ func InitSchema(ctx context.Context, db *sql.DB, schema string) error {
 	}
 	defer conn.Close()
 
+	// InitSchema runs on every backend open. Separate bd processes can open the
+	// same workspace concurrently, and PostgreSQL's IF NOT EXISTS / CREATE OR
+	// REPLACE forms are not safe against concurrent catalog updates (for
+	// example pg_namespace uniqueness and function replacement can race). Hold
+	// a session advisory lock for this database+schema while applying bootstrap
+	// DDL. The lock is automatically released when conn closes even if the
+	// explicit unlock cannot run because ctx was canceled.
+	const lockKey = `hashtextextended(current_database() || ':' || $1, 0)`
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(`+lockKey+`)`, schema); err != nil {
+		return fmt.Errorf("postgres: lock schema %q initialization: %w", schema, err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(`+lockKey+`)`, schema)
+	}()
+
 	if _, err := conn.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS "`+schema+`"`); err != nil {
 		return fmt.Errorf("postgres: create schema %q: %w", schema, err)
 	}
