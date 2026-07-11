@@ -71,6 +71,8 @@ fi
 # The complete set of generated doc artifacts, as git pathspecs.
 GEN_PATHSPECS=(
     "docs/CLI_REFERENCE.md"
+    "docs/cli-reference"
+    "docs/docs.json"
     "website/docs/cli-reference"
     "website/static/llms-full.txt"
 )
@@ -107,18 +109,20 @@ surface_fingerprint() {
     (
         cd "$dir"
         local f d
-        for f in docs/CLI_REFERENCE.md website/static/llms-full.txt; do
+        for f in docs/CLI_REFERENCE.md docs/docs.json website/static/llms-full.txt; do
             if [ -f "$f" ]; then
                 printf '== %s\n' "$f"
                 cat "$f"
             fi
         done
-        if [ -d website/docs/cli-reference ]; then
-            find website/docs/cli-reference -type f -name '*.md' | sort | while IFS= read -r f; do
-                printf '== %s\n' "$f"
-                cat "$f"
-            done
-        fi
+        for d in website/docs/cli-reference docs/cli-reference; do
+            if [ -d "$d" ]; then
+                find "$d" -type f -name '*.md' | sort | while IFS= read -r f; do
+                    printf '== %s\n' "$f"
+                    cat "$f"
+                done
+            fi
+        done
     ) | sha256sum | awk '{print $1}'
 }
 

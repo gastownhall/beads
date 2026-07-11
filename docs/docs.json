@@ -1,0 +1,263 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "linden",
+  "name": "Beads Documentation",
+  "logo": {
+    "light": "/images/logo.svg",
+    "dark": "/images/logo.svg"
+  },
+  "favicon": "/images/favicon.svg",
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "icon": "github",
+        "iconType": "brands",
+        "href": "https://github.com/gastownhall/beads"
+      },
+      {
+        "label": "npm",
+        "href": "https://www.npmjs.com/package/@beads/bd"
+      }
+    ]
+  },
+  "colors": {
+    "primary": "#2e8555",
+    "light": "#3cad6e",
+    "dark": "#29784c"
+  },
+  "redirects": [],
+  "navigation": {
+    "groups": [
+      {
+        "group": "Getting Started",
+        "pages": [
+          "index",
+          "getting-started/installation",
+          "getting-started/quickstart",
+          "getting-started/ide-setup",
+          "getting-started/sync-setup",
+          "getting-started/upgrading"
+        ]
+      },
+      {
+        "group": "Core Concepts",
+        "pages": [
+          "core-concepts/index",
+          "core-concepts/issues",
+          "core-concepts/dependencies",
+          "core-concepts/hash-ids",
+          "core-concepts/adaptive-ids",
+          "core-concepts/graph-links",
+          "core-concepts/sync-concepts",
+          "core-concepts/labels",
+          "core-concepts/metadata"
+        ]
+      },
+      {
+        "group": "Architecture",
+        "pages": [
+          "architecture/index",
+          "architecture/dolt",
+          "architecture/storage-backends"
+        ]
+      },
+      {
+        "group": "CLI Reference",
+        "pages": [
+          "cli-reference/index",
+          "cli-reference/admin",
+          "cli-reference/ado",
+          "cli-reference/assign",
+          "cli-reference/audit",
+          "cli-reference/backup",
+          "cli-reference/batch",
+          "cli-reference/blocked",
+          "cli-reference/bootstrap",
+          "cli-reference/branch",
+          "cli-reference/children",
+          "cli-reference/close",
+          "cli-reference/comment",
+          "cli-reference/comments",
+          "cli-reference/compact",
+          "cli-reference/completion",
+          "cli-reference/config",
+          "cli-reference/context",
+          "cli-reference/cook",
+          "cli-reference/count",
+          "cli-reference/create",
+          "cli-reference/create-form",
+          "cli-reference/defer",
+          "cli-reference/delete",
+          "cli-reference/dep",
+          "cli-reference/diff",
+          "cli-reference/doctor",
+          "cli-reference/dolt",
+          "cli-reference/duplicate",
+          "cli-reference/duplicates",
+          "cli-reference/edit",
+          "cli-reference/epic",
+          "cli-reference/export",
+          "cli-reference/federation",
+          "cli-reference/find-duplicates",
+          "cli-reference/flatten",
+          "cli-reference/forget",
+          "cli-reference/formula",
+          "cli-reference/gate",
+          "cli-reference/gc",
+          "cli-reference/github",
+          "cli-reference/gitlab",
+          "cli-reference/graph",
+          "cli-reference/heartbeat",
+          "cli-reference/history",
+          "cli-reference/hooks",
+          "cli-reference/human",
+          "cli-reference/import",
+          "cli-reference/info",
+          "cli-reference/init",
+          "cli-reference/init-safety",
+          "cli-reference/jira",
+          "cli-reference/kv",
+          "cli-reference/label",
+          "cli-reference/linear",
+          "cli-reference/link",
+          "cli-reference/lint",
+          "cli-reference/list",
+          "cli-reference/mail",
+          "cli-reference/memories",
+          "cli-reference/merge-slot",
+          "cli-reference/metrics",
+          "cli-reference/migrate",
+          "cli-reference/migrate-personal",
+          "cli-reference/mol",
+          "cli-reference/note",
+          "cli-reference/notion",
+          "cli-reference/onboard",
+          "cli-reference/orphans",
+          "cli-reference/ping",
+          "cli-reference/preflight",
+          "cli-reference/prime",
+          "cli-reference/priority",
+          "cli-reference/promote",
+          "cli-reference/prune",
+          "cli-reference/purge",
+          "cli-reference/q",
+          "cli-reference/query",
+          "cli-reference/quickstart",
+          "cli-reference/ready",
+          "cli-reference/recall",
+          "cli-reference/reclaim",
+          "cli-reference/recompute-blocked",
+          "cli-reference/remember",
+          "cli-reference/rename",
+          "cli-reference/rename-prefix",
+          "cli-reference/reopen",
+          "cli-reference/repo",
+          "cli-reference/restore",
+          "cli-reference/rules",
+          "cli-reference/search",
+          "cli-reference/set-state",
+          "cli-reference/setup",
+          "cli-reference/ship",
+          "cli-reference/show",
+          "cli-reference/sql",
+          "cli-reference/stale",
+          "cli-reference/state",
+          "cli-reference/status",
+          "cli-reference/statuses",
+          "cli-reference/supersede",
+          "cli-reference/swarm",
+          "cli-reference/tag",
+          "cli-reference/todo",
+          "cli-reference/types",
+          "cli-reference/unclaim",
+          "cli-reference/undefer",
+          "cli-reference/update",
+          "cli-reference/upgrade",
+          "cli-reference/vc",
+          "cli-reference/version",
+          "cli-reference/where",
+          "cli-reference/worktree"
+        ]
+      },
+      {
+        "group": "Workflows",
+        "pages": [
+          "workflows/index",
+          "workflows/molecules",
+          "workflows/formulas",
+          "workflows/gates",
+          "workflows/wisps",
+          "workflows/todo"
+        ]
+      },
+      {
+        "group": "Recovery",
+        "pages": [
+          "recovery/index",
+          "recovery/init-safety",
+          "recovery/database-corruption",
+          "recovery/merge-conflicts",
+          "recovery/circular-dependencies",
+          "recovery/sync-failures",
+          "recovery/uninstalling"
+        ]
+      },
+      {
+        "group": "Multi-Agent",
+        "pages": [
+          "multi-agent/index",
+          "multi-agent/routing",
+          "multi-agent/coordination",
+          "multi-agent/federation",
+          "multi-agent/multi-repo-migration"
+        ]
+      },
+      {
+        "group": "Integrations",
+        "pages": [
+          "integrations/index",
+          "integrations/aider",
+          "integrations/claude-code",
+          "integrations/claude-code-plugin",
+          "integrations/codex",
+          "integrations/cody",
+          "integrations/cursor",
+          "integrations/factory",
+          "integrations/gemini",
+          "integrations/junie",
+          "integrations/kilocode",
+          "integrations/mux",
+          "integrations/opencode",
+          "integrations/windsurf",
+          "integrations/mcp-server",
+          "integrations/github-copilot",
+          "integrations/copilot-cli",
+          "integrations/azure-devops"
+        ]
+      },
+      {
+        "group": "Community",
+        "pages": [
+          "community-tools",
+          "related-projects"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "reference/configuration",
+          "reference/git-integration",
+          "reference/worktrees",
+          "reference/protected-branches",
+          "reference/advanced",
+          "reference/json-schema",
+          "reference/observability",
+          "reference/troubleshooting",
+          "reference/antivirus",
+          "reference/faq"
+        ]
+      }
+    ]
+  }
+}

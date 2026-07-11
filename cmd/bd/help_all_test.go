@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -203,6 +204,171 @@ func TestWriteGeneratedCLIDocsDoesNotTouchVersionedDocsWithoutVersion(t *testing
 		t.Fatalf("writeGeneratedCLIDocs() error = %v", err)
 	}
 	assertFileContains(t, sentinel, "keep me")
+}
+
+func TestWriteGeneratedCLIDocsWritesMintlifyCLIReference(t *testing.T) {
+	root := &cobra.Command{Use: "bd"}
+	mol := testHelpCmd("mol", "Molecule commands")
+	mol.AddCommand(testHelpCmd("pour <formula>", "Start a workflow"))
+	root.AddCommand(
+		testHelpCmd("show <id>", "Show an issue"),
+		mol,
+	)
+	dir := t.TempDir()
+
+	if err := writeGeneratedCLIDocs(root, dir, ""); err != nil {
+		t.Fatalf("writeGeneratedCLIDocs() error = %v", err)
+	}
+
+	// Index page: Mintlify frontmatter, no body H1, extensionless links.
+	indexPath := filepath.Join(dir, "docs", "cli-reference", "index.md")
+	assertFileContains(t, indexPath, "title: CLI Reference")
+	assertFileContains(t, indexPath, "](/cli-reference/show)")
+	index, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"\n# ", "<!--", "sidebar_position", "](./"} {
+		if strings.Contains(string(index), banned) {
+			t.Errorf("Mintlify index.md contains banned %q:\n%s", banned, index)
+		}
+	}
+
+	// Command page: Mintlify frontmatter, no Docusaurus keys, JSX comment marker.
+	showPath := filepath.Join(dir, "docs", "cli-reference", "show.md")
+	assertFileContains(t, showPath, "title: \"bd show\"")
+	assertFileContains(t, showPath, "description: \"Show an issue\"")
+	assertFileContains(t, showPath, "{/* AUTO-GENERATED: do not edit manually */}")
+	assertFileContains(t, showPath, "bd show <id>")
+	show, err := os.ReadFile(showPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, banned := range []string{"id: show", "slug:", "sidebar_position", "<!--", "\n# "} {
+		if strings.Contains(string(show), banned) {
+			t.Errorf("Mintlify show.md contains banned %q:\n%s", banned, show)
+		}
+	}
+
+	// Nested command page exists with the full command path.
+	molPath := filepath.Join(dir, "docs", "cli-reference", "mol.md")
+	assertFileContains(t, molPath, "## bd mol pour")
+}
+
+func TestUpdateMintlifyCLINavReplacesOnlyCLIReferencePages(t *testing.T) {
+	dir := t.TempDir()
+	docsJSON := filepath.Join(dir, "docs.json")
+	original := `{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "Beads Documentation",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Getting Started",
+        "pages": [
+          "index",
+          "getting-started/installation"
+        ]
+      },
+      {
+        "group": "CLI Reference",
+        "pages": [
+          "cli-reference/index",
+          "cli-reference/stale-command"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "reference/faq"
+        ]
+      }
+    ]
+  }
+}
+`
+	if err := os.WriteFile(docsJSON, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := updateMintlifyCLINav(docsJSON, []string{"cli-reference/index", "cli-reference/create", "cli-reference/show"}); err != nil {
+		t.Fatalf("updateMintlifyCLINav() error = %v", err)
+	}
+
+	data, err := os.ReadFile(docsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+
+	for _, want := range []string{
+		`"cli-reference/create"`,
+		`"cli-reference/show"`,
+		`"getting-started/installation"`,
+		`"reference/faq"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("updated docs.json missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "stale-command") {
+		t.Errorf("updated docs.json still lists stale CLI page:\n%s", got)
+	}
+
+	// The rewrite must remain valid JSON and preserve the other groups' pages.
+	var decoded map[string]any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("updated docs.json is not valid JSON: %v\n%s", err, got)
+	}
+
+	// Idempotent: running again must not change the file.
+	if err := updateMintlifyCLINav(docsJSON, []string{"cli-reference/index", "cli-reference/create", "cli-reference/show"}); err != nil {
+		t.Fatalf("updateMintlifyCLINav() second run error = %v", err)
+	}
+	again, err := os.ReadFile(docsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, again) {
+		t.Errorf("updateMintlifyCLINav is not idempotent:\nfirst:\n%s\nsecond:\n%s", data, again)
+	}
+}
+
+func TestWriteGeneratedCLIDocsUpdatesMintlifyNavWhenPresent(t *testing.T) {
+	root := &cobra.Command{Use: "bd"}
+	root.AddCommand(
+		testHelpCmd("show <id>", "Show an issue"),
+		testHelpCmd("create", "Create an issue"),
+	)
+	dir := t.TempDir()
+	docsDir := filepath.Join(dir, "docs")
+	if err := os.MkdirAll(docsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	docsJSON := filepath.Join(docsDir, "docs.json")
+	seed := `{
+  "navigation": {
+    "groups": [
+      {
+        "group": "CLI Reference",
+        "pages": [
+          "cli-reference/index"
+        ]
+      }
+    ]
+  }
+}
+`
+	if err := os.WriteFile(docsJSON, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeGeneratedCLIDocs(root, dir, ""); err != nil {
+		t.Fatalf("writeGeneratedCLIDocs() error = %v", err)
+	}
+
+	assertFileContains(t, docsJSON, `"cli-reference/create"`)
+	assertFileContains(t, docsJSON, `"cli-reference/show"`)
 }
 
 func assertFileContains(t *testing.T, path, want string) {

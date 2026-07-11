@@ -182,6 +182,31 @@ func writeCommandHelp(w io.Writer, cmd *cobra.Command, parentPath string, depth 
 
 	fmt.Fprintf(w, "%s %s\n\n", heading, fullPath)
 
+	writeCommandBody(w, cmd)
+
+	// Subcommands
+	subCmds := cmd.Commands()
+	hasVisibleSubs := false
+	for _, sub := range subCmds {
+		if sub.IsAvailableCommand() {
+			hasVisibleSubs = true
+			break
+		}
+	}
+
+	if hasVisibleSubs {
+		for _, sub := range subCmds {
+			if !sub.IsAvailableCommand() {
+				continue
+			}
+			writeCommandHelp(w, sub, fullPath, depth+1)
+		}
+	}
+}
+
+// writeCommandBody writes the heading-independent parts of a command's help:
+// description, usage, aliases, examples, and local flags.
+func writeCommandBody(w io.Writer, cmd *cobra.Command) {
 	// Description
 	if cmd.Long != "" {
 		fmt.Fprintf(w, "%s\n\n", escapeMDXText(cmd.Long))
@@ -206,25 +231,6 @@ func writeCommandHelp(w io.Writer, cmd *cobra.Command, parentPath string, depth 
 	localFlags := cmd.NonInheritedFlags()
 	if localFlags.HasFlags() {
 		fmt.Fprintf(w, "**Flags:**\n\n```\n%s```\n\n", localFlags.FlagUsages())
-	}
-
-	// Subcommands
-	subCmds := cmd.Commands()
-	hasVisibleSubs := false
-	for _, sub := range subCmds {
-		if sub.IsAvailableCommand() {
-			hasVisibleSubs = true
-			break
-		}
-	}
-
-	if hasVisibleSubs {
-		for _, sub := range subCmds {
-			if !sub.IsAvailableCommand() {
-				continue
-			}
-			writeCommandHelp(w, sub, fullPath, depth+1)
-		}
 	}
 }
 
@@ -308,6 +314,25 @@ func writeGeneratedCLIDocs(root *cobra.Command, repoRoot, docsVersion string) er
 		return err
 	}
 
+	if err := writeMintlifyCLIReferenceDir(filepath.Join(repoRoot, "docs", "cli-reference"), root); err != nil {
+		return err
+	}
+
+	// The Mintlify site's navigation lists every CLI page explicitly; those
+	// entries are generated here, never hand-maintained. Roots without a
+	// docs.json (bare output roots, --check scratch dirs before the copy)
+	// simply get the pages.
+	docsJSONPath := filepath.Join(repoRoot, "docs", "docs.json")
+	if _, err := os.Stat(docsJSONPath); err == nil {
+		navPages := []string{"cli-reference/index"}
+		for _, name := range availableCommandNames(root) {
+			navPages = append(navPages, "cli-reference/"+commandDocID(name))
+		}
+		if err := updateMintlifyCLINav(docsJSONPath, navPages); err != nil {
+			return err
+		}
+	}
+
 	if docsVersion != "" {
 		versionDir := filepath.Join(repoRoot, "website", "versioned_docs", "version-"+docsVersion, "cli-reference")
 		if err := writeCLIReferenceDir(versionDir, root, "v"+docsVersion); err != nil {
@@ -316,6 +341,158 @@ func writeGeneratedCLIDocs(root *cobra.Command, repoRoot, docsVersion string) er
 	}
 
 	return nil
+}
+
+// writeMintlifyCLIReferenceDir emits the Mintlify-form CLI reference under
+// docs/cli-reference/: frontmatter title is the H1 (no body H1), links are
+// root-relative and extensionless, and the auto-generated marker is a JSX
+// comment because Mintlify parses .md through MDX (HTML comments break it).
+func writeMintlifyCLIReferenceDir(outDir string, root *cobra.Command) error {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
+	}
+	if err := removeMarkdownFiles(outDir); err != nil {
+		return err
+	}
+
+	commands := availableCommandNames(root)
+	if err := writeMarkdownFile(filepath.Join(outDir, "index.md"), mintlifyCLIReferenceIndex(commands)); err != nil {
+		return err
+	}
+
+	for _, name := range commands {
+		var out bytes.Buffer
+		if err := writeMintlifySingleCommandDoc(&out, root, name); err != nil {
+			return err
+		}
+		path := filepath.Join(outDir, commandDocID(name)+".md")
+		if err := writeMarkdownFile(path, out.String()); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// writeMintlifySingleCommandDoc renders one command as a Mintlify page. The
+// frontmatter title renders as the page H1, so the top command emits its body
+// without its own heading; subcommands start at ##.
+func writeMintlifySingleCommandDoc(w io.Writer, root *cobra.Command, cmdName string) error {
+	cmd := findCommand(root, cmdName)
+	if cmd == nil {
+		return fmt.Errorf("Error: command not found: %s", cmdName)
+	}
+
+	docCommand := strings.TrimSpace(strings.TrimPrefix(commandPath(cmd), root.Name()))
+	if docCommand == "" {
+		return errors.New("Error: cannot generate docs for root command")
+	}
+
+	fmt.Fprintf(w, "---\n")
+	fmt.Fprintf(w, "title: %q\n", "bd "+docCommand)
+	if cmd.Short != "" {
+		fmt.Fprintf(w, "description: %q\n", cmd.Short)
+	}
+	fmt.Fprintf(w, "---\n\n")
+	fmt.Fprintf(w, "{/* AUTO-GENERATED: do not edit manually */}\n\n")
+	fmt.Fprintf(w, "Generated from `bd help --doc %s`.\n\n", docCommand)
+
+	writeCommandBody(w, cmd)
+
+	fullPath := commandPath(cmd)
+	for _, sub := range cmd.Commands() {
+		if !sub.IsAvailableCommand() {
+			continue
+		}
+		writeCommandHelp(w, sub, fullPath, 2)
+	}
+	return nil
+}
+
+func mintlifyCLIReferenceIndex(commands []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "---\n")
+	fmt.Fprintf(&b, "title: CLI Reference\n")
+	fmt.Fprintf(&b, "description: Generated reference for every bd command\n")
+	fmt.Fprintf(&b, "---\n\n")
+	fmt.Fprintf(&b, "{/* AUTO-GENERATED: do not edit manually */}\n\n")
+	fmt.Fprintf(&b, "Generated from `bd help --docs-root`.\n\n")
+	fmt.Fprintf(&b, "This reference covers all %d live top-level `bd` commands. Regenerate it with:\n\n", len(commands))
+	fmt.Fprintf(&b, "```bash\n")
+	fmt.Fprintf(&b, "./scripts/generate-cli-docs.sh\n")
+	fmt.Fprintf(&b, "```\n\n")
+	fmt.Fprintf(&b, "## Commands\n\n")
+	for _, cmd := range commands {
+		fmt.Fprintf(&b, "- [`bd %s`](/cli-reference/%s)\n", cmd, commandDocID(cmd))
+	}
+	return b.String()
+}
+
+// updateMintlifyCLINav rewrites the "pages" array of the "CLI Reference"
+// navigation group in docs.json, leaving every other byte of the file
+// untouched. A textual splice (rather than a JSON round-trip) preserves key
+// order and formatting so regeneration is diff-stable. The pages entries are
+// plain slugs, so bracket matching cannot be confused by string contents.
+func updateMintlifyCLINav(docsJSONPath string, pages []string) error {
+	data, err := os.ReadFile(docsJSONPath)
+	if err != nil {
+		return err
+	}
+	s := string(data)
+
+	groupIdx := strings.Index(s, `"group": "CLI Reference"`)
+	if groupIdx < 0 {
+		return fmt.Errorf("%s: no \"CLI Reference\" navigation group found", docsJSONPath)
+	}
+	pagesIdx := strings.Index(s[groupIdx:], `"pages"`)
+	if pagesIdx < 0 {
+		return fmt.Errorf("%s: \"CLI Reference\" group has no \"pages\" key", docsJSONPath)
+	}
+	pagesIdx += groupIdx
+	openIdx := strings.Index(s[pagesIdx:], "[")
+	if openIdx < 0 {
+		return fmt.Errorf("%s: \"CLI Reference\" pages key has no array", docsJSONPath)
+	}
+	openIdx += pagesIdx
+
+	depth := 0
+	closeIdx := -1
+	for i := openIdx; i < len(s); i++ {
+		switch s[i] {
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				closeIdx = i
+			}
+		}
+		if closeIdx >= 0 {
+			break
+		}
+	}
+	if closeIdx < 0 {
+		return fmt.Errorf("%s: unbalanced \"pages\" array in \"CLI Reference\" group", docsJSONPath)
+	}
+
+	lineStart := strings.LastIndex(s[:pagesIdx], "\n") + 1
+	indent := s[lineStart:pagesIdx]
+	entryIndent := indent + "  "
+
+	var b strings.Builder
+	b.WriteString("[\n")
+	for i, p := range pages {
+		fmt.Fprintf(&b, "%s%q", entryIndent, p)
+		if i < len(pages)-1 {
+			b.WriteString(",")
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString(indent + "]")
+
+	out := s[:openIdx] + b.String() + s[closeIdx+1:]
+	// #nosec G306: docs.json is repository source, readable like other source files.
+	return os.WriteFile(docsJSONPath, []byte(out), 0o644)
 }
 
 func writeCLIReferenceDir(outDir string, root *cobra.Command, versionLabel string) error {

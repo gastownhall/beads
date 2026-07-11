@@ -118,13 +118,22 @@ generate_all() {
 
 if [ "$CHECK_MODE" -eq 1 ]; then
     TMP_OUTPUT_DIR="$(mktemp -d)"
-    mkdir -p "$TMP_OUTPUT_DIR/website"
+    mkdir -p "$TMP_OUTPUT_DIR/website" "$TMP_OUTPUT_DIR/docs"
     cp -Rf "$PROJECT_ROOT/website/docs" "$TMP_OUTPUT_DIR/website/docs"
     if [ -d "$PROJECT_ROOT/website/versioned_docs" ]; then
         cp -Rf "$PROJECT_ROOT/website/versioned_docs" "$TMP_OUTPUT_DIR/website/versioned_docs"
     fi
     if [ -f "$PROJECT_ROOT/website/versions.json" ]; then
         cp -f "$PROJECT_ROOT/website/versions.json" "$TMP_OUTPUT_DIR/website/versions.json"
+    fi
+    # The Mintlify site: the generator rewrites docs/cli-reference/ and the
+    # CLI Reference pages array inside docs/docs.json, so both are seeded
+    # from the committed copies and diffed after regeneration.
+    if [ -f "$PROJECT_ROOT/docs/docs.json" ]; then
+        cp -f "$PROJECT_ROOT/docs/docs.json" "$TMP_OUTPUT_DIR/docs/docs.json"
+    fi
+    if [ -d "$PROJECT_ROOT/docs/cli-reference" ]; then
+        cp -Rf "$PROJECT_ROOT/docs/cli-reference" "$TMP_OUTPUT_DIR/docs/cli-reference"
     fi
 
     generate_all "$TMP_OUTPUT_DIR"
@@ -138,7 +147,16 @@ if [ "$CHECK_MODE" -eq 1 ]; then
         exit 1
     fi
 
-    check_dirs=("website/docs/cli-reference")
+    if [ -f "$PROJECT_ROOT/docs/docs.json" ]; then
+        if ! diff -q "$PROJECT_ROOT/docs/docs.json" "$TMP_OUTPUT_DIR/docs/docs.json" >/dev/null; then
+            echo "FAIL: docs/docs.json CLI Reference navigation is out of sync with live CLI help."
+            echo "Run: ./scripts/generate-cli-docs.sh ${BD_ARG:-}"
+            diff -u "$PROJECT_ROOT/docs/docs.json" "$TMP_OUTPUT_DIR/docs/docs.json" | sed -n '1,80p' || true
+            exit 1
+        fi
+    fi
+
+    check_dirs=("website/docs/cli-reference" "docs/cli-reference")
     if [ -n "$VERSIONED_VERSION" ]; then
         check_dirs+=("website/versioned_docs/version-$VERSIONED_VERSION/cli-reference")
     fi

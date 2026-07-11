@@ -38,6 +38,7 @@ echo "=== Check 1: Removed commands ==="
 # bd sync (removed in v0.51)
 SYNC_REFS=$(grep -rn 'bd sync\b' \
     "$PROJECT_ROOT"/docs/*.md \
+    "$PROJECT_ROOT"/docs/*/*.md \
     "$PROJECT_ROOT"/AGENT_INSTRUCTIONS.md \
     "$PROJECT_ROOT"/AGENTS.md \
     "$PROJECT_ROOT"/README.md \
@@ -69,6 +70,7 @@ INIT_FLAGS=$($BD init --help 2>&1 | grep -oP '^\s+--[a-z][a-z0-9-]*' | sed 's/^\
 # Check for --branch on init (removed)
 BRANCH_REFS=$(grep -rn 'bd init.*--branch' \
     "$PROJECT_ROOT"/docs/*.md \
+    "$PROJECT_ROOT"/docs/*/*.md \
     "$PROJECT_ROOT"/AGENT_INSTRUCTIONS.md \
     "$PROJECT_ROOT"/AGENTS.md \
     "$PROJECT_ROOT"/README.md \
@@ -92,6 +94,7 @@ echo "=== Check 3: Legacy storage references ==="
 
 SQLITE_REFS=$(grep -rn 'beads\.db\|default\.db\|sqlite3.*\.beads\|\.beads/.*\.db' \
     "$PROJECT_ROOT"/docs/*.md \
+    "$PROJECT_ROOT"/docs/*/*.md \
     "$PROJECT_ROOT"/AGENT_INSTRUCTIONS.md \
     "$PROJECT_ROOT"/AGENTS.md \
     "$PROJECT_ROOT"/README.md \
@@ -132,7 +135,7 @@ if [ -f "$CLI_REF" ]; then
             echo "PASS: docs/CLI_REFERENCE.md covers all live top-level CLI commands"
         fi
 
-        WEBSITE_DIRS=("$PROJECT_ROOT/website/docs/cli-reference")
+        WEBSITE_DIRS=("$PROJECT_ROOT/website/docs/cli-reference" "$PROJECT_ROOT/docs/cli-reference")
         for dir in "${WEBSITE_DIRS[@]}"; do
             if [ ! -d "$dir" ]; then
                 continue
