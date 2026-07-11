@@ -1,6 +1,6 @@
 # Dolt Backend Documentation
 
-The canonical Dolt backend guide is [DOLT.md](DOLT.md).
+The canonical Dolt backend guide is [architecture/dolt.md](architecture/dolt.md).
 
 The previous long-form duplicate of this file has been staged at
 [staged-for-removal/DOLT-BACKEND.md](../engdocs/staged-for-removal/DOLT-BACKEND.md).

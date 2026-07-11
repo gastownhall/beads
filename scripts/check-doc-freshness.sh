@@ -22,7 +22,7 @@ DOCS=(
     "docs/ADO_CONFIG.md|cmd/bd/ado*.go;internal/ado/"
     "docs/JSON_SCHEMA.md|cmd/bd/output.go;cmd/bd/errors.go;cmd/bd/protocol/json_contract_test.go"
     "docs/RECOVERY.md|cmd/bd/init.go;cmd/bd/init_safety.go;cmd/bd/init_safety_test.go"
-    "docs/ERROR_HANDLING.md|cmd/bd/*.go;cmd/bd/errors.go"
+    "engdocs/ERROR_HANDLING.md|cmd/bd/*.go;cmd/bd/errors.go"
     "engdocs/LINTING.md|.golangci.yml"
     "engdocs/design/otel/otel-data-model.md|internal/telemetry/;internal/storage/dolt/store.go;internal/compact/haiku.go;cmd/bd/find_duplicates.go;internal/hooks/"
 )
