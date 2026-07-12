@@ -56,41 +56,47 @@ func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("open unit of work: %v", err)
-	}
-	defer uw.Close(ctx)
-
-	issueUC := uw.IssueUseCase()
 
 	if in.dryRun || !in.force {
-		return runDeleteProxiedPreview(ctx, issueUC, in)
+		uw, err := uowProvider.NewUOW(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("open unit of work: %v", err)
+		}
+		defer uw.Close(ctx)
+		return runDeleteProxiedPreview(ctx, uw.IssueUseCase(), in)
 	}
 
-	preview, err := issueUC.PreviewDelete(ctx, in.ids)
-	if err != nil {
-		return HandleErrorRespectJSON("preview: %v", err)
-	}
-	if len(preview.NotFound) > 0 {
-		return HandleErrorRespectJSON("issues not found: %s", strings.Join(preview.NotFound, ", "))
-	}
-
-	res, err := issueUC.DeleteIssues(ctx, domain.DeleteIssuesParams{
-		IDs:                  in.ids,
-		Cascade:              true,
-		UpdateTextReferences: true,
-	}, actor)
-	if err != nil {
-		return HandleErrorRespectJSON("delete: %v", err)
-	}
-	if res.DeletedCount == 0 {
-		return HandleErrorRespectJSON("issues not found: %s", strings.Join(in.ids, ", "))
-	}
-
-	commitMsg := fmt.Sprintf("bd: delete %d issue(s)", res.DeletedCount)
-	if err := uow.CommitWithRetries(ctx, uw, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("commit: %v", err)
+	// Mutating delete must replay preview+delete on a fresh UOW snapshot.
+	var res domain.DeleteIssuesResult
+	commitMsg := "bd: delete"
+	err = uow.RunWithFreshUOWRetriesDynamicMessage(ctx, uowProvider, func() string { return commitMsg }, func(ctx context.Context, uw uow.UnitOfWork) error {
+		res = domain.DeleteIssuesResult{}
+		commitMsg = "bd: delete"
+		issueUC := uw.IssueUseCase()
+		preview, pErr := issueUC.PreviewDelete(ctx, in.ids)
+		if pErr != nil {
+			return pErr
+		}
+		if len(preview.NotFound) > 0 {
+			return fmt.Errorf("issues not found: %s", strings.Join(preview.NotFound, ", "))
+		}
+		attempt, dErr := issueUC.DeleteIssues(ctx, domain.DeleteIssuesParams{
+			IDs:                  in.ids,
+			Cascade:              true,
+			UpdateTextReferences: true,
+		}, actor)
+		if dErr != nil {
+			return dErr
+		}
+		if attempt.DeletedCount == 0 {
+			return fmt.Errorf("issues not found: %s", strings.Join(in.ids, ", "))
+		}
+		res = attempt
+		commitMsg = fmt.Sprintf("bd: delete %d issue(s)", res.DeletedCount)
+		return nil
+	})
+	if err != nil && !isDoltNothingToCommit(err) {
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	renderDeleteProxiedResult(in, res)

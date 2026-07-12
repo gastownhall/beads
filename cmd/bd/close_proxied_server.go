@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -29,11 +28,20 @@ type closeProxiedInput struct {
 }
 
 type closeProxiedOutcome struct {
-	id     string
-	before *types.Issue
-	after  *types.Issue
-	closed bool
+	id                 string
+	before             *types.Issue
+	after              *types.Issue
+	closed             bool
+	autoClosedMolecule *types.Issue
 }
+
+// errProxiedNoCommit signals a completed attempt that intentionally left no
+// durable mutation, so RunWithFreshUOWRetries must not Commit.
+var errProxiedNoCommit = errors.New("proxied: no durable mutation")
+
+// errProxiedSoftFailure signals a user-visible, non-retryable close failure that
+// was already reported on stderr (not found, validation, etc.).
+var errProxiedSoftFailure = errors.New("proxied: soft failure")
 
 func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	if len(args) == 0 {
@@ -61,17 +69,17 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("open unit of work: %v", err)
-	}
-	defer uw.Close(ctx)
 
 	outcomes := make([]closeProxiedOutcome, 0, len(args))
 	closedIssues := []*types.Issue{}
 	for i, id := range args {
 		reason := reasonForCloseIndex(reasons, i)
-		outcome, ok := closeProxiedOne(ctx, uw, id, reason, in)
+		// Each close must open, mutate, and commit on a fresh UOW. Retrying only
+		// Commit on a failed UOW cannot recover Dolt serialization losses.
+		outcome, ok, closeErr := closeProxiedOneFresh(ctx, id, reason, in)
+		if closeErr != nil {
+			return closeErr
+		}
 		if !ok {
 			continue
 		}
@@ -80,36 +88,38 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 			closedIssues = append(closedIssues, outcome.after)
 		} else {
 			fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(outcome.after.ID, outcome.after.Title), reason)
+			if outcome.autoClosedMolecule != nil {
+				fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"),
+					formatFeedbackID(outcome.autoClosedMolecule.ID, outcome.autoClosedMolecule.Title))
+			}
+		}
+		if outcome.closed {
+			if err := fireProxiedCloseHooks(ctx, outcome.before, outcome.after); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: %s: %v\n", outcome.id, err)
+			}
 		}
 	}
 
 	var unblocked []*types.Issue
 	if in.suggestNext && len(args) == 1 && len(outcomes) > 0 {
-		unblocked = closeProxiedSuggestNext(ctx, uw, args[0])
+		unblocked = closeProxiedSuggestNextFresh(ctx, args[0])
 	}
 
 	var continueResult *ContinueResult
 	if in.continueOn && len(args) == 1 && len(outcomes) > 0 {
-		continueResult = closeProxiedContinue(ctx, uw, args[0], !in.noAuto)
+		var contErr error
+		continueResult, contErr = closeProxiedContinueFresh(ctx, args[0], !in.noAuto)
+		if contErr != nil {
+			return contErr
+		}
 	}
 
 	var claimedNextIssue *types.Issue
 	if in.claimNext && len(outcomes) > 0 && !in.continueOn {
-		claimedNextIssue = closeProxiedClaimNext(ctx, uw, in.jsonOut)
-	}
-
-	if len(outcomes) > 0 {
-		msg := closeProxiedCommitMessage(outcomes, claimedNextIssue, continueResult)
-		if err := uow.CommitWithRetries(ctx, uw, msg); err != nil && !isDoltNothingToCommit(err) {
-			return HandleErrorRespectJSON("commit close: %v", err)
-		}
-		for _, o := range outcomes {
-			if !o.closed {
-				continue
-			}
-			if err := fireProxiedCloseHooks(ctx, o.before, o.after); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: %s: %v\n", o.id, err)
-			}
+		var claimErr error
+		claimedNextIssue, claimErr = closeProxiedClaimNextFresh(ctx, in.jsonOut)
+		if claimErr != nil {
+			return claimErr
 		}
 	}
 
@@ -162,16 +172,39 @@ func gatherCloseProxiedInput(cmd *cobra.Command) closeProxiedInput {
 	return in
 }
 
-func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, in closeProxiedInput) (closeProxiedOutcome, bool) {
+// closeProxiedOneFresh closes one issue/wisp with full-operation retry on a
+// fresh UOW snapshot. Hooks and user-facing success output run only after a
+// durable commit succeeds.
+func closeProxiedOneFresh(ctx context.Context, id, reason string, in closeProxiedInput) (closeProxiedOutcome, bool, error) {
+	var outcome closeProxiedOutcome
+	err := uow.RunWithFreshUOWRetries(ctx, uowProvider, fmt.Sprintf("bd: close %s", id), func(ctx context.Context, uw uow.UnitOfWork) error {
+		outcome = closeProxiedOutcome{}
+		o, applyErr := closeProxiedOne(ctx, uw, id, reason, in)
+		if applyErr != nil {
+			return applyErr
+		}
+		outcome = o
+		return nil
+	})
+	if errors.Is(err, errProxiedSoftFailure) {
+		return closeProxiedOutcome{}, false, nil
+	}
+	if err != nil && !isDoltNothingToCommit(err) {
+		return closeProxiedOutcome{}, false, HandleErrorRespectJSON("close %s: %v", id, err)
+	}
+	return outcome, true, nil
+}
+
+func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, in closeProxiedInput) (closeProxiedOutcome, error) {
 	current, isWisp := proxiedResolveIssueOrWisp(ctx, uw, id)
 	if current == nil {
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-		return closeProxiedOutcome{}, false
+		return closeProxiedOutcome{}, errProxiedSoftFailure
 	}
 
 	if err := validateIssueClosable(id, current, actor, in.force); err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", err)
-		return closeProxiedOutcome{}, false
+		return closeProxiedOutcome{}, errProxiedSoftFailure
 	}
 
 	if !in.force && current.IssueType == types.TypeEpic {
@@ -184,14 +217,14 @@ func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, 
 		}
 		if err == nil && openChildren > 0 {
 			fmt.Fprintf(os.Stderr, "cannot close epic %s: %d open child issue(s); close children first or use --force to override\n", id, openChildren)
-			return closeProxiedOutcome{}, false
+			return closeProxiedOutcome{}, errProxiedSoftFailure
 		}
 	}
 
 	if !in.force {
 		if err := checkGateSatisfaction(current); err != nil {
 			fmt.Fprintf(os.Stderr, "cannot close %s: %s\n", id, err)
-			return closeProxiedOutcome{}, false
+			return closeProxiedOutcome{}, errProxiedSoftFailure
 		}
 	}
 
@@ -206,11 +239,11 @@ func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, 
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error checking blockers for %s: %v\n", id, err)
-			return closeProxiedOutcome{}, false
+			return closeProxiedOutcome{}, errProxiedSoftFailure
 		}
 		if blocked && len(blockers) > 0 {
 			fmt.Fprintf(os.Stderr, "cannot close %s: blocked by open issues %v (use --force to override)\n", id, blockers)
-			return closeProxiedOutcome{}, false
+			return closeProxiedOutcome{}, errProxiedSoftFailure
 		}
 	}
 
@@ -226,7 +259,7 @@ func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, 
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
-		return closeProxiedOutcome{}, false
+		return closeProxiedOutcome{}, errProxiedSoftFailure
 	}
 
 	oldStatus := string(current.Status)
@@ -235,24 +268,17 @@ func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, 
 	}
 	audit.LogFieldChange(id, "status", oldStatus, "closed", actor, reason)
 
-	autoCloseProxiedCompletedMolecule(ctx, uw, id, actor, in.session, in.jsonOut)
+	// Defer molecule auto-close user output until after durable commit so a
+	// retried attempt does not print twice for a rolled-back first attempt.
+	mol := autoCloseProxiedCompletedMolecule(ctx, uw, id, actor, in.session)
 
-	return closeProxiedOutcome{id: id, before: current, after: res.Issue, closed: res.Closed}, true
-}
-
-func closeProxiedCommitMessage(outcomes []closeProxiedOutcome, claimed *types.Issue, cont *ContinueResult) string {
-	ids := make([]string, 0, len(outcomes))
-	for _, o := range outcomes {
-		ids = append(ids, o.id)
-	}
-	msg := "bd: close " + strings.Join(ids, ", ")
-	if cont != nil && cont.AutoAdvanced && cont.NextStep != nil {
-		msg += "; advance to " + cont.NextStep.ID
-	}
-	if claimed != nil {
-		msg += "; claim " + claimed.ID
-	}
-	return msg
+	return closeProxiedOutcome{
+		id:                 id,
+		before:             current,
+		after:              res.Issue,
+		closed:             res.Closed,
+		autoClosedMolecule: mol,
+	}, nil
 }
 
 func proxiedResolveIssueOrWisp(ctx context.Context, uw uow.UnitOfWork, id string) (*types.Issue, bool) {
@@ -289,6 +315,19 @@ func fireProxiedCloseHooks(ctx context.Context, before, after *types.Issue) erro
 	return nil
 }
 
+func closeProxiedSuggestNextFresh(ctx context.Context, closedID string) []*types.Issue {
+	if uowProvider == nil {
+		return nil
+	}
+	uw, err := uowProvider.NewUOW(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not open unit of work for suggest-next: %v\n", err)
+		return nil
+	}
+	defer uw.Close(ctx)
+	return closeProxiedSuggestNext(ctx, uw, closedID)
+}
+
 func closeProxiedSuggestNext(ctx context.Context, uw uow.UnitOfWork, closedID string) []*types.Issue {
 	unblocked, err := uw.IssueUseCase().GetNewlyUnblockedByClose(ctx, closedID)
 	if err != nil {
@@ -296,6 +335,31 @@ func closeProxiedSuggestNext(ctx context.Context, uw uow.UnitOfWork, closedID st
 		return nil
 	}
 	return unblocked
+}
+
+func closeProxiedClaimNextFresh(ctx context.Context, jsonOut bool) (*types.Issue, error) {
+	var claimed *types.Issue
+	err := uow.RunWithFreshUOWRetriesDynamicMessage(ctx, uowProvider, func() string {
+		if claimed == nil {
+			return "bd: close claim-next"
+		}
+		return "bd: close claim-next " + claimed.ID
+	}, func(ctx context.Context, uw uow.UnitOfWork) error {
+		claimed = nil
+		next := closeProxiedClaimNext(ctx, uw, jsonOut)
+		if next == nil {
+			return errProxiedNoCommit
+		}
+		claimed = next
+		return nil
+	})
+	if errors.Is(err, errProxiedNoCommit) {
+		return nil, nil
+	}
+	if err != nil && !isDoltNothingToCommit(err) {
+		return nil, HandleErrorRespectJSON("claim-next after close: %v", err)
+	}
+	return claimed, nil
 }
 
 func closeProxiedClaimNext(ctx context.Context, uw uow.UnitOfWork, jsonOut bool) *types.Issue {
@@ -323,6 +387,34 @@ func closeProxiedClaimNext(ctx context.Context, uw uow.UnitOfWork, jsonOut bool)
 	return nextIssue
 }
 
+func closeProxiedContinueFresh(ctx context.Context, closedID string, autoClaim bool) (*ContinueResult, error) {
+	var result *ContinueResult
+	err := uow.RunWithFreshUOWRetriesDynamicMessage(ctx, uowProvider, func() string {
+		msg := "bd: close continue " + closedID
+		if result != nil && result.AutoAdvanced && result.NextStep != nil {
+			msg += "; advance to " + result.NextStep.ID
+		}
+		return msg
+	}, func(ctx context.Context, uw uow.UnitOfWork) error {
+		result = nil
+		cont := closeProxiedContinue(ctx, uw, closedID, autoClaim)
+		if cont == nil || !cont.AutoAdvanced {
+			// Read-only continue or no advance: nothing durable to commit.
+			result = cont
+			return errProxiedNoCommit
+		}
+		result = cont
+		return nil
+	})
+	if errors.Is(err, errProxiedNoCommit) {
+		return result, nil
+	}
+	if err != nil && !isDoltNothingToCommit(err) {
+		return nil, HandleErrorRespectJSON("continue after close: %v", err)
+	}
+	return result, nil
+}
+
 func closeProxiedContinue(ctx context.Context, uw uow.UnitOfWork, closedID string, autoClaim bool) *ContinueResult {
 	result, err := proxiedAdvanceToNextStep(ctx, uw, closedID, autoClaim, actor)
 	if err != nil {
@@ -332,39 +424,43 @@ func closeProxiedContinue(ctx context.Context, uw uow.UnitOfWork, closedID strin
 	return result
 }
 
-func autoCloseProxiedCompletedMolecule(ctx context.Context, uw uow.UnitOfWork, closedStepID string, actorName, session string, jsonOut bool) {
+// autoCloseProxiedCompletedMolecule closes a completed parent molecule in the
+// same UOW as the step close. Caller prints success only after durable commit.
+func autoCloseProxiedCompletedMolecule(ctx context.Context, uw uow.UnitOfWork, closedStepID string, actorName, session string) *types.Issue {
 	moleculeID := proxiedFindParentMolecule(ctx, uw, closedStepID)
 	if moleculeID == "" {
-		return
+		return nil
 	}
 
 	root, err := uw.IssueUseCase().GetIssue(ctx, moleculeID)
 	if err != nil || root == nil || root.Status == types.StatusClosed {
-		return
+		return nil
 	}
 	if labels, err := uw.LabelUseCase().GetLabels(ctx, moleculeID); err == nil {
 		root.Labels = labels
 	}
 	if !shouldAutoCloseCompletedRoot(root) {
-		return
+		return nil
 	}
 
 	progress, err := proxiedGetMoleculeProgress(ctx, uw, moleculeID)
 	if err != nil {
-		return
+		return nil
 	}
 	if progress.Completed < progress.Total {
-		return
+		return nil
 	}
 
 	params := domain.CloseIssueParams{Reason: "all steps complete", Session: session}
-	if _, err := uw.IssueUseCase().CloseIssue(ctx, moleculeID, params, actorName); err != nil {
+	res, err := uw.IssueUseCase().CloseIssue(ctx, moleculeID, params, actorName)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule %s: %v\n", moleculeID, err)
-		return
+		return nil
 	}
-	if !jsonOut {
-		fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
+	if res.Issue != nil {
+		return res.Issue
 	}
+	return root
 }
 
 func proxiedFindParentMolecule(ctx context.Context, uw uow.UnitOfWork, issueID string) string {

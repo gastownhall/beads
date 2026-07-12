@@ -52,7 +52,11 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 
 	_, err = conn.ExecContext(ctx, "START TRANSACTION;")
 	if err != nil {
-		_ = conn.Close()
+		// START TRANSACTION can commit pending session work before beginning the
+		// new transaction. Its failure therefore leaves the session state
+		// uncertain; discard the physical connection rather than leaking the pinned
+		// handle or returning it dirty to the pool.
+		discardSQLConn(conn)
 		return nil, fmt.Errorf("uow: failed to start transaction: %w", err)
 	}
 
