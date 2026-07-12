@@ -19,26 +19,33 @@ func buildIssueTree(issues []*types.Issue) (roots []*types.Issue, childrenMap ma
 
 // buildIssueTreeWithDeps builds parent-child tree using dependency records
 // If allDeps is nil, falls back to dotted ID hierarchy (e.g., "parent.1")
-// Treats any dependency on an epic as a parent-child relationship
+// Only parent-child dependency edges establish nesting; other edge types
+// (blocks, waits-for, discovered-from, relates-to, ...) are workflow/graph
+// links and are not rendered as hierarchy.
 func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.Dependency) (roots []*types.Issue, childrenMap map[string][]*types.Issue) {
 	issueMap := make(map[string]*types.Issue)
 	childrenMap = make(map[string][]*types.Issue)
 	isChild := make(map[string]bool)
 
-	// Build issue map and identify epics
-	epicIDs := make(map[string]bool)
 	for _, issue := range issues {
 		issueMap[issue.ID] = issue
-		if issue.IssueType == "epic" {
-			epicIDs[issue.ID] = true
-		}
 	}
 
-	// If we have dependency records, use them to find parent-child relationships
+	// If we have dependency records, use them to find parent-child relationships.
+	// Nesting is driven strictly by the parent-child edge type. Earlier versions
+	// also nested any dependency whose target was an epic, but that conflated
+	// workflow edges (a task that merely blocks an epic) with membership, so a
+	// genuinely 2-layer parent tree could render as a 6+ level tangle and trigger
+	// false "the hierarchy is broken" conclusions. This now matches the storage
+	// layer, which scopes an epic's children to parent-child edges only
+	// (see epic_closure.go); non-hierarchical edges stay off the tree.
 	if allDeps != nil {
 		addedChild := make(map[string]bool) // tracks "parentID:childID" to prevent duplicates
 		for issueID, deps := range allDeps {
 			for _, dep := range deps {
+				if dep.Type != types.DepParentChild {
+					continue
+				}
 				parentID := dep.DependsOnID
 				// Only include if both parent and child are in the issue set
 				child, childOk := issueMap[issueID]
@@ -47,26 +54,12 @@ func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.D
 					continue
 				}
 
-				// relates-to is a loose graph link, not a hierarchical edge:
-				// treating it as parent-child causes incorrect nesting and, when
-				// bidirectional, marks both endpoints as children of each other
-				// — collapsing them out of the root set and silently dropping
-				// whole subtrees from `bd list`. See gastownhall/beads#3936.
-				if dep.Type == types.DepRelatesTo {
-					continue
+				key := parentID + ":" + issueID
+				if !addedChild[key] {
+					childrenMap[parentID] = append(childrenMap[parentID], child)
+					addedChild[key] = true
 				}
-
-				// Treat as parent-child if:
-				// 1. Explicit parent-child dependency type, OR
-				// 2. Any dependency where the target is an epic
-				if dep.Type == types.DepParentChild || epicIDs[parentID] {
-					key := parentID + ":" + issueID
-					if !addedChild[key] {
-						childrenMap[parentID] = append(childrenMap[parentID], child)
-						addedChild[key] = true
-					}
-					isChild[issueID] = true
-				}
+				isChild[issueID] = true
 			}
 		}
 	}
