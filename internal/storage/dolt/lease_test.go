@@ -174,6 +174,71 @@ func TestUpdateIssueMaintainsLeaseOwnership(t *testing.T) {
 	}
 }
 
+// TestUnclaimOwnershipAndLease verifies that unclaim (a) rejects a non-owner
+// with ErrNotOwner and leaves the claim intact, (b) when done by the owner
+// clears the lease columns and rewrites row_lock so a racing heartbeat/reclaim
+// conflicts, and (c) with force overrides the ownership check.
+func TestUnclaimOwnershipAndLease(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// (a) Non-owner cannot release someone else's claim.
+	seedClaimedIssue(t, ctx, store, "unclaim-a", "alice", time.Hour)
+	before := readLeaseState(t, ctx, store, "unclaim-a")
+	if err := store.UnclaimIssue(ctx, "unclaim-a", "mallory", false); !errors.Is(err, storage.ErrNotOwner) {
+		t.Fatalf("non-owner unclaim err = %v, want ErrNotOwner", err)
+	}
+	stillClaimed := readLeaseState(t, ctx, store, "unclaim-a")
+	if stillClaimed.status != "in_progress" || stillClaimed.assignee.String != "alice" {
+		t.Fatalf("rejected unclaim mutated state: %+v", stillClaimed)
+	}
+	if stillClaimed.rowLock != before.rowLock {
+		t.Fatalf("rejected unclaim rewrote row_lock: before=%d after=%d", before.rowLock, stillClaimed.rowLock)
+	}
+
+	// (b) Owner releases: status → open, assignee cleared, lease columns
+	// cleared, row_lock rewritten.
+	if err := store.UnclaimIssue(ctx, "unclaim-a", "alice", false); err != nil {
+		t.Fatalf("owner unclaim: %v", err)
+	}
+	released := readLeaseState(t, ctx, store, "unclaim-a")
+	if released.status != "open" {
+		t.Errorf("status after unclaim = %q, want open", released.status)
+	}
+	if released.assignee.Valid && released.assignee.String != "" {
+		t.Errorf("assignee after unclaim = %q, want empty", released.assignee.String)
+	}
+	if released.leaseExpires.Valid || released.heartbeatAt.Valid {
+		t.Errorf("unclaim did not clear lease columns: %+v", released)
+	}
+	if !released.startedAtNull {
+		t.Errorf("unclaim did not clear started_at: %+v", released)
+	}
+	if released.rowLock == before.rowLock || released.rowLock == 0 {
+		t.Errorf("unclaim did not rewrite row_lock to a fresh non-zero value: before=%d after=%d", before.rowLock, released.rowLock)
+	}
+
+	// A heartbeat from the old owner after release finds no live claim.
+	if err := store.HeartbeatIssue(ctx, "unclaim-a", "alice"); !errors.Is(err, storage.ErrNotClaimable) {
+		t.Errorf("heartbeat after unclaim err = %v, want ErrNotClaimable", err)
+	}
+
+	// (c) --force lets an admin/reaper release a claim held by someone else.
+	seedClaimedIssue(t, ctx, store, "unclaim-c", "alice", time.Hour)
+	if err := store.UnclaimIssue(ctx, "unclaim-c", "reaper", true); err != nil {
+		t.Fatalf("forced unclaim by non-owner: %v", err)
+	}
+	forced := readLeaseState(t, ctx, store, "unclaim-c")
+	if forced.status != "open" || (forced.assignee.Valid && forced.assignee.String != "") {
+		t.Fatalf("forced unclaim did not release: %+v", forced)
+	}
+	if forced.leaseExpires.Valid || forced.heartbeatAt.Valid {
+		t.Fatalf("forced unclaim did not clear lease columns: %+v", forced)
+	}
+}
+
 // TestBareUpdateClaimDoesNotArmLease is the regression guard for bd-9hpgf
 // (GH#4716): a plain interactive claim — `bd update -s in_progress -a <who>`
 // with no worker/lease semantics intended — must NOT arm a lease. Nobody

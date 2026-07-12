@@ -82,6 +82,22 @@ func leaseSetClause(now time.Time, ttl time.Duration) (string, []interface{}) {
 		[]interface{}{now.Add(ttl), now, freshRowLock()}
 }
 
+// LeaseSetClause is the exported form of leaseSetClause, for the proxied-server
+// (uow) claim path in internal/storage/domain/db, which builds its own claim
+// UPDATE rather than calling ClaimIssueInTx. Keeping both paths on this one
+// helper is what stops the proxied path from reintroducing the missing-lease /
+// cell-merge bug the row_lock invariant guards against.
+func LeaseSetClause(now time.Time, ttl time.Duration) (string, []interface{}) {
+	return leaseSetClause(now, ttl)
+}
+
+// LeaseTTL is the exported form of leaseTTL: it resolves the lease TTL for the
+// current claim from the context (WithLeaseTTL) or falls back to
+// DefaultLeaseTTL.
+func LeaseTTL(ctx context.Context) time.Duration {
+	return leaseTTL(ctx)
+}
+
 // HeartbeatIssueInTx proves the lease owner is still alive: it pushes
 // lease_expires_at forward by the TTL, stamps heartbeat_at = now, and rewrites
 // row_lock so the heartbeat conflicts with any concurrent reclaim/close on the

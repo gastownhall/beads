@@ -218,21 +218,32 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 	now := time.Now().UTC()
 	startedWasZero := oldIssue.StartedAt == nil
 
+	// Stamp the same lease + row_lock the primary claim path (issueops.
+	// ClaimIssueInTx) writes. Without this, a claim made through the proxied-
+	// server (uow) path leaves lease_expires_at/heartbeat_at NULL and row_lock
+	// unchanged — invisible to bd reclaim and open to the cell-merge bug the
+	// row_lock invariant guards against (see issueops/lease.go).
+	leaseClause, leaseArgs := issueops.LeaseSetClause(now, issueops.LeaseTTL(ctx))
+
 	var res sql.Result
 	if startedWasZero {
+		args := append([]any{actor, now, now}, leaseArgs...)
+		args = append(args, id, actor)
 		//nolint:gosec // G201: table is one of two hardcoded constants
 		res, err = r.runner.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?
+			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
 			WHERE id = ? AND status = 'open' AND (assignee = '' OR assignee IS NULL OR assignee = ?)
-		`, table), actor, now, now, id, actor)
+		`, table, leaseClause), args...)
 	} else {
+		args := append([]any{actor, now}, leaseArgs...)
+		args = append(args, id, actor)
 		//nolint:gosec // G201: table is one of two hardcoded constants
 		res, err = r.runner.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?
+			SET assignee = ?, status = 'in_progress', updated_at = ?, %s
 			WHERE id = ? AND status = 'open' AND (assignee = '' OR assignee IS NULL OR assignee = ?)
-		`, table), actor, now, id, actor)
+		`, table, leaseClause), args...)
 	}
 	if err != nil {
 		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: %w", id, err)

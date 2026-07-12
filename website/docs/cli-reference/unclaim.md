@@ -27,5 +27,6 @@ bd unclaim [id...] [flags]
 **Flags:**
 
 ```
+      --force           Release the claim even if held by a different actor (admin/reaper use)
   -r, --reason string   Reason for unclaiming
 ```

@@ -23,6 +23,11 @@ var ErrAlreadyClaimed = errors.New("issue already claimed")
 // same actor owning the claim.
 var ErrNotClaimable = errors.New("issue not claimable")
 
+// ErrNotOwner is returned when an actor tries to unclaim an issue that is claimed
+// by a different actor. Releasing another actor's claim requires the force
+// escape hatch (bd unclaim --force), reserved for admin/reaper use.
+var ErrNotOwner = errors.New("issue claimed by a different actor")
+
 // ErrNotFound is returned when a requested entity does not exist in the database.
 var ErrNotFound = errors.New("not found")
 
@@ -45,7 +50,7 @@ type Storage interface {
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
 	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
 	ReopenIssue(ctx context.Context, id string, reason string, actor string) error
-	UnclaimIssue(ctx context.Context, id string, actor string) error
+	UnclaimIssue(ctx context.Context, id string, actor string, force bool) error
 	UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
 	DeleteIssue(ctx context.Context, id string) error

@@ -80,4 +80,8 @@ jobs:
           BEADS_PG_TEST_URL: "postgres://bts:bts@127.0.0.1:5432/bdwedge"
           BEADS_PG_PASSWORD: "bts"
           BEADS_MYSQL_TEST_URL: "bts:bts@tcp(127.0.0.1:3306)/"
+          # Hard-fail (Tier 1 run_sql_conformance + Tier 2 e2e) if either real backend
+          # is absent, so removing/renaming a *_TEST_URL can't silently drop coverage
+          # while the gate still reports green.
+          BEADS_CONFORMANCE_REQUIRE: "postgres,mysql"
         run: ./scripts/conformance.sh

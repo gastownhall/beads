@@ -34,6 +34,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	mysqlstore "github.com/steveyegge/beads/internal/storage/mysql"
+	"github.com/steveyegge/beads/internal/storage/pgdialect"
 	pgstore "github.com/steveyegge/beads/internal/storage/postgres"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	sqlitestore "github.com/steveyegge/beads/internal/storage/sqlite"
@@ -742,7 +743,7 @@ var rootCmd = &cobra.Command{
 			oteltrace.WithAttributes(
 				attribute.String("bd.command", cmd.Name()),
 				attribute.String("bd.version", Version),
-				attribute.String("bd.args", scrubArgsForTelemetry(os.Args[1:])),
+				attribute.String("bd.args", scrubArgsForTelemetry(os.Args[1:], secretFlagTokens(cmd))),
 			),
 		)
 
@@ -1728,22 +1729,139 @@ func envTruthyValue(v string) bool {
 	return true
 }
 
+// dsnFlags are the flags whose value is a connection string that may embed a
+// password (bd init --backend=postgres/mysql). Their values get the full
+// parser-backed DSN scrub; other args only get the unambiguous userinfo scrub.
+var dsnFlags = map[string]bool{"--pg-url": true, "--mysql-url": true}
+
+// secretFlagNames are long flag names whose entire value is an opaque credential
+// that must never reach the bd.args telemetry span. Unlike dsnFlags (a DSN that is
+// parsed so its structure survives), a secret flag's value is redacted wholesale.
+// Only federation add-peer's --password currently qualifies. Its shorthand (-p) is
+// resolved per command via secretFlagTokens so the same letter bound to
+// --priority/--prefix/--parallel on other commands is never redacted.
+var secretFlagNames = map[string]bool{"password": true}
+
+// secretFlagTokens returns the concrete --long and -short flag tokens that carry a
+// secret value for cmd. Resolving against the running command is what makes the
+// redaction "by flag identity": -p is treated as secret only on the command that
+// actually binds it to a secret flag (federation add-peer), not on the many
+// commands that bind -p to a non-secret option.
+func secretFlagTokens(cmd *cobra.Command) map[string]bool {
+	tokens := make(map[string]bool)
+	if cmd == nil {
+		return tokens
+	}
+	for name := range secretFlagNames {
+		f := cmd.Flags().Lookup(name)
+		if f == nil {
+			continue
+		}
+		tokens["--"+f.Name] = true
+		if f.Shorthand != "" {
+			tokens["-"+f.Shorthand] = true
+		}
+	}
+	return tokens
+}
+
 // scrubArgsForTelemetry joins argv for the bd.args span attribute with any
 // credential-bearing values redacted. --pg-url/--mysql-url may carry a password
-// for init; RedactPassword protects metadata.json, but the raw argv would
-// otherwise leak the password into the telemetry root span and trace logs.
-func scrubArgsForTelemetry(argv []string) string {
+// for init, and federation add-peer --password/-p carries a SQL password;
+// RedactPassword protects metadata.json, but the raw argv would otherwise leak the
+// secret into the telemetry root span and trace logs.
+//
+// A DSN flag's value is scrubbed through the parser-backed pgdialect logic so every
+// password form pgx accepts is caught — URL userinfo, URL `?password=`/`?sslpassword=`
+// query params, and libpq `password=`/`sslpassword=` keyword/value tokens — in both
+// the `--pg-url=<dsn>` and `--pg-url <dsn>` spellings. A secretFlags token's value is
+// an opaque credential and is redacted wholesale across the `--password <v>`,
+// `--password=<v>`, `-p <v>`, `-p=<v>`, and `-p<v>` spellings pflag accepts. Every
+// other arg still gets the narrow user:PASS@host userinfo scrub as defense in depth,
+// without the broad keyword scan that would over-redact ordinary text.
+func scrubArgsForTelemetry(argv []string, secretFlags map[string]bool) string {
 	parts := make([]string, len(argv))
 	for i, a := range argv {
-		parts[i] = scrubCredsInArg(a)
+		if name, val, ok := strings.Cut(a, "="); ok {
+			if dsnFlags[name] {
+				// --pg-url=<dsn> — scrub only the value, keep the flag name.
+				parts[i] = name + "=" + scrubDSNValue(val)
+				continue
+			}
+			if secretFlags[name] {
+				// --password=<secret> / -p=<secret> — redact the whole value.
+				parts[i] = name + "=xxxxx"
+				continue
+			}
+		}
+		if i > 0 {
+			if dsnFlags[argv[i-1]] {
+				// <dsn> following a bare --pg-url token.
+				parts[i] = scrubDSNValue(a)
+				continue
+			}
+			if secretFlags[argv[i-1]] {
+				// <secret> following a bare --password / -p token.
+				parts[i] = "xxxxx"
+				continue
+			}
+		}
+		if short, ok := secretShorthandPrefix(a, secretFlags); ok {
+			// -p<secret> — pflag's concatenated shorthand spelling.
+			parts[i] = short + "xxxxx"
+			continue
+		}
+		parts[i] = scrubUserinfoPassword(a)
 	}
 	return strings.Join(parts, " ")
 }
 
-// scrubCredsInArg redacts the password in a URL/DSN-shaped argument
-// (postgres://user:PASS@host or user:PASS@tcp(...)), whether passed as
-// --flag=value or as a bare value; non-credential args pass through unchanged.
-func scrubCredsInArg(a string) string {
+// secretShorthandPrefix reports whether a is pflag's concatenated secret-shorthand
+// spelling, returning the "-x...-p" prefix to preserve. Long flags cannot concatenate
+// a value, so only -X<value> shorthands are matched.
+//
+// pflag also accepts a CLUSTER of boolean shorthands ending in a value-taking
+// shorthand: given boolean flags -q/-v and value flag -p, "-qpSECRET" parses as -q
+// followed by -p SECRET, and "-vpSECRET" parses as -v followed by -p SECRET — but the
+// raw token still reaches telemetry as one string. Walk the leading run of letters in
+// a; the first letter whose "-x" token is a registered secret shorthand ends the
+// cluster, and everything after it is that flag's value, regardless of how many
+// boolean shorthands preceded it. This mirrors pflag's own grammar (a cluster is zero
+// or more boolean shorthands followed by one value-taking shorthand) without needing
+// the running command's flag set here: it is conservative in the safe direction,
+// since treating a longer prefix as consumed by the secret shorthand only ever
+// over-redacts, never under-redacts.
+func secretShorthandPrefix(a string, secretFlags map[string]bool) (string, bool) {
+	if len(a) < 3 || a[0] != '-' || a[1] == '-' {
+		return "", false
+	}
+	for i := 1; i < len(a); i++ {
+		c := a[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			return "", false
+		}
+		if secretFlags["-"+string(c)] {
+			if i+1 >= len(a) {
+				return "", false // no value follows; not the concatenated spelling
+			}
+			return a[:i+1], true
+		}
+	}
+	return "", false
+}
+
+// scrubDSNValue redacts every password form from a connection-string value. The
+// pgdialect pass covers pgx's URL (userinfo + query) and libpq keyword/value shapes;
+// the trailing userinfo pass covers the MySQL user:PASS@tcp(...) DSN, which is not a
+// scheme URL and so is invisible to the pgdialect extractor.
+func scrubDSNValue(val string) string {
+	return scrubUserinfoPassword(pgdialect.ScrubDSNString(val, val))
+}
+
+// scrubUserinfoPassword redacts the password in a URL/DSN userinfo section
+// (postgres://user:PASS@host or user:PASS@tcp(...)); args without a user:pass@
+// userinfo pass through unchanged, so ordinary text is never mangled.
+func scrubUserinfoPassword(a string) string {
 	at := strings.LastIndexByte(a, '@')
 	if at < 0 {
 		return a

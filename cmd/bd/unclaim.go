@@ -28,6 +28,7 @@ Examples:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("unclaim")
 		reason, _ := cmd.Flags().GetString("reason")
+		force, _ := cmd.Flags().GetBool("force")
 		ctx := rootCtx
 
 		unclaimedIssues := []*types.Issue{}
@@ -47,7 +48,7 @@ Examples:
 			fullID := result.ResolvedID
 			issueStore := result.Store
 
-			if err := issueStore.UnclaimIssue(ctx, fullID, actor); err != nil {
+			if err := issueStore.UnclaimIssue(ctx, fullID, actor, force); err != nil {
 				fmt.Fprintf(os.Stderr, "Error unclaiming %s: %v\n", fullID, err)
 				hasError = true
 				result.Close()
@@ -92,6 +93,7 @@ Examples:
 
 func init() {
 	unclaimCmd.Flags().StringP("reason", "r", "", "Reason for unclaiming")
+	unclaimCmd.Flags().Bool("force", false, "Release the claim even if held by a different actor (admin/reaper use)")
 	unclaimCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(unclaimCmd)
 }

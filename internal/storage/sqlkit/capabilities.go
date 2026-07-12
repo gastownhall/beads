@@ -62,9 +62,9 @@ func (s *Store) ClaimIssue(ctx context.Context, id string, actor string) error {
 
 // UnclaimIssue releases a claim (clears assignee, returns to open) in a mutation
 // tx so the change and its is_blocked reprojection commit atomically.
-func (s *Store) UnclaimIssue(ctx context.Context, id string, actor string) error {
+func (s *Store) UnclaimIssue(ctx context.Context, id string, actor string, force bool) error {
 	return s.withMutationTx(ctx, func(tx *sql.Tx) error {
-		return issueops.UnclaimIssueInTx(ctx, tx, id, actor)
+		return issueops.UnclaimIssueInTx(ctx, tx, id, actor, force)
 	})
 }
 

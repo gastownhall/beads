@@ -45,4 +45,13 @@ func TestUnclaimCommand_Flags(t *testing.T) {
 	if reasonFlag.DefValue != "" {
 		t.Errorf("expected default value '', got %q", reasonFlag.DefValue)
 	}
+
+	// The --force flag bypasses the claim-ownership check (admin/reaper use).
+	forceFlag := unclaimCmd.Flags().Lookup("force")
+	if forceFlag == nil {
+		t.Fatal("force flag should be defined")
+	}
+	if forceFlag.DefValue != "false" {
+		t.Errorf("expected force default value 'false', got %q", forceFlag.DefValue)
+	}
 }
