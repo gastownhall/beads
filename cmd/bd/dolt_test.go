@@ -1354,15 +1354,17 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 // TestShouldUseExternalDoltStatus covers the routing predicate for
 // `bd dolt status`. The predicate decides whether to ping the configured
 // SQL endpoint (externally-managed server) or read the local PID file
-// (bd-managed server). Three scenarios qualify as externally-managed:
-// non-local hosts, and local hosts where bd does not own the lifecycle
-// (auto-start disabled — be-0eyj). Other configurations should keep the
-// PID-file path so bd-managed servers continue to report PID/log/data.
+// (bd-managed server). Scenarios that qualify as externally-managed:
+// shared-server mode (GH#3218), non-local hosts, and local hosts where bd
+// does not own the lifecycle (auto-start disabled — be-0eyj). Other
+// configurations should keep the PID-file path so bd-managed servers
+// continue to report PID/log/data.
 func TestShouldUseExternalDoltStatus(t *testing.T) {
 	tests := []struct {
 		name              string
 		cfg               *configfile.Config
 		autoStartDisabled bool
+		sharedServerMode  bool
 		want              bool
 	}{
 		{
@@ -1411,6 +1413,61 @@ func TestShouldUseExternalDoltStatus(t *testing.T) {
 			want:              false,
 		},
 		{
+			// GH#3218: a shared server on localhost with bd auto-start
+			// ENABLED previously fell through to the PID-file path and
+			// reported "not running" though bd could connect fine. Shared
+			// mode means bd never owns the lifecycle, so probe SQL.
+			name: "server mode + local host + auto-start enabled + shared-server routes to external (GH#3218)",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "127.0.0.1",
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  true,
+			want:              true,
+		},
+		{
+			name: "server mode + empty host + shared-server routes to external (GH#3218)",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: "server",
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  true,
+			want:              true,
+		},
+		{
+			// GH#2946/#3218: shared-server mode (e.g. dolt.shared-server:
+			// true in config.yaml) wins over a stale metadata.json that
+			// still pins dolt_mode="embedded". IsDoltServerMode() does not
+			// consult dolt.shared-server, so without the shared-server
+			// branch preceding the server-mode guard this workspace would
+			// fall through to the PID-file "not running" path.
+			name: "shared-server flag wins over stale embedded metadata (GH#2946/#3218)",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: "embedded",
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  true,
+			want:              true,
+		},
+		{
+			// Proxied-server mode is excluded from the shared-server
+			// override (matches main.go's !psm guard): bd talks through the
+			// proxy, so keep the non-external path even if the shared-server
+			// flag is also set.
+			name: "proxied-server mode + shared-server flag stays non-external",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: configfile.DoltModeProxiedServer,
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  true,
+			want:              false,
+		},
+		{
 			name: "server mode + local host + auto-start disabled routes to external (be-0eyj)",
 			cfg: &configfile.Config{
 				Backend:        "dolt",
@@ -1449,7 +1506,7 @@ func TestShouldUseExternalDoltStatus(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := shouldUseExternalDoltStatus(tc.cfg, tc.autoStartDisabled)
+			got := shouldUseExternalDoltStatus(tc.cfg, tc.autoStartDisabled, tc.sharedServerMode)
 			if got != tc.want {
 				t.Errorf("shouldUseExternalDoltStatus = %v, want %v", got, tc.want)
 			}
@@ -1675,8 +1732,7 @@ func TestNoPushSkipsDoltPush(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		doltPushCmd.Run(doltPushCmd, nil)
-		return nil
+		return doltPushCmd.RunE(doltPushCmd, nil)
 	})
 
 	if fake.pushCalled {
@@ -1713,8 +1769,7 @@ func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		doltPullCmd.Run(doltPullCmd, nil)
-		return nil
+		return doltPullCmd.RunE(doltPullCmd, nil)
 	})
 
 	if !fake.pullCalled {

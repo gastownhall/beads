@@ -1,6 +1,6 @@
 # Error Handling Guidelines
 
-Last reviewed: 2026-05-08
+Last reviewed: 2026-07-07
 
 Freshness source: `cmd/bd/*.go`, especially command error exits and JSON error
 helpers in `cmd/bd/errors.go`.
@@ -13,7 +13,7 @@ The beads codebase currently uses **three distinct error handling patterns** acr
 
 ## The Three Patterns
 
-### Pattern A: Exit Immediately (`os.Exit(1)`)
+### Pattern A: Return a Fatal Error Through `RunE` (`return HandleError(...)`)
 
 **When to use:**
 - **Fatal errors** that prevent the command from completing its core function
@@ -24,21 +24,36 @@ The beads codebase currently uses **three distinct error handling patterns** acr
 **Example:**
 ```go
 if err := store.CreateIssue(ctx, issue, actor); err != nil {
-    fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-    os.Exit(1)
+    return HandleError("%v", err)
 }
 ```
 
-**Characteristics:**
-- Writes `Error:` prefix to stderr
-- Returns exit code 1 immediately
-- Command makes no further progress
-- Database/JSONL may be left in partial state (should be transactional)
+**Why not `os.Exit(1)`?** Calling `os.Exit` inside a command handler abandons the
+stack without running deferred functions — the per-command metrics event
+(`CloseEventAndAdd`) and `main()`'s `metrics.CloseAndFlush()` never run, so the
+invocation records no usage event and any `defer`red cleanup (unit-of-work close,
+temp-file removal) is skipped. Instead return a `HandleError*` value: it prints
+the message and returns a sentinel `*exitError`; cobra unwinds the stack (running
+every `defer`), and `main()` maps the sentinel to exit code 1.
 
-**Files using this pattern:**
-- `cmd/bd/create.go` (lines 31-32, 46-49, 57-58, 74-75, 107-108, etc.)
-- `cmd/bd/init.go` (lines 77-78, 96-97, 104-105, 112-115, 209-210, 225-227)
-- `cmd/bd/sync.go` (lines 52-54, 59-60, 82-83, etc.)
+**Characteristics:**
+- Prints `Error:` (plus `Hint:` for the `WithHint` variants) to stderr; the
+  `RespectJSON` variants emit a structured JSON error to stdout under `--json`
+- Returns `&exitError{Code: 1}` up through `RunE`; `main()` exits 1 after
+  deferred cleanup and the metrics flush have run
+- The command's `cobra.Command` **must** set `SilenceUsage: true` and
+  `SilenceErrors: true`, or cobra will additionally print `Error: exit code 1`
+  and the usage text on top of the real message
+
+**Narrow exceptions still using `os.Exit`:** process-level gates that run before
+or outside the `RunE` error path — e.g. `CheckReadonly`, which aborts a blocked
+command after flushing metrics first. A handful of pre-existing direct
+`os.Exit(1)` calls also remain inside handler bodies; new command code should
+return a `HandleError*` value instead of adding more.
+
+**Files using this pattern:** nearly every command in `cmd/bd/` — search for
+`return HandleError` (e.g. `create.go`, `defer.go`, `dolt.go`, `unclaim.go`,
+`compact.go`).
 
 ---
 
@@ -115,10 +130,10 @@ Use this flowchart to choose the appropriate error handling pattern:
                        ├─ Is this a fatal error that prevents
                        │  the command's core purpose?
                        │
-                       │  YES → Pattern A: Exit with os.Exit(1)
-                       │        • Write "Error: ..." to stderr
-                       │        • Provide actionable hint if possible
-                       │        • Exit code 1
+                       │  YES → Pattern A: return HandleError(...) from RunE
+                       │        • Prints "Error: ..." to stderr
+                       │        • Provide actionable hint (HandleErrorWithHint)
+                       │        • Returns *exitError; main() exits 1 after defers
                        │
                        ├─ Is this an optional/auxiliary operation
                        │  where the command can still succeed?
@@ -139,13 +154,12 @@ Use this flowchart to choose the appropriate error handling pattern:
 
 ## Examples by Scenario
 
-### User Input Validation → Pattern A (Exit)
+### User Input Validation → Pattern A (Return Fatal Error)
 
 ```go
 priority, err := validation.ValidatePriority(priorityStr)
 if err != nil {
-    fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-    os.Exit(1)
+    return HandleError("%v", err)
 }
 ```
 
@@ -177,12 +191,11 @@ if err := store.SetMetadata(ctx, "last_import_hash", currentHash); err != nil {
 }
 ```
 
-### Database Transaction Failures → Pattern A (Exit)
+### Database Transaction Failures → Pattern A (Return Fatal Error)
 
 ```go
 if err := store.CreateIssue(ctx, issue, actor); err != nil {
-    fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-    os.Exit(1)
+    return HandleError("%v", err)
 }
 ```
 
@@ -219,10 +232,9 @@ _ = store.CreateIssue(ctx, issue, actor)
 ```
 
 ```go
-// GOOD: Exit on critical errors
+// GOOD: Return a fatal error through RunE
 if err := store.CreateIssue(ctx, issue, actor); err != nil {
-    fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-    os.Exit(1)
+    return HandleError("%v", err)
 }
 ```
 
@@ -249,7 +261,7 @@ if err := installGitHooks(); err != nil {
 
 When writing tests for error handling:
 
-1. **Pattern A (Exit)** - Test with subprocess or mock `os.Exit`
+1. **Pattern A (Fatal)** - Assert `RunE` returns a non-nil error (a `*exitError`); no subprocess or `os.Exit` mock needed, since `HandleError` returns rather than exiting
 2. **Pattern B (Warn)** - Capture stderr and verify warning message
 3. **Pattern C (Ignore)** - Verify operation was attempted, no error propagates
 
@@ -264,17 +276,18 @@ When writing tests for error handling:
 Configuration metadata defines **fundamental system behavior** and must succeed:
 
 ```go
-// Pattern A: Exit on failure
+// Pattern A: return a fatal error through RunE.
+// Returning lets a single `defer store.Close()` cover every exit path, instead
+// of repeating a manual `_ = store.Close()` before each os.Exit (which os.Exit
+// would otherwise skip).
+defer store.Close()
+
 if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-    fmt.Fprintf(os.Stderr, "Error: failed to set issue prefix: %v\n", err)
-    _ = store.Close()
-    os.Exit(1)
+    return HandleError("failed to set issue prefix: %v", err)
 }
 
 if err := syncbranch.Set(ctx, store, branch); err != nil {
-    fmt.Fprintf(os.Stderr, "Error: failed to set sync branch: %v\n", err)
-    _ = store.Close()
-    os.Exit(1)
+    return HandleError("failed to set sync branch: %v", err)
 }
 ```
 
@@ -346,21 +359,27 @@ defer func() {
 - [ ] Similar operations use consistent patterns
 - [ ] Error messages provide actionable hints when possible
 
-### Suggested Helper Functions
+### Error Helpers
 
-Consider creating helper functions to enforce consistency:
+`cmd/bd/errors.go` provides the shared helpers that enforce consistency. Pattern A
+handlers return one of the `HandleError*` values; Pattern B uses `WarnError`:
 
 ```go
-// FatalError writes error to stderr and exits
-func FatalError(format string, args ...interface{}) {
-    fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
-    os.Exit(1)
-}
+// Return through RunE — prints "Error: ..." to stderr, returns *exitError{Code: 1}
+func HandleError(format string, args ...interface{}) error
 
-// WarnError writes warning to stderr and continues
-func WarnError(format string, args ...interface{}) {
-    fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
-}
+// Like HandleError, but emits a structured JSON error to stdout under --json
+func HandleErrorRespectJSON(format string, args ...interface{}) error
+
+// Adds a "Hint: ..." line (the …RespectJSON variant routes JSON to stdout)
+func HandleErrorWithHint(message, hint string) error
+func HandleErrorWithHintRespectJSON(message, hint string) error
+
+// Exit 1 with no message, when the error was already reported
+func SilentExit() error
+
+// Pattern B — prints "Warning: ..." to stderr and returns nothing
+func WarnError(format string, args ...interface{})
 ```
 
 ## Related Issues
@@ -371,7 +390,7 @@ func WarnError(format string, args ...interface{}) {
 
 ## References
 
-- `cmd/bd/create.go` - Examples of Pattern A for user input validation
+- `cmd/bd/errors.go` - The `HandleError*` / `WarnError` / `SilentExit` helpers and the `exitError` sentinel that `main()` maps to an exit code
+- `cmd/bd/defer.go` - Clean example of Pattern A: `return HandleError(...)` from a `RunE` with `SilenceUsage`/`SilenceErrors` set
 - `cmd/bd/init.go` - Examples of all three patterns
-- `cmd/bd/sync.go` - Examples of Pattern B for metadata operations
-- `cmd/bd/sync.go` - Examples of Pattern C for cleanup operations
+- `cmd/bd/sync.go` - Examples of Pattern B for metadata operations and Pattern C for cleanup operations

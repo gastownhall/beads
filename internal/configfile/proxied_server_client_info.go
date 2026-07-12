@@ -5,15 +5,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const ProxiedServerClientInfoFileName = "proxied_server_client_info.json"
 
 type ProxiedServerClientInfo struct {
-	RootPath   string              `json:"root_path,omitempty"`
-	ConfigPath string              `json:"config_path,omitempty"`
-	LogPath    string              `json:"log_path,omitempty"`
-	External   *ExternalDoltConfig `json:"external,omitempty"`
+	RootPath    string              `json:"root_path,omitempty"`
+	ConfigPath  string              `json:"config_path,omitempty"`
+	LogPath     string              `json:"log_path,omitempty"`
+	Port        int                 `json:"port,omitempty"`
+	IdleTimeout time.Duration       `json:"idle_timeout,omitempty"`
+	External    *ExternalDoltConfig `json:"external,omitempty"`
 }
 
 func ProxiedServerClientInfoPath(beadsDir string) string {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/gitlab"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -225,6 +227,22 @@ func getGitLabConfig() GitLabConfig {
 
 // getGitLabConfigValue reads a GitLab configuration value from store or environment.
 func getGitLabConfigValue(ctx context.Context, key string) string {
+	// Secret/yaml-only keys (e.g. gitlab.token) live in config.yaml, not the
+	// Dolt database, to avoid leaking secrets when the DB is pushed to remotes.
+	// Read them from config.yaml first, then env, and never touch the store.
+	// Mirrors internal/gitlab/tracker.go getConfig after upstream 99653e059.
+	if config.IsYamlOnlyKey(key) {
+		if val := config.GetString(key); val != "" {
+			return val
+		}
+		if envKey := gitlabConfigToEnvVar(key); envKey != "" {
+			if val := os.Getenv(envKey); val != "" {
+				return val
+			}
+		}
+		return ""
+	}
+
 	// Try to read from store (works in direct mode)
 	if store != nil {
 		value, _ := store.GetConfig(ctx, key)
@@ -422,6 +440,22 @@ func runGitLabProjects(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// gitlabSyncResult holds the JSON output for the gitlab sync command.
+type gitlabSyncResult struct {
+	DryRun              bool     `json:"dry_run"`
+	Pulled              int      `json:"pulled"`
+	Pushed              int      `json:"pushed"`
+	Created             int      `json:"created"`
+	Updated             int      `json:"updated"`
+	Skipped             int      `json:"skipped"`
+	Conflicts           int      `json:"conflicts"`
+	Errors              int      `json:"errors"`
+	LinksPushed         int      `json:"links_pushed"`
+	LinksLicenseSkipped int      `json:"links_license_skipped,omitempty"`
+	MilestonesUpdated   int      `json:"milestones_updated,omitempty"`
+	Warnings            []string `json:"warnings,omitempty"`
+}
+
 // runGitLabSync implements the gitlab sync command.
 // Uses the tracker.Engine for all sync operations.
 func runGitLabSync(cmd *cobra.Command, args []string) error {
@@ -469,11 +503,14 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 
 	// Create the sync engine
 	engine := tracker.NewEngine(gt, store, actor)
-	engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(out, "  "+msg) }
+	if !jsonOutput {
+		engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(out, "  "+msg) }
+	}
 	engine.OnWarning = func(msg string) { _, _ = fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
 	// Set up GitLab-specific pull hooks
 	engine.PullHooks = buildGitLabPullHooks(ctx)
+	engine.PushHooks = buildGitLabPushHooks()
 
 	// Build sync options from CLI flags
 	pull := !gitlabSyncPushOnly
@@ -512,7 +549,7 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		opts.ConflictResolution = tracker.ConflictTimestamp
 	}
 
-	if gitlabSyncDryRun {
+	if gitlabSyncDryRun && !jsonOutput {
 		_, _ = fmt.Fprintln(out, "Dry run mode - no changes will be made")
 		_, _ = fmt.Fprintln(out)
 	}
@@ -520,6 +557,37 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 	result, err := engine.Sync(ctx, opts)
 	if err != nil {
 		return HandleError("%v", err)
+	}
+
+	var linkWarnings []string
+	warnLink := func(msg string) {
+		linkWarnings = append(linkWarnings, msg)
+		_, _ = fmt.Fprintf(os.Stderr, "Warning: %s\n", msg)
+	}
+
+	// Dependency-link push pass: sync beads dependencies to GitLab issue links.
+	var linksPushed int
+	var linksLicenseSkipped int
+	var milestonesUpdated int
+	if push {
+		linksPushed, linksLicenseSkipped, milestonesUpdated = pushGitLabDependencyLinks(ctx, gt, store, opts, gitlabSyncDryRun, out, warnLink)
+	}
+
+	if jsonOutput {
+		return outputJSON(gitlabSyncResult{
+			DryRun:              gitlabSyncDryRun,
+			Pulled:              result.Stats.Pulled,
+			Pushed:              result.Stats.Pushed,
+			Created:             result.Stats.Created,
+			Updated:             result.Stats.Updated,
+			Skipped:             result.Stats.Skipped,
+			Conflicts:           result.Stats.Conflicts,
+			Errors:              result.Stats.Errors,
+			LinksPushed:         linksPushed,
+			LinksLicenseSkipped: linksLicenseSkipped,
+			MilestonesUpdated:   milestonesUpdated,
+			Warnings:            append(result.Warnings, linkWarnings...),
+		})
 	}
 
 	// Output results
@@ -531,6 +599,9 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		if result.Stats.Pushed > 0 {
 			_, _ = fmt.Fprintf(out, "✓ Pushed %d issues\n", result.Stats.Pushed)
 		}
+		if linksPushed > 0 {
+			_, _ = fmt.Fprintf(out, "✓ Synced %d dependency links\n", linksPushed)
+		}
 		if result.Stats.Conflicts > 0 {
 			_, _ = fmt.Fprintf(out, "→ Resolved %d conflicts\n", result.Stats.Conflicts)
 		}
@@ -541,7 +612,230 @@ func runGitLabSync(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintln(out, "Run without --dry-run to apply changes")
 	}
 
+	if !gitlabSyncDryRun {
+		commandDidWrite.Store(true)
+	}
+
 	return nil
+}
+
+// gitLabLicenseSkipMessage returns a single curated, actionable line explaining
+// that N blocks/is_blocked_by links were skipped because the GitLab instance's
+// license lacks the issue-blocking feature. Used instead of raw per-link API
+// errors so the degradation is transparent and not mistaken for a real failure.
+func gitLabLicenseSkipMessage(n int) string {
+	noun := "link"
+	if n != 1 {
+		noun = "links"
+	}
+	return fmt.Sprintf(
+		"Skipped %d dependency 'blocks' %s: GitLab 'blocks'/'is_blocked_by' requires Premium/Ultimate. "+
+			"'relates_to' links and milestones were applied normally.", n, noun)
+}
+
+// pushGitLabDependencyLinks runs the dependency-link + epic-milestone push pass:
+// it converts beads dependencies among the scoped issues (per opts) into GitLab
+// issue links (additive — stale remote links are left untouched) and repairs
+// epic-child milestones. Shared by `bd gitlab sync` and `bd gitlab push` so both
+// reach the same link parity. Dry-run plan lines are written to out (unless
+// --json); warnings are delivered via warn. Returns the number of links created,
+// license-skipped, and milestones updated.
+func pushGitLabDependencyLinks(ctx context.Context, gt *gitlab.Tracker, st storage.Storage, opts tracker.SyncOptions, dryRun bool, out io.Writer, warn func(string)) (linksPushed, linksLicenseSkipped, milestonesUpdated int) {
+	linkData, collectWarnings := collectGitLabLinkSyncData(ctx, st, opts)
+	for _, warning := range collectWarnings {
+		warn(warning)
+	}
+
+	client := gt.GitLabClient()
+	if client == nil {
+		return 0, 0, 0
+	}
+
+	if len(linkData.DesiredLinks) > 0 {
+		resolver := gitlab.NewLinkResolver(client)
+		res := resolver.PushLinks(ctx, linkData.DesiredLinks, gitlab.PushLinkOptions{
+			DryRun: dryRun,
+			OnPlan: func(link gitlab.DependencyLink) {
+				if !jsonOutput {
+					_, _ = fmt.Fprintf(out, "  [dry-run] Would create GitLab dependency link: #%d %s #%d\n",
+						link.SourceIID, link.LinkType, link.TargetIID)
+				}
+			},
+		})
+		linksPushed = res.Created
+		linksLicenseSkipped = res.LicenseSkipped
+		// Curated, license-aware degradation: one actionable line instead of
+		// a raw per-link API error, kept distinct from genuine failures.
+		if res.LicenseSkipped > 0 {
+			warn(gitLabLicenseSkipMessage(res.LicenseSkipped))
+		}
+		for _, err := range res.Errors {
+			warn(fmt.Sprintf("GitLab dependency link sync: %v", err))
+		}
+	}
+
+	if len(linkData.ScopedIssues) > 0 {
+		count, errs := gt.PushEpicMilestones(ctx, linkData.ScopedIssues, gitlab.EpicMilestoneOptions{
+			DryRun: dryRun,
+			OnPlan: func(issueID string, issueIID int, milestoneID int) {
+				if !jsonOutput {
+					_, _ = fmt.Fprintf(out, "  [dry-run] Would set GitLab milestone %d on %s (#%d)\n",
+						milestoneID, issueID, issueIID)
+				}
+			},
+		})
+		milestonesUpdated = count
+		for _, err := range errs {
+			warn(fmt.Sprintf("GitLab epic milestone sync: %v", err))
+		}
+	}
+
+	return linksPushed, linksLicenseSkipped, milestonesUpdated
+}
+
+type gitlabLinkSyncData struct {
+	ScopedIssues []*types.Issue
+	DesiredLinks []gitlab.DependencyLink
+}
+
+func collectGitLabLinkSyncData(ctx context.Context, st storage.Storage, opts tracker.SyncOptions) (gitlabLinkSyncData, []string) {
+	if st == nil {
+		return gitlabLinkSyncData{}, []string{"GitLab dependency link sync skipped: database not available"}
+	}
+
+	allIssues, err := st.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		return gitlabLinkSyncData{}, []string{fmt.Sprintf("GitLab dependency link sync skipped: %v", err)}
+	}
+
+	var warnings []string
+	var descendantSet map[string]bool
+	if opts.ParentID != "" {
+		descendantSet, err = buildGitLabDescendantSet(ctx, st, opts.ParentID)
+		if err != nil {
+			return gitlabLinkSyncData{}, []string{fmt.Sprintf("GitLab dependency link sync skipped: resolving parent %s: %v", opts.ParentID, err)}
+		}
+	}
+
+	scopedIssues := filterGitLabLinkScopedIssues(allIssues, opts, descendantSet)
+	scopedIssueIDs := gitlabScopedIssueIDSet(scopedIssues)
+	desired := make([]gitlab.DependencyLink, 0, len(scopedIssues))
+	for _, issue := range scopedIssues {
+		deps, err := st.GetDependenciesWithMetadata(ctx, issue.ID)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("GitLab dependency link sync skipped dependencies for %s: %v", issue.ID, err))
+			continue
+		}
+		for _, dep := range deps {
+			if !scopedIssueIDs[dep.ID] {
+				continue
+			}
+			link, ok := gitlab.LinkFromBeadsDependency(issue, dep)
+			if ok {
+				desired = append(desired, link)
+			}
+		}
+	}
+
+	return gitlabLinkSyncData{
+		ScopedIssues: scopedIssues,
+		DesiredLinks: gitlab.DeduplicateLinks(desired),
+	}, warnings
+}
+
+func filterGitLabLinkScopedIssues(issues []*types.Issue, opts tracker.SyncOptions, descendantSet map[string]bool) []*types.Issue {
+	result := make([]*types.Issue, 0, len(issues))
+	issueIDSet := gitlabIssueIDSet(opts.IssueIDs)
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		if issueIDSet != nil && !issueIDSet[issue.ID] {
+			continue
+		}
+		if descendantSet != nil && !descendantSet[issue.ID] {
+			continue
+		}
+		if !gitlabIssueAllowedByPushFilters(issue, opts) {
+			continue
+		}
+		result = append(result, issue)
+	}
+	return result
+}
+
+func gitlabIssueAllowedByPushFilters(issue *types.Issue, opts tracker.SyncOptions) bool {
+	if issue == nil {
+		return false
+	}
+	if opts.ExcludeEphemeral && issue.Ephemeral {
+		return false
+	}
+	if len(opts.TypeFilter) > 0 {
+		matched := false
+		for _, issueType := range opts.TypeFilter {
+			if issue.IssueType == issueType {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	for _, issueType := range opts.ExcludeTypes {
+		if issue.IssueType == issueType {
+			return false
+		}
+	}
+	if opts.State == "open" && issue.Status == types.StatusClosed {
+		return false
+	}
+	return true
+}
+
+func buildGitLabDescendantSet(ctx context.Context, st storage.Storage, parentID string) (map[string]bool, error) {
+	result := map[string]bool{parentID: true}
+	queue := []string{parentID}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		dependents, err := st.GetDependentsWithMetadata(ctx, current)
+		if err != nil {
+			return nil, fmt.Errorf("getting dependents of %s: %w", current, err)
+		}
+		for _, dep := range dependents {
+			if dep.DependencyType == types.DepParentChild && !result[dep.Issue.ID] {
+				result[dep.Issue.ID] = true
+				queue = append(queue, dep.Issue.ID)
+			}
+		}
+	}
+	return result, nil
+}
+
+func gitlabIssueIDSet(ids []string) map[string]bool {
+	if len(ids) == 0 {
+		return nil
+	}
+	result := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			result[id] = true
+		}
+	}
+	return result
+}
+
+func gitlabScopedIssueIDSet(issues []*types.Issue) map[string]bool {
+	result := make(map[string]bool, len(issues))
+	for _, issue := range issues {
+		if issue != nil && issue.ID != "" {
+			result[issue.ID] = true
+		}
+	}
+	return result
 }
 
 // buildCLIFilter constructs an IssueFilter from CLI flags.
@@ -584,6 +878,59 @@ func buildGitLabPullHooks(ctx context.Context) *tracker.PullHooks {
 			}
 			return nil
 		},
+	}
+}
+
+// buildGitLabPushHooks creates PushHooks for GitLab-specific push behavior.
+func buildGitLabPushHooks() *tracker.PushHooks {
+	return &tracker.PushHooks{
+		ContentEqual: gitLabPushContentEqual,
+	}
+}
+
+func gitLabPushContentEqual(local *types.Issue, remote *tracker.TrackerIssue) bool {
+	if local == nil || remote == nil {
+		return false
+	}
+
+	// Epics are represented as GitLab milestones. GitLab can return a milestone
+	// updated_at that is older than local beads bookkeeping even when pushed
+	// fields are already identical, so use content equality to avoid repeat PUTs.
+	if local.IssueType == types.TypeEpic && gitLabMilestonePushFieldsEqual(local, remote) {
+		return true
+	}
+
+	// Preserve the engine's default skip behavior for everything this hook does
+	// not handle explicitly.
+	return !remote.UpdatedAt.Before(local.UpdatedAt)
+}
+
+func gitLabMilestonePushFieldsEqual(local *types.Issue, remote *tracker.TrackerIssue) bool {
+	if !gitLabComparableTextEqual(local.Title, remote.Title) {
+		return false
+	}
+	if !gitLabComparableTextEqual(local.Description, remote.Description) {
+		return false
+	}
+	return gitLabMilestoneStateEqual(local.Status, remote.State)
+}
+
+func gitLabComparableTextEqual(a, b string) bool {
+	return strings.TrimSpace(strings.ReplaceAll(a, "\r\n", "\n")) ==
+		strings.TrimSpace(strings.ReplaceAll(b, "\r\n", "\n"))
+}
+
+func gitLabMilestoneStateEqual(status types.Status, remoteState interface{}) bool {
+	remoteStateString, ok := remoteState.(string)
+	if !ok {
+		return false
+	}
+	remoteStateString = strings.ToLower(strings.TrimSpace(remoteStateString))
+	switch status {
+	case types.StatusClosed:
+		return remoteStateString == "closed"
+	default:
+		return remoteStateString == "active"
 	}
 }
 

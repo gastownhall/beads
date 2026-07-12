@@ -34,12 +34,12 @@ const gitAddTimeout = 5 * time.Second
 
 // maybeAutoExport writes a git-tracked JSONL file if enabled and due.
 // Called from PersistentPostRun after auto-backup.
-func maybeAutoExport(ctx context.Context, serverMode, allowEmptyOverwrite bool) error {
-	if serverMode {
-		debug.Logf("auto-export: skipping — server mode\n")
-		return nil
-	}
-
+//
+// This runs in server mode too: clients of a shared dolt sql-server rely on
+// the JSONL export for git-durable state exactly like embedded users do — in
+// topologies without a Dolt remote it is the only durability. Skipping here
+// made `git push` silently publish stale issue state (wy-4ope).
+func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	// Skip when running as a git hook to avoid re-export during pre-commit.
 	if os.Getenv("BD_GIT_HOOK") == "1" {
 		debug.Logf("auto-export: skipping — running as git hook\n")
@@ -80,9 +80,9 @@ func maybeAutoExport(ctx context.Context, serverMode, allowEmptyOverwrite bool) 
 		interval = 60 * time.Second
 	}
 
-	// Change detection via Dolt commit hash. This is cheap, so do it before
+	// Change detection via Dolt state hash. This is cheap, so do it before
 	// throttle: when there are no changes, there is nothing to throttle.
-	currentCommit, err := store.GetCurrentCommit(ctx)
+	currentCommit, err := storeStateHash(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
 		return nil
@@ -162,6 +162,18 @@ func maybeAutoExport(ctx context.Context, serverMode, allowEmptyOverwrite bool) 
 	}
 	saveExportAutoState(beadsDir, &newState)
 	return nil
+}
+
+// storeStateHash returns the hash used for auto-export change detection.
+// It prefers a working-set-aware hash (storage.StateHasher) over the HEAD
+// commit: in server mode dolt auto-commit is off, so writes stay in the
+// working set and HEAD does not advance — HEAD-based detection would go
+// permanently quiet after the first export.
+func storeStateHash(ctx context.Context) (string, error) {
+	if sh, ok := storage.UnwrapStore(store).(storage.StateHasher); ok {
+		return sh.GetStateHash(ctx)
+	}
+	return store.GetCurrentCommit(ctx)
 }
 
 // shouldExport reports whether the throttle window has elapsed, or whether
@@ -356,6 +368,16 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 	issues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to search issues: %w", err)
+	}
+
+	// Owner-exclusion safety net: auto-export writes the git-committed
+	// .beads/issues.jsonl, so the export.exclude_owners config (and legacy
+	// export.exclude_owner) must filter here too. Otherwise contributor/personal
+	// issues that the manual `bd export` path excludes can still leak into git
+	// history and PRs via auto-export (maphew review, be-e2nb). Auto-export has
+	// no --exclude-owner flag, so only config-sourced owners apply here.
+	if ownerExcludes := buildOwnerExcludeSet(ctx, nil); len(ownerExcludes) > 0 {
+		issues = filterOutOwners(issues, ownerExcludes)
 	}
 
 	if err := guardAutoExportOverwrite(path, infraTypeSet, includeMemories); err != nil {

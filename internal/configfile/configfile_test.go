@@ -311,6 +311,9 @@ func TestDoltServerMode(t *testing.T) {
 	})
 
 	t.Run("GetDoltServerPort", func(t *testing.T) {
+		// Clear port env vars so the table-driven configs are the source of truth.
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
 		tests := []struct {
 			name string
 			cfg  *Config
@@ -626,23 +629,34 @@ func TestProxiedServerClientInfo_ResolvedPaths(t *testing.T) {
 	})
 }
 
-// TestGetBackendAlwaysDolt tests that GetBackend always returns "dolt".
-func TestGetBackendAlwaysDolt(t *testing.T) {
-	tests := []struct {
+// TestGetBackendAllowlist verifies the allowlist semantics: the SQL backends
+// (postgres, mysql, sqlite) are honored; every other value (empty, legacy,
+// genuinely unknown) falls back to Dolt. This is the guard behind backend selection
+// — a typo in metadata.json must fail safe to Dolt, never to an unintended backend.
+func TestGetBackendAllowlist(t *testing.T) {
+	fallsBackToDolt := []struct {
 		name string
 		cfg  *Config
 	}{
 		{name: "explicit dolt", cfg: &Config{Backend: BackendDolt}},
 		{name: "empty backend", cfg: &Config{Backend: ""}},
 		{name: "legacy config", cfg: &Config{}},
-		{name: "stale sqlite value", cfg: &Config{Backend: "sqlite"}},
-		{name: "unknown backend", cfg: &Config{Backend: "postgres"}},
+		{name: "unknown backend", cfg: &Config{Backend: "mystery"}},
 	}
-
-	for _, tt := range tests {
+	for _, tt := range fallsBackToDolt {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.cfg.GetBackend(); got != BackendDolt {
 				t.Errorf("GetBackend() = %q, want %q", got, BackendDolt)
+			}
+		})
+	}
+
+	honored := []string{BackendPostgres, BackendMySQL, BackendSQLite}
+	for _, backend := range honored {
+		t.Run(backend+" honored", func(t *testing.T) {
+			cfg := &Config{Backend: backend}
+			if got := cfg.GetBackend(); got != backend {
+				t.Errorf("GetBackend() = %q, want %q", got, backend)
 			}
 		})
 	}
@@ -705,6 +719,9 @@ func TestGetCapabilities(t *testing.T) {
 
 // TestDoltServerModeRoundtrip tests that server mode config survives save/load
 func TestDoltServerModeRoundtrip(t *testing.T) {
+	// Clear port env vars so saved/loaded port comes from config, not ambient env.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0750); err != nil {

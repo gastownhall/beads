@@ -47,7 +47,7 @@ var BuiltinRecipes = map[string]Recipe{
 		Name:        "Cursor IDE",
 		Path:        ".cursor/rules/beads.mdc",
 		Type:        TypeFile,
-		Description: "Cursor IDE rules file",
+		Description: "Cursor IDE rules file + agent hooks (prime on session start, restore after compaction)",
 	},
 	"windsurf": {
 		Name:        "Windsurf",

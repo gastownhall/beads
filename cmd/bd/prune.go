@@ -23,6 +23,12 @@ Use ` + "`--pattern '*'`" + ` if you really do want to sweep everything closed.
 Deletes: issues, dependencies, labels, events, and comments for matching beads.
 Skips: pinned beads (protected), open/in-progress beads, and ephemeral beads.
 
+Also skips closed beads whose ID appears in the description, notes, or
+comments of any open / in-progress bead. This protects ADR / decision /
+verification trails that downstream beads still cite. Use
+--ignore-references to override (e.g., when bulk-decommissioning a
+retired label across the rig).
+
 To delete closed ephemeral beads (wisps, transient molecules) use
 ` + "`bd purge`" + ` instead.
 
@@ -45,20 +51,23 @@ EXAMPLES:
 			}
 		}()
 
+		ignoreRefs, _ := cmd.Flags().GetBool("ignore-references")
 		return runPurgeOrPrune(cmd, purgeScope{
-			cmdName:        "prune",
-			pastTense:      "pruned",
-			countKey:       "pruned_count",
-			dryRunCountKey: "prune_count",
-			subjectNoun:    "closed bead",
-			ephemeralOnly:  false,
-			requireFilter:  true,
+			cmdName:          "prune",
+			pastTense:        "pruned",
+			countKey:         "pruned_count",
+			dryRunCountKey:   "prune_count",
+			subjectNoun:      "closed bead",
+			ephemeralOnly:    false,
+			requireFilter:    true,
+			ignoreReferences: ignoreRefs,
 		})
 	},
 }
 
 func init() {
 	pruneCmd.Flags().BoolP("force", "f", false, "Actually prune (without this, shows preview)")
+	pruneCmd.Flags().Bool("ignore-references", false, "Delete closed beads even when referenced by open beads (use with care; see --help for details)")
 	pruneCmd.Flags().Bool("dry-run", false, "Preview what would be pruned with stats")
 	pruneCmd.Flags().String("older-than", "", "Only prune beads closed more than N ago (e.g., 30d, 2w, 60)")
 	pruneCmd.Flags().String("pattern", "", "Only prune beads matching ID glob pattern (e.g., 'gm-old-*')")

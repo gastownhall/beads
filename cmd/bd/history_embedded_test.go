@@ -121,6 +121,22 @@ func TestEmbeddedHistory(t *testing.T) {
 		}
 	})
 
+	t.Run("events_json_output", func(t *testing.T) {
+		events := bdHistoryJSON(t, bd, dir, issue.ID, "--events")
+		if len(events) == 0 {
+			t.Fatal("expected non-empty history events")
+		}
+		var sawStatus bool
+		for _, event := range events {
+			if event["event_type"] == "status_changed" {
+				sawStatus = true
+			}
+		}
+		if !sawStatus {
+			t.Fatalf("expected status_changed event in history events, got %#v", events)
+		}
+	})
+
 	// ===== --json output =====
 
 	t.Run("json_output_structure", func(t *testing.T) {

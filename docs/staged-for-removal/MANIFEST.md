@@ -1,11 +1,16 @@
 # Staged-for-Removal Manifest
 
-Reviewed: 2026-05-08
+Reviewed: 2026-07-07
 
 This directory preserves docs that no longer meet the active-doc evidence bar.
 Do not restore a file wholesale. Rescue only the specific paragraphs that are
 verified against current CLI behaviour, tests, or used code, and move them into
 the canonical doc named in the rescue criteria.
+
+All 11 entries below were staged on 2026-05-08 and have seen zero rescue
+activity through the 2026-07-07 re-review. They reach the deletion threshold
+around 2026-09-09 (two months after that re-review). The next docs health
+check executes the deletion.
 
 | Original path | Staged path | Reason staged | Evidence gap | Rescue criteria |
 |---|---|---|---|---|

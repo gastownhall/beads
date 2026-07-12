@@ -15,39 +15,42 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) {
-	in := gatherReadyInput(cmd)
+func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
+	in, err := gatherReadyInput(cmd)
+	if err != nil {
+		return err
+	}
 
 	if uowProvider == nil {
-		FatalError("proxied-server UOW provider not initialized")
+		return HandleError("proxied-server UOW provider not initialized")
 	}
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		FatalErrorRespectJSON("open unit of work: %v", err)
+		return HandleErrorRespectJSON("open unit of work: %v", err)
 	}
 	defer uw.Close(ctx)
 
 	switch {
 	case in.gated:
-		runReadyProxiedGated(ctx, uw, in)
+		return runReadyProxiedGated(ctx, uw, in)
 	case in.molID != "":
-		runReadyProxiedMolecule(ctx, uw, in)
+		return runReadyProxiedMolecule(ctx, uw, in)
 	case in.explain:
-		runReadyProxiedExplain(ctx, uw, in)
+		return runReadyProxiedExplain(ctx, uw, in)
 	case in.claim:
-		runReadyProxiedClaim(ctx, uw, in)
+		return runReadyProxiedClaim(ctx, uw, in)
 	default:
-		runReadyProxiedList(ctx, uw, in)
+		return runReadyProxiedList(ctx, uw, in)
 	}
 }
 
-func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) {
+func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	if uowProvider == nil {
-		FatalError("proxied-server UOW provider not initialized")
+		return HandleError("proxied-server UOW provider not initialized")
 	}
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		FatalErrorRespectJSON("open unit of work: %v", err)
+		return HandleErrorRespectJSON("open unit of work: %v", err)
 	}
 	defer uw.Close(ctx)
 
@@ -58,7 +61,7 @@ func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) {
 
 	blocked, err := uw.IssueUseCase().GetBlockedIssues(ctx, filter)
 	if err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if jsonOutput {
@@ -66,11 +69,11 @@ func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) {
 			blocked = []*types.BlockedIssue{}
 		}
 		_ = outputJSON(blocked)
-		return
+		return nil
 	}
 	if len(blocked) == 0 {
 		fmt.Printf("\n%s No blocked issues\n\n", ui.RenderPass("✨"))
-		return
+		return nil
 	}
 	fmt.Printf("\n%s Blocked issues (%d):\n\n", ui.RenderFail("🚫"), len(blocked))
 	for _, issue := range blocked {
@@ -85,13 +88,14 @@ func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) {
 			issue.BlockedByCount, blockedBy)
 		fmt.Println()
 	}
+	return nil
 }
 
-func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) {
+func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) error {
 	if in.jsonOut {
 		page, err := uw.IssueUseCase().GetReadyWorkWithCounts(ctx, in.filter)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 		results := page.Items
 		if results == nil {
@@ -101,12 +105,12 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		if page.HasMore && in.filter.Limit > 0 {
 			fmt.Fprintf(os.Stderr, "Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results))
 		}
-		return
+		return nil
 	}
 
 	page, err := uw.IssueUseCase().GetReadyWork(ctx, in.filter)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 	issues := page.Items
 	truncated := page.HasMore && in.filter.Limit > 0
@@ -124,7 +128,7 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		} else {
 			fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
 		}
-		return
+		return nil
 	}
 
 	parentEpicMap := buildParentEpicMapProxied(ctx, uw, issues)
@@ -151,14 +155,15 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 	if truncated {
 		fmt.Printf("%s\n\n", ui.RenderMuted(fmt.Sprintf("Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.", len(issues))))
 	}
+	return nil
 }
 
-func runReadyProxiedClaim(ctx context.Context, uw uow.UnitOfWork, in readyInput) {
+func runReadyProxiedClaim(ctx context.Context, uw uow.UnitOfWork, in readyInput) error {
 	CheckReadonly("ready --claim")
 
 	res, err := uw.IssueUseCase().ClaimReadyIssue(ctx, in.filter, actor)
 	if err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 	if !res.Claimed {
 		if in.jsonOut {
@@ -166,7 +171,7 @@ func runReadyProxiedClaim(ctx context.Context, uw uow.UnitOfWork, in readyInput)
 		} else {
 			fmt.Printf("\n%s No ready work to claim\n\n", ui.RenderWarn("○"))
 		}
-		return
+		return nil
 	}
 
 	var jsonPayload []*types.IssueWithCounts
@@ -174,8 +179,8 @@ func runReadyProxiedClaim(ctx context.Context, uw uow.UnitOfWork, in readyInput)
 		jsonPayload = buildReadyIssueOutputProxied(ctx, uw, []*types.Issue{res.Issue})
 	}
 
-	if err := uw.Commit(ctx, fmt.Sprintf("bd: ready --claim %s", res.Issue.ID)); err != nil && !isDoltNothingToCommit(err) {
-		FatalErrorRespectJSON("failed to commit: %v", err)
+	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: ready --claim %s", res.Issue.ID)); err != nil && !isDoltNothingToCommit(err) {
+		return HandleErrorRespectJSON("failed to commit: %v", err)
 	}
 	SetLastTouchedID(res.Issue.ID)
 
@@ -184,22 +189,23 @@ func runReadyProxiedClaim(ctx context.Context, uw uow.UnitOfWork, in readyInput)
 	} else {
 		fmt.Printf("%s Claimed issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(res.Issue.ID, res.Issue.Title))
 	}
+	return nil
 }
 
-func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput) {
+func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput) error {
 	filter := types.WorkFilter{
 		Status:     types.StatusOpen,
 		SortPolicy: types.SortPolicyPriority,
 	}
 	readyPage, err := uw.IssueUseCase().GetReadyWork(ctx, filter)
 	if err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 	readyIssues := readyPage.Items
 
 	blockedIssues, err := uw.IssueUseCase().GetBlockedIssues(ctx, types.WorkFilter{})
 	if err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	readyIDs := make([]string, len(readyIssues))
@@ -254,7 +260,7 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 
 	if jsonOutput {
 		_ = outputJSON(explanation)
-		return
+		return nil
 	}
 
 	fmt.Printf("\n%s Ready Work Explanation\n\n", ui.RenderAccent("📊"))
@@ -306,13 +312,14 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 		fmt.Printf(", %d cycle(s)", explanation.Summary.CycleCount)
 	}
 	fmt.Printf("\n\n")
+	return nil
 }
 
-func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInput) {
+func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInput) error {
 	moleculeID := in.molID
 	subgraph, err := proxiedLoadTemplateSubgraph(ctx, uw, moleculeID)
 	if err != nil {
-		FatalError("loading molecule: %v", err)
+		return HandleError("loading molecule: %v", err)
 	}
 
 	analysis := analyzeMoleculeParallel(subgraph)
@@ -339,7 +346,7 @@ func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInp
 			ParallelGroups: analysis.ParallelGroups,
 		}
 		_ = outputJSON(output)
-		return
+		return nil
 	}
 
 	fmt.Printf("\n%s Ready steps in molecule: %s\n", ui.RenderAccent("🧪"), subgraph.Root.Title)
@@ -347,7 +354,7 @@ func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInp
 	fmt.Printf("   Total: %d steps, %d ready\n", analysis.TotalSteps, len(readySteps))
 	if len(readySteps) == 0 {
 		fmt.Printf("\n%s No ready steps (all blocked or completed)\n\n", ui.RenderWarn("✨"))
-		return
+		return nil
 	}
 	if len(analysis.ParallelGroups) > 0 {
 		fmt.Printf("\n%s Parallel Groups:\n", ui.RenderPass("⚡"))
@@ -388,9 +395,10 @@ func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInp
 		}
 	}
 	fmt.Println()
+	return nil
 }
 
-func runReadyProxiedGated(ctx context.Context, uw uow.UnitOfWork, _ readyInput) {
+func runReadyProxiedGated(ctx context.Context, uw uow.UnitOfWork, _ readyInput) error {
 	gateType := types.IssueType("gate")
 	closedStatus := types.StatusClosed
 	gatePage, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{
@@ -398,16 +406,16 @@ func runReadyProxiedGated(ctx context.Context, uw uow.UnitOfWork, _ readyInput) 
 		Status:    &closedStatus,
 	})
 	if err != nil {
-		FatalErrorRespectJSON("error searching for closed gates: %v", err)
+		return HandleErrorRespectJSON("error searching for closed gates: %v", err)
 	}
 	if len(gatePage.Items) == 0 {
 		emitGatedEmpty()
-		return
+		return nil
 	}
 
 	readyPage, err := uw.IssueUseCase().GetReadyWork(ctx, types.WorkFilter{})
 	if err != nil {
-		FatalErrorRespectJSON("error getting ready work: %v", err)
+		return HandleErrorRespectJSON("error getting ready work: %v", err)
 	}
 	readySet := make(map[string]*types.Issue, len(readyPage.Items))
 	for _, issue := range readyPage.Items {
@@ -417,7 +425,7 @@ func runReadyProxiedGated(ctx context.Context, uw uow.UnitOfWork, _ readyInput) 
 	hookedStatus := types.StatusHooked
 	hookedPage, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{Status: &hookedStatus})
 	if err != nil {
-		FatalErrorRespectJSON("error searching for hooked issues: %v", err)
+		return HandleErrorRespectJSON("error searching for hooked issues: %v", err)
 	}
 	hookedSet := make(map[string]*types.Issue, len(hookedPage.Items))
 	for _, issue := range hookedPage.Items {
@@ -476,11 +484,11 @@ func runReadyProxiedGated(ctx context.Context, uw uow.UnitOfWork, _ readyInput) 
 			output.Molecules = []*GatedMolecule{}
 		}
 		_ = outputJSON(output)
-		return
+		return nil
 	}
 	if len(molecules) == 0 {
 		fmt.Printf("\n%s No molecules ready for gate-resume dispatch\n\n", ui.RenderPass("✨"))
-		return
+		return nil
 	}
 	fmt.Printf("\n%s Molecules ready for gate-resume dispatch (%d):\n\n", ui.RenderAccent("🚪"), len(molecules))
 	for _, m := range molecules {
@@ -489,6 +497,7 @@ func runReadyProxiedGated(ctx context.Context, uw uow.UnitOfWork, _ readyInput) 
 		fmt.Printf("    Ready step:  %s (%s)\n", ui.RenderID(m.ReadyStep.ID), m.ReadyStep.Title)
 		fmt.Println()
 	}
+	return nil
 }
 
 func emitGatedEmpty() {

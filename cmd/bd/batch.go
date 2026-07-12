@@ -24,8 +24,8 @@ import (
 // and dispatches directly against a shared storage.Transaction so the entire
 // batch executes as a single dolt transaction (one DOLT_COMMIT).
 //
-// The supported grammar is a documented subset that matches what the gascity
-// shell-script "orders" (gate-sweep.sh, spawn-storm-detect.sh,
+// The supported grammar is a documented subset that matches what a downstream
+// consumer's shell-script "orders" (gate-sweep.sh, spawn-storm-detect.sh,
 // cross-rig-deps.sh) actually call in loops. See the Long help below for the
 // exact list. Unsupported commands error out loudly.
 

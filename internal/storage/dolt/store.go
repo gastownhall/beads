@@ -207,6 +207,14 @@ type Config struct {
 	Database       string // Database name within Dolt (default: "beads")
 	ReadOnly       bool   // Open in read-only mode (skip schema init)
 
+	// LenientOpen opens the store leniently: embedded mode only. A migration
+	// gate refusal (#4259) or a dirty-working-set refusal (#4566) skips the
+	// migration instead of failing the open. Set for working-set-reconcile
+	// commands (bd dolt commit, bd vc commit; #4566), whose entire purpose is
+	// to clear the working set that the migration would otherwise refuse to
+	// touch. Ignored in server mode.
+	LenientOpen bool
+
 	// Server connection options
 	ServerSocket   string // Unix domain socket path (overrides Host/Port when set)
 	ServerHost     string // Server host (default: 127.0.0.1)
@@ -243,6 +251,14 @@ type Config struct {
 	// ServerHost/Port/Socket/User. Set by the store factory based on
 	// metadata.json dolt_mode=proxied-server.
 	ProxiedServer bool
+
+	// Gateway indicates the server is an authenticating gateway server: a credential
+	// command supplies a short-lived token as the connection username. bd treats such a
+	// server as owning database routing and schema, so it connects with the project
+	// database, skips the no-database admin probe, and never issues SHOW DATABASES /
+	// CREATE DATABASE or schema DDL (drift check only, like ReadOnly). Set by
+	// ApplyGatewayCredential, never by hand.
+	Gateway bool
 
 	// AutoStart enables transparent server auto-start when connection fails.
 	// When true and the host is localhost, bd will start a dolt sql-server
@@ -300,10 +316,39 @@ func withCLIExecTimeout(ctx context.Context) (context.Context, context.CancelFun
 	return context.WithTimeout(ctx, cliExecTimeout)
 }
 
-// fsckTimeout is the maximum time to wait for dolt fsck to verify the local
-// chunk store before a push. fsck reads local files only; 30 seconds is ample
-// for any DB size we currently operate.
+// fsckTimeout is the default maximum time to wait for dolt fsck to verify the
+// local chunk store before a push. fsck reads local files only; 30 seconds is
+// ample for small stores. Large stores may need more time; set
+// BEADS_FSCK_TIMEOUT to override.
 const fsckTimeout = 30 * time.Second
+
+// fsckTimeoutEnv is the environment variable that overrides fsckTimeout.
+const fsckTimeoutEnv = "BEADS_FSCK_TIMEOUT"
+
+// fsckTimeoutDuration returns the configured fsck timeout. The env var
+// BEADS_FSCK_TIMEOUT overrides the compiled-in fsckTimeout const; valid
+// time.ParseDuration strings (e.g. "2m", "90s") or bare numbers treated as
+// seconds (e.g. "90") are accepted. Unset or invalid values fall back to
+// fsckTimeout.
+func fsckTimeoutDuration() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(fsckTimeoutEnv))
+	if raw == "" {
+		return fsckTimeout
+	}
+	if d, err := time.ParseDuration(raw); err == nil {
+		if d > 0 {
+			return d
+		}
+		return fsckTimeout
+	}
+	if d, err := time.ParseDuration(raw + "s"); err == nil {
+		if d > 0 {
+			return d
+		}
+		return fsckTimeout
+	}
+	return fsckTimeout
+}
 
 // Retry configuration for transient connection errors (stale pool connections,
 // brief network issues, server restarts).
@@ -1125,9 +1170,16 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		return nil, err
 	}
 
+	// Close the pool on any failure path below; cleared once ownership passes to the caller.
+	storeReady := false
+	defer func() {
+		if !storeReady {
+			_ = db.Close()
+		}
+	}()
+
 	// Test connection
 	if err := db.PingContext(ctx); err != nil {
-		_ = db.Close()
 		return nil, fmt.Errorf("failed to ping Dolt database: %w", err)
 	}
 
@@ -1154,12 +1206,20 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		autoStartedServerDir: autoStartedDir,
 	}
 
-	if cfg.ReadOnly {
-		if err := schema.CheckForwardDrift(ctx, db); err != nil {
-			_ = db.Close()
-			return nil, err
-		}
-	} else {
+	// Forward-drift guard runs on read-only AND writable opens. A binary older
+	// than the database's schema cannot migrate it forward: MigrateUp no-ops
+	// when the DB is already past the binary's latest migration (atLatest uses
+	// >=), so without this guard a writable open would proceed and later queries
+	// would fail with cryptic unknown-column errors instead of a clear
+	// "upgrade bd" message (the stale-binary incident behind #4135/#4137).
+	if err := schema.CheckForwardDrift(ctx, db); err != nil {
+		return nil, err
+	}
+	// A gateway server owns the schema: it provisions each project at its deployed bd
+	// version, so a client must never run migrations (DDL) against it. Treat it like
+	// ReadOnly for schema — the forward-drift guard above still protects a stale client
+	// binary.
+	if !cfg.ReadOnly && !cfg.Gateway {
 		if err := store.initSchema(ctx); err != nil {
 			return nil, fmt.Errorf("failed to initialize schema: %w", err)
 		}
@@ -1173,7 +1233,6 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			verifyErr = store.verifyProjectIdentity(ctx, cfg.BeadsDir)
 		}
 		if verifyErr != nil {
-			_ = db.Close()
 			return nil, verifyErr
 		}
 	}
@@ -1194,6 +1253,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// These report sql.DB.Stats() on each OTel scrape — no-op when telemetry is off.
 	store.registerPoolGauges()
 
+	// Ownership of db transfers to the returned store; suppress the deferred
+	// close above. Must be the last thing before the success return.
+	storeReady = true
 	return store, nil
 }
 
@@ -1408,19 +1470,39 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// pairs in dolt-server.log).
 	applyPoolLimits(db, cfg)
 
+	// Close the pool on any failure path below; cleared at the success return.
+	connReady := false
+	defer func() {
+		if !connReady {
+			_ = db.Close()
+		}
+	}()
+
+	// A gateway server owns database routing and existence, so bd does not probe or create
+	// it: skip the no-database admin connection (and the SHOW DATABASES / CREATE DATABASE
+	// it would run) and verify the project connection directly — a successful connect IS
+	// the existence proof. connReady must be set before returning the pool, or the defer
+	// above would close the *sql.DB we just handed the caller.
+	if cfg.Gateway {
+		if err := db.PingContext(ctx); err != nil {
+			return nil, "", fmt.Errorf("failed to connect to gateway server %s:%d (database %q): %w",
+				cfg.ServerHost, cfg.ServerPort, cfg.Database, err)
+		}
+		connReady = true
+		return db, connStr, nil
+	}
+
 	// Ensure database exists (may need to create it)
 	// First connect without database to create it
 	initConnStr := buildServerDSN(cfg, "")
 	initDB, err := sql.Open("mysql", initConnStr)
 	if err != nil {
-		_ = db.Close()
 		return nil, "", fmt.Errorf("failed to open init connection: %w", err)
 	}
 	defer func() { _ = initDB.Close() }()
 
 	// Validate database name to prevent SQL injection via backtick escaping
 	if err := ValidateDatabaseName(cfg.Database); err != nil {
-		_ = db.Close()
 		return nil, "", fmt.Errorf("invalid database name %q: %w", cfg.Database, err)
 	}
 
@@ -1428,7 +1510,6 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// This is the last line of defense against test pollution (Clown Shows #12-#18).
 	// Pattern-based, not env-var-based — env vars can be misconfigured or missing.
 	if isTestDatabaseName(cfg.Database) && cfg.ServerPort == DefaultSQLPort {
-		_ = db.Close()
 		return nil, "", fmt.Errorf(
 			"REFUSED: will not CREATE DATABASE %q on production port %d — "+
 				"this is a test database name on the production server (see DOLT-WAR-ROOM.md)",
@@ -1445,14 +1526,12 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// match unrelated databases with LIKE.
 	dbExists, checkErr := databaseExistsOnServer(ctx, initDB, cfg.Database)
 	if checkErr != nil {
-		_ = db.Close()
 		return nil, "", fmt.Errorf("failed to check if database %q exists on server %s:%d: %w",
 			cfg.Database, cfg.ServerHost, cfg.ServerPort, checkErr)
 	}
 
 	if !dbExists {
 		if !cfg.CreateIfMissing {
-			_ = db.Close()
 			return nil, "", databaseNotFoundError(cfg)
 		}
 
@@ -1461,7 +1540,6 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 			// Dolt may return error 1007 even with IF NOT EXISTS - ignore if database already exists
 			errLower := strings.ToLower(err.Error())
 			if !strings.Contains(errLower, "database exists") && !strings.Contains(errLower, "1007") {
-				_ = db.Close()
 				// Check for connection refused - server likely not running
 				if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
 					return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using an orchestrator",
@@ -1491,10 +1569,10 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 		}
 		return nil
 	}, backoff.WithContext(bo, ctx)); err != nil {
-		_ = db.Close()
 		return nil, "", fmt.Errorf("database %q not available after CREATE DATABASE: %w", cfg.Database, err)
 	}
 
+	connReady = true
 	return db, connStr, nil
 }
 
@@ -1606,8 +1684,34 @@ func (s *DoltStore) initSchema(ctx context.Context) error {
 	// empty dolt_remotes table even though remotes are persisted in .dolt/config
 	// (GH#2315), so an SQL-only check would miss the remote on the first write
 	// open after an upgrade.
+	//
+	// adopt injects the driver-side fast-forward ancestry primitives
+	// (mybd-ae1i) so the smart gate can distinguish a losslessly
+	// fast-forwardable remote-ahead case (smartAdoptFastForward) from the
+	// plain destructive adopt, and auto-execute it: CheckRemoteMigrateGate*
+	// calls FastForward and returns nil (proceed, nothing pending) once HEAD
+	// has actually advanced; any execution failure (dirty working set raced
+	// in, non-fast-forward, concurrent writer) falls back to the plain
+	// destructive adopt directive instead of forcing the write.
+	adopt := &schema.FastForwardAdopter{
+		IsStrictAncestor: func(ctx context.Context, db schema.DBConn, ref string) (bool, error) {
+			return versioncontrolops.LocalIsStrictAncestorOf(ctx, db, ref)
+		},
+		WorkingSetClean: func(ctx context.Context, db schema.DBConn) (bool, error) {
+			return versioncontrolops.WorkingSetClean(ctx, db)
+		},
+		FastForward: func(ctx context.Context, db schema.DBConn, ref string) error {
+			return versioncontrolops.FastForwardAdopt(ctx, db, ref)
+		},
+		// s.initSchema is only ever invoked from the writable-open path (the
+		// caller guards it on !cfg.ReadOnly), so this is always false in
+		// practice today — wired explicitly anyway so the adopter's safety
+		// invariant (ReadOnly means "cannot write here") does not silently
+		// depend on that external guard alone.
+		ReadOnly: s.readOnly,
+	}
 	gate := func(ctx context.Context, db *sql.DB) error {
-		return schema.CheckRemoteMigrateGateWithRemoteCheck(ctx, db, s.hasPersistedCLIRemote)
+		return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
 	}
 	_, err = initSchemaOnDBWithRetryAndGate(ctx, migDB, gate)
 	return err
@@ -2281,7 +2385,12 @@ func (s *DoltStore) credentialsForRemote(remote string) *remoteCredentials {
 // re-pushes that remote faithfully propagates the dangling reference.
 //
 // If CLIDir is empty or .dolt/noms does not exist, the check is skipped.
-// Any fsck failure returns ErrDanglingReference — the push is NOT attempted.
+// Five outcomes are possible when fsck exits non-zero (see classifyFSCKFailure):
+//   - non-empty output, could-not-open: skipped with a log warning.
+//   - non-empty output, other: ErrDanglingReference — push aborted.
+//   - parent context canceled: cancellation error — push aborted.
+//   - parent context deadline exceeded: ErrFSCKTimeout (caller timeout) — push aborted.
+//   - fsck own timeout: ErrFSCKTimeout (raise BEADS_FSCK_TIMEOUT) — push aborted.
 func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	dir := s.CLIDir()
 	if dir == "" {
@@ -2290,34 +2399,84 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	if _, err := os.Stat(filepath.Join(dir, ".dolt", "noms")); os.IsNotExist(err) {
 		return nil
 	}
-	fsckCtx, cancel := context.WithTimeout(ctx, fsckTimeout)
+	fsckCtx, cancel := context.WithTimeout(ctx, fsckTimeoutDuration())
 	defer cancel()
 	cmd := exec.CommandContext(fsckCtx, "dolt", "fsck", "--quiet") // #nosec G204 -- fixed command
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		output := strings.TrimSpace(string(out))
-		// Distinguish "fsck couldn't run the integrity check" (environmental /
-		// tooling issue) from "fsck ran and found integrity problems" (the actual
-		// concern of PR #3447). Wrapping an open-failure as ErrDanglingReference
-		// misleads users into thinking their db is corrupt.
-		//
-		// Concrete example: dolthub/dolt#10915 (Windows url.Parse bug, pre-v1.86.4)
-		// caused fsck to construct a malformed file path and fail to open; users
-		// running `bd dolt push` saw "dangling chunk reference" errors on perfectly
-		// healthy databases.
-		//
-		// The two known "couldn't open" signatures from dolt are covered below.
-		// Any other fsck failure still aborts the push so real dangling references
-		// continue to block propagation.
+		if classified := classifyFSCKFailure(ctx.Err(), fsckCtx.Err(), output); classified != nil {
+			return classified
+		}
+		log.Printf("pre-push fsck could not run, skipping integrity check: %s", output)
+		return nil
+	}
+	return nil
+}
+
+// classifyFSCKFailure maps a failed dolt fsck exit into one of five outcomes,
+// evaluated in priority order:
+//
+//	(a) Non-empty output → route by content: could-not-open → nil (caller logs
+//	    and skips); any other content → ErrDanglingReference abort. Non-empty
+//	    output means fsck actually ran and said something (--quiet fsck is
+//	    silent until it finds a problem), so content wins over context state.
+//	    This also closes the race where real corruption arrives at the deadline
+//	    instant and would otherwise be masked as a timeout.
+//
+//	(b) Parent context canceled (Ctrl-C, caller abort) → plain cancellation
+//	    error wrapping context.Canceled; neither ErrDanglingReference nor
+//	    ErrFSCKTimeout (the store is not implicated).
+//
+//	(c) Parent context deadline exceeded → ErrFSCKTimeout, but guidance points
+//	    at the CALLER's timeout (e.g. dolt.auto-push-timeout for auto-push)
+//	    and explicitly notes BEADS_FSCK_TIMEOUT cannot extend it. Checked
+//	    before fsck's own deadline because a fired parent context propagates
+//	    cancellation into all child contexts, making both parentErr and fsckErr
+//	    DeadlineExceeded simultaneously.
+//
+//	(d) fsck's own deadline exceeded, parent still running → ErrFSCKTimeout
+//	    with dolt gc / CALL DOLT_GC() / BEADS_FSCK_TIMEOUT guidance.
+//
+//	(e) Generic non-zero exit, empty output → ErrDanglingReference abort.
+//
+// Returning nil for the could-not-open case (branch a) distinguishes "fsck
+// couldn't run at all" from "fsck ran and found a problem". Wrapping an
+// open-failure as ErrDanglingReference misleads users (dolthub/dolt#10915).
+func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
+	// (a) Non-empty output: fsck actually reported something; route by content.
+	if output != "" {
 		if fsckCouldNotOpen(output) {
-			log.Printf("pre-push fsck could not run, skipping integrity check: %s", output)
 			return nil
 		}
 		return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
 			ErrDanglingReference, output)
 	}
-	return nil
+	// (b) Parent context canceled — user interrupt or caller abort.
+	if errors.Is(parentErr, context.Canceled) {
+		return fmt.Errorf("pre-push integrity check interrupted: %w", parentErr)
+	}
+	// (c) Caller's deadline expired during fsck. Point at the caller's timeout;
+	// BEADS_FSCK_TIMEOUT cannot extend a deadline imposed by the caller.
+	if errors.Is(parentErr, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: the surrounding operation's deadline expired during the "+
+			"pre-push integrity check; to extend it, raise the caller timeout "+
+			"(for auto-push: the dolt.auto-push-timeout config); "+
+			"note that BEADS_FSCK_TIMEOUT cannot extend the caller deadline",
+			ErrFSCKTimeout)
+	}
+	// (d) fsck's own per-call timeout expired (parent still running).
+	if errors.Is(fsckErr, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: fsck did not complete within the configured timeout; "+
+			"the push was aborted without checking integrity (the store is not necessarily corrupt); "+
+			"large stores can be shrunk with `dolt gc` (or `CALL DOLT_GC()` on a running sql-server); "+
+			"the timeout can be raised via the BEADS_FSCK_TIMEOUT environment variable",
+			ErrFSCKTimeout)
+	}
+	// (e) Generic failure with no output and no recognized context error.
+	return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks",
+		ErrDanglingReference)
 }
 
 // fsckCouldNotOpen reports whether dolt fsck output indicates the check
@@ -2869,7 +3028,8 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 
 // autoResolveConflictsAfterCLIPull inspects the working set and auto-resolves the
 // conflict classes that are safe without operator input (#4259 audit-only dependency
-// edges, GH#2466 metadata). It runs on a connection from the store pool (s.db) on
+// edges, GH#2466 metadata, GH#4698 issues-table LWW). It runs on a connection from
+// the store pool (s.db) on
 // purpose: those connections are on the same branch the CLI `dolt pull` merged into,
 // whereas a separately opened connection would default to the base branch and never
 // see the conflicts. The pull's
@@ -2944,8 +3104,9 @@ func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool,
 // tryAutoResolveMergeConflicts auto-resolves merge conflicts that are safe to
 // resolve without operator input (GH#2466 metadata, #4259 audit-only
 // dependency edges, bd-6dnrw.29 schema_migrations vintage rows, GH#2474
-// convergent kv.memory.* config rows), returning
-// (true, nil) only if ALL conflicts were resolved. The implementation is
+// convergent kv.memory.* config rows, GH#4698 issues-table LWW by updated_at),
+// returning (true, nil) only if ALL conflicts were resolved. The
+// implementation is
 // shared with the embedded pull path (bd-6dnrw.40); see
 // versioncontrolops.TryAutoResolveMergeConflicts for the full contract.
 func (s *DoltStore) tryAutoResolveMergeConflicts(ctx context.Context, tx *sql.Tx) (bool, error) {

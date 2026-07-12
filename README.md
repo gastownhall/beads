@@ -94,6 +94,16 @@ npm install -g @beads/bd     # Node.js users
 
 **Requirements:** macOS, Linux, Windows, or FreeBSD. See [docs/INSTALLING.md](docs/INSTALLING.md) for complete installation guide.
 
+**Upgrading?** Replacing the binary is not always the whole story. Short
+version: sync remote-backed databases with your current `bd`, back up with
+`bd export --all`, upgrade the binary, then run `bd info --whats-new`,
+`bd hooks install`, and `bd version`. If the upgrade crosses a schema
+migration on a remote-backed database, exactly one designated clone runs
+`bd migrate --force` and `bd dolt push`; other clones install the new binary
+and run `bd bootstrap`. See the full
+[upgrade guide](https://gastownhall.github.io/beads/docs/getting-started/upgrading)
+or [docs/INSTALLING.md](docs/INSTALLING.md#updating-bd).
+
 ### Security And Verification
 
 Before trusting any downloaded binary, verify its checksum against the release `checksums.txt`.
@@ -150,6 +160,31 @@ access control is simpler than network allowlists. The Dolt server must be
 started with `dolt sql-server --socket <path>`. Auto-start is not supported
 in socket mode.
 
+### Maintenance — `bd prune` and `bd purge`
+
+`bd prune` permanently deletes closed non-ephemeral beads to reclaim storage
+and shrink auto-exports. `bd purge` does the same for ephemeral beads (wisps,
+transient molecules). Both require `--force` to execute.
+
+```bash
+bd prune --older-than 30d              # Preview closed beads >30d old
+bd prune --older-than 30d --force      # Delete them
+bd prune --older-than 90d --dry-run    # Detailed preview with stats
+bd purge --force                       # Delete all closed ephemeral beads
+```
+
+**Reference-aware protection:** `bd prune` automatically skips closed beads
+whose ID appears in the description, notes, or comments of any open or
+in-progress bead. This prevents accidental deletion of ADR, decision, and
+verification beads that downstream work still cites. Use `--ignore-references`
+to override when cleaning up known-stale references:
+
+```bash
+bd prune --older-than 90d --ignore-references --force
+```
+
+`bd purge` is unaffected — ephemeral beads' references are themselves transient.
+
 ### Backup & Migration
 
 Back up your database and migrate between modes using `bd backup`:
@@ -167,6 +202,10 @@ bd backup restore --force /path/to/backup
 See [docs/DOLT.md](docs/DOLT.md#migrating-between-backends) for full
 migration instructions.
 
+Prefer a different database? [docs/STORAGE-BACKENDS.md](docs/STORAGE-BACKENDS.md)
+covers running `bd` on Postgres, MySQL, or SQLite. Dolt stays the default and the
+only backend with history.
+
 `bd export` and `.beads/issues.jsonl` are issue-table exports. They are useful
 for review, migration, and interoperability, but they do not capture Dolt
 branches, commit history, working-set state, or non-issue tables. Use
@@ -175,6 +214,8 @@ branches, commit history, working-set state, or non-issue tables. Use
 ## 🌐 Community Tools
 
 See [docs/COMMUNITY_TOOLS.md](docs/COMMUNITY_TOOLS.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.
+
+See [docs/RELATED_PROJECTS.md](docs/RELATED_PROJECTS.md) for adjacent or complementary projects that solve different problems in the same neighborhood.
 
 ## 🚀 Git-Free Usage
 

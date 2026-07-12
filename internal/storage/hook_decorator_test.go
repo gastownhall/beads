@@ -80,3 +80,46 @@ func TestNewHookFiringStoreNilRunnerSafe(t *testing.T) {
 	_ = errors.New("test")
 	_ = types.Issue{}
 }
+
+// stubDoltStore is a typed stand-in for a concrete DoltStorage implementation.
+// Tests must not invoke any of its methods (interface-promoted calls would
+// panic on the embedded nil); only its identity is used.
+type stubDoltStore struct {
+	storage.DoltStorage
+}
+
+// fakeUnwrappableDecorator is a minimal Unwrapper used to verify that
+// UnwrapStore peels arbitrary decorator chains, not just HookFiringStore.
+type fakeUnwrappableDecorator struct {
+	storage.DoltStorage
+	inner storage.DoltStorage
+}
+
+func (d *fakeUnwrappableDecorator) Unwrap() storage.DoltStorage { return d.inner }
+
+func TestUnwrapStore_NoDecorator(t *testing.T) {
+	raw := &stubDoltStore{}
+	if got := storage.UnwrapStore(raw); got.(*stubDoltStore) != raw {
+		t.Errorf("UnwrapStore on a non-decorator returned %T; want input unchanged", got)
+	}
+}
+
+func TestUnwrapStore_HookFiringStore(t *testing.T) {
+	raw := &stubDoltStore{}
+	wrapped := storage.NewHookFiringStore(raw, nil)
+	if got := storage.UnwrapStore(wrapped); got.(*stubDoltStore) != raw {
+		t.Errorf("UnwrapStore did not peel HookFiringStore; got %T want %T", got, raw)
+	}
+}
+
+// Catches the regression where adding a new decorator layer (e.g.
+// telemetry.InstrumentedStorage) silently breaks UnwrapStore for
+// optional-interface type assertions across cmd/bd.
+func TestUnwrapStore_PeelsMultipleLayers(t *testing.T) {
+	raw := &stubDoltStore{}
+	mid := &fakeUnwrappableDecorator{inner: raw}
+	outer := storage.NewHookFiringStore(mid, nil)
+	if got := storage.UnwrapStore(outer); got.(*stubDoltStore) != raw {
+		t.Errorf("UnwrapStore did not peel all decorator layers; got %T want %T", got, raw)
+	}
+}

@@ -12,6 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestGitAddFile_InWorktreeHook_StagesCorrectPath is a regression test for
@@ -191,25 +193,146 @@ func TestShouldRunPostCommandAutoExportSkipsReadOnlyCommands(t *testing.T) {
 	}
 }
 
-func TestMaybeAutoExportSkipsServerModeBeforeStoreAccess(t *testing.T) {
+// fakeStateHashStore implements the storage.StateHasher optional interface
+// plus the minimal DoltStorage surface maybeAutoExport touches. Any
+// non-overridden method panics via the embedded nil interface.
+type fakeStateHashStore struct {
+	storage.DoltStorage
+	stateHash          string
+	stateHashCalls     int
+	currentCommitCalls int
+	issues             []*types.Issue
+}
+
+func (f *fakeStateHashStore) GetStateHash(_ context.Context) (string, error) {
+	f.stateHashCalls++
+	return f.stateHash, nil
+}
+
+func (f *fakeStateHashStore) GetCurrentCommit(_ context.Context) (string, error) {
+	f.currentCommitCalls++
+	return "head-commit-hash", nil
+}
+
+func (f *fakeStateHashStore) GetInfraTypes(_ context.Context) map[string]bool { return nil }
+
+// GetConfig lets buildOwnerExcludeSet's database fallback lookup (for
+// export.exclude_owners / export.exclude_owner) run without panicking;
+// this fake has no config store, so every key is unset.
+func (f *fakeStateHashStore) GetConfig(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeStateHashStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
+	return f.issues, nil
+}
+
+// fakeHeadOnlyStore does NOT implement storage.StateHasher, forcing the
+// GetCurrentCommit fallback.
+type fakeHeadOnlyStore struct {
+	storage.DoltStorage
+	currentCommitCalls int
+}
+
+func (f *fakeHeadOnlyStore) GetCurrentCommit(_ context.Context) (string, error) {
+	f.currentCommitCalls++
+	return "head-commit-hash", nil
+}
+
+func autoExportTestDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"beads","backend":"dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	t.Setenv("BEADS_DIR", beadsDir)
+	return dir
+}
+
+// Regression test for wy-4ope: server-mode clients used to skip auto-export
+// entirely, so `git push` published stale JSONL. maybeAutoExport must reach
+// change detection and consult the working-set-aware state hash, not HEAD —
+// server mode runs with dolt auto-commit off, so HEAD does not advance on
+// writes.
+func TestMaybeAutoExportUsesStateHashForChangeDetection(t *testing.T) {
 	initConfigForTest(t)
 	config.Set("export.auto", true)
 
 	saveAndRestoreGlobals(t)
-	store = &fakeFallbackStore{}
+	fake := &fakeStateHashStore{stateHash: "working-set-hash"}
+	store = fake
 
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
-		t.Fatal(err)
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "working-set-hash",
+		Timestamp:      time.Now(),
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
 	}
-	t.Chdir(dir)
 
-	if err := maybeAutoExport(context.Background(), true, false); err != nil {
-		t.Fatalf("maybeAutoExport(serverMode=true): %v", err)
+	if fake.stateHashCalls != 1 {
+		t.Fatalf("GetStateHash calls = %d, want 1", fake.stateHashCalls)
+	}
+	if fake.currentCommitCalls != 0 {
+		t.Fatalf("GetCurrentCommit calls = %d, want 0 (StateHasher must take precedence)", fake.currentCommitCalls)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads", "issues.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("unchanged state hash must not export, stat err=%v", err)
+	}
+}
+
+func TestMaybeAutoExportExportsOnStateHashChange(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeStateHashStore{stateHash: "hash-after-write"}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "hash-before-write",
+		Timestamp:      time.Time{}, // zero: throttle window open
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(dir, ".beads", exportAutoStateFile)); !os.IsNotExist(err) {
-		t.Fatalf("server-mode auto-export wrote state file, stat err=%v", err)
+	state := loadExportAutoState(filepath.Join(dir, ".beads"))
+	if state.LastDoltCommit != "hash-after-write" {
+		t.Fatalf("state LastDoltCommit = %q, want %q (export must run when the state hash moves)",
+			state.LastDoltCommit, "hash-after-write")
+	}
+}
+
+func TestMaybeAutoExportFallsBackToHeadCommit(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeHeadOnlyStore{}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "head-commit-hash",
+		Timestamp:      time.Now(),
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
+	}
+
+	if fake.currentCommitCalls != 1 {
+		t.Fatalf("GetCurrentCommit calls = %d, want 1 (fallback when StateHasher is absent)", fake.currentCommitCalls)
 	}
 }
 

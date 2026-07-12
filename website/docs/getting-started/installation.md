@@ -6,6 +6,11 @@ sidebar_position: 1
 
 # Installing bd
 
+<!-- This website install page and the GitHub-rendered docs/INSTALLING.md are
+     deliberate parallel docs for different audiences. When you change platform
+     commands or install methods here, update docs/INSTALLING.md too so they do
+     not drift. -->
+
 Complete installation guide for all platforms.
 
 ## Quick Install (Recommended)
@@ -17,14 +22,9 @@ brew install beads
 ```
 
 Homebrew core's `beads` formula is the supported Homebrew package. If you
-previously installed the old tap formula as `bd`, migrate to the core formula:
-
-```bash
-brew uninstall bd
-brew untap gastownhall/beads 2>/dev/null || true
-brew untap steveyegge/beads 2>/dev/null || true
-brew install beads
-```
+previously installed the old tap formula as `bd`, see
+[Migrating from the old Homebrew tap](/getting-started/upgrading#homebrew) to
+switch to the core formula.
 
 **Why Homebrew?**
 - Simple one-command install
@@ -245,6 +245,27 @@ CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/c
 ```
 
 ## Updating bd
+
+Upgrade checklist:
+
+1. With your current `bd`, sync remote-backed databases before installing the
+   new binary:
+   `bd dolt push`
+   `bd dolt pull`
+2. Back up before migration:
+   `bd export --all -o .beads/backup/pre-migrate-$(date +%Y%m%d).jsonl`
+3. Upgrade using the command for your install method below.
+4. After upgrading:
+   `bd info --whats-new`
+   `bd hooks install`
+   `bd version`
+5. If crossing a schema migration on a remote-backed database, only the
+   designated migrator runs:
+   `bd migrate --force`
+   `bd dolt push`
+
+Other clones should install the new binary and run `bd bootstrap`, not
+independently migrate. For the full procedure, see [Upgrading](/getting-started/upgrading).
 
 ### Quick install script (macOS/Linux/FreeBSD)
 

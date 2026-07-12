@@ -1,6 +1,6 @@
 # Documentation Disposition Inventory
 
-Reviewed: 2026-05-08
+Reviewed: 2026-07-07
 
 CI cleanup entry added: 2026-05-28
 
@@ -59,6 +59,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `CLAUDE.md` | Revise | Kept as architecture orientation only; command/workflow duplication was reduced in favour of root `AGENTS.md` and `AGENT_INSTRUCTIONS.md`. |
 | `CLI_REFERENCE.md` | Keep/generated | Generated command reference from live help output. |
 | `CI_CLEANUP_PLAN.md` | Keep with freshness | Accepted CI tier decisions, package gate policy, measurement plan, and implementation order. |
+| `CI_REQUIRED_CHECK_TOPOLOGY.md` | Keep | Design note for the required-check aggregate gate topology; explicitly flags pre-rollout status and gates branch-protection changes on the new checks passing first. |
 | `CI_TEST_SURFACE_AUDIT.md` | Keep with freshness | Snapshot of local validation commands, GitHub Actions coverage, gaps, and CI cleanup roadmap. |
 | `plugins/beads/skills/beads/resources/CLI_REFERENCE.md` | Keep pointer | Plugin skill resource intentionally points at live CLI sources to avoid duplicate generated command snapshots. |
 | `CODEX_INTEGRATION.md` | Keep | User-facing Codex integration guide. |
@@ -66,6 +67,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `COMMUNITY_TOOLS.md` | Keep | Curated external tools list; external links need periodic review. |
 | `CONFIG.md` | Keep with freshness | Reference doc; reviewed against config and env-var code. |
 | `CONTRIBUTOR_NAMESPACE_ISOLATION.md` | Keep | Design/user guide for contributor routing and `BEADS_DIR` behaviour. |
+| `COPILOT_CLI_INTEGRATION.md` | Keep | Design doc for GitHub Copilot CLI integration; paired with `COPILOT_INTEGRATION.md` (VS Code + MCP). |
 | `COPILOT_INTEGRATION.md` | Keep | User-facing integration guide. |
 | `DEPENDENCIES.md` | Keep | Behaviour doc for graph semantics. |
 | `design/dolt-concurrency.md` | Keep | Design note for Dolt concurrency. |
@@ -78,6 +80,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `ERROR_HANDLING.md` | Keep with freshness | Pattern guide with code-linked examples; marker added. |
 | `EXCLUSIVE_LOCK.md` | Keep | Behaviour/design doc for lock protocol. |
 | `FAQ.md` | Revise | Opening wording now describes beads as Dolt-powered; stale pre-1.0 status removed. |
+| `FEDERATION.md` | Keep/canonical | Canonical federation (peer-to-peer sync) guide; moved from root `FEDERATION-SETUP.md`, which is now a stable pointer. Absorbed the duplicate federation section previously in `DOLT.md`. |
 | `GIT_INTEGRATION.md` | Keep | User-facing git/worktree/hook behaviour. |
 | `graph-links.md` | Keep | Behaviour/design doc for graph links. |
 | `ICU-POLICY.md` | Revise | Link updated to canonical Dolt doc. |
@@ -100,6 +103,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `QUICKSTART.md` | Keep pointer | Short pointer to website quickstart; low drift. |
 | `README_TESTING.md` | Consolidated pointer | Old duplicate staged; active path points to `TESTING.md` and `TESTING_PHILOSOPHY.md`. |
 | `RECOVERY.md` | Keep with freshness | Runtime recovery playbooks; marker tied to init safety constants/tests. |
+| `RELATED_PROJECTS.md` | Keep | Curated list of adjacent, non-integration projects; companion to `COMMUNITY_TOOLS.md`. |
 | `RELEASE-STABILITY-GATE.md` | Keep | Maintainer release gate policy. |
 | `RELEASING.md` | Consolidated pointer | Old duplicate staged; canonical process is root `RELEASING.md`. |
 | `REPO_CONTEXT.md` | Keep | Architecture/behaviour doc for repo context. |
@@ -108,6 +112,9 @@ Follow-up automation should replace marker-only checks with generated or
 | `SECURITY-DEPENDENCY-EXCEPTIONS.md` | Keep with freshness | Existing freshness-marker exemplar. |
 | `SETUP.md` | Keep with freshness | Setup reference; marker tied to setup commands and recipes. |
 | `staged-for-removal/MANIFEST.md` | Keep | Staged removal process and per-file rationale. |
+| `superpowers/plans/2026-05-03-unclaim-command.md` | Removed | PR-passenger planning artifact from a contributor's personal multi-agent rig, same class as the artifacts removed in commit 187ba85f3 (#4632); no readers in this repo, content stays in git history. |
+| `superpowers/specs/2026-05-03-unclaim-command-design.md` | Removed | PR-passenger design-spec artifact paired with the plans file above; same removal rationale, content stays in git history. |
+| `SYNC_CONCEPTS.md` | Keep/canonical | Sanctioned website-mirror source for the sync conceptual model (Dolt source of truth, wire format, JSONL export, anti-patterns); listed in `deploy-docs.yml` and linked from `AGENTS.md`, `README.md`, `ARCHITECTURE.md`, `DOLT.md`, `GIT_INTEGRATION.md`, and `FAQ.md`. |
 | `SYNC_SETUP.md` | Revise | Links now point at canonical `DOLT.md`. |
 | `TESTING.md` | Revise/canonical | Canonical test-running guide; stale line/test-count and stale skip entry removed. |
 | `TESTING_PHILOSOPHY.md` | Keep | Canonical test-design guidance; duplicate/historical links removed. |

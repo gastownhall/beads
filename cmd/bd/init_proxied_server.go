@@ -22,25 +22,27 @@ import (
 )
 
 type initProxiedServerInput struct {
-	prefix            string
-	database          string
-	roleFlag          string
-	initRemote        string
-	initRemoteChanged bool
-	destroyToken      string
-	serverConfigPath  string
-	serverLogPath     string
-	serverRootPath    string
-	externalConfig    *configfile.ExternalDoltConfig
-	quiet             bool
-	stealth           bool
-	skipHooks         bool
-	skipAgents        bool
-	reinitLocal       bool
-	contributor       bool
-	team              bool
-	fromJSONL         bool
-	nonInteractive    bool
+	prefix                 string
+	database               string
+	roleFlag               string
+	initRemote             string
+	initRemoteChanged      bool
+	destroyToken           string
+	serverConfigPath       string
+	serverLogPath          string
+	serverRootPath         string
+	serverProxyPort        int
+	serverProxyIdleTimeout time.Duration
+	externalConfig         *configfile.ExternalDoltConfig
+	quiet                  bool
+	stealth                bool
+	skipHooks              bool
+	skipAgents             bool
+	reinitLocal            bool
+	contributor            bool
+	team                   bool
+	fromJSONL              bool
+	nonInteractive         bool
 }
 
 func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput) error {
@@ -119,7 +121,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 	configYAMLBody := renderInitConfigYAML("", false)
 
-	clientInfo, err := buildProxiedServerClientInfo(in.serverRootPath, in.serverConfigPath, in.serverLogPath, in.externalConfig)
+	clientInfo, err := buildProxiedServerClientInfo(in.serverRootPath, in.serverConfigPath, in.serverLogPath, in.serverProxyPort, in.serverProxyIdleTimeout, in.externalConfig)
 	if err != nil {
 		return err
 	}
@@ -151,6 +153,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		return fmt.Errorf("failed to open uow provider: %v", err)
 	}
 
+	uw, err := uowProvider.NewUOW(ctx)
+	if err != nil {
+		return HandleError("failed to open unit of work: %v", err)
+	}
+	defer uw.Close(ctx)
+
 	bootstrapParams := domain.BootstrapProjectParams{
 		Prefix:         prefix,
 		ProjectID:      projectID,
@@ -173,11 +181,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		bootstrapParams.RemoteURL = remoteURL
 	}
 
-	if err := uow.RunInTx(ctx, uowProvider, "bd init", func(uw uow.UnitOfWork) error {
-		_, err := uw.BootstrapUseCase().BootstrapProject(ctx, bootstrapParams)
-		return err
-	}); err != nil {
-		return fmt.Errorf("init: %v", err)
+	if _, err := uw.BootstrapUseCase().BootstrapProject(ctx, bootstrapParams); err != nil {
+		return HandleError("bootstrap project: %v", err)
+	}
+
+	if err := uow.CommitWithRetries(ctx, uw, "bd init"); err != nil {
+		return HandleError("commit init: %v", err)
 	}
 
 	return runInitProxiedServerTail(cmd, ctx, in, runInitTailContext{
@@ -248,8 +257,8 @@ func composeProxiedServerMetadataJSON(in proxiedMetadataInputs) ([]byte, error) 
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
-func buildProxiedServerClientInfo(rootPath, configPath, logPath string, external *configfile.ExternalDoltConfig) (*configfile.ProxiedServerClientInfo, error) {
-	if rootPath == "" && configPath == "" && logPath == "" && external == nil {
+func buildProxiedServerClientInfo(rootPath, configPath, logPath string, port int, idleTimeout time.Duration, external *configfile.ExternalDoltConfig) (*configfile.ProxiedServerClientInfo, error) {
+	if rootPath == "" && configPath == "" && logPath == "" && port == 0 && idleTimeout == 0 && external == nil {
 		return nil, nil
 	}
 	clean := func(p string) (string, error) {
@@ -279,10 +288,12 @@ func buildProxiedServerClientInfo(rootPath, configPath, logPath string, external
 		}
 	}
 	return &configfile.ProxiedServerClientInfo{
-		RootPath:   rootAbs,
-		ConfigPath: configAbs,
-		LogPath:    logAbs,
-		External:   external,
+		RootPath:    rootAbs,
+		ConfigPath:  configAbs,
+		LogPath:     logAbs,
+		Port:        port,
+		IdleTimeout: idleTimeout,
+		External:    external,
 	}, nil
 }
 

@@ -14,7 +14,7 @@ func TestNewDatabaseServer_BackendExternal(t *testing.T) {
 	t.Run("valid tcp config builds an ExternalDoltServer", func(t *testing.T) {
 		srv, err := newDatabaseServer(
 			proxy.BackendExternal,
-			"", "", "", "",
+			"", "", "", "", "",
 			configfile.ExternalDoltConfig{Host: "db.internal", Port: 3306},
 		)
 		require.NoError(t, err)
@@ -26,7 +26,7 @@ func TestNewDatabaseServer_BackendExternal(t *testing.T) {
 	t.Run("invalid config bubbles validation error", func(t *testing.T) {
 		_, err := newDatabaseServer(
 			proxy.BackendExternal,
-			"", "", "", "",
+			"", "", "", "", "",
 			configfile.ExternalDoltConfig{},
 		)
 		require.Error(t, err)
@@ -36,7 +36,7 @@ func TestNewDatabaseServer_BackendExternal(t *testing.T) {
 	t.Run("unix socket config builds an ExternalDoltServer", func(t *testing.T) {
 		srv, err := newDatabaseServer(
 			proxy.BackendExternal,
-			"", "", "", "",
+			"", "", "", "", "",
 			configfile.ExternalDoltConfig{Socket: "/var/run/dolt.sock"},
 		)
 		require.NoError(t, err)
@@ -49,7 +49,7 @@ func TestNewDatabaseServer_BackendExternal(t *testing.T) {
 func TestNewDatabaseServer_BackendLocalSharedServerStillStubbed(t *testing.T) {
 	_, err := newDatabaseServer(
 		proxy.BackendLocalSharedServer,
-		"/tmp/root", "/tmp/cfg", "/tmp/log", "/usr/bin/dolt",
+		"/tmp/root", "/tmp/cfg", "/tmp/log", "/usr/bin/dolt", "",
 		configfile.ExternalDoltConfig{},
 	)
 	require.Error(t, err)
@@ -59,7 +59,7 @@ func TestNewDatabaseServer_BackendLocalSharedServerStillStubbed(t *testing.T) {
 func TestNewDatabaseServer_UnknownBackendRejected(t *testing.T) {
 	_, err := newDatabaseServer(
 		proxy.Backend("bogus"),
-		"", "", "", "",
+		"", "", "", "", "",
 		configfile.ExternalDoltConfig{},
 	)
 	require.Error(t, err)

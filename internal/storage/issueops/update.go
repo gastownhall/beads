@@ -87,6 +87,64 @@ func ManageStartedAt(oldIssue *types.Issue, updates map[string]interface{}, setC
 	return setClauses, args
 }
 
+// ManageLeaseOnUpdate keeps lease ownership coherent when generic updates alter
+// status or assignee. Leases are armed ONLY by the lease-aware verbs — claim
+// (ClaimIssueInTx, bd update --claim, bd ready --claim) and heartbeat — never by
+// a generic update. A bare `bd update -s in_progress -a <who>` is an interactive
+// hand-dole claim: nobody is heartbeating it, so arming a lease here just turns
+// the claim into reclaim-bait that reverts to open after the TTL (bd-9hpgf,
+// GH#4716). This helper therefore only ever CLEARS lease columns:
+//
+//   - the update moves the row out of the claimed state (not in_progress, or
+//     unassigned): any lease is stale — clear it.
+//   - the update changes who holds the claim (assignee transfer, or a fresh
+//     transition into in_progress): the previous owner's lease must not count
+//     down against the new holder — clear it. The new holder gets a lease only
+//     via the claim verb; a real worker's next heartbeat re-arms one.
+//   - the update leaves the same claim in place (already in_progress, same
+//     assignee): leave the lease columns untouched, so a worker's live lease
+//     survives unrelated edits to its issue.
+func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}, setClauses []string, args []interface{}) ([]string, []interface{}) {
+	rawStatus, hasStatus := updates["status"]
+	rawAssignee, hasAssignee := updates["assignee"]
+	if !hasStatus && !hasAssignee {
+		return setClauses, args
+	}
+
+	newStatus := string(oldIssue.Status)
+	if hasStatus {
+		switch v := rawStatus.(type) {
+		case string:
+			newStatus = v
+		case types.Status:
+			newStatus = string(v)
+		default:
+			return setClauses, args
+		}
+	}
+
+	newAssignee := oldIssue.Assignee
+	if hasAssignee {
+		switch v := rawAssignee.(type) {
+		case nil:
+			newAssignee = ""
+		case string:
+			newAssignee = v
+		default:
+			newAssignee = fmt.Sprint(v)
+		}
+	}
+
+	sameClaim := newStatus == string(types.StatusInProgress) && newAssignee != "" &&
+		oldIssue.Status == types.StatusInProgress && newAssignee == oldIssue.Assignee
+	if sameClaim {
+		return setClauses, args
+	}
+
+	setClauses = append(setClauses, "lease_expires_at = NULL", "heartbeat_at = NULL")
+	return setClauses, args
+}
+
 // DetermineEventType returns the appropriate event type for an update.
 func DetermineEventType(oldIssue *types.Issue, updates map[string]interface{}) types.EventType {
 	statusVal, hasStatus := updates["status"]
@@ -214,6 +272,18 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 
 	// Auto-manage started_at (set on transition to in_progress). (GH#2796)
 	setClauses, args = ManageStartedAt(oldIssue, updates, setClauses, args)
+
+	// Auto-manage leases when direct updates change status or assignee.
+	// Clears stale leases only; arming is reserved for claim/heartbeat.
+	setClauses, args = ManageLeaseOnUpdate(oldIssue, updates, setClauses, args)
+
+	// Rewrite row_lock on every update so a concurrent lease mutation (heartbeat/
+	// reclaim) collides on this shared cell and is forced to conflict-and-retry
+	// rather than silently cell-merging two writes to different columns of the
+	// same row (see lease.go). This is the "every mutating path writes row_lock"
+	// invariant the lease scheme depends on.
+	setClauses = append(setClauses, "row_lock = ?")
+	args = append(args, freshRowLock())
 
 	args = append(args, id)
 

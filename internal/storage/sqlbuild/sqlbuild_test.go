@@ -116,10 +116,60 @@ func TestBuildReadyWorkWhereBatchesIDSets(t *testing.T) {
 	}
 }
 
+// wy-jpd3.2: --label-any was silently dropped on the ready/claim path (with or
+// without --parent). BuildReadyWorkWhere must now emit an OR-set membership
+// clause for LabelsAny that AND-combines with the AND-set Labels and the parent
+// filter, so an atomic claim is actually fenced by the label filter it names.
+func TestBuildReadyWorkWhereLabelsAny(t *testing.T) {
+	t.Parallel()
+
+	parent := "wy-jpd3"
+	filter := types.WorkFilter{
+		Labels:    []string{"tier:opus"},
+		LabelsAny: []string{"lane-a", "lane-c"},
+		ParentID:  &parent,
+	}
+	where, args, err := BuildReadyWorkWhere(filter, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// OR-set: one subquery with an IN over all --label-any values.
+	wantAny := "id IN (SELECT issue_id FROM " + IssuesFilterTables.Labels + " WHERE label IN (?, ?))"
+	if !strings.Contains(where, wantAny) {
+		t.Errorf("LabelsAny OR clause missing.\n where = %s\n want substring = %s", where, wantAny)
+	}
+	// AND-set still emits its own per-label subquery (equality, not IN).
+	wantAnd := "id IN (SELECT issue_id FROM " + IssuesFilterTables.Labels + " WHERE label = ?)"
+	if !strings.Contains(where, wantAnd) {
+		t.Errorf("Labels AND clause missing.\n where = %s\n want substring = %s", where, wantAnd)
+	}
+	// Parent filter must survive alongside the label clauses.
+	if !strings.Contains(where, "LIKE CONCAT(?, '.%')") {
+		t.Errorf("parent filter clause missing when combined with labels.\n where = %s", where)
+	}
+	// The label + parent args land in filter order (AND labels, then LabelsAny
+	// values, then the parent LIKE arg) as the tail of the arg list — the
+	// default issue_type exclusion prepends its own args.
+	wantTail := []interface{}{"tier:opus", "lane-a", "lane-c", parent}
+	if len(args) < len(wantTail) {
+		t.Fatalf("args = %v, want at least %d trailing values %v", args, len(wantTail), wantTail)
+	}
+	tail := args[len(args)-len(wantTail):]
+	for i := range wantTail {
+		if tail[i] != wantTail[i] {
+			t.Errorf("tail[%d] = %v, want %v (full args: %v)", i, tail[i], wantTail[i], args)
+		}
+	}
+}
+
 func TestSearchCountsSQLShape(t *testing.T) {
 	t.Parallel()
 
-	sql := SearchCountsSQL(WispsFilterTables, "WHERE x = ?", "ORDER BY y", "LIMIT 5", true, false)
+	sql, args := SearchCountsSQL(WispsFilterTables, nil, "WHERE x = ?", "ORDER BY y", "LIMIT 5", true, false)
+	if args != nil {
+		t.Errorf("predicate form must not return generated args, got %d", len(args))
+	}
 	for _, want := range []string{
 		"FROM wisps i",
 		"FROM wisp_dependencies",
@@ -135,7 +185,7 @@ func TestSearchCountsSQLShape(t *testing.T) {
 		}
 	}
 
-	noWispDeps := SearchCountsSQL(IssuesFilterTables, "", "", "", false, true)
+	noWispDeps, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", false, true)
 	if strings.Contains(noWispDeps, "UNION ALL") {
 		t.Error("counts SQL must not union wisp reverse deps when probe says absent")
 	}
@@ -144,5 +194,26 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 	if !strings.Contains(noWispDeps, "NULL AS labels_json") {
 		t.Error("counts SQL must project NULL labels_json when skipLabels is set")
+	}
+
+	// By-IDs form: driver and every subquery are constrained to the ids, and the
+	// arg count matches the placeholder injection points (labels, dc, rc-deps,
+	// rc-wisp, cc, pc, d, driver = 8 for the wisp family with labels).
+	byIDs, idArgs := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, false)
+	if !strings.Contains(byIDs, "WHERE i.id IN (?,?)") {
+		t.Errorf("by-IDs counts SQL missing driver id filter:\n%s", byIDs)
+	}
+	if strings.Contains(byIDs, "ORDER BY") || strings.Contains(byIDs, "LIMIT") {
+		t.Error("by-IDs counts SQL must not carry ORDER BY / LIMIT (order restored in Go)")
+	}
+	if len(idArgs) != 8*2 {
+		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 8*2)
+	}
+
+	// skipLabels drops the labels point and !includeWispReverseDeps drops the
+	// rc-wisp point, leaving 6 injection points (dc, rc-deps, cc, pc, d, driver).
+	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, true)
+	if len(idArgsNoLabels) != 6*2 {
+		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
 	}
 }

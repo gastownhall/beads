@@ -453,7 +453,7 @@ git worktree prune
 bd config set sync.branch ""
 ```
 
-See [WORKTREES.md#beads-created-worktrees-sync-branch](WORKTREES.md#beads-created-worktrees-sync-branch) for full details.
+See [WORKTREES.md#legacy-cleanup](WORKTREES.md#legacy-cleanup) for full details.
 
 ### What's the difference between database corruption and ID collisions?
 

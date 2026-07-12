@@ -188,70 +188,13 @@ The sections below are the canonical backend migration reference.
 
 ## Federation (Peer-to-Peer Sync)
 
-Federation enables direct sync between Dolt installations without a central hub.
+Federation lets independent Dolt-backed workspaces ("towns") sync issues
+directly with each other via `bd federation add-peer`/`sync`/`status`,
+without a central hub. Credentials are AES-256 encrypted and stored locally.
 
-### Architecture
-
-```
-┌─────────────────┐         ┌─────────────────┐
-│  Workspace A    │◄───────►│  Workspace B    │
-│  dolt sql-server│  sync   │  dolt sql-server│
-│  :3306 (sql)    │         │  :3306 (sql)    │
-│  :8080 (remote) │         │  :8080 (remote) │
-└─────────────────┘         └─────────────────┘
-```
-
-In federation mode, the server exposes two ports:
-- **MySQL (3306)**: Multi-writer SQL access
-- **remotesapi (8080)**: Peer-to-peer push/pull
-
-### Quick Start
-
-```bash
-# Add a peer
-bd federation add-peer town-beta 192.168.1.100:8080/beads
-
-# With authentication
-bd federation add-peer town-beta host:8080/beads --user sync-bot
-
-# Sync with all peers
-bd federation sync
-
-# Handle conflicts
-bd federation sync --strategy theirs  # or 'ours'
-
-# Check status
-bd federation status
-```
-
-### Topologies
-
-| Pattern | Description | Use Case |
-|---------|-------------|----------|
-| Hub-spoke | Central hub, satellites sync to hub | Team with central coordination |
-| Mesh | All peers sync with each other | Decentralized collaboration |
-| Hierarchical | Tree of hubs | Multi-team organizations |
-
-### Credentials
-
-Peer credentials are AES-256 encrypted, stored locally, and used automatically during sync:
-
-```bash
-# Credentials prompted interactively
-bd federation add-peer name url --user admin
-
-# Stored in federation_peers table (encrypted)
-```
-
-### Troubleshooting
-
-```bash
-# Check federation health
-bd doctor --deep
-
-# Verify peer connectivity
-bd federation status
-```
+See [FEDERATION.md](FEDERATION.md) for the full setup guide, including
+peer configuration, sovereignty tiers, sync/status/topology details, and
+troubleshooting.
 
 ## Dolt Remotes
 
@@ -447,8 +390,8 @@ dolt:
 | `BEADS_DOLT_SERVER_TLS` | Enable TLS (set to "1" or "true") |
 | `BEADS_DOLT_SERVER_USER` | MySQL connection user |
 | `BEADS_DOLT_SHARED_SERVER` | Enable shared server mode (set to "1" or "true") |
-| `DOLT_REMOTE_USER` | Push/pull auth user |
-| `DOLT_REMOTE_PASSWORD` | Push/pull auth password |
+| `DOLT_REMOTE_USER` | Clone/push/pull auth user |
+| `DOLT_REMOTE_PASSWORD` | Clone/push/pull auth password |
 | `BD_DOLT_AUTO_COMMIT` | Override auto-commit setting |
 
 ### Credentials File
@@ -787,6 +730,7 @@ rm .beads/*.backup-*.db
 
 - [SYNC_CONCEPTS.md](SYNC_CONCEPTS.md) - The conceptual model behind cross-machine sync (Dolt source of truth, wire format, anti-patterns)
 - [SYNC_SETUP.md](SYNC_SETUP.md) - Setting up sync across multiple computers
+- [FEDERATION.md](FEDERATION.md) - Peer-to-peer federation setup
 - [CONFIG.md](CONFIG.md) - Full configuration reference
 - [DEPENDENCIES.md](DEPENDENCIES.md) - Dependencies and gates
 - [GIT_INTEGRATION.md](GIT_INTEGRATION.md) - Git worktrees and protected branches

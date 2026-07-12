@@ -25,71 +25,73 @@ func resolveProxiedCustomTypes(dbTypes []string) []string {
 	return config.GetCustomTypesFromYAML()
 }
 
-func runCreateProxiedServer(cmd *cobra.Command, ctx context.Context, in createInput) {
+func runCreateProxiedServer(cmd *cobra.Command, ctx context.Context, in createInput) error {
 	if in.repoOverrideSet {
-		FatalError("--repo is not supported with --proxied-server")
+		return HandleError("--repo is not supported with --proxied-server")
 	}
 	switch {
 	case in.graphFile != "":
-		runCreateProxiedGraph(cmd, ctx, in)
+		return runCreateProxiedGraph(cmd, ctx, in)
 	case in.markdownFile != "":
-		runCreateProxiedMarkdown(cmd, ctx, in)
+		return runCreateProxiedMarkdown(cmd, ctx, in)
 	default:
-		runCreateProxiedSingle(cmd, ctx, in)
+		return runCreateProxiedSingle(cmd, ctx, in)
 	}
 }
 
-func proxiedOpenUOW(ctx context.Context) (uow.UnitOfWork, domain.CreateContext) {
+func proxiedOpenUOW(ctx context.Context) (uow.UnitOfWork, domain.CreateContext, error) {
 	if uowProvider == nil {
-		FatalError("proxied-server UOW provider not initialized")
+		return nil, domain.CreateContext{}, HandleError("proxied-server UOW provider not initialized")
 	}
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		FatalError("open unit of work: %v", err)
+		return nil, domain.CreateContext{}, HandleError("open unit of work: %v", err)
 	}
 	cctx, err := uw.ConfigUseCase().LoadCreateContext(ctx)
 	if err != nil {
 		uw.Close(ctx)
-		FatalError("load create context: %v", err)
+		return nil, domain.CreateContext{}, HandleError("load create context: %v", err)
 	}
-	return uw, cctx
+	return uw, cctx, nil
 }
 
-func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInput) {
-	runCreateLintIssue(in)
+func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInput) error {
+	if err := runCreateLintIssue(in); err != nil {
+		return err
+	}
 	if in.explicitID != "" {
 		if _, err := validation.ValidateIDFormat(in.explicitID); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 	}
 	deps, err := parseDepSpecs(in.deps)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 	waitsFor, err := buildWaitsFor(in.waitsFor, in.waitsForGate)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
 	if in.dryRun {
 		previewLabels := in.labels
 		if in.parentID != "" {
 			if uowProvider == nil {
-				FatalError("proxied-server UOW provider not initialized")
+				return HandleError("proxied-server UOW provider not initialized")
 			}
 			dryUW, err := uowProvider.NewUOW(ctx)
 			if err != nil {
-				FatalError("open unit of work: %v", err)
+				return HandleError("open unit of work: %v", err)
 			}
 			if _, err := dryUW.IssueUseCase().GetIssue(ctx, in.parentID); err != nil {
 				dryUW.Close(ctx)
-				FatalError("parent issue %s not found: %v", in.parentID, err)
+				return HandleError("parent issue %s not found: %v", in.parentID, err)
 			}
 			if !in.noInheritLabels {
 				inherited, lerr := dryUW.LabelUseCase().GetLabels(ctx, in.parentID)
 				if lerr != nil {
 					dryUW.Close(ctx)
-					FatalError("dry-run inherit labels: %v", lerr)
+					return HandleError("dry-run inherit labels: %v", lerr)
 				}
 				previewLabels = mergeCreateLabels(in.labels, inherited)
 			}
@@ -103,24 +105,35 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		} else {
 			renderCreateDryRunPreview(previewIssue, previewLabels, in.deps)
 		}
-		return
+		return nil
 	}
 
-	// Load create context (read-only) to validate input before the write tx.
-	configUW, cctx := proxiedOpenUOW(ctx)
-	configUW.Close(ctx)
+	uw, cctx, err := proxiedOpenUOW(ctx)
+	if err != nil {
+		return err
+	}
+	defer uw.Close(ctx)
 
 	customTypes := resolveProxiedCustomTypes(cctx.CustomTypes)
 	if in.issueType != "" {
 		it := types.IssueType(in.issueType).Normalize()
 		if !it.IsValidWithCustom(customTypes) {
-			FatalError("invalid type %q (allowed: built-ins plus configured custom types)", in.issueType)
+			return HandleError("invalid type %q (allowed: built-ins plus configured custom types)", in.issueType)
+		}
+	}
+	if in.status != "" {
+		customStatuses, err := uw.ConfigUseCase().GetCustomStatuses(ctx)
+		if err != nil {
+			return HandleError("failed to get custom statuses: %v", err)
+		}
+		if !types.Status(in.status).IsValidWithCustom(types.CustomStatusNames(customStatuses)) {
+			return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", in.status)
 		}
 	}
 	if in.explicitID != "" {
 		effectivePrefix := overlayYAMLPrefix(cctx.IssuePrefix)
 		if err := validation.ValidateIDPrefixAllowed(in.explicitID, effectivePrefix, cctx.AllowedPrefixes, in.force); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 	}
 
@@ -138,19 +151,17 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 	}
 
 	var result domain.CreateIssueResult
-	if err := uow.RunInTxMsg(ctx, uowProvider, func(uw uow.UnitOfWork) (string, error) {
-		var e error
-		if issue.Ephemeral {
-			result, e = uw.IssueUseCase().CreateWisp(ctx, params, in.createdBy)
-		} else {
-			result, e = uw.IssueUseCase().CreateIssue(ctx, params, in.createdBy)
-		}
-		if e != nil {
-			return "", e
-		}
-		return fmt.Sprintf("bd: create %s", result.Issue.ID), nil
-	}); err != nil {
-		FatalError("%v", err)
+	if issue.Ephemeral {
+		result, err = uw.IssueUseCase().CreateWisp(ctx, params, in.createdBy)
+	} else {
+		result, err = uw.IssueUseCase().CreateIssue(ctx, params, in.createdBy)
+	}
+	if err != nil {
+		return HandleError("%v", err)
+	}
+
+	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: create %s", result.Issue.ID)); err != nil && !isDoltNothingToCommit(err) {
+		return HandleError("commit: %v", err)
 	}
 
 	switch {
@@ -165,11 +176,12 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		fmt.Printf("  Priority: P%d\n", result.Issue.Priority)
 		fmt.Printf("  Status: %s\n", result.Issue.Status)
 	}
+	return nil
 }
 
-func runCreateLintIssue(in createInput) {
+func runCreateLintIssue(in createInput) error {
 	if in.validationMode != "error" && in.validationMode != "warn" {
-		return
+		return nil
 	}
 	lintIssue := &types.Issue{
 		IssueType:          types.IssueType(in.issueType).Normalize(),
@@ -178,10 +190,11 @@ func runCreateLintIssue(in createInput) {
 	}
 	if err := validation.LintIssue(lintIssue); err != nil {
 		if in.validationMode == "error" {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 		fmt.Fprintf(os.Stderr, "%s %v\n", ui.RenderWarn("⚠"), err)
 	}
+	return nil
 }
 
 func buildCreateIssueFromInput(in createInput) *types.Issue {
@@ -208,19 +221,20 @@ func buildCreateIssueFromInput(in createInput) *types.Issue {
 		Actor:              in.eventActor,
 		Target:             in.eventTarget,
 		Payload:            in.eventPayload,
+		InitialStatus:      in.status,
 		DueAt:              in.dueAt,
 		DeferUntil:         in.deferUntil,
 		Metadata:           in.metadata,
 	})
 }
 
-func runCreateProxiedMarkdown(_ *cobra.Command, ctx context.Context, in createInput) {
+func runCreateProxiedMarkdown(_ *cobra.Command, ctx context.Context, in createInput) error {
 	templates, err := parseMarkdownFile(in.markdownFile)
 	if err != nil {
-		FatalError("parsing markdown file: %v", err)
+		return HandleError("parsing markdown file: %v", err)
 	}
 	if len(templates) == 0 {
-		FatalError("no issues found in markdown file")
+		return HandleError("no issues found in markdown file")
 	}
 
 	if in.validationMode == "error" || in.validationMode == "warn" {
@@ -232,7 +246,7 @@ func runCreateProxiedMarkdown(_ *cobra.Command, ctx context.Context, in createIn
 			}
 			if err := validation.LintIssue(lintIssue); err != nil {
 				if in.validationMode == "error" {
-					FatalError("template %q: %v", t.Title, err)
+					return HandleError("template %q: %v", t.Title, err)
 				}
 				fmt.Fprintf(os.Stderr, "%s template %q: %v\n", ui.RenderWarn("⚠"), t.Title, err)
 			}
@@ -248,13 +262,16 @@ func runCreateProxiedMarkdown(_ *cobra.Command, ctx context.Context, in createIn
 	for _, t := range templates {
 		deps, err := parseMarkdownDepSpecs(t.Dependencies, t.Title)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 		builds = append(builds, templateBuild{template: t, deps: deps})
 	}
 
-	configUW, cctx := proxiedOpenUOW(ctx)
-	configUW.Close(ctx)
+	uw, cctx, err := proxiedOpenUOW(ctx)
+	if err != nil {
+		return err
+	}
+	defer uw.Close(ctx)
 
 	customTypes := resolveProxiedCustomTypes(cctx.CustomTypes)
 	for _, b := range builds {
@@ -262,7 +279,7 @@ func runCreateProxiedMarkdown(_ *cobra.Command, ctx context.Context, in createIn
 			continue
 		}
 		if !b.template.IssueType.IsValidWithCustom(customTypes) {
-			FatalError("template %q: invalid type %q", b.template.Title, b.template.IssueType)
+			return HandleError("template %q: invalid type %q", b.template.Title, b.template.IssueType)
 		}
 	}
 
@@ -291,32 +308,32 @@ func runCreateProxiedMarkdown(_ *cobra.Command, ctx context.Context, in createIn
 	}
 
 	var result domain.CreateIssuesResult
-	if err := uow.RunInTxMsg(ctx, uowProvider, func(uw uow.UnitOfWork) (string, error) {
-		var e error
-		if in.ephemeral {
-			result, e = uw.IssueUseCase().CreateWisps(ctx, paramsList, in.createdBy)
-		} else {
-			result, e = uw.IssueUseCase().CreateIssues(ctx, paramsList, in.createdBy)
-		}
-		if e != nil {
-			return "", e
-		}
-		return fmt.Sprintf("bd: create %d issue(s) from %s", len(result.Issues), in.markdownFile), nil
-	}); err != nil {
-		FatalError("creating issues from markdown: %v", err)
+	if in.ephemeral {
+		result, err = uw.IssueUseCase().CreateWisps(ctx, paramsList, in.createdBy)
+	} else {
+		result, err = uw.IssueUseCase().CreateIssues(ctx, paramsList, in.createdBy)
+	}
+	if err != nil {
+		return HandleError("creating issues from markdown: %v", err)
+	}
+
+	commitMsg := fmt.Sprintf("bd: create %d issue(s) from %s", len(result.Issues), in.markdownFile)
+	if err := uow.CommitWithRetries(ctx, uw, commitMsg); err != nil && !isDoltNothingToCommit(err) {
+		return HandleError("commit: %v", err)
 	}
 
 	if in.jsonOutput {
 		if err := outputJSON(result.Issues); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
-		return
+		return nil
 	}
 
 	fmt.Printf("%s Created %d issues from %s:\n", ui.RenderPass("✓"), len(result.Issues), in.markdownFile)
 	for _, issue := range result.Issues {
 		fmt.Printf("  %s: %s [P%d, %s]\n", issue.ID, issue.Title, issue.Priority, issue.IssueType)
 	}
+	return nil
 }
 
 func parseMarkdownDepSpecs(deps []string, templateTitle string) ([]domain.DependencySpec, error) {
@@ -352,10 +369,10 @@ func parseMarkdownDepSpecs(deps []string, templateTitle string) ([]domain.Depend
 	return out, nil
 }
 
-func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput) {
+func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput) error {
 	data, err := os.ReadFile(in.graphFile) // #nosec G304 -- user-provided path is intentional
 	if err != nil {
-		FatalError("reading graph plan: %v", err)
+		return HandleError("reading graph plan: %v", err)
 	}
 	if unknown := detectUnknownGraphFields(data); len(unknown) > 0 {
 		warnUnknownGraphFields(os.Stderr, unknown)
@@ -363,39 +380,45 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 
 	var plan GraphApplyPlan
 	if err := json.Unmarshal(data, &plan); err != nil {
-		FatalError("parsing graph plan: %v", err)
+		return HandleError("parsing graph plan: %v", err)
 	}
 
 	if in.dryRun {
 		if uowProvider == nil {
-			FatalError("proxied-server UOW provider not initialized")
+			return HandleError("proxied-server UOW provider not initialized")
 		}
 		dryUW, err := uowProvider.NewUOW(ctx)
 		if err != nil {
-			FatalError("open unit of work: %v", err)
+			return HandleError("open unit of work: %v", err)
 		}
 		cctx, err := dryUW.ConfigUseCase().LoadCreateContext(ctx)
 		dryUW.Close(ctx)
 		if err != nil {
-			FatalError("load create context: %v", err)
+			return HandleError("load create context: %v", err)
 		}
 		if err := validateGraphApplyPlan(&plan, resolveProxiedCustomTypes(cctx.CustomTypes)); err != nil {
-			FatalError("invalid graph plan: %v", err)
+			return HandleError("invalid graph plan: %v", err)
 		}
 		if err := emitGraphApplyDryRun(&plan); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
-		return
+		return nil
 	}
 
-	uw, cctx := proxiedOpenUOW(ctx)
+	uw, cctx, err := proxiedOpenUOW(ctx)
+	if err != nil {
+		return err
+	}
 	defer uw.Close(ctx)
 
 	if err := validateGraphApplyPlan(&plan, resolveProxiedCustomTypes(cctx.CustomTypes)); err != nil {
-		FatalError("invalid graph plan: %v", err)
+		return HandleError("invalid graph plan: %v", err)
 	}
 
-	domainPlan := buildDomainGraphPlan(plan, in)
+	domainPlan, err := buildDomainGraphPlan(plan, in)
+	if err != nil {
+		return err
+	}
 
 	var result domain.GraphApplyResult
 	if in.ephemeral {
@@ -404,7 +427,7 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 		result, err = uw.IssueUseCase().ApplyIssueGraph(ctx, domainPlan, in.createdBy)
 	}
 	if err != nil {
-		FatalError("graph create: %v", err)
+		return HandleError("graph create: %v", err)
 	}
 
 	commitMsg := plan.CommitMessage
@@ -412,15 +435,15 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 		commitMsg = fmt.Sprintf("bd: graph-apply %d nodes", len(plan.Nodes))
 	}
 
-	if err := uw.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-		FatalError("commit: %v", err)
+	if err := uow.CommitWithRetries(ctx, uw, commitMsg); err != nil && !isDoltNothingToCommit(err) {
+		return HandleError("commit: %v", err)
 	}
 
 	if in.jsonOutput {
 		if err := outputJSON(GraphApplyResult{IDs: result.IDs}); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
-		return
+		return nil
 	}
 
 	fmt.Printf("Created %d issues\n", len(result.IDs))
@@ -433,14 +456,19 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 	for _, k := range keys {
 		fmt.Printf("  %s -> %s\n", k, result.IDs[k])
 	}
+	return nil
 }
 
-func buildDomainGraphPlan(plan GraphApplyPlan, in createInput) domain.GraphPlan {
+func buildDomainGraphPlan(plan GraphApplyPlan, in createInput) (domain.GraphPlan, error) {
 	nodes := make([]domain.GraphNode, 0, len(plan.Nodes))
 	for _, n := range plan.Nodes {
+		issue, err := materializeGraphNodeIssue(n, in)
+		if err != nil {
+			return domain.GraphPlan{}, err
+		}
 		nodes = append(nodes, domain.GraphNode{
 			Key:               n.Key,
-			Issue:             materializeGraphNodeIssue(n, in),
+			Issue:             issue,
 			ParentKey:         n.ParentKey,
 			ParentID:          n.ParentID,
 			Assignee:          n.Assignee,
@@ -459,10 +487,10 @@ func buildDomainGraphPlan(plan GraphApplyPlan, in createInput) domain.GraphPlan 
 			Type:    graphApplyDependencyType(e.Type),
 		})
 	}
-	return domain.GraphPlan{Nodes: nodes, Edges: edges}
+	return domain.GraphPlan{Nodes: nodes, Edges: edges}, nil
 }
 
-func materializeGraphNodeIssue(n GraphApplyNode, in createInput) *types.Issue {
+func materializeGraphNodeIssue(n GraphApplyNode, in createInput) (*types.Issue, error) {
 	issueType := types.IssueType(n.Type)
 	if issueType == "" {
 		issueType = types.TypeTask
@@ -475,7 +503,7 @@ func materializeGraphNodeIssue(n GraphApplyNode, in createInput) *types.Issue {
 	if len(n.Metadata) > 0 {
 		raw, err := json.Marshal(n.Metadata)
 		if err != nil {
-			FatalError("node %q: marshaling metadata: %v", n.Key, err)
+			return nil, HandleError("node %q: marshaling metadata: %v", n.Key, err)
 		}
 		metadataJSON = raw
 	}
@@ -491,5 +519,5 @@ func materializeGraphNodeIssue(n GraphApplyNode, in createInput) *types.Issue {
 		NoHistory:   in.noHistory,
 		CreatedBy:   in.createdBy,
 		Owner:       in.owner,
-	}
+	}, nil
 }

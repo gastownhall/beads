@@ -44,6 +44,29 @@ func slugify(s string) string {
 	return slug
 }
 
+// matchesKnownCommand reports whether insight is a single bare word that
+// matches the name or an alias of a top-level bd command. It is used to catch
+// `bd remember <subcommand>` mistakes before they become accidental memories.
+// Multi-word insights (the normal case) always pass, since they contain
+// whitespace and so cannot be a single command token.
+func matchesKnownCommand(cmd *cobra.Command, insight string) (string, bool) {
+	word := strings.TrimSpace(insight)
+	if word == "" || strings.ContainsAny(word, " \t\r\n") {
+		return "", false
+	}
+	for _, c := range cmd.Root().Commands() {
+		if strings.EqualFold(c.Name(), word) {
+			return c.Name(), true
+		}
+		for _, alias := range c.Aliases {
+			if strings.EqualFold(alias, word) {
+				return c.Name(), true
+			}
+		}
+	}
+	return "", false
+}
+
 // rememberCmd stores a memory.
 var rememberCmd = &cobra.Command{
 	Use:   `remember "<insight>"`,
@@ -53,10 +76,16 @@ var rememberCmd = &cobra.Command{
 Memories are injected at prime time (bd prime) so you have them
 in every session without manual loading.
 
+The positional arg is the memory CONTENT (the key is auto-generated from it
+unless --key is given). As a convenience, if the arg is a bare key naming an
+existing memory, it is RECALLED instead of stored (same as 'bd recall');
+a bare key naming nothing is refused. Use --key to store slug-like content.
+
 Examples:
   bd remember "always run tests with -race flag"
   bd remember "Dolt phantom DBs hide in three places" --key dolt-phantoms
-  bd remember "auth module uses JWT not sessions" --key auth-jwt`,
+  bd remember "auth module uses JWT not sessions" --key auth-jwt
+  bd remember dolt-phantoms        # bare existing key: reads it (= bd recall)`,
 	GroupID:       "setup",
 	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,
@@ -80,6 +109,23 @@ Examples:
 			return HandleErrorRespectJSON("memory content cannot be empty")
 		}
 
+		// Guard against a subcommand-like first argument being silently stored
+		// as memory content. `bd remember` is a leaf command, so a mistaken
+		// `bd remember recall` (or any bare bd command name) would otherwise
+		// store the word "recall" as a memory instead of doing what the user
+		// intended (GH#4401). A genuine insight is a phrase, so only a single
+		// bare word that matches a known command is treated as suspect, and an
+		// explicit --key signals deliberate intent and bypasses the guard.
+		if memoryKeyFlag == "" {
+			if name, ok := matchesKnownCommand(cmd, insight); ok {
+				return HandleErrorWithHintRespectJSON(
+					fmt.Sprintf("%q looks like a command, not something to remember", insight),
+					fmt.Sprintf("Did you mean 'bd %s'? To store %q as a memory anyway, give it an explicit key: bd remember %q --key <key>", name, insight, insight),
+				)
+			}
+		}
+
+		// Generate or use provided key
 		key := memoryKeyFlag
 		if key == "" {
 			key = slugify(insight)
@@ -96,6 +142,38 @@ Examples:
 		verb := "Remembered"
 		if existing != "" {
 			verb = "Updated"
+		}
+
+		// Desire path + footgun guard: `bd remember <x>` is a WRITE whose positional arg is
+		// the CONTENT, not a key -- but "remember X" reads as a getter in English, so agents
+		// routinely type `bd remember some-key` meaning "do you remember X?". The tell-tale of
+		// a mistyped read is content that round-trips through slugify unchanged (a bare slug);
+		// real prose insights never do. When that happens and no explicit --key was given:
+		//   - the key EXISTS  -> pave the desire path: recall it instead of writing
+		//   - no such key     -> refuse; storing a key-like token as its own content would
+		//                        create a junk memory that hides the mistake
+		// Passing --key states write intent and bypasses both branches.
+		if memoryKeyFlag == "" && slugify(insight) == insight {
+			if existing != "" {
+				if jsonOutput {
+					return outputJSON(map[string]interface{}{
+						"key":    key,
+						"value":  existing,
+						"found":  true,
+						"action": "recalled",
+					})
+				}
+				fmt.Fprintf(os.Stderr,
+					"(recalled %q -- a bare existing key READS. To overwrite: `bd remember \"<new content>\" --key %s`)\n",
+					key, key)
+				fmt.Printf("%s\n", existing)
+				return nil
+			}
+			return HandleErrorRespectJSON(
+				"no memory named %q to recall -- and refusing to store a bare key-like token as its own content. "+
+					"`bd remember` WRITES (its positional arg is CONTENT, not a key). "+
+					"To store it anyway: `bd remember %q --key %s`. To browse keys: `bd memories`",
+				key, insight, key)
 		}
 
 		if err := store.SetConfig(ctx, storageKey, insight); err != nil {

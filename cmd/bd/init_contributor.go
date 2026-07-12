@@ -282,8 +282,7 @@ func autoConfigureForkContributor(ctx context.Context, store storage.DoltStorage
 		return nil
 	}
 
-	// Already configured: idempotent re-init. Check both DB config and YAML
-	// config — a YAML-configured contributor setup would be missed by DB-only check.
+	// Already configured: idempotent re-init.
 	if existing, err := store.GetConfig(ctx, "routing.contributor"); err == nil && existing != "" {
 		if !quiet {
 			fmt.Printf("\n  %s Fork detected (upstream: %s)\n", ui.RenderWarn("⚠"), upstreamURL)

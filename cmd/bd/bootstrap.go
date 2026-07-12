@@ -711,7 +711,7 @@ func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGate
 			"  Re-running `"+rerunCmd+"` will NOT fix this — the remote itself is behind.\n"+
 			"  Choose one:\n"+
 			"    • This machine is the designated migrator (exactly ONE machine should be):\n"+
-			"        "+schema.AllowRemoteMigrateEnv+"=1 bd migrate\n"+
+			"        bd migrate --force\n"+
 			"        bd dolt push\n"+
 			"      then other machines re-run `bd bootstrap` to adopt the migrated database.\n"+
 			"    • Another machine is the designated migrator: wait for it to push, then\n"+
@@ -846,7 +846,7 @@ func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) e
 	}
 	defer func() { _ = cleanup() }()
 
-	if err := versioncontrolops.DoltClone(ctx, db, remoteURL, dbName); err != nil {
+	if err := versioncontrolops.DoltClone(ctx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER")); err != nil {
 		return fmt.Errorf("clone from remote: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Synced database from %s\n", remoteURL)
@@ -883,7 +883,7 @@ func cloneViaServer(ctx context.Context, beadsDir, remoteURL, dbName string, cfg
 			cfg.GetDoltServerHost(), port, err)
 	}
 
-	if err := versioncontrolops.DoltClone(cloneCtx, db, remoteURL, dbName); err != nil {
+	if err := versioncontrolops.DoltClone(cloneCtx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER")); err != nil {
 		return fmt.Errorf("clone from remote via server: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Synced database from %s (via server at %s:%d)\n",

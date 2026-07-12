@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/timeparsing"
@@ -40,8 +41,7 @@ create, update, show, or close operation).`,
 		}()
 
 		if usesProxiedServer() {
-			runUpdateProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runUpdateProxiedServer(cmd, rootCtx, args)
 		}
 
 		// If no IDs provided, use last touched issue
@@ -521,7 +521,7 @@ create, update, show, or close operation).`,
 					updatedIssues = append(updatedIssues, updatedIssue)
 				}
 			} else {
-				fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, updateTitle))
+				debug.PrintNormal("%s Updated issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, updateTitle))
 			}
 
 			// Track first successful update for last-touched

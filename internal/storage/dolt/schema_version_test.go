@@ -161,7 +161,13 @@ func TestMigration0053PromotesRigWisps(t *testing.T) {
 		t.Fatalf("commit seed fixture: %v", err)
 	}
 
-	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+	// This test exercises the rig-wisp promotion in migration 0053 specifically.
+	// MigrateUp only re-applies versions strictly greater than MAX(applied), so to
+	// replay 0053 we delete every row >= 53 (not just LatestVersion(), which now
+	// points past 0053 as later migrations like 0054 land). 0053 re-runs the
+	// promotion; any later migration replays as a guarded no-op.
+	const rigWispsMigrationVersion = 53
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version >= ?", rigWispsMigrationVersion); err != nil {
 		t.Fatalf("mark 0053 pending: %v", err)
 	}
 	if _, err := schema.MigrateUp(ctx, store.db); err != nil {
@@ -209,6 +215,131 @@ func TestMigration0053PromotesRigWisps(t *testing.T) {
 		`SELECT COUNT(*) FROM wisp_child_counters WHERE parent_id = ?`, 0, rigID)
 	assertCount("remaining source wisp dependencies",
 		`SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?`, 0, rigID)
+}
+
+// TestMigration0053RepairsIssuesMissingRigColumns reproduces #4502: a database
+// whose schema_migrations sits at v52 but whose issues table was bootstrapped
+// before the rig/agent columns existed in 0001_create_issues. The 0053 rig
+// repair copies those columns from wisps, so it must ensure they exist on
+// issues first instead of failing with "Unknown column".
+func TestMigration0053RepairsIssuesMissingRigColumns(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Simulate the pre-rig issues shape. Databases in the wild can be
+	// missing any subset; drop all six to cover the worst case.
+	for _, col := range []string{"hook_bead", "role_bead", "agent_state", "last_activity", "role_type", "rig"} {
+		if _, err := store.db.ExecContext(ctx, "ALTER TABLE issues DROP COLUMN "+col); err != nil {
+			t.Fatalf("drop issues.%s: %v", col, err)
+		}
+	}
+
+	const rigID = "schema-rig-legacy"
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral, agent_state, rig)
+		VALUES (?, 'Rig identity', '', '', '', '', 'open', 1, 'rig', 1, 'ready', 'test-rig')
+	`, rigID); err != nil {
+		t.Fatalf("seed rig wisp: %v", err)
+	}
+
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
+		t.Fatalf("stage legacy fixture: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'seed legacy issues shape')"); err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+		t.Fatalf("commit legacy fixture: %v", err)
+	}
+
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+		t.Fatalf("mark 0053 pending: %v", err)
+	}
+	if _, err := schema.MigrateUp(ctx, store.db); err != nil {
+		t.Fatalf("MigrateUp on legacy issues shape: %v", err)
+	}
+
+	var promoted int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM issues WHERE id = ? AND issue_type = 'rig' AND ephemeral = 0 AND agent_state = 'ready' AND rig = 'test-rig'`,
+		rigID).Scan(&promoted); err != nil {
+		t.Fatalf("count promoted rig issue: %v", err)
+	}
+	if promoted != 1 {
+		t.Fatalf("promoted rig issue rows = %d, want 1 with rig columns restored and copied", promoted)
+	}
+}
+
+// TestIgnoredMigration0011CleansOrphanedChildCounters reproduces #4534: a
+// child_counters row orphaned while fk_counter_parent was dropped (0039)
+// survives the FK's re-add (ignored 0002 runs under FOREIGN_KEY_CHECKS=0),
+// and the dangling row then fails constraint validation on every subsequent
+// write. The cleanup migration must delete orphans and keep live counters.
+func TestIgnoredMigration0011CleansOrphanedChildCounters(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const parentID = "schema-counter-parent"
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+		VALUES (?, 'parent', '', '', '', '', 'open', 2, 'task')
+	`, parentID); err != nil {
+		t.Fatalf("seed parent issue: %v", err)
+	}
+
+	// MaxOpenConns is 1, so the session FK toggle holds for the next insert.
+	if _, err := store.db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatalf("disable fk checks: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		`INSERT INTO child_counters (parent_id, last_child) VALUES ('schema-counter-orphan', 3), (?, 5)`,
+		parentID); err != nil {
+		t.Fatalf("seed counters with legacy orphan: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatalf("re-enable fk checks: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_ADD('-A')"); err != nil {
+		t.Fatalf("stage counter fixture: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'seed orphaned child counter')"); err != nil &&
+		!strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+		t.Fatalf("commit counter fixture: %v", err)
+	}
+
+	if _, err := store.db.ExecContext(ctx, "DELETE FROM ignored_schema_migrations WHERE version = ?", schema.LatestIgnoredVersion()); err != nil {
+		t.Fatalf("mark ignored 0011 pending: %v", err)
+	}
+	if _, err := schema.MigrateUp(ctx, store.db); err != nil {
+		t.Fatalf("MigrateUp with orphaned child counter: %v", err)
+	}
+
+	assertCount := func(name, query string, want int, args ...any) {
+		t.Helper()
+		var got int
+		if err := store.db.QueryRowContext(ctx, query, args...).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got != want {
+			t.Fatalf("%s = %d, want %d", name, got, want)
+		}
+	}
+	assertCount("orphaned counter rows",
+		`SELECT COUNT(*) FROM child_counters WHERE parent_id = 'schema-counter-orphan'`, 0)
+	assertCount("live counter rows",
+		`SELECT COUNT(*) FROM child_counters WHERE parent_id = ? AND last_child = 5`, 1, parentID)
+
+	// The #4534 symptom: with the orphan gone, plain issue inserts work again.
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+		VALUES ('schema-counter-after', 'insert works again', '', '', '', '', 'open', 2, 'task')
+	`); err != nil {
+		t.Fatalf("insert after cleanup: %v", err)
+	}
 }
 
 // TestSchemaRunsInitWhenMissing verifies that initSchemaOnDB runs

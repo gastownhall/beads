@@ -15,22 +15,29 @@ import (
 
 const storageScopeName = "github.com/steveyegge/beads/storage"
 
-// InstrumentedStorage wraps storage.Storage with OTel tracing and metrics.
-// Every method gets a span and is counted in bd.storage.* metrics.
-// Use WrapStorage to create one; it returns the original store unchanged when
-// telemetry is disabled.
+// InstrumentedStorage wraps storage.DoltStorage with OTel tracing and metrics.
+// Methods on the core Storage interface are overridden to emit bd.storage.*
+// counters, duration histograms, and per-operation spans. Methods on the
+// DoltStorage capability sub-interfaces (VersionControl, HistoryViewer,
+// SyncStore, etc.) pass through to the embedded inner store unchanged —
+// those operations already have their own dolt.* spans inside the dolt
+// implementation, so wrapping them here would double-count.
+//
+// Use WrapStorage to construct one; it returns the original store unchanged
+// when telemetry is disabled.
 type InstrumentedStorage struct {
-	inner      storage.Storage
-	tracer     trace.Tracer
-	ops        metric.Int64Counter
-	dur        metric.Float64Histogram
-	errs       metric.Int64Counter
-	issueGauge metric.Int64Gauge
+	storage.DoltStorage // passthrough for capability methods we don't instrument
+	inner               storage.DoltStorage
+	tracer              trace.Tracer
+	ops                 metric.Int64Counter
+	dur                 metric.Float64Histogram
+	errs                metric.Int64Counter
+	issueGauge          metric.Int64Gauge
 }
 
 // WrapStorage returns s decorated with OTel instrumentation.
 // When telemetry is disabled, s is returned as-is with zero overhead.
-func WrapStorage(s storage.Storage) storage.Storage {
+func WrapStorage(s storage.DoltStorage) storage.DoltStorage {
 	if !Enabled() {
 		return s
 	}
@@ -49,14 +56,19 @@ func WrapStorage(s storage.Storage) storage.Storage {
 		metric.WithDescription("Current number of issues by status (snapshot from GetStatistics)"),
 	)
 	return &InstrumentedStorage{
-		inner:      s,
-		tracer:     Tracer(storageScopeName),
-		ops:        ops,
-		dur:        dur,
-		errs:       errs,
-		issueGauge: issueGauge,
+		DoltStorage: s,
+		inner:       s,
+		tracer:      Tracer(storageScopeName),
+		ops:         ops,
+		dur:         dur,
+		errs:        errs,
+		issueGauge:  issueGauge,
 	}
 }
+
+// Unwrap satisfies storage.Unwrapper so storage.UnwrapStore can peel the
+// instrumentation layer for optional-interface type assertions.
+func (s *InstrumentedStorage) Unwrap() storage.DoltStorage { return s.inner }
 
 // op starts a span and records a metric for the named storage operation.
 func (s *InstrumentedStorage) op(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span, time.Time) {
@@ -151,6 +163,17 @@ func (s *InstrumentedStorage) ReopenIssue(ctx context.Context, id string, reason
 	return err
 }
 
+func (s *InstrumentedStorage) UnclaimIssue(ctx context.Context, id string, actor string) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", id),
+		attribute.String("bd.actor", actor),
+	}
+	ctx, span, t := s.op(ctx, "UnclaimIssue", attrs...)
+	err := s.inner.UnclaimIssue(ctx, id, actor)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
 func (s *InstrumentedStorage) UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error {
 	attrs := []attribute.KeyValue{
 		attribute.String("bd.issue.id", id),
@@ -202,6 +225,17 @@ func (s *InstrumentedStorage) SearchIssuesWithCounts(ctx context.Context, query 
 	}
 	s.done(ctx, span, t, err, attrs...)
 	return v, err
+}
+
+func (s *InstrumentedStorage) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
+	ctx, span, t := s.op(ctx, "SearchIssueIDs", attrs...)
+	ids, err := s.inner.SearchIssueIDs(ctx, query, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(ids)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return ids, err
 }
 
 // ── Dependencies ────────────────────────────────────────────────────────────
@@ -644,3 +678,9 @@ func (s *InstrumentedStorage) SlotClear(ctx context.Context, issueID, key, actor
 func (s *InstrumentedStorage) Close() error {
 	return s.inner.Close()
 }
+
+// Compile-time interface satisfaction.
+var (
+	_ storage.DoltStorage = (*InstrumentedStorage)(nil)
+	_ storage.Unwrapper   = (*InstrumentedStorage)(nil)
+)

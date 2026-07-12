@@ -13,19 +13,23 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/fs"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) {
+func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		FatalErrorRespectJSON("no issue ID provided")
+		return HandleErrorRespectJSON("no issue ID provided")
 	}
 
-	in := gatherUpdateInput(ctx, cmd)
+	in, err := gatherUpdateInput(ctx, cmd)
+	if err != nil {
+		return err
+	}
 	if isUpdateInputNoop(in) {
 		fmt.Println("No updates specified")
-		return
+		return nil
 	}
 
 	jsonOut, _ := cmd.Flags().GetBool("json")
@@ -33,7 +37,10 @@ func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	var anyUpdated bool
 
 	for _, id := range args {
-		issue, ok := applyUpdateProxiedOne(ctx, id, in)
+		issue, ok, err := applyUpdateProxiedOne(ctx, id, in)
+		if err != nil {
+			return err
+		}
 		if !ok {
 			continue
 		}
@@ -49,18 +56,19 @@ func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		_ = outputJSON(updated)
 	}
 	if !anyUpdated {
-		os.Exit(1)
+		return SilentExit()
 	}
+	return nil
 }
 
-func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*types.Issue, bool) {
+func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*types.Issue, bool, error) {
 	if uowProvider == nil {
-		FatalError("proxied-server UOW provider not initialized")
+		return nil, false, HandleError("proxied-server UOW provider not initialized")
 	}
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error opening unit of work for %s: %v\n", id, err)
-		return nil, false
+		return nil, false, nil
 	}
 	defer uw.Close(ctx)
 
@@ -72,20 +80,20 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 			current = wispCurrent
 		} else if err != nil {
 			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-			return nil, false
+			return nil, false, nil
 		} else {
 			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-			return nil, false
+			return nil, false, nil
 		}
 	}
 	if err := validateIssueUpdatable(id, current); err != nil {
 		fmt.Fprintf(os.Stderr, "%s\n", err)
-		return nil, false
+		return nil, false, nil
 	}
 
 	spec, err := buildUpdateSpecForIssue(current, in)
 	if err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return nil, false, HandleErrorRespectJSON("%v", err)
 	}
 
 	updated, err := issueUC.ApplyUpdate(ctx, id, spec, actor)
@@ -95,18 +103,18 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		} else {
 			fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
 		}
-		return nil, false
+		return nil, false, nil
 	}
 
-	if err := uw.Commit(ctx, fmt.Sprintf("bd: update %s", id)); err != nil && !isDoltNothingToCommit(err) {
+	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: update %s", id)); err != nil && !isDoltNothingToCommit(err) {
 		fmt.Fprintf(os.Stderr, "Error committing %s: %v\n", id, err)
-		return nil, false
+		return nil, false, nil
 	}
 
 	if err := fireProxiedUpdateHooks(ctx, current, updated); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: %s: %v\n", id, err)
 	}
-	return updated, true
+	return updated, true, nil
 }
 
 func fireProxiedUpdateHooks(ctx context.Context, before, after *types.Issue) error {

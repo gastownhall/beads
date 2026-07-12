@@ -77,12 +77,16 @@ var issueUpsertColumns = []string{
 // Tie rows are deliberately NOT short-circuited by the staleRejected
 // pre-check in InsertIssueIfNew, so their aux data (labels/comments/deps,
 // which never bump updated_at) still merges additively.
-func issueUpsertAssignments(rejectStaleUpdate bool) string {
+func issueUpsertAssignments(table string, rejectStaleUpdate bool) string {
 	assignments := make([]string, 0, len(issueUpsertColumns))
 	for _, col := range issueUpsertColumns {
 		if rejectStaleUpdate {
+			// Qualify the existing-row references with the table name. Postgres's
+			// ON CONFLICT DO UPDATE rejects a bare `updated_at` as ambiguous (it could
+			// be the target row or EXCLUDED); <table>.updated_at is unambiguous and is
+			// also accepted by MySQL/Dolt/SQLite. VALUES(...) is the incoming row.
 			assignments = append(assignments,
-				fmt.Sprintf("%s = IF(VALUES(updated_at) > updated_at, VALUES(%s), %s)", col, col, col))
+				fmt.Sprintf("%s = IF(VALUES(updated_at) > %s.updated_at, VALUES(%s), %s.%s)", col, table, col, table, col))
 		} else {
 			assignments = append(assignments, fmt.Sprintf("%s = VALUES(%s)", col, col))
 		}
@@ -122,7 +126,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 		)
 		ON DUPLICATE KEY UPDATE
 			%s
-	`, table, issueUpsertAssignments(rejectStaleUpdate)),
+	`, table, issueUpsertAssignments(table, rejectStaleUpdate)),
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		issue.Status, issue.Priority, issue.IssueType, NullString(issue.Assignee), NullInt(issue.EstimatedMinutes),
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, NullStringPtr(issue.ExternalRef), issue.SpecID,
@@ -379,25 +383,11 @@ func ComputeAdaptiveLength(numIssues int, cfg AdaptiveIDConfig) int {
 
 // GetCustomStatusesTx reads custom statuses from config within a transaction.
 func GetCustomStatusesTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
-	var raw string
-	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "status.custom").Scan(&raw)
-	if err == sql.ErrNoRows || raw == "" {
-		return nil, nil
-	}
+	detailed, err := ResolveCustomStatusesDetailedInTx(ctx, tx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read status.custom config: %w", err)
+		return nil, err
 	}
-	var statuses []string
-	if err := json.Unmarshal([]byte(raw), &statuses); err != nil {
-		// Try comma-separated fallback
-		for _, s := range strings.Split(raw, ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				statuses = append(statuses, s)
-			}
-		}
-	}
-	return statuses, nil
+	return types.CustomStatusNames(detailed), nil
 }
 
 // GetCustomTypesTx reads custom types from config within a transaction.

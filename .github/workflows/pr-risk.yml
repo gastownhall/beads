@@ -57,7 +57,7 @@ jobs:
   #     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
   #
   #     - name: Set up Go
-  #       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+  #       uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
   #       with:
   #         go-version-file: 'go.mod'
   #
@@ -102,7 +102,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -115,6 +115,13 @@ jobs:
       - name: Build embedded cmd test binary
         run: go test -tags gms_pure_go -race -c -o /tmp/bd-cmd-test ./cmd/bd/
 
+      # Server-Dolt conformance binary. No -race: the Dolt server runs
+      # out-of-process in a container, and omitting it keeps the run inside the
+      # job's timeout. The dolt package self-skips without the docker image, so
+      # the binary is harmless if its job is gated off.
+      - name: Build server Dolt conformance test binary
+        run: go test -tags=integration,gms_pure_go -c -o /tmp/dolt-conformance-test ./internal/storage/dolt/
+
       - name: Upload binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -123,6 +130,7 @@ jobs:
             /tmp/bd-embedded-test
             /tmp/embeddeddolt-test
             /tmp/bd-cmd-test
+            /tmp/dolt-conformance-test
           retention-days: 1
 
   test-embedded-storage:
@@ -151,7 +159,88 @@ jobs:
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
           BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
-        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=10m
+        # Conformance runs in the dedicated test-embedded-conformance job; skip
+        # it here. Keeps upstream's 20m bump (base embedded tests grew) while
+        # this job stays inside its envelope without the conformance suite.
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=20m -test.skip '^TestConformance$'
+
+  test-embedded-conformance:
+    name: Test (Embedded Dolt Conformance)
+    needs: [detect-ci-tier, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: embedded-test-binaries
+          path: /tmp/
+
+      - name: Fix permissions
+        run: chmod +x /tmp/embeddeddolt-test
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Test
+        env:
+          BEADS_TEST_EMBEDDED_DOLT: "1"
+          BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
+        # Conformance suite (conformance.RunAll via TestConformance) against the
+        # embedded Dolt backend. Split from test-embedded-storage so each job
+        # stays well under its timeout; the server twin runs in mybd-665b's job.
+        # 30m matches the repo's integration timeout: the audit suite is large and
+        # embedded Dolt under -race is slow, so 15m no longer left headroom.
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.run '^TestConformance$'
+
+  test-server-storage:
+    name: Test (Server Dolt Conformance)
+    needs: [detect-ci-tier, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: embedded-test-binaries
+          path: /tmp/
+
+      - name: Fix permissions
+        run: chmod +x /tmp/dolt-conformance-test
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Dolt
+        run: |
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+          dolt version
+
+      - name: Pull Dolt sql-server image
+        # Presence of this image flips isDoltImageCached() true, so the suite
+        # exercises server Dolt instead of self-skipping. Keep the tag in sync
+        # with internal/testutil/testdoltcommon.go:DoltDockerImage.
+        run: docker pull dolthub/dolt-sql-server:2.1.10
+
+      - name: Test
+        # Server twin of test-embedded-conformance: same conformance.RunAll, but
+        # against the container-backed server-mode Dolt backend. No -short / no
+        # BEADS_TEST_SKIP=dolt, so TestMain starts the shared server and the
+        # suite runs instead of self-skipping.
+        run: /tmp/dolt-conformance-test -test.v -test.count=1 -test.timeout=15m -test.run '^TestConformance$'
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
@@ -191,7 +280,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
-      - uses: DeterminateSystems/determinate-nix-action@9adf02b41cfdac2632e1c16f0480ff5bf3b05dd6 # v3
+      - uses: DeterminateSystems/determinate-nix-action@629b284231c2a82554b724e357e47fc6020833c8 # v3
       - name: Run bd help via Nix
         id: nix_help
         run: |
@@ -216,6 +305,8 @@ jobs:
       - detect-ci-tier
       - build-embedded
       - test-embedded-storage
+      - test-embedded-conformance
+      - test-server-storage
       - test-embedded-cmd
       - test-nix
     if: ${{ always() }}
@@ -229,18 +320,22 @@ jobs:
             DETECT_CI_TIER
             BUILD_EMBEDDED
             TEST_EMBEDDED_STORAGE
+            TEST_EMBEDDED_CONFORMANCE
+            TEST_SERVER_STORAGE
             TEST_EMBEDDED_CMD
             TEST_NIX
           FULL_EMBEDDED: ${{ needs.detect-ci-tier.outputs.full_embedded }}
           DETECT_CI_TIER: ${{ needs.detect-ci-tier.result }}
           BUILD_EMBEDDED: ${{ needs.build-embedded.result }}
           TEST_EMBEDDED_STORAGE: ${{ needs.test-embedded-storage.result }}
+          TEST_EMBEDDED_CONFORMANCE: ${{ needs.test-embedded-conformance.result }}
+          TEST_SERVER_STORAGE: ${{ needs.test-server-storage.result }}
           TEST_EMBEDDED_CMD: ${{ needs.test-embedded-cmd.result }}
           TEST_NIX: ${{ needs.test-nix.result }}
         run: |
           skipped_ok=""
           if [[ "$FULL_EMBEDDED" != "true" ]]; then
-            skipped_ok="BUILD_EMBEDDED TEST_EMBEDDED_STORAGE TEST_EMBEDDED_CMD"
+            skipped_ok="BUILD_EMBEDDED TEST_EMBEDDED_STORAGE TEST_EMBEDDED_CONFORMANCE TEST_SERVER_STORAGE TEST_EMBEDDED_CMD"
           fi
           export CI_GATE_SKIPPED_OK="$skipped_ok"
           bash .github/scripts/ci-gate.sh

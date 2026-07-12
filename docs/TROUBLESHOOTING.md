@@ -700,7 +700,7 @@ git checkout main
 bd config set sync.branch ""
 ```
 
-See [WORKTREES.md#beads-created-worktrees-sync-branch](WORKTREES.md#beads-created-worktrees-sync-branch) for details.
+See [WORKTREES.md#legacy-cleanup](WORKTREES.md#legacy-cleanup) for details.
 
 ### Unexpected worktree directories in .git/
 

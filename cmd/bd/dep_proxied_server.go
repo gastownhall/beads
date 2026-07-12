@@ -14,15 +14,15 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-func openDepProxiedUOW(ctx context.Context) uow.UnitOfWork {
+func openDepProxiedUOW(ctx context.Context) (uow.UnitOfWork, error) {
 	if uowProvider == nil {
-		FatalErrorRespectJSON("proxied-server UOW provider not initialized")
+		return nil, HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		FatalErrorRespectJSON("open unit of work: %v", err)
+		return nil, HandleErrorRespectJSON("open unit of work: %v", err)
 	}
-	return uw
+	return uw, nil
 }
 
 func proxiedLookupTitle(ctx context.Context, uw uow.UnitOfWork, id string) string {
@@ -68,12 +68,15 @@ func proxiedWarnCycles(ctx context.Context, uw uow.UnitOfWork) {
 	fmt.Fprintf(os.Stderr, "\nRun 'bd dep cycles' for detailed analysis.\n\n")
 }
 
-func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerID, blockedID string) {
+func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerID, blockedID string) error {
 	if isChildOf(blockedID, blockerID) {
-		FatalErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", blockedID, blockerID)
+		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", blockedID, blockerID)
 	}
 
-	uw := openDepProxiedUOW(ctx)
+	uw, err := openDepProxiedUOW(ctx)
+	if err != nil {
+		return err
+	}
 	defer uw.Close(ctx)
 
 	dep := &types.Dependency{
@@ -82,7 +85,7 @@ func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerI
 		Type:        types.DepBlocks,
 	}
 	if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
@@ -93,8 +96,8 @@ func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerI
 	blockerTitle := proxiedLookupTitle(ctx, uw, blockerID)
 	blockedTitle := proxiedLookupTitle(ctx, uw, blockedID)
 
-	if err := uw.Commit(ctx, fmt.Sprintf("bd: dep add %s %s", blockedID, blockerID)); err != nil && !isDoltNothingToCommit(err) {
-		FatalErrorRespectJSON("failed to commit: %v", err)
+	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: dep add %s %s", blockedID, blockerID)); err != nil && !isDoltNothingToCommit(err) {
+		return HandleErrorRespectJSON("failed to commit: %v", err)
 	}
 
 	if jsonOutput {
@@ -104,22 +107,22 @@ func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerI
 			"blocked_id": blockedID,
 			"type":       string(types.DepBlocks),
 		})
-		return
+		return nil
 	}
 
 	fmt.Printf("%s Added dependency: %s blocks %s\n",
 		ui.RenderPass("✓"),
 		formatFeedbackIDParen(blockerID, blockerTitle),
 		formatFeedbackIDParen(blockedID, blockedTitle))
+	return nil
 }
 
-func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) {
+func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	depType, _ := cmd.Flags().GetString("type")
 	file, _ := cmd.Flags().GetString("file")
 
 	if file != "" {
-		runDepAddBulkProxied(cmd, ctx, file, depType)
-		return
+		return runDepAddBulkProxied(cmd, ctx, file, depType)
 	}
 
 	blockedBy, _ := cmd.Flags().GetString("blocked-by")
@@ -139,7 +142,7 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	var toID string
 	if strings.HasPrefix(dependsOnArg, "external:") {
 		if err := validateExternalRef(dependsOnArg); err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 		toID = dependsOnArg
 	} else {
@@ -147,20 +150,23 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	}
 
 	if isChildOf(fromID, toID) {
-		FatalErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
+		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 	}
 
 	dt := types.DependencyType(depType)
 	if !dt.IsValid() {
-		FatalErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
+		return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
 	}
 
-	uw := openDepProxiedUOW(ctx)
+	uw, err := openDepProxiedUOW(ctx)
+	if err != nil {
+		return err
+	}
 	defer uw.Close(ctx)
 
 	dep := &types.Dependency{IssueID: fromID, DependsOnID: toID, Type: dt}
 	if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
@@ -171,8 +177,8 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	fromTitle := proxiedLookupTitle(ctx, uw, fromID)
 	toTitle := proxiedLookupTitle(ctx, uw, toID)
 
-	if err := uw.Commit(ctx, fmt.Sprintf("bd: dep add %s %s", fromID, toID)); err != nil && !isDoltNothingToCommit(err) {
-		FatalErrorRespectJSON("failed to commit: %v", err)
+	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: dep add %s %s", fromID, toID)); err != nil && !isDoltNothingToCommit(err) {
+		return HandleErrorRespectJSON("failed to commit: %v", err)
 	}
 
 	if jsonOutput {
@@ -182,7 +188,7 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 			"depends_on_id": toID,
 			"type":          depType,
 		})
-		return
+		return nil
 	}
 
 	fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
@@ -190,25 +196,26 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		formatFeedbackIDParen(fromID, fromTitle),
 		formatFeedbackIDParen(toID, toTitle),
 		depType)
+	return nil
 }
 
-func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, defaultType string) {
+func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, defaultType string) error {
 	edges, err := readBulkDepEdges(file, defaultType)
 	if err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 	if len(edges) == 0 {
-		FatalErrorRespectJSON("no dependency edges found")
+		return HandleErrorRespectJSON("no dependency edges found")
 	}
 
 	deps := make([]*types.Dependency, 0, len(edges))
 	for _, edge := range edges {
 		if isChildOf(edge.IssueID, edge.DependsOnID) {
-			FatalErrorRespectJSON("line %d: cannot add dependency: %s is already a child of %s", edge.Line, edge.IssueID, edge.DependsOnID)
+			return HandleErrorRespectJSON("line %d: cannot add dependency: %s is already a child of %s", edge.Line, edge.IssueID, edge.DependsOnID)
 		}
 		if strings.HasPrefix(edge.DependsOnID, "external:") {
 			if err := validateExternalRef(edge.DependsOnID); err != nil {
-				FatalErrorRespectJSON("line %d: %v", edge.Line, err)
+				return HandleErrorRespectJSON("line %d: %v", edge.Line, err)
 			}
 		}
 		deps = append(deps, &types.Dependency{
@@ -218,22 +225,25 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 		})
 	}
 
-	uw := openDepProxiedUOW(ctx)
+	uw, err := openDepProxiedUOW(ctx)
+	if err != nil {
+		return err
+	}
 	defer uw.Close(ctx)
 
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
 	if _, err := uw.DependencyUseCase().AddDependencies(ctx, deps, actor, domain.BulkAddDepsOpts{
 		SkipPerEdgeCycleCheck: noCycleCheck,
 	}); err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if !noCycleCheck {
 		proxiedWarnCycles(ctx, uw)
 	}
 
-	if err := uw.Commit(ctx, fmt.Sprintf("dependency: add %d edges", len(deps))); err != nil && !isDoltNothingToCommit(err) {
-		FatalErrorRespectJSON("failed to commit: %v", err)
+	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("dependency: add %d edges", len(deps))); err != nil && !isDoltNothingToCommit(err) {
+		return HandleErrorRespectJSON("failed to commit: %v", err)
 	}
 
 	if jsonOutput {
@@ -250,33 +260,37 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 			"count":        len(deps),
 			"dependencies": out,
 		})
-		return
+		return nil
 	}
 
 	fmt.Printf("%s Added %d dependencies\n", ui.RenderPass("✓"), len(deps))
+	return nil
 }
 
-func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []string) {
+func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []string) error {
 	fromID := args[0]
 	toID := args[1]
 	if strings.HasPrefix(toID, "external:") {
 		if err := validateExternalRef(toID); err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 	}
 
-	uw := openDepProxiedUOW(ctx)
+	uw, err := openDepProxiedUOW(ctx)
+	if err != nil {
+		return err
+	}
 	defer uw.Close(ctx)
 
 	if err := uw.DependencyUseCase().RemoveDependency(ctx, fromID, toID, actor); err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	fromTitle := proxiedLookupTitle(ctx, uw, fromID)
 	toTitle := proxiedLookupTitle(ctx, uw, toID)
 
-	if err := uw.Commit(ctx, fmt.Sprintf("bd: dep remove %s %s", fromID, toID)); err != nil && !isDoltNothingToCommit(err) {
-		FatalErrorRespectJSON("failed to commit: %v", err)
+	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: dep remove %s %s", fromID, toID)); err != nil && !isDoltNothingToCommit(err) {
+		return HandleErrorRespectJSON("failed to commit: %v", err)
 	}
 
 	if jsonOutput {
@@ -285,23 +299,27 @@ func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []str
 			"issue_id":      fromID,
 			"depends_on_id": toID,
 		})
-		return
+		return nil
 	}
 
 	fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
 		ui.RenderPass("✓"),
 		formatFeedbackIDParen(fromID, fromTitle),
 		formatFeedbackIDParen(toID, toTitle))
+	return nil
 }
 
-func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) {
+func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	direction, _ := cmd.Flags().GetString("direction")
 	typeFilter, _ := cmd.Flags().GetString("type")
 	if direction == "" {
 		direction = "down"
 	}
 
-	uw := openDepProxiedUOW(ctx)
+	uw, err := openDepProxiedUOW(ctx)
+	if err != nil {
+		return err
+	}
 	defer uw.Close(ctx)
 
 	depUC := uw.DependencyUseCase()
@@ -309,7 +327,7 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 	if len(args) > 1 && direction == "down" {
 		depMap, err := depUC.GetIssueDependencyRecords(ctx, args)
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 		var allDeps []*types.Dependency
 		for _, id := range args {
@@ -324,7 +342,7 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 				allDeps = []*types.Dependency{}
 			}
 			_ = outputJSON(allDeps)
-			return
+			return nil
 		}
 		for _, id := range args {
 			deps := depMap[id]
@@ -341,7 +359,7 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 			}
 		}
 		fmt.Println()
-		return
+		return nil
 	}
 
 	var allIssues []*types.IssueWithDependencyMetadata
@@ -352,7 +370,7 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 	for _, id := range args {
 		issues, err := depUC.ListWithIssueMetadata(ctx, id, domain.DepListFilter{Direction: listDirection})
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 		if typeFilter != "" {
 			filtered := issues[:0]
@@ -371,7 +389,7 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 			allIssues = []*types.IssueWithDependencyMetadata{}
 		}
 		_ = outputJSON(allIssues)
-		return
+		return nil
 	}
 
 	if len(allIssues) == 0 {
@@ -384,7 +402,7 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		} else {
 			fmt.Println("\nNo dependencies found")
 		}
-		return
+		return nil
 	}
 
 	for _, iss := range allIssues {
@@ -405,9 +423,10 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 			idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
 	}
 	fmt.Println()
+	return nil
 }
 
-func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) {
+func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	fullID := args[0]
 	showAllPaths, _ := cmd.Flags().GetBool("show-all-paths")
 	maxDepth, _ := cmd.Flags().GetInt("max-depth")
@@ -425,13 +444,16 @@ func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		direction = "down"
 	}
 	if direction != "down" && direction != "up" && direction != "both" {
-		FatalErrorRespectJSON("--direction must be 'down', 'up', or 'both'")
+		return HandleErrorRespectJSON("--direction must be 'down', 'up', or 'both'")
 	}
 	if maxDepth < 1 {
-		FatalErrorRespectJSON("--max-depth must be >= 1")
+		return HandleErrorRespectJSON("--max-depth must be >= 1")
 	}
 
-	uw := openDepProxiedUOW(ctx)
+	uw, err := openDepProxiedUOW(ctx)
+	if err != nil {
+		return err
+	}
 	defer uw.Close(ctx)
 
 	depUC := uw.DependencyUseCase()
@@ -444,7 +466,7 @@ func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 			Direction:    domain.DepDirectionOut,
 		})
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 		upTree, err := depUC.GetDependencyTree(ctx, fullID, domain.DepTreeOpts{
 			MaxDepth:     maxDepth,
@@ -452,7 +474,7 @@ func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 			Direction:    domain.DepDirectionIn,
 		})
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 		tree = mergeBidirectionalTrees(downTree, upTree, fullID)
 	} else {
@@ -467,7 +489,7 @@ func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 			Direction:    treeDir,
 		})
 		if err != nil {
-			FatalErrorRespectJSON("%v", err)
+			return HandleErrorRespectJSON("%v", err)
 		}
 	}
 
@@ -477,7 +499,7 @@ func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 
 	if formatStr == "mermaid" {
 		outputMermaidTree(tree, args[0])
-		return
+		return nil
 	}
 
 	if jsonOutput {
@@ -485,7 +507,7 @@ func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 			tree = []*types.TreeNode{}
 		}
 		_ = outputJSON(tree)
-		return
+		return nil
 	}
 
 	if len(tree) == 0 {
@@ -497,7 +519,7 @@ func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		default:
 			fmt.Printf("\n%s has no dependencies\n", fullID)
 		}
-		return
+		return nil
 	}
 
 	switch direction {
@@ -511,15 +533,19 @@ func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 
 	renderTree(tree, maxDepth, direction)
 	fmt.Println()
+	return nil
 }
 
-func runDepCyclesProxiedServer(_ *cobra.Command, ctx context.Context) {
-	uw := openDepProxiedUOW(ctx)
+func runDepCyclesProxiedServer(_ *cobra.Command, ctx context.Context) error {
+	uw, err := openDepProxiedUOW(ctx)
+	if err != nil {
+		return err
+	}
 	defer uw.Close(ctx)
 
 	cycles, err := uw.DependencyUseCase().DetectCycles(ctx)
 	if err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if jsonOutput {
@@ -527,12 +553,12 @@ func runDepCyclesProxiedServer(_ *cobra.Command, ctx context.Context) {
 			cycles = [][]*types.Issue{}
 		}
 		_ = outputJSON(cycles)
-		return
+		return nil
 	}
 
 	if len(cycles) == 0 {
 		fmt.Printf("\n%s No dependency cycles detected\n\n", ui.RenderPass("✓"))
-		return
+		return nil
 	}
 
 	fmt.Printf("\n%s Found %d dependency cycles:\n\n", ui.RenderFail("⚠"), len(cycles))
@@ -543,4 +569,5 @@ func runDepCyclesProxiedServer(_ *cobra.Command, ctx context.Context) {
 		}
 		fmt.Println()
 	}
+	return nil
 }

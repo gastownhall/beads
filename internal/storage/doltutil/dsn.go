@@ -36,13 +36,26 @@ func (d ServerDSN) String() string {
 	}
 
 	cfg := mysql.Config{
-		User:                 d.User,
-		Passwd:               d.Password,
-		Net:                  net,
-		Addr:                 addr,
-		DBName:               d.Database,
-		ParseTime:            true,
-		MultiStatements:      true,
+		User:            d.User,
+		Passwd:          d.Password,
+		Net:             net,
+		Addr:            addr,
+		DBName:          d.Database,
+		ParseTime:       true,
+		MultiStatements: true,
+		// InterpolateParams renders bound parameters into the SQL client-side, so
+		// a parameterized query is a single round-trip instead of a server-side
+		// PREPARE + EXECUTE pair. Over a high-latency connection (e.g. a remote
+		// TLS-fronted Dolt server), a write that issues many parameterized
+		// statements — such as creating an issue and its labels, events, and
+		// dependencies inside one transaction — otherwise pays a full round-trip
+		// per statement for the prepare alone. The driver falls back to a
+		// server-side prepare (driver.ErrSkip) whenever it cannot safely
+		// interpolate an argument, so results never change; this only removes the
+		// extra round-trip when interpolation is safe. Independent of
+		// MultiStatements. The driver rejects it only with custom unsafe
+		// collations, which this DSN never sets.
+		InterpolateParams:    true,
 		Timeout:              timeout,
 		AllowNativePasswords: true,
 	}

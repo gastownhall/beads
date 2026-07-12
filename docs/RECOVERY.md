@@ -217,9 +217,10 @@ bd doctor                  # sanity-check before publishing
 bd dolt push --force       # make the remote authoritative
 ```
 
-(`bd`'s migration gate may ask for `BD_ALLOW_REMOTE_MIGRATE=1` — on the
-canonical clone, that is exactly the designated-migrator case the gate is
-asking about.)
+(`bd`'s migration gate may block here; run `bd migrate --force` on the
+canonical clone — that is exactly the designated-migrator case the gate is
+asking about. `BD_ALLOW_REMOTE_MIGRATE=1` is the env-var equivalent for
+scripted use.)
 
 ### 3. On EVERY other clone: save local-only work, re-clone, re-apply
 
@@ -237,9 +238,14 @@ remote already has are skipped. Spot-check with `bd stats` afterwards.
 ### Prevention (upgrades across PK-reshaping migrations)
 
 - **Sync before upgrading**: `bd dolt push` + `bd dolt pull` on every clone
-  while all clones still run the *old* version.
+  while all clones still run the *old* version, then stop editing. Once the new
+  binary is installed, `bd dolt push`/`bd dolt pull` are gated too, so this must
+  happen first.
 - **One designated migrator**: upgrade one machine, let it migrate, then
   `bd dolt push`.
-- **Sync immediately after**: on every other clone, upgrade the binary, then
-  `bd dolt pull` *before* doing tracked work, so no clone accumulates
-  un-synced rows under the old schema.
+- **Every other clone adopts, does not pull**: after the migrator pushes, each
+  other clone upgrades the binary and runs `bd bootstrap` to adopt the migrated
+  database. `bd dolt pull` is *refused* while the clone still has pending
+  migrations, so do not rely on it; the "sync before" step above is what
+  preserves these clones' work, because `bd bootstrap` replaces the local
+  database.

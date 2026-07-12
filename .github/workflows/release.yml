@@ -65,12 +65,12 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.14'
 
@@ -98,7 +98,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -144,7 +144,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -157,7 +157,7 @@ jobs:
         run: go install github.com/tc-hib/go-winres@latest
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
           distribution: goreleaser
           version: '~> v2'
@@ -182,6 +182,35 @@ jobs:
             echo "OK: $bin has no ICU runtime dependency"
           done
 
+      - name: Publish the contract corpus as a release artifact
+        # Ships the canonicalized golden corpus (cmd/bd/protocol/testdata/corpus)
+        # with each release and appends its checksum to the release checksums.txt,
+        # so a downstream consumer can anchor its vendored-corpus drift-check to a signed
+        # beads release rather than a self-recomputed manifest. Runs before the
+        # macOS job's serial checksums.txt append (goreleaser-macos needs this
+        # job), so the entry is preserved.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          archive="beads_${version}_contract_corpus.tar.gz"
+          tar -czf "$archive" -C cmd/bd/protocol/testdata corpus
+          shasum -a 256 "$archive" | tee corpus-checksum.txt
+          gh release upload "$tag" "$archive" --clobber
+          gh release download "$tag" --pattern checksums.txt --dir /tmp/corpus-sums
+          sums=/tmp/corpus-sums/checksums.txt
+          # Idempotent on a job re-run (manual retry or flake): drop any prior
+          # entry for this archive before appending the fresh checksum, so the
+          # re-download+append never leaves a duplicate (or stale) corpus row.
+          if [ -f "$sums" ]; then
+            grep -vF "$archive" "$sums" > "$sums.tmp" || true
+            mv "$sums.tmp" "$sums"
+          fi
+          cat corpus-checksum.txt >> "$sums"
+          gh release upload "$tag" "$sums" --clobber
+
   goreleaser-macos:
     # Build macOS binaries with CGO_ENABLED=1 for embedded Dolt support.
     # Runs on native macOS to avoid zig/osxcross cross-compilation issues.
@@ -195,7 +224,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -332,12 +361,12 @@ jobs:
         run: gh release upload "${GITHUB_REF_NAME}" "${{ steps.assets.outputs.sbom }}" --clobber
 
       - name: Attest release artifacts
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
         with:
           subject-checksums: ${{ steps.assets.outputs.checksums }}
 
       - name: Attest release SBOM
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
         with:
           subject-checksums: ${{ steps.assets.outputs.checksums }}
           sbom-path: ${{ steps.assets.outputs.sbom }}
@@ -351,7 +380,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.14'
 

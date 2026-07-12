@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
+	_ "github.com/go-sql-driver/mysql"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
@@ -41,6 +43,7 @@ type DoltServer struct {
 	doltBinExec     string
 	rootDir         string
 	configPath      string
+	database        string
 	config          servercfg.ServerConfig
 	keepAlivePeriod time.Duration
 
@@ -53,7 +56,7 @@ type DoltServer struct {
 
 var _ DatabaseServer = (*DoltServer)(nil)
 
-func NewDoltServer(doltBinExec, rootDir, configPath, logFilePath string, keepAlivePeriod time.Duration) (*DoltServer, error) {
+func NewDoltServer(doltBinExec, rootDir, configPath, logFilePath string, keepAlivePeriod time.Duration, database string) (*DoltServer, error) {
 	if doltBinExec == "" {
 		return nil, errors.New("server: NewDoltServer: doltBinExec is required")
 	}
@@ -99,6 +102,7 @@ func NewDoltServer(doltBinExec, rootDir, configPath, logFilePath string, keepAli
 		doltBinExec:     absDoltBinExec,
 		rootDir:         absRootDir,
 		configPath:      absConfigPath,
+		database:        database,
 		config:          cfg,
 		keepAlivePeriod: keepAlivePeriod,
 		logFile:         logFile,
@@ -313,7 +317,12 @@ func (s *DoltServer) waitReady(ctx context.Context) error {
 	}
 }
 
-func (s *DoltServer) Stop(_ context.Context) error {
+func (s *DoltServer) Stop(ctx context.Context) error {
+	gcErr := s.runShutdownGC(ctx)
+	if gcErr != nil {
+		gcErr = fmt.Errorf("server: DoltServer.Stop: %w", gcErr)
+	}
+
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -325,26 +334,51 @@ func (s *DoltServer) Stop(_ context.Context) error {
 			waitErr = nil
 		}
 	}
+	if waitErr != nil {
+		waitErr = fmt.Errorf("server: DoltServer.Stop: %w", waitErr)
+	}
 	var closeErr error
 	if s.logFile != nil {
 		closeErr = s.logFile.Close()
 		s.logFile = nil
+	}
+	if closeErr != nil {
+		closeErr = fmt.Errorf("server: DoltServer.Stop: close log: %w", closeErr)
 	}
 	var rmErr error
 	if s.pid != 0 {
 		rmErr = pidfile.Remove(s.rootDir, PIDFileName)
 		s.pid = 0
 	}
-	if waitErr != nil {
-		return fmt.Errorf("server: DoltServer.Stop: %w", waitErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("server: DoltServer.Stop: close log: %w", closeErr)
-	}
 	if rmErr != nil {
-		return fmt.Errorf("server: DoltServer.Stop: remove pidfile: %w", rmErr)
+		rmErr = fmt.Errorf("server: DoltServer.Stop: remove pidfile: %w", rmErr)
 	}
-	return nil
+	return errors.Join(gcErr, waitErr, closeErr, rmErr)
+}
+
+func (s *DoltServer) runShutdownGC(ctx context.Context) (retErr error) {
+	if s.database == "" || !s.Running(ctx) {
+		return nil
+	}
+	db, err := sql.Open("mysql", s.DSN(ctx, s.database, "root", ""))
+	if err != nil {
+		return fmt.Errorf("open gc connection: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, db.Close()) }()
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire gc connection: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, conn.Close()) }()
+
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_GC()"); err != nil {
+		retErr = errors.Join(retErr, fmt.Errorf("dolt_gc: %w", err))
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_STATS_GC()"); err != nil {
+		retErr = errors.Join(retErr, fmt.Errorf("dolt_stats_gc: %w", err))
+	}
+	return retErr
 }
 
 func (s *DoltServer) Running(_ context.Context) bool {

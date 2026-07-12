@@ -8,7 +8,7 @@
 #   ./scripts/test-git-remote.sh              # Local bare git repo (default)
 #   ./scripts/test-git-remote.sh <github-url> # Push to real GitHub repo
 #
-# Requirements: bd, dolt (>= 2.1.0), git
+# Requirements: bd, dolt (>= 2.1.10), git
 #
 # The script is self-contained: creates temp dirs, cleans up on exit.
 

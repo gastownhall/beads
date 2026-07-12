@@ -139,6 +139,7 @@ type Label struct {
 type IssueLink struct {
 	SourceIssue *Issue `json:"source_issue"`
 	TargetIssue *Issue `json:"target_issue"`
+	IID         int    `json:"iid,omitempty"`
 	LinkType    string `json:"link_type"` // "relates_to", "blocks", "is_blocked_by"
 }
 

@@ -11,7 +11,7 @@ import (
 )
 
 // DoltDockerImage is the Docker image used for Dolt test containers.
-const DoltDockerImage = "dolthub/dolt-sql-server:2.1.0"
+const DoltDockerImage = "dolthub/dolt-sql-server:2.1.10"
 
 // RequireDoltBinary ensures the `dolt` CLI binary is available. The test is
 // skipped locally when dolt is missing but fatally fails under GitHub Actions

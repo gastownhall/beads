@@ -70,6 +70,14 @@ func OrderByForColumns(sortBy string, sortDesc bool, col func(sortKey string) st
 	if sortBy == "" || sortBy == "priority" {
 		return fmt.Sprintf("ORDER BY %s %s, %s DESC, %s ASC", col("priority"), dir, col("created"), col("id"))
 	}
+	// A nullable sort column (closed_at, assignee) must order NULLs the MySQL way — NULL
+	// treated as lowest, so first on ASC and last on DESC — on every backend. MySQL/Dolt/
+	// SQLite do this by default; Postgres defaults the opposite way (NULLS FIRST on DESC),
+	// so lead with an explicit (col IS NULL) key for those two. NOT NULL columns keep the
+	// plain clause (byte-identical to before).
+	if sortBy == "closed" || sortBy == "assignee" {
+		return fmt.Sprintf("ORDER BY (%s IS NULL) %s, %s %s, %s ASC", col(sortBy), flipDir(dir), col(sortBy), dir, col("id"))
+	}
 	return fmt.Sprintf("ORDER BY %s %s, %s ASC", col(sortBy), dir, col("id"))
 }
 

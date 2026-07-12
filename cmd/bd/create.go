@@ -49,8 +49,7 @@ var createCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
-			runCreateProxiedServer(cmd, rootCtx, in)
-			return nil
+			return runCreateProxiedServer(cmd, rootCtx, in)
 		}
 		file, _ := cmd.Flags().GetString("file")
 		graphFile, _ := cmd.Flags().GetString("graph")
@@ -110,7 +109,10 @@ var createCmd = &cobra.Command{
 
 		// Warn if creating a test issue in a database with existing issues.
 		// A brand-new repo with zero issues is not a "production database" (#2898).
-		if isTestIssue(title) && !silent && !debug.IsQuiet() {
+		// store is nil here for `create --repo=<remote URL>` from a directory with
+		// no local .beads/: PersistentPreRunE skips local store init entirely for
+		// that path, so this check is best-effort only.
+		if store != nil && isTestIssue(title) && !silent && !debug.IsQuiet() {
 			if stats, err := store.GetStatistics(context.Background()); err == nil && stats != nil && stats.TotalIssues >= 5 {
 				fmt.Fprintf(os.Stderr, "%s Creating test issue in production database\n", ui.RenderWarn("⚠"))
 				fmt.Fprintf(os.Stderr, "  Title: %q appears to be test data\n", title)
@@ -162,6 +164,20 @@ var createCmd = &cobra.Command{
 
 		issueType, _ := cmd.Flags().GetString("type")
 		assignee, _ := cmd.Flags().GetString("assignee")
+		statusFlag, _ := cmd.Flags().GetString("status")
+		if statusFlag != "" {
+			var customStatuses []string
+			// store is nil for `create --repo=<remote URL>` with no local
+			// .beads/; fall back to built-in statuses only.
+			if store != nil {
+				if cs, err := store.GetCustomStatuses(rootCtx); err == nil {
+					customStatuses = cs
+				}
+			}
+			if !types.Status(statusFlag).IsValidWithCustom(customStatuses) {
+				return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", statusFlag)
+			}
+		}
 
 		labels, _ := cmd.Flags().GetStringSlice("labels")
 		labelAlias, _ := cmd.Flags().GetStringSlice("label")
@@ -344,6 +360,7 @@ var createCmd = &cobra.Command{
 				Labels:             labels,
 				MolType:            molType,
 				WispType:           wispType,
+				InitialStatus:      statusFlag,
 				DueAt:              dueAt,
 				DeferUntil:         deferUntil,
 				Metadata:           metadata,
@@ -503,6 +520,7 @@ var createCmd = &cobra.Command{
 			Actor:              eventActor,
 			Target:             eventTarget,
 			Payload:            eventPayload,
+			InitialStatus:      statusFlag,
 			DueAt:              dueAt,
 			DeferUntil:         deferUntil,
 			Metadata:           metadata,
@@ -691,9 +709,9 @@ var createCmd = &cobra.Command{
 		} else if silent {
 			fmt.Println(issue.ID)
 		} else {
-			fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(issue.ID, issue.Title))
-			fmt.Printf("  Priority: P%d\n", issue.Priority)
-			fmt.Printf("  Status: %s\n", issue.Status)
+			debug.PrintNormal("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(issue.ID, issue.Title))
+			debug.PrintNormal("  Priority: P%d\n", issue.Priority)
+			debug.PrintNormal("  Status: %s\n", issue.Status)
 
 			maybeShowTip(store)
 		}
@@ -727,6 +745,7 @@ type createIssueParams struct {
 	Actor              string
 	Target             string
 	Payload            string
+	InitialStatus      string
 	DueAt              *time.Time
 	DeferUntil         *time.Time
 	Metadata           json.RawMessage
@@ -739,7 +758,9 @@ func buildCreateIssue(params createIssueParams) *types.Issue {
 	}
 
 	status := types.StatusOpen
-	if params.DeferUntil != nil && params.DeferUntil.After(time.Now()) {
+	if params.InitialStatus != "" {
+		status = types.Status(params.InitialStatus)
+	} else if params.DeferUntil != nil && params.DeferUntil.After(time.Now()) {
 		status = types.StatusDeferred
 	}
 
@@ -855,7 +876,8 @@ func init() {
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")
 	createCmd.Flags().Bool("dry-run", false, "Preview what would be created without actually creating")
 	registerPriorityFlag(createCmd, "2")
-	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|decision); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision")
+	createCmd.Flags().StringP("type", "t", "task", "Issue type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision")
+	createCmd.Flags().StringP("status", "s", "", "Initial status")
 	registerCommonIssueFlags(createCmd)
 	createCmd.Flags().String("spec-id", "", "Link to specification document")
 	createCmd.Flags().StringSliceP("labels", "l", []string{}, "Labels (comma-separated)")

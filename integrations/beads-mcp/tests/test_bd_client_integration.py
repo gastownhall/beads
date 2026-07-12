@@ -9,10 +9,13 @@ import pytest
 
 from beads_mcp.bd_client import BdClient, BdCommandError
 from beads_mcp.models import (
+    AddCommentParams,
     AddDependencyParams,
+    AddNoteParams,
     ClaimIssueParams,
     CloseIssueParams,
     CreateIssueParams,
+    ListCommentsParams,
     ListIssuesParams,
     ReadyWorkParams,
     ReopenIssueParams,
@@ -302,6 +305,33 @@ async def test_add_dependency(bd_client):
 
     assert len(shown.dependencies) > 0
     assert any(dep.id == issue2.id for dep in shown.dependencies)
+
+
+@pytest.mark.asyncio
+async def test_comments_and_notes(bd_client):
+    """Test comment/comments/note round-trip with real bd."""
+    issue = await bd_client.create(CreateIssueParams(title="Comment target", priority=1, issue_type="task"))
+
+    # Add two comments and read them back
+    result = await bd_client.add_comment(AddCommentParams(issue_id=issue.id, text="First comment"))
+    assert issue.id in result
+    await bd_client.add_comment(AddCommentParams(issue_id=issue.id, text="Second comment"))
+
+    comments = await bd_client.list_comments(ListCommentsParams(issue_id=issue.id))
+    assert len(comments) >= 2
+    texts = [c.text for c in comments]
+    assert "First comment" in texts
+    assert "Second comment" in texts
+    assert all(c.issue_id == issue.id for c in comments)
+    # Chronological order: first added comes first
+    assert texts.index("First comment") < texts.index("Second comment")
+
+    # Append a note and verify it lands in the notes field
+    note_result = await bd_client.add_note(AddNoteParams(issue_id=issue.id, text="A durable note"))
+    assert issue.id in note_result
+
+    shown = await bd_client.show(ShowIssueParams(issue_id=issue.id))
+    assert "A durable note" in (shown.notes or "")
 
 
 @pytest.mark.asyncio

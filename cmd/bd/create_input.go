@@ -23,6 +23,7 @@ type createInput struct {
 	explicitID         string
 	parentID           string
 	issueType          string
+	status             string
 	priority           int
 	assignee           string
 	externalRef        string
@@ -156,6 +157,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	in.priority = priority
 
 	in.issueType, _ = cmd.Flags().GetString("type")
+	in.status, _ = cmd.Flags().GetString("status")
 	in.assignee, _ = cmd.Flags().GetString("assignee")
 	in.externalRef, _ = cmd.Flags().GetString("external-ref")
 	in.explicitID, _ = cmd.Flags().GetString("id")
@@ -268,6 +270,7 @@ var singleIssueOnlyFlags = []string{
 	"id", "parent", "no-inherit-labels",
 	"deps", "waits-for", "waits-for-gate",
 	"type", "priority", "assignee", "external-ref", "spec-id",
+	"status",
 	"description", "body", "message", "body-file", "description-file", "stdin",
 	"design", "design-file", "acceptance", "notes", "append-notes",
 	"labels", "label", "skills", "context",

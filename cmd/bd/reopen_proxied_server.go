@@ -23,19 +23,19 @@ type reopenProxiedOutcome struct {
 	reopened bool
 }
 
-func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) {
+func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		FatalErrorRespectJSON("no issue ID provided")
+		return HandleErrorRespectJSON("no issue ID provided")
 	}
 	reason, _ := cmd.Flags().GetString("reason")
 	jsonOut, _ := cmd.Flags().GetBool("json")
 
 	if uowProvider == nil {
-		FatalError("proxied-server UOW provider not initialized")
+		return HandleError("proxied-server UOW provider not initialized")
 	}
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		FatalErrorRespectJSON("open unit of work: %v", err)
+		return HandleErrorRespectJSON("open unit of work: %v", err)
 	}
 	defer uw.Close(ctx)
 
@@ -66,8 +66,8 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 
 	if len(outcomes) > 0 {
 		msg := reopenProxiedCommitMessage(outcomes)
-		if err := uw.Commit(ctx, msg); err != nil && !isDoltNothingToCommit(err) {
-			FatalErrorRespectJSON("commit reopen: %v", err)
+		if err := uow.CommitWithRetries(ctx, uw, msg); err != nil && !isDoltNothingToCommit(err) {
+			return HandleErrorRespectJSON("commit reopen: %v", err)
 		}
 		for _, o := range outcomes {
 			if err := fireProxiedReopenHooks(ctx, o.after); err != nil {
@@ -80,8 +80,9 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		_ = outputJSON(reopenedIssues)
 	}
 	if hasError {
-		os.Exit(1)
+		return SilentExit()
 	}
+	return nil
 }
 
 func reopenProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string) (reopenProxiedOutcome, bool) {

@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -42,74 +43,76 @@ func gatherDeleteInput(cmd *cobra.Command, args []string) (*deleteInput, error) 
 	return in, nil
 }
 
-func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) {
+func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	in, err := gatherDeleteInput(cmd, args)
 	if err != nil {
-		FatalErrorRespectJSON("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 	if len(in.ids) == 0 {
 		_ = cmd.Usage()
-		FatalError("no issue IDs provided")
+		return HandleError("no issue IDs provided")
 	}
 
 	if uowProvider == nil {
-		FatalError("proxied-server UOW provider not initialized")
+		return HandleError("proxied-server UOW provider not initialized")
 	}
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		FatalErrorRespectJSON("open unit of work: %v", err)
+		return HandleErrorRespectJSON("open unit of work: %v", err)
 	}
 	defer uw.Close(ctx)
 
 	issueUC := uw.IssueUseCase()
 
 	if in.dryRun || !in.force {
-		runDeleteProxiedPreview(ctx, issueUC, in)
-		return
+		return runDeleteProxiedPreview(ctx, issueUC, in)
 	}
 
 	preview, err := issueUC.PreviewDelete(ctx, in.ids)
 	if err != nil {
-		FatalErrorRespectJSON("preview: %v", err)
+		return HandleErrorRespectJSON("preview: %v", err)
 	}
 	if len(preview.NotFound) > 0 {
-		FatalErrorRespectJSON("issues not found: %s", strings.Join(preview.NotFound, ", "))
+		return HandleErrorRespectJSON("issues not found: %s", strings.Join(preview.NotFound, ", "))
 	}
 
 	res, err := issueUC.DeleteIssues(ctx, domain.DeleteIssuesParams{
 		IDs:                  in.ids,
+		Cascade:              true,
 		UpdateTextReferences: true,
 	}, actor)
 	if err != nil {
-		FatalErrorRespectJSON("delete: %v", err)
+		return HandleErrorRespectJSON("delete: %v", err)
 	}
 	if res.DeletedCount == 0 {
-		FatalErrorRespectJSON("issues not found: %s", strings.Join(in.ids, ", "))
+		return HandleErrorRespectJSON("issues not found: %s", strings.Join(in.ids, ", "))
 	}
 
 	commitMsg := fmt.Sprintf("bd: delete %d issue(s)", res.DeletedCount)
-	if err := uw.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-		FatalErrorRespectJSON("commit: %v", err)
+	if err := uow.CommitWithRetries(ctx, uw, commitMsg); err != nil && !isDoltNothingToCommit(err) {
+		return HandleErrorRespectJSON("commit: %v", err)
 	}
 
 	renderDeleteProxiedResult(in, res)
+	return nil
 }
 
-func runDeleteProxiedPreview(ctx context.Context, issueUC domain.IssueUseCase, in *deleteInput) {
+func runDeleteProxiedPreview(ctx context.Context, issueUC domain.IssueUseCase, in *deleteInput) error {
 	preview, err := issueUC.PreviewDelete(ctx, in.ids)
 	if err != nil {
-		FatalErrorRespectJSON("preview: %v", err)
+		return HandleErrorRespectJSON("preview: %v", err)
 	}
 	if len(preview.NotFound) > 0 {
-		FatalErrorRespectJSON("issues not found: %s", strings.Join(preview.NotFound, ", "))
+		return HandleErrorRespectJSON("issues not found: %s", strings.Join(preview.NotFound, ", "))
 	}
 
 	res, err := issueUC.DeleteIssues(ctx, domain.DeleteIssuesParams{
-		IDs:    in.ids,
-		DryRun: true,
+		IDs:     in.ids,
+		Cascade: true,
+		DryRun:  true,
 	}, actor)
 	if err != nil {
-		FatalErrorRespectJSON("preview counts: %v", err)
+		return HandleErrorRespectJSON("preview counts: %v", err)
 	}
 
 	if in.jsonOutput {
@@ -123,9 +126,10 @@ func runDeleteProxiedPreview(ctx context.Context, issueUC domain.IssueUseCase, i
 			"connected":            sortedKeys(preview.ConnectedIssues),
 			"dry_run":              in.dryRun,
 		})
-		return
+		return nil
 	}
 	renderDeletePreview(in, preview, res)
+	return nil
 }
 
 func renderDeletePreview(in *deleteInput, preview domain.DeletePreview, res domain.DeleteIssuesResult) {

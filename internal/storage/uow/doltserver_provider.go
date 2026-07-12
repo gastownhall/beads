@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 
@@ -22,7 +23,12 @@ func NewDoltServerUOWProvider(
 	rootUser string,
 	rootPassword string,
 	doltBinExec string,
+	proxyPort int,
+	idleTimeout time.Duration,
 ) (UnitOfWorkProvider, error) {
+	if idleTimeout == 0 {
+		idleTimeout = defaultProxyIdleTimeout
+	}
 	if database == "" {
 		return nil, fmt.Errorf("uow: database name must not be empty (caller should default to %q)", "beads")
 	}
@@ -54,7 +60,9 @@ func NewDoltServerUOWProvider(
 		ConfigFilePath: serverConfigFilePath,
 		LogFilePath:    serverLogFilePath,
 		DoltBinPath:    absDoltBinExec,
-		IdleTimeout:    defaultProxyIdleTimeout,
+		Database:       database,
+		IdleTimeout:    idleTimeout,
+		Port:           proxyPort,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)

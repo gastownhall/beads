@@ -1,0 +1,25 @@
+# Step.Gate — async wait condition that blocks a step until satisfied.
+#
+# A step with `gate` is split at cook time into two issues:
+#  * a sibling `gate`-typed issue capturing the wait (await_type, timeout)
+#  * the original step, with a blocking dep on the gate issue
+# The smoke harness asserts the gate issue exists with await_type=timer
+# and that the target step blocks on it.
+formula = "gate-timer"
+description = "Step.Gate: timer gate blocks the verify step until it elapses."
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "deploy"
+title = "Deploy build"
+
+[[steps]]
+id = "verify"
+title = "Verify deployment after soak"
+depends_on = ["deploy"]
+
+[steps.gate]
+type = "timer"
+await_id = "soak-30m"
+timeout = "30m"

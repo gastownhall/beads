@@ -49,14 +49,36 @@ type EmbeddedDoltStore struct {
 	// (CREATE DATABASE, schema migrations) were skipped and write
 	// transactions are refused (bd-6dnrw.32).
 	readOnly bool
-	// lenientGate marks a store opened for a read-only command
-	// (OpenForReadOnlyCommand): a #4259 remote-migrate gate refusal skips
-	// the migration with a warning instead of failing the open, so read
-	// commands keep working on the current schema until the operator makes
-	// the migrate-or-adopt decision (bd-578h9.5). Unlike readOnly, writes
-	// stay allowed (e.g. the post-command autocommit net).
-	lenientGate bool
+	// intent records why this store was opened, controlling how lenient
+	// initSchema is about pending-migration refusals it would otherwise treat
+	// as fatal. Unlike readOnly, a non-strict intent still allows writes
+	// (e.g. the post-command autocommit net, or the commit itself) - only the
+	// migration step is skipped.
+	intent openIntent
 }
+
+// openIntent classifies why a store is being opened. openStrict fails the
+// open on any pending-migration refusal; the other two intents relax both
+// the #4259 remote-migrate gate refusal and the #4566 dirty-table refusal,
+// each with its own warning text (see initSchema).
+type openIntent int
+
+const (
+	// openStrict is the default: any pending-migration refusal fails the
+	// open. Used by Open.
+	openStrict openIntent = iota
+	// openReadOnlyCommand relaxes both refusals for read-only commands: they
+	// must keep working on the current schema until the operator makes the
+	// migrate-or-adopt decision (bd-578h9.5), and must not be bricked by
+	// dirty tables either. Used by OpenForReadOnlyCommand.
+	openReadOnlyCommand
+	// openWorkingSetReconcile relaxes both refusals for working-set-reconcile
+	// commands (bd dolt commit, bd vc commit): their entire purpose is to
+	// clear the dirty working set that a migration would otherwise refuse to
+	// touch, so failing the open here would deadlock the documented recovery
+	// (#4566). Used by OpenForWorkingSetReconcile.
+	openWorkingSetReconcile
+)
 
 // errClosed is returned when a method is called after Close.
 var errClosed = errors.New("embeddeddolt: store is closed")
@@ -78,7 +100,7 @@ func (s *EmbeddedDoltStore) IsClosed() bool {
 // The dolthub/driver/v2 handles its own concurrency internally. File-level locking
 // is only used during bd init (via util.TryLock in the init command) to protect
 // one-time initialization steps — the store itself does not hold any lock.
-func newStore(ctx context.Context, beadsDir, database, branch string, lenientGate bool) (*EmbeddedDoltStore, error) {
+func newStore(ctx context.Context, beadsDir, database, branch string, intent openIntent) (*EmbeddedDoltStore, error) {
 	if database == "" {
 		return nil, fmt.Errorf("embeddeddolt: database name must not be empty (caller should default to %q)", "beads")
 	}
@@ -96,11 +118,11 @@ func newStore(ctx context.Context, beadsDir, database, branch string, lenientGat
 	}
 
 	s := &EmbeddedDoltStore{
-		dataDir:     dataDir,
-		beadsDir:    absBeadsDir,
-		database:    database,
-		branch:      branch,
-		lenientGate: lenientGate,
+		dataDir:  dataDir,
+		beadsDir: absBeadsDir,
+		database: database,
+		branch:   branch,
+		intent:   intent,
 	}
 
 	if err := s.initSchema(ctx); err != nil {
@@ -273,23 +295,82 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 		}
 	}
 
+	// Forward-drift guard: if this database's schema is AHEAD of the binary,
+	// fail fast with a clear "upgrade bd" message before MigrateUp no-ops and a
+	// later query dies on a dropped/renamed column. Embedded mode is the mode
+	// the stale-binary incident (#4135/#4137) was observed in. The read-only
+	// embedded open (OpenReadOnly) already guards this; the writable open did
+	// not. Runs after the USE switch so the version read resolves against the
+	// target database.
+	if err := schema.CheckForwardDrift(ctx, conn); err != nil {
+		return err
+	}
+
 	// #4259: refuse to silently apply pending migrations to a remote-backed,
 	// already-initialized database — independently migrating each clone forks the
 	// schema. Embedded mode (the mode the original report was filed against) syncs
 	// via Dolt remotes too, so it needs the same gate as server mode.
-	if err := schema.CheckRemoteMigrateGate(ctx, conn); err != nil {
+	//
+	// adopt injects the driver-side fast-forward ancestry primitives
+	// (mybd-ae1i) so the smart gate can distinguish a losslessly
+	// fast-forwardable remote-ahead case (smartAdoptFastForward) from the
+	// plain destructive adopt, and auto-execute it: CheckRemoteMigrateGate*
+	// calls FastForward and returns nil (proceed, nothing pending) once HEAD
+	// has actually advanced; any execution failure (dirty working set raced
+	// in, non-fast-forward, concurrent writer) falls back to the plain
+	// destructive adopt directive instead of forcing the write.
+	adopt := &schema.FastForwardAdopter{
+		IsStrictAncestor: func(ctx context.Context, db schema.DBConn, ref string) (bool, error) {
+			return versioncontrolops.LocalIsStrictAncestorOf(ctx, db, ref)
+		},
+		WorkingSetClean: func(ctx context.Context, db schema.DBConn) (bool, error) {
+			return versioncontrolops.WorkingSetClean(ctx, db)
+		},
+		FastForward: func(ctx context.Context, db schema.DBConn, ref string) error {
+			return versioncontrolops.FastForwardAdopt(ctx, db, ref)
+		},
+		// ReadOnly is deliberately left unset (false) here: this initSchema
+		// path is only ever reached via newStore (openStrict,
+		// openReadOnlyCommand, or openWorkingSetReconcile intents), all of
+		// which perform a writable open — s.readOnly is never true for any
+		// of them. The genuinely read-only embedded open, OpenReadOnly,
+		// skips initSchema (and this gate) entirely, so there is no
+		// read-only signal to plumb through at this injection site the way
+		// server mode's cfg.ReadOnly is (dolt/store.go initSchema). If that
+		// ever changes — e.g. initSchema starts running on a store that can
+		// report readOnly true — wire it here too.
+	}
+	if err := schema.CheckRemoteMigrateGateWithAdopt(ctx, conn, adopt); err != nil {
 		var gateErr *schema.RemoteMigrateGateError
-		if s.lenientGate && errors.As(err, &gateErr) {
-			// Read-only command: the gate exists to stop in-place
-			// migration, not reads (bd-578h9.5). Warn and continue on
-			// the current schema; write commands still fail the open
-			// with the full migrate-or-adopt guidance.
-			fmt.Fprintf(os.Stderr,
-				"Warning: %v\n"+
-					"  Read-only command: continuing on schema v%d without migrating.\n"+
-					"  To resolve, the ONE designated migrator runs: %s=1 bd migrate && bd dolt push\n"+
-					"  Everyone else adopts the migrated database: bd bootstrap\n",
-				gateErr, gateErr.CurrentVersion, schema.AllowRemoteMigrateEnv)
+		if s.intent != openStrict && errors.As(err, &gateErr) {
+			// The gate exists to stop in-place migration on a remote-backed,
+			// already-initialized database (#4259), not to block reads or a
+			// working-set commit. Warn and continue on the current schema;
+			// a plain (openStrict) open still fails with the full
+			// migrate-or-adopt guidance.
+			const sharedGuidance = "  This is a\n" +
+				"  coordination decision, not an auto-fix - do NOT run a migration unless\n" +
+				"  you are the single designated migrator (only ONE clone may migrate a\n" +
+				"  shared remote, else the schema forks; #4259):\n" +
+				"    • designated migrator (only ONE machine): bd migrate --force && bd dolt push\n" +
+				"    • every other clone (another already migrated): bd bootstrap\n" +
+				"    • several machines: only ONE migrates; sync each other clone and run\n" +
+				"      bd dolt pull after the migrator pushes, before upgrading it\n"
+			switch s.intent {
+			case openWorkingSetReconcile:
+				fmt.Fprintf(os.Stderr,
+					"Warning: %[1]v\n"+
+						"  Working-set reconcile command: continuing on schema v%[2]d without\n"+
+						"  migrating; the commit applies to the working set at the current\n"+
+						"  schema."+sharedGuidance,
+					gateErr, gateErr.CurrentVersion)
+			default: // openReadOnlyCommand
+				fmt.Fprintf(os.Stderr,
+					"Warning: %[1]v\n"+
+						"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
+						"  Writes are blocked until the schema is reconciled."+sharedGuidance,
+					gateErr, gateErr.CurrentVersion)
+			}
 			return nil
 		}
 		return err
@@ -298,6 +379,31 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	// Embedded mode relies on the dolthub/driver/v2's local file/concurrency
 	// controls; schema.MigrateUpWithLock requires a sql-server session lock.
 	if _, err := schema.MigrateUp(ctx, conn); err != nil {
+		var dirtyErr *schema.DirtyTablesError
+		if s.intent != openStrict && errors.As(err, &dirtyErr) {
+			// The guard exists to keep dirty user data from being entangled
+			// with a migration, but its documented recovery - committing the
+			// working set - also opens the store and would otherwise hit
+			// this same refusal before it ever runs, deadlocking (#4566). A
+			// read-only command must not be bricked by dirty tables either,
+			// so both non-strict intents warn and continue on the current
+			// schema instead of failing the open.
+			switch s.intent {
+			case openWorkingSetReconcile:
+				fmt.Fprintf(os.Stderr,
+					"Warning: %v\n"+
+						"  Committing the working set at the current schema; when it completes,\n"+
+						"  re-run 'bd migrate'.\n",
+					dirtyErr)
+			default: // openReadOnlyCommand
+				fmt.Fprintf(os.Stderr,
+					"Warning: %v\n"+
+						"  Continuing without migrating. Run 'bd dolt commit' to commit the\n"+
+						"  working set at the current schema, then re-run 'bd migrate'.\n",
+					dirtyErr)
+			}
+			return nil
+		}
 		return fmt.Errorf("embeddeddolt: migrate: %w", err)
 	}
 
