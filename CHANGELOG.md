@@ -121,6 +121,18 @@ remote-migrate gate from a blunt block into a state-aware one.
 
 ### Fixed
 
+- **`--label-any` is no longer silently dropped by `bd ready` and
+  `bd ready --claim`.** The ready-work WHERE builder emitted clauses for
+  `--label` and `--exclude-label` but none for `--label-any`, so the OR-set
+  filter was ignored on the ready/claim path (with or without `--parent`) on
+  every backend — while `bd list`/`bd search` honored it. On an *atomic claim*
+  this was dangerous rather than merely wrong: a worker fencing itself to its
+  own lane (`bd ready --claim --label-any lane-a --parent epic-1`) would
+  happily claim another lane's issue and believe it was fenced. `--label-any`
+  now emits an OR-set membership clause that AND-combines with `--label`,
+  `--exclude-label`, and `--parent`, exactly as the flag help promises; an
+  exhausted lane now claims nothing instead of falling back to unfenced work.
+
 - **A failed v53 migration no longer traps the database, and the v53 repair
   now covers `wisp_dependencies` split-column drift.** rc.2 repaired the
   `issues` rig columns, but a database coming from schema v49 could still fail

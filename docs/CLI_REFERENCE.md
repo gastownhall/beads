@@ -27,11 +27,11 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd gate show](#bd-gate-show) — Show a gate issue
 - [bd heartbeat](#bd-heartbeat) — Refresh the lease on an issue you hold in_progress
 - [bd label](#bd-label) — Manage issue labels
-  - [bd label add](#bd-label-add) — Add a label to one or more issues
+  - [bd label add](#bd-label-add) — Add one or more labels to one or more issues
   - [bd label list](#bd-label-list) — List labels for an issue
   - [bd label list-all](#bd-label-list-all) — List all unique labels in the database
   - [bd label propagate](#bd-label-propagate) — Propagate a label from a parent issue to all its children
-  - [bd label remove](#bd-label-remove) — Remove a label from one or more issues
+  - [bd label remove](#bd-label-remove) — Remove one or more labels from one or more issues
 - [bd link](#bd-link) — Link two issues with a dependency
 - [bd list](#bd-list) — List issues
 - [bd merge-slot](#bd-merge-slot) — Manage merge-slot gates for serialized conflict resolution
@@ -854,10 +854,10 @@ bd label
 
 #### bd label add
 
-Add a label to one or more issues
+Add labels to issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label add bd-123 label1,label2
 
 ```
-bd label add [issue-id...] [label]
+bd label add [issue-id...] [label[,label...]]
 ```
 
 #### bd label list
@@ -886,10 +886,10 @@ bd label propagate [parent-id] [label]
 
 #### bd label remove
 
-Remove a label from one or more issues
+Remove labels from issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label remove bd-123 label1,label2
 
 ```
-bd label remove [issue-id...] [label]
+bd label remove [issue-id...] [label[,label...]]
 ```
 
 ### bd link
