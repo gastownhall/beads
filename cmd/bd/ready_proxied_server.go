@@ -24,6 +24,12 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
+	// Preserve the existing option precedence while giving the mutating claim
+	// path ownership of the provider, so it can reopen a fresh UOW after a Dolt
+	// serialization conflict. The remaining paths are read-only.
+	if in.claim && !in.gated && in.molID == "" && !in.explain {
+		return runReadyProxiedClaim(ctx, in)
+	}
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
 		return HandleErrorRespectJSON("open unit of work: %v", err)
@@ -37,8 +43,6 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		return runReadyProxiedMolecule(ctx, uw, in)
 	case in.explain:
 		return runReadyProxiedExplain(ctx, uw, in)
-	case in.claim:
-		return runReadyProxiedClaim(ctx, uw, in)
 	default:
 		return runReadyProxiedList(ctx, uw, in)
 	}
@@ -158,12 +162,34 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 	return nil
 }
 
-func runReadyProxiedClaim(ctx context.Context, uw uow.UnitOfWork, in readyInput) error {
+func runReadyProxiedClaim(ctx context.Context, in readyInput) error {
 	CheckReadonly("ready --claim")
 
-	res, err := uw.IssueUseCase().ClaimReadyIssue(ctx, in.filter, actor)
-	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
+	var (
+		res         domain.ClaimReadyResult
+		jsonPayload []*types.IssueWithCounts
+		commitMsg   = "bd: ready --claim"
+	)
+	err := uow.RunWithFreshUOWRetriesDynamicMessage(ctx, uowProvider, func() string { return commitMsg }, func(ctx context.Context, uw uow.UnitOfWork) error {
+		res = domain.ClaimReadyResult{}
+		jsonPayload = nil
+		commitMsg = "bd: ready --claim"
+
+		attempt, claimErr := uw.IssueUseCase().ClaimReadyIssue(ctx, in.filter, actor)
+		if claimErr != nil {
+			return claimErr
+		}
+		res = attempt
+		if res.Claimed {
+			commitMsg = fmt.Sprintf("bd: ready --claim %s", res.Issue.ID)
+		}
+		if in.jsonOut && res.Claimed {
+			jsonPayload = buildReadyIssueOutputProxied(ctx, uw, []*types.Issue{res.Issue})
+		}
+		return nil
+	})
+	if err != nil && !isDoltNothingToCommit(err) {
+		return HandleErrorRespectJSON("failed to claim ready work: %v", err)
 	}
 	if !res.Claimed {
 		if in.jsonOut {
@@ -174,14 +200,6 @@ func runReadyProxiedClaim(ctx context.Context, uw uow.UnitOfWork, in readyInput)
 		return nil
 	}
 
-	var jsonPayload []*types.IssueWithCounts
-	if in.jsonOut {
-		jsonPayload = buildReadyIssueOutputProxied(ctx, uw, []*types.Issue{res.Issue})
-	}
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: ready --claim %s", res.Issue.ID)); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("failed to commit: %v", err)
-	}
 	SetLastTouchedID(res.Issue.ID)
 
 	if in.jsonOut {

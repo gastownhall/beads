@@ -2,10 +2,13 @@ package uow
 
 import (
 	"context"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/domain/db"
 )
+
+const uowCleanupTimeout = 5 * time.Second
 
 type UnitOfWork interface {
 	Close(ctx context.Context)
@@ -54,7 +57,12 @@ func (u *baseUOW) Commit(ctx context.Context, message string) error {
 }
 
 func (u *baseUOW) Close(ctx context.Context) {
-	u.tx.RollbackUnlessCommitted(ctx)
+	// Command contexts are commonly canceled precisely when cleanup is most
+	// important. Using that canceled context would prevent ROLLBACK from reaching
+	// Dolt and could return a dirty session to database/sql's pool.
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uowCleanupTimeout)
+	defer cancel()
+	u.tx.RollbackUnlessCommitted(cleanupCtx)
 }
 
 func (u *baseUOW) ConfigUseCase() domain.ConfigUseCase {

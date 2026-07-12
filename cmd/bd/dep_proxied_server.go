@@ -72,32 +72,31 @@ func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerI
 	if isChildOf(blockedID, blockerID) {
 		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", blockedID, blockerID)
 	}
-
-	uw, err := openDepProxiedUOW(ctx)
-	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	dep := &types.Dependency{
-		IssueID:     blockedID,
-		DependsOnID: blockerID,
-		Type:        types.DepBlocks,
-	}
-	if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
-		return HandleErrorRespectJSON("%v", err)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
 
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
-	if !noCycleCheck {
-		proxiedWarnCycles(ctx, uw)
-	}
-
-	blockerTitle := proxiedLookupTitle(ctx, uw, blockerID)
-	blockedTitle := proxiedLookupTitle(ctx, uw, blockedID)
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: dep add %s %s", blockedID, blockerID)); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("failed to commit: %v", err)
+	var blockerTitle, blockedTitle string
+	err := uow.RunWithFreshUOWRetries(ctx, uowProvider, fmt.Sprintf("bd: dep add %s %s", blockedID, blockerID), func(ctx context.Context, uw uow.UnitOfWork) error {
+		blockerTitle, blockedTitle = "", ""
+		dep := &types.Dependency{
+			IssueID:     blockedID,
+			DependsOnID: blockerID,
+			Type:        types.DepBlocks,
+		}
+		if _, addErr := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); addErr != nil {
+			return addErr
+		}
+		if !noCycleCheck {
+			proxiedWarnCycles(ctx, uw)
+		}
+		blockerTitle = proxiedLookupTitle(ctx, uw, blockerID)
+		blockedTitle = proxiedLookupTitle(ctx, uw, blockedID)
+		return nil
+	})
+	if err != nil && !isDoltNothingToCommit(err) {
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if jsonOutput {
@@ -157,28 +156,27 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	if !dt.IsValid() {
 		return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
 	}
-
-	uw, err := openDepProxiedUOW(ctx)
-	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	dep := &types.Dependency{IssueID: fromID, DependsOnID: toID, Type: dt}
-	if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
-		return HandleErrorRespectJSON("%v", err)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
 
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
-	if !noCycleCheck {
-		proxiedWarnCycles(ctx, uw)
-	}
-
-	fromTitle := proxiedLookupTitle(ctx, uw, fromID)
-	toTitle := proxiedLookupTitle(ctx, uw, toID)
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: dep add %s %s", fromID, toID)); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("failed to commit: %v", err)
+	var fromTitle, toTitle string
+	err := uow.RunWithFreshUOWRetries(ctx, uowProvider, fmt.Sprintf("bd: dep add %s %s", fromID, toID), func(ctx context.Context, uw uow.UnitOfWork) error {
+		fromTitle, toTitle = "", ""
+		dep := &types.Dependency{IssueID: fromID, DependsOnID: toID, Type: dt}
+		if _, addErr := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); addErr != nil {
+			return addErr
+		}
+		if !noCycleCheck {
+			proxiedWarnCycles(ctx, uw)
+		}
+		fromTitle = proxiedLookupTitle(ctx, uw, fromID)
+		toTitle = proxiedLookupTitle(ctx, uw, toID)
+		return nil
+	})
+	if err != nil && !isDoltNothingToCommit(err) {
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if jsonOutput {
@@ -225,25 +223,23 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 		})
 	}
 
-	uw, err := openDepProxiedUOW(ctx)
-	if err != nil {
-		return err
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
-	defer uw.Close(ctx)
-
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
-	if _, err := uw.DependencyUseCase().AddDependencies(ctx, deps, actor, domain.BulkAddDepsOpts{
-		SkipPerEdgeCycleCheck: noCycleCheck,
-	}); err != nil {
+	err = uow.RunWithFreshUOWRetries(ctx, uowProvider, fmt.Sprintf("dependency: add %d edges", len(deps)), func(ctx context.Context, uw uow.UnitOfWork) error {
+		if _, addErr := uw.DependencyUseCase().AddDependencies(ctx, deps, actor, domain.BulkAddDepsOpts{
+			SkipPerEdgeCycleCheck: noCycleCheck,
+		}); addErr != nil {
+			return addErr
+		}
+		if !noCycleCheck {
+			proxiedWarnCycles(ctx, uw)
+		}
+		return nil
+	})
+	if err != nil && !isDoltNothingToCommit(err) {
 		return HandleErrorRespectJSON("%v", err)
-	}
-
-	if !noCycleCheck {
-		proxiedWarnCycles(ctx, uw)
-	}
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("dependency: add %d edges", len(deps))); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("failed to commit: %v", err)
 	}
 
 	if jsonOutput {
@@ -275,22 +271,22 @@ func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []str
 			return HandleErrorRespectJSON("%v", err)
 		}
 	}
-
-	uw, err := openDepProxiedUOW(ctx)
-	if err != nil {
-		return err
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
-	defer uw.Close(ctx)
 
-	if err := uw.DependencyUseCase().RemoveDependency(ctx, fromID, toID, actor); err != nil {
+	var fromTitle, toTitle string
+	err := uow.RunWithFreshUOWRetries(ctx, uowProvider, fmt.Sprintf("bd: dep remove %s %s", fromID, toID), func(ctx context.Context, uw uow.UnitOfWork) error {
+		fromTitle, toTitle = "", ""
+		if remErr := uw.DependencyUseCase().RemoveDependency(ctx, fromID, toID, actor); remErr != nil {
+			return remErr
+		}
+		fromTitle = proxiedLookupTitle(ctx, uw, fromID)
+		toTitle = proxiedLookupTitle(ctx, uw, toID)
+		return nil
+	})
+	if err != nil && !isDoltNothingToCommit(err) {
 		return HandleErrorRespectJSON("%v", err)
-	}
-
-	fromTitle := proxiedLookupTitle(ctx, uw, fromID)
-	toTitle := proxiedLookupTitle(ctx, uw, toID)
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: dep remove %s %s", fromID, toID)); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("failed to commit: %v", err)
 	}
 
 	if jsonOutput {

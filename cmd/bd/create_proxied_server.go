@@ -108,60 +108,79 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		return nil
 	}
 
-	uw, cctx, err := proxiedOpenUOW(ctx)
-	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	customTypes := resolveProxiedCustomTypes(cctx.CustomTypes)
-	if in.issueType != "" {
-		it := types.IssueType(in.issueType).Normalize()
-		if !it.IsValidWithCustom(customTypes) {
-			return HandleError("invalid type %q (allowed: built-ins plus configured custom types)", in.issueType)
-		}
-	}
-	if in.status != "" {
-		customStatuses, err := uw.ConfigUseCase().GetCustomStatuses(ctx)
-		if err != nil {
-			return HandleError("failed to get custom statuses: %v", err)
-		}
-		if !types.Status(in.status).IsValidWithCustom(types.CustomStatusNames(customStatuses)) {
-			return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", in.status)
-		}
-	}
-	if in.explicitID != "" {
-		effectivePrefix := overlayYAMLPrefix(cctx.IssuePrefix)
-		if err := validation.ValidateIDPrefixAllowed(in.explicitID, effectivePrefix, cctx.AllowedPrefixes, in.force); err != nil {
-			return HandleError("%v", err)
-		}
+	if uowProvider == nil {
+		return HandleError("proxied-server UOW provider not initialized")
 	}
 
-	issue := buildCreateIssueFromInput(in)
-	params := domain.CreateIssueParams{
-		Issue:                   issue,
-		ExplicitID:              in.explicitID,
-		ParentID:                in.parentID,
-		Labels:                  in.labels,
-		InheritLabelsFromParent: !in.noInheritLabels && in.parentID != "",
-		Dependencies:            deps,
-		WaitsFor:                waitsFor,
-		DiscoveredFromParent:    discoveredFromParent(in.deps),
-		ForcePrefix:             in.force,
-	}
-
+	// Create must replay the full high-level operation on a fresh UOW. The
+	// durable issue ID is selected inside the attempt, so the commit message is
+	// resolved after a successful create.
 	var result domain.CreateIssueResult
-	if issue.Ephemeral {
-		result, err = uw.IssueUseCase().CreateWisp(ctx, params, in.createdBy)
-	} else {
-		result, err = uw.IssueUseCase().CreateIssue(ctx, params, in.createdBy)
-	}
-	if err != nil {
+	commitMsg := "bd: create"
+	err = uow.RunWithFreshUOWRetriesDynamicMessage(ctx, uowProvider, func() string { return commitMsg }, func(ctx context.Context, uw uow.UnitOfWork) error {
+		result = domain.CreateIssueResult{}
+		commitMsg = "bd: create"
+
+		cctx, loadErr := uw.ConfigUseCase().LoadCreateContext(ctx)
+		if loadErr != nil {
+			return fmt.Errorf("load create context: %w", loadErr)
+		}
+
+		customTypes := resolveProxiedCustomTypes(cctx.CustomTypes)
+		if in.issueType != "" {
+			it := types.IssueType(in.issueType).Normalize()
+			if !it.IsValidWithCustom(customTypes) {
+				return fmt.Errorf("invalid type %q (allowed: built-ins plus configured custom types)", in.issueType)
+			}
+		}
+		if in.status != "" {
+			customStatuses, stErr := uw.ConfigUseCase().GetCustomStatuses(ctx)
+			if stErr != nil {
+				return fmt.Errorf("failed to get custom statuses: %w", stErr)
+			}
+			if !types.Status(in.status).IsValidWithCustom(types.CustomStatusNames(customStatuses)) {
+				return fmt.Errorf("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", in.status)
+			}
+		}
+		if in.explicitID != "" {
+			effectivePrefix := overlayYAMLPrefix(cctx.IssuePrefix)
+			if vErr := validation.ValidateIDPrefixAllowed(in.explicitID, effectivePrefix, cctx.AllowedPrefixes, in.force); vErr != nil {
+				return vErr
+			}
+		}
+
+		issue := buildCreateIssueFromInput(in)
+		params := domain.CreateIssueParams{
+			Issue:                   issue,
+			ExplicitID:              in.explicitID,
+			ParentID:                in.parentID,
+			Labels:                  in.labels,
+			InheritLabelsFromParent: !in.noInheritLabels && in.parentID != "",
+			Dependencies:            deps,
+			WaitsFor:                waitsFor,
+			DiscoveredFromParent:    discoveredFromParent(in.deps),
+			ForcePrefix:             in.force,
+		}
+
+		var createErr error
+		if issue.Ephemeral {
+			result, createErr = uw.IssueUseCase().CreateWisp(ctx, params, in.createdBy)
+		} else {
+			result, createErr = uw.IssueUseCase().CreateIssue(ctx, params, in.createdBy)
+		}
+		if createErr != nil {
+			return createErr
+		}
+		if result.Issue != nil {
+			commitMsg = fmt.Sprintf("bd: create %s", result.Issue.ID)
+		}
+		return nil
+	})
+	if err != nil && !isDoltNothingToCommit(err) {
 		return HandleError("%v", err)
 	}
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: create %s", result.Issue.ID)); err != nil && !isDoltNothingToCommit(err) {
-		return HandleError("commit: %v", err)
+	if result.Issue == nil {
+		return HandleError("create produced no issue")
 	}
 
 	switch {

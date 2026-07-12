@@ -35,11 +35,20 @@ func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	var updated []*types.Issue
 	var anyUpdated bool
+	// claimFailed records a requested-but-lost --claim. In a mixed batch (one
+	// claim won, another lost to a different owner) anyUpdated is set by the
+	// winner, so the command would otherwise exit 0 and hide the lost claim from
+	// exit-code automation. Track it separately and exit non-zero, mirroring the
+	// non-proxied path in update.go (beads audit finding #10).
+	claimFailed := false
 
 	for _, id := range args {
-		issue, ok, err := applyUpdateProxiedOne(ctx, id, in)
+		issue, ok, claimLost, err := applyUpdateProxiedOne(ctx, id, in)
 		if err != nil {
 			return err
+		}
+		if claimLost {
+			claimFailed = true
 		}
 		if !ok {
 			continue
@@ -55,66 +64,96 @@ func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	if jsonOut && len(updated) > 0 {
 		_ = outputJSON(updated)
 	}
-	if !anyUpdated {
+	if !anyUpdated || claimFailed {
 		return SilentExit()
 	}
 	return nil
 }
 
-func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*types.Issue, bool, error) {
+// applyUpdateProxiedOne applies one ID's update on the proxied path. The third
+// return (claimLost) reports a requested --claim that lost to a different owner
+// (already-claimed / not-claimable), so the caller can flip the batch exit code
+// even when another ID succeeded — matching the non-proxied path.
+func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*types.Issue, bool, bool, error) {
 	if uowProvider == nil {
-		return nil, false, HandleError("proxied-server UOW provider not initialized")
+		return nil, false, false, HandleError("proxied-server UOW provider not initialized")
 	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening unit of work for %s: %v\n", id, err)
-		return nil, false, nil
-	}
-	defer uw.Close(ctx)
 
-	issueUC := uw.IssueUseCase()
-	current, err := issueUC.GetIssue(ctx, id)
-	if err != nil || current == nil {
-		wispCurrent, wispErr := issueUC.GetWisp(ctx, id)
-		if wispErr == nil && wispCurrent != nil {
-			current = wispCurrent
-		} else if err != nil {
-			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-			return nil, false, nil
-		} else {
-			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-			return nil, false, nil
+	// The whole read/derive/mutate sequence must replay on a fresh snapshot.
+	// Retrying Commit on the same UOW cannot recover a Dolt serialization
+	// failure because that transaction has already lost. Keep attempt-local
+	// values inside this callback; hooks and output run only after one attempt is
+	// durably committed.
+	var current, updated *types.Issue
+	stage := "open"
+	err := uow.RunWithFreshUOWRetries(ctx, uowProvider, fmt.Sprintf("bd: update %s", id), func(ctx context.Context, uw uow.UnitOfWork) error {
+		current = nil
+		updated = nil
+		issueUC := uw.IssueUseCase()
+
+		stage = "resolve"
+		resolved, getErr := issueUC.GetIssue(ctx, id)
+		if getErr != nil || resolved == nil {
+			wispCurrent, wispErr := issueUC.GetWisp(ctx, id)
+			if wispErr == nil && wispCurrent != nil {
+				resolved = wispCurrent
+			} else if getErr != nil {
+				return getErr
+			} else {
+				stage = "not_found"
+				return fmt.Errorf("issue %s not found", id)
+			}
 		}
-	}
-	if err := validateIssueUpdatable(id, current); err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", err)
-		return nil, false, nil
-	}
 
-	spec, err := buildUpdateSpecForIssue(current, in)
-	if err != nil {
-		return nil, false, HandleErrorRespectJSON("%v", err)
-	}
+		stage = "validate"
+		if validateErr := validateIssueUpdatable(id, resolved); validateErr != nil {
+			return validateErr
+		}
 
-	updated, err := issueUC.ApplyUpdate(ctx, id, spec, actor)
-	if err != nil {
+		stage = "build"
+		spec, buildErr := buildUpdateSpecForIssue(resolved, in)
+		if buildErr != nil {
+			return buildErr
+		}
+
+		stage = "apply"
+		attemptUpdated, applyErr := issueUC.ApplyUpdate(ctx, id, spec, actor)
+		if applyErr != nil {
+			return applyErr
+		}
+		current = resolved
+		updated = attemptUpdated
+		stage = "commit"
+		return nil
+	})
+	if err != nil && !isDoltNothingToCommit(err) {
 		if errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable) {
 			fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
-		} else {
+			// A requested --claim that lost to another owner must flip the exit
+			// code even if another ID in the same batch was updated.
+			return nil, false, in.claim, nil
+		}
+		switch stage {
+		case "resolve":
+			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+		case "not_found":
+			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+		case "validate":
+			fmt.Fprintf(os.Stderr, "%s\n", err)
+		case "build":
+			return nil, false, false, HandleErrorRespectJSON("%v", err)
+		case "commit":
+			fmt.Fprintf(os.Stderr, "Error committing %s: %v\n", id, err)
+		default:
 			fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
 		}
-		return nil, false, nil
-	}
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: update %s", id)); err != nil && !isDoltNothingToCommit(err) {
-		fmt.Fprintf(os.Stderr, "Error committing %s: %v\n", id, err)
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 
 	if err := fireProxiedUpdateHooks(ctx, current, updated); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: %s: %v\n", id, err)
 	}
-	return updated, true, nil
+	return updated, true, false, nil
 }
 
 func fireProxiedUpdateHooks(ctx context.Context, before, after *types.Issue) error {

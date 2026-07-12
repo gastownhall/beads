@@ -25,29 +25,15 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 		return errors.New("uow: commit: already done")
 	}
 	_, err := t.conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?);", message)
-	if err == nil {
-		t.done = true
-		t.releaseConn()
-		return nil
-	}
-	if isSerializationError(err) {
-		// Serialization failures guarantee the transaction was already rolled
-		// back and the caller retries them, so leave the pinned session in place
-		// for the retry rather than tearing it down here.
+	if err != nil {
+		// Leave the transaction open so Close can roll it back with its bounded,
+		// cancellation-independent cleanup context. Fresh-UOW retries always open
+		// a new unit of work; commit-only retry on this session is not used.
 		return err
 	}
-	// A non-serialization DOLT_COMMIT failure leaves the transaction open on the
-	// pinned session. Roll it back before releasing the connection so the next
-	// borrower cannot inherit and implicitly commit the orphaned writes. If the
-	// rollback also fails the session state is unknown, so poison the connection
-	// and let the pool discard it instead of handing it out again.
 	t.done = true
-	if rbErr := t.rollbackConn(ctx); rbErr != nil {
-		t.poisonConn()
-	} else {
-		t.releaseConn()
-	}
-	return err
+	t.releaseConn()
+	return nil
 }
 
 func (t *doltServerTx) Rollback(ctx context.Context) error {
@@ -98,4 +84,16 @@ func (t *doltServerTx) poisonConn() {
 	_ = t.conn.Raw(func(any) error { return driver.ErrBadConn })
 	_ = t.conn.Close()
 	t.conn = nil
+}
+
+// discardSQLConn marks a pinned database/sql connection bad before closing its
+// handle. Returning driver.ErrBadConn from Raw makes database/sql close the
+// physical driver connection instead of putting a potentially dirty session
+// back in the pool.
+func discardSQLConn(conn *sql.Conn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	_ = conn.Close()
 }
