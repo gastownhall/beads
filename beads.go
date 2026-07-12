@@ -10,6 +10,7 @@ package beads
 import (
 	"context"
 
+	"github.com/steveyegge/beads/internal/backend"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -22,6 +23,33 @@ type Storage = beads.Storage
 // Transaction provides atomic multi-operation support within a database transaction.
 // Use Storage.RunInTransaction() to obtain a Transaction instance.
 type Transaction = beads.Transaction
+
+// BackendCapabilities describes optional backend behavior without exposing
+// concrete database drivers or connection handles.
+type BackendCapabilities struct {
+	Embedded          bool
+	Transactions      bool
+	RawSQL            bool
+	Leases            bool
+	Maintenance       bool
+	Versioning        bool
+	Branching         bool
+	DoltRemotes       bool
+	ConcurrentWriters bool
+}
+
+// BackendInfo identifies the backend selected by OpenConfigured.
+type BackendInfo struct {
+	Name         string
+	External     bool
+	Capabilities BackendCapabilities
+}
+
+// OpenConfiguredOptions controls behavior that cannot be inferred from the
+// workspace's metadata.json.
+type OpenConfiguredOptions struct {
+	ReadOnly bool
+}
 
 // RemoteStore provides dolt remote management and replication operations.
 // Use type assertion on a Storage value to access these methods:
@@ -62,6 +90,31 @@ type (
 // server mode settings from metadata.json.
 func Open(ctx context.Context, dbPath string) (Storage, error) {
 	return dolt.New(ctx, &dolt.Config{Path: dbPath, CreateIfMissing: true})
+}
+
+// OpenConfigured opens the built-in backend selected by metadata.json and
+// returns a backend-neutral descriptor. It supports Dolt, PostgreSQL, MySQL,
+// and SQLite. Unknown backend names fail closed.
+func OpenConfigured(ctx context.Context, beadsDir string, opts OpenConfiguredOptions) (Storage, BackendInfo, error) {
+	store, descriptor, err := backend.OpenConfigured(ctx, beadsDir, opts.ReadOnly)
+	if err != nil {
+		return nil, BackendInfo{}, err
+	}
+	return store, BackendInfo{
+		Name:     descriptor.Name,
+		External: descriptor.External,
+		Capabilities: BackendCapabilities{
+			Embedded:          descriptor.Capabilities.Embedded,
+			Transactions:      descriptor.Capabilities.Transactions,
+			RawSQL:            descriptor.Capabilities.RawSQL,
+			Leases:            descriptor.Capabilities.Leases,
+			Maintenance:       descriptor.Capabilities.Maintenance,
+			Versioning:        descriptor.Capabilities.Versioning,
+			Branching:         descriptor.Capabilities.Branching,
+			DoltRemotes:       descriptor.Capabilities.DoltRemotes,
+			ConcurrentWriters: descriptor.Capabilities.ConcurrentWriters,
+		},
+	}, nil
 }
 
 // OpenFromConfig opens a beads database using configuration from metadata.json.
