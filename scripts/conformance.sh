@@ -106,6 +106,9 @@ CGO_ENABLED=1 go test -tags "$TAGS" ./internal/storage/mysqldialect/
 CGO_ENABLED=1 go test -tags "$TAGS" ./internal/storage/sqlite/ \
   -run 'TestInterfaceCompleteness|TestUnsupportedContract|TestConformance|TestSeedOnlyOnFirstProvision'
 CGO_ENABLED=1 go test -tags "$TAGS" ./internal/storage/sqlitedialect/
+# Flat-file is embedded (pure-Go, one JSON file per issue), always runs.
+CGO_ENABLED=1 go test -tags "$TAGS" ./internal/storage/flatfile/ \
+  -run 'TestInterfaceCompleteness|TestUnsupportedContract|TestConformance|TestSeedOnlyOnFirstProvision'
 
 echo "==> Tier 2: end-to-end 'bd init' + CLI conformance (differential vs Dolt)"
 CGO_ENABLED=1 go test -tags "$TAGS e2e" ./test/conformance/

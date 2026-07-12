@@ -101,12 +101,17 @@ linters:
         linters:
           - gosec
         text: "G304"
+      # G304/G306: Flat-file backend reads/writes issue JSON files at known paths with 0644
+      - path: 'internal/storage/flatfile/|cmd/bd/migrate_flatfile\.go|cmd/bd/doctor/flatfile\.go'
+        linters:
+          - gosec
+        text: "G304|G306|G302"
       # G302/G306: Directory/file permissions 0700/0750 are acceptable
       - linters:
           - gosec
         text: "G302.*0700|G301.*0750"
-      # G302/G306: JSONL files and error logs need 0644 for debugging/sharing
-      - path: 'cmd/bd/setup\.go|internal/git/worktree\.go'
+      # G302/G306: JSONL files, error logs, and flatfile init need 0644
+      - path: 'cmd/bd/setup\.go|internal/git/worktree\.go|cmd/bd/init\.go'
         linters:
           - gosec
         text: "G306"
