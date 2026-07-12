@@ -256,6 +256,21 @@ func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
 	return changed, nil
 }
 
+// commitSeededDoltIgnore stages and commits freshly seeded dolt_ignore rows
+// in a scoped, labeled commit. Both MigrateUp paths use it: on the no-work
+// short-circuit nothing downstream would ever commit the seed, and on the
+// migration path the seed must be committed before the first step so an
+// interrupted pass leaves a clean working set (#4566 self-heal contract).
+func commitSeededDoltIgnore(ctx context.Context, db DBConn) error {
+	if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('dolt_ignore')"); err != nil {
+		return fmt.Errorf("staging seeded dolt_ignore patterns: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')"); err != nil {
+		return fmt.Errorf("committing seeded dolt_ignore patterns: %w", err)
+	}
+	return nil
+}
+
 func LatestVersion() int {
 	latestOnce.Do(func() {
 		latestVer = mainSource.latest()
@@ -345,11 +360,8 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 		// it indefinitely). Commit it here, scoped and labeled, so the
 		// out-of-band-copy heal converges in one pass.
 		if seedChanged {
-			if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('dolt_ignore')"); err != nil {
-				return 0, fmt.Errorf("staging seeded dolt_ignore patterns: %w", err)
-			}
-			if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')"); err != nil {
-				return 0, fmt.Errorf("committing seeded dolt_ignore patterns: %w", err)
+			if err := commitSeededDoltIgnore(ctx, db); err != nil {
+				return 0, err
 			}
 		}
 		return 0, nil
@@ -362,11 +374,22 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// dolt_ignore is pass-owned state: seedDoltIgnorePatterns above may have
 	// just dirtied it on an under-seeded database. Exempting it from the
 	// pre-existing-dirty guards (like the aux-rekey tables below) keeps the
-	// pending-migration and changed-signature gates off it and lets
-	// stageSchemaTables commit the seeded patterns with the pass.
+	// pending-migration and changed-signature gates off it.
 	delete(dirtyBeforeAll, "dolt_ignore")
 	if err := unstagePreExistingTables(ctx, db, dirtyBeforeAll); err != nil {
 		return 0, fmt.Errorf("unstaging pre-migration tables: %w", err)
+	}
+	// The seed must not ride the migration pass: every step of the pass
+	// commits atomically, and a pass killed between steps must leave a CLEAN
+	// working set (the #4566 self-heal contract) — but the seeded dolt_ignore
+	// rows would stay dirty until the pass's final commit, so an interrupted
+	// retry sees a dirty working set and refuses to converge. Commit the seed
+	// scoped and labeled now, after pre-existing staged tables were unstaged
+	// (so nothing else rides into the commit) and before the first step runs.
+	if seedChanged {
+		if err := commitSeededDoltIgnore(ctx, db); err != nil {
+			return 0, err
+		}
 	}
 	dirtyBefore, err := committableDirtyTables(ctx, db)
 	if err != nil {

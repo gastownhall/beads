@@ -199,6 +199,13 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	expectIgnorePatternSeed(mock)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	expectDoltStatusRows(mock)
+	// The seed changed rows (expectIgnorePatternSeed reports RowsAffected=1),
+	// so MigrateUp commits it scoped+labeled before the pass runs (#4566: the
+	// seed must not ride the per-step pass commits).
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectDoltStatusRows(mock)
 	// MigrateUp probes the aux-rekey crash sentinel (bd-578h9.16); this
 	// mocked world has no local_metadata table, so no crashed pass.
