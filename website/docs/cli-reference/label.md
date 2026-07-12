@@ -18,10 +18,10 @@ bd label [flags]
 
 ### bd label add
 
-Add a label to one or more issues
+Add labels to issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label add bd-123 label1,label2
 
 ```
-bd label add [issue-id...] [label] [flags]
+bd label add [issue-id...] [label[,label...]] [flags]
 ```
 
 ### bd label list
@@ -50,8 +50,8 @@ bd label propagate [parent-id] [label] [flags]
 
 ### bd label remove
 
-Remove a label from one or more issues
+Remove labels from issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label remove bd-123 label1,label2
 
 ```
-bd label remove [issue-id...] [label] [flags]
+bd label remove [issue-id...] [label[,label...]] [flags]
 ```

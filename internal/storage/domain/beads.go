@@ -186,9 +186,6 @@ func (u *beadsDirFSUseCaseImpl) InitializeBeadsDir(ctx context.Context, params I
 			return InitializeBeadsDirResult{}, err
 		}
 	}
-	if err := u.fsRepo.WriteInteractionsLog(ctx); err != nil {
-		return InitializeBeadsDirResult{}, err
-	}
 	if err := u.fsRepo.WriteReadme(ctx); err != nil {
 		return InitializeBeadsDirResult{}, err
 	}
