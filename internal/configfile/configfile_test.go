@@ -629,11 +629,10 @@ func TestProxiedServerClientInfo_ResolvedPaths(t *testing.T) {
 	})
 }
 
-// TestGetBackendAllowlist verifies the allowlist semantics: the SQL backends
-// (postgres, mysql, sqlite) are honored; every other value (empty, legacy,
-// genuinely unknown) falls back to Dolt. This is the guard behind backend selection
-// — a typo in metadata.json must fail safe to Dolt, never to an unintended backend.
-func TestGetBackendAllowlist(t *testing.T) {
+// TestGetBackendNormalization verifies that only an empty value defaults to
+// Dolt. Unknown non-empty names must survive normalization so configured open
+// can resolve an external provider or fail closed instead of opening Dolt.
+func TestGetBackendNormalization(t *testing.T) {
 	fallsBackToDolt := []struct {
 		name string
 		cfg  *Config
@@ -641,7 +640,6 @@ func TestGetBackendAllowlist(t *testing.T) {
 		{name: "explicit dolt", cfg: &Config{Backend: BackendDolt}},
 		{name: "empty backend", cfg: &Config{Backend: ""}},
 		{name: "legacy config", cfg: &Config{}},
-		{name: "unknown backend", cfg: &Config{Backend: "mystery"}},
 	}
 	for _, tt := range fallsBackToDolt {
 		t.Run(tt.name, func(t *testing.T) {
@@ -651,7 +649,7 @@ func TestGetBackendAllowlist(t *testing.T) {
 		})
 	}
 
-	honored := []string{BackendPostgres, BackendMySQL, BackendSQLite}
+	honored := []string{BackendPostgres, BackendMySQL, BackendSQLite, "mystery"}
 	for _, backend := range honored {
 		t.Run(backend+" honored", func(t *testing.T) {
 			cfg := &Config{Backend: backend}
@@ -659,6 +657,10 @@ func TestGetBackendAllowlist(t *testing.T) {
 				t.Errorf("GetBackend() = %q, want %q", got, backend)
 			}
 		})
+	}
+
+	if got := (&Config{Backend: " DoltLite "}).GetBackend(); got != "doltlite" {
+		t.Errorf("GetBackend() = %q, want normalized external backend", got)
 	}
 }
 

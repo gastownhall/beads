@@ -224,6 +224,20 @@ type RawDBAccessor interface {
 	UnderlyingDB() *sql.DB
 }
 
+// RawSQLResult is the portable result shape for raw SQL executed by storage
+// backends that cannot expose an in-process *sql.DB, such as external plugins.
+type RawSQLResult struct {
+	Columns      []string                 `json:"columns,omitempty"`
+	Rows         []map[string]interface{} `json:"rows,omitempty"`
+	RowsAffected int64                    `json:"rows_affected,omitempty"`
+	Read         bool                     `json:"read"`
+}
+
+// RawSQLExecutor provides raw SQL access without exposing a concrete *sql.DB.
+type RawSQLExecutor interface {
+	ExecuteRawSQL(ctx context.Context, query string) (RawSQLResult, error)
+}
+
 // StoreLocator provides filesystem path information for the store.
 // Callers that need the store's on-disk location should type-assert to this interface.
 type StoreLocator interface {

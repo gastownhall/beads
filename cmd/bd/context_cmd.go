@@ -99,6 +99,7 @@ Examples:
 
 		info.DoltMode = cfg.GetDoltMode()
 		info.Database = cfg.GetDoltDatabase()
+		info.Backend = cfg.GetBackend()
 		info.ProjectID = cfg.ProjectID
 
 		if cfg.IsDoltServerMode() {

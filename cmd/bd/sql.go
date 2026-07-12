@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/csv"
 	"fmt"
 	"os"
@@ -41,9 +43,6 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 			}
 		}()
 
-		if !usesSQLServer() {
-			return HandleError("'bd sql' is not yet supported in embedded mode")
-		}
 		query := args[0]
 		csvOutput, _ := cmd.Flags().GetBool("csv")
 
@@ -55,76 +54,30 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 			return HandleErrorRespectJSON("no database connection available (%s)", diagHint())
 		}
 
-		accessor, ok := storage.UnwrapStore(store).(storage.RawDBAccessor)
-		if !ok {
-			return HandleErrorRespectJSON("storage backend does not support raw DB access")
-		}
-		db := accessor.UnderlyingDB()
-		if db == nil {
-			return HandleErrorRespectJSON("underlying database not available")
-		}
-
 		ctx := rootCtx
 
-		trimmed := strings.TrimSpace(strings.ToUpper(query))
-		isRead := strings.HasPrefix(trimmed, "SELECT") ||
-			strings.HasPrefix(trimmed, "EXPLAIN") ||
-			strings.HasPrefix(trimmed, "PRAGMA") ||
-			strings.HasPrefix(trimmed, "SHOW") ||
-			strings.HasPrefix(trimmed, "DESCRIBE") ||
-			strings.HasPrefix(trimmed, "WITH")
+		if !rawSQLIsRead(query) {
+			CheckReadonly("sql")
+		}
 
-		if isRead {
-			rows, err := db.QueryContext(ctx, query)
-			if err != nil {
-				return HandleErrorRespectJSON("query error: %v", err)
-			}
-			defer rows.Close()
+		result, err := executeRawSQL(ctx, storage.UnwrapStore(store), query)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 
-			columns, err := rows.Columns()
-			if err != nil {
-				return HandleErrorRespectJSON("getting columns: %v", err)
-			}
-
-			allRows := make([]map[string]interface{}, 0)
-			for rows.Next() {
-				values := make([]interface{}, len(columns))
-				valuePtrs := make([]interface{}, len(columns))
-				for i := range values {
-					valuePtrs[i] = &values[i]
-				}
-
-				if err := rows.Scan(valuePtrs...); err != nil {
-					return HandleErrorRespectJSON("scanning row: %v", err)
-				}
-
-				row := make(map[string]interface{})
-				for i, col := range columns {
-					val := values[i]
-					if b, ok := val.([]byte); ok {
-						row[col] = string(b)
-					} else {
-						row[col] = val
-					}
-				}
-				allRows = append(allRows, row)
-			}
-			if err := rows.Err(); err != nil {
-				return HandleErrorRespectJSON("reading rows: %v", err)
-			}
-
+		if result.Read {
 			if jsonOutput {
-				return outputJSON(allRows)
+				return outputJSON(result.Rows)
 			}
 
 			if csvOutput {
 				w := csv.NewWriter(os.Stdout)
-				if err := w.Write(columns); err != nil {
+				if err := w.Write(result.Columns); err != nil {
 					return HandleErrorRespectJSON("writing CSV header: %v", err)
 				}
-				for _, row := range allRows {
-					record := make([]string, len(columns))
-					for i, col := range columns {
+				for _, row := range result.Rows {
+					record := make([]string, len(result.Columns))
+					for i, col := range result.Columns {
 						record[i] = fmt.Sprintf("%v", row[col])
 					}
 					if err := w.Write(record); err != nil {
@@ -138,18 +91,18 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 				return nil
 			}
 
-			if len(allRows) == 0 {
+			if len(result.Rows) == 0 {
 				fmt.Println("(0 rows)")
 				return nil
 			}
 
 			// Calculate column widths
-			widths := make([]int, len(columns))
-			for i, col := range columns {
+			widths := make([]int, len(result.Columns))
+			for i, col := range result.Columns {
 				widths[i] = len(col)
 			}
-			for _, row := range allRows {
-				for i, col := range columns {
+			for _, row := range result.Rows {
+				for i, col := range result.Columns {
 					s := fmt.Sprintf("%v", row[col])
 					if len(s) > widths[i] {
 						widths[i] = len(s)
@@ -165,7 +118,7 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 			}
 
 			// Print header
-			for i, col := range columns {
+			for i, col := range result.Columns {
 				if i > 0 {
 					fmt.Print(" | ")
 				}
@@ -174,7 +127,7 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 			fmt.Println()
 
 			// Print separator
-			for i := range columns {
+			for i := range result.Columns {
 				if i > 0 {
 					fmt.Print("-+-")
 				}
@@ -183,8 +136,8 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 			fmt.Println()
 
 			// Print rows
-			for _, row := range allRows {
-				for i, col := range columns {
+			for _, row := range result.Rows {
+				for i, col := range result.Columns {
 					if i > 0 {
 						fmt.Print(" | ")
 					}
@@ -197,26 +150,17 @@ WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 				fmt.Println()
 			}
 
-			fmt.Printf("(%d rows)\n", len(allRows))
+			fmt.Printf("(%d rows)\n", len(result.Rows))
 			return nil
 		}
 
-		CheckReadonly("sql")
-
-		result, err := db.ExecContext(ctx, query)
-		if err != nil {
-			return HandleErrorRespectJSON("exec error: %v", err)
-		}
-
-		affected, _ := result.RowsAffected()
-
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
-				"rows_affected": affected,
+				"rows_affected": result.RowsAffected,
 			})
 		}
 
-		fmt.Printf("OK, %d rows affected\n", affected)
+		fmt.Printf("OK, %d rows affected\n", result.RowsAffected)
 		return nil
 	},
 }
@@ -229,4 +173,88 @@ func init() {
 	// We don't add to readOnlyCommands because it can do writes too.
 
 	rootCmd.AddCommand(sqlCmd)
+}
+
+func rawSQLIsRead(query string) bool {
+	trimmed := strings.TrimSpace(strings.ToUpper(query))
+	return strings.HasPrefix(trimmed, "SELECT") ||
+		strings.HasPrefix(trimmed, "EXPLAIN") ||
+		strings.HasPrefix(trimmed, "PRAGMA") ||
+		strings.HasPrefix(trimmed, "SHOW") ||
+		strings.HasPrefix(trimmed, "DESCRIBE") ||
+		strings.HasPrefix(trimmed, "WITH")
+}
+
+func executeRawSQL(ctx context.Context, store storage.Storage, query string) (storage.RawSQLResult, error) {
+	if executor, ok := store.(storage.RawSQLExecutor); ok {
+		return executor.ExecuteRawSQL(ctx, query)
+	}
+	accessor, ok := store.(storage.RawDBAccessor)
+	if !ok {
+		return storage.RawSQLResult{}, fmt.Errorf("storage backend does not support raw DB access")
+	}
+	db := accessor.UnderlyingDB()
+	if db == nil {
+		return storage.RawSQLResult{}, fmt.Errorf("underlying database not available")
+	}
+	return executeRawSQLOnDB(ctx, db, query)
+}
+
+func executeRawSQLOnDB(ctx context.Context, db *sql.DB, query string) (storage.RawSQLResult, error) {
+	if !rawSQLIsRead(query) {
+		result, err := db.ExecContext(ctx, query)
+		if err != nil {
+			return storage.RawSQLResult{}, fmt.Errorf("exec error: %w", err)
+		}
+		affected, _ := result.RowsAffected()
+		return storage.RawSQLResult{RowsAffected: affected, Read: false}, nil
+	}
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return storage.RawSQLResult{}, fmt.Errorf("query error: %w", err)
+	}
+	defer rows.Close()
+
+	result, err := scanRawSQLRows(rows)
+	if err != nil {
+		return storage.RawSQLResult{}, err
+	}
+	result.Read = true
+	return result, nil
+}
+
+func scanRawSQLRows(rows *sql.Rows) (storage.RawSQLResult, error) {
+	columns, err := rows.Columns()
+	if err != nil {
+		return storage.RawSQLResult{}, fmt.Errorf("getting columns: %w", err)
+	}
+
+	allRows := make([]map[string]interface{}, 0)
+	for rows.Next() {
+		values := make([]interface{}, len(columns))
+		valuePtrs := make([]interface{}, len(columns))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+
+		if err := rows.Scan(valuePtrs...); err != nil {
+			return storage.RawSQLResult{}, fmt.Errorf("scanning row: %w", err)
+		}
+
+		row := make(map[string]interface{})
+		for i, col := range columns {
+			val := values[i]
+			if b, ok := val.([]byte); ok {
+				row[col] = string(b)
+			} else {
+				row[col] = val
+			}
+		}
+		allRows = append(allRows, row)
+	}
+	if err := rows.Err(); err != nil {
+		return storage.RawSQLResult{}, fmt.Errorf("reading rows: %w", err)
+	}
+	return storage.RawSQLResult{Columns: columns, Rows: allRows, Read: true}, nil
 }

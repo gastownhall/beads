@@ -74,6 +74,9 @@ backup/
 # Per-project environment file (Dolt connection config, GH#2520)
 .env
 
+# Local-only config overrides and plugin executable trust
+config.local.yaml
+
 # Legacy files (from pre-Dolt versions)
 *.db
 *.db?*

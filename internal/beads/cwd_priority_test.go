@@ -141,6 +141,47 @@ func TestFindDatabasePath_CwdPriority(t *testing.T) {
 	}
 }
 
+func TestFindDatabasePathRecognizesPluginBackendDirectory(t *testing.T) {
+	origBeadsDir := os.Getenv("BEADS_DIR")
+	origBeadsDB := os.Getenv("BEADS_DB")
+	t.Cleanup(func() {
+		if origBeadsDir != "" {
+			os.Setenv("BEADS_DIR", origBeadsDir)
+		} else {
+			os.Unsetenv("BEADS_DIR")
+		}
+		if origBeadsDB != "" {
+			os.Setenv("BEADS_DB", origBeadsDB)
+		} else {
+			os.Unsetenv("BEADS_DB")
+		}
+	})
+	os.Unsetenv("BEADS_DB")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"postgres","database":"test","postgres_database":"beads","postgres_schema":"test"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	result := FindDatabasePath()
+	if result == "" {
+		t.Fatal("FindDatabasePath() returned empty for plugin-backed scope")
+	}
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	wantResolved, _ := filepath.EvalSymlinks(beadsDir)
+	if resultResolved != wantResolved {
+		t.Fatalf("FindDatabasePath() = %q, want %q", result, beadsDir)
+	}
+}
+
 // TestFindBeadsDir_CwdWithoutBeads_FallsBackToWalk verifies that when cwd
 // has no .beads/, the normal walk-up behavior still works.
 func TestFindBeadsDir_CwdWithoutBeads_FallsBackToWalk(t *testing.T) {

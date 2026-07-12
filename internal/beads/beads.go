@@ -421,13 +421,18 @@ func findLocalBeadsDir() string {
 }
 
 // findDatabaseInBeadsDir searches for a database within a .beads directory.
-// Checks metadata.json for the Dolt database path. For server mode, no local
-// directory is required. For embedded mode, checks both the embeddeddolt/
-// directory (where the embedded engine stores data) and the legacy dolt/ path.
-// Returns empty string if no database is found.
+// Checks metadata.json for the backend path. Plugin-backed stores use the
+// .beads directory itself as their discovery marker; the plugin decides where
+// the actual storage lives. For Dolt server mode, no local directory is
+// required. For embedded mode, checks both the embeddeddolt/ directory (where
+// the embedded engine stores data) and the legacy dolt/ path. Returns empty
+// string if no database is found.
 func findDatabaseInBeadsDir(beadsDir string, _ bool) string {
 	// Check for metadata.json first (single source of truth)
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+		if cfg.GetBackend() != configfile.BackendDolt {
+			return beadsDir
+		}
 		// For Dolt server mode, database is on the server - no local directory required
 		if cfg.IsDoltServerMode() {
 			return cfg.DatabasePath(beadsDir)
@@ -450,6 +455,10 @@ func findDatabaseInBeadsDir(beadsDir string, _ bool) string {
 	embeddedPath := filepath.Join(beadsDir, "embeddeddolt")
 	if info, err := os.Stat(embeddedPath); err == nil && info.IsDir() {
 		return embeddedPath
+	}
+	doltlitePath := filepath.Join(beadsDir, "doltlite")
+	if info, err := os.Stat(doltlitePath); err == nil && info.IsDir() {
+		return doltlitePath
 	}
 	doltPath := filepath.Join(beadsDir, "dolt")
 	if info, err := os.Stat(doltPath); err == nil && info.IsDir() {
@@ -628,6 +637,9 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 	if info, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err == nil && info.IsDir() {
 		return true
 	}
+	if info, err := os.Stat(filepath.Join(beadsDir, "doltlite")); err == nil && info.IsDir() {
+		return true
+	}
 
 	// Check for database files (excluding backups and vc.db)
 	dbMatches, _ := filepath.Glob(filepath.Join(beadsDir, "*.db"))
@@ -643,8 +655,9 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 
 // hasBeadsDatabase is the strict counterpart to hasBeadsProjectFiles: it
 // returns true only when beadsDir contains an actual database — a dolt/
-// directory, an embeddeddolt/ directory, or a non-backup *.db file. Mere
-// presence of metadata.json / config.yaml / issues.jsonl does not count.
+// directory, an embeddeddolt/ directory, plugin-backed metadata, or a
+// non-backup *.db file. Mere presence of generic metadata.json / config.yaml /
+// issues.jsonl does not count.
 //
 // Used by FindBeadsDir's worktree-separate-DB branch to distinguish a
 // genuine separate-database worktree (which owns its own Dolt data) from
@@ -653,10 +666,16 @@ func hasBeadsProjectFiles(beadsDir string) bool {
 // check, the separate-DB branch would match on inherited metadata.json and
 // return a broken directory, short-circuiting the shared-DB fallback.
 func hasBeadsDatabase(beadsDir string) bool {
+	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.GetBackend() != configfile.BackendDolt {
+		return true
+	}
 	if info, err := os.Stat(filepath.Join(beadsDir, "dolt")); err == nil && info.IsDir() {
 		return true
 	}
 	if info, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err == nil && info.IsDir() {
+		return true
+	}
+	if info, err := os.Stat(filepath.Join(beadsDir, "doltlite")); err == nil && info.IsDir() {
 		return true
 	}
 	dbMatches, _ := filepath.Glob(filepath.Join(beadsDir, "*.db"))

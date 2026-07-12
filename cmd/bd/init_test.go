@@ -441,6 +441,20 @@ func TestCheckExistingBeadsDataOperationalErrorNotMasked(t *testing.T) {
 		}
 	})
 
+	t.Run("plugin backend matches sentinel", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(beadsDir, configfile.ConfigFileName), []byte(`{"backend":"postgres","database":"test","postgres_database":"beads","postgres_schema":"test"}`), 0o644); err != nil {
+			t.Fatalf("save config: %v", err)
+		}
+		err := checkExistingBeadsDataAt(beadsDir, "test")
+		if err == nil {
+			t.Fatal("expected already-initialized error, got nil")
+		}
+		if !errors.Is(err, errWorkspaceAlreadyInitialized) {
+			t.Errorf("plugin backend error must match errWorkspaceAlreadyInitialized, got: %v", err)
+		}
+	})
+
 	t.Run("operational error not masked", func(t *testing.T) {
 		beadsDir := t.TempDir()
 		saveEmbeddedConfig(t, beadsDir)

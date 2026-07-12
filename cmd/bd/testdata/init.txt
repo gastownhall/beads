@@ -11,6 +11,7 @@ grep '^\*\.db-shm$' .beads/.gitignore
 grep '^daemon\.log$' .beads/.gitignore
 grep '^daemon\.pid$' .beads/.gitignore
 grep '^bd\.sock$' .beads/.gitignore
+grep '^config\.local\.yaml$' .beads/.gitignore
 grep '^!\*\.jsonl$' .beads/.gitignore
 grep '^!metadata\.json$' .beads/.gitignore
 grep '^!config\.json$' .beads/.gitignore

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -51,6 +52,65 @@ func writeMetadataConfig(t *testing.T, beadsDir string, doltMode string, databas
 		DoltDatabase: database,
 	}).Save(beadsDir); err != nil {
 		t.Fatalf("save metadata: %v", err)
+	}
+}
+
+func TestPersistentPreRunUsesTrustedPluginForPluginBackend(t *testing.T) {
+	repoDir := t.TempDir()
+	beadsDir := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(filepath.Join(beadsDir, "doltlite"), 0o755); err != nil {
+		t.Fatalf("mkdir beadsDir: %v", err)
+	}
+	if err := (&configfile.Config{
+		Backend:      "doltlite",
+		Database:     "doltlite",
+		DoltDatabase: "plugin_ctx_test",
+	}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+
+	capture := filepath.Join(t.TempDir(), "plugin-open.jsonl")
+	plugin := writeStoreFactoryPluginHelper(t, capture)
+	if _, err := saveBackendPluginTrust(beadsDir, "doltlite", plugin, []string{"serve"}); err != nil {
+		t.Fatalf("saveBackendPluginTrust: %v", err)
+	}
+
+	t.Chdir(repoDir)
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	savePersistentPreRunState(t)
+
+	if rootCmd.PersistentPreRunE == nil {
+		t.Fatal("rootCmd.PersistentPreRunE must be set")
+	}
+	if err := rootCmd.PersistentPreRunE(createCmd, []string{"plugin-backed create"}); err != nil {
+		t.Fatalf("PersistentPreRunE: %v", err)
+	}
+	t.Cleanup(func() {
+		if store != nil {
+			_ = store.Close()
+			store = nil
+		}
+	})
+
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatalf("read capture: %v", err)
+	}
+	text := string(data)
+	if !strings.Contains(text, `"method":"open"`) {
+		t.Fatalf("plugin did not receive open request:\n%s", text)
+	}
+	if !strings.Contains(text, `"database":"plugin_ctx_test"`) {
+		t.Fatalf("plugin open did not use configured database:\n%s", text)
+	}
+	if store == nil {
+		t.Fatal("PersistentPreRunE did not install active store")
 	}
 }
 

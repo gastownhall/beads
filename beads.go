@@ -10,6 +10,7 @@ package beads
 import (
 	"context"
 
+	"github.com/steveyegge/beads/internal/backend"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -22,6 +23,33 @@ type Storage = beads.Storage
 // Transaction provides atomic multi-operation support within a database transaction.
 // Use Storage.RunInTransaction() to obtain a Transaction instance.
 type Transaction = beads.Transaction
+
+// BackendCapabilities describes optional backend behavior without exposing
+// concrete database drivers or connection handles.
+type BackendCapabilities struct {
+	Embedded          bool
+	Transactions      bool
+	RawSQL            bool
+	Leases            bool
+	Maintenance       bool
+	Versioning        bool
+	Branching         bool
+	DoltRemotes       bool
+	ConcurrentWriters bool
+}
+
+// BackendInfo identifies the backend selected by OpenConfigured.
+type BackendInfo struct {
+	Name         string
+	External     bool
+	Capabilities BackendCapabilities
+}
+
+// OpenConfiguredOptions controls behavior that cannot be inferred from the
+// workspace's metadata.json.
+type OpenConfiguredOptions struct {
+	ReadOnly bool
+}
 
 // RemoteStore provides dolt remote management and replication operations.
 // Use type assertion on a Storage value to access these methods:
@@ -64,12 +92,42 @@ func Open(ctx context.Context, dbPath string) (Storage, error) {
 	return dolt.New(ctx, &dolt.Config{Path: dbPath, CreateIfMissing: true})
 }
 
-// OpenFromConfig opens a beads database using configuration from metadata.json.
-// Unlike Open, this respects Dolt server mode settings and database name
-// configuration, connecting to the Dolt SQL server when dolt_mode is "server".
-// beadsDir is the path to the .beads directory.
+// OpenConfigured opens the built-in or trusted external backend selected by
+// metadata.json and returns its backend-neutral descriptor. External plugin
+// commands are resolved from local/user trust configuration or environment;
+// committed metadata cannot authorize executable code.
+func OpenConfigured(ctx context.Context, beadsDir string, opts OpenConfiguredOptions) (Storage, BackendInfo, error) {
+	store, descriptor, err := backend.OpenConfigured(ctx, beadsDir, backend.ConfiguredOpenOptions{ReadOnly: opts.ReadOnly})
+	if err != nil {
+		return nil, BackendInfo{}, err
+	}
+	return store, backendInfoFromInternal(descriptor), nil
+}
+
+// OpenFromConfig opens the backend selected by metadata.json. It is retained
+// for source compatibility; new callers that need backend information should
+// use OpenConfigured.
 func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
-	return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+	store, _, err := OpenConfigured(ctx, beadsDir, OpenConfiguredOptions{})
+	return store, err
+}
+
+func backendInfoFromInternal(in backend.Descriptor) BackendInfo {
+	return BackendInfo{
+		Name:     in.Name,
+		External: in.External,
+		Capabilities: BackendCapabilities{
+			Embedded:          in.Capabilities.Embedded,
+			Transactions:      in.Capabilities.Transactions,
+			RawSQL:            in.Capabilities.RawSQL,
+			Leases:            in.Capabilities.Leases,
+			Maintenance:       in.Capabilities.Maintenance,
+			Versioning:        in.Capabilities.Versioning,
+			Branching:         in.Capabilities.Branching,
+			DoltRemotes:       in.Capabilities.DoltRemotes,
+			ConcurrentWriters: in.Capabilities.ConcurrentWriters,
+		},
+	}
 }
 
 // FindDatabasePath finds the beads database in the current directory tree

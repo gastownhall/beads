@@ -19,6 +19,12 @@ type Config struct {
 	Database string `json:"database"`
 	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default), "postgres", "mysql", or "sqlite". Read via GetBackend().
 
+	// Deprecated executable fields retained for metadata compatibility only.
+	// Commands in committed metadata are never trusted or executed; external
+	// provider trust lives in config.local.yaml, user config, or environment.
+	BackendPluginCommand string   `json:"backend_plugin_command,omitempty"`
+	BackendPluginArgs    []string `json:"backend_plugin_args,omitempty"`
+
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
 
@@ -249,22 +255,19 @@ func (c *Config) GetCapabilities() BackendCapabilities {
 	return CapabilitiesForBackend(backend)
 }
 
-// GetBackend returns the configured storage backend. Only the explicitly-allowlisted
-// non-default backends ("postgres", "mysql") are honored; "", "dolt", and any legacy
-// or unknown value resolve to dolt so the default path stays byte-identical and a
-// typo fails safe to Dolt.
+// GetBackend returns the normalized configured storage backend. Empty values
+// retain the Dolt default. Non-empty unknown names are preserved so the
+// configured factory can resolve an external provider or fail closed; silently
+// coercing an unknown source of truth to Dolt risks opening the wrong database.
 func (c *Config) GetBackend() string {
-	if c != nil {
-		switch c.Backend {
-		case BackendPostgres:
-			return BackendPostgres
-		case BackendMySQL:
-			return BackendMySQL
-		case BackendSQLite:
-			return BackendSQLite
-		}
+	if c == nil {
+		return BackendDolt
 	}
-	return BackendDolt
+	backend := strings.ToLower(strings.TrimSpace(c.Backend))
+	if backend == "" {
+		return BackendDolt
+	}
+	return backend
 }
 
 // GetSQLitePath returns the SQLite database file path (relative to the beads dir, or

@@ -2303,6 +2303,19 @@ To re-initialize (SQLite provisioning is idempotent):
   bd init --backend=sqlite --reinit-local ...
 
 Aborting.`, ui.RenderWarn("⚠"), cfg.GetSQLitePath(), ui.RenderAccent("bd list"))
+	default:
+		if backend := cfg.GetBackend(); backend != configfile.BackendDolt {
+			return alreadyInitialized(`
+%s This workspace is already initialized with the %s backend.
+
+To use it:
+  Just run bd commands normally (e.g., %s)
+
+If its external provider is not installed on this machine:
+  bd backend install %s --command <path>
+
+Aborting.`, ui.RenderWarn("⚠"), backend, ui.RenderAccent("bd list"), backend)
+		}
 	}
 	return nil
 }

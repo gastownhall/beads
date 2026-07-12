@@ -21,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/subosito/gotenv"
 
+	"github.com/steveyegge/beads/internal/backend"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -33,10 +34,7 @@ import (
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	mysqlstore "github.com/steveyegge/beads/internal/storage/mysql"
-	pgstore "github.com/steveyegge/beads/internal/storage/postgres"
 	"github.com/steveyegge/beads/internal/storage/schema"
-	sqlitestore "github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/utils"
@@ -842,6 +840,7 @@ var rootCmd = &cobra.Command{
 			"__complete",       // Cobra's internal completion command (shell completions work without db)
 			"__completeNoDesc", // Cobra's completion without descriptions (used by fish)
 			"bash",
+			"backend",
 			"bootstrap",
 			"completion",
 			"context", // reads config files directly, does not need DB open
@@ -1256,16 +1255,11 @@ var rootCmd = &cobra.Command{
 		// Removing them WILL cause unrecoverable data corruption and data loss.
 		// Dolt manages these files itself; external interference is never safe.
 
-		if cfg != nil && cfg.GetBackend() == configfile.BackendPostgres {
-			// Postgres backend: open via the SQL-family bundle, bypassing the
-			// Dolt open path (the doltCfg above is built but unused here).
-			store, err = pgstore.NewFromConfig(rootCtx, beadsDir)
-		} else if cfg != nil && cfg.GetBackend() == configfile.BackendMySQL {
-			// MySQL backend: same SQL-family bundle, isolation by database.
-			store, err = mysqlstore.NewFromConfig(rootCtx, beadsDir)
-		} else if cfg != nil && cfg.GetBackend() == configfile.BackendSQLite {
-			// SQLite backend: pure-Go file-based SQL-family bundle.
-			store, err = sqlitestore.NewFromConfig(rootCtx, beadsDir)
+		if cfg != nil && cfg.GetBackend() != configfile.BackendDolt {
+			// Built-in SQL and trusted external providers share the configured
+			// factory used by the public Go API. Dolt retains this command-scoped
+			// path because doltCfg carries CLI auto-start and gateway state.
+			store, _, err = backend.OpenConfigured(rootCtx, beadsDir, backend.ConfiguredOpenOptions{ReadOnly: doltCfg.ReadOnly})
 		} else {
 			store, err = newDoltStore(rootCtx, doltCfg)
 		}
