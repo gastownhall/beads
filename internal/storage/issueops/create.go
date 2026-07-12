@@ -291,6 +291,13 @@ func ValidateCreateIssuesMixedBucketDependencies(issues []*types.Issue) error {
 	return err
 }
 
+// FilterCreateIssuesMixedBucketDependencies exposes the cross-bucket edge
+// filter to non-SQL backends (flatfile) so the rule cannot drift between
+// implementations.
+func FilterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
+	return filterCreateIssuesMixedBucketDependencies(issues, opts)
+}
+
 func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
 	batchWispByID := make(map[string]bool, len(issues))
 	hasRegular := false

@@ -432,6 +432,10 @@ func findDatabaseInBeadsDir(beadsDir string, _ bool) string {
 		if cfg.IsDoltServerMode() {
 			return cfg.DatabasePath(beadsDir)
 		}
+		// For flatfile backend, data is stored directly in .beads/ (no subdirectory)
+		if cfg.GetBackend() == configfile.BackendFlatfile {
+			return beadsDir
+		}
 		// For embedded Dolt, the engine stores data under .beads/embeddeddolt/,
 		// not .beads/dolt/. Check the actual embedded data directory first.
 		embeddedPath := filepath.Join(beadsDir, "embeddeddolt")

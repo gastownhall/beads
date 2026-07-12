@@ -17,7 +17,7 @@ const ConfigFileName = "metadata.json"
 
 type Config struct {
 	Database string `json:"database"`
-	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default), "postgres", "mysql", or "sqlite". Read via GetBackend().
+	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default), "postgres", "mysql", "sqlite", or "flatfile". Read via GetBackend().
 
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
@@ -215,6 +215,7 @@ const (
 	BackendPostgres = "postgres"
 	BackendMySQL    = "mysql"
 	BackendSQLite   = "sqlite"
+	BackendFlatfile = "flatfile"
 )
 
 // BackendCapabilities describes behavioral constraints for a storage backend.
@@ -232,9 +233,13 @@ type BackendCapabilities struct {
 }
 
 // CapabilitiesForBackend returns capabilities for a backend string.
-// Dolt is the only supported backend. Returns SingleProcessOnly=true by default;
-// use Config.GetCapabilities() to properly handle server mode.
-func CapabilitiesForBackend(_ string) BackendCapabilities {
+// Returns SingleProcessOnly=true for embedded dolt, false for flatfile
+// (which uses filesystem for concurrency). Use Config.GetCapabilities()
+// to properly handle server mode.
+func CapabilitiesForBackend(backend string) BackendCapabilities {
+	if backend == BackendFlatfile {
+		return BackendCapabilities{SingleProcessOnly: false}
+	}
 	return BackendCapabilities{SingleProcessOnly: true}
 }
 
@@ -250,9 +255,9 @@ func (c *Config) GetCapabilities() BackendCapabilities {
 }
 
 // GetBackend returns the configured storage backend. Only the explicitly-allowlisted
-// non-default backends ("postgres", "mysql") are honored; "", "dolt", and any legacy
-// or unknown value resolve to dolt so the default path stays byte-identical and a
-// typo fails safe to Dolt.
+// non-default backends ("postgres", "mysql", "sqlite", "flatfile") are honored; "", "dolt",
+// and any legacy or unknown value resolve to dolt so the default path stays byte-identical
+// and a typo fails safe to Dolt.
 func (c *Config) GetBackend() string {
 	if c != nil {
 		switch c.Backend {
@@ -262,6 +267,8 @@ func (c *Config) GetBackend() string {
 			return BackendMySQL
 		case BackendSQLite:
 			return BackendSQLite
+		case BackendFlatfile:
+			return BackendFlatfile
 		}
 	}
 	return BackendDolt

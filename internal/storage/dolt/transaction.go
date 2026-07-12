@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -308,34 +309,35 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 	if query != "" {
 		lowerQuery := strings.ToLower(query)
 		if looksLikeIssueID(query) {
+			// ID-shaped queries cannot contain LIKE specials, so no escaping.
 			whereClauses = append(whereClauses, "(id = ? OR id LIKE ? OR LOWER(title) LIKE ?)")
 			args = append(args, lowerQuery, lowerQuery+"%", "%"+lowerQuery+"%")
 		} else {
-			whereClauses = append(whereClauses, "(LOWER(title) LIKE ? OR id LIKE ?)")
-			pattern := "%" + lowerQuery + "%"
+			whereClauses = append(whereClauses, "(LOWER(title) LIKE ?"+sqlbuild.LikeEscape+" OR id LIKE ?"+sqlbuild.LikeEscape+")")
+			pattern := "%" + sqlbuild.EscapeLikePattern(lowerQuery) + "%"
 			args = append(args, pattern, pattern)
 		}
 	}
 
 	if filter.TitleSearch != "" {
-		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.TitleSearch)+"%")
+		whereClauses = append(whereClauses, "LOWER(title) LIKE ?"+sqlbuild.LikeEscape)
+		args = append(args, "%"+sqlbuild.EscapeLikePattern(strings.ToLower(filter.TitleSearch))+"%")
 	}
 	if filter.TitleContains != "" {
-		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.TitleContains)+"%")
+		whereClauses = append(whereClauses, "LOWER(title) LIKE ?"+sqlbuild.LikeEscape)
+		args = append(args, "%"+sqlbuild.EscapeLikePattern(strings.ToLower(filter.TitleContains))+"%")
 	}
 	if filter.DescriptionContains != "" {
-		whereClauses = append(whereClauses, "LOWER(description) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.DescriptionContains)+"%")
+		whereClauses = append(whereClauses, "LOWER(description) LIKE ?"+sqlbuild.LikeEscape)
+		args = append(args, "%"+sqlbuild.EscapeLikePattern(strings.ToLower(filter.DescriptionContains))+"%")
 	}
 	if filter.NotesContains != "" {
-		whereClauses = append(whereClauses, "LOWER(notes) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.NotesContains)+"%")
+		whereClauses = append(whereClauses, "LOWER(notes) LIKE ?"+sqlbuild.LikeEscape)
+		args = append(args, "%"+sqlbuild.EscapeLikePattern(strings.ToLower(filter.NotesContains))+"%")
 	}
 	if filter.ExternalRefContains != "" {
-		whereClauses = append(whereClauses, "LOWER(external_ref) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.ExternalRefContains)+"%")
+		whereClauses = append(whereClauses, "LOWER(external_ref) LIKE ?"+sqlbuild.LikeEscape)
+		args = append(args, "%"+sqlbuild.EscapeLikePattern(strings.ToLower(filter.ExternalRefContains))+"%")
 	}
 	if filter.ExternalRef != nil {
 		whereClauses = append(whereClauses, "external_ref = ?")
@@ -477,12 +479,12 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 	}
 
 	if filter.IDPrefix != "" {
-		whereClauses = append(whereClauses, "id LIKE ?")
-		args = append(args, filter.IDPrefix+"%")
+		whereClauses = append(whereClauses, "id LIKE ?"+sqlbuild.LikeEscape)
+		args = append(args, sqlbuild.EscapeLikePattern(filter.IDPrefix)+"%")
 	}
 	if filter.SpecIDPrefix != "" {
-		whereClauses = append(whereClauses, "spec_id LIKE ?")
-		args = append(args, filter.SpecIDPrefix+"%")
+		whereClauses = append(whereClauses, "spec_id LIKE ?"+sqlbuild.LikeEscape)
+		args = append(args, sqlbuild.EscapeLikePattern(filter.SpecIDPrefix)+"%")
 	}
 
 	// Source repo
