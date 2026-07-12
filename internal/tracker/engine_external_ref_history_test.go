@@ -209,6 +209,26 @@ func TestEngineExternalRefChangedAfter_FastPathNotFound(t *testing.T) {
 	}
 }
 
+// Locks the NULL-historical contract: a NULL external_ref column surfaces
+// from PreviousExternalRefInTx as ("", found=true) (see
+// issueops.PreviousExternalRefInTx, internal/storage/issueops/history.go),
+// not as "not found". The fast path must therefore compare it against
+// currentRef like any other value, rather than treating it as an
+// unconditional "changed" the way the old inline !previousRef.Valid check did.
+func TestEngineExternalRefChangedAfter_FastPathNullHistoricalRef(t *testing.T) {
+	querier := &historyQuerierStore{prevRef: "", prevFound: true}
+	e := &Engine{Store: querier}
+	local := newTestIssue("bd-1", time.Now(), time.Now())
+
+	changed, err := e.externalRefChangedAfter(context.Background(), local, "", time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if changed {
+		t.Error("expected changed=false: NULL historical ref (\"\", found=true) compared equal to an empty currentRef")
+	}
+}
+
 func TestEngineExternalRefChangedAfter_FastPathPropagatesError(t *testing.T) {
 	wantErr := errors.New("boom")
 	querier := &historyQuerierStore{prevErr: wantErr}
