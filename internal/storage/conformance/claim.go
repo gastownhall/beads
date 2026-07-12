@@ -95,6 +95,67 @@ func testClaimReadyIssue(t *testing.T, f Factory) {
 	}
 }
 
+// testClaimReadyIssueLabelFilters: the claim path is FENCED by the label filters it is
+// given. --label-any (LabelsAny, OR-set) used to be dropped on the ready/claim path, so a
+// worker asking for its own lane could atomically claim another lane's work while
+// believing it was fenced. Asserts the OR-set works alone, AND-combines with the Labels
+// AND-set and with --parent, and — the safety property — that an exhausted filter claims
+// NOTHING rather than falling back to unfenced ready work.
+func testClaimReadyIssueLabelFilters(t *testing.T, f Factory) {
+	s := f(t)
+	// clf-free is unlabeled and top-priority: it wins any claim whose label filter was
+	// dropped, so every assertion below doubles as a check that the filter was applied.
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "clf-free", Title: "unfenced", Priority: 0}), "a"))
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "clf-p.1", Title: "other lane", Priority: 1}), "a"))
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "clf-p.2", Title: "my lane", Priority: 3}), "a"))
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "clf-x", Title: "my lane, other parent", Priority: 2}), "a"))
+	must(t, s.AddLabel(ctx(), "clf-p.1", "lane-b", "a"))
+	must(t, s.AddLabel(ctx(), "clf-p.2", "lane-a", "a"))
+	must(t, s.AddLabel(ctx(), "clf-p.2", "tier:opus", "a"))
+	must(t, s.AddLabel(ctx(), "clf-x", "lane-a", "a"))
+
+	claim := func(filter types.WorkFilter) *types.Issue {
+		t.Helper()
+		claimed, err := s.ClaimReadyIssue(ctx(), filter, "worker")
+		must(t, err)
+		return claimed
+	}
+	parent := "clf-p"
+
+	// --label-any + --parent: the only child carrying lane-a, even though clf-p.1 is the
+	// higher-priority child and clf-x is the higher-priority lane-a issue.
+	got := claim(types.WorkFilter{LabelsAny: []string{"lane-a", "lane-c"}, ParentID: &parent})
+	if got == nil || got.ID != "clf-p.2" {
+		t.Fatalf("claim(--label-any lane-a,lane-c --parent clf-p) = %v, want clf-p.2", issueID(got))
+	}
+
+	// AND-set + OR-set: the AND-set is unsatisfiable, so nothing is claimable — an
+	// unfenced claim would take clf-free.
+	if got := claim(types.WorkFilter{Labels: []string{"tier:nobody"}, LabelsAny: []string{"lane-a"}}); got != nil {
+		t.Errorf("claim(--label tier:nobody --label-any lane-a) = %v, want no claim", issueID(got))
+	}
+
+	// --label-any alone still fences: clf-x, not the unlabeled higher-priority clf-free.
+	if got := claim(types.WorkFilter{LabelsAny: []string{"lane-a"}}); got == nil || got.ID != "clf-x" {
+		t.Fatalf("claim(--label-any lane-a) = %v, want clf-x", issueID(got))
+	}
+
+	// Lane exhausted: claim NOTHING rather than falling back to the unfenced clf-free.
+	if got := claim(types.WorkFilter{LabelsAny: []string{"lane-a"}}); got != nil {
+		t.Errorf("claim(--label-any lane-a) with the lane exhausted = %v, want no claim", issueID(got))
+	}
+	if got := claim(types.WorkFilter{}); got == nil || got.ID != "clf-free" {
+		t.Errorf("unfiltered claim = %v, want clf-free (it must still be claimable)", issueID(got))
+	}
+}
+
+func issueID(i *types.Issue) string {
+	if i == nil {
+		return "<nil>"
+	}
+	return i.ID
+}
+
 // requireMultiWriter skips the caller unless the backend backs concurrent writers on
 // separate connections. Postgres and MySQL use a multi-connection pool; SQLite pins its
 // pool to a single connection (sqliteDialect.Open sets MaxOpenConns(1)) and embedded-Dolt

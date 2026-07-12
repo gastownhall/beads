@@ -685,8 +685,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		}
 
 		// Always create local .beads/ when using default location (CWD/.beads).
-		// The local directory is needed for metadata.json, config.yaml, .gitignore,
-		// interactions.jsonl, and hooks — regardless of where dolt data lives.
+		// The local directory is needed for metadata.json, config.yaml,
+		// .gitignore, and hooks — regardless of where dolt data lives.
 		// Only skip when BEADS_DIR explicitly points outside the project.
 		//
 		// Previous logic only created .beads/ when the dolt data dir was a
@@ -775,15 +775,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				}
 			}
 
-			// Ensure interactions.jsonl exists (append-only agent audit log)
-			interactionsPath := filepath.Join(beadsDir, "interactions.jsonl")
-			if _, err := os.Stat(interactionsPath); os.IsNotExist(err) {
-				// nolint:gosec // G306: JSONL file needs to be readable by other tools
-				if err := os.WriteFile(interactionsPath, []byte{}, 0644); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to create interactions.jsonl: %v\n", err)
-					// Non-fatal - continue anyway
-				}
-			}
 		}
 
 		// Ensure git is initialized — bd requires git for role config, sync branches,
