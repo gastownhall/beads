@@ -546,6 +546,9 @@ Garbage collect old or abandoned wisps from the database.
 
 A wisp is considered abandoned if:
   - It hasn't been updated in --age duration and is not closed
+  - AND it is not active: blocked steps (waiting on a dependency) and
+    in-progress/hooked steps are live molecule work and are never reclaimed
+    by age, no matter how long they have been waiting (GH#4394).
 
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
