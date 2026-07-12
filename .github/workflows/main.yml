@@ -890,7 +890,9 @@ jobs:
         # Conformance suite (conformance.RunAll via TestConformance) against
         # the embedded Dolt backend, split from test-embedded-storage so each
         # job stays well under its timeout - same structure as pr-risk.yml.
-        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=15m -test.run '^TestConformance$'
+        # 30m matches the repo's integration timeout: the audit suite is large and
+        # embedded Dolt under -race is slow, so 15m no longer left headroom.
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.run '^TestConformance$'
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})

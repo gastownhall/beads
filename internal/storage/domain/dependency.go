@@ -2,12 +2,31 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// DependencyTypeConflictError is returned when an edge already exists between
+// the same pair with a DIFFERENT type. Its message is byte-identical to the
+// embedded issueops path (issueops/dependencies.go) so `bd dep add` surfaces
+// the same user-facing retype error on the domain/db seam as on the embedded
+// store. It is a typed error so the use-case can pass it through
+// unwrapped instead of burying it under an "add dep: insert:" prefix.
+type DependencyTypeConflictError struct {
+	IssueID       string
+	DependsOnID   string
+	ExistingType  string
+	RequestedType string
+}
+
+func (e *DependencyTypeConflictError) Error() string {
+	return fmt.Sprintf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
+		e.IssueID, e.DependsOnID, e.ExistingType, e.RequestedType)
+}
 
 type DepDirection int
 
@@ -149,17 +168,35 @@ func (u *dependencyUseCaseImpl) add(ctx context.Context, dep *types.Dependency, 
 		return fmt.Errorf("add dep: IssueID and DependsOnID must be non-empty")
 	}
 
+	// Self-dependency guard mirrors issueops.CheckDependencyCycleInTx: it is
+	// checked BEFORE the cycle probe and for ALL dep types, and emits the
+	// dedicated self-dep message. A blocking self-edge otherwise trips HasCycle
+	// and would report the wrong (cycle) error (#4547 F-1).
+	if dep.IssueID == dep.DependsOnID {
+		return fmt.Errorf("cannot add self-dependency: %s cannot depend on itself", dep.IssueID)
+	}
+
 	if isBlockingDep(dep.Type) {
 		cycle, err := u.depRepo.HasCycle(ctx, dep.IssueID, dep.DependsOnID)
 		if err != nil {
 			return fmt.Errorf("add dep: cycle check: %w", err)
 		}
 		if cycle {
-			return fmt.Errorf("add dep: adding %s -> %s would create a cycle", dep.IssueID, dep.DependsOnID)
+			// Match the embedded store's user-facing wording verbatim (no ids
+			// prefix) so gc code that string-matches this error behaves the same
+			// on both plumbings (#4547 F-1).
+			return fmt.Errorf("adding dependency would create a cycle")
 		}
 	}
 
 	if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
+		// The retype conflict is a user-facing error whose message already
+		// matches embedded verbatim; pass it through unwrapped so the CLI does
+		// not prepend "add dep: insert:" (#4547 F-1).
+		var conflict *DependencyTypeConflictError
+		if errors.As(err, &conflict) {
+			return err
+		}
 		return fmt.Errorf("add dep: insert: %w", err)
 	}
 	return nil

@@ -116,10 +116,16 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 	now := time.Now().UTC()
 	leaseClause, leaseArgs := leaseSetClause(now, leaseTTL(ctx))
 
+	// Stamp updated_at = now on the heartbeat. On Dolt/MySQL the issues/wisps
+	// ON UPDATE CURRENT_TIMESTAMP trigger bumps updated_at on every heartbeat;
+	// Postgres and SQLite have no such trigger, so without an explicit stamp an
+	// actively-heartbeated issue keeps a stale updated_at and bd stale (which
+	// filters in_progress rows on updated_at < cutoff) diverges from the Dolt
+	// oracle. Claim already stamps updated_at explicitly, so this is heartbeat-only.
 	args := append([]interface{}{}, leaseArgs...)
-	args = append(args, id, actor)
+	args = append(args, now, id, actor)
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		UPDATE %s SET %s
+		UPDATE %s SET %s, updated_at = ?
 		WHERE id = ? AND status = 'in_progress' AND assignee = ?
 	`, issueTable, leaseClause), args...)
 	if err != nil {

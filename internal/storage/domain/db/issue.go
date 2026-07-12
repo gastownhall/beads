@@ -91,8 +91,30 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		return nil
 	}
 
-	setClauses := make([]string, 0, len(updates))
-	args := make([]any, 0, len(updates)+1)
+	table := pickIssueTable(opts.UseWispsTable)
+
+	_, statusChanging := updates["status"]
+
+	// When the status changes we need the prior row to reproduce the embedded
+	// lifecycle side effects (issueops.updateIssueInTx): closed_at is set on
+	// close and cleared on reopen, started_at is set on the in_progress
+	// transition, the audit event type is derived from the transition, and
+	// is_blocked is recomputed for neighbors. Read the full old issue once so
+	// all four use the same snapshot; the ErrNoRows contract is preserved.
+	var oldIssue *types.Issue
+	if statusChanging {
+		var err error
+		oldIssue, err = r.Get(ctx, id, opts)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
+			}
+			return fmt.Errorf("db: Update %s: read old issue: %w", id, err)
+		}
+	}
+
+	setClauses := make([]string, 0, len(updates)+3)
+	args := make([]any, 0, len(updates)+4)
 	for key, value := range updates {
 		if _, ok := allowedUpdateFields[key]; !ok {
 			return fmt.Errorf("db: Update: field %q is not allowed", key)
@@ -106,23 +128,16 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	}
 	setClauses = append(setClauses, "updated_at = ?")
 	args = append(args, time.Now().UTC())
-	args = append(args, id)
 
-	table := pickIssueTable(opts.UseWispsTable)
-
-	var oldStatus types.Status
-	_, statusChanging := updates["status"]
+	// Lifecycle parity with issueops.updateIssueInTx: auto-manage closed_at and
+	// started_at from the status transition unless the caller set them
+	// explicitly. Both helpers no-op when the status is unchanged.
 	if statusChanging {
-		//nolint:gosec // G201: table is one of two hardcoded constants
-		if err := r.runner.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT status FROM %s WHERE id = ?", table), id,
-		).Scan(&oldStatus); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
-			}
-			return fmt.Errorf("db: Update %s: read old status: %w", id, err)
-		}
+		setClauses, args = issueops.ManageClosedAt(oldIssue, updates, setClauses, args)
+		setClauses, args = issueops.ManageStartedAt(oldIssue, updates, setClauses, args)
 	}
+
+	args = append(args, id)
 
 	//nolint:gosec // G201: table is one of two hardcoded constants
 	q := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?", table, strings.Join(setClauses, ", "))
@@ -138,9 +153,16 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
 	}
 
+	// Event-type parity: embedded records EventClosed / EventReopened /
+	// EventStatusChanged for status transitions (issueops.DetermineEventType),
+	// EventUpdated otherwise.
+	eventType := types.EventUpdated
+	if statusChanging {
+		eventType = issueops.DetermineEventType(oldIssue, updates)
+	}
 	if err := r.events.Record(ctx, domain.Event{
 		IssueID: id,
-		Type:    types.EventUpdated,
+		Type:    eventType,
 		Actor:   actor,
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return err
@@ -148,7 +170,7 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 
 	if statusChanging {
 		newStatus := coerceStatus(updates["status"])
-		oldActive := oldStatus != types.StatusClosed && oldStatus != types.StatusPinned
+		oldActive := oldIssue.Status != types.StatusClosed && oldIssue.Status != types.StatusPinned
 		newActive := newStatus != types.StatusClosed && newStatus != types.StatusPinned
 		if oldActive != newActive {
 			var (

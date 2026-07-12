@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,6 +31,19 @@ func TestBuildProxiedServerClientInfo(t *testing.T) {
 		require.NotNil(t, info)
 		assert.Equal(t, 5*time.Minute, info.IdleTimeout)
 		assert.Zero(t, info.Port)
+	})
+
+	t.Run("never sentinel is persisted and survives a round-trip", func(t *testing.T) {
+		dir := t.TempDir()
+		info, err := buildProxiedServerClientInfo("", "", "", 0, proxy.IdleTimeoutNever, nil)
+		require.NoError(t, err)
+		require.NotNil(t, info)
+		assert.Equal(t, proxy.IdleTimeoutNever, info.IdleTimeout)
+		require.NoError(t, configfile.SaveProxiedServerClientInfo(dir, info))
+		loaded, err := configfile.LoadProxiedServerClientInfo(dir)
+		require.NoError(t, err)
+		require.NotNil(t, loaded)
+		assert.Equal(t, proxy.IdleTimeoutNever, loaded.IdleTimeout)
 	})
 
 	t.Run("port and idle timeout survive a round-trip via SaveProxiedServerClientInfo", func(t *testing.T) {

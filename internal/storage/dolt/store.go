@@ -252,6 +252,14 @@ type Config struct {
 	// metadata.json dolt_mode=proxied-server.
 	ProxiedServer bool
 
+	// Gateway indicates the server is an authenticating gateway server: a credential
+	// command supplies a short-lived token as the connection username. bd treats such a
+	// server as owning database routing and schema, so it connects with the project
+	// database, skips the no-database admin probe, and never issues SHOW DATABASES /
+	// CREATE DATABASE or schema DDL (drift check only, like ReadOnly). Set by
+	// ApplyGatewayCredential, never by hand.
+	Gateway bool
+
 	// AutoStart enables transparent server auto-start when connection fails.
 	// When true and the host is localhost, bd will start a dolt sql-server
 	// automatically if one isn't running. Disabled under orchestrator (GT_ROOT set).
@@ -1207,7 +1215,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	if err := schema.CheckForwardDrift(ctx, db); err != nil {
 		return nil, err
 	}
-	if !cfg.ReadOnly {
+	// A gateway server owns the schema: it provisions each project at its deployed bd
+	// version, so a client must never run migrations (DDL) against it. Treat it like
+	// ReadOnly for schema — the forward-drift guard above still protects a stale client
+	// binary.
+	if !cfg.ReadOnly && !cfg.Gateway {
 		if err := store.initSchema(ctx); err != nil {
 			return nil, fmt.Errorf("failed to initialize schema: %w", err)
 		}
@@ -1465,6 +1477,20 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 			_ = db.Close()
 		}
 	}()
+
+	// A gateway server owns database routing and existence, so bd does not probe or create
+	// it: skip the no-database admin connection (and the SHOW DATABASES / CREATE DATABASE
+	// it would run) and verify the project connection directly — a successful connect IS
+	// the existence proof. connReady must be set before returning the pool, or the defer
+	// above would close the *sql.DB we just handed the caller.
+	if cfg.Gateway {
+		if err := db.PingContext(ctx); err != nil {
+			return nil, "", fmt.Errorf("failed to connect to gateway server %s:%d (database %q): %w",
+				cfg.ServerHost, cfg.ServerPort, cfg.Database, err)
+		}
+		connReady = true
+		return db, connStr, nil
+	}
 
 	// Ensure database exists (may need to create it)
 	// First connect without database to create it
@@ -3002,7 +3028,8 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 
 // autoResolveConflictsAfterCLIPull inspects the working set and auto-resolves the
 // conflict classes that are safe without operator input (#4259 audit-only dependency
-// edges, GH#2466 metadata). It runs on a connection from the store pool (s.db) on
+// edges, GH#2466 metadata, GH#4698 issues-table LWW). It runs on a connection from
+// the store pool (s.db) on
 // purpose: those connections are on the same branch the CLI `dolt pull` merged into,
 // whereas a separately opened connection would default to the base branch and never
 // see the conflicts. The pull's
@@ -3077,8 +3104,9 @@ func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool,
 // tryAutoResolveMergeConflicts auto-resolves merge conflicts that are safe to
 // resolve without operator input (GH#2466 metadata, #4259 audit-only
 // dependency edges, bd-6dnrw.29 schema_migrations vintage rows, GH#2474
-// convergent kv.memory.* config rows), returning
-// (true, nil) only if ALL conflicts were resolved. The implementation is
+// convergent kv.memory.* config rows, GH#4698 issues-table LWW by updated_at),
+// returning (true, nil) only if ALL conflicts were resolved. The
+// implementation is
 // shared with the embedded pull path (bd-6dnrw.40); see
 // versioncontrolops.TryAutoResolveMergeConflicts for the full contract.
 func (s *DoltStore) tryAutoResolveMergeConflicts(ctx context.Context, tx *sql.Tx) (bool, error) {

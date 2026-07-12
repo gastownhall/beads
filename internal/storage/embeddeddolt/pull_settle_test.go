@@ -293,7 +293,10 @@ func TestEmbeddedMergeAndSettleReportsOperatorConflicts(t *testing.T) {
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH('opcpeer', 'HEAD')"); err != nil {
 		t.Fatalf("create peer branch: %v", err)
 	}
-	if _, err := conn.ExecContext(ctx, "UPDATE issues SET title = 'ours' WHERE id = 'opc-1'"); err != nil {
+	// Pin both updates to the same timestamp so the issues LWW resolver
+	// declines this semantic conflict as ambiguous. Automatic timestamps make
+	// this test timing-dependent: if they differ, the resolver may settle it.
+	if _, err := conn.ExecContext(ctx, "UPDATE issues SET title = 'ours', updated_at = '2026-01-01 00:00:00' WHERE id = 'opc-1'"); err != nil {
 		t.Fatalf("retitle on main: %v", err)
 	}
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'retitle ours')"); err != nil {
@@ -302,7 +305,7 @@ func TestEmbeddedMergeAndSettleReportsOperatorConflicts(t *testing.T) {
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT('opcpeer')"); err != nil {
 		t.Fatalf("checkout peer: %v", err)
 	}
-	if _, err := conn.ExecContext(ctx, "UPDATE issues SET title = 'theirs' WHERE id = 'opc-1'"); err != nil {
+	if _, err := conn.ExecContext(ctx, "UPDATE issues SET title = 'theirs', updated_at = '2026-01-01 00:00:00' WHERE id = 'opc-1'"); err != nil {
 		t.Fatalf("retitle on peer: %v", err)
 	}
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'retitle theirs')"); err != nil {

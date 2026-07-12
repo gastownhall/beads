@@ -36,7 +36,8 @@ Recipes define where beads workflow instructions are written. Built-in recipes
 include cursor, claude, copilot, gemini, aider, factory, codex, mux, opencode, junie, windsurf, cody, and kilocode.
 
 Examples:
-  bd setup cursor          # Install Cursor IDE integration
+  bd setup cursor          # Install Cursor IDE integration (rules + agent hooks)
+  bd setup cursor --global # Install global Cursor hooks (~/.cursor/hooks.json)
   bd setup codex           # Install Codex skill + AGENTS.md guidance + native hooks
   bd setup codex --global  # Install global Codex skill + guidance + native hooks
   bd setup copilot         # Install Copilot CLI plugin + repository instructions
@@ -319,11 +320,11 @@ func translateSetupError(err error) error {
 func runCursorRecipe() error {
 	switch {
 	case setupCheck:
-		return translateSetupError(setup.CheckCursor())
+		return translateSetupError(setup.CheckCursor(setupGlobal))
 	case setupRemove:
-		return translateSetupError(setup.RemoveCursor())
+		return translateSetupError(setup.RemoveCursor(setupGlobal))
 	default:
-		return translateSetupError(setup.InstallCursor())
+		return translateSetupError(setup.InstallCursor(setupGlobal))
 	}
 }
 
@@ -426,7 +427,7 @@ func init() {
 	setupCmd.Flags().BoolVar(&setupCheck, "check", false, "Check if integration is installed")
 	setupCmd.Flags().BoolVar(&setupRemove, "remove", false, "Remove the integration")
 	setupCmd.Flags().BoolVar(&setupProject, "project", false, "Install for this project only (gemini/mux)")
-	setupCmd.Flags().BoolVar(&setupGlobal, "global", false, "Install globally (claude/codex/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, or ~/.mux/AGENTS.md)")
+	setupCmd.Flags().BoolVar(&setupGlobal, "global", false, "Install globally (claude/codex/cursor/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, ~/.cursor/hooks.json, or ~/.mux/AGENTS.md)")
 	setupCmd.Flags().BoolVar(&setupStealth, "stealth", false, "Use stealth mode (claude/gemini)")
 
 	rootCmd.AddCommand(setupCmd)

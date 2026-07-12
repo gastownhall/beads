@@ -193,7 +193,9 @@ jobs:
         # Conformance suite (conformance.RunAll via TestConformance) against the
         # embedded Dolt backend. Split from test-embedded-storage so each job
         # stays well under its timeout; the server twin runs in mybd-665b's job.
-        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=15m -test.run '^TestConformance$'
+        # 30m matches the repo's integration timeout: the audit suite is large and
+        # embedded Dolt under -race is slow, so 15m no longer left headroom.
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.run '^TestConformance$'
 
   test-server-storage:
     name: Test (Server Dolt Conformance)

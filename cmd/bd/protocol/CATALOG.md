@@ -1,14 +1,12 @@
 # bd contract corpus — producer catalog
 
-This package is the **producer** half of the Beads ↔ Gas City cross-version
-contract-test system. It pins the `bd` `--json` wire surface that Gas City's
-`gc` binary decodes, by generating a canonicalized golden-JSON **corpus** under
-`testdata/corpus/` and failing CI on any unreviewed change to it.
+This package is the **producer** half of the Beads ↔ consumer cross-version
+contract-test system. It pins the `bd` `--json` wire surface that a downstream
+consumer's decoder consumes, by generating a canonicalized golden-JSON **corpus**
+under `testdata/corpus/` and failing CI on any unreviewed change to it.
 
-Gas City vendors this corpus and replays it against its own decoder, so a `bd`
-release can never silently change a wire shape that `gc` parses. See the full
-design at `engdocs/design/beads-gascity-contract-test-system.md` in the gascity
-repo.
+A downstream consumer vendors this corpus and replays it against its own decoder,
+so a `bd` release can never silently change a wire shape the consumer parses.
 
 ## How it works
 
@@ -26,8 +24,8 @@ repo.
 
 Regenerate after any deliberate wire change: `make corpus-regen`, review the
 diff, **and bump `JSONSchemaVersion` (`cmd/bd/output.go`)** — the `schema_version`
-field in every blob is the coordination canary Gas City keys its pinned-decoder
-migration off.
+field in every blob is the coordination canary a downstream consumer keys its
+pinned-decoder migration off.
 
 ## Coverage
 
@@ -50,7 +48,7 @@ migration off.
 ## Known gaps (tracked, not silent)
 
 - `bd sql` is **not supported in embedded mode** (this harness's mode), so it is
-  not in the corpus. Gas City's ready-projection enrichment depends on `bd sql`
+  not in the corpus. A downstream consumer's ready-projection enrichment depends on `bd sql`
   against a managed Dolt server; covering it needs a server-mode generation path.
 - The `error` blob pins the not-found envelope; other error classifiers
   (claim-conflict, silent-fallback auto-import, `bd sql` unsupported) are

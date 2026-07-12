@@ -29,7 +29,7 @@ reimplementing the use case in a smaller design.
 ## Orchestration Boundary
 
 Beads should not know about orchestration layers built on top of it. Systems
-such as Gastown, Gas City, schedulers, swarms, release coordinators, and future
+such as schedulers, swarms, release coordinators, and future
 workflow engines may use beads, but beads should not encode their concepts in
 core.
 

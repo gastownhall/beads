@@ -185,8 +185,12 @@ func countByColumnInTx(ctx context.Context, tx *sql.Tx, filter types.IssueFilter
 	if len(clauses) > 0 {
 		whereSQL = " WHERE " + strings.Join(clauses, " AND ")
 	}
+	// CAST the group column to text before COALESCE so an integer column (priority)
+	// COALESCEs with '' consistently. MySQL/Dolt coerce int->text implicitly, but
+	// Postgres rejects COALESCE(integer, '') (22P02); CAST(... AS CHAR) is portable
+	// (pgdialect -> ::text, native on MySQL/SQLite) and byte-identical on every backend.
 	//nolint:gosec // G201: tables.Main hardcoded; col validated by caller
-	query := fmt.Sprintf("SELECT COALESCE(%s, ''), COUNT(*) FROM %s%s GROUP BY %s", col, tables.Main, whereSQL, col)
+	query := fmt.Sprintf("SELECT COALESCE(CAST(%s AS CHAR), ''), COUNT(*) FROM %s%s GROUP BY %s", col, tables.Main, whereSQL, col)
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("count by column %s: %w", col, err)

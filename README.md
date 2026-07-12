@@ -94,11 +94,15 @@ npm install -g @beads/bd     # Node.js users
 
 **Requirements:** macOS, Linux, Windows, or FreeBSD. See [docs/INSTALLING.md](docs/INSTALLING.md) for complete installation guide.
 
-**Upgrading?** Replacing the binary is not always the whole story: releases can
-carry schema migrations, and a database that syncs to a Dolt remote must be
-migrated by exactly one designated clone. Back up first (`bd export --all`),
-then follow the [upgrade guide](https://gastownhall.github.io/beads/docs/getting-started/upgrading)
-(also summarized in [docs/INSTALLING.md](docs/INSTALLING.md#updating-bd)).
+**Upgrading?** Replacing the binary is not always the whole story. Short
+version: sync remote-backed databases with your current `bd`, back up with
+`bd export --all`, upgrade the binary, then run `bd info --whats-new`,
+`bd hooks install`, and `bd version`. If the upgrade crosses a schema
+migration on a remote-backed database, exactly one designated clone runs
+`bd migrate --force` and `bd dolt push`; other clones install the new binary
+and run `bd bootstrap`. See the full
+[upgrade guide](https://gastownhall.github.io/beads/docs/getting-started/upgrading)
+or [docs/INSTALLING.md](docs/INSTALLING.md#updating-bd).
 
 ### Security And Verification
 
@@ -197,6 +201,10 @@ bd backup restore --force /path/to/backup
 
 See [docs/DOLT.md](docs/DOLT.md#migrating-between-backends) for full
 migration instructions.
+
+Prefer a different database? [docs/STORAGE-BACKENDS.md](docs/STORAGE-BACKENDS.md)
+covers running `bd` on Postgres, MySQL, or SQLite. Dolt stays the default and the
+only backend with history.
 
 `bd export` and `.beads/issues.jsonl` are issue-table exports. They are useful
 for review, migration, and interoperability, but they do not capture Dolt

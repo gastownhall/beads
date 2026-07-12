@@ -26,7 +26,7 @@ func NewDoltServerUOWProvider(
 	proxyPort int,
 	idleTimeout time.Duration,
 ) (UnitOfWorkProvider, error) {
-	if idleTimeout <= 0 {
+	if idleTimeout == 0 {
 		idleTimeout = defaultProxyIdleTimeout
 	}
 	if database == "" {

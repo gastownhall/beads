@@ -227,7 +227,7 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, lock *util.Lock) (*e
 
 	idleTimeout := opts.IdleTimeout
 	if idleTimeout < 0 {
-		idleTimeout = 0
+		idleTimeout = IdleTimeoutNever
 	}
 
 	args := []string{

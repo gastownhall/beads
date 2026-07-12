@@ -1,7 +1,7 @@
 // repro-dolt-prod-timeouts runs production-shaped bd CLI timeout scenarios.
 //
 // It initializes a real server-mode beads workspace, bulk-loads a graph that
-// mirrors maintainer-city's skew (large mostly-closed issue table, large
+// mirrors a large production deployment's skew (large mostly-closed issue table, large
 // dependency table, small active frontier), then forks actual bd commands.
 //
 // Usage:
@@ -448,10 +448,10 @@ func insertIssues(ctx context.Context, db *sql.DB, count, depOps, chainDepth int
 				status = "open"
 			}
 			if i < 40 {
-				assignee = "gascity--control-dispatcher"
+				assignee = "example-org--control-dispatcher"
 			}
 			if i >= 40 && i < 80 {
-				metadata = `{"gc.routed_to":"gascity/control-dispatcher"}`
+				metadata = `{"route.routed_to":"example-org/control-dispatcher"}`
 			}
 			if i >= count {
 				status = "open"
@@ -610,9 +610,9 @@ func runReadyScenario(ctx context.Context, cfg config, ws *workspace) []opResult
 	jobs := make([]job, 0, cfg.Ops)
 	for i := 0; i < cfg.Ops; i++ {
 		if i%2 == 0 {
-			jobs = append(jobs, job{Kind: "ready", Argv: []string{"ready", "--assignee=gascity--control-dispatcher", "--json", "--limit=20"}})
+			jobs = append(jobs, job{Kind: "ready", Argv: []string{"ready", "--assignee=example-org--control-dispatcher", "--json", "--limit=20"}})
 		} else {
-			jobs = append(jobs, job{Kind: "ready", Argv: []string{"ready", "--metadata-field", "gc.routed_to=gascity/control-dispatcher", "--unassigned", "--json", "--limit=20"}})
+			jobs = append(jobs, job{Kind: "ready", Argv: []string{"ready", "--metadata-field", "route.routed_to=example-org/control-dispatcher", "--unassigned", "--json", "--limit=20"}})
 		}
 	}
 	return runJobs(ctx, cfg, ws, jobs)
@@ -875,9 +875,9 @@ func mixedBackgroundJobs(count int) []job {
 		case 0:
 			jobs = append(jobs, job{Kind: "session-ready", Argv: []string{"ready", "--include-ephemeral", "--assignee=" + sessionAssignee(i), "--json", "--limit=1"}})
 		case 1:
-			jobs = append(jobs, job{Kind: "control-ready", Argv: []string{"--readonly", "--sandbox", "ready", "--include-ephemeral", "--assignee=gascity--control-dispatcher", "--json", "--limit=20"}})
+			jobs = append(jobs, job{Kind: "control-ready", Argv: []string{"--readonly", "--sandbox", "ready", "--include-ephemeral", "--assignee=example-org--control-dispatcher", "--json", "--limit=20"}})
 		case 2:
-			jobs = append(jobs, job{Kind: "route-ready", Argv: []string{"--readonly", "--sandbox", "ready", "--include-ephemeral", "--metadata-field", "gc.routed_to=gascity/control-dispatcher", "--unassigned", "--json", "--limit=20"}})
+			jobs = append(jobs, job{Kind: "route-ready", Argv: []string{"--readonly", "--sandbox", "ready", "--include-ephemeral", "--metadata-field", "route.routed_to=example-org/control-dispatcher", "--unassigned", "--json", "--limit=20"}})
 		case 3:
 			jobs = append(jobs, job{Kind: "show", Argv: []string{"show", fmt.Sprintf("perf-%06d", i%350), "--json"}})
 		case 4:
@@ -915,8 +915,8 @@ func controlQueryJobs(count int) []job {
 		legacy  string
 	}{
 		{target: "control-dispatcher", session: "control-dispatcher", legacy: "workflow-control"},
-		{target: "gascity/control-dispatcher", session: "gascity--control-dispatcher", legacy: "gascity/workflow-control"},
-		{target: "gasworks-gui/control-dispatcher", session: "gasworks-gui--control-dispatcher", legacy: "gasworks-gui/workflow-control"},
+		{target: "example-org/control-dispatcher", session: "example-org--control-dispatcher", legacy: "example-org/workflow-control"},
+		{target: "example-gui/control-dispatcher", session: "example-gui--control-dispatcher", legacy: "example-gui/workflow-control"},
 		{target: "gtest-rig/control-dispatcher", session: "gtest-rig--control-dispatcher", legacy: "gtest-rig/workflow-control"},
 	}
 
@@ -965,8 +965,8 @@ for id in "$GC_CONTROL_SESSION_NAME" "$GC_SESSION_NAME" "$GC_ALIAS" "$GC_CONTROL
     emit_ready "$BD_BIN" --readonly --sandbox ready --assignee="$cand" --json --limit=20 || exit $?
   done
 done
-emit_ready "$BD_BIN" --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=20 || exit $?
-emit_ready "$BD_BIN" --readonly --sandbox ready --metadata-field "gc.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=20 || exit $?
+emit_ready "$BD_BIN" --readonly --sandbox ready --metadata-field "route.routed_to=$GC_CONTROL_TARGET" --unassigned --json --limit=20 || exit $?
+emit_ready "$BD_BIN" --readonly --sandbox ready --metadata-field "route.routed_to=$GC_CONTROL_LEGACY_TARGET" --unassigned --json --limit=20 || exit $?
 [ -s "$tmp" ] && jq -s 'reduce add[] as $item ([]; if any(.[]; .id == $item.id) then . else . + [$item] end)' "$tmp" || printf "[]"
 `
 }

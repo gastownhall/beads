@@ -246,6 +246,27 @@ CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/c
 
 ## Updating bd
 
+Upgrade checklist:
+
+1. With your current `bd`, sync remote-backed databases before installing the
+   new binary:
+   `bd dolt push`
+   `bd dolt pull`
+2. Back up before migration:
+   `bd export --all -o .beads/backup/pre-migrate-$(date +%Y%m%d).jsonl`
+3. Upgrade using the command for your install method below.
+4. After upgrading:
+   `bd info --whats-new`
+   `bd hooks install`
+   `bd version`
+5. If crossing a schema migration on a remote-backed database, only the
+   designated migrator runs:
+   `BD_ALLOW_REMOTE_MIGRATE=1 bd migrate`
+   `bd dolt push`
+
+Other clones should install the new binary and run `bd bootstrap`, not
+independently migrate. For the full procedure, see [Upgrading](/getting-started/upgrading).
+
 ### Quick install script (macOS/Linux/FreeBSD)
 
 ```bash

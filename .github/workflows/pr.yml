@@ -485,7 +485,7 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
         run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
 
-  # Producer-side guard for the Beads<->Gas City contract corpus. Regenerates
+  # Producer-side guard for the Beads<->consumer contract corpus. Regenerates
   # the canonicalized golden corpus from this branch's bd and byte-compares it
   # to the committed testdata/corpus/; an unreviewed wire change is a hard
   # failure (run `make corpus-regen`). The double-run test proves determinism.

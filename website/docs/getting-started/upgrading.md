@@ -19,6 +19,27 @@ bd info --whats-new
 bd info --whats-new --json  # Machine-readable
 ```
 
+## Short Version
+
+1. With your current `bd`, sync remote-backed databases before installing the
+   new binary:
+   `bd dolt push`
+   `bd dolt pull`
+2. Back up before migration:
+   `bd export --all -o .beads/backup/pre-migrate-$(date +%Y%m%d).jsonl`
+3. Upgrade using the command that matches your install method.
+4. After upgrading:
+   `bd info --whats-new`
+   `bd hooks install`
+   `bd version`
+5. If crossing a schema migration on a remote-backed database, only the
+   designated migrator runs:
+   `bd migrate --force`
+   `bd dolt push`
+
+Other clones should install the new binary and run `bd bootstrap`, not
+independently migrate. The full procedure is below.
+
 ## Upgrading
 
 Use the command that matches your install method.

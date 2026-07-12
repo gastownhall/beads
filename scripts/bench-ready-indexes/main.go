@@ -185,7 +185,7 @@ WHERE status IN ('open','in_progress')
 AND (pinned = 0 OR pinned IS NULL)
 AND (ephemeral = 0 OR ephemeral IS NULL)
 AND id IN (SELECT id FROM issues WHERE issue_type NOT IN ('merge-request','gate','molecule','message','agent','role','rig'))
-AND assignee = 'gascity--control-dispatcher'
+AND assignee = 'example-org--control-dispatcher'
 AND (defer_until IS NULL OR defer_until <= UTC_TIMESTAMP())
 ORDER BY priority ASC, created_at DESC, id ASC
 LIMIT 100`,
@@ -199,7 +199,7 @@ AND (ephemeral = 0 OR ephemeral IS NULL)
 AND id IN (SELECT id FROM issues WHERE issue_type NOT IN ('merge-request','gate','molecule','message','agent','role','rig'))
 AND (assignee IS NULL OR assignee = '')
 AND (defer_until IS NULL OR defer_until <= UTC_TIMESTAMP())
-AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."gc.routed_to"')) = 'gascity/control-dispatcher'
+AND JSON_UNQUOTE(JSON_EXTRACT(metadata, '$."route.routed_to"')) = 'example-org/control-dispatcher'
 ORDER BY priority ASC, created_at DESC, id ASC
 LIMIT 100`,
 		},

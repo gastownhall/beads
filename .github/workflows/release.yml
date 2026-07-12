@@ -185,7 +185,7 @@ jobs:
       - name: Publish the contract corpus as a release artifact
         # Ships the canonicalized golden corpus (cmd/bd/protocol/testdata/corpus)
         # with each release and appends its checksum to the release checksums.txt,
-        # so Gas City can anchor its vendored-corpus drift-check to a signed
+        # so a downstream consumer can anchor its vendored-corpus drift-check to a signed
         # beads release rather than a self-recomputed manifest. Runs before the
         # macOS job's serial checksums.txt append (goreleaser-macos needs this
         # job), so the entry is preserved.

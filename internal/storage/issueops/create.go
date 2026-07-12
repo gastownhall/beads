@@ -867,10 +867,14 @@ func ReconcileChildCounters(ctx context.Context, tx *sql.Tx, issues []*types.Iss
 		if err == nil && current >= b.maxChild {
 			continue
 		}
+		// Qualify the existing-row column with the table name. Bare `last_child`
+		// on the update RHS is a valid MySQL "current row value" reference, but
+		// Postgres sees it as ambiguous between the target row and EXCLUDED
+		// (SQLSTATE 42702); table-qualifying it is unambiguous on every backend.
 		//nolint:gosec // G201: table is one of two hardcoded constants.
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (parent_id, last_child) VALUES (?, ?)
-			ON DUPLICATE KEY UPDATE last_child = GREATEST(last_child, ?)
+			INSERT INTO %[1]s (parent_id, last_child) VALUES (?, ?)
+			ON DUPLICATE KEY UPDATE last_child = GREATEST(%[1]s.last_child, ?)
 		`, table), parentID, b.maxChild, b.maxChild); err != nil {
 			return nil, fmt.Errorf("failed to reconcile child counter for %s: %w", parentID, err)
 		}

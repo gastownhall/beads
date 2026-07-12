@@ -168,7 +168,7 @@ test-migration: build
 
 # Regenerate the golden-JSON contract corpus (cmd/bd/protocol/testdata/corpus/).
 # Run after any deliberate bd --json wire change; review the diff, then commit.
-# Gas City vendors this corpus to detect cross-version drift. Needs Docker (Dolt).
+# A downstream consumer vendors this corpus to detect cross-version drift. Needs Docker (Dolt).
 corpus-regen:
 	@echo "Regenerating contract corpus..."
 	go test -tags "$(BUILD_TAGS)" ./cmd/bd/protocol -run TestCorpusGolden -corpus.update -count=1

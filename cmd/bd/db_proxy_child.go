@@ -94,7 +94,7 @@ func newDatabaseServer(backend proxy.Backend, rootDir, configPath, logPath, dolt
 func init() {
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildRoot, "root", "", "root directory holding proxy.lock, proxy.pid, proxy.log")
 	dbProxyChildCmd.Flags().IntVar(&dbProxyChildPort, "port", 0, "port to listen on")
-	dbProxyChildCmd.Flags().DurationVar(&dbProxyChildIdleTimeout, "idle-timeout", 30*time.Second, "idle timeout before shutdown (0 disables)")
+	dbProxyChildCmd.Flags().DurationVar(&dbProxyChildIdleTimeout, "idle-timeout", 0, "idle timeout before shutdown (0 or negative = never shut down)")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildBackend, "backend", "",
 		"backend kind: "+strings.Join(proxy.KnownBackendNames(), " | "))
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildConfig, "config", "", "path to backend server config (e.g. dolt sql-server YAML)")

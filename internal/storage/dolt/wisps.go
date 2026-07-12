@@ -504,7 +504,17 @@ func (s *DoltStore) getWispsByIDs(ctx context.Context, ids []string) ([]*types.I
 		}
 	}
 
-	return issues, nil
+	// getWispsByIDs is fed IDs already ordered by the caller's query (e.g.
+	// ListWisps' priority ASC, created_at DESC), but `WHERE id IN (...)` returns
+	// rows in arbitrary order. Re-emit in the requested ID order so that ordering
+	// survives the two-step fetch.
+	ordered := make([]*types.Issue, 0, len(issues))
+	for _, id := range ids {
+		if issue, ok := issueMap[id]; ok {
+			ordered = append(ordered, issue)
+		}
+	}
+	return ordered, nil
 }
 
 // addWispDependency adds a dependency to the wisp_dependencies table.

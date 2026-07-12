@@ -114,7 +114,7 @@ bd hooks install
 
 ## Git Workflow: PR by Default
 
-Crew workers use a PR-based workflow. Beads is a dependency of Gas City, so we
+Crew workers use a PR-based workflow. Beads is a dependency of a downstream consumer, so we
 defer to the standard PR flow to keep changes reviewable.
 
 - Work on a feature branch, push the branch, open a PR against `main`
