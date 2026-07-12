@@ -3028,7 +3028,8 @@ func (s *DoltStore) finishCLIPull(ctx context.Context, pullErr error) error {
 
 // autoResolveConflictsAfterCLIPull inspects the working set and auto-resolves the
 // conflict classes that are safe without operator input (#4259 audit-only dependency
-// edges, GH#2466 metadata). It runs on a connection from the store pool (s.db) on
+// edges, GH#2466 metadata, GH#4698 issues-table LWW). It runs on a connection from
+// the store pool (s.db) on
 // purpose: those connections are on the same branch the CLI `dolt pull` merged into,
 // whereas a separately opened connection would default to the base branch and never
 // see the conflicts. The pull's
@@ -3103,8 +3104,9 @@ func (s *DoltStore) autoResolveConflictsAfterCLIPull(ctx context.Context) (bool,
 // tryAutoResolveMergeConflicts auto-resolves merge conflicts that are safe to
 // resolve without operator input (GH#2466 metadata, #4259 audit-only
 // dependency edges, bd-6dnrw.29 schema_migrations vintage rows, GH#2474
-// convergent kv.memory.* config rows), returning
-// (true, nil) only if ALL conflicts were resolved. The implementation is
+// convergent kv.memory.* config rows, GH#4698 issues-table LWW by updated_at),
+// returning (true, nil) only if ALL conflicts were resolved. The
+// implementation is
 // shared with the embedded pull path (bd-6dnrw.40); see
 // versioncontrolops.TryAutoResolveMergeConflicts for the full contract.
 func (s *DoltStore) tryAutoResolveMergeConflicts(ctx context.Context, tx *sql.Tx) (bool, error) {

@@ -35,11 +35,17 @@ bd create "Fix auth bug" -t bug -p 1 -l auth,backend,urgent
 bd label add bd-42 security
 bd label add bd-42 breaking-change
 
+# Add multiple labels at once (comma-separated, no spaces around commas)
+bd label add bd-42 security,breaking-change
+
 # List issue labels
 bd label list bd-42
 
 # Remove a label
 bd label remove bd-42 urgent
+
+# Remove multiple labels at once
+bd label remove bd-42 urgent,needs-review
 
 # List all labels in use
 bd label list-all
