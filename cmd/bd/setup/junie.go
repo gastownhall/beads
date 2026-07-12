@@ -122,7 +122,7 @@ func InstallJunie() error {
 		return HandleError("%v", err)
 	}
 
-	if err := atomicWriteFile(guidelinesPath, []byte(junieGuidelinesTemplate)); err != nil {
+	if err := atomicWriteFile(guidelinesPath, []byte(renderSetupTemplate(junieGuidelinesTemplate))); err != nil {
 		return HandleError("write guidelines: %v", err)
 	}
 

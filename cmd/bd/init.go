@@ -28,6 +28,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/flatfile"
 	beadsmysql "github.com/steveyegge/beads/internal/storage/mysql"
 	"github.com/steveyegge/beads/internal/storage/pgdialect"
 	"github.com/steveyegge/beads/internal/storage/postgres"
@@ -248,30 +249,53 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			externalConfig = &cfg
 		}
 
-		// Backend selection: dolt (default) + the pluggable SQL-family backends
-		// (postgres, mysql, sqlite). SQLite was removed under the one-backend
-		// assumption (#3151) and re-added as a pluggable leaf backend.
+		// Backend selection: dolt + the pluggable SQL-family backends
+		// (postgres, mysql, sqlite) + the flat-file backend (the default). SQLite
+		// was removed under the one-backend assumption (#3151) and re-added as a
+		// pluggable leaf backend. Flatfile flows through the shared (Dolt-ish) init
+		// path below rather than dispatching to its own arm.
 		isPostgres := backendFlag == configfile.BackendPostgres
 		isMySQL := backendFlag == configfile.BackendMySQL
 		isSQLite := backendFlag == configfile.BackendSQLite
-		if backendFlag != "" && backendFlag != configfile.BackendDolt && !isPostgres && !isMySQL && !isSQLite {
-			return fmt.Errorf("unknown backend %q: supported backends are \"dolt\" (default), \"postgres\", \"mysql\", and \"sqlite\"", backendFlag)
+		isFlatfile := backendFlag == configfile.BackendFlatfile
+		if backendFlag != "" && backendFlag != configfile.BackendDolt && !isPostgres && !isMySQL && !isSQLite && !isFlatfile {
+			return fmt.Errorf("unknown backend %q: supported backends are \"dolt\" (default), \"postgres\", \"mysql\", \"sqlite\", and \"flatfile\"", backendFlag)
 		}
-		if isPostgres || isMySQL || isSQLite {
-			// A non-Dolt SQL backend is a plain local workspace: only a small set of
+		if isPostgres || isMySQL || isSQLite || isFlatfile {
+			// A non-Dolt backend is a plain local workspace: only a small set of
 			// init-local flags apply. Reject any other init-local flag by ALLOWLIST — a
 			// denylist silently ignores Dolt-only flags added later, the exact footgun
 			// this block exists to prevent. Inherited/global flags (--json, --dir, …)
 			// are not init-local and are left untouched.
-			pgAllowedFlags := map[string]bool{
+			allowedFlags := map[string]bool{
 				"backend": true,
-				"pg-url":  true, "pg-schema": true,
-				"mysql-url": true, "mysql-database": true,
-				"sqlite-path": true,
-				"prefix":      true, "quiet": true,
+				"prefix":  true, "quiet": true,
 				"skip-hooks": true, "skip-agents": true,
 				"reinit-local": true, "force": true, "init-if-missing": true,
 				"non-interactive": true,
+				// beads.role is git-config routing state, meaningful on every
+				// backend; init stamps it so read commands don't warn (GH#2950).
+				"role": true,
+				// The JSONL handoff (GH#2023) is backend-agnostic: import
+				// rides the portable import core on every store.
+				"from-jsonl": true,
+			}
+			if isFlatfile {
+				// runInitFlatfile honors stealth mode; the SQL connection
+				// flags below do not apply to the flat-file backend.
+				allowedFlags["stealth"] = true
+				// --destroy-token is part of the shared --reinit-local
+				// confirmation path that runs before backend dispatch; the
+				// already-initialized guard (TASKS-abg5) routes destructive
+				// flat-file re-init through it, so non-interactive callers
+				// must be able to pass the token.
+				allowedFlags["destroy-token"] = true
+			} else {
+				allowedFlags["pg-url"] = true
+				allowedFlags["pg-schema"] = true
+				allowedFlags["mysql-url"] = true
+				allowedFlags["mysql-database"] = true
+				allowedFlags["sqlite-path"] = true
 			}
 			var rejected []string
 			cmd.Flags().Visit(func(f *pflag.Flag) {
@@ -281,13 +305,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				if cmd.InheritedFlags().Lookup(f.Name) != nil {
 					return
 				}
-				if !pgAllowedFlags[f.Name] {
+				if !allowedFlags[f.Name] {
 					rejected = append(rejected, "--"+f.Name)
 				}
 			})
 			if len(rejected) > 0 {
 				sort.Strings(rejected)
-				return fmt.Errorf("bd init --backend=%s does not support %s (a non-Dolt SQL backend is a plain local workspace: no Dolt server, sync, remote, or wizard)", backendFlag, strings.Join(rejected, ", "))
+				desc := "a non-Dolt SQL backend is a plain local workspace: no Dolt server, sync, remote, or wizard"
+				if isFlatfile {
+					desc = "the flat-file backend is a plain local workspace: no Dolt server, Dolt sync/remote, or wizard"
+				}
+				return fmt.Errorf("bd init --backend=%s does not support %s (%s)", backendFlag, strings.Join(rejected, ", "), desc)
 			}
 		}
 
@@ -312,17 +340,60 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
-		// Fail-fast: contributor/team wizards require interaction
+		// Select backend. Flat-file is the default; Dolt and flat-file share this
+		// init path, while postgres/mysql/sqlite dispatch to their own arms below.
+		backend := configfile.BackendFlatfile
+		if backendFlag == configfile.BackendDolt {
+			backend = configfile.BackendDolt
+		}
+
+		// Explicit Dolt server intent must not silently degrade to a
+		// flat-file workspace: the backend defaults to flatfile, so `bd init
+		// --server` (or --database, …) without --backend=dolt used to
+		// validate the flag, create a stray .beads/dolt/ marker dir, then
+		// dispatch to runInitFlatfile with the server intent discarded
+		// entirely (TASKS-luzu). Refuse instead of silently picking a
+		// backend the caller did not ask for. --remote is deliberately NOT
+		// in this list: remote bootstrap intent must keep routing through
+		// the CheckRemoteSafety chokepoint below (ADR 0002), which owns the
+		// divergence refusals; the flatfile arm at the clone site handles
+		// it. Env-var leftovers (BEADS_DOLT_SERVER_MODE /
+		// BEADS_DOLT_SHARED_SERVER) intentionally do NOT count as intent —
+		// only explicit flags do (TASKS-9tsg). Explicit --backend=flatfile
+		// is handled by the allowlist above, so this only fires for the
+		// defaulted backend.
+		if backend == configfile.BackendFlatfile {
+			var doltIntent []string
+			// --contributor and --team drive the Dolt onboarding wizards,
+			// which run after the store is built and are silently skipped by
+			// the flat-file dispatch — the same validate-then-discard shape
+			// as the server flags.
+			for _, name := range []string{"server", "shared-server", "external", "database", "server-host", "server-port", "server-socket", "server-user", "contributor", "team"} {
+				if cmd.Flags().Changed(name) {
+					doltIntent = append(doltIntent, "--"+name)
+				}
+			}
+			// A pre-existing config.yaml declaring dolt.mode: server is
+			// recorded operator intent, stronger than an env leftover — a
+			// defaulted init must not shadow it with a flat-file workspace.
+			if mode := config.GetYamlConfig("dolt.mode"); strings.EqualFold(mode, "server") || strings.EqualFold(mode, "shared-server") {
+				doltIntent = append(doltIntent, fmt.Sprintf("config.yaml dolt.mode: %s", mode))
+			}
+			if len(doltIntent) > 0 {
+				return fmt.Errorf("%s requires --backend=dolt: the default flat-file backend is a plain local workspace with no Dolt server", strings.Join(doltIntent, ", "))
+			}
+		}
+
+		// Fail-fast: contributor/team wizards require interaction. Checked
+		// after the backend-intent guard above so a defaulted-flatfile
+		// `bd init --contributor` reports the fundamental problem (wrong
+		// backend), not the interactivity one.
 		if nonInteractive && contributor {
 			return fmt.Errorf("--contributor requires interactive prompts and cannot be used with --non-interactive")
 		}
 		if nonInteractive && team {
 			return fmt.Errorf("--team requires interactive prompts and cannot be used with --non-interactive")
 		}
-
-		// Non-Dolt backends (postgres/mysql/sqlite) were dispatched and returned
-		// earlier; this is the Dolt init path.
-		backend := configfile.BackendDolt
 
 		// Also treat BEADS_DOLT_SERVER_MODE=1 env var as --server.
 		if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
@@ -800,7 +871,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// so we create the marker directory explicitly.
 		// In embedded mode the engine creates its own directories under .beads/embeddeddolt/,
 		// so skip this to avoid leaving an empty .beads/dolt/ artifact (GH#2903).
-		if initServerMode {
+		// Skip for the flat-file backend too: an explicit --server already
+		// errored above, so serverMode here can only be an env-var leftover,
+		// which must not leave a stray Dolt marker dir in a flat-file
+		// workspace (TASKS-luzu).
+		if initServerMode && backend != configfile.BackendFlatfile {
 			if err := os.MkdirAll(initDBPath, config.BeadsDirPerm); err != nil {
 				return fmt.Errorf("failed to create storage directory %s: %v", initDBPath, err)
 			}
@@ -975,6 +1050,31 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				}
 			}
 		}
+		// Never clone-then-stamp: a Dolt bootstrap into a workspace about to
+		// be stamped backend=flatfile makes the just-cloned history
+		// unreachable — init prints "Bootstrapped from remote" while bd list
+		// shows an empty flat-file store (TASKS-nfbg). The remote-safety
+		// refusals above still ran (divergence/--from-jsonl conflicts keep
+		// their exact messages and exit codes); only the bootstrap itself is
+		// intercepted here. Defaulted backend: refuse with guidance — the
+		// remote marks this as a Dolt team workspace and silently shadowing
+		// it with an empty flat-file store loses the team's data from view.
+		// Explicit --backend=flatfile: honor the caller's choice — skip the
+		// bootstrap and proceed fresh; flat-file workspaces sync via git
+		// itself, never refs/dolt/data.
+		if syncFromRemote && backend == configfile.BackendFlatfile {
+			if backendFlag == "" {
+				fmt.Fprintf(os.Stderr, "Error: remote %q has Dolt data, which marks this as a Dolt team workspace.\n", syncURL)
+				fmt.Fprintf(os.Stderr, "The default backend is now flat-file, which cannot use a Dolt remote.\n")
+				fmt.Fprintf(os.Stderr, "  bd init --backend=dolt ...      # bootstrap from the team's Dolt remote\n")
+				fmt.Fprintf(os.Stderr, "  bd init --backend=flatfile ...  # fresh flat-file workspace, ignores the Dolt remote\n")
+				return &exitError{Code: 1}
+			}
+			if !quiet {
+				fmt.Printf("  %s Remote %s has Dolt data; --backend=flatfile skips the Dolt bootstrap (flat-file syncs via git)\n", ui.RenderWarn("!"), syncURL)
+			}
+			syncFromRemote = false
+		}
 		if syncFromRemote {
 			var err error
 			cloneCfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
@@ -996,6 +1096,57 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fmt.Printf("  %s Bootstrapped from remote: %s\n", ui.RenderPass("✓"), syncURL)
 				}
 			}
+		}
+
+		// Flat-file backend: create store directly, skip all Dolt setup.
+		// This dispatch must come BEFORE acquireEmbeddedLock (which creates
+		// .beads/embeddeddolt/.lock — a Dolt-only artifact that 'git add
+		// .beads/' would stage, misclassifying clones as Dolt workspaces)
+		// and before the shared-server block (a leftover
+		// BEADS_DOLT_SHARED_SERVER=1 must not spawn a Dolt server for a
+		// flat-file workspace). The remote-bootstrap block above never
+		// clones for this backend (TASKS-nfbg).
+		if backend == configfile.BackendFlatfile {
+			// Stamp beads.role like the Dolt arm below does after store
+			// creation: without it every routed read command (bd list, bd
+			// ready, …) warns "beads.role not configured" (GH#2950) on every
+			// invocation in a flat-file workspace.
+			if isGitRepo() {
+				role := roleFlag
+				if role == "" {
+					role = "maintainer"
+				}
+				if _, hasRole := getBeadsRole(); !hasRole {
+					if err := setBeadsRole(role); err != nil && !quiet {
+						fmt.Fprintf(os.Stderr, "Warning: failed to set default beads.role: %v\n", err)
+					}
+				} else if roleFlag != "" {
+					if err := setBeadsRole(role); err != nil && !quiet {
+						fmt.Fprintf(os.Stderr, "Warning: failed to set beads.role: %v\n", err)
+					}
+				}
+			}
+			if err := runInitFlatfile(ctx, beadsDir, prefix, quiet, skipHooks, skipAgents, stealth); err != nil {
+				return err
+			}
+			// Import from local JSONL if requested (GH#2023) — the same
+			// contract as the Dolt arm below. The Claude-Code-for-Web flow
+			// commits .beads/issues.jsonl and re-imports it when a fresh
+			// clone (or ephemeral container) re-runs init.
+			if fromJSONL {
+				localJSONLPath := configuredImportJSONLPath(beadsDir)
+				if _, statErr := os.Stat(localJSONLPath); os.IsNotExist(statErr) {
+					return fmt.Errorf("--from-jsonl specified but %s does not exist", localJSONLPath)
+				}
+				issueCount, importErr := importFromLocalJSONL(ctx, store, localJSONLPath)
+				if importErr != nil {
+					return fmt.Errorf("failed to import from JSONL: %v", importErr)
+				}
+				if !quiet {
+					fmt.Printf("  Imported %d issues from %s\n", issueCount, localJSONLPath)
+				}
+			}
+			return nil
 		}
 
 		// Build config. Beads always uses dolt sql-server.
@@ -1652,7 +1803,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					fmt.Printf("  Skipping %s generation in bare repository\n", resolvedAgentsFile)
 				}
 			} else {
-				renderOpts := agents.RenderOpts{HasRemote: shouldConfigureInitDoltRemote(syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin, isDoltLocalOnly()), NoPush: config.GetBool("no-push")}
+				renderOpts := agents.RenderOpts{HasRemote: shouldConfigureInitDoltRemote(syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin, isDoltLocalOnly()), NoPush: config.GetBool("no-push"), Flatfile: backend == configfile.BackendFlatfile}
 				addAgentsInstructions(resolvedAgentsFile, !quiet, agentsTemplate, agentsProfile, renderOpts)
 			}
 		}
@@ -2139,8 +2290,8 @@ func init() {
 	initCmd.Flags().Bool("non-interactive", false, "Skip all interactive prompts (auto-detected in CI or non-TTY environments)")
 	initCmd.Flags().String("role", "", "Set beads role without prompting: \"maintainer\" or \"contributor\"")
 
-	// Backend selection: dolt (default) plus the SQL-family backends (postgres/mysql/sqlite).
-	initCmd.Flags().String("backend", "", "Storage backend: dolt (default), postgres, mysql, or sqlite. See docs/architecture/storage-backends.md.")
+	// Backend selection: flatfile (default), dolt, plus the SQL-family backends (postgres/mysql/sqlite).
+	initCmd.Flags().String("backend", "", "Storage backend: flatfile (default), dolt, postgres, mysql, or sqlite. See docs/architecture/storage-backends.md.")
 	initCmd.Flags().String("pg-url", "", "Postgres connection URL (with --backend=postgres). A password may be included for init but is never persisted; set BEADS_PG_PASSWORD for later commands. Falls back to BEADS_POSTGRES_URL.")
 	initCmd.Flags().String("pg-schema", "", "Postgres schema for this workspace's tables (with --backend=postgres; provides search_path isolation)")
 	initCmd.Flags().String("mysql-url", "", "MySQL server DSN (with --backend=mysql), e.g. user:pass@tcp(host:3306)/ . A password may be included for init but is never persisted; set BEADS_MYSQL_PASSWORD for later commands. Falls back to BEADS_MYSQL_URL.")
@@ -2264,13 +2415,31 @@ func alreadyInitialized(format string, args ...any) error {
 // already exists (the benign, idempotent-skip case); any other error is
 // operational and must not be treated as success.
 // checkExistingSQLBackend returns an "already initialized" guard error when cfg
-// selects a non-Dolt SQL backend (Postgres/MySQL/SQLite), each of which is marked
-// by metadata.json alone with no local DB directory to inspect. It returns nil for
-// the Dolt backend so the caller runs the directory/server checks instead. Split
-// out of checkExistingBeadsDataAt so the added SQL-backend branches don't inflate
-// that function's complexity.
+// selects a non-Dolt backend (Postgres/MySQL/SQLite/flatfile), each of which is
+// marked by metadata.json alone with no local Dolt DB directory to inspect. It
+// returns nil for the Dolt backend so the caller runs the directory/server checks
+// instead. Split out of checkExistingBeadsDataAt so the added backend branches
+// don't inflate that function's complexity.
 func checkExistingSQLBackend(cfg *configfile.Config) error {
 	switch cfg.GetBackend() {
+	case configfile.BackendFlatfile:
+		// Without this arm, backend=flatfile fell through to the legacy
+		// redirect/beads.db checks and returned nil: a re-run `bd init`
+		// silently re-stamped metadata.json with a new project_id and
+		// prefix, `bd init --backend=dolt` overwrote a live flat-file
+		// workspace (orphaning every issue file), and --init-if-missing
+		// lost its idempotency (TASKS-abg5).
+		return alreadyInitialized(`
+%s This workspace is already initialized with the flat-file backend (.beads/issues/).
+
+To use it:
+  Just run bd commands normally (e.g., %s)
+
+If it is genuinely broken and must be re-initialized:
+  bd export > issue-export.jsonl   # Export issue records first
+  bd init --reinit-local ...
+
+Aborting.`, ui.RenderWarn("⚠"), ui.RenderAccent("bd list"))
 	case configfile.BackendPostgres:
 		return alreadyInitialized(`
 %s This workspace is already initialized with the Postgres backend (schema %q).
@@ -2315,10 +2484,10 @@ func checkExistingBeadsDataAt(beadsDir string, prefix string) error {
 	}
 
 	// metadata.json is authoritative for the configured backend, so resolve it once
-	// and dispatch. A non-Dolt SQL backend (Postgres/MySQL/SQLite) is marked by
-	// metadata alone — there is no local DB directory to inspect — so a plain
-	// `bd init` (which defaults to Dolt) must not silently repoint a live SQL
-	// workspace to a fresh embedded Dolt DB and orphan its issues. --reinit-local
+	// and dispatch. A non-Dolt backend (Postgres/MySQL/SQLite/flatfile) is marked by
+	// metadata alone — there is no local Dolt DB directory to inspect — so a plain
+	// `bd init` (or `bd init --backend=dolt`) must not silently repoint a live
+	// workspace to a fresh store and orphan its issues. --reinit-local
 	// /--force bypass this (handled by the caller). A config that fails to load falls
 	// through to the redirect/database-file checks below.
 	cfg, cfgErr := configfile.Load(beadsDir)
@@ -2995,4 +3164,127 @@ func resolveInitDoltMode(proxiedFlag, sharedFlag, serverFlag bool) string {
 		return "server"
 	}
 	return "embedded"
+}
+
+// runInitFlatfile handles "bd init --backend=flatfile" — creates a flat-file
+// beads workspace without any Dolt server or embedded database.
+func runInitFlatfile(ctx context.Context, beadsDir, prefix string, quiet, skipHooks, skipAgents, stealth bool) error {
+	// Determine the issue prefix up front and validate it BEFORE any side
+	// effects so an invalid prefix cannot leave a half-created workspace.
+	// Flat-file issue IDs become filenames (issues/<prefix>-<n>.json), so the
+	// prefix is user input flowing into paths; enforce the same identifier
+	// rule the Dolt path applies to the prefix-derived database name — which
+	// validatePrefix cannot be used for here, because auto-detected prefixes
+	// legitimately contain underscores and uppercase (normalizeIssuePrefix
+	// output) that the Dolt path accepts.
+	issuePrefix := strings.ReplaceAll(prefix, ".", "_")
+	if issuePrefix == "" {
+		issuePrefix = strings.ReplaceAll(filepath.Base(mustCwd()), "-", "_")
+		issuePrefix = strings.ReplaceAll(issuePrefix, ".", "_")
+	}
+	if err := dolt.ValidateDatabaseName(issuePrefix); err != nil {
+		return HandleError("invalid issue prefix %q: prefixes must start with a letter or underscore and contain only letters, digits, underscores, or hyphens (flat-file issue IDs become filenames)", issuePrefix)
+	}
+
+	// Create .beads/ directory.
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		return HandleError("failed to create .beads directory: %v", err)
+	}
+
+	// Create the flat-file store (creates issues/, comments/, etc.).
+	ffStore, err := flatfile.NewFlatFileStore(beadsDir)
+	if err != nil {
+		return HandleError("failed to create flat-file store: %v", err)
+	}
+
+	// Write metadata.json.
+	projectID := configfile.GenerateProjectID()
+	metaJSON := fmt.Sprintf("{\"backend\":\"flatfile\",\"project_id\":%q}\n", projectID)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metaJSON), 0o644); err != nil {
+		return HandleError("failed to write metadata.json: %v", err)
+	}
+
+	// Write default config.yaml.
+	cfgPath := filepath.Join(beadsDir, "config.yaml")
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		if err := createConfigYaml(beadsDir, false, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to write config.yaml: %v\n", err)
+		}
+	}
+
+	// Write .gitignore for flat-file: only ignore local_metadata.json and tmp files.
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	flatfileGitignore := "local_metadata.json\n*.tmp\nmerge_slot.json\nrepo_mtime.json\n"
+	if err := os.WriteFile(gitignorePath, []byte(flatfileGitignore), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to write .gitignore: %v\n", err)
+	}
+
+	// Set issue prefix (validated above).
+	if err := ffStore.SetConfig(ctx, "issue_prefix", issuePrefix); err != nil {
+		_ = ffStore.Close()
+		return HandleError("failed to set issue prefix: %v", err)
+	}
+
+	// Set as global store for hooks/agents setup.
+	store = ffStore
+	if cmdCtx != nil {
+		cmdCtx.Store = ffStore
+	}
+
+	if !quiet {
+		fmt.Printf("✓ Initialized flat-file beads with prefix %q\n", issuePrefix)
+	}
+
+	// Warn if there is no git repo (flat-file sync happens through git —
+	// without one, issues exist only on this machine) or if .beads/issues/
+	// would be gitignored.
+	if !flatfile.InGitRepo(beadsDir) {
+		fmt.Fprintf(os.Stderr, "\nWARNING: not inside a git repository — flat-file issues exist only on this machine.\nThe flat-file backend syncs through git (push/pull). Run 'git init' to enable sync.\n\n")
+	} else if warning := flatfile.CheckGitignored(beadsDir); warning != "" {
+		fmt.Fprintf(os.Stderr, "\n%s\n\n", warning)
+	}
+
+	// Install hooks (reuse existing logic).
+	if !skipHooks && isGitRepo() {
+		if !hooksInstalled() || hooksNeedUpdate() {
+			if err := installGitHooks(); err != nil && !quiet {
+				fmt.Fprintf(os.Stderr, "Warning: failed to install hooks: %v\n", err)
+			} else if !quiet {
+				fmt.Println("  Hooks installed")
+			}
+		}
+	}
+
+	// Install agent integrations.
+	if !skipAgents && !stealth {
+		if err := setup.InstallClaudeProject(stealth); err != nil && !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)
+		}
+		if err := setup.InstallCodexProject(); err != nil && !quiet {
+			fmt.Fprintf(os.Stderr, "Warning: failed to setup Codex integration: %v\n", err)
+		}
+	}
+
+	// Commit initial state if in a git repo.
+	if isGitRepo() && !stealth {
+		gitAddCmd := exec.Command("git", "add", ".beads/")
+		gitAddCmd.Dir = filepath.Dir(beadsDir)
+		_ = gitAddCmd.Run()
+	}
+
+	// Close with the same canonical success line as the Dolt arm: tooling
+	// (the MCP server's context-init among it) pattern-matches this string,
+	// so it is part of init's output contract regardless of backend.
+	if !quiet {
+		fmt.Printf("\n%s bd initialized successfully!\n\n", ui.RenderPass("✓"))
+	}
+	return nil
+}
+
+func mustCwd() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "project"
+	}
+	return cwd
 }

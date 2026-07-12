@@ -165,9 +165,23 @@ func bdInit(t *testing.T, bd string, extraArgs ...string) (dir, beadsDir string,
 	return
 }
 
+// withDoltBackend pins the embedded harness to the Dolt backend: every
+// TestEmbedded* exercises embedded Dolt by charter, and a plain `bd init`
+// now defaults to flat-file. Tests probing backend selection pass their own
+// --backend, which is left untouched.
+func withDoltBackend(extraArgs []string) []string {
+	for _, a := range extraArgs {
+		if a == "--backend" || strings.HasPrefix(a, "--backend=") {
+			return extraArgs
+		}
+	}
+	return append([]string{"--backend=dolt"}, extraArgs...)
+}
+
 // bdInitInDir runs bd init --quiet in an existing dir. Fatals on failure.
 func runBDInit(t *testing.T, bd, dir string, extraArgs ...string) string {
 	t.Helper()
+	extraArgs = withDoltBackend(extraArgs)
 	args := append([]string{"init", "--quiet"}, extraArgs...)
 	cmd := exec.Command(bd, args...)
 	cmd.Dir = dir
@@ -184,6 +198,7 @@ func bdInitFail(t *testing.T, bd string, extraArgs ...string) string {
 	t.Helper()
 	dir := t.TempDir()
 	initGitRepoAt(t, dir)
+	extraArgs = withDoltBackend(extraArgs)
 	args := append([]string{"init", "--quiet"}, extraArgs...)
 	cmd := exec.Command(bd, args...)
 	cmd.Dir = dir
@@ -413,7 +428,7 @@ func TestEmbeddedInit(t *testing.T) {
 	t.Run("not_quiet", func(t *testing.T) {
 		dir := t.TempDir()
 		initGitRepoAt(t, dir)
-		cmd := exec.Command(bd, "init", "--prefix", "nq")
+		cmd := exec.Command(bd, "init", "--backend=dolt", "--prefix", "nq")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
 		stdout, stderr, err := runCommandBuffers(t, cmd)
@@ -639,7 +654,7 @@ func TestEmbeddedInit(t *testing.T) {
 		if !replacedPath {
 			noDoltEnv = append(noDoltEnv, "PATH="+pathDir)
 		}
-		cmd = exec.Command(bd, "init", "--quiet", "--prefix", "clone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+		cmd = exec.Command(bd, "init", "--backend=dolt", "--quiet", "--prefix", "clone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
 		cmd.Dir = cloneDir
 		cmd.Env = noDoltEnv
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -725,7 +740,7 @@ func TestEmbeddedInit(t *testing.T) {
 		t.Run("default_smart_gate_auto_migrates_first_mover", func(t *testing.T) {
 			cloneDir := t.TempDir()
 			initGitRepoAt(t, cloneDir)
-			cmd := exec.Command(bd, "init", "--quiet", "--prefix", "bclone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+			cmd := exec.Command(bd, "init", "--backend=dolt", "--quiet", "--prefix", "bclone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
 			cmd.Dir = cloneDir
 			// Exercise the true default: strip any ambient opt-out so
 			// BD_SMART_GATE is genuinely unset.
@@ -754,7 +769,7 @@ func TestEmbeddedInit(t *testing.T) {
 		t.Run("opt_out_gates_with_guidance", func(t *testing.T) {
 			cloneDir := t.TempDir()
 			initGitRepoAt(t, cloneDir)
-			cmd := exec.Command(bd, "init", "--quiet", "--prefix", "bclone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+			cmd := exec.Command(bd, "init", "--backend=dolt", "--quiet", "--prefix", "bclone", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
 			cmd.Dir = cloneDir
 			cmd.Env = append(bdEnv(cloneDir), schema.AllowRemoteMigrateEnv+"=0", schema.SmartGateEnv+"=0")
 			out, err := cmd.CombinedOutput()
@@ -845,7 +860,7 @@ func TestEmbeddedInit(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, bd, "init", "--quiet", "--prefix", "fail", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+		cmd := exec.CommandContext(ctx, bd, "init", "--backend=dolt", "--quiet", "--prefix", "fail", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
 		out, err := cmd.CombinedOutput()
@@ -875,7 +890,7 @@ func TestEmbeddedInit(t *testing.T) {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, bd, "init", "--quiet", "--prefix", "fail2", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
+		cmd := exec.CommandContext(ctx, bd, "init", "--backend=dolt", "--quiet", "--prefix", "fail2", "--remote", remoteURL, "--skip-hooks", "--skip-agents")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
 		out, err := cmd.CombinedOutput()
@@ -1185,7 +1200,7 @@ func TestEmbeddedInit(t *testing.T) {
 			t.Fatalf("git config --unset core.hooksPath failed: %v\n%s", err, out)
 		}
 
-		cmd := exec.Command(bd, "init", "--prefix", "jl", "--from-jsonl", "--quiet")
+		cmd := exec.Command(bd, "init", "--backend=dolt", "--prefix", "jl", "--from-jsonl", "--quiet")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
 		stdout, stderr, err := runCommandBuffers(t, cmd)
@@ -1262,7 +1277,7 @@ func TestEmbeddedInit(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(reimportBeadsDir, "issues.jsonl"), exportedJSONL, 0644); err != nil {
 			t.Fatal(err)
 		}
-		reimportCmd := exec.Command(bd, "init", "--prefix", "jl", "--from-jsonl", "--quiet")
+		reimportCmd := exec.Command(bd, "init", "--backend=dolt", "--prefix", "jl", "--from-jsonl", "--quiet")
 		reimportCmd.Dir = reimportDir
 		reimportCmd.Env = bdEnv(reimportDir)
 		if stdout, stderr, err := runCommandBuffers(t, reimportCmd); err != nil {
@@ -1309,7 +1324,7 @@ func TestEmbeddedInit(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		cmd := exec.Command(bd, "init", "--prefix", "jlremote", "--from-jsonl", "--discard-remote", "--destroy-token=DESTROY-jlremote", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+		cmd := exec.Command(bd, "init", "--backend=dolt", "--prefix", "jlremote", "--from-jsonl", "--discard-remote", "--destroy-token=DESTROY-jlremote", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
 		stdout, stderr, err := runCommandBuffers(t, cmd)
@@ -1899,7 +1914,7 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 
-			cmd := exec.CommandContext(ctx, bd, "init", "--prefix", "conc", "--force", "--quiet", "--skip-agents")
+			cmd := exec.CommandContext(ctx, bd, "init", "--backend=dolt", "--prefix", "conc", "--force", "--quiet", "--skip-agents")
 			cmd.Dir = dir
 			cmd.Env = env
 			out, err := cmd.CombinedOutput()

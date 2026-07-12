@@ -213,6 +213,22 @@ Examples:
 			return HandleError("failed to resolve path: %v", err)
 		}
 
+		// Flat-file backend: run flatfile doctor directly (no SQL server needed).
+		if beadsDir := doctor.ResolveBeadsDirForRepo(absPath); doctor.IsFlatfileBackend(beadsDir) {
+			result := runDiagnostics(absPath)
+			if jsonOutput {
+				if err := exportDiagnostics(result, ""); err != nil {
+					return HandleError("failed to export diagnostics: %v", err)
+				}
+			} else {
+				printDiagnostics(result)
+			}
+			if !result.OverallOK {
+				return fmt.Errorf("doctor checks failed")
+			}
+			return nil
+		}
+
 		if doctorFix && isOrchestratorRoot(absPath) {
 			return HandleErrorWithHint(
 				"refusing to run 'bd doctor --fix' at orchestrator workspace root",
@@ -475,6 +491,18 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, managedHandoffCheck)
 	if managedHandoffCheck.Status == statusWarning || managedHandoffCheck.Status == statusError {
 		result.OverallOK = false
+	}
+
+	// Flat-file backend: run flatfile-specific checks and skip Dolt checks.
+	if doctor.IsFlatfileBackend(beadsDir) {
+		for _, dc := range doctor.RunFlatfileChecks(beadsDir) {
+			check := convertDoctorCheck(dc)
+			result.Checks = append(result.Checks, check)
+			if check.Status == statusError {
+				result.OverallOK = false
+			}
+		}
+		return result
 	}
 
 	// bd-jgxi: Auto-migrate database version before checking it.

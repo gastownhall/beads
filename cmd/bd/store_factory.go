@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/flatfile"
 	beadsmysql "github.com/steveyegge/beads/internal/storage/mysql"
 	"github.com/steveyegge/beads/internal/storage/postgres"
 	beadssqlite "github.com/steveyegge/beads/internal/storage/sqlite"
@@ -49,6 +50,10 @@ func usesProxiedServer() bool {
 // newDoltStore creates a storage backend from an explicit config.
 // Used by bd init and PersistentPreRun.
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {
+	// Flat-file backend: no Dolt server needed.
+	if cfg.BeadsDir != "" && flatfile.IsFlatFileBackend(cfg.BeadsDir) {
+		return flatfile.OpenStore(ctx, cfg.BeadsDir)
+	}
 	if cfg.ProxiedServer {
 		// TODO: this should not be a store
 		// it should be a uow provider
@@ -101,6 +106,10 @@ func acquireEmbeddedLock(beadsDir string, serverMode bool) (util.Unlocker, error
 // For embedded mode, legacy hyphenated database names (pre-GH#2142) are
 // auto-sanitized to underscores and the fix is persisted to metadata.json.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	// Flat-file backend: no Dolt config needed.
+	if flatfile.IsFlatFileBackend(beadsDir) {
+		return flatfile.OpenStore(ctx, beadsDir)
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		// A present-but-unloadable metadata.json must not degrade to the
@@ -191,6 +200,11 @@ func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newNa
 // only — no directory renames or metadata.json writes. This prevents cross-repo
 // hydration from mutating foreign projects (GH#3231).
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	// Flat-file backend: open without creating directories — a read-only
+	// cross-repo open must not mutate the foreign checkout (GH#3231).
+	if flatfile.IsFlatFileBackend(beadsDir) {
+		return flatfile.OpenStoreReadOnly(ctx, beadsDir)
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		// Same contract as newDoltStoreFromConfig: a present-but-unloadable

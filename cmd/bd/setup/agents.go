@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/templates/agents"
 )
 
@@ -57,10 +59,18 @@ func defaultAgentsEnv() agentsEnv {
 // omits "bd dolt push" from session-completion instructions.
 // Exposed as a variable so tests can override.
 var detectRenderOptsImpl = func() agents.RenderOpts {
-	return agents.RenderOpts{
+	opts := agents.RenderOpts{
 		HasRemote: config.GetString("sync.remote") != "" || config.GetString("sync.git-remote") != "",
 		NoPush:    config.GetBool("no-push"),
 	}
+	// A flat-file workspace gets the Dolt guidance rewritten at render time
+	// (issues are git-tracked JSON files; no bd dolt push).
+	if beadsDir := beads.FindBeadsDir(); beadsDir != "" {
+		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.GetBackend() == configfile.BackendFlatfile {
+			opts.Flatfile = true
+		}
+	}
+	return opts
 }
 
 func detectRenderOpts() agents.RenderOpts {
@@ -373,4 +383,33 @@ _Add a brief overview of your project architecture_
 
 _Add your project-specific conventions here_
 `
+}
+
+// flatfileizeSetupText rewrites Dolt sync directives in the static setup
+// templates (aider instructions/README, junie guidelines) for flat-file
+// workspaces: beads data is git-tracked files there, so session-end sync is
+// `git push`, not `bd dolt push`. Dolt workspaces get the templates verbatim.
+func flatfileizeSetupText(s string) string {
+	replacements := [...][2]string{
+		{"**Suggest 'bd dolt push'** at end of session", "**Suggest 'git push'** at end of session"},
+		{"`bd dolt push` - Push changes to Dolt remote", "`git push` - Push changes (including beads data)"},
+		{"Remind user to run `/run bd dolt push` before ending session", "Remind user to run `/run git push` before ending session"},
+		{"Run `bd dolt push` before ending your session", "Run `git push` before ending your session"},
+		{"bd dolt push  # ALWAYS run at session end - commits and pushes changes", "git push  # ALWAYS run at session end - pushes changes including beads data"},
+		{"Run `bd dolt push` at end of session", "Run `git push` at end of session"},
+		{"/run bd dolt push", "/run git push"},
+	}
+	for _, r := range replacements {
+		s = strings.ReplaceAll(s, r[0], r[1])
+	}
+	return s
+}
+
+// renderSetupTemplate applies backend-aware rewrites to a static setup
+// template before it is written to the user's repo.
+func renderSetupTemplate(s string) string {
+	if detectRenderOpts().Flatfile {
+		return flatfileizeSetupText(s)
+	}
+	return s
 }

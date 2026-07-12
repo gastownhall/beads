@@ -1,5 +1,6 @@
 """Real integration tests for BdClient using actual bd binary."""
 
+import json
 import os
 import shutil
 import subprocess
@@ -507,13 +508,18 @@ async def test_init_creates_beads_directory(
     assert beads_dir.exists(), f".beads directory not created in {temp_path}"
     assert beads_dir.is_dir(), ".beads exists but is not a directory"
 
-    # Verify Dolt backend files were created under the isolated .beads directory.
+    # Verify the default (flat-file) backend files were created under the
+    # isolated .beads directory: metadata names the backend and issues live
+    # as JSON files under issues/ — no Dolt database directory.
     assert (beads_dir / "metadata.json").is_file()
     assert (beads_dir / "config.yaml").is_file()
-    embedded_dir = beads_dir / "embeddeddolt"
-    assert embedded_dir.exists(), "No embedded Dolt directory created in .beads/"
-    assert any(path.name == ".dolt" for path in embedded_dir.glob("*/.dolt")), (
-        f"Expected an embedded Dolt database under {embedded_dir}"
+    metadata = json.loads((beads_dir / "metadata.json").read_text())
+    assert metadata.get("backend") == "flatfile", (
+        f"default init should create a flat-file workspace, got: {metadata}"
+    )
+    assert (beads_dir / "issues").is_dir(), "No issues/ directory created in .beads/"
+    assert not (beads_dir / "embeddeddolt").exists(), (
+        "default (flat-file) init must not create an embedded Dolt directory"
     )
 
     # Verify success message

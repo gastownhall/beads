@@ -209,7 +209,11 @@ func newWorkspace(t *testing.T) *workspace {
 	w.git("commit", "-m", "initial")
 
 	prefix := testPrefix(t)
-	w.run("init", "--prefix", prefix, "--quiet")
+	// The protocol suite pins the frozen DOLT CLI contract (newWorkspace
+	// requires a live Dolt store above), so the workspace must ask for Dolt
+	// explicitly: a plain `bd init` now defaults to the flat-file backend,
+	// which would silently run the whole contract against the wrong store.
+	w.run("init", "--backend=dolt", "--prefix", prefix, "--quiet")
 	w.prefix = prefix
 	return w
 }

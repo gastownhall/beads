@@ -202,7 +202,10 @@ func TestProtocol_ExitCode130_PromptCanceled(t *testing.T) {
 	}
 	defer func() { _ = outR.Close() }()
 
-	cmd := exec.Command(buildBD(t), "init", "--prefix", "pe3", "--contributor")
+	// --backend=dolt is pinned: the contributor wizard is Dolt onboarding, and
+	// the default backend is flat-file, where --contributor is refused up front
+	// instead of prompting.
+	cmd := exec.Command(buildBD(t), "init", "--backend=dolt", "--prefix", "pe3", "--contributor")
 	cmd.Dir = dir
 	cmd.Stdin = stdinR
 	cmd.Stdout = outW

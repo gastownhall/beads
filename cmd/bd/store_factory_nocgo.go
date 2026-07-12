@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/flatfile"
 	beadsmysql "github.com/steveyegge/beads/internal/storage/mysql"
 	"github.com/steveyegge/beads/internal/storage/postgres"
 	beadssqlite "github.com/steveyegge/beads/internal/storage/sqlite"
@@ -32,6 +33,10 @@ func usesProxiedServer() bool {
 }
 
 func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, error) {
+	// Flat-file backend: no Dolt server needed.
+	if cfg.BeadsDir != "" && flatfile.IsFlatFileBackend(cfg.BeadsDir) {
+		return flatfile.OpenStore(ctx, cfg.BeadsDir)
+	}
 	if cfg.ProxiedServer {
 		// TODO: this should not be a store
 		// it should be a uow provider
@@ -50,6 +55,9 @@ func acquireEmbeddedLock(_ string, _ bool) (util.Unlocker, error) {
 
 // newDoltStoreFromConfig creates a SQL-server-backed storage backend from config.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	if flatfile.IsFlatFileBackend(beadsDir) {
+		return flatfile.OpenStore(ctx, beadsDir)
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		// Name the real cause: without this, a present-but-unloadable
@@ -86,6 +94,11 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 
 // newReadOnlyStoreFromConfig creates a read-only SQL-server-backed storage backend.
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	// Flat-file backend: open without creating directories — a read-only
+	// cross-repo open must not mutate the foreign checkout (GH#3231).
+	if flatfile.IsFlatFileBackend(beadsDir) {
+		return flatfile.OpenStoreReadOnly(ctx, beadsDir)
+	}
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", configfile.ConfigPath(beadsDir), err)
