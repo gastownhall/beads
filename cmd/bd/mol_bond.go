@@ -216,9 +216,9 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 		if routeErr != nil {
 			return HandleErrorRespectJSON("%v", routeErr)
 		}
-		if rr.MutationForbidden {
+		if routeErr := verifyMolBondWritableHome(rr, targetStoreKey); routeErr != nil {
 			rr.Close()
-			return HandleErrorRespectJSON("cannot bond issue %s: contributor auto-routing forbids mutation; run the bond from the project that owns the issue", targetID)
+			return HandleErrorRespectJSON("%v", routeErr)
 		}
 		activeStore = rr.Store
 		closeActiveStore = rr.Close
@@ -667,6 +667,22 @@ func validateMolBondHomes(localStore storage.DoltStorage, discoveries ...*molBon
 		return "", storeIdentityKey(localStore), nil
 	}
 	return targetID, targetKey, nil
+}
+
+// verifyMolBondWritableHome closes the TOCTOU gap between read-only discovery
+// and writable reopen. Routing or local contents may change between phases; a
+// bond must never mutate a logical store that was not the validated home.
+func verifyMolBondWritableHome(rr *RoutedResult, expectedStoreKey string) error {
+	if rr == nil || rr.Store == nil {
+		return fmt.Errorf("routed bond target reopened without a store")
+	}
+	if rr.MutationForbidden {
+		return fmt.Errorf("cannot bond issue %s: contributor auto-routing forbids mutation; run the bond from the project that owns the issue", rr.ResolvedID)
+	}
+	if actual := storeIdentityKey(rr.Store); actual != expectedStoreKey {
+		return fmt.Errorf("routed bond target changed between discovery and writable reopen (expected %s, got %s); retry the command", expectedStoreKey, actual)
+	}
+	return nil
 }
 
 // materializeMolBondOperand is the second phase: after one store home has been

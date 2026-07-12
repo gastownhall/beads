@@ -218,6 +218,25 @@ func TestMolBondPrefixRouting(t *testing.T) {
 	if _, err := discoverMolBondOperand(ctx, townStore, "bad-target"); err == nil || !strings.Contains(err.Error(), "no dolt_database") {
 		t.Fatalf("matched-route failure = %v, want actionable target metadata error", err)
 	}
+
+	drift, err := discoverMolBondOperand(ctx, townStore, "zz-other")
+	if err != nil {
+		t.Fatalf("discover drift fixture: %v", err)
+	}
+	_, driftKey, err := validateMolBondHomes(townStore, drift)
+	if err != nil {
+		t.Fatalf("validate drift fixture: %v", err)
+	}
+	drift.Close()
+	seedIssue(t, ctx, townStore, "zz-other") // local-first resolution now points elsewhere
+	reopened, err := resolveAndGetIssueForMutation(ctx, townStore, "zz-other")
+	if err != nil {
+		t.Fatalf("reopen drift fixture: %v", err)
+	}
+	defer reopened.Close()
+	if err := verifyMolBondWritableHome(reopened, driftKey); err == nil || !strings.Contains(err.Error(), "changed between discovery") {
+		t.Fatalf("reopen identity mismatch = %v, want retryable safety error", err)
+	}
 }
 
 func setupMolBondPrefixRouting(t *testing.T, rigs map[string][]string) (context.Context, storage.DoltStorage) {
