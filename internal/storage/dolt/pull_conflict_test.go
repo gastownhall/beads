@@ -104,7 +104,10 @@ func TestPullAutoResolveMetadataConflicts(t *testing.T) {
 }
 
 // TestPullAutoResolveSkipsNonMetadataConflicts verifies that conflicts on
-// tables other than metadata are NOT auto-resolved.
+// tables other than metadata are NOT auto-resolved. The issues-table conflict
+// here is add/add (both branches insert the same PK), which the LWW safety
+// check rejects (GH#4698); modify/modify conflicts with different timestamps
+// ARE auto-resolved by LWW, covered by issues_conflict_test.go.
 func TestPullAutoResolveSkipsNonMetadataConflicts(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

@@ -171,6 +171,7 @@ func Initialize() error {
 	// Set defaults for all flags
 	v.SetDefault("json", false)
 	v.SetDefault("events-export", false)
+	v.SetDefault("audit.enabled", false)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
 	v.SetDefault("db", "")

@@ -1463,7 +1463,9 @@ func TestEmbeddedInit(t *testing.T) {
 	t.Run("files_created", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fc", "--skip-hooks")
 		requireFile(t, filepath.Join(beadsDir, "config.yaml"))
-		requireFile(t, filepath.Join(beadsDir, "interactions.jsonl"))
+		if _, err := os.Stat(filepath.Join(beadsDir, "interactions.jsonl")); !os.IsNotExist(err) {
+			t.Fatalf("interactions.jsonl should be created only when audit.enabled is true, got stat err %v", err)
+		}
 		requireFile(t, filepath.Join(dir, "AGENTS.md"))
 		requireFile(t, filepath.Join(dir, ".agents", "skills", "beads", "SKILL.md"))
 		requireFile(t, filepath.Join(dir, ".agents", "skills", "beads", "agents", "openai.yaml"))
