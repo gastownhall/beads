@@ -110,6 +110,8 @@ type proxiedRetryTestIssueUC struct {
 	claimReadyCalls int
 	closeCalls      int
 	createCalls     int
+	reopenCalls     int
+	reopened        *types.Issue
 }
 
 func (u *proxiedRetryTestIssueUC) GetIssue(context.Context, string) (*types.Issue, error) {
@@ -371,5 +373,44 @@ func TestRunDepBlocksProxiedServerRetriesWholeOperationOnFreshUOW(t *testing.T) 
 		if uw.commitCalls != 1 || uw.commitMessage != "bd: dep add blocked-1 blocker-1" {
 			t.Errorf("UOW %d commit calls/message = %d/%q", i, uw.commitCalls, uw.commitMessage)
 		}
+	}
+}
+
+func (u *proxiedRetryTestIssueUC) ReopenIssue(_ context.Context, _ string, _ domain.ReopenIssueParams, _ string) (domain.ReopenIssueResult, error) {
+	u.reopenCalls++
+	if u.reopened == nil {
+		return domain.ReopenIssueResult{}, errors.New("missing reopen result")
+	}
+	return domain.ReopenIssueResult{Issue: u.reopened, Reopened: true}, nil
+}
+
+func TestReopenProxiedOneFreshRetriesWholeOperationOnFreshUOW(t *testing.T) {
+	t.Chdir(t.TempDir())
+	oldProvider, oldActor := uowProvider, actor
+	t.Cleanup(func() { uowProvider, actor = oldProvider, oldActor })
+	actor = "reopen-retry-agent"
+
+	firstUC := &proxiedRetryTestIssueUC{
+		current:  &types.Issue{ID: "reopen-1", Title: "first", Status: types.StatusClosed, IssueType: types.TypeTask},
+		reopened: &types.Issue{ID: "reopen-1", Title: "failed", Status: types.StatusOpen, IssueType: types.TypeTask},
+	}
+	secondUC := &proxiedRetryTestIssueUC{
+		current:  &types.Issue{ID: "reopen-1", Title: "fresh", Status: types.StatusClosed, IssueType: types.TypeTask},
+		reopened: &types.Issue{ID: "reopen-1", Title: "durable", Status: types.StatusOpen, IssueType: types.TypeTask},
+	}
+	firstUOW := &proxiedRetryTestUOW{issueUC: firstUC, commitErr: &mysql.MySQLError{Number: 1213, Message: "serialization conflict"}}
+	secondUOW := &proxiedRetryTestUOW{issueUC: secondUC}
+	uowProvider = &proxiedRetryTestProvider{uows: []uow.UnitOfWork{firstUOW, secondUOW}}
+
+	got, ok, soft, err := reopenProxiedOneFresh(context.Background(), "reopen-1", "again")
+	if err != nil || soft || !ok {
+		t.Fatalf("result err=%v soft=%v ok=%v", err, soft, ok)
+	}
+	if got.after != secondUC.reopened {
+		t.Fatalf("want durable reopen, got %#v", got.after)
+	}
+	if firstUC.reopenCalls != 1 || secondUC.reopenCalls != 1 || firstUOW.commitCalls != 1 || secondUOW.commitCalls != 1 {
+		t.Fatalf("replay counts reopen first=%d second=%d commit first=%d second=%d",
+			firstUC.reopenCalls, secondUC.reopenCalls, firstUOW.commitCalls, secondUOW.commitCalls)
 	}
 }

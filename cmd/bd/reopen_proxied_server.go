@@ -2,9 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -33,23 +33,22 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("open unit of work: %v", err)
-	}
-	defer uw.Close(ctx)
 
 	outcomes := make([]reopenProxiedOutcome, 0, len(args))
 	reopenedIssues := []*types.Issue{}
 	hasError := false
 
 	for _, id := range args {
-		outcome, ok := reopenProxiedOne(ctx, uw, id, reason)
-		if !ok {
+		// Per-ID fresh UOW: commit-only retries cannot recover a lost Dolt snapshot.
+		outcome, ok, soft, err := reopenProxiedOneFresh(ctx, id, reason)
+		if err != nil {
+			return err
+		}
+		if soft {
 			hasError = true
 			continue
 		}
-		if !outcome.reopened {
+		if !ok || !outcome.reopened {
 			continue
 		}
 		outcomes = append(outcomes, outcome)
@@ -62,17 +61,8 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 			}
 			fmt.Printf("%s Reopened %s%s\n", ui.RenderAccent("↻"), outcome.id, suffix)
 		}
-	}
-
-	if len(outcomes) > 0 {
-		msg := reopenProxiedCommitMessage(outcomes)
-		if err := uow.CommitWithRetries(ctx, uw, msg); err != nil && !isDoltNothingToCommit(err) {
-			return HandleErrorRespectJSON("commit reopen: %v", err)
-		}
-		for _, o := range outcomes {
-			if err := fireProxiedReopenHooks(ctx, o.after); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: %s: %v\n", o.id, err)
-			}
+		if err := fireProxiedReopenHooks(ctx, outcome.after); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", outcome.id, err)
 		}
 	}
 
@@ -85,15 +75,50 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	return nil
 }
 
-func reopenProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string) (reopenProxiedOutcome, bool) {
+func reopenProxiedOneFresh(ctx context.Context, id, reason string) (reopenProxiedOutcome, bool, bool, error) {
+	var outcome reopenProxiedOutcome
+	err := uow.RunWithFreshUOWRetries(ctx, uowProvider, fmt.Sprintf("bd: reopen %s", id), func(ctx context.Context, uw uow.UnitOfWork) error {
+		outcome = reopenProxiedOutcome{}
+		o, ok, softFail := reopenProxiedOne(ctx, uw, id, reason)
+		if softFail {
+			return errProxiedSoftFailure
+		}
+		if !ok {
+			// already open: durable no-op, skip commit
+			outcome = o
+			return errProxiedNoCommit
+		}
+		if !o.reopened {
+			outcome = o
+			return errProxiedNoCommit
+		}
+		outcome = o
+		return nil
+	})
+	if errors.Is(err, errProxiedSoftFailure) {
+		return reopenProxiedOutcome{}, false, true, nil
+	}
+	if errors.Is(err, errProxiedNoCommit) {
+		return outcome, true, false, nil
+	}
+	if err != nil && !isDoltNothingToCommit(err) {
+		return reopenProxiedOutcome{}, false, false, HandleErrorRespectJSON("reopen %s: %v", id, err)
+	}
+	return outcome, true, false, nil
+}
+
+// reopenProxiedOne returns (outcome, reopenedOK, softFailure).
+// softFailure means not found / domain error already printed.
+// reopenedOK false with softFailure false means already open (not an error).
+func reopenProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string) (reopenProxiedOutcome, bool, bool) {
 	current, isWisp := proxiedResolveIssueOrWisp(ctx, uw, id)
 	if current == nil {
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-		return reopenProxiedOutcome{}, false
+		return reopenProxiedOutcome{}, false, true
 	}
 	if current.Status != types.StatusClosed {
 		fmt.Fprintf(os.Stderr, "%s is already %s\n", id, current.Status)
-		return reopenProxiedOutcome{id: id, before: current, after: current, reopened: false}, true
+		return reopenProxiedOutcome{id: id, before: current, after: current, reopened: false}, false, false
 	}
 
 	params := domain.ReopenIssueParams{Reason: reason}
@@ -108,7 +133,7 @@ func reopenProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error reopening %s: %v\n", id, err)
-		return reopenProxiedOutcome{}, false
+		return reopenProxiedOutcome{}, false, true
 	}
 
 	oldStatus := string(current.Status)
@@ -116,15 +141,7 @@ func reopenProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string)
 		oldStatus = "closed"
 	}
 	audit.LogFieldChange(id, "status", oldStatus, string(types.StatusOpen), actor, reason)
-	return reopenProxiedOutcome{id: id, before: current, after: res.Issue, reopened: res.Reopened}, true
-}
-
-func reopenProxiedCommitMessage(outcomes []reopenProxiedOutcome) string {
-	ids := make([]string, 0, len(outcomes))
-	for _, o := range outcomes {
-		ids = append(ids, o.id)
-	}
-	return "bd: reopen " + strings.Join(ids, ", ")
+	return reopenProxiedOutcome{id: id, before: current, after: res.Issue, reopened: res.Reopened}, true, false
 }
 
 func fireProxiedReopenHooks(ctx context.Context, after *types.Issue) error {
