@@ -43,10 +43,32 @@ title = "Routed work"
 	if err := os.WriteFile(filepath.Join(formulasDir, "mol-route.formula.toml"), []byte(formulaBody), 0644); err != nil {
 		t.Fatalf("write formula: %v", err)
 	}
+	otherDir := filepath.Join(sourceDir, "other-repo")
+	if err := os.MkdirAll(otherDir, 0750); err != nil {
+		t.Fatalf("create other rig: %v", err)
+	}
+	initGitRepoAt(t, otherDir)
+	runBDInit(t, bd, otherDir, "--prefix", "oth")
+	other := bdCreate(t, bd, otherDir, "Other routed target")
+	routes := "{\"prefix\":\"tgt-\",\"path\":\"target-repo\"}\n" +
+		"{\"prefix\":\"oth-\",\"path\":\"other-repo\"}\n"
+	if err := os.WriteFile(filepath.Join(sourceDir, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write two-rig routes: %v", err)
+	}
 
 	sourceBeadsDir := filepath.Join(sourceDir, ".beads")
+	otherBeadsDir := filepath.Join(otherDir, ".beads")
 	sourceBefore := embeddedCurrentCommit(t, sourceBeadsDir, "src")
 	targetBefore := embeddedCurrentCommit(t, targetBeadsDir, "tgt")
+	otherBefore := embeddedCurrentCommit(t, otherBeadsDir, "oth")
+	crossOut, crossErr := bdRunWithFlockRetry(t, bd, sourceDir, "mol", "bond", target.ID, other.ID, "--dry-run")
+	if crossErr == nil || !strings.Contains(string(crossOut), "different stores/rigs") {
+		t.Fatalf("cross-rig dry-run error = %v, output:\n%s", crossErr, crossOut)
+	}
+	assertEmbeddedHeadUnchanged(t, sourceBeadsDir, "src", sourceBefore, "cross-rig dry-run source")
+	assertEmbeddedHeadUnchanged(t, targetBeadsDir, "tgt", targetBefore, "cross-rig dry-run target")
+	assertEmbeddedHeadUnchanged(t, otherBeadsDir, "oth", otherBefore, "cross-rig dry-run other")
+
 	dryRunOut := bdCommand(t, bd, sourceDir, "mol", "bond", "mol-route", target.ID, "--type", "parallel", "--dry-run")
 	if !strings.Contains(dryRunOut, target.ID) {
 		t.Fatalf("dry-run did not resolve routed target %s:\n%s", target.ID, dryRunOut)

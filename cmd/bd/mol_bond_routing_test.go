@@ -22,10 +22,8 @@ import (
 // utils.ResolvePartialID against the local store only and never fell through to
 // the routing fallback that show/update/close use.
 //
-// resolveMolBondOperand now routes operand resolution through
-// resolveAndGetIssueForMutation, so an operand that exists only in a routed
-// store resolves and reports the routed store as its owner. The bond mutation
-// then runs against that store instead of the local one.
+// discoverMolBondOperand resolves both operands read-only and records their
+// logical store homes before the accepted target is reopened writable.
 //
 // The cases mirror TestResolveCloseTargets:
 //   - maintainer-mode local resolution (no routing involved)
@@ -33,22 +31,20 @@ import (
 func TestResolveMolBondOperandRouting(t *testing.T) {
 	cases := []struct {
 		name          string
-		role          string // git config beads.role value
-		enableRouting bool   // set routing.mode=auto + routing.contributor=<planningDir>
-		localSeed     string // issue ID to create in the primary (local) store, if non-empty
-		planningSeed  string // issue ID to create in the routed planning store, if non-empty
-		operand       string // argument to resolveMolBondOperand
-		wantRouted    bool   // expected molBondOperand.routed
-		wantReadOnly  bool   // expected mutation policy for the resolved store
-		wantStore     string // "local" (== primaryStore) or "planning" (routed handle)
+		role          string
+		enableRouting bool
+		localSeed     string
+		planningSeed  string
+		operand       string
+		wantForbidden bool
+		wantStore     string
 	}{
 		{
-			name:       "maintainer_local_issue",
-			role:       "maintainer",
-			localSeed:  "shared-local",
-			operand:    "shared-local",
-			wantRouted: false,
-			wantStore:  "local",
+			name:      "maintainer_local_issue",
+			role:      "maintainer",
+			localSeed: "shared-local",
+			operand:   "shared-local",
+			wantStore: "local",
 		},
 		{
 			name:          "contributor_routed_issue",
@@ -56,8 +52,7 @@ func TestResolveMolBondOperandRouting(t *testing.T) {
 			enableRouting: true,
 			planningSeed:  "shared-routed",
 			operand:       "shared-routed",
-			wantRouted:    true,
-			wantReadOnly:  true,
+			wantForbidden: true,
 			wantStore:     "planning",
 		},
 	}
@@ -91,7 +86,7 @@ func TestResolveMolBondOperandRouting(t *testing.T) {
 			if tc.planningSeed != "" {
 				planningStore := newTestStoreIsolatedDB(t, filepath.Join(planningDir, ".beads", "beads.db"), "shared")
 				seedIssue(t, ctx, planningStore, tc.planningSeed)
-				// Release the planning store so resolveMolBondOperand can open the
+				// Release the planning store so discovery can open the
 				// routed store through the normal command path.
 				if err := planningStore.Close(); err != nil {
 					t.Fatalf("close planning store: %v", err)
@@ -107,35 +102,30 @@ func TestResolveMolBondOperandRouting(t *testing.T) {
 				t.Fatalf("chdir repoDir: %v", err)
 			}
 
-			op, err := resolveMolBondOperand(ctx, primaryStore, tc.operand, nil)
+			disc, err := discoverMolBondOperand(ctx, primaryStore, tc.operand)
 			if err != nil {
-				t.Fatalf("resolveMolBondOperand(%q): %v", tc.operand, err)
+				t.Fatalf("discoverMolBondOperand(%q): %v", tc.operand, err)
 			}
-			defer op.Close()
-
-			if op.subgraph == nil || op.subgraph.Root == nil {
-				t.Fatalf("operand %q: missing resolved subgraph", tc.operand)
+			defer disc.Close()
+			if disc.issue == nil || disc.issue.ID != tc.operand || disc.formula != "" {
+				t.Fatalf("operand %q discovery = %#v", tc.operand, disc)
 			}
-			if op.subgraph.Root.ID != tc.operand {
-				t.Errorf("operand %q: Root.ID = %q, want %q", tc.operand, op.subgraph.Root.ID, tc.operand)
+			if disc.mutationForbidden != tc.wantForbidden {
+				t.Errorf("operand %q: mutationForbidden = %v, want %v", tc.operand, disc.mutationForbidden, tc.wantForbidden)
 			}
-			if op.cooked {
-				t.Errorf("operand %q: cooked = true, want false (it is an existing issue)", tc.operand)
-			}
-			if op.routed != tc.wantRouted {
-				t.Errorf("operand %q: routed = %v, want %v", tc.operand, op.routed, tc.wantRouted)
-			}
-			if op.readOnly != tc.wantReadOnly {
-				t.Errorf("operand %q: readOnly = %v, want %v", tc.operand, op.readOnly, tc.wantReadOnly)
-			}
-			if op.readOnly {
-				formula := &molBondOperand{cooked: true}
-				if _, err := pickBondStore(primaryStore, formula, op); err == nil || !strings.Contains(err.Error(), "auto-routing") {
-					t.Errorf("read-only auto-routed operand error = %v, want clear refusal", err)
+			if disc.mutationForbidden {
+				formula := &molBondDiscovery{operand: "mol-test", formula: "mol-test"}
+				if _, _, err := validateMolBondHomes(primaryStore, formula, disc); err == nil || !strings.Contains(err.Error(), "auto-routing") {
+					t.Errorf("forbidden auto-routed operand error = %v, want clear refusal", err)
 				}
 			}
-
-			assertStoreOrigin(t, tc.operand, tc.wantStore, op.store, primaryStore)
+			localKey := storeIdentityKey(primaryStore)
+			if tc.wantStore == "local" && disc.storeKey != localKey {
+				t.Errorf("operand %q storeKey = %q, want local %q", tc.operand, disc.storeKey, localKey)
+			}
+			if tc.wantStore == "planning" && disc.storeKey == localKey {
+				t.Errorf("operand %q unexpectedly resolved to local store", tc.operand)
+			}
 		})
 	}
 }
@@ -152,23 +142,36 @@ func TestMolBondPrefixRouting(t *testing.T) {
 		"mol": {"mol-polecat-work"},
 	})
 
-	opA, err := resolveMolBondOperand(ctx, townStore, "gt-first", nil)
+	discA, err := discoverMolBondOperand(ctx, townStore, "gt-first")
 	if err != nil {
-		t.Fatalf("resolve first routed operand: %v", err)
+		t.Fatalf("discover first routed operand: %v", err)
 	}
-	defer opA.Close()
-	opB, err := resolveMolBondOperandWithPreferredStore(ctx, townStore, opA, "gt-second", nil)
+	defer discA.Close()
+	discB, err := discoverMolBondOperand(ctx, townStore, "gt-second")
 	if err != nil {
-		t.Fatalf("resolve second routed operand: %v", err)
+		t.Fatalf("discover second routed operand: %v", err)
 	}
-	defer opB.Close()
-	if opA.store != opB.store {
-		t.Fatal("same-rig operands did not reuse one routed store handle")
-	}
-	active, err := pickBondStore(townStore, opA, opB)
+	defer discB.Close()
+	targetID, _, err := validateMolBondHomes(townStore, discA, discB)
 	if err != nil {
 		t.Fatalf("same-rig operands rejected as cross-store: %v", err)
 	}
+	discA.Close()
+	discB.Close()
+	routed, err := resolveAndGetIssueForMutation(ctx, townStore, targetID)
+	if err != nil {
+		t.Fatalf("open accepted target writable: %v", err)
+	}
+	defer routed.Close()
+	opA, err := materializeMolBondOperand(ctx, routed.Store, discA, nil)
+	if err != nil {
+		t.Fatalf("materialize first operand: %v", err)
+	}
+	opB, err := materializeMolBondOperand(ctx, routed.Store, discB, nil)
+	if err != nil {
+		t.Fatalf("materialize second operand: %v", err)
+	}
+	active := routed.Store
 	if _, err := bondMolMol(ctx, active, opA.subgraph.Root, opB.subgraph.Root, types.BondTypeSequential, "test"); err != nil {
 		t.Fatalf("bond same-rig operands: %v", err)
 	}
@@ -180,27 +183,40 @@ func TestMolBondPrefixRouting(t *testing.T) {
 		t.Fatalf("routed mutation landed incorrectly: dependencies=%v", deps)
 	}
 
-	crossA, err := resolveMolBondOperand(ctx, townStore, "gt-first", nil)
+	crossA, err := discoverMolBondOperand(ctx, townStore, "gt-first")
 	if err != nil {
-		t.Fatalf("resolve cross-store operand A: %v", err)
+		t.Fatalf("discover cross-store operand A: %v", err)
 	}
 	defer crossA.Close()
-	crossB, err := resolveMolBondOperandWithPreferredStore(ctx, townStore, crossA, "zz-other", nil)
+	crossB, err := discoverMolBondOperand(ctx, townStore, "zz-other")
 	if err != nil {
-		t.Fatalf("resolve cross-store operand B: %v", err)
+		t.Fatalf("discover cross-store operand B: %v", err)
 	}
 	defer crossB.Close()
-	if _, err := pickBondStore(townStore, crossA, crossB); err == nil || !strings.Contains(err.Error(), "different stores/rigs") {
+	if _, _, err := validateMolBondHomes(townStore, crossA, crossB); err == nil || !strings.Contains(err.Error(), "different stores/rigs") {
 		t.Fatalf("cross-store pair error = %v, want explicit rejection", err)
 	}
 
-	formulaLike, err := resolveMolBondOperand(ctx, townStore, "mol-polecat-work", nil)
+	formulaLike, err := discoverMolBondOperand(ctx, townStore, "mol-polecat-work")
 	if err != nil {
-		t.Fatalf("resolve formula-like routed issue: %v", err)
+		t.Fatalf("discover formula-like routed issue: %v", err)
 	}
 	defer formulaLike.Close()
-	if formulaLike.cooked || formulaLike.subgraph.Root.ID != "mol-polecat-work" {
-		t.Fatalf("formula-like issue did not retain issue-first semantics: cooked=%v root=%q", formulaLike.cooked, formulaLike.subgraph.Root.ID)
+	if formulaLike.issue == nil || formulaLike.issue.ID != "mol-polecat-work" || formulaLike.formula != "" {
+		t.Fatalf("formula-like issue did not retain issue-first semantics: %#v", formulaLike)
+	}
+
+	routesPath := filepath.Join(filepath.Dir(dbPath), "routes.jsonl")
+	routes, err := os.ReadFile(routesPath)
+	if err != nil {
+		t.Fatalf("read routes for failure case: %v", err)
+	}
+	routes = append(routes, []byte("{\"prefix\":\"bad-\",\"path\":\"missing-rig\"}\n")...)
+	if err := os.WriteFile(routesPath, routes, 0644); err != nil {
+		t.Fatalf("write failure route: %v", err)
+	}
+	if _, err := discoverMolBondOperand(ctx, townStore, "bad-target"); err == nil || !strings.Contains(err.Error(), "no dolt_database") {
+		t.Fatalf("matched-route failure = %v, want actionable target metadata error", err)
 	}
 }
 
@@ -245,23 +261,4 @@ func setupMolBondPrefixRouting(t *testing.T, rigs map[string][]string) (context.
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWD) })
 	return ctx, townStore
-}
-
-func assertStoreOrigin(t *testing.T, operand, want string, got, local storage.DoltStorage) {
-	t.Helper()
-	switch want {
-	case "local":
-		if got != local {
-			t.Errorf("operand %q: store should be the local primary store", operand)
-		}
-	case "planning":
-		if got == nil {
-			t.Errorf("operand %q: store is nil", operand)
-		}
-		if got == local {
-			t.Errorf("operand %q: store should be the routed planning store, not the local one", operand)
-		}
-	default:
-		t.Fatalf("operand %q: unknown wantStore %q", operand, want)
-	}
 }

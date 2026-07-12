@@ -17,6 +17,8 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
+var errRoutingUnavailable = errors.New("routing unavailable")
+
 // isNotFoundErr returns true if the error indicates the issue was not found.
 // This covers both storage.ErrNotFound (from GetIssue) and the plain error
 // from ResolvePartialID which doesn't wrap the sentinel.
@@ -32,12 +34,12 @@ func isNotFoundErr(err error) bool {
 
 // RoutedResult contains the result of a routed issue lookup
 type RoutedResult struct {
-	Issue      *types.Issue
-	Store      storage.DoltStorage // The store that contains this issue (may be routed)
-	Routed     bool                // true if the issue was found via routing
-	ReadOnly   bool                // true when routing policy forbids mutation of this store
-	ResolvedID string              // The resolved (full) issue ID
-	closeFn    func()              // Function to close routed storage (if any)
+	Issue             *types.Issue
+	Store             storage.DoltStorage // The store that contains this issue (may be routed)
+	Routed            bool                // true if the issue was found via routing
+	MutationForbidden bool                // true when routing policy forbids mutation of this store
+	ResolvedID        string              // The resolved (full) issue ID
+	closeFn           func()              // Function to close routed storage (if any)
 }
 
 // storeIdentityKey returns a stable logical identity for a store. Routed
@@ -96,6 +98,8 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	if isNotFoundErr(err) {
 		if prefixResult, prefixErr := resolveViaPrefixRoutingWithAccess(ctx, id, writablePrefixRoute); prefixErr == nil {
 			return prefixResult, nil
+		} else if !errors.Is(prefixErr, errRoutingUnavailable) && !isNotFoundErr(prefixErr) {
+			return nil, prefixErr
 		}
 	}
 
@@ -105,6 +109,8 @@ func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage
 	if isNotFoundErr(err) {
 		if autoResult, autoErr := resolveViaAutoRouting(ctx, localStore, id); autoErr == nil {
 			return autoResult, nil
+		} else if !errors.Is(autoErr, errRoutingUnavailable) && !isNotFoundErr(autoErr) {
+			return nil, autoErr
 		}
 	}
 
@@ -138,8 +144,11 @@ func resolveAndGetFromStore(ctx context.Context, s storage.DoltStorage, id strin
 // Returns a RoutedResult if the issue is found in the auto-routed store.
 func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
 	routedStore, routed, err := openRoutedReadStore(ctx, localStore)
-	if err != nil || !routed {
-		return nil, fmt.Errorf("no auto-routed store available")
+	if err != nil {
+		return nil, err
+	}
+	if !routed {
+		return nil, fmt.Errorf("%w: no auto-routed store available", errRoutingUnavailable)
 	}
 
 	result, err := resolveAndGetFromStore(ctx, routedStore, id, true)
@@ -147,7 +156,7 @@ func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, 
 		_ = routedStore.Close()
 		return nil, err
 	}
-	result.ReadOnly = true
+	result.MutationForbidden = true
 	result.closeFn = func() { _ = routedStore.Close() }
 	return result, nil
 }
@@ -180,19 +189,25 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 	// Extract prefix from the bead ID (e.g., "hr-" from "hr-8wn.1")
 	prefix := extractBeadPrefix(id)
 	if prefix == "" {
-		return nil, fmt.Errorf("no prefix in ID %q", id)
+		return nil, fmt.Errorf("%w: no prefix in ID %q", errRoutingUnavailable, id)
 	}
 
 	// Find the resolved beads directory (where routes.jsonl lives)
 	currentBeadsDir := resolveCommandBeadsDir(dbPath)
 	if currentBeadsDir == "" {
-		return nil, fmt.Errorf("no beads directory available")
+		return nil, fmt.Errorf("%w: no beads directory available", errRoutingUnavailable)
 	}
 
 	// Load routes from routes.jsonl
 	routes, err := loadPrefixRoutes(currentBeadsDir)
-	if err != nil || len(routes) == 0 {
-		return nil, fmt.Errorf("no routes available")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: no routes available", errRoutingUnavailable)
+		}
+		return nil, fmt.Errorf("loading routes: %w", err)
+	}
+	if len(routes) == 0 {
+		return nil, fmt.Errorf("%w: no routes available", errRoutingUnavailable)
 	}
 
 	// Find matching route for this prefix
@@ -204,12 +219,12 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 		}
 	}
 	if matchedRoute == nil {
-		return nil, fmt.Errorf("no route for prefix %q", prefix)
+		return nil, fmt.Errorf("%w: no route for prefix %q", errRoutingUnavailable, prefix)
 	}
 
 	// Skip if the route points to current directory (town-level, already checked)
 	if matchedRoute.Path == "." {
-		return nil, fmt.Errorf("route points to current database")
+		return nil, fmt.Errorf("%w: route points to current database", errRoutingUnavailable)
 	}
 
 	// Derive the town root from the current beads dir.
@@ -254,7 +269,6 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 		_ = targetStore.Close()
 		return nil, err
 	}
-	result.ReadOnly = !writable
 	result.closeFn = func() { _ = targetStore.Close() }
 
 	if os.Getenv("BD_DEBUG_ROUTING") != "" {
