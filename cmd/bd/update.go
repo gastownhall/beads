@@ -410,6 +410,14 @@ create, update, show, or close operation).`,
 				}
 				regularUpdates["metadata"] = merged
 			}
+			// GH#4541: --notes silently replaces existing notes, destroying
+			// append-only audit history that agent fleets rely on. Warn (but
+			// don't block) when a plain --notes overwrite would discard
+			// non-empty existing notes with a different value.
+			// --append-notes is exempt since it's additive by design.
+			if newNotes, ok := updates["notes"].(string); ok && issue.Notes != "" && newNotes != issue.Notes {
+				fmt.Fprintf(os.Stderr, "warning: %s: --notes replaced existing notes (use --append-notes to preserve history)\n", id)
+			}
 			// Handle append_notes: combine existing notes with new content
 			if appendNotes, ok := updates["append_notes"].(string); ok {
 				combined := issue.Notes

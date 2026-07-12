@@ -508,7 +508,7 @@ bd create [title] [flags]
       --mol-type string         Molecule type: swarm (multi-agent), patrol (recurring ops), work (default)
       --no-history              Skip Dolt commit history without making GC-eligible (for permanent agent beads)
       --no-inherit-labels       Don't inherit labels from parent issue
-      --notes string            Additional notes
+      --notes string            Additional notes (replaces existing notes; use --append-notes to append)
       --parent string           Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')
   -p, --priority string         Priority (0-4 or P0-P4, 0=highest) (default "2")
       --repo string             Target repository for issue (overrides auto-routing)
@@ -1569,7 +1569,7 @@ bd update [id...] [flags]
       --history                      Clear no-history flag (re-enable Dolt commit history)
       --metadata string              Set custom metadata (JSON string or @file.json to read from file)
       --no-history                   Mark issue as no-history (skip Dolt commits, not GC-eligible)
-      --notes string                 Additional notes
+      --notes string                 Additional notes (replaces existing notes; use --append-notes to append)
       --parent string                New parent issue ID (reparents the issue, use empty string to remove parent)
       --persistent                   Mark issue as persistent (promote wisp to regular issue)
   -p, --priority string              Priority (0-4 or P0-P4, 0=highest)

@@ -45,6 +45,21 @@ func bdUpdateFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
+// bdUpdateCapture runs "bd update" expecting success, returning stdout and
+// stderr separately (stdout may be JSON; warnings must not pollute it).
+func bdUpdateCapture(t *testing.T, bd, dir string, args ...string) (stdout, stderr string) {
+	t.Helper()
+	fullArgs := append([]string{"update"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	outBuf, errBuf, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd update %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, outBuf.String(), errBuf.String())
+	}
+	return outBuf.String(), errBuf.String()
+}
+
 func embeddedCurrentCommit(t *testing.T, beadsDir, database string) string {
 	t.Helper()
 	store, err := embeddeddolt.Open(t.Context(), beadsDir, database, "main")
@@ -330,6 +345,53 @@ func TestEmbeddedUpdate(t *testing.T) {
 		out := bdUpdateFail(t, bd, dir, issue.ID, "--notes", "x", "--append-notes", "y")
 		if !strings.Contains(out, "cannot specify both") {
 			t.Errorf("expected conflict error, got: %s", out)
+		}
+	})
+
+	// GH#4541: --notes silently replaces existing notes, destroying
+	// append-only audit history. bd update should warn (on stderr, never
+	// stdout) when a plain --notes overwrite discards non-empty existing
+	// notes with a different value, without blocking the update.
+	t.Run("update_notes_overwrite_warns", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes overwrite warn test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+		stdout, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "replacement notes")
+		wantWarn := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
+		if !strings.Contains(stderr, wantWarn) {
+			t.Errorf("expected stderr to contain %q, got: %s", wantWarn, stderr)
+		}
+		if strings.Contains(stdout, "warning:") {
+			t.Errorf("warning must not appear on stdout, got: %s", stdout)
+		}
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Notes != "replacement notes" {
+			t.Errorf("expected notes 'replacement notes', got %q", got.Notes)
+		}
+	})
+
+	t.Run("update_notes_on_empty_no_warn", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes empty no warn test", "--type", "task")
+		_, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "first notes")
+		if strings.Contains(stderr, "--notes replaced existing notes") {
+			t.Errorf("expected no overwrite warning when prior notes were empty, got stderr: %s", stderr)
+		}
+	})
+
+	t.Run("update_append_notes_no_warn", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Append notes no warn test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+		_, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--append-notes", "more")
+		if strings.Contains(stderr, "--notes replaced existing notes") {
+			t.Errorf("expected no overwrite warning for --append-notes, got stderr: %s", stderr)
+		}
+	})
+
+	t.Run("update_notes_same_value_no_warn", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes same value no warn test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "unchanged notes")
+		_, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "unchanged notes")
+		if strings.Contains(stderr, "--notes replaced existing notes") {
+			t.Errorf("expected no overwrite warning when new value equals existing, got stderr: %s", stderr)
 		}
 	})
 
