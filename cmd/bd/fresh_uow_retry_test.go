@@ -135,7 +135,6 @@ func (u *proxiedRetryTestIssueUC) ClaimReadyIssue(context.Context, types.WorkFil
 	return u.ready, nil
 }
 
-
 func (u *proxiedRetryTestIssueUC) CloseIssue(_ context.Context, _ string, _ domain.CloseIssueParams, _ string) (domain.CloseIssueResult, error) {
 	u.closeCalls++
 	if u.closed == nil {
@@ -243,7 +242,6 @@ func TestRunReadyProxiedClaimRetriesWholeOperationOnFreshUOW(t *testing.T) {
 		}
 	}
 }
-
 
 func TestCloseProxiedOneFreshRetriesWholeOperationOnFreshUOW(t *testing.T) {
 	t.Chdir(t.TempDir())
