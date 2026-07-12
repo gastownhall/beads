@@ -148,6 +148,7 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("ClaimAlreadyClaimed", func(t *testing.T) { testClaimAlreadyClaimed(t, factory) })
 	t.Run("ClaimNotClaimable", func(t *testing.T) { testClaimNotClaimable(t, factory) })
 	t.Run("ClaimReadyIssue", func(t *testing.T) { testClaimReadyIssue(t, factory) })
+	t.Run("ClaimReadyIssueLabelFilters", func(t *testing.T) { testClaimReadyIssueLabelFilters(t, factory) })
 	t.Run("ClaimReadyIssueConcurrentExclusivity", func(t *testing.T) { testClaimReadyIssueConcurrentExclusivity(t, factory) })
 	t.Run("HeartbeatRenewsLease", func(t *testing.T) { testHeartbeatRenewsLease(t, factory) })
 	t.Run("HeartbeatWisp", func(t *testing.T) { testHeartbeatWisp(t, factory) })
