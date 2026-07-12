@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -623,7 +622,7 @@ func validateBulkDepEdges(ctx context.Context, edges []bulkDepEdge) ([]bulkDepEd
 		current.Cleanups = append(current.Cleanups, fromCleanup)
 		current.IssueID = fromID
 		current.Store = fromStore
-		current.StoreKey = dependencyStoreKey(fromStore)
+		current.StoreKey = storeIdentityKey(fromStore)
 
 		if strings.HasPrefix(edge.DependsOnID, "external:") {
 			if err := validateExternalRef(edge.DependsOnID); err != nil {
@@ -672,18 +671,6 @@ func validateBulkDepEdges(ctx context.Context, edges []bulkDepEdge) ([]bulkDepEd
 
 func bulkDepValidationError(errs []string) error {
 	return fmt.Errorf("bulk dependency validation failed:\n  %s", strings.Join(errs, "\n  "))
-}
-
-func dependencyStoreKey(s storage.DoltStorage) string {
-	if locator, ok := storage.UnwrapStore(s).(storage.StoreLocator); ok {
-		if cliDir := strings.TrimSpace(locator.CLIDir()); cliDir != "" {
-			return "cli:" + filepath.Clean(cliDir)
-		}
-		if path := strings.TrimSpace(locator.Path()); path != "" {
-			return "path:" + filepath.Clean(path)
-		}
-	}
-	return fmt.Sprintf("instance:%p", s)
 }
 
 var depListCmd = &cobra.Command{

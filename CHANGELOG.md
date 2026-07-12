@@ -104,7 +104,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A bond whose two operands resolve to different stores is rejected rather than
   written to the wrong database. Same routing-parity fix as
   [#3608](https://github.com/gastownhall/beads/issues/3608) for `bd close`.
-  Fixes [#4714](https://github.com/gastownhall/beads/issues/4714).
+  Consolidates the complementary work in
+  [#4350](https://github.com/gastownhall/beads/pull/4350) and
+  [#4720](https://github.com/gastownhall/beads/pull/4720), following the live
+  Gas Town reproduction in
+  [gastown#4220](https://github.com/gastownhall/gastown/issues/4220). Fixes
+  [#4714](https://github.com/gastownhall/beads/issues/4714).
 
 ## [1.1.0] - 2026-07-04
 

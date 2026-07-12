@@ -35,8 +35,24 @@ type RoutedResult struct {
 	Issue      *types.Issue
 	Store      storage.DoltStorage // The store that contains this issue (may be routed)
 	Routed     bool                // true if the issue was found via routing
+	ReadOnly   bool                // true when routing policy forbids mutation of this store
 	ResolvedID string              // The resolved (full) issue ID
 	closeFn    func()              // Function to close routed storage (if any)
+}
+
+// storeIdentityKey returns a stable logical identity for a store. Routed
+// commands may open the same database more than once, so interface/pointer
+// equality is not sufficient for deciding whether two operands share a home.
+func storeIdentityKey(s storage.DoltStorage) string {
+	if locator, ok := storage.UnwrapStore(s).(storage.StoreLocator); ok {
+		if cliDir := strings.TrimSpace(locator.CLIDir()); cliDir != "" {
+			return "cli:" + filepath.Clean(cliDir)
+		}
+		if path := strings.TrimSpace(locator.Path()); path != "" {
+			return "path:" + filepath.Clean(path)
+		}
+	}
+	return fmt.Sprintf("instance:%p", s)
 }
 
 // Close closes any routed storage. Safe to call if Routed is false.
@@ -131,6 +147,7 @@ func resolveViaAutoRouting(ctx context.Context, localStore storage.DoltStorage, 
 		_ = routedStore.Close()
 		return nil, err
 	}
+	result.ReadOnly = true
 	result.closeFn = func() { _ = routedStore.Close() }
 	return result, nil
 }
@@ -237,6 +254,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 		_ = targetStore.Close()
 		return nil, err
 	}
+	result.ReadOnly = !writable
 	result.closeFn = func() { _ = targetStore.Close() }
 
 	if os.Getenv("BD_DEBUG_ROUTING") != "" {

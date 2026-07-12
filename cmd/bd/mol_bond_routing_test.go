@@ -4,11 +4,14 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestResolveMolBondOperandRouting is the regression test for the mol-bond
@@ -36,6 +39,7 @@ func TestResolveMolBondOperandRouting(t *testing.T) {
 		planningSeed  string // issue ID to create in the routed planning store, if non-empty
 		operand       string // argument to resolveMolBondOperand
 		wantRouted    bool   // expected molBondOperand.routed
+		wantReadOnly  bool   // expected mutation policy for the resolved store
 		wantStore     string // "local" (== primaryStore) or "planning" (routed handle)
 	}{
 		{
@@ -53,6 +57,7 @@ func TestResolveMolBondOperandRouting(t *testing.T) {
 			planningSeed:  "shared-routed",
 			operand:       "shared-routed",
 			wantRouted:    true,
+			wantReadOnly:  true,
 			wantStore:     "planning",
 		},
 	}
@@ -120,10 +125,126 @@ func TestResolveMolBondOperandRouting(t *testing.T) {
 			if op.routed != tc.wantRouted {
 				t.Errorf("operand %q: routed = %v, want %v", tc.operand, op.routed, tc.wantRouted)
 			}
+			if op.readOnly != tc.wantReadOnly {
+				t.Errorf("operand %q: readOnly = %v, want %v", tc.operand, op.readOnly, tc.wantReadOnly)
+			}
+			if op.readOnly {
+				formula := &molBondOperand{cooked: true}
+				if _, err := pickBondStore(primaryStore, formula, op); err == nil || !strings.Contains(err.Error(), "auto-routing") {
+					t.Errorf("read-only auto-routed operand error = %v, want clear refusal", err)
+				}
+			}
 
 			assertStoreOrigin(t, tc.operand, tc.wantStore, op.store, primaryStore)
 		})
 	}
+}
+
+// TestMolBondPrefixRouting exercises the explicit routes.jsonl path reported in
+// #4714 and gastownhall/gastown#4220. It proves that a same-rig pair shares one
+// writable handle and can mutate that rig, while a genuinely cross-rig pair is
+// rejected before mutation. It also guards issue-first resolution for IDs that
+// look like formula names.
+func TestMolBondPrefixRouting(t *testing.T) {
+	ctx, townStore := setupMolBondPrefixRouting(t, map[string][]string{
+		"gt":  {"gt-first", "gt-second"},
+		"zz":  {"zz-other"},
+		"mol": {"mol-polecat-work"},
+	})
+
+	opA, err := resolveMolBondOperand(ctx, townStore, "gt-first", nil)
+	if err != nil {
+		t.Fatalf("resolve first routed operand: %v", err)
+	}
+	defer opA.Close()
+	opB, err := resolveMolBondOperandWithPreferredStore(ctx, townStore, opA, "gt-second", nil)
+	if err != nil {
+		t.Fatalf("resolve second routed operand: %v", err)
+	}
+	defer opB.Close()
+	if opA.store != opB.store {
+		t.Fatal("same-rig operands did not reuse one routed store handle")
+	}
+	active, err := pickBondStore(townStore, opA, opB)
+	if err != nil {
+		t.Fatalf("same-rig operands rejected as cross-store: %v", err)
+	}
+	if _, err := bondMolMol(ctx, active, opA.subgraph.Root, opB.subgraph.Root, types.BondTypeSequential, "test"); err != nil {
+		t.Fatalf("bond same-rig operands: %v", err)
+	}
+	deps, err := active.GetDependenciesWithMetadata(ctx, "gt-second")
+	if err != nil {
+		t.Fatalf("read routed dependencies after bond: %v", err)
+	}
+	if len(deps) != 1 || deps[0].ID != "gt-first" {
+		t.Fatalf("routed mutation landed incorrectly: dependencies=%v", deps)
+	}
+
+	crossA, err := resolveMolBondOperand(ctx, townStore, "gt-first", nil)
+	if err != nil {
+		t.Fatalf("resolve cross-store operand A: %v", err)
+	}
+	defer crossA.Close()
+	crossB, err := resolveMolBondOperandWithPreferredStore(ctx, townStore, crossA, "zz-other", nil)
+	if err != nil {
+		t.Fatalf("resolve cross-store operand B: %v", err)
+	}
+	defer crossB.Close()
+	if _, err := pickBondStore(townStore, crossA, crossB); err == nil || !strings.Contains(err.Error(), "different stores/rigs") {
+		t.Fatalf("cross-store pair error = %v, want explicit rejection", err)
+	}
+
+	formulaLike, err := resolveMolBondOperand(ctx, townStore, "mol-polecat-work", nil)
+	if err != nil {
+		t.Fatalf("resolve formula-like routed issue: %v", err)
+	}
+	defer formulaLike.Close()
+	if formulaLike.cooked || formulaLike.subgraph.Root.ID != "mol-polecat-work" {
+		t.Fatalf("formula-like issue did not retain issue-first semantics: cooked=%v root=%q", formulaLike.cooked, formulaLike.subgraph.Root.ID)
+	}
+}
+
+func setupMolBondPrefixRouting(t *testing.T, rigs map[string][]string) (context.Context, storage.DoltStorage) {
+	t.Helper()
+	initConfigForTest(t)
+	ctx := context.Background()
+	townDir := t.TempDir()
+	townBeadsDir := filepath.Join(townDir, ".beads")
+	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
+		t.Fatalf("create town beads dir: %v", err)
+	}
+	townDBPath := filepath.Join(townBeadsDir, "dolt")
+	townStore := newTestStoreIsolatedDB(t, townDBPath, "hq")
+
+	var routes strings.Builder
+	for prefix, ids := range rigs {
+		rigPath := "rig-" + prefix
+		rigDBPath := filepath.Join(townDir, rigPath, ".beads", "dolt")
+		rigStore := newTestStoreIsolatedDB(t, rigDBPath, prefix)
+		for _, id := range ids {
+			seedIssue(t, ctx, rigStore, id)
+		}
+		if err := rigStore.Close(); err != nil {
+			t.Fatalf("close %s routed store: %v", prefix, err)
+		}
+		fmt.Fprintf(&routes, "{\"prefix\":%q,\"path\":%q}\n", prefix+"-", rigPath)
+	}
+	if err := os.WriteFile(filepath.Join(townBeadsDir, "routes.jsonl"), []byte(routes.String()), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	oldDBPath := dbPath
+	dbPath = townDBPath
+	t.Cleanup(func() { dbPath = oldDBPath })
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(townDir); err != nil {
+		t.Fatalf("chdir town: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	return ctx, townStore
 }
 
 func assertStoreOrigin(t *testing.T, operand, want string, got, local storage.DoltStorage) {

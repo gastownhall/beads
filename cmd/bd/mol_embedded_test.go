@@ -3,13 +3,87 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// TestEmbeddedMolBondRoutesFormulaMutationToTarget is the end-to-end
+// regression for #4350/#4714. A formula found in the town is bonded to an issue
+// that exists only in a prefix-routed rig; every spawned issue and dependency
+// must land in the rig database without advancing the town database.
+func TestEmbeddedMolBondRoutesFormulaMutationToTarget(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	sourceDir, targetDir, targetBeadsDir := setupRoutedEmbeddedRepo(t, bd, "src", "tgt")
+	target := bdCreate(t, bd, targetDir, "Routed bond target", "--type", "epic")
+
+	formulasDir := filepath.Join(sourceDir, ".beads", "formulas")
+	if err := os.MkdirAll(formulasDir, 0755); err != nil {
+		t.Fatalf("create formulas dir: %v", err)
+	}
+	formulaBody := `formula = "mol-route"
+description = "Routed bond regression"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Routed work"
+`
+	if err := os.WriteFile(filepath.Join(formulasDir, "mol-route.formula.toml"), []byte(formulaBody), 0644); err != nil {
+		t.Fatalf("write formula: %v", err)
+	}
+
+	sourceBeadsDir := filepath.Join(sourceDir, ".beads")
+	sourceBefore := embeddedCurrentCommit(t, sourceBeadsDir, "src")
+	targetBefore := embeddedCurrentCommit(t, targetBeadsDir, "tgt")
+	dryRunOut := bdCommand(t, bd, sourceDir, "mol", "bond", "mol-route", target.ID, "--type", "parallel", "--dry-run")
+	if !strings.Contains(dryRunOut, target.ID) {
+		t.Fatalf("dry-run did not resolve routed target %s:\n%s", target.ID, dryRunOut)
+	}
+	assertEmbeddedHeadUnchanged(t, sourceBeadsDir, "src", sourceBefore, "routed mol bond dry-run source")
+	assertEmbeddedHeadUnchanged(t, targetBeadsDir, "tgt", targetBefore, "routed mol bond dry-run target")
+
+	out := bdCommand(t, bd, sourceDir, "--json", "mol", "bond", "mol-route", target.ID, "--type", "parallel")
+
+	var result BondResult
+	jsonStart := strings.Index(out, "{")
+	if jsonStart < 0 {
+		t.Fatalf("bond output has no JSON object: %s", out)
+	}
+	if err := json.NewDecoder(strings.NewReader(out[jsonStart:])).Decode(&result); err != nil {
+		t.Fatalf("decode bond result: %v\n%s", err, out)
+	}
+	if result.ResultID != target.ID || result.Spawned == 0 || len(result.IDMapping) == 0 {
+		t.Fatalf("unexpected bond result: %+v", result)
+	}
+
+	assertEmbeddedHeadUnchanged(t, sourceBeadsDir, "src", sourceBefore, "routed mol bond source")
+	assertEmbeddedHeadAdvanced(t, targetBeadsDir, "tgt", targetBefore, "routed mol bond target")
+
+	targetStore := openStore(t, targetBeadsDir, "tgt")
+	for oldID, newID := range result.IDMapping {
+		if _, err := targetStore.GetIssue(t.Context(), newID); err != nil {
+			t.Errorf("spawned %s -> %s missing from target store: %v", oldID, newID, err)
+		}
+	}
+	sourceStore := openStore(t, sourceBeadsDir, "src")
+	for _, newID := range result.IDMapping {
+		if _, err := sourceStore.GetIssue(t.Context(), newID); err == nil {
+			t.Errorf("spawned issue %s leaked into source store", newID)
+		}
+	}
+}
 
 // TestSpawnMolecule_PreservesStepLabels verifies that a cooked formula with
 // per-step labels results in spawned issues whose labels are persisted to the

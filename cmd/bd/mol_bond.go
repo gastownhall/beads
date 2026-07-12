@@ -198,7 +198,7 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("%v", err)
 	}
 	defer opA.Close()
-	opB, err := resolveMolBondOperand(ctx, store, args[1], vars)
+	opB, err := resolveMolBondOperandWithPreferredStore(ctx, store, opA, args[1], vars)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
@@ -581,6 +581,7 @@ type molBondOperand struct {
 	cooked   bool                // cooked inline from a formula (no owning store yet)
 	store    storage.DoltStorage // store that owns the issue; nil for cooked formulas
 	routed   bool                // issue was found via routing, not the local store
+	readOnly bool                // routing policy forbids mutation of this store
 	closeFn  func()              // releases any routed store handle
 }
 
@@ -594,7 +595,7 @@ func (o *molBondOperand) Close() {
 // operandFromIssue wraps a resolved issue as a molBondOperand, loading the full
 // proto subgraph when the issue is a proto and wrapping a plain molecule as a
 // single-issue subgraph otherwise.
-func operandFromIssue(ctx context.Context, s storage.DoltStorage, issue *types.Issue, routed bool, closeFn func()) (*molBondOperand, error) {
+func operandFromIssue(ctx context.Context, s storage.DoltStorage, issue *types.Issue, routed, readOnly bool, closeFn func()) (*molBondOperand, error) {
 	if isProto(issue) {
 		subgraph, err := loadTemplateSubgraph(ctx, s, issue.ID)
 		if err != nil {
@@ -603,7 +604,7 @@ func operandFromIssue(ctx context.Context, s storage.DoltStorage, issue *types.I
 			}
 			return nil, fmt.Errorf("loading proto subgraph '%s': %w", issue.ID, err)
 		}
-		return &molBondOperand{subgraph: subgraph, store: s, routed: routed, closeFn: closeFn}, nil
+		return &molBondOperand{subgraph: subgraph, store: s, routed: routed, readOnly: readOnly, closeFn: closeFn}, nil
 	}
 	return &molBondOperand{
 		subgraph: &TemplateSubgraph{
@@ -611,9 +612,10 @@ func operandFromIssue(ctx context.Context, s storage.DoltStorage, issue *types.I
 			Issues:   []*types.Issue{issue},
 			IssueMap: map[string]*types.Issue{issue.ID: issue},
 		},
-		store:   s,
-		routed:  routed,
-		closeFn: closeFn,
+		store:    s,
+		routed:   routed,
+		readOnly: readOnly,
+		closeFn:  closeFn,
 	}, nil
 }
 
@@ -631,7 +633,7 @@ func operandFromIssue(ctx context.Context, s storage.DoltStorage, issue *types.I
 func resolveMolBondOperand(ctx context.Context, localStore storage.DoltStorage, operand string, vars map[string]string) (*molBondOperand, error) {
 	rr, err := resolveAndGetIssueForMutation(ctx, localStore, operand)
 	if err == nil {
-		return operandFromIssue(ctx, rr.Store, rr.Issue, rr.Routed, rr.Close)
+		return operandFromIssue(ctx, rr.Store, rr.Issue, rr.Routed, rr.ReadOnly, rr.Close)
 	}
 	if !isNotFoundErr(err) {
 		return nil, err
@@ -646,6 +648,24 @@ func resolveMolBondOperand(ctx context.Context, localStore storage.DoltStorage, 
 		return nil, fmt.Errorf("'%s' not found as issue or formula: %w", operand, cookErr)
 	}
 	return &molBondOperand{subgraph: subgraph, cooked: true}, nil
+}
+
+// resolveMolBondOperandWithPreferredStore preserves the single-work-store
+// behavior introduced by #4350. Once the first issue operand pins a store, try
+// the second operand there before opening another routed handle. This lets two
+// issues in the same routed database share one handle while still falling back
+// to normal routing so a genuinely cross-store pair can be rejected explicitly.
+func resolveMolBondOperandWithPreferredStore(ctx context.Context, localStore storage.DoltStorage, preferred *molBondOperand, operand string, vars map[string]string) (*molBondOperand, error) {
+	if preferred != nil && preferred.store != nil {
+		rr, err := resolveAndGetFromStore(ctx, preferred.store, operand, preferred.routed)
+		if err == nil {
+			return operandFromIssue(ctx, preferred.store, rr.Issue, preferred.routed, preferred.readOnly, nil)
+		}
+		if !isNotFoundErr(err) {
+			return nil, err
+		}
+	}
+	return resolveMolBondOperand(ctx, localStore, operand, vars)
 }
 
 // pickBondStore returns the store the bond mutation must run against.
@@ -663,12 +683,15 @@ func pickBondStore(localStore storage.DoltStorage, a, b *molBondOperand) (storag
 		if op.cooked || op.store == nil {
 			continue
 		}
+		if op.readOnly {
+			return nil, fmt.Errorf("cannot bond issue %s: contributor auto-routing opened its store read-only; run the bond from the project that owns the issue", op.subgraph.Root.ID)
+		}
 		if !pinned {
 			active = op.store
 			pinned = true
 			continue
 		}
-		if op.store != active {
+		if storeIdentityKey(op.store) != storeIdentityKey(active) {
 			return nil, fmt.Errorf("cannot bond operands that live in different stores/rigs; run the bond from the rig that owns them")
 		}
 	}
