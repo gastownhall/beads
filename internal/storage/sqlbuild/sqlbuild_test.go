@@ -116,6 +116,53 @@ func TestBuildReadyWorkWhereBatchesIDSets(t *testing.T) {
 	}
 }
 
+// wy-jpd3.2: --label-any was silently dropped on the ready/claim path (with or
+// without --parent). BuildReadyWorkWhere must now emit an OR-set membership
+// clause for LabelsAny that AND-combines with the AND-set Labels and the parent
+// filter, so an atomic claim is actually fenced by the label filter it names.
+func TestBuildReadyWorkWhereLabelsAny(t *testing.T) {
+	t.Parallel()
+
+	parent := "wy-jpd3"
+	filter := types.WorkFilter{
+		Labels:    []string{"tier:opus"},
+		LabelsAny: []string{"lane-a", "lane-c"},
+		ParentID:  &parent,
+	}
+	where, args, err := BuildReadyWorkWhere(filter, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// OR-set: one subquery with an IN over all --label-any values.
+	wantAny := "id IN (SELECT issue_id FROM " + IssuesFilterTables.Labels + " WHERE label IN (?, ?))"
+	if !strings.Contains(where, wantAny) {
+		t.Errorf("LabelsAny OR clause missing.\n where = %s\n want substring = %s", where, wantAny)
+	}
+	// AND-set still emits its own per-label subquery (equality, not IN).
+	wantAnd := "id IN (SELECT issue_id FROM " + IssuesFilterTables.Labels + " WHERE label = ?)"
+	if !strings.Contains(where, wantAnd) {
+		t.Errorf("Labels AND clause missing.\n where = %s\n want substring = %s", where, wantAnd)
+	}
+	// Parent filter must survive alongside the label clauses.
+	if !strings.Contains(where, "LIKE CONCAT(?, '.%')") {
+		t.Errorf("parent filter clause missing when combined with labels.\n where = %s", where)
+	}
+	// The label + parent args land in filter order (AND labels, then LabelsAny
+	// values, then the parent LIKE arg) as the tail of the arg list — the
+	// default issue_type exclusion prepends its own args.
+	wantTail := []interface{}{"tier:opus", "lane-a", "lane-c", parent}
+	if len(args) < len(wantTail) {
+		t.Fatalf("args = %v, want at least %d trailing values %v", args, len(wantTail), wantTail)
+	}
+	tail := args[len(args)-len(wantTail):]
+	for i := range wantTail {
+		if tail[i] != wantTail[i] {
+			t.Errorf("tail[%d] = %v, want %v (full args: %v)", i, tail[i], wantTail[i], args)
+		}
+	}
+}
+
 func TestSearchCountsSQLShape(t *testing.T) {
 	t.Parallel()
 

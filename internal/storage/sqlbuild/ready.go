@@ -141,6 +141,19 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 			args = append(args, label)
 		}
 	}
+	// LabelsAny is an OR-set: an issue qualifies if it carries AT LEAST ONE of
+	// the labels. Previously this clause was absent entirely, so --label-any was
+	// silently dropped on the ready/claim path (with or without --parent) — a
+	// worker believed it was fenced when it was not. It AND-combines with Labels
+	// (the flag help promises "Can combine with --label").
+	if len(filter.LabelsAny) > 0 {
+		placeholders := make([]string, len(filter.LabelsAny))
+		for i, label := range filter.LabelsAny {
+			placeholders[i] = "?"
+			args = append(args, label)
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label IN (%s))", tables.Labels, strings.Join(placeholders, ", ")))
+	}
 	if len(filter.ExcludeLabels) > 0 {
 		placeholders := make([]string, len(filter.ExcludeLabels))
 		for i, label := range filter.ExcludeLabels {

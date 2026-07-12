@@ -42,6 +42,7 @@ func TestAppend_ConcurrentWritersUniqueIDs(t *testing.T) {
 		t.Fatalf("write metadata.json: %v", err)
 	}
 	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BD_AUDIT_ENABLED", "1")
 
 	const (
 		writers          = 8
