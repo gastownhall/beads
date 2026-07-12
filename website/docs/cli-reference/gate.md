@@ -164,12 +164,16 @@ bd gate discover [flags]
 
 ### bd gate list
 
-List all gate issues in the current beads database.
+List gate issues.
+
+With no argument, lists all gate issues in the current beads database.
+With an [issue-id] argument, lists ONLY the gates that block that issue
+(its own dependency gates) — not every gate in the database.
 
 By default, shows only open gates. Use --all to include closed gates.
 
 ```
-bd gate list [flags]
+bd gate list [issue-id] [flags]
 ```
 
 **Flags:**
