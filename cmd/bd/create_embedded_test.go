@@ -481,6 +481,43 @@ func TestEmbeddedCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("default_status_config_applies", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "dfb")
+		bdConfig(t, bd, dir, "set", "status.default", "blocked")
+		issue := bdCreate(t, bd, dir, "Default-status issue")
+		if issue.Status != types.StatusBlocked {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusBlocked)
+		}
+	})
+
+	t.Run("default_status_flag_wins", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "dfw")
+		bdConfig(t, bd, dir, "set", "status.default", "blocked")
+		// Use in_progress (not the built-in 'open' fallback) so this proves the
+		// flag beats the default rather than passing on the fallback path.
+		issue := bdCreate(t, bd, dir, "Flag beats default", "--status", "in_progress")
+		if issue.Status != types.StatusInProgress {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusInProgress)
+		}
+	})
+
+	t.Run("default_status_unset_falls_back_to_open", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "dfu")
+		issue := bdCreate(t, bd, dir, "No default configured")
+		if issue.Status != types.StatusOpen {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusOpen)
+		}
+	})
+
+	t.Run("default_status_invalid", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "dfi")
+		bdConfig(t, bd, dir, "set", "status.default", "not_a_status")
+		out := bdCreateFail(t, bd, dir, "Invalid default status issue")
+		if !strings.Contains(out, `invalid status "not_a_status"`) {
+			t.Fatalf("expected invalid status error, got:\n%s", out)
+		}
+	})
+
 	t.Run("ephemeral", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ep")
 		issue := bdCreate(t, bd, dir, "Ephemeral issue", "--ephemeral")

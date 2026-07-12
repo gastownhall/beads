@@ -117,6 +117,94 @@ func TestBuildCreateIssueFromInput_ExplicitStatusWinsOverDefer(t *testing.T) {
 	}
 }
 
+func TestBuildCreateIssueFromInput_DefaultStatusPrecedence(t *testing.T) {
+	t.Run("config_default_applies_without_flag_or_defer", func(t *testing.T) {
+		got := buildCreateIssueFromInput(createInput{
+			title:         "T",
+			priority:      2,
+			issueType:     "task",
+			defaultStatus: "blocked",
+		})
+		if got.Status != types.StatusBlocked {
+			t.Errorf("Status = %q, want %q", got.Status, types.StatusBlocked)
+		}
+	})
+
+	t.Run("defer_beats_config_default", func(t *testing.T) {
+		deferUntil := time.Now().UTC().Add(24 * time.Hour)
+		got := buildCreateIssueFromInput(createInput{
+			title:         "T",
+			priority:      2,
+			issueType:     "task",
+			defaultStatus: "blocked",
+			deferUntil:    &deferUntil,
+		})
+		if got.Status != types.StatusDeferred {
+			t.Errorf("Status = %q, want %q", got.Status, types.StatusDeferred)
+		}
+	})
+
+	t.Run("explicit_status_beats_config_default_and_defer", func(t *testing.T) {
+		deferUntil := time.Now().UTC().Add(24 * time.Hour)
+		got := buildCreateIssueFromInput(createInput{
+			title:         "T",
+			priority:      2,
+			issueType:     "task",
+			status:        "in_progress",
+			defaultStatus: "blocked",
+			deferUntil:    &deferUntil,
+		})
+		if got.Status != types.StatusInProgress {
+			t.Errorf("Status = %q, want %q", got.Status, types.StatusInProgress)
+		}
+	})
+}
+
+// TestBuildCreateIssue_DefaultStatusPrecedence covers the embedded/direct create
+// path's builder, mirroring the proxied buildCreateIssueFromInput coverage above.
+func TestBuildCreateIssue_DefaultStatusPrecedence(t *testing.T) {
+	t.Run("config_default_applies_without_flag_or_defer", func(t *testing.T) {
+		got := buildCreateIssue(createIssueParams{
+			Title:         "T",
+			Priority:      2,
+			IssueType:     types.TypeTask,
+			DefaultStatus: "blocked",
+		})
+		if got.Status != types.StatusBlocked {
+			t.Errorf("Status = %q, want %q", got.Status, types.StatusBlocked)
+		}
+	})
+
+	t.Run("defer_beats_config_default", func(t *testing.T) {
+		deferUntil := time.Now().UTC().Add(24 * time.Hour)
+		got := buildCreateIssue(createIssueParams{
+			Title:         "T",
+			Priority:      2,
+			IssueType:     types.TypeTask,
+			DefaultStatus: "blocked",
+			DeferUntil:    &deferUntil,
+		})
+		if got.Status != types.StatusDeferred {
+			t.Errorf("Status = %q, want %q", got.Status, types.StatusDeferred)
+		}
+	})
+
+	t.Run("explicit_status_beats_config_default_and_defer", func(t *testing.T) {
+		deferUntil := time.Now().UTC().Add(24 * time.Hour)
+		got := buildCreateIssue(createIssueParams{
+			Title:         "T",
+			Priority:      2,
+			IssueType:     types.TypeTask,
+			InitialStatus: "in_progress",
+			DefaultStatus: "blocked",
+			DeferUntil:    &deferUntil,
+		})
+		if got.Status != types.StatusInProgress {
+			t.Errorf("Status = %q, want %q", got.Status, types.StatusInProgress)
+		}
+	})
+}
+
 func TestMaterializeGraphNodeIssue_DefaultsAndOpts(t *testing.T) {
 	t.Run("type and priority defaults", func(t *testing.T) {
 		issue, err := materializeGraphNodeIssue(GraphApplyNode{Key: "n", Title: "N"}, createInput{createdBy: "t"})

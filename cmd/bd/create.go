@@ -165,17 +165,27 @@ var createCmd = &cobra.Command{
 		issueType, _ := cmd.Flags().GetString("type")
 		assignee, _ := cmd.Flags().GetString("assignee")
 		statusFlag, _ := cmd.Flags().GetString("status")
-		if statusFlag != "" {
+		// store is nil for `create --repo=<remote URL>` with no local
+		// .beads/; fall back to built-in statuses only.
+		var defaultStatus string
+		if store != nil {
+			if ds, err := store.GetConfig(rootCtx, "status.default"); err == nil {
+				defaultStatus = strings.TrimSpace(ds)
+			}
+		}
+		if statusFlag != "" || defaultStatus != "" {
 			var customStatuses []string
-			// store is nil for `create --repo=<remote URL>` with no local
-			// .beads/; fall back to built-in statuses only.
 			if store != nil {
 				if cs, err := store.GetCustomStatuses(rootCtx); err == nil {
 					customStatuses = cs
 				}
 			}
-			if !types.Status(statusFlag).IsValidWithCustom(customStatuses) {
-				return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", statusFlag)
+			if statusFlag != "" {
+				if !types.Status(statusFlag).IsValidWithCustom(customStatuses) {
+					return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", statusFlag)
+				}
+			} else if !types.Status(defaultStatus).IsValidWithCustom(customStatuses) {
+				return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", defaultStatus)
 			}
 		}
 
@@ -361,6 +371,7 @@ var createCmd = &cobra.Command{
 				MolType:            molType,
 				WispType:           wispType,
 				InitialStatus:      statusFlag,
+				DefaultStatus:      defaultStatus,
 				DueAt:              dueAt,
 				DeferUntil:         deferUntil,
 				Metadata:           metadata,
@@ -521,6 +532,7 @@ var createCmd = &cobra.Command{
 			Target:             eventTarget,
 			Payload:            eventPayload,
 			InitialStatus:      statusFlag,
+			DefaultStatus:      defaultStatus,
 			DueAt:              dueAt,
 			DeferUntil:         deferUntil,
 			Metadata:           metadata,
@@ -746,6 +758,7 @@ type createIssueParams struct {
 	Target             string
 	Payload            string
 	InitialStatus      string
+	DefaultStatus      string
 	DueAt              *time.Time
 	DeferUntil         *time.Time
 	Metadata           json.RawMessage
@@ -758,6 +771,9 @@ func buildCreateIssue(params createIssueParams) *types.Issue {
 	}
 
 	status := types.StatusOpen
+	if params.DefaultStatus != "" {
+		status = types.Status(params.DefaultStatus)
+	}
 	if params.InitialStatus != "" {
 		status = types.Status(params.InitialStatus)
 	} else if params.DeferUntil != nil && params.DeferUntil.After(time.Now()) {
