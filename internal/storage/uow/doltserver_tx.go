@@ -25,15 +25,29 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 		return errors.New("uow: commit: already done")
 	}
 	_, err := t.conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?);", message)
-	if err != nil {
-		// Leave the transaction open so Close can roll it back with its bounded,
-		// cancellation-independent cleanup context. Fresh-UOW retries always open
-		// a new unit of work; commit-only retry on this session is not used.
+	if err == nil {
+		t.done = true
+		t.releaseConn()
+		return nil
+	}
+	if isSerializationError(err) {
+		// Serialization failures guarantee the transaction was already rolled
+		// back by the engine. Leave the session for CommitWithRetries on this
+		// UOW, or for Close cleanup when RunWithFreshUOWRetries opens a new UOW.
 		return err
 	}
+	// Non-serialization DOLT_COMMIT failure leaves the transaction open on the
+	// pinned session. Roll it back before releasing the connection so the next
+	// borrower cannot inherit and implicitly commit the orphaned writes. If the
+	// rollback also fails the session state is unknown, so poison the connection
+	// and let the pool discard it instead of handing it out again.
 	t.done = true
-	t.releaseConn()
-	return nil
+	if rbErr := t.rollbackConn(ctx); rbErr != nil {
+		t.poisonConn()
+	} else {
+		t.releaseConn()
+	}
+	return err
 }
 
 func (t *doltServerTx) Rollback(ctx context.Context) error {
