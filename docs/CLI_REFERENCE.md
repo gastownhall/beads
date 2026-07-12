@@ -2763,6 +2763,23 @@ Custom Status States:
   This enables issues to use statuses like 'awaiting_review' in addition to
   the built-in statuses (open, in_progress, blocked, deferred, closed).
 
+  Default Initial Status:
+    Set status.default to change the status new issues receive from a
+    single-issue 'bd create' when no explicit --status flag is given.
+    Precedence: an explicit --status flag wins, then a --defer-derived
+    'deferred', then status.default, then the built-in 'open'. The configured
+    value must be a built-in status or a configured custom status; it is
+    validated when 'bd create' runs.
+
+    Scope: this applies only to single-issue 'bd create'. Batch create
+    (--file / --graph), cross-repo routing (--repo and contributor/maintainer
+    auto-routing), and the sibling commands 'bd q', 'bd create-form',
+    'bd batch create', and 'bd todo add' intentionally still start issues in
+    'open' and do not consult status.default.
+
+    Example:
+      bd config set status.default backlog
+
 Suppressing Doctor Warnings:
   Suppress specific bd doctor warnings by check name slug:
     bd config set doctor.suppress.pending-migrations true

@@ -24,6 +24,7 @@ type createInput struct {
 	parentID           string
 	issueType          string
 	status             string
+	defaultStatus      string
 	priority           int
 	assignee           string
 	externalRef        string

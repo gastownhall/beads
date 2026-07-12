@@ -73,41 +73,6 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		return HandleError("%v", err)
 	}
 
-	if in.dryRun {
-		previewLabels := in.labels
-		if in.parentID != "" {
-			if uowProvider == nil {
-				return HandleError("proxied-server UOW provider not initialized")
-			}
-			dryUW, err := uowProvider.NewUOW(ctx)
-			if err != nil {
-				return HandleError("open unit of work: %v", err)
-			}
-			if _, err := dryUW.IssueUseCase().GetIssue(ctx, in.parentID); err != nil {
-				dryUW.Close(ctx)
-				return HandleError("parent issue %s not found: %v", in.parentID, err)
-			}
-			if !in.noInheritLabels {
-				inherited, lerr := dryUW.LabelUseCase().GetLabels(ctx, in.parentID)
-				if lerr != nil {
-					dryUW.Close(ctx)
-					return HandleError("dry-run inherit labels: %v", lerr)
-				}
-				previewLabels = mergeCreateLabels(in.labels, inherited)
-			}
-			dryUW.Close(ctx)
-		}
-		previewIssue := buildCreateIssueFromInput(in)
-		if in.jsonOutput {
-			if err := outputJSON(previewIssue); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			}
-		} else {
-			renderCreateDryRunPreview(previewIssue, previewLabels, in.deps)
-		}
-		return nil
-	}
-
 	uw, cctx, err := proxiedOpenUOW(ctx)
 	if err != nil {
 		return err
@@ -121,15 +86,55 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 			return HandleError("invalid type %q (allowed: built-ins plus configured custom types)", in.issueType)
 		}
 	}
-	if in.status != "" {
+	// Resolve and validate status.default before the dry-run preview so the
+	// preview reflects the same initial status the real create would apply and
+	// an invalid status.default is caught in --dry-run too. This mirrors the
+	// embedded path, which resolves the default before its own dry-run render.
+	defaultStatus, err := uw.ConfigUseCase().GetConfig(ctx, "status.default")
+	if err != nil {
+		return HandleError("failed to get status.default config: %v", err)
+	}
+	in.defaultStatus = strings.TrimSpace(defaultStatus)
+	if in.status != "" || in.defaultStatus != "" {
 		customStatuses, err := uw.ConfigUseCase().GetCustomStatuses(ctx)
 		if err != nil {
 			return HandleError("failed to get custom statuses: %v", err)
 		}
-		if !types.Status(in.status).IsValidWithCustom(types.CustomStatusNames(customStatuses)) {
-			return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", in.status)
+		names := types.CustomStatusNames(customStatuses)
+		if in.status != "" {
+			if !types.Status(in.status).IsValidWithCustom(names) {
+				return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", in.status)
+			}
+		} else if !types.Status(in.defaultStatus).IsValidWithCustom(names) {
+			return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", in.defaultStatus)
 		}
 	}
+
+	if in.dryRun {
+		previewLabels := in.labels
+		if in.parentID != "" {
+			if _, err := uw.IssueUseCase().GetIssue(ctx, in.parentID); err != nil {
+				return HandleError("parent issue %s not found: %v", in.parentID, err)
+			}
+			if !in.noInheritLabels {
+				inherited, lerr := uw.LabelUseCase().GetLabels(ctx, in.parentID)
+				if lerr != nil {
+					return HandleError("dry-run inherit labels: %v", lerr)
+				}
+				previewLabels = mergeCreateLabels(in.labels, inherited)
+			}
+		}
+		previewIssue := buildCreateIssueFromInput(in)
+		if in.jsonOutput {
+			if err := outputJSON(previewIssue); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			}
+		} else {
+			renderCreateDryRunPreview(previewIssue, previewLabels, in.deps)
+		}
+		return nil
+	}
+
 	if in.explicitID != "" {
 		effectivePrefix := overlayYAMLPrefix(cctx.IssuePrefix)
 		if err := validation.ValidateIDPrefixAllowed(in.explicitID, effectivePrefix, cctx.AllowedPrefixes, in.force); err != nil {
@@ -222,6 +227,7 @@ func buildCreateIssueFromInput(in createInput) *types.Issue {
 		Target:             in.eventTarget,
 		Payload:            in.eventPayload,
 		InitialStatus:      in.status,
+		DefaultStatus:      in.defaultStatus,
 		DueAt:              in.dueAt,
 		DeferUntil:         in.deferUntil,
 		Metadata:           in.metadata,

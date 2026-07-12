@@ -645,3 +645,63 @@ A new feature
 		}
 	})
 }
+
+// TestProxiedServerCreate_DefaultStatus exercises the proxied create path's
+// status.default wiring end-to-end (config read -> validate -> build in
+// runCreateProxiedSingle), which the builder-only unit tests do not cover. It
+// mirrors the embedded TestEmbeddedCreate/default_status_* coverage.
+func TestProxiedServerCreate_DefaultStatus(t *testing.T) {
+	requireProxiedServerEnv(t)
+
+	bd := buildEmbeddedBD(t)
+
+	t.Run("config_applies", func(t *testing.T) {
+		p := bdProxiedInit(t, bd, "pds")
+		bdProxiedConfig(t, bd, p.dir, "set", "status.default", "blocked")
+		issue := bdProxiedCreate(t, bd, p.dir, "Default-status issue")
+		if issue.Status != types.StatusBlocked {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusBlocked)
+		}
+	})
+
+	t.Run("flag_wins", func(t *testing.T) {
+		p := bdProxiedInit(t, bd, "pdw")
+		bdProxiedConfig(t, bd, p.dir, "set", "status.default", "blocked")
+		// Use in_progress (not the built-in 'open' fallback) so this proves the
+		// flag beats the default rather than passing on the fallback path.
+		issue := bdProxiedCreate(t, bd, p.dir, "Flag beats default", "--status", "in_progress")
+		if issue.Status != types.StatusInProgress {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusInProgress)
+		}
+	})
+
+	t.Run("invalid_default", func(t *testing.T) {
+		p := bdProxiedInit(t, bd, "pdi")
+		bdProxiedConfig(t, bd, p.dir, "set", "status.default", "not_a_status")
+		out := bdProxiedCreateFail(t, bd, p.dir, "Invalid default status issue")
+		if !strings.Contains(out, `invalid status "not_a_status"`) {
+			t.Fatalf("expected invalid status error, got:\n%s", out)
+		}
+	})
+
+	t.Run("dry_run_reflects_default", func(t *testing.T) {
+		p := bdProxiedInit(t, bd, "pdd")
+		bdProxiedConfig(t, bd, p.dir, "set", "status.default", "blocked")
+		out, err := bdProxiedRun(t, bd, p.dir, "create", "--dry-run", "Dry run default", "--json")
+		if err != nil {
+			t.Fatalf("bd create --dry-run failed: %v\n%s", err, out)
+		}
+		preview := parseIssueJSON(t, out)
+		if preview.Status != types.StatusBlocked {
+			t.Errorf("dry-run preview status: got %q, want %q (preview must reflect status.default)", preview.Status, types.StatusBlocked)
+		}
+		db := openProxiedDB(t, p)
+		var count int
+		if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
+			t.Fatalf("query issues: %v", err)
+		}
+		if count != 0 {
+			t.Errorf("expected dry-run to persist nothing, found %d issues", count)
+		}
+	})
+}
