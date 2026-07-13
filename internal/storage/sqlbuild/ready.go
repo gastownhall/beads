@@ -144,6 +144,15 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 			whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
 		}
 	}
+	for start := 0; start < len(filter.ExcludeIDs); start += QueryBatchSize {
+		end := start + QueryBatchSize
+		if end > len(filter.ExcludeIDs) {
+			end = len(filter.ExcludeIDs)
+		}
+		placeholders, batchArgs := InPlaceholders(filter.ExcludeIDs[start:end])
+		args = append(args, batchArgs...)
+		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
+	}
 
 	if len(filter.Labels) > 0 {
 		for _, label := range filter.Labels {

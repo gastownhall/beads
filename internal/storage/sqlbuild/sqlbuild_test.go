@@ -1,6 +1,7 @@
 package sqlbuild
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -159,6 +160,30 @@ func TestBuildReadyWorkWhereBatchesIDSets(t *testing.T) {
 	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
 	if len(args) != wantArgs {
 		t.Errorf("args = %d, want %d", len(args), wantArgs)
+	}
+}
+
+func TestBuildReadyWorkWhereAppliesPolicyIDExclusions(t *testing.T) {
+	t.Parallel()
+
+	ids := make([]string, QueryBatchSize+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("be-external-%d", i)
+	}
+	where, args, err := BuildReadyWorkWhere(
+		types.WorkFilter{ExcludeIDs: ids},
+		IssuesFilterTables,
+		ReadyWorkWhereInputs{},
+	)
+	if err != nil {
+		t.Fatalf("BuildReadyWorkWhere: %v", err)
+	}
+	if got := strings.Count(where, "id NOT IN ("); got != 2 {
+		t.Fatalf("external policy exclusions produced %d NOT IN clauses, want 2", got)
+	}
+	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
+	if len(args) != wantArgs {
+		t.Fatalf("args = %d, want %d", len(args), wantArgs)
 	}
 }
 

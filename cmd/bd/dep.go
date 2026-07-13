@@ -1288,7 +1288,7 @@ func renderTree(tree []*types.TreeNode, maxDepth int, direction string) {
 	if root != nil {
 		hasOpenBlockers := false
 		for _, child := range children[root.ID] {
-			if (child.Status == types.StatusOpen || child.Status == types.StatusInProgress) &&
+			if child.Status != types.StatusClosed && child.Status != types.StatusPinned &&
 				child.EdgeFromParent.IsBlockingEdge() {
 				hasOpenBlockers = true
 				break
