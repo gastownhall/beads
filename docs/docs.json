@@ -210,6 +210,10 @@
     {
       "source": "/1.0.5/:slug*",
       "destination": "/:slug*"
+    },
+    {
+      "source": "/1.1.0/:slug*",
+      "destination": "/:slug*"
     }
   ],
   "navigation": {
