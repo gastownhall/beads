@@ -248,3 +248,60 @@ func TestSearchCountsSQLShape(t *testing.T) {
 		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
 	}
 }
+
+func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		filter          types.WorkFilter
+		wantClause      string
+		rejectClause    string // must NOT appear in the WHERE; "" skips the check
+		wantLeadingArgs []any
+	}{
+		{
+			name:            "StatusesInClause",
+			filter:          types.WorkFilter{Statuses: []types.Status{"open", "blocked", "pinned"}},
+			wantClause:      "status IN (?,?,?)",
+			wantLeadingArgs: []any{"open", "blocked", "pinned"},
+		},
+		{
+			name:            "SingularStatusWinsOverStatuses",
+			filter:          types.WorkFilter{Status: "open", Statuses: []types.Status{"blocked", "pinned"}},
+			wantClause:      "status = ?",
+			rejectClause:    "status IN (?",
+			wantLeadingArgs: []any{"open"},
+		},
+		{
+			name:         "EmptyFilterLegacyDefault",
+			filter:       types.WorkFilter{},
+			wantClause:   "status IN ('open', 'in_progress')",
+			rejectClause: "status = ?",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			where, args, err := BuildReadyWorkWhere(tt.filter, IssuesFilterTables, ReadyWorkWhereInputs{})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !strings.Contains(where, tt.wantClause) {
+				t.Errorf("status clause %q missing.\n where = %s", tt.wantClause, where)
+			}
+			if tt.rejectClause != "" && strings.Contains(where, tt.rejectClause) {
+				t.Errorf("unexpected status clause %q present.\n where = %s", tt.rejectClause, where)
+			}
+			if len(args) < len(tt.wantLeadingArgs) {
+				t.Fatalf("args = %v, want at least the %d leading status args %v", args, len(tt.wantLeadingArgs), tt.wantLeadingArgs)
+			}
+			for i, want := range tt.wantLeadingArgs {
+				if args[i] != want {
+					t.Errorf("args[%d] = %v, want %v (status args must lead)", i, args[i], want)
+				}
+			}
+		})
+	}
+}

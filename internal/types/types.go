@@ -1474,7 +1474,12 @@ func (f ReclaimFilter) IsEmpty() bool {
 
 // WorkFilter is used to filter ready work queries
 type WorkFilter struct {
-	Status        Status
+	Status Status
+	// Statuses filters to any of the given statuses (OR semantics) in a
+	// single query, so multi-status callers avoid one GetReadyWork round
+	// trip per status. Ignored when Status is set; when both are empty the
+	// legacy default of ('open', 'in_progress') applies.
+	Statuses      []Status
 	Type          string // Filter by issue type (task, bug, feature, epic, merge-request, etc.)
 	Priority      *int
 	Assignee      *string

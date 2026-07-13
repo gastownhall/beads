@@ -85,9 +85,16 @@ type ReadyWorkWhereInputs struct {
 // suite); all ready predicates live here.
 func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyWorkWhereInputs) (string, []any, error) {
 	var statusClause string
-	if filter.Status != "" {
+	var args []any
+	switch {
+	case filter.Status != "":
 		statusClause = "status = ?"
-	} else {
+		args = append(args, string(filter.Status))
+	case len(filter.Statuses) > 0:
+		ph, statusArgs := InPlaceholders(filter.Statuses)
+		statusClause = fmt.Sprintf("status IN (%s)", ph)
+		args = append(args, statusArgs...)
+	default:
 		statusClause = "status IN ('open', 'in_progress')"
 	}
 	whereClauses := []string{
@@ -97,10 +104,6 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 	}
 	if !filter.IncludeEphemeral {
 		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
-	}
-	var args []any
-	if filter.Status != "" {
-		args = append(args, string(filter.Status))
 	}
 
 	if filter.Priority != nil {
