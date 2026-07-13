@@ -4,6 +4,8 @@
     <meta charset="utf-8" />
     <meta name="robots" content="noindex" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="redirect-destination" content="https://beads.gascity.com" />
+    <meta http-equiv="refresh" content="1; url=https://beads.gascity.com/" />
     <title>Beads documentation has moved</title>
   </head>
   <body>
@@ -29,7 +31,7 @@
         }
 
         var destination =
-          "https://beads.gascity.com" +
+          document.querySelector('meta[name="redirect-destination"]').content +
           destinationPath +
           window.location.search +
           window.location.hash;
