@@ -50,6 +50,10 @@ pinned-decoder migration off.
 - `bd sql` is **not supported in embedded mode** (this harness's mode), so it is
   not in the corpus. A downstream consumer's ready-projection enrichment depends on `bd sql`
   against a managed Dolt server; covering it needs a server-mode generation path.
+- The `show` blob pins the **count-only** default payload (`comment_count`,
+  `dependent_count`); the opt-in `--include-comments` / `--include-dependents`
+  shapes are not in the corpus. They are covered at the CLI level by the
+  preservation and round-trip tests, not byte-pinned for a consumer.
 - The `error` blob pins the not-found envelope; other error classifiers
   (claim-conflict, silent-fallback auto-import, `bd sql` unsupported) are
   plain-text on stderr and belong in a separate error-string fixture set.

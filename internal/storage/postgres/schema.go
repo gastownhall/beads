@@ -16,7 +16,7 @@ import (
 const ddl = `-- bd Postgres backend schema.
 -- Machine-translated from Dolt ` + "`" + `SHOW CREATE TABLE` + "`" + ` output at HEAD (all
 -- migrations applied), using the conformance type map documented in
--- docs/STORAGE-BACKENDS.md:
+-- docs/architecture/storage-backends.md:
 --   varchar/char/text/longtext -> text   (see collation note below)
 --   datetime                   -> timestamp(0)       (naive whole-second UTC)
 --   tinyint(1)                 -> smallint

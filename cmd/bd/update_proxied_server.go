@@ -108,6 +108,7 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 	if err != nil {
 		return nil, false, false, HandleErrorRespectJSON("%v", err)
 	}
+	notesOverwritten := replacesExistingNotes(current.Notes, in.fields)
 
 	updated, err := issueUC.ApplyUpdate(ctx, id, spec, actor)
 	if err != nil {
@@ -124,6 +125,9 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: update %s", id)); err != nil && !isDoltNothingToCommit(err) {
 		fmt.Fprintf(os.Stderr, "Error committing %s: %v\n", id, err)
 		return nil, false, false, nil
+	}
+	if notesOverwritten {
+		warnNotesReplacement(id)
 	}
 
 	if err := fireProxiedUpdateHooks(ctx, current, updated); err != nil {

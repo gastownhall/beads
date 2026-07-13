@@ -45,15 +45,8 @@ jobs:
           fi
           echo "OK: tag and version.go agree on $code_version"
 
-      - name: Check version + docs consistency
-        run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          if [[ "$tag_version" == *-* ]]; then
-            echo "Prerelease tag detected; stable docs snapshot may remain on latest stable release."
-            ./scripts/check-versions.sh
-          else
-            BEADS_REQUIRE_RELEASE_DOCS=1 ./scripts/check-versions.sh
-          fi
+      - name: Check version consistency
+        run: ./scripts/check-versions.sh
 
   release-package-mcp:
     name: Release Package Gate (MCP)
@@ -110,24 +103,6 @@ jobs:
       - name: Run npm package gate
         run: make ci-package-npm
 
-  release-package-website:
-    name: Release Package Gate (website)
-    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
-    needs: verify-version-consistency
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
-
-      - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: website/package-lock.json
-
-      - name: Run website package gate
-        run: make ci-website
 
   goreleaser:
     # Guard: only run goreleaser in the canonical repository (not in forks)
@@ -135,7 +110,6 @@ jobs:
     needs:
       - release-package-mcp
       - release-package-npm
-      - release-package-website
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

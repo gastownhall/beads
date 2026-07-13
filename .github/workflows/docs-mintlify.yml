@@ -1,0 +1,65 @@
+name: Docs (Mintlify) checks
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      # The docsync guard also validates engdocs/** and the curated root
+      # markdown files (rootDocFiles in test/docsync/docsync_test.go) — keep
+      # this filter in sync with that list, or a docs-breaking PR merges
+      # green and turns main red at the full test run.
+      - 'docs/**'
+      - 'engdocs/**'
+      - 'test/docsync/**'
+      - 'mint.sh'
+      - 'README.md'
+      - 'AGENTS.md'
+      - 'AGENT_INSTRUCTIONS.md'
+      - 'CONTRIBUTING.md'
+      - 'CLAUDE.md'
+      - 'RELEASING.md'
+      - 'PR_MAINTAINER_GUIDELINES.md'
+      - '.github/scripts/docs-render-check.sh'
+      - '.github/workflows/docs-mintlify.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-mintlify-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  docsync:
+    name: Docs nav/link sync (docsync guard)
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run docsync guard
+        run: go test -tags=gms_pure_go ./test/docsync
+
+  broken-links:
+    name: Mintlify broken-links (baseline-aware)
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+
+      - name: Run baseline-aware broken-link check
+        env:
+          BASE_REF: origin/${{ github.base_ref }}
+        run: .github/scripts/docs-render-check.sh "$BASE_REF"

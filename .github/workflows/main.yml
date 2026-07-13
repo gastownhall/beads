@@ -101,7 +101,7 @@ jobs:
 
   # Fast check: every `go build|test|run|generate|install` invocation in
   # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
-  # regressions from re-entering the build (see docs/ICU-POLICY.md).
+  # regressions from re-entering the build (see engdocs/ICU-POLICY.md).
   check-build-tags:
     name: Check build-tag policy
     runs-on: ubuntu-latest
@@ -214,7 +214,6 @@ jobs:
     outputs:
       mcp_package: ${{ steps.detect.outputs.mcp_package }}
       npm_package: ${{ steps.detect.outputs.npm_package }}
-      website: ${{ steps.detect.outputs.website }}
       reason: ${{ steps.detect.outputs.reason }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
@@ -320,33 +319,6 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
         run: make ci-package-npm
 
-  package-website:
-    name: Package Gate (website)
-    runs-on: ubuntu-latest
-    needs: detect-package-gates
-    steps:
-      - name: Check applicability
-        id: applicability
-        run: |
-          echo "run=${{ needs.detect-package-gates.outputs.website }}" >> "$GITHUB_OUTPUT"
-          if [[ "${{ needs.detect-package-gates.outputs.website }}" != "true" ]]; then
-            echo "website package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
-          fi
-
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
-        if: steps.applicability.outputs.run == 'true'
-
-      - name: Set up Node.js
-        if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: website/package-lock.json
-
-      - name: Run website package gate
-        if: steps.applicability.outputs.run == 'true'
-        run: make ci-website
 
   pr-policy-wrapper:
     name: PR Policy (wrapper timing)

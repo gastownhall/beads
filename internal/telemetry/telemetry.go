@@ -22,7 +22,7 @@
 //	VictoriaLogs    :9428  — future log storage
 //	Grafana         :9429  — dashboards
 //
-// See docs/OBSERVABILITY.md for the full reference.
+// See docs/reference/observability.md for the full reference.
 package telemetry
 
 import (

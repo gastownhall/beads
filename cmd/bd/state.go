@@ -1,6 +1,6 @@
 // Package main implements the bd CLI state management commands.
 // These commands provide convenient access to the labels-as-state pattern
-// documented in docs/LABELS.md.
+// documented in docs/core-concepts/labels.md.
 package main
 
 import (

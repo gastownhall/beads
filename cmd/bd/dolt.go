@@ -250,7 +250,7 @@ func printAncestorPKMismatchGuidance(err error) {
 	fmt.Fprintln(w, "       bd import /tmp/beads-local.jsonl")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Full playbook (and how to prevent this during upgrades):")
-	fmt.Fprintln(w, "  https://github.com/gastownhall/beads/blob/main/docs/RECOVERY.md#pk-fork-refused")
+	fmt.Fprintln(w, "  https://github.com/gastownhall/beads/blob/main/docs/recovery/init-safety.md#pk-fork-refused")
 }
 
 // printNoRemoteGuidance prints an informational message (to stdout) when

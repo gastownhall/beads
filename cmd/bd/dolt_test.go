@@ -1238,7 +1238,7 @@ func TestPrintAncestorPKMismatchGuidance(t *testing.T) {
 	if !strings.Contains(output, "bd bootstrap") {
 		t.Error("expected guidance to mention re-cloning via bd bootstrap")
 	}
-	if !strings.Contains(output, "docs/RECOVERY.md#pk-fork-refused") {
+	if !strings.Contains(output, "docs/recovery/init-safety.md#pk-fork-refused") {
 		t.Error("expected guidance to link the full recovery playbook")
 	}
 }

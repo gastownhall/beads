@@ -82,7 +82,7 @@ func CheckClaude(repoPath string) DoctorCheck {
 			Fix: "Set up Claude integration:\n" +
 				"  Option 1: Install the beads plugin (recommended)\n" +
 				"    • Provides hooks, slash commands, and MCP tools automatically\n" +
-				"    • See: https://github.com/steveyegge/beads/blob/main/docs/PLUGIN.md\n" +
+				"    • See: https://github.com/gastownhall/beads/blob/main/docs/integrations/claude-code-plugin.md\n" +
 				"\n" +
 				"  Option 2: CLI-only mode\n" +
 				"    • Run 'bd setup claude' to add SessionStart hooks\n" +
@@ -453,7 +453,7 @@ func CheckClaudePlugin() DoctorCheck {
 			Name:    "Claude Plugin",
 			Status:  StatusWarning,
 			Message: "beads plugin not installed",
-			Fix:     "Install plugin: /plugin marketplace add steveyegge/beads && /plugin install beads (see docs/PLUGIN.md)",
+			Fix:     "Install plugin: /plugin marketplace add steveyegge/beads && /plugin install beads (see docs/integrations/claude-code-plugin.md)",
 		}
 	}
 
@@ -519,7 +519,7 @@ func CheckClaudePluginLocalOnly() DoctorCheck {
 			Name:    "Claude Plugin",
 			Status:  StatusWarning,
 			Message: "beads plugin not installed",
-			Fix:     "Install plugin: /plugin marketplace add steveyegge/beads && /plugin install beads (see docs/PLUGIN.md)",
+			Fix:     "Install plugin: /plugin marketplace add steveyegge/beads && /plugin install beads (see docs/integrations/claude-code-plugin.md)",
 		}
 	}
 

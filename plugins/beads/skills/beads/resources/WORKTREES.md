@@ -85,10 +85,10 @@ Multi-clone, multi-branch workflows:
 
 - Hash-based IDs (`bd-abc`) eliminate collision across clones
 - Each clone syncs independently via git
-- See [WORKTREES.md](https://github.com/gastownhall/beads/blob/main/docs/WORKTREES.md) for comprehensive guide
+- See [WORKTREES.md](https://github.com/gastownhall/beads/blob/main/docs/reference/worktrees.md) for comprehensive guide
 
 ## External References
 
 - **Official Docs**: [github.com/gastownhall/beads/docs](https://github.com/gastownhall/beads/tree/main/docs)
-- **Sync Branch**: [PROTECTED_BRANCHES.md](https://github.com/gastownhall/beads/blob/main/docs/PROTECTED_BRANCHES.md)
-- **Worktrees**: [WORKTREES.md](https://github.com/gastownhall/beads/blob/main/docs/WORKTREES.md)
+- **Sync Branch**: [PROTECTED_BRANCHES.md](https://github.com/gastownhall/beads/blob/main/docs/reference/protected-branches.md)
+- **Worktrees**: [WORKTREES.md](https://github.com/gastownhall/beads/blob/main/docs/reference/worktrees.md)

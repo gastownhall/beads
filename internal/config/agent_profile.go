@@ -5,7 +5,7 @@ import "strings"
 // AgentProfile represents the explicit policy profile that controls agent
 // git/commit authority (gh#3423, follow-up to #4220's PROFILE_VOCABULARY doc).
 //
-// See docs/SETUP.md "Policy Profiles" for the full description of each value.
+// See docs/getting-started/ide-setup.md "Policy Profiles" for the full description of each value.
 type AgentProfile string
 
 const (

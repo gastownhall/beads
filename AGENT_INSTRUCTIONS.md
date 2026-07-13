@@ -9,7 +9,7 @@ This document contains detailed operational instructions for AI agents working o
 ### Code Standards
 
 - **Go version**: see `go.mod` for the required version (currently 1.26+)
-- **Linting**: `golangci-lint run ./...` (baseline warnings documented in [docs/LINTING.md](docs/LINTING.md))
+- **Linting**: `golangci-lint run ./...` (baseline warnings documented in [engdocs/LINTING.md](engdocs/LINTING.md))
 - **Testing**: All new features need tests (`make test` for the normal local/CI path, `make test-icu-path` only when intentionally exercising the opt-in ICU regex path)
 - **Documentation**: Update relevant .md files
 
@@ -90,7 +90,7 @@ This enables `bd doctor` to detect **orphaned issues** - work that was committed
 
 For agent-prepared commits, also include the
 `Agent-Signature:` trailer described in
-[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md). Use `unknown-model` or
+[engdocs/AGENT_SIGNING.md](engdocs/AGENT_SIGNING.md). Use `unknown-model` or
 `unknown-reasoning` when reliable runtime metadata is unavailable.
 
 ### Git Workflow
@@ -106,9 +106,9 @@ bd hooks install
 
 **Dolt sync**: Dolt handles sync natively via `bd dolt push` / `bd dolt pull`. No export/import round-trip needed for normal sync.
 
-**Protected branches**: Dolt stores data under `refs/dolt/data`, separate from standard Git refs. See [docs/PROTECTED_BRANCHES.md](docs/PROTECTED_BRANCHES.md).
+**Protected branches**: Dolt stores data under `refs/dolt/data`, separate from standard Git refs. See [docs/reference/protected-branches.md](docs/reference/protected-branches.md).
 
-**Git worktrees**: Work directly with Dolt — no special flags needed. See [docs/ADVANCED.md](docs/ADVANCED.md).
+**Git worktrees**: Work directly with Dolt — no special flags needed. See [docs/reference/advanced.md](docs/reference/advanced.md).
 
 **Merge conflicts**: Rare with hash IDs. Dolt uses cell-level 3-way merge for conflict resolution.
 
@@ -133,7 +133,7 @@ value, absorb or transform it locally when practical, preserve attribution, and
 use request-changes only as a last resort.
 
 Sign agent-written GitHub comments and reviews using
-[docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md).
+[engdocs/AGENT_SIGNING.md](engdocs/AGENT_SIGNING.md).
 
 ### External Contributor PRs: Check Before You Build
 
@@ -509,7 +509,7 @@ still works as a one-off, shell-scoped override.
 
 - Check existing issues: `bd list`
 - Look at recent commits: `git log --oneline -20`
-- Read the docs: README.md, ADVANCED.md, docs/CONFIG.md
+- Read the docs: README.md, ADVANCED.md, docs/reference/configuration.md
 - Create an issue if unsure: `bd create "Question: ..." -t task -p 2`
 
 ## Important Files

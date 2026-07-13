@@ -69,12 +69,22 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// withReadTx runs fn in a read transaction that is always rolled back.
+// withReadTx runs fn in a read-only transaction that is always rolled back.
+//
+// ReadOnly is load-bearing on SQLite: the DSN's `_txlock=immediate` makes every
+// default BeginTx issue BEGIN IMMEDIATE (modernc.org/sqlite honors it via
+// beginMode), which takes SQLite's single write lock — so plain-BEGIN reads
+// would queue behind any in-flight writer and fail with SQLITE_BUSY after
+// busy_timeout, forfeiting WAL's reader/writer independence. TxOptions.ReadOnly
+// suppresses beginMode (plain deferred BEGIN), letting reads run concurrently
+// with a writer. On the server backends it maps to START TRANSACTION READ ONLY
+// (mysql) / BEGIN READ ONLY (pgx), which every withReadTx callback satisfies:
+// they are pure issueops reads.
 func (s *Store) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if s.closed.Load() {
 		return ErrStoreClosed
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return fmt.Errorf("begin read tx: %w", err)
 	}

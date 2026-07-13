@@ -470,7 +470,7 @@ verify_binary_has_cgo() {
 # Tries CGO_ENABLED=1 first for an embedded-capable binary. If that fails
 # (host lacks C toolchain or transitive Dolt deps' headers), falls back to
 # CGO_ENABLED=0 which yields a server-mode-only binary that still works on
-# any Go-capable box. See docs/ICU-POLICY.md and docs/INSTALLING.md.
+# any Go-capable box. See engdocs/ICU-POLICY.md and docs/getting-started/installation.md.
 install_with_go() {
     log_info "Installing bd using 'go install'..."
 

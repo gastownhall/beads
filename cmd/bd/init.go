@@ -50,7 +50,7 @@ and its storage (a Dolt database by default). Optionally specify a custom issue 
 
 Dolt is the default backend and the only one with version control (history,
 branching, sync). Select an alternative with --backend=<postgres|mysql|sqlite>;
-see docs/STORAGE-BACKENDS.md for the trade-offs and setup.
+see docs/architecture/storage-backends.md for the trade-offs and setup.
 
 Use --database to specify an existing server database name, overriding the
 default prefix-based naming. This is useful when an external tool (e.g. an orchestrator)
@@ -115,7 +115,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// --force is a deprecated alias for --reinit-local. They share
 		// semantics for the local data-safety guard; both refuse remote
 		// divergence unless --discard-remote is also passed. See
-		// docs/adr/0002-init-safety-invariants.md.
+		// engdocs/adr/0002-init-safety-invariants.md.
 		if force && !reinitLocal {
 			fmt.Fprintf(os.Stderr, "%s --force is deprecated; use --reinit-local instead.\n", ui.RenderWarn("DeprecationWarning:"))
 			fmt.Fprintf(os.Stderr, "  See 'bd help init-safety' for the init flag surface.\n\n")
@@ -448,7 +448,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// --reinit-local both bypass this local-only guard; they do NOT
 		// authorize cross-boundary operations on remote history (see
 		// CheckRemoteSafety at cmd/bd/init_safety.go and
-		// docs/adr/0002-init-safety-invariants.md).
+		// engdocs/adr/0002-init-safety-invariants.md).
 		if !reinitLocal {
 			if err := checkExistingBeadsData(prefix); err != nil {
 				// --init-if-missing makes init idempotent, but ONLY for the
@@ -506,7 +506,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				} else {
 					// Non-interactive (piped input, AI agent, etc.)
 					//
-					// ADR invariant (docs/adr/0002-init-safety-invariants.md):
+					// ADR invariant (engdocs/adr/0002-init-safety-invariants.md):
 					// runtime error text must not echo a complete destructive
 					// invocation. See 'bd help init-safety' for the token
 					// format. This closes the 58f5989bf failure class where
@@ -2139,7 +2139,7 @@ func init() {
 	initCmd.Flags().String("role", "", "Set beads role without prompting: \"maintainer\" or \"contributor\"")
 
 	// Backend selection: dolt (default) plus the SQL-family backends (postgres/mysql/sqlite).
-	initCmd.Flags().String("backend", "", "Storage backend: dolt (default), postgres, mysql, or sqlite. See docs/STORAGE-BACKENDS.md.")
+	initCmd.Flags().String("backend", "", "Storage backend: dolt (default), postgres, mysql, or sqlite. See docs/architecture/storage-backends.md.")
 	initCmd.Flags().String("pg-url", "", "Postgres connection URL (with --backend=postgres). A password may be included for init but is never persisted; set BEADS_PG_PASSWORD for later commands. Falls back to BEADS_POSTGRES_URL.")
 	initCmd.Flags().String("pg-schema", "", "Postgres schema for this workspace's tables (with --backend=postgres; provides search_path isolation)")
 	initCmd.Flags().String("mysql-url", "", "MySQL server DSN (with --backend=mysql), e.g. user:pass@tcp(host:3306)/ . A password may be included for init but is never persisted; set BEADS_MYSQL_PASSWORD for later commands. Falls back to BEADS_MYSQL_URL.")

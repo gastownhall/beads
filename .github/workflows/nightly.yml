@@ -26,7 +26,6 @@ on:
           - nix
           - mcp-package
           - npm-package
-          - website
       smoke_version:
         description: "Optional previous release for cross-version-smoke"
         required: false

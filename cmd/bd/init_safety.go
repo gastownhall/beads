@@ -2,7 +2,7 @@ package main
 
 // Init-safety decision logic.
 //
-// See docs/adr/0002-init-safety-invariants.md for the ADR this encodes.
+// See engdocs/adr/0002-init-safety-invariants.md for the ADR this encodes.
 // The invariant: every `bd init` resolves `project_id` from exactly one
 // explicitly-named source; ambiguous sources refuse. `--force` (or its
 // replacement `--reinit-local`) bypasses the local data-safety guard only;
@@ -14,7 +14,7 @@ package main
 // Error-message contract: no runtime error may emit a complete destructive
 // invocation. Flag identifiers and safe-tool names are permitted; token
 // values and other friction-bearing arguments live in `bd help init-safety`
-// and `docs/RECOVERY.md` only.
+// and `docs/recovery/init-safety.md` only.
 
 import "fmt"
 
@@ -204,7 +204,7 @@ func refusalMessageTokenMissing() string {
 
 // FormatDestroyToken returns the destroy-token the caller should supply
 // for a given issue prefix. Callers that need to surface this to users
-// should do so via `bd help init-safety` or `docs/RECOVERY.md` — NOT via
+// should do so via `bd help init-safety` or `docs/recovery/init-safety.md` — NOT via
 // runtime error text (see the ADR invariant).
 func FormatDestroyToken(prefix string) string {
 	return fmt.Sprintf("DESTROY-%s", prefix)

@@ -101,7 +101,7 @@ Config options:
   (conservative | minimal | team-maintainer; default conservative).
   Set via: bd config set agent.profile team-maintainer
   Or per-session: BD_AGENT_PROFILE=team-maintainer (env var takes precedence).
-  See docs/SETUP.md#policy-profiles for what each profile means.
+  See docs/getting-started/ide-setup.md#policy-profiles for what each profile means.
 
 	Workflow customization:
 	- Place a .beads/PRIME.md file in the local clone or resolved workspace to override the default output entirely.

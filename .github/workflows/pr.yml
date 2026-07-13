@@ -67,7 +67,7 @@ jobs:
 
   # Fast check: every `go build|test|run|generate|install` invocation in
   # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
-  # regressions from re-entering the build (see docs/ICU-POLICY.md).
+  # regressions from re-entering the build (see engdocs/ICU-POLICY.md).
   check-build-tags:
     name: Check build-tag policy
     runs-on: ubuntu-latest
@@ -171,14 +171,6 @@ jobs:
           ./scripts/check-doc-flags.sh ./bd
           ./scripts/check-doc-freshness.sh
 
-      # Website doc mirrors (website/docs/... and, when applicable,
-      # website/versioned_docs/version-<latest>/...) are a pure text
-      # transform of their docs/ sources, so this needs no bd build and no
-      # merge-base attribution: it just fails if scripts/sync-website-docs.sh
-      # produces any diff against the committed mirrors.
-      - name: Validate website doc mirrors
-        run: ./scripts/check-website-docs-drift.sh
-
       # When the drift check fails, it writes the exact regenerated-docs fix
       # (produced with CI's canonical build) so contributors can apply it with
       # `git apply` instead of reproducing CI's environment locally. The
@@ -224,7 +216,6 @@ jobs:
     outputs:
       mcp_package: ${{ steps.detect.outputs.mcp_package }}
       npm_package: ${{ steps.detect.outputs.npm_package }}
-      website: ${{ steps.detect.outputs.website }}
       reason: ${{ steps.detect.outputs.reason }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
@@ -330,33 +321,6 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
         run: make ci-package-npm
 
-  package-website:
-    name: Package Gate (website)
-    runs-on: ubuntu-latest
-    needs: detect-package-gates
-    steps:
-      - name: Check applicability
-        id: applicability
-        run: |
-          echo "run=${{ needs.detect-package-gates.outputs.website }}" >> "$GITHUB_OUTPUT"
-          if [[ "${{ needs.detect-package-gates.outputs.website }}" != "true" ]]; then
-            echo "website package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
-          fi
-
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
-        if: steps.applicability.outputs.run == 'true'
-
-      - name: Set up Node.js
-        if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: website/package-lock.json
-
-      - name: Run website package gate
-        if: steps.applicability.outputs.run == 'true'
-        run: make ci-website
 
   pr-policy-wrapper:
     name: PR Policy (wrapper timing)
@@ -485,13 +449,25 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
         run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
 
-  # Producer-side guard for the Beads<->consumer contract corpus. Regenerates
-  # the canonicalized golden corpus from this branch's bd and byte-compares it
-  # to the committed testdata/corpus/; an unreviewed wire change is a hard
-  # failure (run `make corpus-regen`). The double-run test proves determinism.
+  # Producer-side guard for the Beads<->consumer CLI contract. Runs the whole
+  # cmd/bd/protocol package: the golden corpus (regenerated from this branch's
+  # bd and byte-compared to the committed testdata/corpus/, so an unreviewed
+  # wire change is a hard failure — run `make corpus-regen`), the double-run
+  # determinism check, and the TestProtocol_/TestJSONContract_ behavioral
+  # conformance suite that pins the CLI's JSON payloads and semantics.
+  #
+  # Run the PACKAGE, never a -run subset: a filter here is what let the
+  # conformance tests sit red on main for ~3 months while every CI run was
+  # green (they matched no job's -run, and every broad ./... job skips them
+  # for want of a Dolt store). Package scope means a newly added protocol test
+  # is gated the moment it lands.
+  #
   # Needs the Dolt sql-server image (the protocol harness spins a container).
+  # ~10 min: each test builds an isolated Dolt-backed workspace. If that ever
+  # becomes unacceptable on PRs, shard this job by an exhaustive `go test
+  # -list` partition — do not reintroduce a hand-written -run regex.
   contract-corpus:
-    name: Contract corpus (golden + determinism)
+    name: Contract corpus (golden + determinism + conformance)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
@@ -515,13 +491,17 @@ jobs:
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
         run: docker pull dolthub/dolt-sql-server:2.1.10
 
-      - name: Corpus golden + determinism
+      - name: Protocol conformance + corpus golden + determinism
         # Require a live Dolt store here: this is the gate that must exercise the
-        # golden + double-run checks, so a failed container is a hard failure,
-        # not a silent skip (see requireDoltStore in cmd/bd/protocol tests).
+        # conformance, golden and double-run checks, so a failed container is a
+        # hard failure, not a silent skip (see requireDoltStore in the
+        # cmd/bd/protocol tests).
+        #
+        # -timeout is explicit because the package runs well past `go test`'s
+        # 10m default; without it a slow runner reports a panic, not a verdict.
         env:
           BEADS_PROTOCOL_REQUIRE_DOLT: "1"
-        run: go test -tags gms_pure_go -count=1 -run 'TestCorpusGolden|TestCanonicalize|TestCorpusDoubleRunByteIdentical|TestCheckCaptureExit' ./cmd/bd/protocol
+        run: go test -tags gms_pure_go -count=1 -timeout 30m ./cmd/bd/protocol
 
   fmt-check:
     name: Check formatting
@@ -568,7 +548,6 @@ jobs:
       - detect-package-gates
       - package-mcp
       - package-npm
-      - package-website
       - pr-policy-wrapper
       - pr-core-wrapper
       - pr-lint-wrapper
@@ -594,7 +573,6 @@ jobs:
             DETECT_PACKAGE_GATES
             PACKAGE_MCP
             PACKAGE_NPM
-            PACKAGE_WEBSITE
             PR_POLICY_WRAPPER
             PR_CORE_WRAPPER
             PR_LINT_WRAPPER
@@ -612,7 +590,6 @@ jobs:
           DETECT_PACKAGE_GATES: ${{ needs.detect-package-gates.result }}
           PACKAGE_MCP: ${{ needs.package-mcp.result }}
           PACKAGE_NPM: ${{ needs.package-npm.result }}
-          PACKAGE_WEBSITE: ${{ needs.package-website.result }}
           PR_POLICY_WRAPPER: ${{ needs.pr-policy-wrapper.result }}
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
           PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}

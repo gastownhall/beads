@@ -321,6 +321,7 @@ create, update, show, or close operation).`,
 		// requested but not granted (beads audit finding #10).
 		claimFailed := false
 		mutatedStores := map[storage.DoltStorage][]string{}
+		notesOverwriteWarnings := map[storage.DoltStorage][]string{}
 		mutatedResults := map[*RoutedResult]bool{}
 		pendingCloseResults := []*RoutedResult{}
 		trackMutation := func(result *RoutedResult) {
@@ -417,14 +418,7 @@ create, update, show, or close operation).`,
 				}
 				regularUpdates["metadata"] = merged
 			}
-			// GH#4541: --notes silently replaces existing notes, destroying
-			// append-only audit history that agent fleets rely on. Warn (but
-			// don't block) when a plain --notes overwrite would discard
-			// non-empty existing notes with a different value.
-			// --append-notes is exempt since it's additive by design.
-			if newNotes, ok := updates["notes"].(string); ok && issue.Notes != "" && newNotes != issue.Notes {
-				fmt.Fprintf(os.Stderr, "warning: %s: --notes replaced existing notes (use --append-notes to preserve history)\n", id)
-			}
+			notesOverwritten := replacesExistingNotes(issue.Notes, updates)
 			// Handle append_notes: combine existing notes with new content
 			if appendNotes, ok := updates["append_notes"].(string); ok {
 				combined := issue.Notes
@@ -441,6 +435,9 @@ create, update, show, or close operation).`,
 					continue
 				}
 				trackMutation(result)
+				if notesOverwritten {
+					notesOverwriteWarnings[issueStore] = append(notesOverwriteWarnings[issueStore], id)
+				}
 				// Audit log key field changes (survives Dolt GC flatten)
 				if s, ok := regularUpdates["status"].(string); ok {
 					audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), s, actor, "")
@@ -558,6 +555,9 @@ create, update, show, or close operation).`,
 					closePendingResults()
 					return HandleErrorRespectJSON("failed to commit: %v", err)
 				}
+				for _, id := range notesOverwriteWarnings[s] {
+					warnNotesReplacement(id)
+				}
 			}
 		}
 		closePendingResults()
@@ -578,6 +578,15 @@ create, update, show, or close operation).`,
 		}
 		return nil
 	},
+}
+
+func replacesExistingNotes(existing string, fields map[string]any) bool {
+	newNotes, replacing := fields["notes"].(string)
+	return replacing && existing != "" && newNotes != existing
+}
+
+func warnNotesReplacement(id string) {
+	fmt.Fprintf(os.Stderr, "warning: %s: --notes replaced existing notes (use --append-notes to preserve history)\n", id)
 }
 
 // mergeMetadata merges new metadata JSON into existing metadata.
@@ -680,6 +689,7 @@ func init() {
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|decision); custom types require types.custom config")
 	registerCommonIssueFlags(updateCmd)
+	updateCmd.Flags().Lookup("notes").Usage = "Additional notes (replaces existing notes; use --append-notes to append)"
 	updateCmd.Flags().Bool("allow-empty-description", false, "Allow empty description replacement when reading from stdin or file")
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")

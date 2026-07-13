@@ -348,52 +348,41 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 	})
 
-	// GH#4541: --notes silently replaces existing notes, destroying
-	// append-only audit history. bd update should warn (on stderr, never
-	// stdout) when a plain --notes overwrite discards non-empty existing
-	// notes with a different value, without blocking the update.
-	t.Run("update_notes_overwrite_warns", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Notes overwrite warn test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
-		stdout, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "replacement notes")
-		wantWarn := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
-		if !strings.Contains(stderr, wantWarn) {
-			t.Errorf("expected stderr to contain %q, got: %s", wantWarn, stderr)
-		}
-		if strings.Contains(stdout, "warning:") {
-			t.Errorf("warning must not appear on stdout, got: %s", stdout)
-		}
-		got := bdShow(t, bd, dir, issue.ID)
-		if got.Notes != "replacement notes" {
-			t.Errorf("expected notes 'replacement notes', got %q", got.Notes)
-		}
-	})
+	noteWarningCases := []struct {
+		name        string
+		initial     string
+		args        []string
+		wantWarning bool
+		wantNotes   string
+	}{
+		{name: "overwrite_warns", initial: "original notes", args: []string{"--notes", "replacement notes"}, wantWarning: true, wantNotes: "replacement notes"},
+		{name: "empty_is_silent", args: []string{"--notes", "first notes"}, wantNotes: "first notes"},
+		{name: "append_is_silent", initial: "original notes", args: []string{"--append-notes", "more"}, wantNotes: "original notes\nmore"},
+		{name: "same_value_is_silent", initial: "unchanged notes", args: []string{"--notes", "unchanged notes"}, wantNotes: "unchanged notes"},
+	}
+	for _, tc := range noteWarningCases {
+		t.Run("update_notes_"+tc.name, func(t *testing.T) {
+			issue := bdCreate(t, bd, dir, "Notes warning test", "--type", "task")
+			if tc.initial != "" {
+				bdUpdate(t, bd, dir, issue.ID, "--notes", tc.initial)
+			}
 
-	t.Run("update_notes_on_empty_no_warn", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Notes empty no warn test", "--type", "task")
-		_, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "first notes")
-		if strings.Contains(stderr, "--notes replaced existing notes") {
-			t.Errorf("expected no overwrite warning when prior notes were empty, got stderr: %s", stderr)
-		}
-	})
-
-	t.Run("update_append_notes_no_warn", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Append notes no warn test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
-		_, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--append-notes", "more")
-		if strings.Contains(stderr, "--notes replaced existing notes") {
-			t.Errorf("expected no overwrite warning for --append-notes, got stderr: %s", stderr)
-		}
-	})
-
-	t.Run("update_notes_same_value_no_warn", func(t *testing.T) {
-		issue := bdCreate(t, bd, dir, "Notes same value no warn test", "--type", "task")
-		bdUpdate(t, bd, dir, issue.ID, "--notes", "unchanged notes")
-		_, stderr := bdUpdateCapture(t, bd, dir, issue.ID, "--notes", "unchanged notes")
-		if strings.Contains(stderr, "--notes replaced existing notes") {
-			t.Errorf("expected no overwrite warning when new value equals existing, got stderr: %s", stderr)
-		}
-	})
+			stdout, stderr := bdUpdateCapture(t, bd, dir, append([]string{issue.ID}, tc.args...)...)
+			warning := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
+			if tc.wantWarning && !strings.Contains(stderr, warning) {
+				t.Errorf("expected stderr to contain %q, got: %s", warning, stderr)
+			}
+			if !tc.wantWarning && strings.Contains(stderr, "--notes replaced existing notes") {
+				t.Errorf("expected no overwrite warning, got stderr: %s", stderr)
+			}
+			if strings.Contains(stdout, "warning:") {
+				t.Errorf("warning must not appear on stdout, got: %s", stdout)
+			}
+			if got := bdShow(t, bd, dir, issue.ID); got.Notes != tc.wantNotes {
+				t.Errorf("expected notes %q, got %q", tc.wantNotes, got.Notes)
+			}
+		})
+	}
 
 	t.Run("update_acceptance", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "AC test", "--type", "task")

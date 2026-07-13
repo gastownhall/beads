@@ -17,14 +17,14 @@ TODAY="${DOC_FRESHNESS_TODAY:-$(date +%F)}"
 ERRORS=0
 
 DOCS=(
-    "docs/CONFIG.md|cmd/bd/main.go;cmd/bd/config.go;internal/configfile/"
-    "docs/SETUP.md|cmd/bd/setup*.go;internal/recipes/"
-    "docs/ADO_CONFIG.md|cmd/bd/ado*.go;internal/ado/"
-    "docs/JSON_SCHEMA.md|cmd/bd/output.go;cmd/bd/errors.go;cmd/bd/protocol/json_contract_test.go"
-    "docs/RECOVERY.md|cmd/bd/init.go;cmd/bd/init_safety.go;cmd/bd/init_safety_test.go"
-    "docs/ERROR_HANDLING.md|cmd/bd/*.go;cmd/bd/errors.go"
-    "docs/LINTING.md|.golangci.yml"
-    "docs/design/otel/otel-data-model.md|internal/telemetry/;internal/storage/dolt/store.go;internal/compact/haiku.go;cmd/bd/find_duplicates.go;internal/hooks/"
+    "docs/reference/configuration.md|cmd/bd/main.go;cmd/bd/config.go;internal/configfile/"
+    "docs/getting-started/ide-setup.md|cmd/bd/setup*.go;internal/recipes/"
+    "docs/integrations/azure-devops.md|cmd/bd/ado*.go;internal/ado/"
+    "docs/reference/json-schema.md|cmd/bd/output.go;cmd/bd/errors.go;cmd/bd/protocol/json_contract_test.go"
+    "docs/recovery/init-safety.md|cmd/bd/init.go;cmd/bd/init_safety.go;cmd/bd/init_safety_test.go"
+    "engdocs/ERROR_HANDLING.md|cmd/bd/*.go;cmd/bd/errors.go"
+    "engdocs/LINTING.md|.golangci.yml"
+    "engdocs/design/otel/otel-data-model.md|internal/telemetry/;internal/storage/dolt/store.go;internal/compact/haiku.go;cmd/bd/find_duplicates.go;internal/hooks/"
 )
 
 echo "Checking reference doc freshness markers..."
@@ -47,6 +47,7 @@ PY
 inventory_ref_for_doc() {
     local doc="$1"
     doc="${doc#docs/}"
+    doc="${doc#engdocs/}"
     printf '%s\n' "$doc"
 }
 
@@ -74,11 +75,11 @@ for entry in "${DOCS[@]}"; do
         continue
     fi
 
-    if ! grep -Fq "\`$inventory_ref\`" "$PROJECT_ROOT/docs/DOC_INVENTORY.md"; then
-        echo "FAIL: docs/DOC_INVENTORY.md does not list \`$inventory_ref\`"
+    if ! grep -Fq "\`$inventory_ref\`" "$PROJECT_ROOT/engdocs/DOC_INVENTORY.md"; then
+        echo "FAIL: engdocs/DOC_INVENTORY.md does not list \`$inventory_ref\`"
         ERRORS=$((ERRORS + 1))
     else
-        echo "PASS: listed in docs/DOC_INVENTORY.md"
+        echo "PASS: listed in engdocs/DOC_INVENTORY.md"
     fi
 
     reviewed_line="$(grep -E -m1 '^Last reviewed: [0-9]{4}-[0-9]{2}-[0-9]{2}$' "$doc_path" || true)"
