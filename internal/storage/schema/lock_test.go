@@ -75,6 +75,9 @@ func TestMigrateUpWithLockUsesDatabaseScopedLockOnly(t *testing.T) {
 	defer conn.Close()
 
 	lockName := MigrationLockName("testdb")
+	// The pre-lock fast-path probe finds the main cursor behind latest and
+	// reports work needed, so MigrateUpWithLock still takes the lock.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion()-1)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
@@ -93,6 +96,116 @@ func TestMigrateUpWithLockUsesDatabaseScopedLockOnly(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
 	}
+}
+
+// TestMigrateUpWithLockSkipsLockWhenAtLatestAndSeeded proves the fast path: an
+// already-migrated, already-seeded database must NOT acquire the per-database
+// GET_LOCK, so concurrent opens stop serializing on it. sqlmock fails on any
+// unexpected query, so an errant GET_LOCK would fail this test.
+func TestMigrateUpWithLockSkipsLockWhenAtLatestAndSeeded(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	// migrationWorkNeeded: both cursors at latest, both content_hash columns
+	// present, no custom backfill -> no work needed.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectContentHashColumnExists(mock)
+	expectContentHashColumnExists(mock)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	// dolt_ignore fully seeded -> the open is provably a no-op; no lock taken.
+	expectDoltIgnoreSeeded(mock, len(doltIgnorePatterns))
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 0", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (at-latest seeded open must skip GET_LOCK): %v", err)
+	}
+}
+
+// TestMigrateUpWithLockTakesLockWhenUnderSeeded proves the fast path preserves
+// the #4566 self-heal contract: a database at latest but missing dolt_ignore
+// patterns (out-of-band copy) still takes the lock, so the seed and its commit
+// stay serialized instead of racing across concurrent opens.
+func TestMigrateUpWithLockTakesLockWhenUnderSeeded(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	// Fast-path probe: at latest (no migration pass)...
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectContentHashColumnExists(mock)
+	expectContentHashColumnExists(mock)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	// ...but dolt_ignore is under-seeded, so the fast path declines the no-op
+	// and the lock path runs the authoritative MigrateUp under GET_LOCK.
+	expectDoltIgnoreSeeded(mock, len(doltIgnorePatterns)-1)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	// MigrateUp re-seeds (rows change), re-checks work, then commits the seed
+	// scoped+labeled and short-circuits (no migration pass).
+	expectIgnorePatternSeed(mock)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectContentHashColumnExists(mock)
+	expectContentHashColumnExists(mock)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 0", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (under-seeded at-latest open must take the lock): %v", err)
+	}
+}
+
+// expectDoltIgnoreSeeded mocks the read-only dolt_ignore pattern-presence probe
+// that gates the lock-free fast path, reporting present of len(doltIgnorePatterns).
+func expectDoltIgnoreSeeded(mock sqlmock.Sqlmock, present int) {
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(doltIgnorePatterns)), ", ")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_ignore WHERE pattern IN (" + placeholders + ")")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(present))
 }
 
 // TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded is the regression guard for

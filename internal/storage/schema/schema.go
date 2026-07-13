@@ -256,6 +256,24 @@ func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
 	return changed, nil
 }
 
+// doltIgnorePatternsSeeded reports whether every canonical dolt_ignore pattern
+// is already present. It is the read-only counterpart to seedDoltIgnorePatterns
+// used to prove an at-latest open would be a pure no-op.
+func doltIgnorePatternsSeeded(ctx context.Context, db DBConn) (bool, error) {
+	placeholders := make([]string, len(doltIgnorePatterns))
+	args := make([]any, len(doltIgnorePatterns))
+	for i, pattern := range doltIgnorePatterns {
+		placeholders[i] = "?"
+		args[i] = pattern
+	}
+	query := "SELECT COUNT(*) FROM dolt_ignore WHERE pattern IN (" + strings.Join(placeholders, ", ") + ")"
+	var present int
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&present); err != nil {
+		return false, err
+	}
+	return present == len(doltIgnorePatterns), nil
+}
+
 // commitSeededDoltIgnore stages and commits freshly seeded dolt_ignore rows
 // in a scoped, labeled commit. Both MigrateUp paths use it: on the no-work
 // short-circuit nothing downstream would ever commit the seed, and on the

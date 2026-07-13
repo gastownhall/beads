@@ -53,7 +53,17 @@ func MigrationLockName(databaseName string) string {
 // server session. Embedded Dolt intentionally uses bare MigrateUp because it
 // relies on the embedded driver's file/concurrency controls instead of
 // sql-server session locks.
+//
+// A read-only fast path skips the lock entirely when the database is provably
+// at-latest and seeded, so the common open no longer serializes every concurrent
+// connection on the per-database GET_LOCK.
 func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string) (applied int, err error) {
+	if noop, err := migrateUpWouldNoop(ctx, conn); err != nil {
+		return 0, err
+	} else if noop {
+		return 0, nil
+	}
+
 	lockName := MigrationLockName(databaseName)
 	if err := AcquireMigrationLock(ctx, conn, lockName); err != nil {
 		return 0, err
@@ -65,6 +75,23 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string)
 	}()
 
 	return MigrateUp(ctx, conn)
+}
+
+// migrateUpWouldNoop reports whether MigrateUp is guaranteed to do nothing on
+// this database: no pending migration work AND the canonical dolt_ignore
+// patterns already seeded. Both probes are read-only, letting an at-latest open
+// skip the serializing per-database migration lock. Pending work or an
+// under-seeded out-of-band copy returns false so the caller takes the lock and
+// runs the authoritative MigrateUp.
+func migrateUpWouldNoop(ctx context.Context, conn *sql.Conn) (bool, error) {
+	needed, err := migrationWorkNeeded(ctx, conn)
+	if err != nil {
+		return false, err
+	}
+	if needed {
+		return false, nil
+	}
+	return doltIgnorePatternsSeeded(ctx, conn)
 }
 
 // AcquireMigrationLock acquires the named schema migration lock on the pinned
