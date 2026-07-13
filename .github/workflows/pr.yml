@@ -449,13 +449,25 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
         run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
 
-  # Producer-side guard for the Beads<->consumer contract corpus. Regenerates
-  # the canonicalized golden corpus from this branch's bd and byte-compares it
-  # to the committed testdata/corpus/; an unreviewed wire change is a hard
-  # failure (run `make corpus-regen`). The double-run test proves determinism.
+  # Producer-side guard for the Beads<->consumer CLI contract. Runs the whole
+  # cmd/bd/protocol package: the golden corpus (regenerated from this branch's
+  # bd and byte-compared to the committed testdata/corpus/, so an unreviewed
+  # wire change is a hard failure — run `make corpus-regen`), the double-run
+  # determinism check, and the TestProtocol_/TestJSONContract_ behavioral
+  # conformance suite that pins the CLI's JSON payloads and semantics.
+  #
+  # Run the PACKAGE, never a -run subset: a filter here is what let the
+  # conformance tests sit red on main for ~3 months while every CI run was
+  # green (they matched no job's -run, and every broad ./... job skips them
+  # for want of a Dolt store). Package scope means a newly added protocol test
+  # is gated the moment it lands.
+  #
   # Needs the Dolt sql-server image (the protocol harness spins a container).
+  # ~10 min: each test builds an isolated Dolt-backed workspace. If that ever
+  # becomes unacceptable on PRs, shard this job by an exhaustive `go test
+  # -list` partition — do not reintroduce a hand-written -run regex.
   contract-corpus:
-    name: Contract corpus (golden + determinism)
+    name: Contract corpus (golden + determinism + conformance)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
@@ -479,13 +491,17 @@ jobs:
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
         run: docker pull dolthub/dolt-sql-server:2.1.10
 
-      - name: Corpus golden + determinism
+      - name: Protocol conformance + corpus golden + determinism
         # Require a live Dolt store here: this is the gate that must exercise the
-        # golden + double-run checks, so a failed container is a hard failure,
-        # not a silent skip (see requireDoltStore in cmd/bd/protocol tests).
+        # conformance, golden and double-run checks, so a failed container is a
+        # hard failure, not a silent skip (see requireDoltStore in the
+        # cmd/bd/protocol tests).
+        #
+        # -timeout is explicit because the package runs well past `go test`'s
+        # 10m default; without it a slow runner reports a panic, not a verdict.
         env:
           BEADS_PROTOCOL_REQUIRE_DOLT: "1"
-        run: go test -tags gms_pure_go -count=1 -run 'TestCorpusGolden|TestCanonicalize|TestCorpusDoubleRunByteIdentical|TestCheckCaptureExit' ./cmd/bd/protocol
+        run: go test -tags gms_pure_go -count=1 -timeout 30m ./cmd/bd/protocol
 
   fmt-check:
     name: Check formatting
