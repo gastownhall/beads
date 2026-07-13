@@ -219,6 +219,21 @@ func TestCheckNoDuplicateVersionsPanicsWithBothFilenames(t *testing.T) {
 	checkNoDuplicateVersions(files)
 }
 
+// TestEmbeddedMigrationSourcesHaveNoDuplicateVersions runs discovery over the
+// real embedded migration tree for both sources. list() panics on duplicate
+// numeric prefixes — at runtime that panic fires at store open, before any
+// command's RunE, so a duplicate bricks every bd command. Tests that read a
+// migration's SQL file directly bypass list() and cannot catch this; this
+// discovery-level check makes the whole failure class fail in CI instead.
+func TestEmbeddedMigrationSourcesHaveNoDuplicateVersions(t *testing.T) {
+	for _, src := range []migrationSource{mainSource, ignoredSource} {
+		files := src.list() // panics on duplicate versions
+		if len(files) == 0 {
+			t.Errorf("migrationSource(%s).list() returned no migrations", src.dir)
+		}
+	}
+}
+
 func TestDirtyTableSignatureRejectsUnsafeTableName(t *testing.T) {
 	_, err := dirtyTableSignature(context.Background(), nil, "issues'); SELECT 1; --")
 	if err == nil {
@@ -2019,4 +2034,55 @@ func TestRunMigrationsLargeRigNoticeOnlyOnMainSource(t *testing.T) {
 	if strings.Contains(ignoredBuf.String(), "Large rig detected") {
 		t.Errorf("expected ignoredSource pass to stay silent on the large-rig notice (main-source pass already warned); got: %q", ignoredBuf.String())
 	}
+}
+
+func TestIgnoredMigration0015AddsWispsDeferUntilIndexThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "wisps-defer-until-index")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create wisps defer_until index dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	migrationSQL, err := ignoredSource.files.ReadFile("migrations/ignored/0015_add_wisps_defer_until_index.up.sql")
+	if err != nil {
+		t.Fatalf("read ignored 0015 up migration: %v", err)
+	}
+	const indexCountQuery = `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps' AND INDEX_NAME = 'idx_wisps_defer_until'`
+
+	runDoltSQL(t, dir, string(migrationSQL))
+	requireDoltCount(t, dir, indexCountQuery, "1")
+
+	// Idempotent: re-applying must not error or duplicate the index.
+	runDoltSQL(t, dir, string(migrationSQL))
+	requireDoltCount(t, dir, indexCountQuery, "1")
+}
+
+func TestIgnoredMigration0015NoopsWithoutWispsTableThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "wisps-defer-until-index-no-wisps")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create no-wisps dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+	runDoltSQL(t, dir, `
+DROP TABLE IF EXISTS wisp_child_counters;
+DROP TABLE IF EXISTS wisp_comments;
+DROP TABLE IF EXISTS wisp_events;
+DROP TABLE IF EXISTS wisp_dependencies;
+DROP TABLE IF EXISTS wisp_labels;
+DROP TABLE IF EXISTS wisps;
+`)
+
+	migrationSQL, err := ignoredSource.files.ReadFile("migrations/ignored/0015_add_wisps_defer_until_index.up.sql")
+	if err != nil {
+		t.Fatalf("read ignored 0015 up migration: %v", err)
+	}
+	runDoltSQL(t, dir, string(migrationSQL))
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps'`, "0")
 }
