@@ -1717,10 +1717,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					giCmd := exec.Command("git", "add", ".gitignore")
 					_ = giCmd.Run()
 				}
-				// Hooks installed by this init can call back into bd. Skip them
-				// for the bootstrap commit to avoid self-deadlocking while init
-				// still owns the embedded Dolt lock.
-				commitArgs := []string{"commit", "--no-verify", "-m", "bd init: initialize beads issue tracking"}
+				// Hooks installed by this init can call back into bd. Skip all
+				// of them for the bootstrap commit to avoid self-deadlocking
+				// while init still owns the embedded Dolt lock. --no-verify
+				// alone does not skip prepare-commit-msg.
+				commitArgs := []string{"-c", "core.hooksPath=", "commit", "--no-verify", "-m", "bd init: initialize beads issue tracking"}
 				commitCmd := exec.Command("git", commitArgs...)
 				if commitOut, commitErr := commitCmd.CombinedOutput(); commitErr != nil {
 					if !quiet && !strings.Contains(string(commitOut), "nothing to commit") {

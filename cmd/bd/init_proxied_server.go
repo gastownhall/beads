@@ -426,8 +426,9 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				"CLAUDE.md",
 				".gitignore",
 			},
-			Message:  "bd init: initialize beads issue tracking",
-			NoVerify: true,
+			Message:   "bd init: initialize beads issue tracking",
+			NoVerify:  true,
+			SkipHooks: true,
 		})
 		switch {
 		case err != nil && !in.quiet:
