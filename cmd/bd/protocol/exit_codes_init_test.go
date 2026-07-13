@@ -31,6 +31,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/creack/pty"
 )
 
 // Literal exit codes frozen by §E3. Deliberately NOT bd's Go constants: the
@@ -166,15 +168,125 @@ func TestProtocol_ExitCode12_DestroyTokenMissing(t *testing.T) {
 	}
 }
 
-// TestProtocol_ExitCode11_LocalExistsRefused is the §E3 gap: exit 11 is
+// TestProtocol_ExitCode11_LocalExistsRefused pins §E3's exit 11: exit 11 is
 // returned only from the INTERACTIVE typed-confirmation abort in
 // `bd init --reinit-local` (cmd/bd/init.go, guarded by term.IsTerminal on
 // stdin). The non-interactive branch of the same guard returns 12 instead, so
-// no piped-stdin subprocess can produce 11 — pinning it needs a PTY-backed run
-// helper, tracked in wy-vh5y8. Un-skip when that lands.
+// no piped-stdin subprocess can produce 11 — the prompt only fires on a real
+// terminal. This test allocates a PTY (creack/pty, a test-only dependency),
+// drives `bd init --reinit-local` on it against a workspace with issues, answers
+// the "Type 'destroy N issues' to confirm:" prompt with the WRONG text, and
+// asserts the abort exits 11 — distinct from the 12 an agent supplying a bad
+// --destroy-token would get, so a script can tell "the operator declined at the
+// prompt" from "the token was wrong".
 func TestProtocol_ExitCode11_LocalExistsRefused(t *testing.T) {
-	t.Skip("exit 11 is reachable only through an interactive TTY prompt; needs a PTY harness (wy-vh5y8)")
-	_ = exitLocalExistsRefused
+	if runtime.GOOS == "windows" {
+		t.Skip("no unix PTY on Windows; the exit-11 interactive prompt is unreachable here")
+	}
+	// Deliberately NOT t.Parallel(): this test drives a PTY with a generous
+	// prompt deadline and a reader goroutine. newWorkspace already gives it an
+	// isolated per-test Dolt database, so serializing it costs nothing but keeps
+	// the PTY interaction free of contention noise.
+
+	w := newWorkspace(t)
+	// The exit-11 prompt only fires when --reinit-local has data to destroy:
+	// countExistingIssues must return > 0, so seed one issue.
+	w.create("--title", "seed issue for exit-11 refusal", "--type", "task")
+
+	cmd := exec.Command(w.bd, "init", "--reinit-local")
+	cmd.Dir = w.dir
+	// CI= / BD_NON_INTERACTIVE=0 mirror the 130 test: strip any ambient signal
+	// that would push bd onto a non-interactive path. The exit-11 branch keys on
+	// term.IsTerminal(stdin) directly, which the PTY below already satisfies;
+	// these just guard against an earlier non-interactive short-circuit.
+	cmd.Env = append(w.env(), "BD_NON_INTERACTIVE=0", "CI=")
+
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("pty.Start bd init --reinit-local: %v", err)
+	}
+	defer func() { _ = ptmx.Close() }()
+
+	var (
+		mu         sync.Mutex
+		output     bytes.Buffer
+		promptSeen = make(chan struct{})
+		once       sync.Once
+	)
+	// Drain the PTY continuously: the child writes the warning and prompt to the
+	// same terminal, and an unread PTY can block the writer. Signal promptSeen
+	// once the confirmation prompt appears.
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, readErr := ptmx.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				output.Write(buf[:n])
+				if strings.Contains(output.String(), "to confirm:") {
+					once.Do(func() { close(promptSeen) })
+				}
+				mu.Unlock()
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}()
+
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+
+	got := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return output.String()
+	}
+
+	// Like the 130 test, the deadline covers a whole store connection, not just
+	// process startup: reaching the prompt means counting the existing issues,
+	// which opens the workspace's Dolt store — tens of seconds on a loaded box.
+	const promptDeadline = 120 * time.Second
+	select {
+	case <-promptSeen:
+	case err := <-waitCh:
+		t.Fatalf("bd init --reinit-local exited before prompting: %v\n%s", err, got())
+	case <-time.After(promptDeadline):
+		_ = cmd.Process.Kill()
+		<-waitCh
+		t.Fatalf("timed out waiting for the destroy-confirmation prompt\n%s", got())
+	}
+
+	// Answer with text that is NOT "destroy N issues": the typed-confirmation
+	// mismatch is exactly what returns exit 11.
+	if _, err := ptmx.Write([]byte("definitely not the confirmation\n")); err != nil {
+		t.Fatalf("write wrong confirmation to PTY: %v", err)
+	}
+
+	var waitErr error
+	select {
+	case waitErr = <-waitCh:
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+		<-waitCh
+		t.Fatalf("bd did not exit after the wrong confirmation\n%s", got())
+	}
+
+	var exitErr *exec.ExitError
+	if !errors.As(waitErr, &exitErr) {
+		t.Fatalf("expected a non-zero exit after wrong confirmation, got %v\n%s", waitErr, got())
+	}
+	if code := exitErr.ExitCode(); code != exitLocalExistsRefused {
+		t.Errorf("exit code = %d, want %d (§E3 local-exists refusal)\n%s", code, exitLocalExistsRefused, got())
+	}
+	if code := exitErr.ExitCode(); code == exitDestroyTokenMissing {
+		t.Errorf("local-exists refusal collapsed into the destroy-token code — §E3 codes must stay distinct")
+	}
+
+	// The abort must be a no-op: the seeded issue must survive.
+	if out := w.run("list", "--json"); !strings.Contains(out, "seed issue for exit-11 refusal") {
+		t.Errorf("aborted reinit destroyed data — seeded issue missing:\n%s", out)
+	}
 }
 
 // TestProtocol_ExitCode130_PromptCanceled pins §E3's exit 130: SIGINT at an
