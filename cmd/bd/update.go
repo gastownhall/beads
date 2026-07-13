@@ -377,7 +377,7 @@ create, update, show, or close operation).`,
 			// Handle claim operation atomically using compare-and-swap semantics
 			if claimFlag {
 				if err := issueStore.ClaimIssue(ctx, result.ResolvedID, actor); err != nil {
-					fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
+					reportClaimFailure(id, err)
 					claimFailed = true
 					closeIfUnmutated(result)
 					continue

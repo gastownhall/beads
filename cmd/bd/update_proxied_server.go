@@ -112,7 +112,7 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 	updated, err := issueUC.ApplyUpdate(ctx, id, spec, actor)
 	if err != nil {
 		if errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable) {
-			fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
+			reportClaimFailure(id, err)
 			// A requested --claim that lost to another owner must flip the exit
 			// code even if another ID in the same batch was updated.
 			return nil, false, in.claim, nil

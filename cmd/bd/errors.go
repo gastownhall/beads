@@ -116,6 +116,21 @@ func HandleErrorWithHintRespectJSON(message, hint string) error {
 	return &exitError{Code: 1}
 }
 
+// reportClaimFailure renders a failed --claim (already-claimed, not-claimable,
+// or any other ClaimIssue error). Protocol v0 §E5 requires errors under --json
+// to be structured, and a lost claim is the most common contended-write failure
+// an agent has to branch on, so --json gets {error, schema_version:1} instead of
+// a stderr line to scrape. The plain-text wording is frozen (§E4 pins the class
+// and the holder/state in the message). The JSON object goes to stderr so that a
+// mixed batch's stdout stays the clean array of issues that did update.
+func reportClaimFailure(id string, err error) {
+	if jsonOutput {
+		jsonStderrError(fmt.Sprintf("failed to claim %s: %v", id, err), "")
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
+}
+
 func SilentExit() error {
 	return &exitError{Code: 1}
 }
