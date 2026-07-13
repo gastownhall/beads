@@ -115,25 +115,12 @@ func TestProtocol_ErrorClass_NotClaimableNamesState(t *testing.T) {
 }
 
 // TestProtocol_ErrorClass_ClaimFailures_StructuredJSON is the §E5 half of the
-// claim error classes — and it is SKIPPED because bd-go does not satisfy it
-// today (wy-kxgf4).
-//
-// bd routes not-found through the JSON-respecting error helper, so
-// `bd show <missing> --json` emits {error, schema_version:1} (pinned above).
-// The claim path does not: `bd update <id> --claim --json` prints
-//
-//	Error claiming t04…-qqr: issue already claimed by alice
-//
-// as plain text, so an agent driving bd with --json gets an unparseable stderr
-// line for the single most common contended-write failure it must branch on.
-// The message contract (§E4) holds; the structured contract (§E5) does not.
-//
-// Per proposal §14, where bd's behavior deviates from a clause the clause wins
-// and the deviation is a bug — so this test asserts the clause and stays
-// skipped until wy-kxgf4 lands, at which point it becomes the guardrail.
+// claim error classes: a lost claim is the most common contended-write failure
+// an agent driving bd with --json has to branch on, so it must arrive as a JSON
+// object and not as a stderr line to scrape. bd emitted plain text here until
+// wy-kxgf4; the clause is the guardrail now. The stream (stdout vs stderr) is
+// deliberately not pinned — that split is proposal OQ-5.
 func TestProtocol_ErrorClass_ClaimFailures_StructuredJSON(t *testing.T) {
-	t.Skip("bd emits claim failures as plain text even with --json; violates §E5 (wy-kxgf4)")
-
 	t.Parallel()
 	w := newWorkspace(t)
 

@@ -271,7 +271,7 @@ func proxiedUpdateFailure(id string, claim bool, err error) *updateIDFailure {
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
 		return &updateIDFailure{ID: id, Error: "issue not found"}
 	case errors.Is(err, storage.ErrAlreadyClaimed), errors.Is(err, storage.ErrNotClaimable):
-		fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
+		reportClaimFailure(id, err)
 		return &updateIDFailure{ID: id, Error: fmt.Sprintf("claiming issue: %v", err)}
 	case errors.Is(err, storage.ErrCloseOpenChildren):
 		fmt.Fprintf(os.Stderr, "%v\n", err)
