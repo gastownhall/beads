@@ -372,14 +372,29 @@ func cycleDetectionTables() []string {
 	return []string{"dependencies", "wisp_dependencies"}
 }
 
+// DeleteWispFromDependenciesInTx removes every dependency row involving a
+// deleted wisp: rows in the regular dependencies table that target it, plus
+// its rows in wisp_dependencies — both the wisp's own outgoing rows
+// (issue_id: step-ordering blocks, parent-child) and rows that target it
+// (depends_on_wisp_id). Without the wisp_dependencies cleanup every
+// mol burn / wisp GC leaked its step-dependency rows as permanent orphans
+// (gastownhall/beads#4673).
 func DeleteWispFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispID string) error {
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM dependencies WHERE depends_on_wisp_id = ?", wispID); err != nil {
 		return fmt.Errorf("delete wisp %s from dependencies: %w", wispID, err)
 	}
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM wisp_dependencies WHERE issue_id = ? OR depends_on_wisp_id = ?",
+		wispID, wispID); err != nil && !isTableNotExistError(err) {
+		return fmt.Errorf("delete wisp %s from wisp_dependencies: %w", wispID, err)
+	}
 	return nil
 }
 
+// DeleteWispsFromDependenciesInTx is the batch form of
+// DeleteWispFromDependenciesInTx; see its doc comment for what is cascaded.
+//
 //nolint:gosec // G201: inClause contains only ? placeholders
 func DeleteWispsFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispIDs []string) error {
 	if len(wispIDs) == 0 {
@@ -390,6 +405,14 @@ func DeleteWispsFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispIDs []
 		fmt.Sprintf("DELETE FROM dependencies WHERE depends_on_wisp_id IN (%s)", inClause),
 		args...); err != nil {
 		return fmt.Errorf("delete wisps from dependencies: %w", err)
+	}
+	wispArgs := make([]interface{}, 0, len(args)*2)
+	wispArgs = append(wispArgs, args...)
+	wispArgs = append(wispArgs, args...)
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM wisp_dependencies WHERE issue_id IN (%s) OR depends_on_wisp_id IN (%s)", inClause, inClause),
+		wispArgs...); err != nil && !isTableNotExistError(err) {
+		return fmt.Errorf("delete wisps from wisp_dependencies: %w", err)
 	}
 	return nil
 }
