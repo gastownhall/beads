@@ -234,6 +234,9 @@ func importJSONLIntoStore(ctx context.Context, store storage.DoltStorage, jsonlP
 
 	err = store.CreateIssuesWithFullOptions(ctx, issues, actor, storage.BatchCreateOptions{
 		SkipPrefixValidation: true,
+		// Replays existing data: exclusive-label violations warn via bd
+		// doctor instead of failing the replay (bd-7u5ki).
+		ExclusiveLabelConflictWarn: true,
 	})
 	if err != nil {
 		return 0, err

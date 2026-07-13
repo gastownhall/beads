@@ -81,6 +81,31 @@ func TestValidateSettingWriteParsesTheCustomStatusValue(t *testing.T) {
 	}
 }
 
+func TestValidateSettingWriteChecksTheExclusiveLabelPrefixes(t *testing.T) {
+	for _, value := range []string{
+		"tier:",
+		"tier:,review:",
+		"tier, review", // the trailing colon is optional; entries are trimmed
+		// Empty disables enforcement, the default; it is not a value to parse.
+		"",
+	} {
+		if _, err := ValidateSettingWrite("labels.exclusive-prefixes", value); err != nil {
+			t.Errorf("ValidateSettingWrite(labels.exclusive-prefixes, %q) = %v, want it accepted", value, err)
+		}
+	}
+	for _, value := range []string{
+		"provides:", // reserved: cross-project capabilities are multi-valued
+		"tier:a:",   // at most one colon, at the end
+		"my tier:",  // whitespace inside a prefix
+		":",         // no name before the colon
+		",",         // no prefixes at all: unset the key instead
+	} {
+		if _, err := ValidateSettingWrite("labels.exclusive-prefixes", value); !errors.Is(err, issueops.ErrValidation) {
+			t.Errorf("ValidateSettingWrite(labels.exclusive-prefixes, %q) error = %v, want ErrValidation", value, err)
+		}
+	}
+}
+
 // TestValidateSettingWriteReturnsTheValueUnchanged is the machine half of
 // issueops.SetSettingResult.Value's promise: a successful write stores what the
 // caller sent. Nothing normalizes today, and this is what would fail if

@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "labelns",
+    srcs = ["labelns.go"],
+    importpath = "github.com/steveyegge/beads/internal/labelns",
+    visibility = ["//:__subpackages__"],
+)
+
+go_test(
+    name = "labelns_test",
+    srcs = ["labelns_test.go"],
+    embed = [":labelns"],
+)

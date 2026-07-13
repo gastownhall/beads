@@ -91,6 +91,18 @@ Claim Pools:
   that if a taker's lease expires, bd reclaim returns the issue to the
   unassigned pool, not to the pool alias it was dispatched to.
 
+Exclusive Label Namespaces:
+  Labels are free-form, but routing conventions like tier:<model> assume one
+  label per prefix; a second one silently narrows fleet eligibility to zero.
+  Declare prefixes exclusive (at most one label per issue) with:
+
+    bd config set labels.exclusive-prefixes "tier:,review:"
+
+  Adding a second label in an exclusive namespace is then rejected on every
+  write path ('bd label add --replace' swaps instead). Import warns and keeps
+  violating labels; 'bd doctor' reports existing violations. Unset the key to
+  restore fully free-form labels (the default).
+
 Suppressing Doctor Warnings:
   Suppress specific bd doctor warnings by check name slug:
     bd config set doctor.suppress.pending-migrations true
@@ -108,6 +120,7 @@ Examples:
   bd config set jira.project "PROJ"
   bd config set status.custom "awaiting_review,awaiting_testing"
   bd config set claim.pools "fable-crew,night-crew"    # Pool aliases claimable by any actor
+  bd config set labels.exclusive-prefixes "tier:,review:"
   bd config set doctor.suppress.pending-migrations true
   bd config set dolt.debug true                        # Enable Dolt sql-server debug mode (loglevel=debug, --prof cpu)
   bd config set dolt.local-only true                   # Skip wiring a Dolt sync remote during bd init
@@ -1296,7 +1309,7 @@ Examples:
 // a new tracker is added (GH#4427).
 var recognizedConfigPrefixes = []string{
 	"export.", "import.", "dolt.", "custom.",
-	"status.", "types.", "doctor.suppress.", "routing.", "sync.", "git.",
+	"status.", "types.", "labels.", "doctor.suppress.", "routing.", "sync.", "git.",
 	"directory.", "repos.", "external_projects.", "validation.",
 	"lint.", "hierarchy.", "ai.", "backup.", "federation.", "metrics.",
 	"agent.", "claim.", "storage-class.",

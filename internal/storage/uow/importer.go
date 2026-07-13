@@ -93,6 +93,9 @@ func (o *importer) ImportBatch(ctx context.Context, request publicops.ImportBatc
 				SkipPrefixValidation:           request.SkipPrefixValidation,
 				RejectStaleUpserts:             !request.AllowStale,
 				SkipDependencyValidationErrors: true,
+				// Replays existing data: exclusive-label violations warn via bd
+				// doctor instead of failing the replay (bd-7u5ki).
+				ExclusiveLabelConflictWarn: true,
 				OnSkippedDependency: func(issueID, dependsOnID, reason string) {
 					key := issueID + "\x00" + dependsOnID + "\x00" + reason
 					if _, ok := skippedSeen[key]; ok {

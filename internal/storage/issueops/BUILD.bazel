@@ -105,6 +105,7 @@ go_library(
         "//internal/config",
         "//internal/debug",
         "//internal/idgen",
+        "//internal/labelns",
         "//internal/storage",
         "//internal/storage/dberrors",
         "//internal/storage/depid",

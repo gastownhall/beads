@@ -278,7 +278,7 @@ var proxiedLookupCommands = []struct {
 		// asked for.
 		name: "label add",
 		run: func(ctx context.Context) error {
-			return inProxiedRoute(func() error { return runLabelAdd(ctx, []string{stubMissingID, "urgent"}) })
+			return inProxiedRoute(func() error { return runLabelAdd(ctx, []string{stubMissingID, "urgent"}, false) })
 		},
 		wantNotFound: `Error: resolving issue ID "bd-missing": not found`,
 		wantHardErr:  `Error: resolving issue ID "bd-missing": connection reset by peer`,

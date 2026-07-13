@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/labelns"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
@@ -58,6 +59,15 @@ func ValidateSettingWrite(key, value string) (string, error) {
 	// makes the refusal a validation error rather than a storage failure.
 	if key == issueops.SettingKeyStatusCustom && value != "" {
 		if _, err := types.ParseCustomStatusConfig(value); err != nil {
+			return "", fmt.Errorf("%w: invalid %s value: %v", issueops.ErrValidation, key, err)
+		}
+	}
+	// labels.exclusive-prefixes is parsed permissively where it is read
+	// (labelns.ParsePrefixes), so a value it should never hold - the reserved
+	// 'provides:' prefix, an entry with whitespace or an inner colon - is
+	// refused here, where it is written, on every route that writes it.
+	if key == labelns.ConfigKey && value != "" {
+		if _, err := labelns.ValidatePrefixes(value); err != nil {
 			return "", fmt.Errorf("%w: invalid %s value: %v", issueops.ErrValidation, key, err)
 		}
 	}

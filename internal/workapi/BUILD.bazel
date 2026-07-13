@@ -25,6 +25,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/config",
+        "//internal/labelns",
         "//internal/query",
         "//internal/storage",
         "//internal/storage/domain",
