@@ -218,6 +218,41 @@ func TestBuildIssueFilterClauses_LabelsAny(t *testing.T) {
 	}
 }
 
+func TestBuildIssueFilterClauses_LabelExact(t *testing.T) {
+	t.Parallel()
+
+	label := "backend"
+	clauses, args, err := BuildIssueFilterClauses("", types.IssueFilter{Label: &label}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(clauses) != 1 {
+		t.Fatalf("expected 1 clause for exact label, got %d: %v", len(clauses), clauses)
+	}
+	if want := "id IN (SELECT issue_id FROM labels WHERE label = ?)"; clauses[0] != want {
+		t.Errorf("clause = %q, want %q", clauses[0], want)
+	}
+	if len(args) != 1 || args[0] != label {
+		t.Errorf("args = %#v, want [%q]", args, label)
+	}
+}
+
+func TestBuildIssueFilterClauses_LabelExactWispsTable(t *testing.T) {
+	t.Parallel()
+
+	label := "backend"
+	clauses, _, err := BuildIssueFilterClauses("", types.IssueFilter{Label: &label}, WispsFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(clauses) != 1 {
+		t.Fatalf("expected 1 clause for exact label, got %d: %v", len(clauses), clauses)
+	}
+	if !strings.Contains(clauses[0], WispsFilterTables.Labels) {
+		t.Errorf("clause %q does not reference wisp labels table %q", clauses[0], WispsFilterTables.Labels)
+	}
+}
+
 func TestBuildLabelDrivenSearchUsesLabelJoins(t *testing.T) {
 	t.Parallel()
 
