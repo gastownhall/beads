@@ -63,6 +63,14 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 		whereClauses = append(whereClauses, "LOWER(external_ref) LIKE ?")
 		args = append(args, "%"+strings.ToLower(filter.ExternalRefContains)+"%")
 	}
+	if filter.ExternalRef != nil {
+		whereClauses = append(whereClauses, "external_ref = ?")
+		args = append(args, *filter.ExternalRef)
+	}
+	if filter.Label != nil {
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label = ?)", tables.Labels))
+		args = append(args, *filter.Label)
+	}
 
 	if filter.Status != nil {
 		whereClauses = append(whereClauses, "status = ?")

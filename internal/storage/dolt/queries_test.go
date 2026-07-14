@@ -1729,6 +1729,99 @@ func TestSearchIssues_ByExternalRef(t *testing.T) {
 	}
 }
 
+// TestSearchIssues_ByExternalRefExact verifies the ExternalRef exact-match
+// filter on IssueFilter. This uses a *string pointer for exact equality
+// (as opposed to ExternalRefContains which is a substring match).
+func TestSearchIssues_ByExternalRefExact(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	linearURL := "https://linear.app/example-org/issue/BE-2222"
+	issue := &types.Issue{
+		ID:          "si-extref-exact",
+		Title:       "Test exact external ref filter",
+		ExternalRef: &linearURL,
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+
+	// ExternalRef exact match should find the issue.
+	results, err := store.SearchIssues(ctx, "", types.IssueFilter{ExternalRef: &linearURL})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("ExternalRef exact match: expected 1 result, got %d", len(results))
+	}
+	if results[0].ID != issue.ID {
+		t.Errorf("expected %s, got %s", issue.ID, results[0].ID)
+	}
+
+	// ExternalRef exact match with wrong value should return nothing.
+	wrongRef := "jira-WRONG-123"
+	results, err = store.SearchIssues(ctx, "", types.IssueFilter{ExternalRef: &wrongRef})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("ExternalRef exact match with wrong value: expected 0 results, got %d", len(results))
+	}
+}
+
+// TestSearchIssues_ByLabelExact verifies the Label exact-match filter on
+// IssueFilter. This uses a *string pointer for single-label exact equality.
+func TestSearchIssues_ByLabelExact(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:        "si-label-exact",
+		Title:     "Test exact label filter",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	if err := store.AddLabel(ctx, issue.ID, "backend", "tester"); err != nil {
+		t.Fatalf("failed to add label: %v", err)
+	}
+
+	// Label exact match should find the issue.
+	labelName := "backend"
+	results, err := store.SearchIssues(ctx, "", types.IssueFilter{Label: &labelName})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Label exact match: expected 1 result, got %d", len(results))
+	}
+	if results[0].ID != issue.ID {
+		t.Errorf("expected %s, got %s", issue.ID, results[0].ID)
+	}
+
+	// Label exact match with wrong value should return nothing.
+	wrongLabel := "frontend"
+	results, err = store.SearchIssues(ctx, "", types.IssueFilter{Label: &wrongLabel})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("Label exact match with wrong value: expected 0 results, got %d", len(results))
+	}
+}
+
 func TestSearchIssues_ByID(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

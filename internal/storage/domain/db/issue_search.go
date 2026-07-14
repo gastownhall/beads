@@ -488,6 +488,10 @@ func buildIssueFilterClauses(query string, filter types.IssueFilter, tables filt
 	likeLowerContains(&c, "description", filter.DescriptionContains)
 	likeLowerContains(&c, "notes", filter.NotesContains)
 	likeLowerContains(&c, "external_ref", filter.ExternalRefContains)
+	eqStrPtr(&c, "external_ref", filter.ExternalRef)
+	if filter.Label != nil {
+		c.and(fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label = ?)", tables.Labels), *filter.Label)
+	}
 
 	eqStrPtr(&c, "status", filter.Status)
 	inList(&c, "status", filter.Statuses)

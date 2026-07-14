@@ -214,6 +214,15 @@ func buildListFilter(in listInput, cfg listFilterConfig) (types.IssueFilter, err
 	if in.notesContains != "" {
 		filter.NotesContains = in.notesContains
 	}
+	if in.externalContains != "" {
+		filter.ExternalRefContains = in.externalContains
+	}
+	if in.externalRef != "" {
+		filter.ExternalRef = &in.externalRef
+	}
+	if in.labelExact != "" {
+		filter.Label = &in.labelExact
+	}
 
 	filter.CreatedAfter = in.createdAfter
 	filter.CreatedBefore = in.createdBefore
