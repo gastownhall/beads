@@ -82,10 +82,15 @@ func maybeNewCircuitBreaker(host string, port int, database string) *circuitBrea
 	return newCircuitBreaker(host, port, database)
 }
 
-// circuitBreakerDir is the dedicated directory for circuit breaker state files.
-// Using a subdirectory avoids scanning all of /tmp (which may contain millions
-// of entries) when cleaning up stale breaker files on startup.
-const circuitBreakerDir = "/tmp/beads-circuit"
+// circuitBreakerDir returns the dedicated directory for circuit breaker state
+// files. Using a subdirectory avoids scanning all of the temp root (which may
+// contain millions of entries) when cleaning up stale breaker files on
+// startup. Derived from os.TempDir() so it is correct on every platform:
+// hardcoding "/tmp" resolved to C:\tmp on Windows, silently accumulating
+// breaker files there forever (GH#4636).
+func circuitBreakerDir() string {
+	return filepath.Join(os.TempDir(), "beads-circuit")
+}
 
 // newCircuitBreaker creates a circuit breaker for the given Dolt server
 // host:port:database. The database name is included in the file path so each
@@ -107,12 +112,13 @@ func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 		filename = fmt.Sprintf("beads-dolt-circuit-%s-%d.json", safeHost, port)
 	}
 
-	_ = os.MkdirAll(circuitBreakerDir, 0755)
+	dir := circuitBreakerDir()
+	_ = os.MkdirAll(dir, 0755)
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
 		database: database,
-		filePath: filepath.Join(circuitBreakerDir, filename),
+		filePath: filepath.Join(dir, filename),
 	}
 }
 
@@ -324,13 +330,22 @@ func (cb *circuitBreaker) writeState(state circuitState) {
 //
 // Called during init to ensure a clean starting state (GH#2598).
 func CleanStaleCircuitBreakerFiles() {
-	// Remove legacy files that lived directly in /tmp (before the subdirectory move).
-	// Direct path removal — no directory scan needed.
-	_ = os.Remove("/tmp/beads-dolt-circuit-0.json")
+	// Remove the legacy port-0 file that lived directly in the temp root before
+	// the subdirectory move (GH#2598). Best-effort: remove from the correct
+	// temp root and from the legacy hardcoded "/tmp" (which resolved to C:\tmp
+	// on Windows, GH#4636). Double-remove is harmless when they coincide.
+	_ = os.Remove(filepath.Join(os.TempDir(), "beads-dolt-circuit-0.json"))
+	_ = os.Remove(filepath.Join("/tmp", "beads-dolt-circuit-0.json"))
 
-	// Clean stale files in the dedicated subdirectory (fast — typically 0-2 files).
-	_ = os.MkdirAll(circuitBreakerDir, 0755)
-	cleanStaleCircuitBreakerFilesIn(circuitBreakerDir)
+	// Clean stale files in the dedicated subdirectory (fast — typically 0-2
+	// files). Also sweep the legacy hardcoded "/tmp/beads-circuit" location
+	// (C:\tmp\beads-circuit on Windows) where older builds accumulated files.
+	dir := circuitBreakerDir()
+	_ = os.MkdirAll(dir, 0755)
+	cleanStaleCircuitBreakerFilesIn(dir)
+	if legacy := filepath.Join("/tmp", "beads-circuit"); legacy != dir {
+		cleanStaleCircuitBreakerFilesIn(legacy)
+	}
 }
 
 // cleanStaleCircuitBreakerFilesIn is the testable implementation of
