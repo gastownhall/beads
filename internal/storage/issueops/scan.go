@@ -90,6 +90,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var ephemeral, noHistory, pinned, isTemplate sql.NullInt64
 	var metadata sql.NullString
 	var rowLock sql.NullInt64 // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
+	var closedBySession sql.NullString
 
 	dests := []any{
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -102,7 +103,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&molType,
 		&eventKind, &actor, &target, &payload,
 		&dueAt, &deferUntil,
-		&workType, &sourceSystem, &metadata, &rowLock,
+		&workType, &sourceSystem, &metadata, &rowLock, &closedBySession,
 		&leaseExpiresAt, &heartbeatAt, &leaseGrantedNode,
 	}
 	dests = append(dests, extra...)
@@ -161,6 +162,9 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	}
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
+	}
+	if closedBySession.Valid {
+		issue.ClosedBySession = closedBySession.String
 	}
 	if sender.Valid {
 		issue.Sender = sender.String
