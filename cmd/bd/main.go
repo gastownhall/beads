@@ -504,7 +504,7 @@ func refreshBoundCommandConfig(cmd *cobra.Command) {
 		readonlyMode = config.GetBool("readonly")
 	}
 	if !root.PersistentFlags().Changed("actor") {
-		actor = config.GetString("actor")
+		actor = resolveConfiguredActor()
 	}
 	if !root.PersistentFlags().Changed("dolt-auto-commit") {
 		doltAutoCommit = config.GetString("dolt.auto-commit")
@@ -541,6 +541,22 @@ func resolveCommandBeadsDir(dbPath string) string {
 }
 
 // getActorWithGit returns the actor for audit trails with git config fallback.
+// resolveConfiguredActor returns the actor implied by env/config when no
+// explicit --actor flag was passed, honoring the documented priority
+// BEADS_ACTOR > BD_ACTOR (deprecated) > config.yaml `actor`.
+//
+// viper's AutomaticEnv binds the deprecated BD_ACTOR to the "actor" key (env
+// prefix "BD"), and it is consulted ahead of any explicit binding — so
+// config.GetString("actor") alone returns BD_ACTOR's value even when
+// BEADS_ACTOR is also set, silently letting the deprecated alias win (GH#4645).
+// Check BEADS_ACTOR explicitly first so the primary override outranks it.
+func resolveConfiguredActor() string {
+	if beadsActor := os.Getenv("BEADS_ACTOR"); beadsActor != "" {
+		return beadsActor
+	}
+	return config.GetString("actor")
+}
+
 // Priority: --actor flag > BEADS_ACTOR env > BD_ACTOR env (deprecated) > git config user.name > $USER > "unknown"
 // This provides a sensible default for developers: their git identity is used unless
 // explicitly overridden
@@ -820,7 +836,7 @@ var rootCmd = &cobra.Command{
 			}{dbPath, true}
 		}
 		if !cmd.Root().PersistentFlags().Changed("actor") && actor == "" {
-			actor = config.GetString("actor")
+			actor = resolveConfiguredActor()
 		} else if cmd.Root().PersistentFlags().Changed("actor") {
 			flagOverrides["actor"] = struct {
 				Value  interface{}
