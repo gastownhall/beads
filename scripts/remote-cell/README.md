@@ -79,6 +79,8 @@ Architecture / load / capacity proofs: [docs/EVIDENCE.md](docs/EVIDENCE.md).
 
 ## Docs
 
+- [docs/MAINTAINER_REVIEW.md](docs/MAINTAINER_REVIEW.md) — **start here for review / decisions**  
 - [docs/ADMIN.md](docs/ADMIN.md) · [docs/USER.md](docs/USER.md)  
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/VM.md](docs/VM.md)  
-- [docs/EXPERIMENTAL.md](docs/EXPERIMENTAL.md) · [docs/EVIDENCE.md](docs/EVIDENCE.md)
+- [docs/EXPERIMENTAL.md](docs/EXPERIMENTAL.md) · [docs/EVIDENCE.md](docs/EVIDENCE.md)  
+- [docs/GOAL_AUDIT.md](docs/GOAL_AUDIT.md) — goal scorecard
