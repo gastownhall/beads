@@ -1437,16 +1437,24 @@ func TestEnginePushWithContentHash(t *testing.T) {
 		ContentHash: contentHash,
 	}
 
-	// First push: no stored hash yet, so the engine fetches, finds the remote
-	// already matches (ContentEqual), skips the update, and records the hash.
+	// A legacy content-only entry must miss once and repopulate in the new
+	// content+scope+target format.
+	if err := store.SetLocalMetadata(ctx, "test.pushhash.bd-hash1", contentHash(issue)); err != nil {
+		t.Fatalf("SetLocalMetadata() error: %v", err)
+	}
+
+	// First push: the legacy hash is not target-bound, so the engine fetches,
+	// finds the remote already matches (ContentEqual), skips the update, and
+	// records the new fingerprint.
 	if _, err := engine.Sync(ctx, SyncOptions{Push: true}); err != nil {
 		t.Fatalf("Sync() #1 error: %v", err)
 	}
 	if tracker.fetchCalls != 1 {
 		t.Fatalf("first push fetchCalls = %d, want 1", tracker.fetchCalls)
 	}
-	if got, _ := store.GetLocalMetadata(ctx, "test.pushhash.bd-hash1"); got != contentHash(issue) {
-		t.Fatalf("stored push hash = %q, want %q", got, contentHash(issue))
+	wantCache := engine.pushCacheValue(issue, *issue.ExternalRef)
+	if got, _ := store.GetLocalMetadata(ctx, "test.pushhash.bd-hash1"); got != wantCache {
+		t.Fatalf("stored push hash = %q, want %q", got, wantCache)
 	}
 
 	// Second push: hash matches, so the fetch must be skipped entirely.
@@ -1487,8 +1495,142 @@ func TestEnginePushWithContentHash(t *testing.T) {
 	if result.Stats.Updated != 1 {
 		t.Errorf("changed push Stats.Updated = %d, want 1", result.Stats.Updated)
 	}
-	if got, _ := store.GetLocalMetadata(ctx, "test.pushhash.bd-hash1"); got != "h:Changed content" {
-		t.Errorf("post-update stored hash = %q, want %q", got, "h:Changed content")
+	changedIssue, err := store.GetIssue(ctx, "bd-hash1")
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	wantCache = engine.pushCacheValue(changedIssue, *changedIssue.ExternalRef)
+	if got, _ := store.GetLocalMetadata(ctx, "test.pushhash.bd-hash1"); got != wantCache {
+		t.Errorf("post-update stored hash = %q, want %q", got, wantCache)
+	}
+}
+
+// TestEnginePushContentHashInvalidatedByRelink verifies that the local hash
+// cache is scoped to its remote target. Relinking an unchanged issue must not
+// reuse the old target's cache entry and skip updating the new target.
+func TestEnginePushContentHashInvalidatedByRelink(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issue := &types.Issue{
+		ID:          "bd-hash-relink",
+		Title:       "Unchanged content",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: strPtr("https://github.com/acme/widgets/issues/41"),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("github")
+	tracker.issues = []TrackerIssue{
+		{Identifier: "41", Title: issue.Title},
+		{Identifier: "42", Title: "Stale target content"},
+	}
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.PushHooks = &PushHooks{
+		ContentEqual: func(local *types.Issue, remote *TrackerIssue) bool {
+			return local.Title == remote.Title
+		},
+		ContentHash: func(local *types.Issue) string { return "h:" + local.Title },
+	}
+
+	// Seed the cache for issue 41 through the normal equality path.
+	if _, err := engine.Sync(ctx, SyncOptions{Push: true}); err != nil {
+		t.Fatalf("Sync() initial error: %v", err)
+	}
+	tracker.fetchCalls = 0
+
+	// Keep the local content unchanged while moving its link to issue 42.
+	newRef := "https://github.com/acme/widgets/issues/42"
+	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{"external_ref": newRef}, "test-actor"); err != nil {
+		t.Fatalf("UpdateIssue(external_ref) error: %v", err)
+	}
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() after relink error: %v", err)
+	}
+
+	if tracker.fetchCalls != 1 {
+		t.Errorf("fetchCalls after relink = %d, want 1", tracker.fetchCalls)
+	}
+	if result.Stats.Updated != 1 {
+		t.Errorf("Stats.Updated after relink = %d, want 1", result.Stats.Updated)
+	}
+	if _, ok := tracker.updated["42"]; !ok {
+		t.Errorf("updated targets = %v, want target 42", tracker.updated)
+	}
+}
+
+// TestEnginePushContentHashInvalidatedByTargetScope verifies that a repo-less
+// external ref cannot reuse a cache entry after tracker configuration changes
+// its remote namespace.
+func TestEnginePushContentHashInvalidatedByTargetScope(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	issue := &types.Issue{
+		ID:          "bd-hash-scope",
+		Title:       "Unchanged content",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		ExternalRef: strPtr("github:42"),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	base := newMockTracker("github")
+	base.issues = []TrackerIssue{{Identifier: "42", Title: issue.Title}}
+	tracker := &mockExternalRefTracker{
+		mockTracker: base,
+		extract: func(ref string) string {
+			return strings.TrimPrefix(ref, "github:")
+		},
+	}
+	scope := "https://api.github.com/repos/acme/widgets"
+	engine := NewEngine(tracker, store, "test-actor")
+	engine.PushHooks = &PushHooks{
+		ContentEqual: func(local *types.Issue, remote *TrackerIssue) bool {
+			return local.Title == remote.Title
+		},
+		ContentHash: func(local *types.Issue) string { return "h:" + local.Title },
+		TargetScope: func() string { return scope },
+	}
+
+	// Seed the cache, then confirm the same target keeps the zero-fetch path.
+	if _, err := engine.Sync(ctx, SyncOptions{Push: true}); err != nil {
+		t.Fatalf("Sync() initial error: %v", err)
+	}
+	base.fetchCalls = 0
+	if _, err := engine.Sync(ctx, SyncOptions{Push: true}); err != nil {
+		t.Fatalf("Sync() same scope error: %v", err)
+	}
+	if base.fetchCalls != 0 {
+		t.Fatalf("fetchCalls with unchanged scope = %d, want 0", base.fetchCalls)
+	}
+
+	// Keep content and github:42 unchanged, but point the tracker at a different
+	// repository whose issue 42 does not yet match local content.
+	scope = "https://api.github.com/repos/acme/gadgets"
+	base.issues[0].Title = "Stale target content"
+	result, err := engine.Sync(ctx, SyncOptions{Push: true})
+	if err != nil {
+		t.Fatalf("Sync() changed scope error: %v", err)
+	}
+	if base.fetchCalls != 1 {
+		t.Errorf("fetchCalls after scope change = %d, want 1", base.fetchCalls)
+	}
+	if result.Stats.Updated != 1 {
+		t.Errorf("Stats.Updated after scope change = %d, want 1", result.Stats.Updated)
+	}
+	if _, ok := base.updated["42"]; !ok {
+		t.Errorf("updated targets = %v, want target 42", base.updated)
 	}
 }
 

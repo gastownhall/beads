@@ -30,6 +30,39 @@ func TestRegistered(t *testing.T) {
 	}
 }
 
+func TestPushTargetScope(t *testing.T) {
+	tr := &Tracker{client: &Client{
+		BaseURL: "HTTPS://GHE.Example.Test/Api/v3///",
+		Owner:   "Acme",
+		Repo:    "Widgets",
+	}}
+	if got, want := tr.PushTargetScope(), "https://ghe.example.test/Api/v3/repos/acme/widgets"; got != want {
+		t.Fatalf("PushTargetScope() = %q, want %q", got, want)
+	}
+
+	equivalent := &Tracker{client: &Client{
+		BaseURL: "https://ghe.example.test/Api/v3",
+		Owner:   "acme",
+		Repo:    "widgets",
+	}}
+	if got, want := equivalent.PushTargetScope(), tr.PushTargetScope(); got != want {
+		t.Fatalf("equivalent PushTargetScope() = %q, want %q", got, want)
+	}
+
+	malformed := &Tracker{client: &Client{
+		BaseURL: "://GHE.Example.Test/Api/ ",
+		Owner:   "ACME",
+		Repo:    "WIDGETS",
+	}}
+	if got, want := malformed.PushTargetScope(), "://GHE.Example.Test/Api/repos/acme/widgets"; got != want {
+		t.Fatalf("malformed PushTargetScope() = %q, want deterministic fallback %q", got, want)
+	}
+
+	if got := (&Tracker{}).PushTargetScope(); got != "" {
+		t.Fatalf("uninitialized PushTargetScope() = %q, want empty", got)
+	}
+}
+
 func TestIsExternalRef(t *testing.T) {
 	tr := &Tracker{}
 	tests := []struct {

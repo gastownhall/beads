@@ -505,6 +505,10 @@ func buildGitHubPushHooks(gt *github.Tracker) *tracker.PushHooks {
 		ContentHash: func(local *types.Issue) string {
 			return github.PushContentHash(local, config)
 		},
+		// TargetScope supplies the host and repository omitted by shorthand refs
+		// such as github:42, so changing GitHub target configuration invalidates
+		// the local no-op cache.
+		TargetScope: gt.PushTargetScope,
 	}
 }
 
