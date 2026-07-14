@@ -79,6 +79,7 @@ Architecture / load / capacity proofs: [docs/EVIDENCE.md](docs/EVIDENCE.md).
 
 ## Docs
 
+- [docs/PROBLEM_AND_WHY.md](docs/PROBLEM_AND_WHY.md) — **problem, experiment, architecture, performance data**
 - [docs/MAINTAINER_REVIEW.md](docs/MAINTAINER_REVIEW.md) — **start here for review / decisions**  
 - [docs/ADMIN.md](docs/ADMIN.md) · [docs/USER.md](docs/USER.md)  
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/VM.md](docs/VM.md)  
