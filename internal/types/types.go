@@ -752,7 +752,7 @@ type IssueWithCounts struct {
 	DependencyCount int     `json:"dependency_count"`
 	DependentCount  int     `json:"dependent_count"`
 	CommentCount    int     `json:"comment_count"`
-	Parent          *string `json:"parent,omitempty"`         // Computed parent from parent-child dep (bd-ym8c)
+	Parent          *string `json:"parent,omitempty"`        // Computed parent from parent-child dep (bd-ym8c)
 	NotesPreview    string  `json:"notes_preview,omitempty"` // First 200 chars of notes (truncated with "...")
 }
 
