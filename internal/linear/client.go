@@ -119,6 +119,11 @@ type rateLimitState struct {
 	resetsAt  time.Time
 }
 
+// maxRateLimitResetHorizon accommodates Linear's short quota windows and
+// clock skew without allowing a nonsensical timestamp to block requests
+// effectively forever.
+const maxRateLimitResetHorizon = 24 * time.Hour
+
 func newRateLimitState() *rateLimitState {
 	return &rateLimitState{remaining: -1}
 }
@@ -257,7 +262,8 @@ func (c *Client) recordRateLimitHeaders(info RateLimitInfo) {
 	}
 	c.rateLimitState.mu.Lock()
 	defer c.rateLimitState.mu.Unlock()
-	if info.RequestsReset.IsZero() || !time.Now().Before(info.RequestsReset) {
+	now := time.Now()
+	if info.RequestsReset.IsZero() || !now.Before(info.RequestsReset) || info.RequestsReset.After(now.Add(maxRateLimitResetHorizon)) {
 		c.rateLimitState.remaining = -1
 		c.rateLimitState.resetsAt = time.Time{}
 		return

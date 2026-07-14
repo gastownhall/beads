@@ -725,7 +725,8 @@ func TestExecute_CircuitBreakerAllowsRequestAfterResetThenRearms(t *testing.T) {
 }
 
 func TestExecute_CircuitBreakerRequiresValidFutureReset(t *testing.T) {
-	futureReset := strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10)
+	futureReset := strconv.FormatInt(time.Now().Add(maxRateLimitResetHorizon-time.Hour).UnixMilli(), 10)
+	beyondHorizon := strconv.FormatInt(time.Now().Add(maxRateLimitResetHorizon+time.Minute).UnixMilli(), 10)
 	tests := []struct {
 		name      string
 		reset     string
@@ -735,7 +736,9 @@ func TestExecute_CircuitBreakerRequiresValidFutureReset(t *testing.T) {
 		{name: "malformed reset", reset: "not-a-timestamp"},
 		{name: "overflow reset", reset: "9223372036854775808"},
 		{name: "negative reset", reset: "-1"},
-		{name: "valid future reset", reset: futureReset, wantArmed: true},
+		{name: "maximum int64 reset", reset: "9223372036854775807"},
+		{name: "reset beyond maximum horizon", reset: beyondHorizon},
+		{name: "valid reset near maximum horizon", reset: futureReset, wantArmed: true},
 	}
 
 	for _, tt := range tests {
