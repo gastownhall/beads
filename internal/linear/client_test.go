@@ -638,10 +638,11 @@ func TestExecute_NoRetryAfterFallsBackToExponential(t *testing.T) {
 
 func TestExecute_CircuitBreakerTripsOnSubsequentRequest(t *testing.T) {
 	requestCount := 0
+	resetAt := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
 		w.Header().Set("X-RateLimit-Requests-Remaining", "50")
-		w.Header().Set("X-RateLimit-Requests-Reset", "2026-06-01T00:00:00Z")
+		w.Header().Set("X-RateLimit-Requests-Reset", resetAt)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
 	})
@@ -657,7 +658,8 @@ func TestExecute_CircuitBreakerTripsOnSubsequentRequest(t *testing.T) {
 		t.Fatal("first Execute returned nil data")
 	}
 
-	_, err = client.Execute(ctx, &GraphQLRequest{Query: "{ viewer { id } }"})
+	clone := client.WithProjectID("project-id")
+	_, err = clone.Execute(ctx, &GraphQLRequest{Query: "{ viewer { id } }"})
 	if err == nil {
 		t.Fatal("expected ErrRateLimitExhausted, got nil")
 	}
@@ -674,6 +676,40 @@ func TestExecute_CircuitBreakerTripsOnSubsequentRequest(t *testing.T) {
 	}
 	if requestCount != 1 {
 		t.Errorf("requestCount = %d, want 1 (second call should trip locally)", requestCount)
+	}
+}
+
+func TestExecute_CircuitBreakerAllowsRequestAfterResetThenRearms(t *testing.T) {
+	requestCount := 0
+	pastReset := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	futureReset := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("X-RateLimit-Requests-Remaining", "50")
+		if requestCount == 1 {
+			w.Header().Set("X-RateLimit-Requests-Reset", pastReset)
+		} else {
+			w.Header().Set("X-RateLimit-Requests-Reset", futureReset)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
+	})
+
+	client := NewClient("key", "team").WithEndpoint(srv.Server.URL)
+	ctx := context.Background()
+	request := &GraphQLRequest{Query: "{ viewer { id } }"}
+
+	if _, err := client.Execute(ctx, request); err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if _, err := client.WithRateLimitFloor(DefaultRateLimitFloor).Execute(ctx, request); err != nil {
+		t.Fatalf("Execute after reset returned error: %v", err)
+	}
+	if _, err := client.Execute(ctx, request); err == nil {
+		t.Fatal("expected re-armed breaker to block after future reset was recorded")
+	}
+	if requestCount != 2 {
+		t.Errorf("requestCount = %d, want 2 (expired breaker should allow one request, then re-arm)", requestCount)
 	}
 }
 

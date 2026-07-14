@@ -234,9 +234,14 @@ func (c *Client) circuitBreakerError() *ErrRateLimitExhausted {
 	if c.rateLimitState == nil {
 		return nil
 	}
-	c.rateLimitState.mu.RLock()
-	defer c.rateLimitState.mu.RUnlock()
+	c.rateLimitState.mu.Lock()
+	defer c.rateLimitState.mu.Unlock()
 	if c.rateLimitState.remaining < 0 || c.rateLimitState.remaining >= c.rateLimitFloor() {
+		return nil
+	}
+	if !c.rateLimitState.resetsAt.IsZero() && !time.Now().Before(c.rateLimitState.resetsAt) {
+		c.rateLimitState.remaining = -1
+		c.rateLimitState.resetsAt = time.Time{}
 		return nil
 	}
 	return &ErrRateLimitExhausted{
