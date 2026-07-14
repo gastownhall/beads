@@ -740,6 +740,12 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 		return err
 	}
 
+	// Commit the workspace files bootstrap just wrote/updated (config.yaml,
+	// metadata.json, and any appended .beads/.gitignore patterns) so an
+	// adopt-from-remote flow leaves a clean working tree, matching bd init
+	// (GH#4644).
+	commitBeadsWorkspaceFiles(plan.BeadsDir)
+
 	// Open and close the store to ensure dolt_ignore'd wisp tables are
 	// created in the working set. Clone does not include these tables
 	// (they are never committed), so they must be recreated after clone.

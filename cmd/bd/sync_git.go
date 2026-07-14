@@ -5,12 +5,62 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/doltremote"
 )
+
+// commitBeadsWorkspaceFiles stages and commits the tracked .beads/ workspace
+// files (metadata.json, config.yaml, .gitignore) that the bootstrap sync path
+// writes, so adopting a project from a remote does not leave the working tree
+// dirty — matching what `bd init` does on a fresh repo (GH#4644).
+//
+// Best-effort and side-effect-scoped: it no-ops outside a (non-bare) git repo,
+// only runs when there are actual changes under .beads/, and commits with an
+// explicit .beads/ pathspec so any unrelated staged changes are left untouched.
+// Uses --no-verify so bootstrap-installed hooks cannot recurse into bd while
+// the embedded Dolt lock may still be held, mirroring bd init.
+func commitBeadsWorkspaceFiles(beadsDir string) {
+	repoDir := filepath.Dir(beadsDir)
+
+	// args are fixed git subcommands; the only variable is beadsDir, always
+	// passed after a "--" pathspec separator so it cannot be read as a flag or
+	// command, and it is an internal .beads directory path.
+	gitIn := func(args ...string) *exec.Cmd {
+		c := exec.Command("git", args...) //nolint:gosec // G702: see comment above — fixed subcommands + "--"-separated internal path
+		c.Dir = repoDir
+		return c
+	}
+
+	// Only proceed inside a non-bare git repo.
+	if gitIn("rev-parse", "--git-dir").Run() != nil {
+		return
+	}
+	if out, err := gitIn("rev-parse", "--is-bare-repository").Output(); err == nil &&
+		strings.TrimSpace(string(out)) == "true" {
+		return
+	}
+
+	// Nothing changed under .beads/? Then there is nothing to commit.
+	status, err := gitIn("status", "--porcelain", "--", beadsDir).Output()
+	if err != nil || strings.TrimSpace(string(status)) == "" {
+		return
+	}
+
+	if err := gitIn("add", "--", beadsDir).Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to stage beads workspace files: %v\n", err)
+		return
+	}
+	commit := gitIn("commit", "--no-verify", "-m", "bd bootstrap: sync beads workspace files", "--", beadsDir)
+	if out, err := commit.CombinedOutput(); err != nil {
+		if !strings.Contains(string(out), "nothing to commit") {
+			fmt.Fprintf(os.Stderr, "Warning: failed to commit beads workspace files: %v\n", err)
+		}
+	}
+}
 
 // isGitRepo checks if the current working directory is in a git repository.
 // NOTE: This intentionally checks CWD, not the beads repo. It's used as a guard
