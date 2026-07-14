@@ -104,6 +104,13 @@ var createCmd = &cobra.Command{
 			return HandleError("title required (or use --file to create from markdown)")
 		}
 
+		// Refuse a whitespace-only title. Such a bead is functionally invisible
+		// in title-based views (board scans, search, title-sorted listings) and
+		// reads as "no title" to any downstream consumer (GH#4771).
+		if strings.TrimSpace(title) == "" {
+			return HandleError("title cannot be empty or whitespace-only")
+		}
+
 		// Get silent flag
 		silent, _ := cmd.Flags().GetBool("silent")
 

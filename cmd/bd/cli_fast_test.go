@@ -1323,6 +1323,33 @@ func TestCLI_CreateRejectsFlagLikeTitles(t *testing.T) {
 	})
 }
 
+// TestCLI_CreateRejectsEmptyTitle verifies that a whitespace-only title is
+// refused rather than silently creating a title-less bead (GH#4771). Such a
+// bead is functionally invisible in title-based views.
+func TestCLI_CreateRejectsEmptyTitle(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"FlagSpaces", []string{"create", "--title", "   ", "-p", "2"}},
+		{"FlagTab", []string{"create", "--title", "\t", "-p", "2"}},
+		{"PositionalSpaces", []string{"create", "   ", "-p", "2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := setupCLITestDB(t)
+			stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, tc.args...)
+			if err == nil {
+				t.Fatalf("expected error for whitespace-only title, got success\nstdout: %s", stdout)
+			}
+			combined := stdout + stderr
+			if !strings.Contains(combined, "title cannot be empty") {
+				t.Errorf("expected 'title cannot be empty' error, got: %s", combined)
+			}
+		})
+	}
+}
+
 // TestCLI_CreateNoHistory tests that the --no-history CLI flag is wired through
 // to the created issue (GH#2619). A storage-layer test already covers the DB
 // semantics; this test verifies the CLI flag is actually parsed and passed.
