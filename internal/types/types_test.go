@@ -1679,3 +1679,26 @@ func TestBondRefUnmarshalJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestComputeNotesPreview(t *testing.T) {
+	tests := []struct {
+		name  string
+		notes string
+		want  string
+	}{
+		{name: "empty", notes: "", want: ""},
+		{name: "short", notes: "Quick note.", want: "Quick note."},
+		{name: "exactly 200", notes: strings.Repeat("a", NotesPreviewMaxLen), want: strings.Repeat("a", NotesPreviewMaxLen)},
+		{name: "201 truncated", notes: strings.Repeat("b", NotesPreviewMaxLen+1), want: strings.Repeat("b", NotesPreviewMaxLen) + "..."},
+		{name: "long", notes: strings.Repeat("x", 500), want: strings.Repeat("x", NotesPreviewMaxLen) + "..."},
+		{name: "unicode emoji", notes: strings.Repeat("\U0001f600", NotesPreviewMaxLen+1), want: strings.Repeat("\U0001f600", NotesPreviewMaxLen) + "..."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ComputeNotesPreview(tt.notes)
+			if got != tt.want {
+				t.Errorf("ComputeNotesPreview() = %q (len %d), want %q (len %d)", got, len(got), tt.want, len(tt.want))
+			}
+		})
+	}
+}

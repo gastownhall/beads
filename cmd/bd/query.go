@@ -174,6 +174,12 @@ Examples:
 			if iwc == nil {
 				iwc = []*types.IssueWithCounts{}
 			}
+			// Populate notes_preview for JSON consumers (GH#3501).
+			for _, item := range iwc {
+				if item.Issue != nil {
+					item.NotesPreview = types.ComputeNotesPreview(item.Issue.Notes)
+				}
+			}
 			return outputJSON(iwc)
 		}
 
