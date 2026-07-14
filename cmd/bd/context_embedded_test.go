@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -43,6 +44,31 @@ func TestEmbeddedContext(t *testing.T) {
 		}
 		if len(strings.TrimSpace(stdout.String())) == 0 {
 			t.Error("expected non-empty context --json output")
+		}
+	})
+
+	// bd context must resolve from a discoverable .beads directory even when
+	// the scope is not inside a git repository — git is a means of finding the
+	// repo root, not a hard requirement for this diagnostic (GH#4772).
+	t.Run("context_json_without_git_repo", func(t *testing.T) {
+		ngDir, _, _ := bdInit(t, bd, "--prefix", "ng")
+		if err := os.RemoveAll(filepath.Join(ngDir, ".git")); err != nil {
+			t.Fatalf("remove .git: %v", err)
+		}
+
+		cmd := exec.Command(bd, "context", "--json")
+		cmd.Dir = ngDir
+		cmd.Env = bdEnv(ngDir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd context --json failed outside git repo: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		out := stdout.String()
+		if strings.Contains(out, "cannot determine repository root") || strings.Contains(out, `"error"`) {
+			t.Errorf("expected context to resolve without a git repo, got error output:\n%s", out)
+		}
+		if !strings.Contains(out, `"beads_dir"`) {
+			t.Errorf("expected beads_dir in context output:\n%s", out)
 		}
 	})
 }
