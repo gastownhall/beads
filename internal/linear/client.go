@@ -302,8 +302,8 @@ func parseRateLimitHeaders(h http.Header) RateLimitInfo {
 		}
 	}
 	if v := h.Get("X-RateLimit-Requests-Reset"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			info.RequestsReset = t
+		if milliseconds, err := strconv.ParseInt(v, 10, 64); err == nil {
+			info.RequestsReset = time.UnixMilli(milliseconds).UTC()
 		}
 	}
 	return info

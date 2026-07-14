@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -531,7 +532,7 @@ func TestParseRateLimitHeaders(t *testing.T) {
 		h := http.Header{}
 		h.Set("Retry-After", "45")
 		h.Set("X-RateLimit-Requests-Remaining", "80")
-		h.Set("X-RateLimit-Requests-Reset", "2026-01-01T00:00:00Z")
+		h.Set("X-RateLimit-Requests-Reset", "1767225600000")
 
 		info := parseRateLimitHeaders(h)
 		if info.RetryAfter != 45*time.Second {
@@ -540,7 +541,7 @@ func TestParseRateLimitHeaders(t *testing.T) {
 		if info.RequestsRemaining != 80 {
 			t.Errorf("RequestsRemaining = %d, want 80", info.RequestsRemaining)
 		}
-		wantReset, _ := time.Parse(time.RFC3339, "2026-01-01T00:00:00Z")
+		wantReset := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 		if !info.RequestsReset.Equal(wantReset) {
 			t.Errorf("RequestsReset = %v, want %v", info.RequestsReset, wantReset)
 		}
@@ -638,7 +639,7 @@ func TestExecute_NoRetryAfterFallsBackToExponential(t *testing.T) {
 
 func TestExecute_CircuitBreakerTripsOnSubsequentRequest(t *testing.T) {
 	requestCount := 0
-	resetAt := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	resetAt := strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10)
 	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
 		w.Header().Set("X-RateLimit-Requests-Remaining", "50")
@@ -681,8 +682,8 @@ func TestExecute_CircuitBreakerTripsOnSubsequentRequest(t *testing.T) {
 
 func TestExecute_CircuitBreakerAllowsRequestAfterResetThenRearms(t *testing.T) {
 	requestCount := 0
-	pastReset := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
-	futureReset := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	pastReset := strconv.FormatInt(time.Now().Add(-time.Hour).UnixMilli(), 10)
+	futureReset := strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10)
 	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
 		w.Header().Set("X-RateLimit-Requests-Remaining", "50")
