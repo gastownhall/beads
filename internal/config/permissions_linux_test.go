@@ -3,9 +3,12 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestFixBeadsDirPermissions_UnreadableDirectory(t *testing.T) {
@@ -18,6 +21,9 @@ func TestFixBeadsDirPermissions_UnreadableDirectory(t *testing.T) {
 	}
 
 	fixed, err := FixBeadsDirPermissions(path)
+	if errors.Is(err, unix.EOPNOTSUPP) {
+		t.Skip("kernel does not support fchmodat2 with AT_EMPTY_PATH")
+	}
 	if err != nil {
 		t.Fatalf("FixBeadsDirPermissions() error = %v", err)
 	}
@@ -48,6 +54,9 @@ func TestLinuxPathDirHandle_ChmodUnreadableDirectory(t *testing.T) {
 	}
 	defer handle.Close()
 	if err := handle.Chmod(BeadsDirPerm); err != nil {
+		if errors.Is(err, unix.EOPNOTSUPP) {
+			t.Skip("kernel does not support fchmodat2 with AT_EMPTY_PATH")
+		}
 		t.Fatalf("descriptor chmod error = %v", err)
 	}
 

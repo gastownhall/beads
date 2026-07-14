@@ -4,6 +4,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -283,4 +284,45 @@ func TestFixBeadsDirPermissions_RejectsDirectorySwap(t *testing.T) {
 	if got := info.Mode().Perm(); got != 0o755 {
 		t.Fatalf("replacement directory permissions = %04o, want unchanged 0755", got)
 	}
+}
+
+func TestFixBeadsDirPermissions_ChmodUnsupportedLeavesDirectoryUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".beads")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unsupported := errors.New("descriptor chmod unsupported")
+
+	fixed, err := fixBeadsDirPermissions(path, func(path string) (beadsDirHandle, error) {
+		file, openErr := os.Open(path)
+		if openErr != nil {
+			return nil, openErr
+		}
+		return &chmodErrorHandle{File: file, err: unsupported}, nil
+	})
+	if !errors.Is(err, unsupported) {
+		t.Fatalf("error = %v, want wrapped unsupported error", err)
+	}
+	if fixed {
+		t.Error("expected fixed=false when descriptor chmod is unsupported")
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("permissions after failed descriptor chmod = %04o, want unchanged 0755", got)
+	}
+}
+
+type chmodErrorHandle struct {
+	*os.File
+	err error
+}
+
+func (h *chmodErrorHandle) Chmod(os.FileMode) error {
+	return h.err
 }
