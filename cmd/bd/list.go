@@ -688,7 +688,7 @@ func init() {
 	listCmd.Flags().String("notes-contains", "", "Filter by notes substring (case-insensitive)")
 	listCmd.Flags().String("external-contains", "", "Filter by external ref substring (case-insensitive)")
 	listCmd.Flags().String("external-ref", "", "Filter by exact external_ref value")
-	listCmd.Flags().String("label-exact", "", "Filter by exact label name (single label, server-side)")
+	listCmd.Flags().String("label-exact", "", "Filter by exact label name (single label, server-side; ANDs with other label filters)")
 
 	// Date ranges
 	listCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")

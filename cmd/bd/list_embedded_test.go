@@ -369,6 +369,26 @@ func TestEmbeddedList(t *testing.T) {
 		}
 	})
 
+	t.Run("label_exact_ands_with_label", func(t *testing.T) {
+		// --label-exact composes with --label as an AND: an issue must carry
+		// BOTH labels to match, not either. Seed a dedicated issue with both
+		// backend and frontend since no existing seed issue has that pair.
+		both := bdCreate(t, bd, dir, "Backend+frontend task", "--type", "task",
+			"--priority", "2", "--label", "backend", "--label", "frontend")
+
+		matched := bdListJSON(t, bd, dir, "--label-exact", "backend", "--label", "frontend")
+		if !containsID(matched, both.ID) {
+			t.Errorf("--label-exact backend --label frontend should return %s (has both), got %v",
+				both.ID, listIssueIDs(matched))
+		}
+
+		none := bdListJSON(t, bd, dir, "--label-exact", "backend", "--label", "nonexistent")
+		if len(none) != 0 {
+			t.Errorf("--label-exact backend --label nonexistent should return none (AND excludes all), got %v",
+				listIssueIDs(none))
+		}
+	})
+
 	t.Run("exclude_label", func(t *testing.T) {
 		issues := bdListJSON(t, bd, dir, "--exclude-label", "urgent")
 		// openBug has labels: backend,urgent — should be excluded
