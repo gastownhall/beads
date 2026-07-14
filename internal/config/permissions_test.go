@@ -220,14 +220,14 @@ func TestFixBeadsDirPermissions_RejectsSymlinkSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fixed, err := fixBeadsDirPermissions(path, func(path string) (*os.File, error) {
+	fixed, err := fixBeadsDirPermissions(path, func(path string) (beadsDirHandle, error) {
 		if err := os.Remove(path); err != nil {
 			t.Fatalf("remove validated directory: %v", err)
 		}
 		if err := os.Symlink(target, path); err != nil {
 			t.Fatalf("replace directory with symlink: %v", err)
 		}
-		return openBeadsDirNoFollow(path)
+		return openBeadsDirHandle(path)
 	})
 	if err == nil {
 		t.Fatal("expected error when directory is replaced with a symlink")
@@ -261,14 +261,14 @@ func TestFixBeadsDirPermissions_RejectsDirectorySwap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fixed, err := fixBeadsDirPermissions(path, func(path string) (*os.File, error) {
+	fixed, err := fixBeadsDirPermissions(path, func(path string) (beadsDirHandle, error) {
 		if err := os.Remove(path); err != nil {
 			t.Fatalf("remove validated directory: %v", err)
 		}
 		if err := os.Rename(replacement, path); err != nil {
 			t.Fatalf("replace validated directory: %v", err)
 		}
-		return openBeadsDirNoFollow(path)
+		return openBeadsDirHandle(path)
 	})
 	if err == nil {
 		t.Fatal("expected error when directory is replaced")
