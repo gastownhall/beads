@@ -1,0 +1,29 @@
+[Unit]
+Description=Beads remote-cell gateway (experimental)
+After=network.target dolt.service
+Requires=dolt.service
+
+[Service]
+Type=simple
+User=beads
+Group=beads
+# Fill paths after make bootstrap (see data/cell.env). Example only:
+Environment=REMOTE_CELL_RUNTIME_ROOT=/var/lib/beads-perf-lab
+ExecStart=/opt/beads-remote-cell/bin/gateway \
+  -database beads_perf_lab_default \
+  -dolt-host 127.0.0.1 -dolt-port 13360 \
+  -listen 127.0.0.1:7707 \
+  -lab-id bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb \
+  -project-id REPLACE_ME \
+  -password-file /var/lib/beads-perf-lab/secrets/pw_default \
+  -token-file /var/lib/beads-perf-lab/secrets/token_admin \
+  -idempotency-key-file /var/lib/beads-perf-lab/secrets/idemp_admin \
+  -queue /var/lib/beads-perf-lab/queues/q_default_admin.db \
+  -runtime-root /var/lib/beads-perf-lab \
+  -subject admin \
+  -max-open 8 -max-idle 4
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

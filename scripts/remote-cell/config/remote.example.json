@@ -1,0 +1,6 @@
+{
+  "experimental": true,
+  "gateway_url": "http://127.0.0.1:7707",
+  "project_id": "00000000-0000-4000-8000-000000000000",
+  "note": "Non-secret. Copy to your repo as .beads/remote.json after bootstrap. Tokens are per-person invite files — never commit them."
+}

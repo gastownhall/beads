@@ -1,0 +1,25 @@
+# OPTIONAL only — not used by `make all`.
+# Official Dolt images often break passwordless root required by cell-provision.
+# Prefer host `dolt` via `make start-dolt`.
+#
+# Kept for operators who already run a compatible Dolt listener on 13360.
+
+name: beads-remote-cell-optional
+
+services:
+  dolt:
+    profiles: ["optional-docker-dolt"]
+    image: dolthub/dolt:latest
+    environment:
+      HOME: /var/lib/dolt
+    entrypoint: ["dolt"]
+    command:
+      - sql-server
+      - --host=0.0.0.0
+      - --port=3306
+      - --data-dir=/var/lib/dolt
+      - --loglevel=warning
+    volumes:
+      - ./data/dolt:/var/lib/dolt
+    ports:
+      - "127.0.0.1:13360:3306"

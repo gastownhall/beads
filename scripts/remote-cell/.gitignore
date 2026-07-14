@@ -1,0 +1,10 @@
+/bin/*
+!/bin/.gitkeep
+/data/
+*.log
+*.pid
+.env
+*.env
+!config/*.example.json
+__pycache__/
+*.pyc

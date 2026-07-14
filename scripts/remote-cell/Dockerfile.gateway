@@ -1,0 +1,23 @@
+# Optional image build when you want a pure-container cell.
+#   make build-image BEADS_SRC=/path/to/tree-with-gateway
+#
+# Default Makefile path uses host-built binaries for faster iteration.
+
+ARG GO_VERSION=1.24
+FROM golang:${GO_VERSION}-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -o /out/gateway ./scripts/bench-remote-server/gateway \
+ && CGO_ENABLED=0 go build -o /out/gateway-client ./scripts/bench-remote-server/gateway-client \
+ && CGO_ENABLED=0 go build -o /out/lab-bootstrap ./scripts/bench-remote-server/lab-bootstrap
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/gateway /usr/local/bin/beads-gateway
+COPY --from=build /out/gateway-client /usr/local/bin/beads-gateway-client
+COPY --from=build /out/lab-bootstrap /usr/local/bin/lab-bootstrap
+# Lab gateway requires this runtime root.
+RUN mkdir -p /var/lib/beads-perf-lab && chmod 700 /var/lib/beads-perf-lab
+EXPOSE 7707
+ENTRYPOINT ["/usr/local/bin/beads-gateway"]

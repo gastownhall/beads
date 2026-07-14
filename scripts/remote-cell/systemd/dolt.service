@@ -1,0 +1,15 @@
+[Unit]
+Description=Beads remote-cell Dolt (experimental)
+After=network.target
+
+[Service]
+Type=simple
+User=beads
+Group=beads
+ExecStart=/usr/local/bin/dolt sql-server --host 127.0.0.1 --port 13360 --data-dir /var/lib/beads-perf-lab/dolt-data --loglevel warning
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
