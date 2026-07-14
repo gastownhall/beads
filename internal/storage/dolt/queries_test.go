@@ -3150,3 +3150,48 @@ func TestSearchIssues_StableOrdering(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchIssues_ByLabelExact(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:        "si-label-exact",
+		Title:     "Label Exact Filter Test",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	if err := store.AddLabel(ctx, issue.ID, "backend", "tester"); err != nil {
+		t.Fatalf("failed to add label: %v", err)
+	}
+
+	// Exact label match should find the issue.
+	labelBackend := "backend"
+	results, err := store.SearchIssues(ctx, "", types.IssueFilter{Label: &labelBackend})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("Label exact match: expected 1 result, got %d", len(results))
+	}
+	if results[0].ID != issue.ID {
+		t.Errorf("expected %s, got %s", issue.ID, results[0].ID)
+	}
+
+	// Non-existent label should return nothing.
+	labelNonexistent := "nonexistent"
+	results, err = store.SearchIssues(ctx, "", types.IssueFilter{Label: &labelNonexistent})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("Label exact match with nonexistent: expected 0 results, got %d", len(results))
+	}
+}

@@ -220,6 +220,9 @@ func buildListFilter(in listInput, cfg listFilterConfig) (types.IssueFilter, err
 	if in.externalRef != "" {
 		filter.ExternalRef = &in.externalRef
 	}
+	if in.labelExact != "" {
+		filter.Label = &in.labelExact
+	}
 
 	filter.CreatedAfter = in.createdAfter
 	filter.CreatedBefore = in.createdBefore

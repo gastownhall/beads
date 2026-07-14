@@ -1224,6 +1224,7 @@ type IssueFilter struct {
 	NotesContains       string
 	ExternalRefContains string
 	ExternalRef         *string // exact match on external_ref
+	Label               *string // exact single-label match (server-side subquery)
 
 	// Date ranges
 	CreatedAfter  *time.Time

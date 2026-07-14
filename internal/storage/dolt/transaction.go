@@ -341,6 +341,11 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 		whereClauses = append(whereClauses, "external_ref = ?")
 		args = append(args, *filter.ExternalRef)
 	}
+	if filter.Label != nil {
+		//nolint:gosec // G201: labelTable is hardcoded to "labels" or "wisp_labels"
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label = ?)", labelTable))
+		args = append(args, *filter.Label)
+	}
 
 	// Status
 	if filter.Status != nil {
