@@ -559,6 +559,16 @@ func TestParseRateLimitHeaders(t *testing.T) {
 			t.Errorf("RequestsReset should be zero, got %v", info.RequestsReset)
 		}
 	})
+
+	for _, value := range []string{"not-a-timestamp", "-1", "9223372036854775808"} {
+		t.Run("invalid reset "+value, func(t *testing.T) {
+			h := http.Header{}
+			h.Set("X-RateLimit-Requests-Reset", value)
+			if got := parseRateLimitHeaders(h).RequestsReset; !got.IsZero() {
+				t.Errorf("RequestsReset = %v, want zero", got)
+			}
+		})
+	}
 }
 
 // mockServer returns an httptest.Server and a function to set the handler per request.
@@ -711,6 +721,59 @@ func TestExecute_CircuitBreakerAllowsRequestAfterResetThenRearms(t *testing.T) {
 	}
 	if requestCount != 2 {
 		t.Errorf("requestCount = %d, want 2 (expired breaker should allow one request, then re-arm)", requestCount)
+	}
+}
+
+func TestExecute_CircuitBreakerRequiresValidFutureReset(t *testing.T) {
+	futureReset := strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10)
+	tests := []struct {
+		name      string
+		reset     string
+		wantArmed bool
+	}{
+		{name: "missing reset"},
+		{name: "malformed reset", reset: "not-a-timestamp"},
+		{name: "overflow reset", reset: "9223372036854775808"},
+		{name: "negative reset", reset: "-1"},
+		{name: "valid future reset", reset: futureReset, wantArmed: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requestCount := 0
+			srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				w.Header().Set("X-RateLimit-Requests-Remaining", "50")
+				if tt.reset != "" {
+					w.Header().Set("X-RateLimit-Requests-Reset", tt.reset)
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
+			})
+
+			client := NewClient("key", "team").WithEndpoint(srv.Server.URL)
+			request := &GraphQLRequest{Query: "{ viewer { id } }"}
+			if data, err := client.Execute(context.Background(), request); err != nil {
+				t.Fatalf("first Execute returned error: %v", err)
+			} else if data == nil {
+				t.Fatal("first Execute returned nil data")
+			}
+
+			_, err := client.WithProjectID("project-id").Execute(context.Background(), request)
+			if tt.wantArmed && err == nil {
+				t.Fatal("expected valid future reset to arm breaker")
+			}
+			if !tt.wantArmed && err != nil {
+				t.Fatalf("invalid reset permanently armed breaker: %v", err)
+			}
+			wantRequests := 2
+			if tt.wantArmed {
+				wantRequests = 1
+			}
+			if requestCount != wantRequests {
+				t.Errorf("requestCount = %d, want %d", requestCount, wantRequests)
+			}
+		})
 	}
 }
 

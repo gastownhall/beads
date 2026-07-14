@@ -256,9 +256,14 @@ func (c *Client) recordRateLimitHeaders(info RateLimitInfo) {
 		return
 	}
 	c.rateLimitState.mu.Lock()
+	defer c.rateLimitState.mu.Unlock()
+	if info.RequestsReset.IsZero() || !time.Now().Before(info.RequestsReset) {
+		c.rateLimitState.remaining = -1
+		c.rateLimitState.resetsAt = time.Time{}
+		return
+	}
 	c.rateLimitState.remaining = info.RequestsRemaining
 	c.rateLimitState.resetsAt = info.RequestsReset
-	c.rateLimitState.mu.Unlock()
 }
 
 // rateLimitFloor returns the effective circuit-breaker floor, using the
@@ -302,7 +307,7 @@ func parseRateLimitHeaders(h http.Header) RateLimitInfo {
 		}
 	}
 	if v := h.Get("X-RateLimit-Requests-Reset"); v != "" {
-		if milliseconds, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if milliseconds, err := strconv.ParseInt(v, 10, 64); err == nil && milliseconds > 0 {
 			info.RequestsReset = time.UnixMilli(milliseconds).UTC()
 		}
 	}
