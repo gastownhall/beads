@@ -46,6 +46,33 @@ Examples:
 		localTime, _ := cmd.Flags().GetBool("local-time")
 		issueID := args[0]
 
+		// The parent "comments" command only lists comments for a single issue.
+		// Reject stray trailing args instead of silently dropping them — the
+		// common offender is the swapped-order add, `bd comments <id> add <text>`,
+		// which otherwise falls through here and no-ops with exit 0 (GH#4642).
+		if len(args) > 1 {
+			if args[1] == "add" {
+				return HandleErrorRespectJSON(`"bd comments <issue-id> add ..." is not valid — the subcommand must come first.
+
+To add a comment, run:
+  bd comments add <issue-id> <text>
+
+Example:
+  bd comments add %s "your comment"
+
+See: bd comments --help`, issueID)
+			}
+			return HandleErrorRespectJSON(`"bd comments" takes a single issue id and lists its comments.
+
+To list comments:
+  bd comments <issue-id>
+
+To add a comment:
+  bd comments add <issue-id> <text>
+
+See: bd comments --help`)
+		}
+
 		if err := ensureStoreActive(); err != nil {
 			return HandleErrorRespectJSON("getting comments: %v", err)
 		}

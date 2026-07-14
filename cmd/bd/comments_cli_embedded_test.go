@@ -92,6 +92,41 @@ func TestEmbeddedCommentsCLI(t *testing.T) {
 		}
 	})
 
+	// Swapped-order add (`bd comments <id> add <text>`) must be rejected, not
+	// silently dropped with exit 0 (GH#4642).
+	t.Run("comments_swapped_add_rejected", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Swapped add target", "--type", "task")
+
+		cmd := exec.Command(bd, "comments", issue.ID, "add", "should not be stored")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected non-zero exit for swapped-order add, got success:\n%s", out)
+		}
+		if !strings.Contains(string(out), "bd comments add") {
+			t.Errorf("expected hint pointing to `bd comments add`, got:\n%s", out)
+		}
+
+		// The stray "add"/text must NOT have been written as a comment.
+		list := bdComments(t, bd, dir, issue.ID)
+		if strings.Contains(list, "should not be stored") {
+			t.Errorf("swapped-order add silently stored a comment:\n%s", list)
+		}
+	})
+
+	// Any other stray trailing arg on the list form is also rejected.
+	t.Run("comments_extra_arg_rejected", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Extra arg target", "--type", "task")
+		cmd := exec.Command(bd, "comments", issue.ID, "stray")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected non-zero exit for stray trailing arg, got success:\n%s", out)
+		}
+	})
+
 	// ===== comments list =====
 
 	t.Run("comments_list", func(t *testing.T) {
