@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -36,6 +38,18 @@ func CheckBeadsDirPermissions(path string) {
 // FixBeadsDirPermissions sets the .beads directory to BeadsDirPerm when it
 // has group or world-accessible bits. Returns true if permissions changed.
 func FixBeadsDirPermissions(path string) (bool, error) {
+	return fixBeadsDirPermissions(path, openBeadsDirNoFollow)
+}
+
+func openBeadsDirNoFollow(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
+
+func fixBeadsDirPermissions(path string, openDir func(string) (*os.File, error)) (bool, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -53,7 +67,21 @@ func FixBeadsDirPermissions(path string) (bool, error) {
 	if perm&0077 == 0 {
 		return false, nil // no group or world-accessible bits
 	}
-	if err := os.Chmod(path, BeadsDirPerm); err != nil {
+
+	dir, err := openDir(path)
+	if err != nil {
+		return false, fmt.Errorf("failed to open %s without following symlinks: %w", path, err)
+	}
+	defer dir.Close()
+
+	openedInfo, err := dir.Stat()
+	if err != nil {
+		return false, fmt.Errorf("failed to inspect opened directory %s: %w", path, err)
+	}
+	if !openedInfo.IsDir() || !os.SameFile(info, openedInfo) {
+		return false, fmt.Errorf("refusing to chmod %s: path changed during permission repair", path)
+	}
+	if err := dir.Chmod(BeadsDirPerm); err != nil {
 		return false, fmt.Errorf("failed to chmod %s to %04o: %w", path, BeadsDirPerm, err)
 	}
 	return true, nil

@@ -202,3 +202,85 @@ func TestFixBeadsDirPermissions_RejectsNonDirectory(t *testing.T) {
 		t.Error("expected fixed=false for non-directory")
 	}
 }
+
+func TestFixBeadsDirPermissions_RejectsSymlinkSwap(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".beads")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(tmp, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fixed, err := fixBeadsDirPermissions(path, func(path string) (*os.File, error) {
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("remove validated directory: %v", err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatalf("replace directory with symlink: %v", err)
+		}
+		return openBeadsDirNoFollow(path)
+	})
+	if err == nil {
+		t.Fatal("expected error when directory is replaced with a symlink")
+	}
+	if fixed {
+		t.Error("expected fixed=false after symlink swap")
+	}
+	info, statErr := os.Stat(target)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("symlink target permissions = %04o, want unchanged 0755", got)
+	}
+}
+
+func TestFixBeadsDirPermissions_RejectsDirectorySwap(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, ".beads")
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(tmp, "replacement")
+	if err := os.Mkdir(replacement, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(replacement, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fixed, err := fixBeadsDirPermissions(path, func(path string) (*os.File, error) {
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("remove validated directory: %v", err)
+		}
+		if err := os.Rename(replacement, path); err != nil {
+			t.Fatalf("replace validated directory: %v", err)
+		}
+		return openBeadsDirNoFollow(path)
+	})
+	if err == nil {
+		t.Fatal("expected error when directory is replaced")
+	}
+	if fixed {
+		t.Error("expected fixed=false after directory swap")
+	}
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if got := info.Mode().Perm(); got != 0o755 {
+		t.Fatalf("replacement directory permissions = %04o, want unchanged 0755", got)
+	}
+}
