@@ -263,6 +263,10 @@ Examples:
 
 		// Bare `bd doctor` and the remaining mode-specific flags (--deep,
 		// --server, --migration) aren't wired up for embedded mode yet.
+		// Policy (GH#3794): embedded support is enabled one subcommand at a
+		// time, each human-vetted — do not lift this gate wholesale. Checks
+		// that reach into the database layer stay server-gated until the
+		// storage driver interface covers them (AGENTS.md "Storage Boundary").
 		if isEmbeddedMode() {
 			printEmbeddedUnsupported("doctor")
 			return nil
