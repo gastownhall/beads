@@ -2797,3 +2797,245 @@ func TestEngineWarnCollectsMessages(t *testing.T) {
 		t.Errorf("expected 3 total warnings, got %d", len(engine.warnings))
 	}
 }
+
+// TestEngineExcludeIDPrefix verifies that beads whose ID starts with the
+// configured prefix are skipped from push. Mirrors mayor's bd-ee0
+// houmanoids_www use case where `hw-mol-*` workflow-artifact beads must
+// not propagate to Linear regardless of issue type.
+func TestEngineExcludeIDPrefix(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, id := range []string{"hw-mol-foo", "hw-mol-bar", "hw-real-1", "hw-real-2"} {
+		issue := &types.Issue{
+			ID: id, Title: "Issue " + id, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", id, err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, ExcludeIDPrefix: "hw-mol-"})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Sync() not successful: %s", result.Error)
+	}
+	if len(tracker.created) != 2 {
+		t.Errorf("created %d issues; want 2 (only hw-real-*)", len(tracker.created))
+	}
+	for _, i := range tracker.created {
+		if strings.HasPrefix(i.ID, "hw-mol-") {
+			t.Errorf("hw-mol- bead leaked through filter: %s", i.ID)
+		}
+	}
+}
+
+// TestEngineExcludeIDPatterns verifies the comma-separated substring filter:
+// beads whose ID contains ANY listed substring (anywhere in the ID) are
+// skipped.
+func TestEngineExcludeIDPatterns(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, id := range []string{"hw-mol-x", "hw-wisp-y", "hw-sandbox-z", "hw-real-keep"} {
+		issue := &types.Issue{
+			ID: id, Title: "Issue " + id, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", id, err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{
+		Push:              true,
+		ExcludeIDPatterns: []string{"mol-", "wisp-", "sandbox-"},
+	})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Sync() not successful: %s", result.Error)
+	}
+	if len(tracker.created) != 1 || tracker.created[0].ID != "hw-real-keep" {
+		ids := make([]string, len(tracker.created))
+		for i, c := range tracker.created {
+			ids[i] = c.ID
+		}
+		t.Errorf("created IDs = %v, want [hw-real-keep]", ids)
+	}
+}
+
+// TestEngineExcludeIDBoth verifies union semantics: a bead matching EITHER
+// the prefix rule OR the patterns rule is excluded.
+func TestEngineExcludeIDBoth(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, id := range []string{
+		"hw-mol-via-prefix",  // matches prefix
+		"hw-evt-via-pattern", // matches pattern (-evt-)
+		"hw-mol-evt-both",    // matches both
+		"hw-real-keep",       // matches neither — pushed
+	} {
+		issue := &types.Issue{
+			ID: id, Title: "Issue " + id, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", id, err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{
+		Push:              true,
+		ExcludeIDPrefix:   "hw-mol-",
+		ExcludeIDPatterns: []string{"-evt-"},
+	})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Sync() not successful: %s", result.Error)
+	}
+	if len(tracker.created) != 1 || tracker.created[0].ID != "hw-real-keep" {
+		ids := make([]string, len(tracker.created))
+		for i, c := range tracker.created {
+			ids[i] = c.ID
+		}
+		t.Errorf("created IDs = %v, want [hw-real-keep]", ids)
+	}
+}
+
+// TestEngineExcludeID_AlreadySynced verifies that a bead with an existing
+// external_ref but matching an exclude rule produces NO update API call.
+// The Linear-side issue is left alone (the spec calls this out: users who
+// add a rule for an already-synced bead must manually archive/delete the
+// remote issue if desired).
+func TestEngineExcludeID_AlreadySynced(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// A previously-synced bead — has external_ref. After the new exclude
+	// rule lands, it must not be updated.
+	stale := &types.Issue{
+		ID: "hw-mol-stale", Title: "Previously synced", Status: types.StatusOpen,
+		IssueType: types.TypeTask, Priority: 2,
+		ExternalRef: strPtr("https://test.test/EXT-STALE"),
+	}
+	if err := store.CreateIssue(ctx, stale, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{ID: "EXT-STALE", Identifier: "EXT-STALE", Title: "Old remote title"},
+	}
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, ExcludeIDPrefix: "hw-mol-"})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Sync() not successful: %s", result.Error)
+	}
+	if len(tracker.updated) != 0 {
+		t.Errorf("excluded already-synced bead was updated: %v", tracker.updated)
+	}
+	if len(tracker.created) != 0 {
+		t.Errorf("excluded already-synced bead was created: %d", len(tracker.created))
+	}
+}
+
+// TestEngineDryRunRespectsExcludeID verifies that --dry-run does not print
+// "Would create" / "Would update" lines for excluded beads. Asserts via the
+// engine's stats: an excluded bead increments Skipped, not Created or
+// Updated.
+func TestEngineDryRunRespectsExcludeID(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, id := range []string{"hw-mol-skip", "hw-real-1"} {
+		issue := &types.Issue{
+			ID: id, Title: "Issue " + id, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", id, err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, DryRun: true, ExcludeIDPrefix: "hw-mol-"})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Sync() not successful: %s", result.Error)
+	}
+	// Dry-run should NOT have called the tracker (even for the unexcluded one,
+	// since DryRun=true short-circuits the API call).
+	if len(tracker.created) != 0 {
+		t.Errorf("dry-run created issues: %d", len(tracker.created))
+	}
+	// PushStats.Created counts intended creates; the excluded bead must NOT
+	// count there. Only hw-real-1 should be classified as a would-be create.
+	if result.PushStats.Created != 1 {
+		t.Errorf("PushStats.Created = %d, want 1 (only hw-real-1 should be a would-be create)", result.PushStats.Created)
+	}
+	if result.PushStats.Skipped != 1 {
+		t.Errorf("PushStats.Skipped = %d, want 1 (hw-mol-skip should be Skipped)", result.PushStats.Skipped)
+	}
+}
+
+// TestShouldPushIssue_ExcludeIDDirect tests the filter logic in isolation,
+// without the storage layer. Runs locally without Dolt/Docker.
+func TestShouldPushIssue_ExcludeIDDirect(t *testing.T) {
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, nil, "test-actor")
+
+	tests := []struct {
+		name string
+		opts SyncOptions
+		id   string
+		want bool
+	}{
+		{"prefix match excludes", SyncOptions{ExcludeIDPrefix: "hw-mol-"}, "hw-mol-foo", false},
+		{"prefix non-match passes", SyncOptions{ExcludeIDPrefix: "hw-mol-"}, "hw-real-1", true},
+		{"empty prefix is no-op", SyncOptions{ExcludeIDPrefix: ""}, "hw-mol-foo", true},
+		{"prefix is case-sensitive", SyncOptions{ExcludeIDPrefix: "hw-mol-"}, "HW-MOL-foo", true},
+		{"pattern match anywhere excludes", SyncOptions{ExcludeIDPatterns: []string{"-wisp-"}}, "hw-wisp-x", false},
+		{"pattern match middle excludes", SyncOptions{ExcludeIDPatterns: []string{"sandbox"}}, "x-sandbox-y", false},
+		{"pattern non-match passes", SyncOptions{ExcludeIDPatterns: []string{"sandbox"}}, "hw-real-1", true},
+		{"empty pattern entry skipped", SyncOptions{ExcludeIDPatterns: []string{"", "wisp-"}}, "hw-wisp-x", false},
+		{"all empty patterns no-op", SyncOptions{ExcludeIDPatterns: []string{""}}, "hw-mol-foo", true},
+		{"prefix and pattern union: prefix match", SyncOptions{ExcludeIDPrefix: "hw-mol-", ExcludeIDPatterns: []string{"-evt-"}}, "hw-mol-foo", false},
+		{"prefix and pattern union: pattern match", SyncOptions{ExcludeIDPrefix: "hw-mol-", ExcludeIDPatterns: []string{"-evt-"}}, "hw-evt-foo", false},
+		{"prefix and pattern union: neither", SyncOptions{ExcludeIDPrefix: "hw-mol-", ExcludeIDPatterns: []string{"-evt-"}}, "hw-real-foo", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &types.Issue{ID: tt.id, IssueType: types.TypeTask, Status: types.StatusOpen}
+			got := engine.shouldPushIssue(issue, tt.opts)
+			if got != tt.want {
+				t.Errorf("shouldPushIssue(%q, %+v) = %v, want %v", tt.id, tt.opts, got, tt.want)
+			}
+		})
+	}
+}

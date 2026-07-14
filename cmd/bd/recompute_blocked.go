@@ -32,6 +32,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(_ *cobra.Command, _ []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("recompute-blocked is not supported in proxied-server mode")
+		}
 		CheckReadonly("recompute-blocked")
 
 		evt := metrics.NewCommandEvent("recompute-blocked")

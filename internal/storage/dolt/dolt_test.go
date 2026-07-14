@@ -786,8 +786,8 @@ func TestDoltStoreDependencies(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	// Create parent and child issues (both tasks — cross-type blocking
-	// is disallowed per GH#1495)
+	// Create parent and child issues (both tasks for a same-type blocks
+	// pair; cross-type blocks edges are now allowed for unrelated issues).
 	parent := &types.Issue{
 		ID:          "test-parent",
 		Title:       "Parent Issue",
@@ -2021,7 +2021,7 @@ func TestGetReadyWorkSortPolicy(t *testing.T) {
 
 	// Create issues with distinct priorities and creation times.
 	// "old-p3" is 3 days old (outside the 48h hybrid window).
-	// "recent-p2" and "recent-p1" are recent (within 48h).
+	// The "recent-*" issues are recent (within 48h).
 	issues := []*types.Issue{
 		{
 			ID:        "test-old-p3",
@@ -2030,6 +2030,14 @@ func TestGetReadyWorkSortPolicy(t *testing.T) {
 			Priority:  3,
 			IssueType: types.TypeTask,
 			CreatedAt: now.Add(-72 * time.Hour), // 3 days ago
+		},
+		{
+			ID:        "test-recent-p1-older",
+			Title:     "Recent P1 Older",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(-90 * time.Minute), // 90 min ago
 		},
 		{
 			ID:        "test-recent-p2",
@@ -2064,8 +2072,8 @@ func TestGetReadyWorkSortPolicy(t *testing.T) {
 		}
 
 		ids := issueIDs(result)
-		// Priority order: P1 < P2 < P3
-		assertOrder(t, ids, "test-recent-p1", "test-recent-p2", "test-old-p3")
+		// Priority order: P1 < P2 < P3, FIFO within the same priority.
+		assertOrder(t, ids, "test-recent-p1-older", "test-recent-p1", "test-recent-p2", "test-old-p3")
 	})
 
 	t.Run("SortPolicyOldest", func(t *testing.T) {
@@ -2077,8 +2085,8 @@ func TestGetReadyWorkSortPolicy(t *testing.T) {
 		}
 
 		ids := issueIDs(result)
-		// Oldest first: old-p3, recent-p2, recent-p1
-		assertOrder(t, ids, "test-old-p3", "test-recent-p2", "test-recent-p1")
+		// Oldest first, regardless of priority.
+		assertOrder(t, ids, "test-old-p3", "test-recent-p1-older", "test-recent-p2", "test-recent-p1")
 	})
 
 	t.Run("SortPolicyHybrid", func(t *testing.T) {
@@ -2091,7 +2099,7 @@ func TestGetReadyWorkSortPolicy(t *testing.T) {
 
 		ids := issueIDs(result)
 		// Hybrid: recent bucket (P1 before P2) first, then old bucket
-		assertOrder(t, ids, "test-recent-p1", "test-recent-p2", "test-old-p3")
+		assertOrder(t, ids, "test-recent-p1-older", "test-recent-p1", "test-recent-p2", "test-old-p3")
 	})
 
 	t.Run("DefaultSortIsHybrid", func(t *testing.T) {
@@ -2102,8 +2110,62 @@ func TestGetReadyWorkSortPolicy(t *testing.T) {
 
 		ids := issueIDs(result)
 		// Default (empty string) behaves like hybrid
-		assertOrder(t, ids, "test-recent-p1", "test-recent-p2", "test-old-p3")
+		assertOrder(t, ids, "test-recent-p1-older", "test-recent-p1", "test-recent-p2", "test-old-p3")
 	})
+}
+
+func TestDoltStoreClaimReadyIssuePriorityFIFO(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	now := time.Now().UTC()
+	issues := []*types.Issue{
+		{
+			ID:        "claim-ready-first",
+			Title:     "First task",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(-2 * time.Hour),
+		},
+		{
+			ID:        "claim-ready-second",
+			Title:     "Second task",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(-1 * time.Hour),
+		},
+		{
+			ID:        "claim-ready-third",
+			Title:     "Third task",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(-30 * time.Minute),
+		},
+	}
+	for _, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+		}
+	}
+
+	claimed, err := store.ClaimReadyIssue(ctx, types.WorkFilter{
+		SortPolicy: types.SortPolicyPriority,
+	}, "agent")
+	if err != nil {
+		t.Fatalf("ClaimReadyIssue failed: %v", err)
+	}
+	if claimed == nil {
+		t.Fatal("ClaimReadyIssue returned nil")
+	}
+	if claimed.ID != "claim-ready-first" {
+		t.Fatalf("ClaimReadyIssue claimed %s, want claim-ready-first", claimed.ID)
+	}
 }
 
 // issueIDs extracts IDs from a slice of issues.

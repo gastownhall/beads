@@ -4,6 +4,7 @@ package utils
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -197,6 +198,13 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 	if len(matches) == 0 {
 		return "", fmt.Errorf("no issue found matching %q", input)
 	}
+
+	// Sort so the ambiguity error lists IDs deterministically. matches is built
+	// in SearchIssues return order, whose primary sort is created_at DESC; that
+	// order is not stable across backends (Postgres timestamp(0) vs Dolt), so an
+	// unsorted list makes the same ambiguous input print in different orders on
+	// different storage. Sorting by ID pins the message regardless of backend.
+	sort.Strings(matches)
 
 	if len(matches) > 1 {
 		return "", fmt.Errorf("ambiguous ID %q matches %d issues: %v\nUse more characters to disambiguate", input, len(matches), matches)

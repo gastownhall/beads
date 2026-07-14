@@ -9,33 +9,25 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func openConfigProxiedUOW(ctx context.Context) uow.UnitOfWork {
-	if uowProvider == nil {
-		FatalErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		FatalErrorRespectJSON("open unit of work: %v", err)
-	}
-	return uw
-}
-
-func runConfigSetProxiedServer(ctx context.Context, key, value string) {
+func runConfigSetProxiedServer(ctx context.Context, key, value string) error {
 	if key == "status.custom" && value != "" {
 		if _, err := types.ParseCustomStatusConfig(value); err != nil {
-			FatalErrorRespectJSON("invalid status.custom value: %v", err)
+			return HandleErrorRespectJSON("invalid status.custom value: %v", err)
 		}
 	}
 
-	uw := openConfigProxiedUOW(ctx)
-	defer uw.Close(ctx)
-
-	if err := uw.ConfigUseCase().SetConfig(ctx, key, value); err != nil {
-		FatalErrorRespectJSON("Error setting config: %v", err)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
 
-	if err := uw.Commit(ctx, fmt.Sprintf("bd: config set %s", key)); err != nil && !isDoltNothingToCommit(err) {
-		FatalErrorRespectJSON("failed to commit: %v", err)
+	err := uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		if err := uw.ConfigUseCase().SetConfig(ctx, key, value); err != nil {
+			return "", fmt.Errorf("setting config: %w", err)
+		}
+		return fmt.Sprintf("bd: config set %s", key), nil
+	})
+	if err != nil {
+		return HandleErrorRespectJSON("failed: %v", err)
 	}
 
 	if jsonOutput {
@@ -47,15 +39,19 @@ func runConfigSetProxiedServer(ctx context.Context, key, value string) {
 		fmt.Printf("Set %s = %s\n", key, value)
 	}
 	printConfigSideEffects(checkConfigSetSideEffects(key, value))
+	return nil
 }
 
-func runConfigGetProxiedServer(ctx context.Context, key string) {
-	uw := openConfigProxiedUOW(ctx)
-	defer uw.Close(ctx)
+func runConfigGetProxiedServer(ctx context.Context, key string) error {
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
+	}
 
-	value, err := uw.ConfigUseCase().GetConfig(ctx, key)
+	value, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		return uw.ConfigUseCase().GetConfig(ctx, key)
+	})
 	if err != nil {
-		FatalErrorRespectJSON("Error getting config: %v", err)
+		return HandleErrorRespectJSON("Error getting config: %v", err)
 	}
 
 	if jsonOutput {
@@ -63,32 +59,36 @@ func runConfigGetProxiedServer(ctx context.Context, key string) {
 			"key":   key,
 			"value": value,
 		})
-		return
+		return nil
 	}
 	if value == "" {
 		fmt.Printf("%s (not set)\n", key)
 	} else {
 		fmt.Printf("%s\n", value)
 	}
+	return nil
 }
 
-func runConfigListProxiedServer(ctx context.Context) {
-	uw := openConfigProxiedUOW(ctx)
-	defer uw.Close(ctx)
+func runConfigListProxiedServer(ctx context.Context) error {
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
+	}
 
-	cfg, err := uw.ConfigUseCase().GetAllConfig(ctx)
+	cfg, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (map[string]string, error) {
+		return uw.ConfigUseCase().GetAllConfig(ctx)
+	})
 	if err != nil {
-		FatalErrorRespectJSON("Error listing config: %v", err)
+		return HandleErrorRespectJSON("Error listing config: %v", err)
 	}
 
 	if jsonOutput {
 		_ = outputJSON(cfg)
-		return
+		return nil
 	}
 
 	if len(cfg) == 0 {
 		fmt.Println("No configuration set")
-		return
+		return nil
 	}
 
 	keys := make([]string, 0, len(cfg))
@@ -103,18 +103,22 @@ func runConfigListProxiedServer(ctx context.Context) {
 	}
 
 	showConfigYAMLOverrides(cfg)
+	return nil
 }
 
-func runConfigUnsetProxiedServer(ctx context.Context, key string) {
-	uw := openConfigProxiedUOW(ctx)
-	defer uw.Close(ctx)
-
-	if err := uw.ConfigUseCase().DeleteConfig(ctx, key); err != nil {
-		FatalErrorRespectJSON("Error deleting config: %v", err)
+func runConfigUnsetProxiedServer(ctx context.Context, key string) error {
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
 
-	if err := uw.Commit(ctx, fmt.Sprintf("bd: config unset %s", key)); err != nil && !isDoltNothingToCommit(err) {
-		FatalErrorRespectJSON("failed to commit: %v", err)
+	err := uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		if err := uw.ConfigUseCase().DeleteConfig(ctx, key); err != nil {
+			return "", fmt.Errorf("deleting config: %w", err)
+		}
+		return fmt.Sprintf("bd: config unset %s", key), nil
+	})
+	if err != nil {
+		return HandleErrorRespectJSON("failed: %v", err)
 	}
 
 	if jsonOutput {
@@ -125,23 +129,25 @@ func runConfigUnsetProxiedServer(ctx context.Context, key string) {
 		fmt.Printf("Unset %s\n", key)
 	}
 	printConfigSideEffects(checkConfigUnsetSideEffects(key))
+	return nil
 }
 
-func runConfigSetManyProxiedServer(ctx context.Context, keys, values []string) {
+func runConfigSetManyProxiedServer(ctx context.Context, keys, values []string) error {
 	if len(keys) == 0 {
-		return
+		return nil
 	}
-	uw := openConfigProxiedUOW(ctx)
-	defer uw.Close(ctx)
 
-	cfgUC := uw.ConfigUseCase()
-	for i, k := range keys {
-		if err := cfgUC.SetConfig(ctx, k, values[i]); err != nil {
-			FatalErrorRespectJSON("Error setting config %s: %v", k, err)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
+	}
+
+	return uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		cfgUC := uw.ConfigUseCase()
+		for i, k := range keys {
+			if err := cfgUC.SetConfig(ctx, k, values[i]); err != nil {
+				return "", fmt.Errorf("setting config %s: %w", k, err)
+			}
 		}
-	}
-
-	if err := uw.Commit(ctx, fmt.Sprintf("bd: config set-many (%d keys)", len(keys))); err != nil && !isDoltNothingToCommit(err) {
-		FatalErrorRespectJSON("failed to commit: %v", err)
-	}
+		return fmt.Sprintf("bd: config set-many (%d keys)", len(keys)), nil
+	})
 }

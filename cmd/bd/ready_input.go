@@ -1,8 +1,6 @@
 package main
 
 import (
-	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -27,7 +25,7 @@ type readyInput struct {
 	jsonOut      bool
 }
 
-func gatherReadyInput(cmd *cobra.Command) readyInput {
+func gatherReadyInput(cmd *cobra.Command) (readyInput, error) {
 	in := readyInput{}
 
 	in.claim, _ = cmd.Flags().GetBool("claim")
@@ -42,7 +40,7 @@ func gatherReadyInput(cmd *cobra.Command) readyInput {
 	if cmd.Flags().Changed("offset") {
 		offset, _ := cmd.Flags().GetInt("offset")
 		if offset < 0 {
-			FatalError("--offset must be >= 0")
+			return in, HandleError("--offset must be >= 0")
 		}
 		in.offset = offset
 	}
@@ -64,34 +62,34 @@ func gatherReadyInput(cmd *cobra.Command) readyInput {
 	if molTypeStr != "" {
 		mt := types.MolType(molTypeStr)
 		if !mt.IsValid() {
-			FatalError("invalid mol-type %q (must be swarm, patrol, or work)", molTypeStr)
+			return in, HandleError("invalid mol-type %q (must be swarm, patrol, or work)", molTypeStr)
 		}
 		molType = &mt
 	}
 
 	if in.claim && assignee != "" {
-		FatalErrorRespectJSON("--claim cannot be combined with --assignee")
+		return in, HandleErrorRespectJSON("--claim cannot be combined with --assignee")
 	}
 	if in.claim && in.gated {
-		FatalErrorRespectJSON("--claim cannot be combined with --gated")
+		return in, HandleErrorRespectJSON("--claim cannot be combined with --gated")
 	}
 	if in.claim && in.molID != "" {
-		FatalErrorRespectJSON("--claim cannot be combined with --mol")
+		return in, HandleErrorRespectJSON("--claim cannot be combined with --mol")
 	}
 	if in.claim && in.explain {
-		FatalErrorRespectJSON("--claim cannot be combined with --explain")
+		return in, HandleErrorRespectJSON("--claim cannot be combined with --explain")
 	}
 	if in.offset > 0 && in.claim {
-		FatalErrorRespectJSON("--offset cannot be combined with --claim")
+		return in, HandleErrorRespectJSON("--offset cannot be combined with --claim")
 	}
 	if in.offset > 0 && in.gated {
-		FatalErrorRespectJSON("--offset cannot be combined with --gated")
+		return in, HandleErrorRespectJSON("--offset cannot be combined with --gated")
 	}
 	if in.offset > 0 && in.molID != "" {
-		FatalErrorRespectJSON("--offset cannot be combined with --mol")
+		return in, HandleErrorRespectJSON("--offset cannot be combined with --mol")
 	}
 	if in.offset > 0 && in.explain {
-		FatalErrorRespectJSON("--offset cannot be combined with --explain")
+		return in, HandleErrorRespectJSON("--offset cannot be combined with --explain")
 	}
 
 	labels = utils.NormalizeLabels(labels)
@@ -148,12 +146,10 @@ func gatherReadyInput(cmd *cobra.Command) readyInput {
 		for _, mf := range metadataFieldFlags {
 			k, v, ok := strings.Cut(mf, "=")
 			if !ok || k == "" {
-				fmt.Fprintf(os.Stderr, "Error: invalid --metadata-field: expected key=value, got %q\n", mf)
-				os.Exit(1)
+				return in, HandleError("invalid --metadata-field: expected key=value, got %q", mf)
 			}
 			if err := storage.ValidateMetadataKey(k); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --metadata-field key: %v\n", err)
-				os.Exit(1)
+				return in, HandleError("invalid --metadata-field key: %v", err)
 			}
 			in.filter.MetadataFields[k] = v
 		}
@@ -161,15 +157,14 @@ func gatherReadyInput(cmd *cobra.Command) readyInput {
 	hasMetadataKey, _ := cmd.Flags().GetString("has-metadata-key")
 	if hasMetadataKey != "" {
 		if err := storage.ValidateMetadataKey(hasMetadataKey); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: invalid --has-metadata-key: %v\n", err)
-			os.Exit(1)
+			return in, HandleError("invalid --has-metadata-key: %v", err)
 		}
 		in.filter.HasMetadataKey = hasMetadataKey
 	}
 
 	if !in.filter.SortPolicy.IsValid() {
-		FatalError("invalid sort policy '%s'. Valid values: hybrid, priority, oldest", sortPolicy)
+		return in, HandleError("invalid sort policy '%s'. Valid values: hybrid, priority, oldest", sortPolicy)
 	}
 
-	return in
+	return in, nil
 }

@@ -28,6 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
+	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -376,7 +378,7 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 
 	// Check if it's a dolt sql-server process
 	if !isDoltProcess(pid) {
-		return 0, fmt.Errorf("port %d is in use by a non-dolt process (PID %d).\n\nFree the port or configure a different one with: bd dolt set port <port>", port, pid)
+		return 0, fmt.Errorf("port %d is in use by a non-dolt process (PID %d).\n\n%s\n\nFree the port or configure a different one with: bd dolt set port <port>", port, pid, portConflictDiagnostics(port))
 	}
 
 	// It's a dolt process. Check if it's one we should adopt.
@@ -389,7 +391,24 @@ func reclaimPort(host string, port int, beadsDir string) (adoptPID int, err erro
 	}
 
 	// Another beads project's Dolt server is on this port.
-	return 0, fmt.Errorf("port %d is in use by another project's dolt server (PID %d).\n\nFree the port or use a different one with: bd dolt set port <port>", port, pid)
+	return 0, fmt.Errorf("port %d is in use by another project's dolt server (PID %d).\n\n%s\n\nFree the port or use a different one with: bd dolt set port <port>", port, pid, portConflictDiagnostics(port))
+}
+
+// portConflictDiagnostics returns a multi-line block of operator-actionable
+// hints for diagnosing what's holding a port. Combines the platform-specific
+// listener-discovery command with a docker-in-the-loop hint that frequently
+// applies in practice — operators running their own dolt sql-server in a
+// container don't realize bd would otherwise try to start a competing
+// instance and lose the race (GH#3516).
+func portConflictDiagnostics(port int) string {
+	return fmt.Sprintf("Identify the listener:\n  %s\n\n"+
+		"If the listener is YOUR own Dolt instance (e.g., a docker container "+
+		"or systemd unit you manage), bd does not need to start a new server. "+
+		"Configure bd to talk to the existing server instead:\n"+
+		"  export BEADS_DOLT_SERVER_HOST=<host>  # 127.0.0.1 for local container\n"+
+		"  export BEADS_DOLT_SERVER_PORT=%d\n"+
+		"  bd dolt status   # verify reachable",
+		fmt.Sprintf(portConflictHint, port), port)
 }
 
 // countDoltProcesses returns the number of running dolt sql-server processes.
@@ -469,6 +488,18 @@ func ReadPortFile(beadsDir string) int {
 	return readPortFile(beadsDir)
 }
 
+func configYamlPort(beadsDir string) int {
+	path := filepath.Join(ResolveDoltDir(beadsDir), "config.yaml")
+	if _, err := os.Stat(path); err != nil {
+		return 0
+	}
+	cfg, err := servercfg.YamlConfigFromFile(filesys.LocalFS, path)
+	if err != nil {
+		return 0
+	}
+	return cfg.Port()
+}
+
 // DefaultConfig returns config with sensible defaults.
 // Priority: env var > port file > config.yaml / global config > metadata.json.
 // Returns port 0 when no source provides a port, meaning Start() should
@@ -504,6 +535,11 @@ func DefaultConfig(beadsDir string) *Config {
 	// Elevated to top priority (after env var) to prevent git-tracked values
 	// from causing cross-project data leakage (GH#2372).
 	if p := readPortFile(beadsDir); 0 < p {
+		cfg.Port = p
+		return cfg
+	}
+
+	if p := configYamlPort(beadsDir); p > 0 {
 		cfg.Port = p
 		return cfg
 	}
@@ -1135,9 +1171,34 @@ func cleanupStateFiles(beadsDir string) error {
 	return errors.Join(errs...)
 }
 
+func StateFilePaths(beadsDir string) []string {
+	return []string{
+		pidPath(beadsDir),
+		portPath(beadsDir),
+		lockPath(beadsDir),
+		logPath(beadsDir),
+		logPath(beadsDir) + ".1",
+		DebugProfileDir(beadsDir),
+	}
+}
+
+func RemoveStateFiles(beadsDir string) []error {
+	var errs []error
+	for _, path := range StateFilePaths(beadsDir) {
+		if err := os.RemoveAll(path); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
 // LogPath returns the path to the server log file.
 func LogPath(beadsDir string) string {
 	return logPath(beadsDir)
+}
+
+func LockPath(beadsDir string) string {
+	return lockPath(beadsDir)
 }
 
 // killStaleServersForDir finds and kills orphan dolt sql-server processes for

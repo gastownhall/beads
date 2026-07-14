@@ -302,7 +302,7 @@ func bdProxiedInitInternal(t *testing.T, bd, prefix string, skipHooks bool, extr
 	dir := t.TempDir()
 	initGitRepoAt(t, dir)
 	beadsDir := filepath.Join(dir, ".beads")
-	proxyRoot := filepath.Join(beadsDir, "proxieddb")
+	proxyRoot := filepath.Join(beadsDir, "dolt")
 	t.Cleanup(func() {
 		if err := proxy.Shutdown(proxyRoot); err != nil {
 			t.Logf("proxy.Shutdown(%s): %v", proxyRoot, err)

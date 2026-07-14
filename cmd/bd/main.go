@@ -11,6 +11,7 @@ import (
 	"runtime/pprof"
 	"runtime/trace"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,11 +29,18 @@ import (
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/molecules"
+	"github.com/steveyegge/beads/internal/remotecache"
+	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	mysqlstore "github.com/steveyegge/beads/internal/storage/mysql"
+	"github.com/steveyegge/beads/internal/storage/pgdialect"
+	pgstore "github.com/steveyegge/beads/internal/storage/postgres"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	sqlitestore "github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/telemetry"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -71,6 +79,7 @@ type envSnapshotValue struct {
 var changeDirEnvSnapshot map[string]envSnapshotValue
 
 var (
+	noColorFlag       bool
 	sandboxMode       bool
 	globalFlag        bool
 	serverMode        bool
@@ -161,6 +170,44 @@ func isWorkingSetReconcileCommand(cmd *cobra.Command) bool {
 		return false
 	}
 	return parent.Name() == "dolt" || parent.Name() == "vc"
+}
+
+// isForcedMigrate reports whether cmd is `bd migrate` or `bd migrate schema`
+// invoked with --force: the operator confirming they are the single designated
+// migrator, so the remote-migrate gate (#4259) must not block this run's store
+// opens. Consulted in the root PersistentPreRunE because the gate fires during
+// store open (and during autoMigrateOnVersionBump), long before the migrate
+// command's own RunE.
+func isForcedMigrate(cmd *cobra.Command) bool {
+	if cmd != migrateCmd && cmd != migrateSchemaCmd {
+		return false
+	}
+	force, _ := cmd.Flags().GetBool("force")
+	return force
+}
+
+// forcedMigratePreviewFlag returns the name of a preview flag (--dry-run,
+// --inspect) that conflicts with --force on a forced migrate invocation, or ""
+// when there is no conflict. The combination must be rejected BEFORE the store
+// opens: with the gate override set, the open itself applies pending schema
+// migrations, so the preview flag would be honored only after the destructive
+// work it exists to prevent had already happened.
+func forcedMigratePreviewFlag(cmd *cobra.Command) string {
+	for _, name := range []string{"dry-run", "inspect"} {
+		if v, err := cmd.Flags().GetBool(name); err == nil && v {
+			return name
+		}
+	}
+	return ""
+}
+
+// applyNoColorFlag disables colorized output when --no-color is set.
+// Complements the NO_COLOR / CLICOLOR=0 env detection in package ui,
+// giving callers a per-invocation override.
+func applyNoColorFlag() {
+	if noColorFlag {
+		ui.DisableColors()
+	}
 }
 
 // loadBeadsEnvFile loads .beads/.env into process environment for per-project
@@ -570,6 +617,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
 	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
 	rootCmd.PersistentFlags().BoolVar(&ignoreSchemaSkew, "ignore-schema-skew", false, "Proceed despite forward schema drift (some queries may fail)")
+	rootCmd.PersistentFlags().BoolVar(&noColorFlag, "no-color", false, "Disable color output (also: NO_COLOR=1 or CLICOLOR=0)")
 
 	// Add --version flag to root command (same behavior as version subcommand)
 	rootCmd.Flags().BoolP("version", "V", false, "Print version information")
@@ -658,6 +706,8 @@ var rootCmd = &cobra.Command{
 		_ = cmd.Help() // Help() always returns nil for cobra commands
 	},
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		applyNoColorFlag()
+
 		// Initialize CommandContext to hold runtime state (replaces scattered globals)
 		initCommandContext()
 
@@ -707,7 +757,7 @@ var rootCmd = &cobra.Command{
 			oteltrace.WithAttributes(
 				attribute.String("bd.command", cmd.Name()),
 				attribute.String("bd.version", Version),
-				attribute.String("bd.args", strings.Join(os.Args[1:], " ")),
+				attribute.String("bd.args", scrubArgsForTelemetry(os.Args[1:], secretFlagTokens(cmd))),
 			),
 		)
 
@@ -811,6 +861,7 @@ var rootCmd = &cobra.Command{
 			"completion",
 			"context", // reads config files directly, does not need DB open
 			"codex-hook",
+			"cursor-hook", // shells out to `bd prime`; never opens the store itself
 			"doctor",
 			"dolt", // bare "bd dolt" shows help only; subcommands handled below
 			"fish",
@@ -843,6 +894,8 @@ var rootCmd = &cobra.Command{
 		// silently skipped if "remote" were ever added to noDbCommands.
 		needsStoreDoltGrandchildren := []string{"remote"}
 
+		skipStoreMigrateSubcommands := []string{"from-server-to-proxied-server", "from-proxied-server-to-server", "from-shared-server-to-proxied-server", "from-proxied-server-to-shared-server"}
+
 		// Check both the command name and parent command name for subcommands
 		cmdName := cmd.Name()
 		isSubcommand := cmd.Parent() != nil && cmd.Parent().Name() != "bd"
@@ -853,6 +906,8 @@ var rootCmd = &cobra.Command{
 				// GH#2042: dolt push/pull/commit need the store — fall through to init
 			} else if slices.Contains(needsStoreDoltGrandchildren, parentName) {
 				// GH#2224: dolt remote add/list/remove need the store — fall through to init
+			} else if parentName == "migrate" && slices.Contains(skipStoreMigrateSubcommands, cmdName) {
+				skipsStoreInit = true
 			} else if slices.Contains(noDbCommands, parentName) {
 				skipsStoreInit = true
 			}
@@ -937,7 +992,9 @@ var rootCmd = &cobra.Command{
 
 		if dbPath == "" {
 			if bd := beads.FindBeadsDir(); bd != "" {
-				if cfg, _ := configfile.Load(bd); cfg != nil && cfg.IsDoltProxiedServerMode() {
+				if cfg, _ := configfile.Load(bd); cfg != nil && (cfg.IsDoltProxiedServerMode() || cfg.GetBackend() == configfile.BackendPostgres || cfg.GetBackend() == configfile.BackendMySQL || cfg.GetBackend() == configfile.BackendSQLite) {
+					// A non-Dolt SQL (or proxied-server) workspace has no local Dolt
+					// database file; the .beads dir with metadata.json IS the workspace.
 					dbPath = bd
 				}
 			}
@@ -965,27 +1022,50 @@ var rootCmd = &cobra.Command{
 					return nil
 				}
 
-				if cmd.Name() != "import" && cmd.Name() != "setup" {
+				// GH#3686: `bd create --repo=<path-or-URL>` targets a different
+				// repo's workspace. Without this, PreRun exits with "no beads
+				// database found" before create.go's --repo handling runs, even
+				// when the target has a valid workspace of its own. Resolve
+				// local targets here so store initialization points at them.
+				// Remote --repo URLs need no local database at all: create.go
+				// opens the remote store itself via the remote cache and never
+				// touches the local `store` global on that path (a gap left by
+				// #4615, which only handled local paths), so skip local
+				// discovery entirely instead of falling through to the "no
+				// beads database found" exit below.
+				if cmd.Name() == "create" && cmd.Flags().Changed("repo") {
+					if repoVal, _ := cmd.Flags().GetString("repo"); repoVal != "" {
+						if remotecache.IsRemoteURL(repoVal) {
+							return nil
+						}
+						targetBeadsDir := filepath.Join(routing.ExpandPath(repoVal), ".beads")
+						dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
+					}
+				}
+
+				if dbPath == "" && cmd.Name() != "import" && cmd.Name() != "setup" {
 					// No database found - provide context-aware error message
 					fmt.Fprintf(os.Stderr, "Error: no beads database found\n")
 					fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
 					fmt.Fprintf(os.Stderr, "      or set BEADS_DIR to point to your .beads directory\n")
-					metrics.CloseAndFlush()
-					os.Exit(1)
+					return SilentExit()
 				}
-				// For import/setup commands, set default database path
-				// Invariant: dbPath must always be absolute. Use CanonicalizePath for OS-agnostic
-				// handling (symlinks, case normalization on macOS).
-				//
-				// IMPORTANT: Use FindBeadsDir() to get the correct .beads directory,
-				// which follows redirect files. Without this, a redirected .beads
-				// would create a local database instead of using the redirect target.
-				// (GH#bd-0qel)
-				targetBeadsDir := beads.FindBeadsDir()
-				if targetBeadsDir == "" {
-					targetBeadsDir = ".beads"
+
+				if dbPath == "" {
+					// For import/setup commands, set default database path
+					// Invariant: dbPath must always be absolute. Use CanonicalizePath for OS-agnostic
+					// handling (symlinks, case normalization on macOS).
+					//
+					// IMPORTANT: Use FindBeadsDir() to get the correct .beads directory,
+					// which follows redirect files. Without this, a redirected .beads
+					// would create a local database instead of using the redirect target.
+					// (GH#bd-0qel)
+					targetBeadsDir := beads.FindBeadsDir()
+					if targetBeadsDir == "" {
+						targetBeadsDir = ".beads"
+					}
+					dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
 				}
-				dbPath = utils.CanonicalizePath(filepath.Join(targetBeadsDir, beads.CanonicalDatabaseName))
 			}
 		}
 
@@ -1011,6 +1091,20 @@ var rootCmd = &cobra.Command{
 		// Read-only commands open the store in read-only mode to avoid modifying
 		// the database (which breaks file watchers).
 		useReadOnly := isReadOnlyCommand(cmd.Name())
+
+		// If the operator passed --force on `bd migrate` or `bd migrate schema`,
+		// set the programmatic gate override before both autoMigrateOnVersionBump
+		// and the main store open — both open their own store connections and the
+		// gate fires on each.
+		forcedMigrate := isForcedMigrate(cmd)
+		if forcedMigrate {
+			if name := forcedMigratePreviewFlag(cmd); name != "" {
+				return HandleError("--force cannot be combined with --%s: opening the store with the gate overridden applies pending migrations before the preview runs", name)
+			}
+		}
+		// Unconditional set-or-clear keeps the override self-clearing should the
+		// root command ever be re-run in-process (tests, a future server mode).
+		schema.SetForceAllowRemoteMigrate(forcedMigrate)
 
 		// Auto-migrate database on version bump (bd-jgxi).
 		// Runs for ALL commands (including read-only ones) because the migration
@@ -1042,7 +1136,7 @@ var rootCmd = &cobra.Command{
 		// the fresh-repo embedded default below.
 		cfg, cfgErr := configfile.Load(beadsDir)
 		if cfgErr != nil {
-			FatalError("failed to load beads config from %s: %v (refusing to fall back to the embedded store; fix or restore metadata.json and retry)", beadsDir, cfgErr)
+			return HandleError("failed to load beads config from %s: %v (refusing to fall back to the embedded store; fix or restore metadata.json and retry)", beadsDir, cfgErr)
 		}
 		if cfg != nil {
 			warnSharedServerEmbeddedMismatch(cfg)
@@ -1077,7 +1171,25 @@ var rootCmd = &cobra.Command{
 			// config.yaml). Port 0 is fine here — auto-start will resolve it.
 			doltCfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 			doltCfg.ServerSocket = cfg.GetDoltServerSocket()
-			doltCfg.ServerUser = cfg.GetDoltServerUser()
+			// A configured credential command targets an authenticating gateway server:
+			// run it for a short-lived token used as the connection username. Fail closed
+			// — never fall back to the static/root user when a command was configured but
+			// failed. Mirrors applyResolvedConfig, which this hand-built doltCfg path
+			// bypasses. Server mode only: embedded stores never present a username, so the
+			// command must not run (or fail) embedded opens even when the env var is set.
+			// Dolt-only: the gateway credential command mints a Dolt server
+			// username. IsSharedServerMode() forces ServerMode true with no backend
+			// guard, so without this check a shared-server config in config.yaml
+			// would run (and fail closed) the command for postgres/mysql/sqlite
+			// workspaces, which never present a server username.
+			if doltCfg.ServerMode && cfg.GetBackend() == configfile.BackendDolt {
+				if _, credErr := dolt.ApplyGatewayCredential(rootCtx, cfg, doltCfg); credErr != nil {
+					return HandleError("resolving dolt credential command: %v", credErr)
+				}
+			}
+			if doltCfg.ServerUser == "" {
+				doltCfg.ServerUser = cfg.GetDoltServerUser()
+			}
 			// Use the resolved port for credential lookup — metadata.json port
 			// and runtime port can diverge (e.g., tunnel on 3308 vs local on 3307).
 			doltCfg.ServerPassword = cfg.GetDoltServerPasswordForPort(doltCfg.ServerPort)
@@ -1127,6 +1239,8 @@ var rootCmd = &cobra.Command{
 		// other helper paths stay in lockstep with the main command path.
 		dolt.ApplyCLIAutoStart(beadsDir, doltCfg)
 
+		// In proxied mode the CLI short-circuits to the uowProvider path and
+		// dispatches through the *_proxied_server.go duals.
 		if proxiedServerMode {
 			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir)
 			if err != nil {
@@ -1161,7 +1275,19 @@ var rootCmd = &cobra.Command{
 		// Removing them WILL cause unrecoverable data corruption and data loss.
 		// Dolt manages these files itself; external interference is never safe.
 
-		store, err = newDoltStore(rootCtx, doltCfg)
+		if cfg != nil && cfg.GetBackend() == configfile.BackendPostgres {
+			// Postgres backend: open via the SQL-family bundle, bypassing the
+			// Dolt open path (the doltCfg above is built but unused here).
+			store, err = pgstore.NewFromConfig(rootCtx, beadsDir)
+		} else if cfg != nil && cfg.GetBackend() == configfile.BackendMySQL {
+			// MySQL backend: same SQL-family bundle, isolation by database.
+			store, err = mysqlstore.NewFromConfig(rootCtx, beadsDir)
+		} else if cfg != nil && cfg.GetBackend() == configfile.BackendSQLite {
+			// SQLite backend: pure-Go file-based SQL-family bundle.
+			store, err = sqlitestore.NewFromConfig(rootCtx, beadsDir)
+		} else {
+			store, err = newDoltStore(rootCtx, doltCfg)
+		}
 
 		// Track final read-only state for staleness checks (GH#1089)
 		storeIsReadOnly = doltCfg.ReadOnly
@@ -1169,8 +1295,7 @@ var rootCmd = &cobra.Command{
 		if err != nil {
 			// Check for fresh clone scenario
 			if handleFreshCloneError(err) {
-				metrics.CloseAndFlush()
-				os.Exit(1)
+				return SilentExit()
 			}
 			// Schema skew gets dedicated UX with actionable rebuild instructions.
 			var skewErr *schema.SchemaSkewError
@@ -1180,8 +1305,7 @@ var rootCmd = &cobra.Command{
 				} else {
 					fmt.Fprint(os.Stderr, skewErr.UserMessage())
 				}
-				metrics.CloseAndFlush()
-				os.Exit(1)
+				return SilentExit()
 			}
 			// #4259: the remote-migrate gate blocks silent in-place migration of a
 			// remote-backed database and tells the operator to migrate-or-adopt.
@@ -1192,8 +1316,7 @@ var rootCmd = &cobra.Command{
 				} else {
 					fmt.Fprint(os.Stderr, gateErr.UserMessage())
 				}
-				metrics.CloseAndFlush()
-				os.Exit(1)
+				return SilentExit()
 			}
 			return HandleError("failed to open database: %v", err)
 		}
@@ -1210,7 +1333,8 @@ var rootCmd = &cobra.Command{
 		// Skip auto-import when the user is explicitly running "bd import" —
 		// the import command handles JSONL files itself and auto-importing
 		// first would interfere (double-import / upsert confusion).
-		if shouldRunAutoImportJSONL(cmd, store, useReadOnly, globalFlag, doltCfg.ServerMode) {
+		if shouldRunAutoImportJSONL(cmd, store, useReadOnly, globalFlag, doltCfg.ServerMode) &&
+			!isDisablingImportAutoViaConfigCommand(cmd, args) {
 			maybeAutoImportJSONL(rootCtx, store, beadsDir)
 		}
 
@@ -1219,7 +1343,9 @@ var rootCmd = &cobra.Command{
 		// Skip for --global: the global database uses a sentinel project ID
 		// that won't match any project's metadata.json.
 		if !useReadOnly && !globalFlag && os.Getenv("BEADS_SKIP_IDENTITY_CHECK") != "1" {
-			validateWorkspaceIdentity(rootCtx, beadsDir)
+			if err := validateWorkspaceIdentity(rootCtx, beadsDir); err != nil {
+				return err
+			}
 		}
 
 		// Initialize hook runner
@@ -1229,14 +1355,12 @@ var rootCmd = &cobra.Command{
 			hookRunner = hooks.NewRunner(filepath.Join(beadsDir, "hooks"))
 		}
 
-		// Wrap store with hook-firing decorator so ALL mutations
-		// automatically fire on_create/on_update/on_close hooks.
-		// Set BD_NO_HOOKS=1 to disable all hook firing (useful for
-		// bulk imports, migrations, or environments where hooks
-		// should not run).
-		if hookRunner != nil && store != nil && !config.GetBool("no-hooks") {
-			store = storage.NewHookFiringStore(store, hookRunner)
-		}
+		// Compose the storage decorator chain: OTel instrumentation (no-op
+		// when telemetry is off) wrapped by hook firing (skipped when
+		// BD_NO_HOOKS=1, which is useful for bulk imports, migrations, or
+		// environments where on_create/on_update/on_close hooks should not
+		// run). Order matters — see wireStorageDecorators in storage_chain.go.
+		store = wireStorageDecorators(store, hookRunner, config.GetBool("no-hooks"))
 
 		// Warn if multiple databases detected in directory hierarchy
 		warnMultipleDatabases(dbPath)
@@ -1270,58 +1394,70 @@ var rootCmd = &cobra.Command{
 				uowProvider = nil
 			}
 		} else {
-			// Dolt auto-commit: after a successful write command (and after final flush),
-			// create a Dolt commit so changes don't remain only in the working set.
-			if commandDidWrite.Load() && !commandDidExplicitDoltCommit {
-				if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: cmd.Name()}); err != nil {
-					return HandleError("dolt auto-commit failed: %v", err)
-				}
+			// Slice 5c: a NonCommitGraphBackend (Postgres, SQLite, ...) has no Dolt
+			// commit graph, so skip the Dolt-only maintenance tail. UnwrapStore reaches
+			// the concrete store past the HookFiringStore decorator; a store WITHOUT the
+			// marker (every Dolt variant) leaves skipMaintenance false and runs the tail
+			// unchanged. store.Close below stays unconditional.
+			skipMaintenance := false
+			if ncg, ok := storage.UnwrapStore(store).(storage.NonCommitGraphBackend); ok && ncg.CommitGraphUnsupported() {
+				skipMaintenance = true
 			}
 
-			// Tip metadata auto-commit: if a tip was shown, create a separate Dolt commit for the
-			// tip_*_last_shown metadata updates. This may happen even for otherwise read-only commands.
-			if commandDidWriteTipMetadata && len(commandTipIDsShown) > 0 {
-				// Only applies when dolt auto-commit is enabled and backend is versioned (Dolt).
-				if mode, err := getDoltAutoCommitMode(); err != nil {
-					return HandleError("dolt tip auto-commit failed: %v", err)
-				} else if mode == doltAutoCommitOn {
-					// Apply tip metadata writes now (deferred in recordTipShown for Dolt).
-					for tipID := range commandTipIDsShown {
-						key := fmt.Sprintf("tip_%s_last_shown", tipID)
-						value := time.Now().Format(time.RFC3339)
-						if err := store.SetLocalMetadata(rootCtx, key, value); err != nil {
+			if !skipMaintenance {
+				// Dolt auto-commit: after a successful write command (and after final flush),
+				// create a Dolt commit so changes don't remain only in the working set.
+				if commandDidWrite.Load() && !commandDidExplicitDoltCommit {
+					if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: cmd.Name()}); err != nil {
+						return HandleError("dolt auto-commit failed: %v", err)
+					}
+				}
+
+				// Tip metadata auto-commit: if a tip was shown, create a separate Dolt commit for the
+				// tip_*_last_shown metadata updates. This may happen even for otherwise read-only commands.
+				if commandDidWriteTipMetadata && len(commandTipIDsShown) > 0 {
+					// Only applies when dolt auto-commit is enabled and backend is versioned (Dolt).
+					if mode, err := getDoltAutoCommitMode(); err != nil {
+						return HandleError("dolt tip auto-commit failed: %v", err)
+					} else if mode == doltAutoCommitOn {
+						// Apply tip metadata writes now (deferred in recordTipShown for Dolt).
+						for tipID := range commandTipIDsShown {
+							key := fmt.Sprintf("tip_%s_last_shown", tipID)
+							value := time.Now().Format(time.RFC3339)
+							if err := store.SetLocalMetadata(rootCtx, key, value); err != nil {
+								return HandleError("dolt tip auto-commit failed: %v", err)
+							}
+						}
+
+						ids := make([]string, 0, len(commandTipIDsShown))
+						for tipID := range commandTipIDsShown {
+							ids = append(ids, tipID)
+						}
+						msg := formatDoltAutoCommitMessage("tip", getActor(), ids)
+						if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: "tip", MessageOverride: msg}); err != nil {
 							return HandleError("dolt tip auto-commit failed: %v", err)
 						}
 					}
+				}
 
-					ids := make([]string, 0, len(commandTipIDsShown))
-					for tipID := range commandTipIDsShown {
-						ids = append(ids, tipID)
-					}
-					msg := formatDoltAutoCommitMessage("tip", getActor(), ids)
-					if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: "tip", MessageOverride: msg}); err != nil {
-						return HandleError("dolt tip auto-commit failed: %v", err)
+				// Auto-backup: sync a Dolt-native backup if enabled and due
+				maybeAutoBackup(rootCtx)
+
+				// Auto-export: write git-tracked JSONL for portability if enabled and due.
+				// Read-only commands must not perform post-run maintenance writes or emit
+				// sync guidance after machine-readable output.
+				if shouldRunPostCommandAutoExport(cmd) {
+					if err := maybeAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd)); err != nil {
+						return HandleError("%v", err)
 					}
 				}
-			}
 
-			// Auto-backup: sync a Dolt-native backup if enabled and due
-			maybeAutoBackup(rootCtx)
-
-			// Auto-export: write git-tracked JSONL for portability if enabled and due.
-			// Read-only commands must not perform post-run maintenance writes or emit
-			// sync guidance after machine-readable output.
-			if shouldRunPostCommandAutoExport(cmd) {
-				if err := maybeAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd)); err != nil {
-					return HandleError("%v", err)
+				// Auto-push: push to Dolt remote if enabled and due.
+				// Skip for read-only commands to avoid unnecessary network operations
+				// and metadata writes on commands like bd list/show/ready (GH#2191).
+				if !isReadOnlyCommand(cmd.Name()) {
+					maybeAutoPush(rootCtx)
 				}
-			}
-
-			// Auto-push: push to Dolt remote if enabled and due.
-			// Skip for read-only commands to avoid unnecessary network operations
-			// and metadata writes on commands like bd list/show/ready (GH#2191).
-			if !isReadOnlyCommand(cmd.Name()) {
-				maybeAutoPush(rootCtx)
 			}
 
 			// Signal that store is closing (prevents background flush from accessing closed store)
@@ -1371,7 +1507,47 @@ func shouldRunAutoImportJSONL(cmd *cobra.Command, s storage.DoltStorage, useRead
 	if cmd == nil || s == nil || useReadOnly || globalFlag || serverMode {
 		return false
 	}
+	// import.auto=false (or BD_IMPORT_AUTO=false) must disable ALL auto-import
+	// behavior, not just the git-hook sync path (importJSONLForSync). Without
+	// this check, a fresh/empty database would silently auto-import stale
+	// issues.jsonl on every write command regardless of the config setting
+	// (GH#4304).
+	if !config.GetBool("import.auto") {
+		return false
+	}
 	return cmd.Name() != "import"
+}
+
+// isDisablingImportAutoViaConfigCommand reports whether the command about to
+// run is "bd config set import.auto false" (or an equivalent
+// "bd config set-many ... import.auto=false" pair). shouldRunAutoImportJSONL
+// runs in PersistentPreRun before configSetCmd/configSetManyCmd write the new
+// value to config.yaml, so without this exemption the master switch would
+// trigger the very auto-import it is meant to disable on its own invocation
+// when a stale .beads/issues.jsonl sits next to an empty database (GH#4304).
+func isDisablingImportAutoViaConfigCommand(cmd *cobra.Command, args []string) bool {
+	if cmd == nil || cmd.Parent() == nil || cmd.Parent().Name() != "config" {
+		return false
+	}
+	switch cmd.Name() {
+	case "set":
+		return len(args) >= 2 && args[0] == "import.auto" && isFalsyConfigValue(args[1])
+	case "set-many":
+		for _, arg := range args {
+			key, value, ok := strings.Cut(arg, "=")
+			if ok && key == "import.auto" && isFalsyConfigValue(value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isFalsyConfigValue reports whether a config value string parses as a
+// boolean false (e.g. "false", "0", "f").
+func isFalsyConfigValue(value string) bool {
+	parsed, err := strconv.ParseBool(value)
+	return err == nil && !parsed
 }
 
 func commandAllowsEmptyAutoExport(cmd *cobra.Command) bool {
@@ -1466,25 +1642,25 @@ func flushBatchCommitOnShutdown() {
 // 1. Read commands are safe even against wrong databases (no data mutation)
 // 2. The check requires an open store connection
 // 3. New databases won't have _project_id yet (bootstrap case)
-func validateWorkspaceIdentity(ctx context.Context, beadsDir string) {
+func validateWorkspaceIdentity(ctx context.Context, beadsDir string) error {
 	if store == nil {
-		return // No store connection, nothing to validate
+		return nil // No store connection, nothing to validate
 	}
 
 	// Load project_id from metadata.json
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
-		return // No config, skip validation (fresh init)
+		return nil // No config, skip validation (fresh init)
 	}
 	configProjectID := cfg.ProjectID
 	if configProjectID == "" {
-		return // No project_id in config (pre-identity era)
+		return nil // No project_id in config (pre-identity era)
 	}
 
 	// Get project_id from database
 	dbProjectID, err := store.GetMetadata(ctx, "_project_id")
 	if err != nil || dbProjectID == "" {
-		return // No project_id in DB (new or pre-identity database)
+		return nil // No project_id in DB (new or pre-identity database)
 	}
 
 	// Compare: mismatch means drift
@@ -1500,9 +1676,9 @@ func validateWorkspaceIdentity(ctx context.Context, beadsDir string) {
 		fmt.Fprintf(os.Stderr, "Recovery: run 'bd doctor --fix' or 'bd bootstrap' to reconcile workspace metadata with the authoritative database when shared-server metadata drifted.\n")
 		fmt.Fprintf(os.Stderr, "To diagnose: bd context --json\n")
 		fmt.Fprintf(os.Stderr, "To override: set BEADS_SKIP_IDENTITY_CHECK=1\n")
-		metrics.CloseAndFlush()
-		os.Exit(1)
+		return SilentExit()
 	}
+	return nil
 }
 
 func main() {
@@ -1569,4 +1745,153 @@ func envTruthyValue(v string) bool {
 		return false
 	}
 	return true
+}
+
+// dsnFlags are the flags whose value is a connection string that may embed a
+// password (bd init --backend=postgres/mysql). Their values get the full
+// parser-backed DSN scrub; other args only get the unambiguous userinfo scrub.
+var dsnFlags = map[string]bool{"--pg-url": true, "--mysql-url": true}
+
+// secretFlagNames are long flag names whose entire value is an opaque credential
+// that must never reach the bd.args telemetry span. Unlike dsnFlags (a DSN that is
+// parsed so its structure survives), a secret flag's value is redacted wholesale.
+// Only federation add-peer's --password currently qualifies. Its shorthand (-p) is
+// resolved per command via secretFlagTokens so the same letter bound to
+// --priority/--prefix/--parallel on other commands is never redacted.
+var secretFlagNames = map[string]bool{"password": true}
+
+// secretFlagTokens returns the concrete --long and -short flag tokens that carry a
+// secret value for cmd. Resolving against the running command is what makes the
+// redaction "by flag identity": -p is treated as secret only on the command that
+// actually binds it to a secret flag (federation add-peer), not on the many
+// commands that bind -p to a non-secret option.
+func secretFlagTokens(cmd *cobra.Command) map[string]bool {
+	tokens := make(map[string]bool)
+	if cmd == nil {
+		return tokens
+	}
+	for name := range secretFlagNames {
+		f := cmd.Flags().Lookup(name)
+		if f == nil {
+			continue
+		}
+		tokens["--"+f.Name] = true
+		if f.Shorthand != "" {
+			tokens["-"+f.Shorthand] = true
+		}
+	}
+	return tokens
+}
+
+// scrubArgsForTelemetry joins argv for the bd.args span attribute with any
+// credential-bearing values redacted. --pg-url/--mysql-url may carry a password
+// for init, and federation add-peer --password/-p carries a SQL password;
+// RedactPassword protects metadata.json, but the raw argv would otherwise leak the
+// secret into the telemetry root span and trace logs.
+//
+// A DSN flag's value is scrubbed through the parser-backed pgdialect logic so every
+// password form pgx accepts is caught — URL userinfo, URL `?password=`/`?sslpassword=`
+// query params, and libpq `password=`/`sslpassword=` keyword/value tokens — in both
+// the `--pg-url=<dsn>` and `--pg-url <dsn>` spellings. A secretFlags token's value is
+// an opaque credential and is redacted wholesale across the `--password <v>`,
+// `--password=<v>`, `-p <v>`, `-p=<v>`, and `-p<v>` spellings pflag accepts. Every
+// other arg still gets the narrow user:PASS@host userinfo scrub as defense in depth,
+// without the broad keyword scan that would over-redact ordinary text.
+func scrubArgsForTelemetry(argv []string, secretFlags map[string]bool) string {
+	parts := make([]string, len(argv))
+	for i, a := range argv {
+		if name, val, ok := strings.Cut(a, "="); ok {
+			if dsnFlags[name] {
+				// --pg-url=<dsn> — scrub only the value, keep the flag name.
+				parts[i] = name + "=" + scrubDSNValue(val)
+				continue
+			}
+			if secretFlags[name] {
+				// --password=<secret> / -p=<secret> — redact the whole value.
+				parts[i] = name + "=xxxxx"
+				continue
+			}
+		}
+		if i > 0 {
+			if dsnFlags[argv[i-1]] {
+				// <dsn> following a bare --pg-url token.
+				parts[i] = scrubDSNValue(a)
+				continue
+			}
+			if secretFlags[argv[i-1]] {
+				// <secret> following a bare --password / -p token.
+				parts[i] = "xxxxx"
+				continue
+			}
+		}
+		if short, ok := secretShorthandPrefix(a, secretFlags); ok {
+			// -p<secret> — pflag's concatenated shorthand spelling.
+			parts[i] = short + "xxxxx"
+			continue
+		}
+		parts[i] = scrubUserinfoPassword(a)
+	}
+	return strings.Join(parts, " ")
+}
+
+// secretShorthandPrefix reports whether a is pflag's concatenated secret-shorthand
+// spelling, returning the "-x...-p" prefix to preserve. Long flags cannot concatenate
+// a value, so only -X<value> shorthands are matched.
+//
+// pflag also accepts a CLUSTER of boolean shorthands ending in a value-taking
+// shorthand: given boolean flags -q/-v and value flag -p, "-qpSECRET" parses as -q
+// followed by -p SECRET, and "-vpSECRET" parses as -v followed by -p SECRET — but the
+// raw token still reaches telemetry as one string. Walk the leading run of letters in
+// a; the first letter whose "-x" token is a registered secret shorthand ends the
+// cluster, and everything after it is that flag's value, regardless of how many
+// boolean shorthands preceded it. This mirrors pflag's own grammar (a cluster is zero
+// or more boolean shorthands followed by one value-taking shorthand) without needing
+// the running command's flag set here: it is conservative in the safe direction,
+// since treating a longer prefix as consumed by the secret shorthand only ever
+// over-redacts, never under-redacts.
+func secretShorthandPrefix(a string, secretFlags map[string]bool) (string, bool) {
+	if len(a) < 3 || a[0] != '-' || a[1] == '-' {
+		return "", false
+	}
+	for i := 1; i < len(a); i++ {
+		c := a[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			return "", false
+		}
+		if secretFlags["-"+string(c)] {
+			if i+1 >= len(a) {
+				return "", false // no value follows; not the concatenated spelling
+			}
+			return a[:i+1], true
+		}
+	}
+	return "", false
+}
+
+// scrubDSNValue redacts every password form from a connection-string value. The
+// pgdialect pass covers pgx's URL (userinfo + query) and libpq keyword/value shapes;
+// the trailing userinfo pass covers the MySQL user:PASS@tcp(...) DSN, which is not a
+// scheme URL and so is invisible to the pgdialect extractor.
+func scrubDSNValue(val string) string {
+	return scrubUserinfoPassword(pgdialect.ScrubDSNString(val, val))
+}
+
+// scrubUserinfoPassword redacts the password in a URL/DSN userinfo section
+// (postgres://user:PASS@host or user:PASS@tcp(...)); args without a user:pass@
+// userinfo pass through unchanged, so ordinary text is never mangled.
+func scrubUserinfoPassword(a string) string {
+	at := strings.LastIndexByte(a, '@')
+	if at < 0 {
+		return a
+	}
+	head := a[:at]
+	start := 0
+	if s := strings.LastIndex(head, "//"); s >= 0 {
+		start = s + 2 // userinfo begins after the scheme's "//"
+	}
+	colon := strings.IndexByte(head[start:], ':')
+	if colon < 0 {
+		return a // no "user:pass" userinfo, nothing to redact
+	}
+	return head[:start+colon+1] + "xxxxx" + a[at:]
 }

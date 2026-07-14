@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -45,8 +46,7 @@ the flags appear in the command line.`,
 		}()
 
 		if usesProxiedServer() {
-			runCloseProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runCloseProxiedServer(cmd, rootCtx, args)
 		}
 
 		// If no IDs provided, use last touched issue
@@ -106,6 +106,7 @@ the flags appear in the command line.`,
 		// Direct mode
 		closedIssues := []*types.Issue{}
 		closedCount := 0
+		firstClosedID := ""
 
 		for i, id := range resolvedIDs {
 			result := results[i]
@@ -169,6 +170,9 @@ the flags appear in the command line.`,
 			audit.LogFieldChange(id, "status", oldStatus, "closed", actor, reason)
 
 			closedCount++
+			if firstClosedID == "" {
+				firstClosedID = id
+			}
 
 			// Auto-close parent molecule if all steps are now complete.
 			// Runs against the same store the step was closed in.
@@ -182,8 +186,17 @@ the flags appear in the command line.`,
 					closedIssues = append(closedIssues, closedIssue)
 				}
 			} else {
-				fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
+				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
 			}
+		}
+
+		// Record the closed issue as last-touched so `bd close` honors its own
+		// documented contract (the "last touched issue ... from create, update,
+		// show, or close" behavior) and downstream write-marker consumers see the
+		// close (GH#3965). Mirrors bd update's firstUpdatedID pattern. A later
+		// --claim-next overwrites this with the claimed issue (the newer touch).
+		if closedCount > 0 {
+			SetLastTouchedID(firstClosedID)
 		}
 
 		// Pick a store for post-close work (--suggest-next, --continue, --claim-next).
@@ -254,14 +267,14 @@ the flags appear in the command line.`,
 					if jsonOutput {
 						// JSON handled below
 					} else {
-						fmt.Printf("%s Auto-claimed next ready issue: %s (P%d)\n", ui.RenderPass("✓"), formatFeedbackID(nextIssue.ID, nextIssue.Title), nextIssue.Priority)
+						debug.PrintNormal("%s Auto-claimed next ready issue: %s (P%d)\n", ui.RenderPass("✓"), formatFeedbackID(nextIssue.ID, nextIssue.Title), nextIssue.Priority)
 					}
 					SetLastTouchedID(nextIssue.ID)
 				} else {
 					fmt.Fprintf(os.Stderr, "Warning: could not claim next issue %s: %v\n", nextIssue.ID, err)
 				}
 			} else if !jsonOutput {
-				fmt.Printf("\n%s No ready issues available to claim.\n", ui.RenderWarn("✨"))
+				debug.PrintNormal("\n%s No ready issues available to claim.\n", ui.RenderWarn("✨"))
 			}
 		}
 
@@ -531,7 +544,7 @@ func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, clos
 	}
 
 	if !jsonOutput {
-		fmt.Printf("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
+		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
 	}
 }
 

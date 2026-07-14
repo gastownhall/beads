@@ -53,7 +53,7 @@ func TestConfigSetManyArgParsing(t *testing.T) {
 // TestConfigSetManyYamlKeyDetection tests that yaml-only keys are correctly identified
 // for routing in the set-many command.
 func TestConfigSetManyYamlKeyDetection(t *testing.T) {
-	yamlKeys := []string{"no-db", "json", "routing.mode", "routing.default", "no-push", "import.path"}
+	yamlKeys := []string{"no-db", "json", "routing.mode", "routing.default", "no-push", "import.auto", "import.path"}
 	for _, key := range yamlKeys {
 		if !config.IsYamlOnlyKey(key) {
 			t.Errorf("expected %q to be yaml-only", key)

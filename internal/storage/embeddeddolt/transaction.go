@@ -121,12 +121,12 @@ func (t *embeddedTransaction) AddDependencyWithOptions(ctx context.Context, dep 
 	return nil
 }
 
-// CycleThroughEdges reports a blocking cycle through one of the new edges,
+// CycleThroughEdges reports a scheduling cycle through one of the new edges,
 // including the transaction's own uncommitted dependency writes
 // (bd-6dnrw.8, bd-578h9.9).
 func (t *embeddedTransaction) CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error) {
 	graph := make(map[string][]string)
-	if err := issueops.AppendBlockingGraphInTx(ctx, t.tx, []string{"dependencies", "wisp_dependencies"}, graph); err != nil {
+	if err := issueops.AppendSchedulingGraphInTx(ctx, t.tx, []string{"dependencies", "wisp_dependencies"}, graph); err != nil {
 		return "", err
 	}
 	return issueops.CycleThroughEdgesInGraph(graph, edges), nil

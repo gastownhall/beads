@@ -96,6 +96,9 @@ func init() {
 }
 
 func runJiraSync(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("jira sync is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("jira-sync")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -223,6 +226,9 @@ func buildJiraPushHooks(ctx context.Context) *tracker.PushHooks {
 }
 
 func runJiraStatus(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("jira status is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("jira-status")
 	defer func() {
 		if c := metrics.Global(); c != nil {

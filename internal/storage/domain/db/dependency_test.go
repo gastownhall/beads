@@ -404,9 +404,8 @@ func (s *testSuite) depWispHasCycleCrossTable() {
 	s.seedWispRow("bd-dep-cx-s")
 
 	r := s.depRepo()
-	// a -> s: source a is permanent, target is a wisp. Stored in dependencies
-	// with depends_on_wisp_id set. We need to insert via raw SQL because our
-	// Insert path writes to depends_on_issue_id only.
+	// a -> s: source a is permanent, target is a wisp. Store it explicitly in
+	// depends_on_wisp_id to exercise typed-target traversal.
 	_, err := s.Runner().ExecContext(s.Ctx(), `
 		INSERT INTO dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
 		VALUES (UUID(), ?, ?, 'blocks', NOW(), 'tester', '{}')
@@ -417,13 +416,11 @@ func (s *testSuite) depWispHasCycleCrossTable() {
 		newDep("bd-dep-cx-s", "bd-dep-cx-b", types.DepBlocks), "tester",
 		domain.DepInsertOpts{UseWispsTable: true}))
 
-	// HasCycle traverses both tables, but only follows depends_on_issue_id
-	// edges. a -> s (via depends_on_wisp_id) is NOT followed, so the closure
-	// from b stops at b. This is documented behavior — wisp-target closure is
-	// intentionally excluded; revisit if needed.
+	// HasCycle traverses both tables and resolves all typed target columns, so
+	// b -> a would close b -> a -> s -> b.
 	cycle, err := r.HasCycle(s.Ctx(), "bd-dep-cx-b", "bd-dep-cx-a")
 	s.Require().NoError(err)
-	s.False(cycle, "wisp-target edges are intentionally not followed in cycle detection")
+	s.True(cycle, "wisp-target edges must participate in combined cycle detection")
 }
 
 func (s *testSuite) depBlockingInfoEmpty() {

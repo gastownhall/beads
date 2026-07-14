@@ -32,6 +32,7 @@ This project uses **Beads (bd)** for issue tracking. Aider requires explicit com
 - ` + "`bd list --status=open`" + ` - List all open issues
 - ` + "`bd create --title=\"...\" --type=task`" + ` - Create new issue
 - ` + "`bd update <id> --claim`" + ` - Claim work atomically
+- ` + "`bd unclaim <id>`" + ` - Release stuck issue
 - ` + "`bd close <id>`" + ` - Mark complete
 - ` + "`bd dep add <issue> <depends-on>`" + ` - Add dependency (issue depends on depends-on)
 - ` + "`bd dolt push`" + ` - Push changes to Dolt remote
@@ -145,7 +146,7 @@ The AI will suggest the appropriate ` + "`bd`" + ` command, which you run via ` 
 
 - Run ` + "`bd --help`" + ` for full command reference
 - See ` + "`AGENTS.md`" + ` for detailed AI integration docs
-- See ` + "`QUICKSTART.md`" + ` for human-oriented guide
+- See the beads quickstart (https://github.com/gastownhall/beads/blob/main/docs/getting-started/quickstart.md) for a human-oriented guide
 `
 
 func InstallAider() error {

@@ -70,7 +70,7 @@ func CheckManagedHandoffPort(repoPath string) DoctorCheck {
 		Status:   StatusWarning,
 		Message:  "managed Dolt port override differs from local standalone port file",
 		Detail:   detail,
-		Fix:      "Before removing the local port file, export from the standalone store, stop its server, then import into the managed server. See docs/DOLT.md#standalone-to-managed-city-handoff",
+		Fix:      "Before removing the local port file, export from the standalone store, stop its server, then import into the managed server. See docs/architecture/dolt.md#standalone-to-managed-city-handoff",
 		Category: CategoryRuntime,
 	}
 }

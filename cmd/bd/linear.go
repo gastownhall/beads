@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -123,6 +124,18 @@ Type Filtering (--push only):
   --parent TICKET           Only push this ticket and its descendants
   --relations               Import Linear relations as bd dependencies on pull
 
+Persistent push-direction ID filters (workflow artifacts, sandbox beads, etc.):
+  bd config set linear.exclude_id_prefix "hw-mol-"
+  bd config set linear.exclude_id_patterns "-wisp-,sandbox-,scratch-"
+
+  exclude_id_prefix is a single case-sensitive prefix on the bead ID.
+  exclude_id_patterns is a comma-separated list of case-sensitive substrings
+  (matched anywhere in the ID). Both are combined as a union: a bead
+  matching either rule is skipped from push (no create, no update). Beads
+  with an existing external_ref that NOW match are silently skipped on
+  future syncs; the Linear-side issue persists — archive/delete it manually
+  if desired.
+
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
   --prefer-local    Always prefer local beads version
@@ -202,6 +215,9 @@ func init() {
 }
 
 func runLinearSync(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("linear sync is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("linear-sync")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -349,6 +365,7 @@ func runLinearSync(cmd *cobra.Command, args []string) error {
 	for _, t := range excludeTypes {
 		opts.ExcludeTypes = append(opts.ExcludeTypes, types.IssueType(strings.ToLower(t)))
 	}
+	applyLinearExcludeIDConfig(ctx, store, &opts)
 	if !includeEphemeral {
 		opts.ExcludeEphemeral = true
 	}
@@ -731,6 +748,18 @@ func isLinearMilestoneIssue(issue *types.Issue) bool {
 // buildLinearPushHooks creates PushHooks for Linear-specific push behavior.
 func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectCreates bool) *tracker.PushHooks {
 	config := lt.MappingConfig()
+	var labelOnce sync.Once
+	var labelCache *linear.LabelCache
+	var labelCacheErr error
+	loadPushLabelCache := func() *linear.LabelCache {
+		labelOnce.Do(func() {
+			labelCache, labelCacheErr = linear.BuildLabelCacheFromTracker(ctx, lt)
+		})
+		if labelCacheErr != nil {
+			return nil
+		}
+		return labelCache
+	}
 	return &tracker.PushHooks{
 		FormatDescription: func(issue *types.Issue) string {
 			return linear.BuildLinearDescription(issue)
@@ -738,7 +767,7 @@ func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectC
 		ContentEqual: func(local *types.Issue, remote *tracker.TrackerIssue) bool {
 			remoteIssue, ok := remote.Raw.(*linear.Issue)
 			if ok && remoteIssue != nil {
-				return linear.PushFieldsEqual(local, remoteIssue, config)
+				return linear.PushFieldsEqual(local, remoteIssue, config, loadPushLabelCache())
 			}
 			remoteConv := lt.FieldMapper().IssueToBeads(remote)
 			if remoteConv == nil || remoteConv.Issue == nil {
@@ -787,6 +816,9 @@ func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectC
 }
 
 func runLinearStatus(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("linear status is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("linear-status")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -900,6 +932,9 @@ func runLinearStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runLinearTeams(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("linear teams is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("linear-teams")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -1180,6 +1215,37 @@ func getLinearIDMode(ctx context.Context) string {
 		return "hash"
 	}
 	return mode
+}
+
+// linearConfigReader is the minimal slice of storage.Storage that the
+// linear-config helpers depend on. Lets tests inject a fake without
+// spinning up a Dolt server.
+type linearConfigReader interface {
+	GetConfig(ctx context.Context, key string) (string, error)
+}
+
+// applyLinearExcludeIDConfig reads linear.exclude_id_prefix and
+// linear.exclude_id_patterns from the given config reader and applies them
+// to opts. Both keys are push-direction-only filters; see the help text on
+// linearSyncCmd for the user-facing semantics.
+//
+// Empty values are no-ops. Patterns are comma-split, trimmed, with empty
+// entries dropped. If reader is nil (no store configured), this is a no-op.
+func applyLinearExcludeIDConfig(ctx context.Context, reader linearConfigReader, opts *tracker.SyncOptions) {
+	if reader == nil || opts == nil {
+		return
+	}
+	if v, _ := reader.GetConfig(ctx, "linear.exclude_id_prefix"); v != "" {
+		opts.ExcludeIDPrefix = strings.TrimSpace(v)
+	}
+	if v, _ := reader.GetConfig(ctx, "linear.exclude_id_patterns"); v != "" {
+		for _, p := range strings.Split(v, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				opts.ExcludeIDPatterns = append(opts.ExcludeIDPatterns, p)
+			}
+		}
+	}
 }
 
 // getLinearHashLength returns the configured hash length for Linear imports.

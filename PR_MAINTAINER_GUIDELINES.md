@@ -10,7 +10,7 @@ For every PR, look for the value in it and choose the action that moves useful w
 
 The goal is not to block contributors unnecessarily. The goal is to identify useful work, preserve it, and keep the project moving.
 
-Read [docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md) when a PR changes
+Read [engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md) when a PR changes
 Beads' product surface area. Scope boundaries should guide where value lands:
 core, metadata, integration, plugin, orchestration layer, or external tool.
 
@@ -99,5 +99,5 @@ These rules apply to everyone who can merge — human maintainers and agents ali
 - File follow-up work as beads issues instead of hidden notes.
 - When code changes result from PR maintenance, follow repo quality gates and session completion rules in `AGENTS.md`.
 - Post multi-line PR comments from a real Markdown body file or a shell heredoc, not from strings with escaped `\n` sequences. Run `scripts/gh-body-lint <body-file>` before posting body files; after posting or editing, verify the rendered body with `gh pr view --comments --json comments --jq ...` before moving on.
-- Sign agent-written GitHub comments, reviews, and commits using [docs/AGENT_SIGNING.md](docs/AGENT_SIGNING.md).
+- Sign agent-written GitHub comments, reviews, and commits using [engdocs/AGENT_SIGNING.md](engdocs/AGENT_SIGNING.md).
 - Before finishing, re-read the PR, latest comments, review threads, and linked issues; address or explicitly note any unresolved action items.

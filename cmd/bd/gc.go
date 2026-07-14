@@ -42,6 +42,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("gc is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("gc")
 		defer func() {
 			if c := metrics.Global(); c != nil {

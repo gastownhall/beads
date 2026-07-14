@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -39,6 +40,7 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("NotClaimableWhenClosed", s.issueClaimClosed)
 		s.Run("EmptyIDReturnsError", s.issueClaimEmptyID)
 		s.Run("RecordsClaimedEvent", s.issueClaimRecordsEvent)
+		s.Run("StampsLeaseAndIsReclaimable", s.issueClaimStampsLease)
 	})
 	s.Run("Get", func() {
 		s.Run("MissingIDReturnsErrNoRows", s.issueGetMissing)
@@ -636,6 +638,58 @@ func (s *testSuite) issueClaimEmptyID() {
 	_, err := s.issueRepo().Claim(s.Ctx(), "", "alice", domain.IssueTableOpts{})
 	s.Require().Error(err)
 	s.Contains(err.Error(), "id must not be empty")
+}
+
+// issueClaimStampsLease asserts the proxied-server (uow) claim path stamps the
+// lease columns and rewrites row_lock, so a claim made through this path is
+// visible to bd reclaim rather than stranded (the C2 gap).
+func (s *testSuite) issueClaimStampsLease() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-lease", "x"), "tester", domain.InsertIssueOpts{}))
+
+	ctx := issueops.WithLeaseTTL(s.Ctx(), 30*time.Second)
+	res, err := r.Claim(ctx, "bd-claim-lease", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().True(res.Updated)
+
+	var (
+		leaseExpires sql.NullTime
+		heartbeatAt  sql.NullTime
+		rowLock      int64
+	)
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT lease_expires_at, heartbeat_at, row_lock FROM issues WHERE id = ?", "bd-claim-lease").
+		Scan(&leaseExpires, &heartbeatAt, &rowLock))
+	s.Require().True(leaseExpires.Valid, "proxied claim must stamp lease_expires_at")
+	s.Require().True(heartbeatAt.Valid, "proxied claim must stamp heartbeat_at")
+	s.NotZero(rowLock, "proxied claim must rewrite row_lock")
+
+	// The stamped lease must be recoverable. A cutoff in the future makes the
+	// lease look expired without waiting on the real TTL. Sibling subtests share
+	// this database (SetupTest resets per suite method, not per s.Run), so the
+	// sweep may also reclaim their leftover claims — assert ours is among them
+	// rather than that it is the only one.
+	tx, err := s.db.BeginTx(s.Ctx(), nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	reclaimed, err := issueops.ReclaimExpiredLeasesInTx(s.Ctx(), tx, time.Now().Add(time.Hour), "reaper")
+	s.Require().NoError(err)
+	s.Require().NoError(tx.Commit())
+	var owner string
+	found := false
+	for _, rl := range reclaimed {
+		if rl.ID == "bd-claim-lease" {
+			found = true
+			owner = rl.PreviousOwner
+		}
+	}
+	s.Require().True(found, "proxied-mode claim must be visible to reclaim, got %+v", reclaimed)
+	s.Equal("alice", owner)
+
+	out, err := r.Get(s.Ctx(), "bd-claim-lease", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(types.StatusOpen, out.Status, "reclaim reverts the proxied claim to open")
+	s.Equal("", out.Assignee)
 }
 
 func (s *testSuite) issueClaimRecordsEvent() {

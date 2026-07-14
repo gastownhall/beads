@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
 var (
-	historyLimit int
+	historyLimit  int
+	historyEvents bool
 )
 
 var historyCmd = &cobra.Command{
@@ -21,11 +24,15 @@ where the issue was modified.
 
 Examples:
   bd history bd-123           # Show all history for issue bd-123
-  bd history bd-123 --limit 5 # Show last 5 changes`,
+  bd history bd-123 --limit 5 # Show last 5 changes
+  bd history bd-123 --events  # Show database audit events`,
 	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("history is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("history")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -35,6 +42,18 @@ Examples:
 
 		ctx := rootCtx
 		issueID := args[0]
+
+		if historyEvents {
+			events, err := collectHistoryEvents(ctx, issueID, historyLimit)
+			if err != nil {
+				return HandleErrorRespectJSON("failed to get history events: %v", err)
+			}
+			if jsonOutput {
+				return outputJSON(events)
+			}
+			printHistoryEvents(issueID, events)
+			return nil
+		}
 
 		history, err := store.History(ctx, issueID)
 		if err != nil {
@@ -87,6 +106,56 @@ Examples:
 
 func init() {
 	historyCmd.Flags().IntVar(&historyLimit, "limit", 0, "Limit number of history entries (0 = all)")
+	historyCmd.Flags().BoolVar(&historyEvents, "events", false, "Show database audit events instead of commit snapshots")
 	historyCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(historyCmd)
+}
+
+func collectHistoryEvents(ctx context.Context, issueID string, limit int) ([]types.Event, error) {
+	iter, err := store.IterEvents(ctx, issueID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = iter.Close() }()
+
+	var events []types.Event
+	for iter.Next(ctx) {
+		event := iter.Value()
+		if event != nil {
+			events = append(events, *event)
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func printHistoryEvents(issueID string, events []types.Event) {
+	if len(events) == 0 {
+		fmt.Printf("No history events found for issue %s\n", issueID)
+		return
+	}
+
+	fmt.Printf("\n%s History events for %s (%d entries)\n\n",
+		ui.RenderAccent("📜"), issueID, len(events))
+	for i, event := range events {
+		fmt.Printf("%s %s by %s\n",
+			ui.RenderMuted(event.CreatedAt.Format("2006-01-02 15:04:05")),
+			event.EventType,
+			event.Actor)
+		if event.OldValue != nil && *event.OldValue != "" {
+			fmt.Printf("  Old: %s\n", *event.OldValue)
+		}
+		if event.NewValue != nil && *event.NewValue != "" {
+			fmt.Printf("  New: %s\n", *event.NewValue)
+		}
+		if event.Comment != nil && *event.Comment != "" {
+			fmt.Printf("  Comment: %s\n", *event.Comment)
+		}
+		if i < len(events)-1 {
+			fmt.Println()
+		}
+	}
+	fmt.Println()
 }

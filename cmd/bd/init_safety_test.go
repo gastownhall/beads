@@ -3,7 +3,7 @@ package main
 // Init-safety guard matrix + end-to-end subprocess tests.
 //
 // The table-driven tests here enforce the invariant from
-// docs/adr/0002-init-safety-invariants.md. Adding a new flag that can
+// engdocs/adr/0002-init-safety-invariants.md. Adding a new flag that can
 // interact with remote history is a signal to extend this matrix — if the
 // table doesn't exhaustively cover (dataSource × flagSet) → outcome, the
 // ADR's structural lock has a gap.

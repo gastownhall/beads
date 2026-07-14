@@ -115,11 +115,20 @@ func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, fil
 
 //nolint:gosec // G201: SQL fragments are caller-built from hardcoded shapes
 func runSearchQueryInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, whereSQL, orderBySQL, limitSQL string, args []interface{}, includeWispReverseDeps bool, skipLabels bool) ([]*types.IssueWithCounts, error) {
-	searchSQL := sqlbuild.SearchCountsSQL(tables, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, skipLabels)
+	searchSQL, _ := sqlbuild.SearchCountsSQL(tables, nil, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, skipLabels)
+	return scanCountsRowsInTx(ctx, tx, tables.Main, searchSQL, args)
+}
 
-	rows, err := tx.QueryContext(ctx, searchSQL, args...)
+// scanCountsRowsInTx runs a prebuilt counts mega-query and hydrates each row
+// through ScanReadyWorkRowWithCounts, deduping by issue ID. It is the single
+// scan/dedupe loop shared by the predicate-form search path and the by-IDs
+// ready-counts path.
+//
+//nolint:gosec // G201: query is builder-produced; user input rides ? placeholders.
+func scanCountsRowsInTx(ctx context.Context, tx *sql.Tx, mainTable, query string, args []interface{}) ([]*types.IssueWithCounts, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("search count %s: %w", tables.Main, err)
+		return nil, fmt.Errorf("search count %s: %w", mainTable, err)
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -140,7 +149,7 @@ func runSearchQueryInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, wh
 		out = append(out, iwc)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("search count %s: rows: %w", tables.Main, err)
+		return nil, fmt.Errorf("search count %s: rows: %w", mainTable, err)
 	}
 	return out, nil
 }

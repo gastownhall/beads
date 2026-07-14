@@ -91,7 +91,7 @@ func isErrorEnvelope(blob []byte, envelope bool) bool {
 // which main() maps to os.Exit(1) — the not-found path exits 1 while still
 // printing the {error, schema_version} envelope to stdout. Pinning the exact
 // code makes the corpus catch a regression in bd's not-found exit status, which
-// Gas City's error classifier keys off of.
+// a downstream consumer's error classifier keys off of.
 const errorCaptureExitCode = 1
 
 // checkCaptureExit validates a capture's subprocess exit status against the

@@ -20,16 +20,9 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 usage() {
-    echo "Usage: $0 <version> [--skip-docs]"
+    echo "Usage: $0 <version>"
     echo ""
-    echo "Updates version numbers across all components (no git operations),"
-    echo "and snapshots the Docusaurus release docs so version.go and the docs"
-    echo "snapshot cannot drift apart for stable releases."
-    echo ""
-    echo "  --skip-docs   Skip the Docusaurus snapshot (e.g. on a host without"
-    echo "                Node.js). You must then run scripts/snapshot-release-docs.sh"
-    echo "                <version> elsewhere before tagging a stable release, or CI"
-    echo "                will fail. Prereleases skip docs snapshots by default."
+    echo "Updates version numbers across all components (no git operations)."
     echo ""
     echo "Examples:"
     echo "  $0 0.47.1"
@@ -39,10 +32,8 @@ usage() {
 }
 
 NEW_VERSION=""
-SKIP_DOCS=0
 for arg in "$@"; do
     case "$arg" in
-        --skip-docs) SKIP_DOCS=1 ;;
         -h|--help) usage; exit 0 ;;
         -*) echo "Unknown option: $arg" >&2; usage; exit 1 ;;
         *)
@@ -68,10 +59,6 @@ if ! [[ $NEW_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]
 fi
 
 BASE_VERSION="${NEW_VERSION%%-*}"
-IS_PRERELEASE=0
-if [ "$BASE_VERSION" != "$NEW_VERSION" ]; then
-    IS_PRERELEASE=1
-fi
 
 # Check we're in repo root
 if [ ! -f "cmd/bd/version.go" ]; then
@@ -146,27 +133,6 @@ update_file "cmd/bd/winres/manifest.xml" "version=\"$CURRENT_BASE.0\"" "version=
 
 echo ""
 echo -e "${GREEN}✓ Version constants updated to $NEW_VERSION${NC}"
-echo ""
-
-# Snapshot the Docusaurus release docs as part of the same bump so version.go
-# and the published docs cannot diverge. This is the failure mode that left
-# main red after the 1.0.5 release (version bumped, docs snapshot missing).
-if [ "$SKIP_DOCS" -eq 1 ]; then
-    echo -e "${YELLOW}Skipping docs snapshot (--skip-docs).${NC}"
-    if [ "$IS_PRERELEASE" -eq 1 ]; then
-        echo "  Prerelease CI does not require a stable docs snapshot for $NEW_VERSION."
-    else
-        echo "  Run scripts/snapshot-release-docs.sh $NEW_VERSION before tagging,"
-        echo "  or CI (check-version-consistency) will fail."
-    fi
-elif [ "$IS_PRERELEASE" -eq 1 ]; then
-    echo -e "${YELLOW}Skipping docs snapshot for prerelease $NEW_VERSION.${NC}"
-    echo "  Stable docs stay on the latest stable release until $BASE_VERSION ships."
-else
-    echo "Snapshotting release docs..."
-    ./scripts/snapshot-release-docs.sh "$NEW_VERSION"
-fi
-
 echo ""
 echo "Changed files:"
 git diff --stat 2>/dev/null || true

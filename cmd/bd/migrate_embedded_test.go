@@ -26,6 +26,20 @@ func bdMigrate(t *testing.T, bd, dir string, args ...string) string {
 	return stdout.String()
 }
 
+// extractNewRepoID pulls the fingerprint from the "  New: <hash>" line of
+// `bd migrate --update-repo-id --dry-run` output.
+func extractNewRepoID(t *testing.T, out string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "New:") {
+			fields := strings.Fields(line)
+			return fields[len(fields)-1]
+		}
+	}
+	t.Fatalf("no 'New:' fingerprint line in migrate output:\n%s", out)
+	return ""
+}
+
 // bdMigrateFail runs "bd migrate" expecting failure.
 func bdMigrateFail(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
@@ -110,6 +124,43 @@ func TestEmbeddedMigrate(t *testing.T) {
 		out := bdMigrate(t, bd, dir, "--update-repo-id", "--yes")
 		if !strings.Contains(out, "Repository ID") && !strings.Contains(out, "repo_id") {
 			t.Errorf("expected repo ID update message: %s", out)
+		}
+	})
+
+	// Regression for GH#4361: `bd -C <dir> migrate --update-repo-id` must
+	// derive the new fingerprint from the -C target, not the process cwd.
+	// Otherwise it stamps the target DB with the caller repo's fingerprint,
+	// which then propagates to every clone via the synced metadata table.
+	t.Run("migrate_update_repo_id_honors_C", func(t *testing.T) {
+		dirA, _, _ := bdInit(t, bd, "--prefix", "ca")
+		dirB, _, _ := bdInit(t, bd, "--prefix", "cb")
+
+		runDryRun := func(cwd, target, home string) string {
+			cmd := exec.Command(bd, "-C", target, "migrate", "--update-repo-id", "--dry-run")
+			cmd.Dir = cwd
+			cmd.Env = bdEnv(home)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd -C %s migrate --update-repo-id --dry-run (cwd=%s) failed: %v\nstdout:\n%s\nstderr:\n%s",
+					target, cwd, err, stdout.String(), stderr.String())
+			}
+			return extractNewRepoID(t, stdout.String())
+		}
+
+		// Each repo's fingerprint computed from its own directory.
+		wantA := runDryRun(dirA, dirA, dirA)
+		wantB := runDryRun(dirB, dirB, dirB)
+		if wantA == wantB {
+			t.Fatalf("test setup invalid: repos A and B produced the same fingerprint %q", wantA)
+		}
+
+		// Run from inside A but target B via -C. Must report B's fingerprint.
+		got := runDryRun(dirA, dirB, dirB)
+		if got == wantA {
+			t.Fatalf("bd -C <B> reported A's fingerprint %q — computed from cwd, not -C target (GH#4361)", wantA)
+		}
+		if got != wantB {
+			t.Errorf("bd -C <B> migrate --update-repo-id from cwd A reported %q, want B's fingerprint %q", got, wantB)
 		}
 	})
 

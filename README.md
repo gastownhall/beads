@@ -10,9 +10,19 @@
 [![npm version](https://img.shields.io/npm/v/@beads/bd)](https://www.npmjs.com/package/@beads/bd)
 [![PyPI](https://img.shields.io/pypi/v/beads-mcp)](https://pypi.org/project/beads-mcp/)
 
-**Docs:** https://gastownhall.github.io/beads/
+**Docs:** https://beads.gascity.com/
 
 Beads provides a persistent, structured memory for coding agents. It replaces messy markdown plans with a dependency-aware graph, allowing agents to handle long-horizon tasks without losing context.
+
+```mermaid
+flowchart LR
+    create["bd create<br/>new bead"] --> graph["dependency<br/>graph"]
+    graph --> ready["bd ready<br/>claimable work"]
+    ready --> claim["bd update --claim<br/>agent takes it"]
+    claim --> close["bd close<br/>work done"]
+    close -->|blockers released| ready
+    graph <-->|"bd dolt push / pull"| remote[("other machines<br/>and agents")]
+```
 
 ## ⚡ Quick Start
 
@@ -32,7 +42,7 @@ bd setup factory  # Factory.ai Droid - creates/updates AGENTS.md
 
 **Note:** Beads is a CLI tool you install once and use everywhere. You don't need to clone this repository into your project.
 
-`bd init` creates or updates `AGENTS.md` by default so agents can discover the beads workflow, and also installs project Claude/Codex integrations unless you pass `--skip-agents` or `--stealth`. Use `bd setup --list` to see supported integrations, including `bd setup codex`, `bd setup factory`, `bd setup claude`, `bd setup mux`, `bd setup cursor`, and more. See [Agent and IDE setup](docs/SETUP.md).
+`bd init` creates or updates `AGENTS.md` by default so agents can discover the beads workflow, and also installs project Claude/Codex integrations unless you pass `--skip-agents` or `--stealth`. Use `bd setup --list` to see supported integrations, including `bd setup codex`, `bd setup factory`, `bd setup claude`, `bd setup mux`, `bd setup cursor`, and more. See [Agent and IDE setup](docs/getting-started/ide-setup.md).
 
 Manual copy-paste is only for unsupported agents, existing projects where you cannot rerun `bd init`/`bd setup`, or custom instruction files. In those cases, run `bd onboard` and paste the printed snippet into the file your agent reads.
 
@@ -54,7 +64,7 @@ This project uses bd (beads) for issue tracking.
 * **Zero Conflict:** Hash-based IDs (`bd-a1b2`) prevent merge collisions in multi-agent/multi-branch workflows.
 * **Compaction:** Semantic "memory decay" summarizes old closed tasks to save context window.
 * **Messaging:** Message issue type with threading (`--thread`), ephemeral lifecycle, and mail delegation.
-* **Graph Links:** `relates_to`, `duplicates`, `supersedes`, and `replies_to` for knowledge graphs.
+* **Graph Links:** `relates-to`, `duplicates`, `supersedes`, and `replies-to` for knowledge graphs.
 
 ## 📖 Essential Commands
 
@@ -90,15 +100,19 @@ brew install beads           # macOS / Linux (recommended)
 npm install -g @beads/bd     # Node.js users
 ```
 
-**Other methods:** [install script](docs/INSTALLING.md#quick-install-script-all-platforms) | [go install](docs/INSTALLING.md#a-note-on-go-install-capability) | [from source](docs/INSTALLING.md#build-dependencies-contributors-only) | [Windows](docs/INSTALLING.md#windows-11) | [Arch AUR](docs/INSTALLING.md#linux)
+**Other methods:** [install script](docs/getting-started/installation.md#quick-install-script-all-platforms) | [go install](docs/getting-started/installation.md#a-note-on-go-install-capability) | [from source](docs/getting-started/installation.md#build-dependencies-contributors-only) | [Windows](docs/getting-started/installation.md#windows-11) | [Arch AUR](docs/getting-started/installation.md#linux)
 
-**Requirements:** macOS, Linux, Windows, or FreeBSD. See [docs/INSTALLING.md](docs/INSTALLING.md) for complete installation guide.
+**Requirements:** macOS, Linux, Windows, or FreeBSD. See [docs/getting-started/installation.md](docs/getting-started/installation.md) for complete installation guide.
 
-**Upgrading?** Replacing the binary is not always the whole story: releases can
-carry schema migrations, and a database that syncs to a Dolt remote must be
-migrated by exactly one designated clone. Back up first (`bd export --all`),
-then follow the [upgrade guide](https://gastownhall.github.io/beads/docs/getting-started/upgrading)
-(also summarized in [docs/INSTALLING.md](docs/INSTALLING.md#updating-bd)).
+**Upgrading?** Replacing the binary is not always the whole story. Short
+version: sync remote-backed databases with your current `bd`, back up with
+`bd export --all`, upgrade the binary, then run `bd info --whats-new`,
+`bd hooks install`, and `bd version`. If the upgrade crosses a schema
+migration on a remote-backed database, exactly one designated clone runs
+`bd migrate --force` and `bd dolt push`; other clones install the new binary
+and run `bd bootstrap`. See the full
+[upgrade guide](https://beads.gascity.com/getting-started/upgrading)
+or [docs/getting-started/installation.md](docs/getting-started/installation.md#updating-bd).
 
 ### Security And Verification
 
@@ -108,106 +122,34 @@ The install scripts verify release checksums before install. For manual installs
 
 On macOS, `scripts/install.sh` preserves the downloaded signature by default. Local ad-hoc re-signing is explicit opt-in via `BEADS_INSTALL_RESIGN_MACOS=1`.
 
-See [docs/ANTIVIRUS.md](docs/ANTIVIRUS.md) for Windows AV false-positive guidance and verification workflow.
+See [docs/reference/antivirus.md](docs/reference/antivirus.md) for Windows AV false-positive guidance and verification workflow.
 
 ## 💾 Storage Modes
 
-Beads uses [Dolt](https://github.com/dolthub/dolt) as its database. Two modes
-are available:
+Beads uses [Dolt](https://github.com/dolthub/dolt) as its database. Two modes:
 
-### Embedded Mode (default)
+- **Embedded (default)** — `bd init`. Dolt runs in-process, data lives in
+  `.beads/embeddeddolt/`, single writer. Recommended for most users.
+- **Server** — `bd init --server`. Connects to an external `dolt sql-server`
+  for multiple concurrent writers; data lives in `.beads/dolt/`.
 
-```bash
-bd init
-```
+Cross-machine sync uses `bd dolt push` / `bd dolt pull` against
+`refs/dolt/data` on your git remote; `.beads/issues.jsonl` is an export for
+viewers and interchange, not the source of truth or a backup. Back up and
+migrate between modes with `bd backup`; reclaim space with `bd prune` /
+`bd purge`.
 
-Dolt runs in-process — no external server needed. Data lives in
-`.beads/embeddeddolt/`. Single-writer only (file locking enforced).
-This is the recommended mode for most users.
-
-When the git repo has an `origin` remote, `bd init` configures a Dolt remote
-named `origin` automatically. Cross-machine sync uses `bd dolt push` and
-`bd dolt pull` against `refs/dolt/data`; `.beads/issues.jsonl` is an export
-for viewers and interchange, not the source of truth or a full database
-backup.
-
-### Server Mode
-
-```bash
-bd init --server
-```
-
-Connects to an external `dolt sql-server`. Data lives in `.beads/dolt/`.
-Supports multiple concurrent writers. Configure the connection with flags
-or environment variables:
-
-| Flag | Env Var | Default |
-|------|---------|---------|
-| `--server-host` | `BEADS_DOLT_SERVER_HOST` | `127.0.0.1` |
-| `--server-port` | `BEADS_DOLT_SERVER_PORT` | `3307` |
-| `--server-socket` | `BEADS_DOLT_SERVER_SOCKET` | (none; uses TCP) |
-| `--server-user` | `BEADS_DOLT_SERVER_USER` | `root` |
-| | `BEADS_DOLT_PASSWORD` | (none) |
-
-**Unix domain sockets:** Use `--server-socket` to connect via a Unix socket
-instead of TCP. This avoids port conflicts between concurrent projects and
-is useful in sandboxed environments (e.g., Claude Code) where file-level
-access control is simpler than network allowlists. The Dolt server must be
-started with `dolt sql-server --socket <path>`. Auto-start is not supported
-in socket mode.
-
-### Maintenance — `bd prune` and `bd purge`
-
-`bd prune` permanently deletes closed non-ephemeral beads to reclaim storage
-and shrink auto-exports. `bd purge` does the same for ephemeral beads (wisps,
-transient molecules). Both require `--force` to execute.
-
-```bash
-bd prune --older-than 30d              # Preview closed beads >30d old
-bd prune --older-than 30d --force      # Delete them
-bd prune --older-than 90d --dry-run    # Detailed preview with stats
-bd purge --force                       # Delete all closed ephemeral beads
-```
-
-**Reference-aware protection:** `bd prune` automatically skips closed beads
-whose ID appears in the description, notes, or comments of any open or
-in-progress bead. This prevents accidental deletion of ADR, decision, and
-verification beads that downstream work still cites. Use `--ignore-references`
-to override when cleaning up known-stale references:
-
-```bash
-bd prune --older-than 90d --ignore-references --force
-```
-
-`bd purge` is unaffected — ephemeral beads' references are themselves transient.
-
-### Backup & Migration
-
-Back up your database and migrate between modes using `bd backup`:
-
-```bash
-# Set up a backup destination and push
-bd backup init /path/to/backup
-bd backup sync
-
-# Restore into a new project (any mode)
-bd init           # or bd init --server
-bd backup restore --force /path/to/backup
-```
-
-See [docs/DOLT.md](docs/DOLT.md#migrating-between-backends) for full
-migration instructions.
-
-`bd export` and `.beads/issues.jsonl` are issue-table exports. They are useful
-for review, migration, and interoperability, but they do not capture Dolt
-branches, commit history, working-set state, or non-issue tables. Use
-`bd backup` or a manual Dolt backup when you need a restorable database backup.
+Full detail — connection flags, sockets, maintenance, backup, and migration —
+in the [Dolt backend guide](docs/architecture/dolt.md). Prefer a different
+database? [Storage Backends](docs/architecture/storage-backends.md) covers
+Postgres, MySQL, and SQLite (Dolt stays the default and the only backend
+with history).
 
 ## 🌐 Community Tools
 
-See [docs/COMMUNITY_TOOLS.md](docs/COMMUNITY_TOOLS.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.
+See [docs/community-tools.md](docs/community-tools.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.
 
-See [docs/RELATED_PROJECTS.md](docs/RELATED_PROJECTS.md) for adjacent or complementary projects that solve different problems in the same neighborhood.
+See [docs/related-projects.md](docs/related-projects.md) for adjacent or complementary projects that solve different problems in the same neighborhood.
 
 ## 🚀 Git-Free Usage
 
@@ -242,5 +184,5 @@ For daemon mode without git, use `bd daemon start --local`
 
 ## 📝 Documentation
 
-* [Documentation site](https://gastownhall.github.io/beads/) (versioned) | [Installing](docs/INSTALLING.md) | [Sync Concepts](docs/SYNC_CONCEPTS.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Copilot CLI Setup](docs/COPILOT_CLI_INTEGRATION.md) | [Copilot VS Code MCP](docs/COPILOT_INTEGRATION.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/PROTECTED_BRANCHES.md) | [Troubleshooting](docs/TROUBLESHOOTING.md) | [FAQ](docs/FAQ.md)
+* [Documentation site](https://beads.gascity.com/) | [Installing](docs/getting-started/installation.md) | [Sync Concepts](docs/core-concepts/sync-concepts.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Copilot CLI Setup](docs/integrations/copilot-cli.md) | [Copilot VS Code MCP](docs/integrations/github-copilot.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/reference/protected-branches.md) | [Troubleshooting](docs/reference/troubleshooting.md) | [FAQ](docs/reference/faq.md)
 * [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/gastownhall/beads)

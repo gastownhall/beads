@@ -75,6 +75,20 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		metadata = "{}"
 	}
 
+	if !opts.HierarchyValidated {
+		if err := r.ValidateBlockingHierarchy(ctx, dep); err != nil {
+			return err
+		}
+	}
+	if !opts.CycleValidated && isSchedulingDependency(dep.Type) {
+		cycle, err := r.HasCycle(ctx, dep.IssueID, dep.DependsOnID)
+		if err != nil {
+			return fmt.Errorf("db: DependencySQLRepository.Insert: cycle check: %w", err)
+		}
+		if cycle {
+			return fmt.Errorf("adding dependency would create a cycle")
+		}
+	}
 	table := pickDepTable(opts.UseWispsTable)
 
 	var existingType string
@@ -95,8 +109,12 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			}
 			return nil
 		}
-		return fmt.Errorf("db: DependencySQLRepository.Insert: %s -> %s already exists with type %q (requested %q)",
-			dep.IssueID, dep.DependsOnID, existingType, dep.Type)
+		return &domain.DependencyTypeConflictError{
+			IssueID:       dep.IssueID,
+			DependsOnID:   dep.DependsOnID,
+			ExistingType:  existingType,
+			RequestedType: string(dep.Type),
+		}
 	case errors.Is(err, sql.ErrNoRows):
 	default:
 		return fmt.Errorf("db: DependencySQLRepository.Insert: check existing: %w", err)
@@ -156,6 +174,17 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		return fmt.Errorf("db: DependencySQLRepository.Insert: mark is_blocked (affected): %w", err)
 	}
 	return nil
+}
+
+func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error {
+	if dep == nil {
+		return errors.New("db: DependencySQLRepository.ValidateBlockingHierarchy: dep must not be nil")
+	}
+	if strings.HasPrefix(dep.DependsOnID, "external:") ||
+		types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID) {
+		return nil
+	}
+	return issueops.CheckBlockingHierarchyInTx(ctx, r.runner, dep, nil)
 }
 
 // markDirectBlockedSource mirrors issueops.markDirectBlockingDependencySourceInTx:
@@ -244,52 +273,15 @@ func (r *dependencySQLRepositoryImpl) HasCycle(ctx context.Context, issueID, dep
 		return false, errors.New("db: DependencySQLRepository.HasCycle: issueID and dependsOnID must not be empty")
 	}
 
-	var one int
-	err := r.runner.QueryRowContext(ctx, `
-		SELECT 1 FROM dependencies
-		WHERE issue_id = ? AND depends_on_issue_id = ?
-		  AND type IN ('blocks', 'conditional-blocks')
-		LIMIT 1
-	`, dependsOnID, issueID).Scan(&one)
-	switch {
-	case err == nil:
-		return true, nil
-	case !errors.Is(err, sql.ErrNoRows):
-		return false, fmt.Errorf("db: DependencySQLRepository.HasCycle: direct probe (dependencies): %w", err)
-	}
-	err = r.runner.QueryRowContext(ctx, `
-		SELECT 1 FROM wisp_dependencies
-		WHERE issue_id = ? AND depends_on_issue_id = ?
-		  AND type IN ('blocks', 'conditional-blocks')
-		LIMIT 1
-	`, dependsOnID, issueID).Scan(&one)
-	switch {
-	case err == nil:
-		return true, nil
-	case !errors.Is(err, sql.ErrNoRows):
-		return false, fmt.Errorf("db: DependencySQLRepository.HasCycle: direct probe (wisp_dependencies): %w", err)
-	}
-
-	var count int
-	err = r.runner.QueryRowContext(ctx, `
-		WITH RECURSIVE reachable(node) AS (
-			SELECT ?
-			UNION
-			SELECT d.depends_on_issue_id FROM (
-				SELECT issue_id, depends_on_issue_id, type FROM dependencies
-				UNION ALL
-				SELECT issue_id, depends_on_issue_id, type FROM wisp_dependencies
-			) d
-			JOIN reachable r ON d.issue_id = r.node
-			WHERE d.type IN ('blocks', 'conditional-blocks')
-			  AND d.depends_on_issue_id IS NOT NULL
-		)
-		SELECT COUNT(*) FROM reachable WHERE node = ?
-	`, dependsOnID, issueID).Scan(&count)
+	cycle, err := issueops.WouldCreateSchedulingCycleInTx(ctx, r.runner, issueID, dependsOnID, nil)
 	if err != nil {
 		return false, fmt.Errorf("db: DependencySQLRepository.HasCycle: %w", err)
 	}
-	return count > 0, nil
+	return cycle, nil
+}
+
+func isSchedulingDependency(t types.DependencyType) bool {
+	return t == types.DepBlocks || t == types.DepConditionalBlocks || t == types.DepParentChild
 }
 
 func (r *dependencySQLRepositoryImpl) ListByIssueIDs(ctx context.Context, issueIDs []string, opts domain.DepListOpts) (domain.DepBulkResult, error) {
@@ -791,10 +783,10 @@ func (r *dependencySQLRepositoryImpl) CycleThroughEdges(ctx context.Context, edg
 		return "", nil
 	}
 	graph := make(map[string][]string)
-	if err := issueops.AppendBlockingGraphInTx(ctx, r.runner, []string{"dependencies"}, graph); err != nil {
+	if err := issueops.AppendSchedulingGraphInTx(ctx, r.runner, []string{"dependencies"}, graph); err != nil {
 		return "", fmt.Errorf("db: DependencySQLRepository.CycleThroughEdges: %w", err)
 	}
-	if err := issueops.AppendBlockingGraphInTx(ctx, r.runner, []string{"wisp_dependencies"}, graph); err != nil && !dberrors.IsTableNotExist(err) {
+	if err := issueops.AppendSchedulingGraphInTx(ctx, r.runner, []string{"wisp_dependencies"}, graph); err != nil && !dberrors.IsTableNotExist(err) {
 		return "", fmt.Errorf("db: DependencySQLRepository.CycleThroughEdges (wisps): %w", err)
 	}
 	return issueops.CycleThroughEdgesInGraph(graph, edges), nil

@@ -1,0 +1,217 @@
+//go:build cgo
+
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// bdUnclaim runs "bd unclaim" with the given args and returns stdout.
+// Retries on flock contention.
+func bdUnclaim(t *testing.T, bd, dir string, args ...string) string {
+	t.Helper()
+	fullArgs := append([]string{"unclaim"}, args...)
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd unclaim %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return string(out)
+}
+
+// bdUnclaimFail runs "bd unclaim" expecting failure.
+func bdUnclaimFail(t *testing.T, bd, dir string, args ...string) string {
+	t.Helper()
+	fullArgs := append([]string{"unclaim"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected bd unclaim %s to fail, but it succeeded:\n%s", strings.Join(args, " "), out)
+	}
+	return string(out)
+}
+
+func TestEmbeddedUnclaim(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "tu")
+
+	// ===== Basic Success =====
+
+	t.Run("unclaim_from_in_progress", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Unclaim test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--claim")
+		bdUnclaim(t, bd, dir, issue.ID)
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Assignee != "" {
+			t.Errorf("expected assignee to be empty after unclaim, got %q", got.Assignee)
+		}
+		if got.Status != types.StatusOpen {
+			t.Errorf("expected status open after unclaim, got %s", got.Status)
+		}
+	})
+
+	t.Run("unclaim_from_open_stuck_claim", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Stuck claim test", "--type", "task")
+		// Manually set assignee without changing status (simulates stuck claim).
+		bdUpdate(t, bd, dir, issue.ID, "--assignee", "alice")
+		// Release as the owner: ownership enforcement (fe908d40b) rejects a
+		// non-owner release without --force.
+		bdUnclaim(t, bd, dir, issue.ID, "--actor", "alice")
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Assignee != "" {
+			t.Errorf("expected assignee to be empty after unclaim, got %q", got.Assignee)
+		}
+		if got.Status != types.StatusOpen {
+			t.Errorf("expected status open after unclaim, got %s", got.Status)
+		}
+	})
+
+	// ===== With Reason =====
+
+	t.Run("unclaim_with_reason", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Reason test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--claim")
+		out := bdUnclaim(t, bd, dir, issue.ID, "--reason", "Agent crashed")
+		if !strings.Contains(out, "Agent crashed") {
+			t.Errorf("expected reason in output, got: %s", out)
+		}
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Assignee != "" {
+			t.Errorf("expected assignee to be empty after unclaim, got %q", got.Assignee)
+		}
+		if got.Status != types.StatusOpen {
+			t.Errorf("expected status open after unclaim, got %s", got.Status)
+		}
+	})
+
+	// ===== JSON Output =====
+
+	t.Run("unclaim_json_output", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "JSON test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--claim")
+		out := bdUnclaim(t, bd, dir, issue.ID, "--json")
+		// bd unclaim --json emits an array of the affected issues. A cleared
+		// assignee is empty and omitempty drops it from the payload, so parse
+		// and assert on the decoded fields rather than raw substrings.
+		var unclaimed []struct {
+			Assignee string `json:"assignee"`
+			Status   string `json:"status"`
+		}
+		if err := json.Unmarshal([]byte(out), &unclaimed); err != nil {
+			t.Fatalf("failed to parse unclaim --json output: %v\n%s", err, out)
+		}
+		if len(unclaimed) != 1 {
+			t.Fatalf("expected 1 issue in unclaim --json output, got %d:\n%s", len(unclaimed), out)
+		}
+		if unclaimed[0].Assignee != "" {
+			t.Errorf("expected empty assignee after unclaim, got %q", unclaimed[0].Assignee)
+		}
+		if unclaimed[0].Status != "open" {
+			t.Errorf("expected status open after unclaim, got %q", unclaimed[0].Status)
+		}
+	})
+
+	// ===== Multiple IDs =====
+
+	t.Run("unclaim_multiple_ids", func(t *testing.T) {
+		issue1 := bdCreate(t, bd, dir, "Multi test 1", "--type", "task")
+		issue2 := bdCreate(t, bd, dir, "Multi test 2", "--type", "task")
+		bdUpdate(t, bd, dir, issue1.ID, "--claim")
+		bdUpdate(t, bd, dir, issue2.ID, "--claim")
+		bdUnclaim(t, bd, dir, issue1.ID, issue2.ID)
+		got1 := bdShow(t, bd, dir, issue1.ID)
+		got2 := bdShow(t, bd, dir, issue2.ID)
+		if got1.Assignee != "" {
+			t.Errorf("expected assignee to be empty for issue1, got %q", got1.Assignee)
+		}
+		if got2.Assignee != "" {
+			t.Errorf("expected assignee to be empty for issue2, got %q", got2.Assignee)
+		}
+		if got1.Status != types.StatusOpen {
+			t.Errorf("expected status open for issue1, got %s", got1.Status)
+		}
+		if got2.Status != types.StatusOpen {
+			t.Errorf("expected status open for issue2, got %s", got2.Status)
+		}
+	})
+
+	// ===== Error Cases =====
+
+	t.Run("unclaim_non_existent_issue", func(t *testing.T) {
+		out := bdUnclaimFail(t, bd, dir, "nonexistent")
+		if !strings.Contains(out, "not found") && !strings.Contains(out, "Error") {
+			t.Errorf("expected error about non-existent issue, got: %s", out)
+		}
+	})
+
+	t.Run("unclaim_closed_issue", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Closed test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--claim")
+		// Close the issue first
+		bdClose(t, bd, dir, issue.ID)
+		out := bdUnclaimFail(t, bd, dir, issue.ID)
+		if !strings.Contains(out, "cannot unclaim closed issue") {
+			t.Errorf("expected error about closed issue, got: %s", out)
+		}
+	})
+
+	t.Run("unclaim_unassigned_issue", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Unassigned test", "--type", "task")
+		out := bdUnclaimFail(t, bd, dir, issue.ID)
+		if !strings.Contains(out, "is not assigned") {
+			t.Errorf("expected error about unassigned issue, got: %s", out)
+		}
+	})
+
+	// ===== Ownership =====
+
+	// A non-owner may not release another agent's claim: the release is rejected
+	// with ErrNotOwner (non-zero exit) and the claim is left intact.
+	t.Run("unclaim_non_owner_rejected", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Owned by alice", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--claim", "--actor", "alice")
+
+		out := bdUnclaimFail(t, bd, dir, issue.ID, "--actor", "bob")
+		// ErrNotOwner surfaces as "issue claimed by a different actor: ... held by alice".
+		if !strings.Contains(out, "held by alice") && !strings.Contains(out, "claimed by a different actor") {
+			t.Errorf("expected ownership-rejection error, got: %s", out)
+		}
+
+		// The claim must be untouched after the rejected release.
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Assignee != "alice" {
+			t.Errorf("expected assignee to remain alice after rejected unclaim, got %q", got.Assignee)
+		}
+		if got.Status != types.StatusInProgress {
+			t.Errorf("expected status to remain in_progress after rejected unclaim, got %s", got.Status)
+		}
+	})
+
+	// --force lets a non-owner (admin/reaper) release someone else's claim.
+	t.Run("unclaim_non_owner_force_succeeds", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Force release", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--claim", "--actor", "alice")
+
+		bdUnclaim(t, bd, dir, issue.ID, "--force", "--actor", "bob")
+
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Assignee != "" {
+			t.Errorf("expected assignee to be cleared after --force unclaim, got %q", got.Assignee)
+		}
+		if got.Status != types.StatusOpen {
+			t.Errorf("expected status open after --force unclaim, got %s", got.Status)
+		}
+	})
+}

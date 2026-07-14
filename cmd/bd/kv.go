@@ -81,6 +81,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("kv set is not supported in proxied-server mode")
+		}
 		CheckReadonly("kv set")
 
 		evt := metrics.NewCommandEvent("kv-set")
@@ -130,6 +133,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("kv get is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("kv-get")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -185,6 +191,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("kv clear is not supported in proxied-server mode")
+		}
 		CheckReadonly("kv clear")
 
 		evt := metrics.NewCommandEvent("kv-clear")
@@ -232,6 +241,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("kv list is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("kv-list")
 		defer func() {
 			if c := metrics.Global(); c != nil {

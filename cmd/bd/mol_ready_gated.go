@@ -49,6 +49,9 @@ Examples:
 }
 
 func runMolReadyGated(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("mol ready is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("mol-ready-gated")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -232,7 +235,10 @@ func findGateReadyMolecules(ctx context.Context, s storage.DoltStorage) ([]*Gate
 }
 
 func init() {
-	// Note: --gated flag is registered in ready.go
-	// Also add as a subcommand under mol for discoverability
+	// `bd ready --gated` registers --gated on readyCmd in ready.go.
+	// `bd mol ready` is a separate subcommand under molCmd that always runs
+	// in gated mode, so accept --gated here too: both spellings work and the
+	// documented `bd mol ready --gated` form actually matches the help text.
+	molReadyGatedCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch (always on for this subcommand)")
 	molCmd.AddCommand(molReadyGatedCmd)
 }

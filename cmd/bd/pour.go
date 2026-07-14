@@ -23,7 +23,8 @@ var pourCmd = &cobra.Command{
 	Long: `Pour a proto into a persistent mol - like pouring molten metal into a mold.
 
 This is the chemistry-inspired command for creating PERSISTENT work from templates.
-The resulting mol lives in .beads/ (permanent storage) and is synced with git.
+The resulting mol is stored as persistent beads in the issue database and
+syncs like any other bead (bd dolt push / pull).
 
 Phase transition: Proto (solid) -> pour -> Mol (liquid)
 
@@ -106,7 +107,7 @@ func runPour(cmd *cobra.Command, args []string) error {
 				fmt.Fprintf(os.Stderr, " --var %s", v)
 			}
 			fmt.Fprintf(os.Stderr, "\n")
-			fmt.Fprintf(os.Stderr, "  Pour creates persistent issues that sync to git.\n")
+			fmt.Fprintf(os.Stderr, "  Pour creates persistent issues that sync like any other bead.\n")
 			fmt.Fprintf(os.Stderr, "  Wisp creates ephemeral issues that auto-cleanup.\n\n")
 		}
 	}
@@ -251,7 +252,7 @@ func runPour(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Poured mol: created %d issues\n", ui.RenderPass("✓"), result.Created)
 	fmt.Printf("  Root issue: %s\n", result.NewEpicID)
-	fmt.Printf("  Phase: liquid (persistent in .beads/)\n")
+	fmt.Printf("  Phase: liquid (persistent in the issue database)\n")
 	if totalAttached > 0 {
 		fmt.Printf("  Attached: %d issues from %d protos\n", totalAttached, len(attachments))
 	}

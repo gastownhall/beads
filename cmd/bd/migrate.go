@@ -25,14 +25,28 @@ var migrateCmd = &cobra.Command{
 Without subcommand, checks and updates database metadata to current version.
 
 Subcommands:
-  hooks       Plan git hook migration to marker-managed format
-  issues      Move issues between repositories
-  schema      Apply pending schema migrations (idempotent)
-  sync        Set up sync.branch workflow for multi-clone setups
+  hooks                            Plan git hook migration to marker-managed format
+  issues                           Move issues between repositories
+  schema                           Apply pending schema migrations (idempotent)
+  sync                             Set up sync.branch workflow for multi-clone setups
+  from-server-to-proxied-server           [EXPERIMENTAL] Switch server mode to proxied-server mode
+  from-proxied-server-to-server           [EXPERIMENTAL] Switch proxied-server mode to server mode
+  from-shared-server-to-proxied-server    [EXPERIMENTAL] Switch shared-server mode to proxied-server mode
+  from-proxied-server-to-shared-server    [EXPERIMENTAL] Switch proxied-server mode to shared-server mode
+
+On a remote-backed database with pending schema migrations bd refuses to
+migrate in place (#4259): migrating two clones independently forks the schema
+so bd dolt pull can no longer merge — the break is silent and unrecoverable.
+Use --force to confirm you are the single designated migrator, after which you
+should publish the migrated schema with 'bd dolt push'. The env-var equivalent
+BD_ALLOW_REMOTE_MIGRATE=1 remains supported for scripted/CI use.
 `,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("migrate is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("migrate")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -85,11 +99,15 @@ Subcommands:
 			return HandleError("failed to load config: %v", err)
 		}
 
-		return handleDoltMetadataUpdate(cfg, dryRun)
+		return handleDoltMetadataUpdate(cfg, beadsDir, dryRun)
 	},
 }
 
-func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) error {
+// handleDoltMetadataUpdate handles version metadata updates for Dolt backends.
+// beadsDir is the resolved .beads directory (honoring -C); repo-derived metadata
+// is computed from it rather than the process cwd so `bd -C <dir> migrate`
+// fingerprints the target repo, not the caller's (GH#4361).
+func handleDoltMetadataUpdate(cfg *configfile.Config, beadsDir string, dryRun bool) error {
 	ctx := rootCtx
 	store := getStore()
 	if store == nil {
@@ -200,7 +218,7 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) error {
 
 	// Set repo_id if missing (non-fatal — may fail in non-git environments)
 	if needsRepoID {
-		computed, err := beads.ComputeRepoID()
+		computed, err := beads.ComputeRepoIDForPath(beadsDir)
 		if err != nil {
 			if !jsonOutput {
 				fmt.Fprintf(os.Stderr, "Warning: could not compute repo_id: %v\n", err)
@@ -221,7 +239,7 @@ func handleDoltMetadataUpdate(cfg *configfile.Config, dryRun bool) error {
 
 	// Set clone_id if missing (non-fatal — may fail in non-git environments)
 	if needsCloneID {
-		computed, err := beads.GetCloneID()
+		computed, err := beads.GetCloneIDForPath(beadsDir)
 		if err != nil {
 			if !jsonOutput {
 				fmt.Fprintf(os.Stderr, "Warning: could not compute clone_id: %v\n", err)
@@ -297,7 +315,11 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) error {
 		return HandleErrorWithHint("no beads database found", diagHint())
 	}
 
-	newRepoID, err := beads.ComputeRepoID()
+	// Compute new repo ID from the resolved .beads directory (honoring -C),
+	// not the process cwd. Otherwise `bd -C <dir> migrate --update-repo-id`
+	// stamps the target DB with the caller repo's fingerprint and the bad
+	// value propagates to every clone on the next sync (GH#4361).
+	newRepoID, err := beads.ComputeRepoIDForPath(beadsDir)
 	if err != nil {
 		if jsonOutput {
 			if jerr := outputJSON(map[string]interface{}{
@@ -727,6 +749,9 @@ Example:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("migrate sync is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("migrate-sync")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -758,6 +783,9 @@ Example:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("migrate schema is not supported in proxied-server mode")
+		}
 		CheckReadonly("migrate schema")
 
 		evt := metrics.NewCommandEvent("migrate-schema")
@@ -777,6 +805,9 @@ func init() {
 	migrateCmd.Flags().Bool("update-repo-id", false, "Update repository ID (use after changing git remote)")
 	migrateCmd.Flags().Bool("inspect", false, "Show migration plan and database state for AI agent analysis")
 	migrateCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output migration statistics in JSON format")
+	// --force bypasses the remote-migrate gate (#4259) as the single designated
+	// migrator. No -f shorthand: deliberate typing for a fork-risk bypass.
+	migrateCmd.Flags().Bool("force", false, "Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)")
 
 	migrateSyncCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
 	migrateSyncCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
@@ -789,7 +820,24 @@ func init() {
 	migrateCmd.AddCommand(migrateHooksCmd)
 
 	migrateSchemaCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+	// --force on migrate schema mirrors the parent command's flag; both trip the
+	// same isForcedMigrate check in main.go's PersistentPreRunE.
+	migrateSchemaCmd.Flags().Bool("force", false, "Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)")
 	migrateCmd.AddCommand(migrateSchemaCmd)
+
+	migrateToProxiedServerCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
+	migrateToProxiedServerCmd.Flags().Duration("idle-timeout", 0, "Proxy idle timeout; omit for the 30s default, 0 for indefinite uptime")
+	migrateCmd.AddCommand(migrateToProxiedServerCmd)
+
+	migrateSharedToProxiedServerCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
+	migrateSharedToProxiedServerCmd.Flags().Duration("idle-timeout", 0, "Proxy idle timeout; omit for the 30s default, 0 for indefinite uptime")
+	migrateCmd.AddCommand(migrateSharedToProxiedServerCmd)
+
+	migrateToServerCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
+	migrateCmd.AddCommand(migrateToServerCmd)
+
+	migrateToSharedServerCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
+	migrateCmd.AddCommand(migrateToSharedServerCmd)
 
 	rootCmd.AddCommand(migrateCmd)
 }

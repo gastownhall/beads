@@ -213,17 +213,24 @@ func captureStdout(t *testing.T, fn func() error) string {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r)
+		done <- buf.String()
+	}()
+
 	err := fn()
 
 	w.Close()
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
 	os.Stdout = oldStdout
+	out := <-done
+	_ = r.Close()
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	return buf.String()
+	return out
 }
 
 // captureStderr captures stderr output from fn and returns it as a string.

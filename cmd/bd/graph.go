@@ -74,6 +74,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("graph is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("graph")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -178,6 +181,9 @@ Returns exit code 0 if the graph is clean, 1 if issues are found.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("graph check is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("graph-check")
 		defer func() {
 			if c := metrics.Global(); c != nil {

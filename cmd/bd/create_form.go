@@ -278,6 +278,9 @@ The form uses keyboard navigation:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("create-form is not supported in proxied-server mode")
+		}
 		CheckReadonly("create-form")
 
 		evt := metrics.NewCommandEvent("create-form")

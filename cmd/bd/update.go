@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/timeparsing"
@@ -40,8 +41,7 @@ create, update, show, or close operation).`,
 		}()
 
 		if usesProxiedServer() {
-			runUpdateProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runUpdateProxiedServer(cmd, rootCtx, args)
 		}
 
 		// If no IDs provided, use last touched issue
@@ -314,6 +314,12 @@ create, update, show, or close operation).`,
 
 		updatedIssues := []*types.Issue{}
 		var firstUpdatedID string // Track first successful update for last-touched
+		// claimFailed records a requested-but-lost claim. In a mixed batch (one
+		// claim won, another lost) firstUpdatedID is set by the winner, so the
+		// command would otherwise exit 0 and hide the lost claim from exit-code
+		// automation. Track it separately and exit non-zero when any claim was
+		// requested but not granted (beads audit finding #10).
+		claimFailed := false
 		mutatedStores := map[storage.DoltStorage][]string{}
 		mutatedResults := map[*RoutedResult]bool{}
 		pendingCloseResults := []*RoutedResult{}
@@ -372,6 +378,7 @@ create, update, show, or close operation).`,
 			if claimFlag {
 				if err := issueStore.ClaimIssue(ctx, result.ResolvedID, actor); err != nil {
 					fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
+					claimFailed = true
 					closeIfUnmutated(result)
 					continue
 				}
@@ -521,7 +528,7 @@ create, update, show, or close operation).`,
 					updatedIssues = append(updatedIssues, updatedIssue)
 				}
 			} else {
-				fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, updateTitle))
+				debug.PrintNormal("%s Updated issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, updateTitle))
 			}
 
 			// Track first successful update for last-touched
@@ -558,7 +565,7 @@ create, update, show, or close operation).`,
 			}
 		}
 
-		if len(args) > 0 && firstUpdatedID == "" {
+		if (len(args) > 0 && firstUpdatedID == "") || claimFailed {
 			return SilentExit()
 		}
 		return nil
@@ -636,25 +643,10 @@ func applyMetadataEdits(existing json.RawMessage, setFlags, unsetFlags []string)
 	return json.RawMessage(result), nil
 }
 
-// toJSONValue converts a string value to its most appropriate JSON representation.
-// Recognizes numbers, booleans, and null; everything else becomes a JSON string.
+// toJSONValue stores a CLI metadata value as a JSON string.
+// Previous behavior inferred types (numbers, booleans) from content,
+// which silently broke map[string]string round-trips (GH#4146).
 func toJSONValue(s string) json.RawMessage {
-	// Check for null
-	if s == "null" {
-		return json.RawMessage("null")
-	}
-	// Check for booleans
-	if s == "true" || s == "false" {
-		return json.RawMessage(s)
-	}
-	// Check for numbers (integer or float)
-	if _, err := fmt.Sscanf(s, "%f", new(float64)); err == nil {
-		// Verify it round-trips cleanly (not NaN, Inf, etc.)
-		if json.Valid([]byte(s)) {
-			return json.RawMessage(s)
-		}
-	}
-	// Default to JSON string
 	b, _ := json.Marshal(s)
 	return json.RawMessage(b)
 }

@@ -1,5 +1,15 @@
 #!/bin/bash
 # generate-cli-docs.sh — Generate CLI reference docs from the live bd command tree.
+#
+# Two stages:
+#   1. `bd help --docs-root <root>` emits vendor-neutral output only:
+#      docs/CLI_REFERENCE.md plus a generic per-command tree at
+#      build/cli-docs/ (uncommitted staging).
+#   2. `go run ./tools/docsmint <root>` post-processes the staging tree into
+#      the committed Mintlify pages at docs/cli-reference/ and splices the
+#      CLI Reference pages array in docs/docs.json.
+# bd never emits site-generator-specific formats; all Mintlify targeting
+# lives in tools/docsmint.
 
 set -euo pipefail
 export LC_ALL=C
@@ -8,7 +18,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 CHECK_MODE=0
-VERSIONED_VERSION=""
 BD_ARG=""
 TMP_BUILD_DIR=""
 TMP_OUTPUT_DIR=""
@@ -19,23 +28,19 @@ while [ "$#" -gt 0 ]; do
             CHECK_MODE=1
             shift
             ;;
-        --versioned)
-            [ "$#" -ge 2 ] || { echo "Error: --versioned needs a version" >&2; exit 2; }
-            VERSIONED_VERSION="$2"
-            shift 2
-            ;;
         -h|--help)
             cat <<'EOF'
-Usage: scripts/generate-cli-docs.sh [--check] [--versioned VERSION] [path-to-bd]
+Usage: scripts/generate-cli-docs.sh [--check] [path-to-bd]
 
-Generate live CLI docs from one bd process. Historical Docusaurus snapshots are
-left untouched unless --versioned VERSION is supplied by the release snapshot
-workflow.
+Generate the committed CLI docs (docs/CLI_REFERENCE.md, docs/cli-reference/,
+and the CLI pages array in docs/docs.json) from one bd process plus the
+tools/docsmint post-processor. --check regenerates into a scratch root and
+fails if the committed copies are stale.
 
-If the resolved bd binary is CGO-enabled it emits the full `bd federation` help
-tree that CI (CGO_ENABLED=0) stubs out; the script rebuilds a pinned pure-go
-binary to keep committed docs in sync. Set BD_DOCS_ALLOW_CGO=1 to bypass that
-rebuild and trust the supplied binary as-is.
+If the resolved bd binary is CGO-enabled it emits the full `bd federation`
+help tree that CI (CGO_ENABLED=0) stubs out; the script rebuilds a pinned
+pure-go binary to keep committed docs in sync. Set BD_DOCS_ALLOW_CGO=1 to
+bypass that rebuild and trust the supplied binary as-is.
 EOF
             exit 0
             ;;
@@ -62,7 +67,10 @@ trap cleanup EXIT
 
 if [ -n "$BD_ARG" ]; then
     BD="$BD_ARG"
-elif [ -x "$PROJECT_ROOT/bd" ]; then
+elif [ "$CHECK_MODE" -eq 0 ] && [ -x "$PROJECT_ROOT/bd" ]; then
+    # Convenience for regeneration only. --check never trusts a repo-root
+    # ./bd it wasn't explicitly given: the guard below detects CGO-ness, not
+    # staleness, so a stale pure-go ./bd would produce a false "fresh".
     BD="$PROJECT_ROOT/bd"
 else
     TMP_BUILD_DIR="$(mktemp -d)"
@@ -103,33 +111,28 @@ fi
 
 if [ ! -x "$BD" ]; then
     echo "Error: bd binary not found or not executable: $BD" >&2
-    echo "Usage: $0 [--check] [--versioned VERSION] [path-to-bd]" >&2
+    echo "Usage: $0 [--check] [path-to-bd]" >&2
     exit 1
 fi
 
 generate_all() {
     local root="$1"
-    local args=(help --docs-root "$root")
-    if [ -n "$VERSIONED_VERSION" ]; then
-        args+=(--docs-version "$VERSIONED_VERSION")
-    fi
-    "$BD" "${args[@]}"
+    "$BD" help --docs-root "$root"
+    (cd "$PROJECT_ROOT" && go run -tags=gms_pure_go ./tools/docsmint "$root")
 }
 
 if [ "$CHECK_MODE" -eq 1 ]; then
     TMP_OUTPUT_DIR="$(mktemp -d)"
-    mkdir -p "$TMP_OUTPUT_DIR/website"
-    cp -Rf "$PROJECT_ROOT/website/docs" "$TMP_OUTPUT_DIR/website/docs"
-    if [ -d "$PROJECT_ROOT/website/versioned_docs" ]; then
-        cp -Rf "$PROJECT_ROOT/website/versioned_docs" "$TMP_OUTPUT_DIR/website/versioned_docs"
-    fi
-    if [ -f "$PROJECT_ROOT/website/versions.json" ]; then
-        cp -f "$PROJECT_ROOT/website/versions.json" "$TMP_OUTPUT_DIR/website/versions.json"
+    mkdir -p "$TMP_OUTPUT_DIR/docs"
+    # Seed the committed artifacts the pipeline rewrites, then regenerate and diff.
+    cp -f "$PROJECT_ROOT/docs/docs.json" "$TMP_OUTPUT_DIR/docs/docs.json"
+    if [ -d "$PROJECT_ROOT/docs/cli-reference" ]; then
+        cp -Rf "$PROJECT_ROOT/docs/cli-reference" "$TMP_OUTPUT_DIR/docs/cli-reference"
     fi
 
     generate_all "$TMP_OUTPUT_DIR"
 
-    if ! diff -qr \
+    if ! diff -q \
         "$PROJECT_ROOT/docs/CLI_REFERENCE.md" \
         "$TMP_OUTPUT_DIR/docs/CLI_REFERENCE.md" >/dev/null; then
         echo "FAIL: docs/CLI_REFERENCE.md is out of sync with live CLI help."
@@ -138,31 +141,23 @@ if [ "$CHECK_MODE" -eq 1 ]; then
         exit 1
     fi
 
-    check_dirs=("website/docs/cli-reference")
-    if [ -n "$VERSIONED_VERSION" ]; then
-        check_dirs+=("website/versioned_docs/version-$VERSIONED_VERSION/cli-reference")
+    if ! diff -q "$PROJECT_ROOT/docs/docs.json" "$TMP_OUTPUT_DIR/docs/docs.json" >/dev/null; then
+        echo "FAIL: docs/docs.json CLI Reference navigation is out of sync with live CLI help."
+        echo "Run: ./scripts/generate-cli-docs.sh ${BD_ARG:-}"
+        diff -u "$PROJECT_ROOT/docs/docs.json" "$TMP_OUTPUT_DIR/docs/docs.json" | sed -n '1,80p' || true
+        exit 1
     fi
 
-    for rel in "${check_dirs[@]}"; do
-        if [ -d "$PROJECT_ROOT/$rel" ]; then
-            if ! diff -qr "$PROJECT_ROOT/$rel" "$TMP_OUTPUT_DIR/$rel" >/dev/null; then
-                echo "FAIL: $rel is out of sync with live CLI help."
-                echo "Run: ./scripts/generate-cli-docs.sh ${BD_ARG:-}"
-                diff -ur "$PROJECT_ROOT/$rel" "$TMP_OUTPUT_DIR/$rel" | sed -n '1,160p' || true
-                exit 1
-            fi
-        fi
-    done
-
-    "$PROJECT_ROOT/scripts/generate-llms-full.sh" --check --source-root "$TMP_OUTPUT_DIR"
+    if ! diff -qr "$PROJECT_ROOT/docs/cli-reference" "$TMP_OUTPUT_DIR/docs/cli-reference" >/dev/null; then
+        echo "FAIL: docs/cli-reference is out of sync with live CLI help."
+        echo "Run: ./scripts/generate-cli-docs.sh ${BD_ARG:-}"
+        diff -ur "$PROJECT_ROOT/docs/cli-reference" "$TMP_OUTPUT_DIR/docs/cli-reference" | sed -n '1,160p' || true
+        exit 1
+    fi
 
     echo "PASS: generated CLI docs are fresh"
 else
     generate_all "$PROJECT_ROOT"
     echo "Generated CLI docs from: $($BD version 2>/dev/null | head -1 || echo "$BD")"
-    if [ -n "$VERSIONED_VERSION" ]; then
-        echo "Updated docs/CLI_REFERENCE.md, website CLI reference pages, and version-$VERSIONED_VERSION CLI snapshot"
-    else
-        echo "Updated docs/CLI_REFERENCE.md and live website CLI reference pages"
-    fi
+    echo "Updated docs/CLI_REFERENCE.md, docs/cli-reference/, and the docs.json CLI nav"
 fi

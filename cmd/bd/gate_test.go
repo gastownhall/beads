@@ -840,3 +840,61 @@ func gateTestFindSubstring(s, substr string) int {
 	}
 	return -1
 }
+
+// TestFilterIssueGates covers the bead-scoping helper behind `bd gate list <issue-id>`:
+// only gate-type dependencies are returned, --all controls closed visibility, and the
+// limit is honored. Regression guard for the bug where `bd gate list <bead>` silently
+// ignored the argument and returned the DB-wide gate list.
+func TestFilterIssueGates(t *testing.T) {
+	gate := types.IssueType("gate")
+	task := types.IssueType("task")
+	deps := []*types.Issue{
+		{ID: "g-open", IssueType: gate, Status: types.StatusOpen},
+		{ID: "g-closed", IssueType: gate, Status: types.StatusClosed},
+		{ID: "t-blocker", IssueType: task, Status: types.StatusOpen}, // not a gate
+		nil, // defensive: skipped
+		{ID: "g-open2", IssueType: gate, Status: types.StatusOpen},
+	}
+
+	t.Run("open_only_excludes_closed_and_nongates", func(t *testing.T) {
+		got := filterIssueGates(deps, false, 0)
+		ids := gateIDs(got)
+		if len(got) != 2 || ids[0] != "g-open" || ids[1] != "g-open2" {
+			t.Fatalf("expected [g-open g-open2], got %v", ids)
+		}
+	})
+
+	t.Run("all_includes_closed_gates_only", func(t *testing.T) {
+		got := filterIssueGates(deps, true, 0)
+		ids := gateIDs(got)
+		if len(got) != 3 {
+			t.Fatalf("expected 3 gates (incl. closed), got %v", ids)
+		}
+		for _, id := range ids {
+			if id == "t-blocker" {
+				t.Fatalf("non-gate dependency leaked into result: %v", ids)
+			}
+		}
+	})
+
+	t.Run("limit_caps_results", func(t *testing.T) {
+		got := filterIssueGates(deps, true, 1)
+		if len(got) != 1 || got[0].ID != "g-open" {
+			t.Fatalf("expected limit=1 -> [g-open], got %v", gateIDs(got))
+		}
+	})
+
+	t.Run("empty_deps", func(t *testing.T) {
+		if got := filterIssueGates(nil, true, 0); len(got) != 0 {
+			t.Fatalf("expected no gates, got %v", gateIDs(got))
+		}
+	})
+}
+
+func gateIDs(gs []*types.Issue) []string {
+	ids := make([]string, 0, len(gs))
+	for _, g := range gs {
+		ids = append(ids, g.ID)
+	}
+	return ids
+}

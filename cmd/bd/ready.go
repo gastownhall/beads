@@ -47,8 +47,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}()
 
 		if usesProxiedServer() {
-			runReadyProxiedServer(cmd, rootCtx)
-			return nil
+			return runReadyProxiedServer(cmd, rootCtx)
 		}
 
 		if offset, _ := cmd.Flags().GetInt("offset"); offset > 0 {
@@ -237,12 +236,26 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			totalReady := len(results)
 			truncated := false
 			if filter.Limit > 0 && len(results) == filter.Limit {
+				// The page is full, so there may be more ready work. Size the true
+				// total N over the same ready predicate, zeroing the limit so the
+				// count is the full ready set (byte-identical to
+				// len(GetReadyWorkWithCounts(Limit=0))). Prefer the cheap COUNT(*)
+				// capability; unwrap past decorators (e.g. HookFiringStore) so the
+				// assertion reaches the concrete store. Fall back to the unbounded
+				// mega-query only when a store predates ReadyWorkCounter.
 				countFilter := filter
 				countFilter.Limit = 0
-				all, countErr := activeStore.GetReadyWorkWithCounts(ctx, countFilter)
-				if countErr == nil && len(all) > len(results) {
-					totalReady = len(all)
-					truncated = true
+				if counter, ok := storage.UnwrapStore(activeStore).(storage.ReadyWorkCounter); ok {
+					if n, countErr := counter.CountReadyWork(ctx, countFilter); countErr == nil && n > len(results) {
+						totalReady = n
+						truncated = true
+					}
+				} else {
+					all, countErr := activeStore.GetReadyWorkWithCounts(ctx, countFilter)
+					if countErr == nil && len(all) > len(results) {
+						totalReady = len(all)
+						truncated = true
+					}
 				}
 			}
 			if results == nil {
@@ -333,8 +346,7 @@ var blockedCmd = &cobra.Command{
 		}()
 
 		if usesProxiedServer() {
-			runBlockedProxiedServer(cmd, rootCtx)
-			return nil
+			return runBlockedProxiedServer(cmd, rootCtx)
 		}
 		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
 		// Use factory to respect backend configuration (bd-m2jr: SQLite fallback fix)

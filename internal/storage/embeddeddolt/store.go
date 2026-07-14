@@ -29,6 +29,7 @@ var _ storage.GarbageCollector = (*EmbeddedDoltStore)(nil)
 var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
+var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
 // Each method call opens a short-lived connection, executes within an explicit
@@ -310,7 +311,37 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	// already-initialized database — independently migrating each clone forks the
 	// schema. Embedded mode (the mode the original report was filed against) syncs
 	// via Dolt remotes too, so it needs the same gate as server mode.
-	if err := schema.CheckRemoteMigrateGate(ctx, conn); err != nil {
+	//
+	// adopt injects the driver-side fast-forward ancestry primitives
+	// (mybd-ae1i) so the smart gate can distinguish a losslessly
+	// fast-forwardable remote-ahead case (smartAdoptFastForward) from the
+	// plain destructive adopt, and auto-execute it: CheckRemoteMigrateGate*
+	// calls FastForward and returns nil (proceed, nothing pending) once HEAD
+	// has actually advanced; any execution failure (dirty working set raced
+	// in, non-fast-forward, concurrent writer) falls back to the plain
+	// destructive adopt directive instead of forcing the write.
+	adopt := &schema.FastForwardAdopter{
+		IsStrictAncestor: func(ctx context.Context, db schema.DBConn, ref string) (bool, error) {
+			return versioncontrolops.LocalIsStrictAncestorOf(ctx, db, ref)
+		},
+		WorkingSetClean: func(ctx context.Context, db schema.DBConn) (bool, error) {
+			return versioncontrolops.WorkingSetClean(ctx, db)
+		},
+		FastForward: func(ctx context.Context, db schema.DBConn, ref string) error {
+			return versioncontrolops.FastForwardAdopt(ctx, db, ref)
+		},
+		// ReadOnly is deliberately left unset (false) here: this initSchema
+		// path is only ever reached via newStore (openStrict,
+		// openReadOnlyCommand, or openWorkingSetReconcile intents), all of
+		// which perform a writable open — s.readOnly is never true for any
+		// of them. The genuinely read-only embedded open, OpenReadOnly,
+		// skips initSchema (and this gate) entirely, so there is no
+		// read-only signal to plumb through at this injection site the way
+		// server mode's cfg.ReadOnly is (dolt/store.go initSchema). If that
+		// ever changes — e.g. initSchema starts running on a store that can
+		// report readOnly true — wire it here too.
+	}
+	if err := schema.CheckRemoteMigrateGateWithAdopt(ctx, conn, adopt); err != nil {
 		var gateErr *schema.RemoteMigrateGateError
 		if s.intent != openStrict && errors.As(err, &gateErr) {
 			// The gate exists to stop in-place migration on a remote-backed,
@@ -322,8 +353,10 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 				"  coordination decision, not an auto-fix - do NOT run a migration unless\n" +
 				"  you are the single designated migrator (only ONE clone may migrate a\n" +
 				"  shared remote, else the schema forks; #4259):\n" +
-				"    • designated migrator (only ONE machine): %[3]s=1 bd migrate && bd dolt push\n" +
-				"    • every other clone (another already migrated): bd bootstrap\n"
+				"    • designated migrator (only ONE machine): bd migrate --force && bd dolt push\n" +
+				"    • every other clone (another already migrated): bd bootstrap\n" +
+				"    • several machines: only ONE migrates; sync each other clone and run\n" +
+				"      bd dolt pull after the migrator pushes, before upgrading it\n"
 			switch s.intent {
 			case openWorkingSetReconcile:
 				fmt.Fprintf(os.Stderr,
@@ -331,13 +364,13 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 						"  Working-set reconcile command: continuing on schema v%[2]d without\n"+
 						"  migrating; the commit applies to the working set at the current\n"+
 						"  schema."+sharedGuidance,
-					gateErr, gateErr.CurrentVersion, schema.AllowRemoteMigrateEnv)
+					gateErr, gateErr.CurrentVersion)
 			default: // openReadOnlyCommand
 				fmt.Fprintf(os.Stderr,
 					"Warning: %[1]v\n"+
 						"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
 						"  Writes are blocked until the schema is reconciled."+sharedGuidance,
-					gateErr, gateErr.CurrentVersion, schema.AllowRemoteMigrateEnv)
+					gateErr, gateErr.CurrentVersion)
 			}
 			return nil
 		}
@@ -724,6 +757,20 @@ func (s *EmbeddedDoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]
 		return err
 	})
 	return result, err
+}
+
+// PreviousExternalRef returns the external_ref value recorded for issueID
+// as of the most recent commit at or before asOf.
+// Implements storage.ExternalRefHistoryQuerier.
+func (s *EmbeddedDoltStore) PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (string, bool, error) {
+	var ref string
+	var found bool
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		ref, found, err = issueops.PreviousExternalRefInTx(ctx, tx, issueID, asOf)
+		return err
+	})
+	return ref, found, err
 }
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,12 +101,7 @@ func buildReferencedSet(ctx context.Context, st storage.DoltStorage, candidateID
 	if len(candidateIDs) == 0 {
 		return nil, nil
 	}
-	ids := make([]string, 0, len(candidateIDs))
-	for id := range candidateIDs {
-		ids = append(ids, regexp.QuoteMeta(id))
-	}
-	sort.Strings(ids)
-	pat := regexp.MustCompile(`\b(` + strings.Join(ids, "|") + `)\b`)
+	matcher := newCandidateIDMatcher(candidateIDs)
 
 	// Scan every non-done bead: built-in active statuses plus any configured
 	// custom statuses whose category is not "done". A repo can define custom
@@ -141,9 +135,7 @@ func buildReferencedSet(ctx context.Context, st storage.DoltStorage, candidateID
 
 	refSet := make(map[string]bool)
 	scanText := func(text string) {
-		for _, m := range pat.FindAllString(text, -1) {
-			refSet[m] = true
-		}
+		matcher.findAll(text, refSet)
 	}
 
 	for _, iss := range openBeads {
@@ -160,10 +152,73 @@ func buildReferencedSet(ctx context.Context, st storage.DoltStorage, candidateID
 	return refSet, nil
 }
 
+type candidateIDMatcher struct {
+	byFirstByte map[byte][]string
+}
+
+func newCandidateIDMatcher(candidateIDs map[string]bool) candidateIDMatcher {
+	byFirstByte := make(map[byte][]string)
+	for id := range candidateIDs {
+		if id == "" {
+			continue
+		}
+		byFirstByte[id[0]] = append(byFirstByte[id[0]], id)
+	}
+	for first := range byFirstByte {
+		ids := byFirstByte[first]
+		sort.Slice(ids, func(i, j int) bool {
+			if len(ids[i]) == len(ids[j]) {
+				return ids[i] < ids[j]
+			}
+			return len(ids[i]) > len(ids[j])
+		})
+		byFirstByte[first] = ids
+	}
+	return candidateIDMatcher{byFirstByte: byFirstByte}
+}
+
+func (m candidateIDMatcher) findAll(text string, found map[string]bool) {
+	for i := 0; i < len(text); i++ {
+		ids := m.byFirstByte[text[i]]
+		if len(ids) == 0 || !isWordBoundaryAt(text, i) {
+			continue
+		}
+		for _, id := range ids {
+			end := i + len(id)
+			if end <= len(text) && strings.HasPrefix(text[i:], id) && isWordBoundaryAt(text, end) {
+				found[id] = true
+				break
+			}
+		}
+	}
+}
+
+func isWordBoundaryAt(s string, idx int) bool {
+	var before, after byte
+	if idx > 0 {
+		before = s[idx-1]
+	}
+	if idx < len(s) {
+		after = s[idx]
+	}
+	return isASCIIWordByte(before) != isASCIIWordByte(after)
+}
+
+func isASCIIWordByte(b byte) bool {
+	return b == '_' ||
+		('0' <= b && b <= '9') ||
+		('A' <= b && b <= 'Z') ||
+		('a' <= b && b <= 'z')
+}
+
 // runPurgeOrPrune implements the shared delete-closed-beads flow used by
 // both `bd purge` (ephemeral scope) and `bd prune` (non-ephemeral scope).
 // The caller's scope controls the filter, messaging, and safety gate.
 func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
+	if usesProxiedServer() {
+		return runPurgeOrPruneProxied(cmd, scope)
+	}
+
 	CheckReadonly(scope.cmdName)
 
 	force, _ := cmd.Flags().GetBool("force")

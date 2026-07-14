@@ -121,7 +121,9 @@ func TestPullFromSettlesFKCascadeViolations(t *testing.T) {
 // peerPullOutcome's post-hoc GetConflicts can never see it — the conflicts
 // must arrive captured pre-rollback inside MergeConflictsError and surface
 // through PullFrom's conflict-reporting contract. Peer setup mirrors
-// TestPullFromSettlesFKCascadeViolations.
+// TestPullFromSettlesFKCascadeViolations. Both sides' updated_at is pinned to
+// the same value so the LWW auto-resolver (GH#4698) declines the conflict as
+// ambiguous, leaving it for the operator.
 func TestPullFromReportsOperatorConflicts(t *testing.T) {
 	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
@@ -159,7 +161,7 @@ func TestPullFromReportsOperatorConflicts(t *testing.T) {
 	defer peerConn.Close()
 	peerConn.SetMaxOpenConns(1)
 	for _, q := range []string{
-		"UPDATE issues SET title = 'theirs' WHERE id = 'opcpeer-x'",
+		"UPDATE issues SET title = 'theirs', updated_at = '2026-01-01 00:00:00' WHERE id = 'opcpeer-x'",
 		"CALL DOLT_COMMIT('-Am', 'peer retitles')",
 		"CALL DOLT_PUSH('origin', 'main')",
 	} {
@@ -168,7 +170,11 @@ func TestPullFromReportsOperatorConflicts(t *testing.T) {
 		}
 	}
 
-	if _, err := db.ExecContext(ctx, "UPDATE issues SET title = 'ours' WHERE id = 'opcpeer-x'"); err != nil {
+	// Pin updated_at to the same value as the peer's update so the LWW
+	// safety check (issuesConflictsAreLWWSafe) rejects it as ambiguous —
+	// this test exercises the operator-conflict reporting path, which
+	// requires a conflict the auto-resolver declines (GH#4698).
+	if _, err := db.ExecContext(ctx, "UPDATE issues SET title = 'ours', updated_at = '2026-01-01 00:00:00' WHERE id = 'opcpeer-x'"); err != nil {
 		t.Fatalf("retitle locally: %v", err)
 	}
 	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'local retitles')"); err != nil {

@@ -49,6 +49,8 @@ func newTestUOWProvider(t *testing.T) UnitOfWorkProvider {
 		"root",
 		"",
 		bin,
+		0,
+		0,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, provider)

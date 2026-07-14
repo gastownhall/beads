@@ -30,6 +30,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("edit is not supported in proxied-server mode")
+		}
 		CheckReadonly("edit")
 
 		evt := metrics.NewCommandEvent("edit")

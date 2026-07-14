@@ -11,7 +11,11 @@ package conformance
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -19,6 +23,74 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+var (
+	ctxIface = reflect.TypeOf((*context.Context)(nil)).Elem()
+	errIface = reflect.TypeOf((*error)(nil)).Elem()
+)
+
+// RunUnsupportedContract is the BEHAVIORAL half of a backend's capability contract: it
+// calls every method the backend lists as legitimately unsupported and asserts each
+// returns a typed storage.ErrUnsupported. completeness_test.go asserts the STRUCTURAL
+// half (the generated shell equals this same allowlist); together they close the loop so
+// an unsupported method can neither silently resolve to something else (structural) nor
+// return the wrong error/panic (behavioral). Driven by the allowlist itself, so it stays
+// exhaustive and shrinks automatically as methods graduate off the list.
+//
+// No live database: the generated stubs ignore their receiver and arguments, so a
+// zero-value store answers them. Pass the backend's concrete store value (e.g. &Store{}).
+func RunUnsupportedContract(t *testing.T, store any, unsupported map[string]string) {
+	t.Helper()
+	rv := reflect.ValueOf(store)
+	names := make([]string, 0, len(unsupported))
+	for name := range unsupported {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			m := rv.MethodByName(name)
+			if !m.IsValid() {
+				t.Fatalf("%q is on the unsupported allowlist but is not a method on the store (shell drift)", name)
+			}
+			mt := m.Type()
+			in := make([]reflect.Value, mt.NumIn())
+			for i := 0; i < mt.NumIn(); i++ {
+				if mt.In(i) == ctxIface {
+					in[i] = reflect.ValueOf(ctx())
+				} else {
+					in[i] = reflect.Zero(mt.In(i))
+				}
+			}
+			var out []reflect.Value
+			if mt.IsVariadic() {
+				out = m.CallSlice(in)
+			} else {
+				out = m.Call(in)
+			}
+			var err error
+			hasErr := false
+			for _, o := range out {
+				if o.Type() == errIface {
+					hasErr = true
+					if !o.IsNil() {
+						err = o.Interface().(error)
+					}
+				}
+			}
+			if !hasErr {
+				t.Fatalf("%q has no error return; cannot assert the unsupported contract", name)
+			}
+			var unsup *storage.ErrUnsupported
+			if !errors.As(err, &unsup) {
+				t.Fatalf("%q returned %v, want *storage.ErrUnsupported", name, err)
+			}
+			if unsup.Op != name {
+				t.Errorf("%q returned unsupported error for Op %q — wrong method wired?", name, unsup.Op)
+			}
+		})
+	}
+}
 
 // Factory creates a fresh, empty store for each test.
 //
@@ -66,6 +138,22 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("ReadyUnblockedByClose", func(t *testing.T) { testReadyUnblockedByClose(t, factory) })
 	t.Run("BlockedIssues", func(t *testing.T) { testBlockedIssues(t, factory) })
 	t.Run("EpicsEligibleForClosure", func(t *testing.T) { testEpicsEligible(t, factory) })
+	t.Run("ReadyCountsPageEquivalence", func(t *testing.T) { testReadyCountsPageEquivalence(t, factory) })
+	t.Run("ReadyCountsWithWisps", func(t *testing.T) { testReadyCountsWithWisps(t, factory) })
+	t.Run("ReadyCountsPageChunking", func(t *testing.T) { testReadyCountsPageChunking(t, factory) })
+
+	// Claim / lease (dead-worker recovery)
+	t.Run("Claim", func(t *testing.T) { testClaim(t, factory) })
+	t.Run("ClaimIdempotent", func(t *testing.T) { testClaimIdempotent(t, factory) })
+	t.Run("ClaimAlreadyClaimed", func(t *testing.T) { testClaimAlreadyClaimed(t, factory) })
+	t.Run("ClaimNotClaimable", func(t *testing.T) { testClaimNotClaimable(t, factory) })
+	t.Run("ClaimReadyIssue", func(t *testing.T) { testClaimReadyIssue(t, factory) })
+	t.Run("ClaimReadyIssueLabelFilters", func(t *testing.T) { testClaimReadyIssueLabelFilters(t, factory) })
+	t.Run("ClaimReadyIssueConcurrentExclusivity", func(t *testing.T) { testClaimReadyIssueConcurrentExclusivity(t, factory) })
+	t.Run("HeartbeatRenewsLease", func(t *testing.T) { testHeartbeatRenewsLease(t, factory) })
+	t.Run("HeartbeatWisp", func(t *testing.T) { testHeartbeatWisp(t, factory) })
+	t.Run("ReclaimExpiredLease", func(t *testing.T) { testReclaimExpiredLease(t, factory) })
+	t.Run("ReclaimSkipsFreshLease", func(t *testing.T) { testReclaimSkipsFreshLease(t, factory) })
 
 	// Labels
 	t.Run("Labels", func(t *testing.T) { testLabels(t, factory) })
@@ -86,12 +174,34 @@ func RunAll(t *testing.T, factory Factory) {
 	// Statistics
 	t.Run("Statistics", func(t *testing.T) { testStatistics(t, factory) })
 
+	// Stale
+	t.Run("StaleIssues", func(t *testing.T) { testStaleIssues(t, factory) })
+
+	// Portable non-VC methods (molecule/repo-mtime/streams/counts/comment/rekey/batch)
+	t.Run("Portable", func(t *testing.T) { RunPortableMethods(t, factory) })
+
+	// Audit — exhaustive strange-behavior cases derived from the Dolt reference impl.
+	t.Run("Audit", func(t *testing.T) { RunAudit(t, factory) })
+
 	// Iterators
 	t.Run("IterIssues", func(t *testing.T) { testIterIssues(t, factory) })
 	t.Run("IterComments", func(t *testing.T) { testIterComments(t, factory) })
 
 	// Transaction
 	t.Run("Transaction", func(t *testing.T) { testTransaction(t, factory) })
+}
+
+// RunDeferredReads runs the subset of the suite covering the shared "deferred"
+// non-version-control reads — statistics, external-ref lookup, and staleness — that
+// the SQL-family backends (postgres/mysql/sqlite) implement through issueops. RunAll
+// is the full fail-loud measurement (and stays red on genuinely Dolt-only methods
+// like slots), so these backends run this focused GREEN gate instead. The Dolt
+// reference covers the same cases via RunAll.
+func RunDeferredReads(t *testing.T, factory Factory) {
+	t.Helper()
+	t.Run("Statistics", func(t *testing.T) { testStatistics(t, factory) })
+	t.Run("GetByExternalRef", func(t *testing.T) { testGetByExternalRef(t, factory) })
+	t.Run("StaleIssues", func(t *testing.T) { testStaleIssues(t, factory) })
 }
 
 // --- helpers ---
@@ -136,6 +246,16 @@ func issueIDs(issues []*types.Issue) []string {
 		ids[i] = iss.ID
 	}
 	sort.Strings(ids)
+	return ids
+}
+
+// orderedIDs is issueIDs without the sort — for asserting a contractual result
+// order (e.g. GetStaleIssues' updated_at ASC) rather than set membership.
+func orderedIDs(issues []*types.Issue) []string {
+	ids := make([]string, len(issues))
+	for i, iss := range issues {
+		ids[i] = iss.ID
+	}
 	return ids
 }
 
@@ -623,6 +743,56 @@ func testStatistics(t *testing.T, f Factory) {
 	}
 }
 
+// --- Stale ---
+
+func testStaleIssues(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+
+	// Two issues last touched years ago (stalest first by updated_at), one fresh,
+	// and one aged-but-closed. Staleness is decided on updated_at, which CreateIssue
+	// honors when preset (issueops/create.go), so no clock manipulation is needed —
+	// and a year between the aged timestamps keeps the order unambiguous across
+	// backends (no whole-second tie).
+	y2020 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	y2021 := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "sl-old1", Title: "oldest open", Status: types.StatusOpen, CreatedAt: y2020, UpdatedAt: y2020}), "actor"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "sl-old2", Title: "aged in-progress", Status: types.StatusInProgress, CreatedAt: y2021, UpdatedAt: y2021}), "actor"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "sl-fresh", Title: "fresh open", Status: types.StatusOpen}), "actor"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "sl-closed", Title: "aged but closed", Status: types.StatusClosed, CreatedAt: y2020, UpdatedAt: y2020}), "actor"))
+
+	// Default (open + in_progress): the two aged issues, stalest first; the fresh one
+	// and the closed one are excluded. Order is contractual (updated_at ASC).
+	got, err := s.GetStaleIssues(c, types.StaleFilter{Days: 30})
+	if err != nil {
+		t.Fatalf("GetStaleIssues: %v", err)
+	}
+	if seq := orderedIDs(got); !slices.Equal(seq, []string{"sl-old1", "sl-old2"}) {
+		t.Fatalf("GetStaleIssues(Days=30) = %v, want [sl-old1 sl-old2]", seq)
+	}
+
+	// Status filter narrows to open only.
+	openOnly, err := s.GetStaleIssues(c, types.StaleFilter{Days: 30, Status: "open"})
+	must(t, err)
+	if seq := orderedIDs(openOnly); !slices.Equal(seq, []string{"sl-old1"}) {
+		t.Fatalf("GetStaleIssues(status=open) = %v, want [sl-old1]", seq)
+	}
+
+	// Limit caps the result set.
+	limited, err := s.GetStaleIssues(c, types.StaleFilter{Days: 30, Limit: 1})
+	must(t, err)
+	if len(limited) != 1 {
+		t.Fatalf("GetStaleIssues(limit=1) returned %d, want 1", len(limited))
+	}
+
+	// Nothing is stale on a century horizon.
+	none, err := s.GetStaleIssues(c, types.StaleFilter{Days: 36500})
+	must(t, err)
+	if len(none) != 0 {
+		t.Fatalf("GetStaleIssues(Days=36500) = %v, want none", orderedIDs(none))
+	}
+}
+
 // --- Iterators ---
 
 func testIterIssues(t *testing.T, f Factory) {
@@ -697,4 +867,129 @@ func testTransaction(t *testing.T, f Factory) {
 	if !found {
 		t.Errorf("label 'from-tx' not found, got %v", labels)
 	}
+}
+
+// --- Ready-work counts equivalence (perf/ready-counts) ---
+
+// marshalCounts renders a counts slice to JSON for byte-equivalence comparison
+// between the page-pushed and unbounded queries.
+func marshalCounts(t *testing.T, items []*types.IssueWithCounts) string {
+	t.Helper()
+	b, err := json.Marshal(items)
+	if err != nil {
+		t.Fatalf("marshal counts: %v", err)
+	}
+	return string(b)
+}
+
+// assertReadyCountsEquivalence checks the two central claims of the ready-counts
+// fast path against a real backend: (a) each bounded page — which resolves a
+// page of IDs then hydrates counts constrained to those IDs — is byte-identical
+// to the same-length prefix of the unbounded predicate query, and (b)
+// CountReadyWork equals len(unbounded) regardless of the page cap.
+func assertReadyCountsEquivalence(t *testing.T, s storage.DoltStorage, base types.WorkFilter, pages []int) {
+	t.Helper()
+	c := ctx()
+
+	unboundedFilter := base
+	unboundedFilter.Limit = 0
+	unbounded, err := s.GetReadyWorkWithCounts(c, unboundedFilter)
+	if err != nil {
+		t.Fatalf("GetReadyWorkWithCounts(unbounded): %v", err)
+	}
+
+	counter, ok := s.(storage.ReadyWorkCounter)
+	if !ok {
+		t.Fatalf("store does not implement storage.ReadyWorkCounter")
+	}
+
+	for _, page := range pages {
+		pf := base
+		pf.Limit = page
+
+		got, err := s.GetReadyWorkWithCounts(c, pf)
+		if err != nil {
+			t.Fatalf("GetReadyWorkWithCounts(limit=%d): %v", page, err)
+		}
+		want := unbounded
+		if page > 0 && page < len(unbounded) {
+			want = unbounded[:page]
+		}
+		if gj, wj := marshalCounts(t, got), marshalCounts(t, want); gj != wj {
+			t.Fatalf("ready counts page (limit=%d) not byte-identical to unbounded prefix:\n got: %s\nwant: %s", page, gj, wj)
+		}
+
+		n, err := counter.CountReadyWork(c, pf)
+		if err != nil {
+			t.Fatalf("CountReadyWork(limit=%d): %v", page, err)
+		}
+		if n != len(unbounded) {
+			t.Fatalf("CountReadyWork(limit=%d) = %d, want %d (len unbounded)", page, n, len(unbounded))
+		}
+	}
+}
+
+func testReadyCountsPageEquivalence(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+
+	// 12 ready issues with varied priority.
+	for i := 1; i <= 12; i++ {
+		id := fmt.Sprintf("rc-%02d", i)
+		must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: id, Title: id, Priority: i % 4, Status: types.StatusOpen}), "a"))
+	}
+	// A closed blocker leaves rc-01 ready but with DependencyCount=1, so the
+	// hydrated counts are non-trivial (not all zero).
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "rc-dep", Title: "dep", Status: types.StatusOpen}), "a"))
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: "rc-01", DependsOnID: "rc-dep", Type: types.DepBlocks}, "a"))
+	must(t, s.CloseIssue(c, "rc-dep", "done", "a", "s"))
+	// A still-open blocker keeps rc-blocked out of the ready set (rc-blk stays ready).
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "rc-blk", Title: "blk", Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "rc-blocked", Title: "blocked", Status: types.StatusOpen}), "a"))
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: "rc-blocked", DependsOnID: "rc-blk", Type: types.DepBlocks}, "a"))
+	// Comment, label, and parent-child so those columns vary across rows.
+	must(t, s.AddComment(c, "rc-02", "a", "hi"))
+	must(t, s.AddLabel(c, "rc-03", "urgent", "a"))
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: "rc-04", DependsOnID: "rc-01", Type: types.DepParentChild}, "a"))
+
+	// Ready set: rc-01..rc-12 plus rc-blk = 13. Page < ready exercises the
+	// by-IDs path; page == and > ready exercise the boundary.
+	assertReadyCountsEquivalence(t, s, types.WorkFilter{SortPolicy: types.SortPolicyOldest}, []int{1, 5, 13, 50})
+}
+
+func testReadyCountsWithWisps(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+
+	// Durable ready issues.
+	for i := 1; i <= 4; i++ {
+		id := fmt.Sprintf("wc-i%02d", i)
+		must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: id, Title: id, Priority: i % 3, Status: types.StatusOpen}), "a"))
+	}
+	// Ready ephemeral wisps (routed to the wisps table).
+	for i := 1; i <= 3; i++ {
+		id := fmt.Sprintf("wc-w%02d", i)
+		must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: id, Title: id, Priority: i % 3, Status: types.StatusOpen, Ephemeral: true}), "a"))
+	}
+
+	// IncludeEphemeral makes the ready set the issues∪wisps union the counts path
+	// merges, exercising CountReadyWork's two-family COUNT(*) + overlap path.
+	assertReadyCountsEquivalence(t, s, types.WorkFilter{SortPolicy: types.SortPolicyOldest, IncludeEphemeral: true}, []int{1, 3, 7, 20})
+}
+
+func testReadyCountsPageChunking(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+
+	// A page larger than sqlbuild.QueryBatchSize (200) forces the by-IDs
+	// hydration to chunk its IN-list; the merged result must still match the
+	// unbounded query byte-for-byte.
+	const n = 205
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("ch-%04d", i)
+		must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: id, Title: id, Status: types.StatusOpen}), "a"))
+	}
+
+	// limit=100 stays within one chunk; limit=205 and 250 span two chunks.
+	assertReadyCountsEquivalence(t, s, types.WorkFilter{SortPolicy: types.SortPolicyOldest}, []int{100, n, 250})
 }

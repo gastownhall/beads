@@ -11,7 +11,6 @@ push_after_sha="${PUSH_AFTER_SHA:-${GITHUB_SHA:-HEAD}}"
 
 mcp_package=false
 npm_package=false
-website=false
 reason=""
 changed_files=""
 
@@ -20,7 +19,6 @@ write_outputs() {
         {
             echo "mcp_package=$mcp_package"
             echo "npm_package=$npm_package"
-            echo "website=$website"
             echo "reason=$reason"
         } >>"$GITHUB_OUTPUT"
     fi
@@ -30,7 +28,6 @@ run_all() {
     reason="$1"
     mcp_package=true
     npm_package=true
-    website=true
     write_outputs
     echo "$reason"
     exit 0
@@ -85,13 +82,14 @@ while IFS= read -r path; do
             ;;
     esac
     case "$path" in
-        website/*|scripts/generate-llms-full.sh|scripts/ci/website.sh|scripts/ci/detect-package-gates.sh|.github/workflows/pr.yml|.github/workflows/main.yml|.github/workflows/pr-risk.yml|.github/workflows/ci-measurements.yml|.github/workflows/deploy-docs.yml|Makefile)
-            website=true
+        scripts/ci/detect-package-gates.sh|.github/workflows/pr.yml|.github/workflows/main.yml|.github/workflows/pr-risk.yml|.github/workflows/ci-measurements.yml|Makefile)
+            mcp_package=true
+            npm_package=true
             ;;
     esac
 done <<<"$changed_files"
 
-if [[ "$mcp_package" == "true" || "$npm_package" == "true" || "$website" == "true" ]]; then
+if [[ "$mcp_package" == "true" || "$npm_package" == "true" ]]; then
     reason="package paths changed"
 else
     reason="no package-gate paths changed"
@@ -111,4 +109,3 @@ fi
 echo "Package gates:"
 echo "  mcp_package=$mcp_package"
 echo "  npm_package=$npm_package"
-echo "  website=$website"

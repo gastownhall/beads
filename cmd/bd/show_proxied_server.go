@@ -54,54 +54,58 @@ func gatherShowProxiedInput(cmd *cobra.Command, args []string) *showProxiedInput
 	return in
 }
 
-func proxiedOpenReadUOW(ctx context.Context) uow.UnitOfWork {
+func proxiedOpenReadUOW(ctx context.Context) (uow.UnitOfWork, error) {
 	if uowProvider == nil {
-		FatalError("proxied-server UOW provider not initialized")
+		return nil, HandleError("proxied-server UOW provider not initialized")
 	}
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		FatalErrorRespectJSON("open unit of work: %v", err)
+		return nil, HandleErrorRespectJSON("open unit of work: %v", err)
 	}
-	return uw
+	return uw, nil
 }
 
-func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) {
+func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	in := gatherShowProxiedInput(cmd, args)
 
 	if in.watchMode {
-		FatalErrorRespectJSON("watch mode not supported in proxied-server mode")
+		return HandleErrorRespectJSON("watch mode not supported in proxied-server mode")
 	}
 
-	uw := proxiedOpenReadUOW(ctx)
+	uw, err := proxiedOpenReadUOW(ctx)
+	if err != nil {
+		return err
+	}
 	defer uw.Close(ctx)
 
 	if in.currentMode {
 		if len(in.ids) > 0 {
-			FatalErrorRespectJSON("--current cannot be combined with explicit issue IDs")
+			return HandleErrorRespectJSON("--current cannot be combined with explicit issue IDs")
 		}
 		currentID := resolveCurrentIssueIDProxied(ctx, uw)
 		if currentID == "" {
-			FatalErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
+			return HandleErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
 		}
 		in.ids = []string{currentID}
 	}
 
 	if len(in.ids) == 0 {
-		FatalErrorRespectJSON("at least one issue ID is required (use positional args, --id flag, or --current)")
+		return HandleErrorRespectJSON("at least one issue ID is required (use positional args, --id flag, or --current)")
 	}
 
 	switch {
 	case in.asOfRef != "":
 		runShowProxiedAsOf(ctx, uw, in)
 	case in.thread:
-		runShowProxiedThread(ctx, uw, in)
+		return runShowProxiedThread(ctx, uw, in)
 	case in.refs:
 		runShowProxiedRefs(ctx, uw, in)
 	case in.children:
 		runShowProxiedChildren(ctx, uw, in)
 	default:
-		runShowProxiedDefault(ctx, uw, in)
+		return runShowProxiedDefault(ctx, uw, in)
 	}
+	return nil
 }
 
 func resolveCurrentIssueIDProxied(ctx context.Context, uw uow.UnitOfWork) string {
@@ -304,16 +308,16 @@ func runShowProxiedChildren(ctx context.Context, uw uow.UnitOfWork, in *showProx
 	}
 }
 
-func runShowProxiedThread(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) {
+func runShowProxiedThread(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) error {
 	if len(in.ids) == 0 {
-		return
+		return nil
 	}
 	startMsg, _, err := proxiedGetIssueOrWisp(ctx, uw, in.ids[0])
 	if err != nil {
-		FatalErrorRespectJSON("fetching message %s: %v", in.ids[0], err)
+		return HandleErrorRespectJSON("fetching message %s: %v", in.ids[0], err)
 	}
 	if startMsg == nil {
-		FatalErrorRespectJSON("message %s not found", in.ids[0])
+		return HandleErrorRespectJSON("message %s not found", in.ids[0])
 	}
 
 	rootMsg := startMsg
@@ -362,7 +366,7 @@ func runShowProxiedThread(ctx context.Context, uw uow.UnitOfWork, in *showProxie
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetIndent("", "  ")
 		_ = encoder.Encode(threadMessages)
-		return
+		return nil
 	}
 
 	fmt.Printf("\n%s Thread: %s\n", ui.RenderAccent("📬"), rootMsg.Title)
@@ -394,6 +398,7 @@ func runShowProxiedThread(ctx context.Context, uw uow.UnitOfWork, in *showProxie
 		fmt.Println()
 	}
 	fmt.Printf("Total: %d messages in thread\n\n", len(threadMessages))
+	return nil
 }
 
 func proxiedFindRepliesTo(ctx context.Context, uw uow.UnitOfWork, id string) string {
@@ -422,7 +427,7 @@ func proxiedFindReplies(ctx context.Context, uw uow.UnitOfWork, id string) []typ
 	return out
 }
 
-func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) {
+func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxiedInput) error {
 	formatTime := func(t time.Time) string {
 		if in.localTime {
 			t = t.Local()
@@ -462,11 +467,12 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 		if len(allDetails) > 0 {
 			_ = outputJSON(allDetails)
 		} else {
-			FatalErrorRespectJSON("no issues found matching the provided IDs")
+			return HandleErrorRespectJSON("no issues found matching the provided IDs")
 		}
 	} else if foundCount == 0 {
-		os.Exit(1)
+		return SilentExit()
 	}
+	return nil
 }
 
 func proxiedBuildDetails(ctx context.Context, uw uow.UnitOfWork, issue *types.Issue, isWisp bool, in *showProxiedInput) *types.IssueDetails {

@@ -32,7 +32,7 @@ Section requirements by type:
   bug:      Steps to Reproduce, Acceptance Criteria
   task:     Acceptance Criteria
   feature:  Acceptance Criteria
-  epic:     Success Criteria
+  epic:     Success Criteria (or Acceptance Criteria)
   chore:    (none)
 
 Examples:
@@ -45,6 +45,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("lint is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("lint")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -163,7 +166,7 @@ Examples:
 }
 
 func init() {
-	lintCmd.Flags().StringP("type", "t", "", "Filter by issue type (bug, task, feature, epic)")
+	lintCmd.Flags().StringP("type", "t", "", "Filter by issue type (bug, task, feature, epic, decision, spike, story, chore, milestone)")
 	lintCmd.Flags().StringP("status", "s", "", "Filter by status (default: open, use 'all' for all)")
 
 	rootCmd.AddCommand(lintCmd)

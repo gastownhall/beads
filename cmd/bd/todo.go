@@ -30,6 +30,9 @@ TODOs can be promoted to full issues by changing type or priority:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("todo is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("todo")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -50,6 +53,9 @@ var addTodoCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("todo add is not supported in proxied-server mode")
+		}
 		CheckReadonly("todo add")
 
 		evt := metrics.NewCommandEvent("todo-add")
@@ -103,6 +109,9 @@ var listTodosCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("todo list is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("todo-list")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -172,6 +181,9 @@ var doneTodoCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("todo done is not supported in proxied-server mode")
+		}
 		CheckReadonly("todo done")
 
 		evt := metrics.NewCommandEvent("todo-done")

@@ -387,6 +387,35 @@ func TestProxy_IdleTimeout_BlockedByActiveConn(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
+func TestProxy_IdleTimeout_Never(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port,
+		IdleTimeout: proxy.IdleTimeoutNever,
+		Server:      ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	// No client traffic and no timeout — proxy must stay up.
+	time.Sleep(3 * time.Second)
+	assert.Equal(t, int64(0), stats.Snapshot().IdleTimeouts)
+	pf, err := pidfile.Read(root, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, pf, "proxy should still be running")
+	_ = dialProxy(t, port).Close()
+
+	h.Cancel()
+	require.NoError(t, h.waitErr(t, shutdownWait))
+
+	assertNoPidFile(t, root)
+}
+
 func TestProxy_ConcurrentConnections(t *testing.T) {
 	t.Parallel()
 

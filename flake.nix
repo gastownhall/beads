@@ -9,6 +9,7 @@
     {
       self,
       nixpkgs,
+      ...
     }:
     let
       systems = [
@@ -18,22 +19,27 @@
         "x86_64-linux"
       ];
 
+      overlay = import ./overlay.nix self;
+
       forAllSystems =
         f:
         nixpkgs.lib.genAttrs systems (
           system:
-          f {
-            pkgs = import nixpkgs {
+          f (
+            import nixpkgs {
               inherit system;
-            };
-            inherit system self;
-          }
+              overlays = [ overlay ];
+            }
+          )
         );
-    in rec {
-      packages = forAllSystems (args: import ./packages.nix args);
+    in
+    {
+      overlays.default = overlay;
 
-      apps = forAllSystems (
-        { self, system, ... }:
+      packages = forAllSystems (import ./packages.nix);
+
+      apps = nixpkgs.lib.genAttrs systems (
+        system:
         rec {
           bd = {
             type = "app";
@@ -44,7 +50,7 @@
       );
 
       devShells = forAllSystems (
-        { pkgs, ... }:
+        pkgs:
         {
           default = pkgs.mkShell {
             buildInputs = with pkgs; [

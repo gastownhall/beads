@@ -504,7 +504,7 @@ grep 'vendorHash = ' default.nix
 [[steps]]
 id = "stamp-changelog"
 title = "Stamp changelog with release date"
-needs = ["snapshot-docs"]
+needs = ["update-vendorhash"]
 description = """
 Add the release date to the [Unreleased] section header.
 
@@ -526,28 +526,6 @@ Verify:
 ```bash
 grep -A2 '\\[Unreleased\\]' CHANGELOG.md
 ```
-"""
-
-[[steps]]
-id = "snapshot-docs"
-title = "Snapshot versioned documentation"
-needs = ["update-vendorhash"]
-description = """
-Create or verify the Docusaurus snapshot for {{version}} so the published docs
-version dropdown, default docs route, and llms-full artifact match the release.
-
-This is a single, idempotent script so version.go and the docs snapshot cannot
-drift apart. It installs website deps if needed, creates the versioned snapshot
-(if missing), points `docusaurus.config.ts` lastVersion at it, regenerates the
-CLI reference and llms-full.txt, and verifies consistency.
-
-```bash
-./scripts/snapshot-release-docs.sh {{version}}
-```
-
-If `scripts/update-versions.sh {{version}}` was used for the version bump, the
-docs snapshot has already run as part of that step (unless --skip-docs was
-passed) and this step just re-verifies.
 """
 
 [[steps]]

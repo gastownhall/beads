@@ -26,6 +26,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("undefer is not supported in proxied-server mode")
+		}
 		CheckReadonly("undefer")
 
 		evt := metrics.NewCommandEvent("undefer")

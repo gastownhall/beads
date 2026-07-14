@@ -29,9 +29,11 @@ type listInput struct {
 	labelPattern  string
 	labelRegex    string
 
-	titleContains string
-	descContains  string
-	notesContains string
+	titleContains    string
+	descContains     string
+	notesContains    string
+	externalContains string
+	externalRef      string
 
 	createdBefore *time.Time
 	createdAfter  *time.Time
@@ -139,6 +141,8 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.titleContains, _ = cmd.Flags().GetString("title-contains")
 	in.descContains, _ = cmd.Flags().GetString("desc-contains")
 	in.notesContains, _ = cmd.Flags().GetString("notes-contains")
+	in.externalContains, _ = cmd.Flags().GetString("external-contains")
+	in.externalRef, _ = cmd.Flags().GetString("external-ref")
 
 	in.emptyDesc, _ = cmd.Flags().GetBool("empty-description")
 	in.noAssignee, _ = cmd.Flags().GetBool("no-assignee")

@@ -45,6 +45,8 @@ func TestNewExternalDoltServerUOWProvider_ValidationErrors(t *testing.T) {
 				tc.external,
 				tc.rootUser,
 				"",
+				0,
+				0,
 			)
 			assert.Nil(t, p)
 			require.Error(t, err)
@@ -85,6 +87,8 @@ func TestNewExternalDoltServerUOWProvider_EndToEnd(t *testing.T) {
 		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: portInt},
 		"root",
 		"",
+		0,
+		0,
 	)
 	require.NoError(t, err)
 	require.NotNil(t, provider)
@@ -158,6 +162,8 @@ func TestNewExternalDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) 
 				external,
 				"root",
 				"",
+				0,
+				0,
 			)
 			results[i] = result{provider: p, err: err}
 		}()

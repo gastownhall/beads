@@ -263,6 +263,32 @@ func TestRemoveCodexRemovesSkillAndInstructionsSection(t *testing.T) {
 	}
 }
 
+func TestRemoveCodexKeepsSkillWhenCursorPresent(t *testing.T) {
+	env, _, _ := newCodexTestEnv(t)
+	if err := installCodex(env, false); err != nil {
+		t.Fatalf("installCodex returned error: %v", err)
+	}
+
+	// Simulate a Cursor install that shares the .agents/skills/beads skill by
+	// writing a bd-managed cursor hooks file under the same root.
+	cursorDir := filepath.Join(env.projectDir, ".cursor")
+	if err := os.MkdirAll(cursorDir, 0o755); err != nil {
+		t.Fatalf("mkdir .cursor: %v", err)
+	}
+	hooks := `{"version":1,"hooks":{"sessionStart":[{"command":"bd cursor-hook sessionStart"}]}}`
+	if err := os.WriteFile(filepath.Join(cursorDir, "hooks.json"), []byte(hooks), 0o644); err != nil {
+		t.Fatalf("write cursor hooks: %v", err)
+	}
+
+	if err := removeCodex(env, false); err != nil {
+		t.Fatalf("removeCodex returned error: %v", err)
+	}
+
+	if _, err := os.Stat(agentSkillPath(env.projectDir)); err != nil {
+		t.Errorf("skill should be kept while Cursor integration is present: %v", err)
+	}
+}
+
 func TestCodexHooksConfigMergeIsIdempotent(t *testing.T) {
 	env, _, _ := newCodexTestEnv(t)
 	configPath := codexConfigPath(env, false)

@@ -1,0 +1,33 @@
+---
+title: "bd show"
+description: "Show issue details"
+---
+
+{/* AUTO-GENERATED: do not edit manually */}
+
+Generated from `bd help --doc show`.
+
+Show issue details
+
+```
+bd show [id...] [--id=<id>...] [--current] [flags]
+```
+
+**Aliases:** view
+
+**Flags:**
+
+```
+      --as-of string         Show issue as it existed at a specific commit hash or branch (requires Dolt)
+      --children             Show only the children of this issue
+      --current              Show the currently active issue (in-progress, hooked, or last touched)
+      --id stringArray       Issue ID (use for IDs that look like flags, e.g., --id=gt--xyz)
+      --include-comments     Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments)
+      --include-dependents   Stream full dependent issues in JSON output (--json only; may be slow on hub beads)
+      --local-time           Show timestamps in local time instead of UTC
+      --long                 Show all available fields (extended metadata, agent identity, gate fields, etc.)
+      --refs                 Show issues that reference this issue (reverse lookup)
+      --short                Show compact one-line output per issue
+      --thread               Show full conversation thread (for messages)
+  -w, --watch                Watch for changes and auto-refresh display
+```

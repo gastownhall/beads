@@ -104,6 +104,9 @@ func init() {
 }
 
 func runImport(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("import is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("import")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -206,6 +209,18 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 		var peek map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &peek); err != nil {
 			return fmt.Errorf("failed to parse JSONL line: %w", err)
+		}
+
+		// Skip the optional beads-jsonl header record (§J1.3). A canonical
+		// export may prepend a provenance line, e.g.
+		// {"_schema":"beads-jsonl/1","_dolt_branch":"main","_sort":"stable-v1"}.
+		// It carries no _type and no issue fields; without this guard it falls
+		// through to the issue path, unmarshals into an empty Issue, and aborts
+		// the whole import with "title is required". parseJSONLFile (the
+		// bootstrap reader) has always skipped it; this loop — the one `bd
+		// import` and `bd import -` run through — did not.
+		if _, isHeader := peek["_schema"]; isHeader {
+			continue
 		}
 
 		if rawType, ok := peek["_type"]; ok {

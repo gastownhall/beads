@@ -8,6 +8,8 @@ on:
       - 'default.nix'
       - 'flake.nix'
       - 'flake.lock'
+      - 'overlay.nix'
+      - 'packages.nix'
   push:
     branches: [main]
     paths:
@@ -16,6 +18,8 @@ on:
       - 'default.nix'
       - 'flake.nix'
       - 'flake.lock'
+      - 'overlay.nix'
+      - 'packages.nix'
   workflow_dispatch:
 
 env:
@@ -31,6 +35,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
       - name: Install Nix
-        uses: DeterminateSystems/determinate-nix-action@9adf02b41cfdac2632e1c16f0480ff5bf3b05dd6 # v3
+        uses: DeterminateSystems/determinate-nix-action@629b284231c2a82554b724e357e47fc6020833c8 # v3
       - name: Build
         run: nix build .#default --print-build-logs

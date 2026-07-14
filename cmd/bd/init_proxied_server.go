@@ -17,29 +17,32 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/fs"
 	"github.com/steveyegge/beads/internal/storage/git"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
 type initProxiedServerInput struct {
-	prefix            string
-	database          string
-	roleFlag          string
-	initRemote        string
-	initRemoteChanged bool
-	destroyToken      string
-	serverConfigPath  string
-	serverLogPath     string
-	serverRootPath    string
-	externalConfig    *configfile.ExternalDoltConfig
-	quiet             bool
-	stealth           bool
-	skipHooks         bool
-	skipAgents        bool
-	reinitLocal       bool
-	contributor       bool
-	team              bool
-	fromJSONL         bool
-	nonInteractive    bool
+	prefix                 string
+	database               string
+	roleFlag               string
+	initRemote             string
+	initRemoteChanged      bool
+	destroyToken           string
+	serverConfigPath       string
+	serverLogPath          string
+	serverRootPath         string
+	serverProxyPort        int
+	serverProxyIdleTimeout time.Duration
+	externalConfig         *configfile.ExternalDoltConfig
+	quiet                  bool
+	stealth                bool
+	skipHooks              bool
+	skipAgents             bool
+	reinitLocal            bool
+	contributor            bool
+	team                   bool
+	fromJSONL              bool
+	nonInteractive         bool
 }
 
 func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput) error {
@@ -118,7 +121,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 	configYAMLBody := renderInitConfigYAML("", false)
 
-	clientInfo, err := buildProxiedServerClientInfo(in.serverRootPath, in.serverConfigPath, in.serverLogPath, in.externalConfig)
+	clientInfo, err := buildProxiedServerClientInfo(in.serverRootPath, in.serverConfigPath, in.serverLogPath, in.serverProxyPort, in.serverProxyIdleTimeout, in.externalConfig)
 	if err != nil {
 		return err
 	}
@@ -145,45 +148,47 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize version tracking: %v\n", fsResult.LocalVersionErr)
 	}
 
-	uowProvider, err := newProxiedServerUOWProvider(ctx, beadsDir)
+	initUOWProvider, err := newProxiedServerUOWProvider(ctx, beadsDir)
 	if err != nil {
 		return fmt.Errorf("failed to open uow provider: %v", err)
 	}
 
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		FatalError("failed to open unit of work: %v", err)
-	}
-	defer uw.Close(ctx)
+	remoteURL := resolveProxiedInitRemoteURL(ctx, gitUC, in)
 
-	bootstrapParams := domain.BootstrapProjectParams{
-		Prefix:         prefix,
-		ProjectID:      projectID,
-		BdVersion:      Version,
-		LastImportTime: time.Now(),
-	}
-
-	if repoID, err := beads.ComputeRepoID(); err == nil {
-		bootstrapParams.RepoID = repoID
+	var repoID, cloneID string
+	if id, err := beads.ComputeRepoID(); err == nil {
+		repoID = id
 	} else if !in.quiet {
 		fmt.Fprintf(os.Stderr, "Warning: could not compute repository ID: %v\n", err)
 	}
-	if cloneID, err := beads.GetCloneID(); err == nil {
-		bootstrapParams.CloneID = cloneID
+	if id, err := beads.GetCloneID(); err == nil {
+		cloneID = id
 	} else if !in.quiet {
 		fmt.Fprintf(os.Stderr, "Warning: could not compute clone ID: %v\n", err)
 	}
-	if remoteURL := resolveProxiedInitRemoteURL(ctx, gitUC, in); remoteURL != "" {
-		bootstrapParams.RemoteName = "origin"
-		bootstrapParams.RemoteURL = remoteURL
-	}
 
-	if _, err := uw.BootstrapUseCase().BootstrapProject(ctx, bootstrapParams); err != nil {
-		FatalError("bootstrap project: %v", err)
-	}
+	err = uow.RunTx(ctx, initUOWProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		bootstrapParams := domain.BootstrapProjectParams{
+			Prefix:         prefix,
+			ProjectID:      projectID,
+			BdVersion:      Version,
+			LastImportTime: time.Now(),
+			RepoID:         repoID,
+			CloneID:        cloneID,
+		}
+		if remoteURL != "" {
+			bootstrapParams.RemoteName = "origin"
+			bootstrapParams.RemoteURL = remoteURL
+		}
 
-	if err := uw.Commit(ctx, "bd init"); err != nil {
-		FatalError("commit init: %v", err)
+		if _, err := uw.BootstrapUseCase().BootstrapProject(ctx, bootstrapParams); err != nil {
+			return "", fmt.Errorf("bootstrap project: %w", err)
+		}
+
+		return "bd init", nil
+	})
+	if err != nil {
+		return HandleError("%v", err)
 	}
 
 	return runInitProxiedServerTail(cmd, ctx, in, runInitTailContext{
@@ -191,7 +196,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		prefix:        prefix,
 		dbName:        dbName,
 		useLocalBeads: useLocalBeads,
-		remoteURL:     bootstrapParams.RemoteURL,
+		remoteURL:     remoteURL,
 		fsUseCase:     fsUseCase,
 		gitUC:         gitUC,
 	})
@@ -254,8 +259,8 @@ func composeProxiedServerMetadataJSON(in proxiedMetadataInputs) ([]byte, error) 
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
-func buildProxiedServerClientInfo(rootPath, configPath, logPath string, external *configfile.ExternalDoltConfig) (*configfile.ProxiedServerClientInfo, error) {
-	if rootPath == "" && configPath == "" && logPath == "" && external == nil {
+func buildProxiedServerClientInfo(rootPath, configPath, logPath string, port int, idleTimeout time.Duration, external *configfile.ExternalDoltConfig) (*configfile.ProxiedServerClientInfo, error) {
+	if rootPath == "" && configPath == "" && logPath == "" && port == 0 && idleTimeout == 0 && external == nil {
 		return nil, nil
 	}
 	clean := func(p string) (string, error) {
@@ -285,10 +290,12 @@ func buildProxiedServerClientInfo(rootPath, configPath, logPath string, external
 		}
 	}
 	return &configfile.ProxiedServerClientInfo{
-		RootPath:   rootAbs,
-		ConfigPath: configAbs,
-		LogPath:    logAbs,
-		External:   external,
+		RootPath:    rootAbs,
+		ConfigPath:  configAbs,
+		LogPath:     logAbs,
+		Port:        port,
+		IdleTimeout: idleTimeout,
+		External:    external,
 	}, nil
 }
 

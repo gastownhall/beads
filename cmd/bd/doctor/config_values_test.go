@@ -376,7 +376,7 @@ func TestExpandPath(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"tilde only", "~", homeDir},
+		{"tilde only", "~", filepath.Clean(homeDir)},
 		{"tilde path", "~/foo/bar", filepath.Join(homeDir, "foo/bar")},
 		{"no tilde", "/absolute/path", "/absolute/path"},
 		{"relative", "relative/path", "relative/path"},

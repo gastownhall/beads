@@ -1392,13 +1392,13 @@ func BenchmarkPerfReadyWorkLimited_LargeBlockedGraph(b *testing.B) {
 	}
 }
 
-func BenchmarkPerfReadyWorkLimited_GasCityWispHeavy(b *testing.B) {
+func BenchmarkPerfReadyWorkLimited_ExampleOrgWispHeavy(b *testing.B) {
 	const (
 		wispCount    = 8000
 		readyLimit   = 20
-		gcAssignee   = "gascity/workflows.codex-min-11"
-		gcRoute      = "gascity/workflows.codex-min-11"
-		routeJSON    = `{"gc.routed_to":"gascity/workflows.codex-min-11"}`
+		gcAssignee   = "example-org/workflows.codex-min-11"
+		gcRoute      = "example-org/workflows.codex-min-11"
+		routeJSON    = `{"route.routed_to":"example-org/workflows.codex-min-11"}`
 		emptyJSON    = `{}`
 		closedStatus = types.StatusClosed
 	)
@@ -1449,7 +1449,7 @@ func BenchmarkPerfReadyWorkLimited_GasCityWispHeavy(b *testing.B) {
 			name: "MetadataRouteDenseLimit20Of8000",
 			filter: types.WorkFilter{
 				Unassigned:       true,
-				MetadataFields:   map[string]string{"gc.routed_to": gcRoute},
+				MetadataFields:   map[string]string{"route.routed_to": gcRoute},
 				IncludeEphemeral: true,
 				Limit:            readyLimit,
 				SortPolicy:       types.SortPolicyPriority,
@@ -1546,10 +1546,10 @@ func BenchmarkPerfReadyWorkLimited_GasCityWispHeavy(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				results, err := store.GetReadyWork(ctx, tc.filter)
 				if err != nil {
-					b.Fatalf("GetReadyWork gascity wisps: %v", err)
+					b.Fatalf("GetReadyWork example-org wisps: %v", err)
 				}
 				if len(results) != readyLimit {
-					b.Fatalf("GetReadyWork gascity wisps returned %d issues, want %d", len(results), readyLimit)
+					b.Fatalf("GetReadyWork example-org wisps returned %d issues, want %d", len(results), readyLimit)
 				}
 			}
 		})

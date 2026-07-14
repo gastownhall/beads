@@ -10,16 +10,17 @@ Key scripts include version bumping, installation helpers that inject git inform
 
 ## generate-cli-docs.sh
 
-Generates maintained CLI reference docs from the live Cobra command tree exposed by `bd help`.
+Generates maintained CLI reference docs from the live Cobra command tree in
+two stages: `bd help --docs-root` emits vendor-neutral output (the single-file
+reference plus a generic per-command tree in uncommitted staging), then
+`tools/docsmint` post-processes the staging tree into the committed Mintlify
+pages and splices the CLI Reference pages array in `docs/docs.json`.
 
 ### Usage
 
 ```bash
 # Regenerate checked-in CLI docs using a temporary no-cgo build
 ./scripts/generate-cli-docs.sh
-
-# Regenerate the live docs and one release snapshot
-./scripts/generate-cli-docs.sh --versioned 1.0.5
 
 # Regenerate/check against an existing binary
 ./scripts/generate-cli-docs.sh ./bd
@@ -29,26 +30,11 @@ Generates maintained CLI reference docs from the live Cobra command tree exposed
 ### Outputs
 
 - `docs/CLI_REFERENCE.md` from the live Cobra command tree
-- `website/docs/cli-reference/*.md` from the live Cobra command tree
-- `website/versioned_docs/version-X.Y.Z/cli-reference/*.md` only when `--versioned X.Y.Z` is supplied by the release snapshot workflow
-- `website/static/llms-full.txt` freshness is checked from the same generated website docs tree
+- `docs/cli-reference/*.md` (Mintlify pages) via `tools/docsmint`
+- the CLI Reference pages array in `docs/docs.json`
 
-`scripts/check-doc-flags.sh` runs the `--check` mode in CI and fails when live top-level commands are missing from live generated docs or `llms-full.txt` is stale. Historical Docusaurus CLI snapshots are release artifacts; ordinary PR checks do not rewrite them to match unreleased commands.
-
-## check-docs-version.sh
-
-Validates the released Docusaurus docs metadata:
-
-- `website/versions.json` latest entry and `website/docusaurus.config.ts` `lastVersion` agree
-- the matching `website/versioned_docs/version-X.Y.Z` and sidebar snapshot exist
-- the versioned CLI reference label matches the latest released docs snapshot
-- `website/static/llms-full.txt` is sourced from the latest released snapshot
-
-Default CI mode does not require the latest released docs snapshot to equal
-`cmd/bd/version.go`, because a version bump may land before the release is cut.
-Use `BEADS_REQUIRE_RELEASE_DOCS=1 ./scripts/check-docs-version.sh`, or run from a
-`v*` tag, for release preflight mode where the docs snapshot must match the
-current binary version.
+`scripts/check-cli-docs-drift.sh` runs the `--check` mode in CI and fails when
+the committed copies are stale relative to the live command tree.
 
 ## check-doc-freshness.sh
 
@@ -61,7 +47,7 @@ Validates marker-based freshness for reference-shaped docs that are not generate
 make check-docs
 ```
 
-The script currently checks the reference docs named in `docs/DOC_INVENTORY.md`: `CONFIG.md`, `SETUP.md`, `ADO_CONFIG.md`, `JSON_SCHEMA.md`, `RECOVERY.md`, `ERROR_HANDLING.md`, `LINTING.md`, and `design/otel/otel-data-model.md`. Each doc must be listed in the inventory, include a recent `Last reviewed:` marker, include a `Freshness source:` marker, and name source paths or globs that exist in the repository.
+The script currently checks the reference docs named in `engdocs/DOC_INVENTORY.md`: `CONFIG.md`, `SETUP.md`, `ADO_CONFIG.md`, `JSON_SCHEMA.md`, `RECOVERY.md`, `ERROR_HANDLING.md`, `LINTING.md`, and `design/otel/otel-data-model.md`. Each doc must be listed in the inventory, include a recent `Last reviewed:` marker, include a `Freshness source:` marker, and name source paths or globs that exist in the repository.
 
 Set `DOC_FRESHNESS_MAX_AGE_DAYS` to override the default 90-day review window. Set `DOC_FRESHNESS_TODAY=YYYY-MM-DD` when testing date behaviour.
 

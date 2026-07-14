@@ -1273,9 +1273,9 @@ func TestFinalizeSyncedBootstrap_WorktreeStubDoesNotShadowTargetConfig(t *testin
 		t.Fatal(err)
 	}
 
-	const remoteURL = "git+ssh://git@github.com/gastownhall/gascity.git"
+	const remoteURL = "git+ssh://git@github.com/example-org/example-app.git"
 	cfg := configfile.DefaultConfig()
-	if err := finalizeSyncedBootstrap(targetBeadsDir, remoteURL, cfg, "gascity"); err != nil {
+	if err := finalizeSyncedBootstrap(targetBeadsDir, remoteURL, cfg, "example-org"); err != nil {
 		t.Fatalf("finalizeSyncedBootstrap failed: %v", err)
 	}
 

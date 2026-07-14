@@ -45,15 +45,8 @@ jobs:
           fi
           echo "OK: tag and version.go agree on $code_version"
 
-      - name: Check version + docs consistency
-        run: |
-          tag_version="${GITHUB_REF_NAME#v}"
-          if [[ "$tag_version" == *-* ]]; then
-            echo "Prerelease tag detected; stable docs snapshot may remain on latest stable release."
-            ./scripts/check-versions.sh
-          else
-            BEADS_REQUIRE_RELEASE_DOCS=1 ./scripts/check-versions.sh
-          fi
+      - name: Check version consistency
+        run: ./scripts/check-versions.sh
 
   release-package-mcp:
     name: Release Package Gate (MCP)
@@ -65,12 +58,12 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.14'
 
@@ -98,7 +91,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -110,24 +103,6 @@ jobs:
       - name: Run npm package gate
         run: make ci-package-npm
 
-  release-package-website:
-    name: Release Package Gate (website)
-    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
-    needs: verify-version-consistency
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
-
-      - name: Set up Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: website/package-lock.json
-
-      - name: Run website package gate
-        run: make ci-website
 
   goreleaser:
     # Guard: only run goreleaser in the canonical repository (not in forks)
@@ -135,7 +110,6 @@ jobs:
     needs:
       - release-package-mcp
       - release-package-npm
-      - release-package-website
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -144,7 +118,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -157,7 +131,7 @@ jobs:
         run: go install github.com/tc-hib/go-winres@latest
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:
           distribution: goreleaser
           version: '~> v2'
@@ -185,7 +159,7 @@ jobs:
       - name: Publish the contract corpus as a release artifact
         # Ships the canonicalized golden corpus (cmd/bd/protocol/testdata/corpus)
         # with each release and appends its checksum to the release checksums.txt,
-        # so Gas City can anchor its vendored-corpus drift-check to a signed
+        # so a downstream consumer can anchor its vendored-corpus drift-check to a signed
         # beads release rather than a self-recomputed manifest. Runs before the
         # macOS job's serial checksums.txt append (goreleaser-macos needs this
         # job), so the entry is preserved.
@@ -224,7 +198,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: 'go.mod'
 
@@ -361,12 +335,12 @@ jobs:
         run: gh release upload "${GITHUB_REF_NAME}" "${{ steps.assets.outputs.sbom }}" --clobber
 
       - name: Attest release artifacts
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
         with:
           subject-checksums: ${{ steps.assets.outputs.checksums }}
 
       - name: Attest release SBOM
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
         with:
           subject-checksums: ${{ steps.assets.outputs.checksums }}
           sbom-path: ${{ steps.assets.outputs.sbom }}
@@ -380,7 +354,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.14'
 
