@@ -68,7 +68,7 @@ func fixBeadsDirPermissions(path string, openDir func(string) (beadsDirHandle, e
 	if err != nil {
 		return false, fmt.Errorf("failed to open %s securely: %w", path, err)
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 
 	openedInfo, err := dir.Stat()
 	if err != nil {
