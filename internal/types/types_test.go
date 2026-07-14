@@ -1612,3 +1612,77 @@ func TestBondRefUnmarshalJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestComputeNotesPreview(t *testing.T) {
+	tests := []struct {
+		name  string
+		notes string
+		want  string
+	}{
+		{
+			name:  "empty notes",
+			notes: "",
+			want:  "",
+		},
+		{
+			name:  "short notes unchanged",
+			notes: "Quick note about this issue.",
+			want:  "Quick note about this issue.",
+		},
+		{
+			name:  "exactly 200 chars not truncated",
+			notes: strings.Repeat("a", NotesPreviewMaxLen),
+			want:  strings.Repeat("a", NotesPreviewMaxLen),
+		},
+		{
+			name:  "201 chars truncated with ellipsis",
+			notes: strings.Repeat("b", NotesPreviewMaxLen+1),
+			want:  strings.Repeat("b", NotesPreviewMaxLen) + "...",
+		},
+		{
+			name:  "long notes truncated",
+			notes: strings.Repeat("x", 500),
+			want:  strings.Repeat("x", NotesPreviewMaxLen) + "...",
+		},
+		{
+			name:  "unicode handled by rune count",
+			notes: strings.Repeat("\U0001f600", NotesPreviewMaxLen+1), // emoji (multi-byte)
+			want:  strings.Repeat("\U0001f600", NotesPreviewMaxLen) + "...",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ComputeNotesPreview(tt.notes)
+			if got != tt.want {
+				t.Errorf("ComputeNotesPreview() = %q (len %d), want %q (len %d)",
+					got, len(got), tt.want, len(tt.want))
+			}
+		})
+	}
+}
+
+func TestIssueWithCounts_NotesPreviewJSON(t *testing.T) {
+	iwc := &IssueWithCounts{
+		Issue: &Issue{
+			ID:    "test-1",
+			Title: "No notes",
+		},
+	}
+	data, err := json.Marshal(iwc)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+	if strings.Contains(string(data), "notes_preview") {
+		t.Errorf("expected notes_preview to be omitted when empty, got: %s", data)
+	}
+
+	iwc.NotesPreview = "Some preview text"
+	data, err = json.Marshal(iwc)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+	if !strings.Contains(string(data), `"notes_preview":"Some preview text"`) {
+		t.Errorf("expected notes_preview in JSON output, got: %s", data)
+	}
+}

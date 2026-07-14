@@ -746,7 +746,23 @@ type IssueWithCounts struct {
 	DependencyCount int     `json:"dependency_count"`
 	DependentCount  int     `json:"dependent_count"`
 	CommentCount    int     `json:"comment_count"`
-	Parent          *string `json:"parent,omitempty"` // Computed parent from parent-child dep (bd-ym8c)
+	Parent       *string `json:"parent,omitempty"`        // Computed parent from parent-child dep (bd-ym8c)
+	NotesPreview string  `json:"notes_preview,omitempty"` // First 200 chars of notes (truncated with "...")
+}
+
+// NotesPreviewMaxLen is the maximum character length for NotesPreview before truncation.
+const NotesPreviewMaxLen = 200
+
+// ComputeNotesPreview returns the first NotesPreviewMaxLen characters of notes,
+// appending "..." if truncated. Returns empty string if notes is empty.
+func ComputeNotesPreview(notes string) string {
+	if notes == "" {
+		return ""
+	}
+	if len([]rune(notes)) <= NotesPreviewMaxLen {
+		return notes
+	}
+	return string([]rune(notes)[:NotesPreviewMaxLen]) + "..."
 }
 
 // IssueDetails extends Issue with labels, dependencies, dependents, and comments.
