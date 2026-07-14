@@ -36,6 +36,7 @@ var (
 	graphAll     bool
 	graphDOT     bool
 	graphHTML    bool
+	graphOpen    bool
 )
 
 var graphCmd = &cobra.Command{
@@ -48,6 +49,7 @@ For epics, shows all children and their dependencies.
 For regular issues, shows the issue and its direct dependencies.
 
 With --all, shows all open issues grouped by connected component.
+With --open, filters to only open/actionable issues (compact layer format).
 
 Display formats:
   (default)        DAG with columns and box-drawing edges (terminal-native)
@@ -55,6 +57,7 @@ Display formats:
   --compact        Tree format, one line per issue, more scannable
   --dot            Graphviz DOT format (pipe to dot -Tsvg > graph.svg)
   --html           Self-contained interactive HTML with D3.js visualization
+  --open           Open issues only, compact layers (LLM-friendly)
 
 The graph shows execution order:
 - Layer 0 / leftmost = no dependencies (can start immediately)
@@ -69,11 +72,16 @@ Examples:
   bd graph --dot issue-id | dot -Tsvg > graph.svg  # SVG via Graphviz
   bd graph --dot issue-id | dot -Tpng > graph.png  # PNG via Graphviz
   bd graph --html issue-id > graph.html  # Interactive browser view
-  bd graph --all --html > all.html       # All issues, interactive`,
+  bd graph --all --html > all.html       # All issues, interactive
+  bd graph --open issue-id       # Open issues only, layered by blocking order
+  bd graph --all --open          # All open issues, compact layers`,
 	Args:          cobra.RangeArgs(0, 1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("graph is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("graph")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -100,6 +108,17 @@ Examples:
 				return HandleErrorRespectJSON("loading all issues: %v", err)
 			}
 
+			if graphOpen {
+				var filtered []*TemplateSubgraph
+				for _, sg := range subgraphs {
+					f := filterSubgraphOpen(sg)
+					if f != nil && len(f.Issues) > 0 {
+						filtered = append(filtered, f)
+					}
+				}
+				subgraphs = filtered
+			}
+
 			if len(subgraphs) == 0 {
 				fmt.Println("No open issues found")
 				return nil
@@ -109,10 +128,21 @@ Examples:
 				return outputJSON(subgraphs)
 			}
 
-			if graphHTML {
+			if graphHTML && !graphOpen {
 				merged := mergeSubgraphsForHTML(subgraphs)
 				layout := computeLayout(merged)
 				renderGraphHTML(layout, merged)
+				return nil
+			}
+
+			if graphOpen {
+				for i, subgraph := range subgraphs {
+					layout := computeLayout(subgraph)
+					renderGraphCompact(layout, subgraph)
+					if i < len(subgraphs)-1 {
+						fmt.Println(strings.Repeat("─", 60))
+					}
+				}
 				return nil
 			}
 
@@ -144,6 +174,14 @@ Examples:
 			return HandleErrorRespectJSON("loading graph: %v", err)
 		}
 
+		if graphOpen {
+			subgraph = filterSubgraphOpen(subgraph)
+			if subgraph == nil || len(subgraph.Issues) == 0 {
+				fmt.Println("No open issues in subgraph")
+				return nil
+			}
+		}
+
 		layout := computeLayout(subgraph)
 
 		if jsonOutput {
@@ -152,6 +190,11 @@ Examples:
 				"issues": subgraph.Issues,
 				"layout": layout,
 			})
+		}
+
+		if graphOpen {
+			renderGraphCompact(layout, subgraph)
+			return nil
 		}
 
 		if graphDOT {
@@ -178,6 +221,9 @@ Returns exit code 0 if the graph is clean, 1 if issues are found.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("graph check is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("graph-check")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -256,6 +302,7 @@ func init() {
 	graphCmd.Flags().BoolVar(&graphBox, "box", false, "ASCII boxes showing layers")
 	graphCmd.Flags().BoolVar(&graphDOT, "dot", false, "Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)")
 	graphCmd.Flags().BoolVar(&graphHTML, "html", false, "Output self-contained interactive HTML (redirect to file)")
+	graphCmd.Flags().BoolVar(&graphOpen, "open", false, "Show only open issues (filters out closed/deferred), forces compact layer format")
 	graphCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(graphCmd)
 	graphCmd.AddCommand(graphCheckCmd)
@@ -534,6 +581,130 @@ func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage) ([]*Templ
 	}
 
 	return subgraphs, nil
+}
+
+// isOpenStatus returns true for statuses considered "open" / actionable.
+// Closed and deferred (frozen) issues are excluded by --open.
+func isOpenStatus(s types.Status) bool {
+	switch s {
+	case types.StatusOpen, types.StatusInProgress, types.StatusBlocked:
+		return true
+	default:
+		return false
+	}
+}
+
+// filterSubgraphOpen removes closed/deferred issues from a subgraph and
+// computes a transitive closure of blocking edges through removed nodes so
+// that indirect blocking relationships are preserved.
+//
+// Example: if A(open) blocks B(closed) blocks C(open), the filtered graph
+// contains A and C with a synthetic edge A→C.
+func filterSubgraphOpen(subgraph *TemplateSubgraph) *TemplateSubgraph {
+	if subgraph == nil {
+		return nil
+	}
+
+	openSet := make(map[string]bool)
+	for _, issue := range subgraph.Issues {
+		if isOpenStatus(issue.Status) {
+			openSet[issue.ID] = true
+		}
+	}
+
+	if len(openSet) == 0 {
+		return nil
+	}
+
+	// Build full blocking graph (all nodes, including closed) for transitive
+	// closure. blocksAdj: A→B means "A blocks B" (B depends on A).
+	blocksAdj := make(map[string][]string)
+	for _, dep := range subgraph.Dependencies {
+		if dep.Type == types.DepBlocks {
+			blocksAdj[dep.DependsOnID] = append(blocksAdj[dep.DependsOnID], dep.IssueID)
+		}
+	}
+
+	// For each open node, BFS forward through the blocking graph to find all
+	// reachable open nodes. Each such reachable open node has a transitive
+	// blocking relationship.
+	type edge struct{ from, to string }
+	syntheticEdges := make(map[edge]bool)
+
+	for src := range openSet {
+		visited := map[string]bool{src: true}
+		queue := []string{src}
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+			for _, next := range blocksAdj[cur] {
+				if visited[next] {
+					continue
+				}
+				visited[next] = true
+				if openSet[next] {
+					syntheticEdges[edge{src, next}] = true
+				}
+				if !openSet[next] {
+					queue = append(queue, next)
+				}
+			}
+		}
+	}
+
+	// Build filtered subgraph
+	filtered := &TemplateSubgraph{
+		IssueMap: make(map[string]*types.Issue, len(openSet)),
+	}
+	for _, issue := range subgraph.Issues {
+		if openSet[issue.ID] {
+			filtered.Issues = append(filtered.Issues, issue)
+			filtered.IssueMap[issue.ID] = issue
+		}
+	}
+
+	// Keep non-blocks deps where both ends are open, and rebuild blocks
+	// deps from the transitive closure.
+	seen := make(map[edge]bool)
+	for _, dep := range subgraph.Dependencies {
+		if !openSet[dep.IssueID] || !openSet[dep.DependsOnID] {
+			continue
+		}
+		if dep.Type == types.DepBlocks {
+			e := edge{dep.DependsOnID, dep.IssueID}
+			if !seen[e] {
+				seen[e] = true
+				filtered.Dependencies = append(filtered.Dependencies, dep)
+			}
+		} else {
+			filtered.Dependencies = append(filtered.Dependencies, dep)
+		}
+	}
+	// Add synthetic transitive edges
+	for e := range syntheticEdges {
+		if seen[e] {
+			continue
+		}
+		seen[e] = true
+		filtered.Dependencies = append(filtered.Dependencies, &types.Dependency{
+			IssueID:     e.to,
+			DependsOnID: e.from,
+			Type:        types.DepBlocks,
+		})
+	}
+
+	// Pick root: prefer original root if still open, else highest-priority open issue
+	if subgraph.Root != nil && openSet[subgraph.Root.ID] {
+		filtered.Root = subgraph.Root
+	} else {
+		for _, issue := range filtered.Issues {
+			if filtered.Root == nil || issue.Priority < filtered.Root.Priority {
+				filtered.Root = issue
+			}
+		}
+	}
+
+	return filtered
 }
 
 // computeLayout assigns layers to nodes using topological sort

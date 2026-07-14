@@ -686,6 +686,8 @@ func init() {
 	listCmd.Flags().String("title-contains", "", "Filter by title substring (case-insensitive)")
 	listCmd.Flags().String("desc-contains", "", "Filter by description substring (case-insensitive)")
 	listCmd.Flags().String("notes-contains", "", "Filter by notes substring (case-insensitive)")
+	listCmd.Flags().String("external-contains", "", "Filter by external ref substring (case-insensitive)")
+	listCmd.Flags().String("external-ref", "", "Filter by exact external_ref value")
 
 	// Date ranges
 	listCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")

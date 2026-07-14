@@ -1238,7 +1238,7 @@ func TestPrintAncestorPKMismatchGuidance(t *testing.T) {
 	if !strings.Contains(output, "bd bootstrap") {
 		t.Error("expected guidance to mention re-cloning via bd bootstrap")
 	}
-	if !strings.Contains(output, "docs/RECOVERY.md#pk-fork-refused") {
+	if !strings.Contains(output, "docs/recovery/init-safety.md#pk-fork-refused") {
 		t.Error("expected guidance to link the full recovery playbook")
 	}
 }
@@ -1732,8 +1732,7 @@ func TestNoPushSkipsDoltPush(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		doltPushCmd.Run(doltPushCmd, nil)
-		return nil
+		return doltPushCmd.RunE(doltPushCmd, nil)
 	})
 
 	if fake.pushCalled {
@@ -1770,8 +1769,7 @@ func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		doltPullCmd.Run(doltPullCmd, nil)
-		return nil
+		return doltPullCmd.RunE(doltPullCmd, nil)
 	})
 
 	if !fake.pullCalled {

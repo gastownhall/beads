@@ -172,3 +172,88 @@ check_fidelity() {
 
     return "$violations"
 }
+
+# Post-upgrade blocker-query assertions.
+#
+# check_fidelity (above) only reads back list/show JSON — it never exercises
+# bd's blocker-aware query paths (bd ready, bd blocked) or bd close on a
+# migrated DB. That is exactly the surface of the historical "bd close"
+# errno 1105 failure on a stale post-migration dependency schema (mybd-ihg5,
+# verified manually for the 1.0.5 release in mybd-kdxj). This function gives
+# that path permanent regression coverage.
+#
+# Uses the BUG->TASK dependency created by create_dataset() (features.sh):
+# `dep add "$bug_id" "$task_id"` means the bug DEPENDS ON the task, i.e. the
+# task is the blocker and the bug is the blocked dependent. Requires
+# DATASET_IDS[task] and DATASET_IDS[bug] to be set and "dependency" to be
+# present in DATASET_FEATURES; skips gracefully (0 violations) when the
+# source version's dataset has no dependency (e.g. `dep add` unsupported).
+#
+# Args: ws bin
+# Returns the number of violations found.
+check_blocker_paths() {
+    local ws="$1"
+    local bin="$2"
+    local violations=0
+
+    local has_dep=false
+    local f
+    for f in "${DATASET_FEATURES[@]:-}"; do
+        if [ "$f" = "dependency" ]; then
+            has_dep=true
+            break
+        fi
+    done
+    if ! $has_dep; then
+        echo "  BLOCKER-CHECK: skipped (no dependency in dataset)"
+        return 0
+    fi
+
+    local blocker_id="${DATASET_IDS[task]:-}"
+    local dependent_id="${DATASET_IDS[bug]:-}"
+    if [ -z "$blocker_id" ] || [ -z "$dependent_id" ]; then
+        echo "  BLOCKER-CHECK: skipped (task/bug id missing from dataset)"
+        return 0
+    fi
+
+    # 1. bd blocked must list the dependent (bug) while the blocker (task) is
+    #    still open — proves is_blocked survived migration on the dependent.
+    local blocked_json
+    blocked_json=$(bd_in "$ws" "$bin" blocked --json 2>/dev/null) || true
+    if ! echo "$blocked_json" | jq -e --arg id "$dependent_id" 'any(.[]?; .id == $id)' >/dev/null 2>&1; then
+        echo -e "  ${RED:-}BLOCKER-CHECK VIOLATION: 'bd blocked' does not list dependent '$dependent_id' while blocker '$blocker_id' is open${NC:-}"
+        violations=$((violations + 1))
+    fi
+
+    # 2. bd ready must NOT list the dependent, but MUST list the blocker.
+    local ready_json
+    ready_json=$(bd_in "$ws" "$bin" ready --json 2>/dev/null) || true
+    if echo "$ready_json" | jq -e --arg id "$dependent_id" 'any(.[]?; .id == $id)' >/dev/null 2>&1; then
+        echo -e "  ${RED:-}BLOCKER-CHECK VIOLATION: 'bd ready' lists blocked dependent '$dependent_id'${NC:-}"
+        violations=$((violations + 1))
+    fi
+    if ! echo "$ready_json" | jq -e --arg id "$blocker_id" 'any(.[]?; .id == $id)' >/dev/null 2>&1; then
+        echo -e "  ${RED:-}BLOCKER-CHECK VIOLATION: 'bd ready' does not list open blocker '$blocker_id'${NC:-}"
+        violations=$((violations + 1))
+    fi
+
+    # 3. Closing the blocker must succeed on the migrated schema (the errno
+    #    1105 surface) and must unblock the dependent (is_blocked recompute).
+    if ! bd_in "$ws" "$bin" close "$blocker_id" >/dev/null 2>&1; then
+        echo -e "  ${RED:-}BLOCKER-CHECK VIOLATION: 'bd close $blocker_id' failed after migration (errno 1105 / stale-schema regression)${NC:-}"
+        violations=$((violations + 1))
+    else
+        local ready_after_json
+        ready_after_json=$(bd_in "$ws" "$bin" ready --json 2>/dev/null) || true
+        if ! echo "$ready_after_json" | jq -e --arg id "$dependent_id" 'any(.[]?; .id == $id)' >/dev/null 2>&1; then
+            echo -e "  ${RED:-}BLOCKER-CHECK VIOLATION: dependent '$dependent_id' not ready after blocker '$blocker_id' closed${NC:-}"
+            violations=$((violations + 1))
+        fi
+    fi
+
+    if [ "$violations" -eq 0 ]; then
+        echo -e "  ${GREEN:-}BLOCKER-CHECK: bd blocked/ready/close all correct on migrated DB${NC:-}"
+    fi
+
+    return "$violations"
+}

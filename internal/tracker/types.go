@@ -44,6 +44,12 @@ type TrackerIssue struct {
 	ParentID         string // Parent issue identifier (for subtasks/children)
 	ParentInternalID string // Parent issue internal ID
 
+	// Warnings carries non-fatal, partial-success messages from a create/update
+	// (e.g. the issue was created but a follow-up state change failed). The sync
+	// engine drains these into the sync result's warnings so a degraded push is
+	// visible in --json output instead of being silently swallowed.
+	Warnings []string
+
 	// Raw data for tracker-specific processing
 	Raw interface{} // Original API response for tracker-specific access
 

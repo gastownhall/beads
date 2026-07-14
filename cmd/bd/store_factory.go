@@ -15,6 +15,9 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	beadsmysql "github.com/steveyegge/beads/internal/storage/mysql"
+	"github.com/steveyegge/beads/internal/storage/postgres"
+	beadssqlite "github.com/steveyegge/beads/internal/storage/sqlite"
 )
 
 func usesSQLServer() bool {
@@ -107,6 +110,15 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 		// metadata.json (cfg == nil, err == nil) keeps the embedded default.
 		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
 	}
+	if cfg != nil && cfg.GetBackend() == configfile.BackendPostgres {
+		return postgres.NewFromConfig(ctx, beadsDir)
+	}
+	if cfg != nil && cfg.GetBackend() == configfile.BackendMySQL {
+		return beadsmysql.NewFromConfig(ctx, beadsDir)
+	}
+	if cfg != nil && cfg.GetBackend() == configfile.BackendSQLite {
+		return beadssqlite.NewFromConfig(ctx, beadsDir)
+	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
 		return nil, fmt.Errorf("proxy server store should be uow provider")
@@ -186,6 +198,18 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 		// and the error must name the real cause rather than the downstream
 		// "database not found" the embedded open would produce.
 		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
+	}
+	if cfg != nil && cfg.GetBackend() == configfile.BackendPostgres {
+		// Postgres has no read-only open mode in the wedge; a normal open is fine
+		// (reads don't mutate, and search_path is per-workspace).
+		return postgres.NewFromConfig(ctx, beadsDir)
+	}
+	if cfg != nil && cfg.GetBackend() == configfile.BackendMySQL {
+		// MySQL likewise has no separate read-only open in the wedge; reads don't mutate.
+		return beadsmysql.NewFromConfig(ctx, beadsDir)
+	}
+	if cfg != nil && cfg.GetBackend() == configfile.BackendSQLite {
+		return beadssqlite.NewFromConfig(ctx, beadsDir)
 	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider

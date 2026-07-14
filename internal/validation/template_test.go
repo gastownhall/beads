@@ -113,6 +113,28 @@ Widget displays correctly`,
 			wantErr:     true,
 			wantMissing: 1,
 		},
+		{
+			// GH#3834: epics accept "Acceptance Criteria" as an alias for the
+			// canonical "Success Criteria" heading.
+			name:      "epic with acceptance criteria heading",
+			issueType: types.TypeEpic,
+			description: `Big project
+
+## Acceptance Criteria
+- Project ships
+- Users happy`,
+			wantErr: false,
+		},
+		{
+			// The epic alias must not leak to other types: a feature still
+			// requires "Acceptance Criteria" and is not satisfied by "Success
+			// Criteria".
+			name:        "feature not satisfied by success criteria",
+			issueType:   types.TypeFeature,
+			description: "Ship it\n\n## Success Criteria\n- done",
+			wantErr:     true,
+			wantMissing: 1,
+		},
 
 		// Types with no requirements
 		{

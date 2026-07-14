@@ -294,10 +294,16 @@ func TestSchemaMigrationRejectsChangedPreExistingDirtyTable(t *testing.T) {
 		t.Fatalf("commit cleared custom_statuses: %v", err)
 	}
 
+	// Leave an UNCOMMITTED user write on custom_statuses: the pass's backfill
+	// (re-inserting 'review' from config) then changes a pre-existing dirty
+	// table mid-pass, which the changed-signature guard must reject.
+	// (Historically this test dirtied dolt_ignore and relied on the pass's
+	// pattern re-seed to flip it; dolt_ignore is now pass-owned state exempt
+	// from the guard, so the canary is a real user table.)
 	if _, err := store.db.ExecContext(ctx,
-		"REPLACE INTO dolt_ignore VALUES ('ignored_schema_migrations', false)",
+		"INSERT INTO custom_statuses (name, category) VALUES ('scratch', 'wip')",
 	); err != nil {
-		t.Fatalf("dirty dolt_ignore: %v", err)
+		t.Fatalf("dirty custom_statuses: %v", err)
 	}
 
 	_, err := initSchemaOnDB(ctx, store.db)

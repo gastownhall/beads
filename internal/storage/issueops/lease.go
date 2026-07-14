@@ -82,6 +82,22 @@ func leaseSetClause(now time.Time, ttl time.Duration) (string, []interface{}) {
 		[]interface{}{now.Add(ttl), now, freshRowLock()}
 }
 
+// LeaseSetClause is the exported form of leaseSetClause, for the proxied-server
+// (uow) claim path in internal/storage/domain/db, which builds its own claim
+// UPDATE rather than calling ClaimIssueInTx. Keeping both paths on this one
+// helper is what stops the proxied path from reintroducing the missing-lease /
+// cell-merge bug the row_lock invariant guards against.
+func LeaseSetClause(now time.Time, ttl time.Duration) (string, []interface{}) {
+	return leaseSetClause(now, ttl)
+}
+
+// LeaseTTL is the exported form of leaseTTL: it resolves the lease TTL for the
+// current claim from the context (WithLeaseTTL) or falls back to
+// DefaultLeaseTTL.
+func LeaseTTL(ctx context.Context) time.Duration {
+	return leaseTTL(ctx)
+}
+
 // HeartbeatIssueInTx proves the lease owner is still alive: it pushes
 // lease_expires_at forward by the TTL, stamps heartbeat_at = now, and rewrites
 // row_lock so the heartbeat conflicts with any concurrent reclaim/close on the
@@ -100,10 +116,16 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 	now := time.Now().UTC()
 	leaseClause, leaseArgs := leaseSetClause(now, leaseTTL(ctx))
 
+	// Stamp updated_at = now on the heartbeat. On Dolt/MySQL the issues/wisps
+	// ON UPDATE CURRENT_TIMESTAMP trigger bumps updated_at on every heartbeat;
+	// Postgres and SQLite have no such trigger, so without an explicit stamp an
+	// actively-heartbeated issue keeps a stale updated_at and bd stale (which
+	// filters in_progress rows on updated_at < cutoff) diverges from the Dolt
+	// oracle. Claim already stamps updated_at explicitly, so this is heartbeat-only.
 	args := append([]interface{}{}, leaseArgs...)
-	args = append(args, id, actor)
+	args = append(args, now, id, actor)
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		UPDATE %s SET %s
+		UPDATE %s SET %s, updated_at = ?
 		WHERE id = ? AND status = 'in_progress' AND assignee = ?
 	`, issueTable, leaseClause), args...)
 	if err != nil {

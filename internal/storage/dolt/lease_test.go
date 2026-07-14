@@ -137,6 +137,9 @@ func TestUpdateIssueMaintainsLeaseOwnership(t *testing.T) {
 	seedClaimedIssue(t, ctx, store, "lease-update", "alice", time.Hour)
 	before := readLeaseState(t, ctx, store, "lease-update")
 
+	// An assignee transfer through generic update clears the old owner's lease
+	// rather than stamping a fresh one: the new holder did not claim through the
+	// lease-aware verb, so their hold is durable until they opt in (bd-9hpgf).
 	if err := store.UpdateIssue(ctx, "lease-update", map[string]interface{}{"assignee": "bob"}, "dispatcher"); err != nil {
 		t.Fatalf("transfer assignee: %v", err)
 	}
@@ -144,17 +147,22 @@ func TestUpdateIssueMaintainsLeaseOwnership(t *testing.T) {
 	if transferred.assignee.String != "bob" {
 		t.Fatalf("assignee after transfer = %q, want bob", transferred.assignee.String)
 	}
-	if !transferred.leaseExpires.Valid || !transferred.heartbeatAt.Valid {
-		t.Fatalf("transfer did not stamp a fresh lease: %+v", transferred)
+	if transferred.leaseExpires.Valid || transferred.heartbeatAt.Valid {
+		t.Fatalf("transfer should clear the old owner's lease, got %+v", transferred)
 	}
-	if !transferred.heartbeatAt.Time.After(before.heartbeatAt.Time) && transferred.rowLock == before.rowLock {
-		t.Fatalf("transfer did not refresh heartbeat or row_lock: before=%+v after=%+v", before, transferred)
+	if transferred.rowLock == before.rowLock {
+		t.Fatalf("transfer did not rewrite row_lock: before=%+v after=%+v", before, transferred)
 	}
 	if err := store.HeartbeatIssue(ctx, "lease-update", "alice"); !errors.Is(err, storage.ErrAlreadyClaimed) {
 		t.Fatalf("old owner heartbeat err = %v, want ErrAlreadyClaimed", err)
 	}
+	// The new owner can opt back into lease semantics by heartbeating.
 	if err := store.HeartbeatIssue(ctx, "lease-update", "bob"); err != nil {
 		t.Fatalf("new owner heartbeat: %v", err)
+	}
+	rearmed := readLeaseState(t, ctx, store, "lease-update")
+	if !rearmed.leaseExpires.Valid || !rearmed.heartbeatAt.Valid {
+		t.Fatalf("heartbeat by new owner should re-arm the lease, got %+v", rearmed)
 	}
 
 	if err := store.UpdateIssue(ctx, "lease-update", map[string]interface{}{"status": string(types.StatusOpen)}, "dispatcher"); err != nil {
@@ -163,6 +171,159 @@ func TestUpdateIssueMaintainsLeaseOwnership(t *testing.T) {
 	open := readLeaseState(t, ctx, store, "lease-update")
 	if open.leaseExpires.Valid || open.heartbeatAt.Valid {
 		t.Fatalf("status away from in_progress did not clear lease: %+v", open)
+	}
+}
+
+// TestUnclaimOwnershipAndLease verifies that unclaim (a) rejects a non-owner
+// with ErrNotOwner and leaves the claim intact, (b) when done by the owner
+// clears the lease columns and rewrites row_lock so a racing heartbeat/reclaim
+// conflicts, and (c) with force overrides the ownership check.
+func TestUnclaimOwnershipAndLease(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// (a) Non-owner cannot release someone else's claim.
+	seedClaimedIssue(t, ctx, store, "unclaim-a", "alice", time.Hour)
+	before := readLeaseState(t, ctx, store, "unclaim-a")
+	if err := store.UnclaimIssue(ctx, "unclaim-a", "mallory", false); !errors.Is(err, storage.ErrNotOwner) {
+		t.Fatalf("non-owner unclaim err = %v, want ErrNotOwner", err)
+	}
+	stillClaimed := readLeaseState(t, ctx, store, "unclaim-a")
+	if stillClaimed.status != "in_progress" || stillClaimed.assignee.String != "alice" {
+		t.Fatalf("rejected unclaim mutated state: %+v", stillClaimed)
+	}
+	if stillClaimed.rowLock != before.rowLock {
+		t.Fatalf("rejected unclaim rewrote row_lock: before=%d after=%d", before.rowLock, stillClaimed.rowLock)
+	}
+
+	// (b) Owner releases: status → open, assignee cleared, lease columns
+	// cleared, row_lock rewritten.
+	if err := store.UnclaimIssue(ctx, "unclaim-a", "alice", false); err != nil {
+		t.Fatalf("owner unclaim: %v", err)
+	}
+	released := readLeaseState(t, ctx, store, "unclaim-a")
+	if released.status != "open" {
+		t.Errorf("status after unclaim = %q, want open", released.status)
+	}
+	if released.assignee.Valid && released.assignee.String != "" {
+		t.Errorf("assignee after unclaim = %q, want empty", released.assignee.String)
+	}
+	if released.leaseExpires.Valid || released.heartbeatAt.Valid {
+		t.Errorf("unclaim did not clear lease columns: %+v", released)
+	}
+	if !released.startedAtNull {
+		t.Errorf("unclaim did not clear started_at: %+v", released)
+	}
+	if released.rowLock == before.rowLock || released.rowLock == 0 {
+		t.Errorf("unclaim did not rewrite row_lock to a fresh non-zero value: before=%d after=%d", before.rowLock, released.rowLock)
+	}
+
+	// A heartbeat from the old owner after release finds no live claim.
+	if err := store.HeartbeatIssue(ctx, "unclaim-a", "alice"); !errors.Is(err, storage.ErrNotClaimable) {
+		t.Errorf("heartbeat after unclaim err = %v, want ErrNotClaimable", err)
+	}
+
+	// (c) --force lets an admin/reaper release a claim held by someone else.
+	seedClaimedIssue(t, ctx, store, "unclaim-c", "alice", time.Hour)
+	if err := store.UnclaimIssue(ctx, "unclaim-c", "reaper", true); err != nil {
+		t.Fatalf("forced unclaim by non-owner: %v", err)
+	}
+	forced := readLeaseState(t, ctx, store, "unclaim-c")
+	if forced.status != "open" || (forced.assignee.Valid && forced.assignee.String != "") {
+		t.Fatalf("forced unclaim did not release: %+v", forced)
+	}
+	if forced.leaseExpires.Valid || forced.heartbeatAt.Valid {
+		t.Fatalf("forced unclaim did not clear lease columns: %+v", forced)
+	}
+}
+
+// TestBareUpdateClaimDoesNotArmLease is the regression guard for bd-9hpgf
+// (GH#4716): a plain interactive claim — `bd update -s in_progress -a <who>`
+// with no worker/lease semantics intended — must NOT arm a lease. Nobody
+// heartbeats an interactive session, so an armed lease just lapses and the
+// reclaim reaper reverts the bead out from under its owner.
+func TestBareUpdateClaimDoesNotArmLease(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:        "lease-handdole",
+		Title:     "hand-dole claim",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "seeder"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	if err := store.UpdateIssue(ctx, "lease-handdole", map[string]interface{}{
+		"status":   string(types.StatusInProgress),
+		"assignee": "crow",
+	}, "crow"); err != nil {
+		t.Fatalf("bare interactive claim: %v", err)
+	}
+	ls := readLeaseState(t, ctx, store, "lease-handdole")
+	if ls.status != "in_progress" || ls.assignee.String != "crow" {
+		t.Fatalf("claim did not stick: %+v", ls)
+	}
+	if ls.leaseExpires.Valid || ls.heartbeatAt.Valid {
+		t.Fatalf("bare status+assignee update armed a lease: %+v", ls)
+	}
+
+	// Even a reclaim sweep with its cutoff pushed into the future (which would
+	// reap ANY leased issue) must leave the interactive claim alone: durable
+	// until the actor releases it or a human reclaims.
+	reclaimed, err := store.ReclaimExpiredLeases(ctx, -time.Hour, "reaper")
+	if err != nil {
+		t.Fatalf("reclaim sweep: %v", err)
+	}
+	for _, r := range reclaimed {
+		if r.ID == "lease-handdole" {
+			t.Fatalf("interactive claim was reclaimed: %+v", r)
+		}
+	}
+	after := readLeaseState(t, ctx, store, "lease-handdole")
+	if after.status != "in_progress" || after.assignee.String != "crow" {
+		t.Fatalf("interactive claim disturbed by reclaim: %+v", after)
+	}
+}
+
+// TestUpdatePreservesLeaseOnSameClaim: a generic update that does not change
+// who holds the claim (same assignee, still in_progress) must leave a worker's
+// live lease untouched — a supervisor tweaking priority or re-asserting the
+// same status must not disarm dead-worker recovery for a real worker claim.
+func TestUpdatePreservesLeaseOnSameClaim(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seedClaimedIssue(t, ctx, store, "lease-same", "alice", time.Hour)
+	before := readLeaseState(t, ctx, store, "lease-same")
+	if !before.leaseExpires.Valid {
+		t.Fatalf("seed claim did not arm a lease: %+v", before)
+	}
+
+	// Re-assert the same status+assignee alongside an unrelated field edit.
+	if err := store.UpdateIssue(ctx, "lease-same", map[string]interface{}{
+		"status":   string(types.StatusInProgress),
+		"assignee": "alice",
+		"priority": 1,
+	}, "supervisor"); err != nil {
+		t.Fatalf("same-claim update: %v", err)
+	}
+	after := readLeaseState(t, ctx, store, "lease-same")
+	if !after.leaseExpires.Valid || !after.heartbeatAt.Valid {
+		t.Fatalf("same-claim update dropped the worker's lease: %+v", after)
+	}
+	if !after.leaseExpires.Time.Equal(before.leaseExpires.Time) {
+		t.Errorf("same-claim update moved lease_expires_at: before=%v after=%v",
+			before.leaseExpires.Time, after.leaseExpires.Time)
 	}
 }
 

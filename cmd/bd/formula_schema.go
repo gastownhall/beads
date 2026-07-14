@@ -29,25 +29,25 @@ Examples:
 
 Curated smoke-tested fixtures for wired primitives live in
 examples/formulas/primitives/ (with a smoke harness that proves they work).`,
-	Args: cobra.MaximumNArgs(1),
-	Run:  runFormulaSchema,
+	Args:          cobra.MaximumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runFormulaSchema,
 }
 
-func runFormulaSchema(cmd *cobra.Command, args []string) {
+func runFormulaSchema(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
-		runFormulaSchemaList()
-		return
+		return runFormulaSchemaList()
 	}
-	runFormulaSchemaShow(args[0])
+	return runFormulaSchemaShow(args[0])
 }
 
-func runFormulaSchemaList() {
+func runFormulaSchemaList() error {
 	if jsonOutput {
 		if err := outputJSON(formula.Primitives); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return HandleError("%v", err)
 		}
-		return
+		return nil
 	}
 
 	fmt.Printf("Formula schema structs (%d):\n\n", len(formula.Primitives))
@@ -57,9 +57,10 @@ func runFormulaSchemaList() {
 	fmt.Printf("\n%s\n", ui.RenderMuted("Show fields:       bd formula schema <name>"))
 	fmt.Printf("%s\n", ui.RenderMuted("Wired examples:    examples/formulas/primitives/"))
 	fmt.Printf("%s\n", ui.RenderMuted("Note: schema output is structural; smoke-tested examples are the verified authoring surface."))
+	return nil
 }
 
-func runFormulaSchemaShow(name string) {
+func runFormulaSchemaShow(name string) error {
 	p := formula.PrimitiveByName(name)
 	if p == nil {
 		fmt.Fprintf(os.Stderr, "Error: unknown primitive %q\n\n", name)
@@ -67,15 +68,14 @@ func runFormulaSchemaShow(name string) {
 		for _, prim := range formula.Primitives {
 			fmt.Fprintf(os.Stderr, "  %s\n", prim.Name)
 		}
-		os.Exit(1)
+		return SilentExit()
 	}
 
 	if jsonOutput {
 		if err := outputJSON(p); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return HandleError("%v", err)
 		}
-		return
+		return nil
 	}
 
 	fmt.Printf("%s\n", ui.RenderAccent(p.Name))
@@ -87,7 +87,7 @@ func runFormulaSchemaShow(name string) {
 
 	if len(p.Fields) == 0 {
 		fmt.Printf("\n  %s\n", ui.RenderMuted("(no exposed fields)"))
-		return
+		return nil
 	}
 
 	fmt.Printf("\nFields:\n")
@@ -123,6 +123,7 @@ func runFormulaSchemaShow(name string) {
 		}
 		fmt.Println()
 	}
+	return nil
 }
 
 func firstDocLine(doc string) string {

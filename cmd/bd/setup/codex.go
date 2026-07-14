@@ -125,13 +125,36 @@ func RemoveCodex(global bool) error {
 }
 
 func removeCodex(env codexEnv, global bool) error {
-	if err := removeAgentSkill(codexAgentSkillEnv(env, global)); err != nil {
+	// The agent skill is shared with Cursor (same .agents/skills/beads path).
+	// Only remove it if Cursor isn't still relying on it.
+	if cursorIntegrationInstalledAt(env.readFile, codexRootDir(env, global), global) {
+		_, _ = fmt.Fprintln(env.stdout, "Keeping Beads agent skill (still used by Cursor integration)")
+	} else if err := removeAgentSkill(codexAgentSkillEnv(env, global)); err != nil {
 		return err
 	}
 	if err := removeCodexNativeHooks(env, global); err != nil {
 		return err
 	}
 	return removeCodexInstructions(env, global)
+}
+
+// cursorIntegrationInstalledAt reports whether Cursor's bd integration exists
+// under root (projectDir for project scope, homeDir for global scope), using the
+// provided readFile so the check stays hermetic in tests. Both Cursor and Codex
+// install the shared .agents/skills/beads skill, so removing one must not delete
+// the skill while the other still relies on it.
+func cursorIntegrationInstalledAt(readFile func(string) ([]byte, error), root string, global bool) bool {
+	if data, err := readFile(filepath.Join(root, ".cursor", "hooks.json")); err == nil {
+		if config, perr := parseHooksJSON(data); perr == nil && cursorBeadsHooksPresent(config) {
+			return true
+		}
+	}
+	if !global {
+		if _, err := readFile(filepath.Join(root, cursorRulesPath)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func codexSetupCommand(global bool) string {
@@ -470,23 +493,24 @@ func installCodexHooksJSON(env codexEnv, global bool) error {
 		return err
 	}
 	current := map[string]interface{}{}
-	if data, err := env.readFile(path); err == nil && len(strings.TrimSpace(string(data))) > 0 {
-		if err := json.Unmarshal(data, &current); err != nil {
-			_, _ = fmt.Fprintf(env.stderr, "Error: parse %s: %v\n", path, err)
-			return err
-		}
-	} else if err != nil && !os.IsNotExist(err) {
+	data, err := env.readFile(path)
+	if err != nil && !os.IsNotExist(err) {
 		_, _ = fmt.Fprintf(env.stderr, "Error: read %s: %v\n", path, err)
 		return err
 	}
+	if err == nil {
+		if current, err = parseHooksJSON(data); err != nil {
+			_, _ = fmt.Fprintf(env.stderr, "Error: parse %s: %v\n", path, err)
+			return err
+		}
+	}
 	upsertCodexManagedHooks(current)
-	data, err := json.MarshalIndent(current, "", "  ")
+	out, err := marshalHooksJSON(current)
 	if err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: marshal %s: %v\n", path, err)
 		return err
 	}
-	data = append(data, '\n')
-	if err := env.writeFile(path, data); err != nil {
+	if err := env.writeFile(path, out); err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", path, err)
 		return err
 	}
@@ -503,12 +527,10 @@ func removeCodexHooksJSON(env codexEnv, global bool) error {
 		_, _ = fmt.Fprintf(env.stderr, "Error: read %s: %v\n", path, err)
 		return err
 	}
-	current := map[string]interface{}{}
-	if len(strings.TrimSpace(string(data))) > 0 {
-		if err := json.Unmarshal(data, &current); err != nil {
-			_, _ = fmt.Fprintf(env.stderr, "Error: parse %s: %v\n", path, err)
-			return err
-		}
+	current, err := parseHooksJSON(data)
+	if err != nil {
+		_, _ = fmt.Fprintf(env.stderr, "Error: parse %s: %v\n", path, err)
+		return err
 	}
 	removeCodexManagedHooks(current)
 	if len(current) == 0 {
@@ -517,11 +539,10 @@ func removeCodexHooksJSON(env codexEnv, global bool) error {
 		}
 		return nil
 	}
-	next, err := json.MarshalIndent(current, "", "  ")
+	next, err := marshalHooksJSON(current)
 	if err != nil {
 		return err
 	}
-	next = append(next, '\n')
 	return env.writeFile(path, next)
 }
 
@@ -530,8 +551,8 @@ func codexHooksJSONCurrent(env codexEnv, global bool) bool {
 	if err != nil {
 		return false
 	}
-	current := map[string]interface{}{}
-	if err := json.Unmarshal(data, &current); err != nil {
+	current, err := parseHooksJSON(data)
+	if err != nil {
 		return false
 	}
 	return codexManagedHooksCurrent(current)
@@ -704,6 +725,26 @@ func codexManagedHooksCurrent(config map[string]interface{}) bool {
 		}
 	}
 	return true
+}
+
+// codexBeadsHooksPresent reports whether a parsed hooks.json config contains any
+// bd-managed Codex hook entry ("bd codex-hook " command). It mirrors
+// cursorBeadsHooksPresent so codexIntegrationInstalled can detect a hooks-only
+// Codex install (no AGENTS.md section) the same way cursorIntegrationInstalledAt
+// detects a hooks-only Cursor install.
+func codexBeadsHooksPresent(config map[string]interface{}) bool {
+	hooks, ok := config["hooks"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for event := range codexManagedHooks() {
+		for _, entry := range toInterfaceSlice(hooks[event]) {
+			if codexHookEntryManaged(entry) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func removeCodexManagedHookEvent(hooks map[string]interface{}, event string) {

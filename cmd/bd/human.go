@@ -216,7 +216,7 @@ Examples:
 
 		// Direct mode
 		if err := ensureStoreActive(); err != nil {
-			FatalErrorRespectJSON("responding to human bead: %v", err)
+			return HandleErrorRespectJSON("responding to human bead: %v", err)
 		}
 
 		// Resolve partial ID and get issue
@@ -299,7 +299,7 @@ Examples:
 
 		// Direct mode
 		if err := ensureStoreActive(); err != nil {
-			FatalErrorRespectJSON("dismissing human bead: %v", err)
+			return HandleErrorRespectJSON("dismissing human bead: %v", err)
 		}
 
 		// Resolve partial ID and get issue

@@ -163,13 +163,14 @@ func (s *InstrumentedStorage) ReopenIssue(ctx context.Context, id string, reason
 	return err
 }
 
-func (s *InstrumentedStorage) UnclaimIssue(ctx context.Context, id string, actor string) error {
+func (s *InstrumentedStorage) UnclaimIssue(ctx context.Context, id string, actor string, force bool) error {
 	attrs := []attribute.KeyValue{
 		attribute.String("bd.issue.id", id),
 		attribute.String("bd.actor", actor),
+		attribute.Bool("bd.force", force),
 	}
 	ctx, span, t := s.op(ctx, "UnclaimIssue", attrs...)
-	err := s.inner.UnclaimIssue(ctx, id, actor)
+	err := s.inner.UnclaimIssue(ctx, id, actor, force)
 	s.done(ctx, span, t, err, attrs...)
 	return err
 }

@@ -78,6 +78,9 @@ type duplicatePair struct {
 }
 
 func runFindDuplicates(cmd *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("find-duplicates is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("find-duplicates")
 	defer func() {
 		if c := metrics.Global(); c != nil {

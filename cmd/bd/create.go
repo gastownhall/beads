@@ -49,8 +49,7 @@ var createCmd = &cobra.Command{
 			if err != nil {
 				return err
 			}
-			runCreateProxiedServer(cmd, rootCtx, in)
-			return nil
+			return runCreateProxiedServer(cmd, rootCtx, in)
 		}
 		file, _ := cmd.Flags().GetString("file")
 		graphFile, _ := cmd.Flags().GetString("graph")
@@ -110,7 +109,10 @@ var createCmd = &cobra.Command{
 
 		// Warn if creating a test issue in a database with existing issues.
 		// A brand-new repo with zero issues is not a "production database" (#2898).
-		if isTestIssue(title) && !silent && !debug.IsQuiet() {
+		// store is nil here for `create --repo=<remote URL>` from a directory with
+		// no local .beads/: PersistentPreRunE skips local store init entirely for
+		// that path, so this check is best-effort only.
+		if store != nil && isTestIssue(title) && !silent && !debug.IsQuiet() {
 			if stats, err := store.GetStatistics(context.Background()); err == nil && stats != nil && stats.TotalIssues >= 5 {
 				fmt.Fprintf(os.Stderr, "%s Creating test issue in production database\n", ui.RenderWarn("⚠"))
 				fmt.Fprintf(os.Stderr, "  Title: %q appears to be test data\n", title)
@@ -165,8 +167,12 @@ var createCmd = &cobra.Command{
 		statusFlag, _ := cmd.Flags().GetString("status")
 		if statusFlag != "" {
 			var customStatuses []string
-			if cs, err := store.GetCustomStatuses(rootCtx); err == nil {
-				customStatuses = cs
+			// store is nil for `create --repo=<remote URL>` with no local
+			// .beads/; fall back to built-in statuses only.
+			if store != nil {
+				if cs, err := store.GetCustomStatuses(rootCtx); err == nil {
+					customStatuses = cs
+				}
 			}
 			if !types.Status(statusFlag).IsValidWithCustom(customStatuses) {
 				return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", statusFlag)

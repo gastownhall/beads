@@ -91,8 +91,8 @@ func TestApplyMetadataEdits_NumericValue(t *testing.T) {
 	if err := json.Unmarshal(result, &data); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if string(data["story_points"]) != "5" {
-		t.Errorf("expected 5, got %s", data["story_points"])
+	if string(data["story_points"]) != `"5"` {
+		t.Errorf("expected \"5\", got %s", data["story_points"])
 	}
 }
 
@@ -106,8 +106,8 @@ func TestApplyMetadataEdits_BoolValue(t *testing.T) {
 	if err := json.Unmarshal(result, &data); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if string(data["urgent"]) != "true" {
-		t.Errorf("expected true, got %s", data["urgent"])
+	if string(data["urgent"]) != `"true"` {
+		t.Errorf("expected \"true\", got %s", data["urgent"])
 	}
 }
 
@@ -121,8 +121,8 @@ func TestApplyMetadataEdits_NullValue(t *testing.T) {
 	if err := json.Unmarshal(result, &data); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if string(data["cleared"]) != "null" {
-		t.Errorf("expected null, got %s", data["cleared"])
+	if string(data["cleared"]) != `"null"` {
+		t.Errorf("expected \"null\", got %s", data["cleared"])
 	}
 }
 
@@ -199,8 +199,8 @@ func TestApplyMetadataEdits_MultipleSetFlags(t *testing.T) {
 	if string(data["sprint"]) != `"Q1"` {
 		t.Errorf("expected \"Q1\", got %s", data["sprint"])
 	}
-	if string(data["priority"]) != "2" {
-		t.Errorf("expected 2, got %s", data["priority"])
+	if string(data["priority"]) != `"2"` {
+		t.Errorf("expected \"2\", got %s", data["priority"])
 	}
 }
 
@@ -306,15 +306,15 @@ func TestToJSONValue(t *testing.T) {
 		expected string
 	}{
 		{"hello", `"hello"`},
-		{"42", "42"},
-		{"3.14", "3.14"},
-		{"true", "true"},
-		{"false", "false"},
-		{"null", "null"},
+		{"42", `"42"`},
+		{"3.14", `"3.14"`},
+		{"true", `"true"`},
+		{"false", `"false"`},
+		{"null", `"null"`},
 		{"", `""`},
 		{"hello world", `"hello world"`},
-		{"0", "0"},
-		{"-1", "-1"},
+		{"0", `"0"`},
+		{"-1", `"-1"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {

@@ -24,6 +24,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("branch is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("branch")
 		defer func() {
 			if c := metrics.Global(); c != nil {

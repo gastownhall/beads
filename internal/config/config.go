@@ -171,6 +171,7 @@ func Initialize() error {
 	// Set defaults for all flags
 	v.SetDefault("json", false)
 	v.SetDefault("events-export", false)
+	v.SetDefault("audit.enabled", false)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
 	v.SetDefault("db", "")
@@ -205,6 +206,13 @@ func Initialize() error {
 
 	// Push configuration defaults
 	v.SetDefault("no-push", false)
+
+	// Agent profile configuration (gh#3423, follow-up to #4220)
+	// Explicit runtime knob for the policy profile (git/commit authority)
+	// documented in docs/getting-started/ide-setup.md. `bd prime` uses this to select its
+	// close-protocol wording. Values: conservative | minimal | team-maintainer.
+	// Invalid values fall back to "conservative" (see GetAgentProfile).
+	v.SetDefault("agent.profile", string(ProfileConservative))
 
 	// Create command defaults
 	v.SetDefault("create.require-description", false)

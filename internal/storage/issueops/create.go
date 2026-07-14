@@ -709,6 +709,11 @@ func PersistDependenciesWithResult(ctx context.Context, tx *sql.Tx, issues []*ty
 
 func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) (CreateIssueResult, error) {
 	var result CreateIssueResult
+	type pendingDependency struct {
+		dep      *types.Dependency
+		depTable string
+	}
+	var pending []pendingDependency
 	for _, issue := range issues {
 		if len(issue.Dependencies) == 0 {
 			continue
@@ -723,7 +728,20 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			if dep.IssueID == "" {
 				dep.IssueID = issue.ID
 			}
+			pending = append(pending, pendingDependency{dep: dep, depTable: depTable})
+		}
+	}
 
+	// Persist hierarchy first so blocking edges in the same import see the full
+	// planned ancestry. The enclosing create transaction rolls this phase back
+	// if a later dependency is invalid.
+	for phase := 0; phase < 2; phase++ {
+		parentPhase := phase == 0
+		for _, item := range pending {
+			dep := item.dep
+			if (dep.Type == types.DepParentChild) != parentPhase {
+				continue
+			}
 			kind := ClassifyDepTarget(ctx, tx, dep, false)
 
 			if kind != DepTargetExternal {
@@ -744,6 +762,16 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 				}
 			}
 
+			if kind != DepTargetExternal && types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) {
+				if err := CheckBlockingHierarchyInTx(ctx, tx, dep, nil); err != nil {
+					if opts.SkipDependencyValidationErrors {
+						recordSkippedDependency(opts, dep, err.Error())
+						continue
+					}
+					return result, fmt.Errorf("invalid dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+				}
+			}
+
 			if err := CheckDependencyCycleInTx(ctx, tx, dep, nil); err != nil {
 				if opts.SkipDependencyValidationErrors {
 					recordSkippedDependency(opts, dep, err.Error())
@@ -760,12 +788,12 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			// merge-safe across clones — two clones importing the same JSONL get the
 			// same primary key, not two random UUIDs that collide on uk_dep_* (#4259).
 			createdBy := dependencyCreatedBy(dep, actor)
-			//nolint:gosec // G201: depTable is one of two hardcoded constants; target column from DepTargetKind.Column()
+			//nolint:gosec // G201: item.depTable is one of two hardcoded constants; target column from DepTargetKind.Column()
 			sqlResult, err := tx.ExecContext(ctx, fmt.Sprintf(`
 					INSERT INTO %s (id, issue_id, %s, type, created_by, created_at)
 					VALUES (?, ?, ?, ?, ?, ?)
 					ON DUPLICATE KEY UPDATE type = type
-				`, depTable, kind.Column()), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, createdBy, createdAt)
+				`, item.depTable, kind.Column()), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, createdBy, createdAt)
 			if err != nil {
 				return result, fmt.Errorf("failed to insert dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}
@@ -774,7 +802,7 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 				return result, fmt.Errorf("failed to check dependency insert result for %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}
 			if rowsAffected > 0 {
-				result.markChanged(depTable)
+				result.markChanged(item.depTable)
 			}
 		}
 	}
@@ -867,10 +895,14 @@ func ReconcileChildCounters(ctx context.Context, tx *sql.Tx, issues []*types.Iss
 		if err == nil && current >= b.maxChild {
 			continue
 		}
+		// Qualify the existing-row column with the table name. Bare `last_child`
+		// on the update RHS is a valid MySQL "current row value" reference, but
+		// Postgres sees it as ambiguous between the target row and EXCLUDED
+		// (SQLSTATE 42702); table-qualifying it is unambiguous on every backend.
 		//nolint:gosec // G201: table is one of two hardcoded constants.
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (parent_id, last_child) VALUES (?, ?)
-			ON DUPLICATE KEY UPDATE last_child = GREATEST(last_child, ?)
+			INSERT INTO %[1]s (parent_id, last_child) VALUES (?, ?)
+			ON DUPLICATE KEY UPDATE last_child = GREATEST(%[1]s.last_child, ?)
 		`, table), parentID, b.maxChild, b.maxChild); err != nil {
 			return nil, fmt.Errorf("failed to reconcile child counter for %s: %w", parentID, err)
 		}

@@ -8,7 +8,7 @@ bd formula --help
 stdout 'bd formula schema'
 stdout 'bd formula primitives'
 stdout 'examples/formulas/primitives/'
-stdout 'website/docs/workflows/formulas.md'
+stdout 'docs/workflows/formulas.md'
 
 # The list and show subcommands also point at the schema index so agents
 # arriving via either subcommand find the primitive surface.

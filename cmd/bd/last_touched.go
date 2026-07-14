@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 )
@@ -41,7 +42,14 @@ func SetLastTouchedID(issueID string) {
 
 	lastTouchedPath := filepath.Join(beadsDir, lastTouchedFile)
 	// Write with restrictive permissions (local-only state)
-	_ = os.WriteFile(lastTouchedPath, []byte(issueID+"\n"), 0600)
+	if err := os.WriteFile(lastTouchedPath, []byte(issueID+"\n"), 0600); err != nil {
+		return
+	}
+	// Always advance mtime, even when the same ID is rewritten, so file-watch
+	// fingerprints and cache validators that key on mtime never see an
+	// "identical" marker after a write (GH#3965).
+	now := time.Now()
+	_ = os.Chtimes(lastTouchedPath, now, now)
 }
 
 // ClearLastTouched removes the last touched file.

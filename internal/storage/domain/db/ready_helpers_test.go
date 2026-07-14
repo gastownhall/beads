@@ -457,11 +457,12 @@ func (s *testSuite) cyclesTwoNode() {
 	for _, id := range []string{"bd-cy2-a", "bd-cy2-b"} {
 		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, id), "tester", domain.InsertIssueOpts{}))
 	}
-	// Repo-level Insert bypasses the use-case cycle check, so we can plant a cycle directly.
+	// Explicit CycleValidated bypasses the defensive repository check so this
+	// legacy-cycle reporting test can plant a cycle directly.
 	s.Require().NoError(dr.Insert(s.Ctx(),
 		newDep("bd-cy2-a", "bd-cy2-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(dr.Insert(s.Ctx(),
-		newDep("bd-cy2-b", "bd-cy2-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep("bd-cy2-b", "bd-cy2-a", types.DepBlocks), "tester", domain.DepInsertOpts{CycleValidated: true}))
 
 	out, err := dr.DetectCycles(s.Ctx())
 	s.Require().NoError(err)
@@ -483,7 +484,7 @@ func (s *testSuite) cyclesThreeNode() {
 	s.Require().NoError(dr.Insert(s.Ctx(),
 		newDep("bd-cy3-b", "bd-cy3-c", types.DepBlocks), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(dr.Insert(s.Ctx(),
-		newDep("bd-cy3-c", "bd-cy3-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep("bd-cy3-c", "bd-cy3-a", types.DepBlocks), "tester", domain.DepInsertOpts{CycleValidated: true}))
 
 	out, err := dr.DetectCycles(s.Ctx())
 	s.Require().NoError(err)
@@ -505,7 +506,7 @@ func (s *testSuite) cyclesIgnoresParentChild() {
 	s.Require().NoError(dr.Insert(s.Ctx(),
 		newDep("bd-cypc-a", "bd-cypc-b", types.DepParentChild), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(dr.Insert(s.Ctx(),
-		newDep("bd-cypc-b", "bd-cypc-a", types.DepParentChild), "tester", domain.DepInsertOpts{}))
+		newDep("bd-cypc-b", "bd-cypc-a", types.DepParentChild), "tester", domain.DepInsertOpts{CycleValidated: true}))
 
 	out, err := dr.DetectCycles(s.Ctx())
 	s.Require().NoError(err)
@@ -522,7 +523,7 @@ func (s *testSuite) cyclesConditionalBlocks() {
 	s.Require().NoError(dr.Insert(s.Ctx(),
 		newDep("bd-cycb-a", "bd-cycb-b", types.DepConditionalBlocks), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(dr.Insert(s.Ctx(),
-		newDep("bd-cycb-b", "bd-cycb-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep("bd-cycb-b", "bd-cycb-a", types.DepBlocks), "tester", domain.DepInsertOpts{CycleValidated: true}))
 
 	out, err := dr.DetectCycles(s.Ctx())
 	s.Require().NoError(err)

@@ -1783,6 +1783,28 @@ func TestSearchIssues_ByExternalRef(t *testing.T) {
 	if len(results) != 0 {
 		t.Fatalf("expected no results for unrelated external ref, got %d", len(results))
 	}
+
+	// ExternalRef exact match should find the issue.
+	results, err = store.SearchIssues(ctx, "", types.IssueFilter{ExternalRef: &linearURL})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("ExternalRef exact match: expected 1 result, got %d", len(results))
+	}
+	if results[0].ID != issue.ID {
+		t.Errorf("expected %s, got %s", issue.ID, results[0].ID)
+	}
+
+	// ExternalRef exact match with wrong value should return nothing.
+	wrongRef := "jira-WRONG-123"
+	results, err = store.SearchIssues(ctx, "", types.IssueFilter{ExternalRef: &wrongRef})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("ExternalRef exact match with wrong value: expected 0 results, got %d", len(results))
+	}
 }
 
 func TestSearchIssues_ByID(t *testing.T) {

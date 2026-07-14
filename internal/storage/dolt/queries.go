@@ -63,6 +63,20 @@ func (s *DoltStore) GetReadyWorkWithCounts(ctx context.Context, filter types.Wor
 	return result, err
 }
 
+// CountReadyWork returns the total ready-work count for filter. It is identical
+// to len(GetReadyWorkWithCounts(filter with Limit=0)) but sizes the total with
+// cheap indexed COUNT(*)s instead of re-running the counts mega-query. Backs the
+// storage.ReadyWorkCounter capability.
+func (s *DoltStore) CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error) {
+	var n int
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		n, err = issueops.CountReadyWorkInTx(ctx, tx, filter)
+		return err
+	})
+	return n, err
+}
+
 func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	var result []*types.BlockedIssue
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {

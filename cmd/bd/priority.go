@@ -31,6 +31,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("priority is not supported in proxied-server mode")
+		}
 		CheckReadonly("priority")
 
 		evt := metrics.NewCommandEvent("priority")

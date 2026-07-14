@@ -10,9 +10,11 @@ import (
 )
 
 var unclaimCmd = &cobra.Command{
-	Use:     "unclaim [id...]",
-	GroupID: "issues",
-	Short:   "Release a claimed issue",
+	Use:           "unclaim [id...]",
+	GroupID:       "issues",
+	Short:         "Release a claimed issue",
+	SilenceUsage:  true,
+	SilenceErrors: true,
 	Long: `Release a claimed issue by clearing the assignee and resetting status to 'open'.
 
 Use this when an agent crashes mid-work or you need to abandon a claimed task.
@@ -23,15 +25,19 @@ Examples:
   bd unclaim bd-123 --reason "Agent crashed"
   bd unclaim bd-123 bd-456`,
 	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("unclaim is not supported in proxied-server mode")
+		}
 		CheckReadonly("unclaim")
 		reason, _ := cmd.Flags().GetString("reason")
+		force, _ := cmd.Flags().GetBool("force")
 		ctx := rootCtx
 
 		unclaimedIssues := []*types.Issue{}
 		hasError := false
 		if store == nil {
-			FatalErrorWithHint("database not initialized",
+			return HandleErrorWithHint("database not initialized",
 				diagHint())
 		}
 		for _, id := range args {
@@ -45,7 +51,7 @@ Examples:
 			fullID := result.ResolvedID
 			issueStore := result.Store
 
-			if err := issueStore.UnclaimIssue(ctx, fullID, actor); err != nil {
+			if err := issueStore.UnclaimIssue(ctx, fullID, actor, force); err != nil {
 				fmt.Fprintf(os.Stderr, "Error unclaiming %s: %v\n", fullID, err)
 				hasError = true
 				result.Close()
@@ -77,19 +83,20 @@ Examples:
 
 		if jsonOutput && len(unclaimedIssues) > 0 {
 			if err := outputJSON(unclaimedIssues); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
+				return HandleError("%v", err)
 			}
 		}
 
 		if hasError {
-			os.Exit(1)
+			return SilentExit()
 		}
+		return nil
 	},
 }
 
 func init() {
 	unclaimCmd.Flags().StringP("reason", "r", "", "Reason for unclaiming")
+	unclaimCmd.Flags().Bool("force", false, "Release the claim even if held by a different actor (admin/reaper use)")
 	unclaimCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(unclaimCmd)
 }

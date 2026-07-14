@@ -46,8 +46,7 @@ the flags appear in the command line.`,
 		}()
 
 		if usesProxiedServer() {
-			runCloseProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runCloseProxiedServer(cmd, rootCtx, args)
 		}
 
 		// If no IDs provided, use last touched issue
@@ -107,6 +106,7 @@ the flags appear in the command line.`,
 		// Direct mode
 		closedIssues := []*types.Issue{}
 		closedCount := 0
+		firstClosedID := ""
 
 		for i, id := range resolvedIDs {
 			result := results[i]
@@ -170,6 +170,9 @@ the flags appear in the command line.`,
 			audit.LogFieldChange(id, "status", oldStatus, "closed", actor, reason)
 
 			closedCount++
+			if firstClosedID == "" {
+				firstClosedID = id
+			}
 
 			// Auto-close parent molecule if all steps are now complete.
 			// Runs against the same store the step was closed in.
@@ -185,6 +188,15 @@ the flags appear in the command line.`,
 			} else {
 				debug.PrintNormal("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(id, issueTitleOrEmpty(issue)), reason)
 			}
+		}
+
+		// Record the closed issue as last-touched so `bd close` honors its own
+		// documented contract (the "last touched issue ... from create, update,
+		// show, or close" behavior) and downstream write-marker consumers see the
+		// close (GH#3965). Mirrors bd update's firstUpdatedID pattern. A later
+		// --claim-next overwrites this with the claimed issue (the newer touch).
+		if closedCount > 0 {
+			SetLastTouchedID(firstClosedID)
 		}
 
 		// Pick a store for post-close work (--suggest-next, --continue, --claim-next).

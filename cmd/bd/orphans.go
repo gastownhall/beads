@@ -44,6 +44,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("orphans is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("orphans")
 		defer func() {
 			if c := metrics.Global(); c != nil {

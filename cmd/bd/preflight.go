@@ -83,27 +83,114 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 	skipLint, _ := cmd.Flags().GetBool("skip-lint")
 
 	if fix {
-		runFixes(jsonOutput)
-		return nil
+		return runFixes(jsonOutput)
 	}
 
 	if check {
 		return runChecks(jsonOutput, skipLint)
 	}
 
+	// Static checklist mode — tailor the checklist to the detected project
+	// stack so non-Go projects don't get a misleading Go/Nix checklist (GH#4364).
+	root := git.GetRepoRoot()
+	if root == "" {
+		if wd, err := os.Getwd(); err == nil {
+			root = wd
+		}
+	}
+
 	fmt.Println("PR Readiness Checklist:")
 	fmt.Println()
-	fmt.Println("[ ] Tests pass: go test -tags gms_pure_go -short ./...")
-	fmt.Println("[ ] Lint passes: golangci-lint run --build-tags=gms_pure_go ./...")
-	fmt.Println("[ ] Formatting: gofmt -l .")
-	fmt.Println("[ ] No beads pollution: check .beads/issues.jsonl diff")
-	fmt.Println("[ ] Nix hash current: go.sum unchanged or vendorHash updated")
-	fmt.Println("[ ] Version sync: version.go matches default.nix")
+	for _, item := range buildPreflightChecklist(root) {
+		fmt.Printf("[ ] %s\n", item)
+	}
 	fmt.Println()
 	fmt.Println("Run 'bd preflight --check' to validate automatically.")
 	return nil
 }
 
+// fileExists reports whether name exists directly under dir.
+func fileExists(dir, name string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, name))
+	return err == nil
+}
+
+// buildPreflightChecklist returns PR-readiness checklist items tailored to the
+// project's language stack, detected from standard marker files in dir. A
+// project with no recognized stack gets a generic reminder rather than a
+// misleading Go checklist, and the repo's own Go+Nix specific items
+// (gms_pure_go build tags, nix vendorHash, version.go vs default.nix) only
+// appear where they apply (GH#4364).
+func buildPreflightChecklist(dir string) []string {
+	// Preserve the exact rich checklist when run inside the beads repo itself
+	// (its primary audience), so the gms_pure_go build tags and nix/version
+	// reminders beads contributors rely on are not lost.
+	if isBeadsRepo(dir) {
+		return []string{
+			"Tests pass: go test -tags gms_pure_go -short ./...",
+			"Lint passes: golangci-lint run --build-tags=gms_pure_go ./...",
+			"Formatting: gofmt -l .",
+			"No beads pollution: check .beads/issues.jsonl diff",
+			"Nix hash current: go.sum unchanged or vendorHash updated",
+			"Version sync: version.go matches default.nix",
+		}
+	}
+
+	var items []string
+	switch {
+	case fileExists(dir, "go.mod"):
+		items = append(items,
+			"Tests pass: go test ./...",
+			"Lint passes: golangci-lint run ./...",
+			"Formatting: gofmt -l .",
+		)
+	case fileExists(dir, "package.json"):
+		items = append(items,
+			"Tests pass: npm test",
+			"Types check: tsc --noEmit",
+		)
+	case fileExists(dir, "pyproject.toml"), fileExists(dir, "setup.py"):
+		items = append(items,
+			"Tests pass: pytest",
+			"Lint passes: ruff check",
+		)
+	case fileExists(dir, "Cargo.toml"):
+		items = append(items,
+			"Tests pass: cargo test",
+			"Lint passes: cargo clippy",
+		)
+	default:
+		items = append(items, "Tests pass: run your project's test suite, linter, and formatter")
+	}
+
+	// Relevant to any beads workspace, regardless of language.
+	if fileExists(dir, ".beads") {
+		items = append(items, "No beads pollution: check .beads/issues.jsonl diff")
+	}
+
+	return items
+}
+
+// isBeadsRepo reports whether dir is the beads source repo, detected by the
+// module path in go.mod. Used to keep preflight's repo-specific checklist.
+func isBeadsRepo(dir string) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "go.mod")) //nolint:gosec // path is constructed internally (repo root + fixed filename)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module ")) == "github.com/steveyegge/beads"
+		}
+	}
+	return false
+}
+
+// runChecks executes all preflight checks and reports results.
 func runChecks(jsonOutput, skipLint bool) error {
 	var results []CheckResult
 
@@ -577,7 +664,7 @@ type fixResult struct {
 }
 
 // runFixes executes auto-fix operations for fixable preflight checks.
-func runFixes(jsonOutput bool) {
+func runFixes(jsonOutput bool) error {
 	var results []fixResult
 	hasError := false
 
@@ -614,9 +701,9 @@ func runFixes(jsonOutput bool) {
 			fmt.Fprintf(os.Stderr, "Error encoding fix results: %v\n", err)
 		}
 		if hasError {
-			os.Exit(1)
+			return SilentExit()
 		}
-		return
+		return nil
 	}
 
 	for _, r := range results {
@@ -635,8 +722,9 @@ func runFixes(jsonOutput bool) {
 	}
 
 	if hasError {
-		os.Exit(1)
+		return SilentExit()
 	}
+	return nil
 }
 
 // fixNixHash computes and updates the vendorHash in default.nix.

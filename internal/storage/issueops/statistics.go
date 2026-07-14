@@ -33,3 +33,29 @@ func ScanIssueCountsInTx(ctx context.Context, tx DBTX, stats *types.Statistics) 
 	}
 	return nil
 }
+
+// GetStatisticsInTx computes the full summary statistics (counts + blocked + ready)
+// in one transaction, using only the normal issues table — no version-control state —
+// so it is portable across every SQL backend. Behaviorally identical to the Dolt and
+// embedded-Dolt implementations: ScanIssueCountsInTx for the status counts, a direct
+// blocked count (the is_blocked flag is maintained in-tx by the shared layer), then
+// ReadyIssues = OpenIssues - BlockedIssues clamped at zero.
+func GetStatisticsInTx(ctx context.Context, tx DBTX) (*types.Statistics, error) {
+	stats := &types.Statistics{}
+	if err := ScanIssueCountsInTx(ctx, tx, stats); err != nil {
+		return nil, err
+	}
+	var blocked int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM issues
+		WHERE is_blocked = 1 AND status <> 'closed' AND status <> 'pinned'
+	`).Scan(&blocked); err != nil {
+		return nil, fmt.Errorf("count blocked issues: %w", err)
+	}
+	stats.BlockedIssues = blocked
+	stats.ReadyIssues = stats.OpenIssues - stats.BlockedIssues
+	if stats.ReadyIssues < 0 {
+		stats.ReadyIssues = 0
+	}
+	return stats, nil
+}

@@ -28,6 +28,9 @@ Example:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("q is not supported in proxied-server mode")
+		}
 		// Create the event before the readonly guard so the operation label
 		// matches this command ("q", not "create") and the readonly exit path
 		// still flushes queued metrics via CheckReadonly's CloseAndFlush.

@@ -1,14 +1,12 @@
 # bd contract corpus — producer catalog
 
-This package is the **producer** half of the Beads ↔ Gas City cross-version
-contract-test system. It pins the `bd` `--json` wire surface that Gas City's
-`gc` binary decodes, by generating a canonicalized golden-JSON **corpus** under
-`testdata/corpus/` and failing CI on any unreviewed change to it.
+This package is the **producer** half of the Beads ↔ consumer cross-version
+contract-test system. It pins the `bd` `--json` wire surface that a downstream
+consumer's decoder consumes, by generating a canonicalized golden-JSON **corpus**
+under `testdata/corpus/` and failing CI on any unreviewed change to it.
 
-Gas City vendors this corpus and replays it against its own decoder, so a `bd`
-release can never silently change a wire shape that `gc` parses. See the full
-design at `engdocs/design/beads-gascity-contract-test-system.md` in the gascity
-repo.
+A downstream consumer vendors this corpus and replays it against its own decoder,
+so a `bd` release can never silently change a wire shape the consumer parses.
 
 ## How it works
 
@@ -26,8 +24,8 @@ repo.
 
 Regenerate after any deliberate wire change: `make corpus-regen`, review the
 diff, **and bump `JSONSchemaVersion` (`cmd/bd/output.go`)** — the `schema_version`
-field in every blob is the coordination canary Gas City keys its pinned-decoder
-migration off.
+field in every blob is the coordination canary a downstream consumer keys its
+pinned-decoder migration off.
 
 ## Coverage
 
@@ -35,7 +33,7 @@ migration off.
 | ---------------------- | ---------- | --------------- |
 | `create_root`, `create_dep`, `create_closed`, `create_deleted` | `bd create … --json` | json-output-shapes (object) |
 | `show` | `bd show <id> --json` | json-output-shapes (array-of-one), dependency shape |
-| `update` | `bd update … --json` | json-output-shapes (mutation array), label add + metadata coercion (`phase` → integer) |
+| `update` | `bd update … --json` | json-output-shapes (mutation array), label add + metadata coercion (`phase` → string) |
 | `close` | `bd close --reason … --json` | close semantics (`close_reason`, `closed_at`) |
 | `reopen` | `bd reopen … --json` | reopen semantics (status back to open) |
 | `list` | `bd list --all --json` | json-output-shapes (array / list envelope) |
@@ -50,8 +48,12 @@ migration off.
 ## Known gaps (tracked, not silent)
 
 - `bd sql` is **not supported in embedded mode** (this harness's mode), so it is
-  not in the corpus. Gas City's ready-projection enrichment depends on `bd sql`
+  not in the corpus. A downstream consumer's ready-projection enrichment depends on `bd sql`
   against a managed Dolt server; covering it needs a server-mode generation path.
+- The `show` blob pins the **count-only** default payload (`comment_count`,
+  `dependent_count`); the opt-in `--include-comments` / `--include-dependents`
+  shapes are not in the corpus. They are covered at the CLI level by the
+  preservation and round-trip tests, not byte-pinned for a consumer.
 - The `error` blob pins the not-found envelope; other error classifiers
   (claim-conflict, silent-fallback auto-import, `bd sql` unsupported) are
   plain-text on stderr and belong in a separate error-string fixture set.

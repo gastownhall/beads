@@ -153,8 +153,7 @@ Examples:
 
 			ctx := rootCtx
 			if usesProxiedServer() {
-				runDepBlocksProxiedServer(cmd, ctx, blockerID, blocksID)
-				return nil
+				return runDepBlocksProxiedServer(cmd, ctx, blockerID, blocksID)
 			}
 			depType := "blocks"
 
@@ -297,8 +296,7 @@ Examples:
 		}()
 
 		if usesProxiedServer() {
-			runDepAddProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runDepAddProxiedServer(cmd, rootCtx, args)
 		}
 
 		depType, _ := cmd.Flags().GetString("type")
@@ -415,17 +413,17 @@ type bulkDepInput struct {
 }
 
 // newCycleThroughEdges runs a whole-graph cycle check inside the bulk-add
-// transaction and returns a rendered cycle path when a cycle actually
+// transaction and returns a rendered scheduling-cycle path when a cycle actually
 // traverses one of the edges being added, or "" when none does. Endpoint
 // membership is not enough: an issue sitting in a pre-existing committed
 // cycle must not block unrelated bulk wiring that merely touches it
-// (bd-578h9.9). Non-blocking edge types cannot form blocking cycles and are
-// excluded. A failed check returns an error — the bulk add must roll back
+// (bd-578h9.9). Only blocks, conditional-blocks, and parent-child edges
+// participate. A failed check returns an error — the bulk add must roll back
 // rather than commit unverified edges (bd-6dnrw.8).
 func newCycleThroughEdges(ctx context.Context, tx storage.Transaction, edges []bulkDepEdge) (string, error) {
 	pairs := make([][2]string, 0, len(edges))
 	for _, edge := range edges {
-		if edge.Type != types.DepBlocks && edge.Type != types.DepConditionalBlocks {
+		if edge.Type != types.DepBlocks && edge.Type != types.DepConditionalBlocks && edge.Type != types.DepParentChild {
 			continue
 		}
 		pairs = append(pairs, [2]string{edge.IssueID, edge.DependsOnID})
@@ -478,32 +476,7 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
 	commitMsg := fmt.Sprintf("dependency: add %d edges", len(resolved))
 	if err := transact(rootCtx, targetStore, commitMsg, func(tx storage.Transaction) error {
-		for _, edge := range resolved {
-			dep := &types.Dependency{
-				IssueID:     edge.IssueID,
-				DependsOnID: edge.DependsOnID,
-				Type:        edge.Type,
-			}
-			if err := tx.AddDependencyWithOptions(rootCtx, dep, actor, storage.DependencyAddOptions{SkipCycleCheck: noCycleCheck}); err != nil {
-				return fmt.Errorf("line %d: %w", edge.Line, err)
-			}
-		}
-		if noCycleCheck {
-			// --no-cycle-check skips the per-edge recursive check for bulk
-			// speed, not graph integrity: one whole-graph check still gates
-			// the commit so cycles introduced by these edges roll back
-			// instead of landing and poisoning ready-work (bd-6dnrw.8).
-			// Cycles that predate this bulk add (not touching any added
-			// edge) don't block it.
-			cyclePath, cycleErr := newCycleThroughEdges(rootCtx, tx, resolved)
-			if cycleErr != nil {
-				return fmt.Errorf("final cycle check failed (no edges added): %w", cycleErr)
-			}
-			if cyclePath != "" {
-				return fmt.Errorf("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
-			}
-		}
-		return nil
+		return addBulkDependenciesInTx(rootCtx, tx, resolved, noCycleCheck, actor)
 	}); err != nil {
 		return err
 	}
@@ -529,6 +502,33 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 	}
 
 	fmt.Printf("%s Added %d dependencies\n", ui.RenderPass("✓"), len(resolved))
+	return nil
+}
+
+func addBulkDependenciesInTx(ctx context.Context, tx storage.Transaction, edges []bulkDepEdge, noCycleCheck bool, actor string) error {
+	// Make the complete planned hierarchy visible before validating any
+	// blocking edge, independent of input-file order.
+	for phase := 0; phase < 2; phase++ {
+		parentPhase := phase == 0
+		for _, edge := range edges {
+			if (edge.Type == types.DepParentChild) != parentPhase {
+				continue
+			}
+			dep := &types.Dependency{IssueID: edge.IssueID, DependsOnID: edge.DependsOnID, Type: edge.Type}
+			if err := tx.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{SkipCycleCheck: noCycleCheck}); err != nil {
+				return fmt.Errorf("line %d: %w", edge.Line, err)
+			}
+		}
+	}
+	// Always merge both transaction snapshots before commit. Per-edge checks
+	// cannot see uncommitted paths split across regular and wisp storage.
+	cyclePath, cycleErr := newCycleThroughEdges(ctx, tx, edges)
+	if cycleErr != nil {
+		return fmt.Errorf("final cycle check failed (no edges added): %w", cycleErr)
+	}
+	if cyclePath != "" {
+		return fmt.Errorf("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
+	}
 	return nil
 }
 
@@ -719,8 +719,7 @@ Examples:
 		}()
 
 		if usesProxiedServer() {
-			runDepListProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runDepListProxiedServer(cmd, rootCtx, args)
 		}
 
 		ctx := rootCtx
@@ -912,8 +911,7 @@ var depRemoveCmd = &cobra.Command{
 		}()
 
 		if usesProxiedServer() {
-			runDepRemoveProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runDepRemoveProxiedServer(cmd, rootCtx, args)
 		}
 
 		ctx := rootCtx
@@ -1007,8 +1005,7 @@ Examples:
 		}()
 
 		if usesProxiedServer() {
-			runDepTreeProxiedServer(cmd, rootCtx, args)
-			return nil
+			return runDepTreeProxiedServer(cmd, rootCtx, args)
 		}
 
 		ctx := rootCtx
@@ -1122,8 +1119,7 @@ var depCyclesCmd = &cobra.Command{
 		}()
 
 		if usesProxiedServer() {
-			runDepCyclesProxiedServer(cmd, rootCtx)
-			return nil
+			return runDepCyclesProxiedServer(cmd, rootCtx)
 		}
 
 		ctx := rootCtx

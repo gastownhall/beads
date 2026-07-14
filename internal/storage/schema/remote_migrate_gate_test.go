@@ -33,6 +33,24 @@ func TestCheckRemoteMigrateGate(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	}
 
+	t.Run("programmatic override (SetForceAllowRemoteMigrate) bypasses gate", func(t *testing.T) {
+		t.Setenv(AllowRemoteMigrateEnv, "0") // env-var escape hatch disabled
+		SetForceAllowRemoteMigrate(true)
+		defer SetForceAllowRemoteMigrate(false) // reset so subsequent tests are unaffected
+		db, mock, err := sqlmock.New()
+		if err != nil {
+			t.Fatalf("sqlmock.New: %v", err)
+		}
+		expectFiringGate(mock)
+		if err := CheckRemoteMigrateGate(context.Background(), db); err != nil {
+			t.Fatalf("SetForceAllowRemoteMigrate(true): expected nil, got %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("SetForceAllowRemoteMigrate: unmet expectations: %v", err)
+		}
+		db.Close()
+	})
+
 	t.Run("escape hatch allows migration when the gate would fire", func(t *testing.T) {
 		for _, v := range []string{"1", "true", "TRUE"} {
 			t.Setenv(AllowRemoteMigrateEnv, v)
@@ -269,6 +287,9 @@ func TestRemoteMigrateGateAgentSafety(t *testing.T) {
 	if strings.Contains(e.AgentDirective(), AllowRemoteMigrateEnv+"=1 bd migrate") {
 		t.Errorf("AgentDirective must not embed the runnable migrate command: %q", e.AgentDirective())
 	}
+	if strings.Contains(e.AgentDirective(), "bd migrate --force") {
+		t.Errorf("AgentDirective must not embed the runnable --force migrate command: %q", e.AgentDirective())
+	}
 
 	opts := e.Options()
 	if len(opts) != 2 {
@@ -322,6 +343,9 @@ func TestRemoteMigrateGateAdoptFastForward(t *testing.T) {
 	}
 	if strings.Contains(e.AgentDirective(), AllowRemoteMigrateEnv+"=1 bd migrate") {
 		t.Errorf("AgentDirective must not embed the runnable migrate command: %q", e.AgentDirective())
+	}
+	if strings.Contains(e.AgentDirective(), "bd migrate --force") {
+		t.Errorf("AgentDirective must not embed the runnable --force migrate command: %q", e.AgentDirective())
 	}
 
 	opts := e.Options()

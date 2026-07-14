@@ -36,6 +36,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("reclaim is not supported in proxied-server mode")
+		}
 		CheckReadonly("reclaim")
 
 		evt := metrics.NewCommandEvent("reclaim")

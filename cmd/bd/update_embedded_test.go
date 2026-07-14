@@ -670,6 +670,31 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 	})
 
+	// A batch where one claim is lost and another is won must exit non-zero, so
+	// the lost claim is not hidden from exit-code automation (beads audit
+	// finding #10). The winner is still committed.
+	t.Run("update_claim_batch_partial_loss_exits_nonzero", func(t *testing.T) {
+		lost := bdCreate(t, bd, dir, "Batch lost", "--type", "task")
+		won := bdCreate(t, bd, dir, "Batch won", "--type", "task")
+		// Pre-assign `lost` to someone else so the default actor's claim loses.
+		bdUpdate(t, bd, dir, lost.ID, "--assignee", "alice")
+
+		out := bdUpdateFail(t, bd, dir, lost.ID, won.ID, "--claim")
+		if !strings.Contains(out, "already assigned to") {
+			t.Errorf("expected 'already assigned to' error in batch output, got: %s", out)
+		}
+		// The winning claim still lands despite the batch exiting non-zero.
+		gotWon := bdShow(t, bd, dir, won.ID)
+		if gotWon.Status != types.StatusInProgress {
+			t.Errorf("winning claim %s: status = %s, want in_progress", won.ID, gotWon.Status)
+		}
+		// The lost issue is untouched.
+		gotLost := bdShow(t, bd, dir, lost.ID)
+		if gotLost.Assignee != "alice" {
+			t.Errorf("lost issue %s assignee = %q, want alice (unchanged)", lost.ID, gotLost.Assignee)
+		}
+	})
+
 	// ===== Parent Reparenting =====
 
 	t.Run("update_parent_set", func(t *testing.T) {

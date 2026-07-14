@@ -587,13 +587,14 @@ func TestImportFromLocalJSONL(t *testing.T) {
 			t.Errorf("Expected 1 issue on re-import, got %d", count2)
 		}
 
-		// Verify comments were NOT duplicated
-		issue, err := store.GetIssue(ctx, "test-cmt1")
+		// Verify comments were NOT duplicated. GetIssue does not hydrate
+		// comments, so read them through the dedicated accessor.
+		comments, err := store.GetIssueComments(ctx, "test-cmt1")
 		if err != nil {
-			t.Fatalf("Failed to get issue: %v", err)
+			t.Fatalf("Failed to get comments: %v", err)
 		}
-		if len(issue.Comments) != 2 {
-			t.Errorf("Expected 2 comments after re-import, got %d (duplicates!)", len(issue.Comments))
+		if len(comments) != 2 {
+			t.Errorf("Expected 2 comments after re-import, got %d (duplicates!)", len(comments))
 		}
 	})
 
@@ -666,15 +667,16 @@ func TestImportFromLocalJSONL_LegacyFormats(t *testing.T) {
 			t.Errorf("Expected 1 issue imported, got %d", count)
 		}
 
-		issue, err := store.GetIssue(ctx, "test-numcmt")
+		// GetIssue does not hydrate comments; read them through the accessor.
+		comments, err := store.GetIssueComments(ctx, "test-numcmt")
 		if err != nil {
-			t.Fatalf("Failed to get issue: %v", err)
+			t.Fatalf("Failed to get comments: %v", err)
 		}
-		if len(issue.Comments) != 1 {
-			t.Fatalf("Expected 1 comment, got %d", len(issue.Comments))
+		if len(comments) != 1 {
+			t.Fatalf("Expected 1 comment, got %d", len(comments))
 		}
-		if issue.Comments[0].Text != "numeric id comment" {
-			t.Errorf("Comment text = %q, want %q", issue.Comments[0].Text, "numeric id comment")
+		if comments[0].Text != "numeric id comment" {
+			t.Errorf("Comment text = %q, want %q", comments[0].Text, "numeric id comment")
 		}
 	})
 

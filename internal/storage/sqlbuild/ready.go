@@ -53,7 +53,7 @@ func BuildReadyWorkOrder(policy types.SortPolicy, createdCol, priorityCol string
 	case types.SortPolicyOldest:
 		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, id ASC", createdCol)}
 	case types.SortPolicyPriority:
-		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, %s DESC, id ASC", priorityCol, createdCol)}
+		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, %s ASC, id ASC", priorityCol, createdCol)}
 	case types.SortPolicyHybrid, "":
 		recentCutoff := time.Now().UTC().Add(-48 * time.Hour)
 		return ReadyWorkOrder{
@@ -64,7 +64,7 @@ func BuildReadyWorkOrder(policy types.SortPolicy, createdCol, priorityCol string
 			Args: []any{recentCutoff, recentCutoff},
 		}
 	default:
-		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, %s DESC, id ASC", priorityCol, createdCol)}
+		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, %s ASC, id ASC", priorityCol, createdCol)}
 	}
 }
 
@@ -140,6 +140,19 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 			whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label = ?)", tables.Labels))
 			args = append(args, label)
 		}
+	}
+	// LabelsAny is an OR-set: an issue qualifies if it carries AT LEAST ONE of
+	// the labels. Previously this clause was absent entirely, so --label-any was
+	// silently dropped on the ready/claim path (with or without --parent) — a
+	// worker believed it was fenced when it was not. It AND-combines with Labels
+	// (the flag help promises "Can combine with --label").
+	if len(filter.LabelsAny) > 0 {
+		placeholders := make([]string, len(filter.LabelsAny))
+		for i, label := range filter.LabelsAny {
+			placeholders[i] = "?"
+			args = append(args, label)
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label IN (%s))", tables.Labels, strings.Join(placeholders, ", ")))
 	}
 	if len(filter.ExcludeLabels) > 0 {
 		placeholders := make([]string, len(filter.ExcludeLabels))

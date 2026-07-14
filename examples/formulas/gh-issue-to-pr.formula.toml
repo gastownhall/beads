@@ -472,7 +472,7 @@ ALL THREE quality gates are MANDATORY — do not skip any without explicit justi
    ```
    golangci-lint run ./...
    ```
-   (Ignore baseline warnings documented in docs/LINTING.md — focus on NEW issues)
+   (Ignore baseline warnings documented in engdocs/LINTING.md — focus on NEW issues)
 3. Build the project:
    ```
    make build

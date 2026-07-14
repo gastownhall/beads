@@ -37,6 +37,9 @@ Examples:
 }
 
 func runShip(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("ship is not supported in proxied-server mode")
+	}
 	CheckReadonly("ship")
 
 	evt := metrics.NewCommandEvent("ship")

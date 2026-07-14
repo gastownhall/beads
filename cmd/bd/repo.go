@@ -54,6 +54,9 @@ shared across all clones of this repository.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("repo add is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("repo-add")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -117,6 +120,9 @@ that came from the removed repository.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("repo remove is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("repo-remove")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -186,6 +192,9 @@ repositories configured for hydration.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("repo list is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("repo-list")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -245,6 +254,9 @@ Also triggers Dolt push/pull if a remote is configured.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("repo sync is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("repo-sync")
 		defer func() {
 			if c := metrics.Global(); c != nil {

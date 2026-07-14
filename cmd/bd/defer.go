@@ -35,6 +35,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("defer is not supported in proxied-server mode")
+		}
 		CheckReadonly("defer")
 
 		evt := metrics.NewCommandEvent("defer")

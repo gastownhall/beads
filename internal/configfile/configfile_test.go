@@ -629,23 +629,34 @@ func TestProxiedServerClientInfo_ResolvedPaths(t *testing.T) {
 	})
 }
 
-// TestGetBackendAlwaysDolt tests that GetBackend always returns "dolt".
-func TestGetBackendAlwaysDolt(t *testing.T) {
-	tests := []struct {
+// TestGetBackendAllowlist verifies the allowlist semantics: the SQL backends
+// (postgres, mysql, sqlite) are honored; every other value (empty, legacy,
+// genuinely unknown) falls back to Dolt. This is the guard behind backend selection
+// — a typo in metadata.json must fail safe to Dolt, never to an unintended backend.
+func TestGetBackendAllowlist(t *testing.T) {
+	fallsBackToDolt := []struct {
 		name string
 		cfg  *Config
 	}{
 		{name: "explicit dolt", cfg: &Config{Backend: BackendDolt}},
 		{name: "empty backend", cfg: &Config{Backend: ""}},
 		{name: "legacy config", cfg: &Config{}},
-		{name: "stale sqlite value", cfg: &Config{Backend: "sqlite"}},
-		{name: "unknown backend", cfg: &Config{Backend: "postgres"}},
+		{name: "unknown backend", cfg: &Config{Backend: "mystery"}},
 	}
-
-	for _, tt := range tests {
+	for _, tt := range fallsBackToDolt {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.cfg.GetBackend(); got != BackendDolt {
 				t.Errorf("GetBackend() = %q, want %q", got, BackendDolt)
+			}
+		})
+	}
+
+	honored := []string{BackendPostgres, BackendMySQL, BackendSQLite}
+	for _, backend := range honored {
+		t.Run(backend+" honored", func(t *testing.T) {
+			cfg := &Config{Backend: backend}
+			if got := cfg.GetBackend(); got != backend {
+				t.Errorf("GetBackend() = %q, want %q", got, backend)
 			}
 		})
 	}

@@ -3,12 +3,10 @@ package dolt
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -377,7 +375,7 @@ func (s *DoltStore) searchWisps(ctx context.Context, query string, filter types.
 	querySQL := fmt.Sprintf(`
 		SELECT id FROM wisps
 		%s
-		ORDER BY priority ASC, created_at DESC
+		ORDER BY priority ASC, created_at ASC
 		%s
 	`, whereSQL, limitSQL)
 
@@ -504,120 +502,38 @@ func (s *DoltStore) getWispsByIDs(ctx context.Context, ids []string) ([]*types.I
 		}
 	}
 
-	return issues, nil
+	// getWispsByIDs is fed IDs already ordered by the caller's query (e.g.
+	// ListWisps' priority ASC, created_at DESC), but `WHERE id IN (...)` returns
+	// rows in arbitrary order. Re-emit in the requested ID order so that ordering
+	// survives the two-step fetch.
+	ordered := make([]*types.Issue, 0, len(issues))
+	for _, id := range ids {
+		if issue, ok := issueMap[id]; ok {
+			ordered = append(ordered, issue)
+		}
+	}
+	return ordered, nil
 }
 
 // addWispDependency adds a dependency to the wisp_dependencies table.
 func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency, actor string, isCrossPrefix bool) error {
-	metadata := dep.Metadata
-	if metadata == "" {
-		metadata = "{}"
-	}
-
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Cycle detection for blocking dependency types: check if adding this edge
-	// would create a cycle. Edge storage is source-routed, so same-class
-	// endpoints can still have mixed-table interior paths.
-	if dep.Type == types.DepBlocks {
-		depTables := wispCycleDetectionTables()
-		var reachable int
-		query := wispCycleReachabilityQuery(depTables)
-		if err := tx.QueryRowContext(ctx, query, dep.DependsOnID, dep.IssueID).Scan(&reachable); err != nil {
-			return fmt.Errorf("failed to check for dependency cycle: %w", err)
-		}
-		if reachable > 0 {
-			return fmt.Errorf("adding dependency would create a cycle")
-		}
-	}
-
 	kind := issueops.ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
-	targetCol := kind.Column()
-
-	// Check for existing dependency to prevent silent type overwrites.
-	var existingType string
-	//nolint:gosec // G201: targetCol from DepTargetKind.Column()
-	err = tx.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT type FROM wisp_dependencies WHERE issue_id = ? AND %s = ?
-	`, targetCol), dep.IssueID, dep.DependsOnID).Scan(&existingType)
-	if err == nil {
-		if existingType == string(dep.Type) {
-			// Same type — idempotent; update metadata in case it changed
-			//nolint:gosec // G201: targetCol from DepTargetKind.Column()
-			if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-				UPDATE wisp_dependencies SET metadata = ? WHERE issue_id = ? AND %s = ?
-			`, targetCol), metadata, dep.IssueID, dep.DependsOnID); err != nil {
-				return fmt.Errorf("failed to update wisp dependency metadata: %w", err)
-			}
-			return wrapTransactionError("commit add wisp dependency", tx.Commit())
-		}
-		return fmt.Errorf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
-			dep.IssueID, dep.DependsOnID, existingType, dep.Type)
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("failed to check existing wisp dependency: %w", err)
-	}
-
-	// Deterministic id keyed on (issue_id, target), same derivation as the
-	// dependencies table, so a wisp edge promoted to a real dependency keeps a
-	// clone-stable primary key and wisp_dependencies.id needs no DEFAULT (#4259).
-	//nolint:gosec // G201: targetCol from DepTargetKind.Column()
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO wisp_dependencies (id, issue_id, %s, type, created_at, created_by, metadata, thread_id)
-		VALUES (?, ?, ?, ?, NOW(), ?, ?, ?)
-	`, targetCol), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
-		return fmt.Errorf("failed to add wisp dependency: %w", err)
-	}
-
-	affectedIssues, affectedWisps, aerr := issueops.AffectedByDepChangeForWispInTx(ctx, tx, dep.IssueID, dep.DependsOnID, dep.Type)
-	if aerr != nil {
-		return fmt.Errorf("affected by add wisp dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, aerr)
-	}
-	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
-		return fmt.Errorf("recompute is_blocked after add wisp dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+	if err := issueops.AddDependencyInTx(ctx, tx, dep, actor, issueops.AddDependencyOpts{
+		SourceTable:   "wisps",
+		WriteTable:    "wisp_dependencies",
+		IsCrossPrefix: isCrossPrefix,
+		TargetKind:    &kind,
+	}); err != nil {
+		return err
 	}
 
 	return wrapTransactionError("commit add wisp dependency", tx.Commit())
-}
-
-// wispCycleReachabilityQuery uses UNION distinct recursion so cyclic and
-// diamond graphs terminate by unique reachable node instead of enumerating paths.
-func wispCycleReachabilityQuery(depTables []string) string {
-	if len(depTables) == 1 {
-		return fmt.Sprintf(`
-			WITH RECURSIVE reachable(node) AS (
-				SELECT ?
-				UNION
-				SELECT %s
-				FROM reachable r
-				JOIN %s d ON d.issue_id = r.node AND d.type = 'blocks'
-			)
-			SELECT COUNT(*) FROM reachable WHERE node = ?
-		`, issueops.DepTargetExpr, depTables[0])
-	}
-
-	var unions []string
-	for _, t := range depTables {
-		unions = append(unions, fmt.Sprintf("SELECT issue_id, %s AS depends_on_id FROM %s WHERE type = 'blocks'", issueops.DepTargetExpr, t))
-	}
-	unionQuery := strings.Join(unions, " UNION ")
-	return fmt.Sprintf(`
-		WITH RECURSIVE reachable(node) AS (
-			SELECT ?
-			UNION
-			SELECT d.depends_on_id
-			FROM reachable r
-			JOIN (%s) d ON d.issue_id = r.node
-		)
-		SELECT COUNT(*) FROM reachable WHERE node = ?
-	`, unionQuery)
-}
-
-func wispCycleDetectionTables() []string {
-	return []string{"dependencies", "wisp_dependencies"}
 }
 
 // getWispDependencies retrieves issues that a wisp depends on.

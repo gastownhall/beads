@@ -314,3 +314,140 @@ func TestPersistDependenciesSkipsValidationErrorsWhenConfigured(t *testing.T) {
 		t.Fatalf("unmet expectations: %v", err)
 	}
 }
+
+func TestPersistDependenciesRejectsHierarchyBlocking(t *testing.T) {
+	ctx := context.Background()
+	db, mock, tx := beginMockTx(t)
+	defer db.Close()
+	issue := &types.Issue{
+		ID:        "child",
+		IssueType: types.TypeTask,
+		Dependencies: []*types.Dependency{{
+			DependsOnID: "parent",
+			Type:        types.DepConditionalBlocks,
+		}},
+	}
+
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		WithArgs("parent").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
+		WithArgs("parent").
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery("WITH RECURSIVE ancestors").
+		WithArgs("child", "parent").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+
+	_, err := PersistDependenciesWithOptionsResult(ctx, tx, []*types.Issue{issue}, "tester", storage.BatchCreateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "cannot be blocked by its ancestor") {
+		t.Fatalf("error = %v, want ancestor hierarchy rejection", err)
+	}
+
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestPersistDependenciesValidatesPlannedHierarchyBeforeBlocking(t *testing.T) {
+	ctx := context.Background()
+	db, mock, tx := beginMockTx(t)
+	defer db.Close()
+	child := &types.Issue{
+		ID:        "bd-child",
+		IssueType: types.TypeTask,
+		Dependencies: []*types.Dependency{
+			{DependsOnID: "bd-grand", Type: types.DepBlocks}, // Deliberately first.
+			{DependsOnID: "bd-parent", Type: types.DepParentChild},
+		},
+	}
+	parent := &types.Issue{
+		ID:        "bd-parent",
+		IssueType: types.TypeTask,
+		Dependencies: []*types.Dependency{{
+			DependsOnID: "bd-grand",
+			Type:        types.DepParentChild,
+		}},
+	}
+
+	for _, pair := range [][2]string{{"bd-child", "bd-parent"}, {"bd-parent", "bd-grand"}} {
+		mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+			WithArgs(pair[1]).
+			WillReturnError(sql.ErrNoRows)
+		mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
+			WithArgs(pair[1]).
+			WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+		mock.ExpectQuery("WITH RECURSIVE reachable").
+			WithArgs(pair[1], pair[0]).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+		mock.ExpectExec("INSERT INTO dependencies").
+			WithArgs(depid.New(pair[0], pair[1]), pair[0], pair[1], types.DepParentChild, "tester", sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		WithArgs("bd-grand").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
+		WithArgs("bd-grand").
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery("WITH RECURSIVE ancestors").
+		WithArgs("bd-child", "bd-grand").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+
+	_, err := PersistDependenciesWithOptionsResult(ctx, tx, []*types.Issue{child, parent}, "tester", storage.BatchCreateOptions{})
+	if err == nil || !strings.Contains(err.Error(), "cannot be blocked by its ancestor") {
+		t.Fatalf("error = %v, want planned-ancestor rejection", err)
+	}
+
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestPersistDependenciesSkipsHierarchyValidationAcrossPrefixes(t *testing.T) {
+	ctx := context.Background()
+	db, mock, tx := beginMockTx(t)
+	defer db.Close()
+	issue := &types.Issue{
+		ID:        "aa-source",
+		IssueType: types.TypeTask,
+		Dependencies: []*types.Dependency{{
+			DependsOnID: "bb-target",
+			Type:        types.DepBlocks,
+		}},
+	}
+
+	mock.ExpectQuery("SELECT 1 FROM wisps WHERE id = \\? LIMIT 1").
+		WithArgs("bb-target").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
+		WithArgs("bb-target").
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	// No ancestors query: hierarchy cannot cross rig prefixes.
+	mock.ExpectQuery("WITH RECURSIVE reachable").
+		WithArgs("bb-target", "aa-source").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectExec("INSERT INTO dependencies").
+		WithArgs(depid.New("aa-source", "bb-target"), "aa-source", "bb-target", types.DepBlocks, "tester", sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	_, err := PersistDependenciesWithOptionsResult(ctx, tx, []*types.Issue{issue}, "tester", storage.BatchCreateOptions{})
+	if err != nil {
+		t.Fatalf("cross-prefix blocking dependency: %v", err)
+	}
+
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}

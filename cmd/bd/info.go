@@ -32,6 +32,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("info is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("info")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -756,7 +759,7 @@ var versionChanges = []VersionChange{
 			"FIX: Import custom issue types (#1322)",
 			"FIX: SQLite transaction improvements (#1272, #1276)",
 			"FIX: Multiple Dolt backend fixes for hooks, routing, and daemon compatibility",
-			"DOCS: Comprehensive docs/DOLT.md guide (#1310)",
+			"DOCS: Comprehensive Dolt backend guide, now at docs/architecture/dolt.md (#1310)",
 		},
 	},
 	{

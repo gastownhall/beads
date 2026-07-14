@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -206,7 +207,9 @@ func TestApplyResolvedConfig(t *testing.T) {
 		}
 		cfg := &Config{}
 
-		applyResolvedConfig(beadsDir, fileCfg, cfg)
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
 
 		if cfg.BeadsDir != beadsDir {
 			t.Fatalf("BeadsDir = %q, want %q", cfg.BeadsDir, beadsDir)
@@ -244,7 +247,9 @@ func TestApplyResolvedConfig(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stderr = w
 
-		applyResolvedConfig(beadsDir, fileCfg, cfg)
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
 
 		w.Close()
 		os.Stderr = oldStderr
@@ -273,7 +278,9 @@ func TestApplyResolvedConfig(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stderr = w
 
-		applyResolvedConfig(beadsDir, fileCfg, cfg)
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
 
 		w.Close()
 		os.Stderr = oldStderr
@@ -299,7 +306,9 @@ func TestApplyResolvedConfig(t *testing.T) {
 			ServerUser: "custom",
 		}
 
-		applyResolvedConfig(beadsDir, fileCfg, cfg)
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
 
 		if cfg.BeadsDir != "/override/.beads" {
 			t.Fatalf("BeadsDir override lost: %q", cfg.BeadsDir)

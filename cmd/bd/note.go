@@ -28,6 +28,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("note is not supported in proxied-server mode")
+		}
 		CheckReadonly("note")
 
 		evt := metrics.NewCommandEvent("note")

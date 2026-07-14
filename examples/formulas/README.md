@@ -37,4 +37,4 @@ commands to match your project before first use.
 
 ## Creating Your Own
 
-See the [Formulas documentation](https://gastownhall.github.io/beads/docs/workflows/formulas) for the full reference.
+See the [Formulas documentation](https://beads.gascity.com/workflows/formulas) for the full reference.

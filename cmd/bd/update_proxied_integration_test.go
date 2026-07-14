@@ -86,6 +86,36 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	// Parity with the non-proxied update_claim_batch_partial_loss_exits_nonzero:
+	// a batch where one claim is lost and another is won must exit non-zero so
+	// the lost claim is not hidden from exit-code automation (beads audit
+	// finding #10). The winner is still committed.
+	t.Run("claim_batch_partial_loss_exits_nonzero", func(t *testing.T) {
+		p := bdProxiedInit(t, bd, "ucbp")
+		lost := bdProxiedCreate(t, bd, p.dir, "Batch lost")
+		won := bdProxiedCreate(t, bd, p.dir, "Batch won")
+		// Pre-claim `lost` as alice so bob's claim in the batch loses.
+		bdProxiedUpdateOne(t, bd, p.dir, lost.ID, "--claim", "--actor", "alice")
+
+		out := bdProxiedUpdateFail(t, bd, p.dir, lost.ID, won.ID, "--claim", "--actor", "bob")
+		if !strings.Contains(out, "already claimed") {
+			t.Errorf("expected 'already claimed' error in batch output, got: %s", out)
+		}
+		// The winning claim still lands despite the batch exiting non-zero.
+		gotWon := bdProxiedShow(t, bd, p.dir, won.ID)
+		if gotWon.Status != types.StatusInProgress {
+			t.Errorf("winning claim %s: status = %s, want in_progress", won.ID, gotWon.Status)
+		}
+		if gotWon.Assignee != "bob" {
+			t.Errorf("winning claim %s: assignee = %q, want bob", won.ID, gotWon.Assignee)
+		}
+		// The lost issue stays claimed by alice.
+		gotLost := bdProxiedShow(t, bd, p.dir, lost.ID)
+		if gotLost.Assignee != "alice" {
+			t.Errorf("lost issue %s assignee = %q, want alice (unchanged)", lost.ID, gotLost.Assignee)
+		}
+	})
+
 	t.Run("add_remove_labels", func(t *testing.T) {
 		p := bdProxiedInit(t, bd, "ul")
 		issue := bdProxiedCreate(t, bd, p.dir, "Labeled")
@@ -535,8 +565,8 @@ func TestProxiedServerUpdate(t *testing.T) {
 		if got["tier"] != "gold" {
 			t.Errorf("metadata[tier]: got %v, want %q", got["tier"], "gold")
 		}
-		if got["score"] != float64(99) {
-			t.Errorf("metadata[score]: got %v, want 99 (number-typed via toJSONValue)", got["score"])
+		if got["score"] != "99" {
+			t.Errorf("metadata[score]: got %v, want %q (--set-metadata always stores string values)", got["score"], "99")
 		}
 	})
 

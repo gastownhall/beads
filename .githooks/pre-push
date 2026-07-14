@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Pre-push hook: when pushing a release tag (refs/tags/v*), refuse the push if
-# version constants and the Docusaurus docs snapshot disagree. This stops a
-# release from being tagged/published with drifted docs (the failure mode that
-# left main red after the 1.0.5 release) before it ever reaches CI.
+# version constants disagree. This stops a release from being tagged/published
+# with drifted versions (the failure mode that left main red after the 1.0.5
+# release) before it ever reaches CI.
 #
 # Installed via: git config core.hooksPath .githooks
 # See also: make install (sets hooksPath automatically)
@@ -12,27 +12,65 @@
 set -euo pipefail
 
 # git feeds "<local ref> <local sha> <remote ref> <remote sha>" lines on stdin.
+# Capture it so the chained beads hook at the bottom still sees the ref list.
+push_refs="$(cat)"
+
 pushing_version_tag=0
 while read -r local_ref _local_sha _remote_ref _remote_sha; do
     case "$local_ref" in
         refs/tags/v[0-9]*) pushing_version_tag=1 ;;
     esac
-done
+done <<< "$push_refs"
 
-[ "$pushing_version_tag" -eq 0 ] && exit 0
-
-repo_root="$(git rev-parse --show-toplevel)"
-if [ ! -x "$repo_root/scripts/check-versions.sh" ]; then
-    # Older checkout without the consistency check; do not block.
-    exit 0
+if [ "$pushing_version_tag" -eq 1 ]; then
+    repo_root="$(git rev-parse --show-toplevel)"
+    # Skip on older checkouts without the consistency check; do not block.
+    if [ -x "$repo_root/scripts/check-versions.sh" ]; then
+        echo "Release tag push detected — verifying version consistency..."
+        if ! (cd "$repo_root" && ./scripts/check-versions.sh); then
+            echo ""
+            echo "❌ Refusing to push release tag: versions are inconsistent." >&2
+            echo "   Fix with: scripts/update-versions.sh <version>" >&2
+            echo "   Override with --no-verify only if you know what you are doing." >&2
+            exit 1
+        fi
+    fi
 fi
 
-echo "Release tag push detected — verifying version + docs consistency..."
-if ! (cd "$repo_root" && ./scripts/check-versions.sh); then
-    echo ""
-    echo "❌ Refusing to push release tag: version/docs are inconsistent." >&2
-    echo "   Fix with: scripts/update-versions.sh <version>" >&2
-    echo "   (or scripts/snapshot-release-docs.sh <version> for the docs side)." >&2
-    echo "   Override with --no-verify only if you know what you are doing." >&2
-    exit 1
+# The managed section below captures exit codes to tolerate timeouts and an
+# uninitialized bd database; set -e would abort before that handling runs.
+set +e
+exec < <(printf '%s\n' "$push_refs")
+
+# --- BEGIN BEADS INTEGRATION v1.1.0 ---
+# This section is managed by beads. Do not remove these markers.
+if command -v bd >/dev/null 2>&1; then
+  export BD_GIT_HOOK=1
+  _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
+  _bd_used_perl=0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$_bd_timeout" bd hooks run pre-push "$@"
+    _bd_exit=$?
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$_bd_timeout" bd hooks run pre-push "$@"
+    _bd_exit=$?
+  elif command -v perl >/dev/null 2>&1; then
+    _bd_used_perl=1
+    perl -e 'alarm shift; exec @ARGV' "$_bd_timeout" bd hooks run pre-push "$@"
+    _bd_exit=$?
+  else
+    echo >&2 "beads: hook 'pre-push' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT"
+    bd hooks run pre-push "$@"
+    _bd_exit=$?
+  fi
+  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then
+    echo >&2 "beads: hook 'pre-push' timed out after ${_bd_timeout}s — continuing without beads"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -eq 3 ]; then
+    echo >&2 "beads: database not initialized — skipping hook 'pre-push'"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
 fi
+# --- END BEADS INTEGRATION v1.1.0 ---

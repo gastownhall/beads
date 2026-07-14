@@ -112,8 +112,8 @@ func TestCycleReachabilityQuerySingleTableJoinsDirectly(t *testing.T) {
 	if strings.Contains(query, "JOIN (SELECT") {
 		t.Fatalf("single-table cycle query should not materialize a derived dependency table:\n%s", query)
 	}
-	if !strings.Contains(query, "d.type IN ('blocks', 'conditional-blocks')") {
-		t.Fatalf("query does not filter blocking dependency types at the direct join:\n%s", query)
+	if !strings.Contains(query, "d.type IN ('blocks', 'conditional-blocks', 'parent-child')") {
+		t.Fatalf("query does not filter scheduling-relevant dependency types at the direct join:\n%s", query)
 	}
 	if strings.Contains(query, "UNION ALL") || strings.Contains(query, "depth") {
 		t.Fatalf("cycle query should traverse unique nodes, not enumerate paths:\n%s", query)

@@ -1,6 +1,6 @@
 // Package main implements the bd CLI state management commands.
 // These commands provide convenient access to the labels-as-state pattern
-// documented in docs/LABELS.md.
+// documented in docs/core-concepts/labels.md.
 package main
 
 import (
@@ -36,6 +36,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("state is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("state")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -116,6 +119,9 @@ The --reason flag provides context for the event bead (recommended).`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("set-state is not supported in proxied-server mode")
+		}
 		CheckReadonly("set-state")
 
 		evt := metrics.NewCommandEvent("set-state")
@@ -272,6 +278,9 @@ Example:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("state list is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("state-list")
 		defer func() {
 			if c := metrics.Global(); c != nil {

@@ -13,27 +13,43 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/fs"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) {
+func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		FatalErrorRespectJSON("no issue ID provided")
+		return HandleErrorRespectJSON("no issue ID provided")
 	}
 
-	in := gatherUpdateInput(ctx, cmd)
+	in, err := gatherUpdateInput(ctx, cmd)
+	if err != nil {
+		return err
+	}
 	if isUpdateInputNoop(in) {
 		fmt.Println("No updates specified")
-		return
+		return nil
 	}
 
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	var updated []*types.Issue
 	var anyUpdated bool
+	// claimFailed records a requested-but-lost --claim. In a mixed batch (one
+	// claim won, another lost to a different owner) anyUpdated is set by the
+	// winner, so the command would otherwise exit 0 and hide the lost claim from
+	// exit-code automation. Track it separately and exit non-zero, mirroring the
+	// non-proxied path in update.go (beads audit finding #10).
+	claimFailed := false
 
 	for _, id := range args {
-		issue, ok := applyUpdateProxiedOne(ctx, id, in)
+		issue, ok, claimLost, err := applyUpdateProxiedOne(ctx, id, in)
+		if err != nil {
+			return err
+		}
+		if claimLost {
+			claimFailed = true
+		}
 		if !ok {
 			continue
 		}
@@ -48,65 +64,76 @@ func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	if jsonOut && len(updated) > 0 {
 		_ = outputJSON(updated)
 	}
-	if !anyUpdated {
-		os.Exit(1)
+	if !anyUpdated || claimFailed {
+		return SilentExit()
 	}
+	return nil
 }
 
-func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*types.Issue, bool) {
+type updateProxiedResult struct {
+	before  *types.Issue
+	after   *types.Issue
+	updated bool
+}
+
+// applyUpdateProxiedOne applies one ID's update on the proxied path. The third
+// return (claimLost) reports a requested --claim that lost to a different owner
+// (already-claimed / not-claimable), so the caller can flip the batch exit code
+// even when another ID succeeded — matching the non-proxied path.
+func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*types.Issue, bool, bool, error) {
 	if uowProvider == nil {
-		FatalError("proxied-server UOW provider not initialized")
+		return nil, false, false, HandleError("proxied-server UOW provider not initialized")
 	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening unit of work for %s: %v\n", id, err)
-		return nil, false
-	}
-	defer uw.Close(ctx)
 
-	issueUC := uw.IssueUseCase()
-	current, err := issueUC.GetIssue(ctx, id)
-	if err != nil || current == nil {
-		wispCurrent, wispErr := issueUC.GetWisp(ctx, id)
-		if wispErr == nil && wispCurrent != nil {
-			current = wispCurrent
-		} else if err != nil {
-			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-			return nil, false
-		} else {
-			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-			return nil, false
+	var claimLost bool
+	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (updateProxiedResult, string, error) {
+		issueUC := uw.IssueUseCase()
+		current, err := issueUC.GetIssue(ctx, id)
+		if err != nil || current == nil {
+			wispCurrent, wispErr := issueUC.GetWisp(ctx, id)
+			if wispErr == nil && wispCurrent != nil {
+				current = wispCurrent
+			} else if err != nil {
+				return updateProxiedResult{}, "", fmt.Errorf("resolving %s: %w", id, err)
+			} else {
+				return updateProxiedResult{}, "", fmt.Errorf("issue %s not found", id)
+			}
 		}
-	}
-	if err := validateIssueUpdatable(id, current); err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", err)
-		return nil, false
-	}
+		if err := validateIssueUpdatable(id, current); err != nil {
+			return updateProxiedResult{}, "", err
+		}
 
-	spec, err := buildUpdateSpecForIssue(current, in)
-	if err != nil {
-		FatalErrorRespectJSON("%v", err)
-	}
+		spec, err := buildUpdateSpecForIssue(current, in)
+		if err != nil {
+			return updateProxiedResult{}, "", err
+		}
 
-	updated, err := issueUC.ApplyUpdate(ctx, id, spec, actor)
+		updated, err := issueUC.ApplyUpdate(ctx, id, spec, actor)
+		if err != nil {
+			if errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable) {
+				claimLost = in.claim
+				return updateProxiedResult{}, "", err
+			}
+			return updateProxiedResult{}, "", fmt.Errorf("updating %s: %w", id, err)
+		}
+
+		return updateProxiedResult{before: current, after: updated, updated: true}, fmt.Sprintf("bd: update %s", id), nil
+	})
 	if err != nil {
-		if errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable) {
+		if claimLost {
 			fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
-		} else {
-			fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+			return nil, false, true, nil
 		}
-		return nil, false
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return nil, false, false, nil
 	}
 
-	if err := uw.Commit(ctx, fmt.Sprintf("bd: update %s", id)); err != nil && !isDoltNothingToCommit(err) {
-		fmt.Fprintf(os.Stderr, "Error committing %s: %v\n", id, err)
-		return nil, false
+	if res.updated {
+		if err := fireProxiedUpdateHooks(ctx, res.before, res.after); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", id, err)
+		}
 	}
-
-	if err := fireProxiedUpdateHooks(ctx, current, updated); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: %s: %v\n", id, err)
-	}
-	return updated, true
+	return res.after, res.updated, false, nil
 }
 
 func fireProxiedUpdateHooks(ctx context.Context, before, after *types.Issue) error {

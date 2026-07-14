@@ -194,16 +194,6 @@ Examples:
 			}
 		}()
 
-		if !usesSQLServer() {
-			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in embedded mode.")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "For embedded mode troubleshooting:")
-			fmt.Fprintln(os.Stderr, "  • Verify database exists:  ls -la .beads/embeddeddolt/")
-			fmt.Fprintln(os.Stderr, "  • Check bd version:        bd version")
-			fmt.Fprintln(os.Stderr, "  • Reinitialize if needed:  bd init --force")
-			fmt.Fprintln(os.Stderr, "  • Switch to server mode:   bd init --server")
-			return nil
-		}
 		if usesProxiedServer() {
 			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in proxied-server mode.")
 			return nil
@@ -230,30 +220,56 @@ Examples:
 			)
 		}
 
+		// --check-health has a hook-only fallback for embedded mode
+		// (doctor_health.go), so it runs before the embedded-mode gate below.
+		if checkHealthMode {
+			return runCheckHealth(absPath)
+		}
+
+		// --perf opens a live server-mode connection; route embedded users to
+		// the structured stub instead of a hard connection error (GH#3597).
 		if perfMode {
+			if isEmbeddedMode() {
+				printEmbeddedUnsupported("doctor --perf")
+				return nil
+			}
 			if err := doctor.RunPerformanceDiagnostics(absPath); err != nil {
 				return HandleError("performance diagnostics: %v", err)
 			}
 			return nil
 		}
 
-		if checkHealthMode {
-			return runCheckHealth(absPath)
-		}
-
+		// artifacts, conventions, and pollution work in embedded mode and run
+		// unconditionally; validate still requires a server-mode connection
+		// and stays gated (GH#3597).
 		if doctorCheckFlag != "" {
 			switch doctorCheckFlag {
-			case "pollution":
-				return runPollutionCheck(absPath, doctorClean, doctorYes)
-			case "validate":
-				return runValidateCheck(absPath)
 			case "artifacts":
 				return runArtifactsCheck(absPath, doctorClean, doctorYes)
 			case "conventions":
 				return runConventionsCheck(absPath)
+			case "pollution":
+				return runPollutionCheck(absPath, doctorClean, doctorYes)
+			case "validate":
+				if isEmbeddedMode() {
+					printEmbeddedUnsupported("doctor --check=validate")
+					return nil
+				}
+				return runValidateCheck(absPath)
 			default:
 				return HandleErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, pollution, validate")
 			}
+		}
+
+		// Bare `bd doctor` and the remaining mode-specific flags (--deep,
+		// --server, --migration) aren't wired up for embedded mode yet.
+		// Policy (GH#3794): embedded support is enabled one subcommand at a
+		// time, each human-vetted — do not lift this gate wholesale. Checks
+		// that reach into the database layer stay server-gated until the
+		// storage driver interface covers them (AGENTS.md "Storage Boundary").
+		if isEmbeddedMode() {
+			printEmbeddedUnsupported("doctor")
+			return nil
 		}
 
 		if doctorDeep {
@@ -330,6 +346,53 @@ func init() {
 
 func shouldSkipDoctorNetworkChecks() bool {
 	return jsonOutput || !ui.IsTerminal()
+}
+
+// printEmbeddedUnsupported reports that a doctor variant is not yet wired up
+// for embedded mode. Emits a structured payload to stderr when --json or
+// --agent is set so downstream tooling can detect the gap without parsing
+// prose, and the existing prose stub otherwise (GH#3597).
+//
+// Follows the bd error-JSON contract (docs/JSON_SCHEMA.md): stderr, includes
+// a `code` field, and is wrapped with schema_version. Exit code stays 0 - a
+// benign refusal, not a failure.
+func printEmbeddedUnsupported(commandLabel string) {
+	hints := []string{
+		"Verify database exists:  ls -la .beads/embeddeddolt/",
+		"Check bd version:        bd version",
+		"Reinitialize if needed:  bd init --reinit-local",
+		"Switch to server mode:   bd init --server",
+	}
+	supported := []string{"artifacts", "conventions", "pollution"}
+	unsupported := []string{"validate"}
+
+	if jsonOutput || doctorAgent {
+		payload := map[string]interface{}{
+			"error":                               fmt.Sprintf("'bd %s' is not yet supported in embedded mode", commandLabel),
+			"code":                                "embedded_unsupported",
+			"unsupported":                         true,
+			"mode":                                "embedded",
+			"command":                             commandLabel,
+			"checks_supported_in_embedded_mode":   supported,
+			"checks_unsupported_in_embedded_mode": unsupported,
+			"hints":                               hints,
+		}
+		encoder := json.NewEncoder(os.Stderr)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(wrapWithSchemaVersion(payload))
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "Note: 'bd %s' is not yet supported in embedded mode.\n\n", commandLabel)
+	fmt.Fprintln(os.Stderr, "For embedded mode troubleshooting:")
+	for _, h := range hints {
+		fmt.Fprintf(os.Stderr, "  • %s\n", h)
+	}
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Checks available in embedded mode:")
+	fmt.Fprintln(os.Stderr, "  • bd doctor --check=artifacts")
+	fmt.Fprintln(os.Stderr, "  • bd doctor --check=conventions")
+	fmt.Fprintln(os.Stderr, "  • bd doctor --check=pollution")
 }
 
 func runDiagnostics(path string) doctorResult {
@@ -651,7 +714,24 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, bdPathCheck)
 	// Don't fail overall check for missing bd in PATH, just warn
 
-	// Check 11e: Documentation bd prime references match installed version
+	// Check 11e: Cursor integration (agent hooks)
+	cursorCheck := convertWithCategory(doctor.CheckCursor(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, cursorCheck)
+	// Don't fail overall check for missing Cursor integration, just warn
+
+	// Check 11f: Cursor hooks file health (malformed JSON detection)
+	cursorSettingsCheck := convertWithCategory(doctor.CheckCursorSettingsHealth(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, cursorSettingsCheck)
+	if cursorSettingsCheck.Status == statusError {
+		result.OverallOK = false // Malformed hooks.json is a real problem
+	}
+
+	// Check 11g: Cursor hook completeness (all three lifecycle events)
+	cursorHookCheck := convertWithCategory(doctor.CheckCursorHookCompleteness(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, cursorHookCheck)
+	// Don't fail overall check for incomplete hooks, just warn
+
+	// Check 11h: Documentation bd prime references match installed version
 	bdPrimeDocsCheck := convertWithCategory(doctor.CheckDocumentationBdPrimeReference(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, bdPrimeDocsCheck)
 	// Don't fail overall check for doc mismatch, just warn

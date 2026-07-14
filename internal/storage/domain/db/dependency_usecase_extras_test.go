@@ -23,6 +23,7 @@ func (s *testSuite) TestDependencyUseCase_Extras() {
 		s.Run("NilDepReturnsError", s.ducAddBulkNilDep)
 		s.Run("EmptyIDsReturnError", s.ducAddBulkEmptyIDs)
 		s.Run("InsertsEdgesAndReturnsAdded", s.ducAddBulkInserts)
+		s.Run("RejectsHierarchyBlockingButAllowsSiblings", s.ducAddBulkHierarchyBlocking)
 		s.Run("PerEdgeCycleCheckBlocksCycleCreation", s.ducAddBulkPerEdgeCycle)
 		s.Run("SkipPerEdgeStillRunsFinalCheck", s.ducAddBulkFinalCycleCheck)
 		s.Run("SkipPerEdgeAcceptsAcyclicBulk", s.ducAddBulkSkipPerEdgeAcyclic)
@@ -156,6 +157,47 @@ func (s *testSuite) ducAddBulkInserts() {
 	s.Require().Len(out["bd-duc-bulk-a"], 2)
 }
 
+func (s *testSuite) ducAddBulkHierarchyBlocking() {
+	for _, id := range []string{
+		"bd-duc-hier-parent",
+		"bd-duc-hier-child",
+		"bd-duc-hier-sibling",
+	} {
+		s.seedIssueRow(id)
+	}
+
+	repo := NewDependencySQLRepository(s.Runner())
+	for _, child := range []string{"bd-duc-hier-child", "bd-duc-hier-sibling"} {
+		s.Require().NoError(repo.Insert(s.Ctx(),
+			newDep(child, "bd-duc-hier-parent", types.DepParentChild),
+			"tester", domain.DepInsertOpts{}))
+	}
+
+	uc := s.depUseCase()
+	_, err := uc.AddDependencies(s.Ctx(), []*types.Dependency{
+		newDep("bd-duc-hier-sibling", "bd-duc-hier-child", types.DepBlocks),
+	}, "tester", domain.BulkAddDepsOpts{})
+	s.Require().NoError(err, "siblings may carry ordering edges")
+
+	_, err = uc.AddDependencies(s.Ctx(), []*types.Dependency{
+		newDep("bd-duc-hier-child", "bd-duc-hier-parent", types.DepBlocks),
+	}, "tester", domain.BulkAddDepsOpts{})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "cannot be blocked by its ancestor")
+
+	_, err = uc.AddDependencies(s.Ctx(), []*types.Dependency{
+		newDep("bd-duc-hier-parent", "bd-duc-hier-child", types.DepBlocks),
+	}, "tester", domain.BulkAddDepsOpts{})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "cannot be blocked by its descendant")
+
+	_, err = uc.AddDependencies(s.Ctx(), []*types.Dependency{
+		newDep("bd-duc-hier-child", "bd-duc-hier-parent", types.DepConditionalBlocks),
+	}, "tester", domain.BulkAddDepsOpts{})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "cannot be blocked by its ancestor")
+}
+
 func (s *testSuite) ducAddBulkPerEdgeCycle() {
 	// Existing a -> b. Trying to add b -> a must fail the per-edge cycle check
 	// and NOT insert the new edge.
@@ -223,7 +265,7 @@ func (s *testSuite) ducAddBulkNonBlockingNoCheck() {
 	s.Require().NoError(depRepo.Insert(s.Ctx(),
 		newDep("bd-duc-nbnc-a", "bd-duc-nbnc-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
 
-	// related edge b -> a: cycle check is per-edge for blocking types only, so
+	// related edge b -> a: cycle checks cover only the static scheduling types, so
 	// this should always be accepted.
 	res, err := s.depUseCase().AddDependencies(s.Ctx(),
 		[]*types.Dependency{newDep("bd-duc-nbnc-b", "bd-duc-nbnc-a", types.DepRelated)},

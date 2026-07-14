@@ -4,7 +4,7 @@
 #
 # Rationale: go-mysql-server links ICU by default under cgo. beads never
 # uses SQL REGEXP, so we always build with -tags=gms_pure_go. See
-# docs/ICU-POLICY.md for the full policy.
+# engdocs/ICU-POLICY.md for the full policy.
 
 # Embedded Dolt requires CGO; server mode and nocgo builds do not. Default
 # to 1 for the embedded-capable build paths that sourced this, but respect

@@ -84,6 +84,9 @@ type BondResult struct {
 }
 
 func runMolBond(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("mol bond is not supported in proxied-server mode")
+	}
 	CheckReadonly("mol bond")
 
 	evt := metrics.NewCommandEvent("mol-bond")

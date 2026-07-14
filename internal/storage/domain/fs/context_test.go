@@ -175,7 +175,7 @@ func TestContextRepository_ProxiedServerRoot(t *testing.T) {
 		got, err := repo.ProxiedServerRoot(context.Background())
 		require.NoError(t, err)
 		canonBeadsDir := canonicalBeadsDir(t, workDir)
-		require.Equal(t, filepath.Join(canonBeadsDir, proxiedServerRootDirName), got)
+		require.Equal(t, filepath.Join(canonBeadsDir, "dolt"), got)
 	})
 }
 

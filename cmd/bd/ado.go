@@ -356,6 +356,9 @@ type adoStatusResult struct {
 
 // runADOStatus implements the ado status command.
 func runADOStatus(cmd *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("ado status is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("ado-status")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -409,6 +412,9 @@ func runADOStatus(cmd *cobra.Command, _ []string) error {
 
 // runADOProjects implements the ado projects command.
 func runADOProjects(cmd *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("ado projects is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("ado-projects")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -478,6 +484,9 @@ type adoSyncResult struct {
 // runADOSync implements the ado sync command.
 // Uses the tracker.Engine for all sync operations.
 func runADOSync(cmd *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("ado sync is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("ado-sync")
 	defer func() {
 		if c := metrics.Global(); c != nil {

@@ -15,7 +15,22 @@ import (
 // the designated migrator apply pending schema migrations to a remote-backed
 // database despite the gate below. It is consulted only when the gate would
 // otherwise fire, so exporting it permanently does not warn on every store open.
+// The CLI-flag twin `bd migrate --force` is the preferred interactive form;
+// this env var remains supported for scripted/CI use.
 const AllowRemoteMigrateEnv = "BD_ALLOW_REMOTE_MIGRATE"
+
+// forceAllowRemoteMigrate is the programmatic (in-process) twin of
+// AllowRemoteMigrateEnv. Set by SetForceAllowRemoteMigrate before the store
+// opens; unlike os.Setenv(AllowRemoteMigrateEnv), it cannot leak into child
+// processes (git hooks, dolt subprocesses).
+var forceAllowRemoteMigrate bool
+
+// SetForceAllowRemoteMigrate sets (or clears) the programmatic override that
+// allows a pending schema migration on a remote-backed database. It is called
+// by `bd migrate --force` / `bd migrate schema --force` in the root
+// PersistentPreRunE, before both autoMigrateOnVersionBump and the main store
+// open. External test packages may reset it to false after each test case.
+func SetForceAllowRemoteMigrate(v bool) { forceAllowRemoteMigrate = v }
 
 // RemoteMigrateGateError is returned when bd is about to auto-apply pending
 // schema migrations to an existing database that has a remote configured.
@@ -204,7 +219,8 @@ func (e *RemoteMigrateGateError) userBody() string {
 			"  Choose one:\n" +
 			"    • You are the designated migrator (only ONE machine should be): migrate,\n" +
 			"      then publish the migrated database to the remote:\n" +
-			"        " + AllowRemoteMigrateEnv + "=1 bd migrate\n" +
+			"        bd migrate --force\n" +
+			"        (or " + AllowRemoteMigrateEnv + "=1 bd migrate in scripted/CI use)\n" +
 			"        bd dolt push\n" +
 			"    • Another machine has already migrated: adopt its database instead of\n" +
 			"      migrating here — re-clone from the remote so you receive the migrated\n" +
@@ -223,7 +239,7 @@ func (e *RemoteMigrateGateError) userBody() string {
 
 // EscapeHint returns the escape-hatch string for JSON error output.
 func (e *RemoteMigrateGateError) EscapeHint() string {
-	return AllowRemoteMigrateEnv + "=1 bd migrate"
+	return "bd migrate --force"
 }
 
 // AgentDirective is the non-runnable instruction surfaced to agents in place of
@@ -307,7 +323,7 @@ func (e *RemoteMigrateGateError) Options() []GateOption {
 			{
 				ID:       "migrate",
 				When:     "you are the single designated migrator (only ONE machine, confirmed with the operator) and no other clone has migrated yet",
-				Commands: []string{AllowRemoteMigrateEnv + "=1 bd migrate", "bd dolt push"},
+				Commands: []string{"bd migrate --force", "bd dolt push"},
 				Risk:     "if another clone also migrates independently, the schema forks unrecoverably (#4259)",
 			},
 			adopt,
@@ -411,6 +427,19 @@ func checkRemoteMigrateGate(ctx context.Context, db DBConn, remoteName string, e
 	}
 	if !hasRemote {
 		return nil // no remote — no cross-clone fork risk
+	}
+
+	// Programmatic override — set by `bd migrate --force` / `bd migrate schema
+	// --force` in the root PersistentPreRunE before both
+	// autoMigrateOnVersionBump and the main store open. Process-local by
+	// design: unlike os.Setenv(AllowRemoteMigrateEnv), it cannot leak into
+	// child processes (git hooks, dolt subprocesses). Consulted here — only
+	// once the gate would otherwise fire — so normal opens produce no noise.
+	if forceAllowRemoteMigrate {
+		fmt.Fprintf(os.Stderr,
+			"Warning: applying %d pending schema migration(s) to a remote-backed database (bd migrate --force); only one clone should migrate, then `bd dolt push`\n",
+			len(pending))
+		return nil
 	}
 
 	// Escape hatch — consulted only once the gate would actually fire, so an

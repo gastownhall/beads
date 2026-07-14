@@ -47,6 +47,16 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 	// to conflict rather than silently cell-merge.
 	leaseClause, leaseArgs := leaseSetClause(now, leaseTTL(ctx))
 
+	// An issue is claimable from "open" plus any configured custom status whose
+	// category is "active" (e.g. a draft->ready->in_progress lifecycle where
+	// "ready" should be claimable). WIP/done/frozen customs are excluded so the
+	// anti-steal protection from GH-3570 is preserved.
+	claimableStatuses, err := ClaimableSourceStatusesInTx(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve claimable statuses: %w", err)
+	}
+	statusPlaceholders, statusArgs := buildSQLInClause(claimableStatuses)
+
 	// Conditional UPDATE: only succeeds while the issue is still claimable.
 	// Also set started_at on first transition to in_progress (GH#2796); preserve
 	// any existing value so re-claims don't overwrite the original start time.
@@ -55,20 +65,24 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 	)
 	if oldIssue.StartedAt == nil {
 		args := append([]interface{}{actor, now, now}, leaseArgs...)
-		args = append(args, id, actor)
+		args = append(args, id)
+		args = append(args, statusArgs...)
+		args = append(args, actor)
 		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
 			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
-			WHERE id = ? AND status = 'open' AND (assignee = '' OR assignee IS NULL OR assignee = ?)
-		`, issueTable, leaseClause), args...)
+			WHERE id = ? AND status IN (%s) AND (assignee = '' OR assignee IS NULL OR assignee = ?)
+		`, issueTable, leaseClause, statusPlaceholders), args...)
 	} else {
 		args := append([]interface{}{actor, now}, leaseArgs...)
-		args = append(args, id, actor)
+		args = append(args, id)
+		args = append(args, statusArgs...)
+		args = append(args, actor)
 		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
 			SET assignee = ?, status = 'in_progress', updated_at = ?, %s
-			WHERE id = ? AND status = 'open' AND (assignee = '' OR assignee IS NULL OR assignee = ?)
-		`, issueTable, leaseClause), args...)
+			WHERE id = ? AND status IN (%s) AND (assignee = '' OR assignee IS NULL OR assignee = ?)
+		`, issueTable, leaseClause, statusPlaceholders), args...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to claim issue: %w", err)
@@ -155,4 +169,26 @@ func ClaimReadyIssueInTx(
 		return claimed, nil
 	}
 	return nil, nil
+}
+
+// ClaimableSourceStatusesInTx returns the set of statuses an issue may be
+// claimed FROM: the built-in "open" status plus any configured custom status
+// whose category is "active" (the same category that surfaces issues in
+// bd ready). Custom statuses in the wip/done/frozen categories are intentionally
+// excluded so claim retains its anti-steal protection (GH-3570) — an
+// in_progress/blocked issue, or a custom alias for one, is never silently
+// re-claimable. Unspecified-category customs are also excluded, matching their
+// absence from bd ready.
+func ClaimableSourceStatusesInTx(ctx context.Context, tx DBTX) ([]string, error) {
+	statuses := []string{string(types.StatusOpen)}
+	customs, err := ResolveCustomStatusesDetailedInTx(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range customs {
+		if s.Category == types.CategoryActive {
+			statuses = append(statuses, s.Name)
+		}
+	}
+	return statuses, nil
 }

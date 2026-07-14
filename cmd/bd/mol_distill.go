@@ -103,6 +103,9 @@ func parseDistillVar(varFlag, searchableText string) (string, string, error) {
 }
 
 func runMolDistill(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("mol distill is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("mol-distill")
 	defer func() {
 		if c := metrics.Global(); c != nil {

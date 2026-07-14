@@ -61,6 +61,60 @@ default_repo() {
   gh repo view --json nameWithOwner --jq .nameWithOwner
 }
 
+closing_issue_count() {
+  local pr_url="$1"
+  local pr_number="$2"
+  local repo_host repo_owner repo_name response count
+
+  if [[ "$pr_url" =~ ^https://([^/]+)/([^/]+)/([^/]+)/pull/([0-9]+)$ ]]; then
+    repo_host="${BASH_REMATCH[1]}"
+    repo_owner="${BASH_REMATCH[2]}"
+    repo_name="${BASH_REMATCH[3]}"
+    if [[ "${BASH_REMATCH[4]}" != "$pr_number" ]]; then
+      die "PR URL number does not match returned PR number: ${pr_url}"
+    fi
+  else
+    die "invalid canonical GitHub PR URL: ${pr_url}"
+  fi
+
+  # GraphQL variables are intentionally literal and are bound by gh -f/-F.
+  # shellcheck disable=SC2016
+  if ! response=$(gh api graphql \
+    --hostname "$repo_host" \
+    -f query='query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          closingIssuesReferences(first: 1) { nodes { id } }
+        }
+      }
+    }' \
+    -f owner="$repo_owner" \
+    -f name="$repo_name" \
+    -F number="$pr_number"); then
+    die "could not query closing issue references for ${repo_owner}/${repo_name}#${pr_number}"
+  fi
+
+  if ! count=$(jq -ser '
+    select(length == 1)
+    | .[0]
+    | select(has("errors") | not)
+    | .data.repository.pullRequest.closingIssuesReferences.nodes
+    | if type != "array" then empty
+      elif length == 0 then "0"
+      elif length == 1
+        and (.[0] | type == "object")
+        and (.[0] | keys == ["id"])
+        and (.[0].id | type == "string" and length > 0)
+      then "1"
+      else empty
+      end
+  ' <<<"$response"); then
+    die "invalid closing issue response for ${repo_owner}/${repo_name}#${pr_number}"
+  fi
+
+  printf '%s\n' "$count"
+}
+
 repo=""
 pr=""
 search=""
@@ -128,7 +182,7 @@ fi
 
 json=$(gh pr view "$pr" \
   --repo "$repo" \
-  --json number,title,author,url,baseRefName,headRefName,headRepositoryOwner,isCrossRepository,isDraft,maintainerCanModify,mergeStateStatus,mergeable,reviewDecision,changedFiles,additions,deletions,files,statusCheckRollup,closingIssuesReferences,latestReviews)
+  --json number,title,author,url,baseRefName,headRefName,headRepositoryOwner,isCrossRepository,isDraft,maintainerCanModify,mergeStateStatus,mergeable,reviewDecision,changedFiles,additions,deletions,files,statusCheckRollup,latestReviews)
 
 number=$(jq -r .number <<<"$json")
 title=$(jq -r .title <<<"$json")
@@ -274,11 +328,11 @@ if [[ "$files" -gt 30 || "$additions" -gt 1000 ]]; then
   warn "Large PR; verify scope is one issue and one PR."
 fi
 
-issue_count=$(jq '[.closingIssuesReferences[]?] | length' <<<"$json")
-if [[ "$issue_count" -eq 0 ]]; then
+issue_count=$(closing_issue_count "$url" "$number")
+if [[ "$issue_count" == "0" ]]; then
   warn "No closing issue reference found."
 else
-  pass "PR references $issue_count closing issue(s)."
+  pass "PR references at least one closing issue."
 fi
 
 printf '\nChanged files:\n'

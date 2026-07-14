@@ -28,8 +28,10 @@ func TestProtocol_ImportPreservesRelationalData(t *testing.T) {
 	w.run("comments", "add", id1, "Design notes for the feature")
 	w.run("comments", "add", id1, "Review feedback from team")
 
-	// Verify via bd show --json
-	featShow := w.showJSON(id1)
+	// Verify via bd show --json. The feature's comment bodies are opt-in
+	// (--include-comments), so it needs the full payload; the dep target is
+	// only checked for labels, which are inline in the default one.
+	featShow := w.showJSONFull(id1)
 	depTargetShow := w.showJSON(id2)
 
 	t.Run("labels", func(t *testing.T) {
@@ -177,7 +179,9 @@ func TestProtocol_ParentChildDepShowRoundTrip(t *testing.T) {
 	child := w.create("--title", "Child task", "--type", "task", "--priority", "2", "--parent", parent)
 
 	childIssue := w.showJSON(child)
-	parentIssue := w.showJSON(parent)
+	// The parent's dependents list is opt-in (--include-dependents); its
+	// dependent_count is what the default payload carries.
+	parentIssue := w.showJSONFull(parent)
 
 	// Child must have a dependency pointing to parent
 	t.Run("child_references_parent", func(t *testing.T) {
@@ -221,6 +225,9 @@ func TestProtocol_ParentChildDepShowRoundTrip(t *testing.T) {
 			t.Errorf("parent %s does not list child %s in dependents (got %d dependents)",
 				parent, child, len(parentDependents))
 		}
+
+		// The count-only default payload must agree with the streamed list.
+		assertFieldFloat(t, w.showJSON(parent), "dependent_count", 1)
 	})
 }
 

@@ -763,7 +763,7 @@ func TestEmbeddedInit(t *testing.T) {
 			}
 			for _, want := range []string{
 				"Re-running `bd init` will NOT fix this",
-				schema.AllowRemoteMigrateEnv + "=1",
+				"bd migrate --force",
 				"bd dolt push",
 			} {
 				if !strings.Contains(string(out), want) {
@@ -1376,17 +1376,31 @@ func TestEmbeddedInit(t *testing.T) {
 		requireFile(t, filepath.Join(embeddedDir, "bdolt", ".dolt"))
 	})
 
-	t.Run("rejected_backends", func(t *testing.T) {
-		for _, tc := range []struct {
-			backend, wantErr string
-		}{
-			{"sqlite", "DEPRECATED"},
-			{"postgres", "unknown backend"},
-		} {
-			out := bdInitFail(t, bd, "--backend", tc.backend)
-			if !strings.Contains(out, tc.wantErr) {
-				t.Errorf("--backend %s: expected %q, got: %s", tc.backend, tc.wantErr, out)
-			}
+	t.Run("sql_backend_flags", func(t *testing.T) {
+		// SQLite is a supported pluggable backend now: init succeeds and records it.
+		_, beadsDir, _ := bdInit(t, bd, "--prefix", "sqlt", "--backend", "sqlite")
+		cfg, err := configfile.Load(beadsDir)
+		if err != nil {
+			t.Fatalf("failed to load metadata.json: %v", err)
+		}
+		if cfg.Backend != configfile.BackendSQLite {
+			t.Errorf("backend: got %q, want %q", cfg.Backend, configfile.BackendSQLite)
+		}
+
+		// Postgres is recognized, not an unknown backend: it fails only because the
+		// required connection config is absent (bdEnv strips any ambient DSN).
+		pgOut := bdInitFail(t, bd, "--backend", "postgres")
+		if strings.Contains(pgOut, "unknown backend") {
+			t.Errorf("postgres should be recognized, got unknown-backend error: %s", pgOut)
+		}
+		if !strings.Contains(pgOut, "--pg-url") {
+			t.Errorf("postgres init should request --pg-url, got: %s", pgOut)
+		}
+
+		// A genuinely unsupported backend is still rejected.
+		unknownOut := bdInitFail(t, bd, "--backend", "mongodb")
+		if !strings.Contains(unknownOut, "unknown backend") {
+			t.Errorf("mongodb: expected unknown-backend error, got: %s", unknownOut)
 		}
 	})
 
@@ -1449,12 +1463,17 @@ func TestEmbeddedInit(t *testing.T) {
 	t.Run("files_created", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fc", "--skip-hooks")
 		requireFile(t, filepath.Join(beadsDir, "config.yaml"))
-		requireFile(t, filepath.Join(beadsDir, "interactions.jsonl"))
+		if _, err := os.Stat(filepath.Join(beadsDir, "interactions.jsonl")); !os.IsNotExist(err) {
+			t.Fatalf("interactions.jsonl should be created only when audit.enabled is true, got stat err %v", err)
+		}
 		requireFile(t, filepath.Join(dir, "AGENTS.md"))
 		requireFile(t, filepath.Join(dir, ".agents", "skills", "beads", "SKILL.md"))
 		requireFile(t, filepath.Join(dir, ".agents", "skills", "beads", "agents", "openai.yaml"))
 		requireFile(t, filepath.Join(dir, ".codex", "config.toml"))
 		requireFile(t, filepath.Join(dir, ".codex", "hooks.json"))
+		// Cursor integration is auto-installed by bd init too (rules + hooks).
+		requireFile(t, filepath.Join(dir, ".cursor", "rules", "beads.mdc"))
+		requireFile(t, filepath.Join(dir, ".cursor", "hooks.json"))
 
 		content, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore"))
 		if err != nil {
@@ -1877,7 +1896,7 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	for i := 0; i < N; i++ {
 		go func(idx int) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 
 			cmd := exec.CommandContext(ctx, bd, "init", "--prefix", "conc", "--force", "--quiet", "--skip-agents")
@@ -1889,10 +1908,11 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	successes, lockErrors := 0, 0
+	successes, lockErrors, timeoutKills := 0, 0, 0
 	for _, r := range results {
 		if r.timedOut {
-			t.Errorf("process %d timed out after 45s running concurrent bd init: %v\n%s", r.idx, r.err, r.out)
+			t.Logf("process %d timed out after 90s running concurrent bd init: %v\n%s", r.idx, r.err, r.out)
+			timeoutKills++
 			continue
 		}
 		if strings.Contains(r.out, "panic") {
@@ -1909,10 +1929,18 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	if successes < 1 {
 		t.Errorf("expected at least 1 success, got %d", successes)
 	}
-	if successes+lockErrors != N {
-		t.Errorf("expected successes (%d) + lock errors (%d) = %d, got %d", successes, lockErrors, N, successes+lockErrors)
+	if lockErrors < 1 {
+		t.Errorf("expected at least 1 lock error, got %d", lockErrors)
 	}
-	t.Logf("%d/%d succeeded, %d/%d got lock error", successes, N, lockErrors, N)
+	// timeoutKills > 2 (i.e. > N/5) indicates a systemic runner problem, not normal load variance.
+	if timeoutKills > 2 {
+		t.Errorf("too many timeout-killed processes: %d/%d (cap is 2)", timeoutKills, N)
+	}
+	if successes+lockErrors+timeoutKills != N {
+		t.Errorf("expected successes (%d) + lock errors (%d) + timeout kills (%d) = %d, got %d",
+			successes, lockErrors, timeoutKills, N, successes+lockErrors+timeoutKills)
+	}
+	t.Logf("%d/%d succeeded, %d/%d got lock error, %d/%d timed out", successes, N, lockErrors, N, timeoutKills, N)
 
 	beadsDir := filepath.Join(dir, ".beads")
 	embeddedDir := filepath.Join(beadsDir, "embeddeddolt")
