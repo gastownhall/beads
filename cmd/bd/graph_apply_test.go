@@ -647,4 +647,14 @@ func TestCreateIssuesFromGraph_DryRunDoesNotPersist(t *testing.T) {
 	if result.NodeCount != 2 {
 		t.Errorf("node_count = %d, want 2", result.NodeCount)
 	}
+	// The fixture combines b's parent_key="a" with an explicit b--blocks-->a
+	// edge. The dry-run preview counts these independently and does not dedupe
+	// the overlapping relationship, so edge_count and parent_deps are each 1.
+	// Pin both to catch any regression that starts merging or dropping them.
+	if result.EdgeCount != 1 {
+		t.Errorf("edge_count = %d, want 1", result.EdgeCount)
+	}
+	if result.ParentDeps != 1 {
+		t.Errorf("parent_deps = %d, want 1", result.ParentDeps)
+	}
 }
