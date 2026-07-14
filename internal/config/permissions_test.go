@@ -167,3 +167,38 @@ func TestFixBeadsDirPermissions_Nonexistent(t *testing.T) {
 		t.Error("expected fixed=false for nonexistent directory")
 	}
 }
+
+func TestFixBeadsDirPermissions_RejectsSymlink(t *testing.T) {
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(tmp, ".beads")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	fixed, err := FixBeadsDirPermissions(link)
+	if err == nil {
+		t.Fatal("expected error for symbolic link")
+	}
+	if fixed {
+		t.Error("expected fixed=false for symbolic link")
+	}
+}
+
+func TestFixBeadsDirPermissions_RejectsNonDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".beads")
+	if err := os.WriteFile(path, []byte("not a directory"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	fixed, err := FixBeadsDirPermissions(path)
+	if err == nil {
+		t.Fatal("expected error for non-directory")
+	}
+	if fixed {
+		t.Error("expected fixed=false for non-directory")
+	}
+}

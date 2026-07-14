@@ -36,9 +36,18 @@ func CheckBeadsDirPermissions(path string) {
 // FixBeadsDirPermissions sets the .beads directory to BeadsDirPerm when it
 // has group or world-accessible bits. Returns true if permissions changed.
 func FixBeadsDirPermissions(path string) (bool, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
-		return false, nil // directory doesn't exist yet
+		if os.IsNotExist(err) {
+			return false, nil // directory doesn't exist yet
+		}
+		return false, fmt.Errorf("failed to inspect %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("refusing to chmod %s: path is a symbolic link", path)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("refusing to chmod %s: path is not a directory", path)
 	}
 	perm := info.Mode().Perm()
 	if perm&0077 == 0 {
