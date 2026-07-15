@@ -110,13 +110,7 @@ func TestGetDependencyRecordsForIssuesOrdersByDependsOnID(t *testing.T) {
 	// specific SQL, use ExpectQuery with a flexible pattern.
 	// Simpler path: call getDependencyRecordsIntoFromTable via FromTable helper.
 	now := time.Now()
-	q := regexp.QuoteMeta(
-		"SELECT issue_id, COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id, type, created_at, created_by, metadata, thread_id\n" +
-			"\t\t\t FROM dependencies WHERE issue_id IN (?) ORDER BY issue_id, depends_on_id, type",
-	)
-	// The actual query uses fmt with tabs/spaces — use flexible regex like the all-query helper.
 	flex := `(?s)SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type, created_at, created_by, metadata, thread_id\s+FROM dependencies WHERE issue_id IN \(\?\) ORDER BY issue_id, depends_on_id, type`
-	_ = q
 	mock.ExpectQuery(flex).
 		WithArgs("src").
 		WillReturnRows(dependencyRows().
