@@ -448,19 +448,35 @@ func detectStructuralIssues(analysis *SwarmAnalysis, _ []*types.Issue) {
 }
 
 // computeReadyFronts calculates the waves of parallel work.
+// Closed issues are excluded from waves and do not block dependents (GH#4564):
+// a closed dependency is treated as already satisfied for ready-front purposes.
 func computeReadyFronts(analysis *SwarmAnalysis) {
 	if len(analysis.Errors) > 0 {
 		// Can't compute ready fronts if there are cycles
 		return
 	}
 
-	// Use Kahn's algorithm for topological sort with level tracking
-	inDegree := make(map[string]int)
-	for id, node := range analysis.Issues {
-		inDegree[id] = len(node.DependsOn)
+	isClosed := func(id string) bool {
+		n, ok := analysis.Issues[id]
+		return ok && n.Status == string(types.StatusClosed)
 	}
 
-	// Start with all nodes that have no dependencies (wave 0)
+	// Kahn's algorithm over open issues only; in-degree counts open blockers.
+	inDegree := make(map[string]int)
+	for id, node := range analysis.Issues {
+		if isClosed(id) {
+			continue
+		}
+		openBlockers := 0
+		for _, depID := range node.DependsOn {
+			if !isClosed(depID) {
+				openBlockers++
+			}
+		}
+		inDegree[id] = openBlockers
+	}
+
+	// Wave 0: open issues with no open dependencies
 	var currentWave []string
 	for id, degree := range inDegree {
 		if degree == 0 {
@@ -494,11 +510,17 @@ func computeReadyFronts(analysis *SwarmAnalysis) {
 			analysis.MaxParallelism = len(currentWave)
 		}
 
-		// Find next wave
+		// Find next wave among open dependents
 		var nextWave []string
 		for _, id := range currentWave {
 			if node, ok := analysis.Issues[id]; ok {
 				for _, dependentID := range node.DependedOnBy {
+					if isClosed(dependentID) {
+						continue
+					}
+					if _, tracked := inDegree[dependentID]; !tracked {
+						continue
+					}
 					inDegree[dependentID]--
 					if inDegree[dependentID] == 0 {
 						nextWave = append(nextWave, dependentID)
@@ -512,8 +534,14 @@ func computeReadyFronts(analysis *SwarmAnalysis) {
 		wave++
 	}
 
-	// Estimated sessions = total issues (each issue is roughly one session)
-	analysis.EstimatedSessions = analysis.TotalIssues
+	// Estimated sessions ≈ remaining open issues (each issue is roughly one session)
+	openCount := 0
+	for id := range analysis.Issues {
+		if !isClosed(id) {
+			openCount++
+		}
+	}
+	analysis.EstimatedSessions = openCount
 }
 
 // renderSwarmAnalysis outputs human-readable analysis.
