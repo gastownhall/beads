@@ -77,7 +77,7 @@ while IFS= read -r path; do
             ;;
     esac
     case "$path" in
-        npm-package/*|scripts/ci/package-npm.sh|scripts/ci/detect-package-gates.sh|.github/workflows/pr.yml|.github/workflows/main.yml|.github/workflows/pr-risk.yml|.github/workflows/ci-measurements.yml|.github/workflows/release.yml|Makefile)
+        npm-package/*|plugins/beads/*|scripts/ci/package-npm.sh|scripts/ci/detect-package-gates.sh|.github/workflows/pr.yml|.github/workflows/main.yml|.github/workflows/pr-risk.yml|.github/workflows/ci-measurements.yml|.github/workflows/release.yml|Makefile)
             npm_package=true
             ;;
     esac
