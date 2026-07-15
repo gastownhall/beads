@@ -87,6 +87,24 @@ func TestParseDepSpecs(t *testing.T) {
 			in:      []string{":bd-1"},
 			wantErr: true,
 		},
+		{
+			name: "comma-separated multi-type different targets",
+			in:   []string{"discovered-from:bd-20,blocks:bd-15"},
+			want: []domain.DependencySpec{
+				{Type: types.DepDiscoveredFrom, TargetID: "bd-20"},
+				{Type: types.DepBlocks, TargetID: "bd-15", SwapDirection: true},
+			},
+		},
+		{
+			name:    "multi-type same target rejected (uk_dep_issue_target)",
+			in:      []string{"discovered-from:bd-1,blocked-by:bd-1"},
+			wantErr: true,
+		},
+		{
+			name:    "duplicate same edge rejected",
+			in:      []string{"blocked-by:bd-1", "depends-on:bd-1"},
+			wantErr: true, // both map to blocks without swap on same target
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

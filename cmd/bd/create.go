@@ -587,63 +587,27 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		// Add dependencies if specified (format: type:id or just id for default "blocks" type)
-		for _, depSpec := range deps {
-			depSpec = strings.TrimSpace(depSpec)
-			if depSpec == "" {
-				continue
-			}
-
-			var depType types.DependencyType
-			var dependsOnID string
-			swapDirection := false
-
-			if strings.Contains(depSpec, ":") {
-				parts := strings.SplitN(depSpec, ":", 2)
-				if len(parts) != 2 {
-					WarnError("invalid dependency format '%s', expected 'type:id' or 'id'", depSpec)
-					continue
-				}
-				rawType := types.DependencyType(strings.TrimSpace(parts[0]))
-				dependsOnID = strings.TrimSpace(parts[1])
-
-				switch rawType {
-				case "depends-on", "blocked-by":
-					// Alias: the new issue depends on the target. Store as a blocks edge.
-					depType = types.DepBlocks
-				case types.DepBlocks:
-					// Explicit "blocks:X" means the new issue blocks X, so store X -> new issue.
-					depType = types.DepBlocks
-					swapDirection = true
-				default:
-					depType = rawType
-				}
-			} else {
-				depType = types.DepBlocks
-				dependsOnID = depSpec
-			}
-
-			if !depType.IsValid() {
-				return HandleErrorRespectJSON("invalid dependency type %q (must be non-empty, max 50 chars); valid types: %s", depType, createDepsAcceptedTypeList())
-			}
-			if !depType.IsWellKnown() {
-				return HandleErrorRespectJSON("unknown dependency type %q; valid types: %s", depType, createDepsAcceptedTypeList())
-			}
-
+		// Add dependencies if specified (format: type:id or just id for default "blocks" type).
+		// Parse + uniqueness check first so multi-type same-target cannot partially apply (GH#4626).
+		parsedDeps, err := parseDepSpecs(deps)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		for _, spec := range parsedDeps {
 			dep := &types.Dependency{
 				IssueID:     issue.ID,
-				DependsOnID: dependsOnID,
-				Type:        depType,
+				DependsOnID: spec.TargetID,
+				Type:        spec.Type,
 			}
-			if swapDirection {
-				dep.IssueID = dependsOnID
+			if spec.SwapDirection {
+				dep.IssueID = spec.TargetID
 				dep.DependsOnID = issue.ID
 			}
 			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				WarnError("failed to add dependency %s -> %s: %v", issue.ID, dependsOnID, err)
-			} else {
-				postCreateWrites = true
+				// Hard-fail: silent WarnError dropped edges and left issues un-gated (GH#4626).
+				return HandleErrorRespectJSON("failed to add dependency %s -> %s (%s): %v", dep.IssueID, dep.DependsOnID, dep.Type, err)
 			}
+			postCreateWrites = true
 		}
 
 		if waitsFor != "" {
