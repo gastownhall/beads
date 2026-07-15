@@ -8,9 +8,45 @@ import (
 	"testing"
 )
 
+func TestDataDirDefaultUsesHomeBeads(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("BEADS_DIR", "")
+
+	got, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	want := filepath.Join(home, ".beads", "eventsData")
+	if got != want {
+		t.Fatalf("DataDir() = %q, want %q", got, want)
+	}
+}
+
+func TestDataDirRespectsBeadsDir(t *testing.T) {
+	home := t.TempDir()
+	beadsDir := filepath.Join(t.TempDir(), "custom-beads")
+	t.Setenv("HOME", home)
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	got, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	want := filepath.Join(beadsDir, "eventsData")
+	if got != want {
+		t.Fatalf("DataDir() = %q, want %q", got, want)
+	}
+	// Must not place events under the default home .beads when BEADS_DIR is set.
+	if strings.HasPrefix(got, filepath.Join(home, ".beads")) {
+		t.Fatalf("DataDir() = %q still under $HOME/.beads despite BEADS_DIR", got)
+	}
+}
+
 func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("BEADS_DIR", "")
 
 	closeFn, err := Init("0.0.0-test", false, "")
 	if err != nil {
@@ -39,6 +75,7 @@ func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
 func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("BEADS_DIR", "")
 
 	closeFn, err := Init("0.0.0-test", true, "")
 	if err != nil {

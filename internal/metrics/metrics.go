@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/dolthub/eventkit"
@@ -40,7 +41,14 @@ func Endpoint() string {
 	return endpoint
 }
 
+// DataDir returns the directory used for on-disk telemetry queues.
+// When BEADS_DIR is set, events live under $BEADS_DIR/eventsData so a custom
+// workspace does not create a phantom ~/.beads/ tree that confuses discovery.
+// Otherwise the default is $HOME/.beads/eventsData.
 func DataDir() (string, error) {
+	if beadsDir := strings.TrimSpace(os.Getenv("BEADS_DIR")); beadsDir != "" {
+		return filepath.Join(beadsDir, "eventsData"), nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
