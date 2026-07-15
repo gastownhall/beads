@@ -1782,3 +1782,30 @@ func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
 		t.Errorf("expected pull attempt output, got: %q", out)
 	}
 }
+
+// GH#4511: show's config-source banner must match doltserver.DefaultConfig order.
+func TestDoltShowConfigSourceLinesMatchDefaultConfigOrder(t *testing.T) {
+	// Contract with DefaultConfig comments: env > port file > yaml > metadata.
+	joined := strings.Join(doltShowConfigSourceLines, "\n")
+	for _, want := range []string{
+		"BEADS_DOLT_SERVER_PORT",
+		"dolt-server.port",
+		"config.yaml",
+		"metadata.json",
+		"deprecated",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("config source lines missing %q:\n%s", want, joined)
+		}
+	}
+	// Port file must appear before metadata.json (primary local before deprecated).
+	portIdx := strings.Index(joined, "dolt-server.port")
+	metaIdx := strings.Index(joined, "metadata.json")
+	if portIdx < 0 || metaIdx < 0 || portIdx > metaIdx {
+		t.Fatalf("expected dolt-server.port before metadata.json; port=%d meta=%d", portIdx, metaIdx)
+	}
+	// Must not claim metadata is local/gitignored (the bug).
+	if strings.Contains(joined, "local, gitignored") {
+		t.Fatal("must not label metadata.json as local/gitignored")
+	}
+}
