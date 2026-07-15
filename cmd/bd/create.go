@@ -528,39 +528,22 @@ var createCmd = &cobra.Command{
 
 		ctx := createCtx
 
-		// Check if any dependencies are discovered-from type
-		// If so, inherit source_repo from the parent issue
-		var discoveredFromParentID string
-		for _, depSpec := range deps {
-			depSpec = strings.TrimSpace(depSpec)
-			if depSpec == "" {
-				continue
-			}
-
-			var depType types.DependencyType
-			var dependsOnID string
-
-			if strings.Contains(depSpec, ":") {
-				parts := strings.SplitN(depSpec, ":", 2)
-				if len(parts) == 2 {
-					depType = types.DependencyType(strings.TrimSpace(parts[0]))
-					dependsOnID = strings.TrimSpace(parts[1])
-
-					if depType == types.DepDiscoveredFrom && dependsOnID != "" {
-						discoveredFromParentID = dependsOnID
-						break
-					}
-				}
-			}
+		// Parse --deps BEFORE CreateIssue so multi-type same-target / invalid specs
+		// fail closed without leaving an orphan issue (GH#4626).
+		parsedDeps, err := parseDepSpecs(deps)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		// If we found a discovered-from dependency, inherit source_repo from parent
-		if discoveredFromParentID != "" {
-			parentIssue, err := store.GetIssue(ctx, discoveredFromParentID)
-			if err == nil && parentIssue.SourceRepo != "" {
-				issue.SourceRepo = parentIssue.SourceRepo
+		// If any dependency is discovered-from, inherit source_repo from that parent.
+		for _, spec := range parsedDeps {
+			if spec.Type == types.DepDiscoveredFrom && spec.TargetID != "" {
+				parentIssue, gerr := store.GetIssue(ctx, spec.TargetID)
+				if gerr == nil && parentIssue.SourceRepo != "" {
+					issue.SourceRepo = parentIssue.SourceRepo
+				}
+				break
 			}
-			// If error getting parent or parent has no source_repo, continue with default
 		}
 
 		if err := store.CreateIssue(ctx, issue, actor); err != nil {
@@ -587,12 +570,7 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		// Add dependencies if specified (format: type:id or just id for default "blocks" type).
-		// Parse + uniqueness check first so multi-type same-target cannot partially apply (GH#4626).
-		parsedDeps, err := parseDepSpecs(deps)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
+		// Apply pre-parsed deps (uniqueness already validated before create).
 		for _, spec := range parsedDeps {
 			dep := &types.Dependency{
 				IssueID:     issue.ID,
