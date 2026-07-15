@@ -8,14 +8,14 @@ This is the shared Claude, Codex, Copilot, and Pi plugin package for Beads. Each
 - `.claude-plugin/plugin.json` describes the Claude plugin.
 - `.copilot-plugin/plugin.json` describes the Copilot plugin.
 - `package.json` describes the Pi package.
-- `.pi/extensions/beads.ts` adds the shared skill tree during Pi resource discovery.
+- `.pi/extensions/beads.ts` adds the shared skill tree and refreshes Beads context across Pi session lifecycle events.
 - `skills/beads/` contains the plugin-owned Beads skill.
 - `.codex-plugin/hooks/hooks.json` contains Codex-only lifecycle hooks for startup and compaction-aware context refresh.
 - The Claude marketplace entry lives at `.claude-plugin/marketplace.json`.
 
 ## Pi
 
-Pi loads this directory as a package. Its extension resolves `skills/` relative to the installed extension, so discovery does not depend on the directory where Pi starts.
+Pi loads this directory as a package. Its extension resolves `skills/` relative to the installed extension, so discovery does not depend on the directory where Pi starts. When Pi starts or replaces a session, the extension runs `bd prime` in the session working directory and injects successful output as hidden model context. It refreshes that context again after manual, threshold, or overflow compaction. Non-Beads working directories are left unchanged.
 
 The installed Pi CLI accepts git repository roots, but does not document a git-subdirectory selector. For a durable install, keep a Beads checkout and install the plugin directory from that checkout:
 
@@ -33,7 +33,7 @@ pi list
 pi
 ```
 
-Inside Pi, run `/skill:beads` to load the skill explicitly. The skill directs Pi to run `bd prime`, which is the current source of truth for Beads workflow guidance.
+Inside Pi, run `/skill:beads` to load the skill explicitly. The skill remains useful for commands and reference material, while `bd prime` is the current source of truth automatically injected by the lifecycle hooks.
 
 Run the focused extension test from the repository root with:
 
