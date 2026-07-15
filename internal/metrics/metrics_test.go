@@ -111,6 +111,7 @@ func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
 
 func TestRunSendMetricsNoOpWhenDisabled(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_DIR", "")
 	_, err := Init("0.0.0-test", false, "")
 	if err != nil {
 		t.Fatalf("Init: %v", err)
@@ -122,6 +123,7 @@ func TestRunSendMetricsNoOpWhenDisabled(t *testing.T) {
 
 func TestMaybeSpawnFlusherNoOpWhenDisabled(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_DIR", "")
 	_, err := Init("0.0.0-test", false, "")
 	if err != nil {
 		t.Fatalf("Init: %v", err)
@@ -173,6 +175,7 @@ func TestFlusherChildEnvPinsSanctionedEndpoint(t *testing.T) {
 // independent of send-metrics' os.Exit.
 func TestMaybeSpawnFlusherNoOpInsideFlusher(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("BEADS_DIR", "")
 	t.Setenv(EnvIsFlusher, "1")
 	if _, err := Init("0.0.0-test", true, ""); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -190,6 +193,7 @@ func TestMaybeSpawnFlusherNoOpInsideFlusher(t *testing.T) {
 func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("BEADS_DIR", "")
 	// Keep the detached uploader from actually forking during the test; we only
 	// assert the on-disk write that CloseAndFlush guarantees before an os.Exit.
 	t.Setenv(EnvDisableEventFlush, "1")
@@ -227,6 +231,7 @@ func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
 func TestCloseAndFlushDisabledIsSafe(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("BEADS_DIR", "")
 	t.Setenv(EnvDisableEventFlush, "1")
 
 	if _, err := Init("0.0.0-test", false, ""); err != nil {

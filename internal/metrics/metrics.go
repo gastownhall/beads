@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/dolthub/eventkit"
@@ -45,8 +44,9 @@ func Endpoint() string {
 // When BEADS_DIR is set, events live under $BEADS_DIR/eventsData so a custom
 // workspace does not create a phantom ~/.beads/ tree that confuses discovery.
 // Otherwise the default is $HOME/.beads/eventsData.
+// BEADS_DIR is read the same way as FindBeadsDir (bare getenv, no TrimSpace).
 func DataDir() (string, error) {
-	if beadsDir := strings.TrimSpace(os.Getenv("BEADS_DIR")); beadsDir != "" {
+	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
 		return filepath.Join(beadsDir, "eventsData"), nil
 	}
 	home, err := os.UserHomeDir()
