@@ -1,14 +1,45 @@
 # Beads Plugin
 
-This is the shared Claude/Codex plugin package for Beads. Claude and Codex use separate manifest files, but they share the same skill tree.
+This is the shared Claude, Codex, Copilot, and Pi plugin package for Beads. Each agent uses its own metadata, while all of them share the same skill tree.
 
 ## Layout
 
 - `.codex-plugin/plugin.json` describes the Codex plugin.
 - `.claude-plugin/plugin.json` describes the Claude plugin.
+- `.copilot-plugin/plugin.json` describes the Copilot plugin.
+- `package.json` describes the Pi package.
+- `.pi/extensions/beads.ts` adds the shared skill tree during Pi resource discovery.
 - `skills/beads/` contains the plugin-owned Beads skill.
 - `.codex-plugin/hooks/hooks.json` contains Codex-only lifecycle hooks for startup and compaction-aware context refresh.
 - The Claude marketplace entry lives at `.claude-plugin/marketplace.json`.
+
+## Pi
+
+Pi loads this directory as a package. Its extension resolves `skills/` relative to the installed extension, so discovery does not depend on the directory where Pi starts.
+
+The installed Pi CLI accepts git repository roots, but does not document a git-subdirectory selector. For a durable install, keep a Beads checkout and install the plugin directory from that checkout:
+
+```bash
+git clone https://github.com/gastownhall/beads.git
+pi install /absolute/path/to/beads/plugins/beads
+```
+
+To test a local Beads checkout without changing global Pi settings, point Pi at an isolated agent directory:
+
+```bash
+export PI_CODING_AGENT_DIR=/tmp/beads-pi
+pi install ./plugins/beads
+pi list
+pi
+```
+
+Inside Pi, run `/skill:beads` to load the skill explicitly. The skill directs Pi to run `bd prime`, which is the current source of truth for Beads workflow guidance.
+
+Run the focused extension test from the repository root with:
+
+```bash
+npm test --prefix plugins/beads
+```
 
 ## Codex Hooks
 
