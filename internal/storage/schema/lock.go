@@ -53,7 +53,20 @@ func MigrationLockName(databaseName string) string {
 // server session. Embedded Dolt intentionally uses bare MigrateUp because it
 // relies on the embedded driver's file/concurrency controls instead of
 // sql-server session locks.
+//
+// A database that is already fully migrated and seeded skips the lock and the
+// migration pass entirely: the currency probe is strictly read-only, so any
+// number of concurrent processes can take the fast path without coordination.
+// Without it, every store open in a fleet of bd processes serializes on the
+// per-database GET_LOCK just to discover there is no work — the lock exists to
+// serialize migrations, not the steady-state no-op check. Anything less than
+// fully-current (or a probe error) falls through to the locked pass, which
+// re-checks under the lock (double-checked locking) and surfaces real errors.
 func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string) (applied int, err error) {
+	if current, probeErr := migrationStateCurrent(ctx, conn); probeErr == nil && current {
+		return 0, nil
+	}
+
 	lockName := MigrationLockName(databaseName)
 	if err := AcquireMigrationLock(ctx, conn, lockName); err != nil {
 		return 0, err

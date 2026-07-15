@@ -256,6 +256,56 @@ func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
 	return changed, nil
 }
 
+// doltIgnoreSeedCurrent is the read-only counterpart of seedDoltIgnorePatterns:
+// it reports whether every canonical pattern is already present in dolt_ignore
+// (any ignored value — the seed's INSERT IGNORE is keyed on the pattern alone,
+// so a present row means the seed would be a no-op, and an operator override
+// with ignored=false stays a no-op here too). A missing dolt_ignore table
+// reports false so the caller falls through to the seeding path.
+func doltIgnoreSeedCurrent(ctx context.Context, db DBConn) (bool, error) {
+	rows, err := db.QueryContext(ctx, "SELECT pattern FROM dolt_ignore")
+	if err != nil {
+		if dberrors.IsTableNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("reading dolt_ignore patterns: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	present := make(map[string]bool, len(doltIgnorePatterns))
+	for rows.Next() {
+		var pattern string
+		if err := rows.Scan(&pattern); err != nil {
+			return false, fmt.Errorf("reading dolt_ignore patterns: %w", err)
+		}
+		present[pattern] = true
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("reading dolt_ignore patterns: %w", err)
+	}
+	for _, pattern := range doltIgnorePatterns {
+		if !present[pattern] {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// migrationStateCurrent reports whether MigrateUp would be a complete no-op:
+// the dolt_ignore seed is fully present and no migration work is needed. It is
+// strictly read-only, so any number of concurrent processes can probe it
+// without coordination — the basis for MigrateUpWithLock's lock-free fast path.
+func migrationStateCurrent(ctx context.Context, db DBConn) (bool, error) {
+	seeded, err := doltIgnoreSeedCurrent(ctx, db)
+	if err != nil || !seeded {
+		return false, err
+	}
+	needed, err := migrationWorkNeeded(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	return !needed, nil
+}
+
 // commitSeededDoltIgnore stages and commits freshly seeded dolt_ignore rows
 // in a scoped, labeled commit. Both MigrateUp paths use it: on the no-work
 // short-circuit nothing downstream would ever commit the seed, and on the
