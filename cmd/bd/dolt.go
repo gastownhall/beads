@@ -1437,6 +1437,49 @@ func selectedDoltBeadsDir() string {
 	return beadsDir
 }
 
+// resolveDoltShowRemotes returns remotes for `bd dolt show`.
+// `show` is a no-store diagnostic command, so getStore() is usually nil and
+// ListRemotes is unavailable. Fall back to on-disk repo_state.json (same
+// source as the remote-migrate gate) so remotes match `bd dolt remote list`
+// in embedded mode (GH#4619).
+func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config, embeddedDataDir string) []storage.RemoteInfo {
+	ctx := context.Background()
+	if st := getStore(); st != nil {
+		if remotes, err := st.ListRemotes(ctx); err == nil && len(remotes) > 0 {
+			return remotes
+		}
+	}
+	// Probe persisted remotes under common Dolt data roots without opening a store.
+	dbName := ""
+	if cfg != nil {
+		dbName = cfg.GetDoltDatabase()
+	}
+	var candidates []string
+	if embeddedDataDir != "" {
+		candidates = append(candidates, embeddedDataDir)
+		if dbName != "" {
+			candidates = append(candidates, filepath.Join(embeddedDataDir, dbName))
+		}
+	}
+	if beadsDir != "" {
+		candidates = append(candidates, filepath.Join(beadsDir, "dolt"))
+		if dbName != "" {
+			candidates = append(candidates, filepath.Join(beadsDir, "dolt", dbName))
+		}
+	}
+	for _, dir := range candidates {
+		if dir == "" {
+			continue
+		}
+		remotes, err := doltutil.PersistedRemotes(dir)
+		if err != nil || len(remotes) == 0 {
+			continue
+		}
+		return remotes
+	}
+	return nil
+}
+
 func showDoltConfig(testConnection bool) error {
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
@@ -1520,12 +1563,7 @@ func showDoltConfig(testConnection bool) error {
 	}
 
 	fmt.Println("\nRemotes:")
-	ctx := context.Background()
-	st := getStore()
-	var remotes []storage.RemoteInfo
-	if st != nil {
-		remotes, _ = st.ListRemotes(ctx)
-	}
+	remotes := resolveDoltShowRemotes(beadsDir, cfg, embeddedDataDir)
 	if len(remotes) == 0 {
 		fmt.Println("  (none)")
 	} else {

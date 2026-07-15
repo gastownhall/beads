@@ -1782,3 +1782,42 @@ func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
 		t.Errorf("expected pull attempt output, got: %q", out)
 	}
 }
+
+// GH#4619: bd dolt show is a no-store command; remotes must still surface from
+// on-disk repo_state.json when getStore() is nil.
+func TestResolveDoltShowRemotesFromPersistedState(t *testing.T) {
+	beadsDir := t.TempDir()
+	dbName := "beads"
+	dbPath := filepath.Join(beadsDir, "embeddeddolt", dbName)
+	if err := os.MkdirAll(filepath.Join(dbPath, ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	state := `{"remotes":{"origin":{"name":"origin","url":"https://doltremoteapi.dolthub.com/org/db"}}}`
+	if err := os.WriteFile(filepath.Join(dbPath, ".dolt", "repo_state.json"), []byte(state), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	// Ensure database name matches fixture path.
+	if cfg.GetDoltDatabase() != dbName {
+		t.Fatalf("default dolt database = %q, want %q for fixture layout", cfg.GetDoltDatabase(), dbName)
+	}
+
+	// getStore() is nil outside PersistentPreRun — same as real `bd dolt show`.
+	store = nil
+	remotes := resolveDoltShowRemotes(beadsDir, cfg, filepath.Join(beadsDir, "embeddeddolt"))
+	if len(remotes) != 1 || remotes[0].Name != "origin" {
+		t.Fatalf("resolveDoltShowRemotes = %+v, want origin", remotes)
+	}
+	if remotes[0].URL != "https://doltremoteapi.dolthub.com/org/db" {
+		t.Fatalf("origin URL = %q", remotes[0].URL)
+	}
+}
+
+func TestResolveDoltShowRemotesNoneWhenNoState(t *testing.T) {
+	store = nil
+	remotes := resolveDoltShowRemotes(t.TempDir(), configfile.DefaultConfig(), filepath.Join(t.TempDir(), "embeddeddolt"))
+	if len(remotes) != 0 {
+		t.Fatalf("want no remotes, got %+v", remotes)
+	}
+}
