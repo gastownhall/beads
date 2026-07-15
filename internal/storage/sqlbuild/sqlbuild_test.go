@@ -249,6 +249,12 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	if strings.Contains(noWispDeps, "UNION ALL") {
 		t.Error("counts SQL must not union wisp reverse deps when probe says absent")
 	}
+	// An empty whereSQL keeps the plain driver: there is no predicate to push
+	// down, so the derived-table wrapper would be pure overhead for the
+	// unfiltered list/counts path.
+	if strings.Contains(noWispDeps, "SELECT i.*") {
+		t.Errorf("empty-where counts SQL must keep the plain driver, not a derived table:\n%s", noWispDeps)
+	}
 	if strings.Contains(noWispDeps, "JSON_ARRAYAGG(label)") {
 		t.Error("counts SQL must skip the labels join when skipLabels is set")
 	}

@@ -61,7 +61,9 @@ const DepJSONObject = `JSON_OBJECT(
 // the narrow ephemeral-work searches that dominate the hot path. Only the WHERE
 // moves inward; orderBySQL and limitSQL remain after the joins, because ORDER BY
 // and LIMIT must see the projected aggregate columns and must apply to the final
-// joined result.
+// joined result. An empty whereSQL keeps the plain "FROM <main> i" driver: there
+// is no predicate to push down, so the derived table would only interpose a
+// needless wrapper between the planner and the base table.
 //
 // That shape REQUIRES that whereSQL reference only main-table columns (or
 // correlated subqueries against labels/deps/comments keyed by id) — never the
@@ -123,18 +125,21 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 		labelsJoin = ""
 	}
 
-	// Predicate form: whereSQL filters the main table inside a derived table so
-	// the aggregate joins drive off the already-narrowed set; ORDER BY and LIMIT
-	// stay outer, after the joins. By-IDs form: plain driver, id predicate at the
-	// outer level (its subqueries are already id-constrained).
-	driverSQL := fmt.Sprintf(`(
+	// Predicate form with a filter: whereSQL filters the main table inside a
+	// derived table so the aggregate joins drive off the already-narrowed set;
+	// ORDER BY and LIMIT stay outer, after the joins. Everything else — empty
+	// whereSQL (nothing to push down) and the by-IDs form (subqueries already
+	// id-constrained) — keeps the plain driver.
+	driverSQL := fmt.Sprintf("%s i", tables.Main)
+	if !byIDs && whereSQL != "" {
+		driverSQL = fmt.Sprintf(`(
 			SELECT i.*
 			FROM %s i
 			%s
 		) i`, tables.Main, whereSQL)
+	}
 	outerClause := fmt.Sprintf("%s\n\t\t%s", orderBySQL, limitSQL)
 	if byIDs {
-		driverSQL = fmt.Sprintf("%s i", tables.Main)
 		outerClause = fmt.Sprintf("WHERE i.id IN (%s)", inSQL)
 	}
 
