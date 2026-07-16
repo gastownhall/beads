@@ -50,6 +50,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   note: in server mode that was behaving like `on`; it now genuinely stops
   minting version commits until an explicit `bd dolt commit`.
 
+- **The no-ID "last touched issue" fallback on `bd update` / `bd close` is
+  now interactive-only** (bd-m00pb,
+  [#4839](https://github.com/gastownhall/beads/pull/4839)).
+  Previously a scripted `bd update $ID ...` with an accidentally empty `$ID`
+  silently mutated whatever issue was touched last — a real agent session
+  corrupted an unrelated closed bead this way. The missing-ID refusal happens
+  in argument validation, before any store open, migration, or auto-import
+  side effect. The fallback now requires stdin to be a terminal;
+  `BD_NON_INTERACTIVE=1` and `CI=1/true` also disable it. Scripts that
+  intentionally relied on it can set `BD_LAST_TOUCHED_FALLBACK=1` (or `=0` to
+  disable the fallback everywhere). Explicit IDs and `bd show --current` are
+  unaffected.
+
 
 - **`bd delete --cascade` no longer marks LIVE issues as deleted in other
   issues' text** (bd-x82so). When the deletion named a wisp, the set used to
