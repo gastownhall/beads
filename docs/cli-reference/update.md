@@ -10,7 +10,11 @@ Generated from `bd help --doc update`.
 Update one or more issues.
 
 If no issue ID is provided, updates the last touched issue (from most recent
-create, update, show, or close operation).
+create, update, show, or close operation). This fallback only applies in
+interactive sessions (stdin is a terminal); in scripts and agent sessions a
+missing ID is an error, so a command built from an empty variable cannot
+silently mutate an unrelated issue. Set BD_LAST_TOUCHED_FALLBACK=1 to allow
+the fallback anywhere, or =0 to disable it entirely.
 
 ```
 bd update [id...] [flags]

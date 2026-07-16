@@ -356,7 +356,11 @@ bd children <parent-id> [flags]
 Close one or more issues.
 
 If no issue ID is provided, closes the last touched issue (from most recent
-create, update, show, or close operation).
+create, update, show, or close operation). This fallback only applies in
+interactive sessions (stdin is a terminal); in scripts and agent sessions a
+missing ID is an error, so a command built from an empty variable cannot
+silently close an unrelated issue. Set BD_LAST_TOUCHED_FALLBACK=1 to allow
+the fallback anywhere, or =0 to disable it entirely.
 
 When closing multiple issues, provide one --reason for all IDs or repeat
 --reason once per ID. Reasons map positionally: the first --reason applies
@@ -1455,7 +1459,11 @@ bd todo list [flags]
 Update one or more issues.
 
 If no issue ID is provided, updates the last touched issue (from most recent
-create, update, show, or close operation).
+create, update, show, or close operation). This fallback only applies in
+interactive sessions (stdin is a terminal); in scripts and agent sessions a
+missing ID is an error, so a command built from an empty variable cannot
+silently mutate an unrelated issue. Set BD_LAST_TOUCHED_FALLBACK=1 to allow
+the fallback anywhere, or =0 to disable it entirely.
 
 ```
 bd update [id...] [flags]
@@ -2240,6 +2248,16 @@ Commands:
 DoltHub is recommended for cloud backup:
   bd backup init https://doltremoteapi.dolthub.com/&lt;user&gt;/&lt;repo&gt;
   Set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD for authentication.
+
+Auto-backup default:
+  When backup.enabled is unset, auto-backup turns ON in embedded mode if a
+  git remote exists, and stays OFF in sql-server / shared-server mode. In
+  server mode many bd clients share one Dolt server, and each would register
+  a server-side backup remote under the same name pointing at its own local
+  dir and full-sync the whole database — a self-amplifying storm. To back up
+  a shared server, run 'bd backup' explicitly (or set backup.enabled=true and
+  coordinate destinations). 'bd config get backup.enabled' shows the effective
+  value and its source.
 
 ```
 bd backup
