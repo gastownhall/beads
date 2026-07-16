@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/labelns"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -150,11 +151,39 @@ var labelAddCmd = &cobra.Command{
 			}
 		}
 
+		var exclusivePrefixes []string
+		if replace, _ := cmd.Flags().GetBool("replace"); replace {
+			raw, _ := store.GetConfig(ctx, labelns.ConfigKey)
+			exclusivePrefixes = labelns.ParsePrefixes(raw)
+		}
+
 		return processBatchLabelOperation(issueIDs, labels, "added", jsonOutput,
-			func(ctx context.Context, tx storage.Transaction, issueID, lbl, act string) error {
-				return tx.AddLabel(ctx, issueID, lbl, act)
-			})
+			exclusiveReplaceAddTxFunc(exclusivePrefixes))
 	},
+}
+
+// exclusiveReplaceAddTxFunc returns the per-(issue,label) add operation for
+// 'bd label add'. With exclusive prefixes supplied (--replace), a label in an
+// exclusive namespace first removes any other label the issue carries in that
+// namespace, so the add swaps instead of tripping the exclusivity guard in
+// the storage layer (bd-7u5ki). Without prefixes it is a plain AddLabel.
+func exclusiveReplaceAddTxFunc(exclusivePrefixes []string) func(context.Context, storage.Transaction, string, string, string) error {
+	return func(ctx context.Context, tx storage.Transaction, issueID, lbl, act string) error {
+		if prefix := labelns.Match(exclusivePrefixes, lbl); prefix != "" {
+			existing, err := tx.GetLabels(ctx, issueID)
+			if err != nil {
+				return err
+			}
+			for _, have := range existing {
+				if have != lbl && labelns.Match(exclusivePrefixes, have) == prefix {
+					if err := tx.RemoveLabel(ctx, issueID, have, act); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		return tx.AddLabel(ctx, issueID, lbl, act)
+	}
 }
 
 //nolint:dupl // labelRemoveCmd and labelAddCmd are similar but serve different operations
@@ -399,6 +428,8 @@ var labelPropagateCmd = &cobra.Command{
 }
 
 func init() {
+	labelAddCmd.Flags().Bool("replace", false, "In exclusive label namespaces (labels.exclusive-prefixes), swap out any existing label in the same namespace instead of failing")
+
 	// Issue ID completions
 	labelAddCmd.ValidArgsFunction = issueIDCompletion
 	labelRemoveCmd.ValidArgsFunction = issueIDCompletion

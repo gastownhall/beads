@@ -317,6 +317,9 @@ Also triggers Dolt push/pull if a remote is configured.`,
 					if importErr := store.CreateIssuesWithFullOptions(ctx, issues, "repo-sync", storage.BatchCreateOptions{
 						OrphanHandling:       storage.OrphanAllow,
 						SkipPrefixValidation: true,
+						// Replays existing data: exclusive-label violations warn via bd
+						// doctor instead of failing the replay (bd-7u5ki).
+						ExclusiveLabelConflictWarn: true,
 					}); importErr != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to import from %s: %v\n", repoPath, importErr)
 						continue
@@ -388,6 +391,9 @@ Also triggers Dolt push/pull if a remote is configured.`,
 			if err := store.CreateIssuesWithFullOptions(ctx, issues, "repo-sync", storage.BatchCreateOptions{
 				OrphanHandling:       storage.OrphanAllow,
 				SkipPrefixValidation: true,
+				// Replays existing data: exclusive-label violations warn via bd
+				// doctor instead of failing the replay (bd-7u5ki).
+				ExclusiveLabelConflictWarn: true,
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to import from %s: %v\n", repoPath, err)
 				continue

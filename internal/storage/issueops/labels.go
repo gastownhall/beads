@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/labelns"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -142,6 +143,9 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 			eventTable = et
 		}
 	}
+	if err := checkExclusiveLabelInTx(ctx, tx, labelTable, issueID, label); err != nil {
+		return err
+	}
 	//nolint:gosec // G201: labelTable is from WispTableRouting ("labels" or "wisp_labels")
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)`, labelTable), issueID, label); err != nil {
 		return fmt.Errorf("add label: %w", err)
@@ -153,6 +157,91 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 		return fmt.Errorf("add label: record event: %w", err)
 	}
 	return nil
+}
+
+// checkExclusiveLabelInTx rejects the add when the label falls in a
+// configured exclusive namespace (labels.exclusive-prefixes, bd-7u5ki) the
+// issue already carries a different label in. It lives at the shared insert
+// choke point so every interactive mutation path — bd label add, bd update
+// --add-label, bd label propagate — gets the same guard. With no prefixes
+// configured (the default) only the config lookup runs.
+func checkExclusiveLabelInTx(ctx context.Context, tx DBTX, labelTable, issueID, label string) error {
+	raw, err := GetConfigInTx(ctx, tx, labelns.ConfigKey)
+	if err != nil {
+		return fmt.Errorf("add label: %w", err)
+	}
+	prefixes := labelns.ParsePrefixes(raw)
+	if len(prefixes) == 0 {
+		return nil
+	}
+	prefix := labelns.Match(prefixes, label)
+	if prefix == "" {
+		return nil
+	}
+	existing, err := GetLabelsInTx(ctx, tx, labelTable, issueID)
+	if err != nil {
+		return fmt.Errorf("add label: %w", err)
+	}
+	for _, have := range existing {
+		if have != label && labelns.Match(prefixes, have) == prefix {
+			return fmt.Errorf("cannot add label %q to %s: namespace %q is exclusive (%s) and the issue already has %q — remove it first, or swap in one step with 'bd label add --replace'",
+				label, issueID, prefix, labelns.ConfigKey, have)
+		}
+	}
+	return nil
+}
+
+// ExclusiveLabelViolation reports an issue carrying more than one label in a
+// configured exclusive namespace.
+type ExclusiveLabelViolation struct {
+	IssueID string
+	Prefix  string
+	Labels  []string
+}
+
+// FindExclusiveLabelViolations scans the permanent labels table for
+// non-closed issues violating the given exclusive prefixes. bd doctor uses it
+// so adopters can find pre-existing violations before (or after) enabling
+// labels.exclusive-prefixes — write-path enforcement only guards new label
+// additions. Closed issues are skipped (no routing consumer reads them), as
+// are wisp labels (wisps are ephemeral and expire via TTL compaction).
+func FindExclusiveLabelViolations(ctx context.Context, db DBTX, prefixes []string) ([]ExclusiveLabelViolation, error) {
+	if len(prefixes) == 0 {
+		return nil, nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT l.issue_id, l.label
+		FROM labels l JOIN issues i ON i.id = l.issue_id
+		WHERE i.status != 'closed'
+		ORDER BY l.issue_id, l.label`)
+	if err != nil {
+		return nil, fmt.Errorf("scan exclusive labels: %w", err)
+	}
+	defer rows.Close()
+
+	labelsByIssue := make(map[string][]string)
+	var issueOrder []string
+	for rows.Next() {
+		var issueID, label string
+		if err := rows.Scan(&issueID, &label); err != nil {
+			return nil, fmt.Errorf("scan exclusive labels: %w", err)
+		}
+		if _, ok := labelsByIssue[issueID]; !ok {
+			issueOrder = append(issueOrder, issueID)
+		}
+		labelsByIssue[issueID] = append(labelsByIssue[issueID], label)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("scan exclusive labels: %w", err)
+	}
+
+	var violations []ExclusiveLabelViolation
+	for _, issueID := range issueOrder {
+		for _, c := range labelns.Conflicts(prefixes, labelsByIssue[issueID]) {
+			violations = append(violations, ExclusiveLabelViolation{IssueID: issueID, Prefix: c.Prefix, Labels: c.Labels})
+		}
+	}
+	return violations, nil
 }
 
 // RemoveLabelInTx removes a label from an issue and records an event within

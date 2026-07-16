@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/labelns"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/tracker"
@@ -72,6 +73,18 @@ Custom Status States:
   This enables issues to use statuses like 'awaiting_review' in addition to
   the built-in statuses (open, in_progress, blocked, deferred, closed).
 
+Exclusive Label Namespaces:
+  Labels are free-form, but routing conventions like tier:<model> assume one
+  label per prefix; a second one silently narrows fleet eligibility to zero.
+  Declare prefixes exclusive (at most one label per issue) with:
+
+    bd config set labels.exclusive-prefixes "tier:,review:"
+
+  Adding a second label in an exclusive namespace is then rejected on every
+  write path ('bd label add --replace' swaps instead). Import warns and keeps
+  violating labels; 'bd doctor' reports existing violations. Unset the key to
+  restore fully free-form labels (the default).
+
 Suppressing Doctor Warnings:
   Suppress specific bd doctor warnings by check name slug:
     bd config set doctor.suppress.pending-migrations true
@@ -88,6 +101,7 @@ Examples:
   bd config set jira.url "https://company.atlassian.net"
   bd config set jira.project "PROJ"
   bd config set status.custom "awaiting_review,awaiting_testing"
+  bd config set labels.exclusive-prefixes "tier:,review:"
   bd config set doctor.suppress.pending-migrations true
   bd config set dolt.debug true                        # Enable Dolt sql-server debug mode (loglevel=debug, --prof cpu)
   bd config set dolt.local-only true                   # Skip wiring a Dolt sync remote during bd init
@@ -207,6 +221,12 @@ var configSetCmd = &cobra.Command{
 		if key == "status.custom" && value != "" {
 			if _, err := types.ParseCustomStatusConfig(value); err != nil {
 				return HandleError("invalid status.custom value: %v", err)
+			}
+		}
+
+		if key == labelns.ConfigKey && value != "" {
+			if _, err := labelns.ValidatePrefixes(value); err != nil {
+				return HandleError("invalid %s value: %v", labelns.ConfigKey, err)
 			}
 		}
 
@@ -923,7 +943,7 @@ Examples:
 // a new tracker is added (GH#4427).
 var recognizedConfigPrefixes = []string{
 	"export.", "import.", "dolt.", "custom.",
-	"status.", "types.", "doctor.suppress.", "routing.", "sync.", "git.",
+	"status.", "types.", "labels.", "doctor.suppress.", "routing.", "sync.", "git.",
 	"directory.", "repos.", "external_projects.", "validation.",
 	"hierarchy.", "ai.", "backup.", "federation.", "metrics.", "agent.",
 }

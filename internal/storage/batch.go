@@ -53,4 +53,15 @@ type BatchCreateOptions struct {
 	// them as skipped rather than created. May fire more than once per issue
 	// if the enclosing transaction retries; callers should dedup by ID.
 	OnStaleRejected func(issueID string)
+	// ExclusiveLabelConflictWarn downgrades exclusive-label-namespace
+	// violations (labels.exclusive-prefixes, bd-7u5ki) from a hard error to
+	// the OnExclusiveLabelConflict callback, keeping the labels as written.
+	// Set by import, which replays history that may predate the namespace
+	// config and must not hard-fail or silently drop labels; interactive
+	// create paths leave it false and fail the create instead.
+	ExclusiveLabelConflictWarn bool
+	// OnExclusiveLabelConflict reports each exclusive-namespace violation
+	// when ExclusiveLabelConflictWarn is set. May fire more than once per
+	// issue if the enclosing transaction retries; callers should dedup.
+	OnExclusiveLabelConflict func(issueID, prefix string, labels []string)
 }

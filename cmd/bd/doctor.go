@@ -687,6 +687,13 @@ func runDiagnostics(path string) doctorResult {
 	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, blockedConsistencyCheck)
 
+	// Exclusive label namespaces (bd-7u5ki): only reports when the workspace
+	// opted in via labels.exclusive-prefixes. Warn-only: violations predate
+	// the config (or arrived via import, which deliberately keeps them), and
+	// the cleanup is a routine label remove/swap.
+	exclusiveLabelsCheck := convertWithCategory(doctor.CheckExclusiveLabelNamespacesWithStore(sharedStore), doctor.CategoryData)
+	result.Checks = append(result.Checks, exclusiveLabelsCheck)
+
 	// Check 11: Claude integration
 	claudeCheck := convertWithCategory(doctor.CheckClaude(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, claudeCheck)

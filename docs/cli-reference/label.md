@@ -21,6 +21,12 @@ Add labels to issues. Issue IDs come first; the final argument is the label. Pas
 bd label add [issue-id...] [label[,label...]] [flags]
 ```
 
+**Flags:**
+
+```
+      --replace   In exclusive label namespaces (labels.exclusive-prefixes), swap out any existing label in the same namespace instead of failing
+```
+
 ## bd label list
 
 List labels for an issue

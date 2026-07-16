@@ -274,6 +274,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `status.custom` | Custom statuses with optional behavior categories (see [below](#custom-statuses-and-types)) |
 | `types.custom` | Comma-separated list of custom issue types |
 | `types.infra` | Infra types routed to the wisps table instead of the versioned issues table |
+| `labels.exclusive-prefixes` | Label prefixes limited to one label per issue (see [below](#exclusive-label-namespaces)) |
 | `compact_tier1_days`, `compact_tier2_days` | Age thresholds in days for `bd admin compact` tier eligibility (defaults `30` and `90`) |
 | `issue_id_mode` | `hash` (default) \| `counter` (see [below](#sequential-counter-ids)) |
 | `min_hash_length`, `max_hash_length` | Adaptive ID bounds (defaults `3` and `8`) |
@@ -308,7 +309,26 @@ bd config set types.custom "agent,molecule,event"
 
 Use `bd statuses` and `bd types` to list everything configured.
 
-### Sequential Counter IDs
+### Exclusive Label Namespaces
+
+Labels are free-form, but conventions like `tier:<model>` treat a prefix as single-valued — and a bead that ends up with both `tier:fable` and `tier:opus` doesn't widen its eligibility, it silently vanishes from routing (one filter matches the first label while another excludes on the second). Declare such prefixes exclusive so a bead carries at most one label per namespace:
+
+```bash
+bd config set labels.exclusive-prefixes "tier:,review:"
+```
+
+With a namespace configured, every write path rejects a second label in it — `bd create -l`, `bd update --add-label`, `bd label add`, and `bd label propagate` — naming the existing label in the error. To swap instead of remove-then-add:
+
+```bash
+bd label add bd-a1b2 tier:opus --replace   # removes tier:fable, adds tier:opus
+```
+
+Boundary behavior:
+
+- **Off by default.** An empty or unset key leaves all labels free-form; multi-valued prefixes like `area:` keep working unless you list them.
+- **Explicit beats inherited.** A child created with `--parent` and an explicit label in an exclusive namespace drops the parent's label in that namespace instead of failing.
+- **Import warns instead of failing.** `bd import` replays history that may predate the config, so violations are kept and reported, not rejected.
+- **`bd doctor` reports existing violations** (server mode), so you can clean up before or after turning enforcement on.
 
 By default, beads generates hash-based IDs (e.g. `bd-a3f2`). For projects that prefer short sequential IDs (`bd-1`, `bd-2`, ...), enable counter mode:
 

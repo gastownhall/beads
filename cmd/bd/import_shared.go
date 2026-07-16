@@ -64,6 +64,11 @@ type ImportResult struct {
 	// row for these (second-granularity timestamp ties, bd-hj85c); their
 	// aux data still merges.
 	TieKeptLocalIDs []string
+	// ExclusiveLabelConflicts lists issues that violate a configured
+	// exclusive label namespace (labels.exclusive-prefixes, bd-7u5ki).
+	// Import replays history, so violations warn instead of failing and the
+	// labels are kept as written; bd doctor reports them for cleanup.
+	ExclusiveLabelConflicts []string
 }
 
 // ImportChange describes how an import row modified an existing local issue.
@@ -106,6 +111,8 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 	// (local update committed between the pre-filter read and the batch
 	// write). The transaction may retry, so dedup by ID.
 	staleRejectedSet := make(map[string]struct{})
+	var exclusiveLabelConflicts []string
+	exclusiveLabelConflictSet := make(map[string]struct{})
 	err := store.CreateIssuesWithFullOptions(ctx, issues, getActorWithGit(), storage.BatchCreateOptions{
 		OrphanHandling:                 storage.OrphanAllow,
 		SkipPrefixValidation:           opts.SkipPrefixValidation,
@@ -122,6 +129,15 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 		},
 		OnStaleRejected: func(issueID string) {
 			staleRejectedSet[issueID] = struct{}{}
+		},
+		ExclusiveLabelConflictWarn: true,
+		OnExclusiveLabelConflict: func(issueID, prefix string, labels []string) {
+			conflict := fmt.Sprintf("%s: namespace %q has %s", issueID, prefix, strings.Join(labels, ", "))
+			if _, ok := exclusiveLabelConflictSet[conflict]; ok {
+				return
+			}
+			exclusiveLabelConflictSet[conflict] = struct{}{}
+			exclusiveLabelConflicts = append(exclusiveLabelConflicts, conflict)
 		},
 	})
 	if err != nil {
@@ -148,14 +164,15 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 		updatedCount++
 	}
 	return &ImportResult{
-		Created:             len(importedIDs),
-		Updated:             updatedCount,
-		Skipped:             len(staleSkippedIDs),
-		ImportedIDs:         importedIDs,
-		StaleSkippedIDs:     staleSkippedIDs,
-		SkippedDependencies: skippedDependencies,
-		UpdatedIssues:       updatedIssues,
-		TieKeptLocalIDs:     changePlan.TieKeptLocal,
+		Created:                 len(importedIDs),
+		Updated:                 updatedCount,
+		Skipped:                 len(staleSkippedIDs),
+		ImportedIDs:             importedIDs,
+		StaleSkippedIDs:         staleSkippedIDs,
+		SkippedDependencies:     skippedDependencies,
+		UpdatedIssues:           updatedIssues,
+		TieKeptLocalIDs:         changePlan.TieKeptLocal,
+		ExclusiveLabelConflicts: exclusiveLabelConflicts,
 	}, nil
 }
 

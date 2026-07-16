@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/steveyegge/beads/internal/labelns"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/types"
@@ -19,7 +20,10 @@ type BatchContext struct {
 	CustomTypes     []string
 	ConfigPrefix    string
 	AllowedPrefixes string
-	Opts            storage.BatchCreateOptions
+	// ExclusiveLabelPrefixes holds the parsed labels.exclusive-prefixes config
+	// (bd-7u5ki); empty means no namespace is exclusive.
+	ExclusiveLabelPrefixes []string
+	Opts                   storage.BatchCreateOptions
 }
 
 // NewBatchContext reads config from the database and returns a BatchContext.
@@ -39,12 +43,18 @@ func NewBatchContext(ctx context.Context, tx *sql.Tx, opts storage.BatchCreateOp
 	var allowedPrefixes string
 	_ = tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "allowed_prefixes").Scan(&allowedPrefixes)
 
+	exclusiveRaw, err := GetConfigInTx(ctx, tx, labelns.ConfigKey)
+	if err != nil {
+		return nil, err
+	}
+
 	return &BatchContext{
-		CustomStatuses:  customStatuses,
-		CustomTypes:     customTypes,
-		ConfigPrefix:    configPrefix,
-		AllowedPrefixes: allowedPrefixes,
-		Opts:            opts,
+		CustomStatuses:         customStatuses,
+		CustomTypes:            customTypes,
+		ConfigPrefix:           configPrefix,
+		AllowedPrefixes:        allowedPrefixes,
+		ExclusiveLabelPrefixes: labelns.ParsePrefixes(exclusiveRaw),
+		Opts:                   opts,
 	}, nil
 }
 
@@ -145,7 +155,7 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 		result.markChanged(eventTable)
 	}
 
-	labelResult, err := PersistLabels(ctx, tx, issue, actor, eventTable)
+	labelResult, err := PersistLabels(ctx, tx, bc, issue, actor, eventTable)
 	if err != nil {
 		return result, err
 	}
@@ -608,7 +618,7 @@ func InsertIssueIfNew(ctx context.Context, tx *sql.Tx, issueTable string, issue 
 	return existingCount == 0, false, nil
 }
 
-func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, eventTable string) (CreateIssueResult, error) {
+func PersistLabels(ctx context.Context, tx *sql.Tx, bc *BatchContext, issue *types.Issue, actor, eventTable string) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	if len(issue.Labels) == 0 {
 		return result, nil
@@ -616,6 +626,9 @@ func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, e
 	labelTable := "labels"
 	if IsWisp(issue) {
 		labelTable = "wisp_labels"
+	}
+	if err := checkExclusiveLabelsForPersist(ctx, tx, bc, issue, labelTable); err != nil {
+		return result, err
 	}
 	seen := make(map[string]struct{}, len(issue.Labels))
 	for _, label := range issue.Labels {
@@ -650,6 +663,40 @@ func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, e
 		result.markChanged(eventTable)
 	}
 	return result, nil
+}
+
+// checkExclusiveLabelsForPersist enforces labels.exclusive-prefixes
+// (bd-7u5ki) on the create/import label path. The incoming snapshot's labels
+// are checked together with any labels already stored for the issue, because
+// an import upsert merges aux data into an existing row. Interactive create
+// paths fail hard; import sets ExclusiveLabelConflictWarn because it replays
+// history that may predate the namespace config, so each violation is
+// reported through the callback and the labels are kept as-is (no silent
+// data loss — bd doctor surfaces the violations for cleanup).
+func checkExclusiveLabelsForPersist(ctx context.Context, tx *sql.Tx, bc *BatchContext, issue *types.Issue, labelTable string) error {
+	if bc == nil || len(bc.ExclusiveLabelPrefixes) == 0 {
+		return nil
+	}
+	existing, err := GetLabelsInTx(ctx, tx, labelTable, issue.ID)
+	if err != nil {
+		return fmt.Errorf("check exclusive labels for %s: %w", issue.ID, err)
+	}
+	combined := append(append([]string{}, existing...), issue.Labels...)
+	conflicts := labelns.Conflicts(bc.ExclusiveLabelPrefixes, combined)
+	if len(conflicts) == 0 {
+		return nil
+	}
+	if bc.Opts.ExclusiveLabelConflictWarn {
+		if bc.Opts.OnExclusiveLabelConflict != nil {
+			for _, c := range conflicts {
+				bc.Opts.OnExclusiveLabelConflict(issue.ID, c.Prefix, c.Labels)
+			}
+		}
+		return nil
+	}
+	c := conflicts[0]
+	return fmt.Errorf("issue %s: namespace %q is exclusive (%s) and allows at most one label, got %s",
+		issue.ID, c.Prefix, labelns.ConfigKey, strings.Join(c.Labels, ", "))
 }
 
 func PersistComments(ctx context.Context, tx *sql.Tx, issue *types.Issue) (CreateIssueResult, error) {

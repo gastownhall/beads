@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/labelns"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
@@ -459,7 +460,18 @@ var createCmd = &cobra.Command{
 			}
 		}
 
+		var exclusivePrefixes []string
+		if store != nil {
+			raw, _ := store.GetConfig(rootCtx, labelns.ConfigKey)
+			exclusivePrefixes = labelns.ParsePrefixes(raw)
+		}
+		inheritedLabels = dropConflictingInheritedLabels(labels, inheritedLabels, exclusivePrefixes)
 		labels = mergeCreateLabels(labels, inheritedLabels)
+		if conflicts := labelns.Conflicts(exclusivePrefixes, labels); len(conflicts) > 0 {
+			c := conflicts[0]
+			return HandleError("namespace %q is exclusive (%s) and allows at most one label, got %s",
+				c.Prefix, labelns.ConfigKey, strings.Join(c.Labels, ", "))
+		}
 
 		if dryRun {
 			return renderDryRun()
@@ -793,6 +805,32 @@ func buildCreateIssue(params createIssueParams) *types.Issue {
 		DeferUntil:         params.DeferUntil,
 		Metadata:           params.Metadata,
 	}
+}
+
+// dropConflictingInheritedLabels resolves exclusive-namespace collisions
+// between explicit -l labels and labels inherited from --parent: the explicit
+// label wins and the inherited one is dropped, so a child can override e.g. a
+// tier: routing label without needing --no-inherit-labels (bd-7u5ki).
+// Collisions among the explicit labels themselves are left for the caller to
+// reject.
+func dropConflictingInheritedLabels(explicit, inherited, exclusivePrefixes []string) []string {
+	if len(exclusivePrefixes) == 0 || len(inherited) == 0 {
+		return inherited
+	}
+	taken := make(map[string]bool)
+	for _, label := range explicit {
+		if prefix := labelns.Match(exclusivePrefixes, label); prefix != "" {
+			taken[prefix] = true
+		}
+	}
+	kept := make([]string, 0, len(inherited))
+	for _, label := range inherited {
+		if prefix := labelns.Match(exclusivePrefixes, label); prefix != "" && taken[prefix] {
+			continue
+		}
+		kept = append(kept, label)
+	}
+	return kept
 }
 
 func mergeCreateLabels(labels, inheritedLabels []string) []string {

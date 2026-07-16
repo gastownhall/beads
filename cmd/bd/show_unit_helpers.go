@@ -51,16 +51,18 @@ func applyLabelUpdates(ctx context.Context, st storage.DoltStorage, issueID, act
 		}
 	}
 
-	// Add labels
-	for _, label := range addLabels {
-		if err := st.AddLabel(ctx, issueID, label, actor); err != nil {
+	// Removes run before adds so a single update can swap a label in an
+	// exclusive namespace (--remove-label tier:x --add-label tier:y) without
+	// tripping the exclusivity guard on the add (bd-7u5ki).
+	for _, label := range removeLabels {
+		if err := st.RemoveLabel(ctx, issueID, label, actor); err != nil {
 			return err
 		}
 	}
 
-	// Remove labels
-	for _, label := range removeLabels {
-		if err := st.RemoveLabel(ctx, issueID, label, actor); err != nil {
+	// Add labels
+	for _, label := range addLabels {
+		if err := st.AddLabel(ctx, issueID, label, actor); err != nil {
 			return err
 		}
 	}

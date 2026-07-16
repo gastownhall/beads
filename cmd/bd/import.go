@@ -186,7 +186,11 @@ type importResultJSON struct {
 	TieKeptLocalIDs     []string       `json:"tie_kept_local_ids,omitempty"`
 	StaleSkippedIDs     []string       `json:"stale_skipped_ids,omitempty"`
 	SkippedDependencies []string       `json:"skipped_dependencies,omitempty"`
-	DryRun              bool           `json:"dry_run,omitempty"`
+	// ExclusiveLabelConflicts lists issues carrying more than one label in an
+	// exclusive namespace (labels.exclusive-prefixes); import warns and keeps
+	// the labels rather than failing (bd-7u5ki).
+	ExclusiveLabelConflicts []string `json:"exclusive_label_conflicts,omitempty"`
+	DryRun                  bool     `json:"dry_run,omitempty"`
 }
 
 func runImportFromReader(ctx context.Context, r io.Reader, source string) error {
@@ -308,6 +312,7 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 		result.UpdatedIssues = append(result.UpdatedIssues, importResult.UpdatedIssues...)
 		result.TieKeptLocalIDs = append(result.TieKeptLocalIDs, importResult.TieKeptLocalIDs...)
 		result.StaleSkippedIDs = append(result.StaleSkippedIDs, importResult.StaleSkippedIDs...)
+		result.ExclusiveLabelConflicts = append(result.ExclusiveLabelConflicts, importResult.ExclusiveLabelConflicts...)
 	}
 
 	if result.Created > 0 || result.Memories > 0 {
@@ -354,6 +359,9 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 	}
 	for _, skipped := range result.SkippedDependencies {
 		fmt.Fprintf(os.Stderr, "Skipped dependency: %s\n", skipped)
+	}
+	for _, conflict := range result.ExclusiveLabelConflicts {
+		fmt.Fprintf(os.Stderr, "Warning: exclusive label conflict kept as-is (clean up with 'bd label remove' or 'bd label add --replace'): %s\n", conflict)
 	}
 	return nil
 }
