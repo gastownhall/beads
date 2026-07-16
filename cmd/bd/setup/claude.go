@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/templates/agents"
 )
 
@@ -70,11 +71,46 @@ func globalSettingsPath(home string) string {
 }
 
 func claudeAgentsEnv(env claudeEnv) agentsEnv {
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+
+	// If CLAUDE.md is a thin stub that imports AGENTS.md via the @-include
+	// convention (Claude Code expands @-imports), redirect the managed beads
+	// section to AGENTS.md instead of duplicating it in the stub. This matches
+	// the shared-authoritative-file pattern used by repos that keep AGENTS.md
+	// as the single source of agent instructions.
+	agentsFile := config.SafeAgentsFile()
+	agentsPath := filepath.Join(env.projectDir, agentsFile)
+	if data, err := env.readFile(claudePath); err == nil {
+		if isAgentsImportStub(string(data), agentsFile) {
+			if _, err := env.readFile(agentsPath); err == nil {
+				return agentsEnv{
+					agentsPath: agentsPath,
+					stdout:     env.stdout,
+					stderr:     env.stderr,
+				}
+			}
+		}
+	}
+
 	return agentsEnv{
-		agentsPath: filepath.Join(env.projectDir, claudeInstructionsFile),
+		agentsPath: claudePath,
 		stdout:     env.stdout,
 		stderr:     env.stderr,
 	}
+}
+
+// isAgentsImportStub reports whether content contains an @-include directive
+// for the given agents file (e.g. "@AGENTS.md" on its own line), indicating
+// the file is a thin stub that imports shared agent instructions from the
+// agents file rather than carrying its own content.
+func isAgentsImportStub(content, agentsFile string) bool {
+	directive := "@" + agentsFile
+	for _, line := range strings.Split(content, "\n") {
+		if strings.TrimSpace(line) == directive {
+			return true
+		}
+	}
+	return false
 }
 
 func InstallClaude(global bool, stealth bool) error {

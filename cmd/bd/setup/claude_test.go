@@ -1156,3 +1156,206 @@ func TestCheckClaudePluginManaged(t *testing.T) {
 		t.Errorf("expected plugin-managed message, got: %s", out)
 	}
 }
+
+func TestIsAgentsImportStub(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		agentsFile string
+		want       bool
+	}{
+		{
+			name:       "standalone @AGENTS.md directive",
+			content:    "# Claude Code\n\n@AGENTS.md\n\nSome text.\n",
+			agentsFile: "AGENTS.md",
+			want:       true,
+		},
+		{
+			name:       "directive with surrounding whitespace",
+			content:    "# Claude Code\n\n  @AGENTS.md  \n",
+			agentsFile: "AGENTS.md",
+			want:       true,
+		},
+		{
+			name:       "directive inline in prose",
+			content:    "See @AGENTS.md for details.\n",
+			agentsFile: "AGENTS.md",
+			want:       false,
+		},
+		{
+			name:       "no directive",
+			content:    "# Claude Code\n\nFull instructions here.\n",
+			agentsFile: "AGENTS.md",
+			want:       false,
+		},
+		{
+			name:       "custom agents file name",
+			content:    "# Claude Code\n\n@INSTRUCTIONS.md\n",
+			agentsFile: "INSTRUCTIONS.md",
+			want:       true,
+		},
+		{
+			name:       "empty content",
+			content:    "",
+			agentsFile: "AGENTS.md",
+			want:       false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAgentsImportStub(tt.content, tt.agentsFile); got != tt.want {
+				t.Errorf("isAgentsImportStub() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInstallClaudeRedirectsToAgentsMD(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, _, _ := newClaudeTestEnv(t)
+
+	// Create CLAUDE.md as a thin stub that imports AGENTS.md
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	stubContent := "# Claude Code\n\n@AGENTS.md\n\nShared instructions live in AGENTS.md.\n"
+	if err := os.WriteFile(claudePath, []byte(stubContent), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	// Create AGENTS.md with existing content (no beads block yet)
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("# Agent Instructions\n\nSome content.\n"), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	// CLAUDE.md should NOT have a beads section
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if strings.Contains(string(claudeData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("CLAUDE.md should not contain beads section when it imports AGENTS.md:\n%s", claudeData)
+	}
+
+	// AGENTS.md SHOULD have a beads section
+	agentsData, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if !strings.Contains(string(agentsData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("AGENTS.md should contain beads section:\n%s", agentsData)
+	}
+	if !strings.Contains(string(agentsData), "profile:minimal") {
+		t.Fatalf("AGENTS.md should have minimal profile:\n%s", agentsData)
+	}
+}
+
+func TestCheckClaudeRedirectsToAgentsMD(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	// Create CLAUDE.md as a thin stub
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte("# Claude Code\n\n@AGENTS.md\n"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	// Create AGENTS.md with a beads section
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("# Agent Instructions\n\n"+agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	// Install hooks so check passes the hooks stage
+	writeSettings(t, projectSettingsPath(env.projectDir), map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"SessionStart": []interface{}{
+				map[string]interface{}{
+					"matcher": "",
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": "bd prime --hook-json"},
+					},
+				},
+			},
+		},
+	})
+
+	if err := checkClaude(env); err != nil {
+		t.Fatalf("checkClaude: %v", err)
+	}
+
+	// Should report AGENTS.md as the integration file, not CLAUDE.md
+	out := stdout.String()
+	if !strings.Contains(out, "AGENTS.md") {
+		t.Fatalf("expected output to reference AGENTS.md, got: %s", out)
+	}
+}
+
+func TestRemoveClaudeRedirectsToAgentsMD(t *testing.T) {
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	// Create CLAUDE.md as a thin stub
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte("# Claude Code\n\n@AGENTS.md\n"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	// Create AGENTS.md with a beads section
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("# Agent Instructions\n\n"+agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	if err := removeClaude(env, false); err != nil {
+		t.Fatalf("removeClaude: %v", err)
+	}
+
+	// AGENTS.md should no longer have a beads section
+	agentsData, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if strings.Contains(string(agentsData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("AGENTS.md should not contain beads section after remove:\n%s", agentsData)
+	}
+
+	// CLAUDE.md should be untouched (still a stub)
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if !strings.Contains(string(claudeData), "@AGENTS.md") {
+		t.Fatalf("CLAUDE.md should still contain @AGENTS.md import:\n%s", claudeData)
+	}
+
+	if !strings.Contains(stdout.String(), "AGENTS.md") {
+		t.Fatalf("expected output to reference AGENTS.md, got: %s", stdout.String())
+	}
+}
+
+func TestInstallClaudeNoRedirectWhenAGENTSMDMissing(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, _, _ := newClaudeTestEnv(t)
+
+	// Create CLAUDE.md as a thin stub, but do NOT create AGENTS.md
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte("# Claude Code\n\n@AGENTS.md\n"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	// CLAUDE.md should get the beads section (fallback: no AGENTS.md to redirect to)
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if !strings.Contains(string(claudeData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("CLAUDE.md should contain beads section when AGENTS.md is missing:\n%s", claudeData)
+	}
+}
