@@ -752,7 +752,10 @@ func TestAutoExportGitAddFailureExitsNonZero(t *testing.T) {
 		return string(out)
 	}
 
-	run("init", "--prefix", "agf", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	// --backend=dolt is pinned: the JSONL auto-export pipeline under test is
+	// Dolt-mode machinery. The flat-file backend (now the default) has no
+	// issues.jsonl auto-export — its git-tracked JSON files are the export.
+	run("init", "--backend=dolt", "--prefix", "agf", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
 	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".beads/\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

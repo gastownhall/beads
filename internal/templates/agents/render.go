@@ -52,6 +52,12 @@ type RenderOpts struct {
 	// NoPush indicates the rig is declared local-only (no-push: true in config).
 	// When true, "bd dolt push" is omitted regardless of HasRemote.
 	NoPush bool
+	// Flatfile indicates the workspace uses the flat-file backend. The
+	// templates ship Dolt-flavored architecture guidance; a flat-file
+	// workspace gets that guidance rewritten (issues are git-tracked JSON
+	// files, sync is plain git) instead of instructions for a backend it
+	// does not run.
+	Flatfile bool
 }
 
 // DefaultRenderOpts returns opts that assume a remote is configured,
@@ -217,8 +223,48 @@ func templateBodyWithOpts(profile Profile, opts RenderOpts) string {
 	if !opts.HasRemote || opts.NoPush {
 		body = stripDoltPushReferences(body)
 	}
+	if opts.Flatfile {
+		body = flatfileizeBody(body)
+	}
 
 	return body
+}
+
+// Dolt-flavored template fragments and their flat-file equivalents. The Dolt
+// text stays canonical in the template files (Dolt is upstream's default
+// backend); flat-file workspaces get these rewrites at render time. Anchors
+// are exact strings — TestFlatfileRenderHasNoDoltReferences fails the build
+// if a template edit strands any "dolt" mention, so anchor rot cannot ship
+// silently.
+const (
+	doltSyncBlock = "bd stores issue history in Dolt:\n\n" +
+		"- Each write auto-commits to Dolt history\n" +
+		"- Use `bd dolt push`/`bd dolt pull` for remote sync\n" +
+		"- Do not treat `.beads/issues.jsonl` as the sync protocol\n\n" +
+		"**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns."
+	flatfileSyncBlock = "Issues are stored as flat JSON files in `.beads/issues/`, tracked by git. Each write updates these files directly. Sync is via standard git operations (commit, push, pull)."
+
+	doltArchLine     = "**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns."
+	flatfileArchLine = "**Architecture in one line:** issues are stored as flat JSON files in `.beads/issues/`, tracked by git. Sync is via standard git operations."
+
+	doltGitFriendlyBullet     = "- Git-friendly: Dolt-powered version control with native sync"
+	flatfileGitFriendlyBullet = "- Git-friendly: plain JSON files under `.beads/`, versioned by git itself"
+
+	doltConservativeBullet     = "git commits, git pushes, or Dolt remote sync"
+	flatfileConservativeBullet = "git commits or git pushes"
+)
+
+// flatfileizeBody rewrites the Dolt-specific guidance for flat-file
+// workspaces: the sync/architecture description, the Dolt bullets, and every
+// `bd dolt push` directive (the flat-file backend syncs with plain git).
+func flatfileizeBody(body string) string {
+	// The full-profile sync block embeds the arch one-liner, so it must be
+	// replaced before the standalone one-liner rewrite (minimal/codex).
+	body = strings.ReplaceAll(body, doltSyncBlock, flatfileSyncBlock)
+	body = strings.ReplaceAll(body, doltArchLine, flatfileArchLine)
+	body = strings.ReplaceAll(body, doltGitFriendlyBullet, flatfileGitFriendlyBullet)
+	body = strings.ReplaceAll(body, doltConservativeBullet, flatfileConservativeBullet)
+	return stripDoltPushReferences(body)
 }
 
 func normalizeEmbeddedMarkdown(content string) string {
@@ -246,4 +292,22 @@ func stripDoltPushReferences(body string) string {
 func computeHash(body string) string {
 	h := sha256.Sum256([]byte(body))
 	return fmt.Sprintf("%x", h[:4])
+}
+
+// agents.md.tmpl carries Dolt guidance outside the managed markers too (the
+// architecture blockquote and the cheat-sheet push line); these anchors let
+// EmbeddedDefaultWithOpts rewrite the whole document for flat-file workspaces.
+const (
+	doltArchBlockquote     = "> **Architecture in one line:** Issues live in a local Dolt database\n> (`.beads/dolt/`); cross-machine sync uses `bd dolt push/pull` (a\n> git-compatible protocol), stored under `refs/dolt/data` on your git\n> remote — separate from `refs/heads/*` where your code lives.\n> `.beads/issues.jsonl` is a passive export, not the wire protocol.\n>\n> See [sync-concepts](https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md)\n> for the one-screen overview and anti-patterns (don't treat JSONL as the\n> source of truth; don't `bd import` during normal operation; don't\n> reach for third-party Dolt hosting before trying the default)."
+	flatfileArchBlockquote = "> **Architecture in one line:** Issues are stored as flat JSON files in\n> `.beads/issues/`, tracked by git. Sync is via standard git operations\n> (commit, push, pull)."
+	doltCheatsheetPushLine = "bd dolt push          # Push beads data to remote\n"
+)
+
+// CodexSectionBodyWithOpts is CodexSectionBody with backend-aware rewrites.
+func CodexSectionBodyWithOpts(opts RenderOpts) string {
+	body := CodexSectionBody()
+	if opts.Flatfile {
+		body = flatfileizeBody(body)
+	}
+	return body
 }

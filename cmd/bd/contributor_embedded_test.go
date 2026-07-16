@@ -94,7 +94,7 @@ func initContributor(t *testing.T, bd, prefix string) (projectDir, planningDir s
 	// The wizard prompts (no upstream remote):
 	//   1. "Continue with contributor setup? [y/N]:" → "y"
 	//   2. "Planning repo path [press Enter for default]:" → planningDir
-	args := []string{"init", "--quiet", "--prefix", prefix, "--contributor"}
+	args := []string{"init", "--backend=dolt", "--quiet", "--prefix", prefix, "--contributor"}
 	cmd := exec.Command(bd, args...)
 	cmd.Dir = projectDir
 	cmd.Env = append(bdEnv(projectDir), "BD_NON_INTERACTIVE=0")

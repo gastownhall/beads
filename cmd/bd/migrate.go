@@ -25,6 +25,7 @@ var migrateCmd = &cobra.Command{
 Without subcommand, checks and updates database metadata to current version.
 
 Subcommands:
+  flatfile                         Migrate Dolt to flat-file storage (--reverse converts back)
   hooks                            Plan git hook migration to marker-managed format
   issues                           Move issues between repositories
   schema                           Apply pending schema migrations (idempotent)

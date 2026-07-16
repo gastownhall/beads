@@ -176,6 +176,7 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd flatten](#bd-flatten) — Squash all Dolt history into a single commit
 - [bd gc](#bd-gc) — Garbage collect: decay old issues, compact Dolt commits, run Dolt GC
 - [bd migrate](#bd-migrate) — Database migration commands
+  - [bd migrate flatfile](#bd-migrate-flatfile) — Migrate between Dolt and flat-file storage
   - [bd migrate from-proxied-server-to-server](#bd-migrate-from-proxied-server-to-server) — [EXPERIMENTAL] Switch a proxied-server repo to server mode
   - [bd migrate from-proxied-server-to-shared-server](#bd-migrate-from-proxied-server-to-shared-server) — [EXPERIMENTAL] Switch a proxied-server repo back to shared-server mode
   - [bd migrate from-server-to-proxied-server](#bd-migrate-from-server-to-proxied-server) — [EXPERIMENTAL] Switch a server-mode repo to proxied-server mode
@@ -2358,6 +2359,16 @@ DoltHub is recommended for cloud backup:
   bd backup init https://doltremoteapi.dolthub.com/&lt;user&gt;/&lt;repo&gt;
   Set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD for authentication.
 
+Auto-backup default:
+  When backup.enabled is unset, auto-backup turns ON in embedded mode if a
+  git remote exists, and stays OFF in sql-server / shared-server mode. In
+  server mode many bd clients share one Dolt server, and each would register
+  a server-side backup remote under the same name pointing at its own local
+  dir and full-sync the whole database — a self-amplifying storm. To back up
+  a shared server, run 'bd backup' explicitly (or set backup.enabled=true and
+  coordinate destinations). 'bd config get backup.enabled' shows the effective
+  value and its source.
+
 ```
 bd backup [command]
 ```
@@ -3553,7 +3564,7 @@ bd init [flags]
       --agents-file string                             Custom filename for agent instructions (default: AGENTS.md)
       --agents-profile string                          AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)
       --agents-template string                         Path to custom AGENTS.md template (overrides embedded default)
-      --backend string                                 Storage backend: dolt (default), postgres, mysql, or sqlite. See docs/architecture/storage-backends.md.
+      --backend string                                 Storage backend: flatfile (default), dolt, postgres, mysql, or sqlite. See docs/architecture/storage-backends.md.
       --contributor                                    Run OSS contributor setup wizard
       --database string                                Use existing server database name (overrides prefix-based naming)
       --debug                                          Run the managed Dolt sql-server with --loglevel=debug and CPU profiling (--prof cpu). Persisted to config.yaml as dolt.debug. No effect on externally-managed servers.
@@ -4208,6 +4219,7 @@ Database migration and data transformation commands.
 Without subcommand, checks and updates database metadata to current version.
 
 Subcommands:
+  flatfile                         Migrate Dolt to flat-file storage (--reverse converts back)
   hooks                            Plan git hook migration to marker-managed format
   issues                           Move issues between repositories
   schema                           Apply pending schema migrations (idempotent)
@@ -4239,6 +4251,33 @@ bd migrate [command]
       --json             Output migration statistics in JSON format
       --update-repo-id   Update repository ID (use after changing git remote)
       --yes              Auto-confirm prompts
+```
+
+#### bd migrate flatfile
+
+Migrate all issues, dependencies, comments, labels, metadata, and config
+from the Dolt database to flat-file JSON storage (.beads/issues/*.json).
+
+After migration, the Dolt database is no longer needed and can be removed.
+The flat-file backend uses git for sync instead of Dolt remotes.
+
+With --reverse, migrate a flat-file workspace back to embedded Dolt — the
+escape hatch for teams that hit the flat-file scale or merge ceiling. The
+same data is carried in both directions via the portable import path used
+by 'bd import'. Audit events are not transferred in either direction (no
+backend exposes an event-import API); each backend records a fresh created
+event at migration time. The source backend's files are left in place so
+either migration can be retried, and can be removed afterwards.
+
+```
+bd migrate flatfile [flags]
+```
+
+**Flags:**
+
+```
+      --dry-run   Show what would be migrated without making changes
+      --reverse   Migrate a flat-file workspace back to embedded Dolt
 ```
 
 #### bd migrate from-proxied-server-to-server
@@ -6911,6 +6950,9 @@ Garbage collect old or abandoned wisps from the database.
 
 A wisp is considered abandoned if:
   - It hasn't been updated in --age duration and is not closed
+  - AND it is not active: blocked steps (waiting on a dependency) and
+    in-progress/hooked steps are live molecule work and are never reclaimed
+    by age, no matter how long they have been waiting (GH#4394).
 
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.

@@ -10,6 +10,23 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// LikeEscape is the ESCAPE clause appended to every LIKE whose needle comes
+// from free-form user input. '!' is used (not backslash) because its string
+// literal spells identically across MySQL/Dolt/SQLite/Postgres, and
+// go-mysql-server keeps backslash special in LIKE patterns even under an
+// explicit ESCAPE clause.
+const LikeEscape = " ESCAPE '!'"
+
+var likeEscaper = strings.NewReplacer("!", "!!", "%", "!%", "_", "!_", `\`, `!\`)
+
+// EscapeLikePattern escapes LIKE wildcards (% and _), the '!' escape
+// character itself, and backslash so a user needle matches literally,
+// mirroring the flat-file backend's strings.Contains/HasPrefix semantics.
+// Clauses consuming the result must append LikeEscape.
+func EscapeLikePattern(s string) string {
+	return likeEscaper.Replace(s)
+}
+
 // BuildIssueFilterClauses builds WHERE clause fragments and args from a query
 // string and IssueFilter. The tables parameter controls which table names are
 // referenced in subqueries (issues vs wisps).
@@ -20,34 +37,36 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 	if query != "" {
 		lowerQuery := strings.ToLower(query)
 		if LooksLikeIssueID(query) {
+			// ID-shaped queries cannot contain LIKE specials (LooksLikeIssueID
+			// admits only [0-9a-zA-Z.-]), so no escaping is needed here.
 			whereClauses = append(whereClauses, "(id = ? OR id LIKE ? OR LOWER(title) LIKE ? OR LOWER(external_ref) LIKE ?)")
 			args = append(args, lowerQuery, lowerQuery+"%", "%"+lowerQuery+"%", "%"+lowerQuery+"%")
 		} else {
-			whereClauses = append(whereClauses, "(LOWER(title) LIKE ? OR id LIKE ?)")
-			pattern := "%" + lowerQuery + "%"
+			whereClauses = append(whereClauses, "(LOWER(title) LIKE ?"+LikeEscape+" OR id LIKE ?"+LikeEscape+")")
+			pattern := "%" + EscapeLikePattern(lowerQuery) + "%"
 			args = append(args, pattern, pattern)
 		}
 	}
 
 	if filter.TitleSearch != "" {
-		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.TitleSearch)+"%")
+		whereClauses = append(whereClauses, "LOWER(title) LIKE ?"+LikeEscape)
+		args = append(args, "%"+EscapeLikePattern(strings.ToLower(filter.TitleSearch))+"%")
 	}
 	if filter.TitleContains != "" {
-		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.TitleContains)+"%")
+		whereClauses = append(whereClauses, "LOWER(title) LIKE ?"+LikeEscape)
+		args = append(args, "%"+EscapeLikePattern(strings.ToLower(filter.TitleContains))+"%")
 	}
 	if filter.DescriptionContains != "" {
-		whereClauses = append(whereClauses, "LOWER(description) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.DescriptionContains)+"%")
+		whereClauses = append(whereClauses, "LOWER(description) LIKE ?"+LikeEscape)
+		args = append(args, "%"+EscapeLikePattern(strings.ToLower(filter.DescriptionContains))+"%")
 	}
 	if filter.NotesContains != "" {
-		whereClauses = append(whereClauses, "LOWER(notes) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.NotesContains)+"%")
+		whereClauses = append(whereClauses, "LOWER(notes) LIKE ?"+LikeEscape)
+		args = append(args, "%"+EscapeLikePattern(strings.ToLower(filter.NotesContains))+"%")
 	}
 	if filter.ExternalRefContains != "" {
-		whereClauses = append(whereClauses, "LOWER(external_ref) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.ExternalRefContains)+"%")
+		whereClauses = append(whereClauses, "LOWER(external_ref) LIKE ?"+LikeEscape)
+		args = append(args, "%"+EscapeLikePattern(strings.ToLower(filter.ExternalRefContains))+"%")
 	}
 	if filter.ExternalRef != nil {
 		whereClauses = append(whereClauses, "external_ref = ?")
@@ -115,12 +134,12 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ", ")))
 	}
 	if filter.IDPrefix != "" {
-		whereClauses = append(whereClauses, "id LIKE ?")
-		args = append(args, filter.IDPrefix+"%")
+		whereClauses = append(whereClauses, "id LIKE ?"+LikeEscape)
+		args = append(args, EscapeLikePattern(filter.IDPrefix)+"%")
 	}
 	if filter.SpecIDPrefix != "" {
-		whereClauses = append(whereClauses, "spec_id LIKE ?")
-		args = append(args, filter.SpecIDPrefix+"%")
+		whereClauses = append(whereClauses, "spec_id LIKE ?"+LikeEscape)
+		args = append(args, EscapeLikePattern(filter.SpecIDPrefix)+"%")
 	}
 
 	if filter.ParentID != nil {

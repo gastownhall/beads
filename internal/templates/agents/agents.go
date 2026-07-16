@@ -23,3 +23,18 @@ func EmbeddedDefault() string {
 func EmbeddedBeadsSection() string {
 	return strings.TrimRight(beadsSection, "\n") + "\n"
 }
+
+// EmbeddedDefaultWithOpts returns the AGENTS.md template with backend-aware
+// rewrites applied. For flat-file workspaces the Dolt architecture blockquote,
+// the cheat-sheet push line, and the managed section's Dolt guidance are all
+// rewritten; other backends get the template verbatim. CRLF is normalized
+// first so a Windows checkout still matches the LF anchors (cf. #3552).
+func EmbeddedDefaultWithOpts(opts RenderOpts) string {
+	if !opts.Flatfile {
+		return defaultTemplate
+	}
+	doc := strings.ReplaceAll(defaultTemplate, "\r\n", "\n")
+	doc = strings.ReplaceAll(doc, doltArchBlockquote, flatfileArchBlockquote)
+	doc = strings.ReplaceAll(doc, doltCheatsheetPushLine, "")
+	return flatfileizeBody(doc)
+}

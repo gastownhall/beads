@@ -54,7 +54,11 @@ var Profiles = []BackendProfile{
 		Name:      "dolt-embedded",
 		Reference: true,
 		Available: func() bool { return true },
-		InitArgs:  func(*Workspace) []string { return nil },
+		// The reference declares itself dolt-embedded, so it must ask for Dolt
+		// explicitly: a plain `bd init` now defaults to the flat-file backend,
+		// which would silently make every differential comparison
+		// flatfile-vs-candidate instead of dolt-vs-candidate.
+		InitArgs: func(*Workspace) []string { return []string{"--backend=dolt"} },
 	},
 	{
 		Name:      "postgres",
@@ -99,6 +103,13 @@ var Profiles = []BackendProfile{
 		// File-based: the default beads.db inside each workspace's .beads dir isolates
 		// it; the temp workspace dir cleanup removes the file. No handle/env/teardown.
 		InitArgs: func(*Workspace) []string { return []string{"--backend=sqlite"} },
+	},
+	{
+		Name:      "flatfile",
+		Available: func() bool { return true }, // embedded (pure Go, one JSON file per issue); always runs
+		// File-based: the JSON files inside each workspace's .beads dir isolate it;
+		// the temp workspace dir cleanup removes them. No handle/env/teardown.
+		InitArgs: func(*Workspace) []string { return []string{"--backend=flatfile"} },
 	},
 }
 

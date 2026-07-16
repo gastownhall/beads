@@ -248,3 +248,65 @@ func TestSearchCountsSQLShape(t *testing.T) {
 		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
 	}
 }
+
+// SQL LIKE treats % and _ as wildcards, so free-form needles must be escaped
+// and the clause must carry an ESCAPE marker — otherwise bd search "10_"
+// matches title "105" on SQL backends while the flat-file backend (literal
+// strings.Contains/HasPrefix) does not.
+func TestBuildIssueFilterClausesLikeEscaping(t *testing.T) {
+	t.Parallel()
+
+	escCases := map[string]string{
+		"10_":   "10!_",
+		"100%":  "100!%",
+		"a!b":   "a!!b",
+		`a\b`:   `a!\b`,
+		"plain": "plain",
+	}
+	for in, want := range escCases {
+		if got := EscapeLikePattern(in); got != want {
+			t.Errorf("EscapeLikePattern(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	// Free-text query branch.
+	clauses, args, err := BuildIssueFilterClauses("10_ done", types.IssueFilter{}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantClause := "(LOWER(title) LIKE ? ESCAPE '!' OR id LIKE ? ESCAPE '!')"
+	if len(clauses) != 1 || clauses[0] != wantClause {
+		t.Errorf("query clause = %q, want %q", clauses, wantClause)
+	}
+	if len(args) != 2 || args[0] != "%10!_ done%" || args[1] != "%10!_ done%" {
+		t.Errorf("query args = %v, want escaped needle %%10!_ done%%", args)
+	}
+
+	// Contains filters and ID prefixes.
+	clauses, args, err = BuildIssueFilterClauses("", types.IssueFilter{
+		TitleContains: "100%",
+		IDPrefix:      "a_",
+	}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	found := map[string]string{}
+	for i, c := range clauses {
+		found[c] = args[i].(string)
+	}
+	if got := found["LOWER(title) LIKE ? ESCAPE '!'"]; got != "%100!%%" {
+		t.Errorf("TitleContains arg = %q, want %%100!%%%% (clauses %v)", got, clauses)
+	}
+	if got := found["id LIKE ? ESCAPE '!'"]; got != "a!_%" {
+		t.Errorf("IDPrefix arg = %q, want a!_%% (clauses %v)", got, clauses)
+	}
+
+	// ID-shaped queries cannot contain LIKE specials; branch stays unescaped.
+	clauses, _, err = BuildIssueFilterClauses("bd-123", types.IssueFilter{}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(clauses) != 1 || strings.Contains(clauses[0], "ESCAPE") {
+		t.Errorf("ID-shaped query clause must not carry ESCAPE: %q", clauses)
+	}
+}

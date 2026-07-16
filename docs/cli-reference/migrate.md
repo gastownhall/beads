@@ -12,6 +12,7 @@ Database migration and data transformation commands.
 Without subcommand, checks and updates database metadata to current version.
 
 Subcommands:
+  flatfile                         Migrate Dolt to flat-file storage (--reverse converts back)
   hooks                            Plan git hook migration to marker-managed format
   issues                           Move issues between repositories
   schema                           Apply pending schema migrations (idempotent)
@@ -43,6 +44,33 @@ bd migrate [command]
       --json             Output migration statistics in JSON format
       --update-repo-id   Update repository ID (use after changing git remote)
       --yes              Auto-confirm prompts
+```
+
+## bd migrate flatfile
+
+Migrate all issues, dependencies, comments, labels, metadata, and config
+from the Dolt database to flat-file JSON storage (.beads/issues/*.json).
+
+After migration, the Dolt database is no longer needed and can be removed.
+The flat-file backend uses git for sync instead of Dolt remotes.
+
+With --reverse, migrate a flat-file workspace back to embedded Dolt — the
+escape hatch for teams that hit the flat-file scale or merge ceiling. The
+same data is carried in both directions via the portable import path used
+by 'bd import'. Audit events are not transferred in either direction (no
+backend exposes an event-import API); each backend records a fresh created
+event at migration time. The source backend's files are left in place so
+either migration can be retried, and can be removed afterwards.
+
+```
+bd migrate flatfile [flags]
+```
+
+**Flags:**
+
+```
+      --dry-run   Show what would be migrated without making changes
+      --reverse   Migrate a flat-file workspace back to embedded Dolt
 ```
 
 ## bd migrate from-proxied-server-to-server

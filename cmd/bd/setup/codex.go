@@ -215,7 +215,7 @@ func codexAgentSkillEnv(env codexEnv, global bool) agentSkillEnv {
 }
 
 func codexManagedSection() string {
-	return codexBeginMarker + "\n" + agents.CodexSectionBody() + "\n" + codexEndMarker
+	return codexBeginMarker + "\n" + agents.CodexSectionBodyWithOpts(detectRenderOpts()) + "\n" + codexEndMarker
 }
 
 func installCodexInstructions(env codexEnv, global bool) error {

@@ -49,7 +49,7 @@ func updateAgentFile(filename string, verbose bool, templatePath string, profile
 			}
 			newContent = string(data)
 		} else {
-			newContent = agents.EmbeddedDefault()
+			newContent = agents.EmbeddedDefaultWithOpts(opts)
 		}
 
 		// Replace the beads section with the requested profile.

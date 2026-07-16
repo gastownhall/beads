@@ -160,15 +160,15 @@ func InstallAider() error {
 		return HandleError("%v", err)
 	}
 
-	if err := atomicWriteFile(configPath, []byte(aiderConfigTemplate)); err != nil {
+	if err := atomicWriteFile(configPath, []byte(renderSetupTemplate(aiderConfigTemplate))); err != nil {
 		return HandleError("write config: %v", err)
 	}
 
-	if err := atomicWriteFile(instructionsPath, []byte(aiderBeadsInstructions)); err != nil {
+	if err := atomicWriteFile(instructionsPath, []byte(renderSetupTemplate(aiderBeadsInstructions))); err != nil {
 		return HandleError("write instructions: %v", err)
 	}
 
-	if err := atomicWriteFile(readmePath, []byte(aiderReadmeTemplate)); err != nil {
+	if err := atomicWriteFile(readmePath, []byte(renderSetupTemplate(aiderReadmeTemplate))); err != nil {
 		return HandleError("write README: %v", err)
 	}
 

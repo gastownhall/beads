@@ -3150,3 +3150,70 @@ func TestSearchIssues_StableOrdering(t *testing.T) {
 		}
 	}
 }
+
+// LIKE-wildcard characters in text queries and *Contains/IDPrefix needles
+// must match literally (flat-file parity contract): bd search "10_" must not
+// match title "105", and --title-contains "100%" must not match "1005".
+// Exercises both the store path (issueops/sqlbuild) and the in-tx duplicate
+// builder, verifying the engine honors the ESCAPE '!' clause.
+func TestSearchIssues_WildcardNeedlesMatchLiterally(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seed := []*types.Issue{
+		{ID: "si-w1", Title: "release 10_ branch", Status: types.StatusOpen, IssueType: types.TypeTask},
+		{ID: "si-w2", Title: "release 105 branch", Status: types.StatusOpen, IssueType: types.TypeTask},
+		{ID: "si-w3", Title: "100% done", Status: types.StatusOpen, IssueType: types.TypeTask},
+		{ID: "si-w4", Title: "1005 done", Status: types.StatusOpen, IssueType: types.TypeTask},
+	}
+	for _, is := range seed {
+		if err := store.CreateIssue(ctx, is, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", is.ID, err)
+		}
+	}
+
+	assertOnly := func(label string, got []*types.Issue, err error, wantIDs ...string) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", label, err)
+		}
+		gotIDs := make(map[string]bool, len(got))
+		for _, is := range got {
+			gotIDs[is.ID] = true
+		}
+		if len(got) != len(wantIDs) {
+			t.Errorf("%s: got %d issues %v, want %v", label, len(got), gotIDs, wantIDs)
+			return
+		}
+		for _, w := range wantIDs {
+			if !gotIDs[w] {
+				t.Errorf("%s: missing %s (got %v)", label, w, gotIDs)
+			}
+		}
+	}
+
+	// Store path.
+	got, err := store.SearchIssues(ctx, "10_", types.IssueFilter{})
+	assertOnly("store query 10_", got, err, "si-w1")
+	got, err = store.SearchIssues(ctx, "", types.IssueFilter{TitleContains: "100%"})
+	assertOnly("store TitleContains 100%", got, err, "si-w3")
+	got, err = store.SearchIssues(ctx, "", types.IssueFilter{IDPrefix: "si_"})
+	assertOnly("store IDPrefix si_", got, err)
+
+	// In-tx path (duplicate clause builder in transaction.go).
+	txErr := store.RunInTransaction(ctx, "test: wildcard literal search", func(tx storage.Transaction) error {
+		got, err := tx.SearchIssues(ctx, "10_", types.IssueFilter{})
+		assertOnly("tx query 10_", got, err, "si-w1")
+		got, err = tx.SearchIssues(ctx, "", types.IssueFilter{TitleContains: "100%"})
+		assertOnly("tx TitleContains 100%", got, err, "si-w3")
+		got, err = tx.SearchIssues(ctx, "", types.IssueFilter{IDPrefix: "si_"})
+		assertOnly("tx IDPrefix si_", got, err)
+		return nil
+	})
+	if txErr != nil {
+		t.Fatalf("RunInTransaction: %v", txErr)
+	}
+}
