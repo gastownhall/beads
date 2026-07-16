@@ -57,8 +57,8 @@ func TestComputeReadyFrontsExcludesClosed(t *testing.T) {
 func TestComputeReadyFrontsClosedLeafNotInWave0(t *testing.T) {
 	analysis := &SwarmAnalysis{
 		Issues: map[string]*IssueNode{
-			"done":  {ID: "done", Title: "Done", Status: string(types.StatusClosed), Wave: -1},
-			"todo":  {ID: "todo", Title: "Todo", Status: string(types.StatusOpen), Wave: -1},
+			"done": {ID: "done", Title: "Done", Status: string(types.StatusClosed), Wave: -1},
+			"todo": {ID: "todo", Title: "Todo", Status: string(types.StatusOpen), Wave: -1},
 		},
 	}
 	computeReadyFronts(analysis)
