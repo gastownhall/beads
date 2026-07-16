@@ -62,7 +62,7 @@ var issueUpsertColumns = []string{
 	"content_hash", "title", "description", "design", "acceptance_criteria",
 	"notes", "status", "priority", "issue_type", "assignee",
 	"estimated_minutes", "started_at", "closed_at", "external_ref",
-	"source_repo", "close_reason", "metadata", "updated_at",
+	"source_repo", "close_reason", "metadata", "revision", "updated_at",
 }
 
 // issueUpsertAssignments renders the ON DUPLICATE KEY UPDATE clause. With
@@ -112,7 +112,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			mol_type, work_type, source_system, source_repo, close_reason,
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
-			due_at, defer_until, metadata
+			due_at, defer_until, metadata, revision
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
@@ -122,7 +122,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
-			?, ?, ?
+			?, ?, ?, ?
 		)
 		ON DUPLICATE KEY UPDATE
 			%s
@@ -135,7 +135,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 		issue.MolType, issue.WorkType, issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
-		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
+		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata), NewRevision(),
 	)
 	if err != nil {
 		return fmt.Errorf("insert issue into %s: %w", table, err)

@@ -7,9 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 )
 
@@ -224,23 +227,26 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     "theirs", so all clones pulling from one remote converge on the remote's
 //     value. A conflict touching ANY non-memory config key (issue_prefix above
 //     all) is a real semantic conflict and is left for the operator.
-//
-//   - issues: modify/modify conflicts where both sides updated the same issue
-//     are resolved row-wise by last-write-wins (updated_at) — whichever side
-//     has the strictly newer timestamp wins the whole row. add/add (no base
-//     row) and delete/modify are left for the operator, as are rows where both
-//     sides share the same updated_at (ambiguous). A row is only auto-resolved
-//     when the losing side's updated_at predates the merge base (equals the
-//     base row's updated_at): if the losing side also moved its updated_at past
-//     the base value, both sides made real edits since the last sync and LWW
-//     would silently drop the losing side's field-level changes, so the row is
-//     left for the operator. This eliminates the biggest manual wall in
-//     multi-clone sync: the issues-table conflicts that follow routine
-//     cross-clone pulls (GH#4698), while preserving the common case where one
-//     side's conflict is a migration artifact (the row was rewritten by a
-//     schema change but updated_at did not move) and the other side made the
-//     only real edit. bd is primarily single-user-multi-machine so concurrent
-//     same-issue edits since a shared merge base are rare.
+//   - issues: every issues write now stamps a fresh opaque revision nonce (the
+//     whole-row CAS token), so two clones editing DISJOINT columns of the same
+//     bead — which used to cell-merge cleanly — now always collide on the
+//     revision cell. Two passes settle the resolvable classes, cell-wise first.
+//     When revision is the SOLE both-sides-diverged column (every other column
+//     changed on at most one side), the edits do not actually conflict: the row
+//     is rebuilt cell-wise (take the one side that diverged per column, mint a
+//     fresh revision) so BOTH edits survive. The residual class the cell-wise
+//     pass escalates — a genuine both-sides column conflict where the losing
+//     side's updated_at predates the merge base (equals the base row's
+//     updated_at), e.g. a denormalized is_blocked recompute colliding with the
+//     other side's real edit — is settled row-wise by last-write-wins: the
+//     strictly-newer updated_at wins the whole row, and since the loser predates
+//     the base it dropped no field-level edit of its own (GH#4698). A both-sides
+//     conflict where the losing side ALSO moved its updated_at past the base
+//     (both made real edits since the last sync, so LWW would silently drop the
+//     loser's field-level edits), a same-updated_at tie (ambiguous), or an
+//     add/delete, is a real semantic conflict and is left for the operator.
+//     Wisps are dolt-ignored (no dolt_conflicts_wisps), so this class is
+//     issues-only.
 //
 // Any conflict on another table, or an unresolvable dependencies,
 // schema_migrations, config, or issues conflict, returns (false, nil) so the
@@ -312,12 +318,21 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 			}
 			resolvable = append(resolvable, "config")
 		case "issues":
-			lwwSafe, err := issuesConflictsAreLWWSafe(ctx, db)
+			// Cell-wise revision-only rebuild is the primary pass; last-write-wins
+			// settles the residual predates-base class it escalates. Resolvable if
+			// either applies (dispatched in resolution below).
+			revisionOnly, err := issueConflictsAreRevisionOnly(ctx, db)
 			if err != nil {
 				return false, err
 			}
-			if !lwwSafe {
-				return false, nil
+			if !revisionOnly {
+				lwwSafe, err := issuesConflictsAreLWWSafe(ctx, db)
+				if err != nil {
+					return false, err
+				}
+				if !lwwSafe {
+					return false, nil
+				}
 			}
 			resolvable = append(resolvable, "issues")
 		default:
@@ -335,6 +350,24 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 			if err := resolveSchemaMigrationsVintageConflicts(ctx, db); err != nil {
 				return false, err
 			}
+		case "issues":
+			// Prefer the cell-wise revision-only rebuild (overlays the peer's
+			// disjoint edits onto the ours row and mints a fresh revision, so a
+			// bare --ours can never drop them); fall back to last-write-wins for
+			// the residual predates-base class the cell-wise pass escalates. The
+			// gate above proved one of the two applies; re-derive which here (no
+			// prior resolution touches dolt_conflicts_issues).
+			revisionOnly, err := issueConflictsAreRevisionOnly(ctx, db)
+			if err != nil {
+				return false, err
+			}
+			if revisionOnly {
+				if err := resolveIssuesRevisionOnlyConflicts(ctx, db); err != nil {
+					return false, err
+				}
+			} else if err := resolveIssuesLWWConflicts(ctx, db); err != nil {
+				return false, err
+			}
 		case "config":
 			// --theirs makes this clone's local kv.memory.* edit lose to the
 			// remote value (the same convergent trade-off metadata makes). That
@@ -349,10 +382,6 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 			}
 			if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'config')"); err != nil {
 				return false, fmt.Errorf("failed to resolve config conflicts: %w", err)
-			}
-		case "issues":
-			if err := resolveIssuesLWWConflicts(ctx, db); err != nil {
-				return false, err
 			}
 		default:
 			//nolint:gosec // G201: table is one of the hardcoded constants above.
@@ -377,7 +406,7 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 // cascade violation could never settle while the resolver committed first
 // (bd-578h9.14).
 func CommitResolvedConflicts(ctx context.Context, db DBConn) error {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts (GH#2466, #4259, GH#2474, GH#4698)')"); err != nil {
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts (GH#2466, #4259, GH#2474, GH#4698, issues CAS revision)')"); err != nil {
 		return fmt.Errorf("failed to commit resolved conflicts: %w", err)
 	}
 	return nil
@@ -386,12 +415,13 @@ func CommitResolvedConflicts(ctx context.Context, db DBConn) error {
 // issuesConflictsAreLWWSafe reports whether every conflicted row in the issues
 // table is a modify/modify conflict (the row existed at the merge base and was
 // modified on both sides) with strictly different updated_at timestamps where
-// the losing side's timestamp predates the merge base — the only class safe to
+// the losing side's timestamp equals the merge base — the only class safe to
 // auto-resolve by last-write-wins. add/add conflicts (no base row),
 // delete/modify conflicts (one side deleted), rows where both sides share the
 // same updated_at (ambiguous), and rows where the losing side's updated_at
-// moved past the base value (both sides made real edits since the last sync)
-// are left for the operator.
+// differs from the base value — whether it moved past it (both sides made real
+// edits since the last sync) or fell below it (a clock-skewed clone that may
+// still carry a real field edit) — are left for the operator.
 func issuesConflictsAreLWWSafe(ctx context.Context, db DBConn) (bool, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT base_id, our_id, their_id, base_updated_at, our_updated_at, their_updated_at
@@ -430,16 +460,21 @@ func issuesConflictsAreLWWSafe(ctx context.Context, db DBConn) (bool, error) {
 		if !baseUpdatedAt.Valid {
 			return false, nil
 		}
-		// The losing side (older updated_at) must not have edited the issue
-		// since the merge base. If its updated_at moved past the base value,
-		// both sides made real edits since the last sync and row-level LWW
-		// would silently drop the losing side's field-level changes — leave
-		// that concurrent-edit case for the operator (GH#4698 Risk).
+		// The losing side (older updated_at) must not carry an edit of its own:
+		// its updated_at must EQUAL the base row's. If it moved PAST the base
+		// value, both sides made real edits since the last sync; if it fell
+		// BELOW base (a clock-skewed or back-dated clone — the class the CAS
+		// revision resolver cedes here, having already declined it as a genuine
+		// updated_at conflict), the loser may still hold a disjoint field edit.
+		// In either case whole-row LWW would silently drop the loser's
+		// field-level change, so leave it for the operator (GH#4698 Risk; this
+		// is the documented "equals the base row's updated_at" contract, which
+		// also keeps LWW from clobbering the revision resolver's disjoint merge).
 		losing := ourUpdatedAt.Time
 		if theirUpdatedAt.Time.Before(losing) {
 			losing = theirUpdatedAt.Time
 		}
-		if losing.After(baseUpdatedAt.Time) {
+		if !losing.Equal(baseUpdatedAt.Time) {
 			return false, nil
 		}
 	}
@@ -712,6 +747,230 @@ func resolveSchemaMigrationsVintageConflicts(ctx context.Context, db DBConn) err
 		return fmt.Errorf("failed to resolve schema_migrations conflicts: %w", err)
 	}
 	return nil
+}
+
+// columnIdentRE matches a plain SQL identifier. issues column names come from
+// information_schema (the live schema, never user input), but the resolver
+// interpolates them into base_/our_/their_ column references, so each is
+// validated against this before it is ever concatenated into SQL.
+var columnIdentRE = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
+
+// issueMergeConflictColumns returns the physical `issues` columns, in schema
+// order, that the merge resolver compares and rebuilds cell-wise. It is derived
+// from information_schema at resolve time — NOT a hand-maintained list — so a
+// column added to `issues` is automatically covered and can never be silently
+// dropped from a resolved merge (which would lose a real edit). Dolt exposes
+// base_<col>/our_<col>/their_<col> for every one of these in
+// dolt_conflicts_issues (verified against real Dolt by the dolt package's
+// conflict-table shape guard); a column that is somehow absent makes the
+// resolver's SELECT error out, which fails the merge closed to the operator.
+func issueMergeConflictColumns(ctx context.Context, db DBConn) ([]string, error) {
+	rows, err := db.QueryContext(ctx,
+		"SELECT column_name FROM information_schema.columns WHERE table_name = 'issues' AND table_schema = DATABASE() ORDER BY ordinal_position")
+	if err != nil {
+		return nil, fmt.Errorf("enumerate issues columns: %w", err)
+	}
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return nil, fmt.Errorf("scan issues column: %w", err)
+		}
+		if !columnIdentRE.MatchString(c) {
+			return nil, fmt.Errorf("issues column %q is not a plain identifier; refusing to interpolate", c)
+		}
+		cols = append(cols, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("issues table exposes no columns via information_schema")
+	}
+	return cols, nil
+}
+
+// conflictCellSelect builds a "SELECT <lead>, per-column base/our/their cast to
+// text FROM dolt_conflicts_issues" over the given columns. Casting to CHAR gives
+// a null-safe, type-uniform basis for divergence comparison (base/our/their of a
+// column share its type, so their text forms compare consistently); the actual
+// value copy is done column-to-column in SQL, so this text form is never written
+// back and its fidelity only has to preserve equality.
+func conflictCellSelect(lead string, cols []string) string {
+	var b strings.Builder
+	b.WriteString("SELECT ")
+	b.WriteString(lead)
+	for _, c := range cols {
+		fmt.Fprintf(&b, ", CAST(base_%s AS CHAR), CAST(our_%s AS CHAR), CAST(their_%s AS CHAR)", c, c, c)
+	}
+	b.WriteString(" FROM dolt_conflicts_issues")
+	return b.String()
+}
+
+// nullStrEq is null-safe equality: both NULL compare equal, exactly one NULL does
+// not.
+func nullStrEq(a, b sql.NullString) bool {
+	if a.Valid != b.Valid {
+		return false
+	}
+	return !a.Valid || a.String == b.String
+}
+
+// columnGenuinelyConflicts reports whether a column diverged on BOTH sides to
+// DIFFERENT values (our≠base AND their≠base AND our≠their) — a real conflict. A
+// column that changed on one side only, or that both sides changed to the same
+// value (a convergent edit), is not a genuine conflict.
+func columnGenuinelyConflicts(base, our, their sql.NullString) bool {
+	return !nullStrEq(our, base) && !nullStrEq(their, base) && !nullStrEq(our, their)
+}
+
+// issueConflictsAreRevisionOnly reports whether every conflicted issues row is
+// safe to auto-resolve cell-wise: it is present on both sides (not an add/delete)
+// and `revision` is the ONLY column that genuinely conflicts (diverged on both
+// sides to different values). Any non-revision both-sides conflict — a real edit
+// collision, or updated_at differing across time-gapped clones — or an add/delete
+// leaves the whole issues table for the operator.
+//
+// It reads the full base/our/their state so a new issues column is checked
+// automatically; the column set comes from the live schema, not a fixed list.
+func issueConflictsAreRevisionOnly(ctx context.Context, db DBConn) (bool, error) {
+	cols, err := issueMergeConflictColumns(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	rows, err := db.QueryContext(ctx, conflictCellSelect("our_id, their_id", cols))
+	if err != nil {
+		return false, fmt.Errorf("query issues conflicts: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		cells := make([]sql.NullString, 2+3*len(cols))
+		dest := make([]any, len(cells))
+		for i := range cells {
+			dest[i] = &cells[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return false, fmt.Errorf("scan issues conflict: %w", err)
+		}
+		ourID, theirID := cells[0], cells[1]
+		// One side added or deleted the row: a real semantic conflict.
+		if !ourID.Valid || !theirID.Valid {
+			return false, nil
+		}
+		for i, c := range cols {
+			base, our, their := cells[2+3*i], cells[2+3*i+1], cells[2+3*i+2]
+			if c == "revision" {
+				continue // the CAS nonce is expected to collide; that is the whole point
+			}
+			if columnGenuinelyConflicts(base, our, their) {
+				return false, nil
+			}
+		}
+	}
+	return true, rows.Err()
+}
+
+// resolveIssuesRevisionOnlyConflicts settles the revision-only conflicts that
+// issueConflictsAreRevisionOnly validated. For each conflicted row it overlays
+// the peer's disjoint edits onto the ours working row — for every non-revision
+// column that diverged on THEIR side and not ours, it copies their_<col> in
+// (column-to-column, so the native type is preserved and their merge-fixed value
+// is read afresh) — then stamps a fresh revision distinct from both sides' nonces,
+// and finally resolves the table with --ours. The result keeps ours' own diverged
+// columns, adopts theirs' disjoint columns, and carries a brand-new CAS token, so
+// both edits survive.
+//
+// The conflict cells are snapshotted into memory BEFORE any mutation (mirroring
+// resolveSchemaMigrationsVintageConflicts): mutating the working row must not feed
+// back into the read that decides what to copy.
+func resolveIssuesRevisionOnlyConflicts(ctx context.Context, db DBConn) error {
+	cols, err := issueMergeConflictColumns(ctx, db)
+	if err != nil {
+		return err
+	}
+
+	type rowPlan struct {
+		id               string
+		copyCols         []string
+		ourRev, theirRev sql.NullString
+	}
+
+	rows, err := db.QueryContext(ctx, conflictCellSelect("our_id", cols))
+	if err != nil {
+		return fmt.Errorf("query issues conflicts: %w", err)
+	}
+	var plans []rowPlan
+	for rows.Next() {
+		cells := make([]sql.NullString, 1+3*len(cols))
+		dest := make([]any, len(cells))
+		for i := range cells {
+			dest[i] = &cells[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan issues conflict: %w", err)
+		}
+		id := cells[0]
+		if !id.Valid {
+			// issueConflictsAreRevisionOnly already rejected add/delete rows.
+			_ = rows.Close()
+			return fmt.Errorf("issues conflict resolver reached an add/delete row; discriminator contract violated")
+		}
+		p := rowPlan{id: id.String}
+		for i, c := range cols {
+			base, our, their := cells[1+3*i], cells[1+3*i+1], cells[1+3*i+2]
+			if c == "revision" {
+				p.ourRev, p.theirRev = our, their
+				continue
+			}
+			// Take theirs only where the peer's edit is disjoint from ours (their
+			// diverged, ours did not); the discriminator guarantees no non-revision
+			// column diverged on both sides, so ours' own edits are left untouched.
+			if !nullStrEq(their, base) && nullStrEq(our, base) {
+				p.copyCols = append(p.copyCols, c)
+			}
+		}
+		plans = append(plans, p)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+
+	for _, p := range plans {
+		for _, c := range p.copyCols {
+			// c is a validated identifier from information_schema (columnIdentRE).
+			//nolint:gosec // G201: column name is schema-derived and identifier-validated.
+			q := "UPDATE issues SET " + c + " = (SELECT their_" + c +
+				" FROM dolt_conflicts_issues WHERE our_id = ?) WHERE id = ?"
+			if _, err := db.ExecContext(ctx, q, p.id, p.id); err != nil {
+				return fmt.Errorf("overlay peer edit for issue %s column %s: %w", p.id, c, err)
+			}
+		}
+		newRev := freshRevisionDistinctFrom(p.ourRev, p.theirRev)
+		if _, err := db.ExecContext(ctx, "UPDATE issues SET revision = ? WHERE id = ?", newRev, p.id); err != nil {
+			return fmt.Errorf("stamp fresh revision for issue %s: %w", p.id, err)
+		}
+	}
+
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--ours', 'issues')"); err != nil {
+		return fmt.Errorf("failed to resolve issues conflicts: %w", err)
+	}
+	return nil
+}
+
+// freshRevisionDistinctFrom mints a new opaque revision token that differs from
+// both sides' nonces. A collision is a ~2⁻⁶³ event, but rerolling makes the
+// "both edits carry a brand-new token" guarantee exact rather than probabilistic.
+func freshRevisionDistinctFrom(ourRev, theirRev sql.NullString) int64 {
+	for {
+		r := issueops.NewRevision()
+		s := strconv.FormatInt(r, 10)
+		if (!ourRev.Valid || s != ourRev.String) && (!theirRev.Valid || s != theirRev.String) {
+			return r
+		}
+	}
 }
 
 // resolveConflictDepTarget returns the single non-null dependency target from a

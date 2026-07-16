@@ -183,17 +183,26 @@ type UpdateResult struct {
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func UpdateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, true)
+	return updateIssueInTx(ctx, tx, id, updates, actor, true, nil)
 }
 
 // UpdateIssueWithoutEventInTx applies normal update semantics without recording
 // an intermediate event. Demotion uses this to preserve the historical event
 // stream: create/update history is copied, then a single demotion event is added.
 func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, false)
+	return updateIssueInTx(ctx, tx, id, updates, actor, false, nil)
 }
 
-func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool) (*UpdateResult, error) {
+// UpdateIssueIfMatchInTx applies updates iff the issue's current revision equals
+// *expectedRevision — whole-row optimistic concurrency. A nil expectedRevision is
+// an unconditional update (last-writer-wins). On a revision mismatch it returns a
+// *storage.PreconditionFailedError carrying the current revision and row; the row
+// is left untouched.
+func UpdateIssueIfMatchInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, expectedRevision *int64, actor string) (*UpdateResult, error) {
+	return updateIssueInTx(ctx, tx, id, updates, actor, true, expectedRevision)
+}
+
+func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool, expectedRevision *int64) (*UpdateResult, error) {
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
@@ -220,9 +229,19 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		}
 	}
 
-	// Build SET clauses.
-	setClauses := []string{"updated_at = ?"}
-	args := []interface{}{time.Now().UTC()}
+	// Build SET clauses. Every issues/wisps row write stamps a fresh opaque
+	// revision nonce (B1.2) so a whole-row CAS guard can detect that the row
+	// changed since it was read; see NewRevision. On a guarded write, reroll so
+	// the cell always differs from the token being replaced (Dolt reports changed
+	// rows, not matched rows).
+	rev := NewRevision()
+	if expectedRevision != nil {
+		for rev == *expectedRevision {
+			rev = NewRevision()
+		}
+	}
+	setClauses := []string{"updated_at = ?", "revision = ?"}
+	args := []interface{}{time.Now().UTC(), rev}
 
 	for key, value := range updates {
 		if !IsAllowedUpdateField(key) {
@@ -287,10 +306,28 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 
 	args = append(args, id)
 
+	whereRevision := ""
+	if expectedRevision != nil {
+		whereRevision = " AND revision = ?"
+		args = append(args, *expectedRevision)
+	}
+
 	//nolint:gosec // G201: issueTable comes from WispTableRouting (hardcoded constants)
-	query := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?", issueTable, strings.Join(setClauses, ", "))
-	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+	query := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?%s", issueTable, strings.Join(setClauses, ", "), whereRevision)
+	res, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
 		return nil, fmt.Errorf("failed to update issue: %w", err)
+	}
+	if expectedRevision != nil {
+		n, err := res.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("rows affected for conditional update on %s: %w", id, err)
+		}
+		if n == 0 {
+			// Guard missed: the row's revision no longer equals the token, or the
+			// row was concurrently deleted. Re-read inside the tx for the conflict.
+			return nil, newRevisionPreconditionError(ctx, tx, id, *expectedRevision)
+		}
 	}
 
 	if recordEvent {
@@ -345,4 +382,21 @@ func RecordFullEventInTable(ctx context.Context, tx DBTX, table, issueID string,
 		return fmt.Errorf("record event in %s: %w", table, err)
 	}
 	return nil
+}
+
+// newRevisionPreconditionError re-reads the row inside the same transaction after
+// a guarded whole-row write matched zero rows, so the caller sees the revision
+// (and full row) it lost to. If the row has since vanished it surfaces that read
+// error (ErrNotFound) instead of a precondition failure.
+func newRevisionPreconditionError(ctx context.Context, tx DBTX, id string, expectedRevision int64) error {
+	cur, err := GetIssueInTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	return &storage.PreconditionFailedError{
+		ID:               id,
+		ExpectedRevision: expectedRevision,
+		CurrentRevision:  cur.Revision,
+		CurrentIssue:     cur,
+	}
 }

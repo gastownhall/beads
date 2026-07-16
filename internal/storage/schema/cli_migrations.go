@@ -54,10 +54,18 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// apply the prepared ALTER TABLE statements the runtime migration uses
 		// for idempotent re-runs on upgraded databases.
 		return cliMigration0054AddLeaseColumns
+	case "0055_add_revision.up.sql":
+		// Direct DDL: the source migration's PREPARE guards exist for re-run
+		// safety on upgraded databases; a fresh CLI bundle always needs the
+		// revision column on both tables.
+		return cliMigration0055AddRevision
 	default:
 		return sqlText
 	}
 }
+
+const cliMigration0055AddRevision = `ALTER TABLE issues ADD COLUMN revision BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE wisps ADD COLUMN revision BIGINT NOT NULL DEFAULT 0;`
 
 const cliMigration0008CreateChildCounters = `CREATE TABLE IF NOT EXISTS child_counters (
     parent_id VARCHAR(255) PRIMARY KEY,

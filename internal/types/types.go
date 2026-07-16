@@ -18,6 +18,12 @@ type Issue struct {
 	ID          string `json:"id"`
 	ContentHash string `json:"-"` // Internal: SHA256 of canonical content
 
+	// Revision is an opaque per-bead compare-and-swap token. It changes on every
+	// write; callers may only compare it for equality, never order it (see
+	// storage.ConditionalWriter / UpdateIssueIfMatch). Zero means "no revision
+	// recorded yet" (a pre-migration row not written since the column was added).
+	Revision int64 `json:"revision,omitempty"`
+
 	// ===== Issue Content =====
 	Title              string `json:"title"`
 	Description        string `json:"description,omitempty"`

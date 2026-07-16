@@ -64,23 +64,25 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 		result sql.Result
 	)
 	if oldIssue.StartedAt == nil {
-		args := append([]interface{}{actor, now, now}, leaseArgs...)
+		// Stamp a fresh revision nonce (B1.2) alongside the lease so a whole-row
+		// CAS guard sees the claim changed the row.
+		args := append([]interface{}{actor, now, now, NewRevision()}, leaseArgs...)
 		args = append(args, id)
 		args = append(args, statusArgs...)
 		args = append(args, actor)
 		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
+			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, revision = ?, %s
 			WHERE id = ? AND status IN (%s) AND (assignee = '' OR assignee IS NULL OR assignee = ?)
 		`, issueTable, leaseClause, statusPlaceholders), args...)
 	} else {
-		args := append([]interface{}{actor, now}, leaseArgs...)
+		args := append([]interface{}{actor, now, NewRevision()}, leaseArgs...)
 		args = append(args, id)
 		args = append(args, statusArgs...)
 		args = append(args, actor)
 		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, %s
+			SET assignee = ?, status = 'in_progress', updated_at = ?, revision = ?, %s
 			WHERE id = ? AND status IN (%s) AND (assignee = '' OR assignee IS NULL OR assignee = ?)
 		`, issueTable, leaseClause, statusPlaceholders), args...)
 	}

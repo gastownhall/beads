@@ -90,8 +90,8 @@ func CheckEligibilityInTx(ctx context.Context, tx *sql.Tx, issueID string, tier 
 func ApplyCompactionInTx(ctx context.Context, tx *sql.Tx, issueID string, tier int, originalSize int, commitHash string) error {
 	now := time.Now().UTC()
 	_, err := tx.ExecContext(ctx,
-		`UPDATE issues SET compaction_level = ?, compacted_at = ?, compacted_at_commit = ?, original_size = ?, updated_at = ? WHERE id = ?`,
-		tier, now, commitHash, originalSize, now, issueID)
+		`UPDATE issues SET compaction_level = ?, compacted_at = ?, compacted_at_commit = ?, original_size = ?, updated_at = ?, revision = ? WHERE id = ?`,
+		tier, now, commitHash, originalSize, now, NewRevision(), issueID)
 	if err != nil {
 		return fmt.Errorf("apply compaction: %w", err)
 	}
@@ -177,16 +177,16 @@ func RestoreFromSnapshotInTx(ctx context.Context, tx *sql.Tx, issueID string) (*
 			UPDATE issues
 			SET description = ?, design = ?, notes = ?, acceptance_criteria = ?,
 			    compaction_level = 0, compacted_at = NULL, compacted_at_commit = '', original_size = 0,
-			    updated_at = ?
+			    updated_at = ?, revision = ?
 			WHERE id = ?`,
-			snap.Description, snap.Design, snap.Notes, snap.AcceptanceCriteria, now, issueID)
+			snap.Description, snap.Design, snap.Notes, snap.AcceptanceCriteria, now, NewRevision(), issueID)
 	} else {
 		_, err = tx.ExecContext(ctx, `
 			UPDATE issues
 			SET description = ?, design = ?, notes = ?, acceptance_criteria = ?,
-			    compaction_level = ?, updated_at = ?
+			    compaction_level = ?, updated_at = ?, revision = ?
 			WHERE id = ?`,
-			snap.Description, snap.Design, snap.Notes, snap.AcceptanceCriteria, newLevel, now, issueID)
+			snap.Description, snap.Design, snap.Notes, snap.AcceptanceCriteria, newLevel, now, NewRevision(), issueID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("restore issue %s: %w", issueID, err)

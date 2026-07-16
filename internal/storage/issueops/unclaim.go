@@ -66,17 +66,17 @@ func UnclaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string, 
 	// write is not clobbered. row_lock forces a racing heartbeat/reclaim on the
 	// same row to conflict rather than silently merge (see lease.go invariant).
 	ownerPredicate := "AND assignee = ?"
-	args := []interface{}{now, freshRowLock(), id, actor}
+	args := []interface{}{now, freshRowLock(), NewRevision(), id, actor}
 	if force {
 		// Force still requires a current assignee, but from anyone.
 		ownerPredicate = "AND assignee != ''"
-		args = []interface{}{now, freshRowLock(), id}
+		args = []interface{}{now, freshRowLock(), NewRevision(), id}
 	}
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE %s
 		SET assignee = '', status = 'open', updated_at = ?,
 		    lease_expires_at = NULL, heartbeat_at = NULL, started_at = NULL,
-		    row_lock = ?
+		    row_lock = ?, revision = ?
 		WHERE id = ? AND status IN ('open', 'in_progress') %s
 	`, issueTable, ownerPredicate), args...)
 	if err != nil {

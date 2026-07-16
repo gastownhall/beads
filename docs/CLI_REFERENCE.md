@@ -7,6 +7,9 @@ Reference for bd Latest. Generated from `bd help --all`.
 ### Working With Issues:
 
 - [bd assign](#bd-assign) — Assign an issue to someone
+- [bd cas](#bd-cas) — Conditional (compare-and-swap) metadata writes
+  - [bd cas set](#bd-cas-set) — Set a metadata key only if its current value matches
+  - [bd cas unset](#bd-cas-unset) — Remove a metadata key only if its current value matches (guarded release)
 - [bd children](#bd-children) — List child beads of a parent
 - [bd close](#bd-close) — Close one or more issues
 - [bd comment](#bd-comment) — Add a comment to an issue
@@ -335,7 +338,75 @@ Examples:
   bd assign bd-123 ""      # unassign
 
 ```
-bd assign <id> <name>
+bd assign <id> <name> [flags]
+```
+
+**Flags:**
+
+```
+      --if-revision int   only apply if the issue's current revision equals N (whole-row compare-and-swap; exits 9 on mismatch)
+```
+
+### bd cas
+
+Atomic compare-and-swap on a single metadata key.
+
+Use 'cas set' to set a key only if its current value matches an expectation —
+the building block for lock-free fences, epoch counters, and claim-once
+reservations across concurrent writers.
+
+On a precondition mismatch the command exits 9 (distinct from the generic
+error code 1) with the current value, so a caller can re-read and retry.
+
+```
+bd cas [command]
+```
+
+#### bd cas set
+
+Atomically set a metadata key iff a precondition holds.
+
+Exactly one precondition is required:
+  --if &lt;value&gt;   set only if the key currently equals &lt;value&gt;
+  --if-absent    set only if the key is currently absent (claim-once)
+
+Examples:
+  bd cas set bd-1 gc.control_epoch 5 --if 4     # advance epoch 4 -&gt; 5
+  bd cas set bd-1 gc.drain.reserved_by me --if-absent   # claim once
+
+Exit codes: 0 success, 9 precondition mismatch, 1 other error.
+
+```
+bd cas set <id> <key> <value> [flags]
+```
+
+**Flags:**
+
+```
+      --if string   set only if the key currently equals this value
+      --if-absent   set only if the key is currently absent (claim-once)
+```
+
+#### bd cas unset
+
+Atomically remove a metadata key iff it currently equals --if &lt;value&gt;.
+
+The symmetric release for 'cas set --if-absent': release a reservation or lease
+you hold. Idempotent — removing an already-absent key succeeds.
+
+Example:
+  bd cas unset bd-1 gc.drain.reserved_by --if me   # release my reservation
+
+Exit codes: 0 success, 9 held by a different value, 1 other error.
+
+```
+bd cas unset <id> <key> [flags]
+```
+
+**Flags:**
+
+```
+      --if string   remove only if the key currently equals this value
 ```
 
 ### bd children
@@ -385,6 +456,7 @@ bd close [id...] [flags]
       --claim-next           Automatically claim the next highest priority available issue
       --continue             Auto-advance to next step in molecule
   -f, --force                Force close pinned issues or unsatisfied gates
+      --if-revision int      only apply if the issue's current revision equals N (whole-row compare-and-swap; exits 9 on mismatch)
       --no-auto              With --continue, show next step but don't claim it
   -r, --reason string        Reason for closing
       --reason-file string   Read close reason from file (use - for stdin)
@@ -598,6 +670,7 @@ bd delete <issue-id> [issue-id...] [flags]
       --dry-run            Preview what would be deleted without making changes
   -f, --force              Actually delete (without this flag, shows preview)
       --from-file string   Read issue IDs from file (one per line)
+      --if-revision int    only apply if the issue's current revision equals N (whole-row compare-and-swap; exits 9 on mismatch)
 ```
 
 ### bd edit
@@ -1582,6 +1655,7 @@ bd update [id...] [flags]
   -e, --estimate int                 Time estimate in minutes (e.g., 60 for 1 hour)
       --external-ref string          External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)
       --history                      Clear no-history flag (re-enable Dolt commit history)
+      --if-revision int              only apply if the issue's current revision equals N (whole-row compare-and-swap; exits 9 on mismatch)
       --metadata string              Set custom metadata (JSON string or @file.json to read from file)
       --no-history                   Mark issue as no-history (skip Dolt commits, not GC-eligible)
       --notes string                 Additional notes

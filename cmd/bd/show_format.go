@@ -283,6 +283,11 @@ func formatIssueLongExtras(issue *types.Issue, formatTime func(time.Time) string
 	if issue.WorkType != "" {
 		closeParts = append(closeParts, fmt.Sprintf("  Work type: %s", issue.WorkType))
 	}
+	// The whole-row CAS token used by `bd update/close/assign/delete --if-revision`.
+	// Zero means unwritten (pre-migration / never stamped), so only show a real one.
+	if issue.Revision != 0 {
+		closeParts = append(closeParts, fmt.Sprintf("  Revision: %d", issue.Revision))
+	}
 	if len(closeParts) > 0 {
 		sections = append(sections, fmt.Sprintf("%s\n%s",
 			ui.RenderBold("EXTENDED DETAILS"), strings.Join(closeParts, "\n")))

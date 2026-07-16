@@ -40,6 +40,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var awaitType, awaitID, waiters sql.NullString
 	var ephemeral, noHistory, pinned, isTemplate sql.NullInt64
 	var metadata sql.NullString
+	var revision sql.NullInt64 // NOT NULL DEFAULT 0 in schema; tolerate NULL for partial/mock rows
 
 	dests := []any{
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -53,7 +54,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&eventKind, &actor, &target, &payload,
 		&dueAt, &deferUntil,
 		&workType, &sourceSystem, &metadata,
-		&leaseExpiresAt, &heartbeatAt,
+		&leaseExpiresAt, &heartbeatAt, &revision,
 	}
 	dests = append(dests, extra...)
 	if err := s.Scan(dests...); err != nil {
@@ -69,6 +70,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	}
 
 	// Map nullable fields
+	issue.Revision = revision.Int64 // NULL (pre-migration / partial row) reads as 0
 	if contentHash.Valid {
 		issue.ContentHash = contentHash.String
 	}

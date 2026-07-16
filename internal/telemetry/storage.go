@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -670,6 +671,66 @@ func (s *InstrumentedStorage) SlotGet(ctx context.Context, issueID, key string) 
 func (s *InstrumentedStorage) SlotClear(ctx context.Context, issueID, key, actor string) error {
 	ctx, span, t := s.op(ctx, "SlotClear", attribute.String("slot.key", key))
 	err := s.inner.SlotClear(ctx, issueID, key, actor)
+	s.done(ctx, span, t, err)
+	return err
+}
+
+// CompareAndSetMetadataKey forwards the ConditionalWriter capability to the
+// wrapped store, or returns ErrConditionalWriteUnsupported if it lacks it.
+func (s *InstrumentedStorage) CompareAndSetMetadataKey(ctx context.Context, id, key string, expected *string, newValue, actor string) (*types.Issue, error) {
+	cw, ok := s.inner.(storage.ConditionalWriter)
+	if !ok {
+		return nil, fmt.Errorf("%w: underlying store does not support conditional writes", storage.ErrConditionalWriteUnsupported)
+	}
+	ctx, span, t := s.op(ctx, "CompareAndSetMetadataKey", attribute.String("slot.key", key))
+	v, err := cw.CompareAndSetMetadataKey(ctx, id, key, expected, newValue, actor)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+// CompareAndClearMetadataKey forwards the guarded release to the wrapped store.
+func (s *InstrumentedStorage) CompareAndClearMetadataKey(ctx context.Context, id, key, expected, actor string) (*types.Issue, error) {
+	cw, ok := s.inner.(storage.ConditionalWriter)
+	if !ok {
+		return nil, fmt.Errorf("%w: underlying store does not support conditional writes", storage.ErrConditionalWriteUnsupported)
+	}
+	ctx, span, t := s.op(ctx, "CompareAndClearMetadataKey", attribute.String("slot.key", key))
+	v, err := cw.CompareAndClearMetadataKey(ctx, id, key, expected, actor)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+// UpdateIssueIfMatch forwards the whole-row CAS to the wrapped store.
+func (s *InstrumentedStorage) UpdateIssueIfMatch(ctx context.Context, id string, updates map[string]interface{}, expectedRevision *int64, actor string) (*types.Issue, error) {
+	cw, ok := s.inner.(storage.ConditionalWriter)
+	if !ok {
+		return nil, fmt.Errorf("%w: underlying store does not support conditional writes", storage.ErrConditionalWriteUnsupported)
+	}
+	ctx, span, t := s.op(ctx, "UpdateIssueIfMatch", attribute.String("bd.issue.id", id))
+	v, err := cw.UpdateIssueIfMatch(ctx, id, updates, expectedRevision, actor)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+// DeleteIssueIfMatch forwards the guarded delete to the wrapped store.
+func (s *InstrumentedStorage) DeleteIssueIfMatch(ctx context.Context, id string, expectedRevision *int64) error {
+	cw, ok := s.inner.(storage.ConditionalWriter)
+	if !ok {
+		return fmt.Errorf("%w: underlying store does not support conditional writes", storage.ErrConditionalWriteUnsupported)
+	}
+	ctx, span, t := s.op(ctx, "DeleteIssueIfMatch", attribute.String("bd.issue.id", id))
+	err := cw.DeleteIssueIfMatch(ctx, id, expectedRevision)
+	s.done(ctx, span, t, err)
+	return err
+}
+
+func (s *InstrumentedStorage) CloseIssueIfMatch(ctx context.Context, id, reason, actor, session string, expectedRevision *int64) error {
+	cw, ok := s.inner.(storage.ConditionalWriter)
+	if !ok {
+		return fmt.Errorf("%w: underlying store does not support conditional writes", storage.ErrConditionalWriteUnsupported)
+	}
+	ctx, span, t := s.op(ctx, "CloseIssueIfMatch", attribute.String("bd.issue.id", id))
+	err := cw.CloseIssueIfMatch(ctx, id, reason, actor, session, expectedRevision)
 	s.done(ctx, span, t, err)
 	return err
 }

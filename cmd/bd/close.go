@@ -45,8 +45,22 @@ the flags appear in the command line.`,
 			}
 		}()
 
+		precond := ifRevisionPrecondition(cmd)
+
 		if usesProxiedServer() {
+			if precond != nil {
+				// The proxied server has no ConditionalWriter; never silently fall
+				// back to an unconditional close.
+				return reportConditionalWriteUnsupported(fmt.Errorf(
+					"%w: --if-revision is not supported against a proxied server", storage.ErrConditionalWriteUnsupported))
+			}
 			return runCloseProxiedServer(cmd, rootCtx, args)
+		}
+
+		// --if-revision is a single-issue whole-row precondition: require an
+		// explicit ID (no last-touched fallback, no multi-close).
+		if precond != nil && len(args) != 1 {
+			return HandleErrorRespectJSON("--if-revision requires exactly one explicit issue ID")
 		}
 
 		// If no IDs provided, use last touched issue
@@ -156,7 +170,17 @@ the flags appear in the command line.`,
 				}
 			}
 
-			if err := activeStore.CloseIssue(ctx, id, reason, actor, session); err != nil {
+			if precond != nil {
+				// Single-issue guarded close (validated to len(args)==1 above): a
+				// revision mismatch or gate refusal is a hard exit, not a per-id skip.
+				cw, cerr := asConditionalWriter(activeStore)
+				if cerr != nil {
+					return cerr
+				}
+				if cerr := cw.CloseIssueIfMatch(ctx, id, reason, actor, session, precond); cerr != nil {
+					return mapConditionalWriteError(fmt.Sprintf("closing %s", id), cerr)
+				}
+			} else if err := activeStore.CloseIssue(ctx, id, reason, actor, session); err != nil {
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				continue
 			}
@@ -330,6 +354,7 @@ func init() {
 	closeCmd.Flags().Bool("suggest-next", false, "Show newly unblocked issues after closing")
 	closeCmd.Flags().Bool("claim-next", false, "Automatically claim the next highest priority available issue")
 	closeCmd.Flags().String("session", "", "Claude Code session ID (or set CLAUDE_SESSION_ID env var)")
+	registerIfRevisionFlag(closeCmd)
 	closeCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(closeCmd)
 }

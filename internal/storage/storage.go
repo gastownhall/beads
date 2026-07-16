@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -37,6 +38,57 @@ var ErrNotInitialized = errors.New("database not initialized")
 
 // ErrPrefixMismatch is returned when an issue ID does not match the configured prefix.
 var ErrPrefixMismatch = errors.New("prefix mismatch")
+
+// ErrPreconditionFailed is the sentinel returned when a conditional write's
+// precondition does not hold (compare-and-swap mismatch). Callers detect it with
+// errors.Is; the concrete *PreconditionFailedError carries the current state.
+var ErrPreconditionFailed = errors.New("precondition failed")
+
+// ErrConditionalWriteUnsupported is returned when a conditional write cannot be
+// enforced: the store does not implement ConditionalWriter, or the enforcing
+// store is in a state where compare-and-swap semantics cannot be guaranteed
+// (e.g. multiple branches, a configured remote, or federation peers — see the
+// ConditionalWriter godoc). It is always wrapped with the concrete reason.
+var ErrConditionalWriteUnsupported = errors.New("conditional write unsupported")
+
+// PreconditionFailedError describes a failed compare-and-swap. It unwraps to
+// ErrPreconditionFailed. For a metadata-key CAS, Key/ExpectedValue/CurrentValue
+// are populated (a nil *string means "absent"). CurrentIssue is the row re-read
+// inside the same transaction as the failed guard, so it reflects the state the
+// caller lost to (used for a 412 body or a level-triggered re-observe).
+type PreconditionFailedError struct {
+	ID            string
+	Key           string
+	ExpectedValue *string
+	CurrentValue  *string
+	CurrentIssue  *types.Issue
+
+	// ExpectedRevision/CurrentRevision carry the guarded and current whole-row
+	// CAS tokens for a revision (UpdateIssueIfMatch/DeleteIssueIfMatch) conflict;
+	// Key is empty in that case. For a metadata-key CAS they are 0.
+	ExpectedRevision int64
+	CurrentRevision  int64
+}
+
+// Error implements the error interface.
+func (e *PreconditionFailedError) Error() string {
+	if e.Key != "" {
+		return fmt.Sprintf("precondition failed on %s: metadata key %q expected %s, current %s",
+			e.ID, e.Key, quoteMaybeNil(e.ExpectedValue), quoteMaybeNil(e.CurrentValue))
+	}
+	return fmt.Sprintf("precondition failed on %s: revision expected %d, current %d",
+		e.ID, e.ExpectedRevision, e.CurrentRevision)
+}
+
+// Unwrap allows errors.Is(err, ErrPreconditionFailed).
+func (e *PreconditionFailedError) Unwrap() error { return ErrPreconditionFailed }
+
+func quoteMaybeNil(s *string) string {
+	if s == nil {
+		return "<absent>"
+	}
+	return fmt.Sprintf("%q", *s)
+}
 
 // Storage is the interface satisfied by *dolt.DoltStore.
 // Consumers depend on this interface rather than on the concrete type so that
@@ -227,6 +279,57 @@ type DoltStorage interface {
 type RawDBAccessor interface {
 	DB() *sql.DB
 	UnderlyingDB() *sql.DB
+}
+
+// ConditionalWriter is the optional compare-and-swap capability. Callers
+// type-assert a Storage to it (like RawDBAccessor); a store that does not
+// implement it has no CAS support and callers must treat the write accordingly
+// (they must NOT silently fall back to an unconditional write).
+//
+// Guarantees hold only within a single linear working set (one Dolt branch, no
+// remote, no federation peers). The enforcing store refuses conditional writes
+// when it cannot guarantee that, returning a wrapped ErrConditionalWriteUnsupported.
+// Within that scope: a conditional write that reports success provably applied
+// over the observed value (no lost update); on mismatch it returns a
+// *PreconditionFailedError carrying the current row. It may conservatively fail
+// (return a precondition error when a retry would succeed) but never falsely
+// succeeds.
+type ConditionalWriter interface {
+	// CompareAndSetMetadataKey atomically sets a single metadata key iff its
+	// current value matches expected. A nil expected means "the key must be
+	// absent" (claim-once); a non-nil expected means the key's current string
+	// value must equal *expected. The value is stored as a JSON string. On
+	// success it returns the post-write issue; on mismatch it returns a
+	// *PreconditionFailedError (errors.Is(err, ErrPreconditionFailed)).
+	CompareAndSetMetadataKey(ctx context.Context, id, key string, expected *string, newValue, actor string) (*types.Issue, error)
+
+	// CompareAndClearMetadataKey atomically removes a single metadata key iff its
+	// current value equals expected — the symmetric release for a claim/lease.
+	// It is idempotent when the key is already absent (returns success); a key
+	// held by a different value returns a *PreconditionFailedError.
+	CompareAndClearMetadataKey(ctx context.Context, id, key, expected, actor string) (*types.Issue, error)
+
+	// UpdateIssueIfMatch applies updates iff the issue's current revision equals
+	// *expectedRevision — whole-row optimistic concurrency (the C2 API's
+	// If-Match/resourceVersion). A nil expectedRevision applies the update
+	// unconditionally (last-writer-wins). On success it returns the post-write
+	// issue; on a revision mismatch it returns a *PreconditionFailedError whose
+	// ExpectedRevision/CurrentRevision and CurrentIssue describe the state lost to.
+	UpdateIssueIfMatch(ctx context.Context, id string, updates map[string]interface{}, expectedRevision *int64, actor string) (*types.Issue, error)
+
+	// DeleteIssueIfMatch deletes the issue iff its current revision equals
+	// *expectedRevision. A nil expectedRevision deletes unconditionally. A
+	// revision mismatch returns a *PreconditionFailedError; an absent issue
+	// returns ErrNotFound.
+	DeleteIssueIfMatch(ctx context.Context, id string, expectedRevision *int64) error
+
+	// CloseIssueIfMatch closes the issue (status=closed, recording the close
+	// event and recomputing dependents' is_blocked) iff its current revision
+	// equals *expectedRevision — whole-row optimistic concurrency for close. A
+	// nil expectedRevision closes unconditionally (matching CloseIssue). A
+	// revision mismatch returns a *PreconditionFailedError; an already-closed
+	// issue whose revision still matches is an idempotent success.
+	CloseIssueIfMatch(ctx context.Context, id, reason, actor, session string, expectedRevision *int64) error
 }
 
 // StoreLocator provides filesystem path information for the store.

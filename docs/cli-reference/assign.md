@@ -18,3 +18,9 @@ Examples:
 ```
 bd assign <id> <name> [flags]
 ```
+
+**Flags:**
+
+```
+      --if-revision int   only apply if the issue's current revision equals N (whole-row compare-and-swap; exits 9 on mismatch)
+```

@@ -59,7 +59,15 @@ Force: Delete and orphan dependents
 			}
 		}()
 
+		precond := ifRevisionPrecondition(cmd)
+
 		if usesProxiedServer() {
+			if precond != nil {
+				// The proxied server has no ConditionalWriter; never silently fall
+				// back to an unconditional delete.
+				return reportConditionalWriteUnsupported(fmt.Errorf(
+					"%w: --if-revision is not supported against a proxied server", storage.ErrConditionalWriteUnsupported))
+			}
 			return runDeleteProxiedServer(cmd, rootCtx, args)
 		}
 
@@ -86,6 +94,14 @@ Force: Delete and orphan dependents
 			if err := ensureStoreActive(); err != nil {
 				return HandleError("%v", err)
 			}
+		}
+
+		// Guarded delete: --if-revision is the atomic conditional-delete primitive.
+		// It routes through the store's DeleteIssueIfMatch (revision-guarded, with
+		// the is_blocked recompute) rather than the interactive preview + text-
+		// reference-rewriting flow, so it is a single-issue, non-cascade path.
+		if precond != nil {
+			return runGuardedDelete(rootCtx, issueIDs, cascade, force, precond)
 		}
 
 		if len(issueIDs) > 1 || cascade {
@@ -460,11 +476,67 @@ func uniqueStrings(slice []string) []string {
 	return result
 }
 
+// runGuardedDelete performs a --if-revision delete: an atomic revision-guarded
+// removal via the store's DeleteIssueIfMatch. It is a single-issue, non-cascade,
+// --force path — the interactive preview and text-reference rewriting of the plain
+// delete flow are intentionally skipped, so the caller gets a clean conditional
+// primitive (exit 9 on a revision mismatch, exit 13 on a gate refusal).
+func runGuardedDelete(ctx context.Context, issueIDs []string, cascade, force bool, precond *int64) error {
+	if cascade {
+		return HandleErrorRespectJSON("--if-revision cannot be combined with --cascade")
+	}
+	if len(issueIDs) != 1 {
+		return HandleErrorRespectJSON("--if-revision requires exactly one issue ID")
+	}
+	if !force {
+		return HandleErrorRespectJSON("--if-revision deletes the issue; pass --force to confirm (the revision guard makes it conditional)")
+	}
+
+	routedResult, err := resolveAndGetIssueForMutation(ctx, store, issueIDs[0])
+	if err != nil {
+		if routedResult != nil {
+			routedResult.Close()
+		}
+		if isNotFoundErr(err) {
+			return HandleErrorRespectJSON("issue %s not found", issueIDs[0])
+		}
+		return HandleErrorRespectJSON("resolving %s: %v", issueIDs[0], err)
+	}
+	if routedResult == nil || routedResult.Issue == nil {
+		if routedResult != nil {
+			routedResult.Close()
+		}
+		return HandleErrorRespectJSON("issue %s not found", issueIDs[0])
+	}
+	defer routedResult.Close()
+
+	cw, err := asConditionalWriter(routedResult.Store)
+	if err != nil {
+		return err
+	}
+	if err := cw.DeleteIssueIfMatch(ctx, routedResult.ResolvedID, precond); err != nil {
+		return mapConditionalWriteError(fmt.Sprintf("deleting %s", routedResult.ResolvedID), err)
+	}
+	if err := commitPendingIfEmbedded(ctx, routedResult.Store, actor, doltAutoCommitParams{
+		Command:  "delete",
+		IssueIDs: []string{routedResult.ResolvedID},
+	}); err != nil {
+		return HandleErrorRespectJSON("committing delete %s: %v", routedResult.ResolvedID, err)
+	}
+
+	if jsonOutput {
+		return outputJSON(map[string]interface{}{"id": routedResult.ResolvedID, "deleted": true})
+	}
+	fmt.Printf("%s Deleted %s\n", ui.RenderPass("✓"), routedResult.ResolvedID)
+	return nil
+}
+
 func init() {
 	deleteCmd.Flags().BoolP("force", "f", false, "Actually delete (without this flag, shows preview)")
 	deleteCmd.Flags().String("from-file", "", "Read issue IDs from file (one per line)")
 	deleteCmd.Flags().Bool("dry-run", false, "Preview what would be deleted without making changes")
 	deleteCmd.Flags().Bool("cascade", false, "Recursively delete all dependent issues")
+	registerIfRevisionFlag(deleteCmd)
 	deleteCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(deleteCmd)
 }

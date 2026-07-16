@@ -17,6 +17,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/types"
@@ -113,6 +114,76 @@ func (h *HookFiringStore) UpdateIssue(ctx context.Context, id string, updates ma
 		return err
 	}
 	h.fireHookByID(ctx, hooks.EventUpdate, id)
+	return nil
+}
+
+// Compile-time assertion that the decorator preserves the CAS capability.
+var _ ConditionalWriter = (*HookFiringStore)(nil)
+
+// CompareAndSetMetadataKey forwards the ConditionalWriter capability to the
+// wrapped store (or reports it unsupported), then fires on_update on success so
+// a conditional metadata write triggers the same hooks as any other mutation.
+func (h *HookFiringStore) CompareAndSetMetadataKey(ctx context.Context, id, key string, expected *string, newValue, actor string) (*types.Issue, error) {
+	cw, ok := h.inner.(ConditionalWriter)
+	if !ok {
+		return nil, fmt.Errorf("%w: underlying store does not support conditional writes", ErrConditionalWriteUnsupported)
+	}
+	issue, err := cw.CompareAndSetMetadataKey(ctx, id, key, expected, newValue, actor)
+	if err != nil {
+		return nil, err
+	}
+	h.fireHookByID(ctx, hooks.EventUpdate, id)
+	return issue, nil
+}
+
+// CompareAndClearMetadataKey forwards the guarded release and fires on_update.
+func (h *HookFiringStore) CompareAndClearMetadataKey(ctx context.Context, id, key, expected, actor string) (*types.Issue, error) {
+	cw, ok := h.inner.(ConditionalWriter)
+	if !ok {
+		return nil, fmt.Errorf("%w: underlying store does not support conditional writes", ErrConditionalWriteUnsupported)
+	}
+	issue, err := cw.CompareAndClearMetadataKey(ctx, id, key, expected, actor)
+	if err != nil {
+		return nil, err
+	}
+	h.fireHookByID(ctx, hooks.EventUpdate, id)
+	return issue, nil
+}
+
+// UpdateIssueIfMatch forwards the whole-row CAS to the wrapped store (or reports
+// it unsupported) and fires on_update on success.
+func (h *HookFiringStore) UpdateIssueIfMatch(ctx context.Context, id string, updates map[string]interface{}, expectedRevision *int64, actor string) (*types.Issue, error) {
+	cw, ok := h.inner.(ConditionalWriter)
+	if !ok {
+		return nil, fmt.Errorf("%w: underlying store does not support conditional writes", ErrConditionalWriteUnsupported)
+	}
+	issue, err := cw.UpdateIssueIfMatch(ctx, id, updates, expectedRevision, actor)
+	if err != nil {
+		return nil, err
+	}
+	h.fireHookByID(ctx, hooks.EventUpdate, id)
+	return issue, nil
+}
+
+// DeleteIssueIfMatch forwards the guarded delete to the wrapped store. Delete is
+// not hooked at the decorator (consistent with DeleteIssue), so it only forwards.
+func (h *HookFiringStore) DeleteIssueIfMatch(ctx context.Context, id string, expectedRevision *int64) error {
+	cw, ok := h.inner.(ConditionalWriter)
+	if !ok {
+		return fmt.Errorf("%w: underlying store does not support conditional writes", ErrConditionalWriteUnsupported)
+	}
+	return cw.DeleteIssueIfMatch(ctx, id, expectedRevision)
+}
+
+func (h *HookFiringStore) CloseIssueIfMatch(ctx context.Context, id, reason, actor, session string, expectedRevision *int64) error {
+	cw, ok := h.inner.(ConditionalWriter)
+	if !ok {
+		return fmt.Errorf("%w: underlying store does not support conditional writes", ErrConditionalWriteUnsupported)
+	}
+	if err := cw.CloseIssueIfMatch(ctx, id, reason, actor, session, expectedRevision); err != nil {
+		return err
+	}
+	h.fireHookByID(ctx, hooks.EventClose, id)
 	return nil
 }
 

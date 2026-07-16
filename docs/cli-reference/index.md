@@ -7,7 +7,7 @@ description: Generated reference for every bd command
 
 Generated from `bd help --docs-root`.
 
-This reference covers all 112 live top-level `bd` commands. Regenerate it with:
+This reference covers all 113 live top-level `bd` commands. Regenerate it with:
 
 ```bash
 ./scripts/generate-cli-docs.sh
@@ -44,6 +44,7 @@ These flags apply to all commands:
 - [`bd blocked`](/cli-reference/blocked)
 - [`bd bootstrap`](/cli-reference/bootstrap)
 - [`bd branch`](/cli-reference/branch)
+- [`bd cas`](/cli-reference/cas)
 - [`bd children`](/cli-reference/children)
 - [`bd close`](/cli-reference/close)
 - [`bd comment`](/cli-reference/comment)

@@ -46,4 +46,5 @@ bd delete <issue-id> [issue-id...] [flags]
       --dry-run            Preview what would be deleted without making changes
   -f, --force              Actually delete (without this flag, shows preview)
       --from-file string   Read issue IDs from file (one per line)
+      --if-revision int    only apply if the issue's current revision equals N (whole-row compare-and-swap; exits 9 on mismatch)
 ```

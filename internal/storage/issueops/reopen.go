@@ -33,9 +33,9 @@ func ReopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string) (*R
 	now := time.Now().UTC()
 
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		UPDATE %s SET status = ?, closed_at = NULL, close_reason = '', closed_by_session = '', defer_until = NULL, updated_at = ?
+		UPDATE %s SET status = ?, closed_at = NULL, close_reason = '', closed_by_session = '', defer_until = NULL, updated_at = ?, revision = ?
 		WHERE id = ? AND status = ?
-	`, issueTable), types.StatusOpen, now, id, types.StatusClosed)
+	`, issueTable), types.StatusOpen, now, NewRevision(), id, types.StatusClosed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to reopen issue: %w", err)
 	}

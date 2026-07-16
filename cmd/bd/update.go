@@ -40,8 +40,22 @@ create, update, show, or close operation).`,
 			}
 		}()
 
+		precond := ifRevisionPrecondition(cmd)
+
 		if usesProxiedServer() {
+			if precond != nil {
+				// The proxied server has no ConditionalWriter; never silently fall
+				// back to an unconditional update.
+				return reportConditionalWriteUnsupported(fmt.Errorf(
+					"%w: --if-revision is not supported against a proxied server", storage.ErrConditionalWriteUnsupported))
+			}
 			return runUpdateProxiedServer(cmd, rootCtx, args)
+		}
+
+		// --if-revision is a single-issue whole-row precondition: require an
+		// explicit ID (no last-touched fallback, no multi-update).
+		if precond != nil && len(args) != 1 {
+			return HandleErrorRespectJSON("--if-revision requires exactly one explicit issue ID")
 		}
 
 		// If no IDs provided, use last touched issue
@@ -310,6 +324,21 @@ create, update, show, or close operation).`,
 			return nil
 		}
 
+		// --if-revision guards the issue's own whole-row fields. Claim is its own
+		// compare-and-swap, and label/parent edits are separate writes the row
+		// revision cannot cover, so reject those combinations rather than guard
+		// only part of the command.
+		if precond != nil {
+			if claimFlag {
+				return HandleErrorRespectJSON("--if-revision cannot be combined with --claim (claim is its own compare-and-swap)")
+			}
+			for _, k := range []string{"set_labels", "add_labels", "remove_labels", "parent"} {
+				if _, ok := updates[k]; ok {
+					return HandleErrorRespectJSON("--if-revision cannot be combined with label or parent edits (they are separate writes the row revision does not guard)")
+				}
+			}
+		}
+
 		ctx := rootCtx
 
 		updatedIssues := []*types.Issue{}
@@ -427,7 +456,17 @@ create, update, show, or close operation).`,
 				regularUpdates["notes"] = combined
 			}
 			if len(regularUpdates) > 0 {
-				if err := issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor); err != nil {
+				if precond != nil {
+					// Single-issue guarded update (validated to len(args)==1 above):
+					// a revision mismatch or gate refusal is a hard exit, not a skip.
+					cw, cerr := asConditionalWriter(issueStore)
+					if cerr != nil {
+						return cerr
+					}
+					if _, cerr := cw.UpdateIssueIfMatch(ctx, result.ResolvedID, regularUpdates, precond, actor); cerr != nil {
+						return mapConditionalWriteError(fmt.Sprintf("updating %s", id), cerr)
+					}
+				} else if err := issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor); err != nil {
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
 					closeIfUnmutated(result)
 					continue
@@ -691,6 +730,7 @@ func init() {
 	// Incremental metadata edits (GH#1406)
 	updateCmd.Flags().StringArray("set-metadata", nil, "Set metadata key=value (repeatable, e.g., --set-metadata team=platform)")
 	updateCmd.Flags().StringArray("unset-metadata", nil, "Remove metadata key (repeatable, e.g., --unset-metadata team)")
+	registerIfRevisionFlag(updateCmd)
 	updateCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(updateCmd)
 }

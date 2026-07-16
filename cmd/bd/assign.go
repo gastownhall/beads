@@ -66,7 +66,15 @@ Examples:
 		updates := map[string]interface{}{
 			"assignee": assignee,
 		}
-		if err := issueStore.UpdateIssue(ctx, result.ResolvedID, updates, actor); err != nil {
+		if precond := ifRevisionPrecondition(cmd); precond != nil {
+			cw, err := asConditionalWriter(issueStore)
+			if err != nil {
+				return err
+			}
+			if _, err := cw.UpdateIssueIfMatch(ctx, result.ResolvedID, updates, precond, actor); err != nil {
+				return mapConditionalWriteError(fmt.Sprintf("assigning %s", id), err)
+			}
+		} else if err := issueStore.UpdateIssue(ctx, result.ResolvedID, updates, actor); err != nil {
 			return HandleErrorRespectJSON("updating %s: %v", id, err)
 		}
 
@@ -103,5 +111,6 @@ Examples:
 
 func init() {
 	assignCmd.ValidArgsFunction = issueIDCompletion
+	registerIfRevisionFlag(assignCmd)
 	rootCmd.AddCommand(assignCmd)
 }

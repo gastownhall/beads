@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS issues (
     lease_expires_at    timestamp(0),
     heartbeat_at        timestamp(0),
     row_lock            bigint NOT NULL DEFAULT 0,
+    revision            bigint NOT NULL DEFAULT 0,
     PRIMARY KEY (id)
 );
 
@@ -184,6 +185,7 @@ CREATE TABLE IF NOT EXISTS wisps (
     lease_expires_at    timestamp(0),
     heartbeat_at        timestamp(0),
     row_lock            bigint NOT NULL DEFAULT 0,
+    revision            bigint NOT NULL DEFAULT 0,
     PRIMARY KEY (id)
 );
 

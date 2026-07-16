@@ -341,6 +341,7 @@
               "cli-reference/blocked",
               "cli-reference/bootstrap",
               "cli-reference/branch",
+              "cli-reference/cas",
               "cli-reference/children",
               "cli-reference/close",
               "cli-reference/comment",

@@ -43,6 +43,72 @@ func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string) error {
 	return nil
 }
 
+// DeleteIssueIfMatchInTx deletes the issue iff its current revision equals
+// *expectedRevision (whole-row optimistic concurrency). A nil expectedRevision
+// deletes unconditionally, matching DeleteIssueInTx. On a revision mismatch it
+// returns a *storage.PreconditionFailedError carrying the current revision and
+// row; an absent issue returns "issue not found".
+//
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func DeleteIssueIfMatchInTx(ctx context.Context, tx *sql.Tx, id string, expectedRevision *int64) error {
+	isWisp := IsActiveWispInTx(ctx, tx, id)
+
+	// Read the row up front so a guard miss can report the state lost to and so an
+	// absent issue is a clean not-found rather than a silent zero-row delete.
+	cur, err := GetIssueInTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+
+	var deletedIssues, deletedWisps []string
+	if isWisp {
+		deletedWisps = []string{id}
+	} else {
+		deletedIssues = []string{id}
+	}
+	affectedIssues, affectedWisps, aerr := AffectedByDeletionInTx(ctx, tx, deletedIssues, deletedWisps)
+	if aerr != nil {
+		return fmt.Errorf("affected by delete for %s: %w", id, aerr)
+	}
+
+	issueTable, _, _, _ := WispTableRouting(isWisp)
+	where := "id = ?"
+	args := []interface{}{id}
+	if expectedRevision != nil {
+		where += " AND revision = ?"
+		args = append(args, *expectedRevision)
+	}
+	result, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s", issueTable, where), args...)
+	if err != nil {
+		return fmt.Errorf("delete issue from %s: %w", issueTable, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("get rows affected: %w", err)
+	}
+	if rows == 0 {
+		if expectedRevision != nil {
+			return &storage.PreconditionFailedError{
+				ID:               id,
+				ExpectedRevision: *expectedRevision,
+				CurrentRevision:  cur.Revision,
+				CurrentIssue:     cur,
+			}
+		}
+		return fmt.Errorf("issue not found: %s", id)
+	}
+
+	if isWisp {
+		if err := DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
+			return err
+		}
+	}
+	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+		return fmt.Errorf("recompute is_blocked after delete for %s: %w", id, err)
+	}
+	return nil
+}
+
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool) error {
 	issueTable, _, _, _ := WispTableRouting(isWisp)

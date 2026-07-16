@@ -125,7 +125,7 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 	args := append([]interface{}{}, leaseArgs...)
 	args = append(args, now, id, actor)
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		UPDATE %s SET %s, updated_at = ?
+		UPDATE %s SET %s, updated_at = ? -- lease-heartbeat keepalive: refreshes liveness columns only, no content change
 		WHERE id = ? AND status = 'in_progress' AND assignee = ?
 	`, issueTable, leaseClause), args...)
 	if err != nil {
@@ -210,10 +210,10 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, ac
 			UPDATE issues
 			SET status = 'open', assignee = NULL, started_at = NULL,
 			    lease_expires_at = NULL, heartbeat_at = NULL,
-			    updated_at = ?, row_lock = ?
+			    updated_at = ?, row_lock = ?, revision = ?
 			WHERE id = ? AND status = 'in_progress'
 			  AND lease_expires_at IS NOT NULL AND lease_expires_at < ?
-		`, time.Now().UTC(), freshRowLock(), r.ID, cutoff)
+		`, time.Now().UTC(), freshRowLock(), NewRevision(), r.ID, cutoff)
 		if err != nil {
 			return nil, fmt.Errorf("reclaim %s: %w", r.ID, err)
 		}
