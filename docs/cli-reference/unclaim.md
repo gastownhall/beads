@@ -24,6 +24,8 @@ bd unclaim [id...] [flags]
 **Flags:**
 
 ```
-      --force           Release the claim even if held by a different actor (admin/reaper use)
-  -r, --reason string   Reason for unclaiming
+      --force                Release the claim even if held by a different actor (admin/reaper use)
+      --if-assignee string   Only mutate while the issue is still assigned to this actor; empty asserts unassigned (mismatch: exit 9, unsupported path: exit 13)
+      --if-fence int         Only mutate while claim_fence still equals this snapshot value (mismatch: exit 9, unsupported path: exit 13)
+  -r, --reason string        Reason for unclaiming
 ```

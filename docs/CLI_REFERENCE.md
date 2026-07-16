@@ -32,6 +32,8 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd label list-all](#bd-label-list-all) — List all unique labels in the database
   - [bd label propagate](#bd-label-propagate) — Propagate a label from a parent issue to all its children
   - [bd label remove](#bd-label-remove) — Remove one or more labels from one or more issues
+- [bd lease](#bd-lease) — Manage automatic claim leases
+  - [bd lease disarm](#bd-lease-disarm) — Turn off automatic claim leases and clear the armed ones
 - [bd link](#bd-link) — Link two issues with a dependency
 - [bd list](#bd-list) — List issues
 - [bd merge-slot](#bd-merge-slot) — Manage merge-slot gates for serialized conflict resolution
@@ -385,6 +387,8 @@ bd close [id...] [flags]
       --claim-next           Automatically claim the next highest priority available issue
       --continue             Auto-advance to next step in molecule
   -f, --force                Force close pinned issues or unsatisfied gates
+      --if-assignee string   Only mutate while the issue is still assigned to this actor; empty asserts unassigned (mismatch: exit 9, unsupported path: exit 13)
+      --if-fence int         Only mutate while claim_fence still equals this snapshot value (mismatch: exit 9, unsupported path: exit 13)
       --no-auto              With --continue, show next step but don't claim it
   -r, --reason string        Reason for closing
       --reason-file string   Read close reason from file (use - for stdin)
@@ -844,6 +848,10 @@ the issue closed, heartbeat fails so the worker learns to stop.
 Heartbeat writes a Dolt commit, so heartbeat well below the TTL but not so fast
 it bloats history — cadence should be a small fraction of the TTL, not per-op.
 
+On stores with lease.auto=off (see 'bd lease disarm'), an owned claim
+carries no lease: heartbeat fails with "issue has no lease" and never arms
+one as a side effect.
+
 Examples:
   bd heartbeat bd-123
   bd hb bd-123
@@ -900,6 +908,42 @@ Remove labels from issues. Issue IDs come first; the final argument is the label
 
 ```
 bd label remove [issue-id...] [label[,label...]]
+```
+
+### bd lease
+
+Manage the store's automatic claim-lease behavior.
+
+By default every claim stamps a lease (`lease.auto` on): a worker that
+stops heartbeating loses its claim to 'bd reclaim'. Deployments whose
+recovery authority lives elsewhere — an orchestrator with its own liveness
+evidence — disarm automatic stamping so an un-renewed fleet is never one
+stray reclaim away from mass-reverting live work. Explicit leases requested
+AFTER disarming remain available and reclaimable; leases existing at disarm
+time are cleared by the sweep regardless of how they were requested.
+
+```
+bd lease [command]
+```
+
+#### bd lease disarm
+
+Set lease.auto=off and NULL the lease columns on existing in_progress
+rows — the flip and the first sweep share one transaction, and bounded
+follow-up sweeps catch claims that were in flight during the flip. Nothing
+is released:
+status and assignee are untouched, and the ownership fence does not move.
+
+After disarming, claims carry no lease unless one is explicitly requested,
+heartbeats on unleased claims are rejected (exit non-zero, they never arm a
+lease as a side effect), and 'bd reclaim' only ever touches explicitly
+requested leases.
+
+Re-arm with: bd config set lease.auto on
+(existing claims stay unleased until re-claimed or explicitly leased).
+
+```
+bd lease disarm
 ```
 
 ### bd link
@@ -1271,6 +1315,18 @@ least this long ago are reclaimed, so a worker briefly paused (GC, clock skew)
 is not robbed of live work. Run it from a supervisor on a timer with a window
 of roughly 2× the claim TTL.
 
+On stores with lease.auto=off (see 'bd lease disarm'), claims carry no
+lease unless explicitly requested, so reclaim only ever touches explicitly
+requested leases there.
+
+UPGRADE NOTE: earlier binaries stamped a lease on every claim (both tiers)
+but only ever reclaimed the issues table. Reclaim now also sweeps the wisps
+table, so on an auto-on store upgrading across this change the first run can
+reclaim in_progress wisp rows whose leases went stale under the old binary.
+Run 'bd lease disarm' first (it clears armed leases on both tiers) if that
+recovery is not wanted, or let live workers heartbeat within the grace
+window to refresh their leases.
+
 Examples:
   bd reclaim                       # default grace window (2× the lease TTL)
   bd reclaim --older-than 10m      # reclaim leases expired &gt;10m ago
@@ -1547,8 +1603,10 @@ bd unclaim [id...] [flags]
 **Flags:**
 
 ```
-      --force           Release the claim even if held by a different actor (admin/reaper use)
-  -r, --reason string   Reason for unclaiming
+      --force                Release the claim even if held by a different actor (admin/reaper use)
+      --if-assignee string   Only mutate while the issue is still assigned to this actor; empty asserts unassigned (mismatch: exit 9, unsupported path: exit 13)
+      --if-fence int         Only mutate while claim_fence still equals this snapshot value (mismatch: exit 9, unsupported path: exit 13)
+  -r, --reason string        Reason for unclaiming
 ```
 
 ### bd update
@@ -1582,6 +1640,9 @@ bd update [id...] [flags]
   -e, --estimate int                 Time estimate in minutes (e.g., 60 for 1 hour)
       --external-ref string          External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)
       --history                      Clear no-history flag (re-enable Dolt commit history)
+      --if-assignee string           Only mutate while the issue is still assigned to this actor; empty asserts unassigned (mismatch: exit 9, unsupported path: exit 13)
+      --if-fence int                 Only mutate while claim_fence still equals this snapshot value (mismatch: exit 9, unsupported path: exit 13)
+      --lease-ttl duration           With --claim: request a lease with this TTL (stamps even when lease.auto=off; renew with bd heartbeat, recover with bd reclaim)
       --metadata string              Set custom metadata (JSON string or @file.json to read from file)
       --no-history                   Mark issue as no-history (skip Dolt commits, not GC-eligible)
       --notes string                 Additional notes
@@ -7160,6 +7221,7 @@ bd ready [flags]
       --include-ephemeral            Include ephemeral issues (wisps) in results
   -l, --label strings                Filter by labels (AND: must have ALL). Can combine with --label-any
       --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
+      --lease-ttl duration           With --claim: request a lease with this TTL (stamps even when lease.auto=off)
   -n, --limit int                    Maximum issues to show (use 0 for unlimited) (default 100)
       --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
       --mol string                   Filter to steps within a specific molecule

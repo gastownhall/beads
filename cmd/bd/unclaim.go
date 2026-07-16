@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -33,6 +34,10 @@ Examples:
 		reason, _ := cmd.Flags().GetString("reason")
 		force, _ := cmd.Flags().GetBool("force")
 		ctx := rootCtx
+		guard, hasGuard := ownershipGuardFromFlags(cmd)
+		if gerr := validateGuardInvocation(cmd, len(args)); gerr != nil {
+			return gerr
+		}
 
 		unclaimedIssues := []*types.Issue{}
 		hasError := false
@@ -51,7 +56,17 @@ Examples:
 			fullID := result.ResolvedID
 			issueStore := result.Store
 
-			if err := issueStore.UnclaimIssue(ctx, fullID, actor, force); err != nil {
+			// The guard scopes to exactly this mutation of this issue —
+			// downstream writes (reason comment) stay unguarded.
+			mutCtx := ctx
+			if hasGuard {
+				mutCtx = issueops.WithGuard(ctx, guard)
+			}
+			if err := issueStore.UnclaimIssue(mutCtx, fullID, actor, force); err != nil {
+				if handled, cerr := maybeReportOwnershipConflict(cmd, err); handled {
+					result.Close()
+					return cerr
+				}
 				fmt.Fprintf(os.Stderr, "Error unclaiming %s: %v\n", fullID, err)
 				hasError = true
 				result.Close()
@@ -97,6 +112,7 @@ Examples:
 func init() {
 	unclaimCmd.Flags().StringP("reason", "r", "", "Reason for unclaiming")
 	unclaimCmd.Flags().Bool("force", false, "Release the claim even if held by a different actor (admin/reaper use)")
+	registerOwnershipGuardFlags(unclaimCmd)
 	unclaimCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(unclaimCmd)
 }

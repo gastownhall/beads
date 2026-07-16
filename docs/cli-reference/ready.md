@@ -43,6 +43,7 @@ bd ready [flags]
       --include-ephemeral            Include ephemeral issues (wisps) in results
   -l, --label strings                Filter by labels (AND: must have ALL). Can combine with --label-any
       --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
+      --lease-ttl duration           With --claim: request a lease with this TTL (stamps even when lease.auto=off)
   -n, --limit int                    Maximum issues to show (use 0 for unlimited) (default 100)
       --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
       --mol string                   Filter to steps within a specific molecule

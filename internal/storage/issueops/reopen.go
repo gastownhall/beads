@@ -32,10 +32,15 @@ func ReopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string) (*R
 
 	now := time.Now().UTC()
 
+	// Reopen resets the row's ownership context (a later claim starts a fresh
+	// ownership generation), so it bumps claim_fence — paired with a row_lock
+	// rewrite per the fence invariant (see fence.go). The generic
+	// status-update reopen path in updateIssueInTx applies the same bump.
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		UPDATE %s SET status = ?, closed_at = NULL, close_reason = '', closed_by_session = '', defer_until = NULL, updated_at = ?
+		UPDATE %s SET status = ?, closed_at = NULL, close_reason = '', closed_by_session = '', defer_until = NULL, updated_at = ?,
+			claim_fence = claim_fence + 1, row_lock = ?
 		WHERE id = ? AND status = ?
-	`, issueTable), types.StatusOpen, now, id, types.StatusClosed)
+	`, issueTable), types.StatusOpen, now, freshRowLock(), id, types.StatusClosed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to reopen issue: %w", err)
 	}

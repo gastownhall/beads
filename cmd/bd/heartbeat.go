@@ -27,6 +27,10 @@ the issue closed, heartbeat fails so the worker learns to stop.
 Heartbeat writes a Dolt commit, so heartbeat well below the TTL but not so fast
 it bloats history — cadence should be a small fraction of the TTL, not per-op.
 
+On stores with lease.auto=off (see 'bd lease disarm'), an owned claim
+carries no lease: heartbeat fails with "issue has no lease" and never arms
+one as a side effect.
+
 Examples:
   bd heartbeat bd-123
   bd hb bd-123`,

@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
@@ -46,6 +47,9 @@ the flags appear in the command line.`,
 		}()
 
 		if usesProxiedServer() {
+			if _, hasGuard := ownershipGuardFromFlags(cmd); hasGuard {
+				return reportGuardUnsupported(cmd, "proxied-server mode does not enforce ownership guards yet")
+			}
 			return runCloseProxiedServer(cmd, rootCtx, args)
 		}
 
@@ -80,6 +84,10 @@ the flags appear in the command line.`,
 		}
 
 		ctx := rootCtx
+		guard, hasGuard := ownershipGuardFromFlags(cmd)
+		if gerr := validateGuardInvocation(cmd, len(args)); gerr != nil {
+			return gerr
+		}
 
 		if continueFlag && len(args) > 1 {
 			return HandleErrorRespectJSON("--continue only works when closing a single issue")
@@ -156,7 +164,18 @@ the flags appear in the command line.`,
 				}
 			}
 
-			if err := activeStore.CloseIssue(ctx, id, reason, actor, session); err != nil {
+			// The guard scopes to exactly this close of this issue — cascade
+			// writes (molecule auto-close, auto-advance, claim-next) run on
+			// the unguarded ctx, or the target's guard would be wrongly
+			// evaluated against unrelated rows.
+			mutCtx := ctx
+			if hasGuard {
+				mutCtx = issueops.WithGuard(ctx, guard)
+			}
+			if err := activeStore.CloseIssue(mutCtx, id, reason, actor, session); err != nil {
+				if handled, cerr := maybeReportOwnershipConflict(cmd, err); handled {
+					return cerr
+				}
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				continue
 			}
@@ -331,6 +350,7 @@ func init() {
 	closeCmd.Flags().Bool("claim-next", false, "Automatically claim the next highest priority available issue")
 	closeCmd.Flags().String("session", "", "Claude Code session ID (or set CLAUDE_SESSION_ID env var)")
 	closeCmd.ValidArgsFunction = issueIDCompletion
+	registerOwnershipGuardFlags(closeCmd)
 	rootCmd.AddCommand(closeCmd)
 }
 

@@ -21,6 +21,18 @@ least this long ago are reclaimed, so a worker briefly paused (GC, clock skew)
 is not robbed of live work. Run it from a supervisor on a timer with a window
 of roughly 2× the claim TTL.
 
+On stores with lease.auto=off (see 'bd lease disarm'), claims carry no
+lease unless explicitly requested, so reclaim only ever touches explicitly
+requested leases there.
+
+UPGRADE NOTE: earlier binaries stamped a lease on every claim (both tiers)
+but only ever reclaimed the issues table. Reclaim now also sweeps the wisps
+table, so on an auto-on store upgrading across this change the first run can
+reclaim in_progress wisp rows whose leases went stale under the old binary.
+Run 'bd lease disarm' first (it clears armed leases on both tiers) if that
+recovery is not wanted, or let live workers heartbeat within the grace
+window to refresh their leases.
+
 Examples:
   bd reclaim                       # default grace window (2× the lease TTL)
   bd reclaim --older-than 10m      # reclaim leases expired &gt;10m ago

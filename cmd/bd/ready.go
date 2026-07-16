@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -55,6 +56,13 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}
 
 		claimReady, _ := cmd.Flags().GetBool("claim")
+
+		// A lease request without --claim is refused loudly, never silently
+		// dropped (matching bd update): the caller would otherwise believe it
+		// stamped a lease and leave the claim invisible to bd reclaim.
+		if cmd.Flags().Changed("lease-ttl") && !claimReady {
+			return HandleErrorRespectJSON("--lease-ttl requires --claim (it requests a lease on the claim)")
+		}
 
 		gated, _ := cmd.Flags().GetBool("gated")
 		if gated {
@@ -203,7 +211,17 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}
 
 		if claimReady {
-			claimed, err := activeStore.ClaimReadyIssue(ctx, filter, actor)
+			claimCtx := issueops.WithHolderToken(ctx, holderTokenFromEnv())
+			if cmd.Flags().Changed("lease-ttl") {
+				ttl, _ := cmd.Flags().GetDuration("lease-ttl")
+				if ttl <= 0 {
+					return HandleErrorRespectJSON("--lease-ttl must be positive")
+				}
+				// Explicitly requested lease: stamps even on stores with
+				// lease.auto=off (the requested-lease opt-in).
+				claimCtx = issueops.WithLeaseTTL(claimCtx, ttl)
+			}
+			claimed, err := activeStore.ClaimReadyIssue(claimCtx, filter, actor)
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
@@ -766,6 +784,7 @@ func init() {
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 	readyCmd.Flags().Bool("explain", false, "Show dependency-aware reasoning for why issues are ready or blocked")
 	readyCmd.Flags().Bool("claim", false, "Atomically claim the first ready issue matching the filters")
+	readyCmd.Flags().Duration("lease-ttl", 0, "With --claim: request a lease with this TTL (stamps even when lease.auto=off)")
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")

@@ -3,6 +3,7 @@
 package embeddeddolt_test
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -95,5 +96,49 @@ func TestHeartbeatRejectsWispEmbedded(t *testing.T) {
 	}
 	if err := te.store.HeartbeatIssue(ctx, "lease-wisp-1", "alice"); !errors.Is(err, storage.ErrNotClaimable) {
 		t.Fatalf("wisp heartbeat err = %v, want ErrNotClaimable", err)
+	}
+}
+
+// TestEmbeddedDisarmAutoLeases mirrors the dolt-server disarm test on the
+// embedded backend, whose transaction plumbing (withConn + CLI-level commit)
+// is distinct from the server store's withRetryTx + in-tx DOLT_COMMIT.
+func TestEmbeddedDisarmAutoLeases(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "disarm")
+	ctx := context.Background()
+
+	issue := &types.Issue{ID: "ed-disarm", Title: "disarm", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.CreateIssue(ctx, issue, "seeder"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := te.store.ClaimIssue(ctx, "ed-disarm", "alice"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	n, err := te.store.DisarmAutoLeases(ctx)
+	if err != nil {
+		t.Fatalf("disarm: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("disarmed %d, want 1", n)
+	}
+
+	// Post-disarm claim stamps nothing; heartbeat on it is rejected typed.
+	issue2 := &types.Issue{ID: "ed-disarm2", Title: "disarm2", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.CreateIssue(ctx, issue2, "seeder"); err != nil {
+		t.Fatalf("seed2: %v", err)
+	}
+	if err := te.store.ClaimIssue(ctx, "ed-disarm2", "bob"); err != nil {
+		t.Fatalf("claim2: %v", err)
+	}
+	got, err := te.store.GetIssue(ctx, "ed-disarm2")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.LeaseExpiresAt != nil {
+		t.Error("post-disarm claim stamped a lease")
+	}
+	if err := te.store.HeartbeatIssue(ctx, "ed-disarm2", "bob"); !errors.Is(err, storage.ErrUnleased) {
+		t.Errorf("heartbeat on unleased claim: got %v, want ErrUnleased", err)
 	}
 }

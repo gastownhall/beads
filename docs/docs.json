@@ -385,6 +385,7 @@
               "cli-reference/jira",
               "cli-reference/kv",
               "cli-reference/label",
+              "cli-reference/lease",
               "cli-reference/linear",
               "cli-reference/link",
               "cli-reference/lint",

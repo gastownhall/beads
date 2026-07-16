@@ -45,7 +45,7 @@ const IssueSelectColumns = `id, content_hash, title, description, design, accept
 	       event_kind, actor, target, payload,
 	       due_at, defer_until,
 	       work_type, source_system, metadata,
-	       lease_expires_at, heartbeat_at`
+	       lease_expires_at, heartbeat_at, claim_fence`
 
 // QueryBatchSize bounds IN-clause sizes when long ID lists are folded into
 // WHERE fragments.

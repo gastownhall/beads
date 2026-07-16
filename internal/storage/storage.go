@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -27,6 +28,45 @@ var ErrNotClaimable = errors.New("issue not claimable")
 // by a different actor. Releasing another actor's claim requires the force
 // escape hatch (bd unclaim --force), reserved for admin/reaper use.
 var ErrNotOwner = errors.New("issue claimed by a different actor")
+
+// ErrUnleased is returned when an actor heartbeats its own in_progress claim
+// that carries no lease (lease.auto off, or claimed before the lease stack).
+// Heartbeat is strictly a renewal: arming a lease on a deliberately unleased
+// claim would silently re-create the unrequested reclaim exposure that
+// disarming exists to remove.
+var ErrUnleased = errors.New("issue has no lease")
+
+// ErrPreconditionFailed is the sentinel wrapped by PreconditionFailedError so
+// callers can errors.Is a guarded-write conflict without naming the struct.
+var ErrPreconditionFailed = errors.New("precondition failed")
+
+// PreconditionFailedError reports a guarded ownership write (unclaim, close,
+// update with --if-assignee/--if-fence) whose precondition no longer matched
+// the row at write time. Expected values are the guard the caller supplied
+// (nil when that axis was unguarded); Current values are re-read inside the
+// same transaction, so the caller can distinguish "ownership moved" from
+// "fence superseded" and log an accurate conflict.
+type PreconditionFailedError struct {
+	ID               string
+	ExpectedAssignee *string
+	ExpectedFence    *int64
+	CurrentAssignee  string
+	CurrentFence     int64
+}
+
+func (e *PreconditionFailedError) Error() string {
+	msg := "ownership precondition failed for " + e.ID
+	if e.ExpectedAssignee != nil {
+		msg += fmt.Sprintf(": expected assignee %q, current %q", *e.ExpectedAssignee, e.CurrentAssignee)
+	}
+	if e.ExpectedFence != nil {
+		msg += fmt.Sprintf(": expected fence %d, current %d", *e.ExpectedFence, e.CurrentFence)
+	}
+	return msg
+}
+
+// Unwrap lets errors.Is(err, ErrPreconditionFailed) match.
+func (e *PreconditionFailedError) Unwrap() error { return ErrPreconditionFailed }
 
 // ErrNotFound is returned when a requested entity does not exist in the database.
 var ErrNotFound = errors.New("not found")

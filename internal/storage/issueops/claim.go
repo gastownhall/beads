@@ -18,6 +18,15 @@ type ClaimResult struct {
 	IsWisp   bool
 }
 
+// claimConflictError carries the frozen open-but-assigned conflict message
+// unchanged while unwrapping to storage.ErrAlreadyClaimed, so typed consumers
+// (exit codes, {code:"already_claimed"} JSON) classify the loss without the
+// sentinel's own text prefixing the message.
+type claimConflictError struct{ msg string }
+
+func (e *claimConflictError) Error() string { return e.msg }
+func (e *claimConflictError) Unwrap() error { return storage.ErrAlreadyClaimed }
+
 // ClaimIssueInTx atomically claims an issue using compare-and-swap semantics.
 // It sets the assignee to actor and status to "in_progress" only if the issue
 // is currently open and unassigned or already assigned to the same actor.
@@ -44,8 +53,18 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 	// now, and a fresh row_lock (see lease.go). The lease is what makes a claim
 	// recoverable — a worker that dies stops heartbeating and bd reclaim later
 	// reverts the issue. row_lock here also forces a concurrent reclaim/heartbeat
-	// to conflict rather than silently cell-merge.
-	leaseClause, leaseArgs := leaseSetClause(now, leaseTTL(ctx))
+	// to conflict rather than silently cell-merge. The claim is an ownership
+	// transition, so it also bumps claim_fence (fenceBumpExpr; row_lock pairing
+	// satisfied by the lease clause in the same statement).
+	leaseClause, leaseArgs, err := ClaimLeaseClause(ctx, tx, now)
+	if err != nil {
+		return nil, fmt.Errorf("resolve claim lease: %w", err)
+	}
+
+	// Record the caller's incarnation token (empty when the caller supplied
+	// none — a tokenless/legacy claim). The token distinguishes runtime
+	// incarnations of a re-used assignee name; enforcement checks it.
+	holderToken := holderTokenFrom(ctx)
 
 	// An issue is claimable from "open" plus any configured custom status whose
 	// category is "active" (e.g. a draft->ready->in_progress lifecycle where
@@ -64,25 +83,25 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 		result sql.Result
 	)
 	if oldIssue.StartedAt == nil {
-		args := append([]interface{}{actor, now, now}, leaseArgs...)
+		args := append([]interface{}{actor, holderToken, now, now}, leaseArgs...)
 		args = append(args, id)
 		args = append(args, statusArgs...)
 		args = append(args, actor)
 		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
+			SET assignee = ?, holder_token = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s, %s
 			WHERE id = ? AND status IN (%s) AND (assignee = '' OR assignee IS NULL OR assignee = ?)
-		`, issueTable, leaseClause, statusPlaceholders), args...)
+		`, issueTable, fenceBumpExpr, leaseClause, statusPlaceholders), args...)
 	} else {
-		args := append([]interface{}{actor, now}, leaseArgs...)
+		args := append([]interface{}{actor, holderToken, now}, leaseArgs...)
 		args = append(args, id)
 		args = append(args, statusArgs...)
 		args = append(args, actor)
 		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, %s
+			SET assignee = ?, holder_token = ?, status = 'in_progress', updated_at = ?, %s, %s
 			WHERE id = ? AND status IN (%s) AND (assignee = '' OR assignee IS NULL OR assignee = ?)
-		`, issueTable, leaseClause, statusPlaceholders), args...)
+		`, issueTable, fenceBumpExpr, leaseClause, statusPlaceholders), args...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to claim issue: %w", err)
@@ -110,11 +129,32 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 		// This supports agent retry workflows where claim may be called multiple
 		// times after transient failures (GH#8).
 		if assignee == actor && currentStatus == types.StatusInProgress {
+			// A re-claim by the same actor is an ownership re-assertion: refresh
+			// the holder token so the CURRENT incarnation owns it. Without this a
+			// fresh incarnation of a re-used session name, re-claiming its own
+			// in_progress work through the idempotent path, would keep a prior
+			// incarnation's token and then classify as a zombie against its own
+			// bead — inverting the advisory signal. Only a token-bearing caller
+			// refreshes (a tokenless re-claim must not wipe a live token). Not an
+			// ownership transition — no fence bump. (A-B3b replaces this with a
+			// fenced incarnation_conflict under require mode.)
+			if holderToken != "" {
+				if _, uerr := tx.ExecContext(ctx, fmt.Sprintf(
+					`UPDATE %s SET holder_token = ? WHERE id = ? AND assignee = ? AND status = 'in_progress'`,
+					issueTable), holderToken, id, actor); uerr != nil {
+					return nil, fmt.Errorf("refresh holder token: %w", uerr)
+				}
+			}
 			return &ClaimResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
 		}
 		if assignee != "" && assignee != actor {
 			if currentStatus == types.StatusOpen {
-				return nil, fmt.Errorf("issue already assigned to %q. Use `bd unclaim %s` to release it before re-claiming", assignee, id)
+				// The message text is a frozen contract (downstream substring
+				// matchers and this repo's own tests pin "already assigned
+				// to"); claimConflictError keeps it byte-identical while
+				// wrapping ErrAlreadyClaimed for typed classification.
+				return nil, &claimConflictError{msg: fmt.Sprintf(
+					"issue already assigned to %q. Use `bd unclaim %s` to release it before re-claiming", assignee, id)}
 			}
 			return nil, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, assignee)
 		}

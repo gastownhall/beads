@@ -41,19 +41,34 @@ func UnclaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string, 
 		return fmt.Errorf("failed to get issue for unclaim: %w", err)
 	}
 
-	// Validate: cannot unclaim closed issues
+	guard, hasGuard := GuardFrom(ctx)
+
+	// Validate: cannot unclaim closed issues. Under a guard this is an
+	// ownership-state mismatch like any other — the guarded caller keyed its
+	// decision on a snapshot that no longer holds — so it maps to the typed
+	// conflict (exit 9) instead of a generic error, keeping orchestrator
+	// retry logic on one contract for every "state moved" outcome.
 	if oldIssue.Status == types.StatusClosed {
+		if hasGuard {
+			return guardConflictFromIssue(oldIssue, guard)
+		}
 		return fmt.Errorf("cannot unclaim closed issue %s", id)
 	}
 
-	// Validate: must have an assignee to unclaim
+	// Validate: must have an assignee to unclaim. Same guarded mapping: an
+	// already-released row is the single most common race outcome for the
+	// orchestrator release path guards exist to serve.
 	if oldIssue.Assignee == "" {
+		if hasGuard {
+			return guardConflictFromIssue(oldIssue, guard)
+		}
 		return fmt.Errorf("issue %s is not assigned", id)
 	}
 
-	// Validate ownership unless the caller forced the release. Without force, a
-	// process may only release its own claim.
-	if !force && oldIssue.Assignee != actor {
+	// Authorization (the class-T rule, see guard.go): a satisfied explicit
+	// guard authorizes a cross-actor release — the guard is the credential —
+	// so the owner pre-check applies only to unguarded, unforced calls.
+	if !force && !hasGuard && oldIssue.Assignee != actor {
 		return fmt.Errorf("%w: %s is held by %s (use --force to override)",
 			storage.ErrNotOwner, id, oldIssue.Assignee)
 	}
@@ -61,24 +76,27 @@ func UnclaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string, 
 	now := time.Now().UTC()
 
 	// Atomic UPDATE: clear assignee, reset status to open, clear the lease
-	// columns, and rewrite row_lock. The predicate re-checks ownership (unless
-	// forced) so a claim that changed hands between the read above and this
-	// write is not clobbered. row_lock forces a racing heartbeat/reclaim on the
-	// same row to conflict rather than silently merge (see lease.go invariant).
+	// columns, and rewrite row_lock. The predicate re-checks ownership (owner
+	// match, or the supplied guard — force alone still requires a current
+	// assignee) so a claim that changed hands between the read above and this
+	// write is not clobbered. force never skips a supplied guard. row_lock
+	// forces a racing heartbeat/reclaim on the same row to conflict rather
+	// than silently merge (see lease.go invariant).
 	ownerPredicate := "AND assignee = ?"
 	args := []interface{}{now, freshRowLock(), id, actor}
-	if force {
-		// Force still requires a current assignee, but from anyone.
+	if force || hasGuard {
 		ownerPredicate = "AND assignee != ''"
 		args = []interface{}{now, freshRowLock(), id}
 	}
+	guardClause, guardArgs := guard.whereClause()
+	args = append(args, guardArgs...)
 	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE %s
-		SET assignee = '', status = 'open', updated_at = ?,
+		SET assignee = '', holder_token = '', status = 'open', updated_at = ?,
 		    lease_expires_at = NULL, heartbeat_at = NULL, started_at = NULL,
-		    row_lock = ?
-		WHERE id = ? AND status IN ('open', 'in_progress') %s
-	`, issueTable, ownerPredicate), args...)
+		    claim_fence = claim_fence + 1, row_lock = ?
+		WHERE id = ? AND status IN ('open', 'in_progress') %s%s
+	`, issueTable, ownerPredicate, guardClause), args...)
 	if err != nil {
 		return fmt.Errorf("failed to unclaim issue: %w", err)
 	}
@@ -89,6 +107,9 @@ func UnclaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string, 
 	}
 
 	if rowsAffected == 0 {
+		if hasGuard {
+			return GuardPreconditionError(ctx, tx, issueTable, id, guard)
+		}
 		// The pre-checks passed, so a 0-row result means the row changed
 		// underneath us: re-read to disambiguate an ownership change from a
 		// status change.
@@ -103,11 +124,30 @@ func UnclaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string, 
 		return fmt.Errorf("failed to unclaim issue %s: no matching row", id)
 	}
 
-	// Record the unclaim event
+	// Record the unclaim event. The audit fields make bypassed checks
+	// enumerable: a cross-actor release is visible with the channel that
+	// authorized it (guard vs force), feeding the advisory taxonomy the
+	// enforcement rollout gates on.
 	oldData, _ := json.Marshal(oldIssue)
 	newUpdates := map[string]interface{}{
 		"assignee": "",
 		"status":   "open",
+	}
+	if actor != oldIssue.Assignee {
+		newUpdates["cross_actor"] = true
+	}
+	if force {
+		newUpdates["forced"] = true
+	}
+	if hasGuard {
+		guarded := map[string]interface{}{}
+		if guard.Assignee != nil {
+			guarded["if_assignee"] = *guard.Assignee
+		}
+		if guard.Fence != nil {
+			guarded["if_fence"] = *guard.Fence
+		}
+		newUpdates["guarded"] = guarded
 	}
 	newData, _ := json.Marshal(newUpdates)
 

@@ -277,6 +277,19 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// Clears stale leases only; arming is reserved for claim/heartbeat.
 	setClauses, args = ManageLeaseOnUpdate(oldIssue, updates, setClauses, args)
 
+	// Ownership transitions through the generic update path bump the fence:
+	// an assignee change, or a reopen (closed→open) — the primary reopen path
+	// on the dolt/embedded stores, whose ReopenIssue delegates here. The
+	// bump⇒row_lock pairing invariant holds because row_lock is rewritten
+	// unconditionally just below.
+	if IsOwnershipTransition(oldIssue.Status, oldIssue.Assignee, updates) {
+		// A transition also clears holder_token: on an assignee change the new
+		// owner has no valid prior token, and a leftover would lock it out
+		// under enforcement (a reassignment is not a token-bearing claim). The
+		// next claim/adoption re-stamps a token.
+		setClauses = append(setClauses, fenceBumpExpr, "holder_token = ''")
+	}
+
 	// Rewrite row_lock on every update so a concurrent lease mutation (heartbeat/
 	// reclaim) collides on this shared cell and is forced to conflict-and-retry
 	// rather than silently cell-merging two writes to different columns of the
@@ -287,10 +300,27 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 
 	args = append(args, id)
 
+	// An ownership guard folds into the WHERE (see guard.go); row_lock is
+	// rewritten unconditionally above, so a guard-matched update always
+	// affects the row and a 0-row result is a genuine precondition failure.
+	guard, hasGuard := GuardFrom(ctx)
+	guardClause, guardArgs := guard.whereClause()
+	args = append(args, guardArgs...)
+
 	//nolint:gosec // G201: issueTable comes from WispTableRouting (hardcoded constants)
-	query := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?", issueTable, strings.Join(setClauses, ", "))
-	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+	query := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?%s", issueTable, strings.Join(setClauses, ", "), guardClause)
+	result, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
 		return nil, fmt.Errorf("failed to update issue: %w", err)
+	}
+	if hasGuard {
+		rows, rerr := result.RowsAffected()
+		if rerr != nil {
+			return nil, fmt.Errorf("failed to get rows affected: %w", rerr)
+		}
+		if rows == 0 {
+			return nil, GuardPreconditionError(ctx, tx, issueTable, id, guard)
+		}
 	}
 
 	if recordEvent {
@@ -300,6 +330,16 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 
 		if err := RecordFullEventInTable(ctx, tx, eventTable, id, eventType, actor, string(oldData), string(newData)); err != nil {
 			return nil, fmt.Errorf("failed to record event: %w", err)
+		}
+	}
+
+	// Advisory ownership telemetry: an in-place mutation (not an ownership
+	// transition — the fence covers those) of a row someone else holds is
+	// recorded for the enforcement rollout. Scope is judged from the
+	// pre-mutation ownership.
+	if !IsOwnershipTransition(oldIssue.Status, oldIssue.Assignee, updates) {
+		if err := RecordOwnershipAdvisoryIfMismatch(ctx, tx, issueTable, eventTable, id, actor, oldIssue.Assignee, oldIssue.Status); err != nil {
+			return nil, err
 		}
 	}
 

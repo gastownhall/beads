@@ -3,8 +3,10 @@ package sqlkit
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -66,6 +68,80 @@ func (s *Store) UnclaimIssue(ctx context.Context, id string, actor string, force
 	return s.withMutationTx(ctx, func(tx *sql.Tx) error {
 		return issueops.UnclaimIssueInTx(ctx, tx, id, actor, force)
 	})
+}
+
+// CountActiveClaimsByOwner counts in_progress claims held by owner across both
+// tiers. Pure read: no write transaction.
+func (s *Store) CountActiveClaimsByOwner(ctx context.Context, owner string) (int, error) {
+	var n int
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		n, err = issueops.CountActiveClaimsByOwnerInTx(ctx, tx, owner)
+		return err
+	})
+	return n, err
+}
+
+// DisarmAutoLeases flips lease.auto off and clears every armed lease across both
+// tiers, re-sweeping until it converges: a claim that read lease.auto before the
+// flip committed can still stamp a lease the first sweep never saw (disjoint
+// rows, so no serialization conflict forces them together). Clearing leases
+// cannot change blocked-ness, so each sweep runs on a plain write tx. Returns
+// the total number of leases cleared.
+func (s *Store) DisarmAutoLeases(ctx context.Context) (int64, error) {
+	disarmTables := []string{"issues", "wisps"}
+	sweep := func(flip bool) (int64, error) {
+		var swept int64
+		err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+			swept = 0
+			if flip {
+				if err := issueops.DisarmLeaseConfigInTx(ctx, tx); err != nil {
+					return err
+				}
+			}
+			for _, table := range disarmTables {
+				n, err := issueops.ClearArmedLeasesInTx(ctx, tx, table)
+				if err != nil {
+					return err
+				}
+				swept += n
+			}
+			return nil
+		})
+		return swept, err
+	}
+
+	total, err := sweep(true)
+	if err != nil {
+		return 0, err
+	}
+	for i := 0; i < 3; i++ {
+		n, err := sweep(false)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n == 0 {
+			break
+		}
+	}
+	return total, nil
+}
+
+// RenewLeases renews the given (id, fence) leases in one transaction. A renewal
+// only touches lease columns, so it cannot change blocked-ness and runs on a
+// plain write tx. See issueops.RenewLeasesInTx for the per-ref outcome semantics.
+func (s *Store) RenewLeases(ctx context.Context, refs []storage.LeaseRef, ttl time.Duration) ([]storage.LeaseRenewalResult, error) {
+	var out []storage.LeaseRenewalResult
+	err := s.withWriteTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		out, err = issueops.RenewLeasesInTx(ctx, tx, refs, ttl)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ClaimReadyIssue atomically claims the first ready issue matching filter, or

@@ -54,6 +54,12 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// apply the prepared ALTER TABLE statements the runtime migration uses
 		// for idempotent re-runs on upgraded databases.
 		return cliMigration0054AddLeaseColumns
+	case "0055_add_claim_fence.up.sql":
+		// Same direct-DDL treatment as 0054: fresh bundles add the ownership
+		// fence column without the prepared idempotency guards.
+		return cliMigration0055AddClaimFence
+	case "0056_add_holder_token.up.sql":
+		return cliMigration0056AddHolderToken
 	default:
 		return sqlText
 	}
@@ -80,6 +86,13 @@ CREATE INDEX idx_issues_lease ON issues (status, lease_expires_at);
 ALTER TABLE wisps ADD COLUMN lease_expires_at DATETIME;
 ALTER TABLE wisps ADD COLUMN heartbeat_at DATETIME;
 ALTER TABLE wisps ADD COLUMN row_lock BIGINT NOT NULL DEFAULT 0;`
+
+const cliMigration0055AddClaimFence = `ALTER TABLE issues ADD COLUMN claim_fence BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE wisps ADD COLUMN claim_fence BIGINT NOT NULL DEFAULT 0;`
+
+//nolint:gosec // G101 false positive: DDL adding a column named holder_token, not a credential literal.
+const cliMigration0056AddHolderToken = `ALTER TABLE issues ADD COLUMN holder_token VARCHAR(64) NOT NULL DEFAULT '';
+ALTER TABLE wisps ADD COLUMN holder_token VARCHAR(64) NOT NULL DEFAULT '';`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');

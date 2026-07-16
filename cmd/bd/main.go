@@ -540,6 +540,14 @@ func resolveCommandBeadsDir(dbPath string) string {
 	return filepath.Dir(dbPath)
 }
 
+// holderTokenFromEnv returns the caller's ambient incarnation token from
+// BEADS_HOLDER_TOKEN, recorded on a claim to distinguish runtime incarnations
+// of a re-used assignee name. Empty when unset (a tokenless/legacy claim).
+// An orchestrator (e.g. Gas City) sets it to its session's instance token.
+func holderTokenFromEnv() string {
+	return os.Getenv("BEADS_HOLDER_TOKEN")
+}
+
 // getActorWithGit returns the actor for audit trails with git config fallback.
 // Priority: --actor flag > BEADS_ACTOR env > BD_ACTOR env (deprecated) > git config user.name > $USER > "unknown"
 // This provides a sensible default for developers: their git identity is used unless

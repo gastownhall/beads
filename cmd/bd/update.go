@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -41,6 +43,9 @@ create, update, show, or close operation).`,
 		}()
 
 		if usesProxiedServer() {
+			if _, hasGuard := ownershipGuardFromFlags(cmd); hasGuard {
+				return reportGuardUnsupported(cmd, "proxied-server mode does not enforce ownership guards yet")
+			}
 			return runUpdateProxiedServer(cmd, rootCtx, args)
 		}
 
@@ -311,6 +316,45 @@ create, update, show, or close operation).`,
 		}
 
 		ctx := rootCtx
+		guard, hasGuard := ownershipGuardFromFlags(cmd)
+		if gerr := validateGuardInvocation(cmd, len(args)); gerr != nil {
+			return gerr
+		}
+		if hasGuard {
+			// Fail closed on sub-operations that have no guarded form:
+			// silently dropping a supplied guard is the one forbidden
+			// outcome (see issueops/guard.go). Claim never consults guards
+			// (a fresh claim bumps the fence, so a pre-claim guard would
+			// self-conflict); label/parent ops bypass updateIssueInTx.
+			if claimFlag {
+				return reportGuardUnsupported(cmd, "--claim cannot be combined with ownership guards (a claim is its own ownership transition)")
+			}
+			for _, f := range []string{"add-label", "remove-label", "set-labels", "parent"} {
+				if cmd.Flags().Changed(f) {
+					return reportGuardUnsupported(cmd, fmt.Sprintf("--%s bypasses the guarded update path and cannot be combined with ownership guards", f))
+				}
+			}
+		}
+
+		// Resolve the requested-lease TTL once, before the per-ID loop. A lease
+		// request without --claim is refused loudly rather than silently
+		// dropped: a caller who believes it stamped a lease but did not would
+		// leave the claim invisible to bd reclaim — the stranded-work exposure
+		// this feature exists to close.
+		claimCtx := ctx
+		if cmd.Flags().Changed("lease-ttl") {
+			if !claimFlag {
+				return HandleErrorRespectJSON("--lease-ttl requires --claim (it requests a lease on the claim)")
+			}
+			ttl, _ := cmd.Flags().GetDuration("lease-ttl")
+			if ttl <= 0 {
+				return HandleErrorRespectJSON("--lease-ttl must be positive")
+			}
+			claimCtx = issueops.WithLeaseTTL(claimCtx, ttl)
+		}
+		if claimFlag {
+			claimCtx = issueops.WithHolderToken(claimCtx, holderTokenFromEnv())
+		}
 
 		updatedIssues := []*types.Issue{}
 		var firstUpdatedID string // Track first successful update for last-touched
@@ -376,8 +420,20 @@ create, update, show, or close operation).`,
 
 			// Handle claim operation atomically using compare-and-swap semantics
 			if claimFlag {
-				if err := issueStore.ClaimIssue(ctx, result.ResolvedID, actor); err != nil {
+				if err := issueStore.ClaimIssue(claimCtx, result.ResolvedID, actor); err != nil {
 					fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
+					// Typed body alongside the frozen text (additive contract):
+					// old consumers substring-match the line above, new ones
+					// parse this JSON. Gated on the actual claim-loss class so
+					// closed/transient failures are never mislabeled. Holder
+					// re-read best-effort.
+					if errors.Is(err, storage.ErrAlreadyClaimed) {
+						holder := ""
+						if cur, gerr := issueStore.GetIssue(ctx, result.ResolvedID); gerr == nil && cur != nil {
+							holder = cur.Assignee
+						}
+						emitAlreadyClaimedJSON(cmd, result.ResolvedID, holder)
+					}
 					claimFailed = true
 					closeIfUnmutated(result)
 					continue
@@ -427,7 +483,16 @@ create, update, show, or close operation).`,
 				regularUpdates["notes"] = combined
 			}
 			if len(regularUpdates) > 0 {
-				if err := issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor); err != nil {
+				// The guard scopes to exactly this update of this issue.
+				mutCtx := ctx
+				if hasGuard {
+					mutCtx = issueops.WithGuard(ctx, guard)
+				}
+				if err := issueStore.UpdateIssue(mutCtx, result.ResolvedID, regularUpdates, actor); err != nil {
+					if handled, cerr := maybeReportOwnershipConflict(cmd, err); handled {
+						closeIfUnmutated(result)
+						return cerr
+					}
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
 					closeIfUnmutated(result)
 					continue
@@ -692,5 +757,7 @@ func init() {
 	updateCmd.Flags().StringArray("set-metadata", nil, "Set metadata key=value (repeatable, e.g., --set-metadata team=platform)")
 	updateCmd.Flags().StringArray("unset-metadata", nil, "Remove metadata key (repeatable, e.g., --unset-metadata team)")
 	updateCmd.ValidArgsFunction = issueIDCompletion
+	updateCmd.Flags().Duration("lease-ttl", 0, "With --claim: request a lease with this TTL (stamps even when lease.auto=off; renew with bd heartbeat, recover with bd reclaim)")
+	registerOwnershipGuardFlags(updateCmd)
 	rootCmd.AddCommand(updateCmd)
 }

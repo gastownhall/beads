@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -117,6 +118,12 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("CloseAndReopen", func(t *testing.T) { testCloseAndReopen(t, factory) })
 	t.Run("Delete", func(t *testing.T) { testDelete(t, factory) })
 	t.Run("DeleteNotFound", func(t *testing.T) { testDeleteNotFound(t, factory) })
+
+	// Ownership: claim, fence, guarded release, tier-complete lease renewal
+	t.Run("ClaimBumpsFence", func(t *testing.T) { testClaimBumpsFence(t, factory) })
+	t.Run("GuardedReleaseConflict", func(t *testing.T) { testGuardedReleaseConflict(t, factory) })
+	t.Run("RenewLeaseFenceKeyed", func(t *testing.T) { testRenewLeaseFenceKeyed(t, factory) })
+	t.Run("CountActiveClaimsByOwner", func(t *testing.T) { testCountActiveClaimsByOwnerConf(t, factory) })
 
 	// Search and filter
 	t.Run("SearchNoFilter", func(t *testing.T) { testSearchNoFilter(t, factory) })
@@ -993,3 +1000,95 @@ func testReadyCountsPageChunking(t *testing.T, f Factory) {
 	// limit=100 stays within one chunk; limit=205 and 250 span two chunks.
 	assertReadyCountsEquivalence(t, s, types.WorkFilter{SortPolicy: types.SortPolicyOldest}, []int{100, n, 250})
 }
+
+// ===== Ownership: fence, guarded release, tier-complete lease renewal =====
+
+func testClaimBumpsFence(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "own-1", Title: "T", Status: types.StatusOpen}), "a"))
+	must(t, s.ClaimIssue(c, "own-1", "alice"))
+	got, _ := s.GetIssue(c, "own-1")
+	if got.ClaimFence == 0 {
+		t.Error("claim did not bump claim_fence off zero")
+	}
+	if got.Assignee != "alice" || got.Status != types.StatusInProgress {
+		t.Errorf("after claim: assignee=%q status=%q", got.Assignee, got.Status)
+	}
+}
+
+func testGuardedReleaseConflict(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "own-2", Title: "T", Status: types.StatusOpen}), "a"))
+	must(t, s.ClaimIssue(c, "own-2", "alice"))
+	snap, _ := s.GetIssue(c, "own-2")
+
+	// A guard quoting a superseded fence must conflict and leave the row intact.
+	stale := snap.ClaimFence - 1
+	gctx := issueops.WithGuard(c, issueops.Guard{Assignee: strptr("alice"), Fence: &stale})
+	err := s.UnclaimIssue(gctx, "own-2", "controller", false)
+	var pf *storage.PreconditionFailedError
+	if !errors.As(err, &pf) {
+		t.Fatalf("stale-fence unclaim: want PreconditionFailedError, got %v", err)
+	}
+	after, _ := s.GetIssue(c, "own-2")
+	if after.Assignee != "alice" {
+		t.Errorf("guarded conflict disturbed the row: assignee=%q", after.Assignee)
+	}
+
+	// A matching guard authorizes a cross-actor release.
+	gctx = issueops.WithGuard(c, issueops.Guard{Assignee: strptr("alice"), Fence: &snap.ClaimFence})
+	must(t, s.UnclaimIssue(gctx, "own-2", "controller", false))
+	rel, _ := s.GetIssue(c, "own-2")
+	if rel.Status != types.StatusOpen || rel.Assignee != "" {
+		t.Errorf("guarded release failed: status=%q assignee=%q", rel.Status, rel.Assignee)
+	}
+}
+
+func testRenewLeaseFenceKeyed(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "own-3", Title: "T", Status: types.StatusOpen}), "a"))
+	must(t, s.ClaimIssue(issueops.WithLeaseTTL(c, time.Minute), "own-3", "alice"))
+	snap, _ := s.GetIssue(c, "own-3")
+
+	res, err := s.RenewLeases(c, []storage.LeaseRef{
+		{ID: "own-3", Fence: snap.ClaimFence},
+		{ID: "own-3-missing", Fence: 0},
+	}, time.Minute)
+	must(t, err)
+	outcome := map[string]storage.LeaseRenewalOutcome{}
+	for _, r := range res {
+		outcome[r.ID] = r.Outcome
+	}
+	if outcome["own-3"] != storage.LeaseRenewed {
+		t.Errorf("own-3 renewal = %v, want renewed", outcome["own-3"])
+	}
+	if outcome["own-3-missing"] != storage.LeaseRenewalNotFound {
+		t.Errorf("missing renewal = %v, want not_found", outcome["own-3-missing"])
+	}
+
+	// A superseded fence is reported lost, not renewed.
+	res, err = s.RenewLeases(c, []storage.LeaseRef{{ID: "own-3", Fence: snap.ClaimFence + 99}}, time.Minute)
+	must(t, err)
+	if len(res) != 1 || res[0].Outcome != storage.LeaseRenewalLost {
+		t.Errorf("stale-fence renewal = %+v, want lost", res)
+	}
+}
+
+func testCountActiveClaimsByOwnerConf(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "own-4a", Title: "T", Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "own-4b", Title: "T", Status: types.StatusOpen}), "a"))
+	must(t, s.ClaimIssue(c, "own-4a", "w1"))
+	must(t, s.ClaimIssue(c, "own-4b", "w1"))
+	n, err := s.CountActiveClaimsByOwner(c, "w1")
+	must(t, err)
+	if n != 2 {
+		t.Errorf("w1 active claims = %d, want 2", n)
+	}
+}
+
+func strptr(s string) *string { return &s }

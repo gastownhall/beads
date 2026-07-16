@@ -36,6 +36,9 @@ bd update [id...] [flags]
   -e, --estimate int                 Time estimate in minutes (e.g., 60 for 1 hour)
       --external-ref string          External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)
       --history                      Clear no-history flag (re-enable Dolt commit history)
+      --if-assignee string           Only mutate while the issue is still assigned to this actor; empty asserts unassigned (mismatch: exit 9, unsupported path: exit 13)
+      --if-fence int                 Only mutate while claim_fence still equals this snapshot value (mismatch: exit 9, unsupported path: exit 13)
+      --lease-ttl duration           With --claim: request a lease with this TTL (stamps even when lease.auto=off; renew with bd heartbeat, recover with bd reclaim)
       --metadata string              Set custom metadata (JSON string or @file.json to read from file)
       --no-history                   Mark issue as no-history (skip Dolt commits, not GC-eligible)
       --notes string                 Additional notes

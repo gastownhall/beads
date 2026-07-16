@@ -31,6 +31,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var createdAtStr, updatedAtStr sql.NullString // scanned as strings, parsed with format fallbacks
 	var startedAt, closedAt, compactedAt, dueAt, deferUntil sql.NullTime
 	var leaseExpiresAt, heartbeatAt sql.NullTime // lease columns (migration 0054); NULL when no active lease
+	var claimFence sql.NullInt64                 // ownership fence (migration 0055); bumped only on ownership transitions
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
 	var createdBy sql.NullString
 	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
@@ -53,7 +54,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&eventKind, &actor, &target, &payload,
 		&dueAt, &deferUntil,
 		&workType, &sourceSystem, &metadata,
-		&leaseExpiresAt, &heartbeatAt,
+		&leaseExpiresAt, &heartbeatAt, &claimFence,
 	}
 	dests = append(dests, extra...)
 	if err := s.Scan(dests...); err != nil {
@@ -179,6 +180,10 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	}
 	if heartbeatAt.Valid {
 		issue.HeartbeatAt = &heartbeatAt.Time
+	}
+	// Ownership fence (migration 0055); 0 on rows that predate the column.
+	if claimFence.Valid {
+		issue.ClaimFence = claimFence.Int64
 	}
 
 	return &issue, nil

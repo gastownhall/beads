@@ -278,16 +278,18 @@ func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter
 // concurrent reclaim/close on the same row is replayed against a fresh snapshot
 // rather than surfaced — the row_lock collision is what forces that retry.
 func (s *DoltStore) HeartbeatIssue(ctx context.Context, id, actor string) error {
-	if s.isActiveWisp(ctx, id) {
-		// Wisps are ephemeral and never leased; nothing to heartbeat.
-		return fmt.Errorf("%w: %s is ephemeral", storage.ErrNotClaimable, id)
-	}
+	// Leases are tier-complete for requested leases: wisp-table rows (durable
+	// no_history work included) renew exactly like permanent issues —
+	// issueops routes to the right table. Unleased rows are rejected with
+	// ErrUnleased inside HeartbeatIssueInTx (renewal only, never arming).
 	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		if err := issueops.HeartbeatIssueInTx(ctx, tx, id, actor); err != nil {
 			return err
 		}
 		// GH#2455: stage only the tables we touched, then commit without -A.
-		for _, table := range []string{"issues"} {
+		// Both tiers are staged: a wisp heartbeat writes the wisps table, and
+		// DOLT_ADD on the untouched sibling is a harmless no-op.
+		for _, table := range []string{"issues", "wisps"} {
 			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 		}
 		commitMsg := fmt.Sprintf("bd: heartbeat %s", id)
@@ -315,7 +317,7 @@ func (s *DoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Dur
 		if len(reclaimed) == 0 {
 			return nil
 		}
-		for _, table := range []string{"issues", "events"} {
+		for _, table := range []string{"issues", "events", "wisps", "wisp_events"} {
 			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
 		}
 		commitMsg := fmt.Sprintf("bd: reclaim %d expired lease(s)", len(reclaimed))
@@ -329,6 +331,110 @@ func (s *DoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Dur
 		return nil, err
 	}
 	return reclaimed, nil
+}
+
+// DisarmAutoLeases sets lease.auto=off and NULLs armed leases on existing
+// in_progress rows in both tiers, without releasing them. The flip and the
+// first sweep share one transaction; bounded follow-up sweeps then catch
+// claims whose transactions read lease.auto before the flip committed and
+// stamped a lease the first sweep's snapshot never saw (disjoint rows, so
+// row_lock forces no conflict). Every transaction begun after the flip reads
+// auto=off, so the re-sweep converges within a pass or two.
+func (s *DoltStore) DisarmAutoLeases(ctx context.Context) (int64, error) {
+	disarmTables := []string{"issues", "wisps"}
+	sweep := func(flip bool) (int64, error) {
+		var swept int64
+		err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			swept = 0
+			if flip {
+				if err := issueops.DisarmLeaseConfigInTx(ctx, tx); err != nil {
+					return err
+				}
+			}
+			for _, table := range disarmTables {
+				n, err := issueops.ClearArmedLeasesInTx(ctx, tx, table)
+				if err != nil {
+					return err
+				}
+				swept += n
+			}
+			if !flip && swept == 0 {
+				return nil // nothing to commit on a clean re-sweep
+			}
+			for _, table := range []string{"issues", "wisps", "config"} {
+				_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+			}
+			commitMsg := fmt.Sprintf("bd: disarm auto-leases (%d in-flight lease(s) cleared)", swept)
+			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+				return fmt.Errorf("dolt commit: %w", err)
+			}
+			return nil
+		})
+		return swept, err
+	}
+
+	total, err := sweep(true)
+	if err != nil {
+		return 0, err
+	}
+	for i := 0; i < 3; i++ {
+		n, err := sweep(false)
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n == 0 {
+			break
+		}
+	}
+	return total, nil
+}
+
+// RenewLeases renews the given (id, fence) leases in one transaction. See
+// issueops.RenewLeasesInTx for the per-ref outcome semantics.
+func (s *DoltStore) RenewLeases(ctx context.Context, refs []storage.LeaseRef, ttl time.Duration) ([]storage.LeaseRenewalResult, error) {
+	var out []storage.LeaseRenewalResult
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		out, err = issueops.RenewLeasesInTx(ctx, tx, refs, ttl)
+		if err != nil {
+			return err
+		}
+		renewedCount := 0
+		for _, r := range out {
+			if r.Outcome == storage.LeaseRenewed {
+				renewedCount++
+			}
+		}
+		if renewedCount == 0 {
+			return nil
+		}
+		for _, table := range []string{"issues", "wisps"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			fmt.Sprintf("bd: renew %d lease(s)", renewedCount), s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CountActiveClaimsByOwner counts in_progress claims held by owner across both
+// tiers. Pure read: no write transaction.
+func (s *DoltStore) CountActiveClaimsByOwner(ctx context.Context, owner string) (int, error) {
+	var n int
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		n, err = issueops.CountActiveClaimsByOwnerInTx(ctx, tx, owner)
+		return err
+	})
+	return n, err
 }
 
 // UnclaimIssue atomically unclaims an issue by clearing the assignee, resetting

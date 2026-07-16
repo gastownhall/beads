@@ -340,7 +340,10 @@ func TestReclaimRevertsExpiredOnly(t *testing.T) {
 	seedClaimedIssue(t, ctx, store, "lease-dead", "dead-worker", time.Second)
 	seedClaimedIssue(t, ctx, store, "lease-live", "live-worker", time.Hour)
 
-	time.Sleep(1500 * time.Millisecond) // let dead's lease expire
+	// lease_expires_at is second-granular DATETIME; sleep well past the 1s TTL
+	// so rounding under load can never leave the lease looking unexpired at
+	// the zero-grace cutoff (same margin as TestReclaimBumpsFence).
+	time.Sleep(3 * time.Second)
 
 	// Grace window larger than how long the lease has been expired: nothing yet.
 	reclaimed, err := store.ReclaimExpiredLeases(ctx, time.Hour, "reaper")
