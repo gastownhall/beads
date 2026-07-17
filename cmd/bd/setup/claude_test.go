@@ -1359,3 +1359,93 @@ func TestInstallClaudeNoRedirectWhenAGENTSMDMissing(t *testing.T) {
 		t.Fatalf("CLAUDE.md should contain beads section when AGENTS.md is missing:\n%s", claudeData)
 	}
 }
+
+// staleClaudeStubWithBlock builds a CLAUDE.md stub that carries BOTH the
+// @AGENTS.md import line (redirect trigger) and a beads block written by an
+// older bd, simulating a project that adopted the AGENTS.md-import pattern
+// after a beads block was already installed directly into CLAUDE.md.
+func staleClaudeStubWithBlock() string {
+	return "# Claude Code\n\n@AGENTS.md\n\n" +
+		agents.RenderSection(agents.ProfileMinimal) +
+		"\nShared instructions live in AGENTS.md.\n"
+}
+
+func TestInstallClaudeRedirectCleansStaleClaudeBlock(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, _, _ := newClaudeTestEnv(t)
+
+	// CLAUDE.md is a stub that imports AGENTS.md but still carries a stale
+	// beads block from an older bd install.
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte(staleClaudeStubWithBlock()), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	// AGENTS.md already exists (without a beads block yet).
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("# Agent Instructions\n\nSome content.\n"), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	claudeContent := string(claudeData)
+	if strings.Contains(claudeContent, "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("CLAUDE.md should have the stale beads block stripped:\n%s", claudeContent)
+	}
+	if !strings.Contains(claudeContent, "@AGENTS.md") {
+		t.Fatalf("CLAUDE.md should still contain the @AGENTS.md import line:\n%s", claudeContent)
+	}
+	if !strings.Contains(claudeContent, "Shared instructions live in AGENTS.md.") {
+		t.Fatalf("CLAUDE.md should keep its other stub content:\n%s", claudeContent)
+	}
+
+	agentsData, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	agentsContent := string(agentsData)
+	if got := strings.Count(agentsContent, "BEGIN BEADS INTEGRATION"); got != 1 {
+		t.Fatalf("AGENTS.md should contain exactly one beads block, got %d:\n%s", got, agentsContent)
+	}
+}
+
+func TestRemoveClaudeRedirectCleansStaleClaudeBlock(t *testing.T) {
+	env, _, _ := newClaudeTestEnv(t)
+
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte(staleClaudeStubWithBlock()), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("# Agent Instructions\n\n"+agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	if err := removeClaude(env, false); err != nil {
+		t.Fatalf("removeClaude: %v", err)
+	}
+
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if strings.Contains(string(claudeData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("CLAUDE.md should not contain a beads block after remove:\n%s", claudeData)
+	}
+
+	agentsData, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if strings.Contains(string(agentsData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("AGENTS.md should not contain a beads block after remove:\n%s", agentsData)
+	}
+}
