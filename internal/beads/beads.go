@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -144,6 +145,33 @@ func FollowRedirect(beadsDir string) string {
 		return beadsDir
 	}
 
+	// Defense-in-depth (gastownhall/beads#4692): a redirect can end up
+	// pointing at a directory with no database at all, e.g. a stray
+	// worktree-depth redirect written by the "graceful server-to-embedded
+	// fallback" path (related to the "bd worktree create" write-site removed
+	// in #3051). Following such a redirect silently lands bd on an empty,
+	// unrelated location and `bd list`/`bd show` report no issues even
+	// though the real data is untouched elsewhere. docs/reference/advanced.md
+	// ("Database Redirects") already documents the contract: "The target
+	// directory must exist and contain a valid database" -- enforce that
+	// here instead of trusting any redirect file blindly.
+	//
+	// This intentionally does NOT look at the source directory's own mode:
+	// a server-mode source rig redirecting to a shared Gas Town root (each
+	// supplying its own dolt_database via ResolveRedirect/fb51196f7) is a
+	// documented, supported topology, not a staleness signal.
+	//
+	// hasBeadsProjectFiles treats bare presence of metadata.json in the
+	// target as sufficient, even if it later fails to parse: a
+	// present-but-corrupt metadata.json is a config problem, not a
+	// missing-database problem, and store_factory.go's
+	// newDoltStoreFromConfig already hard-errors loudly on an unloadable
+	// metadata.json rather than silently falling back to the embedded store.
+	if !hasBeadsProjectFiles(target) {
+		warnInvalidRedirectTargetOnce(beadsDir, target)
+		return beadsDir
+	}
+
 	// Prevent redirect chains - don't follow if target also has a redirect
 	targetRedirect := filepath.Join(target, RedirectFileName)
 	if _, err := os.Stat(targetRedirect); err == nil {
@@ -155,6 +183,22 @@ func FollowRedirect(beadsDir string) string {
 	}
 
 	return target
+}
+
+// invalidRedirectTargetWarned tracks source beadsDir paths that have already
+// received the "ignoring redirect: invalid target" warning in this process,
+// so warnInvalidRedirectTargetOnce doesn't spam stderr. FollowRedirect is
+// called many times per bd invocation (CWD walk, routing, worktree
+// fallbacks), all for the same source directory.
+var invalidRedirectTargetWarned sync.Map
+
+// warnInvalidRedirectTargetOnce emits the invalid-redirect-target warning at
+// most once per source beadsDir per process.
+func warnInvalidRedirectTargetOnce(beadsDir, target string) {
+	if _, alreadyWarned := invalidRedirectTargetWarned.LoadOrStore(beadsDir, struct{}{}); alreadyWarned {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Warning: ignoring redirect from %s to %s because the target has no database or metadata.json; fix or delete the redirect file\n", beadsDir, target)
 }
 
 func canonicalizeBeadsDirPath(beadsDir string) string {

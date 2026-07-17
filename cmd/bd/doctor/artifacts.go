@@ -396,5 +396,48 @@ func validateRedirect(beadsDir string, report *ArtifactReport) {
 			Description: fmt.Sprintf("redirect target is not a directory: %s", target),
 			SafeDelete:  false,
 		})
+		return
 	}
+
+	// gastownhall/beads#4692: FollowRedirect ignores a redirect whose target
+	// has no metadata.json and no recognizable database (a stray
+	// worktree-depth redirect, e.g. a relic of the "bd worktree create"
+	// write-site removed in #3051, can point past the real .beads dir into
+	// an empty location). Flag that here too as an actionable warning, not
+	// SafeDelete cruft -- the fix is to correct or remove the redirect file,
+	// not to delete anything automatically.
+	if !hasDatabaseOrMetadata(resolvedTarget) {
+		report.RedirectIssues = append(report.RedirectIssues, ArtifactFinding{
+			Path:        redirectPath,
+			Type:        "redirect",
+			Description: fmt.Sprintf("redirect target has no database or metadata.json (ignored by bd): %s", target),
+			SafeDelete:  false,
+		})
+	}
+}
+
+// hasDatabaseOrMetadata reports whether dir contains a metadata.json or a
+// recognizable Dolt/SQLite database. Mirrors the target-validity check
+// FollowRedirect (internal/beads) applies before honoring a redirect;
+// duplicated locally (rather than importing internal/beads) to keep this
+// package's existing pattern of small, self-contained filesystem checks
+// (see isRedirectExpectedDir/hasRedirectFile above).
+func hasDatabaseOrMetadata(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "metadata.json")); err == nil {
+		return true
+	}
+	if info, err := os.Stat(filepath.Join(dir, "dolt")); err == nil && info.IsDir() {
+		return true
+	}
+	if info, err := os.Stat(filepath.Join(dir, "embeddeddolt")); err == nil && info.IsDir() {
+		return true
+	}
+	dbMatches, _ := filepath.Glob(filepath.Join(dir, "*.db"))
+	for _, match := range dbMatches {
+		baseName := filepath.Base(match)
+		if !strings.Contains(baseName, ".backup") && baseName != "vc.db" {
+			return true
+		}
+	}
+	return false
 }

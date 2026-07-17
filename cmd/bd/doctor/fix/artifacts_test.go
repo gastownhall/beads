@@ -184,6 +184,46 @@ func TestClassicArtifacts_CleansCruftBeadsDir(t *testing.T) {
 	}
 }
 
+// TestClassicArtifacts_PreservesMetadataJSONAlongsideRedirect is a
+// regression test for gastownhall/beads#4692: a metadata.json co-located
+// with a redirect file (the fb51196f7 / docs "Database Redirects" topology,
+// where a server-mode source rig's own metadata.json supplies its
+// dolt_database while a redirect points at the shared Gas Town root) must
+// never be deleted as cruft while the redirect is preserved.
+func TestClassicArtifacts_PreservesMetadataJSONAlongsideRedirect(t *testing.T) {
+	dir := t.TempDir()
+	polecatsDir := filepath.Join(dir, "polecats", "test")
+	beadsDir := filepath.Join(polecatsDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte("../../mayor/rig/.beads"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"dolt_mode":"server","dolt_database":"lola"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Still remove unrelated cruft in the same pass.
+	if err := os.WriteFile(filepath.Join(beadsDir, "extra.txt"), []byte("cruft"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ClassicArtifacts(dir); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(beadsDir, "redirect")); os.IsNotExist(err) {
+		t.Error("redirect should NOT have been removed")
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); os.IsNotExist(err) {
+		t.Error("metadata.json should NOT have been removed while a redirect is present")
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "extra.txt")); !os.IsNotExist(err) {
+		t.Error("extra.txt should have been removed")
+	}
+}
+
 func TestClassicArtifacts_CleansCruftWithoutRedirectFile(t *testing.T) {
 	// Regression test: when a redirect-expected location has cruft files but
 	// NO redirect file, the fix should still clean up the cruft.

@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -816,6 +817,157 @@ func TestFollowRedirect(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// captureStderr redirects os.Stderr for the duration of fn and returns
+// whatever was written to it.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing stderr pipe writer: %v", err)
+	}
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	return buf.String()
+}
+
+// TestFollowRedirect_IgnoresInvalidTarget is a regression test for
+// gastownhall/beads#4692: a redirect whose target directory exists but has
+// no metadata.json and no recognizable database is ignored (the source dir
+// is returned unchanged) and a warning naming both paths is emitted once on
+// stderr. docs/reference/advanced.md ("Database Redirects") documents this
+// contract: "The target directory must exist and contain a valid database."
+func TestFollowRedirect_IgnoresInvalidTarget(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "worktree", ".beads")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	targetDir := filepath.Join(tmpDir, "empty-target", ".beads")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// targetDir exists but has no metadata.json and no database.
+
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(targetDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var result string
+	stderr := captureStderr(t, func() {
+		result = FollowRedirect(sourceDir)
+	})
+
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	sourceResolved, _ := filepath.EvalSymlinks(sourceDir)
+	if resultResolved != sourceResolved {
+		t.Errorf("FollowRedirect() = %q, want source dir %q (invalid target should be ignored)", result, sourceDir)
+	}
+	if !strings.Contains(stderr, "no database or metadata.json") {
+		t.Errorf("expected an invalid-target warning on stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stderr, sourceDir) || !strings.Contains(stderr, targetDir) {
+		t.Errorf("expected warning to name both source and target paths, got: %q", stderr)
+	}
+}
+
+// TestFollowRedirect_FollowsWhenTargetHasDatabase documents that a redirect
+// to a target with a recognizable database (no metadata.json) is followed as
+// before -- the #4692 guard is about missing databases, not about source
+// mode.
+func TestFollowRedirect_FollowsWhenTargetHasDatabase(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "worktree", ".beads")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// No metadata.json in source (the common worktree-redirect-to-rig-root
+	// pattern).
+
+	targetDir := filepath.Join(tmpDir, "rig", ".beads")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(targetDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := FollowRedirect(sourceDir)
+
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	targetResolved, _ := filepath.EvalSymlinks(targetDir)
+	if resultResolved != targetResolved {
+		t.Errorf("FollowRedirect() = %q, want target dir %q", result, targetDir)
+	}
+}
+
+// TestFollowRedirect_ServerModeSourceStillFollowsValidTarget is the
+// regression test for the cross-vendor review finding on this fix: a
+// server-mode source rig redirecting to a differently-configured, valid
+// shared Gas Town root (the fb51196f7 / docs "Database Redirects" topology)
+// must still be FOLLOWED. "Source is server-mode" must never, by itself,
+// cause a redirect to be ignored -- only target validity does.
+func TestFollowRedirect_ServerModeSourceStillFollowsValidTarget(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "lola", ".beads")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataJSON(t, sourceDir, &configfile.Config{
+		DoltMode:     "server",
+		DoltDatabase: "lola",
+	})
+
+	targetDir := filepath.Join(tmpDir, "town", ".beads")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataJSON(t, targetDir, &configfile.Config{
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(targetDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := FollowRedirect(sourceDir)
+
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	targetResolved, _ := filepath.EvalSymlinks(targetDir)
+	if resultResolved != targetResolved {
+		t.Errorf("FollowRedirect() = %q, want target dir %q (server-mode source must still follow a valid redirect)", result, targetDir)
 	}
 }
 

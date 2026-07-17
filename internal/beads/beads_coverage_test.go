@@ -379,6 +379,11 @@ func TestCheckRedirectInDir(t *testing.T) {
 		if err := os.MkdirAll(targetDir, 0755); err != nil {
 			t.Fatal(err)
 		}
+		// Target must contain a recognizable database (or metadata.json) for
+		// FollowRedirect to honor the redirect (gastownhall/beads#4692 guard).
+		if err := os.WriteFile(filepath.Join(targetDir, "beads.db"), []byte{}, 0644); err != nil {
+			t.Fatal(err)
+		}
 
 		// Write redirect
 		if err := os.WriteFile(filepath.Join(stubDir, "redirect"), []byte(targetDir+"\n"), 0644); err != nil {
@@ -427,6 +432,11 @@ func TestFollowRedirect_ChainPrevention(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(dir2, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// dir2 must contain a recognizable database for FollowRedirect to honor
+	// the redirect from dir1 (gastownhall/beads#4692 guard).
+	if err := os.WriteFile(filepath.Join(dir2, "beads.db"), []byte{}, 0644); err != nil {
 		t.Fatal(err)
 	}
 
