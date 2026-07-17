@@ -606,6 +606,87 @@ func TestCheckChildParentDependenciesDB_WispChildBlockingParentDetected(t *testi
 	}
 }
 
+// TestCheckOrphanedChildCountersDB_NoOrphans verifies StatusOK when every
+// child_counters/wisp_child_counters row has a live parent.
+func TestCheckOrphanedChildCountersDB_NoOrphans(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	parent := &types.Issue{ID: "test-live-parent", Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("CreateIssue parent: %v", err)
+	}
+
+	wisp := &types.Issue{ID: "test-live-wisp", Title: "Wisp parent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, NoHistory: true}
+	if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
+		t.Fatalf("CreateIssue wisp: %v", err)
+	}
+
+	db := store.DB()
+	if _, err := db.ExecContext(ctx, "INSERT INTO child_counters (parent_id, last_child) VALUES (?, 1)", parent.ID); err != nil {
+		t.Fatalf("insert live child_counters row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (?, 1)", wisp.ID); err != nil {
+		t.Fatalf("insert live wisp_child_counters row: %v", err)
+	}
+
+	check := checkOrphanedChildCountersDB(db)
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q; detail=%s", check.Status, StatusOK, check.Detail)
+	}
+}
+
+// TestCheckOrphanedChildCountersDB_ChildCountersOrphanDetected verifies that a
+// child_counters row with no matching issues row is detected (#4539).
+func TestCheckOrphanedChildCountersDB_ChildCountersOrphanDetected(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	db := store.DB()
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.ExecContext(ctx,
+		"INSERT INTO child_counters (parent_id, last_child) VALUES (?, 3)", "test-missing-parent")
+	if err != nil {
+		t.Fatalf("insert orphaned child_counters row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkOrphanedChildCountersDB(db)
+	if check.Status != StatusError {
+		t.Fatalf("Status = %q, want %q", check.Status, StatusError)
+	}
+	if !strings.Contains(check.Detail, "child_counters:test-missing-parent") {
+		t.Fatalf("Detail = %q, want it to name the dangling parent_id", check.Detail)
+	}
+}
+
+// TestCheckOrphanedChildCountersDB_WispChildCountersOrphanDetected verifies
+// that a wisp_child_counters row with no matching wisps row is detected — the
+// "twin gap" called out in #4539.
+func TestCheckOrphanedChildCountersDB_WispChildCountersOrphanDetected(t *testing.T) {
+	store := newTestDoltStore(t, "test")
+	ctx := context.Background()
+
+	db := store.DB()
+	_, err := db.ExecContext(ctx,
+		"INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (?, 2)", "test-missing-wisp-parent")
+	if err != nil {
+		t.Fatalf("insert orphaned wisp_child_counters row: %v", err)
+	}
+
+	check := checkOrphanedChildCountersDB(db)
+	if check.Status != StatusError {
+		t.Fatalf("Status = %q, want %q", check.Status, StatusError)
+	}
+	if !strings.Contains(check.Detail, "wisp_child_counters:test-missing-wisp-parent") {
+		t.Fatalf("Detail = %q, want it to name the dangling parent_id", check.Detail)
+	}
+}
+
 // TestCheckTestPollution_NoTestIssues_NoServer verifies StatusOK when no Dolt
 // server is reachable. This isolates BEADS_DOLT_PORT set by TestMain (which
 // starts a Docker-based Dolt container on Ubuntu but not macOS) so the test

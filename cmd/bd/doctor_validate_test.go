@@ -270,6 +270,56 @@ func TestValidateCheck_FixOrphanedDeps(t *testing.T) {
 	}
 }
 
+func TestValidateCheck_DetectsOrphanedChildCounters(t *testing.T) {
+	tmpDir, store := setupValidateTestDB(t, "test")
+	ctx := context.Background()
+
+	issue := &types.Issue{
+		Title:     "Real issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("Failed to create issue: %v", err)
+	}
+
+	db := store.UnderlyingDB()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("Failed to begin transaction: %v", err)
+	}
+	// child_counters has an FK on parent_id; simulate the drift scenario
+	// (#4539, follow-up to #4534) the validator is designed to catch.
+	if _, err = tx.Exec("SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatalf("Failed to disable FK checks: %v", err)
+	}
+	_, err = tx.Exec("INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?)",
+		"test-nonexistent-parent", 3)
+	if err != nil {
+		t.Fatalf("Failed to insert orphaned child counter: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Failed to commit orphaned child counter: %v", err)
+	}
+	store.Close()
+
+	checks := collectValidateChecks(tmpDir)
+
+	for _, cr := range checks {
+		if cr.check.Name == "Orphaned Child Counters" {
+			if cr.check.Status != statusError {
+				t.Errorf("Orphaned Child Counters status = %q, want %q", cr.check.Status, statusError)
+			}
+			if !cr.fixable {
+				t.Error("Orphaned Child Counters should be marked fixable")
+			}
+			return
+		}
+	}
+	t.Error("Orphaned Child Counters check not found")
+}
+
 func TestValidateOverallOK(t *testing.T) {
 	allPass := []validateCheckResult{
 		{check: doctorCheck{Status: statusOK}},

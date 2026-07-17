@@ -2091,6 +2091,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Storage` implementations that ignore the new fields simply do not enforce
   them and should add support before advertising guard semantics.
 
+- **`bd doctor --check=validate` now detects orphaned `child_counters` /
+  `wisp_child_counters` rows** ([#4539](https://github.com/gastownhall/beads/issues/4539),
+  follow-up to [#4534](https://github.com/gastownhall/beads/issues/4534)).
+  A `child_counters` row whose `parent_id` has no matching `issues` row (or a
+  `wisp_child_counters` row with no matching `wisps` row) can fail Dolt
+  constraint validation on a later write, silently bricking every
+  `bd create` — while `bd doctor` previously reported 0 errors. #4538 healed
+  the known legacy window with a one-time cleanup migration, but the drift
+  class that creates such rows (#728, #1393) predates that window and can
+  recur with no ongoing guard. The new "Orphaned Child Counters" check
+  flags dangling `parent_id`s and is fixable via `bd doctor --fix`.
+  Credit: reported by @maphew, check suggested by @eitsupi in #4534.
+
 - **Pool-aware claiming via the `claim.pools` config key** (bd-bguz6).
   Dispatcher fleets pre-assign issues to a pool pseudo-assignee (e.g.
   `fable-crew`); `--claim` previously refused those ("already assigned"),

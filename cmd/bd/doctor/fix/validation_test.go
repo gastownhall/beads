@@ -142,6 +142,7 @@ func TestFixFunctions_RequireBeadsDir(t *testing.T) {
 		{"SchemaCompatibility", SchemaCompatibility},
 		{"ChildParentDependencies", func(dir string) error { return ChildParentDependencies(dir, false) }},
 		{"OrphanedDependencies", func(dir string) error { return OrphanedDependencies(dir, false) }},
+		{"OrphanedChildCounters", func(dir string) error { return OrphanedChildCounters(dir, false) }},
 	}
 
 	for _, tc := range funcs {

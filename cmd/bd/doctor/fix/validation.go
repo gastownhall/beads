@@ -116,6 +116,105 @@ func OrphanedDependencies(path string, verbose bool) error {
 	return nil
 }
 
+// OrphanedChildCounters removes child_counters/wisp_child_counters rows whose
+// parent_id has no matching issues/wisps row. A single such row can fail Dolt
+// constraint validation on subsequent writes, silently bricking every
+// `bd create` (#4539, follow-up to #4534). Credit: check suggested by
+// @eitsupi in #4534.
+// If verbose is true, prints each removed row; otherwise shows only summary.
+func OrphanedChildCounters(path string, verbose bool) error {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
+		return err
+	}
+
+	db, err := openDoltDB(beadsDir)
+	if err != nil {
+		fmt.Printf("  Orphaned child counters fix skipped (%v)\n", err)
+		return nil
+	}
+	defer db.Close()
+
+	// Find child_counters rows dangling from issues and wisp_child_counters
+	// rows dangling from wisps.
+	query := `
+		SELECT 'child_counters' AS counter_table, cc.parent_id
+		FROM child_counters cc
+		LEFT JOIN issues i ON cc.parent_id = i.id
+		WHERE i.id IS NULL
+		UNION ALL
+		SELECT 'wisp_child_counters' AS counter_table, wcc.parent_id
+		FROM wisp_child_counters wcc
+		LEFT JOIN wisps w ON wcc.parent_id = w.id
+		WHERE w.id IS NULL
+	`
+	rows, err := db.Query(query)
+	if err != nil {
+		return fmt.Errorf("failed to query orphaned child counters: %w", err)
+	}
+	defer rows.Close()
+
+	type orphan struct {
+		counterTable string
+		parentID     string
+	}
+	var orphans []orphan
+
+	for rows.Next() {
+		var o orphan
+		if err := rows.Scan(&o.counterTable, &o.parentID); err == nil {
+			orphans = append(orphans, o)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("row iteration error: %w", err)
+	}
+
+	if len(orphans) == 0 {
+		fmt.Println("  No orphaned child counters to fix")
+		return nil
+	}
+
+	// Delete orphaned child counter rows.
+	// Uses explicit transaction so writes persist when @@autocommit is OFF
+	// (e.g. Dolt server started with --no-auto-commit).
+	showIndividual := verbose || len(orphans) < 20
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	var removed int
+	for _, o := range orphans {
+		var err error
+		switch o.counterTable {
+		case "child_counters":
+			_, err = tx.Exec("DELETE FROM child_counters WHERE parent_id = ?", o.parentID)
+		case "wisp_child_counters":
+			_, err = tx.Exec("DELETE FROM wisp_child_counters WHERE parent_id = ?", o.parentID)
+		default:
+			fmt.Printf("  Warning: skipped orphaned child counter from unexpected table %s\n", o.counterTable)
+			continue
+		}
+		if err != nil {
+			fmt.Printf("  Warning: failed to remove %s row for %s: %v\n", o.counterTable, o.parentID, err)
+		} else {
+			removed++
+			if showIndividual {
+				fmt.Printf("  Removed orphaned %s row: parent_id=%s\n", o.counterTable, o.parentID)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit orphaned child counter removals: %w", err)
+	}
+
+	// Commit changes in Dolt
+	_, _ = db.Exec("CALL DOLT_COMMIT('-Am', 'doctor: remove orphaned child counter rows')") // Best effort: commit advisory; schema fix already applied in-memory
+
+	fmt.Printf("  Fixed %d orphaned child counter row(s)\n", removed)
+	return nil
+}
+
 // ChildParentDependencies removes child→parent blocking dependencies.
 // These often indicate a modeling mistake (deadlock: child waits for parent, parent waits for children).
 // Requires explicit opt-in via --fix-child-parent flag since some workflows may use these intentionally.
