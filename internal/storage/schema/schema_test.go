@@ -634,6 +634,38 @@ func TestEnsureDependenciesIDColumnFailsClearlyOnTargetlessRowInsteadOfBrickingN
 	}
 }
 
+func TestMigration0056GuardsEventValueColumnsIndependently(t *testing.T) {
+	sql, err := os.ReadFile("migrations/0056_events_value_columns_idempotent_longtext.up.sql")
+	if err != nil {
+		t.Fatalf("read 0056 up migration: %v", err)
+	}
+
+	// Each column has its own guard variable and its own MODIFY, not one
+	// combined check driving both: a single shared check would either skip
+	// converting the other column (if only one had already drifted to
+	// LONGTEXT) or re-issue a MODIFY on a column that's already LONGTEXT,
+	// re-triggering the encoding-flip risk this migration exists to guard
+	// against.
+	body := string(sql)
+	for _, want := range []string{
+		"@old_value_needs_fix",
+		"@new_value_needs_fix",
+		"INFORMATION_SCHEMA.COLUMNS",
+		"COLUMN_TYPE = 'text'",
+		"ALTER TABLE events MODIFY COLUMN old_value LONGTEXT",
+		"ALTER TABLE events MODIFY COLUMN new_value LONGTEXT",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("0056 migration missing independent per-column guard marker %q", want)
+		}
+	}
+	// The two columns must not be MODIFY'd in one combined ALTER statement
+	// (that would put them back behind a single guard).
+	if strings.Contains(body, "MODIFY COLUMN old_value LONGTEXT, MODIFY COLUMN new_value LONGTEXT") {
+		t.Fatal("0056 migration MODIFYs old_value and new_value in one combined ALTER, want independent guards/ALTERs per column")
+	}
+}
+
 func TestIgnoredMigration0011CleansOrphanedChildCountersShape(t *testing.T) {
 	sql, err := os.ReadFile("migrations/ignored/0011_cleanup_orphaned_child_counters.up.sql")
 	if err != nil {
@@ -940,6 +972,37 @@ DELETE FROM schema_migrations WHERE version = 53;
 		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dependencies' AND COLUMN_NAME = 'id' AND CONSTRAINT_NAME = 'PRIMARY'`, "1")
 	requireDoltCount(t, dir,
 		fmt.Sprintf(`SELECT COUNT(*) AS c FROM dependencies WHERE issue_id = %s AND id = %s`, doltSQLString(sourceID), doltSQLString(repairID)), "1")
+}
+
+func TestMigration0056IsIdempotentOnAlreadyLongtextEventsThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "events-longtext-idempotent")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create events-longtext-idempotent dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	migrationSQL, err := mainSource.files.ReadFile("migrations/0056_events_value_columns_idempotent_longtext.up.sql")
+	if err != nil {
+		t.Fatalf("read 0056 migration: %v", err)
+	}
+
+	// events.old_value/new_value are already LONGTEXT after the fresh chain
+	// (0048's unconditional MODIFY). Re-running 0056's guarded SQL a second
+	// time -- simulating any repeat pass through this version -- must take
+	// the no-op branch for BOTH columns independently rather than re-issuing
+	// MODIFY on either one, which is exactly the drift 0048 itself lacks a
+	// guard against (#4353). This does not, and cannot, reproduce a raw
+	// re-execution of 0048's own frozen SQL by tooling outside bd's
+	// cursor-gated migrate chain; see 0056's header comment for that
+	// boundary.
+	runDoltSQL(t, dir, string(migrationSQL))
+	runDoltSQL(t, dir, string(migrationSQL))
+
+	requireDoltColumnShape(t, dir, "events", "old_value", "longtext", "YES")
+	requireDoltColumnShape(t, dir, "events", "new_value", "longtext", "YES")
 }
 
 func TestWispDependenciesSplitTargetBackfillPrefersWispOverIssueThroughDoltCLI(t *testing.T) {
