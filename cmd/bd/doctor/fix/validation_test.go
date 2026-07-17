@@ -157,6 +157,176 @@ func TestFixFunctions_RequireBeadsDir(t *testing.T) {
 	}
 }
 
+// TestOrphanedChildCounters_FixDeletesOnlyOrphans verifies the destructive
+// half of the #4539 fix: OrphanedChildCounters must DELETE exactly the
+// dangling child_counters/wisp_child_counters rows and leave every row with
+// a live parent untouched. TestFixFunctions_RequireBeadsDir only covers the
+// missing-.beads-dir error path; nothing previously exercised the DELETE
+// itself against a live store.
+//
+// Uses the same local-dolt-binary auto-start harness as the sibling
+// TestDependencyKeys_RekeysAndRemovesLeftovers (dep_keys_test.go): dolt.New
+// with no ServerHost/ServerPort auto-starts a real `dolt sql-server`
+// subprocess via the local `dolt` binary (internal/doltserver), the same
+// mechanism `bd init` uses in production and the same one CI's
+// RequireDoltBinary check enforces — no Docker required.
+func TestOrphanedChildCounters_FixDeletesOnlyOrphans(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+
+	// Unique database name: the local server/process may outlive a single run.
+	h := sha256.Sum256([]byte(t.Name() + fmt.Sprintf("%d", time.Now().UnixNano())))
+	dbName := "fixorphancc_" + hex.EncodeToString(h[:6])
+
+	// Seed metadata.json up front (with the target database name already
+	// set) so OrphanedChildCounters' own openDoltDB(beadsDir) → configfile.Load
+	// call — a separate connection from the one below — resolves the same
+	// server/database this test seeds.
+	seedCfg := &configfile.Config{Database: "dolt", DoltDatabase: dbName}
+	if err := seedCfg.Save(beadsDir); err != nil {
+		t.Fatalf("save initial config: %v", err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		Database:        dbName,
+		CreateIfMissing: true,
+		MaxOpenConns:    1,
+		AutoStart:       true,
+	})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "tst"); err != nil {
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+
+	// Live parent + live wisp: their child_counters/wisp_child_counters rows
+	// must survive the fix untouched.
+	liveIssue := &types.Issue{ID: "tst-live", Title: "live parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, liveIssue, "test"); err != nil {
+		t.Fatalf("CreateIssue live parent: %v", err)
+	}
+	liveWisp := &types.Issue{ID: "tst-wisp-live", Title: "live wisp parent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, NoHistory: true}
+	if err := store.CreateIssue(ctx, liveWisp, "test"); err != nil {
+		t.Fatalf("CreateIssue live wisp parent: %v", err)
+	}
+
+	db := store.UnderlyingDB()
+	if _, err := db.ExecContext(ctx, "INSERT INTO child_counters (parent_id, last_child) VALUES (?, 1)", liveIssue.ID); err != nil {
+		t.Fatalf("insert live child_counters row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (?, 1)", liveWisp.ID); err != nil {
+		t.Fatalf("insert live wisp_child_counters row: %v", err)
+	}
+
+	// Orphaned rows: FK checks disabled per-connection so the dangling insert
+	// succeeds (same trick as the detection tests in validation_test.go's
+	// sibling doctor package, TestCheckOrphanedChildCountersDB_*).
+	const orphanParent = "tst-missing-parent"
+	const orphanWispParent = "tst-missing-wisp-parent"
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO child_counters (parent_id, last_child) VALUES (?, 3)", orphanParent); err != nil {
+		t.Fatalf("insert orphaned child_counters row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (?, 2)", orphanWispParent); err != nil {
+		t.Fatalf("insert orphaned wisp_child_counters row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
+	}
+
+	countRows := func(t *testing.T, query string) int {
+		t.Helper()
+		var got int
+		if err := db.QueryRowContext(ctx, query).Scan(&got); err != nil {
+			t.Fatalf("query %q: %v", query, err)
+		}
+		return got
+	}
+
+	if got := countRows(t, "SELECT COUNT(*) FROM child_counters"); got != 2 {
+		t.Fatalf("child_counters before fix = %d, want 2 (1 live + 1 orphaned)", got)
+	}
+	if got := countRows(t, "SELECT COUNT(*) FROM wisp_child_counters"); got != 2 {
+		t.Fatalf("wisp_child_counters before fix = %d, want 2 (1 live + 1 orphaned)", got)
+	}
+
+	// OrphanedChildCounters (validation.go) opens its own connection via
+	// openDoltDB → configfile.Load, which is server-mode only (remotes.go's
+	// openFixDB always dials MySQL). seedCfg above already points that config
+	// at the same local server/database this test just seeded — the port is
+	// picked up from the .beads/dolt-server.port file the auto-start above
+	// wrote (doltserver.DefaultConfig's top-priority source).
+	if err := OrphanedChildCounters(dir, false); err != nil {
+		t.Fatalf("OrphanedChildCounters: %v", err)
+	}
+
+	// (a) orphans gone from both tables.
+	if got := countRows(t, "SELECT COUNT(*) FROM child_counters"); got != 1 {
+		t.Errorf("child_counters after fix = %d, want 1 (orphan removed)", got)
+	}
+	if got := countRows(t, "SELECT COUNT(*) FROM wisp_child_counters"); got != 1 {
+		t.Errorf("wisp_child_counters after fix = %d, want 1 (orphan removed)", got)
+	}
+	if got := countRows(t, fmt.Sprintf("SELECT COUNT(*) FROM child_counters WHERE parent_id = '%s'", orphanParent)); got != 0 {
+		t.Errorf("orphaned child_counters row for %s still present after fix", orphanParent)
+	}
+	if got := countRows(t, fmt.Sprintf("SELECT COUNT(*) FROM wisp_child_counters WHERE parent_id = '%s'", orphanWispParent)); got != 0 {
+		t.Errorf("orphaned wisp_child_counters row for %s still present after fix", orphanWispParent)
+	}
+
+	// (b) valid rows untouched.
+	if got := countRows(t, fmt.Sprintf("SELECT COUNT(*) FROM child_counters WHERE parent_id = '%s'", liveIssue.ID)); got != 1 {
+		t.Errorf("live child_counters row for %s missing after fix", liveIssue.ID)
+	}
+	if got := countRows(t, fmt.Sprintf("SELECT COUNT(*) FROM wisp_child_counters WHERE parent_id = '%s'", liveWisp.ID)); got != 1 {
+		t.Errorf("live wisp_child_counters row for %s missing after fix", liveWisp.ID)
+	}
+
+	// (c) the check now reports ok — mirrors the doctor package's
+	// checkOrphanedChildCountersDB against the same connection.
+	var orphanCount int
+	const checkQuery = `
+		SELECT COUNT(*) FROM (
+			SELECT cc.parent_id FROM child_counters cc
+			LEFT JOIN issues i ON cc.parent_id = i.id
+			WHERE i.id IS NULL
+			UNION ALL
+			SELECT wcc.parent_id FROM wisp_child_counters wcc
+			LEFT JOIN wisps w ON wcc.parent_id = w.id
+			WHERE w.id IS NULL
+		) orphans`
+	if err := db.QueryRowContext(ctx, checkQuery).Scan(&orphanCount); err != nil {
+		t.Fatalf("post-fix orphan check query: %v", err)
+	}
+	if orphanCount != 0 {
+		t.Errorf("post-fix orphan check found %d orphan(s), want 0 (check should now report ok)", orphanCount)
+	}
+
+	// Re-running the fix on an already-clean store must be a safe no-op.
+	if err := OrphanedChildCounters(dir, false); err != nil {
+		t.Fatalf("OrphanedChildCounters (second run, no-op expected): %v", err)
+	}
+	if got := countRows(t, "SELECT COUNT(*) FROM child_counters"); got != 1 {
+		t.Errorf("child_counters after no-op re-run = %d, want 1", got)
+	}
+	if got := countRows(t, "SELECT COUNT(*) FROM wisp_child_counters"); got != 1 {
+		t.Errorf("wisp_child_counters after no-op re-run = %d, want 1", got)
+	}
+}
+
 func TestChildParentDependencies_NoBadDeps(t *testing.T) {
 	dir := t.TempDir()
 	store := newFixTestStore(t, dir, "bd")
