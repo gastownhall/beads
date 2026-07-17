@@ -4,11 +4,17 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -303,6 +309,109 @@ func TestValidateCheck_DetectsOrphanedChildCounters(t *testing.T) {
 		t.Fatalf("Failed to commit orphaned child counter: %v", err)
 	}
 	store.Close()
+
+	checks := collectValidateChecks(tmpDir)
+
+	for _, cr := range checks {
+		if cr.check.Name == "Orphaned Child Counters" {
+			if cr.check.Status != statusError {
+				t.Errorf("Orphaned Child Counters status = %q, want %q", cr.check.Status, statusError)
+			}
+			if !cr.fixable {
+				t.Error("Orphaned Child Counters should be marked fixable")
+			}
+			return
+		}
+	}
+	t.Error("Orphaned Child Counters check not found")
+}
+
+// TestValidateCheck_DetectsOrphanedChildCounters_LocalDolt is the Docker-free
+// companion to TestValidateCheck_DetectsOrphanedChildCounters. Unlike
+// setupValidateTestDB (which needs the package-level testDoltServerPort set
+// by a Docker-starting TestMain), this test starts its own real local `dolt
+// sql-server` subprocess via dolt.New(AutoStart:true) — the local `dolt`
+// binary already on PATH, no Docker required. collectValidateChecks reads
+// metadata.json (via configfile) to find that server/database, so the
+// config must be saved to .beads BEFORE dolt.New starts the server — same
+// sequencing as TestOrphanedChildCounters_FixDeletesOnlyOrphans in
+// cmd/bd/doctor/fix/validation_test.go, the ground-truth example of this
+// pattern.
+func TestValidateCheck_DetectsOrphanedChildCounters_LocalDolt(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+
+	// Unique database name: the local server/process may outlive a single run.
+	h := sha256.Sum256([]byte(t.Name() + fmt.Sprintf("%d", time.Now().UnixNano())))
+	dbName := "validatecc_" + hex.EncodeToString(h[:6])
+
+	// Seed metadata.json up front (with the target database name already
+	// set) so collectValidateChecks' own doctor.CheckOrphanedChildCounters
+	// (a separate connection from the one below) resolves the same
+	// server/database this test seeds.
+	seedCfg := &configfile.Config{Database: "dolt", DoltDatabase: dbName}
+	if err := seedCfg.Save(beadsDir); err != nil {
+		t.Fatalf("save initial config: %v", err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		Database:        dbName,
+		CreateIfMissing: true,
+		MaxOpenConns:    1,
+		AutoStart:       true,
+	})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	// Unlike the Docker-backed variant (setupValidateTestDB), which closes
+	// the store before calling collectValidateChecks because the shared
+	// Docker test server outlives any single store's connection, AutoStart
+	// ties the local `dolt sql-server` subprocess's lifetime to the last
+	// store referencing it (see DoltStore.Close -> autoStartRelease). This
+	// store must stay open for the rest of the test so the server survives
+	// long enough for collectValidateChecks's own connection to reach it.
+	defer func() { _ = store.Close() }()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+
+	issue := &types.Issue{
+		Title:     "Real issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatalf("Failed to create issue: %v", err)
+	}
+
+	db := store.UnderlyingDB()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("Failed to begin transaction: %v", err)
+	}
+	// child_counters has an FK on parent_id; simulate the drift scenario
+	// (#4539, follow-up to #4534) the validator is designed to catch.
+	if _, err = tx.Exec("SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatalf("Failed to disable FK checks: %v", err)
+	}
+	_, err = tx.Exec("INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?)",
+		"test-nonexistent-parent", 3)
+	if err != nil {
+		t.Fatalf("Failed to insert orphaned child counter: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Failed to commit orphaned child counter: %v", err)
+	}
 
 	checks := collectValidateChecks(tmpDir)
 

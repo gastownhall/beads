@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -676,6 +678,146 @@ func TestCheckOrphanedChildCountersDB_WispChildCountersOrphanDetected(t *testing
 		"INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (?, 2)", "test-missing-wisp-parent")
 	if err != nil {
 		t.Fatalf("insert orphaned wisp_child_counters row: %v", err)
+	}
+
+	check := checkOrphanedChildCountersDB(db)
+	if check.Status != StatusError {
+		t.Fatalf("Status = %q, want %q", check.Status, StatusError)
+	}
+	if !strings.Contains(check.Detail, "wisp_child_counters:test-missing-wisp-parent") {
+		t.Fatalf("Detail = %q, want it to name the dangling parent_id", check.Detail)
+	}
+}
+
+// newLocalDoltStore creates a DoltStore backed by a real local `dolt
+// sql-server` subprocess (dolt.New with AutoStart:true), started via the
+// `dolt` binary already on PATH — no Docker required. This is the Docker-free
+// companion harness to newTestDoltStore, which requires a Docker-based Dolt
+// test container (see cmd/bd TestMain). Mirrors
+// TestOrphanedChildCounters_FixDeletesOnlyOrphans in
+// cmd/bd/doctor/fix/validation_test.go, the ground-truth example of this
+// pattern; see also TestDependencyKeys_RekeysAndRemovesLeftovers in
+// cmd/bd/doctor/fix/dep_keys_test.go.
+func newLocalDoltStore(t *testing.T, prefix string) *dolt.DoltStore {
+	t.Helper()
+	testutil.RequireDoltBinary(t)
+
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+
+	// Unique database name: the local server/process may outlive a single run.
+	h := sha256.Sum256([]byte(t.Name() + fmt.Sprintf("%d", time.Now().UnixNano())))
+	dbName := "localdolt_" + hex.EncodeToString(h[:6])
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		Database:        dbName,
+		CreateIfMissing: true,
+		MaxOpenConns:    1,
+		AutoStart:       true,
+	})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+
+	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		store.Close()
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+// TestCheckOrphanedChildCountersDB_NoOrphans_LocalDolt is the Docker-free
+// companion to TestCheckOrphanedChildCountersDB_NoOrphans, using
+// newLocalDoltStore instead of newTestDoltStore.
+func TestCheckOrphanedChildCountersDB_NoOrphans_LocalDolt(t *testing.T) {
+	store := newLocalDoltStore(t, "test")
+	ctx := context.Background()
+
+	parent := &types.Issue{ID: "test-live-parent", Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	if err := store.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("CreateIssue parent: %v", err)
+	}
+
+	wisp := &types.Issue{ID: "test-live-wisp", Title: "Wisp parent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, NoHistory: true}
+	if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
+		t.Fatalf("CreateIssue wisp: %v", err)
+	}
+
+	db := store.UnderlyingDB()
+	if _, err := db.ExecContext(ctx, "INSERT INTO child_counters (parent_id, last_child) VALUES (?, 1)", parent.ID); err != nil {
+		t.Fatalf("insert live child_counters row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (?, 1)", wisp.ID); err != nil {
+		t.Fatalf("insert live wisp_child_counters row: %v", err)
+	}
+
+	check := checkOrphanedChildCountersDB(db)
+	if check.Status != StatusOK {
+		t.Fatalf("Status = %q, want %q; detail=%s", check.Status, StatusOK, check.Detail)
+	}
+}
+
+// TestCheckOrphanedChildCountersDB_ChildCountersOrphanDetected_LocalDolt is
+// the Docker-free companion to
+// TestCheckOrphanedChildCountersDB_ChildCountersOrphanDetected.
+func TestCheckOrphanedChildCountersDB_ChildCountersOrphanDetected_LocalDolt(t *testing.T) {
+	store := newLocalDoltStore(t, "test")
+	ctx := context.Background()
+
+	db := store.UnderlyingDB()
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.ExecContext(ctx,
+		"INSERT INTO child_counters (parent_id, last_child) VALUES (?, 3)", "test-missing-parent")
+	if err != nil {
+		t.Fatalf("insert orphaned child_counters row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkOrphanedChildCountersDB(db)
+	if check.Status != StatusError {
+		t.Fatalf("Status = %q, want %q", check.Status, StatusError)
+	}
+	if !strings.Contains(check.Detail, "child_counters:test-missing-parent") {
+		t.Fatalf("Detail = %q, want it to name the dangling parent_id", check.Detail)
+	}
+}
+
+// TestCheckOrphanedChildCountersDB_WispChildCountersOrphanDetected_LocalDolt
+// is the Docker-free companion to
+// TestCheckOrphanedChildCountersDB_WispChildCountersOrphanDetected.
+func TestCheckOrphanedChildCountersDB_WispChildCountersOrphanDetected_LocalDolt(t *testing.T) {
+	store := newLocalDoltStore(t, "test")
+	ctx := context.Background()
+
+	db := store.UnderlyingDB()
+	// Unlike the Docker-backed shared-schema variant, a freshly created local
+	// database enforces the wisp_child_counters -> wisps FK, so it must be
+	// disabled per-connection to simulate the drift scenario (same trick used
+	// by the child_counters orphan test above and by
+	// TestOrphanedChildCounters_FixDeletesOnlyOrphans in
+	// cmd/bd/doctor/fix/validation_test.go).
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := db.ExecContext(ctx,
+		"INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (?, 2)", "test-missing-wisp-parent")
+	if err != nil {
+		t.Fatalf("insert orphaned wisp_child_counters row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
 	}
 
 	check := checkOrphanedChildCountersDB(db)
