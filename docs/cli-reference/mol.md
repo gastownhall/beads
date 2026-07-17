@@ -1,6 +1,6 @@
 ---
 title: "bd mol"
-description: "Manage molecules - work templates for agent workflows."
+description: "Molecule commands (work templates)"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -31,7 +31,7 @@ Commands:
 Use "bd formula list" to list available formulas.
 
 ```
-bd mol [flags]
+bd mol [command]
 ```
 
 **Aliases:** protomolecule
@@ -238,7 +238,8 @@ bd mol last-activity <molecule-id> [flags]
 Pour a proto into a persistent mol - like pouring molten metal into a mold.
 
 This is the chemistry-inspired command for creating PERSISTENT work from templates.
-The resulting mol lives in .beads/ (permanent storage) and is synced with git.
+The resulting mol is stored as persistent beads in the issue database and
+syncs like any other bead (bd dolt push / pull).
 
 Phase transition: Proto (solid) -&gt; pour -&gt; Mol (liquid)
 
@@ -316,6 +317,12 @@ Examples:
 
 ```
 bd mol ready --gated [flags]
+```
+
+**Flags:**
+
+```
+      --gated   Find molecules ready for gate-resume dispatch (always on for this subcommand)
 ```
 
 ## bd mol seed
@@ -485,6 +492,7 @@ Subcommands:
 
 ```
 bd mol wisp [proto-id] [flags]
+bd mol wisp [command]
 ```
 
 **Flags:**

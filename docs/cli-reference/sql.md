@@ -1,6 +1,6 @@
 ---
 title: "bd sql"
-description: "Execute a raw SQL query against the underlying database (SQLite or Dolt)."
+description: "Execute raw SQL against the beads database"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

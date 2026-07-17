@@ -1,6 +1,6 @@
 ---
 title: "bd ping"
-description: "Lightweight health check that confirms bd can reach its database."
+description: "Check database connectivity"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

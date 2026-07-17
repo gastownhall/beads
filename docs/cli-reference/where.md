@@ -1,6 +1,6 @@
 ---
 title: "bd where"
-description: "Show the active beads database location, including redirect information."
+description: "Show active beads location"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

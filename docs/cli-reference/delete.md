@@ -1,6 +1,6 @@
 ---
 title: "bd delete"
-description: "Delete one or more issues and clean up all references to them."
+description: "Delete one or more issues and clean up references"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

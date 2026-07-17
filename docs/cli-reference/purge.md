@@ -1,6 +1,6 @@
 ---
 title: "bd purge"
-description: "Permanently delete closed ephemeral beads and their associated data."
+description: "Delete closed ephemeral beads to reclaim space"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

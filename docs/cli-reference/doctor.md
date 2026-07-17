@@ -1,6 +1,6 @@
 ---
 title: "bd doctor"
-description: "Sanity check the beads installation for the current directory or specified path."
+description: "Check and fix beads installation health (start here)"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

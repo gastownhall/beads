@@ -1,6 +1,6 @@
 ---
 title: "bd info"
-description: "Display information about the current database."
+description: "Show database information"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

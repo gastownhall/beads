@@ -1,6 +1,6 @@
 ---
 title: "bd note"
-description: "Append a note to an issue's notes field."
+description: "Append a note to an issue"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

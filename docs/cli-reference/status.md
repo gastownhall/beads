@@ -1,6 +1,6 @@
 ---
 title: "bd status"
-description: "Show a quick snapshot of the issue database state and statistics."
+description: "Show issue database overview and statistics"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

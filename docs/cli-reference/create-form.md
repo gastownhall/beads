@@ -1,6 +1,6 @@
 ---
 title: "bd create-form"
-description: "Create a new issue using an interactive terminal form."
+description: "Create a new issue using an interactive form"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

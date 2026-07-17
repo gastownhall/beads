@@ -10,7 +10,7 @@ Generated from `bd help --doc epic`.
 Epic management commands
 
 ```
-bd epic [flags]
+bd epic [command]
 ```
 
 ## bd epic close-eligible

@@ -1,6 +1,6 @@
 ---
 title: "bd dep"
-description: "Manage dependencies between issues."
+description: "Manage dependencies"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -21,6 +21,7 @@ Examples:
 
 ```
 bd dep [issue-id] [flags]
+bd dep [command]
 ```
 
 **Flags:**

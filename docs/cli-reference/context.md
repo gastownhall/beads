@@ -1,6 +1,6 @@
 ---
 title: "bd context"
-description: "Show the effective backend identity information including repository paths,"
+description: "Show effective backend identity and repository context"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

@@ -1,6 +1,6 @@
 ---
 title: "bd human"
-description: "Display a focused help menu showing only the most common commands."
+description: "Show essential commands for human users"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -22,6 +22,7 @@ SUBCOMMANDS:
 
 ```
 bd human [flags]
+bd human [command]
 ```
 
 ## bd human dismiss

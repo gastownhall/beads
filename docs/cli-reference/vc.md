@@ -1,6 +1,6 @@
 ---
 title: "bd vc"
-description: "Version control operations for the beads database."
+description: "Version control operations"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -16,7 +16,7 @@ Note: 'bd history', 'bd diff', and 'bd branch' also work for quick access.
 This subcommand provides additional operations like merge and commit.
 
 ```
-bd vc [flags]
+bd vc [command]
 ```
 
 ## bd vc commit
