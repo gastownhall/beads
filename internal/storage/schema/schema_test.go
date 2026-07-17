@@ -3,8 +3,10 @@ package schema
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/csv"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -403,6 +405,101 @@ func TestPreMigrationRepairDispatchesMain47ToWispTableRepair(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAtomically
+// is the atomicity fix for the finding-#6 gap: preMigrationRepair (which can
+// itself mutate a synced table, e.g. ensureDependenciesIDColumn's ALTERs on
+// `dependencies`) must run AFTER the per-step "before" dirty-table snapshot,
+// not before it -- otherwise the repair's own mutation is misclassified as
+// pre-existing dirt to exclude from this step's commit, and a process killed
+// between this step and the pass's later commits would leave history
+// claiming the migration applied while the repaired table's change was never
+// durably recorded (and the version-gated repair hook can never re-run to
+// fix it, since its version is no longer pending).
+//
+// sqlmock enforces in-order call matching by default, so the exact sequence
+// registered below IS the assertion: if runMigrations snapshotted dirty
+// tables AFTER calling preMigrationRepair (the pre-fix order), the "before"
+// dirtyTables query below would run too late (after the repair's ADD COLUMN
+// /MODIFY/ADD PRIMARY KEY execs it's supposed to precede) and this test would
+// fail with an out-of-order-call error, not a silent pass.
+//
+// This is a Go-level proof of the call ordering, not a live Dolt dirty/staged
+// commit -- that end-to-end proof belongs in
+// internal/storage/embeddeddolt (cgo-gated, see TestEmbeddedMigrateRepairedDependenciesIDColumnCommitsAtomicallyWithVersion53_4690).
+func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAtomically(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	dirtyStatusQuery := `(?s)SELECT s\.table_name, s\.staged\s+FROM dolt_status s\s+WHERE NOT EXISTS`
+	tableQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
+	columnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
+
+	// 1. The "before" snapshot: this step's own repair has not run yet, so
+	// nothing is dirty.
+	mock.ExpectQuery(dirtyStatusQuery).
+		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
+
+	// 2. preMigrationRepair(53): ensureIssuesRigColumns (all present, no
+	// exec), ensureWispDependenciesSplitTargets (table absent, no-op), then
+	// ensureDependenciesIDColumn actually mutating `dependencies`.
+	for _, col := range []string{"hook_bead", "role_bead", "agent_state", "last_activity", "role_type", "rig"} {
+		mock.ExpectQuery(columnQuery).WithArgs("issues", col).
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	}
+	mock.ExpectQuery(tableQuery).WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectQuery(columnQuery).WithArgs("dependencies", "id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`ALTER TABLE dependencies ADD COLUMN id CHAR\(36\) NULL`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`(?s)SELECT issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external\s+FROM dependencies\s+WHERE id IS NULL`).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"}))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dependencies WHERE id IS NULL`).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	keyColumnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.KEY_COLUMN_USAGE.*TABLE_NAME = \? AND COLUMN_NAME = \? AND CONSTRAINT_NAME = 'PRIMARY'`
+	mock.ExpectQuery(keyColumnQuery).WithArgs("dependencies", "id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`ALTER TABLE dependencies MODIFY COLUMN id CHAR\(36\) NOT NULL`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	tableConstraintQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLE_CONSTRAINTS.*TABLE_NAME = \? AND CONSTRAINT_TYPE = 'PRIMARY KEY'`
+	mock.ExpectQuery(tableConstraintQuery).WithArgs("dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`ALTER TABLE dependencies ADD PRIMARY KEY \(id\)`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	// 3. Migration 0053's own frozen SQL, then its cursor row.
+	mock.ExpectExec(`SET FOREIGN_KEY_CHECKS = 0`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`INSERT IGNORE INTO schema_migrations`).WithArgs(53, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	// 4. commitMigrationStep's "after" snapshot sees `dependencies` dirty --
+	// from the repair's own ALTERs above, now correctly attributed to THIS
+	// step because the "before" snapshot in (1) predates them -- so it gets
+	// force-added alongside the cursor table and committed in the same call.
+	mock.ExpectQuery(dirtyStatusQuery).
+		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}).AddRow("dependencies", false))
+	mock.ExpectExec(`CALL DOLT_ADD\('-f', \?\)`).WithArgs("dependencies").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`CALL DOLT_ADD\('-f', \?\)`).WithArgs("schema_migrations").
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`CALL DOLT_COMMIT`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	applied, err := runMigrations(context.Background(), db, mainSource, 52, 53, true)
+	if err != nil {
+		t.Fatalf("runMigrations: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("runMigrations applied = %d, want 1", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations (ordering mismatch would surface here): %v", err)
 	}
 }
 
@@ -1003,6 +1100,265 @@ func TestMigration0056IsIdempotentOnAlreadyLongtextEventsThroughDoltCLI(t *testi
 
 	requireDoltColumnShape(t, dir, "events", "old_value", "longtext", "YES")
 	requireDoltColumnShape(t, dir, "events", "new_value", "longtext", "YES")
+}
+
+// wispIsBlockedColumnSQLForTest decides, from live DB state, whether
+// wisps.is_blocked (added by ignored/0006_add_wisp_is_blocked.up.sql) and its
+// index still need adding, and emits direct DDL if so. Same rationale as
+// dependenciesIDRepairSQLForTest: 0006's own ADD COLUMN/CREATE INDEX are
+// PREPARE'd, and the Dolt CLI does not reliably apply a prepared ALTER TABLE
+// in this path, so a fresh wisps table (created by this test's v47 repair
+// injection, not through the ignored sequence) never actually gains the
+// column before ignored/0007 needs it.
+func wispIsBlockedColumnSQLForTest(t *testing.T, dir string) string {
+	t.Helper()
+	hasColumn := queryDoltCSV(t, dir, `
+		SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps' AND COLUMN_NAME = 'is_blocked'`)[0]["c"] != "0"
+	hasIndex := queryDoltCSV(t, dir, `
+		SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps' AND INDEX_NAME = 'idx_wisps_is_blocked'`)[0]["c"] != "0"
+
+	var b strings.Builder
+	if !hasColumn {
+		b.WriteString("ALTER TABLE wisps ADD COLUMN is_blocked TINYINT(1) NOT NULL DEFAULT 0;\n")
+	}
+	if !hasIndex {
+		b.WriteString("CREATE INDEX idx_wisps_is_blocked ON wisps(is_blocked, status);\n")
+	}
+	return b.String()
+}
+
+// TestFullChainFromPreWispsAndMissingDependenciesIDConvergesThroughDoltCLI is
+// the acceptance test for the migration-chain-hardening branch: it seeds a
+// database simultaneously in BOTH drifted shapes this branch fixes --
+// #4695/#4176 (cursor arrives with the wisp tables absent) and #4690
+// (dependencies never got its surrogate id column) -- and drives the
+// migration chain all the way through the main sequence AND the ignored
+// sequence to the latest version, the 0047 -> 0053 -> 0056 -> ignored path
+// the narrower per-fix CLI tests above stop short of.
+//
+// Like every other CLI test in this file, this applies migration SQL text
+// directly (via cliCompatibleMigrationSQL, the same substitution
+// AllMigrationsSQL() uses) rather than calling schema.MigrateUp: the Dolt
+// CLI test path here proves the frozen migration files plus the repair SQL
+// converge to the correct end state, not the Go orchestration around them
+// (runMigrations' commit atomicity is covered separately, and by a real cgo
+// embedded-dolt test: see
+// internal/storage/embeddeddolt's TestEmbeddedMigrateRepairedDependenciesIDColumnCommitsAtomicallyWithVersion53_4690).
+func TestFullChainFromPreWispsAndMissingDependenciesIDConvergesThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "full-chain-convergence")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+
+	// Build the schema genuinely bounded at v46 -- the real shape those
+	// migrations produce, not a hand-simplified stand-in -- using the same
+	// cliCompatibleMigrationSQL substitution AllMigrationsSQL() itself uses.
+	const seedCursor = 46
+	recordCursorSQL := func(cursorTable, name string, version int, data []byte) string {
+		sum := sha256.Sum256(data)
+		return fmt.Sprintf("INSERT IGNORE INTO %s (version, content_hash) VALUES (%d, %s);\n",
+			cursorTable, version, doltSQLString(hex.EncodeToString(sum[:])))
+	}
+	var bounded strings.Builder
+	bounded.WriteString(mainSource.bootstrapSQL())
+	bounded.WriteString(";\n")
+	for _, f := range mainSource.list() {
+		if f.version > seedCursor {
+			continue
+		}
+		data, err := mainSource.files.ReadFile(mainSource.dir + "/" + f.name)
+		if err != nil {
+			t.Fatalf("read %s: %v", f.name, err)
+		}
+		bounded.WriteString(cliCompatibleMigrationSQL(f.name, string(data)))
+		bounded.WriteString("\n")
+		bounded.WriteString(recordCursorSQL("schema_migrations", f.name, f.version, data))
+	}
+	runDoltSQL(t, dir, bounded.String())
+
+	// Reproduce #4695/#4176 AND #4690 simultaneously: the wisp tables never
+	// synced (dolt_ignore'd, absent even though the cursor is past the
+	// migrations that create them), and dependencies lost its surrogate id
+	// column (a different historical migration path than 0043).
+	const blockerID = "full-chain-blocker"
+	const blockedID = "full-chain-blocked"
+	depID := depid.New(blockedID, blockerID)
+	seedSQL := fmt.Sprintf(`
+DROP TABLE IF EXISTS wisp_child_counters;
+DROP TABLE IF EXISTS wisp_comments;
+DROP TABLE IF EXISTS wisp_events;
+DROP TABLE IF EXISTS wisp_dependencies;
+DROP TABLE IF EXISTS wisp_labels;
+DROP TABLE IF EXISTS wisps;
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES (%s, 'blocker', '', '', '', '', 'open', 2, 'task'),
+       (%s, 'blocked', '', '', '', '', 'open', 2, 'task');
+INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
+VALUES (%s, %s, %s, 'blocks', NOW(), 'tester', JSON_OBJECT());
+ALTER TABLE dependencies DROP PRIMARY KEY;
+ALTER TABLE dependencies DROP COLUMN id;
+`,
+		doltSQLString(blockerID), doltSQLString(blockedID),
+		doltSQLString(depID), doltSQLString(blockedID), doltSQLString(blockerID))
+	runDoltSQL(t, dir, seedSQL)
+
+	// Drive the main sequence 47..latest (injecting each affected version's
+	// repair immediately before its own frozen SQL, mirroring
+	// preMigrationRepair's dispatch), then the ignored sequence 1..latest.
+	applyRemainingChain := func() {
+		var b strings.Builder
+		flush := func() {
+			if b.Len() == 0 {
+				return
+			}
+			runDoltSQL(t, dir, b.String())
+			b.Reset()
+		}
+		for _, f := range mainSource.list() {
+			if f.version <= seedCursor {
+				continue
+			}
+			switch f.version {
+			case 47:
+				b.WriteString(wispsTableDDLForMigration0047)
+				b.WriteString("\n")
+				b.WriteString(wispDependenciesTableDDLForMigration0047)
+				b.WriteString("\n")
+			case 53:
+				// dependenciesIDRepairSQLForTest queries live DB state, so
+				// the batch built so far must actually be applied first --
+				// it decides "hasID"/"idIsPK" from what's really in dir, not
+				// from statements still sitting unexecuted in b.
+				flush()
+				b.WriteString(dependenciesIDRepairSQLForTest(t, dir, blockedID, blockerID, depID))
+				b.WriteString("\n")
+			}
+			data, err := mainSource.files.ReadFile(mainSource.dir + "/" + f.name)
+			if err != nil {
+				t.Fatalf("read %s: %v", f.name, err)
+			}
+			if f.version == 53 {
+				// The registered CLI substitute (cliMigration0053RepairRigWisps)
+				// assumes every wisp_* table already exists -- true for a
+				// fresh AllMigrationsSQL() bundle, where the ignored sequence's
+				// final committed shape is all that matters, but not here:
+				// this test's ordering deliberately matches real MigrateUp
+				// (main before ignored), so at this point only wisps and
+				// wisp_dependencies exist yet. The raw frozen text's own
+				// @has_wisps/@has_wisp_labels/... guards handle that correctly
+				// (proven already by TestMigration0053NoopsWithoutWispTablesThroughDoltCLI),
+				// so use it unsubstituted here.
+				b.WriteString(string(data))
+			} else {
+				b.WriteString(cliCompatibleMigrationSQL(f.name, string(data)))
+			}
+			b.WriteString("\n")
+			b.WriteString(recordCursorSQL("schema_migrations", f.name, f.version, data))
+		}
+		b.WriteString(ignoredSource.bootstrapSQL())
+		b.WriteString(";\n")
+		for _, f := range ignoredSource.list() {
+			if f.name == "0006_add_wisp_is_blocked.up.sql" {
+				// Same Dolt-CLI prepared-ALTER limitation as the v53 repair
+				// above: 0006's ADD COLUMN/CREATE INDEX are PREPARE'd, and a
+				// prepared ALTER TABLE is not reliably applied through this
+				// path (cli_migrations.go), so 0007 (which needs
+				// wisps.is_blocked to already exist) fails right after it.
+				// Decide state in Go and emit direct DDL instead, same
+				// technique as dependenciesIDRepairSQLForTest.
+				flush()
+				b.WriteString(wispIsBlockedColumnSQLForTest(t, dir))
+				b.WriteString("\n")
+			}
+			data, err := ignoredSource.files.ReadFile(ignoredSource.dir + "/" + f.name)
+			if err != nil {
+				t.Fatalf("read ignored %s: %v", f.name, err)
+			}
+			b.WriteString(cliCompatibleMigrationSQL(f.name, string(data)))
+			b.WriteString("\n")
+			b.WriteString(recordCursorSQL("ignored_schema_migrations", f.name, f.version, data))
+		}
+		flush()
+	}
+
+	applyRemainingChain()
+
+	assertConverged := func() {
+		requireDoltCount(t, dir,
+			`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps'`, "1")
+		requireDoltCount(t, dir,
+			`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisp_dependencies'`, "1")
+		requireDoltCount(t, dir,
+			`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps' AND COLUMN_NAME = 'no_history'`, "1")
+		requireDoltCount(t, dir,
+			`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps' AND COLUMN_NAME = 'started_at'`, "1")
+		requireDoltCount(t, dir,
+			`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisp_dependencies' AND INDEX_NAME = 'idx_wisp_dep_type'`, "1")
+
+		requireDoltCount(t, dir,
+			`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dependencies' AND COLUMN_NAME = 'id'`, "1")
+		requireDoltCount(t, dir,
+			`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dependencies' AND COLUMN_NAME = 'id' AND CONSTRAINT_NAME = 'PRIMARY'`, "1")
+		requireDoltCount(t, dir,
+			`SELECT COUNT(*) AS c FROM dependencies WHERE id IS NULL`, "0")
+		requireDoltCount(t, dir,
+			fmt.Sprintf(`SELECT COUNT(*) AS c FROM dependencies WHERE issue_id = %s AND id = %s`, doltSQLString(blockedID), doltSQLString(depID)), "1")
+		requireDoltCount(t, dir, `SELECT COUNT(*) AS c FROM dependencies`, "1")
+
+		requireDoltCount(t, dir,
+			fmt.Sprintf(`SELECT COUNT(*) AS c FROM issues WHERE id = %s AND is_blocked = 1`, doltSQLString(blockedID)), "1")
+		requireDoltCount(t, dir,
+			fmt.Sprintf(`SELECT COUNT(*) AS c FROM issues WHERE id = %s AND is_blocked = 0`, doltSQLString(blockerID)), "1")
+
+		requireDoltCount(t, dir,
+			fmt.Sprintf(`SELECT COUNT(*) AS c FROM schema_migrations WHERE version = %d`, LatestVersion()), "1")
+		requireDoltCount(t, dir,
+			fmt.Sprintf(`SELECT COUNT(*) AS c FROM ignored_schema_migrations WHERE version = %d`, LatestIgnoredVersion()), "1")
+	}
+	assertConverged()
+
+	// Re-open: a real second schema.MigrateUp on this database would see
+	// both cursors already at latest and do nothing at all -- this harness
+	// applies raw migration SQL text directly (see the package doc comment
+	// above) rather than calling MigrateUp, so it has no cursor gate to
+	// reproduce that no-op with. Re-running every migration file
+	// unconditionally is NOT an equivalent stand-in: some of the
+	// cliCompatibleMigrationSQL substitutes this test also relies on (0054's
+	// and 0055's direct-DDL lease-column bundles, in particular) are
+	// deliberately single-application fresh-bundle DDL, not idempotent, and
+	// re-running them is a false failure orthogonal to this branch's fixes.
+	//
+	// What a re-open must prove for THIS branch is narrower and more
+	// precise: (1) both repair-detection helpers, queried fresh against live
+	// state, find nothing left to do -- proving ensureDependenciesIDColumn's
+	// and the wisp-tables repair's target state is fully converged, not just
+	// "ran once and happened to look right"; and (2) the three frozen
+	// migration files this branch's fixes actually touch (0047, 0053, 0056)
+	// are safe to re-run on the now-converged database without error or
+	// drift, which their own guards (not this test) are responsible for.
+	if repair := dependenciesIDRepairSQLForTest(t, dir, blockedID, blockerID, depID); repair != "" {
+		t.Fatalf("dependencies id repair has more work after convergence, want none:\n%s", repair)
+	}
+	if repair := wispIsBlockedColumnSQLForTest(t, dir); repair != "" {
+		t.Fatalf("wisps.is_blocked repair has more work after convergence, want none:\n%s", repair)
+	}
+	for _, name := range []string{
+		"0047_recompute_mixed_is_blocked.up.sql",
+		"0053_repair_rig_wisps.up.sql",
+		"0056_events_value_columns_idempotent_longtext.up.sql",
+	} {
+		data, err := mainSource.files.ReadFile(mainSource.dir + "/" + name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		runDoltSQL(t, dir, string(data))
+	}
+	assertConverged()
 }
 
 func TestWispDependenciesSplitTargetBackfillPrefersWispOverIssueThroughDoltCLI(t *testing.T) {
