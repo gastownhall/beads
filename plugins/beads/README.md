@@ -15,16 +15,15 @@ This is the shared Claude, Codex, Copilot, and Pi plugin package for Beads. Each
 
 ## Pi
 
-Pi loads this directory as a package. Its extension resolves `skills/` relative to the installed extension, so discovery does not depend on the directory where Pi starts. When Pi starts or replaces a session, the extension runs `bd prime` in the session working directory and injects successful output as hidden model context. It refreshes that context again after manual, threshold, or overflow compaction. Non-Beads working directories are left unchanged.
-
-The installed Pi CLI accepts git repository roots, but does not document a git-subdirectory selector. For a durable install, keep a Beads checkout and install the plugin directory from that checkout:
+Install from a persistent Beads checkout. Pi records the local path, so keep the checkout after installation.
 
 ```bash
 git clone https://github.com/gastownhall/beads.git
-pi install /absolute/path/to/beads/plugins/beads
+cd beads
+pi install "$PWD/plugins/beads"
 ```
 
-To test a local Beads checkout without changing global Pi settings, point Pi at an isolated agent directory:
+For local development, use an isolated Pi agent directory:
 
 ```bash
 export PI_CODING_AGENT_DIR=/tmp/beads-pi
@@ -33,13 +32,7 @@ pi list
 pi
 ```
 
-Inside Pi, run `/skill:beads` to load the skill explicitly. The skill remains useful for commands and reference material, while `bd prime` is the current source of truth automatically injected by the lifecycle hooks.
-
-Run the focused extension test from the repository root with:
-
-```bash
-npm test --prefix plugins/beads
-```
+Inside Pi, run `/skill:beads` to load the skill explicitly.
 
 ## Codex Hooks
 
