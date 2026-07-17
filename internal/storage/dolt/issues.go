@@ -3,8 +3,10 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -206,6 +208,76 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 // currently has no assignee. Returns storage.ErrAlreadyClaimed if already claimed.
 // Delegates SQL work to issueops.ClaimIssueInTx; handles Dolt-specific concerns
 // (wisp routing, DOLT_ADD/COMMIT, cache invalidation).
+// claimLockTimeoutSecs bounds how long a claim waits for the advisory lock before
+// giving up (a heavily-contended goal, or a crashed holder whose session has not yet
+// been reaped by the server).
+const claimLockTimeoutSecs = 10
+
+// acquireClaimLock serializes concurrent claims on THIS database with a MySQL named
+// advisory lock, and returns a release func.
+//
+// Why this is needed: the claim itself is already a correct compare-and-swap
+// (`UPDATE ... WHERE status='open' AND assignee IN (”,NULL,actor)` + RowsAffected).
+// But under Dolt's snapshot isolation each concurrent claim transaction evaluates that
+// WHERE against its own start snapshot, so N racers all still see status='open', all
+// get RowsAffected==1, and all commit — the CAS is defeated by the isolation model.
+// MEASURED against a Dolt 2.1.10 sql-server, 6 concurrent claims of one open bead:
+// baseline 6/6 "win"; `SELECT ... FOR UPDATE` ALSO 6/6 (Dolt does not serialize on it);
+// GET_LOCK 1/6 (correct). So a named lock — not FOR UPDATE — is the serialization
+// primitive that works here. The lock name is per-database so claims in different repos
+// on a shared server never block each other. Held on a dedicated pinned connection for
+// the whole claim (find + CAS + DOLT_COMMIT); other claimers block on GET_LOCK until it
+// is released.
+func (s *DoltStore) acquireClaimLock(ctx context.Context) (*sql.Conn, func(), error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("claim lock: acquire connection: %w", err)
+	}
+	var dbName sql.NullString
+	if err := conn.QueryRowContext(ctx, "SELECT DATABASE()").Scan(&dbName); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("claim lock: resolve database: %w", err)
+	}
+	lockName := "bd_claim_" + dbName.String
+	var got sql.NullInt64
+	if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, ?)", lockName, claimLockTimeoutSecs).Scan(&got); err != nil {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("claim lock: GET_LOCK(%q): %w", lockName, err)
+	}
+	if !got.Valid || got.Int64 != 1 {
+		_ = conn.Close()
+		return nil, nil, fmt.Errorf("claim lock: could not acquire %q within %ds (contended)", lockName, claimLockTimeoutSecs)
+	}
+	release := func() {
+		// Release on a BOUNDED context so a hung server cannot block forever.
+		releaseCtx, cancel := context.WithTimeout(context.Background(), claimLockTimeoutSecs*time.Second)
+		defer cancel()
+		var released sql.NullInt64
+		err := conn.QueryRowContext(releaseCtx, "SELECT RELEASE_LOCK(?)", lockName).Scan(&released)
+		if err == nil && released.Valid && released.Int64 == 1 {
+			// Lock confirmed released; safe to return the session to the pool.
+			_ = conn.Close()
+			return
+		}
+		// The release did NOT confirm. GET_LOCK is session-scoped, and conn.Close() only returns
+		// the physical session to database/sql's pool — a pooled session that still holds the lock
+		// would block every future claim on this database. So physically drop the driver connection
+		// (ending the session and its advisory lock) and mark it bad so the pool discards it.
+		_ = conn.Raw(func(dc any) error {
+			if c, ok := dc.(io.Closer); ok {
+				_ = c.Close()
+			}
+			return driver.ErrBadConn
+		})
+		// Returning ErrBadConn from Raw already discards the underlying driver connection, but
+		// call Close explicitly so the *sql.Conn is unambiguously finalized on this path too
+		// (a no-op / ErrConnDone if Raw already closed it — never a double-release).
+		_ = conn.Close()
+	}
+
+	return conn, release, nil
+}
+
 func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) error {
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
 	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
@@ -213,7 +285,13 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 		return s.claimWisp(ctx, id, actor)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, release, err := s.acquireClaimLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -242,7 +320,13 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 
 // ClaimReadyIssue atomically claims the first ready issue matching filter.
 func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, release, err := s.acquireClaimLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
