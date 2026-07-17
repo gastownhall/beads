@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -89,6 +90,29 @@ func determineAutoRoutedRepoPath(ctx context.Context, store storage.DoltStorage)
 	}
 
 	return routing.DetermineTargetRepo(routingConfig, userRole, ".")
+}
+
+// printContributorRoutingNotice tells the user that `bd list`/`bd ready` are
+// reading from the auto-routed contributor planning store instead of the
+// local project database, so a short or empty result doesn't look like data
+// loss. Without this, a routed-but-unrelated (often empty) planning store
+// silently replaces the local result set with no indication anything changed:
+// `bd stats` and `bd show <id>` don't route (see openRoutedReadStore callers),
+// so they keep reporting the local project truth while list/ready go quiet —
+// exactly the split that makes this so hard to diagnose from the CLI alone.
+// Deliberately not gated on --quiet: this is safety-critical routing
+// information, not decorative output (matches the unconditional stderr
+// truncation notice in `bd ready --json`, not the --quiet-respecting
+// --skip-labels footer).
+func printContributorRoutingNotice(ctx context.Context, localStore storage.DoltStorage) {
+	countSuffix := ""
+	if localStore != nil {
+		if stats, err := localStore.GetStatistics(ctx); err == nil {
+			countSuffix = fmt.Sprintf(" (%d issue(s) in this project are hidden as a result)", stats.TotalIssues)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "note: beads.role=contributor routes bd list/ready to the contributor planning store, not this project%s.\n", countSuffix)
+	fmt.Fprintln(os.Stderr, "  Fix: git config beads.role maintainer")
 }
 
 // openRoutedReadStore opens the auto-routed target store for read commands.

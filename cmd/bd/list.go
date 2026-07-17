@@ -511,6 +511,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 	if routed {
 		defer func() { _ = routedStore.Close() }()
+		printContributorRoutingNotice(ctx, activeStore)
 		activeStore = routedStore
 	}
 

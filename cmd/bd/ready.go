@@ -198,6 +198,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 			if routed {
 				defer func() { _ = routedStore.Close() }()
+				printContributorRoutingNotice(ctx, activeStore)
 				activeStore = routedStore
 			}
 		}
