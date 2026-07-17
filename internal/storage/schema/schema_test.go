@@ -332,16 +332,15 @@ func TestEnsureWispDependenciesSplitTargetsAddsMissingAndBackfills(t *testing.T)
 	columnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
 	mock.ExpectQuery(tableQuery).WithArgs("wisp_dependencies").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	ddlByColumn := map[string]string{
+		"depends_on_issue_id": "ALTER TABLE wisp_dependencies ADD COLUMN depends_on_issue_id VARCHAR\\(255\\) NULL",
+		"depends_on_wisp_id":  "ALTER TABLE wisp_dependencies ADD COLUMN depends_on_wisp_id VARCHAR\\(255\\) NULL",
+		"depends_on_external": "ALTER TABLE wisp_dependencies ADD COLUMN depends_on_external VARCHAR\\(255\\) NULL",
+	}
 	for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
 		mock.ExpectQuery(columnQuery).WithArgs("wisp_dependencies", col).
 			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
-	}
-	for _, ddl := range []string{
-		"ALTER TABLE wisp_dependencies ADD COLUMN depends_on_issue_id VARCHAR\\(255\\) NULL",
-		"ALTER TABLE wisp_dependencies ADD COLUMN depends_on_wisp_id VARCHAR\\(255\\) NULL",
-		"ALTER TABLE wisp_dependencies ADD COLUMN depends_on_external VARCHAR\\(255\\) NULL",
-	} {
-		mock.ExpectExec(ddl).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(ddlByColumn[col]).WillReturnResult(sqlmock.NewResult(0, 0))
 	}
 	mock.ExpectQuery(columnQuery).WithArgs("wisp_dependencies", "depends_on_id").
 		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
@@ -455,10 +454,181 @@ func TestEnsureWispTablesForMigration0047DelegatesSplitTargetRepairWhenWispDepen
 		mock.ExpectQuery(columnQuery).WithArgs("wisp_dependencies", col).
 			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
 	}
+	// The legacy source column is already gone: a prior pass finished the
+	// backfill (or this database never had it), so there is nothing left to
+	// re-run and the repair no-ops here.
+	mock.ExpectQuery(columnQuery).WithArgs("wisp_dependencies", "depends_on_id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
 
 	if err := ensureWispTablesForMixedBlockedRecompute(context.Background(), db); err != nil {
 		t.Fatalf("ensureWispTablesForMixedBlockedRecompute: %v", err)
 	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestEnsureDependenciesIDColumnNoopWhenAlreadyFullyBackfilledAndKeyed(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// Steady state: id exists, nothing left to backfill (WHERE id IS NULL
+	// matches no rows), and id is already the primary key. Column presence
+	// alone must not short-circuit re-verification (#3/#6 re-entry), but a
+	// database that has already fully converged still does no work.
+	columnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
+	mock.ExpectQuery(columnQuery).WithArgs("dependencies", "id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(`(?s)SELECT issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external\s+FROM dependencies\s+WHERE id IS NULL`).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"}))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dependencies WHERE id IS NULL`).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	keyColumnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.KEY_COLUMN_USAGE.*TABLE_NAME = \? AND COLUMN_NAME = \? AND CONSTRAINT_NAME = 'PRIMARY'`
+	mock.ExpectQuery(keyColumnQuery).WithArgs("dependencies", "id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+
+	if err := ensureDependenciesIDColumn(context.Background(), db); err != nil {
+		t.Fatalf("ensureDependenciesIDColumn: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestEnsureDependenciesIDColumnBackfillsMissingIDsDeterministically(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// #4690: dependencies already in split-target/content-derived-key shape
+	// but never had its surrogate id column added at all (a different
+	// historical migration path than this repo's 0043). Add it, backfill
+	// with the same deterministic id every insert path and the post-migration
+	// rekey pass use, and restore id as the PRIMARY KEY (0043's exact
+	// canonical shape -- not just a plain NOT NULL column, see #4690's
+	// duplication risk without a key).
+	columnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
+	mock.ExpectQuery(columnQuery).WithArgs("dependencies", "id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`ALTER TABLE dependencies ADD COLUMN id CHAR\(36\) NULL`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	rows := sqlmock.NewRows([]string{"issue_id", "depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"}).
+		AddRow("iss-1", "iss-2", nil, nil).
+		AddRow("iss-3", nil, "wisp-1", nil)
+	mock.ExpectQuery(`(?s)SELECT issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external\s+FROM dependencies\s+WHERE id IS NULL`).
+		WillReturnRows(rows)
+
+	id1 := depid.New("iss-1", "iss-2")
+	mock.ExpectExec(`(?s)UPDATE dependencies SET id = \?\s+WHERE issue_id = \?.*depends_on_issue_id <=> \?.*depends_on_wisp_id <=> \?.*depends_on_external <=> \?`).
+		WithArgs(id1, "iss-1", "iss-2", nil, nil).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	id2 := depid.New("iss-3", "wisp-1")
+	mock.ExpectExec(`(?s)UPDATE dependencies SET id = \?\s+WHERE issue_id = \?.*depends_on_issue_id <=> \?.*depends_on_wisp_id <=> \?.*depends_on_external <=> \?`).
+		WithArgs(id2, "iss-3", nil, "wisp-1", nil).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dependencies WHERE id IS NULL`).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	keyColumnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.KEY_COLUMN_USAGE.*TABLE_NAME = \? AND COLUMN_NAME = \? AND CONSTRAINT_NAME = 'PRIMARY'`
+	mock.ExpectQuery(keyColumnQuery).WithArgs("dependencies", "id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`ALTER TABLE dependencies MODIFY COLUMN id CHAR\(36\) NOT NULL`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	tableConstraintQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLE_CONSTRAINTS.*TABLE_NAME = \? AND CONSTRAINT_TYPE = 'PRIMARY KEY'`
+	mock.ExpectQuery(tableConstraintQuery).WithArgs("dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`ALTER TABLE dependencies ADD PRIMARY KEY \(id\)`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := ensureDependenciesIDColumn(context.Background(), db); err != nil {
+		t.Fatalf("ensureDependenciesIDColumn: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestEnsureDependenciesIDColumnDropsExistingPrimaryKeyBeforeAddingID(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// The #4690 drifted shape can leave dependencies keyed some other way
+	// (e.g. a composite content-derived key predating the id column). A
+	// table carries only one PRIMARY KEY, so the existing one must be
+	// dropped before id can become it; the uk_dep_* natural-identity unique
+	// keys (0043) enforce the real uniqueness regardless.
+	columnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
+	mock.ExpectQuery(columnQuery).WithArgs("dependencies", "id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(`(?s)SELECT issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external\s+FROM dependencies\s+WHERE id IS NULL`).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"}))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dependencies WHERE id IS NULL`).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	keyColumnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.KEY_COLUMN_USAGE.*TABLE_NAME = \? AND COLUMN_NAME = \? AND CONSTRAINT_NAME = 'PRIMARY'`
+	mock.ExpectQuery(keyColumnQuery).WithArgs("dependencies", "id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`ALTER TABLE dependencies MODIFY COLUMN id CHAR\(36\) NOT NULL`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	tableConstraintQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLE_CONSTRAINTS.*TABLE_NAME = \? AND CONSTRAINT_TYPE = 'PRIMARY KEY'`
+	mock.ExpectQuery(tableConstraintQuery).WithArgs("dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectExec(`ALTER TABLE dependencies DROP PRIMARY KEY`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(`ALTER TABLE dependencies ADD PRIMARY KEY \(id\)`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := ensureDependenciesIDColumn(context.Background(), db); err != nil {
+		t.Fatalf("ensureDependenciesIDColumn: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestEnsureDependenciesIDColumnFailsClearlyOnTargetlessRowInsteadOfBrickingNotNullModify(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// ck_dep_one_target (0041) should make a targetless row unreachable in
+	// practice, but if one exists anyway the repair must fail with a clear,
+	// actionable error instead of leaving id NULL under a column callers
+	// assume is NOT NULL, or letting a blind MODIFY ... NOT NULL abort with a
+	// generic, confusing "column cannot be null" error.
+	columnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
+	mock.ExpectQuery(columnQuery).WithArgs("dependencies", "id").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`ALTER TABLE dependencies ADD COLUMN id CHAR\(36\) NULL`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	rows := sqlmock.NewRows([]string{"issue_id", "depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"}).
+		AddRow("iss-4", nil, nil, nil)
+	mock.ExpectQuery(`(?s)SELECT issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external\s+FROM dependencies\s+WHERE id IS NULL`).
+		WillReturnRows(rows)
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM dependencies WHERE id IS NULL`).
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+
+	err = ensureDependenciesIDColumn(context.Background(), db)
+	if err == nil {
+		t.Fatal("ensureDependenciesIDColumn = nil error, want a targetless-row error")
+	}
+	if !strings.Contains(err.Error(), "1 dependencies row") {
+		t.Fatalf("ensureDependenciesIDColumn error = %q, want it to name the unbackfillable row count", err)
+	}
+	// The MODIFY COLUMN ... NOT NULL was never attempted (no mock expectation
+	// registered for it above): mock.ExpectationsWereMet catches a stray call.
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
@@ -668,6 +838,108 @@ VALUES (%s, %s, %s, 'blocks', NOW(), 'tester', JSON_OBJECT());
 		fmt.Sprintf(`SELECT COUNT(*) AS c FROM issues WHERE id = %s AND is_blocked = 1`, doltSQLString(blockedID)), "1")
 	requireDoltCount(t, dir,
 		fmt.Sprintf(`SELECT COUNT(*) AS c FROM issues WHERE id = %s AND is_blocked = 0`, doltSQLString(blockerID)), "1")
+}
+
+// dependenciesIDRepairSQLForTest mirrors ensureDependenciesIDColumn's Go
+// logic (migration_repairs.go) for a single known row, since plain SQL
+// cannot reproduce depid.New's UUIDv5 derivation -- CLI tests seed exactly
+// one dependency edge and precompute its id in Go. Unlike the real Go
+// function, the "is this step already done" checks run here in Go (via a
+// live query against dir) rather than as SET/IF/PREPARE dynamic SQL: the
+// Dolt CLI does not reliably apply some prepared ALTER TABLE statements
+// (see cli_migrations.go's cliCompatibleMigrationSQL doc and its
+// per-migration direct-DDL substitutes for exactly this reason), so a
+// PREPARE'd ADD COLUMN here is invisible to the very next statement in the
+// same dolt sql -f batch. Deciding state in Go and emitting only direct
+// (unprepared) DDL sidesteps that CLI limitation while still being safe to
+// call more than once against the same database.
+func dependenciesIDRepairSQLForTest(t *testing.T, dir, issueID, targetIssueID, precomputedID string) string {
+	t.Helper()
+	hasID := queryDoltCSV(t, dir, `
+		SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dependencies' AND COLUMN_NAME = 'id'`)[0]["c"] != "0"
+	idIsPK := hasID && queryDoltCSV(t, dir, `
+		SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dependencies' AND COLUMN_NAME = 'id' AND CONSTRAINT_NAME = 'PRIMARY'`)[0]["c"] != "0"
+
+	var b strings.Builder
+	if !hasID {
+		b.WriteString("ALTER TABLE dependencies ADD COLUMN id CHAR(36) NULL;\n")
+		fmt.Fprintf(&b, `UPDATE dependencies SET id = %s
+WHERE issue_id = %s
+  AND depends_on_issue_id <=> %s
+  AND depends_on_wisp_id <=> NULL
+  AND depends_on_external <=> NULL
+  AND id IS NULL;
+`, doltSQLString(precomputedID), doltSQLString(issueID), doltSQLString(targetIssueID))
+	}
+	if !idIsPK {
+		b.WriteString("ALTER TABLE dependencies MODIFY COLUMN id CHAR(36) NOT NULL;\n")
+		hasAnyPK := queryDoltCSV(t, dir, `
+			SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dependencies' AND CONSTRAINT_TYPE = 'PRIMARY KEY'`)[0]["c"] != "0"
+		if hasAnyPK {
+			b.WriteString("ALTER TABLE dependencies DROP PRIMARY KEY;\n")
+		}
+		b.WriteString("ALTER TABLE dependencies ADD PRIMARY KEY (id);\n")
+	}
+	return b.String()
+}
+
+func TestMigration0053NoopsWhenDependenciesMissingIDColumnThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "rig-repair-no-dep-id")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create no-dep-id dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	// Reproduce #4690: dependencies already in split-target/content-derived
+	// key shape (the uk_dep_* unique keys on issue_id + typed target, added
+	// by 0043, already give it a natural identity), but its surrogate id
+	// column was never added at all by this clone's history (a different
+	// migration path than this repo's 0043, which both drops the older
+	// generated depends_on_id column AND adds id in the same step). Seed one
+	// ordinary (non-rig) edge -- zero rig wisps exist, matching the
+	// reporter's confirmed-safe-to-no-op precondition -- and drop id,
+	// leaving the table keyless (Dolt supports this; the uk_dep_* unique
+	// keys still enforce the real identity).
+	const sourceID = "schema-cli-0053-source"
+	const targetID = "schema-cli-0053-target"
+	seedSQL := fmt.Sprintf(`
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES (%s, 'source', '', '', '', '', 'open', 2, 'task'),
+       (%s, 'target', '', '', '', '', 'open', 2, 'task');
+INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
+VALUES (%s, %s, %s, 'blocks', NOW(), 'tester', JSON_OBJECT());
+ALTER TABLE dependencies DROP PRIMARY KEY;
+ALTER TABLE dependencies DROP COLUMN id;
+DELETE FROM schema_migrations WHERE version = 53;
+`,
+		doltSQLString(sourceID), doltSQLString(targetID),
+		doltSQLString(depid.New(sourceID, targetID)), doltSQLString(sourceID), doltSQLString(targetID))
+	runDoltSQL(t, dir, seedSQL)
+
+	// dependenciesIDRepairSQLForTest mirrors ensureDependenciesIDColumn's Go
+	// logic (add the column, backfill, then restore it as the PRIMARY KEY --
+	// #2's fix, not just a plain NOT NULL column) for this one known edge.
+	repairID := depid.New(sourceID, targetID)
+	runDoltSQL(t, dir, dependenciesIDRepairSQLForTest(t, dir, sourceID, targetID, repairID))
+
+	migrationSQL, err := mainSource.files.ReadFile("migrations/0053_repair_rig_wisps.up.sql")
+	if err != nil {
+		t.Fatalf("read 0053 migration: %v", err)
+	}
+	runDoltSQL(t, dir, string(migrationSQL))
+
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dependencies' AND COLUMN_NAME = 'id'`, "1")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dependencies' AND COLUMN_NAME = 'id' AND CONSTRAINT_NAME = 'PRIMARY'`, "1")
+	requireDoltCount(t, dir,
+		fmt.Sprintf(`SELECT COUNT(*) AS c FROM dependencies WHERE issue_id = %s AND id = %s`, doltSQLString(sourceID), doltSQLString(repairID)), "1")
 }
 
 func TestWispDependenciesSplitTargetBackfillPrefersWispOverIssueThroughDoltCLI(t *testing.T) {
