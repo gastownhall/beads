@@ -373,6 +373,97 @@ func TestPreMigrationRepairScopedToMain0053(t *testing.T) {
 	}
 }
 
+func TestPreMigrationRepairScopedToMain0047(t *testing.T) {
+	// #4695/#4176: the repair must not fire for other versions or for the
+	// ignored source; nil DB proves no queries are attempted.
+	if err := mainSource.preMigrationRepair(context.Background(), nil, 46); err != nil {
+		t.Fatalf("main v46 repair = %v, want nil no-op", err)
+	}
+	if err := ignoredSource.preMigrationRepair(context.Background(), nil, 47); err != nil {
+		t.Fatalf("ignored v47 repair = %v, want nil no-op", err)
+	}
+}
+
+func TestPreMigrationRepairDispatchesMain47ToWispTableRepair(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	tableQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
+	mock.ExpectQuery(tableQuery).WithArgs("wisps").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS wisps`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(tableQuery).WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS wisp_dependencies`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := mainSource.preMigrationRepair(context.Background(), db, 47); err != nil {
+		t.Fatalf("main v47 repair: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestEnsureWispTablesForMigration0047CreatesMissingTables(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// #4695/#4176: a clone whose main cursor arrives at 0047 with the wisp
+	// tables entirely absent (dolt_ignore'd, never synced) must have them
+	// created at the canonical shape before 0047's frozen recompute runs.
+	tableQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
+	mock.ExpectQuery(tableQuery).WithArgs("wisps").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS wisps \(`).WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(tableQuery).WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS wisp_dependencies \(`).WillReturnResult(sqlmock.NewResult(0, 0))
+
+	if err := ensureWispTablesForMixedBlockedRecompute(context.Background(), db); err != nil {
+		t.Fatalf("ensureWispTablesForMixedBlockedRecompute: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestEnsureWispTablesForMigration0047DelegatesSplitTargetRepairWhenWispDependenciesExists(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	tableQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES.*TABLE_NAME = \?`
+	columnQuery := `(?s)SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME = \? AND COLUMN_NAME = \?`
+	// wisps already exists: skip creating it.
+	mock.ExpectQuery(tableQuery).WithArgs("wisps").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	// wisp_dependencies already exists too: delegate to the same split-target
+	// repair migration 0053 relies on, rather than recreating it.
+	mock.ExpectQuery(tableQuery).WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	mock.ExpectQuery(tableQuery).WithArgs("wisp_dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	for _, col := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
+		mock.ExpectQuery(columnQuery).WithArgs("wisp_dependencies", col).
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+	}
+
+	if err := ensureWispTablesForMixedBlockedRecompute(context.Background(), db); err != nil {
+		t.Fatalf("ensureWispTablesForMixedBlockedRecompute: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 func TestIgnoredMigration0011CleansOrphanedChildCountersShape(t *testing.T) {
 	sql, err := os.ReadFile("migrations/ignored/0011_cleanup_orphaned_child_counters.up.sql")
 	if err != nil {
@@ -525,6 +616,58 @@ INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (%s, 7);
 		`SELECT COUNT(*) AS c FROM child_counters WHERE parent_id = 'schema-cli-rig' AND last_child = 7`, "1")
 	requireDoltCount(t, dir,
 		`SELECT COUNT(*) AS c FROM wisp_child_counters WHERE parent_id = 'schema-cli-rig'`, "0")
+}
+
+func TestMigration0047RepairsMissingWispTablesThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "mixed-blocked-repair-no-wisps")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create no-wisps dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	// Reproduce #4695/#4176: a clone whose main cursor arrives at 0047 with
+	// the (dolt_ignore'd, never-synced) wisp tables entirely absent. Seed a
+	// normal issue-to-issue block edge so the recompute has real work to do.
+	const blockerID = "schema-cli-0047-blocker"
+	const blockedID = "schema-cli-0047-blocked"
+	seedSQL := fmt.Sprintf(`
+DROP TABLE IF EXISTS wisp_child_counters;
+DROP TABLE IF EXISTS wisp_comments;
+DROP TABLE IF EXISTS wisp_events;
+DROP TABLE IF EXISTS wisp_dependencies;
+DROP TABLE IF EXISTS wisp_labels;
+DROP TABLE IF EXISTS wisps;
+DELETE FROM schema_migrations WHERE version = 47;
+INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type)
+VALUES (%s, 'blocker', '', '', '', '', 'open', 2, 'task'),
+       (%s, 'blocked', '', '', '', '', 'open', 2, 'task');
+INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
+VALUES (%s, %s, %s, 'blocks', NOW(), 'tester', JSON_OBJECT());
+`,
+		doltSQLString(blockerID), doltSQLString(blockedID),
+		doltSQLString(depid.New(blockedID, blockerID)), doltSQLString(blockedID), doltSQLString(blockerID))
+
+	migrationSQL, err := mainSource.files.ReadFile("migrations/0047_recompute_mixed_is_blocked.up.sql")
+	if err != nil {
+		t.Fatalf("read 0047 migration: %v", err)
+	}
+	// The repair DDL that ensureWispTablesForMixedBlockedRecompute issues in
+	// Go (plain CREATE TABLE IF NOT EXISTS, no PREPARE) precedes the frozen
+	// migration text, exactly mirroring preMigrationRepair's ordering.
+	repairSQL := wispsTableDDLForMigration0047 + "\n" + wispDependenciesTableDDLForMigration0047 + "\n"
+	runDoltSQL(t, dir, seedSQL+"\n"+repairSQL+string(migrationSQL))
+
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps'`, "1")
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisp_dependencies'`, "1")
+	requireDoltCount(t, dir,
+		fmt.Sprintf(`SELECT COUNT(*) AS c FROM issues WHERE id = %s AND is_blocked = 1`, doltSQLString(blockedID)), "1")
+	requireDoltCount(t, dir,
+		fmt.Sprintf(`SELECT COUNT(*) AS c FROM issues WHERE id = %s AND is_blocked = 0`, doltSQLString(blockerID)), "1")
 }
 
 func TestWispDependenciesSplitTargetBackfillPrefersWispOverIssueThroughDoltCLI(t *testing.T) {
@@ -1076,11 +1219,13 @@ func TestRunMigrationsStderrOutput(t *testing.T) {
 	stderr = &buf
 	defer func() { stderr = orig }()
 
-	// Bounded below migration 53: that version's preMigrationRepair issues real
-	// INFORMATION_SCHEMA probes (see TestPreMigrationRepairScopedToMain0053),
-	// which mockDB.QueryRowContext doesn't support. This test only exercises
-	// the stderr line, not the repair path.
-	n, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 52, false)
+	// Bounded below migration 47: that version's preMigrationRepair (and 53's)
+	// issues real INFORMATION_SCHEMA probes (see
+	// TestPreMigrationRepairScopedToMain0047 /
+	// TestPreMigrationRepairScopedToMain0053), which mockDB.QueryRowContext
+	// doesn't support. This test only exercises the stderr line, not the
+	// repair path.
+	n, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 46, false)
 	if err != nil {
 		t.Fatalf("runMigrations: %v", err)
 	}
@@ -1107,18 +1252,19 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	stderr = &bytes.Buffer{}
 	defer func() { stderr = orig }()
 
-	// Bounded below migration 53 for the same reason as
+	// Bounded below migration 47 for the same reason as
 	// TestRunMigrationsStderrOutput: mockDB can't answer the real
-	// INFORMATION_SCHEMA queries preMigrationRepair issues for that version.
-	main, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 52, false)
+	// INFORMATION_SCHEMA queries preMigrationRepair issues from that version
+	// (and from 53) onward.
+	main, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 46, false)
 	if err != nil {
 		t.Fatalf("runMigrations(mainSource): %v", err)
 	}
 	// Same upTo cap as the mainSource call: the source-threading regression
 	// this test guards (hardcoding mainSource) is only detectable when both
 	// calls share a bound, so their counts collapse to equal under the bug.
-	// ignoredSource has 11 migrations, so 52 is a no-op on correct behavior.
-	ignored, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 52, false)
+	// ignoredSource has 11 migrations, so 46 is a no-op on correct behavior.
+	ignored, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 46, false)
 	if err != nil {
 		t.Fatalf("runMigrations(ignoredSource): %v", err)
 	}
