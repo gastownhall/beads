@@ -705,6 +705,13 @@ func TestEvaluatorMetadataQueries(t *testing.T) {
 			},
 		},
 		{
+			name:  "metadata.jira/sprint=Q1",
+			query: "metadata.jira/sprint=Q1",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.MetadataFields != nil && f.MetadataFields["jira/sprint"] == "Q1"
+			},
+		},
+		{
 			name:  "metadata combined with status",
 			query: "status=open AND metadata.team=platform",
 			expectFilter: func(f *types.IssueFilter) bool {
