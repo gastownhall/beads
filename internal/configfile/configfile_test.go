@@ -630,9 +630,17 @@ func TestProxiedServerClientInfo_ResolvedPaths(t *testing.T) {
 }
 
 // TestGetBackendAllowlist verifies the allowlist semantics: the SQL backends
-// (postgres, mysql, sqlite) are honored; every other value (empty, legacy,
-// genuinely unknown) falls back to Dolt. This is the guard behind backend selection
-// — a typo in metadata.json must fail safe to Dolt, never to an unintended backend.
+// (postgres, mysql, sqlite-with-sqlite_path) are honored; every other value (empty,
+// legacy, genuinely unknown) falls back to Dolt. This is the guard behind backend
+// selection — a typo in metadata.json must fail safe to Dolt, never to an
+// unintended backend.
+//
+// The "stale sqlite value" case is a load-bearing regression guard (bd-oyvc2.7,
+// regression from #4601): pre-#3151 workspaces still carry backend:"sqlite" in
+// metadata.json but have operated as Dolt ever since SQLite was removed. Honoring
+// the bare field would provision a fresh empty SQLite database over live Dolt data
+// (false-empty). New-era `bd init --backend=sqlite` always writes sqlite_path, which
+// is the positive marker that makes "sqlite" honored.
 func TestGetBackendAllowlist(t *testing.T) {
 	fallsBackToDolt := []struct {
 		name string
@@ -641,6 +649,8 @@ func TestGetBackendAllowlist(t *testing.T) {
 		{name: "explicit dolt", cfg: &Config{Backend: BackendDolt}},
 		{name: "empty backend", cfg: &Config{Backend: ""}},
 		{name: "legacy config", cfg: &Config{}},
+		{name: "stale sqlite value", cfg: &Config{Backend: BackendSQLite}},
+		{name: "stale sqlite value with legacy database field", cfg: &Config{Backend: BackendSQLite, Database: "beads.db"}},
 		{name: "unknown backend", cfg: &Config{Backend: "mystery"}},
 	}
 	for _, tt := range fallsBackToDolt {
@@ -651,12 +661,43 @@ func TestGetBackendAllowlist(t *testing.T) {
 		})
 	}
 
-	honored := []string{BackendPostgres, BackendMySQL, BackendSQLite}
-	for _, backend := range honored {
-		t.Run(backend+" honored", func(t *testing.T) {
-			cfg := &Config{Backend: backend}
-			if got := cfg.GetBackend(); got != backend {
-				t.Errorf("GetBackend() = %q, want %q", got, backend)
+	honored := []struct {
+		name string
+		cfg  *Config
+		want string
+	}{
+		{name: "postgres honored", cfg: &Config{Backend: BackendPostgres}, want: BackendPostgres},
+		{name: "mysql honored", cfg: &Config{Backend: BackendMySQL}, want: BackendMySQL},
+		{name: "sqlite honored with sqlite_path", cfg: &Config{Backend: BackendSQLite, SQLitePath: "beads.db"}, want: BackendSQLite},
+		{name: "sqlite honored with custom sqlite_path", cfg: &Config{Backend: BackendSQLite, SQLitePath: "issues/tracker.db"}, want: BackendSQLite},
+	}
+	for _, tt := range honored {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetBackend(); got != tt.want {
+				t.Errorf("GetBackend() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHasStaleSQLiteBackend verifies detection of the legacy pre-#3151
+// backend:"sqlite" marker (no sqlite_path) that GetBackend resolves to Dolt.
+func TestHasStaleSQLiteBackend(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  *Config
+		want bool
+	}{
+		{name: "nil config", cfg: nil, want: false},
+		{name: "legacy stale sqlite", cfg: &Config{Backend: BackendSQLite}, want: true},
+		{name: "new-era sqlite with sqlite_path", cfg: &Config{Backend: BackendSQLite, SQLitePath: "beads.db"}, want: false},
+		{name: "dolt", cfg: &Config{Backend: BackendDolt}, want: false},
+		{name: "empty", cfg: &Config{}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.HasStaleSQLiteBackend(); got != tt.want {
+				t.Errorf("HasStaleSQLiteBackend() = %v, want %v", got, tt.want)
 			}
 		})
 	}

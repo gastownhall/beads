@@ -57,6 +57,9 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 		// message below.
 		return nil, fmt.Errorf("load %s: %w", configfile.ConfigPath(beadsDir), err)
 	}
+	if cfg != nil {
+		warnStaleSQLiteBackend(cfg)
+	}
 	if cfg != nil && cfg.GetBackend() == configfile.BackendPostgres {
 		// Postgres needs no CGO (pure-Go pgx), so it works in the nocgo build too.
 		return postgres.NewFromConfig(ctx, beadsDir)

@@ -110,6 +110,9 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 		// metadata.json (cfg == nil, err == nil) keeps the embedded default.
 		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
 	}
+	if cfg != nil {
+		warnStaleSQLiteBackend(cfg)
+	}
 	if cfg != nil && cfg.GetBackend() == configfile.BackendPostgres {
 		return postgres.NewFromConfig(ctx, beadsDir)
 	}

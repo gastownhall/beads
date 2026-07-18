@@ -2394,6 +2394,16 @@ func TestInitBackendFlag(t *testing.T) {
 		if cfg.Backend != configfile.BackendSQLite {
 			t.Errorf("Expected backend %q, got %q", configfile.BackendSQLite, cfg.Backend)
 		}
+		// sqlite_path is the positive new-era marker that distinguishes a real
+		// SQLite workspace from pre-#3151 legacy metadata whose stale
+		// backend:"sqlite" must keep resolving to Dolt (bd-oyvc2.7). init must
+		// always write it, and GetBackend must honor the pair.
+		if cfg.SQLitePath == "" {
+			t.Error("bd init --backend=sqlite must persist sqlite_path (positive marker, bd-oyvc2.7)")
+		}
+		if got := cfg.GetBackend(); got != configfile.BackendSQLite {
+			t.Errorf("GetBackend() = %q, want %q for an init-created SQLite workspace", got, configfile.BackendSQLite)
+		}
 	})
 
 	// Postgres is a recognized backend now: it must not be rejected as unknown,

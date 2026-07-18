@@ -41,6 +41,45 @@ func TestNewDoltStoreFromConfig_NoMetadata(t *testing.T) {
 	defer store.Close()
 }
 
+// TestNewDoltStoreFromConfig_StaleSQLiteMetadataOpensDolt pins the bd-oyvc2.7
+// regression (introduced by #4601): a legacy workspace whose metadata.json still
+// says backend:"sqlite" from the pre-#3151 SQLite era (no sqlite_path — the
+// positive marker `bd init --backend=sqlite` always writes) must open its Dolt
+// database, not provision a fresh empty SQLite database that false-empties every
+// issue and divorces new writes.
+func TestNewDoltStoreFromConfig_StaleSQLiteMetadataOpensDolt(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+
+	beadsDir := t.TempDir()
+
+	// Simulate the legacy metadata shape: backend "sqlite", legacy database
+	// field, no sqlite_path.
+	cfg := &configfile.Config{
+		Database: "beads.db",
+		Backend:  configfile.BackendSQLite,
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("failed to save config: %v", err)
+	}
+
+	store, err := newDoltStoreFromConfig(t.Context(), beadsDir)
+	if err != nil {
+		t.Fatalf("newDoltStoreFromConfig failed (stale sqlite metadata must open Dolt): %v", err)
+	}
+	defer store.Close()
+
+	// The workspace must be Dolt-backed: embedded dolt data exists and no
+	// SQLite database was provisioned.
+	if _, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); err != nil {
+		t.Errorf("expected embedded dolt data dir, got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, "beads.db")); !os.IsNotExist(err) {
+		t.Error("stale sqlite metadata must not provision .beads/beads.db")
+	}
+}
+
 // TestEmbeddedOpen_EmptyDatabaseRejected verifies that embeddeddolt.Open fails
 // with a clear error when called with an empty database name, rather than
 // deferring to a confusing "no database selected" SQL error.

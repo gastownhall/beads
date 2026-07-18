@@ -291,6 +291,21 @@ func loadEnvironment() {
 	}
 }
 
+var staleSQLiteBackendWarned bool
+
+// warnStaleSQLiteBackend prints a one-line notice when metadata.json carries the
+// legacy backend:"sqlite" marker from the pre-#3151 SQLite era (no sqlite_path).
+// GetBackend resolves such configs to Dolt — the backend these workspaces have
+// actually been running since SQLite was removed — so bd opens the Dolt database
+// as before; the notice nudges the user to clean up the stale field (bd-oyvc2.7).
+func warnStaleSQLiteBackend(cfg *configfile.Config) {
+	if staleSQLiteBackendWarned || !cfg.HasStaleSQLiteBackend() {
+		return
+	}
+	staleSQLiteBackendWarned = true
+	fmt.Fprintln(os.Stderr, "Notice: .beads/metadata.json has legacy backend:\"sqlite\" (no sqlite_path); opening the Dolt database as usual. Remove the stale \"backend\" field to silence this, or run 'bd init --backend=sqlite --reinit-local' to actually use SQLite.")
+}
+
 var sharedServerEmbeddedMismatchWarned bool
 
 // warnSharedServerEmbeddedMismatch detects the case where shared-server mode
@@ -1140,6 +1155,7 @@ var rootCmd = &cobra.Command{
 		}
 		if cfg != nil {
 			warnSharedServerEmbeddedMismatch(cfg)
+			warnStaleSQLiteBackend(cfg)
 			doltCfg.ProxiedServer = cfg.IsDoltProxiedServerMode()
 			proxiedServerMode = doltCfg.ProxiedServer
 			if cmdCtx != nil {

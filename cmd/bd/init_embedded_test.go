@@ -1386,6 +1386,11 @@ func TestEmbeddedInit(t *testing.T) {
 		if cfg.Backend != configfile.BackendSQLite {
 			t.Errorf("backend: got %q, want %q", cfg.Backend, configfile.BackendSQLite)
 		}
+		// sqlite_path is the positive marker separating a real SQLite workspace
+		// from stale pre-#3151 backend:"sqlite" metadata (bd-oyvc2.7).
+		if cfg.SQLitePath == "" {
+			t.Error("init --backend=sqlite must persist sqlite_path")
+		}
 
 		// Postgres is recognized, not an unknown backend: it fails only because the
 		// required connection config is absent (bdEnv strips any ambient DSN).

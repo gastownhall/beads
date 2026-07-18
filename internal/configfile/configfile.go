@@ -17,7 +17,7 @@ const ConfigFileName = "metadata.json"
 
 type Config struct {
 	Database string `json:"database"`
-	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default), "postgres", "mysql", or "sqlite". Read via GetBackend().
+	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default), "postgres", "mysql", or "sqlite" (honored only with sqlite_path set). Read via GetBackend().
 
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
@@ -250,9 +250,17 @@ func (c *Config) GetCapabilities() BackendCapabilities {
 }
 
 // GetBackend returns the configured storage backend. Only the explicitly-allowlisted
-// non-default backends ("postgres", "mysql") are honored; "", "dolt", and any legacy
-// or unknown value resolve to dolt so the default path stays byte-identical and a
-// typo fails safe to Dolt.
+// non-default backends are honored: "postgres", "mysql", and "sqlite" — the latter
+// only when sqlite_path is also set, the positive marker that `bd init
+// --backend=sqlite` always writes. Everything else — "", "dolt", unknown values, and
+// a bare backend:"sqlite" without sqlite_path — resolves to dolt so the default path
+// stays byte-identical and a typo fails safe to Dolt.
+//
+// The bare-sqlite rule protects pre-#3151 workspaces whose metadata.json still says
+// backend:"sqlite" but which have operated as Dolt ever since SQLite was removed:
+// honoring the stale field would provision a fresh empty SQLite database next to the
+// live Dolt data, making every issue vanish (false-empty) and divorcing new writes
+// (bd-oyvc2.7, regression from #4601). See HasStaleSQLiteBackend.
 func (c *Config) GetBackend() string {
 	if c != nil {
 		switch c.Backend {
@@ -261,10 +269,23 @@ func (c *Config) GetBackend() string {
 		case BackendMySQL:
 			return BackendMySQL
 		case BackendSQLite:
-			return BackendSQLite
+			if c.SQLitePath != "" {
+				return BackendSQLite
+			}
+			// Legacy stale marker (pre-#3151, no sqlite_path): fall through to Dolt.
 		}
 	}
 	return BackendDolt
+}
+
+// HasStaleSQLiteBackend reports whether metadata.json carries the legacy
+// backend:"sqlite" marker without the sqlite_path field that `bd init
+// --backend=sqlite` always writes. Such configs predate the removal of the
+// original SQLite backend (#3151); the workspace has been running on Dolt, and
+// GetBackend resolves it to dolt (bd-oyvc2.7). Callers can use this to suggest
+// removing the stale field.
+func (c *Config) HasStaleSQLiteBackend() bool {
+	return c != nil && c.Backend == BackendSQLite && c.SQLitePath == ""
 }
 
 // GetSQLitePath returns the SQLite database file path (relative to the beads dir, or
