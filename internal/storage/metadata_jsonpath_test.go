@@ -12,6 +12,8 @@ func TestJSONMetadataPath(t *testing.T) {
 		{"gc.routed_to", `$."gc.routed_to"`},
 		{"gc.scope.ref", `$."gc.scope.ref"`},
 		{"jira/sprint", `$."jira/sprint"`},
+		{`ke"y`, `$."ke\"y"`},
+		{`ke\y`, `$."ke\\y"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.key, func(t *testing.T) {

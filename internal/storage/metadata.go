@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // NormalizeMetadataValue converts metadata values to a validated JSON string.
@@ -206,9 +207,7 @@ func ValidateMetadataSchema(metadata json.RawMessage, schema MetadataSchemaConfi
 
 // validMetadataKeyRe validates metadata key names for use in JSON path expressions.
 // Allows alphanumeric, underscore, dot (dotted keys like "jira.sprint"), and
-// slash (path-style keys like "jira/sprint"). Keys are quoted by
-// JSONMetadataPath, which is why `"` and `\` stay disallowed: they would need
-// escaping inside the quoted path leg.
+// slash (path-style keys like "jira/sprint").
 var validMetadataKeyRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_./]*$`)
 
 // ValidateMetadataKey checks that a metadata key is safe for use in JSON path
@@ -225,9 +224,11 @@ func ValidateMetadataKey(key string) error {
 // metadata key. The key is always quoted so that "gc.routed_to" produces
 // '$."gc.routed_to"' instead of '$.gc.routed_to' (which dolt interprets as a
 // nested path: {gc: {routed_to: ...}}); quoting is valid for plain keys too,
-// so no character list needs to stay in sync with validMetadataKeyRe. The key
-// is spliced in without escaping, which is safe only because
-// ValidateMetadataKey rejects `"` and `\`.
+// so no character list needs to stay in sync with validMetadataKeyRe.
+// Backslashes and quotes are escaped so the function is correct for any key,
+// not just keys that already passed ValidateMetadataKey.
 func JSONMetadataPath(key string) string {
-	return `$."` + key + `"`
+	return `$."` + jsonPathEscaper.Replace(key) + `"`
 }
+
+var jsonPathEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)

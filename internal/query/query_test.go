@@ -1,7 +1,6 @@
 package query
 
 import (
-	"strings"
 	"testing"
 	"time"
 
@@ -714,6 +713,13 @@ func TestEvaluatorMetadataQueries(t *testing.T) {
 			},
 		},
 		{
+			name:  "metadata.Sprint=Q1 preserves key case",
+			query: "metadata.Sprint=Q1",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.MetadataFields != nil && f.MetadataFields["Sprint"] == "Q1"
+			},
+		},
+		{
 			name:  "metadata combined with status",
 			query: "status=open AND metadata.team=platform",
 			expectFilter: func(f *types.IssueFilter) bool {
@@ -760,8 +766,9 @@ func TestEvaluatorMetadataQueries(t *testing.T) {
 // "metadata.<key>=<value>". The lexer's identifier alphabet and the storage
 // key regex are maintained independently; a character admitted to the regex
 // but not to isIdentChar would produce keys that store fine but are
-// unqueryable (the bug this test guards against). The parser lowercases
-// field names, so the filter key is the lowercased form of the query key.
+// unqueryable (the bug this test guards against). Metadata keys are
+// case-sensitive JSON keys, so the filter key must preserve the query key's
+// case even though field names are otherwise case-insensitive.
 func TestMetadataKeysAreQueryable(t *testing.T) {
 	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
 
@@ -775,7 +782,7 @@ func TestMetadataKeysAreQueryable(t *testing.T) {
 			t.Errorf("key %q is valid per ValidateMetadataKey but not queryable: %v", key, err)
 			continue
 		}
-		if result.Filter.MetadataFields[strings.ToLower(key)] != "v" {
+		if result.Filter.MetadataFields[key] != "v" {
 			t.Errorf("key %q is valid per ValidateMetadataKey but query parsed to filter %+v", key, result.Filter)
 		}
 	}
