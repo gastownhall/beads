@@ -206,25 +206,30 @@ func ValidateMetadataSchema(metadata json.RawMessage, schema MetadataSchemaConfi
 }
 
 // validMetadataKeyRe validates metadata key names for use in JSON path expressions.
-// Allows alphanumeric, underscore, and dot (for nested paths like "jira.sprint").
-var validMetadataKeyRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.]*$`)
+// Allows alphanumeric, underscore, dot (dotted keys like "jira.sprint"), and
+// slash (path-style keys like "jira/sprint"). Keys containing dots or slashes
+// are quoted by JSONMetadataPath, which is why `"` and `\` stay disallowed:
+// they would need escaping inside the quoted path leg.
+var validMetadataKeyRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_./]*$`)
 
 // ValidateMetadataKey checks that a metadata key is safe for use in JSON path
 // expressions. Keys must start with a letter or underscore and contain only
-// alphanumeric characters, underscores, and dots.
+// alphanumeric characters, underscores, dots, and slashes.
 func ValidateMetadataKey(key string) error {
 	if !validMetadataKeyRe.MatchString(key) {
-		return fmt.Errorf("invalid metadata key %q: must match [a-zA-Z_][a-zA-Z0-9_.]*", key)
+		return fmt.Errorf("invalid metadata key %q: must match [a-zA-Z_][a-zA-Z0-9_./]*", key)
 	}
 	return nil
 }
 
 // JSONMetadataPath returns a MySQL/Dolt JSON path expression for the given
-// metadata key. Keys containing dots are quoted so that "gc.routed_to"
-// produces '$."gc.routed_to"' instead of '$.gc.routed_to' (which dolt
-// interprets as a nested path: {gc: {routed_to: ...}}).
+// metadata key. Keys containing dots or slashes are quoted so that
+// "gc.routed_to" produces '$."gc.routed_to"' instead of '$.gc.routed_to'
+// (which dolt interprets as a nested path: {gc: {routed_to: ...}}), and
+// "jira/sprint" produces '$."jira/sprint"' (unquoted, the slash is a path
+// syntax error).
 func JSONMetadataPath(key string) string {
-	if strings.Contains(key, ".") {
+	if strings.ContainsAny(key, "./") {
 		return `$."` + key + `"`
 	}
 	return "$." + key

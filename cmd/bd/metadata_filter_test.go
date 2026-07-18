@@ -226,6 +226,8 @@ func TestValidateMetadataKey(t *testing.T) {
 		{"team", false},
 		{"story_points", false},
 		{"jira.sprint", false},
+		{"jira/sprint", false},
+		{"a/b/c", false},
 		{"_private", false},
 		{"CamelCase", false},
 		{"a1b2c3", false},

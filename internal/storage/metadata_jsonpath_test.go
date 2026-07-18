@@ -26,6 +26,14 @@ func TestJSONMetadataPathMultipleDots(t *testing.T) {
 	}
 }
 
+func TestJSONMetadataPathSlashKey(t *testing.T) {
+	got := JSONMetadataPath("jira/sprint")
+	want := `$."jira/sprint"`
+	if got != want {
+		t.Errorf("JSONMetadataPath(%q) = %q, want %q", "jira/sprint", got, want)
+	}
+}
+
 func TestJSONMetadataPathUnderscoredKey(t *testing.T) {
 	got := JSONMetadataPath("my_field")
 	want := "$.my_field"
