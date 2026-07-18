@@ -1,9 +1,11 @@
 package query
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -750,6 +752,32 @@ func TestEvaluatorMetadataQueries(t *testing.T) {
 				t.Errorf("RequiresPredicate = %v, want %v for %q", result.RequiresPredicate, tt.requiresPredicate, tt.query)
 			}
 		})
+	}
+}
+
+// TestMetadataKeysAreQueryable enforces the cross-package invariant that
+// every key accepted by storage.ValidateMetadataKey can be queried as
+// "metadata.<key>=<value>". The lexer's identifier alphabet and the storage
+// key regex are maintained independently; a character admitted to the regex
+// but not to isIdentChar would produce keys that store fine but are
+// unqueryable (the bug this test guards against). The parser lowercases
+// field names, so the filter key is the lowercased form of the query key.
+func TestMetadataKeysAreQueryable(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	for c := rune(' '); c <= '~'; c++ {
+		key := "a" + string(c) + "b"
+		if storage.ValidateMetadataKey(key) != nil {
+			continue
+		}
+		result, err := EvaluateAt("metadata."+key+"=v", now)
+		if err != nil {
+			t.Errorf("key %q is valid per ValidateMetadataKey but not queryable: %v", key, err)
+			continue
+		}
+		if result.Filter.MetadataFields[strings.ToLower(key)] != "v" {
+			t.Errorf("key %q is valid per ValidateMetadataKey but query parsed to filter %+v", key, result.Filter)
+		}
 	}
 }
 
