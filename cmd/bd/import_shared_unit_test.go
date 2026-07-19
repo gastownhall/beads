@@ -117,6 +117,131 @@ func TestFilterStaleImportIssuesReportsTieConflicts(t *testing.T) {
 	}
 }
 
+// GH#4901: plan.NewIDs must cover rows with no local match, including the
+// "first import into an empty db" case, which used to short-circuit before
+// ever populating it.
+func TestFilterStaleImportIssuesReportsNewIDs(t *testing.T) {
+	base := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+
+	t.Run("mixed_new_and_existing", func(t *testing.T) {
+		store := &fakeImportIssueLookupStore{issues: []*types.Issue{
+			{ID: "bd-existing", Title: "t", UpdatedAt: base},
+		}}
+		incoming := []*types.Issue{
+			{ID: "bd-existing", Title: "t", UpdatedAt: base},
+			{ID: "bd-new", Title: "brand new", UpdatedAt: base},
+		}
+		_, _, plan, err := filterStaleImportIssues(context.Background(), store, incoming)
+		if err != nil {
+			t.Fatalf("filterStaleImportIssues: %v", err)
+		}
+		if len(plan.NewIDs) != 1 || plan.NewIDs[0] != "bd-new" {
+			t.Fatalf("plan.NewIDs = %#v, want [bd-new]", plan.NewIDs)
+		}
+	})
+
+	t.Run("all_new_no_local_matches", func(t *testing.T) {
+		store := &fakeImportIssueLookupStore{} // empty db: nothing matches
+		incoming := []*types.Issue{
+			{ID: "bd-a", Title: "a", UpdatedAt: base},
+			{ID: "bd-b", Title: "b", UpdatedAt: base},
+		}
+		_, _, plan, err := filterStaleImportIssues(context.Background(), store, incoming)
+		if err != nil {
+			t.Fatalf("filterStaleImportIssues: %v", err)
+		}
+		if len(plan.NewIDs) != 2 {
+			t.Fatalf("plan.NewIDs = %#v, want both bd-a and bd-b", plan.NewIDs)
+		}
+	})
+}
+
+// GH#4901: re-importing a byte-identical snapshot must classify every row
+// as unchanged, not as a create.
+func TestClassifyDryRunImport(t *testing.T) {
+	base := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+
+	t.Run("identical_snapshot_reports_zero_creates", func(t *testing.T) {
+		store := &fakeImportIssueLookupStore{issues: []*types.Issue{
+			{ID: "bd-a", Title: "a", Status: types.StatusOpen, UpdatedAt: base},
+			{ID: "bd-b", Title: "b", Status: types.StatusOpen, UpdatedAt: base},
+		}}
+		incoming := []*types.Issue{
+			{ID: "bd-a", Title: "a", Status: types.StatusOpen, UpdatedAt: base},
+			{ID: "bd-b", Title: "b", Status: types.StatusOpen, UpdatedAt: base},
+		}
+		result, err := classifyDryRunImport(context.Background(), store, incoming, false)
+		if err != nil {
+			t.Fatalf("classifyDryRunImport: %v", err)
+		}
+		if result.Created != 0 {
+			t.Fatalf("Created = %d, want 0 (no row is actually new)", result.Created)
+		}
+		if result.Unchanged != 2 {
+			t.Fatalf("Unchanged = %d, want 2", result.Unchanged)
+		}
+		if result.Updated != 0 || result.Skipped != 0 {
+			t.Fatalf("Updated = %d, Skipped = %d, want both 0", result.Updated, result.Skipped)
+		}
+	})
+
+	t.Run("distinguishes_create_update_stale_unchanged", func(t *testing.T) {
+		store := &fakeImportIssueLookupStore{issues: []*types.Issue{
+			{ID: "bd-unchanged", Title: "same", Status: types.StatusOpen, UpdatedAt: base},
+			{ID: "bd-updated", Title: "old title", Status: types.StatusOpen, UpdatedAt: base},
+			{ID: "bd-stale", Title: "t", Status: types.StatusOpen, UpdatedAt: base.Add(time.Hour)},
+		}}
+		incoming := []*types.Issue{
+			{ID: "bd-unchanged", Title: "same", Status: types.StatusOpen, UpdatedAt: base},
+			{ID: "bd-updated", Title: "new title", Status: types.StatusOpen, UpdatedAt: base.Add(time.Hour)},
+			{ID: "bd-stale", Title: "t", Status: types.StatusOpen, UpdatedAt: base},
+			{ID: "bd-created", Title: "brand new", Status: types.StatusOpen, UpdatedAt: base},
+		}
+		result, err := classifyDryRunImport(context.Background(), store, incoming, false)
+		if err != nil {
+			t.Fatalf("classifyDryRunImport: %v", err)
+		}
+		if result.Created != 1 || len(result.ImportedIDs) != 1 || result.ImportedIDs[0] != "bd-created" {
+			t.Fatalf("Created = %d, ImportedIDs = %#v, want [bd-created]", result.Created, result.ImportedIDs)
+		}
+		if result.Updated != 1 || len(result.UpdatedIssues) != 1 || result.UpdatedIssues[0].ID != "bd-updated" {
+			t.Fatalf("Updated = %d, UpdatedIssues = %#v, want [bd-updated]", result.Updated, result.UpdatedIssues)
+		}
+		if result.Skipped != 1 || len(result.StaleSkippedIDs) != 1 || result.StaleSkippedIDs[0] != "bd-stale" {
+			t.Fatalf("Skipped = %d, StaleSkippedIDs = %#v, want [bd-stale]", result.Skipped, result.StaleSkippedIDs)
+		}
+		if result.Unchanged != 1 {
+			t.Fatalf("Unchanged = %d, want 1 (bd-unchanged)", result.Unchanged)
+		}
+	})
+
+	t.Run("allow_stale_forces_every_row_through_as_created", func(t *testing.T) {
+		store := &fakeImportIssueLookupStore{issues: []*types.Issue{
+			{ID: "bd-stale", Title: "t", UpdatedAt: base.Add(time.Hour)},
+		}}
+		incoming := []*types.Issue{
+			{ID: "bd-stale", Title: "restored older snapshot", UpdatedAt: base},
+		}
+		result, err := classifyDryRunImport(context.Background(), store, incoming, true)
+		if err != nil {
+			t.Fatalf("classifyDryRunImport: %v", err)
+		}
+		if result.Created != 1 || result.Skipped != 0 {
+			t.Fatalf("Created = %d, Skipped = %d, want Created=1, Skipped=0 under --allow-stale", result.Created, result.Skipped)
+		}
+	})
+
+	t.Run("empty_input", func(t *testing.T) {
+		result, err := classifyDryRunImport(context.Background(), &fakeImportIssueLookupStore{}, nil, false)
+		if err != nil {
+			t.Fatalf("classifyDryRunImport: %v", err)
+		}
+		if result.Created != 0 || result.Updated != 0 || result.Unchanged != 0 || result.Skipped != 0 {
+			t.Fatalf("classifyDryRunImport(empty) = %#v, want all zero", result)
+		}
+	})
+}
+
 func TestImportRowChangeSummary(t *testing.T) {
 	local := &types.Issue{
 		Title: "t", Status: types.StatusClosed, Priority: 1,

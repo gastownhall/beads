@@ -171,6 +171,8 @@ type importChangePlan struct {
 	// every stored column for these (second-granularity timestamp tie),
 	// while their aux data still merges.
 	TieKeptLocal []string
+	// NewIDs lists incoming rows with no local match (would-create).
+	NewIDs []string
 }
 
 func filterStaleImportIssues(ctx context.Context, store storage.DoltStorage, issues []*types.Issue) ([]*types.Issue, []string, importChangePlan, error) {
@@ -202,6 +204,13 @@ func filterStaleImportIssues(ctx context.Context, store storage.DoltStorage, iss
 		}
 	}
 	if len(localByID) == 0 {
+		// Nothing matched locally, so every identifiable row here is new.
+		for _, issue := range issues {
+			if issue == nil || issue.ID == "" || issue.UpdatedAt.IsZero() {
+				continue
+			}
+			plan.NewIDs = append(plan.NewIDs, issue.ID)
+		}
 		return issues, nil, plan, nil
 	}
 
@@ -215,6 +224,7 @@ func filterStaleImportIssues(ctx context.Context, store storage.DoltStorage, iss
 		local, ok := localByID[issue.ID]
 		if !ok {
 			filtered = append(filtered, issue)
+			plan.NewIDs = append(plan.NewIDs, issue.ID)
 			continue
 		}
 		// Compare at second granularity: updated_at is DATETIME(0) in the
@@ -236,6 +246,35 @@ func filterStaleImportIssues(ctx context.Context, store storage.DoltStorage, iss
 		filtered = append(filtered, issue)
 	}
 	return filtered, skippedIDs, plan, nil
+}
+
+// classifyDryRunImport runs the same id lookup as a real import, without
+// writing anything, so --dry-run can report create/update/skip counts
+// instead of treating every row as a create (GH#4901).
+func classifyDryRunImport(ctx context.Context, store storage.DoltStorage, issues []*types.Issue, allowStale bool) (*ImportResult, error) {
+	if len(issues) == 0 {
+		return &ImportResult{}, nil
+	}
+	if allowStale {
+		// Matches the real path: --allow-stale skips the stale guard entirely.
+		return &ImportResult{Created: len(issues)}, nil
+	}
+
+	filtered, staleSkippedIDs, plan, err := filterStaleImportIssues(ctx, store, issues)
+	if err != nil {
+		return nil, err
+	}
+	changed := len(plan.Updates) + len(plan.TieKeptLocal)
+	return &ImportResult{
+		Created:         len(plan.NewIDs),
+		Updated:         changed,
+		Unchanged:       len(filtered) - len(plan.NewIDs) - changed,
+		Skipped:         len(staleSkippedIDs),
+		ImportedIDs:     plan.NewIDs,
+		StaleSkippedIDs: staleSkippedIDs,
+		UpdatedIssues:   plan.Updates,
+		TieKeptLocalIDs: plan.TieKeptLocal,
+	}, nil
 }
 
 // importRowChangeSummary summarizes the differences between the local issue
