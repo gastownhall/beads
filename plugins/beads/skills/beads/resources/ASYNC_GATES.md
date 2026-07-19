@@ -8,13 +8,12 @@
 
 ## Gate Types
 
-| Type | Await Syntax | Use Case |
-|------|--------------|----------|
-| Human | `human:<prompt>` | Cross-session human approval |
-| CI | `gh:run:<id>` | Wait for GitHub Actions completion |
-| PR | `gh:pr:<id>` | Wait for PR merge/close |
-| Timer | `timer:<duration>` | Deployment propagation delay |
-| Mail | `mail:<pattern>` | Wait for matching email |
+| Type | `--type` value | `--await-id` | Use Case |
+|------|-----------------|--------------|----------|
+| Human | `human` (default) | — | Cross-session human approval |
+| CI | `gh:run` | GitHub Actions run ID | Wait for GitHub Actions completion |
+| PR | `gh:pr` | PR number | Wait for PR merge/close |
+| Timer | `timer` | — | Deployment propagation delay |
 
 ---
 
@@ -22,32 +21,33 @@
 
 ```bash
 # Human approval gate
-bd gate create --await human:deploy-approval \
-  --title "Approve production deploy" \
+bd gate create --type human --blocks bd-abc \
+  --reason "Approve production deploy" \
   --timeout 4h
 
 # CI gate (GitHub Actions)
-bd gate create --await gh:run:123456789 \
-  --title "Wait for CI" \
+bd gate create --type gh:run --blocks bd-abc \
+  --await-id 123456789 \
   --timeout 30m
 
 # PR merge gate
-bd gate create --await gh:pr:42 \
-  --title "Wait for PR approval" \
+bd gate create --type gh:pr --blocks bd-abc \
+  --await-id 42 \
   --timeout 24h
 
 # Timer gate (deployment propagation)
-bd gate create --await timer:15m \
-  --title "Wait for deployment propagation"
+bd gate create --type timer --blocks bd-abc \
+  --timeout 15m
 ```
 
 **Required options**:
-- `--await <spec>` — Gate condition (see types above)
-- `--timeout <duration>` — Recommended: prevents forever-open gates
+- `--blocks <issue-id>` — Issue that stays blocked until the gate resolves
 
 **Optional**:
-- `--title <text>` — Human-readable description
-- `--notify <recipients>` — Email/beads addresses to notify
+- `--type <type>` — Gate type: `human`, `timer`, `gh:run`, `gh:pr` (default `human`)
+- `--await-id <id>` — Condition identifier (run ID, PR number, etc.)
+- `--reason <text>` — Human-readable description of what's being gated
+- `--timeout <duration>` — Recommended: prevents forever-open gates
 
 ---
 
@@ -57,31 +57,31 @@ bd gate create --await timer:15m \
 bd gate list              # All open gates
 bd gate list --all        # Include closed
 bd gate show <gate-id>    # Details for specific gate
-bd gate eval              # Auto-close elapsed/completed gates
-bd gate eval --dry-run    # Preview what would close
+bd gate check             # Evaluate open gates, close resolved ones
+bd gate check --dry-run   # Preview what would close
 ```
 
-**Auto-close behavior** (`bd gate eval`):
-- `timer:*` — Closes when duration elapsed
-- `gh:run:*` — Checks GitHub API, closes on success/failure
-- `gh:pr:*` — Checks GitHub API, closes on merge/close
-- `human:*` — Requires explicit `bd gate approve`
+**Auto-close behavior** (`bd gate check`):
+- `timer` — Closes when duration elapsed
+- `gh:run` — Checks GitHub API (`gh run view`), closes on success/failure
+- `gh:pr` — Checks GitHub API (`gh pr view`), closes on merge/close
+- `human` — Never auto-closes; requires explicit `bd gate resolve`
 
 ---
 
 ## Closing Gates
 
 ```bash
-# Human gates require explicit approval
-bd gate approve <gate-id>
-bd gate approve <gate-id> --comment "Reviewed and approved by Steve"
+# Human gates require explicit resolution
+bd gate resolve <gate-id>
+bd gate resolve <gate-id> --reason "Reviewed and approved by Steve"
 
-# Manual close (any gate)
-bd gate close <gate-id>
-bd gate close <gate-id> --reason "No longer needed"
+# Manual close (any gate) — there's no separate "close" subcommand,
+# resolve works on gates of any type
+bd gate resolve <gate-id> --reason "No longer needed"
 
 # Auto-close via evaluation
-bd gate eval
+bd gate check
 ```
 
 ---
@@ -90,22 +90,22 @@ bd gate eval
 
 1. **Always set timeouts**: Prevents forever-open gates
    ```bash
-   bd gate create --await human:... --timeout 24h
+   bd gate create --type human --blocks bd-abc --timeout 24h
    ```
 
-2. **Clear titles**: Title should indicate what's being gated
+2. **Clear reasons**: The `--reason` text should indicate what's being gated
    ```bash
-   --title "Approve Phase 2: Core Implementation"
+   --reason "Approve Phase 2: Core Implementation"
    ```
 
-3. **Eval periodically**: Run at session start to close elapsed gates
+3. **Check periodically**: Run at session start to close elapsed gates
    ```bash
-   bd gate eval
+   bd gate check
    ```
 
 4. **Clean up obsolete gates**: Close gates that are no longer needed
    ```bash
-   bd gate close <id> --reason "superseded by new approach"
+   bd gate resolve <id> --reason "superseded by new approach"
    ```
 
 5. **Check before creating**: Avoid duplicate gates
@@ -141,7 +141,7 @@ bd gate show <gate-id>
 gh run view <run-id>
 
 # Force close if stuck
-bd gate close <gate-id> --reason "manual override"
+bd gate resolve <gate-id> --reason "manual override"
 ```
 
 ### Can't find gate ID
