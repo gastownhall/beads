@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var (
@@ -42,6 +43,12 @@ Examples:
 
 		ctx := rootCtx
 		issueID := args[0]
+		if resolved, err := utils.ResolvePartialID(ctx, store, issueID); err == nil {
+			issueID = resolved
+		}
+		// Unresolved IDs fall through unchanged -- the queries below just find
+		// nothing and hit the existing "No history found" path (GH#3502), so we
+		// don't hard-error on an id that never existed.
 
 		if historyEvents {
 			events, err := collectHistoryEvents(ctx, issueID, historyLimit)

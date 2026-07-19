@@ -175,6 +175,33 @@ func TestEmbeddedHistory(t *testing.T) {
 		}
 	})
 
+	// ===== Short/partial issue ID resolution (GH#4868) =====
+
+	// issue.ID is "hi-<hash>"; the short id is the part after the prefix.
+	shortID := strings.TrimPrefix(issue.ID, "hi-")
+
+	t.Run("short_id_resolves_like_full_id", func(t *testing.T) {
+		out := bdHistory(t, bd, dir, shortID)
+		if strings.Contains(out, "No history found") {
+			t.Fatalf("bd history %s (short id) incorrectly reported no history: %s", shortID, out)
+		}
+		if !strings.Contains(out, issue.ID) {
+			t.Errorf("expected full issue ID %s in history output for short id %s: %s", issue.ID, shortID, out)
+		}
+
+		entries := bdHistoryJSON(t, bd, dir, shortID)
+		if len(entries) < 4 {
+			t.Errorf("expected at least 4 history entries via short id, got %d", len(entries))
+		}
+	})
+
+	t.Run("partial_id_resolves_via_events_flag_too", func(t *testing.T) {
+		events := bdHistoryJSON(t, bd, dir, shortID, "--events")
+		if len(events) == 0 {
+			t.Fatalf("expected non-empty history events via short id %s", shortID)
+		}
+	})
+
 	// ===== Nonexistent issue ID =====
 
 	t.Run("nonexistent_issue_empty_history", func(t *testing.T) {
