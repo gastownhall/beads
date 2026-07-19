@@ -534,7 +534,7 @@ var createCmd = &cobra.Command{
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate)
+		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate, cmd.Flags().Changed("waits-for-gate"))
 		if err != nil {
 			return HandleError("%v", err)
 		}

@@ -108,8 +108,8 @@ func TestParseDepSpecs(t *testing.T) {
 }
 
 func TestBuildWaitsFor(t *testing.T) {
-	t.Run("empty spawner returns nil", func(t *testing.T) {
-		got, err := buildWaitsFor("", "")
+	t.Run("empty spawner without explicit gate returns nil", func(t *testing.T) {
+		got, err := buildWaitsFor("", "", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -117,8 +117,22 @@ func TestBuildWaitsFor(t *testing.T) {
 			t.Fatalf("expected nil, got %+v", got)
 		}
 	})
+	t.Run("explicit gate without spawner returns error", func(t *testing.T) {
+		// --waits-for-gate set but --waits-for absent: must be rejected,
+		// not silently ignored. Applies to any gate value, including the
+		// valid "all-children" — the operator clearly intended a dep they
+		// did not get.
+		_, err := buildWaitsFor("", types.WaitsForAllChildren, true)
+		if err == nil {
+			t.Fatal("expected error when --waits-for-gate is explicit but spawner is empty")
+		}
+		_, err = buildWaitsFor("", "TOTALLY-BOGUS", true)
+		if err == nil {
+			t.Fatal("expected error when --waits-for-gate is explicit (invalid value) but spawner is empty")
+		}
+	})
 	t.Run("empty gate defaults to all-children", func(t *testing.T) {
-		got, err := buildWaitsFor("bd-1", "")
+		got, err := buildWaitsFor("bd-1", "", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -128,7 +142,7 @@ func TestBuildWaitsFor(t *testing.T) {
 		}
 	})
 	t.Run("any-children gate accepted", func(t *testing.T) {
-		got, err := buildWaitsFor("bd-1", types.WaitsForAnyChildren)
+		got, err := buildWaitsFor("bd-1", types.WaitsForAnyChildren, false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -137,13 +151,13 @@ func TestBuildWaitsFor(t *testing.T) {
 		}
 	})
 	t.Run("invalid gate rejected", func(t *testing.T) {
-		_, err := buildWaitsFor("bd-1", "bogus")
+		_, err := buildWaitsFor("bd-1", "bogus", false)
 		if err == nil {
 			t.Fatal("expected error for invalid gate")
 		}
 	})
 	t.Run("whitespace spawner treated as empty", func(t *testing.T) {
-		got, err := buildWaitsFor("   ", "")
+		got, err := buildWaitsFor("   ", "", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

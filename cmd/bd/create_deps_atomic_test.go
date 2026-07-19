@@ -167,9 +167,49 @@ func TestCreateDepsAtomicity(t *testing.T) {
 		}
 	})
 
+	// Defect A: --waits-for-gate without --waits-for silently no-ops.
+	// Before the fix, both commands below exited 0 and created a normal bead
+	// with no gate or dependency wired, regardless of the gate value (including
+	// invalid values). An operator who wrote --waits-for-gate believing they had
+	// armed a hold got a dispatchable bead instead.
+	t.Run("waits_for_gate_without_waits_for_is_rejected", func(t *testing.T) {
+		for _, gate := range []string{"all-children", "TOTALLY-BOGUS"} {
+			title := "gate-no-spawner-" + gate
+			out, err := runCreateDepsBDRaw(bd, dir, "create", title, "--json",
+				"--waits-for-gate", gate)
+			if err == nil {
+				t.Errorf("create --waits-for-gate %s (no --waits-for) exited 0 (was silently ignored); output:\n%s", gate, out)
+			}
+			if createDepsIssueTitles(t, bd, dir)[title] {
+				t.Errorf("issue %q persisted despite rejected command (should not exist)", title)
+			}
+		}
+	})
+
+	// Defect B: with both --waits-for and --waits-for-gate INVALID, the bead
+	// was written before validation ran, leaving a dep-less dispatchable orphan.
+	// After the refactor in create_atomic.go, validation runs pre-write; this
+	// test documents the contract and guards against regressions.
+	t.Run("invalid_waits_for_gate_value_is_rejected_before_write", func(t *testing.T) {
+		out, err := runCreateDepsBDRaw(bd, dir, "create", "invalid-gate-probe", "--json",
+			"--waits-for", blocker, "--waits-for-gate", "TOTALLY-BOGUS")
+		if err == nil {
+			t.Errorf("create with invalid --waits-for-gate exited 0; output:\n%s", out)
+		}
+		if !strings.Contains(out, "TOTALLY-BOGUS") {
+			t.Errorf("error should name the invalid gate value; got:\n%s", out)
+		}
+		if createDepsIssueTitles(t, bd, dir)["invalid-gate-probe"] {
+			t.Error("issue \"invalid-gate-probe\" persisted despite failed command (half-write: bead created before validation)")
+		}
+	})
+
 	t.Run("ready_never_offers_a_failed_create", func(t *testing.T) {
 		out := runCreateDepsBD(t, bd, dir, "ready", "--json")
-		for _, title := range []string{"orphan candidate", "partial dep issue", "waits-for orphan"} {
+		for _, title := range []string{
+			"orphan candidate", "partial dep issue", "waits-for orphan",
+			"gate-no-spawner-all-children", "gate-no-spawner-TOTALLY-BOGUS", "invalid-gate-probe",
+		} {
 			if strings.Contains(out, title) {
 				t.Errorf("bd ready offers %q, a bead whose create should have been rolled back:\n%s", title, out)
 			}
