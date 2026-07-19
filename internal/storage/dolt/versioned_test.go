@@ -1,9 +1,90 @@
 package dolt
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
+
+// nullOutTextColumns drops the NOT NULL constraint on the given issues text
+// columns and sets them to NULL for issueID, reproducing the NULL rows
+// dolt_history_issues can carry after a schema migration recreates a column
+// (GH#4867), without needing to replay a real migration.
+func nullOutTextColumns(t *testing.T, ctx context.Context, store *DoltStore, issueID string, cols ...string) {
+	t.Helper()
+	for _, col := range cols {
+		if _, err := store.db.ExecContext(ctx, "ALTER TABLE issues MODIFY COLUMN `"+col+"` TEXT"); err != nil {
+			t.Fatalf("failed to relax %s constraint: %v", col, err)
+		}
+	}
+	sets := make([]string, len(cols))
+	for i, col := range cols {
+		sets[i] = col + " = NULL"
+	}
+	stmt := "UPDATE issues SET " + strings.Join(sets, ", ") + " WHERE id = ?"
+	if _, err := store.db.ExecContext(ctx, stmt, issueID); err != nil {
+		t.Fatalf("failed to null out columns %v: %v", cols, err)
+	}
+}
+
+// TestHistory_NullTextColumns reproduces GH#4867: a schema migration that
+// recreates a column leaves NULL in dolt_history_issues for pre-migration
+// commits, which used to crash the scan. We relax the NOT NULL constraint
+// and write NULL directly instead of replaying a real migration.
+func TestHistory_NullTextColumns(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:                 "null-hist-1",
+		Title:              "Null history test",
+		Description:        "original description",
+		Design:             "original design",
+		AcceptanceCriteria: "original AC",
+		Notes:              "original notes",
+		Status:             types.StatusOpen,
+		Priority:           2,
+		IssueType:          types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("failed to create issue: %v", err)
+	}
+	if err := store.Commit(ctx, "initial commit"); err != nil {
+		t.Fatalf("failed to commit: %v", err)
+	}
+
+	nullOutTextColumns(t, ctx, store, issue.ID, "description", "design", "acceptance_criteria", "notes")
+	if err := store.Commit(ctx, "null text columns commit"); err != nil {
+		t.Fatalf("failed to commit NULL text columns: %v", err)
+	}
+
+	history, err := store.History(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("History() failed on NULL text columns: %v", err)
+	}
+	if len(history) < 2 {
+		t.Fatalf("expected at least 2 history entries, got %d", len(history))
+	}
+
+	latest := history[0].Issue
+	if latest.Description != "" {
+		t.Errorf("expected NULL description to coalesce to \"\", got %q", latest.Description)
+	}
+	if latest.Design != "" {
+		t.Errorf("expected NULL design to coalesce to \"\", got %q", latest.Design)
+	}
+	if latest.AcceptanceCriteria != "" {
+		t.Errorf("expected NULL acceptance_criteria to coalesce to \"\", got %q", latest.AcceptanceCriteria)
+	}
+	if latest.Notes != "" {
+		t.Errorf("expected NULL notes to coalesce to \"\", got %q", latest.Notes)
+	}
+}
 
 // TestCommitExists tests the CommitExists method.
 func TestCommitExists(t *testing.T) {

@@ -68,7 +68,11 @@ func (s *DoltStore) getIssueHistory(ctx context.Context, issueID string) ([]*iss
 	// but the query planner incorrectly assumes WHERE id=? returns one row.
 	rows, err := s.queryContext(ctx, `
 		SELECT
-			id, title, description, design, acceptance_criteria, notes,
+			id, title,
+			COALESCE(description, '') AS description,
+			COALESCE(design, '') AS design,
+			COALESCE(acceptance_criteria, '') AS acceptance_criteria,
+			COALESCE(notes, '') AS notes,
 			status, priority, issue_type, assignee, owner, created_by,
 			estimated_minutes, created_at, updated_at, closed_at, close_reason,
 			pinned, mol_type,
