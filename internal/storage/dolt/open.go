@@ -227,20 +227,10 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 		// falls back to 3307 which is wrong for standalone repos.
 		cfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 	}
-	// Resolve the server-mode credential (the MySQL username). A configured credential command
-	// takes precedence over the static user: bd runs the vendor-neutral helper and uses its
-	// short-lived token. Fail closed — never fall back to the static/root user when a helper was
-	// configured but failed, or a wrong identity could connect.
-	if cfg.ServerUser == "" {
-		if helper := fileCfg.GetDoltCredentialCommand(); helper != "" {
-			tok, err := resolveCredentialToken(helper)
-			if err != nil {
-				return fmt.Errorf("resolving dolt credential command: %w", err)
-			}
-			cfg.ServerUser = tok
-		} else {
-			cfg.ServerUser = fileCfg.GetDoltServerUser()
-		}
+	// Resolve the server-mode credential (the MySQL username) from the config and any
+	// trusted credential helper.
+	if err := resolveServerCredential(fileCfg, cfg); err != nil {
+		return err
 	}
 	// Populate password and TLS the same way the CLI CRUD path does. Without
 	// this, callers that rely on NewFromConfigWithOptions (e.g. doctor's
@@ -271,6 +261,53 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 			}
 		}
 	}
+	return nil
+}
+
+// resolveServerCredential populates cfg.ServerUser (and, on the hosted credential path,
+// cfg.CredentialCommand) when the caller left ServerUser unset. An explicitly pre-set
+// ServerUser bypasses the helper entirely and keeps the pure static sql.Open path.
+//
+// SECURITY: the credential helper is executed as a shell command (sh -c), so it is accepted
+// ONLY from a trusted user-local source (BEADS_DOLT_CREDENTIAL_COMMAND or the central per-user
+// server config) — never from the project's tracked .beads/metadata.json, which travels with a
+// git clone and would otherwise let a checked-out repository inject shell execution during
+// store open (CWE-78). This single gate covers both the open-time eager resolve and the
+// per-dial BeforeConnect path, because both key off cfg.CredentialCommand set here.
+//
+// A configured helper takes precedence over the static user and fails closed: if it errors,
+// store construction aborts rather than falling back to the static/root identity. The eager
+// token only SEEDS the DSN username so buildServerDSN/connStr stays parseable; every physical
+// dial re-resolves a fresh cached token via BeforeConnect (see connector.go), so the baked
+// username is inert and pooled connections survive token rotation.
+func resolveServerCredential(fileCfg *configfile.Config, cfg *Config) error {
+	if cfg.ServerUser != "" {
+		return nil
+	}
+	helper := configfile.TrustedDoltCredentialCommand()
+	if helper == "" {
+		// A tracked metadata.json may name a credential command, but bd will not run it.
+		// Warn so an operator who intended a helper moves it to a trusted source instead of
+		// silently getting the static-user fallback.
+		if fileCfg.DoltCredentialCommand != "" {
+			fmt.Fprint(os.Stderr,
+				"Warning: ignoring dolt_credential_command from project metadata.json for security.\n"+
+					"A credential helper is executed as a shell command, so it must come from a trusted\n"+
+					"user-local source: set BEADS_DOLT_CREDENTIAL_COMMAND or add dolt_credential_command to\n"+
+					"the central server config (~/.config/beads/server.json). Falling back to the static user.\n")
+		}
+		cfg.ServerUser = fileCfg.GetDoltServerUser()
+		return nil
+	}
+	// Open-time eager resolve: no dial context here, so use Background (the helper keeps its
+	// full credCommandTimeout cap). Per-dial resolves on the connector path thread the dial
+	// context so a deadline can abort the mint.
+	tok, err := resolveCredentialToken(context.Background(), helper)
+	if err != nil {
+		return fmt.Errorf("resolving dolt credential command: %w", err)
+	}
+	cfg.ServerUser = tok
+	cfg.CredentialCommand = helper
 	return nil
 }
 

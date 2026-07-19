@@ -344,14 +344,40 @@ func (c *Config) GetDoltServerUser() string {
 	return DefaultDoltServerUser
 }
 
-// GetDoltCredentialCommand returns the credential-helper command bd runs to obtain a
-// short-lived server-mode credential. Checks BEADS_DOLT_CREDENTIAL_COMMAND env first, then
-// config. Empty means no helper — the static BEADS_DOLT_SERVER_USER / credentials-file path applies.
-func (c *Config) GetDoltCredentialCommand() string {
+// TrustedDoltCredentialCommand returns the server-mode credential-helper command bd runs to
+// obtain a short-lived credential (presented as the MySQL username), resolved from a TRUSTED,
+// user-local source only, in priority order:
+//
+//  1. the BEADS_DOLT_CREDENTIAL_COMMAND environment variable, then
+//  2. the central per-user server config (BEADS_CENTRAL_CONFIG or ~/.config/beads/server.json).
+//
+// SECURITY: it deliberately IGNORES the dolt_credential_command field of a project's tracked
+// .beads/metadata.json. That file is committed and travels with a git clone, so honoring an
+// executable helper named there would let any checked-out repository run arbitrary shell code
+// through the credential runner (sh -c) during ordinary store open — a reachable CWE-78 OS
+// command injection. Project metadata may point bd at connection endpoints, never at an
+// executable to run; a helper must be established by the machine's operator out-of-band.
+//
+// Empty means no trusted helper is configured — the static BEADS_DOLT_SERVER_USER /
+// credentials-file path applies.
+func TrustedDoltCredentialCommand() string {
 	if v := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND"); v != "" {
 		return v
 	}
-	return c.DoltCredentialCommand
+	centralPath := os.Getenv("BEADS_CENTRAL_CONFIG")
+	if centralPath == "" {
+		centralPath = DefaultCentralConfigPath()
+	}
+	if centralPath != "" {
+		// A helper is strictly opt-in, so a missing or broken central config resolves to
+		// "no trusted helper" rather than surfacing an error here.
+		if central, err := LoadCentralConfig(centralPath); err == nil && central != nil {
+			if central.DoltCredentialCommand != "" {
+				return central.DoltCredentialCommand
+			}
+		}
+	}
+	return ""
 }
 
 // GetDoltDatabase returns the Dolt SQL database name.

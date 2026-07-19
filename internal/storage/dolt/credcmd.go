@@ -64,7 +64,7 @@ var (
 // resolveCredentialToken returns the bearer token for the given helper command, using a
 // process-level cache keyed by the command so repeated opens don't re-spawn the helper until
 // the token is near expiry. It is concurrency-safe.
-func resolveCredentialToken(command string) (string, error) {
+func resolveCredentialToken(ctx context.Context, command string) (string, error) {
 	now := time.Now()
 
 	credCacheMu.Lock()
@@ -75,7 +75,11 @@ func resolveCredentialToken(command string) (string, error) {
 	}
 	credCacheMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), credCommandTimeout)
+	// Derive the mint deadline from the caller's context (the dial context on the
+	// connector path), capped at credCommandTimeout. An expired dial deadline now
+	// aborts a slow or hung helper instead of blocking the caller for the full
+	// timeout; a Background caller (the open-time eager resolve) keeps the cap.
+	ctx, cancel := context.WithTimeout(ctx, credCommandTimeout)
 	defer cancel()
 	raw, err := credRunner(ctx, command)
 	if err != nil {
@@ -93,6 +97,17 @@ func resolveCredentialToken(command string) (string, error) {
 	credCache[command] = cachedCred{token: token, expires: expiry}
 	credCacheMu.Unlock()
 	return token, nil
+}
+
+// invalidateCredentialToken drops any cached token for command so the next resolve
+// re-runs the helper. Called when the server rejects a presented token (auth
+// failure) before its recorded expiry — e.g. a rotating credential revoked
+// mid-life — so a new dial re-mints instead of re-presenting the dead token until
+// its stale expiry. No-op if nothing is cached.
+func invalidateCredentialToken(command string) {
+	credCacheMu.Lock()
+	delete(credCache, command)
+	credCacheMu.Unlock()
 }
 
 // parseCredential extracts the token (and any expiry) from a helper's stdout. A JSON object

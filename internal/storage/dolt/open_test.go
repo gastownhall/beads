@@ -2,6 +2,8 @@ package dolt
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -196,7 +198,164 @@ func TestCLIDirUsesDbPathOutsideSharedServerMode(t *testing.T) {
 	}
 }
 
+func TestApplyResolvedConfig_SetsCredentialCommand(t *testing.T) {
+	const helper = "gasworks getToken beads --org o_1"
+
+	// applyResolvedConfig now resolves the credential helper from trusted sources only
+	// (BEADS_DOLT_CREDENTIAL_COMMAND env + central server config). Point the central path
+	// at an absent file by default so a real ~/.config/beads/server.json on the host can
+	// never leak into these tests; the central-path subtest overrides this with its own file.
+	t.Setenv("BEADS_CENTRAL_CONFIG", filepath.Join(t.TempDir(), "absent-server.json"))
+
+	t.Run("trusted env credential command threaded and eager token seeded", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", helper)
+		stubCredRunner(t, func(_ context.Context, _ string) ([]byte, error) {
+			return []byte(`{"access_token":"eager-tok","expires_in":300}`), nil
+		})
+		beadsDir := t.TempDir()
+		fileCfg := &configfile.Config{
+			Backend:      configfile.BackendDolt,
+			DoltMode:     configfile.DoltModeServer,
+			DoltDatabase: "beads_codex",
+		}
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+		if cfg.CredentialCommand != helper {
+			t.Fatalf("CredentialCommand = %q, want %q", cfg.CredentialCommand, helper)
+		}
+		if cfg.ServerUser != "eager-tok" {
+			t.Fatalf("ServerUser = %q, want the eager token %q", cfg.ServerUser, "eager-tok")
+		}
+	})
+
+	t.Run("trusted central config credential command is honored", func(t *testing.T) {
+		central := filepath.Join(t.TempDir(), "server.json")
+		if err := os.WriteFile(central, []byte(fmt.Sprintf(`{"dolt_credential_command":%q}`, helper)), 0o600); err != nil {
+			t.Fatalf("writing central config: %v", err)
+		}
+		t.Setenv("BEADS_CENTRAL_CONFIG", central)
+		stubCredRunner(t, func(_ context.Context, _ string) ([]byte, error) {
+			return []byte(`{"access_token":"central-tok","expires_in":300}`), nil
+		})
+		beadsDir := t.TempDir()
+		fileCfg := &configfile.Config{
+			Backend:      configfile.BackendDolt,
+			DoltMode:     configfile.DoltModeServer,
+			DoltDatabase: "beads_codex",
+		}
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+		if cfg.CredentialCommand != helper {
+			t.Fatalf("CredentialCommand = %q, want %q", cfg.CredentialCommand, helper)
+		}
+		if cfg.ServerUser != "central-tok" {
+			t.Fatalf("ServerUser = %q, want the central token %q", cfg.ServerUser, "central-tok")
+		}
+	})
+
+	t.Run("tracked project metadata credential command is ignored, never executed", func(t *testing.T) {
+		// Security regression: a repository-controlled .beads/metadata.json names a helper,
+		// but with no trusted source configured bd must NOT run it. It falls back to the
+		// static user and leaves cfg.CredentialCommand empty, so nothing reaches the sh -c
+		// runner at open time or per dial.
+		stubCredRunner(t, func(_ context.Context, cmd string) ([]byte, error) {
+			t.Fatalf("credential helper from project metadata must never run, but ran %q", cmd)
+			return nil, nil
+		})
+		beadsDir := t.TempDir()
+		fileCfg := &configfile.Config{
+			Backend:               configfile.BackendDolt,
+			DoltMode:              configfile.DoltModeServer,
+			DoltDatabase:          "beads_codex",
+			DoltCredentialCommand: helper, // repo-controlled; must be ignored
+		}
+		cfg := &Config{}
+
+		// Capture stderr to confirm the ignored-helper warning is surfaced.
+		oldStderr := os.Stderr
+		r, w, _ := os.Pipe()
+		os.Stderr = w
+
+		err := applyResolvedConfig(beadsDir, fileCfg, cfg)
+
+		w.Close()
+		os.Stderr = oldStderr
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+
+		if err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+		if cfg.CredentialCommand != "" {
+			t.Fatalf("CredentialCommand = %q, want empty (metadata helper must not be adopted)", cfg.CredentialCommand)
+		}
+		if cfg.ServerUser != fileCfg.GetDoltServerUser() {
+			t.Fatalf("ServerUser = %q, want the static fallback %q", cfg.ServerUser, fileCfg.GetDoltServerUser())
+		}
+		if !strings.Contains(buf.String(), "ignoring dolt_credential_command from project metadata.json") {
+			t.Fatalf("expected an ignored-helper security warning on stderr, got: %q", buf.String())
+		}
+	})
+
+	t.Run("explicit ServerUser bypasses the helper", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", helper)
+		stubCredRunner(t, func(_ context.Context, _ string) ([]byte, error) {
+			t.Fatal("helper must not run when ServerUser is pre-set")
+			return nil, nil
+		})
+		beadsDir := t.TempDir()
+		fileCfg := &configfile.Config{
+			Backend:      configfile.BackendDolt,
+			DoltMode:     configfile.DoltModeServer,
+			DoltDatabase: "beads_codex",
+		}
+		cfg := &Config{ServerUser: "preset"}
+
+		if err := applyResolvedConfig(beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+		if cfg.CredentialCommand != "" {
+			t.Fatalf("CredentialCommand = %q, want empty (static path preserved)", cfg.CredentialCommand)
+		}
+		if cfg.ServerUser != "preset" {
+			t.Fatalf("ServerUser = %q, want it left as %q", cfg.ServerUser, "preset")
+		}
+	})
+
+	t.Run("failing trusted helper aborts store construction (fail-closed)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", helper)
+		stubCredRunner(t, func(_ context.Context, _ string) ([]byte, error) {
+			return nil, fmt.Errorf("mint denied")
+		})
+		beadsDir := t.TempDir()
+		fileCfg := &configfile.Config{
+			Backend:      configfile.BackendDolt,
+			DoltMode:     configfile.DoltModeServer,
+			DoltDatabase: "beads_codex",
+		}
+		cfg := &Config{}
+
+		err := applyResolvedConfig(beadsDir, fileCfg, cfg)
+		if err == nil {
+			t.Fatal("expected a fail-closed error when the helper fails")
+		}
+		if !strings.Contains(err.Error(), "resolving dolt credential command") {
+			t.Fatalf("error = %q, want it to wrap %q", err.Error(), "resolving dolt credential command")
+		}
+	})
+}
+
 func TestApplyResolvedConfig(t *testing.T) {
+	// applyResolvedConfig resolves the credential helper from the central server config when
+	// no ServerUser is set; isolate it to an absent path so a host ~/.config/beads/server.json
+	// cannot make these non-credential cases run a helper.
+	t.Setenv("BEADS_CENTRAL_CONFIG", filepath.Join(t.TempDir(), "absent-server.json"))
 	t.Run("fills server config for legacy metadata without dolt_mode", func(t *testing.T) {
 		beadsDir := t.TempDir()
 		fileCfg := &configfile.Config{

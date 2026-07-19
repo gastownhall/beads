@@ -209,6 +209,57 @@ func TestApplyCentralDefaults_NilCentralIsNoOp(t *testing.T) {
 	}
 }
 
+func TestTrustedDoltCredentialCommand(t *testing.T) {
+	const helper = "gasworks getToken beads --org o_1"
+
+	t.Run("env var is the highest-priority trusted source", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", helper)
+		// A central config naming a different helper must still lose to the env var.
+		central := filepath.Join(t.TempDir(), "server.json")
+		writeCentralConfig(t, central, &Config{DoltCredentialCommand: "central-helper"})
+		t.Setenv("BEADS_CENTRAL_CONFIG", central)
+
+		if got := TrustedDoltCredentialCommand(); got != helper {
+			t.Fatalf("TrustedDoltCredentialCommand() = %q, want env value %q", got, helper)
+		}
+	})
+
+	t.Run("central server config is honored when no env var", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+		central := filepath.Join(t.TempDir(), "server.json")
+		writeCentralConfig(t, central, &Config{DoltCredentialCommand: helper})
+		t.Setenv("BEADS_CENTRAL_CONFIG", central)
+
+		if got := TrustedDoltCredentialCommand(); got != helper {
+			t.Fatalf("TrustedDoltCredentialCommand() = %q, want central value %q", got, helper)
+		}
+	})
+
+	t.Run("no trusted source yields empty; project metadata is never a source", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+		// Absent central config, and there is deliberately no parameter through which a
+		// project's tracked metadata.json could ever supply the helper.
+		t.Setenv("BEADS_CENTRAL_CONFIG", filepath.Join(t.TempDir(), "absent.json"))
+
+		if got := TrustedDoltCredentialCommand(); got != "" {
+			t.Fatalf("TrustedDoltCredentialCommand() = %q, want empty (no trusted helper)", got)
+		}
+	})
+
+	t.Run("broken central config resolves to no helper", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "")
+		central := filepath.Join(t.TempDir(), "server.json")
+		if err := os.WriteFile(central, []byte("{bad json"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_CENTRAL_CONFIG", central)
+
+		if got := TrustedDoltCredentialCommand(); got != "" {
+			t.Fatalf("TrustedDoltCredentialCommand() = %q, want empty (broken central is opt-out)", got)
+		}
+	})
+}
+
 func TestDefaultCentralConfigPath(t *testing.T) {
 	path := DefaultCentralConfigPath()
 	if path == "" {

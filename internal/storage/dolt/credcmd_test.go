@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 func TestParseCredential(t *testing.T) {
@@ -65,11 +67,11 @@ func TestResolveCredentialTokenCachesUntilExpiry(t *testing.T) {
 			time.Now().Add(time.Hour).Format(time.RFC3339))), nil
 	}
 
-	tok1, err := resolveCredentialToken("helper --x")
+	tok1, err := resolveCredentialToken(context.Background(), "helper --x")
 	if err != nil {
 		t.Fatalf("first resolve: %v", err)
 	}
-	tok2, err := resolveCredentialToken("helper --x")
+	tok2, err := resolveCredentialToken(context.Background(), "helper --x")
 	if err != nil {
 		t.Fatalf("second resolve: %v", err)
 	}
@@ -78,7 +80,7 @@ func TestResolveCredentialTokenCachesUntilExpiry(t *testing.T) {
 	}
 
 	// A different command is a different cache key → a fresh run.
-	if _, err := resolveCredentialToken("helper --y"); err != nil {
+	if _, err := resolveCredentialToken(context.Background(), "helper --y"); err != nil {
 		t.Fatalf("third resolve: %v", err)
 	}
 	if calls != 2 {
@@ -95,7 +97,93 @@ func TestResolveCredentialTokenPropagatesHelperError(t *testing.T) {
 	credRunner = func(_ context.Context, _ string) ([]byte, error) {
 		return nil, fmt.Errorf("boom")
 	}
-	if _, err := resolveCredentialToken("broken-helper"); err == nil {
+	if _, err := resolveCredentialToken(context.Background(), "broken-helper"); err == nil {
 		t.Fatal("expected an error when the helper fails")
+	}
+}
+
+// TestResolveCredentialTokenHonorsCallerContext is the follow-up-A teeth test: the
+// mint must abort when the caller's (dial) context deadline fires, instead of
+// blocking for the full credCommandTimeout. Reverting resolveCredentialToken to
+// context.Background() makes the blocking helper wait the full 30s and this fails.
+func TestResolveCredentialTokenHonorsCallerContext(t *testing.T) {
+	credCacheMu.Lock()
+	credCache = map[string]cachedCred{}
+	credCacheMu.Unlock()
+	orig := credRunner
+	t.Cleanup(func() { credRunner = orig })
+	// Models a slow/hung helper: blocks until its (derived) context is cancelled.
+	credRunner = func(ctx context.Context, _ string) ([]byte, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := resolveCredentialToken(ctx, "slow-helper")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected an error when the caller context deadline fires")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("resolve took %v — caller context was not honored (would block up to credCommandTimeout=%v)", elapsed, credCommandTimeout)
+	}
+}
+
+// TestInvalidateCredentialToken is the follow-up-B teeth test: after invalidation a
+// still-unexpired cached token is dropped so the next resolve re-mints. If
+// invalidateCredentialToken failed to delete, the third resolve would be a cache
+// hit and calls would stay at 1.
+func TestInvalidateCredentialToken(t *testing.T) {
+	credCacheMu.Lock()
+	credCache = map[string]cachedCred{}
+	credCacheMu.Unlock()
+	orig := credRunner
+	t.Cleanup(func() { credRunner = orig })
+	var calls int
+	credRunner = func(_ context.Context, _ string) ([]byte, error) {
+		calls++
+		return []byte(`{"access_token":"tok","expires_in":3600}`), nil
+	}
+
+	const cmd = "rotating-helper"
+	if _, err := resolveCredentialToken(context.Background(), cmd); err != nil {
+		t.Fatalf("first resolve: %v", err)
+	}
+	if _, err := resolveCredentialToken(context.Background(), cmd); err != nil {
+		t.Fatalf("second resolve: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 helper call before invalidation (long expiry cached), got %d", calls)
+	}
+
+	invalidateCredentialToken(cmd)
+
+	if _, err := resolveCredentialToken(context.Background(), cmd); err != nil {
+		t.Fatalf("post-invalidation resolve: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected a re-mint after invalidation, got calls=%d", calls)
+	}
+}
+
+// TestIsAuthError classifies the MySQL access-denied (1045) signal that drives
+// credential-cache invalidation, and rejects non-auth errors.
+func TestIsAuthError(t *testing.T) {
+	if !isAuthError(&mysql.MySQLError{Number: 1045, Message: "Access denied for user"}) {
+		t.Fatal("MySQL 1045 must be an auth error")
+	}
+	if isAuthError(&mysql.MySQLError{Number: 1213, Message: "deadlock found"}) {
+		t.Fatal("MySQL 1213 (deadlock) is not an auth error")
+	}
+	if !isAuthError(fmt.Errorf("Error 1045: Access denied for user 'x'@'y'")) {
+		t.Fatal("an access-denied string must match")
+	}
+	if isAuthError(fmt.Errorf("dial tcp: connection refused")) {
+		t.Fatal("connection refused is not an auth error")
+	}
+	if isAuthError(nil) {
+		t.Fatal("nil is not an auth error")
 	}
 }
