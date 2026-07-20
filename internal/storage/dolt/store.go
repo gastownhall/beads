@@ -1253,11 +1253,7 @@ func buildTestModeProductionPortPanic(cfg *Config) string {
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
 func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
-	// Clean stale circuit breaker files before checking — prevents leftover
-	// state from previous sessions poisoning fresh inits (GH#2598).
-	CleanStaleCircuitBreakerFiles()
-
-	breaker := maybeNewCircuitBreaker(cfg.ServerHost, cfg.ServerPort, cfg.Database)
+	breaker := initializeServerCircuitBreaker(cfg)
 
 	// Circuit breaker: fail-fast if the server is known to be down.
 	if breaker != nil && !breaker.Allow() {
@@ -1267,7 +1263,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	// Tracks server dir if we auto-started a server (for cleanup in Close, GH#2542).
 	var autoStartedDir string
-	trackAutoStartedServer := shouldStopAutoStartedServerOnClose(cfg)
+	trackAutoStartedServer := !cfg.ReadOnly && shouldStopAutoStartedServerOnClose(cfg)
 	resolvedBeadsDir := cfg.BeadsDir
 	if resolvedBeadsDir == "" {
 		resolvedBeadsDir = filepath.Dir(cfg.Path) // fallback: cfg.Path is .beads/dolt → parent is .beads/
@@ -1292,8 +1288,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		// Socket mode is excluded — auto-start creates a TCP listener, not a
 		// unix socket, so the DSN would still fail. Socket users are expected
 		// to manage their own server lifecycle.
-		canAutoStart := cfg.AutoStart && cfg.Path != "" &&
-			cfg.ServerSocket == "" && isLocalHost(cfg.ServerHost)
+		canAutoStart := serverOpenCanAutoStart(cfg)
 		if canAutoStart {
 			port, startedByUs, startErr := doltserver.EnsureRunningDetailed(resolvedBeadsDir)
 			if startErr != nil {
@@ -1441,12 +1436,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		}
 	}
 
-	if isLocalHost(cfg.ServerHost) && shouldPersistResolvedPortFile() {
+	if isLocalHost(cfg.ServerHost) {
 		beadsDir := cfg.BeadsDir
 		if beadsDir == "" && cfg.Path != "" {
 			beadsDir = filepath.Dir(cfg.Path)
 		}
-		_ = doltserver.EnsurePortFile(beadsDir, cfg.ServerPort)
+		_ = persistResolvedPortFile(cfg, beadsDir)
 	}
 
 	// All writers operate on main — transaction isolation via RunInTransaction
@@ -1461,6 +1456,34 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// close above. Must be the last thing before the success return.
 	storeReady = true
 	return store, nil
+}
+
+var (
+	cleanServerCircuitState = CleanStaleCircuitBreakerFiles
+	newServerCircuitBreaker = maybeNewCircuitBreaker
+	ensureResolvedPortFile  = doltserver.EnsurePortFile
+)
+
+func initializeServerCircuitBreaker(cfg *Config) *circuitBreaker {
+	if cfg.ReadOnly || os.Getenv("BEADS_TEST_MODE") == "1" {
+		return nil
+	}
+	// Clean stale circuit breaker files before checking — prevents leftover
+	// state from previous sessions poisoning fresh writable opens (GH#2598).
+	cleanServerCircuitState()
+	return newServerCircuitBreaker(cfg.ServerHost, cfg.ServerPort, cfg.Database)
+}
+
+func serverOpenCanAutoStart(cfg *Config) bool {
+	return !cfg.ReadOnly && cfg.AutoStart && cfg.Path != "" &&
+		cfg.ServerSocket == "" && isLocalHost(cfg.ServerHost)
+}
+
+func persistResolvedPortFile(cfg *Config, beadsDir string) error {
+	if cfg.ReadOnly || !shouldPersistResolvedPortFile() {
+		return nil
+	}
+	return ensureResolvedPortFile(beadsDir, cfg.ServerPort)
 }
 
 func shouldPersistResolvedPortFile() bool {

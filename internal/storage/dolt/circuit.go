@@ -82,10 +82,25 @@ func maybeNewCircuitBreaker(host string, port int, database string) *circuitBrea
 	return newCircuitBreaker(host, port, database)
 }
 
-// circuitBreakerDir is the dedicated directory for circuit breaker state files.
+// circuitBreakerDir is the production directory for circuit breaker state files.
 // Using a subdirectory avoids scanning all of /tmp (which may contain millions
 // of entries) when cleaning up stale breaker files on startup.
 const circuitBreakerDir = "/tmp/beads-circuit"
+
+const (
+	legacyCircuitBreakerFile = "/tmp/beads-dolt-circuit-0.json"
+	testCircuitBreakerDirEnv = "BEADS_TEST_CIRCUIT_DIR"
+)
+
+// circuitBreakerPaths returns production paths unless the test harness provides
+// a suite-owned circuit directory. The override redirects both current and
+// legacy state even when an individual test temporarily unsets BEADS_TEST_MODE.
+func circuitBreakerPaths() (dir, legacyFile string) {
+	if testDir := filepath.Clean(os.Getenv(testCircuitBreakerDirEnv)); filepath.IsAbs(testDir) {
+		return testDir, filepath.Join(testDir, "beads-dolt-circuit-0.json")
+	}
+	return circuitBreakerDir, legacyCircuitBreakerFile
+}
 
 // newCircuitBreaker creates a circuit breaker for the given Dolt server
 // host:port:database. The database name is included in the file path so each
@@ -107,12 +122,13 @@ func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 		filename = fmt.Sprintf("beads-dolt-circuit-%s-%d.json", safeHost, port)
 	}
 
-	_ = os.MkdirAll(circuitBreakerDir, 0755)
+	dir, _ := circuitBreakerPaths()
+	_ = os.MkdirAll(dir, 0755)
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
 		database: database,
-		filePath: filepath.Join(circuitBreakerDir, filename),
+		filePath: filepath.Join(dir, filename),
 	}
 }
 
@@ -324,13 +340,14 @@ func (cb *circuitBreaker) writeState(state circuitState) {
 //
 // Called during init to ensure a clean starting state (GH#2598).
 func CleanStaleCircuitBreakerFiles() {
+	dir, legacyFile := circuitBreakerPaths()
 	// Remove legacy files that lived directly in /tmp (before the subdirectory move).
 	// Direct path removal — no directory scan needed.
-	_ = os.Remove("/tmp/beads-dolt-circuit-0.json")
+	_ = os.Remove(legacyFile)
 
 	// Clean stale files in the dedicated subdirectory (fast — typically 0-2 files).
-	_ = os.MkdirAll(circuitBreakerDir, 0755)
-	cleanStaleCircuitBreakerFilesIn(circuitBreakerDir)
+	_ = os.MkdirAll(dir, 0755)
+	cleanStaleCircuitBreakerFilesIn(dir)
 }
 
 // cleanStaleCircuitBreakerFilesIn is the testable implementation of
