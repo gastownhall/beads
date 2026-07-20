@@ -147,6 +147,7 @@ func shouldStopAutoStartedServerOnClose(cfg *Config) bool {
 var _ storage.DoltStorage = (*DoltStore)(nil)
 var _ storage.RawDBAccessor = (*DoltStore)(nil)
 var _ storage.StoreLocator = (*DoltStore)(nil)
+var _ storage.ActiveDatabaseSizer = (*DoltStore)(nil)
 var _ storage.LifecycleManager = (*DoltStore)(nil)
 var _ storage.PendingCommitter = (*DoltStore)(nil)
 var _ storage.GarbageCollector = (*DoltStore)(nil)
@@ -166,6 +167,11 @@ type DoltStore struct {
 	mu            sync.RWMutex // Protects concurrent access
 	readOnly      bool         // True if opened in read-only mode
 	credentialKey []byte       // Random encryption key for federation credentials
+
+	// localActiveDatabaseDir is the exact active database directory when this
+	// store instance has authoritative local filesystem access. It is resolved
+	// once at construction; empty means sizing is unsupported for this instance.
+	localActiveDatabaseDir string
 
 	customStatusDetailedCache []types.CustomStatus
 	customStatusCache         []string
@@ -1077,6 +1083,36 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	return newServerMode(ctx, cfg)
 }
 
+// resolveLocalActiveDatabaseDir returns an authoritative local path only for
+// server configurations whose storage ownership is known. It deliberately
+// does not infer locality from Path, CLIDir, or filesystem existence: external
+// servers may leave unrelated client-local directories at those locations.
+func resolveLocalActiveDatabaseDir(cfg *Config) string {
+	if cfg == nil || cfg.BeadsDir == "" || cfg.Database == "" ||
+		cfg.Gateway || cfg.ProxiedServer || cfg.ServerSocket != "" ||
+		cfg.ServerTLS || !isLocalHost(cfg.ServerHost) {
+		return ""
+	}
+
+	// An endpoint supplied directly by the environment may be any server,
+	// including a container or tunnel on localhost. It is not proof that this
+	// process can inspect the server's data directory.
+	if os.Getenv("BEADS_DOLT_SERVER_PORT") != "" || os.Getenv("BEADS_DOLT_PORT") != "" {
+		return ""
+	}
+
+	if doltserver.IsSharedServerMode() {
+		return filepath.Join(doltserver.ResolveDoltDir(cfg.BeadsDir), cfg.Database)
+	}
+
+	// Owned mode plus effective auto-start authority is the affirmative proof
+	// that the configured data root belongs to this local beads instance.
+	if !cfg.AutoStart || doltserver.ResolveServerMode(cfg.BeadsDir) != doltserver.ServerModeOwned {
+		return ""
+	}
+	return filepath.Join(cfg.Path, cfg.Database)
+}
+
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
 func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
@@ -1220,21 +1256,22 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 
 	store := &DoltStore{
-		db:                   db,
-		dbPath:               cfg.Path,
-		beadsDir:             beadsDir,
-		database:             cfg.Database,
-		connStr:              connStr,
-		breaker:              breaker,
-		committerName:        cfg.CommitterName,
-		committerEmail:       cfg.CommitterEmail,
-		remote:               cfg.Remote,
-		branch:               "main",
-		remoteUser:           cfg.RemoteUser,
-		remotePassword:       cfg.RemotePassword,
-		serverMode:           true,
-		readOnly:             cfg.ReadOnly,
-		autoStartedServerDir: autoStartedDir,
+		db:                     db,
+		dbPath:                 cfg.Path,
+		beadsDir:               beadsDir,
+		database:               cfg.Database,
+		localActiveDatabaseDir: resolveLocalActiveDatabaseDir(cfg),
+		connStr:                connStr,
+		breaker:                breaker,
+		committerName:          cfg.CommitterName,
+		committerEmail:         cfg.CommitterEmail,
+		remote:                 cfg.Remote,
+		branch:                 "main",
+		remoteUser:             cfg.RemoteUser,
+		remotePassword:         cfg.RemotePassword,
+		serverMode:             true,
+		readOnly:               cfg.ReadOnly,
+		autoStartedServerDir:   autoStartedDir,
 	}
 
 	// Forward-drift guard runs on read-only AND writable opens. A binary older
@@ -1847,6 +1884,23 @@ func (s *DoltStore) CLIDir() string {
 		return ""
 	}
 	return filepath.Join(s.dbPath, s.database)
+}
+
+// ActiveDatabaseSize returns the approximate size of the active database.
+// External server instances have no authoritative local path and report the
+// capability as unsupported even if a stale client-local directory exists.
+func (s *DoltStore) ActiveDatabaseSize(ctx context.Context) (int64, error) {
+	if s.localActiveDatabaseDir == "" {
+		return 0, &storage.ErrUnsupported{
+			Op:      "ActiveDatabaseSize",
+			Backend: "dolt-server",
+		}
+	}
+	size, err := storage.MeasureDirectorySize(ctx, s.localActiveDatabaseDir)
+	if err != nil {
+		return 0, fmt.Errorf("measure active database directory %q: %w", s.localActiveDatabaseDir, err)
+	}
+	return size, nil
 }
 
 // DoltGC runs Dolt garbage collection to reclaim disk space.
