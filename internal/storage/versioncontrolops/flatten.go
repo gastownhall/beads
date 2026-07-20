@@ -15,7 +15,9 @@ import (
 //  6. Hard-reset main to the flattened branch
 //  7. Delete temp branch
 //
-// Callers should run DoltGC afterward to reclaim disk space from orphaned history.
+// Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
+// space from orphaned history — remote-tracking refs still anchor the
+// pre-flatten chain, and GC alone reclaims nothing while they exist (bd-agctw).
 //
 // conn must be a single database connection (not a pooled *sql.DB) since the
 // stored procedures rely on session-scoped state (current branch, working set).

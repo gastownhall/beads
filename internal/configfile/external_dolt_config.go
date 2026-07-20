@@ -1,8 +1,11 @@
 package configfile
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 )
@@ -18,8 +21,11 @@ type ExternalDoltConfig struct {
 	Socket          string        `json:"socket,omitempty"`
 	User            string        `json:"user,omitempty"`
 	TLSRequired     bool          `json:"tls_required,omitempty"`
+	TLSCACert       string        `json:"tls_ca_cert,omitempty"`
 	TLSCert         string        `json:"tls_cert,omitempty"`
 	TLSKey          string        `json:"tls_key,omitempty"`
+	TLSServerName   string        `json:"tls_server_name,omitempty"`
+	TLSSkipVerify   bool          `json:"tls_skip_verify,omitempty"`
 	KeepAlivePeriod time.Duration `json:"keep_alive_period,omitempty"`
 }
 
@@ -67,10 +73,70 @@ func (c ExternalDoltConfig) Validate() error {
 	if c.TLSKey != "" && !filepath.IsAbs(c.TLSKey) {
 		return fmt.Errorf("ExternalDoltConfig: TLSKey %q is not absolute", c.TLSKey)
 	}
+	if c.TLSCACert != "" && !filepath.IsAbs(c.TLSCACert) {
+		return fmt.Errorf("ExternalDoltConfig: TLSCACert %q is not absolute", c.TLSCACert)
+	}
+
+	if !c.TLSRequired {
+		switch {
+		case c.TLSCACert != "":
+			return errors.New("ExternalDoltConfig: TLSCACert set without TLSRequired")
+		case c.TLSCert != "" || c.TLSKey != "":
+			return errors.New("ExternalDoltConfig: TLSCert/TLSKey set without TLSRequired")
+		case c.TLSServerName != "":
+			return errors.New("ExternalDoltConfig: TLSServerName set without TLSRequired")
+		case c.TLSSkipVerify:
+			return errors.New("ExternalDoltConfig: TLSSkipVerify set without TLSRequired")
+		}
+	}
+
+	if c.TLSRequired && hasSocket && c.TLSServerName == "" && !c.TLSSkipVerify {
+		return errors.New("ExternalDoltConfig: TLSRequired over Socket needs TLSServerName or TLSSkipVerify")
+	}
 
 	if c.KeepAlivePeriod < 0 {
 		return fmt.Errorf("ExternalDoltConfig: KeepAlivePeriod %s is negative", c.KeepAlivePeriod)
 	}
 
 	return nil
+}
+
+func (c ExternalDoltConfig) TLSClientConfig() (*tls.Config, error) {
+	if !c.TLSRequired {
+		return nil, nil
+	}
+
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+
+	if c.TLSSkipVerify {
+		cfg.InsecureSkipVerify = true //nolint:gosec // G402: opt-in insecure transport via the TLSSkipVerify testing flag
+	} else {
+		name := c.TLSServerName
+		if name == "" {
+			name = c.Host
+		}
+		cfg.ServerName = name
+	}
+
+	if c.TLSCACert != "" {
+		pem, err := os.ReadFile(c.TLSCACert)
+		if err != nil {
+			return nil, fmt.Errorf("ExternalDoltConfig: read TLSCACert: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("ExternalDoltConfig: TLSCACert %q: no certificates parsed", c.TLSCACert)
+		}
+		cfg.RootCAs = pool
+	}
+
+	if c.TLSCert != "" {
+		crt, err := tls.LoadX509KeyPair(c.TLSCert, c.TLSKey)
+		if err != nil {
+			return nil, fmt.Errorf("ExternalDoltConfig: load client cert/key: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{crt}
+	}
+
+	return cfg, nil
 }

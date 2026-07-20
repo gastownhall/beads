@@ -15,7 +15,7 @@ var sqlCmd = &cobra.Command{
 	Use:     "sql <query>",
 	GroupID: "maint",
 	Short:   "Execute raw SQL against the beads database",
-	Long: `Execute a raw SQL query against the underlying database (SQLite or Dolt).
+	Long: `Execute a raw SQL query against the underlying database (Dolt).
 
 Useful for debugging, maintenance, and working around bugs in higher-level commands.
 

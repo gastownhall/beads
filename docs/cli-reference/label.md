@@ -10,15 +10,15 @@ Generated from `bd help --doc label`.
 Manage issue labels
 
 ```
-bd label [command]
+bd label [flags]
 ```
 
 ## bd label add
 
-Add labels to issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label add bd-123 label1,label2
+Add a label to one or more issues
 
 ```
-bd label add [issue-id...] [label[,label...]] [flags]
+bd label add [issue-id...] [label] [flags]
 ```
 
 ## bd label list
@@ -47,8 +47,8 @@ bd label propagate [parent-id] [label] [flags]
 
 ## bd label remove
 
-Remove labels from issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label remove bd-123 label1,label2
+Remove a label from one or more issues
 
 ```
-bd label remove [issue-id...] [label[,label...]] [flags]
+bd label remove [issue-id...] [label] [flags]
 ```

@@ -96,10 +96,6 @@ Plain `bd init` also detects the fork pattern (an `upstream` remote that
 differs from `origin`) and applies the same contributor configuration
 automatically; pass `--role maintainer` to opt out.
 
-If you created planning beads in the project database before configuring
-routing, [`bd migrate-personal`](/cli-reference/migrate-personal) moves the
-beads created by your git identity into your planning repo.
-
 ### Teams
 
 ```bash

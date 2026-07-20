@@ -1,6 +1,6 @@
 ---
 title: "bd admin"
-description: "Administrative commands for database maintenance"
+description: "Administrative commands for beads database maintenance."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -18,7 +18,7 @@ For routine maintenance, prefer 'bd doctor --fix' which handles common repairs
 automatically. Use these admin commands for targeted database operations.
 
 ```
-bd admin [command]
+bd admin [flags]
 ```
 
 ## bd admin cleanup

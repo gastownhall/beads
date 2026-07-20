@@ -1,6 +1,6 @@
 ---
 title: "bd rename"
-description: "Rename an issue ID"
+description: "Rename an issue from one ID to another."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

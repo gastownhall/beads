@@ -85,11 +85,13 @@ func readReopenComment(t *testing.T, db *sql.DB, id string) string {
 }
 
 func TestProxiedServerReopen(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("no_ids_errors", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ron")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ron")
 		out := bdProxiedReopenFail(t, bd, p.dir)
 		if !strings.Contains(out, "requires at least 1 arg") {
 			t.Errorf("expected cobra arg-count error, got: %s", out)
@@ -97,7 +99,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("reopens_closed_issue", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rorc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rorc")
 		issue := bdProxiedCreate(t, bd, p.dir, "Reopen target")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		out := bdProxiedReopen(t, bd, p.dir, issue.ID)
@@ -122,7 +125,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("reason_recorded_as_comment", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rorr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rorr")
 		issue := bdProxiedCreate(t, bd, p.dir, "Reason target")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		bdProxiedReopen(t, bd, p.dir, issue.ID, "--reason", "regression in QA")
@@ -133,7 +137,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("already_open_prints_warning", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "roao")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "roao")
 		issue := bdProxiedCreate(t, bd, p.dir, "Already open")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "reopen", issue.ID)
 		if err != nil {
@@ -145,7 +150,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("missing_id_errors", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rom")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rom")
 		out := bdProxiedReopenFail(t, bd, p.dir, "rom-does-not-exist")
 		if !strings.Contains(out, "not found") {
 			t.Errorf("expected 'not found' error, got: %s", out)
@@ -153,7 +159,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("reopens_wisp", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rorw")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rorw")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp reopen", "--ephemeral")
 		bdProxiedClose(t, bd, p.dir, wisp.ID)
 		bdProxiedReopen(t, bd, p.dir, wisp.ID)
@@ -186,7 +193,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("json_output", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "roj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "roj")
 		issue := bdProxiedCreate(t, bd, p.dir, "JSON reopen")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		issues := bdProxiedReopenJSON(t, bd, p.dir, issue.ID)
@@ -199,7 +207,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("batch_single_dolt_commit", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rosd")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rosd")
 		a := bdProxiedCreate(t, bd, p.dir, "Batch A")
 		b := bdProxiedCreate(t, bd, p.dir, "Batch B")
 		bdProxiedClose(t, bd, p.dir, a.ID, b.ID)
@@ -222,7 +231,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("reblocks_dependent", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rorb")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rorb")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Reblock blocker")
 		blocked := bdProxiedCreate(t, bd, p.dir, "Reblock blocked", "--deps", "depends-on:"+blocker.ID)
 		bdProxiedClose(t, bd, p.dir, blocker.ID)
@@ -237,7 +247,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("reopen_with_reason_short", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rorrs")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rorrs")
 		issue := bdProxiedCreate(t, bd, p.dir, "Short reason target")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		bdProxiedReopen(t, bd, p.dir, issue.ID, "-r", "needs more work")
@@ -251,7 +262,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("reopen_clears_defer_until", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rocd")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rocd")
 		issue := bdProxiedCreate(t, bd, p.dir, "Deferred reopen", "--defer", "+8760h")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		bdProxiedReopen(t, bd, p.dir, issue.ID)
@@ -270,7 +282,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("last_touched_not_supported", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rolt")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rolt")
 		_ = bdProxiedCreate(t, bd, p.dir, "Recent create")
 		out := bdProxiedReopenFail(t, bd, p.dir)
 		if !strings.Contains(out, "requires at least 1 arg") {
@@ -279,12 +292,13 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("hooks_fire_on_update", func(t *testing.T) {
+		t.Parallel()
 		if runtime.GOOS == "windows" {
 			t.Skip("hook script form is POSIX shell")
 		}
 		marker := filepath.Join(t.TempDir(), "on_update_marker")
 		script := "#!/bin/sh\nprintf '%s\\n' \"$1\" > " + shellQuote(marker) + "\n"
-		p := bdProxiedInitWithHooks(t, bd, "rofh", map[string]string{"on_update": script})
+		p := newSharedProxiedProjectWithHooks(t, bd, "rofh", map[string]string{"on_update": script})
 		issue := bdProxiedCreate(t, bd, p.dir, "Hook reopen")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		_ = os.Remove(marker)
@@ -299,7 +313,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("wisp_reopen_clears_defer_until", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rowd")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rowd")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Deferred wisp", "--ephemeral", "--defer", "+8760h")
 		bdProxiedClose(t, bd, p.dir, wisp.ID)
 		bdProxiedReopen(t, bd, p.dir, wisp.ID)
@@ -315,7 +330,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("wisp_reason_recorded_as_comment", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rowr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rowr")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp reason", "--ephemeral")
 		bdProxiedClose(t, bd, p.dir, wisp.ID)
 		bdProxiedReopen(t, bd, p.dir, wisp.ID, "--reason", "wisp regression")
@@ -326,7 +342,8 @@ func TestProxiedServerReopen(t *testing.T) {
 	})
 
 	t.Run("wisp_reopen_with_reason_short", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rowrs")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rowrs")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp short reason", "--ephemeral")
 		bdProxiedClose(t, bd, p.dir, wisp.ID)
 		bdProxiedReopen(t, bd, p.dir, wisp.ID, "-r", "still flaky")
@@ -346,10 +363,11 @@ func TestProxiedServerReopen(t *testing.T) {
 }
 
 func TestProxiedServerReopenConcurrent(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
-	p := bdProxiedInit(t, bd, "rxc")
+	p := newSharedProxiedProject(t, bd, "rxc")
 
 	const (
 		numWorkers      = 10

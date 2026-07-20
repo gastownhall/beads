@@ -1,6 +1,6 @@
 ---
 title: "bd promote"
-description: "Promote a wisp to a permanent bead"
+description: "Promote a wisp (ephemeral issue) to a permanent bead."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

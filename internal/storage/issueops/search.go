@@ -47,14 +47,18 @@ type searchProjection[T any] struct {
 	// limited queries. Worth it only for wide projections; the id projection
 	// already scans id-only with no hydration, so it leaves this false.
 	idShrink bool
+	// joinLeases adds the leases LEFT JOIN to the FROM clause; required by
+	// any projection whose columns include sqlbuild.LeaseSelectColumns.
+	joinLeases bool
 }
 
 var issueProjection = searchProjection[*types.Issue]{
-	columns:  func(_ FilterTables) string { return IssueSelectColumns },
-	scan:     func(rows *sql.Rows) (*types.Issue, error) { return ScanIssueFrom(rows) },
-	id:       func(issue *types.Issue) string { return issue.ID },
-	hydrate:  hydrateIssueLabelsAndDeps,
-	idShrink: true,
+	columns:    func(_ FilterTables) string { return IssueSelectColumns },
+	scan:       func(rows *sql.Rows) (*types.Issue, error) { return ScanIssueFrom(rows) },
+	id:         func(issue *types.Issue) string { return issue.ID },
+	hydrate:    hydrateIssueLabelsAndDeps,
+	idShrink:   true,
+	joinLeases: true,
 }
 
 var idProjection = searchProjection[string]{
@@ -211,9 +215,14 @@ func searchTableInTxT[T any](ctx context.Context, tx DBTX, query string, filter 
 	if plan.Distinct {
 		selectKeyword = "SELECT DISTINCT "
 	}
+	fromSQL := plan.FromSQL
+	if proj.joinLeases {
+		fromSQL += " " + sqlbuild.LeaseJoin(tables.Main)
+	}
+
 	//nolint:gosec // G201: SQL fragments are built from fixed table/column names and parameterized filters.
 	querySQL := fmt.Sprintf(`%s%s FROM %s %s %s %s`,
-		selectKeyword, proj.columns(tables), plan.FromSQL, whereSQL, sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, ""), limitSQL)
+		selectKeyword, proj.columns(tables), fromSQL, whereSQL, sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, ""), limitSQL)
 
 	rows, err := tx.QueryContext(ctx, querySQL, args...)
 	if err != nil {
@@ -272,9 +281,13 @@ func searchTablePatternBT[T any](ctx context.Context, tx DBTX, query string, fil
 		placeholders[i] = "?"
 		fetchArgs[i] = id
 	}
+	fetchFrom := tables.Main
+	if proj.joinLeases {
+		fetchFrom += " " + sqlbuild.LeaseJoin(tables.Main)
+	}
 	//nolint:gosec // G201: column expression and table name are fixed; ids are parameterized.
 	fetchSQL := fmt.Sprintf(`SELECT %s FROM %s WHERE id IN (%s)`,
-		proj.columns(tables), tables.Main, strings.Join(placeholders, ","))
+		proj.columns(tables), fetchFrom, strings.Join(placeholders, ","))
 
 	fetchRows, err := tx.QueryContext(ctx, fetchSQL, fetchArgs...)
 	if err != nil {

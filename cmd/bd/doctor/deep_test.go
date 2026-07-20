@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -42,6 +43,26 @@ func TestRunDeepValidation_EmptyBeadsDir(t *testing.T) {
 	}
 	if result.AllChecks[0].Status != StatusOK {
 		t.Errorf("Status = %q, want %q", result.AllChecks[0].Status, StatusOK)
+	}
+}
+
+func TestRunDeepValidationSQLiteIsNotAMigrationWarning(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&configfile.Config{Backend: configfile.BackendSQLite, SQLitePath: "beads.db"}).Save(beadsDir); err != nil {
+		t.Fatalf("save SQLite config: %v", err)
+	}
+
+	result := RunDeepValidation(tmpDir)
+	if len(result.AllChecks) != 1 {
+		t.Fatalf("SQLite deep-validation result = %#v, want one N/A check", result)
+	}
+	check := result.AllChecks[0]
+	if check.Status != StatusWarning || !strings.Contains(check.Message, "sqlite") || check.Fix != "" {
+		t.Fatalf("SQLite deep-validation check = %#v, want non-Dolt N/A without migration fix", check)
 	}
 }
 

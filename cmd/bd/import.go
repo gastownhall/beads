@@ -72,6 +72,16 @@ an import is visible. To deliberately restore an older snapshot, pass
 --allow-stale, which imports every row even when it overwrites newer
 local state.
 
+Large imports are written in bounded transactions (a few hundred issues
+each, with a short pause between commits) with progress on stderr, so
+concurrent bd commands keep working while the import runs instead of
+stalling on one batch-wide write lock. Rows land in dependency order
+with their blocking edges in the same transaction, so a half-finished
+import never shows a blocked issue as ready. If an import fails partway,
+the already-committed chunks are durable and the command exits nonzero;
+re-running the same import is safe and converges (rows upsert,
+labels/comments/dependencies deduplicate).
+
 EXAMPLES:
   bd import                        # Import from configured import.path
   bd import backup.jsonl           # Import from a specific file

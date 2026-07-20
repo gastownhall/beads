@@ -1,6 +1,6 @@
 ---
 title: "bd export"
-description: "Export issues to JSONL format"
+description: "Export all issues to JSONL (newline-delimited JSON) format."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -39,11 +39,9 @@ bd export [flags]
 **Flags:**
 
 ```
-      --all                         Include all records (infra, templates, gates, memories)
-      --exclude-owner stringArray   Exclude issues created by this identity (repeatable; also reads export.exclude_owners config)
-      --include-infra               Include infrastructure beads (agents, roles, messages)
-      --include-memories            Include persistent memories (from 'bd remember') in the export
-  -o, --output string               Output file path (default: stdout)
-      --scrub                       Exclude test/pollution records
-      --verbose                     Print filtered issue count when owners are excluded
+      --all                Include all records (infra, templates, gates, memories)
+      --include-infra      Include infrastructure beads (agents, roles, messages)
+      --include-memories   Include persistent memories (from 'bd remember') in the export
+  -o, --output string      Output file path (default: stdout)
+      --scrub              Exclude test/pollution records
 ```

@@ -1,6 +1,6 @@
 ---
 title: "bd gc"
-description: "Garbage collect: decay old issues, compact Dolt commits, run Dolt GC"
+description: "Full lifecycle garbage collection for standalone Beads databases."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

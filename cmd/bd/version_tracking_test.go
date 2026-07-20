@@ -434,5 +434,5 @@ func TestAutoMigrateOnVersionBump_NoDatabase(t *testing.T) {
 // TestAutoMigrateOnVersionBump_RefusesDowngrade, and TestAutoMigrateOnVersionBump_TracksMaxVersion
 // were removed because they depended on the SQLite storage backend (sqlite.New) for round-trip
 // persistence testing through autoMigrateOnVersionBump -> dolt.NewFromConfig.
-// Since SQLite support has been removed, auto-migration is only exercised with Dolt backends.
+// Automatic schema migration is exercised here through the Dolt backend.
 // Dolt-based migration testing is covered by TestInitDoltMetadata in init_test.go.

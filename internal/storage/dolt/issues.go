@@ -273,29 +273,20 @@ func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter
 }
 
 // HeartbeatIssue refreshes the lease on an issue actor holds in_progress,
-// pushing lease_expires_at forward and rewriting row_lock (see issueops.lease).
-// Wrapped in withRetryTx so a heartbeat that loses Dolt's optimistic merge to a
-// concurrent reclaim/close on the same row is replayed against a fresh snapshot
-// rather than surfaced — the row_lock collision is what forces that retry.
+// pushing lease_expires_at forward on its row in the ephemeral leases table
+// (see issueops.lease). Deliberately NO DOLT_ADD/DOLT_COMMIT: the leases
+// table is dolt_ignored, so a heartbeat mints no commit and no history — this
+// is the whole point of bd-lrgn1 (fleet heartbeats were the dominant source
+// of unbounded reachable history). Wrapped in withRetryTx so a heartbeat that
+// loses Dolt's optimistic merge to a concurrent reclaim/close on the same
+// lease row is replayed against a fresh snapshot rather than surfaced.
 func (s *DoltStore) HeartbeatIssue(ctx context.Context, id, actor string) error {
 	if s.isActiveWisp(ctx, id) {
 		// Wisps are ephemeral and never leased; nothing to heartbeat.
 		return fmt.Errorf("%w: %s is ephemeral", storage.ErrNotClaimable, id)
 	}
 	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		if err := issueops.HeartbeatIssueInTx(ctx, tx, id, actor); err != nil {
-			return err
-		}
-		// GH#2455: stage only the tables we touched, then commit without -A.
-		for _, table := range []string{"issues"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
-		commitMsg := fmt.Sprintf("bd: heartbeat %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-		return nil
+		return issueops.HeartbeatIssueInTx(ctx, tx, id, actor)
 	})
 }
 
@@ -332,7 +323,7 @@ func (s *DoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Dur
 }
 
 // UnclaimIssue atomically unclaims an issue by clearing the assignee, resetting
-// status to "open", clearing the lease columns and rewriting row_lock. Records
+// status to "open", deleting its lease row and rewriting row_lock. Records
 // an "unclaimed" event. Only the current assignee may release its own claim
 // unless force is set (admin/reaper override). Delegates SQL work to
 // issueops.UnclaimIssueInTx; handles Dolt-specific concerns (DOLT_ADD/COMMIT).
@@ -343,6 +334,32 @@ func (s *DoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Dur
 func (s *DoltStore) UnclaimIssue(ctx context.Context, id string, actor string, force bool) error {
 	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		if err := issueops.UnclaimIssueInTx(ctx, tx, id, actor, force); err != nil {
+			return err
+		}
+
+		// Dolt versioning for permanent issues.
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: unclaim %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	})
+}
+
+// UnclaimIssueIfAssignee releases a claim only while the issue is still assigned
+// to expectedAssignee (compare-and-swap, the inverse of ClaimIssue). Returns
+// storage.ErrAssigneeMismatch, leaving the issue untouched, when the current
+// assignee differs. Delegates SQL work to issueops.UnclaimIssueIfAssigneeInTx;
+// handles Dolt-specific concerns (DOLT_ADD/COMMIT). Wrapped in withRetryTx like
+// UnclaimIssue so a concurrent writer that loses Dolt's optimistic commit-time
+// merge is retried rather than surfaced as a hard failure.
+func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, tx, id, actor, expectedAssignee); err != nil {
 			return err
 		}
 
@@ -417,6 +434,48 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 		}
 		return nil
 	})
+}
+
+// CloseIssueChecked closes an issue but refuses with storage.ErrCloseBlocked
+// when it is still blocked (is_blocked=1) unless opts.Force is set. The guard
+// and the close share one transaction, so the check is atomic (no TOCTOU).
+// Mirrors CloseIssue's Dolt-specific concerns (wisp routing, DOLT_ADD/COMMIT).
+func (s *DoltStore) CloseIssueChecked(ctx context.Context, id string, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
+	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
+	if s.isActiveWisp(ctx, id) {
+		return s.closeWispChecked(ctx, id, actor, opts)
+	}
+
+	// Wrap in withRetryTx exactly like CloseIssue so a concurrent writer that
+	// loses Dolt's optimistic commit-time merge (MySQL 1213/1205, guaranteed
+	// server-side rollback) is retried. A blocked-guard rejection
+	// (storage.ErrCloseBlocked) is NOT a serialization error, so withRetryTx
+	// surfaces it permanently and the transaction rolls back — no close and no
+	// event are written (the atomic-refuse property).
+	var result storage.CloseIssueResult
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		res, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force)
+		if err != nil {
+			return err
+		}
+		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed}
+
+		// Dolt versioning for permanent issues.
+		// GH#2455: Stage only the tables we modified, then commit without -A.
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: close %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return storage.CloseIssueResult{}, err
+	}
+	return result, nil
 }
 
 // DeleteIssue permanently removes an issue

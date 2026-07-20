@@ -175,6 +175,18 @@ func (s *InstrumentedStorage) UnclaimIssue(ctx context.Context, id string, actor
 	return err
 }
 
+func (s *InstrumentedStorage) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", id),
+		attribute.String("bd.actor", actor),
+		attribute.String("bd.issue.expected_assignee", expectedAssignee),
+	}
+	ctx, span, t := s.op(ctx, "UnclaimIssueIfAssignee", attrs...)
+	err := s.inner.UnclaimIssueIfAssignee(ctx, id, actor, expectedAssignee)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
 func (s *InstrumentedStorage) UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error {
 	attrs := []attribute.KeyValue{
 		attribute.String("bd.issue.id", id),
@@ -196,6 +208,17 @@ func (s *InstrumentedStorage) CloseIssue(ctx context.Context, id string, reason 
 	err := s.inner.CloseIssue(ctx, id, reason, actor, session)
 	s.done(ctx, span, t, err, attrs...)
 	return err
+}
+
+func (s *InstrumentedStorage) CloseIssueChecked(ctx context.Context, id string, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", id),
+		attribute.String("bd.actor", actor),
+	}
+	ctx, span, t := s.op(ctx, "CloseIssueChecked", attrs...)
+	res, err := s.inner.CloseIssueChecked(ctx, id, actor, opts)
+	s.done(ctx, span, t, err, attrs...)
+	return res, err
 }
 
 func (s *InstrumentedStorage) DeleteIssue(ctx context.Context, id string) error {

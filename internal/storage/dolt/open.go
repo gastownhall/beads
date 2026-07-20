@@ -48,6 +48,25 @@ func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 	cfg.AutoStart = resolveAutoStart(true, autoStartCfg, mode)
 }
 
+// requireDoltBackend keeps metadata-driven callers from bypassing the storage
+// factory and interpreting another backend's workspace as Dolt. Removed backend
+// identifiers deliberately remain recognizable in metadata so this check can fail
+// closed instead of opening a new, empty Dolt database.
+func requireDoltBackend(fileCfg *configfile.Config) error {
+	switch fileCfg.Backend {
+	case configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite:
+		return fmt.Errorf("configured storage backend %q is no longer supported and cannot be opened as Dolt: %s", fileCfg.Backend, configfile.RemovedBackendDetail(fileCfg.Backend))
+	}
+	if !configfile.IsSupportedBackend(fileCfg.Backend) {
+		return fmt.Errorf("configured storage backend %q in metadata.json is not recognized and cannot be opened as Dolt; %s", fileCfg.Backend, configfile.BackendNotOpenedGuarantee)
+	}
+	backend := fileCfg.GetBackend()
+	if backend != configfile.BackendDolt {
+		return fmt.Errorf("configured storage backend %q cannot be opened as Dolt", backend)
+	}
+	return nil
+}
+
 // NewFromConfig creates a DoltStore based on the metadata.json configuration.
 // beadsDir is the path to the .beads directory.
 func NewFromConfig(ctx context.Context, beadsDir string) (*DoltStore, error) {
@@ -65,6 +84,9 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 	}
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
+	}
+	if err := requireDoltBackend(fileCfg); err != nil {
+		return nil, err
 	}
 
 	// Apply central server config as defaults for any server fields not
@@ -92,6 +114,9 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	}
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
+	}
+	if err := requireDoltBackend(fileCfg); err != nil {
+		return nil, err
 	}
 
 	// Apply central server config as defaults for any server fields not

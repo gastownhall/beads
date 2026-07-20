@@ -8,16 +8,17 @@ import (
 )
 
 type DoltServerDSN struct {
-	Socket      string
-	Host        string
-	Port        int
-	User        string
-	Password    string //nolint:gosec // G117: MySQL DSN password field; required by the connection-string builder, not serialized as JSON
-	Database    string
-	Timeout     time.Duration
-	TLSRequired bool
-	TLSCert     string
-	TLSKey      string
+	Socket        string
+	Host          string
+	Port          int
+	User          string
+	Password      string //nolint:gosec // G117: MySQL DSN password field; required by the connection-string builder, not serialized as JSON
+	Database      string
+	Timeout       time.Duration
+	TLSRequired   bool
+	TLSCert       string
+	TLSKey        string
+	TLSConfigName string
 }
 
 func (d DoltServerDSN) String() string {
@@ -44,9 +45,12 @@ func (d DoltServerDSN) String() string {
 		Timeout:              timeout,
 		AllowNativePasswords: true,
 	}
-	if d.TLSRequired {
+	switch {
+	case d.TLSConfigName != "":
+		cfg.TLSConfig = d.TLSConfigName
+	case d.TLSRequired:
 		cfg.TLSConfig = "true"
-	} else {
+	default:
 		cfg.TLSConfig = "false"
 	}
 

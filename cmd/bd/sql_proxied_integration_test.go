@@ -46,9 +46,10 @@ func bdProxiedSQLFail(t *testing.T, bd, dir string, args ...string) string {
 }
 
 func TestProxiedServerSQL(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
-	p := bdProxiedInit(t, bd, "sql")
+	p := newSharedProxiedProject(t, bd, "sql")
 
 	one := bdProxiedCreate(t, bd, p.dir, "Test issue one", "--type", "task", "--priority", "1")
 	two := bdProxiedCreate(t, bd, p.dir, "Test issue two", "--type", "bug", "--priority", "2")

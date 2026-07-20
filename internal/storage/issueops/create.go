@@ -138,6 +138,16 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 	}
 	result.markChanged(issueTable)
 
+	// Reconcile the ephemeral lease row with the accepted issue state
+	// (restore an imported lease / drop an orphaned one — see
+	// RestoreLeaseOnImportInTx). Wisps are never leased. The leases table is
+	// dolt_ignored, so this is deliberately not marked as a changed table.
+	if issueTable == "issues" {
+		if err := RestoreLeaseOnImportInTx(ctx, tx, issue, isNew); err != nil {
+			return result, err
+		}
+	}
+
 	if isNew {
 		if err := RecordEventInTable(ctx, tx, eventTable, issue.ID, types.EventCreated, actor, ""); err != nil {
 			return result, fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
@@ -289,6 +299,17 @@ func stageableChangedTables(changed map[string]bool) map[string]bool {
 func ValidateCreateIssuesMixedBucketDependencies(issues []*types.Issue) error {
 	_, err := filterCreateIssuesMixedBucketDependencies(issues, storage.BatchCreateOptions{})
 	return err
+}
+
+// FilterCreateIssuesMixedBucketDependencies applies the same cross-bucket
+// dependency policy as CreateIssuesInTx, but over the full issue set. Callers
+// that split one logical batch into bounded sub-batches (chunked import) must
+// run this once up front: the per-batch filter inside the engine only sees one
+// sub-batch, so it could no longer detect an edge whose endpoints land in
+// different chunks. Filtered edges are reported via opts.OnSkippedDependency;
+// issues whose dependency list changes are copied, never mutated.
+func FilterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
+	return filterCreateIssuesMixedBucketDependencies(issues, opts)
 }
 
 func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
@@ -895,10 +916,9 @@ func ReconcileChildCounters(ctx context.Context, tx *sql.Tx, issues []*types.Iss
 		if err == nil && current >= b.maxChild {
 			continue
 		}
-		// Qualify the existing-row column with the table name. Bare `last_child`
-		// on the update RHS is a valid MySQL "current row value" reference, but
-		// Postgres sees it as ambiguous between the target row and EXCLUDED
-		// (SQLSTATE 42702); table-qualifying it is unambiguous on every backend.
+		// Qualify the existing-row column with the table name so the canonical
+		// MySQL form and SQLite's translated ON CONFLICT form both unambiguously
+		// refer to the target row rather than the incoming value.
 		//nolint:gosec // G201: table is one of two hardcoded constants.
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %[1]s (parent_id, last_child) VALUES (?, ?)

@@ -12,6 +12,7 @@ func (s *testSuite) TestIssueUseCase_Claim() {
 	s.Run("SuccessReturnsEmptyResult", s.iucClaimSuccess)
 	s.Run("IdempotentReclaimMarksAlreadyClaimed", s.iucClaimIdempotent)
 	s.Run("ConflictWrapsErrAlreadyClaimed", s.iucClaimConflict)
+	s.Run("OpenAssignedRefusalSteersToHolder", s.iucClaimOpenAssignedCopy)
 	s.Run("ClosedWrapsErrNotClaimable", s.iucClaimClosed)
 	s.Run("EmptyIDReturnsError", s.iucClaimEmptyID)
 	s.Run("EmptyActorReturnsError", s.iucClaimEmptyActor)
@@ -67,6 +68,25 @@ func (s *testSuite) iucClaimConflict() {
 	s.Require().Error(err)
 	s.True(errors.Is(err, storage.ErrAlreadyClaimed), "expected ErrAlreadyClaimed, got %v", err)
 	s.Contains(err.Error(), "alice")
+}
+
+// iucClaimOpenAssignedCopy pins the proxied-path refusal copy for an OPEN
+// issue assigned to another real actor (bd-at6rc parity, found by review):
+// it must steer toward the holder like issueops.ClaimIssueInTx, keep the
+// ErrAlreadyClaimed wrap (the proxied batch exit code keys on errors.Is),
+// and never name an eviction command.
+func (s *testSuite) iucClaimOpenAssignedCopy() {
+	s.seedOpenIssue("bd-iuc-cl-openassigned")
+	r := s.issueRepo()
+	s.Require().NoError(r.Update(s.Ctx(), "bd-iuc-cl-openassigned",
+		map[string]any{"assignee": "alice"}, "seeder", domain.IssueTableOpts{}))
+
+	_, err := s.issueUseCase().ClaimIssue(s.Ctx(), "bd-iuc-cl-openassigned", "bob")
+	s.Require().Error(err)
+	s.True(errors.Is(err, storage.ErrAlreadyClaimed), "expected ErrAlreadyClaimed wrap, got %v", err)
+	s.Contains(err.Error(), "coordinate with the holder")
+	s.NotContains(err.Error(), "unclaim")
+	s.NotContains(err.Error(), "--force")
 }
 
 func (s *testSuite) iucClaimClosed() {

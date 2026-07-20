@@ -273,6 +273,10 @@ func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[str
 		if _, err := tx.ExecContext(ctx, "DELETE FROM issues WHERE id = ?", id); err != nil {
 			return fmt.Errorf("failed to delete issue from issues: %w", err)
 		}
+		// Wisps are never leased: drop any lease the issue held.
+		if err := issueops.DeleteLeaseInTx(ctx, tx, id); err != nil {
+			return err
+		}
 
 		affectedIssues, affectedWisps, aerr := issueops.AffectedByStatusChangeForWispInTx(ctx, tx, id)
 		if aerr != nil {

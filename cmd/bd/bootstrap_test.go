@@ -919,7 +919,10 @@ func TestBootstrapRigSubdirUsesParentDBName(t *testing.T) {
 	cfg, cfgErr := configfile.Load(synthesizedDir)
 	if cfgErr != nil || cfg == nil {
 		// This is the fix path: search parent directories for metadata.json
-		cfg = findParentConfig(synthesizedDir)
+		cfg, cfgErr = findParentConfig(synthesizedDir)
+		if cfgErr != nil {
+			t.Fatalf("findParentConfig: %v", cfgErr)
+		}
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
@@ -936,6 +939,37 @@ func TestBootstrapRigSubdirUsesParentDBName(t *testing.T) {
 	}
 	if plan.Database != "my_rig" {
 		t.Errorf("plan.Database = %q, want %q", plan.Database, "my_rig")
+	}
+}
+
+func TestFindParentConfigDoesNotSkipCorruptNearestAncestor(t *testing.T) {
+	root := t.TempDir()
+	higherBeadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(higherBeadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(higherBeadsDir, "metadata.json"), []byte(`{"dolt_database":"wrong_higher_database"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	nearestBeadsDir := filepath.Join(root, "workspace", ".beads")
+	if err := os.MkdirAll(nearestBeadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := []byte("{\n")
+	metadataPath := filepath.Join(nearestBeadsDir, "metadata.json")
+	if err := os.WriteFile(metadataPath, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	synthesizedDir := filepath.Join(root, "workspace", "rig", ".beads")
+	if cfg, err := findParentConfig(synthesizedDir); err == nil {
+		t.Fatalf("findParentConfig skipped corrupt nearest metadata and selected higher database %q", cfg.GetDoltDatabase())
+	} else if !strings.Contains(err.Error(), filepath.Join("workspace", ".beads", "metadata.json")) {
+		t.Fatalf("findParentConfig error = %v, want nearest metadata path", err)
+	}
+	if after, err := os.ReadFile(metadataPath); err != nil || string(after) != string(corrupt) {
+		t.Fatalf("corrupt nearest metadata changed: got %q, err %v", after, err)
 	}
 }
 
@@ -1052,7 +1086,10 @@ func TestDetectBootstrapAction_WorktreeSynthesizedDirPrefersSyncOverDefaultShare
 	synthesizedDir := filepath.Join(localBare, ".beads")
 	cfg, cfgErr := configfile.Load(synthesizedDir)
 	if cfgErr != nil || cfg == nil {
-		cfg = findParentConfig(synthesizedDir)
+		cfg, cfgErr = findParentConfig(synthesizedDir)
+		if cfgErr != nil {
+			t.Fatalf("findParentConfig: %v", cfgErr)
+		}
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()

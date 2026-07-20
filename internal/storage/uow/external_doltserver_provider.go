@@ -7,11 +7,12 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 )
 
 func NewExternalDoltServerUOWProvider(
@@ -47,6 +48,11 @@ func NewExternalDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: creating server root directory: %w", err)
 	}
 
+	tlsConfigName, err := registerExternalTLSConfig(external)
+	if err != nil {
+		return nil, fmt.Errorf("uow: external TLS: %w", err)
+	}
+
 	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(absServerRootDir, proxy.OpenOpts{
 		Backend:     proxy.BackendExternal,
 		LogFilePath: serverLogFilePath,
@@ -58,5 +64,20 @@ func NewExternalDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword)
+	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword, tlsConfigName)
+}
+
+func registerExternalTLSConfig(external configfile.ExternalDoltConfig) (string, error) {
+	if !external.TLSRequired {
+		return "", nil
+	}
+	tc, err := external.TLSClientConfig()
+	if err != nil {
+		return "", err
+	}
+	name := "beads-external-" + server.ExternalDoltServerID(external)
+	if err := mysql.RegisterTLSConfig(name, tc); err != nil {
+		return "", fmt.Errorf("register TLS config: %w", err)
+	}
+	return name, nil
 }

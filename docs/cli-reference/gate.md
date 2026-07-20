@@ -1,6 +1,6 @@
 ---
 title: "bd gate"
-description: "Manage async coordination gates"
+description: "Gates are async wait conditions that block workflow steps."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -29,7 +29,7 @@ Examples:
   bd gate resolve &lt;id&gt;   # Close a gate manually
 
 ```
-bd gate [command]
+bd gate [flags]
 ```
 
 ## bd gate add-waiter
@@ -161,16 +161,12 @@ bd gate discover [flags]
 
 ## bd gate list
 
-List gate issues.
-
-With no argument, lists all gate issues in the current beads database.
-With an [issue-id] argument, lists ONLY the gates that block that issue
-(its own dependency gates) — not every gate in the database.
+List all gate issues in the current beads database.
 
 By default, shows only open gates. Use --all to include closed gates.
 
 ```
-bd gate list [issue-id] [flags]
+bd gate list [flags]
 ```
 
 **Flags:**

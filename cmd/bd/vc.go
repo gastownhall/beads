@@ -176,10 +176,6 @@ Examples:
 			return HandleErrorRespectJSON("commit message is required (use -m, --message, or --stdin)")
 		}
 
-		if err := errExplicitCommitUnsupported(store, "vc commit"); err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-
 		commandDidExplicitDoltCommit = true
 		if err := store.Commit(ctx, vcCommitMessage); err != nil {
 			if isDoltNothingToCommit(err) {

@@ -88,36 +88,14 @@ Example:
 			ctx = storage.WithReservedChildCounter(ctx, parentID, childID)
 		}
 
-		if err := store.CreateIssue(ctx, issue, actor); err != nil {
+		// The issue and its parent-child edge commit in one transaction; a
+		// failed edge rolls back the create instead of leaving a dep-less
+		// child behind (same contract as bd create).
+		if err := createIssueWithDeps(ctx, store, issue, actor, createDepEdges{parentID: parentID}); err != nil {
 			return HandleError("%v", err)
 		}
 
 		commandDidWrite.Store(true)
-
-		if parentID != "" {
-			dep := &types.Dependency{
-				IssueID:     issue.ID,
-				DependsOnID: parentID,
-				Type:        types.DepParentChild,
-			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				WarnError("failed to add parent-child dependency %s -> %s: %v", issue.ID, parentID, err)
-			} else {
-				// CreateIssue commits internally, but the dependency write
-				// only lands in the working set (GH#2009) — same follow-up
-				// commit bd create performs.
-				shouldCommit, err := shouldCommitCreatePostWrites(issue, true)
-				if err != nil {
-					return HandleError("dolt auto-commit failed: %v", err)
-				}
-				if shouldCommit {
-					commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
-					if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-						WarnError("failed to commit: %v", err)
-					}
-				}
-			}
-		}
 
 		fmt.Println(issue.ID)
 		return nil

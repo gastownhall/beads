@@ -1,6 +1,6 @@
 ---
 title: "bd rename-prefix"
-description: "Rename the issue prefix for all issues in the database"
+description: "Rename the issue prefix for all issues in the database."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

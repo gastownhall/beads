@@ -508,8 +508,11 @@ func TestInitCommandRegistersProxiedServerExternalFlags(t *testing.T) {
 		{"proxied-server-external-socket-path", ""},
 		{"proxied-server-external-user", ""},
 		{"proxied-server-external-tls", "false"},
+		{"proxied-server-external-tls-ca-cert-path", ""},
 		{"proxied-server-external-tls-cert-path", ""},
 		{"proxied-server-external-tls-key-path", ""},
+		{"proxied-server-external-tls-server-name", ""},
+		{"proxied-server-external-tls-skip-verify", "false"},
 		{"proxied-server-external-keep-alive", "0s"},
 	}
 	for _, tc := range cases {

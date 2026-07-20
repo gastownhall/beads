@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -100,7 +101,7 @@ type dependencyRow struct {
 }
 
 func expectIssue(mock sqlmock.Sqlmock, id, title string) {
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM issues WHERE id = ?")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM issues " + sqlbuild.LeaseJoin("issues") + " WHERE id = ?")).
 		WithArgs(id).
 		WillReturnRows(issueRows().AddRow(issueRowValues(id, title)...))
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT label FROM labels WHERE issue_id = ? ORDER BY label")).
@@ -129,7 +130,7 @@ func expectIssueBatch(mock sqlmock.Sqlmock, ids []string) {
 	for _, id := range ids {
 		rows.AddRow(issueRowValues(id, id)...)
 	}
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT "+IssueSelectColumns+" FROM issues WHERE id IN (?,?)")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT "+IssueSelectColumns+" FROM issues "+sqlbuild.LeaseJoin("issues")+" WHERE id IN (?,?)")).
 		WithArgs(ids[0], ids[1]).
 		WillReturnRows(rows)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM labels WHERE issue_id IN (?,?) ORDER BY issue_id, label")).

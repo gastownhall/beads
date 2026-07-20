@@ -12,9 +12,9 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// This file holds the behavior contract for the "portable" non-version-control methods
-// that the SQL-family backends (postgres/mysql/sqlite) implement through shared issueops
-// helpers — molecule rollups, repo-mtime cache, event/dependency streams, dependent
+// This file holds the behavior contract for the portable, non-version-control methods
+// that SQLite implements through shared issueops helpers: molecule rollups, repo-mtime
+// cache, event/dependency streams, dependent
 // counts, wisp cascade discovery, comment/audit writes, id rekey, source-repo purge, and
 // batch create. Each case is validated against the embedded-Dolt reference (the oracle)
 // and, once a method is wired into a backend, must match it there too.
@@ -23,7 +23,7 @@ import (
 // ties, tie-broken "current step") is asserted as a set, never positionally.
 
 // RunPortableMethods runs the portable-method behavior contract. The Dolt reference runs
-// it via RunAll; each SQL backend runs it once the methods are implemented.
+// it via RunAll; SQLite runs it for the methods supplied by the shared layer.
 func RunPortableMethods(t *testing.T, factory Factory) {
 	t.Helper()
 	t.Run("MoleculeProgress", func(t *testing.T) { testGetMoleculeProgress(t, factory) })

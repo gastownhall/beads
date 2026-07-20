@@ -1,27 +1,22 @@
 ---
 title: "bd audit"
-description: "Record and label agent interactions (append-only JSONL)"
+description: "Audit log entries are appended to .beads/interactions.jsonl."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
 Generated from `bd help --doc audit`.
 
-Record explicit agent/tool interaction audit entries in .beads/interactions.jsonl.
+Audit log entries are appended to .beads/interactions.jsonl.
 
-This optional JSONL sidecar is disabled by default. Enable it with:
-
-  bd config set audit.enabled true
-
-Issue history is always recorded in the database and is visible with
-bd history &lt;id&gt; --events. The JSONL sidecar is for explicit interaction capture:
+Each line is one event. This file is intended to be versioned in git and used for:
 - auditing ("why did the agent do that?")
 - dataset generation (SFT/RL fine-tuning)
 
 Entries are append-only. Labeling creates a new "label" entry that references a parent entry.
 
 ```
-bd audit [command]
+bd audit [flags]
 ```
 
 ## bd audit label

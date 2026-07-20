@@ -17,7 +17,7 @@ const ConfigFileName = "metadata.json"
 
 type Config struct {
 	Database string `json:"database"`
-	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default), "postgres", "mysql", or "sqlite". Read via GetBackend().
+	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default); legacy "postgres"/"mysql"/"sqlite" values are rejection tombstones. Read via GetBackend().
 
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
@@ -36,17 +36,16 @@ type Config struct {
 	DoltRemotesAPIPort int    `json:"dolt_remotesapi_port,omitempty"` // Dolt remotesapi port for federation (default: 8080)
 	// Note: Password should be set via BEADS_DOLT_PASSWORD env var for security
 
-	// Postgres backend (backend="postgres"). Password is NEVER persisted; it
-	// comes from BEADS_PG_PASSWORD or BEADS_POSTGRES_URL.
-	PostgresDSN    string `json:"postgres_dsn,omitempty"`    // e.g. postgres://user@host:5432/db (no password)
-	PostgresSchema string `json:"postgres_schema,omitempty"` // per-workspace schema (search_path)
+	// Deprecated backend fields are retained only to round-trip metadata written by
+	// the short-lived PostgreSQL/MySQL implementations. They are not connection
+	// configuration for current builds; store selection rejects those backends.
+	PostgresDSN    string `json:"postgres_dsn,omitempty"`
+	PostgresSchema string `json:"postgres_schema,omitempty"`
+	MySQLDSN       string `json:"mysql_dsn,omitempty"`
+	MySQLDatabase  string `json:"mysql_database,omitempty"`
 
-	// MySQL backend (backend="mysql"). Password is NEVER persisted; it comes from
-	// BEADS_MYSQL_PASSWORD or BEADS_MYSQL_URL.
-	MySQLDSN      string `json:"mysql_dsn,omitempty"`      // e.g. user@tcp(host:3306)/ (no password)
-	MySQLDatabase string `json:"mysql_database,omitempty"` // per-workspace database (MySQL's isolation unit)
-
-	// SQLite backend (backend="sqlite"). File-based, embedded; no credentials.
+	// Deprecated: retained only to round-trip metadata written by the removed
+	// SQLite backend (backend="sqlite"); store selection rejects that backend.
 	SQLitePath string `json:"sqlite_path,omitempty"` // database file, relative to the beads dir (default beads.db)
 
 	// Project identity — unique ID generated at bd init time.
@@ -231,9 +230,9 @@ type BackendCapabilities struct {
 	SingleProcessOnly bool
 }
 
-// CapabilitiesForBackend returns capabilities for a backend string.
-// Dolt is the only supported backend. Returns SingleProcessOnly=true by default;
-// use Config.GetCapabilities() to properly handle server mode.
+// CapabilitiesForBackend returns capabilities for a backend string. Embedded Dolt
+// is single-process-only; use Config.GetCapabilities() to account for
+// Dolt server and proxied-server modes.
 func CapabilitiesForBackend(_ string) BackendCapabilities {
 	return BackendCapabilities{SingleProcessOnly: true}
 }
@@ -249,10 +248,19 @@ func (c *Config) GetCapabilities() BackendCapabilities {
 	return CapabilitiesForBackend(backend)
 }
 
-// GetBackend returns the configured storage backend. Only the explicitly-allowlisted
-// non-default backends ("postgres", "mysql") are honored; "", "dolt", and any legacy
-// or unknown value resolve to dolt so the default path stays byte-identical and a
-// typo fails safe to Dolt.
+// IsSupportedBackend reports whether backend selects an implementation shipped by
+// beads. The empty value is the legacy/default spelling of Dolt.
+func IsSupportedBackend(backend string) bool {
+	return backend == "" || backend == BackendDolt
+}
+
+// GetBackend returns the configured storage backend. PostgreSQL, MySQL, and
+// SQLite remain recognizable here so workspaces created by earlier builds can
+// fail loudly at store selection instead of silently falling back to an empty
+// Dolt database.
+// Empty and explicit Dolt retain the established Dolt behavior. GetBackend keeps
+// the historical Dolt fallback for unknown values, so storage-selection callers
+// must check IsSupportedBackend(c.Backend) before opening or creating storage.
 func (c *Config) GetBackend() string {
 	if c != nil {
 		switch c.Backend {
@@ -275,82 +283,6 @@ func (c *Config) GetSQLitePath() string {
 	}
 	return c.SQLitePath
 }
-
-// GetPostgresDSN returns the base Postgres connection string: BEADS_POSTGRES_URL (a
-// full override that may carry a password) if set, else the persisted,
-// password-free metadata postgres_dsn. It never merges a password — password
-// resolution (BEADS_PG_PASSWORD_COMMAND, BEADS_PG_PASSWORD, the credentials file)
-// and placement happen at open time in the postgres backend, which owns the pgx
-// parser this low-level package must not import (see the note at RedactPassword).
-func (c *Config) GetPostgresDSN() string {
-	if u := os.Getenv("BEADS_POSTGRES_URL"); u != "" {
-		return u
-	}
-	if c == nil {
-		return ""
-	}
-	return c.PostgresDSN
-}
-
-// GetPostgresPasswordCommand returns the credential command that resolves the
-// Postgres password: BEADS_PG_PASSWORD_COMMAND. Empty means no command — the static
-// BEADS_PG_PASSWORD / credentials-file path applies. The command's stdout is a
-// password (a bare token or a {token,expires_in} envelope); it is run at open time,
-// out-ranking the static password so a rotating secret is never shadowed by a stale
-// env value. It is deliberately read from the environment only, NOT metadata.json:
-// a metadata-sourced command is arbitrary code run on open, so persisting it waits
-// on a workspace-trust gate.
-func (c *Config) GetPostgresPasswordCommand() string {
-	return os.Getenv("BEADS_PG_PASSWORD_COMMAND")
-}
-
-// GetPostgresSchema returns the per-workspace Postgres schema (search_path).
-func (c *Config) GetPostgresSchema() string {
-	if c == nil {
-		return ""
-	}
-	return c.PostgresSchema
-}
-
-// GetMySQLDSN returns the base MySQL server DSN: BEADS_MYSQL_URL (a full override
-// that may carry a password) if set, else the persisted, password-free metadata
-// mysql_dsn. It never merges a password — password resolution
-// (BEADS_MYSQL_PASSWORD_COMMAND, BEADS_MYSQL_PASSWORD, the credentials file) and
-// placement happen at open time in the mysql backend, which owns the go-sql-driver
-// parser this low-level package must not import (see the note at RedactPassword).
-func (c *Config) GetMySQLDSN() string {
-	if u := os.Getenv("BEADS_MYSQL_URL"); u != "" {
-		return u
-	}
-	if c == nil {
-		return ""
-	}
-	return c.MySQLDSN
-}
-
-// GetMySQLPasswordCommand returns the credential command that resolves the MySQL
-// password: BEADS_MYSQL_PASSWORD_COMMAND. Empty means no command — the static
-// BEADS_MYSQL_PASSWORD / credentials-file path applies. The command's stdout is a
-// password (a bare token or a {token,expires_in} envelope); it is run at open time,
-// out-ranking the static password so a rotating secret is never shadowed by a stale
-// env value. It is deliberately read from the environment only, NOT metadata.json:
-// a metadata-sourced command is arbitrary code run on open, so persisting it waits
-// on a workspace-trust gate.
-func (c *Config) GetMySQLPasswordCommand() string {
-	return os.Getenv("BEADS_MYSQL_PASSWORD_COMMAND")
-}
-
-// GetMySQLDatabase returns the per-workspace MySQL database (isolation unit).
-func (c *Config) GetMySQLDatabase() string {
-	if c == nil {
-		return ""
-	}
-	return c.MySQLDatabase
-}
-
-// Password redaction for persistence lives in pgdialect.RedactPassword, not here:
-// it must fail closed (verify with pgx that no password survives) and therefore
-// depends on the pgx parser, which this low-level config package must not import.
 
 // Dolt mode constants
 const (

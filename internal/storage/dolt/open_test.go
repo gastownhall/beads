@@ -162,6 +162,50 @@ func TestApplyCLIAutoStart_DisableAutoStartWins(t *testing.T) {
 	}
 }
 
+func TestConfigConstructorsRejectNonDoltBackends(t *testing.T) {
+	for _, backend := range []string{
+		configfile.BackendSQLite,
+		configfile.BackendPostgres,
+		configfile.BackendMySQL,
+		"mystery",
+	} {
+		t.Run(backend, func(t *testing.T) {
+			beadsDir := t.TempDir()
+			if err := (&configfile.Config{Backend: backend}).Save(beadsDir); err != nil {
+				t.Fatalf("save metadata: %v", err)
+			}
+
+			constructors := map[string]func() (*DoltStore, error){
+				"standard": func() (*DoltStore, error) {
+					return NewFromConfigWithOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true})
+				},
+				"cli": func() (*DoltStore, error) {
+					return NewFromConfigWithCLIOptions(t.Context(), beadsDir, &Config{DisableAutoStart: true})
+				},
+			}
+			for name, construct := range constructors {
+				t.Run(name, func(t *testing.T) {
+					store, err := construct()
+					if store != nil {
+						_ = store.Close()
+						t.Fatalf("non-Dolt backend %q unexpectedly opened as Dolt", backend)
+					}
+					if err == nil || !strings.Contains(err.Error(), "cannot be opened as Dolt") {
+						t.Fatalf("constructor error = %v, want backend mismatch", err)
+					}
+					if backend == configfile.BackendPostgres || backend == configfile.BackendMySQL {
+						for _, want := range []string{"no longer supported", "was not opened or modified", "bd help init-safety"} {
+							if !strings.Contains(err.Error(), want) {
+								t.Errorf("removed-backend constructor error missing %q: %v", want, err)
+							}
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestCLIDirUsesSharedDoltRootInSharedServerMode(t *testing.T) {
 	sharedRoot := t.TempDir()
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")

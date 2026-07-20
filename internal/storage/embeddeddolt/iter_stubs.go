@@ -4,8 +4,8 @@
 //
 // Slice-wrapping stubs for the Iter* methods. The embedded Dolt backend
 // uses a per-method short-lived connection model (`withConn`) which is
-// incompatible with the dedicated-conn cursor pattern used by the
-// streaming iterators in internal/storage/dolt and internal/storage/postgres.
+// incompatible with the dedicated-connection cursor pattern used by the
+// streaming iterators in internal/storage/dolt.
 // The interface ships complete now (be-jaavsb / be-yinl4d); a follow-up
 // child of be-yinl4d may add a streaming variant if EmbeddedDoltStore
 // gains a cursor-conn API. For now every Iter* method materializes the

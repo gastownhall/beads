@@ -81,7 +81,11 @@
     },
     {
       "source": "/STORAGE-BACKENDS",
-      "destination": "/architecture/storage-backends"
+      "destination": "/architecture/dolt"
+    },
+    {
+      "source": "/architecture/storage-backends",
+      "destination": "/architecture/dolt"
     },
     {
       "source": "/MOLECULES",
@@ -247,8 +251,7 @@
         "group": "Architecture",
         "pages": [
           "architecture/index",
-          "architecture/dolt",
-          "architecture/storage-backends"
+          "architecture/dolt"
         ]
       },
       {
@@ -271,6 +274,7 @@
           "recovery/merge-conflicts",
           "recovery/circular-dependencies",
           "recovery/sync-failures",
+          "recovery/history-squash",
           "recovery/uninstalling"
         ]
       },
@@ -374,7 +378,6 @@
               "cli-reference/github",
               "cli-reference/gitlab",
               "cli-reference/graph",
-              "cli-reference/heartbeat",
               "cli-reference/history",
               "cli-reference/hooks",
               "cli-reference/human",
@@ -393,7 +396,6 @@
               "cli-reference/memories",
               "cli-reference/merge-slot",
               "cli-reference/metrics",
-              "cli-reference/migrate-personal",
               "cli-reference/migrate",
               "cli-reference/mol",
               "cli-reference/note",
@@ -412,7 +414,6 @@
               "cli-reference/quickstart",
               "cli-reference/ready",
               "cli-reference/recall",
-              "cli-reference/reclaim",
               "cli-reference/recompute-blocked",
               "cli-reference/remember",
               "cli-reference/rename-prefix",
@@ -436,7 +437,6 @@
               "cli-reference/tag",
               "cli-reference/todo",
               "cli-reference/types",
-              "cli-reference/unclaim",
               "cli-reference/undefer",
               "cli-reference/update",
               "cli-reference/upgrade",

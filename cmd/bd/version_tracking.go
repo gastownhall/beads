@@ -163,6 +163,10 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
 	}
+	if cfg.GetBackend() != configfile.BackendDolt {
+		debug.Logf("auto-migrate: skipping Dolt migration for backend %q", cfg.GetBackend())
+		return
+	}
 
 	if cfg.IsDoltProxiedServerMode() {
 		debug.Logf("auto-migrate: skipping embedded migration, proxied-server handled after UOW provider init")

@@ -1,6 +1,6 @@
 ---
 title: "bd supersede"
-description: "Mark an issue as superseded by a newer one"
+description: "Mark an issue as superseded by a newer version."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

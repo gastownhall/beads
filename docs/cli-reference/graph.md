@@ -1,6 +1,6 @@
 ---
 title: "bd graph"
-description: "Display issue dependency graph"
+description: "Display a visualization of an issue's dependency graph."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -13,7 +13,6 @@ For epics, shows all children and their dependencies.
 For regular issues, shows the issue and its direct dependencies.
 
 With --all, shows all open issues grouped by connected component.
-With --open, filters to only open/actionable issues (compact layer format).
 
 Display formats:
   (default)        DAG with columns and box-drawing edges (terminal-native)
@@ -21,7 +20,6 @@ Display formats:
   --compact        Tree format, one line per issue, more scannable
   --dot            Graphviz DOT format (pipe to dot -Tsvg &gt; graph.svg)
   --html           Self-contained interactive HTML with D3.js visualization
-  --open           Open issues only, compact layers (LLM-friendly)
 
 The graph shows execution order:
 - Layer 0 / leftmost = no dependencies (can start immediately)
@@ -37,12 +35,9 @@ Examples:
   bd graph --dot issue-id | dot -Tpng &gt; graph.png  # PNG via Graphviz
   bd graph --html issue-id &gt; graph.html  # Interactive browser view
   bd graph --all --html &gt; all.html       # All issues, interactive
-  bd graph --open issue-id       # Open issues only, layered by blocking order
-  bd graph --all --open          # All open issues, compact layers
 
 ```
 bd graph [issue-id] [flags]
-bd graph [command]
 ```
 
 **Flags:**
@@ -53,7 +48,6 @@ bd graph [command]
       --compact   Tree format, one line per issue, more scannable
       --dot       Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)
       --html      Output self-contained interactive HTML (redirect to file)
-      --open      Show only open issues (filters out closed/deferred), forces compact layer format
 ```
 
 ## bd graph check

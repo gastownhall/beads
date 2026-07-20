@@ -37,6 +37,10 @@ and the CLI pages array in docs/docs.json) from one bd process plus the
 tools/docsmint post-processor. --check regenerates into a scratch root and
 fails if the committed copies are stale.
 
+When docs/cli-docs.pin names a release tag, bd is built from that tag
+(the published docs describe the pinned release, not this checkout) and a
+supplied binary is ignored; set BD_DOCS_IGNORE_PIN=1 to bypass the pin.
+
 If the resolved bd binary is CGO-enabled it emits the full `bd federation`
 help tree that CI (CGO_ENABLED=0) stubs out; the script rebuilds a pinned
 pure-go binary to keep committed docs in sync. Set BD_DOCS_ALLOW_CGO=1 to
@@ -65,7 +69,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ -n "$BD_ARG" ]; then
+# Release pin (docs/cli-docs.pin): the published docs describe the pinned
+# release, so the pipeline builds bd from that tag and ignores any supplied
+# binary. Set BD_DOCS_IGNORE_PIN=1 to bypass (e.g. to preview docs for an
+# unreleased emitter).
+PINNED_BD=""
+if [ "${BD_DOCS_IGNORE_PIN:-0}" != "1" ]; then
+    PINNED_BD="$("$SCRIPT_DIR/resolve-docs-bd.sh")"
+fi
+
+if [ -n "$PINNED_BD" ]; then
+    if [ -n "$BD_ARG" ] && [ "$BD_ARG" != "$PINNED_BD" ]; then
+        echo "Note: docs are pinned via docs/cli-docs.pin; ignoring supplied binary $BD_ARG." >&2
+    fi
+    BD="$PINNED_BD"
+elif [ -n "$BD_ARG" ]; then
     BD="$BD_ARG"
 elif [ "$CHECK_MODE" -eq 0 ] && [ -x "$PROJECT_ROOT/bd" ]; then
     # Convenience for regeneration only. --check never trusts a repo-root
@@ -91,7 +109,7 @@ fi
 # the committed docs always match CI. Set BD_DOCS_ALLOW_CGO=1 to bypass the rebuild and
 # trust the supplied binary as-is (e.g. to deliberately regenerate the full federation
 # tree); you then own any federation churn the diff introduces.
-if [ -x "$BD" ] && ! "$BD" federation --help 2>&1 | grep -q "Federation commands require CGO"; then
+if [ -z "$PINNED_BD" ] && [ -x "$BD" ] && ! "$BD" federation --help 2>&1 | grep -q "Federation commands require CGO"; then
     if [ "${BD_DOCS_ALLOW_CGO:-0}" = "1" ]; then
         echo "WARNING: $BD looks CGO-enabled and emits the full 'bd federation' help tree," >&2
         echo "         which CI's pure-go docs build stubs out. BD_DOCS_ALLOW_CGO=1 is set," >&2
@@ -117,8 +135,18 @@ fi
 
 generate_all() {
     local root="$1"
+    local had_website=0
+    [ -d "$root/website" ] && had_website=1
+    # Clear stale staging so docsmint can only consume what this bd emitted
+    # (a pinned legacy bd stages under website/, not build/cli-docs).
+    rm -rf "$root/build/cli-docs"
     "$BD" help --docs-root "$root"
     (cd "$PROJECT_ROOT" && go run -tags=gms_pure_go ./tools/docsmint "$root")
+    # A pinned legacy emitter (bd <= v1.1.0) stages Docusaurus pages under
+    # website/; docsmint has consumed them, so drop the scaffolding.
+    if [ "$had_website" -eq 0 ] && [ -d "$root/website" ]; then
+        rm -rf "$root/website"
+    fi
 }
 
 if [ "$CHECK_MODE" -eq 1 ]; then

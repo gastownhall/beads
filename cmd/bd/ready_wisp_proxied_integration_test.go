@@ -14,11 +14,13 @@ import (
 )
 
 func TestProxiedServerReadyWisp(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("claim_include_ephemeral_claims_wisp", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rwc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rwc")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp to claim", "--ephemeral", "--label", "wclaim")
 
 		out, err := bdProxiedRun(t, bd, p.dir,
@@ -58,7 +60,8 @@ func TestProxiedServerReadyWisp(t *testing.T) {
 	})
 
 	t.Run("mol_on_wisp_molecule_currently_errors", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rwm")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rwm")
 		mol := bdProxiedCreate(t, bd, p.dir, "Wisp mol", "--ephemeral", "--type", "molecule")
 		bdProxiedCreate(t, bd, p.dir, "Wisp step", "--ephemeral", "--parent", mol.ID)
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "ready", "--mol", mol.ID, "--json")
@@ -72,7 +75,8 @@ func TestProxiedServerReadyWisp(t *testing.T) {
 	})
 
 	t.Run("wisp_blocked_by_wisp_hidden_and_listed_in_blocked", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rwwb")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rwwb")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Wisp blocker", "--ephemeral")
 		dependent := bdProxiedCreate(t, bd, p.dir, "Wisp dependent", "--ephemeral")
 
@@ -111,7 +115,8 @@ func TestProxiedServerReadyWisp(t *testing.T) {
 	})
 
 	t.Run("cross_table_issue_blocked_by_wisp", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rwci")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rwci")
 		wispBlocker := bdProxiedCreate(t, bd, p.dir, "Wisp blocker for issue", "--ephemeral")
 		issue := bdProxiedCreate(t, bd, p.dir, "Issue blocked by wisp")
 
@@ -158,7 +163,8 @@ func TestProxiedServerReadyWisp(t *testing.T) {
 	})
 
 	t.Run("cross_table_wisp_blocked_by_issue", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rwcw")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rwcw")
 		issueBlocker := bdProxiedCreate(t, bd, p.dir, "Issue blocker for wisp")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp blocked by issue", "--ephemeral")
 
@@ -205,7 +211,8 @@ func TestProxiedServerReadyWisp(t *testing.T) {
 	})
 
 	t.Run("blocked_lists_blocked_wisp", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rwbl")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rwbl")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker wisp", "--ephemeral")
 		dependent := bdProxiedCreate(t, bd, p.dir, "Dependent wisp", "--ephemeral")
 
@@ -238,7 +245,8 @@ func TestProxiedServerReadyWisp(t *testing.T) {
 	})
 
 	t.Run("explain_enriches_wisp_blocker_details", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rwexb")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rwexb")
 		wispBlocker := bdProxiedCreate(t, bd, p.dir,
 			"Wisp blocker title", "--ephemeral", "-p", "1")
 		issue := bdProxiedCreate(t, bd, p.dir, "Blocked issue")
@@ -303,7 +311,8 @@ func TestProxiedServerReadyWisp(t *testing.T) {
 	})
 
 	t.Run("explain_detects_cycle_in_wisp_dependencies", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rwcy")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rwcy")
 		a := bdProxiedCreate(t, bd, p.dir, "Wisp cycle A", "--ephemeral")
 		b := bdProxiedCreate(t, bd, p.dir, "Wisp cycle B", "--ephemeral")
 
@@ -353,7 +362,8 @@ func TestProxiedServerReadyWisp(t *testing.T) {
 	})
 
 	t.Run("empty_state_hint_when_only_wisps_exist", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rwes")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rwes")
 		bdProxiedCreate(t, bd, p.dir, "Lonely wisp", "--ephemeral")
 		stdout, _ := bdProxiedReadyCapture(t, bd, p)
 		if !strings.Contains(stdout, "No open issues") {

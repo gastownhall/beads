@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -527,7 +528,11 @@ func addBulkDependenciesInTx(ctx context.Context, tx storage.Transaction, edges 
 		return fmt.Errorf("final cycle check failed (no edges added): %w", cycleErr)
 	}
 	if cyclePath != "" {
-		return fmt.Errorf("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
+		// Type this rejection so callers can errors.Is(err, domain.ErrDependencyCycle),
+		// matching the proxied/domain bulk final gate. NewCycleError renders the
+		// message verbatim (no sentinel text appended), so the user-facing string
+		// is unchanged.
+		return domain.NewCycleError("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
 	}
 	return nil
 }

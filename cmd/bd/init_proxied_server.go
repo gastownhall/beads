@@ -152,6 +152,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	if err != nil {
 		return fmt.Errorf("failed to open uow provider: %v", err)
 	}
+	defer func() { _ = initUOWProvider.Close(ctx) }()
 
 	remoteURL := resolveProxiedInitRemoteURL(ctx, gitUC, in)
 

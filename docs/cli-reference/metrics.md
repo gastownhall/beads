@@ -1,6 +1,6 @@
 ---
 title: "bd metrics"
-description: "Show or change anonymous usage-metrics settings"
+description: "Show whether anonymous usage metrics are on, see exactly what is sent, and"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -22,7 +22,6 @@ any user-supplied text.
 
 ```
 bd metrics [flags]
-bd metrics [command]
 ```
 
 ## bd metrics example

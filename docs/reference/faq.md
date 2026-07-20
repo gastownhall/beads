@@ -58,7 +58,7 @@ Dolt is a version-controlled SQL database — git semantics at the database leve
 - **Multi-writer**: server mode supports concurrent agents
 - **Portable**: `bd export` produces JSONL for migration and interoperability
 
-See [Dolt architecture](/architecture/dolt) for the detailed analysis and [Storage backends](/architecture/storage-backends) for the alternatives.
+See [Dolt architecture](/architecture/dolt) for the detailed analysis.
 
 ### Why hash-based IDs instead of sequential?
 

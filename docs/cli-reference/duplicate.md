@@ -1,6 +1,6 @@
 ---
 title: "bd duplicate"
-description: "Mark an issue as a duplicate of another"
+description: "Mark an issue as a duplicate of a canonical issue."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

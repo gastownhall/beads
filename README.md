@@ -109,7 +109,7 @@ version: sync remote-backed databases with your current `bd`, back up with
 `bd export --all`, upgrade the binary, then run `bd info --whats-new`,
 `bd hooks install`, and `bd version`. If the upgrade crosses a schema
 migration on a remote-backed database, exactly one designated clone runs
-`bd migrate --force` and `bd dolt push`; other clones install the new binary
+`bd migrate` and `bd dolt push`; other clones install the new binary
 and run `bd bootstrap`. See the full
 [upgrade guide](https://beads.gascity.com/getting-started/upgrading)
 or [docs/getting-started/installation.md](docs/getting-started/installation.md#updating-bd).
@@ -140,10 +140,7 @@ migrate between modes with `bd backup`; reclaim space with `bd prune` /
 `bd purge`.
 
 Full detail — connection flags, sockets, maintenance, backup, and migration —
-in the [Dolt backend guide](docs/architecture/dolt.md). Prefer a different
-database? [Storage Backends](docs/architecture/storage-backends.md) covers
-Postgres, MySQL, and SQLite (Dolt stays the default and the only backend
-with history).
+in the [Dolt backend guide](docs/architecture/dolt.md).
 
 ## 🌐 Community Tools
 
@@ -178,9 +175,6 @@ This is useful for:
 - **Monorepos** — point `BEADS_DIR` at a specific subdirectory
 - **CI/CD** — isolated task tracking without repo-level side effects
 - **Evaluation/testing** — ephemeral databases in `/tmp`
-
-For daemon mode without git, use `bd daemon start --local`
-(see [PR #433](https://github.com/gastownhall/beads/pull/433)).
 
 ## 📝 Documentation
 

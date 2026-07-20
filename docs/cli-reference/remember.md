@@ -1,6 +1,6 @@
 ---
 title: "bd remember"
-description: "Store a persistent memory"
+description: "Store a memory that persists across sessions and account rotations."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

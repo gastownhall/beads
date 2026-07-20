@@ -43,9 +43,8 @@ func auditFoldCount(all map[string]string, want string) int {
 // testAuditConfigKeyCaseSensitive pins the reference's config key-column collation.
 // The finding predicted Dolt's VARCHAR primary key would be case-insensitive, but
 // the embedded-Dolt oracle treats "MyKey" and "mykey" as DISTINCT keys: each holds
-// its own value and GetAllConfig carries both rows. Postgres text and SQLite BINARY
-// are case-sensitive too, so they match; the divergence suspect is real MySQL, whose
-// server-default utf8mb4 collation is case-insensitive and would collapse the two.
+// its own value and GetAllConfig carries both rows. SQLite's BINARY collation matches
+// that behavior.
 func testAuditConfigKeyCaseSensitive(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()

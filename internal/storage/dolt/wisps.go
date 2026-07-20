@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -27,9 +28,9 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 func scanIssueFromTable(ctx context.Context, db *sql.DB, table, id string) (*types.Issue, error) {
 	row := db.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT %s
-		FROM %s
+		FROM %s %s
 		WHERE id = ?
-	`, issueSelectColumns, table), id)
+	`, issueSelectColumns, table, sqlbuild.LeaseJoin(table)), id)
 
 	issue, err := scanIssueFrom(row)
 	if err == sql.ErrNoRows {
@@ -117,8 +118,8 @@ func insertIssueTxIntoTable(ctx context.Context, tx *sql.Tx, table string, issue
 //nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
 func scanIssueTxFromTable(ctx context.Context, tx *sql.Tx, table, id string) (*types.Issue, error) {
 	row := tx.QueryRowContext(ctx, fmt.Sprintf(`
-		SELECT %s FROM %s WHERE id = ?
-	`, issueSelectColumns, table), id)
+		SELECT %s FROM %s %s WHERE id = ?
+	`, issueSelectColumns, table, sqlbuild.LeaseJoin(table)), id)
 
 	issue, err := scanIssueFrom(row)
 	if err == sql.ErrNoRows {
@@ -213,6 +214,30 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 	}
 
 	return wrapTransactionError("commit close wisp", tx.Commit())
+}
+
+// closeWispChecked closes a wisp with the is_blocked guard, mirroring closeWisp
+// but refusing with storage.ErrCloseBlocked when the wisp is still blocked
+// unless opts.Force is set. The guard and the close share the same transaction;
+// wisps live in dolt_ignored tables, so there is no DOLT_COMMIT. On a guard
+// rejection the deferred Rollback discards the transaction — no close or event
+// is written.
+func (s *DoltStore) closeWispChecked(ctx context.Context, id string, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storage.CloseIssueResult{}, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force)
+	if err != nil {
+		return storage.CloseIssueResult{}, err
+	}
+
+	if err := wrapTransactionError("commit close wisp", tx.Commit()); err != nil {
+		return storage.CloseIssueResult{}, err
+	}
+	return storage.CloseIssueResult{Unchanged: res.AlreadyClosed}, nil
 }
 
 // deleteWisp permanently removes a wisp and its related data.
@@ -432,9 +457,9 @@ func (s *DoltStore) getWispsByIDs(ctx context.Context, ids []string) ([]*types.I
 		//nolint:gosec // G201: placeholders contains only ? markers
 		querySQL := fmt.Sprintf(`
 			SELECT %s
-			FROM wisps
+			FROM wisps %s
 			WHERE id IN (%s)
-		`, issueSelectColumns, placeholders)
+		`, issueSelectColumns, sqlbuild.LeaseJoin("wisps"), placeholders)
 
 		queryRows, err := s.queryContext(ctx, querySQL, args...)
 		if err != nil {

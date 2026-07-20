@@ -191,11 +191,20 @@ Examples:
 		// name (e.g. dolt_database). Without this, server-mode rigs get the
 		// default name "beads" instead of their configured name. (GH#3029)
 		cfg, err := configfile.Load(beadsDir)
-		if err != nil || cfg == nil {
-			cfg = findParentConfig(beadsDir)
+		if err != nil {
+			return HandleError("failed to load %s: %v; no storage database was opened or modified; fix or restore metadata.json and retry", configfile.ConfigPath(beadsDir), err)
+		}
+		if cfg == nil {
+			cfg, err = findParentConfig(beadsDir)
+			if err != nil {
+				return HandleError("failed to load ancestor storage metadata: %v; no storage database was opened or modified; fix or restore metadata.json and retry", err)
+			}
 		}
 		if cfg == nil {
 			cfg = configfile.DefaultConfig()
+		}
+		if err := requireBootstrapDoltBackend(cfg); err != nil {
+			return HandleError("%v", err)
 		}
 
 		resolvedCfg, repairMsg, err := applyBootstrapMetadataRepair(beadsDir, cfg, !dryRun)
@@ -268,6 +277,13 @@ func noWorkspaceBootstrapPayload() map[string]interface{} {
 		"reason":     activeWorkspaceNotFoundError(),
 		"suggestion": diagHint(),
 	}
+}
+
+func requireBootstrapDoltBackend(cfg *configfile.Config) error {
+	if err := validateConfiguredBackend(cfg); err != nil {
+		return err
+	}
+	return nil
 }
 
 func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPlan {
@@ -513,6 +529,9 @@ func confirmPrompt(message string, nonInteractive bool) bool {
 }
 
 func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInteractive bool) error {
+	if err := requireBootstrapDoltBackend(cfg); err != nil {
+		return err
+	}
 	if !confirmPrompt("Proceed?", nonInteractive) {
 		fmt.Fprintf(os.Stderr, "Aborted.\n")
 		return nil
@@ -955,8 +974,10 @@ func isNonInteractiveBootstrap(flagValue bool) bool {
 // findParentConfig walks up from beadsDir's parent looking for a
 // .beads/metadata.json in ancestor directories. This handles the case where a
 // rig subdirectory (its own git repo) doesn't have a local .beads but its
-// parent workspace does. Returns nil if no parent config is found.
-func findParentConfig(beadsDir string) *configfile.Config {
+// parent workspace does. Returns nil if no parent config is found. A malformed
+// or unreadable ancestor metadata file is authoritative and returned as an error;
+// bootstrap must not skip it and select a more distant workspace or defaults.
+func findParentConfig(beadsDir string) (*configfile.Config, error) {
 	// Start from the parent of beadsDir's enclosing directory.
 	// beadsDir is typically "<project>/.beads", so we start from <project>'s parent.
 	start := filepath.Dir(filepath.Dir(beadsDir))
@@ -964,8 +985,12 @@ func findParentConfig(beadsDir string) *configfile.Config {
 
 	for dir := start; dir != "/" && dir != "."; {
 		candidate := filepath.Join(dir, ".beads")
-		if cfg, err := configfile.Load(candidate); err == nil && cfg != nil {
-			return cfg
+		cfg, err := configfile.Load(candidate)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", configfile.ConfigPath(candidate), err)
+		}
+		if cfg != nil {
+			return cfg, nil
 		}
 
 		// Don't search above $HOME
@@ -979,7 +1004,7 @@ func findParentConfig(beadsDir string) *configfile.Config {
 		}
 		dir = parent
 	}
-	return nil
+	return nil, nil
 }
 
 func init() {

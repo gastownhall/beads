@@ -70,11 +70,9 @@ func OrderByForColumns(sortBy string, sortDesc bool, col func(sortKey string) st
 	if sortBy == "" || sortBy == "priority" {
 		return fmt.Sprintf("ORDER BY %s %s, %s DESC, %s ASC", col("priority"), dir, col("created"), col("id"))
 	}
-	// A nullable sort column (closed_at, assignee) must order NULLs the MySQL way — NULL
-	// treated as lowest, so first on ASC and last on DESC — on every backend. MySQL/Dolt/
-	// SQLite do this by default; Postgres defaults the opposite way (NULLS FIRST on DESC),
-	// so lead with an explicit (col IS NULL) key for those two. NOT NULL columns keep the
-	// plain clause (byte-identical to before).
+	// A nullable sort column (closed_at, assignee) treats NULL as lowest: first on ASC
+	// and last on DESC. Lead with an explicit (col IS NULL) key so the contract does not
+	// depend on a driver's default NULL ordering. NOT NULL columns keep the plain clause.
 	if sortBy == "closed" || sortBy == "assignee" {
 		return fmt.Sprintf("ORDER BY (%s IS NULL) %s, %s %s, %s ASC", col(sortBy), flipDir(dir), col(sortBy), dir, col("id"))
 	}
@@ -102,7 +100,7 @@ func OrderBy(sortBy string, sortDesc bool, table string) string {
 
 // Less is the Go-side mirror of OrderBy for merge sorts over rows fetched
 // from separate queries (issues + wisps). It must order exactly the way the
-// SQL does, including MySQL NULL-first semantics for nullable columns;
+// SQL does, including NULL-first ascending semantics for nullable columns;
 // otherwise a post-merge limit cut keeps a different row set than SQL
 // selected.
 func Less(a, b *types.Issue, sortBy string, sortDesc bool) bool {

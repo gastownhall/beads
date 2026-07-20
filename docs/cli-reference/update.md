@@ -1,6 +1,6 @@
 ---
 title: "bd update"
-description: "Update one or more issues"
+description: "Update one or more issues."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

@@ -508,7 +508,7 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 			return freshCloneServerUnreachableResult(dbName, host, port, result.Err)
 		}
 	default:
-		// SQLite (default): check configured .db file path.
+		// Non-Dolt (legacy sqlite-era metadata): check configured .db file path.
 		var dbPath string
 		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.Database != "" {
 			dbPath = cfg.DatabasePath(beadsDir)

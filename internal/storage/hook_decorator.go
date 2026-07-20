@@ -143,6 +143,19 @@ func (h *HookFiringStore) CloseIssue(ctx context.Context, id string, reason stri
 	return nil
 }
 
+// CloseIssueChecked closes an issue under the is_blocked guard and fires
+// on_close on success — mirroring CloseIssue, this includes the idempotent
+// no-op when the issue was already closed (res.Unchanged). A guard rejection
+// (ErrCloseBlocked) or any other error returns without firing.
+func (h *HookFiringStore) CloseIssueChecked(ctx context.Context, id string, actor string, opts CloseIssueOptions) (CloseIssueResult, error) {
+	res, err := h.inner.CloseIssueChecked(ctx, id, actor, opts)
+	if err != nil {
+		return res, err
+	}
+	h.fireHookByID(ctx, hooks.EventClose, id)
+	return res, nil
+}
+
 // ── Dependency mutations ────────────────────────────────────────────
 
 // AddDependency adds a dependency and fires on_update for the issue.

@@ -1,6 +1,6 @@
 ---
 title: "bd restore"
-description: "Restore the pre-compaction content of a compacted issue"
+description: "Restore the pre-compaction content of a compacted issue."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

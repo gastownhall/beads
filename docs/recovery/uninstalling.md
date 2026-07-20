@@ -1,6 +1,6 @@
 ---
 title: Uninstalling
-description: Remove beads from a repository with bd reset, uninstall git hooks, and delete the bd binary after backing up issue data
+description: Remove beads from a repository with bd admin reset, uninstall git hooks, and delete the bd binary after backing up issue data
 ---
 
 This guide explains how to remove beads from a repository or remove the `bd`
@@ -28,17 +28,17 @@ Dolt branches, commit history, working-set state, or non-issue tables.
 
 ## Repository Reset
 
-Use `bd reset` from the repository root. It previews what will be removed by
-default:
+Use `bd admin reset` from the repository root. It previews what will be
+removed by default:
 
 ```bash
-bd reset
+bd admin reset
 ```
 
 If the preview is correct, run:
 
 ```bash
-bd reset --force
+bd admin reset --force
 ```
 
 This removes beads-managed repository data such as:
@@ -60,8 +60,8 @@ unrelated user hook content outside its managed hook markers.
 
 ## Manual Cleanup
 
-Use manual cleanup only if `bd reset` is unavailable or cannot run in the
-repository.
+Use manual cleanup only if `bd admin reset` is unavailable or cannot run in
+the repository.
 
 ```bash
 # Stop a local Dolt server if one is running.
@@ -116,7 +116,7 @@ you used to install it.
 ```bash
 which bd
 test ! -e .beads
-bd hooks status 2>/dev/null || true
+bd hooks list 2>/dev/null || true
 git config --get merge.beads.driver
 ```
 

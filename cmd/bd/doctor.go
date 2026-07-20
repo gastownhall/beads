@@ -84,10 +84,17 @@ This command checks:
   - .beads/.gitignore up to date
   - Metadata.json version tracking (LastBdVersion field)
 
+Storage Availability:
+  Full diagnostics, --perf, --deep, --server, --migration, and
+  --check=validate currently require Dolt server mode. Embedded Dolt
+  supports --check=artifacts, --check=conventions, and
+  --check=pollution. --check-health has a limited hook-health fallback.
+  Unsupported combinations return a notice without changing storage.
+
 Performance Mode (--perf):
   Run performance diagnostics on your database:
   - Times key operations (bd ready, bd list, bd show, etc.)
-  - Collects system info (OS, arch, SQLite version, database stats)
+  - Collects system info (OS, arch, database stats)
   - Generates CPU profile for analysis
   - Outputs shareable report for bug reports
 
@@ -123,18 +130,12 @@ Server Mode (--server):
   - Schema compatible: Can query beads tables?
   - Connection pool: Pool health metrics
 
-Migration Validation Mode (--migration):
-  Run Dolt migration validation checks with machine-parseable output.
-  Use --migration=pre before migration to verify readiness:
-  - JSONL file exists and is valid (parseable, no corruption)
-  - All JSONL issues are present in SQLite (or explains discrepancies)
-  - No blocking issues prevent migration
-  Use --migration=post after migration to verify completion:
-  - Dolt database exists and is healthy
-  - All issues from JSONL are present in Dolt
-  - No data was lost during migration
-  - Dolt database has no locks or uncommitted changes
-  Combine with --json for machine-parseable output for automation.
+Legacy Dolt Migration Validation Mode (--migration):
+  Retained for older SQLite-to-Dolt migration workflows and available only in
+  Dolt server mode. It is not the migration path for removed backends
+  (PostgreSQL, MySQL, SQLite); those fail closed with export/import guidance.
+  Combine
+  with --json for machine-parseable diagnostic output.
 
 Agent Mode (--agent):
   Output diagnostics designed for AI agent consumption. Instead of terse
@@ -181,9 +182,9 @@ Examples:
   bd doctor --check=validate --fix   # Auto-fix data-integrity issues
   bd doctor --deep             # Full graph integrity validation
   bd doctor --server           # Dolt server mode health checks
-  bd doctor --migration=pre    # Validate readiness for Dolt migration
-  bd doctor --migration=post   # Validate Dolt migration completed
-  bd doctor --migration=pre --json  # Machine-parseable migration validation`,
+  bd doctor --migration=pre    # Legacy Dolt-server migration diagnostic
+  bd doctor --migration=post   # Legacy Dolt-server completion diagnostic
+  bd doctor --migration=pre --json  # Machine-parseable legacy diagnostic`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -193,11 +194,6 @@ Examples:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
-
-		if usesProxiedServer() {
-			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in proxied-server mode.")
-			return nil
-		}
 
 		var checkPath string
 		if len(args) > 0 {
@@ -211,6 +207,14 @@ Examples:
 		absPath, err := filepath.Abs(checkPath)
 		if err != nil {
 			return HandleError("failed to resolve path: %v", err)
+		}
+		if err := validateDoctorWorkspaceBackend(absPath); err != nil {
+			return HandleError("%v", err)
+		}
+
+		if usesProxiedServer() {
+			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in proxied-server mode.")
+			return nil
 		}
 
 		if doctorFix && isOrchestratorRoot(absPath) {
@@ -340,12 +344,25 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorOrchestrator, "orchestrator", false, "Running in orchestrator multi-workspace mode (routes.jsonl is expected, higher duplicate tolerance)")
 	doctorCmd.Flags().IntVar(&orchestratorDuplicatesThreshold, "orchestrator-duplicates-threshold", 1000, "Duplicate tolerance threshold for orchestrator mode (wisps are ephemeral)")
 	doctorCmd.Flags().BoolVar(&doctorServer, "server", false, "Run Dolt server mode health checks (connectivity, version, schema)")
-	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run Dolt migration validation: 'pre' (before migration) or 'post' (after migration)")
+	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run legacy Dolt-server migration diagnostics: 'pre' or 'post'")
 	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
 }
 
 func shouldSkipDoctorNetworkChecks() bool {
 	return jsonOutput || !ui.IsTerminal()
+}
+
+// validateDoctorWorkspaceBackend keeps doctor diagnostics read-only when metadata
+// selects a removed or unknown implementation or cannot be parsed. Doctor contains
+// direct diagnostic store paths and may run under shared-server mode, so corrupt
+// metadata must be rejected before version tracking or any database check begins.
+func validateDoctorWorkspaceBackend(path string) error {
+	beadsDir := doctor.ResolveBeadsDirForRepo(path)
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return fmt.Errorf("failed to load %s: %w; no storage database was opened or modified; fix or restore metadata.json and retry", configfile.ConfigPath(beadsDir), err)
+	}
+	return validateConfiguredBackend(cfg)
 }
 
 // printEmbeddedUnsupported reports that a doctor variant is not yet wired up

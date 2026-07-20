@@ -1,6 +1,6 @@
 ---
 title: "bd completion"
-description: "Generate the autocompletion script for the specified shell"
+description: "Generate the autocompletion script for bd for the specified shell."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -12,7 +12,7 @@ See each sub-command's help for details on how to use the generated script.
 
 
 ```
-bd completion [command]
+bd completion [flags]
 ```
 
 ## bd completion bash
@@ -28,11 +28,11 @@ To load completions in your current shell session:
 
 To load completions for every new session, execute once:
 
-#### Linux:
+### Linux:
 
 	bd completion bash &gt; /etc/bash_completion.d/bd
 
-#### macOS:
+### macOS:
 
 	bd completion bash &gt; $(brew --prefix)/etc/bash_completion.d/bd
 
@@ -111,11 +111,11 @@ To load completions in your current shell session:
 
 To load completions for every new session, execute once:
 
-#### Linux:
+### Linux:
 
 	bd completion zsh &gt; "$&#123;fpath[1]&#125;/_bd"
 
-#### macOS:
+### macOS:
 
 	bd completion zsh &gt; $(brew --prefix)/share/zsh/site-functions/_bd
 

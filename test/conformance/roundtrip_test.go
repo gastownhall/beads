@@ -12,12 +12,10 @@ import (
 	"testing"
 )
 
-// The portable JSONL backup path — `bd export` -> git -> `bd import` — is the only
-// backup mechanism the non-Dolt backends have (Dolt-native CALL DOLT_BACKUP is
-// unsupported on them, and auto-export is gated to Dolt because its change token is
-// the Dolt commit hash). The manual round-trip is already lossless on every backend
-// (verified live against real Postgres/MySQL); this test pins that so a regression in
-// export or import cannot slip through CI.
+// The portable JSONL backup path — `bd export` -> git -> `bd import` — is the
+// backend-agnostic backup mechanism for stores without Dolt-native CALL
+// DOLT_BACKUP and commit hashes. This test pins the manual round-trip so a
+// regression in export or import cannot slip through CI.
 //
 // It is a self-consistency (idempotence) check, not a differential one, so it lives
 // outside the `corpus`: for each backend it seeds a rich fixture, exports, restores
@@ -125,18 +123,11 @@ func restoreAndReexport(t *testing.T, bin string, p BackendProfile, exportJSONL 
 	return mustRead(t, out)
 }
 
-// initRoundTripWorkspace mints an isolated workspace for a backend (fresh temp dir plus
-// a fresh handle/schema for the server backends) and runs `bd init`. Prefix "rt" matches
-// the pinned rt-* ids in the seed.
+// initRoundTripWorkspace creates an isolated temporary workspace and runs `bd init`.
+// Prefix "rt" matches the pinned rt-* ids in the seed.
 func initRoundTripWorkspace(t *testing.T, bin string, p BackendProfile) (*Workspace, []string) {
 	t.Helper()
 	ws := &Workspace{Dir: t.TempDir()}
-	if p.NewHandle != nil {
-		ws.Handle = p.NewHandle()
-	}
-	if p.Teardown != nil {
-		t.Cleanup(func() { p.Teardown(ws) })
-	}
 	var env []string
 	if p.Env != nil {
 		env = p.Env(ws)
@@ -157,11 +148,14 @@ func runSteps(t *testing.T, bin, dir string, env []string, backend string, steps
 	}
 }
 
-// ephemeralExportKeys are runtime claim/lease fields that `bd export` serializes but
-// `bd import` deliberately does not restore: a restored backup must not carry a dead
-// worker's stale lease. They are not part of the durable backup contract, so the
-// round-trip legitimately drops them on EVERY backend (the Dolt reference included), and
-// canonicalRecords strips them before the fidelity comparison.
+// ephemeralExportKeys are runtime claim/lease fields that `bd export`
+// serializes but that are not part of the durable backup contract. Leases
+// live in the ephemeral, node-local leases table (bd-lrgn1): import restores
+// a snapshot lease only when the stored row is a live claim and no unexpired
+// local lease exists (issueops.RestoreLeaseOnImportInTx), so whether they
+// survive a round trip is timing- and node-dependent. canonicalRecords strips
+// them before the fidelity comparison. The exact restore semantics are pinned
+// separately by cmd/bd/protocol/lease_claim_test.go (L1.2).
 var ephemeralExportKeys = []string{"lease_expires_at", "heartbeat_at", "row_lock"}
 
 // canonicalRecords normalizes a JSONL export for the round-trip fidelity comparison:

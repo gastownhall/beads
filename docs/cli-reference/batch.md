@@ -1,6 +1,6 @@
 ---
 title: "bd batch"
-description: "Run multiple write operations in a single database transaction"
+description: "Run multiple write operations in a single database transaction."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

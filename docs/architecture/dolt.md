@@ -337,7 +337,7 @@ publishes Dolt history to `refs/dolt/data` on the same git remote.
 
 ```bash
 bd list              # Should show issues
-bd vc log            # Should show initial commit
+bd vc status         # Should show the current branch, no uncommitted changes
 ```
 
 ## Troubleshooting
@@ -501,11 +501,11 @@ chmod 600 ~/.config/beads/credentials
 Dolt maintains its own version history, separate from Git:
 
 ```bash
-# View Dolt commit history
-bd vc log
+# View an issue's version history across Dolt commits
+bd history bd-42
 
-# Show diff between Dolt commits
-bd vc diff HEAD~1 HEAD
+# Show current branch and uncommitted changes
+bd vc status
 
 # Create manual checkpoint
 bd vc commit -m "Checkpoint before refactor"

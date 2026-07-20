@@ -45,9 +45,11 @@ type Issue struct {
 	CloseReason     string     `json:"close_reason,omitempty"`      // Reason provided when closing
 	ClosedBySession string     `json:"closed_by_session,omitempty"` // Claude Code session that closed this issue
 
-	// ===== Leasing (claim TTL + heartbeat; migration 0054) =====
-	// NULL when there is no active lease. row_lock is an internal serialization
-	// mechanism and is intentionally NOT surfaced here.
+	// ===== Leasing (claim TTL + heartbeat; migrations 0054/0055) =====
+	// Hydrated from the ephemeral, node-local leases table (bd-lrgn1), not
+	// from issues columns. NULL when there is no active lease on this node.
+	// row_lock is an internal serialization mechanism (an issues column) and
+	// is intentionally NOT surfaced here.
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"` // When the current claim's lease expires
 	HeartbeatAt    *time.Time `json:"heartbeat_at,omitempty"`     // Last heartbeat from the lease owner
 

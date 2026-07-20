@@ -665,9 +665,8 @@ func testAuditGetNextChildID(t *testing.T, f Factory) {
 	}
 }
 
-// The self-heal scan (id LIKE parent.'%') is case-sensitive on every backend
-// (Dolt/MySQL bin collation, Postgres "C", SQLite case_sensitive_like — see
-// bd-oyvc2.10), so a different-cased sibling parent's children never advance
+// The self-heal scan (id LIKE parent.'%') is case-sensitive on Dolt and SQLite
+// (see bd-oyvc2.10), so a different-cased sibling parent's children never advance
 // this parent's counter.
 func testAuditGetNextChildIDCaseSensitive(t *testing.T, f Factory) {
 	s := f(t)

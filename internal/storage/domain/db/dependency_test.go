@@ -107,6 +107,7 @@ func (s *testSuite) depInsertSelfDep() {
 	err := s.depRepo().Insert(s.Ctx(), newDep("bd-dep-self", "bd-dep-self", types.DepBlocks), "tester", domain.DepInsertOpts{})
 	s.Require().Error(err)
 	s.Contains(err.Error(), "cannot depend on itself")
+	s.Require().ErrorIs(err, domain.ErrSelfDependency)
 }
 
 func (s *testSuite) depInsertEmptyIDs() {

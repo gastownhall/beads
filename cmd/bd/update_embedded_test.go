@@ -668,6 +668,21 @@ func TestEmbeddedUpdate(t *testing.T) {
 		if !strings.Contains(out, "already assigned to") {
 			t.Errorf("expected 'already assigned to' error, got: %s", out)
 		}
+		// The refusal must steer toward the holder, not teach an
+		// unclaim-then-claim eviction of a live claim (bd-at6rc / wy-zs5s2).
+		if !strings.Contains(out, "coordinate with the holder") {
+			t.Errorf("refusal should say coordinate-with-holder, got: %s", out)
+		}
+		if strings.Contains(out, "to release it before re-claiming") {
+			t.Errorf("refusal must not suggest plain unclaim of a foreign claim, got: %s", out)
+		}
+		// Nor may it name unclaim or --force at all: copy that names an
+		// eviction command gets pattern-matched by batch agents into
+		// `unclaim --force; claim` — a stronger steamroller than the one
+		// this fix removed (wy-yuclk).
+		if strings.Contains(out, "unclaim") || strings.Contains(out, "--force") {
+			t.Errorf("claim refusal must not name an eviction command, got: %s", out)
+		}
 	})
 
 	// A batch where one claim is lost and another is won must exit non-zero, so

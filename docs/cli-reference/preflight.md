@@ -1,6 +1,6 @@
 ---
 title: "bd preflight"
-description: "Show PR readiness checklist"
+description: "Display a checklist of common pre-PR checks for contributors."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -32,7 +32,7 @@ bd preflight [flags]
 
 ```
       --check       Run checks automatically
-      --fix         Auto-fix issues where possible (vendorHash, version sync)
+      --fix         Auto-fix issues where possible (not yet implemented)
       --json        Output results as JSON
       --skip-lint   Skip lint check explicitly
 ```

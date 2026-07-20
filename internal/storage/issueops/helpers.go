@@ -58,11 +58,19 @@ func TableRouting(issue *types.Issue) (issueTable, eventTable string) {
 // updated_at in every assignment, and ON DUPLICATE KEY UPDATE assignments are
 // evaluated in order, so the comparison column must not be reassigned until
 // all other columns have been decided.
+//
+// Leases are NOT issues columns (bd-lrgn1): they live in the ephemeral
+// leases table and are restored by RestoreLeaseOnImportInTx, which enforces
+// the never-clobber-a-live-local-lease rule (protocol L1.2: lease fields MUST
+// round-trip the JSONL interchange, wy-urlct). row_lock rides along because
+// any write that can change status/assignee must rewrite it to collide with a
+// concurrent reclaim/close on the same row (see freshRowLock in lease.go).
 var issueUpsertColumns = []string{
 	"content_hash", "title", "description", "design", "acceptance_criteria",
 	"notes", "status", "priority", "issue_type", "assignee",
 	"estimated_minutes", "started_at", "closed_at", "external_ref",
-	"source_repo", "close_reason", "metadata", "updated_at",
+	"source_repo", "close_reason", "metadata",
+	"row_lock", "updated_at",
 }
 
 // issueUpsertAssignments renders the ON DUPLICATE KEY UPDATE clause. With
@@ -81,10 +89,9 @@ func issueUpsertAssignments(table string, rejectStaleUpdate bool) string {
 	assignments := make([]string, 0, len(issueUpsertColumns))
 	for _, col := range issueUpsertColumns {
 		if rejectStaleUpdate {
-			// Qualify the existing-row references with the table name. Postgres's
-			// ON CONFLICT DO UPDATE rejects a bare `updated_at` as ambiguous (it could
-			// be the target row or EXCLUDED); <table>.updated_at is unambiguous and is
-			// also accepted by MySQL/Dolt/SQLite. VALUES(...) is the incoming row.
+			// Qualify existing-row references with the table name so the target value
+			// remains unambiguous after the SQLite upsert translation. VALUES(...) is
+			// the incoming row in the canonical Dolt/MySQL-dialect statement.
 			assignments = append(assignments,
 				fmt.Sprintf("%s = IF(VALUES(updated_at) > %s.updated_at, VALUES(%s), %s.%s)", col, table, col, table, col))
 		} else {
@@ -112,7 +119,8 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			mol_type, work_type, source_system, source_repo, close_reason,
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
-			due_at, defer_until, metadata
+			due_at, defer_until, metadata,
+			row_lock
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
@@ -122,7 +130,8 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
-			?, ?, ?
+			?, ?, ?,
+			?
 		)
 		ON DUPLICATE KEY UPDATE
 			%s
@@ -136,6 +145,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
+		freshRowLock(),
 	)
 	if err != nil {
 		return fmt.Errorf("insert issue into %s: %w", table, err)

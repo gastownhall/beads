@@ -5,6 +5,8 @@ description: Dependency-aware, Dolt-backed issue tracker built for AI coding age
 
 **Beads** (`bd`) is a Dolt-powered issue tracker designed for AI-supervised coding workflows.
 
+These docs are for the 1.1.0 release of beads — see the [v1.1.0 release notes](https://github.com/gastownhall/beads/releases/tag/v1.1.0).
+
 ## Why Beads?
 
 Traditional issue trackers (Jira, GitHub Issues) weren't designed for AI agents. Beads was built from the ground up for:

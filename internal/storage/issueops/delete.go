@@ -64,6 +64,9 @@ func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool)
 		if err := DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
 			return err
 		}
+	} else if err := DeleteLeaseInTx(ctx, tx, id); err != nil {
+		// A deleted issue holds no lease.
+		return err
 	}
 	return nil
 }
@@ -262,6 +265,13 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 		}
 		rowsAffected, _ := deleteResult.RowsAffected()
 		totalRegularsDeleted += int(rowsAffected)
+
+		// Deleted issues hold no leases.
+		if _, err := tx.ExecContext(ctx,
+			fmt.Sprintf(`DELETE FROM leases WHERE issue_id IN (%s)`, batchInClause),
+			batchArgs...); err != nil {
+			return nil, fmt.Errorf("delete leases: %w", err)
+		}
 	}
 	result.DeletedCount = totalRegularsDeleted + len(allWispIDs)
 

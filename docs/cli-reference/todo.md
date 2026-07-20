@@ -1,6 +1,6 @@
 ---
 title: "bd todo"
-description: "Manage TODO items (convenience wrapper for task issues)"
+description: "Manage TODO items as lightweight task issues."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -19,7 +19,6 @@ TODOs can be promoted to full issues by changing type or priority:
 
 ```
 bd todo [flags]
-bd todo [command]
 ```
 
 ## bd todo add

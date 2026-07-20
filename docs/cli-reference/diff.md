@@ -1,6 +1,6 @@
 ---
 title: "bd diff"
-description: "Show changes between two commits or branches"
+description: "Show the differences in issues between two commits or branches."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

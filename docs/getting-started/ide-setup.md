@@ -23,7 +23,7 @@ bd setup claude --remove    # Uninstall
 | Recipe | Files written | Details |
 |--------|---------------|---------|
 | `claude` | `.claude/settings.json` (or `~/.claude/settings.json` with `--global`) + `CLAUDE.md` section | [Claude Code](/integrations/claude-code) |
-| `cursor` | `.cursor/rules/beads.mdc` + `.cursor/hooks.json` + `.agents/skills/beads/` | [Cursor](/integrations/cursor) |
+| `cursor` | `.cursor/rules/beads.mdc` | [Cursor](/integrations/cursor) |
 | `gemini` | `~/.gemini/settings.json` (or `.gemini/settings.json` with `--project`) + `GEMINI.md` section | [Gemini CLI](/integrations/gemini) |
 | `copilot` | `.copilot-plugin/plugin.json` + `.github/copilot-instructions.md` | [Copilot CLI](/integrations/copilot-cli) |
 | `codex` | `.agents/skills/beads/` + `AGENTS.md` section + `.codex/` hooks | [Codex](/integrations/codex) |
@@ -142,18 +142,18 @@ If you prefer manual configuration, add the hook to your Claude Code settings:
 ## Cursor IDE
 
 ```bash
-bd setup cursor            # Rules file + agent hooks + beads skill
-bd setup cursor --global   # Global hooks in ~/.cursor/hooks.json
+bd setup cursor            # Always-applied rules file
 ```
 
-This creates `.cursor/rules/beads.mdc` with beads-aware rules, `.cursor/hooks.json` with agent hooks (prime on session start, restore context after compaction), and the beads agent skill in `.agents/skills/beads/`.
+This creates `.cursor/rules/beads.mdc` with beads-aware rules that Cursor
+re-includes every turn.
 
 **Verify:**
 ```bash
 bd setup cursor --check
 ```
 
-See [Cursor](/integrations/cursor) for hook details and PATH caveats.
+See [Cursor](/integrations/cursor) for details.
 
 ## Gemini CLI
 

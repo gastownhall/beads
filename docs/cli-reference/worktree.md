@@ -1,6 +1,6 @@
 ---
 title: "bd worktree"
-description: "Manage git worktrees for parallel development"
+description: "Manage git worktrees with proper beads configuration."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -23,7 +23,7 @@ Examples:
   bd worktree info                          # Show info about current worktree
 
 ```
-bd worktree [command]
+bd worktree [flags]
 ```
 
 ## bd worktree create

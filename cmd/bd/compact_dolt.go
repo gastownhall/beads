@@ -33,7 +33,9 @@ How it works:
   2. Creates a squashed base commit from all old history
   3. Cherry-picks recent commits on top
   4. Swaps main branch to the compacted version
-  5. Runs Dolt GC to reclaim space
+  5. Prunes remote-tracking refs (they would keep the old history alive;
+     the next push or fetch re-creates them at the new tip)
+  6. Runs Dolt GC to reclaim space
 
 Examples:
   bd compact --dry-run               # Preview: show commit breakdown
@@ -175,29 +177,46 @@ Examples:
 			return HandleError("compact failed: %v", err)
 		}
 
+		// Prune remote-tracking refs before GC: they still anchor the
+		// pre-compact chain, and with them in place GC reclaims nothing on any
+		// workspace that has ever pushed or fetched (bd-agctw).
+		sizeBefore := storeSizeBytes()
+		pruned, tags := pruneRemoteRefsForGC(ctx)
+		if !jsonOutput {
+			printPruneReport(pruned, tags)
+		}
+
 		// Reclaim disk space from orphaned old history
 		if gc, ok := storage.UnwrapStore(store).(storage.GarbageCollector); ok {
 			if err := gc.DoltGC(ctx); err != nil {
 				WarnError("dolt gc after compact failed: %v", err)
 			}
 		}
+		sizeAfter := storeSizeBytes()
 
 		elapsed := time.Since(start)
 		resultCommits := len(recentHashes) + 1
 
 		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"success":        true,
-				"commits_before": totalCommits,
-				"commits_after":  resultCommits,
-				"old_squashed":   oldCommits,
-				"recent_kept":    len(recentHashes),
-				"elapsed_ms":     elapsed.Milliseconds(),
-			})
+			result := map[string]interface{}{
+				"success":            true,
+				"commits_before":     totalCommits,
+				"commits_after":      resultCommits,
+				"old_squashed":       oldCommits,
+				"recent_kept":        len(recentHashes),
+				"remote_refs_pruned": pruned,
+				"tags_anchoring":     tags,
+				"elapsed_ms":         elapsed.Milliseconds(),
+			}
+			addGCSizeJSON(result, sizeBefore, sizeAfter)
+			return outputJSON(result)
 		}
 		fmt.Printf("✓ Compacted %d commits → %d\n", totalCommits, resultCommits)
 		fmt.Printf("  Squashed: %d old commits → 1 base\n", oldCommits)
 		fmt.Printf("  Preserved: %d recent commits\n", len(recentHashes))
+		if line := gcSizeLine(sizeBefore, sizeAfter); line != "" {
+			fmt.Printf("  Store: %s\n", line)
+		}
 		fmt.Printf("  Time: %v\n", elapsed.Round(time.Millisecond))
 		return nil
 	},

@@ -61,9 +61,8 @@ func RunServerHealthChecks(path string) ServerHealthResult {
 		result.Checks = append(result.Checks, DoctorCheck{
 			Name:     "Server Config",
 			Status:   StatusWarning,
-			Message:  fmt.Sprintf("Backend is '%s', not Dolt", cfg.GetBackend()),
-			Detail:   "Server mode health checks are only relevant for Dolt backend",
-			Fix:      "Set backend: dolt in metadata.json to use Dolt server mode",
+			Message:  fmt.Sprintf("Server checks require Dolt; configured backend is %q", cfg.GetBackend()),
+			Detail:   "Dolt server health checks do not apply to this backend",
 			Category: CategoryFederation,
 		})
 		result.OverallOK = false

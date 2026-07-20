@@ -583,37 +583,6 @@ func TestMetricsRootVersionFlagSuppressesFirstRunNotice(t *testing.T) {
 	}
 }
 
-// TestInitProxiedServerRejectedNotYetImplemented asserts `bd init
-// --proxied-server` is rejected as "not yet implemented", keeping
-// proxied-server mode gated off so usesProxiedServer() is never true.
-func TestInitProxiedServerRejectedNotYetImplemented(t *testing.T) {
-	bd := buildEmbeddedBD(t)
-	home, err := testTempDir("bd-proxied-gate-home-*")
-	if err != nil {
-		t.Fatalf("temp home: %v", err)
-	}
-	repo, err := testTempDir("bd-proxied-gate-repo-*")
-	if err != nil {
-		t.Fatalf("temp repo: %v", err)
-	}
-	initGitRepoAt(t, repo)
-
-	cmd := exec.Command(bd, "init", "--non-interactive", "--quiet", "--proxied-server")
-	cmd.Dir = repo
-	cmd.Env = metricsTestEnv(home)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
-
-	if runErr == nil {
-		t.Fatalf("bd init --proxied-server unexpectedly succeeded; proxied-server mode must stay gated off\nstdout:\n%s", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "not yet implemented") {
-		t.Errorf("bd init --proxied-server stderr = %q, want it to contain %q", stderr.String(), "not yet implemented")
-	}
-}
-
 // metrics off must not queue a usage event, honoring the "No usage data will be
 // collected or sent" promise even though metrics are still enabled for the
 // off invocation itself.

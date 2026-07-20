@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -135,13 +136,14 @@ func TestCheckMigrationReadinessResult_NoJSONL(t *testing.T) {
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("failed to create .beads: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"sqlite","sqlite_path":"issues.db"}`), 0644); err != nil {
+		t.Fatalf("failed to create SQLite metadata: %v", err)
+	}
 
 	check, _ := CheckMigrationReadiness(tmpDir)
 
-	// With Dolt-only backend, GetBackend defaults to BackendDolt,
-	// so migration readiness returns OK ("Already using Dolt backend")
-	if check.Status != StatusOK {
-		t.Errorf("status = %q, want %q (Dolt-only backend returns OK)", check.Status, StatusOK)
+	if check.Status != StatusError {
+		t.Errorf("status = %q, want %q", check.Status, StatusError)
 	}
 }
 
@@ -156,6 +158,9 @@ func TestCheckMigrationReadinessResult_ValidJSONL(t *testing.T) {
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("failed to create .beads: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"sqlite","sqlite_path":"issues.db"}`), 0644); err != nil {
+		t.Fatalf("failed to create SQLite metadata: %v", err)
+	}
 
 	// Create valid JSONL
 	jsonl := `{"id":"bd-001","title":"Test 1"}` + "\n" + `{"id":"bd-002","title":"Test 2"}`
@@ -165,11 +170,14 @@ func TestCheckMigrationReadinessResult_ValidJSONL(t *testing.T) {
 
 	check, _ := CheckMigrationReadiness(tmpDir)
 
-	// With Dolt-only backend, GetBackend defaults to BackendDolt,
-	// so migration readiness returns OK ("Already using Dolt backend")
-	// without validating JSONL (no migration needed)
 	if check.Status == StatusError {
 		t.Errorf("status = %q, did not want error", check.Status)
+	}
+	if !strings.Contains(check.Fix, "bd help init-safety") {
+		t.Errorf("fix must point to safe reinitialization guidance, got %q", check.Fix)
+	}
+	if strings.Contains(check.Fix, "bd migrate dolt") {
+		t.Errorf("fix must not recommend removed backend-conversion command, got %q", check.Fix)
 	}
 }
 
@@ -206,6 +214,9 @@ func TestCheckMigrationCompletionResult_NotDoltBackend(t *testing.T) {
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatalf("failed to create .beads: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"sqlite","sqlite_path":"issues.db"}`), 0644); err != nil {
+		t.Fatalf("failed to create SQLite metadata: %v", err)
+	}
 
 	// Create JSONL (no Dolt backend present)
 	jsonl := `{"id":"bd-001","title":"Test 1"}`
@@ -225,6 +236,12 @@ func TestCheckMigrationCompletionResult_NotDoltBackend(t *testing.T) {
 
 	if len(result.Errors) == 0 {
 		t.Error("expected errors in result")
+	}
+	if !strings.Contains(check.Fix, "bd help init-safety") {
+		t.Errorf("fix must point to safe reinitialization guidance, got %q", check.Fix)
+	}
+	if strings.Contains(check.Fix, "bd migrate dolt") {
+		t.Errorf("fix must not recommend removed backend-conversion command, got %q", check.Fix)
 	}
 }
 

@@ -1,6 +1,6 @@
 ---
 title: "bd defer"
-description: "Defer one or more issues for later"
+description: "Defer issues to put them on ice for later."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

@@ -1,6 +1,6 @@
 ---
 title: "bd branch"
-description: "List or create branches"
+description: "List all branches or create a new branch."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

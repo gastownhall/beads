@@ -1,6 +1,6 @@
 ---
 title: "bd forget"
-description: "Remove a persistent memory"
+description: "Remove a memory by its key."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

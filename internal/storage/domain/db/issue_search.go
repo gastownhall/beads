@@ -131,8 +131,8 @@ func (r *issueSQLRepositoryImpl) fetchIssuesByIDs(ctx context.Context, ids []str
 	placeholders, args := buildInPlaceholders(ids)
 
 	//nolint:gosec // G201: tables.Main is "issues" or "wisps"; placeholders are ?.
-	fetchSQL := fmt.Sprintf(`SELECT %s FROM %s WHERE id IN (%s)`,
-		issueSelectColumns, tables.Main, placeholders)
+	fetchSQL := fmt.Sprintf(`SELECT %s FROM %s %s WHERE id IN (%s)`,
+		issueSelectColumns, tables.Main, sqlbuild.LeaseJoin(tables.Main), placeholders)
 	rows, err := r.runner.QueryContext(ctx, fetchSQL, args...)
 	if err != nil {
 		return nil, err
@@ -198,8 +198,8 @@ func (r *issueSQLRepositoryImpl) searchTable(ctx context.Context, query string, 
 	limitSQL := limitOffsetSQL(filter.Limit, filter.Offset)
 
 	//nolint:gosec // G201: SQL fragments from fixed table names and parameterized filters.
-	querySQL := fmt.Sprintf(`%s%s FROM %s %s %s %s`,
-		selectKw, issueSelectColumns, plan.FromSQL, whereSQL, orderBy, limitSQL)
+	querySQL := fmt.Sprintf(`%s%s FROM %s %s %s %s %s`,
+		selectKw, issueSelectColumns, plan.FromSQL, sqlbuild.LeaseJoin(tables.Main), whereSQL, orderBy, limitSQL)
 
 	rows, err := r.runner.QueryContext(ctx, querySQL, args...)
 	if err != nil {

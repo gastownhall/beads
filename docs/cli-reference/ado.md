@@ -1,6 +1,6 @@
 ---
 title: "bd ado"
-description: "Azure DevOps integration commands"
+description: "Commands for syncing issues between beads and Azure DevOps."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -17,7 +17,7 @@ Configuration can be set via 'bd config' or environment variables:
   ado.url / AZURE_DEVOPS_URL              - Custom base URL (on-prem)
 
 ```
-bd ado [command]
+bd ado [flags]
 ```
 
 ## bd ado projects

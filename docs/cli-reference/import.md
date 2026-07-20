@@ -1,6 +1,6 @@
 ---
 title: "bd import"
-description: "Import issues from a JSONL file or stdin into the database"
+description: "Import issues from a JSONL file (newline-delimited JSON) into the database."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

@@ -2369,10 +2369,9 @@ func initBackendTestEnv(beadsDir string) []string {
 func TestInitBackendFlag(t *testing.T) {
 	bd := buildBDForInitTests(t)
 
-	// SQLite is a supported pluggable backend now (it was removed under the
-	// one-backend assumption in #3151 and re-added as a leaf backend): init
-	// succeeds and metadata.json records backend=sqlite.
-	t.Run("sqlite_initializes_and_persists_backend", func(t *testing.T) {
+	// The SQLite backend was rolled back with the other alternative backends:
+	// init fails closed with migration guidance and writes no workspace state.
+	t.Run("sqlite_is_no_longer_supported", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		beadsDir := filepath.Join(tmpDir, ".beads")
 
@@ -2380,44 +2379,40 @@ func TestInitBackendFlag(t *testing.T) {
 		cmd.Dir = tmpDir
 		cmd.Env = initBackendTestEnv(beadsDir)
 		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("bd init --backend=sqlite should succeed: %v\n%s", err, out)
-		}
-
-		cfg, err := configfile.Load(beadsDir)
-		if err != nil {
-			t.Fatalf("Failed to load metadata.json: %v", err)
-		}
-		if cfg == nil {
-			t.Fatal("metadata.json not found after --backend=sqlite init")
-		}
-		if cfg.Backend != configfile.BackendSQLite {
-			t.Errorf("Expected backend %q, got %q", configfile.BackendSQLite, cfg.Backend)
-		}
-	})
-
-	// Postgres is a recognized backend now: it must not be rejected as unknown,
-	// and it fails only because the required connection config is absent.
-	t.Run("postgres_is_recognized_and_requires_config", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		beadsDir := filepath.Join(tmpDir, ".beads")
-
-		cmd := exec.Command(bd, "init", "--backend", "postgres", "--quiet")
-		cmd.Dir = tmpDir
-		cmd.Env = initBackendTestEnv(beadsDir)
-		out, err := cmd.CombinedOutput()
 		if err == nil {
-			t.Fatal("Expected non-zero exit for --backend=postgres without connection config")
+			t.Fatalf("Expected non-zero exit for --backend=sqlite:\n%s", out)
 		}
-
 		outStr := string(out)
-		if strings.Contains(outStr, "unknown backend") {
-			t.Errorf("postgres must be a recognized backend, not reported unknown: %s", outStr)
+		if !strings.Contains(outStr, "no longer supported") || !strings.Contains(outStr, "single engine") {
+			t.Errorf("Expected rollback guidance for sqlite, got: %s", outStr)
 		}
-		if !strings.Contains(outStr, "--pg-url") {
-			t.Errorf("Expected missing --pg-url guidance for postgres, got: %s", outStr)
+		if _, statErr := os.Stat(beadsDir); !os.IsNotExist(statErr) {
+			t.Fatalf("rejected sqlite init created workspace state (stat error: %v)", statErr)
 		}
 	})
+
+	for _, backend := range []string{"postgres", "mysql"} {
+		t.Run(backend+"_is_no_longer_supported", func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+
+			cmd := exec.Command(bd, "init", "--backend", backend, "--quiet")
+			cmd.Dir = tmpDir
+			cmd.Env = initBackendTestEnv(beadsDir)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("Expected non-zero exit for --backend=%s", backend)
+			}
+
+			outStr := string(out)
+			if !strings.Contains(outStr, "no longer supported") {
+				t.Errorf("Expected rollback guidance for %s, got: %s", backend, outStr)
+			}
+			if !strings.Contains(outStr, `"dolt"`) {
+				t.Errorf("Expected supported backend guidance for %s, got: %s", backend, outStr)
+			}
+		})
+	}
 
 	// A genuinely unsupported backend value is still rejected up front.
 	t.Run("unknown_backend_errors", func(t *testing.T) {

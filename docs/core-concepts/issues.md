@@ -98,7 +98,7 @@ bd create "Subtask" --parent bd-42
 bd create "Found bug" --deps discovered-from:bd-42
 
 # Related (soft link)
-bd relate bd-1 bd-2
+bd dep relate bd-1 bd-2
 ```
 
 ### Dependency Types

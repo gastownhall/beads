@@ -528,104 +528,45 @@ var createCmd = &cobra.Command{
 
 		ctx := createCtx
 
-		// Parse --deps BEFORE CreateIssue so multi-type same-target / invalid specs
-		// fail closed without leaving an orphan issue (GH#4626).
-		parsedDeps, err := parseDepSpecs(deps)
+		// Parse every requested dependency edge BEFORE creating anything so
+		// a malformed spec (incl. multi-type same-target, GH#4626) aborts
+		// with no orphan issue behind it.
+		depSpecs, err := parseDepSpecs(deps)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-
-		// If any dependency is discovered-from, inherit source_repo from that parent.
-		for _, spec := range parsedDeps {
-			if spec.Type == types.DepDiscoveredFrom && spec.TargetID != "" {
-				parentIssue, gerr := store.GetIssue(ctx, spec.TargetID)
-				if gerr == nil && parentIssue.SourceRepo != "" {
-					issue.SourceRepo = parentIssue.SourceRepo
-				}
-				break
-			}
-		}
-
-		if err := store.CreateIssue(ctx, issue, actor); err != nil {
+		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate)
+		if err != nil {
 			return HandleError("%v", err)
 		}
 
-		// Track whether any post-create writes occurred. CreateIssue commits
-		// the issue and its initial labels to Dolt internally, but subsequent
-		// AddDependency calls only write to the working set. A follow-up Dolt
-		// commit is needed to persist them (GH#2009).
-		postCreateWrites := false
-
-		// If parent was specified, add parent-child dependency
-		if parentID != "" {
-			dep := &types.Dependency{
-				IssueID:     issue.ID,
-				DependsOnID: parentID,
-				Type:        types.DepParentChild,
+		// If a discovered-from dependency is present, inherit source_repo
+		// from the referenced parent issue.
+		if dfParent := discoveredFromParent(deps); dfParent != "" {
+			parentIssue, err := store.GetIssue(ctx, dfParent)
+			if err == nil && parentIssue.SourceRepo != "" {
+				issue.SourceRepo = parentIssue.SourceRepo
 			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				WarnError("failed to add parent-child dependency %s -> %s: %v", issue.ID, parentID, err)
-			} else {
-				postCreateWrites = true
-			}
+			// If error getting parent or parent has no source_repo, continue with default
 		}
 
-		// Apply pre-parsed deps (uniqueness already validated before create).
-		for _, spec := range parsedDeps {
-			dep := &types.Dependency{
-				IssueID:     issue.ID,
-				DependsOnID: spec.TargetID,
-				Type:        spec.Type,
-			}
-			if spec.SwapDirection {
-				dep.IssueID = spec.TargetID
-				dep.DependsOnID = issue.ID
-			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				// Hard-fail: silent WarnError dropped edges and left issues un-gated (GH#4626).
-				return HandleErrorRespectJSON("failed to add dependency %s -> %s (%s): %v", dep.IssueID, dep.DependsOnID, dep.Type, err)
-			}
-			postCreateWrites = true
+		edges := createDepEdges{parentID: parentID, specs: depSpecs, waitsFor: waitsForSpec}
+		if err := createIssueWithDeps(ctx, store, issue, actor, edges); err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		if waitsFor != "" {
-			gate := waitsForGate
-			if gate == "" {
-				gate = types.WaitsForAllChildren
-			}
-			if gate != types.WaitsForAllChildren && gate != types.WaitsForAnyChildren {
-				return HandleError("invalid --waits-for-gate value '%s' (valid: all-children, any-children)", gate)
-			}
-
-			meta := types.WaitsForMeta{
-				Gate: gate,
-			}
-			metaJSON, err := json.Marshal(meta)
+		if edges.empty() {
+			// Bare create: preserve the embedded-mode follow-up Dolt commit.
+			// The deps path commits inside its transaction instead.
+			shouldCommit, err := shouldCommitCreatePostWrites(issue, false)
 			if err != nil {
-				return HandleError("failed to serialize waits-for metadata: %v", err)
+				return HandleError("dolt auto-commit failed: %v", err)
 			}
-
-			dep := &types.Dependency{
-				IssueID:     issue.ID,
-				DependsOnID: waitsFor,
-				Type:        types.DepWaitsFor,
-				Metadata:    string(metaJSON),
-			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				WarnError("failed to add waits-for dependency %s -> %s: %v", issue.ID, waitsFor, err)
-			} else {
-				postCreateWrites = true
-			}
-		}
-
-		shouldCommit, err := shouldCommitCreatePostWrites(issue, postCreateWrites)
-		if err != nil {
-			return HandleError("dolt auto-commit failed: %v", err)
-		}
-		if shouldCommit {
-			commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
-			if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-				WarnError("failed to commit: %v", err)
+			if shouldCommit {
+				commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
+				if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
+					WarnError("failed to commit: %v", err)
+				}
 			}
 		}
 

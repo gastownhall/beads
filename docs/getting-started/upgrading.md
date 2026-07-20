@@ -31,7 +31,7 @@ bd info --whats-new --json  # Machine-readable
    `bd version`
 5. If crossing a schema migration on a remote-backed database, only the
    designated migrator runs:
-   `bd migrate --force`
+   `bd migrate`
    `bd dolt push`
 
 Other clones should install the new binary and run `bd bootstrap`, not
@@ -194,14 +194,21 @@ also copy the `.beads` directory (or `dolt backup` in server mode) while no
 bd dolt push                              # 1. CURRENT binary: publish all local work
 bd export --all -o .beads/backup/pre-migrate.jsonl   # 2. backup (see above)
 # 3. install the new binary (see Upgrading above)
-bd migrate --force                        # 4. migrate as the designated migrator
+bd migrate                                # 4. migrate as the designated migrator
 bd dolt push                              # 5. publish the migrated schema
 bd version                                # 6. confirm the new version is active
 ```
 
-`--force` confirms you are the single designated migrator so this run may
-migrate the remote-backed database. For scripted or CI use,
-`BD_ALLOW_REMOTE_MIGRATE=1 bd migrate` is the env-var equivalent.
+If `bd`'s remote-migrate gate blocks the run, it prints the available options —
+migrating here as the designated migrator, adopting the remote's already-migrated
+database, or recovering a fork — and asks for an explicit operator decision.
+Follow the guidance it prints.
+
+For scripted or CI upgrades where nobody reads the prompt,
+`BD_ALLOW_REMOTE_MIGRATE=1 bd migrate` (any boolean true value works) declares
+this clone the designated migrator and bypasses the gate entirely — including
+its already-forked checks — so wire it into exactly one clone's upgrade job,
+never all of them.
 
 **Multiple clones sharing one remote:**
 
@@ -214,7 +221,7 @@ bd dolt pull
 # 2. Designated migrator ONLY: back up, install the new binary, then migrate
 #    and publish.
 bd export --all -o .beads/backup/pre-migrate.jsonl
-bd migrate --force
+bd migrate
 bd dolt push
 
 # 3. Every OTHER clone: install the new binary, then ADOPT the migrated database.

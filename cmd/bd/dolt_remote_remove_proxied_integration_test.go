@@ -10,7 +10,8 @@ import (
 )
 
 func TestProxiedServerDoltRemoteRemove(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	seedRemote := func(t *testing.T, p proxiedProject, name, url string) {
@@ -34,7 +35,8 @@ func TestProxiedServerDoltRemoteRemove(t *testing.T) {
 	}
 
 	t.Run("removes_existing_remote", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "prr1")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "prr1")
 		seedRemote(t, p, "backup", "https://doltremoteapi.dolthub.com/org/backup")
 
 		out, err := bdProxiedRun(t, bd, p.dir, "dolt", "remote", "remove", "backup")
@@ -50,7 +52,8 @@ func TestProxiedServerDoltRemoteRemove(t *testing.T) {
 	})
 
 	t.Run("json_output", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "prr2")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "prr2")
 		seedRemote(t, p, "backup", "https://doltremoteapi.dolthub.com/org/backup")
 
 		out, err := bdProxiedRun(t, bd, p.dir, "dolt", "remote", "remove", "--json", "backup")
@@ -78,7 +81,8 @@ func TestProxiedServerDoltRemoteRemove(t *testing.T) {
 	})
 
 	t.Run("nonexistent_remote_errors", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "prr3")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "prr3")
 		out, err := bdProxiedRun(t, bd, p.dir, "dolt", "remote", "remove", "ghost")
 		if err == nil {
 			t.Fatalf("expected error removing nonexistent remote, got:\n%s", out)

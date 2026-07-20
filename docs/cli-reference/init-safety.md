@@ -1,6 +1,6 @@
 ---
 title: "bd init-safety"
-description: "Explain bd init flag semantics and the destroy-token format"
+description: "bd init flag safety contract."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -59,7 +59,7 @@ DESTROY-TOKEN (non-interactive only)
   In interactive (TTY) mode you confirm via a typed prompt instead. The
   token is not echoed by bd's runtime error messages — this is a
   deliberate guard against pattern-matched one-liners (see
-  engdocs/adr/0002-init-safety-invariants.md).
+  docs/adr/0002-init-safety-invariants.md).
 
 EXIT CODES
 
@@ -71,7 +71,7 @@ EXIT CODES
 
 RECOVERY
 
-  If you hit a refusal, see docs/recovery/init-safety.md for step-by-step recovery
+  If you hit a refusal, see docs/RECOVERY.md for step-by-step recovery
   playbooks for each exit code.
 
 

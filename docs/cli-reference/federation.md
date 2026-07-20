@@ -1,6 +1,6 @@
 ---
 title: "bd federation"
-description: "Manage peer-to-peer federation (requires CGO)"
+description: "Federation commands require CGO and the Dolt storage backend."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

@@ -13,11 +13,13 @@ import (
 )
 
 func TestProxiedServerContext(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
-	p := bdProxiedInit(t, bd, "ctx")
+	p := newSharedProxiedProject(t, bd, "ctx")
 
 	t.Run("default_text", func(t *testing.T) {
+		t.Parallel()
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "context")
 		if err != nil {
 			t.Fatalf("bd context failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
@@ -31,6 +33,7 @@ func TestProxiedServerContext(t *testing.T) {
 	})
 
 	t.Run("json_fields", func(t *testing.T) {
+		t.Parallel()
 		info := proxiedContextJSON(t, bd, p)
 
 		if info.DoltMode != configfile.DoltModeProxiedServer {
@@ -57,6 +60,7 @@ func TestProxiedServerContext(t *testing.T) {
 	})
 
 	t.Run("concurrent", func(t *testing.T) {
+		t.Parallel()
 		const numWorkers = 8
 		errs := make([]error, numWorkers)
 		modes := make([]string, numWorkers)

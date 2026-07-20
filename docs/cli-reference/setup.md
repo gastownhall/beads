@@ -1,6 +1,6 @@
 ---
 title: "bd setup"
-description: "Setup integration with AI editors"
+description: "Setup integration files for AI editors and coding assistants."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -13,8 +13,7 @@ Recipes define where beads workflow instructions are written. Built-in recipes
 include cursor, claude, copilot, gemini, aider, factory, codex, mux, opencode, junie, windsurf, cody, and kilocode.
 
 Examples:
-  bd setup cursor          # Install Cursor IDE integration (rules + agent hooks)
-  bd setup cursor --global # Install global Cursor hooks (~/.cursor/hooks.json)
+  bd setup cursor          # Install Cursor IDE integration
   bd setup codex           # Install Codex skill + AGENTS.md guidance + native hooks
   bd setup codex --global  # Install global Codex skill + guidance + native hooks
   bd setup copilot         # Install Copilot CLI plugin + repository instructions
@@ -38,7 +37,7 @@ bd setup [recipe] [flags]
 ```
       --add string      Add a custom recipe with given name
       --check           Check if integration is installed
-      --global          Install globally (claude/codex/cursor/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, ~/.cursor/hooks.json, or ~/.mux/AGENTS.md)
+      --global          Install globally (claude/codex/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, or ~/.mux/AGENTS.md)
       --list            List all available recipes
   -o, --output string   Write template to custom path
       --print           Print the template to stdout

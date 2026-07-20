@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -1721,6 +1723,16 @@ func TestAddBulkDependenciesInTxOrdersHierarchyAndAlwaysRunsFinalGate(t *testing
 	err := addBulkDependenciesInTx(context.Background(), tx, edges, false, "tester")
 	if err == nil || !strings.Contains(err.Error(), "dependency cycle would be created") {
 		t.Fatalf("normal-mode final gate error = %v, want rejection", err)
+	}
+	// The embedded bulk final gate must type its rejection identically to the
+	// proxied/domain bulk gate so callers can errors.Is it regardless of plumbing.
+	if !errors.Is(err, domain.ErrDependencyCycle) {
+		t.Fatalf("final gate error must errors.Is domain.ErrDependencyCycle, got %v", err)
+	}
+	// Typing must not alter the rendered text: no sentinel string appended.
+	const wantMsg = "dependency cycle would be created: child → grand → child (no edges added; run 'bd dep cycles' for analysis)"
+	if err.Error() != wantMsg {
+		t.Fatalf("final gate message = %q, want byte-identical %q", err.Error(), wantMsg)
 	}
 	if len(tx.added) != 3 {
 		t.Fatalf("added dependencies = %d, want 3", len(tx.added))

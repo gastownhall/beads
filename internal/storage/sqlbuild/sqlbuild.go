@@ -31,11 +31,11 @@ var (
 // mutually-exclusive target columns.
 const DepTargetExpr = "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)"
 
-// IssueSelectColumns is the canonical column list for full issue hydration.
-// Every query that reads a complete types.Issue should use this constant;
-// the scan side is issueops.ScanIssueFrom, which scans positionally and
-// must stay in column-for-column agreement with this list.
-const IssueSelectColumns = `id, content_hash, title, description, design, acceptance_criteria, notes,
+// IssueBaseColumns is the column list for the issues/wisps row itself,
+// without the lease overlay. Use IssueSelectColumns for full hydration;
+// this split exists so callers that alias the main table (QualifyColumns)
+// can qualify the row columns without mangling the leases.* references.
+const IssueBaseColumns = `id, content_hash, title, description, design, acceptance_criteria, notes,
 	       status, priority, issue_type, assignee, estimated_minutes,
 	       created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
 	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
@@ -44,8 +44,29 @@ const IssueSelectColumns = `id, content_hash, title, description, design, accept
 	       mol_type,
 	       event_kind, actor, target, payload,
 	       due_at, defer_until,
-	       work_type, source_system, metadata,
-	       lease_expires_at, heartbeat_at`
+	       work_type, source_system, metadata`
+
+// LeaseSelectColumns is the lease overlay for full issue hydration. Leases
+// live in the ephemeral leases table (bd-lrgn1), not on the issues row, so
+// every query selecting these must also add LeaseJoin to its FROM clause —
+// a query that forgets the join fails loudly on the leases.* reference.
+const LeaseSelectColumns = `leases.lease_expires_at, leases.heartbeat_at`
+
+// IssueSelectColumns is the canonical column list for full issue hydration.
+// Every query that reads a complete types.Issue should use this constant
+// and include LeaseJoin(table) in its FROM clause; the scan side is
+// issueops.ScanIssueFrom, which scans positionally and must stay in
+// column-for-column agreement with this list.
+const IssueSelectColumns = IssueBaseColumns + `,
+	       ` + LeaseSelectColumns
+
+// LeaseJoin returns the FROM-clause fragment that overlays the ephemeral
+// leases table onto the given issues/wisps table reference (a table name or
+// alias). LEFT JOIN: rows without a live claim have no lease row and hydrate
+// nil lease fields.
+func LeaseJoin(tableRef string) string {
+	return "LEFT JOIN leases ON leases.issue_id = " + tableRef + ".id"
+}
 
 // QueryBatchSize bounds IN-clause sizes when long ID lists are folded into
 // WHERE fragments.

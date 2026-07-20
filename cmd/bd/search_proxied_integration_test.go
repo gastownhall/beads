@@ -61,11 +61,12 @@ func searchResultIDs(results []map[string]interface{}) map[string]bool {
 }
 
 func TestProxiedServerSearch(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 
-	p := bdProxiedInit(t, bd, "sp")
+	p := newSharedProxiedProject(t, bd, "sp")
 	taskA := bdProxiedCreate(t, bd, p.dir, "Alpha task", "--type", "task", "--priority", "1", "--assignee", "alice", "--description", "Important alpha work", "--label", "urgent")
 	taskB := bdProxiedCreate(t, bd, p.dir, "Beta bug", "--type", "bug", "--priority", "3", "--assignee", "bob", "--description", "Beta bug description", "--label", "backend")
 	taskC := bdProxiedCreate(t, bd, p.dir, "Gamma feature", "--type", "feature", "--priority", "2", "--label", "urgent", "--label", "frontend")
@@ -330,7 +331,7 @@ func TestProxiedServerSearch(t *testing.T) {
 	})
 
 	t.Run("wisp_appears_in_search", func(t *testing.T) {
-		wp := bdProxiedInit(t, bd, "sw")
+		wp := newSharedProxiedProject(t, bd, "sw")
 		wisp := bdProxiedCreate(t, bd, wp.dir, "Wispy alpha search target", "--ephemeral")
 		if !searchResultIDs(bdProxiedSearchJSON(t, bd, wp.dir, "Wispy"))[wisp.ID] {
 			t.Errorf("expected ephemeral wisp %s to appear in search results", wisp.ID)
@@ -338,7 +339,7 @@ func TestProxiedServerSearch(t *testing.T) {
 	})
 
 	t.Run("wisp_labels_hydrated_from_wisp_labels", func(t *testing.T) {
-		wp := bdProxiedInit(t, bd, "swl")
+		wp := newSharedProxiedProject(t, bd, "swl")
 		wisp := bdProxiedCreate(t, bd, wp.dir, "Wisp label search", "--ephemeral")
 		bdProxiedLabel(t, bd, wp.dir, "add", wisp.ID, "wlabel")
 

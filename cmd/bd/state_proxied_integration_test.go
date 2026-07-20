@@ -9,11 +9,13 @@ import (
 )
 
 func TestProxiedServerState(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("state_query", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "st")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "st")
 		issue := bdProxiedCreate(t, bd, p.dir, "State target")
 		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "patrol:active")
 
@@ -27,7 +29,8 @@ func TestProxiedServerState(t *testing.T) {
 	})
 
 	t.Run("state_query_unset", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "su")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "su")
 		issue := bdProxiedCreate(t, bd, p.dir, "No state")
 		out, _, err := bdProxiedRunBuffers(t, bd, p.dir, "state", issue.ID, "mode")
 		if err != nil {
@@ -39,7 +42,8 @@ func TestProxiedServerState(t *testing.T) {
 	})
 
 	t.Run("state_query_json", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sj")
 		issue := bdProxiedCreate(t, bd, p.dir, "State json")
 		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "mode:degraded")
 
@@ -61,7 +65,8 @@ func TestProxiedServerState(t *testing.T) {
 	})
 
 	t.Run("state_list", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sl")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sl")
 		issue := bdProxiedCreate(t, bd, p.dir, "State list target")
 		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "patrol:active,mode:normal")
 
@@ -75,7 +80,8 @@ func TestProxiedServerState(t *testing.T) {
 	})
 
 	t.Run("state_list_empty", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "se")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "se")
 		issue := bdProxiedCreate(t, bd, p.dir, "No labels")
 		out, _, err := bdProxiedRunBuffers(t, bd, p.dir, "state", "list", issue.ID)
 		if err != nil {
@@ -87,7 +93,8 @@ func TestProxiedServerState(t *testing.T) {
 	})
 
 	t.Run("state_reads_wisp_labels", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sw")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sw")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp state", "--ephemeral")
 		bdProxiedLabel(t, bd, p.dir, "add", wisp.ID, "patrol:muted")
 

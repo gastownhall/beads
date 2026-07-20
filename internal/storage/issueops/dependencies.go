@@ -89,6 +89,25 @@ type AddDependencyOpts struct {
 	// that intentionally trade validation cost for bulk graph wiring speed.
 	SkipCycleCheck bool
 	TargetKind     *DepTargetKind
+	// PrecheckedTarget, when non-nil, replaces the in-tx target read: the
+	// target is known to exist with this type and status. Callers that set
+	// it must also set TargetKind, since target classification otherwise
+	// queries tx too.
+	PrecheckedTarget *DepTargetPrecheck
+}
+
+// DepTargetPrecheck carries a target-issue row the caller has already read
+// from the transaction that can see it. Dolt server mode splits one logical
+// transaction across two SQL sessions (versioned tables vs dolt-ignored wisp
+// tables); when the dependency write table lives on one session and the
+// target issue on the other, a target read on tx misses rows created earlier
+// in the same logical transaction. The caller reads the target on its own
+// session and passes the row here; existence validation, cross-type blocking
+// validation, and the direct is_blocked mark then use these values instead
+// of querying the target table on tx.
+type DepTargetPrecheck struct {
+	IssueType string
+	Status    string
 }
 
 // AddDependencyInTx validates and inserts a dependency within an existing
@@ -147,9 +166,13 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		return fmt.Errorf("failed to check issue existence: %w", err)
 	}
 
-	// Validate target issue exists (skip for external and cross-prefix refs).
+	// Validate target issue exists (skip for external and cross-prefix refs,
+	// and for targets the caller already read on their own transaction).
 	var targetType string
-	if !strings.HasPrefix(dep.DependsOnID, "external:") && !opts.IsCrossPrefix {
+	switch {
+	case opts.PrecheckedTarget != nil:
+		targetType = opts.PrecheckedTarget.IssueType
+	case !strings.HasPrefix(dep.DependsOnID, "external:") && !opts.IsCrossPrefix:
 		//nolint:gosec // G201: targetTable is from WispTableRouting ("issues" or "wisps")
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT issue_type FROM %s WHERE id = ?`, targetTable), dep.DependsOnID).Scan(&targetType); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -226,7 +249,7 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		return fmt.Errorf("affected by add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, aerr)
 	}
 	if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks {
-		if err := markDirectBlockingDependencySourceInTx(ctx, tx, dep.IssueID, srcIsWisp, dep.DependsOnID, kind); err != nil {
+		if err := markDirectBlockingDependencySourceInTx(ctx, tx, dep.IssueID, srcIsWisp, dep.DependsOnID, kind, opts.PrecheckedTarget); err != nil {
 			return fmt.Errorf("mark direct is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
 		affectedIssues, affectedWisps = RemoveSourceFromAffected(dep.IssueID, srcIsWisp, affectedIssues, affectedWisps)
@@ -269,7 +292,7 @@ func removeID(ids []string, remove string) []string {
 }
 
 //nolint:gosec // G201: table names are selected from fixed issue/wisp tables.
-func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, source string, srcIsWisp bool, target string, targetKind DepTargetKind) error {
+func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, source string, srcIsWisp bool, target string, targetKind DepTargetKind, precheckedTarget *DepTargetPrecheck) error {
 	sourceTable := "issues"
 	if srcIsWisp {
 		sourceTable = "wisps"
@@ -282,6 +305,22 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 		targetTable = "wisps"
 	default:
 		return nil
+	}
+
+	if precheckedTarget != nil {
+		// The target row lives on another session; the EXISTS gate below
+		// would miss it there. Its openness is already known, so gate in Go
+		// and mark the source (whose table always matches tx) directly.
+		if types.Status(precheckedTarget.Status) == types.StatusClosed || types.Status(precheckedTarget.Status) == types.StatusPinned {
+			return nil
+		}
+		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+			UPDATE %s s SET s.is_blocked = 1, s.updated_at = s.updated_at
+			WHERE s.id = ?
+			  AND s.is_blocked = 0
+			  AND s.status <> 'closed' AND s.status <> 'pinned'
+		`, sourceTable), source)
+		return err
 	}
 
 	// MySQL 8.0+ rejects UPDATE <T> ... WHERE EXISTS (SELECT FROM <T> ...)
@@ -311,7 +350,7 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 // nil uses all dependency tables.
 func CheckDependencyCycleInTx(ctx context.Context, tx DBTX, dep *types.Dependency, depTables []string) error {
 	if dep.IssueID == dep.DependsOnID {
-		return fmt.Errorf("cannot add self-dependency: %s cannot depend on itself", dep.IssueID)
+		return fmt.Errorf("%w: %s cannot depend on itself", domain.ErrSelfDependency, dep.IssueID)
 	}
 	if !isSchedulingEdge(dep.Type) {
 		return nil
@@ -321,7 +360,7 @@ func CheckDependencyCycleInTx(ctx context.Context, tx DBTX, dep *types.Dependenc
 		return fmt.Errorf("failed to check for dependency cycle: %w", err)
 	}
 	if wouldCycle {
-		return fmt.Errorf("adding dependency would create a cycle")
+		return domain.ErrDependencyCycle
 	}
 	return nil
 }
@@ -882,8 +921,8 @@ func GetIssuesByIDsInTx(ctx context.Context, tx DBTX, ids []string, wispSet map[
 			inClause := strings.Join(placeholders, ",")
 
 			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
-				`SELECT %s FROM %s WHERE id IN (%s)`,
-				IssueSelectColumns, pair.table, inClause), args...)
+				`SELECT %s FROM %s %s WHERE id IN (%s)`,
+				IssueSelectColumns, pair.table, sqlbuild.LeaseJoin(pair.table), inClause), args...)
 			if err != nil {
 				return nil, fmt.Errorf("get issues by IDs from %s: %w", pair.table, err)
 			}

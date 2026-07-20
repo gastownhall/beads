@@ -1,12 +1,27 @@
 # PROPOSAL: Pluggable Storage Backends
 
-**Status:** Draft for review (survived one adversarial review round; defects folded in)
+**Status:** Historical — partially implemented, then superseded on 2026-07-16
 **Date:** 2026-07-02
 **Informed by:** the bts-rs Rust spike (a from-scratch Rust reimplementation
 of the gc-contract surface that validated a backend-agnostic storage seam at 299/299 byte-parity
 across two radically different backends), a five-dimension recon of this repo's storage
 architecture, and a two-reviewer adversarial verification pass. All file:line citations verified
 against `worktree-beads-new`.
+
+> **Superseded scope:** This proposal is retained as the design record for the
+> storage interface, shared issue core, SQLite adapter, and differential
+> conformance work that grew from it. Those pieces remain. The direct
+> PostgreSQL and MySQL adapters were rolled back before entering a tagged
+> release because supporting additional general-purpose server databases adds
+> substantial dialect, credential, schema-lifecycle, migration, CI, and
+> operational complexity. Our goal is to keep Beads as simple as possible and
+> consume as few resources as possible. The supported paths are now embedded
+> Dolt, Dolt server, and SQLite; Dolt server's use of the MySQL wire protocol is
+> unchanged. See [Storage Backends](docs/architecture/storage-backends.md) for
+> the current design.
+
+Everything below this notice is retained as historical design material, not as
+current backend support or migration guidance.
 
 ---
 

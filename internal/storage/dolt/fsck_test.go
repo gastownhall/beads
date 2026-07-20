@@ -200,7 +200,59 @@ func TestClassifyFSCKFailure(t *testing.T) {
 			wantIsNot:    []error{ErrDanglingReference},
 			wantContains: "BEADS_FSCK_TIMEOUT",
 		},
-		// (e) Generic non-zero exit, empty output, no context error → ErrDanglingReference.
+		// (e) Cancellation phrasing in output with no context error (bd-f2b15
+		//     pin): a killed process group leaves "context canceled" in the
+		//     output while both contexts look healthy. Must NOT be reported
+		//     as corruption.
+		{
+			name:         "output 'context canceled' + nil ctx errors → interrupted, not ErrDanglingReference",
+			parentErr:    nil,
+			fsckErr:      nil,
+			output:       "context canceled",
+			wantIs:       context.Canceled,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "interrupted",
+		},
+		{
+			name:         "output 'signal: killed' + nil ctx errors → interrupted, not ErrDanglingReference",
+			parentErr:    nil,
+			fsckErr:      nil,
+			output:       "signal: killed",
+			wantIs:       context.Canceled,
+			wantIsNot:    []error{ErrDanglingReference, ErrFSCKTimeout},
+			wantContains: "interrupted",
+		},
+		// (a→b) Cancellation phrasing falls through to the parent-canceled branch.
+		{
+			name:      "output 'context canceled' + parent Canceled → cancellation, not dangling",
+			parentErr: context.Canceled,
+			fsckErr:   context.Canceled,
+			output:    "context canceled",
+			wantIs:    context.Canceled,
+			wantIsNot: []error{ErrDanglingReference, ErrFSCKTimeout},
+		},
+		// (a→d) Cancellation phrasing + fsck's own deadline → timeout guidance,
+		//       not a corruption report.
+		{
+			name:         "output 'context deadline exceeded' + own fsck timeout → ErrFSCKTimeout, not dangling",
+			parentErr:    nil,
+			fsckErr:      context.DeadlineExceeded,
+			output:       "context deadline exceeded",
+			wantIs:       ErrFSCKTimeout,
+			wantIsNot:    []error{ErrDanglingReference},
+			wantContains: "BEADS_FSCK_TIMEOUT",
+		},
+		// Negative sentinel: real corruption output without cancellation
+		// phrasing must still abort.
+		{
+			name:      "real corruption output stays ErrDanglingReference despite nil ctx errors",
+			parentErr: nil,
+			fsckErr:   nil,
+			output:    "dangling chunk reference: hash abc123 not found",
+			wantIs:    ErrDanglingReference,
+			wantIsNot: []error{ErrFSCKTimeout},
+		},
+		// (f) Generic non-zero exit, empty output, no context error → ErrDanglingReference.
 		{
 			name:      "generic failure (empty output, no ctx error) → ErrDanglingReference",
 			parentErr: nil,
@@ -240,6 +292,58 @@ func TestClassifyFSCKFailure(t *testing.T) {
 			}
 			if tc.wantAbsent != "" && strings.Contains(err.Error(), tc.wantAbsent) {
 				t.Errorf("error message %q must not contain %q", err.Error(), tc.wantAbsent)
+			}
+		})
+	}
+}
+
+// TestFsckOutputInterrupted verifies the helper recognizes the cancellation
+// phrasings an interrupted fsck prints, and does not classify integrity
+// findings or unrelated output as interrupts.
+func TestFsckOutputInterrupted(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "context canceled (observed: killed background bd dolt push, bd-f2b15)",
+			output: "context canceled",
+			want:   true,
+		},
+		{
+			name:   "context deadline exceeded",
+			output: "error: context deadline exceeded",
+			want:   true,
+		},
+		{
+			name:   "signal killed",
+			output: "signal: killed",
+			want:   true,
+		},
+		{
+			name:   "signal terminated",
+			output: "signal: terminated",
+			want:   true,
+		},
+		{
+			name:   "real dangling reference is not an interrupt",
+			output: "dangling chunk reference: hash abc123 referenced but not present",
+			want:   false,
+		},
+		{
+			name:   "empty output",
+			output: "",
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := fsckOutputInterrupted(tc.output); got != tc.want {
+				t.Errorf("fsckOutputInterrupted(%q) = %v, want %v", tc.output, got, tc.want)
 			}
 		})
 	}

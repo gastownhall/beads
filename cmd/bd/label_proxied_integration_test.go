@@ -51,12 +51,14 @@ func bdProxiedLabelListJSON(t *testing.T, bd, dir, issueID string) []string {
 }
 
 func TestProxiedServerLabel(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 
 	t.Run("add_list_remove", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "la")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "la")
 		issue := bdProxiedCreate(t, bd, p.dir, "Label target")
 
 		out := bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "alpha,beta")
@@ -82,7 +84,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("add_multiple_issues", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "lm")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lm")
 		a := bdProxiedCreate(t, bd, p.dir, "Issue A")
 		b := bdProxiedCreate(t, bd, p.dir, "Issue B")
 
@@ -97,7 +100,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("list_empty", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "le")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "le")
 		issue := bdProxiedCreate(t, bd, p.dir, "No labels")
 		out := bdProxiedLabel(t, bd, p.dir, "list", issue.ID)
 		if !strings.Contains(out, "no labels") {
@@ -106,7 +110,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("list_all", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ll")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ll")
 		a := bdProxiedCreate(t, bd, p.dir, "A")
 		b := bdProxiedCreate(t, bd, p.dir, "B")
 		bdProxiedLabel(t, bd, p.dir, "add", a.ID, "common")
@@ -141,7 +146,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("propagate", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "lp")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lp")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent epic", "--type", "epic")
 		c1 := bdProxiedCreate(t, bd, p.dir, "Child 1", "--parent", parent.ID)
 		c2 := bdProxiedCreate(t, bd, p.dir, "Child 2", "--parent", parent.ID)
@@ -159,7 +165,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("propagate_no_children", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pn")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pn")
 		lonely := bdProxiedCreate(t, bd, p.dir, "Lonely")
 		out := bdProxiedLabel(t, bd, p.dir, "propagate", lonely.ID, "nope")
 		if !strings.Contains(out, "No children found") {
@@ -168,7 +175,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("add_json", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "aj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "aj")
 		issue := bdProxiedCreate(t, bd, p.dir, "Add JSON")
 
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "label", "add", issue.ID, "j1,j2", "--json")
@@ -198,7 +206,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("remove_json", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rj")
 		issue := bdProxiedCreate(t, bd, p.dir, "Remove JSON")
 		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "rmj")
 
@@ -223,7 +232,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("add_duplicate_idempotent", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "di")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "di")
 		issue := bdProxiedCreate(t, bd, p.dir, "Dup label")
 		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "dup")
 		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "dup")
@@ -234,7 +244,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("remove_comma_separated_multi", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rm")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rm")
 		issue := bdProxiedCreate(t, bd, p.dir, "Multi remove")
 		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "rm-a,rm-b,rm-keep")
 
@@ -245,7 +256,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("remove_batch", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "rb")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rb")
 		a := bdProxiedCreate(t, bd, p.dir, "Batch rm A")
 		b := bdProxiedCreate(t, bd, p.dir, "Batch rm B")
 		bdProxiedLabel(t, bd, p.dir, "add", a.ID, b.ID, "batch-rm")
@@ -259,7 +271,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("list_text", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "lx")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lx")
 		issue := bdProxiedCreate(t, bd, p.dir, "Text list")
 		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "alpha,beta")
 
@@ -270,7 +283,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("propagate_json", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pj")
 		parent := bdProxiedCreate(t, bd, p.dir, "JSON propagate", "--type", "epic")
 		child := bdProxiedCreate(t, bd, p.dir, "JSON prop child", "--parent", parent.ID)
 
@@ -296,7 +310,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("add_empty_label_rejected", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "el")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "el")
 		issue := bdProxiedCreate(t, bd, p.dir, "Empty label")
 		out := bdProxiedLabelFail(t, bd, p.dir, "add", issue.ID, "")
 		if !strings.Contains(out, "empty") {
@@ -305,7 +320,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("provides_label_rejected", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pv")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pv")
 		issue := bdProxiedCreate(t, bd, p.dir, "Provides guard")
 		out := bdProxiedLabelFail(t, bd, p.dir, "add", issue.ID, "provides:foo")
 		if !strings.Contains(out, "provides:") {
@@ -314,7 +330,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("provides_in_comma_list_rejected", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pc")
 		issue := bdProxiedCreate(t, bd, p.dir, "Provides in list")
 		out := bdProxiedLabelFail(t, bd, p.dir, "add", issue.ID, "ok-label,provides:auth")
 		if !strings.Contains(out, "provides:") {
@@ -326,7 +343,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("wisp_label_routes_to_wisp_labels", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "lw")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lw")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp target", "--ephemeral")
 
 		bdProxiedLabel(t, bd, p.dir, "add", wisp.ID, "wlabel")
@@ -354,7 +372,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("wisp_label_remove_routes_to_wisp_labels", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "wr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wr")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp remove target", "--ephemeral")
 
 		bdProxiedLabel(t, bd, p.dir, "add", wisp.ID, "keep,drop")
@@ -376,7 +395,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("list_all_includes_wisp_labels", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "law")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "law")
 		perm := bdProxiedCreate(t, bd, p.dir, "Perm issue")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp issue", "--ephemeral")
 		bdProxiedLabel(t, bd, p.dir, "add", perm.ID, "shared")
@@ -411,7 +431,8 @@ func TestProxiedServerLabel(t *testing.T) {
 	})
 
 	t.Run("propagate_to_wisp_children", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pw")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pw")
 		parent := bdProxiedCreate(t, bd, p.dir, "Wisp parent", "--ephemeral", "--type", "epic")
 		child := bdProxiedCreate(t, bd, p.dir, "Wisp child", "--ephemeral", "--parent", parent.ID)
 

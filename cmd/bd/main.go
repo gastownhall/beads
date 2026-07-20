@@ -33,11 +33,7 @@ import (
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	mysqlstore "github.com/steveyegge/beads/internal/storage/mysql"
-	"github.com/steveyegge/beads/internal/storage/pgdialect"
-	pgstore "github.com/steveyegge/beads/internal/storage/postgres"
 	"github.com/steveyegge/beads/internal/storage/schema"
-	sqlitestore "github.com/steveyegge/beads/internal/storage/sqlite"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/telemetry"
 	"github.com/steveyegge/beads/internal/ui"
@@ -992,9 +988,13 @@ var rootCmd = &cobra.Command{
 
 		if dbPath == "" {
 			if bd := beads.FindBeadsDir(); bd != "" {
-				if cfg, _ := configfile.Load(bd); cfg != nil && (cfg.IsDoltProxiedServerMode() || cfg.GetBackend() == configfile.BackendPostgres || cfg.GetBackend() == configfile.BackendMySQL || cfg.GetBackend() == configfile.BackendSQLite) {
-					// A non-Dolt SQL (or proxied-server) workspace has no local Dolt
-					// database file; the .beads dir with metadata.json IS the workspace.
+				cfg, cfgErr := configfile.Load(bd)
+				if cfgErr != nil || cfg != nil && (cfg.IsDoltProxiedServerMode() || !configfile.IsSupportedBackend(cfg.Backend)) {
+					// Proxied-server and removed-backend workspaces may have no
+					// local Dolt database file. Invalid or unknown metadata likewise must
+					// reach config validation instead of becoming a generic "no database"
+					// result. metadata.json identifies the workspace so store selection can
+					// route or reject it explicitly.
 					dbPath = bd
 				}
 			}
@@ -1076,6 +1076,18 @@ var rootCmd = &cobra.Command{
 			return HandleError("%v", err)
 		}
 
+		// Resolve the backend before version tracking, migration, server startup, or
+		// any store construction. PostgreSQL/MySQL values are retained as metadata
+		// tombstones so an existing workspace fails closed instead of falling through
+		// to a new, empty Dolt database.
+		cfg, cfgErr := configfile.Load(beadsDir)
+		if cfgErr != nil {
+			return HandleError("failed to load beads config from %s: %v (refusing to fall back to the embedded store; fix or restore metadata.json and retry)", beadsDir, cfgErr)
+		}
+		if backendErr := validateConfiguredBackend(cfg); backendErr != nil {
+			return HandleError("%v", backendErr)
+		}
+
 		// Set actor for audit trail
 		actor = getActorWithGit()
 		// Attach actor to the command span now that we have it.
@@ -1134,10 +1146,6 @@ var rootCmd = &cobra.Command{
 		// result set and exit 0 (false-empty), which readers misinterpret as
 		// "no work". Absent metadata.json (cfg == nil, cfgErr == nil) keeps
 		// the fresh-repo embedded default below.
-		cfg, cfgErr := configfile.Load(beadsDir)
-		if cfgErr != nil {
-			return HandleError("failed to load beads config from %s: %v (refusing to fall back to the embedded store; fix or restore metadata.json and retry)", beadsDir, cfgErr)
-		}
 		if cfg != nil {
 			warnSharedServerEmbeddedMismatch(cfg)
 			doltCfg.ProxiedServer = cfg.IsDoltProxiedServerMode()
@@ -1179,9 +1187,7 @@ var rootCmd = &cobra.Command{
 			// command must not run (or fail) embedded opens even when the env var is set.
 			// Dolt-only: the gateway credential command mints a Dolt server
 			// username. IsSharedServerMode() forces ServerMode true with no backend
-			// guard, so without this check a shared-server config in config.yaml
-			// would run (and fail closed) the command for postgres/mysql/sqlite
-			// workspaces, which never present a server username.
+			// guard, so non-Dolt metadata must not try to resolve a server username.
 			if doltCfg.ServerMode && cfg.GetBackend() == configfile.BackendDolt {
 				if _, credErr := dolt.ApplyGatewayCredential(rootCtx, cfg, doltCfg); credErr != nil {
 					return HandleError("resolving dolt credential command: %v", credErr)
@@ -1275,19 +1281,7 @@ var rootCmd = &cobra.Command{
 		// Removing them WILL cause unrecoverable data corruption and data loss.
 		// Dolt manages these files itself; external interference is never safe.
 
-		if cfg != nil && cfg.GetBackend() == configfile.BackendPostgres {
-			// Postgres backend: open via the SQL-family bundle, bypassing the
-			// Dolt open path (the doltCfg above is built but unused here).
-			store, err = pgstore.NewFromConfig(rootCtx, beadsDir)
-		} else if cfg != nil && cfg.GetBackend() == configfile.BackendMySQL {
-			// MySQL backend: same SQL-family bundle, isolation by database.
-			store, err = mysqlstore.NewFromConfig(rootCtx, beadsDir)
-		} else if cfg != nil && cfg.GetBackend() == configfile.BackendSQLite {
-			// SQLite backend: pure-Go file-based SQL-family bundle.
-			store, err = sqlitestore.NewFromConfig(rootCtx, beadsDir)
-		} else {
-			store, err = newDoltStore(rootCtx, doltCfg)
-		}
+		store, err = newDoltStore(rootCtx, doltCfg)
 
 		// Track final read-only state for staleness checks (GH#1089)
 		storeIsReadOnly = doltCfg.ReadOnly
@@ -1394,70 +1388,58 @@ var rootCmd = &cobra.Command{
 				uowProvider = nil
 			}
 		} else {
-			// Slice 5c: a NonCommitGraphBackend (Postgres, SQLite, ...) has no Dolt
-			// commit graph, so skip the Dolt-only maintenance tail. UnwrapStore reaches
-			// the concrete store past the HookFiringStore decorator; a store WITHOUT the
-			// marker (every Dolt variant) leaves skipMaintenance false and runs the tail
-			// unchanged. store.Close below stays unconditional.
-			skipMaintenance := false
-			if ncg, ok := storage.UnwrapStore(store).(storage.NonCommitGraphBackend); ok && ncg.CommitGraphUnsupported() {
-				skipMaintenance = true
+			// Dolt auto-commit: after a successful write command (and after final flush),
+			// create a Dolt commit so changes don't remain only in the working set.
+			if commandDidWrite.Load() && !commandDidExplicitDoltCommit {
+				if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: cmd.Name()}); err != nil {
+					return HandleError("dolt auto-commit failed: %v", err)
+				}
 			}
 
-			if !skipMaintenance {
-				// Dolt auto-commit: after a successful write command (and after final flush),
-				// create a Dolt commit so changes don't remain only in the working set.
-				if commandDidWrite.Load() && !commandDidExplicitDoltCommit {
-					if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: cmd.Name()}); err != nil {
-						return HandleError("dolt auto-commit failed: %v", err)
-					}
-				}
-
-				// Tip metadata auto-commit: if a tip was shown, create a separate Dolt commit for the
-				// tip_*_last_shown metadata updates. This may happen even for otherwise read-only commands.
-				if commandDidWriteTipMetadata && len(commandTipIDsShown) > 0 {
-					// Only applies when dolt auto-commit is enabled and backend is versioned (Dolt).
-					if mode, err := getDoltAutoCommitMode(); err != nil {
-						return HandleError("dolt tip auto-commit failed: %v", err)
-					} else if mode == doltAutoCommitOn {
-						// Apply tip metadata writes now (deferred in recordTipShown for Dolt).
-						for tipID := range commandTipIDsShown {
-							key := fmt.Sprintf("tip_%s_last_shown", tipID)
-							value := time.Now().Format(time.RFC3339)
-							if err := store.SetLocalMetadata(rootCtx, key, value); err != nil {
-								return HandleError("dolt tip auto-commit failed: %v", err)
-							}
-						}
-
-						ids := make([]string, 0, len(commandTipIDsShown))
-						for tipID := range commandTipIDsShown {
-							ids = append(ids, tipID)
-						}
-						msg := formatDoltAutoCommitMessage("tip", getActor(), ids)
-						if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: "tip", MessageOverride: msg}); err != nil {
+			// Tip metadata auto-commit: if a tip was shown, create a separate Dolt commit for the
+			// tip_*_last_shown metadata updates. This may happen even for otherwise read-only commands.
+			if commandDidWriteTipMetadata && len(commandTipIDsShown) > 0 {
+				// Only applies when dolt auto-commit is enabled and backend is versioned (Dolt).
+				if mode, err := getDoltAutoCommitMode(); err != nil {
+					return HandleError("dolt tip auto-commit failed: %v", err)
+				} else if mode == doltAutoCommitOn {
+					// Apply tip metadata writes now (deferred in recordTipShown for Dolt).
+					for tipID := range commandTipIDsShown {
+						key := fmt.Sprintf("tip_%s_last_shown", tipID)
+						value := time.Now().Format(time.RFC3339)
+						if err := store.SetLocalMetadata(rootCtx, key, value); err != nil {
 							return HandleError("dolt tip auto-commit failed: %v", err)
 						}
 					}
-				}
 
-				// Auto-backup: sync a Dolt-native backup if enabled and due
-				maybeAutoBackup(rootCtx)
-
-				// Auto-export: write git-tracked JSONL for portability if enabled and due.
-				// Read-only commands must not perform post-run maintenance writes or emit
-				// sync guidance after machine-readable output.
-				if shouldRunPostCommandAutoExport(cmd) {
-					if err := maybeAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd)); err != nil {
-						return HandleError("%v", err)
+					ids := make([]string, 0, len(commandTipIDsShown))
+					for tipID := range commandTipIDsShown {
+						ids = append(ids, tipID)
+					}
+					msg := formatDoltAutoCommitMessage("tip", getActor(), ids)
+					if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: "tip", MessageOverride: msg}); err != nil {
+						return HandleError("dolt tip auto-commit failed: %v", err)
 					}
 				}
+			}
 
-				// Auto-push: push to Dolt remote if enabled and due.
-				// Skip for read-only commands to avoid unnecessary network operations
-				// and metadata writes on commands like bd list/show/ready (GH#2191).
-				if !isReadOnlyCommand(cmd.Name()) {
-					maybeAutoPush(rootCtx)
+			// Auto-backup: sync a Dolt-native backup if enabled and due
+			maybeAutoBackup(rootCtx)
+
+			// Auto-export: write git-tracked JSONL for portability if enabled and due.
+			// Read-only commands must not perform post-run maintenance writes or emit
+			// sync guidance after machine-readable output.
+			if shouldRunPostCommandAutoExport(cmd) {
+				if err := maybeAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd)); err != nil {
+					return HandleError("%v", err)
 				}
+			}
+
+			// Auto-push: push to Dolt remote if enabled and due.
+			// Skip for read-only commands to avoid unnecessary network operations
+			// and metadata writes on commands like bd list/show/ready (GH#2191).
+			if !isReadOnlyCommand(cmd.Name()) {
+				maybeAutoPush(rootCtx)
 			}
 
 			// Signal that store is closing (prevents background flush from accessing closed store)
@@ -1572,7 +1554,7 @@ func checkBlockedEnvVars() error {
 	for _, name := range blockedEnvVars {
 		if os.Getenv(name) != "" {
 			return fmt.Errorf("%s env var is not supported and has been removed to prevent data fragmentation.\n"+
-				"The storage backend is set in .beads/metadata.json. To change it, use: bd migrate dolt", name)
+				"Unset %s; storage selection comes from .beads/metadata.json. To choose a different supported backend, follow 'bd help init-safety'; do not edit metadata.json by hand", name, name)
 		}
 	}
 	return nil
@@ -1747,15 +1729,9 @@ func envTruthyValue(v string) bool {
 	return true
 }
 
-// dsnFlags are the flags whose value is a connection string that may embed a
-// password (bd init --backend=postgres/mysql). Their values get the full
-// parser-backed DSN scrub; other args only get the unambiguous userinfo scrub.
-var dsnFlags = map[string]bool{"--pg-url": true, "--mysql-url": true}
-
 // secretFlagNames are long flag names whose entire value is an opaque credential
-// that must never reach the bd.args telemetry span. Unlike dsnFlags (a DSN that is
-// parsed so its structure survives), a secret flag's value is redacted wholesale.
-// Only federation add-peer's --password currently qualifies. Its shorthand (-p) is
+// that must never reach the bd.args telemetry span. The flag's value is redacted
+// wholesale. Only federation add-peer's --password currently qualifies. Its shorthand (-p) is
 // resolved per command via secretFlagTokens so the same letter bound to
 // --priority/--prefix/--parallel on other commands is never redacted.
 var secretFlagNames = map[string]bool{"password": true}
@@ -1784,40 +1760,38 @@ func secretFlagTokens(cmd *cobra.Command) map[string]bool {
 }
 
 // scrubArgsForTelemetry joins argv for the bd.args span attribute with any
-// credential-bearing values redacted. --pg-url/--mysql-url may carry a password
-// for init, and federation add-peer --password/-p carries a SQL password;
-// RedactPassword protects metadata.json, but the raw argv would otherwise leak the
-// secret into the telemetry root span and trace logs.
-//
-// A DSN flag's value is scrubbed through the parser-backed pgdialect logic so every
-// password form pgx accepts is caught — URL userinfo, URL `?password=`/`?sslpassword=`
-// query params, and libpq `password=`/`sslpassword=` keyword/value tokens — in both
-// the `--pg-url=<dsn>` and `--pg-url <dsn>` spellings. A secretFlags token's value is
-// an opaque credential and is redacted wholesale across the `--password <v>`,
+// credential-bearing values redacted. A secretFlags token's value is redacted
+// wholesale across the `--password <v>`,
 // `--password=<v>`, `-p <v>`, `-p=<v>`, and `-p<v>` spellings pflag accepts. Every
-// other arg still gets the narrow user:PASS@host userinfo scrub as defense in depth,
-// without the broad keyword scan that would over-redact ordinary text.
+// other arg gets a conservative DSN/userinfo scrub as defense in depth so a
+// positional connection string cannot leak a password.
 func scrubArgsForTelemetry(argv []string, secretFlags map[string]bool) string {
 	parts := make([]string, len(argv))
+	redactNext := false
 	for i, a := range argv {
-		if name, val, ok := strings.Cut(a, "="); ok {
-			if dsnFlags[name] {
-				// --pg-url=<dsn> — scrub only the value, keep the flag name.
-				parts[i] = name + "=" + scrubDSNValue(val)
-				continue
-			}
+		if redactNext {
+			parts[i] = "xxxxx"
+			redactNext = false
+			continue
+		}
+		if name, value, ok := strings.Cut(a, "="); ok {
 			if secretFlags[name] {
 				// --password=<secret> / -p=<secret> — redact the whole value.
 				parts[i] = name + "=xxxxx"
 				continue
 			}
+			if strings.HasPrefix(name, "-") {
+				scrubbed := scrubUserinfoPassword(scrubPotentialDSNPasswords(value))
+				if scrubbed != value {
+					// Preserve an arbitrary flag name while parsing its equals-value as
+					// a possible DSN. Passing the whole token to url.Parse would treat
+					// the flag prefix as the URL scheme and miss query credentials.
+					parts[i] = name + "=" + scrubbed
+					continue
+				}
+			}
 		}
 		if i > 0 {
-			if dsnFlags[argv[i-1]] {
-				// <dsn> following a bare --pg-url token.
-				parts[i] = scrubDSNValue(a)
-				continue
-			}
 			if secretFlags[argv[i-1]] {
 				// <secret> following a bare --password / -p token.
 				parts[i] = "xxxxx"
@@ -1829,7 +1803,14 @@ func scrubArgsForTelemetry(argv []string, secretFlags map[string]bool) string {
 			parts[i] = short + "xxxxx"
 			continue
 		}
-		parts[i] = scrubUserinfoPassword(a)
+		if secretShorthandTakesSeparateValue(a, secretFlags) {
+			// -qp <secret> — a boolean shorthand cluster ending in the
+			// value-taking secret shorthand, with its value in the next token.
+			parts[i] = a
+			redactNext = true
+			continue
+		}
+		parts[i] = scrubUserinfoPassword(scrubPotentialDSNPasswords(a))
 	}
 	return strings.Join(parts, " ")
 }
@@ -1868,12 +1849,23 @@ func secretShorthandPrefix(a string, secretFlags map[string]bool) (string, bool)
 	return "", false
 }
 
-// scrubDSNValue redacts every password form from a connection-string value. The
-// pgdialect pass covers pgx's URL (userinfo + query) and libpq keyword/value shapes;
-// the trailing userinfo pass covers the MySQL user:PASS@tcp(...) DSN, which is not a
-// scheme URL and so is invisible to the pgdialect extractor.
-func scrubDSNValue(val string) string {
-	return scrubUserinfoPassword(pgdialect.ScrubDSNString(val, val))
+// secretShorthandTakesSeparateValue recognizes a boolean-shorthand cluster that
+// ends in a registered secret shorthand with no attached value. For example,
+// pflag parses "-qp secret" as -q followed by -p=secret.
+func secretShorthandTakesSeparateValue(a string, secretFlags map[string]bool) bool {
+	if len(a) < 3 || a[0] != '-' || a[1] == '-' {
+		return false
+	}
+	for i := 1; i < len(a); i++ {
+		c := a[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			return false
+		}
+		if secretFlags["-"+string(c)] {
+			return i == len(a)-1
+		}
+	}
+	return false
 }
 
 // scrubUserinfoPassword redacts the password in a URL/DSN userinfo section

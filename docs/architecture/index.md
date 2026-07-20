@@ -270,7 +270,6 @@ For these use cases, consider GitHub Issues, Linear, or Jira.
 - [How Beads Works](/core-concepts/index) — The concept model: beads, dependencies, ready work, molecules
 - [Sync Concepts](/core-concepts/sync-concepts) — Cross-machine sync, wire format, and anti-patterns
 - [Dolt Backend](/architecture/dolt) — Embedded vs server mode in depth, shared server, migration
-- [Storage Backends](/architecture/storage-backends) — Postgres, MySQL, and SQLite alternatives
 - [Recovery Runbooks](/recovery/index) — Step-by-step procedures for common issues
 - [CLI Reference](/cli-reference/index) — Complete command documentation
 - [Getting Started](/index) — Installation and first steps

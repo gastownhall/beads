@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -95,14 +96,13 @@ Examples:
 			return HandleErrorRespectJSON("%s", err)
 		}
 
-		combined := issue.Notes
-		if combined != "" {
-			combined += "\n"
-		}
-		combined += noteText
-
+		// Passed as an append OPERATION, not a pre-merged value: the storage
+		// layer re-reads the row inside the mutation transaction and appends
+		// there. Concatenating onto the `issue` snapshot here (read in an
+		// earlier transaction) silently erased notes committed by a concurrent
+		// `bd note` / `bd update --append-notes` — both processes exited 0.
 		updates := map[string]interface{}{
-			"notes": combined,
+			issueops.OpAppendNotes: noteText,
 		}
 		if err := issueStore.UpdateIssue(ctx, result.ResolvedID, updates, actor); err != nil {
 			return HandleErrorRespectJSON("updating %s: %v", id, err)
