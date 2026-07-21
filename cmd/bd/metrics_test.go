@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 // TestMetricsOnOffWritesUserConfig verifies `bd metrics on/off` persists the
@@ -281,4 +282,60 @@ func TestFirstRunNoticeSuppressedByContext(t *testing.T) {
 			t.Errorf("root command without --version set should NOT be suppressed by the version-flag rule")
 		}
 	})
+}
+
+// TestResolveMetricsEnabledHonorsDoNotTrack verifies the cross-tool DO_NOT_TRACK
+// standard (https://donottrack.sh/) is honored as an alias for
+// BD_DISABLE_METRICS: it opts out with the same truthy semantics, and
+// BD_DISABLE_METRICS takes precedence when both are set.
+func TestResolveMetricsEnabledHonorsDoNotTrack(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+
+	for _, key := range []string{metrics.EnvDisableMetrics, metrics.EnvDoNotTrack} {
+		if orig, ok := os.LookupEnv(key); ok {
+			_ = os.Unsetenv(key)
+			t.Cleanup(func() { _ = os.Setenv(key, orig) })
+		}
+	}
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !metricsEnabledByConfig() {
+		t.Fatalf("precondition: metrics should be enabled by default config")
+	}
+
+	cases := []struct {
+		name        string
+		disableEnv  *string
+		doNotTrack  *string
+		wantEnabled bool
+	}{
+		{name: "no env uses config default", wantEnabled: true},
+		{name: "DO_NOT_TRACK=1 disables", doNotTrack: strPtr("1"), wantEnabled: false},
+		{name: "DO_NOT_TRACK=true disables", doNotTrack: strPtr("true"), wantEnabled: false},
+		{name: "DO_NOT_TRACK=0 does not disable", doNotTrack: strPtr("0"), wantEnabled: true},
+		{name: "DO_NOT_TRACK empty does not disable", doNotTrack: strPtr(""), wantEnabled: true},
+		{name: "BD_DISABLE_METRICS=0 wins over DO_NOT_TRACK=1", disableEnv: strPtr("0"), doNotTrack: strPtr("1"), wantEnabled: true},
+		{name: "BD_DISABLE_METRICS=1 wins over DO_NOT_TRACK=0", disableEnv: strPtr("1"), doNotTrack: strPtr("0"), wantEnabled: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.disableEnv != nil {
+				t.Setenv(metrics.EnvDisableMetrics, *tc.disableEnv)
+			}
+			if tc.doNotTrack != nil {
+				t.Setenv(metrics.EnvDoNotTrack, *tc.doNotTrack)
+			}
+			if got := resolveMetricsEnabled(); got != tc.wantEnabled {
+				t.Errorf("resolveMetricsEnabled() = %v, want %v", got, tc.wantEnabled)
+			}
+		})
+	}
 }

@@ -86,7 +86,7 @@ func metricsTestEnv(home string, extra ...string) []string {
 	base := bdEnv(home)
 	out := make([]string, 0, len(base)+len(extra)+1)
 	for _, e := range base {
-		if strings.HasPrefix(e, "BD_DISABLE_METRICS=") {
+		if strings.HasPrefix(e, "BD_DISABLE_METRICS=") || strings.HasPrefix(e, "DO_NOT_TRACK=") {
 			continue
 		}
 		out = append(out, e)

@@ -16,6 +16,7 @@ const (
 
 	EnvDisableMetrics    = "BD_DISABLE_METRICS"
 	EnvDisableEventFlush = "BD_DISABLE_EVENT_FLUSH"
+	EnvDoNotTrack        = "DO_NOT_TRACK"
 
 	DefaultEndpoint = "https://gastownhall-eventsapi.com/mp/collect"
 )

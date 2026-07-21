@@ -1699,6 +1699,9 @@ func resolveMetricsEnabled() bool {
 	if v, ok := os.LookupEnv(metrics.EnvDisableMetrics); ok {
 		return !envTruthyValue(v)
 	}
+	if v, ok := os.LookupEnv(metrics.EnvDoNotTrack); ok {
+		return !envTruthyValue(v)
+	}
 	// Consent is the user's own global choice: resolve it from the user-global
 	// config only, never merged project/BEADS_DIR config. Otherwise a
 	// repository's .beads/config.yaml (highest viper precedence) could re-enable
