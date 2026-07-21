@@ -11,6 +11,13 @@ import (
 func TestResolveDoltBackupURL(t *testing.T) {
 	t.Parallel()
 
+	// Build the absolute-path fixture with platform-native semantics.
+	// A hard-coded POSIX literal like "/mnt/usb/beads-backup" is not absolute
+	// on Windows (no volume name), so resolveDoltBackupURL would resolve it
+	// against the current drive and return "file://C:\\mnt\\usb\\...".
+	// t.TempDir() is absolute and already cleaned on every platform.
+	absBackup := filepath.Join(t.TempDir(), "beads-backup")
+
 	tests := []struct {
 		name      string
 		input     string
@@ -43,9 +50,9 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			wantExact: "gs://bucket/path",
 		},
 		{
-			name:    "absolute path gets file:// prefix",
-			input:   "/mnt/usb/beads-backup",
-			wantPfx: "file:///mnt/usb/beads-backup",
+			name:      "absolute path gets file:// prefix",
+			input:     absBackup,
+			wantExact: "file://" + absBackup,
 		},
 		{
 			name:    "relative path gets resolved and prefixed",
