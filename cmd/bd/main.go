@@ -1699,8 +1699,13 @@ func resolveMetricsEnabled() bool {
 	if v, ok := os.LookupEnv(metrics.EnvDisableMetrics); ok {
 		return !envTruthyValue(v)
 	}
-	if v, ok := os.LookupEnv(metrics.EnvDoNotTrack); ok {
-		return !envTruthyValue(v)
+	// DO_NOT_TRACK is a disable-only alias: a truthy value opts out, but a
+	// falsey or empty value (DO_NOT_TRACK=0/false/"") must fall through to the
+	// user's saved preference instead of forcing metrics back on over a saved
+	// `bd metrics off`. Only BD_DISABLE_METRICS (checked first) is a
+	// bidirectional override.
+	if v, ok := os.LookupEnv(metrics.EnvDoNotTrack); ok && envTruthyValue(v) {
+		return false
 	}
 	// Consent is the user's own global choice: resolve it from the user-global
 	// config only, never merged project/BEADS_DIR config. Otherwise a

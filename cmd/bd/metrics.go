@@ -139,11 +139,15 @@ func metricsEnabledByConfig() bool {
 
 // metricsEnvOverride returns the metrics opt-out env var in effect for this
 // shell, if any, preferring BD_DISABLE_METRICS over its DO_NOT_TRACK alias.
+// BD_DISABLE_METRICS is a bidirectional override, so it counts whenever it is
+// set. DO_NOT_TRACK is disable-only: a falsey or empty DO_NOT_TRACK falls
+// through to saved config and overrides nothing, so it is reported as an active
+// override only when truthy — matching resolveMetricsEnabled.
 func metricsEnvOverride() (name, value string, ok bool) {
 	if v, found := os.LookupEnv(metrics.EnvDisableMetrics); found {
 		return metrics.EnvDisableMetrics, v, true
 	}
-	if v, found := os.LookupEnv(metrics.EnvDoNotTrack); found {
+	if v, found := os.LookupEnv(metrics.EnvDoNotTrack); found && envTruthyValue(v) {
 		return metrics.EnvDoNotTrack, v, true
 	}
 	return "", "", false
