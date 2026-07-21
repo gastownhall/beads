@@ -145,6 +145,15 @@ func TestResolvePartialID(t *testing.T) {
 		Priority:  1,
 		IssueType: types.TypeTask,
 	}
+	// Test substring matching rejection (GH#4234)
+	// This issue's hash "j0kt8" contains "kt8" as substring
+	substringIssue := &types.Issue{
+		ID:        "hq-wisp-j0kt8",
+		Title:     "Inspect resource conditions",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
 
 	if err := store.CreateIssue(ctx, issue1, "test"); err != nil {
 		t.Fatal(err)
@@ -161,9 +170,16 @@ func TestResolvePartialID(t *testing.T) {
 	if err := store.CreateIssue(ctx, childIssue, "test"); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.CreateIssue(ctx, substringIssue, "test"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Set config for prefix
 	if err := store.SetConfig(ctx, "issue_prefix", "bd-"); err != nil {
+		t.Fatal(err)
+	}
+	// Allow hq prefix for cross-prefix lookup test
+	if err := store.SetConfig(ctx, "allowed_prefixes", "hq"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -219,6 +235,25 @@ func TestResolvePartialID(t *testing.T) {
 			name:     "exact match parent without prefix - gh-316",
 			input:    "3d0",
 			expected: "offlinebrew-3d0", // Should still prefer exact hash match
+		},
+		{
+			name:        "substring match should error - GH#4234",
+			input:       "hq-kt8",
+			shouldError: true,
+			errorMsg:    "no issue found",
+			// hq-wisp-j0kt8 exists but "kt8" is only a substring of "j0kt8", not exact
+		},
+		{
+			name:        "substring match without prefix should error - GH#4234",
+			input:       "kt8",
+			shouldError: true,
+			errorMsg:    "no issue found",
+			// hq-wisp-j0kt8 exists but "kt8" is only a substring of "j0kt8", not exact
+		},
+		{
+			name:     "exact match with full ID containing substring",
+			input:    "hq-wisp-j0kt8",
+			expected: "hq-wisp-j0kt8",
 		},
 	}
 

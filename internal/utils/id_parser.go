@@ -152,11 +152,6 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 			exactMatch = id
 			// Don't break - keep searching in case there's a full ID match
 		}
-
-		// Check if the issue hash contains the input hash as substring
-		if strings.Contains(issueHash, hashPart) {
-			matches = append(matches, id)
-		}
 	}
 
 	// Prefer exact match over substring matches
@@ -184,9 +179,6 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 				}
 				if wHash == hashPart {
 					exactMatch = wID
-				}
-				if strings.Contains(wHash, hashPart) {
-					matches = append(matches, wID)
 				}
 			}
 			if exactMatch != "" {
