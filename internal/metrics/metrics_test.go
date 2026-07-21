@@ -9,9 +9,7 @@ import (
 )
 
 func TestDataDirDefaultUsesHomeBeads(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("BEADS_DIR", "")
+	home := isolateUserProfile(t)
 
 	got, err := DataDir()
 	if err != nil {
@@ -24,9 +22,8 @@ func TestDataDirDefaultUsesHomeBeads(t *testing.T) {
 }
 
 func TestDataDirRespectsBeadsDir(t *testing.T) {
-	home := t.TempDir()
+	home := isolateUserProfile(t)
 	beadsDir := filepath.Join(t.TempDir(), "custom-beads")
-	t.Setenv("HOME", home)
 	t.Setenv("BEADS_DIR", beadsDir)
 
 	got, err := DataDir()
@@ -44,9 +41,7 @@ func TestDataDirRespectsBeadsDir(t *testing.T) {
 }
 
 func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("BEADS_DIR", "")
+	home := isolateUserProfile(t)
 
 	closeFn, err := Init("0.0.0-test", false, "")
 	if err != nil {
@@ -73,9 +68,7 @@ func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
 }
 
 func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("BEADS_DIR", "")
+	home := isolateUserProfile(t)
 
 	closeFn, err := Init("0.0.0-test", true, "")
 	if err != nil {
@@ -110,8 +103,7 @@ func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
 }
 
 func TestRunSendMetricsNoOpWhenDisabled(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("BEADS_DIR", "")
+	isolateUserProfile(t)
 	_, err := Init("0.0.0-test", false, "")
 	if err != nil {
 		t.Fatalf("Init: %v", err)
@@ -122,8 +114,7 @@ func TestRunSendMetricsNoOpWhenDisabled(t *testing.T) {
 }
 
 func TestMaybeSpawnFlusherNoOpWhenDisabled(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("BEADS_DIR", "")
+	isolateUserProfile(t)
 	_, err := Init("0.0.0-test", false, "")
 	if err != nil {
 		t.Fatalf("Init: %v", err)
@@ -174,8 +165,7 @@ func TestFlusherChildEnvPinsSanctionedEndpoint(t *testing.T) {
 // guard: a process already marked as the flusher must never spawn another one,
 // independent of send-metrics' os.Exit.
 func TestMaybeSpawnFlusherNoOpInsideFlusher(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("BEADS_DIR", "")
+	isolateUserProfile(t)
 	t.Setenv(EnvIsFlusher, "1")
 	if _, err := Init("0.0.0-test", true, ""); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -191,9 +181,7 @@ func TestMaybeSpawnFlusherNoOpInsideFlusher(t *testing.T) {
 // of bypassing main()'s post-command tail, so an event queued earlier in the run
 // is still written to disk for the uploader rather than stranded.
 func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("BEADS_DIR", "")
+	home := isolateUserProfile(t)
 	// Keep the detached uploader from actually forking during the test; we only
 	// assert the on-disk write that CloseAndFlush guarantees before an os.Exit.
 	t.Setenv(EnvDisableEventFlush, "1")
@@ -229,9 +217,7 @@ func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
 // when metrics are disabled without panicking, spawning a flusher, or writing any
 // queue file.
 func TestCloseAndFlushDisabledIsSafe(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("BEADS_DIR", "")
+	home := isolateUserProfile(t)
 	t.Setenv(EnvDisableEventFlush, "1")
 
 	if _, err := Init("0.0.0-test", false, ""); err != nil {
