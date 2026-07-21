@@ -10,9 +10,7 @@ import (
 )
 
 func TestDataDirDefaultUsesHomeBeads(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("BEADS_DIR", "")
+	home := isolateUserProfile(t)
 
 	got, err := DataDir()
 	if err != nil {
@@ -25,9 +23,8 @@ func TestDataDirDefaultUsesHomeBeads(t *testing.T) {
 }
 
 func TestDataDirRespectsBeadsDir(t *testing.T) {
-	home := t.TempDir()
+	home := isolateUserProfile(t)
 	beadsDir := filepath.Join(t.TempDir(), "custom-beads")
-	t.Setenv("HOME", home)
 	t.Setenv("BEADS_DIR", beadsDir)
 
 	got, err := DataDir()
@@ -45,9 +42,7 @@ func TestDataDirRespectsBeadsDir(t *testing.T) {
 }
 
 func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("BEADS_DIR", "")
+	home := isolateUserProfile(t)
 
 	closeFn, err := Init("0.0.0-test", false, "")
 	if err != nil {
@@ -74,9 +69,7 @@ func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
 }
 
 func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("BEADS_DIR", "")
+	home := isolateUserProfile(t)
 
 	closeFn, err := Init("0.0.0-test", true, "")
 	if err != nil {
@@ -117,8 +110,7 @@ func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
 // / 15.8GB observed on one control VM). Disabled mode must prune by the normal
 // policy and must not upload.
 func TestRunSendMetricsDisabledPrunesWithoutUploading(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := isolateUserProfile(t)
 	dir := filepath.Join(home, ".beads", "eventsData")
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		t.Fatalf("mkdir eventsData: %v", err)
@@ -165,8 +157,7 @@ func TestRunSendMetricsDisabledPrunesWithoutUploading(t *testing.T) {
 // leftover queue. The stateful half still applies — with no queued backlog
 // nothing is due, so a machine that never enabled telemetry never forks.
 func TestSpawnGateIgnoresDisabledMetrics(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	_ = isolateUserProfile(t)
 	// Hermetically clear the two env suppressors (the repo's own runner exports
 	// BEADS_TEST_MODE=1, and CI exports BD_DISABLE_EVENT_FLUSH=1 workflow-wide)
 	// so the assertion below is gated on Enabled() alone. shouldSpawnFlusher is
@@ -244,8 +235,7 @@ func TestFlusherChildEnvPinsSanctionedEndpoint(t *testing.T) {
 // guard: a process already marked as the flusher must never spawn another one,
 // independent of send-metrics' os.Exit.
 func TestMaybeSpawnFlusherNoOpInsideFlusher(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("BEADS_DIR", "")
+	isolateUserProfile(t)
 	t.Setenv(EnvIsFlusher, "1")
 	if _, err := Init("0.0.0-test", true, ""); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -261,9 +251,7 @@ func TestMaybeSpawnFlusherNoOpInsideFlusher(t *testing.T) {
 // of bypassing main()'s post-command tail, so an event queued earlier in the run
 // is still written to disk for the uploader rather than stranded.
 func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("BEADS_DIR", "")
+	home := isolateUserProfile(t)
 	// Keep the detached uploader from actually forking during the test; we only
 	// assert the on-disk write that CloseAndFlush guarantees before an os.Exit.
 	t.Setenv(EnvDisableEventFlush, "1")
@@ -299,9 +287,7 @@ func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
 // when metrics are disabled without panicking, spawning a flusher, or writing any
 // queue file.
 func TestCloseAndFlushDisabledIsSafe(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("BEADS_DIR", "")
+	home := isolateUserProfile(t)
 	t.Setenv(EnvDisableEventFlush, "1")
 
 	if _, err := Init("0.0.0-test", false, ""); err != nil {
@@ -335,8 +321,7 @@ func envContains(env []string, want string) bool {
 // expensive half on a backed-up spool — ran with no deadline at all and the
 // advertised budget bounded nothing.
 func TestRunSendMetricsPrunesUnderFlushDeadline(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := isolateUserProfile(t)
 	if err := os.MkdirAll(filepath.Join(home, ".beads", "eventsData"), 0o750); err != nil {
 		t.Fatalf("mkdir eventsData: %v", err)
 	}
