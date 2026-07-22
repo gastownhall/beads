@@ -66,7 +66,7 @@ func printCycleWarnings(cycles [][]*types.Issue) {
 }
 
 func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerID, blockedID string) error {
-	if isChildOf(blockedID, blockerID) {
+	if isDisallowedHierarchicalDependency(blockedID, blockerID, types.DepBlocks) {
 		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", blockedID, blockerID)
 	}
 
@@ -155,11 +155,11 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		toID = dependsOnArg
 	}
 
-	if isChildOf(fromID, toID) {
+	dt := types.DependencyType(depType)
+	if isDisallowedHierarchicalDependency(fromID, toID, dt) {
 		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 	}
 
-	dt := types.DependencyType(depType)
 	if !dt.IsValid() {
 		return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
 	}
@@ -225,7 +225,7 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 
 	deps := make([]*types.Dependency, 0, len(edges))
 	for _, edge := range edges {
-		if isChildOf(edge.IssueID, edge.DependsOnID) {
+		if isDisallowedHierarchicalDependency(edge.IssueID, edge.DependsOnID, edge.Type) {
 			return HandleErrorRespectJSON("line %d: cannot add dependency: %s is already a child of %s", edge.Line, edge.IssueID, edge.DependsOnID)
 		}
 		if strings.HasPrefix(edge.DependsOnID, "external:") {

@@ -17,11 +17,11 @@ func runLinkProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 	id2 := args[1]
 	depType, _ := cmd.Flags().GetString("type")
 
-	if isChildOf(id1, id2) {
+	dt := types.DependencyType(depType)
+	if isDisallowedHierarchicalDependency(id1, id2, dt) {
 		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", id1, id2)
 	}
 
-	dt := types.DependencyType(depType)
 	if !dt.IsValid() {
 		return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
 	}
