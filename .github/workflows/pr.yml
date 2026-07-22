@@ -184,6 +184,26 @@ jobs:
           path: ${{ runner.temp }}/cli-docs-freshness.patch
           if-no-files-found: ignore
 
+  pr-preflight-platforms:
+    name: PR preflight process (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Exercise the real Bash process boundary
+        shell: bash
+        run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestPRPreflight' ./scripts
+
   # Fast check to catch accidental .beads/issues.jsonl changes from contributors
   check-no-beads-changes:
     name: Check for .beads changes
@@ -544,6 +564,7 @@ jobs:
       - check-version-consistency
       - check-migration-hygiene
       - check-doc-flags
+      - pr-preflight-platforms
       - check-no-beads-changes
       - detect-package-gates
       - package-mcp
@@ -569,6 +590,7 @@ jobs:
             CHECK_VERSION_CONSISTENCY
             CHECK_MIGRATION_HYGIENE
             CHECK_DOC_FLAGS
+            PR_PREFLIGHT_PLATFORMS
             CHECK_NO_BEADS_CHANGES
             DETECT_PACKAGE_GATES
             PACKAGE_MCP
@@ -586,6 +608,7 @@ jobs:
           CHECK_VERSION_CONSISTENCY: ${{ needs.check-version-consistency.result }}
           CHECK_MIGRATION_HYGIENE: ${{ needs.check-migration-hygiene.result }}
           CHECK_DOC_FLAGS: ${{ needs.check-doc-flags.result }}
+          PR_PREFLIGHT_PLATFORMS: ${{ needs.pr-preflight-platforms.result }}
           CHECK_NO_BEADS_CHANGES: ${{ needs.check-no-beads-changes.result }}
           DETECT_PACKAGE_GATES: ${{ needs.detect-package-gates.result }}
           PACKAGE_MCP: ${{ needs.package-mcp.result }}
