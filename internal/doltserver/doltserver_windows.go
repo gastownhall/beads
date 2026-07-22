@@ -98,16 +98,19 @@ func isProcessInDir(pid int, dir string) bool {
 	return false
 }
 
-// isProcessAlive checks if a process with the given PID is running.
-// Uses OpenProcess with PROCESS_QUERY_LIMITED_INFORMATION — returns error if
-// the process doesn't exist.
+// isProcessAlive checks if a process with the given PID is running. Opening a
+// process is not sufficient: an exited process remains openable while another
+// handle refers to it. A zero-timeout wait distinguishes that signaled process
+// from a running process.
 func isProcessAlive(pid int) bool {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	h, err := windows.OpenProcess(windows.SYNCHRONIZE, false, uint32(pid))
 	if err != nil {
 		return false
 	}
-	windows.CloseHandle(h)
-	return true
+	defer func() { _ = windows.CloseHandle(h) }()
+
+	status, err := windows.WaitForSingleObject(h, 0)
+	return err == nil && status == uint32(windows.WAIT_TIMEOUT)
 }
 
 // gracefulStop terminates a process on Windows. Uses TerminateProcess (hard kill)
