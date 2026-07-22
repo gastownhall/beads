@@ -128,22 +128,8 @@ func buildListFilter(in listInput, cfg listFilterConfig) (types.IssueFilter, err
 		s := types.StatusOpen
 		filter.Status = &s
 	} else if in.status != "" && in.status != "all" {
-		names := cfg.customStatusNames()
-		statusParts := strings.Split(in.status, ",")
-		if len(statusParts) == 1 {
-			s := types.Status(strings.TrimSpace(statusParts[0]))
-			if !s.IsValidWithCustom(names) {
-				return filter, fmt.Errorf("invalid status %q (valid: %s)", in.status, validStatusList(names))
-			}
-			filter.Status = &s
-		} else {
-			for _, part := range statusParts {
-				s := types.Status(strings.TrimSpace(part))
-				if !s.IsValidWithCustom(names) {
-					return filter, fmt.Errorf("invalid status %q in multi-status filter (valid: %s)", strings.TrimSpace(part), validStatusList(names))
-				}
-				filter.Statuses = append(filter.Statuses, s)
-			}
+		if err := applyStatusFilter(&filter, in.status, cfg.customStatusNames()); err != nil {
+			return filter, err
 		}
 	}
 
@@ -333,4 +319,25 @@ func validStatusList(customStatusNames []string) string {
 		validList += ", " + strings.Join(customStatusNames, ", ")
 	}
 	return validList
+}
+
+func applyStatusFilter(filter *types.IssueFilter, status string, customStatusNames []string) error {
+	statusParts := strings.Split(status, ",")
+	if len(statusParts) == 1 {
+		s := types.Status(strings.TrimSpace(statusParts[0]))
+		if !s.IsValidWithCustom(customStatusNames) {
+			return fmt.Errorf("invalid status %q (valid: %s)", status, validStatusList(customStatusNames))
+		}
+		filter.Status = &s
+		return nil
+	}
+
+	for _, part := range statusParts {
+		s := types.Status(strings.TrimSpace(part))
+		if !s.IsValidWithCustom(customStatusNames) {
+			return fmt.Errorf("invalid status %q in multi-status filter (valid: %s)", strings.TrimSpace(part), validStatusList(customStatusNames))
+		}
+		filter.Statuses = append(filter.Statuses, s)
+	}
+	return nil
 }
