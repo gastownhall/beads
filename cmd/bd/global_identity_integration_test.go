@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -103,8 +104,30 @@ func TestGlobalDBIdentityCheck(t *testing.T) {
 		t.Errorf("metadata.json global_project_id = %q, want %q",
 			cfg.GlobalProjectID, doltserver.GlobalProjectID)
 	}
+	if yamlPrefix := config.GetStringFromDir(beadsDir, "issue-prefix"); yamlPrefix != "proj0" {
+		t.Fatalf("project YAML issue-prefix = %q, want %q", yamlPrefix, "proj0")
+	}
 
-	out, err := ssExec(ctx, bdBinary, projectDir, env, "list", "--global")
+	explicitGlobalID := "global-explicit"
+	out, err := ssExec(ctx, bdBinary, projectDir, env,
+		"create", "Global explicit ID", "--global", "--id", explicitGlobalID, "--silent")
+	if err != nil {
+		t.Fatalf("bd create --global --id %s failed: %v\noutput:\n%s", explicitGlobalID, err, out)
+	}
+	if got := strings.TrimSpace(out); got != explicitGlobalID {
+		t.Fatalf("bd create --global --id returned %q, want %q", got, explicitGlobalID)
+	}
+
+	out, err = ssExec(ctx, bdBinary, projectDir, env, "show", "--global", explicitGlobalID)
+	if err != nil {
+		t.Fatalf("bd show --global %s failed: %v\noutput:\n%s", explicitGlobalID, err, out)
+	}
+	if !strings.Contains(out, explicitGlobalID) {
+		t.Fatalf("bd show --global did not return %s from %s:\n%s",
+			explicitGlobalID, doltserver.GlobalDatabaseName, out)
+	}
+
+	out, err = ssExec(ctx, bdBinary, projectDir, env, "list", "--global")
 	if err != nil {
 		t.Fatalf("bd list --global failed: %v\noutput:\n%s", err, out)
 	}

@@ -483,12 +483,9 @@ var createCmd = &cobra.Command{
 
 			ctx := createCtx
 
-			var dbPrefix, allowedPrefixes string
-			if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
-				dbPrefix = yamlPrefix
-			} else {
-				dbPrefix, _ = store.GetConfig(ctx, "issue_prefix")
-			}
+			storePrefix, _ := store.GetConfig(ctx, "issue_prefix")
+			dbPrefix := selectCreateIDPrefix(globalFlag, config.GetString("issue-prefix"), storePrefix)
+			var allowedPrefixes string
 			allowedPrefixes, _ = store.GetConfig(ctx, "allowed_prefixes")
 
 			if err := validation.ValidateIDPrefixAllowed(explicitID, dbPrefix, allowedPrefixes, forceCreate); err != nil {
@@ -698,6 +695,16 @@ func mergeCreateLabels(labels, inheritedLabels []string) []string {
 		return nil
 	}
 	return merged
+}
+
+func selectCreateIDPrefix(global bool, yamlPrefix, storePrefix string) string {
+	if global {
+		return storePrefix
+	}
+	if yamlPrefix != "" {
+		return yamlPrefix
+	}
+	return storePrefix
 }
 
 func renderCreateDryRunPreview(issue *types.Issue, labels, deps []string) {
