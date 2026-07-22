@@ -1428,6 +1428,22 @@ func TestSharedServerDir_EnvOverride(t *testing.T) {
 	}
 }
 
+func TestSharedServerPath_EnvOverrideDoesNotCreateDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "not-created")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", dir)
+
+	got, err := SharedServerPath()
+	if err != nil {
+		t.Fatalf("SharedServerPath: %v", err)
+	}
+	if got != dir {
+		t.Fatalf("SharedServerPath = %q, want %q", got, dir)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("SharedServerPath created or touched %q: stat error = %v", dir, err)
+	}
+}
+
 func TestSharedDoltDir_EnvOverride(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("BEADS_SHARED_SERVER_DIR", tmp)

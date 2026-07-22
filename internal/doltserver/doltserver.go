@@ -205,19 +205,27 @@ func readyTimeout() time.Duration {
 	return time.Duration(secs) * time.Second
 }
 
+// SharedServerPath returns the directory for shared server state files without
+// creating it. Override with BEADS_SHARED_SERVER_DIR for testing or custom
+// layouts; otherwise it resolves to ~/.beads/shared-server/.
+func SharedServerPath() (string, error) {
+	if d := os.Getenv("BEADS_SHARED_SERVER_DIR"); d != "" {
+		return d, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	return filepath.Join(home, ".beads", "shared-server"), nil
+}
+
 // SharedServerDir returns the directory for shared server state files.
 // Returns ~/.beads/shared-server/ (created on first use).
 // Override with BEADS_SHARED_SERVER_DIR env var for testing or custom layouts.
 func SharedServerDir() (string, error) {
-	var dir string
-	if d := os.Getenv("BEADS_SHARED_SERVER_DIR"); d != "" {
-		dir = d
-	} else {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("cannot determine home directory: %w", err)
-		}
-		dir = filepath.Join(home, ".beads", "shared-server")
+	dir, err := SharedServerPath()
+	if err != nil {
+		return "", err
 	}
 	if err := os.MkdirAll(dir, config.BeadsDirPerm); err != nil {
 		return "", fmt.Errorf("cannot create shared server directory %s: %w", dir, err)
