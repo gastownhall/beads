@@ -14,3 +14,10 @@ internal/templates/agents/defaults/*.md text eol=lf
 # Windows checkouts (core.autocrlf=true) hash identically to release builds
 # instead of reporting false migration-content skew.
 internal/storage/schema/migrations/**/*.sql text eol=lf
+
+# CLI docs freshness compares committed artifacts byte-for-byte with an LF-only
+# scratch tree. Pin every generated surface so core.autocrlf cannot create false
+# drift on Windows.
+docs/CLI_REFERENCE.md text eol=lf
+docs/cli-reference/*.md text eol=lf
+docs/docs.json text eol=lf
