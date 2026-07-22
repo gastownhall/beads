@@ -16,12 +16,12 @@ Beads provides a persistent, structured memory for coding agents. It replaces me
 
 ```mermaid
 flowchart LR
-    create["bd create<br/>new bead"] --> graph["dependency<br/>graph"]
-    graph --> ready["bd ready<br/>claimable work"]
+    create["bd create<br/>new bead"] --> depgraph["dependency<br/>graph"]
+    depgraph --> ready["bd ready<br/>claimable work"]
     ready --> claim["bd update --claim<br/>agent takes it"]
     claim --> close["bd close<br/>work done"]
     close -->|blockers released| ready
-    graph <-->|"bd dolt push / pull"| remote[("other machines<br/>and agents")]
+    depgraph <-->|"bd dolt push / pull"| remote[("other machines<br/>and agents")]
 ```
 
 ## ⚡ Quick Start

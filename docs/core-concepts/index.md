@@ -12,8 +12,8 @@ Work survives the agent; the next session picks up where the last one died.
 
 ```mermaid
 flowchart LR
-    create["bd create<br/>new bead"] --> graph["dependency<br/>graph"]
-    graph --> ready["bd ready<br/>claimable work"]
+    create["bd create<br/>new bead"] --> depgraph["dependency<br/>graph"]
+    depgraph --> ready["bd ready<br/>claimable work"]
     ready --> claim["bd update --claim<br/>agent takes it"]
     claim --> close["bd close<br/>work done"]
     close -->|blockers released| ready
