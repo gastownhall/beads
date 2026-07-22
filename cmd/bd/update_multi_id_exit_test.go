@@ -28,8 +28,8 @@ import (
 )
 
 // multiIDUpdateEnv returns a hermetic environment for bd subprocess runs:
-// no inherited BEADS_* variables, HOME pinned to the test dir, metrics and
-// daemons disabled.
+// no inherited BEADS_* variables, HOME and USERPROFILE pinned to the test dir,
+// metrics and daemons disabled.
 func multiIDUpdateEnv(dir string) []string {
 	var env []string
 	for _, e := range os.Environ() {
@@ -40,6 +40,7 @@ func multiIDUpdateEnv(dir string) []string {
 	}
 	return append(env,
 		"HOME="+dir,
+		"USERPROFILE="+dir,
 		"BD_NON_INTERACTIVE=1",
 		"BD_DISABLE_METRICS=1",
 		"BD_DISABLE_EVENT_FLUSH=1",
@@ -75,6 +76,8 @@ func setupMultiIDUpdateDB(t *testing.T) (bd, dir string) {
 	t.Helper()
 	bd = buildBDForInitTests(t)
 	dir = t.TempDir()
+	runGitForBootstrapTest(t, dir, "init", "-q")
+	runGitForBootstrapTest(t, dir, "config", "core.hooksPath", ".git/hooks")
 	stdout, stderr, code := runBDMultiID(t, bd, dir,
 		"init", "--prefix", "test", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
 	if code != 0 {
