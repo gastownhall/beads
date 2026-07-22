@@ -534,6 +534,188 @@ jobs:
           version: latest
           args: --timeout=5m --build-tags=gms_pure_go
 
+  windows-make-shell:
+    name: Windows Make shell (${{ matrix.host }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        host:
+          - native
+          - msys2
+          - cygwin
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Install native GNU Make
+        if: matrix.host == 'native'
+        shell: pwsh
+        run: choco install make --version=4.4.1 --yes --no-progress
+
+      - name: Set up MSYS2 GNU Make
+        if: matrix.host == 'msys2'
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: MSYS
+          install: git make
+          path-type: minimal
+
+      - name: Set up Cygwin GNU Make
+        if: matrix.host == 'cygwin'
+        id: cygwin
+        uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6
+        with:
+          packages: git make
+          add-to-path: 'false'
+
+      - name: Exercise native Windows Make
+        if: matrix.host == 'native'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $make = (Get-Command make.exe -ErrorAction Stop).Source
+          $hostOutput = & $make --no-print-directory -f NUL --eval '$(info MAKE_HOST=$(MAKE_HOST))' --eval 'noop:;' noop
+          $makeHost = (($hostOutput | Where-Object { $_ -like 'MAKE_HOST=*' }) -replace '^MAKE_HOST=', '').Trim()
+          if ($LASTEXITCODE -ne 0 -or ($makeHost -ne 'Windows32' -and $makeHost -notmatch '-mingw32$')) {
+            throw "Expected native Windows GNU Make, found '$makeHost' at '$make'"
+          }
+
+          $git = (Get-Command git.exe -ErrorAction Stop).Source
+          if ($git -notmatch ' ') {
+            throw "Expected the hosted Git for Windows path to contain a space, found '$git'"
+          }
+
+          $profile = Join-Path $env:RUNNER_TEMP 'profile with spaces'
+          New-Item -ItemType Directory -Force -Path $profile | Out-Null
+          $poison = Join-Path $profile 'poison bash env.sh'
+          Set-Content -LiteralPath $poison -Encoding utf8 -Value 'exit 97'
+
+          $env:USERPROFILE = $profile
+          $env:BASH_ENV = $poison
+          $env:BASHOPTS = 'failglob'
+          $env:SHELLOPTS = 'nounset'
+          $env:GIT_EXEC_PATH = Join-Path $profile 'missing git exec path'
+          $env:PATH = "$(Split-Path $git);$env:SystemRoot\System32"
+
+          & $make --no-print-directory help | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Native Make failed while parsing or running help'
+          }
+
+          @'
+          include Makefile
+          .RECIPEPREFIX := >
+          .PHONY: windows-make-shell-smoke
+          windows-make-shell-smoke:
+          >@case "$(SHELL)" in */bin/bash.exe) ;; *) exit 1;; esac
+          >@test -n "$$BASH_VERSION"
+          >@test "$$(command -v sed)" = /usr/bin/sed
+          >@test "$$(command -v env)" = /usr/bin/env
+          >@test -z "$${BASH_ENV+x}"
+          >@case "$$-" in *u*) exit 1;; esac
+          >@shopt -q failglob && exit 1 || :
+          >@test -z "$${GIT_EXEC_PATH+x}"
+          >@env printf '%s\n' 'native Windows Make shell smoke passed'
+          '@ | & $make --no-print-directory -f - windows-make-shell-smoke
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Native Make shell smoke failed'
+          }
+
+      - name: Exercise MSYS2-hosted Make
+        if: matrix.host == 'msys2'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          make_host="$(
+            make --no-print-directory -f /dev/null \
+              --eval '$(info $(MAKE_HOST))' \
+              --eval 'noop:;' noop |
+              sed -n '1p'
+          )"
+          case "$make_host" in
+            *-msys|*-cygwin) ;;
+            *) echo "Expected a POSIX-hosted MSYS2 GNU Make, found '$make_host'" >&2; exit 1 ;;
+          esac
+
+          profile="$(cygpath -u "$RUNNER_TEMP")/profile with spaces"
+          mkdir -p "$profile"
+          bash_env="$profile/compat bash env.sh"
+          printf '%s\n' 'exit 97' > "$bash_env"
+          export BASH_ENV="$bash_env"
+          export GIT_EXEC_PATH="$profile/missing git exec path"
+          export PATH=/usr/bin
+
+          make --no-print-directory help >/dev/null
+          cat > "$profile/smoke.mk" <<'MAKE_EOF'
+          include Makefile
+          .RECIPEPREFIX := >
+          .PHONY: windows-make-shell-smoke
+          windows-make-shell-smoke:
+          >@case "$(SHELL)" in */sh) ;; *) exit 1;; esac
+          >@test -n "$$BASH_VERSION"
+          >@test "$$(command -v sed)" = /usr/bin/sed
+          >@test "$$(command -v env)" = /usr/bin/env
+          >@test -f "$$BASH_ENV"
+          >@test -n "$$GIT_EXEC_PATH"
+          >@case "$$PATH" in *';'*) exit 1;; esac
+          >@env printf '%s\n' 'MSYS2 Make shell smoke passed'
+          MAKE_EOF
+          make --no-print-directory -f "$profile/smoke.mk" windows-make-shell-smoke
+
+      - name: Exercise Cygwin-hosted Make
+        if: matrix.host == 'cygwin'
+        shell: pwsh
+        env:
+          CYGWIN_ROOT: ${{ steps.cygwin.outputs.root }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bash = Join-Path $env:CYGWIN_ROOT 'bin\bash.exe'
+          $script = @'
+          set -euo pipefail
+          export PATH=/usr/bin
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+
+          make_host="$(
+            make --no-print-directory -f /dev/null \
+              --eval '$(info $(MAKE_HOST))' \
+              --eval 'noop:;' noop |
+              sed -n '1p'
+          )"
+          case "$make_host" in
+            *-cygwin) ;;
+            *) echo "Expected Cygwin GNU Make, found '$make_host'" >&2; exit 1 ;;
+          esac
+
+          profile="$(mktemp -d)"
+          trap 'rm -rf -- "$profile"' EXIT
+          bash_env="$profile/cygwin bash env.sh"
+          printf '%s\n' 'exit 97' > "$bash_env"
+          export BASH_ENV="$bash_env"
+          export GIT_EXEC_PATH="$profile/missing git exec path"
+
+          make --no-print-directory help >/dev/null
+          cat > "$profile/smoke.mk" <<'MAKE_EOF'
+          include Makefile
+          .RECIPEPREFIX := >
+          .PHONY: windows-make-shell-smoke
+          windows-make-shell-smoke:
+          >@case "$(SHELL)" in */sh) ;; *) exit 1;; esac
+          >@test -n "$$BASH_VERSION"
+          >@test "$$(command -v sed)" = /usr/bin/sed
+          >@test "$$(command -v env)" = /usr/bin/env
+          >@test -f "$$BASH_ENV"
+          >@test -n "$$GIT_EXEC_PATH"
+          >@case "$$PATH" in *';'*) exit 1;; esac
+          >@env printf '%s\n' 'Cygwin Make shell smoke passed'
+          MAKE_EOF
+          make --no-print-directory -f "$profile/smoke.mk" windows-make-shell-smoke
+          '@
+          $script = $script.Replace("`r`n", "`n")
+          & $bash --noprofile --norc -c $script
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Cygwin Make shell smoke failed'
+          }
+
   ci-gate:
     name: CI Gate / Required
     runs-on: ubuntu-latest
@@ -555,6 +737,7 @@ jobs:
       - contract-corpus
       - fmt-check
       - lint
+      - windows-make-shell
     if: ${{ always() }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
@@ -580,6 +763,7 @@ jobs:
             CONTRACT_CORPUS
             FMT_CHECK
             LINT
+            WINDOWS_MAKE_SHELL
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
           CHECK_BUILD_TAGS: ${{ needs.check-build-tags.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
@@ -597,6 +781,7 @@ jobs:
           CONTRACT_CORPUS: ${{ needs.contract-corpus.result }}
           FMT_CHECK: ${{ needs.fmt-check.result }}
           LINT: ${{ needs.lint.result }}
+          WINDOWS_MAKE_SHELL: ${{ needs.windows-make-shell.result }}
         run: |
           skipped_ok=""
           if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
