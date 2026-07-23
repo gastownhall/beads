@@ -38,7 +38,7 @@ bd update [id...] [flags]
       --history                      Clear no-history flag (re-enable Dolt commit history)
       --metadata string              Set custom metadata (JSON string or @file.json to read from file)
       --no-history                   Mark issue as no-history (skip Dolt commits, not GC-eligible)
-      --notes string                 Additional notes (replaces existing notes; use --append-notes to append)
+      --notes string                 Additional notes
       --parent string                New parent issue ID (reparents the issue, use empty string to remove parent)
       --persistent                   Mark issue as persistent (promote wisp to regular issue)
   -p, --priority string              Priority (0-4 or P0-P4, 0=highest)

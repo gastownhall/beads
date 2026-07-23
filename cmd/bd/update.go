@@ -598,7 +598,7 @@ func replacesExistingNotes(existing string, fields map[string]any) bool {
 }
 
 func warnNotesReplacement(id string) {
-	fmt.Fprintf(os.Stderr, "warning: %s: --notes replaced existing notes (use --append-notes to preserve history)\n", id)
+	fmt.Fprintf(os.Stderr, "warning: %s: --notes replaced existing notes (use --append-notes to preserve history)\n", id) //nolint:gosec // G705: stderr, not a browser context
 }
 
 // updateIDFailure records one issue ID that could not be updated and why.
