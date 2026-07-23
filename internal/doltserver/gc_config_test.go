@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestDoltVersionAtLeast(t *testing.T) {
@@ -84,44 +85,108 @@ func TestSupportsArchiveLevelConfig_WithFakeBinary(t *testing.T) {
 	})
 }
 
-// TestSupportsArchiveLevelConfig_Memoizes covers the nit fix
-// (gastownhall/beads#4986 round 2): repeated calls for the same doltBin
-// must not re-fork `dolt version`. We prove memoization behaviorally by
-// rewriting the stub script in place after the first call — if
-// SupportsArchiveLevelConfig actually re-exec'd, the second call would
-// observe the new (older) version and flip to false; it must not.
-// ResetArchiveLevelSupportCacheForTest then clears the cache so a
-// subsequent call picks up the rewritten script, proving the cache (not
-// some other invariant) was what made the second call stale.
-func TestSupportsArchiveLevelConfig_Memoizes(t *testing.T) {
+// callCountingStub writes a stub "dolt" script at dir/dolt that appends one
+// byte to countPath on every invocation (so probeCount below can observe
+// exactly how many times it actually ran) before echoing versionLine, and
+// returns (binPath, writeVersion, probeCount).
+func callCountingStub(t *testing.T, dir, versionLine string) (bin string, writeVersion func(string), probeCount func() int) {
+	t.Helper()
+	bin = filepath.Join(dir, "dolt")
+	countPath := filepath.Join(dir, "calls")
+
+	writeVersion = func(line string) {
+		t.Helper()
+		script := fmt.Sprintf("#!/bin/sh\nprintf x >> %q\necho %q\n", countPath, line)
+		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture, intentionally executable
+			t.Fatalf("write stub dolt: %v", err)
+		}
+	}
+	probeCount = func() int {
+		t.Helper()
+		data, err := os.ReadFile(countPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return 0
+			}
+			t.Fatalf("read call counter: %v", err)
+		}
+		return len(data)
+	}
+
+	writeVersion(versionLine)
+	return bin, writeVersion, probeCount
+}
+
+// TestSupportsArchiveLevelConfig_MemoizesUnchangedBinary covers the nit fix
+// (gastownhall/beads#4986 round 2): repeated calls against the SAME,
+// UNCHANGED on-disk binary must not re-fork `dolt version`. Proven directly
+// via a call counter embedded in the stub script, rather than only
+// inferring it from the returned bool.
+func TestSupportsArchiveLevelConfig_MemoizesUnchangedBinary(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("stub dolt binary is a POSIX shell script")
 	}
 	t.Cleanup(ResetArchiveLevelSupportCacheForTest)
 
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "dolt")
-	writeStub := func(versionLine string) {
-		script := fmt.Sprintf("#!/bin/sh\necho %q\n", versionLine)
-		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture, intentionally executable
-			t.Fatalf("write stub dolt: %v", err)
-		}
-	}
+	bin, _, probeCount := callCountingStub(t, t.TempDir(), "dolt version 2.2.2")
 
-	writeStub("dolt version 2.2.2")
 	if !SupportsArchiveLevelConfig(bin) {
 		t.Fatalf("expected support for dolt version 2.2.2 (>= %s)", MinDoltVersionForArchiveLevelConfig)
 	}
-
-	// Rewrite the SAME path to report an old version. A cached result must
-	// survive this; an uncached (re-exec'd) call would flip to false.
-	writeStub("dolt version 1.40.0")
-	if !SupportsArchiveLevelConfig(bin) {
-		t.Errorf("SupportsArchiveLevelConfig changed after rewriting the binary at the same path; expected the memoized result to stick")
+	if got := probeCount(); got != 1 {
+		t.Fatalf("expected exactly 1 probe after the first call, got %d", got)
 	}
 
-	ResetArchiveLevelSupportCacheForTest()
+	if !SupportsArchiveLevelConfig(bin) {
+		t.Errorf("cached result changed on a second call against the unchanged binary")
+	}
+	if got := probeCount(); got != 1 {
+		t.Errorf("expected the second call against an unchanged binary to hit the cache (still 1 probe), got %d", got)
+	}
+}
+
+// TestSupportsArchiveLevelConfig_InvalidatesOnFileIdentityChange covers the
+// round-3 minor fix (gastownhall/beads#4986): the cache key includes
+// size+mtime, not just the path string, so an in-place dolt
+// upgrade/downgrade at the same path is re-probed on its very next call
+// rather than serving a stale verdict for the rest of the process's
+// lifetime. os.Chtimes forces a distinct mtime deterministically (no real
+// sleep, robust to coarse filesystem mtime resolution); both stub scripts
+// have identical byte length, so this specifically exercises mtime-based
+// invalidation rather than accidentally relying on a size change.
+func TestSupportsArchiveLevelConfig_InvalidatesOnFileIdentityChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub dolt binary is a POSIX shell script")
+	}
+	t.Cleanup(ResetArchiveLevelSupportCacheForTest)
+
+	bin, writeVersion, probeCount := callCountingStub(t, t.TempDir(), "dolt version 2.2.2")
+
+	info1, err := os.Stat(bin)
+	if err != nil {
+		t.Fatalf("os.Stat: %v", err)
+	}
+
+	if !SupportsArchiveLevelConfig(bin) {
+		t.Fatalf("expected support for dolt version 2.2.2 (>= %s)", MinDoltVersionForArchiveLevelConfig)
+	}
+	if got := probeCount(); got != 1 {
+		t.Fatalf("expected exactly 1 probe after the first call, got %d", got)
+	}
+
+	// Rewrite the SAME path with an older version (same byte length as the
+	// first stub — this isolates the mtime-based half of the cache key from
+	// the size-based half), then force a distinct mtime.
+	writeVersion("dolt version 1.40.0")
+	newMtime := info1.ModTime().Add(time.Second)
+	if err := os.Chtimes(bin, newMtime, newMtime); err != nil {
+		t.Fatalf("os.Chtimes: %v", err)
+	}
+
 	if SupportsArchiveLevelConfig(bin) {
-		t.Errorf("after ResetArchiveLevelSupportCacheForTest, expected the rewritten (old) version to be re-probed and return false")
+		t.Errorf("expected the rewritten (older) binary to invalidate the cache and report unsupported")
+	}
+	if got := probeCount(); got != 2 {
+		t.Errorf("expected a fresh probe (2 total) after the binary's file identity changed, got %d", got)
 	}
 }

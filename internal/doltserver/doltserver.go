@@ -807,13 +807,37 @@ var ErrMultipleDoltCfgDirs = errors.New("multiple .doltcfg directories detected"
 //   - ErrMultipleDoltCfgDirs if BOTH exist — ambiguous, matches Dolt's own
 //     ErrMultipleDoltCfgDirs case rather than guessing.
 //
+// doltDir is resolved to its physical (symlink-free) location before
+// computing the parent. filepath.Join/Clean strip ".." lexically without
+// touching the filesystem: if doltDir is itself a symlink, a naive
+// filepath.Join(doltDir, "..") resolves to the symlink's own lexical
+// parent directory, not the physical parent of whatever it points at. On
+// Linux, chdir into a symlink makes the kernel track the process's cwd
+// physically, so the actual `dolt` child process's own "../.doltcfg"
+// lookup (a bare relative path, resolved against its real, physically
+// tracked cwd — see setupDoltConfig) sees the PHYSICAL parent. Using
+// filepath.EvalSymlinks here keeps this resolution consistent with what
+// the child process itself does; skipping it would let a symlinked data
+// directory miss the very parent .doltcfg this function exists to find,
+// re-abandoning existing privileges/branch-control (gastownhall/beads#4986
+// round 3).
+//
 // Returns an absolute path.
 func resolveCfgDir(doltDir string) (string, error) {
-	parentDirCfg := filepath.Join(doltDir, "..", doltCfgDirName)
+	// Fall back to the lexical doltDir on error (e.g. it does not exist
+	// yet) rather than failing outright — resolveCfgDir has no dependency
+	// on doltDir already existing beyond this best-effort symlink check,
+	// and ensureDoltInit already runs before this is called from Start().
+	physicalDoltDir := doltDir
+	if resolved, err := filepath.EvalSymlinks(doltDir); err == nil {
+		physicalDoltDir = resolved
+	}
+
+	parentDirCfg := filepath.Join(physicalDoltDir, "..", doltCfgDirName)
 	parentInfo, parentErr := os.Stat(parentDirCfg)
 	parentExists := parentErr == nil && parentInfo.IsDir()
 
-	currDirCfg := filepath.Join(doltDir, doltCfgDirName)
+	currDirCfg := filepath.Join(physicalDoltDir, doltCfgDirName)
 	currInfo, currErr := os.Stat(currDirCfg)
 	currExists := currErr == nil && currInfo.IsDir()
 

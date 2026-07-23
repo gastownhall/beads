@@ -2106,6 +2106,84 @@ func TestResolveCfgDir_FileNotDirIgnored(t *testing.T) {
 	}
 }
 
+// TestResolveCfgDir_SymlinkedDataDirFindsPhysicalParent covers the round-3
+// verification finding (gastownhall/beads#4986): filepath.Join(doltDir,
+// "..", ...) cleans ".." lexically, without touching the filesystem. If
+// doltDir is itself a symlink, that yields the symlink's own lexical
+// parent directory — not the physical parent of whatever directory the
+// symlink actually points at. But the real `dolt` child process's own
+// "../.doltcfg" lookup is a bare relative path resolved against its
+// actual, kernel-tracked cwd, which chdir into a symlink resolves
+// PHYSICALLY on Linux. A naive lexical join therefore misses a parent
+// .doltcfg that sits next to the physical target directory, silently
+// falling back to a fresh $data_dir/.doltcfg — the exact data-loss
+// scenario this whole fix exists to prevent.
+//
+// Layout:
+//
+//	<root>/physical/parent/target/          (the real data directory)
+//	<root>/physical/parent/.doltcfg/         (the REAL parent .doltcfg)
+//	<root>/lexical/doltlink -> .../target    (symlink passed as doltDir)
+//
+// A lexically-parent-of-the-symlink directory (<root>/lexical/.doltcfg) is
+// deliberately never created, so a buggy lexical resolution would find
+// nothing there and fall through to the (also nonexistent, but still
+// wrong) default $data_dir/.doltcfg instead of the real one.
+func TestResolveCfgDir_SymlinkedDataDirFindsPhysicalParent(t *testing.T) {
+	root := t.TempDir()
+
+	physicalParent := filepath.Join(root, "physical", "parent")
+	physicalTarget := filepath.Join(physicalParent, "target")
+	if err := os.MkdirAll(physicalTarget, 0o755); err != nil {
+		t.Fatalf("mkdir physical target: %v", err)
+	}
+	physicalCfgDir := filepath.Join(physicalParent, doltCfgDirName)
+	if err := os.MkdirAll(physicalCfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir physical .doltcfg: %v", err)
+	}
+	// Seed it so this test would fail loudly if resolution missed it.
+	if err := os.WriteFile(filepath.Join(physicalCfgDir, "privileges.db"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed privileges.db: %v", err)
+	}
+
+	lexicalDir := filepath.Join(root, "lexical")
+	if err := os.MkdirAll(lexicalDir, 0o755); err != nil {
+		t.Fatalf("mkdir lexical dir: %v", err)
+	}
+	symlinkedDoltDir := filepath.Join(lexicalDir, "doltlink")
+	if err := os.Symlink(physicalTarget, symlinkedDoltDir); err != nil {
+		t.Skipf("symlink not supported on this platform: %v", err)
+	}
+
+	got, err := resolveCfgDir(symlinkedDoltDir)
+	if err != nil {
+		t.Fatalf("resolveCfgDir: %v", err)
+	}
+
+	wantPhysical, err := filepath.EvalSymlinks(physicalCfgDir)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks(physicalCfgDir): %v", err)
+	}
+	want, err := filepath.Abs(wantPhysical)
+	if err != nil {
+		t.Fatalf("filepath.Abs: %v", err)
+	}
+
+	if got != want {
+		t.Errorf("resolveCfgDir(%q) = %q, want the PHYSICAL parent .doltcfg %q "+
+			"(existing users/branch-control must not be abandoned behind a symlinked data dir)",
+			symlinkedDoltDir, got, want)
+	}
+
+	// Sanity: the naive lexical join must NOT be what we got, or this test
+	// would pass vacuously against a regression.
+	lexicalWrong := filepath.Join(lexicalDir, doltCfgDirName)
+	if got == lexicalWrong {
+		t.Errorf("resolveCfgDir resolved to the lexical-parent-of-the-symlink %q, "+
+			"not the physical parent — this is the exact bug this test guards against", lexicalWrong)
+	}
+}
+
 // TestBuildDoltServerArgsWithConfig mirrors TestBuildDoltServerArgs_DebugMode
 // for the --config launch form: --prof/--prof-path must still precede
 // sql-server (top-level dolt flags), and --config must carry the path
