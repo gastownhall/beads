@@ -104,6 +104,204 @@ func TestEnsureProxiedServerConfig_ReusesExistingConfig(t *testing.T) {
 	assert.Equal(t, existing, got, "existing config.yaml must be reused unchanged")
 }
 
+// TestIsManagedProxiedServerConfig covers the marker-detection helper in
+// isolation from any file I/O.
+func TestIsManagedProxiedServerConfig(t *testing.T) {
+	managed, err := renderProxiedServerConfig(1234, true)
+	require.NoError(t, err)
+	assert.True(t, isManagedProxiedServerConfig(managed))
+
+	assert.False(t, isManagedProxiedServerConfig([]byte("listener:\n  port: 1234\n")))
+	assert.False(t, isManagedProxiedServerConfig(nil))
+}
+
+// TestReconcileManagedProxiedServerConfig_AddsKey covers the (a) direction
+// (gastownhall/beads#4986 round 2 major 2): a Beads-managed config that
+// predates archive_level support gains the key once the resolved dolt
+// supports it, with every other field (including port) preserved via the
+// servercfg struct round trip.
+func TestReconcileManagedProxiedServerConfig_AddsKey(t *testing.T) {
+	before, err := renderProxiedServerConfig(45678, false)
+	require.NoError(t, err)
+	require.NotContains(t, string(before), "archive_level")
+
+	after, changed, err := reconcileManagedProxiedServerConfig(before, true)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.True(t, isManagedProxiedServerConfig(after), "marker must survive reconcile")
+
+	cfg, err := servercfg.NewYamlConfig(after)
+	require.NoError(t, err)
+	assert.Equal(t, 45678, cfg.Port(), "port must be preserved")
+	gc := cfg.AutoGCBehavior()
+	require.NotNil(t, gc)
+	assert.Equal(t, 0, gc.ArchiveLevel())
+	assert.True(t, gc.Enable())
+}
+
+// TestReconcileManagedProxiedServerConfig_StripsKey covers the (b)
+// direction: a Beads-managed config written with archive_level set loses
+// the key when the resolved dolt no longer supports it (e.g. a downgrade),
+// so a later yaml.UnmarshalStrict on that older dolt cannot hard-fail.
+func TestReconcileManagedProxiedServerConfig_StripsKey(t *testing.T) {
+	before, err := renderProxiedServerConfig(45678, true)
+	require.NoError(t, err)
+	require.Contains(t, string(before), "archive_level")
+
+	after, changed, err := reconcileManagedProxiedServerConfig(before, false)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.NotContains(t, string(after), "archive_level")
+	assert.NotContains(t, string(after), "auto_gc_behavior")
+
+	cfg, err := servercfg.NewYamlConfig(after)
+	require.NoError(t, err)
+	assert.Equal(t, 45678, cfg.Port(), "port must be preserved")
+	assert.Nil(t, cfg.AutoGCBehavior())
+}
+
+// TestReconcileManagedProxiedServerConfig_NoOpWhenAlreadyAligned asserts
+// reconcile reports changed=false (and ensureProxiedServerConfig therefore
+// skips the rewrite) when the config already matches the probe result —
+// the steady-state case on every ordinary bd invocation.
+func TestReconcileManagedProxiedServerConfig_NoOpWhenAlreadyAligned(t *testing.T) {
+	t.Run("already has key, still supported", func(t *testing.T) {
+		body, err := renderProxiedServerConfig(1, true)
+		require.NoError(t, err)
+		after, changed, err := reconcileManagedProxiedServerConfig(body, true)
+		require.NoError(t, err)
+		assert.False(t, changed)
+		assert.Equal(t, body, after)
+	})
+	t.Run("already lacks key, still unsupported", func(t *testing.T) {
+		body, err := renderProxiedServerConfig(1, false)
+		require.NoError(t, err)
+		after, changed, err := reconcileManagedProxiedServerConfig(body, false)
+		require.NoError(t, err)
+		assert.False(t, changed)
+		assert.Equal(t, body, after)
+	})
+}
+
+// TestEnsureProxiedServerConfig_ManagedWithoutKeyGainsIt is the
+// ensureProxiedServerConfig-level counterpart to
+// TestReconcileManagedProxiedServerConfig_AddsKey: an upgraded install
+// whose config.yaml predates this fix gets archive_level added in place on
+// the very next command, without a manual regenerate.
+func TestEnsureProxiedServerConfig_ManagedWithoutKeyGainsIt(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	cfgPath := filepath.Join(root, "config.yaml")
+
+	seed, err := renderProxiedServerConfig(45678, false)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, seed, 0o600))
+
+	path, err := ensureProxiedServerConfig(beadsDir, true)
+	require.NoError(t, err)
+	assert.Equal(t, cfgPath, path)
+
+	got, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(got), "archive_level: 0")
+
+	cfg, err := servercfg.NewYamlConfig(got)
+	require.NoError(t, err)
+	assert.Equal(t, 45678, cfg.Port(), "port must survive the rewrite")
+}
+
+// TestEnsureProxiedServerConfig_ManagedWithKeyOnOldBinaryLosesIt is the
+// ensureProxiedServerConfig-level counterpart to
+// TestReconcileManagedProxiedServerConfig_StripsKey: a dolt downgrade after
+// a managed config already set archive_level must not hard-fail server
+// startup on the next command.
+func TestEnsureProxiedServerConfig_ManagedWithKeyOnOldBinaryLosesIt(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	cfgPath := filepath.Join(root, "config.yaml")
+
+	seed, err := renderProxiedServerConfig(45678, true)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, seed, 0o600))
+
+	path, err := ensureProxiedServerConfig(beadsDir, false)
+	require.NoError(t, err)
+	assert.Equal(t, cfgPath, path)
+
+	got, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(got), "archive_level")
+
+	cfg, err := servercfg.NewYamlConfig(got)
+	require.NoError(t, err)
+	assert.Equal(t, 45678, cfg.Port(), "port must survive the rewrite")
+}
+
+// TestEnsureProxiedServerConfig_CustomConfigUntouchedWithWarning asserts a
+// genuinely user-owned config (env var / sidecar custom path) is NEVER
+// rewritten, and instead gets a one-line stderr warning when it lacks
+// archive_level on a capable binary.
+func TestEnsureProxiedServerConfig_CustomConfigUntouchedWithWarning(t *testing.T) {
+	t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+	bd := t.TempDir()
+
+	customDir := t.TempDir()
+	customPath := filepath.Join(customDir, "my-server.yaml")
+	before, err := renderProxiedServerConfig(54321, false)
+	require.NoError(t, err)
+	// Strip the marker: this is meant to look like a genuinely hand-written
+	// custom config, not one Beads happened to generate elsewhere.
+	before = before[len(managedProxiedServerConfigMarker):]
+	require.NoError(t, os.WriteFile(customPath, before, 0o600))
+
+	writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: customPath})
+
+	var got string
+	var path string
+	got = captureStderr(t, func() {
+		path, err = ensureProxiedServerConfig(bd, true)
+	})
+	require.NoError(t, err)
+	assert.Equal(t, customPath, path)
+
+	after, err := os.ReadFile(customPath)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "custom config must never be rewritten")
+	assert.Contains(t, got, "not Beads-managed")
+	assert.Contains(t, got, customPath)
+}
+
+// TestEnsureProxiedServerConfig_PreMarkerDefaultConfigUntouchedWithWarning
+// covers the other unmanaged case: a default-path config.yaml written by a
+// Beads version that predates the marker. Same contract as the custom-path
+// case — never rewritten, only warned about — since Beads cannot prove it
+// owns the file.
+func TestEnsureProxiedServerConfig_PreMarkerDefaultConfigUntouchedWithWarning(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	cfgPath := filepath.Join(root, "config.yaml")
+
+	seed, err := renderProxiedServerConfig(45678, false)
+	require.NoError(t, err)
+	seed = seed[len(managedProxiedServerConfigMarker):] // simulate a pre-marker file
+	require.NoError(t, os.WriteFile(cfgPath, seed, 0o600))
+
+	var path string
+	got := captureStderr(t, func() {
+		path, err = ensureProxiedServerConfig(beadsDir, true)
+	})
+	require.NoError(t, err)
+	assert.Equal(t, cfgPath, path)
+
+	after, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, seed, after, "pre-marker default config must never be rewritten")
+	assert.Contains(t, got, "not Beads-managed")
+}
+
 func TestProxiedServerPathHelpers(t *testing.T) {
 	bd := "/tmp/some/.beads"
 	assert.Equal(t, "/tmp/some/.beads/dolt", proxiedServerRoot(bd))
