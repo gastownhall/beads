@@ -29,7 +29,17 @@ Commands:
 
 DoltHub is recommended for cloud backup:
   bd backup init https://doltremoteapi.dolthub.com/<user>/<repo>
-  Set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD for authentication.`,
+  Set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD for authentication.
+
+Auto-backup default:
+  When backup.enabled is unset, auto-backup turns ON in embedded mode if a
+  git remote exists, and stays OFF in sql-server / shared-server mode. In
+  server mode many bd clients share one Dolt server, and each would register
+  a server-side backup remote under the same name pointing at its own local
+  dir and full-sync the whole database — a self-amplifying storm. To back up
+  a shared server, run 'bd backup' explicitly (or set backup.enabled=true and
+  coordinate destinations). 'bd config get backup.enabled' shows the effective
+  value and its source.`,
 	GroupID: "sync",
 }
 
@@ -37,6 +47,9 @@ var backupStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show last backup status",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("backup status is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("backup-status")
 		defer func() {
 			if c := metrics.Global(); c != nil {

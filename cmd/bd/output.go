@@ -81,7 +81,7 @@ func emitEnvelopeDeprecation() {
 	fmt.Fprintf(os.Stderr,
 		"NOTE: bd --json output format will change in v2.0. "+
 			"Set BD_JSON_ENVELOPE=1 to opt in early. "+
-			"See docs/JSON_SCHEMA.md for migration details.\n")
+			"See docs/reference/json-schema.md for migration details.\n")
 }
 
 func outputJSONError(err error, code string) error {

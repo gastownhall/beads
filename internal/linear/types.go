@@ -63,6 +63,7 @@ type Client struct {
 	AuthMode       AuthMode
 	TokenManager   *OAuthTokenManager
 	RateLimitFloor int // Minimum remaining quota before circuit breaker trips (0 = use DefaultRateLimitFloor)
+	rateLimitState *rateLimitState
 }
 
 // RateLimitInfo captures rate-limit state from Linear API response headers.

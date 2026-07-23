@@ -344,6 +344,7 @@ func reconcileAuthoritativeServerMetadata(cfg *configfile.Config, databases []se
 			schemaCandidates = append(schemaCandidates, db)
 		}
 	}
+	current, hasCurrent := byName[cfg.GetDoltDatabase()]
 
 	if cfg.ProjectID != "" {
 		var matches []serverDatabaseMetadata
@@ -365,14 +366,26 @@ func reconcileAuthoritativeServerMetadata(cfg *configfile.Config, databases []se
 			)
 		}
 		if len(matches) == 1 && cfg.DoltDatabase != matches[0].Name {
+			// Safety guard: when the configured database has its own project_id that
+			// disagrees with metadata.json, and a different database matches the local
+			// project_id, we have conflicting identity signals. Auto-switching databases
+			// here can silently attach this workspace to another project.
+			if hasCurrent && current.HasSchema && current.ProjectID != "" && current.ProjectID != cfg.ProjectID {
+				return false, "", fmt.Errorf(
+					"conflicting project identity: metadata.json project_id %s matches database %q, but configured database %q reports project_id %s",
+					cfg.ProjectID,
+					matches[0].Name,
+					current.Name,
+					current.ProjectID,
+				)
+			}
 			from := cfg.GetDoltDatabase()
 			cfg.DoltDatabase = matches[0].Name
 			return true, fmt.Sprintf("repaired dolt_database: %q -> %q using project_id %s", from, matches[0].Name, cfg.ProjectID), nil
 		}
 	}
 
-	current, ok := byName[cfg.GetDoltDatabase()]
-	if ok && current.HasSchema && current.ProjectID != "" && cfg.ProjectID != current.ProjectID {
+	if hasCurrent && current.HasSchema && current.ProjectID != "" && cfg.ProjectID != current.ProjectID {
 		from := cfg.ProjectID
 		cfg.ProjectID = current.ProjectID
 		if from == "" {
@@ -381,7 +394,10 @@ func reconcileAuthoritativeServerMetadata(cfg *configfile.Config, databases []se
 		return true, fmt.Sprintf("repaired project_id: %s -> %s from database %q", from, current.ProjectID, current.Name), nil
 	}
 
-	if cfg.ProjectID == "" && len(schemaCandidates) == 1 {
+	// In shared-server mode, a sole schema candidate can belong to a different
+	// workspace. Without a local project_id anchor, auto-adopting that database
+	// can redirect this workspace to another project's data.
+	if cfg.ProjectID == "" && len(schemaCandidates) == 1 && !doltserver.IsSharedServerMode() {
 		candidate := schemaCandidates[0]
 		var repairs []string
 		if cfg.DoltDatabase != candidate.Name {

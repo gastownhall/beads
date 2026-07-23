@@ -15,7 +15,7 @@
 //	}
 //	cmd := rc.GitCmd(ctx, "status")  // Runs in beads repo, not CWD
 //
-// See docs/REPO_CONTEXT.md for detailed documentation.
+// See engdocs/REPO_CONTEXT.md for detailed documentation.
 package beads
 
 import (

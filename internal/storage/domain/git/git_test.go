@@ -159,6 +159,18 @@ func (s *testSuite) TestCommit_NoVerifyBypassesHook() {
 	s.True(result.DidCommit)
 }
 
+func (s *testSuite) TestCommit_SkipHooksBypassesPrepareCommitMsgHook() {
+	s.gitInit()
+	hookPath := filepath.Join(s.tmpDir, ".git", "hooks", "prepare-commit-msg")
+	s.Require().NoError(os.WriteFile(hookPath, []byte("#!/bin/sh\nexit 1\n"), 0755)) //nolint:gosec // test hook
+	s.writeFile("a.txt", "x")
+	s.Require().NoError(s.repo.Add(s.Ctx(), "a.txt"))
+
+	result, err := s.repo.Commit(s.Ctx(), domain.GitCommitParams{Message: "test", SkipHooks: true})
+	s.Require().NoError(err)
+	s.True(result.DidCommit)
+}
+
 func (s *testSuite) TestCommit_NothingToCommitDidCommitFalse() {
 	s.gitInit()
 	s.writeFile("a.txt", "x")

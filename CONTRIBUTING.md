@@ -10,7 +10,7 @@ Thank you for your interest in contributing to bd! This document provides guidel
 - Git
 - A C compiler (CGO is required for the embedded Dolt database)
 - (Optional) golangci-lint for local linting
-- ICU headers are **not required** for building -- see [docs/ICU-POLICY.md](docs/ICU-POLICY.md)
+- ICU headers are **not required** for building -- see [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md)
 
 ### Getting Started
 
@@ -83,7 +83,7 @@ go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 golangci-lint run ./...
 ```
 
-**Note**: The linter currently reports ~100 warnings. These are documented false positives and idiomatic Go patterns (deferred cleanup, Cobra interface requirements, etc.). See [docs/LINTING.md](docs/LINTING.md) for details. When contributing, focus on avoiding *new* issues rather than the baseline warnings.
+**Note**: The linter currently reports ~100 warnings. These are documented false positives and idiomatic Go patterns (deferred cleanup, Cobra interface requirements, etc.). See [engdocs/LINTING.md](engdocs/LINTING.md) for details. When contributing, focus on avoiding *new* issues rather than the baseline warnings.
 
 CI will automatically run linting on all pull requests.
 
@@ -92,7 +92,7 @@ CI will automatically run linting on all pull requests.
 ### Project Scope
 
 Before adding new feature surface area, read
-[docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md). Beads owns issue tracking
+[engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md). Beads owns issue tracking
 primitives. It should not encode orchestration-layer policy, become a storage
 engine, or expand the database schema when issue metadata is sufficient.
 
@@ -139,9 +139,9 @@ If you are contributing code that involves AI decision-making or orchestration, 
 
 ## Testing Guidelines
 
-For how to run tests, see [docs/TESTING.md](docs/TESTING.md). For what to
+For how to run tests, see [engdocs/TESTING.md](engdocs/TESTING.md). For what to
 test and why (the test pyramid and tiering we follow), see
-[docs/TESTING_PHILOSOPHY.md](docs/TESTING_PHILOSOPHY.md).
+[engdocs/TESTING_PHILOSOPHY.md](engdocs/TESTING_PHILOSOPHY.md).
 
 ### Before Opening a PR
 
@@ -152,11 +152,11 @@ test and why (the test pyramid and tiering we follow), see
   files, etc.) in test teardown.
 - If you hit a test failure unrelated to your change, don't silently skip
   it -- check `.test-skip` and file an issue if it's not already tracked
-  (see [docs/TESTING.md](docs/TESTING.md#known-broken-tests)).
+  (see [engdocs/TESTING.md](engdocs/TESTING.md#known-broken-tests)).
 - Ensure CI passes (`make ci-pr-core`, `make ci-pr-policy`, `make
   ci-pr-lint`) before requesting review.
 - If your change touches ICU or build tags, see
-  [docs/ICU-POLICY.md](docs/ICU-POLICY.md) for the policy and rationale.
+  [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md) for the policy and rationale.
 
 ## Documentation
 

@@ -64,7 +64,10 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error {
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = 25 * time.Millisecond
-	bo.MaxElapsedTime = 15 * time.Second
+	// This budget must outwait a peer holding the migration lock through a
+	// full cold-start migration pass (every migration + a Dolt commit each),
+	// not just a transient blip — it grows as migrations accumulate.
+	bo.MaxElapsedTime = 60 * time.Second
 	return backoff.Retry(func() error {
 		conn, err := p.db.Conn(ctx)
 		if err != nil {
@@ -93,13 +96,15 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 	}, backoff.WithContext(bo, ctx))
 }
 
-func buildDSN(ep proxy.Endpoint, database, user, password string) string {
+func buildDSN(ep proxy.Endpoint, database, user, password, tlsConfigName string) string {
 	return util.DoltServerDSN{
-		Host:     ep.Host,
-		Port:     ep.Port,
-		User:     user,
-		Password: password,
-		Database: database,
+		Host:            ep.Host,
+		Port:            ep.Port,
+		User:            user,
+		Password:        password,
+		Database:        database,
+		TLSConfigName:   tlsConfigName,
+		ClientFoundRows: true,
 	}.String()
 }
 
@@ -114,8 +119,8 @@ func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	return conn, nil
 }
 
-func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword string) (UnitOfWorkProvider, error) {
-	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword))
+func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword, tlsConfigName string) (UnitOfWorkProvider, error) {
+	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +139,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 		return nil, fmt.Errorf("uow: close init db: %w", err)
 	}
 
-	dbConn, err := openDB(ctx, buildDSN(ep, database, rootUser, rootPassword))
+	dbConn, err := openDB(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
 	}

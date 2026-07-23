@@ -1,6 +1,6 @@
 ---
 description: Epic management commands
-argument-hint: [command]
+argument-hint: "[command]"
 ---
 
 Manage epics (large features composed of multiple issues).

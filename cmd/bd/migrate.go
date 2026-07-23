@@ -25,10 +25,14 @@ var migrateCmd = &cobra.Command{
 Without subcommand, checks and updates database metadata to current version.
 
 Subcommands:
-  hooks       Plan git hook migration to marker-managed format
-  issues      Move issues between repositories
-  schema      Apply pending schema migrations (idempotent)
-  sync        Set up sync.branch workflow for multi-clone setups
+  hooks                            Plan git hook migration to marker-managed format
+  issues                           Move issues between repositories
+  schema                           Apply pending schema migrations (idempotent)
+  sync                             Set up sync.branch workflow for multi-clone setups
+  from-server-to-proxied-server           [EXPERIMENTAL] Switch server mode to proxied-server mode
+  from-proxied-server-to-server           [EXPERIMENTAL] Switch proxied-server mode to server mode
+  from-shared-server-to-proxied-server    [EXPERIMENTAL] Switch shared-server mode to proxied-server mode
+  from-proxied-server-to-shared-server    [EXPERIMENTAL] Switch proxied-server mode to shared-server mode
 
 On a remote-backed database with pending schema migrations bd refuses to
 migrate in place (#4259): migrating two clones independently forks the schema
@@ -40,6 +44,9 @@ BD_ALLOW_REMOTE_MIGRATE=1 remains supported for scripted/CI use.
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("migrate is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("migrate")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -742,6 +749,9 @@ Example:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("migrate sync is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("migrate-sync")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -773,6 +783,9 @@ Example:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("migrate schema is not supported in proxied-server mode")
+		}
 		CheckReadonly("migrate schema")
 
 		evt := metrics.NewCommandEvent("migrate-schema")
@@ -811,6 +824,20 @@ func init() {
 	// same isForcedMigrate check in main.go's PersistentPreRunE.
 	migrateSchemaCmd.Flags().Bool("force", false, "Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)")
 	migrateCmd.AddCommand(migrateSchemaCmd)
+
+	migrateToProxiedServerCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
+	migrateToProxiedServerCmd.Flags().Duration("idle-timeout", 0, "Proxy idle timeout; omit for the 30s default, 0 for indefinite uptime")
+	migrateCmd.AddCommand(migrateToProxiedServerCmd)
+
+	migrateSharedToProxiedServerCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
+	migrateSharedToProxiedServerCmd.Flags().Duration("idle-timeout", 0, "Proxy idle timeout; omit for the 30s default, 0 for indefinite uptime")
+	migrateCmd.AddCommand(migrateSharedToProxiedServerCmd)
+
+	migrateToServerCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
+	migrateCmd.AddCommand(migrateToServerCmd)
+
+	migrateToSharedServerCmd.Flags().Bool("dry-run", false, "Show what would be done without making changes")
+	migrateCmd.AddCommand(migrateToSharedServerCmd)
 
 	rootCmd.AddCommand(migrateCmd)
 }

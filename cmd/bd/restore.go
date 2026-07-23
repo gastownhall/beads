@@ -35,6 +35,9 @@ before snapshot archiving), restore falls back to a best-effort reconstruction
 from Dolt version history, which can only be displayed, not applied.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("restore is not supported in proxied-server mode")
+		}
 		issueID := args[0]
 		ctx := rootCtx
 

@@ -39,22 +39,6 @@ func runCreateProxiedServer(cmd *cobra.Command, ctx context.Context, in createIn
 	}
 }
 
-func proxiedOpenUOW(ctx context.Context) (uow.UnitOfWork, domain.CreateContext, error) {
-	if uowProvider == nil {
-		return nil, domain.CreateContext{}, HandleError("proxied-server UOW provider not initialized")
-	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return nil, domain.CreateContext{}, HandleError("open unit of work: %v", err)
-	}
-	cctx, err := uw.ConfigUseCase().LoadCreateContext(ctx)
-	if err != nil {
-		uw.Close(ctx)
-		return nil, domain.CreateContext{}, HandleError("load create context: %v", err)
-	}
-	return uw, cctx, nil
-}
-
 func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInput) error {
 	if err := runCreateLintIssue(in); err != nil {
 		return err
@@ -73,12 +57,13 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		return HandleError("%v", err)
 	}
 
+	if uowProvider == nil {
+		return HandleError("proxied-server UOW provider not initialized")
+	}
+
 	if in.dryRun {
 		previewLabels := in.labels
 		if in.parentID != "" {
-			if uowProvider == nil {
-				return HandleError("proxied-server UOW provider not initialized")
-			}
 			dryUW, err := uowProvider.NewUOW(ctx)
 			if err != nil {
 				return HandleError("open unit of work: %v", err)
@@ -108,73 +93,77 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 		return nil
 	}
 
-	uw, cctx, err := proxiedOpenUOW(ctx)
-	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	customTypes := resolveProxiedCustomTypes(cctx.CustomTypes)
-	if in.issueType != "" {
-		it := types.IssueType(in.issueType).Normalize()
-		if !it.IsValidWithCustom(customTypes) {
-			return HandleError("invalid type %q (allowed: built-ins plus configured custom types)", in.issueType)
-		}
-	}
-	if in.status != "" {
-		customStatuses, err := uw.ConfigUseCase().GetCustomStatuses(ctx)
-		if err != nil {
-			return HandleError("failed to get custom statuses: %v", err)
-		}
-		if !types.Status(in.status).IsValidWithCustom(types.CustomStatusNames(customStatuses)) {
-			return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", in.status)
-		}
-	}
-	if in.explicitID != "" {
-		effectivePrefix := overlayYAMLPrefix(cctx.IssuePrefix)
-		if err := validation.ValidateIDPrefixAllowed(in.explicitID, effectivePrefix, cctx.AllowedPrefixes, in.force); err != nil {
-			return HandleError("%v", err)
-		}
-	}
-
 	issue := buildCreateIssueFromInput(in)
-	params := domain.CreateIssueParams{
-		Issue:                   issue,
-		ExplicitID:              in.explicitID,
-		ParentID:                in.parentID,
-		Labels:                  in.labels,
-		InheritLabelsFromParent: !in.noInheritLabels && in.parentID != "",
-		Dependencies:            deps,
-		WaitsFor:                waitsFor,
-		DiscoveredFromParent:    discoveredFromParent(in.deps),
-		ForcePrefix:             in.force,
-	}
 
-	var result domain.CreateIssueResult
-	if issue.Ephemeral {
-		result, err = uw.IssueUseCase().CreateWisp(ctx, params, in.createdBy)
-	} else {
-		result, err = uw.IssueUseCase().CreateIssue(ctx, params, in.createdBy)
-	}
+	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*types.Issue, string, error) {
+		cctx, err := uw.ConfigUseCase().LoadCreateContext(ctx)
+		if err != nil {
+			return nil, "", fmt.Errorf("load create context: %w", err)
+		}
+
+		customTypes := resolveProxiedCustomTypes(cctx.CustomTypes)
+		if in.issueType != "" {
+			it := types.IssueType(in.issueType).Normalize()
+			if !it.IsValidWithCustom(customTypes) {
+				return nil, "", fmt.Errorf("invalid type %q (allowed: built-ins plus configured custom types)", in.issueType)
+			}
+		}
+		if in.status != "" {
+			customStatuses, err := uw.ConfigUseCase().GetCustomStatuses(ctx)
+			if err != nil {
+				return nil, "", fmt.Errorf("failed to get custom statuses: %w", err)
+			}
+			if !types.Status(in.status).IsValidWithCustom(types.CustomStatusNames(customStatuses)) {
+				return nil, "", fmt.Errorf("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", in.status)
+			}
+		}
+		if in.explicitID != "" {
+			effectivePrefix := overlayYAMLPrefix(cctx.IssuePrefix)
+			if err := validation.ValidateIDPrefixAllowed(in.explicitID, effectivePrefix, cctx.AllowedPrefixes, in.force); err != nil {
+				return nil, "", err
+			}
+		}
+
+		params := domain.CreateIssueParams{
+			Issue:                   issue,
+			ExplicitID:              in.explicitID,
+			ParentID:                in.parentID,
+			Labels:                  in.labels,
+			InheritLabelsFromParent: !in.noInheritLabels && in.parentID != "",
+			Dependencies:            deps,
+			WaitsFor:                waitsFor,
+			DiscoveredFromParent:    discoveredFromParent(in.deps),
+			ForcePrefix:             in.force,
+		}
+
+		var result domain.CreateIssueResult
+		var createErr error
+		if issue.Ephemeral || issue.NoHistory {
+			result, createErr = uw.IssueUseCase().CreateWisp(ctx, params, in.createdBy)
+		} else {
+			result, createErr = uw.IssueUseCase().CreateIssue(ctx, params, in.createdBy)
+		}
+		if createErr != nil {
+			return nil, "", createErr
+		}
+
+		return result.Issue, fmt.Sprintf("bd: create %s", result.Issue.ID), nil
+	})
 	if err != nil {
 		return HandleError("%v", err)
 	}
 
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: create %s", result.Issue.ID)); err != nil && !isDoltNothingToCommit(err) {
-		return HandleError("commit: %v", err)
-	}
-
 	switch {
 	case in.jsonOutput:
-		if err := outputJSON(result.Issue); err != nil {
+		if err := outputJSON(res); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
 	case in.silent:
-		fmt.Println(result.Issue.ID)
+		fmt.Println(res.ID)
 	default:
-		fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(result.Issue.ID, result.Issue.Title))
-		fmt.Printf("  Priority: P%d\n", result.Issue.Priority)
-		fmt.Printf("  Status: %s\n", result.Issue.Status)
+		fmt.Printf("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(res.ID, res.Title))
+		fmt.Printf("  Priority: P%d\n", res.Priority)
+		fmt.Printf("  Status: %s\n", res.Status)
 	}
 	return nil
 }
@@ -267,70 +256,76 @@ func runCreateProxiedMarkdown(_ *cobra.Command, ctx context.Context, in createIn
 		builds = append(builds, templateBuild{template: t, deps: deps})
 	}
 
-	uw, cctx, err := proxiedOpenUOW(ctx)
-	if err != nil {
-		return err
+	if uowProvider == nil {
+		return HandleError("proxied-server UOW provider not initialized")
 	}
-	defer uw.Close(ctx)
 
-	customTypes := resolveProxiedCustomTypes(cctx.CustomTypes)
-	for _, b := range builds {
-		if b.template.IssueType == "" {
-			continue
+	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) ([]*types.Issue, string, error) {
+		cctx, err := uw.ConfigUseCase().LoadCreateContext(ctx)
+		if err != nil {
+			return nil, "", fmt.Errorf("load create context: %w", err)
 		}
-		if !b.template.IssueType.IsValidWithCustom(customTypes) {
-			return HandleError("template %q: invalid type %q", b.template.Title, b.template.IssueType)
+
+		customTypes := resolveProxiedCustomTypes(cctx.CustomTypes)
+		for _, b := range builds {
+			if b.template.IssueType == "" {
+				continue
+			}
+			if !b.template.IssueType.IsValidWithCustom(customTypes) {
+				return nil, "", fmt.Errorf("template %q: invalid type %q", b.template.Title, b.template.IssueType)
+			}
 		}
-	}
 
-	paramsList := make([]domain.CreateIssueParams, 0, len(builds))
-	for _, b := range builds {
-		t := b.template
-		paramsList = append(paramsList, domain.CreateIssueParams{
-			Issue: &types.Issue{
-				Title:              t.Title,
-				Description:        t.Description,
-				Design:             t.Design,
-				AcceptanceCriteria: t.AcceptanceCriteria,
-				Status:             types.StatusOpen,
-				Priority:           t.Priority,
-				IssueType:          t.IssueType,
-				Assignee:           t.Assignee,
-				Ephemeral:          in.ephemeral,
-				NoHistory:          in.noHistory,
-				MolType:            in.molType,
-				CreatedBy:          in.createdBy,
-				Owner:              in.owner,
-			},
-			Labels:       t.Labels,
-			Dependencies: b.deps,
-		})
-	}
+		paramsList := make([]domain.CreateIssueParams, 0, len(builds))
+		for _, b := range builds {
+			t := b.template
+			paramsList = append(paramsList, domain.CreateIssueParams{
+				Issue: &types.Issue{
+					Title:              t.Title,
+					Description:        t.Description,
+					Design:             t.Design,
+					AcceptanceCriteria: t.AcceptanceCriteria,
+					Status:             types.StatusOpen,
+					Priority:           t.Priority,
+					IssueType:          t.IssueType,
+					Assignee:           t.Assignee,
+					Ephemeral:          in.ephemeral,
+					NoHistory:          in.noHistory,
+					MolType:            in.molType,
+					CreatedBy:          in.createdBy,
+					Owner:              in.owner,
+				},
+				Labels:       t.Labels,
+				Dependencies: b.deps,
+			})
+		}
 
-	var result domain.CreateIssuesResult
-	if in.ephemeral {
-		result, err = uw.IssueUseCase().CreateWisps(ctx, paramsList, in.createdBy)
-	} else {
-		result, err = uw.IssueUseCase().CreateIssues(ctx, paramsList, in.createdBy)
-	}
+		var result domain.CreateIssuesResult
+		var createErr error
+		if in.ephemeral || in.noHistory {
+			result, createErr = uw.IssueUseCase().CreateWisps(ctx, paramsList, in.createdBy)
+		} else {
+			result, createErr = uw.IssueUseCase().CreateIssues(ctx, paramsList, in.createdBy)
+		}
+		if createErr != nil {
+			return nil, "", fmt.Errorf("creating issues from markdown: %w", createErr)
+		}
+
+		return result.Issues, fmt.Sprintf("bd: create %d issue(s) from %s", len(result.Issues), in.markdownFile), nil
+	})
 	if err != nil {
-		return HandleError("creating issues from markdown: %v", err)
-	}
-
-	commitMsg := fmt.Sprintf("bd: create %d issue(s) from %s", len(result.Issues), in.markdownFile)
-	if err := uow.CommitWithRetries(ctx, uw, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-		return HandleError("commit: %v", err)
+		return HandleError("%v", err)
 	}
 
 	if in.jsonOutput {
-		if err := outputJSON(result.Issues); err != nil {
+		if err := outputJSON(res); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
 		return nil
 	}
 
-	fmt.Printf("%s Created %d issues from %s:\n", ui.RenderPass("✓"), len(result.Issues), in.markdownFile)
-	for _, issue := range result.Issues {
+	fmt.Printf("%s Created %d issues from %s:\n", ui.RenderPass("✓"), len(res), in.markdownFile)
+	for _, issue := range res {
 		fmt.Printf("  %s: %s [P%d, %s]\n", issue.ID, issue.Title, issue.Priority, issue.IssueType)
 	}
 	return nil
@@ -383,10 +378,11 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 		return HandleError("parsing graph plan: %v", err)
 	}
 
+	if uowProvider == nil {
+		return HandleError("proxied-server UOW provider not initialized")
+	}
+
 	if in.dryRun {
-		if uowProvider == nil {
-			return HandleError("proxied-server UOW provider not initialized")
-		}
 		dryUW, err := uowProvider.NewUOW(ctx)
 		if err != nil {
 			return HandleError("open unit of work: %v", err)
@@ -405,29 +401,9 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 		return nil
 	}
 
-	uw, cctx, err := proxiedOpenUOW(ctx)
-	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	if err := validateGraphApplyPlan(&plan, resolveProxiedCustomTypes(cctx.CustomTypes)); err != nil {
-		return HandleError("invalid graph plan: %v", err)
-	}
-
 	domainPlan, err := buildDomainGraphPlan(plan, in)
 	if err != nil {
 		return err
-	}
-
-	var result domain.GraphApplyResult
-	if in.ephemeral {
-		result, err = uw.IssueUseCase().ApplyWispGraph(ctx, domainPlan, in.createdBy)
-	} else {
-		result, err = uw.IssueUseCase().ApplyIssueGraph(ctx, domainPlan, in.createdBy)
-	}
-	if err != nil {
-		return HandleError("graph create: %v", err)
 	}
 
 	commitMsg := plan.CommitMessage
@@ -435,26 +411,49 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 		commitMsg = fmt.Sprintf("bd: graph-apply %d nodes", len(plan.Nodes))
 	}
 
-	if err := uow.CommitWithRetries(ctx, uw, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-		return HandleError("commit: %v", err)
+	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (map[string]string, string, error) {
+		cctx, err := uw.ConfigUseCase().LoadCreateContext(ctx)
+		if err != nil {
+			return nil, "", fmt.Errorf("load create context: %w", err)
+		}
+
+		if err := validateGraphApplyPlan(&plan, resolveProxiedCustomTypes(cctx.CustomTypes)); err != nil {
+			return nil, "", fmt.Errorf("invalid graph plan: %w", err)
+		}
+
+		var result domain.GraphApplyResult
+		var applyErr error
+		if in.ephemeral {
+			result, applyErr = uw.IssueUseCase().ApplyWispGraph(ctx, domainPlan, in.createdBy)
+		} else {
+			result, applyErr = uw.IssueUseCase().ApplyIssueGraph(ctx, domainPlan, in.createdBy)
+		}
+		if applyErr != nil {
+			return nil, "", fmt.Errorf("graph create: %w", applyErr)
+		}
+
+		return result.IDs, commitMsg, nil
+	})
+	if err != nil {
+		return HandleError("%v", err)
 	}
 
 	if in.jsonOutput {
-		if err := outputJSON(GraphApplyResult{IDs: result.IDs}); err != nil {
+		if err := outputJSON(GraphApplyResult{IDs: res}); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		}
 		return nil
 	}
 
-	fmt.Printf("Created %d issues\n", len(result.IDs))
-	keys := make([]string, 0, len(result.IDs))
-	for k := range result.IDs {
+	fmt.Printf("Created %d issues\n", len(res))
+	keys := make([]string, 0, len(res))
+	for k := range res {
 		keys = append(keys, k)
 	}
 
 	sort.Strings(keys)
 	for _, k := range keys {
-		fmt.Printf("  %s -> %s\n", k, result.IDs[k])
+		fmt.Printf("  %s -> %s\n", k, res[k])
 	}
 	return nil
 }

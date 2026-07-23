@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -535,5 +537,124 @@ func TestGraphApplyParentDepPairs(t *testing.T) {
 	}
 	if pairs[graphApplyDepPairKey("bd-root", "bd-child")] {
 		t.Fatal("unexpected reverse parent dep pair")
+	}
+}
+
+// TestEmitGraphApplyDryRun_JSON verifies that the dry-run path emits valid
+// JSON with the expected structure when jsonOutput is set. This exercises the
+// code path that `bd create --graph --dry-run --json` takes, confirming the
+// GraphApplyDryRun struct serializes correctly and that no persistence occurs
+// (emitGraphApplyDryRun only formats output — it never touches the store).
+// Regression coverage for GH#3893.
+func TestEmitGraphApplyDryRun_JSON(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "root", Title: "Root epic", Type: "epic"},
+			{Key: "c1", Title: "First child", ParentKey: "root"},
+			{Key: "c2", Title: "Second child", ParentKey: "root"},
+		},
+		Edges: []GraphApplyEdge{
+			{FromKey: "c1", ToKey: "c2", Type: "blocks"},
+		},
+	}
+
+	oldJSON := jsonOutput
+	jsonOutput = true
+	defer func() { jsonOutput = oldJSON }()
+
+	out := captureStdout(t, func() error {
+		emitGraphApplyDryRun(plan)
+		return nil
+	})
+
+	var result GraphApplyDryRun
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("dry-run JSON output is not valid JSON: %v\nraw: %s", err, out)
+	}
+
+	if !result.DryRun {
+		t.Error("expected dry_run=true in JSON output")
+	}
+	if result.NodeCount != 3 {
+		t.Errorf("node_count = %d, want 3", result.NodeCount)
+	}
+	if result.EdgeCount != 1 {
+		t.Errorf("edge_count = %d, want 1", result.EdgeCount)
+	}
+	if result.ParentDeps != 2 {
+		t.Errorf("parent_deps = %d, want 2", result.ParentDeps)
+	}
+	if len(result.Nodes) != 3 {
+		t.Fatalf("nodes length = %d, want 3", len(result.Nodes))
+	}
+	// Verify node details are populated correctly.
+	rootRow := result.Nodes[0]
+	if rootRow.Key != "root" || rootRow.Title != "Root epic" || rootRow.Type != "epic" {
+		t.Errorf("root node row = %+v, want key=root title=Root epic type=epic", rootRow)
+	}
+	c1Row := result.Nodes[1]
+	if c1Row.ParentKey != "root" {
+		t.Errorf("c1 parent_key = %q, want %q", c1Row.ParentKey, "root")
+	}
+	// Default priority is P2.
+	if rootRow.Priority != 2 {
+		t.Errorf("root priority = %d, want 2 (default)", rootRow.Priority)
+	}
+}
+
+// TestCreateIssuesFromGraph_DryRunDoesNotPersist verifies that
+// createIssuesFromGraph with dryRun=true produces dry-run output and does NOT
+// call executeGraphApply. Since store is nil (no database initialized), any
+// attempt to persist would panic; a successful dry-run completion proves the
+// guard is effective. Regression test for GH#3893.
+func TestCreateIssuesFromGraph_DryRunDoesNotPersist(t *testing.T) {
+	// Ensure store is nil — any persistence attempt would panic.
+	oldStore := store
+	store = nil
+	defer func() { store = oldStore }()
+
+	oldJSON := jsonOutput
+	jsonOutput = true
+	defer func() { jsonOutput = oldJSON }()
+
+	planJSON := `{
+		"nodes": [
+			{"key": "a", "title": "Task A", "type": "task"},
+			{"key": "b", "title": "Task B", "type": "task", "parent_key": "a"}
+		],
+		"edges": [
+			{"from_key": "b", "to_key": "a", "type": "blocks"}
+		]
+	}`
+
+	planFile := t.TempDir() + "/plan.json"
+	if err := os.WriteFile(planFile, []byte(planJSON), 0o600); err != nil {
+		t.Fatalf("write plan file: %v", err)
+	}
+
+	out := captureStdout(t, func() error {
+		createIssuesFromGraph(planFile, true, GraphApplyOptions{})
+		return nil
+	})
+
+	var result GraphApplyDryRun
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("output is not valid dry-run JSON: %v\nraw: %s", err, out)
+	}
+	if !result.DryRun {
+		t.Error("expected dry_run=true")
+	}
+	if result.NodeCount != 2 {
+		t.Errorf("node_count = %d, want 2", result.NodeCount)
+	}
+	// The fixture combines b's parent_key="a" with an explicit b--blocks-->a
+	// edge. The dry-run preview counts these independently and does not dedupe
+	// the overlapping relationship, so edge_count and parent_deps are each 1.
+	// Pin both to catch any regression that starts merging or dropping them.
+	if result.EdgeCount != 1 {
+		t.Errorf("edge_count = %d, want 1", result.EdgeCount)
+	}
+	if result.ParentDeps != 1 {
+		t.Errorf("parent_deps = %d, want 1", result.ParentDeps)
 	}
 }

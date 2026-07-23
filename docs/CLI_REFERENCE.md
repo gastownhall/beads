@@ -25,13 +25,12 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd gate list](#bd-gate-list) — List gate issues
   - [bd gate resolve](#bd-gate-resolve) — Manually resolve (close) a gate
   - [bd gate show](#bd-gate-show) — Show a gate issue
-- [bd heartbeat](#bd-heartbeat) — Refresh the lease on an issue you hold in_progress
 - [bd label](#bd-label) — Manage issue labels
-  - [bd label add](#bd-label-add) — Add one or more labels to one or more issues
+  - [bd label add](#bd-label-add) — Add a label to one or more issues
   - [bd label list](#bd-label-list) — List labels for an issue
   - [bd label list-all](#bd-label-list-all) — List all unique labels in the database
   - [bd label propagate](#bd-label-propagate) — Propagate a label from a parent issue to all its children
-  - [bd label remove](#bd-label-remove) — Remove one or more labels from one or more issues
+  - [bd label remove](#bd-label-remove) — Remove a label from one or more issues
 - [bd link](#bd-link) — Link two issues with a dependency
 - [bd list](#bd-list) — List issues
 - [bd merge-slot](#bd-merge-slot) — Manage merge-slot gates for serialized conflict resolution
@@ -44,7 +43,6 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd promote](#bd-promote) — Promote a wisp to a permanent bead
 - [bd q](#bd-q) — Quick capture: create issue and output only ID
 - [bd query](#bd-query) — Query issues using a simple query language
-- [bd reclaim](#bd-reclaim) — Revert stale-lease in_progress issues back to ready (dead-worker recovery)
 - [bd reopen](#bd-reopen) — Reopen one or more closed issues
 - [bd search](#bd-search) — Search issues by text query
 - [bd set-state](#bd-set-state) — Set operational state (creates event + updates label)
@@ -56,7 +54,6 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd todo add](#bd-todo-add) — Add a new TODO item
   - [bd todo done](#bd-todo-done) — Mark TODO(s) as done
   - [bd todo list](#bd-todo-list) — List TODO items
-- [bd unclaim](#bd-unclaim) — Release a claimed issue
 - [bd update](#bd-update) — Update one or more issues
 
 ### Views & Reports:
@@ -159,7 +156,6 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd kv list](#bd-kv-list) — List all key-value pairs
   - [bd kv set](#bd-kv-set) — Set a key-value pair
 - [bd memories](#bd-memories) — List or search persistent memories
-- [bd migrate-personal](#bd-migrate-personal) — Move personal planning issues from the project database to your planning repo
 - [bd onboard](#bd-onboard) — Display minimal snippet for agent instructions file
 - [bd prime](#bd-prime) — Output AI-optimized workflow context
 - [bd quickstart](#bd-quickstart) — Quick start guide for bd
@@ -245,7 +241,6 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd formula](#bd-formula) — Manage workflow formulas
   - [bd formula convert](#bd-formula-convert) — Convert formula from JSON to TOML
   - [bd formula list](#bd-formula-list) — List available formulas
-  - [bd formula schema](#bd-formula-schema) — Show the formula schema index (every exported struct in types.go)
   - [bd formula show](#bd-formula-show) — Show formula details
 - [bd github](#bd-github) — GitHub integration commands
   - [bd github pull](#bd-github-pull) — Pull specific items from GitHub
@@ -515,10 +510,9 @@ bd create [title] [flags]
       --silent                  Output only the issue ID (for scripting)
       --skills string           Required skills for this issue
       --spec-id string          Link to specification document
-  -s, --status string           Initial status
       --stdin                   Read description from stdin (alias for --body-file -)
       --title string            Issue title (alternative to positional argument)
-  -t, --type string             Issue type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision (default "task")
+  -t, --type string             Issue type (bug|feature|task|epic|chore|decision); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision (default "task")
       --validate                Validate description contains required sections for issue type
       --waits-for string        Spawner issue ID to wait for (creates waits-for dependency for fanout gate)
       --waits-for-gate string   Gate type: all-children (wait for all) or any-children (wait for first) (default "all-children")
@@ -819,31 +813,6 @@ This is similar to 'bd show' but validates that the issue is a gate.
 bd gate show <gate-id>
 ```
 
-### bd heartbeat
-
-Refresh the lease on an issue you currently hold in_progress.
-
-A claim carries a lease that expires after a TTL. A worker keeps its claim alive
-by heartbeating faster than the TTL; once it stops (because it died), the lease
-goes stale and 'bd reclaim' reverts the issue to ready so another worker can pick
-it up. Heartbeat pushes lease_expires_at forward and stamps heartbeat_at = now.
-
-Only the current owner may heartbeat. If the lease has already been reclaimed or
-the issue closed, heartbeat fails so the worker learns to stop.
-
-Heartbeat writes a Dolt commit, so heartbeat well below the TTL but not so fast
-it bloats history — cadence should be a small fraction of the TTL, not per-op.
-
-Examples:
-  bd heartbeat bd-123
-  bd hb bd-123
-
-```
-bd heartbeat <id>
-```
-
-**Aliases:** hb
-
 ### bd label
 
 Manage issue labels
@@ -854,10 +823,10 @@ bd label
 
 #### bd label add
 
-Add labels to issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label add bd-123 label1,label2
+Add a label to one or more issues
 
 ```
-bd label add [issue-id...] [label[,label...]]
+bd label add [issue-id...] [label]
 ```
 
 #### bd label list
@@ -886,10 +855,10 @@ bd label propagate [parent-id] [label]
 
 #### bd label remove
 
-Remove labels from issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label remove bd-123 label1,label2
+Remove a label from one or more issues
 
 ```
-bd label remove [issue-id...] [label[,label...]]
+bd label remove [issue-id...] [label]
 ```
 
 ### bd link
@@ -1152,7 +1121,6 @@ Example:
   bd q "Fix login bug"           # Outputs: bd-a1b2
   ISSUE=$(bd q "New feature")    # Capture ID in variable
   bd q "Task" | xargs bd show    # Pipe to other commands
-  bd q "Subtask" --parent=bd-a1b2  # Hierarchical child (outputs: bd-a1b2.1)
 
 ```
 bd q [title] [flags]
@@ -1162,7 +1130,6 @@ bd q [title] [flags]
 
 ```
   -l, --labels strings    Labels
-      --parent string     Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')
   -p, --priority string   Priority (0-4 or P0-P4) (default "2")
   -t, --type string       Issue type (default "task")
 ```
@@ -1241,37 +1208,6 @@ bd query [expression] [flags]
       --parse-only    Only parse the query and show the AST (for debugging)
   -r, --reverse       Reverse sort order
       --sort string   Sort by field: priority, created, updated, closed, status, id, title, type, assignee
-```
-
-### bd reclaim
-
-Revert in_progress issues whose lease has gone stale back to ready.
-
-When a worker claims an issue it takes a lease that expires after a TTL, kept
-alive by 'bd heartbeat'. A worker that dies stops heartbeating, so its lease
-expires and its issue would otherwise stay in_progress forever. reclaim is the
-reaper: it finds in_progress issues whose lease expired more than --older-than
-ago, clears the assignee, and sets them back to open so another worker can
-claim them. The previous owner's stale lease is recorded as a recovery event.
-
---older-than is a grace window past lease expiry: only leases that expired at
-least this long ago are reclaimed, so a worker briefly paused (GC, clock skew)
-is not robbed of live work. Run it from a supervisor on a timer with a window
-of roughly 2× the claim TTL.
-
-Examples:
-  bd reclaim                       # default grace window (2× the lease TTL)
-  bd reclaim --older-than 10m      # reclaim leases expired &gt;10m ago
-  bd reclaim --older-than 0s       # reclaim every currently-expired lease
-
-```
-bd reclaim [flags]
-```
-
-**Flags:**
-
-```
-      --older-than duration   Only reclaim leases that expired at least this long ago (grace window) (default 10m0s)
 ```
 
 ### bd reopen
@@ -1514,28 +1450,6 @@ bd todo list [flags]
       --all   Show all TODOs including completed
 ```
 
-### bd unclaim
-
-Release a claimed issue by clearing the assignee and resetting status to 'open'.
-
-Use this when an agent crashes mid-work or you need to abandon a claimed task.
-The issue becomes available for re-claiming by other agents.
-
-Examples:
-  bd unclaim bd-123
-  bd unclaim bd-123 --reason "Agent crashed"
-  bd unclaim bd-123 bd-456
-
-```
-bd unclaim [id...] [flags]
-```
-
-**Flags:**
-
-```
-  -r, --reason string   Reason for unclaiming
-```
-
 ### bd update
 
 Update one or more issues.
@@ -1713,7 +1627,6 @@ where the issue was modified.
 Examples:
   bd history bd-123           # Show all history for issue bd-123
   bd history bd-123 --limit 5 # Show last 5 changes
-  bd history bd-123 --events  # Show database audit events
 
 ```
 bd history <id> [flags]
@@ -1722,7 +1635,6 @@ bd history <id> [flags]
 **Flags:**
 
 ```
-      --events      Show database audit events instead of commit snapshots
       --limit int   Limit number of history entries (0 = all)
 ```
 
@@ -1755,7 +1667,7 @@ bd lint [issue-id...] [flags]
 
 ```
   -s, --status string   Filter by status (default: open, use 'all' for all)
-  -t, --type string     Filter by issue type (bug, task, feature, epic, decision, spike, story, chore, milestone)
+  -t, --type string     Filter by issue type (bug, task, feature, epic)
 ```
 
 ### bd stale
@@ -1846,23 +1758,16 @@ bd statuses
 
 List all valid issue types that can be used with bd create --type.
 
-Core work types (bug, task, feature, chore, epic, decision, spike, story, milestone) are always valid.
+Core work types (bug, task, feature, chore, epic, decision) are always valid.
 Additional types require configuration via types.custom in .beads/config.yaml.
 
 Examples:
   bd types              # List all types with descriptions
-  bd types --sections   # List required sections for each type
   bd types --json       # Output as JSON
 
 
 ```
-bd types [flags]
-```
-
-**Flags:**
-
-```
-      --sections   Show required sections for each issue type
+bd types
 ```
 
 ## Dependencies & Structure:
@@ -2474,13 +2379,11 @@ bd export [flags]
 **Flags:**
 
 ```
-      --all                         Include all records (infra, templates, gates, memories)
-      --exclude-owner stringArray   Exclude issues created by this identity (repeatable; also reads export.exclude_owners config)
-      --include-infra               Include infrastructure beads (agents, roles, messages)
-      --include-memories            Include persistent memories (from 'bd remember') in the export
-  -o, --output string               Output file path (default: stdout)
-      --scrub                       Exclude test/pollution records
-      --verbose                     Print filtered issue count when owners are excluded
+      --all                Include all records (infra, templates, gates, memories)
+      --include-infra      Include infrastructure beads (agents, roles, messages)
+      --include-memories   Include persistent memories (from 'bd remember') in the export
+  -o, --output string      Output file path (default: stdout)
+      --scrub              Exclude test/pollution records
 ```
 
 ### bd federation
@@ -2725,9 +2628,6 @@ Common namespaces:
   - jira.*            Jira integration settings
   - linear.*          Linear integration settings
   - github.*          GitHub integration settings
-  - gitlab.*          GitLab integration settings
-  - ado.*             Azure DevOps integration settings
-  - notion.*          Notion integration settings
   - custom.*          Custom integration settings
   - status.*          Issue status configuration
   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
@@ -3020,7 +2920,7 @@ bd dolt
 Identify and drop leftover test and agent databases that accumulate
 on the shared Dolt server from interrupted test runs and terminated agents.
 
-Stale database prefixes: testdb_*, beads_test*, beads_pt*, beads_vr*, doctest_*, doctortest_*, benchdb_*
+Stale database prefixes: testdb_*, doctest_*, doctortest_*, beads_pt*, beads_vr*, beads_t*
 
 These waste server memory and can degrade performance under concurrent load.
 Use --dry-run to see what would be dropped without actually dropping.
@@ -3139,13 +3039,7 @@ bd dolt remote
 Add a Dolt remote
 
 ```
-bd dolt remote add <name> <url> [flags]
-```
-
-**Flags:**
-
-```
-      --allow-git-origin   Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)
+bd dolt remote add <name> <url>
 ```
 
 ##### bd dolt remote list
@@ -3222,10 +3116,10 @@ Show the status of the Dolt engine for the current project.
 In embedded mode, reports that the Dolt engine runs in-process and shows
 the on-disk data directory. For beads-managed (local) servers, displays
 PID, port, and data directory from the local PID file. For externally-
-managed servers — a shared server (dolt.shared-server: true), a remote
-dolt_server_host, or a local server managed outside bd (dolt.auto-start:
-false, e.g. an orchestrator-shared sql-server) — pings the configured
-endpoint via SQL and reports reachability, server version, and database.
+managed servers — either a remote dolt_server_host or a local server
+managed outside bd (dolt.auto-start: false, e.g. an orchestrator-shared
+sql-server) — pings the configured endpoint via SQL and reports
+reachability, server version, and database.
 
 ```
 bd dolt status
@@ -3486,11 +3380,10 @@ bd info [flags]
 ### bd init
 
 Initialize bd in the current directory by creating a .beads/ directory
-and its storage (a Dolt database by default). Optionally specify a custom issue prefix.
+and Dolt database. Optionally specify a custom issue prefix.
 
-Dolt is the default backend and the only one with version control (history,
-branching, sync). Select an alternative with --backend=&lt;postgres|mysql|sqlite&gt;;
-see docs/STORAGE-BACKENDS.md for the trade-offs and setup.
+Dolt is the default (and only supported) storage backend. The legacy SQLite
+backend has been removed. Use --backend=sqlite to see migration instructions.
 
 Use --database to specify an existing server database name, overriding the
 default prefix-based naming. This is useful when an external tool (e.g. an orchestrator)
@@ -3530,7 +3423,7 @@ bd init [flags]
       --agents-file string                             Custom filename for agent instructions (default: AGENTS.md)
       --agents-profile string                          AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)
       --agents-template string                         Path to custom AGENTS.md template (overrides embedded default)
-      --backend string                                 Storage backend: dolt (default), postgres, mysql, or sqlite. See docs/STORAGE-BACKENDS.md.
+      --backend string                                 Storage backend (default: dolt). --backend=sqlite prints deprecation notice.
       --contributor                                    Run OSS contributor setup wizard
       --database string                                Use existing server database name (overrides prefix-based naming)
       --debug                                          Run the managed Dolt sql-server with --loglevel=debug and CPU profiling (--prof cpu). Persisted to config.yaml as dolt.debug. No effect on externally-managed servers.
@@ -3540,11 +3433,7 @@ bd init [flags]
       --force                                          Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence (see 'bd help init-safety').
       --from-jsonl                                     Import issues from configured import.path; refuses remote history unless --discard-remote authorizes replacement
       --init-if-missing                                If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)
-      --mysql-database string                          MySQL database for this workspace (with --backend=mysql; MySQL's isolation unit)
-      --mysql-url string                               MySQL server DSN (with --backend=mysql), e.g. user:pass@tcp(host:3306)/ . A password may be included for init but is never persisted; set BEADS_MYSQL_PASSWORD for later commands. Falls back to BEADS_MYSQL_URL.
       --non-interactive                                Skip all interactive prompts (auto-detected in CI or non-TTY environments)
-      --pg-schema string                               Postgres schema for this workspace's tables (with --backend=postgres; provides search_path isolation)
-      --pg-url string                                  Postgres connection URL (with --backend=postgres). A password may be included for init but is never persisted; set BEADS_PG_PASSWORD for later commands. Falls back to BEADS_POSTGRES_URL.
   -p, --prefix string                                  Issue prefix (default: current directory name)
       --proxied-server                                 [EXPERIMENTAL] Use a per-workspace proxied dolt sql-server (proxy + child dolt) rooted at .beads/proxieddb
       --proxied-server-config-path string              [EXPERIMENTAL] Absolute path to an existing dolt sql-server YAML config (proxied-server mode only). When set, bd uses this file instead of auto-generating one. Relative paths are rejected.
@@ -3556,9 +3445,7 @@ bd init [flags]
       --proxied-server-external-tls-cert-path string   [EXPERIMENTAL] Absolute path to a client TLS certificate (for mTLS to the externally-managed dolt sql-server). Must be paired with --proxied-server-external-tls-key-path. Relative paths are rejected.
       --proxied-server-external-tls-key-path string    [EXPERIMENTAL] Absolute path to the client TLS private key (for mTLS to the externally-managed dolt sql-server). Must be paired with --proxied-server-external-tls-cert-path. Relative paths are rejected.
       --proxied-server-external-user string            [EXPERIMENTAL] MySQL user for the externally-managed dolt sql-server (proxied-server mode only). Defaults to "root" when empty. Password is read at runtime from $BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD and is never persisted to disk.
-      --proxied-server-idle-timeout duration           [EXPERIMENTAL] Idle duration after which the proxy shuts down its loopback listener and backend (proxied-server mode only). Omit for the built-in default (30s); 0 keeps the proxy and backend alive indefinitely; a positive value sets the window.
       --proxied-server-log-path string                 [EXPERIMENTAL] Absolute path to the proxied dolt sql-server log file (proxied-server mode only). Default: <beadsDir>/proxieddb/server.log. Relative paths are rejected.
-      --proxied-server-port int                        [EXPERIMENTAL] Fixed TCP port for the proxy's loopback listener (proxied-server mode only). Default 0 = an OS-assigned free port. Startup fails if the port is already in use.
       --proxied-server-root-path string                [EXPERIMENTAL] Absolute directory holding the proxied dolt sql-server's lockfiles, pidfiles, and child .dolt repository (proxied-server mode only). Default: <beadsDir>/proxieddb. May not exist yet — bd will create it. Relative paths are rejected.
   -q, --quiet                                          Suppress output (quiet mode)
       --reinit-local                                   Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence; see --discard-remote.
@@ -3571,9 +3458,8 @@ bd init [flags]
       --server-user string                             Dolt server MySQL user (default: root)
       --setup-exclude                                  Configure .git/info/exclude to keep beads files local (for forks)
       --shared-server                                  Enable shared Dolt server mode (all projects share one server at ~/.beads/shared-server/)
-      --skip-agents                                    Skip AGENTS.md and Claude/Codex/Cursor setup generation
+      --skip-agents                                    Skip AGENTS.md and Claude/Codex setup generation
       --skip-hooks                                     Skip git hooks installation
-      --sqlite-path string                             SQLite database file (with --backend=sqlite; relative to the beads dir, default beads.db)
       --stealth                                        Enable stealth mode: global gitattributes and gitignore, no local repo tracking
       --team                                           Run team workflow setup wizard
 ```
@@ -3660,33 +3546,6 @@ Examples:
 bd memories [search]
 ```
 
-### bd migrate-personal
-
-Identify issues you created in the project database and move them to your
-personal planning repository (~/.beads-planning by default).
-
-This is a one-time migration for contributors who created personal planning
-issues before contributor routing was configured.
-
-The command:
-  1. Finds all issues in the project database created by your git identity
-  2. Shows you the list and asks for confirmation
-  3. Moves them to the planning repo configured in routing.contributor
-
-EXAMPLES:
-  bd migrate-personal        # Interactive: show list and prompt
-  bd migrate-personal -y     # Non-interactive: skip confirmation
-
-```
-bd migrate-personal [flags]
-```
-
-**Flags:**
-
-```
-  -y, --yes   Skip confirmation prompt
-```
-
 ### bd onboard
 
 Display a minimal snippet to add to your agent instructions file for bd integration.
@@ -3724,27 +3583,11 @@ Config options:
 - no-git-ops: When true, outputs stealth mode (no git commands in session close protocol).
   Set via: bd config set no-git-ops true
   Useful when you want to control when commits happen manually.
-- agent.profile: Explicit policy profile for git/commit authority wording
-  (conservative | minimal | team-maintainer; default conservative).
-  Set via: bd config set agent.profile team-maintainer
-  Or per-session: BD_AGENT_PROFILE=team-maintainer (env var takes precedence).
-  See docs/SETUP.md#policy-profiles for what each profile means.
 
 	Workflow customization:
 	- Place a .beads/PRIME.md file in the local clone or resolved workspace to override the default output entirely.
 	- Use --export to dump the default content for customization.
 	- Use --memories-only for hook contexts that should inject only persistent memories.
-
-Memory injection caps:
-	Large memory sets can exceed what a session-start hook host will ingest,
-	and hosts truncate silently. Cap what prime injects with --max-memories N
-	and/or --max-memory-chars N (or the prime.max-memories /
-	prime.max-memory-chars config keys; an explicit flag wins, and an explicit
-	0 forces unlimited). Caps apply at whole-memory boundaries, at least one
-	memory is always emitted, and a banner ahead of the entries reports how
-	many were elided and how to browse the rest with bd memories.
-	--max-memory-chars caps the total bytes of the injected memory entries;
-	the section header and elision banner are excluded from the budget.
 
 ```
 bd prime [flags]
@@ -3753,14 +3596,12 @@ bd prime [flags]
 **Flags:**
 
 ```
-      --export                 Output default content (ignores PRIME.md override)
-      --full                   Force full CLI output (ignore MCP detection)
-      --hook-json              Wrap output in the SessionStart hook JSON envelope (Claude Code, Gemini CLI, Codex)
-      --max-memories int       Cap injected persistent memories to N entries (0 = unlimited; falls back to the prime.max-memories config key)
-      --max-memory-chars int   Cap the total bytes of injected memory entries, at whole-memory boundaries; section header and banner are not counted (0 = unlimited; falls back to the prime.max-memory-chars config key)
-      --mcp                    Force MCP mode (minimal output)
-      --memories-only          Output only persistent memories for compact hook contexts
-      --stealth                Stealth mode (no git operations, flush only)
+      --export          Output default content (ignores PRIME.md override)
+      --full            Force full CLI output (ignore MCP detection)
+      --hook-json       Wrap output in the SessionStart hook JSON envelope (Claude Code, Gemini CLI, Codex)
+      --mcp             Force MCP mode (minimal output)
+      --memories-only   Output only persistent memories for compact hook contexts
+      --stealth         Stealth mode (no git operations, flush only)
 ```
 
 ### bd quickstart
@@ -3819,8 +3660,7 @@ Recipes define where beads workflow instructions are written. Built-in recipes
 include cursor, claude, copilot, gemini, aider, factory, codex, mux, opencode, junie, windsurf, cody, and kilocode.
 
 Examples:
-  bd setup cursor          # Install Cursor IDE integration (rules + agent hooks)
-  bd setup cursor --global # Install global Cursor hooks (~/.cursor/hooks.json)
+  bd setup cursor          # Install Cursor IDE integration
   bd setup codex           # Install Codex skill + AGENTS.md guidance + native hooks
   bd setup codex --global  # Install global Codex skill + guidance + native hooks
   bd setup copilot         # Install Copilot CLI plugin + repository instructions
@@ -3844,7 +3684,7 @@ bd setup [recipe] [flags]
 ```
       --add string      Add a custom recipe with given name
       --check           Check if integration is installed
-      --global          Install globally (claude/codex/cursor/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, ~/.cursor/hooks.json, or ~/.mux/AGENTS.md)
+      --global          Install globally (claude/codex/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, or ~/.mux/AGENTS.md)
       --list            List all available recipes
   -o, --output string   Write template to custom path
       --print           Print the template to stdout
@@ -4188,13 +4028,6 @@ Subcommands:
   schema      Apply pending schema migrations (idempotent)
   sync        Set up sync.branch workflow for multi-clone setups
 
-On a remote-backed database with pending schema migrations bd refuses to
-migrate in place (#4259): migrating two clones independently forks the schema
-so bd dolt pull can no longer merge — the break is silent and unrecoverable.
-Use --force to confirm you are the single designated migrator, after which you
-should publish the migrated schema with 'bd dolt push'. The env-var equivalent
-BD_ALLOW_REMOTE_MIGRATE=1 remains supported for scripted/CI use.
-
 
 ```
 bd migrate [flags]
@@ -4204,7 +4037,6 @@ bd migrate [flags]
 
 ```
       --dry-run          Show what would be done without making changes
-      --force            Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)
       --inspect          Show migration plan and database state for AI agent analysis
       --json             Output migration statistics in JSON format
       --update-repo-id   Update repository ID (use after changing git remote)
@@ -4301,8 +4133,7 @@ bd migrate schema [flags]
 **Flags:**
 
 ```
-      --force   Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)
-      --json    Output in JSON format
+      --json   Output in JSON format
 ```
 
 #### bd migrate sync
@@ -4373,7 +4204,7 @@ bd preflight [flags]
 
 ```
       --check       Run checks automatically
-      --fix         Auto-fix issues where possible (vendorHash, version sync)
+      --fix         Auto-fix issues where possible (not yet implemented)
       --json        Output results as JSON
       --skip-lint   Skip lint check explicitly
 ```
@@ -4392,12 +4223,6 @@ Use `--pattern '*'` if you really do want to sweep everything closed.
 
 Deletes: issues, dependencies, labels, events, and comments for matching beads.
 Skips: pinned beads (protected), open/in-progress beads, and ephemeral beads.
-
-Also skips closed beads whose ID appears in the description, notes, or
-comments of any open / in-progress bead. This protects ADR / decision /
-verification trails that downstream beads still cite. Use
---ignore-references to override (e.g., when bulk-decommissioning a
-retired label across the rig).
 
 To delete closed ephemeral beads (wisps, transient molecules) use
 `bd purge` instead.
@@ -4421,7 +4246,6 @@ bd prune [flags]
 ```
       --dry-run             Preview what would be pruned with stats
   -f, --force               Actually prune (without this, shows preview)
-      --ignore-references   Delete closed beads even when referenced by open beads (use with care; see --help for details)
       --older-than string   Only prune beads closed more than N ago (e.g., 30d, 2w, 60)
       --pattern string      Only prune beads matching ID glob pattern (e.g., 'gm-old-*')
 ```
@@ -5184,18 +5008,6 @@ Type Filtering (--push only):
   --parent TICKET           Only push this ticket and its descendants
   --relations               Import Linear relations as bd dependencies on pull
 
-Persistent push-direction ID filters (workflow artifacts, sandbox beads, etc.):
-  bd config set linear.exclude_id_prefix "hw-mol-"
-  bd config set linear.exclude_id_patterns "-wisp-,sandbox-,scratch-"
-
-  exclude_id_prefix is a single case-sensitive prefix on the bead ID.
-  exclude_id_patterns is a comma-separated list of case-sensitive substrings
-  (matched anywhere in the ID). Both are combined as a union: a bead
-  matching either rule is skipped from push (no create, no update). Beads
-  with an existing external_ref that NOW match are silently skipped on
-  future syncs; the Linear-side issue persists — archive/delete it manually
-  if desired.
-
 Conflict Resolution:
   By default, newer timestamp wins. Override with:
   --prefer-local    Always prefer local beads version
@@ -5472,14 +5284,9 @@ bd ado sync [flags]
 
 ### bd audit
 
-Record explicit agent/tool interaction audit entries in .beads/interactions.jsonl.
+Audit log entries are appended to .beads/interactions.jsonl.
 
-This optional JSONL sidecar is disabled by default. Enable it with:
-
-  bd config set audit.enabled true
-
-Issue history is always recorded in the database and is visible with
-bd history &lt;id&gt; --events. The JSONL sidecar is for explicit interaction capture:
+Each line is one event. This file is intended to be versioned in git and used for:
 - auditing ("why did the agent do that?")
 - dataset generation (SFT/RL fine-tuning)
 
@@ -5775,16 +5582,8 @@ Search paths (in order):
   4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
 
 Commands:
-  list    List available formulas from all search paths
-  show    Show formula details, steps, and composition rules
-  schema  Show the formula schema index (alias: primitives)
-
-Discovering primitives:
-  bd formula schema                 # list every declared formula struct
-  bd formula schema loop            # show LoopSpec fields, types, and tags
-  bd formula primitives gate        # alias; same handler as 'schema'
-  examples/formulas/primitives/     # curated, smoke-tested wired fixtures
-  website/docs/workflows/formulas.md  # narrative reference
+  list   List available formulas from all search paths
+  show   Show formula details, steps, and composition rules
 
 ```
 bd formula
@@ -5833,9 +5632,6 @@ Search paths (in order of priority):
 
 Formulas in earlier paths shadow those with the same name in later paths.
 
-To list the declared formula schema structs an agent can write inside a .formula.toml,
-use 'bd formula schema' (alias: 'bd formula primitives').
-
 Examples:
   bd formula list
   bd formula list --json
@@ -5852,30 +5648,6 @@ bd formula list [flags]
       --type string   Filter by type (workflow, expansion, aspect, convoy)
 ```
 
-#### bd formula schema
-
-Show the formula schema index: every exported struct declared
-in a .formula.toml/.formula.json, with field names, types, and tags.
-
-The index is generated from internal/formula/types.go via go:generate; the
-struct definitions are the source of truth, so this list cannot drift. It is
-structural reference, not proof that every declared runtime behavior is wired.
-
-Examples:
-  bd formula schema                 # list every declared schema struct
-  bd formula schema loop            # show LoopSpec fields
-  bd formula primitives gate        # alias; shows Gate fields
-  bd formula schema --json          # machine-readable index
-
-Curated smoke-tested fixtures for wired primitives live in
-examples/formulas/primitives/ (with a smoke harness that proves they work).
-
-```
-bd formula schema [primitive]
-```
-
-**Aliases:** primitives
-
 #### bd formula show
 
 Show detailed information about a formula.
@@ -5886,9 +5658,6 @@ Displays:
   - Steps with dependencies
   - Composition rules (extends, aspects, expansions)
   - Bond points for external composition
-
-To inspect the structure of an individual primitive (e.g. LoopSpec, Gate)
-rather than a user-authored formula, use 'bd formula schema &lt;primitive&gt;'.
 
 Examples:
   bd formula show shiny
@@ -6198,7 +5967,7 @@ Configuration (checked in order):
 
 Examples:
   # Configure delegation (one-time setup)
-  export BEADS_MAIL_DELEGATE="gt mail"
+  `export BEADS_MAIL_DELEGATE="gt mail"`
   # or
   bd config set mail.delegate "gt mail"
 
@@ -6564,13 +6333,7 @@ Examples:
   bd mol ready --gated --json    # JSON output for automation
 
 ```
-bd mol ready --gated [flags]
-```
-
-**Flags:**
-
-```
-      --gated   Find molecules ready for gate-resume dispatch (always on for this subcommand)
+bd mol ready --gated
 ```
 
 #### bd mol seed

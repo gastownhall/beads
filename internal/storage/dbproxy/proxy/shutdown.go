@@ -35,6 +35,26 @@ func Shutdown(rootDir string) error {
 	return nil
 }
 
+func ControlFilePaths(rootDir string) []string {
+	return []string{
+		filepath.Join(rootDir, PIDFileName),
+		filepath.Join(rootDir, LockFileName),
+		filepath.Join(rootDir, LogFileName),
+		filepath.Join(rootDir, server.PIDFileName),
+		filepath.Join(rootDir, server.LockFileName),
+	}
+}
+
+func PurgeControlFiles(rootDir string) []error {
+	var errs []error
+	for _, path := range ControlFilePaths(rootDir) {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
 func shutdownPair(rootDir, lockName, pidName string) error {
 	lockPath := filepath.Join(rootDir, lockName)
 

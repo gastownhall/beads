@@ -56,7 +56,7 @@ Overrides:
 - **Rust / `cargo`** — builds the conformance harness (`harness/`).
 - **A CGO toolchain (`gcc`/`cc`)** and **`go`** — `bd` embeds Dolt, which is cgo;
   both binaries build with `CGO_ENABLED=1 -tags gms_pure_go` (the `gms_pure_go`
-  tag is mandatory per `docs/ICU-POLICY.md`).
+  tag is mandatory per `engdocs/ICU-POLICY.md`).
 - **`git`** with `origin/main` fetched (the script resolves `REF_REF` locally;
   run `git fetch` first if it is stale).
 - **`jq`** — used for the golden floor assertion (the reference's `create` steps

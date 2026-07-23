@@ -14,7 +14,7 @@ expected and should not be flagged.
 
 - **Issue Tracking** - How to use bd for work management
 - **Development Guidelines** - Code standards and testing
-- **Project Scope** - Read [docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md) before adding new feature surface area
+- **Project Scope** - Read [engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md) before adding new feature surface area
 - **Visual Design System** - Status icons, colors, and semantic styling for CLI output
 - **Contributor Protection** - Read [CONTRIBUTING.md](CONTRIBUTING.md) before handling external PRs
 - **Maintainer PR Guidelines** - Read [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md) before triaging, landing, or closing PRs
@@ -22,7 +22,7 @@ expected and should not be flagged.
 ## Project Scope
 
 Before adding new feature surface area, read
-[docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md). Beads owns issue tracking
+[engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md). Beads owns issue tracking
 primitives and should not encode orchestration-layer policy, become a storage
 engine, or casually expand the database schema when metadata would work.
 
@@ -59,12 +59,17 @@ See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full development guidelin
 ## Storage Boundary
 
 The canonical storage boundary is in
-[docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md#storage-boundary). In short:
+[engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md#storage-boundary). In short:
 Beads talks to storage through a driver interface (`dolthub/driver` for Dolt).
 Do not add beads-side flocks, engine introspection, storage-specific retry or
 crash-recovery logic, or public SDK return types that leak driver internals.
 If the boundary is too narrow, widen the interface or route the issue to the
 driver instead of patching around it in beads.
+
+A live application of this rule: `bd doctor` support for embedded mode is
+enabled one subcommand at a time, each human-vetted (GH#3794). Do not lift the
+embedded-mode gate in `cmd/bd/doctor.go` wholesale, and keep database-layer
+checks and fixes server-gated until the driver interface covers them.
 
 ## Agent Warning: Interactive Commands
 
@@ -158,7 +163,7 @@ Close with a summary for the user: what was completed this session, issues
 filed for follow-up, quality-gate status, confirmation everything is pushed,
 and the recommended prompt for the next session.
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:19cc25d9 -->
+<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:bacef91e -->
 ## Issue Tracking with bd (beads)
 
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
@@ -241,7 +246,7 @@ bd stores issue history in Dolt:
 - Use `bd dolt push`/`bd dolt pull` for remote sync
 - Do not treat `.beads/issues.jsonl` as the sync protocol
 
-**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
 
 ### Important Rules
 
@@ -253,7 +258,7 @@ bd stores issue history in Dolt:
 - ❌ Do NOT use external issue trackers
 - ❌ Do NOT duplicate tracking systems
 
-For more details, see README.md and docs/QUICKSTART.md.
+For more details, see README.md and https://github.com/gastownhall/beads/blob/main/docs/getting-started/quickstart.md.
 
 ## Agent Context Profiles
 

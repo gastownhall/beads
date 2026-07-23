@@ -21,8 +21,10 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
 const defaultKeepAlivePeriod = 30 * time.Second
@@ -165,12 +167,12 @@ func (s *DoltServer) doltInit(ctx context.Context) error {
 	cmd.Dir = s.rootDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if strings.Contains(string(out), "already been initialized") {
-			return nil
+			return doltserver.MarkDoltDirCompatible(s.rootDir)
 		}
 		return fmt.Errorf("server: DoltServer.doltInit: %w\n%s", err, out)
 	}
 
-	return nil
+	return doltserver.MarkDoltDirCompatible(s.rootDir)
 }
 
 var retryableDoltInitErrSubstrings = []string{
@@ -372,8 +374,8 @@ func (s *DoltServer) runShutdownGC(ctx context.Context) (retErr error) {
 	}
 	defer func() { retErr = errors.Join(retErr, conn.Close()) }()
 
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_GC()"); err != nil {
-		retErr = errors.Join(retErr, fmt.Errorf("dolt_gc: %w", err))
+	if err := versioncontrolops.DoltGC(ctx, conn); err != nil {
+		retErr = errors.Join(retErr, err)
 	}
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_STATS_GC()"); err != nil {
 		retErr = errors.Join(retErr, fmt.Errorf("dolt_stats_gc: %w", err))

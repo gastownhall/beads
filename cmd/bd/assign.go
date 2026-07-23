@@ -26,15 +26,19 @@ Examples:
 	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("assign")
 
-		id := args[0]
-		assignee := args[1]
-
 		evt := metrics.NewCommandEvent("assign")
 		defer func() {
 			if c := metrics.Global(); c != nil {
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runAssignProxiedServer(rootCtx, args)
+		}
+
+		id := args[0]
+		assignee := args[1]
 
 		ctx := rootCtx
 

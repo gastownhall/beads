@@ -1461,14 +1461,15 @@ func TestHierarchicalChildren(t *testing.T) {
 		}
 	})
 
-	// Test leaf node (should return only itself)
+	// Test leaf node: a childless parent is not echoed (GH#3349), so a leaf
+	// has no hierarchical children and the result is empty.
 	t.Run("leaf_node", func(t *testing.T) {
 		issues, err := getHierarchicalChildren(ctx, store, "", grandchild11.ID, types.IssueFilter{})
 		if err != nil {
 			t.Fatalf("getHierarchicalChildren for leaf failed: %v", err)
 		}
-		if len(issues) != 1 || issues[0].ID != grandchild11.ID {
-			t.Errorf("Expected 1 issue (leaf), got %d", len(issues))
+		if len(issues) != 0 {
+			t.Errorf("Expected 0 issues for a leaf node (GH#3349: parent not echoed when childless), got %d", len(issues))
 		}
 	})
 

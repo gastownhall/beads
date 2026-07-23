@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"time"
 
@@ -15,7 +14,7 @@ import (
 // Results are ordered by updated_at ascending (stalest first).
 //
 // nolint:gosec // G201: statusClause contains only literal SQL or a single ? placeholder
-func GetStaleIssuesInTx(ctx context.Context, tx *sql.Tx, filter types.StaleFilter) ([]*types.Issue, error) {
+func GetStaleIssuesInTx(ctx context.Context, tx DBTX, filter types.StaleFilter) ([]*types.Issue, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -filter.Days)
 
 	statusClause := "status IN ('open', 'in_progress')"
@@ -23,17 +22,24 @@ func GetStaleIssuesInTx(ctx context.Context, tx *sql.Tx, filter types.StaleFilte
 		statusClause = "status = ?"
 	}
 
+	// Heartbeats live in the ephemeral leases table and no longer stamp
+	// issues.updated_at (bd-lrgn1), so an actively-worked claim can carry an
+	// old updated_at: an issue with a heartbeat since the cutoff is not stale.
 	query := fmt.Sprintf(`
 		SELECT id FROM issues
 		WHERE updated_at < ?
 		  AND %s
 		  AND (ephemeral = 0 OR ephemeral IS NULL)
+		  AND NOT EXISTS (
+			SELECT 1 FROM leases WHERE leases.issue_id = issues.id AND leases.heartbeat_at >= ?
+		  )
 		ORDER BY updated_at ASC
 	`, statusClause)
 	args := []interface{}{cutoff}
 	if filter.Status != "" {
 		args = append(args, filter.Status)
 	}
+	args = append(args, cutoff) // NOT EXISTS heartbeat cutoff, after any status arg
 
 	if filter.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", filter.Limit)

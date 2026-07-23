@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -14,21 +15,18 @@ import (
 )
 
 var (
-	dbProxyChildRoot                string
-	dbProxyChildPort                int
-	dbProxyChildIdleTimeout         time.Duration
-	dbProxyChildBackend             string
-	dbProxyChildConfig              string
-	dbProxyChildLogPath             string
-	dbProxyChildDoltBin             string
-	dbProxyChildDatabase            string
-	dbProxyChildExternalHost        string
-	dbProxyChildExternalPort        int
-	dbProxyChildExternalSocketPath  string
-	dbProxyChildExternalTLS         bool
-	dbProxyChildExternalTLSCertPath string
-	dbProxyChildExternalTLSKeyPath  string
-	dbProxyChildExternalKeepAlive   time.Duration
+	dbProxyChildRoot               string
+	dbProxyChildPort               int
+	dbProxyChildIdleTimeout        time.Duration
+	dbProxyChildBackend            string
+	dbProxyChildConfig             string
+	dbProxyChildLogPath            string
+	dbProxyChildDoltBin            string
+	dbProxyChildDatabase           string
+	dbProxyChildExternalHost       string
+	dbProxyChildExternalPort       int
+	dbProxyChildExternalSocketPath string
+	dbProxyChildExternalKeepAlive  time.Duration
 )
 
 var dbProxyChildCmd = &cobra.Command{
@@ -52,9 +50,6 @@ not intended to be invoked directly by users.`,
 			Host:            dbProxyChildExternalHost,
 			Port:            dbProxyChildExternalPort,
 			Socket:          dbProxyChildExternalSocketPath,
-			TLSRequired:     dbProxyChildExternalTLS,
-			TLSCert:         dbProxyChildExternalTLSCertPath,
-			TLSKey:          dbProxyChildExternalTLSKeyPath,
 			KeepAlivePeriod: dbProxyChildExternalKeepAlive,
 		}
 
@@ -62,6 +57,7 @@ not intended to be invoked directly by users.`,
 		if err != nil {
 			return err
 		}
+		defer func() { _ = srv.Stop(context.Background()) }()
 
 		p := proxy.NewProxyServer(proxy.ProxyOpts{
 			RootDir:     dbProxyChildRoot,
@@ -104,9 +100,6 @@ func init() {
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalHost, "external-host", "", "external backend: hostname or IP of the dolt sql-server")
 	dbProxyChildCmd.Flags().IntVar(&dbProxyChildExternalPort, "external-port", 0, "external backend: TCP port of the dolt sql-server")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalSocketPath, "external-socket-path", "", "external backend: absolute path to a unix domain socket (overrides host/port)")
-	dbProxyChildCmd.Flags().BoolVar(&dbProxyChildExternalTLS, "external-tls", false, "external backend: require TLS in the MySQL handshake")
-	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalTLSCertPath, "external-tls-cert-path", "", "external backend: absolute path to client TLS certificate (mTLS)")
-	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalTLSKeyPath, "external-tls-key-path", "", "external backend: absolute path to client TLS private key (mTLS)")
 	dbProxyChildCmd.Flags().DurationVar(&dbProxyChildExternalKeepAlive, "external-keep-alive", 0, "external backend: TCP keepalive period (default 30s)")
 	_ = dbProxyChildCmd.MarkFlagRequired("root")
 	_ = dbProxyChildCmd.MarkFlagRequired("port")

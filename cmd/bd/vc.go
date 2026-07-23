@@ -43,6 +43,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("vc merge is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("vc-merge")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -146,6 +149,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("vc commit is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("vc-commit")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -168,10 +174,6 @@ Examples:
 
 		if vcCommitMessage == "" {
 			return HandleErrorRespectJSON("commit message is required (use -m, --message, or --stdin)")
-		}
-
-		if err := errExplicitCommitUnsupported(store, "vc commit"); err != nil {
-			return HandleErrorRespectJSON("%v", err)
 		}
 
 		commandDidExplicitDoltCommit = true
@@ -214,6 +216,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("vc status is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("vc-status")
 		defer func() {
 			if c := metrics.Global(); c != nil {

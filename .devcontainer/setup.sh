@@ -3,7 +3,7 @@ set -e
 
 # Persist -tags=gms_pure_go in the go env config file (`go env -w`), so a
 # bare `go build`/`go test` run later from a shell that never sourced
-# .buildflags still picks up the tag (see docs/ICU-POLICY.md and
+# .buildflags still picks up the tag (see engdocs/ICU-POLICY.md and
 # `make doctor-build`). Read the persisted value here, before sourcing
 # .buildflags below, since that export would otherwise shadow the on-disk
 # go env value for the rest of this script.

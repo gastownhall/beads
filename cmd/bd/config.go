@@ -39,6 +39,7 @@ Common namespaces:
   - notion.*          Notion integration settings
   - custom.*          Custom integration settings
   - status.*          Issue status configuration
+  - claim.*           Claim arbitration settings (pool-aware claiming)
   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
 
 Auto-Export (config.yaml):
@@ -72,6 +73,18 @@ Custom Status States:
   This enables issues to use statuses like 'awaiting_review' in addition to
   the built-in statuses (open, in_progress, blocked, deferred, closed).
 
+Claim Pools:
+  A dispatcher can pre-assign issues to a pool pseudo-assignee (e.g.
+  "fable-crew") and let any actor take them with --claim. List the pool
+  aliases in the claim.pools config key, comma-separated:
+
+    bd config set claim.pools "fable-crew,night-crew"
+
+  Issues assigned to a real actor (or to an alias not in the list) keep
+  their anti-steal protection. Pool takes carry the normal lease; note
+  that if a taker's lease expires, bd reclaim returns the issue to the
+  unassigned pool, not to the pool alias it was dispatched to.
+
 Suppressing Doctor Warnings:
   Suppress specific bd doctor warnings by check name slug:
     bd config set doctor.suppress.pending-migrations true
@@ -88,6 +101,7 @@ Examples:
   bd config set jira.url "https://company.atlassian.net"
   bd config set jira.project "PROJ"
   bd config set status.custom "awaiting_review,awaiting_testing"
+  bd config set claim.pools "fable-crew,night-crew"    # Pool aliases claimable by any actor
   bd config set doctor.suppress.pending-migrations true
   bd config set dolt.debug true                        # Enable Dolt sql-server debug mode (loglevel=debug, --prof cpu)
   bd config set dolt.local-only true                   # Skip wiring a Dolt sync remote during bd init
@@ -246,6 +260,17 @@ var configGetCmd = &cobra.Command{
 
 		key := args[0]
 
+		if key == "backup.enabled" {
+			// backup.enabled has an auto-detected effective value that
+			// differs from the stored value: when unset it auto-enables
+			// in embedded mode with a git remote, and is forced OFF in
+			// sql-server mode (see isBackupAutoEnabled). Reporting the raw
+			// stored "false"/"not set" here misled operators during the
+			// 2026-07 shared-dolt incident, so show the EFFECTIVE value
+			// and its source.
+			return runConfigGetBackupEnabled()
+		}
+
 		if config.IsYamlOnlyKey(key) {
 			// User-global keys (e.g. metrics.*) must be read from the user-global
 			// config.yaml only — the same source the runtime uses for metrics
@@ -341,6 +366,45 @@ var configGetCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// runConfigGetBackupEnabled reports the EFFECTIVE value of
+// backup.enabled together with its source, rather than the raw stored
+// value. The stored value is misleading because isBackupAutoEnabled()
+// derives the runtime value: unset → auto-enabled in embedded mode
+// when a git remote exists, and forced OFF in sql-server mode.
+func runConfigGetBackupEnabled() error {
+	const key = "backup.enabled"
+	source := config.GetValueSource(key)
+	effective := isBackupAutoEnabled()
+
+	var sourceDesc string
+	switch source {
+	case config.SourceEnvVar:
+		sourceDesc = "env var"
+	case config.SourceConfigFile:
+		sourceDesc = "config.yaml"
+	default: // SourceDefault — value came from auto-detection
+		switch {
+		case usesSQLServer():
+			sourceDesc = "default (auto: off in sql-server mode)"
+		case effective:
+			sourceDesc = "default (auto: on — git remote detected)"
+		default:
+			sourceDesc = "default (auto: off — no git remote)"
+		}
+	}
+
+	if jsonOutput {
+		return outputJSON(map[string]interface{}{
+			"key":       key,
+			"value":     effective,
+			"effective": effective,
+			"source":    string(source),
+		})
+	}
+	fmt.Printf("%t (%s)\n", effective, sourceDesc)
+	return nil
 }
 
 var configListCmd = &cobra.Command{
@@ -876,6 +940,7 @@ var recognizedConfigPrefixes = []string{
 	"status.", "types.", "doctor.suppress.", "routing.", "sync.", "git.",
 	"directory.", "repos.", "external_projects.", "validation.",
 	"hierarchy.", "ai.", "backup.", "federation.", "metrics.", "agent.",
+	"claim.",
 }
 
 // allRecognizedConfigPrefixes returns the static namespaces plus the prefix of

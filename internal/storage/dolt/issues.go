@@ -145,19 +145,41 @@ func (s *DoltStore) GetIssueByExternalRef(ctx context.Context, externalRef strin
 	return s.GetIssue(ctx, id)
 }
 
+// validateUpdateMetadata validates an inbound metadata update value against the
+// configured schema (GH#1416 Phase 2) before any wisp routing. It is a no-op
+// when the update carries no "metadata" key. Shared by UpdateIssue and
+// UpdateIssueChecked so both apply the identical pre-write validation.
+func validateUpdateMetadata(updates map[string]interface{}) error {
+	rawMeta, ok := updates["metadata"]
+	if !ok {
+		return nil
+	}
+	metadataStr, err := storage.NormalizeMetadataValue(rawMeta)
+	if err != nil {
+		return fmt.Errorf("invalid metadata: %w", err)
+	}
+	return validateMetadataIfConfigured(json.RawMessage(metadataStr))
+}
+
+// checkExpectedVersionInTx enforces the optional ExpectedVersion CAS
+// precondition inside tx: when expectedVersion is non-nil the row's current
+// RowVersion (row_lock) must still equal it, else the caller's transaction
+// returns storage.ErrVersionMismatch and rolls back with the issue unchanged. A
+// nil expectedVersion disables the check (an unconditional update).
+func checkExpectedVersionInTx(ctx context.Context, tx *sql.Tx, id string, expectedVersion *int64) error {
+	if expectedVersion == nil {
+		return nil
+	}
+	return issueops.CheckVersionInTx(ctx, tx, id, *expectedVersion)
+}
+
 // UpdateIssue updates fields on an issue.
 // Delegates SQL work to issueops.UpdateIssueInTx; handles Dolt-specific concerns
 // (metadata validation, DemoteToWisp, DOLT_ADD/COMMIT, cache invalidation).
 func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
-	// Validate metadata against schema before wisp routing (GH#1416 Phase 2)
-	if rawMeta, ok := updates["metadata"]; ok {
-		metadataStr, err := storage.NormalizeMetadataValue(rawMeta)
-		if err != nil {
-			return fmt.Errorf("invalid metadata: %w", err)
-		}
-		if err := validateMetadataIfConfigured(json.RawMessage(metadataStr)); err != nil {
-			return err
-		}
+	// Validate metadata against schema before wisp routing (GH#1416 Phase 2).
+	if err := validateUpdateMetadata(updates); err != nil {
+		return err
 	}
 
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
@@ -182,6 +204,71 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 	// (https://www.dolthub.com/blog/2023-10-23-hold-my-beer/) — so retry is the
 	// only safety net. withRetryTx owns BeginTx and the final Commit.
 	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
+			return err
+		}
+
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: update %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	})
+}
+
+// UpdateIssueChecked applies the update like UpdateIssue, adding an optional
+// optimistic-concurrency precondition: when opts.ExpectedVersion is non-nil the
+// update proceeds only if the issue's current RowVersion (row_lock) still equals
+// *opts.ExpectedVersion, else it refuses with storage.ErrVersionMismatch. The
+// version read and the update share ONE transaction, so a mismatch returns
+// before any write and the transaction rolls back with the issue unchanged (a
+// true compare-and-swap). nil disables the check, leaving behavior identical to
+// UpdateIssue. Mirrors UpdateIssue's Dolt-specific concerns (metadata
+// validation, wisp routing, DemoteToWisp, DOLT_ADD/COMMIT); UpdateIssue is the
+// hot path and is left untouched.
+func (s *DoltStore) UpdateIssueChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts storage.UpdateIssueOptions) error {
+	// Validate metadata against schema before wisp routing (GH#1416 Phase 2).
+	if err := validateUpdateMetadata(updates); err != nil {
+		return err
+	}
+
+	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
+	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
+	if s.isActiveWisp(ctx, id) {
+		return s.updateWispChecked(ctx, id, updates, actor, opts.ExpectedVersion)
+	}
+
+	// If updating a regular issue to no-history or ephemeral, migrate it to the
+	// wisps table instead of updating in-place (mirrors UpdateIssue). The version
+	// check shares the demotion transaction so the CAS stays atomic on this path.
+	_, settingNoHistory := updates["no_history"]
+	_, settingWisp := updates["wisp"]
+	if settingNoHistory || settingWisp {
+		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			if err := checkExpectedVersionInTx(ctx, tx, id, opts.ExpectedVersion); err != nil {
+				return err
+			}
+			return s.demoteToWispInTx(ctx, tx, id, updates, actor)
+		})
+	}
+
+	// Wrap in withRetryTx exactly like UpdateIssue so a concurrent writer that
+	// loses Dolt's optimistic commit-time merge (MySQL 1213/1205, guaranteed
+	// server-side rollback) is retried rather than surfaced as a hard failure.
+	// A version mismatch (storage.ErrVersionMismatch) is NOT a serialization
+	// error, so withRetryTx surfaces it permanently and the transaction rolls
+	// back — no update and no event are written (the atomic-refuse property). A
+	// concurrent write that commits DURING this tx collides on the row_lock cell
+	// and is replayed by withRetryTx, which re-reads the new version here and
+	// refuses. withRetryTx owns BeginTx and the final Commit.
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		if err := checkExpectedVersionInTx(ctx, tx, id, opts.ExpectedVersion); err != nil {
+			return err
+		}
 		if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
 			return err
 		}
@@ -273,29 +360,20 @@ func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter
 }
 
 // HeartbeatIssue refreshes the lease on an issue actor holds in_progress,
-// pushing lease_expires_at forward and rewriting row_lock (see issueops.lease).
-// Wrapped in withRetryTx so a heartbeat that loses Dolt's optimistic merge to a
-// concurrent reclaim/close on the same row is replayed against a fresh snapshot
-// rather than surfaced — the row_lock collision is what forces that retry.
+// pushing lease_expires_at forward on its row in the ephemeral leases table
+// (see issueops.lease). Deliberately NO DOLT_ADD/DOLT_COMMIT: the leases
+// table is dolt_ignored, so a heartbeat mints no commit and no history — this
+// is the whole point of bd-lrgn1 (fleet heartbeats were the dominant source
+// of unbounded reachable history). Wrapped in withRetryTx so a heartbeat that
+// loses Dolt's optimistic merge to a concurrent reclaim/close on the same
+// lease row is replayed against a fresh snapshot rather than surfaced.
 func (s *DoltStore) HeartbeatIssue(ctx context.Context, id, actor string) error {
 	if s.isActiveWisp(ctx, id) {
 		// Wisps are ephemeral and never leased; nothing to heartbeat.
 		return fmt.Errorf("%w: %s is ephemeral", storage.ErrNotClaimable, id)
 	}
 	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		if err := issueops.HeartbeatIssueInTx(ctx, tx, id, actor); err != nil {
-			return err
-		}
-		// GH#2455: stage only the tables we touched, then commit without -A.
-		for _, table := range []string{"issues"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
-		commitMsg := fmt.Sprintf("bd: heartbeat %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-		return nil
+		return issueops.HeartbeatIssueInTx(ctx, tx, id, actor)
 	})
 }
 
@@ -331,35 +409,58 @@ func (s *DoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Dur
 	return reclaimed, nil
 }
 
-// UnclaimIssue atomically unclaims an issue by clearing the assignee
-// and resetting status to "open". Records an "unclaimed" event.
-// Delegates SQL work to issueops.UnclaimIssueInTx; handles Dolt-specific concerns
-// (DOLT_ADD/COMMIT).
-func (s *DoltStore) UnclaimIssue(ctx context.Context, id string, actor string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
+// UnclaimIssue atomically unclaims an issue by clearing the assignee, resetting
+// status to "open", deleting its lease row and rewriting row_lock. Records
+// an "unclaimed" event. Only the current assignee may release its own claim
+// unless force is set (admin/reaper override). Delegates SQL work to
+// issueops.UnclaimIssueInTx; handles Dolt-specific concerns (DOLT_ADD/COMMIT).
+//
+// Wrapped in withRetryTx like the other claim-family writes so a concurrent
+// writer that loses Dolt's optimistic commit-time merge (1213/1205) is retried
+// rather than surfaced as a hard failure.
+func (s *DoltStore) UnclaimIssue(ctx context.Context, id string, actor string, force bool) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		if err := issueops.UnclaimIssueInTx(ctx, tx, id, actor, force); err != nil {
+			return err
+		}
 
-	if err := issueops.UnclaimIssueInTx(ctx, tx, id, actor); err != nil {
-		return err
-	}
+		// Dolt versioning for permanent issues.
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: unclaim %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	})
+}
 
-	// Dolt versioning for permanent issues.
-	for _, table := range []string{"issues", "events"} {
-		_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-	}
-	commitMsg := fmt.Sprintf("bd: unclaim %s", id)
-	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
-	}
+// UnclaimIssueIfAssignee releases a claim only while the issue is still assigned
+// to expectedAssignee (compare-and-swap, the inverse of ClaimIssue). Returns
+// storage.ErrAssigneeMismatch, leaving the issue untouched, when the current
+// assignee differs. Delegates SQL work to issueops.UnclaimIssueIfAssigneeInTx;
+// handles Dolt-specific concerns (DOLT_ADD/COMMIT). Wrapped in withRetryTx like
+// UnclaimIssue so a concurrent writer that loses Dolt's optimistic commit-time
+// merge is retried rather than surfaced as a hard failure.
+func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, tx, id, actor, expectedAssignee); err != nil {
+			return err
+		}
 
-	if err := tx.Commit(); err != nil {
-		return wrapTransactionError("commit unclaim issue", err)
-	}
-	return nil
+		// Dolt versioning for permanent issues.
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: unclaim %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	})
 }
 
 // ReopenIssue reopens a closed issue, setting status to open and clearing
@@ -420,6 +521,51 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 		}
 		return nil
 	})
+}
+
+// CloseIssueChecked closes an issue but refuses with storage.ErrCloseBlocked
+// when it has a live direct blocker unless opts.Force is set, and — when
+// opts.ExpectedVersion is non-nil — with storage.ErrVersionMismatch when the
+// row's current RowVersion no longer matches (an orthogonal CAS that Force does
+// not bypass). Both checks and the close share one transaction, so they are
+// atomic (no TOCTOU). Mirrors CloseIssue's Dolt-specific concerns (wisp routing,
+// DOLT_ADD/COMMIT).
+func (s *DoltStore) CloseIssueChecked(ctx context.Context, id string, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
+	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
+	if s.isActiveWisp(ctx, id) {
+		return s.closeWispChecked(ctx, id, actor, opts)
+	}
+
+	// Wrap in withRetryTx exactly like CloseIssue so a concurrent writer that
+	// loses Dolt's optimistic commit-time merge (MySQL 1213/1205, guaranteed
+	// server-side rollback) is retried. A blocked-guard rejection
+	// (storage.ErrCloseBlocked) is NOT a serialization error, so withRetryTx
+	// surfaces it permanently and the transaction rolls back — no close and no
+	// event are written (the atomic-refuse property).
+	var result storage.CloseIssueResult
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		res, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force, opts.ExpectedVersion)
+		if err != nil {
+			return err
+		}
+		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed}
+
+		// Dolt versioning for permanent issues.
+		// GH#2455: Stage only the tables we modified, then commit without -A.
+		for _, table := range []string{"issues", "events"} {
+			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+		}
+		commitMsg := fmt.Sprintf("bd: close %s", id)
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+			return fmt.Errorf("dolt commit: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return storage.CloseIssueResult{}, err
+	}
+	return result, nil
 }
 
 // DeleteIssue permanently removes an issue

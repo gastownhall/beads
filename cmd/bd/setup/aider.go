@@ -146,7 +146,7 @@ The AI will suggest the appropriate ` + "`bd`" + ` command, which you run via ` 
 
 - Run ` + "`bd --help`" + ` for full command reference
 - See ` + "`AGENTS.md`" + ` for detailed AI integration docs
-- See ` + "`QUICKSTART.md`" + ` for human-oriented guide
+- See the beads quickstart (https://github.com/gastownhall/beads/blob/main/docs/getting-started/quickstart.md) for a human-oriented guide
 `
 
 func InstallAider() error {

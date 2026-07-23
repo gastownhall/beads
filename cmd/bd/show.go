@@ -160,41 +160,47 @@ var showCmd = &cobra.Command{
 				// May be slow on hub beads with many dependents.
 				if includeDepends {
 					iter, err := issueStore.IterDependentsWithMetadata(ctx, issue.ID)
-					if err == nil {
-						defer iter.Close() //nolint:errcheck
-						var shallowDeps []*types.IssueWithDependencyMetadata
-						for iter.Next(ctx) {
-							item := iter.Value()
-							shallowDeps = append(shallowDeps, &types.IssueWithDependencyMetadata{
-								Issue: types.Issue{
-									ID:        item.Issue.ID,
-									Status:    item.Issue.Status,
-									IssueType: item.Issue.IssueType,
-									Priority:  item.Issue.Priority,
-									Title:     item.Issue.Title,
-								},
-								DependencyType: item.DependencyType,
-							})
-						}
-						details.Dependents = shallowDeps
+					if err != nil {
+						result.Close()
+						return HandleErrorRespectJSON("iter dependents %s: %v", issue.ID, err)
+					}
+					defer iter.Close() //nolint:errcheck
+					var shallowDeps []*types.IssueWithDependencyMetadata
+					for iter.Next(ctx) {
+						item := iter.Value()
+						shallowDeps = append(shallowDeps, &types.IssueWithDependencyMetadata{
+							Issue: types.Issue{
+								ID:        item.Issue.ID,
+								Status:    item.Issue.Status,
+								IssueType: item.Issue.IssueType,
+								Priority:  item.Issue.Priority,
+								Title:     item.Issue.Title,
+							},
+							DependencyType: item.DependencyType,
+						})
+					}
+					if err := iter.Err(); err != nil {
+						result.Close()
+						return HandleErrorRespectJSON("iter dependents %s: %v", issue.ID, err)
+					}
+					details.Dependents = shallowDeps
 
-						// Epic progress from streamed dependents.
-						if issue.IssueType == types.TypeEpic && len(shallowDeps) > 0 {
-							total, closed := 0, 0
-							for _, dep := range shallowDeps {
-								if dep.DependencyType == types.DepParentChild {
-									total++
-									if dep.Issue.Status == types.StatusClosed {
-										closed++
-									}
+					// Epic progress from streamed dependents.
+					if issue.IssueType == types.TypeEpic && len(shallowDeps) > 0 {
+						total, closed := 0, 0
+						for _, dep := range shallowDeps {
+							if dep.DependencyType == types.DepParentChild {
+								total++
+								if dep.Issue.Status == types.StatusClosed {
+									closed++
 								}
 							}
-							if total > 0 {
-								details.EpicTotalChildren = &total
-								details.EpicClosedChildren = &closed
-								closeable := total == closed
-								details.EpicCloseable = &closeable
-							}
+						}
+						if total > 0 {
+							details.EpicTotalChildren = &total
+							details.EpicClosedChildren = &closed
+							closeable := total == closed
+							details.EpicCloseable = &closeable
 						}
 					}
 				}
@@ -203,11 +209,17 @@ var showCmd = &cobra.Command{
 				// May be slow on issues with many comments.
 				if includeComments {
 					iter, err := issueStore.IterIssueComments(ctx, issue.ID)
-					if err == nil {
-						defer iter.Close() //nolint:errcheck
-						for iter.Next(ctx) {
-							details.Comments = append(details.Comments, iter.Value())
-						}
+					if err != nil {
+						result.Close()
+						return HandleErrorRespectJSON("iter comments %s: %v", issue.ID, err)
+					}
+					defer iter.Close() //nolint:errcheck
+					for iter.Next(ctx) {
+						details.Comments = append(details.Comments, iter.Value())
+					}
+					if err := iter.Err(); err != nil {
+						result.Close()
+						return HandleErrorRespectJSON("iter comments %s: %v", issue.ID, err)
 					}
 				}
 

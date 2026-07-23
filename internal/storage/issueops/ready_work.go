@@ -453,7 +453,7 @@ func issuePriorityBefore(a, b *types.Issue) bool {
 		return a.Priority < b.Priority
 	}
 	if !a.CreatedAt.Equal(b.CreatedAt) {
-		return a.CreatedAt.After(b.CreatedAt)
+		return a.CreatedAt.Before(b.CreatedAt)
 	}
 	return a.ID < b.ID
 }

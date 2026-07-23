@@ -72,7 +72,7 @@ var BuiltinRecipes = map[string]Recipe{
 		Type:        TypeHooks,
 		Description: "Claude Code hooks (SessionStart)",
 		GlobalPath:  "~/.claude/settings.json",
-		ProjectPath: ".claude/settings.local.json",
+		ProjectPath: ".claude/settings.json",
 	},
 	"gemini": {
 		Name:        "Gemini CLI",

@@ -55,6 +55,10 @@ Examples:
 			return printSections(jsonOutput)
 		}
 
+		if usesProxiedServer() {
+			return runTypesProxiedServer(rootCtx)
+		}
+
 		if err := ensureDirectMode("types command requires direct database access"); err != nil {
 			return HandleError("%v", err)
 		}
@@ -67,38 +71,42 @@ Examples:
 			}
 		}
 
-		if jsonOutput {
-			result := struct {
-				CoreTypes   []typeInfo `json:"core_types"`
-				CustomTypes []string   `json:"custom_types,omitempty"`
-			}{}
-
-			for _, t := range coreWorkTypes {
-				result.CoreTypes = append(result.CoreTypes, typeInfo{
-					Name:        string(t.Type),
-					Description: t.Description,
-				})
-			}
-			result.CustomTypes = customTypes
-			return outputJSON(result)
-		}
-
-		fmt.Println("Core work types (built-in):")
-		for _, t := range coreWorkTypes {
-			fmt.Printf("  %-14s %s\n", t.Type, t.Description)
-		}
-
-		if len(customTypes) > 0 {
-			fmt.Println("\nConfigured custom types:")
-			for _, t := range customTypes {
-				fmt.Printf("  %s\n", t)
-			}
-		} else {
-			fmt.Println("\nNo custom types configured.")
-			fmt.Println("Configure with: bd config set types.custom \"type1,type2,...\"")
-		}
-		return nil
+		return renderTypes(customTypes)
 	},
+}
+
+func renderTypes(customTypes []string) error {
+	if jsonOutput {
+		result := struct {
+			CoreTypes   []typeInfo `json:"core_types"`
+			CustomTypes []string   `json:"custom_types,omitempty"`
+		}{}
+
+		for _, t := range coreWorkTypes {
+			result.CoreTypes = append(result.CoreTypes, typeInfo{
+				Name:        string(t.Type),
+				Description: t.Description,
+			})
+		}
+		result.CustomTypes = customTypes
+		return outputJSON(result)
+	}
+
+	fmt.Println("Core work types (built-in):")
+	for _, t := range coreWorkTypes {
+		fmt.Printf("  %-14s %s\n", t.Type, t.Description)
+	}
+
+	if len(customTypes) > 0 {
+		fmt.Println("\nConfigured custom types:")
+		for _, t := range customTypes {
+			fmt.Printf("  %s\n", t)
+		}
+	} else {
+		fmt.Println("\nNo custom types configured.")
+		fmt.Println("Configure with: bd config set types.custom \"type1,type2,...\"")
+	}
+	return nil
 }
 
 // typeSectionsInfo holds section data for JSON output.

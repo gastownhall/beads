@@ -253,7 +253,7 @@ func (s *testSuite) ucCyclesDetected() {
 	s.Require().NoError(dr.Insert(s.Ctx(),
 		newDep("bd-uccy-a", "bd-uccy-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(dr.Insert(s.Ctx(),
-		newDep("bd-uccy-b", "bd-uccy-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep("bd-uccy-b", "bd-uccy-a", types.DepBlocks), "tester", domain.DepInsertOpts{CycleValidated: true}))
 
 	out, err := s.depUseCase().DetectCycles(s.Ctx())
 	s.Require().NoError(err)

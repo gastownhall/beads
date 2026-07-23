@@ -52,7 +52,7 @@ else
   unset ORACLE_CATALOG 2>/dev/null || true
 fi
 
-# gms_pure_go is mandatory per docs/ICU-POLICY.md; CGO is required for embedded Dolt.
+# gms_pure_go is mandatory per engdocs/ICU-POLICY.md; CGO is required for embedded Dolt.
 BUILD_TAGS="gms_pure_go"
 
 # unique scratch dir per run — cp over an exec-mapped binary fails silently and

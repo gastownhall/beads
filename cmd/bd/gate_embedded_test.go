@@ -663,3 +663,60 @@ func TestEmbeddedGateConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// TestEmbeddedGateListScoped is the integration regression for the bug where
+// `bd gate list <issue-id>` silently ignored the argument and returned the
+// DB-wide gate list. It asserts the scoped list contains only the named issue's
+// own gate and never leaks an unrelated issue's gate.
+func TestEmbeddedGateListScoped(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gls")
+
+	// Register "gate" as a custom type so bd gate create works.
+	store := openStore(t, beadsDir, "gls")
+	if err := store.SetConfig(t.Context(), "types.custom", `["gate"]`); err != nil {
+		t.Fatalf("SetConfig types.custom: %v", err)
+	}
+	store.Close()
+
+	taskA := bdCreate(t, bd, dir, "Task A", "--type", "task")
+	taskB := bdCreate(t, bd, dir, "Task B", "--type", "task")
+	bdGate(t, bd, dir, "create", "--blocks", taskA.ID, "--type", "gh:pr", "--await-id", "111")
+	bdGate(t, bd, dir, "create", "--blocks", taskB.ID, "--type", "gh:pr", "--await-id", "222")
+
+	// DB-wide (no arg) still lists every gate.
+	if all := bdGateListJSON(t, bd, dir); len(all) != 2 {
+		t.Fatalf("expected 2 gates DB-wide, got %d: %v", len(all), all)
+	}
+
+	// Scoped to A: exactly A's gate, and never B's.
+	scoped := bdGateListJSON(t, bd, dir, taskA.ID)
+	if len(scoped) != 1 {
+		t.Fatalf("expected exactly 1 gate scoped to %s, got %d: %v", taskA.ID, len(scoped), scoped)
+	}
+	if got := scoped[0]["await_id"]; got != "111" {
+		t.Fatalf("expected await_id=111 scoped to %s, got %v", taskA.ID, got)
+	}
+	for _, g := range scoped {
+		if g["await_id"] == "222" {
+			t.Fatalf("gate list %s leaked unrelated gate 222: %v", taskA.ID, scoped)
+		}
+	}
+
+	// Scoped to B: exactly B's gate.
+	scopedB := bdGateListJSON(t, bd, dir, taskB.ID)
+	if len(scopedB) != 1 || scopedB[0]["await_id"] != "222" {
+		t.Fatalf("expected exactly gate 222 scoped to %s, got %v", taskB.ID, scopedB)
+	}
+
+	// Unknown issue id is a clean error, not a DB-wide dump.
+	out := bdGateFail(t, bd, dir, "list", "gls-nope")
+	if !strings.Contains(out, "not found") {
+		t.Fatalf("expected 'not found' error for unknown issue, got: %s", out)
+	}
+}

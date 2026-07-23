@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -36,8 +37,6 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("reclaim")
-
 		evt := metrics.NewCommandEvent("reclaim")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -48,6 +47,12 @@ Examples:
 		olderThan, _ := cmd.Flags().GetDuration("older-than")
 		if olderThan < 0 {
 			return HandleErrorRespectJSON("--older-than must not be negative")
+		}
+
+		CheckReadonly("reclaim")
+
+		if usesProxiedServer() {
+			return runReclaimProxiedServer(rootCtx, olderThan)
 		}
 
 		ctx := rootCtx
@@ -67,26 +72,30 @@ Examples:
 			return HandleErrorRespectJSON("failed to commit: %v", err)
 		}
 
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"reclaimed": reclaimed,
-				"count":     len(reclaimed),
-			})
-		}
-		if len(reclaimed) == 0 {
-			fmt.Printf("%s No stale leases to reclaim\n", ui.RenderPass("✓"))
-			return nil
-		}
-		fmt.Printf("%s Reclaimed %d stale-lease issue(s):\n", ui.RenderPass("✓"), len(reclaimed))
-		for _, r := range reclaimed {
-			owner := r.PreviousOwner
-			if owner == "" {
-				owner = "(unassigned)"
-			}
-			fmt.Printf("  %s (was held by %s)\n", r.ID, owner)
-		}
-		return nil
+		return renderReclaim(reclaimed)
 	},
+}
+
+func renderReclaim(reclaimed []types.ReclaimedLease) error {
+	if jsonOutput {
+		return outputJSON(map[string]interface{}{
+			"reclaimed": reclaimed,
+			"count":     len(reclaimed),
+		})
+	}
+	if len(reclaimed) == 0 {
+		fmt.Printf("%s No stale leases to reclaim\n", ui.RenderPass("✓"))
+		return nil
+	}
+	fmt.Printf("%s Reclaimed %d stale-lease issue(s):\n", ui.RenderPass("✓"), len(reclaimed))
+	for _, r := range reclaimed {
+		owner := r.PreviousOwner
+		if owner == "" {
+			owner = "(unassigned)"
+		}
+		fmt.Printf("  %s (was held by %s)\n", r.ID, owner)
+	}
+	return nil
 }
 
 func init() {

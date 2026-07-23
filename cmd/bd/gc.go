@@ -42,6 +42,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("gc is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("gc")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -167,6 +170,7 @@ Examples:
 			}
 		}
 
+		var gcSizeInfo map[string]interface{}
 		if gcSkipDolt {
 			results = append(results, phaseResult{name: "Dolt GC", skipped: true})
 		} else {
@@ -186,14 +190,34 @@ Examples:
 				}
 				results = append(results, phaseResult{name: "Dolt GC", detail: "dry-run"})
 			} else {
+				// bd gc runs without a preceding squash, so remote-tracking
+				// refs are left alone here (they cache the remote tip for the
+				// migrate gate); flatten/compact prune them before their GC
+				// (bd-agctw). Sizes are reported so a no-op reclaim is visible.
+				sizeBefore := storeSizeBytes()
+				remoteRefs, tags := listRemoteRefsAndTags(ctx)
 				if err := gc.DoltGC(ctx); err != nil {
 					WarnError("dolt gc failed: %v", err)
 					results = append(results, phaseResult{name: "Dolt GC", detail: "failed"})
 				} else {
-					if !jsonOutput {
-						fmt.Println("  Done")
+					sizeAfter := storeSizeBytes()
+					detail := "complete"
+					if line := gcSizeLine(sizeBefore, sizeAfter); line != "" {
+						detail = "complete: " + line
 					}
-					results = append(results, phaseResult{name: "Dolt GC", detail: "complete"})
+					if !jsonOutput {
+						fmt.Printf("  Done (%s)\n", detail)
+						if len(remoteRefs)+len(tags) > 0 {
+							fmt.Printf("  Note: %d remote-tracking ref(s) and %d tag(s) anchor history;\n", len(remoteRefs), len(tags))
+							fmt.Printf("  after a history squash, use bd flatten / bd compact so they are pruned first.\n")
+						}
+					}
+					results = append(results, phaseResult{name: "Dolt GC", detail: detail})
+					gcSizeInfo = map[string]interface{}{
+						"remote_refs": len(remoteRefs),
+						"tags":        len(tags),
+					}
+					addGCSizeJSON(gcSizeInfo, sizeBefore, sizeAfter)
 				}
 			}
 			if !jsonOutput {
@@ -219,6 +243,9 @@ Examples:
 				phases = append(phases, p)
 			}
 			summaryMap["phases"] = phases
+			if gcSizeInfo != nil {
+				summaryMap["dolt_gc"] = gcSizeInfo
+			}
 			return outputJSON(summaryMap)
 		}
 

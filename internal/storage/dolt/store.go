@@ -153,6 +153,7 @@ var _ storage.GarbageCollector = (*DoltStore)(nil)
 var _ storage.Flattener = (*DoltStore)(nil)
 var _ storage.Compactor = (*DoltStore)(nil)
 var _ storage.SchemaMigrator = (*DoltStore)(nil)
+var _ storage.ExternalRefHistoryQuerier = (*DoltStore)(nil)
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
@@ -246,7 +247,7 @@ type Config struct {
 
 	// ProxiedServer indicates this config targets a per-workspace proxied
 	// dolt sql-server (a parent proxy + a child dolt sql-server, both rooted
-	// at <BeadsDir>/proxieddb). Mutually exclusive with ServerMode: the
+	// at <BeadsDir>/dolt). Mutually exclusive with ServerMode: the
 	// proxied path owns its own connection details and does not consult
 	// ServerHost/Port/Socket/User. Set by the store factory based on
 	// metadata.json dolt_mode=proxied-server.
@@ -307,13 +308,59 @@ const (
 	defaultConnMaxIdleTime = 20 * time.Second
 )
 
-// cliExecTimeout is the maximum time to wait for dolt CLI push/pull operations.
-// SSH transfers can hang indefinitely on network issues or SSH key prompts;
-// this prevents the process from blocking forever.
+// cliExecTimeout is the default maximum time to wait for dolt CLI
+// push/pull/fetch operations. SSH transfers can hang indefinitely on network
+// issues or SSH key prompts; this prevents the process from blocking forever.
+// Large transfers can legitimately run longer (e.g. pushing a big chunk store
+// to a cloud remote, or a transfer serialized behind a busy dolt sql-server
+// that holds the database directory lock); set BEADS_CLI_TRANSFER_TIMEOUT to
+// override.
 const cliExecTimeout = 5 * time.Minute
 
+// cliExecTimeoutEnv is the environment variable that overrides cliExecTimeout.
+const cliExecTimeoutEnv = "BEADS_CLI_TRANSFER_TIMEOUT"
+
+// cliExecWaitDelay bounds how long Wait/CombinedOutput may keep waiting after
+// the transfer context expires. CommandContext kills only the direct dolt
+// child; a grandchild (e.g. a cloud credential helper) that inherited the
+// output pipes would otherwise keep Wait blocked indefinitely after the kill.
+const cliExecWaitDelay = 10 * time.Second
+
+// cliExecTimeoutDuration returns the configured CLI transfer timeout. The env
+// var BEADS_CLI_TRANSFER_TIMEOUT overrides the compiled-in cliExecTimeout
+// const; valid time.ParseDuration strings (e.g. "20m", "90s") or bare numbers
+// treated as seconds (e.g. "90") are accepted. Unset or invalid values fall
+// back to cliExecTimeout.
+func cliExecTimeoutDuration() time.Duration {
+	return timeoutFromEnv(cliExecTimeoutEnv, cliExecTimeout)
+}
+
 func withCLIExecTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, cliExecTimeout)
+	return context.WithTimeout(ctx, cliExecTimeoutDuration())
+}
+
+// timeoutFromEnv returns the duration configured in the named env var, falling
+// back to fallback when the var is unset, unparsable, or non-positive. Valid
+// time.ParseDuration strings (e.g. "2m", "90s") or bare numbers treated as
+// seconds (e.g. "90") are accepted.
+func timeoutFromEnv(env string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(env))
+	if raw == "" {
+		return fallback
+	}
+	if d, err := time.ParseDuration(raw); err == nil {
+		if d > 0 {
+			return d
+		}
+		return fallback
+	}
+	if d, err := time.ParseDuration(raw + "s"); err == nil {
+		if d > 0 {
+			return d
+		}
+		return fallback
+	}
+	return fallback
 }
 
 // fsckTimeout is the default maximum time to wait for dolt fsck to verify the
@@ -331,23 +378,7 @@ const fsckTimeoutEnv = "BEADS_FSCK_TIMEOUT"
 // seconds (e.g. "90") are accepted. Unset or invalid values fall back to
 // fsckTimeout.
 func fsckTimeoutDuration() time.Duration {
-	raw := strings.TrimSpace(os.Getenv(fsckTimeoutEnv))
-	if raw == "" {
-		return fsckTimeout
-	}
-	if d, err := time.ParseDuration(raw); err == nil {
-		if d > 0 {
-			return d
-		}
-		return fsckTimeout
-	}
-	if d, err := time.ParseDuration(raw + "s"); err == nil {
-		if d > 0 {
-			return d
-		}
-		return fsckTimeout
-	}
-	return fsckTimeout
+	return timeoutFromEnv(fsckTimeoutEnv, fsckTimeout)
 }
 
 // Retry configuration for transient connection errors (stale pool connections,
@@ -1829,6 +1860,27 @@ func (s *DoltStore) DoltGC(ctx context.Context) error {
 	return versioncontrolops.DoltGC(ctx, conn)
 }
 
+// ListRemoteRefs returns the names of all cached remote-tracking refs.
+func (s *DoltStore) ListRemoteRefs(ctx context.Context) ([]string, error) {
+	return versioncontrolops.ListRemoteRefs(ctx, s.db)
+}
+
+// PruneRemoteRefs deletes all cached remote-tracking refs so a post-squash GC
+// can reclaim the history they anchor (bd-agctw). Returns the deleted names.
+func (s *DoltStore) PruneRemoteRefs(ctx context.Context) ([]string, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection for remote-ref prune: %w", err)
+	}
+	defer conn.Close()
+	return versioncontrolops.PruneRemoteRefs(ctx, conn)
+}
+
+// ListTags returns the names of all Dolt tags.
+func (s *DoltStore) ListTags(ctx context.Context) ([]string, error) {
+	return versioncontrolops.ListTags(ctx, s.db)
+}
+
 // Flatten squashes all Dolt commit history into a single commit.
 // Pins a single connection because the stored procedures (DOLT_CHECKOUT,
 // DOLT_RESET, etc.) rely on session-scoped state that would be lost if
@@ -2298,19 +2350,23 @@ func (s *DoltStore) ensureMatchingCLIRemote(remote, expectedURL string) error {
 	return nil
 }
 
-func (s *DoltStore) prepareDoltCLITransfer(ctx context.Context, remote string, creds *remoteCredentials, args ...string) (*exec.Cmd, context.CancelFunc) {
+func (s *DoltStore) prepareDoltCLITransfer(ctx context.Context, remote string, creds *remoteCredentials, args ...string) (*exec.Cmd, context.Context, context.CancelFunc) {
 	return prepareDoltCLITransferCommand(ctx, s.CLIDir(), creds, s.isS3Remote(ctx, remote), args...)
 }
 
-func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *remoteCredentials, s3Remote bool, args ...string) (*exec.Cmd, context.CancelFunc) {
+func prepareDoltCLITransferCommand(ctx context.Context, cliDir string, creds *remoteCredentials, s3Remote bool, args ...string) (*exec.Cmd, context.Context, context.CancelFunc) {
 	ctx, cancel := withCLIExecTimeout(ctx)
 	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/ref args
+	// CommandContext kills only the direct dolt child on expiry; a grandchild
+	// (e.g. a cloud credential helper) holding the inherited output pipes
+	// would otherwise keep Wait/CombinedOutput blocked forever after the kill.
+	cmd.WaitDelay = cliExecWaitDelay
 	cmd.Dir = cliDir
 	creds.applyToCmd(cmd)
 	if s3Remote {
 		applyS3ChecksumEnvToCmd(cmd)
 	}
-	return cmd, cancel
+	return cmd, ctx, cancel
 }
 
 // prepareCLIRouteForGitProtocol reports whether the SQL-visible remote uses
@@ -2385,12 +2441,13 @@ func (s *DoltStore) credentialsForRemote(remote string) *remoteCredentials {
 // re-pushes that remote faithfully propagates the dangling reference.
 //
 // If CLIDir is empty or .dolt/noms does not exist, the check is skipped.
-// Five outcomes are possible when fsck exits non-zero (see classifyFSCKFailure):
+// Six outcomes are possible when fsck exits non-zero (see classifyFSCKFailure):
 //   - non-empty output, could-not-open: skipped with a log warning.
 //   - non-empty output, other: ErrDanglingReference — push aborted.
 //   - parent context canceled: cancellation error — push aborted.
 //   - parent context deadline exceeded: ErrFSCKTimeout (caller timeout) — push aborted.
 //   - fsck own timeout: ErrFSCKTimeout (raise BEADS_FSCK_TIMEOUT) — push aborted.
+//   - cancellation phrasing in output, no context error: cancellation error — push aborted.
 func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	dir := s.CLIDir()
 	if dir == "" {
@@ -2415,15 +2472,18 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	return nil
 }
 
-// classifyFSCKFailure maps a failed dolt fsck exit into one of five outcomes,
+// classifyFSCKFailure maps a failed dolt fsck exit into one of six outcomes,
 // evaluated in priority order:
 //
 //	(a) Non-empty output → route by content: could-not-open → nil (caller logs
-//	    and skips); any other content → ErrDanglingReference abort. Non-empty
-//	    output means fsck actually ran and said something (--quiet fsck is
-//	    silent until it finds a problem), so content wins over context state.
-//	    This also closes the race where real corruption arrives at the deadline
-//	    instant and would otherwise be masked as a timeout.
+//	    and skips); cancellation phrasing (fsckOutputInterrupted) → fall
+//	    through to the context-state branches below, because an interrupted
+//	    fsck prints e.g. "context canceled" before dying and that text is not
+//	    an integrity finding; any other content → ErrDanglingReference abort.
+//	    Non-empty output means fsck actually ran and said something (--quiet
+//	    fsck is silent until it finds a problem), so content wins over context
+//	    state. This also closes the race where real corruption arrives at the
+//	    deadline instant and would otherwise be masked as a timeout.
 //
 //	(b) Parent context canceled (Ctrl-C, caller abort) → plain cancellation
 //	    error wrapping context.Canceled; neither ErrDanglingReference nor
@@ -2439,19 +2499,30 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 //	(d) fsck's own deadline exceeded, parent still running → ErrFSCKTimeout
 //	    with dolt gc / CALL DOLT_GC() / BEADS_FSCK_TIMEOUT guidance.
 //
-//	(e) Generic non-zero exit, empty output → ErrDanglingReference abort.
+//	(e) Cancellation phrasing in output but no recognized context error — the
+//	    bd process (group) was killed out from under fsck, so neither context
+//	    carries the reason. Plain cancellation error wrapping context.Canceled;
+//	    the store is not implicated.
+//
+//	(f) Generic non-zero exit, empty output → ErrDanglingReference abort.
 //
 // Returning nil for the could-not-open case (branch a) distinguishes "fsck
 // couldn't run at all" from "fsck ran and found a problem". Wrapping an
-// open-failure as ErrDanglingReference misleads users (dolthub/dolt#10915).
+// open-failure as ErrDanglingReference misleads users (dolthub/dolt#10915);
+// so does wrapping an interrupt's "context canceled" noise as corruption
+// (same genus, observed when a background push's process group was killed).
 func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
 	// (a) Non-empty output: fsck actually reported something; route by content.
 	if output != "" {
 		if fsckCouldNotOpen(output) {
 			return nil
 		}
-		return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
-			ErrDanglingReference, output)
+		if !fsckOutputInterrupted(output) {
+			return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
+				ErrDanglingReference, output)
+		}
+		// Cancellation phrasing: not an integrity finding — classify by
+		// context state below.
 	}
 	// (b) Parent context canceled — user interrupt or caller abort.
 	if errors.Is(parentErr, context.Canceled) {
@@ -2474,7 +2545,13 @@ func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
 			"the timeout can be raised via the BEADS_FSCK_TIMEOUT environment variable",
 			ErrFSCKTimeout)
 	}
-	// (e) Generic failure with no output and no recognized context error.
+	// (e) Interrupted fsck whose cancellation reason lives only in the output
+	// (process group killed: both contexts look healthy from here).
+	if fsckOutputInterrupted(output) {
+		return fmt.Errorf("pre-push integrity check interrupted: %w: %s",
+			context.Canceled, output)
+	}
+	// (f) Generic failure with no output and no recognized context error.
 	return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks",
 		ErrDanglingReference)
 }
@@ -2493,6 +2570,26 @@ func fsckCouldNotOpen(output string) bool {
 	}
 }
 
+// fsckOutputInterrupted reports whether dolt fsck output is cancellation
+// noise from a dying process rather than an integrity finding. An fsck
+// interrupted mid-run (Ctrl-C, killed process group, expired deadline)
+// prints the literal cancellation text to its combined output before
+// exiting; treating that as a dangling-reference finding produces a false
+// corruption report for a plain interrupt (bd-f2b15).
+func fsckOutputInterrupted(output string) bool {
+	for _, phrase := range []string{
+		"context canceled",
+		"context deadline exceeded",
+		"signal: killed",
+		"signal: terminated",
+	} {
+		if strings.Contains(output, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // doltCLIPush shells out to `dolt push` from the database directory.
 // Used for git-protocol remotes where CALL DOLT_PUSH times out through the SQL connection.
 // If creds is non-nil, credentials are set on the subprocess environment only,
@@ -2506,25 +2603,36 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 		args = append(args, "--force")
 	}
 	args = append(args, remote, s.branch)
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, args...)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, args...)
 	defer cancel()
 	applyNoGitHooksToCmd(cmd) // GH#3724
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("dolt push failed: %s: %w", strings.TrimSpace(string(out)), err)
+		return cliTransferError("dolt push", remote, transferCtx, out, err)
 	}
 	return nil
+}
+
+// cliTransferError wraps a failed CLI transfer, distinguishing a transfer that
+// hit the bounded timeout (actionable: raise BEADS_CLI_TRANSFER_TIMEOUT, or
+// check what holds the database directory busy) from an ordinary failure.
+func cliTransferError(op, remote string, transferCtx context.Context, out []byte, err error) error {
+	if errors.Is(transferCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%s to %q timed out after %s (override with %s=<duration>; large transfers to cloud remotes can run long, and a busy dolt sql-server serving the database directory can stall CLI transfers): %s: %w",
+			op, remote, cliExecTimeoutDuration(), cliExecTimeoutEnv, strings.TrimSpace(string(out)), err)
+	}
+	return fmt.Errorf("%s failed: %s: %w", op, strings.TrimSpace(string(out)), err)
 }
 
 // doltCLIPull shells out to `dolt pull` from the database directory.
 // Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
 // If creds is non-nil, credentials are set on the subprocess environment only.
 func (s *DoltStore) doltCLIPull(ctx context.Context, remote string, creds *remoteCredentials) error {
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, "pull", remote, s.branch)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, "pull", remote, s.branch)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("dolt pull failed: %s: %w", strings.TrimSpace(string(out)), err)
+		return cliTransferError("dolt pull", remote, transferCtx, out, err)
 	}
 	return nil
 }

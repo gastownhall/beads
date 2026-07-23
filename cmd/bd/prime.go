@@ -25,6 +25,7 @@ var (
 	primeStealthMode  bool
 	primeExportMode   bool
 	primeMemoriesOnly bool
+	primeNoMemories   bool
 	primeHookJSONMode bool
 
 	primeMaxMemories       int
@@ -101,12 +102,13 @@ Config options:
   (conservative | minimal | team-maintainer; default conservative).
   Set via: bd config set agent.profile team-maintainer
   Or per-session: BD_AGENT_PROFILE=team-maintainer (env var takes precedence).
-  See docs/SETUP.md#policy-profiles for what each profile means.
+  See docs/getting-started/ide-setup.md#policy-profiles for what each profile means.
 
 	Workflow customization:
-	- Place a .beads/PRIME.md file in the local clone or resolved workspace to override the default output entirely.
+	- Place a .beads/PRIME.md file in the local clone or resolved workspace to override the default workflow text. Persistent memories (from bd remember) are still appended so memory injection keeps working under a custom template.
 	- Use --export to dump the default content for customization.
-	- Use --memories-only for hook contexts that should inject only persistent memories.
+	- Use --memories-only for hook contexts that should inject only persistent memories; this returns only the memories section even when a custom PRIME.md is present.
+	- Use --no-memories to omit the persistent memories section (useful when the memories section is large and would dominate a context budget). --memories-only takes precedence if both are set.
 
 Memory injection caps:
 	Large memory sets can exceed what a session-start hook host will ingest,
@@ -160,26 +162,38 @@ Memory injection caps:
 
 		stealthMode := primeStealthMode || config.GetBool("no-git-ops")
 
-		if !primeExportMode {
-			localPrimePath := filepath.Join(".beads", "PRIME.md")
-			redirectedPrimePath := filepath.Join(beadsDir, "PRIME.md")
-
-			// #nosec G304 -- path is relative to cwd
-			if content, err := os.ReadFile(localPrimePath); err == nil {
-				emit(string(content))
-				return nil
-			}
-			// #nosec G304 -- path is constructed from beadsDir which we control
-			if content, err := os.ReadFile(redirectedPrimePath); err == nil {
-				emit(string(content))
-				return nil
-			}
-			// #nosec G304 -- path constructed from UserConfigDir which we control
-			if globalPath := resolveGlobalPrimePath(""); globalPath != "" {
-				if content, err := os.ReadFile(globalPath); err == nil {
-					emit(string(content))
-					return nil
+		// --memories-only is the primary memory-injection path for hook contexts
+		// (e.g. PreCompact). It must return ONLY the persistent memories section,
+		// regardless of any custom PRIME.md override or --export (GH#3941).
+		// Handle it before the custom-PRIME branch so a custom PRIME.md can never
+		// suppress memory injection.
+		if primeMemoriesOnly {
+			var buf bytes.Buffer
+			if err := outputMemoriesOnlyContext(&buf); err != nil {
+				// Suppress all errors - silent exit with success.
+				if primeHookJSONMode {
+					_ = outputHookJSON(os.Stdout, "")
 				}
+				return nil
+			}
+			emit(buf.String())
+			return nil
+		}
+
+		// Check for custom PRIME.md override (unless --export flag).
+		// A custom PRIME.md replaces the default workflow text, but the persistent
+		// memories section is still appended (when present) so `bd remember` keeps
+		// working under a custom template — matching the default-template behavior
+		// (GH#3941).
+		if !primeExportMode {
+			if content, ok := readCustomPrimeContent(beadsDir); ok {
+				if !primeNoMemories {
+					if mem := formatMemoriesForPrime(false); mem != "" {
+						content += mem
+					}
+				}
+				emit(content)
+				return nil
 			}
 		}
 
@@ -206,10 +220,39 @@ func init() {
 	primeCmd.Flags().BoolVar(&primeStealthMode, "stealth", false, "Stealth mode (no git operations, flush only)")
 	primeCmd.Flags().BoolVar(&primeExportMode, "export", false, "Output default content (ignores PRIME.md override)")
 	primeCmd.Flags().BoolVar(&primeMemoriesOnly, "memories-only", false, "Output only persistent memories for compact hook contexts")
+	primeCmd.Flags().BoolVar(&primeNoMemories, "no-memories", false, "Omit the persistent memories section (ignored when --memories-only is set, which wins)")
 	primeCmd.Flags().BoolVar(&primeHookJSONMode, "hook-json", false, "Wrap output in the SessionStart hook JSON envelope (Claude Code, Gemini CLI, Codex)")
 	primeCmd.Flags().IntVar(&primeMaxMemories, "max-memories", 0, "Cap injected persistent memories to N entries (0 = unlimited; falls back to the prime.max-memories config key)")
 	primeCmd.Flags().IntVar(&primeMaxMemoryChars, "max-memory-chars", 0, "Cap the total bytes of injected memory entries, at whole-memory boundaries; section header and banner are not counted (0 = unlimited; falls back to the prime.max-memory-chars config key)")
 	rootCmd.AddCommand(primeCmd)
+}
+
+// readCustomPrimeContent returns the contents of a custom PRIME.md override and
+// true when one is found. It checks, in priority order: the local .beads/PRIME.md
+// (clone-specific customization), the redirected workspace PRIME.md (shared
+// customization), then the global ~/.config/beads/PRIME.md. It returns ("", false)
+// when no override exists, so callers fall through to the generated default.
+func readCustomPrimeContent(beadsDir string) (string, bool) {
+	localPrimePath := filepath.Join(".beads", "PRIME.md")
+	// Try local first (user's clone-specific customization).
+	// #nosec G304 -- path is relative to cwd
+	if content, err := os.ReadFile(localPrimePath); err == nil {
+		return string(content), true
+	}
+	// Fall back to redirected location (shared customization).
+	redirectedPrimePath := filepath.Join(beadsDir, "PRIME.md")
+	// #nosec G304 -- path is constructed from beadsDir which we control
+	if content, err := os.ReadFile(redirectedPrimePath); err == nil {
+		return string(content), true
+	}
+	// Fall back to global config (~/.config/beads/PRIME.md).
+	if globalPath := resolveGlobalPrimePath(""); globalPath != "" {
+		// #nosec G304 -- path constructed from UserConfigDir which we control
+		if content, err := os.ReadFile(globalPath); err == nil {
+			return string(content), true
+		}
+	}
+	return "", false
 }
 
 // outputHookJSON wraps content in the SessionStart hook JSON envelope shared
@@ -310,6 +353,29 @@ var primeHasGitRemote = func() bool {
 		return false
 	}
 	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// primeHasSyncRemote detects if a Dolt sync remote is configured (stubbable for tests)
+var primeHasSyncRemote = func() bool {
+	return resolveSyncRemote() != ""
+}
+
+// primeDoltSyncBullets returns the "bd dolt push"/"bd dolt pull" bullet
+// lines for the Sync & Collaboration section, in the requested order, and
+// an empty string when no Dolt sync remote is configured (doltSync == false,
+// gh#4130). This is independent of the git-remote axis (localOnly) that
+// drives git push/pull hints — the two axes must not be conflated
+// (gh#4230 review).
+func primeDoltSyncBullets(doltSync bool, pushFirst bool) string {
+	if !doltSync {
+		return ""
+	}
+	if pushFirst {
+		return "- `bd dolt push` - Push beads to Dolt remote\n" +
+			"- `bd dolt pull` - Pull beads from Dolt remote\n"
+	}
+	return "- `bd dolt pull` - Pull beads updates from Dolt remote\n" +
+		"- `bd dolt push` - Push beads to Dolt remote\n"
 }
 
 // getRedirectNotice returns a notice string if beads is redirected
@@ -522,7 +588,13 @@ func formatPrimeMemoryTimeout(compact bool, timeout time.Duration) string {
 func outputMCPContext(w io.Writer, stealthMode bool) error {
 	ephemeral := isEphemeralBranch()
 	noPush := primeNoPushConfigured()
+	// localOnly reflects only the git-remote axis (drives git push/pull
+	// hints and remote-sync authority wording). Dolt sync-remote presence
+	// (doltSync, below) is a separate axis that only gates the literal
+	// `bd dolt push`/`bd dolt pull` hint lines (gh#4130) — the two must not
+	// be conflated (gh#4230 review).
 	localOnly := !primeHasGitRemote()
+	doltSync := primeHasSyncRemote()
 
 	var closeProtocol string
 	var profileRule string
@@ -549,7 +621,11 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 		// routine work here, not conditional on a per-session "enabled" ask.
 		// Hard constraints above (stealth/local-only/ephemeral/no-push) still
 		// take precedence over this profile.
-		closeProtocol = "Before saying \"done\": bd close <completed-ids>; run checks; commit, bd dolt push, and git push as part of routine work (agent.profile=team-maintainer), unless current instructions say otherwise."
+		if doltSync {
+			closeProtocol = "Before saying \"done\": bd close <completed-ids>; run checks; commit, bd dolt push, and git push as part of routine work (agent.profile=team-maintainer), unless current instructions say otherwise."
+		} else {
+			closeProtocol = "Before saying \"done\": bd close <completed-ids>; run checks; commit and git push as part of routine work (agent.profile=team-maintainer), unless current instructions say otherwise."
+		}
 		profileRule = "Profile: team-maintainer active (agent.profile=team-maintainer) - commit, sync, and push are routine; explicit no-commit/no-push instructions still override."
 	} else {
 		closeProtocol = "Before saying \"done\": bd close <completed-ids>; run checks. Then follow the active profile — conservative reports handoff; team-maintainer may commit/sync/push when explicitly enabled."
@@ -557,7 +633,10 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 	}
 
 	redirectNotice := getRedirectNotice(false)
-	memories := formatMemoriesForPrime(true)
+	var memories string
+	if !primeNoMemories {
+		memories = formatMemoriesForPrime(true)
+	}
 
 	context := primeTruncationDirective + `# Beads Issue Tracker Active
 
@@ -589,7 +668,13 @@ Start: Check ` + "`ready`" + ` tool for available work.
 func outputCLIContext(w io.Writer, stealthMode bool) error {
 	ephemeral := isEphemeralBranch()
 	noPush := primeNoPushConfigured()
+	// localOnly reflects only the git-remote axis (drives git push/pull
+	// hints and remote-sync authority wording). Dolt sync-remote presence
+	// (doltSync, below) is a separate axis that only gates the literal
+	// `bd dolt push`/`bd dolt pull` hint lines (gh#4130) — the two must not
+	// be conflated (gh#4230 review).
 	localOnly := !primeHasGitRemote()
+	doltSync := primeHasSyncRemote()
 
 	var closeProtocol string
 	var closeNote string
@@ -647,15 +732,17 @@ git status                  # Report changed files and proposed commands
 [ ] 3. git status               (check what changed)
 [ ] 4. report handoff           (changed files, validation, proposed commit if authorized)`
 		closeNote = "**Note:** This is an ephemeral branch (no upstream). Do not push it unless the user or orchestrator explicitly says to."
-		syncSection = `### Sync & Collaboration
-- ` + "`bd dolt pull`" + ` - Pull beads updates from Dolt remote
-- ` + "`bd dolt push`" + ` - Push beads to Dolt remote
-- ` + "`bd search <query>`" + ` - Search issues by keyword`
+		syncSection = "### Sync & Collaboration\n" +
+			primeDoltSyncBullets(doltSync, false) +
+			"- `bd search <query>` - Search issues by keyword"
+		doltPullStep := ""
+		if doltSync {
+			doltPullStep = "bd dolt pull                # Pull latest beads from main\n"
+		}
 		completingWorkflow = `**Completing work:**
 ` + "```bash" + `
 bd close <id1> <id2> ...    # Close all completed issues at once
-bd dolt pull                # Pull latest beads from main
-git status                  # Report changed files and proposed commit; wait for authority
+` + doltPullStep + `git status                  # Report changed files and proposed commit; wait for authority
 # Merge to main locally only when the active instructions grant that authority
 ` + "```"
 		gitWorkflowRule = "Git workflow: conservative by default on ephemeral branches"
@@ -666,10 +753,9 @@ git status                  # Report changed files and proposed commit; wait for
 [ ] 3. git status               (check what changed)
 [ ] 4. report handoff           (push disabled; wait for explicit authority)`
 		closeNote = "**Note:** Push disabled via config. Do not push unless the user or orchestrator explicitly says to."
-		syncSection = `### Sync & Collaboration
-- ` + "`bd dolt push`" + ` - Push beads to Dolt remote
-- ` + "`bd dolt pull`" + ` - Pull beads from Dolt remote
-- ` + "`bd search <query>`" + ` - Search issues by keyword`
+		syncSection = "### Sync & Collaboration\n" +
+			primeDoltSyncBullets(doltSync, true) +
+			"- `bd search <query>` - Search issues by keyword"
 		completingWorkflow = `**Completing work:**
 ` + "```bash" + `
 bd close <id1> <id2> ...    # Close all completed issues at once
@@ -688,18 +774,20 @@ git status                  # Report changed files and proposed commands
 [ ] 3. git status               (check what changed)
 [ ] 4. team-maintainer: commit, sync, push as part of routine work (unless current instructions say otherwise)`
 		closeNote = "**Policy:** agent.profile=team-maintainer is active. Commit, sync, and push as part of routine work; explicit \"do not commit\"/\"do not push\" instructions still override."
-		syncSection = `### Sync & Collaboration
-- ` + "`bd dolt push`" + ` - Push beads to Dolt remote
-- ` + "`bd dolt pull`" + ` - Pull beads from Dolt remote
-- ` + "`bd search <query>`" + ` - Search issues by keyword`
+		syncSection = "### Sync & Collaboration\n" +
+			primeDoltSyncBullets(doltSync, true) +
+			"- `bd search <query>` - Search issues by keyword"
+		doltPushStep := ""
+		if doltSync {
+			doltPushStep = "bd dolt push\n"
+		}
 		completingWorkflow = `**Completing work:**
 ` + "```bash" + `
 bd close <id1> <id2> ...    # Close all completed issues at once
 git status                  # Check changed files
 # team-maintainer: commit, sync, push are routine unless instructions forbid it
 git add . && git commit -m "..."
-bd dolt push
-git push
+` + doltPushStep + `git push
 ` + "```"
 		gitWorkflowRule = "Git workflow: team-maintainer active - commit/push are routine unless explicitly restricted"
 		profileRule = "Profile: team-maintainer active (agent.profile=team-maintainer) - commit, sync, and push are routine; explicit no-commit/no-push instructions still override."
@@ -709,10 +797,13 @@ git push
 [ ] 3. git status               (check what changed)
 [ ] 4. follow active profile    (conservative: report handoff; team-maintainer: commit/sync/push if enabled)`
 		closeNote = "**Policy:** Conservative is the default. Commit, sync, or push only when the active user, orchestrator, or repository profile grants that authority."
-		syncSection = `### Sync & Collaboration
-- ` + "`bd dolt push`" + ` - Push beads to Dolt remote
-- ` + "`bd dolt pull`" + ` - Pull beads from Dolt remote
-- ` + "`bd search <query>`" + ` - Search issues by keyword`
+		syncSection = "### Sync & Collaboration\n" +
+			primeDoltSyncBullets(doltSync, true) +
+			"- `bd search <query>` - Search issues by keyword"
+		doltPushComment := ""
+		if doltSync {
+			doltPushComment = "# bd dolt push\n"
+		}
 		completingWorkflow = `**Completing work:**
 ` + "```bash" + `
 bd close <id1> <id2> ...    # Close all completed issues at once
@@ -720,15 +811,17 @@ git status                  # Check changed files
 # Conservative/minimal/default: report status and proposed commands; wait for approval
 # Team-maintainer opt-in only, unless current instructions forbid it:
 # git add . && git commit -m "..."
-# bd dolt push
-# git push
+` + doltPushComment + `# git push
 ` + "```"
 		gitWorkflowRule = "Git workflow: conservative by default; commit/push only with explicit user/orchestrator or team-maintainer authority"
 		profileRule = "Default: do not commit, push, or run dolt remote sync without explicit authority. Team-maintainer behavior is opt-in and still subordinate to user/orchestrator instructions."
 	}
 
 	redirectNotice := getRedirectNotice(true)
-	memories := formatMemoriesForPrime(false)
+	var memories string
+	if !primeNoMemories {
+		memories = formatMemoriesForPrime(false)
+	}
 
 	context := primeTruncationDirective + `# Beads Workflow Context
 

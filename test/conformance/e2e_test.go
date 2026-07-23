@@ -20,11 +20,9 @@ import (
 // scenario is a named sequence of bd CLI invocations. IDs are pinned with --id so
 // they match across backends; only timestamps/paths need normalization.
 //
-// unordered marks a scenario whose JSON-array output has no contractual order: bd
-// sorts by priority then created_at, and Postgres's whole-second timestamps tie where
-// Dolt's sub-second ones do not, so equal-priority items created in the same second
-// can legitimately differ in order. For these, array elements are sorted by id before
-// comparison (matching the bts-rs oracle's multiset semantics for list output).
+// unordered marks a scenario whose JSON-array output has no contractual order. For
+// these, array elements are sorted by id before comparison (matching the bts-rs
+// oracle's multiset semantics for list output).
 type scenario struct {
 	name      string
 	steps     [][]string
@@ -33,7 +31,7 @@ type scenario struct {
 
 // corpus is the backend-agnostic CLI surface exercised end-to-end. It is deliberately
 // compact (the gc lifecycle + config), and grows over time; the bts-rs 523-scenario
-// differential oracle (scripts/run-oracle-p.sh) remains the deep gate.
+// differential corpus exercises both maintained storage families.
 var corpus = []scenario{
 	{name: "create-show", steps: [][]string{
 		{"create", "First task", "--id", "cf-a1", "-t", "task", "--json"},
@@ -75,8 +73,7 @@ var corpus = []scenario{
 		{"config", "unset", "custom.foo"},
 		{"config", "get", "custom.foo"},
 	}},
-	// Deferred surfaces, present to exercise XFail classification against the
-	// postgres profile's allowlist (the reference passes these).
+	// Deferred surfaces exercise the typed unsupported-operation contract.
 	{name: "stats", steps: [][]string{
 		{"create", "s", "--id", "cf-s1", "-t", "task"},
 		{"stats", "--json"},
@@ -143,12 +140,10 @@ var corpus = []scenario{
 	// comment UUIDv7 the CLI harness can't normalize, so it is not a CLI-differential.)
 	// Case-variant config key round-trip. `config set` passes the key verbatim to
 	// store.SetConfig (no ToLower) and namespaced keys bypass the recognized-key
-	// allowlist, so custom.TeamName reaches the store as-is. On the embedded-Dolt
-	// reference the key column is case-SENSITIVE (verified at the store layer), so
+	// allowlist, so custom.TeamName reaches the store as-is. On both maintained
+	// backends the key column is case-sensitive, so
 	// `config get custom.teamname` does NOT see the value set under custom.TeamName,
-	// while `config get custom.TeamName` does. config set/get/unset all run on SQL
-	// backends. Divergence suspect: real MySQL's case-insensitive default collation
-	// would make custom.teamname resolve to the custom.TeamName row.
+	// while `config get custom.TeamName` does.
 	{name: "config-case-variant-key", steps: [][]string{
 		{"config", "set", "custom.TeamName", "example-org"},
 		{"config", "get", "custom.teamname"},
@@ -164,8 +159,8 @@ var corpus = []scenario{
 		{"create", "childB", "-t", "task", "--parent", "cf-cp1", "--json"},
 		{"list", "--json"},
 	}},
-	// (bd mol wisp list order is non-contractual for equal-second ties — Dolt/PG vs
-	// MySQL/SQLite differ on tie order in the nested wisps array, which the harness can't
+	// (bd mol wisp list order is non-contractual for equal-second ties — backends
+	// can differ on tie order in the nested wisps array, which the harness can't
 	// normalize; ListWisps is covered as a set at the store level.)
 	// All cli-differential scenarios below were driven end-to-end against the
 	// embedded-Dolt reference (bd built with -tags gms_pure_go, `bd init -p cf`) and
@@ -310,35 +305,14 @@ func TestConformanceE2E(t *testing.T) {
 	ref := Reference()
 	cands := Candidates()
 	if len(cands) == 0 {
-		t.Skip("no candidate backends available (set BEADS_PG_TEST_URL for the postgres profile)")
+		t.Skip("no candidate backends registered; the differential harness is idle until another backend profile is added")
 	}
-	// Make coverage visible: sqlite's Available() is always true, so a run with
-	// BEADS_PG_TEST_URL/BEADS_MYSQL_TEST_URL unset compares only sqlite yet still
-	// passes green. Log the candidate set, and honor BEADS_CONFORMANCE_REQUIRE
-	// (comma-separated profile names) so CI hard-fails when an expected backend is
-	// absent rather than silently narrowing coverage.
+	// Make coverage visible in test logs.
 	names := make([]string, len(cands))
 	for i, c := range cands {
 		names[i] = c.Name
 	}
 	t.Logf("E2E differential candidates: %v (reference=%s)", names, ref.Name)
-	if req := strings.TrimSpace(os.Getenv("BEADS_CONFORMANCE_REQUIRE")); req != "" {
-		for _, want := range strings.Split(req, ",") {
-			if want = strings.TrimSpace(want); want == "" {
-				continue
-			}
-			found := false
-			for _, n := range names {
-				if n == want {
-					found = true
-					break
-				}
-			}
-			if !found {
-				t.Fatalf("BEADS_CONFORMANCE_REQUIRE lists %q but that candidate is unavailable (set its BEADS_*_TEST_URL)", want)
-			}
-		}
-	}
 	for _, sc := range corpus {
 		sc := sc
 		t.Run(sc.name, func(t *testing.T) {
@@ -365,12 +339,6 @@ func TestConformanceE2E(t *testing.T) {
 func runScenario(t *testing.T, bin string, p BackendProfile, sc scenario) []string {
 	t.Helper()
 	ws := &Workspace{Dir: t.TempDir()}
-	if p.NewHandle != nil {
-		ws.Handle = p.NewHandle()
-	}
-	if p.Teardown != nil {
-		t.Cleanup(func() { p.Teardown(ws) })
-	}
 	var env []string
 	if p.Env != nil {
 		env = p.Env(ws)
@@ -440,13 +408,10 @@ var (
 	reRoleWarn = regexp.MustCompile(`(?m)^warning: beads\.role not configured \(GH#2950\)\.\n(?:^  (?:Fix|Or): .*\n?)*`)
 )
 
-// normalize removes cross-backend and cross-run noise: workspace path, schema handle,
-// timestamps, and random tip banners. Pinned IDs need no normalization.
+// normalize removes cross-backend and cross-run noise: workspace path, timestamps,
+// and random tip banners. Pinned IDs need no normalization.
 func normalize(s string, ws *Workspace) string {
 	s = strings.ReplaceAll(s, ws.Dir, "<DIR>")
-	if ws.Handle != "" {
-		s = strings.ReplaceAll(s, ws.Handle, "<SCHEMA>")
-	}
 	s = reZeroTS.ReplaceAllString(s, "<ZERO-TS>")
 	s = reTimestamp.ReplaceAllString(s, "<TS>")
 	s = reTip.ReplaceAllString(s, "")

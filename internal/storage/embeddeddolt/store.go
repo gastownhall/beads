@@ -29,6 +29,7 @@ var _ storage.GarbageCollector = (*EmbeddedDoltStore)(nil)
 var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
+var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
 // Each method call opens a short-lived connection, executes within an explicit
@@ -536,6 +537,20 @@ func (s *EmbeddedDoltStore) GetIssueComments(ctx context.Context, issueID string
 	return result, err
 }
 
+// GetIssueCommentsPage returns one keyset page of an issue's comments in
+// (created_at ASC, id ASC) order, resuming strictly after the cursor. See the
+// storage.Storage doc for the ordering, sargability, and page-walk-equals-full-
+// read contract.
+func (s *EmbeddedDoltStore) GetIssueCommentsPage(ctx context.Context, issueID string, after storage.CommentPageCursor, limit int) ([]*types.Comment, error) {
+	var result []*types.Comment
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetIssueCommentsPageInTx(ctx, tx, issueID, after, limit)
+		return err
+	})
+	return result, err
+}
+
 func (s *EmbeddedDoltStore) GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error) {
 	var result []*types.Event
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
@@ -551,6 +566,19 @@ func (s *EmbeddedDoltStore) GetAllEventsSince(ctx context.Context, since time.Ti
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.GetAllEventsSinceInTx(ctx, tx, since)
+		return err
+	})
+	return result, err
+}
+
+// EventsSince returns durable events strictly after the keyset cursor, ordered
+// by (created_at ASC, id ASC) and bounded by limit. Durable events table only.
+// issueID != "" scopes the feed to one bead's history.
+func (s *EmbeddedDoltStore) EventsSince(ctx context.Context, cursor storage.EventCursor, issueID string, limit int) ([]*types.Event, error) {
+	var result []*types.Event
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.EventsSinceInTx(ctx, tx, cursor.CreatedAt, cursor.ID, issueID, limit)
 		return err
 	})
 	return result, err
@@ -580,6 +608,40 @@ func (s *EmbeddedDoltStore) DoltGC(ctx context.Context) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.DoltGC(ctx, db)
 	})
+}
+
+// ListRemoteRefs returns the names of all cached remote-tracking refs.
+func (s *EmbeddedDoltStore) ListRemoteRefs(ctx context.Context) ([]string, error) {
+	var refs []string
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		refs, err = versioncontrolops.ListRemoteRefs(ctx, db)
+		return err
+	})
+	return refs, err
+}
+
+// PruneRemoteRefs deletes all cached remote-tracking refs so a post-squash GC
+// can reclaim the history they anchor (bd-agctw). Returns the deleted names.
+func (s *EmbeddedDoltStore) PruneRemoteRefs(ctx context.Context) ([]string, error) {
+	var pruned []string
+	err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		pruned, err = versioncontrolops.PruneRemoteRefs(ctx, db)
+		return err
+	})
+	return pruned, err
+}
+
+// ListTags returns the names of all Dolt tags.
+func (s *EmbeddedDoltStore) ListTags(ctx context.Context) ([]string, error) {
+	var tags []string
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		tags, err = versioncontrolops.ListTags(ctx, db)
+		return err
+	})
+	return tags, err
 }
 
 // ImportJSONLData atomically checks if the database is empty and, if so,
@@ -758,6 +820,20 @@ func (s *EmbeddedDoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]
 	return result, err
 }
 
+// PreviousExternalRef returns the external_ref value recorded for issueID
+// as of the most recent commit at or before asOf.
+// Implements storage.ExternalRefHistoryQuerier.
+func (s *EmbeddedDoltStore) PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (string, bool, error) {
+	var ref string
+	var found bool
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		ref, found, err = issueops.PreviousExternalRefInTx(ctx, tx, issueID, asOf)
+		return err
+	})
+	return ref, found, err
+}
+
 // ---------------------------------------------------------------------------
 // storage.RemoteStore
 // ---------------------------------------------------------------------------
@@ -835,6 +911,30 @@ func (s *EmbeddedDoltStore) GetDependencyRecords(ctx context.Context, issueID st
 		return nil
 	})
 	return result, err
+}
+
+// GetDependentRecords returns raw dependency rows whose target is targetID,
+// without hydrating the source issues. Delegates to shared query logic.
+func (s *EmbeddedDoltStore) GetDependentRecords(ctx context.Context, targetID string, depType string, limit int, afterID string) ([]*types.Dependency, error) {
+	var result []*types.Dependency
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependentRecordsInTx(ctx, tx, targetID, depType, limit, afterID)
+		return err
+	})
+	return result, err
+}
+
+// CountDependentRecords returns the total inbound-edge count of targetID across
+// both dependency tables. Delegates to issueops.CountDependentRecordsInTx.
+func (s *EmbeddedDoltStore) CountDependentRecords(ctx context.Context, targetID string, depType string) (int, error) {
+	var n int
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		n, err = issueops.CountDependentRecordsInTx(ctx, tx, targetID, depType)
+		return err
+	})
+	return n, err
 }
 
 // IsBlocked is implemented in issues.go.

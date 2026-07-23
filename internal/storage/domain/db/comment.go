@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -109,4 +112,39 @@ func (r *commentSQLRepositoryImpl) IterByIssueID(ctx context.Context, issueID st
 		return nil, err
 	}
 	return storage.NewSliceIter(bulk[issueID]), nil
+}
+
+func (r *commentSQLRepositoryImpl) Insert(ctx context.Context, issueID, author, text string, opts domain.CommentOpts) (*types.Comment, error) {
+	if issueID == "" {
+		return nil, fmt.Errorf("db: CommentSQLRepository.Insert: issueID must not be empty")
+	}
+
+	issueTable := pickIssueTable(opts.UseWispsTable)
+	var exists bool
+	//nolint:gosec // G201: issueTable is one of two hardcoded constants
+	if err := r.runner.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM %s WHERE id = ?)", issueTable), issueID).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("db: CommentSQLRepository.Insert: check issue existence: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("db: CommentSQLRepository.Insert: issue %s not found", issueID)
+	}
+
+	createdAt := time.Now().UTC()
+	id := uuid.Must(uuid.NewV7()).String()
+	commentTable := pickCommentTable(opts.UseWispsTable)
+	//nolint:gosec // G201: commentTable is one of two hardcoded constants
+	if _, err := r.runner.ExecContext(ctx,
+		fmt.Sprintf("INSERT INTO %s (id, issue_id, author, text, created_at) VALUES (?, ?, ?, ?, ?)", commentTable),
+		id, issueID, author, text, createdAt); err != nil {
+		return nil, fmt.Errorf("db: CommentSQLRepository.Insert: %w", err)
+	}
+
+	return &types.Comment{
+		ID:        id,
+		IssueID:   issueID,
+		Author:    author,
+		Text:      text,
+		CreatedAt: createdAt,
+	}, nil
 }

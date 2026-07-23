@@ -148,6 +148,9 @@ func getFederatedStore() (storage.DoltStorage, error) {
 }
 
 func runFederationSync(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("federation sync is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("federation-sync")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -243,6 +246,9 @@ func runFederationSync(cmd *cobra.Command, args []string) error {
 }
 
 func runFederationStatus(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("federation status is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("federation-status")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -363,6 +369,9 @@ func runFederationStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runFederationAddPeer(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("federation add-peer is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("federation-add-peer")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -431,6 +440,9 @@ func runFederationAddPeer(cmd *cobra.Command, args []string) error {
 }
 
 func runFederationRemovePeer(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("federation remove-peer is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("federation-remove-peer")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -457,6 +469,9 @@ func runFederationRemovePeer(cmd *cobra.Command, args []string) error {
 }
 
 func runFederationListPeers(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("federation list-peers is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("federation-list-peers")
 	defer func() {
 		if c := metrics.Global(); c != nil {

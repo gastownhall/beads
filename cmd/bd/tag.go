@@ -32,6 +32,10 @@ Examples:
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runTagProxiedServer(rootCtx, args)
+		}
+
 		id := args[0]
 		label := args[1]
 

@@ -36,6 +36,8 @@ func RunAudit_search_counts_stats(t *testing.T, f Factory) {
 	t.Run("SearchIdenticalTimestampIDOrder", func(t *testing.T) { testAuditSearchIdenticalTimestampIDOrder(t, f) })
 	t.Run("SearchSortByClosedNullsLast", func(t *testing.T) { testAuditSearchSortByClosedNullsLast(t, f) })
 	t.Run("SearchTextIDBranchExternalRef", func(t *testing.T) { testAuditSearchTextIDBranchExternalRef(t, f) })
+	t.Run("SearchIDPrefixCaseSensitive", func(t *testing.T) { testAuditSearchIDPrefixCaseSensitive(t, f) })
+	t.Run("SearchParentDescendantCaseSensitive", func(t *testing.T) { testAuditSearchParentDescendantCaseSensitive(t, f) })
 	t.Run("StaleStatusOverride", func(t *testing.T) { testAuditStaleStatusOverride(t, f) })
 	t.Run("EpicsEligiblePartial", func(t *testing.T) { testAuditEpicsEligiblePartial(t, f) })
 	t.Run("GetIssuesByLabelWithWisp", func(t *testing.T) { testAuditGetIssuesByLabelWithWisp(t, f) })
@@ -180,7 +182,7 @@ func testAuditReadyWorkDepCreatedAtParity(t *testing.T, f Factory) {
 }
 
 // countByColumnInTx emits COALESCE(priority, ”) GROUP BY priority; priority is
-// integer NOT NULL. MySQL/Dolt coerce the int to a string key, then
+// integer NOT NULL. Both maintained implementations return a string key, then
 // countGroupForTablesInTx prepends 'P'. Reference keys: P0/P1/P2.
 func testAuditCountByPriority(t *testing.T, f Factory) {
 	s := f(t)
@@ -364,7 +366,7 @@ func testAuditSearchIdenticalTimestampIDOrder(t *testing.T, f Factory) {
 }
 
 // SortBy="closed" emits ORDER BY closed_at DESC, id ASC. closed_at is nullable;
-// MySQL/Dolt place NULLs LAST on DESC. The open (NULL-closed) rows follow the
+// the storage contract places NULLs last on DESC. The open (NULL-closed) rows follow the
 // closed ones, ordered by id ASC.
 func testAuditSearchSortByClosedNullsLast(t *testing.T, f Factory) {
 	s := f(t)
@@ -404,6 +406,57 @@ func testAuditSearchTextIDBranchExternalRef(t *testing.T, f Factory) {
 	must(t, err)
 	if ids := issueIDs(got); !reflect.DeepEqual(ids, []string{"test-9"}) {
 		t.Errorf("search 'test-9' = %v, want [test-9]", ids)
+	}
+}
+
+// LIKE over raw-cased operands is case-sensitive on both implementations: Dolt uses
+// a binary table collation, and SQLite set PRAGMA case_sensitive_like (formerly sqlite/dsn.go).
+// SQLite's default LIKE is
+// ASCII-case-insensitive and silently diverged (bd-oyvc2.10). IDPrefix filtering
+// (sqlbuild/filter.go `id LIKE ?`) must therefore distinguish test-AB from test-ab.
+func testAuditSearchIDPrefixCaseSensitive(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-AB1", Title: "Upper"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-ab2", Title: "Lower"}), "a"))
+
+	got, err := s.SearchIssues(c, "", types.IssueFilter{IDPrefix: "test-AB"})
+	must(t, err)
+	if ids := issueIDs(got); !reflect.DeepEqual(ids, []string{"test-AB1"}) {
+		t.Errorf("IDPrefix test-AB = %v, want [test-AB1] (LIKE must be case-sensitive)", ids)
+	}
+
+	got, err = s.SearchIssues(c, "", types.IssueFilter{IDPrefix: "test-ab"})
+	must(t, err)
+	if ids := issueIDs(got); !reflect.DeepEqual(ids, []string{"test-ab2"}) {
+		t.Errorf("IDPrefix test-ab = %v, want [test-ab2] (LIKE must be case-sensitive)", ids)
+	}
+}
+
+// The ParentID descendant branch (sqlbuild/filter.go `id LIKE CONCAT(?, '.%')`)
+// is likewise case-sensitive: with two sibling parents differing only by case,
+// each with a dotted child and no parent-child dep rows, listing one parent's
+// descendants must not leak the other-cased parent's child (bd-oyvc2.10).
+func testAuditSearchParentDescendantCaseSensitive(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-pc", Title: "lower parent"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-PC", Title: "upper parent"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-pc.1", Title: "lower child"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-PC.1", Title: "upper child"}), "a"))
+
+	parent := "test-pc"
+	got, err := s.SearchIssues(c, "", types.IssueFilter{ParentID: &parent})
+	must(t, err)
+	if ids := issueIDs(got); !reflect.DeepEqual(ids, []string{"test-pc.1"}) {
+		t.Errorf("ParentID test-pc = %v, want [test-pc.1] (different-cased sibling's child must be excluded)", ids)
+	}
+
+	upper := "test-PC"
+	got, err = s.SearchIssues(c, "", types.IssueFilter{ParentID: &upper})
+	must(t, err)
+	if ids := issueIDs(got); !reflect.DeepEqual(ids, []string{"test-PC.1"}) {
+		t.Errorf("ParentID test-PC = %v, want [test-PC.1] (different-cased sibling's child must be excluded)", ids)
 	}
 }
 

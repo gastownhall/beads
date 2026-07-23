@@ -95,14 +95,117 @@ func TestMigrateUpWithLockUsesDatabaseScopedLockOnly(t *testing.T) {
 	}
 }
 
+// TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded is the regression guard for
+// out-of-band-materialized databases: one whose migration cursors arrived
+// at-latest WITHOUT executing the seeding migrations (out-of-band table
+// copy/rename) reports no migration work, but MigrateUp must still re-assert
+// the full canonical dolt_ignore pattern set before the short-circuit, or the
+// copied database is never healed (1 pattern instead of 5, wisp churn in
+// dolt_status, dirty-gate block on subsequent migrations).
+func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	expectIgnorePatternSeed(mock)
+	// migrationWorkNeeded: both cursors at latest, both content_hash columns
+	// present, no custom backfill pending -> no work, MigrateUp short-circuits.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectContentHashColumnExists(mock)
+	expectContentHashColumnExists(mock)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	// The seed inserted rows and no migration pass follows to commit them, so
+	// MigrateUp must commit the heal itself, scoped and labeled.
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	applied, err := MigrateUp(context.Background(), db)
+	if err != nil {
+		t.Fatalf("MigrateUp() error = %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (ignore-pattern seed must run before the no-work short-circuit and be committed when it changed rows): %v", err)
+	}
+}
+
+// TestMigrateUpSkipsSeedCommitWhenNothingChanged is the negative counterpart:
+// on a healthy database every INSERT IGNORE is a no-op (0 rows affected), so
+// the no-work short-circuit must NOT stage or commit dolt_ignore — sqlmock
+// fails the test on any unexpected DOLT_ADD/DOLT_COMMIT call.
+func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	expectIgnorePatternSeedNoop(mock)
+	// migrationWorkNeeded: no work, MigrateUp short-circuits.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectContentHashColumnExists(mock)
+	expectContentHashColumnExists(mock)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+
+	applied, err := MigrateUp(context.Background(), db)
+	if err != nil {
+		t.Fatalf("MigrateUp() error = %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (no-op seed must not trigger a scoped commit): %v", err)
+	}
+}
+
+// expectIgnorePatternSeed mocks the unconditional dolt_ignore pattern seed
+// MigrateUp runs before anything else, with every pattern actually inserted
+// (RowsAffected=1: an under-seeded database).
+func expectIgnorePatternSeed(mock sqlmock.Sqlmock) {
+	for _, pattern := range doltIgnorePatterns {
+		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+			WithArgs(pattern).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+}
+
+// expectIgnorePatternSeedNoop mocks the seed on a healthy database: every
+// INSERT IGNORE hits an existing row (RowsAffected=0), nothing changes.
+func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock) {
+	for _, pattern := range doltIgnorePatterns {
+		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+			WithArgs(pattern).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+}
+
 func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	t.Helper()
 
 	latest := LatestVersion()
 	latestIgnored := LatestIgnoredVersion()
 
+	expectIgnorePatternSeed(mock)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	expectDoltStatusRows(mock)
+	// The seed changed rows (expectIgnorePatternSeed reports RowsAffected=1),
+	// so MigrateUp commits it scoped+labeled before the pass runs (#4566: the
+	// seed must not ride the per-step pass commits).
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectDoltStatusRows(mock)
 	// MigrateUp probes the aux-rekey crash sentinel (bd-578h9.16); this
 	// mocked world has no local_metadata table, so no crashed pass.
@@ -155,8 +258,6 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	// rekeyAuxRowIDs reads the ignored cursor to see whether its clone-local
 	// marker is pending; at latest it is not, so the re-key no-ops.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
-	mock.ExpectExec(regexp.QuoteMeta("REPLACE INTO dolt_ignore VALUES ('ignored_schema_migrations', true)")).
-		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("(?s)^CREATE TABLE IF NOT EXISTS ignored_schema_migrations").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectContentHashColumnExists(mock)

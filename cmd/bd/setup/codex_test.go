@@ -427,3 +427,174 @@ func TestCodexConfigEnablesBeadsPlugin(t *testing.T) {
 		})
 	}
 }
+
+func codexTestHookEntry(commands ...string) map[string]interface{} {
+	hooks := make([]interface{}, 0, len(commands))
+	for _, command := range commands {
+		hooks = append(hooks, map[string]interface{}{
+			"type":    "command",
+			"command": command,
+		})
+	}
+	return map[string]interface{}{"hooks": hooks}
+}
+
+func codexTestEventCommands(config map[string]interface{}, event string) []string {
+	hooks, _ := config["hooks"].(map[string]interface{})
+	var commands []string
+	for _, entry := range toInterfaceSlice(hooks[event]) {
+		entryMap, _ := entry.(map[string]interface{})
+		for _, hook := range toInterfaceSlice(entryMap["hooks"]) {
+			hookMap, _ := hook.(map[string]interface{})
+			if command, ok := hookMap["command"].(string); ok {
+				commands = append(commands, command)
+			}
+		}
+	}
+	return commands
+}
+
+func codexTestCommandsContain(commands []string, want string) bool {
+	for _, command := range commands {
+		if command == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCodexHooksMigratesExactLegacySessionStart(t *testing.T) {
+	config := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"SessionStart": []interface{}{codexTestHookEntry("  " + codexLegacySessionStartCommand + "\n")},
+		},
+	}
+	if !codexBeadsHooksPresent(config) {
+		t.Fatal("expected exact legacy SessionStart hook to count as Codex integration")
+	}
+
+	upsertCodexManagedHooks(config)
+
+	hooks := config["hooks"].(map[string]interface{})
+	entries := toInterfaceSlice(hooks["SessionStart"])
+	if len(entries) != 1 {
+		t.Fatalf("SessionStart entries = %d, want one canonical entry", len(entries))
+	}
+	commands := codexTestEventCommands(config, "SessionStart")
+	if !codexTestCommandsContain(commands, "bd codex-hook SessionStart") {
+		t.Fatalf("canonical SessionStart hook missing: %v", commands)
+	}
+	for _, command := range commands {
+		if strings.TrimSpace(command) == codexLegacySessionStartCommand {
+			t.Fatalf("legacy SessionStart hook remains: %v", commands)
+		}
+	}
+}
+
+func TestCodexHooksLegacyMigrationIsIdempotent(t *testing.T) {
+	config := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"SessionStart": []interface{}{codexTestHookEntry(codexLegacySessionStartCommand)},
+		},
+	}
+	upsertCodexManagedHooks(config)
+	first, err := marshalHooksJSON(config)
+	if err != nil {
+		t.Fatalf("marshal first migration: %v", err)
+	}
+	upsertCodexManagedHooks(config)
+	second, err := marshalHooksJSON(config)
+	if err != nil {
+		t.Fatalf("marshal second migration: %v", err)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("legacy migration is not idempotent:\nfirst:\n%s\nsecond:\n%s", first, second)
+	}
+}
+
+func TestCodexManagedHooksCurrentRejectsCanonicalPlusLegacy(t *testing.T) {
+	config := map[string]interface{}{"hooks": codexManagedHooks()}
+	hooks := config["hooks"].(map[string]interface{})
+	hooks["SessionStart"] = append(toInterfaceSlice(hooks["SessionStart"]), codexTestHookEntry(codexLegacySessionStartCommand))
+	if codexManagedHooksCurrent(config) {
+		t.Fatal("canonical hooks with an exact legacy SessionStart hook must be stale")
+	}
+
+	upsertCodexManagedHooks(config)
+	if !codexManagedHooksCurrent(config) {
+		t.Fatal("hooks should be current after legacy migration")
+	}
+}
+
+func TestCodexHooksLegacyMigrationPreservesUnrelatedEntries(t *testing.T) {
+	nearLegacy := "bd prime --stealth | jq ."
+	config := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"SessionStart": []interface{}{
+				codexTestHookEntry("echo keep"),
+				codexTestHookEntry(nearLegacy),
+				codexTestHookEntry(codexLegacySessionStartCommand),
+			},
+		},
+	}
+
+	upsertCodexManagedHooks(config)
+
+	commands := codexTestEventCommands(config, "SessionStart")
+	for _, want := range []string{"echo keep", nearLegacy, "bd codex-hook SessionStart"} {
+		if !codexTestCommandsContain(commands, want) {
+			t.Fatalf("command %q was not preserved/installed: %v", want, commands)
+		}
+	}
+}
+
+func TestCodexHooksLegacyMigrationPreservesMixedEntryCommands(t *testing.T) {
+	config := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"SessionStart": []interface{}{
+				codexTestHookEntry(codexLegacySessionStartCommand, "echo keep"),
+			},
+		},
+	}
+
+	upsertCodexManagedHooks(config)
+
+	commands := codexTestEventCommands(config, "SessionStart")
+	if !codexTestCommandsContain(commands, "echo keep") || !codexTestCommandsContain(commands, "bd codex-hook SessionStart") {
+		t.Fatalf("mixed entry command or canonical hook missing: %v", commands)
+	}
+	for _, command := range commands {
+		if strings.TrimSpace(command) == codexLegacySessionStartCommand {
+			t.Fatalf("legacy command remains in mixed entry: %v", commands)
+		}
+	}
+}
+
+func TestRemoveCodexHooksRemovesLegacyAndPreservesUnrelated(t *testing.T) {
+	nearLegacy := "bd prime --stealth"
+	config := map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"SessionStart": []interface{}{
+				codexTestHookEntry(codexLegacySessionStartCommand),
+				codexTestHookEntry(codexLegacySessionStartCommand, "echo keep"),
+				codexTestHookEntry(nearLegacy),
+				codexHookEntry("startup|resume|clear", "bd codex-hook SessionStart", "Loading Beads context"),
+			},
+		},
+	}
+
+	removeCodexManagedHooks(config)
+
+	commands := codexTestEventCommands(config, "SessionStart")
+	if !codexTestCommandsContain(commands, "echo keep") || !codexTestCommandsContain(commands, nearLegacy) {
+		t.Fatalf("unrelated commands not preserved: %v", commands)
+	}
+	for _, command := range commands {
+		if strings.TrimSpace(command) == codexLegacySessionStartCommand || strings.HasPrefix(command, "bd codex-hook ") {
+			t.Fatalf("managed command remains after removal: %v", commands)
+		}
+	}
+	if codexBeadsHooksPresent(config) {
+		t.Fatal("removed config should no longer be detected as a Codex Beads integration")
+	}
+}

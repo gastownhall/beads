@@ -12,14 +12,14 @@ import (
 )
 
 func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool) error {
-	if sqlQueryIsRead(query) {
-		uw, err := openProxiedListUOW(ctx)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		defer uw.Close(ctx)
+	if uowProvider == nil {
+		return HandleError("proxied-server UOW provider not initialized")
+	}
 
-		result, err := uw.RawSQLUseCase().Query(ctx, query)
+	if sqlQueryIsRead(query) {
+		result, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*domain.RawSQLResult, error) {
+			return uw.RawSQLUseCase().Query(ctx, query)
+		})
 		if err != nil {
 			return HandleErrorRespectJSON("query error: %v", err)
 		}
@@ -28,23 +28,15 @@ func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool) erro
 
 	CheckReadonly("sql")
 
-	if uowProvider == nil {
-		return HandleError("proxied-server UOW provider not initialized")
-	}
-
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("%v", err)
-	}
-	defer uw.Close(ctx)
-
-	affected, err := uw.RawSQLUseCase().Exec(ctx, query)
+	affected, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (int64, string, error) {
+		affected, err := uw.RawSQLUseCase().Exec(ctx, query)
+		if err != nil {
+			return 0, "", err
+		}
+		return affected, "bd sql: " + query, nil
+	})
 	if err != nil {
 		return HandleErrorRespectJSON("exec error: %v", err)
-	}
-
-	if err := uow.CommitWithRetries(ctx, uw, "bd sql: "+query); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("commit: %v", err)
 	}
 
 	if jsonOutput {

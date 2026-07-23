@@ -1,10 +1,13 @@
 package setup
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestPluginLayoutUsesSharedBeadsRoot(t *testing.T) {
@@ -57,6 +60,54 @@ func TestPluginLayoutUsesSharedBeadsRoot(t *testing.T) {
 	requireRepoFile(t, root, "plugins", "beads", "skills", "beads", "commands", "ready.md")
 	requireRepoFile(t, root, "plugins", "beads", ".codex-plugin", "hooks", "hooks.json")
 	requireNoRepoPath(t, root, "plugins", "beads", "hooks", "hooks.json")
+}
+
+func TestPluginCommandArgumentHintsAreStrings(t *testing.T) {
+	root := filepath.Join("..", "..", "..")
+	commandsDir := filepath.Join(root, "plugins", "beads", "skills", "beads", "commands")
+	entries, err := os.ReadDir(commandsDir)
+	if err != nil {
+		t.Fatalf("read commands directory %s: %v", commandsDir, err)
+	}
+
+	const expectedArgumentHints = 23
+	checkedArgumentHints := 0
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
+			continue
+		}
+
+		path := filepath.Join(commandsDir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
+		if !bytes.HasPrefix(data, []byte("---\n")) {
+			continue
+		}
+
+		frontmatter, _, ok := bytes.Cut(data[len("---\n"):], []byte("\n---\n"))
+		if !ok {
+			t.Fatalf("parse frontmatter in %s: missing closing delimiter", path)
+		}
+
+		var metadata map[string]interface{}
+		if err := yaml.Unmarshal(frontmatter, &metadata); err != nil {
+			t.Fatalf("parse frontmatter in %s: %v", path, err)
+		}
+		argumentHint, ok := metadata["argument-hint"]
+		if !ok {
+			continue
+		}
+		checkedArgumentHints++
+		if _, ok := argumentHint.(string); !ok {
+			t.Errorf("argument-hint in %s decoded as %T, want string", path, argumentHint)
+		}
+	}
+	if checkedArgumentHints != expectedArgumentHints {
+		t.Errorf("checked %d command argument-hint fields, want %d", checkedArgumentHints, expectedArgumentHints)
+	}
 }
 
 func readJSONFile(t *testing.T, path string, dest interface{}) {

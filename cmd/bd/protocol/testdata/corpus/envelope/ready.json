@@ -43,7 +43,7 @@
         "corpus-label"
       ],
       "metadata": {
-        "phase": 2
+        "phase": "2"
       },
       "owner": "test@protocol.test",
       "priority": 0,

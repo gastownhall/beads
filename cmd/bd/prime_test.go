@@ -51,9 +51,16 @@ func TestOutputContextFunction(t *testing.T) {
 		ephemeralMode bool
 		localOnlyMode bool
 		noPushMode    bool
-		profile       config.AgentProfile // "" stubs config.ProfileConservative (default)
-		expectText    []string
-		rejectText    []string
+		// noSyncRemoteMode is a separate axis from localOnlyMode: it stubs
+		// primeHasSyncRemote independently of primeHasGitRemote, so tests can
+		// exercise "git remote present, no Dolt sync remote configured"
+		// without conflating the two (gh#4130, gh#4230 review). Defaults to
+		// false (sync remote present) so existing cases that expect dolt
+		// hints keep passing unchanged.
+		noSyncRemoteMode bool
+		profile          config.AgentProfile // "" stubs config.ProfileConservative (default)
+		expectText       []string
+		rejectText       []string
 	}{
 		{
 			name:          "CLI Normal (non-ephemeral)",
@@ -223,12 +230,69 @@ func TestOutputContextFunction(t *testing.T) {
 			expectText:    []string{"Beads Issue Tracker Active", "bd close", "Git authority: no git operations in this context"},
 			rejectText:    []string{"git push", "git pull", "git commit", "git status", "git add", "bd export", "Git authority: local-only/no-remote"},
 		},
+		// The following cases pin the two-axis fix (gh#4130, gh#4230 review):
+		// git-remote presence (localOnlyMode) must drive git push/pull hints
+		// independently of Dolt sync-remote presence (noSyncRemoteMode),
+		// which must drive only the "bd dolt push"/"bd dolt pull" hint lines.
+		{
+			name:             "CLI git remote present, no sync remote (non-ephemeral)",
+			mcpMode:          false,
+			stealthMode:      false,
+			ephemeralMode:    false,
+			localOnlyMode:    false, // git remote present -> git hints retained
+			noSyncRemoteMode: true,  // no Dolt sync remote -> dolt hints dropped
+			expectText:       []string{"Beads Workflow Context", "git status", "conservative by default"},
+			rejectText:       []string{"bd dolt push", "bd dolt pull", "No git remote configured", "Git authority: local-only/no-remote"},
+		},
+		{
+			name:             "CLI git remote present, no sync remote (ephemeral)",
+			mcpMode:          false,
+			stealthMode:      false,
+			ephemeralMode:    true,
+			localOnlyMode:    false,
+			noSyncRemoteMode: true,
+			expectText:       []string{"Beads Workflow Context", "ephemeral branch", "git status"},
+			rejectText:       []string{"bd dolt push", "bd dolt pull", "No git remote configured"},
+		},
+		{
+			name:             "CLI git remote present, no sync remote (team-maintainer)",
+			mcpMode:          false,
+			stealthMode:      false,
+			ephemeralMode:    false,
+			localOnlyMode:    false,
+			noSyncRemoteMode: true,
+			profile:          config.ProfileTeamMaintainer,
+			expectText:       []string{"Beads Workflow Context", "agent.profile=team-maintainer", "git push"},
+			rejectText:       []string{"bd dolt push", "bd dolt pull", "No git remote configured"},
+		},
+		{
+			name:             "MCP git remote present, no sync remote (team-maintainer)",
+			mcpMode:          true,
+			stealthMode:      false,
+			ephemeralMode:    false,
+			localOnlyMode:    false,
+			noSyncRemoteMode: true,
+			profile:          config.ProfileTeamMaintainer,
+			expectText:       []string{"Beads Issue Tracker Active", "agent.profile=team-maintainer", "commit and git push"},
+			rejectText:       []string{"bd dolt push", "bd dolt pull", "No git remote configured"},
+		},
+		{
+			name:          "CLI sync remote present (no-push) -> dolt hints retained",
+			mcpMode:       false,
+			stealthMode:   false,
+			ephemeralMode: false,
+			localOnlyMode: false,
+			noPushMode:    true,
+			expectText:    []string{"Beads Workflow Context", "bd dolt push", "bd dolt pull", "push disabled"},
+			rejectText:    []string{"No git remote configured"},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			defer stubIsEphemeralBranch(tt.ephemeralMode)()
-			defer stubPrimeHasGitRemote(!tt.localOnlyMode)() // localOnly = !primeHasGitRemote
+			defer stubPrimeHasGitRemote(!tt.localOnlyMode)()
+			defer stubPrimeHasSyncRemote(!tt.localOnlyMode && !tt.noSyncRemoteMode)()
 			defer stubPrimeNoPushConfigured(tt.noPushMode)()
 			profile := tt.profile
 			if profile == "" {
@@ -469,6 +533,16 @@ func stubPrimeAgentProfile(profile config.AgentProfile) func() {
 	}
 	return func() {
 		primeAgentProfile = original
+	}
+}
+
+func stubPrimeHasSyncRemote(hasSyncRemote bool) func() {
+	original := primeHasSyncRemote
+	primeHasSyncRemote = func() bool {
+		return hasSyncRemote
+	}
+	return func() {
+		primeHasSyncRemote = original
 	}
 }
 

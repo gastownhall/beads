@@ -33,11 +33,12 @@ func RunAudit_molecule_wisp_batch_iter(t *testing.T, f Factory) {
 	t.Run("CreateRejectStaleUpserts", func(t *testing.T) { testAuditCreateRejectStaleUpserts(t, f) })
 	t.Run("CreateAllWispsFastPath", func(t *testing.T) { testAuditCreateAllWispsFastPath(t, f) })
 	t.Run("CreateAllWispsInlineDependencies", func(t *testing.T) { testAuditCreateAllWispsInlineDependencies(t, f) })
-	t.Run("CreateOrphanStrict", func(t *testing.T) { testAuditCreateOrphanStrict(t, f) })
+	t.Run("CreateOrphanHandling", func(t *testing.T) { testAuditCreateOrphanHandling(t, f) })
 	t.Run("CreateCrossBucketDependency", func(t *testing.T) { testAuditCreateCrossBucketDependency(t, f) })
 	t.Run("CreateInBatchCycle", func(t *testing.T) { testAuditCreateInBatchCycle(t, f) })
 	t.Run("ListWisps", func(t *testing.T) { testAuditListWisps(t, f) })
 	t.Run("GetNextChildID", func(t *testing.T) { testAuditGetNextChildID(t, f) })
+	t.Run("GetNextChildIDCaseSensitive", func(t *testing.T) { testAuditGetNextChildIDCaseSensitive(t, f) })
 }
 
 // auditDepTargets returns the sorted DependsOnID set for a dependency slice.
@@ -503,15 +504,11 @@ func testAuditCreateAllWispsInlineDependencies(t *testing.T, f Factory) {
 }
 
 // OrphanStrict rejects an issue whose hierarchical parent is missing
-// (create.go:490-515), inserting nothing.
-//
-// NOTE: the finding's companion claim — that OrphanSkip *silently* drops the
-// same orphan — does NOT hold in the batch path on the Dolt reference: the
-// skipped orphan is still handed to ReconcileChildCounters, which FK-violates
-// on the missing parent (child_counters.fk_counter_parent). So a single
-// missing-parent orphan under OrphanSkip errors on Dolt, not skips; only the
-// Strict branch is a stable, reproducible contract here.
-func testAuditCreateOrphanStrict(t *testing.T, f Factory) {
+// (create.go:490-515), inserting nothing. OrphanSkip accepts the batch but
+// inserts neither the orphan nor an ownerless child-counter row: counter
+// reconciliation now verifies that the routed parent exists before touching
+// its auxiliary counter table.
+func testAuditCreateOrphanHandling(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()
 	if err := s.CreateIssuesWithFullOptions(c, []*types.Issue{
@@ -521,6 +518,15 @@ func testAuditCreateOrphanStrict(t *testing.T, f Factory) {
 	}
 	if _, err := s.GetIssue(c, "test-p.2"); !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("OrphanStrict inserted the orphan: %v", err)
+	}
+
+	if err := s.CreateIssuesWithFullOptions(c, []*types.Issue{
+		withDefaults(&types.Issue{ID: "test-p.3", Title: "Orphan3"}),
+	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanSkip, SkipPrefixValidation: true}); err != nil {
+		t.Errorf("OrphanSkip: unexpected error: %v", err)
+	}
+	if _, err := s.GetIssue(c, "test-p.3"); !errors.Is(err, storage.ErrNotFound) {
+		t.Errorf("OrphanSkip inserted the orphan: %v", err)
 	}
 }
 
@@ -661,5 +667,22 @@ func testAuditGetNextChildID(t *testing.T, f Factory) {
 	must(t, err)
 	if wid != "test-wp.1" {
 		t.Errorf("wisp parent = %q, want test-wp.1", wid)
+	}
+}
+
+// The self-heal scan (id LIKE parent.'%') is case-sensitive on Dolt and SQLite
+// (see bd-oyvc2.10), so a different-cased sibling parent's children never advance
+// this parent's counter.
+func testAuditGetNextChildIDCaseSensitive(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-q", Title: "lower parent"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-Q", Title: "upper parent"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-Q.7", Title: "upper child"}), "a"))
+
+	id, err := s.GetNextChildID(c, "test-q")
+	must(t, err)
+	if id != "test-q.1" {
+		t.Errorf("GetNextChildID(test-q) = %q, want test-q.1 (test-Q.7 must not advance test-q's counter)", id)
 	}
 }

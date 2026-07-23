@@ -54,6 +54,9 @@ type StaleResult struct {
 }
 
 func runMolStale(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("mol stale is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("mol-stale")
 	defer func() {
 		if c := metrics.Global(); c != nil {

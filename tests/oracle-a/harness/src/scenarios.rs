@@ -438,10 +438,11 @@ pub fn all() -> Vec<Scenario> {
                 &["update", "umk-1", "--set-metadata", "routed-to=x", "--json"],
             ],
         ),
-        // DIVERGENCE PIN: --set-metadata scalar coercion. bd coerces a token to a number
-        // ONLY when it is valid JSON (toJSONValue: Sscanf%f + json.Valid). So leading-zero
-        // "007" and trailing-dot "1." stay STRINGS; plain ints/bools coerce.
-        // (Bigint float-precision cases are avoided — out of the realistic surface.)
+        // DIVERGENCE PIN: --set-metadata scalar coercion. toJSONValue no longer infers
+        // JSON types from content — every token, including numeric- and bool-looking
+        // ones, is stored as a JSON string (GH#4146). "007", "42", "1.", and "true" all
+        // round-trip as strings; use --metadata with a raw JSON blob for explicit
+        // non-string types.
         Scenario::new(
             "update_set_metadata_raw_scalars",
             "umc",

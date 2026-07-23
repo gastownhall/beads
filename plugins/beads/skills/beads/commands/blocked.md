@@ -1,6 +1,6 @@
 ---
 description: Show blocked issues
-argument-hint: []
+argument-hint: ""
 ---
 
 Show all issues that are blocked by dependencies.

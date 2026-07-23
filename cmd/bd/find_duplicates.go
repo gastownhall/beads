@@ -94,8 +94,6 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 		model = config.DefaultAIModel()
 	}
 
-	ctx := rootCtx
-
 	if method != "mechanical" && method != "ai" {
 		return HandleErrorRespectJSON("invalid method %q (use: mechanical, ai)", method)
 	}
@@ -112,24 +110,33 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 		filter.Status = &s
 	}
 
-	var issues []*types.Issue
-	var err error
+	if usesProxiedServer() {
+		return runFindDuplicatesProxiedServer(rootCtx, filter, status, method, threshold, limit, model)
+	}
 
-	issues, err = store.SearchIssues(ctx, "", filter)
+	issues, err := store.SearchIssues(rootCtx, "", filter)
 	if err != nil {
 		return HandleErrorRespectJSON("fetching issues: %v", err)
 	}
+	issues = filterClosedIfNoStatus(issues, status)
 
-	if status == "" {
-		var filtered []*types.Issue
-		for _, issue := range issues {
-			if issue.Status != types.StatusClosed {
-				filtered = append(filtered, issue)
-			}
-		}
-		issues = filtered
+	return reportFindDuplicates(rootCtx, issues, method, threshold, limit, model)
+}
+
+func filterClosedIfNoStatus(issues []*types.Issue, status string) []*types.Issue {
+	if status != "" {
+		return issues
 	}
+	var filtered []*types.Issue
+	for _, issue := range issues {
+		if issue.Status != types.StatusClosed {
+			filtered = append(filtered, issue)
+		}
+	}
+	return filtered
+}
 
+func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method string, threshold float64, limit int, model string) error {
 	if len(issues) < 2 {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{

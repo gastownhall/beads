@@ -35,8 +35,6 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("defer")
-
 		evt := metrics.NewCommandEvent("defer")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -62,6 +60,12 @@ Examples:
 		reason = strings.TrimSpace(reason)
 		if cmd.Flags().Changed("reason") && reason == "" {
 			return HandleError("reason cannot be empty")
+		}
+
+		CheckReadonly("defer")
+
+		if usesProxiedServer() {
+			return runDeferProxiedServer(rootCtx, args, deferUntil, reason)
 		}
 
 		ctx := rootCtx

@@ -64,9 +64,11 @@ func TestEmbeddedUnclaim(t *testing.T) {
 
 	t.Run("unclaim_from_open_stuck_claim", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Stuck claim test", "--type", "task")
-		// Manually set assignee without changing status (simulates stuck claim)
+		// Manually set assignee without changing status (simulates stuck claim).
 		bdUpdate(t, bd, dir, issue.ID, "--assignee", "alice")
-		bdUnclaim(t, bd, dir, issue.ID)
+		// Release as the owner: ownership enforcement (fe908d40b) rejects a
+		// non-owner release without --force.
+		bdUnclaim(t, bd, dir, issue.ID, "--actor", "alice")
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.Assignee != "" {
 			t.Errorf("expected assignee to be empty after unclaim, got %q", got.Assignee)
@@ -170,6 +172,51 @@ func TestEmbeddedUnclaim(t *testing.T) {
 		out := bdUnclaimFail(t, bd, dir, issue.ID)
 		if !strings.Contains(out, "is not assigned") {
 			t.Errorf("expected error about unassigned issue, got: %s", out)
+		}
+	})
+
+	// ===== Ownership =====
+
+	// A non-owner may not release another agent's claim: the release is rejected
+	// with ErrNotOwner (non-zero exit) and the claim is left intact.
+	t.Run("unclaim_non_owner_rejected", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Owned by alice", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--claim", "--actor", "alice")
+
+		out := bdUnclaimFail(t, bd, dir, issue.ID, "--actor", "bob")
+		// ErrNotOwner surfaces as "issue claimed by a different actor: ... held by alice".
+		if !strings.Contains(out, "held by alice") && !strings.Contains(out, "claimed by a different actor") {
+			t.Errorf("expected ownership-rejection error, got: %s", out)
+		}
+		// The rejection should frame --force as an abandoned-claim escape
+		// hatch, not a routine override (bd-at6rc / wy-zs5s2).
+		if !strings.Contains(out, "coordinate with the holder") {
+			t.Errorf("rejection should say coordinate-with-holder, got: %s", out)
+		}
+
+		// The claim must be untouched after the rejected release.
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Assignee != "alice" {
+			t.Errorf("expected assignee to remain alice after rejected unclaim, got %q", got.Assignee)
+		}
+		if got.Status != types.StatusInProgress {
+			t.Errorf("expected status to remain in_progress after rejected unclaim, got %s", got.Status)
+		}
+	})
+
+	// --force lets a non-owner (admin/reaper) release someone else's claim.
+	t.Run("unclaim_non_owner_force_succeeds", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Force release", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--claim", "--actor", "alice")
+
+		bdUnclaim(t, bd, dir, issue.ID, "--force", "--actor", "bob")
+
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Assignee != "" {
+			t.Errorf("expected assignee to be cleared after --force unclaim, got %q", got.Assignee)
+		}
+		if got.Status != types.StatusOpen {
+			t.Errorf("expected status open after --force unclaim, got %s", got.Status)
 		}
 	})
 }

@@ -148,7 +148,7 @@ func CheckMigrationReadiness(path string) (DoctorCheck, MigrationValidationResul
 		Status:   status,
 		Message:  message,
 		Detail:   strings.Join(result.Warnings, "\n"),
-		Fix:      "Run 'bd migrate dolt' to start migration",
+		Fix:      "Follow 'bd help init-safety' to reinitialize with Dolt, then import and verify this JSONL export",
 		Category: CategoryMaintenance,
 	}, result
 }
@@ -195,7 +195,7 @@ func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResu
 			Status:   StatusError,
 			Message:  "Not using Dolt backend",
 			Detail:   fmt.Sprintf("Current backend: %s", result.Backend),
-			Fix:      "Run 'bd migrate dolt' to migrate to Dolt",
+			Fix:      "Follow 'bd help init-safety' to reinitialize with Dolt, then import and verify the issue export",
 			Category: CategoryMaintenance,
 		}, result
 	}
@@ -302,7 +302,7 @@ func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResu
 			Status:   StatusError,
 			Message:  fmt.Sprintf("Migration incomplete: %d error(s)", len(result.Errors)),
 			Detail:   strings.Join(result.Errors, "\n"),
-			Fix:      "Re-run 'bd migrate dolt' or check for data issues",
+			Fix:      "Check the export/import results; follow 'bd help init-safety' before reinitializing again",
 			Category: CategoryMaintenance,
 		}, result
 	}

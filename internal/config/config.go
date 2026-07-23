@@ -209,7 +209,7 @@ func Initialize() error {
 
 	// Agent profile configuration (gh#3423, follow-up to #4220)
 	// Explicit runtime knob for the policy profile (git/commit authority)
-	// documented in docs/SETUP.md. `bd prime` uses this to select its
+	// documented in docs/getting-started/ide-setup.md. `bd prime` uses this to select its
 	// close-protocol wording. Values: conservative | minimal | team-maintainer.
 	// Invalid values fall back to "conservative" (see GetAgentProfile).
 	v.SetDefault("agent.profile", string(ProfileConservative))

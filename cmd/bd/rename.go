@@ -40,6 +40,9 @@ func init() {
 }
 
 func runRename(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("rename is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("rename")
 	defer func() {
 		if c := metrics.Global(); c != nil {

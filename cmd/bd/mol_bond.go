@@ -84,6 +84,9 @@ type BondResult struct {
 }
 
 func runMolBond(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("mol bond is not supported in proxied-server mode")
+	}
 	CheckReadonly("mol bond")
 
 	evt := metrics.NewCommandEvent("mol-bond")
@@ -571,12 +574,10 @@ func resolveOrDescribe(ctx context.Context, s storage.DoltStorage, operand strin
 		}
 	}
 
-	// Not found as issue - check if it looks like a formula name
-	if !looksLikeFormulaName(operand) {
-		return nil, "", fmt.Errorf("'%s' not found (not an issue ID or formula name)", operand)
-	}
-
-	// Try to load the formula (but don't cook it)
+	// Not found as issue — fall through to the formula registry. parser.LoadByName
+	// returns "formula %q not found in search paths" for genuinely unknown names,
+	// which is the right error. This matches the resolution behavior of
+	// bd formula show / bd mol seed / bd mol pour / bd cook.
 	parser := formula.NewParser()
 	f, err := parser.LoadByName(operand)
 	if err != nil {
@@ -615,37 +616,15 @@ func resolveOrCookToSubgraph(ctx context.Context, s storage.DoltStorage, operand
 		}
 	}
 
-	// Not found as issue - check if it looks like a formula name
-	if !looksLikeFormulaName(operand) {
-		return nil, false, fmt.Errorf("'%s' not found (not an issue ID or formula name)", operand)
-	}
-
-	// Try to cook formula inline to in-memory subgraph
-	// Pass vars for step condition filtering (bd-7zka.1)
+	// Not found as issue — fall through to the formula registry. Same rationale
+	// as resolveOrDescribe above: let the parser decide. Pass vars for step
+	// condition filtering (bd-7zka.1).
 	subgraph, err := resolveAndCookFormulaWithVars(operand, nil, vars)
 	if err != nil {
 		return nil, false, fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
 	}
 
 	return subgraph, true, nil
-}
-
-// looksLikeFormulaName checks if an operand looks like a formula name.
-// Formula names typically start with "mol-" or contain ".formula" patterns.
-func looksLikeFormulaName(operand string) bool {
-	// Common formula prefixes
-	if strings.HasPrefix(operand, "mol-") {
-		return true
-	}
-	// Formula file references
-	if strings.Contains(operand, ".formula") {
-		return true
-	}
-	// If it contains a path separator, might be a formula path
-	if strings.Contains(operand, "/") || strings.Contains(operand, "\\") {
-		return true
-	}
-	return false
 }
 
 func init() {

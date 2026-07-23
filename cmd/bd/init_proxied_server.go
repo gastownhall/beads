@@ -148,45 +148,48 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize version tracking: %v\n", fsResult.LocalVersionErr)
 	}
 
-	uowProvider, err := newProxiedServerUOWProvider(ctx, beadsDir)
+	initUOWProvider, err := newProxiedServerUOWProvider(ctx, beadsDir)
 	if err != nil {
 		return fmt.Errorf("failed to open uow provider: %v", err)
 	}
+	defer func() { _ = initUOWProvider.Close(ctx) }()
 
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return HandleError("failed to open unit of work: %v", err)
-	}
-	defer uw.Close(ctx)
+	remoteURL := resolveProxiedInitRemoteURL(ctx, gitUC, in)
 
-	bootstrapParams := domain.BootstrapProjectParams{
-		Prefix:         prefix,
-		ProjectID:      projectID,
-		BdVersion:      Version,
-		LastImportTime: time.Now(),
-	}
-
-	if repoID, err := beads.ComputeRepoID(); err == nil {
-		bootstrapParams.RepoID = repoID
+	var repoID, cloneID string
+	if id, err := beads.ComputeRepoID(); err == nil {
+		repoID = id
 	} else if !in.quiet {
 		fmt.Fprintf(os.Stderr, "Warning: could not compute repository ID: %v\n", err)
 	}
-	if cloneID, err := beads.GetCloneID(); err == nil {
-		bootstrapParams.CloneID = cloneID
+	if id, err := beads.GetCloneID(); err == nil {
+		cloneID = id
 	} else if !in.quiet {
 		fmt.Fprintf(os.Stderr, "Warning: could not compute clone ID: %v\n", err)
 	}
-	if remoteURL := resolveProxiedInitRemoteURL(ctx, gitUC, in); remoteURL != "" {
-		bootstrapParams.RemoteName = "origin"
-		bootstrapParams.RemoteURL = remoteURL
-	}
 
-	if _, err := uw.BootstrapUseCase().BootstrapProject(ctx, bootstrapParams); err != nil {
-		return HandleError("bootstrap project: %v", err)
-	}
+	err = uow.RunTx(ctx, initUOWProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		bootstrapParams := domain.BootstrapProjectParams{
+			Prefix:         prefix,
+			ProjectID:      projectID,
+			BdVersion:      Version,
+			LastImportTime: time.Now(),
+			RepoID:         repoID,
+			CloneID:        cloneID,
+		}
+		if remoteURL != "" {
+			bootstrapParams.RemoteName = "origin"
+			bootstrapParams.RemoteURL = remoteURL
+		}
 
-	if err := uow.CommitWithRetries(ctx, uw, "bd init"); err != nil {
-		return HandleError("commit init: %v", err)
+		if _, err := uw.BootstrapUseCase().BootstrapProject(ctx, bootstrapParams); err != nil {
+			return "", fmt.Errorf("bootstrap project: %w", err)
+		}
+
+		return "bd init", nil
+	})
+	if err != nil {
+		return HandleError("%v", err)
 	}
 
 	return runInitProxiedServerTail(cmd, ctx, in, runInitTailContext{
@@ -194,7 +197,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		prefix:        prefix,
 		dbName:        dbName,
 		useLocalBeads: useLocalBeads,
-		remoteURL:     bootstrapParams.RemoteURL,
+		remoteURL:     remoteURL,
 		fsUseCase:     fsUseCase,
 		gitUC:         gitUC,
 	})
@@ -426,8 +429,9 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				"CLAUDE.md",
 				".gitignore",
 			},
-			Message:  "bd init: initialize beads issue tracking",
-			NoVerify: true,
+			Message:   "bd init: initialize beads issue tracking",
+			NoVerify:  true,
+			SkipHooks: true,
 		})
 		switch {
 		case err != nil && !in.quiet:
@@ -444,7 +448,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 			fmt.Fprintf(os.Stderr, "  %s\n\n", ui.RenderAccent("git remote add upstream <repo-url>"))
 		}
 		if !in.stealth && !in.initRemoteChanged && t.remoteURL == "" {
-			printInitNoDoltRemoteWarning()
+			printInitNoDoltRemoteWarning(false)
 		}
 	}
 

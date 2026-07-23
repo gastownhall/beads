@@ -1,0 +1,45 @@
+---
+title: Recovery Overview
+description: Diagnose and resolve common Beads issues
+---
+
+This section provides step-by-step recovery procedures for common Beads issues. Each runbook follows a consistent format: Symptoms, Diagnosis, Solution (5 steps max), and Prevention.
+
+## Common Issues
+
+| Issue | Symptoms | Runbook |
+|-------|----------|---------|
+| Init Safety Refusals | `bd init` or `bd dolt` refuses with a pattern code like `pk-fork-refused` | [Recovery Playbooks](/recovery/init-safety) |
+| Database Corruption | Database errors, missing data | [Database Corruption](/recovery/database-corruption) |
+| Merge Conflicts | Dolt conflicts during sync | [Merge Conflicts](/recovery/merge-conflicts) |
+| Circular Dependencies | Cycle detection errors | [Circular Dependencies](/recovery/circular-dependencies) |
+| Sync Failures | `bd dolt push`/`bd dolt pull` errors | [Sync Failures](/recovery/sync-failures) |
+| History Bloat | Store grows unbounded; `dolt gc` reclaims nothing | [History Bloat](/recovery/history-squash) |
+| Removing beads | Uninstall bd or strip beads from a repo | [Uninstalling](/recovery/uninstalling) |
+
+## Quick Diagnostic
+
+Before diving into specific runbooks, try these quick checks:
+
+```bash
+# Check Beads status
+bd status
+
+# Verify Dolt server is running
+bd doctor
+
+# Check for blocked issues
+bd blocked
+```
+
+<Tip>
+Most issues can be diagnosed with `bd status`. Start there before following specific runbooks.
+</Tip>
+
+## Getting Help
+
+If these runbooks don't resolve your issue:
+
+1. Check the [FAQ](/reference/faq)
+2. Search [existing issues](https://github.com/gastownhall/beads/issues)
+3. Open a new issue with diagnostic output

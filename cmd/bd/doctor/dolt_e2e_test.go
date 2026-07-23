@@ -274,7 +274,7 @@ func runBDDoctor(t *testing.T, bdPath, path string) (e2eDoctorResult, string, er
 	return result, string(out), execErr
 }
 
-// TestE2E_DoctorSQLiteBackend was removed: SQLite backend no longer exists.
+// TestE2E_DoctorSQLiteBackend is covered by the backend-neutral doctor tests.
 // GetBackend() always returns "dolt" after the dolt-native cleanup (bd-yqpwy).
 
 // TestE2E_DoctorDoltBackendNoDB was removed: the embedded Dolt driver

@@ -74,9 +74,6 @@ func TestDbProxyChildRegistersExternalFlags(t *testing.T) {
 		{"external-host", ""},
 		{"external-port", "0"},
 		{"external-socket-path", ""},
-		{"external-tls", "false"},
-		{"external-tls-cert-path", ""},
-		{"external-tls-key-path", ""},
 		{"external-keep-alive", "0s"},
 	}
 	for _, tc := range cases {

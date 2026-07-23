@@ -28,57 +28,68 @@ var epicStatusCmd = &cobra.Command{
 		}()
 
 		eligibleOnly, _ := cmd.Flags().GetBool("eligible-only")
-		var epics []*types.EpicStatus
-		var err error
-		ctx := rootCtx
-		epics, err = store.GetEpicsEligibleForClosure(ctx)
+
+		if usesProxiedServer() {
+			return runEpicStatusProxiedServer(rootCtx, eligibleOnly)
+		}
+
+		epics, err := store.GetEpicsEligibleForClosure(rootCtx)
 		if err != nil {
 			return HandleErrorRespectJSON("getting epic status: %v", err)
 		}
-		if eligibleOnly {
-			filtered := []*types.EpicStatus{}
-			for _, epic := range epics {
-				if epic.EligibleForClose {
-					filtered = append(filtered, epic)
-				}
-			}
-			epics = filtered
-		}
-		if jsonOutput {
-			if epics == nil {
-				epics = []*types.EpicStatus{}
-			}
-			return outputJSON(epics)
-		}
-		if len(epics) == 0 {
-			fmt.Println("No open epics found")
-			return nil
-		}
-		for _, epicStatus := range epics {
-			epic := epicStatus.Epic
-			percentage := 0
-			if epicStatus.TotalChildren > 0 {
-				percentage = (epicStatus.ClosedChildren * 100) / epicStatus.TotalChildren
-			}
-			statusIcon := ""
-			if epicStatus.EligibleForClose {
-				statusIcon = ui.RenderPass("✓")
-			} else if percentage > 0 {
-				statusIcon = ui.RenderWarn("○")
-			} else {
-				statusIcon = "○"
-			}
-			fmt.Printf("%s %s %s\n", statusIcon, ui.RenderAccent(epic.ID), ui.RenderBold(epic.Title))
-			fmt.Printf("   Progress: %d/%d children closed (%d%%)\n",
-				epicStatus.ClosedChildren, epicStatus.TotalChildren, percentage)
-			if epicStatus.EligibleForClose {
-				fmt.Printf("   %s\n", ui.RenderPass("Eligible for closure"))
-			}
-			fmt.Println()
-		}
-		return nil
+		return renderEpicStatus(epics, eligibleOnly)
 	},
 }
+
+func renderEpicStatus(epics []*types.EpicStatus, eligibleOnly bool) error {
+	if eligibleOnly {
+		epics = filterEligibleEpics(epics)
+	}
+	if jsonOutput {
+		if epics == nil {
+			epics = []*types.EpicStatus{}
+		}
+		return outputJSON(epics)
+	}
+	if len(epics) == 0 {
+		fmt.Println("No open epics found")
+		return nil
+	}
+	for _, epicStatus := range epics {
+		epic := epicStatus.Epic
+		percentage := 0
+		if epicStatus.TotalChildren > 0 {
+			percentage = (epicStatus.ClosedChildren * 100) / epicStatus.TotalChildren
+		}
+		statusIcon := ""
+		if epicStatus.EligibleForClose {
+			statusIcon = ui.RenderPass("✓")
+		} else if percentage > 0 {
+			statusIcon = ui.RenderWarn("○")
+		} else {
+			statusIcon = "○"
+		}
+		fmt.Printf("%s %s %s\n", statusIcon, ui.RenderAccent(epic.ID), ui.RenderBold(epic.Title))
+		fmt.Printf("   Progress: %d/%d children closed (%d%%)\n",
+			epicStatus.ClosedChildren, epicStatus.TotalChildren, percentage)
+		if epicStatus.EligibleForClose {
+			fmt.Printf("   %s\n", ui.RenderPass("Eligible for closure"))
+		}
+		fmt.Println()
+	}
+	return nil
+}
+
+func filterEligibleEpics(epics []*types.EpicStatus) []*types.EpicStatus {
+	filtered := []*types.EpicStatus{}
+	for _, epic := range epics {
+		if epic.EligibleForClose {
+			filtered = append(filtered, epic)
+		}
+	}
+	return filtered
+}
+
 var closeEligibleEpicsCmd = &cobra.Command{
 	Use:           "close-eligible",
 	Short:         "Close epics where all children are complete",
@@ -93,40 +104,28 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		}()
 
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+
+		if usesProxiedServer() {
+			return runCloseEligibleEpicsProxiedServer(rootCtx, dryRun)
+		}
+
 		if !dryRun {
 			CheckReadonly("epic close-eligible")
 		}
-		var eligibleEpics []*types.EpicStatus
-		ctx := rootCtx
-		epics, err := store.GetEpicsEligibleForClosure(ctx)
+		epics, err := store.GetEpicsEligibleForClosure(rootCtx)
 		if err != nil {
 			return HandleErrorRespectJSON("getting eligible epics: %v", err)
 		}
-		for _, epic := range epics {
-			if epic.EligibleForClose {
-				eligibleEpics = append(eligibleEpics, epic)
-			}
-		}
+		eligibleEpics := filterEligibleEpics(epics)
 		if len(eligibleEpics) == 0 {
-			if jsonOutput {
-				return outputJSON([]*types.EpicStatus{})
-			}
-			fmt.Println("No epics eligible for closure")
-			return nil
+			return outputNoEligibleEpics()
 		}
 		if dryRun {
-			if jsonOutput {
-				return outputJSON(eligibleEpics)
-			}
-			fmt.Printf("Would close %d epic(s):\n", len(eligibleEpics))
-			for _, epicStatus := range eligibleEpics {
-				fmt.Printf("  - %s: %s\n", epicStatus.Epic.ID, epicStatus.Epic.Title)
-			}
-			return nil
+			return outputCloseEligibleDryRun(eligibleEpics)
 		}
 		closedIDs := []string{}
 		for _, epicStatus := range eligibleEpics {
-			err := store.CloseIssue(ctx, epicStatus.Epic.ID, "All children completed", "system", "")
+			err := store.CloseIssue(rootCtx, epicStatus.Epic.ID, "All children completed", "system", "")
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", epicStatus.Epic.ID, err)
 				continue
@@ -136,18 +135,41 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		if len(closedIDs) > 0 {
 			commandDidWrite.Store(true)
 		}
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"closed": closedIDs,
-				"count":  len(closedIDs),
-			})
-		}
-		fmt.Printf("✓ Closed %d epic(s)\n", len(closedIDs))
-		for _, id := range closedIDs {
-			fmt.Printf("  - %s\n", id)
-		}
-		return nil
+		return outputCloseEligibleResult(closedIDs)
 	},
+}
+
+func outputNoEligibleEpics() error {
+	if jsonOutput {
+		return outputJSON([]*types.EpicStatus{})
+	}
+	fmt.Println("No epics eligible for closure")
+	return nil
+}
+
+func outputCloseEligibleDryRun(eligibleEpics []*types.EpicStatus) error {
+	if jsonOutput {
+		return outputJSON(eligibleEpics)
+	}
+	fmt.Printf("Would close %d epic(s):\n", len(eligibleEpics))
+	for _, epicStatus := range eligibleEpics {
+		fmt.Printf("  - %s: %s\n", epicStatus.Epic.ID, epicStatus.Epic.Title)
+	}
+	return nil
+}
+
+func outputCloseEligibleResult(closedIDs []string) error {
+	if jsonOutput {
+		return outputJSON(map[string]interface{}{
+			"closed": closedIDs,
+			"count":  len(closedIDs),
+		})
+	}
+	fmt.Printf("✓ Closed %d epic(s)\n", len(closedIDs))
+	for _, id := range closedIDs {
+		fmt.Printf("  - %s\n", id)
+	}
+	return nil
 }
 
 func init() {
