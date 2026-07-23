@@ -5,7 +5,6 @@ package embeddeddolt_test
 import (
 	"context"
 	"database/sql"
-	"os"
 	"testing"
 
 	"github.com/google/uuid"
@@ -57,7 +56,7 @@ func TestEmbeddedMigration0057ConvertsTextEventsColumnsToLongtext(t *testing.T) 
 	requireEmbedded(t)
 	ctx := t.Context()
 
-	migrationSQL, err := os.ReadFile("../schema/migrations/0057_events_value_columns_idempotent_longtext.up.sql")
+	migrationSQL, err := schema.MigrationSQL("0057_events_value_columns_idempotent_longtext.up.sql")
 	if err != nil {
 		t.Fatalf("read 0057 migration: %v", err)
 	}
@@ -74,14 +73,14 @@ ALTER TABLE events MODIFY COLUMN new_value TEXT;
 		requireEventsColumnType(t, ctx, conn, "old_value", "text")
 		requireEventsColumnType(t, ctx, conn, "new_value", "text")
 
-		execFrozenGuard(t, ctx, conn, string(migrationSQL))
+		execFrozenGuard(t, ctx, conn, migrationSQL)
 		requireEventsColumnType(t, ctx, conn, "old_value", "longtext")
 		requireEventsColumnType(t, ctx, conn, "new_value", "longtext")
 
 		// Idempotent: a second pass, with both guards now reading 0, must
 		// take the no-op branch for both columns rather than re-issue MODIFY
 		// (the #4353 encoding-flip risk 0057 exists to guard against).
-		execFrozenGuard(t, ctx, conn, string(migrationSQL))
+		execFrozenGuard(t, ctx, conn, migrationSQL)
 		requireEventsColumnType(t, ctx, conn, "old_value", "longtext")
 		requireEventsColumnType(t, ctx, conn, "new_value", "longtext")
 	})
@@ -100,11 +99,11 @@ ALTER TABLE events MODIFY COLUMN new_value TEXT;
 		requireEventsColumnType(t, ctx, conn, "old_value", "text")
 		requireEventsColumnType(t, ctx, conn, "new_value", "longtext")
 
-		execFrozenGuard(t, ctx, conn, string(migrationSQL))
+		execFrozenGuard(t, ctx, conn, migrationSQL)
 		requireEventsColumnType(t, ctx, conn, "old_value", "longtext")
 		requireEventsColumnType(t, ctx, conn, "new_value", "longtext")
 
-		execFrozenGuard(t, ctx, conn, string(migrationSQL))
+		execFrozenGuard(t, ctx, conn, migrationSQL)
 		requireEventsColumnType(t, ctx, conn, "old_value", "longtext")
 		requireEventsColumnType(t, ctx, conn, "new_value", "longtext")
 	})
@@ -335,7 +334,7 @@ func TestEmbeddedMigration0058HealsAlreadyAffectedDatabase(t *testing.T) {
 	requireEmbedded(t)
 	ctx := t.Context()
 
-	migrationSQL, err := os.ReadFile("../schema/migrations/0058_heal_wisp_dependencies_split_constraints.up.sql")
+	migrationSQL, err := schema.MigrationSQL("0058_heal_wisp_dependencies_split_constraints.up.sql")
 	if err != nil {
 		t.Fatalf("read 0058 migration: %v", err)
 	}
@@ -362,7 +361,7 @@ ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_issue_target;
 		requireConstraintCount(t, ctx, conn, name, "", 1)
 	}
 
-	execFrozenGuard(t, ctx, conn, string(migrationSQL))
+	execFrozenGuard(t, ctx, conn, migrationSQL)
 	requireConstraintCount(t, ctx, conn, "ck_wisp_dep_one_target", "", 1)
 	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_wisp_target", "FOREIGN KEY", 1)
 	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_issue_target", "FOREIGN KEY", 1)
@@ -390,7 +389,7 @@ ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_issue_target;
 	// Idempotent: a second pass (e.g. a retry, or MigrateUp re-run after the
 	// cursor already recorded 0058) must not error re-adding a constraint
 	// that is already present.
-	execFrozenGuard(t, ctx, conn, string(migrationSQL))
+	execFrozenGuard(t, ctx, conn, migrationSQL)
 	requireConstraintCount(t, ctx, conn, "ck_wisp_dep_one_target", "", 1)
 	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_wisp_target", "FOREIGN KEY", 1)
 	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_issue_target", "FOREIGN KEY", 1)
@@ -407,7 +406,7 @@ func TestEmbeddedMigration0058AddsOnlyMissingConstraintInMixedPopulation(t *test
 	requireEmbedded(t)
 	ctx := t.Context()
 
-	migrationSQL, err := os.ReadFile("../schema/migrations/0058_heal_wisp_dependencies_split_constraints.up.sql")
+	migrationSQL, err := schema.MigrationSQL("0058_heal_wisp_dependencies_split_constraints.up.sql")
 	if err != nil {
 		t.Fatalf("read 0058 migration: %v", err)
 	}
@@ -421,7 +420,7 @@ func TestEmbeddedMigration0058AddsOnlyMissingConstraintInMixedPopulation(t *test
 	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_wisp_target", "FOREIGN KEY", 1)
 	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_issue_target", "FOREIGN KEY", 1)
 
-	execFrozenGuard(t, ctx, conn, string(migrationSQL))
+	execFrozenGuard(t, ctx, conn, migrationSQL)
 	requireConstraintCount(t, ctx, conn, "ck_wisp_dep_one_target", "", 1)
 	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_wisp_target", "FOREIGN KEY", 1)
 	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_issue_target", "FOREIGN KEY", 1)
@@ -455,7 +454,7 @@ func TestEmbeddedMigration0058CleansOrphanedAndInvalidWispDependenciesRowsBefore
 	requireEmbedded(t)
 	ctx := t.Context()
 
-	migrationSQL, err := os.ReadFile("../schema/migrations/0058_heal_wisp_dependencies_split_constraints.up.sql")
+	migrationSQL, err := schema.MigrationSQL("0058_heal_wisp_dependencies_split_constraints.up.sql")
 	if err != nil {
 		t.Fatalf("read 0058 migration: %v", err)
 	}
@@ -529,7 +528,7 @@ ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_issue_target;
 	conn2, closeConn2 := openPinnedConn(t, ctx, dataDir)
 	defer closeConn2()
 
-	execFrozenGuard(t, ctx, conn2, string(migrationSQL))
+	execFrozenGuard(t, ctx, conn2, migrationSQL)
 
 	var orphanCount, zeroCount int
 	if err := conn2.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?", orphanSourceID).Scan(&orphanCount); err != nil {
@@ -566,7 +565,7 @@ ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_issue_target;
 	// cleanup guards already read 0, since the constraints are now present)
 	// and no error re-adding an already-present constraint; the normalized
 	// row survives unchanged.
-	execFrozenGuard(t, ctx, conn2, string(migrationSQL))
+	execFrozenGuard(t, ctx, conn2, migrationSQL)
 	requireConstraintCount(t, ctx, conn2, "fk_wisp_dep_wisp_target", "FOREIGN KEY", 1)
 	requireConstraintCount(t, ctx, conn2, "fk_wisp_dep_issue_target", "FOREIGN KEY", 1)
 	requireConstraintCount(t, ctx, conn2, "ck_wisp_dep_one_target", "", 1)

@@ -319,6 +319,26 @@ func AllMigrationsSQL() string {
 	return b.String()
 }
 
+// MigrationSQL returns the frozen SQL content of a main-source migration
+// file by name (e.g. "0057_events_value_columns_idempotent_longtext.up.sql"),
+// read from the same embedded FS runMigrations applies in production
+// (see mainSource.files above). It exists for tests outside this package
+// (internal/storage/embeddeddolt's engine-based frozen-guard tests) that need
+// to execute the byte-exact frozen migration content through a real engine:
+// reading the file from disk by a package-relative path does not reliably
+// resolve across every CI execution context, while the embedded FS is always
+// available and is, in fact, higher-fidelity -- it is the literal bytes
+// runMigrations itself applies, not a copy that could drift from the build.
+// Read-only; callers cannot use it to mutate or bypass the frozen-file
+// hygiene guard (scripts/check-migration-hygiene.sh).
+func MigrationSQL(name string) (string, error) {
+	data, err := mainSource.files.ReadFile(mainSource.dir + "/" + name)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 func parseVersion(name string) (int, error) {
 	parts := strings.SplitN(name, "_", 2)
 	if len(parts) == 0 {
