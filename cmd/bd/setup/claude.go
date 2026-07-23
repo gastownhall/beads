@@ -138,10 +138,13 @@ func stripStaleClaudeBlock(env claudeEnv) error {
 // the file is a thin stub that imports shared agent instructions from the
 // agents file rather than carrying its own content.
 func isAgentsImportStub(content, agentsFile string) bool {
-	directive := "@" + agentsFile
+	directives := []string{"@" + agentsFile, "@./" + agentsFile}
 	for _, line := range strings.Split(content, "\n") {
-		if strings.TrimSpace(line) == directive {
-			return true
+		trimmed := strings.TrimSpace(line)
+		for _, directive := range directives {
+			if trimmed == directive {
+				return true
+			}
 		}
 	}
 	return false
@@ -277,7 +280,11 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 		_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", claudeInstructionsFile, err)
 	}
 
-	if redirected {
+	// Only strip the stale CLAUDE.md block once the redirect has actually
+	// written the replacement to AGENTS.md. If installAgents skipped injection
+	// (e.g. AGENTS.md is a symlink), stripping here would delete-before-write
+	// and leave the project with no beads section anywhere.
+	if redirected && !agentsSkipped {
 		if err := stripStaleClaudeBlock(env); err != nil {
 			// Non-fatal: the redirect itself already succeeded above
 			_, _ = fmt.Fprintf(env.stderr, "Warning: failed to clean stale beads block from %s: %v\n", claudeInstructionsFile, err)
@@ -458,14 +465,19 @@ func removeClaude(env claudeEnv, global bool) error {
 	}
 
 	agentsEnv, redirected := claudeAgentsEnvRedirect(env)
-	if err := removeAgents(agentsEnv, claudeAgentsIntegration); err != nil {
-		// Non-fatal
-		_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", claudeInstructionsFile, err)
-	}
-
 	if redirected {
+		// When redirected, AGENTS.md carries the project-authoritative shared
+		// beads section (created by `bd init` or another agent's setup), not a
+		// Claude-specific one. Removing Claude integration must not delete it;
+		// only clean up any stale block left directly in CLAUDE.md.
+		_, _ = fmt.Fprintf(env.stdout, "  Leaving shared beads section in %s untouched (project-authoritative, not Claude-specific)\n", config.SafeAgentsFile())
 		if err := stripStaleClaudeBlock(env); err != nil {
 			_, _ = fmt.Fprintf(env.stderr, "Warning: failed to clean stale beads block from %s: %v\n", claudeInstructionsFile, err)
+		}
+	} else {
+		if err := removeAgents(agentsEnv, claudeAgentsIntegration); err != nil {
+			// Non-fatal
+			_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", claudeInstructionsFile, err)
 		}
 	}
 

@@ -1195,6 +1195,12 @@ func TestIsAgentsImportStub(t *testing.T) {
 			want:       true,
 		},
 		{
+			name:       "relative @./AGENTS.md directive",
+			content:    "# Claude Code\n\n@./AGENTS.md\n",
+			agentsFile: "AGENTS.md",
+			want:       true,
+		},
+		{
 			name:       "empty content",
 			content:    "",
 			agentsFile: "AGENTS.md",
@@ -1313,13 +1319,15 @@ func TestRemoveClaudeRedirectsToAgentsMD(t *testing.T) {
 		t.Fatalf("removeClaude: %v", err)
 	}
 
-	// AGENTS.md should no longer have a beads section
+	// AGENTS.md's beads section is project-authoritative (shared with other
+	// agents), not Claude-specific — removing Claude integration must leave
+	// it intact.
 	agentsData, err := os.ReadFile(agentsPath)
 	if err != nil {
 		t.Fatalf("read AGENTS.md: %v", err)
 	}
-	if strings.Contains(string(agentsData), "BEGIN BEADS INTEGRATION") {
-		t.Fatalf("AGENTS.md should not contain beads section after remove:\n%s", agentsData)
+	if !strings.Contains(string(agentsData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("AGENTS.md should still contain the shared beads section after removing Claude:\n%s", agentsData)
 	}
 
 	// CLAUDE.md should be untouched (still a stub)
@@ -1329,6 +1337,41 @@ func TestRemoveClaudeRedirectsToAgentsMD(t *testing.T) {
 	}
 	if !strings.Contains(string(claudeData), "@AGENTS.md") {
 		t.Fatalf("CLAUDE.md should still contain @AGENTS.md import:\n%s", claudeData)
+	}
+
+	if !strings.Contains(stdout.String(), "AGENTS.md") {
+		t.Fatalf("expected output to reference AGENTS.md, got: %s", stdout.String())
+	}
+}
+
+// TestRemoveClaudeRedirectPreservesFullProfileSharedBlock covers the case
+// where AGENTS.md carries a full-profile shared beads block (e.g. created by
+// `bd init` or `bd setup codex`). Removing Claude integration must not touch
+// it — other agents still depend on it.
+func TestRemoveClaudeRedirectPreservesFullProfileSharedBlock(t *testing.T) {
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte("# Claude Code\n\n@AGENTS.md\n"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	fullBlock := "# Agent Instructions\n\n" + agents.RenderSection(agents.ProfileFull)
+	if err := os.WriteFile(agentsPath, []byte(fullBlock), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	if err := removeClaude(env, false); err != nil {
+		t.Fatalf("removeClaude: %v", err)
+	}
+
+	agentsData, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(agentsData) != fullBlock {
+		t.Fatalf("AGENTS.md full-profile shared block should be byte-for-byte unchanged:\ngot:\n%s\nwant:\n%s", agentsData, fullBlock)
 	}
 
 	if !strings.Contains(stdout.String(), "AGENTS.md") {
@@ -1416,6 +1459,62 @@ func TestInstallClaudeRedirectCleansStaleClaudeBlock(t *testing.T) {
 	}
 }
 
+// TestInstallClaudeRedirectSkipsStripWhenAgentsSymlink is a regression test
+// for the delete-before-write gap: when the redirect target (AGENTS.md) is a
+// symlink, installAgents skips injection (agents.go markSkipped) without
+// writing the beads block anywhere. In that case installClaude must NOT
+// strip the stale block already present in CLAUDE.md, or the project is left
+// with no beads section at all.
+func TestInstallClaudeRedirectSkipsStripWhenAgentsSymlink(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, _, stderr := newClaudeTestEnv(t)
+
+	// CLAUDE.md is a stub that imports AGENTS.md but still carries a stale
+	// beads block from an older bd install.
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte(staleClaudeStubWithBlock()), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	// AGENTS.md is a symlink to a separate target file.
+	target := filepath.Join(env.projectDir, "AGENTS_target.md")
+	if err := os.WriteFile(target, []byte("# Shared instructions\n"), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md target: %v", err)
+	}
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.Symlink(target, agentsPath); err != nil {
+		t.Fatalf("symlink AGENTS.md: %v", err)
+	}
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	// installAgents should have warned and skipped injection.
+	if !strings.Contains(stderr.String(), "AGENTS.md is a symlink") {
+		t.Fatalf("expected symlink warning on stderr, got:\n%s", stderr.String())
+	}
+
+	// The stale beads block in CLAUDE.md must be preserved: the redirect
+	// never wrote a replacement, so stripping it would delete-before-write.
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if !strings.Contains(string(claudeData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("CLAUDE.md should keep its beads block when the AGENTS.md redirect is skipped:\n%s", claudeData)
+	}
+
+	// The symlink target must remain untouched.
+	targetData, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read AGENTS.md target: %v", err)
+	}
+	if strings.Contains(string(targetData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("AGENTS.md symlink target should remain untouched:\n%s", targetData)
+	}
+}
+
 func TestRemoveClaudeRedirectCleansStaleClaudeBlock(t *testing.T) {
 	env, _, _ := newClaudeTestEnv(t)
 
@@ -1441,11 +1540,14 @@ func TestRemoveClaudeRedirectCleansStaleClaudeBlock(t *testing.T) {
 		t.Fatalf("CLAUDE.md should not contain a beads block after remove:\n%s", claudeData)
 	}
 
+	// AGENTS.md's own beads section is project-authoritative and shared with
+	// other agents — removing Claude integration must not delete it, only the
+	// stale duplicate left in CLAUDE.md.
 	agentsData, err := os.ReadFile(agentsPath)
 	if err != nil {
 		t.Fatalf("read AGENTS.md: %v", err)
 	}
-	if strings.Contains(string(agentsData), "BEGIN BEADS INTEGRATION") {
-		t.Fatalf("AGENTS.md should not contain a beads block after remove:\n%s", agentsData)
+	if !strings.Contains(string(agentsData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("AGENTS.md should still contain its beads block after remove:\n%s", agentsData)
 	}
 }
