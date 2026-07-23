@@ -10,8 +10,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+type dependencySkipCapturingStore struct {
+	storage.DoltStorage
+	skippedDependencies []string
+}
+
+func (s *dependencySkipCapturingStore) CreateIssuesWithFullOptions(ctx context.Context, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) error {
+	onSkipped := opts.OnSkippedDependency
+	opts.OnSkippedDependency = func(issueID, dependsOnID, reason string) {
+		s.skippedDependencies = append(s.skippedDependencies, issueID+" -> "+dependsOnID+": "+reason)
+		if onSkipped != nil {
+			onSkipped(issueID, dependsOnID, reason)
+		}
+	}
+	return s.DoltStorage.CreateIssuesWithFullOptions(ctx, issues, actor, opts)
+}
 
 func TestImportFromLocalJSONL(t *testing.T) {
 	skipIfNoDolt(t)
@@ -473,6 +490,40 @@ func TestImportFromLocalJSONL(t *testing.T) {
 		}
 		if deps[0].CreatedBy != "someone.else" {
 			t.Fatalf("dependency created_by = %q, want someone.else", deps[0].CreatedBy)
+		}
+	})
+
+	t.Run("preserves bare cross-prefix dependency", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, "dolt")
+		baseStore := newTestStoreWithPrefix(t, dbPath, "sym")
+		store := &dependencySkipCapturingStore{DoltStorage: baseStore}
+
+		jsonlContent := `{"id":"sym-3su","title":"Cross-project source","status":"open","priority":2,"issue_type":"task","dependencies":[{"depends_on_id":"mkt-456","type":"related"}],"created_at":"2025-01-01T00:00:00Z","updated_at":"2025-01-01T00:00:00Z"}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0644); err != nil {
+			t.Fatalf("Failed to write JSONL file: %v", err)
+		}
+
+		ctx := context.Background()
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONL failed: %v", err)
+		}
+		if count != 1 {
+			t.Fatalf("imported count = %d, want 1", count)
+		}
+		if len(store.skippedDependencies) != 0 {
+			t.Fatalf("skipped dependencies = %#v, want none", store.skippedDependencies)
+		}
+
+		deps, err := baseStore.GetDependencyRecords(ctx, "sym-3su")
+		if err != nil {
+			t.Fatalf("GetDependencyRecords(sym-3su): %v", err)
+		}
+		if len(deps) != 1 || deps[0].DependsOnID != "mkt-456" || deps[0].Type != types.DepRelated {
+			t.Fatalf("sym-3su deps = %#v, want one related dependency on mkt-456", deps)
 		}
 	})
 

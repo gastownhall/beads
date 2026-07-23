@@ -771,7 +771,8 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			if (dep.Type == types.DepParentChild) != parentPhase {
 				continue
 			}
-			kind := ClassifyDepTarget(ctx, tx, dep, false)
+			isCrossPrefix := types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID)
+			kind := ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
 
 			if kind != DepTargetExternal {
 				lookupTable := "issues"
