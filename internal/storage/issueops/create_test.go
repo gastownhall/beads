@@ -451,3 +451,96 @@ func TestPersistDependenciesSkipsHierarchyValidationAcrossPrefixes(t *testing.T)
 		t.Fatalf("unmet expectations: %v", err)
 	}
 }
+
+func TestReconcileChildCountersSkipsMissingParent(t *testing.T) {
+	ctx := context.Background()
+	db, mock, tx := beginMockTx(t)
+	defer db.Close()
+
+	mock.ExpectQuery("SELECT 1 FROM wisps LIMIT 1").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
+		WithArgs("test-deleted-parent").
+		WillReturnError(sql.ErrNoRows)
+
+	changed, err := ReconcileChildCounters(ctx, tx, []*types.Issue{{
+		ID:        "test-deleted-parent.7",
+		IssueType: types.TypeTask,
+	}})
+	if err != nil {
+		t.Fatalf("ReconcileChildCounters error = %v, want nil", err)
+	}
+	if len(changed) != 0 {
+		t.Fatalf("changed tables = %#v, want none", changed)
+	}
+
+	// No counter SELECT or upsert is expected after the missing-parent lookup.
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestReconcileChildCountersReturnsParentLookupError(t *testing.T) {
+	ctx := context.Background()
+	db, mock, tx := beginMockTx(t)
+	defer db.Close()
+	lookupErr := errors.New("parent lookup failed")
+
+	mock.ExpectQuery("SELECT 1 FROM wisps LIMIT 1").
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery("SELECT 1 FROM issues WHERE id = \\?").
+		WithArgs("test-parent").
+		WillReturnError(lookupErr)
+
+	_, err := ReconcileChildCounters(ctx, tx, []*types.Issue{{
+		ID:        "test-parent.1",
+		IssueType: types.TypeTask,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "failed to check child counter parent test-parent") || !errors.Is(err, lookupErr) {
+		t.Fatalf("error = %v, want contextual parent lookup error", err)
+	}
+
+	// A lookup failure must not be mistaken for an absent parent or reach the
+	// counter table.
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestReconcileChildCountersReturnsWispLookupError(t *testing.T) {
+	ctx := context.Background()
+	db, mock, tx := beginMockTx(t)
+	defer db.Close()
+	lookupErr := errors.New("wisp lookup failed")
+
+	mock.ExpectQuery("SELECT 1 FROM wisps LIMIT 1").
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery("SELECT id FROM wisps WHERE id IN \\(\\?\\)").
+		WithArgs("test-parent").
+		WillReturnError(lookupErr)
+
+	_, err := ReconcileChildCounters(ctx, tx, []*types.Issue{{
+		ID:        "test-parent.1",
+		IssueType: types.TypeTask,
+	}})
+	if err == nil || !strings.Contains(err.Error(), "failed to route child counter parents") || !errors.Is(err, lookupErr) {
+		t.Fatalf("error = %v, want contextual wisp lookup error", err)
+	}
+
+	// A failed wisp lookup must stop routing before any issues or counter query.
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
