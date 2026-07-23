@@ -807,8 +807,9 @@ func runCompactDolt() error {
 		fmt.Printf("Running Dolt garbage collection...\n")
 	}
 
-	// Run dolt gc
-	cmd := exec.Command("dolt", "gc") // #nosec G204 -- fixed command, no user input
+	// Run dolt gc without archive compression. Level 0 writes classic Snappy
+	// table files instead of zstd archives, matching the in-process GC paths.
+	cmd := exec.Command("dolt", "gc", "--archive-level", "0") // #nosec G204 -- fixed command, no user input
 	cmd.Dir = doltPath
 	output, err := cmd.CombinedOutput()
 	if err != nil {
