@@ -12,8 +12,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
-const proxiedServerRootDirName = "proxieddb"
-
 func NewContextRepository(fsRepo domain.BeadsDirFSRepository) domain.ContextRepository {
 	return &contextRepositoryImpl{fsRepo: fsRepo}
 }
@@ -83,7 +81,7 @@ func (r *contextRepositoryImpl) ProxiedServerRoot(ctx context.Context) (string, 
 	if p := info.ResolvedRootPath(beadsDir); p != "" {
 		return p, nil
 	}
-	return filepath.Join(beadsDir, proxiedServerRootDirName), nil
+	return doltserver.ResolveDoltDir(beadsDir), nil
 }
 
 func (r *contextRepositoryImpl) SyncRemote(ctx context.Context) (string, error) {

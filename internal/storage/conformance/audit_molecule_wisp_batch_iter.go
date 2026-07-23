@@ -38,6 +38,7 @@ func RunAudit_molecule_wisp_batch_iter(t *testing.T, f Factory) {
 	t.Run("CreateInBatchCycle", func(t *testing.T) { testAuditCreateInBatchCycle(t, f) })
 	t.Run("ListWisps", func(t *testing.T) { testAuditListWisps(t, f) })
 	t.Run("GetNextChildID", func(t *testing.T) { testAuditGetNextChildID(t, f) })
+	t.Run("GetNextChildIDCaseSensitive", func(t *testing.T) { testAuditGetNextChildIDCaseSensitive(t, f) })
 }
 
 // auditDepTargets returns the sorted DependsOnID set for a dependency slice.
@@ -661,5 +662,22 @@ func testAuditGetNextChildID(t *testing.T, f Factory) {
 	must(t, err)
 	if wid != "test-wp.1" {
 		t.Errorf("wisp parent = %q, want test-wp.1", wid)
+	}
+}
+
+// The self-heal scan (id LIKE parent.'%') is case-sensitive on Dolt and SQLite
+// (see bd-oyvc2.10), so a different-cased sibling parent's children never advance
+// this parent's counter.
+func testAuditGetNextChildIDCaseSensitive(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-q", Title: "lower parent"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-Q", Title: "upper parent"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-Q.7", Title: "upper child"}), "a"))
+
+	id, err := s.GetNextChildID(c, "test-q")
+	must(t, err)
+	if id != "test-q.1" {
+		t.Errorf("GetNextChildID(test-q) = %q, want test-q.1 (test-Q.7 must not advance test-q's counter)", id)
 	}
 }

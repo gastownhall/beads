@@ -1,6 +1,6 @@
 ---
 title: "bd close"
-description: "Close one or more issues"
+description: "Close one or more issues."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

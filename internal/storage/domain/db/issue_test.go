@@ -32,6 +32,12 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("NormalizesTimestampToUTC", s.issueUpdateNormalizesTimestamp)
 		s.Run("MissingIDWithStatusChangeReturnsErrNoRows", s.issueUpdateMissingIDWithStatus)
 	})
+	s.Run("RowVersion", func() {
+		s.Run("NonZeroAfterCreate", s.issueRowVersionNonZeroOnCreate)
+		s.Run("ChangesOnUpdate", s.issueRowVersionChangesOnUpdate)
+		s.Run("WispNonZeroAfterCreate", s.wispRowVersionNonZeroOnCreate)
+		s.Run("WispChangesOnUpdate", s.wispRowVersionChangesOnUpdate)
+	})
 	s.Run("Claim", func() {
 		s.Run("FreshOpenSetsAssigneeAndStartedAt", s.issueClaimFresh)
 		s.Run("IdempotentReclaimBySameActor", s.issueClaimIdempotent)
@@ -41,6 +47,10 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("EmptyIDReturnsError", s.issueClaimEmptyID)
 		s.Run("RecordsClaimedEvent", s.issueClaimRecordsEvent)
 		s.Run("StampsLeaseAndIsReclaimable", s.issueClaimStampsLease)
+		s.Run("PoolAliasClaimableByAnyActor", s.issueClaimPoolAlias)
+		s.Run("UnconfiguredAliasStillProtected", s.issueClaimPoolUnconfiguredAlias)
+		s.Run("PoolStatusConflictFlagsPoolAssignee", s.issueClaimPoolStatusConflict)
+		s.Run("CustomActiveStatusClaimable", s.issueClaimCustomActiveStatus)
 	})
 	s.Run("Get", func() {
 		s.Run("MissingIDReturnsErrNoRows", s.issueGetMissing)
@@ -210,6 +220,68 @@ func (s *testSuite) issueInsertBatchStopsOnError() {
 	s.Require().NoError(err)
 	s.Len(got, 1, "first issue should be persisted, third should not")
 	s.Equal("bd-stop-1", got[0].ID)
+}
+
+// issueRowVersionNonZeroOnCreate proves a proxied/domain create stamps a
+// non-zero row_lock so types.Issue.RowVersion is a live CAS token from the
+// first write, matching the classic insert (issueops/helpers.go) rather than
+// the schema DEFAULT 0.
+func (s *testSuite) issueRowVersionNonZeroOnCreate() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-rv-create", "row version create"), "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.Get(s.Ctx(), "bd-rv-create", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.NotZero(out.RowVersion, "create must stamp a non-zero row_lock / RowVersion")
+}
+
+// issueRowVersionChangesOnUpdate proves the generic proxied/domain update path
+// rewrites row_lock, so RowVersion advances on a plain field edit exactly like
+// the classic issueops.updateIssueInTx invariant.
+func (s *testSuite) issueRowVersionChangesOnUpdate() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-rv-update", "before"), "tester", domain.InsertIssueOpts{}))
+	before, err := r.Get(s.Ctx(), "bd-rv-update", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().NotZero(before.RowVersion)
+
+	s.Require().NoError(r.Update(s.Ctx(), "bd-rv-update", map[string]any{"title": "after"}, "tester", domain.IssueTableOpts{}))
+	after, err := r.Get(s.Ctx(), "bd-rv-update", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.NotZero(after.RowVersion)
+	s.NotEqual(before.RowVersion, after.RowVersion, "a generic update must rewrite row_lock / RowVersion")
+}
+
+// wispRowVersionNonZeroOnCreate is the wisp-table counterpart of
+// issueRowVersionNonZeroOnCreate: the same insert chokepoint (insertIssueRow)
+// serves both tables, so a wisp create must also stamp a non-zero token.
+func (s *testSuite) wispRowVersionNonZeroOnCreate() {
+	r := s.issueRepo()
+	wisp := newTestIssue("bd-rv-wisp-create", "wisp row version")
+	wisp.Ephemeral = true
+	s.Require().NoError(r.Insert(s.Ctx(), wisp, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+
+	out, err := r.Get(s.Ctx(), "bd-rv-wisp-create", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.NotZero(out.RowVersion, "wisp create must stamp a non-zero row_lock / RowVersion")
+}
+
+// wispRowVersionChangesOnUpdate is the wisp-table counterpart of
+// issueRowVersionChangesOnUpdate.
+func (s *testSuite) wispRowVersionChangesOnUpdate() {
+	r := s.issueRepo()
+	wisp := newTestIssue("bd-rv-wisp-update", "before")
+	wisp.Ephemeral = true
+	s.Require().NoError(r.Insert(s.Ctx(), wisp, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+	before, err := r.Get(s.Ctx(), "bd-rv-wisp-update", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.Require().NotZero(before.RowVersion)
+
+	s.Require().NoError(r.Update(s.Ctx(), "bd-rv-wisp-update", map[string]any{"title": "after"}, "tester", domain.IssueTableOpts{UseWispsTable: true}))
+	after, err := r.Get(s.Ctx(), "bd-rv-wisp-update", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.NotZero(after.RowVersion)
+	s.NotEqual(before.RowVersion, after.RowVersion, "a generic wisp update must rewrite row_lock / RowVersion")
 }
 
 func (s *testSuite) issueUpdateAllowedFields() {
@@ -640,8 +712,8 @@ func (s *testSuite) issueClaimEmptyID() {
 	s.Contains(err.Error(), "id must not be empty")
 }
 
-// issueClaimStampsLease asserts the proxied-server (uow) claim path stamps the
-// lease columns and rewrites row_lock, so a claim made through this path is
+// issueClaimStampsLease asserts the proxied-server (uow) claim path grants a
+// lease row and rewrites row_lock, so a claim made through this path is
 // visible to bd reclaim rather than stranded (the C2 gap).
 func (s *testSuite) issueClaimStampsLease() {
 	r := s.issueRepo()
@@ -658,10 +730,11 @@ func (s *testSuite) issueClaimStampsLease() {
 		rowLock      int64
 	)
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT lease_expires_at, heartbeat_at, row_lock FROM issues WHERE id = ?", "bd-claim-lease").
+		"SELECT l.lease_expires_at, l.heartbeat_at, i.row_lock FROM issues i "+
+			"LEFT JOIN leases l ON l.issue_id = i.id WHERE i.id = ?", "bd-claim-lease").
 		Scan(&leaseExpires, &heartbeatAt, &rowLock))
-	s.Require().True(leaseExpires.Valid, "proxied claim must stamp lease_expires_at")
-	s.Require().True(heartbeatAt.Valid, "proxied claim must stamp heartbeat_at")
+	s.Require().True(leaseExpires.Valid, "proxied claim must grant a lease row")
+	s.Require().True(heartbeatAt.Valid, "proxied claim must stamp heartbeat_at on the lease row")
 	s.NotZero(rowLock, "proxied claim must rewrite row_lock")
 
 	// The stamped lease must be recoverable. A cutoff in the future makes the
@@ -690,6 +763,123 @@ func (s *testSuite) issueClaimStampsLease() {
 	s.Require().NoError(err)
 	s.Equal(types.StatusOpen, out.Status, "reclaim reverts the proxied claim to open")
 	s.Equal("", out.Assignee)
+}
+
+// setClaimPools configures claim.pools for a subtest and returns a cleanup
+// func. Sibling subtests share this database (SetupTest resets per suite
+// method, not per s.Run), so the key must not leak past the subtest.
+func (s *testSuite) setClaimPools(value string) func() {
+	s.Require().NoError(issueops.SetConfigInTx(s.Ctx(), s.Runner(), "claim.pools", value))
+	return func() {
+		_, err := s.db.ExecContext(s.Ctx(), "DELETE FROM config WHERE `key` = 'claim.pools'")
+		s.Require().NoError(err)
+	}
+}
+
+// issueClaimPoolAlias asserts the proxied-server (uow) claim path honors
+// claim.pools (bd-bguz6): an issue pre-assigned to a configured pool alias is
+// claimable by any actor, exactly like the primary issueops.ClaimIssueInTx
+// path.
+func (s *testSuite) issueClaimPoolAlias() {
+	cleanup := s.setClaimPools("fable-crew, night-crew")
+	defer cleanup()
+
+	r := s.issueRepo()
+	in := newTestIssue("bd-claim-pool", "pool-dispatched item")
+	in.Assignee = "fable-crew"
+	s.Require().NoError(r.Insert(s.Ctx(), in, "dispatcher", domain.InsertIssueOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-pool", "bob", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().True(res.Updated, "pool-assigned issue must be claimable by any actor through the proxied path")
+
+	out, err := r.Get(s.Ctx(), "bd-claim-pool", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal("bob", out.Assignee)
+	s.Equal(types.StatusInProgress, out.Status)
+
+	var leaseExpires sql.NullTime
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT lease_expires_at FROM leases WHERE issue_id = ?", "bd-claim-pool").Scan(&leaseExpires))
+	s.Require().True(leaseExpires.Valid, "a pool take is a normal claim and must grant a lease")
+}
+
+// issueClaimPoolUnconfiguredAlias asserts an alias absent from claim.pools
+// keeps the anti-steal protection on this path too.
+func (s *testSuite) issueClaimPoolUnconfiguredAlias() {
+	cleanup := s.setClaimPools("fable-crew")
+	defer cleanup()
+
+	r := s.issueRepo()
+	in := newTestIssue("bd-claim-pool-other", "other crew's work")
+	in.Assignee = "other-crew"
+	s.Require().NoError(r.Insert(s.Ctx(), in, "dispatcher", domain.InsertIssueOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-pool-other", "bob", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(res.Updated, "unconfigured alias must not be claimable")
+	s.Equal("other-crew", res.CurrentAssignee)
+	s.False(res.CurrentAssigneeIsPool, "unconfigured alias is not a pool")
+}
+
+// issueClaimPoolStatusConflict asserts a pool-assigned issue that loses the
+// CAS on status is flagged CurrentAssigneeIsPool, so the use-case layer
+// reports a status conflict instead of a held-by-pseudo-assignee refusal.
+func (s *testSuite) issueClaimPoolStatusConflict() {
+	cleanup := s.setClaimPools("fable-crew")
+	defer cleanup()
+
+	r := s.issueRepo()
+	in := newTestIssue("bd-claim-pool-blocked", "blocked pool item")
+	in.Assignee = "fable-crew"
+	in.Status = types.StatusBlocked
+	s.Require().NoError(r.Insert(s.Ctx(), in, "dispatcher", domain.InsertIssueOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-pool-blocked", "bob", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(res.Updated)
+	s.True(res.CurrentAssigneeIsPool, "pool assignee must be flagged for status-conflict error mapping")
+	s.Equal(types.StatusBlocked, res.CurrentStatus)
+}
+
+// issueClaimCustomActiveStatus asserts the proxied-server claim path claims
+// from custom active-category statuses like the primary path's
+// ClaimableSourceStatusesInTx (bd-pq7m2), not from a hardcoded
+// status = 'open' — and that non-active customs keep their anti-steal
+// protection (GH-3570 parity).
+func (s *testSuite) issueClaimCustomActiveStatus() {
+	_, err := s.db.ExecContext(s.Ctx(),
+		"INSERT INTO custom_statuses (name, category) VALUES ('triaged', 'active'), ('polishing', 'wip')")
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.db.ExecContext(s.Ctx(),
+			"DELETE FROM custom_statuses WHERE name IN ('triaged', 'polishing')")
+		s.Require().NoError(err)
+	}()
+
+	r := s.issueRepo()
+	in := newTestIssue("bd-claim-custom-active", "triaged item")
+	in.Status = types.Status("triaged")
+	s.Require().NoError(r.Insert(s.Ctx(), in, "tester", domain.InsertIssueOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-custom-active", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().True(res.Updated, "custom active-category status must be claimable through the proxied path (bd-pq7m2)")
+
+	out, err := r.Get(s.Ctx(), "bd-claim-custom-active", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal("alice", out.Assignee)
+	s.Equal(types.StatusInProgress, out.Status)
+
+	// A wip-category custom status stays unclaimable (anti-steal parity).
+	wip := newTestIssue("bd-claim-custom-wip", "being polished")
+	wip.Status = types.Status("polishing")
+	s.Require().NoError(r.Insert(s.Ctx(), wip, "tester", domain.InsertIssueOpts{}))
+
+	res, err = r.Claim(s.Ctx(), "bd-claim-custom-wip", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(res.Updated, "wip-category custom status must not be claimable")
+	s.Equal(types.Status("polishing"), res.CurrentStatus)
 }
 
 func (s *testSuite) issueClaimRecordsEvent() {

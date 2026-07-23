@@ -66,6 +66,11 @@ crash-recovery logic, or public SDK return types that leak driver internals.
 If the boundary is too narrow, widen the interface or route the issue to the
 driver instead of patching around it in beads.
 
+A live application of this rule: `bd doctor` support for embedded mode is
+enabled one subcommand at a time, each human-vetted (GH#3794). Do not lift the
+embedded-mode gate in `cmd/bd/doctor.go` wholesale, and keep database-layer
+checks and fixes server-gated until the driver interface covers them.
+
 ## Agent Warning: Interactive Commands
 
 **DO NOT use `bd edit`** - it opens an interactive editor ($EDITOR) which AI agents cannot use.

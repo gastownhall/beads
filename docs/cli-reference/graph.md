@@ -1,6 +1,6 @@
 ---
 title: "bd graph"
-description: "Display issue dependency graph"
+description: "Display a visualization of an issue's dependency graph."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -38,7 +38,6 @@ Examples:
 
 ```
 bd graph [issue-id] [flags]
-bd graph [command]
 ```
 
 **Flags:**

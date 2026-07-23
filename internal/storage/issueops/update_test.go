@@ -1,7 +1,6 @@
 package issueops
 
 import (
-	"reflect"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -9,12 +8,10 @@ import (
 
 // TestManageLeaseOnUpdate pins the clear-only contract (bd-9hpgf, GH#4716):
 // generic updates never arm a lease — arming belongs to claim/heartbeat. The
-// helper clears the lease columns whenever the update leaves the claimed state
-// or changes who holds the claim, and leaves them untouched when the same
-// claim stays in place.
+// helper reports that the lease row must be dropped (DeleteLeaseInTx) whenever
+// the update leaves the claimed state or changes who holds the claim, and
+// leaves the lease untouched when the same claim stays in place.
 func TestManageLeaseOnUpdate(t *testing.T) {
-	const clearClause = "lease_expires_at = NULL"
-
 	tests := []struct {
 		name      string
 		oldStatus types.Status
@@ -82,29 +79,9 @@ func TestManageLeaseOnUpdate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			oldIssue := &types.Issue{Status: tt.oldStatus, Assignee: tt.oldOwner}
-			inClauses := []string{"updated_at = ?"}
-			inArgs := []interface{}{"now"}
 
-			gotClauses, gotArgs := ManageLeaseOnUpdate(oldIssue, tt.updates, inClauses, inArgs)
-
-			cleared := false
-			for _, c := range gotClauses {
-				if c == clearClause {
-					cleared = true
-				}
-			}
-			if cleared != tt.wantClear {
-				t.Errorf("clear = %v, want %v (clauses: %v)", cleared, tt.wantClear, gotClauses)
-			}
-			// The helper must never arm: no new args beyond what came in, and no
-			// parameterized lease clause.
-			if !reflect.DeepEqual(gotArgs, inArgs) {
-				t.Errorf("args changed — generic update must never stamp lease values: %v", gotArgs)
-			}
-			for _, c := range gotClauses {
-				if c == "lease_expires_at = ?" || c == "heartbeat_at = ?" {
-					t.Errorf("generic update armed a lease via clause %q", c)
-				}
+			if cleared := ManageLeaseOnUpdate(oldIssue, tt.updates); cleared != tt.wantClear {
+				t.Errorf("clear = %v, want %v", cleared, tt.wantClear)
 			}
 		})
 	}

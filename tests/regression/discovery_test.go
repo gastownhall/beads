@@ -293,7 +293,11 @@ func TestProtocol_CloseGuardRespectDepTypes(t *testing.T) {
 		w.run("dep", "add", a, b, "--type", "blocks")
 
 		out, _ := w.tryRun("close", a)
-		if !strings.Contains(out, "blocked by open issues") {
+		// Both close paths now delegate to a library checked close and surface
+		// storage.ErrCloseBlocked ("cannot close blocked issue: <id> is blocked
+		// by [...]"). The older "blocked by open issues" arm is kept so this
+		// discovery test still matches pre-delegation binaries.
+		if !strings.Contains(out, "blocked by open issues") && !strings.Contains(out, "cannot close") {
 			t.Errorf("close of blocked issue should be rejected, got: %s", out)
 		}
 

@@ -130,6 +130,10 @@ var labelAddCmd = &cobra.Command{
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runLabelAddProxiedServer(rootCtx, args)
+		}
+
 		issueIDs, labels := parseLabelArgs(args)
 		if len(labels) == 0 {
 			return HandleErrorRespectJSON("label cannot be empty")
@@ -171,6 +175,10 @@ var labelRemoveCmd = &cobra.Command{
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runLabelRemoveProxiedServer(rootCtx, args)
+		}
+
 		issueIDs, labels := parseLabelArgs(args)
 		if len(labels) == 0 {
 			return HandleErrorRespectJSON("label cannot be empty")
@@ -199,6 +207,10 @@ var labelListCmd = &cobra.Command{
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runLabelListProxiedServer(rootCtx, args)
+		}
 
 		ctx := rootCtx
 		var issueID string
@@ -242,6 +254,10 @@ var labelListAllCmd = &cobra.Command{
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runLabelListAllProxiedServer(rootCtx)
+		}
 
 		ctx := rootCtx
 		var issues []*types.Issue
@@ -318,6 +334,10 @@ var labelPropagateCmd = &cobra.Command{
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runLabelPropagateProxiedServer(rootCtx, args)
+		}
 
 		ctx := rootCtx
 

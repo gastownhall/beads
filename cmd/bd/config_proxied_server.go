@@ -9,17 +9,6 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func openConfigProxiedUOW(ctx context.Context) (uow.UnitOfWork, error) {
-	if uowProvider == nil {
-		return nil, HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return nil, HandleErrorRespectJSON("open unit of work: %v", err)
-	}
-	return uw, nil
-}
-
 func runConfigSetProxiedServer(ctx context.Context, key, value string) error {
 	if key == "status.custom" && value != "" {
 		if _, err := types.ParseCustomStatusConfig(value); err != nil {
@@ -27,18 +16,18 @@ func runConfigSetProxiedServer(ctx context.Context, key, value string) error {
 		}
 	}
 
-	uw, err := openConfigProxiedUOW(ctx)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
+	}
+
+	err := uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		if err := uw.ConfigUseCase().SetConfig(ctx, key, value); err != nil {
+			return "", fmt.Errorf("setting config: %w", err)
+		}
+		return fmt.Sprintf("bd: config set %s", key), nil
+	})
 	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	if err := uw.ConfigUseCase().SetConfig(ctx, key, value); err != nil {
-		return HandleErrorRespectJSON("Error setting config: %v", err)
-	}
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: config set %s", key)); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("failed to commit: %v", err)
+		return HandleErrorRespectJSON("failed: %v", err)
 	}
 
 	if jsonOutput {
@@ -54,13 +43,13 @@ func runConfigSetProxiedServer(ctx context.Context, key, value string) error {
 }
 
 func runConfigGetProxiedServer(ctx context.Context, key string) error {
-	uw, err := openConfigProxiedUOW(ctx)
-	if err != nil {
-		return err
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
-	defer uw.Close(ctx)
 
-	value, err := uw.ConfigUseCase().GetConfig(ctx, key)
+	value, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		return uw.ConfigUseCase().GetConfig(ctx, key)
+	})
 	if err != nil {
 		return HandleErrorRespectJSON("Error getting config: %v", err)
 	}
@@ -81,13 +70,13 @@ func runConfigGetProxiedServer(ctx context.Context, key string) error {
 }
 
 func runConfigListProxiedServer(ctx context.Context) error {
-	uw, err := openConfigProxiedUOW(ctx)
-	if err != nil {
-		return err
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
-	defer uw.Close(ctx)
 
-	cfg, err := uw.ConfigUseCase().GetAllConfig(ctx)
+	cfg, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (map[string]string, error) {
+		return uw.ConfigUseCase().GetAllConfig(ctx)
+	})
 	if err != nil {
 		return HandleErrorRespectJSON("Error listing config: %v", err)
 	}
@@ -118,18 +107,18 @@ func runConfigListProxiedServer(ctx context.Context) error {
 }
 
 func runConfigUnsetProxiedServer(ctx context.Context, key string) error {
-	uw, err := openConfigProxiedUOW(ctx)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
+	}
+
+	err := uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		if err := uw.ConfigUseCase().DeleteConfig(ctx, key); err != nil {
+			return "", fmt.Errorf("deleting config: %w", err)
+		}
+		return fmt.Sprintf("bd: config unset %s", key), nil
+	})
 	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	if err := uw.ConfigUseCase().DeleteConfig(ctx, key); err != nil {
-		return HandleErrorRespectJSON("Error deleting config: %v", err)
-	}
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: config unset %s", key)); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("failed to commit: %v", err)
+		return HandleErrorRespectJSON("failed: %v", err)
 	}
 
 	if jsonOutput {
@@ -147,21 +136,18 @@ func runConfigSetManyProxiedServer(ctx context.Context, keys, values []string) e
 	if len(keys) == 0 {
 		return nil
 	}
-	uw, err := openConfigProxiedUOW(ctx)
-	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
 
-	cfgUC := uw.ConfigUseCase()
-	for i, k := range keys {
-		if err := cfgUC.SetConfig(ctx, k, values[i]); err != nil {
-			return HandleErrorRespectJSON("Error setting config %s: %v", k, err)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
+	}
+
+	return uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		cfgUC := uw.ConfigUseCase()
+		for i, k := range keys {
+			if err := cfgUC.SetConfig(ctx, k, values[i]); err != nil {
+				return "", fmt.Errorf("setting config %s: %w", k, err)
+			}
 		}
-	}
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: config set-many (%d keys)", len(keys))); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("failed to commit: %v", err)
-	}
-	return nil
+		return fmt.Sprintf("bd: config set-many (%d keys)", len(keys)), nil
+	})
 }

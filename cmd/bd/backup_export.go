@@ -140,6 +140,19 @@ func runBackupExport(ctx context.Context, force bool) (*backupState, error) {
 	}
 
 	if err := bs.BackupDatabase(ctx, dir); err != nil {
+		// Persist the attempt time even on failure so the throttle
+		// interval (checked by maybeAutoBackup via state.Timestamp)
+		// applies to the next command. Without this, a sync that keeps
+		// failing — e.g. a slow/overloaded shared Dolt server — retries
+		// on EVERY bd command instead of once per interval, turning a
+		// transient slowdown into a self-amplifying storm (the 2026-07
+		// shared-dolt CPU-pin incident). LastDoltCommit is deliberately
+		// left unchanged so change-detection still sees pending work and
+		// a real backup runs once the failure clears.
+		state.Timestamp = time.Now().UTC()
+		if saveErr := saveBackupState(dir, state); saveErr != nil {
+			debug.Logf("backup: failed to persist throttle state after error: %v\n", saveErr)
+		}
 		return nil, err
 	}
 

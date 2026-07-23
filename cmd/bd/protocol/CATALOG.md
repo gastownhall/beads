@@ -33,7 +33,7 @@ pinned-decoder migration off.
 | ---------------------- | ---------- | --------------- |
 | `create_root`, `create_dep`, `create_closed`, `create_deleted` | `bd create … --json` | json-output-shapes (object) |
 | `show` | `bd show <id> --json` | json-output-shapes (array-of-one), dependency shape |
-| `update` | `bd update … --json` | json-output-shapes (mutation array), label add + metadata coercion (`phase` → integer) |
+| `update` | `bd update … --json` | json-output-shapes (mutation array), label add + metadata coercion (`phase` → string) |
 | `close` | `bd close --reason … --json` | close semantics (`close_reason`, `closed_at`) |
 | `reopen` | `bd reopen … --json` | reopen semantics (status back to open) |
 | `list` | `bd list --all --json` | json-output-shapes (array / list envelope) |

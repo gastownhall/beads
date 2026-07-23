@@ -1,6 +1,6 @@
 ---
 title: "bd assign"
-description: "Assign an issue to someone"
+description: "Assign an issue to someone."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

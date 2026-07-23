@@ -16138,7 +16138,7 @@
  },
  {
   "name": "update_set_metadata_incremental",
-  "purpose": "Incremental --set-metadata key=value with type coercion (string, number, bool).",
+  "purpose": "Incremental --set-metadata key=value; all values stored as JSON strings.",
   "prefix": "upm",
   "steps": [
    [
@@ -16168,7 +16168,7 @@
     "--json"
    ]
   ],
-  "pins": "applyMetadataEdits/toJSONValue: number->5, bool->true, string->\"platform\"; merged into metadata object.",
+  "pins": "applyMetadataEdits/toJSONValue: no type inference; team->\"platform\", count->\"5\", active->\"true\" (GH#4146); merged into metadata object.",
   "deterministic": true
  },
  {

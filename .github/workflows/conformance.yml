@@ -1,12 +1,7 @@
 name: Conformance
 
-# Runs the two-tier storage-backend conformance suite against REAL databases —
-# the same scripts/conformance.sh developers run locally, so local == CI. Tier 1
-# is the in-process store suite plus the wedge gates; Tier 2 is the end-to-end
-# `bd init` + CLI differential (every SQL backend compared to the Dolt reference).
-# Postgres and MySQL run as service containers; Dolt (embedded) and SQLite are
-# in-process. The deep bts-rs 523-scenario oracle stays on-demand (CONFORMANCE_DEEP),
-# not in this per-PR job.
+# Runs the same two-tier storage conformance suite developers run locally:
+# the in-process store corpus and the real-binary CLI harness.
 
 on:
   pull_request:
@@ -23,40 +18,8 @@ env:
 
 jobs:
   conformance:
-    name: Storage backend conformance (real DBs)
+    name: Storage backend conformance (embedded Dolt oracle)
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: bts
-          POSTGRES_PASSWORD: bts
-          POSTGRES_DB: bdwedge
-          # Code-point collation parity with Dolt (utf8mb4_0900_bin). The pg backend
-          # provisions per-workspace SCHEMAS inside this one database and can't set
-          # per-column COLLATE "C" (it breaks the shared recursive CTEs; see
-          # internal/storage/postgres/schema.go), so byte-order parity has to be
-          # guaranteed at DB-creation time via a C-locale cluster.
-          POSTGRES_INITDB_ARGS: "--lc-collate=C --lc-ctype=C"
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U bts -d bdwedge"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-      mysql:
-        image: mysql:8
-        env:
-          MYSQL_ROOT_PASSWORD: bts
-          MYSQL_DATABASE: bdwedge
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd "mysqladmin ping -uroot -pbts --silent"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
@@ -65,23 +28,5 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      # The MySQL image's root only auths from localhost inside the container; the
-      # backend connects over TCP as a distinct host, so create a TCP-reachable user
-      # matching BEADS_MYSQL_TEST_URL.
-      - name: Provision MySQL user
-        run: |
-          mysql -h 127.0.0.1 -P 3306 -uroot -pbts -e "
-            CREATE USER IF NOT EXISTS 'bts'@'%' IDENTIFIED BY 'bts';
-            GRANT ALL PRIVILEGES ON *.* TO 'bts'@'%' WITH GRANT OPTION;
-            FLUSH PRIVILEGES;"
-
-      - name: Run conformance (Dolt + Postgres + MySQL + SQLite)
-        env:
-          BEADS_PG_TEST_URL: "postgres://bts:bts@127.0.0.1:5432/bdwedge"
-          BEADS_PG_PASSWORD: "bts"
-          BEADS_MYSQL_TEST_URL: "bts:bts@tcp(127.0.0.1:3306)/"
-          # Hard-fail (Tier 1 run_sql_conformance + Tier 2 e2e) if either real backend
-          # is absent, so removing/renaming a *_TEST_URL can't silently drop coverage
-          # while the gate still reports green.
-          BEADS_CONFORMANCE_REQUIRE: "postgres,mysql"
+      - name: Run conformance (embedded Dolt oracle)
         run: ./scripts/conformance.sh

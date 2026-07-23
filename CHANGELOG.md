@@ -7,7 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Public `beads.Storage` interface gained two required methods**
+  ([#4911](https://github.com/gastownhall/beads/pull/4911)). `UpdateIssueChecked`
+  (an optional `ExpectedVersion` compare-and-swap on updates) and `MergeMetadata`
+  (atomic single-key metadata merge) are now part of the `beads.Storage` /
+  `storage.Storage` contract. Consumers that only *call* the interface are
+  unaffected; any external type that *implements* it (a custom store, mock, or
+  proxy) must add both methods to compile. `UpdateIssueChecked` with a nil
+  `ExpectedVersion` behaves exactly like `UpdateIssue`, and `MergeMetadata` can
+  be layered over a read-modify-write of issue metadata. See
+  [examples/library-usage](examples/library-usage/README.md#concurrency--metadata).
+
+- **Storage backend scope simplified** (bd-sadcd). The recently merged direct
+  PostgreSQL and MySQL adapters have been rolled back before entering a tagged
+  release. Supporting additional general-purpose server databases introduced
+  dialect, credential, schema-lifecycle, migration, CI, and operational
+  complexity at odds with our goal of keeping Beads as simple as possible and
+  consuming as few resources as possible. The storage interface, shared issue
+  core, SQLite implementation, and conformance harness remain; embedded Dolt,
+  Dolt server, and SQLite are the supported storage paths. Dolt server mode and
+  its use of the MySQL wire protocol are unchanged. Existing PostgreSQL or
+  MySQL workspaces stop before their configured databases are opened or
+  modified; see the [migration
+  guide](docs/architecture/storage-backends.md#existing-postgresql-or-mysql-workspaces).
+- **Cross-type blocking dependencies are now allowed** (bd-wg7ve,
+  [#4034](https://github.com/gastownhall/beads/pull/4034)).
+  `bd dep add <task> <epic>` — gating a work item on an epic (program)
+  completing — previously failed with a backwards-reading error ("tasks can
+  only block other tasks, not epics"). The blanket same-type rule (GH#1495)
+  is replaced by a hierarchy deadlock guard that rejects only the cases that
+  actually wedge the graph: gating an issue on its own ancestor (the ancestor
+  can't close until its descendants finish) or on its own descendant (blocked
+  status cascades down to the very issue that must close to clear the gate).
+  Sibling ordering edges stay allowed. The guard now also covers
+  `conditional-blocks`, which previously skipped cross-type validation
+  entirely. A task gated on an epic becomes ready when the epic itself is
+  closed, consistent with `bd ready`/`bd blocked`.
+
+- **Claim/unclaim refusals now steer toward the holder instead of teaching
+  eviction** (bd-at6rc, wyvern wy-zs5s2). The `--claim` refusal for an issue
+  assigned to someone else suggested `bd unclaim <id>` — in a multi-agent
+  fleet that copy taught an unclaim-then-claim steamroller that evicted a
+  live, heartbeated claim mid-review. The refusal now says to coordinate
+  with the holder, and unclaim's ownership rejection frames `--force` as an
+  abandoned-claim escape hatch rather than a routine override. (The
+  ownership check itself — foreign unclaim requires `--force` — landed in
+  [#4675](https://github.com/gastownhall/beads/pull/4675).)
+
 ### Added
+
+- **Pool-aware claiming via the `claim.pools` config key** (bd-bguz6).
+  Dispatcher fleets pre-assign issues to a pool pseudo-assignee (e.g.
+  `fable-crew`); `--claim` previously refused those ("already assigned"),
+  forcing a two-step `--assignee <me> -s in_progress` per issue. Aliases
+  listed in `bd config set claim.pools "fable-crew,night-crew"` are now
+  claimable by any actor through the same atomic compare-and-swap — the
+  claim stamps the normal lease, and issues assigned to a real actor (or
+  to an alias not in the config) keep their anti-steal protection.
+  Pool-aware claiming works in every dolt mode — the proxied-server claim
+  path applies the same predicate — and `claim.*` is a recognized config
+  namespace (documented in `bd config --help`). Note: if a pool take's
+  lease expires, `bd reclaim` returns the issue to the unassigned pool,
+  not to the pool alias it was dispatched to.
+  Off by default: with no `claim.pools` configured, behavior is unchanged.
 
 - **Work leases: claim-TTL, heartbeat, and reclaim for dead-worker recovery**
   (schema v54, migration `0054`)

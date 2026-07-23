@@ -13,11 +13,13 @@ import (
 )
 
 func TestProxiedServerShow(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("show_single_issue", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ssi")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ssi")
 		issue := bdProxiedCreate(t, bd, p.dir, "Show me", "--type", "task")
 
 		out := bdProxiedShowRaw(t, bd, p.dir, issue.ID)
@@ -30,7 +32,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_multiple_issues", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "smi")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "smi")
 		issue1 := bdProxiedCreate(t, bd, p.dir, "Multi 1", "--type", "task")
 		issue2 := bdProxiedCreate(t, bd, p.dir, "Multi 2", "--type", "task")
 
@@ -44,14 +47,16 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_nonexistent_id_exits_nonzero", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sne")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sne")
 		stdout, stderr := bdProxiedShowFail(t, bd, p.dir, "sne-nonexistent999")
 		_ = stdout
 		_ = stderr
 	})
 
 	t.Run("show_no_args_errors", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sna")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sna")
 		stdout, stderr := bdProxiedShowFail(t, bd, p.dir)
 		combined := stdout + stderr
 		if !strings.Contains(combined, "at least one issue ID") {
@@ -60,7 +65,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_json_fields_round_trip", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sjf")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjf")
 		issue := bdProxiedCreate(t, bd, p.dir, "JSON show", "--type", "task",
 			"--description", "A description", "-p", "1")
 
@@ -86,7 +92,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_json_includes_labels", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sjl")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjl")
 		issue := bdProxiedCreate(t, bd, p.dir, "Labeled show", "--type", "task", "-l", "bug")
 
 		m := bdProxiedShowDetailsFirst(t, bd, p.dir, issue.ID)
@@ -106,7 +113,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_json_includes_dependencies", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sjd")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjd")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker", "--type", "task")
 		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked",
 			"--type", "task", "--deps", "blocked-by:"+blocker.ID)
@@ -126,7 +134,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_json_count_fields_default", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sjc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjc")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker", "--type", "task")
 		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked",
 			"--type", "task", "--deps", "blocked-by:"+blocker.ID)
@@ -153,7 +162,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_json_includes_comments_under_flag", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sjic")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjic")
 		issue := bdProxiedCreate(t, bd, p.dir, "Commented", "--type", "task")
 
 		db := openProxiedDB(t, p)
@@ -173,7 +183,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_json_includes_dependents_under_flag", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sjidep")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjidep")
 		hub := bdProxiedCreate(t, bd, p.dir, "Hub", "--type", "task")
 		bdProxiedCreate(t, bd, p.dir, "Spoke 1", "--type", "task", "--deps", "blocked-by:"+hub.ID)
 		bdProxiedCreate(t, bd, p.dir, "Spoke 2", "--type", "task", "--deps", "blocked-by:"+hub.ID)
@@ -191,7 +202,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_json_epic_progress", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sjep")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjep")
 		epic := bdProxiedCreate(t, bd, p.dir, "Epic progress", "--type", "epic")
 		child1 := bdProxiedCreate(t, bd, p.dir, "Epic child 1", "--type", "task", "--parent", epic.ID)
 		bdProxiedCreate(t, bd, p.dir, "Epic child 2", "--type", "task", "--parent", epic.ID)
@@ -215,7 +227,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_json_parent_derived", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sjp")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjp")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent", "--type", "epic")
 		child := bdProxiedCreate(t, bd, p.dir, "Child", "--type", "task", "--parent", parent.ID)
 
@@ -226,7 +239,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_short", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ssh")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ssh")
 		issue := bdProxiedCreate(t, bd, p.dir, "Short show", "--type", "task")
 		out := bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--short")
 		lines := strings.Split(strings.TrimSpace(out), "\n")
@@ -239,7 +253,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_long", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "slong")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "slong")
 		issue := bdProxiedCreate(t, bd, p.dir, "Long show", "--type", "task",
 			"--description", "Desc", "--assignee", "alice")
 		out := bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--long")
@@ -249,7 +264,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_id_flag", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sid")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sid")
 		issue := bdProxiedCreate(t, bd, p.dir, "ID flag test", "--type", "task")
 
 		out := bdProxiedShowRaw(t, bd, p.dir, "--id", issue.ID, "--short")
@@ -269,7 +285,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_local_time_no_error", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "slt")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "slt")
 		issue := bdProxiedCreate(t, bd, p.dir, "Local time", "--type", "task")
 		out := bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--local-time")
 		if !strings.Contains(out, "Local time") {
@@ -277,8 +294,16 @@ func TestProxiedServerShow(t *testing.T) {
 		}
 	})
 
+}
+
+func TestProxiedServerShow2(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
 	t.Run("show_external_ref_rendered", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sxr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sxr")
 		issue := bdProxiedCreate(t, bd, p.dir, "External ref test",
 			"--type", "task", "--external-ref", "https://example.com/spec.md")
 		out := bdProxiedShowRaw(t, bd, p.dir, issue.ID)
@@ -291,7 +316,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_no_external_ref_omits_line", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "snx")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "snx")
 		issue := bdProxiedCreate(t, bd, p.dir, "No ref test", "--type", "task")
 		out := bdProxiedShowRaw(t, bd, p.dir, issue.ID)
 		if strings.Contains(out, "External:") {
@@ -300,7 +326,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_not_found_json_envelope", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "snj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "snj")
 		stdout, _ := bdProxiedShowFail(t, bd, p.dir, "snj-bogus", "--json")
 		if stdout == "" {
 			t.Fatal("expected JSON error on stdout, got empty")
@@ -315,7 +342,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("view_alias_dispatches_to_proxied", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sva")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sva")
 		issue := bdProxiedCreate(t, bd, p.dir, "View alias", "--type", "task")
 		out, err := bdProxiedRun(t, bd, p.dir, "view", issue.ID, "--short")
 		if err != nil {
@@ -327,7 +355,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_concurrent_json_and_short", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "scn")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "scn")
 		const (
 			numWorkers      = 8
 			issuesPerWorker = 3
@@ -375,7 +404,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_wisp_id_routes_to_wisp_uc", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "swr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "swr")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp default", "--type", "task", "--ephemeral")
 
 		out := bdProxiedShowRaw(t, bd, p.dir, wisp.ID)
@@ -393,7 +423,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_refs_lists_referrers", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "srl")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "srl")
 		parent := bdProxiedCreate(t, bd, p.dir, "Refs parent", "--type", "task")
 		child := bdProxiedCreate(t, bd, p.dir, "Refs child",
 			"--type", "task", "--deps", "blocked-by:"+parent.ID)
@@ -405,7 +436,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_refs_groups_by_type", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "srg")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "srg")
 		hub := bdProxiedCreate(t, bd, p.dir, "Refs hub", "--type", "task")
 		bdProxiedCreate(t, bd, p.dir, "Blocker A",
 			"--type", "task", "--deps", "blocked-by:"+hub.ID)
@@ -422,7 +454,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_refs_empty", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sre")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sre")
 		issue := bdProxiedCreate(t, bd, p.dir, "No refs", "--type", "task")
 		out := bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--refs")
 		if !strings.Contains(out, "No references found") {
@@ -431,7 +464,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_refs_json_map_shape", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "srj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "srj")
 		parent := bdProxiedCreate(t, bd, p.dir, "Refs parent J", "--type", "task")
 		child := bdProxiedCreate(t, bd, p.dir, "Refs child J",
 			"--type", "task", "--deps", "blocked-by:"+parent.ID)
@@ -464,7 +498,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_wisp_refs", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "swrefs")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "swrefs")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp ref target", "--type", "task", "--ephemeral")
 		referrer := bdProxiedCreate(t, bd, p.dir, "Wisp referrer",
 			"--type", "task", "--ephemeral", "--deps", "blocked-by:"+wisp.ID)
@@ -476,7 +511,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_children", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sc")
 		parent := bdProxiedCreate(t, bd, p.dir, "Children parent", "--type", "epic")
 		child := bdProxiedCreate(t, bd, p.dir, "Children child",
 			"--type", "task", "--parent", parent.ID)
@@ -488,7 +524,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_children_empty", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sce")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sce")
 		issue := bdProxiedCreate(t, bd, p.dir, "No children", "--type", "task")
 		out := bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--children")
 		if !strings.Contains(out, "No children found") {
@@ -497,7 +534,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_children_short", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "scs")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "scs")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent S", "--type", "epic")
 		child := bdProxiedCreate(t, bd, p.dir, "Child S",
 			"--type", "task", "--parent", parent.ID)
@@ -509,7 +547,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_children_json_map_shape", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "scj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "scj")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent J", "--type", "epic")
 		child := bdProxiedCreate(t, bd, p.dir, "Child J",
 			"--type", "task", "--parent", parent.ID)
@@ -545,7 +584,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_wisp_children", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "swc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "swc")
 		epicW := bdProxiedCreate(t, bd, p.dir, "Wisp epic", "--type", "epic", "--ephemeral")
 		childW := bdProxiedCreate(t, bd, p.dir, "Wisp child",
 			"--type", "task", "--ephemeral", "--parent", epicW.ID)
@@ -556,8 +596,16 @@ func TestProxiedServerShow(t *testing.T) {
 		}
 	})
 
+}
+
+func TestProxiedServerShow3(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
 	t.Run("show_as_of_historical_title", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sao")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sao")
 		issue := bdProxiedCreate(t, bd, p.dir, "AsOf original", "--type", "task")
 
 		hash := proxiedCurrentCommit(t, p)
@@ -574,7 +622,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_as_of_invalid_ref_errors", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "saoi")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "saoi")
 		issue := bdProxiedCreate(t, bd, p.dir, "AsOf invalid", "--type", "task")
 
 		_, stderr, _ := bdProxiedRunBuffers(t, bd, p.dir, "show", issue.ID, "--as-of", "'; DROP TABLE issues; --")
@@ -584,7 +633,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_as_of_short_mode", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "saos")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "saos")
 		issue := bdProxiedCreate(t, bd, p.dir, "AsOf short", "--type", "task")
 		hash := proxiedCurrentCommit(t, p)
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--title", "AsOf short updated")
@@ -599,7 +649,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_as_of_json_array", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "saoj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "saoj")
 		issue := bdProxiedCreate(t, bd, p.dir, "AsOf JSON", "--type", "task")
 		hash := proxiedCurrentCommit(t, p)
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--title", "AsOf JSON updated")
@@ -614,7 +665,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_thread_walks_to_root", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sthr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sthr")
 		root := bdProxiedCreate(t, bd, p.dir, "Root msg", "--type", "task")
 		mid := bdProxiedCreate(t, bd, p.dir, "Mid reply",
 			"--type", "task", "--deps", "replies-to:"+root.ID)
@@ -630,7 +682,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_thread_collects_replies", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "stbr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "stbr")
 		root := bdProxiedCreate(t, bd, p.dir, "Branch root", "--type", "task")
 		a := bdProxiedCreate(t, bd, p.dir, "Reply A",
 			"--type", "task", "--deps", "replies-to:"+root.ID)
@@ -648,7 +701,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_thread_json_emits_array", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "stj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "stj")
 		root := bdProxiedCreate(t, bd, p.dir, "Thread JSON root", "--type", "task")
 		reply := bdProxiedCreate(t, bd, p.dir, "Thread JSON reply",
 			"--type", "task", "--deps", "replies-to:"+root.ID)
@@ -676,7 +730,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_thread_orphan_message_renders_alone", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sto")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sto")
 		orphan := bdProxiedCreate(t, bd, p.dir, "Orphan msg", "--type", "task")
 		out := bdProxiedShowRaw(t, bd, p.dir, orphan.ID, "--thread")
 		if !strings.Contains(out, orphan.ID) {
@@ -688,7 +743,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_current_with_in_progress", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "scur")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "scur")
 		issue := bdProxiedCreate(t, bd, p.dir, "In progress", "--type", "task")
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID,
 			"--status", "in_progress", "--assignee", "alice", "--actor", "alice")
@@ -703,7 +759,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_current_prefers_in_progress_over_hooked", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "scp")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "scp")
 		hooked := bdProxiedCreate(t, bd, p.dir, "Hooked one", "--type", "task")
 		inProg := bdProxiedCreate(t, bd, p.dir, "InProg one", "--type", "task")
 		bdProxiedUpdateOne(t, bd, p.dir, hooked.ID,
@@ -724,7 +781,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_current_with_id_fails", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "scid")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "scid")
 		issue := bdProxiedCreate(t, bd, p.dir, "Conflict", "--type", "task")
 		stdout, stderr := bdProxiedShowFail(t, bd, p.dir, "--current", issue.ID)
 		combined := stdout + stderr
@@ -734,7 +792,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_current_no_match_errors", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "scnm")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "scnm")
 		stdout, stderr := bdProxiedShowFail(t, bd, p.dir, "--current")
 		combined := stdout + stderr
 		if !strings.Contains(combined, "no current issue found") {
@@ -743,7 +802,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_watch_rejected_in_proxied_mode", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "swt")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "swt")
 		issue := bdProxiedCreate(t, bd, p.dir, "Watch test", "--type", "task")
 		stdout, stderr := bdProxiedShowFail(t, bd, p.dir, issue.ID, "--watch")
 		combined := stdout + stderr
@@ -753,7 +813,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_wisp_comments_default_count_only", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "swcc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "swcc")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp w/comments", "--type", "task", "--ephemeral")
 
 		db := openProxiedDB(t, p)
@@ -778,7 +839,8 @@ func TestProxiedServerShow(t *testing.T) {
 	})
 
 	t.Run("show_wisp_comments_include_streams", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "swci")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "swci")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp stream", "--type", "task", "--ephemeral")
 
 		db := openProxiedDB(t, p)

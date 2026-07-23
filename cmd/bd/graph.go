@@ -36,6 +36,7 @@ var (
 	graphAll     bool
 	graphDOT     bool
 	graphHTML    bool
+	graphOpen    bool
 )
 
 var graphCmd = &cobra.Command{
@@ -48,6 +49,7 @@ For epics, shows all children and their dependencies.
 For regular issues, shows the issue and its direct dependencies.
 
 With --all, shows all open issues grouped by connected component.
+With --open, filters to only open/actionable issues (compact layer format).
 
 Display formats:
   (default)        DAG with columns and box-drawing edges (terminal-native)
@@ -55,6 +57,7 @@ Display formats:
   --compact        Tree format, one line per issue, more scannable
   --dot            Graphviz DOT format (pipe to dot -Tsvg > graph.svg)
   --html           Self-contained interactive HTML with D3.js visualization
+  --open           Open issues only, compact layers (LLM-friendly)
 
 The graph shows execution order:
 - Layer 0 / leftmost = no dependencies (can start immediately)
@@ -69,7 +72,9 @@ Examples:
   bd graph --dot issue-id | dot -Tsvg > graph.svg  # SVG via Graphviz
   bd graph --dot issue-id | dot -Tpng > graph.png  # PNG via Graphviz
   bd graph --html issue-id > graph.html  # Interactive browser view
-  bd graph --all --html > all.html       # All issues, interactive`,
+  bd graph --all --html > all.html       # All issues, interactive
+  bd graph --open issue-id       # Open issues only, layered by blocking order
+  bd graph --all --open          # All open issues, compact layers`,
 	Args:          cobra.RangeArgs(0, 1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -81,8 +86,6 @@ Examples:
 			}
 		}()
 
-		ctx := rootCtx
-
 		if graphAll && len(args) > 0 {
 			return HandleErrorRespectJSON("cannot specify issue ID with --all flag")
 		}
@@ -90,6 +93,11 @@ Examples:
 			return HandleErrorWithHintRespectJSON("issue ID required", "Use --all for all open issues")
 		}
 
+		if usesProxiedServer() {
+			return runGraphProxiedServer(rootCtx, args)
+		}
+
+		ctx := rootCtx
 		if store == nil {
 			return HandleErrorRespectJSON("no database connection")
 		}
@@ -99,39 +107,7 @@ Examples:
 			if err != nil {
 				return HandleErrorRespectJSON("loading all issues: %v", err)
 			}
-
-			if len(subgraphs) == 0 {
-				fmt.Println("No open issues found")
-				return nil
-			}
-
-			if jsonOutput {
-				return outputJSON(subgraphs)
-			}
-
-			if graphHTML {
-				merged := mergeSubgraphsForHTML(subgraphs)
-				layout := computeLayout(merged)
-				renderGraphHTML(layout, merged)
-				return nil
-			}
-
-			for i, subgraph := range subgraphs {
-				layout := computeLayout(subgraph)
-				if graphDOT {
-					renderGraphDOT(layout, subgraph)
-				} else if graphCompact {
-					renderGraphCompact(layout, subgraph)
-				} else if graphBox {
-					renderGraph(layout, subgraph)
-				} else {
-					renderGraphVisual(layout, subgraph)
-				}
-				if !graphDOT && i < len(subgraphs)-1 {
-					fmt.Println(strings.Repeat("─", 60))
-				}
-			}
-			return nil
+			return renderGraphAllSubgraphs(subgraphs)
 		}
 
 		issueID, err := utils.ResolvePartialID(ctx, store, args[0])
@@ -143,21 +119,53 @@ Examples:
 		if err != nil {
 			return HandleErrorRespectJSON("loading graph: %v", err)
 		}
+		return renderGraphSingleSubgraph(subgraph)
+	},
+}
 
-		layout := computeLayout(subgraph)
-
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"root":   subgraph.Root,
-				"issues": subgraph.Issues,
-				"layout": layout,
-			})
+func renderGraphAllSubgraphs(subgraphs []*TemplateSubgraph) error {
+	if graphOpen {
+		var filtered []*TemplateSubgraph
+		for _, sg := range subgraphs {
+			f := filterSubgraphOpen(sg)
+			if f != nil && len(f.Issues) > 0 {
+				filtered = append(filtered, f)
+			}
 		}
+		subgraphs = filtered
+	}
 
+	if len(subgraphs) == 0 {
+		fmt.Println("No open issues found")
+		return nil
+	}
+
+	if jsonOutput {
+		return outputJSON(subgraphs)
+	}
+
+	if graphHTML && !graphOpen {
+		merged := mergeSubgraphsForHTML(subgraphs)
+		layout := computeLayout(merged)
+		renderGraphHTML(layout, merged)
+		return nil
+	}
+
+	if graphOpen {
+		for i, subgraph := range subgraphs {
+			layout := computeLayout(subgraph)
+			renderGraphCompact(layout, subgraph)
+			if i < len(subgraphs)-1 {
+				fmt.Println(strings.Repeat("─", 60))
+			}
+		}
+		return nil
+	}
+
+	for i, subgraph := range subgraphs {
+		layout := computeLayout(subgraph)
 		if graphDOT {
 			renderGraphDOT(layout, subgraph)
-		} else if graphHTML {
-			renderGraphHTML(layout, subgraph)
 		} else if graphCompact {
 			renderGraphCompact(layout, subgraph)
 		} else if graphBox {
@@ -165,8 +173,49 @@ Examples:
 		} else {
 			renderGraphVisual(layout, subgraph)
 		}
+		if !graphDOT && i < len(subgraphs)-1 {
+			fmt.Println(strings.Repeat("─", 60))
+		}
+	}
+	return nil
+}
+
+func renderGraphSingleSubgraph(subgraph *TemplateSubgraph) error {
+	if graphOpen {
+		subgraph = filterSubgraphOpen(subgraph)
+		if subgraph == nil || len(subgraph.Issues) == 0 {
+			fmt.Println("No open issues in subgraph")
+			return nil
+		}
+	}
+
+	layout := computeLayout(subgraph)
+
+	if jsonOutput {
+		return outputJSON(map[string]interface{}{
+			"root":   subgraph.Root,
+			"issues": subgraph.Issues,
+			"layout": layout,
+		})
+	}
+
+	if graphOpen {
+		renderGraphCompact(layout, subgraph)
 		return nil
-	},
+	}
+
+	if graphDOT {
+		renderGraphDOT(layout, subgraph)
+	} else if graphHTML {
+		renderGraphHTML(layout, subgraph)
+	} else if graphCompact {
+		renderGraphCompact(layout, subgraph)
+	} else if graphBox {
+		renderGraph(layout, subgraph)
+	} else {
+		renderGraphVisual(layout, subgraph)
+	}
+	return nil
 }
 
 var graphCheckCmd = &cobra.Command{
@@ -185,69 +234,74 @@ Returns exit code 0 if the graph is clean, 1 if issues are found.`,
 			}
 		}()
 
-		ctx := rootCtx
-
-		type GraphCheckResult struct {
-			Clean   bool       `json:"clean"`
-			Cycles  [][]string `json:"cycles"`
-			Summary struct {
-				CycleCount int `json:"cycle_count"`
-			} `json:"summary"`
+		if usesProxiedServer() {
+			return runGraphCheckProxiedServer(rootCtx)
 		}
 
-		result := GraphCheckResult{Clean: true}
-
-		cycles, err := store.DetectCycles(ctx)
+		cycles, err := store.DetectCycles(rootCtx)
 		if err != nil {
 			return HandleErrorRespectJSON("cycle detection failed: %v", err)
 		}
+		return renderGraphCheck(cycles)
+	},
+}
 
-		for _, cycle := range cycles {
-			ids := make([]string, len(cycle))
-			for i, issue := range cycle {
-				ids[i] = issue.ID
-			}
-			result.Cycles = append(result.Cycles, ids)
+func renderGraphCheck(cycles [][]*types.Issue) error {
+	type GraphCheckResult struct {
+		Clean   bool       `json:"clean"`
+		Cycles  [][]string `json:"cycles"`
+		Summary struct {
+			CycleCount int `json:"cycle_count"`
+		} `json:"summary"`
+	}
+
+	result := GraphCheckResult{Clean: true}
+
+	for _, cycle := range cycles {
+		ids := make([]string, len(cycle))
+		for i, issue := range cycle {
+			ids[i] = issue.ID
 		}
-		result.Summary.CycleCount = len(cycles)
+		result.Cycles = append(result.Cycles, ids)
+	}
+	result.Summary.CycleCount = len(cycles)
 
-		if len(cycles) > 0 {
-			result.Clean = false
+	if len(cycles) > 0 {
+		result.Clean = false
+	}
+
+	if jsonOutput {
+		if err := outputJSON(result); err != nil {
+			return err
 		}
-
-		if jsonOutput {
-			if err := outputJSON(result); err != nil {
-				return err
-			}
-			if !result.Clean {
-				return SilentExit()
-			}
-			return nil
-		}
-
-		if result.Clean {
-			fmt.Printf("\n%s Graph integrity check passed\n\n", ui.RenderPass("✓"))
-		} else {
-			fmt.Printf("\n%s Graph integrity issues found\n\n", ui.RenderFail("✗"))
-		}
-
-		if len(result.Cycles) > 0 {
-			fmt.Printf("%s Cycles (%d):\n\n", ui.RenderFail("⚠"), len(result.Cycles))
-			for _, cycle := range result.Cycles {
-				fmt.Printf("  %s → %s\n", strings.Join(cycle, " → "), cycle[0])
-			}
-			fmt.Println()
-		} else {
-			fmt.Printf("  %s No dependency cycles\n", ui.RenderPass("✓"))
-		}
-
-		fmt.Println()
-
 		if !result.Clean {
 			return SilentExit()
 		}
 		return nil
-	},
+	}
+
+	if result.Clean {
+		fmt.Printf("\n%s Graph integrity check passed\n\n", ui.RenderPass("✓"))
+	} else {
+		fmt.Printf("\n%s Graph integrity issues found\n\n", ui.RenderFail("✗"))
+	}
+
+	if len(result.Cycles) > 0 {
+		fmt.Printf("%s Cycles (%d):\n\n", ui.RenderFail("⚠"), len(result.Cycles))
+		for _, cycle := range result.Cycles {
+			fmt.Printf("  %s → %s\n", strings.Join(cycle, " → "), cycle[0])
+		}
+		fmt.Println()
+	} else {
+		fmt.Printf("  %s No dependency cycles\n", ui.RenderPass("✓"))
+	}
+
+	fmt.Println()
+
+	if !result.Clean {
+		return SilentExit()
+	}
+	return nil
 }
 
 func init() {
@@ -256,6 +310,7 @@ func init() {
 	graphCmd.Flags().BoolVar(&graphBox, "box", false, "ASCII boxes showing layers")
 	graphCmd.Flags().BoolVar(&graphDOT, "dot", false, "Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)")
 	graphCmd.Flags().BoolVar(&graphHTML, "html", false, "Output self-contained interactive HTML (redirect to file)")
+	graphCmd.Flags().BoolVar(&graphOpen, "open", false, "Show only open issues (filters out closed/deferred), forces compact layer format")
 	graphCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(graphCmd)
 	graphCmd.AddCommand(graphCheckCmd)
@@ -431,6 +486,10 @@ func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage) ([]*Templ
 		}
 	}
 
+	return assembleAllSubgraphs(allIssues, issueMap, allDeps), nil
+}
+
+func assembleAllSubgraphs(allIssues []*types.Issue, issueMap map[string]*types.Issue, allDeps []*types.Dependency) []*TemplateSubgraph {
 	// Build adjacency list for union-find
 	adj := make(map[string][]string)
 	for _, dep := range allDeps {
@@ -533,7 +592,131 @@ func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage) ([]*Templ
 		subgraphs = append(subgraphs, subgraph)
 	}
 
-	return subgraphs, nil
+	return subgraphs
+}
+
+// isOpenStatus returns true for statuses considered "open" / actionable.
+// Closed and deferred (frozen) issues are excluded by --open.
+func isOpenStatus(s types.Status) bool {
+	switch s {
+	case types.StatusOpen, types.StatusInProgress, types.StatusBlocked:
+		return true
+	default:
+		return false
+	}
+}
+
+// filterSubgraphOpen removes closed/deferred issues from a subgraph and
+// computes a transitive closure of blocking edges through removed nodes so
+// that indirect blocking relationships are preserved.
+//
+// Example: if A(open) blocks B(closed) blocks C(open), the filtered graph
+// contains A and C with a synthetic edge A→C.
+func filterSubgraphOpen(subgraph *TemplateSubgraph) *TemplateSubgraph {
+	if subgraph == nil {
+		return nil
+	}
+
+	openSet := make(map[string]bool)
+	for _, issue := range subgraph.Issues {
+		if isOpenStatus(issue.Status) {
+			openSet[issue.ID] = true
+		}
+	}
+
+	if len(openSet) == 0 {
+		return nil
+	}
+
+	// Build full blocking graph (all nodes, including closed) for transitive
+	// closure. blocksAdj: A→B means "A blocks B" (B depends on A).
+	blocksAdj := make(map[string][]string)
+	for _, dep := range subgraph.Dependencies {
+		if dep.Type == types.DepBlocks {
+			blocksAdj[dep.DependsOnID] = append(blocksAdj[dep.DependsOnID], dep.IssueID)
+		}
+	}
+
+	// For each open node, BFS forward through the blocking graph to find all
+	// reachable open nodes. Each such reachable open node has a transitive
+	// blocking relationship.
+	type edge struct{ from, to string }
+	syntheticEdges := make(map[edge]bool)
+
+	for src := range openSet {
+		visited := map[string]bool{src: true}
+		queue := []string{src}
+		for len(queue) > 0 {
+			cur := queue[0]
+			queue = queue[1:]
+			for _, next := range blocksAdj[cur] {
+				if visited[next] {
+					continue
+				}
+				visited[next] = true
+				if openSet[next] {
+					syntheticEdges[edge{src, next}] = true
+				}
+				if !openSet[next] {
+					queue = append(queue, next)
+				}
+			}
+		}
+	}
+
+	// Build filtered subgraph
+	filtered := &TemplateSubgraph{
+		IssueMap: make(map[string]*types.Issue, len(openSet)),
+	}
+	for _, issue := range subgraph.Issues {
+		if openSet[issue.ID] {
+			filtered.Issues = append(filtered.Issues, issue)
+			filtered.IssueMap[issue.ID] = issue
+		}
+	}
+
+	// Keep non-blocks deps where both ends are open, and rebuild blocks
+	// deps from the transitive closure.
+	seen := make(map[edge]bool)
+	for _, dep := range subgraph.Dependencies {
+		if !openSet[dep.IssueID] || !openSet[dep.DependsOnID] {
+			continue
+		}
+		if dep.Type == types.DepBlocks {
+			e := edge{dep.DependsOnID, dep.IssueID}
+			if !seen[e] {
+				seen[e] = true
+				filtered.Dependencies = append(filtered.Dependencies, dep)
+			}
+		} else {
+			filtered.Dependencies = append(filtered.Dependencies, dep)
+		}
+	}
+	// Add synthetic transitive edges
+	for e := range syntheticEdges {
+		if seen[e] {
+			continue
+		}
+		seen[e] = true
+		filtered.Dependencies = append(filtered.Dependencies, &types.Dependency{
+			IssueID:     e.to,
+			DependsOnID: e.from,
+			Type:        types.DepBlocks,
+		})
+	}
+
+	// Pick root: prefer original root if still open, else highest-priority open issue
+	if subgraph.Root != nil && openSet[subgraph.Root.ID] {
+		filtered.Root = subgraph.Root
+	} else {
+		for _, issue := range filtered.Issues {
+			if filtered.Root == nil || issue.Priority < filtered.Root.Priority {
+				filtered.Root = issue
+			}
+		}
+	}
+
+	return filtered
 }
 
 // computeLayout assigns layers to nodes using topological sort

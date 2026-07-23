@@ -43,21 +43,28 @@ This helps identify:
 			Status: status,
 			Limit:  limit,
 		}
-		ctx := rootCtx
 
-		issues, err := store.GetStaleIssues(ctx, filter)
+		if usesProxiedServer() {
+			return runStaleProxiedServer(rootCtx, filter)
+		}
+
+		issues, err := store.GetStaleIssues(rootCtx, filter)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		if jsonOutput {
-			if issues == nil {
-				issues = []*types.Issue{}
-			}
-			return outputJSON(issues)
-		}
-		displayStaleIssues(issues, days)
-		return nil
+		return renderStale(issues, filter.Days)
 	},
+}
+
+func renderStale(issues []*types.Issue, days int) error {
+	if jsonOutput {
+		if issues == nil {
+			issues = []*types.Issue{}
+		}
+		return outputJSON(issues)
+	}
+	displayStaleIssues(issues, days)
+	return nil
 }
 
 func displayStaleIssues(issues []*types.Issue, days int) {

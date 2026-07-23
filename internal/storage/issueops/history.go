@@ -16,7 +16,7 @@ import (
 // The subquery wrapper avoids Dolt's max1Row optimization on PK lookup:
 // dolt_history_* tables return multiple rows per PK (one per commit), but
 // the query planner incorrectly assumes WHERE id=? returns one row.
-func HistoryInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*storage.HistoryEntry, error) {
+func HistoryInTx(ctx context.Context, tx DBTX, issueID string) ([]*storage.HistoryEntry, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT
 			id, title, description, design, acceptance_criteria, notes,

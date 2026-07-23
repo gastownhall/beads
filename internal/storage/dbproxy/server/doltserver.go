@@ -21,6 +21,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 )
@@ -165,12 +166,12 @@ func (s *DoltServer) doltInit(ctx context.Context) error {
 	cmd.Dir = s.rootDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if strings.Contains(string(out), "already been initialized") {
-			return nil
+			return doltserver.MarkDoltDirCompatible(s.rootDir)
 		}
 		return fmt.Errorf("server: DoltServer.doltInit: %w\n%s", err, out)
 	}
 
-	return nil
+	return doltserver.MarkDoltDirCompatible(s.rootDir)
 }
 
 var retryableDoltInitErrSubstrings = []string{

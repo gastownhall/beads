@@ -43,6 +43,7 @@ type ConfigUseCase interface {
 	DeleteConfig(ctx context.Context, key string) error
 	GetAllConfig(ctx context.Context) (map[string]string, error)
 	GetMetadata(ctx context.Context, key string) (string, error)
+	GetLocalMetadata(ctx context.Context, key string) (string, error)
 
 	ReconcileVersion(ctx context.Context, cliVersion string) (VersionReconcileResult, error)
 }
@@ -180,6 +181,14 @@ func (u *configUseCaseImpl) GetMetadata(ctx context.Context, key string) (string
 	out, err := u.cfgRepo.GetMetadata(ctx, key)
 	if err != nil {
 		return "", fmt.Errorf("GetMetadata: %w", err)
+	}
+	return out, nil
+}
+
+func (u *configUseCaseImpl) GetLocalMetadata(ctx context.Context, key string) (string, error) {
+	out, err := u.cfgRepo.GetLocalMetadata(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("GetLocalMetadata: %w", err)
 	}
 	return out, nil
 }

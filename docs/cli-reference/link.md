@@ -1,6 +1,6 @@
 ---
 title: "bd link"
-description: "Link two issues with a dependency"
+description: "Link two issues with a dependency."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

@@ -1,6 +1,6 @@
 ---
 title: "bd statuses"
-description: "List valid issue statuses"
+description: "List all valid issue statuses and their categories."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

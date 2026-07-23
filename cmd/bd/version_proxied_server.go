@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
@@ -13,21 +14,15 @@ func reconcileVersionProxiedServer(ctx context.Context) {
 		return
 	}
 
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		debug.Logf("reconcile-version: open uow: %v", err)
-		return
-	}
-	defer uw.Close(ctx)
-
-	res, err := uw.ConfigUseCase().ReconcileVersion(ctx, Version)
+	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.VersionReconcileResult, string, error) {
+		res, err := uw.ConfigUseCase().ReconcileVersion(ctx, Version)
+		if err != nil {
+			return domain.VersionReconcileResult{}, "", err
+		}
+		return res, fmt.Sprintf("bd: reconcile version -> %s", res.Current), nil
+	})
 	if err != nil {
 		debug.Logf("reconcile-version: %v", err)
-		return
-	}
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: reconcile version -> %s", res.Current)); err != nil && !isDoltNothingToCommit(err) {
-		debug.Logf("reconcile-version: commit: %v", err)
 		return
 	}
 

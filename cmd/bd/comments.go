@@ -40,6 +40,10 @@ Examples:
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runCommentsProxiedServer(cmd, rootCtx, args)
+		}
+
 		localTime, _ := cmd.Flags().GetBool("local-time")
 		issueID := args[0]
 
@@ -140,6 +144,10 @@ Examples:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runCommentsAddProxiedServer(cmd, rootCtx, args)
+		}
 
 		issueID := args[0]
 

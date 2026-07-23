@@ -14,9 +14,10 @@ import (
 )
 
 func TestProxiedServerList(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
-	p := bdProxiedInit(t, bd, "lst")
+	p := newSharedProxiedProject(t, bd, "lst")
 	seed := seedProxiedListData(t, bd, p)
 
 	// --- A. Basic filtering ---
@@ -499,7 +500,7 @@ func TestProxiedServerList(t *testing.T) {
 
 	t.Run("empty_database", func(t *testing.T) {
 		// Fresh proxied project with no seeded issues.
-		empty := bdProxiedInit(t, bd, "lst-empty")
+		empty := newSharedProxiedProject(t, bd, "lst-empty")
 		issues := bdProxiedListJSON(t, bd, empty)
 		if len(issues) != 0 {
 			t.Errorf("expected 0 issues in empty proxied database, got %d", len(issues))
@@ -732,7 +733,7 @@ func TestProxiedServerList(t *testing.T) {
 	t.Run("concurrent_create_and_list", func(t *testing.T) {
 		// Isolated project: race test creates 20 issues; keep them out of
 		// the shared fixture so subsequent runs aren't polluted.
-		race := bdProxiedInit(t, bd, "lst-race")
+		race := newSharedProxiedProject(t, bd, "lst-race")
 
 		const (
 			workers = 4

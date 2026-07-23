@@ -16,12 +16,14 @@ import (
 )
 
 func TestProxiedServerCreate(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 
 	t.Run("basic", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "bc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "bc")
 		issue := bdProxiedCreate(t, bd, p.dir, "Basic issue")
 		if issue.ID == "" {
 			t.Fatal("expected issue ID")
@@ -44,7 +46,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("title_flag", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "tf")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "tf")
 		issue := bdProxiedCreate(t, bd, p.dir, "--title", "Title via flag")
 		if issue.Title != "Title via flag" {
 			t.Errorf("title: got %q, want %q", issue.Title, "Title via flag")
@@ -52,7 +55,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("silent", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sl")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sl")
 		id := bdProxiedCreateSilent(t, bd, p.dir, "Silent issue")
 		if id == "" {
 			t.Fatal("expected issue ID from --silent")
@@ -63,7 +67,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("priority", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pr")
 		for _, tc := range []struct {
 			flag string
 			want int
@@ -80,7 +85,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("issue_types", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "it")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "it")
 		for _, issueType := range []string{"bug", "feature", "task", "epic", "chore", "decision"} {
 			t.Run(issueType, func(t *testing.T) {
 				issue := bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Type %s", issueType), "-t", issueType)
@@ -93,7 +99,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("description", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ds")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ds")
 		issue := bdProxiedCreate(t, bd, p.dir, "Desc issue", "-d", "This is the description")
 		if issue.Description != "This is the description" {
 			t.Errorf("description: got %q, want %q", issue.Description, "This is the description")
@@ -101,7 +108,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("design_and_acceptance", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "da")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "da")
 		issue := bdProxiedCreate(t, bd, p.dir, "Design issue",
 			"--design", "Use MVC pattern",
 			"--acceptance", "All tests pass")
@@ -114,7 +122,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("assignee", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "as")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "as")
 		issue := bdProxiedCreate(t, bd, p.dir, "Assigned issue", "-a", "alice")
 		if issue.Assignee != "alice" {
 			t.Errorf("assignee: got %q, want %q", issue.Assignee, "alice")
@@ -122,7 +131,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("labels", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "lb")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lb")
 		issue := bdProxiedCreate(t, bd, p.dir, "Labeled issue", "-l", "bug,critical")
 
 		db := openProxiedDB(t, p)
@@ -137,7 +147,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("explicit_id", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ei")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ei")
 		issue := bdProxiedCreate(t, bd, p.dir, "Explicit ID", "--id", "ei-custom42")
 		if issue.ID != "ei-custom42" {
 			t.Errorf("ID: got %q, want %q", issue.ID, "ei-custom42")
@@ -145,7 +156,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("dependencies", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dp")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dp")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent issue")
 		child := bdProxiedCreate(t, bd, p.dir, "Child issue", "--deps", "blocks:"+parent.ID)
 
@@ -154,7 +166,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("blocked_by_alias", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "bb")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "bb")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker issue")
 		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked issue", "--deps", "blocked-by:"+blocker.ID)
 
@@ -163,7 +176,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("depends_on_alias", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "do")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "do")
 		prereq := bdProxiedCreate(t, bd, p.dir, "Prerequisite")
 		dependent := bdProxiedCreate(t, bd, p.dir, "Dependent issue", "--deps", "depends-on:"+prereq.ID)
 
@@ -172,7 +186,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("unknown_dep_type_rejected", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ud")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ud")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker")
 		out := bdProxiedCreateFail(t, bd, p.dir, "Bad dep type", "--deps", "bogus-type:"+blocker.ID)
 		if !strings.Contains(out, "unknown dependency type") {
@@ -184,7 +199,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("multiple_dependencies", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "md")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "md")
 		dep1 := bdProxiedCreate(t, bd, p.dir, "Dep 1")
 		dep2 := bdProxiedCreate(t, bd, p.dir, "Dep 2")
 		child := bdProxiedCreate(t, bd, p.dir, "Multi dep issue",
@@ -196,7 +212,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("parent_child", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pc")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent epic", "-t", "epic")
 		child := bdProxiedCreate(t, bd, p.dir, "Child task", "--parent", parent.ID)
 
@@ -208,7 +225,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("parent_label_inheritance", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pi")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pi")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent with labels", "-t", "epic", "-l", "team-a,priority:high")
 		child := bdProxiedCreate(t, bd, p.dir, "Child inherits", "--parent", parent.ID)
 
@@ -224,7 +242,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("parent_no_inherit_labels", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ni")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ni")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent", "-t", "epic", "-l", "inherited-label")
 		child := bdProxiedCreate(t, bd, p.dir, "Child no inherit", "--parent", parent.ID, "--no-inherit-labels", "-l", "own-label")
 
@@ -243,7 +262,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("due_date", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dd")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dd")
 		issue := bdProxiedCreate(t, bd, p.dir, "Due issue", "--due", "+24h")
 		if issue.DueAt == nil {
 			t.Fatal("expected DueAt to be set")
@@ -256,7 +276,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("defer_until", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "df")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "df")
 		issue := bdProxiedCreate(t, bd, p.dir, "Deferred issue", "--defer", "+2h")
 		if issue.DeferUntil == nil {
 			t.Fatal("expected DeferUntil to be set")
@@ -268,8 +289,16 @@ func TestProxiedServerCreate(t *testing.T) {
 		}
 	})
 
+}
+
+func TestProxiedServerCreate2(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
 	t.Run("ephemeral", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ep")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ep")
 		issue := bdProxiedCreate(t, bd, p.dir, "Ephemeral issue", "--ephemeral")
 
 		db := openProxiedDB(t, p)
@@ -283,7 +312,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("no_history", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "nh")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "nh")
 		issue := bdProxiedCreate(t, bd, p.dir, "No history issue", "--no-history")
 		if issue.ID == "" {
 			t.Fatal("expected issue ID")
@@ -291,7 +321,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("estimate", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "es")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "es")
 		issue := bdProxiedCreate(t, bd, p.dir, "Estimated issue", "-e", "60")
 		if issue.EstimatedMinutes == nil || *issue.EstimatedMinutes != 60 {
 			t.Errorf("estimate: got %v, want 60", issue.EstimatedMinutes)
@@ -299,7 +330,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("notes", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "nt")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "nt")
 		issue := bdProxiedCreate(t, bd, p.dir, "Notes issue", "--notes", "Some notes here")
 		if issue.Notes != "Some notes here" {
 			t.Errorf("notes: got %q, want %q", issue.Notes, "Some notes here")
@@ -307,7 +339,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("spec_id", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sp")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sp")
 		issue := bdProxiedCreate(t, bd, p.dir, "Spec issue", "--spec-id", "sp-spec1")
 		if issue.SpecID != "sp-spec1" {
 			t.Errorf("spec_id: got %q, want %q", issue.SpecID, "sp-spec1")
@@ -315,7 +348,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("external_ref", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "er")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "er")
 		issue := bdProxiedCreate(t, bd, p.dir, "External ref issue", "--external-ref", "gh-123")
 		if issue.ExternalRef == nil || *issue.ExternalRef != "gh-123" {
 			t.Errorf("external_ref: got %v, want %q", issue.ExternalRef, "gh-123")
@@ -323,7 +357,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("linear_external_ref", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ler")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ler")
 		ref := "https://linear.app/team/issue/TEAM-123/fix-login"
 		issue := bdProxiedCreate(t, bd, p.dir, "Pre-linked Linear issue", "--external-ref", ref)
 		if issue.ExternalRef == nil || *issue.ExternalRef != ref {
@@ -332,7 +367,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("metadata", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "mt")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "mt")
 		issue := bdProxiedCreate(t, bd, p.dir, "Metadata issue", "--metadata", `{"key":"value"}`)
 		if issue.Metadata == nil {
 			t.Fatal("expected metadata to be set")
@@ -347,7 +383,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("dry_run", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dr")
 		out, err := bdProxiedRun(t, bd, p.dir, "create", "--dry-run", "Dry run issue", "--json")
 		if err != nil {
 			t.Fatalf("bd create --dry-run failed: %v\n%s", err, out)
@@ -366,7 +403,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("skills_and_context", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sc")
 		issue := bdProxiedCreate(t, bd, p.dir, "Skills issue",
 			"--skills", "Go, SQL",
 			"--context", "Working on embedded storage")
@@ -379,7 +417,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("discovered_from_dep", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "di")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "di")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent work")
 		child := bdProxiedCreate(t, bd, p.dir, "Discovered bug",
 			"--deps", "discovered-from:"+parent.ID)
@@ -391,7 +430,8 @@ func TestProxiedServerCreate(t *testing.T) {
 	})
 
 	t.Run("markdown_bulk_create", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "mk")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "mk")
 		mdContent := `## First issue
 
 ### Priority
@@ -436,7 +476,8 @@ A new feature
 	})
 
 	t.Run("both_due_and_defer", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "bd2")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "bd2")
 		issue := bdProxiedCreate(t, bd, p.dir, "Both due and defer", "--due", "+48h", "--defer", "+24h")
 		if issue.DueAt == nil {
 			t.Fatal("expected DueAt to be set")
@@ -447,7 +488,8 @@ A new feature
 	})
 
 	t.Run("parent_label_inheritance_merge", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pm")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pm")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent with a,b", "-t", "epic", "-l", "a,b")
 		child := bdProxiedCreate(t, bd, p.dir, "Child with c,a", "--parent", parent.ID, "-l", "c,a")
 
@@ -468,7 +510,8 @@ A new feature
 	})
 
 	t.Run("parent_no_labels", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pn")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pn")
 		parent := bdProxiedCreate(t, bd, p.dir, "Labelless parent", "-t", "epic")
 		child := bdProxiedCreate(t, bd, p.dir, "Child of labelless", "--parent", parent.ID)
 
@@ -480,7 +523,8 @@ A new feature
 	})
 
 	t.Run("discovered_from_inherits_source_repo", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "sr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sr")
 
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent with source repo")
 		db := openProxiedDB(t, p)
@@ -505,7 +549,8 @@ A new feature
 	})
 
 	t.Run("no_title_fails", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "nt2")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "nt2")
 		out := bdProxiedCreateFail(t, bd, p.dir)
 		if !strings.Contains(out, "title") {
 			t.Errorf("expected title-related error, got: %s", out)
@@ -513,7 +558,8 @@ A new feature
 	})
 
 	t.Run("graph_basic", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "gb")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "gb")
 		plan := `{
   "nodes": [
     {"key": "a", "title": "Node A", "type": "task"},
@@ -544,7 +590,8 @@ A new feature
 	})
 
 	t.Run("graph_parent_child_top_level_ids", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "gpc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "gpc")
 		plan := `{
   "nodes": [
     {"key": "child", "title": "Child", "type": "task", "parent_key": "parent"},
@@ -575,7 +622,8 @@ A new feature
 	})
 
 	t.Run("graph_dry_run_db_aware", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "gdr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "gdr")
 		db := openProxiedDB(t, p)
 		_, err := db.ExecContext(context.Background(),
 			`REPLACE INTO config (`+"`key`"+`, value) VALUES (?, ?)`,
@@ -607,7 +655,8 @@ A new feature
 	})
 
 	t.Run("graph_initial_labels_not_duplicated", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "gil")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "gil")
 		plan := `{
   "nodes": [
     {"key": "root", "title": "Graph root", "type": "task", "labels": ["team-a", "shared"]}

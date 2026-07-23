@@ -72,6 +72,16 @@ an import is visible. To deliberately restore an older snapshot, pass
 --allow-stale, which imports every row even when it overwrites newer
 local state.
 
+Large imports are written in bounded transactions (a few hundred issues
+each, with a short pause between commits) with progress on stderr, so
+concurrent bd commands keep working while the import runs instead of
+stalling on one batch-wide write lock. Rows land in dependency order
+with their blocking edges in the same transaction, so a half-finished
+import never shows a blocked issue as ready. If an import fails partway,
+the already-committed chunks are durable and the command exits nonzero;
+re-running the same import is safe and converges (rows upsert,
+labels/comments/dependencies deduplicate).
+
 EXAMPLES:
   bd import                        # Import from configured import.path
   bd import backup.jsonl           # Import from a specific file
@@ -104,6 +114,9 @@ func init() {
 }
 
 func runImport(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("import is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("import")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -206,6 +219,18 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 		var peek map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &peek); err != nil {
 			return fmt.Errorf("failed to parse JSONL line: %w", err)
+		}
+
+		// Skip the optional beads-jsonl header record (§J1.3). A canonical
+		// export may prepend a provenance line, e.g.
+		// {"_schema":"beads-jsonl/1","_dolt_branch":"main","_sort":"stable-v1"}.
+		// It carries no _type and no issue fields; without this guard it falls
+		// through to the issue path, unmarshals into an empty Issue, and aborts
+		// the whole import with "title is required". parseJSONLFile (the
+		// bootstrap reader) has always skipped it; this loop — the one `bd
+		// import` and `bd import -` run through — did not.
+		if _, isHeader := peek["_schema"]; isHeader {
+			continue
 		}
 
 		if rawType, ok := peek["_type"]; ok {

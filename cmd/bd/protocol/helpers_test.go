@@ -173,6 +173,10 @@ type workspace struct {
 	dir string
 	bd  string
 	t   *testing.T
+	// prefix is the id prefix this workspace was initialized with — the
+	// interchange tests need it to mint well-formed ids in hand-written
+	// JSONL fixtures.
+	prefix string
 }
 
 // testPrefix returns a unique prefix with a random suffix to ensure each test
@@ -206,6 +210,7 @@ func newWorkspace(t *testing.T) *workspace {
 
 	prefix := testPrefix(t)
 	w.run("init", "--prefix", prefix, "--quiet")
+	w.prefix = prefix
 	return w
 }
 

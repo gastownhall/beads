@@ -383,7 +383,9 @@ The help text documents this, but the `--ready` flag name is misleading.
 **Files:** `cmd/bd/close.go:117`, `cmd/bd/update.go:278`
 
 When close guard prevents closing a blocked issue, the command prints a message
-to stderr ("cannot close X: blocked by open issues") but exits with code 0.
+to stderr (the delegated embedded path emits "cannot close blocked issue: X is
+blocked by [...]"; the proxied path still uses the older "cannot close X:
+blocked by open issues") but exits with code 0.
 Similarly, `update --claim` on an already-claimed issue prints "already claimed"
 to stderr but exits 0.
 

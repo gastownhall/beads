@@ -53,7 +53,7 @@ func BuildReadyWorkOrder(policy types.SortPolicy, createdCol, priorityCol string
 	case types.SortPolicyOldest:
 		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, id ASC", createdCol)}
 	case types.SortPolicyPriority:
-		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, %s DESC, id ASC", priorityCol, createdCol)}
+		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, %s ASC, id ASC", priorityCol, createdCol)}
 	case types.SortPolicyHybrid, "":
 		recentCutoff := time.Now().UTC().Add(-48 * time.Hour)
 		return ReadyWorkOrder{
@@ -64,7 +64,7 @@ func BuildReadyWorkOrder(policy types.SortPolicy, createdCol, priorityCol string
 			Args: []any{recentCutoff, recentCutoff},
 		}
 	default:
-		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, %s DESC, id ASC", priorityCol, createdCol)}
+		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, %s ASC, id ASC", priorityCol, createdCol)}
 	}
 }
 

@@ -63,6 +63,9 @@ type SquashResult struct {
 }
 
 func runMolSquash(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("mol squash is not supported in proxied-server mode")
+	}
 	CheckReadonly("mol squash")
 
 	evt := metrics.NewCommandEvent("mol-squash")

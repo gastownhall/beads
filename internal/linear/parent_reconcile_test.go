@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // linearMockHandler is a tiny GraphQL mock that routes by query keyword.
@@ -49,11 +51,14 @@ func (h *linearMockHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// If failNextRL is set, return rate-limit-exhausted on this single
-	// response (header drives the circuit breaker in Execute).
+	// response (header drives the circuit breaker in Execute). The breaker
+	// only arms when the reset header carries a valid future timestamp, so
+	// send one alongside the low remaining count.
 	if h.failNextRL {
 		h.failNextRL = false
 		h.rateLimited++
 		w.Header().Set("X-RateLimit-Requests-Remaining", "1") // < DefaultRateLimitFloor (100)
+		w.Header().Set("X-RateLimit-Requests-Reset", strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10))
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": map[string]interface{}{}})
 		return
 	}

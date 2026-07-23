@@ -100,7 +100,7 @@ This package downloads the appropriate native binary for your platform:
 For complete documentation, see the [beads GitHub repository](https://github.com/gastownhall/beads):
 
 - [Complete README](https://github.com/gastownhall/beads#readme)
-- [Quick Start (documentation site)](https://gastownhall.github.io/beads/getting-started/quickstart) · [in-repo source](https://github.com/gastownhall/beads/blob/main/docs/getting-started/quickstart.md)
+- [Quick Start (documentation site)](https://beads.gascity.com/getting-started/quickstart) · [in-repo source](https://github.com/gastownhall/beads/blob/main/docs/getting-started/quickstart.md)
 - [Installation Guide](https://github.com/gastownhall/beads/blob/main/docs/getting-started/installation.md)
 - [FAQ](https://github.com/gastownhall/beads/blob/main/docs/reference/faq.md)
 - [Troubleshooting](https://github.com/gastownhall/beads/blob/main/docs/reference/troubleshooting.md)

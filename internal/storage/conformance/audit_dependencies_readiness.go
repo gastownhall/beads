@@ -13,7 +13,7 @@ import (
 // This file encodes strange/undertested dependency-and-readiness behaviors of the
 // issueops reference (validated against the embedded-Dolt oracle). Every case here
 // is deliberately absent from conformance.go/portable.go: self-dep and cycle
-// rejection, the blocks-only cross-type guard, idempotency vs type-conflict,
+// rejection, the hierarchy blocking-deadlock guard, idempotency vs type-conflict,
 // external targets, the blocks-only vs all-types count split, ready-work type/pinned/
 // deferred exclusions, hybrid sort ordering, transitive ParentID descendants,
 // inherited parent blocking, typed blocker descriptions, and hypothetical
@@ -24,7 +24,7 @@ func RunAudit_dependencies_readiness(t *testing.T, f Factory) {
 	t.Helper()
 	t.Run("SelfDependencyRejected", func(t *testing.T) { testAuditSelfDependencyRejected(t, f) })
 	t.Run("CycleRejection", func(t *testing.T) { testAuditCycleRejection(t, f) })
-	t.Run("CycleScopeNonBlocking", func(t *testing.T) { testAuditCycleScopeNonBlocking(t, f) })
+	t.Run("CycleScopeByDependencyType", func(t *testing.T) { testAuditCycleScopeByDependencyType(t, f) })
 	t.Run("IdempotencyVsTypeConflict", func(t *testing.T) { testAuditIdempotencyVsTypeConflict(t, f) })
 	t.Run("CrossTypeEpicTaskBlocking", func(t *testing.T) { testAuditCrossTypeEpicTaskBlocking(t, f) })
 	t.Run("MissingSourceTarget", func(t *testing.T) { testAuditMissingSourceTarget(t, f) })
@@ -118,17 +118,21 @@ func testAuditCycleRejection(t *testing.T, f Factory) {
 	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "d3", DependsOnID: "d4", Type: types.DepBlocks}, "a"))
 }
 
-func testAuditCycleScopeNonBlocking(t *testing.T, f Factory) {
+func testAuditCycleScopeByDependencyType(t *testing.T, f Factory) {
 	s := f(t)
 	for _, id := range []string{"ra", "rb", "pa", "pb"} {
 		must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: id, Title: id}), "a"))
 	}
-	// relates-to and parent-child edges skip the reachability probe, so graph
-	// cycles in those edge types form freely.
+	// Related edges remain outside scheduling-cycle validation.
 	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "ra", DependsOnID: "rb", Type: types.DepRelatesTo}, "a"))
 	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "rb", DependsOnID: "ra", Type: types.DepRelatesTo}, "a"))
+	// Parent-child participates in the scheduling graph, so the reverse edge is
+	// rejected and leaves the original hierarchy unchanged.
 	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "pa", DependsOnID: "pb", Type: types.DepParentChild}, "a"))
-	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "pb", DependsOnID: "pa", Type: types.DepParentChild}, "a"))
+	err := s.AddDependency(ctx(), &types.Dependency{IssueID: "pb", DependsOnID: "pa", Type: types.DepParentChild}, "a")
+	if err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("reverse parent-child err = %v, want a 'cycle' error", err)
+	}
 
 	raRecs, _ := s.GetDependencyRecords(ctx(), "ra")
 	if got := depTargets(raRecs); !slices.Equal(got, []string{"rb"}) {
@@ -137,6 +141,10 @@ func testAuditCycleScopeNonBlocking(t *testing.T, f Factory) {
 	rbRecs, _ := s.GetDependencyRecords(ctx(), "rb")
 	if got := depTargets(rbRecs); !slices.Equal(got, []string{"ra"}) {
 		t.Errorf("rb records = %v, want [ra]", got)
+	}
+	pbRecs, _ := s.GetDependencyRecords(ctx(), "pb")
+	if len(pbRecs) != 0 {
+		t.Errorf("pb records after rejected parent-child cycle = %v, want empty", depTargets(pbRecs))
 	}
 }
 
@@ -171,16 +179,51 @@ func testAuditCrossTypeEpicTaskBlocking(t *testing.T, f Factory) {
 	s := f(t)
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ep", Title: "Epic", IssueType: types.TypeEpic}), "a"))
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "tk", Title: "Task", IssueType: types.TypeTask}), "a"))
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "tk2", Title: "Task 2", IssueType: types.TypeTask}), "a"))
 
-	if err := s.AddDependency(ctx(), &types.Dependency{IssueID: "ep", DependsOnID: "tk", Type: types.DepBlocks}, "a"); err == nil || !strings.Contains(err.Error(), "can only block") {
-		t.Errorf("epic->task blocks err = %v, want a 'can only block' error", err)
+	// Cross-type blocking is allowed between unrelated issues (bd-wg7ve):
+	// gating a task on an epic closing, or an epic on a task closing.
+	if err := s.AddDependency(ctx(), &types.Dependency{IssueID: "ep", DependsOnID: "tk", Type: types.DepBlocks}, "a"); err != nil {
+		t.Errorf("epic gated on unrelated task err = %v, want nil", err)
 	}
-	if err := s.AddDependency(ctx(), &types.Dependency{IssueID: "tk", DependsOnID: "ep", Type: types.DepBlocks}, "a"); err == nil || !strings.Contains(err.Error(), "can only block") {
-		t.Errorf("task->epic blocks err = %v, want a 'can only block' error", err)
+	if err := s.AddDependency(ctx(), &types.Dependency{IssueID: "tk2", DependsOnID: "ep", Type: types.DepBlocks}, "a"); err != nil {
+		t.Errorf("task gated on unrelated epic err = %v, want nil", err)
 	}
-	// The cross-type guard is scoped to DepBlocks only; conditional-blocks is allowed.
-	if err := s.AddDependency(ctx(), &types.Dependency{IssueID: "ep", DependsOnID: "tk", Type: types.DepConditionalBlocks}, "a"); err != nil {
-		t.Errorf("epic->task conditional-blocks err = %v, want nil (guard not applied)", err)
+
+	// The gate resolves when the epic itself closes: tk2 is blocked while ep
+	// is open and becomes unblocked once ep is closed.
+	if blocked, _, err := s.IsBlocked(ctx(), "tk2"); err != nil || !blocked {
+		t.Errorf("IsBlocked(tk2) = %v, %v; want blocked while gating epic is open", blocked, err)
+	}
+	must(t, s.CloseIssue(ctx(), "tk", "done", "a", "s"))
+	must(t, s.CloseIssue(ctx(), "ep", "done", "a", "s"))
+	if blocked, _, err := s.IsBlocked(ctx(), "tk2"); err != nil || blocked {
+		t.Errorf("IsBlocked(tk2) = %v, %v; want unblocked after gating epic closed", blocked, err)
+	}
+
+	// Blocking deps within a hierarchy line are rejected in both directions:
+	// gating on an ancestor deadlocks, gating on a descendant livelocks. The
+	// guard covers conditional-blocks too.
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "hep", Title: "Parent epic", IssueType: types.TypeEpic}), "a"))
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "hch", Title: "Child task", IssueType: types.TypeTask}), "a"))
+	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "hch", DependsOnID: "hep", Type: types.DepParentChild}, "a"))
+	if err := s.AddDependency(ctx(), &types.Dependency{IssueID: "hch", DependsOnID: "hep", Type: types.DepBlocks}, "a"); err == nil || !strings.Contains(err.Error(), "ancestor") {
+		t.Errorf("child gated on ancestor err = %v, want an 'ancestor' error", err)
+	}
+	if err := s.AddDependency(ctx(), &types.Dependency{IssueID: "hep", DependsOnID: "hch", Type: types.DepBlocks}, "a"); err == nil || !strings.Contains(err.Error(), "descendant") {
+		t.Errorf("epic gated on descendant err = %v, want a 'descendant' error", err)
+	}
+	if err := s.AddDependency(ctx(), &types.Dependency{IssueID: "hch", DependsOnID: "hep", Type: types.DepConditionalBlocks}, "a"); err == nil || !strings.Contains(err.Error(), "ancestor") {
+		t.Errorf("child conditionally gated on ancestor err = %v, want an 'ancestor' error", err)
+	}
+
+	// Siblings share a hierarchy component but not a hierarchy line: ordering
+	// blocks edges between children of the same parent stay allowed (the
+	// ancestry walk goes child -> parent only, never back down).
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "hch2", Title: "Sibling task", IssueType: types.TypeTask}), "a"))
+	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "hch2", DependsOnID: "hep", Type: types.DepParentChild}, "a"))
+	if err := s.AddDependency(ctx(), &types.Dependency{IssueID: "hch2", DependsOnID: "hch", Type: types.DepBlocks}, "a"); err != nil {
+		t.Errorf("sibling ordering blocks edge err = %v, want nil", err)
 	}
 }
 

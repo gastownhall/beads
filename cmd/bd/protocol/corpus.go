@@ -100,7 +100,8 @@ func CorpusPlan() []Capture {
 			Args: []string{"dep", "list", CorpusRootID, "--json"},
 		},
 		// MUTATIONS: update/close/reopen return an array of the affected issue;
-		// update pins label + metadata coercion (phase=2 -> integer); close pins
+		// update pins label + metadata coercion (phase=2 -> string "2", since
+		// --set-metadata always stores values as JSON strings); close pins
 		// close_reason + closed_at; dep_remove/delete pin their confirmation shapes.
 		{
 			Name: "update",

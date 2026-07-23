@@ -138,6 +138,16 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 	}
 	result.markChanged(issueTable)
 
+	// Reconcile the ephemeral lease row with the accepted issue state
+	// (restore an imported lease / drop an orphaned one — see
+	// RestoreLeaseOnImportInTx). Wisps are never leased. The leases table is
+	// dolt_ignored, so this is deliberately not marked as a changed table.
+	if issueTable == "issues" {
+		if err := RestoreLeaseOnImportInTx(ctx, tx, issue, isNew); err != nil {
+			return result, err
+		}
+	}
+
 	if isNew {
 		if err := RecordEventInTable(ctx, tx, eventTable, issue.ID, types.EventCreated, actor, ""); err != nil {
 			return result, fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
@@ -289,6 +299,17 @@ func stageableChangedTables(changed map[string]bool) map[string]bool {
 func ValidateCreateIssuesMixedBucketDependencies(issues []*types.Issue) error {
 	_, err := filterCreateIssuesMixedBucketDependencies(issues, storage.BatchCreateOptions{})
 	return err
+}
+
+// FilterCreateIssuesMixedBucketDependencies applies the same cross-bucket
+// dependency policy as CreateIssuesInTx, but over the full issue set. Callers
+// that split one logical batch into bounded sub-batches (chunked import) must
+// run this once up front: the per-batch filter inside the engine only sees one
+// sub-batch, so it could no longer detect an edge whose endpoints land in
+// different chunks. Filtered edges are reported via opts.OnSkippedDependency;
+// issues whose dependency list changes are copied, never mutated.
+func FilterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
+	return filterCreateIssuesMixedBucketDependencies(issues, opts)
 }
 
 func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
@@ -623,6 +644,14 @@ func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, e
 			continue
 		}
 		seen[label] = struct{}{}
+		// Reject an over-length label before the INSERT IGNORE, which would
+		// otherwise silently truncate it to VARCHAR(255). This is the create and
+		// import chokepoint (AddLabelInTx guards the bd label-add path). The whole
+		// create runs in one transaction, so returning here rolls it back — the
+		// issue and its labels are not persisted.
+		if err := types.CheckFieldLen("label", label); err != nil {
+			return result, err
+		}
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		sqlResult, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT IGNORE INTO %s (issue_id, label)
@@ -709,6 +738,11 @@ func PersistDependenciesWithResult(ctx context.Context, tx *sql.Tx, issues []*ty
 
 func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) (CreateIssueResult, error) {
 	var result CreateIssueResult
+	type pendingDependency struct {
+		dep      *types.Dependency
+		depTable string
+	}
+	var pending []pendingDependency
 	for _, issue := range issues {
 		if len(issue.Dependencies) == 0 {
 			continue
@@ -723,7 +757,20 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			if dep.IssueID == "" {
 				dep.IssueID = issue.ID
 			}
+			pending = append(pending, pendingDependency{dep: dep, depTable: depTable})
+		}
+	}
 
+	// Persist hierarchy first so blocking edges in the same import see the full
+	// planned ancestry. The enclosing create transaction rolls this phase back
+	// if a later dependency is invalid.
+	for phase := 0; phase < 2; phase++ {
+		parentPhase := phase == 0
+		for _, item := range pending {
+			dep := item.dep
+			if (dep.Type == types.DepParentChild) != parentPhase {
+				continue
+			}
 			kind := ClassifyDepTarget(ctx, tx, dep, false)
 
 			if kind != DepTargetExternal {
@@ -744,6 +791,16 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 				}
 			}
 
+			if kind != DepTargetExternal && types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) {
+				if err := CheckBlockingHierarchyInTx(ctx, tx, dep, nil); err != nil {
+					if opts.SkipDependencyValidationErrors {
+						recordSkippedDependency(opts, dep, err.Error())
+						continue
+					}
+					return result, fmt.Errorf("invalid dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+				}
+			}
+
 			if err := CheckDependencyCycleInTx(ctx, tx, dep, nil); err != nil {
 				if opts.SkipDependencyValidationErrors {
 					recordSkippedDependency(opts, dep, err.Error())
@@ -760,12 +817,12 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			// merge-safe across clones — two clones importing the same JSONL get the
 			// same primary key, not two random UUIDs that collide on uk_dep_* (#4259).
 			createdBy := dependencyCreatedBy(dep, actor)
-			//nolint:gosec // G201: depTable is one of two hardcoded constants; target column from DepTargetKind.Column()
+			//nolint:gosec // G201: item.depTable is one of two hardcoded constants; target column from DepTargetKind.Column()
 			sqlResult, err := tx.ExecContext(ctx, fmt.Sprintf(`
 					INSERT INTO %s (id, issue_id, %s, type, created_by, created_at)
 					VALUES (?, ?, ?, ?, ?, ?)
 					ON DUPLICATE KEY UPDATE type = type
-				`, depTable, kind.Column()), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, createdBy, createdAt)
+				`, item.depTable, kind.Column()), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, createdBy, createdAt)
 			if err != nil {
 				return result, fmt.Errorf("failed to insert dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}
@@ -774,7 +831,7 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 				return result, fmt.Errorf("failed to check dependency insert result for %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}
 			if rowsAffected > 0 {
-				result.markChanged(depTable)
+				result.markChanged(item.depTable)
 			}
 		}
 	}
@@ -867,10 +924,9 @@ func ReconcileChildCounters(ctx context.Context, tx *sql.Tx, issues []*types.Iss
 		if err == nil && current >= b.maxChild {
 			continue
 		}
-		// Qualify the existing-row column with the table name. Bare `last_child`
-		// on the update RHS is a valid MySQL "current row value" reference, but
-		// Postgres sees it as ambiguous between the target row and EXCLUDED
-		// (SQLSTATE 42702); table-qualifying it is unambiguous on every backend.
+		// Qualify the existing-row column with the table name so the canonical
+		// MySQL form and SQLite's translated ON CONFLICT form both unambiguously
+		// refer to the target row rather than the incoming value.
 		//nolint:gosec // G201: table is one of two hardcoded constants.
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %[1]s (parent_id, last_child) VALUES (?, ?)

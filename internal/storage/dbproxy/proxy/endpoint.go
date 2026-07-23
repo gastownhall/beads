@@ -260,15 +260,6 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, lock *util.Lock) (*e
 		if ext.Socket != "" {
 			args = append(args, "--external-socket-path", ext.Socket)
 		}
-		if ext.TLSRequired {
-			args = append(args, "--external-tls")
-		}
-		if ext.TLSCert != "" {
-			args = append(args, "--external-tls-cert-path", ext.TLSCert)
-		}
-		if ext.TLSKey != "" {
-			args = append(args, "--external-tls-key-path", ext.TLSKey)
-		}
 		if ext.KeepAlivePeriod != 0 {
 			args = append(args, "--external-keep-alive", ext.KeepAlivePeriod.String())
 		}
@@ -301,6 +292,14 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, lock *util.Lock) (*e
 	}()
 
 	return cmd, done, nil
+}
+
+func IsRunning(rootDir string) (bool, int) {
+	_, pf, ok := readAndDial(rootDir)
+	if !ok {
+		return false, 0
+	}
+	return true, pf.Pid
 }
 
 func readAndDial(rootDir string) (Endpoint, *pidfile.PidFile, bool) {

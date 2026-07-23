@@ -1,6 +1,6 @@
 ---
 title: "bd migrate"
-description: "Database migration commands"
+description: "Database migration and data transformation commands."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -17,24 +17,15 @@ Subcommands:
   schema      Apply pending schema migrations (idempotent)
   sync        Set up sync.branch workflow for multi-clone setups
 
-On a remote-backed database with pending schema migrations bd refuses to
-migrate in place (#4259): migrating two clones independently forks the schema
-so bd dolt pull can no longer merge — the break is silent and unrecoverable.
-Use --force to confirm you are the single designated migrator, after which you
-should publish the migrated schema with 'bd dolt push'. The env-var equivalent
-BD_ALLOW_REMOTE_MIGRATE=1 remains supported for scripted/CI use.
-
 
 ```
 bd migrate [flags]
-bd migrate [command]
 ```
 
 **Flags:**
 
 ```
       --dry-run          Show what would be done without making changes
-      --force            Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)
       --inspect          Show migration plan and database state for AI agent analysis
       --json             Output migration statistics in JSON format
       --update-repo-id   Update repository ID (use after changing git remote)
@@ -131,8 +122,7 @@ bd migrate schema [flags]
 **Flags:**
 
 ```
-      --force   Bypass the remote-migrate gate as the single designated migrator (equivalent to BD_ALLOW_REMOTE_MIGRATE=1)
-      --json    Output in JSON format
+      --json   Output in JSON format
 ```
 
 ## bd migrate sync

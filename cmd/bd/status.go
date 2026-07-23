@@ -62,7 +62,6 @@ Examples:
 			}
 		}()
 
-		showAll, _ := cmd.Flags().GetBool("all")
 		showAssigned, _ := cmd.Flags().GetBool("assigned")
 		noActivity, _ := cmd.Flags().GetBool("no-activity")
 		jsonFormat, _ := cmd.Flags().GetBool("json")
@@ -71,12 +70,13 @@ Examples:
 			jsonOutput = true
 		}
 
-		var stats *types.Statistics
-		var err error
+		if usesProxiedServer() {
+			return runStatusProxiedServer(rootCtx, showAssigned, noActivity)
+		}
 
 		ctx := rootCtx
 
-		stats, err = store.GetStatistics(ctx)
+		stats, err := store.GetStatistics(ctx)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
@@ -93,57 +93,60 @@ Examples:
 			recentActivity = getGitActivity(24)
 		}
 
-		output := &StatusOutput{
-			Summary:        stats,
-			RecentActivity: recentActivity,
-		}
-
-		if jsonOutput {
-			return outputJSON(output)
-		}
-
-		// Human-readable colorized output using semantic ui package
-		fmt.Printf("\n%s Issue Database Status\n\n", ui.RenderAccent("📊"))
-		fmt.Printf("Summary:\n")
-		fmt.Printf("  Total Issues:           %d\n", stats.TotalIssues)
-		fmt.Printf("  Open:                   %s\n", ui.RenderPass(fmt.Sprintf("%d", stats.OpenIssues)))
-		fmt.Printf("  In Progress:            %s\n", ui.RenderWarn(fmt.Sprintf("%d", stats.InProgressIssues)))
-		fmt.Printf("  Blocked:                %s\n", ui.RenderFail(fmt.Sprintf("%d", stats.BlockedIssues)))
-		fmt.Printf("  Closed:                 %d\n", stats.ClosedIssues)
-		fmt.Printf("  Ready to Work:          %s\n", ui.RenderPass(fmt.Sprintf("%d", stats.ReadyIssues)))
-
-		// Extended statistics (only show if non-zero)
-		hasExtended := stats.PinnedIssues > 0 ||
-			stats.EpicsEligibleForClosure > 0 || stats.AverageLeadTime > 0
-		if hasExtended {
-			fmt.Printf("\nExtended:\n")
-			if stats.PinnedIssues > 0 {
-				fmt.Printf("  Pinned:                 %d\n", stats.PinnedIssues)
-			}
-			if stats.EpicsEligibleForClosure > 0 {
-				fmt.Printf("  Epics Ready to Close:   %s\n", ui.RenderPass(fmt.Sprintf("%d", stats.EpicsEligibleForClosure)))
-			}
-			if stats.AverageLeadTime > 0 {
-				fmt.Printf("  Avg Lead Time:          %.1f hours\n", stats.AverageLeadTime)
-			}
-		}
-
-		if recentActivity != nil {
-			fmt.Printf("\nRecent Activity (last %d hours):\n", recentActivity.HoursTracked)
-			fmt.Printf("  Commits:                %d\n", recentActivity.CommitCount)
-			fmt.Printf("  Total Changes:          %d\n", recentActivity.TotalChanges)
-			fmt.Printf("  Issues Created:         %d\n", recentActivity.IssuesCreated)
-			fmt.Printf("  Issues Closed:          %d\n", recentActivity.IssuesClosed)
-			fmt.Printf("  Issues Reopened:        %d\n", recentActivity.IssuesReopened)
-			fmt.Printf("  Issues Updated:         %d\n", recentActivity.IssuesUpdated)
-		}
-
-		fmt.Printf("\nFor more details, use 'bd list' to see individual issues.\n")
-		fmt.Println()
-
-		_ = showAll
-		return nil
+		return renderStatus(stats, recentActivity)
 	},
+}
+
+func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary) error {
+	output := &StatusOutput{
+		Summary:        stats,
+		RecentActivity: recentActivity,
+	}
+
+	if jsonOutput {
+		return outputJSON(output)
+	}
+
+	// Human-readable colorized output using semantic ui package
+	fmt.Printf("\n%s Issue Database Status\n\n", ui.RenderAccent("📊"))
+	fmt.Printf("Summary:\n")
+	fmt.Printf("  Total Issues:           %d\n", stats.TotalIssues)
+	fmt.Printf("  Open:                   %s\n", ui.RenderPass(fmt.Sprintf("%d", stats.OpenIssues)))
+	fmt.Printf("  In Progress:            %s\n", ui.RenderWarn(fmt.Sprintf("%d", stats.InProgressIssues)))
+	fmt.Printf("  Blocked:                %s\n", ui.RenderFail(fmt.Sprintf("%d", stats.BlockedIssues)))
+	fmt.Printf("  Closed:                 %d\n", stats.ClosedIssues)
+	fmt.Printf("  Ready to Work:          %s\n", ui.RenderPass(fmt.Sprintf("%d", stats.ReadyIssues)))
+
+	// Extended statistics (only show if non-zero)
+	hasExtended := stats.PinnedIssues > 0 ||
+		stats.EpicsEligibleForClosure > 0 || stats.AverageLeadTime > 0
+	if hasExtended {
+		fmt.Printf("\nExtended:\n")
+		if stats.PinnedIssues > 0 {
+			fmt.Printf("  Pinned:                 %d\n", stats.PinnedIssues)
+		}
+		if stats.EpicsEligibleForClosure > 0 {
+			fmt.Printf("  Epics Ready to Close:   %s\n", ui.RenderPass(fmt.Sprintf("%d", stats.EpicsEligibleForClosure)))
+		}
+		if stats.AverageLeadTime > 0 {
+			fmt.Printf("  Avg Lead Time:          %.1f hours\n", stats.AverageLeadTime)
+		}
+	}
+
+	if recentActivity != nil {
+		fmt.Printf("\nRecent Activity (last %d hours):\n", recentActivity.HoursTracked)
+		fmt.Printf("  Commits:                %d\n", recentActivity.CommitCount)
+		fmt.Printf("  Total Changes:          %d\n", recentActivity.TotalChanges)
+		fmt.Printf("  Issues Created:         %d\n", recentActivity.IssuesCreated)
+		fmt.Printf("  Issues Closed:          %d\n", recentActivity.IssuesClosed)
+		fmt.Printf("  Issues Reopened:        %d\n", recentActivity.IssuesReopened)
+		fmt.Printf("  Issues Updated:         %d\n", recentActivity.IssuesUpdated)
+	}
+
+	fmt.Printf("\nFor more details, use 'bd list' to see individual issues.\n")
+	fmt.Println()
+
+	return nil
 }
 
 // getGitActivity returns recent activity statistics.
@@ -161,22 +164,26 @@ func getAssignedStatistics(assignee string) *types.Statistics {
 
 	ctx := rootCtx
 
-	// Filter by assignee
 	assigneePtr := assignee
-	filter := types.IssueFilter{
-		Assignee: &assigneePtr,
-	}
-
-	issues, err := store.SearchIssues(ctx, "", filter)
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Assignee: &assigneePtr})
 	if err != nil {
 		return nil
 	}
 
+	readyCount := 0
+	readyIssues, err := store.GetReadyWork(ctx, types.WorkFilter{Assignee: &assigneePtr})
+	if err == nil {
+		readyCount = len(readyIssues)
+	}
+
+	return buildAssignedStats(issues, readyCount)
+}
+
+func buildAssignedStats(issues []*types.Issue, readyCount int) *types.Statistics {
 	stats := &types.Statistics{
 		TotalIssues: len(issues),
 	}
 
-	// Count by status
 	for _, issue := range issues {
 		switch issue.Status {
 		case types.StatusOpen:
@@ -192,15 +199,7 @@ func getAssignedStatistics(assignee string) *types.Statistics {
 		}
 	}
 
-	// Get ready work count for this assignee
-	readyFilter := types.WorkFilter{
-		Assignee: &assigneePtr,
-	}
-	readyIssues, err := store.GetReadyWork(ctx, readyFilter)
-	if err == nil {
-		stats.ReadyIssues = len(readyIssues)
-	}
-
+	stats.ReadyIssues = readyCount
 	return stats
 }
 

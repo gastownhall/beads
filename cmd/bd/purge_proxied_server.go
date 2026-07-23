@@ -15,9 +15,20 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-// runPurgeOrPruneProxied is the proxied-server counterpart of runPurgeOrPrune.
-// It drives the same delete-closed-beads flow through a UnitOfWork and the
-// domain use cases instead of the embedded store.
+type purgeProxiedTxResult struct {
+	empty        bool
+	dryRun       bool
+	needsConfirm bool
+
+	issueIDs         []string
+	deleteResult     domain.DeleteIssuesResult
+	deleteErr        error
+	pinnedCount      int
+	referencedCount  int
+	referencedSample []string
+	safetyStats      closedDeletionCandidateStats
+}
+
 func runPurgeOrPruneProxied(cmd *cobra.Command, scope purgeScope) error {
 	CheckReadonly(scope.cmdName)
 
@@ -38,117 +49,122 @@ func runPurgeOrPruneProxied(cmd *cobra.Command, scope purgeScope) error {
 		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
 	ctx := rootCtx
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("open unit of work: %v", err)
-	}
-	defer uw.Close(ctx)
 
-	statusClosed := types.StatusClosed
-	ephemeralFlag := scope.ephemeralOnly
-	filter := types.IssueFilter{
-		Status:    &statusClosed,
-		Ephemeral: &ephemeralFlag,
-	}
+	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (purgeProxiedTxResult, string, error) {
+		var result purgeProxiedTxResult
 
-	var cutoff *time.Time
-	if olderThan != "" {
-		days, err := parseHumanDuration(olderThan)
-		if err != nil {
-			return HandleErrorRespectJSON("invalid --older-than value %q: %v", olderThan, err)
+		statusClosed := types.StatusClosed
+		ephemeralFlag := scope.ephemeralOnly
+		filter := types.IssueFilter{
+			Status:    &statusClosed,
+			Ephemeral: &ephemeralFlag,
 		}
-		cutoffTime := time.Now().UTC().AddDate(0, 0, -days)
-		cutoff = &cutoffTime
-		filter.ClosedBefore = cutoff
-	}
 
-	page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
-	if err != nil {
-		return HandleErrorRespectJSON("listing issues: %v", err)
-	}
-	closedIssues := page.Items
-
-	if pattern != "" {
-		var matched []*types.Issue
-		for _, issue := range closedIssues {
-			if ok, _ := filepath.Match(pattern, issue.ID); ok {
-				matched = append(matched, issue)
+		var cutoff *time.Time
+		if olderThan != "" {
+			days, err := parseHumanDuration(olderThan)
+			if err != nil {
+				return result, "", fmt.Errorf("invalid --older-than value %q: %w", olderThan, err)
 			}
+			cutoffTime := time.Now().UTC().AddDate(0, 0, -days)
+			cutoff = &cutoffTime
+			filter.ClosedBefore = cutoff
 		}
-		closedIssues = matched
-	}
 
-	var safetyStats closedDeletionCandidateStats
-	closedIssues, safetyStats = filterClosedDeletionCandidates(closedIssues, cutoff)
-	pinnedCount := safetyStats.PinnedSkipped
-	warnClosedDeletionSafetySkips(safetyStats)
-
-	referencedCount := 0
-	var referencedSample []string
-	if scope.cmdName == "prune" && !scope.ignoreReferences {
-		candidateIDs := make(map[string]bool, len(closedIssues))
-		for _, iss := range closedIssues {
-			candidateIDs[iss.ID] = true
-		}
-		refSet, err := buildReferencedSetProxied(ctx, uw, candidateIDs)
+		page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
 		if err != nil {
-			return HandleErrorRespectJSON("scanning open beads for references: %v", err)
+			return result, "", fmt.Errorf("listing issues: %w", err)
 		}
-		nonReferenced := closedIssues[:0]
-		for _, iss := range closedIssues {
-			if refSet[iss.ID] {
-				referencedCount++
-				if len(referencedSample) < 100 {
-					referencedSample = append(referencedSample, iss.ID)
+		closedIssues := page.Items
+
+		if pattern != "" {
+			var matched []*types.Issue
+			for _, issue := range closedIssues {
+				if ok, _ := filepath.Match(pattern, issue.ID); ok {
+					matched = append(matched, issue)
 				}
-			} else {
-				nonReferenced = append(nonReferenced, iss)
 			}
+			closedIssues = matched
 		}
-		closedIssues = nonReferenced
-	}
 
-	if len(closedIssues) == 0 {
-		return emitProxiedPruneEmpty(scope, olderThan, pattern, referencedCount, referencedSample)
-	}
+		closedIssues, result.safetyStats = filterClosedDeletionCandidates(closedIssues, cutoff)
+		result.pinnedCount = result.safetyStats.PinnedSkipped
 
-	issueIDs := make([]string, len(closedIssues))
-	for i, issue := range closedIssues {
-		issueIDs[i] = issue.ID
-	}
+		if scope.cmdName == "prune" && !scope.ignoreReferences {
+			candidateIDs := make(map[string]bool, len(closedIssues))
+			for _, iss := range closedIssues {
+				candidateIDs[iss.ID] = true
+			}
+			refSet, err := buildReferencedSetProxied(ctx, uw, candidateIDs)
+			if err != nil {
+				return result, "", fmt.Errorf("scanning open beads for references: %w", err)
+			}
+			nonReferenced := closedIssues[:0]
+			for _, iss := range closedIssues {
+				if refSet[iss.ID] {
+					result.referencedCount++
+					if len(result.referencedSample) < 100 {
+						result.referencedSample = append(result.referencedSample, iss.ID)
+					}
+				} else {
+					nonReferenced = append(nonReferenced, iss)
+				}
+			}
+			closedIssues = nonReferenced
+		}
 
-	if dryRun {
-		result, derr := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
-			IDs:    issueIDs,
-			DryRun: true,
+		if len(closedIssues) == 0 {
+			result.empty = true
+			return result, "", nil
+		}
+
+		result.issueIDs = make([]string, len(closedIssues))
+		for i, issue := range closedIssues {
+			result.issueIDs[i] = issue.ID
+		}
+
+		if dryRun {
+			result.dryRun = true
+			result.deleteResult, result.deleteErr = uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
+				IDs:    result.issueIDs,
+				DryRun: true,
+			}, actor)
+			return result, "", nil
+		}
+
+		if !force {
+			result.needsConfirm = true
+			return result, "", nil
+		}
+
+		deleteResult, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
+			IDs: result.issueIDs,
 		}, actor)
-		return emitProxiedPruneDryRun(scope, issueIDs, result, derr, pinnedCount, referencedCount, referencedSample)
-	}
+		if err != nil {
+			return result, "", fmt.Errorf("%s failed: %w", scope.cmdName, err)
+		}
+		result.deleteResult = deleteResult
 
-	if !force {
-		return emitProxiedPruneConfirm(scope, issueIDs, olderThan, pattern, pinnedCount, referencedCount)
-	}
-
-	result, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
-		IDs: issueIDs,
-	}, actor)
+		return result, fmt.Sprintf("bd: %s %d bead(s)", scope.cmdName, deleteResult.DeletedCount), nil
+	})
 	if err != nil {
-		return HandleErrorRespectJSON("%s failed: %v", scope.cmdName, err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: %s %d bead(s)", scope.cmdName, result.DeletedCount)); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("commit: %v", err)
-	}
+	warnClosedDeletionSafetySkips(res.safetyStats)
 
-	return emitProxiedPruneResult(scope, result, pinnedCount, referencedCount, referencedSample)
+	switch {
+	case res.empty:
+		return emitProxiedPruneEmpty(scope, olderThan, pattern, res.referencedCount, res.referencedSample)
+	case res.dryRun:
+		return emitProxiedPruneDryRun(scope, res.issueIDs, res.deleteResult, res.deleteErr, res.pinnedCount, res.referencedCount, res.referencedSample)
+	case res.needsConfirm:
+		return emitProxiedPruneConfirm(scope, res.issueIDs, olderThan, pattern, res.pinnedCount, res.referencedCount)
+	default:
+		return emitProxiedPruneResult(scope, res.deleteResult, res.pinnedCount, res.referencedCount, res.referencedSample)
+	}
 }
 
-// buildReferencedSetProxied mirrors buildReferencedSet using the domain use
-// cases behind a UnitOfWork. It scans every non-done bead's description,
-// notes, and comments for literal occurrences of any candidate ID, using the
-// same linear candidateIDMatcher as the embedded path (the regexp-alternation
-// scan it replaces was the ~15s-on-10K-beads profile behind the
-// TestPruneLargeFixture CI failures).
 func buildReferencedSetProxied(ctx context.Context, uw uow.UnitOfWork, candidateIDs map[string]bool) (map[string]bool, error) {
 	if len(candidateIDs) == 0 {
 		return nil, nil

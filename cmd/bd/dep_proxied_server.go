@@ -14,15 +14,11 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-func openDepProxiedUOW(ctx context.Context) (uow.UnitOfWork, error) {
-	if uowProvider == nil {
-		return nil, HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return nil, HandleErrorRespectJSON("open unit of work: %v", err)
-	}
-	return uw, nil
+type depAddResult struct {
+	fromTitle string
+	toTitle   string
+	cycles    [][]*types.Issue
+	cycleErr  error
 }
 
 func proxiedLookupTitle(ctx context.Context, uw uow.UnitOfWork, id string) string {
@@ -40,12 +36,13 @@ func proxiedLookupTitle(ctx context.Context, uw uow.UnitOfWork, id string) strin
 	return ""
 }
 
-func proxiedWarnCycles(ctx context.Context, uw uow.UnitOfWork) {
-	cycles, err := uw.DependencyUseCase().DetectCycles(ctx)
+func printCycleDetectionError(err error) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to check for cycles: %v\n", err)
-		return
 	}
+}
+
+func printCycleWarnings(cycles [][]*types.Issue) {
 	if len(cycles) == 0 {
 		return
 	}
@@ -73,32 +70,41 @@ func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerI
 		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", blockedID, blockerID)
 	}
 
-	uw, err := openDepProxiedUOW(ctx)
-	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	dep := &types.Dependency{
-		IssueID:     blockedID,
-		DependsOnID: blockerID,
-		Type:        types.DepBlocks,
-	}
-	if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
-		return HandleErrorRespectJSON("%v", err)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
 
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
-	if !noCycleCheck {
-		proxiedWarnCycles(ctx, uw)
+
+	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (depAddResult, string, error) {
+		dep := &types.Dependency{
+			IssueID:     blockedID,
+			DependsOnID: blockerID,
+			Type:        types.DepBlocks,
+		}
+		if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
+			return depAddResult{}, "", err
+		}
+
+		var cycles [][]*types.Issue
+		var cycleErr error
+		if !noCycleCheck {
+			cycles, cycleErr = uw.DependencyUseCase().DetectCycles(ctx)
+		}
+
+		return depAddResult{
+			fromTitle: proxiedLookupTitle(ctx, uw, blockedID),
+			toTitle:   proxiedLookupTitle(ctx, uw, blockerID),
+			cycles:    cycles,
+			cycleErr:  cycleErr,
+		}, fmt.Sprintf("bd: dep add %s %s", blockedID, blockerID), nil
+	})
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 
-	blockerTitle := proxiedLookupTitle(ctx, uw, blockerID)
-	blockedTitle := proxiedLookupTitle(ctx, uw, blockedID)
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: dep add %s %s", blockedID, blockerID)); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("failed to commit: %v", err)
-	}
+	printCycleDetectionError(res.cycleErr)
+	printCycleWarnings(res.cycles)
 
 	if jsonOutput {
 		_ = outputJSON(map[string]interface{}{
@@ -112,8 +118,8 @@ func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerI
 
 	fmt.Printf("%s Added dependency: %s blocks %s\n",
 		ui.RenderPass("✓"),
-		formatFeedbackIDParen(blockerID, blockerTitle),
-		formatFeedbackIDParen(blockedID, blockedTitle))
+		formatFeedbackIDParen(blockerID, res.toTitle),
+		formatFeedbackIDParen(blockedID, res.fromTitle))
 	return nil
 }
 
@@ -158,28 +164,37 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
 	}
 
-	uw, err := openDepProxiedUOW(ctx)
-	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	dep := &types.Dependency{IssueID: fromID, DependsOnID: toID, Type: dt}
-	if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
-		return HandleErrorRespectJSON("%v", err)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
 
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
-	if !noCycleCheck {
-		proxiedWarnCycles(ctx, uw)
+
+	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (depAddResult, string, error) {
+		dep := &types.Dependency{IssueID: fromID, DependsOnID: toID, Type: dt}
+		if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
+			return depAddResult{}, "", err
+		}
+
+		var cycles [][]*types.Issue
+		var cycleErr error
+		if !noCycleCheck {
+			cycles, cycleErr = uw.DependencyUseCase().DetectCycles(ctx)
+		}
+
+		return depAddResult{
+			fromTitle: proxiedLookupTitle(ctx, uw, fromID),
+			toTitle:   proxiedLookupTitle(ctx, uw, toID),
+			cycles:    cycles,
+			cycleErr:  cycleErr,
+		}, fmt.Sprintf("bd: dep add %s %s", fromID, toID), nil
+	})
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 
-	fromTitle := proxiedLookupTitle(ctx, uw, fromID)
-	toTitle := proxiedLookupTitle(ctx, uw, toID)
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: dep add %s %s", fromID, toID)); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("failed to commit: %v", err)
-	}
+	printCycleDetectionError(res.cycleErr)
+	printCycleWarnings(res.cycles)
 
 	if jsonOutput {
 		_ = outputJSON(map[string]interface{}{
@@ -193,8 +208,8 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 
 	fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
 		ui.RenderPass("✓"),
-		formatFeedbackIDParen(fromID, fromTitle),
-		formatFeedbackIDParen(toID, toTitle),
+		formatFeedbackIDParen(fromID, res.fromTitle),
+		formatFeedbackIDParen(toID, res.toTitle),
 		depType)
 	return nil
 }
@@ -225,26 +240,36 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 		})
 	}
 
-	uw, err := openDepProxiedUOW(ctx)
-	if err != nil {
-		return err
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
-	defer uw.Close(ctx)
 
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
-	if _, err := uw.DependencyUseCase().AddDependencies(ctx, deps, actor, domain.BulkAddDepsOpts{
-		SkipPerEdgeCycleCheck: noCycleCheck,
-	}); err != nil {
+
+	type bulkResult struct {
+		cycles   [][]*types.Issue
+		cycleErr error
+	}
+	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (bulkResult, string, error) {
+		if _, err := uw.DependencyUseCase().AddDependencies(ctx, deps, actor, domain.BulkAddDepsOpts{
+			SkipPerEdgeCycleCheck: noCycleCheck,
+		}); err != nil {
+			return bulkResult{}, "", err
+		}
+
+		var r bulkResult
+		if !noCycleCheck {
+			r.cycles, r.cycleErr = uw.DependencyUseCase().DetectCycles(ctx)
+		}
+
+		return r, fmt.Sprintf("dependency: add %d edges", len(deps)), nil
+	})
+	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
-	if !noCycleCheck {
-		proxiedWarnCycles(ctx, uw)
-	}
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("dependency: add %d edges", len(deps))); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("failed to commit: %v", err)
-	}
+	printCycleDetectionError(res.cycleErr)
+	printCycleWarnings(res.cycles)
 
 	if jsonOutput {
 		out := make([]map[string]interface{}, 0, len(deps))
@@ -276,21 +301,21 @@ func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []str
 		}
 	}
 
-	uw, err := openDepProxiedUOW(ctx)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
+	}
+
+	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (depAddResult, string, error) {
+		if err := uw.DependencyUseCase().RemoveDependency(ctx, fromID, toID, actor); err != nil {
+			return depAddResult{}, "", err
+		}
+		return depAddResult{
+			fromTitle: proxiedLookupTitle(ctx, uw, fromID),
+			toTitle:   proxiedLookupTitle(ctx, uw, toID),
+		}, fmt.Sprintf("bd: dep remove %s %s", fromID, toID), nil
+	})
 	if err != nil {
-		return err
-	}
-	defer uw.Close(ctx)
-
-	if err := uw.DependencyUseCase().RemoveDependency(ctx, fromID, toID, actor); err != nil {
 		return HandleErrorRespectJSON("%v", err)
-	}
-
-	fromTitle := proxiedLookupTitle(ctx, uw, fromID)
-	toTitle := proxiedLookupTitle(ctx, uw, toID)
-
-	if err := uow.CommitWithRetries(ctx, uw, fmt.Sprintf("bd: dep remove %s %s", fromID, toID)); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("failed to commit: %v", err)
 	}
 
 	if jsonOutput {
@@ -304,8 +329,8 @@ func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []str
 
 	fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
 		ui.RenderPass("✓"),
-		formatFeedbackIDParen(fromID, fromTitle),
-		formatFeedbackIDParen(toID, toTitle))
+		formatFeedbackIDParen(fromID, res.fromTitle),
+		formatFeedbackIDParen(toID, res.toTitle))
 	return nil
 }
 
@@ -316,9 +341,12 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		direction = "down"
 	}
 
-	uw, err := openDepProxiedUOW(ctx)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
+	}
+	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		return err
+		return HandleErrorRespectJSON("open unit of work: %v", err)
 	}
 	defer uw.Close(ctx)
 
@@ -450,9 +478,12 @@ func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		return HandleErrorRespectJSON("--max-depth must be >= 1")
 	}
 
-	uw, err := openDepProxiedUOW(ctx)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
+	}
+	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		return err
+		return HandleErrorRespectJSON("open unit of work: %v", err)
 	}
 	defer uw.Close(ctx)
 
@@ -537,9 +568,12 @@ func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 }
 
 func runDepCyclesProxiedServer(_ *cobra.Command, ctx context.Context) error {
-	uw, err := openDepProxiedUOW(ctx)
+	if uowProvider == nil {
+		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
+	}
+	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
-		return err
+		return HandleErrorRespectJSON("open unit of work: %v", err)
 	}
 	defer uw.Close(ctx)
 

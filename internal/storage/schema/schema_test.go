@@ -425,6 +425,44 @@ DELETE FROM schema_migrations WHERE version = %d;
 		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps'`, "0")
 }
 
+// TestMigration0056NoopsWithoutWispCommentsThroughDoltCLI pins the fresh-clone
+// guard for the comments-keyset index: main migrations run before the ignored
+// chain materializes the clone-local wisp_% tables, so migration 0056 must
+// no-op its wisp half when wisp_comments is absent. A bare
+// CREATE INDEX ... ON wisp_comments would fail at PREPARE ("table not found")
+// and brick the first writable open. The durable comments half still runs.
+// AllMigrationsSQL is main-source only (it never creates wisp_comments), so
+// applying it already runs 0056 against an absent wisp_comments; the isolated
+// re-apply then asserts the no-op explicitly.
+func TestMigration0056NoopsWithoutWispCommentsThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "comments-keyset-no-wisps")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create no-wisps dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	seedSQL := fmt.Sprintf(`
+DROP TABLE IF EXISTS wisp_comments;
+DELETE FROM schema_migrations WHERE version = %d;
+`, LatestVersion())
+	migrationSQL, err := mainSource.files.ReadFile("migrations/0056_add_comments_keyset_index.up.sql")
+	if err != nil {
+		t.Fatalf("read 0056 migration: %v", err)
+	}
+	runDoltSQL(t, dir, seedSQL+"\n"+string(migrationSQL))
+
+	// Wisp half no-oped: no wisp_comments table was created, no error raised.
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisp_comments'`, "0")
+	// Comments half ran: the durable composite index is present (one distinct
+	// index name; a composite spans three STATISTICS rows).
+	requireDoltCount(t, dir,
+		`SELECT COUNT(DISTINCT INDEX_NAME) AS c FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'comments' AND INDEX_NAME = 'idx_comments_issue_created_id'`, "1")
+}
+
 func TestMigration0053RepairsRigWispsThroughDoltCLI(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 

@@ -10,7 +10,7 @@
 [![npm version](https://img.shields.io/npm/v/@beads/bd)](https://www.npmjs.com/package/@beads/bd)
 [![PyPI](https://img.shields.io/pypi/v/beads-mcp)](https://pypi.org/project/beads-mcp/)
 
-**Docs:** https://gastownhall.github.io/beads/
+**Docs:** https://beads.gascity.com/
 
 Beads provides a persistent, structured memory for coding agents. It replaces messy markdown plans with a dependency-aware graph, allowing agents to handle long-horizon tasks without losing context.
 
@@ -109,9 +109,9 @@ version: sync remote-backed databases with your current `bd`, back up with
 `bd export --all`, upgrade the binary, then run `bd info --whats-new`,
 `bd hooks install`, and `bd version`. If the upgrade crosses a schema
 migration on a remote-backed database, exactly one designated clone runs
-`bd migrate --force` and `bd dolt push`; other clones install the new binary
+`bd migrate` and `bd dolt push`; other clones install the new binary
 and run `bd bootstrap`. See the full
-[upgrade guide](https://gastownhall.github.io/beads/getting-started/upgrading)
+[upgrade guide](https://beads.gascity.com/getting-started/upgrading)
 or [docs/getting-started/installation.md](docs/getting-started/installation.md#updating-bd).
 
 ### Security And Verification
@@ -140,10 +140,7 @@ migrate between modes with `bd backup`; reclaim space with `bd prune` /
 `bd purge`.
 
 Full detail — connection flags, sockets, maintenance, backup, and migration —
-in the [Dolt backend guide](docs/architecture/dolt.md). Prefer a different
-database? [Storage Backends](docs/architecture/storage-backends.md) covers
-Postgres, MySQL, and SQLite (Dolt stays the default and the only backend
-with history).
+in the [Dolt backend guide](docs/architecture/dolt.md).
 
 ## 🌐 Community Tools
 
@@ -179,10 +176,7 @@ This is useful for:
 - **CI/CD** — isolated task tracking without repo-level side effects
 - **Evaluation/testing** — ephemeral databases in `/tmp`
 
-For daemon mode without git, use `bd daemon start --local`
-(see [PR #433](https://github.com/gastownhall/beads/pull/433)).
-
 ## 📝 Documentation
 
-* [Documentation site](https://gastownhall.github.io/beads/) (versioned) | [Installing](docs/getting-started/installation.md) | [Sync Concepts](docs/core-concepts/sync-concepts.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Copilot CLI Setup](docs/integrations/copilot-cli.md) | [Copilot VS Code MCP](docs/integrations/github-copilot.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/reference/protected-branches.md) | [Troubleshooting](docs/reference/troubleshooting.md) | [FAQ](docs/reference/faq.md)
+* [Documentation site](https://beads.gascity.com/) | [Installing](docs/getting-started/installation.md) | [Sync Concepts](docs/core-concepts/sync-concepts.md) | [Agent Workflow](AGENT_INSTRUCTIONS.md) | [Copilot CLI Setup](docs/integrations/copilot-cli.md) | [Copilot VS Code MCP](docs/integrations/github-copilot.md) | [Articles](ARTICLES.md) | [Sync Branch Mode](docs/reference/protected-branches.md) | [Troubleshooting](docs/reference/troubleshooting.md) | [FAQ](docs/reference/faq.md)
 * [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/gastownhall/beads)

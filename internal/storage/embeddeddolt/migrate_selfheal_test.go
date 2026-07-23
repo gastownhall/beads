@@ -180,15 +180,17 @@ func TestEmbeddedMigrateConvergesUnderConcurrentInterruptedRetries_4566(t *testi
 	}
 
 	// Install the fault hook only AFTER seeding, so the baseline builds cleanly.
-	// It fires on a random ~55% of numbered main-source steps (versions > the
-	// ignored source's max of 11, so only the killed 49..latest jump is
-	// affected, never the dolt-ignored tail). A thread-safe RNG keeps it safe
-	// for the concurrent workers. Progress is monotonic post-fix: a step that
-	// faults was already committed, so each attempt advances.
+	// It fires on a random ~55% of numbered main-source steps (versions above
+	// the ignored source's max, so only the killed 49..latest jump is
+	// affected, never the dolt-ignored tail — the hook cannot tell sources
+	// apart, and a kill inside the ignored tail strands the pass's backfill
+	// dirt, which only the end-of-pass commit stages). A thread-safe RNG keeps
+	// it safe for the concurrent workers. Progress is monotonic post-fix: a
+	// step that faults was already committed, so each attempt advances.
 	var rngMu sync.Mutex
 	rng := rand.New(rand.NewSource(1))
 	restore := schema.SetMigrateStepFaultHookForTest(func(_ context.Context, _ schema.DBConn, version int) error {
-		if version <= 11 {
+		if version <= schema.LatestIgnoredVersion() {
 			return nil
 		}
 		rngMu.Lock()

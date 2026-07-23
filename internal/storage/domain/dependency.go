@@ -10,6 +10,48 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// ErrSelfDependency is returned when a dependency edge would point an issue at
+// itself. It is the static prefix of the formatted message, wrapped so callers
+// can errors.Is it while the human-readable text is preserved byte-for-byte.
+var ErrSelfDependency = errors.New("cannot add self-dependency")
+
+// ErrDependencyCycle is returned when adding a dependency edge would introduce a
+// scheduling cycle. It is scoped to the dependency-add family — the single and
+// bulk add paths (add/addBulk) and the dolt cross-tier check — so callers can
+// errors.Is any dependency-add cycle rejection. The whole-graph construction
+// paths (ApplyIssueGraph/ApplyWispGraph) are a separate family and deliberately
+// do not carry this sentinel yet.
+var ErrDependencyCycle = errors.New("adding dependency would create a cycle")
+
+// cycleError carries a fully-formatted cycle-rejection message while unwrapping
+// to ErrDependencyCycle. The bulk dependency-add path surfaces this text
+// verbatim through the proxied CLI (HandleErrorRespectJSON("%v", err)), so a
+// plain fmt.Errorf("...: %w", ErrDependencyCycle) — which appends the sentinel's
+// own "adding dependency would create a cycle" text to an already-complete
+// message — would change the user-facing string. This keeps the message
+// byte-for-byte and adds only errors.Is matchability.
+type cycleError struct {
+	msg string
+}
+
+func (e *cycleError) Error() string { return e.msg }
+func (e *cycleError) Unwrap() error { return ErrDependencyCycle }
+
+// cycleErrorf formats a cycle-rejection message that errors.Is-matches
+// ErrDependencyCycle without altering the rendered text.
+func cycleErrorf(format string, args ...any) error {
+	return &cycleError{msg: fmt.Sprintf(format, args...)}
+}
+
+// NewCycleError is the exported entry point for cycleErrorf. The embedded bulk
+// CLI final gate (cmd/bd/dep.go addBulkDependenciesInTx) lives in a different
+// package but must type its cycle rejection identically to this bulk path, so it
+// builds the same errors.Is-matchable-but-text-preserving error through here
+// rather than duplicating the cycleError wrapper.
+func NewCycleError(format string, args ...any) error {
+	return cycleErrorf(format, args...)
+}
+
 // DependencyTypeConflictError is returned when an edge already exists between
 // the same pair with a DIFFERENT type. Its message is byte-identical to the
 // embedded issueops path (issueops/dependencies.go) so `bd dep add` surfaces
@@ -21,6 +63,24 @@ type DependencyTypeConflictError struct {
 	DependsOnID   string
 	ExistingType  string
 	RequestedType string
+}
+
+// DependencyHierarchyConflictError is returned when a blocking dependency
+// would gate an issue on one of its own ancestors or descendants. Either shape
+// can never clear under the parent-child close/blocking semantics.
+type DependencyHierarchyConflictError struct {
+	IssueID           string
+	BlockerID         string
+	BlockerIsAncestor bool
+}
+
+func (e *DependencyHierarchyConflictError) Error() string {
+	if e.BlockerIsAncestor {
+		return fmt.Sprintf("%s cannot be blocked by its ancestor %s: %s cannot close until its descendants finish, so the gate would never clear",
+			e.IssueID, e.BlockerID, e.BlockerID)
+	}
+	return fmt.Sprintf("%s cannot be blocked by its descendant %s: blocked status cascades to descendants, so %s would inherit the block and never close",
+		e.IssueID, e.BlockerID, e.BlockerID)
 }
 
 func (e *DependencyTypeConflictError) Error() string {
@@ -37,7 +97,19 @@ const (
 )
 
 type DepInsertOpts struct {
-	UseWispsTable bool
+	UseWispsTable      bool
+	HierarchyValidated bool // Set only after ValidateBlockingHierarchy on the same repository/UOW.
+	CycleValidated     bool // Set only after HasCycle or a whole-graph check on the same repository/UOW.
+	// EmitEvent records a dependency_added / dependency_removed event on the
+	// source's event table for a genuine edge add/remove. Only the explicit dep
+	// verbs (AddDependency/AddDependencies/RemoveDependency and their wisp twins)
+	// set it; create-with-deps and reparent call Insert/Delete directly with it
+	// unset so an implicit parent-child / --deps / waits-for edge produces no
+	// event. The embedded plumbing matches edge-for-edge: its structural paths
+	// wire edges through the plain AddDependency/tx.AddDependency, whose
+	// issueops.AddDependencyInTx EmitEvent gate is unset, while only the explicit
+	// bd dep add / bd link / bd dep remove verbs pass EmitEvent.
+	EmitEvent bool
 }
 
 type DepListOpts struct {
@@ -87,6 +159,7 @@ type BulkAddDepsResult struct {
 }
 
 type DependencySQLRepository interface {
+	ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error
 	Insert(ctx context.Context, dep *types.Dependency, actor string, opts DepInsertOpts) error
 	Delete(ctx context.Context, issueID, dependsOnID, actor string, opts DepInsertOpts) (DepDeleteResult, error)
 	HasCycle(ctx context.Context, issueID, dependsOnID string) (bool, error)
@@ -173,10 +246,17 @@ func (u *dependencyUseCaseImpl) add(ctx context.Context, dep *types.Dependency, 
 	// dedicated self-dep message. A blocking self-edge otherwise trips HasCycle
 	// and would report the wrong (cycle) error (#4547 F-1).
 	if dep.IssueID == dep.DependsOnID {
-		return fmt.Errorf("cannot add self-dependency: %s cannot depend on itself", dep.IssueID)
+		return fmt.Errorf("%w: %s cannot depend on itself", ErrSelfDependency, dep.IssueID)
+	}
+	if err := u.depRepo.ValidateBlockingHierarchy(ctx, dep); err != nil {
+		var hierarchyConflict *DependencyHierarchyConflictError
+		if errors.As(err, &hierarchyConflict) {
+			return err
+		}
+		return fmt.Errorf("add dep: hierarchy check: %w", err)
 	}
 
-	if isBlockingDep(dep.Type) {
+	if isSchedulingDep(dep.Type) {
 		cycle, err := u.depRepo.HasCycle(ctx, dep.IssueID, dep.DependsOnID)
 		if err != nil {
 			return fmt.Errorf("add dep: cycle check: %w", err)
@@ -185,16 +265,20 @@ func (u *dependencyUseCaseImpl) add(ctx context.Context, dep *types.Dependency, 
 			// Match the embedded store's user-facing wording verbatim (no ids
 			// prefix) so gc code that string-matches this error behaves the same
 			// on both plumbings (#4547 F-1).
-			return fmt.Errorf("adding dependency would create a cycle")
+			return ErrDependencyCycle
 		}
 	}
 
-	if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
+	if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp, HierarchyValidated: true, CycleValidated: true, EmitEvent: true}); err != nil {
 		// The retype conflict is a user-facing error whose message already
 		// matches embedded verbatim; pass it through unwrapped so the CLI does
 		// not prepend "add dep: insert:" (#4547 F-1).
 		var conflict *DependencyTypeConflictError
 		if errors.As(err, &conflict) {
+			return err
+		}
+		var hierarchyConflict *DependencyHierarchyConflictError
+		if errors.As(err, &hierarchyConflict) {
 			return err
 		}
 		return fmt.Errorf("add dep: insert: %w", err)
@@ -214,7 +298,7 @@ func (u *dependencyUseCaseImpl) removeDep(ctx context.Context, sourceID, depends
 	if sourceID == "" || dependsOnID == "" {
 		return fmt.Errorf("remove dep: sourceID and dependsOnID must not be empty")
 	}
-	if _, err := u.depRepo.Delete(ctx, sourceID, dependsOnID, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
+	if _, err := u.depRepo.Delete(ctx, sourceID, dependsOnID, actor, DepInsertOpts{UseWispsTable: useWisp, EmitEvent: true}); err != nil {
 		return fmt.Errorf("remove dep %s -> %s: %w", sourceID, dependsOnID, err)
 	}
 	return nil
@@ -432,6 +516,10 @@ func isBlockingDep(t types.DependencyType) bool {
 	return t == types.DepBlocks || t == types.DepConditionalBlocks
 }
 
+func isSchedulingDep(t types.DependencyType) bool {
+	return isBlockingDep(t) || t == types.DepParentChild
+}
+
 func (u *dependencyUseCaseImpl) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
 	return u.isBlocked(ctx, issueID, false)
 }
@@ -482,7 +570,14 @@ func (u *dependencyUseCaseImpl) addBulk(ctx context.Context, deps []*types.Depen
 	if len(deps) == 0 {
 		return BulkAddDepsResult{Added: []*types.Dependency{}}, nil
 	}
-	insertOpts := DepInsertOpts{UseWispsTable: useWisp}
+	// AddDependencies is the explicit `bd dep add` / `bd link` verb on the
+	// proxied server (cmd/bd/dep_proxied_server.go, link_proxied_server.go), so
+	// each genuine new edge records a dependency_added event — unlike
+	// create-with-deps, which calls depRepo.Insert directly without EmitEvent.
+	insertOpts := DepInsertOpts{UseWispsTable: useWisp, HierarchyValidated: true, CycleValidated: true, EmitEvent: true}
+	// Validate the entire input shape before the first write. Multi-edge callers
+	// run in a UOW, but this also avoids an avoidable partial prefix for direct
+	// use-case consumers.
 	for i, dep := range deps {
 		if dep == nil {
 			return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: dep must not be nil", i)
@@ -490,35 +585,65 @@ func (u *dependencyUseCaseImpl) addBulk(ctx context.Context, deps []*types.Depen
 		if dep.IssueID == "" || dep.DependsOnID == "" {
 			return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: IssueID and DependsOnID must be non-empty", i)
 		}
-		if !opts.SkipPerEdgeCycleCheck && isBlockingDep(dep.Type) {
-			cycle, err := u.depRepo.HasCycle(ctx, dep.IssueID, dep.DependsOnID)
-			if err != nil {
-				return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: cycle check: %w", i, err)
-			}
-			if cycle {
-				return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: adding %s -> %s would create a cycle", i, dep.IssueID, dep.DependsOnID)
-			}
-		}
-		if err := u.depRepo.Insert(ctx, dep, actor, insertOpts); err != nil {
-			return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: insert: %w", i, err)
+		// Self-dependency guard mirrors the single-edge add() path and
+		// issueops.CheckDependencyCycleInTx: reject a self-edge for ALL dep
+		// types before the hierarchy/cycle probe, so a scheduling self-edge is
+		// typed as ErrSelfDependency instead of tripping HasCycle (or the final
+		// CycleThroughEdges gate) and surfacing as a cycle. The message is
+		// byte-identical to every other self-dep site so the proxied bulk CLI
+		// (bd dep add / bd link) shows one consistent self-dependency error.
+		if dep.IssueID == dep.DependsOnID {
+			return BulkAddDepsResult{}, fmt.Errorf("%w: %s cannot depend on itself", ErrSelfDependency, dep.IssueID)
 		}
 	}
-	if opts.SkipPerEdgeCycleCheck {
-		var pairs [][2]string
-		for _, dep := range deps {
-			if !isBlockingDep(dep.Type) {
+	// Parent-child edges must be visible before blocking edges in the same
+	// request. The shared repository guard can then evaluate existing + planned
+	// ancestry without widening #4034 into #4035's combined-graph cycle check.
+	for phase := 0; phase < 2; phase++ {
+		parentPhase := phase == 0
+		for i, dep := range deps {
+			if (dep.Type == types.DepParentChild) != parentPhase {
 				continue
 			}
-			pairs = append(pairs, [2]string{dep.IssueID, dep.DependsOnID})
+			if err := u.depRepo.ValidateBlockingHierarchy(ctx, dep); err != nil {
+				var hierarchyConflict *DependencyHierarchyConflictError
+				if errors.As(err, &hierarchyConflict) {
+					return BulkAddDepsResult{}, err
+				}
+				return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: hierarchy check: %w", i, err)
+			}
+			if !opts.SkipPerEdgeCycleCheck && isSchedulingDep(dep.Type) {
+				cycle, err := u.depRepo.HasCycle(ctx, dep.IssueID, dep.DependsOnID)
+				if err != nil {
+					return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: cycle check: %w", i, err)
+				}
+				if cycle {
+					return BulkAddDepsResult{}, cycleErrorf("add deps[%d]: adding %s -> %s would create a cycle", i, dep.IssueID, dep.DependsOnID)
+				}
+			}
+			if err := u.depRepo.Insert(ctx, dep, actor, insertOpts); err != nil {
+				var hierarchyConflict *DependencyHierarchyConflictError
+				if errors.As(err, &hierarchyConflict) {
+					return BulkAddDepsResult{}, err
+				}
+				return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: insert: %w", i, err)
+			}
 		}
-		if len(pairs) > 0 {
-			cyclePath, err := u.depRepo.CycleThroughEdges(ctx, pairs)
-			if err != nil {
-				return BulkAddDepsResult{}, fmt.Errorf("add deps: final cycle check: %w", err)
-			}
-			if cyclePath != "" {
-				return BulkAddDepsResult{}, fmt.Errorf("add deps: dependency cycle would be created: %s", cyclePath)
-			}
+	}
+	var pairs [][2]string
+	for _, dep := range deps {
+		if !isSchedulingDep(dep.Type) {
+			continue
+		}
+		pairs = append(pairs, [2]string{dep.IssueID, dep.DependsOnID})
+	}
+	if len(pairs) > 0 {
+		cyclePath, err := u.depRepo.CycleThroughEdges(ctx, pairs)
+		if err != nil {
+			return BulkAddDepsResult{}, fmt.Errorf("add deps: final cycle check: %w", err)
+		}
+		if cyclePath != "" {
+			return BulkAddDepsResult{}, cycleErrorf("add deps: dependency cycle would be created: %s", cyclePath)
 		}
 	}
 	return BulkAddDepsResult{Added: deps}, nil

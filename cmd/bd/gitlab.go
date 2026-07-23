@@ -342,6 +342,9 @@ func getGitLabClient(config GitLabConfig) *gitlab.Client {
 
 // runGitLabStatus implements the gitlab status command.
 func runGitLabStatus(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("gitlab status is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("gitlab-status")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -402,6 +405,9 @@ func runGitLabStatus(cmd *cobra.Command, args []string) error {
 
 // runGitLabProjects implements the gitlab projects command.
 func runGitLabProjects(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("gitlab projects is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("gitlab-projects")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -459,6 +465,9 @@ type gitlabSyncResult struct {
 // runGitLabSync implements the gitlab sync command.
 // Uses the tracker.Engine for all sync operations.
 func runGitLabSync(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("gitlab sync is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("gitlab-sync")
 	defer func() {
 		if c := metrics.Global(); c != nil {

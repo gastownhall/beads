@@ -429,7 +429,7 @@ jobs:
       - name: Pull Dolt sql-server image
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
         # Without this, RequireDoltContainer reports doltNoImage and TestDomainDB skips.
-        run: docker pull dolthub/dolt-sql-server:2.1.10
+        run: docker pull dolthub/dolt-sql-server:2.2.0
 
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -489,7 +489,7 @@ jobs:
 
       - name: Pull Dolt sql-server image
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: docker pull dolthub/dolt-sql-server:2.1.10
+        run: docker pull dolthub/dolt-sql-server:2.2.0
 
       - name: Protocol conformance + corpus golden + determinism
         # Require a live Dolt store here: this is the gate that must exercise the

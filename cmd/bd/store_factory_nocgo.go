@@ -10,9 +10,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/steveyegge/beads/internal/storage/dolt"
-	beadsmysql "github.com/steveyegge/beads/internal/storage/mysql"
-	"github.com/steveyegge/beads/internal/storage/postgres"
-	beadssqlite "github.com/steveyegge/beads/internal/storage/sqlite"
 )
 
 func usesSQLServer() bool {
@@ -57,17 +54,8 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 		// message below.
 		return nil, fmt.Errorf("load %s: %w", configfile.ConfigPath(beadsDir), err)
 	}
-	if cfg != nil && cfg.GetBackend() == configfile.BackendPostgres {
-		// Postgres needs no CGO (pure-Go pgx), so it works in the nocgo build too.
-		return postgres.NewFromConfig(ctx, beadsDir)
-	}
-	if cfg != nil && cfg.GetBackend() == configfile.BackendMySQL {
-		// MySQL (go-sql-driver) needs no CGO either.
-		return beadsmysql.NewFromConfig(ctx, beadsDir)
-	}
-	if cfg != nil && cfg.GetBackend() == configfile.BackendSQLite {
-		// SQLite (modernc.org/sqlite) is pure-Go; no CGO.
-		return beadssqlite.NewFromConfig(ctx, beadsDir)
+	if err := validateConfiguredBackend(cfg); err != nil {
+		return nil, err
 	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
@@ -90,14 +78,8 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 	if err != nil {
 		return nil, fmt.Errorf("load %s: %w", configfile.ConfigPath(beadsDir), err)
 	}
-	if cfg != nil && cfg.GetBackend() == configfile.BackendPostgres {
-		return postgres.NewFromConfig(ctx, beadsDir)
-	}
-	if cfg != nil && cfg.GetBackend() == configfile.BackendMySQL {
-		return beadsmysql.NewFromConfig(ctx, beadsDir)
-	}
-	if cfg != nil && cfg.GetBackend() == configfile.BackendSQLite {
-		return beadssqlite.NewFromConfig(ctx, beadsDir)
+	if err := validateConfiguredBackend(cfg); err != nil {
+		return nil, err
 	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
@@ -122,7 +104,7 @@ Three options:
   1. Use the proxied dolt sql-server (no external server, no reinstall):
        bd init --proxied-server
      bd spawns a per-workspace proxy + child dolt sql-server under
-     .beads/proxieddb/ and manages their lifecycle for you.
+     .beads/dolt/ and manages their lifecycle for you.
 
   2. Use external server mode (no reinstall needed):
        bd init --server

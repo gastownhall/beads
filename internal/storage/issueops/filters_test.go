@@ -389,6 +389,50 @@ func TestBuildIssueFilterClauses_PinnedFilter(t *testing.T) {
 	}
 }
 
+func TestBuildIssueFilterClauses_IsBlockedFilter(t *testing.T) {
+	t.Parallel()
+
+	blockedTrue := true
+	blockedFalse := false
+
+	tests := []struct {
+		name      string
+		isBlocked *bool
+		wantSQL   string
+		wantArg   int
+	}{
+		{name: "is_blocked=true", isBlocked: &blockedTrue, wantSQL: "is_blocked = ?", wantArg: 1},
+		{name: "is_blocked=false", isBlocked: &blockedFalse, wantSQL: "is_blocked = ?", wantArg: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clauses, args, err := BuildIssueFilterClauses("", types.IssueFilter{IsBlocked: tt.isBlocked}, IssuesFilterTables)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(clauses) != 1 || clauses[0] != tt.wantSQL {
+				t.Fatalf("got clauses %v, want [%q]", clauses, tt.wantSQL)
+			}
+			if len(args) != 1 || args[0] != tt.wantArg {
+				t.Errorf("got args %v, want [%d] (index-backed integer bind)", args, tt.wantArg)
+			}
+		})
+	}
+
+	// nil is the unset case: no is_blocked clause is emitted (filter is inert).
+	clauses, _, err := BuildIssueFilterClauses("", types.IssueFilter{IsBlocked: nil}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, c := range clauses {
+		if strings.Contains(c, "is_blocked") {
+			t.Errorf("nil IsBlocked emitted an is_blocked clause %q, want none", c)
+		}
+	}
+}
+
 func TestBuildIssueFilterClauses_IDFilters(t *testing.T) {
 	t.Parallel()
 

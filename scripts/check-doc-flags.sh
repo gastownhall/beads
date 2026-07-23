@@ -21,12 +21,34 @@ ERRORS=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
+# Release pin (docs/cli-docs.pin): the docs describe the pinned release, so
+# every check below validates against a bd built from that tag, not the
+# supplied binary. Set BD_DOCS_IGNORE_PIN=1 to bypass.
+if [ "${BD_DOCS_IGNORE_PIN:-0}" != "1" ]; then
+    PINNED_BD="$("$SCRIPT_DIR/resolve-docs-bd.sh")"
+    if [ -n "$PINNED_BD" ]; then
+        if [ "$BD" != "$PINNED_BD" ]; then
+            echo "Note: docs are pinned via docs/cli-docs.pin; validating against the pinned bd."
+        fi
+        BD="$PINNED_BD"
+    fi
+fi
+
 # Verify bd binary exists and runs
 if ! command -v "$BD" &>/dev/null && [ ! -x "$BD" ]; then
     echo "Error: bd binary not found at '$BD'"
     echo "Usage: $0 [path-to-bd]"
     exit 1
 fi
+
+# macOS has no coreutils timeout(1) by default; degrade to an unbounded run.
+run_bounded() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 30 "$@"
+    else
+        "$@"
+    fi
+}
 
 echo "Checking documentation against CLI flags..."
 echo "Using: $($BD version 2>/dev/null | head -1 || echo "$BD")"
@@ -117,7 +139,7 @@ CLI_REF="$PROJECT_ROOT/docs/CLI_REFERENCE.md"
 if [ -f "$CLI_REF" ]; then
     TMPDIR_CHECK=$(mktemp -d)
     trap "rm -rf $TMPDIR_CHECK" EXIT
-    if timeout 30 "$BD" help --list > "$TMPDIR_CHECK/help-cmds.txt" 2>/dev/null; then
+    if run_bounded "$BD" help --list > "$TMPDIR_CHECK/help-cmds.txt" 2>/dev/null; then
         sort -u "$TMPDIR_CHECK/help-cmds.txt" -o "$TMPDIR_CHECK/help-cmds.txt"
 
         grep -oE '\bbd [a-z][a-z0-9-]*\b' "$CLI_REF" \

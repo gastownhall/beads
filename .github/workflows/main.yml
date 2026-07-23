@@ -80,6 +80,8 @@ jobs:
           commit="$(git rev-parse HEAD)"
           go build -tags "$BEADS_BUILD_TAGS" -o artifacts/bd-linux-gms-pure ./cmd/bd
           chmod +x artifacts/bd-linux-gms-pure
+          go test -tags "$BEADS_BUILD_TAGS" -c -o artifacts/bd-cmd-test ./cmd/bd
+          chmod +x artifacts/bd-cmd-test
           (
             cd artifacts
             sha256sum bd-linux-gms-pure > SHA256SUMS
@@ -523,7 +525,7 @@ jobs:
       - name: Pull Dolt sql-server image
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
         # Without this, RequireDoltContainer reports doltNoImage and TestDomainDB skips.
-        run: docker pull dolthub/dolt-sql-server:2.1.10
+        run: docker pull dolthub/dolt-sql-server:2.2.0
 
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -709,60 +711,67 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  # # End-to-end coverage for proxied-server CLI subcommands. Each sub-test
-  # # spawns a real dolt sql-server via the proxy and exercises the bd CLI
-  # # subprocess against it (see cmd/bd/*_proxied_integration_test.go).
-  # #
-  # # The -run pattern intentionally matches the TestProxiedServer* prefix so
-  # # new proxied integration suites (TestProxiedServerCreate, ...Update,
-  # # ...Show, etc.) are auto-included without further CI edits. Adopt the
-  # # `TestProxiedServer<Subcommand>` naming convention for any new entry
-  # # points and they will be picked up here.
-  # #
-  # # Companion to test-domain-uow (which tests the storage/uow layer); this
-  # # job is the CLI-side gate that ensures the proxied path stays at parity
-  # # with the embedded path's behavior.
-  # #
-  # # The package-level testcontainers Dolt singleton (started by
-  # # cmd/bd/test_dolt_server_cgo_test.go) is automatically skipped when
-  # # BEADS_TEST_PROXIED_SERVER=1 is set, so this lane is ~50s faster than
-  # # it would otherwise be.
-  # test-proxied-server-cmd:
-  #   name: Test (proxied-server cmd)
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+  # End-to-end coverage for proxied-server CLI subcommands, sharded across the
+  # CI matrix. Each sub-test drives the bd CLI subprocess against a real dolt
+  # sql-server started via testcontainers by the shared proxied harness
+  # (cmd/bd/*_proxied_integration_test.go).
   #
-  #     - name: Set up Go
-  #       uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-  #       with:
-  #         go-version-file: 'go.mod'
-  #
-  #     - name: Install Dolt CLI
-  #       run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
-  #
-  #     - name: Verify dolt on PATH
-  #       run: dolt version
-  #
-  #     - name: Configure Git and Dolt identity
-  #       run: |
-  #         git config --global user.name "CI Bot"
-  #         git config --global user.email "ci@beads.test"
-  #         dolt config --global --add user.name "CI Bot"
-  #         dolt config --global --add user.email "ci@beads.test"
-  #
-  #     - name: Pre-build bd binary for proxied integration tests
-  #       # The test's buildEmbeddedBD helper picks up BEADS_TEST_BD_BINARY,
-  #       # skipping a per-test ~45s rebuild for each invocation.
-  #       run: go build -tags gms_pure_go -o /tmp/bd-proxied-test ./cmd/bd
-  #
-  #     - name: Test proxied-server bd subcommands
-  #       env:
-  #         BEADS_TEST_PROXIED_SERVER: "1"
-  #         BEADS_TEST_BD_BINARY: /tmp/bd-proxied-test
-  #       # ^TestProxiedServer matches every proxied-server top-level test
-  #       # (Create today; future Update/Show/etc. auto-join without edits).
-  #       run: go test -tags gms_pure_go -count=1 -timeout=10m -v -run '^TestProxiedServer' ./cmd/bd/
+  # Reuses the cmd/bd test binary compiled once by build-artifacts (bd-cmd-test):
+  # the proxied tests share the package and are gated at runtime by
+  # BEADS_TEST_PROXIED_SERVER=1. Shard assignment is committed in
+  # .github/scripts/proxied-cmd-test-shards.txt; newly-added TestProxiedServer*
+  # tests hash-distribute until listed there. Adopt the
+  # `TestProxiedServer<Subcommand>` naming convention for new entry points.
+  test-proxied-cmd:
+    name: Test (proxied-server cmd ${{ matrix.shard }}/15)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: build-artifacts
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure bd-cmd-test
+
+      - name: Install Dolt CLI
+        # TestProxiedServerExternalCreate needs the dolt binary on PATH; the
+        # shared harness itself uses the dolt sql-server container image.
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Pull Dolt sql-server image
+        # The shared proxied harness requires the image cached locally
+        # (isDoltImageCached); without it every proxied test self-skips. Keep the
+        # tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
+        run: docker pull dolthub/dolt-sql-server:2.2.0
+
+      - name: Test proxied-server cmd shard
+        env:
+          BEADS_TEST_PROXIED_SERVER: "1"
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+          BEADS_TEST_CMD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-cmd-test
+        run: bash .github/scripts/proxied-test-shard.sh ${{ matrix.shard }} 15
 
   # Embedded Dolt tests - test the in-process Dolt engine (no server required)
   #
@@ -829,9 +838,10 @@ jobs:
           BEADS_TEST_EMBEDDED_DOLT: "1"
           BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
         # Conformance runs in the dedicated test-embedded-conformance job
-        # below (mirrors pr-risk.yml); skip it here so this job stays inside
-        # its 20m envelope as the base embedded suite grows.
-        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=20m -test.skip '^TestConformance$'
+        # below (mirrors pr-risk.yml); skip it here. The budget must cover
+        # every store-open re-running the full migration chain, which grows
+        # with each migration (bd-lrgn1 pushed a slow runner past 20m).
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.skip '^TestConformance$'
 
   test-embedded-conformance:
     name: Test (Embedded Dolt Conformance)

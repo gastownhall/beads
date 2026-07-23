@@ -56,79 +56,90 @@ func runDeleteProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("open unit of work: %v", err)
-	}
-	defer uw.Close(ctx)
-
-	issueUC := uw.IssueUseCase()
 
 	if in.dryRun || !in.force {
-		return runDeleteProxiedPreview(ctx, issueUC, in)
+		return runDeleteProxiedPreviewTx(ctx, in)
 	}
 
-	preview, err := issueUC.PreviewDelete(ctx, in.ids)
+	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
+		issueUC := uw.IssueUseCase()
+
+		preview, err := issueUC.PreviewDelete(ctx, in.ids)
+		if err != nil {
+			return domain.DeleteIssuesResult{}, "", fmt.Errorf("preview: %w", err)
+		}
+		if len(preview.NotFound) > 0 {
+			return domain.DeleteIssuesResult{}, "", fmt.Errorf("issues not found: %s", strings.Join(preview.NotFound, ", "))
+		}
+
+		res, err := issueUC.DeleteIssues(ctx, domain.DeleteIssuesParams{
+			IDs:                  in.ids,
+			Cascade:              true,
+			UpdateTextReferences: true,
+		}, actor)
+		if err != nil {
+			return domain.DeleteIssuesResult{}, "", fmt.Errorf("delete: %w", err)
+		}
+		if res.DeletedCount == 0 {
+			return domain.DeleteIssuesResult{}, "", fmt.Errorf("issues not found: %s", strings.Join(in.ids, ", "))
+		}
+
+		return res, fmt.Sprintf("bd: delete %d issue(s)", res.DeletedCount), nil
+	})
 	if err != nil {
-		return HandleErrorRespectJSON("preview: %v", err)
-	}
-	if len(preview.NotFound) > 0 {
-		return HandleErrorRespectJSON("issues not found: %s", strings.Join(preview.NotFound, ", "))
-	}
-
-	res, err := issueUC.DeleteIssues(ctx, domain.DeleteIssuesParams{
-		IDs:                  in.ids,
-		Cascade:              true,
-		UpdateTextReferences: true,
-	}, actor)
-	if err != nil {
-		return HandleErrorRespectJSON("delete: %v", err)
-	}
-	if res.DeletedCount == 0 {
-		return HandleErrorRespectJSON("issues not found: %s", strings.Join(in.ids, ", "))
-	}
-
-	commitMsg := fmt.Sprintf("bd: delete %d issue(s)", res.DeletedCount)
-	if err := uow.CommitWithRetries(ctx, uw, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-		return HandleErrorRespectJSON("commit: %v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	renderDeleteProxiedResult(in, res)
 	return nil
 }
 
-func runDeleteProxiedPreview(ctx context.Context, issueUC domain.IssueUseCase, in *deleteInput) error {
-	preview, err := issueUC.PreviewDelete(ctx, in.ids)
-	if err != nil {
-		return HandleErrorRespectJSON("preview: %v", err)
-	}
-	if len(preview.NotFound) > 0 {
-		return HandleErrorRespectJSON("issues not found: %s", strings.Join(preview.NotFound, ", "))
-	}
+type deletePreviewResult struct {
+	preview domain.DeletePreview
+	res     domain.DeleteIssuesResult
+}
 
-	res, err := issueUC.DeleteIssues(ctx, domain.DeleteIssuesParams{
-		IDs:     in.ids,
-		Cascade: true,
-		DryRun:  true,
-	}, actor)
+func runDeleteProxiedPreviewTx(ctx context.Context, in *deleteInput) error {
+	result, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (deletePreviewResult, error) {
+		issueUC := uw.IssueUseCase()
+
+		preview, err := issueUC.PreviewDelete(ctx, in.ids)
+		if err != nil {
+			return deletePreviewResult{}, fmt.Errorf("preview: %w", err)
+		}
+		if len(preview.NotFound) > 0 {
+			return deletePreviewResult{}, fmt.Errorf("issues not found: %s", strings.Join(preview.NotFound, ", "))
+		}
+
+		res, err := issueUC.DeleteIssues(ctx, domain.DeleteIssuesParams{
+			IDs:     in.ids,
+			Cascade: true,
+			DryRun:  true,
+		}, actor)
+		if err != nil {
+			return deletePreviewResult{}, fmt.Errorf("preview counts: %w", err)
+		}
+
+		return deletePreviewResult{preview: preview, res: res}, nil
+	})
 	if err != nil {
-		return HandleErrorRespectJSON("preview counts: %v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if in.jsonOutput {
 		_ = outputJSON(map[string]any{
-			"would_delete":         res.DeletedCount,
-			"dependencies_removed": res.DependenciesCount,
-			"labels_removed":       res.LabelsCount,
-			"events_removed":       res.EventsCount,
+			"would_delete":         result.res.DeletedCount,
+			"dependencies_removed": result.res.DependenciesCount,
+			"labels_removed":       result.res.LabelsCount,
+			"events_removed":       result.res.EventsCount,
 			"ids":                  in.ids,
-			"not_found":            preview.NotFound,
-			"connected":            sortedKeys(preview.ConnectedIssues),
+			"not_found":            result.preview.NotFound,
+			"connected":            sortedKeys(result.preview.ConnectedIssues),
 			"dry_run":              in.dryRun,
 		})
 		return nil
 	}
-	renderDeletePreview(in, preview, res)
+	renderDeletePreview(in, result.preview, result.res)
 	return nil
 }
 

@@ -73,6 +73,37 @@ func TestLessMirrorsOrderBy(t *testing.T) {
 	}
 }
 
+func TestBuildReadyWorkOrderPriorityFIFO(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		policy types.SortPolicy
+		want   string
+	}{
+		{
+			name:   "priority",
+			policy: types.SortPolicyPriority,
+			want:   "ORDER BY priority ASC, created_at ASC, id ASC",
+		},
+		{
+			name:   "fallback",
+			policy: types.SortPolicy("unknown"),
+			want:   "ORDER BY priority ASC, created_at ASC, id ASC",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := BuildReadyWorkOrder(tc.policy, "created_at", "priority")
+			if got.SQL != tc.want {
+				t.Fatalf("BuildReadyWorkOrder(%q).SQL = %q, want %q", tc.policy, got.SQL, tc.want)
+			}
+		})
+	}
+}
+
 func TestReadyWorkExcludeTypes(t *testing.T) {
 	t.Parallel()
 

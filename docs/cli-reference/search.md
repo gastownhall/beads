@@ -1,6 +1,6 @@
 ---
 title: "bd search"
-description: "Search issues by text query"
+description: "Search issues across title and ID (excludes closed issues by default)."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

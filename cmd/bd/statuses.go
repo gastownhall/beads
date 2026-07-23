@@ -58,6 +58,10 @@ Examples:
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runStatusesProxiedServer(rootCtx)
+		}
+
 		if err := ensureDirectMode("statuses command requires direct database access"); err != nil {
 			return HandleError("%v", err)
 		}
@@ -70,43 +74,47 @@ Examples:
 			}
 		}
 
-		if jsonOutput {
-			result := struct {
-				BuiltInStatuses []statusInfo         `json:"built_in_statuses"`
-				CustomStatuses  []types.CustomStatus `json:"custom_statuses,omitempty"`
-			}{}
-
-			for _, s := range builtInStatuses {
-				result.BuiltInStatuses = append(result.BuiltInStatuses, statusInfo{
-					Name:        string(s.Status),
-					Category:    string(s.Category),
-					Icon:        ui.GetStatusIcon(string(s.Status)),
-					Description: s.Description,
-				})
-			}
-			result.CustomStatuses = customStatuses
-			return outputJSON(result)
-		}
-
-		fmt.Println("Built-in statuses:")
-		for _, s := range builtInStatuses {
-			icon := ui.RenderStatusIcon(string(s.Status))
-			fmt.Printf("  %s %-14s [%-6s]  %s\n", icon, s.Status, s.Category, s.Description)
-		}
-
-		if len(customStatuses) > 0 {
-			fmt.Println("\nCustom statuses:")
-			for _, cs := range customStatuses {
-				icon := ui.RenderStatusIconWithCategory(cs.Name, cs.Category)
-				fmt.Printf("  %s %-14s [%-6s]\n", icon, cs.Name, cs.Category)
-			}
-		} else {
-			fmt.Println("\nNo custom statuses configured.")
-			fmt.Println("Configure with: bd config set status.custom \"name:category,...\"")
-			fmt.Println("Categories: active, wip, done, frozen")
-		}
-		return nil
+		return renderStatuses(customStatuses)
 	},
+}
+
+func renderStatuses(customStatuses []types.CustomStatus) error {
+	if jsonOutput {
+		result := struct {
+			BuiltInStatuses []statusInfo         `json:"built_in_statuses"`
+			CustomStatuses  []types.CustomStatus `json:"custom_statuses,omitempty"`
+		}{}
+
+		for _, s := range builtInStatuses {
+			result.BuiltInStatuses = append(result.BuiltInStatuses, statusInfo{
+				Name:        string(s.Status),
+				Category:    string(s.Category),
+				Icon:        ui.GetStatusIcon(string(s.Status)),
+				Description: s.Description,
+			})
+		}
+		result.CustomStatuses = customStatuses
+		return outputJSON(result)
+	}
+
+	fmt.Println("Built-in statuses:")
+	for _, s := range builtInStatuses {
+		icon := ui.RenderStatusIcon(string(s.Status))
+		fmt.Printf("  %s %-14s [%-6s]  %s\n", icon, s.Status, s.Category, s.Description)
+	}
+
+	if len(customStatuses) > 0 {
+		fmt.Println("\nCustom statuses:")
+		for _, cs := range customStatuses {
+			icon := ui.RenderStatusIconWithCategory(cs.Name, cs.Category)
+			fmt.Printf("  %s %-14s [%-6s]\n", icon, cs.Name, cs.Category)
+		}
+	} else {
+		fmt.Println("\nNo custom statuses configured.")
+		fmt.Println("Configure with: bd config set status.custom \"name:category,...\"")
+		fmt.Println("Categories: active, wip, done, frozen")
+	}
+	return nil
 }
 
 type statusInfo struct {

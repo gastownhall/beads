@@ -528,162 +528,44 @@ var createCmd = &cobra.Command{
 
 		ctx := createCtx
 
-		// Check if any dependencies are discovered-from type
-		// If so, inherit source_repo from the parent issue
-		var discoveredFromParentID string
-		for _, depSpec := range deps {
-			depSpec = strings.TrimSpace(depSpec)
-			if depSpec == "" {
-				continue
-			}
-
-			var depType types.DependencyType
-			var dependsOnID string
-
-			if strings.Contains(depSpec, ":") {
-				parts := strings.SplitN(depSpec, ":", 2)
-				if len(parts) == 2 {
-					depType = types.DependencyType(strings.TrimSpace(parts[0]))
-					dependsOnID = strings.TrimSpace(parts[1])
-
-					if depType == types.DepDiscoveredFrom && dependsOnID != "" {
-						discoveredFromParentID = dependsOnID
-						break
-					}
-				}
-			}
+		// Parse every requested dependency edge BEFORE creating anything so
+		// a malformed spec aborts with no orphan issue behind it.
+		depSpecs, err := parseDepSpecs(deps)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate)
+		if err != nil {
+			return HandleError("%v", err)
 		}
 
-		// If we found a discovered-from dependency, inherit source_repo from parent
-		if discoveredFromParentID != "" {
-			parentIssue, err := store.GetIssue(ctx, discoveredFromParentID)
+		// If a discovered-from dependency is present, inherit source_repo
+		// from the referenced parent issue.
+		if dfParent := discoveredFromParent(deps); dfParent != "" {
+			parentIssue, err := store.GetIssue(ctx, dfParent)
 			if err == nil && parentIssue.SourceRepo != "" {
 				issue.SourceRepo = parentIssue.SourceRepo
 			}
 			// If error getting parent or parent has no source_repo, continue with default
 		}
 
-		if err := store.CreateIssue(ctx, issue, actor); err != nil {
-			return HandleError("%v", err)
+		edges := createDepEdges{parentID: parentID, specs: depSpecs, waitsFor: waitsForSpec}
+		if err := createIssueWithDeps(ctx, store, issue, actor, edges); err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		// Track whether any post-create writes occurred. CreateIssue commits
-		// the issue and its initial labels to Dolt internally, but subsequent
-		// AddDependency calls only write to the working set. A follow-up Dolt
-		// commit is needed to persist them (GH#2009).
-		postCreateWrites := false
-
-		// If parent was specified, add parent-child dependency
-		if parentID != "" {
-			dep := &types.Dependency{
-				IssueID:     issue.ID,
-				DependsOnID: parentID,
-				Type:        types.DepParentChild,
-			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				WarnError("failed to add parent-child dependency %s -> %s: %v", issue.ID, parentID, err)
-			} else {
-				postCreateWrites = true
-			}
-		}
-
-		// Add dependencies if specified (format: type:id or just id for default "blocks" type)
-		for _, depSpec := range deps {
-			depSpec = strings.TrimSpace(depSpec)
-			if depSpec == "" {
-				continue
-			}
-
-			var depType types.DependencyType
-			var dependsOnID string
-			swapDirection := false
-
-			if strings.Contains(depSpec, ":") {
-				parts := strings.SplitN(depSpec, ":", 2)
-				if len(parts) != 2 {
-					WarnError("invalid dependency format '%s', expected 'type:id' or 'id'", depSpec)
-					continue
-				}
-				rawType := types.DependencyType(strings.TrimSpace(parts[0]))
-				dependsOnID = strings.TrimSpace(parts[1])
-
-				switch rawType {
-				case "depends-on", "blocked-by":
-					// Alias: the new issue depends on the target. Store as a blocks edge.
-					depType = types.DepBlocks
-				case types.DepBlocks:
-					// Explicit "blocks:X" means the new issue blocks X, so store X -> new issue.
-					depType = types.DepBlocks
-					swapDirection = true
-				default:
-					depType = rawType
-				}
-			} else {
-				depType = types.DepBlocks
-				dependsOnID = depSpec
-			}
-
-			if !depType.IsValid() {
-				return HandleErrorRespectJSON("invalid dependency type %q (must be non-empty, max 50 chars); valid types: %s", depType, createDepsAcceptedTypeList())
-			}
-			if !depType.IsWellKnown() {
-				return HandleErrorRespectJSON("unknown dependency type %q; valid types: %s", depType, createDepsAcceptedTypeList())
-			}
-
-			dep := &types.Dependency{
-				IssueID:     issue.ID,
-				DependsOnID: dependsOnID,
-				Type:        depType,
-			}
-			if swapDirection {
-				dep.IssueID = dependsOnID
-				dep.DependsOnID = issue.ID
-			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				WarnError("failed to add dependency %s -> %s: %v", issue.ID, dependsOnID, err)
-			} else {
-				postCreateWrites = true
-			}
-		}
-
-		if waitsFor != "" {
-			gate := waitsForGate
-			if gate == "" {
-				gate = types.WaitsForAllChildren
-			}
-			if gate != types.WaitsForAllChildren && gate != types.WaitsForAnyChildren {
-				return HandleError("invalid --waits-for-gate value '%s' (valid: all-children, any-children)", gate)
-			}
-
-			meta := types.WaitsForMeta{
-				Gate: gate,
-			}
-			metaJSON, err := json.Marshal(meta)
+		if edges.empty() {
+			// Bare create: preserve the embedded-mode follow-up Dolt commit.
+			// The deps path commits inside its transaction instead.
+			shouldCommit, err := shouldCommitCreatePostWrites(issue, false)
 			if err != nil {
-				return HandleError("failed to serialize waits-for metadata: %v", err)
+				return HandleError("dolt auto-commit failed: %v", err)
 			}
-
-			dep := &types.Dependency{
-				IssueID:     issue.ID,
-				DependsOnID: waitsFor,
-				Type:        types.DepWaitsFor,
-				Metadata:    string(metaJSON),
-			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				WarnError("failed to add waits-for dependency %s -> %s: %v", issue.ID, waitsFor, err)
-			} else {
-				postCreateWrites = true
-			}
-		}
-
-		shouldCommit, err := shouldCommitCreatePostWrites(issue, postCreateWrites)
-		if err != nil {
-			return HandleError("dolt auto-commit failed: %v", err)
-		}
-		if shouldCommit {
-			commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
-			if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-				WarnError("failed to commit: %v", err)
+			if shouldCommit {
+				commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
+				if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
+					WarnError("failed to commit: %v", err)
+				}
 			}
 		}
 

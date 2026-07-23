@@ -181,17 +181,26 @@ items, plus:
 Returns a summary object when `--json` is active:
 - `source` (string): File path or "stdin"
 - `created` (number): Issues created
-- `skipped` (number): Issues skipped (dedup)
+- `updated` (number): Existing issues updated
+- `skipped` (number): Issues skipped (stale rows + dedup)
 - `dedup_skipped` (number): Issues skipped by `--dedup` title match
 - `memories` (number): Memory records imported
 - `ids` (string[]): IDs of created issues
+- `updated_issues` (object[]): Per-issue summary of what an update changed
+- `tie_kept_local_ids` (string[]): Equal-`updated_at` rows where local state won
+- `stale_skipped_ids` (string[]): Rows older than the local issue, skipped
+- `skipped_dependencies` (string[]): Dependency edges whose target id was absent
 - `dry_run` (boolean): Whether `--dry-run` was active
 
 ### bd export --json
 
 Outputs JSONL (one JSON object per line), not wrapped in an envelope.
-Each line is a self-contained issue or memory record. `schema_version`
-is included per line.
+Each line is a self-contained issue or memory record, discriminated by
+`_type` (`"issue"` / `"memory"`). Export lines do **not** carry
+`schema_version` — that field belongs to the `--json` command envelope,
+not to the interchange stream. The interchange's own version marker is the
+optional `_schema` header record (`{"_schema":"beads-jsonl/1"}`), which
+readers skip.
 
 ## Consumer Guidelines
 

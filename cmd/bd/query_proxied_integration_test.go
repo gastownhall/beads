@@ -57,9 +57,10 @@ func bdProxiedQueryFail(t *testing.T, bd string, p proxiedProject, args ...strin
 }
 
 func TestProxiedServerQuery(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
-	p := bdProxiedInit(t, bd, "qry")
+	p := newSharedProxiedProject(t, bd, "qry")
 	seed := seedProxiedListData(t, bd, p)
 
 	t.Run("filter_only_and_chain", func(t *testing.T) {

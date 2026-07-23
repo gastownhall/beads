@@ -78,6 +78,9 @@ normal 'bd' subcommands for interactive/read operations.`,
 	SilenceUsage:  true,
 	SilenceErrors: false,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("batch is not supported in proxied-server mode")
+		}
 		CheckReadonly("batch")
 
 		evt := metrics.NewCommandEvent("batch")

@@ -355,6 +355,9 @@ func persistCookFormula(ctx context.Context, resolved *formula.Formula, protoID 
 }
 
 func runCook(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("cook is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("cook")
 	defer func() {
 		if c := metrics.Global(); c != nil {

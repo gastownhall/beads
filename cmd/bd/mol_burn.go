@@ -56,6 +56,9 @@ type BatchBurnResult struct {
 }
 
 func runMolBurn(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("mol burn is not supported in proxied-server mode")
+	}
 	CheckReadonly("mol burn")
 
 	evt := metrics.NewCommandEvent("mol-burn")

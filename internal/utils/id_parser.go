@@ -199,11 +199,9 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 		return "", fmt.Errorf("no issue found matching %q", input)
 	}
 
-	// Sort so the ambiguity error lists IDs deterministically. matches is built
-	// in SearchIssues return order, whose primary sort is created_at DESC; that
-	// order is not stable across backends (Postgres timestamp(0) vs Dolt), so an
-	// unsorted list makes the same ambiguous input print in different orders on
-	// different storage. Sorting by ID pins the message regardless of backend.
+	// Sort so the ambiguity error lists IDs deterministically. SearchIssues return
+	// order is not a contract for ambiguous matches, so sorting by ID pins the same
+	// message for every storage implementation.
 	sort.Strings(matches)
 
 	if len(matches) > 1 {

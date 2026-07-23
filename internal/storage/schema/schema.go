@@ -221,6 +221,7 @@ var (
 // re-asserts the full set idempotently at the top of every write-mode open.
 var doltIgnorePatterns = []string{
 	"ignored_schema_migrations",
+	"leases",
 	"local_metadata",
 	"repo_mtimes",
 	"wisp_%",

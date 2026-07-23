@@ -1,6 +1,6 @@
 ---
 title: "bd undefer"
-description: "Undefer one or more issues (restore to open)"
+description: "Undefer issues to restore them to open status."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

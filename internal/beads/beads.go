@@ -421,13 +421,27 @@ func findLocalBeadsDir() string {
 }
 
 // findDatabaseInBeadsDir searches for a database within a .beads directory.
-// Checks metadata.json for the Dolt database path. For server mode, no local
-// directory is required. For embedded mode, checks both the embeddeddolt/
-// directory (where the embedded engine stores data) and the legacy dolt/ path.
-// Returns empty string if no database is found.
+// Checks metadata.json for the selected implementation's database path. For
+// server mode, no local path needs to exist yet: authoritative
+// metadata is enough to route the caller without falling through to Dolt.
+// Embedded Dolt checks both embeddeddolt/ and the legacy dolt/ path. Returns
+// empty string if no database is configured or found.
 func findDatabaseInBeadsDir(beadsDir string, _ bool) string {
 	// Check for metadata.json first (single source of truth)
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		// A present but unreadable/invalid metadata file is authoritative. Do
+		// not bypass it by discovering a leftover local Dolt directory; callers
+		// that need the detailed error should use OpenBestAvailable.
+		return ""
+	}
+	if cfg != nil {
+		if !configfile.IsSupportedBackend(cfg.Backend) {
+			// Unknown and removed backend markers are not Dolt aliases. Let the
+			// storage-selection layer report the metadata error without routing
+			// through a leftover local Dolt directory.
+			return ""
+		}
 		// For Dolt server mode, database is on the server - no local directory required
 		if cfg.IsDoltServerMode() {
 			return cfg.DatabasePath(beadsDir)
@@ -491,6 +505,7 @@ func FindDatabasePath() string {
 
 		// BEADS_DIR is set but no database found - this is OK for --no-db mode
 		// Return empty string and let the caller handle it
+		return ""
 	}
 
 	// 2. Check BEADS_DB environment variable (deprecated but still supported)
