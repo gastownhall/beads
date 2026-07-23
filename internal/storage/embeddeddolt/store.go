@@ -46,9 +46,10 @@ type EmbeddedDoltStore struct {
 	branch        string
 	credentialKey []byte
 	closed        atomic.Bool
-	// readOnly marks a store opened via OpenReadOnly: open-time mutations
-	// (CREATE DATABASE, schema migrations) were skipped and write
-	// transactions are refused (bd-6dnrw.32).
+	// readOnly marks a store opened via OpenReadOnly or
+	// OpenForPreviewCommand: open-time mutations (CREATE DATABASE, schema
+	// migrations) were skipped and write transactions are refused
+	// (bd-6dnrw.32).
 	readOnly bool
 	// intent records why this store was opened, controlling how lenient
 	// initSchema is about pending-migration refusals it would otherwise treat
@@ -150,6 +151,20 @@ func newStore(ctx context.Context, beadsDir, database, branch string, intent ope
 // opens of the same directory keep their own lifecycle. Write transactions on
 // the returned store are refused.
 func OpenReadOnly(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openReadOnly(ctx, beadsDir, database, branch, true)
+}
+
+// OpenForPreviewCommand opens an existing embedded database without any
+// open-time mutation and refuses all write transactions. Unlike
+// OpenReadOnly, it permits a behind schema cursor so --dry-run/--inspect can
+// still validate state that is query-compatible with the current binary. A
+// missing column or other genuine incompatibility is reported by the preview
+// query itself; it is never repaired implicitly.
+func OpenForPreviewCommand(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openReadOnly(ctx, beadsDir, database, branch, false)
+}
+
+func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkBehind bool) (*EmbeddedDoltStore, error) {
 	if database == "" {
 		return nil, fmt.Errorf("embeddeddolt: database name must not be empty (caller should default to %q)", "beads")
 	}
@@ -181,8 +196,10 @@ func OpenReadOnly(ctx context.Context, beadsDir, database, branch string) (*Embe
 	if err := schema.CheckForwardDrift(ctx, db); err != nil {
 		return nil, err
 	}
-	if err := schema.CheckBehindDrift(ctx, db); err != nil {
-		return nil, err
+	if checkBehind {
+		if err := schema.CheckBehindDrift(ctx, db); err != nil {
+			return nil, err
+		}
 	}
 
 	return s, nil

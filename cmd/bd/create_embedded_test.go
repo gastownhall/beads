@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -907,6 +908,149 @@ A new feature
 			t.Errorf("expected title-related error, got: %s", out)
 		}
 	})
+}
+
+func TestEmbeddedCreateDryRunDoesNotMigrate(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dnm")
+	bdCreate(t, bd, dir, "Existing issue")
+
+	type snapshot struct {
+		schemaVersion int
+		head          string
+		issueCount    int
+	}
+	readSnapshot := func() snapshot {
+		t.Helper()
+		db, cleanup, err := embeddeddolt.OpenSQL(
+			t.Context(),
+			filepath.Join(beadsDir, "embeddeddolt"),
+			"dnm",
+			"main",
+		)
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer func() {
+			if err := cleanup(); err != nil {
+				t.Errorf("cleanup OpenSQL: %v", err)
+			}
+		}()
+
+		var got snapshot
+		if err := db.QueryRowContext(t.Context(),
+			"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&got.schemaVersion); err != nil {
+			t.Fatalf("read schema version: %v", err)
+		}
+		if err := db.QueryRowContext(t.Context(), "SELECT HASHOF('HEAD')").Scan(&got.head); err != nil {
+			t.Fatalf("read HEAD: %v", err)
+		}
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues").Scan(&got.issueCount); err != nil {
+			t.Fatalf("read issue count: %v", err)
+		}
+		return got
+	}
+
+	// Regress only the migration cursor. The latest migration is idempotent, so
+	// a writable open would reapply it, restore the cursor, and commit a new
+	// HEAD. Keeping the physical schema intact lets create --dry-run execute
+	// its read-only validation against the older recorded schema version.
+	db, cleanup, err := embeddeddolt.OpenSQL(
+		t.Context(),
+		filepath.Join(beadsDir, "embeddeddolt"),
+		"dnm",
+		"main",
+	)
+	if err != nil {
+		t.Fatalf("OpenSQL for regression fixture: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(),
+		"DELETE FROM schema_migrations WHERE version = ?", schema.LatestVersion()); err != nil {
+		_ = cleanup()
+		t.Fatalf("regress schema cursor: %v", err)
+	}
+	if _, err := db.ExecContext(t.Context(),
+		"CALL DOLT_COMMIT('-am', 'test: regress schema before dry-run')"); err != nil {
+		_ = cleanup()
+		t.Fatalf("commit regressed schema cursor: %v", err)
+	}
+	if err := cleanup(); err != nil {
+		t.Fatalf("cleanup regression fixture: %v", err)
+	}
+
+	// Force the version-bump path that previously opened a second writable
+	// store and migrated before create.RunE reached --dry-run handling.
+	if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte("0.9.0\n"), 0o600); err != nil {
+		t.Fatalf("write old local version: %v", err)
+	}
+
+	before := readSnapshot()
+	if before.schemaVersion != schema.LatestVersion()-1 {
+		t.Fatalf("fixture schema version = %d, want %d", before.schemaVersion, schema.LatestVersion()-1)
+	}
+
+	cmd := exec.Command(bd, "create", "--dry-run", "Preview only", "--json")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd create --dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	after := readSnapshot()
+	if after.schemaVersion != before.schemaVersion {
+		t.Errorf("schema version changed during dry-run: before=%d after=%d", before.schemaVersion, after.schemaVersion)
+	}
+	if after.head != before.head {
+		t.Errorf("Dolt HEAD changed during dry-run: before=%s after=%s", before.head, after.head)
+	}
+	if after.issueCount != before.issueCount {
+		t.Errorf("issue count changed during dry-run: before=%d after=%d", before.issueCount, after.issueCount)
+	}
+}
+
+func TestEmbeddedChangeDirOverridesInheritedBeadsDir(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	callerDir, callerBeadsDir, _ := bdInit(t, bd, "--prefix", "caller")
+	targetDir, targetBeadsDir, _ := bdInit(t, bd, "--prefix", "target")
+
+	cmd := exec.Command(bd, "-C", targetDir, "create", "Explicit target", "--json")
+	cmd.Dir = callerDir
+	cmd.Env = append(bdEnv(callerDir), "BEADS_DIR="+callerBeadsDir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd -C target create failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	countIssues := func(beadsDir, database string) int {
+		t.Helper()
+		db, cleanup, err := embeddeddolt.OpenSQL(
+			t.Context(),
+			filepath.Join(beadsDir, "embeddeddolt"),
+			database,
+			"main",
+		)
+		if err != nil {
+			t.Fatalf("OpenSQL %s: %v", database, err)
+		}
+		defer func() {
+			if err := cleanup(); err != nil {
+				t.Errorf("cleanup OpenSQL %s: %v", database, err)
+			}
+		}()
+		var count int
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
+			t.Fatalf("count issues in %s: %v", database, err)
+		}
+		return count
+	}
+
+	if got := countIssues(callerBeadsDir, "caller"); got != 0 {
+		t.Fatalf("inherited BEADS_DIR received %d issues, want 0", got)
+	}
+	if got := countIssues(targetBeadsDir, "target"); got != 1 {
+		t.Fatalf("-C target received %d issues, want 1", got)
+	}
 }
 
 // TestEmbeddedCreateCommitPending verifies that CommitPending works on EmbeddedDoltStore:
