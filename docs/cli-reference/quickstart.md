@@ -1,13 +1,13 @@
 ---
 title: "bd quickstart"
-description: "Display a quick start guide showing common bd workflows and patterns."
+description: "일반적인 bd 워크플로와 패턴을 보여 주는 빠른 시작 가이드를 표시합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc quickstart`.
+`bd help --doc quickstart`에서 생성되었습니다.
 
-Display a quick start guide showing common bd workflows and patterns.
+일반적인 bd 워크플로와 패턴을 보여 주는 빠른 시작 가이드를 표시합니다.
 
 ```
 bd quickstart [flags]

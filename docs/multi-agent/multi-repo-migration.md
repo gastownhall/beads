@@ -1,249 +1,261 @@
 ---
-title: Multi-Repo Migration Guide
-description: Adopt multi-repo routing for OSS contributor, team, multi-phase, and multi-persona workflows with separate planning repos
+title: 다중 저장소 마이그레이션 가이드
+description: 별도 계획 저장소를 사용하는 OSS contributor, 팀, 다중 단계, 다중 persona 워크플로에 다중 저장소 routing 도입
 ---
 
-This guide helps you adopt beads' multi-repo workflow for OSS contributions, team collaboration, and multi-phase development.
+이 가이드는 OSS 기여, 팀 협업, 다중 단계 개발에 Beads의 다중 저장소 워크플로를
+도입하도록 안내합니다.
 
-## Quick Start
+## 빠른 시작
 
-**Already have beads installed?** Jump to your scenario:
-- [OSS Contributor](#oss-contributor-workflow) - Keep planning out of upstream PRs
-- [Team Member](#team-workflow) - Shared planning on branches
-- [Multi-Phase Development](#multi-phase-development) - Separate repos per phase
-- [Multiple Personas](#multiple-personas) - Architect vs. implementer separation
+**Beads가 이미 설치되어 있나요?** 해당 상황으로 이동하세요.
 
-**New to beads?** See [Quick Start](/getting-started/quickstart) first.
+- [OSS contributor](#oss-contributor-workflow) - 계획을 upstream PR에서 분리
+- [팀원](#team-workflow) - 브랜치에서 계획 공유
+- [다중 단계 개발](#multi-phase-development) - 단계별 저장소 분리
+- [여러 persona](#multiple-personas) - architect와 implementer 분리
 
-## What is Multi-Repo Mode?
+**Beads가 처음인가요?** 먼저 [빠른 시작](/getting-started/quickstart)을 참고하세요.
 
-By default, beads stores issues in its Dolt database under `.beads/` in your current repository (`.beads/embeddeddolt/` in the default embedded mode). Multi-repo mode lets you:
+## 다중 저장소 모드란?
 
-- **Route issues to different repositories** based on your role (maintainer vs. contributor)
-- **Aggregate issues from multiple repos** into a unified view
-- **Keep contributor planning separate** from upstream projects
-- **Maintain data integrity everywhere** - Dolt version control in every repo
+기본적으로 Beads는 현재 저장소의 `.beads/` 아래 Dolt 데이터베이스에 이슈를
+저장합니다. 기본 embedded 모드에서는 `.beads/embeddeddolt/`입니다. 다중 저장소
+모드는 다음 기능을 제공합니다.
 
-## When Do You Need Multi-Repo?
+- 역할(maintainer 또는 contributor)에 따라 **이슈를 다른 저장소로 routing**
+- **여러 저장소의 이슈를 집계**하여 통합 보기 제공
+- contributor 계획을 upstream 프로젝트와 **분리**
+- 모든 저장소에서 Dolt 버전 관리로 **데이터 무결성 유지**
 
-### You DON'T need multi-repo if:
-- ✅ Working solo on your own project
-- ✅ Team with shared repository and trust model
-- ✅ All issues belong in the project's git history
+## 다중 저장소가 필요한 경우
 
-### You DO need multi-repo if:
-- 🔴 Contributing to OSS - don't pollute upstream with planning
-- 🔴 Fork workflow - planning shouldn't appear in PRs
-- 🔴 Multiple work phases - design vs. implementation repos
-- 🔴 Multiple personas - architect planning vs. implementer tasks
+### 다중 저장소가 필요하지 않은 경우:
 
-## Core Concepts
+- ✅ 자신의 프로젝트에서 혼자 작업
+- ✅ 공유 저장소와 신뢰 모델을 사용하는 팀
+- ✅ 모든 이슈가 프로젝트 Git 기록에 포함되어야 함
 
-### 1. Source Repository (`source_repo`)
+### 다중 저장소가 필요한 경우:
 
-Every issue has a `source_repo` field indicating which repository owns it:
+- 🔴 OSS 기여 - 계획으로 upstream을 오염시키지 않아야 함
+- 🔴 fork 워크플로 - 계획이 PR에 표시되면 안 됨
+- 🔴 여러 작업 단계 - 설계와 구현 저장소 분리
+- 🔴 여러 persona - architect 계획과 implementer 작업 분리
+
+## 핵심 개념
+
+### 1. 소스 저장소(`source_repo`)
+
+모든 이슈에는 소유 저장소를 나타내는 `source_repo` 필드가 있습니다.
 
 ```jsonl
-{"id":"bd-abc","source_repo":".","title":"Core issue"}
-{"id":"bd-xyz","source_repo":"~/.beads-planning","title":"Planning issue"}
+{"id":"bd-abc","source_repo":".","title":"핵심 이슈"}
+{"id":"bd-xyz","source_repo":"~/.beads-planning","title":"계획 이슈"}
 ```
 
-- `.` = Current repository (default)
-- `~/.beads-planning` = Contributor planning repo
-- `/path/to/repo` = Absolute path to another repo
+- `.` = 현재 저장소(기본값)
+- `~/.beads-planning` = contributor 계획 저장소
+- `/path/to/repo` = 다른 저장소의 절대 경로
 
-### 2. Auto-Routing
+### 2. 자동 routing
 
-Beads automatically routes new issues to the right repository based on your role:
+Beads는 역할에 따라 새 이슈를 올바른 저장소로 자동 routing합니다.
 
 ```bash
-# Maintainer (has SSH push access)
-bd create "Fix bug" -p 1
-# → Creates in current repo (source_repo = ".")
+# maintainer(SSH push 권한 보유)
+bd create "버그 수정" -p 1
+# 현재 저장소에 생성(source_repo = ".")
 
-# Contributor (HTTPS or no push access)
-bd create "Fix bug" -p 1  
-# → Creates in ~/.beads-planning (source_repo = "~/.beads-planning")
+# contributor(HTTPS 또는 push 권한 없음)
+bd create "버그 수정" -p 1
+# ~/.beads-planning에 생성(source_repo = "~/.beads-planning")
 ```
 
-### 3. Multi-Repo Hydration
+### 3. 다중 저장소 hydration
 
-Beads can aggregate issues from multiple repositories into a unified database:
+Beads는 여러 저장소의 이슈를 통합 데이터베이스로 집계할 수 있습니다.
 
 ```bash
 bd list --json
-# Shows issues from:
-# - Current repo (.)
-# - Planning repo (~/.beads-planning)
-# - Any configured additional repos
+# 다음 위치의 이슈 표시:
+# - 현재 저장소(.)
+# - 계획 저장소(~/.beads-planning)
+# - 설정된 모든 추가 저장소
 ```
 
-## OSS Contributor Workflow
+<a id="oss-contributor-workflow"></a>
 
-**Problem:** You're contributing to an OSS project but don't want your experimental planning to appear in PRs.
+## OSS contributor 워크플로
 
-**Solution:** Use a separate planning repository that's never committed to upstream.
+**문제:** OSS 프로젝트에 기여하지만 실험적 계획이 PR에 표시되는 것을 원하지 않습니다.
 
-### Setup (One-Time)
+**해결 방법:** upstream에 commit하지 않는 별도 계획 저장소를 사용합니다.
+
+### 설정(최초 한 번)
 
 ```bash
-# 1. Fork and clone the upstream project
+# 1. upstream 프로젝트 fork 및 clone
 git clone https://github.com/you/project.git
 cd project
 
-# 2. Initialize beads (if not already done)
+# 2. 아직 하지 않았다면 Beads 초기화
 bd init
 
-# 3. Run the contributor setup wizard
+# 3. contributor 설정 wizard 실행
 bd init --contributor
 
-# The wizard will:
-# - Detect that you're in a fork (checks for 'upstream' remote)
-# - Prompt you to create a planning repo (~/.beads-planning by default)
-# - Configure auto-routing (contributor → planning repo)
-# - Set up multi-repo hydration
+# wizard의 작업:
+# - fork 여부 감지('upstream' 원격 확인)
+# - 계획 저장소 생성 요청(기본값 ~/.beads-planning)
+# - 자동 routing 설정(contributor에서 계획 저장소)
+# - 다중 저장소 hydration 설정
 ```
 
-### Manual Configuration
+### 수동 설정
 
-If you prefer manual setup:
+수동 설정을 원한다면 다음을 실행하세요.
 
 ```bash
-# 1. Create planning repository
+# 1. 계획 저장소 생성
 mkdir -p ~/.beads-planning
 cd ~/.beads-planning
 git init
 bd init --prefix plan
 
-# 2. Configure routing in your fork
+# 2. fork에서 routing 설정
 cd ~/projects/project
 bd config set routing.mode auto
 bd config set routing.contributor "~/.beads-planning"
 
-# 3. Add planning repo to hydration sources
+# 3. hydration 소스에 계획 저장소 추가
 bd config set repos.additional "~/.beads-planning"
 ```
 
-### Daily Workflow
+### 일일 워크플로
 
 ```bash
-# Work in your fork
+# fork에서 작업
 cd ~/projects/project
 
-# Create planning issues (auto-routed to ~/.beads-planning)
-bd create "Investigate auth implementation" -p 1
-bd create "Draft RFC for new feature" -p 2
+# 계획 이슈 생성(~/.beads-planning으로 자동 routing)
+bd create "인증 구현 조사" -p 1
+bd create "새 기능 RFC 초안" -p 2
 
-# View all issues (current repo + planning repo)
+# 모든 이슈 보기(현재 저장소와 계획 저장소)
 bd ready
 bd list --json
 
-# Work on an issue
+# 이슈 작업
 bd update plan-42 --claim
 
-# Complete work
-bd close plan-42 --reason "Completed"
+# 작업 완료
+bd close plan-42 --reason "완료"
 
-# Create PR - your planning issues never appear!
+# PR 생성 - 계획 이슈는 표시되지 않음
 git add .
 git commit -m "Fix authentication bug"
 git push origin my-feature-branch
-# ✅ PR only contains code changes, no .beads/ pollution
+# ✅ PR에는 코드 변경만 포함되고 .beads/ 오염 없음
 ```
 
-### Proposing Issues Upstream
+### upstream에 이슈 제안
 
-If you want to share a planning issue with upstream:
+계획 이슈를 upstream과 공유하려면 다음 방법을 사용하세요.
 
 ```bash
-# Option 1: Manually copy issue to upstream repo
+# 옵션 1: 이슈를 upstream 저장소로 수동 복사
 bd show plan-42 --json > /tmp/issue.json
-# (Send to maintainers or create GitHub issue)
+# (maintainer에게 보내거나 GitHub 이슈 생성)
 
-# Option 2: Migrate issue (future feature, see bd-mlcz)
+# 옵션 2: 이슈 마이그레이션(향후 기능, bd-mlcz 참고)
 bd migrate plan-42 --to . --dry-run
 bd migrate plan-42 --to .
 ```
 
-## Team Workflow
+<a id="team-workflow"></a>
 
-**Problem:** Team members working on shared repository with branches, but different levels of planning granularity.
+## 팀 워크플로
 
-**Solution:** Use branch-based workflow with optional personal planning repos.
+**문제:** 팀원이 브랜치가 있는 공유 저장소에서 작업하지만 계획의 상세 수준이 서로 다릅니다.
 
-### Setup (Team Lead)
+**해결 방법:** 선택적 개인 계획 저장소와 브랜치 기반 워크플로를 사용합니다.
+
+### 설정(팀 리드)
 
 ```bash
-# 1. Initialize beads in main repo
+# 1. 기본 저장소에서 Beads 초기화
 cd ~/projects/team-project
 bd init --prefix team
 
-# 2. Run team setup wizard  
+# 2. 팀 설정 wizard 실행
 bd init --team
 
-# The wizard will:
-# - Detect shared repository (SSH push access)
-# - Configure auto-routing (maintainer → current repo)
-# - Set up protected branch workflow (if using GitHub/GitLab)
-# - Create example workflows
+# wizard의 작업:
+# - 공유 저장소 감지(SSH push 권한)
+# - 자동 routing 설정(maintainer는 현재 저장소 사용)
+# - 보호 브랜치 워크플로 설정(GitHub/GitLab 사용 시)
+# - 예제 워크플로 생성
 ```
 
-### Setup (Team Member)
+### 설정(팀원)
 
 ```bash
-# 1. Clone team repo
+# 1. 팀 저장소 clone
 git clone git@github.com:team/project.git
 cd project
 
-# 2. Beads auto-detects you're a maintainer (SSH access)
-bd create "Implement feature X" -p 1
-# → Creates in current repo (team-123)
+# 2. Beads가 SSH 권한으로 maintainer 역할 자동 감지
+bd create "기능 X 구현" -p 1
+# 현재 저장소에 생성(team-123)
 
-# 3. Optional: Create personal planning repo for experiments
+# 3. 선택 사항: 실험용 개인 계획 저장소 생성
 mkdir -p ~/.beads-planning-personal
 cd ~/.beads-planning-personal
 git init
 bd init --prefix exp
 
-# 4. Configure multi-repo in team project
+# 4. 팀 프로젝트에서 다중 저장소 설정
 cd ~/projects/project
 bd config set repos.additional "~/.beads-planning-personal"
 ```
 
-### Daily Workflow
+### 일일 워크플로
 
 ```bash
-# Shared team planning (committed to repo)
-bd create "Implement auth" -p 1 --repo .
-# → team-42 (visible to entire team)
+# 공유 팀 계획(저장소에 commit)
+bd create "인증 구현" -p 1 --repo .
+# team-42(팀 전체에 표시)
 
-# Personal experiments (not committed to team repo)
-bd create "Try alternative approach" -p 2 --repo ~/.beads-planning-personal
-# → exp-99 (private planning)
+# 개인 실험(팀 저장소에 commit하지 않음)
+bd create "대안 접근법 시도" -p 2 --repo ~/.beads-planning-personal
+# exp-99(개인 계획)
 
-# View all work
+# 모든 작업 보기
 bd ready
 bd list --json
 
-# Complete team work and sync
+# 팀 작업 완료 및 동기화
 bd dolt push
 ```
 
-## Multi-Phase Development
+<a id="multi-phase-development"></a>
 
-**Problem:** Project has distinct phases (planning, implementation, maintenance) that need separate issue spaces.
+## 다중 단계 개발
 
-**Solution:** Use separate repositories for each phase.
+**문제:** 프로젝트의 계획, 구현, 유지보수 단계마다 별도 이슈 공간이 필요합니다.
 
-### Setup
+**해결 방법:** 단계마다 별도 저장소를 사용합니다.
+
+### 설정
 
 ```bash
-# 1. Create phase repositories
+# 1. 단계별 저장소 생성
 mkdir -p ~/projects/myapp-planning
 mkdir -p ~/projects/myapp-implementation
 mkdir -p ~/projects/myapp-maintenance
 
-# 2. Initialize each phase
+# 2. 각 단계 초기화
 cd ~/projects/myapp-planning
 git init
 bd init --prefix plan
@@ -256,40 +268,42 @@ cd ~/projects/myapp-maintenance
 git init
 bd init --prefix maint
 
-# 3. Configure aggregation in main workspace
+# 3. 기본 작업 공간에서 집계 설정
 cd ~/projects/myapp-implementation
 bd config set repos.additional "~/projects/myapp-planning,~/projects/myapp-maintenance"
 ```
 
-### Workflow
+### 워크플로
 
 ```bash
-# Phase 1: Planning
+# 1단계: 계획
 cd ~/projects/myapp-planning
-bd create "Design auth system" -p 1 -t epic
-bd create "Research OAuth providers" -p 1
+bd create "인증 시스템 설계" -p 1 -t epic
+bd create "OAuth 제공자 조사" -p 1
 
-# Phase 2: Implementation (view planning + implementation issues)
+# 2단계: 구현(계획 및 구현 이슈 확인)
 cd ~/projects/myapp-implementation
-bd ready  # Shows issues from both repos
-bd create "Implement auth backend" -p 1
-bd dep add impl-42 plan-10 --type blocks  # Link across repos
+bd ready  # 두 저장소의 이슈 표시
+bd create "인증 backend 구현" -p 1
+bd dep add impl-42 plan-10 --type blocks  # 저장소 간 연결
 
-# Phase 3: Maintenance
+# 3단계: 유지보수
 cd ~/projects/myapp-maintenance
-bd create "Security patch for auth" -p 0 -t bug
+bd create "인증 보안 patch" -p 0 -t bug
 ```
 
-## Multiple Personas
+<a id="multiple-personas"></a>
 
-**Problem:** You work as both architect (high-level planning) and implementer (detailed tasks).
+## 여러 persona
 
-**Solution:** Separate repositories for each persona's work.
+**문제:** architect(상위 수준 계획)와 implementer(세부 작업) 역할을 모두 수행합니다.
 
-### Setup
+**해결 방법:** persona별 작업 저장소를 분리합니다.
+
+### 설정
 
 ```bash
-# 1. Create persona repos
+# 1. persona 저장소 생성
 mkdir -p ~/architect-planning
 mkdir -p ~/implementer-tasks
 
@@ -301,188 +315,193 @@ cd ~/implementer-tasks
 git init  
 bd init --prefix impl
 
-# 2. Configure aggregation
+# 2. 집계 설정
 cd ~/implementer-tasks
 bd config set repos.additional "~/architect-planning"
 ```
 
-### Workflow
+### 워크플로
 
 ```bash
-# Architect mode
+# architect 모드
 cd ~/architect-planning
-bd create "System architecture for feature X" -p 1 -t epic
-bd create "Database schema design" -p 1
+bd create "기능 X 시스템 아키텍처" -p 1 -t epic
+bd create "데이터베이스 schema 설계" -p 1
 
-# Implementer mode (sees both architect + implementation tasks)
+# implementer 모드(architect와 구현 작업 모두 표시)
 cd ~/implementer-tasks
 bd ready
-bd create "Implement user table" -p 1
+bd create "사용자 table 구현" -p 1
 bd dep add impl-10 arch-42 --type blocks
 
-# Complete implementation
-bd close impl-10 --reason "Completed"
+# 구현 완료
+bd close impl-10 --reason "완료"
 ```
 
-## Configuration Reference
+## 설정 레퍼런스
 
-### Routing Settings
+### Routing 설정
 
 ```bash
-# Auto-detect role and route accordingly
+# 역할을 자동 감지하고 그에 따라 routing
 bd config set routing.mode auto
 
-# Always use default repo (ignore role detection)
+# 항상 기본 저장소 사용(역할 감지 무시)
 bd config set routing.mode explicit  
 bd config set routing.default "."
 
-# Configure repos for each role
+# 역할별 저장소 설정
 bd config set routing.maintainer "."
 bd config set routing.contributor "~/.beads-planning"
 ```
 
-### Multi-Repo Hydration
+### 다중 저장소 hydration
 
 ```bash
-# Add additional repos to aggregate
+# 집계할 추가 저장소 등록
 bd config set repos.additional "~/repo1,~/repo2,~/repo3"
 
-# Set primary repo (optional)
+# 기본 저장소 설정(선택 사항)
 bd config set repos.primary "."
 ```
 
-### Override Auto-Routing
+### 자동 routing 재정의
 
 ```bash
-# Force issue to specific repo (ignores auto-routing)
-bd create "Issue" -p 1 --repo /path/to/repo
+# 이슈를 특정 저장소에 강제로 생성(자동 routing 무시)
+bd create "이슈" -p 1 --repo /path/to/repo
 ```
 
-## Troubleshooting
+## 문제 해결
 
-### Issues appearing in wrong repository
+### 이슈가 잘못된 저장소에 표시됨
 
-**Problem:** `bd create` routes issues to unexpected repository.
+**문제:** `bd create`가 예상하지 않은 저장소로 이슈를 routing합니다.
 
-**Solution:**
+**해결 방법:**
 ```bash
-# Check current routing configuration
+# 현재 routing 설정 확인
 bd config get routing.mode
 bd config get routing.maintainer
 bd config get routing.contributor
 
-# Check detected role
+# 감지된 역할 확인
 bd config get beads.role
 
-# Override with explicit flag
-bd create "Issue" -p 1 --repo .
+# 명시적 flag로 재정의
+bd create "이슈" -p 1 --repo .
 ```
 
-### Can't see issues from other repos
+### 다른 저장소의 이슈가 보이지 않음
 
-**Problem:** `bd list` only shows issues from current repo.
+**문제:** `bd list`에 현재 저장소의 이슈만 표시됩니다.
 
-**Solution:**
+**해결 방법:**
 ```bash
-# Check multi-repo configuration
+# 다중 저장소 설정 확인
 bd config get repos.additional
 
-# Add missing repos
+# 누락된 저장소 추가
 bd config set repos.additional "~/repo1,~/repo2"
 
-# Verify hydration
+# hydration 확인
 bd dolt push
 bd list --json
 ```
 
-### Merge conflicts
+### Merge 충돌
 
-**Problem:** Multiple repos with conflicting changes.
+**문제:** 여러 저장소의 변경 사항이 충돌합니다.
 
-**Solution:** Dolt handles merge conflicts natively with cell-level merge. See [Troubleshooting](/reference/troubleshooting#merge-conflicts) for details.
+**해결 방법:** Dolt는 cell 단위 merge로 merge 충돌을 직접 처리합니다. 자세한 내용은
+[문제 해결](/reference/troubleshooting#merge-conflicts)을 참고하세요.
 
-### Discovered issues in wrong repository
+### 발견한 이슈가 잘못된 저장소에 생성됨
 
-**Problem:** Issues created with `discovered-from` dependency appear in wrong repo.
+**문제:** `discovered-from` 의존성으로 생성한 이슈가 잘못된 저장소에 표시됩니다.
 
-**Solution:** Discovered issues automatically inherit parent's `source_repo`. This is intentional. To override:
+**해결 방법:** 발견한 이슈는 상위 이슈의 `source_repo`를 자동으로 상속합니다.
+의도된 동작이며, 재정의하려면 다음을 실행하세요.
 ```bash
-bd create "Issue" -p 1 --deps discovered-from:bd-42 --repo /different/repo
+bd create "이슈" -p 1 --deps discovered-from:bd-42 --repo /different/repo
 ```
 
-### Planning repo polluting PRs
+### 계획 저장소가 PR을 오염시킴
 
-**Problem:** Your `~/.beads-planning` changes appear in PRs to upstream.
+**문제:** `~/.beads-planning` 변경 사항이 upstream PR에 표시됩니다.
 
-**Solution:** This shouldn't happen if configured correctly. Verify:
+**해결 방법:** 올바르게 설정했다면 발생하지 않아야 합니다. 다음을 확인하세요.
 ```bash
-# Check that planning repo is separate from fork
-ls -la ~/.beads-planning/.git  # Should exist
-ls -la ~/projects/fork/.beads/  # Should NOT contain planning issues
+# 계획 저장소가 fork와 분리되었는지 확인
+ls -la ~/.beads-planning/.git  # 존재해야 함
+ls -la ~/projects/fork/.beads/  # 계획 이슈가 없어야 함
 
-# Verify routing
-bd config get routing.contributor  # Should be ~/.beads-planning
+# routing 확인
+bd config get routing.contributor  # ~/.beads-planning이어야 함
 ```
 
-## Backward Compatibility
+## 이전 버전 호환성
 
-### Migrating from Single-Repo
+### 단일 저장소에서 마이그레이션
 
-No migration needed! Multi-repo mode is opt-in:
+마이그레이션이 필요하지 않습니다. 다중 저장소 모드는 선택 사항입니다.
 
 ```bash
-# Before (single repo)
-bd create "Issue" -p 1
-# → Creates in local Dolt database
+# 이전(단일 저장소)
+bd create "이슈" -p 1
+# 로컬 Dolt 데이터베이스에 생성
 
-# After (multi-repo configured)
-bd create "Issue" -p 1
-# → Auto-routed based on role
-# → Old issues in local database still work
+# 이후(다중 저장소 설정)
+bd create "이슈" -p 1
+# 역할에 따라 자동 routing
+# 로컬 데이터베이스의 기존 이슈도 계속 작동
 ```
 
-### Disabling Multi-Repo
+### 다중 저장소 비활성화
 
 ```bash
-# Remove routing configuration
+# routing 설정 제거
 bd config unset routing.mode
 bd config unset repos.additional
 
-# All issues go to current repo again
-bd create "Issue" -p 1
-# → Back to single-repo mode
+# 모든 이슈를 다시 현재 저장소에 생성
+bd create "이슈" -p 1
+# 단일 저장소 모드로 복귀
 ```
 
-## Best Practices
+## 권장 사항
 
-### OSS Contributors
-- ✅ Always use `~/.beads-planning` or similar for personal planning
-- ✅ Never commit `.beads/` changes to upstream PRs
-- ✅ Use descriptive prefixes (`plan-`, `exp-`) for clarity
-- ❌ Don't mix planning and implementation in the same repo
+### OSS 기여자
 
-### Teams
-- ✅ Use `bd dolt push` to sync the shared Dolt database
-- ✅ Use protected branch workflow for main/master
-- ✅ Review issue changes in PRs like code changes
-- ❌ Don't delete `.beads/` - you lose all issue data
+- ✅ 개인 계획에는 항상 `~/.beads-planning` 또는 유사한 저장소 사용
+- ✅ `.beads/` 변경 사항을 upstream PR에 commit하지 않음
+- ✅ 명확한 prefix(`plan-`, `exp-`) 사용
+- ❌ 같은 저장소에서 계획과 구현을 혼합하지 않음
 
-### Multi-Phase Projects
-- ✅ Use clear phase naming (`planning`, `impl`, `maint`)
-- ✅ Link issues across phases with dependencies
-- ✅ Archive completed phases periodically
-- ❌ Don't duplicate issues across phases
+### 팀
 
-## Next Steps
+- ✅ 공유 Dolt 데이터베이스 동기화에 `bd dolt push` 사용
+- ✅ main/master에 보호 브랜치 워크플로 사용
+- ✅ 코드 변경과 마찬가지로 PR에서 이슈 변경 사항 검토
+- ❌ `.beads/`를 삭제하지 않음. 모든 이슈 데이터를 잃게 됨
 
-- **CLI Reference:** See [README.md](https://github.com/gastownhall/beads/blob/main/README.md) for command details
-- **Configuration Guide:** See [Configuration](/reference/configuration) for all config options
-- **Troubleshooting:** See [Troubleshooting](/reference/troubleshooting)
-- **Multi-Repo Internals:** See [ROUTING.md#multi-repo-hydration](/multi-agent/routing#multi-repo-hydration)
+### 다중 단계 프로젝트
 
-## Related Issues
+- ✅ 명확한 단계 이름(`planning`, `impl`, `maint`) 사용
+- ✅ 의존성으로 단계 간 이슈 연결
+- ✅ 완료된 단계를 주기적으로 보관
+- ❌ 여러 단계에 이슈를 중복 생성하지 않음
 
-- `bd-8rd` - Migration and onboarding epic
-- `bd-mlcz` - `bd migrate` command (planned)
-- `bd-kla1` - `bd init --contributor` wizard - implemented
-- `bd-twlr` - `bd init --team` wizard - implemented
+## 다음 단계
+
+- **CLI 레퍼런스:** 명령 상세 정보는 [README.md](https://github.com/gastownhall/beads/blob/main/README.md) 참고
+- **설정 가이드:** 모든 설정 옵션은 [설정](/reference/configuration) 참고
+- **문제 해결:** [문제 해결](/reference/troubleshooting) 참고
+- **다중 저장소 내부 구조:** [ROUTING.md의 다중 저장소 hydration](/multi-agent/routing#multi-repo-hydration) 참고
+
+## 관련 이슈
+
+- `bd-8rd` - 마이그레이션 및 onboarding epic
+- `bd-mlcz` - `bd migrate` 명령(계획됨)
+- `bd-kla1` - `bd init --contributor` wizard(구현됨)
+- `bd-twlr` - `bd init --team` wizard(구현됨)

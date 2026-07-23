@@ -1,19 +1,19 @@
 ---
-title: CLI Reference
-description: Generated reference for every bd command
+title: CLI 참조
+description: 모든 bd 명령에 대해 생성된 참조
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --docs-root`.
+`bd help --docs-root`에서 생성되었습니다.
 
-This reference covers all 108 live top-level `bd` commands. Regenerate it with:
+이 참조는 현재 사용 가능한 최상위 `bd` 명령 108개를 모두 다룹니다. 다음 명령으로 다시 생성하세요:
 
 ```bash
 ./scripts/generate-cli-docs.sh
 ```
 
-## Commands
+## 명령
 
 - [`bd admin`](/cli-reference/admin)
 - [`bd ado`](/cli-reference/ado)

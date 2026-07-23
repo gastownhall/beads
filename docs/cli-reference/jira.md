@@ -1,34 +1,34 @@
 ---
 title: "bd jira"
-description: "Synchronize issues between beads and Jira."
+description: "beads와 Jira 간에 이슈를 동기화합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc jira`.
+`bd help --doc jira`에서 생성되었습니다.
 
-Synchronize issues between beads and Jira.
+beads와 Jira 간에 이슈를 동기화합니다.
 
-Configuration:
+구성:
   bd config set jira.url "https://company.atlassian.net"
   bd config set jira.project "PROJ"
-  bd config set jira.projects "PROJ1,PROJ2"   # Multiple projects
+  bd config set jira.projects "PROJ1,PROJ2"   # 여러 프로젝트
   bd config set jira.api_token "YOUR_TOKEN"
-  bd config set jira.username "your_email@company.com"  # For Jira Cloud
-  bd config set jira.push_prefix "hippo"       # Only push hippo-* issues to Jira
-  bd config set jira.push_prefix "proj1,proj2" # Multiple prefixes (comma-separated)
+  bd config set jira.username "your_email@company.com"  # Jira Cloud용
+  bd config set jira.push_prefix "hippo"       # hippo-* 이슈만 Jira로 push
+  bd config set jira.push_prefix "proj1,proj2" # 여러 접두사(쉼표로 구분)
 
-Environment variables (alternative to config):
-  JIRA_API_TOKEN  - Jira API token
-  JIRA_USERNAME   - Jira username/email
-  JIRA_PROJECTS   - Comma-separated project keys
+환경 변수(구성 대신 사용):
+  JIRA_API_TOKEN  - Jira API 토큰
+  JIRA_USERNAME   - Jira 사용자 이름/이메일
+  JIRA_PROJECTS   - 쉼표로 구분한 프로젝트 키
 
-Examples:
-  bd jira sync --pull         # Import issues from Jira
-  bd jira sync --push         # Export issues to Jira
-  bd jira sync                # Bidirectional sync (pull then push)
-  bd jira sync --dry-run      # Preview sync without changes
-  bd jira status              # Show sync status
+예시:
+  bd jira sync --pull         # Jira에서 이슈 가져오기
+  bd jira sync --push         # Jira로 이슈 내보내기
+  bd jira sync                # 양방향 동기화(pull 후 push)
+  bd jira sync --dry-run      # 변경 없이 동기화 미리 보기
+  bd jira status              # 동기화 상태 표시
 
 ```
 bd jira [flags]
@@ -36,45 +36,45 @@ bd jira [flags]
 
 ## bd jira pull
 
-Pull one or more items from Jira.
+Jira에서 하나 이상의 항목을 가져옵니다.
 
-Accepts bead IDs or external references as positional arguments.
-Equivalent to: bd jira sync --pull --issues &lt;refs&gt;
+bead ID 또는 외부 참조를 위치 인수로 받습니다.
+다음과 같습니다: bd jira sync --pull --issues &lt;refs&gt;
 
 ```
 bd jira pull [refs...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview pull without making changes
+      --dry-run   변경하지 않고 pull 미리 보기
 ```
 
 ## bd jira push
 
-Push one or more beads issues to Jira.
+하나 이상의 beads 이슈를 Jira로 푸시합니다.
 
-Accepts bead IDs as positional arguments.
-Equivalent to: bd jira sync --push --issues &lt;ids&gt;
+bead ID를 위치 인수로 받습니다.
+다음과 같습니다: bd jira sync --push --issues &lt;ids&gt;
 
 ```
 bd jira push [bead-ids...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview push without making changes
+      --dry-run   변경하지 않고 push 미리 보기
 ```
 
 ## bd jira status
 
-Show the current Jira sync status, including:
-  - Last sync timestamp
-  - Configuration status
-  - Number of issues with Jira links
-  - Issues pending push (no external_ref)
+다음을 포함한 현재 Jira 동기화 상태를 표시합니다:
+  - 마지막 동기화 타임스탬프
+  - 구성 상태
+  - Jira 링크가 있는 이슈 수
+  - push 대기 중인 이슈(external_ref 없음)
 
 ```
 bd jira status [flags]
@@ -82,39 +82,39 @@ bd jira status [flags]
 
 ## bd jira sync
 
-Synchronize issues between beads and Jira.
+beads와 Jira 간에 이슈를 동기화합니다.
 
-Modes:
-  --pull         Import issues from Jira into beads
-  --push         Export issues from beads to Jira
-  (no flags)     Bidirectional sync: pull then push, with conflict resolution
+모드:
+  --pull         Jira에서 beads로 이슈 가져오기
+  --push         beads에서 Jira로 이슈 내보내기
+  (플래그 없음)  양방향 동기화: 충돌을 해결하며 pull 후 push
 
-Conflict Resolution:
-  By default, newer timestamp wins. Override with:
-  --prefer-local   Always prefer local beads version
-  --prefer-jira    Always prefer Jira version
+충돌 해결:
+  기본적으로 더 최신 타임스탬프가 우선합니다. 다음으로 재정의할 수 있습니다:
+  --prefer-local   항상 로컬 beads 버전 우선
+  --prefer-jira    항상 Jira 버전 우선
 
-Examples:
-  bd jira sync --pull                # Import from Jira
-  bd jira sync --push --create-only  # Push new issues only
-  bd jira sync --dry-run             # Preview without changes
-  bd jira sync --prefer-local        # Bidirectional, local wins
+예시:
+  bd jira sync --pull                # Jira에서 가져오기
+  bd jira sync --push --create-only  # 새 이슈만 push
+  bd jira sync --dry-run             # 변경 없이 미리 보기
+  bd jira sync --prefer-local        # 양방향, 로컬 우선
 
 ```
 bd jira sync [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --create-only       Only create new issues, don't update existing
-      --dry-run           Preview sync without making changes
-      --issues string     Comma-separated bead IDs to sync selectively (e.g., bd-abc,bd-def). Mutually exclusive with --parent.
-      --parent string     Limit push to this bead and its descendants (push only). Mutually exclusive with --issues.
-      --prefer-jira       Prefer Jira version on conflicts
-      --prefer-local      Prefer local version on conflicts
-      --project strings   Project key(s) to sync (overrides configured project/projects)
-      --pull              Pull issues from Jira
-      --push              Push issues to Jira
-      --state string      Issue state to sync: open, closed, all (default "all")
+      --create-only       새 이슈만 생성하고 기존 이슈는 업데이트하지 않음
+      --dry-run           변경 없이 동기화 미리 보기
+      --issues string     선택적으로 동기화할 쉼표 구분 bead ID(예: bd-abc,bd-def). --parent와 함께 사용할 수 없음.
+      --parent string     이 bead와 하위 항목으로 push 제한(push 전용). --issues와 함께 사용할 수 없음.
+      --prefer-jira       충돌 시 Jira 버전 우선
+      --prefer-local      충돌 시 로컬 버전 우선
+      --project strings   동기화할 프로젝트 키(구성된 project/projects 재정의)
+      --pull              Jira에서 이슈 pull
+      --push              Jira로 이슈 push
+      --state string      동기화할 이슈 상태: open, closed, all(기본값 "all")
 ```

@@ -1,291 +1,289 @@
 ---
-title: Molecules
-description: Molecules are epics whose children flow through bd ready as ordered steps; covers creating, executing, bonding, and the molecule lifecycle.
+title: Molecule
+description: Molecule은 하위 항목이 순서가 있는 단계로 bd ready를 통해 흐르는 epic입니다. 생성, 실행, bonding, 수명 주기를 설명합니다.
 ---
 
-Molecules are work graphs: epics whose children flow through `bd ready` as
-dependency-ordered steps. They are usually instantiated from formulas, but a
-formula is optional — any epic with children is a molecule.
+Molecule은 하위 항목이 의존성 순서가 있는 단계로 `bd ready`를 통해 흐르는 작업
+그래프, 즉 epic입니다. 일반적으로 Formula에서 인스턴스화하지만 Formula는 선택
+사항입니다. 하위 항목이 있는 모든 epic이 Molecule입니다.
 
-## What is a Molecule?
+## Molecule이란?
 
-A molecule is a persistent instance of a proto (a cooked formula):
-- Contains steps with dependencies
-- Persistent beads in the issue database, synced like any other bead
-- Steps map to issues with parent-child relationships
+Molecule은 Proto(조리된 Formula)의 영구 인스턴스입니다.
 
-Under the hood, **a molecule is just an epic** — a parent bead with children —
-plus workflow semantics:
+- 의존성이 있는 단계를 포함합니다.
+- 이슈 데이터베이스에 영구 Beads로 저장되고 다른 Bead처럼 동기화됩니다.
+- 단계는 parent-child 관계가 있는 이슈에 대응합니다.
 
-| Term | Meaning | When to use |
+내부적으로 **Molecule은 하위 항목이 있는 상위 Bead인 epic**에 워크플로 의미를 더한
+것입니다.
+
+| 용어 | 의미 | 사용 시점 |
 |------|---------|-------------|
-| **Epic** | Parent issue with children | General term for hierarchical work |
-| **Molecule** | Epic with execution intent | When discussing workflow traversal |
-| **Proto** | Epic with the `template` label | Reusable pattern (optional) |
+| **Epic** | 하위 항목이 있는 상위 이슈 | 계층형 작업의 일반 용어 |
+| **Molecule** | 실행 의도가 있는 epic | 워크플로 순회를 설명할 때 |
+| **Proto** | `template` 레이블이 있는 epic | 재사용 가능한 패턴(선택 사항) |
 
-Protos and formulas are optional layers for reusable patterns and complex
-composition — most work needs only epics and dependencies.
+Proto와 Formula는 재사용 가능한 패턴과 복잡한 조합을 위한 선택적 계층입니다. 대부분의
+작업에는 epic과 의존성만 필요합니다.
 
-## Creating Molecules
+## Molecule 생성
 
-### From a Formula
+### Formula에서 생성
 
 ```bash
-# Cook the formula into a proto, then pour the proto into a molecule
+# Formula를 Proto로 조리한 뒤 Proto를 Molecule로 pour
 bd cook release.formula.toml
 bd mol pour release --var version=1.0.0
 ```
 
-This creates:
-- Parent issue: `bd-xyz` (the molecule root)
-- Child issues: `bd-xyz.1`, `bd-xyz.2`, etc. (the steps)
+다음 항목이 생성됩니다.
 
-### Without a Formula
+- 상위 이슈: `bd-xyz`(Molecule root)
+- 하위 이슈: `bd-xyz.1`, `bd-xyz.2` 등(단계)
 
-Create the epic and wire the dependencies directly:
+### Formula 없이 생성
 
-```bash
-bd create "Feature X" -t epic
-bd create "Design" -t task --parent <epic-id>
-bd create "Implement" -t task --parent <epic-id>
-bd create "Test" -t task --parent <epic-id>
-bd dep add <implement-id> <design-id>   # implement needs design
-bd dep add <test-id> <implement-id>     # test needs implement
-```
-
-If an ad-hoc epic turns out to be worth repeating, extract a reusable formula
-from it with `bd mol distill <epic-id> <formula-name>`.
-
-### Finding Molecules
+epic을 만들고 의존성을 직접 연결합니다.
 
 ```bash
-bd mol current           # Where you are in the molecule you're working
-bd mol stale             # Complete-but-still-open molecules
-bd mol wisp list         # Ephemeral molecules (wisps)
+bd create "기능 X" -t epic
+bd create "설계" -t task --parent <epic-id>
+bd create "구현" -t task --parent <epic-id>
+bd create "테스트" -t task --parent <epic-id>
+bd dep add <implement-id> <design-id>   # 구현에 설계가 필요
+bd dep add <test-id> <implement-id>     # 테스트에 구현이 필요
 ```
 
-### Viewing a Molecule
+임시 epic을 반복해서 사용할 가치가 있다면 `bd mol distill <epic-id>
+<formula-name>`으로 재사용 가능한 Formula를 추출하세요.
+
+### Molecule 찾기
 
 ```bash
-bd mol show <molecule-id>             # Structure and variables
-bd mol show <molecule-id> --parallel  # Highlight steps that can run concurrently
-bd dep tree <molecule-id>             # Shows full hierarchy
+bd mol current           # 작업 중인 Molecule의 현재 위치
+bd mol stale             # 완료되었지만 아직 열린 Molecule
+bd mol wisp list         # 임시 Molecule(Wisp)
 ```
 
-## Working with Molecules
+### Molecule 보기
 
-### The Execution Model
-
-An agent picks up a molecule and executes ready children in parallel until
-everything closes:
-
-```
-epic-root (assigned to agent)
-├── child.1 (no deps → ready)      ← execute in parallel
-├── child.2 (no deps → ready)      ← execute in parallel
-├── child.3 (needs child.1) → blocked until child.1 closes
-└── child.4 (needs child.2, child.3) → blocked until both close
+```bash
+bd mol show <molecule-id>             # 구조와 변수
+bd mol show <molecule-id> --parallel  # 동시에 실행할 수 있는 단계 강조
+bd dep tree <molecule-id>             # 전체 계층 구조 표시
 ```
 
-**Children are parallel by default.** Only explicit dependencies create
-sequence. The multi-session loop:
+## Molecule 작업
 
-1. Get ready work: `bd ready --mol <molecule-id>`
-2. Claim it: `bd update <id> --claim`
-3. Do the work
-4. Close it: `bd close <id>`
-5. Repeat until the molecule is done
+### 실행 모델
 
-### Dependency Types
+에이전트는 Molecule을 선택하고 모든 항목이 종료될 때까지 준비된 하위 항목을 병렬로
+실행합니다.
 
-Only some dependency types block execution:
+```
+epic-root (에이전트에 할당)
+├── child.1 (의존성 없음 → 준비됨)      ← 병렬 실행
+├── child.2 (의존성 없음 → 준비됨)      ← 병렬 실행
+├── child.3 (child.1 필요) → child.1 종료까지 차단
+└── child.4 (child.2, child.3 필요) → 둘 다 종료될 때까지 차단
+```
 
-| Type | Semantics | Use case |
+**하위 항목은 기본적으로 병렬입니다.** 명시적 의존성만 순서를 만듭니다. 다중 세션
+반복 절차는 다음과 같습니다.
+
+1. 준비된 작업 가져오기: `bd ready --mol <molecule-id>`
+2. 작업 맡기(claim): `bd update <id> --claim`
+3. 작업 수행
+4. 종료: `bd close <id>`
+5. Molecule이 끝날 때까지 반복
+
+### 의존성 유형
+
+일부 의존성 유형만 실행을 차단합니다.
+
+| 유형 | 의미 | 사용 사례 |
 |------|-----------|----------|
-| `blocks` | B can't start until A closes | Sequencing work |
-| `parent-child` | If the parent is blocked, children are blocked | Hierarchy (children parallel by default) |
-| `conditional-blocks` | B runs only if A fails | Error-handling paths |
-| `waits-for` | B waits for all of A's dynamic children | Fan-in gates — see [Gates](/workflows/gates) |
+| `blocks` | A가 종료될 때까지 B를 시작할 수 없음 | 작업 순서 지정 |
+| `parent-child` | 상위 항목이 차단되면 하위 항목도 차단 | 계층 구조(하위 항목은 기본적으로 병렬) |
+| `conditional-blocks` | A가 실패할 때만 B 실행 | 오류 처리 경로 |
+| `waits-for` | B가 A의 동적 하위 항목을 모두 대기 | fan-in Gate. [Gate](/workflows/gates) 참고 |
 
-Non-blocking types (`related`, `discovered-from`, `replies-to`) link issues
-without affecting execution.
+차단하지 않는 유형(`related`, `discovered-from`, `replies-to`)은 실행에 영향을 주지
+않고 이슈를 연결합니다.
 
-### Step Dependencies
+### 단계 의존성
 
-In a formula, steps declare `needs`:
+Formula에서 단계는 `needs`를 선언합니다.
 
 ```toml
 [[steps]]
 id = "implement"
-title = "Implement feature"
-needs = ["design"]  # Must complete design first
+title = "기능 구현"
+needs = ["design"]  # 먼저 설계를 완료해야 함
 ```
 
-On live issues, add the edge directly — the dependent comes first:
+실제 이슈에서는 edge를 직접 추가합니다. 의존하는 항목이 먼저 옵니다.
 
 ```bash
-bd dep add <B-id> <A-id>   # B depends on A (B needs A)
+bd dep add <B-id> <A-id>   # B가 A에 의존(B에 A가 필요)
 ```
 
-The `bd ready` command respects these:
+`bd ready` 명령은 이러한 의존성을 따릅니다.
 
 ```bash
-bd ready --mol <molecule-id>  # Only shows steps with completed dependencies
+bd ready --mol <molecule-id>  # 의존성이 완료된 단계만 표시
 ```
 
-### Progressing Through Steps
+### 단계 진행
 
 ```bash
-# Start a step
+# 단계 시작
 bd update bd-xyz.1 --claim
 
-# Complete a step
-bd close bd-xyz.1 --reason "Done"
+# 단계 완료
+bd close bd-xyz.1 --reason "완료"
 
-# Check what's ready next
+# 다음 준비 항목 확인
 bd ready --mol bd-xyz
 ```
 
-### Viewing Progress
+### 진행 상황 보기
 
 ```bash
-# See blocked steps
+# 차단된 단계 확인
 bd blocked
 
-# Step-by-step status: [done] / [current] / [ready] / [blocked] / [pending]
+# 단계별 상태: [done] / [current] / [ready] / [blocked] / [pending]
 bd mol current <molecule-id>
 
-# Progress summary: completed/total, rate, ETA
+# 진행 요약: 완료/전체, 비율, ETA
 bd mol progress <molecule-id>
 ```
 
-## Molecule Lifecycle
+## Molecule 수명 주기
 
 ```
-Formula (template source)
+Formula (템플릿 소스)
     ↓ bd cook
-Proto (template epic)
+Proto (템플릿 epic)
     ↓ bd mol pour
-Molecule (instance)
-    ↓ work steps
-Completed Molecule
-    ↓ optional cleanup
-Closed / Squashed / Burned
+Molecule (인스턴스)
+    ↓ 작업 단계
+완료된 Molecule
+    ↓ 선택적 정리
+종료 / squash / burn
 ```
 
-Closing the last child does not close the molecule root — epics stay open as
-close-eligible work until closed explicitly (`bd epic close-eligible` sweeps
-them). For cleanup of the beads themselves:
+마지막 하위 항목을 종료해도 Molecule root는 종료되지 않습니다. epic은 명시적으로
+종료할 때까지 종료 가능한 작업으로 열린 상태를 유지합니다(`bd epic close-eligible`이
+일괄 처리). Beads 자체를 정리하는 방법은 다음과 같습니다.
 
-- `bd mol squash <id>` condenses a molecule's ephemeral children into a
-  permanent digest issue.
-- `bd mol burn <id>` deletes a molecule outright, no digest — for abandoned
-  or test runs.
+- `bd mol squash <id>`는 Molecule의 임시 하위 항목을 영구 digest 이슈로 압축합니다.
+- `bd mol burn <id>`는 digest 없이 Molecule을 완전히 삭제하며 중단되었거나 테스트용인
+  실행에 사용합니다.
 
-See [Wisps](/workflows/wisps) for the ephemeral lifecycle these commands
-usually serve.
+이 명령이 주로 처리하는 임시 수명 주기는 [Wisp](/workflows/wisps)를 참고하세요.
 
-## Bonding: Connecting Work Graphs
+## Bonding: 작업 그래프 연결
 
-**Bond** means creating a dependency between two work graphs. When molecule A
-blocks molecule B, completing A unblocks B and an agent can continue from A
-into B — one compound workflow that can span days.
+**Bond**는 두 작업 그래프 사이에 의존성을 만드는 것입니다. Molecule A가 Molecule
+B를 차단하면 A를 완료할 때 B의 차단이 해제되고 에이전트가 A에서 B로 계속 진행할 수
+있습니다. 며칠에 걸쳐 실행될 수 있는 하나의 복합 워크플로가 됩니다.
 
 ```bash
-bd mol bond A B                    # B depends on A (sequential by default)
-bd mol bond A B --type parallel    # B runs alongside A
-bd mol bond A B --type conditional # B runs only if A fails
+bd mol bond A B                    # B가 A에 의존(기본적으로 순차)
+bd mol bond A B --type parallel    # B가 A와 함께 실행
+bd mol bond A B --type conditional # A가 실패할 때만 B 실행
 ```
 
-The command is polymorphic over its operands:
+이 명령은 operand에 따라 다형적으로 작동합니다.
 
-| Operands | What happens |
+| operand | 동작 |
 |----------|--------------|
-| proto + proto | Compound proto (reusable template) |
-| proto + molecule | Spawns the proto as new issues, attached to the molecule |
-| molecule + molecule | Joins them into a compound molecule |
-| formula + anything | The formula is cooked inline first |
+| proto + proto | 복합 Proto(재사용 가능한 템플릿) |
+| proto + molecule | Proto를 새 이슈로 생성하여 Molecule에 연결 |
+| molecule + molecule | 두 항목을 복합 Molecule로 결합 |
+| formula + anything | Formula를 먼저 인라인으로 조리 |
 
-Spawned issues follow the target's phase (persistent or ephemeral) by
-default. Override with `--pour` (force persistent) or `--ephemeral` (force
-ephemeral) — see [Wisps](/workflows/wisps).
+생성된 이슈는 기본적으로 대상의 단계(영구 또는 임시)를 따릅니다. `--pour`로 영구
+상태를, `--ephemeral`로 임시 상태를 강제할 수 있습니다. [Wisp](/workflows/wisps)를
+참고하세요.
 
-### Dynamic Bonding
+### 동적 Bonding
 
-When the number of children isn't known until runtime, bond in a loop with
-`--ref` to get readable child IDs instead of random hashes:
+runtime까지 하위 항목 수를 알 수 없다면 loop에서 `--ref`로 bond하여 무작위 해시 대신
+읽을 수 있는 하위 ID를 만드세요.
 
 ```bash
-# One arm per discovered worker
+# 발견된 worker마다 arm 하나
 bd mol bond mol-worker-arm bd-patrol --ref arm-{{name}} --var name=ace
-# Creates: bd-patrol.arm-ace (and children like bd-patrol.arm-ace.capture)
+# 생성: bd-patrol.arm-ace 및 bd-patrol.arm-ace.capture 같은 하위 항목
 ```
 
-## Advanced Features
+## 고급 기능
 
-### Bond Points
+### Bond 지점
 
-Formulas can define bond points — named attachment sites for composition.
-Each names a step to attach `before_step` or `after_step` (with optional
-`parallel = true`):
+Formula는 조합을 위한 이름이 있는 연결 위치인 bond point를 정의할 수 있습니다. 각
+point는 `before_step` 또는 `after_step`을 연결할 단계를 지정하며 선택적으로
+`parallel = true`를 사용할 수 있습니다.
 
 ```toml
 [[compose.bond_points]]
 id = "entry"
-description = "Attach setup work here"
+description = "여기에 설정 작업 연결"
 before_step = "design"
 ```
 
-### Hooks
+### 훅
 
-Step-completion hooks are not currently exposed as runnable formula
-actions. The historical `on_complete.run` example was invalid: `run` is
-not a formula field, and `on_complete` runtime expansion is tracked
-separately until it is wired end to end.
+단계 완료 hook은 현재 실행 가능한 Formula action으로 노출되지 않습니다. 과거의
+`on_complete.run` 예제는 유효하지 않았습니다. `run`은 Formula 필드가 아니며,
+`on_complete` runtime expansion은 전체 연결이 완료될 때까지 별도로 추적됩니다.
 
-### Assigning Molecules
+### Molecule 할당
 
-Assign the molecule root to an agent at pour time, then track where each
-agent is:
+pour할 때 Molecule root를 에이전트에 할당한 뒤 각 에이전트의 위치를 추적하세요.
 
 ```bash
-bd mol pour mol-feature --assignee <agent>   # Assign on creation
-bd mol current --for <agent>                 # Where that agent is
+bd mol pour mol-feature --assignee <agent>   # 생성 시 할당
+bd mol current --for <agent>                 # 에이전트의 현재 위치
 ```
 
-## Agent Pitfalls
+## 에이전트 주의 사항
 
-1. **Temporal language inverts dependencies.** "Phase 1 comes before Phase 2"
-   tempts `bd dep add phase1 phase2` — backwards. Use requirement language:
-   "Phase 2 needs Phase 1" is `bd dep add phase2 phase1`. Verify with
-   `bd blocked`.
-2. **Numbered steps don't create sequence.** Steps named "Step 1/2/3" still
-   run in parallel until you add dependencies between them.
-3. **Forgetting to close work.** Blocked issues stay blocked forever if their
-   blockers aren't closed: `bd close <id> --reason "Done"`.
+1. **시간 순서 표현은 의존성을 뒤집게 만듭니다.** "1단계가 2단계보다 먼저다"라는
+   표현은 반대 방향인 `bd dep add phase1 phase2`를 쓰게 만들 수 있습니다. 요구
+   표현을 사용하세요. "2단계에 1단계가 필요하다"는 `bd dep add phase2 phase1`입니다.
+   `bd blocked`로 확인하세요.
+2. **단계 번호는 순서를 만들지 않습니다.** "1/2/3단계"라는 이름의 단계도 서로
+   의존성을 추가할 때까지 병렬로 실행됩니다.
+3. **작업 종료 누락.** 차단 요소를 종료하지 않으면 차단된 이슈는 계속 차단됩니다.
+   `bd close <id> --reason "완료"`를 실행하세요.
 
-## Example Workflow
+## 워크플로 예제
 
 ```bash
-# 1. Create molecule from formula
+# 1. Formula에서 Molecule 생성
 bd cook feature-workflow.formula.toml
 bd mol pour feature-workflow --var name="dark-mode"
 
-# 2. View structure
+# 2. 구조 보기
 bd dep tree bd-xyz
 
-# 3. Start first step
+# 3. 첫 단계 시작
 bd update bd-xyz.1 --claim
 
-# 4. Complete and progress
+# 4. 완료 후 진행
 bd close bd-xyz.1
-bd ready --mol bd-xyz  # Shows next steps
+bd ready --mol bd-xyz  # 다음 단계 표시
 
-# 5. Continue until complete
+# 5. 완료할 때까지 계속
 ```
 
-## See Also
+## 관련 문서
 
-- [Formulas](/workflows/formulas) - Creating templates
-- [Gates](/workflows/gates) - Async coordination
-- [Wisps](/workflows/wisps) - Ephemeral workflows
+- [Formula](/workflows/formulas) - 템플릿 생성
+- [Gate](/workflows/gates) - 비동기 조정
+- [Wisp](/workflows/wisps) - 임시 워크플로

@@ -1,21 +1,21 @@
 ---
 title: "bd info"
-description: "Display information about the current database."
+description: "현재 데이터베이스 정보를 표시합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc info`.
+`bd help --doc info`에서 생성되었습니다.
 
-Display information about the current database.
+현재 데이터베이스 정보를 표시합니다.
 
-This command helps debug issues where bd is using an unexpected database. It shows:
-  - The absolute path to the database file
-  - Database statistics (issue count)
-  - Schema information (with --schema flag)
-  - What's new in recent versions (with --whats-new flag)
+bd가 예상하지 않은 데이터베이스를 사용하는 문제를 디버깅하는 데 도움이 됩니다. 다음을 표시합니다:
+  - 데이터베이스 파일의 절대 경로
+  - 데이터베이스 통계(이슈 수)
+  - 스키마 정보(--schema 플래그 사용)
+  - 최근 버전의 새 변경 사항(--whats-new 플래그 사용)
 
-Examples:
+예시:
   bd info
   bd info --json
   bd info --schema --json
@@ -27,11 +27,11 @@ Examples:
 bd info [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --json        Output in JSON format
-      --schema      Include schema information in output
-      --thanks      Show thank you page for contributors
-      --whats-new   Show agent-relevant changes from recent versions
+      --json        JSON 형식으로 출력
+      --schema      출력에 스키마 정보 포함
+      --thanks      기여자 감사 페이지 표시
+      --whats-new   최근 버전의 에이전트 관련 변경 사항 표시
 ```

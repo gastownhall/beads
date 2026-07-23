@@ -1,137 +1,130 @@
 ---
-title: History Bloat
-description: Shed reachable Dolt history that dolt gc cannot reclaim
+title: 기록 비대화
+description: dolt gc가 회수할 수 없는 도달 가능한 Dolt 기록 제거하기
 ---
 
-Every bead write mints a Dolt commit, and Dolt keeps every byte a reachable
-commit references — `dolt gc` only reclaims what nothing points to. A
-workspace that has accumulated months of high-frequency writes can grow far
-past its live data (gigabytes of storage for a few thousand beads) while
-`dolt gc` reclaims nothing, because the entire chain is still reachable from
-your branch. This runbook squashes that chain to a single baseline commit so
-the old history becomes collectable, without touching your live data.
+bead를 쓸 때마다 Dolt 커밋이 생성되며, Dolt는 도달 가능한 커밋이 참조하는 모든
+바이트를 유지합니다. `dolt gc`는 아무것도 가리키지 않는 데이터만 회수합니다. 수개월간
+고빈도 쓰기가 누적된 워크스페이스는 실제 데이터보다 훨씬 커질 수 있습니다(수천 개
+bead에 수 GB의 저장소). 전체 체인에 브랜치에서 여전히 도달할 수 있으므로
+`dolt gc`는 아무것도 회수하지 못합니다. 이 런북은 실제 데이터를 건드리지 않고
+해당 체인을 하나의 기준 커밋으로 스쿼시하여 이전 기록을 회수할 수 있게 합니다.
 
 <Warning>
-This procedure rewrites history. Every other clone of the database becomes
-unmergeable and must re-clone, and remotes and backups must be re-pointed.
-Run it in a fenced window: all writers stopped **on every machine that syncs
-this database**, backup verified first.
+이 절차는 기록을 다시 씁니다. 데이터베이스의 다른 모든 클론은 병합할 수 없게 되어
+다시 클론해야 하며, 원격과 백업도 새 대상을 가리키게 해야 합니다. 격리된 작업
+시간에 실행하세요. 먼저 백업을 확인하고 **이 데이터베이스를 동기화하는 모든
+머신에서** 모든 기록자를 중지해야 합니다.
 </Warning>
 
-## Symptoms
+## 증상
 
-- The Dolt data directory (or its remote/backup) is large and growing while
-  `bd stats` shows a modest number of beads
-- `dolt gc` and `dolt gc --full` reclaim little or nothing
-- Cloning or pulling the database is slow far out of proportion to its content
+- `bd stats`에는 bead 수가 많지 않지만 Dolt 데이터 디렉터리(또는 그 원격/백업)가
+  크고 계속 증가합니다.
+- `dolt gc`와 `dolt gc --full`이 거의 또는 전혀 회수하지 못합니다.
+- 데이터베이스 클론이나 풀 속도가 그 내용에 비해 지나치게 느립니다.
 
-## Diagnosis
+## 진단
 
-Run these inside the Dolt data directory — `.beads/embeddeddolt/<database>/`
-in embedded mode, `.beads/dolt/<database>/` in server mode:
+다음 명령은 Dolt 데이터 디렉터리 안에서 실행하세요. 임베디드 모드에서는
+`.beads/embeddeddolt/<database>/`, 서버 모드에서는 `.beads/dolt/<database>/`입니다.
 
 ```bash
-# How big is the store?
+# 저장소 크기는 얼마인가요?
 du -sh .
 
-# How deep is the history? Thousands of commits with a small live
-# dataset means the history, not the data, is the bloat.
+# 기록이 얼마나 깊은가요? 실제 데이터 세트는 작은데 커밋이 수천 개라면
+# 데이터가 아니라 기록이 비대해진 것입니다.
 dolt log --oneline | wc -l
 
-# Confirm gc has nothing unreachable to collect
+# gc가 회수할 수 없는 도달 불가능 데이터가 없는지 확인합니다.
 dolt gc --full
 ```
 
-If `dolt gc --full` frees the space, you are done — no squash needed.
+`dolt gc --full`로 공간이 확보되면 완료입니다. 스쿼시할 필요가 없습니다.
 
-## Solution
+## 해결 방법
 
-**Step 1:** Fence and back up. Stop every writer: agents, background
-services, and — easiest to miss — any scheduled sync job (cron, launchd,
-systemd) that pushes or pulls this database, on *every machine that syncs
-it*, not just the one you squash on. List the machines and their sync units
-by name and verify each is stopped. One live peer sync undoes the squash on
-its next tick: it pulls the new baseline, cross-merges it into its old
-chain, and pushes the entire old history back to the fresh remote. In
-server mode also stop the server after backing up. The backup is dolt-native
-and keeps the full history, so it remains your rollback.
+**1단계:** 격리하고 백업합니다. 스쿼시를 실행할 머신뿐 아니라 *이 데이터베이스를
+동기화하는 모든 머신*에서 에이전트, 백그라운드 서비스, 그리고 놓치기 쉬운 예약
+동기화 작업(cron, launchd, systemd) 등 데이터베이스를 푸시하거나 풀하는 모든
+기록자를 중지합니다. 머신과 해당 동기화 유닛을 이름별로 나열하고 각각 중지되었는지
+확인합니다. 동작 중인 피어 하나가 다음 동기화 때 새 기준을 풀하고 이전 체인에 교차
+병합한 다음 전체 이전 기록을 새 원격에 다시 푸시하면 스쿼시가 무효화됩니다. 서버
+모드에서는 백업 후 서버도 중지합니다. 백업은 Dolt 네이티브 형식으로 전체 기록을
+유지하므로 롤백 수단으로 남습니다.
 
 ```bash
 bd backup sync
 bd dolt stop
 ```
 
-**Step 2:** Squash to a single baseline. From the Dolt data directory,
-re-commit the current tree directly on top of the root commit. Keeping the
-root as the sole ancestor preserves a valid chain — do not try to "simplify"
-further by starting an orphan branch:
+**2단계:** 하나의 기준으로 스쿼시합니다. Dolt 데이터 디렉터리에서 현재 트리를 루트
+커밋 바로 위에 다시 커밋합니다. 루트를 유일한 조상으로 유지하면 유효한 체인이
+보존됩니다. 고아 브랜치를 시작해 더 "단순화"하려 하지 마세요.
 
 ```bash
 root=$(dolt log --oneline | tail -1 | cut -d' ' -f1)
 dolt reset --soft "$root"
 dolt add -A
-dolt commit -m "history squash: baseline $(date +%F)"
+dolt commit -m "기록 스쿼시: 기준선 $(date +%F)"
 ```
 
-**Step 3:** Drop the other refs and collect. Anything still pointing at the
-old chain keeps it alive — stale local branches and tags, and also the
-*remote-tracking refs* left behind by every past push and fetch, which any
-long-lived synced workspace has. Delete them all before collecting; Step 4's
-force-push recreates the remote-tracking refs on the new chain:
+**3단계:** 다른 참조를 제거하고 회수합니다. 오래된 로컬 브랜치와 태그뿐 아니라 장기간
+동기화한 워크스페이스에 과거의 모든 푸시와 페치가 남긴 *원격 추적 참조*까지,
+이전 체인을 계속 가리키는 항목이 하나라도 있으면 체인이 유지됩니다. 회수 전에 모두
+삭제하세요. 4단계의 강제 푸시가 새 체인에 원격 추적 참조를 다시 생성합니다.
 
 ```bash
-dolt branch          # delete stale branches:       dolt branch -D <name>
-dolt branch -r       # delete remote-tracking refs: dolt branch -rd <remote>/<branch>
-dolt tag             # delete stale tags:           dolt tag -d <name>
+dolt branch          # 오래된 브랜치 삭제:          dolt branch -D <name>
+dolt branch -r       # 원격 추적 참조 삭제:          dolt branch -rd <remote>/<branch>
+dolt tag             # 오래된 태그 삭제:             dolt tag -d <name>
 dolt gc --full
-du -sh .             # verify: the store should now be a fraction of its old size
+du -sh .             # 확인: 이제 저장소 크기가 이전의 일부여야 합니다.
 ```
 
-If the size barely moved, a ref still anchors the old chain — re-check
-`dolt branch`, `dolt branch -r`, and `dolt tag` for survivors and collect
-again. (A failed collection does not endanger Step 4 — the push sends only
-what the new baseline references — but this machine keeps the bloat until
-the gc succeeds.)
+크기가 거의 줄지 않았다면 어떤 참조가 여전히 이전 체인을 고정하고 있는 것입니다.
+`dolt branch`, `dolt branch -r`, `dolt tag`에서 남은 항목을 다시 확인하고 재차
+회수하세요. 회수 실패가 4단계를 위험하게 만들지는 않습니다. 푸시는 새 기준이
+참조하는 항목만 전송합니다. 다만 gc가 성공할 때까지 이 머신의 비대화는 유지됩니다.
 
-**Step 4:** Re-point remotes and backups. The new history is unrelated to
-the old, so the first publish must replace it:
+**4단계:** 원격과 백업이 새 대상을 가리키게 합니다. 새 기록은 이전 기록과 관련이
+없으므로 첫 게시는 이전 기록을 교체해야 합니다.
 
 ```bash
 bd dolt push --force
-bd backup remove && bd backup init <path>   # fresh destination, then:
+bd backup remove && bd backup init <path>   # 새 대상, 이후:
 bd backup sync
 ```
 
 <Warning>
-A Dolt remote accumulates chunks monotonically: the force-push re-points the
-remote's refs at the squashed chain but deletes nothing, so the *remote's*
-storage does not shrink. To reclaim the published side too, replace the
-remote — clear its storage (or pick a fresh path/prefix) before the push:
-`bd dolt remote remove <name>`, `bd dolt remote add <name> <fresh-url>`,
-then `bd dolt push --force`. Every other clone must re-clone after a squash
-regardless, so replacing the remote costs nothing extra.
+Dolt 원격에는 청크가 단조롭게 누적됩니다. 강제 푸시는 원격 참조가 스쿼시된 체인을
+가리키도록 바꾸지만 아무것도 삭제하지 않으므로 *원격의* 저장소는 줄어들지 않습니다.
+게시된 쪽의 공간도 회수하려면 원격을 교체하세요. 푸시 전에 저장소를 비우거나 새
+경로/접두사를 선택하고 `bd dolt remote remove <name>`,
+`bd dolt remote add <name> <fresh-url>`, 이어서 `bd dolt push --force`를
+실행합니다. 다른 모든 클론은 어차피 스쿼시 후 다시 클론해야 하므로 원격 교체에
+추가 비용은 없습니다.
 </Warning>
 
-**Step 5:** Verify, then re-clone everywhere else. On this machine:
+**5단계:** 확인한 다음 다른 모든 곳에서 다시 클론합니다. 이 머신에서는 다음을 실행합니다.
 
 ```bash
 bd doctor
 bd list -n 5
 ```
 
-Every other clone of this database must be re-created from the squashed
-remote. Old clones must not pull: the two chains still share the root, so a
-pull can "succeed" as a cross-merge that re-anchors the entire old history —
-and a later push resurrects the bloat on the squashed remote. Re-enable each
-machine's sync jobs only after that machine has re-cloned; unfence your
-writers last.
+이 데이터베이스의 다른 모든 클론은 스쿼시된 원격에서 다시 만들어야 합니다. 이전
+클론에서는 풀하지 마세요. 두 체인이 여전히 루트를 공유하므로, 전체 이전 기록을 다시
+고정하는 교차 병합으로 풀이 "성공"할 수 있고 이후 푸시가 스쿼시된 원격의 비대화를
+되살립니다. 각 머신에서 다시 클론한 뒤에만 해당 머신의 동기화 작업을 다시
+활성화하세요. 기록자 격리는 마지막에 해제합니다.
 
-## Prevention
+## 예방
 
-High-frequency coordination state lives in unversioned tables precisely so
-routine agent traffic does not mint history — claim leases and
-[wisps](/workflows/wisps) —
-so bloat at this scale usually means something is writing versioned tables
-in a tight loop. Find and fix that writer, watch data-directory growth over time, and
-run `dolt gc` periodically so unreachable garbage never accumulates on top
-of reachable history.
+일상적인 에이전트 트래픽이 기록을 생성하지 않도록 클레임 임대와
+[Wisps](/workflows/wisps) 같은 고빈도 조정 상태는 의도적으로 버전 관리되지 않는
+테이블에 저장됩니다. 따라서 이 정도 규모의 비대화는 대개 어떤 항목이 버전 관리되는
+테이블을 짧은 간격으로 반복해서 쓰고 있음을 뜻합니다. 해당 기록자를 찾아 수정하고,
+시간에 따른 데이터 디렉터리 증가를 관찰하며, 도달 불가능한 쓰레기가 도달 가능한
+기록 위에 쌓이지 않도록 `dolt gc`를 주기적으로 실행하세요.

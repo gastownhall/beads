@@ -1,18 +1,18 @@
 ---
 title: Kilo Code
-description: Set up beads for Kilo Code by writing a .kilocode/rules/beads.md project rules file
+description: .kilocode/rules/beads.md 프로젝트 규칙 파일을 작성하여 Kilo Code용 Beads 설정
 ---
 
-Use Beads with Kilo Code through a project rules file.
+프로젝트 규칙 파일을 통해 Kilo Code에서 Beads를 사용합니다.
 
 ```bash
 bd setup kilocode
 bd setup kilocode --check
 ```
 
-The setup command creates `.kilocode/rules/beads.md` with Beads workflow guidance.
+설정 명령은 Beads 워크플로 지침이 담긴 `.kilocode/rules/beads.md`를 생성합니다.
 
-## Remove
+## 제거
 
 ```bash
 bd setup kilocode --remove

@@ -1,21 +1,20 @@
 ---
 title: "bd context"
-description: "Show the effective backend identity information including repository paths,"
+description: "저장소 경로, 백엔드 구성, 동기화 설정을 포함한 유효 백엔드 식별 정보를 표시합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc context`.
+`bd help --doc context`에서 생성되었습니다.
 
-Show the effective backend identity information including repository paths,
-backend configuration, and sync settings.
+저장소 경로, 백엔드 구성, 동기화 설정을 포함한 유효 백엔드 식별 정보를 표시합니다.
 
-This command reads directly from config files and does not require the
-database to be open, making it useful for diagnostics in degraded states.
+이 명령은 구성 파일에서 직접 읽으며 데이터베이스를 열 필요가 없으므로
+성능 저하 상태의 진단에 유용합니다.
 
-Examples:
-  bd context           # Show context information
-  bd context --json    # Output in JSON format
+예시:
+  bd context           # 컨텍스트 정보 표시
+  bd context --json    # JSON 형식으로 출력
 
 
 ```

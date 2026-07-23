@@ -1,62 +1,62 @@
 ---
 title: "bd comments"
-description: "View or manage comments on an issue."
+description: "이슈의 댓글을 보거나 관리합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc comments`.
+`bd help --doc comments`에서 생성되었습니다.
 
-View or manage comments on an issue.
+이슈의 댓글을 보거나 관리합니다.
 
-Examples:
-  # List all comments on an issue (issue id is required — there is no "comments list")
+예시:
+  # 이슈의 모든 댓글 나열(이슈 ID 필수, "comments list"는 없음)
   bd comments bd-123
 
-  # List comments in JSON format
+  # 댓글을 JSON 형식으로 나열
   bd comments bd-123 --json
 
-  # Add a comment
-  bd comments add bd-123 "This is a comment"
+  # 댓글 추가
+  bd comments add bd-123 "댓글입니다"
 
-  # Add a comment from a file
+  # 파일에서 댓글 추가
   bd comments add bd-123 -f notes.txt
 
 ```
 bd comments [issue-id] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --local-time   Show timestamps in local time instead of UTC
+      --local-time   UTC 대신 현지 시간으로 타임스탬프 표시
 ```
 
 ## bd comments add
 
-Add a comment to an issue.
+이슈에 댓글을 추가합니다.
 
-Examples:
-  # Add a comment
-  bd comments add bd-123 "Working on this now"
+예시:
+  # 댓글 추가
+  bd comments add bd-123 "지금 작업 중"
 
-  # Add a comment from a file
+  # 파일에서 댓글 추가
   bd comments add bd-123 -f notes.txt
 
 ```
 bd comments add [issue-id] [text] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -a, --author string   Add author to comment
-  -f, --file string     Read comment text from file
+  -a, --author string   댓글에 작성자 추가
+  -f, --file string     파일에서 댓글 텍스트 읽기
 ```
 
 ## bd comments list
 
-Invalid — use bd comments &lt;issue-id&gt; to list comments
+잘못된 명령입니다. 댓글을 나열하려면 bd comments &lt;issue-id&gt;를 사용하세요
 
 ```
 bd comments list [flags]

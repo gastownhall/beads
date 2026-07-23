@@ -1,13 +1,13 @@
 ---
-title: "Issues & Dependencies"
-description: "The issue model: fields, types, priorities, and the dependencies that decide what work is ready"
+title: "이슈와 의존성"
+description: "이슈 모델: 필드, 유형, 우선순위 및 준비된 작업을 결정하는 의존성"
 ---
 
-Understanding the issue model in beads.
+beads의 이슈 모델을 알아봅니다.
 
-## Issue Structure
+## 이슈 구조
 
-Every issue has:
+모든 이슈에는 다음 항목이 있습니다.
 
 ```bash
 bd show bd-42 --json
@@ -16,8 +16,8 @@ bd show bd-42 --json
 ```json
 {
   "id": "bd-42",
-  "title": "Implement authentication",
-  "description": "Add JWT-based auth",
+  "title": "인증 구현",
+  "description": "JWT 기반 인증 추가",
   "type": "feature",
   "status": "open",
   "priority": 1,
@@ -27,154 +27,154 @@ bd show bd-42 --json
 }
 ```
 
-## Issue Types
+## 이슈 유형
 
-| Type | Use Case |
+| 유형 | 사용 사례 |
 |------|----------|
-| `bug` | Something broken that needs fixing |
-| `feature` | New functionality |
-| `task` | Work item (tests, docs, refactoring) |
-| `epic` | Large feature with subtasks |
-| `chore` | Maintenance (dependencies, tooling) |
+| `bug` | 수정해야 하는 고장 난 기능 |
+| `feature` | 새로운 기능 |
+| `task` | 작업 항목(테스트, 문서, 리팩터링) |
+| `epic` | 하위 작업이 있는 큰 기능 |
+| `chore` | 유지 관리(의존성, 도구) |
 
-## Priorities
+## 우선순위
 
-| Priority | Level | Examples |
+| 우선순위 | 수준 | 예시 |
 |----------|-------|----------|
-| 0 | Critical | Security, data loss, broken builds |
-| 1 | High | Major features, important bugs |
-| 2 | Medium | Nice-to-have features, minor bugs |
-| 3 | Low | Polish, optimization |
-| 4 | Backlog | Future ideas |
+| 0 | 치명적 | 보안, 데이터 손실, 빌드 실패 |
+| 1 | 높음 | 주요 기능, 중요한 버그 |
+| 2 | 중간 | 있으면 좋은 기능, 사소한 버그 |
+| 3 | 낮음 | 다듬기, 최적화 |
+| 4 | 백로그 | 향후 아이디어 |
 
-## Creating Issues
+## 이슈 생성
 
 ```bash
-# Basic issue
-bd create "Fix login bug" -t bug -p 1
+# 기본 이슈
+bd create "로그인 버그 수정" -t bug -p 1
 
-# With description
-bd create "Add password reset" \
-  --description="Users need to reset forgotten passwords via email" \
+# 설명 포함
+bd create "비밀번호 재설정 추가" \
+  --description="사용자가 잊어버린 비밀번호를 이메일로 재설정할 수 있어야 함" \
   -t feature -p 2
 
-# With labels
-bd create "Update dependencies" -t chore -l "maintenance,security"
+# 레이블 포함
+bd create "의존성 업데이트" -t chore -l "maintenance,security"
 
-# JSON output for agents
-bd create "Task" -t task --json
+# 에이전트용 JSON 출력
+bd create "작업" -t task --json
 ```
 
-## Dependencies
+## 의존성
 
-### Blocking Dependencies
+### 차단 의존성
 
-The `blocks` relationship affects the ready queue:
+`blocks` 관계는 준비 큐에 영향을 줍니다.
 
 ```bash
-# Add dependency: bd-2 depends on bd-1
+# 의존성 추가: bd-2는 bd-1에 의존
 bd dep add bd-2 bd-1
 
-# View dependencies
+# 의존성 보기
 bd dep tree bd-2
 
-# See blocked issues
+# 차단된 이슈 보기
 bd blocked
 
-# See ready work (not blocked)
+# 준비된 작업 보기(차단되지 않음)
 bd ready
 ```
 
-### Structural Relationships
+### 구조적 관계
 
-These don't affect the ready queue:
+다음 관계는 준비 큐에 영향을 주지 않습니다.
 
 ```bash
-# Parent-child (epic subtasks)
-bd create "Epic" -t epic
-bd create "Subtask" --parent bd-42
+# 부모-자식(epic 하위 작업)
+bd create "에픽" -t epic
+bd create "하위 작업" --parent bd-42
 
-# Discovered-from (found during work)
-bd create "Found bug" --deps discovered-from:bd-42
+# 발견 출처(작업 중 발견)
+bd create "발견한 버그" --deps discovered-from:bd-42
 
-# Related (soft link)
+# 관련(소프트 링크)
 bd dep relate bd-1 bd-2
 ```
 
-### Dependency Types
+### 의존성 유형
 
-| Type | Description | Ready Queue Impact |
+| 유형 | 설명 | 준비 큐에 미치는 영향 |
 |------|-------------|-------------------|
-| `blocks` | Hard dependency | Yes - blocked items not ready |
-| `parent-child` | Epic/subtask hierarchy | No |
-| `discovered-from` | Tracks origin of discovery | No |
-| `related` | Soft relationship | No |
+| `blocks` | 하드 의존성 | 있음 - 차단된 항목은 준비되지 않음 |
+| `parent-child` | Epic/하위 작업 계층 | 없음 |
+| `discovered-from` | 발견 출처 추적 | 없음 |
+| `related` | 소프트 관계 | 없음 |
 
-## Hierarchical Issues
+## 계층적 이슈
 
-For large features, use hierarchical IDs:
+큰 기능에는 계층적 ID를 사용합니다.
 
 ```bash
-# Create epic
-bd create "Auth System" -t epic -p 1
-# Returns: bd-a3f8e9
+# epic 생성
+bd create "인증 시스템" -t epic -p 1
+# 반환: bd-a3f8e9
 
-# Child tasks auto-number
-bd create "Design login UI" --parent bd-a3f8e9     # bd-a3f8e9.1
-bd create "Backend validation" --parent bd-a3f8e9  # bd-a3f8e9.2
+# 자식 작업 자동 번호 지정
+bd create "로그인 UI 설계" --parent bd-a3f8e9       # bd-a3f8e9.1
+bd create "백엔드 검증" --parent bd-a3f8e9          # bd-a3f8e9.2
 
-# View hierarchy
+# 계층 보기
 bd dep tree bd-a3f8e9
 ```
 
-## Updating Issues
+## 이슈 업데이트
 
 ```bash
-# Change status
+# 상태 변경
 bd update bd-42 --claim
 
-# Change priority
+# 우선순위 변경
 bd update bd-42 --priority 0
 
-# Add labels
+# 레이블 추가
 bd update bd-42 --add-label urgent
 
-# Multiple changes
+# 여러 항목 변경
 bd update bd-42 --claim --priority 1 --add-label "in-review"
 ```
 
-## Closing Issues
+## 이슈 닫기
 
 ```bash
-# Simple close
+# 단순 닫기
 bd close bd-42
 
-# With reason
-bd close bd-42 --reason "Implemented in PR #123"
+# 이유 포함
+bd close bd-42 --reason "PR #123에서 구현됨"
 
-# JSON output
+# JSON 출력
 bd close bd-42 --json
 ```
 
-## Searching and Filtering
+## 검색 및 필터링
 
 ```bash
-# By status
+# 상태별
 bd list --status open
 bd list --status in_progress
 
-# By priority
+# 우선순위별
 bd list --priority 1
-bd list --priority 0,1  # Multiple
+bd list --priority 0,1  # 여러 값
 
-# By type
+# 유형별
 bd list --type bug
 bd list --type feature,task
 
-# By label
+# 레이블별
 bd list --label-any urgent,critical
 bd list --label-all backend,security
 
-# Combined filters
+# 필터 조합
 bd list --status open --priority 1 --type bug --json
 ```

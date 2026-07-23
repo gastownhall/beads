@@ -1,156 +1,156 @@
 ---
-title: Formulas
-description: Writing declarative TOML or JSON workflow templates with steps, variables, dependencies, gates, and aspects, then cooking them into protos.
+title: Formula
+description: 단계, 변수, 의존성, Gate, aspect가 있는 선언형 TOML 또는 JSON 워크플로 템플릿을 작성하고 Proto로 조리합니다.
 ---
 
-Formulas are declarative workflow templates.
+Formula는 선언형 워크플로 템플릿입니다.
 
-## Formula Format
+## Formula 형식
 
-Formulas can be written in TOML (preferred) or JSON:
+Formula는 TOML(권장) 또는 JSON으로 작성할 수 있습니다.
 
-### TOML Format
+### TOML 형식
 
 ```toml
 formula = "feature-workflow"
-description = "Standard feature development workflow"
+description = "표준 기능 개발 워크플로"
 version = 1
 type = "workflow"
 
 [vars.feature_name]
-description = "Name of the feature"
+description = "기능 이름"
 required = true
 
 [[steps]]
 id = "design"
-title = "Design {{feature_name}}"
+title = "{{feature_name}} 설계"
 type = "human"
-description = "Create design document"
+description = "설계 문서 생성"
 
 [[steps]]
 id = "implement"
-title = "Implement {{feature_name}}"
+title = "{{feature_name}} 구현"
 needs = ["design"]
 
 [[steps]]
 id = "review"
-title = "Code review"
+title = "코드 검토"
 needs = ["implement"]
 type = "human"
 
 [[steps]]
 id = "merge"
-title = "Merge to main"
+title = "main에 merge"
 needs = ["review"]
 ```
 
-### JSON Format
+### JSON 형식
 
 ```json
 {
   "formula": "feature-workflow",
-  "description": "Standard feature development workflow",
+  "description": "표준 기능 개발 워크플로",
   "version": 1,
   "type": "workflow",
   "vars": {
     "feature_name": {
-      "description": "Name of the feature",
+      "description": "기능 이름",
       "required": true
     }
   },
   "steps": [
     {
       "id": "design",
-      "title": "Design {{feature_name}}",
+      "title": "{{feature_name}} 설계",
       "type": "human"
     },
     {
       "id": "implement",
-      "title": "Implement {{feature_name}}",
+      "title": "{{feature_name}} 구현",
       "needs": ["design"]
     }
   ]
 }
 ```
 
-## Formula Types
+## Formula 유형
 
-| Type | Description |
+| 유형 | 설명 |
 |------|-------------|
-| `workflow` | Standard step sequence |
-| `expansion` | Template for expansion operator |
-| `aspect` | Cross-cutting concerns |
+| `workflow` | 표준 단계 순서 |
+| `expansion` | expansion operator용 템플릿 |
+| `aspect` | 횡단 관심사 |
 
-## Variables
+## 변수
 
-Define variables with defaults and constraints:
+기본값과 제약 조건이 있는 변수를 정의합니다.
 
 ```toml
 [vars.version]
-description = "Release version"
+description = "릴리스 버전"
 required = true
 pattern = "^\\d+\\.\\d+\\.\\d+$"
 
 [vars.environment]
-description = "Target environment"
+description = "대상 환경"
 default = "staging"
 enum = ["staging", "production"]
 ```
 
-Use variables in steps:
+단계에서 변수를 사용합니다.
 
 ```toml
 [[steps]]
-title = "Deploy {{version}} to {{environment}}"
+title = "{{version}}을 {{environment}}에 배포"
 ```
 
-## Step Types
+## 단계 유형
 
-A step's `type` sets the issue type of the bead it creates: `task`
-(default), `bug`, `feature`, `epic`, or `chore`. Any other value falls back
-to `task`. Human sign-offs and async waits are expressed with a
-`[steps.gate]` block, not a step type — see [Gates](/workflows/gates).
+단계의 `type`은 생성할 Bead의 이슈 유형을 설정합니다. `task`(기본값), `bug`,
+`feature`, `epic`, `chore`를 사용할 수 있으며 다른 값은 `task`로 대체됩니다. 사람의
+승인과 비동기 대기는 단계 유형이 아니라 `[steps.gate]` block으로 표현합니다.
+[Gate](/workflows/gates)를 참고하세요.
 
-## Dependencies
+## 의존성
 
-### Sequential
+### 순차 실행
 
 ```toml
 [[steps]]
 id = "step1"
-title = "First step"
+title = "첫 단계"
 
 [[steps]]
 id = "step2"
-title = "Second step"
+title = "두 번째 단계"
 needs = ["step1"]
 ```
 
-### Parallel then Join
+### 병렬 실행 후 합류
 
 ```toml
 [[steps]]
 id = "test-unit"
-title = "Unit tests"
+title = "단위 테스트"
 
 [[steps]]
 id = "test-integration"
-title = "Integration tests"
+title = "통합 테스트"
 
 [[steps]]
 id = "deploy"
-title = "Deploy"
-needs = ["test-unit", "test-integration"]  # Waits for both
+title = "배포"
+needs = ["test-unit", "test-integration"]  # 둘 다 대기
 ```
 
-## Gates
+## Gate 워크플로
 
-Add gates for async coordination:
+비동기 조정을 위한 Gate를 추가합니다.
 
 ```toml
 [[steps]]
 id = "approval"
-title = "Manager approval"
+title = "관리자 승인"
 type = "human"
 
 [steps.gate]
@@ -159,59 +159,60 @@ approvers = ["manager"]
 
 [[steps]]
 id = "deploy"
-title = "Deploy to production"
+title = "production에 배포"
 needs = ["approval"]
 ```
 
-## Aspects (Cross-cutting)
+## Aspect(횡단 관심사)
 
-Apply transformations to matching steps:
+일치하는 단계에 변환을 적용합니다.
 
 ```toml
 formula = "security-scan"
 type = "aspect"
 
 [[advice]]
-target = "*.deploy"  # Match all deploy steps
+target = "*.deploy"  # 모든 deploy 단계와 일치
 
 [advice.before]
 id = "security-scan-{step.id}"
-title = "Security scan before {step.title}"
+title = "{step.title} 전 보안 scan"
 ```
 
-## Formula Locations
+## Formula 위치
 
-Formulas are searched in order:
-1. `.beads/formulas/` (project-level)
-2. `~/.beads/formulas/` (user-level)
+Formula는 다음 순서로 검색합니다.
 
-`bd formula list` shows everything visible on the search paths.
+1. `.beads/formulas/`(프로젝트 수준)
+2. `~/.beads/formulas/`(사용자 수준)
 
-## Using Formulas
+`bd formula list`는 검색 경로에서 보이는 모든 Formula를 표시합니다.
+
+## Formula 사용
 
 ```bash
-# List available formulas
+# 사용 가능한 Formula 나열
 bd formula list
 
-# Cook the formula into a proto, then pour it into a molecule
+# Formula를 Proto로 조리한 뒤 Molecule로 pour
 bd cook <formula-file>
 bd mol pour <proto-id> --var key=value
 
-# Preview what would be created
+# 생성될 내용 미리 보기
 bd mol pour <proto-id> --dry-run
 ```
 
-## Creating Custom Formulas
+## 커스텀 Formula 생성
 
-1. Create file: `.beads/formulas/my-workflow.formula.toml`
-2. Define structure (see examples above)
-3. Use with: `bd cook my-workflow` then `bd mol pour <proto-id>`
+1. 파일 생성: `.beads/formulas/my-workflow.formula.toml`
+2. 구조 정의(위 예제 참고)
+3. 사용: `bd cook my-workflow` 실행 후 `bd mol pour <proto-id>` 실행
 
-## Example: Release Formula
+## 예제: release Formula
 
 ```toml
 formula = "release"
-description = "Standard release workflow"
+description = "표준 릴리스 워크플로"
 version = 1
 
 [vars.version]
@@ -220,31 +221,31 @@ pattern = "^\\d+\\.\\d+\\.\\d+$"
 
 [[steps]]
 id = "bump-version"
-title = "Bump version to {{version}}"
+title = "버전을 {{version}}으로 올리기"
 
 [[steps]]
 id = "changelog"
-title = "Update CHANGELOG"
+title = "CHANGELOG 업데이트"
 needs = ["bump-version"]
 
 [[steps]]
 id = "test"
-title = "Run full test suite"
+title = "전체 테스트 suite 실행"
 needs = ["changelog"]
 
 [[steps]]
 id = "build"
-title = "Build release artifacts"
+title = "릴리스 artifact build"
 needs = ["test"]
 
 [[steps]]
 id = "tag"
-title = "Create git tag v{{version}}"
+title = "Git tag v{{version}} 생성"
 needs = ["build"]
 
 [[steps]]
 id = "publish"
-title = "Publish release"
+title = "릴리스 게시"
 needs = ["tag"]
 type = "human"
 ```

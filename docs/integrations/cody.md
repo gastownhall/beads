@@ -1,18 +1,18 @@
 ---
 title: Sourcegraph Cody
-description: Add beads workflow guidance to Sourcegraph Cody through a .cody/rules/beads.md project rules file
+description: .cody/rules/beads.md 프로젝트 규칙 파일로 Sourcegraph Cody에 Beads 워크플로 지침 추가
 ---
 
-Use Beads with Sourcegraph Cody through a project rules file.
+프로젝트 규칙 파일을 통해 Sourcegraph Cody에서 Beads를 사용합니다.
 
 ```bash
 bd setup cody
 bd setup cody --check
 ```
 
-The setup command creates `.cody/rules/beads.md` with Beads workflow guidance.
+설정 명령은 Beads 워크플로 지침이 담긴 `.cody/rules/beads.md`를 생성합니다.
 
-## Remove
+## 제거
 
 ```bash
 bd setup cody --remove

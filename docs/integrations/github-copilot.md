@@ -1,34 +1,37 @@
 ---
 title: GitHub Copilot
-description: Use beads from Copilot Chat in VS Code via the beads-mcp server to track issues in natural language
+description: beads-mcp 서버를 통해 VS Code의 Copilot Chat에서 자연어로 이슈를 추적하며 Beads 사용
 ---
 
-Beads gives Copilot a persistent, structured memory for tracking work: with the MCP server configured, you create, update, and track issues in natural language without leaving the editor.
+Beads는 Copilot에 작업 추적을 위한 영구적이고 구조화된 메모리를 제공합니다. MCP
+서버를 설정하면 편집기를 떠나지 않고 자연어로 이슈를 생성·업데이트·추적할 수 있습니다.
 
-This page covers **Copilot Chat in VS Code via MCP**. For the terminal-based Copilot CLI plugin installed by `bd setup copilot`, see [Copilot CLI](/integrations/copilot-cli).
+이 페이지에서는 **MCP를 통한 VS Code의 Copilot Chat**을 다룹니다. `bd setup
+copilot`으로 설치하는 터미널 기반 Copilot CLI 플러그인은 [Copilot
+CLI](/integrations/copilot-cli)를 참고하세요.
 
-## Prerequisites
+## 사전 요구 사항
 
-- VS Code 1.96+ with the GitHub Copilot extension
-- A GitHub Copilot subscription (Individual, Business, or Enterprise)
-- The beads CLI installed ([installation guide](/getting-started/installation))
-- Python 3.10+ or the `uv` package manager
+- GitHub Copilot 확장이 있는 VS Code 1.96 이상
+- GitHub Copilot 구독(Individual, Business 또는 Enterprise)
+- Beads CLI 설치([설치 가이드](/getting-started/installation))
+- Python 3.10 이상 또는 `uv` package manager
 
-## Setup
+## 설정
 
-### Quick Setup
+### 빠른 설정
 
-1. Install beads-mcp:
+1. beads-mcp를 설치합니다.
    ```bash
-   # Using uv (recommended)
+   # uv 사용(권장)
    uv tool install beads-mcp
 
-   # Or using pip / pipx
+   # 또는 pip/pipx 사용
    pip install beads-mcp
    pipx install beads-mcp
    ```
 
-2. Create `.vscode/mcp.json` in your project:
+2. 프로젝트에 `.vscode/mcp.json`을 생성합니다.
    ```json
    {
      "servers": {
@@ -39,9 +42,9 @@ This page covers **Copilot Chat in VS Code via MCP**. For the terminal-based Cop
    }
    ```
 
-   **For all projects:** Add to VS Code user-level MCP config:
+   **모든 프로젝트에 적용:** VS Code 사용자 수준 MCP 설정에 추가합니다.
 
-   | Platform | Path |
+   | 플랫폼 | 경로 |
    |----------|------|
    | macOS | `~/Library/Application Support/Code/User/mcp.json` |
    | Linux | `~/.config/Code/User/mcp.json` |
@@ -58,153 +61,164 @@ This page covers **Copilot Chat in VS Code via MCP**. For the terminal-based Cop
    }
    ```
 
-3. Initialize beads:
+3. Beads를 초기화합니다.
    ```bash
    bd init --quiet
    ```
 
-   This creates a `.beads/` directory with the issue database.
+   이슈 데이터베이스가 있는 `.beads/` 디렉터리를 생성합니다.
 
-4. Reload VS Code
+4. VS Code를 다시 로드합니다.
 
-### Verify Setup
+### 설정 확인
 
-Ask Copilot Chat: "What beads issues are ready to work on?"
+Copilot Chat에 "작업할 준비가 된 Beads 이슈는 무엇인가요?"라고 물어보세요.
 
-## Using Natural Language
+## 자연어 사용
 
-With MCP configured, interact naturally:
+MCP를 설정한 뒤 자연어로 대화하세요.
 
 ```
-You: Create a bug for the login timeout
-Copilot: Created bd-42: Login timeout bug
+사용자: 로그인 timeout 버그를 만들어 줘
+Copilot: bd-42 생성: 로그인 timeout 버그
 
-You: What issues are ready?
-Copilot: 3 issues ready: bd-42, bd-99, bd-17
+사용자: 준비된 이슈는 무엇이야?
+Copilot: 준비된 이슈 3개: bd-42, bd-99, bd-17
 
-You: Claim bd-42, I'll take it
-Copilot: Claimed bd-42 and started work
+사용자: bd-42를 claim해 줘. 내가 맡을게
+Copilot: bd-42를 claim하고 작업 시작
 
-You: I found a related bug - the session token isn't refreshed.
-     File it, linked to bd-42.
-Copilot: Created bd-103: Session token not refreshed
-         Linked as discovered-from bd-42
+사용자: 관련 버그를 발견했어. session token이 갱신되지 않아.
+       bd-42에 연결해서 등록해 줘.
+Copilot: bd-103 생성: session token이 갱신되지 않음
+         bd-42의 discovered-from으로 연결
 
-You: Close bd-42 with reason "Fixed timeout handling"
-Copilot: Closed bd-42: Fixed timeout handling
+사용자: bd-42를 "timeout 처리 수정" 사유로 종료해 줘
+Copilot: bd-42 종료: timeout 처리 수정
 ```
 
-Syncing stays on the CLI: run `bd dolt push` at the end of a session. There is no MCP push tool.
+동기화는 CLI에서 수행합니다. 세션 종료 시 `bd dolt push`를 실행하세요. MCP push
+도구는 없습니다.
 
-## MCP Tools
+## MCP 도구
 
-| Tool | Description | You say |
+| 도구 | 설명 | 요청 예시 |
 |------|-------------|---------|
-| `ready` | List unblocked issues | "What can I work on?" |
-| `list` | List issues with filters | "Show all open bugs" |
-| `show` | Show issue details, including dependencies and dependents | "Show bd-42 details" |
-| `create` | Create new issue | "Create a task for refactoring" |
-| `claim` | Atomically claim an issue (assignee + in_progress) | "I'll take bd-42" |
-| `update` | Update issue fields | "Set bd-42 to priority 1" |
-| `close` | Close an issue | "Complete bd-42" |
-| `dep` | Add dependency | "bd-99 blocks bd-42" |
-| `blocked` | Show blocked issues and their blockers | "What's blocking my work?" |
-| `stats` | Issue counts and average lead time | "How's the backlog?" |
+| `ready` | 차단되지 않은 이슈 나열 | "무엇을 작업할 수 있어?" |
+| `list` | 필터를 적용하여 이슈 나열 | "열린 버그를 모두 보여 줘" |
+| `show` | 의존성과 종속 항목을 포함한 이슈 상세 정보 표시 | "bd-42 상세 정보를 보여 줘" |
+| `create` | 새 이슈 생성 | "refactoring 작업을 만들어 줘" |
+| `claim` | 이슈를 원자적으로 claim(assignee 및 in_progress) | "bd-42를 내가 맡을게" |
+| `update` | 이슈 필드 업데이트 | "bd-42를 우선순위 1로 설정해 줘" |
+| `close` | 이슈 종료 | "bd-42를 완료해 줘" |
+| `dep` | 의존성 추가 | "bd-99가 bd-42를 차단해" |
+| `blocked` | 차단된 이슈와 차단 요소 표시 | "내 작업을 무엇이 차단하고 있어?" |
+| `stats` | 이슈 수와 평균 lead time | "backlog 상태가 어때?" |
 
-The server also exposes `reopen`, `comment`, `comments`, `note`, `context`, and `admin`; call `discover_tools` for the full catalog.
+서버는 `reopen`, `comment`, `comments`, `note`, `context`, `admin`도 노출합니다.
+전체 catalog는 `discover_tools`를 호출하여 확인하세요.
 
-## Copilot Instructions
+## Copilot 지침
 
-Optionally add `.github/copilot-instructions.md`:
+선택적으로 `.github/copilot-instructions.md`를 추가하세요.
 
 ```markdown
-## Issue Tracking
+## 이슈 추적
 
-This project uses **bd (beads)** for issue tracking.
-Run `bd prime` for workflow context.
+이 프로젝트는 이슈 추적에 **bd(Beads)**를 사용합니다.
+워크플로 컨텍스트가 필요하면 `bd prime`을 실행합니다.
 
-Quick reference:
-- `bd ready` - Find unblocked work
-- `bd create "Title" --type task --priority 2` - Create issue
-- `bd close <id>` - Complete work
-- `bd dolt push` - Push changes to Dolt remote (run at session end)
+빠른 참조:
+- `bd ready` - 차단되지 않은 작업 찾기
+- `bd create "제목" --type task --priority 2` - 이슈 생성
+- `bd close <id>` - 작업 완료
+- `bd dolt push` - 변경 사항을 Dolt 원격에 push(세션 종료 시 실행)
 ```
 
-## CLI vs MCP
+## CLI와 MCP 비교
 
-| Approach | Best for | Trade-off |
+| 방식 | 적합한 용도 | 절충점 |
 |----------|----------|-----------|
-| **MCP (Copilot Chat)** | Natural language, discovery | Higher token overhead |
-| **CLI (terminal)** | Scripting, precision, speed | Requires shell access |
+| **MCP(Copilot Chat)** | 자연어, 탐색 | 더 큰 토큰 오버헤드 |
+| **CLI(터미널)** | scripting, 정밀성, 속도 | shell 접근 필요 |
 
-Both work against the same database - use MCP for conversational work, the CLI for quick commands. See [MCP Server](/integrations/mcp-server) for the full trade-off discussion.
+둘 다 같은 데이터베이스에서 작동합니다. 대화형 작업에는 MCP를, 빠른 명령에는 CLI를
+사용하세요. 전체 절충점은 [MCP 서버](/integrations/mcp-server)를 참고하세요.
 
-## Troubleshooting
+## 문제 해결
 
-### Tools not appearing
+### 도구가 표시되지 않음
 
-1. Check VS Code 1.96+
-2. Verify mcp.json syntax is valid JSON
-3. Reload VS Code window
-4. Check Output panel for MCP errors
+1. VS Code 1.96 이상인지 확인합니다.
+2. `mcp.json` 문법이 유효한 JSON인지 확인합니다.
+3. VS Code window를 다시 로드합니다.
+4. Output panel에서 MCP 오류를 확인합니다.
 
 ### "beads-mcp not found"
 
 ```bash
-# Check installation
+# 설치 확인
 which beads-mcp
 pip show beads-mcp
 
-# uv installs to ~/.local/bin - make sure it's on PATH
+# uv는 ~/.local/bin에 설치하므로 PATH 포함 여부 확인
 export PATH="$HOME/.local/bin:$PATH"
 
-# If installed with pip, find it
+# pip로 설치했다면 위치 찾기
 pip show beads-mcp | grep Location
 
-# Reinstall if needed
+# 필요한 경우 다시 설치
 uv tool install beads-mcp --force
 ```
 
-### No database found
+### 데이터베이스를 찾을 수 없음
 
 ```bash
 bd init --quiet
 ```
 
-### Changes not persisting
+### 변경 사항이 유지되지 않음
 
-Push to the Dolt remote at the end of your session, from the terminal:
+세션 종료 시 터미널에서 Dolt 원격으로 push하세요.
 
 ```bash
 bd dolt push
 ```
 
-### Organization policies blocking MCP
+### 조직 정책이 MCP를 차단함
 
-For Copilot Business/Enterprise, your organization must enable the "MCP servers in Copilot" policy. Contact your admin if MCP tools don't appear despite a correct config.
+Copilot Business/Enterprise에서는 조직이 `MCP servers in Copilot` 정책을 활성화해야
+합니다. 설정이 올바른데도 MCP 도구가 표시되지 않으면 관리자에게 문의하세요.
 
-## FAQ
+## 자주 묻는 질문
 
-### Do I need to clone beads?
+### Beads를 클론해야 하나요?
 
-**No.** Beads is a system-wide CLI tool. Install once, use everywhere. The `.beads/` directory in your project only contains the issue database.
+**아니요.** Beads는 시스템 전체 CLI 도구입니다. 한 번 설치하고 어디서나 사용하세요.
+프로젝트의 `.beads/` 디렉터리에는 이슈 데이터베이스만 들어 있습니다.
 
-### What about git hooks?
+### Git hook은 어떤 역할을 하나요?
 
-Git hooks are optional. They refresh exports and legacy fallback checks, while issue sync uses `bd dolt push` / `bd dolt pull`. They never modify your source code; skip them with `bd init --skip-hooks`.
+Git hook은 선택 사항입니다. export와 legacy fallback 검사를 갱신하며 이슈 동기화에는
+`bd dolt push` / `bd dolt pull`을 사용합니다. 소스 코드를 수정하지 않으며 `bd init
+--skip-hooks`로 건너뛸 수 있습니다.
 
-### Can I use beads without Copilot?
+### Copilot 없이 Beads를 사용할 수 있나요?
 
-Yes. The same database works from the terminal, [Claude Code](/integrations/claude-code), [Cursor](/integrations/cursor), [Aider](/integrations/aider), and any editor with MCP or shell access.
+예. 같은 데이터베이스를 터미널, [Claude Code](/integrations/claude-code),
+[Cursor](/integrations/cursor), [Aider](/integrations/aider), MCP 또는 shell에 접근할
+수 있는 모든 편집기에서 사용할 수 있습니다.
 
-### Does this work with Copilot in other editors?
+### 다른 편집기의 Copilot에서도 작동하나요?
 
-This page covers VS Code. For JetBrains IDEs, check whether your IDE supports MCP; the config location differs. For Neovim, use the CLI directly. For the terminal, see [Copilot CLI](/integrations/copilot-cli).
+이 페이지는 VS Code를 다룹니다. JetBrains IDE에서는 해당 IDE의 MCP 지원 여부를
+확인하세요. 설정 위치가 다릅니다. Neovim에서는 CLI를 직접 사용하고, 터미널에서는
+[Copilot CLI](/integrations/copilot-cli)를 참고하세요.
 
-## See Also
+## 관련 문서
 
-- [MCP Server](/integrations/mcp-server) - Detailed MCP configuration
-- [Copilot CLI](/integrations/copilot-cli) - Terminal-based Copilot integration
-- [Quickstart](/getting-started/quickstart) - bd command basics
-- [Installation](/getting-started/installation) - Full install guide
-- [Agent Instructions](https://github.com/gastownhall/beads/blob/main/AGENT_INSTRUCTIONS.md) - Full agent workflow reference
+- [MCP 서버](/integrations/mcp-server) - 상세 MCP 설정
+- [Copilot CLI](/integrations/copilot-cli) - 터미널 기반 Copilot 통합
+- [빠른 시작](/getting-started/quickstart) - `bd` 명령 기본 사항
+- [설치](/getting-started/installation) - 전체 설치 가이드
+- [에이전트 지침](https://github.com/gastownhall/beads/blob/main/AGENT_INSTRUCTIONS.md) - 전체 에이전트 워크플로 참조

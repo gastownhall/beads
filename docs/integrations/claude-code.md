@@ -1,35 +1,38 @@
 ---
 title: Claude Code
-description: Wire beads into Claude Code with a SessionStart hook that primes context, using the CLI instead of MCP
+description: MCP 대신 CLI를 사용하고 컨텍스트를 준비하는 SessionStart hook으로 Claude Code에 Beads 연결
 ---
 
-How to use beads with Claude Code.
+Claude Code에서 Beads를 사용하는 방법입니다.
 
-## Setup
+## 설정
 
-### Quick Setup
+### 빠른 설정
 
 ```bash
 bd setup claude
 ```
 
-This installs:
-- **SessionStart hook** - Runs `bd prime --hook-json` when a session starts. SessionStart also fires after context compaction, so the same hook refreshes context automatically.
-- **CLAUDE.md pointer** - A minimal beads section in your project's `CLAUDE.md` (skipped if `CLAUDE.md` is a symlink).
+다음 항목을 설치합니다.
 
-By default the hook is written to the project's `.claude/settings.json`. Variants:
+- **SessionStart hook** - 세션 시작 시 `bd prime --hook-json`을 실행합니다. SessionStart는 컨텍스트 압축 후에도 실행되므로 같은 hook이 컨텍스트를 자동 갱신합니다.
+- **CLAUDE.md 포인터** - 프로젝트 `CLAUDE.md`의 minimal Beads 섹션입니다. `CLAUDE.md`가 symlink이면 건너뜁니다.
+
+기본적으로 hook은 프로젝트의 `.claude/settings.json`에 작성됩니다. 변형은 다음과 같습니다.
 
 ```bash
-bd setup claude --global   # Install to ~/.claude/settings.json instead
-bd setup claude --stealth  # Stealth mode: flush only, no git operations
-bd setup claude --remove   # Remove the hook and the CLAUDE.md section
+bd setup claude --global   # 대신 ~/.claude/settings.json에 설치
+bd setup claude --stealth  # Stealth 모드: flush만 수행, Git 작업 없음
+bd setup claude --remove   # hook과 CLAUDE.md 섹션 제거
 ```
 
-If the [beads plugin](/integrations/claude-code-plugin) is enabled, `bd setup claude` skips writing hooks - the plugin provides its own, and duplicates would run `bd prime` twice per session.
+[Beads 플러그인](/integrations/claude-code-plugin)이 활성화되어 있으면 플러그인이
+자체 hook을 제공하므로 `bd setup claude`는 hook 작성을 건너뜁니다. 중복되면 세션마다
+`bd prime`이 두 번 실행됩니다.
 
-### Manual Setup
+### 수동 설정
 
-Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
+`.claude/settings.json`(프로젝트) 또는 `~/.claude/settings.json`(전역)에 추가하세요.
 
 ```json
 {
@@ -46,164 +49,174 @@ Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (global):
 }
 ```
 
-The `--hook-json` flag wraps the output in the hook JSON envelope Claude Code expects. No `PreCompact` hook is needed - SessionStart fires again after compaction.
+`--hook-json` flag는 출력을 Claude Code가 기대하는 hook JSON envelope로 감쌉니다.
+압축 후 SessionStart가 다시 실행되므로 `PreCompact` hook은 필요하지 않습니다.
 
-### Verify Setup
+### 설정 확인
 
 ```bash
 bd setup claude --check
 ```
 
-## How It Works
+## 작동 방식
 
-1. **Session starts** → `bd prime` injects ~1-2k tokens of context
-2. **You work** → Use `bd` CLI commands directly
-3. **Session compacts** → SessionStart fires again and `bd prime` refreshes workflow context
-4. **Session ends** → `bd dolt push` syncs changes
+1. **세션 시작**: `bd prime`이 약 1~2천 token의 컨텍스트를 주입합니다.
+2. **작업**: `bd` CLI 명령을 직접 사용합니다.
+3. **세션 압축**: SessionStart가 다시 실행되고 `bd prime`이 워크플로 컨텍스트를 갱신합니다.
+4. **세션 종료**: `bd dolt push`가 변경 사항을 동기화합니다.
 
-### Why CLI + hooks instead of MCP?
+### MCP 대신 CLI 및 hook을 사용하는 이유
 
-Context efficiency. MCP tool schemas can add 10-50k tokens to every request; `bd prime` adds ~1-2k tokens of workflow context - 10-50x less overhead, which means lower cost, lower latency, and better model attention. Prefer CLI + hooks in any environment with shell access; use the [MCP server](/integrations/mcp-server) only where the CLI is unavailable, such as Claude Desktop.
+컨텍스트 효율 때문입니다. MCP 도구 schema는 요청마다 1만~5만 token을 추가할 수
+있지만 `bd prime`은 약 1~2천 token의 워크플로 컨텍스트를 추가합니다. overhead가
+10~50배 적어 비용과 지연 시간이 줄고 모델의 주의력이 향상됩니다. shell에 접근할 수
+있는 환경에서는 CLI 및 hook을 권장하며, Claude Desktop처럼 CLI를 사용할 수 없는
+곳에서만 [MCP 서버](/integrations/mcp-server)를 사용하세요.
 
-### Why not Claude Skills?
+### Claude Skill을 사용하지 않는 이유
 
-Beads doesn't ship or require Claude Skills (`.claude/skills/`). `bd prime` already delivers the workflow context, and the workflow fits a simple command set (ready → create → update → close → sync). Skills are also Claude-specific, which would break beads' editor-agnostic approach - the same CLI works in Cursor, Windsurf, and every other shell-capable editor. You can create your own Skills on top of beads, but none are needed.
+Beads는 Claude Skill(`.claude/skills/`)을 제공하거나 요구하지 않습니다. `bd prime`이
+이미 워크플로 컨텍스트를 전달하며, 워크플로는 ready, create, update, close, sync라는
+간단한 명령 집합에 맞습니다. Skill은 Claude 전용이므로 편집기에 독립적인 Beads의
+방식과 맞지 않습니다. 같은 CLI가 Cursor, Windsurf 등 shell 지원 편집기에서 모두
+작동합니다. Beads 위에 자체 Skill을 만들 수 있지만 필수는 아닙니다.
 
-## Essential Commands for Agents
+## 에이전트 필수 명령
 
-### Creating Issues
+### 이슈 생성
 
 ```bash
-# Always include description for context
-bd create "Fix authentication bug" \
-  --description="Login fails with special characters in password" \
+# 컨텍스트를 위해 항상 설명 포함
+bd create "인증 버그 수정" \
+  --description="비밀번호에 특수 문자가 있으면 로그인 실패" \
   -t bug -p 1 --json
 
-# Link discovered issues
-bd create "Found SQL injection" \
-  --description="User input not sanitized in query builder" \
+# 발견한 이슈 연결
+bd create "SQL injection 발견" \
+  --description="query builder에서 사용자 입력이 sanitize되지 않음" \
   --deps discovered-from:bd-42 --json
 ```
 
-### Working on Issues
+### 이슈 작업
 
 ```bash
-# Find ready work
+# 준비된 작업 찾기
 bd ready --json
 
-# Start work
+# 작업 시작
 bd update bd-42 --claim --json
 
-# Complete work
-bd close bd-42 --reason "Fixed in commit abc123" --json
+# 작업 완료
+bd close bd-42 --reason "commit abc123에서 수정" --json
 ```
 
-### Querying
+### 조회
 
 ```bash
-# List open issues
+# 열린 이슈 나열
 bd list --status open --json
 
-# Show issue details
+# 이슈 상세 정보 표시
 bd show bd-42 --json
 
-# Check blocked issues
+# 차단된 이슈 확인
 bd blocked --json
 ```
 
-### Syncing
+### 동기화
 
 ```bash
-# ALWAYS run at session end
+# 세션 종료 시 항상 실행
 bd dolt push
 ```
 
-## Best Practices
+## 모범 사례
 
-### Always Use `--json`
+### 항상 `--json` 사용
 
 ```bash
-bd list --json          # Parse programmatically
-bd create "Task" --json # Get issue ID from output
-bd show bd-42 --json    # Structured data
+bd list --json            # 프로그래밍 방식으로 parse
+bd create "작업" --json  # 출력에서 이슈 ID 가져오기
+bd show bd-42 --json      # 구조화된 데이터
 ```
 
-### Always Include Descriptions
+### 항상 설명 포함
 
 ```bash
-# Good
-bd create "Fix auth bug" \
-  --description="Login fails when password contains quotes" \
+# 좋은 예
+bd create "인증 버그 수정" \
+  --description="비밀번호에 따옴표가 있으면 로그인 실패" \
   -t bug -p 1 --json
 
-# Bad - no context for future work
-bd create "Fix auth bug" -t bug -p 1 --json
+# 나쁜 예 - 향후 작업을 위한 컨텍스트 없음
+bd create "인증 버그 수정" -t bug -p 1 --json
 ```
 
-### Link Related Work
+### 관련 작업 연결
 
 ```bash
-# When you discover issues during work
-bd create "Found related bug" \
+# 작업 중 이슈를 발견한 경우
+bd create "관련 버그 발견" \
   --deps discovered-from:bd-current --json
 ```
 
-### Push Before Session End
+### 세션 종료 전 push
 
 ```bash
-# ALWAYS run before ending
+# 종료 전에 항상 실행
 bd dolt push
 ```
 
-## Plugin (Optional)
+## 플러그인(선택 사항)
 
-For slash commands and enhanced UX, install the [beads plugin](/integrations/claude-code-plugin):
+slash 명령과 향상된 UX를 사용하려면 [Beads 플러그인](/integrations/claude-code-plugin)을 설치하세요.
 
 ```bash
-# In Claude Code
+# Claude Code에서 실행
 /plugin marketplace add gastownhall/beads
 /plugin install beads
-# Restart Claude Code
+# Claude Code 다시 시작
 ```
 
-Adds slash commands:
-- `/beads:ready` - Show ready work
-- `/beads:create` - Create issue
-- `/beads:show` - Show issue
-- `/beads:update` - Update issue
-- `/beads:close` - Close issue
+다음 slash 명령을 추가합니다.
 
-## Troubleshooting
+- `/beads:ready` - 준비된 작업 표시
+- `/beads:create` - 이슈 생성
+- `/beads:show` - 이슈 표시
+- `/beads:update` - 이슈 업데이트
+- `/beads:close` - 이슈 종료
 
-### Context not injected
+## 문제 해결
+
+### 컨텍스트가 주입되지 않음
 
 ```bash
-# Check hook setup
+# hook 설정 확인
 bd setup claude --check
 
-# Manually prime
+# 수동으로 prime
 bd prime
 ```
 
-### Changes not syncing
+### 변경 사항이 동기화되지 않음
 
 ```bash
-# Force push
+# 강제 push
 bd dolt push
 
-# Check system health
+# 시스템 상태 확인
 bd doctor
 ```
 
-### Database not found
+### 데이터베이스를 찾을 수 없음
 
 ```bash
-# Initialize beads
+# Beads 초기화
 bd init --quiet
 ```
 
-## See Also
+## 관련 문서
 
-- [Beads Claude Code Plugin](/integrations/claude-code-plugin) - Packaged plugin with slash commands
-- [MCP Server](/integrations/mcp-server) - For MCP-only environments
-- [IDE Setup](/getting-started/ide-setup) - Other editors
+- [Beads Claude Code 플러그인](/integrations/claude-code-plugin) - slash 명령이 포함된 package형 플러그인
+- [MCP 서버](/integrations/mcp-server) - MCP 전용 환경
+- [IDE 설정](/getting-started/ide-setup) - 기타 편집기

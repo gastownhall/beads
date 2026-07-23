@@ -1,223 +1,218 @@
 ---
-title: Federation Setup Guide
-description: Configure peer-to-peer sync of beads databases across workspaces with Dolt remotes, sovereignty tiers, and topologies
+title: Federation 설정 가이드
+description: Dolt 원격, sovereignty tier, topology로 워크스페이스 간 Beads 데이터베이스 peer-to-peer 동기화 설정
 ---
 
-Federation enables peer-to-peer synchronization of beads databases between
-multiple workspaces using Dolt remotes. Each workspace maintains its own database
-while sharing work items with configured peers.
+federation은 Dolt 원격을 사용하여 여러 워크스페이스의 Beads 데이터베이스를
+peer-to-peer로 동기화합니다. 각 워크스페이스는 자체 데이터베이스를 유지하면서 설정된
+peer와 작업 항목을 공유합니다.
 
-## Overview
+## 개요
 
-Federation uses Dolt's distributed version control capabilities to sync issue
-data between independent teams or locations. Key benefits:
+federation은 Dolt의 분산 버전 관리 기능으로 독립적인 팀이나 위치 간 이슈 데이터를
+동기화합니다. 주요 이점은 다음과 같습니다.
 
-- **Peer-to-peer**: No central server required; each town is autonomous
-- **Database-native versioning**: Built on Dolt's version control, not file exports
-- **Flexible infrastructure**: Works with DoltHub, S3, GCS, local paths, or SSH
-- **Data sovereignty**: Configurable tiers for compliance (GDPR, regional laws)
+- **peer-to-peer**: 중앙 서버가 필요 없고 각 town이 자율적으로 작동합니다.
+- **데이터베이스 native versioning**: 파일 export가 아닌 Dolt 버전 관리를 기반으로 합니다.
+- **유연한 인프라**: DoltHub, S3, GCS, 로컬 경로 또는 SSH와 함께 작동합니다.
+- **데이터 sovereignty**: GDPR, 지역 법률 등 규정 준수를 위한 tier를 설정할 수 있습니다.
 
-## Prerequisites
+## 사전 요구 사항
 
-1. **Dolt backend**: Federation requires the Dolt storage backend (the only supported backend)
+1. **Dolt backend**: federation에는 유일하게 지원되는 Dolt 저장소 backend가 필요합니다.
 
-## Configuration
+## 설정
 
-### Enable Federation-Compatible Sync
+### federation 호환 동기화 활성화
 
-Edit `.beads/config.yaml` or `~/.config/bd/config.yaml`:
+`.beads/config.yaml` 또는 `~/.config/bd/config.yaml`을 편집하세요.
 
 ```yaml
 federation:
-  remote: dolthub://myorg/beads          # Primary remote (optional)
-  sovereignty: T2                        # Data sovereignty tier
+  remote: dolthub://myorg/beads          # 주 원격(선택 사항)
+  sovereignty: T2                        # 데이터 sovereignty tier
 ```
 
-Or via environment variables:
+또는 환경 변수를 사용하세요.
 
 ```bash
 export BD_FEDERATION_REMOTE="dolthub://myorg/beads"
 export BD_FEDERATION_SOVEREIGNTY="T2"
 ```
 
-### Data Sovereignty Tiers
+### 데이터 주권 등급
 
-| Tier | Description | Use Case |
+| 등급 | 설명 | 사용 사례 |
 |------|-------------|----------|
-| T1 | No restrictions | Public data |
-| T2 | Organization-level | Regional/company compliance |
-| T3 | Pseudonymous | Identifiers removed |
-| T4 | Anonymous | Maximum privacy |
+| T1 | 제한 없음 | 공개 데이터 |
+| T2 | 조직 수준 | 지역/회사 규정 준수 |
+| T3 | 가명화 | 식별자 제거 |
+| T4 | 익명화 | 최대 개인정보 보호 |
 
-## Adding Federation Peers
+## federation peer 추가
 
-Use `bd federation add-peer` to register remote peers:
+`bd federation add-peer`로 원격 peer를 등록하세요.
 
 ```bash
 bd federation add-peer <name> <endpoint>
 ```
 
-### Peer Name Rules
+### peer 이름 규칙
 
-- Must start with a letter
-- Alphanumeric, dash, and underscore only
-- Maximum 64 characters
+- 문자로 시작해야 합니다.
+- 영숫자, dash, underscore만 사용할 수 있습니다.
+- 최대 64자입니다.
 
-### Supported Endpoint Formats
+### 지원되는 endpoint 형식
 
-| Format | Example | Description |
+| 형식 | 예제 | 설명 |
 |--------|---------|-------------|
-| DoltHub | `dolthub://org/repo` | DoltHub hosted repository |
+| DoltHub | `dolthub://org/repo` | DoltHub가 host하는 저장소 |
 | Google Cloud | `gs://bucket/path` | Google Cloud Storage |
 | Amazon S3 | `s3://bucket/path` | Amazon S3 |
-| Local | `file:///path/to/backup` | Local filesystem |
-| HTTPS | `https://host/path` | HTTPS remote |
-| SSH | `ssh://host/path` | SSH remote |
-| Git SSH | `git@host:path` | Git SSH shorthand |
+| 로컬 | `file:///path/to/backup` | 로컬 filesystem |
+| HTTPS | `https://host/path` | HTTPS 원격 |
+| SSH | `ssh://host/path` | SSH 원격 |
+| Git SSH | `git@host:path` | Git SSH 단축 형식 |
 
-### Examples
+### 예제
 
 ```bash
-# Add a staging environment on DoltHub
+# DoltHub에 staging 환경 추가
 bd federation add-peer staging dolthub://myorg/staging-beads
 
-# Add a cloud backup
+# cloud backup 추가
 bd federation add-peer backup gs://mybucket/beads-backup
 bd federation add-peer backup-s3 s3://mybucket/beads-backup
 
-# Add a local backup
+# 로컬 backup 추가
 bd federation add-peer local file:///home/user/beads-backup
 
-# Add a partner organization
+# partner 조직 추가
 bd federation add-peer partner-town dolthub://partner-org/beads
 ```
 
-### Credentials
+### 자격 증명
 
-Peers configured with `--user` (and optionally `--password`, otherwise
-prompted interactively) store SQL credentials AES-256 encrypted, locally.
-Stored credentials are used automatically during sync:
+`--user`와 선택적 `--password`로 설정한 peer는 SQL credential을 AES-256으로
+암호화하여 로컬에 저장합니다. 비밀번호를 생략하면 대화형으로 요청합니다. 저장된
+credential은 동기화할 때 자동으로 사용됩니다.
 
 ```bash
 bd federation add-peer town-gamma 192.168.1.100:3306/beads --user sync-bot
 ```
 
-### JSON Output
+### JSON 출력
 
-For scripting, use the `--json` flag:
+scripting에는 `--json` flag를 사용하세요.
 
 ```bash
 bd --json federation add-peer staging dolthub://myorg/staging-beads
 # {"added":"staging","url":"dolthub://myorg/staging-beads","has_auth":false,"sovereignty":""}
 ```
 
-### Verify Configuration
+### 설정 확인
 
-List configured peers:
+설정된 peer를 나열하세요.
 
 ```bash
 bd federation list-peers
 ```
 
-## Syncing with Peers
+## peer와 동기화
 
-Use `bd federation sync` to pull from and push to peer towns, and
-`bd federation status` to check sync state without transferring data.
+`bd federation sync`로 peer town에서 pull하고 push하며, `bd federation status`로
+데이터를 전송하지 않고 동기화 상태를 확인합니다.
 
 ```bash
-# Sync with all peers
+# 모든 peer와 동기화
 bd federation sync
 
-# Sync with a specific peer
+# 특정 peer와 동기화
 bd federation sync --peer town-beta
 
-# Handle conflicts
-bd federation sync --strategy theirs  # or 'ours'
+# 충돌 처리
+bd federation sync --strategy theirs  # 또는 'ours'
 
-# Check status (ahead/behind, reachability, conflicts)
+# 상태 확인(ahead/behind, reachability, 충돌)
 bd federation status
 bd federation status --peer town-beta
 ```
 
-Without `--strategy`, a sync that hits merge conflicts pauses and reports the
-conflicting tables for manual resolution instead of auto-resolving.
+`--strategy`가 없을 때 merge 충돌이 발생하면 동기화를 일시 중지하고 자동으로
+해결하는 대신 수동 해결할 충돌 table을 보고합니다.
 
-### Topologies
+### 토폴로지
 
-| Pattern | Description | Use Case |
+| 패턴 | 설명 | 사용 사례 |
 |---------|-------------|----------|
-| Hub-spoke | Central hub, satellites sync to hub | Team with central coordination |
-| Mesh | All peers sync with each other | Decentralized collaboration |
-| Hierarchical | Tree of hubs | Multi-team organizations |
+| hub-spoke | 중앙 hub, satellite가 hub와 동기화 | 중앙 조정을 사용하는 팀 |
+| mesh | 모든 peer가 서로 동기화 | 분산 협업 |
+| 계층형 | hub 트리 | 다중 팀 조직 |
 
-## Architecture Notes
+## 아키텍처 참고 사항
 
-### How It Works
+### 작동 방식
 
-1. Each workspace has its own Dolt database
-2. `add-peer` registers a Dolt remote (similar to `git remote add`)
-3. `bd federation sync` pushes and pulls commits between peers
-4. Conflict resolution follows the configured strategy
+1. 각 워크스페이스에 자체 Dolt 데이터베이스가 있습니다.
+2. `add-peer`가 `git remote add`와 비슷하게 Dolt 원격을 등록합니다.
+3. `bd federation sync`가 peer 간 commit을 push하고 pull합니다.
+4. 충돌 해결은 설정된 strategy를 따릅니다.
 
-When run against a Dolt SQL server, federation uses two ports: MySQL (3306)
-for multi-writer SQL access, and remotesapi (8080) for peer-to-peer
-push/pull:
+Dolt SQL 서버에서 실행할 때 federation은 포트 두 개를 사용합니다. 다중 writer SQL
+접근에는 MySQL(3306), peer-to-peer push/pull에는 remotesapi(8080)를 사용합니다.
 
-```
-┌─────────────────┐         ┌─────────────────┐
-│  Workspace A    │◄───────►│  Workspace B    │
-│  dolt sql-server│  sync   │  dolt sql-server│
-│  :3306 (sql)    │         │  :3306 (sql)    │
-│  :8080 (remote) │         │  :8080 (remote) │
-└─────────────────┘         └─────────────────┘
+```mermaid
+flowchart LR
+    A["작업 공간 A<br/>dolt sql-server<br/>:3306 (SQL)<br/>:8080 (원격)"]
+    B["작업 공간 B<br/>dolt sql-server<br/>:3306 (SQL)<br/>:8080 (원격)"]
+    A <-->|동기화| B
 ```
 
-### Multi-Repo Support
+### 다중 저장소 지원
 
-Issues track their `SourceSystem` to identify which federated system created
-them. This enables proper attribution and trust chains across organizations.
+이슈는 `SourceSystem`을 추적하여 어느 federated system에서 생성되었는지 식별합니다.
+이를 통해 조직 간 출처 표시와 trust chain을 올바르게 유지할 수 있습니다.
 
-### Connectivity
+### 연결성
 
-Remote connectivity is validated on first push/pull operation, not when adding
-the peer. This allows configuring remotes before infrastructure is ready.
+원격 연결은 peer를 추가할 때가 아니라 첫 push/pull 작업에서 검증합니다. 따라서
+인프라가 준비되기 전에 원격을 설정할 수 있습니다.
 
-## Planned Features
+## 계획된 기능
 
-The following operation has infrastructure support but is not yet exposed as
-a command:
+다음 작업은 인프라에서 지원하지만 아직 명령으로 노출되지 않았습니다.
 
-- `bd federation push <peer>` / `bd federation pull <peer>` - single-direction
-  sync with one peer. `bd federation sync` already covers the bidirectional
-  case.
+- `bd federation push <peer>` / `bd federation pull <peer>` - peer 하나와 단방향
+  동기화합니다. 양방향은 이미 `bd federation sync`가 지원합니다.
 
-## Troubleshooting
+## 문제 해결
 
 ### "requires direct database access"
 
-Federation commands require the Dolt backend with direct database access. Ensure
-you have the Dolt backend configured for federation operations.
+federation 명령에는 데이터베이스에 직접 접근할 수 있는 Dolt backend가 필요합니다.
+federation 작업용 Dolt backend가 설정되었는지 확인하세요.
 
 ### "peer already exists"
 
-A peer with that name is already configured. Use a different name or check
-existing peers with `bd federation list-peers`.
+해당 이름의 peer가 이미 설정되어 있습니다. 다른 이름을 사용하거나 `bd federation
+list-peers`로 기존 peer를 확인하세요.
 
-### Invalid endpoint format
+### 잘못된 endpoint 형식
 
-Ensure your endpoint matches one of the supported formats above. The scheme
-must be one of: `dolthub://`, `gs://`, `s3://`, `file://`, `https://`, `ssh://`,
-or git SSH format (`git@host:path`).
+endpoint가 위의 지원 형식 중 하나와 일치하는지 확인하세요. scheme은 `dolthub://`,
+`gs://`, `s3://`, `file://`, `https://`, `ssh://` 또는 Git SSH 형식
+(`git@host:path`)이어야 합니다.
 
-### General health check
+### 일반 상태 검사
 
 ```bash
 bd doctor --deep
 ```
 
-## Reference
+## 참조
 
-- Configuration: See [Configuration](/reference/configuration) for all federation settings
-- Source: `cmd/bd/federation.go`
-- Storage interfaces: `internal/storage/versioned.go`
-- Dolt implementation: `internal/storage/dolt/store.go`
+- 설정: 모든 federation 설정은 [설정](/reference/configuration) 참고
+- 소스: `cmd/bd/federation.go`
+- 저장소 인터페이스: `internal/storage/versioned.go`
+- Dolt 구현: `internal/storage/dolt/store.go`

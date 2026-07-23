@@ -1,62 +1,61 @@
 ---
 title: "bd batch"
-description: "Run multiple write operations in a single database transaction."
+description: "여러 쓰기 작업을 단일 데이터베이스 트랜잭션에서 실행합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc batch`.
+`bd help --doc batch`에서 생성되었습니다.
 
-Run multiple write operations in a single database transaction.
+여러 쓰기 작업을 단일 데이터베이스 트랜잭션에서 실행합니다.
 
-Commands are read from stdin (one per line) or from a file via -f/--file.
-All operations execute inside a single dolt transaction: on any error the
-whole batch is rolled back, otherwise it is committed with one DOLT_COMMIT.
+명령은 stdin(한 줄에 하나) 또는 -f/--file을 통해 파일에서 읽습니다. 모든 작업은
+단일 dolt 트랜잭션에서 실행됩니다. 오류가 있으면 전체 일괄 작업을 롤백하고,
+그렇지 않으면 DOLT_COMMIT 하나로 커밋합니다.
 
-This is intended for shell scripts that currently invoke 'bd' many times in
-a loop, which causes severe write amplification on a dolt sql-server backed
-by btrfs+compression. Batching collapses N invocations into one transaction
-and one dolt commit.
+루프에서 현재 'bd'를 여러 번 호출해 btrfs+compression 기반 dolt sql-server에
+심각한 쓰기 증폭을 유발하는 셸 스크립트용입니다. 일괄 처리는 N번의 호출을
+트랜잭션 하나와 dolt 커밋 하나로 줄입니다.
 
-Grammar (one command per line):
+문법(한 줄에 명령 하나):
   close &lt;id&gt; [reason...]
   update &lt;id&gt; &lt;key&gt;=&lt;value&gt; [&lt;key&gt;=&lt;value&gt; ...]
   create &lt;type&gt; &lt;priority&gt; &lt;title...&gt;
   dep add &lt;from-id&gt; &lt;to-id&gt; [type]
   dep remove &lt;from-id&gt; &lt;to-id&gt;
-  #comment  (blank lines and '# ...' comments are ignored)
+  #comment  (빈 줄과 '# ...' 댓글은 무시)
 
-Supported 'update' keys: status, priority, title, assignee
-Supported dependency types: see 'bd dep add --help' (default: blocks)
+지원되는 'update' 키: status, priority, title, assignee
+지원되는 의존성 유형: 'bd dep add --help' 참조(기본값: blocks)
 
-Tokens are whitespace-separated. Double-quoted strings ("like this") may
-contain spaces; use \" to embed a quote and \\ for a backslash.
+토큰은 공백으로 구분됩니다. 큰따옴표 문자열("like this")에는 공백을 포함할 수 있습니다.
+큰따옴표를 포함하려면 \"를, 백슬래시에는 \\를 사용하세요.
 
-Examples:
-  # From a pipe
+예시:
+  # 파이프에서
   bd list --status stale -q | awk '&#123;print "close",$1," stale"&#125;' | bd batch
 
-  # From a file
+  # 파일에서
   bd batch -f operations.txt
 
-  # Inline
+  # 인라인
   printf 'close bd-1 done\nupdate bd-2 status=in_progress\n' | bd batch
 
-On success, exits 0 and prints a summary (or JSON with --json). On any error,
-rolls back the entire transaction and exits non-zero with the failing line.
+성공 시 0으로 종료하고 요약(--json 사용 시 JSON)을 출력합니다. 오류가 있으면
+전체 트랜잭션을 롤백하고 실패한 줄과 함께 0이 아닌 값으로 종료합니다.
 
-NOTE: This is a narrow subset. Commands like 'show', 'list', 'ready', 'sync',
-complex create flows, or any flag not listed above are NOT accepted. Use
-normal 'bd' subcommands for interactive/read operations.
+참고: 좁은 하위 집합입니다. 'show', 'list', 'ready', 'sync' 같은 명령, 복잡한 create
+흐름 또는 위에 나열되지 않은 플래그는 허용되지 않습니다. 대화형/읽기 작업에는
+일반 'bd' 하위 명령을 사용하세요.
 
 ```
 bd batch [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run          Parse input and echo commands without executing
-  -f, --file string      Read commands from file instead of stdin
-  -m, --message string   DOLT_COMMIT message (default: 'bd: batch N ops by <actor>')
+      --dry-run          입력을 구문 분석하고 실행하지 않은 채 명령 출력
+  -f, --file string      stdin 대신 파일에서 명령 읽기
+  -m, --message string   DOLT_COMMIT 메시지(기본값: 'bd: batch N ops by <actor>')
 ```

@@ -1,15 +1,15 @@
 ---
 title: "bd recall"
-description: "Retrieve the full content of a memory by its key."
+description: "키로 메모리의 전체 콘텐츠를 가져옵니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc recall`.
+`bd help --doc recall`에서 생성되었습니다.
 
-Retrieve the full content of a memory by its key.
+키로 메모리의 전체 콘텐츠를 가져옵니다.
 
-Examples:
+예시:
   bd recall dolt-phantoms
   bd recall auth-jwt
 

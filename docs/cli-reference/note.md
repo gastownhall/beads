@@ -1,29 +1,29 @@
 ---
 title: "bd note"
-description: "Append a note to an issue's notes field."
+description: "이슈의 notes 필드에 메모를 추가합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc note`.
+`bd help --doc note`에서 생성되었습니다.
 
-Append a note to an issue's notes field.
+이슈의 notes 필드에 메모를 추가합니다.
 
-Shorthand for 'bd update &lt;id&gt; --append-notes "text"'.
+'bd update &lt;id&gt; --append-notes "text"'의 단축 명령입니다.
 
-Examples:
-  bd note gt-abc "Fixed the flaky test"
-  bd note gt-abc Fixed the flaky test
-  echo "note from pipe" | bd note gt-abc --stdin
+예시:
+  bd note gt-abc "불안정한 테스트 수정"
+  bd note gt-abc 불안정한 테스트 수정
+  echo "파이프에서 온 메모" | bd note gt-abc --stdin
   bd note gt-abc --file notes.txt
 
 ```
 bd note <id> [text...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --file string   Read note text from file
-      --stdin         Read note text from stdin
+      --file string   파일에서 메모 텍스트 읽기
+      --stdin         stdin에서 메모 텍스트 읽기
 ```

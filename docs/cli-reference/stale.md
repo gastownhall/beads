@@ -1,26 +1,26 @@
 ---
 title: "bd stale"
-description: "Show issues that haven't been updated recently and may need attention."
+description: "최근 업데이트되지 않아 확인이 필요할 수 있는 이슈를 표시합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc stale`.
+`bd help --doc stale`에서 생성되었습니다.
 
-Show issues that haven't been updated recently and may need attention.
-This helps identify:
-- In-progress issues with no recent activity (may be abandoned)
-- Open issues that have been forgotten
-- Issues that might be outdated or no longer relevant
+최근 업데이트되지 않아 확인이 필요할 수 있는 이슈를 표시합니다.
+다음을 식별하는 데 도움이 됩니다:
+- 최근 활동이 없는 진행 중 이슈(중단되었을 수 있음)
+- 잊힌 열린 이슈
+- 오래되었거나 더 이상 관련 없을 수 있는 이슈
 
 ```
 bd stale [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -d, --days int        Issues not updated in this many days (default 30)
-  -n, --limit int       Maximum issues to show (default 50)
-  -s, --status string   Filter by status (open|in_progress|blocked|deferred)
+  -d, --days int        이 일수 동안 업데이트되지 않은 이슈(기본값 30)
+  -n, --limit int       표시할 최대 이슈 수(기본값 50)
+  -s, --status string   상태로 필터링(open|in_progress|blocked|deferred)
 ```

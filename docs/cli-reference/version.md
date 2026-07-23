@@ -1,13 +1,13 @@
 ---
 title: "bd version"
-description: "Print version information"
+description: "버전 정보를 출력합니다"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc version`.
+`bd help --doc version`에서 생성되었습니다.
 
-Print version information
+버전 정보를 출력합니다
 
 ```
 bd version [flags]

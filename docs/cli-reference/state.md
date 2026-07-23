@@ -1,25 +1,25 @@
 ---
 title: "bd state"
-description: "Query the current value of a state dimension from an issue's labels."
+description: "이슈 레이블에서 상태 차원의 현재 값을 조회합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc state`.
+`bd help --doc state`에서 생성되었습니다.
 
-Query the current value of a state dimension from an issue's labels.
+이슈 레이블에서 상태 차원의 현재 값을 조회합니다.
 
-State labels follow the convention &lt;dimension&gt;:&lt;value&gt;, for example:
+상태 레이블은 &lt;dimension&gt;:&lt;value&gt; 규칙을 따릅니다. 예:
   patrol:active
   mode:degraded
   health:healthy
 
-This command extracts the value for a given dimension.
+이 명령은 지정한 차원의 값을 추출합니다.
 
-Examples:
-  bd state witness-abc patrol     # Output: active
-  bd state witness-abc mode       # Output: normal
-  bd state witness-abc health     # Output: healthy
+예시:
+  bd state witness-abc patrol     # 출력: active
+  bd state witness-abc mode       # 출력: normal
+  bd state witness-abc health     # 출력: healthy
 
 ```
 bd state <issue-id> <dimension> [flags]
@@ -27,13 +27,13 @@ bd state <issue-id> <dimension> [flags]
 
 ## bd state list
 
-List all state labels (dimension:value format) on an issue.
+이슈의 모든 상태 레이블(dimension:value 형식)을 나열합니다.
 
-This filters labels to only show those following the state convention.
+상태 규칙을 따르는 레이블만 표시하도록 필터링합니다.
 
-Example:
+예시:
   bd state list witness-abc
-  # Output:
+  # 출력:
   #   patrol: active
   #   mode: normal
   #   health: healthy

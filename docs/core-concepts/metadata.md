@@ -1,64 +1,58 @@
 ---
-title: Issue Metadata
-description: Storing arbitrary JSON on issues as the extension point for integrations and execution hints
+title: 이슈 메타데이터
+description: 통합 및 실행 힌트의 확장 지점으로 이슈에 임의 JSON 저장하기
 ---
 
-The `metadata` field on issues accepts arbitrary JSON. Any valid JSON value is stored as-is.
+이슈의 `metadata` 필드는 임의 JSON을 받습니다. 유효한 모든 JSON 값이 그대로 저장됩니다.
 
-Metadata is the preferred extension point for data that is specific to an
-integration, orchestrator, team workflow, or experimental automation. Before
-adding first-class fields, commands, or schema changes, check the
-[Project Charter](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md#schema-boundary).
+메타데이터는 통합, 오케스트레이터, 팀 워크플로 또는 실험적 자동화에 특화된 데이터의
+권장 확장 지점입니다. 일급 필드, 명령 또는 스키마 변경을 추가하기 전에
+[프로젝트 헌장](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md#schema-boundary)을 확인하세요.
 
-## Example: Agent Execution Metadata
+## 예시: 에이전트 실행 메타데이터
 
-Agent execution hints are one example of using metadata to extend beads without
-adding new native database fields. Automation may store these hints so agents
-can make routing decisions without parsing prose. Agents enacting an issue
-should read metadata first, then use description and notes for scope and
-rationale:
+에이전트 실행 힌트는 새로운 네이티브 데이터베이스 필드를 추가하지 않고 메타데이터로
+beads를 확장하는 한 가지 예입니다. 자동화가 이 힌트를 저장하면 에이전트는 산문을
+파싱하지 않고 라우팅 결정을 내릴 수 있습니다. 이슈를 수행하는 에이전트는 먼저
+메타데이터를 읽고, 그다음 범위와 근거를 파악할 때 설명과 메모를 사용해야 합니다.
 
 ```bash
 bd show <id> --json | jq '.[0] | {id,title,metadata,description,notes}'
 ```
 
-The current convention for execution hint keys is:
+현재 실행 힌트 키 규칙은 다음과 같습니다.
 
-| Key | Meaning |
+| 키 | 의미 |
 |-----|---------|
-| `execution_agent_type` | Suggested worker class, such as `explorer`, `worker`, or `mixed`. |
-| `execution_suggested_model` | Suggested model for the parent agent or spawned subagent. |
-| `execution_reasoning_effort` | Suggested reasoning effort, such as `low`, `medium`, `high`, or `xhigh`. |
-| `execution_mode` | Whether work should be local, delegated, or staged between delegated and local execution. |
-| `execution_parallel_group` | Grouping hint for work that can run alongside related tasks. |
+| `execution_agent_type` | `explorer`, `worker`, `mixed` 같은 권장 작업자 클래스입니다. |
+| `execution_suggested_model` | 부모 에이전트 또는 생성된 하위 에이전트에 권장하는 모델입니다. |
+| `execution_reasoning_effort` | `low`, `medium`, `high`, `xhigh` 같은 권장 추론 수준입니다. |
+| `execution_mode` | 작업을 로컬에서 할지, 위임할지, 위임 실행과 로컬 실행 사이에서 단계화할지 지정합니다. |
+| `execution_parallel_group` | 관련 작업과 함께 실행할 수 있는 작업의 그룹화 힌트입니다. |
 
-These keys are advisory metadata, not core issue fields. When a workflow uses
-them, they take precedence over free-form notes for execution routing. Notes
-remain useful for rationale, ownership, and exact prompts.
+이 키는 핵심 이슈 필드가 아니라 권고 메타데이터입니다. 워크플로에서 이 키를 사용하면
+실행 라우팅에 대해 자유 형식 메모보다 우선합니다. 메모는 근거, 소유권, 정확한 프롬프트를
+기록하는 데 여전히 유용합니다.
 
-Model and effort values are portable hints, not runtime bindings. The
-`execution_reasoning_effort` values above are a canonical advisory scale:
-writers should store canonical values rather than runtime-local ones, and a
-consumer whose runtime uses a different scale should map the stored value to
-its nearest native level instead of dropping the hint. Likewise,
-`execution_suggested_model` is a capability-tier suggestion: a consumer on a
-different provider should substitute a model of the same tier rather than
-ignore the hint.
+모델과 추론 수준 값은 런타임 바인딩이 아니라 이식 가능한 힌트입니다. 위의
+`execution_reasoning_effort` 값은 정식 권고 척도입니다. 작성자는 런타임 로컬 값이
+아니라 정식 값을 저장해야 하며, 다른 척도를 쓰는 런타임의 소비자는 힌트를 버리지 말고
+저장된 값을 가장 가까운 네이티브 수준에 매핑해야 합니다. 마찬가지로
+`execution_suggested_model`은 기능 계층 제안입니다. 다른 제공자를 사용하는 소비자는
+힌트를 무시하지 말고 같은 계층의 모델로 대체해야 합니다.
 
-Parent/orchestrator agents must consume these keys before spawning subagents.
-Model and reasoning effort are normally fixed at launch, so reading metadata
-after delegation is too late.
+부모/오케스트레이터 에이전트는 하위 에이전트를 생성하기 전에 이 키를 사용해야 합니다.
+모델과 추론 수준은 일반적으로 시작할 때 고정되므로 위임 후 메타데이터를 읽으면 너무 늦습니다.
 
-Do not add a first-class helper such as `bd show <id> --execution` or
-`bd plan <id> --json`. Issue gh-3541 resolved to keep execution hints as
-metadata only; the JSON/JQ snippet remains the supported access path.
+`bd show <id> --execution` 또는 `bd plan <id> --json` 같은 일급 도우미를
+추가하지 마세요. 이슈 gh-3541에서는 실행 힌트를 메타데이터로만 유지하기로 결정했으며,
+JSON/JQ 스니펫이 계속 지원되는 접근 경로입니다.
 
-## Example: Tracker Round-Trip Metadata
+## 예시: 트래커 왕복 메타데이터
 
-Tracker integrations map external issues into beads fields such as title,
-status, priority, type, labels, dependencies, and `external_ref`. When an
-integration needs to preserve tracker-specific fields that do not belong in the
-native beads schema, it can store those fields in issue metadata:
+트래커 통합은 외부 이슈를 제목, 상태, 우선순위, 유형, 레이블, 의존성, `external_ref`
+같은 beads 필드에 매핑합니다. 통합에서 네이티브 beads 스키마에 속하지 않는 트래커 전용
+필드를 보존해야 할 때는 해당 필드를 이슈 메타데이터에 저장할 수 있습니다.
 
 ```json
 {
@@ -70,21 +64,20 @@ native beads schema, it can store those fields in issue metadata:
 }
 ```
 
-This keeps beads' core issue model stable while allowing the integration to
-round-trip fields it understands. Prefer namespaced keys and keep
-tracker-specific policy in the integration. If a value becomes broadly useful
-to beads itself, revisit whether it deserves a native field.
+이렇게 하면 beads의 핵심 이슈 모델을 안정적으로 유지하면서 통합이 이해하는 필드를
+왕복 처리할 수 있습니다. 네임스페이스가 지정된 키를 선호하고 트래커 전용 정책은 통합에
+유지하세요. 어떤 값이 beads 자체에 널리 유용해지면 네이티브 필드가 필요할지 다시 검토하세요.
 
-## Reserved Key Prefixes
+## 예약된 키 접두사
 
-| Prefix | Reserved For |
+| 접두사 | 예약 용도 |
 |--------|------------|
-| `bd:` | Beads internal use |
-| `_` | Internal/private keys |
+| `bd:` | Beads 내부용 |
+| `_` | 내부/비공개 키 |
 
-Avoid these prefixes in user-defined keys to prevent conflicts with future Beads features.
+향후 Beads 기능과의 충돌을 방지하려면 사용자 정의 키에 이 접두사를 사용하지 마세요.
 
-## Related
+## 관련 자료
 
-- [Project Charter](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md) - Product scope and schema boundary
-- [#1416](https://github.com/gastownhall/beads/issues/1416) - Optional schema enforcement (future)
+- [프로젝트 헌장](https://github.com/gastownhall/beads/blob/main/engdocs/PROJECT_CHARTER.md) - 제품 범위 및 스키마 경계
+- [#1416](https://github.com/gastownhall/beads/issues/1416) - 선택적 스키마 강제 적용(향후)

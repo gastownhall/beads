@@ -1,25 +1,24 @@
 ---
 title: "bd history"
-description: "Show the complete version history of an issue, including all commits"
+description: "이슈가 수정된 모든 커밋을 포함해 전체 버전 이력을 표시합니다"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc history`.
+`bd help --doc history`에서 생성되었습니다.
 
-Show the complete version history of an issue, including all commits
-where the issue was modified.
+이슈가 수정된 모든 커밋을 포함해 전체 버전 이력을 표시합니다.
 
-Examples:
-  bd history bd-123           # Show all history for issue bd-123
-  bd history bd-123 --limit 5 # Show last 5 changes
+예시:
+  bd history bd-123           # 이슈 bd-123의 모든 이력 표시
+  bd history bd-123 --limit 5 # 최근 변경 사항 5개 표시
 
 ```
 bd history <id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --limit int   Limit number of history entries (0 = all)
+      --limit int   이력 항목 수 제한(0 = 전체)
 ```

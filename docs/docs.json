@@ -1,7 +1,7 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "linden",
-  "name": "Beads Documentation",
+  "name": "Beads 문서",
   "logo": {
     "light": "/images/logo.svg",
     "dark": "/images/logo.svg"
@@ -223,7 +223,7 @@
   "navigation": {
     "groups": [
       {
-        "group": "Getting Started",
+        "group": "시작하기",
         "pages": [
           "index",
           "getting-started/installation",
@@ -234,7 +234,7 @@
         ]
       },
       {
-        "group": "Core Concepts",
+        "group": "핵심 개념",
         "pages": [
           "core-concepts/index",
           "core-concepts/issues",
@@ -248,14 +248,14 @@
         ]
       },
       {
-        "group": "Architecture",
+        "group": "아키텍처",
         "pages": [
           "architecture/index",
           "architecture/dolt"
         ]
       },
       {
-        "group": "Workflows",
+        "group": "워크플로",
         "pages": [
           "workflows/index",
           "workflows/molecules",
@@ -266,7 +266,7 @@
         ]
       },
       {
-        "group": "Recovery",
+        "group": "복구",
         "pages": [
           "recovery/index",
           "recovery/init-safety",
@@ -279,7 +279,7 @@
         ]
       },
       {
-        "group": "Multi-Agent",
+        "group": "다중 에이전트",
         "pages": [
           "multi-agent/index",
           "multi-agent/routing",
@@ -289,7 +289,7 @@
         ]
       },
       {
-        "group": "Integrations",
+        "group": "통합",
         "pages": [
           "integrations/index",
           "integrations/aider",
@@ -312,14 +312,14 @@
         ]
       },
       {
-        "group": "Community",
+        "group": "커뮤니티",
         "pages": [
           "community-tools",
           "related-projects"
         ]
       },
       {
-        "group": "Reference",
+        "group": "참조",
         "pages": [
           "reference/index",
           "reference/configuration",

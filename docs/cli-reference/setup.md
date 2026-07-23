@@ -1,47 +1,47 @@
 ---
 title: "bd setup"
-description: "Setup integration files for AI editors and coding assistants."
+description: "AI 편집기와 코딩 도우미용 통합 파일을 설정합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc setup`.
+`bd help --doc setup`에서 생성되었습니다.
 
-Setup integration files for AI editors and coding assistants.
+AI 편집기와 코딩 도우미용 통합 파일을 설정합니다.
 
-Recipes define where beads workflow instructions are written. Built-in recipes
-include cursor, claude, copilot, gemini, aider, factory, codex, mux, opencode, junie, windsurf, cody, and kilocode.
+레시피는 beads 워크플로 지침이 작성될 위치를 정의합니다. 기본 제공 레시피에는
+cursor, claude, copilot, gemini, aider, factory, codex, mux, opencode, junie, windsurf, cody, kilocode가 있습니다.
 
-Examples:
-  bd setup cursor          # Install Cursor IDE integration
-  bd setup codex           # Install Codex skill + AGENTS.md guidance + native hooks
-  bd setup codex --global  # Install global Codex skill + guidance + native hooks
-  bd setup copilot         # Install Copilot CLI plugin + repository instructions
-  bd setup mux --project   # Install Mux workspace layer (.mux/AGENTS.md)
-  bd setup mux --global    # Install Mux global layer (~/.mux/AGENTS.md)
-  bd setup mux --project --global  # Install both Mux layers
-  bd setup --list          # Show all available recipes
-  bd setup --print         # Print the template to stdout
-  bd setup -o rules.md     # Write template to custom path
-  bd setup --add myeditor .myeditor/rules.md  # Add custom recipe
+예시:
+  bd setup cursor          # Cursor IDE 통합 설치
+  bd setup codex           # Codex skill + AGENTS.md 지침 + 네이티브 훅 설치
+  bd setup codex --global  # 전역 Codex skill + 지침 + 네이티브 훅 설치
+  bd setup copilot         # Copilot CLI 플러그인 + 저장소 지침 설치
+  bd setup mux --project   # Mux 워크스페이스 계층(.mux/AGENTS.md) 설치
+  bd setup mux --global    # Mux 전역 계층(~/.mux/AGENTS.md) 설치
+  bd setup mux --project --global  # 두 Mux 계층 모두 설치
+  bd setup --list          # 사용 가능한 모든 레시피 표시
+  bd setup --print         # 템플릿을 stdout에 출력
+  bd setup -o rules.md     # 사용자 정의 경로에 템플릿 쓰기
+  bd setup --add myeditor .myeditor/rules.md  # 사용자 정의 레시피 추가
 
-Use 'bd setup &lt;recipe&gt; --check' to verify installation status.
-Use 'bd setup &lt;recipe&gt; --remove' to uninstall.
+설치 상태를 확인하려면 'bd setup &lt;recipe&gt; --check'를 사용하세요.
+제거하려면 'bd setup &lt;recipe&gt; --remove'를 사용하세요.
 
 ```
 bd setup [recipe] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --add string      Add a custom recipe with given name
-      --check           Check if integration is installed
-      --global          Install globally (claude/codex/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, or ~/.mux/AGENTS.md)
-      --list            List all available recipes
-  -o, --output string   Write template to custom path
-      --print           Print the template to stdout
-      --project         Install for this project only (gemini/mux)
-      --remove          Remove the integration
-      --stealth         Use stealth mode (claude/gemini)
+      --add string      지정한 이름으로 사용자 정의 레시피 추가
+      --check           통합 설치 여부 확인
+      --global          전역 설치(claude/codex/mux, ~/.claude/settings.json, $CODEX_HOME/AGENTS.md 또는 ~/.codex/AGENTS.md, ~/.mux/AGENTS.md에 쓰기)
+      --list            사용 가능한 모든 레시피 나열
+  -o, --output string   사용자 정의 경로에 템플릿 쓰기
+      --print           템플릿을 stdout에 출력
+      --project         이 프로젝트에만 설치(gemini/mux)
+      --remove          통합 제거
+      --stealth         스텔스 모드 사용(claude/gemini)
 ```

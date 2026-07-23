@@ -1,13 +1,13 @@
 ---
 title: "bd epic"
-description: "Epic management commands"
+description: "epic 관리 명령입니다"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc epic`.
+`bd help --doc epic`에서 생성되었습니다.
 
-Epic management commands
+epic 관리 명령입니다
 
 ```
 bd epic [flags]
@@ -15,28 +15,28 @@ bd epic [flags]
 
 ## bd epic close-eligible
 
-Close epics where all children are complete
+모든 하위 이슈가 완료된 epic을 닫습니다
 
 ```
 bd epic close-eligible [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview what would be closed without making changes
+      --dry-run   변경하지 않고 닫힐 항목 미리 보기
 ```
 
 ## bd epic status
 
-Show epic completion status
+epic 완료 상태를 표시합니다
 
 ```
 bd epic status [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --eligible-only   Show only epics eligible for closure
+      --eligible-only   닫을 수 있는 epic만 표시
 ```

@@ -1,91 +1,91 @@
 ---
-title: Uninstalling
-description: Remove beads from a repository with bd admin reset, uninstall git hooks, and delete the bd binary after backing up issue data
+title: 제거
+description: 이슈 데이터를 백업한 뒤 bd admin reset으로 저장소에서 beads를 제거하고 git 훅을 제거한 다음 bd 바이너리 삭제하기
 ---
 
-This guide explains how to remove beads from a repository or remove the `bd`
-binary from a machine.
+이 가이드에서는 저장소에서 beads를 제거하거나 머신에서 `bd` 바이너리를
+제거하는 방법을 설명합니다.
 
-## Before You Remove Data
+## 데이터를 제거하기 전에
 
-Removing `.beads/` permanently deletes the local Dolt database. If the issue
-history matters, make a Dolt-native backup first:
+`.beads/`를 제거하면 로컬 Dolt 데이터베이스가 영구적으로 삭제됩니다. 이슈
+기록이 중요하다면 먼저 Dolt 네이티브 백업을 만드세요.
 
 ```bash
 bd backup init /path/to/beads-backup
 bd backup sync
 ```
 
-For review, migration, or interoperability, you can also write an issue-table
-export:
+검토, 마이그레이션 또는 상호 운용을 위해 이슈 테이블 내보내기 파일을
+작성할 수도 있습니다.
 
 ```bash
 bd export -o ~/beads-issues-$(date +%Y%m%d).jsonl
 ```
 
-`bd export` is not a complete restorable database backup. It does not preserve
-Dolt branches, commit history, working-set state, or non-issue tables.
+`bd export`는 완전히 복원할 수 있는 데이터베이스 백업이 아닙니다. Dolt 브랜치,
+커밋 기록, 작업 세트 상태 또는 이슈가 아닌 테이블을 보존하지 않습니다.
 
-## Repository Reset
+## 저장소 초기화
 
-Use `bd admin reset` from the repository root. It previews what will be
-removed by default:
+저장소 루트에서 `bd admin reset`을 사용하세요. 기본적으로 제거될 항목을
+미리 보여 줍니다.
 
 ```bash
 bd admin reset
 ```
 
-If the preview is correct, run:
+미리 보기 내용이 맞으면 다음을 실행합니다.
 
 ```bash
 bd admin reset --force
 ```
 
-This removes beads-managed repository data such as:
+다음과 같은 beads 관리 저장소 데이터가 제거됩니다.
 
-- the `.beads/` directory
-- beads-managed git hook sections
-- legacy beads sync worktrees under `.git/beads-worktrees/`
+- `.beads/` 디렉터리
+- beads가 관리하는 git 훅 섹션
+- `.git/beads-worktrees/` 아래의 레거시 beads 동기화 워크트리
 
-## Remove Hooks Only
+## 훅만 제거하기
 
-To keep issue data but remove git hooks:
+이슈 데이터는 유지하고 git 훅만 제거하려면 다음을 실행합니다.
 
 ```bash
 bd hooks uninstall
 ```
 
-This is preferable to manually deleting hook files because beads preserves
-unrelated user hook content outside its managed hook markers.
+beads는 관리하는 훅 마커 밖의 관련 없는 사용자 훅 내용을 보존하므로, 훅 파일을
+수동으로 삭제하는 것보다 이 방법이 좋습니다.
 
-## Manual Cleanup
+## 수동 정리
 
-Use manual cleanup only if `bd admin reset` is unavailable or cannot run in
-the repository.
+`bd admin reset`을 사용할 수 없거나 저장소에서 실행할 수 없을 때만 수동 정리를
+사용하세요.
 
 ```bash
-# Stop a local Dolt server if one is running.
+# 로컬 Dolt 서버가 실행 중이면 중지합니다.
 bd dolt stop 2>/dev/null || true
 
-# Remove beads-managed hooks when bd hooks uninstall is unavailable.
+# bd hooks uninstall을 사용할 수 없으면 beads 관리 훅을 제거합니다.
 rm -f .git/hooks/pre-commit
 rm -f .git/hooks/prepare-commit-msg
 rm -f .git/hooks/post-merge
 rm -f .git/hooks/pre-push
 rm -f .git/hooks/post-checkout
 
-# Remove the local beads database and config.
+# 로컬 beads 데이터베이스와 구성을 제거합니다.
 rm -rf .beads
 
-# Remove legacy sync-branch worktrees from older beads versions.
+# 이전 beads 버전의 레거시 동기화 브랜치 워크트리를 제거합니다.
 rm -rf .git/beads-worktrees
 git worktree prune
 ```
 
-If `.gitattributes` contains only beads merge-driver configuration, remove it.
-If it contains other project entries, edit out only the beads line.
+`.gitattributes`에 beads 병합 드라이버 구성만 있으면 파일을 제거합니다.
+다른 프로젝트 항목도 있으면 beads 줄만 삭제합니다.
 
-If beads-specific git config remains, remove it:
+beads 전용 git 구성이 남아 있으면 제거합니다.
 
 ```bash
 git config --unset beads.role 2>/dev/null || true
@@ -93,25 +93,24 @@ git config --unset merge.beads.driver 2>/dev/null || true
 git config --unset merge.beads.name 2>/dev/null || true
 ```
 
-## Remove the `bd` Binary
+## `bd` 바이너리 제거하기
 
-The CLI is a standalone binary. Remove it according to how it was installed:
+CLI는 독립 실행형 바이너리입니다. 설치 방법에 따라 제거하세요.
 
 ```bash
 # Homebrew
 brew uninstall beads
 
-# Go install
+# Go 설치
 rm -f "$(which bd)"
 
-# Manual install location
+# 수동 설치 위치
 rm -f /usr/local/bin/bd
 ```
 
-If you installed the MCP package separately, remove that package with the tool
-you used to install it.
+MCP 패키지를 별도로 설치했다면 설치에 사용한 도구로 해당 패키지를 제거하세요.
 
-## Verify Removal
+## 제거 확인하기
 
 ```bash
 which bd
@@ -120,9 +119,9 @@ bd hooks list 2>/dev/null || true
 git config --get merge.beads.driver
 ```
 
-## Reinstall Later
+## 나중에 다시 설치하기
 
-To initialize beads again:
+beads를 다시 초기화하려면 다음을 실행합니다.
 
 ```bash
 bd init

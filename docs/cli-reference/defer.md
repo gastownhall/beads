@@ -1,34 +1,32 @@
 ---
 title: "bd defer"
-description: "Defer issues to put them on ice for later."
+description: "나중을 위해 이슈를 연기해 보류합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc defer`.
+`bd help --doc defer`에서 생성되었습니다.
 
-Defer issues to put them on ice for later.
+나중을 위해 이슈를 연기해 보류합니다.
 
-Deferred issues are deliberately set aside - not blocked by anything specific,
-just postponed for future consideration. Unlike blocked issues, there's no
-dependency keeping them from being worked. Unlike closed issues, they will
-be revisited.
+연기된 이슈는 특정 항목에 차단된 것이 아니라 향후 검토를 위해 의도적으로 보류됩니다.
+차단된 이슈와 달리 작업을 막는 의존성이 없습니다. 닫힌 이슈와 달리 다시 검토됩니다.
 
-Deferred issues don't show in 'bd ready' but remain visible in 'bd list'.
+연기된 이슈는 'bd ready'에 표시되지 않지만 'bd list'에는 계속 표시됩니다.
 
-Examples:
-  bd defer bd-abc                  # Defer a single issue (status-based)
-  bd defer bd-abc --until=tomorrow # Defer until specific time
-  bd defer bd-abc --reason="waiting on API access"
-  bd defer bd-abc bd-def           # Defer multiple issues
+예시:
+  bd defer bd-abc                  # 단일 이슈 연기(상태 기반)
+  bd defer bd-abc --until=tomorrow # 특정 시간까지 연기
+  bd defer bd-abc --reason="API 접근 대기 중"
+  bd defer bd-abc bd-def           # 여러 이슈 연기
 
 ```
 bd defer [id...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --reason string   Record why this issue is being deferred (appended to notes)
-      --until string    Defer until specific time (e.g., +1h, tomorrow, next monday)
+      --reason string   이 이슈를 연기하는 이유 기록(notes에 추가)
+      --until string    특정 시간까지 연기(예: +1h, tomorrow, next monday)
 ```

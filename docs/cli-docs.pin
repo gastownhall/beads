@@ -1,12 +1,11 @@
-# Pins the bd version that the generated CLI docs are produced from and
-# validated against: docs/CLI_REFERENCE.md, docs/cli-reference/, and the
-# CLI Reference pages array in docs/docs.json.
+# 생성형 CLI 문서를 만들고 검증할 때 사용할 bd 버전을 고정합니다.
+# 대상은 docs/CLI_REFERENCE.md, docs/cli-reference/, 그리고
+# docs/docs.json의 CLI Reference 페이지 배열입니다.
 #
-# The published docs site describes the latest *release*, not main's source,
-# so the docs pipeline builds bd from this tag (CGO_ENABLED=0, pure Go —
-# CI's canonical build) instead of the current checkout. Bump this tag as
-# part of each release, then run ./scripts/generate-cli-docs.sh.
+# 게시 문서 사이트는 main 소스가 아니라 최신 *릴리스*를 설명하므로
+# 문서 파이프라인은 현재 체크아웃 대신 이 태그에서 bd를 빌드합니다
+# (CGO_ENABLED=0, pure Go — CI 표준 빌드). 각 릴리스에서 이 태그를 올린 뒤
+# ./scripts/generate-cli-docs.sh를 실행하세요.
 #
-# Set to HEAD to track the current checkout's source instead (the pre-pin
-# behavior).
+# 현재 체크아웃 소스를 추적하려면 HEAD로 설정하세요(고정 도입 전 동작).
 v1.1.0

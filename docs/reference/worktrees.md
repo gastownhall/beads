@@ -1,61 +1,61 @@
 ---
-title: Git Worktrees Guide
-description: Using beads from Git worktrees, which share one .beads workspace, plus external BEADS_DIR setups and legacy sync-branch cleanup.
+title: Git 워크트리 가이드
+description: 하나의 .beads 워크스페이스를 공유하는 Git 워크트리에서 beads 사용하기, 외부 BEADS_DIR 설정 및 레거시 동기화 브랜치 정리
 ---
 
-Beads works from normal Git worktrees without a separate sync branch. Current
-beads stores issue data in Dolt under `refs/dolt/data`, so issue sync is
-separate from Git branch commits.
+Beads는 별도의 동기화 브랜치 없이 일반 Git 워크트리에서 작동합니다. 현재 beads는
+`refs/dolt/data` 아래의 Dolt에 이슈 데이터를 저장하므로 이슈 동기화가 Git 브랜치
+커밋과 분리됩니다.
 
-## Current Model
+## 현재 모델
 
-All worktrees in the same repository use the same beads workspace unless you
-override discovery with `BEADS_DIR`.
+`BEADS_DIR`로 검색을 재정의하지 않는 한 같은 저장소의 모든 워크트리는 동일한 beads
+워크스페이스를 사용합니다.
 
 ```
 project/
-├── .git/                 # Shared Git directory
-├── .beads/               # Shared beads config and local Dolt data
+├── .git/                 # 공유 Git 디렉터리
+├── .beads/               # 공유 beads 구성과 로컬 Dolt 데이터
 ├── main-worktree/
 └── feature-worktree/
 ```
 
-Key points:
+핵심 사항:
 
-- `bd` discovers the repository's `.beads` directory from linked worktrees.
-- Issue changes are stored in Dolt, not committed to the current Git branch.
-- Cross-clone sync uses `bd dolt pull` and `bd dolt push`.
-- No `sync.branch` or beads-managed Git worktree is required.
+- `bd`는 연결된 워크트리에서 저장소의 `.beads` 디렉터리를 찾습니다.
+- 이슈 변경 사항은 현재 Git 브랜치에 커밋되지 않고 Dolt에 저장됩니다.
+- 클론 간 동기화에는 `bd dolt pull`과 `bd dolt push`를 사용합니다.
+- `sync.branch` 또는 beads 관리 Git 워크트리가 필요 없습니다.
 
-## Basic Usage
+## 기본 사용법
 
-Initialize beads once in the repository:
+저장소에서 beads를 한 번 초기화합니다.
 
 ```bash
 cd project
 bd init
 ```
 
-Create linked worktrees normally:
+평소처럼 연결된 워크트리를 생성합니다.
 
 ```bash
 git worktree add ../project-feature feature-branch
 cd ../project-feature
 bd ready
-bd create "Implement feature X" -t feature -p 1
+bd create "기능 X 구현" -t feature -p 1
 ```
 
-Sync issue data through the configured Dolt remote:
+구성된 Dolt 원격을 통해 이슈 데이터를 동기화합니다.
 
 ```bash
 bd dolt pull
 bd dolt push
 ```
 
-## External Beads Workspace
+## 외부 Beads 워크스페이스
 
-If you want a separate issue-tracker repository shared by many code worktrees,
-point `BEADS_DIR` at that workspace:
+여러 코드 워크트리가 공유하는 별도의 이슈 트래커 저장소를 사용하려면 `BEADS_DIR`이
+해당 워크스페이스를 가리키도록 합니다.
 
 ```bash
 export BEADS_DIR=~/project-beads/.beads
@@ -65,26 +65,27 @@ cd ~/project/feature-1  && bd list
 cd ~/project/feature-2  && bd list
 ```
 
-With an external `BEADS_DIR`, `bd dolt push` and `bd dolt pull` target the
-external beads workspace, not the code repository.
+외부 `BEADS_DIR`을 사용하면 `bd dolt push`와 `bd dolt pull`이 코드 저장소가 아닌
+외부 beads 워크스페이스를 대상으로 합니다.
 
-## Hooks
+## 훅
 
-Git hooks installed by beads are worktree-aware. If hooks are stale or mention
-removed legacy sync commands, refresh them:
+beads가 설치한 Git 훅은 워크트리를 인식합니다. 훅이 오래되었거나 제거된 레거시 동기화
+명령을 언급하면 새로 고칩니다.
 
 ```bash
 bd hooks install
 ```
 
-## Legacy Cleanup
+<a id="legacy-cleanup"></a>
 
-Older beads versions had an experimental `sync.branch` workflow that created
-hidden worktrees such as `.git/beads-worktrees/<branch>/`. That workflow has
-been removed.
+## 레거시 정리
 
-If a legacy checkout cannot switch branches because a beads-created worktree
-still holds the branch, remove the stale worktree records:
+이전 beads 버전에는 `.git/beads-worktrees/<branch>/` 같은 숨겨진 워크트리를 만드는
+실험적 `sync.branch` 워크플로가 있었습니다. 이 워크플로는 제거되었습니다.
+
+beads가 만든 워크트리가 아직 브랜치를 점유해 레거시 체크아웃에서 브랜치를 전환할 수
+없다면 오래된 워크트리 레코드를 제거합니다.
 
 ```bash
 rm -rf .git/beads-worktrees
@@ -92,18 +93,17 @@ rm -rf .git/worktrees/beads-*
 git worktree prune
 ```
 
-If old config still contains a sync branch, clear it:
+이전 구성에 동기화 브랜치가 남아 있다면 지웁니다.
 
 ```bash
 bd config set sync.branch ""
 ```
 
-## Troubleshooting
+## 문제 해결
 
-### Database Not Found In A Worktree
+### 워크트리에서 데이터베이스를 찾을 수 없음
 
-Check that the main repository has a `.beads` directory and that the worktree
-belongs to that repository:
+주 저장소에 `.beads` 디렉터리가 있고 워크트리가 해당 저장소에 속하는지 확인합니다.
 
 ```bash
 git worktree list
@@ -111,24 +111,22 @@ cd /path/to/main/repo
 ls -la .beads
 ```
 
-If the repository has no beads workspace yet, run `bd init` from the main
-repository.
+저장소에 아직 beads 워크스페이스가 없다면 주 저장소에서 `bd init`을 실행합니다.
 
-### Multiple `.beads` Directories
+### 여러 `.beads` 디렉터리
 
-If a worktree has its own accidental `.beads` directory, remove or archive the
-extra copy after confirming it does not contain unique issue data. By default,
-worktrees should share the repository workspace.
+워크트리에 실수로 자체 `.beads` 디렉터리가 생겼다면 고유한 이슈 데이터가 없는지
+확인한 뒤 추가 사본을 제거하거나 보관합니다. 기본적으로 워크트리는 저장소 워크스페이스를
+공유해야 합니다.
 
-### Concurrent Writers
+### 동시 기록자
 
-For ordinary single-user worktree use, run commands directly. For true
-multi-writer workflows across machines or agents, sync frequently with
-`bd dolt pull` and `bd dolt push`, and coordinate through the tracker to avoid
-working the same issue concurrently.
+일반적인 단일 사용자 워크트리에서는 명령을 직접 실행합니다. 여러 머신 또는 에이전트가
+실제로 동시에 기록하는 워크플로에서는 `bd dolt pull`과 `bd dolt push`로 자주
+동기화하고 같은 이슈를 동시에 작업하지 않도록 트래커를 통해 조율하세요.
 
-## See Also
+## 함께 보기
 
-- [Protected Branches](/reference/protected-branches) - protected branch behavior
-- [Git Integration](/reference/git-integration) - general Git integration guide
-- [Multi-Repo Migration Guide](/multi-agent/multi-repo-migration) - multi-workspace patterns
+- [보호된 브랜치](/reference/protected-branches) - 보호된 브랜치 동작
+- [Git 통합](/reference/git-integration) - 일반 Git 통합 가이드
+- [다중 저장소 마이그레이션 가이드](/multi-agent/multi-repo-migration) - 다중 워크스페이스 패턴

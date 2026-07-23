@@ -1,21 +1,21 @@
 ---
 title: "bd reopen"
-description: "Reopen closed issues by setting status to 'open' and clearing the closed_at timestamp."
+description: "상태를 'open'으로 설정하고 closed_at 타임스탬프를 지워 닫힌 이슈를 다시 엽니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc reopen`.
+`bd help --doc reopen`에서 생성되었습니다.
 
-Reopen closed issues by setting status to 'open' and clearing the closed_at timestamp.
-This is more explicit than 'bd update --status open' and emits a Reopened event.
+상태를 'open'으로 설정하고 closed_at 타임스탬프를 지워 닫힌 이슈를 다시 엽니다.
+'bd update --status open'보다 명시적이며 Reopened 이벤트를 내보냅니다.
 
 ```
 bd reopen [id...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -r, --reason string   Reason for reopening
+  -r, --reason string   다시 여는 사유
 ```

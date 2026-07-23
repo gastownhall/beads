@@ -1,42 +1,41 @@
 ---
 title: "bd compact"
-description: "Squash Dolt commits older than N days into a single commit."
+description: "N일보다 오래된 Dolt 커밋을 단일 커밋으로 squash합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc compact`.
+`bd help --doc compact`에서 생성되었습니다.
 
-Squash Dolt commits older than N days into a single commit.
+N일보다 오래된 Dolt 커밋을 단일 커밋으로 squash합니다.
 
-Recent commits (within the retention window) are preserved via cherry-pick.
-This reduces Dolt storage overhead from auto-commit history while keeping
-recent change tracking intact.
+최근 커밋(보존 기간 내)은 cherry-pick으로 보존됩니다. 최근 변경 추적은 유지하면서
+자동 커밋 이력으로 인한 Dolt 저장소 오버헤드를 줄입니다.
 
-For semantic issue compaction (summarizing closed issues), use 'bd admin compact'.
-For full history squash, use 'bd flatten'.
+의미 기반 이슈 압축(닫힌 이슈 요약)에는 'bd admin compact'를 사용하세요.
+전체 이력 squash에는 'bd flatten'을 사용하세요.
 
-How it works:
-  1. Identifies commits older than --days threshold
-  2. Creates a squashed base commit from all old history
-  3. Cherry-picks recent commits on top
-  4. Swaps main branch to the compacted version
-  5. Runs Dolt GC to reclaim space
+작동 방식:
+  1. --days 임곗값보다 오래된 커밋 식별
+  2. 모든 오래된 이력에서 squash된 기본 커밋 생성
+  3. 그 위에 최근 커밋 cherry-pick
+  4. main 브랜치를 압축된 버전으로 교체
+  5. 공간 회수를 위해 Dolt GC 실행
 
-Examples:
-  bd compact --dry-run               # Preview: show commit breakdown
-  bd compact --force                 # Squash commits older than 30 days
-  bd compact --days 7 --force        # Keep only last 7 days of history
-  bd compact --days 90 --force       # Conservative: squash 90+ day old commits
+예시:
+  bd compact --dry-run               # 미리 보기: 커밋 내역 표시
+  bd compact --force                 # 30일보다 오래된 커밋 squash
+  bd compact --days 7 --force        # 최근 7일 이력만 유지
+  bd compact --days 90 --force       # 보수적: 90일 이상 된 커밋 squash
 
 ```
 bd compact [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --days int   Keep commits newer than N days (default 30)
-      --dry-run    Preview without making changes
-  -f, --force      Confirm commit squash
+      --days int   N일 이내의 새 커밋 유지(기본값 30)
+      --dry-run    변경 없이 미리 보기
+  -f, --force      커밋 squash 확인
 ```

@@ -1,75 +1,75 @@
 ---
-title: Sync Failures
-description: Recover from Dolt sync failures
+title: 동기화 실패
+description: Dolt 동기화 실패에서 복구하기
 ---
 
-This runbook helps you recover from Dolt sync failures.
+이 런북은 Dolt 동기화 실패에서 복구하는 방법을 안내합니다.
 
-## Symptoms
+## 증상
 
-- `bd dolt push` or `bd dolt pull` hangs or times out
-- Network-related error messages
-- "failed to push" or "failed to pull" errors
-- Dolt server not responding
+- `bd dolt push` 또는 `bd dolt pull`이 멈추거나 시간 초과됩니다.
+- 네트워크 관련 오류 메시지가 나타납니다.
+- "failed to push" 또는 "failed to pull" 오류가 발생합니다.
+- Dolt 서버가 응답하지 않습니다.
 
-## Diagnosis
+## 진단
 
 ```bash
-# Check Dolt server health
+# Dolt 서버 상태 확인
 bd doctor
 bd dolt show
 
-# View Dolt server logs
-tail -50 .beads/dolt-server.log   # server mode
+# Dolt 서버 로그 보기
+tail -50 .beads/dolt-server.log   # 서버 모드
 ```
 
-## Solution
+## 해결 방법
 
-**Step 1:** Stop the Dolt server
+**1단계:** Dolt 서버를 중지합니다.
 ```bash
 bd dolt stop
 ```
 
-**Step 2:** Check for lock files
+**2단계:** 잠금 파일을 확인합니다.
 ```bash
 ls -la .beads/*.lock
-# Remove stale locks if Dolt server is definitely stopped
+# Dolt 서버가 확실히 중지되었다면 오래된 잠금을 제거합니다.
 rm -f .beads/*.lock
 ```
 
-**Step 3:** Back up and preview fixes
+**3단계:** 백업하고 수정 사항을 미리 봅니다.
 ```bash
 cp -r .beads .beads.backup
 bd doctor --dry-run
 ```
 
-**Step 4:** Apply fixes if needed
+**4단계:** 필요하면 수정 사항을 적용합니다.
 ```bash
 bd doctor --fix
 ```
 
-**Step 5:** Restart the Dolt server
+**5단계:** Dolt 서버를 다시 시작합니다.
 ```bash
 dolt sql-server
 ```
 
-**Step 6:** Verify sync works
+**6단계:** 동기화가 작동하는지 확인합니다.
 ```bash
 bd dolt push
 bd doctor
 ```
 
-## Common Causes
+## 일반적인 원인
 
-| Cause | Solution |
+| 원인 | 해결 방법 |
 |-------|----------|
-| Network timeout | Retry with better connection |
-| Stale lock file | Remove lock after stopping Dolt server |
-| Corrupted state | Back up, then `bd doctor --fix` |
-| Merge conflicts | See [Merge Conflicts](/recovery/merge-conflicts) |
+| 네트워크 시간 초과 | 더 나은 연결에서 다시 시도합니다. |
+| 오래된 잠금 파일 | Dolt 서버를 중지한 뒤 잠금을 제거합니다. |
+| 손상된 상태 | 백업한 뒤 `bd doctor --fix`를 실행합니다. |
+| 병합 충돌 | [병합 충돌](/recovery/merge-conflicts)을 참조하세요. |
 
-## Prevention
+## 예방
 
-- Ensure stable network before sync
-- Let sync complete before closing terminal
-- Use `bd dolt stop` before system shutdown
+- 동기화 전에 네트워크가 안정적인지 확인합니다.
+- 터미널을 닫기 전에 동기화가 완료되도록 합니다.
+- 시스템을 종료하기 전에 `bd dolt stop`을 사용합니다.

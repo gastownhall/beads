@@ -1,18 +1,18 @@
 ---
 title: Factory.ai Droid
-description: Set up beads for Factory.ai Droid through a managed Beads section in AGENTS.md
+description: AGENTS.md의 관리형 Beads 섹션을 통해 Factory.ai Droid용 Beads 설정
 ---
 
-Use Beads with Factory.ai Droid through managed `AGENTS.md` guidance.
+관리형 `AGENTS.md` 지침을 통해 Factory.ai Droid에서 Beads를 사용합니다.
 
 ```bash
 bd setup factory
 bd setup factory --check
 ```
 
-The setup command creates or updates `AGENTS.md` with a managed Beads section. Factory Droid reads `AGENTS.md` automatically when it starts a session.
+설정 명령은 관리형 Beads 섹션으로 `AGENTS.md`를 생성하거나 업데이트합니다. Factory Droid는 세션을 시작할 때 `AGENTS.md`를 자동으로 읽습니다.
 
-## Remove
+## 제거
 
 ```bash
 bd setup factory --remove

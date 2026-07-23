@@ -1,86 +1,90 @@
 ---
-title: GitHub Copilot CLI Integration Design
-description: Design rationale and setup for the Copilot CLI integration, which uses a plugin manifest plus repository instructions
+title: GitHub Copilot CLI 통합 설계
+description: 플러그인 매니페스트와 저장소 지침을 사용하는 Copilot CLI 통합의 설계 근거 및 설정
 ---
 
-This document explains design decisions for GitHub Copilot CLI integration in beads.
+이 문서는 Beads의 GitHub Copilot CLI 통합 설계 결정을 설명합니다.
 
-For **VS Code + MCP**, see [GitHub Copilot](/integrations/github-copilot).
+**VS Code 및 MCP**는 [GitHub Copilot](/integrations/github-copilot)을 참고하세요.
 
-## Integration Approach
+## 통합 방식
 
-**Recommended: Copilot CLI plugin + repository instructions** - Beads uses Copilot CLI's native plugin manifest plus repository instructions:
-- `.copilot-plugin/plugin.json` registers `bd prime` hooks natively
-- `.github/copilot-instructions.md` provides repository-specific workflow guidance
-- Direct CLI commands with `--json` flags remain the primary operational interface
+**권장: Copilot CLI 플러그인 및 저장소 지침** - Beads는 Copilot CLI의 네이티브 플러그인
+매니페스트와 저장소 지침을 함께 사용합니다.
 
-**Alternative: VS Code MCP** - For Copilot Chat in the editor:
-- Native tool calling through MCP
-- Higher context overhead from tool schemas
-- Use when you want editor-native tool access instead of terminal-first workflow
+- `.copilot-plugin/plugin.json`이 `bd prime` 훅을 네이티브로 등록합니다.
+- `.github/copilot-instructions.md`가 저장소별 워크플로 지침을 제공합니다.
+- `--json` 플래그가 있는 직접 CLI 명령이 주요 운영 인터페이스로 유지됩니다.
 
-## Why Plugin + Instructions Over Custom Setup Code?
+**대안: VS Code MCP** - 편집기의 Copilot Chat에 사용합니다.
 
-**The plugin manifest already models the behavior we want:**
+- MCP를 통한 네이티브 도구 호출
+- 도구 스키마로 인한 더 큰 컨텍스트 오버헤드
+- 터미널 우선 워크플로 대신 편집기 네이티브 도구 접근을 원할 때 사용
 
-1. **Hooks belong in the tool's native format**
-   - Copilot CLI understands plugin manifests directly
-   - `SessionStart` and `PreCompact` can be declared as data instead of custom Go logic
-   - This keeps beads core smaller and easier to maintain
+## 커스텀 설정 코드 대신 플러그인 및 지침을 사용하는 이유
 
-2. **Instructions stay explicit and reviewable**
-   - Repository guidance still lives in `.github/copilot-instructions.md`
-   - Teams can review the instructions like any other project documentation
-   - The hook behavior and the human-readable guidance stay separate
+**플러그인 매니페스트가 이미 원하는 동작을 모델링합니다.**
 
-3. **Lower maintenance burden**
-   - No Copilot-specific install/check/remove implementation in core
-   - No Copilot-specific doctor checks
-   - The recipe just writes the native plugin file and the instruction file
+1. **훅은 도구의 네이티브 형식에 포함**
+   - Copilot CLI가 플러그인 매니페스트를 직접 이해합니다.
+   - `SessionStart`와 `PreCompact`를 커스텀 Go 논리 대신 데이터로 선언할 수 있습니다.
+   - Beads 코어를 더 작고 유지보수하기 쉽게 유지합니다.
 
-## Why Copilot CLI Over MCP for Terminal Work?
+2. **지침을 명시적이고 검토 가능한 상태로 유지**
+   - 저장소 지침은 계속 `.github/copilot-instructions.md`에 있습니다.
+   - 팀은 다른 프로젝트 문서처럼 지침을 검토할 수 있습니다.
+   - 훅 동작과 사람이 읽는 지침이 분리됩니다.
 
-**Context efficiency still matters**, even with large context windows:
+3. **낮은 유지보수 부담**
+   - 코어에 Copilot 전용 설치/검사/제거 구현이 없습니다.
+   - Copilot 전용 doctor 점검도 없습니다.
+   - 레시피는 네이티브 플러그인 파일과 지침 파일만 작성합니다.
 
-1. **Compute cost scales with tokens** - Every token in context is processed on every inference
-2. **Latency increases with context** - Smaller prompts keep the CLI more responsive
-3. **Energy consumption** - Lean prompts are more sustainable over long sessions
-4. **Attention quality** - Models generally perform better with tighter, more relevant context
+## 터미널 작업에서 MCP보다 Copilot CLI를 사용하는 이유
 
-**The math:**
-- MCP tool schemas can add 10-50k tokens to context
-- `bd prime` adds ~1-2k tokens of workflow context
-- That is an order-of-magnitude reduction in overhead
+큰 컨텍스트 창에서도 **컨텍스트 효율은 중요합니다.**
 
-## Installation
+1. **토큰에 따라 계산 비용 증가** - 추론할 때마다 컨텍스트의 모든 토큰을 처리합니다.
+2. **컨텍스트에 따라 지연 시간 증가** - 작은 프롬프트가 CLI 응답성을 높입니다.
+3. **에너지 소비** - 간결한 프롬프트가 긴 세션에서 더 지속 가능합니다.
+4. **주의 품질** - 일반적으로 모델은 더 작고 관련성 높은 컨텍스트에서 잘 작동합니다.
+
+**수치 비교:**
+
+- MCP 도구 스키마는 컨텍스트에 1만~5만 토큰을 추가할 수 있습니다.
+- `bd prime`은 약 1~2천 토큰의 워크플로 컨텍스트를 추가합니다.
+- 오버헤드가 약 10배 줄어듭니다.
+
+## 설치
 
 ```bash
-# Install the Copilot CLI plugin manifest + repository instructions
+# Copilot CLI 플러그인 매니페스트 및 저장소 지침 설치
 bd setup copilot
 
-# Check installation status
+# 설치 상태 확인
 bd setup copilot --check
 
-# Remove the integration
+# 통합 제거
 bd setup copilot --remove
 ```
 
-**What it installs:**
+**설치 항목:**
 - `.copilot-plugin/plugin.json`
-  - `SessionStart` hook: Runs `bd prime` when Copilot CLI starts a session
-  - `PreCompact` hook: Runs `bd prime` before context compaction
+  - `SessionStart` hook: Copilot CLI가 세션을 시작할 때 `bd prime` 실행
+  - `PreCompact` hook: 컨텍스트 압축 전에 `bd prime` 실행
 - `.github/copilot-instructions.md`
-  - Repository workflow guidance for Copilot CLI
+  - Copilot CLI용 저장소 워크플로 지침
 
-## Related Files
+## 관련 파일
 
-- `plugins/beads/.copilot-plugin/plugin.json` - Source plugin manifest for the shared plugin package
-- `plugins/beads/copilot_manifest.go` - Embedded manifest source used by `bd setup copilot`
-- `internal/recipes/recipes.go` - Lightweight `copilot` recipe definition
-- `internal/recipes/template.go` - Static Copilot instructions template used by `bd setup`
-- [GitHub Copilot integration](/integrations/github-copilot) - VS Code MCP integration
+- `plugins/beads/.copilot-plugin/plugin.json` - 공유 플러그인 패키지의 소스 플러그인 매니페스트
+- `plugins/beads/copilot_manifest.go` - `bd setup copilot`이 사용하는 내장 매니페스트 소스
+- `internal/recipes/recipes.go` - 가벼운 `copilot` 레시피 정의
+- `internal/recipes/template.go` - `bd setup`이 사용하는 정적 Copilot 지침 템플릿
+- [GitHub Copilot 통합](/integrations/github-copilot) - VS Code MCP 통합
 
-## References
+## 참고 자료
 
-- [GitHub Copilot CLI docs](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-copilot-cli)
-- [Adding repository custom instructions for GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/copilot-cli/add-custom-instructions)
+- [GitHub Copilot CLI 문서](https://docs.github.com/en/copilot/how-tos/use-copilot-agents/use-copilot-cli)
+- [GitHub Copilot CLI에 저장소 커스텀 지침 추가](https://docs.github.com/en/copilot/how-tos/copilot-cli/add-custom-instructions)

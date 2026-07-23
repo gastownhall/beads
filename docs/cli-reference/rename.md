@@ -1,25 +1,25 @@
 ---
 title: "bd rename"
-description: "Rename an issue from one ID to another."
+description: "이슈 ID를 다른 ID로 변경합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc rename`.
+`bd help --doc rename`에서 생성되었습니다.
 
-Rename an issue from one ID to another.
+이슈 ID를 다른 ID로 변경합니다.
 
-This updates:
-- The issue's primary ID
-- All references in other issues (descriptions, titles, notes, etc.)
-- Dependencies pointing to/from this issue
-- Labels, comments, and events
+다음을 업데이트합니다:
+- 이슈의 기본 ID
+- 다른 이슈의 모든 참조(설명, 제목, 메모 등)
+- 이 이슈를 향하거나 이 이슈에서 나가는 의존성
+- 레이블, 댓글, 이벤트
 
-Examples:
-  bd rename bd-w382l bd-dolt     # Rename to memorable ID
-  bd rename gt-abc123 gt-auth    # Use descriptive ID
+예시:
+  bd rename bd-w382l bd-dolt     # 기억하기 쉬운 ID로 변경
+  bd rename gt-abc123 gt-auth    # 설명적인 ID 사용
 
-Note: The new ID must use a valid prefix for this database.
+참고: 새 ID는 이 데이터베이스에 유효한 접두사를 사용해야 합니다.
 
 ```
 bd rename <old-id> <new-id> [flags]

@@ -1,89 +1,91 @@
 ---
-title: Azure DevOps (ADO) Integration Configuration
-description: Configuration reference for bd ado sync, which bidirectionally syncs beads issues with Azure DevOps work items
+title: Azure DevOps(ADO) 통합 설정
+description: Beads 이슈와 Azure DevOps 작업 항목을 양방향 동기화하는 bd ado sync 설정 참조
 ---
 
 Last reviewed: 2026-05-08
 
-Freshness source: `cmd/bd/ado*.go` and `internal/ado/`.
+Freshness source: `cmd/bd/ado*.go` 및 `internal/ado/`.
 
-This guide covers all configuration options for the `bd ado sync` command, which synchronizes beads issues with Azure DevOps work items.
+이 가이드는 Beads 이슈를 Azure DevOps 작업 항목과 동기화하는 `bd ado sync` 명령의
+모든 설정 옵션을 다룹니다.
 
-## Quick Start
+## 빠른 시작
 
 ```bash
-# Set required config
+# 필수 설정 지정
 bd config set ado.pat "your-personal-access-token"
 bd config set ado.org "your-organization"
 bd config set ado.project "your-project"
 
-# Or use environment variables
+# 또는 환경 변수 사용
 export AZURE_DEVOPS_PAT="your-personal-access-token"
 export AZURE_DEVOPS_ORG="your-organization"
 export AZURE_DEVOPS_PROJECT="your-project"
 
-# Sync (bidirectional)
+# 동기화(양방향)
 bd ado sync
 
-# Pull only (import from ADO)
+# pull만 수행(ADO에서 import)
 bd ado sync --pull-only
 
-# Push only (export to ADO)
+# push만 수행(ADO로 export)
 bd ado sync --push-only
 
-# Preview without making changes
+# 변경하지 않고 미리 보기
 bd ado sync --dry-run
 ```
 
-## Connection Configuration
+## 연결 설정
 
-| Config Key | Env Variable | Required | Description |
+| 설정 key | 환경 변수 | 필수 | 설명 |
 |---|---|---|---|
-| `ado.pat` | `AZURE_DEVOPS_PAT` | Yes | Personal Access Token |
-| `ado.org` | `AZURE_DEVOPS_ORG` | Conditional¹ | Organization name (e.g., `myorg`) |
-| `ado.url` | `AZURE_DEVOPS_URL` | Conditional¹ | Custom base URL (on-prem ADO Server) |
-| `ado.project` | `AZURE_DEVOPS_PROJECT` | Conditional² | Single project name |
-| `ado.projects` | `AZURE_DEVOPS_PROJECTS` | Conditional² | Comma-separated project names |
+| `ado.pat` | `AZURE_DEVOPS_PAT` | 예 | Personal Access Token |
+| `ado.org` | `AZURE_DEVOPS_ORG` | 조건부¹ | 조직 이름(예: `myorg`) |
+| `ado.url` | `AZURE_DEVOPS_URL` | 조건부¹ | 커스텀 base URL(on-prem ADO 서버) |
+| `ado.project` | `AZURE_DEVOPS_PROJECT` | 조건부² | 단일 프로젝트 이름 |
+| `ado.projects` | `AZURE_DEVOPS_PROJECTS` | 조건부² | 쉼표로 구분한 프로젝트 이름 |
 
-¹ Either `ado.org` or `ado.url` must be set. Use `ado.url` for on-premises Azure DevOps Server.
+¹ `ado.org` 또는 `ado.url` 중 하나를 설정해야 합니다. on-premises Azure DevOps 서버에는 `ado.url`을 사용하세요.
 
-² At least one project must be configured via `ado.project` or `ado.projects`.
+² `ado.project` 또는 `ado.projects`로 프로젝트를 하나 이상 설정해야 합니다.
 
-**Config vs env var precedence:** Config keys (set via `bd config set`) take priority over environment variables.
+**설정과 환경 변수의 우선순위:** `bd config set`으로 지정한 설정 key가 환경 변수보다 우선합니다.
 
-### On-Premises ADO Server
+### on-premises ADO 서버
 
-For Azure DevOps Server (on-prem), use `ado.url` instead of `ado.org`:
+Azure DevOps 서버(on-prem)에는 `ado.org` 대신 `ado.url`을 사용하세요.
 
 ```bash
 bd config set ado.url "https://tfs.company.com/DefaultCollection"
 bd config set ado.project "MyProject"
 ```
 
-### Multi-Project Sync
+### 다중 프로젝트 동기화
 
-Sync across multiple projects in a single command:
+명령 하나로 여러 프로젝트를 동기화합니다.
 
 ```bash
 bd config set ado.projects "ProjectA,ProjectB,ProjectC"
 ```
 
-The first project is used as the primary for URL construction. WIQL queries use `TeamProject IN (...)` for multi-project support.
+첫 프로젝트를 URL 구성의 주 대상으로 사용합니다. WIQL query는 다중 프로젝트 지원을
+위해 `TeamProject IN (...)`을 사용합니다.
 
-## Filter Configuration
+## 필터 설정
 
-Filters control which ADO work items are included in sync operations.
+필터는 동기화 작업에 포함할 ADO 작업 항목을 제어합니다.
 
-| Config Key | CLI Flag | Description | Example |
+| 설정 key | CLI flag | 설명 | 예제 |
 |---|---|---|---|
-| `ado.filter.area_path` | `--area-path` | Area path (uses UNDER) | `Project\Team` |
-| `ado.filter.iteration_path` | `--iteration-path` | Sprint/iteration path | `Project\Sprint 1` |
-| `ado.filter.types` | `--types` | Work item types (comma-separated) | `Bug,Task,User Story` |
-| `ado.filter.states` | `--states` | ADO states (comma-separated) | `New,Active,Resolved` |
+| `ado.filter.area_path` | `--area-path` | 영역 경로(UNDER 사용) | `Project\Team` |
+| `ado.filter.iteration_path` | `--iteration-path` | sprint/iteration 경로 | `Project\Sprint 1` |
+| `ado.filter.types` | `--types` | 작업 항목 유형(쉼표로 구분) | `Bug,Task,User Story` |
+| `ado.filter.states` | `--states` | ADO 상태(쉼표로 구분) | `New,Active,Resolved` |
 
-CLI flags override config values for that sync run.
+CLI flag는 해당 동기화 실행에서 설정 값을 override합니다.
 
-**WIQL query example** (generated from filters):
+**WIQL query 예제**(필터에서 생성):
 
 ```sql
 SELECT [System.Id] FROM WorkItems WHERE
@@ -95,34 +97,36 @@ SELECT [System.Id] FROM WorkItems WHERE
   ORDER BY [System.ChangedDate] ASC
 ```
 
-## Default Mappings
+## 기본 mapping
 
-### Priority Mapping
+### 우선순위 mapping
 
-Priority mapping is bidirectional but **lossy for P3/P4**:
+우선순위 mapping은 양방향이지만 **P3/P4에서는 손실이 발생**합니다.
 
-| Beads Priority | ADO Priority | Direction | Notes |
+| Beads 우선순위 | ADO 우선순위 | 방향 | 참고 |
 |---|---|---|---|
-| 0 (Critical) | 1 | ↔ | |
-| 1 (High) | 2 | ↔ | |
-| 2 (Medium) | 3 | ↔ | Default for unknown values |
-| 3 (Low) | 4 | → | |
-| 4 (Backlog) | 4 | → | **Lossy**: becomes P3 on pull |
+| 0(긴급) | 1 | 양방향 | |
+| 1(높음) | 2 | 양방향 | |
+| 2(중간) | 3 | 양방향 | 알 수 없는 값의 기본값 |
+| 3(낮음) | 4 | Beads에서 ADO | |
+| 4(backlog) | 4 | Beads에서 ADO | **손실 발생**: pull 시 P3가 됨 |
 
-> **Note:** Beads P3 and P4 both map to ADO priority 4. On a fresh pull into an empty database, ADO 4 maps back to beads P3. The original priority is not preserved across a full round-trip for P4 issues.
+> **참고:** Beads P3와 P4는 모두 ADO 우선순위 4에 대응합니다. 빈 데이터베이스로 새로
+> pull하면 ADO 4가 Beads P3로 돌아옵니다. P4 이슈는 전체 왕복 과정에서 원래
+> 우선순위가 보존되지 않습니다.
 
-For Bug-type work items, ADO also requires a Severity field:
+Bug 유형 작업 항목에는 ADO가 Severity 필드도 요구합니다.
 
-| Beads Priority | ADO Severity |
+| Beads 우선순위 | ADO Severity |
 |---|---|
 | 0 | 1 - Critical |
 | 1 | 2 - High |
 | 2 | 3 - Medium |
 | 3, 4 | 4 - Low |
 
-### Status Mapping
+### 상태 mapping
 
-| Beads Status | Default ADO State | Config Key |
+| Beads 상태 | 기본 ADO 상태 | 설정 key |
 |---|---|---|
 | `open` | `New` | `ado.state_map.open` |
 | `in_progress` | `Active` | `ado.state_map.in_progress` |
@@ -130,20 +134,22 @@ For Bug-type work items, ADO also requires a Severity field:
 | `deferred` | `Removed` | `ado.state_map.deferred` |
 | `closed` | `Closed` | `ado.state_map.closed` |
 
-**Blocked status:** ADO has no native blocked state. beads maps blocked to `Active` and adds a `beads:blocked` tag. On pull, `Active` + `beads:blocked` tag restores `StatusBlocked`.
+**차단 상태:** ADO에는 native 차단 상태가 없습니다. Beads는 차단 상태를 `Active`에
+대응시키고 `beads:blocked` tag를 추가합니다. pull 시 `Active` 및 `beads:blocked`
+tag가 `StatusBlocked`를 복원합니다.
 
-Override defaults for your process template:
+process 템플릿에 맞게 기본값을 override하세요.
 
 ```bash
-# Example: Scrum template
+# 예제: Scrum 템플릿
 bd config set ado.state_map.open "To Do"
 bd config set ado.state_map.in_progress "In Progress"
 bd config set ado.state_map.closed "Done"
 ```
 
-### Type Mapping
+### 유형 mapping
 
-| Beads Type | Default ADO Type | Config Key |
+| Beads 유형 | 기본 ADO 유형 | 설정 key |
 |---|---|---|
 | `bug` | `Bug` | `ado.type_map.bug` |
 | `feature` | `User Story` | `ado.type_map.feature` |
@@ -151,26 +157,28 @@ bd config set ado.state_map.closed "Done"
 | `epic` | `Epic` | `ado.type_map.epic` |
 | `chore` | `Task` | `ado.type_map.chore` |
 
-Reverse mapping (ADO → beads) also recognizes:
-- `Product Backlog Item` → `feature` (Scrum template)
-- `Issue` → `task`
+역방향 mapping(ADO에서 Beads)도 다음 항목을 인식합니다.
 
-Override for your process template:
+- `Product Backlog Item`은 `feature`에 대응(Scrum 템플릿)
+- `Issue`는 `task`에 대응
+
+process 템플릿에 맞게 override하세요.
 
 ```bash
-# Example: Scrum template
+# 예제: Scrum 템플릿
 bd config set ado.type_map.feature "Product Backlog Item"
 ```
 
-## Process Template Configuration
+## process 템플릿 설정
 
-ADO supports multiple process templates with different work item types and state transitions. The defaults assume the **Agile** template. Override mappings for other templates.
+ADO는 작업 항목 유형과 상태 전환이 서로 다른 여러 process 템플릿을 지원합니다. 기본값은
+**Agile** 템플릿을 가정합니다. 다른 템플릿에는 mapping을 override하세요.
 
-### Agile (Default)
+### Agile(기본값)
 
-No configuration needed. Default mappings work out of the box.
+설정할 필요가 없습니다. 기본 mapping이 바로 작동합니다.
 
-State transitions:
+상태 전환:
 ```
 Bug:         New → Active → Resolved → Closed
 Task:        New → Active → Closed
@@ -187,7 +195,7 @@ bd config set ado.state_map.in_progress "Committed"
 bd config set ado.state_map.closed "Done"
 ```
 
-State transitions:
+상태 전환:
 ```
 Product Backlog Item: New → Approved → Committed → Done
 Task:                 To Do → In Progress → Done
@@ -203,131 +211,135 @@ bd config set ado.state_map.in_progress "Active"
 bd config set ado.state_map.closed "Closed"
 ```
 
-State transitions:
+상태 전환:
 ```
 Requirement: Proposed → Active → Resolved → Closed
 Task:        Proposed → Active → Closed
 Bug:         Proposed → Active → Resolved → Closed
 ```
 
-### State Transition Handling
+### 상태 전환 처리
 
-When creating a work item in a non-initial state (e.g., pushing a closed issue), beads:
+초기 상태가 아닌 작업 항목을 생성할 때(예: 종료된 이슈 push) Beads는 다음과 같이
+처리합니다.
 
-1. Creates the item in the initial state (e.g., `New`)
-2. Transitions through intermediate states to reach the target
-3. Example: Creating a closed Bug → `New → Active → Resolved → Closed`
+1. 초기 상태(예: `New`)로 항목을 생성합니다.
+2. 중간 상태를 거쳐 대상 상태에 도달합니다.
+3. 예: 종료된 Bug 생성은 `New → Active → Resolved → Closed` 순서로 진행됩니다.
 
-If a direct transition fails (ADO returns 400), beads automatically walks the known transition path for the work item type and process template.
+직접 전환에 실패하면(ADO가 400 반환) Beads가 작업 항목 유형과 process 템플릿의 알려진
+전환 경로를 자동으로 따릅니다.
 
-## Sync Options
+## 동기화 옵션
 
-### Direction
+### 방향
 
-| Flag | Description |
+| 플래그 | 설명 |
 |---|---|
-| (none) | Bidirectional: pull then push |
-| `--pull-only` | Import from ADO only |
-| `--push-only` | Export to ADO only |
+| 없음 | 양방향: pull 후 push |
+| `--pull-only` | ADO에서만 import |
+| `--push-only` | ADO로만 export |
 
-### Conflict Resolution
+### 충돌 해결
 
-When the same issue has been modified both locally and in ADO:
+같은 이슈가 로컬과 ADO에서 모두 수정된 경우입니다.
 
-| Flag | Description |
+| 플래그 | 설명 |
 |---|---|
-| `--prefer-newer` | Most recently updated version wins (default) |
-| `--prefer-local` | Local beads version always wins |
-| `--prefer-ado` | ADO version always wins |
+| `--prefer-newer` | 가장 최근에 업데이트된 버전이 우선(기본값) |
+| `--prefer-local` | 로컬 Beads 버전이 항상 우선 |
+| `--prefer-ado` | ADO 버전이 항상 우선 |
 
-### Additional Flags
+### 추가 플래그
 
-| Flag | Description |
+| 플래그 | 설명 |
 |---|---|
-| `--dry-run` | Preview sync without making changes |
-| `--no-create` | Only update existing items, never create new ones |
-| `--bootstrap-match` | Enable heuristic title matching for first sync |
-| `--reconcile` | Force reconciliation scan for deleted items |
-| `--issues` | Sync specific issues by bead ID or ADO work item ID |
-| `--states` | Filter by work item states (comma-separated) |
-| `--types` | Filter by work item types (comma-separated) |
-| `--issues` | Sync specific beads by ID |
+| `--dry-run` | 변경하지 않고 동기화 미리 보기 |
+| `--no-create` | 기존 항목만 업데이트하고 새 항목은 생성하지 않음 |
+| `--bootstrap-match` | 첫 동기화에서 heuristic 제목 일치 활성화 |
+| `--reconcile` | 삭제된 항목의 조정 scan 강제 실행 |
+| `--issues` | Bead ID 또는 ADO 작업 항목 ID로 특정 이슈 동기화 |
+| `--states` | 작업 항목 상태로 필터링(쉼표로 구분) |
+| `--types` | 작업 항목 유형으로 필터링(쉼표로 구분) |
+| `--issues` | ID로 특정 Beads 동기화 |
 
-## PAT Permissions
+## PAT 권한
 
-The Personal Access Token needs these scopes:
+Personal Access Token에 다음 scope가 필요합니다.
 
-| Scope | Access | Required For |
+| scope | 접근 권한 | 필요한 작업 |
 |---|---|---|
-| Work Items | Read & Write | Creating and updating work items |
+| Work Items | Read & Write | 작업 항목 생성 및 업데이트 |
 
-Generate a PAT at: `https://dev.azure.com/{org}/_usersettings/tokens`
+다음 위치에서 PAT를 생성하세요: `https://dev.azure.com/{org}/_usersettings/tokens`
 
-## Metadata Preserved
+## 보존되는 metadata
 
-beads stores ADO-specific metadata for round-trip fidelity:
+Beads는 왕복 충실도를 위해 ADO별 metadata를 저장합니다.
 
-| Metadata Key | Description |
+| metadata key | 설명 |
 |---|---|
-| `ado.rev` | ADO revision number |
-| `ado.area_path` | Area path |
-| `ado.iteration_path` | Iteration/sprint path |
-| `ado.story_points` | Story points estimate |
-| `ado.remaining_work` | Remaining work hours |
-| `ado.severity` | Bug severity value |
+| `ado.rev` | ADO revision 번호 |
+| `ado.area_path` | 영역 경로 |
+| `ado.iteration_path` | iteration/sprint 경로 |
+| `ado.story_points` | story point 추정치 |
+| `ado.remaining_work` | 남은 작업 시간 |
+| `ado.severity` | Bug severity 값 |
 
-## Description Conversion
+## 설명 변환
 
-- **Push (beads → ADO):** Markdown converted to HTML
-- **Pull (ADO → beads):** HTML converted to Markdown
+- **push(Beads에서 ADO):** Markdown을 HTML로 변환
+- **pull(ADO에서 Beads):** HTML을 Markdown으로 변환
 
-## Tags and Labels
+## tag와 레이블
 
-- ADO tags are semicolon-separated; beads labels use arrays
-- User labels round-trip through ADO tags
-- Internal `beads:*` tags (e.g., `beads:blocked`) are filtered on pull — they don't appear as user labels
+- ADO tag는 세미콜론으로 구분하고 Beads 레이블은 array를 사용합니다.
+- 사용자 레이블은 ADO tag를 통해 왕복합니다.
+- 내부 `beads:*` tag(예: `beads:blocked`)는 pull 시 필터링되므로 사용자 레이블로 표시되지 않습니다.
 
-## API Limits
+## API 제한
 
-| Limit | Value |
+| 제한 | 값 |
 |---|---|
-| Max batch size | 200 work items per GET request |
-| Max response size | 50 MB |
-| Request timeout | 30 seconds |
-| Max retries | 3 (GET and WIQL only) |
-| Retry backoff | Exponential with jitter, respects `Retry-After` header |
+| 최대 batch 크기 | GET 요청당 작업 항목 200개 |
+| 최대 응답 크기 | 50MB |
+| 요청 timeout | 30초 |
+| 최대 재시도 | 3회(GET 및 WIQL만) |
+| 재시도 backoff | jitter가 있는 지수형, `Retry-After` header 준수 |
 
-## Troubleshooting
+## 문제 해결
 
-### Common Errors
+### 일반적인 오류
 
 **`ado.pat not configured: set via 'bd config set ado.pat <token>' or AZURE_DEVOPS_PAT env var`**
 ```bash
 bd config set ado.pat "your-pat-here"
-# or
+# 또는
 export AZURE_DEVOPS_PAT="your-pat-here"
 ```
 
 **"ado.organization not configured"**
 ```bash
 bd config set ado.org "your-org"
-# or for on-prem:
+# 또는 on-prem의 경우
 bd config set ado.url "https://tfs.company.com/DefaultCollection"
 ```
 
-**State transition errors (400 Bad Request)**
-This usually means the process template doesn't support a direct state change. Check your `ado.state_map.*` config matches your actual process template.
+**상태 전환 오류(400 Bad Request)**
+일반적으로 process 템플릿이 직접 상태 변경을 지원하지 않는다는 의미입니다.
+`ado.state_map.*` 설정이 실제 process 템플릿과 일치하는지 확인하세요.
 
-**Type not found errors**
-Verify your `ado.type_map.*` config matches the work item types available in your project. Use `--types` filter to restrict which types are synced.
+**유형을 찾을 수 없음 오류**
+`ado.type_map.*` 설정이 프로젝트에서 사용할 수 있는 작업 항목 유형과 일치하는지
+확인하세요. 동기화할 유형을 제한하려면 `--types` 필터를 사용하세요.
 
-### Debugging
+### 디버깅
 
 ```bash
-# Preview what would happen
+# 실행 결과 미리 보기
 bd ado sync --dry-run
 
-# Check current config
+# 현재 설정 확인
 bd config get ado.pat
 bd config get ado.org
 bd config get ado.project

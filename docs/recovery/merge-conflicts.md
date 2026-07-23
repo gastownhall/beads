@@ -1,54 +1,54 @@
 ---
-title: Merge Conflicts
-description: Resolve Dolt merge conflicts
+title: 병합 충돌
+description: Dolt 병합 충돌 해결하기
 ---
 
-This runbook helps you resolve merge conflicts that occur during Dolt sync operations.
+이 런북은 Dolt 동기화 작업 중 발생하는 병합 충돌을 해결하는 방법을 안내합니다.
 
-## Symptoms
+## 증상
 
-- `bd dolt pull` fails with conflict errors
-- Different issue states between clones
+- `bd dolt pull`이 충돌 오류와 함께 실패합니다.
+- 클론마다 이슈 상태가 다릅니다.
 
-## Diagnosis
+## 진단
 
 ```bash
-# Check database health
+# 데이터베이스 상태 확인
 bd doctor
 
-# Preview what fixes would be applied
+# 적용할 수정 사항 미리 보기
 bd doctor --dry-run
 ```
 
-## Solution
+## 해결 방법
 
-**Step 1:** Back up current state
+**1단계:** 현재 상태를 백업합니다.
 ```bash
 cp -r .beads .beads.backup
 ```
 
-**Step 2:** Check for conflicts
+**2단계:** 충돌을 확인합니다.
 ```bash
 bd doctor
 ```
 
-**Step 3:** Fix to reconcile
+**3단계:** 일치하도록 수정합니다.
 ```bash
 bd doctor --fix
 ```
 
-**Step 4:** Verify state
+**4단계:** 상태를 확인합니다.
 ```bash
 bd list
 bd stats
 ```
 
-**Step 5:** Push resolved state
+**5단계:** 해결된 상태를 푸시합니다.
 ```bash
 bd dolt push
 ```
 
-## Prevention
+## 예방
 
-- Sync before and after work sessions using `bd dolt pull` / `bd dolt push`
-- Avoid concurrent modifications from multiple clones without the Dolt server running
+- 작업 세션 전후에 `bd dolt pull` / `bd dolt push`로 동기화합니다.
+- Dolt 서버가 실행 중이지 않을 때 여러 클론에서 동시에 수정하지 않습니다.

@@ -1,41 +1,41 @@
 ---
 title: "bd flatten"
-description: "Nuclear option: squash ALL Dolt commit history into a single commit."
+description: "최후의 수단: 모든 Dolt 커밋 이력을 단일 커밋으로 squash합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc flatten`.
+`bd help --doc flatten`에서 생성되었습니다.
 
-Nuclear option: squash ALL Dolt commit history into a single commit.
+최후의 수단: 모든 Dolt 커밋 이력을 단일 커밋으로 squash합니다.
 
-This uses the Tim Sehn recipe:
-  1. Create a new branch from the current state
-  2. Soft-reset to the initial commit (preserving all data)
-  3. Commit everything as a single snapshot
-  4. Swap main branch to the new flattened branch
-  5. Run Dolt GC to reclaim space from old history
+Tim Sehn 레시피를 사용합니다:
+  1. 현재 상태에서 새 브랜치 생성
+  2. 초기 커밋으로 soft-reset(모든 데이터 보존)
+  3. 모든 항목을 단일 스냅샷으로 커밋
+  4. main 브랜치를 새로 평탄화한 브랜치로 교체
+  5. 오래된 이력의 공간 회수를 위해 Dolt GC 실행
 
-This is irreversible — all commit history is lost. The resulting database
-has exactly one commit containing all current data.
+되돌릴 수 없으며 모든 커밋 이력이 손실됩니다. 결과 데이터베이스에는 현재 데이터를
+모두 포함한 커밋 하나만 존재합니다.
 
-Use this when:
-  - Your .beads/dolt directory has grown very large
-  - You don't need commit-level history (time travel)
-  - You want to start fresh with minimal storage
+다음 경우 사용하세요:
+  - .beads/dolt 디렉터리가 매우 커진 경우
+  - 커밋 수준 이력(time travel)이 필요 없는 경우
+  - 최소 저장소로 새로 시작하려는 경우
 
-Examples:
-  bd flatten --dry-run               # Preview: show commit count and disk usage
-  bd flatten --force                 # Actually squash all history
-  bd flatten --force --json          # JSON output
+예시:
+  bd flatten --dry-run               # 미리 보기: 커밋 수와 디스크 사용량 표시
+  bd flatten --force                 # 모든 이력을 실제로 squash
+  bd flatten --force --json          # JSON 출력
 
 ```
 bd flatten [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview without making changes
-  -f, --force     Confirm irreversible history squash
+      --dry-run   변경 없이 미리 보기
+  -f, --force     되돌릴 수 없는 이력 squash 확인
 ```
