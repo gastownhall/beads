@@ -15,7 +15,7 @@ import (
 )
 
 func TestRenderProxiedServerConfig_RoundTrips(t *testing.T) {
-	body, err := renderProxiedServerConfig(54321)
+	body, err := renderProxiedServerConfig(54321, true)
 	require.NoError(t, err)
 
 	cfg, err := servercfg.NewYamlConfig(body)
@@ -26,10 +26,41 @@ func TestRenderProxiedServerConfig_RoundTrips(t *testing.T) {
 	assert.Equal(t, servercfg.LogLevel_Info, cfg.LogLevel(), "LogLevel mismatch")
 }
 
+// TestRenderProxiedServerConfig_ArchiveLevel covers the actual Snappy-GC fix
+// (gastownhall/beads#4986): when archiveLevelSupported is true, the
+// generated config sets auto_gc_behavior.archive_level: 0 with auto-GC left
+// enabled; when false, the key is omitted entirely so an older external
+// dolt's yaml.UnmarshalStrict loader never sees an unrecognized key.
+func TestRenderProxiedServerConfig_ArchiveLevel(t *testing.T) {
+	t.Run("supported: archive_level 0, auto-GC enabled", func(t *testing.T) {
+		body, err := renderProxiedServerConfig(54321, true)
+		require.NoError(t, err)
+		assert.Contains(t, string(body), "archive_level: 0")
+
+		cfg, err := servercfg.NewYamlConfig(body)
+		require.NoError(t, err)
+		gc := cfg.AutoGCBehavior()
+		require.NotNil(t, gc, "AutoGCBehavior must be set when archiveLevelSupported is true")
+		assert.Equal(t, 0, gc.ArchiveLevel())
+		assert.True(t, gc.Enable(), "auto-GC must remain enabled")
+	})
+
+	t.Run("unsupported: no auto_gc_behavior key at all", func(t *testing.T) {
+		body, err := renderProxiedServerConfig(54321, false)
+		require.NoError(t, err)
+		assert.NotContains(t, string(body), "archive_level")
+		assert.NotContains(t, string(body), "auto_gc_behavior")
+
+		cfg, err := servercfg.NewYamlConfig(body)
+		require.NoError(t, err)
+		assert.Nil(t, cfg.AutoGCBehavior())
+	})
+}
+
 func TestEnsureProxiedServerConfig_CreatesAndIsIdempotent(t *testing.T) {
 	beadsDir := t.TempDir()
 
-	path1, err := ensureProxiedServerConfig(beadsDir)
+	path1, err := ensureProxiedServerConfig(beadsDir, true)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(beadsDir, "dolt", "config.yaml"), path1)
 
@@ -39,7 +70,7 @@ func TestEnsureProxiedServerConfig_CreatesAndIsIdempotent(t *testing.T) {
 	require.True(t, strings.Contains(string(body1), proxiedServerListenerHost))
 
 	// Second call must NOT rewrite — running daemon is bound to the existing port.
-	path2, err := ensureProxiedServerConfig(beadsDir)
+	path2, err := ensureProxiedServerConfig(beadsDir, true)
 	require.NoError(t, err)
 	assert.Equal(t, path1, path2)
 
@@ -59,12 +90,12 @@ func TestEnsureProxiedServerConfig_ReusesExistingConfig(t *testing.T) {
 	root := filepath.Join(beadsDir, "dolt")
 	require.NoError(t, os.MkdirAll(root, 0o755))
 
-	existing, err := renderProxiedServerConfig(45678)
+	existing, err := renderProxiedServerConfig(45678, true)
 	require.NoError(t, err)
 	cfgPath := filepath.Join(root, "config.yaml")
 	require.NoError(t, os.WriteFile(cfgPath, existing, 0o600))
 
-	path, err := ensureProxiedServerConfig(beadsDir)
+	path, err := ensureProxiedServerConfig(beadsDir, true)
 	require.NoError(t, err)
 	assert.Equal(t, cfgPath, path)
 
@@ -165,7 +196,7 @@ func TestResolveProxiedServerConfigPath(t *testing.T) {
 // and returns the path. Used to exercise the custom-config success path.
 func writeValidServerYAML(t *testing.T, path string) string {
 	t.Helper()
-	body, err := renderProxiedServerConfig(54321)
+	body, err := renderProxiedServerConfig(54321, true)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, body, 0o600))
 	return path
@@ -182,7 +213,7 @@ func TestEnsureProxiedServerConfig_CustomPathExists(t *testing.T) {
 	customPath := writeValidServerYAML(t, filepath.Join(customDir, "my-server.yaml"))
 
 	writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: customPath})
-	got, err := ensureProxiedServerConfig(bd)
+	got, err := ensureProxiedServerConfig(bd, true)
 	require.NoError(t, err)
 	assert.Equal(t, customPath, got)
 
@@ -199,7 +230,7 @@ func TestEnsureProxiedServerConfig_CustomPathMissing(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist.yaml")
 
 	writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: missing})
-	_, err := ensureProxiedServerConfig(bd)
+	_, err := ensureProxiedServerConfig(bd, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), missing)
 }
@@ -215,7 +246,7 @@ func TestEnsureProxiedServerConfig_CustomPathInvalidYAML(t *testing.T) {
 	require.NoError(t, os.WriteFile(bad, []byte("listener: [host: 127.0.0.1\n"), 0o600))
 
 	writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: bad})
-	_, err := ensureProxiedServerConfig(bd)
+	_, err := ensureProxiedServerConfig(bd, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), bad)
 	assert.Contains(t, strings.ToLower(err.Error()), "parse")
@@ -229,7 +260,7 @@ func TestEnsureProxiedServerConfig_CustomPathIsDirectory(t *testing.T) {
 	dir := t.TempDir()
 
 	writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: dir})
-	_, err := ensureProxiedServerConfig(bd)
+	_, err := ensureProxiedServerConfig(bd, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), dir)
 	assert.Contains(t, err.Error(), "not a regular file")

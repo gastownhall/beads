@@ -17,6 +17,14 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
 
+// archiveLevelSupportNoticeFormat is the one-time stderr notice emitted when
+// generating a fresh managed-server config.yaml against an external dolt
+// that predates auto_gc_behavior.archive_level support. Never fires for an
+// existing config.yaml (ensureProxiedServerConfig only renders on first
+// bootstrap), so this is not a per-invocation warning.
+const archiveLevelSupportNoticeFormat = "Info: external dolt predates archive_level config support (need >= Dolt %s); " +
+	"this managed server's background auto-GC may still produce zstd archives.\n"
+
 const (
 	proxiedServerConfigName = "config.yaml"
 	proxiedServerLogName    = "server.log"
@@ -95,7 +103,12 @@ func resolveProxiedServerLogPath(beadsDir string) (path string, isCustom bool, e
 	return filepath.Join(root, proxiedServerLogName), false, nil
 }
 
-func ensureProxiedServerConfig(beadsDir string) (string, error) {
+// ensureProxiedServerConfig resolves (creating if needed) the managed
+// sql-server config.yaml. archiveLevelSupported gates whether a freshly
+// generated config sets auto_gc_behavior.archive_level: 0 (see
+// renderProxiedServerConfig); it has no effect on an existing config.yaml,
+// which is loaded as-is.
+func ensureProxiedServerConfig(beadsDir string, archiveLevelSupported bool) (string, error) {
 	path, isCustom, err := resolveProxiedServerConfigPath(beadsDir)
 	if err != nil {
 		return "", err
@@ -135,7 +148,11 @@ func ensureProxiedServerConfig(beadsDir string) (string, error) {
 		return "", fmt.Errorf("ensureProxiedServerConfig: pick free port: %w", err)
 	}
 
-	body, err := renderProxiedServerConfig(port)
+	if !archiveLevelSupported {
+		fmt.Fprintf(os.Stderr, archiveLevelSupportNoticeFormat, doltserver.MinDoltVersionForArchiveLevelConfig)
+	}
+
+	body, err := renderProxiedServerConfig(port, archiveLevelSupported)
 	if err != nil {
 		return "", fmt.Errorf("ensureProxiedServerConfig: render YAML: %w", err)
 	}
@@ -197,7 +214,17 @@ func validateProxiedServerLogPath(path string) error {
 	return nil
 }
 
-func renderProxiedServerConfig(port int) ([]byte, error) {
+// renderProxiedServerConfig renders the managed sql-server config.yaml. When
+// archiveLevelSupported is true it sets auto_gc_behavior.archive_level: 0,
+// so this server's background auto-GC writes classic Snappy table files
+// instead of zstd archives (gastownhall/beads#4986); auto-GC itself stays
+// enabled (the sibling "enable" key is left unset, which Dolt defaults to
+// true). When false, the key is omitted entirely — an older external dolt's
+// own YAMLConfig struct may not have this field, and Dolt's config loader
+// uses yaml.UnmarshalStrict, so an unrecognized key is a hard parse error at
+// server startup rather than a silently-ignored one. Callers must gate
+// archiveLevelSupported on doltserver.SupportsArchiveLevelConfig.
+func renderProxiedServerConfig(port int, archiveLevelSupported bool) ([]byte, error) {
 	host := proxiedServerListenerHost
 	logLevel := string(servercfg.LogLevel_Info)
 	yc := &servercfg.YAMLConfig{
@@ -206,6 +233,12 @@ func renderProxiedServerConfig(port int) ([]byte, error) {
 			HostStr:    &host,
 			PortNumber: &port,
 		},
+	}
+	if archiveLevelSupported {
+		archiveLevel := 0
+		yc.BehaviorConfig.AutoGCBehavior = &servercfg.AutoGCBehaviorYAMLConfig{
+			ArchiveLevel_: &archiveLevel,
+		}
 	}
 	return yaml.Marshal(yc)
 }

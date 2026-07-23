@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
+
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 )
@@ -1905,6 +1907,124 @@ func TestBuildDoltServerArgs_NoDebugFlagsWhenDisabled(t *testing.T) {
 	}
 	if logLevel == "debug" {
 		t.Errorf("non-debug mode must not use --loglevel=debug; got: %v", args)
+	}
+}
+
+// TestBuildDoltServerYAMLConfig verifies the --config counterpart to
+// buildDoltServerArgs: it must round-trip through Dolt's own YAML loader
+// with the same host/port/log-level as the CLI-flag form, plus
+// auto_gc_behavior.archive_level: 0 (the actual Snappy-GC fix,
+// gastownhall/beads#4986) and auto-GC left enabled.
+func TestBuildDoltServerYAMLConfig(t *testing.T) {
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, false)
+	if err != nil {
+		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
+	}
+
+	cfg, err := servercfg.NewYamlConfig(body)
+	if err != nil {
+		t.Fatalf("servercfg.NewYamlConfig could not parse generated config: %v\nconfig:\n%s", err, body)
+	}
+	if got := cfg.Host(); got != "127.0.0.1" {
+		t.Errorf("Host = %q, want %q", got, "127.0.0.1")
+	}
+	if got := cfg.Port(); got != 54321 {
+		t.Errorf("Port = %d, want %d", got, 54321)
+	}
+	if got := string(cfg.LogLevel()); got != doltServerLogLevel {
+		t.Errorf("LogLevel = %q, want %q", got, doltServerLogLevel)
+	}
+
+	gc := cfg.AutoGCBehavior()
+	if gc == nil {
+		t.Fatal("AutoGCBehavior is nil; expected archive_level: 0 to be set")
+	}
+	if got := gc.ArchiveLevel(); got != 0 {
+		t.Errorf("ArchiveLevel = %d, want 0 (Snappy, not zstd)", got)
+	}
+	if !gc.Enable() {
+		t.Error("auto-GC must remain enabled; only the archive level should change")
+	}
+}
+
+// TestBuildDoltServerYAMLConfig_DebugLogLevel asserts debug mode raises the
+// YAML config's log level the same way buildDoltServerArgs does for the
+// CLI-flag form.
+func TestBuildDoltServerYAMLConfig_DebugLogLevel(t *testing.T) {
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, true)
+	if err != nil {
+		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
+	}
+	cfg, err := servercfg.NewYamlConfig(body)
+	if err != nil {
+		t.Fatalf("servercfg.NewYamlConfig: %v", err)
+	}
+	if got := string(cfg.LogLevel()); got != "debug" {
+		t.Errorf("debug mode LogLevel = %q, want %q", got, "debug")
+	}
+}
+
+// TestBuildDoltServerArgsWithConfig mirrors TestBuildDoltServerArgs_DebugMode
+// for the --config launch form: --prof/--prof-path must still precede
+// sql-server (top-level dolt flags), and --config must carry the path
+// unmodified. Per Dolt's own sql-server docs, --config causes all other
+// sql-server flags (host/port/log-level) to be ignored, so this form MUST
+// NOT also pass -H/-P/--loglevel.
+func TestBuildDoltServerArgsWithConfig(t *testing.T) {
+	t.Run("non-debug", func(t *testing.T) {
+		args := buildDoltServerArgsWithConfig("/tmp/dolt-server-config.yaml", false, "")
+		if len(args) == 0 || args[0] != "sql-server" {
+			t.Fatalf("args[0] = %q, want %q; full args: %v", firstOrEmpty(args), "sql-server", args)
+		}
+		cfgIdx := indexOf(args, "--config")
+		if cfgIdx < 0 || cfgIdx+1 >= len(args) {
+			t.Fatalf("missing --config <path> in args: %v", args)
+		}
+		if got := args[cfgIdx+1]; got != "/tmp/dolt-server-config.yaml" {
+			t.Errorf("--config value = %q, want %q", got, "/tmp/dolt-server-config.yaml")
+		}
+		for _, flag := range []string{"-H", "-P", "--loglevel"} {
+			if indexOf(args, flag) >= 0 {
+				t.Errorf("--config mode must not also pass %s (Dolt ignores it, and its presence is misleading): %v", flag, args)
+			}
+		}
+	})
+
+	t.Run("debug mode places --prof before sql-server", func(t *testing.T) {
+		const profDir = "/tmp/test-pprof"
+		args := buildDoltServerArgsWithConfig("/tmp/dolt-server-config.yaml", true, profDir)
+		subIdx := indexOf(args, "sql-server")
+		if subIdx < 0 {
+			t.Fatalf("missing sql-server in args: %v", args)
+		}
+		profIdx := indexOf(args, "--prof")
+		if profIdx < 0 || profIdx >= subIdx {
+			t.Fatalf("--prof must precede sql-server; got: %v", args)
+		}
+		pathIdx := indexOf(args, "--prof-path")
+		if pathIdx < 0 || pathIdx >= subIdx {
+			t.Fatalf("--prof-path must precede sql-server; got: %v", args)
+		}
+		if got := args[pathIdx+1]; got != profDir {
+			t.Errorf("--prof-path value = %q, want %q", got, profDir)
+		}
+	})
+}
+
+func TestDoltServerConfigPath(t *testing.T) {
+	got := doltServerConfigPath("/tmp/some/.beads")
+	want := filepath.Join("/tmp/some/.beads", "dolt-server-config.yaml")
+	if got != want {
+		t.Errorf("doltServerConfigPath = %q, want %q", got, want)
+	}
+}
+
+// TestStateFilePaths_IncludesGeneratedConfig guards against the generated
+// sql-server config leaking as an untracked leftover after Stop/RemoveState.
+func TestStateFilePaths_IncludesGeneratedConfig(t *testing.T) {
+	paths := StateFilePaths("/tmp/some/.beads")
+	if indexOf(paths, doltServerConfigPath("/tmp/some/.beads")) < 0 {
+		t.Errorf("StateFilePaths does not include the generated sql-server config; got: %v", paths)
 	}
 }
 

@@ -31,6 +31,7 @@ import (
 	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
 	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	_ "github.com/go-sql-driver/mysql"
+	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -767,6 +768,65 @@ func buildDoltServerArgs(host string, port int, debug bool, profDir string) []st
 	return args
 }
 
+// doltServerConfigFileName is the YAML config Start() writes when the
+// resolved external dolt binary supports auto_gc_behavior.archive_level
+// (see SupportsArchiveLevelConfig). It lives alongside the other gitignored
+// server state files in beadsDir, not inside the Dolt data directory.
+const doltServerConfigFileName = "dolt-server-config.yaml"
+
+func doltServerConfigPath(beadsDir string) string {
+	return filepath.Join(beadsDir, doltServerConfigFileName)
+}
+
+// buildDoltServerYAMLConfig renders a minimal sql-server YAML config
+// equivalent to buildDoltServerArgs' CLI flags (host, port, log level), plus
+// auto_gc_behavior.archive_level: 0 so this managed server's background
+// auto-GC writes classic Snappy table files instead of zstd archives
+// (gastownhall/beads#4986). Auto-GC itself is left enabled (archive_level's
+// sibling "enable" key is omitted, which Dolt defaults to true).
+//
+// Callers MUST only use this when SupportsArchiveLevelConfig(doltBin)
+// reports true — an older external dolt's own YAMLConfig struct may lack
+// this field, and Dolt's YAML loader uses yaml.UnmarshalStrict, so an
+// unrecognized key is a hard parse error at server startup, not a
+// silently-ignored one.
+func buildDoltServerYAMLConfig(host string, port int, debug bool) ([]byte, error) {
+	logLevel := doltServerLogLevel
+	if debug {
+		logLevel = "debug"
+	}
+	archiveLevel := 0
+	yc := &servercfg.YAMLConfig{
+		LogLevelStr: &logLevel,
+		ListenerConfig: servercfg.ListenerYAMLConfig{
+			HostStr:    &host,
+			PortNumber: &port,
+		},
+		BehaviorConfig: servercfg.BehaviorYAMLConfig{
+			AutoGCBehavior: &servercfg.AutoGCBehaviorYAMLConfig{
+				ArchiveLevel_: &archiveLevel,
+			},
+		},
+	}
+	return yaml.Marshal(yc)
+}
+
+// buildDoltServerArgsWithConfig is the --config counterpart to
+// buildDoltServerArgs. Dolt's sql-server subcommand ignores all other
+// command-line parameters when --config is present, so host/port/log-level
+// must come from the YAML file at configPath (see buildDoltServerYAMLConfig)
+// rather than from flags here. The top-level --prof/--prof-path flags are
+// unaffected — they are consumed by the outer `dolt` command dispatcher
+// before the sql-server subcommand's own arg parser ever sees --config.
+func buildDoltServerArgsWithConfig(configPath string, debug bool, profDir string) []string {
+	var args []string
+	if debug {
+		args = append(args, "--prof", "cpu", "--prof-path", profDir)
+	}
+	args = append(args, "sql-server", "--config", configPath)
+	return args
+}
+
 // Start explicitly starts a dolt sql-server for the project.
 // Returns the State of the started server, or an error.
 func Start(beadsDir string) (*State, error) {
@@ -822,6 +882,21 @@ func Start(beadsDir string) (*State, error) {
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
 		return nil, fmt.Errorf("dolt is not installed (not found in PATH)\n\nInstall from: https://docs.dolthub.com/introduction/installation")
+	}
+
+	// Prefer a generated YAML config (via --config) over plain CLI flags when
+	// the resolved external dolt is new enough to safely accept
+	// auto_gc_behavior.archive_level: 0. This is what keeps this managed
+	// server's background auto-GC producing Snappy table files instead of
+	// zstd archives (gastownhall/beads#4986). On an older/undetectable dolt
+	// we fail closed and keep the existing CLI-flag launch unchanged — never
+	// risk a refuse-to-start over an unrecognized YAML key.
+	useArchiveLevelConfig := SupportsArchiveLevelConfig(doltBin)
+	if !useArchiveLevelConfig {
+		fmt.Fprintf(os.Stderr,
+			"Info: external dolt at %s predates archive_level config support (need >= Dolt %s); "+
+				"this managed server's background auto-GC may still produce zstd archives.\n",
+			doltBin, MinDoltVersionForArchiveLevelConfig)
 	}
 
 	// Ensure dolt identity is configured
@@ -903,7 +978,29 @@ func Start(beadsDir string) (*State, error) {
 				actualPort = p
 			}
 
-			cmd := exec.Command(doltBin, buildDoltServerArgs(cfg.Host, actualPort, debug, profDir)...) //nolint:gosec // doltBin is resolved from PATH, not user input
+			var cmdArgs []string
+			if useArchiveLevelConfig {
+				cfgBody, cfgErr := buildDoltServerYAMLConfig(cfg.Host, actualPort, debug)
+				if cfgErr != nil {
+					lastErr = fmt.Errorf("rendering managed sql-server config: %w", cfgErr)
+					if !explicitPort {
+						continue
+					}
+					break
+				}
+				if werr := os.WriteFile(doltServerConfigPath(beadsDir), cfgBody, 0600); werr != nil {
+					lastErr = fmt.Errorf("writing managed sql-server config: %w", werr)
+					if !explicitPort {
+						continue
+					}
+					break
+				}
+				cmdArgs = buildDoltServerArgsWithConfig(doltServerConfigPath(beadsDir), debug, profDir)
+			} else {
+				cmdArgs = buildDoltServerArgs(cfg.Host, actualPort, debug, profDir)
+			}
+
+			cmd := exec.Command(doltBin, cmdArgs...) //nolint:gosec // doltBin is resolved from PATH, not user input
 			cmd.Dir = doltDir
 			cmd.Stdout = logFile
 			cmd.Stderr = logFile
@@ -1187,6 +1284,7 @@ func StateFilePaths(beadsDir string) []string {
 		logPath(beadsDir),
 		logPath(beadsDir) + ".1",
 		DebugProfileDir(beadsDir),
+		doltServerConfigPath(beadsDir),
 	}
 }
 
