@@ -44,6 +44,50 @@
 -- database whose wisp_dependencies table (or a required column) is for any
 -- other reason absent by the time this migration runs is left untouched
 -- rather than assumed into a shape it may not have.
+--
+-- Adding a constraint over data that accumulated during the window it was
+-- missing is exactly the failure class ignored/0011 (#4534) documents:
+-- foreign keys re-added under FOREIGN_KEY_CHECKS = 0 accept whatever
+-- orphaned rows are already there, and "Dolt then fails constraint
+-- validation on subsequent writes, so one legacy orphan bricks every bd
+-- create on an otherwise healthy database." The delegate path's
+-- unconstrained window can leave two more classes of row that would abort a
+-- later PREPARE'd ADD CONSTRAINT the same way, so this migration cleans up
+-- both, immediately before the constraint that would otherwise reject them,
+-- mirroring ignored/0011's guarded LEFT JOIN idiom:
+--
+--   1. FK orphans (before the two ADD CONSTRAINT ... FOREIGN KEY below): a
+--      depends_on_wisp_id/depends_on_issue_id pointing at a row that no
+--      longer exists (deleted while no CASCADE was in force). DELETE the
+--      whole row -- exactly what ON DELETE CASCADE would have done had the
+--      FK been in force when the target went away -- rather than null just
+--      the dangling column, matching how a real CASCADE never leaves a
+--      partial row behind.
+--   2. CHECK-invalid rows (before ADD CONSTRAINT ck_wisp_dep_one_target): a
+--      row with zero targets set is semantically meaningless (there is
+--      nothing here to be blocked on) and is deleted outright. A row with
+--      more than one target set is normalized to exactly one by applying
+--      the SAME precedence the delegate's own backfill
+--      (wispDependenciesSplitTargetBackfillSQL) already trusts when a
+--      single legacy id resolves ambiguously -- confirmed by that function's
+--      statement order (the external-prefix UPDATE runs first and is
+--      excluded from the wisp UPDATE's guard; the wisp UPDATE runs next and
+--      is excluded from the issue UPDATE's guard) and by its sibling test
+--      TestWispDependenciesSplitTargetBackfillPrefersWispOverIssueThroughDoltCLI,
+--      which seeds one id that resolves as both a wisp and an issue and
+--      asserts the wisp reading wins. That gives external > wisp > issue;
+--      normalizing here nulls the lower-precedence column(s) rather than
+--      picking one arbitrarily or deleting the row (unlike a zero-target
+--      row, a multi-target row already names a real, resolvable target --
+--      just more than one -- so keeping the highest-precedence one preserves
+--      real edge data instead of discarding it).
+--
+-- Both cleanup steps are scoped to exactly the rows the corresponding
+-- constraint would otherwise reject, guarded by the same @needs_fk_*/
+-- @needs_ck_one_target flags the ADD CONSTRAINT statements use: a database
+-- that already has (or never needed) a constraint skips its cleanup too, so
+-- a converged database never pays this scan, and a second pass after the
+-- constraints are added is a no-op (no violating rows are left to find).
 
 SET FOREIGN_KEY_CHECKS = 0;
 
@@ -112,25 +156,58 @@ SET @needs_fk_wisp_target = IF(
     @has_wisp_dependencies > 0 AND @has_wisps > 0
     AND @has_col_wisp_target > 0 AND @has_fk_wisp_target = 0,
     1, 0);
-SET @sql = IF(@needs_fk_wisp_target = 1,
-    'ALTER TABLE wisp_dependencies ADD CONSTRAINT fk_wisp_dep_wisp_target FOREIGN KEY (depends_on_wisp_id) REFERENCES wisps(id) ON DELETE CASCADE ON UPDATE CASCADE',
-    'SELECT 1');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
 SET @needs_fk_issue_target = IF(
     @has_wisp_dependencies > 0 AND @has_issues > 0
     AND @has_col_issue_target > 0 AND @has_fk_issue_target = 0,
     1, 0);
-SET @sql = IF(@needs_fk_issue_target = 1,
-    'ALTER TABLE wisp_dependencies ADD CONSTRAINT fk_wisp_dep_issue_target FOREIGN KEY (depends_on_issue_id) REFERENCES issues(id) ON DELETE CASCADE ON UPDATE CASCADE',
-    'SELECT 1');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
 SET @needs_ck_one_target = IF(
     @has_wisp_dependencies > 0
     AND @has_col_issue_target > 0 AND @has_col_wisp_target > 0 AND @has_col_external_target > 0
     AND @has_ck_one_target = 0,
     1, 0);
+
+-- --- Cleanup 1: FK orphans (#4534-class, see ignored/0011) ------------------
+
+SET @sql = IF(@needs_fk_wisp_target = 1,
+    'DELETE wd FROM wisp_dependencies wd LEFT JOIN wisps w ON w.id = wd.depends_on_wisp_id WHERE wd.depends_on_wisp_id IS NOT NULL AND w.id IS NULL',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql = IF(@needs_fk_issue_target = 1,
+    'DELETE wd FROM wisp_dependencies wd LEFT JOIN issues i ON i.id = wd.depends_on_issue_id WHERE wd.depends_on_issue_id IS NOT NULL AND i.id IS NULL',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- --- Cleanup 2: CHECK-invalid rows (zero-target delete, multi-target -------
+-- --- normalize to external > wisp > issue precedence) ----------------------
+
+SET @sql = IF(@needs_ck_one_target = 1,
+    'DELETE FROM wisp_dependencies WHERE depends_on_issue_id IS NULL AND depends_on_wisp_id IS NULL AND depends_on_external IS NULL',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql = IF(@needs_ck_one_target = 1,
+    'UPDATE wisp_dependencies SET depends_on_wisp_id = NULL, depends_on_issue_id = NULL WHERE depends_on_external IS NOT NULL AND (depends_on_wisp_id IS NOT NULL OR depends_on_issue_id IS NOT NULL)',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql = IF(@needs_ck_one_target = 1,
+    'UPDATE wisp_dependencies SET depends_on_issue_id = NULL WHERE depends_on_external IS NULL AND depends_on_wisp_id IS NOT NULL AND depends_on_issue_id IS NOT NULL',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- --- Add the constraints -----------------------------------------------------
+
+SET @sql = IF(@needs_fk_wisp_target = 1,
+    'ALTER TABLE wisp_dependencies ADD CONSTRAINT fk_wisp_dep_wisp_target FOREIGN KEY (depends_on_wisp_id) REFERENCES wisps(id) ON DELETE CASCADE ON UPDATE CASCADE',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql = IF(@needs_fk_issue_target = 1,
+    'ALTER TABLE wisp_dependencies ADD CONSTRAINT fk_wisp_dep_issue_target FOREIGN KEY (depends_on_issue_id) REFERENCES issues(id) ON DELETE CASCADE ON UPDATE CASCADE',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
 SET @sql = IF(@needs_ck_one_target = 1,
     'ALTER TABLE wisp_dependencies ADD CONSTRAINT ck_wisp_dep_one_target CHECK ((depends_on_issue_id IS NOT NULL) + (depends_on_wisp_id IS NOT NULL) + (depends_on_external IS NOT NULL) = 1)',
     'SELECT 1');
