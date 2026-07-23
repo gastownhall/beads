@@ -121,30 +121,52 @@ func isAutoGCBehaviorEmpty(gc *servercfg.AutoGCBehaviorYAMLConfig) bool {
 // path, or a default-path file predating this marker). It surfaces the same
 // two risks reconcileManagedProxiedServerConfig fixes automatically for a
 // Beads-owned config, without ever touching the file:
-//   - archiveLevelSupported and the key is absent: zstd auto-GC may still
-//     be active; tell the user how to opt in.
-//   - !archiveLevelSupported and the key is present: the resolved external
-//     dolt may refuse to start on this file (yaml.UnmarshalStrict on an
-//     unrecognized key).
+//   - archiveLevelSupported and archive_level is absent: zstd auto-GC may
+//     still be active; tell the user how to opt in.
+//   - !archiveLevelSupported and archive_level is present: the resolved
+//     external dolt may refuse to start on this file (yaml.UnmarshalStrict
+//     on an unrecognized key).
+//
+// Deliberately checks only ArchiveLevel_ (via autoGCArchiveLevelIsSet), not
+// "the whole auto_gc_behavior block is present" — the same field-vs-block
+// distinction reconcileManagedProxiedServerConfig applies. A block carrying
+// only a user-set "enable" (no archive_level) would otherwise both miss the
+// zstd-risk warning on a capable binary, and get a false
+// refuse-to-start warning on an incapable one.
 //
 // cfg must be the ALREADY-PARSED config (via servercfg.YamlConfigFromFile,
 // not NewYamlConfig on raw bytes) — callers own an unmanaged file's parse,
 // and that parse must be interpolation-aware (see the ensureProxiedServerConfig
 // doc comment on why raw-bytes parsing is wrong for these files).
 func warnUnmanagedProxiedServerConfig(path string, cfg servercfg.ServerConfig, archiveLevelSupported bool) {
-	hasKey := cfg.AutoGCBehavior() != nil
+	hasArchiveLevel := autoGCArchiveLevelIsSet(cfg)
 	switch {
-	case archiveLevelSupported && !hasKey:
+	case archiveLevelSupported && !hasArchiveLevel:
 		fmt.Fprintf(os.Stderr,
 			"Warning: %s is not Beads-managed (no marker); zstd auto-GC may still be active. "+
 				"To opt in, add 'auto_gc_behavior: {archive_level: 0}' under the top-level 'behavior:' key.\n",
 			path)
-	case !archiveLevelSupported && hasKey:
+	case !archiveLevelSupported && hasArchiveLevel:
 		fmt.Fprintf(os.Stderr,
 			"Warning: %s sets auto_gc_behavior.archive_level, but the resolved external dolt predates support "+
 				"for it (need >= Dolt %s); the server may refuse to start. Remove the key or upgrade dolt.\n",
 			path, doltserver.MinDoltVersionForArchiveLevelConfig)
 	}
+}
+
+// autoGCArchiveLevelIsSet reports whether cfg's auto_gc_behavior.archive_level
+// key is explicitly set — not just "the auto_gc_behavior block is present"
+// (a block can carry only a sibling field like "enable"). Both
+// servercfg.YamlConfigFromFile and servercfg.NewYamlConfig always return a
+// *servercfg.YAMLConfig underneath the ServerConfig interface in the
+// pinned module, so the type assertion below is expected to succeed; if it
+// ever doesn't, this falls back to the coarser "block is present" test
+// rather than panicking.
+func autoGCArchiveLevelIsSet(cfg servercfg.ServerConfig) bool {
+	if yc, ok := cfg.(*servercfg.YAMLConfig); ok {
+		return yc.BehaviorConfig.AutoGCBehavior != nil && yc.BehaviorConfig.AutoGCBehavior.ArchiveLevel_ != nil
+	}
+	return cfg.AutoGCBehavior() != nil
 }
 
 const (
@@ -280,13 +302,35 @@ func ensureProxiedServerConfig(beadsDir string, archiveLevelSupported bool) (str
 		if isManagedProxiedServerConfig(body) {
 			// Beads-managed: never carries interpolation syntax, so raw-bytes
 			// parsing (inside reconcileManagedProxiedServerConfig) is safe and
-			// avoids a redundant interpolation pass.
+			// avoids a redundant interpolation pass. BUT the marker only
+			// proves Beads generated the file originally — an operator can
+			// still hand-edit a managed file afterward (e.g. add a ${VAR}
+			// placeholder), which the non-interpolating raw parse cannot
+			// handle. That must degrade gracefully rather than fail the
+			// whole command: dolt itself would still start fine against
+			// such a file once its own interpolation pass runs.
 			reconciled, changed, rerr := reconcileManagedProxiedServerConfig(body, archiveLevelSupported)
 			if rerr != nil {
-				return "", fmt.Errorf("ensureProxiedServerConfig: reconcile managed config %s: %w", path, rerr)
+				fmt.Fprintf(os.Stderr,
+					"Warning: %s carries the Beads-managed marker but failed to parse (%v); treating as "+
+						"unmanaged (not rewriting). If this file was hand-edited (e.g. with ${VAR} "+
+						"placeholders), that's expected — dolt itself will interpolate it at startup.\n",
+					path, rerr)
+				cfg, cerr := servercfg.YamlConfigFromFile(filesys.LocalFS, path)
+				if cerr != nil {
+					return "", fmt.Errorf("ensureProxiedServerConfig: existing config %s: parse: %w", path, cerr)
+				}
+				warnUnmanagedProxiedServerConfig(path, cfg, archiveLevelSupported)
+				return path, nil
 			}
 			if changed {
-				if werr := atomicWriteFile(path, reconciled); werr != nil {
+				// os.Rename (inside atomicWriteFile) does not follow a
+				// symlink at its destination — it replaces whatever is AT
+				// that path, symlink or not. Resolve to the physical file
+				// first so a symlinked managed config is rewritten through
+				// the symlink (the symlink itself survives) rather than
+				// having the symlink replaced by a regular file.
+				if werr := atomicWriteFile(resolveConfigWriteTarget(path), reconciled); werr != nil {
 					return "", fmt.Errorf("ensureProxiedServerConfig: rewrite managed config %s: %w", path, werr)
 				}
 			}
@@ -318,10 +362,31 @@ func ensureProxiedServerConfig(beadsDir string, archiveLevelSupported bool) (str
 	if err != nil {
 		return "", fmt.Errorf("ensureProxiedServerConfig: render YAML: %w", err)
 	}
-	if err := atomicWriteFile(path, body); err != nil {
+	// See the reconcile call site above for why the write target is
+	// resolved through any symlink first: this branch only runs after
+	// os.Stat(path) reported IsNotExist, which is also true for a dangling
+	// symlink — resolveConfigWriteTarget falls back to path itself in that
+	// case, so a dangling symlink is simply replaced (self-healed) here.
+	if err := atomicWriteFile(resolveConfigWriteTarget(path), body); err != nil {
 		return "", fmt.Errorf("ensureProxiedServerConfig: write %s: %w", path, err)
 	}
 	return path, nil
+}
+
+// resolveConfigWriteTarget resolves path to its physical location before
+// an atomic rewrite. os.Rename's destination argument does not follow
+// symlinks — it unlinks and replaces whatever is AT that path, symlink or
+// not — so writing straight to a symlinked config.yaml would silently
+// replace the symlink itself with a regular file instead of updating the
+// file it points at. Falls back to path unresolved when it does not exist
+// yet (filepath.EvalSymlinks errors on a missing path), which covers both
+// the ordinary "no config.yaml yet" case and a dangling symlink.
+func resolveConfigWriteTarget(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return resolved
 }
 
 // Validators below emit source-neutral errors. Callers wrap with whichever
