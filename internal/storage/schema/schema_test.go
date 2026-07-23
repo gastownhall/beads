@@ -731,10 +731,10 @@ func TestEnsureDependenciesIDColumnFailsClearlyOnTargetlessRowInsteadOfBrickingN
 	}
 }
 
-func TestMigration0056GuardsEventValueColumnsIndependently(t *testing.T) {
-	sql, err := os.ReadFile("migrations/0056_events_value_columns_idempotent_longtext.up.sql")
+func TestMigration0057GuardsEventValueColumnsIndependently(t *testing.T) {
+	sql, err := os.ReadFile("migrations/0057_events_value_columns_idempotent_longtext.up.sql")
 	if err != nil {
-		t.Fatalf("read 0056 up migration: %v", err)
+		t.Fatalf("read 0057 up migration: %v", err)
 	}
 
 	// Each column has its own guard variable and its own MODIFY, not one
@@ -753,13 +753,13 @@ func TestMigration0056GuardsEventValueColumnsIndependently(t *testing.T) {
 		"ALTER TABLE events MODIFY COLUMN new_value LONGTEXT",
 	} {
 		if !strings.Contains(body, want) {
-			t.Fatalf("0056 migration missing independent per-column guard marker %q", want)
+			t.Fatalf("0057 migration missing independent per-column guard marker %q", want)
 		}
 	}
 	// The two columns must not be MODIFY'd in one combined ALTER statement
 	// (that would put them back behind a single guard).
 	if strings.Contains(body, "MODIFY COLUMN old_value LONGTEXT, MODIFY COLUMN new_value LONGTEXT") {
-		t.Fatal("0056 migration MODIFYs old_value and new_value in one combined ALTER, want independent guards/ALTERs per column")
+		t.Fatal("0057 migration MODIFYs old_value and new_value in one combined ALTER, want independent guards/ALTERs per column")
 	}
 }
 
@@ -1071,7 +1071,7 @@ DELETE FROM schema_migrations WHERE version = 53;
 		fmt.Sprintf(`SELECT COUNT(*) AS c FROM dependencies WHERE issue_id = %s AND id = %s`, doltSQLString(sourceID), doltSQLString(repairID)), "1")
 }
 
-func TestMigration0056IsIdempotentOnAlreadyLongtextEventsThroughDoltCLI(t *testing.T) {
+func TestMigration0057IsIdempotentOnAlreadyLongtextEventsThroughDoltCLI(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
 	dir := filepath.Join(t.TempDir(), "events-longtext-idempotent")
@@ -1081,19 +1081,19 @@ func TestMigration0056IsIdempotentOnAlreadyLongtextEventsThroughDoltCLI(t *testi
 	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
 	runDoltSQL(t, dir, AllMigrationsSQL())
 
-	migrationSQL, err := mainSource.files.ReadFile("migrations/0056_events_value_columns_idempotent_longtext.up.sql")
+	migrationSQL, err := mainSource.files.ReadFile("migrations/0057_events_value_columns_idempotent_longtext.up.sql")
 	if err != nil {
-		t.Fatalf("read 0056 migration: %v", err)
+		t.Fatalf("read 0057 migration: %v", err)
 	}
 
 	// events.old_value/new_value are already LONGTEXT after the fresh chain
-	// (0048's unconditional MODIFY). Re-running 0056's guarded SQL a second
+	// (0048's unconditional MODIFY). Re-running 0057's guarded SQL a second
 	// time -- simulating any repeat pass through this version -- must take
 	// the no-op branch for BOTH columns independently rather than re-issuing
 	// MODIFY on either one, which is exactly the drift 0048 itself lacks a
 	// guard against (#4353). This does not, and cannot, reproduce a raw
 	// re-execution of 0048's own frozen SQL by tooling outside bd's
-	// cursor-gated migrate chain; see 0056's header comment for that
+	// cursor-gated migrate chain; see 0057's header comment for that
 	// boundary.
 	runDoltSQL(t, dir, string(migrationSQL))
 	runDoltSQL(t, dir, string(migrationSQL))
@@ -1135,7 +1135,7 @@ func wispIsBlockedColumnSQLForTest(t *testing.T, dir string) string {
 // #4695/#4176 (cursor arrives with the wisp tables absent) and #4690
 // (dependencies never got its surrogate id column) -- and drives the
 // migration chain all the way through the main sequence AND the ignored
-// sequence to the latest version, the 0047 -> 0053 -> 0056 -> ignored path
+// sequence to the latest version, the 0047 -> 0053 -> 0056 -> 0057 -> ignored path
 // the narrower per-fix CLI tests above stop short of.
 //
 // Like every other CLI test in this file, this applies migration SQL text
@@ -1338,7 +1338,7 @@ ALTER TABLE dependencies DROP COLUMN id;
 	// state, find nothing left to do -- proving ensureDependenciesIDColumn's
 	// and the wisp-tables repair's target state is fully converged, not just
 	// "ran once and happened to look right"; and (2) the three frozen
-	// migration files this branch's fixes actually touch (0047, 0053, 0056)
+	// migration files this branch's fixes actually touch (0047, 0053, 0057)
 	// are safe to re-run on the now-converged database without error or
 	// drift, which their own guards (not this test) are responsible for.
 	if repair := dependenciesIDRepairSQLForTest(t, dir, blockedID, blockerID, depID); repair != "" {
@@ -1350,7 +1350,7 @@ ALTER TABLE dependencies DROP COLUMN id;
 	for _, name := range []string{
 		"0047_recompute_mixed_is_blocked.up.sql",
 		"0053_repair_rig_wisps.up.sql",
-		"0056_events_value_columns_idempotent_longtext.up.sql",
+		"0057_events_value_columns_idempotent_longtext.up.sql",
 	} {
 		data, err := mainSource.files.ReadFile(mainSource.dir + "/" + name)
 		if err != nil {

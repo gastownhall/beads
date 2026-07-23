@@ -1,4 +1,4 @@
--- Migration 0056: idempotency guard for the events value-column widening
+-- Migration 0057: idempotency guard for the events value-column widening
 -- (residual of #4353).
 --
 -- 0048_widen_event_value_columns unconditionally runs
