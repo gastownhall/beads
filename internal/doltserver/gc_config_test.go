@@ -56,6 +56,7 @@ func TestSupportsArchiveLevelConfig_WithFakeBinary(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("stub dolt binary is a POSIX shell script")
 	}
+	t.Cleanup(ResetArchiveLevelSupportCacheForTest)
 
 	newStub := func(t *testing.T, versionLine string) string {
 		t.Helper()
@@ -81,4 +82,46 @@ func TestSupportsArchiveLevelConfig_WithFakeBinary(t *testing.T) {
 			t.Errorf("expected no support for dolt version 1.40.0 (< %s)", MinDoltVersionForArchiveLevelConfig)
 		}
 	})
+}
+
+// TestSupportsArchiveLevelConfig_Memoizes covers the nit fix
+// (gastownhall/beads#4986 round 2): repeated calls for the same doltBin
+// must not re-fork `dolt version`. We prove memoization behaviorally by
+// rewriting the stub script in place after the first call — if
+// SupportsArchiveLevelConfig actually re-exec'd, the second call would
+// observe the new (older) version and flip to false; it must not.
+// ResetArchiveLevelSupportCacheForTest then clears the cache so a
+// subsequent call picks up the rewritten script, proving the cache (not
+// some other invariant) was what made the second call stale.
+func TestSupportsArchiveLevelConfig_Memoizes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stub dolt binary is a POSIX shell script")
+	}
+	t.Cleanup(ResetArchiveLevelSupportCacheForTest)
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "dolt")
+	writeStub := func(versionLine string) {
+		script := fmt.Sprintf("#!/bin/sh\necho %q\n", versionLine)
+		if err := os.WriteFile(bin, []byte(script), 0o755); err != nil { //nolint:gosec // test fixture, intentionally executable
+			t.Fatalf("write stub dolt: %v", err)
+		}
+	}
+
+	writeStub("dolt version 2.2.2")
+	if !SupportsArchiveLevelConfig(bin) {
+		t.Fatalf("expected support for dolt version 2.2.2 (>= %s)", MinDoltVersionForArchiveLevelConfig)
+	}
+
+	// Rewrite the SAME path to report an old version. A cached result must
+	// survive this; an uncached (re-exec'd) call would flip to false.
+	writeStub("dolt version 1.40.0")
+	if !SupportsArchiveLevelConfig(bin) {
+		t.Errorf("SupportsArchiveLevelConfig changed after rewriting the binary at the same path; expected the memoized result to stick")
+	}
+
+	ResetArchiveLevelSupportCacheForTest()
+	if SupportsArchiveLevelConfig(bin) {
+		t.Errorf("after ResetArchiveLevelSupportCacheForTest, expected the rewritten (old) version to be re-probed and return false")
+	}
 }

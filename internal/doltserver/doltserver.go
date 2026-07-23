@@ -778,19 +778,86 @@ func doltServerConfigPath(beadsDir string) string {
 	return filepath.Join(beadsDir, doltServerConfigFileName)
 }
 
+// doltCfgDirName mirrors commands.DefaultCfgDirName in the pinned dolt
+// module (cmd/dolt/commands/sql.go) — the on-disk directory name Dolt looks
+// in for privileges.db (users/passwords) and branch_control.db.
+const doltCfgDirName = ".doltcfg"
+
+// ErrMultipleDoltCfgDirs is returned by resolveCfgDir when both a parent
+// and a data-directory .doltcfg exist. Mirrors Dolt's own ambiguous case
+// (commands.ErrMultipleDoltCfgDirs in the pinned module) — guessing which
+// one to use risks the same silent user/branch-control loss this function
+// exists to prevent, so this is surfaced as a hard Start() failure instead.
+var ErrMultipleDoltCfgDirs = errors.New("multiple .doltcfg directories detected")
+
+// resolveCfgDir replicates Dolt's own flag-mode .doltcfg discovery
+// (setupDoltConfig in cmd/dolt/commands/sqlserver/sqlserver.go, pinned
+// module) for our generated --config YAML. setupDoltConfig returns
+// immediately when --config is passed, so a deployment that previously ran
+// this launcher in CLI-flag mode — where dolt auto-discovers a parent
+// ../.doltcfg holding privileges.db/branch_control.db — would otherwise
+// silently fall back to a fresh $data_dir/.doltcfg under --config mode:
+// existing users and branch controls abandoned, new passwordless root
+// (gastownhall/beads#4986).
+//
+// doltDir is the server's data directory (== process cwd, since neither
+// --data-dir nor --doltcfg-dir are ever passed). Mirrors Dolt exactly:
+//   - parent ../.doltcfg (relative to doltDir) if it exists and is a dir
+//   - else doltDir/.doltcfg
+//   - ErrMultipleDoltCfgDirs if BOTH exist — ambiguous, matches Dolt's own
+//     ErrMultipleDoltCfgDirs case rather than guessing.
+//
+// Returns an absolute path.
+func resolveCfgDir(doltDir string) (string, error) {
+	parentDirCfg := filepath.Join(doltDir, "..", doltCfgDirName)
+	parentInfo, parentErr := os.Stat(parentDirCfg)
+	parentExists := parentErr == nil && parentInfo.IsDir()
+
+	currDirCfg := filepath.Join(doltDir, doltCfgDirName)
+	currInfo, currErr := os.Stat(currDirCfg)
+	currExists := currErr == nil && currInfo.IsDir()
+
+	if parentExists && currExists {
+		absParent, err := filepath.Abs(parentDirCfg)
+		if err != nil {
+			absParent = parentDirCfg
+		}
+		absCurr, err := filepath.Abs(currDirCfg)
+		if err != nil {
+			absCurr = currDirCfg
+		}
+		return "", fmt.Errorf("%w: %q and %q; remove or merge one before starting the managed dolt server "+
+			"(matches Dolt's own ambiguous-.doltcfg case; see --doltcfg-dir in `dolt sql-server --help`)",
+			ErrMultipleDoltCfgDirs, absParent, absCurr)
+	}
+
+	chosen := currDirCfg
+	if parentExists {
+		chosen = parentDirCfg
+	}
+	abs, err := filepath.Abs(chosen)
+	if err != nil {
+		return "", fmt.Errorf("resolving .doltcfg path %q: %w", chosen, err)
+	}
+	return abs, nil
+}
+
 // buildDoltServerYAMLConfig renders a minimal sql-server YAML config
 // equivalent to buildDoltServerArgs' CLI flags (host, port, log level), plus
 // auto_gc_behavior.archive_level: 0 so this managed server's background
 // auto-GC writes classic Snappy table files instead of zstd archives
 // (gastownhall/beads#4986). Auto-GC itself is left enabled (archive_level's
-// sibling "enable" key is omitted, which Dolt defaults to true).
+// sibling "enable" key is omitted, which Dolt defaults to true). cfgDir must
+// be pre-resolved via resolveCfgDir — --config mode skips Dolt's own
+// flag-mode .doltcfg discovery entirely, so this is the one place that
+// behavior must be replicated.
 //
 // Callers MUST only use this when SupportsArchiveLevelConfig(doltBin)
 // reports true — an older external dolt's own YAMLConfig struct may lack
 // this field, and Dolt's YAML loader uses yaml.UnmarshalStrict, so an
 // unrecognized key is a hard parse error at server startup, not a
 // silently-ignored one.
-func buildDoltServerYAMLConfig(host string, port int, debug bool) ([]byte, error) {
+func buildDoltServerYAMLConfig(host string, port int, debug bool, cfgDir string) ([]byte, error) {
 	logLevel := doltServerLogLevel
 	if debug {
 		logLevel = "debug"
@@ -802,6 +869,7 @@ func buildDoltServerYAMLConfig(host string, port int, debug bool) ([]byte, error
 			HostStr:    &host,
 			PortNumber: &port,
 		},
+		CfgDirStr: &cfgDir,
 		BehaviorConfig: servercfg.BehaviorYAMLConfig{
 			AutoGCBehavior: &servercfg.AutoGCBehaviorYAMLConfig{
 				ArchiveLevel_: &archiveLevel,
@@ -933,6 +1001,18 @@ func Start(beadsDir string) (*State, error) {
 		// only intervene between runs. See logrotate.go for the caveat discussion.
 		maybeRotateLog(beadsDir)
 
+		// Resolve .doltcfg once, before the port retry loop — it does not
+		// depend on the port, and an ambiguous both-exist result must fail
+		// Start() outright rather than retry into a fresh unintended
+		// $data_dir/.doltcfg (see resolveCfgDir).
+		var cfgDir string
+		if useArchiveLevelConfig {
+			cfgDir, err = resolveCfgDir(doltDir)
+			if err != nil {
+				return nil, fmt.Errorf("resolving .doltcfg directory: %w", err)
+			}
+		}
+
 		// Open log file
 		logFile, err := os.OpenFile(logPath(beadsDir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // G304: logPath derives from user-configured beadsDir
 		if err != nil {
@@ -980,7 +1060,7 @@ func Start(beadsDir string) (*State, error) {
 
 			var cmdArgs []string
 			if useArchiveLevelConfig {
-				cfgBody, cfgErr := buildDoltServerYAMLConfig(cfg.Host, actualPort, debug)
+				cfgBody, cfgErr := buildDoltServerYAMLConfig(cfg.Host, actualPort, debug, cfgDir)
 				if cfgErr != nil {
 					lastErr = fmt.Errorf("rendering managed sql-server config: %w", cfgErr)
 					if !explicitPort {
@@ -988,14 +1068,26 @@ func Start(beadsDir string) (*State, error) {
 					}
 					break
 				}
-				if werr := os.WriteFile(doltServerConfigPath(beadsDir), cfgBody, 0600); werr != nil {
+				// filepath.Abs defensively: the child's cwd is doltDir (cmd.Dir
+				// below), so a relative configPath would resolve against the
+				// wrong directory (matches the sibling dbproxy/server path,
+				// which abs's its configPath in NewDoltServer).
+				absConfigPath, absErr := filepath.Abs(doltServerConfigPath(beadsDir))
+				if absErr != nil {
+					lastErr = fmt.Errorf("resolving managed sql-server config path: %w", absErr)
+					if !explicitPort {
+						continue
+					}
+					break
+				}
+				if werr := os.WriteFile(absConfigPath, cfgBody, 0600); werr != nil {
 					lastErr = fmt.Errorf("writing managed sql-server config: %w", werr)
 					if !explicitPort {
 						continue
 					}
 					break
 				}
-				cmdArgs = buildDoltServerArgsWithConfig(doltServerConfigPath(beadsDir), debug, profDir)
+				cmdArgs = buildDoltServerArgsWithConfig(absConfigPath, debug, profDir)
 			} else {
 				cmdArgs = buildDoltServerArgs(cfg.Host, actualPort, debug, profDir)
 			}

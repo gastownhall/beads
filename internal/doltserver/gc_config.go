@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // MinDoltVersionForArchiveLevelConfig is the earliest Dolt release known to
@@ -19,18 +20,42 @@ import (
 // start. See gastownhall/beads#4986.
 const MinDoltVersionForArchiveLevelConfig = "1.52.1"
 
+// archiveLevelSupportCache memoizes SupportsArchiveLevelConfig per doltBin
+// for the lifetime of the process. `dolt version` does not change mid-run,
+// and Start()/the UOW provider can be invoked repeatedly against the same
+// resolved binary (retries, multiple projects sharing one dolt, tests),
+// so this avoids forking a `dolt version` subprocess on every call.
+var archiveLevelSupportCache sync.Map // map[string]bool
+
 // SupportsArchiveLevelConfig probes doltBin (an absolute path or a PATH
 // lookup result) for a version new enough to safely accept
 // auto_gc_behavior.archive_level in a YAML sql-server config. It fails
 // closed: any error running or parsing `dolt version` returns false, so
 // callers fall back to config generation that omits the key rather than
-// risk a refuse-to-start on an older external dolt.
+// risk a refuse-to-start on an older external dolt. Results are memoized
+// per doltBin string for the process lifetime (see archiveLevelSupportCache);
+// use ResetArchiveLevelSupportCacheForTest to clear it between test cases
+// that swap out a stub binary at the same path.
 func SupportsArchiveLevelConfig(doltBin string) bool {
-	out, err := exec.Command(doltBin, "version").Output() //nolint:gosec // G204: doltBin is caller-resolved (PATH lookup or config), not user-request input
-	if err != nil {
-		return false
+	if cached, ok := archiveLevelSupportCache.Load(doltBin); ok {
+		return cached.(bool)
 	}
-	return doltVersionAtLeast(string(out), MinDoltVersionForArchiveLevelConfig)
+	out, err := exec.Command(doltBin, "version").Output() //nolint:gosec // G204: doltBin is caller-resolved (PATH lookup or config), not user-request input
+	supported := err == nil && doltVersionAtLeast(string(out), MinDoltVersionForArchiveLevelConfig)
+	archiveLevelSupportCache.Store(doltBin, supported)
+	return supported
+}
+
+// ResetArchiveLevelSupportCacheForTest clears the memoization cache. Tests
+// that probe SupportsArchiveLevelConfig against a stub binary path that
+// gets rewritten between subtests (or reused across independent test
+// binaries in the same package) must call this to avoid a stale result
+// from a different test.
+func ResetArchiveLevelSupportCacheForTest() {
+	archiveLevelSupportCache.Range(func(key, _ any) bool {
+		archiveLevelSupportCache.Delete(key)
+		return true
+	})
 }
 
 // doltVersionAtLeast parses the first line of `dolt version` output (e.g.
