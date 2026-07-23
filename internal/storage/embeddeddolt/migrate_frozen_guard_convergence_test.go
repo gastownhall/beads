@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
@@ -254,6 +255,13 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisp_dependencies'
 		requireConstraintCount(t, ctx, conn2, name, "FOREIGN KEY", 1)
 	}
 	requireConstraintCount(t, ctx, conn2, "ck_wisp_dep_one_target", "", 1)
+	// Bare name/type presence isn't proof these reference the right
+	// table/column with CASCADE actions -- confirm via KEY_COLUMN_USAGE and
+	// REFERENTIAL_CONSTRAINTS, and exercise ck_wisp_dep_one_target
+	// behaviorally (PR #4987 review, minor).
+	requireForeignKeyReferences(t, ctx, conn2, "fk_wisp_dep_wisp_target", "depends_on_wisp_id", "wisps", "id")
+	requireForeignKeyReferences(t, ctx, conn2, "fk_wisp_dep_issue_target", "depends_on_issue_id", "issues", "id")
+	requireForeignKeyReferences(t, ctx, conn2, "fk_wisp_dep_issue", "issue_id", "wisps", "id")
 
 	// The single legacy row backfilled to its issue target (not wisp or
 	// external) and survived the structural split unchanged.
@@ -273,6 +281,31 @@ WHERE issue_id = ? AND depends_on_issue_id = ? AND depends_on_wisp_id IS NULL AN
 	}
 	if totalRows != 1 {
 		t.Fatalf("wisp_dependencies row count = %d, want 1", totalRows)
+	}
+
+	// Behavioral CHECK probe: dedicated fresh wisp/issue, and the helper
+	// deletes its own successful probe row, so this doesn't disturb the row
+	// count just asserted or the clean-working-set check below.
+	const (
+		checkProbeWispID  = "wisp-deps-delegate-check-probe"
+		checkProbeIssueID = "issue-deps-delegate-check-probe"
+	)
+	if _, err := conn2.ExecContext(ctx,
+		"INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral) VALUES (?, 'check probe wisp', '', '', '', '', 'open', 2, 'task', 1)",
+		checkProbeWispID); err != nil {
+		t.Fatalf("insert check probe wisp: %v", err)
+	}
+	if _, err := conn2.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, 'check probe issue', '', '', '', '', 'open', 2, 'task')",
+		checkProbeIssueID); err != nil {
+		t.Fatalf("insert check probe issue: %v", err)
+	}
+	requireCheckRejectsInvalidTargetCounts(t, ctx, conn2, checkProbeWispID, checkProbeIssueID)
+	if _, err := conn2.ExecContext(ctx, "DELETE FROM wisps WHERE id = ?", checkProbeWispID); err != nil {
+		t.Fatalf("cleanup check probe wisp: %v", err)
+	}
+	if _, err := conn2.ExecContext(ctx, "DELETE FROM issues WHERE id = ?", checkProbeIssueID); err != nil {
+		t.Fatalf("cleanup check probe issue: %v", err)
 	}
 
 	if dirty := dirtyTableNames(t, ctx, conn2); len(dirty) != 0 {
@@ -333,6 +366,26 @@ ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_issue_target;
 	requireConstraintCount(t, ctx, conn, "ck_wisp_dep_one_target", "", 1)
 	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_wisp_target", "FOREIGN KEY", 1)
 	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_issue_target", "FOREIGN KEY", 1)
+	requireForeignKeyReferences(t, ctx, conn, "fk_wisp_dep_wisp_target", "depends_on_wisp_id", "wisps", "id")
+	requireForeignKeyReferences(t, ctx, conn, "fk_wisp_dep_issue_target", "depends_on_issue_id", "issues", "id")
+
+	// Behavioral CHECK probe on a dedicated fresh wisp/issue pair; the
+	// helper cleans up its own successful probe row.
+	const (
+		checkProbeWispID  = "wisp-0058-heal-check-probe"
+		checkProbeIssueID = "issue-0058-heal-check-probe"
+	)
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral) VALUES (?, 'check probe wisp', '', '', '', '', 'open', 2, 'task', 1)",
+		checkProbeWispID); err != nil {
+		t.Fatalf("insert check probe wisp: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, 'check probe issue', '', '', '', '', 'open', 2, 'task')",
+		checkProbeIssueID); err != nil {
+		t.Fatalf("insert check probe issue: %v", err)
+	}
+	requireCheckRejectsInvalidTargetCounts(t, ctx, conn, checkProbeWispID, checkProbeIssueID)
 
 	// Idempotent: a second pass (e.g. a retry, or MigrateUp re-run after the
 	// cursor already recorded 0058) must not error re-adding a constraint
@@ -341,6 +394,189 @@ ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_issue_target;
 	requireConstraintCount(t, ctx, conn, "ck_wisp_dep_one_target", "", 1)
 	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_wisp_target", "FOREIGN KEY", 1)
 	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_issue_target", "FOREIGN KEY", 1)
+}
+
+// TestEmbeddedMigration0058AddsOnlyMissingConstraintInMixedPopulation covers
+// the PR #4987 review's minor: a database missing only ONE of the three
+// constraints (here, ck_wisp_dep_one_target -- both foreign keys already
+// present) must have 0058 add exactly that one, without erroring on the two
+// already-present foreign keys (each guarded independently, so a converged
+// constraint's own @needs_* flag reads 0 and its ADD CONSTRAINT takes the
+// no-op branch).
+func TestEmbeddedMigration0058AddsOnlyMissingConstraintInMixedPopulation(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	migrationSQL, err := os.ReadFile("../schema/migrations/0058_heal_wisp_dependencies_split_constraints.up.sql")
+	if err != nil {
+		t.Fatalf("read 0058 migration: %v", err)
+	}
+
+	dataDir := seedMainSchemaAt(t, ctx, schema.LatestVersion())
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	execFrozenGuard(t, ctx, conn, "ALTER TABLE wisp_dependencies DROP CONSTRAINT ck_wisp_dep_one_target;")
+	requireConstraintCount(t, ctx, conn, "ck_wisp_dep_one_target", "", 0)
+	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_wisp_target", "FOREIGN KEY", 1)
+	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_issue_target", "FOREIGN KEY", 1)
+
+	execFrozenGuard(t, ctx, conn, string(migrationSQL))
+	requireConstraintCount(t, ctx, conn, "ck_wisp_dep_one_target", "", 1)
+	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_wisp_target", "FOREIGN KEY", 1)
+	requireConstraintCount(t, ctx, conn, "fk_wisp_dep_issue_target", "FOREIGN KEY", 1)
+}
+
+// TestEmbeddedMigration0058CleansOrphanedAndInvalidWispDependenciesRowsBeforeAddingConstraints
+// covers the two majors from the paired review on PR #4987: adding a foreign
+// key over data that accumulated during the window it was missing repeats
+// the #4534 failure class ignored/0011 documents ("Dolt then fails
+// constraint validation on subsequent writes, so one legacy orphan bricks
+// every bd create"), and ADD CONSTRAINT ck_wisp_dep_one_target validates
+// existing rows regardless of FOREIGN_KEY_CHECKS, so a zero- or multi-target
+// row accumulated in the same window would abort the ADD CONSTRAINT itself,
+// repeatedly failing MigrateUp before it ever records 0058.
+//
+// Seed exactly the three row shapes that unconstrained window can leave, all
+// on a delegate-path database at cursor-latest (built through the real
+// chain, then the three constraints dropped, matching
+// TestEmbeddedMigration0058HealsAlreadyAffectedDatabase's technique):
+//   - an FK orphan: a valid depends_on_wisp_id edge, then its target wisp
+//     deleted with no CASCADE in force (the FK is dropped) to leave the
+//     edge dangling.
+//   - a zero-target row: no issue, no wisp, no external target.
+//   - a multi-target row: both a valid wisp target and a valid issue target
+//     set at once.
+//
+// Run 0058 and assert the orphan and zero-target rows are gone, the
+// multi-target row is normalized to its single wisp-precedence target, all
+// three constraints converge, and a second pass is an idempotent no-op.
+func TestEmbeddedMigration0058CleansOrphanedAndInvalidWispDependenciesRowsBeforeAddingConstraints(t *testing.T) {
+	requireEmbedded(t)
+	ctx := t.Context()
+
+	migrationSQL, err := os.ReadFile("../schema/migrations/0058_heal_wisp_dependencies_split_constraints.up.sql")
+	if err != nil {
+		t.Fatalf("read 0058 migration: %v", err)
+	}
+
+	dataDir := seedMainSchemaAt(t, ctx, schema.LatestVersion())
+	conn, closeConn := openPinnedConn(t, ctx, dataDir)
+	defer closeConn()
+
+	execFrozenGuard(t, ctx, conn, `
+ALTER TABLE wisp_dependencies DROP CONSTRAINT ck_wisp_dep_one_target;
+ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_wisp_target;
+ALTER TABLE wisp_dependencies DROP FOREIGN KEY fk_wisp_dep_issue_target;
+`)
+
+	const (
+		orphanSourceID     = "wisp-0058-orphan-source"
+		danglingWispTarget = "wisp-0058-dangling-target"
+		zeroSourceID       = "wisp-0058-zero-source"
+		multiSourceID      = "wisp-0058-multi-source"
+		multiWispTarget    = "wisp-0058-multi-wisp-target"
+		multiIssueTarget   = "issue-0058-multi-issue-target"
+	)
+	for _, id := range []string{orphanSourceID, danglingWispTarget, zeroSourceID, multiSourceID, multiWispTarget} {
+		if _, err := conn.ExecContext(ctx,
+			"INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral) VALUES (?, ?, '', '', '', '', 'open', 2, 'task', 1)",
+			id, id); err != nil {
+			t.Fatalf("insert wisp %s: %v", id, err)
+		}
+	}
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, ?, '', '', '', '', 'open', 2, 'task')",
+		multiIssueTarget, multiIssueTarget); err != nil {
+		t.Fatalf("insert issue %s: %v", multiIssueTarget, err)
+	}
+
+	// FK orphan: a valid edge to danglingWispTarget, then delete that wisp
+	// out from under it -- with the FK dropped, nothing cascades, leaving a
+	// row whose target no longer resolves.
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO wisp_dependencies (issue_id, depends_on_wisp_id, type, created_at, created_by, metadata) VALUES (?, ?, 'blocks', NOW(), 'tester', JSON_OBJECT())",
+		orphanSourceID, danglingWispTarget); err != nil {
+		t.Fatalf("insert orphan-to-be row: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "DELETE FROM wisps WHERE id = ?", danglingWispTarget); err != nil {
+		t.Fatalf("delete dangling wisp target: %v", err)
+	}
+
+	// Zero-target: no issue, no wisp, no external target -- semantically
+	// meaningless, and would fail ck_wisp_dep_one_target's ADD CONSTRAINT.
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO wisp_dependencies (issue_id, type, created_at, created_by, metadata) VALUES (?, 'blocks', NOW(), 'tester', JSON_OBJECT())",
+		zeroSourceID); err != nil {
+		t.Fatalf("insert zero-target row: %v", err)
+	}
+
+	// Multi-target: both a valid wisp target and a valid issue target set at
+	// once. wispDependenciesSplitTargetBackfillSQL's own statement order
+	// (external-prefix match first, then wisp, then issue, each guarded on
+	// the earlier ones not having already matched) and its sibling test
+	// TestWispDependenciesSplitTargetBackfillPrefersWispOverIssueThroughDoltCLI
+	// (an id resolving as both a wisp and an issue backfills to the wisp
+	// reading) establish wisp > issue precedence; 0058 must normalize this
+	// row to depends_on_wisp_id only.
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO wisp_dependencies (issue_id, depends_on_wisp_id, depends_on_issue_id, type, created_at, created_by, metadata) VALUES (?, ?, ?, 'blocks', NOW(), 'tester', JSON_OBJECT())",
+		multiSourceID, multiWispTarget, multiIssueTarget); err != nil {
+		t.Fatalf("insert multi-target row: %v", err)
+	}
+	closeConn()
+
+	conn2, closeConn2 := openPinnedConn(t, ctx, dataDir)
+	defer closeConn2()
+
+	execFrozenGuard(t, ctx, conn2, string(migrationSQL))
+
+	var orphanCount, zeroCount int
+	if err := conn2.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?", orphanSourceID).Scan(&orphanCount); err != nil {
+		t.Fatalf("count orphan row: %v", err)
+	}
+	if orphanCount != 0 {
+		t.Fatalf("orphan row count = %d, want 0 (0058 must delete rows whose target no longer resolves)", orphanCount)
+	}
+	if err := conn2.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?", zeroSourceID).Scan(&zeroCount); err != nil {
+		t.Fatalf("count zero-target row: %v", err)
+	}
+	if zeroCount != 0 {
+		t.Fatalf("zero-target row count = %d, want 0", zeroCount)
+	}
+
+	var multiWisp, multiIssue sql.NullString
+	if err := conn2.QueryRowContext(ctx,
+		"SELECT depends_on_wisp_id, depends_on_issue_id FROM wisp_dependencies WHERE issue_id = ?",
+		multiSourceID).Scan(&multiWisp, &multiIssue); err != nil {
+		t.Fatalf("read normalized multi-target row: %v", err)
+	}
+	if !multiWisp.Valid || multiWisp.String != multiWispTarget {
+		t.Fatalf("multi-target row depends_on_wisp_id = %+v, want %s", multiWisp, multiWispTarget)
+	}
+	if multiIssue.Valid {
+		t.Fatalf("multi-target row depends_on_issue_id = %s, want NULL (wisp precedence)", multiIssue.String)
+	}
+
+	requireConstraintCount(t, ctx, conn2, "fk_wisp_dep_wisp_target", "FOREIGN KEY", 1)
+	requireConstraintCount(t, ctx, conn2, "fk_wisp_dep_issue_target", "FOREIGN KEY", 1)
+	requireConstraintCount(t, ctx, conn2, "ck_wisp_dep_one_target", "", 1)
+
+	// Idempotent: a second pass finds no more orphans or invalid rows (the
+	// cleanup guards already read 0, since the constraints are now present)
+	// and no error re-adding an already-present constraint; the normalized
+	// row survives unchanged.
+	execFrozenGuard(t, ctx, conn2, string(migrationSQL))
+	requireConstraintCount(t, ctx, conn2, "fk_wisp_dep_wisp_target", "FOREIGN KEY", 1)
+	requireConstraintCount(t, ctx, conn2, "fk_wisp_dep_issue_target", "FOREIGN KEY", 1)
+	requireConstraintCount(t, ctx, conn2, "ck_wisp_dep_one_target", "", 1)
+	var survivorCount int
+	if err := conn2.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?", multiSourceID).Scan(&survivorCount); err != nil {
+		t.Fatalf("count surviving multi-target row after second pass: %v", err)
+	}
+	if survivorCount != 1 {
+		t.Fatalf("surviving multi-target row count after second pass = %d, want 1", survivorCount)
+	}
 }
 
 // execFrozenGuard runs a raw SQL blob (typically the exact content of a
@@ -401,5 +637,80 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisp_dependencies' AND CONSTRA
 	}
 	if got != want {
 		t.Fatalf("wisp_dependencies constraint %s count = %d, want %d", name, got, want)
+	}
+}
+
+// requireForeignKeyReferences asserts a foreign key's referenced
+// table/column via INFORMATION_SCHEMA.KEY_COLUMN_USAGE and its
+// DELETE_RULE/UPDATE_RULE via INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS --
+// requireConstraintCount's bare name/type presence check would still pass a
+// foreign key pointed at the wrong table/column or missing its CASCADE
+// actions (PR #4987 review, minor).
+func requireForeignKeyReferences(t *testing.T, ctx context.Context, conn *sql.Conn, name, column, refTable, refColumn string) {
+	t.Helper()
+	var gotRefTable, gotRefColumn string
+	if err := conn.QueryRowContext(ctx, `
+SELECT REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisp_dependencies' AND CONSTRAINT_NAME = ? AND COLUMN_NAME = ?`,
+		name, column).Scan(&gotRefTable, &gotRefColumn); err != nil {
+		t.Fatalf("read %s KEY_COLUMN_USAGE: %v", name, err)
+	}
+	if gotRefTable != refTable || gotRefColumn != refColumn {
+		t.Fatalf("%s references %s(%s), want %s(%s)", name, gotRefTable, gotRefColumn, refTable, refColumn)
+	}
+	var updateRule, deleteRule string
+	if err := conn.QueryRowContext(ctx, `
+SELECT UPDATE_RULE, DELETE_RULE FROM INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS
+WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'wisp_dependencies' AND CONSTRAINT_NAME = ?`,
+		name).Scan(&updateRule, &deleteRule); err != nil {
+		t.Fatalf("read %s REFERENTIAL_CONSTRAINTS: %v", name, err)
+	}
+	if updateRule != "CASCADE" || deleteRule != "CASCADE" {
+		t.Fatalf("%s UPDATE_RULE/DELETE_RULE = %s/%s, want CASCADE/CASCADE", name, updateRule, deleteRule)
+	}
+}
+
+// requireCheckRejectsInvalidTargetCounts behaviorally exercises
+// ck_wisp_dep_one_target rather than string-matching
+// INFORMATION_SCHEMA.CHECK_CONSTRAINTS.CHECK_CLAUSE -- the engine reformats
+// the clause on storage (e.g. "x IS NOT NULL" becomes "NOT(x IS NULL)"), so
+// an exact-text assertion would be brittle against the engine's own
+// normalization rather than the migration's actual behavior. Attempts a
+// zero-target insert and a two-target insert against sourceWispID (both
+// must be rejected), then a valid one-target insert against
+// validIssueTargetID (must succeed, proving the constraint isn't simply
+// refusing everything) -- and cleans that row back up before returning, so
+// callers can use it without disturbing row-count or dolt_status
+// assertions elsewhere in the same test. sourceWispID and validIssueTargetID
+// must be real rows (via fk_wisp_dep_issue/fk_wisp_dep_issue_target) not
+// otherwise used by the caller's own wisp_dependencies rows. id is supplied
+// explicitly on every insert (google/uuid, already a repo dependency)
+// instead of relying on the column's DEFAULT (UUID()): a wisp_dependencies
+// table that reached its id column via ignored/0005's ALTER TABLE ... ADD
+// COLUMN id ... DEFAULT (UUID()) (the delegate-path repair route) does not
+// reliably honor that default on a later plain INSERT the way the fresh
+// CREATE TABLE route does, which is an unrelated engine/migration quirk
+// this probe must not depend on to stay focused on ck_wisp_dep_one_target.
+func requireCheckRejectsInvalidTargetCounts(t *testing.T, ctx context.Context, conn *sql.Conn, sourceWispID, validIssueTargetID string) {
+	t.Helper()
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO wisp_dependencies (id, issue_id, type, created_at, created_by, metadata) VALUES (?, ?, 'blocks', NOW(), 'tester', JSON_OBJECT())",
+		uuid.NewString(), sourceWispID); err == nil {
+		t.Fatal("insert with zero targets succeeded, want ck_wisp_dep_one_target to reject it")
+	}
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, depends_on_wisp_id, type, created_at, created_by, metadata) VALUES (?, ?, ?, ?, 'blocks', NOW(), 'tester', JSON_OBJECT())",
+		uuid.NewString(), sourceWispID, validIssueTargetID, sourceWispID); err == nil {
+		t.Fatal("insert with two targets succeeded, want ck_wisp_dep_one_target to reject it")
+	}
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata) VALUES (?, ?, ?, 'blocks', NOW(), 'tester', JSON_OBJECT())",
+		uuid.NewString(), sourceWispID, validIssueTargetID); err != nil {
+		t.Fatalf("insert with exactly one target failed, want ck_wisp_dep_one_target to accept it: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"DELETE FROM wisp_dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
+		sourceWispID, validIssueTargetID); err != nil {
+		t.Fatalf("cleanup valid-target probe row: %v", err)
 	}
 }
