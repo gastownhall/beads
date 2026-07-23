@@ -46,7 +46,7 @@ var createCmd = &cobra.Command{
 	GroupID:       "issues",
 	Aliases:       []string{"new"},
 	Short:         "Create a new issue (or batch from markdown/graph JSON)",
-	Args:          validateCreateArgs,
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateCreateArgs),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -124,9 +124,12 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		description, _, err := getDescriptionFlag(cmd)
+		description, descriptionChanged, err := getDescriptionFlag(cmd)
 		if err != nil {
 			return err
+		}
+		if err := validateDescriptionUpdate(cmd, description, descriptionChanged); err != nil {
+			return HandleError("%v", err)
 		}
 
 		skills, _ := cmd.Flags().GetString("skills")
@@ -782,6 +785,7 @@ func init() {
 	createCmd.Flags().String("mol-type", "", "Molecule type: swarm (multi-agent), patrol (recurring ops), work (default)")
 	createCmd.Flags().String("wisp-type", "", "Wisp type for TTL-based compaction: heartbeat, ping, patrol, gc_report, recovery, error, escalation")
 	createCmd.Flags().Bool("validate", false, "Validate description contains required sections for issue type")
+	createCmd.Flags().Bool("allow-empty-description", false, "Allow empty description input from stdin or file")
 	// Event-specific flags (only valid when --type=event)
 	createCmd.Flags().String("event-category", "", "Event category (e.g., patrol.muted, agent.started) (requires --type=event)")
 	createCmd.Flags().String("event-actor", "", "Entity URI who caused this event (requires --type=event)")

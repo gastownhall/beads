@@ -130,9 +130,12 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	}
 	in.title = title
 
-	desc, _, err := getDescriptionFlag(cmd)
+	desc, descChanged, err := getDescriptionFlag(cmd)
 	if err != nil {
 		return in, err
+	}
+	if err := validateDescriptionUpdate(cmd, desc, descChanged); err != nil {
+		return in, HandleError("%v", err)
 	}
 	in.description = desc
 	skills, _ := cmd.Flags().GetString("skills")
@@ -293,6 +296,7 @@ var singleIssueOnlyFlags = []string{
 	"status",
 	"description", "body", "message", "body-file", "description-file", "stdin",
 	"design", "design-file", "acceptance", "notes", "append-notes",
+	"allow-empty-description",
 	"labels", "label", "skills", "context",
 	"event-category", "event-actor", "event-target", "event-payload",
 	"due", "defer",
