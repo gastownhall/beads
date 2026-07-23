@@ -1,17 +1,17 @@
 ---
 title: "bd tag"
-description: "Add a label to an issue."
+description: "이슈에 레이블을 추가합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc tag`.
+`bd help --doc tag`에서 생성되었습니다.
 
-Add a label to an issue.
+이슈에 레이블을 추가합니다.
 
-Shorthand for 'bd update &lt;id&gt; --add-label &lt;label&gt;'.
+'bd update &lt;id&gt; --add-label &lt;label&gt;'의 단축 명령입니다.
 
-Examples:
+예시:
   bd tag bd-123 bug
   bd tag bd-123 needs-review
 

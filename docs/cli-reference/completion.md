@@ -1,14 +1,14 @@
 ---
 title: "bd completion"
-description: "Generate the autocompletion script for bd for the specified shell."
+description: "지정한 셸용 bd 자동 완성 스크립트를 생성합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc completion`.
+`bd help --doc completion`에서 생성되었습니다.
 
-Generate the autocompletion script for bd for the specified shell.
-See each sub-command's help for details on how to use the generated script.
+지정한 셸용 bd 자동 완성 스크립트를 생성합니다.
+생성된 스크립트의 자세한 사용법은 각 하위 명령의 도움말을 참조하세요.
 
 
 ```
@@ -17,16 +17,16 @@ bd completion [flags]
 
 ## bd completion bash
 
-Generate the autocompletion script for the bash shell.
+bash 셸용 자동 완성 스크립트를 생성합니다.
 
-This script depends on the 'bash-completion' package.
-If it is not installed already, you can install it via your OS's package manager.
+이 스크립트는 'bash-completion' 패키지에 의존합니다.
+아직 설치되지 않았다면 OS 패키지 관리자로 설치할 수 있습니다.
 
-To load completions in your current shell session:
+현재 셸 세션에 자동 완성을 로드하려면:
 
 	source &lt;(bd completion bash)
 
-To load completions for every new session, execute once:
+모든 새 세션에 자동 완성을 로드하려면 한 번 실행하세요:
 
 ### Linux:
 
@@ -36,80 +36,79 @@ To load completions for every new session, execute once:
 
 	bd completion bash &gt; $(brew --prefix)/etc/bash_completion.d/bd
 
-You will need to start a new shell for this setup to take effect.
+이 설정을 적용하려면 새 셸을 시작해야 합니다.
 
 
 ```
 bd completion bash
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --no-descriptions   disable completion descriptions
+      --no-descriptions   자동 완성 설명 비활성화
 ```
 
 ## bd completion fish
 
-Generate the autocompletion script for the fish shell.
+fish 셸용 자동 완성 스크립트를 생성합니다.
 
-To load completions in your current shell session:
+현재 셸 세션에 자동 완성을 로드하려면:
 
 	bd completion fish | source
 
-To load completions for every new session, execute once:
+모든 새 세션에 자동 완성을 로드하려면 한 번 실행하세요:
 
 	bd completion fish &gt; ~/.config/fish/completions/bd.fish
 
-You will need to start a new shell for this setup to take effect.
+이 설정을 적용하려면 새 셸을 시작해야 합니다.
 
 
 ```
 bd completion fish [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --no-descriptions   disable completion descriptions
+      --no-descriptions   자동 완성 설명 비활성화
 ```
 
 ## bd completion powershell
 
-Generate the autocompletion script for powershell.
+powershell용 자동 완성 스크립트를 생성합니다.
 
-To load completions in your current shell session:
+현재 셸 세션에 자동 완성을 로드하려면:
 
 	bd completion powershell | Out-String | Invoke-Expression
 
-To load completions for every new session, add the output of the above command
-to your powershell profile.
+모든 새 세션에 자동 완성을 로드하려면 위 명령의 출력을 powershell 프로필에 추가하세요.
 
 
 ```
 bd completion powershell [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --no-descriptions   disable completion descriptions
+      --no-descriptions   자동 완성 설명 비활성화
 ```
 
 ## bd completion zsh
 
-Generate the autocompletion script for the zsh shell.
+zsh 셸용 자동 완성 스크립트를 생성합니다.
 
-If shell completion is not already enabled in your environment you will need
-to enable it.  You can execute the following once:
+환경에서 셸 자동 완성이 아직 활성화되지 않았다면 활성화해야 합니다.
+다음을 한 번 실행하세요:
 
 	echo "autoload -U compinit; compinit" &gt;&gt; ~/.zshrc
 
-To load completions in your current shell session:
+현재 셸 세션에 자동 완성을 로드하려면:
 
 	source &lt;(bd completion zsh)
 
-To load completions for every new session, execute once:
+모든 새 세션에 자동 완성을 로드하려면 한 번 실행하세요:
 
 ### Linux:
 
@@ -119,15 +118,15 @@ To load completions for every new session, execute once:
 
 	bd completion zsh &gt; $(brew --prefix)/share/zsh/site-functions/_bd
 
-You will need to start a new shell for this setup to take effect.
+이 설정을 적용하려면 새 셸을 시작해야 합니다.
 
 
 ```
 bd completion zsh [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --no-descriptions   disable completion descriptions
+      --no-descriptions   자동 완성 설명 비활성화
 ```

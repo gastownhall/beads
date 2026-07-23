@@ -1,46 +1,46 @@
 ---
 title: "bd migrate"
-description: "Database migration and data transformation commands."
+description: "데이터베이스 마이그레이션 및 데이터 변환 명령입니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc migrate`.
+`bd help --doc migrate`에서 생성되었습니다.
 
-Database migration and data transformation commands.
+데이터베이스 마이그레이션 및 데이터 변환 명령입니다.
 
-Without subcommand, checks and updates database metadata to current version.
+하위 명령이 없으면 데이터베이스 메타데이터를 검사하고 현재 버전으로 업데이트합니다.
 
-Subcommands:
-  hooks       Plan git hook migration to marker-managed format
-  issues      Move issues between repositories
-  schema      Apply pending schema migrations (idempotent)
-  sync        Set up sync.branch workflow for multi-clone setups
+하위 명령:
+  hooks       marker 관리 형식으로 git 훅 마이그레이션 계획
+  issues      저장소 간 이슈 이동
+  schema      대기 중인 스키마 마이그레이션 적용(멱등)
+  sync        다중 클론 설정용 sync.branch 워크플로 설정
 
 
 ```
 bd migrate [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run          Show what would be done without making changes
-      --inspect          Show migration plan and database state for AI agent analysis
-      --json             Output migration statistics in JSON format
-      --update-repo-id   Update repository ID (use after changing git remote)
-      --yes              Auto-confirm prompts
+      --dry-run          변경하지 않고 수행될 작업 표시
+      --inspect          AI 에이전트 분석용 마이그레이션 계획과 데이터베이스 상태 표시
+      --json             마이그레이션 통계를 JSON 형식으로 출력
+      --update-repo-id   저장소 ID 업데이트(git 원격 변경 후 사용)
+      --yes              확인 프롬프트 자동 승인
 ```
 
 ## bd migrate hooks
 
-Analyze git hook files and sidecar artifacts for migration to marker-managed format.
+marker 관리 형식으로 마이그레이션하기 위해 git 훅 파일과 sidecar 아티팩트를 분석합니다.
 
-Modes:
-  --dry-run  Preview migration operations without changing files
-  --apply    Apply migration operations
+모드:
+  --dry-run  파일을 변경하지 않고 마이그레이션 작업 미리 보기
+  --apply    마이그레이션 작업 적용
 
-Examples:
+예시:
   bd migrate hooks --dry-run
   bd migrate hooks --apply
   bd migrate hooks --apply --yes
@@ -50,68 +50,68 @@ Examples:
 bd migrate hooks [path] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --apply     Apply planned hook migration changes
-      --dry-run   Show what would be done without making changes
-      --json      Output in JSON format
-      --yes       Skip confirmation prompt for --apply
+      --apply     계획된 훅 마이그레이션 변경 사항 적용
+      --dry-run   변경하지 않고 수행될 작업 표시
+      --json      JSON 형식으로 출력
+      --yes       --apply의 확인 프롬프트 건너뛰기
 ```
 
 ## bd migrate issues
 
-Move issues from one source repository to another with filtering and dependency preservation.
+필터링하고 의존성을 보존하면서 한 소스 저장소에서 다른 저장소로 이슈를 이동합니다.
 
-This command updates the source_repo field for selected issues, allowing you to:
-- Move contributor planning issues to upstream repository
-- Reorganize issues across multi-phase repositories
-- Consolidate issues from multiple repos
+이 명령은 선택한 이슈의 source_repo 필드를 업데이트하여 다음을 수행할 수 있게 합니다:
+- 기여자 계획 이슈를 업스트림 저장소로 이동
+- 여러 단계의 저장소에 걸쳐 이슈 재구성
+- 여러 저장소의 이슈 통합
 
-Examples:
-  # Preview migration from planning repo to current repo
+예시:
+  # 계획 저장소에서 현재 저장소로의 마이그레이션 미리 보기
   bd migrate-issues --from ~/.beads-planning --to . --dry-run
 
-  # Move all open P1 bugs
+  # 열린 P1 버그 모두 이동
   bd migrate-issues --from ~/repo1 --to ~/repo2 --priority 1 --type bug --status open
 
-  # Move specific issues with their dependencies
+  # 특정 이슈와 그 의존성 이동
   bd migrate-issues --from . --to ~/archive --id bd-abc --id bd-xyz --include closure
 
-  # Move issues with label filter
+  # 레이블 필터로 이슈 이동
   bd migrate-issues --from . --to ~/feature-work --label frontend --label urgent
 
 ```
 bd migrate issues [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run            Show plan without making changes
-      --from string        Source repository (required)
-      --id strings         Specific issue IDs to migrate (can specify multiple)
-      --ids-file string    File containing issue IDs (one per line)
-      --include string     Include dependencies: none/upstream/downstream/closure (default "none")
-      --label strings      Filter by labels (can specify multiple)
-      --priority int       Filter by priority (0-4) (default -1)
-      --status string      Filter by status (open/closed/all)
-      --strict             Fail on orphaned dependencies or missing repos
-      --to string          Destination repository (required)
-      --type string        Filter by issue type (bug/feature/task/epic/chore/decision)
-      --within-from-only   Only include dependencies from source repo (default true)
-      --yes                Skip confirmation prompt
+      --dry-run            변경하지 않고 계획 표시
+      --from string        소스 저장소(필수)
+      --id strings         마이그레이션할 특정 이슈 ID(여러 개 지정 가능)
+      --ids-file string    이슈 ID가 포함된 파일(한 줄에 하나)
+      --include string     포함할 의존성: none/upstream/downstream/closure(기본값 "none")
+      --label strings      레이블로 필터링(여러 개 지정 가능)
+      --priority int       우선순위로 필터링(0-4)(기본값 -1)
+      --status string      상태로 필터링(open/closed/all)
+      --strict             고립 의존성이나 누락된 저장소가 있으면 실패
+      --to string          대상 저장소(필수)
+      --type string        이슈 유형으로 필터링(bug/feature/task/epic/chore/decision)
+      --within-from-only   소스 저장소의 의존성만 포함(기본값 true)
+      --yes                확인 프롬프트 건너뛰기
 ```
 
 ## bd migrate schema
 
-Apply pending schema migrations idempotently.
+대기 중인 스키마 마이그레이션을 멱등하게 적용합니다.
 
-Schema migrations also run automatically on store open, so this subcommand
-is typically a no-op. It exists to make migration explicit and observable
-in CI, release gates, and recovery scenarios.
+스키마 마이그레이션은 저장소를 열 때 자동으로도 실행되므로 이 하위 명령은 일반적으로
+아무 작업도 하지 않습니다. CI, 릴리스 gate, 복구 시나리오에서 마이그레이션을
+명시하고 관찰할 수 있도록 존재합니다.
 
-Example:
+예시:
   bd migrate schema
   bd migrate schema --json
 
@@ -119,29 +119,29 @@ Example:
 bd migrate schema [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --json   Output in JSON format
+      --json   JSON 형식으로 출력
 ```
 
 ## bd migrate sync
 
-Configure separate branch workflow for multi-clone setups.
+다중 클론 설정을 위한 별도 브랜치 워크플로를 구성합니다.
 
-This sets the sync.branch config value so that issue data is committed
-to a dedicated branch, keeping your main branch clean.
+이슈 데이터가 전용 브랜치에 커밋되어 main 브랜치를 깨끗하게 유지하도록
+sync.branch 구성 값을 설정합니다.
 
-Example:
+예시:
   bd migrate sync beads-sync
 
 ```
 bd migrate sync <branch> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Show what would be done without making changes
-      --json      Output in JSON format
+      --dry-run   변경하지 않고 수행될 작업 표시
+      --json      JSON 형식으로 출력
 ```

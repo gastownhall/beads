@@ -1,44 +1,44 @@
 ---
 title: "bd status"
-description: "Show a quick snapshot of the issue database state and statistics."
+description: "이슈 데이터베이스 상태와 통계의 빠른 스냅샷을 표시합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc status`.
+`bd help --doc status`에서 생성되었습니다.
 
-Show a quick snapshot of the issue database state and statistics.
+이슈 데이터베이스 상태와 통계의 빠른 스냅샷을 표시합니다.
 
-This command provides a summary of issue counts by state (open, in_progress,
-blocked, closed), ready work, extended statistics (pinned issues,
-average lead time), and recent activity over the last 24 hours from git history.
+이 명령은 상태별(open, in_progress, blocked, closed) 이슈 수, 준비된 작업,
+확장 통계(고정된 이슈, 평균 리드 타임), git 이력의 최근 24시간 활동 요약을
+제공합니다.
 
-Similar to how 'git status' shows working tree state, 'bd status' gives you
-a quick overview of your issue database without needing multiple queries.
+'git status'가 작업 트리 상태를 보여 주는 것과 유사하게 'bd status'는 여러 쿼리 없이
+이슈 데이터베이스의 빠른 개요를 제공합니다.
 
-Use cases:
-  - Quick project health check
-  - Onboarding for new contributors
-  - Integration with shell prompts or CI/CD
-  - Daily standup reference
+사용 사례:
+  - 빠른 프로젝트 상태 검사
+  - 새 기여자 온보딩
+  - 셸 프롬프트 또는 CI/CD와 통합
+  - 일일 스탠드업 참고
 
-Examples:
-  bd status                    # Show summary with activity
-  bd status --no-activity      # Skip git activity (faster)
-  bd status --json             # JSON format output
-  bd status --assigned         # Show issues assigned to current user
-  bd stats                     # Alias for bd status
+예시:
+  bd status                    # 활동이 포함된 요약 표시
+  bd status --no-activity      # git 활동 건너뛰기(더 빠름)
+  bd status --json             # JSON 형식 출력
+  bd status --assigned         # 현재 사용자에게 할당된 이슈 표시
+  bd stats                     # bd status의 별칭
 
 ```
 bd status [flags]
 ```
 
-**Aliases:** stats
+**별칭:** stats
 
-**Flags:**
+**플래그:**
 
 ```
-      --all           Show all issues (default behavior)
-      --assigned      Show issues assigned to current user
-      --no-activity   Skip git activity tracking (faster)
+      --all           모든 이슈 표시(기본 동작)
+      --assigned      현재 사용자에게 할당된 이슈 표시
+      --no-activity   git 활동 추적 건너뛰기(더 빠름)
 ```

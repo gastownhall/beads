@@ -1,20 +1,24 @@
 ---
-title: Quick Start
-description: Initialize beads, create issues with dependencies, find ready work, and sync with your team in a few minutes
+title: 빠른 시작
+description: 몇 분 안에 Beads를 초기화하고, 의존성이 있는 이슈를 만들고, 준비된 작업을 찾고, 팀과 동기화합니다.
 ---
 
-Get up and running with Beads in a few minutes.
+몇 분 안에 Beads를 시작해 보세요.
 
-## Why Beads?
+## Beads를 사용하는 이유
 
-Flat issue trackers (GitHub Issues, Jira, etc.) show you a list of open items. You pick one. But if that item depends on something else that isn't done yet, you've wasted time. Multiply this across a team of AI agents and humans, and you get thrashing.
+평면적인 이슈 추적기(GitHub Issues, Jira 등)는 열린 항목 목록을 보여 주고 사용자가
+하나를 선택하게 합니다. 그러나 그 항목이 아직 끝나지 않은 다른 작업에 의존한다면
+시간을 낭비하게 됩니다. AI 에이전트와 사람으로 구성된 팀 전체에서 이런 일이
+반복되면 작업이 계속 헛돕니다.
 
-Beads tracks **dependencies between issues** and computes a **ready queue** — only items with no active blockers appear. Here's the difference:
+Beads는 **이슈 간 의존성**을 추적하고 **준비 큐**를 계산합니다. 활성 차단 요소가
+없는 항목만 표시됩니다. 차이는 다음과 같습니다.
 
-**Flat tracker (GitHub Issues):**
+**평면 추적기(GitHub Issues):**
 ```
-Open issues: Set up database, Create API, Add authentication
-→ An agent picks "Add authentication" and gets stuck immediately
+열린 이슈: 데이터베이스 설정, API 생성, 인증 추가
+→ 에이전트가 "인증 추가"를 선택하고 즉시 막힘
 ```
 
 **Beads:**
@@ -25,119 +29,127 @@ $ bd ready
 $ bd ready --explain --json | jq '.blocked[0]'
 {
   "id": "bd-3",
-  "title": "Add authentication",
-  "blocked_by": [{"id": "bd-2", "title": "Create API", "status": "open"}]
+  "title": "인증 추가",
+  "blocked_by": [{"id": "bd-2", "title": "API 생성", "status": "open"}]
 }
 ```
 
-The agent picks the right task every time. No wasted cycles.
+에이전트는 매번 올바른 작업을 선택하므로 주기를 낭비하지 않습니다.
 
-## Installation
+## 설치
 
-Install `bd` using [the full installation guide](/getting-started/installation) (Homebrew, install script, npm, or `go install`).
+[전체 설치 가이드](/getting-started/installation)에 따라 Homebrew, 설치 script, npm
+또는 `go install`로 `bd`를 설치하세요.
 
-**Developing in a clone of this repository:** use `make install` so the binary gets correct build metadata and a consistent install path. Avoid ad-hoc `go build` / `go install` without the Makefile unless you know what you are doing — see the repository `README` and `AGENTS.md`.
+**이 저장소의 클론에서 개발하는 경우:** 바이너리에 올바른 build metadata를 넣고
+일관된 설치 경로를 사용하려면 `make install`을 실행하세요. 동작을 정확히 아는 경우가
+아니라면 Makefile 없이 임의로 `go build` 또는 `go install`을 실행하지 마세요.
+저장소의 `README`와 `AGENTS.md`를 참고하세요.
 
 ```bash
 bd --help
 ```
 
-## Initialize
+## 초기화
 
-First time in a repository:
+저장소에서 처음 실행하는 경우입니다.
 
 ```bash
-# Basic setup (prompts for contributor mode)
+# 기본 설정(contributor 모드 질문 표시)
 bd init
 
-# For AI agents (non-interactive)
+# AI 에이전트용(비대화형)
 bd init --quiet
 
-# OSS contributor (fork workflow with separate planning repo)
+# OSS contributor(별도 계획 저장소를 사용하는 fork 워크플로)
 bd init --contributor
 
-# Team member (branch workflow for collaboration)
+# 팀원(협업용 브랜치 워크플로)
 bd init --team
 
-# Protected main branch (GitHub/GitLab)
-# Note: Dolt stores data under refs/dolt/data, separate from
-# Git refs, so no --branch flag is needed.
+# 보호된 main 브랜치(GitHub/GitLab)
+# 참고: Dolt는 Git ref와 별도로 refs/dolt/data 아래에 데이터를 저장하므로
+# --branch flag가 필요하지 않음
 ```
 
-The wizard will:
-- Create `.beads/` directory and embedded Dolt database
-- **Prompt for your role** (maintainer or contributor) unless a flag is provided
-- Import existing issues from git (if any)
-- Install git hooks (skip with `--skip-hooks`)
+wizard는 다음 작업을 수행합니다.
 
-Notes:
-- Dolt is the default (and only) storage backend. Data is stored in `.beads/embeddeddolt/`.
-- By default, Dolt runs in **embedded mode** (in-process, no server needed).
-- For multi-writer setups, use `bd init --server` to connect to a `dolt sql-server` instead.
-- To import issues from an older installation, run `bd init --from-jsonl`.
+- `.beads/` 디렉터리와 embedded Dolt 데이터베이스 생성
+- flag가 제공되지 않으면 **역할**(maintainer 또는 contributor) 질문
+- 기존 Git 이슈가 있으면 import
+- Git hook 설치(`--skip-hooks`로 생략)
 
-### Role configuration
+참고:
 
-During `bd init`, you'll be asked: "Contributing to someone else's repo? [y/N]"
+- Dolt는 기본이자 유일한 저장소 backend입니다. 데이터는 `.beads/embeddeddolt/`에 저장됩니다.
+- 기본적으로 Dolt는 **embedded 모드**로 실행됩니다. 프로세스 내부에서 실행되므로 서버가 필요 없습니다.
+- 여러 writer가 있는 설정에서는 `bd init --server`로 `dolt sql-server`에 연결하세요.
+- 이전 설치의 이슈를 가져오려면 `bd init --from-jsonl`을 실행하세요.
 
-- Answer **Y** if you're contributing to a fork (runs contributor wizard)
-- Answer **N** if you're the maintainer or have push access
+### 역할 설정
 
-This sets `git config beads.role` which determines how beads routes issues:
+`bd init` 실행 중 `Contributing to someone else's repo? [y/N]`라는 질문이 표시됩니다.
 
-| Role | Use case | Issue storage |
+- fork에 기여하는 경우 **Y**로 답하세요. contributor wizard가 실행됩니다.
+- maintainer이거나 push 권한이 있으면 **N**으로 답하세요.
+
+이 답변은 Beads의 이슈 라우팅 방식을 결정하는 `git config beads.role`을 설정합니다.
+
+| 역할 | 사용 사례 | 이슈 저장 위치 |
 |------|----------|---------------|
-| `maintainer` | Repo owner, team with push access | In-repo `.beads/` |
-| `contributor` | Fork contributor, OSS contributor | Separate planning repo |
+| `maintainer` | 저장소 소유자, push 권한이 있는 팀 | 저장소 내부 `.beads/` |
+| `contributor` | fork contributor, OSS contributor | 별도 계획 저장소 |
 
-You can also configure manually:
+수동으로 설정할 수도 있습니다.
 
 ```bash
-# Set as contributor
+# contributor로 설정
 git config beads.role contributor
 
-# Set as maintainer
+# maintainer로 설정
 git config beads.role maintainer
 
-# Check current role
+# 현재 역할 확인
 git config --get beads.role
 ```
 
-**Note:** If `beads.role` is not configured, beads falls back to URL-based detection (deprecated). Run `bd doctor` to check configuration status.
+**참고:** `beads.role`을 설정하지 않으면 Beads는 더 이상 권장되지 않는 URL 기반
+감지로 대체합니다. `bd doctor`를 실행하여 설정 상태를 확인하세요.
 
-## Your first issues
+## 첫 이슈
 
 ```bash
-# Create a few issues
-bd create "Set up database" -p 1 -t task
-bd create "Create API" -p 2 -t feature
-bd create "Add authentication" -p 2 -t feature
+# 이슈 몇 개 생성
+bd create "데이터베이스 설정" -p 1 -t task
+bd create "API 생성" -p 2 -t feature
+bd create "인증 추가" -p 2 -t feature
 
-# List them
+# 목록 확인
 bd list
 ```
 
-**Note:** Issue IDs are hash-based (e.g., `bd-a1b2`, `bd-f14c`) to prevent collisions when multiple agents/branches work concurrently.
+**참고:** 여러 에이전트나 브랜치가 동시에 작업할 때 충돌하지 않도록 이슈 ID는
+해시 기반입니다(예: `bd-a1b2`, `bd-f14c`).
 
-## Hierarchical issues (epics)
+## 계층형 이슈(epic)
 
-For large features, use hierarchical IDs to organize work:
+큰 기능의 작업은 계층형 ID로 구성하세요.
 
 ```bash
-# Create epic (generates parent hash ID)
-bd create "Auth System" -t epic -p 1
-# Returns: bd-a3f8e9
+# epic 생성(상위 해시 ID 생성)
+bd create "인증 시스템" -t epic -p 1
+# 반환: bd-a3f8e9
 
-# Create child tasks (use --parent to attach to the epic)
-bd create "Design login UI" -p 1 --parent bd-a3f8e9       # bd-a3f8e9.1
-bd create "Backend validation" -p 1 --parent bd-a3f8e9    # bd-a3f8e9.2
-bd create "Integration tests" -p 1 --parent bd-a3f8e9     # bd-a3f8e9.3
+# 하위 작업 생성(--parent로 epic에 연결)
+bd create "로그인 UI 설계" -p 1 --parent bd-a3f8e9       # bd-a3f8e9.1
+bd create "Backend 검증" -p 1 --parent bd-a3f8e9         # bd-a3f8e9.2
+bd create "통합 테스트" -p 1 --parent bd-a3f8e9          # bd-a3f8e9.3
 
-# View hierarchy
+# 계층 구조 보기
 bd dep tree bd-a3f8e9
 ```
 
-Output:
+출력:
 ```
 Dependency tree for bd-a3f8e9:
 
@@ -147,20 +159,22 @@ Dependency tree for bd-a3f8e9:
   > bd-a3f8e9.3: Integration tests [P1] (open)
 ```
 
-## Add dependencies
+<a id="add-dependencies"></a>
+
+## 의존성 추가
 
 ```bash
-# API depends on database
+# API가 데이터베이스에 의존
 bd dep add bd-2 bd-1
 
-# Auth depends on API
+# 인증이 API에 의존
 bd dep add bd-3 bd-2
 
-# View the tree
+# 트리 보기
 bd dep tree bd-3
 ```
 
-Output:
+출력:
 ```
 Dependency tree for bd-3:
 
@@ -169,35 +183,35 @@ Dependency tree for bd-3:
     > bd-1: Set up database [P1] (open)
 ```
 
-**Dependency visibility:** `bd list` shows blocking dependencies inline:
+**의존성 표시:** `bd list`는 차단 의존성을 인라인으로 보여 줍니다.
 ```
 ○ bd-a1b2 [P1] [task] - Set up database
 ○ bd-f14c [P2] [feature] - Create API (blocked by: bd-a1b2)
 ○ bd-g25d [P2] [feature] - Add authentication (blocked by: bd-f14c)
 ```
 
-## Find ready work
+## 준비된 작업 찾기
 
 ```bash
 bd ready
 ```
 
-Output:
+출력:
 ```
 Ready work (1 issues with no active blockers):
 
 1. [P1] bd-1: Set up database
 ```
 
-Only bd-1 is ready because bd-2 and bd-3 are blocked.
+bd-2와 bd-3는 차단되었으므로 bd-1만 준비되어 있습니다.
 
-**Understanding why:** Use `--explain` to see the full graph reasoning:
+**이유 확인:** 전체 그래프의 판단 근거를 보려면 `--explain`을 사용하세요.
 
 ```bash
 bd ready --explain
 ```
 
-Output:
+출력:
 ```
 Ready Work Explanation
 
@@ -218,79 +232,88 @@ Ready Work Explanation
 ─ Summary: 1 ready, 2 blocked
 ```
 
-**Note:** `bd ready` is not the same as `bd list --status open`. The `list` command shows all open issues regardless of blockers. The `ready` command computes the dependency graph and only shows truly unblocked work.
+**참고:** `bd ready`와 `bd list --status open`은 다릅니다. `list` 명령은 차단 요소와
+관계없이 열린 이슈를 모두 보여 줍니다. `ready` 명령은 의존성 그래프를 계산하여
+실제로 차단되지 않은 작업만 보여 줍니다.
 
-## Work the queue
+## 큐의 작업 처리
 
 ```bash
-# Start working on bd-1
+# bd-1 작업 시작
 bd update bd-1 --claim
 
-# Complete it
-bd close bd-1 --reason "Database setup complete"
+# 완료 처리
+bd close bd-1 --reason "데이터베이스 설정 완료"
 
-# Check ready work again
+# 준비된 작업 다시 확인
 bd ready
 ```
 
-Now bd-2 is ready.
+이제 bd-2가 준비됩니다.
 
-## Track progress
+## 진행 상황 추적
 
 ```bash
-# See blocked issues
+# 차단된 이슈 확인
 bd blocked
 
-# View statistics
+# 통계 보기
 bd stats
 ```
 
-## Team sync
+## 팀 동기화
 
-Share issues with your team using Dolt remotes. Dolt stores data under `refs/dolt/data` on the same Git remote, separate from standard Git refs. In repos with `origin`, `bd init` configures that Dolt remote automatically.
+Dolt 원격을 사용하여 팀과 이슈를 공유하세요. Dolt는 표준 Git ref와 별도로 같은 Git
+원격의 `refs/dolt/data` 아래에 데이터를 저장합니다. `origin`이 있는 저장소에서는
+`bd init`이 해당 Dolt 원격을 자동으로 설정합니다.
 
 ```bash
-# Verify the remote, or add one if the repo had no origin during init
+# 원격 확인. 초기화할 때 저장소에 origin이 없었다면 추가
 bd dolt remote list
-bd dolt remote add origin git+ssh://git@github.com/org/repo.git  # if needed
+bd dolt remote add origin git+ssh://git@github.com/org/repo.git  # 필요한 경우
 
-# Push your issues
+# 이슈 push
 bd dolt push
 
-# Pull teammates' changes
+# 팀원의 변경 사항 pull
 bd dolt pull
 ```
 
-When a teammate clones the repo, `bd bootstrap` auto-detects the existing database on `refs/dolt/data`, clones it, and wires `origin` for future `bd dolt push` / `bd dolt pull`.
+팀원이 저장소를 클론하면 `bd bootstrap`이 `refs/dolt/data`의 기존 데이터베이스를
+자동 감지하고 클론한 뒤 이후 `bd dolt push` 및 `bd dolt pull`에 사용할 `origin`을
+연결합니다.
 
-See [`bd dolt`](/cli-reference/dolt) for CLI details. For remote configuration, see [Dolt architecture](/architecture/dolt); for federation, see [federation](/multi-agent/federation).
+CLI 세부 정보는 [`bd dolt`](/cli-reference/dolt), 원격 설정은
+[Dolt 아키텍처](/architecture/dolt), federation은
+[federation](/multi-agent/federation)을 참고하세요.
 
-## Optional: Notion sync
+## 선택 사항: Notion 동기화
 
-If you keep project issues in Notion, save an integration token first:
+프로젝트 이슈를 Notion에 보관한다면 먼저 통합 token을 저장하세요.
 
 ```bash
 bd config set notion.token <your-token>
 ```
 
-Then either create a new Beads database under a parent page or connect to an existing target:
+그런 다음 상위 페이지 아래에 새 Beads 데이터베이스를 만들거나 기존 대상에 연결하세요.
 
 ```bash
 bd notion init --parent <page-id>
-# or
+# 또는
 bd notion connect --url <notion-database-or-data-source-url>
 ```
 
-The same auth value can also come from `NOTION_TOKEN`. Directly setting `notion.data_source_id` remains available as an escape hatch for advanced setups.
+같은 인증 값을 `NOTION_TOKEN`으로 제공할 수도 있습니다. 고급 설정을 위한 우회
+방법으로 `notion.data_source_id`를 직접 설정하는 방식도 계속 지원됩니다.
 
-Check which auth source is active and whether the target schema is ready:
+활성 인증 소스와 대상 schema의 준비 여부를 확인하세요.
 
 ```bash
 bd notion status
 bd notion status --json
 ```
 
-Preview or run sync:
+동기화를 미리 보거나 실행하세요.
 
 ```bash
 bd notion sync --dry-run
@@ -299,69 +322,73 @@ bd notion sync --pull
 bd notion sync --push
 ```
 
-## Database location
+## 데이터베이스 위치
 
-By default (embedded mode), data is stored in `.beads/embeddeddolt/` within your repository.
-In server mode, data is managed by the external `dolt sql-server`.
+기본 embedded 모드에서는 데이터가 저장소 내부의 `.beads/embeddeddolt/`에
+저장됩니다. server 모드에서는 외부 `dolt sql-server`가 데이터를 관리합니다.
 
-## Migrating databases
+## 데이터베이스 마이그레이션
 
-After upgrading bd, use `bd migrate` to check for and migrate old database files:
+`bd`를 업그레이드한 뒤 `bd migrate`로 이전 데이터베이스 파일을 확인하고
+마이그레이션하세요.
 
 ```bash
-# Inspect migration plan (AI agents)
+# 마이그레이션 계획 검사(AI 에이전트)
 bd migrate --inspect --json
 
-# Check schema and config
+# schema 및 설정 확인
 bd info --schema --json
 
-# Preview migration changes
+# 마이그레이션 변경 사항 미리 보기
 bd migrate --dry-run
 
-# Migrate old databases to beads.db
+# 이전 데이터베이스를 beads.db로 마이그레이션
 bd migrate
 
-# Migrate and clean up old files
+# 마이그레이션 후 이전 파일 정리
 bd migrate --yes
 ```
 
-**AI agents:** Use `--inspect` to analyze migration safety before running. The system verifies required config keys and data integrity invariants.
+**AI 에이전트:** 실행 전에 `--inspect`로 마이그레이션 안전성을 분석하세요. 시스템은
+필수 설정 key와 데이터 무결성 invariant를 검증합니다.
 
-## Database maintenance
+## 데이터베이스 유지보수
 
-As your project accumulates closed issues, the database grows. Manage size with these commands:
+프로젝트에 종료된 이슈가 쌓이면 데이터베이스가 커집니다. 다음 명령으로 크기를 관리하세요.
 
 ```bash
-# View compaction statistics
+# 압축 통계 보기
 bd admin compact --stats
 
-# Preview compaction candidates (30+ days closed)
+# 압축 후보 미리 보기(종료 후 30일 이상)
 bd admin compact --analyze --json
 
-# Apply agent-generated summary
+# 에이전트가 생성한 요약 적용
 bd admin compact --apply --id bd-42 --summary summary.txt
 
-# Immediately delete closed issues (CAUTION: permanent!)
+# 종료된 이슈 즉시 삭제(주의: 영구 삭제)
 bd admin cleanup --force
 ```
 
-**When to compact:**
-- Database file > 10MB with many old closed issues
-- After major project milestones when old issues are no longer relevant
-- Before archiving a project phase
+**압축 시점:**
 
-**Note:** Compaction is permanent graceful decay. Original content is discarded but recoverable via `bd restore <id>` (from the pre-compaction snapshot, with Dolt history as fallback).
+- 오래전에 종료된 이슈가 많고 데이터베이스 파일이 10MB를 초과할 때
+- 주요 프로젝트 milestone이 끝나 이전 이슈가 더 이상 관련 없을 때
+- 프로젝트 단계를 보관하기 전
 
-## Next steps
+**참고:** 압축은 영구적인 점진적 축약입니다. 원본 내용은 버려지지만 `bd restore <id>`로
+압축 전 snapshot에서 복구할 수 있으며, Dolt 기록을 대체 수단으로 사용합니다.
 
-- Add labels: `bd create "Task" -l "backend,urgent"`
-- Filter ready work: `bd ready --priority 1`
-- Explain the graph: `bd ready --explain`
-- Check graph integrity: `bd graph check`
-- Search issues: `bd list --status open`
-- Detect cycles: `bd dep cycles`
-- Gates for PR/CI sync: [`bd gate`](/cli-reference/gate)
-- More sync scenarios: [`bd dolt`](/cli-reference/dolt)
-- Full command list: [CLI Reference](/cli-reference/index)
+## 다음 단계
 
-See the [repository README](https://github.com/gastownhall/beads/blob/main/README.md) for an overview and links to deeper docs.
+- 레이블 추가: `bd create "작업" -l "backend,urgent"`
+- 준비된 작업 필터링: `bd ready --priority 1`
+- 그래프 설명 보기: `bd ready --explain`
+- 그래프 무결성 확인: `bd graph check`
+- 이슈 검색: `bd list --status open`
+- cycle 감지: `bd dep cycles`
+- PR/CI 동기화용 Gate: [`bd gate`](/cli-reference/gate)
+- 더 많은 동기화 사례: [`bd dolt`](/cli-reference/dolt)
+- 전체 명령 목록: [CLI 참조](/cli-reference/index)
+
+개요와 상세 문서 링크는 [저장소 README](https://github.com/gastownhall/beads/blob/main/README.md)를 참고하세요.

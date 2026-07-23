@@ -1,62 +1,62 @@
 ---
-title: Database Corruption
-description: Recover from Dolt database corruption
+title: 데이터베이스 손상
+description: Dolt 데이터베이스 손상에서 복구하기
 ---
 
-This runbook helps you recover from database corruption in Beads.
+이 런북은 Beads의 데이터베이스 손상에서 복구하는 방법을 안내합니다.
 
-## Symptoms
+## 증상
 
-- Error messages during `bd` commands
-- "database is locked" errors that persist
-- Missing issues that should exist
-- Inconsistent database state
+- `bd` 명령 실행 중 오류 메시지가 나타납니다.
+- "database is locked" 오류가 계속 발생합니다.
+- 존재해야 할 이슈가 누락됩니다.
+- 데이터베이스 상태가 일관되지 않습니다.
 
-## Diagnosis
+## 진단
 
 ```bash
-# Check database integrity
+# 데이터베이스 무결성 확인
 bd doctor
 
-# Check Dolt server health
+# Dolt 서버 상태 확인
 bd dolt show
 ```
 
-## Solution
+## 해결 방법
 
-**Step 1:** Stop the Dolt server
+**1단계:** Dolt 서버를 중지합니다.
 ```bash
 bd dolt stop
 ```
 
-**Step 2:** Back up current state
+**2단계:** 현재 상태를 백업합니다.
 ```bash
 cp -r .beads .beads.backup
 ```
 
-**Step 3:** Preview what doctor would fix
+**3단계:** doctor가 수정할 내용을 미리 봅니다.
 ```bash
 bd doctor --dry-run
 ```
 
-**Step 4:** Rebuild database
+**4단계:** 데이터베이스를 다시 빌드합니다.
 ```bash
 bd doctor --fix
 ```
 
-**Step 5:** Verify recovery
+**5단계:** 복구를 확인합니다.
 ```bash
 bd doctor
 bd list
 ```
 
-**Step 6:** Restart the Dolt server
+**6단계:** Dolt 서버를 다시 시작합니다.
 ```bash
 dolt sql-server
 ```
 
-## Prevention
+## 예방
 
-- Let the Dolt server handle synchronization
-- Use `bd dolt stop` before system shutdown
-- Run `bd doctor` periodically to catch issues early
+- 동기화는 Dolt 서버가 처리하도록 합니다.
+- 시스템을 종료하기 전에 `bd dolt stop`을 사용합니다.
+- 문제를 조기에 발견하도록 `bd doctor`를 주기적으로 실행합니다.

@@ -1,72 +1,71 @@
 ---
 title: "bd cook"
-description: "Cook transforms a .formula.json file into a proto."
+description: "Cook은 .formula.json 파일을 proto로 변환합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc cook`.
+`bd help --doc cook`에서 생성되었습니다.
 
-Cook transforms a .formula.json file into a proto.
+Cook은 .formula.json 파일을 proto로 변환합니다.
 
-By default, cook outputs the resolved formula as JSON to stdout for
-ephemeral use. The output can be inspected, piped, or saved to a file.
+기본적으로 cook은 임시 사용을 위해 해석된 formula를 JSON으로 stdout에 출력합니다.
+출력을 검사하거나 파이프로 전달하거나 파일에 저장할 수 있습니다.
 
-Two cooking modes are available:
+두 가지 cook 모드를 사용할 수 있습니다:
 
-  COMPILE-TIME (default, --mode=compile):
-    Produces a proto with &#123;&#123;variable&#125;&#125; placeholders intact.
-    Use for: modeling, estimation, contractor handoff, planning.
-    Variables are NOT substituted - the output shows the template structure.
+  컴파일 시간(기본값, --mode=compile):
+    &#123;&#123;variable&#125;&#125; 자리표시자를 그대로 유지한 proto를 생성합니다.
+    용도: 모델링, 추정, 외주 인계, 계획.
+    변수를 치환하지 않으며 출력에 템플릿 구조가 표시됩니다.
 
-  RUNTIME (--mode=runtime or when --var flags provided):
-    Produces a fully-resolved proto with variables substituted.
-    Use for: final validation before pour, seeing exact output.
-    Requires all variables to have values (via --var or defaults).
+  런타임(--mode=runtime 또는 --var 플래그 제공 시):
+    변수가 치환된 완전히 해석된 proto를 생성합니다.
+    용도: pour 전 최종 검증, 정확한 출력 확인.
+    모든 변수에 값이 필요합니다(--var 또는 기본값 사용).
 
-Formulas are high-level workflow templates that support:
-  - Variable definitions with defaults and validation
-  - Step definitions that become issue hierarchies
-  - Composition rules for bonding formulas together
-  - Inheritance via extends
+formula는 다음을 지원하는 상위 수준 워크플로 템플릿입니다:
+  - 기본값과 검증이 있는 변수 정의
+  - 이슈 계층이 되는 단계 정의
+  - formula를 결합하기 위한 구성 규칙
+  - extends를 통한 상속
 
-The --persist flag enables the legacy behavior of writing the proto
-to the database. This is useful when you want to reuse the same
-proto multiple times without re-cooking.
+--persist 플래그는 proto를 데이터베이스에 쓰는 레거시 동작을 활성화합니다.
+다시 cook하지 않고 같은 proto를 여러 번 재사용하려는 경우 유용합니다.
 
-For most workflows, prefer ephemeral protos: pour and wisp commands
-accept formula names directly and cook inline.
+대부분의 워크플로에서는 임시 proto를 선호합니다. pour와 wisp 명령은 formula 이름을
+직접 받고 인라인으로 cook합니다.
 
-Examples:
-  bd cook mol-feature.formula.json                    # Compile-time: keep &#123;&#123;vars&#125;&#125;
-  bd cook mol-feature --var name=auth                 # Runtime: substitute vars
-  bd cook mol-feature --mode=runtime --var name=auth  # Explicit runtime mode
-  bd cook mol-feature --dry-run                       # Preview steps
-  bd cook mol-release.formula.json --persist          # Write to database
-  bd cook mol-release.formula.json --persist --force  # Replace existing
+예시:
+  bd cook mol-feature.formula.json                    # 컴파일 시간: &#123;&#123;vars&#125;&#125; 유지
+  bd cook mol-feature --var name=auth                 # 런타임: 변수 치환
+  bd cook mol-feature --mode=runtime --var name=auth  # 명시적 런타임 모드
+  bd cook mol-feature --dry-run                       # 단계 미리 보기
+  bd cook mol-release.formula.json --persist          # 데이터베이스에 쓰기
+  bd cook mol-release.formula.json --persist --force  # 기존 항목 교체
 
-Output (default):
-  JSON representation of the resolved formula with all steps.
+출력(기본값):
+  모든 단계를 포함한 해석된 formula의 JSON 표현.
 
-Output (--persist):
-  Creates a proto bead in the database with:
-  - ID matching the formula name (e.g., mol-feature)
-  - The "template" label for proto identification
-  - Child issues for each step
-  - Dependencies matching depends_on relationships
+출력(--persist):
+  데이터베이스에 다음을 갖는 proto bead를 생성합니다:
+  - formula 이름과 일치하는 ID(예: mol-feature)
+  - proto 식별용 "template" 레이블
+  - 각 단계의 하위 이슈
+  - depends_on 관계와 일치하는 의존성
 
 ```
 bd cook <formula-file> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run               Preview what would be created
-      --force                 Replace existing proto if it exists (requires --persist)
-      --mode string           Cooking mode: compile (keep placeholders) or runtime (substitute vars)
-      --persist               Persist proto to database (legacy behavior)
-      --prefix string         Prefix to prepend to proto ID (e.g., 'gt-' creates 'gt-mol-feature')
-      --search-path strings   Additional paths to search for formula inheritance
-      --var stringArray       Variable substitution (key=value), enables runtime mode
+      --dry-run               생성될 항목 미리 보기
+      --force                 기존 proto가 있으면 교체(--persist 필요)
+      --mode string           cook 모드: compile(자리표시자 유지) 또는 runtime(변수 치환)
+      --persist               proto를 데이터베이스에 영구 저장(레거시 동작)
+      --prefix string         proto ID 앞에 붙일 접두사(예: 'gt-'는 'gt-mol-feature' 생성)
+      --search-path strings   formula 상속을 검색할 추가 경로
+      --var stringArray       변수 치환(key=value), 런타임 모드 활성화
 ```

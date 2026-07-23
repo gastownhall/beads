@@ -1,29 +1,29 @@
 ---
 title: "bd comment"
-description: "Add a comment to an issue."
+description: "이슈에 댓글을 추가합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc comment`.
+`bd help --doc comment`에서 생성되었습니다.
 
-Add a comment to an issue.
+이슈에 댓글을 추가합니다.
 
-Shorthand for 'bd comments add &lt;id&gt; "text"'.
+'bd comments add &lt;id&gt; "text"'의 단축 명령입니다.
 
-Examples:
-  bd comment bd-123 "Working on this now"
-  bd comment bd-123 Working on this now
-  echo "comment from pipe" | bd comment bd-123 --stdin
+예시:
+  bd comment bd-123 "지금 작업 중"
+  bd comment bd-123 지금 작업 중
+  echo "파이프에서 온 댓글" | bd comment bd-123 --stdin
   bd comment bd-123 --file notes.txt
 
 ```
 bd comment <id> [text...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --file string   Read comment text from file
-      --stdin         Read comment text from stdin
+      --file string   파일에서 댓글 텍스트 읽기
+      --stdin         stdin에서 댓글 텍스트 읽기
 ```

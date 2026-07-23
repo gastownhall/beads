@@ -1,164 +1,166 @@
 ---
-title: Beads Claude Code Plugin
-description: Install the beads Claude Code plugin for /beads slash commands, a bundled skill, and session lifecycle hooks
+title: Beads Claude Code 플러그인
+description: /beads slash 명령, 내장 skill, 세션 수명 주기 hook을 제공하는 Beads Claude Code 플러그인 설치
 ---
 
-AI-supervised issue tracker for coding workflows. Manage tasks, discover work, and maintain context with slash commands, a bundled skill, and lifecycle hooks.
+코딩 워크플로를 위한 AI 감독형 이슈 추적기입니다. slash 명령, 내장 skill, 수명 주기
+hook으로 작업을 관리하고 새 작업을 발견하며 컨텍스트를 유지합니다.
 
-## What is Beads?
+## Beads란?
 
-Beads (`bd`) is an issue tracker designed specifically for AI-supervised coding workflows. It helps AI agents and developers:
-- Track work with a simple CLI
-- Discover and link related tasks during development
-- Maintain context across coding sessions
-- Sync issues via Dolt remotes for distributed workflows
+Beads(`bd`)는 AI 감독형 코딩 워크플로를 위해 특별히 설계된 이슈 추적기입니다. AI
+에이전트와 개발자에게 다음 기능을 제공합니다.
 
-## Installation
+- 간단한 CLI로 작업 추적
+- 개발 중 관련 작업 발견 및 연결
+- 코딩 세션 간 컨텍스트 유지
+- 분산 워크플로를 위해 Dolt 원격을 통한 이슈 동기화
 
-### Prerequisites
+## 설치
 
-1. Install beads CLI:
+### 사전 요구 사항
+
+1. Beads CLI를 설치합니다.
 ```bash
 curl -sSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 ```
 
 
-### Install Plugin
+### 플러그인 설치
 
-There are two ways to install the beads plugin:
+Beads 플러그인을 설치하는 방법은 두 가지입니다.
 
-#### Option 1: From GitHub (Recommended)
+#### 옵션 1: GitHub에서 설치(권장)
 
 ```bash
-# In Claude Code
+# Claude Code에서 실행
 /plugin marketplace add gastownhall/beads
 /plugin install beads
 ```
 
-#### Option 2: Local Development
+#### 옵션 2: 로컬 개발
 
 ```bash
-# Clone the repository (shell command)
+# 저장소 클론(shell 명령)
 git clone https://github.com/gastownhall/beads
 cd beads
 ```
 
-Then in Claude Code:
+그런 다음 Claude Code에서 다음을 실행하세요.
 
 ```
-# Add local marketplace (Claude Code command)
+# 로컬 marketplace 추가(Claude Code 명령)
 /plugin marketplace add ./beads
 
-# Install plugin
+# 플러그인 설치
 /plugin install beads
 ```
 
-**Note:** If you want to install the plugin from a different repo, first `cd` to that repo's directory in your terminal, then use `./beads` (or the relative path to the beads directory) in Claude Code.
+**참고:** 다른 저장소에서 플러그인을 설치하려면 먼저 터미널에서 해당 저장소
+디렉터리로 `cd`한 뒤 Claude Code에서 `./beads` 또는 Beads 디렉터리의 상대 경로를
+사용하세요.
 
-### Restart Claude Code
+### Claude Code 다시 시작
 
-After installation, restart Claude Code to load the plugin's commands and hooks.
+설치 후 Claude Code를 다시 시작하여 플러그인의 명령과 hook을 로드하세요.
 
-## Quick Start
+## 빠른 시작
 
 ```bash
-# Initialize beads in your project
+# 프로젝트에서 Beads 초기화
 /beads:init
 
-# Create your first issue
-/beads:create "Set up project structure" feature 1
+# 첫 이슈 생성
+/beads:create "프로젝트 구조 설정" feature 1
 
-# See what's ready to work on
+# 작업할 준비가 된 항목 확인
 /beads:ready
 
-# Show full workflow guide
+# 전체 워크플로 가이드 표시
 /beads:workflow
 ```
 
-## Available Commands
+## 사용 가능한 명령
 
-### Version Management
+### 버전 관리
 
-- **`/beads:version`** - Check bd CLI and plugin versions
+- **`/beads:version`** - bd CLI와 플러그인 버전 확인
 
-### Core Workflow Commands
+### 핵심 워크플로 명령
 
-- **`/beads:ready`** - Find tasks with no blockers, ready to work on
-- **`/beads:create [title] [type] [priority]`** - Create a new issue interactively
-- **`/beads:show [issue-id]`** - Show detailed information about an issue
-- **`/beads:update [issue-id] [status]`** - Update issue status or other fields
-- **`/beads:close [issue-id] [reason]`** - Close a completed issue
+- **`/beads:ready`** - 차단 요소가 없어 작업할 준비가 된 작업 찾기
+- **`/beads:create [title] [type] [priority]`** - 대화형으로 새 이슈 생성
+- **`/beads:show [issue-id]`** - 이슈 상세 정보 표시
+- **`/beads:update [issue-id] [status]`** - 이슈 상태 또는 기타 필드 업데이트
+- **`/beads:close [issue-id] [reason]`** - 완료된 이슈 종료
 
-### Project Management
+### 프로젝트 관리
 
-- **`/beads:init`** - Initialize beads in the current project
-- **`/beads:workflow`** - Show the AI-supervised issue workflow guide
-- **`/beads:stats`** - Show project statistics and progress
+- **`/beads:init`** - 현재 프로젝트에서 Beads 초기화
+- **`/beads:workflow`** - AI 감독형 이슈 워크플로 가이드 표시
+- **`/beads:stats`** - 프로젝트 통계와 진행 상황 표시
 
-### Agents
+### 에이전트
 
-- **`@task-agent`** - Autonomous agent that finds and completes ready tasks
+- **`@task-agent`** - 준비된 작업을 찾아 완료하는 자율 에이전트
 
-## MCP Tools
+## MCP 도구
 
-The plugin does not bundle an MCP server — it works through the bd CLI,
-which Claude Code drives directly (lower token overhead than MCP tool
-schemas). If you want MCP tools as well — for example in MCP-only
-surfaces — configure the standalone `beads-mcp` server alongside the
-plugin; see [MCP Server](/integrations/mcp-server) for its install
-options and full tool catalog.
+플러그인에는 MCP 서버가 포함되지 않습니다. Claude Code가 직접 구동하는 `bd` CLI를
+통해 작동하며 MCP 도구 schema보다 token overhead가 적습니다. MCP 전용 화면 등에서
+MCP 도구도 사용하려면 플러그인과 함께 독립 실행형 `beads-mcp` 서버를 설정하세요.
+설치 옵션과 전체 도구 catalog는 [MCP 서버](/integrations/mcp-server)를 참고하세요.
 
-## Workflow
+## 워크플로
 
-The beads workflow is designed for AI agents but works great for humans too:
+Beads 워크플로는 AI 에이전트를 위해 설계되었지만 사람에게도 잘 맞습니다.
 
-1. **Find ready work**: `/beads:ready`
-2. **Claim your task**: `/beads:update <id> in_progress`
-3. **Work on it**: Implement, test, document
-4. **Discover new work**: Create issues for bugs/TODOs found during work
-5. **Complete**: `/beads:close <id> "Done: <summary>"`
-6. **Repeat**: Check for newly unblocked tasks
+1. **준비된 작업 찾기**: `/beads:ready`
+2. **작업 claim**: `/beads:update <id> in_progress`
+3. **작업 수행**: 구현, 테스트, 문서화
+4. **새 작업 발견**: 작업 중 발견한 bug/TODO의 이슈 생성
+5. **완료**: `/beads:close <id> "완료: <summary>"`
+6. **반복**: 새로 차단이 해제된 작업 확인
 
-## Issue Types
+## 이슈 유형
 
-- **`bug`** - Something broken that needs fixing
-- **`feature`** - New functionality
-- **`task`** - Work item (tests, docs, refactoring)
-- **`epic`** - Large feature composed of multiple issues
-- **`chore`** - Maintenance work (dependencies, tooling)
+- **`bug`** - 수정해야 하는 문제
+- **`feature`** - 새 기능
+- **`task`** - 작업 항목(테스트, 문서, refactoring)
+- **`epic`** - 여러 이슈로 구성된 큰 기능
+- **`chore`** - 유지보수 작업(의존성, tooling)
 
-## Priority Levels
+## 우선순위 수준
 
-- **`0`** - Critical (security, data loss, broken builds)
-- **`1`** - High (major features, important bugs)
-- **`2`** - Medium (nice-to-have features, minor bugs)
-- **`3`** - Low (polish, optimization)
-- **`4`** - Backlog (future ideas)
+- **`0`** - 긴급(보안, 데이터 손실, build 실패)
+- **`1`** - 높음(주요 기능, 중요한 버그)
+- **`2`** - 중간(있으면 좋은 기능, 사소한 버그)
+- **`3`** - 낮음(마무리, 최적화)
+- **`4`** - backlog(향후 아이디어)
 
-## Dependency Types
+## 의존성 유형
 
-- **`blocks`** - Hard dependency (issue X blocks issue Y from starting)
-- **`related`** - Soft relationship (issues are connected)
-- **`parent-child`** - Epic/subtask relationship
-- **`discovered-from`** - Track issues discovered during work
+- **`blocks`** - 강한 의존성(이슈 X가 이슈 Y의 시작을 차단)
+- **`related`** - 약한 관계(이슈가 서로 연결됨)
+- **`parent-child`** - epic/subtask 관계
+- **`discovered-from`** - 작업 중 발견한 이슈 추적
 
-Only `blocks` dependencies affect the ready work queue.
+`blocks` 의존성만 준비된 작업 큐에 영향을 줍니다.
 
-## Configuration
+## 설정
 
-### Auto-Approval Configuration
+### 자동 승인 설정
 
-These settings apply if you configure the standalone [beads-mcp
-server](/integrations/mcp-server) alongside the plugin. By default, Claude
-Code asks for confirmation every time an MCP server wants to run a command.
-This is a security feature, but it can disrupt workflow during active
-development.
+이 설정은 플러그인과 함께 독립 실행형 [beads-mcp
+서버](/integrations/mcp-server)를 설정한 경우에 적용됩니다. 기본적으로 Claude Code는
+MCP 서버가 명령을 실행하려 할 때마다 확인을 요청합니다. 보안 기능이지만 활발한 개발
+중에는 워크플로를 방해할 수 있습니다.
 
-**Available Options:**
+**사용 가능한 옵션:**
 
-#### 1. Auto-Approve All Beads Tools (Recommended for Trusted Projects)
+#### 1. 모든 Beads 도구 자동 승인(신뢰할 수 있는 프로젝트에 권장)
 
-Add to your Claude Code `settings.json`:
+Claude Code `settings.json`에 추가하세요.
 
 ```json
 {
@@ -166,11 +168,11 @@ Add to your Claude Code `settings.json`:
 }
 ```
 
-This auto-approves all beads commands without prompting.
+모든 Beads 명령을 prompt 없이 자동 승인합니다.
 
-#### 2. Auto-Approve Project MCP Servers
+#### 2. 프로젝트 MCP 서버 자동 승인
 
-Add to your Claude Code `settings.json`:
+Claude Code `settings.json`에 추가하세요.
 
 ```json
 {
@@ -178,23 +180,26 @@ Add to your Claude Code `settings.json`:
 }
 ```
 
-This auto-approves all MCP servers defined in your project's `.mcp.json` file. Useful when working across multiple projects with different MCP requirements.
+프로젝트의 `.mcp.json` 파일에 정의된 모든 MCP 서버를 자동 승인합니다. MCP 요구 사항이
+서로 다른 여러 프로젝트에서 작업할 때 유용합니다.
 
-#### 3. Manual Approval (Default)
+#### 3. 수동 승인(기본값)
 
-No configuration needed. Claude Code will prompt for approval on each MCP tool invocation.
+설정할 필요가 없습니다. Claude Code가 MCP 도구를 호출할 때마다 승인을 요청합니다.
 
-**Security Trade-offs:**
+**보안 절충점:**
 
-- **Manual approval (default)**: Maximum safety, but interrupts workflow frequently
-- **Server-level auto-approval**: Convenient for trusted projects, but allows any beads operation without confirmation
-- **Project-level auto-approval**: Good balance for multi-project workflows with project-specific trust levels
+- **수동 승인(기본값)**: 가장 안전하지만 워크플로를 자주 중단합니다.
+- **서버 수준 자동 승인**: 신뢰할 수 있는 프로젝트에는 편리하지만 확인 없이 모든 Beads 작업을 허용합니다.
+- **프로젝트 수준 자동 승인**: 프로젝트별 신뢰 수준이 다른 다중 프로젝트 워크플로에 균형 잡힌 선택입니다.
 
-**Limitation:** Claude Code doesn't currently support per-tool approval granularity. You cannot auto-approve only read operations (like `bd ready`, `bd show`) while requiring confirmation for mutations (like `bd create`, `bd update`). It's all-or-nothing at the server level.
+**제한:** Claude Code는 현재 도구별 승인 세분화를 지원하지 않습니다. `bd ready`, `bd
+show` 같은 읽기 작업만 자동 승인하면서 `bd create`, `bd update` 같은 변경 작업에
+확인을 요구할 수 없습니다. 서버 수준에서 전부 허용하거나 전부 확인해야 합니다.
 
-**Recommended Configuration:**
+**권장 설정:**
 
-For active development on trusted projects where you're frequently using beads:
+Beads를 자주 사용하는 신뢰할 수 있는 프로젝트에서 활발히 개발하는 경우:
 
 ```json
 {
@@ -202,169 +207,174 @@ For active development on trusted projects where you're frequently using beads:
 }
 ```
 
-For more information, see the [Claude Code settings documentation](https://docs.claude.com/en/docs/claude-code/settings).
+자세한 내용은 [Claude Code 설정 문서](https://docs.claude.com/en/docs/claude-code/settings)를 참고하세요.
 
 
-## Examples
+## 예제
 
-### Basic Task Management
+### 기본 작업 관리
 
 ```bash
-# Create a high-priority bug
-/beads:create "Fix authentication" bug 1
+# 높은 우선순위의 bug 생성
+/beads:create "인증 수정" bug 1
 
-# See ready work
+# 준비된 작업 확인
 /beads:ready
 
-# Start working on bd-10
+# bd-10 작업 시작
 /beads:update bd-10 in_progress
 
-# Complete the task
-/beads:close bd-10 "Fixed auth token validation"
+# 작업 완료
+/beads:close bd-10 "인증 token 검증 수정"
 ```
 
-### Discovering Work During Development
+### 개발 중 작업 발견
 
 ```bash
-# Working on bd-10, found a related bug
-/beads:create "Add rate limiting to API" feature 2
+# bd-10 작업 중 관련 버그 발견
+/beads:create "API에 rate limiting 추가" feature 2
 
-# Link it to current work
+# 현재 작업에 연결
 bd dep add bd-11 bd-10 --type discovered-from
 
-# Close original task
-/beads:close bd-10 "Done, discovered bd-11 for rate limiting"
+# 원래 작업 종료
+/beads:close bd-10 "완료, rate limiting용 bd-11 발견"
 ```
 
-### Using the Task Agent
+### 작업 에이전트 사용
 
 ```bash
-# Let the agent find and complete ready work
+# 에이전트가 준비된 작업을 찾아 완료하게 함
 @task-agent
 
-# The agent will:
-# 1. Find ready work with `ready` tool
-# 2. Claim a task by updating status
-# 3. Execute the work
-# 4. Create issues for discoveries
-# 5. Close when complete
-# 6. Repeat
+# 에이전트의 작업:
+# 1. `ready` 도구로 준비된 작업 찾기
+# 2. 상태를 업데이트하여 작업 claim
+# 3. 작업 실행
+# 4. 발견한 내용의 이슈 생성
+# 5. 완료 시 종료
+# 6. 반복
 ```
 
-## Auto-Sync with Dolt
+## Dolt를 사용한 자동 동기화
 
-Beads automatically commits changes to Dolt history after every write operation. This enables seamless collaboration:
+Beads는 모든 쓰기 작업 후 변경 사항을 Dolt 기록에 자동 commit합니다. 이를 통해
+원활하게 협업할 수 있습니다.
 
 ```bash
-# Make changes
-bd create "Add feature" -p 1
+# 변경
+bd create "기능 추가" -p 1
 
-# Changes are automatically committed to Dolt history
-# Sync with remotes when ready:
+# 변경 사항은 Dolt 기록에 자동 commit됨
+# 준비되면 원격과 동기화
 bd dolt push
 
-# Pull changes from collaborators:
+# 협업자의 변경 사항 pull
 bd dolt pull
-bd ready  # Shows issues ready to work on (with fresh data)
+bd ready  # 최신 데이터로 작업할 준비가 된 이슈 표시
 ```
 
-## Updating
+## 업데이트
 
-The beads plugin has three components that may need updating:
+Beads 플러그인에는 업데이트가 필요할 수 있는 구성 요소가 세 개 있습니다.
 
-### 1. Plugin Updates
+### 1. 플러그인 업데이트
 
-Check for plugin updates:
+플러그인 업데이트를 확인하세요.
 ```bash
 /plugin update beads
 ```
 
-Claude Code will pull the latest version from GitHub. After updating, **restart Claude Code** to apply plugin changes.
+Claude Code가 GitHub에서 최신 버전을 pull합니다. 업데이트 후 **Claude Code를 다시
+시작**하여 플러그인 변경 사항을 적용하세요.
 
-### 2. bd CLI Updates
+### 2. bd CLI 업데이트
 
-The plugin requires the `bd` CLI to be installed. Update it separately:
+플러그인을 사용하려면 `bd` CLI가 설치되어 있어야 합니다. 별도로 업데이트하세요.
 
 ```bash
-# Quick update
+# 빠른 업데이트
 curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
-# Or with Go (server-mode only)
+# 또는 Go 사용(server 모드 전용)
 CGO_ENABLED=0 go install github.com/steveyegge/beads/cmd/bd@latest
 
-# Or with Go (embedded-capable)
+# 또는 Go 사용(embedded 지원)
 CGO_ENABLED=1 GOFLAGS=-tags=gms_pure_go go install github.com/steveyegge/beads/cmd/bd@latest
 ```
 
-### 3. Version Compatibility
+### 3. 버전 호환성
 
-The MCP server **automatically checks** bd CLI version on startup and will fail with a clear error if your version is too old.
+MCP 서버는 시작 시 bd CLI 버전을 **자동으로 확인**하며 버전이 너무 오래되면 명확한
+오류와 함께 실패합니다.
 
-Check version compatibility manually:
+버전 호환성을 수동으로 확인하세요.
 ```bash
 /beads:version
 ```
 
-This will show:
-- bd CLI version
-- Plugin version
-- MCP server status
-- Compatibility warnings if versions mismatch
+다음 항목을 표시합니다.
 
-**Recommended update workflow:**
-1. Check versions: `/beads:version`
-2. Update bd CLI if needed (see above)
-3. Update plugin: `/plugin update beads`
-4. Restart Claude Code
-5. Verify: `/beads:version`
+- bd CLI 버전
+- 플러그인 버전
+- MCP 서버 상태
+- 버전이 일치하지 않을 때 호환성 경고
 
-### Version Numbering
+**권장 업데이트 워크플로:**
 
-Beads follows semantic versioning. The plugin version tracks the bd CLI
-version; major version bumps may introduce breaking changes — check
-CHANGELOG.md for release notes.
+1. 버전 확인: `/beads:version`
+2. 필요한 경우 bd CLI 업데이트(위 내용 참고)
+3. 플러그인 업데이트: `/plugin update beads`
+4. Claude Code 다시 시작
+5. 확인: `/beads:version`
 
-## Troubleshooting
+### 버전 번호
 
-### Plugin not appearing
+Beads는 semantic versioning을 따릅니다. 플러그인 버전은 bd CLI 버전을 추적합니다.
+major 버전 상승에는 breaking change가 포함될 수 있으므로 release note는
+CHANGELOG.md를 확인하세요.
 
-1. Check installation: `/plugin list`
-2. Restart Claude Code
-3. Verify `bd` is in PATH: `which bd`
-4. Check uv is installed: `which uv`
+## 문제 해결
 
-### MCP server not connecting
+### 플러그인이 표시되지 않음
 
-1. Check MCP server list: `/mcp`
-2. Look for "beads" server with plugin indicator
-3. Restart Claude Code to reload MCP servers
-4. Check logs for errors
+1. 설치 확인: `/plugin list`
+2. Claude Code 다시 시작
+3. `bd`가 PATH에 있는지 확인: `which bd`
+4. uv 설치 확인: `which uv`
 
-### Commands not working
+### MCP 서버가 연결되지 않음
 
-1. Make sure you're in a project with beads initialized: `/beads:init`
-2. Check if database exists: `ls -la .beads/`
-3. Try direct MCP tool access instead of slash commands
-4. Check the beads CLI works: `bd --help`
+1. MCP 서버 목록 확인: `/mcp`
+2. 플러그인 표시가 있는 `beads` 서버 찾기
+3. MCP 서버를 다시 로드하도록 Claude Code 다시 시작
+4. log에서 오류 확인
 
-### MCP tool errors
+### 명령이 작동하지 않음
 
-1. Verify `bd` executable location: `BEADS_PATH` env var
-2. Check `bd` works in terminal: `bd stats`
-3. Review MCP server logs in Claude Code
-4. Try reinitializing: `/beads:init`
+1. Beads를 초기화한 프로젝트인지 확인: `/beads:init`
+2. 데이터베이스 존재 여부 확인: `ls -la .beads/`
+3. slash 명령 대신 MCP 도구에 직접 접근
+4. Beads CLI 작동 확인: `bd --help`
 
-## Learn More
+### MCP 도구 오류
+
+1. `bd` 실행 파일 위치 확인: `BEADS_PATH` 환경 변수
+2. 터미널에서 `bd` 작동 확인: `bd stats`
+3. Claude Code의 MCP 서버 log 검토
+4. 다시 초기화: `/beads:init`
+
+## 더 알아보기
 
 - **GitHub**: https://github.com/gastownhall/beads
-- **Documentation**: See README.md in the repository
-- **Examples**: Check `examples/` directory for integration patterns
-- **MCP Server**: See `integrations/beads-mcp/` for server details
+- **문서**: 저장소의 README.md 참고
+- **예제**: 통합 패턴은 `examples/` 디렉터리 확인
+- **MCP 서버**: 서버 상세 정보는 `integrations/beads-mcp/` 참고
 
-## Contributing
+## 기여
 
-Found a bug or have a feature idea? Create an issue in the beads repository!
+버그를 발견했거나 기능 아이디어가 있나요? Beads 저장소에 이슈를 생성하세요.
 
-## License
+## 라이선스
 
-MIT License - see LICENSE file in the repository.
+MIT License입니다. 저장소의 LICENSE 파일을 참고하세요.

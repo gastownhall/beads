@@ -1,37 +1,37 @@
 ---
 title: "bd ship"
-description: "Ship a capability to satisfy cross-project dependencies."
+description: "프로젝트 간 의존성을 충족하도록 기능을 배포합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc ship`.
+`bd help --doc ship`에서 생성되었습니다.
 
-Ship a capability to satisfy cross-project dependencies.
+프로젝트 간 의존성을 충족하도록 기능을 배포합니다.
 
-This command:
-  1. Finds issue with export:&lt;capability&gt; label
-  2. Validates issue is closed (or --force to override)
-  3. Adds provides:&lt;capability&gt; label
+이 명령은 다음을 수행합니다:
+  1. export:&lt;capability&gt; 레이블이 있는 이슈 찾기
+  2. 이슈가 닫혔는지 검증(또는 --force로 재정의)
+  3. provides:&lt;capability&gt; 레이블 추가
 
-External projects can depend on this capability using:
+외부 프로젝트는 다음을 사용해 이 기능에 의존할 수 있습니다:
   bd dep add &lt;issue&gt; external:&lt;project&gt;:&lt;capability&gt;
 
-The capability is resolved when the external project has a closed issue
-with the provides:&lt;capability&gt; label.
+외부 프로젝트에 provides:&lt;capability&gt; 레이블이 있는 닫힌 이슈가 있으면
+기능이 해결됩니다.
 
-Examples:
-  bd ship mol-run-assignee              # Ship the mol-run-assignee capability
-  bd ship mol-run-assignee --force      # Ship even if issue is not closed
-  bd ship mol-run-assignee --dry-run    # Preview without making changes
+예시:
+  bd ship mol-run-assignee              # mol-run-assignee 기능 배포
+  bd ship mol-run-assignee --force      # 이슈가 닫히지 않아도 배포
+  bd ship mol-run-assignee --dry-run    # 변경 없이 미리 보기
 
 ```
 bd ship <capability> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview without making changes
-      --force     Ship even if issue is not closed
+      --dry-run   변경 없이 미리 보기
+      --force     이슈가 닫히지 않아도 배포
 ```

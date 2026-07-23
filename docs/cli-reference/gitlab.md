@@ -1,20 +1,20 @@
 ---
 title: "bd gitlab"
-description: "Commands for syncing issues between beads and GitLab."
+description: "beads와 GitLab 간 이슈 동기화 명령입니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc gitlab`.
+`bd help --doc gitlab`에서 생성되었습니다.
 
-Commands for syncing issues between beads and GitLab.
+beads와 GitLab 간 이슈 동기화 명령입니다.
 
-Configuration can be set via 'bd config' or environment variables:
-  gitlab.url / GITLAB_URL                         - GitLab instance URL
-  gitlab.token / GITLAB_TOKEN                     - Personal access token
-  gitlab.project_id / GITLAB_PROJECT_ID           - Project ID or path
-  gitlab.group_id / GITLAB_GROUP_ID               - Group ID for group-level sync
-  gitlab.default_project_id / GITLAB_DEFAULT_PROJECT_ID - Project for creating issues in group mode
+구성은 'bd config' 또는 환경 변수로 설정할 수 있습니다:
+  gitlab.url / GITLAB_URL                         - GitLab 인스턴스 URL
+  gitlab.token / GITLAB_TOKEN                     - 개인용 액세스 토큰
+  gitlab.project_id / GITLAB_PROJECT_ID           - 프로젝트 ID 또는 경로
+  gitlab.group_id / GITLAB_GROUP_ID               - 그룹 수준 동기화용 그룹 ID
+  gitlab.default_project_id / GITLAB_DEFAULT_PROJECT_ID - 그룹 모드에서 이슈를 생성할 프로젝트
 
 ```
 bd gitlab [flags]
@@ -22,7 +22,7 @@ bd gitlab [flags]
 
 ## bd gitlab projects
 
-List GitLab projects that the configured token has access to.
+구성된 토큰으로 접근 가능한 GitLab 프로젝트를 나열합니다.
 
 ```
 bd gitlab projects [flags]
@@ -30,41 +30,41 @@ bd gitlab projects [flags]
 
 ## bd gitlab pull
 
-Pull one or more items from GitLab.
+GitLab에서 하나 이상의 항목을 가져옵니다.
 
-Accepts bead IDs or external references as positional arguments.
-Equivalent to: bd gitlab sync --pull-only --issues &lt;refs&gt;
+bead ID 또는 외부 참조를 위치 인수로 받습니다.
+다음과 같습니다: bd gitlab sync --pull-only --issues &lt;refs&gt;
 
 ```
 bd gitlab pull [refs...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview pull without making changes
+      --dry-run   변경하지 않고 pull 미리 보기
 ```
 
 ## bd gitlab push
 
-Push one or more beads issues to GitLab.
+하나 이상의 beads 이슈를 GitLab으로 푸시합니다.
 
-Accepts bead IDs as positional arguments.
-Equivalent to: bd gitlab sync --push-only --issues &lt;ids&gt;
+bead ID를 위치 인수로 받습니다.
+다음과 같습니다: bd gitlab sync --push-only --issues &lt;ids&gt;
 
 ```
 bd gitlab push [bead-ids...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview push without making changes
+      --dry-run   변경하지 않고 push 미리 보기
 ```
 
 ## bd gitlab status
 
-Display current GitLab configuration and sync status.
+현재 GitLab 구성과 동기화 상태를 표시합니다.
 
 ```
 bd gitlab status [flags]
@@ -72,34 +72,34 @@ bd gitlab status [flags]
 
 ## bd gitlab sync
 
-Synchronize issues between beads and GitLab.
+beads와 GitLab 간에 이슈를 동기화합니다.
 
-By default, performs bidirectional sync:
-- Pulls new/updated issues from GitLab to beads
-- Pushes local beads issues to GitLab
+기본적으로 양방향 동기화를 수행합니다:
+- GitLab의 새 이슈 또는 업데이트된 이슈를 beads로 pull
+- 로컬 beads 이슈를 GitLab으로 push
 
-Use --pull-only or --push-only to limit direction.
+방향을 제한하려면 --pull-only 또는 --push-only를 사용하세요.
 
 ```
 bd gitlab sync [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --assignee string       Filter by assignee username
-      --dry-run               Show what would be synced without making changes
-      --exclude-type string   Exclude these issue types from sync (comma-separated)
-      --issues string         Comma-separated bead IDs to sync selectively (e.g., bd-abc,bd-def). Mutually exclusive with --parent.
-      --label string          Filter by labels (comma-separated, AND logic)
-      --milestone string      Filter by milestone title
-      --no-ephemeral          Exclude ephemeral/wisp issues from push (default: true) (default true)
-      --parent string         Limit push to this bead and its descendants (push only). Mutually exclusive with --issues.
-      --prefer-gitlab         On conflict, use GitLab version
-      --prefer-local          On conflict, keep local beads version
-      --prefer-newer          On conflict, use most recent version (default)
-      --project string        Filter to issues from this project ID (group mode)
-      --pull-only             Only pull issues from GitLab
-      --push-only             Only push issues to GitLab
-      --type string           Only sync these issue types (comma-separated, e.g. 'epic,feature,task')
+      --assignee string       담당자 사용자 이름으로 필터링
+      --dry-run               변경하지 않고 동기화될 항목 표시
+      --exclude-type string   동기화에서 해당 이슈 유형 제외(쉼표로 구분)
+      --issues string         선택적으로 동기화할 쉼표 구분 bead ID(예: bd-abc,bd-def). --parent와 함께 사용할 수 없음.
+      --label string          레이블로 필터링(쉼표로 구분, AND 논리)
+      --milestone string      마일스톤 제목으로 필터링
+      --no-ephemeral          push에서 임시/wisp 이슈 제외(기본값: true)(기본값 true)
+      --parent string         이 bead와 하위 항목으로 push 제한(push 전용). --issues와 함께 사용할 수 없음.
+      --prefer-gitlab         충돌 시 GitLab 버전 사용
+      --prefer-local          충돌 시 로컬 beads 버전 유지
+      --prefer-newer          충돌 시 최신 버전 사용(기본값)
+      --project string        이 프로젝트 ID의 이슈로 필터링(그룹 모드)
+      --pull-only             GitLab에서 이슈만 pull
+      --push-only             GitLab으로 이슈만 push
+      --type string           해당 이슈 유형만 동기화(쉼표로 구분, 예: 'epic,feature,task')
 ```

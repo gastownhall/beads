@@ -1,27 +1,27 @@
 ---
 title: "bd onboard"
-description: "Display a minimal snippet to add to your agent instructions file for bd integration."
+description: "bd 통합을 위해 에이전트 지침 파일에 추가할 최소 스니펫을 표시합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc onboard`.
+`bd help --doc onboard`에서 생성되었습니다.
 
-Display a minimal snippet to add to your agent instructions file for bd integration.
+bd 통합을 위해 에이전트 지침 파일에 추가할 최소 스니펫을 표시합니다.
 
-By default, the agent instructions file is AGENTS.md. Use 'bd init --agents-file'
-to configure a different filename (e.g. BEADS.md).
+기본 에이전트 지침 파일은 AGENTS.md입니다. 다른 파일 이름(예: BEADS.md)을
+구성하려면 'bd init --agents-file'을 사용하세요.
 
-This outputs a small (~10 line) snippet that points to 'bd prime' for full
-workflow context. This is the same minimal profile that 'bd init' generates
-by default. This approach:
+전체 워크플로 컨텍스트를 위해 'bd prime'을 가리키는 작은 스니펫(약 10줄)을
+출력합니다. 이는 'bd init'이 기본적으로 생성하는 것과 같은 최소 프로필입니다.
+이 접근 방식은 다음과 같습니다:
 
-  • Keeps your agent file lean (doesn't bloat with instructions)
-  • bd prime provides dynamic, always-current workflow details
-  • Hooks auto-inject bd prime at session start
+  • 에이전트 파일을 간결하게 유지(지침으로 비대해지지 않음)
+  • bd prime이 동적이며 항상 최신인 워크플로 세부 정보 제공
+  • 훅이 세션 시작 시 bd prime을 자동 주입
 
-For agents or environments that do not auto-inject hook output, use
-'bd init --agents-profile=full' to embed the complete command reference.
+훅 출력을 자동 주입하지 않는 에이전트나 환경에서는 전체 명령 참조를 포함하도록
+'bd init --agents-profile=full'을 사용하세요.
 
 ```
 bd onboard [flags]

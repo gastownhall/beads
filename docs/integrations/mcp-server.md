@@ -1,38 +1,39 @@
 ---
-title: MCP Server
-description: Run the beads-mcp server for MCP-only environments like Claude Desktop where the bd CLI is unavailable
+title: MCP 서버
+description: bd CLI를 사용할 수 없는 Claude Desktop 같은 MCP 전용 환경에서 beads-mcp 서버 실행
 ---
 
-Use beads in MCP-only environments.
+MCP 전용 환경에서 Beads를 사용합니다.
 
-## When to Use MCP
+## MCP 사용 시점
 
-Use MCP server when CLI is unavailable:
-- Claude Desktop (no shell access)
-- Sourcegraph Amp without shell
-- Other MCP-only environments
+CLI를 사용할 수 없을 때 MCP 서버를 사용하세요.
 
-**Prefer CLI + hooks** when shell is available - it's more context efficient.
+- Claude Desktop(shell 접근 없음)
+- shell 없는 Sourcegraph Amp
+- 기타 MCP 전용 환경
 
-## Installation
+shell을 사용할 수 있다면 컨텍스트 효율이 높은 **CLI 및 hook**을 권장합니다.
 
-### Using uv (Recommended)
+## 설치
+
+### uv 사용(권장)
 
 ```bash
 uv tool install beads-mcp
 ```
 
-### Using pip
+### pip 사용
 
 ```bash
 pip install beads-mcp
 ```
 
-## Configuration
+## 설정
 
 ### Claude Desktop (macOS)
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+`~/Library/Application Support/Claude/claude_desktop_config.json`에 추가하세요.
 
 ```json
 {
@@ -46,7 +47,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ### Claude Desktop (Windows)
 
-Add to `%APPDATA%\Claude\claude_desktop_config.json`:
+`%APPDATA%\Claude\claude_desktop_config.json`에 추가하세요.
 
 ```json
 {
@@ -60,7 +61,7 @@ Add to `%APPDATA%\Claude\claude_desktop_config.json`:
 
 ### Sourcegraph Amp
 
-Add to MCP settings:
+MCP 설정에 추가하세요.
 
 ```json
 {
@@ -73,7 +74,7 @@ Add to MCP settings:
 
 ### VS Code / GitHub Copilot
 
-Create `.vscode/mcp.json` in your project:
+프로젝트에 `.vscode/mcp.json`을 생성하세요.
 
 ```json
 {
@@ -85,9 +86,9 @@ Create `.vscode/mcp.json` in your project:
 }
 ```
 
-**For all projects:** Add to VS Code user-level MCP config:
+**모든 프로젝트에 적용:** VS Code 사용자 수준 MCP 설정에 추가하세요.
 
-| Platform | Path |
+| 플랫폼 | 경로 |
 |----------|------|
 | macOS | `~/Library/Application Support/Code/User/mcp.json` |
 | Linux | `~/.config/Code/User/mcp.json` |
@@ -104,88 +105,88 @@ Create `.vscode/mcp.json` in your project:
 }
 ```
 
-**Note:** Requires VS Code 1.96+ with MCP support enabled.
+**참고:** MCP 지원이 활성화된 VS Code 1.96 이상이 필요합니다.
 
-See [GitHub Copilot Integration](/integrations/github-copilot) for complete setup guide.
+전체 설정 가이드는 [GitHub Copilot 통합](/integrations/github-copilot)을 참고하세요.
 
-## Available Tools
+## 사용 가능한 도구
 
-The MCP server exposes these tools:
+MCP 서버는 다음 도구를 노출합니다.
 
-| Tool | Description |
+| 도구 | 설명 |
 |------|-------------|
-| `ready` | Show ready work (no open blockers) |
-| `list` | List issues with filters |
-| `show` | Show issue details, dependencies, and dependents |
-| `create` | Create a new issue |
-| `claim` | Atomically claim an issue |
-| `update` | Update an issue |
-| `close` / `reopen` | Close or reopen an issue |
-| `dep` | Manage dependencies |
-| `comment` / `comments` | Add or list comments |
-| `note` | Append to an issue's notes |
-| `blocked` | Show blocked issues and their blockers |
-| `stats` / `context` | Database stats and workspace context |
-| `admin` | Administrative operations |
-| `discover_tools` / `get_tool_info` | Tool discovery and schemas |
+| `ready` | 준비된 작업 표시(열린 차단 요소 없음) |
+| `list` | 필터를 적용하여 이슈 나열 |
+| `show` | 이슈 상세 정보, 의존성, 종속 항목 표시 |
+| `create` | 새 이슈 생성 |
+| `claim` | 이슈를 원자적으로 claim |
+| `update` | 이슈 업데이트 |
+| `close` / `reopen` | 이슈 종료 또는 다시 열기 |
+| `dep` | 의존성 관리 |
+| `comment` / `comments` | 댓글 추가 또는 나열 |
+| `note` | 이슈 notes에 추가 |
+| `blocked` | 차단된 이슈와 차단 요소 표시 |
+| `stats` / `context` | 데이터베이스 통계 및 워크스페이스 컨텍스트 |
+| `admin` | 관리 작업 |
+| `discover_tools` / `get_tool_info` | 도구 탐색 및 schema |
 
-There is no MCP sync tool — syncing stays on the CLI (`bd dolt push` /
-`bd dolt pull`).
+MCP 동기화 도구는 없습니다. 동기화는 CLI(`bd dolt push` / `bd dolt pull`)에서
+수행합니다.
 
-## Usage
+## 사용법
 
-Once configured, use naturally:
+설정 후 자연어로 사용하세요.
 
 ```
-Create an issue for fixing the login bug with priority 1
+로그인 버그 수정 이슈를 우선순위 1로 생성해 줘
 ```
 
-The MCP server translates to appropriate `bd` commands.
+MCP 서버가 적절한 `bd` 명령으로 변환합니다.
 
-## Trade-offs
+## 절충점
 
-| Aspect | CLI + Hooks | MCP Server |
+| 측면 | CLI 및 hook | MCP 서버 |
 |--------|-------------|------------|
-| Context overhead | ~1-2k tokens | 10-50k tokens |
-| Latency | Direct calls | MCP protocol |
-| Setup | Hooks config | MCP config |
-| Availability | Shell required | MCP environments |
+| 컨텍스트 오버헤드 | 약 1~2천 토큰 | 1만~5만 토큰 |
+| 지연 시간 | 직접 호출 | MCP protocol |
+| 설정 | hook 설정 | MCP 설정 |
+| 가용성 | shell 필요 | MCP 환경 |
 
-## Troubleshooting
+## 문제 해결
 
-### Server won't start
+### 서버가 시작되지 않음
 
-Check if `beads-mcp` is in PATH:
+`beads-mcp`가 PATH에 있는지 확인하세요.
 
 ```bash
 which beads-mcp
 ```
 
-If not found:
+찾을 수 없다면 다음을 실행하세요.
 
 ```bash
-# Reinstall
+# 다시 설치
 pip uninstall beads-mcp
 pip install beads-mcp
 ```
 
-### Tools not appearing
+### 도구가 표시되지 않음
 
-1. Restart Claude Desktop
-2. Check MCP config JSON syntax
-3. Verify server path
+1. Claude Desktop을 다시 시작합니다.
+2. MCP 설정 JSON 문법을 확인합니다.
+3. 서버 경로를 확인합니다.
 
-### Permission errors
+### 권한 오류
 
 ```bash
-# Check directory permissions
+# 디렉터리 권한 확인
 ls -la .beads/
 
-# Initialize if needed
+# 필요한 경우 초기화
 bd init --quiet
 ```
 
-## See Also
+## 관련 문서
 
-- [Claude Code](/integrations/claude-code) - CLI integration
-- [Installation](/getting-started/installation) - Full install guide
+- [Claude Code](/integrations/claude-code) - CLI 통합
+- [설치](/getting-started/installation) - 전체 설치 가이드

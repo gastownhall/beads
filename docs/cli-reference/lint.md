@@ -1,38 +1,38 @@
 ---
 title: "bd lint"
-description: "Check issues for missing recommended sections based on issue type."
+description: "이슈 유형별 권장 섹션의 누락 여부를 검사합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc lint`.
+`bd help --doc lint`에서 생성되었습니다.
 
-Check issues for missing recommended sections based on issue type.
+이슈 유형별 권장 섹션의 누락 여부를 검사합니다.
 
-By default, lints all open issues. Specify issue IDs to lint specific issues.
+기본적으로 열린 이슈를 모두 린트합니다. 특정 이슈를 린트하려면 이슈 ID를 지정하세요.
 
-Section requirements by type:
-  bug:      Steps to Reproduce, Acceptance Criteria
-  task:     Acceptance Criteria
-  feature:  Acceptance Criteria
-  epic:     Success Criteria
-  chore:    (none)
+유형별 섹션 요구 사항:
+  bug:      재현 단계, 인수 기준
+  task:     인수 기준
+  feature:  인수 기준
+  epic:     성공 기준
+  chore:    (없음)
 
-Examples:
-  bd lint                    # Lint all open issues
-  bd lint bd-abc             # Lint specific issue
-  bd lint bd-abc bd-def      # Lint multiple issues
-  bd lint --type bug         # Lint only bugs
-  bd lint --status all       # Lint all issues (including closed)
+예시:
+  bd lint                    # 열린 이슈 모두 린트
+  bd lint bd-abc             # 특정 이슈 린트
+  bd lint bd-abc bd-def      # 여러 이슈 린트
+  bd lint --type bug         # 버그만 린트
+  bd lint --status all       # 모든 이슈 린트(닫힌 이슈 포함)
 
 
 ```
 bd lint [issue-id...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -s, --status string   Filter by status (default: open, use 'all' for all)
-  -t, --type string     Filter by issue type (bug, task, feature, epic)
+  -s, --status string   상태로 필터링(기본값: open, 전체에는 'all' 사용)
+  -t, --type string     이슈 유형으로 필터링(bug, task, feature, epic)
 ```

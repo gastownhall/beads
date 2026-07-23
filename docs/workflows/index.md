@@ -1,40 +1,39 @@
 ---
-title: Workflows
-description: Declare multi-step work once as a formula, then stamp it out as molecules of real, dependency-ordered beads.
+title: 워크플로
+description: 여러 단계의 작업을 Formula로 한 번 선언한 뒤 의존성 순서가 있는 실제 Beads의 Molecule로 생성합니다.
 ---
 
-Repeatable multi-step work — a release checklist, a feature pipeline, a
-review process — shouldn't be re-planned by hand every time. Beads lets you
-declare the shape once and instantiate it on demand: a **formula** (TOML
-source) is cooked into a **proto** (template), and the proto is poured into a
-**molecule** — real beads whose steps flow through `bd ready` like any other
-work. The full pipeline is diagrammed in
-[How Beads Works](/core-concepts/index).
+릴리스 체크리스트, 기능 파이프라인, 검토 절차와 같이 반복되는 다단계 작업을 매번
+수동으로 다시 계획할 필요는 없습니다. Beads에서는 구조를 한 번 선언하고 필요할 때
+인스턴스화할 수 있습니다. **Formula**(TOML 소스)를 조리하여 **Proto**(템플릿)로
+만들고, Proto를 부어 **Molecule**을 만듭니다. Molecule은 다른 작업처럼 각 단계가
+`bd ready`를 따라 흐르는 실제 Beads입니다. 전체 파이프라인은
+[Beads 작동 방식](/core-concepts/index)의 다이어그램을 참고하세요.
 
 ```bash
-bd formula list                    # formulas visible on the search paths
-bd cook release.formula.toml       # compile the formula into a proto
-bd mol pour release --var version=1.2.0   # instantiate real work
-bd ready --mol <mol-id>            # which steps can run right now
+bd formula list                    # 검색 경로에서 보이는 Formula
+bd cook release.formula.toml       # Formula를 Proto로 컴파일
+bd mol pour release --var version=1.2.0   # 실제 작업 인스턴스화
+bd ready --mol <mol-id>            # 지금 실행할 수 있는 단계
 ```
 
-The three phases, in the chemistry metaphor the CLI uses:
+CLI에서 사용하는 화학 비유에 따른 세 단계는 다음과 같습니다.
 
-| Phase | What it is | Lifecycle |
+| 단계 | 정의 | 수명 주기 |
 |-------|------------|-----------|
-| **Proto** (solid) | template epic with `{{variables}}`, carries the `template` label | reusable, not live work |
-| **Molecule** (liquid) | persistent beads poured from a proto (`bd mol pour`) | synced like any bead |
-| **Wisp** (vapor) | ephemeral instantiation (`bd mol wisp`) | excluded from federation push by default; deleted by `bd purge` |
+| **Proto**(고체) | `{{variables}}`가 있고 `template` 레이블을 지닌 템플릿 epic | 재사용할 수 있으며 실제 작업은 아님 |
+| **Molecule**(액체) | Proto에서 부어 만든 영구 Beads(`bd mol pour`) | 다른 Bead처럼 동기화됨 |
+| **Wisp**(기체) | 임시 인스턴스(`bd mol wisp`) | 기본적으로 federation push에서 제외되며 `bd purge`로 삭제됨 |
 
-## Pages in this section
+## 이 섹션의 문서
 
-- [Molecules](/workflows/molecules) — instantiated work graphs: pouring,
-  inspecting, bonding, and squashing molecules.
-- [Formulas](/workflows/formulas) — the TOML/JSON source format: steps,
-  `needs` dependencies, variables, and composition rules.
-- [Gates](/workflows/gates) — async wait conditions (human, timer, GitHub
-  run/PR, cross-rig bead) that park a step until the world catches up.
-- [Wisps](/workflows/wisps) — ephemeral molecules for transient operational
-  work that shouldn't clutter history.
-- [TODO Command](/workflows/todo) — `bd todo`, the lightweight interface for
-  managing TODO items as task beads.
+- [Molecule](/workflows/molecules) — 인스턴스화된 작업 그래프의 생성, 검사, 결합,
+  squash 방법을 설명합니다.
+- [Formula](/workflows/formulas) — 단계, `needs` 의존성, 변수, 조합 규칙을 정의하는
+  TOML/JSON 소스 형식입니다.
+- [Gate](/workflows/gates) — 외부 조건이 충족될 때까지 단계를 대기시키는 비동기 조건
+  (사람, 타이머, GitHub run/PR, rig 간 Bead)입니다.
+- [Wisp](/workflows/wisps) — 기록을 복잡하게 만들 필요가 없는 일시적 운영 작업용
+  임시 Molecule입니다.
+- [TODO 명령](/workflows/todo) — TODO 항목을 작업 Bead로 관리하는 가벼운 인터페이스
+  `bd todo`입니다.

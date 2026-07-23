@@ -1,17 +1,17 @@
 ---
 title: "bd forget"
-description: "Remove a memory by its key."
+description: "키로 메모리를 제거합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc forget`.
+`bd help --doc forget`에서 생성되었습니다.
 
-Remove a memory by its key.
+키로 메모리를 제거합니다.
 
-Use 'bd memories' to see available keys.
+사용 가능한 키를 보려면 'bd memories'를 사용하세요.
 
-Examples:
+예시:
   bd forget dolt-phantoms
   bd forget auth-jwt
 

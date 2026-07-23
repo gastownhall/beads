@@ -1,70 +1,70 @@
 ---
-title: Sync Concepts
-description: Why Dolt is the source of truth for sync and how the JSONL export differs from bd dolt push and pull
+title: 동기화 개념
+description: Dolt가 동기화의 원본인 이유와 JSONL 내보내기가 bd dolt push 및 pull과 다른 점
 ---
 
-Beads issue data lives in Dolt. The local Dolt database is the source of truth
-for `bd list`, `bd show`, `bd ready`, and every write command.
+Beads 이슈 데이터는 Dolt에 저장됩니다. 로컬 Dolt 데이터베이스가 `bd list`,
+`bd show`, `bd ready`와 모든 쓰기 명령의 원본입니다.
 
-## The Wire Format
+## 전송 형식
 
-Cross-machine sync uses Dolt remotes:
+머신 간 동기화에는 Dolt 원격을 사용합니다.
 
 ```bash
 bd dolt push
 bd dolt pull
 ```
 
-For normal git-hosted projects, the Dolt remote can be the same `origin` URL
-used for source code. Dolt stores issue history under `refs/dolt/data`, separate
-from source branches such as `refs/heads/main`.
+일반적인 git 호스팅 프로젝트에서는 소스 코드에 사용하는 것과 같은 `origin` URL을
+Dolt 원격으로 사용할 수 있습니다. Dolt는 `refs/heads/main` 같은 소스 브랜치와
+별도로 `refs/dolt/data` 아래에 이슈 기록을 저장합니다.
 
-On new projects, `bd init` auto-detects `git remote get-url origin` and
-configures a Dolt remote named `origin`. The first `bd dolt push` publishes
-`refs/dolt/data`. Fresh clones should run `bd bootstrap` to clone that Dolt
-history. When bootstrap finds `refs/dolt/data` on git origin, it also wires
-that origin as the Dolt remote for future `bd dolt push` and `bd dolt pull`.
+새 프로젝트에서 `bd init`은 `git remote get-url origin`을 자동 감지하고 `origin`이라는
+Dolt 원격을 구성합니다. 첫 `bd dolt push`가 `refs/dolt/data`를 게시합니다. 새 클론에서는
+`bd bootstrap`을 실행해 해당 Dolt 기록을 클론해야 합니다. bootstrap이 git origin에서
+`refs/dolt/data`를 찾으면 이후 `bd dolt push`와 `bd dolt pull`에 사용할 Dolt 원격으로도
+해당 origin을 연결합니다.
 
-## What JSONL Is For
+## JSONL의 용도
 
-`.beads/issues.jsonl` is an export. It exists for viewers, interchange,
-migration, and backup. It is not the canonical cross-machine sync channel.
+`.beads/issues.jsonl`은 내보내기 파일입니다. 뷰어, 교환, 마이그레이션, 백업에 사용합니다.
+정식 머신 간 동기화 채널은 아닙니다.
 
-Do not use routine `bd import .beads/issues.jsonl` as a replacement for
-`bd dolt pull`. JSONL import is upsert-only; it cannot infer that records absent
-from an export were deleted, pruned, or simply never exported.
+일상적으로 `bd import .beads/issues.jsonl`을 `bd dolt pull` 대신 사용하지 마세요.
+JSONL 가져오기는 upsert만 수행하므로 내보내기에 없는 레코드가 삭제되었는지,
+정리되었는지, 아니면 애초에 내보내지지 않았는지 추론할 수 없습니다.
 
-## Hooks
+## 훅
 
-The pre-commit hook refreshes `.beads/issues.jsonl` when `export.auto=true`.
-That keeps the export current for tools, but it does not push Dolt history.
+pre-commit 훅은 `export.auto=true`일 때 `.beads/issues.jsonl`을 새로 고칩니다.
+도구에서 사용하는 내보내기를 최신 상태로 유지하지만 Dolt 기록을 푸시하지는 않습니다.
 
-The post-merge and post-checkout hooks skip JSONL import when `sync.remote` is
-configured. For old projects with no Dolt remote, they may import JSONL as a
-compatibility fallback and print a warning that this is not durable sync.
+post-merge 및 post-checkout 훅은 `sync.remote`가 구성되어 있으면 JSONL 가져오기를
+건너뜁니다. Dolt 원격이 없는 이전 프로젝트에서는 호환성 대체 수단으로 JSONL을
+가져오고 이것이 지속 가능한 동기화가 아니라는 경고를 표시할 수 있습니다.
 
-## Repair
+## 복구
 
-For projects initialized before automatic git-origin remote wiring, pick the
-machine with the authoritative local Dolt database first. Then run:
+git-origin 원격 자동 연결 기능이 생기기 전에 초기화한 프로젝트에서는 먼저 기준 로컬
+Dolt 데이터베이스가 있는 머신을 선택합니다. 그런 다음 다음을 실행합니다.
 
 ```bash
 bd dolt remote list
-bd export -o .beads/issues.pre-remote.jsonl   # optional issue audit export
+bd export -o .beads/issues.pre-remote.jsonl   # 선택적 이슈 감사 내보내기
 bd dolt remote add origin <git-origin-url>
 bd dolt push
 ```
 
-Use the Dolt-compatible git URL form when needed. For example,
-`git+ssh://git@github.com/org/repo.git` or
-`git+https://github.com/org/repo.git`. `bd dolt remote add origin ...`
-persists `sync.remote` into `.beads/config.yaml`; commit and push that config
-change so fresh clones can run `bd bootstrap`.
+필요한 경우 Dolt 호환 git URL 형식을 사용하세요. 예를 들면
+`git+ssh://git@github.com/org/repo.git` 또는
+`git+https://github.com/org/repo.git`입니다. `bd dolt remote add origin ...`은
+`sync.remote`를 `.beads/config.yaml`에 영구 저장합니다. 새 클론에서 `bd bootstrap`을
+실행할 수 있도록 이 구성 변경을 커밋하고 푸시하세요.
 
-Other machines should then run:
+그런 다음 다른 머신에서는 다음을 실행해야 합니다.
 
 ```bash
 bd dolt pull
-# or, if the local database is stale or missing:
+# 또는 로컬 데이터베이스가 오래되었거나 없는 경우:
 bd bootstrap
 ```

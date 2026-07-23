@@ -1,67 +1,67 @@
 ---
-title: Labels
-description: Flexible tagging for cross-cutting concerns, filtering, and caching operational state on issues
+title: 레이블
+description: 횡단 관심사, 필터링 및 이슈의 운영 상태 캐싱을 위한 유연한 태그 지정
 ---
 
-Labels provide flexible, multi-dimensional categorization for issues beyond the structured fields (status, priority, type). Use labels for cross-cutting concerns, technical metadata, and contextual tagging without schema changes.
+레이블은 구조화된 필드(상태, 우선순위, 유형)를 넘어 이슈를 유연하고 다차원적으로 분류합니다. 스키마를 변경하지 않고 횡단 관심사, 기술 메타데이터, 컨텍스트 태그에 레이블을 사용하세요.
 
-## Design Philosophy
+## 설계 철학
 
-**When to use labels vs. structured fields:**
+**레이블과 구조화된 필드를 사용하는 시점:**
 
-- **Structured fields** (status, priority, type) → Core workflow state
-  - Status: Where the issue is in the workflow (`open`, `in_progress`, `blocked`, `closed`)
-  - Priority: How urgent (0-4)
-  - Type: What kind of work (`bug`, `feature`, `task`, `epic`, `chore`)
+- **구조화된 필드**(상태, 우선순위, 유형) → 핵심 워크플로 상태
+  - 상태: 워크플로에서 이슈의 위치(`open`, `in_progress`, `blocked`, `closed`)
+  - 우선순위: 긴급도(0~4)
+  - 유형: 작업 종류(`bug`, `feature`, `task`, `epic`, `chore`)
 
-- **Labels** → Everything else
-  - Technical metadata (`backend`, `frontend`, `api`, `database`)
-  - Domain/scope (`auth`, `payments`, `search`, `analytics`)
-  - Effort estimates (`small`, `medium`, `large`)
-  - Quality gates (`needs-review`, `needs-tests`, `breaking-change`)
-  - Team/ownership (`team-infra`, `team-product`)
-  - Release tracking (`v1.0`, `v2.0`, `backport-candidate`)
+- **레이블** → 그 밖의 모든 항목
+  - 기술 메타데이터(`backend`, `frontend`, `api`, `database`)
+  - 도메인/범위(`auth`, `payments`, `search`, `analytics`)
+  - 작업량 추정(`small`, `medium`, `large`)
+  - 품질 Gate(`needs-review`, `needs-tests`, `breaking-change`)
+  - 팀/소유권(`team-infra`, `team-product`)
+  - 릴리스 추적(`v1.0`, `v2.0`, `backport-candidate`)
 
-## Quick Start
+## 빠른 시작
 
 ```bash
-# Add labels when creating issues
-bd create "Fix auth bug" -t bug -p 1 -l auth,backend,urgent
+# 이슈 생성 시 레이블 추가
+bd create "인증 버그 수정" -t bug -p 1 -l auth,backend,urgent
 
-# Add labels to existing issues
+# 기존 이슈에 레이블 추가
 bd label add bd-42 security
 bd label add bd-42 breaking-change
 
-# Add multiple labels at once (comma-separated, no spaces around commas)
+# 여러 레이블을 한 번에 추가(쉼표로 구분, 쉼표 주변에 공백 없음)
 bd label add bd-42 security,breaking-change
 
-# List issue labels
+# 이슈 레이블 나열
 bd label list bd-42
 
-# Remove a label
+# 레이블 제거
 bd label remove bd-42 urgent
 
-# Remove multiple labels at once
+# 여러 레이블을 한 번에 제거
 bd label remove bd-42 urgent,needs-review
 
-# List all labels in use
+# 사용 중인 모든 레이블 나열
 bd label list-all
 
-# Filter by labels (AND - must have ALL)
+# 레이블로 필터링(AND - 모두 있어야 함)
 bd list --label backend,auth
 
-# Filter by labels (OR - must have AT LEAST ONE)
+# 레이블로 필터링(OR - 하나 이상 있어야 함)
 bd list --label-any frontend,backend
 
-# Combine filters
+# 필터 조합
 bd list --status open --priority 1 --label security
 ```
 
-## Common Label Patterns
+## 일반적인 레이블 패턴
 
-### 1. Technical Component Labels
+### 1. 기술 구성 요소 레이블
 
-Identify which part of the system:
+시스템의 어느 부분인지 식별합니다.
 ```bash
 backend
 frontend
@@ -73,15 +73,15 @@ ui
 mobile
 ```
 
-**Example:**
+**예시:**
 ```bash
-bd create "Add GraphQL endpoint" -t feature -p 2 -l backend,api
-bd create "Update login form" -t task -p 2 -l frontend,auth,ui
+bd create "GraphQL 엔드포인트 추가" -t feature -p 2 -l backend,api
+bd create "로그인 양식 업데이트" -t task -p 2 -l frontend,auth,ui
 ```
 
-### 2. Domain/Feature Area
+### 2. 도메인/기능 영역
 
-Group by business domain:
+비즈니스 도메인별로 그룹화합니다.
 ```bash
 auth
 payments
@@ -93,30 +93,30 @@ reporting
 admin
 ```
 
-**Example:**
+**예시:**
 ```bash
-bd list --label payments --status open  # All open payment issues
-bd list --label-any auth,security       # Security-related work
+bd list --label payments --status open  # 열린 결제 이슈 모두
+bd list --label-any auth,security       # 보안 관련 작업
 ```
 
-### 3. Size/Effort Estimates
+### 3. 규모/작업량 추정
 
-Quick effort indicators:
+빠른 작업량 지표:
 ```bash
-small     # < 1 day
-medium    # 1-3 days
-large     # > 3 days
+small     # 1일 미만
+medium    # 1~3일
+large     # 3일 초과
 ```
 
-**Example:**
+**예시:**
 ```bash
-# Find small quick wins
+# 작고 빠르게 끝낼 작업 찾기
 bd ready --json | jq '.[] | select(.labels[] == "small")'
 ```
 
-### 4. Quality Gates
+### 4. 품질 Gate
 
-Track what's needed before closing:
+닫기 전에 필요한 항목을 추적합니다.
 ```bash
 needs-review
 needs-tests
@@ -124,15 +124,15 @@ needs-docs
 breaking-change
 ```
 
-**Example:**
+**예시:**
 ```bash
 bd label add bd-42 needs-review
 bd list --label needs-review --status in_progress
 ```
 
-### 5. Release Management
+### 5. 릴리스 관리
 
-Track release targeting:
+대상 릴리스를 추적합니다.
 ```bash
 v1.0
 v2.0
@@ -140,15 +140,15 @@ backport-candidate
 release-blocker
 ```
 
-**Example:**
+**예시:**
 ```bash
-bd list --label v1.0 --status open    # What's left for v1.0?
+bd list --label v1.0 --status open    # v1.0에 남은 항목은?
 bd label add bd-42 release-blocker
 ```
 
-### 6. Team/Ownership
+### 6. 팀/소유권
 
-Indicate ownership or interest:
+소유권 또는 관심사를 표시합니다.
 ```bash
 team-infra
 team-product
@@ -157,144 +157,144 @@ needs-triage
 help-wanted
 ```
 
-**Example:**
+**예시:**
 ```bash
 bd list --assignee alice --label team-infra
-bd create "Memory leak in cache" -t bug -p 1 -l team-infra,help-wanted
+bd create "캐시 메모리 누수" -t bug -p 1 -l team-infra,help-wanted
 ```
 
-### 7. Special Markers
+### 7. 특수 마커
 
-Process or workflow flags:
+프로세스 또는 워크플로 플래그:
 ```bash
-auto-generated     # Created by automation
-discovered-from    # Found during other work (also a dep type)
+auto-generated     # 자동화로 생성
+discovered-from    # 다른 작업 중 발견(의존성 유형이기도 함)
 technical-debt
 good-first-issue
 duplicate
 wontfix
 ```
 
-**Example:**
+**예시:**
 ```bash
-bd create "TODO: Refactor parser" -t chore -p 3 -l technical-debt,auto-generated
+bd create "TODO: 파서 리팩터링" -t chore -p 3 -l technical-debt,auto-generated
 ```
 
-## Filtering by Labels
+## 레이블로 필터링
 
-### AND Filtering (--label)
-All specified labels must be present:
+### AND 필터링(--label)
+지정한 레이블이 모두 있어야 합니다.
 
 ```bash
-# Issues that are BOTH backend AND urgent
+# backend와 urgent가 모두 있는 이슈
 bd list --label backend,urgent
 
-# Open bugs that need review AND tests
+# 검토와 테스트가 모두 필요한 열린 버그
 bd list --status open --type bug --label needs-review,needs-tests
 ```
 
-### OR Filtering (--label-any)
-At least one specified label must be present:
+### OR 필터링(--label-any)
+지정한 레이블 중 하나 이상이 있어야 합니다.
 
 ```bash
-# Issues in frontend OR backend
+# frontend 또는 backend 이슈
 bd list --label-any frontend,backend
 
-# Security or auth related
+# 보안 또는 인증 관련
 bd list --label-any security,auth
 ```
 
-### Combining AND/OR
-Mix both filters for complex queries:
+### AND/OR 조합
+복잡한 쿼리에서는 두 필터를 함께 사용합니다.
 
 ```bash
-# Backend issues that are EITHER urgent OR a blocker
+# urgent 또는 blocker인 backend 이슈
 bd list --label backend --label-any urgent,release-blocker
 
-# Frontend work that needs BOTH review and tests, but in any component
+# 구성 요소와 관계없이 검토와 테스트가 모두 필요한 frontend 작업
 bd list --label needs-review,needs-tests --label-any frontend,ui,mobile
 ```
 
-## Workflow Examples
+## 워크플로 예시
 
-### Triage Workflow
+### 분류 워크플로
 ```bash
-# Create untriaged issue
-bd create "Crash on login" -t bug -p 1 -l needs-triage
+# 분류되지 않은 이슈 생성
+bd create "로그인 시 충돌" -t bug -p 1 -l needs-triage
 
-# During triage, add context
+# 분류 중 컨텍스트 추가
 bd label add bd-42 auth
 bd label add bd-42 backend
 bd label add bd-42 urgent
 bd label remove bd-42 needs-triage
 
-# Find untriaged issues
+# 분류되지 않은 이슈 찾기
 bd list --label needs-triage
 ```
 
-### Quality Gate Workflow
+### 품질 Gate 워크플로
 ```bash
-# Start work
+# 작업 시작
 bd update bd-42 --claim
 
-# Mark quality requirements
+# 품질 요구 사항 표시
 bd label add bd-42 needs-tests
 bd label add bd-42 needs-docs
 
-# Before closing, verify
+# 닫기 전에 확인
 bd label list bd-42
-# ... write tests and docs ...
+# ... 테스트와 문서 작성 ...
 bd label remove bd-42 needs-tests
 bd label remove bd-42 needs-docs
 
-# Close when gates satisfied
+# Gate가 충족되면 닫기
 bd close bd-42
 ```
 
-### Release Planning
+### 릴리스 계획
 ```bash
-# Tag issues for v1.0
+# v1.0 대상 이슈에 태그 지정
 bd label add bd-42 v1.0
 bd label add bd-43 v1.0
 bd label add bd-44 v1.0
 
-# Track v1.0 progress
-bd list --label v1.0 --status closed    # Done
-bd list --label v1.0 --status open      # Remaining
-bd stats  # Overall progress
+# v1.0 진행 상황 추적
+bd list --label v1.0 --status closed    # 완료
+bd list --label v1.0 --status open      # 남음
+bd stats  # 전체 진행 상황
 
-# Mark critical items
+# 중요 항목 표시
 bd label add bd-45 v1.0
 bd label add bd-45 release-blocker
 ```
 
-### Component-Based Work Distribution
+### 구성 요소 기반 작업 분배
 ```bash
-# Backend team picks up work
+# 백엔드 팀이 작업 가져오기
 bd ready --json | jq '.[] | select(.labels[]? == "backend")'
 
-# Frontend team finds small tasks
+# 프런트엔드 팀이 작은 작업 찾기
 bd list --status open --label frontend,small
 
-# Find help-wanted items for new contributors
+# 새 기여자용 help-wanted 항목 찾기
 bd list --label help-wanted,good-first-issue
 ```
 
-## Label Management
+## 레이블 관리
 
-### Listing Labels
+### 레이블 나열
 ```bash
-# Labels on a specific issue
+# 특정 이슈의 레이블
 bd label list bd-42
 
-# All labels in database with usage counts
+# 데이터베이스의 모든 레이블과 사용 횟수
 bd label list-all
 
-# JSON output for scripting
+# 스크립트용 JSON 출력
 bd label list-all --json
 ```
 
-Output:
+출력:
 ```json
 [
   {"label": "auth", "count": 5},
@@ -303,219 +303,219 @@ Output:
 ]
 ```
 
-### Bulk Operations
+### 일괄 작업
 
-Add labels in batch during creation:
+생성 중 레이블을 일괄 추가합니다.
 ```bash
-bd create "Issue" -l label1,label2,label3
+bd create "이슈" -l label1,label2,label3
 ```
 
-Script to add label to multiple issues:
+여러 이슈에 레이블을 추가하는 스크립트:
 ```bash
-# Add "needs-review" to all in_progress issues
+# 모든 in_progress 이슈에 "needs-review" 추가
 bd list --status in_progress --json | jq -r '.[].id' | while read id; do
   bd label add "$id" needs-review
 done
 ```
 
-Remove label from multiple issues:
+여러 이슈에서 레이블을 제거합니다.
 ```bash
-# Remove "urgent" from closed issues
+# 닫힌 이슈에서 "urgent" 제거
 bd list --status closed --label urgent --json | jq -r '.[].id' | while read id; do
   bd label remove "$id" urgent
 done
 ```
 
-## Integration with Git Workflow
+## Git 워크플로와 통합
 
-Labels are stored in the Dolt database and synced automatically with all issue data:
+레이블은 Dolt 데이터베이스에 저장되며 모든 이슈 데이터와 함께 자동으로 동기화됩니다.
 
 ```bash
-# Make changes
-bd create "Fix bug" -l backend,urgent
+# 변경
+bd create "버그 수정" -l backend,urgent
 bd label add bd-42 needs-review
 
-# Changes are committed to Dolt history automatically
-# Sync with remotes when ready:
+# 변경 사항은 Dolt 기록에 자동 커밋
+# 준비되면 원격과 동기화:
 bd dolt push
 
-# After pulling changes:
+# 변경 사항을 풀한 후:
 bd dolt pull
-bd list --label backend  # Fresh data including labels
+bd list --label backend  # 레이블을 포함한 최신 데이터
 ```
 
-## Markdown Import/Export
+## Markdown 가져오기/내보내기
 
-Labels are preserved when importing from markdown:
+Markdown에서 가져올 때 레이블이 보존됩니다.
 
 ```markdown
-# Fix Authentication Bug
+# 인증 버그 수정
 
-### Type
+### 유형
 bug
 
-### Priority
+### 우선순위
 1
 
-### Labels
+### 레이블
 auth, backend, urgent, needs-review
 
-### Description
-Users can't log in after recent deployment.
+### 설명
+최근 배포 후 사용자가 로그인할 수 없습니다.
 ```
 
 ```bash
 bd create -f issue.md
-# Creates issue with all four labels
+# 네 레이블이 모두 있는 이슈 생성
 ```
 
-## Best Practices
+## 모범 사례
 
-### 1. Establish Conventions Early
-Document your team's label taxonomy:
+### 1. 규칙을 일찍 수립
+팀의 레이블 분류 체계를 문서화합니다.
 ```bash
-# Add to project README or CONTRIBUTING.md
-- Use lowercase, hyphen-separated (e.g., `good-first-issue`)
-- Prefix team labels (e.g., `team-infra`, `team-product`)
-- Use consistent size labels (`small`, `medium`, `large`)
+# 프로젝트 README 또는 CONTRIBUTING.md에 추가
+- 소문자와 하이픈 구분 사용(예: `good-first-issue`)
+- 팀 레이블에 접두사 사용(예: `team-infra`, `team-product`)
+- 일관된 규모 레이블 사용(`small`, `medium`, `large`)
 ```
 
-### 2. Don't Overuse Labels
-Labels are flexible, but too many can cause confusion. Prefer:
-- 5-10 core technical labels (`backend`, `frontend`, `api`, etc.)
-- 3-5 domain labels per project
-- Standard process labels (`needs-review`, `needs-tests`)
-- Release labels as needed
+### 2. 레이블을 과도하게 사용하지 않기
+레이블은 유연하지만 너무 많으면 혼란을 일으킬 수 있습니다. 다음을 권장합니다.
+- 핵심 기술 레이블 5~10개(`backend`, `frontend`, `api` 등)
+- 프로젝트당 도메인 레이블 3~5개
+- 표준 프로세스 레이블(`needs-review`, `needs-tests`)
+- 필요한 릴리스 레이블
 
-### 3. Clean Up Unused Labels
-Periodically review:
+### 3. 사용하지 않는 레이블 정리
+주기적으로 검토합니다.
 ```bash
 bd label list-all
-# Remove obsolete labels from issues
+# 이슈에서 오래된 레이블 제거
 ```
 
-### 4. Use Labels for Filtering, Not Search
-Labels are for categorization, not free-text search:
-- ✅ Good: `backend`, `auth`, `urgent`
-- ❌ Bad: `fix-the-login-bug`, `john-asked-for-this`
+### 4. 검색이 아니라 필터링에 레이블 사용
+레이블은 자유 텍스트 검색이 아니라 분류에 사용합니다.
+- ✅ 좋음: `backend`, `auth`, `urgent`
+- ❌ 나쁨: `fix-the-login-bug`, `john-asked-for-this`
 
-### 5. Combine with Dependencies
-Labels + dependencies = powerful organization:
+### 5. 의존성과 조합
+레이블 + 의존성 = 강력한 구성:
 ```bash
-# Epic with labeled subtasks
-bd create "Auth system rewrite" -t epic -p 1 -l auth,v2.0
-bd create "Implement JWT" -t task -p 1 -l auth,backend --deps parent-child:bd-42
-bd create "Update login UI" -t task -p 1 -l auth,frontend --deps parent-child:bd-42
+# 레이블이 있는 하위 작업을 포함한 Epic
+bd create "인증 시스템 재작성" -t epic -p 1 -l auth,v2.0
+bd create "JWT 구현" -t task -p 1 -l auth,backend --deps parent-child:bd-42
+bd create "로그인 UI 업데이트" -t task -p 1 -l auth,frontend --deps parent-child:bd-42
 
-# Find all v2.0 auth work
+# 모든 v2.0 인증 작업 찾기
 bd list --label auth,v2.0
 ```
 
-## AI Agent Usage
+## AI 에이전트 사용법
 
-Labels are especially useful for AI agents managing complex workflows:
+레이블은 복잡한 워크플로를 관리하는 AI 에이전트에 특히 유용합니다.
 
 ```bash
-# Auto-label discovered work
-bd create "Found TODO in auth.go" -t task -p 2 -l auto-generated,technical-debt
+# 발견한 작업에 자동 레이블 지정
+bd create "auth.go에서 TODO 발견" -t task -p 2 -l auto-generated,technical-debt
 
-# Filter for agent review
+# 에이전트 검토용 필터링
 bd list --label needs-review --status in_progress --json
 
-# Track automation metadata
+# 자동화 메타데이터 추적
 bd label add bd-42 ai-generated
 bd label add bd-42 needs-human-review
 ```
 
-Example agent workflow:
+에이전트 워크플로 예시:
 ```bash
-# Agent discovers issues during refactor
-bd create "Extract validateToken function" -t chore -p 2 \
+# 에이전트가 리팩터링 중 이슈 발견
+bd create "validateToken 함수 추출" -t chore -p 2 \
   -l technical-debt,backend,auth,small \
   --deps discovered-from:bd-10
 
-# Agent marks work for review
+# 에이전트가 검토할 작업 표시
 bd update bd-42 --claim
-# ... agent does work ...
+# ... 에이전트 작업 ...
 bd label add bd-42 needs-review
 bd label add bd-42 ai-generated
 
-# Human reviews and approves
+# 사람이 검토하고 승인
 bd label remove bd-42 needs-review
 bd label add bd-42 approved
 bd close bd-42
 ```
 
-## Labels as State Cache
+## 상태 캐시로서의 레이블
 
-Labels can cache operational state for fast queries, enabling patterns where beads track both immutable history (events) and current state (labels).
+레이블은 빠른 쿼리를 위해 운영 상태를 캐시할 수 있으므로 beads가 불변 기록(이벤트)과 현재 상태(레이블)를 모두 추적하는 패턴을 사용할 수 있습니다.
 
-### The Pattern
+### 패턴
 
-**Convention:** `<dimension>:<value>`
+**규칙:** `<dimension>:<value>`
 
-Examples:
-- `patrol:muted` / `patrol:active` - patrol suppression state
-- `mode:degraded` / `mode:normal` - operational mode
-- `status:idle` / `status:working` - worker status
-- `health:healthy` / `health:failing` - component health
+예시:
+- `patrol:muted` / `patrol:active` - 순찰 억제 상태
+- `mode:degraded` / `mode:normal` - 운영 모드
+- `status:idle` / `status:working` - 작업자 상태
+- `health:healthy` / `health:failing` - 구성 요소 상태
 
-**Implementation:**
-1. Create an event bead (full context, immutable history)
-2. Update the role bead's labels (current state cache)
+**구현:**
+1. 이벤트 bead 생성(전체 컨텍스트, 불변 기록)
+2. 역할 bead의 레이블 업데이트(현재 상태 캐시)
 
 ```bash
-# Event: Full record of what happened and why
-bd create "Muted patrol: user requested during debugging" -t event \
+# 이벤트: 발생한 일과 이유의 전체 기록
+bd create "순찰 음소거: 디버깅 중 사용자 요청" -t event \
   -l event-type:patrol-muted,actor:observer,reason:user-request
 
-# State: Update the role bead's label to reflect current state
+# 상태: 현재 상태를 반영하도록 역할 bead의 레이블 업데이트
 bd label remove beads/observer patrol:active
 bd label add beads/observer patrol:muted
 ```
 
-**Key principle:** Events are the source of truth. Labels are a cache for fast queries.
+**핵심 원칙:** 이벤트가 원본입니다. 레이블은 빠른 쿼리를 위한 캐시입니다.
 
-### Why This Pattern?
+### 이 패턴을 사용하는 이유
 
-**Fast queries without event scanning:**
+**이벤트 스캔 없이 빠른 쿼리:**
 ```bash
-# Without labels-as-state: scan all events to find current patrol state
-bd list --type event | grep "patrol" | tail -1  # Slow, fragile
+# 상태 레이블 없이: 현재 순찰 상태를 찾기 위해 모든 이벤트 스캔
+bd list --type event | grep "patrol" | tail -1  # 느리고 취약함
 
-# With labels-as-state: direct query
-bd show beads/observer | grep "patrol:"  # Instant
+# 상태 레이블 사용: 직접 쿼리
+bd show beads/observer | grep "patrol:"  # 즉시
 ```
 
-**History preserved:**
+**기록 보존:**
 ```bash
-# When was patrol muted? Why? Who did it?
+# 순찰을 언제, 왜, 누가 음소거했는가?
 bd list --label event-type:patrol-muted --type event
 ```
 
-**State recovery:**
+**상태 복구:**
 ```bash
-# If labels get corrupted, rebuild from events
+# 레이블이 손상되면 이벤트에서 다시 빌드
 bd list --type event --label event-type:patrol-muted | tail -1
-# Then re-apply the label
+# 그런 다음 레이블 재적용
 ```
 
-### Common State Dimensions
+### 일반적인 상태 차원
 
-| Dimension | Values | Use Case |
+| 차원 | 값 | 사용 사례 |
 |-----------|--------|----------|
-| `patrol:` | `active`, `muted` | Patrol cycle suppression |
-| `mode:` | `normal`, `degraded`, `maintenance` | Operational mode |
-| `status:` | `idle`, `working`, `blocked` | Worker activity |
-| `health:` | `healthy`, `warning`, `failing` | Component health |
-| `lock:` | `unlocked`, `locked` | Exclusive access control |
+| `patrol:` | `active`, `muted` | 순찰 주기 억제 |
+| `mode:` | `normal`, `degraded`, `maintenance` | 운영 모드 |
+| `status:` | `idle`, `working`, `blocked` | 작업자 활동 |
+| `health:` | `healthy`, `warning`, `failing` | 구성 요소 상태 |
+| `lock:` | `unlocked`, `locked` | 배타적 접근 제어 |
 
-### State Transitions
+### 상태 전환
 
-Always create an event before changing state labels:
+상태 레이블을 변경하기 전에 항상 이벤트를 생성합니다.
 
 ```bash
-# Function to transition state with audit trail
+# 감사 추적과 함께 상태를 전환하는 함수
 transition_state() {
   local role="$1"
   local dimension="$2"
@@ -523,114 +523,114 @@ transition_state() {
   local new_value="$4"
   local reason="$5"
 
-  # Record the transition
-  bd create "State change: $dimension $old_value → $new_value" -t event \
+  # 전환 기록
+  bd create "상태 변경: $dimension $old_value → $new_value" -t event \
     -l "event-type:state-change,dimension:$dimension,from:$old_value,to:$new_value"
 
-  # Update the cache
+  # 캐시 업데이트
   bd label remove "$role" "$dimension:$old_value"
   bd label add "$role" "$dimension:$new_value"
 }
 
-# Usage
-transition_state beads/observer patrol active muted "User debugging session"
+# 사용법
+transition_state beads/observer patrol active muted "사용자 디버깅 세션"
 ```
 
-### Querying State
+### 상태 쿼리
 
 ```bash
-# Current state of a role
+# 역할의 현재 상태
 bd label list beads/observer | grep ":"
 
-# All roles in a specific state
+# 특정 상태의 모든 역할
 bd list --label patrol:muted
 
-# Roles NOT in expected state
+# 예상 상태가 아닌 역할
 bd list --label-any mode:degraded,health:failing
 
-# History of state changes
+# 상태 변경 기록
 bd list --type event --label event-type:state-change
 ```
 
-### Best Practices
+### 모범 사례
 
-1. **Use namespaced dimensions** - Prefix with role type if ambiguous
-2. **Keep value sets small** - 2-4 values per dimension
-3. **Document valid values** - List allowed values in role docs
-4. **Always create events first** - Never update labels without history
-5. **Treat labels as ephemeral** - Rebuild from events if corrupted
+1. **네임스페이스가 지정된 차원 사용** - 모호하면 역할 유형을 접두사로 사용합니다.
+2. **값 집합을 작게 유지** - 차원당 값 2~4개를 사용합니다.
+3. **유효한 값 문서화** - 역할 문서에 허용되는 값을 나열합니다.
+4. **항상 이벤트를 먼저 생성** - 기록 없이 레이블을 업데이트하지 않습니다.
+5. **레이블을 임시로 취급** - 손상되면 이벤트에서 다시 빌드합니다.
 
-### Future Helpers
+### 향후 도우미
 
-The pattern suggests helper commands (see bd-7l67):
+이 패턴은 다음 도우미 명령을 제안합니다(bd-7l67 참조).
 ```bash
-# Query current state
+# 현재 상태 쿼리
 bd state beads/observer patrol     # → "muted"
 
-# Transition with automatic event creation
-bd set-state beads/observer patrol=active --reason "Debugging complete"
+# 자동 이벤트 생성과 함께 전환
+bd set-state beads/observer patrol=active --reason "디버깅 완료"
 ```
 
-Until helpers exist, use the manual pattern above.
+도우미가 생길 때까지 위의 수동 패턴을 사용하세요.
 
-## Advanced Patterns
+## 고급 패턴
 
-### Component Matrix
-Track issues across multiple dimensions:
+### 구성 요소 매트릭스
+여러 차원에서 이슈를 추적합니다.
 ```bash
-# Backend + auth + high priority
+# 백엔드 + 인증 + 높은 우선순위
 bd list --label backend,auth --priority 1
 
-# Any frontend work that's small
+# 규모가 작은 모든 프런트엔드 작업
 bd list --label-any frontend,ui --label small
 
-# Critical issues across all components
+# 모든 구성 요소의 치명적 이슈
 bd list --priority 0 --label-any backend,frontend,infrastructure
 ```
 
-### Sprint Planning
+### 스프린트 계획
 ```bash
-# Label issues for sprint
+# 스프린트 대상 이슈에 레이블 지정
 for id in bd-42 bd-43 bd-44 bd-45; do
   bd label add "$id" sprint-12
 done
 
-# Track sprint progress
-bd list --label sprint-12 --status closed    # Velocity
-bd list --label sprint-12 --status open      # Remaining
-bd stats | grep "In Progress"                # Current WIP
+# 스프린트 진행 상황 추적
+bd list --label sprint-12 --status closed    # 속도
+bd list --label sprint-12 --status open      # 남음
+bd stats | grep "In Progress"                # 현재 WIP
 ```
 
-### Technical Debt Tracking
+### 기술 부채 추적
 ```bash
-# Mark debt
-bd create "Refactor legacy parser" -t chore -p 3 -l technical-debt,large
+# 부채 표시
+bd create "레거시 파서 리팩터링" -t chore -p 3 -l technical-debt,large
 
-# Find debt to tackle
+# 처리할 부채 찾기
 bd list --label technical-debt --label small
-bd list --label technical-debt --priority 1  # High-priority debt
+bd list --label technical-debt --priority 1  # 높은 우선순위 부채
 ```
 
-### Breaking Change Coordination
+### 호환성을 깨는 변경 조율
 ```bash
-# Identify breaking changes
+# 호환성을 깨는 변경 식별
 bd label add bd-42 breaking-change
 bd label add bd-42 v2.0
 
-# Find all breaking changes for next major release
+# 다음 메이저 릴리스의 호환성을 깨는 변경 모두 찾기
 bd list --label breaking-change,v2.0
 
-# Ensure they're documented
+# 문서화 여부 확인
 bd list --label breaking-change --label needs-docs
 ```
 
-## Operational State Pattern (Labels as Cache)
+## 운영 상태 패턴(캐시로서의 레이블)
 
-For orchestration systems, labels can cache the current operational state of "role beads" (issues representing agents or system components). This enables fast state queries without scanning event history.
+오케스트레이션 시스템에서 레이블은 "역할 bead"(에이전트 또는 시스템 구성 요소를 나타내는 이슈)의 현재 운영 상태를 캐시할 수 있습니다. 이벤트 기록을 스캔하지 않고 빠르게 상태를 쿼리할 수 있습니다.
 
-### Convention: `<dimension>:<value>`
+### 규칙: `<dimension>:<value>`
 
-Use colon-separated labels with a dimension prefix and value suffix:
+차원 접두사와 값 접미사를 콜론으로 구분한 레이블을 사용합니다.
 
 ```
 patrol:muted      patrol:active
@@ -639,154 +639,154 @@ status:idle       status:working
 health:healthy    health:failing
 ```
 
-### The Pattern
+### 패턴
 
-1. **Create an event bead** with full context (immutable, audit trail)
-2. **Update the role bead's labels** to reflect current state (fast lookup)
+1. 전체 컨텍스트가 있는 **이벤트 bead 생성**(불변, 감사 추적)
+2. 현재 상태를 반영하도록 **역할 bead의 레이블 업데이트**(빠른 조회)
 
 ```bash
-# 1. Record the event (source of truth)
-bd create "Muted patrol for agent-abc" -t event \
+# 1. 이벤트 기록(원본)
+bd create "agent-abc 순찰 음소거" -t event \
   --parent agent-abc \
-  -d "Reason: investigating stuck worker. Expected duration: 30m"
+  -d "이유: 멈춘 작업자 조사. 예상 시간: 30분"
 
-# 2. Update the cached state label
+# 2. 캐시된 상태 레이블 업데이트
 bd label remove agent-abc patrol:active
 bd label add agent-abc patrol:muted
 ```
 
-### Why This Pattern?
+### 이 패턴을 사용하는 이유
 
-**Events are source of truth. Labels are cache.**
+**이벤트가 원본이고 레이블은 캐시입니다.**
 
-| Approach | Events Only | Labels as Cache |
+| 접근 방식 | 이벤트만 사용 | 레이블을 캐시로 사용 |
 |----------|-------------|-----------------|
-| Query current state | Scan all events, find latest | `bd list --label patrol:muted` |
-| Query state history | Natural (all events exist) | Query events |
-| Audit trail | Complete | Complete (events still exist) |
-| Performance | O(n) events | O(1) label lookup |
+| 현재 상태 쿼리 | 모든 이벤트를 스캔해 최신 항목 찾기 | `bd list --label patrol:muted` |
+| 상태 기록 쿼리 | 자연스러움(모든 이벤트 존재) | 이벤트 쿼리 |
+| 감사 추적 | 완전함 | 완전함(이벤트가 계속 존재) |
+| 성능 | O(n) 이벤트 | O(1) 레이블 조회 |
 
-The pattern gives you both: complete history via events, fast queries via labels.
+이 패턴은 이벤트를 통한 전체 기록과 레이블을 통한 빠른 쿼리를 모두 제공합니다.
 
-### Example: Agent Role States
+### 예시: 에이전트 역할 상태
 
 ```bash
-# Create a role bead for an agent
+# 에이전트용 역할 bead 생성
 bd create "witness-alpha" -t role -l patrol:active,mode:normal,health:healthy
 
-# Agent enters degraded mode
-bd create "Degraded: high error rate" -t event --parent witness-alpha \
-  -d "Error rate exceeded 5%. Reducing poll frequency."
+# 에이전트가 성능 저하 모드 진입
+bd create "성능 저하: 높은 오류율" -t event --parent witness-alpha \
+  -d "오류율이 5%를 초과했습니다. 폴링 빈도를 줄입니다."
 bd label remove witness-alpha mode:normal
 bd label add witness-alpha mode:degraded
 
-# Query current state
-bd list --label mode:degraded --type role  # All degraded roles
+# 현재 상태 쿼리
+bd list --label mode:degraded --type role  # 성능이 저하된 모든 역할
 
-# Agent recovers
-bd create "Recovered: error rate normal" -t event --parent witness-alpha
+# 에이전트 복구
+bd create "복구됨: 오류율 정상" -t event --parent witness-alpha
 bd label remove witness-alpha mode:degraded
 bd label add witness-alpha mode:normal
 ```
 
-### Common Dimensions
+### 일반적인 차원
 
-| Dimension | Values | Use Case |
+| 차원 | 값 | 사용 사례 |
 |-----------|--------|----------|
-| `patrol` | `active`, `muted`, `suspended` | Agent patrol cycles |
-| `mode` | `normal`, `degraded`, `maintenance` | Operational modes |
-| `status` | `idle`, `working`, `blocked` | Work state |
-| `health` | `healthy`, `warning`, `failing` | Health checks |
-| `sync` | `current`, `stale`, `syncing` | Sync state |
+| `patrol` | `active`, `muted`, `suspended` | 에이전트 순찰 주기 |
+| `mode` | `normal`, `degraded`, `maintenance` | 운영 모드 |
+| `status` | `idle`, `working`, `blocked` | 작업 상태 |
+| `health` | `healthy`, `warning`, `failing` | 상태 검사 |
+| `sync` | `current`, `stale`, `syncing` | 동기화 상태 |
 
-### Best Practices
+### 모범 사례
 
-1. **Always create the event first** - Labels are cache; events are truth
-2. **Remove old value before adding new** - Prevents dimension:value1 + dimension:value2 conflicts
-3. **Use consistent dimension names** - Establish team conventions early
-4. **Keep dimensions orthogonal** - patrol and mode are independent concerns
+1. **항상 이벤트를 먼저 생성** - 레이블은 캐시이고 이벤트가 원본입니다.
+2. **새 값을 추가하기 전에 이전 값 제거** - dimension:value1 + dimension:value2 충돌을 방지합니다.
+3. **일관된 차원 이름 사용** - 팀 규칙을 일찍 수립합니다.
+4. **차원을 직교하게 유지** - patrol과 mode는 독립된 관심사입니다.
 
-### Querying State
+### 상태 쿼리
 
 ```bash
-# Find all muted patrols
+# 음소거된 모든 순찰 찾기
 bd list --label patrol:muted
 
-# Find healthy agents in normal mode
+# 정상 모드의 정상 에이전트 찾기
 bd list --label health:healthy,mode:normal
 
-# Find any non-healthy agents
+# 정상 상태가 아닌 에이전트 찾기
 bd list --label-any health:warning,health:failing
 
-# Get state for a specific role
+# 특정 역할의 상태 가져오기
 bd label list witness-alpha
 # Output: patrol:active, mode:normal, health:healthy
 ```
 
-### Helper Commands
+### 도우미 명령
 
-For convenience, use these helpers:
+편의를 위해 다음 도우미를 사용합니다.
 
 ```bash
-# Query a specific dimension
+# 특정 차원 쿼리
 bd state witness-alpha patrol
 # Output: active
 
-# List all state dimensions
+# 모든 상태 차원 나열
 bd state list witness-alpha
 # Output:
 #   patrol: active
 #   mode: normal
 #   health: healthy
 
-# Set state (creates event + updates label atomically)
-bd set-state witness-alpha patrol=muted --reason "Investigating issue"
+# 상태 설정(이벤트 생성 + 레이블 원자적 업데이트)
+bd set-state witness-alpha patrol=muted --reason "이슈 조사 중"
 ```
 
-The `set-state` command atomically:
-1. Creates an event bead with the reason (source of truth)
-2. Removes the old dimension label if present
-3. Adds the new dimension:value label (cache)
+`set-state` 명령은 다음을 원자적으로 수행합니다.
+1. 이유가 있는 이벤트 bead 생성(원본)
+2. 이전 차원 레이블이 있으면 제거
+3. 새 dimension:value 레이블 추가(캐시)
 
-See [bd set-state](/cli-reference/set-state) for full command reference.
+전체 명령 참조는 [bd set-state](/cli-reference/set-state)를 참조하세요.
 
-## Troubleshooting
+## 문제 해결
 
-### Labels Not Showing in List
-Labels require explicit fetching. The `bd list` command shows issues but not labels in human output (only in JSON).
+### 목록에 레이블이 표시되지 않음
+레이블은 명시적으로 가져와야 합니다. `bd list` 명령은 사람이 읽는 출력에서 이슈를 표시하지만 레이블은 표시하지 않습니다(JSON에만 표시).
 
 ```bash
-# See labels in JSON
+# JSON에서 레이블 보기
 bd list --json | jq '.[] | {id, labels}'
 
-# See labels for specific issue
+# 특정 이슈의 레이블 보기
 bd show bd-42 --json | jq '.labels'
 bd label list bd-42
 ```
 
-### Label Filtering Not Working
-Check label names for exact matches (case-sensitive):
+### 레이블 필터링이 작동하지 않음
+레이블 이름이 정확히 일치하는지 확인하세요(대소문자 구분).
 ```bash
-# These are different labels:
-bd label add bd-42 Backend    # Capital B
-bd list --label backend       # Won't match
+# 다음은 서로 다른 레이블:
+bd label add bd-42 Backend    # 대문자 B
+bd list --label backend       # 일치하지 않음
 
-# List all labels to see exact names
+# 정확한 이름을 보려면 모든 레이블 나열
 bd label list-all
 ```
 
-### Syncing Labels
-Labels are stored in the Dolt database. If labels seem out of sync:
+### 레이블 동기화
+레이블은 Dolt 데이터베이스에 저장됩니다. 레이블이 동기화되지 않은 것 같으면 다음을 실행합니다.
 ```bash
-# Pull from Dolt remote
+# Dolt 원격에서 풀
 bd dolt pull
 
-# Or run doctor to diagnose
+# 또는 doctor를 실행해 진단
 bd doctor
 ```
 
-## See Also
+## 함께 보기
 
-- [README.md](https://github.com/gastownhall/beads/blob/main/README.md) - Main documentation
-- [AGENTS.md](https://github.com/gastownhall/beads/blob/main/AGENTS.md) - AI agent integration guide
-- [Advanced Features](/reference/advanced) - Advanced features and configuration
+- [README.md](https://github.com/gastownhall/beads/blob/main/README.md) - 주요 문서
+- [AGENTS.md](https://github.com/gastownhall/beads/blob/main/AGENTS.md) - AI 에이전트 통합 가이드
+- [고급 기능](/reference/advanced) - 고급 기능 및 구성

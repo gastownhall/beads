@@ -1,52 +1,53 @@
 ---
 title: Junie
-description: Set up beads for Junie, the JetBrains AI agent, with a guidelines file and an MCP server configuration
+description: 지침 파일과 MCP 서버 설정으로 JetBrains AI 에이전트 Junie용 Beads 설정
 ---
 
-How to use beads with Junie (JetBrains AI Agent).
+Junie(JetBrains AI 에이전트)에서 Beads를 사용하는 방법입니다.
 
-## Setup
+## 설정
 
-### Quick Setup
+### 빠른 설정
 
 ```bash
 bd setup junie
 ```
 
-This creates:
-- **`.junie/guidelines.md`** - Agent instructions for beads workflow
-- **`.junie/mcp/mcp.json`** - MCP server configuration
+다음 항목을 생성합니다.
 
-### Verify Setup
+- **`.junie/guidelines.md`** - Beads 워크플로용 에이전트 지침
+- **`.junie/mcp/mcp.json`** - MCP 서버 설정
+
+### 설정 확인
 
 ```bash
 bd setup junie --check
 ```
 
-## How It Works
+## 작동 방식
 
-1. **Session starts** → Junie reads `.junie/guidelines.md` for workflow context
-2. **MCP tools available** → Junie can use beads MCP tools directly
-3. **You work** → Use `bd` CLI commands or MCP tools
-4. **Session ends** → Run `bd dolt push` to push changes to Dolt remote
+1. **세션 시작**: Junie가 워크플로 컨텍스트를 위해 `.junie/guidelines.md`를 읽습니다.
+2. **MCP 도구 사용 가능**: Junie가 Beads MCP 도구를 직접 사용할 수 있습니다.
+3. **작업**: `bd` CLI 명령 또는 MCP 도구를 사용합니다.
+4. **세션 종료**: `bd dolt push`를 실행하여 변경 사항을 Dolt 원격에 push합니다.
 
-## Configuration Files
+## 설정 파일
 
-### Guidelines (`.junie/guidelines.md`)
+### 지침(`.junie/guidelines.md`)
 
-Contains workflow instructions that Junie reads automatically:
-- Core workflow rules
-- Command reference
-- Issue types and priorities
-- MCP tool documentation
+Junie가 자동으로 읽는 워크플로 지침을 포함합니다.
 
-### MCP Config (`.junie/mcp/mcp.json`)
+- 핵심 워크플로 규칙
+- 명령 참조
+- 이슈 유형과 우선순위
+- MCP 도구 문서
+
+### MCP 설정(`.junie/mcp/mcp.json`)
 
 <Warning>
-`bd setup junie` currently writes an MCP config that invokes `bd mcp`, a
-command that does not exist in current bd builds — that config will not
-start a server. Until the recipe is fixed, point Junie at the standalone
-`beads-mcp` server instead:
+`bd setup junie`는 현재 `bd` build에 존재하지 않는 `bd mcp`를 호출하는 MCP 설정을
+작성하므로 해당 설정으로 서버를 시작할 수 없습니다. 레시피가 수정될 때까지 Junie가
+대신 독립 실행형 `beads-mcp` 서버를 가리키게 하세요.
 </Warning>
 
 ```json
@@ -60,149 +61,149 @@ start a server. Until the recipe is fixed, point Junie at the standalone
 }
 ```
 
-See [MCP Server](/integrations/mcp-server) for the server's tool catalog
-and other install options (pip/pipx).
+서버의 도구 catalog와 다른 설치 옵션(pip/pipx)은 [MCP
+서버](/integrations/mcp-server)를 참고하세요.
 
-## CLI Commands
+## CLI 명령
 
-You can also use the `bd` CLI directly:
+`bd` CLI를 직접 사용할 수도 있습니다.
 
-### Creating Issues
+### 이슈 생성
 
 ```bash
-# Always include description for context
-bd create "Fix authentication bug" \
-  --description="Login fails with special characters in password" \
+# 컨텍스트를 위해 항상 설명 포함
+bd create "인증 버그 수정" \
+  --description="비밀번호에 특수 문자가 있으면 로그인 실패" \
   -t bug -p 1 --json
 
-# Link discovered issues
-bd create "Found SQL injection" \
-  --description="User input not sanitized in query builder" \
+# 발견한 이슈 연결
+bd create "SQL injection 발견" \
+  --description="query builder에서 사용자 입력이 sanitize되지 않음" \
   --deps discovered-from:bd-42 --json
 ```
 
-### Working on Issues
+### 이슈 작업
 
 ```bash
-# Find ready work
+# 준비된 작업 찾기
 bd ready --json
 
-# Start work
+# 작업 시작
 bd update bd-42 --claim --json
 
-# Complete work
-bd close bd-42 --reason "Fixed in commit abc123" --json
+# 작업 완료
+bd close bd-42 --reason "commit abc123에서 수정" --json
 ```
 
-### Querying
+### 조회
 
 ```bash
-# List open issues
+# 열린 이슈 나열
 bd list --status open --json
 
-# Show issue details
+# 이슈 상세 정보 표시
 bd show bd-42 --json
 
-# Check blocked issues
+# 차단된 이슈 확인
 bd blocked --json
 ```
 
-### Syncing
+### 동기화
 
 ```bash
-# ALWAYS run at session end
+# 세션 종료 시 항상 실행
 bd dolt push
 ```
 
-## Best Practices
+## 모범 사례
 
-### Always Use `--json`
+### 항상 `--json` 사용
 
 ```bash
-bd list --json          # Parse programmatically
-bd create "Task" --json # Get issue ID from output
-bd show bd-42 --json    # Structured data
+bd list --json            # 프로그래밍 방식으로 parse
+bd create "작업" --json  # 출력에서 이슈 ID 가져오기
+bd show bd-42 --json      # 구조화된 데이터
 ```
 
-### Always Include Descriptions
+### 항상 설명 포함
 
 ```bash
-# Good
-bd create "Fix auth bug" \
-  --description="Login fails when password contains quotes" \
+# 좋은 예
+bd create "인증 버그 수정" \
+  --description="비밀번호에 따옴표가 있으면 로그인 실패" \
   -t bug -p 1 --json
 
-# Bad - no context for future work
-bd create "Fix auth bug" -t bug -p 1 --json
+# 나쁜 예 - 향후 작업을 위한 컨텍스트 없음
+bd create "인증 버그 수정" -t bug -p 1 --json
 ```
 
-### Link Related Work
+### 관련 작업 연결
 
 ```bash
-# When you discover issues during work
-bd create "Found related bug" \
+# 작업 중 이슈를 발견한 경우
+bd create "관련 버그 발견" \
   --deps discovered-from:bd-current --json
 ```
 
-### Push Before Session End
+### 세션 종료 전 push
 
 ```bash
-# ALWAYS run before ending
+# 종료 전에 항상 실행
 bd dolt push
 ```
 
-## Troubleshooting
+## 문제 해결
 
-### Guidelines not loaded
+### 지침이 로드되지 않음
 
 ```bash
-# Check setup
+# 설정 확인
 bd setup junie --check
 
-# Reinstall if needed
+# 필요한 경우 다시 설치
 bd setup junie
 ```
 
-### MCP tools not available
+### MCP 도구를 사용할 수 없음
 
 ```bash
-# Verify MCP config exists and points at the beads-mcp server
+# MCP 설정이 있고 beads-mcp 서버를 가리키는지 확인
 cat .junie/mcp/mcp.json
 
-# Verify the server package is installed
+# 서버 package 설치 확인
 pip show beads-mcp
 ```
 
-### Changes not syncing
+### 변경 사항이 동기화되지 않음
 
 ```bash
-# Force push
+# 강제 push
 bd dolt push
 
-# Check system health
+# 시스템 상태 확인
 bd doctor
 ```
 
-### Database not found
+### 데이터베이스를 찾을 수 없음
 
 ```bash
-# Initialize beads
+# Beads 초기화
 bd init --quiet
 ```
 
-## Removing Integration
+## 통합 제거
 
 ```bash
 bd setup junie --remove
 ```
 
-This removes:
+다음 항목을 제거합니다.
 - `.junie/guidelines.md`
 - `.junie/mcp/mcp.json`
-- Empty `.junie/mcp/` and `.junie/` directories
+- 비어 있는 `.junie/mcp/` 및 `.junie/` 디렉터리
 
-## See Also
+## 관련 문서
 
-- [MCP Server](/integrations/mcp-server) - MCP server details
-- [Claude Code](/integrations/claude-code) - Similar hook-based integration
-- [IDE Setup](/getting-started/ide-setup) - Other editors
+- [MCP 서버](/integrations/mcp-server) - MCP 서버 상세 정보
+- [Claude Code](/integrations/claude-code) - 유사한 hook 기반 통합
+- [IDE 설정](/getting-started/ide-setup) - 기타 편집기

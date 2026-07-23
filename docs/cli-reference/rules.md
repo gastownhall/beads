@@ -1,13 +1,13 @@
 ---
 title: "bd rules"
-description: "Audit and compact Claude rules"
+description: "Claude 규칙을 감사하고 압축합니다"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc rules`.
+`bd help --doc rules`에서 생성되었습니다.
 
-Audit and compact Claude rules
+Claude 규칙을 감사하고 압축합니다
 
 ```
 bd rules [flags]
@@ -15,32 +15,32 @@ bd rules [flags]
 
 ## bd rules audit
 
-Scan rules for contradictions and merge opportunities
+규칙에서 모순과 병합 기회를 검색합니다
 
 ```
 bd rules audit [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --path string       Path to rules directory (default ".claude/rules/")
-      --threshold float   Jaccard similarity threshold (default 0.6)
+      --path string       규칙 디렉터리 경로(기본값 ".claude/rules/")
+      --threshold float   Jaccard 유사도 임곗값(기본값 0.6)
 ```
 
 ## bd rules compact
 
-Merge related rules into composites
+관련 규칙을 복합 규칙으로 병합합니다
 
 ```
 bd rules compact [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --auto            Apply audit suggestions
-      --dry-run         Preview without applying
-      --group strings   Rule names to merge
-      --path string     Path to rules directory (default ".claude/rules/")
+      --auto            감사 제안 적용
+      --dry-run         적용하지 않고 미리 보기
+      --group strings   병합할 규칙 이름
+      --path string     규칙 디렉터리 경로(기본값 ".claude/rules/")
 ```

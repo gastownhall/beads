@@ -1,26 +1,26 @@
 ---
 title: "bd duplicate"
-description: "Mark an issue as a duplicate of a canonical issue."
+description: "이슈를 기준 이슈의 중복으로 표시합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc duplicate`.
+`bd help --doc duplicate`에서 생성되었습니다.
 
-Mark an issue as a duplicate of a canonical issue.
+이슈를 기준 이슈의 중복으로 표시합니다.
 
-The duplicate issue is automatically closed with a reference to the canonical.
-This is essential for large issue databases with many similar reports.
+중복 이슈는 기준 이슈에 대한 참조와 함께 자동으로 닫힙니다.
+유사한 보고가 많은 대규모 이슈 데이터베이스에 필수적입니다.
 
-Examples:
-  bd duplicate bd-abc --of bd-xyz    # Mark bd-abc as duplicate of bd-xyz
+예시:
+  bd duplicate bd-abc --of bd-xyz    # bd-abc를 bd-xyz의 중복으로 표시
 
 ```
 bd duplicate <id> --of <canonical> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --of string   Canonical issue ID (required)
+      --of string   기준 이슈 ID(필수)
 ```

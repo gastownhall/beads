@@ -1,30 +1,30 @@
 ---
 title: "bd promote"
-description: "Promote a wisp (ephemeral issue) to a permanent bead."
+description: "wisp(임시 이슈)를 영구 bead로 승격합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc promote`.
+`bd help --doc promote`에서 생성되었습니다.
 
-Promote a wisp (ephemeral issue) to a permanent bead.
+wisp(임시 이슈)를 영구 bead로 승격합니다.
 
-This copies the issue from the wisps table (dolt_ignored) to the permanent
-issues table (Dolt-versioned), preserving labels, dependencies, events, and
-comments. The original ID is preserved so all links keep working.
+이슈를 wisps 테이블(dolt_ignored)에서 영구 issues 테이블(Dolt 버전 관리)로
+복사하며 레이블, 의존성, 이벤트, 댓글을 보존합니다. 원래 ID가 보존되어
+모든 링크가 계속 작동합니다.
 
-A comment is added recording the promotion and optional reason.
+승격 및 선택적 사유를 기록하는 댓글이 추가됩니다.
 
-Examples:
+예시:
   bd promote bd-wisp-abc123
-  bd promote bd-wisp-abc123 --reason "Worth tracking long-term"
+  bd promote bd-wisp-abc123 --reason "장기 추적할 가치가 있음"
 
 ```
 bd promote <wisp-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -r, --reason string   Reason for promotion
+  -r, --reason string   승격 사유
 ```

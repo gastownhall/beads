@@ -1,22 +1,22 @@
 ---
 title: "bd kv"
-description: "Commands for working with the beads key-value store."
+description: "beads 키-값 저장소 작업 명령입니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc kv`.
+`bd help --doc kv`에서 생성되었습니다.
 
-Commands for working with the beads key-value store.
+beads 키-값 저장소 작업 명령입니다.
 
-The key-value store is useful for storing flags, environment variables,
-or other user-defined data that persists across sessions.
+키-값 저장소는 세션 간 유지되는 플래그, 환경 변수 또는 기타 사용자 정의 데이터를
+저장하는 데 유용합니다.
 
-Examples:
-  bd kv set mykey myvalue    # Set a value
-  bd kv get mykey            # Get a value
-  bd kv clear mykey          # Delete a key
-  bd kv list                 # List all key-value pairs
+예시:
+  bd kv set mykey myvalue    # 값 설정
+  bd kv get mykey            # 값 가져오기
+  bd kv clear mykey          # 키 삭제
+  bd kv list                 # 모든 키-값 쌍 나열
 
 ```
 bd kv [flags]
@@ -24,9 +24,9 @@ bd kv [flags]
 
 ## bd kv clear
 
-Delete a key from the beads key-value store.
+beads 키-값 저장소에서 키를 삭제합니다.
 
-Examples:
+예시:
   bd kv clear feature_flag
   bd kv clear api_endpoint
 
@@ -36,9 +36,9 @@ bd kv clear <key> [flags]
 
 ## bd kv get
 
-Get a value from the beads key-value store.
+beads 키-값 저장소에서 값을 가져옵니다.
 
-Examples:
+예시:
   bd kv get feature_flag
   bd kv get api_endpoint
 
@@ -48,9 +48,9 @@ bd kv get <key> [flags]
 
 ## bd kv list
 
-List all key-value pairs in the beads key-value store.
+beads 키-값 저장소의 모든 키-값 쌍을 나열합니다.
 
-Examples:
+예시:
   bd kv list
   bd kv list --json
 
@@ -60,12 +60,11 @@ bd kv list [flags]
 
 ## bd kv set
 
-Set a key-value pair in the beads key-value store.
+beads 키-값 저장소에 키-값 쌍을 설정합니다.
 
-This is useful for storing flags, environment variables, or other
-user-defined data that persists across sessions.
+세션 간 유지되는 플래그, 환경 변수 또는 기타 사용자 정의 데이터를 저장하는 데 유용합니다.
 
-Examples:
+예시:
   bd kv set feature_flag true
   bd kv set api_endpoint https://api.example.com
   bd kv set max_retries 3

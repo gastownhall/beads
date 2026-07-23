@@ -1,33 +1,33 @@
 ---
 title: "bd edit"
-description: "Edit an issue field using your configured $EDITOR."
+description: "구성된 $EDITOR로 이슈 필드를 편집합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc edit`.
+`bd help --doc edit`에서 생성되었습니다.
 
-Edit an issue field using your configured $EDITOR.
+구성된 $EDITOR로 이슈 필드를 편집합니다.
 
-By default, edits the description. Use flags to edit other fields.
+기본적으로 설명을 편집합니다. 다른 필드를 편집하려면 플래그를 사용하세요.
 
-Examples:
-  bd edit bd-42                    # Edit description
-  bd edit bd-42 --title            # Edit title
-  bd edit bd-42 --design           # Edit design notes
-  bd edit bd-42 --notes            # Edit notes
-  bd edit bd-42 --acceptance       # Edit acceptance criteria
+예시:
+  bd edit bd-42                    # 설명 편집
+  bd edit bd-42 --title            # 제목 편집
+  bd edit bd-42 --design           # 설계 메모 편집
+  bd edit bd-42 --notes            # 메모 편집
+  bd edit bd-42 --acceptance       # 인수 기준 편집
 
 ```
 bd edit [id] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --acceptance    Edit the acceptance criteria
-      --description   Edit the description (default)
-      --design        Edit the design notes
-      --notes         Edit the notes
-      --title         Edit the title
+      --acceptance    인수 기준 편집
+      --description   설명 편집(기본값)
+      --design        설계 메모 편집
+      --notes         메모 편집
+      --title         제목 편집
 ```

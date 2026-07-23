@@ -1,18 +1,18 @@
 ---
 title: "bd memories"
-description: "List all memories, or search by keyword."
+description: "모든 메모리를 나열하거나 키워드로 검색합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc memories`.
+`bd help --doc memories`에서 생성되었습니다.
 
-List all memories, or search by keyword.
+모든 메모리를 나열하거나 키워드로 검색합니다.
 
-Examples:
-  bd memories              # list all memories
-  bd memories dolt         # search for memories about dolt
-  bd memories "race flag"  # search for a phrase
+예시:
+  bd memories              # 모든 메모리 나열
+  bd memories dolt         # dolt 관련 메모리 검색
+  bd memories "경쟁 플래그" # 구문 검색
 
 ```
 bd memories [search] [flags]

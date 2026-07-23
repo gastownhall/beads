@@ -1,29 +1,29 @@
 ---
 title: "bd children"
-description: "List all beads that are children of the specified parent bead."
+description: "지정한 상위 bead의 모든 하위 bead를 나열합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc children`.
+`bd help --doc children`에서 생성되었습니다.
 
-List all beads that are children of the specified parent bead.
+지정한 상위 bead의 모든 하위 bead를 나열합니다.
 
-This is a convenience alias for 'bd list --parent &lt;id&gt; --status all'.
-Unlike plain 'bd list', children includes closed issues by default,
-since the primary use case is inspecting all work under a parent.
+'bd list --parent &lt;id&gt; --status all'의 편의 별칭입니다. 일반 'bd list'와 달리
+children은 기본적으로 닫힌 이슈를 포함합니다. 주 사용 사례가 상위 항목 아래의
+모든 작업을 검사하는 것이기 때문입니다.
 
-Examples:
-  bd children hq-abc123        # List all children of hq-abc123
-  bd children hq-abc123 --json # List children in JSON format
-  bd children hq-abc123 --pretty # Show children in tree format
+예시:
+  bd children hq-abc123        # hq-abc123의 모든 하위 항목 나열
+  bd children hq-abc123 --json # 하위 항목을 JSON 형식으로 나열
+  bd children hq-abc123 --pretty # 하위 항목을 트리 형식으로 표시
 
 ```
 bd children <parent-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --pretty   Show children in tree format
+      --pretty   하위 항목을 트리 형식으로 표시
 ```

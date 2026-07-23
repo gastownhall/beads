@@ -1,34 +1,34 @@
 ---
 title: "bd sql"
-description: "Execute a raw SQL query against the underlying database (SQLite or Dolt)."
+description: "기반 데이터베이스(SQLite 또는 Dolt)에 원시 SQL 쿼리를 실행합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc sql`.
+`bd help --doc sql`에서 생성되었습니다.
 
-Execute a raw SQL query against the underlying database (SQLite or Dolt).
+기반 데이터베이스(SQLite 또는 Dolt)에 원시 SQL 쿼리를 실행합니다.
 
-Useful for debugging, maintenance, and working around bugs in higher-level commands.
+디버깅, 유지보수, 상위 수준 명령의 버그 우회에 유용합니다.
 
-Examples:
+예시:
   bd sql 'SELECT COUNT(*) FROM issues'
   bd sql 'SELECT id, title FROM issues WHERE status = "open" LIMIT 5'
   bd sql 'DELETE FROM dirty_issues WHERE issue_id = "bd-abc123"'
   bd sql --csv 'SELECT id, title, status FROM issues'
 
-The query is passed directly to the database. SELECT queries return results as a
-table (or JSON/CSV with --json/--csv). Non-SELECT queries (INSERT, UPDATE, DELETE)
-report the number of rows affected.
+쿼리는 데이터베이스에 직접 전달됩니다. SELECT 쿼리는 결과를 표로 반환합니다
+(--json/--csv 사용 시 JSON/CSV). SELECT가 아닌 쿼리(INSERT, UPDATE, DELETE)는
+영향을 받은 행 수를 보고합니다.
 
-WARNING: Direct database access bypasses the storage layer. Use with caution.
+경고: 직접 데이터베이스 접근은 저장소 계층을 우회합니다. 주의해서 사용하세요.
 
 ```
 bd sql <query> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --csv   Output results in CSV format
+      --csv   결과를 CSV 형식으로 출력
 ```

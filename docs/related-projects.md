@@ -1,23 +1,20 @@
 ---
-title: Related Projects
-description: Adjacent, independent projects that solve neighboring problems and compose well with beads
+title: 관련 프로젝트
+description: 인접한 문제를 해결하며 Beads와 함께 사용하기 좋은 독립 프로젝트
 ---
 
-Adjacent or complementary tools that solve different problems in the
-same neighborhood as Beads. These are not Beads integrations (see
-[Community Tools](/community-tools) for those) — they are
-independent projects whose users may also find Beads useful, or vice
-versa.
+Beads와 비슷한 영역에서 서로 다른 문제를 해결하는 인접 도구 또는 보완 도구입니다.
+Beads 통합 도구는 아니며(해당 목록은 [커뮤니티 도구](/community-tools) 참고),
+사용자가 Beads도 유용하게 활용할 수 있거나 반대로 Beads 사용자가 활용할 수 있는
+독립 프로젝트입니다.
 
-## Recall / knowledge graph
+## 회상 및 지식 그래프
 
 - **[scry](https://github.com/prmichaelsen/scry)** —
-  ([scryspec.com](https://scryspec.com)) — marker-indexed knowledge
-  and recall graph for AI coding agents. Files declare identity via
-  inline `@scry.entry` markers; the index makes designs, lessons, and
-  decisions reachable by meaning, tag, and seeded question rather than
-  by path. Different job from Beads: where Beads is a task graph for
-  *what to do next*, scry is a recall layer for *what was decided and
-  why*. They compose — independently arrived at the same hash-based-ID
-  convention (`bd-a1b2`, `~hash`) for the same reason: preventing
-  collisions across multi-agent and multi-branch work.
+  ([scryspec.com](https://scryspec.com)) — AI 코딩 에이전트를 위한 마커 인덱스 기반
+  지식 및 회상 그래프입니다. 파일은 인라인 `@scry.entry` 마커로 정체성을 선언하며,
+  인덱스를 통해 설계, 교훈, 결정을 경로가 아닌 의미, 태그, 미리 지정한 질문으로
+  찾을 수 있습니다. Beads와 역할이 다릅니다. Beads가 *다음에 할 일*을 위한 작업
+  그래프라면 scry는 *무엇을 왜 결정했는지*를 위한 회상 계층입니다. 두 도구는 함께
+  사용할 수 있으며, 다중 에이전트·다중 브랜치 작업의 충돌을 막기 위해 독립적으로
+  같은 해시 기반 ID 규칙(`bd-a1b2`, `~hash`)에 도달했습니다.

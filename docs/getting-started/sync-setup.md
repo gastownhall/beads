@@ -1,109 +1,110 @@
 ---
-title: Sync Setup Guide
-description: "Set up Dolt sync so issue data follows you across machines: remotes, bootstrapping a clone, and day-to-day push and pull"
+title: 동기화 설정 가이드
+description: "여러 머신에서 이슈 데이터를 이어서 사용할 수 있도록 Dolt 동기화 설정: 원격, 클론 bootstrap, 일상적인 push와 pull"
 ---
 
-Set up beads with Dolt sync so your issues follow you across computers.
+Dolt 동기화로 Beads를 설정하여 여러 컴퓨터에서 이슈를 이어서 사용하세요.
 
-## Prerequisites
+## 사전 요구 사항
 
-You need two tools installed on every machine:
+모든 머신에 다음 두 도구를 설치해야 합니다.
 
-| Tool | Minimum Version | Install |
+| 도구 | 최소 버전 | 설치 |
 |------|-----------------|---------|
-| **bd** (beads CLI) | 0.59.0+ | See [Installation](/getting-started/installation) |
-| **Dolt** | 2.2.0+ | `brew install dolt` or [dolt install script](https://github.com/dolthub/dolt/releases/latest/download/install.sh) |
+| **bd**(Beads CLI) | 0.59.0 이상 | [설치](/getting-started/installation) 참고 |
+| **Dolt** | 2.2.0 이상 | `brew install dolt` 또는 [Dolt 설치 script](https://github.com/dolthub/dolt/releases/latest/download/install.sh) |
 
-Verify both are installed:
+두 도구가 모두 설치되었는지 확인합니다.
 
 ```bash
-bd version     # must be 0.59.0+
-dolt version   # must be 2.2.0+
+bd version     # 0.59.0 이상이어야 함
+dolt version   # 2.2.0 이상이어야 함
 ```
 
-## Initial Setup (First Computer)
+## 초기 설정(첫 번째 컴퓨터)
 
-### 1. Initialize beads
+### 1. Beads 초기화
 
 ```bash
 cd your-project
 bd init
 ```
 
-This creates the `.beads/` directory with a Dolt database. If the git repo has
-an `origin` remote, `bd init` also configures a Dolt remote named `origin`
-pointing at that same git URL. Dolt stores issue data under `refs/dolt/data`,
-separate from normal source branches.
+이 명령은 Dolt 데이터베이스가 있는 `.beads/` 디렉터리를 생성합니다. Git 저장소에
+`origin` 원격이 있으면 `bd init`은 같은 Git URL을 가리키는 `origin`이라는 Dolt
+원격도 설정합니다. Dolt는 일반 소스 브랜치와 별도로 `refs/dolt/data` 아래에 이슈
+데이터를 저장합니다.
 
-### 2. Create some issues
+### 2. 이슈 생성
 
 ```bash
-bd create "Set up CI pipeline" -p 1 -t task
-bd create "Add authentication" -p 2 -t feature
+bd create "CI 파이프라인 설정" -p 1 -t task
+bd create "인증 추가" -p 2 -t feature
 bd list
 ```
 
-### 3. Verify or add a Dolt remote
+### 3. Dolt 원격 확인 또는 추가
 
-In a normal git repo with `origin`, this should already be configured:
+`origin`이 있는 일반 Git 저장소라면 이미 설정되어 있어야 합니다.
 
 ```bash
 bd dolt remote list
-# Expected: origin  <your git origin URL>
+# 예상 결과: origin  <Git origin URL>
 ```
 
-If the repo had no `origin` during init, point beads at your Git remote for
-sync:
+초기화할 때 저장소에 `origin`이 없었다면 동기화를 위해 Beads가 Git 원격을 가리키도록
+설정합니다.
 
 ```bash
-# GitHub (SSH — recommended)
+# GitHub(SSH 권장)
 bd dolt remote add origin git+ssh://git@github.com/org/repo.git
 
-# GitHub (HTTPS)
+# GitHub(HTTPS)
 bd dolt remote add origin git+https://github.com/org/repo.git
 
-# Other options: DoltHub, S3, GCS, local path
-# See DOLT.md for all remote types
+# 기타 옵션: DoltHub, S3, GCS, 로컬 경로
+# 모든 원격 유형은 DOLT.md 참고
 ```
 
-### 4. Push your issues
+### 4. 이슈 push
 
 ```bash
 bd dolt push
 ```
 
-Verify the push worked:
+push가 성공했는지 확인합니다.
 
 ```bash
 git ls-remote origin | grep dolt
-# Expected: <hash>  refs/dolt/data
+# 예상 결과: <hash>  refs/dolt/data
 ```
 
-## Existing Projects Without a Dolt Remote
+## Dolt 원격이 없는 기존 프로젝트
 
-Projects initialized by older versions of `bd init` may have a local embedded
-Dolt database and a committed `.beads/issues.jsonl`, but no Dolt remote. Fix
-that from the machine whose local database is authoritative:
+이전 버전의 `bd init`으로 초기화한 프로젝트에는 로컬 embedded Dolt 데이터베이스와
+commit된 `.beads/issues.jsonl`이 있지만 Dolt 원격은 없을 수 있습니다. 로컬
+데이터베이스가 기준인 머신에서 다음과 같이 수정하세요.
 
 ```bash
 bd dolt remote list
-bd export -o .beads/issues.pre-remote.jsonl   # optional issue audit export
+bd export -o .beads/issues.pre-remote.jsonl   # 선택적 이슈 감사 export
 bd dolt remote add origin git+ssh://git@github.com/org/repo.git
 bd dolt push
 ```
 
-`bd dolt remote add origin ...` writes `sync.remote` to `.beads/config.yaml`.
-Commit and push that config file with your normal git workflow. Other clones can
-then run `bd bootstrap` if their database is missing/stale, or `bd dolt pull`
-when they already have the right database.
+`bd dolt remote add origin ...`은 `.beads/config.yaml`에 `sync.remote`를 씁니다.
+일반 Git 워크플로로 이 설정 파일을 commit하고 push하세요. 다른 클론에서는
+데이터베이스가 없거나 오래된 경우 `bd bootstrap`을 실행하고, 이미 올바른
+데이터베이스가 있으면 `bd dolt pull`을 실행할 수 있습니다.
 
-## Cloning to a New Computer
+## 새 컴퓨터에 클론
 
-When you clone a repo that already has beads data on the remote, a standard `git clone` does **not** fetch `refs/dolt/data`. You need to bootstrap the Dolt database.
+원격에 Beads 데이터가 이미 있는 저장소를 클론할 때 일반 `git clone`은
+`refs/dolt/data`를 가져오지 **않습니다**. Dolt 데이터베이스를 bootstrap해야 합니다.
 
-### Quick path: bd bootstrap
+### 빠른 방법: bd bootstrap
 
-On recent versions of bd, `bd bootstrap` handles everything automatically:
+최신 버전의 `bd`에서는 `bd bootstrap`이 모든 작업을 자동으로 처리합니다.
 
 ```bash
 git clone git@github.com:org/repo.git
@@ -112,56 +113,60 @@ cd repo
 bd bootstrap
 ```
 
-`bd bootstrap` auto-detects `refs/dolt/data` on origin, clones the Dolt database, and configures the remote. Verify with:
+`bd bootstrap`은 origin의 `refs/dolt/data`를 자동 감지하고 Dolt 데이터베이스를
+클론한 뒤 원격을 설정합니다. 다음 명령으로 확인하세요.
 
 ```bash
-bd list       # should show your issues
-bd history    # should show recent issue history
+bd list       # 이슈가 표시되어야 함
+bd history    # 최근 이슈 기록이 표시되어야 함
 ```
 
-If `bd bootstrap` succeeds, you're done — skip to [Day-to-day Sync](#day-to-day-sync).
+`bd bootstrap`이 성공하면 설정이 끝났습니다. [일상적인 동기화](#day-to-day-sync)로 이동하세요.
 
-### Manual path (if bootstrap fails)
+<a id="manual-path-if-bootstrap-fails"></a>
 
-If `bd bootstrap` doesn't work (older bd versions, unusual remote configs), follow these steps:
+### 수동 방법(bootstrap 실패 시)
 
-**Step 1: Confirm the remote has beads data**
+`bd bootstrap`이 작동하지 않으면(이전 `bd` 버전, 특수한 원격 설정) 다음 단계를 따르세요.
+
+**1단계: 원격에 Beads 데이터가 있는지 확인**
 
 ```bash
 git ls-remote origin | grep dolt
-# Expected: <hash>  refs/dolt/data
-# If missing, the remote has no beads data — use bd init normally.
+# 예상 결과: <hash>  refs/dolt/data
+# 없으면 원격에 Beads 데이터가 없는 것이므로 일반적으로 bd init 사용
 ```
 
-**Step 2: Initialize beads**
+**2단계: Beads 초기화**
 
 ```bash
 bd init
 ```
 
-This creates `.beads/` with an empty database. Ignore any warnings about `bd bootstrap` — we'll replace the empty database manually.
+이 명령은 빈 데이터베이스가 있는 `.beads/`를 생성합니다. 빈 데이터베이스는
+수동으로 교체할 것이므로 `bd bootstrap` 관련 경고는 무시하세요.
 
-**Step 3: Stop the Dolt server**
+**3단계: Dolt 서버 중지**
 
 ```bash
 bd dolt stop
 ```
 
-**Step 4: Find your database name and remove the empty database**
+**4단계: 데이터베이스 이름 확인 및 빈 데이터베이스 제거**
 
 ```bash
-# Check your database name
-cat .beads/metadata.json    # look for "dolt_database"
+# 데이터베이스 이름 확인
+cat .beads/metadata.json    # "dolt_database" 찾기
 ```
 
-The `dolt_database` field is your `<dbname>` (typically the repo name).
+`dolt_database` 필드가 `<dbname>`입니다. 보통 저장소 이름과 같습니다.
 
 ```bash
-# Remove the empty database
+# 빈 데이터베이스 제거
 rm -rf .beads/dolt/<dbname>/
 ```
 
-**Step 5: Clone the Dolt data from the remote**
+**5단계: 원격에서 Dolt 데이터 클론**
 
 ```bash
 cd .beads/dolt
@@ -169,121 +174,128 @@ dolt clone git@github.com:org/repo.git <dbname>
 cd ../..
 ```
 
-**Step 6: Start the server and migrate**
+**6단계: 서버 시작 및 마이그레이션**
 
 ```bash
 bd dolt start
 bd migrate --yes
 ```
 
-**Step 7: Ensure the remote is registered**
+**7단계: 원격 등록 확인**
 
 ```bash
 bd dolt remote add origin git+ssh://git@github.com/org/repo.git
 ```
 
-If you see "remote already exists", that's fine — `dolt clone` already set it up.
+`remote already exists`가 표시되어도 괜찮습니다. `dolt clone`이 이미 설정한 것입니다.
 
-**Step 8: Verify**
+**8단계: 확인**
 
 ```bash
-bd dolt remote list   # should show origin
-bd list               # should show your issues
+bd dolt remote list   # origin이 표시되어야 함
+bd list               # 이슈가 표시되어야 함
 ```
 
-## Day-to-day Sync
+<a id="day-to-day-sync"></a>
 
-Once set up on both machines, sync is two commands:
+## 일상적인 동기화
+
+두 머신의 설정이 끝나면 두 명령으로 동기화할 수 있습니다.
 
 ```bash
-# Push your changes to the remote
+# 변경 사항을 원격에 push
 bd dolt push
 
-# Pull changes from the remote
+# 원격의 변경 사항을 pull
 bd dolt pull
 ```
 
-### Typical workflow
+### 일반적인 워크플로
 
 ```
-Machine A                          Machine B
+머신 A                            머신 B
 ─────────                          ─────────
-bd create "New task" -p 1
+bd create "새 작업" -p 1
 bd dolt push
                                    bd dolt pull
                                    bd update bd-a1b2 --claim
-                                   bd close bd-a1b2 --reason "Done"
+                                   bd close bd-a1b2 --reason "완료"
                                    bd dolt push
 bd dolt pull
-bd list                            # sees the closed task
+bd list                            # 종료된 작업 확인
 ```
 
-### Important rules
+### 중요 규칙
 
-- **Always use `bd dolt ...` commands** — never run raw `dolt` CLI commands while the Dolt server is running. It causes journal corruption.
-- **Commit before pulling** — if you have uncommitted working set changes, `bd dolt pull` will fail with "cannot merge with uncommitted changes". Run `bd dolt commit` first.
-- **Push before switching machines** — unpushed changes only exist locally.
-- **Do not use JSONL as sync** — `.beads/issues.jsonl` is an export for viewers and interchange. It is not the source of truth, not a full database backup, and cannot safely reconcile deletes or pruning.
+- **항상 `bd dolt ...` 명령 사용** — Dolt 서버가 실행 중일 때 원시 `dolt` CLI 명령을 실행하지 마세요. journal이 손상됩니다.
+- **pull 전에 commit** — working set에 commit하지 않은 변경 사항이 있으면 `bd dolt pull`이 `cannot merge with uncommitted changes` 오류와 함께 실패합니다. 먼저 `bd dolt commit`을 실행하세요.
+- **머신 전환 전에 push** — push하지 않은 변경 사항은 로컬에만 있습니다.
+- **JSONL을 동기화에 사용하지 않기** — `.beads/issues.jsonl`은 뷰어와 교환을 위한 내보내기입니다. 단일 원본이나 전체 데이터베이스 백업이 아니며 삭제 또는 prune을 안전하게 조정할 수 없습니다.
 
-## Troubleshooting
+## 문제 해결
 
-### "no common ancestor" on push
+### push 시 "no common ancestor"
 
-A stale `refs/dolt/data` from a previous database is conflicting. Clear it and retry:
+이전 데이터베이스의 오래된 `refs/dolt/data`가 충돌합니다. 삭제한 뒤 다시 시도하세요.
 
 ```bash
 git update-ref -d refs/dolt/data
 bd dolt push
 ```
 
-### "cannot merge with uncommitted changes" on pull
+### pull 시 "cannot merge with uncommitted changes"
 
-Commit your working set first:
+먼저 working set을 commit하세요.
 
 ```bash
 bd dolt commit
 bd dolt pull
 ```
 
-### "no store available" on push or commit
+### push 또는 commit 시 "no store available"
 
-This was a bug in bd < 0.59.0. Upgrade bd:
+이 문제는 `bd` 0.59.0 미만 버전의 버그였습니다. `bd`를 업그레이드하세요.
 
 ```bash
 brew upgrade beads
-# or re-run the install script
+# 또는 설치 script 다시 실행
 ```
 
-### bd list shows nothing after clone
+### 클론 후 bd list에 아무것도 표시되지 않음
 
-The Dolt database wasn't bootstrapped. Either run `bd bootstrap` or follow the [manual path](#manual-path-if-bootstrap-fails) above.
+Dolt 데이터베이스가 bootstrap되지 않았습니다. `bd bootstrap`을 실행하거나 위의
+[수동 방법](#manual-path-if-bootstrap-fails)을 따르세요.
 
-### Stale lock files after crash
+### 비정상 종료 후 오래된 lock 파일
 
 ```bash
 bd doctor --fix --yes
 ```
 
-**WARNING**: Do NOT manually remove files inside `.dolt/` directories (including
-`noms/LOCK`). These are Dolt-internal files and removing them **will cause
-unrecoverable data corruption**. Dolt manages these files itself.
+**경고**: `.dolt/` 디렉터리 안의 파일(`noms/LOCK` 포함)을 수동으로 제거하지
+마세요. Dolt 내부 파일이므로 제거하면 **복구할 수 없는 데이터 손상**이 발생합니다.
+Dolt가 이 파일을 직접 관리합니다.
 
 ### "fatal: Unable to read current working directory"
 
-The Dolt server's working directory no longer exists (common after branch switches). Restart it:
+Dolt 서버의 작업 디렉터리가 더 이상 존재하지 않습니다. 브랜치 전환 후 흔히
+발생합니다. 서버를 다시 시작하세요.
 
 ```bash
 bd dolt stop
 bd dolt start
 ```
 
-## See Also
+## 관련 문서
 
-- [Sync Concepts](/core-concepts/sync-concepts) — The conceptual model behind this setup (why Dolt is the source of truth, what JSONL is for)
-- [Quick Start](/getting-started/quickstart) — Getting started with beads
-- [Dolt Backend for Beads](/architecture/dolt) — Dolt backend details, server modes, federation, remote types, and sync modes
-- [Installation](/getting-started/installation) — Installation for all platforms
+- [동기화 개념](/core-concepts/sync-concepts) — 이 설정의 개념 모델(Dolt가 단일 원본인 이유와 JSONL의 용도)
+- [빠른 시작](/getting-started/quickstart) — Beads 시작하기
+- [Beads용 Dolt backend](/architecture/dolt) — Dolt backend 상세 정보, 서버 모드, federation, 원격 유형, 동기화 모드
+- [설치](/getting-started/installation) — 모든 플랫폼의 설치 방법
 
-## Attribution
+## 출처
 
-This guide was inspired by [@leonletto](https://github.com/leonletto)'s community setup guide at [leonletto.github.io/thrum](https://leonletto.github.io/thrum/docs.html#guides/beads-setup.html), which documented the end-to-end setup and sync process including the manual bootstrap workflow. Thanks for contributing to the beads community!
+이 가이드는 수동 bootstrap 워크플로를 포함한 전체 설정 및 동기화 절차를 문서화한
+[@leonletto](https://github.com/leonletto)의 커뮤니티 설정 가이드
+[leonletto.github.io/thrum](https://leonletto.github.io/thrum/docs.html#guides/beads-setup.html)에서
+영감을 받았습니다. Beads 커뮤니티에 기여해 주셔서 감사합니다.

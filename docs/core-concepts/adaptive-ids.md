@@ -1,150 +1,150 @@
 ---
-title: Adaptive ID Length
-description: How hash ID length scales with database size to stay short while avoiding collisions
+title: 적응형 ID 길이
+description: 충돌을 피하면서 짧게 유지되도록 데이터베이스 크기에 따라 해시 ID 길이가 확장되는 방식
 ---
 
-Beads uses adaptive hash ID lengths that automatically scale based on database size, optimizing for readability in small databases while preventing collisions as databases grow.
+Beads는 데이터베이스 크기에 따라 자동으로 확장되는 적응형 해시 ID 길이를 사용합니다. 작은 데이터베이스에서는 가독성을 최적화하고 데이터베이스가 커질 때는 충돌을 방지합니다.
 
-## Motivation
+## 도입 이유
 
-- **Small databases** (0-500 issues): Very short, readable IDs like `bd-a3f2` (4 chars)
-- **Medium databases** (500-1500 issues): Slightly longer IDs like `bd-7f3a8` (5 chars)
-- **Large databases** (1500+ issues): Standard IDs like `bd-7f3a86` (6 chars)
+- **작은 데이터베이스**(이슈 0~500개): `bd-a3f2` 같은 매우 짧고 읽기 쉬운 ID(4자)
+- **중간 데이터베이스**(이슈 500~1500개): `bd-7f3a8` 같은 조금 더 긴 ID(5자)
+- **큰 데이터베이스**(이슈 1500개 이상): `bd-7f3a86` 같은 표준 ID(6자)
 
-Users who actively archive old issues can keep their IDs shorter over time.
+오래된 이슈를 적극적으로 보관 처리하면 시간이 지나도 ID를 더 짧게 유지할 수 있습니다.
 
-## How It Works
+## 작동 방식
 
-### Birthday Paradox Math
+### 생일 역설 계산
 
-The collision probability is calculated using:
+충돌 확률은 다음 식으로 계산합니다.
 
 ```
 P(collision) ≈ 1 - e^(-n²/2N)
 ```
 
-Where:
-- `n` = number of issues in database
-- `N` = total possible IDs (36^length for lowercase alphanumeric)
+각 항목의 의미는 다음과 같습니다.
+- `n` = 데이터베이스의 이슈 수
+- `N` = 가능한 전체 ID 수(소문자 영숫자의 경우 36^length)
 
-### Default Thresholds (25% max collision)
+### 기본 임곗값(최대 충돌 확률 25%)
 
-| Database Size | ID Length | Collision Probability |
+| 데이터베이스 크기 | ID 길이 | 충돌 확률 |
 |--------------|-----------|----------------------|
-| 0-500        | 4 chars   | ~7% at 500           |
-| 501-1500     | 5 chars   | ~2% at 1500          |
-| 1501+        | 6 chars   | continues scaling    |
+| 0~500        | 4자       | 500개일 때 약 7%     |
+| 501~1500     | 5자       | 1500개일 때 약 2%    |
+| 1501 이상    | 6자       | 계속 확장             |
 
-### Collision Resolution
+### 충돌 해결
 
-If a collision occurs (rare), the algorithm automatically tries:
-1. Base length (e.g., 4 chars)
-2. Base + 1 (e.g., 5 chars)
-3. Base + 2 (e.g., 6 chars)
+드물게 충돌이 발생하면 알고리즘이 다음을 자동으로 시도합니다.
+1. 기본 길이(예: 4자)
+2. 기본 길이 + 1(예: 5자)
+3. 기본 길이 + 2(예: 6자)
 
-With 10 nonces per length, giving 30 attempts total.
+길이마다 nonce 10개를 사용해 총 30번 시도합니다.
 
-## Configuration
+## 구성
 
-Adaptive ID length is automatically enabled when using `id_mode=hash`. You can customize the behavior:
+`id_mode=hash`를 사용하면 적응형 ID 길이가 자동으로 활성화됩니다. 동작은 다음과 같이 사용자 지정할 수 있습니다.
 
-### Max Collision Probability
+### 최대 충돌 확률
 
-Default: 25% (0.25)
+기본값: 25%(0.25)
 
 ```bash
-# More lenient (allow up to 50% collision probability)
+# 더 관대하게 설정(최대 50% 충돌 확률 허용)
 bd config set max_collision_prob "0.50"
 
-# Stricter (only allow 1% collision probability)
+# 더 엄격하게 설정(충돌 확률 1%만 허용)
 bd config set max_collision_prob "0.01"
 ```
 
-### Minimum Hash Length
+### 최소 해시 길이
 
-Default: 4 chars
+기본값: 4자
 
 ```bash
-# Start with 5-char IDs minimum
+# 최소 5자 ID로 시작
 bd config set min_hash_length "5"
 
-# Very short IDs (use with caution)
+# 매우 짧은 ID(주의해서 사용)
 bd config set min_hash_length "3"
 ```
 
-### Maximum Hash Length
+### 최대 해시 길이
 
-Default: 8 chars
+기본값: 8자
 
 ```bash
-# Allow even longer IDs for huge databases
+# 매우 큰 데이터베이스에 더 긴 ID 허용
 bd config set max_hash_length "10"
 ```
 
-## Examples
+## 예시
 
-### Default Configuration
+### 기본 구성
 
 ```bash
-# Initialize with hash IDs
+# 해시 ID로 초기화
 bd init --id-mode hash --prefix myproject
 
-# First 500 issues get 4-char IDs
-bd create "Fix bug" -p 1
+# 처음 500개 이슈에는 4자 ID 사용
+bd create "버그 수정" -p 1
 # → myproject-a3f2
 
-# After 1000 issues, switches to 5-char IDs
-bd create "Add feature" -p 1
+# 이슈 1000개 이후 5자 ID로 전환
+bd create "기능 추가" -p 1
 # → myproject-7f3a8c
 
-# At 10,000 issues, uses 6-char IDs
-bd create "Refactor" -p 1
+# 이슈 10,000개에서는 6자 ID 사용
+bd create "리팩터링" -p 1
 # → myproject-b9d1e4
 ```
 
-### Custom Configuration
+### 사용자 지정 구성
 
 ```bash
-# Very strict collision tolerance
+# 매우 엄격한 충돌 허용치
 bd config set max_collision_prob "0.01"
 
-# With 1% threshold and 100 issues, uses 4-char IDs
-# (collision probability is ~0.3% with 4 chars)
+# 임곗값 1%, 이슈 100개일 때 4자 ID 사용
+# (4자일 때 충돌 확률은 약 0.3%)
 
-# Force minimum 5-char IDs for consistency
+# 일관성을 위해 최소 5자 ID 강제
 bd config set min_hash_length "5"
 
-# All IDs will be at least 5 chars now
-bd create "Task" -p 1
+# 이제 모든 ID가 최소 5자
+bd create "작업" -p 1
 # → myproject-7f3a8
 ```
 
-## Collision Probability Table
+## 충돌 확률 표
 
-Use `scripts/collision-calculator.go` to explore collision probabilities:
+`scripts/collision-calculator.go`로 충돌 확률을 살펴보세요.
 
 ```bash
 go run scripts/collision-calculator.go
 ```
 
-Output shows:
-- Collision probabilities for different database sizes and ID lengths
-- Recommended ID lengths for different thresholds
-- Expected number of collisions
-- Adaptive scaling strategy
+출력에는 다음이 표시됩니다.
+- 다양한 데이터베이스 크기와 ID 길이의 충돌 확률
+- 다양한 임곗값에 권장되는 ID 길이
+- 예상 충돌 횟수
+- 적응형 확장 전략
 
-## Implementation Details
+## 구현 세부 정보
 
-### Location
+### 위치
 
-- Algorithm: `internal/storage/dolt/adaptive_length.go`
-- ID generation: `internal/storage/dolt/dolt.go` (`generateHashID`)
-- Tests: `internal/storage/dolt/adaptive_length_test.go`
-- E2E tests: `internal/storage/dolt/adaptive_e2e_test.go`
+- 알고리즘: `internal/storage/dolt/adaptive_length.go`
+- ID 생성: `internal/storage/dolt/dolt.go` (`generateHashID`)
+- 테스트: `internal/storage/dolt/adaptive_length_test.go`
+- E2E 테스트: `internal/storage/dolt/adaptive_e2e_test.go`
 
-### Database Schema
+### 데이터베이스 스키마
 
-Configuration is stored in the `config` table:
+구성은 `config` 테이블에 저장됩니다.
 
 ```sql
 INSERT INTO config (key, value) VALUES ('max_collision_prob', '0.25');
@@ -152,68 +152,68 @@ INSERT INTO config (key, value) VALUES ('min_hash_length', '4');
 INSERT INTO config (key, value) VALUES ('max_hash_length', '8');
 ```
 
-### Performance
+### 성능
 
-- Collision probability calculation: ~10ns per call
-- ID generation with adaptive length: ~300ns (same as before)
-- Database query to count issues: ~100μs
+- 충돌 확률 계산: 호출당 약 10ns
+- 적응형 길이를 사용한 ID 생성: 약 300ns(이전과 동일)
+- 이슈 수를 세는 데이터베이스 쿼리: 약 100μs
 
-## Migration
+## 마이그레이션
 
-### Existing Databases
+### 기존 데이터베이스
 
-Existing databases with 6-char IDs will:
-1. Continue using 6-char IDs by default
-2. Can opt into adaptive mode by setting config (new IDs will use adaptive length)
-3. Old IDs remain unchanged
+6자 ID를 사용하는 기존 데이터베이스는 다음과 같이 동작합니다.
+1. 기본적으로 6자 ID를 계속 사용합니다.
+2. 구성을 설정해 적응형 모드를 선택할 수 있습니다(새 ID는 적응형 길이 사용).
+3. 이전 ID는 변경되지 않습니다.
 
-### Sequential to Hash Migration
+### 순차 ID에서 해시 ID로 마이그레이션
 
-When migrating from sequential IDs to hash IDs with `bd migrate --to-hash-ids`:
-- Uses adaptive length algorithm for new IDs
-- Preserves existing sequential IDs
-- References are automatically updated
+`bd migrate --to-hash-ids`로 순차 ID에서 해시 ID로 마이그레이션할 때는 다음과 같이 동작합니다.
+- 새 ID에 적응형 길이 알고리즘을 사용합니다.
+- 기존 순차 ID를 보존합니다.
+- 참조가 자동으로 업데이트됩니다.
 
-## Best Practices
+## 모범 사례
 
-1. **Default is good**: The 25% threshold works well for most use cases
-2. **Active archival**: Delete closed issues to keep database small and IDs short
-3. **Consistency**: Set `min_hash_length` if you want all IDs to be same length
-4. **Monitoring**: Run collision calculator periodically to check health
+1. **기본값 권장**: 임곗값 25%는 대부분의 사용 사례에서 잘 작동합니다.
+2. **적극적인 보관**: 닫힌 이슈를 삭제해 데이터베이스를 작게, ID를 짧게 유지합니다.
+3. **일관성**: 모든 ID를 같은 길이로 만들려면 `min_hash_length`를 설정합니다.
+4. **모니터링**: 충돌 계산기를 주기적으로 실행해 상태를 확인합니다.
 
-## Future Enhancements
+## 향후 개선 사항
 
-Potential improvements (not yet implemented):
+가능한 개선 사항(아직 구현되지 않음):
 
-- **Automatic scaling notifications**: Warn when approaching threshold
-- **Per-workspace thresholds**: Different configs for different projects
-- **Dynamic adjustment**: Auto-adjust threshold based on observed collision rate
-- **Compaction-aware**: Don't count compacted issues in collision calculation
+- **자동 확장 알림**: 임곗값에 가까워지면 경고합니다.
+- **워크스페이스별 임곗값**: 프로젝트마다 다른 구성을 사용합니다.
+- **동적 조정**: 관찰된 충돌률에 따라 임곗값을 자동 조정합니다.
+- **압축 인식**: 충돌 계산에서 압축된 이슈를 세지 않습니다.
 
-## Alternative: Sequential Counter IDs
+## 대안: 순차 카운터 ID
 
-Adaptive hash IDs are the default, but beads also supports sequential integer IDs
-(`bd-1`, `bd-2`, ...) for projects that prefer human-readable numbering.
+적응형 해시 ID가 기본값이지만, 사람이 읽기 쉬운 번호 체계를 선호하는 프로젝트를 위해
+beads는 순차 정수 ID(`bd-1`, `bd-2`, ...)도 지원합니다.
 
-Counter mode is controlled by the `issue_id_mode` config key:
+카운터 모드는 `issue_id_mode` 구성 키로 제어합니다.
 
 ```bash
-# Switch to sequential IDs
+# 순차 ID로 전환
 bd config set issue_id_mode counter
 
-# Revert to hash IDs (default)
+# 해시 ID로 복귀(기본값)
 bd config set issue_id_mode hash
 ```
 
-**Tradeoff:**
+**절충점:**
 
-- **Hash IDs** (this document): Collision-free across parallel branches and agents; IDs are less predictable but always unique.
-- **Counter IDs**: Human-friendly and sequential; require care in multi-branch workflows where counters can diverge.
+- **해시 ID**(이 문서): 병렬 브랜치와 에이전트 간 충돌이 없습니다. ID의 예측 가능성은 낮지만 항상 고유합니다.
+- **카운터 ID**: 사람이 이해하기 쉽고 순차적입니다. 카운터가 갈라질 수 있는 다중 브랜치 워크플로에서는 주의해야 합니다.
 
-See [Configuration](/reference/configuration) for full documentation on `issue_id_mode=counter`, including migration
-guidance and per-prefix counter isolation.
+마이그레이션 안내와 접두사별 카운터 격리를 포함한 `issue_id_mode=counter` 전체 문서는
+[구성](/reference/configuration)을 참조하세요.
 
-## Related
+## 관련 자료
 
-- [Migration Guide](https://github.com/gastownhall/beads/blob/main/README.md#migration) - Converting from sequential to hash IDs
-- [Configuration](/reference/configuration) - All configuration options
+- [마이그레이션 가이드](https://github.com/gastownhall/beads/blob/main/README.md#migration) - 순차 ID를 해시 ID로 변환하기
+- [구성](/reference/configuration) - 모든 구성 옵션

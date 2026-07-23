@@ -1,138 +1,138 @@
 ---
-title: Hash-based IDs
-description: Why beads uses collision-resistant hash IDs like bd-a1b2 so agents and branches never clash
+title: 해시 기반 ID
+description: 에이전트와 브랜치가 충돌하지 않도록 beads가 bd-a1b2 같은 충돌 방지 해시 ID를 사용하는 이유
 ---
 
-Understanding beads' collision-resistant ID system.
+beads의 충돌 방지 ID 시스템을 알아봅니다.
 
-## The Problem
+## 문제
 
-Traditional sequential IDs (`#1`, `#2`, `#3`) break when:
-- Multiple agents create issues simultaneously
-- Different branches have independent numbering
-- Forks diverge and later merge
+기존의 순차 ID(`#1`, `#2`, `#3`)는 다음 상황에서 문제가 생깁니다.
+- 여러 에이전트가 동시에 이슈를 생성합니다.
+- 서로 다른 브랜치가 독립적인 번호 체계를 사용합니다.
+- 포크가 갈라졌다가 나중에 병합됩니다.
 
 ```mermaid
 flowchart TD
-    subgraph seq["Sequential IDs — collision on merge"]
-        a1["agent A creates #7"] --> m1["merge: two different #7s ✗"]
-        b1["agent B creates #7"] --> m1
+    subgraph seq["순차 ID — 병합 시 충돌"]
+        a1["에이전트 A가 #7 생성"] --> m1["병합: 서로 다른 #7 두 개 ✗"]
+        b1["에이전트 B가 #7 생성"] --> m1
     end
-    subgraph hash["Hash IDs — no coordination needed"]
-        a2["agent A creates bd-a1b2"] --> m2["merge: both IDs survive ✓"]
-        b2["agent B creates bd-f14c"] --> m2
+    subgraph hash["해시 ID — 조율 불필요"]
+        a2["에이전트 A가 bd-a1b2 생성"] --> m2["병합: 두 ID 모두 유지 ✓"]
+        b2["에이전트 B가 bd-f14c 생성"] --> m2
     end
 ```
 
-## The Solution
+## 해결 방법
 
-Beads uses hash-based IDs:
+Beads는 해시 기반 ID를 사용합니다.
 
 ```
-bd-a1b2c3    # Short hash
-bd-f14c      # Even shorter
-bd-a3f8e9.1  # Hierarchical (child of bd-a3f8e9)
+bd-a1b2c3    # 짧은 해시
+bd-f14c      # 더 짧은 해시
+bd-a3f8e9.1  # 계층적(bd-a3f8e9의 자식)
 ```
 
-**Properties:**
-- Globally unique (content-based hash)
-- No coordination needed between creators
-- Merge-friendly across branches
-- Predictable length (configurable)
+**특성:**
+- 전역적으로 고유함(내용 기반 해시)
+- 생성자 간 조율이 필요 없음
+- 브랜치 간 병합에 적합함
+- 예측 가능한 길이(구성 가능)
 
-## How Hashes Work
+## 해시 작동 방식
 
-IDs are generated from:
-- Issue title
-- Creation timestamp
-- Random salt
+ID는 다음 값으로 생성됩니다.
+- 이슈 제목
+- 생성 타임스탬프
+- 무작위 솔트
 
 ```bash
-# Create issue - ID assigned automatically
-bd create "Fix authentication bug"
-# Returns: bd-7x2f
+# 이슈 생성 - ID 자동 할당
+bd create "인증 버그 수정"
+# 반환: bd-7x2f
 
-# The ID is deterministic for same content+timestamp
+# 내용과 타임스탬프가 같으면 ID가 결정적으로 생성됩니다.
 ```
 
-## Hierarchical IDs
+## 계층적 ID
 
-For epics and subtasks:
+Epic과 하위 작업에는 다음과 같이 사용합니다.
 
 ```bash
-# Parent epic
-bd create "Auth System" -t epic
-# Returns: bd-a3f8e9
+# 부모 epic
+bd create "인증 시스템" -t epic
+# 반환: bd-a3f8e9
 
-# Children auto-increment
-bd create "Design UI" --parent bd-a3f8e9    # bd-a3f8e9.1
-bd create "Backend" --parent bd-a3f8e9      # bd-a3f8e9.2
-bd create "Tests" --parent bd-a3f8e9        # bd-a3f8e9.3
+# 자식 번호 자동 증가
+bd create "UI 설계" --parent bd-a3f8e9      # bd-a3f8e9.1
+bd create "백엔드" --parent bd-a3f8e9       # bd-a3f8e9.2
+bd create "테스트" --parent bd-a3f8e9       # bd-a3f8e9.3
 ```
 
-Benefits:
-- Clear parent-child relationship
-- No namespace collision (parent hash is unique)
-- Up to 3 levels of nesting
+장점:
+- 명확한 부모-자식 관계
+- 네임스페이스 충돌 없음(부모 해시가 고유함)
+- 최대 3단계 중첩
 
-## ID Configuration
+## ID 구성
 
-Configure ID prefix and length:
+ID 접두사와 길이를 구성합니다.
 
 ```bash
-# Set prefix (default: bd)
+# 접두사 설정(기본값: bd)
 bd config set id.prefix myproject
 
-# Set hash length (default: 4)
+# 해시 길이 설정(기본값: 4)
 bd config set id.hash_length 6
 
-# New issues use new format
-bd create "Test"
-# Returns: myproject-a1b2c3
+# 새 이슈는 새 형식 사용
+bd create "테스트"
+# 반환: myproject-a1b2c3
 ```
 
-## Collision Handling
+## 충돌 처리
 
-While rare, collisions are handled automatically:
+드물지만 충돌이 발생하면 자동으로 처리됩니다.
 
-1. On import, if hash collision detected
-2. Beads appends disambiguator
-3. Both issues preserved
+1. 가져올 때 해시 충돌을 감지합니다.
+2. Beads가 구분자를 덧붙입니다.
+3. 두 이슈를 모두 보존합니다.
 
 ```bash
-# Check for collisions
+# 충돌 확인
 bd info --schema --json | jq '.collision_count'
 ```
 
-## Working with IDs
+## ID 사용하기
 
 ```bash
-# Partial ID matching
-bd show a1b2     # Finds bd-a1b2...
-bd show auth     # Fuzzy match by title
+# 부분 ID 일치
+bd show a1b2     # bd-a1b2... 찾기
+bd show auth     # 제목으로 퍼지 일치
 
-# Full ID required for ambiguous cases
+# 모호한 경우 전체 ID 필요
 bd show bd-a1b2c3d4
 
-# List with full IDs
+# 전체 ID로 나열
 bd list --full-ids
 ```
 
-## Migration from Sequential IDs
+## 순차 ID에서 마이그레이션
 
-If migrating from a system with sequential IDs:
+순차 ID를 사용하는 시스템에서 마이그레이션하는 경우 다음을 실행합니다.
 
 ```bash
-# Bootstrap from a JSONL export (preserves original IDs in metadata)
+# JSONL 내보내기에서 부트스트랩(메타데이터에 원래 ID 보존)
 bd init --from-jsonl old-issues.jsonl
 
-# View original ID
+# 원래 ID 보기
 bd show bd-new --json | jq '.original_id'
 ```
 
-## Best Practices
+## 모범 사례
 
-1. **Use short references** - `bd-a1b2` is usually unique enough
-2. **Use `--json` for scripts** - Parse full ID programmatically
-3. **Reference by hash in commits** - `Fixed bd-a1b2` in commit messages
-4. **Let hierarchies form naturally** - Create epics, add children as needed
+1. **짧은 참조 사용** - 일반적으로 `bd-a1b2`면 충분히 고유합니다.
+2. **스크립트에서는 `--json` 사용** - 전체 ID를 프로그래밍 방식으로 파싱합니다.
+3. **커밋에서 해시로 참조** - 커밋 메시지에 `Fixed bd-a1b2`를 사용합니다.
+4. **계층을 자연스럽게 구성** - epic을 만들고 필요에 따라 자식을 추가합니다.

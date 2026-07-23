@@ -1,13 +1,13 @@
 ---
 title: "bd label"
-description: "Manage issue labels"
+description: "이슈 레이블을 관리합니다"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc label`.
+`bd help --doc label`에서 생성되었습니다.
 
-Manage issue labels
+이슈 레이블을 관리합니다
 
 ```
 bd label [flags]
@@ -15,7 +15,7 @@ bd label [flags]
 
 ## bd label add
 
-Add a label to one or more issues
+하나 이상의 이슈에 레이블을 추가합니다
 
 ```
 bd label add [issue-id...] [label] [flags]
@@ -23,7 +23,7 @@ bd label add [issue-id...] [label] [flags]
 
 ## bd label list
 
-List labels for an issue
+이슈의 레이블을 나열합니다
 
 ```
 bd label list [issue-id] [flags]
@@ -31,7 +31,7 @@ bd label list [issue-id] [flags]
 
 ## bd label list-all
 
-List all unique labels in the database
+데이터베이스의 고유 레이블을 모두 나열합니다
 
 ```
 bd label list-all [flags]
@@ -39,7 +39,7 @@ bd label list-all [flags]
 
 ## bd label propagate
 
-Push a label from a parent down to all direct children that don't already have it. Useful for applying branch: labels across an epic's subtasks.
+상위 항목의 레이블을 아직 갖지 않은 모든 직접 하위 항목에 전파합니다. epic의 하위 작업 전체에 branch: 레이블을 적용할 때 유용합니다.
 
 ```
 bd label propagate [parent-id] [label] [flags]
@@ -47,7 +47,7 @@ bd label propagate [parent-id] [label] [flags]
 
 ## bd label remove
 
-Remove a label from one or more issues
+하나 이상의 이슈에서 레이블을 제거합니다
 
 ```
 bd label remove [issue-id...] [label] [flags]

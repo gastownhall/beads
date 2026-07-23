@@ -1,26 +1,26 @@
 ---
 title: "bd priority"
-description: "Set the priority of an issue."
+description: "이슈의 우선순위를 설정합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc priority`.
+`bd help --doc priority`에서 생성되었습니다.
 
-Set the priority of an issue.
+이슈의 우선순위를 설정합니다.
 
-Shorthand for 'bd update &lt;id&gt; --priority &lt;n&gt;'.
+'bd update &lt;id&gt; --priority &lt;n&gt;'의 단축 명령입니다.
 
-Priority levels:
-  0 - Critical (security, data loss, broken builds)
-  1 - High (major features, important bugs)
-  2 - Medium (default)
-  3 - Low (polish, optimization)
-  4 - Backlog (future ideas)
+우선순위 수준:
+  0 - 치명적(보안, 데이터 손실, 빌드 실패)
+  1 - 높음(주요 기능, 중요한 버그)
+  2 - 중간(기본값)
+  3 - 낮음(다듬기, 최적화)
+  4 - 백로그(향후 아이디어)
 
-Examples:
-  bd priority bd-123 0    # Critical
-  bd priority bd-123 2    # Medium
+예시:
+  bd priority bd-123 0    # 치명적
+  bd priority bd-123 2    # 중간
 
 ```
 bd priority <id> <n> [flags]

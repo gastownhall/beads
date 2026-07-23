@@ -1,328 +1,328 @@
-# bd — Complete Command Reference
+# bd — 전체 명령어 참조
 
-Reference for bd Latest. Generated from `bd help --all`.
+bd 최신 버전에 대한 참조입니다. `bd help --all`에서 생성되었습니다.
 
-## Table of Contents
+## 목차
 
-### Working With Issues:
+### 이슈 작업:
 
-- [bd assign](#bd-assign) — Assign an issue to someone
-- [bd children](#bd-children) — List child beads of a parent
-- [bd close](#bd-close) — Close one or more issues
-- [bd comment](#bd-comment) — Add a comment to an issue
-- [bd comments](#bd-comments) — View or manage comments on an issue
-  - [bd comments add](#bd-comments-add) — Add a comment to an issue
-  - [bd comments list](#bd-comments-list) — Invalid — use bd comments &lt;issue-id&gt; to list comments
-- [bd create](#bd-create) — Create a new issue (or batch from markdown/graph JSON)
-- [bd create-form](#bd-create-form) — Create a new issue using an interactive form
-- [bd delete](#bd-delete) — Delete one or more issues and clean up references
-- [bd edit](#bd-edit) — Edit an issue field in $EDITOR
-- [bd gate](#bd-gate) — Manage async coordination gates
-  - [bd gate add-waiter](#bd-gate-add-waiter) — Add a waiter to a gate
-  - [bd gate check](#bd-gate-check) — Evaluate gates and close resolved ones
-  - [bd gate create](#bd-gate-create) — Create a gate that blocks an issue
-  - [bd gate discover](#bd-gate-discover) — Discover await_id for gh:run gates
-  - [bd gate list](#bd-gate-list) — List gate issues
-  - [bd gate resolve](#bd-gate-resolve) — Manually resolve (close) a gate
-  - [bd gate show](#bd-gate-show) — Show a gate issue
-- [bd label](#bd-label) — Manage issue labels
-  - [bd label add](#bd-label-add) — Add a label to one or more issues
-  - [bd label list](#bd-label-list) — List labels for an issue
-  - [bd label list-all](#bd-label-list-all) — List all unique labels in the database
-  - [bd label propagate](#bd-label-propagate) — Propagate a label from a parent issue to all its children
-  - [bd label remove](#bd-label-remove) — Remove a label from one or more issues
-- [bd link](#bd-link) — Link two issues with a dependency
-- [bd list](#bd-list) — List issues
-- [bd merge-slot](#bd-merge-slot) — Manage merge-slot gates for serialized conflict resolution
-  - [bd merge-slot acquire](#bd-merge-slot-acquire) — Acquire the merge slot
-  - [bd merge-slot check](#bd-merge-slot-check) — Check merge slot availability
-  - [bd merge-slot create](#bd-merge-slot-create) — Create a merge slot bead for the current rig
-  - [bd merge-slot release](#bd-merge-slot-release) — Release the merge slot
-- [bd note](#bd-note) — Append a note to an issue
-- [bd priority](#bd-priority) — Set the priority of an issue
-- [bd promote](#bd-promote) — Promote a wisp to a permanent bead
-- [bd q](#bd-q) — Quick capture: create issue and output only ID
-- [bd query](#bd-query) — Query issues using a simple query language
-- [bd reopen](#bd-reopen) — Reopen one or more closed issues
-- [bd search](#bd-search) — Search issues by text query
-- [bd set-state](#bd-set-state) — Set operational state (creates event + updates label)
-- [bd show](#bd-show) — Show issue details
-- [bd state](#bd-state) — Query the current value of a state dimension
-  - [bd state list](#bd-state-list) — List all state dimensions on an issue
-- [bd tag](#bd-tag) — Add a label to an issue
-- [bd todo](#bd-todo) — Manage TODO items (convenience wrapper for task issues)
-  - [bd todo add](#bd-todo-add) — Add a new TODO item
-  - [bd todo done](#bd-todo-done) — Mark TODO(s) as done
-  - [bd todo list](#bd-todo-list) — List TODO items
-- [bd update](#bd-update) — Update one or more issues
+- [bd assign](#bd-assign) — 이슈를 누군가에게 할당
+- [bd children](#bd-children) — 부모의 하위 bead 목록
+- [bd close](#bd-close) — 하나 이상의 이슈 닫기
+- [bd comment](#bd-comment) — 이슈에 댓글 추가
+- [bd comments](#bd-comments) — 이슈의 댓글 조회 또는 관리
+  - [bd comments add](#bd-comments-add) — 이슈에 댓글 추가
+  - [bd comments list](#bd-comments-list) — 유효하지 않음 — 댓글 목록을 보려면 bd comments &lt;issue-id&gt;를 사용하세요
+- [bd create](#bd-create) — 새 이슈 생성(Markdown/그래프 JSON에서 일괄 생성 가능)
+- [bd create-form](#bd-create-form) — 대화형 폼으로 새 이슈 생성
+- [bd delete](#bd-delete) — 하나 이상의 이슈를 삭제하고 참조를 정리
+- [bd edit](#bd-edit) — $EDITOR에서 이슈 필드 편집
+- [bd gate](#bd-gate) — 비동기 조정 게이트 관리
+  - [bd gate add-waiter](#bd-gate-add-waiter) — 게이트에 대기자 추가
+  - [bd gate check](#bd-gate-check) — 게이트를 평가하고 해결된 게이트를 닫기
+  - [bd gate create](#bd-gate-create) — 이슈를 차단하는 게이트 생성
+  - [bd gate discover](#bd-gate-discover) — gh:run 게이트의 await_id 검색
+  - [bd gate list](#bd-gate-list) — 게이트 이슈 목록
+  - [bd gate resolve](#bd-gate-resolve) — 게이트를 수동으로 해결(닫기)
+  - [bd gate show](#bd-gate-show) — 게이트 이슈 표시
+- [bd label](#bd-label) — 이슈 라벨 관리
+  - [bd label add](#bd-label-add) — 하나 이상의 이슈에 라벨 추가
+  - [bd label list](#bd-label-list) — 이슈의 라벨 목록 조회
+  - [bd label list-all](#bd-label-list-all) — 데이터베이스의 모든 고유 라벨 목록 조회
+  - [bd label propagate](#bd-label-propagate) — 상위 이슈의 라벨을 모든 하위 이슈로 전파
+  - [bd label remove](#bd-label-remove) — 하나 이상의 이슈에서 라벨 제거
+- [bd link](#bd-link) — 두 이슈를 종속성으로 연결
+- [bd list](#bd-list) — 이슈 목록
+- [bd merge-slot](#bd-merge-slot) — 순차적 충돌 해결을 위한 병합 슬롯 게이트 관리
+  - [bd merge-slot acquire](#bd-merge-slot-acquire) — 병합 슬롯 획득
+  - [bd merge-slot check](#bd-merge-slot-check) — 병합 슬롯 사용 가능 여부 확인
+  - [bd merge-slot create](#bd-merge-slot-create) — 현재 rig의 병합 슬롯 bead 생성
+  - [bd merge-slot release](#bd-merge-slot-release) — 병합 슬롯 해제
+- [bd note](#bd-note) — 이슈에 노트 추가
+- [bd priority](#bd-priority) — 이슈 우선순위 설정
+- [bd promote](#bd-promote) — wisp를 영구 bead로 승격
+- [bd q](#bd-q) — 빠른 캡처: 이슈 생성 후 ID만 출력
+- [bd query](#bd-query) — 간단한 쿼리 언어로 이슈 조회
+- [bd reopen](#bd-reopen) — 하나 이상의 닫힌 이슈를 재오픈
+- [bd search](#bd-search) — 텍스트 쿼리로 이슈 검색
+- [bd set-state](#bd-set-state) — 운영 상태 설정(이벤트 생성 + 라벨 업데이트)
+- [bd show](#bd-show) — 이슈 상세 보기
+- [bd state](#bd-state) — state dimension의 현재 값 조회
+  - [bd state list](#bd-state-list) — 이슈의 모든 state dimension 목록
+- [bd tag](#bd-tag) — 이슈에 라벨 추가
+- [bd todo](#bd-todo) — TODO 항목 관리(task issue 편의 wrapper)
+  - [bd todo add](#bd-todo-add) — 새 TODO 항목 추가
+  - [bd todo done](#bd-todo-done) — TODO(s)를 완료 처리
+  - [bd todo list](#bd-todo-list) — TODO 항목 목록 조회
+- [bd update](#bd-update) — 하나 이상의 이슈 업데이트
 
-### Views & Reports:
+### 뷰 및 보고서:
 
-- [bd count](#bd-count) — Count issues matching filters
-- [bd diff](#bd-diff) — Show changes between two commits or branches
-- [bd find-duplicates](#bd-find-duplicates) — Find semantically similar issues using text analysis or AI
-- [bd history](#bd-history) — Show version history for an issue
-- [bd lint](#bd-lint) — Check issues for missing template sections
-- [bd stale](#bd-stale) — Show stale issues (not updated recently)
-- [bd status](#bd-status) — Show issue database overview and statistics
-- [bd statuses](#bd-statuses) — List valid issue statuses
-- [bd types](#bd-types) — List valid issue types
+- [bd count](#bd-count) — 필터와 일치하는 이슈 개수 세기
+- [bd diff](#bd-diff) — 두 커밋 또는 브랜치 간의 변경 사항 표시
+- [bd find-duplicates](#bd-find-duplicates) — 텍스트 분석이나 AI를 사용해 의미적으로 유사한 이슈 찾기
+- [bd history](#bd-history) — 이슈의 버전 이력 표시
+- [bd lint](#bd-lint) — 이슈에서 누락된 템플릿 섹션 확인
+- [bd stale](#bd-stale) — 오래된 이슈 표시(최근에 업데이트되지 않음)
+- [bd status](#bd-status) — 이슈 데이터베이스 개요 및 통계 표시
+- [bd statuses](#bd-statuses) — 유효한 이슈 상태 목록
+- [bd types](#bd-types) — 유효한 이슈 유형 목록
 
-### Dependencies & Structure:
+### 의존성 및 구조:
 
-- [bd dep](#bd-dep) — Manage dependencies
-  - [bd dep add](#bd-dep-add) — Add a dependency
-  - [bd dep cycles](#bd-dep-cycles) — Detect dependency cycles
-  - [bd dep list](#bd-dep-list) — List dependencies or dependents of one or more issues
-  - [bd dep relate](#bd-dep-relate) — Create a bidirectional relates_to link between issues
-  - [bd dep remove](#bd-dep-remove) — Remove a dependency
-  - [bd dep tree](#bd-dep-tree) — Show dependency tree
-  - [bd dep unrelate](#bd-dep-unrelate) — Remove a relates_to link between issues
-- [bd duplicate](#bd-duplicate) — Mark an issue as a duplicate of another
-- [bd duplicates](#bd-duplicates) — Find and optionally merge duplicate issues
-- [bd epic](#bd-epic) — Epic management commands
-  - [bd epic close-eligible](#bd-epic-close-eligible) — Close epics where all children are complete
-  - [bd epic status](#bd-epic-status) — Show epic completion status
-- [bd graph](#bd-graph) — Display issue dependency graph
-  - [bd graph check](#bd-graph-check) — Check dependency graph integrity
-- [bd supersede](#bd-supersede) — Mark an issue as superseded by a newer one
-- [bd swarm](#bd-swarm) — Swarm management for structured epics
-  - [bd swarm create](#bd-swarm-create) — Create a swarm molecule from an epic
-  - [bd swarm list](#bd-swarm-list) — List all swarm molecules
-  - [bd swarm status](#bd-swarm-status) — Show current swarm status
-  - [bd swarm validate](#bd-swarm-validate) — Validate epic structure for swarming
+- [bd dep](#bd-dep) — 의존성 관리
+  - [bd dep add](#bd-dep-add) — 의존성 추가
+  - [bd dep cycles](#bd-dep-cycles) — 의존성 순환 감지
+  - [bd dep list](#bd-dep-list) — 하나 이상의 이슈에 대한 의존성 또는 의존자 목록 표시
+  - [bd dep relate](#bd-dep-relate) — 이슈 간 양방향 relates_to 링크 생성
+  - [bd dep remove](#bd-dep-remove) — 의존성 제거
+  - [bd dep tree](#bd-dep-tree) — 의존성 트리 표시
+  - [bd dep unrelate](#bd-dep-unrelate) — 이슈 간 relates_to 링크 제거
+- [bd duplicate](#bd-duplicate) — 이슈를 다른 이슈의 중복으로 표시
+- [bd duplicates](#bd-duplicates) — 중복된 이슈를 찾고 선택적으로 병합
+- [bd epic](#bd-epic) — 에픽 관리 명령어
+  - [bd epic close-eligible](#bd-epic-close-eligible) — 모든 하위 항목이 완료된 에픽 닫기
+  - [bd epic status](#bd-epic-status) — 에픽 완료 상태 표시
+- [bd graph](#bd-graph) — 이슈 의존성 그래프 표시
+  - [bd graph check](#bd-graph-check) — 의존성 그래프 무결성 검사
+- [bd supersede](#bd-supersede) — 이슈를 더 최신 이슈에 의해 대체됨으로 표시
+- [bd swarm](#bd-swarm) — 구조화된 에픽을 위한 Swarm 관리
+  - [bd swarm create](#bd-swarm-create) — 에픽에서 Swarm 분자 생성
+  - [bd swarm list](#bd-swarm-list) — 모든 Swarm 분자 목록 표시
+  - [bd swarm status](#bd-swarm-status) — 현재 Swarm 상태 표시
+  - [bd swarm validate](#bd-swarm-validate) — Swarm을 위한 에픽 구조 검증
 
-### Sync & Data:
+### 동기화 및 데이터:
 
-- [bd backup](#bd-backup) — Back up your beads database
-  - [bd backup init](#bd-backup-init) — Set up a Dolt backup destination
-  - [bd backup remove](#bd-backup-remove) — Remove the configured backup destination
-  - [bd backup restore](#bd-backup-restore) — Restore database from a Dolt backup
-  - [bd backup status](#bd-backup-status) — Show last backup status
-  - [bd backup sync](#bd-backup-sync) — Push database to configured Dolt backup
-- [bd branch](#bd-branch) — List or create branches
-- [bd export](#bd-export) — Export issues to JSONL format
-- [bd federation](#bd-federation) — Manage peer-to-peer federation (requires CGO)
-- [bd import](#bd-import) — Import issues from a JSONL file or stdin into the database
-- [bd restore](#bd-restore) — Restore the pre-compaction content of a compacted issue
-- [bd vc](#bd-vc) — Version control operations
-  - [bd vc commit](#bd-vc-commit) — Create a commit with all staged changes
-  - [bd vc merge](#bd-vc-merge) — Merge a branch into the current branch
-  - [bd vc status](#bd-vc-status) — Show current branch and uncommitted changes
+- [bd backup](#bd-backup) — beads 데이터베이스를 백업합니다
+  - [bd backup init](#bd-backup-init) — Dolt 백업 대상을 설정합니다
+  - [bd backup remove](#bd-backup-remove) — 설정된 백업 대상을 제거합니다
+  - [bd backup restore](#bd-backup-restore) — Dolt 백업에서 데이터베이스 복원
+  - [bd backup status](#bd-backup-status) — 마지막 백업 상태를 표시합니다
+  - [bd backup sync](#bd-backup-sync) — 설정된 Dolt 백업으로 데이터베이스 푸시
+- [bd branch](#bd-branch) — 브랜치를 나열하거나 생성합니다
+- [bd export](#bd-export) — 이슈를 JSONL 형식으로 내보냅니다
+- [bd federation](#bd-federation) — 피어-투-피어 페더레이션을 관리합니다 (CGO 필요)
+- [bd import](#bd-import) — JSONL 파일 또는 stdin에서 이슈를 데이터베이스로 가져옵니다
+- [bd restore](#bd-restore) — 컴팩션된 이슈의 컴팩션 이전 내용을 복원합니다
+- [bd vc](#bd-vc) — 버전 제어 작업
+  - [bd vc commit](#bd-vc-commit) — 모든 스테이징된 변경 사항으로 커밋을 생성합니다
+  - [bd vc merge](#bd-vc-merge) — 현재 브랜치에 브랜치를 병합합니다
+  - [bd vc status](#bd-vc-status) — 현재 브랜치와 커밋되지 않은 변경 사항을 표시합니다
 
-### Setup & Configuration:
+### 설정 및 구성:
 
-- [bd bootstrap](#bd-bootstrap) — Non-destructive database setup for fresh clones and recovery
-- [bd config](#bd-config) — Manage configuration settings
-  - [bd config apply](#bd-config-apply) — Reconcile system state to match configuration
-  - [bd config drift](#bd-config-drift) — Detect config-vs-reality inconsistencies
-  - [bd config get](#bd-config-get) — Get a configuration value
-  - [bd config list](#bd-config-list) — List all configuration
-  - [bd config set](#bd-config-set) — Set a configuration value
-  - [bd config set-many](#bd-config-set-many) — Set multiple configuration values in one operation
-  - [bd config show](#bd-config-show) — Show all effective configuration with provenance
-  - [bd config unset](#bd-config-unset) — Delete a configuration value
-  - [bd config validate](#bd-config-validate) — Validate sync-related configuration
-- [bd context](#bd-context) — Show effective backend identity and repository context
-- [bd dolt](#bd-dolt) — Configure Dolt database settings
-  - [bd dolt clean-databases](#bd-dolt-clean-databases) — Drop stale test databases from the Dolt server
-  - [bd dolt commit](#bd-dolt-commit) — Create a Dolt commit from pending changes
-  - [bd dolt killall](#bd-dolt-killall) — Kill all orphan Dolt server processes
-  - [bd dolt pull](#bd-dolt-pull) — Pull commits from Dolt remote
-  - [bd dolt push](#bd-dolt-push) — Push commits to Dolt remote
-  - [bd dolt remote](#bd-dolt-remote) — Manage Dolt remotes
-  - [bd dolt set](#bd-dolt-set) — Set a Dolt configuration value
-  - [bd dolt show](#bd-dolt-show) — Show current Dolt configuration with connection status
-  - [bd dolt start](#bd-dolt-start) — Start the Dolt SQL server for this project
-  - [bd dolt status](#bd-dolt-status) — Show Dolt engine status
-  - [bd dolt stop](#bd-dolt-stop) — Stop the Dolt SQL server for this project
-  - [bd dolt test](#bd-dolt-test) — Test connection to Dolt server
-- [bd forget](#bd-forget) — Remove a persistent memory
-- [bd hooks](#bd-hooks) — Manage git hooks for beads integration
-  - [bd hooks install](#bd-hooks-install) — Install bd git hooks
-  - [bd hooks list](#bd-hooks-list) — List installed git hooks status
-  - [bd hooks run](#bd-hooks-run) — Execute a git hook (called by thin shims)
-  - [bd hooks uninstall](#bd-hooks-uninstall) — Uninstall bd git hooks
-- [bd human](#bd-human) — Show essential commands for human users
-  - [bd human dismiss](#bd-human-dismiss) — Dismiss a human-needed bead
-  - [bd human list](#bd-human-list) — List all human-needed beads
-  - [bd human respond](#bd-human-respond) — Respond to a human-needed bead
-  - [bd human stats](#bd-human-stats) — Show summary statistics for human-needed beads
-- [bd info](#bd-info) — Show database information
-- [bd init](#bd-init) — Initialize bd in the current directory
-- [bd kv](#bd-kv) — Key-value store commands
-  - [bd kv clear](#bd-kv-clear) — Delete a key-value pair
-  - [bd kv get](#bd-kv-get) — Get a value by key
-  - [bd kv list](#bd-kv-list) — List all key-value pairs
-  - [bd kv set](#bd-kv-set) — Set a key-value pair
-- [bd memories](#bd-memories) — List or search persistent memories
-- [bd onboard](#bd-onboard) — Display minimal snippet for agent instructions file
-- [bd prime](#bd-prime) — Output AI-optimized workflow context
-- [bd quickstart](#bd-quickstart) — Quick start guide for bd
-- [bd recall](#bd-recall) — Retrieve a specific memory
-- [bd remember](#bd-remember) — Store a persistent memory
-- [bd setup](#bd-setup) — Setup integration with AI editors
-- [bd where](#bd-where) — Show active beads location
+- [bd bootstrap](#bd-bootstrap) — 신규 클론 및 복구를 위한 비파괴적 데이터베이스 설정
+- [bd config](#bd-config) — 구성 설정 관리
+  - [bd config apply](#bd-config-apply) — 시스템 상태를 구성에 맞게 조정
+  - [bd config drift](#bd-config-drift) — 구성 대 실제 간 불일치 감지
+  - [bd config get](#bd-config-get) — 구성 값 조회
+  - [bd config list](#bd-config-list) — 모든 구성 목록
+  - [bd config set](#bd-config-set) — 구성 값 설정
+  - [bd config set-many](#bd-config-set-many) — 한 번의 작업으로 여러 구성 값 설정
+  - [bd config show](#bd-config-show) — 출처 정보와 함께 모든 유효 구성 표시
+  - [bd config unset](#bd-config-unset) — 구성 값 삭제
+  - [bd config validate](#bd-config-validate) — 동기화 관련 구성 유효성 검사
+- [bd context](#bd-context) — 유효한 백엔드 식별자와 저장소 컨텍스트 표시
+- [bd dolt](#bd-dolt) — Dolt 데이터베이스 설정 구성
+  - [bd dolt clean-databases](#bd-dolt-clean-databases) — Dolt 서버에서 오래된 테스트 데이터베이스 삭제
+  - [bd dolt commit](#bd-dolt-commit) — 대기 중인 변경사항으로 Dolt 커밋 생성
+  - [bd dolt killall](#bd-dolt-killall) — 고아 Dolt 서버 프로세스 모두 종료
+  - [bd dolt pull](#bd-dolt-pull) — Dolt 원격에서 커밋 가져오기
+  - [bd dolt push](#bd-dolt-push) — Dolt 원격으로 커밋 푸시
+  - [bd dolt remote](#bd-dolt-remote) — Dolt 원격 저장소 관리
+  - [bd dolt set](#bd-dolt-set) — Dolt 구성 값 설정
+  - [bd dolt show](#bd-dolt-show) — 연결 상태와 함께 현재 Dolt 구성 표시
+  - [bd dolt start](#bd-dolt-start) — 이 프로젝트의 Dolt SQL 서버 시작
+  - [bd dolt status](#bd-dolt-status) — Dolt 엔진 상태 표시
+  - [bd dolt stop](#bd-dolt-stop) — 이 프로젝트의 Dolt SQL 서버 중지
+  - [bd dolt test](#bd-dolt-test) — Dolt 서버 연결 테스트
+- [bd forget](#bd-forget) — 영구 메모리 삭제
+- [bd hooks](#bd-hooks) — beads 통합을 위한 git 훅 관리
+  - [bd hooks install](#bd-hooks-install) — bd git 훅 설치
+  - [bd hooks list](#bd-hooks-list) — 설치된 git 훅 상태 목록 표시
+  - [bd hooks run](#bd-hooks-run) — git 훅 실행 (thin shims에서 호출)
+  - [bd hooks uninstall](#bd-hooks-uninstall) — bd git 훅 제거
+- [bd human](#bd-human) — 인간 사용자용 필수 명령 표시
+  - [bd human dismiss](#bd-human-dismiss) — 인간 개입이 필요한 bead 해제
+  - [bd human list](#bd-human-list) — 인간 개입이 필요한 모든 bead 목록
+  - [bd human respond](#bd-human-respond) — 인간 개입이 필요한 bead에 응답
+  - [bd human stats](#bd-human-stats) — 인간 개입이 필요한 bead의 요약 통계 표시
+- [bd info](#bd-info) — 데이터베이스 정보 표시
+- [bd init](#bd-init) — 현재 디렉터리에서 bd 초기화
+- [bd kv](#bd-kv) — 키-값 저장소 명령
+  - [bd kv clear](#bd-kv-clear) — 키-값 쌍 삭제
+  - [bd kv get](#bd-kv-get) — 키로 값 조회
+  - [bd kv list](#bd-kv-list) — 모든 키-값 쌍 목록
+  - [bd kv set](#bd-kv-set) — 키-값 쌍 설정
+- [bd memories](#bd-memories) — 영구 메모리 목록 또는 검색
+- [bd onboard](#bd-onboard) — 에이전트 지침 파일용 최소 스니펫 표시
+- [bd prime](#bd-prime) — AI 최적화 워크플로우 컨텍스트 출력
+- [bd quickstart](#bd-quickstart) — bd 빠른 시작 가이드
+- [bd recall](#bd-recall) — 특정 메모리 조회
+- [bd remember](#bd-remember) — 영구 메모리 저장
+- [bd setup](#bd-setup) — AI 편집기 통합 설정
+- [bd where](#bd-where) — 활성 beads 위치 표시
 
-### Maintenance:
+### 유지보수:
 
-- [bd batch](#bd-batch) — Run multiple write operations in a single database transaction
-- [bd compact](#bd-compact) — Squash old Dolt commits to reduce history size
-- [bd doctor](#bd-doctor) — Check and fix beads installation health (start here)
-- [bd flatten](#bd-flatten) — Squash all Dolt history into a single commit
-- [bd gc](#bd-gc) — Garbage collect: decay old issues, compact Dolt commits, run Dolt GC
-- [bd migrate](#bd-migrate) — Database migration commands
-  - [bd migrate hooks](#bd-migrate-hooks) — Plan or apply git hook migration to marker-managed format
-  - [bd migrate issues](#bd-migrate-issues) — Move issues between repositories
-  - [bd migrate schema](#bd-migrate-schema) — Apply pending schema migrations (idempotent)
-  - [bd migrate sync](#bd-migrate-sync) — Set up sync.branch workflow for multi-clone setups
-- [bd ping](#bd-ping) — Check database connectivity
-- [bd preflight](#bd-preflight) — Show PR readiness checklist
-- [bd prune](#bd-prune) — Delete old closed beads to reclaim space and shrink exports
-- [bd purge](#bd-purge) — Delete closed ephemeral beads to reclaim space
-- [bd recompute-blocked](#bd-recompute-blocked) — Recompute is_blocked for all issues (repairs stale flags after a pull)
-- [bd rename-prefix](#bd-rename-prefix) — Rename the issue prefix for all issues in the database
-- [bd rules](#bd-rules) — Audit and compact Claude rules
-  - [bd rules audit](#bd-rules-audit) — Scan rules for contradictions and merge opportunities
-  - [bd rules compact](#bd-rules-compact) — Merge related rules into composites
-- [bd sql](#bd-sql) — Execute raw SQL against the beads database
-- [bd upgrade](#bd-upgrade) — Check and manage bd version upgrades
-  - [bd upgrade ack](#bd-upgrade-ack) — Acknowledge the current bd version
-  - [bd upgrade review](#bd-upgrade-review) — Review changes since last bd version
-  - [bd upgrade status](#bd-upgrade-status) — Check if bd version has changed
-- [bd worktree](#bd-worktree) — Manage git worktrees for parallel development
-  - [bd worktree create](#bd-worktree-create) — Create a worktree
-  - [bd worktree info](#bd-worktree-info) — Show worktree info for current directory
-  - [bd worktree list](#bd-worktree-list) — List all git worktrees
-  - [bd worktree remove](#bd-worktree-remove) — Remove a worktree with safety checks
+- [bd batch](#bd-batch) — 단일 데이터베이스 트랜잭션에서 여러 쓰기 작업 실행
+- [bd compact](#bd-compact) — 오래된 Dolt 커밋을 스쿼시해 이력 크기 줄이기
+- [bd doctor](#bd-doctor) — beads 설치 상태 확인 및 수정(시작하기)
+- [bd flatten](#bd-flatten) — 모든 Dolt 이력을 단일 커밋으로 스쿼시
+- [bd gc](#bd-gc) — 가비지 수집: 오래된 이슈 정리, Dolt 커밋 압축, Dolt GC 실행
+- [bd migrate](#bd-migrate) — 데이터베이스 마이그레이션 명령
+  - [bd migrate hooks](#bd-migrate-hooks) — 마커 관리 형식으로 Git 훅 마이그레이션 계획 또는 적용
+  - [bd migrate issues](#bd-migrate-issues) — 저장소 간 이슈 이동
+  - [bd migrate schema](#bd-migrate-schema) — 대기 중인 스키마 마이그레이션 적용(멱등적)
+  - [bd migrate sync](#bd-migrate-sync) — 다중 클론 구성을 위한 sync.branch 워크플로우 설정
+- [bd ping](#bd-ping) — 데이터베이스 연결 확인
+- [bd preflight](#bd-preflight) — PR 준비 체크리스트 표시
+- [bd prune](#bd-prune) — 공간 회수 및 오래된 닫힌 beads 삭제, export 축소
+- [bd purge](#bd-purge) — 공간 회수를 위해 닫힌 임시 beads 삭제
+- [bd recompute-blocked](#bd-recompute-blocked) — 모든 이슈의 is_blocked 재계산(풀 후 오래된 플래그 수리)
+- [bd rename-prefix](#bd-rename-prefix) — 데이터베이스의 모든 이슈 접두사 이름 변경
+- [bd rules](#bd-rules) — Claude 규칙 감사 및 압축
+  - [bd rules audit](#bd-rules-audit) — 모순 및 병합 기회 점검을 위해 규칙 스캔
+  - [bd rules compact](#bd-rules-compact) — 관련 규칙을 복합 규칙으로 병합
+- [bd sql](#bd-sql) — beads 데이터베이스에 대한 원시 SQL 실행
+- [bd upgrade](#bd-upgrade) — bd 버전 업그레이드 확인 및 관리
+  - [bd upgrade ack](#bd-upgrade-ack) — 현재 bd 버전 승인
+  - [bd upgrade review](#bd-upgrade-review) — 마지막 bd 버전 이후 변경사항 검토
+  - [bd upgrade status](#bd-upgrade-status) — bd 버전 변경 여부 확인
+- [bd worktree](#bd-worktree) — 병렬 개발을 위한 git worktree 관리
+  - [bd worktree create](#bd-worktree-create) — worktree 생성
+  - [bd worktree info](#bd-worktree-info) — 현재 디렉터리의 worktree 정보 표시
+  - [bd worktree list](#bd-worktree-list) — 모든 git worktree 목록 표시
+  - [bd worktree remove](#bd-worktree-remove) — 안전 점검과 함께 worktree 제거
 
-### Integrations & Advanced:
+### 통합 및 고급:
 
-- [bd admin](#bd-admin) — Administrative commands for database maintenance
-  - [bd admin cleanup](#bd-admin-cleanup) — Delete closed issues to reduce database size
-  - [bd admin compact](#bd-admin-compact) — Compact old closed issues to save space
-  - [bd admin reset](#bd-admin-reset) — Remove all beads data and configuration
-- [bd jira](#bd-jira) — Jira integration commands
-  - [bd jira pull](#bd-jira-pull) — Pull specific items from Jira
-  - [bd jira push](#bd-jira-push) — Push specific beads to Jira
-  - [bd jira status](#bd-jira-status) — Show Jira sync status
-  - [bd jira sync](#bd-jira-sync) — Synchronize issues with Jira
-- [bd linear](#bd-linear) — Linear integration commands
-  - [bd linear pull](#bd-linear-pull) — Pull specific items from Linear
-  - [bd linear push](#bd-linear-push) — Push specific beads to Linear
-  - [bd linear status](#bd-linear-status) — Show Linear sync status
-  - [bd linear sync](#bd-linear-sync) — Synchronize issues with Linear
-  - [bd linear teams](#bd-linear-teams) — List available Linear teams
-- [bd repo](#bd-repo) — Manage multiple repository configuration
-  - [bd repo add](#bd-repo-add) — Add an additional repository to sync
-  - [bd repo list](#bd-repo-list) — List all configured repositories
-  - [bd repo remove](#bd-repo-remove) — Remove a repository from sync configuration
-  - [bd repo sync](#bd-repo-sync) — Manually trigger multi-repo sync
+- [bd admin](#bd-admin) — 데이터베이스 유지 관리를 위한 관리 명령어
+  - [bd admin cleanup](#bd-admin-cleanup) — 데이터베이스 크기 감소를 위해 닫힌 이슈를 삭제
+  - [bd admin compact](#bd-admin-compact) — 공간을 절약하기 위해 오래된 닫힌 이슈를 압축
+  - [bd admin reset](#bd-admin-reset) — 모든 beads 데이터와 설정을 제거
+- [bd jira](#bd-jira) — Jira 통합 명령어
+  - [bd jira pull](#bd-jira-pull) — Jira에서 특정 항목을 가져오기
+  - [bd jira push](#bd-jira-push) — 특정 beads를 Jira로 푸시
+  - [bd jira status](#bd-jira-status) — Jira 동기화 상태 표시
+  - [bd jira sync](#bd-jira-sync) — Jira와 이슈 동기화
+- [bd linear](#bd-linear) — Linear 통합 명령어
+  - [bd linear pull](#bd-linear-pull) — Linear에서 특정 항목을 가져오기
+  - [bd linear push](#bd-linear-push) — 특정 beads를 Linear로 푸시
+  - [bd linear status](#bd-linear-status) — Linear 동기화 상태 표시
+  - [bd linear sync](#bd-linear-sync) — Linear와 이슈 동기화
+  - [bd linear teams](#bd-linear-teams) — 사용 가능한 Linear 팀 목록
+- [bd repo](#bd-repo) — 여러 리포지토리 구성 관리
+  - [bd repo add](#bd-repo-add) — 동기화에 추가할 리포지토리 추가
+  - [bd repo list](#bd-repo-list) — 구성된 모든 리포지토리 목록 표시
+  - [bd repo remove](#bd-repo-remove) — 동기화 구성에서 리포지토리 제거
+  - [bd repo sync](#bd-repo-sync) — 다중 리포지토리 동기화를 수동으로 트리거
 
-### Other Commands:
+### 기타 명령:
 
-- [bd ado](#bd-ado) — Azure DevOps integration commands
-  - [bd ado projects](#bd-ado-projects) — List accessible Azure DevOps projects
-  - [bd ado pull](#bd-ado-pull) — Pull specific items from Azure DevOps
-  - [bd ado push](#bd-ado-push) — Push specific beads to Azure DevOps
-  - [bd ado status](#bd-ado-status) — Show Azure DevOps sync status
-  - [bd ado sync](#bd-ado-sync) — Sync issues with Azure DevOps
-- [bd audit](#bd-audit) — Record and label agent interactions (append-only JSONL)
-  - [bd audit label](#bd-audit-label) — Append a label entry referencing an existing interaction
-  - [bd audit record](#bd-audit-record) — Append an audit interaction entry
-- [bd blocked](#bd-blocked) — Show blocked issues
-- [bd completion](#bd-completion) — Generate the autocompletion script for the specified shell
-  - [bd completion bash](#bd-completion-bash) — Generate the autocompletion script for bash
-  - [bd completion fish](#bd-completion-fish) — Generate the autocompletion script for fish
-  - [bd completion powershell](#bd-completion-powershell) — Generate the autocompletion script for powershell
-  - [bd completion zsh](#bd-completion-zsh) — Generate the autocompletion script for zsh
-- [bd cook](#bd-cook) — Compile a formula into a proto (ephemeral by default)
-- [bd defer](#bd-defer) — Defer one or more issues for later
-- [bd formula](#bd-formula) — Manage workflow formulas
-  - [bd formula convert](#bd-formula-convert) — Convert formula from JSON to TOML
-  - [bd formula list](#bd-formula-list) — List available formulas
-  - [bd formula show](#bd-formula-show) — Show formula details
-- [bd github](#bd-github) — GitHub integration commands
-  - [bd github pull](#bd-github-pull) — Pull specific items from GitHub
-  - [bd github push](#bd-github-push) — Push specific beads to GitHub
-  - [bd github repos](#bd-github-repos) — List accessible GitHub repositories
-  - [bd github status](#bd-github-status) — Show GitHub sync status
-  - [bd github sync](#bd-github-sync) — Sync issues with GitHub
-- [bd gitlab](#bd-gitlab) — GitLab integration commands
-  - [bd gitlab projects](#bd-gitlab-projects) — List accessible GitLab projects
-  - [bd gitlab pull](#bd-gitlab-pull) — Pull specific items from GitLab
-  - [bd gitlab push](#bd-gitlab-push) — Push specific beads to GitLab
-  - [bd gitlab status](#bd-gitlab-status) — Show GitLab sync status
-  - [bd gitlab sync](#bd-gitlab-sync) — Sync issues with GitLab
-- [bd help](#bd-help) — Help about any command
-- [bd init-safety](#bd-init-safety) — Explain bd init flag semantics and the destroy-token format
-- [bd mail](#bd-mail) — Delegate to mail provider (e.g., gt mail)
-- [bd metrics](#bd-metrics) — Show or change anonymous usage-metrics settings
-  - [bd metrics example](#bd-metrics-example) — Show real examples of the anonymous metrics bd sends
-  - [bd metrics off](#bd-metrics-off) — Turn anonymous usage metrics off
-  - [bd metrics on](#bd-metrics-on) — Turn anonymous usage metrics on
-- [bd mol](#bd-mol) — Molecule commands (work templates)
-  - [bd mol bond](#bd-mol-bond) — Bond two protos or molecules together
-  - [bd mol burn](#bd-mol-burn) — Delete a molecule without creating a digest
-  - [bd mol current](#bd-mol-current) — Show current position in molecule workflow
-  - [bd mol distill](#bd-mol-distill) — Extract a formula from an existing epic
-  - [bd mol last-activity](#bd-mol-last-activity) — Show last activity timestamp for a molecule
-  - [bd mol pour](#bd-mol-pour) — Instantiate a proto as a persistent mol (solid -&gt; liquid)
-  - [bd mol progress](#bd-mol-progress) — Show molecule progress summary
-  - [bd mol ready](#bd-mol-ready) — Find molecules ready for gate-resume dispatch
-  - [bd mol seed](#bd-mol-seed) — Verify formula accessibility
-  - [bd mol show](#bd-mol-show) — Show molecule details
-  - [bd mol squash](#bd-mol-squash) — Compress molecule execution into a digest
-  - [bd mol stale](#bd-mol-stale) — Detect complete-but-unclosed molecules
-  - [bd mol wisp](#bd-mol-wisp) — Create or manage wisps (ephemeral molecules)
-- [bd notion](#bd-notion) — Notion integration commands
-  - [bd notion connect](#bd-notion-connect) — Connect bd to an existing Notion database or data source
-  - [bd notion init](#bd-notion-init) — Create a dedicated Beads database in Notion
-  - [bd notion pull](#bd-notion-pull) — Pull specific items from Notion
-  - [bd notion push](#bd-notion-push) — Push specific beads to Notion
-  - [bd notion status](#bd-notion-status) — Show Notion sync status
-  - [bd notion sync](#bd-notion-sync) — Sync issues with Notion
-- [bd orphans](#bd-orphans) — Identify orphaned issues (referenced in commits but still open)
-- [bd ready](#bd-ready) — Show ready work (open, no active blockers)
-- [bd rename](#bd-rename) — Rename an issue ID
-- [bd ship](#bd-ship) — Publish a capability for cross-project dependencies
-- [bd undefer](#bd-undefer) — Undefer one or more issues (restore to open)
-- [bd version](#bd-version) — Print version information
-
----
-
-## Global Flags
-
-These flags apply to all commands:
-
-```
-      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
-      --db string                 Database path (default: auto-discover .beads/*.db)
-  -C, --directory string          Change to this directory before running the command (like git -C)
-      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
-      --global                    Use the global shared-server database (beads_global)
-      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
-      --json                      Output in JSON format
-      --profile                   Generate CPU profile for performance analysis
-  -q, --quiet                     Suppress non-essential output (errors only)
-      --readonly                  Read-only mode: block write operations (for worker sandboxes)
-      --sandbox                   Sandbox mode: disables Dolt auto-push
-  -v, --verbose                   Enable verbose/debug output
-```
+- [bd ado](#bd-ado) — Azure DevOps 통합 명령
+  - [bd ado projects](#bd-ado-projects) — 액세스 가능한 Azure DevOps 프로젝트 목록 표시
+  - [bd ado pull](#bd-ado-pull) — Azure DevOps에서 특정 항목 가져오기
+  - [bd ado push](#bd-ado-push) — 특정 beads를 Azure DevOps로 푸시
+  - [bd ado status](#bd-ado-status) — Azure DevOps 동기화 상태 표시
+  - [bd ado sync](#bd-ado-sync) — Azure DevOps와 이슈 동기화
+- [bd audit](#bd-audit) — 에이전트 상호작용을 기록하고 레이블 지정 (append-only JSONL)
+  - [bd audit label](#bd-audit-label) — 기존 상호작용을 참조하는 레이블 항목 추가
+  - [bd audit record](#bd-audit-record) — 감사 상호작용 항목 추가
+- [bd blocked](#bd-blocked) — 차단된 이슈 표시
+- [bd completion](#bd-completion) — 지정한 쉘용 자동 완성 스크립트 생성
+  - [bd completion bash](#bd-completion-bash) — bash용 자동 완성 스크립트 생성
+  - [bd completion fish](#bd-completion-fish) — fish용 자동 완성 스크립트 생성
+  - [bd completion powershell](#bd-completion-powershell) — powershell용 자동 완성 스크립트 생성
+  - [bd completion zsh](#bd-completion-zsh) — zsh용 자동 완성 스크립트 생성
+- [bd cook](#bd-cook) — formula를 proto로 컴파일(기본값은 임시)
+- [bd defer](#bd-defer) — 하나 이상의 이슈 연기
+- [bd formula](#bd-formula) — workflow formula 관리
+  - [bd formula convert](#bd-formula-convert) — JSON에서 TOML로 formula 변환
+  - [bd formula list](#bd-formula-list) — 사용 가능한 formula 목록 표시
+  - [bd formula show](#bd-formula-show) — formula 세부 정보 표시
+- [bd github](#bd-github) — GitHub 통합 명령
+  - [bd github pull](#bd-github-pull) — GitHub에서 특정 항목 가져오기
+  - [bd github push](#bd-github-push) — 특정 beads를 GitHub로 푸시
+  - [bd github repos](#bd-github-repos) — 액세스 가능한 GitHub 저장소 목록 표시
+  - [bd github status](#bd-github-status) — GitHub 동기화 상태 표시
+  - [bd github sync](#bd-github-sync) — GitHub와 이슈 동기화
+- [bd gitlab](#bd-gitlab) — GitLab 통합 명령
+  - [bd gitlab projects](#bd-gitlab-projects) — 액세스 가능한 GitLab 프로젝트 목록 표시
+  - [bd gitlab pull](#bd-gitlab-pull) — GitLab에서 특정 항목 가져오기
+  - [bd gitlab push](#bd-gitlab-push) — 특정 beads를 GitLab로 푸시
+  - [bd gitlab status](#bd-gitlab-status) — GitLab 동기화 상태 표시
+  - [bd gitlab sync](#bd-gitlab-sync) — GitLab와 이슈 동기화
+- [bd help](#bd-help) — 모든 명령에 대한 도움말
+- [bd init-safety](#bd-init-safety) — bd init 플래그 의미와 destroy-token 형식 설명
+- [bd mail](#bd-mail) — 메일 제공자에 위임 (예: gt mail)
+- [bd metrics](#bd-metrics) — 익명 사용량 메트릭 설정 보기 또는 변경
+  - [bd metrics example](#bd-metrics-example) — bd가 전송하는 익명 사용 메트릭의 실제 예시 보기
+  - [bd metrics off](#bd-metrics-off) — 익명 사용량 메트릭 끄기
+  - [bd metrics on](#bd-metrics-on) — 익명 사용량 메트릭 켜기
+- [bd mol](#bd-mol) — Molecule 명령 (작업 템플릿)
+  - [bd mol bond](#bd-mol-bond) — 두 proto 또는 molecule을 서로 결합
+  - [bd mol burn](#bd-mol-burn) — digest를 만들지 않고 molecule 삭제
+  - [bd mol current](#bd-mol-current) — molecule 워크플로에서 현재 위치 표시
+  - [bd mol distill](#bd-mol-distill) — 기존 epic에서 formula 추출
+  - [bd mol last-activity](#bd-mol-last-activity) — molecule의 마지막 활동 타임스탬프 표시
+  - [bd mol pour](#bd-mol-pour) — proto를 영속 mol로 인스턴스화 (고체 -&gt; 액체)
+  - [bd mol progress](#bd-mol-progress) — molecule 진행 요약 표시
+  - [bd mol ready](#bd-mol-ready) — gate-resume 디스패치 준비가 된 molecule 찾기
+  - [bd mol seed](#bd-mol-seed) — formula 접근성 확인
+  - [bd mol show](#bd-mol-show) — molecule 세부 정보 표시
+  - [bd mol squash](#bd-mol-squash) — molecule 실행을 digest로 압축
+  - [bd mol stale](#bd-mol-stale) — 완료되었지만 닫히지 않은 molecule 감지
+  - [bd mol wisp](#bd-mol-wisp) — wisps 생성 또는 관리 (임시 molecule)
+- [bd notion](#bd-notion) — Notion 통합 명령
+  - [bd notion connect](#bd-notion-connect) — 기존 Notion 데이터베이스 또는 데이터 소스에 bd 연결
+  - [bd notion init](#bd-notion-init) — Notion에 전용 Beads 데이터베이스 생성
+  - [bd notion pull](#bd-notion-pull) — Notion에서 특정 항목 가져오기
+  - [bd notion push](#bd-notion-push) — 특정 beads를 Notion으로 푸시
+  - [bd notion status](#bd-notion-status) — Notion 동기화 상태 표시
+  - [bd notion sync](#bd-notion-sync) — Notion과 이슈 동기화
+- [bd orphans](#bd-orphans) — 고아 이슈 식별 (커밋에서 참조되었지만 아직 열려 있음)
+- [bd ready](#bd-ready) — 준비된 작업 표시 (열림, 활성 블로커 없음)
+- [bd rename](#bd-rename) — 이슈 ID 이름 변경
+- [bd ship](#bd-ship) — 교차 프로젝트 의존성을 위한 기능 게시
+- [bd undefer](#bd-undefer) — 하나 이상의 이슈 연기 해제 (열린 상태로 복원)
+- [bd version](#bd-version) — 버전 정보 출력
 
 ---
 
-## Working With Issues:
+## 전역 플래그
+
+이 플래그들은 모든 명령에 적용됩니다:
+
+```
+      --actor string              감사 추적용 행위자 이름(기본값: $BEADS_ACTOR, git user.name, $USER)
+      --db string                 데이터베이스 경로(기본값: .beads/*.db 자동 탐색)
+  -C, --directory string          명령 실행 전에 이 디렉터리로 이동(git -C와 유사)
+      --dolt-auto-commit string   Dolt 자동 커밋 정책(off|on|batch). 'on': 쓰기마다 커밋. 'batch': bd dolt commit까지 커밋을 연기하며, 그동안 커밋되지 않은 변경 사항은 작업 집합에 유지. SIGTERM/SIGHUP 발생 시 대기 중인 batch 커밋 반영. 기본값: off. 구성 키 dolt.auto-commit으로 재정의
+      --global                    전역 공유 서버 데이터베이스 사용(beads_global)
+      --ignore-schema-skew        향후 스키마 드리프트가 있어도 계속 진행(일부 쿼리 실패 가능)
+      --json                      JSON 형식으로 출력
+      --profile                   성능 분석용 CPU 프로필 생성
+  -q, --quiet                     필수적이지 않은 출력 억제(오류만)
+      --readonly                  읽기 전용 모드: 쓰기 작업 차단(워커 샌드박스용)
+      --sandbox                   샌드박스 모드: Dolt 자동 푸시 비활성화
+  -v, --verbose                   상세/디버그 출력 활성화
+```
+
+---
+
+## 이슈 작업:
 
 ### bd assign
 
-Assign an issue to someone.
+이슈를 누군가에게 할당합니다.
 
-Shorthand for 'bd update &lt;id&gt; --assignee &lt;name&gt;'.
+'bd update &lt;id&gt; --assignee &lt;name&gt;'의 축약형입니다.
 
-Examples:
+예시:
   bd assign bd-123 alice
-  bd assign bd-123 ""      # unassign
+  bd assign bd-123 ""      # 할당 해제
 
 ```
 bd assign <id> <name>
@@ -330,133 +330,133 @@ bd assign <id> <name>
 
 ### bd children
 
-List all beads that are children of the specified parent bead.
+지정된 상위 비드의 모든 하위 비드를 나열합니다.
 
-This is a convenience alias for 'bd list --parent &lt;id&gt; --status all'.
-Unlike plain 'bd list', children includes closed issues by default,
-since the primary use case is inspecting all work under a parent.
+이것은 'bd list --parent &lt;id&gt; --status all'의 편의용 별칭입니다.
+일반 'bd list'와 달리 children는 기본적으로 닫힌 이슈를 포함하며,
+이는 주요 사용 사례가 상위 항목 아래의 모든 작업을 검사하는 것이기 때문입니다.
 
-Examples:
-  bd children hq-abc123        # List all children of hq-abc123
-  bd children hq-abc123 --json # List children in JSON format
-  bd children hq-abc123 --pretty # Show children in tree format
+예시:
+  bd children hq-abc123        # hq-abc123의 모든 하위 항목을 나열합니다
+  bd children hq-abc123 --json # JSON 형식으로 하위 항목을 출력합니다
+  bd children hq-abc123 --pretty # 트리 형식으로 하위 항목을 표시합니다
 
 ```
 bd children <parent-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --pretty   Show children in tree format
+      --pretty   하위 항목을 트리 형식으로 표시
 ```
 
 ### bd close
 
-Close one or more issues.
+하나 이상의 이슈를 닫습니다.
 
-If no issue ID is provided, closes the last touched issue (from most recent
-create, update, show, or close operation).
+문제 ID가 지정되지 않으면 마지막으로 다룬 이슈를 닫습니다(가장 최근의
+create, update, show 또는 close 작업에서).
 
-When closing multiple issues, provide one --reason for all IDs or repeat
---reason once per ID. Reasons map positionally: the first --reason applies
-to the first ID, the second --reason to the second ID, regardless of where
-the flags appear in the command line.
+여러 개의 이슈를 닫을 때는 모든 ID에 대해 하나의 --reason을 제공하거나
+ID당 --reason을 한 번씩 반복하세요. 이유는 위치에 따라 매핑됩니다. 첫 번째 --reason은
+첫 번째 ID에 적용되고, 두 번째 --reason은 두 번째 ID에 적용되며,
+플래그가 명령줄 어디에 나타나든 상관없이 적용됩니다.
 
 ```
 bd close [id...] [flags]
 ```
 
-**Aliases:** done
+**별칭:** done
 
-**Flags:**
+**플래그:**
 
 ```
-      --claim-next           Automatically claim the next highest priority available issue
-      --continue             Auto-advance to next step in molecule
-  -f, --force                Force close pinned issues or unsatisfied gates
-      --no-auto              With --continue, show next step but don't claim it
-  -r, --reason string        Reason for closing
-      --reason-file string   Read close reason from file (use - for stdin)
-      --session string       Claude Code session ID (or set CLAUDE_SESSION_ID env var)
-      --suggest-next         Show newly unblocked issues after closing
+      --claim-next           사용 가능한 이슈 중 다음으로 우선순위가 높은 이슈를 자동으로 맡기
+      --continue             molecule의 다음 단계로 자동 진행
+  -f, --force                고정된 이슈 또는 충족되지 않은 gate를 강제로 닫기
+      --no-auto              --continue와 함께 다음 단계를 표시하되 맡지 않음
+  -r, --reason string        닫는 사유
+      --reason-file string   파일에서 닫는 사유 읽기(stdin은 - 사용)
+      --session string       Claude Code 세션 ID(또는 CLAUDE_SESSION_ID 환경 변수 설정)
+      --suggest-next         닫은 후 새로 차단 해제된 이슈 표시
 ```
 
 ### bd comment
 
-Add a comment to an issue.
+이슈에 코멘트를 추가합니다.
 
-Shorthand for 'bd comments add &lt;id&gt; "text"'.
+'bd comments add &lt;id&gt; "text"'의 약식 표현입니다.
 
-Examples:
-  bd comment bd-123 "Working on this now"
-  bd comment bd-123 Working on this now
-  echo "comment from pipe" | bd comment bd-123 --stdin
+예시:
+  bd comment bd-123 "현재 진행 중입니다"
+  bd comment bd-123 현재 진행 중입니다
+  echo "파이프에서 보낸 코멘트" | bd comment bd-123 --stdin
   bd comment bd-123 --file notes.txt
 
 ```
 bd comment <id> [text...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --file string   Read comment text from file
-      --stdin         Read comment text from stdin
+      --file string   파일에서 댓글 텍스트 읽기
+      --stdin         stdin에서 댓글 텍스트 읽기
 ```
 
 ### bd comments
 
-View or manage comments on an issue.
+이슈의 댓글을 조회하거나 관리합니다.
 
-Examples:
-  # List all comments on an issue (issue id is required — there is no "comments list")
+예시:
+  # 이슈의 모든 댓글을 나열합니다(이슈 ID가 필요합니다 — \"comments list\"는 없습니다)
   bd comments bd-123
 
-  # List comments in JSON format
+  # JSON 형식으로 댓글 목록 보기
   bd comments bd-123 --json
 
-  # Add a comment
-  bd comments add bd-123 "This is a comment"
+  # 댓글 추가
+  bd comments add bd-123 "이것은 댓글입니다"
 
-  # Add a comment from a file
+  # 파일에서 댓글 추가
   bd comments add bd-123 -f notes.txt
 
 ```
 bd comments [issue-id] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --local-time   Show timestamps in local time instead of UTC
+      --local-time   UTC 대신 현지 시간으로 타임스탬프 표시
 ```
 
 #### bd comments add
 
-Add a comment to an issue.
+이슈에 댓글을 추가합니다.
 
-Examples:
-  # Add a comment
-  bd comments add bd-123 "Working on this now"
+예시:
+  # 댓글 추가
+  bd comments add bd-123 "지금 작업 중입니다"
 
-  # Add a comment from a file
+  # 파일에서 코멘트 추가
   bd comments add bd-123 -f notes.txt
 
 ```
 bd comments add [issue-id] [text] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -a, --author string   Add author to comment
-  -f, --file string     Read comment text from file
+  -a, --author string   댓글에 작성자 추가
+  -f, --file string     파일에서 댓글 텍스트 읽기
 ```
 
 #### bd comments list
 
-Invalid — use bd comments &lt;issue-id&gt; to list comments
+유효하지 않음 — 댓글을 나열하려면 bd comments &lt;issue-id&gt;를 사용하세요
 
 ```
 bd comments list
@@ -464,179 +464,179 @@ bd comments list
 
 ### bd create
 
-Create a new issue (or batch from markdown/graph JSON)
+새 이슈를 생성합니다(Markdown/그래프 JSON에서 일괄 생성 가능)
 
 ```
 bd create [title] [flags]
 ```
 
-**Aliases:** new
+**별칭:** new
 
-**Flags:**
+**플래그:**
 
 ```
-      --acceptance string       Acceptance criteria
-      --append-notes string     Append to existing notes (with newline separator)
-  -a, --assignee string         Assignee
-      --body-file string        Read description from file (use - for stdin)
-      --context string          Additional context for the issue
-      --defer string            Defer until date (issue hidden from bd ready until then). Same formats as --due
-      --deps strings            Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')
-  -d, --description string      Issue description
-      --design string           Design notes
-      --design-file string      Read design from file (use - for stdin)
-      --dry-run                 Preview what would be created without actually creating
-      --due string              Due date/time. Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15
-      --ephemeral               Create as ephemeral (short-lived, subject to TTL compaction)
-  -e, --estimate int            Time estimate in minutes (e.g., 60 for 1 hour)
-      --event-actor string      Entity URI who caused this event (requires --type=event)
-      --event-category string   Event category (e.g., patrol.muted, agent.started) (requires --type=event)
-      --event-payload string    Event-specific JSON data (requires --type=event)
-      --event-target string     Entity URI or bead ID affected (requires --type=event)
-      --external-ref string     External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)
-  -f, --file string             Create multiple issues from markdown file
-      --force                   Force creation even if prefix doesn't match database prefix
-      --graph string            Create a graph of issues with dependencies from JSON plan file
-      --id string               Explicit issue ID (e.g., 'bd-42' for partitioning)
-  -l, --labels strings          Labels (comma-separated)
-      --metadata string         Set custom metadata (JSON string or @file.json to read from file)
-      --mol-type string         Molecule type: swarm (multi-agent), patrol (recurring ops), work (default)
-      --no-history              Skip Dolt commit history without making GC-eligible (for permanent agent beads)
-      --no-inherit-labels       Don't inherit labels from parent issue
-      --notes string            Additional notes
-      --parent string           Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')
-  -p, --priority string         Priority (0-4 or P0-P4, 0=highest) (default "2")
-      --repo string             Target repository for issue (overrides auto-routing)
-      --silent                  Output only the issue ID (for scripting)
-      --skills string           Required skills for this issue
-      --spec-id string          Link to specification document
-      --stdin                   Read description from stdin (alias for --body-file -)
-      --title string            Issue title (alternative to positional argument)
-  -t, --type string             Issue type (bug|feature|task|epic|chore|decision); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision (default "task")
-      --validate                Validate description contains required sections for issue type
-      --waits-for string        Spawner issue ID to wait for (creates waits-for dependency for fanout gate)
-      --waits-for-gate string   Gate type: all-children (wait for all) or any-children (wait for first) (default "all-children")
-      --wisp-type string        Wisp type for TTL-based compaction: heartbeat, ping, patrol, gc_report, recovery, error, escalation
+      --acceptance string       인수 기준
+      --append-notes string     기존 메모에 추가(줄바꿈 구분자 포함)
+  -a, --assignee string         담당자
+      --body-file string        파일에서 설명 읽기(stdin은 - 사용)
+      --context string          이슈의 추가 컨텍스트
+      --defer string            지정 날짜까지 연기(그때까지 bd ready에서 이슈 숨김). --due와 같은 형식
+      --deps strings            'type:id' 또는 'id' 형식의 의존성(예: 'discovered-from:bd-20,blocks:bd-15' 또는 'bd-20')
+  -d, --description string      이슈 설명
+      --design string           설계 메모
+      --design-file string      파일에서 설계 읽기(stdin은 - 사용)
+      --dry-run                 실제 생성하지 않고 생성될 항목 미리 보기
+      --due string              마감 날짜/시간. 형식: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15
+      --ephemeral               임시로 생성(단기 유지, TTL 압축 대상)
+  -e, --estimate int            예상 시간(분)(예: 1시간은 60)
+      --event-actor string      이 이벤트를 발생시킨 엔터티 URI(--type=event 필요)
+      --event-category string   이벤트 범주(예: patrol.muted, agent.started)(--type=event 필요)
+      --event-payload string    이벤트별 JSON 데이터(--type=event 필요)
+      --event-target string     영향을 받은 엔터티 URI 또는 bead ID(--type=event 필요)
+      --external-ref string     외부 참조(예: 'gh-9', 'jira-ABC', Linear URL)
+  -f, --file string             Markdown 파일에서 여러 이슈 생성
+      --force                   접두사가 데이터베이스 접두사와 일치하지 않아도 강제로 생성
+      --graph string            JSON 계획 파일에서 의존성이 있는 이슈 그래프 생성
+      --id string               명시적 이슈 ID(예: 파티셔닝용 'bd-42')
+  -l, --labels strings          레이블(쉼표로 구분)
+      --metadata string         사용자 정의 메타데이터 설정(JSON 문자열 또는 읽을 @file.json)
+      --mol-type string         molecule 유형: swarm(다중 에이전트), patrol(반복 작업), work(기본값)
+      --no-history              GC 대상이 되지 않게 하면서 Dolt 커밋 이력 건너뛰기(영구 에이전트 bead용)
+      --no-inherit-labels       상위 이슈에서 레이블을 상속하지 않음
+      --notes string            추가 메모
+      --parent string           계층형 하위 이슈의 상위 이슈 ID(예: 'bd-a3f8e9')
+  -p, --priority string         우선순위(0-4 또는 P0-P4, 0이 가장 높음)(기본값 "2")
+      --repo string             이슈의 대상 저장소(자동 라우팅 재정의)
+      --silent                  이슈 ID만 출력(스크립팅용)
+      --skills string           이 이슈에 필요한 skill
+      --spec-id string          사양 문서에 연결
+      --stdin                   stdin에서 설명 읽기(--body-file -의 별칭)
+      --title string            이슈 제목(위치 인수 대신 사용)
+  -t, --type string             이슈 유형(bug|feature|task|epic|chore|decision), 사용자 정의 유형에는 types.custom 구성 필요, 별칭: enhancement/feat→feature, dec/adr→decision(기본값 "task")
+      --validate                설명에 이슈 유형별 필수 섹션이 있는지 검증
+      --waits-for string        기다릴 스폰 이슈 ID(fanout gate용 waits-for 의존성 생성)
+      --waits-for-gate string   gate 유형: all-children(모두 기다림) 또는 any-children(첫 항목 기다림)(기본값 "all-children")
+      --wisp-type string        TTL 기반 압축용 wisp 유형: heartbeat, ping, patrol, gc_report, recovery, error, escalation
 ```
 
 ### bd create-form
 
-Create a new issue using an interactive terminal form.
+인터랙티브 터미널 양식을 사용해 새 이슈를 생성합니다.
 
-This command provides a user-friendly form interface for creating issues,
-with fields for title, description, type, priority, labels, and more.
+이 명령은 이슈를 생성하기 위한 사용자 친화적인 양식 인터페이스를 제공합니다,
+제목, 설명, 유형, 우선순위, 레이블 및 기타 필드를 포함합니다.
 
-Use --parent to create a sub-issue under an existing parent issue.
-The child will get an auto-generated hierarchical ID (e.g., parent-id.1).
+--parent를 사용하여 기존 상위 이슈 아래에 하위 이슈를 생성합니다.
+하위 이슈는 자동 생성된 계층 ID를 받게 됩니다(예: parent-id.1).
 
-The form uses keyboard navigation:
-  - Tab/Shift+Tab: Move between fields
-  - Enter: Submit the form (on the last field or submit button)
-  - Ctrl+C: Cancel and exit
-  - Arrow keys: Navigate within select fields
+이 양식은 키보드 탐색을 사용합니다:
+  - Tab/Shift+Tab: 필드 사이를 이동합니다
+  - Enter: 마지막 필드 또는 제출 버튼에서 양식을 제출합니다
+  - Ctrl+C: 취소하고 종료합니다
+  - 화살표 키: 선택 필드 내에서 이동합니다
 
 ```
 bd create-form [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --parent string   Parent issue ID for creating a hierarchical child (e.g., 'bd-a3f8e9')
+      --parent string   계층형 하위 이슈를 생성할 상위 이슈 ID(예: 'bd-a3f8e9')
 ```
 
 ### bd delete
 
-Delete one or more issues and clean up all references to them.
-This command will:
-1. Remove all dependency links (any type, both directions) involving the issues
-2. Update text references to "[deleted:ID]" in directly connected issues
-3. Permanently delete the issues from the database
+하나 이상의 이슈를 삭제하고 해당 이슈에 대한 모든 참조를 정리합니다.
+이 명령은 다음을 수행합니다:
+1. 해당 이슈와 관련된 모든 의존성 링크(모든 유형, 양방향)를 제거합니다.
+2. 직접 연결된 이슈의 텍스트 참조를 "[deleted:ID]"로 업데이트합니다.
+3. 데이터베이스에서 해당 이슈를 영구적으로 삭제합니다.
 
-This is a destructive operation that cannot be undone. Use with caution.
+이는 취소할 수 없는 파괴적 작업입니다. 주의해서 사용하세요.
 
-BATCH DELETION:
-Delete multiple issues at once:
+일괄 삭제:
+여러 이슈를 한 번에 삭제합니다:
   bd delete bd-1 bd-2 bd-3 --force
 
-Delete from file (one ID per line):
+파일에서 삭제(한 줄에 ID 하나씩):
   bd delete --from-file deletions.txt --force
 
-Preview before deleting:
+삭제 전 미리보기:
   bd delete --from-file deletions.txt --dry-run
 
-DEPENDENCY HANDLING:
-Default: Fails if any issue has dependents not in deletion set
+의존성 처리:
+기본값: 삭제 집합에 포함되지 않은 종속 항목이 있는 경우 실패
   bd delete bd-1 bd-2
 
-Cascade: Recursively delete all dependents
+연쇄: 모든 종속 항목을 재귀적으로 삭제
   bd delete bd-1 --cascade --force
 
-Force: Delete and orphan dependents
+강제: 종속 항목을 삭제하고 고아 처리
   bd delete bd-1 --force
 
 ```
 bd delete <issue-id> [issue-id...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --cascade            Recursively delete all dependent issues
-      --dry-run            Preview what would be deleted without making changes
-  -f, --force              Actually delete (without this flag, shows preview)
-      --from-file string   Read issue IDs from file (one per line)
+      --cascade            모든 종속 이슈를 재귀적으로 삭제
+      --dry-run            변경하지 않고 삭제될 항목 미리 보기
+  -f, --force              실제 삭제(이 플래그가 없으면 미리 보기 표시)
+      --from-file string   파일에서 이슈 ID 읽기(한 줄에 하나)
 ```
 
 ### bd edit
 
-Edit an issue field using your configured $EDITOR.
+설정한 $EDITOR를 사용해 이슈 필드를 편집합니다.
 
-By default, edits the description. Use flags to edit other fields.
+기본적으로 설명을 편집합니다. 다른 필드는 플래그를 사용하여 편집하세요.
 
-Examples:
-  bd edit bd-42                    # Edit description
-  bd edit bd-42 --title            # Edit title
-  bd edit bd-42 --design           # Edit design notes
-  bd edit bd-42 --notes            # Edit notes
-  bd edit bd-42 --acceptance       # Edit acceptance criteria
+예제:
+  bd edit bd-42                    # 설명 편집
+  bd edit bd-42 --title            # 제목 편집
+  bd edit bd-42 --design           # 디자인 노트 편집
+  bd edit bd-42 --notes            # 노트 편집
+  bd edit bd-42 --acceptance       # 승인 기준 편집
 
 ```
 bd edit [id] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --acceptance    Edit the acceptance criteria
-      --description   Edit the description (default)
-      --design        Edit the design notes
-      --notes         Edit the notes
-      --title         Edit the title
+      --acceptance    인수 기준 편집
+      --description   설명 편집(기본값)
+      --design        설계 메모 편집
+      --notes         메모 편집
+      --title         제목 편집
 ```
 
 ### bd gate
 
-Gates are async wait conditions that block workflow steps.
+게이트는 워크플로우 단계를 차단하는 비동기 대기 조건입니다.
 
-Gates are created automatically when a formula step has a gate field.
-They must be closed (manually or via watchers) for the blocked step to proceed.
+수식 단계에 게이트 필드가 있으면 게이트가 자동으로 생성됩니다.
+차단된 단계가 진행되려면 게이트를 닫아야 합니다(수동으로 또는 감시자를 통해).
 
-Gate types:
-  human   - Requires manual bd close (Phase 1)
-  timer   - Expires after timeout (Phase 2)
-  gh:run  - Waits for GitHub workflow (Phase 3)
-  gh:pr   - Waits for PR merge (Phase 3)
-  bead    - Waits for cross-rig bead to close (Phase 4)
+게이트 유형:
+  human   - 수동으로 bd close가 필요합니다 (1단계)
+  timer   - 타임아웃 후 만료됩니다 (2단계)
+  gh:run  - GitHub 워크플로우를 기다립니다 (3단계)
+  gh:pr   - PR 병합을 기다립니다 (3단계)
+  bead    - rig 간 bead가 닫히기를 기다립니다 (4단계)
 
-For bead gates, await_id format is &lt;rig&gt;:&lt;bead-id&gt; (e.g., "other-project:op-abc123").
+bead gates의 경우 await_id 형식은 &lt;rig&gt;:&lt;bead-id&gt;(예: "other-project:op-abc123")와 같습니다.
 
-Examples:
-  bd gate list           # Show all open gates
-  bd gate list --all     # Show all gates including closed
-  bd gate check          # Evaluate all open gates
-  bd gate check --type=bead  # Evaluate only bead gates
-  bd gate resolve &lt;id&gt;   # Close a gate manually
+예시:
+  bd gate list           # 열려 있는 모든 게이트 표시
+  bd gate list --all     # 닫힌 게이트를 포함한 모든 게이트 표시
+  bd gate check          # 열려 있는 모든 게이트 평가
+  bd gate check --type=bead  # bead 게이트만 평가
+  bd gate resolve &lt;id&gt;   # 게이트를 수동으로 닫기
 
 ```
 bd gate
@@ -644,12 +644,12 @@ bd gate
 
 #### bd gate add-waiter
 
-Register an agent as a waiter on a gate bead.
+게이트 비드에 에이전트를 웨이터로 등록합니다.
 
-When the gate closes, the waiter will receive a wake notification via 'bd gate wake'.
-The waiter is typically the worker's address (e.g., "my-project/workers/agent-1").
+게이트가 닫히면 대기자는 'bd gate wake'를 통해 깨우기 알림을 받게 됩니다.
+대기자는 일반적으로 작업자의 주소(예: "my-project/workers/agent-1")입니다.
 
-This is used by 'bd done --phase-complete' to register for gate wake notifications.
+이것은 'bd done --phase-complete'에서 게이트 깨우기 알림을 등록하기 위해 사용됩니다.
 
 ```
 bd gate add-waiter <gate-id> <waiter>
@@ -657,70 +657,70 @@ bd gate add-waiter <gate-id> <waiter>
 
 #### bd gate check
 
-Evaluate gate conditions and automatically close resolved gates.
+게이트 조건을 평가하고 해결된 게이트를 자동으로 닫습니다.
 
-By default, checks all open gates. Use --type to filter by gate type.
+기본적으로 모든 열린 게이트를 확인합니다. 게이트 유형으로 필터링하려면 --type을 사용하세요.
 
-Gate types:
-  gh       - Check all GitHub gates (gh:run and gh:pr)
-  gh:run   - Check GitHub Actions workflow runs
-  gh:pr    - Check pull request merge status
-  timer    - Check timer gates (auto-expire based on timeout)
-  bead     - Check cross-rig bead gates
-  all      - Check all gate types
+게이트 유형:
+  gh       - 모든 GitHub 게이트 확인(gh:run 및 gh:pr)
+  gh:run   - GitHub Actions 워크플로우 실행 확인
+  gh:pr    - 풀 리퀘스트 병합 상태 확인
+  timer    - 타이머 게이트 확인(시간 초과를 기반으로 자동 만료)
+  bead     - rig 간 bead 게이트 확인
+  all      - 모든 게이트 유형 확인
 
-GitHub gates use the 'gh' CLI to query status:
-  - gh:run checks 'gh run view &lt;id&gt; --json status,conclusion'
-  - gh:pr checks 'gh pr view &lt;id&gt; --json state,title'
+GitHub 게이트는 상태를 조회하기 위해 'gh' CLI를 사용합니다:
+  - gh:run은 'gh run view &lt;id&gt; --json status,conclusion'를 확인합니다
+  - gh:pr은 'gh pr view &lt;id&gt; --json state,title'를 확인합니다
 
-A gate is resolved when:
+게이트는 다음과 같은 경우 해결됩니다:
   - gh:run: status=completed AND conclusion=success
   - gh:pr: state=MERGED
-  - timer: current time &gt; created_at + timeout
-  - bead: target bead status=closed
+  - timer: 현재 시간 &gt; created_at + timeout
+  - bead: 대상 bead status=closed
 
-A gate is escalated when:
+게이트는 다음과 같은 경우에 에스컬레이션됩니다:
   - gh:run: status=completed AND conclusion in (failure, canceled)
   - gh:pr: state=CLOSED
 
-Examples:
-  bd gate check              # Check all gates
-  bd gate check --type=gh    # Check only GitHub gates
-  bd gate check --type=gh:run # Check only workflow run gates
-  bd gate check --type=timer # Check only timer gates
-  bd gate check --type=bead  # Check only cross-rig bead gates
-  bd gate check --dry-run    # Show what would happen without changes
-  bd gate check --escalate   # Escalate expired/failed gates
+예시:
+  bd gate check              # 모든 게이트를 확인합니다
+  bd gate check --type=gh    # GitHub 게이트만 확인합니다
+  bd gate check --type=gh:run # 워크플로우 실행 게이트만 확인합니다
+  bd gate check --type=timer # 타이머 게이트만 확인합니다
+  bd gate check --type=bead  # rig 간 bead 게이트만 확인합니다
+  bd gate check --dry-run    # 변경 사항 없이 발생할 동작을 표시합니다
+  bd gate check --escalate   # 만료/실패한 게이트를 에스컬레이션합니다
 
 ```
 bd gate check [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run       Show what would happen without making changes
-  -e, --escalate      Escalate failed/expired gates
-  -l, --limit int     Limit results (default 100) (default 100)
-  -t, --type string   Gate type to check (gh, gh:run, gh:pr, timer, bead, all)
+      --dry-run       변경 없이 수행될 작업 표시
+  -e, --escalate      실패/만료한 gate 에스컬레이션
+  -l, --limit int     결과 수 제한(기본값 100)(기본값 100)
+  -t, --type string   검사할 gate 유형(gh, gh:run, gh:pr, timer, bead, all)
 ```
 
 #### bd gate create
 
-Create an ad-hoc gate issue that blocks another issue until resolved.
+다른 이슈가 해결될 때까지 차단하는 임시 게이트 이슈를 생성합니다.
 
-The blocked issue will not appear in 'bd ready' until the gate is resolved
-via 'bd gate resolve'.
+차단된 이슈는 'bd gate resolve'로 게이트가 해결될 때까지 'bd ready'에 표시되지 않습니다
+'bd gate resolve'를 통해 해결됩니다.
 
-Gate types:
-  human   - Requires manual 'bd gate resolve' (default)
-  timer   - Auto-resolves after --timeout duration
-  gh:run  - Waits for GitHub Actions workflow
-  gh:pr   - Waits for PR merge
+게이트 유형:
+  human   - 'bd gate resolve'를 수동으로 실행해야 합니다 (기본값)
+  timer   - --timeout 기간 후 자동으로 해결됩니다
+  gh:run  - GitHub Actions 워크플로우를 기다립니다
+  gh:pr   - PR 병합을 기다립니다
 
-Examples:
+예시:
   bd gate create --blocks bd-abc
-  bd gate create --type=human --blocks bd-abc --reason="Need design review"
+  bd gate create --type=human --blocks bd-abc --reason="디자인 검토가 필요함"
   bd gate create --type=timer --blocks bd-abc --timeout=2h
   bd gate create --type=gh:pr --blocks bd-abc --await-id=42
 
@@ -728,86 +728,86 @@ Examples:
 bd gate create [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --await-id string   Condition identifier (run ID, PR number, etc.)
-      --blocks string     Issue ID to block (required)
-  -r, --reason string     Reason for the gate
-      --timeout string    Timeout duration (e.g., 2h, 30m)
-  -t, --type string       Gate type (human, timer, gh:run, gh:pr) (default "human")
+      --await-id string   조건 식별자(실행 ID, PR 번호 등)
+      --blocks string     차단할 이슈 ID(필수)
+  -r, --reason string     gate 사유
+      --timeout string    timeout 기간(예: 2h, 30m)
+  -t, --type string       gate 유형(human, timer, gh:run, gh:pr)(기본값 "human")
 ```
 
 #### bd gate discover
 
-Discovers GitHub workflow run IDs for gates awaiting CI/CD completion.
+GitHub 워크플로 실행 ID를 찾습니다( CI/CD 완료를 기다리는 게이트 대상).
 
-This command finds open gates with await_type="gh:run" that don't have an await_id,
-queries recent GitHub workflow runs, and matches them using heuristics:
-  - Branch name matching
-  - Commit SHA matching
-  - Time proximity (runs within 5 minutes of gate creation)
+이 명령은 await_id가 없는 await_type="gh:run"인 열린 게이트를 찾고,
+최근 GitHub 워크플로우 실행을 조회한 뒤 휴리스틱을 사용해 매칭합니다:
+  - 브랜치 이름 매칭
+  - 커밋 SHA 매칭
+  - 시간 근접성 (게이트 생성 시점으로부터 5분 이내의 실행)
 
-Once matched, the gate's await_id is updated with the GitHub run ID, enabling
-subsequent polling to check the run's status.
+일치하면 게이트의 await_id가 GitHub run ID로 업데이트되어,
+이후 폴링에서 run의 상태를 확인할 수 있게 됩니다.
 
-Examples:
-  bd gate discover           # Auto-discover run IDs for all matching gates
-  bd gate discover --dry-run # Preview what would be matched (no updates)
-  bd gate discover --branch main --limit 10  # Only match runs on 'main' branch
+예시:
+  bd gate discover           # 일치하는 모든 게이트의 실행 ID를 자동으로 검색합니다
+  bd gate discover --dry-run # 매칭될 항목을 미리 보여줍니다 (업데이트 없음)
+  bd gate discover --branch main --limit 10  # 'main' 브랜치에서만 실행을 매칭합니다
 
 ```
 bd gate discover [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -b, --branch string      Filter runs by branch (default: current branch)
-  -n, --dry-run            Preview mode: show matches without updating
-  -l, --limit int          Max runs to query from GitHub (default 10)
-  -a, --max-age duration   Max age for gate/run matching (default 30m0s)
+  -b, --branch string      브랜치로 실행 필터링(기본값: 현재 브랜치)
+  -n, --dry-run            미리 보기 모드: 업데이트하지 않고 일치 항목 표시
+  -l, --limit int          GitHub에서 쿼리할 최대 실행 수(기본값 10)
+  -a, --max-age duration   gate/실행 일치의 최대 나이(기본값 30m0s)
 ```
 
 #### bd gate list
 
-List all gate issues in the current beads database.
+현재 beads 데이터베이스의 모든 게이트 이슈를 나열합니다.
 
-By default, shows only open gates. Use --all to include closed gates.
+기본적으로 열린 게이트만 표시합니다. 닫힌 게이트를 포함하려면 --all을 사용하세요.
 
 ```
 bd gate list [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -a, --all         Show all gates including closed
-  -n, --limit int   Limit results (default 50) (default 50)
+  -a, --all         닫힌 gate를 포함해 모두 표시
+  -n, --limit int   결과 수 제한(기본값 50)(기본값 50)
 ```
 
 #### bd gate resolve
 
-Close a gate issue to unblock the step waiting on it.
+게이트 이슈를 닫아 그 위에서 대기 중이던 단계를 해제합니다.
 
-This is equivalent to 'bd close &lt;gate-id&gt;' but with a more explicit name.
-Use --reason to provide context for why the gate was resolved.
+이는 'bd close &lt;gate-id&gt;'와 동등하지만 더 명시적인 이름입니다.
+--reason을(를) 사용하여 게이트가 해결된 이유에 대한 맥락을 제공하세요.
 
 ```
 bd gate resolve <gate-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -r, --reason string   Reason for resolving the gate
+  -r, --reason string   gate 해결 사유
 ```
 
 #### bd gate show
 
-Display details of a gate issue including its waiters.
+대기자를 포함한 게이트 이슈의 세부 정보를 표시합니다.
 
-This is similar to 'bd show' but validates that the issue is a gate.
+이는 'bd show'와 유사하지만 이슈가 게이트인지 검증합니다.
 
 ```
 bd gate show <gate-id>
@@ -815,7 +815,7 @@ bd gate show <gate-id>
 
 ### bd label
 
-Manage issue labels
+이슈 라벨 관리
 
 ```
 bd label
@@ -823,7 +823,7 @@ bd label
 
 #### bd label add
 
-Add a label to one or more issues
+하나 이상의 이슈에 레이블을 추가
 
 ```
 bd label add [issue-id...] [label]
@@ -831,7 +831,7 @@ bd label add [issue-id...] [label]
 
 #### bd label list
 
-List labels for an issue
+이슈의 레이블 목록 보기
 
 ```
 bd label list [issue-id]
@@ -839,7 +839,7 @@ bd label list [issue-id]
 
 #### bd label list-all
 
-List all unique labels in the database
+데이터베이스의 모든 고유 레이블을 나열합니다
 
 ```
 bd label list-all
@@ -847,7 +847,7 @@ bd label list-all
 
 #### bd label propagate
 
-Push a label from a parent down to all direct children that don't already have it. Useful for applying branch: labels across an epic's subtasks.
+상위 항목의 레이블을 아직 갖지 않은 모든 직접 하위 항목에 전파합니다. epic의 하위 작업 전체에 branch: 레이블을 적용할 때 유용합니다.
 
 ```
 bd label propagate [parent-id] [label]
@@ -855,7 +855,7 @@ bd label propagate [parent-id] [label]
 
 #### bd label remove
 
-Remove a label from one or more issues
+하나 이상의 이슈에서 레이블을 제거합니다
 
 ```
 bd label remove [issue-id...] [label]
@@ -863,117 +863,117 @@ bd label remove [issue-id...] [label]
 
 ### bd link
 
-Link two issues with a dependency.
+두 개의 이슈를 의존성으로 연결합니다.
 
-Shorthand for 'bd dep add &lt;id1&gt; &lt;id2&gt;'. By default creates a "blocks"
-dependency (id2 blocks id1). Use --type to specify a different relationship.
+'bd dep add &lt;id1&gt; &lt;id2&gt;'의 약칭입니다. 기본적으로 "blocks"
+종속성(id2 blocks id1)을 생성합니다. 다른 관계를 지정하려면 --type을 사용하세요.
 
-Examples:
-  bd link bd-123 bd-456                    # bd-456 blocks bd-123
-  bd link bd-123 bd-456 --type related     # bd-123 related to bd-456
+예시:
+  bd link bd-123 bd-456                    # bd-456가 bd-123을 차단
+  bd link bd-123 bd-456 --type related     # bd-123이 bd-456와 관련됨
   bd link bd-123 bd-456 --type parent-child
 
 ```
 bd link <id1> <id2> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -t, --type string   Dependency type (blocks|tracks|related|parent-child|discovered-from) (default "blocks")
+  -t, --type string   의존성 유형(blocks|tracks|related|parent-child|discovered-from)(기본값 "blocks")
 ```
 
 ### bd list
 
-List issues
+이슈 목록
 
 ```
 bd list [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --all                          Show all issues including closed (overrides default filter)
-  -a, --assignee string              Filter by assignee
-      --closed-after string          Filter issues closed after date (YYYY-MM-DD or RFC3339)
-      --closed-before string         Filter issues closed before date (YYYY-MM-DD or RFC3339)
-      --created-after string         Filter issues created after date (YYYY-MM-DD or RFC3339)
-      --created-before string        Filter issues created before date (YYYY-MM-DD or RFC3339)
-      --defer-after string           Filter issues deferred after date (supports relative: +6h, tomorrow)
-      --defer-before string          Filter issues deferred before date (supports relative: +6h, tomorrow)
-      --deferred                     Show only issues with defer_until set
-      --desc-contains string         Filter by description substring (case-insensitive)
-      --due-after string             Filter issues due after date (supports relative: +6h, tomorrow)
-      --due-before string            Filter issues due before date (supports relative: +6h, tomorrow)
-      --empty-description            Filter issues with empty or missing description
-      --exclude-label strings        Exclude issues that have ANY of these labels
-      --exclude-type strings         Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)
-      --flat                         Disable tree format and use legacy flat list output
-      --format string                Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template
-      --has-metadata-key string      Filter issues that have this metadata key set
-      --id string                    Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)
-      --include-gates                Include gate issues in output (normally hidden)
-      --include-infra                Include infrastructure beads (agent/role/message) in output
-      --include-templates            Include template molecules in output
-  -l, --label strings                Filter by labels (AND: must have ALL). Can combine with --label-any
-      --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
-      --label-pattern string         Filter by label glob pattern (e.g., 'tech-*' matches tech-debt, tech-legacy)
-      --label-regex string           Filter by label regex pattern (e.g., 'tech-(debt|legacy)')
-  -n, --limit int                    Limit results (default 50, use 0 for unlimited) (default 50)
-      --long                         Show detailed multi-line output for each issue
-      --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
-      --mol-type string              Filter by molecule type: swarm, patrol, or work
-      --no-assignee                  Filter issues with no assignee
-      --no-labels                    Filter issues with no labels
-      --no-pager                     Disable pager output
-      --no-parent                    Exclude child issues (show only top-level issues)
-      --no-pinned                    Exclude pinned issues
-      --notes-contains string        Filter by notes substring (case-insensitive)
-      --offset int                   Skip the first N matching results (0-based). Only supported under --proxied-server.
-      --overdue                      Show only issues with due_at in the past (not closed)
-      --parent string                Filter by parent issue ID (shows children of specified issue)
-      --pinned                       Show only pinned issues
-      --pretty                       Display issues in a tree format with status/priority symbols
-  -p, --priority string              Priority (0-4 or P0-P4, 0=highest)
-      --priority-max string          Filter by maximum priority (inclusive, 0-4 or P0-P4)
-      --priority-min string          Filter by minimum priority (inclusive, 0-4 or P0-P4)
-      --ready                        Show only ready issues (no active blockers, same semantics as bd ready)
-  -r, --reverse                      Reverse sort order
-      --skip-labels                  Skip label hydration. The labels field in output will be empty regardless of actual labels. Use only when the caller does not depend on label data. Cannot combine with --label, --label-any, --label-pattern, --label-regex, --exclude-label, or --no-labels.
-      --sort string                  Sort by field: priority, created, updated, closed, status, id, title, type, assignee
-      --spec string                  Filter by spec_id prefix
-  -s, --status string                Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress. Note: repeating -s/--status silently overwrites the previous value — always use the comma-separated form for multi-status filters.
-      --title string                 Filter by title text (case-insensitive substring match)
-      --title-contains string        Filter by title substring (case-insensitive)
-      --tree                         Hierarchical tree format (default: true; use --flat to disable) (default true)
-  -t, --type string                  Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate, convoy). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision
-      --updated-after string         Filter issues updated after date (YYYY-MM-DD or RFC3339)
-      --updated-before string        Filter issues updated before date (YYYY-MM-DD or RFC3339)
-  -w, --watch                        Watch for changes and auto-update display (implies --pretty)
-      --wisp-type string             Filter by wisp type: heartbeat, ping, patrol, gc_report, recovery, error, escalation
+      --all                          닫힌 이슈를 포함해 모든 이슈 표시(기본 필터 재정의)
+  -a, --assignee string              담당자로 필터링
+      --closed-after string          지정 날짜 이후 닫힌 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --closed-before string         지정 날짜 이전 닫힌 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --created-after string         지정 날짜 이후 생성된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --created-before string        지정 날짜 이전 생성된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --defer-after string           지정 날짜 이후 연기된 이슈 필터링(상대값 지원: +6h, tomorrow)
+      --defer-before string          지정 날짜 이전 연기된 이슈 필터링(상대값 지원: +6h, tomorrow)
+      --deferred                     defer_until이 설정된 이슈만 표시
+      --desc-contains string         설명 부분 문자열로 필터링(대소문자 구분 안 함)
+      --due-after string             지정 날짜 이후 마감인 이슈 필터링(상대값 지원: +6h, tomorrow)
+      --due-before string            지정 날짜 이전 마감인 이슈 필터링(상대값 지원: +6h, tomorrow)
+      --empty-description            설명이 비어 있거나 없는 이슈 필터링
+      --exclude-label strings        지정 레이블 중 하나라도 있는 이슈 제외
+      --exclude-type strings         결과에서 이슈 유형 제외(쉼표로 구분하거나 반복 가능, 예: --exclude-type=convoy,epic)
+      --flat                         트리 형식을 비활성화하고 기존 평면 목록 출력 사용
+      --format string                출력 형식: 'digraph'(golang.org/x/tools/cmd/digraph용), 'dot'(Graphviz) 또는 Go 템플릿
+      --has-metadata-key string      이 메타데이터 키가 설정된 이슈 필터링
+      --id string                    특정 이슈 ID로 필터링(쉼표로 구분, 예: bd-1,bd-5,bd-10)
+      --include-gates                출력에 gate 이슈 포함(일반적으로 숨김)
+      --include-infra                출력에 인프라 beads(agent/role/message) 포함
+      --include-templates            출력에 템플릿 molecule 포함
+  -l, --label strings                레이블로 필터링(AND: 모두 있어야 함). --label-any와 함께 사용 가능
+      --label-any strings            레이블로 필터링(OR: 하나 이상 있어야 함). --label과 함께 사용 가능
+      --label-pattern string         레이블 glob 패턴으로 필터링(예: 'tech-*'는 tech-debt, tech-legacy와 일치)
+      --label-regex string           레이블 정규식 패턴으로 필터링(예: 'tech-(debt|legacy)')
+  -n, --limit int                    결과 수 제한(기본값 50, 무제한은 0 사용)(기본값 50)
+      --long                         각 이슈의 상세한 여러 줄 출력 표시
+      --metadata-field stringArray   메타데이터 필드로 필터링(key=value, 반복 가능)
+      --mol-type string              molecule 유형으로 필터링: swarm, patrol 또는 work
+      --no-assignee                  담당자가 없는 이슈 필터링
+      --no-labels                    레이블이 없는 이슈 필터링
+      --no-pager                     페이저 출력 비활성화
+      --no-parent                    하위 이슈 제외(최상위 이슈만 표시)
+      --no-pinned                    고정된 이슈 제외
+      --notes-contains string        메모 부분 문자열로 필터링(대소문자 구분 안 함)
+      --offset int                   처음 N개의 일치 결과 건너뛰기(0부터 시작). --proxied-server에서만 지원.
+      --overdue                      due_at이 과거인 이슈만 표시(닫힌 이슈 제외)
+      --parent string                상위 이슈 ID로 필터링(지정한 이슈의 하위 이슈 표시)
+      --pinned                       고정된 이슈만 표시
+      --pretty                       상태/우선순위 기호가 있는 트리 형식으로 이슈 표시
+  -p, --priority string              우선순위(0-4 또는 P0-P4, 0이 가장 높음)
+      --priority-max string          최대 우선순위로 필터링(경계값 포함, 0-4 또는 P0-P4)
+      --priority-min string          최소 우선순위로 필터링(경계값 포함, 0-4 또는 P0-P4)
+      --ready                        준비된 이슈만 표시(활성 차단 요소 없음, bd ready와 같은 의미)
+  -r, --reverse                      정렬 순서 반전
+      --skip-labels                  레이블 로드를 건너뜁니다. 실제 레이블과 관계없이 출력의 labels 필드가 비어 있습니다. 호출자가 레이블 데이터에 의존하지 않을 때만 사용하세요. --label, --label-any, --label-pattern, --label-regex, --exclude-label, --no-labels와 함께 사용할 수 없습니다.
+      --sort string                  필드로 정렬: priority, created, updated, closed, status, id, title, type, assignee
+      --spec string                  spec_id 접두사로 필터링
+  -s, --status string                저장된 상태로 필터링(open, in_progress, blocked, deferred, closed). 여러 값은 쉼표로 구분: --status open,in_progress. 참고: -s/--status를 반복하면 이전 값을 알림 없이 덮어씁니다. 여러 상태를 필터링할 때는 항상 쉼표 구분 형식을 사용하세요.
+      --title string                 제목 텍스트로 필터링(대소문자 구분 없는 부분 문자열 일치)
+      --title-contains string        제목 부분 문자열로 필터링(대소문자 구분 안 함)
+      --tree                         계층형 트리 형식(기본값: true, 비활성화하려면 --flat 사용)(기본값 true)
+  -t, --type string                  유형으로 필터링(bug, feature, task, epic, chore, decision, merge-request, molecule, gate, convoy). 별칭: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision
+      --updated-after string         지정 날짜 이후 업데이트된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --updated-before string        지정 날짜 이전 업데이트된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+  -w, --watch                        변경을 감시하고 표시 자동 업데이트(--pretty 포함)
+      --wisp-type string             wisp 유형으로 필터링: heartbeat, ping, patrol, gc_report, recovery, error, escalation
 ```
 
 ### bd merge-slot
 
-Merge-slot gates serialize conflict resolution in the merge queue.
+병합 슬롯 게이트는 병합 큐에서 충돌 해결을 직렬화합니다.
 
-A merge slot is an exclusive access primitive: only one agent can hold it at a time.
-This prevents "monkey knife fights" where multiple polecats race to resolve conflicts
-and create cascading conflicts.
+병합 슬롯은 배타적 접근 원시 타입이다: 한 번에 한 에이전트만이 이를 보유할 수 있다.
+이는 여러 polecats가 충돌을 해결하기 위해 경주하다가 벌어지는 "원숭이 칼싸움"을 방지하고
+연쇄 충돌을 만드는 일을 막는다.
 
-Each rig has one merge slot bead: &lt;prefix&gt;-merge-slot (labeled gt:slot).
-The slot uses:
-  - status=open: slot is available
-  - status=in_progress: slot is held
-  - metadata.holder: who currently holds the slot
-  - metadata.waiters: priority-ordered queue of waiters
+각 rig에는 하나의 병합 슬롯 bead가 있습니다: &lt;prefix&gt;-merge-slot (gt:slot으로 라벨링됨).
+이 슬롯은 다음을 사용합니다:
+  - status=open: 슬롯이 사용 가능합니다
+  - status=in_progress: 슬롯이 점유됨
+  - metadata.holder: 현재 슬롯을 보유한 사용자
+  - metadata.waiters: 우선순위 정렬된 대기자 큐
 
-Examples:
-  bd merge-slot create              # Create merge slot for current rig
-  bd merge-slot check               # Check if slot is available
-  bd merge-slot acquire             # Try to acquire the slot
-  bd merge-slot release             # Release the slot
+예시:
+  bd merge-slot create              # 현재 rig에 대한 병합 슬롯 생성
+  bd merge-slot check               # 슬롯 사용 가능 여부 확인
+  bd merge-slot acquire             # 슬롯 획득 시도
+  bd merge-slot release             # 슬롯 해제
 
 ```
 bd merge-slot
@@ -981,36 +981,36 @@ bd merge-slot
 
 #### bd merge-slot acquire
 
-Attempt to acquire the merge slot for exclusive access.
+병합 슬롯을 독점 접근하기 위해 획득하려고 시도합니다.
 
-If the slot is available (status=open), it will be acquired:
-  - status set to in_progress
-  - holder set to the requester
+슬롯이 사용 가능한 경우(status=open), 획득됩니다:
+  - status가 in_progress로 설정됩니다
+  - holder가 요청자로 설정됩니다
 
-If the slot is held (status=in_progress), the command fails unless
---wait is passed, which adds the requester to the waiters queue.
+슬롯이 점유된 경우(status=in_progress), 명령은 다음 조건이 아니면 실패합니다.
+--wait가 전달되면 요청자가 대기자 큐에 추가됩니다.
 
-Use --holder to specify who is acquiring (default: BEADS_ACTOR env var).
+획득 주체를 지정하려면 --holder를 사용합니다 (기본값: BEADS_ACTOR 환경 변수).
 
 ```
 bd merge-slot acquire [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --holder string   Who is acquiring the slot (default: BEADS_ACTOR)
-      --wait            Add to waiters list if slot is held
+      --holder string   슬롯 획득자(기본값: BEADS_ACTOR)
+      --wait            슬롯을 보유 중이면 대기자 목록에 추가
 ```
 
 #### bd merge-slot check
 
-Check if the merge slot is available or held.
+병합 슬롯이 사용 가능한지 또는 점유되어 있는지 확인합니다.
 
-Returns:
-  - available: slot can be acquired
-  - held by &lt;holder&gt;: slot is currently held
-  - not found: no merge slot exists for this rig
+반환:
+  - 사용 가능: 슬롯을 획득할 수 있습니다
+  - &lt;holder&gt;에 의해 점유됨: 슬롯이 현재 점유되어 있습니다
+  - 찾을 수 없음: 이 rig에 대한 병합 슬롯이 존재하지 않습니다
 
 ```
 bd merge-slot check
@@ -1018,10 +1018,10 @@ bd merge-slot check
 
 #### bd merge-slot create
 
-Create a merge slot bead for serialized conflict resolution.
+직렬화된 충돌 해결을 위한 병합 슬롯 비드를 생성합니다.
 
-The slot ID is automatically generated based on the beads prefix (e.g., gt-merge-slot).
-The slot is created with status=open (available).
+슬롯 ID는 beads 접두사(예: gt-merge-slot)를 기준으로 자동으로 생성됩니다.
+슬롯은 status=open(사용 가능) 상태로 생성됩니다.
 
 ```
 bd merge-slot create
@@ -1029,60 +1029,60 @@ bd merge-slot create
 
 #### bd merge-slot release
 
-Release the merge slot after conflict resolution is complete.
+충돌 해결이 완료된 후 병합 슬롯을 해제합니다.
 
-Sets status back to open and clears the holder field.
-If there are waiters, the highest-priority waiter should then acquire.
+상태를 open으로 다시 설정하고 holder 필드를 지웁니다.
+대기자가 있는 경우, 우선순위가 가장 높은 대기자가 이어서 획득해야 합니다.
 
 ```
 bd merge-slot release [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --holder string   Who is releasing the slot (for verification)
+      --holder string   슬롯 해제자(검증용)
 ```
 
 ### bd note
 
-Append a note to an issue's notes field.
+이슈의 notes 필드에 노트를 추가합니다.
 
-Shorthand for 'bd update &lt;id&gt; --append-notes "text"'.
+다음은 'bd update &lt;id&gt; --append-notes "text"'의 단축 표현입니다.
 
-Examples:
-  bd note gt-abc "Fixed the flaky test"
-  bd note gt-abc Fixed the flaky test
-  echo "note from pipe" | bd note gt-abc --stdin
+예시:
+  bd note gt-abc "불안정한 테스트를 수정했습니다"
+  bd note gt-abc 불안정한 테스트를 수정했습니다
+  echo "파이프의 메모" | bd note gt-abc --stdin
   bd note gt-abc --file notes.txt
 
 ```
 bd note <id> [text...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --file string   Read note text from file
-      --stdin         Read note text from stdin
+      --file string   파일에서 메모 텍스트 읽기
+      --stdin         stdin에서 메모 텍스트 읽기
 ```
 
 ### bd priority
 
-Set the priority of an issue.
+이슈의 우선순위를 설정합니다.
 
-Shorthand for 'bd update &lt;id&gt; --priority &lt;n&gt;'.
+'bd update &lt;id&gt; --priority &lt;n&gt;'의 단축 표현입니다.
 
-Priority levels:
-  0 - Critical (security, data loss, broken builds)
-  1 - High (major features, important bugs)
-  2 - Medium (default)
-  3 - Low (polish, optimization)
-  4 - Backlog (future ideas)
+우선순위 레벨:
+  0 - 치명적 (보안, 데이터 손실, 빌드 실패)
+  1 - 높음 (주요 기능, 중요한 버그)
+  2 - 중간 (기본값)
+  3 - 낮음 (폴리싱, 최적화)
+  4 - 백로그 (향후 아이디어)
 
-Examples:
-  bd priority bd-123 0    # Critical
-  bd priority bd-123 2    # Medium
+예시:
+  bd priority bd-123 0    # 치명적
+  bd priority bd-123 2    # 중간
 
 ```
 bd priority <id> <n>
@@ -1090,100 +1090,100 @@ bd priority <id> <n>
 
 ### bd promote
 
-Promote a wisp (ephemeral issue) to a permanent bead.
+임시 이슈인 wisp를 영구적인 bead로 승격합니다.
 
-This copies the issue from the wisps table (dolt_ignored) to the permanent
-issues table (Dolt-versioned), preserving labels, dependencies, events, and
-comments. The original ID is preserved so all links keep working.
+이것은 wisps 테이블(dolt_ignored)의 issue를 영구
+issues 테이블(Dolt 버전 관리형)로 복사하며 라벨, 종속성, 이벤트, 댓글을
+보존합니다. 원래 ID가 유지되어 모든 링크가 계속 작동합니다.
 
-A comment is added recording the promotion and optional reason.
+승급 내역과 선택적 사유를 기록하는 코멘트가 추가됩니다.
 
-Examples:
+예시:
   bd promote bd-wisp-abc123
-  bd promote bd-wisp-abc123 --reason "Worth tracking long-term"
+  bd promote bd-wisp-abc123 --reason "장기적으로 추적할 가치가 있습니다"
 
 ```
 bd promote <wisp-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -r, --reason string   Reason for promotion
+  -r, --reason string   승격 사유
 ```
 
 ### bd q
 
-Quick capture creates an issue and outputs only the issue ID.
-Designed for scripting and AI agent integration.
+빠른 캡처는 이슈를 생성하고 이슈 ID만 출력합니다.
+스크립팅 및 AI 에이전트 통합을 위해 설계되었습니다.
 
-Example:
-  bd q "Fix login bug"           # Outputs: bd-a1b2
-  ISSUE=$(bd q "New feature")    # Capture ID in variable
-  bd q "Task" | xargs bd show    # Pipe to other commands
+예시:
+  bd q "로그인 버그 수정"           # 출력: bd-a1b2
+  ISSUE=$(bd q "새 기능")    # 변수에 ID를 저장
+  bd q "작업" | xargs bd show    # 다른 명령으로 파이프
 
 ```
 bd q [title] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -l, --labels strings    Labels
-  -p, --priority string   Priority (0-4 or P0-P4) (default "2")
-  -t, --type string       Issue type (default "task")
+  -l, --labels strings    레이블
+  -p, --priority string   우선순위(0-4 또는 P0-P4)(기본값 "2")
+  -t, --type string       이슈 유형(기본값 "task")
 ```
 
 ### bd query
 
-Query issues using a simple query language that supports compound filters,
-boolean operators, and date-relative expressions.
+복합 필터를 지원하는 간단한 쿼리 언어를 사용해 이슈를 조회하고,
+불리언 연산자와 날짜 상대 표현식을 지원합니다.
 
-The query language enables complex filtering that would otherwise require
-multiple flags or piping through jq.
+쿼리 언어는 그렇지 않으면 여러 플래그가 필요하거나
+jq를 통해 파이프해야 하는 복잡한 필터링을 가능하게 합니다.
 
-Syntax:
-  field=value       Equality comparison
-  field!=value      Inequality comparison
-  field&gt;value       Greater than
-  field&gt;=value      Greater than or equal
-  field&lt;value       Less than
-  field&lt;=value      Less than or equal
+구문:
+  field=value       동등 비교
+  field!=value      부등 비교
+  field&gt;value       보다 큼
+  field&gt;=value      크거나 같음
+  field&lt;value       보다 작음
+  field&lt;=value      작거나 같음
 
-Boolean operators (case-insensitive):
-  expr AND expr     Both conditions must match
-  expr OR expr      Either condition can match
-  NOT expr          Negates the condition
-  (expr)            Grouping with parentheses
+불리언 연산자 (대소문자 구분 안 함):
+  expr AND expr     두 조건 모두 일치해야 합니다
+  expr OR expr      두 조건 중 하나가 일치할 수 있습니다
+  NOT expr          조건을 부정합니다
+  (expr)            괄호로 그룹화합니다
 
-Supported fields:
-  status            Stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues stay "open"; use 'bd blocked' to find them
-  priority          Priority level (0-4)
-  type              Issue type (bug, feature, task, epic, chore, decision)
-  assignee          Assigned user (use "none" for unassigned)
-  owner             Issue owner
-  label             Issue label (use "none" for unlabeled)
-  title             Search in title (contains)
-  description       Search in description (contains, "none" for empty)
-  notes             Search in notes (contains)
-  created           Creation date/time
-  updated           Last update date/time
-  started           Date/time issue first transitioned to in_progress
-  closed            Close date/time
-  id                Issue ID (supports wildcards: bd-*)
-  spec              Spec ID (supports wildcards)
-  pinned            Boolean (true/false)
-  ephemeral         Boolean (true/false)
-  template          Boolean (true/false)
-  parent            Parent issue ID
-  mol_type          Molecule type (swarm, patrol, work)
+지원되는 필드:
+  status            저장 상태(open, in_progress, blocked, deferred, closed). 참고: 의존성으로 차단된 이슈는 "open" 상태로 유지됩니다. 찾으려면 'bd blocked'를 사용하세요
+  priority          우선순위 수준 (0-4)
+  type              이슈 유형 (bug, feature, task, epic, chore, decision)
+  assignee          할당된 사용자 (미할당인 경우 "none" 사용)
+  owner             이슈 소유자
+  label             이슈 라벨 (라벨이 없는 경우 "none" 사용)
+  title             제목에서 검색 (포함)
+  description       설명에서 검색 (포함, 비어 있는 경우 "none")
+  notes             노트에서 검색 (포함)
+  created           생성 날짜/시간
+  updated           마지막 업데이트 날짜/시간
+  started           이슈가 처음으로 in_progress로 전환된 날짜/시간
+  closed            종료 날짜/시간
+  id                이슈 ID (와일드카드 지원: bd-*)
+  spec              스펙 ID (와일드카드 지원)
+  pinned            부울 (true/false)
+  ephemeral         부울 (true/false)
+  template          부울 (true/false)
+  parent            상위 이슈 ID
+  mol_type          분자 유형 (swarm, patrol, work)
 
-Date values:
-  Relative durations: 7d (7 days ago), 24h (24 hours ago), 2w (2 weeks ago)
-  Absolute dates: 2025-01-15, 2025-01-15T10:00:00Z
-  Natural language: tomorrow, "next monday", "in 3 days"
+날짜 값:
+  상대 기간: 7d (7일 전), 24h (24시간 전), 2w (2주 전)
+  절대 날짜: 2025-01-15, 2025-01-15T10:00:00Z
+  자연어: tomorrow, "next monday", "in 3 days"
 
-Examples:
+예시:
   bd query "status=open AND priority&gt;1"
   bd query "status=open AND priority&lt;=2 AND updated&gt;7d"
   bd query "(status=open OR status=blocked) AND priority&lt;2"
@@ -1198,163 +1198,163 @@ Examples:
 bd query [expression] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -a, --all           Include closed issues (default: exclude closed)
-  -n, --limit int     Limit results (default: 50, 0 = unlimited) (default 50)
-      --long          Show detailed multi-line output for each issue
-      --offset int    Skip the first N matching results (0-based). Only supported under --proxied-server.
-      --parse-only    Only parse the query and show the AST (for debugging)
-  -r, --reverse       Reverse sort order
-      --sort string   Sort by field: priority, created, updated, closed, status, id, title, type, assignee
+  -a, --all           닫힌 이슈 포함(기본값: 닫힌 이슈 제외)
+  -n, --limit int     결과 수 제한(기본값: 50, 0 = 무제한)(기본값 50)
+      --long          각 이슈의 상세한 여러 줄 출력 표시
+      --offset int    처음 N개의 일치 결과 건너뛰기(0부터 시작). --proxied-server에서만 지원.
+      --parse-only    쿼리만 구문 분석하고 AST 표시(디버깅용)
+  -r, --reverse       정렬 순서 반전
+      --sort string   필드로 정렬: priority, created, updated, closed, status, id, title, type, assignee
 ```
 
 ### bd reopen
 
-Reopen closed issues by setting status to 'open' and clearing the closed_at timestamp.
-This is more explicit than 'bd update --status open' and emits a Reopened event.
+상태를 'open'으로 설정하고 closed_at 타임스탬프를 지워 닫힌 이슈를 다시 엽니다.
+이는 'bd update --status open'보다 더 명시적이며 Reopened 이벤트를 발생시킵니다.
 
 ```
 bd reopen [id...] [flags]
 ```
 
-**Flags:**
+**옵션:**
 
 ```
-  -r, --reason string   Reason for reopening
+  -r, --reason string   다시 여는 사유
 ```
 
 ### bd search
 
-Search issues across title and ID (excludes closed issues by default).
+제목과 ID 전체에서 이슈를 검색합니다(기본적으로 닫힌 이슈는 제외됩니다).
 
-ID-like queries (e.g., "bd-123", "hq-319") use fast exact/prefix matching.
-Text queries search titles. Use --desc-contains for description search.
-Use --status all to include closed issues.
+ID와 유사한 쿼리(예: "bd-123", "hq-319")는 빠른 정확/접두사 매칭을 사용합니다.
+텍스트 쿼리는 제목을 검색합니다. 설명 검색에는 --desc-contains를 사용하세요.
+닫힌 이슈를 포함하려면 --status all을 사용하세요.
 
-Examples:
-  bd search "authentication bug"
-  bd search "login" --status open
-  bd search "database" --label backend --limit 10
-  bd search --query "performance" --assignee alice
-  bd search "bd-5q" # Search by partial ID (fast prefix match)
-  bd search "security" --priority-min 0 --priority-max 2
-  bd search "bug" --created-after 2025-01-01
-  bd search "refactor" --status all  # Include closed issues
-  bd search "bug" --sort priority
-  bd search "task" --sort created --reverse
-  bd search "api" --desc-contains "endpoint"
-  bd search "cleanup" --no-assignee --no-labels
+예시:
+  bd search "인증 버그"
+  bd search "로그인" --status open
+  bd search "데이터베이스" --label backend --limit 10
+  bd search --query "성능" --assignee alice
+  bd search "bd-5q" # 부분 ID로 검색 (빠른 접두사 일치)
+  bd search "보안" --priority-min 0 --priority-max 2
+  bd search "버그" --created-after 2025-01-01
+  bd search "리팩터링" --status all  # 닫힌 이슈 포함
+  bd search "버그" --sort priority
+  bd search "작업" --sort created --reverse
+  bd search "api" --desc-contains "엔드포인트"
+  bd search "정리" --no-assignee --no-labels
 
 ```
 bd search [query] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -a, --assignee string              Filter by assignee
-      --closed-after string          Filter issues closed after date (YYYY-MM-DD or RFC3339)
-      --closed-before string         Filter issues closed before date (YYYY-MM-DD or RFC3339)
-      --created-after string         Filter issues created after date (YYYY-MM-DD or RFC3339)
-      --created-before string        Filter issues created before date (YYYY-MM-DD or RFC3339)
-      --desc-contains string         Filter by description substring (case-insensitive)
-      --empty-description            Filter issues with empty or missing description
-      --external-contains string     Filter by external ref substring (case-insensitive)
-      --has-metadata-key string      Filter issues that have this metadata key set
-  -l, --label strings                Filter by labels (AND: must have ALL)
-      --label-any strings            Filter by labels (OR: must have AT LEAST ONE)
-  -n, --limit int                    Limit results (default: 50) (default 50)
-      --long                         Show detailed multi-line output for each issue
-      --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
-      --no-assignee                  Filter issues with no assignee
-      --no-labels                    Filter issues with no labels
-      --notes-contains string        Filter by notes substring (case-insensitive)
-      --priority-max string          Filter by maximum priority (inclusive, 0-4 or P0-P4)
-      --priority-min string          Filter by minimum priority (inclusive, 0-4 or P0-P4)
-      --query string                 Search query (alternative to positional argument)
-  -r, --reverse                      Reverse sort order
-      --sort string                  Sort by field: priority, created, updated, closed, status, id, title, type, assignee
-  -s, --status string                Filter by stored status (open, in_progress, blocked, deferred, closed, all). Default excludes closed; use 'all' to include closed. Note: dependency-blocked issues use 'bd blocked'
-  -t, --type string                  Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)
-      --updated-after string         Filter issues updated after date (YYYY-MM-DD or RFC3339)
-      --updated-before string        Filter issues updated before date (YYYY-MM-DD or RFC3339)
+  -a, --assignee string              담당자로 필터링
+      --closed-after string          지정 날짜 이후 닫힌 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --closed-before string         지정 날짜 이전 닫힌 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --created-after string         지정 날짜 이후 생성된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --created-before string        지정 날짜 이전 생성된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --desc-contains string         설명 부분 문자열로 필터링(대소문자 구분 안 함)
+      --empty-description            설명이 비어 있거나 없는 이슈 필터링
+      --external-contains string     외부 참조 부분 문자열로 필터링(대소문자 구분 안 함)
+      --has-metadata-key string      이 메타데이터 키가 설정된 이슈 필터링
+  -l, --label strings                레이블로 필터링(AND: 모두 있어야 함)
+      --label-any strings            레이블로 필터링(OR: 하나 이상 있어야 함)
+  -n, --limit int                    결과 수 제한(기본값: 50)(기본값 50)
+      --long                         각 이슈의 상세한 여러 줄 출력 표시
+      --metadata-field stringArray   메타데이터 필드로 필터링(key=value, 반복 가능)
+      --no-assignee                  담당자가 없는 이슈 필터링
+      --no-labels                    레이블이 없는 이슈 필터링
+      --notes-contains string        메모 부분 문자열로 필터링(대소문자 구분 안 함)
+      --priority-max string          최대 우선순위로 필터링(경계값 포함, 0-4 또는 P0-P4)
+      --priority-min string          최소 우선순위로 필터링(경계값 포함, 0-4 또는 P0-P4)
+      --query string                 검색 쿼리(위치 인수 대신 사용)
+  -r, --reverse                      정렬 순서 반전
+      --sort string                  필드로 정렬: priority, created, updated, closed, status, id, title, type, assignee
+  -s, --status string                저장된 상태로 필터링(open, in_progress, blocked, deferred, closed, all). 기본값은 closed 제외, 포함하려면 'all' 사용. 참고: 의존성으로 차단된 이슈에는 'bd blocked' 사용
+  -t, --type string                  유형으로 필터링(bug, feature, task, epic, chore, decision, merge-request, molecule, gate)
+      --updated-after string         지정 날짜 이후 업데이트된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --updated-before string        지정 날짜 이전 업데이트된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
 ```
 
 ### bd set-state
 
-Atomically set operational state on an issue.
+이슈의 운영 상태를 원자적으로 설정합니다.
 
-This command:
-1. Creates an event bead recording the state change (source of truth)
-2. Removes any existing label for the dimension
-3. Adds the new dimension:value label (fast lookup cache)
+이 명령은:
+1. 상태 변경을 기록하는 이벤트 bead를 생성합니다 (신뢰할 수 있는 원본)
+2. 해당 dimension의 기존 레이블을 제거합니다
+3. 새로운 dimension:value 레이블을 추가합니다 (빠른 조회 캐시)
 
-State labels follow the convention &lt;dimension&gt;:&lt;value&gt;, for example:
+상태 레이블은 &lt;dimension&gt;:&lt;value&gt; 형식을 따르며, 예를 들어:
   patrol:active, patrol:muted
   mode:normal, mode:degraded
   health:healthy, health:failing
 
-Examples:
-  bd set-state agent-abc patrol=muted --reason "Investigating stuck worker"
-  bd set-state agent-abc mode=degraded --reason "High error rate detected"
+예시:
+  bd set-state agent-abc patrol=muted --reason "멈춘 워커 조사 중"
+  bd set-state agent-abc mode=degraded --reason "높은 오류율이 감지됨"
   bd set-state agent-abc health=healthy
 
-The --reason flag provides context for the event bead (recommended).
+--reason 플래그는 이벤트 비드에 대한 컨텍스트를 제공합니다 (권장).
 
 ```
 bd set-state <issue-id> <dimension>=<value> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --reason string   Reason for the state change (recorded in event)
+      --reason string   상태 변경 사유(이벤트에 기록)
 ```
 
 ### bd show
 
-Show issue details
+이슈 세부 정보 표시
 
 ```
 bd show [id...] [--id=<id>...] [--current] [flags]
 ```
 
-**Aliases:** view
+**별칭:** view
 
-**Flags:**
+**플래그:**
 
 ```
-      --as-of string         Show issue as it existed at a specific commit hash or branch (requires Dolt)
-      --children             Show only the children of this issue
-      --current              Show the currently active issue (in-progress, hooked, or last touched)
-      --id stringArray       Issue ID (use for IDs that look like flags, e.g., --id=gt--xyz)
-      --include-comments     Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments)
-      --include-dependents   Stream full dependent issues in JSON output (--json only; may be slow on hub beads)
-      --local-time           Show timestamps in local time instead of UTC
-      --long                 Show all available fields (extended metadata, agent identity, gate fields, etc.)
-      --refs                 Show issues that reference this issue (reverse lookup)
-      --short                Show compact one-line output per issue
-      --thread               Show full conversation thread (for messages)
-  -w, --watch                Watch for changes and auto-refresh display
+      --as-of string         특정 커밋 해시 또는 브랜치 시점의 이슈 표시(Dolt 필요)
+      --children             이 이슈의 하위 이슈만 표시
+      --current              현재 활성 이슈 표시(in-progress, hooked 또는 마지막으로 접근)
+      --id stringArray       이슈 ID(플래그처럼 보이는 ID에 사용, 예: --id=gt--xyz)
+      --include-comments     JSON 출력에 전체 댓글 본문 스트리밍(--json 전용, 댓글이 많은 이슈에서 느릴 수 있음)
+      --include-dependents   JSON 출력에 전체 종속 이슈 스트리밍(--json 전용, hub bead에서 느릴 수 있음)
+      --local-time           UTC 대신 현지 시간으로 타임스탬프 표시
+      --long                 사용 가능한 모든 필드 표시(확장 메타데이터, 에이전트 신원, gate 필드 등)
+      --refs                 이 이슈를 참조하는 이슈 표시(역방향 조회)
+      --short                이슈별 간결한 한 줄 출력 표시
+      --thread               전체 대화 스레드 표시(메시지용)
+  -w, --watch                변경을 감시하고 표시 자동 새로 고침
 ```
 
 ### bd state
 
-Query the current value of a state dimension from an issue's labels.
+이슈의 라벨에서 상태 차원의 현재 값을 조회합니다.
 
-State labels follow the convention &lt;dimension&gt;:&lt;value&gt;, for example:
+상태 레이블은 &lt;dimension&gt;:&lt;value&gt; 형식을 따르며, 예를 들어:
   patrol:active
   mode:degraded
   health:healthy
 
-This command extracts the value for a given dimension.
+이 명령은 주어진 차원의 값을 추출합니다.
 
-Examples:
-  bd state witness-abc patrol     # Output: active
-  bd state witness-abc mode       # Output: normal
-  bd state witness-abc health     # Output: healthy
+예제:
+  bd state witness-abc patrol     # 출력: active
+  bd state witness-abc mode       # 출력: normal
+  bd state witness-abc health     # 출력: healthy
 
 ```
 bd state <issue-id> <dimension>
@@ -1362,13 +1362,13 @@ bd state <issue-id> <dimension>
 
 #### bd state list
 
-List all state labels (dimension:value format) on an issue.
+이슈에서 모든 상태 레이블을 (dimension:value 형식)으로 나열합니다.
 
-This filters labels to only show those following the state convention.
+이것은 상태 규칙을 따르는 라벨만 표시하도록 라벨을 필터링합니다.
 
-Example:
+예시:
   bd state list witness-abc
-  # Output:
+  # 출력:
   #   patrol: active
   #   mode: normal
   #   health: healthy
@@ -1379,11 +1379,11 @@ bd state list <issue-id>
 
 ### bd tag
 
-Add a label to an issue.
+이슈에 레이블을 추가합니다.
 
-Shorthand for 'bd update &lt;id&gt; --add-label &lt;label&gt;'.
+다음은 'bd update &lt;id&gt; --add-label &lt;label&gt;'의 약칭입니다.
 
-Examples:
+예시:
   bd tag bd-123 bug
   bd tag bd-123 needs-review
 
@@ -1393,14 +1393,14 @@ bd tag <id> <label>
 
 ### bd todo
 
-Manage TODO items as lightweight task issues.
+TODO 항목을 가벼운 작업 이슈로 관리합니다.
 
-TODOs are regular task-type issues with convenient shortcuts:
-  bd todo add "Title"    -&gt; bd create "Title" -t task -p 2
+TODOs는 task 유형의 일반적인 이슈로, 편리한 바로 가기를 제공합니다:
+  bd todo add "제목"    -&gt; bd create "제목" -t task -p 2
   bd todo                -&gt; bd list --type task --status open
   bd todo done &lt;id&gt;      -&gt; bd close &lt;id&gt;
 
-TODOs can be promoted to full issues by changing type or priority:
+TODO 항목은 유형 또는 우선순위를 변경해서 정식 이슈로 승격할 수 있습니다:
   bd update todo-123 --type bug --priority 0
 
 ```
@@ -1409,167 +1409,167 @@ bd todo
 
 #### bd todo add
 
-Add a new TODO item
+새 TODO 항목을 추가하기
 
 ```
 bd todo add <title> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -d, --description string   Description
-  -p, --priority int         Priority (0-4, default 2) (default 2)
+  -d, --description string   설명
+  -p, --priority int         우선순위(0-4, 기본값 2)(기본값 2)
 ```
 
 #### bd todo done
 
-Mark TODO(s) as done
+TODO(s)를 완료로 표시
 
 ```
 bd todo done <id> [<id>...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --reason string   Reason for closing (default: Completed)
+      --reason string   닫는 사유(기본값: Completed)
 ```
 
 #### bd todo list
 
-List TODO items
+TODO 항목 목록
 
 ```
 bd todo list [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --all   Show all TODOs including completed
+      --all   완료된 항목을 포함해 모든 TODO 표시
 ```
 
 ### bd update
 
-Update one or more issues.
+하나 이상의 이슈를 업데이트합니다.
 
-If no issue ID is provided, updates the last touched issue (from most recent
-create, update, show, or close operation).
+이슈 ID가 제공되지 않으면 마지막으로 수정한 이슈(가장 최근의
+create, update, show, 또는 close 작업에서) 업데이트합니다.
 
 ```
 bd update [id...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --acceptance string            Acceptance criteria
-      --add-label strings            Add labels (repeatable)
-      --allow-empty-description      Allow empty description replacement when reading from stdin or file
-      --append-notes string          Append to existing notes (with newline separator)
-  -a, --assignee string              Assignee
-      --await-id string              Set gate await_id (e.g., GitHub run ID for gh:run gates)
-      --body-file string             Read description from file (use - for stdin)
-      --claim                        Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you)
-      --defer string                 Defer until date (empty to clear). Issue hidden from bd ready until then
-  -d, --description string           Issue description
-      --design string                Design notes
-      --design-file string           Read design from file (use - for stdin)
-      --due string                   Due date/time (empty to clear). Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15
-      --ephemeral                    Mark issue as ephemeral (wisp) - not exported to JSONL
-  -e, --estimate int                 Time estimate in minutes (e.g., 60 for 1 hour)
-      --external-ref string          External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)
-      --history                      Clear no-history flag (re-enable Dolt commit history)
-      --metadata string              Set custom metadata (JSON string or @file.json to read from file)
-      --no-history                   Mark issue as no-history (skip Dolt commits, not GC-eligible)
-      --notes string                 Additional notes
-      --parent string                New parent issue ID (reparents the issue, use empty string to remove parent)
-      --persistent                   Mark issue as persistent (promote wisp to regular issue)
-  -p, --priority string              Priority (0-4 or P0-P4, 0=highest)
-      --remove-label strings         Remove labels (repeatable)
-      --session string               Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)
-      --set-labels strings           Set labels, replacing all existing (repeatable)
-      --set-metadata stringArray     Set metadata key=value (repeatable, e.g., --set-metadata team=platform)
-      --spec-id string               Link to specification document
-  -s, --status string                New status
-      --stdin                        Read description from stdin (alias for --body-file -)
-      --title string                 New title
-  -t, --type string                  New type (bug|feature|task|epic|chore|decision); custom types require types.custom config
-      --unset-metadata stringArray   Remove metadata key (repeatable, e.g., --unset-metadata team)
+      --acceptance string            인수 기준
+      --add-label strings            레이블 추가(반복 가능)
+      --allow-empty-description      stdin 또는 파일에서 읽을 때 빈 설명으로 교체 허용
+      --append-notes string          기존 메모에 추가(줄바꿈 구분자 포함)
+  -a, --assignee string              담당자
+      --await-id string              gate await_id 설정(예: gh:run gate의 GitHub 실행 ID)
+      --body-file string             파일에서 설명 읽기(stdin은 - 사용)
+      --claim                        이슈를 원자적으로 맡기(담당자를 자신으로, 상태를 in_progress로 설정, 이미 자신이 맡았다면 멱등)
+      --defer string                 지정 날짜까지 연기(지우려면 빈 값). 그때까지 이슈가 bd ready에서 숨겨짐
+  -d, --description string           이슈 설명
+      --design string                설계 메모
+      --design-file string           파일에서 설계 읽기(stdin은 - 사용)
+      --due string                   마감 날짜/시간(지우려면 빈 값). 형식: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15
+      --ephemeral                    이슈를 임시(wisp)로 표시 - JSONL로 내보내지 않음
+  -e, --estimate int                 예상 시간(분)(예: 1시간은 60)
+      --external-ref string          외부 참조(예: 'gh-9', 'jira-ABC', Linear URL)
+      --history                      no-history 플래그 지우기(Dolt 커밋 이력 다시 활성화)
+      --metadata string              사용자 정의 메타데이터 설정(JSON 문자열 또는 읽을 @file.json)
+      --no-history                   이슈를 no-history로 표시(Dolt 커밋 건너뛰기, GC 대상 아님)
+      --notes string                 추가 메모
+      --parent string                새 상위 이슈 ID(이슈 상위 항목 변경, 제거하려면 빈 문자열 사용)
+      --persistent                   이슈를 영구로 표시(wisp를 일반 이슈로 승격)
+  -p, --priority string              우선순위(0-4 또는 P0-P4, 0이 가장 높음)
+      --remove-label strings         레이블 제거(반복 가능)
+      --session string               status=closed용 Claude Code 세션 ID(또는 CLAUDE_SESSION_ID 환경 변수 설정)
+      --set-labels strings           모든 기존 레이블을 교체하여 설정(반복 가능)
+      --set-metadata stringArray     메타데이터 key=value 설정(반복 가능, 예: --set-metadata team=platform)
+      --spec-id string               사양 문서에 연결
+  -s, --status string                새 상태
+      --stdin                        stdin에서 설명 읽기(--body-file -의 별칭)
+      --title string                 새 제목
+  -t, --type string                  새 유형(bug|feature|task|epic|chore|decision), 사용자 정의 유형에는 types.custom 구성 필요
+      --unset-metadata stringArray   메타데이터 키 제거(반복 가능, 예: --unset-metadata team)
 ```
 
-## Views & Reports:
+## 보기 및 보고서:
 
 ### bd count
 
-Count issues matching the specified filters.
+지정된 필터와 일치하는 이슈의 개수를 계산합니다.
 
-By default, returns the total count of issues matching the filters.
-Use --by-* flags to group counts by different attributes.
+기본적으로 필터와 일치하는 이슈의 총 개수를 반환합니다.
+--by-* 플래그를 사용하여 다양한 속성별로 개수를 그룹화합니다.
 
-Examples:
-  bd count                          # Count all issues
-  bd count --status open            # Count open issues
-  bd count --by-status              # Group count by status
-  bd count --by-priority            # Group count by priority
-  bd count --by-type                # Group count by issue type
-  bd count --by-assignee            # Group count by assignee
-  bd count --by-label               # Group count by label
-  bd count --assignee alice --by-status  # Count alice's issues by status
-  bd count --include-infra          # Count issues + wisps tier (matches 'bd list --include-infra --all' cardinality)
+예시:
+  bd count                          # 모든 이슈를 카운트
+  bd count --status open            # 열린 이슈를 카운트
+  bd count --by-status              # 상태별로 그룹화해 카운트
+  bd count --by-priority            # 우선순위별로 그룹화해 카운트
+  bd count --by-type                # 이슈 유형별로 그룹화해 카운트
+  bd count --by-assignee            # 담당자별로 그룹화해 카운트
+  bd count --by-label               # 레이블별로 그룹화해 카운트
+  bd count --assignee alice --by-status  # alice의 이슈를 상태별로 카운트
+  bd count --include-infra          # 이슈 + wisps tier를 카운트 ('bd list --include-infra --all'의 cardinality와 일치)
 
 
 ```
 bd count [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -a, --assignee string         Filter by assignee
-      --by-assignee             Group count by assignee
-      --by-label                Group count by label
-      --by-priority             Group count by priority
-      --by-status               Group count by status
-      --by-type                 Group count by issue type
-      --closed-after string     Filter issues closed after date (YYYY-MM-DD or RFC3339)
-      --closed-before string    Filter issues closed before date (YYYY-MM-DD or RFC3339)
-      --created-after string    Filter issues created after date (YYYY-MM-DD or RFC3339)
-      --created-before string   Filter issues created before date (YYYY-MM-DD or RFC3339)
-      --desc-contains string    Filter by description substring
-      --empty-description       Filter issues with empty description
-      --id string               Filter by specific issue IDs (comma-separated)
-      --include-infra           Include infrastructure beads and the wisps tier (matches 'bd list --include-infra --all' cardinality)
-  -l, --label strings           Filter by labels (AND: must have ALL)
-      --label-any strings       Filter by labels (OR: must have AT LEAST ONE)
-      --no-assignee             Filter issues with no assignee
-      --no-labels               Filter issues with no labels
-      --notes-contains string   Filter by notes substring
-  -p, --priority int            Filter by priority (0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)
-      --priority-max int        Filter by maximum priority (inclusive)
-      --priority-min int        Filter by minimum priority (inclusive)
-  -s, --status string           Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'
-      --title string            Filter by title text (case-insensitive substring match)
-      --title-contains string   Filter by title substring
-  -t, --type string             Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)
-      --updated-after string    Filter issues updated after date (YYYY-MM-DD or RFC3339)
-      --updated-before string   Filter issues updated before date (YYYY-MM-DD or RFC3339)
+  -a, --assignee string         담당자로 필터링
+      --by-assignee             담당자별 수 그룹화
+      --by-label                레이블별 수 그룹화
+      --by-priority             우선순위별 수 그룹화
+      --by-status               상태별 수 그룹화
+      --by-type                 이슈 유형별 수 그룹화
+      --closed-after string     지정 날짜 이후 닫힌 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --closed-before string    지정 날짜 이전 닫힌 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --created-after string    지정 날짜 이후 생성된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --created-before string   지정 날짜 이전 생성된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --desc-contains string    설명 부분 문자열로 필터링
+      --empty-description       설명이 비어 있는 이슈 필터링
+      --id string               특정 이슈 ID로 필터링(쉼표로 구분)
+      --include-infra           인프라 bead와 wisp 계층 포함('bd list --include-infra --all'의 카디널리티와 일치)
+  -l, --label strings           레이블로 필터링(AND: 모두 있어야 함)
+      --label-any strings       레이블로 필터링(OR: 하나 이상 있어야 함)
+      --no-assignee             담당자가 없는 이슈 필터링
+      --no-labels               레이블이 없는 이슈 필터링
+      --notes-contains string   메모 부분 문자열로 필터링
+  -p, --priority int            우선순위로 필터링(0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)
+      --priority-max int        최대 우선순위로 필터링(경계값 포함)
+      --priority-min int        최소 우선순위로 필터링(경계값 포함)
+  -s, --status string           저장된 상태로 필터링(open, in_progress, blocked, deferred, closed). 참고: 의존성으로 차단된 이슈에는 'bd blocked' 사용
+      --title string            제목 텍스트로 필터링(대소문자 구분 없는 부분 문자열 일치)
+      --title-contains string   제목 부분 문자열로 필터링
+  -t, --type string             유형으로 필터링(bug, feature, task, epic, chore, decision, merge-request, molecule, gate)
+      --updated-after string    지정 날짜 이후 업데이트된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --updated-before string   지정 날짜 이전 업데이트된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
 ```
 
 ### bd diff
 
-Show the differences in issues between two commits or branches.
+두 커밋 또는 브랜치 간의 이슈 차이를 보여줍니다.
 
-The refs can be:
-- Commit hashes (e.g., abc123def)
-- Branch names (e.g., main, feature-branch)
-- Special refs like HEAD, HEAD~1
+refs는 다음과 같습니다:
+- 커밋 해시(예: abc123def)
+- 브랜치 이름(예: main, feature-branch)
+- HEAD, HEAD~1 같은 특수 refs
 
-Examples:
-  bd diff main feature-branch   # Compare main to feature branch
-  bd diff HEAD~5 HEAD           # Show changes in last 5 commits
-  bd diff abc123 def456         # Compare two specific commits
+예제:
+  bd diff main feature-branch   # main을 feature 브랜치와 비교
+  bd diff HEAD~5 HEAD           # 마지막 5개의 커밋에서 변경사항 표시
+  bd diff abc123 def456         # 두 개의 특정 커밋 비교
 
 ```
 bd diff <from-ref> <to-ref>
@@ -1577,177 +1577,177 @@ bd diff <from-ref> <to-ref>
 
 ### bd find-duplicates
 
-Find issues that are semantically similar but not exact duplicates.
+정확히 중복되지는 않지만 의미적으로 유사한 이슈를 찾습니다.
 
-Unlike 'bd duplicates' which finds exact content matches, find-duplicates
-uses text similarity or AI to find issues that discuss the same topic
-with different wording.
+정확한 내용 일치를 찾는 'bd duplicates'와 달리 find-duplicates는
+텍스트 유사도 또는 AI를 사용해
+동일한 주제를 서로 다른 문구로 다루는 이슈를 찾습니다.
 
-Approaches:
-  mechanical  Token-based text similarity (default, no API key needed)
-  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY or ai.api_key)
+접근 방식:
+  mechanical  토큰 기반 텍스트 유사도 (기본값, API 키가 필요하지 않음)
+  ai          LLM 기반 의미 기반 비교 (ANTHROPIC_API_KEY 또는 ai.api_key가 필요함)
 
-The mechanical approach tokenizes titles and descriptions, then computes
-Jaccard similarity between all issue pairs. It's fast and free but may
-miss semantically similar issues with very different wording.
+기계적 접근은 제목과 설명을 토큰화한 다음
+모든 이슈 쌍 간의 Jaccard 유사도를 계산한다. 빠르고 무료이지만
+의미적으로 유사한데 문구가 매우 다른 이슈를 놓칠 수 있다.
 
-The AI approach sends candidate pairs to Claude for semantic comparison.
-It first uses mechanical pre-filtering to reduce the number of API calls,
-then asks the LLM to judge whether the remaining pairs are true duplicates.
+AI 접근 방식은 Claude로 후보 쌍을 보내 의미론적 비교를 수행합니다.
+먼저 기계적 사전 필터링을 사용해 API 호출 횟수를 줄인 뒤,
+그런 다음 LLM에 나머지 쌍이 실제 중복인지 판별하도록 요청합니다.)
 
-Examples:
-  bd find-duplicates                       # Mechanical similarity (default)
-  bd find-duplicates --threshold 0.4       # Lower threshold = more results
-  bd find-duplicates --method ai           # Use AI for semantic comparison
-  bd find-duplicates --status open         # Only check open issues
-  bd find-duplicates --limit 20            # Show top 20 pairs
-  bd find-duplicates --json                # JSON output
+예시:
+  bd find-duplicates                       # 기계적 유사성(기본값)
+  bd find-duplicates --threshold 0.4       # 임계값이 낮을수록 더 많은 결과
+  bd find-duplicates --method ai           # 의미론적 비교에 AI 사용
+  bd find-duplicates --status open         # 열린 이슈만 확인
+  bd find-duplicates --limit 20            # 상위 20개 쌍 표시
+  bd find-duplicates --json                # JSON 출력
 
 ```
 bd find-duplicates [flags]
 ```
 
-**Aliases:** find-dups
+**별칭:** find-dups
 
-**Flags:**
+**플래그:**
 
 ```
-  -n, --limit int         Maximum number of pairs to show (default 50)
-      --method string     Detection method: mechanical, ai (default "mechanical")
-      --model string      AI model to use (only with --method ai; default from config ai.model)
-  -s, --status string     Filter by status (default: non-closed)
-      --threshold float   Similarity threshold (0.0-1.0, lower = more results) (default 0.5)
+  -n, --limit int         표시할 최대 쌍 수(기본값 50)
+      --method string     감지 방법: mechanical, ai(기본값 "mechanical")
+      --model string      사용할 AI 모델(--method ai에서만 사용, 기본값은 ai.model 구성)
+  -s, --status string     상태로 필터링(기본값: 닫히지 않음)
+      --threshold float   유사도 임곗값(0.0-1.0, 낮을수록 결과 증가)(기본값 0.5)
 ```
 
 ### bd history
 
-Show the complete version history of an issue, including all commits
-where the issue was modified.
+이슈의 전체 버전 기록을 표시합니다. 여기에
+이슈가 수정된 모든 커밋이 포함됩니다.
 
-Examples:
-  bd history bd-123           # Show all history for issue bd-123
-  bd history bd-123 --limit 5 # Show last 5 changes
+예시:
+  bd history bd-123           # 이슈 bd-123의 모든 이력 보기
+  bd history bd-123 --limit 5 # 마지막 5개 변경사항 표시
 
 ```
 bd history <id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --limit int   Limit number of history entries (0 = all)
+      --limit int   이력 항목 수 제한(0 = 전체)
 ```
 
 ### bd lint
 
-Check issues for missing recommended sections based on issue type.
+이슈 유형에 따라 누락된 권장 섹션을 확인합니다.
 
-By default, lints all open issues. Specify issue IDs to lint specific issues.
+기본적으로 열린 모든 이슈를 린트합니다. 특정 이슈를 린트하려면 이슈 ID를 지정하세요.
 
-Section requirements by type:
-  bug:      Steps to Reproduce, Acceptance Criteria
-  task:     Acceptance Criteria
-  feature:  Acceptance Criteria
-  epic:     Success Criteria
-  chore:    (none)
+유형별 섹션 요구사항:
+  bug:      재현 단계, 수락 기준
+  task:     수락 기준
+  feature:  수락 기준
+  epic:     성공 기준
+  chore:    (없음)
 
-Examples:
-  bd lint                    # Lint all open issues
-  bd lint bd-abc             # Lint specific issue
-  bd lint bd-abc bd-def      # Lint multiple issues
-  bd lint --type bug         # Lint only bugs
-  bd lint --status all       # Lint all issues (including closed)
+예시:
+  bd lint                    # 열린 이슈를 모두 린트
+  bd lint bd-abc             # 특정 이슈 린트
+  bd lint bd-abc bd-def      # 여러 개 이슈 린트
+  bd lint --type bug         # 버그만 린트
+  bd lint --status all       # 모든 이슈를 린트(닫힌 항목 포함)
 
 
 ```
 bd lint [issue-id...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -s, --status string   Filter by status (default: open, use 'all' for all)
-  -t, --type string     Filter by issue type (bug, task, feature, epic)
+  -s, --status string   상태로 필터링(기본값: open, 전체에는 'all' 사용)
+  -t, --type string     이슈 유형으로 필터링(bug, task, feature, epic)
 ```
 
 ### bd stale
 
-Show issues that haven't been updated recently and may need attention.
-This helps identify:
-- In-progress issues with no recent activity (may be abandoned)
-- Open issues that have been forgotten
-- Issues that might be outdated or no longer relevant
+최근에 최근 업데이트되지 않은 이슈를 표시하여 주의가 필요할 수 있는 이슈를 보여줍니다.
+이는 다음을 식별하는 데 도움을 줍니다.
+- 최근 활동이 없는 진행 중 이슈(방치되어 중단됐을 수 있음)
+- 잊혀진 오픈 이슈
+- 오래되었거나 더 이상 관련이 없는 이슈
 
 ```
 bd stale [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -d, --days int        Issues not updated in this many days (default 30)
-  -n, --limit int       Maximum issues to show (default 50)
-  -s, --status string   Filter by status (open|in_progress|blocked|deferred)
+  -d, --days int        이 일수 동안 업데이트되지 않은 이슈(기본값 30)
+  -n, --limit int       표시할 최대 이슈 수(기본값 50)
+  -s, --status string   상태로 필터링(open|in_progress|blocked|deferred)
 ```
 
 ### bd status
 
-Show a quick snapshot of the issue database state and statistics.
+이슈 데이터베이스의 상태와 통계를 간략하게 빠르게 표시합니다.
 
-This command provides a summary of issue counts by state (open, in_progress,
-blocked, closed), ready work, extended statistics (pinned issues,
-average lead time), and recent activity over the last 24 hours from git history.
+이 명령은 상태별 이슈 개수(open, in_progress,
+blocked, closed), 준비 작업, 확장 통계(고정된 이슈,
+평균 리드 타임), 그리고 Git 이력을 기반으로 지난 24시간의 최근 활동 요약을 제공합니다.
 
-Similar to how 'git status' shows working tree state, 'bd status' gives you
-a quick overview of your issue database without needing multiple queries.
+마치 'git status'가 작업 트리 상태를 보여주는 방식처럼, 'bd status'는
+여러 번의 쿼리가 필요 없는 이슈 데이터베이스의 빠른 개요를 제공합니다.
 
-Use cases:
-  - Quick project health check
-  - Onboarding for new contributors
-  - Integration with shell prompts or CI/CD
-  - Daily standup reference
+사용 사례:
+  - 신속한 프로젝트 상태 점검
+  - 신규 기여자 온보딩
+  - 셸 프롬프트 또는 CI/CD와 통합
+  - 일일 스탠드업 참고자료
 
-Examples:
-  bd status                    # Show summary with activity
-  bd status --no-activity      # Skip git activity (faster)
-  bd status --json             # JSON format output
-  bd status --assigned         # Show issues assigned to current user
-  bd stats                     # Alias for bd status
+예제:
+  bd status                    # 활동 요약 표시
+  bd status --no-activity      # Git 활동 건너뛰기 (더 빠름)
+  bd status --json             # JSON 형식 출력
+  bd status --assigned         # 현재 사용자에게 할당된 이슈 표시
+  bd stats                     # bd status의 별칭
 
 ```
 bd status [flags]
 ```
 
-**Aliases:** stats
+**별칭:** stats
 
-**Flags:**
+**플래그:**
 
 ```
-      --all           Show all issues (default behavior)
-      --assigned      Show issues assigned to current user
-      --no-activity   Skip git activity tracking (faster)
+      --all           모든 이슈 표시(기본 동작)
+      --assigned      현재 사용자에게 할당된 이슈 표시
+      --no-activity   git 활동 추적 건너뛰기(더 빠름)
 ```
 
 ### bd statuses
 
-List all valid issue statuses and their categories.
+모든 유효한 이슈 상태와 해당 카테고리를 나열합니다.
 
-Built-in statuses (open, in_progress, blocked, etc.) are always valid.
-Additional statuses can be configured via status.custom:
+기본 제공 상태(open, in_progress, blocked 등)는 항상 유효합니다.
+추가 상태는 status.custom를 통해 구성할 수 있습니다:
 
   bd config set status.custom "in_review:active,qa_testing:wip,on_hold:frozen"
 
-Categories control behavior:
-  active  — appears in 'bd ready' and default 'bd list'
-  wip     — excluded from 'bd ready', visible in default 'bd list'
-  done    — excluded from 'bd ready' and default 'bd list'
-  frozen  — excluded from 'bd ready' and default 'bd list'
+카테고리는 동작을 제어합니다:
+  active  — 'bd ready'와 기본 'bd list'에 표시됩니다
+  wip     — 'bd ready'에서 제외되며, 기본 'bd list'에는 표시됩니다
+  done    — 'bd ready'와 기본 'bd list'에서 제외됩니다
+  frozen  — 'bd ready'와 기본 'bd list'에서 제외됩니다
 
-Statuses without a category (legacy format) are valid but excluded from 'bd ready'.
+카테고리가 없는 상태(레거시 형식)는 유효하지만 'bd ready'에서는 제외됩니다.
 
-Examples:
-  bd statuses            # List all statuses with icons and categories
-  bd statuses --json     # Output as JSON
+예시:
+  bd statuses            # 아이콘과 카테고리를 사용해 모든 상태를 나열
+  bd statuses --json     # JSON으로 출력
 
 
 ```
@@ -1756,96 +1756,96 @@ bd statuses
 
 ### bd types
 
-List all valid issue types that can be used with bd create --type.
+bd create --type에서 사용할 수 있는 모든 유효한 이슈 유형을 나열합니다.
 
-Core work types (bug, task, feature, chore, epic, decision) are always valid.
-Additional types require configuration via types.custom in .beads/config.yaml.
+핵심 작업 유형(bug, task, feature, chore, epic, decision)은 항상 유효합니다.
+추가 유형은 .beads/config.yaml의 types.custom을 통해 구성해야 합니다.
 
-Examples:
-  bd types              # List all types with descriptions
-  bd types --json       # Output as JSON
+예시:
+  bd types              # 설명과 함께 모든 타입을 나열
+  bd types --json       # JSON 형식으로 출력
 
 
 ```
 bd types
 ```
 
-## Dependencies & Structure:
+## 의존성 및 구조:
 
 ### bd dep
 
-Manage dependencies between issues.
+이슈 간의 종속성을 관리합니다.
 
-When called with an issue ID and --blocks flag, creates a blocking dependency:
+이슈 ID와 --blocks 플래그로 호출되면 블로킹 의존성을 생성합니다:
   bd dep &lt;blocker-id&gt; --blocks &lt;blocked-id&gt;
 
-This is equivalent to:
+이것은 다음과 동일합니다:
   bd dep add &lt;blocked-id&gt; &lt;blocker-id&gt;
 
-Examples:
-  bd dep bd-xyz --blocks bd-abc    # bd-xyz blocks bd-abc
-  bd dep add bd-abc bd-xyz         # Same as above (bd-abc depends on bd-xyz)
+예제:
+  bd dep bd-xyz --blocks bd-abc    # bd-xyz가 bd-abc를 차단
+  bd dep add bd-abc bd-xyz         # 위와 동일함 (bd-abc는 bd-xyz에 의존)
 
 ```
 bd dep [issue-id] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -b, --blocks string    Issue ID that this issue blocks (shorthand for: bd dep add <blocked> <blocker>)
-      --no-cycle-check   Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit
+  -b, --blocks string    이 이슈가 차단하는 이슈 ID(단축 명령: bd dep add <blocked> <blocker>)
+      --no-cycle-check   속도를 위해 간선별 순환 검사 건너뛰기(일괄 연결), 일괄 --file 추가는 커밋 전 마지막 전체 그래프 검사를 계속 실행
 ```
 
 #### bd dep add
 
-Add a dependency between two issues.
+두 개의 이슈 간에 종속성을 추가합니다.
 
-The depends-on-id can be provided as:
-  - A positional argument: bd dep add issue-123 issue-456
-  - A flag: bd dep add issue-123 --blocked-by issue-456
-  - A flag: bd dep add issue-123 --depends-on issue-456
+depends-on-id는 다음과 같이 제공할 수 있습니다:
+  - 위치 인수: bd dep add issue-123 issue-456
+  - 플래그: bd dep add issue-123 --blocked-by issue-456
+  - 플래그: bd dep add issue-123 --depends-on issue-456
 
-The --blocked-by and --depends-on flags are aliases and both mean "issue-123
-depends on (is blocked by) the specified issue."
+--blocked-by 및 --depends-on 플래그는 별칭이며 둘 다 "issue-123
+는 지정된 이슈에 의해 의존(차단됨)합니다."
 
-The depends-on-id can be:
-  - A local issue ID (e.g., bd-xyz)
-  - An external reference: external:&lt;project&gt;:&lt;capability&gt;
+depends-on-id는 다음과 같을 수 있습니다:
+  - 로컬 이슈 ID(예: bd-xyz)
+  - 외부 참조: external:&lt;project&gt;:&lt;capability&gt;
 
-For bulk wiring, pass newline-delimited JSON with --file. Each line must be an
-object with "from" and "to" fields, and may include "type". The aliases
-"issue_id" and "depends_on_id" are also accepted. Use --file - to read stdin.
+대량 와이어링의 경우 --file을 사용해 줄바꿈 구분 JSON을 전달합니다. 각 줄은
+\"from\"과 \"to\" 필드가 있는 객체여야 하며 \"type\"을 포함할 수 있습니다. 별칭
+\"issue_id\" 및 \"depends_on_id\"도 허용됩니다. stdin을 읽으려면 --file - 를 사용하세요.
 
-External references are stored as-is and resolved at query time using
-the external_projects config. They block the issue until the capability
-is "shipped" in the target project.
+외부 참조는 그대로 저장되며 쿼리 시점에 external_projects config를 사용해
+해결됩니다. 이들은 대상 프로젝트에서 기능이 "shipped"될 때까지
+이슈를 차단합니다.
 
-Examples:
-  bd dep add bd-42 bd-41                              # Positional args
-  bd dep add bd-42 --blocked-by bd-41                 # Flag syntax (same effect)
-  bd dep add bd-42 --depends-on bd-41                 # Alias (same effect)
-  bd dep add gt-xyz external:beads:mol-run-assignee   # Cross-project dependency
-  bd dep add bd-42 bd-41 --no-cycle-check             # Skip cycle check (bulk wiring)
-  bd dep add --file deps.jsonl                        # Bulk JSONL: &#123;"from":"bd-42","to":"bd-41"&#125;
+예시:
+  bd dep add bd-42 bd-41                              # 위치 인수
+  bd dep add bd-42 --blocked-by bd-41                 # 플래그 구문 (동일한 효과)
+  bd dep add bd-42 --depends-on bd-41                 # 별칭 (동일한 효과)
+  bd dep add gt-xyz external:beads:mol-run-assignee   # 프로젝트 간 종속성
+  bd dep add bd-42 bd-41 --no-cycle-check             # 순환 검사 건너뛰기 (일괄 와이어링)
+  bd dep add --file deps.jsonl                        # 대량 JSONL: &#123;"from":"bd-42","to":"bd-41"&#125;
 
 ```
 bd dep add [issue-id] [depends-on-id] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --blocked-by string   Issue ID that blocks the first issue (alternative to positional arg)
-      --depends-on string   Issue ID that the first issue depends on (alias for --blocked-by)
-      --file string         Read dependency edges from JSONL file, or '-' for stdin
-      --no-cycle-check      Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit
-  -t, --type string         Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes) (default "blocks")
+      --blocked-by string   첫 이슈를 차단하는 이슈 ID(위치 인수 대신 사용)
+      --depends-on string   첫 이슈가 의존하는 이슈 ID(--blocked-by의 별칭)
+      --file string         JSONL 파일에서 의존성 간선 읽기, stdin은 '-'
+      --no-cycle-check      속도를 위해 간선별 순환 검사 건너뛰기(일괄 연결), 일괄 --file 추가는 커밋 전 마지막 전체 그래프 검사를 계속 실행
+  -t, --type string         의존성 유형(blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes)(기본값 "blocks")
 ```
 
 #### bd dep cycles
 
-Detect dependency cycles
+의존성 순환 감지
 
 ```
 bd dep cycles
@@ -1853,44 +1853,44 @@ bd dep cycles
 
 #### bd dep list
 
-List dependencies or dependents of one or more issues with optional type filtering.
+선택적 유형 필터링을 사용하여 하나 이상의 이슈의 의존성 또는 의존 항목을 나열합니다.
 
-By default shows dependencies (what issues depend on). Use --direction to control:
-  - down: Show dependencies (what this issue depends on) - default
-  - up:   Show dependents (what depends on this issue)
+기본적으로 종속성(어떤 이슈가 이에 의존하는지)을 표시합니다. 제어하려면 --direction을 사용하세요:
+  - down: 종속성(이 이슈가 의존하는 항목)을 표시합니다 - 기본값
+  - up:   종속 항목(이 이슈에 의존하는 항목)을 표시합니다
 
-Multiple IDs can be provided for batch dep listing. With --json, the output
-is a flat array of dependency records across all requested issues.
+여러 ID를 배치 dep 목록 조회에 제공할 수 있습니다. --json을 사용하면 출력
+은(는) 요청된 모든 이슈에 걸친 의존성 레코드의 평면 배열입니다.
 
-Use --type to filter by dependency type (e.g., tracks, blocks, parent-child).
+의존성 유형(예: tracks, blocks, parent-child)로 필터링하려면 --type을 사용하세요.
 
-Examples:
-  bd dep list gt-abc                     # Show what gt-abc depends on
-  bd dep list gt-abc gt-def              # Batch: deps for both issues
-  bd dep list gt-abc --direction=up      # Show what depends on gt-abc
-  bd dep list gt-abc --direction=up -t tracks  # Show what tracks gt-abc (convoy tracking)
+예제:
+  bd dep list gt-abc                     # gt-abc가 의존하는 항목 표시
+  bd dep list gt-abc gt-def              # 배치: 두 이슈 모두의 종속성 표시
+  bd dep list gt-abc --direction=up      # gt-abc에 의존하는 항목 표시
+  bd dep list gt-abc --direction=up -t tracks  # gt-abc를 추적하는 항목 표시(컨보이 추적)
 
 ```
 bd dep list [issue-id...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --direction string   Direction: 'down' (dependencies), 'up' (dependents) (default "down")
-  -t, --type string        Filter by dependency type (e.g., tracks, blocks, parent-child)
+      --direction string   방향: 'down'(의존 항목), 'up'(종속 항목)(기본값 "down")
+  -t, --type string        의존성 유형으로 필터링(예: tracks, blocks, parent-child)
 ```
 
 #### bd dep relate
 
-Create a loose 'see also' relationship between two issues.
+두 이슈 사이에 느슨한 'see also' 관계를 만듭니다.
 
-The relates_to link is bidirectional - both issues will reference each other.
-This enables knowledge graph connections without blocking or hierarchy.
+relates_to 링크는 양방향입니다 - 두 이슈가 서로 참조합니다.
+이는 차단이나 계층 관계 없이 지식 그래프 연결을 가능하게 합니다.
 
-Examples:
-  bd relate bd-abc bd-xyz    # Link two related issues
-  bd relate bd-123 bd-456    # Create see-also connection
+예제:
+  bd relate bd-abc bd-xyz    # 두 개의 관련 이슈를 연결합니다
+  bd relate bd-123 bd-456    # see-also 연결을 생성합니다
 
 ```
 bd dep relate <id1> <id2>
@@ -1898,51 +1898,51 @@ bd dep relate <id1> <id2>
 
 #### bd dep remove
 
-Remove a dependency
+종속성 제거
 
 ```
 bd dep remove [issue-id] [depends-on-id]
 ```
 
-**Aliases:** rm
+**별칭:** rm
 
 #### bd dep tree
 
-Show dependency tree rooted at the given issue.
+주어진 이슈를 루트로 하는 의존성 트리를 표시합니다.
 
-By default, shows dependencies (what blocks this issue). Use --direction to control:
-  - down: Show dependencies (what blocks this issue) - default
-  - up:   Show dependents (what this issue blocks)
-  - both: Show full graph in both directions
+기본적으로 종속 항목을 표시합니다(이 이슈를 차단하는 항목). --direction을 사용해 제어하세요:
+  - down: 종속 항목 표시(이 이슈를 차단하는 항목) - 기본값
+  - up:   종속 항목(이 이슈가 차단하는 항목) 표시
+  - both: 양방향 모두에서 전체 그래프 표시
 
-Examples:
-  bd dep tree gt-0iqq                    # Show what blocks gt-0iqq
-  bd dep tree gt-0iqq --direction=up     # Show what gt-0iqq blocks
-  bd dep tree gt-0iqq --status=open      # Only show open issues
-  bd dep tree gt-0iqq --depth=3          # Limit to 3 levels deep
+예시:
+  bd dep tree gt-0iqq                    # gt-0iqq을(를) 차단하는 항목을 표시
+  bd dep tree gt-0iqq --direction=up     # gt-0iqq이(가) 차단하는 항목을 표시
+  bd dep tree gt-0iqq --status=open      # 열린 이슈만 표시
+  bd dep tree gt-0iqq --depth=3          # 깊이를 3단계로 제한
 
 ```
 bd dep tree [issue-id] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --direction string   Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'
-      --format string      Output format: 'mermaid' for Mermaid.js flowchart
-  -d, --max-depth int      Maximum tree depth to display (safety limit) (default 50)
-      --reverse            Show dependent tree (deprecated: use --direction=up)
-      --show-all-paths     Show all paths to nodes (no deduplication for diamond dependencies)
-      --status string      Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)
+      --direction string   트리 방향: 'down'(의존 항목), 'up'(종속 항목) 또는 'both'
+      --format string      출력 형식: Mermaid.js 순서도용 'mermaid'
+  -d, --max-depth int      표시할 최대 트리 깊이(안전 제한)(기본값 50)
+      --reverse            종속 트리 표시(사용 중단: --direction=up 사용)
+      --show-all-paths     노드로 향하는 모든 경로 표시(다이아몬드 의존성 중복 제거 안 함)
+      --status string      이 상태의 이슈만 표시하도록 필터링(open, in_progress, blocked, deferred, closed)
 ```
 
 #### bd dep unrelate
 
-Remove a relates_to relationship between two issues.
+두 이슈 간의 relates_to 관계를 제거합니다.
 
-Removes the link in both directions.
+링크를 양방향으로 제거합니다.
 
-Example:
+예시:
   bd unrelate bd-abc bd-xyz
 
 ```
@@ -1951,51 +1951,51 @@ bd dep unrelate <id1> <id2>
 
 ### bd duplicate
 
-Mark an issue as a duplicate of a canonical issue.
+이슈를 표준 이슈의 중복으로 표시합니다.
 
-The duplicate issue is automatically closed with a reference to the canonical.
-This is essential for large issue databases with many similar reports.
+중복 이슈는 canonical을 참조하는 방식으로 자동으로 종료됩니다.
+이는 유사한 보고서가 많은 대규모 이슈 데이터베이스에서 필수적입니다.
 
-Examples:
-  bd duplicate bd-abc --of bd-xyz    # Mark bd-abc as duplicate of bd-xyz
+예시:
+  bd duplicate bd-abc --of bd-xyz    # bd-abc을 bd-xyz의 중복으로 표시합니다
 
 ```
 bd duplicate <id> --of <canonical> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --of string   Canonical issue ID (required)
+      --of string   기준 이슈 ID(필수)
 ```
 
 ### bd duplicates
 
-Find issues with identical content (title, description, design, acceptance criteria).
-Groups issues by content hash and reports duplicates with suggested merge targets.
-The merge target is chosen by:
-1. Reference count (most referenced issue wins)
-2. Lexicographically smallest ID if reference counts are equal
-Only groups issues with matching status (open with open, closed with closed).
-Example:
-  bd duplicates                    # Show all duplicate groups
-  bd duplicates --auto-merge       # Automatically merge all duplicates
-  bd duplicates --dry-run          # Show what would be merged
+동일한 내용(제목, 설명, 디자인, 수락 기준)인 이슈를 찾습니다.
+내용 해시로 이슈를 그룹화하고 제안된 병합 대상으로 중복 항목을 보고합니다.
+병합 대상은 다음과 같이 선택됩니다:
+1. 참조 횟수(가장 많이 참조된 이슈가 우선)
+2. 참조 횟수가 같으면 사전식으로 가장 작은 ID
+상태가 일치하는 이슈만 그룹화합니다(open는 open끼리, closed는 closed끼리).
+예시:
+  bd duplicates                    # 모든 중복 그룹 표시
+  bd duplicates --auto-merge       # 모든 중복 항목을 자동으로 병합
+  bd duplicates --dry-run          # 병합될 항목 미리보기
 
 ```
 bd duplicates [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --auto-merge   Automatically merge all duplicates
-      --dry-run      Show what would be merged without making changes
+      --auto-merge   모든 중복 자동 병합
+      --dry-run      변경하지 않고 병합될 항목 표시
 ```
 
 ### bd epic
 
-Epic management commands
+에픽 관리 명령어
 
 ```
 bd epic
@@ -2003,82 +2003,82 @@ bd epic
 
 #### bd epic close-eligible
 
-Close epics where all children are complete
+모든 하위 항목이 완료된 에픽 닫기
 
 ```
 bd epic close-eligible [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview what would be closed without making changes
+      --dry-run   변경하지 않고 닫힐 항목 미리 보기
 ```
 
 #### bd epic status
 
-Show epic completion status
+에픽 완료 상태 표시
 
 ```
 bd epic status [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --eligible-only   Show only epics eligible for closure
+      --eligible-only   닫을 수 있는 epic만 표시
 ```
 
 ### bd graph
 
-Display a visualization of an issue's dependency graph.
+이슈의 종속성 그래프를 시각화하여 표시합니다.
 
-For epics, shows all children and their dependencies.
-For regular issues, shows the issue and its direct dependencies.
+에픽의 경우, 모든 하위 항목과 해당 종속성을 표시합니다.
+일반 이슈의 경우, 이슈와 그 직접적인 종속성을 표시합니다.
 
-With --all, shows all open issues grouped by connected component.
+--all을 사용하면 연결된 구성 요소별로 그룹화된 모든 열린 이슈를 표시합니다.
 
-Display formats:
-  (default)        DAG with columns and box-drawing edges (terminal-native)
-  --box            ASCII boxes showing layers, more detailed
-  --compact        Tree format, one line per issue, more scannable
-  --dot            Graphviz DOT format (pipe to dot -Tsvg &gt; graph.svg)
-  --html           Self-contained interactive HTML with D3.js visualization
+표시 형식:
+  (기본값)         열이 있는 DAG와 박스 그리기 간선(터미널 기본)
+  --box            계층을 보여 주는 ASCII 상자, 더 상세하게
+  --compact        트리 형식, 이슈당 한 줄, 더 읽기 쉬움
+  --dot            Graphviz DOT 형식(dot -Tsvg &gt; graph.svg로 파이프)
+  --html           D3.js 시각화를 포함한 자체 포함형 대화형 HTML
 
-The graph shows execution order:
-- Layer 0 / leftmost = no dependencies (can start immediately)
-- Higher layers depend on lower layers
-- Nodes in the same layer can run in parallel
+그래프는 실행 순서를 보여줍니다:
+- 레이어 0 / 왼쪽 끝 = 의존성이 없음(즉시 시작 가능)
+- 상위 레이어는 하위 레이어에 의존함
+- 동일한 레이어의 노드는 병렬로 실행될 수 있음
 
-Status icons: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
+상태 아이콘: ○ 열림  ◐ 진행 중  ● 차단됨  ✓ 완료  ❄ 보류됨
 
-Examples:
-  bd graph issue-id              # Terminal DAG visualization (default)
-  bd graph --box issue-id        # ASCII boxes with layer grouping
-  bd graph --dot issue-id | dot -Tsvg &gt; graph.svg  # SVG via Graphviz
-  bd graph --dot issue-id | dot -Tpng &gt; graph.png  # PNG via Graphviz
-  bd graph --html issue-id &gt; graph.html  # Interactive browser view
-  bd graph --all --html &gt; all.html       # All issues, interactive
+예시:
+  bd graph issue-id              # 터미널 DAG 시각화 (기본값)
+  bd graph --box issue-id        # 레이어 그룹화가 적용된 ASCII 박스
+  bd graph --dot issue-id | dot -Tsvg &gt; graph.svg  # Graphviz를 통해 SVG 생성
+  bd graph --dot issue-id | dot -Tpng &gt; graph.png  # Graphviz를 통해 PNG 생성
+  bd graph --html issue-id &gt; graph.html  # 대화형 브라우저 뷰
+  bd graph --all --html &gt; all.html       # 모든 이슈, 대화형 뷰
 
 ```
 bd graph [issue-id] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --all       Show graph for all open issues
-      --box       ASCII boxes showing layers
-      --compact   Tree format, one line per issue, more scannable
-      --dot       Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)
-      --html      Output self-contained interactive HTML (redirect to file)
+      --all       모든 열린 이슈의 그래프 표시
+      --box       계층을 표시하는 ASCII 상자
+      --compact   트리 형식, 이슈당 한 줄, 더 빠르게 훑어볼 수 있음
+      --dot       Graphviz DOT 형식 출력(다음으로 파이프: dot -Tsvg > graph.svg)
+      --html      독립형 대화형 HTML 출력(파일로 리디렉션)
 ```
 
 #### bd graph check
 
-Check the dependency graph for cycles, orphans, and other integrity issues.
+의존성 그래프에서 순환, 고아 항목 및 기타 무결성 문제를 확인합니다.
 
-Returns exit code 0 if the graph is clean, 1 if issues are found.
+그래프가 깨끗하면 종료 코드 0을 반환하고, 문제가 발견되면 종료 코드 1을 반환합니다.
 
 ```
 bd graph check
@@ -2086,30 +2086,30 @@ bd graph check
 
 ### bd supersede
 
-Mark an issue as superseded by a newer version.
+더 최신 버전으로 인해 해당 이슈를 폐기 처리합니다.
 
-The superseded issue is automatically closed with a reference to the replacement.
-Useful for design docs, specs, and evolving artifacts.
+대체된 이슈는 대체 항목에 대한 참조와 함께 자동으로 닫힙니다.
+설계 문서, 사양서, 그리고 계속 진화하는 산출물에 유용합니다.
 
-Examples:
-  bd supersede bd-old --with bd-new    # Mark bd-old as superseded by bd-new
+예시:
+  bd supersede bd-old --with bd-new    # bd-old를 bd-new로 대체됨으로 표시합니다
 
 ```
 bd supersede <id> --with <new> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --with string   Replacement issue ID (required)
+      --with string   대체 이슈 ID(필수)
 ```
 
 ### bd swarm
 
-Swarm management commands for coordinating parallel work on epics.
+에픽에서 병렬 작업을 조정하기 위한 Swarm 관리 명령어들입니다.
 
-A swarm is a structured body of work defined by an epic and its children,
-with dependencies forming a DAG (directed acyclic graph) of work.
+스웜은 에픽과 그 하위 항목으로 정의되는 구조화된 작업 단위이며,
+의존성은 작업의 DAG(방향성 비순환 그래프)로 형성됩니다.
 
 ```
 bd swarm
@@ -2117,46 +2117,46 @@ bd swarm
 
 #### bd swarm create
 
-Create a swarm molecule to orchestrate parallel work on an epic.
+에픽에서 병렬 작업을 조율하기 위해 swarm molecule을 생성합니다.
 
-The swarm molecule:
-- Links to the epic it orchestrates
-- Has mol_type=swarm for discovery
-- Specifies a coordinator (optional)
-- Can be picked up by any coordinator agent
+스웜 분자:
+- 조율하는 에픽에 연결됩니다
+- 탐색을 위해 mol_type=swarm을 사용합니다
+- 코디네이터(선택 사항)를 지정합니다
+- 어떤 코디네이터 에이전트든 작업할 수 있습니다
 
-If given a single issue (not an epic), it will be auto-wrapped:
-- Creates an epic with that issue as its only child
-- Then creates the swarm molecule for that epic
+만약 단일 이슈(에픽이 아닌)가 주어지면 자동으로 래핑됩니다:
+- 해당 이슈를 유일한 하위 항목으로 하는 에픽을 생성합니다
+- 그런 다음 해당 에픽의 swarm molecule을 생성합니다
 
-Examples:
-  bd swarm create bd-epic-123                          # Create swarm for epic
-  bd swarm create bd-epic-123 --coordinator=observer/   # With specific coordinator
-  bd swarm create bd-task-456                          # Auto-wrap single issue
+예시:
+  bd swarm create bd-epic-123                          # 에픽용 스웜 생성
+  bd swarm create bd-epic-123 --coordinator=observer/   # 특정 코디네이터로 생성
+  bd swarm create bd-task-456                          # 단일 이슈 자동 래핑
 
 ```
 bd swarm create [epic-id] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --coordinator string   Coordinator address (e.g., my-project/witness)
-      --force                Create new swarm even if one already exists
+      --coordinator string   coordinator 주소(예: my-project/witness)
+      --force                이미 있어도 새 swarm 생성
 ```
 
 #### bd swarm list
 
-List all swarm molecules with their status.
+모든 swarm 분자의 상태를 나열합니다.
 
-Shows each swarm molecule with:
-- Progress (completed/total issues)
-- Active workers
-- Epic ID and title
+각 swarm molecule을 다음 항목과 함께 표시합니다:
+- 진행 상황(완료/총 이슈)
+- 활성 작업자
+- Epic ID 및 제목
 
-Examples:
-  bd swarm list         # List all swarms
-  bd swarm list --json  # Machine-readable output
+예시:
+  bd swarm list         # 모든 swarm 목록 보기
+  bd swarm list --json  # 기계 판독 가능한 출력
 
 ```
 bd swarm list
@@ -2164,25 +2164,25 @@ bd swarm list
 
 #### bd swarm status
 
-Show the current status of a swarm, computed from beads.
+beads로 계산된 swarm의 현재 상태를 표시합니다.
 
-Accepts either:
-- An epic ID (shows status for that epic's children)
-- A swarm molecule ID (follows the link to find the epic)
+다음 중 하나를 받습니다:
+- 에픽 ID(해당 에픽의 하위 항목 상태를 표시)
+- 스웜 분자 ID(링크를 따라 에픽을 찾음)
 
-Displays issues grouped by state:
-- Completed: Closed issues
-- Active: Issues currently in_progress (with assignee)
-- Ready: Open issues with all dependencies satisfied
-- Blocked: Open issues waiting on dependencies
+상태별로 이슈를 그룹화하여 표시:
+- 완료됨: 종료된 이슈
+- 활성: 현재 in_progress인 이슈(담당자 있음)
+- 준비됨: 모든 종속성이 충족된 열린 이슈
+- 차단됨: 종속성 대기 중인 열린 이슈
 
-The status is COMPUTED from beads, not stored separately.
-If beads changes, status changes.
+상태는 별도로 저장되지 않고 beads에서 계산됩니다.
+beads가 변경되면 상태도 변경됩니다.
 
-Examples:
-  bd swarm status gt-epic-123       # Show swarm status by epic
-  bd swarm status gt-swarm-456      # Show status via swarm molecule
-  bd swarm status gt-epic-123 --json  # Machine-readable output
+예시:
+  bd swarm status gt-epic-123       # 에픽별 swarm 상태 표시
+  bd swarm status gt-swarm-456      # swarm molecule을 통해 상태 표시
+  bd swarm status gt-epic-123 --json  # 기계 판독용 출력
 
 ```
 bd swarm status [epic-or-swarm-id]
@@ -2190,56 +2190,56 @@ bd swarm status [epic-or-swarm-id]
 
 #### bd swarm validate
 
-Validate an epic's structure to ensure it's ready for swarm execution.
+에픽의 구조를 검증하여 스웜 실행 준비가 되었는지 확인합니다.
 
-Checks for:
-- Correct dependency direction (requirement-based, not temporal)
-- Orphaned issues (roots with no dependents)
-- Missing dependencies (leaves that should depend on something)
-- Cycles (impossible to resolve)
-- Disconnected subgraphs
+다음 항목을 확인합니다:
+- 올바른 의존성 방향(요구사항 기반, 시간 기반 아님)
+- 고아 이슈(의존 대상이 없는 루트)
+- 누락된 의존성(무언가에 의존해야 하는 리프)
+- 순환(해결할 수 없음)
+- 분리된 하위 그래프
 
-Reports:
-- Ready fronts (waves of parallel work)
-- Estimated worker-sessions
-- Maximum parallelism
-- Warnings for potential issues
+보고서:
+- 준비 프론트(병렬 작업의 웨이브)
+- 예상 작업자 세션
+- 최대 병렬성
+- 잠재적 문제에 대한 경고
 
-Examples:
-  bd swarm validate gt-epic-123           # Validate epic structure
-  bd swarm validate gt-epic-123 --verbose # Include detailed issue graph
+예시:
+  bd swarm validate gt-epic-123           # 에픽 구조를 검증
+  bd swarm validate gt-epic-123 --verbose # 자세한 이슈 그래프를 포함
 
 ```
 bd swarm validate [epic-id] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --verbose   Include detailed issue graph in output
+      --verbose   출력에 상세 이슈 그래프 포함
 ```
 
-## Sync & Data:
+## 동기화 및 데이터:
 
 ### bd backup
 
-Back up your beads database for off-machine recovery.
+오프 머신 복구를 위해 beads 데이터베이스를 백업하세요.
 
-This is a Dolt-native database backup. It preserves the database state,
-including tables, branches, commit history, and working-set data. This is
-different from 'bd export', which writes issue records to JSONL for migration
-and interoperability.
+이는 Dolt-native 데이터베이스 백업입니다. 데이터베이스 상태를 보존합니다,
+테이블, 브랜치, 커밋 기록, 작업 세트 데이터를 포함합니다. 이는
+'bd export'와는 다릅니다. 'bd export'는 마이그레이션 및 상호운용성을 위해 이슈 레코드를
+JSONL로 기록합니다.
 
-Commands:
-  bd backup init &lt;path&gt;    Set up a backup destination (filesystem or DoltHub)
-  bd backup sync           Push to configured backup destination
-  bd backup restore [path] Restore from a backup directory
-  bd backup remove         Remove backup destination
-  bd backup status         Show backup status
+명령어:
+  bd backup init &lt;path&gt;    백업 대상(파일 시스템 또는 DoltHub) 설정
+  bd backup sync           설정된 백업 대상으로 푸시
+  bd backup restore [path] 백업 디렉터리에서 복원
+  bd backup remove         백업 대상 제거
+  bd backup status         백업 상태 표시
 
-DoltHub is recommended for cloud backup:
+DoltHub는 클라우드 백업에 권장됩니다:
   bd backup init https://doltremoteapi.dolthub.com/&lt;user&gt;/&lt;repo&gt;
-  Set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD for authentication.
+  인증을 위해 DOLT_REMOTE_USER와 DOLT_REMOTE_PASSWORD를 설정합니다.
 
 ```
 bd backup
@@ -2247,69 +2247,69 @@ bd backup
 
 #### bd backup init
 
-Configure a filesystem path or URL as a backup destination.
+파일 시스템 경로나 URL을 백업 대상으로 구성합니다.
 
-The path can be a local directory (external drive, NAS, Dropbox folder) or a
-DoltHub remote URL. If the destination was previously configured, it is
-updated to the new path.
+이 경로는 로컬 디렉터리(외장 드라이브, NAS, Dropbox 폴더) 또는
+DoltHub 원격 URL일 수 있습니다. 대상이 이전에 구성되어 있었다면
+새 경로로 업데이트됩니다.
 
-Filesystem examples:
+파일 시스템 예시:
   bd backup add /mnt/usb/beads-backup
   bd backup add ~/Dropbox/beads-backup
 
-DoltHub (recommended for cloud backup):
+클라우드 백업에 권장되는 DoltHub:
   bd backup add https://doltremoteapi.dolthub.com/myuser/beads-backup
 
-After adding, run 'bd backup sync' to push your data.
+추가한 후 데이터 푸시를 위해 'bd backup sync'를 실행하세요.
 
 ```
 bd backup init <path>
 ```
 
-**Aliases:** add
+**별칭:** add
 
 #### bd backup remove
 
-Remove the configured backup destination.
+설정된 백업 대상을 제거합니다.
 
-This unregisters the backup remote from Dolt and removes the local
-backup configuration. The backup data at the destination is not deleted.
+이는 Dolt에서 백업 원격을 등록 해제하고 로컬
+백업 구성을 제거합니다. 대상의 백업 데이터는 삭제되지 않습니다.
 
 ```
 bd backup remove
 ```
 
-**Aliases:** rm
+**별칭:** rm
 
 #### bd backup restore
 
-Restore the beads database from a Dolt-native backup.
+Dolt-native 백업에서 beads 데이터베이스를 복원합니다.
 
-By default, reads from .beads/backup/ (or the configured backup directory).
-Optionally specify a path to a directory containing a Dolt backup.
+기본적으로 .beads/backup/ (또는 설정된 백업 디렉터리)에서 읽습니다.
+선택적으로 Dolt 백업이 들어 있는 디렉터리 경로를 지정할 수 있습니다.
 
-This restores a full database backup created by 'bd backup sync' or an
-equivalent Dolt backup. JSONL files produced by 'bd export' are issue exports,
-not restore targets for this command.
+이는 'bd backup sync' 또는 동등한 Dolt 백업으로 생성된 전체 데이터베이스 백업을 복원합니다.
+'bd export'로 생성된 JSONL 파일은 이슈 내보내기이며, 이 명령의 복원 대상으로는 사용할 수 없습니다.
+이 명령의 복원 대상이 아닙니다.
 
-Use --force to overwrite an existing database with the backup contents.
+기존 데이터베이스를 백업 내용으로 덮어쓰려면 --force를 사용하세요.
 
-The database must already be initialized (run 'bd init' first if needed).
-To initialize and restore in one step, use: bd init &amp;&amp; bd backup restore
+데이터베이스는 이미 초기화되어 있어야 합니다(필요한 경우 먼저 'bd init'를 실행하세요).
+한 번에 초기화하고 복원하려면 다음을 사용하세요: bd init &amp;&amp; bd backup restore
 
 ```
 bd backup restore [path] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --force   Overwrite existing database with backup contents
+      --force   기존 데이터베이스를 백업 콘텐츠로 덮어쓰기
 ```
 
 #### bd backup status
 
-Show last backup status
+마지막 백업 상태 표시
 
 ```
 bd backup status
@@ -2317,14 +2317,14 @@ bd backup status
 
 #### bd backup sync
 
-Sync the current beads database to the configured Dolt backup destination.
+현재 beads 데이터베이스를 구성된 Dolt 백업 대상 위치로 동기화합니다.
 
-This pushes the entire database state (all branches, full history) to the
-backup location configured with 'bd backup init'.
+이 명령은 전체 데이터베이스 상태(모든 브랜치, 전체 히스토리)를
+'bd backup init'으로 구성된 백업 위치로 푸시합니다.
 
-The backup is atomic — if the sync fails, the previous backup state is preserved.
+이 백업은 원자적입니다 — 동기화가 실패하면 이전 백업 상태가 유지됩니다.
 
-Run 'bd backup init &lt;path&gt;' first to configure a destination.
+대상 위치를 구성하려면 먼저 'bd backup init &lt;path&gt;'를 실행하세요.
 
 ```
 bd backup sync
@@ -2332,14 +2332,14 @@ bd backup sync
 
 ### bd branch
 
-List all branches or create a new branch.
+모든 브랜치를 나열하거나 새 브랜치를 생성합니다.
 
-This command requires the Dolt storage backend. Without arguments,
-it lists all branches. With an argument, it creates a new branch.
+이 명령은 Dolt 저장소 백엔드를 필요로 합니다. 인수가 없으면,
+모든 브랜치를 나열합니다. 인수가 있으면 새 브랜치를 생성합니다.
 
-Examples:
-  bd branch                    # List all branches
-  bd branch feature-xyz        # Create a new branch named feature-xyz
+예시:
+  bd branch                    # 모든 브랜치 목록 표시
+  bd branch feature-xyz        # feature-xyz라는 새 브랜치를 생성함
 
 ```
 bd branch [name]
@@ -2347,55 +2347,55 @@ bd branch [name]
 
 ### bd export
 
-Export all issues to JSONL (newline-delimited JSON) format.
+모든 이슈를 JSONL(줄 바꿈으로 구분된 JSON) 형식으로 내보냅니다.
 
-Each line is a complete JSON object representing one issue, including its
-labels, dependencies, and comments.
+각 줄은 하나의 이슈를 나타내는 완전한 JSON 객체로, 해당 이슈의
+라벨, 종속성 및 코멘트를 포함합니다.
 
-This command is for issue export, migration, and interoperability. It exports
-records from the issues table; it is not a full database backup and does not
-capture Dolt branches, commit history, working-set state, or non-issue tables.
-For supported full backup/restore flows, use 'bd backup init', 'bd backup sync',
-and 'bd backup restore'.
+이 명령은 이슈 내보내기, 마이그레이션 및 상호 운용성을 위한 것입니다. issues 테이블에서
+레코드를 내보냅니다; 이는 전체 데이터베이스 백업이 아니며 Dolt 브랜치, 커밋 이력, working-set 상태 또는
+비이슈 테이블을 캡처하지 않습니다.
+전체 백업/복원 플로우를 지원하려면 'bd backup init', 'bd backup sync',
+및 'bd backup restore'를 사용하세요.
 
-By default, exports only regular issues (excluding infrastructure beads
-like agents, roles, and messages). Use --all to include everything.
+기본적으로 일반 이슈만 내보냅니다(에이전트, 역할, 메시지 같은 인프라 Beads 제외).
+모든 항목을 포함하려면 --all을 사용하세요.
 
-Memories (from 'bd remember') are excluded by default because they may
-contain sensitive agent context. Use --include-memories or --all to
-include them.
+메모리('bd remember'에서 유래한 항목)는 기본적으로 제외됩니다.
+이는 민감한 에이전트 컨텍스트를 포함할 수 있기 때문입니다. --include-memories 또는 --all을
+포함하려면 사용하세요.
 
-EXAMPLES:
-  bd export                              # Export issues to stdout
-  bd export -o issues.jsonl              # Export issues to file
-  bd export --include-memories           # Export issues + memories
-  bd export --all -o full.jsonl          # Include infra + templates + gates + memories
-  bd export --scrub -o clean.jsonl       # Exclude test/pollution records
+예시:
+  bd export                              # 이슈를 stdout으로 내보내기
+  bd export -o issues.jsonl              # 이슈를 파일로 내보내기
+  bd export --include-memories           # 이슈 + 메모리 내보내기
+  bd export --all -o full.jsonl          # 인프라 + 템플릿 + 게이트 + 메모리 포함
+  bd export --scrub -o clean.jsonl       # 테스트/오염 레코드 제외
 
 ```
 bd export [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --all                Include all records (infra, templates, gates, memories)
-      --include-infra      Include infrastructure beads (agents, roles, messages)
-      --include-memories   Include persistent memories (from 'bd remember') in the export
-  -o, --output string      Output file path (default: stdout)
-      --scrub              Exclude test/pollution records
+      --all                모든 레코드 포함(인프라, 템플릿, gate, 메모리)
+      --include-infra      인프라 bead 포함(agent, role, message)
+      --include-memories   내보내기에 영구 메모리('bd remember'에서 생성) 포함
+  -o, --output string      출력 파일 경로(기본값: stdout)
+      --scrub              테스트/오염 레코드 제외
 ```
 
 ### bd federation
 
-Federation commands require CGO and the Dolt storage backend.
+Federation 명령은 CGO와 Dolt 스토리지 백엔드가 필요합니다.
 
-This binary was built without CGO support. To use federation features:
-  1. Use pre-built binaries from GitHub releases, or
-  2. Build from source with CGO enabled
+이 바이너리는 CGO 지원 없이 빌드되었습니다. 연합 기능을 사용하려면:
+  1. GitHub 릴리스에서 미리 빌드된 바이너리를 사용하거나,
+  2. CGO가 활성화된 상태로 소스에서 빌드하십시오
 
-Federation enables synchronized issue tracking across multiple workspaces,
-each maintaining their own Dolt database while sharing updates via remotes.
+Federation은 여러 워크스페이스에서 동기화된 이슈 추적을 가능하게 하며,
+각 워크스페이스는 자체 Dolt 데이터베이스를 유지하면서 remotes를 통해 업데이트를 공유합니다.
 
 ```
 bd federation
@@ -2403,118 +2403,118 @@ bd federation
 
 ### bd import
 
-Import issues from a JSONL file (newline-delimited JSON) into the database.
+JSONL 파일(줄 바꿈으로 구분된 JSON)에서 이슈를 데이터베이스로 가져옵니다.
 
-If no file is specified, imports from the configured import.path under .beads/
-(default: issues.jsonl). Use "-" to read from stdin. This is the incremental counterpart to
-'bd export': new issues are created and existing issues are updated (upsert
-semantics).
+파일이 지정되지 않으면 .beads/ 아래의 구성된 import.path에서 가져옵니다
+(기본값: issues.jsonl). 표준 입력에서 읽으려면 "-"를 사용합니다. 이는 'bd export'의
+증분 대응으로, 새 이슈가 생성되고 기존 이슈가 업데이트됩니다 (upsert
+의미론).
 
-Memory records (lines with "_type":"memory") are automatically detected and
-imported as persistent memories (equivalent to 'bd remember'). This makes
-'bd export | bd import' a full round-trip for both issues and memories.
+메모리 레코드("_type":"memory"가 있는 줄)는 자동으로 감지되어
+지속형 메모리로 가져오며( 'bd remember'와 동일). 이것으로 인해
+'bd export | bd import'는 이슈와 메모리 모두에 대해 완전한 라운드트립을 수행합니다.
 
-Each JSONL line should map to an issue. The importer accepts every field
-'bd export' emits — see 'bd export' output for the canonical schema. Only
-"title" is required; everything else is optional.
+각 JSONL 줄은 하나의 이슈와 매핑되어야 합니다. 임포터는
+'bd export'가 내보내는 모든 필드를 수락합니다 — 표준 스키마는 'bd export' 출력을 확인하세요. 오직
+"title"은(는) 필수이며, 나머지는 모두 선택 사항입니다.
 
-Common fields:
-  title                  Required. Short summary.
-  description            Long-form body.
-  design, notes,         Additional content sections.
+일반 필드:
+  title                  필수. 짧은 요약.
+  description            긴 형식 본문.
+  design, notes,         추가 내용 섹션.
     acceptance_criteria
   issue_type             bug | feature | task | epic | chore | ...
-  priority               0-4 (0 = critical). 0 is preserved (no omitempty).
+  priority               0-4 (0 = 치명적). 0은 보존됩니다 (no omitempty).
   status                 open | in_progress | blocked | closed | ...
-                         (rows with status "tombstone" are skipped)
-  assignee, owner,       Ownership metadata.
+                         (상태가 "tombstone"인 행은 건너뜁니다)
+  assignee, owner,       소유권 메타데이터.
     created_by
-  labels                 Array of strings.
-  dependencies           Array of &#123;issue_id, depends_on_id, type, ...&#125;.
-  comments               Array of comment objects.
-  external_ref,          Cross-system identifiers (e.g. "gh-9").
+  labels                 문자열 배열.
+  dependencies           &#123;issue_id, depends_on_id, type, ...&#125; 배열.
+  comments               댓글 객체 배열.
+  external_ref,          다른 시스템 식별자(예: "gh-9").
     source_system
-  due_at, defer_until    RFC3339 timestamps for scheduling.
-  metadata               Arbitrary JSON object preserved verbatim.
+  due_at, defer_until    일정 조정을 위한 RFC3339 타임스탬프.
+  metadata               임의의 JSON 객체가 원문 그대로 보존됩니다.
 
-Timestamps (created_at, updated_at, started_at, closed_at) are preserved
-when present in the JSONL and otherwise filled in by the importer. The
-legacy "wisp" boolean is accepted as an alias for "ephemeral".
+타임스탬프(created_at, updated_at, started_at, closed_at)는 JSONL에 존재할 때 보존되며
+그렇지 않으면 importer에 의해 채워집니다. 기존
+레거시 "wisp" 불리언은 "ephemeral"의 별칭으로 허용됩니다.
 
-By default a row only rewrites an existing local issue when its
-updated_at is strictly newer. Older rows are skipped (reported as
-stale_skipped_ids) and rows with the same updated_at keep every local
-column — updated_at has second granularity, so a timestamp tie can be
-two distinct same-second updates, and the local row wins the tie
-(reported as tie_kept_local_ids; the row's labels/comments/dependencies
-still merge). The guard is also enforced inside the upsert itself, so a
-local update that lands while the import is running is preserved rather
-than overwritten. Existing issues that the import did rewrite are listed
-with a field-level summary (updated_issues), so local state changed by
-an import is visible. To deliberately restore an older snapshot, pass
---allow-stale, which imports every row even when it overwrites newer
-local state.
+기본적으로 행은 기존 로컬 이슈가 있을 때
+updated_at가 더 엄격히 최신일 때만 덮어씁니다. 오래된 행은
+(stale_skipped_ids)로 건너뛰고, updated_at이 동일한 행은 모든 로컬
+컬럼을 유지합니다 — updated_at은 초 단위 정밀도를 가지므로 타임스탬프 동점은
+같은 초 내의 서로 다른 두 업데이트가 될 수 있고, 로컬 행이 동점에서 승리하며
+(tie_kept_local_ids로 보고됨; 행의 labels/comments/dependencies는
+여전히 병합됩니다). 또한 이 가드는 upsert 자체 내부에서도 적용되어, 가져오기가
+실행되는 동안 들어온 로컬 업데이트는 덮어쓰기보다 보존됩니다.
+가져오기가 실제로 덮어쓴 기존 이슈는
+필드 단위 요약(updated_issues)으로 나열되어, 가져오기에 의해 변경된
+로컬 상태가 확인됩니다. 오래된 스냅샷을 의도적으로 복원하려면
+--allow-stale를 지정하면, 최신 로컬 상태를
+덮어쓰더라도 모든 행을 가져옵니다.
 
-EXAMPLES:
-  bd import                        # Import from configured import.path
-  bd import backup.jsonl           # Import from a specific file
-  bd import -i backup.jsonl        # Legacy alias for a specific file
-  bd import -                      # Read JSONL from stdin
-  cat issues.jsonl | bd import -   # Pipe JSONL from another tool
-  bd import --dry-run              # Show what would be imported
-  bd import --dedup                # Skip issues with duplicate titles
-  bd import --allow-stale old.jsonl # Restore an older snapshot (overwrites newer local rows)
-  bd import --json                 # Structured output with created and skipped IDs
+예시:
+  bd import                        # 구성된 import.path에서 가져오기
+  bd import backup.jsonl           # 특정 파일에서 가져오기
+  bd import -i backup.jsonl        # 특정 파일의 레거시 별칭
+  bd import -                      # stdin에서 JSONL 읽기
+  cat issues.jsonl | bd import -   # 다른 도구에서 JSONL 파이프
+  bd import --dry-run              # 가져올 항목 보여주기
+  bd import --dedup                # 제목이 중복된 이슈 건너뛰기
+  bd import --allow-stale old.jsonl # 이전 스냅샷 복원 (최신 로컬 행을 덮어씀)
+  bd import --json                 # 생성 및 건너뜀 ID가 포함된 구조화된 출력
 
 ```
 bd import [file|-] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --allow-stale    Import rows even when older than the local issue (required to restore an older snapshot)
-      --dedup          Skip lines whose title matches an existing open issue
-      --dry-run        Show what would be imported without importing
-  -i, --input string   Read JSONL from a specific file
+      --allow-stale    로컬 이슈보다 오래된 행도 가져오기(오래된 스냅샷 복원에 필요)
+      --dedup          제목이 기존 열린 이슈와 일치하는 줄 건너뛰기
+      --dry-run        실제로 가져오지 않고 가져올 항목 표시
+  -i, --input string   특정 파일에서 JSONL 읽기
 ```
 
 ### bd restore
 
-Restore the pre-compaction content of a compacted issue.
+축소된 이슈의 압축 전 내용을 복원합니다.
 
-When an issue is compacted, its description/design/notes/acceptance criteria
-are summarized and the originals are archived to a compaction snapshot. This
-command recovers that original content.
+이슈가 압축되면 description/design/notes/acceptance criteria가
+요약되고 원본은 압축 스냅샷에 보관됩니다. 이
+명령은 원본 콘텐츠를 복구합니다.
 
-By default it is read-only: it displays the archived content without modifying
-the database. Pass --apply to write the original content back into the issue
-and step its compaction level back down.
+기본적으로 읽기 전용입니다: 데이터베이스를 수정하지 않고 보관된 내용을 표시합니다
+원본 내용을 이슈에 다시 쓰려면 --apply를 전달하세요
+그리고 compaction level을 한 단계 낮춥니다
 
-If no archived snapshot exists (e.g. the issue was compacted by an older bd
-before snapshot archiving), restore falls back to a best-effort reconstruction
-from Dolt version history, which can only be displayed, not applied.
+보관된 스냅샷이 없으면(예: 이 이슈가 스냅샷 보관 전에 오래된 bd에 의해 압축된 경우),
+restore는 Dolt 버전 히스토리에서 최선의 노력으로 재구성하는 방식으로 대체되며,
+이는 적용할 수 없고 표시만 가능합니다.
 
 ```
 bd restore <issue-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --apply   Write the restored content back into the issue (default: display only)
-      --json    Output restore results in JSON format
+      --apply   복원된 콘텐츠를 이슈에 다시 쓰기(기본값: 표시만)
+      --json    복원 결과를 JSON 형식으로 출력
 ```
 
 ### bd vc
 
-Version control operations for the beads database.
+beads 데이터베이스를 위한 버전 제어 작업입니다.
 
-These commands provide git-like version control for your issue data, including branching, merging, and
-viewing history.
+이 명령어는 브랜치, 병합 및
+이슈 데이터에 대한 이력 보기를 포함한 git와 유사한 버전 제어를 제공합니다.
 
-Note: 'bd history', 'bd diff', and 'bd branch' also work for quick access.
-This subcommand provides additional operations like merge and commit.
+참고: 'bd history', 'bd diff', 'bd branch'도 빠른 액세스에 사용할 수 있습니다.
+이 하위 명령은 병합 및 커밋과 같은 추가 작업을 제공합니다.
 
 ```
 bd vc
@@ -2522,166 +2522,166 @@ bd vc
 
 #### bd vc commit
 
-Create a new Dolt commit with all current changes.
+현재 변경된 모든 내용을 포함하는 새로운 Dolt 커밋을 만듭니다.
 
-Examples:
-  bd vc commit -m "Added new feature issues"
-  bd vc commit --message "Fixed priority on several issues"
-  echo "Multi-line message" | bd vc commit --stdin
+예시:
+  bd vc commit -m "새로운 기능 이슈 추가"
+  bd vc commit --message "여러 이슈의 우선순위를 수정함"
+  echo "여러 줄 메시지" | bd vc commit --stdin
 
 ```
 bd vc commit [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -m, --message string   Commit message
-      --stdin            Read commit message from stdin
+  -m, --message string   커밋 메시지
+      --stdin            stdin에서 커밋 메시지 읽기
 ```
 
 #### bd vc merge
 
-Merge the specified branch into the current branch.
+지정한 브랜치를 현재 브랜치로 병합합니다.
 
-If there are merge conflicts, they will be reported. You can resolve
-conflicts with --strategy.
+병합 충돌이 있으면 보고됩니다. --strategy로 충돌을
+해결할 수 있습니다.
 
-Examples:
-  bd vc merge feature-xyz                    # Merge feature-xyz into current branch
-  bd vc merge feature-xyz --strategy ours    # Merge, preferring our changes on conflict
-  bd vc merge feature-xyz --strategy theirs  # Merge, preferring their changes on conflict
+예시:
+  bd vc merge feature-xyz                    # feature-xyz를 현재 브랜치에 병합
+  bd vc merge feature-xyz --strategy ours    # 병합, 충돌 시 내 변경 사항을 우선합니다
+  bd vc merge feature-xyz --strategy theirs  # 병합, 충돌 시 상대 변경 사항을 우선합니다
 
 ```
 bd vc merge <branch> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --strategy string   Conflict resolution strategy: 'ours' or 'theirs'
+      --strategy string   충돌 해결 전략: 'ours' 또는 'theirs'
 ```
 
 #### bd vc status
 
-Show the current branch, commit hash, and any uncommitted changes.
+현재 브랜치, 커밋 해시, 그리고 커밋되지 않은 변경 사항을 표시합니다.
 
-Examples:
+예제:
   bd vc status
 
 ```
 bd vc status
 ```
 
-## Setup & Configuration:
+## 설정 및 구성:
 
 ### bd bootstrap
 
-Bootstrap sets up the beads database without destroying existing data.
-Unlike 'bd init --force', bootstrap will never delete existing issues.
+Bootstrap는 기존 데이터를 파괴하지 않고 beads 데이터베이스를 설정합니다.
+'bd init --force'와 달리 bootstrap는 기존 이슈를 절대 삭제하지 않습니다.
 
-Bootstrap auto-detects the right action:
-  • If sync.remote is configured: clones from the remote
-  • If git origin has Dolt data (refs/dolt/data): clones from git and wires origin for future push/pull
-  • If .beads/backup/*.jsonl exists: restores from backup
-  • If .beads/issues.jsonl exists: imports from git-tracked JSONL
-  • If no database exists: creates a fresh one
-  • If database already exists: validates and reports status
+Bootstrap은 적절한 동작을 자동으로 감지합니다:
+  • sync.remote가 구성된 경우: 원격에서 클론합니다
+  • git origin에 Dolt 데이터(refs/dolt/data)가 있으면: git에서 클론하고 향후 push/pull을 위해 origin을 연결합니다
+  • .beads/backup/*.jsonl이 존재하면: 백업에서 복원합니다
+  • .beads/issues.jsonl이 존재하면: git 추적 JSONL에서 가져옵니다
+  • 데이터베이스가 존재하지 않으면: 새 데이터베이스를 생성합니다
+  • 데이터베이스가 이미 존재하면: 유효성을 검사하고 상태를 보고합니다
 
-This is the recommended command for:
-  • Setting up beads on a fresh clone
-  • Recovering after moving to a new machine
-  • Repairing a broken database configuration
+이 명령은 다음 용도로 권장됩니다:
+  • 새 클론에서 beads 설정
+  • 새 컴퓨터로 이동한 뒤 복구
+  • 손상된 데이터베이스 구성 복구
 
-Non-interactive mode (--non-interactive, --yes/-y, or BD_NON_INTERACTIVE=1):
-  Skips the confirmation prompt before executing the bootstrap plan.
-  Also auto-detected when stdin is not a terminal or CI=true is set.
+비대화형 모드(--non-interactive, --yes/-y, 또는 BD_NON_INTERACTIVE=1):
+  부트스트랩 계획을 실행하기 전에 확인 프롬프트를 건너뜁니다.
+  또한 stdin이 터미널이 아니거나 CI=true가 설정되어 있으면 자동으로 감지됩니다.
 
-Examples:
-  bd bootstrap              # Auto-detect and set up
-  bd bootstrap --dry-run    # Show what would be done
-  bd bootstrap --json       # Output plan as JSON
-  bd bootstrap --yes        # Skip confirmation prompt
+예시:
+  bd bootstrap              # 자동으로 감지하여 설정
+  bd bootstrap --dry-run    # 수행될 작업을 표시
+  bd bootstrap --json       # 계획을 JSON으로 출력
+  bd bootstrap --yes        # 확인 프롬프트를 건너뜀
 
 
 ```
 bd bootstrap [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run           Show what would be done without doing it
-      --non-interactive   Alias for --yes
-  -y, --yes               Skip confirmation prompts (for CI/automation)
+      --dry-run           실행하지 않고 수행될 작업 표시
+      --non-interactive   --yes의 별칭
+  -y, --yes               확인 프롬프트 건너뛰기(CI/자동화용)
 ```
 
 ### bd config
 
-Manage configuration settings for external integrations and preferences.
+외부 통합 및 기본 설정에 대한 구성 설정을 관리합니다.
 
-Configuration is stored per-project in the beads database and is version-control-friendly.
+구성은 프로젝트별로 beads 데이터베이스에 저장되며 버전 제어에 친화적입니다.
 
-Common namespaces:
-  - export.*          Auto-export settings (stored in config.yaml)
-  - import.*          JSONL import settings (stored in config.yaml)
-  - jira.*            Jira integration settings
-  - linear.*          Linear integration settings
-  - github.*          GitHub integration settings
-  - custom.*          Custom integration settings
-  - status.*          Issue status configuration
-  - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
+공통 네임스페이스:
+  - export.*          자동 내보내기 설정(config.yaml에 저장됨)
+  - import.*          JSONL 가져오기 설정(config.yaml에 저장됨)
+  - jira.*            Jira 통합 설정
+  - linear.*          Linear 통합 설정
+  - github.*          GitHub 통합 설정
+  - custom.*          사용자 정의 통합 설정
+  - status.*          이슈 상태 설정
+  - doctor.suppress.* 특정 bd doctor 경고를 억제함 (GH#1095)
 
-Auto-Export (config.yaml):
-  Optional JSONL export to .beads/issues.jsonl after write commands (throttled).
-  Useful for viewers (bv), interchange, and issue-level migration; not a backup.
-  It is not cross-machine sync; use bd dolt push/pull with a Dolt remote.
-  Disabled by default. Enable only for integrations that need fresh JSONL.
-  Auto-staging is separate and disabled by default.
+자동 내보내기 (config.yaml):
+  쓰기 명령 후 .beads/issues.jsonl에 JSONL을 선택적으로 내보냅니다(속도 제한 적용).
+  뷰어(bv), 인터체인지, 이슈 수준 마이그레이션에 유용하며, 백업은 아닙니다.
+  이는 크로스 머신 동기화가 아닙니다; Dolt 원격과 함께 bd dolt push/pull을 사용하세요.
+  기본적으로 비활성화됩니다. 최신 JSONL이 필요한 통합에서만 활성화하세요.
+  자동 스테이징은 별도로 동작하며 기본적으로 비활성화됩니다.
 
-  Keys:
-    export.auto       Enable/disable auto-export (default: false)
-    export.path       Output filename relative to .beads/ (default: issues.jsonl)
-    export.interval   Minimum time between exports (default: 60s)
-    export.git-add    Auto-stage the export file (default: false)
+  키:
+    export.auto       자동 내보내기 활성화/비활성화 (기본값: false)
+    export.path       .beads/에 상대적인 출력 파일명 (기본값: issues.jsonl)
+    export.interval   내보내기 간 최소 시간 (기본값: 60s)
+    export.git-add    내보내기 파일을 자동으로 스테이징 (기본값: false)
 
-Auto-Import (config.yaml):
-  Reads .beads/issues.jsonl by default when a JSONL import path is implied.
-  Use a relative filename/path so the import stays within the project .beads/
-  directory and remains portable across machines.
+자동 가져오기 (config.yaml):
+  기본적으로 JSONL 가져오기 경로가 지정되면 .beads/issues.jsonl을 읽습니다.
+  가져오기가 프로젝트 .beads/
+  디렉터리 내에 유지되고 여러 머신에서 이동 가능하도록 상대 파일 이름/경로를 사용하세요.
 
-  Keys:
-    import.path       Input filename relative to .beads/ (default: issues.jsonl)
+  키:
+    import.path       .beads/ 기준 상대 경로의 입력 파일 이름 (기본값: issues.jsonl)
 
-Custom Status States:
-  You can define custom status states for multi-step pipelines using the
-  status.custom config key. Statuses should be comma-separated.
+사용자 지정 상태:
+  다단계 파이프라인에 대한 사용자 지정 상태를 status.custom 설정 키를 사용해 정의할 수 있습니다.
+  상태는 쉼표로 구분되어야 합니다.
 
-  Example:
+  예시:
     bd config set status.custom "awaiting_review,awaiting_testing,awaiting_docs"
 
-  This enables issues to use statuses like 'awaiting_review' in addition to
-  the built-in statuses (open, in_progress, blocked, deferred, closed).
+  이는 이슈에서 기본 상태(open, in_progress, blocked, deferred, closed)에 더해
+  'awaiting_review'와 같은 상태를 사용할 수 있도록 합니다.
 
-Suppressing Doctor Warnings:
-  Suppress specific bd doctor warnings by check name slug:
+Doctor 경고 억제:
+  특정 bd doctor 경고를 체크 이름 슬러그로 억제하려면:
     bd config set doctor.suppress.pending-migrations true
     bd config set doctor.suppress.git-hooks true
-  Check names are converted to slugs: "Git Hooks" → "git-hooks".
-  Only warnings are suppressed (errors and passing checks always show).
-  To unsuppress: bd config unset doctor.suppress.&lt;slug&gt;
+  체크 이름은 슬러그로 변환됩니다: "Git Hooks" → "git-hooks".
+  경고만 억제됩니다(오류와 통과한 검사 항목은 항상 표시됩니다).
+  억제를 해제하려면: bd config unset doctor.suppress.&lt;slug&gt;
 
-Examples:
-  bd config set export.auto true                       # Enable auto-export for viewer integrations
-  bd config set export.path "beads.jsonl"              # Custom export filename
-  bd config set import.path "beads.jsonl"              # Custom import filename
-  bd config set export.git-add true                    # Also stage the export file
+예시:
+  bd config set export.auto true                       # 뷰어 통합을 위해 자동 내보내기 활성화
+  bd config set export.path "beads.jsonl"              # 사용자 지정 내보내기 파일 이름
+  bd config set import.path "beads.jsonl"              # 사용자 지정 가져오기 파일 이름
+  bd config set export.git-add true                    # 내보내기 파일도 스테이징
   bd config set jira.url "https://company.atlassian.net"
   bd config set jira.project "PROJ"
   bd config set status.custom "awaiting_review,awaiting_testing"
   bd config set doctor.suppress.pending-migrations true
-  bd config set dolt.debug true                        # Enable Dolt sql-server debug mode (loglevel=debug, --prof cpu)
-  bd config set dolt.local-only true                   # Skip wiring a Dolt sync remote during bd init
+  bd config set dolt.debug true                        # Dolt sql-server 디버그 모드 활성화 (loglevel=debug, --prof cpu)
+  bd config set dolt.local-only true                   # bd init 실행 중 Dolt sync 원격 연결 건너뛰기
   bd config get export.auto
   bd config list
   bd config unset jira.url
@@ -2692,18 +2692,18 @@ bd config
 
 #### bd config apply
 
-Reconcile actual system state to match declared configuration.
+실제 시스템 상태를 선언된 구성과 일치하도록 조정합니다.
 
-Runs drift detection and then fixes any mismatches it finds:
+드리프트 감지를 실행한 다음 찾은 불일치 항목을 수정합니다:
 
-  - hooks     Reinstall git hooks if missing or outdated
-  - remote    Add/update Dolt origin remote to match federation.remote
-  - server    Start Dolt server if dolt.shared-server is enabled
+  - hooks     누락되었거나 오래되었을 때 git 훅을 다시 설치
+  - remote    federation.remote에 맞게 Dolt origin remote를 추가/업데이트
+  - server    dolt.shared-server가 활성화된 경우 Dolt 서버를 시작
 
-This command is idempotent — safe to run multiple times. Use --dry-run
-to preview what would change without making modifications.
+이 명령은 멱등성(idempotent)으로 여러 번 실행해도 안전합니다. --dry-run을 사용하면
+수정을 수행하지 않고 변경될 내용을 미리 확인할 수 있습니다.
 
-Examples:
+예시:
   bd config apply
   bd config apply --dry-run
   bd config apply --json
@@ -2712,29 +2712,29 @@ Examples:
 bd config apply [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Show what would change without making modifications
+      --dry-run   수정하지 않고 변경될 항목 표시
 ```
 
 #### bd config drift
 
-Detect drift between declared configuration and actual system state.
+선언된 구성과 실제 시스템 상태 간의 드리프트를 감지합니다.
 
-This is a read-only diagnostic that answers "is my environment consistent
-with my config?" — no mutations are performed.
+이것은 내 환경이 내 구성과 일치하는지에 대한
+질문에 대한 답변을 제공하는 읽기 전용 진단입니다 — 변경은 수행되지 않습니다.
 
-Checks:
-  - hooks     Git hooks installed and up-to-date
-  - remote    Dolt remote matches federation.remote config
-  - server    Server state matches dolt.shared-server config
+확인:
+  - hooks     Git hooks가 설치되어 최신 상태입니다
+  - remote    Dolt remote가 federation.remote config와 일치합니다
+  - server    서버 상태가 dolt.shared-server config와 일치합니다
 
-Exit codes:
-  0  No drift detected (all checks ok/info/skipped)
-  1  Drift detected (at least one check has status "drift")
+종료 코드:
+  0  드리프트가 감지되지 않음 (모든 검사 ok/info/skipped)
+  1  드리프트가 감지됨 (최소한 한 개의 검사가 상태 "drift"를 가짐)
 
-Examples:
+예시:
   bd config drift
   bd config drift --json
 
@@ -2744,7 +2744,7 @@ bd config drift
 
 #### bd config get
 
-Get a configuration value
+구성 값 가져오기
 
 ```
 bd config get <key>
@@ -2752,7 +2752,7 @@ bd config get <key>
 
 #### bd config list
 
-List all configuration
+모든 구성을 나열합니다
 
 ```
 bd config list
@@ -2760,27 +2760,27 @@ bd config list
 
 #### bd config set
 
-Set a configuration value
+구성 값을 설정합니다
 
 ```
 bd config set <key> <value> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --force-git-tracked   Allow writing secret keys to git-tracked config files (use with caution)
+      --force-git-tracked   git 추적 구성 파일에 시크릿 키 쓰기 허용(주의해서 사용)
 ```
 
 #### bd config set-many
 
-Set multiple configuration values at once with a single auto-commit and auto-push.
+단일 자동 커밋과 자동 푸시로 여러 구성 값을 한 번에 설정합니다.
 
-Each argument must be in key=value format. All values are validated before
-any writes occur. This is faster and less noisy than separate 'bd config set'
-calls, especially in CI.
+각 인수는 key=value 형식이어야 합니다. 모든 값은 쓰기 작업이
+발생하기 전에 검증됩니다. 이는 별도의 'bd config set' 호출보다 더 빠르고
+더 적은 출력으로 덜 시끄럽습니다. 특히 CI에서는 더욱 그렇습니다.
 
-Examples:
+예제:
   bd config set-many ado.state_map.open=New ado.state_map.closed=Closed
   bd config set-many jira.url=https://example.atlassian.net jira.project=PROJ
 
@@ -2788,28 +2788,28 @@ Examples:
 bd config set-many <key=value>... [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --force-git-tracked   Allow writing secret keys to git-tracked config files (use with caution)
+      --force-git-tracked   git 추적 구성 파일에 시크릿 키 쓰기 허용(주의해서 사용)
 ```
 
 #### bd config show
 
-Display a unified view of all effective configuration across all sources
-with annotations showing where each value comes from.
+모든 소스의 유효한 구성을 통합된 보기로 표시하고
+각 값의 출처를 표시하는 주석을 함께 보여 줍니다.
 
-Sources (by precedence for Viper-managed keys):
-  - env          Environment variable (BD_* or BEADS_*)
-  - config.yaml  Project config file (.beads/config.yaml)
-  - default      Built-in default value
+소스 (Viper 관리 키의 우선순위):
+  - env          환경 변수 (BD_* 또는 BEADS_*)
+  - config.yaml  프로젝트 구성 파일 (.beads/config.yaml)
+  - default      내장 기본값
 
-Additional sources:
-  - metadata     Connection settings from .beads/metadata.json
-  - database     Integration config stored in the Dolt database
-  - git          Git config (e.g., beads.role)
+추가 소스:
+  - metadata     .beads/metadata.json의 연결 설정
+  - database     Dolt 데이터베이스에 저장된 통합 구성
+  - git          Git 구성 (예: beads.role)
 
-Examples:
+예시:
   bd config show
   bd config show --json
   bd config show --source config.yaml
@@ -2818,15 +2818,15 @@ Examples:
 bd config show [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --source string   Filter by source (e.g., config.yaml, env, default, metadata, database, git)
+      --source string   소스로 필터링(예: config.yaml, env, default, metadata, database, git)
 ```
 
 #### bd config unset
 
-Delete a configuration value
+구성 값을 삭제
 
 ```
 bd config unset <key>
@@ -2834,15 +2834,15 @@ bd config unset <key>
 
 #### bd config validate
 
-Validate sync-related configuration settings.
+동기화 관련 구성 설정을 검증합니다.
 
-Checks:
-  - federation.sovereignty is valid (T1, T2, T3, T4, or empty)
-  - federation.remote is set for Dolt sync
-  - Remote URL format is valid (dolthub://, gs://, s3://, az://, file://)
-  - routing.mode is valid (auto, maintainer, contributor, explicit)
+검사:
+  - federation.sovereignty가 유효합니다 (T1, T2, T3, T4 또는 비어 있음)
+  - Dolt sync를 위해 federation.remote가 설정되어야 합니다
+  - 원격 URL 형식이 유효합니다 (dolthub://, gs://, s3://, az://, file://)
+  - routing.mode가 유효합니다 (auto, maintainer, contributor, explicit)
 
-	Examples:
+	예시:
 	  bd config validate
 	  bd config validate --json
 
@@ -2852,15 +2852,15 @@ bd config validate
 
 ### bd context
 
-Show the effective backend identity information including repository paths,
-backend configuration, and sync settings.
+저장소 경로를 포함한 유효한 백엔드 ID 정보를 표시합니다,
+백엔드 구성과 동기화 설정을 포함합니다.
 
-This command reads directly from config files and does not require the
-database to be open, making it useful for diagnostics in degraded states.
+이 명령은 구성 파일에서 직접 읽기 때문에 데이터베이스가 열릴 필요가 없으며,
+열화된 상태에서 진단에 유용하게 사용할 수 있습니다.
 
-Examples:
-  bd context           # Show context information
-  bd context --json    # Output in JSON format
+예시:
+  bd context           # 컨텍스트 정보를 표시합니다
+  bd context --json    # JSON 형식으로 출력
 
 
 ```
@@ -2869,43 +2869,43 @@ bd context
 
 ### bd dolt
 
-Configure and manage Dolt database settings and server lifecycle.
+Dolt 데이터베이스 설정과 서버 라이프사이클을 구성하고 관리합니다.
 
-Beads uses a dolt sql-server for all database operations. The server is
-auto-started transparently when needed. Use these commands for explicit
-control or diagnostics.
+Beads는 모든 데이터베이스 작업에 dolt sql-server를 사용합니다. 서버는
+필요할 때 자동으로 투명하게 시작됩니다. 명시적 제어 또는 진단을 위해
+이러한 명령어를 사용하세요.
 
-Server lifecycle:
-  bd dolt start        Start the Dolt server for this project
-  bd dolt stop         Stop the Dolt server for this project
-  bd dolt status       Show Dolt server status
+서버 라이프사이클:
+  bd dolt start        이 프로젝트의 Dolt 서버를 시작합니다
+  bd dolt stop         이 프로젝트의 Dolt 서버를 중지합니다
+  bd dolt status       Dolt 서버 상태를 표시합니다
 
-Configuration:
-  bd dolt show         Show current Dolt configuration with connection test
-  bd dolt set &lt;k&gt; &lt;v&gt;  Set a configuration value
-  bd dolt test         Test server connection
+구성:
+  bd dolt show         현재 Dolt 구성을 연결 테스트와 함께 보여줍니다
+  bd dolt set &lt;k&gt; &lt;v&gt;  구성 값을 설정합니다
+  bd dolt test         서버 연결을 테스트합니다
 
-Version control:
-  bd dolt commit       Commit pending changes
-  bd dolt push         Push commits to Dolt remote
-  bd dolt pull         Pull commits from Dolt remote
+버전 제어:
+  bd dolt commit       보류 중인 변경 사항 커밋
+  bd dolt push         Dolt 원격으로 커밋 푸시
+  bd dolt pull         Dolt 원격에서 커밋 가져오기
 
-Remote management:
-  bd dolt remote add &lt;name&gt; &lt;url&gt;   Add a Dolt remote
-  bd dolt remote list                List configured remotes
-  bd dolt remote remove &lt;name&gt;       Remove a Dolt remote
+원격 관리:
+  bd dolt remote add &lt;name&gt; &lt;url&gt;   Dolt 원격 추가
+  bd dolt remote list                구성된 원격 나열
+  bd dolt remote remove &lt;name&gt;       Dolt 원격 제거
 
-Configuration keys for 'bd dolt set':
-  database  Database name (default: issue prefix or "beads")
-  host      Server host (default: 127.0.0.1)
-  port      Server port (auto-detected; override with bd dolt set port &lt;N&gt;)
-  user      MySQL user (default: root)
-  data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
+'bd dolt set'에 대한 구성 키:
+  database  데이터베이스 이름 (기본값: issue 접두사 또는 "beads")
+  host      서버 호스트 (기본값: 127.0.0.1)
+  port      서버 포트 (자동 감지; bd dolt set port &lt;N&gt;로 재정의)
+  user      MySQL 사용자 (기본값: root)
+  data-dir  사용자 지정 dolt 데이터 디렉터리 (절대 경로; 기본값: .beads/dolt)
 
-Flags for 'bd dolt set':
-  --update-config  Also write to config.yaml for team-wide defaults
+'bd dolt set'의 플래그:
+  --update-config  또한 팀 전체 기본값을 위해 config.yaml에도 씁니다
 
-Examples:
+예시:
   bd dolt set database myproject
   bd dolt set host 192.168.1.100 --update-config
   bd dolt set data-dir /home/user/.beads-dolt/myproject
@@ -2917,59 +2917,59 @@ bd dolt
 
 #### bd dolt clean-databases
 
-Identify and drop leftover test and agent databases that accumulate
-on the shared Dolt server from interrupted test runs and terminated agents.
+중단된 테스트 실행과 종료된 에이전트로 인해 공유 Dolt 서버에 누적되는
+남은 테스트 및 에이전트 데이터베이스를 식별하고 삭제합니다.
 
-Stale database prefixes: testdb_*, doctest_*, doctortest_*, beads_pt*, beads_vr*, beads_t*
+오래된 데이터베이스 접두사: testdb_*, doctest_*, doctortest_*, beads_pt*, beads_vr*, beads_t*
 
-These waste server memory and can degrade performance under concurrent load.
-Use --dry-run to see what would be dropped without actually dropping.
+이는 서버 메모리를 낭비하고 동시 부하 상태에서 성능을 저하시킬 수 있습니다.
+실제로 삭제하지 않고 삭제될 항목을 확인하려면 --dry-run을 사용하세요.
 
 ```
 bd dolt clean-databases [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Show what would be dropped without dropping
+      --dry-run   삭제하지 않고 삭제될 항목 표시
 ```
 
 #### bd dolt commit
 
-Create a Dolt commit from any uncommitted changes in the working set.
+작업 세트의 모든 커밋되지 않은 변경사항에서 Dolt 커밋을 생성합니다.
 
-This is the primary commit point for batch mode. When auto-commit is set to
-"batch", changes accumulate in the working set across multiple bd commands and
-are committed together here with a descriptive summary message.
+이는 배치 모드의 주요 커밋 지점입니다.
+auto-commit가 "batch"로 설정되면
+작업 집합의 변경 사항이 여러 bd 명령에 걸쳐 누적되어 여기에서 설명용 요약 메시지와 함께 함께 커밋됩니다.
 
-Also useful before push operations that require a clean working set, or when
-auto-commit was off or changes were made externally.
+클린 작업 집합이 필요한 push 작업 전에 유용하며, 또는
+auto-commit이 꺼져 있거나 변경 사항이 외부에서 이루어진 경우에도 유용합니다.
 
-For more options (--stdin, custom messages), see: bd vc commit
+추가 옵션(--stdin, 사용자 지정 메시지)을 보려면 다음을 참조하세요: bd vc commit
 
 ```
 bd dolt commit [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -m, --message string   Commit message (default: auto-generated)
+  -m, --message string   커밋 메시지(기본값: 자동 생성)
 ```
 
 #### bd dolt killall
 
-Find and kill orphan dolt sql-server processes not tracked by the
-canonical PID file for the current repo's Dolt data directory.
+현재 저장소의 Dolt 데이터 디렉터리에 대한 표준 PID 파일로 추적되지 않는
+고아 dolt sql-server 프로세스를 찾아 종료합니다.
 
-Under an orchestrator, the canonical server lives at $GT_ROOT/.beads/. Any other
-dolt sql-server processes using that shared data directory are considered
-orphans and will be killed.
+오케스트레이터 하에서 표준 서버는 $GT_ROOT/.beads/.에 위치합니다. 다른
+해당 공유 데이터 디렉터리를 사용하는 dolt sql-server 프로세스는 고아로 간주되어
+종료됩니다.
 
-In standalone mode, only dolt sql-server processes using the current
-project's Dolt data directory are eligible for cleanup. Other projects'
-servers are preserved.
+독립 실행 모드에서는 현재 사용 중인 dolt sql-server 프로세스만
+프로젝트의 Dolt 데이터 디렉토리는 정리 대상입니다. 다른 프로젝트의
+서버가 보존됩니다.
 
 ```
 bd dolt killall
@@ -2977,58 +2977,58 @@ bd dolt killall
 
 #### bd dolt pull
 
-Pull commits from the configured Dolt remote into the local database.
+구성된 Dolt 원격 저장소에서 커밋을 로컬 데이터베이스로 가져옵니다.
 
-Requires a Dolt remote to be configured in the database directory.
-For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
-variables for authentication.
+데이터베이스 디렉토리에 Dolt 원격이 구성되어 있어야 합니다.
+Hosted Dolt의 경우 인증을 위해 DOLT_REMOTE_USER 및 DOLT_REMOTE_PASSWORD 환경
+변수를 설정하십시오.
 
-Use --remote to pull from a specific named remote instead of the default.
-The remote must already exist (see 'bd dolt remote add').
+기본 원격 대신 특정 이름이 지정된 원격에서 pull하려면 --remote를 사용합니다.
+원격은 이미 존재해야 합니다( 'bd dolt remote add' 참조).
 
 ```
 bd dolt pull [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --remote string   Pull from a specific named remote instead of the default
+      --remote string   기본값 대신 이름을 지정한 특정 원격에서 pull
 ```
 
 #### bd dolt push
 
-Push local Dolt commits to the configured remote.
+구성된 원격 저장소로 로컬 Dolt 커밋을 푸시합니다.
 
-Requires a Dolt remote to be configured in the database directory.
-For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
-variables for authentication.
+데이터베이스 디렉터리에 Dolt 원격이 구성되어 있어야 합니다.
+Hosted Dolt의 경우, 인증을 위해 DOLT_REMOTE_USER 및 DOLT_REMOTE_PASSWORD 환경
+변수를 설정합니다.
 
-Use --force to overwrite remote changes (e.g., when the remote has
-uncommitted changes in its working set).
+원격 변경 사항을 덮어쓰려면 --force를 사용하세요(예: 원격에
+작업 세트에 커밋되지 않은 변경 사항이 있는 경우).
 
-Use --remote to push to a specific named remote instead of the default.
-The remote must already exist (see 'bd dolt remote add').
+기본값 대신 특정 이름의 원격으로 푸시하려면 --remote를 사용합니다.
+원격은 이미 존재해야 합니다('bd dolt remote add').
 
 ```
 bd dolt push [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --force           Force push (overwrite remote changes)
-      --remote string   Push to a specific named remote instead of the default
+      --force           강제 push(원격 변경 사항 덮어쓰기)
+      --remote string   기본값 대신 이름을 지정한 특정 원격으로 push
 ```
 
 #### bd dolt remote
 
-Manage Dolt remotes for push/pull replication.
+Dolt 리모트를 푸시/풀 복제에 사용할 수 있도록 관리합니다.
 
-Subcommands:
-  add &lt;name&gt; &lt;url&gt;   Add a new remote
-  list               List all configured remotes
-  remove &lt;name&gt;      Remove a remote
+하위 명령:
+  add &lt;name&gt; &lt;url&gt;   새 원격 저장소 추가
+  list               구성된 모든 원격 저장소 나열
+  remove &lt;name&gt;      원격 저장소 제거
 
 ```
 bd dolt remote
@@ -3036,7 +3036,7 @@ bd dolt remote
 
 ##### bd dolt remote add
 
-Add a Dolt remote
+Dolt 원격 추가
 
 ```
 bd dolt remote add <name> <url>
@@ -3044,7 +3044,7 @@ bd dolt remote add <name> <url>
 
 ##### bd dolt remote list
 
-List configured Dolt remotes
+설정된 Dolt 원격 저장소 목록
 
 ```
 bd dolt remote list
@@ -3052,7 +3052,7 @@ bd dolt remote list
 
 ##### bd dolt remote remove
 
-Remove a Dolt remote
+Dolt 원격 저장소 제거
 
 ```
 bd dolt remote remove <name>
@@ -3060,18 +3060,18 @@ bd dolt remote remove <name>
 
 #### bd dolt set
 
-Set a Dolt configuration value in metadata.json.
+metadata.json에서 Dolt 구성 값을 설정합니다.
 
-Keys:
-  database  Database name (default: issue prefix or "beads")
-  host      Server host (default: 127.0.0.1)
-  port      Server port (auto-detected; override with bd dolt set port &lt;N&gt;)
-  user      MySQL user (default: root)
-  data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
+키:
+  database  데이터베이스 이름 (기본값: 이슈 접두사 또는 "beads")
+  host      서버 호스트 (기본값: 127.0.0.1)
+  port      서버 포트 (자동 감지; bd dolt set port &lt;N&gt;로 덮어쓰기)
+  user      MySQL 사용자 (기본값: root)
+  data-dir  사용자 지정 dolt 데이터 디렉터리 (절대 경로; 기본값: .beads/dolt)
 
-Use --update-config to also write to config.yaml for team-wide defaults.
+팀 전체 기본값을 위해 --update-config를 사용하면 config.yaml에도 함께 쓸 수 있습니다.
 
-Examples:
+예시:
   bd dolt set database myproject
   bd dolt set host 192.168.1.100
   bd dolt set port 3307 --update-config
@@ -3081,15 +3081,15 @@ Examples:
 bd dolt set <key> <value> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --update-config   Also write to config.yaml for team-wide defaults
+      --update-config   팀 전체 기본값을 위해 config.yaml에도 쓰기
 ```
 
 #### bd dolt show
 
-Show current Dolt configuration with connection status
+연결 상태와 함께 현재 Dolt 구성을 표시합니다
 
 ```
 bd dolt show
@@ -3097,13 +3097,13 @@ bd dolt show
 
 #### bd dolt start
 
-Start a dolt sql-server for the current beads project.
+현재 beads 프로젝트에 대해 dolt sql-server를 시작합니다.
 
-The server runs in the background on a per-project port derived from the
-project path. PID and logs are stored in .beads/.
+서버는 프로젝트 경로에서 파생된 프로젝트별 포트에서 백그라운드로 실행됩니다.
+PID와 로그는 .beads/에 저장됩니다.
 
-The server auto-starts transparently when needed, so manual start is rarely
-required. Use this command for explicit control or diagnostics.
+필요할 때 서버는 자동으로 투명하게 시작되므로 수동 시작이 거의
+필요하지 않습니다. 이 명령은 명시적 제어 또는 진단에 사용합니다.
 
 ```
 bd dolt start
@@ -3111,15 +3111,15 @@ bd dolt start
 
 #### bd dolt status
 
-Show the status of the Dolt engine for the current project.
+현재 프로젝트의 Dolt 엔진 상태를 표시합니다.
 
-In embedded mode, reports that the Dolt engine runs in-process and shows
-the on-disk data directory. For beads-managed (local) servers, displays
-PID, port, and data directory from the local PID file. For externally-
-managed servers — either a remote dolt_server_host or a local server
-managed outside bd (dolt.auto-start: false, e.g. an orchestrator-shared
-sql-server) — pings the configured endpoint via SQL and reports
-reachability, server version, and database.
+임베디드 모드에서는 Dolt 엔진이 프로세스 내에서 실행됨을 보고하고
+디스크 상의 데이터 디렉터리를 표시한다. beads 관리(로컬) 서버의 경우
+PID, 포트 및 데이터 디렉터리를 로컬 PID 파일에서 표시한다. 외부에서-
+관리되는 서버의 경우, 원격 dolt_server_host 또는 로컬 서버
+bd 밖에서 관리되는(dolt.auto-start: false, 예: orchestrator-shared
+sql-server) — SQL을 통해 구성된 엔드포인트를 ping하고
+도달 가능성, 서버 버전 및 데이터베이스를 보고한다.
 
 ```
 bd dolt status
@@ -3127,30 +3127,30 @@ bd dolt status
 
 #### bd dolt stop
 
-Stop the dolt sql-server managed by beads for the current project.
+현재 프로젝트에서 beads가 관리하는 dolt sql-server를 중지합니다.
 
-This sends a graceful shutdown signal. The server will restart automatically
-on the next bd command unless auto-start is disabled.
+이는 정상 종료 신호를 전송합니다. 서버는 자동으로 재시작됩니다
+auto-start가 비활성화되지 않은 경우 다음 bd 명령에서 서버가 자동으로 다시 시작됩니다.
 
 ```
 bd dolt stop [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --force   Force stop the server
+      --force   서버 강제 중지
 ```
 
 #### bd dolt test
 
-Test the connection to the configured Dolt server.
+설정된 Dolt 서버와의 연결을 테스트합니다.
 
-This verifies that:
-  1. The server is reachable at the configured host:port
-  2. The connection can be established
+이것은 다음 항목을 확인합니다:
+  1. 구성된 host:port에서 서버에 도달할 수 있는지
+  2. 연결을 설정할 수 있는지
 
-Use this before switching to server mode to ensure the server is running.
+서버 모드로 전환하기 전에 서버가 실행 중인지 확인하려면 이 기능을 사용하세요.
 
 ```
 bd dolt test
@@ -3158,11 +3158,11 @@ bd dolt test
 
 ### bd forget
 
-Remove a memory by its key.
+키로 메모리를 제거합니다.
 
-Use 'bd memories' to see available keys.
+'bd memories'를 사용하여 사용 가능한 키를 확인하세요.
 
-Examples:
+예시:
   bd forget dolt-phantoms
   bd forget auth-jwt
 
@@ -3172,14 +3172,14 @@ bd forget <key>
 
 ### bd hooks
 
-Install, uninstall, or list git hooks for beads integration.
+Beads 통합을 위해 git 훅을 설치, 제거하거나 나열합니다.
 
-The hooks provide:
-- pre-commit: Run chained hooks before commit
-- post-merge: Run chained hooks after pull/merge
-- pre-push: Run chained hooks before push
-- post-checkout: Run chained hooks after branch checkout
-- prepare-commit-msg: Add agent identity trailers for forensics
+후크 제공 항목:
+- pre-commit: 커밋 전에 연결된 훅 실행
+- post-merge: pull/merge 후에 연결된 훅 실행
+- pre-push: 푸시 전에 연결된 훅 실행
+- post-checkout: 브랜치 체크아웃 후 연결된 훅 실행
+- prepare-commit-msg: 포렌식 분석을 위한 에이전트 식별자 트레일러 추가
 
 ```
 bd hooks
@@ -3187,39 +3187,39 @@ bd hooks
 
 #### bd hooks install
 
-Install git hooks for beads integration.
+Beads 통합을 위한 Git 훅을 설치합니다.
 
-By default, hooks are installed to .git/hooks/ in the current repository.
-Use --beads to install to .beads/hooks/ (recommended for Dolt backend).
-Use --shared to install to a versioned directory (.beads-hooks/) that can be
-committed to git and shared with team members.
+기본적으로 훅은 현재 저장소의 .git/hooks/에 설치됩니다.
+--beads를 사용하여 .beads/hooks/에 설치합니다(권장: Dolt 백엔드).
+--shared를 사용하면 버전 관리 디렉터리(.beads-hooks/)에 설치할 수 있으며
+이 디렉터리는 git에 커밋하고 팀 구성원과 공유할 수 있습니다.
 
-Hooks use section markers to coexist with existing hooks — any user content
-outside the markers is preserved across installs and upgrades.
+Hooks는 기존 훅과 공존할 수 있도록 섹션 마커를 사용합니다 — 마커 밖의 사용자 콘텐츠는
+설치 및 업그레이드 전반에서 유지됩니다.
 
-Installed hooks:
-  - pre-commit: Run chained hooks before commit
-  - post-merge: Run chained hooks after pull/merge
-  - pre-push: Run chained hooks before push
-  - post-checkout: Run chained hooks after branch checkout
-  - prepare-commit-msg: Add agent identity trailers (for orchestrator agents)
+설치된 훅:
+  - pre-commit: 커밋 전 체인된 훅 실행
+  - post-merge: pull/merge 후 체인된 훅 실행
+  - pre-push: 푸시 전 체인된 훅 실행
+  - post-checkout: 브랜치 체크아웃 후 체인된 훅 실행
+  - prepare-commit-msg: 에이전트 ID 트레일러 추가 (오케스트레이터 에이전트용)
 
 ```
 bd hooks install [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --beads    Install hooks to .beads/hooks/ (recommended for Dolt backend)
-      --chain    Chain with existing hooks (run them before bd hooks)
-      --force    Overwrite existing hooks without backup
-      --shared   Install hooks to .beads-hooks/ (versioned) instead of .git/hooks/
+      --beads    .beads/hooks/에 훅 설치(Dolt 백엔드에 권장)
+      --chain    기존 훅과 연결(bd 훅 전에 실행)
+      --force    백업 없이 기존 훅 덮어쓰기
+      --shared   .git/hooks/ 대신 .beads-hooks/(버전 관리)에 훅 설치
 ```
 
 #### bd hooks list
 
-Show the status of bd git hooks (installed, outdated, missing).
+bd Git 훅의 상태(설치됨, 오래됨, 누락됨)를 표시합니다.
 
 ```
 bd hooks list
@@ -3227,18 +3227,18 @@ bd hooks list
 
 #### bd hooks run
 
-Execute the logic for a git hook. This command is typically called by
-thin shim scripts installed in .git/hooks/.
+Git 훅의 로직을 실행합니다. 이 명령은 보통
+.git/hooks/에 설치된 얇은 심 스크립트에 의해 호출됩니다.
 
-Supported hooks:
-  - pre-commit: Run chained hooks before commit
-  - post-merge: Run chained hooks after pull/merge
-  - pre-push: Run chained hooks before push
-  - post-checkout: Run chained hooks after branch checkout
-  - prepare-commit-msg: Add agent identity trailers for forensics
+지원되는 훅:
+  - pre-commit: 커밋 전에 체인된 훅 실행
+  - post-merge: pull/merge 후 체인된 훅 실행
+  - pre-push: 푸시 전에 체인된 훅 실행
+  - post-checkout: 브랜치 체크아웃 후 체인된 훅 실행
+  - prepare-commit-msg: 포렌식 분석을 위해 에이전트 신원 트레일러 추가
 
-The thin shim pattern ensures hook logic is always in sync with the
-installed bd version - upgrading bd automatically updates hook behavior.
+얇은 심 패턴은 훅 로직이 항상 설치된
+bd 버전과 동기화되도록 보장합니다. bd를 업그레이드하면 훅 동작이 자동으로 업데이트됩니다.
 
 ```
 bd hooks run <hook-name> [args...]
@@ -3246,7 +3246,7 @@ bd hooks run <hook-name> [args...]
 
 #### bd hooks uninstall
 
-Remove bd git hooks from .git/hooks/ directory.
+.git/hooks/ 디렉터리에서 bd Git 훅을 제거합니다.
 
 ```
 bd hooks uninstall
@@ -3254,18 +3254,18 @@ bd hooks uninstall
 
 ### bd human
 
-Display a focused help menu showing only the most common commands.
+가장 일반적인 명령만 표시하는 집중형 도움말 메뉴를 표시합니다.
 
-bd has 70+ commands - many for AI agents, integrations, and advanced workflows.
-This command shows the ~15 essential commands that human users need most often.
+bd에는 70개 이상의 명령이 있습니다 - 다수는 AI 에이전트, 통합, 그리고 고급 워크플로우용입니다.
+이 명령은 사람이 가장 자주 필요로 하는 약 15개의 필수 명령을 보여줍니다.
 
-For the full command list, run: bd --help
+전체 명령어 목록은 다음을 실행하세요: bd --help
 
-SUBCOMMANDS:
-  human list              List all human-needed beads (issues with 'human' label)
-  human respond &lt;id&gt;      Respond to a human-needed bead (adds comment and closes)
-  human dismiss &lt;id&gt;      Dismiss a human-needed bead permanently
-  human stats             Show summary statistics for human-needed beads
+하위 명령어:
+  human list              human 라벨이 지정된 human-needed 비드를 모두 표시합니다 (라벨이 'human'인 이슈)
+  human respond &lt;id&gt;      human-needed 비드에 응답합니다(댓글 추가 및 닫기)
+  human dismiss &lt;id&gt;      human-needed 비드를 영구적으로 무시합니다
+  human stats             human-needed 비드의 요약 통계를 표시합니다
 
 ```
 bd human
@@ -3273,31 +3273,31 @@ bd human
 
 #### bd human dismiss
 
-Dismiss a human-needed bead permanently without responding.
+인간이 필요한 bead를 응답 없이 영구적으로 해제합니다.
 
-The issue is closed with a "Dismissed" reason and optional note.
+이 이슈는 "Dismissed" 사유와 선택적 노트로 닫힙니다.
 
-Examples:
+예시:
   bd human dismiss bd-123
-  bd human dismiss bd-123 --reason "No longer applicable"
+  bd human dismiss bd-123 --reason "더 이상 적용되지 않음"
 
 ```
 bd human dismiss <issue-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --reason string   Reason for dismissal (optional)
+      --reason string   기각 사유(선택 사항)
 ```
 
 #### bd human list
 
-List all issues labeled with 'human' tag.
+'human' 태그가 붙은 모든 이슈를 나열합니다.
 
-These are issues that require human intervention or input.
+이는 사람의 개입이나 입력이 필요한 문제들입니다.
 
-Examples:
+예시:
   bd human list
   bd human list --status=open
   bd human list --json
@@ -3306,40 +3306,40 @@ Examples:
 bd human list [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -s, --status string   Filter by status (open, closed, etc.)
+  -s, --status string   상태로 필터링(open, closed 등)
 ```
 
 #### bd human respond
 
-Respond to a human-needed bead by adding a comment and closing it.
+댓글을 추가하고 이를 닫아서 human-needed bead에 응답하세요.
 
-The response is added as a comment and the issue is closed with reason "Responded".
+응답이 댓글로 추가되며, 이슈는 사유가 "Responded"로 닫힙니다.
 
-Examples:
-  bd human respond bd-123 --response "Use OAuth2 for authentication"
-  bd human respond bd-123 -r "Approved, proceed with implementation"
+예시:
+  bd human respond bd-123 --response "인증에 OAuth2를 사용하세요"
+  bd human respond bd-123 -r "승인되었으니 구현을 진행하세요"
 
 ```
 bd human respond <issue-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -r, --response string   Response text (required)
+  -r, --response string   응답 텍스트(필수)
 ```
 
 #### bd human stats
 
-Display summary statistics for human-needed beads.
+인간이 필요한 비드에 대한 요약 통계를 표시합니다.
 
-Shows counts for total, pending (open), responded (closed without dismiss),
-and dismissed beads.
+총 개수, 대기(열림), 응답(해제 없이 닫힘),
+해제된 beads의 개수를 표시합니다.
 
-Example:
+예시:
   bd human stats
 
 ```
@@ -3348,15 +3348,15 @@ bd human stats
 
 ### bd info
 
-Display information about the current database.
+현재 데이터베이스에 대한 정보를 표시합니다.
 
-This command helps debug issues where bd is using an unexpected database. It shows:
-  - The absolute path to the database file
-  - Database statistics (issue count)
-  - Schema information (with --schema flag)
-  - What's new in recent versions (with --whats-new flag)
+이 명령은 bd가 의도하지 않은 데이터베이스를 사용하는 문제를 디버깅하는 데 도움이 됩니다. 다음을 표시합니다:
+  - 데이터베이스 파일의 절대 경로
+  - 데이터베이스 통계(이슈 수)
+  - 스키마 정보(--schema 플래그 사용)
+  - 최근 버전의 변경 사항(--whats-new 플래그 사용)
 
-Examples:
+예시:
   bd info
   bd info --json
   bd info --schema --json
@@ -3368,114 +3368,114 @@ Examples:
 bd info [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --json        Output in JSON format
-      --schema      Include schema information in output
-      --thanks      Show thank you page for contributors
-      --whats-new   Show agent-relevant changes from recent versions
+      --json        JSON 형식으로 출력
+      --schema      출력에 스키마 정보 포함
+      --thanks      기여자 감사 페이지 표시
+      --whats-new   최근 버전의 에이전트 관련 변경 사항 표시
 ```
 
 ### bd init
 
-Initialize bd in the current directory by creating a .beads/ directory
-and Dolt database. Optionally specify a custom issue prefix.
+현재 디렉토리에서 .beads/ 디렉토리를 생성하여 bd를 초기화합니다
+및 Dolt 데이터베이스를 생성합니다. 필요에 따라 사용자 지정 이슈 접두어를 지정할 수 있습니다.
 
-Dolt is the default (and only supported) storage backend. The legacy SQLite
-backend has been removed. Use --backend=sqlite to see migration instructions.
+Dolt는 기본(및 유일하게 지원되는) 스토리지 백엔드입니다. 이전 SQLite
+백엔드는 제거되었습니다. --backend=sqlite를 사용하여 마이그레이션 지침을 확인하세요.
 
-Use --database to specify an existing server database name, overriding the
-default prefix-based naming. This is useful when an external tool (e.g. an orchestrator)
-has already created the database.
+기존 서버 데이터베이스 이름을 지정하려면 --database를 사용해 기본
+접두사 기반 명명 방식을 덮어씁니다. 이는 외부 도구(예: 오케스트레이터)가
+이미 데이터베이스를 생성한 경우에 유용합니다.
 
-With --stealth: configures per-repository git settings for invisible beads usage:
-  • .git/info/exclude to prevent beads files from being committed
-  Perfect for personal use without affecting repo collaborators.
-  To set up a specific AI tool, run: bd setup &lt;claude|cursor|aider|...&gt; --stealth
+--stealth 사용 시: 보이지 않는 beads 사용을 위해 저장소별 Git 설정을 구성합니다:
+  • .git/info/exclude: beads 파일이 커밋되지 않도록 방지
+  저장소 협업자에게 영향을 주지 않는 개인 사용에 완벽합니다.
+  특정 AI 도구를 설정하려면 다음을 실행하세요: bd setup &lt;claude|cursor|aider|...&gt; --stealth
 
-By default, beads uses an embedded Dolt engine (no external server needed).
-Pass --server to use an external dolt sql-server instead. In server mode,
-set connection details with --server-host, --server-port, and --server-user.
-Password should be set via BEADS_DOLT_PASSWORD environment variable.
+기본적으로 beads는 내장된 Dolt 엔진을 사용합니다(외부 서버가 필요하지 않습니다).
+대신 외부 dolt sql-server를 사용하려면 --server를 전달하세요. 서버 모드에서는,
+연결 정보를 --server-host, --server-port, --server-user로 설정하세요.
+비밀번호는 BEADS_DOLT_PASSWORD 환경 변수로 설정해야 합니다.
 
-Auto-export is optional. When enabled, bd exports issues to
-.beads/issues.jsonl after write commands (throttled to once per 60s). This is
-for viewers (bv), interchange, and issue-level migration; not backup.
-Cross-machine sync and backups use Dolt remotes/backups, not JSONL import/export.
-To enable: bd config set export.auto true
+자동 내보내기는 선택 사항입니다. 활성화되면 bd는 이슈를
+.beads/issues.jsonl로 쓰기 명령 후(60초당 한 번으로 제한됨) 내보냅니다. 이는
+뷰어(bv), 상호 운용, 그리고 이슈 수준 마이그레이션용입니다; 백업용이 아닙니다.
+기기 간 동기화와 백업은 JSONL 가져오기/내보내기가 아니라 Dolt 원격/백업을 사용합니다.
+활성화하려면: bd config set export.auto true
 
-Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
-  Skips all interactive prompts, using sensible defaults:
-  • Role defaults to "maintainer" (override with --role)
-  • Fork exclude auto-configured when fork detected
-  • Auto-export left at default (disabled)
-  • --contributor and --team flags are rejected (wizards require interaction)
-  Also auto-detected when stdin is not a terminal or CI=true is set.
+비대화형 모드(--non-interactive 또는 BD_NON_INTERACTIVE=1):
+  모든 대화형 프롬프트를 건너뛰고 적절한 기본값을 사용합니다:
+  • 역할 기본값은 "maintainer"입니다 (--role로 덮어쓸 수 있음)
+  • Fork 제외는 포크가 감지되면 자동으로 구성됩니다
+  • Auto-export는 기본값(비활성화)으로 유지됩니다
+  • --contributor 및 --team 플래그는 거부됩니다(위저드에는 상호작용이 필요함)
+  stdin이 터미널이 아니거나 CI=true가 설정된 경우에도 자동으로 감지됩니다.
 
 ```
 bd init [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --agents-file string                             Custom filename for agent instructions (default: AGENTS.md)
-      --agents-profile string                          AGENTS.md profile: 'minimal' (default, pointer to bd prime) or 'full' (complete command reference)
-      --agents-template string                         Path to custom AGENTS.md template (overrides embedded default)
-      --backend string                                 Storage backend (default: dolt). --backend=sqlite prints deprecation notice.
-      --contributor                                    Run OSS contributor setup wizard
-      --database string                                Use existing server database name (overrides prefix-based naming)
-      --debug                                          Run the managed Dolt sql-server with --loglevel=debug and CPU profiling (--prof cpu). Persisted to config.yaml as dolt.debug. No effect on externally-managed servers.
-      --destroy-token string                           Explicit confirmation token for destructive re-init in non-interactive mode (format: 'DESTROY-<prefix>')
-      --discard-remote                                 Authorize discarding the configured remote's Dolt history when re-initializing. Requires --destroy-token in non-interactive mode; see 'bd help init-safety'.
-      --external                                       Server is externally managed (skip server startup); use with --shared-server or --server
-      --force                                          Deprecated alias for --reinit-local. Bypasses only the LOCAL data-safety guard; does NOT authorize remote divergence (see 'bd help init-safety').
-      --from-jsonl                                     Import issues from configured import.path; refuses remote history unless --discard-remote authorizes replacement
-      --init-if-missing                                If the workspace is already initialized, skip init and exit 0 instead of failing (idempotent init for scaffolds)
-      --non-interactive                                Skip all interactive prompts (auto-detected in CI or non-TTY environments)
-  -p, --prefix string                                  Issue prefix (default: current directory name)
-      --proxied-server                                 [EXPERIMENTAL] Use a per-workspace proxied dolt sql-server (proxy + child dolt) rooted at .beads/proxieddb
-      --proxied-server-config-path string              [EXPERIMENTAL] Absolute path to an existing dolt sql-server YAML config (proxied-server mode only). When set, bd uses this file instead of auto-generating one. Relative paths are rejected.
-      --proxied-server-external-host string            [EXPERIMENTAL] Hostname or IP of an externally-managed dolt sql-server the proxy should front (proxied-server mode only). Mutually exclusive with --proxied-server-external-socket-path.
-      --proxied-server-external-keep-alive duration    [EXPERIMENTAL] TCP keepalive period for the proxy→external connection. Zero uses the package default (30s).
-      --proxied-server-external-port int               [EXPERIMENTAL] TCP port of the externally-managed dolt sql-server (proxied-server mode only). Required when --proxied-server-external-host is set.
-      --proxied-server-external-socket-path string     [EXPERIMENTAL] Absolute unix socket path of the externally-managed dolt sql-server (proxied-server mode only). Mutually exclusive with --proxied-server-external-host. Relative paths are rejected.
-      --proxied-server-external-tls                    [EXPERIMENTAL] Require TLS when connecting to the externally-managed dolt sql-server (proxied-server mode only).
-      --proxied-server-external-tls-cert-path string   [EXPERIMENTAL] Absolute path to a client TLS certificate (for mTLS to the externally-managed dolt sql-server). Must be paired with --proxied-server-external-tls-key-path. Relative paths are rejected.
-      --proxied-server-external-tls-key-path string    [EXPERIMENTAL] Absolute path to the client TLS private key (for mTLS to the externally-managed dolt sql-server). Must be paired with --proxied-server-external-tls-cert-path. Relative paths are rejected.
-      --proxied-server-external-user string            [EXPERIMENTAL] MySQL user for the externally-managed dolt sql-server (proxied-server mode only). Defaults to "root" when empty. Password is read at runtime from $BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD and is never persisted to disk.
-      --proxied-server-log-path string                 [EXPERIMENTAL] Absolute path to the proxied dolt sql-server log file (proxied-server mode only). Default: <beadsDir>/proxieddb/server.log. Relative paths are rejected.
-      --proxied-server-root-path string                [EXPERIMENTAL] Absolute directory holding the proxied dolt sql-server's lockfiles, pidfiles, and child .dolt repository (proxied-server mode only). Default: <beadsDir>/proxieddb. May not exist yet — bd will create it. Relative paths are rejected.
-  -q, --quiet                                          Suppress output (quiet mode)
-      --reinit-local                                   Re-initialize local .beads/ over existing local data. Does NOT authorize remote divergence; see --discard-remote.
-      --remote string                                  Dolt remote URL to clone from and persist as sync.remote
-      --role string                                    Set beads role without prompting: "maintainer" or "contributor"
-      --server                                         Use external dolt sql-server instead of embedded engine
-      --server-host string                             Dolt server host (default: 127.0.0.1)
-      --server-port int                                Dolt server port (default: 3307)
-      --server-socket string                           Unix domain socket path (overrides host/port)
-      --server-user string                             Dolt server MySQL user (default: root)
-      --setup-exclude                                  Configure .git/info/exclude to keep beads files local (for forks)
-      --shared-server                                  Enable shared Dolt server mode (all projects share one server at ~/.beads/shared-server/)
-      --skip-agents                                    Skip AGENTS.md and Claude/Codex setup generation
-      --skip-hooks                                     Skip git hooks installation
-      --stealth                                        Enable stealth mode: global gitattributes and gitignore, no local repo tracking
-      --team                                           Run team workflow setup wizard
+      --agents-file string                             에이전트 지침용 사용자 정의 파일 이름(기본값: AGENTS.md)
+      --agents-profile string                          AGENTS.md 프로필: 'minimal'(기본값, bd prime 포인터) 또는 'full'(전체 명령 참조)
+      --agents-template string                         사용자 정의 AGENTS.md 템플릿 경로(포함된 기본값 재정의)
+      --backend string                                 저장소 백엔드(기본값: dolt). --backend=sqlite는 사용 중단 알림 출력.
+      --contributor                                    OSS 기여자 설정 마법사 실행
+      --database string                                기존 서버 데이터베이스 이름 사용(접두사 기반 명명 재정의)
+      --debug                                          --loglevel=debug 및 CPU 프로파일링(--prof cpu)으로 관리형 Dolt sql-server 실행. config.yaml에 dolt.debug로 영구 저장. 외부 관리 서버에는 영향 없음.
+      --destroy-token string                           비대화형 모드에서 파괴적 재초기화를 위한 명시적 확인 토큰(형식: 'DESTROY-<prefix>')
+      --discard-remote                                 재초기화 시 구성된 원격의 Dolt 이력 폐기 승인. 비대화형 모드에는 --destroy-token 필요, 'bd help init-safety' 참조.
+      --external                                       서버가 외부에서 관리됨(서버 시작 건너뛰기), --shared-server 또는 --server와 함께 사용
+      --force                                          --reinit-local의 사용 중단된 별칭. 로컬 데이터 안전 보호만 우회하며 원격 분기를 승인하지 않음('bd help init-safety' 참조).
+      --from-jsonl                                     구성된 import.path에서 이슈 가져오기, --discard-remote가 교체를 승인하지 않으면 원격 이력 거부
+      --init-if-missing                                워크스페이스가 이미 초기화된 경우 실패하지 않고 init을 건너뛰며 0으로 종료(scaffold용 멱등 init)
+      --non-interactive                                모든 대화형 프롬프트 건너뛰기(CI 또는 비TTY 환경에서 자동 감지)
+  -p, --prefix string                                  이슈 접두사(기본값: 현재 디렉터리 이름)
+      --proxied-server                                 [실험적] .beads/proxieddb를 루트로 하는 워크스페이스별 프록시 dolt sql-server(프록시 + 하위 dolt) 사용
+      --proxied-server-config-path string              [실험적] 기존 dolt sql-server YAML 구성의 절대 경로(proxied-server 모드 전용). 설정 시 자동 생성 대신 이 파일 사용. 상대 경로 거부.
+      --proxied-server-external-host string            [실험적] 프록시가 앞단에 위치할 외부 관리 dolt sql-server의 호스트 이름 또는 IP(proxied-server 모드 전용). --proxied-server-external-socket-path와 함께 사용할 수 없음.
+      --proxied-server-external-keep-alive duration    [실험적] 프록시→외부 연결의 TCP keepalive 기간. 0은 패키지 기본값(30s) 사용.
+      --proxied-server-external-port int               [실험적] 외부 관리 dolt sql-server의 TCP 포트(proxied-server 모드 전용). --proxied-server-external-host 설정 시 필수.
+      --proxied-server-external-socket-path string     [실험적] 외부 관리 dolt sql-server의 절대 unix 소켓 경로(proxied-server 모드 전용). --proxied-server-external-host와 함께 사용할 수 없음. 상대 경로 거부.
+      --proxied-server-external-tls                    [실험적] 외부 관리 dolt sql-server에 연결할 때 TLS 요구(proxied-server 모드 전용).
+      --proxied-server-external-tls-cert-path string   [실험적] 클라이언트 TLS 인증서의 절대 경로(외부 관리 dolt sql-server에 대한 mTLS용). --proxied-server-external-tls-key-path와 함께 사용해야 함. 상대 경로 거부.
+      --proxied-server-external-tls-key-path string    [실험적] 클라이언트 TLS 개인 키의 절대 경로(외부 관리 dolt sql-server에 대한 mTLS용). --proxied-server-external-tls-cert-path와 함께 사용해야 함. 상대 경로 거부.
+      --proxied-server-external-user string            [실험적] 외부 관리 dolt sql-server의 MySQL 사용자(proxied-server 모드 전용). 비어 있으면 "root"가 기본값. 비밀번호는 런타임에 $BEADS_PROXIED_SERVER_EXTERNAL_PASSWORD 환경 변수에서 읽고 디스크에 영구 저장하지 않음.
+      --proxied-server-log-path string                 [실험적] 프록시 dolt sql-server 로그 파일의 절대 경로(proxied-server 모드 전용). 기본값: <beadsDir>/proxieddb/server.log. 상대 경로 거부.
+      --proxied-server-root-path string                [실험적] 프록시 dolt sql-server의 lockfile, pidfile, 하위 .dolt 저장소를 보관하는 절대 디렉터리(proxied-server 모드 전용). 기본값: <beadsDir>/proxieddb. 아직 없어도 bd가 생성. 상대 경로 거부.
+  -q, --quiet                                          출력 숨기기(quiet 모드)
+      --reinit-local                                   기존 로컬 데이터 위에 로컬 .beads/ 재초기화. 원격 분기를 승인하지 않음, --discard-remote 참조.
+      --remote string                                  클론하고 sync.remote로 영구 저장할 Dolt 원격 URL
+      --role string                                    프롬프트 없이 beads 역할 설정: "maintainer" 또는 "contributor"
+      --server                                         임베디드 엔진 대신 외부 dolt sql-server 사용
+      --server-host string                             Dolt 서버 호스트(기본값: 127.0.0.1)
+      --server-port int                                Dolt 서버 포트(기본값: 3307)
+      --server-socket string                           Unix 도메인 소켓 경로(host/port 재정의)
+      --server-user string                             Dolt 서버 MySQL 사용자(기본값: root)
+      --setup-exclude                                  beads 파일을 로컬에 유지하도록 .git/info/exclude 구성(fork용)
+      --shared-server                                  공유 Dolt 서버 모드 활성화(모든 프로젝트가 ~/.beads/shared-server/의 서버 하나 공유)
+      --skip-agents                                    AGENTS.md 및 Claude/Codex 설정 생성 건너뛰기
+      --skip-hooks                                     git 훅 설치 건너뛰기
+      --stealth                                        스텔스 모드 활성화: 전역 gitattributes와 gitignore, 로컬 저장소 추적 없음
+      --team                                           팀 워크플로 설정 마법사 실행
 ```
 
 ### bd kv
 
-Commands for working with the beads key-value store.
+Beads 키-값 저장소에서 작업하기 위한 명령어입니다.
 
-The key-value store is useful for storing flags, environment variables,
-or other user-defined data that persists across sessions.
+키-값 저장소는 플래그, 환경 변수,
+또는 세션 간에 지속되는 다른 사용자 정의 데이터를 저장하는 데 유용합니다.
 
-Examples:
-  bd kv set mykey myvalue    # Set a value
-  bd kv get mykey            # Get a value
-  bd kv clear mykey          # Delete a key
-  bd kv list                 # List all key-value pairs
+예제:
+  bd kv set mykey myvalue    # 값 설정
+  bd kv get mykey            # 값 가져오기
+  bd kv clear mykey          # 키 삭제
+  bd kv list                 # 모든 키-값 쌍 목록
 
 ```
 bd kv
@@ -3483,9 +3483,9 @@ bd kv
 
 #### bd kv clear
 
-Delete a key from the beads key-value store.
+beads 키-값 저장소에서 키를 삭제합니다.
 
-Examples:
+예시:
   bd kv clear feature_flag
   bd kv clear api_endpoint
 
@@ -3495,9 +3495,9 @@ bd kv clear <key>
 
 #### bd kv get
 
-Get a value from the beads key-value store.
+beads 키-값 저장소에서 값을 가져옵니다.
 
-Examples:
+예시:
   bd kv get feature_flag
   bd kv get api_endpoint
 
@@ -3507,9 +3507,9 @@ bd kv get <key>
 
 #### bd kv list
 
-List all key-value pairs in the beads key-value store.
+beads 키-값 저장소의 모든 키-값 쌍을 나열합니다.
 
-Examples:
+예시:
   bd kv list
   bd kv list --json
 
@@ -3519,12 +3519,12 @@ bd kv list
 
 #### bd kv set
 
-Set a key-value pair in the beads key-value store.
+beads 키-값 저장소에 키-값 쌍을 설정합니다.
 
-This is useful for storing flags, environment variables, or other
-user-defined data that persists across sessions.
+이는 플래그, 환경 변수 또는 기타
+세션 간에 지속되는 사용자 정의 데이터를 저장하는 데 유용합니다.
 
-Examples:
+예시:
   bd kv set feature_flag true
   bd kv set api_endpoint https://api.example.com
   bd kv set max_retries 3
@@ -3535,12 +3535,12 @@ bd kv set <key> <value>
 
 ### bd memories
 
-List all memories, or search by keyword.
+모든 메모리를 나열하거나 키워드로 검색합니다.
 
-Examples:
-  bd memories              # list all memories
-  bd memories dolt         # search for memories about dolt
-  bd memories "race flag"  # search for a phrase
+예시:
+  bd memories              # 모든 메모리를 나열
+  bd memories dolt         # dolt에 대한 메모리를 검색
+  bd memories "경쟁 플래그"  # 구문을 검색
 
 ```
 bd memories [search]
@@ -3548,21 +3548,21 @@ bd memories [search]
 
 ### bd onboard
 
-Display a minimal snippet to add to your agent instructions file for bd integration.
+bd 통합을 위해 에이전트 지침 파일에 추가할 최소 스니펫을 표시합니다.
 
-By default, the agent instructions file is AGENTS.md. Use 'bd init --agents-file'
-to configure a different filename (e.g. BEADS.md).
+기본적으로 에이전트 지침 파일은 AGENTS.md입니다. 'bd init --agents-file'를 사용하여
+다른 파일 이름을 구성하세요(예: BEADS.md).
 
-This outputs a small (~10 line) snippet that points to 'bd prime' for full
-workflow context. This is the same minimal profile that 'bd init' generates
-by default. This approach:
+이는 전체 워크플로우 컨텍스트를 위해 'bd prime'을 가리키는 작은(~10줄) 스니펫을 출력합니다.
+이는 'bd init'이 기본으로 생성하는 동일한 최소 프로필입니다.
+이 접근 방식:
 
-  • Keeps your agent file lean (doesn't bloat with instructions)
-  • bd prime provides dynamic, always-current workflow details
-  • Hooks auto-inject bd prime at session start
+  • 에이전트 파일을 가볍게 유지합니다(지침으로 불필요하게 부풀리지 않습니다)
+  • bd prime는 동적이고 항상 최신 상태의 워크플로우 세부 정보를 제공합니다
+  • 훅은 세션 시작 시 bd prime를 자동으로 주입합니다
 
-For agents or environments that do not auto-inject hook output, use
-'bd init --agents-profile=full' to embed the complete command reference.
+자동으로 훅 출력을 삽입하지 않는 에이전트나 환경의 경우, 완전한 명령어 참조를 포함하려면
+'bd init --agents-profile=full'을(를) 사용하세요.
 
 ```
 bd onboard
@@ -3570,43 +3570,43 @@ bd onboard
 
 ### bd prime
 
-Output essential Beads workflow context in AI-optimized markdown format.
+핵심 Beads 워크플로우 컨텍스트를 AI 최적화 마크다운 형식으로 출력합니다.
 
-Automatically detects if MCP server is active and adapts output:
-- MCP mode: Brief workflow reminders (~50 tokens)
-- CLI mode: Full command reference (~1-2k tokens)
+자동으로 MCP 서버가 활성 상태인지 감지하고 출력을 조정합니다:
+- MCP 모드: 간단한 워크플로우 알림(~50 토큰)
+- CLI 모드: 전체 명령어 참조(~1-2k 토큰)
 
-Designed for Claude Code, Gemini CLI, and Codex SessionStart hooks to prevent
-agents from forgetting bd workflow after context compaction.
+Claude Code, Gemini CLI 및 Codex SessionStart 훅을 위해 설계되어
+컨텍스트 압축 후 에이전트가 bd 워크플로우를 잊어버리는 것을 방지합니다.
 
-Config options:
-- no-git-ops: When true, outputs stealth mode (no git commands in session close protocol).
-  Set via: bd config set no-git-ops true
-  Useful when you want to control when commits happen manually.
+구성 옵션:
+- no-git-ops: true일 때 스텔스 모드로 출력됩니다(세션 닫기 프로토콜에서 git 명령 없음).
+  설정 방법: bd config set no-git-ops true
+  커밋이 수동으로 이루어지는 시점을 제어하고 싶을 때 유용합니다.
 
-	Workflow customization:
-	- Place a .beads/PRIME.md file in the local clone or resolved workspace to override the default output entirely.
-	- Use --export to dump the default content for customization.
-	- Use --memories-only for hook contexts that should inject only persistent memories.
+	워크플로우 사용자 지정:
+	- 기본 출력을 완전히 재정의하려면 로컬 클론 또는 해석된 워크스페이스에 .beads/PRIME.md 파일을 배치하세요.
+	- 사용자 정의를 위해 기본 내용을 덤프하려면 --export를 사용하세요.
+	- 지속형 메모리만 주입해야 하는 훅 컨텍스트에는 --memories-only를 사용하세요.
 
 ```
 bd prime [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --export          Output default content (ignores PRIME.md override)
-      --full            Force full CLI output (ignore MCP detection)
-      --hook-json       Wrap output in the SessionStart hook JSON envelope (Claude Code, Gemini CLI, Codex)
-      --mcp             Force MCP mode (minimal output)
-      --memories-only   Output only persistent memories for compact hook contexts
-      --stealth         Stealth mode (no git operations, flush only)
+      --export          기본 콘텐츠 출력(PRIME.md 재정의 무시)
+      --full            전체 CLI 출력 강제(MCP 감지 무시)
+      --hook-json       출력을 SessionStart 훅 JSON 봉투로 감싸기(Claude Code, Gemini CLI, Codex)
+      --mcp             MCP 모드 강제(최소 출력)
+      --memories-only   간결한 훅 컨텍스트에 영구 메모리만 출력
+      --stealth         스텔스 모드(git 작업 없이 flush만 수행)
 ```
 
 ### bd quickstart
 
-Display a quick start guide showing common bd workflows and patterns.
+일반적인 bd 워크플로우와 패턴을 보여주는 빠른 시작 가이드를 표시합니다.
 
 ```
 bd quickstart
@@ -3614,9 +3614,9 @@ bd quickstart
 
 ### bd recall
 
-Retrieve the full content of a memory by its key.
+키로 메모리의 전체 내용을 검색합니다.
 
-Examples:
+예시:
   bd recall dolt-phantoms
   bd recall auth-jwt
 
@@ -3626,432 +3626,432 @@ bd recall <key>
 
 ### bd remember
 
-Store a memory that persists across sessions and account rotations.
+세션과 계정 전환 간에도 지속되는 메모리를 저장합니다.
 
-Memories are injected at prime time (bd prime) so you have them
-in every session without manual loading.
+메모리는 prime 시점(bd prime)에 주입되므로
+수동 로딩 없이 모든 세션에서 이를 사용할 수 있습니다.
 
-The positional arg is the memory CONTENT (the key is auto-generated from it
-unless --key is given). As a convenience, if the arg is a bare key naming an
-existing memory, it is RECALLED instead of stored (same as 'bd recall');
-a bare key naming nothing is refused. Use --key to store slug-like content.
+위치 인수는 메모리 CONTENT입니다 (키는 --key가 지정되지 않으면 거기에서
+자동 생성됩니다). 편의상, 인수가 기존 메모리를 가리키는 단순 키인 경우
+기존 메모리라면 저장되지 않고 RECALLED됩니다 ('bd recall'와 동일);
+아무 것도 가리키지 않는 단순 키는 거부됩니다. slug와 같은 콘텐츠를 저장하려면 --key를 사용하세요.
 
-Examples:
-  bd remember "always run tests with -race flag"
-  bd remember "Dolt phantom DBs hide in three places" --key dolt-phantoms
-  bd remember "auth module uses JWT not sessions" --key auth-jwt
-  bd remember dolt-phantoms        # bare existing key: reads it (= bd recall)
+예시:
+  bd remember "항상 -race 플래그로 테스트를 실행하세요"
+  bd remember "Dolt 팬텀 DB는 세 군데에 숨어 있습니다" --key dolt-phantoms
+  bd remember "인증 모듈은 JWT를 사용하고 세션은 사용하지 않습니다" --key auth-jwt
+  bd remember dolt-phantoms        # 기존 키를 그대로 사용: 이를 읽습니다 (= bd recall)
 
 ```
 bd remember "<insight>" [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --key string   Explicit key for the memory (auto-generated from content if not set). If a memory with this key already exists, it will be updated in place
+      --key string   메모리의 명시적 키(설정하지 않으면 콘텐츠에서 자동 생성). 이 키의 메모리가 이미 있으면 제자리에서 업데이트
 ```
 
 ### bd setup
 
-Setup integration files for AI editors and coding assistants.
+AI 편집기 및 코딩 어시스턴트를 위한 통합 파일을 설정합니다.
 
-Recipes define where beads workflow instructions are written. Built-in recipes
-include cursor, claude, copilot, gemini, aider, factory, codex, mux, opencode, junie, windsurf, cody, and kilocode.
+레시피는 beads의 워크플로우 지침이 작성되는 위치를 정의합니다. 내장 레시피
+에는 cursor, claude, copilot, gemini, aider, factory, codex, mux, opencode, junie, windsurf, cody, 및 kilocode가 포함됩니다.
 
-Examples:
-  bd setup cursor          # Install Cursor IDE integration
-  bd setup codex           # Install Codex skill + AGENTS.md guidance + native hooks
-  bd setup codex --global  # Install global Codex skill + guidance + native hooks
-  bd setup copilot         # Install Copilot CLI plugin + repository instructions
-  bd setup mux --project   # Install Mux workspace layer (.mux/AGENTS.md)
-  bd setup mux --global    # Install Mux global layer (~/.mux/AGENTS.md)
-  bd setup mux --project --global  # Install both Mux layers
-  bd setup --list          # Show all available recipes
-  bd setup --print         # Print the template to stdout
-  bd setup -o rules.md     # Write template to custom path
-  bd setup --add myeditor .myeditor/rules.md  # Add custom recipe
+예시:
+  bd setup cursor          # Cursor IDE 통합 설치
+  bd setup codex           # Codex 스킬 + AGENTS.md 가이드 + 기본 훅 설치
+  bd setup codex --global  # 전역 Codex 스킬 + 가이드 + 기본 훅 설치
+  bd setup copilot         # Copilot CLI 플러그인 + 저장소 지침 설치
+  bd setup mux --project   # Mux 워크스페이스 레이어(.mux/AGENTS.md) 설치
+  bd setup mux --global    # Mux 전역 레이어(~/.mux/AGENTS.md) 설치
+  bd setup mux --project --global  # 두 Mux 레이어 모두 설치
+  bd setup --list          # 사용 가능한 모든 레시피 표시
+  bd setup --print         # 템플릿을 stdout으로 출력
+  bd setup -o rules.md     # 템플릿을 사용자 지정 경로에 쓰기
+  bd setup --add myeditor .myeditor/rules.md  # 사용자 지정 레시피 추가
 
-Use 'bd setup &lt;recipe&gt; --check' to verify installation status.
-Use 'bd setup &lt;recipe&gt; --remove' to uninstall.
+설치 상태를 확인하려면 'bd setup &lt;recipe&gt; --check'를(를) 사용하세요.
+제거하려면 'bd setup &lt;recipe&gt; --remove'를(를) 사용하세요.
 
 ```
 bd setup [recipe] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --add string      Add a custom recipe with given name
-      --check           Check if integration is installed
-      --global          Install globally (claude/codex/mux; writes to ~/.claude/settings.json, $CODEX_HOME/AGENTS.md or ~/.codex/AGENTS.md, or ~/.mux/AGENTS.md)
-      --list            List all available recipes
-  -o, --output string   Write template to custom path
-      --print           Print the template to stdout
-      --project         Install for this project only (gemini/mux)
-      --remove          Remove the integration
-      --stealth         Use stealth mode (claude/gemini)
+      --add string      지정한 이름으로 사용자 정의 레시피 추가
+      --check           통합 설치 여부 확인
+      --global          전역 설치(claude/codex/mux, ~/.claude/settings.json, $CODEX_HOME/AGENTS.md 또는 ~/.codex/AGENTS.md, ~/.mux/AGENTS.md에 쓰기)
+      --list            사용 가능한 모든 레시피 나열
+  -o, --output string   사용자 정의 경로에 템플릿 쓰기
+      --print           템플릿을 stdout에 출력
+      --project         이 프로젝트에만 설치(gemini/mux)
+      --remove          통합 제거
+      --stealth         스텔스 모드 사용(claude/gemini)
 ```
 
 ### bd where
 
-Show the active beads database location, including redirect information.
+활성 beads 데이터베이스 위치를 리디렉션 정보와 함께 표시합니다.
 
-	This command is useful for debugging when using redirects, to understand
-	which beads workspace is actually being used.
+	이 명령은 리디렉션을 사용할 때 실제로 어떤 beads workspace가 사용되는지 이해하여 디버깅하는 데 유용합니다.
+	어떤 Beads 작업공간이 실제로 사용되고 있는지 파악할 수 있습니다.
 
-Examples:
-  bd where           # Show active beads location
-  bd where --json    # Output in JSON format
+예시:
+  bd where           # 활성 Beads 위치 표시
+  bd where --json    # JSON 형식으로 출력
 
 
 ```
 bd where
 ```
 
-## Maintenance:
+## 유지보수:
 
 ### bd batch
 
-Run multiple write operations in a single database transaction.
+단일 데이터베이스 트랜잭션에서 여러 쓰기 작업을 실행합니다.
 
-Commands are read from stdin (one per line) or from a file via -f/--file.
-All operations execute inside a single dolt transaction: on any error the
-whole batch is rolled back, otherwise it is committed with one DOLT_COMMIT.
+명령은 stdin(한 줄당 하나씩)에서 읽거나 -f/--file을 통해 파일에서 읽습니다.
+모든 작업은 단일 dolt 트랜잭션 내에서 실행됩니다: 어떤 오류가 있으면
+전체 배치가 롤백되며, 그렇지 않으면 하나의 DOLT_COMMIT으로 커밋됩니다.
 
-This is intended for shell scripts that currently invoke 'bd' many times in
-a loop, which causes severe write amplification on a dolt sql-server backed
-by btrfs+compression. Batching collapses N invocations into one transaction
-and one dolt commit.
+이것은 현재 루프에서 'bd'를 여러 번 호출하는 쉘 스크립트를 위한 용도로,
+btrfs+compression이 적용된 dolt sql-server에서 심각한 쓰기 증폭을 일으킵니다.
+배치 처리(Batching)는 N번의 호출을 하나의 트랜잭션으로
+병합하고 하나의 dolt 커밋으로 처리합니다.
 
-Grammar (one command per line):
+문법 (한 줄에 하나의 명령):
   close &lt;id&gt; [reason...]
   update &lt;id&gt; &lt;key&gt;=&lt;value&gt; [&lt;key&gt;=&lt;value&gt; ...]
   create &lt;type&gt; &lt;priority&gt; &lt;title...&gt;
   dep add &lt;from-id&gt; &lt;to-id&gt; [type]
   dep remove &lt;from-id&gt; &lt;to-id&gt;
-  #comment  (blank lines and '# ...' comments are ignored)
+  #comment  (빈 줄과 '# ...' 주석은 무시됩니다)
 
-Supported 'update' keys: status, priority, title, assignee
-Supported dependency types: see 'bd dep add --help' (default: blocks)
+지원되는 'update' 키: status, priority, title, assignee
+지원되는 의존성 유형: 'bd dep add --help' 참조 (기본값: blocks)
 
-Tokens are whitespace-separated. Double-quoted strings ("like this") may
-contain spaces; use \" to embed a quote and \\ for a backslash.
+토큰은 공백으로 구분됩니다. 큰따옴표 문자열("like this")은
+공백을 포함할 수 있습니다; 따옴표를 삽입하려면 \"를 사용하고 백슬래시는 \\로 표현하세요.
 
-Examples:
-  # From a pipe
+예제:
+  # 파이프에서
   bd list --status stale -q | awk '&#123;print "close",$1," stale"&#125;' | bd batch
 
-  # From a file
+  # 파일에서
   bd batch -f operations.txt
 
-  # Inline
+  # 인라인
   printf 'close bd-1 done\nupdate bd-2 status=in_progress\n' | bd batch
 
-On success, exits 0 and prints a summary (or JSON with --json). On any error,
-rolls back the entire transaction and exits non-zero with the failing line.
+성공하면 종료 코드 0으로 끝내고 요약을 출력합니다(--json 사용 시 JSON). 오류가 하나라도 있으면,
+전체 트랜잭션을 롤백하고 실패한 줄과 함께 0이 아닌 코드로 종료합니다.
 
-NOTE: This is a narrow subset. Commands like 'show', 'list', 'ready', 'sync',
-complex create flows, or any flag not listed above are NOT accepted. Use
-normal 'bd' subcommands for interactive/read operations.
+참고: 이것은 제한된 하위 집합입니다. 'show', 'list', 'ready', 'sync',
+복잡한 create 흐름이나 위에 나열되지 않은 플래그는 허용되지 않습니다. 사용
+일반 'bd' 하위 명령을 대화형/읽기 작업에 사용하세요.
 
 ```
 bd batch [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run          Parse input and echo commands without executing
-  -f, --file string      Read commands from file instead of stdin
-  -m, --message string   DOLT_COMMIT message (default: 'bd: batch N ops by <actor>')
+      --dry-run          입력을 구문 분석하고 실행하지 않은 채 명령 출력
+  -f, --file string      stdin 대신 파일에서 명령 읽기
+  -m, --message string   DOLT_COMMIT 메시지(기본값: 'bd: batch N ops by <actor>')
 ```
 
 ### bd compact
 
-Squash Dolt commits older than N days into a single commit.
+N일 이상 오래된 Dolt 커밋을 하나의 커밋으로 스쿼시합니다.
 
-Recent commits (within the retention window) are preserved via cherry-pick.
-This reduces Dolt storage overhead from auto-commit history while keeping
-recent change tracking intact.
+최근 커밋(보존 기간 내 커밋)은 cherry-pick을 통해 보존됩니다.
+이렇게 하면 자동 커밋 히스토리에서 Dolt 저장 오버헤드가 줄어들면서도
+최신 변경 사항 추적 기능을 유지할 수 있습니다.
 
-For semantic issue compaction (summarizing closed issues), use 'bd admin compact'.
-For full history squash, use 'bd flatten'.
+의미적 이슈 압축(닫힌 이슈 요약)에는 'bd admin compact'를 사용하세요.
+전체 이력 스쿼시에 대해서는 'bd flatten'을 사용하세요.
 
-How it works:
-  1. Identifies commits older than --days threshold
-  2. Creates a squashed base commit from all old history
-  3. Cherry-picks recent commits on top
-  4. Swaps main branch to the compacted version
-  5. Runs Dolt GC to reclaim space
+동작 방식:
+  1. --days 임계값보다 오래된 커밋을 식별한다
+  2. 오래된 모든 이력에서 스쿼시된 기본 커밋을 생성한다
+  3. 최근 커밋을 맨 위에 cherry-pick한다
+  4. main 브랜치를 압축된 버전으로 전환한다
+  5. 공간 회수를 위해 Dolt GC를 실행한다
 
-Examples:
-  bd compact --dry-run               # Preview: show commit breakdown
-  bd compact --force                 # Squash commits older than 30 days
-  bd compact --days 7 --force        # Keep only last 7 days of history
-  bd compact --days 90 --force       # Conservative: squash 90+ day old commits
+예시:
+  bd compact --dry-run               # 미리보기: 커밋 분해 표시
+  bd compact --force                 # 30일 이상 된 커밋 스쿼시
+  bd compact --days 7 --force        # 최근 7일의 기록만 유지
+  bd compact --days 90 --force       # 보수적: 90일 이상 된 커밋 스쿼시
 
 ```
 bd compact [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --days int   Keep commits newer than N days (default 30)
-      --dry-run    Preview without making changes
-  -f, --force      Confirm commit squash
+      --days int   N일 이내의 새 커밋 유지(기본값 30)
+      --dry-run    변경 없이 미리 보기
+  -f, --force      커밋 squash 확인
 ```
 
 ### bd doctor
 
-Sanity check the beads installation for the current directory or specified path.
+현재 디렉터리 또는 지정된 경로에 대해 beads 설치 상태를 점검합니다.
 
-This command checks:
-  - If .beads/ directory exists
-  - Database version and migration status
-  - Schema compatibility (all required tables and columns present)
-  - Whether using hash-based vs sequential IDs
-  - If CLI version is current (checks GitHub releases)
-  - If Claude plugin is current (when running in Claude Code)
-  - File permissions
-  - Circular dependencies
-  - Git hooks (pre-commit, post-merge, pre-push)
-  - .beads/.gitignore up to date
-  - Metadata.json version tracking (LastBdVersion field)
+이 명령은 다음을 확인합니다:
+  - .beads/ 디렉토리 존재 여부
+  - 데이터베이스 버전 및 마이그레이션 상태
+  - 스키마 호환성(필요한 모든 테이블과 열이 존재하는지)
+  - 해시 기반 ID와 순차 ID 사용 여부
+  - CLI 버전 최신 여부( GitHub 릴리스 확인)
+  - Claude Code에서 실행 중일 때 Claude 플러그인 최신 여부
+  - 파일 권한
+  - 순환 종속성
+  - Git 훅(pre-commit, post-merge, pre-push)
+  - .beads/.gitignore 최신 상태
+  - Metadata.json 버전 추적(LastBdVersion 필드)
 
-Performance Mode (--perf):
-  Run performance diagnostics on your database:
-  - Times key operations (bd ready, bd list, bd show, etc.)
-  - Collects system info (OS, arch, SQLite version, database stats)
-  - Generates CPU profile for analysis
-  - Outputs shareable report for bug reports
+성능 모드(--perf):
+  데이터베이스에 대한 성능 진단을 실행합니다:
+  - 주요 작업의 소요 시간을 측정합니다 (bd ready, bd list, bd show 등)
+  - 시스템 정보를 수집합니다 (OS, arch, SQLite 버전, 데이터베이스 통계)
+  - 분석을 위해 CPU 프로필을 생성합니다
+  - 버그 보고를 위한 공유 가능한 보고서를 출력합니다
 
-Export Mode (--output):
-  Save diagnostics to a JSON file for historical analysis and bug reporting.
-  Includes timestamp and platform info for tracking intermittent issues.
+내보내기 모드 (--output):
+  이력 분석 및 버그 보고를 위해 진단 정보를 JSON 파일로 저장합니다.
+  간헐적 문제 추적을 위해 타임스탬프와 플랫폼 정보를 포함합니다.
 
-Specific Check Mode (--check):
-  Run a specific check in detail. Available checks:
-  - artifacts: Detect and optionally clean beads classic artifacts
-    (stale JSONL, SQLite files, cruft .beads dirs). Use with --clean.
-  - conventions: Check for convention drift (lint warnings, stale
-    issues, orphaned issues). Advisory only - warns, never blocks.
-  - pollution: Detect and optionally clean test issues from database
-  - validate: Run focused data-integrity checks (duplicates, orphaned
-    deps, test pollution, git conflicts). Use with --fix to auto-repair.
+특정 검사 모드 (--check):
+  특정 검사를 자세히 실행합니다. 사용 가능한 검사는 다음과 같습니다:
+  - artifacts: beads 클래식 아티팩트를 탐지하고 선택적으로 정리합니다
+    (오래된 JSONL, SQLite 파일, 불필요한 .beads 디렉터리). --clean과 함께 사용하세요.
+  - conventions: 컨벤션 드리프트(린트 경고, 오래된
+    문제, 고아 이슈). 경고만 제공되며, 결코 차단하지 않습니다.
+  - pollution: 데이터베이스에서 테스트 이슈를 감지하고 선택적으로 정리합니다
+  - validate: 중점적인 데이터 무결성 검사를 실행합니다(중복, 고아
+    의존성, 테스트 오염, git 충돌). 자동 수리를 위해 --fix를 사용하세요.
 
-Deep Validation Mode (--deep):
-  Validate full graph integrity. May be slow on large databases.
-  Additional checks:
-  - Parent consistency: All parent-child deps point to existing issues
-  - Dependency integrity: All deps reference valid issues
-  - Epic completeness: Find epics ready to close (all children closed)
-  - Agent bead integrity: Agent beads have valid state values
-  - Mail thread integrity: Thread IDs reference existing issues
-  - Molecule integrity: Molecules have valid parent-child structures
+심층 검증 모드 (--deep):
+  전체 그래프 무결성을 검증합니다. 대규모 데이터베이스에서는 느릴 수 있습니다.
+  추가 검사:
+  - 상위-하위 일관성: 모든 상위-하위 의존성은 기존 이슈를 가리킵니다
+  - 의존성 무결성: 모든 의존성은 유효한 이슈를 참조합니다
+  - 에픽 완전성: 닫을 준비가 된 에픽을 찾습니다(모든 하위 항목이 닫힘)
+  - Agent bead 무결성: Agent bead는 유효한 상태 값을 가집니다
+  - 메일 스레드 무결성: 스레드 ID는 기존 이슈를 참조합니다
+  - 분자 무결성: 분자는 유효한 상위-하위 구조를 가집니다
 
-Server Mode (--server):
-  Run health checks for Dolt server mode connections (bd-dolt.2.3):
-  - Server reachable: Can connect to configured host:port?
-  - Dolt version: Is it a Dolt server (not vanilla MySQL)?
-  - Database exists: Does the 'beads' database exist?
-  - Schema compatible: Can query beads tables?
-  - Connection pool: Pool health metrics
+서버 모드 (--server):
+  Dolt 서버 모드 연결에 대한 상태 검사를 실행합니다 (bd-dolt.2.3):
+  - 서버 연결 가능: 구성된 host:port에 연결할 수 있습니까?
+  - Dolt 버전: Dolt 서버인가요(기본 MySQL이 아님)?
+  - 데이터베이스 존재: 'beads' 데이터베이스가 존재합니까?
+  - 스키마 호환성: beads 테이블을 쿼리할 수 있습니까?
+  - 연결 풀: 풀 상태 메트릭
 
-Migration Validation Mode (--migration):
-  Run Dolt migration validation checks with machine-parseable output.
-  Use --migration=pre before migration to verify readiness:
-  - JSONL file exists and is valid (parseable, no corruption)
-  - All JSONL issues are present in SQLite (or explains discrepancies)
-  - No blocking issues prevent migration
-  Use --migration=post after migration to verify completion:
-  - Dolt database exists and is healthy
-  - All issues from JSONL are present in Dolt
-  - No data was lost during migration
-  - Dolt database has no locks or uncommitted changes
-  Combine with --json for machine-parseable output for automation.
+마이그레이션 검증 모드 (--migration):
+  Dolt 마이그레이션 검증 검사를 machine-parseable 출력으로 실행합니다.
+  마이그레이션 전에 --migration=pre를 사용하여 준비 상태를 확인합니다:
+  - JSONL 파일이 존재하고 유효합니다(파싱 가능, 손상 없음)
+  - 모든 JSONL 문제는 SQLite에 존재합니다(또는 불일치를 설명함)
+  - 마이그레이션을 차단하는 문제점이 없습니다
+  마이그레이션 후 완료를 확인하려면 --migration=post를 사용합니다:
+  - Dolt 데이터베이스가 존재하고 상태가 양호합니다
+  - JSONL의 모든 문제는 Dolt에 존재합니다
+  - 마이그레이션 중 데이터 손실이 발생하지 않았습니다
+  - Dolt 데이터베이스에 잠금이나 커밋되지 않은 변경 사항이 없습니다
+  자동화를 위해 machine-parseable 출력을 생성하려면 --json과 함께 사용하세요.
 
-Agent Mode (--agent):
-  Output diagnostics designed for AI agent consumption. Instead of terse
-  pass/fail messages, each issue includes:
-  - Observed state: what the system actually looks like
-  - Expected state: what it should look like
-  - Explanation: full prose context about the issue and why it matters
-  - Commands: exact remediation commands to run
-  - Source files: where in the codebase to investigate further
-  - Severity: blocking (prevents operation), degraded (partial function),
-    or advisory (informational only)
-  ZFC-compliant: Go observes and reports, the agent decides and acts.
-  Combine with --json for structured agent-facing output.
+에이전트 모드 (--agent):
+  AI 에이전트가 소비하도록 설계된 진단을 출력합니다. 간결한
+  pass/fail 메시지 대신 각 이슈에는 다음이 포함됩니다:
+  - 관찰 상태: 시스템이 실제로 보이는 상태
+  - 예상 상태: 시스템이 보여야 하는 상태
+  - 설명: 문제에 대한 전체 맥락과 왜 중요한지
+  - 명령: 실행할 정확한 복구 명령
+  - 소스 파일: 코드베이스에서 추가로 조사할 위치
+  - 심각도: blocking (작동을 방해), degraded (부분 기능),
+    또는 advisory (정보 제공만)
+  ZFC-compliant: Go는 관찰하고 보고하며, 에이전트가 결정하고 실행합니다.
+  구조화된 에이전트 대상 출력을 위해 --json과 함께 사용하세요.
 
-Suppressing Warnings:
-  Suppress specific warnings by setting doctor.suppress.&lt;check-slug&gt; config:
+경고 억제:
+  특정 경고는 doctor.suppress.&lt;check-slug&gt; 설정으로 억제할 수 있습니다:
     bd config set doctor.suppress.pending-migrations true
     bd config set doctor.suppress.git-hooks true
-  Check names are converted to slugs: "Git Hooks" → "git-hooks".
-  Only warnings are suppressed; errors and passing checks always show.
-  To unsuppress: bd config unset doctor.suppress.&lt;slug&gt;
+  이름은 슬러그로 변환됩니다: "Git Hooks" → "git-hooks".
+  경고만 억제되며, 오류와 통과한 검사는 항상 표시됩니다.
+  억제를 해제하려면: bd config unset doctor.suppress.&lt;slug&gt;
 
-Examples:
-  bd doctor              # Check current directory
-  bd doctor /path/to/repo # Check specific repository
-  bd doctor --json       # Machine-readable output
-  bd doctor --agent      # Agent-facing diagnostic output
-  bd doctor --agent --json  # Structured agent diagnostics (JSON)
-  bd doctor --fix        # Automatically fix issues (with confirmation)
-  bd doctor --fix --yes  # Automatically fix issues (no confirmation)
-  bd doctor --fix -i     # Confirm each fix individually
-  bd doctor --fix --fix-child-parent  # Also fix child→parent deps (opt-in)
-  bd doctor --fix --force # Force repair even when database can't be opened
-  bd doctor --fix --source=jsonl # Rebuild database from a JSONL export
-  bd doctor --dry-run    # Preview what --fix would do without making changes
-  bd doctor --perf       # Performance diagnostics
-  bd doctor --output diagnostics.json  # Export diagnostics to file
-  bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
-  bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
-  bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
-  bd doctor --check=pollution          # Show potential test issues
-  bd doctor --check=pollution --clean  # Delete test issues (with confirmation)
-  bd doctor --check=validate         # Data-integrity checks only
-  bd doctor --check=validate --fix   # Auto-fix data-integrity issues
-  bd doctor --deep             # Full graph integrity validation
-  bd doctor --server           # Dolt server mode health checks
-  bd doctor --migration=pre    # Validate readiness for Dolt migration
-  bd doctor --migration=post   # Validate Dolt migration completed
-  bd doctor --migration=pre --json  # Machine-parseable migration validation
+예시:
+  bd doctor              # 현재 디렉토리 확인
+  bd doctor /path/to/repo # 특정 저장소 확인
+  bd doctor --json       # 기계 판독 가능한 출력
+  bd doctor --agent      # 에이전트 대상 진단 출력
+  bd doctor --agent --json  # 구조화된 에이전트 진단(JSON)
+  bd doctor --fix        # 문제를 자동으로 수정(확인 필요)
+  bd doctor --fix --yes  # 문제를 자동으로 수정(확인 없음)
+  bd doctor --fix -i     # 각 수정 작업을 개별적으로 확인
+  bd doctor --fix --fix-child-parent  # 하위→상위 의존성도 함께 수정(옵트인)
+  bd doctor --fix --force # 데이터베이스를 열 수 없는 경우에도 강제 복구
+  bd doctor --fix --source=jsonl # JSONL 내보내기에서 데이터베이스 재구성
+  bd doctor --dry-run    # 변경 없이 --fix가 수행할 작업 미리보기
+  bd doctor --perf       # 성능 진단
+  bd doctor --output diagnostics.json  # 진단 결과를 파일로 내보내기
+  bd doctor --check=artifacts           # 기존 아티팩트 표시(JSONL, SQLite, cruft 디렉토리)
+  bd doctor --check=artifacts --clean  # 안전하게 삭제 가능한 아티팩트 삭제(확인 필요)
+  bd doctor --check=conventions        # 컨벤션 드리프트 검사(lint, stale, orphans)
+  bd doctor --check=pollution          # 잠재적인 테스트 문제 표시
+  bd doctor --check=pollution --clean  # 테스트 문제 삭제(확인 필요)
+  bd doctor --check=validate         # 데이터 무결성 검사만 수행
+  bd doctor --check=validate --fix   # 데이터 무결성 문제 자동 수정
+  bd doctor --deep             # 전체 그래프 무결성 검증
+  bd doctor --server           # Dolt 서버 모드 상태 점검
+  bd doctor --migration=pre    # Dolt 마이그레이션 준비 상태 검증
+  bd doctor --migration=post   # Dolt 마이그레이션 완료 여부 검증
+  bd doctor --migration=pre --json  # 기계 구문 분석 가능한 마이그레이션 검증
 
 ```
 bd doctor [path] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --agent                                   Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)
-      --check string                            Run specific check in detail (e.g., 'pollution')
-      --check-health                            Quick health check for git hooks (silent on success)
-      --clean                                   For pollution check: delete detected test issues
-      --deep                                    Validate full graph integrity
-      --dry-run                                 Preview fixes without making changes
-      --fix                                     Automatically fix issues where possible
-      --fix-child-parent                        Remove child→parent dependencies (opt-in)
-  -i, --interactive                             Confirm each fix individually
-      --migration string                        Run Dolt migration validation: 'pre' (before migration) or 'post' (after migration)
-      --orchestrator                            Running in orchestrator multi-workspace mode (routes.jsonl is expected, higher duplicate tolerance)
-      --orchestrator-duplicates-threshold int   Duplicate tolerance threshold for orchestrator mode (wisps are ephemeral) (default 1000)
-  -o, --output string                           Export diagnostics to JSON file
-      --perf                                    Run performance diagnostics and generate CPU profile
-      --server                                  Run Dolt server mode health checks (connectivity, version, schema)
-  -v, --verbose                                 Show all checks (default shows only warnings/errors)
-  -y, --yes                                     Skip confirmation prompt (for non-interactive use)
+      --agent                                   에이전트용 진단 모드: AI 에이전트를 위한 풍부한 컨텍스트(ZFC 준수)
+      --check string                            특정 검사를 상세히 실행(예: 'pollution')
+      --check-health                            Git 훅 빠른 상태 검사(성공 시 출력 없음)
+      --clean                                   pollution 검사에서 감지된 테스트 이슈 삭제
+      --deep                                    전체 그래프 무결성 검증
+      --dry-run                                 변경하지 않고 수정 사항 미리 보기
+      --fix                                     가능한 경우 이슈 자동 수정
+      --fix-child-parent                        child→parent 의존성 제거(선택 적용)
+  -i, --interactive                             각 수정 개별 확인
+      --migration string                        Dolt 마이그레이션 검증 실행: 'pre'(마이그레이션 전) 또는 'post'(마이그레이션 후)
+      --orchestrator                            오케스트레이터 다중 워크스페이스 모드에서 실행(routes.jsonl 예상, 더 높은 중복 허용치)
+      --orchestrator-duplicates-threshold int   오케스트레이터 모드의 중복 허용 임곗값(wisp는 임시)(기본값 1000)
+  -o, --output string                           진단을 JSON 파일로 내보내기
+      --perf                                    성능 진단 실행 및 CPU 프로필 생성
+      --server                                  Dolt 서버 모드 상태 검사 실행(연결, 버전, 스키마)
+  -v, --verbose                                 모든 검사 표시(기본값은 경고/오류만 표시)
+  -y, --yes                                     확인 프롬프트 건너뛰기(비대화형 사용)
 ```
 
 ### bd flatten
 
-Nuclear option: squash ALL Dolt commit history into a single commit.
+최후의 수단: 모든 Dolt 커밋 히스토리를 하나의 커밋으로 스쿼시합니다.
 
-This uses the Tim Sehn recipe:
-  1. Create a new branch from the current state
-  2. Soft-reset to the initial commit (preserving all data)
-  3. Commit everything as a single snapshot
-  4. Swap main branch to the new flattened branch
-  5. Run Dolt GC to reclaim space from old history
+이는 Tim Sehn 레시피를 사용합니다:
+  1. 현재 상태에서 새 브랜치를 생성
+  2. 모든 데이터를 보존한 채 초기 커밋으로 Soft-reset
+  3. 모든 내용을 단일 스냅샷으로 커밋
+  4. main 브랜치를 새로 평탄화된 브랜치로 교체
+  5. 이전 히스토리에서 공간을 회수하기 위해 Dolt GC 실행
 
-This is irreversible — all commit history is lost. The resulting database
-has exactly one commit containing all current data.
+이는 되돌릴 수 없습니다 — 모든 커밋 이력이 손실됩니다. 결과 데이터베이스
+에는 현재 모든 데이터를 포함하는 커밋이 정확히 하나 존재합니다.
 
-Use this when:
-  - Your .beads/dolt directory has grown very large
-  - You don't need commit-level history (time travel)
-  - You want to start fresh with minimal storage
+이 경우에 사용하세요:
+  - .beads/dolt 디렉터리가 매우 커진 경우
+  - 커밋 단위 이력(타임 트래블)이 필요하지 않은 경우
+  - 최소한의 저장소로 새로 시작하고 싶은 경우
 
-Examples:
-  bd flatten --dry-run               # Preview: show commit count and disk usage
-  bd flatten --force                 # Actually squash all history
-  bd flatten --force --json          # JSON output
+예제:
+  bd flatten --dry-run               # 미리보기: 커밋 개수와 디스크 사용량 표시
+  bd flatten --force                 # 실제로 모든 히스토리를 squash
+  bd flatten --force --json          # JSON 출력
 
 ```
 bd flatten [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview without making changes
-  -f, --force     Confirm irreversible history squash
+      --dry-run   변경 없이 미리 보기
+  -f, --force     되돌릴 수 없는 이력 squash 확인
 ```
 
 ### bd gc
 
-Full lifecycle garbage collection for standalone Beads databases.
+독립형 Beads 데이터베이스를 위한 전체 수명 주기 가비지 컬렉션.
 
-Runs three phases in sequence:
-  1. DECAY   — Delete closed issues older than N days (default 90)
-  2. COMPACT — Squash old Dolt commits into fewer commits (bd compact)
-  3. GC      — Run Dolt garbage collection to reclaim disk space
+세 단계가 순차적으로 실행됩니다:
+  1. DECAY   — N일보다 오래된 종료된 이슈를 삭제합니다 (기본값 90)
+  2. COMPACT — 오래된 Dolt 커밋을 더 적은 커밋으로 squash 합니다 (bd compact)
+  3. GC      — 디스크 공간을 회수하기 위해 Dolt 가비지 컬렉션을 실행합니다
 
-Each phase can be skipped individually. Use --dry-run to preview all phases
-without making changes.
+각 단계는 개별적으로 건너뛸 수 있습니다. --dry-run을 사용하면 변경하지 않고 모든 단계를 미리 볼 수 있습니다
+변경하지 않습니다.
 
-Examples:
-  bd gc                              # Full GC with defaults (90 day decay)
-  bd gc --dry-run                    # Preview what would happen
-  bd gc --older-than 30              # Decay issues closed 30+ days ago
-  bd gc --skip-decay                 # Skip issue deletion, just compact+GC
-  bd gc --skip-dolt                  # Skip Dolt GC, just decay+compact
-  bd gc --force                      # Skip confirmation prompt
+예시:
+  bd gc                              # 기본값(90일 decay)으로 전체 GC 수행
+  bd gc --dry-run                    # 발생할 작업 미리 보기
+  bd gc --older-than 30              # 30일 이상 전에 닫힌 이슈를 decay 처리
+  bd gc --skip-decay                 # 이슈 삭제를 건너뛰고 compact+GC만 실행
+  bd gc --skip-dolt                  # Dolt GC를 건너뛰고 decay+compact만 실행
+  bd gc --force                      # 확인 프롬프트 건너뛰기
 
 ```
 bd gc [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run          Preview without making changes
-  -f, --force            Skip confirmation prompts
-      --older-than int   Delete closed issues older than N days (default 90)
-      --skip-decay       Skip issue deletion phase
-      --skip-dolt        Skip Dolt garbage collection phase
+      --dry-run          변경 없이 미리 보기
+  -f, --force            확인 프롬프트 건너뛰기
+      --older-than int   N일보다 오래된 닫힌 이슈 삭제(기본값 90)
+      --skip-decay       이슈 삭제 단계 건너뛰기
+      --skip-dolt        Dolt 가비지 컬렉션 단계 건너뛰기
 ```
 
 ### bd migrate
 
-Database migration and data transformation commands.
+데이터베이스 마이그레이션 및 데이터 변환 명령입니다.
 
-Without subcommand, checks and updates database metadata to current version.
+하위 명령어가 없으면 데이터베이스 메타데이터를 현재 버전으로 확인하고 업데이트합니다.
 
-Subcommands:
-  hooks       Plan git hook migration to marker-managed format
-  issues      Move issues between repositories
-  schema      Apply pending schema migrations (idempotent)
-  sync        Set up sync.branch workflow for multi-clone setups
+하위 명령어:
+  hooks       마커 관리 형식으로 Git 훅 마이그레이션을 계획
+  issues      저장소 간 이슈 이동
+  schema      보류 중인 스키마 마이그레이션 적용(멱등)
+  sync        다중 클론 설정을 위해 sync.branch 워크플로 설정
 
 
 ```
 bd migrate [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run          Show what would be done without making changes
-      --inspect          Show migration plan and database state for AI agent analysis
-      --json             Output migration statistics in JSON format
-      --update-repo-id   Update repository ID (use after changing git remote)
-      --yes              Auto-confirm prompts
+      --dry-run          변경하지 않고 수행될 작업 표시
+      --inspect          AI 에이전트 분석용 마이그레이션 계획과 데이터베이스 상태 표시
+      --json             마이그레이션 통계를 JSON 형식으로 출력
+      --update-repo-id   저장소 ID 업데이트(git 원격 변경 후 사용)
+      --yes              확인 프롬프트 자동 승인
 ```
 
 #### bd migrate hooks
 
-Analyze git hook files and sidecar artifacts for migration to marker-managed format.
+마커 관리 형식으로 마이그레이션하기 위해 Git 훅 파일과 사이드카 아티팩트를 분석합니다.
 
-Modes:
-  --dry-run  Preview migration operations without changing files
-  --apply    Apply migration operations
+모드:
+  --dry-run  파일을 변경하지 않고 마이그레이션 작업 미리보기
+  --apply    마이그레이션 작업 적용
 
-Examples:
+예시:
   bd migrate hooks --dry-run
   bd migrate hooks --apply
   bd migrate hooks --apply --yes
@@ -4061,68 +4061,68 @@ Examples:
 bd migrate hooks [path] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --apply     Apply planned hook migration changes
-      --dry-run   Show what would be done without making changes
-      --json      Output in JSON format
-      --yes       Skip confirmation prompt for --apply
+      --apply     계획된 훅 마이그레이션 변경 사항 적용
+      --dry-run   변경하지 않고 수행될 작업 표시
+      --json      JSON 형식으로 출력
+      --yes       --apply의 확인 프롬프트 건너뛰기
 ```
 
 #### bd migrate issues
 
-Move issues from one source repository to another with filtering and dependency preservation.
+한 소스 저장소에서 다른 저장소로 이슈를 필터링 및 의존성 보존 상태로 이동합니다.
 
-This command updates the source_repo field for selected issues, allowing you to:
-- Move contributor planning issues to upstream repository
-- Reorganize issues across multi-phase repositories
-- Consolidate issues from multiple repos
+이 명령은 선택한 이슈의 source_repo 필드를 업데이트하여 다음을 수행할 수 있습니다:
+- 기여자 계획 이슈를 업스트림 저장소로 이동
+- 다단계 저장소 전반의 이슈를 재구성
+- 여러 저장소의 이슈를 통합
 
-Examples:
-  # Preview migration from planning repo to current repo
+예시:
+  # 계획 저장소에서 현재 저장소로 마이그레이션 미리보기
   bd migrate-issues --from ~/.beads-planning --to . --dry-run
 
-  # Move all open P1 bugs
+  # 모든 열린 P1 버그 이동
   bd migrate-issues --from ~/repo1 --to ~/repo2 --priority 1 --type bug --status open
 
-  # Move specific issues with their dependencies
+  # 특정 이슈를 종속성과 함께 이동
   bd migrate-issues --from . --to ~/archive --id bd-abc --id bd-xyz --include closure
 
-  # Move issues with label filter
+  # 라벨 필터로 이슈 이동
   bd migrate-issues --from . --to ~/feature-work --label frontend --label urgent
 
 ```
 bd migrate issues [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run            Show plan without making changes
-      --from string        Source repository (required)
-      --id strings         Specific issue IDs to migrate (can specify multiple)
-      --ids-file string    File containing issue IDs (one per line)
-      --include string     Include dependencies: none/upstream/downstream/closure (default "none")
-      --label strings      Filter by labels (can specify multiple)
-      --priority int       Filter by priority (0-4) (default -1)
-      --status string      Filter by status (open/closed/all)
-      --strict             Fail on orphaned dependencies or missing repos
-      --to string          Destination repository (required)
-      --type string        Filter by issue type (bug/feature/task/epic/chore/decision)
-      --within-from-only   Only include dependencies from source repo (default true)
-      --yes                Skip confirmation prompt
+      --dry-run            변경하지 않고 계획 표시
+      --from string        소스 저장소(필수)
+      --id strings         마이그레이션할 특정 이슈 ID(여러 개 지정 가능)
+      --ids-file string    이슈 ID가 포함된 파일(한 줄에 하나)
+      --include string     포함할 의존성: none/upstream/downstream/closure(기본값 "none")
+      --label strings      레이블로 필터링(여러 개 지정 가능)
+      --priority int       우선순위로 필터링(0-4)(기본값 -1)
+      --status string      상태로 필터링(open/closed/all)
+      --strict             고립 의존성이나 누락된 저장소가 있으면 실패
+      --to string          대상 저장소(필수)
+      --type string        이슈 유형으로 필터링(bug/feature/task/epic/chore/decision)
+      --within-from-only   소스 저장소의 의존성만 포함(기본값 true)
+      --yes                확인 프롬프트 건너뛰기
 ```
 
 #### bd migrate schema
 
-Apply pending schema migrations idempotently.
+보류 중인 스키마 마이그레이션을 멱등적으로 적용합니다.
 
-Schema migrations also run automatically on store open, so this subcommand
-is typically a no-op. It exists to make migration explicit and observable
-in CI, release gates, and recovery scenarios.
+스키마 마이그레이션은 저장소 오픈 시에도 자동으로 실행되므로 이 하위 명령은
+일반적으로 no-op입니다. 이는 마이그레이션을 CI, 릴리스 게이트, 복구 시나리오에서
+명시적이고 관찰 가능하게 만들기 위해 존재합니다.
 
-Example:
+예시:
   bd migrate schema
   bd migrate schema --json
 
@@ -4130,48 +4130,48 @@ Example:
 bd migrate schema [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --json   Output in JSON format
+      --json   JSON 형식으로 출력
 ```
 
 #### bd migrate sync
 
-Configure separate branch workflow for multi-clone setups.
+다중 클론 설정을 위해 별도의 브랜치 워크플로우를 구성합니다.
 
-This sets the sync.branch config value so that issue data is committed
-to a dedicated branch, keeping your main branch clean.
+이 설정은 sync.branch 구성 값을 설정하여 이슈 데이터가
+전용 브랜치에 커밋되어 메인 브랜치를 깔끔하게 유지합니다.
 
-Example:
+예시:
   bd migrate sync beads-sync
 
 ```
 bd migrate sync <branch> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Show what would be done without making changes
-      --json      Output in JSON format
+      --dry-run   변경하지 않고 수행될 작업 표시
+      --json      JSON 형식으로 출력
 ```
 
 ### bd ping
 
-Lightweight health check that confirms bd can reach its database.
+데이터베이스에 대한 접근이 가능한지 확인하는 가벼운 상태 확인입니다.
 
-Steps:
-  1. Resolve the .beads workspace
-  2. Open the store (embedded or server)
-  3. Run a trivial query (issue count)
-  4. Report timing
+단계:
+  1. .beads 워크스페이스를 확인한다
+  2. 스토어를 엽니다(임베디드 또는 서버)
+  3. 간단한 쿼리 실행(이슈 수)
+  4. 타이밍을 보고한다
 
-Exit 0 on success, exit 1 on failure.
+성공하면 종료 코드 0을 반환하고, 실패하면 종료 코드 1을 반환합니다.
 
-Examples:
-  bd ping              # Quick connectivity check
-  bd ping --json       # Structured output for automation
+예제:
+  bd ping              # 빠른 연결 확인
+  bd ping --json       # 자동화를 위한 구조화된 출력
 
 ```
 bd ping
@@ -4179,132 +4179,132 @@ bd ping
 
 ### bd preflight
 
-Display a checklist of common pre-PR checks for contributors.
+기여자를 위해 일반적인 PR 사전 확인 사항 체크리스트를 표시합니다.
 
-This command helps catch common issues before pushing to CI:
-- Tests not run locally
-- Lint errors
-- Unformatted Go files
-- .beads/issues.jsonl pollution
-- Stale nix vendorHash
-- Version mismatches
+이 명령은 CI로 푸시하기 전에 흔히 발생하는 문제를 잡아줍니다:
+- 로컬에서 테스트가 실행되지 않음
+- 린트 오류
+- 포맷이 맞지 않은 Go 파일
+- .beads/issues.jsonl 오염
+- 오래된 nix vendorHash
+- 버전 불일치
 
-Examples:
-  bd preflight              # Show checklist
-  bd preflight --check      # Run checks automatically
-  bd preflight --check --json  # JSON output for programmatic use
-  bd preflight --check --skip-lint  # Explicitly skip lint check
+예시:
+  bd preflight              # 체크리스트 표시
+  bd preflight --check      # 검사를 자동으로 실행
+  bd preflight --check --json  # 프로그래밍 방식 사용을 위한 JSON 출력
+  bd preflight --check --skip-lint  # 린트 검사를 명시적으로 건너뛰기
 
 
 ```
 bd preflight [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --check       Run checks automatically
-      --fix         Auto-fix issues where possible (not yet implemented)
-      --json        Output results as JSON
-      --skip-lint   Skip lint check explicitly
+      --check       검사 자동 실행
+      --fix         가능한 경우 이슈 자동 수정(아직 구현되지 않음)
+      --json        결과를 JSON으로 출력
+      --skip-lint   린트 검사를 명시적으로 건너뛰기
 ```
 
 ### bd prune
 
-Permanently delete closed non-ephemeral beads and their associated data.
+닫힌 비일시적 beads와 관련 데이터를 영구적으로 삭제합니다.
 
-Use this to trim closed regular beads (tasks, features, bugs, chores, etc.)
-that are no longer useful. The common case is a long-lived repo where
-closed work has piled up and is bloating auto-export or slowing queries.
+이것을 사용해 더 이상 유용하지 않은 닫힌 일반 비드(작업, 기능, 버그, 잡무 등)를 정리합니다.
+일반적인 경우는 장기 운영되는 저장소에서
+닫힌 작업이 쌓여 자동 내보내기를 비대하게 하거나 쿼리를 느리게 만드는 것입니다.
 
-Requires --older-than or --pattern. The flag is a safety gate — without
-it, a muscle-memory `--force` could wipe every closed bead in the repo.
-Use `--pattern '*'` if you really do want to sweep everything closed.
+--older-than 또는 --pattern이 필요합니다. 이 플래그는 안전장치입니다 — 없으면
+근육 기억으로 실행한 `--force`가 저장소의 모든 닫힌 bead를 삭제할 수 있습니다.
+정말로 닫힌 항목을 모두 정리하려면 `--pattern '*'`를 사용하세요.
 
-Deletes: issues, dependencies, labels, events, and comments for matching beads.
-Skips: pinned beads (protected), open/in-progress beads, and ephemeral beads.
+삭제: 일치하는 비드의 이슈, 종속성, 라벨, 이벤트 및 댓글을 삭제합니다.
+건너뜀: 고정(보호됨) 비드, 진행 중인 비드, 및 임시 비드를 건너뜁니다.
 
-To delete closed ephemeral beads (wisps, transient molecules) use
-`bd purge` instead.
+닫힌 일시적 beads (wisps, 순간 분자)를 삭제하려면
+`bd purge`를 대신 사용하세요.
 
-For full Dolt storage reclaim after deleting many rows, follow with `bd flatten`
-so history can be collapsed and old chunks can be garbage-collected.
+많은 행을 삭제한 후 Dolt 저장소를 완전히 회수하려면 `bd flatten`를 실행한 다음
+히스토리를 압축하고 오래된 청크를 가비지 컬렉션할 수 있습니다.
 
-EXAMPLES:
-  bd prune --older-than 30d              # Preview closed beads &gt;30d old
-  bd prune --older-than 30d --force      # Delete them
-  bd prune --older-than 90d --dry-run    # Detailed preview with stats
-  bd prune --pattern "*" --force         # Delete all closed regular beads
-  bd prune --pattern "gm-temp-*" --force # Scope to a pattern
+예제:
+  bd prune --older-than 30d              # 닫힌 beads의 &gt;30d 오래된 항목 미리보기
+  bd prune --older-than 30d --force      # 항목을 삭제
+  bd prune --older-than 90d --dry-run    # 통계가 포함된 상세 미리보기
+  bd prune --pattern "*" --force         # 닫힌 일반 beads 모두 삭제
+  bd prune --pattern "gm-temp-*" --force # 패턴을 기준으로 범위 지정
 
 ```
 bd prune [flags]
 ```
 
-**Flags:**
+**옵션:**
 
 ```
-      --dry-run             Preview what would be pruned with stats
-  -f, --force               Actually prune (without this, shows preview)
-      --older-than string   Only prune beads closed more than N ago (e.g., 30d, 2w, 60)
-      --pattern string      Only prune beads matching ID glob pattern (e.g., 'gm-old-*')
+      --dry-run             정리될 항목을 통계와 함께 미리 보기
+  -f, --force               실제 정리(없으면 미리 보기 표시)
+      --older-than string   N보다 오래전에 닫힌 bead만 정리(예: 30d, 2w, 60)
+      --pattern string      ID glob 패턴과 일치하는 bead만 정리(예: 'gm-old-*')
 ```
 
 ### bd purge
 
-Permanently delete closed ephemeral beads and their associated data.
+닫힌 임시 비드와 연결된 데이터를 영구적으로 삭제합니다.
 
-Closed ephemeral beads (wisps, transient molecules) accumulate rapidly and
-have no value once closed. This command removes them to reclaim storage.
+닫힌 임시 bead(wisp, 일시적 molecule)는 빠르게 쌓이며
+한 번 닫히면 더는 가치가 없습니다. 이 명령은 저장 공간을 회수하기 위해 이를 제거합니다.
 
-Deletes: issues, dependencies, labels, events, and comments for matching beads.
-Skips: pinned beads (protected).
+삭제: 일치하는 비드의 이슈, 의존성, 라벨, 이벤트 및 댓글을 삭제합니다.
+건너뜀: 고정된 비드(보호됨).
 
-To delete closed non-ephemeral beads (regular tasks, features, bugs, etc.)
-use `bd prune` instead.
+닫힌 비일시적 beads(일반 작업, 기능, 버그 등)를 삭제하려면
+대신 `bd prune`를 사용하세요.
 
-For full Dolt storage reclaim after deleting many rows, follow with `bd flatten`
-so history can be collapsed and old chunks can be garbage-collected.
+많은 행을 삭제한 후 Dolt 저장소를 완전히 회수하려면 `bd flatten`를 따르세요
+그래야 히스토리를 축소하고 오래된 청크를 가비지 컬렉션할 수 있습니다.
 
-EXAMPLES:
-  bd purge                           # Preview what would be purged
-  bd purge --force                   # Delete all closed ephemeral beads
-  bd purge --older-than 7d --force   # Only purge items closed 7+ days ago
-  bd purge --pattern "*-wisp-*"      # Only purge matching ID pattern
-  bd purge --dry-run                 # Detailed preview with stats
+예시:
+  bd purge                           # 삭제될 항목 미리보기
+  bd purge --force                   # 닫힌 임시 beads를 모두 삭제
+  bd purge --older-than 7d --force   # 닫힌 지 7일 이상 지난 항목만 삭제
+  bd purge --pattern "*-wisp-*"      # ID 패턴과 일치하는 항목만 삭제
+  bd purge --dry-run                 # 통계가 포함된 상세 미리보기
 
 ```
 bd purge [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run             Preview what would be purged with stats
-  -f, --force               Actually purge (without this, shows preview)
-      --older-than string   Only purge beads closed more than N ago (e.g., 7d, 2w, 30)
-      --pattern string      Only purge beads matching ID glob pattern (e.g., *-wisp-*)
+      --dry-run             제거될 항목을 통계와 함께 미리 보기
+  -f, --force               실제 제거(없으면 미리 보기 표시)
+      --older-than string   N보다 오래전에 닫힌 bead만 제거(예: 7d, 2w, 30)
+      --pattern string      ID glob 패턴과 일치하는 bead만 제거(예: *-wisp-*)
 ```
 
 ### bd recompute-blocked
 
-Recompute the denormalized is_blocked flag for every issue and wisp.
+모든 issue와 wisp에 대해 비정규화된 is_blocked 플래그를 다시 계산합니다.
 
-is_blocked is derived from the dependency graph and maintained automatically by
-local writes and by a post-pull recompute scoped to what the merge changed. If
-that scoped recompute is skipped — a recompute that failed after its merge
-committed, or a conflicted pull resolved by hand — the flag can go stale, and a
-later pull that merges nothing will not refresh it (bd-6dnrw.37). 'bd ready'
-trusts the flag, so stale values silently hide ready work or surface blocked
-work.
+is_blocked는 의존성 그래프에서 파생되며 로컬 쓰기와
+병합이 변경한 범위로 한정된 pull 후 재계산에 의해 자동으로 유지됩니다. 만약
+해당 범위 재계산이 건너뛰어지면 — 병합 후 커밋된 재계산이 실패했거나
+수동으로 해결한 충돌 pull의 경우 — 플래그가 오래된 값이 될 수 있고, 이후
+나중에 아무것도 병합하지 않는 pull은 이를 갱신하지 않습니다 (bd-6dnrw.37). 'bd ready'
+는 이 플래그를 신뢰하므로, 오래된 값이 준비된 작업을 조용히 숨기거나 차단된
+작업을 표시합니다.
 
-This command runs the full recompute unconditionally and commits the result.
-It is idempotent: on a consistent database it changes nothing. Works in both
-embedded and server mode (unlike 'bd doctor', which is server-mode only).
+이 명령은 전체 재연산을 조건 없이 실행하고 그 결과를 커밋합니다.
+이는 멱등적입니다: 일관된 데이터베이스에서는 아무것도 변경하지 않습니다. 임베디드와
+서버 모드 모두에서 작동합니다('bd doctor'는 서버 모드 전용이라는 점과 달리).
 
-Examples:
-  bd recompute-blocked          # Repair stale is_blocked flags
-  bd recompute-blocked --json   # Machine-parseable &#123;"rows_corrected": N&#125;
+예시:
+  bd recompute-blocked          # 오래된 is_blocked 플래그를 복구
+  bd recompute-blocked --json   # 기계 판독 가능한 &#123;"rows_corrected": N&#125;
 
 ```
 bd recompute-blocked
@@ -4312,48 +4312,48 @@ bd recompute-blocked
 
 ### bd rename-prefix
 
-Rename the issue prefix for all issues in the database.
-This will update all issue IDs and all text references across all fields.
+데이터베이스의 모든 이슈에 대한 이슈 접두사를 변경합니다.
+이는 모든 필드의 모든 이슈 ID와 텍스트 참조를 업데이트합니다.
 
-USE CASES:
-- Shortening long prefixes (e.g., 'knowledge-work-' → 'kw-')
-- Rebranding project naming conventions
-- Consolidating multiple prefixes after database corruption
-- Migrating to team naming standards
+사용 사례:
+- 긴 접두사를 짧게 축약 (예: 'knowledge-work-' → 'kw-')
+- 프로젝트 명명 규칙의 리브랜딩
+- 데이터베이스 손상 후 여러 접두사 통합
+- 팀 명명 표준으로 전환
 
-Prefix validation rules:
-- Max length: 8 characters
-- Allowed characters: lowercase letters, numbers, hyphens
-- Must start with a letter
-- Must end with a hyphen (e.g., 'kw-', 'work-')
-- Cannot be empty or just a hyphen
+접두사 유효성 검사 규칙:
+- 최대 길이: 8자
+- 허용되는 문자: 소문자, 숫자, 하이픈
+- 문자로 시작해야 함
+- 하이픈으로 끝나야 함 (예: 'kw-', 'work-')
+- 비어 있거나 하이픈만으로는 될 수 없음
 
-Multiple prefix detection and repair:
-If issues have multiple prefixes (corrupted database), use --repair to consolidate them.
-The --repair flag will rename all issues with incorrect prefixes to the new prefix,
-preserving issues that already have the correct prefix.
+여러 접두사 감지 및 복구:
+이슈가 여러 접두사를 가진 경우(손상된 데이터베이스), --repair를 사용해 이를 통합하세요.
+--repair 플래그는 잘못된 접두사를 가진 모든 이슈의 접두사를 새 접두사로 변경하며,
+이미 올바른 접두사를 가진 이슈는 유지합니다.
 
-EXAMPLES:
-  bd rename-prefix kw-                # Rename from 'knowledge-work-' to 'kw-'
-  bd rename-prefix mtg- --repair      # Consolidate multiple prefixes into 'mtg-'
-  bd rename-prefix team- --dry-run    # Preview changes without applying
+예제:
+  bd rename-prefix kw-                # 'knowledge-work-'에서 'kw-'로 이름 바꾸기
+  bd rename-prefix mtg- --repair      # 여러 접두사를 'mtg-'로 통합
+  bd rename-prefix team- --dry-run    # 적용하지 않고 변경 사항 미리보기
 
-NOTE: This is a rare operation. Most users never need this command.
+참고: 이것은 드문 작업입니다. 대부분의 사용자는 이 명령이 필요하지 않습니다.
 
 ```
 bd rename-prefix <new-prefix> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview changes without applying them
-      --repair    Repair database with multiple prefixes by consolidating them
+      --dry-run   적용하지 않고 변경 사항 미리 보기
+      --repair    여러 접두사가 있는 데이터베이스를 통합하여 복구
 ```
 
 ### bd rules
 
-Audit and compact Claude rules
+Claude 규칙 감사 및 압축
 
 ```
 bd rules
@@ -4361,74 +4361,74 @@ bd rules
 
 #### bd rules audit
 
-Scan rules for contradictions and merge opportunities
+규칙의 모순과 병합 기회를 스캔
 
 ```
 bd rules audit [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --path string       Path to rules directory (default ".claude/rules/")
-      --threshold float   Jaccard similarity threshold (default 0.6)
+      --path string       규칙 디렉터리 경로(기본값 ".claude/rules/")
+      --threshold float   Jaccard 유사도 임곗값(기본값 0.6)
 ```
 
 #### bd rules compact
 
-Merge related rules into composites
+관련 규칙을 복합 규칙으로 병합
 
 ```
 bd rules compact [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --auto            Apply audit suggestions
-      --dry-run         Preview without applying
-      --group strings   Rule names to merge
-      --path string     Path to rules directory (default ".claude/rules/")
+      --auto            감사 제안 적용
+      --dry-run         적용하지 않고 미리 보기
+      --group strings   병합할 규칙 이름
+      --path string     규칙 디렉터리 경로(기본값 ".claude/rules/")
 ```
 
 ### bd sql
 
-Execute a raw SQL query against the underlying database (SQLite or Dolt).
+기반 데이터베이스(SQLite 또는 Dolt)에 대해 원시 SQL 쿼리를 실행합니다.
 
-Useful for debugging, maintenance, and working around bugs in higher-level commands.
+상위 수준 명령의 디버깅, 유지보수 및 버그 해결을 위한 작업에 유용합니다.
 
-Examples:
+예시:
   bd sql 'SELECT COUNT(*) FROM issues'
   bd sql 'SELECT id, title FROM issues WHERE status = "open" LIMIT 5'
   bd sql 'DELETE FROM dirty_issues WHERE issue_id = "bd-abc123"'
   bd sql --csv 'SELECT id, title, status FROM issues'
 
-The query is passed directly to the database. SELECT queries return results as a
-table (or JSON/CSV with --json/--csv). Non-SELECT queries (INSERT, UPDATE, DELETE)
-report the number of rows affected.
+쿼리는 데이터베이스로 직접 전달됩니다. SELECT 쿼리는
+테이블(또는 --json/--csv 사용 시 JSON/CSV)로 결과를 반환합니다.
+SELECT가 아닌 쿼리(INSERT, UPDATE, DELETE)는 영향을 받은 행 수를 보고합니다.
 
-WARNING: Direct database access bypasses the storage layer. Use with caution.
+경고: 직접 데이터베이스 액세스는 저장 계층을 우회합니다. 주의해서 사용하세요.
 
 ```
 bd sql <query> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --csv   Output results in CSV format
+      --csv   결과를 CSV 형식으로 출력
 ```
 
 ### bd upgrade
 
-Commands for checking bd version upgrades and reviewing changes.
+bd 버전 업그레이드를 확인하고 변경 사항을 검토하는 명령어입니다.
 
-The upgrade command helps you stay aware of bd version changes:
-  - bd upgrade status: Check if bd version changed since last use
-  - bd upgrade review: Show what's new since your last version
-  - bd upgrade ack: Acknowledge the current version
+upgrade 명령은 bd 버전 변경 사항을 인지할 수 있도록 도와줍니다:
+  - bd upgrade status: 이전 사용 후 bd 버전이 변경되었는지 확인합니다
+  - bd upgrade review: 이전 버전 이후 변경된 내용을 표시합니다
+  - bd upgrade ack: 현재 버전을 확인합니다
 
-Version tracking is automatic - bd updates metadata.json on every run.
+버전 추적은 자동입니다 - bd는 매 실행마다 metadata.json을 업데이트합니다.
 
 ```
 bd upgrade
@@ -4436,16 +4436,16 @@ bd upgrade
 
 #### bd upgrade ack
 
-Mark the current bd version as acknowledged.
+현재 bd 버전을 승인됨으로 표시합니다.
 
-This updates metadata.json to record that you've seen the current
-version. Mainly useful after reviewing upgrade changes to suppress
-future upgrade notifications.
+이 명령은 현재 버전을 확인했음을 기록하기 위해 metadata.json을 업데이트합니다.
+주로 업그레이드 변경 사항을 검토한 뒤 향후 업그레이드 알림을
+억제하는 데 유용합니다.
 
-Note: Version tracking happens automatically, so you don't need to
-run this command unless you want to explicitly mark acknowledgement.
+참고: 버전 추적은 자동으로 수행되므로
+명시적으로 승인 표시를 하려는 경우가 아니면 이 명령을 실행할 필요가 없습니다.
 
-Examples:
+예시:
   bd upgrade ack
   bd upgrade ack --json
 
@@ -4455,15 +4455,15 @@ bd upgrade ack
 
 #### bd upgrade review
 
-Show what's new in bd since the last version you used.
+마지막으로 사용한 버전 이후 bd의 변경사항을 표시합니다.
 
-Unlike 'bd info --whats-new' which shows the last 3 versions,
-this command shows ALL changes since your specific last version.
+'bd info --whats-new'가 마지막 3개 버전을 표시하는 것과 달리,
+이 명령은 사용자의 특정 마지막 버전 이후의 모든 변경 사항을 표시합니다.
 
-If you're upgrading from an old version, you'll see the complete
-changelog of everything that changed since then.
+이전 버전에서 업그레이드하면, 그때 이후로 변경된 모든 항목의 완전한
+changelog를 확인할 수 있습니다.
 
-Examples:
+예제:
   bd upgrade review
   bd upgrade review --json
 
@@ -4473,12 +4473,12 @@ bd upgrade review
 
 #### bd upgrade status
 
-Check if bd has been upgraded since you last used it.
+마지막으로 사용한 이후 bd가 업그레이드되었는지 확인합니다.
 
-This command uses the version tracking that happens automatically
-at startup to detect if bd was upgraded.
+이 명령은 시작 시 자동으로 수행되는 버전 추적을 사용하여
+bd가 업그레이드되었는지 감지합니다.
 
-Examples:
+예시:
   bd upgrade status
   bd upgrade status --json
 
@@ -4488,20 +4488,20 @@ bd upgrade status
 
 ### bd worktree
 
-Manage git worktrees with proper beads configuration.
+적절한 beads 구성으로 git worktree를 관리합니다.
 
-Worktrees allow multiple working directories sharing the same git repository,
-enabling parallel development (e.g., multiple agents or features).
+Worktrees는 동일한 git 저장소를 공유하는 여러 작업 디렉터리를 허용해,
+병렬 개발(예: 여러 에이전트 또는 기능)을 가능하게 합니다.
 
-Worktrees automatically share the same beads database as the main repository
-via git common directory discovery — no manual redirect configuration needed.
+Worktrees는 메인 저장소와 동일한 beads 데이터베이스를 자동으로 공유합니다
+git 공통 디렉터리 검색을 통해 자동으로 공유하므로 수동 리디렉션 구성 설정이 필요하지 않습니다.
 
-Examples:
-  bd worktree create feature-auth           # Create worktree
-  bd worktree create bugfix --branch fix-1  # Create with specific branch name
-  bd worktree list                          # List all worktrees
-  bd worktree remove feature-auth           # Remove worktree (with safety checks)
-  bd worktree info                          # Show info about current worktree
+예시:
+  bd worktree create feature-auth           # 워크트리 생성
+  bd worktree create bugfix --branch fix-1  # 지정된 브랜치 이름으로 생성
+  bd worktree list                          # 모든 워크트리 목록
+  bd worktree remove feature-auth           # 워크트리 제거 (안전 검사 포함)
+  bd worktree info                          # 현재 워크트리의 정보 표시
 
 ```
 bd worktree
@@ -4509,43 +4509,43 @@ bd worktree
 
 #### bd worktree create
 
-Create a git worktree for parallel development.
+병렬 개발을 위해 git worktree를 생성합니다.
 
-This command:
-1. Creates a git worktree at ./&lt;name&gt; (or specified path)
-2. Adds the worktree path to .gitignore (if inside repo root)
+이 명령은:
+1. ./&lt;name&gt; (또는 지정된 경로)에 git worktree를 생성합니다
+2. worktree 경로를 .gitignore에 추가합니다 (저장소 루트 내부에 있는 경우)
 
-The worktree automatically shares the same beads database as the main
-repository via git common directory discovery — no redirect file needed.
+worktree는 메인 저장소와 동일한 beads 데이터베이스를 자동으로 공유합니다
+git 공통 디렉터리 검색을 통해 — 리디렉션 파일이 필요하지 않습니다.
 
-Examples:
-  bd worktree create feature-auth           # Create at ./feature-auth
-  bd worktree create bugfix --branch fix-1  # Create with branch name
-  bd worktree create ../agents/worker-1     # Create at relative path
+예시:
+  bd worktree create feature-auth           # ./feature-auth에 생성
+  bd worktree create bugfix --branch fix-1  # 브랜치 이름으로 생성
+  bd worktree create ../agents/worker-1     # 상대 경로에 생성
 
 ```
 bd worktree create <name> [--branch=<branch>] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --branch string   Branch name for the worktree (default: same as name)
+      --branch string   워크트리의 브랜치 이름(기본값: 이름과 동일)
 ```
 
 #### bd worktree info
 
-Show information about the current worktree.
+현재 작업 트리에 대한 정보를 표시합니다.
 
-If the current directory is in a git worktree, shows:
-- Worktree path and name
-- Branch
-- Beads configuration (redirect or main)
-- Main repository location
+현재 디렉토리가 git worktree에 있으면 다음을 표시합니다:
+- 작업 트리 경로 및 이름
+- 브랜치
+- Beads 구성 (redirect 또는 main)
+- 기본 저장소 위치
 
-Examples:
-  bd worktree info          # Show current worktree info
-  bd worktree info --json   # JSON output
+예제:
+  bd worktree info          # 현재 작업 트리 정보 표시
+  bd worktree info --json   # JSON 출력
 
 ```
 bd worktree info
@@ -4553,17 +4553,17 @@ bd worktree info
 
 #### bd worktree list
 
-List all git worktrees and their beads configuration state.
+모든 git worktree와 해당 beads 구성 상태를 나열합니다.
 
-Shows each worktree with:
-- Name (directory name)
-- Path (full path)
-- Branch
-- Beads state: "redirect" (uses shared db), "shared" (is main), "none" (no beads)
+각 worktree를 다음 항목으로 표시합니다:
+- 이름 (디렉터리 이름)
+- 경로 (전체 경로)
+- 브랜치
+- Beads 상태: "redirect" (공유 db 사용), "shared" (메인 상태), "none" (beads 없음)
 
-Examples:
-  bd worktree list          # List all worktrees
-  bd worktree list --json   # JSON output
+예제:
+  bd worktree list          # 모든 워크트리를 나열
+  bd worktree list --json   # JSON 출력
 
 ```
 bd worktree list
@@ -4571,42 +4571,42 @@ bd worktree list
 
 #### bd worktree remove
 
-Remove a git worktree with safety checks.
+안전 검사와 함께 git worktree를 삭제합니다.
 
-Before removing, this command checks for:
-- Uncommitted changes
-- Unpushed commits
-- Stashes
+제거하기 전에 이 명령은 다음을 확인합니다:
+- 커밋되지 않은 변경사항
+- 푸시되지 않은 커밋
+- 스태시
 
-Use --force to skip safety checks (not recommended).
+안전 검사를 건너뛰려면 --force를 사용하세요(권장하지 않음).
 
-Examples:
-  bd worktree remove feature-auth         # Remove with safety checks
-  bd worktree remove feature-auth --force # Skip safety checks
+예시:
+  bd worktree remove feature-auth         # 안전 검사와 함께 제거
+  bd worktree remove feature-auth --force # 안전 검사 건너뛰기
 
 ```
 bd worktree remove <name> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --force   Skip safety checks
+      --force   안전 검사 건너뛰기
 ```
 
-## Integrations & Advanced:
+## 통합 및 고급:
 
 ### bd admin
 
-Administrative commands for beads database maintenance.
+beads 데이터베이스 유지 관리를 위한 관리 명령어입니다.
 
-These commands are for advanced users and should be used carefully:
-  cleanup   Delete closed issues (issue lifecycle)
-  compact   Compact old closed issues to save space (storage optimization)
-  reset     Remove all beads data and configuration (full reset)
+이 명령어들은 고급 사용자를 위한 것이므로 주의해서 사용해야 합니다:
+  cleanup   닫힌 이슈 삭제 (이슈 라이프사이클)
+  compact   오래된 닫힌 이슈를 압축하여 공간을 절약합니다 (저장소 최적화)
+  reset     모든 beads 데이터와 구성을 제거합니다 (전체 초기화)
 
-For routine maintenance, prefer 'bd doctor --fix' which handles common repairs
-automatically. Use these admin commands for targeted database operations.
+일상적인 유지보수의 경우, 일반적인 수리를 자동으로 처리하는 'bd doctor --fix'를 선호하세요.
+특정 데이터베이스 작업에는 이 관리자 명령어를 사용하십시오.
 
 ```
 bd admin
@@ -4614,164 +4614,164 @@ bd admin
 
 #### bd admin cleanup
 
-Delete closed issues to reduce database size.
+닫힌 이슈를 삭제하여 데이터베이스 크기를 줄입니다.
 
-This command permanently removes closed issues from the database.
+이 명령은 데이터베이스에서 닫힌 이슈를 영구적으로 제거합니다.
 
-NOTE: This command only manages issue lifecycle (closed -&gt; deleted). For general
-health checks and automatic repairs, use 'bd doctor --fix' instead.
+참고: 이 명령은 이슈 라이프사이클(closed -&gt; deleted)만 관리합니다. 일반적인
+건강 점검 및 자동 수리를 위해서는 대신 'bd doctor --fix'를 사용하세요.
 
-By default, deletes ALL closed issues. Use --older-than to only delete
-issues closed before a certain date.
+기본적으로 닫힌 모든 이슈를 삭제합니다. --older-than를 사용하면
+특정 날짜 이전에 닫힌 이슈만 삭제할 수 있습니다.
 
-EXAMPLES:
-  bd admin cleanup --force                          # Delete all closed issues
-  bd admin cleanup --older-than 30 --force          # Only issues closed 30+ days ago
-  bd admin cleanup --ephemeral --force              # Only closed wisps (transient molecules)
-  bd admin cleanup --dry-run                        # Preview what would be deleted
+예제:
+  bd admin cleanup --force                          # 모든 닫힌 이슈를 삭제
+  bd admin cleanup --older-than 30 --force          # 30일 이상 전에 닫힌 이슈만 삭제
+  bd admin cleanup --ephemeral --force              # 닫힌 wisps(일시적 분자)만 삭제
+  bd admin cleanup --dry-run                        # 삭제될 항목을 미리보기
 
-SAFETY:
-- Requires --force flag to actually delete (unless --dry-run)
-- Supports --cascade to delete dependents
-- Shows preview of what will be deleted
-- Use --json for programmatic output
+안전성:
+- 실제로 삭제하려면 --force 플래그가 필요합니다 (--dry-run 제외)
+- 종속 항목을 삭제하려면 --cascade를 지원합니다
+- 삭제될 항목의 미리보기를 표시합니다
+- 기계 판독 가능한 출력에 --json을 사용하세요
 
-SEE ALSO:
-  bd doctor --fix    Automatic health checks and repairs (recommended for routine maintenance)
-  bd admin compact   Compact old closed issues to save space
+참고:
+  bd doctor --fix    자동 상태 점검 및 복구(정기 유지보수에 권장됨)
+  bd admin compact   오래된 닫힌 이슈를 압축해 공간을 절약합니다
 
 ```
 bd admin cleanup [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --cascade          Recursively delete all dependent issues
-      --dry-run          Preview what would be deleted without making changes
-      --ephemeral        Only delete closed wisps (transient molecules)
-  -f, --force            Actually delete (without this flag, shows error)
-      --older-than int   Only delete issues closed more than N days ago (0 = all closed issues)
+      --cascade          모든 종속 이슈를 재귀적으로 삭제
+      --dry-run          변경하지 않고 삭제될 항목 미리 보기
+      --ephemeral        닫힌 wisp(일시적 molecule)만 삭제
+  -f, --force            실제 삭제(이 플래그가 없으면 오류 표시)
+      --older-than int   N일보다 오래전에 닫힌 이슈만 삭제(0 = 닫힌 이슈 모두)
 ```
 
 #### bd admin compact
 
-Compact old closed issues using semantic summarization.
+의미론적 요약을 사용하여 오래된 닫힌 이슈를 압축합니다.
 
-Compaction reduces database size by summarizing closed issues that are no longer
-actively referenced. This is permanent graceful decay - original content is discarded.
+압축은 더 이상 활발히 참조되지 않는 종료된 이슈를 요약하여 데이터베이스 크기를 줄입니다.
+이는 영구적인 점진적 소멸입니다. 원본 콘텐츠는 폐기됩니다.
 
-Modes:
-  - Analyze: Export candidates for agent review (no API key needed)
-  - Apply: Accept agent-provided summary (no API key needed)
-  - Auto: AI-powered compaction (requires ANTHROPIC_API_KEY or ai.api_key, legacy)
-  - Dolt: Run Dolt garbage collection (for Dolt-backend repositories)
+모드:
+  - Analyze: 에이전트 검토를 위한 후보 내보내기 (API 키가 필요하지 않음)
+  - Apply: 에이전트가 제공한 요약 수락 (API 키가 필요하지 않음)
+  - Auto: AI 기반 압축(ANTHROPIC_API_KEY 또는 ai.api_key 필요, 레거시)
+  - Dolt: Dolt 가비지 컬렉션 실행(Dolt 백엔드 저장소의 경우)
 
-Tiers:
-  - Tier 1: Semantic compression (30 days closed, 70% reduction)
-  - Tier 2: Ultra compression (90 days closed) - planned, not yet implemented
+티어:
+  - 티어 1: 시맨틱 압축(30일 닫힘, 70% 감소)
+  - 티어 2: 울트라 압축(90일 닫힘) - 계획됨, 아직 구현되지 않음
 
-Dolt Garbage Collection:
-  With auto-commit per mutation, Dolt commit history grows over time. Use
-  --dolt to run Dolt garbage collection and reclaim disk space.
+Dolt 가비지 컬렉션:
+  변경 작업마다 자동 커밋을 수행하므로 Dolt 커밋 히스토리가 시간이 지남에 따라 증가합니다. 사용해
+  --dolt를 사용해 Dolt 가비지 컬렉션을 실행하고 디스크 공간을 회수하세요.
 
-  --dolt: Run Dolt GC on .beads/dolt directory to free disk space.
-          This removes unreachable commits and compacts storage.
+  --dolt: .beads/dolt 디렉터리에서 Dolt GC를 실행하여 디스크 공간을 확보합니다.
+          이는 도달할 수 없는 커밋을 제거하고 저장소를 압축합니다.
 
-Examples:
-  # Dolt garbage collection
-  bd compact --dolt                        # Run Dolt GC
-  bd compact --dolt --dry-run              # Preview without running GC
+예시:
+  # Dolt 가비지 컬렉션
+  bd compact --dolt                        # Dolt GC 실행
+  bd compact --dolt --dry-run              # GC를 실행하지 않고 미리보기
 
-  # Agent-driven workflow (recommended)
-  bd compact --analyze --json              # Get candidates with full content
+  # 에이전트 기반 워크플로우 (권장)
+  bd compact --analyze --json              # 전체 콘텐츠가 포함된 후보를 가져옵니다
   bd compact --apply --id bd-42 --summary summary.txt
   bd compact --apply --id bd-42 --summary - &lt; summary.txt
 
-  # Legacy AI-powered workflow
-  bd compact --auto --dry-run              # Preview candidates
-  bd compact --auto --all                  # Compact all eligible issues
-  bd compact --auto --id bd-42             # Compact specific issue
+  # 레거시 AI 기반 워크플로우
+  bd compact --auto --dry-run              # 후보 미리보기
+  bd compact --auto --all                  # 모든 적용 가능한 이슈 압축
+  bd compact --auto --id bd-42             # 특정 이슈 압축
 
-  # Statistics
-  bd compact --stats                       # Show statistics
+  # 통계
+  bd compact --stats                       # 통계를 표시합니다
 
 
 ```
 bd admin compact [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --actor string     Actor name for audit trail (default "agent")
-      --all              Process all candidates
-      --analyze          Analyze mode: export candidates for agent review
-      --apply            Apply mode: accept agent-provided summary
-      --auto             Auto mode: AI-powered compaction (legacy)
-      --batch-size int   Issues per batch (default 10)
-      --dolt             Dolt mode: run Dolt garbage collection on .beads/dolt
-      --dry-run          Preview without compacting
-      --force            Force compact (bypass checks, requires --id)
-      --id string        Compact specific issue
-      --json             Output JSON format
-      --limit int        Limit number of candidates (0 = no limit)
-      --stats            Show compaction statistics
-      --summary string   Path to summary file (use '-' for stdin)
-      --tier int         Compaction tier (only tier 1 is implemented) (default 1)
-      --workers int      Parallel workers (default 5)
+      --actor string     감사 추적용 행위자 이름(기본값 "agent")
+      --all              모든 후보 처리
+      --analyze          Analyze 모드: 에이전트 검토용 후보 내보내기
+      --apply            Apply 모드: 에이전트 제공 요약 수락
+      --auto             Auto 모드: AI 기반 압축(레거시)
+      --batch-size int   일괄 처리당 이슈 수(기본값 10)
+      --dolt             Dolt 모드: .beads/dolt에 Dolt 가비지 컬렉션 실행
+      --dry-run          압축하지 않고 미리 보기
+      --force            강제 압축(검사 우회, --id 필요)
+      --id string        특정 이슈 압축
+      --json             JSON 형식 출력
+      --limit int        후보 수 제한(0 = 제한 없음)
+      --stats            압축 통계 표시
+      --summary string   요약 파일 경로(stdin은 '-' 사용)
+      --tier int         압축 계층(tier 1만 구현됨)(기본값 1)
+      --workers int      병렬 워커(기본값 5)
 ```
 
 #### bd admin reset
 
-Reset beads to an uninitialized state, removing all local data.
+beads를 초기화되지 않은 상태로 재설정하고 모든 로컬 데이터를 제거합니다.
 
-This command removes:
-  - The .beads directory (database, JSONL, config)
-  - Git hooks installed by bd
-  - Sync branch worktrees
+이 명령은 다음을 제거합니다:
+  - .beads 디렉터리(데이터베이스, JSONL, 구성)
+  - bd가 설치한 Git 훅
+  - 동기화 브랜치 작업 트리
 
-By default, shows what would be deleted (dry-run mode).
-Use --force to actually perform the reset.
+기본적으로 삭제될 항목을 표시합니다(dry-run 모드).
+실제로 리셋을 수행하려면 --force를 사용하세요.
 
-Examples:
-  bd reset              # Show what would be deleted
-  bd reset --force      # Actually delete everything
+예시:
+  bd reset              # 삭제할 항목을 표시
+  bd reset --force      # 실제로 모두 삭제
 
 ```
 bd admin reset [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --force   Actually perform the reset (required)
+      --force   실제 초기화 수행(필수)
 ```
 
 ### bd jira
 
-Synchronize issues between beads and Jira.
+beads와 Jira 간의 이슈를 동기화합니다.
 
-Configuration:
+구성:
   bd config set jira.url "https://company.atlassian.net"
   bd config set jira.project "PROJ"
-  bd config set jira.projects "PROJ1,PROJ2"   # Multiple projects
+  bd config set jira.projects "PROJ1,PROJ2"   # 여러 프로젝트
   bd config set jira.api_token "YOUR_TOKEN"
-  bd config set jira.username "your_email@company.com"  # For Jira Cloud
-  bd config set jira.push_prefix "hippo"       # Only push hippo-* issues to Jira
-  bd config set jira.push_prefix "proj1,proj2" # Multiple prefixes (comma-separated)
+  bd config set jira.username "your_email@company.com"  # Jira Cloud의 경우
+  bd config set jira.push_prefix "hippo"       # hippo-* 이슈만 Jira로 푸시
+  bd config set jira.push_prefix "proj1,proj2" # 여러 접두사(쉼표로 구분)
 
-Environment variables (alternative to config):
-  JIRA_API_TOKEN  - Jira API token
-  JIRA_USERNAME   - Jira username/email
-  JIRA_PROJECTS   - Comma-separated project keys
+환경 변수(설정 대체):
+  JIRA_API_TOKEN  - Jira API 토큰
+  JIRA_USERNAME   - Jira 사용자 이름/이메일
+  JIRA_PROJECTS   - 쉼표로 구분된 프로젝트 키
 
-Examples:
-  bd jira sync --pull         # Import issues from Jira
-  bd jira sync --push         # Export issues to Jira
-  bd jira sync                # Bidirectional sync (pull then push)
-  bd jira sync --dry-run      # Preview sync without changes
-  bd jira status              # Show sync status
+예시:
+  bd jira sync --pull         # Jira에서 이슈 가져오기
+  bd jira sync --push         # Jira로 이슈 내보내기
+  bd jira sync                # 양방향 동기화(가져오기 후 푸시)
+  bd jira sync --dry-run      # 변경 없이 동기화 미리보기
+  bd jira status              # 동기화 상태 표시
 
 ```
 bd jira
@@ -4779,45 +4779,45 @@ bd jira
 
 #### bd jira pull
 
-Pull one or more items from Jira.
+Jira에서 하나 이상의 항목을 가져옵니다.
 
-Accepts bead IDs or external references as positional arguments.
-Equivalent to: bd jira sync --pull --issues &lt;refs&gt;
+bead ID 또는 외부 참조를 위치 인수로 받습니다.
+다음과 동일합니다: bd jira sync --pull --issues &lt;refs&gt;
 
 ```
 bd jira pull [refs...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview pull without making changes
+      --dry-run   변경하지 않고 pull 미리 보기
 ```
 
 #### bd jira push
 
-Push one or more beads issues to Jira.
+하나 이상의 beads 이슈를 Jira로 푸시합니다.
 
-Accepts bead IDs as positional arguments.
-Equivalent to: bd jira sync --push --issues &lt;ids&gt;
+bead ID를 위치 인수로 받습니다.
+다음과 동일합니다: bd jira sync --push --issues &lt;ids&gt;
 
 ```
 bd jira push [bead-ids...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview push without making changes
+      --dry-run   변경하지 않고 push 미리 보기
 ```
 
 #### bd jira status
 
-Show the current Jira sync status, including:
-  - Last sync timestamp
-  - Configuration status
-  - Number of issues with Jira links
-  - Issues pending push (no external_ref)
+현재 Jira 동기화 상태를 다음 항목을 포함하여 표시합니다:
+  - 마지막 동기화 타임스탬프
+  - 구성 상태
+  - Jira 링크가 있는 이슈 수
+  - 푸시 대기 중인 이슈 (external_ref 없음)
 
 ```
 bd jira status
@@ -4825,106 +4825,106 @@ bd jira status
 
 #### bd jira sync
 
-Synchronize issues between beads and Jira.
+beads와 Jira 간의 이슈를 동기화합니다.
 
-Modes:
-  --pull         Import issues from Jira into beads
-  --push         Export issues from beads to Jira
-  (no flags)     Bidirectional sync: pull then push, with conflict resolution
+모드:
+  --pull         Jira에서 beads로 이슈 가져오기
+  --push         beads에서 Jira로 이슈 내보내기
+  (플래그 없음)  양방향 동기화: pull 후 push, 충돌 해결
 
-Conflict Resolution:
-  By default, newer timestamp wins. Override with:
-  --prefer-local   Always prefer local beads version
-  --prefer-jira    Always prefer Jira version
+충돌 해결:
+  기본적으로는 더 최신 타임스탬프가 우선합니다. 다음으로 덮어씁니다:
+  --prefer-local   항상 로컬 beads 버전을 우선 사용합니다
+  --prefer-jira    항상 Jira 버전을 우선 사용합니다
 
-Examples:
-  bd jira sync --pull                # Import from Jira
-  bd jira sync --push --create-only  # Push new issues only
-  bd jira sync --dry-run             # Preview without changes
-  bd jira sync --prefer-local        # Bidirectional, local wins
+예제:
+  bd jira sync --pull                # Jira에서 가져오기
+  bd jira sync --push --create-only  # 새 이슈만 푸시
+  bd jira sync --dry-run             # 변경 없이 미리보기
+  bd jira sync --prefer-local        # 양방향, 로컬이 우선
 
 ```
 bd jira sync [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --create-only       Only create new issues, don't update existing
-      --dry-run           Preview sync without making changes
-      --issues string     Comma-separated bead IDs to sync selectively (e.g., bd-abc,bd-def). Mutually exclusive with --parent.
-      --parent string     Limit push to this bead and its descendants (push only). Mutually exclusive with --issues.
-      --prefer-jira       Prefer Jira version on conflicts
-      --prefer-local      Prefer local version on conflicts
-      --project strings   Project key(s) to sync (overrides configured project/projects)
-      --pull              Pull issues from Jira
-      --push              Push issues to Jira
-      --state string      Issue state to sync: open, closed, all (default "all")
+      --create-only       새 이슈만 생성하고 기존 이슈는 업데이트하지 않음
+      --dry-run           변경 없이 동기화 미리 보기
+      --issues string     선택적으로 동기화할 쉼표 구분 bead ID(예: bd-abc,bd-def). --parent와 함께 사용할 수 없음.
+      --parent string     이 bead와 하위 항목으로 push 제한(push 전용). --issues와 함께 사용할 수 없음.
+      --prefer-jira       충돌 시 Jira 버전 우선
+      --prefer-local      충돌 시 로컬 버전 우선
+      --project strings   동기화할 프로젝트 키(구성된 project/projects 재정의)
+      --pull              Jira에서 이슈 pull
+      --push              Jira로 이슈 push
+      --state string      동기화할 이슈 상태: open, closed, all(기본값 "all")
 ```
 
 ### bd linear
 
-Synchronize issues between beads and Linear.
+beads와 Linear 간의 이슈를 동기화합니다.
 
-Configuration:
+구성:
   bd config set linear.api_key "YOUR_API_KEY"
   bd config set linear.team_id "TEAM_ID"
-  bd config set linear.team_ids "TEAM_ID1,TEAM_ID2"  # Multiple teams (comma-separated)
-  bd config set linear.project_id "PROJECT_ID"  # Optional: sync only this project
+  bd config set linear.team_ids "TEAM_ID1,TEAM_ID2"  # 여러 팀 (쉼표 구분)
+  bd config set linear.project_id "PROJECT_ID"  # 선택 사항: 이 프로젝트만 동기화
 
-Environment variables (alternative to config):
-  LINEAR_API_KEY  - Linear API key (for individual developers)
-  LINEAR_TEAM_ID  - Linear team ID (UUID, singular)
-  LINEAR_TEAM_IDS - Linear team IDs (comma-separated UUIDs)
+환경 변수 (config의 대체):
+  LINEAR_API_KEY  - Linear API 키(개별 개발자용)
+  LINEAR_TEAM_ID  - Linear 팀 ID (UUID, 단일)
+  LINEAR_TEAM_IDS - Linear 팀 ID (쉼표로 구분된 UUID)
 
-OAuth (for CI workers / automated sync):
-  LINEAR_OAUTH_CLIENT_ID     - OAuth app client ID
-  LINEAR_OAUTH_CLIENT_SECRET - OAuth app client secret
+OAuth (CI 작업자 / 자동 동기화):
+  LINEAR_OAUTH_CLIENT_ID     - OAuth 앱 클라이언트 ID
+  LINEAR_OAUTH_CLIENT_SECRET - OAuth 앱 클라이언트 비밀
 
-  When both OAuth env vars are set, OAuth client_credentials flow is used
-  instead of the API key. This allows CI workers to authenticate as an
-  application (actor=application) rather than impersonating a user.
-  Precedence: OAuth &gt; LINEAR_API_KEY &gt; config file.
+  OAuth 환경 변수가 모두 설정되면 OAuth client_credentials 흐름이
+  API 키 대신 사용됩니다. 이는 CI 워커가 사용자를 가장하지 않고 애플리케이션(actor=application)으로
+  인증할 수 있게 합니다.
+  우선순위: OAuth &gt; LINEAR_API_KEY &gt; 구성 파일.
 
-Data Mapping (optional, sensible defaults provided):
-  Priority mapping (Linear 0-4 to Beads 0-4):
-    bd config set linear.priority_map.0 4    # No priority -&gt; Backlog
-    bd config set linear.priority_map.1 0    # Urgent -&gt; Critical
-    bd config set linear.priority_map.2 1    # High -&gt; High
-    bd config set linear.priority_map.3 2    # Medium -&gt; Medium
-    bd config set linear.priority_map.4 3    # Low -&gt; Low
+데이터 매핑(선택 사항, 합리적인 기본값이 제공됨):
+  우선순위 매핑(Linear 0-4에서 Beads 0-4로):
+    bd config set linear.priority_map.0 4    # 우선순위 없음 -&gt; Backlog
+    bd config set linear.priority_map.1 0    # 긴급 -&gt; Critical
+    bd config set linear.priority_map.2 1    # 높음 -&gt; High
+    bd config set linear.priority_map.3 2    # 보통 -&gt; Medium
+    bd config set linear.priority_map.4 3    # 낮음 -&gt; Low
 
-  State mapping (Linear state type to Beads status):
+  상태 매핑 (Linear 상태 유형에서 Beads 상태로):
     bd config set linear.state_map.backlog open
     bd config set linear.state_map.unstarted open
     bd config set linear.state_map.started in_progress
     bd config set linear.state_map.completed closed
     bd config set linear.state_map.canceled closed
-    bd config set linear.state_map.my_custom_state in_progress  # Custom state names
+    bd config set linear.state_map.my_custom_state in_progress  # 사용자 정의 상태 이름
 
-  Label to issue type mapping:
+  라벨에서 이슈 유형으로의 매핑:
     bd config set linear.label_type_map.bug bug
     bd config set linear.label_type_map.feature feature
     bd config set linear.label_type_map.epic epic
 
-  Relation type mapping (Linear relations to Beads dependencies):
+  관계 유형 매핑 (Linear 관계를 Beads 의존성으로):
     bd config set linear.relation_map.blocks blocks
     bd config set linear.relation_map.blockedBy blocks
     bd config set linear.relation_map.duplicate duplicates
     bd config set linear.relation_map.related related
 
-  ID generation (optional, hash IDs to match bd/Jira hash mode):
-    bd config set linear.id_mode "hash"      # hash (default)
-    bd config set linear.hash_length "6"     # hash length 3-8 (default: 6)
+  ID 생성(선택 사항, bd/Jira 해시 모드와 일치하는 해시 ID):
+    bd config set linear.id_mode "hash"      # 해시(기본값)
+    bd config set linear.hash_length "6"     # 해시 길이 3-8(기본값: 6)
 
-Examples:
-  bd linear sync --pull         # Import issues from Linear
-  bd linear sync --push         # Export issues to Linear
-  bd linear sync                # Bidirectional sync (pull then push)
-  bd linear sync --dry-run      # Preview sync without changes
-  bd create "Fix login" --external-ref https://linear.app/team/issue/TEAM-123
-                              # Link a local issue to an existing Linear issue
-  bd linear status              # Show sync status
+예제:
+  bd linear sync --pull         # Linear에서 이슈 가져오기
+  bd linear sync --push         # Linear로 이슈 내보내기
+  bd linear sync                # 양방향 동기화(끌어오기 후 푸시)
+  bd linear sync --dry-run      # 변경 사항 없이 동기화 미리보기
+  bd create "로그인 수정" --external-ref https://linear.app/team/issue/TEAM-123
+                              # 기존 Linear 이슈에 로컬 이슈를 연결
+  bd linear status              # 동기화 상태 표시
 
 ```
 bd linear
@@ -4932,46 +4932,46 @@ bd linear
 
 #### bd linear pull
 
-Pull one or more items from Linear.
+Linear에서 하나 이상의 항목을 가져옵니다.
 
-Accepts bead IDs or external references as positional arguments.
-Equivalent to: bd linear sync --pull --issues &lt;refs&gt;
+위치 인수로 bead ID 또는 외부 참조를 허용합니다.
+다음과 동일함: bd linear sync --pull --issues &lt;refs&gt;
 
 ```
 bd linear pull [refs...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run     Preview pull without making changes
-      --relations   Import Linear relations as bd dependencies when pulling
+      --dry-run     변경하지 않고 pull 미리 보기
+      --relations   pull할 때 Linear 관계를 bd 의존성으로 가져오기
 ```
 
 #### bd linear push
 
-Push one or more beads issues to Linear.
+하나 이상의 beads 이슈를 Linear로 푸시합니다.
 
-Accepts bead IDs as positional arguments.
-Equivalent to: bd linear sync --push --issues &lt;ids&gt;
+bead ID를 위치 인수로 허용합니다.
+다음과 동일합니다: bd linear sync --push --issues &lt;ids&gt;
 
 ```
 bd linear push [bead-ids...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview push without making changes
+      --dry-run   변경하지 않고 push 미리 보기
 ```
 
 #### bd linear status
 
-Show the current Linear sync status, including:
-  - Last sync timestamp
-  - Configuration status
-  - Number of issues with Linear links
-  - Issues pending push (no external_ref)
+현재 Linear 동기화 상태를 다음을 포함하여 표시합니다:
+  - 마지막 동기화 타임스탬프
+  - 구성 상태
+  - Linear 링크가 있는 이슈 수
+  - 푸시 대기 중인 이슈 (external_ref 없음)
 
 ```
 bd linear status
@@ -4979,87 +4979,87 @@ bd linear status
 
 #### bd linear sync
 
-Synchronize issues between beads and Linear.
+beads와 Linear 간의 이슈를 동기화합니다.
 
-Modes:
-  --pull              Import issues from Linear into beads
-  --push              Export issues from beads to Linear
-  --pull-if-stale     Pull only if data is stale (skip if fresh)
-  (no flags)          Bidirectional sync: pull then push, with conflict resolution
+모드:
+  --pull              Linear에서 이슈를 beads로 가져오기
+  --push              beads에서 Linear로 이슈를 내보내기
+  --pull-if-stale     데이터가 오래된 경우에만 가져오기 (최신이면 건너뜀)
+  (플래그 없음)          충돌 해결과 함께 양방향 동기화: pull 후 push
 
-Staleness (--pull-if-stale):
-  --threshold 20m     How old data must be before pulling (default 20m)
-  A 5-minute debounce prevents agent loops: if a pull completed within 5 minutes,
-  data is always treated as fresh regardless of the threshold.
+오래됨 (--pull-if-stale):
+  --threshold 20m     데이터를 가져오기 전에 얼마나 오래된 데이터여야 하는지(기본값 20m)
+  5분 디바운스는 에이전트 루프를 방지합니다: pull이 5분 이내에 완료된 경우,
+  데이터는 임계값에 관계없이 항상 최신으로 간주됩니다.
 
-Team Selection:
-  --team ID1,ID2  Override configured team IDs for this sync
-  Multiple teams can be configured via linear.team_ids (comma-separated).
-  Falls back to linear.team_id for backward compatibility.
-  Push requires explicit --team when multiple teams are configured.
+팀 선택:
+  --team ID1,ID2  이 동기화를 위한 구성된 팀 ID를 덮어씁니다
+  여러 팀은 linear.team_ids (쉼표로 구분)로 구성할 수 있습니다.
+  이전 버전과의 호환성을 위해 linear.team_id로 대체됩니다.
+  여러 팀이 구성된 경우 Push에는 명시적인 --team이 필요합니다.
 
-Pull Options:
-  --milestones       Reconstruct Linear project milestones as local epic parents
+가져오기 옵션:
+  --milestones       Linear 프로젝트 마일스톤을 로컬 에픽 부모로 재구성
 
-Type Filtering (--push only):
-  --type task,feature       Only sync issues of these types
-  --exclude-type wisp       Exclude issues of these types
-  --include-ephemeral       Include ephemeral issues (wisps, etc.); default is to exclude
-  --parent TICKET           Only push this ticket and its descendants
-  --relations               Import Linear relations as bd dependencies on pull
+유형 필터링 (--push 전용):
+  --type task,feature       이 유형의 이슈만 동기화
+  --exclude-type wisp       이 유형의 이슈를 제외
+  --include-ephemeral       임시 이슈(wisp 등)를 포함합니다. 기본값은 제외입니다
+  --parent TICKET           이 티켓과 하위 항목만 푸시
+  --relations               pull 시 Linear 관계를 bd 의존성으로 가져오기
 
-Conflict Resolution:
-  By default, newer timestamp wins. Override with:
-  --prefer-local    Always prefer local beads version
-  --prefer-linear   Always prefer Linear version
+충돌 해결:
+  기본적으로는 최신 타임스탬프가 우선합니다. 다음으로 덮어쓰기:
+  --prefer-local    항상 로컬 beads 버전을 우선 사용합니다
+  --prefer-linear   항상 Linear 버전을 우선 사용합니다
 
-Examples:
-  bd linear sync --pull                         # Import from Linear
-  bd linear sync --pull-if-stale                # Pull only if data is stale
-  bd linear sync --pull-if-stale --threshold 5m # Pull if older than 5 minutes
-  bd linear sync --pull --relations             # Import Linear blocking relations as bd deps
-  bd linear sync --push --create-only           # Push new issues only
-  bd linear sync --push --type=task,feature     # Push only tasks and features
-  bd linear sync --push --exclude-type=wisp     # Push all except wisps
-  bd linear sync --push --parent=bd-abc123      # Push one ticket tree
-  bd linear sync --dry-run                      # Preview without changes
-  bd linear sync --prefer-local                 # Bidirectional, local wins
+예시:
+  bd linear sync --pull                         # Linear에서 가져오기
+  bd linear sync --pull-if-stale                # 데이터가 오래된 경우에만 가져오기
+  bd linear sync --pull-if-stale --threshold 5m # 5분보다 오래된 경우 가져오기
+  bd linear sync --pull --relations             # Linear 차단 관계를 bd deps로 가져오기
+  bd linear sync --push --create-only           # 새 이슈만 푸시
+  bd linear sync --push --type=task,feature     # 작업 및 기능만 푸시
+  bd linear sync --push --exclude-type=wisp     # wisp를 제외한 모든 항목 푸시
+  bd linear sync --push --parent=bd-abc123      # 하나의 티켓 트리 푸시
+  bd linear sync --dry-run                      # 변경 없이 미리보기
+  bd linear sync --prefer-local                 # 양방향, 로컬이 우선
 
 ```
 bd linear sync [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --create-only            Only create new issues, don't update existing
-      --dry-run                Preview sync without making changes
-      --exclude-type strings   Exclude issues of these types (can be repeated)
-      --include-ephemeral      Include ephemeral issues (wisps, etc.) when pushing to Linear
-      --issues string          Comma-separated bead IDs to sync selectively (e.g., bd-abc,bd-def). Mutually exclusive with --parent.
-      --milestones             Reconstruct Linear project milestones as local epic parents when pulling
-      --no-wait                Fail immediately if another sync is running instead of waiting
-      --parent string          Limit push to this beads ticket and its descendants
-      --prefer-linear          Prefer Linear version on conflicts
-      --prefer-local           Prefer local version on conflicts
-      --pull                   Pull issues from Linear
-      --pull-if-stale          Pull only if Linear data is stale (skip if fresh)
-      --push                   Push issues to Linear
-      --relations              Import Linear relations as bd dependencies when pulling
-      --state string           Issue state to sync: open, closed, all (default "all")
-      --team strings           Team ID(s) to sync (overrides configured team_id/team_ids)
-      --threshold duration     Staleness threshold for --pull-if-stale (default 20m) (default 20m0s)
-      --type strings           Only sync issues of these types (can be repeated)
-      --update-refs            Update external_ref after creating Linear issues (default true)
+      --create-only            새 이슈만 생성하고 기존 이슈는 업데이트하지 않음
+      --dry-run                변경 없이 동기화 미리 보기
+      --exclude-type strings   해당 유형의 이슈 제외(반복 가능)
+      --include-ephemeral      Linear로 push할 때 임시 이슈(wisp 등) 포함
+      --issues string          선택적으로 동기화할 쉼표 구분 bead ID(예: bd-abc,bd-def). --parent와 함께 사용할 수 없음.
+      --milestones             pull할 때 Linear 프로젝트 마일스톤을 로컬 epic 상위 이슈로 재구성
+      --no-wait                다른 동기화가 실행 중이면 기다리지 않고 즉시 실패
+      --parent string          이 beads 티켓과 하위 항목으로 push 제한
+      --prefer-linear          충돌 시 Linear 버전 우선
+      --prefer-local           충돌 시 로컬 버전 우선
+      --pull                   Linear에서 이슈 pull
+      --pull-if-stale          Linear 데이터가 오래된 경우에만 pull(최신이면 건너뜀)
+      --push                   Linear로 이슈 push
+      --relations              pull할 때 Linear 관계를 bd 의존성으로 가져오기
+      --state string           동기화할 이슈 상태: open, closed, all(기본값 "all")
+      --team strings           동기화할 팀 ID(구성된 team_id/team_ids 재정의)
+      --threshold duration     --pull-if-stale의 오래됨 임곗값(기본값 20m)(기본값 20m0s)
+      --type strings           해당 유형의 이슈만 동기화(반복 가능)
+      --update-refs            Linear 이슈 생성 후 external_ref 업데이트(기본값 true)
 ```
 
 #### bd linear teams
 
-List all teams accessible with your Linear API key.
+Linear API 키로 접근 가능한 모든 팀을 나열합니다.
 
-Use this to find the team ID (UUID) needed for configuration.
+구성에 필요한 팀 ID(UUID)를 찾으려면 이 값을 사용하세요.
 
-Example:
+예시:
   bd linear teams
   bd config set linear.team_id "12345678-1234-1234-1234-123456789abc"
 
@@ -5069,12 +5069,12 @@ bd linear teams
 
 ### bd repo
 
-Configure and manage multiple repository support for multi-repo hydration.
+다중 리포지토리 하이드레이션을 위한 다중 리포지토리 지원을 구성하고 관리합니다.
 
-Multi-repo support allows hydrating issues from multiple beads repositories
-into a single database for unified cross-repo issue tracking.
+멀티 레포지토리 지원을 통해 여러 beads 저장소의 이슈를 하나의 데이터베이스로 가져와
+단일 데이터베이스에 저장해 저장소 간 이슈 추적을 통합합니다.
 
-Configuration is stored in .beads/config.yaml under the 'repos' section:
+구성은 'repos' 섹션 아래의 .beads/config.yaml에 저장됩니다:
 
   repos:
     primary: "."
@@ -5082,12 +5082,12 @@ Configuration is stored in .beads/config.yaml under the 'repos' section:
       - ~/beads-planning
       - ~/work-repo
 
-Examples:
-  bd repo add ~/beads-planning       # Add planning repo
-  bd repo add ../other-repo          # Add relative path repo
-  bd repo list                       # Show all configured repos
-  bd repo remove ~/beads-planning    # Remove by path
-  bd repo sync                       # Sync from all configured repos
+예시:
+  bd repo add ~/beads-planning       # 계획 저장소 추가
+  bd repo add ../other-repo          # 상대 경로 저장소 추가
+  bd repo list                       # 모든 구성된 저장소 표시
+  bd repo remove ~/beads-planning    # 경로로 제거
+  bd repo sync                       # 모든 구성된 저장소에서 동기화
 
 ```
 bd repo
@@ -5095,94 +5095,94 @@ bd repo
 
 #### bd repo add
 
-Add a repository path to the repos.additional list in config.yaml.
+config.yaml의 repos.additional 목록에 저장소 경로를 추가합니다.
 
-The path should point to a directory containing a .beads folder.
-Paths can be absolute or relative (they are stored as-is).
+경로는 .beads 폴더가 포함된 디렉터리를 가리켜야 합니다.
+경로는 절대 경로 또는 상대 경로일 수 있습니다(그대로 저장됩니다).
 
-This modifies .beads/config.yaml, which is version-controlled and
-shared across all clones of this repository.
+이는 버전 관리되며 이 저장소의 모든 클론에서 공유되는
+.beads/config.yaml을 수정합니다.
 
 ```
 bd repo add <path> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --json   Output JSON
+      --json   JSON 출력
 ```
 
 #### bd repo list
 
-List all repositories configured in .beads/config.yaml.
+.beads/config.yaml에 구성된 모든 저장소를 나열합니다.
 
-Shows the primary repository (always ".") and any additional
-repositories configured for hydration.
+기본 저장소(항상 ".")와 추가
+하이드레이션을 위해 구성된 저장소를 표시합니다.
 
 ```
 bd repo list [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --json   Output JSON
+      --json   JSON 출력
 ```
 
 #### bd repo remove
 
-Remove a repository path from the repos.additional list in config.yaml.
+config.yaml의 repos.additional 목록에서 저장소 경로를 제거합니다.
 
-The path must exactly match what was added (e.g., if you added "~/foo",
-you must remove "~/foo", not "/home/user/foo").
+경로는 추가된 내용과 정확히 일치해야 합니다(예: "~/foo"를 추가했다면,
+"/home/user/foo"가 아니라 "~/foo"를 제거해야 합니다).
 
-This command also removes any previously-hydrated issues from the database
-that came from the removed repository.
+이 명령은 또한 데이터베이스에서 이전에 하이드레이트된 이슈도
+삭제된 저장소에서 온 이슈를 제거합니다.
 
 ```
 bd repo remove <path> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --json   Output JSON
+      --json   JSON 출력
 ```
 
 #### bd repo sync
 
-Synchronize issues from all configured additional repositories.
+모든 구성된 추가 저장소의 이슈를 동기화합니다.
 
-Reads issues.jsonl from each additional repository and imports them into
-the primary database with their original prefixes and source_repo set.
-Uses mtime caching to skip repos whose JSONL hasn't changed.
+각 추가 저장소마다 issues.jsonl을 읽어
+기본 데이터베이스에 원래 접두사와 source_repo 설정을 유지한 채 가져옵니다.
+mtime 캐싱을 사용하여 JSONL이 변경되지 않은 저장소는 건너뜁니다.
 
-Also triggers Dolt push/pull if a remote is configured.
+또한 원격이 구성되어 있으면 Dolt push/pull도 트리거됩니다.
 
 ```
 bd repo sync [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --json      Output JSON
-      --verbose   Show detailed sync progress
+      --json      JSON 출력
+      --verbose   상세한 동기화 진행 상황 표시
 ```
 
-## Other Commands:
+## 기타 명령어:
 
 ### bd ado
 
-Commands for syncing issues between beads and Azure DevOps.
+beads와 Azure DevOps 간에 이슈를 동기화하기 위한 명령어입니다.
 
-Configuration can be set via 'bd config' or environment variables:
-  ado.org / AZURE_DEVOPS_ORG              - Organization name
-  ado.project / AZURE_DEVOPS_PROJECT      - Project name (single)
-  ado.projects / AZURE_DEVOPS_PROJECTS    - Project names (comma-separated)
-  ado.pat / AZURE_DEVOPS_PAT              - Personal access token
-  ado.url / AZURE_DEVOPS_URL              - Custom base URL (on-prem)
+구성은 'bd config' 또는 환경 변수를 통해 설정할 수 있습니다:
+  ado.org / AZURE_DEVOPS_ORG              - 조직 이름
+  ado.project / AZURE_DEVOPS_PROJECT      - 프로젝트 이름(단일)
+  ado.projects / AZURE_DEVOPS_PROJECTS    - 프로젝트 이름(쉼표로 구분)
+  ado.pat / AZURE_DEVOPS_PAT              - 개인 액세스 토큰
+  ado.url / AZURE_DEVOPS_URL              - 사용자 지정 기본 URL(온-프레미스)
 
 ```
 bd ado
@@ -5190,7 +5190,7 @@ bd ado
 
 #### bd ado projects
 
-List Azure DevOps projects that the configured token has access to.
+설정된 토큰이 접근할 수 있는 Azure DevOps 프로젝트를 나열합니다.
 
 ```
 bd ado projects
@@ -5198,41 +5198,41 @@ bd ado projects
 
 #### bd ado pull
 
-Pull one or more items from Azure DevOps.
+Azure DevOps에서 하나 이상의 항목을 가져옵니다.
 
-Accepts bead IDs or external references as positional arguments.
-Equivalent to: bd ado sync --pull-only --issues &lt;refs&gt;
+위치 인수로 bead ID 또는 외부 참조를 받습니다.
+동일함: bd ado sync --pull-only --issues &lt;refs&gt;
 
 ```
 bd ado pull [refs...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview pull without making changes
+      --dry-run   변경하지 않고 pull 미리 보기
 ```
 
 #### bd ado push
 
-Push one or more beads issues to Azure DevOps.
+하나 이상의 beads 이슈를 Azure DevOps에 푸시합니다.
 
-Accepts bead IDs as positional arguments.
-Equivalent to: bd ado sync --push-only --issues &lt;ids&gt;
+위치 인수로 bead ID를 받습니다.
+다음과 동일합니다: bd ado sync --push-only --issues &lt;ids&gt;
 
 ```
 bd ado push [bead-ids...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview push without making changes
+      --dry-run   변경하지 않고 push 미리 보기
 ```
 
 #### bd ado status
 
-Display current Azure DevOps configuration and sync status.
+현재 Azure DevOps 구성 및 동기화 상태를 표시합니다.
 
 ```
 bd ado status
@@ -5240,57 +5240,57 @@ bd ado status
 
 #### bd ado sync
 
-Synchronize issues between beads and Azure DevOps.
+beads와 Azure DevOps 간의 이슈를 동기화합니다.
 
-By default, performs bidirectional sync:
-- Pulls new/updated work items from Azure DevOps to beads
-- Pushes local beads issues to Azure DevOps
+기본적으로 양방향 동기화를 수행합니다:
+- Azure DevOps에서 새/업데이트된 작업 항목을 beads로 가져옵니다
+- 로컬 beads 이슈를 Azure DevOps로 푸시합니다
 
-Use --pull-only or --push-only to limit direction.
+방향을 제한하려면 --pull-only 또는 --push-only를 사용하세요.
 
-Filters (--area-path, --iteration-path, --types, --states) restrict
-which work items are synced. On pull, they limit the WIQL query. On push,
---types and --states filter local beads before pushing to ADO. Use
---no-create with push to skip creating new ADO work items (only update
-existing linked items). Filters can also be persisted via config:
+필터(--area-path, --iteration-path, --types, --states)는 동기화되는 작업 항목을 제한합니다.
+pull에서는 WIQL 쿼리를 제한합니다. push 시에는
+--types와 --states는 ADO로 푸시하기 전에 로컬 beads를 필터링합니다. 사용
+--no-create를 push할 때 새 ADO 작업 항목 생성을 건너뛰려면(기존 연결 항목만
+업데이트). 필터는 config를 통해서도 영구적으로 저장할 수 있습니다:
   ado.filter.area_path, ado.filter.iteration_path,
   ado.filter.types, ado.filter.states
-CLI flags override config values when both are set.
+CLI 플래그는 두 값이 모두 설정되면 구성 값을 덮어씁니다.
 
 ```
 bd ado sync [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --area-path string        Filter to ADO area path (e.g., "Project\Team")
-      --bootstrap-match         Enable heuristic matching for first sync
-      --dry-run                 Show what would be synced without making changes
-      --issues string           Comma-separated bead IDs to sync selectively (e.g., bd-abc,bd-def). Mutually exclusive with --parent.
-      --iteration-path string   Filter to ADO iteration path (e.g., "Project\Sprint 1")
-      --no-create               Never create new items in either direction (pull or push)
-      --parent string           Limit push to this bead and its descendants (push only). Mutually exclusive with --issues.
-      --prefer-ado              On conflict, use Azure DevOps version
-      --prefer-local            On conflict, keep local beads version
-      --prefer-newer            On conflict, use most recent version (default)
-      --project strings         Project name(s) to sync (overrides configured project/projects)
-      --pull-only               Only pull issues from Azure DevOps
-      --push-only               Only push issues to Azure DevOps
-      --reconcile               Force reconciliation scan for deleted items
-      --states string           Filter to ADO states, comma-separated (e.g., "New,Active,Resolved")
-      --types string            Filter to work item types, comma-separated (e.g., "Bug,Task,User Story")
+      --area-path string        ADO 영역 경로로 필터링(예: "Project\Team")
+      --bootstrap-match         최초 동기화용 휴리스틱 일치 활성화
+      --dry-run                 변경하지 않고 동기화될 항목 표시
+      --issues string           선택적으로 동기화할 쉼표 구분 bead ID(예: bd-abc,bd-def). --parent와 함께 사용할 수 없음.
+      --iteration-path string   ADO 반복 경로로 필터링(예: "Project\Sprint 1")
+      --no-create               어느 방향에서도 새 항목을 생성하지 않음(pull 또는 push)
+      --parent string           이 bead와 하위 항목으로 push 제한(push 전용). --issues와 함께 사용할 수 없음.
+      --prefer-ado              충돌 시 Azure DevOps 버전 사용
+      --prefer-local            충돌 시 로컬 beads 버전 유지
+      --prefer-newer            충돌 시 최신 버전 사용(기본값)
+      --project strings         동기화할 프로젝트 이름(구성된 project/projects 재정의)
+      --pull-only               Azure DevOps에서 이슈만 pull
+      --push-only               Azure DevOps로 이슈만 push
+      --reconcile               삭제된 항목의 조정 검사 강제
+      --states string           쉼표로 구분한 ADO 상태로 필터링(예: "New,Active,Resolved")
+      --types string            쉼표로 구분한 작업 항목 유형으로 필터링(예: "Bug,Task,User Story")
 ```
 
 ### bd audit
 
-Audit log entries are appended to .beads/interactions.jsonl.
+감사 로그 항목은 .beads/interactions.jsonl에 추가됩니다.
 
-Each line is one event. This file is intended to be versioned in git and used for:
-- auditing ("why did the agent do that?")
-- dataset generation (SFT/RL fine-tuning)
+각 줄은 하나의 이벤트입니다. 이 파일은 Git에서 버전 관리되어 다음 용도로 사용됩니다:
+- 감사(\"에이전트가 왜 그렇게 했을까요?\")
+- 데이터셋 생성(SFT/RL 미세 조정)
 
-Entries are append-only. Labeling creates a new "label" entry that references a parent entry.
+항목은 추가 전용입니다. 라벨링은 부모 항목을 참조하는 새로운 "label" 항목을 생성합니다.
 
 ```
 bd audit
@@ -5298,59 +5298,59 @@ bd audit
 
 #### bd audit label
 
-Append a label entry referencing an existing interaction
+기존 상호작용을 참조하는 레이블 항목을 추가합니다
 
 ```
 bd audit label <entry-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --label string    Label value (e.g. "good" or "bad")
-      --reason string   Reason for label
+      --label string    레이블 값(예: "good" 또는 "bad")
+      --reason string   레이블 지정 사유
 ```
 
 #### bd audit record
 
-Append an audit interaction entry
+감사 상호작용 항목을 추가합니다
 
 ```
 bd audit record [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --error string       Error string (llm_call/tool_call)
-      --exit-code int      Exit code (tool_call) (default -1)
-      --issue-id string    Related issue id (bd-...)
-      --kind string        Entry kind (e.g. llm_call, tool_call, label)
-      --model string       Model name (llm_call)
-      --prompt string      Prompt text (llm_call)
-      --response string    Response text (llm_call)
-      --stdin              Read a JSON object from stdin (must match audit.Entry schema)
-      --tool-name string   Tool name (tool_call)
+      --error string       오류 문자열(llm_call/tool_call)
+      --exit-code int      종료 코드(tool_call)(기본값 -1)
+      --issue-id string    관련 이슈 ID(bd-...)
+      --kind string        항목 종류(예: llm_call, tool_call, label)
+      --model string       모델 이름(llm_call)
+      --prompt string      프롬프트 텍스트(llm_call)
+      --response string    응답 텍스트(llm_call)
+      --stdin              stdin에서 JSON 객체 읽기(audit.Entry 스키마와 일치해야 함)
+      --tool-name string   도구 이름(tool_call)
 ```
 
 ### bd blocked
 
-Show blocked issues
+차단된 이슈 보기
 
 ```
 bd blocked [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --parent string   Filter to descendants of this bead/epic
+      --parent string   이 bead/epic의 하위 항목으로 필터링
 ```
 
 ### bd completion
 
-Generate the autocompletion script for bd for the specified shell.
-See each sub-command's help for details on how to use the generated script.
+지정된 셸에 대한 bd의 자동 완성 스크립트를 생성합니다.
+생성된 스크립트의 사용 방법에 대한 자세한 내용은 각 하위 명령의 도움말을 참조하세요.
 
 
 ```
@@ -5359,18 +5359,18 @@ bd completion
 
 #### bd completion bash
 
-Generate the autocompletion script for the bash shell.
+bash 셸에 대한 자동 완성 스크립트를 생성합니다.
 
-This script depends on the 'bash-completion' package.
-If it is not installed already, you can install it via your OS's package manager.
+이 스크립트는 'bash-completion' 패키지에 의존합니다.
+아직 설치되지 않은 경우 OS의 패키지 관리자를 통해 설치할 수 있습니다.
 
-To load completions in your current shell session:
+현재 셸 세션에 자동 완성을 로드하려면:
 
 	source &lt;(bd completion bash)
 
-To load completions for every new session, execute once:
+매 새 세션마다 보완 기능을 로드하려면 한 번 실행하세요:
 
-#### Linux:
+#### 리눅스:
 
 	bd completion bash &gt; /etc/bash_completion.d/bd
 
@@ -5378,82 +5378,82 @@ To load completions for every new session, execute once:
 
 	bd completion bash &gt; $(brew --prefix)/etc/bash_completion.d/bd
 
-You will need to start a new shell for this setup to take effect.
+이 설정이 적용되려면 새 셸을 시작해야 합니다.
 
 
 ```
 bd completion bash
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --no-descriptions   disable completion descriptions
+      --no-descriptions   자동 완성 설명 비활성화
 ```
 
 #### bd completion fish
 
-Generate the autocompletion script for the fish shell.
+fish shell용 자동 완성 스크립트를 생성합니다.
 
-To load completions in your current shell session:
+현재 셸 세션에 자동 완성 기능을 로드하려면:
 
 	bd completion fish | source
 
-To load completions for every new session, execute once:
+모든 새 세션에서 자동 완성을 로드하려면 한 번 실행하세요:
 
 	bd completion fish &gt; ~/.config/fish/completions/bd.fish
 
-You will need to start a new shell for this setup to take effect.
+이 설정이 적용되려면 새 셸을 시작해야 합니다.
 
 
 ```
 bd completion fish [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --no-descriptions   disable completion descriptions
+      --no-descriptions   자동 완성 설명 비활성화
 ```
 
 #### bd completion powershell
 
-Generate the autocompletion script for powershell.
+PowerShell의 자동 완성 스크립트를 생성합니다.
 
-To load completions in your current shell session:
+현재 셸 세션에서 자동 완성 기능을 로드하려면:
 
 	bd completion powershell | Out-String | Invoke-Expression
 
-To load completions for every new session, add the output of the above command
-to your powershell profile.
+모든 새 세션에서 자동 완성을 로드하려면, 위 명령의 출력을
+powershell 프로필에 추가하세요.
 
 
 ```
 bd completion powershell [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --no-descriptions   disable completion descriptions
+      --no-descriptions   자동 완성 설명 비활성화
 ```
 
 #### bd completion zsh
 
-Generate the autocompletion script for the zsh shell.
+zsh 셸에 대한 자동 완성 스크립트를 생성합니다.
 
-If shell completion is not already enabled in your environment you will need
-to enable it.  You can execute the following once:
+셸 자동 완성이 환경에서 이미 활성화되어 있지 않으면
+이를 활성화해야 합니다.  다음을 한 번 실행할 수 있습니다:
 
 	echo "autoload -U compinit; compinit" &gt;&gt; ~/.zshrc
 
-To load completions in your current shell session:
+현재 셸 세션에서 completions를 로드하려면:
 
 	source &lt;(bd completion zsh)
 
-To load completions for every new session, execute once:
+모든 새 세션에서 자동 완성을 로드하려면 한 번 실행하세요:
 
-#### Linux:
+#### 리눅스:
 
 	bd completion zsh &gt; "$&#123;fpath[1]&#125;/_bd"
 
@@ -5461,129 +5461,129 @@ To load completions for every new session, execute once:
 
 	bd completion zsh &gt; $(brew --prefix)/share/zsh/site-functions/_bd
 
-You will need to start a new shell for this setup to take effect.
+이 설정이 적용되려면 새 셸을 시작해야 합니다.
 
 
 ```
 bd completion zsh [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --no-descriptions   disable completion descriptions
+      --no-descriptions   자동 완성 설명 비활성화
 ```
 
 ### bd cook
 
-Cook transforms a .formula.json file into a proto.
+Cook는 .formula.json 파일을 proto로 변환합니다.
 
-By default, cook outputs the resolved formula as JSON to stdout for
-ephemeral use. The output can be inspected, piped, or saved to a file.
+기본적으로 cook는 해결된 formula를 JSON으로 stdout에 출력하여 임시로 사용합니다.
+출력은 검사하거나, 파이프 처리하거나, 파일로 저장할 수 있습니다.
 
-Two cooking modes are available:
+두 가지 조리 모드가 사용 가능합니다:
 
-  COMPILE-TIME (default, --mode=compile):
-    Produces a proto with &#123;&#123;variable&#125;&#125; placeholders intact.
-    Use for: modeling, estimation, contractor handoff, planning.
-    Variables are NOT substituted - the output shows the template structure.
+  COMPILE-TIME (기본값, --mode=compile):
+    &#123;&#123;variable&#125;&#125; placeholder를 그대로 유지한 상태의 proto를 생성합니다.
+    용도: 모델링, 추정, 계약자 인수인계, 계획.
+    변수는 치환되지 않습니다 - 출력은 템플릿 구조를 보여줍니다.
 
-  RUNTIME (--mode=runtime or when --var flags provided):
-    Produces a fully-resolved proto with variables substituted.
-    Use for: final validation before pour, seeing exact output.
-    Requires all variables to have values (via --var or defaults).
+  RUNTIME (--mode=runtime 또는 --var 플래그가 제공될 때):
+    변수 치환이 완료된 완전히 해석된 proto를 생성합니다.
+    사용: pour 전 최종 검증, 정확한 출력 확인용.
+    모든 변수가 값이 있어야 합니다 (--var 또는 기본값을 통해).
 
-Formulas are high-level workflow templates that support:
-  - Variable definitions with defaults and validation
-  - Step definitions that become issue hierarchies
-  - Composition rules for bonding formulas together
-  - Inheritance via extends
+Formulas는 다음을 지원하는 고수준 워크플로우 템플릿입니다:
+  - 기본값과 유효성 검사를 포함한 변수 정의
+  - 이슈 계층이 되는 단계 정의
+  - 여러 Formula를 결합하기 위한 구성 규칙
+  - extends를 통한 상속
 
-The --persist flag enables the legacy behavior of writing the proto
-to the database. This is useful when you want to reuse the same
-proto multiple times without re-cooking.
+--persist 플래그는 proto를 데이터베이스에 쓰는 레거시 동작을 활성화합니다.
+이는 동일한 proto를
+다시 조리하지 않고 여러 번 재사용하려는 경우에 유용합니다.
 
-For most workflows, prefer ephemeral protos: pour and wisp commands
-accept formula names directly and cook inline.
+대부분의 워크플로에서는 임시 proto를 선호하세요: pour 및 wisp 명령은
+formula 이름을 직접 받아 인라인으로 처리합니다.
 
-Examples:
-  bd cook mol-feature.formula.json                    # Compile-time: keep &#123;&#123;vars&#125;&#125;
-  bd cook mol-feature --var name=auth                 # Runtime: substitute vars
-  bd cook mol-feature --mode=runtime --var name=auth  # Explicit runtime mode
-  bd cook mol-feature --dry-run                       # Preview steps
-  bd cook mol-release.formula.json --persist          # Write to database
-  bd cook mol-release.formula.json --persist --force  # Replace existing
+예시:
+  bd cook mol-feature.formula.json                    # 컴파일 타임: vars 유지 &#123;vars&#123;&#125;&#125;
+  bd cook mol-feature --var name=auth                 # 런타임: vars 치환
+  bd cook mol-feature --mode=runtime --var name=auth  # 명시적 런타임 모드
+  bd cook mol-feature --dry-run                       # 단계 미리보기
+  bd cook mol-release.formula.json --persist          # 데이터베이스에 쓰기
+  bd cook mol-release.formula.json --persist --force  # 기존 항목 대체
 
-Output (default):
-  JSON representation of the resolved formula with all steps.
+출력(기본값):
+  해결된 formula의 모든 단계를 포함하는 JSON 표현입니다.
 
-Output (--persist):
-  Creates a proto bead in the database with:
-  - ID matching the formula name (e.g., mol-feature)
-  - The "template" label for proto identification
-  - Child issues for each step
-  - Dependencies matching depends_on relationships
+출력 (--persist):
+  데이터베이스에서 proto bead를 생성합니다:
+  - formula 이름과 일치하는 ID (예: mol-feature)
+  - proto 식별용 "template" 레이블
+  - 각 단계에 대한 하위 이슈
+  - depends_on 관계에 맞는 의존성
 
 ```
 bd cook <formula-file> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run               Preview what would be created
-      --force                 Replace existing proto if it exists (requires --persist)
-      --mode string           Cooking mode: compile (keep placeholders) or runtime (substitute vars)
-      --persist               Persist proto to database (legacy behavior)
-      --prefix string         Prefix to prepend to proto ID (e.g., 'gt-' creates 'gt-mol-feature')
-      --search-path strings   Additional paths to search for formula inheritance
-      --var stringArray       Variable substitution (key=value), enables runtime mode
+      --dry-run               생성될 항목 미리 보기
+      --force                 기존 proto가 있으면 교체(--persist 필요)
+      --mode string           cook 모드: compile(자리표시자 유지) 또는 runtime(변수 치환)
+      --persist               proto를 데이터베이스에 영구 저장(레거시 동작)
+      --prefix string         proto ID 앞에 붙일 접두사(예: 'gt-'는 'gt-mol-feature' 생성)
+      --search-path strings   formula 상속을 검색할 추가 경로
+      --var stringArray       변수 치환(key=value), 런타임 모드 활성화
 ```
 
 ### bd defer
 
-Defer issues to put them on ice for later.
+이슈를 나중에 처리할 수 있도록 보류합니다.
 
-Deferred issues are deliberately set aside - not blocked by anything specific,
-just postponed for future consideration. Unlike blocked issues, there's no
-dependency keeping them from being worked. Unlike closed issues, they will
-be revisited.
+연기된 이슈는 특정한 어떤 항목에도 특별히 막히지 않고 의도적으로 보류됩니다,
+향후 고려를 위해 단순히 미루어 둔 것입니다. 차단된 이슈와 달리, 이들을
+작업하지 못하게 막는 의존성이 없습니다. 닫힌 이슈와 달리, 이슈는
+다시 검토될 것입니다.
 
-Deferred issues don't show in 'bd ready' but remain visible in 'bd list'.
+연기된 이슈는 'bd ready'에는 표시되지 않지만 'bd list'에는 여전히 표시됩니다.
 
-Examples:
-  bd defer bd-abc                  # Defer a single issue (status-based)
-  bd defer bd-abc --until=tomorrow # Defer until specific time
-  bd defer bd-abc --reason="waiting on API access"
-  bd defer bd-abc bd-def           # Defer multiple issues
+예시:
+  bd defer bd-abc                  # 단일 이슈를 연기합니다 (상태 기반)
+  bd defer bd-abc --until=tomorrow # 특정 시간까지 연기합니다
+  bd defer bd-abc --reason="API 접근 대기 중"
+  bd defer bd-abc bd-def           # 여러 이슈를 연기합니다
 
 ```
 bd defer [id...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --reason string   Record why this issue is being deferred (appended to notes)
-      --until string    Defer until specific time (e.g., +1h, tomorrow, next monday)
+      --reason string   이 이슈를 연기하는 이유 기록(notes에 추가)
+      --until string    특정 시간까지 연기(예: +1h, tomorrow, next monday)
 ```
 
 ### bd formula
 
-Manage workflow formulas - the source layer for molecule templates.
+워크플로우 수식 관리 - molecule 템플릿의 소스 계층입니다.
 
-Formulas are TOML/JSON files that define workflows with composition rules.
-Define formulas, cook them into protos, then pour or wisp them into work.
+Formulas는 조합 규칙으로 워크플로우를 정의하는 TOML/JSON 파일입니다.
+Formula를 정의하고 이를 proto로 cook한 뒤, 그 다음 pour 또는 wisp를 이용해 work로 이동합니다.
 
-Search paths (in order):
-  1. &lt;resolved-beads-dir&gt;/formulas/ (active project)
-  2. &lt;checkout-root&gt;/.beads/formulas/ (repo-local formulas)
-  3. ~/.beads/formulas/ (user)
-  4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
+검색 경로 (순서):
+  1. &lt;resolved-beads-dir&gt;/formulas/ (활성 프로젝트)
+  2. &lt;checkout-root&gt;/.beads/formulas/ (저장소 로컬 formulas)
+  3. ~/.beads/formulas/ (사용자)
+  4. $GT_ROOT/.beads/formulas/ (공유 작업공간 루트, GT_ROOT가 설정된 경우)
 
-Commands:
-  list   List available formulas from all search paths
-  show   Show formula details, steps, and composition rules
+명령:
+  list   모든 검색 경로의 사용 가능한 formula를 나열
+  show   formula의 세부 정보, 단계 및 구성 규칙을 표시
 
 ```
 bd formula
@@ -5591,48 +5591,48 @@ bd formula
 
 #### bd formula convert
 
-Convert formula files from JSON to TOML format.
+JSON에서 formula 파일을 TOML 형식으로 변환합니다.
 
-TOML format provides better ergonomics:
-  - Multi-line strings without \n escaping
-  - Human-readable diffs
-  - Comments allowed
+TOML 형식이 더 나은 사용성을 제공합니다:
+  - \n 이스케이프 없이 다중 줄 문자열
+  - 사람이 읽기 쉬운 diff
+  - 주석 허용
 
-The convert command reads a .formula.json file and outputs .formula.toml.
-The original JSON file is preserved (use --delete to remove it).
+convert 명령은 .formula.json 파일을 읽고 .formula.toml을 출력합니다.
+원본 JSON 파일은 유지됩니다(삭제하려면 --delete를 사용하세요).
 
-Examples:
-  bd formula convert shiny              # Convert shiny.formula.json to .toml
-  bd formula convert ./my.formula.json  # Convert specific file
-  bd formula convert --all              # Convert all JSON formulas
-  bd formula convert shiny --delete     # Convert and remove JSON file
-  bd formula convert shiny --stdout     # Print TOML to stdout
+예시:
+  bd formula convert shiny              # shiny.formula.json을 .toml로 변환
+  bd formula convert ./my.formula.json  # 특정 파일을 변환
+  bd formula convert --all              # 모든 JSON formula를 변환
+  bd formula convert shiny --delete     # 변환하고 JSON 파일 제거
+  bd formula convert shiny --stdout     # TOML을 stdout으로 출력
 
 ```
 bd formula convert <formula-name|path> [--all] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --all      Convert all JSON formulas
-      --delete   Delete JSON file after conversion
-      --stdout   Print TOML to stdout instead of file
+      --all      모든 JSON formula 변환
+      --delete   변환 후 JSON 파일 삭제
+      --stdout   파일 대신 stdout에 TOML 출력
 ```
 
 #### bd formula list
 
-List all formulas from search paths.
+검색 경로에서 모든 formula를 나열합니다.
 
-Search paths (in order of priority):
-  1. &lt;resolved-beads-dir&gt;/formulas/ (active project - highest priority)
-  2. &lt;checkout-root&gt;/.beads/formulas/ (repo-local formulas)
-  3. ~/.beads/formulas/ (user)
-  4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
+검색 경로(우선순위 순):
+  1. &lt;resolved-beads-dir&gt;/formulas/ (활성 프로젝트 - 최우선 순위)
+  2. &lt;checkout-root&gt;/.beads/formulas/ (레포지토리 로컬 formulas)
+  3. ~/.beads/formulas/ (사용자)
+  4. $GT_ROOT/.beads/formulas/ (공유 워크스페이스 루트, GT_ROOT가 설정된 경우)
 
-Formulas in earlier paths shadow those with the same name in later paths.
+이전 경로의 Formula는 나중 경로에 있는 동일한 이름의 Formula를 가립니다.
 
-Examples:
+예제:
   bd formula list
   bd formula list --json
   bd formula list --type workflow
@@ -5642,24 +5642,24 @@ Examples:
 bd formula list [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --type string   Filter by type (workflow, expansion, aspect, convoy)
+      --type string   유형으로 필터링(workflow, expansion, aspect, convoy)
 ```
 
 #### bd formula show
 
-Show detailed information about a formula.
+formula에 대한 자세한 정보를 표시합니다.
 
-Displays:
-  - Formula metadata (name, type, description)
-  - Variables with defaults and constraints
-  - Steps with dependencies
-  - Composition rules (extends, aspects, expansions)
-  - Bond points for external composition
+표시:
+  - Formula 메타데이터 (이름, 유형, 설명)
+  - 기본값과 제약 조건을 가진 변수
+  - 종속성이 있는 단계
+  - 구성 규칙 (extends, aspects, expansions)
+  - 외부 구성을 위한 결합 지점
 
-Examples:
+예시:
   bd formula show shiny
   bd formula show rule-of-five
   bd formula show security-audit --json
@@ -5670,14 +5670,14 @@ bd formula show <formula-name>
 
 ### bd github
 
-Commands for syncing issues between beads and GitHub.
+Beads와 GitHub 간의 이슈를 동기화하기 위한 명령어들입니다.
 
-Configuration can be set via 'bd config' or environment variables:
-  github.token / GITHUB_TOKEN           - Personal access token
-  github.owner / GITHUB_OWNER           - Repository owner
-  github.repo / GITHUB_REPO             - Repository name
-  github.repository / GITHUB_REPOSITORY - Combined "owner/repo" format
-  github.url / GITHUB_API_URL           - Custom API URL (GitHub Enterprise)
+구성은 'bd config' 또는 환경 변수로 설정할 수 있습니다:
+  github.token / GITHUB_TOKEN           - 개인 액세스 토큰
+  github.owner / GITHUB_OWNER           - 저장소 소유자
+  github.repo / GITHUB_REPO             - 저장소 이름
+  github.repository / GITHUB_REPOSITORY - 결합된 "owner/repo" 형식
+  github.url / GITHUB_API_URL           - 사용자 지정 API URL (GitHub Enterprise)
 
 ```
 bd github
@@ -5685,41 +5685,41 @@ bd github
 
 #### bd github pull
 
-Pull one or more items from GitHub.
+GitHub에서 하나 이상의 항목을 가져옵니다.
 
-Accepts bead IDs or external references as positional arguments.
-Equivalent to: bd github sync --pull-only --issues &lt;refs&gt;
+bead ID 또는 외부 참조를 위치 인수로 받습니다.
+동일함: bd github sync --pull-only --issues &lt;refs&gt;
 
 ```
 bd github pull [refs...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview pull without making changes
+      --dry-run   변경하지 않고 pull 미리 보기
 ```
 
 #### bd github push
 
-Push one or more beads issues to GitHub.
+GitHub로 하나 이상의 beads 이슈를 푸시합니다.
 
-Accepts bead IDs as positional arguments.
-Equivalent to: bd github sync --push-only --issues &lt;ids&gt;
+bead ID를 위치 인수로 받습니다.
+동일함: bd github sync --push-only --issues &lt;ids&gt;
 
 ```
 bd github push [bead-ids...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview push without making changes
+      --dry-run   변경하지 않고 push 미리 보기
 ```
 
 #### bd github repos
 
-List GitHub repositories that the configured token has access to.
+구성된 토큰이 접근할 수 있는 GitHub 저장소를 나열합니다.
 
 ```
 bd github repos
@@ -5727,7 +5727,7 @@ bd github repos
 
 #### bd github status
 
-Display current GitHub configuration and sync status.
+현재 GitHub 구성 및 동기화 상태를 표시합니다.
 
 ```
 bd github status
@@ -5735,41 +5735,41 @@ bd github status
 
 #### bd github sync
 
-Synchronize issues between beads and GitHub.
+beads와 GitHub 사이의 이슈를 동기화합니다.
 
-By default, performs bidirectional sync:
-- Pulls new/updated issues from GitHub to beads
-- Pushes local beads issues to GitHub
+기본적으로 양방향 동기화를 수행합니다:
+- GitHub에서 새/수정된 이슈를 beads로 가져옵니다
+- 로컬 beads 이슈를 GitHub로 푸시합니다
 
-Use --pull-only or --push-only to limit direction.
+방향을 제한하려면 --pull-only 또는 --push-only를 사용합니다.
 
 ```
 bd github sync [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run         Show what would be synced without making changes
-      --issues string   Comma-separated bead IDs to sync selectively (e.g., bd-abc,bd-def). Mutually exclusive with --parent.
-      --parent string   Limit push to this bead and its descendants (push only). Mutually exclusive with --issues.
-      --prefer-github   On conflict, use GitHub version
-      --prefer-local    On conflict, keep local beads version
-      --prefer-newer    On conflict, use most recent version (default)
-      --pull-only       Only pull issues from GitHub
-      --push-only       Only push issues to GitHub
+      --dry-run         변경하지 않고 동기화될 항목 표시
+      --issues string   선택적으로 동기화할 쉼표 구분 bead ID(예: bd-abc,bd-def). --parent와 함께 사용할 수 없음.
+      --parent string   이 bead와 하위 항목으로 push 제한(push 전용). --issues와 함께 사용할 수 없음.
+      --prefer-github   충돌 시 GitHub 버전 사용
+      --prefer-local    충돌 시 로컬 beads 버전 유지
+      --prefer-newer    충돌 시 최신 버전 사용(기본값)
+      --pull-only       GitHub에서 이슈만 pull
+      --push-only       GitHub로 이슈만 push
 ```
 
 ### bd gitlab
 
-Commands for syncing issues between beads and GitLab.
+beads와 GitLab 사이의 이슈를 동기화하기 위한 명령어입니다.
 
-Configuration can be set via 'bd config' or environment variables:
-  gitlab.url / GITLAB_URL                         - GitLab instance URL
-  gitlab.token / GITLAB_TOKEN                     - Personal access token
-  gitlab.project_id / GITLAB_PROJECT_ID           - Project ID or path
-  gitlab.group_id / GITLAB_GROUP_ID               - Group ID for group-level sync
-  gitlab.default_project_id / GITLAB_DEFAULT_PROJECT_ID - Project for creating issues in group mode
+구성은 'bd config' 또는 환경 변수로 설정할 수 있습니다:
+  gitlab.url / GITLAB_URL                         - GitLab 인스턴스 URL
+  gitlab.token / GITLAB_TOKEN                     - 개인 액세스 토큰
+  gitlab.project_id / GITLAB_PROJECT_ID           - 프로젝트 ID 또는 경로
+  gitlab.group_id / GITLAB_GROUP_ID               - 그룹 수준 동기화를 위한 그룹 ID
+  gitlab.default_project_id / GITLAB_DEFAULT_PROJECT_ID - 그룹 모드에서 이슈 생성 대상 프로젝트
 
 ```
 bd gitlab
@@ -5777,7 +5777,7 @@ bd gitlab
 
 #### bd gitlab projects
 
-List GitLab projects that the configured token has access to.
+설정된 토큰이 액세스할 수 있는 GitLab 프로젝트를 나열합니다.
 
 ```
 bd gitlab projects
@@ -5785,41 +5785,41 @@ bd gitlab projects
 
 #### bd gitlab pull
 
-Pull one or more items from GitLab.
+GitLab에서 하나 이상의 항목을 가져옵니다.
 
-Accepts bead IDs or external references as positional arguments.
-Equivalent to: bd gitlab sync --pull-only --issues &lt;refs&gt;
+위치 인수로 bead ID 또는 외부 참조를 받습니다.
+다음과 동일합니다: bd gitlab sync --pull-only --issues &lt;refs&gt;
 
 ```
 bd gitlab pull [refs...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview pull without making changes
+      --dry-run   변경하지 않고 pull 미리 보기
 ```
 
 #### bd gitlab push
 
-Push one or more beads issues to GitLab.
+하나 이상의 beads 이슈를 GitLab으로 푸시합니다.
 
-Accepts bead IDs as positional arguments.
-Equivalent to: bd gitlab sync --push-only --issues &lt;ids&gt;
+bead ID를 위치 인수로 받습니다.
+다음과 동일합니다: bd gitlab sync --push-only --issues &lt;ids&gt;
 
 ```
 bd gitlab push [bead-ids...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview push without making changes
+      --dry-run   변경하지 않고 push 미리 보기
 ```
 
 #### bd gitlab status
 
-Display current GitLab configuration and sync status.
+현재 GitLab 구성과 동기화 상태를 표시합니다.
 
 ```
 bd gitlab status
@@ -5827,126 +5827,126 @@ bd gitlab status
 
 #### bd gitlab sync
 
-Synchronize issues between beads and GitLab.
+Beads와 GitLab 사이의 이슈를 동기화합니다.
 
-By default, performs bidirectional sync:
-- Pulls new/updated issues from GitLab to beads
-- Pushes local beads issues to GitLab
+기본적으로 양방향 동기화를 수행합니다:
+- GitLab에서 새로 생성/업데이트된 이슈를 beads로 가져옵니다
+- 로컬 beads 이슈를 GitLab로 푸시합니다
 
-Use --pull-only or --push-only to limit direction.
+방향을 제한하려면 --pull-only 또는 --push-only를 사용하세요.
 
 ```
 bd gitlab sync [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --assignee string       Filter by assignee username
-      --dry-run               Show what would be synced without making changes
-      --exclude-type string   Exclude these issue types from sync (comma-separated)
-      --issues string         Comma-separated bead IDs to sync selectively (e.g., bd-abc,bd-def). Mutually exclusive with --parent.
-      --label string          Filter by labels (comma-separated, AND logic)
-      --milestone string      Filter by milestone title
-      --no-ephemeral          Exclude ephemeral/wisp issues from push (default: true) (default true)
-      --parent string         Limit push to this bead and its descendants (push only). Mutually exclusive with --issues.
-      --prefer-gitlab         On conflict, use GitLab version
-      --prefer-local          On conflict, keep local beads version
-      --prefer-newer          On conflict, use most recent version (default)
-      --project string        Filter to issues from this project ID (group mode)
-      --pull-only             Only pull issues from GitLab
-      --push-only             Only push issues to GitLab
-      --type string           Only sync these issue types (comma-separated, e.g. 'epic,feature,task')
+      --assignee string       담당자 사용자 이름으로 필터링
+      --dry-run               변경하지 않고 동기화될 항목 표시
+      --exclude-type string   동기화에서 해당 이슈 유형 제외(쉼표로 구분)
+      --issues string         선택적으로 동기화할 쉼표 구분 bead ID(예: bd-abc,bd-def). --parent와 함께 사용할 수 없음.
+      --label string          레이블로 필터링(쉼표로 구분, AND 논리)
+      --milestone string      마일스톤 제목으로 필터링
+      --no-ephemeral          push에서 임시/wisp 이슈 제외(기본값: true)(기본값 true)
+      --parent string         이 bead와 하위 항목으로 push 제한(push 전용). --issues와 함께 사용할 수 없음.
+      --prefer-gitlab         충돌 시 GitLab 버전 사용
+      --prefer-local          충돌 시 로컬 beads 버전 유지
+      --prefer-newer          충돌 시 최신 버전 사용(기본값)
+      --project string        이 프로젝트 ID의 이슈로 필터링(그룹 모드)
+      --pull-only             GitLab에서 이슈만 pull
+      --push-only             GitLab으로 이슈만 push
+      --type string           해당 이슈 유형만 동기화(쉼표로 구분, 예: 'epic,feature,task')
 ```
 
 ### bd help
 
-Help provides help for any command in the application.
-Simply type bd help [path to command] for full details.
+Help는 애플리케이션의 모든 명령에 대한 도움말을 제공합니다.
+자세한 내용을 확인하려면 bd help [명령 경로]를 입력하세요.
 
 ```
 bd help [command] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --all                   Show help for all commands in a single document
-      --doc string            Generate markdown docs for a single command
-      --docs-root string      Generate repository CLI docs under this root
-      --docs-version string   Also refresh one versioned website CLI reference, e.g. 1.0.5
-  -h, --help                  help for help
-      --list                  List all available commands
+      --all                   모든 명령의 도움말을 단일 문서에 표시
+      --doc string            단일 명령의 Markdown 문서 생성
+      --docs-root string      이 루트 아래에 저장소 CLI 문서 생성
+      --docs-version string   버전별 웹사이트 CLI 참조 하나도 갱신(예: 1.0.5)
+  -h, --help                  help 명령의 도움말
+      --list                  사용 가능한 모든 명령 나열
 ```
 
 ### bd init-safety
 
-bd init flag safety contract.
+bd init 플래그의 안전성 계약.
 
-Every bd init invocation resolves project_id from exactly one explicitly
-named source (local reinit, remote adoption, or a fresh mint). When the
-source is ambiguous, bd init refuses.
+모든 bd init 호출은 정확히 하나의 명시적으로 지정된
+소스(로컬 재초기화, 원격 채택, 또는 새로 생성)에서 project_id를 해결합니다. 소스가
+애매하면 bd init은 거부됩니다.
 
-FLAG SURFACE
+플래그 표면
 
-  bd init                       Mint a new identity. Bootstraps from
-                                origin if it has refs/dolt/data.
+  bd init                       새 신원을 생성합니다. 다음을 기준으로 부트스트랩합니다
+                                origin에 refs/dolt/data가 있으면.
 
-  bd init --reinit-local        Re-initialize local .beads/ over existing
-                                local data. Does NOT authorize discarding
-                                remote history. If origin has Dolt data
-                                this will refuse — pair with
-                                --discard-remote to override.
+  bd init --reinit-local        기존 로컬 데이터 위에 local .beads/를 다시 초기화합니다
+                                원격 기록 삭제는 허용되지 않습니다.
+                                origin에 Dolt 데이터가 있으면
+                                이 동작은 거부됩니다 — --discard-remote와 함께
+                                사용해 덮어쓰세요.
 
-  bd init --reinit-local \      Discard the remote's Dolt history and
-      --discard-remote          replace it with the local reinit. First
-                                bd dolt push after this will be a
-                                history-replacing force-push.
+  bd init --reinit-local \      원격의 Dolt 히스토리를 폐기하고
+      --discard-remote          이를 로컬 재초기화로 대체합니다. 이후에
+                                첫 번째 bd dolt push는
+                                히스토리를 교체하는 강제 푸시가 됩니다.
 
-  bd init --force               Deprecated alias for --reinit-local.
-                                Kept working for ≥2 releases.
+  bd init --force               --reinit-local의 더 이상 사용되지 않는 별칭입니다.
+                                2개 이상의 릴리스 동안 동작이 유지됩니다.
 
-  bd init --from-jsonl          Import from configured import.path. If
-                                origin has Dolt data, this refuses unless
-                                --discard-remote authorizes replacing that
-                                remote history.
+  bd init --from-jsonl          설정된 import.path에서 가져옵니다. 만약
+                                origin에 Dolt 데이터가 있으면, 이 명령은
+                                --discard-remote가 해당 원격 히스토리 교체를
+                                허용하지 않으면 거부됩니다.
 
-ADOPTING A REMOTE
+원격 채택
 
-  If you want to use the remote's existing history, use:
+  원격의 기존 히스토리를 사용하려면 다음을 사용하세요:
 
       bd bootstrap
 
-  bd init will automatically suggest this when a remote is detected.
+  원격이 감지되면 bd init이 자동으로 이것을 제안합니다.
 
-DESTROY-TOKEN (non-interactive only)
+DESTROY-TOKEN (비대화형 전용)
 
-  When running with no TTY (CI, agents, piped input), --discard-remote
-  requires an explicit --destroy-token value. The token format is:
+  TTY가 없는 상태로 실행할 때(CI, 에이전트, 파이프 입력)에는 --discard-remote가
+  명시적인 --destroy-token 값이 필요합니다. 토큰 형식은:
 
       DESTROY-&lt;issue-prefix&gt;
 
-  For example, if your issue prefix is "bd", the token is "DESTROY-bd":
+  예를 들어, 이슈 접두사가 "bd"라면 토큰은 "DESTROY-bd"입니다:
 
       bd init --reinit-local --discard-remote --destroy-token=DESTROY-bd
 
-  In interactive (TTY) mode you confirm via a typed prompt instead. The
-  token is not echoed by bd's runtime error messages — this is a
-  deliberate guard against pattern-matched one-liners (see
+  대화형(TTY) 모드에서는 입력한 프롬프트를 통해 대신 확인합니다. 토큰은
+  bd의 런타임 오류 메시지에 출력되지 않습니다 — 이는
+  패턴 일치 한 줄 명령을 의도적으로 방지하기 위한 보안 조치입니다 (참고:
   docs/adr/0002-init-safety-invariants.md).
 
-EXIT CODES
+종료 코드
 
-  10    refused: remote has Dolt history and you selected local history
-        without --discard-remote
-  11    refused: existing local data and you declined the destroy confirm
-  12    refused: --discard-remote passed without a valid --destroy-token
-        (non-interactive mode)
+  10    거부: 원격에 Dolt 이력이 있고 로컬 이력을 선택했지만
+        --discard-remote를 지정하지 않음
+  11    거부: 기존 로컬 데이터가 있고 삭제 확인을 거부함
+  12    거부: 유효한 --destroy-token 없이 --discard-remote를 전달함
+        (비대화형 모드)
 
-RECOVERY
+복구
 
-  If you hit a refusal, see docs/RECOVERY.md for step-by-step recovery
-  playbooks for each exit code.
+  거절이 발생하면 각 종료 코드에 대한 단계별 복구
+  플레이북은 docs/RECOVERY.md에서 확인하세요.
 
 
 ```
@@ -5955,26 +5955,26 @@ bd init-safety
 
 ### bd mail
 
-Delegates mail operations to an external mail provider.
+메일 작업을 외부 메일 제공자에게 위임합니다.
 
-Agents often type 'bd mail' when working with beads, but mail functionality
-is typically provided by the orchestrator. This command bridges that gap
-by delegating to the configured mail provider.
+에이전트들은 beads로 작업할 때 종종 'bd mail'을 입력하지만,
+메일 기능은 일반적으로 오케스트레이터가 제공합니다. 이 명령은
+설정된 메일 제공자에게 위임하여 그 간극을 메웁니다.
 
-Configuration (checked in order):
-  1. BEADS_MAIL_DELEGATE or BD_MAIL_DELEGATE environment variable
-  2. 'mail.delegate' config setting (bd config set mail.delegate "gt mail")
+구성(확인 순서):
+  1. BEADS_MAIL_DELEGATE 또는 BD_MAIL_DELEGATE 환경 변수
+  2. 'mail.delegate' 구성 설정 (bd config set mail.delegate "gt mail")
 
-Examples:
-  # Configure delegation (one-time setup)
+예제:
+  # 위임 구성 (일회성 설정)
   `export BEADS_MAIL_DELEGATE="gt mail"`
-  # or
+  # 또는
   bd config set mail.delegate "gt mail"
 
-  # Then use bd mail as if it were gt mail
-  bd mail inbox                    # Lists inbox
-  bd mail send mayor/ -s "Hi"      # Sends mail
-  bd mail read msg-123             # Reads a message
+  # 그런 다음 bd mail을 gt mail처럼 사용하세요
+  bd mail inbox                    # 인박스 목록
+  bd mail send mayor/ -s "안녕하세요"      # 메일을 보냅니다
+  bd mail read msg-123             # 메시지를 읽습니다
 
 ```
 bd mail [subcommand] [args...]
@@ -5982,18 +5982,18 @@ bd mail [subcommand] [args...]
 
 ### bd metrics
 
-Show whether anonymous usage metrics are on, see exactly what is sent, and
-turn them on or off.
+익명 사용 지표가 켜져 있는지 확인하고, 전송되는 내용을 정확히 확인하고,
+켜거나 끌 수 있습니다.
 
-bd shares anonymous usage metrics to learn how people actually use it — just
-which commands get run, plus the bd version and OS platform. That's how we decide
-what to polish next. We never collect your issues, paths, remotes, identity, or
-any user-supplied text.
+bd는 사람들이 실제로 그것을 어떻게 사용하는지 알기 위해 익명 사용 지표를 공유합니다 — 단지
+실행되는 명령어와 bd 버전 및 OS 플랫폼을 포함합니다. 이것이 우리가 다음으로 다듬을 항목을
+결정하는 방법입니다. 우리는 여러분의 이슈, 경로, 리모트, 신원 또는
+사용자가 제공한 어떤 텍스트도 수집하지 않습니다.
 
-  bd metrics            show the current status and what is collected
-  bd metrics on         turn metrics on
-  bd metrics off        turn metrics off
-  bd metrics example    show real examples of the events bd sends
+  bd metrics            현재 상태와 수집되는 항목을 표시합니다
+  bd metrics on         메트릭을 켭니다
+  bd metrics off        메트릭을 끕니다
+  bd metrics example    bd가 전송하는 이벤트의 실제 예시를 표시합니다
 
 ```
 bd metrics
@@ -6001,7 +6001,7 @@ bd metrics
 
 #### bd metrics example
 
-Show real examples of the anonymous metrics bd sends
+bd가 익명 메트릭을 보내는 실제 예시를 표시합니다
 
 ```
 bd metrics example
@@ -6009,7 +6009,7 @@ bd metrics example
 
 #### bd metrics off
 
-Turn anonymous usage metrics off
+익명 사용 메트릭 비활성화
 
 ```
 bd metrics off
@@ -6017,7 +6017,7 @@ bd metrics off
 
 #### bd metrics on
 
-Turn anonymous usage metrics on
+익명 사용 지표를 켭니다
 
 ```
 bd metrics on
@@ -6025,197 +6025,197 @@ bd metrics on
 
 ### bd mol
 
-Manage molecules - work templates for agent workflows.
+molecules 관리 - 에이전트 워크플로우를 위한 작업 템플릿.
 
-Protos are template epics with the "template" label. They define a DAG of work
-that can be spawned to create real issues (molecules).
+Protos는 "template" 레이블이 붙은 템플릿 에픽입니다. 그것들은 실제 이슈(분자)를 생성하기 위해
+생성될 수 있는 작업의 DAG를 정의합니다.
 
-The molecule metaphor:
-  - A proto is an uninstantiated template (reusable work pattern)
-  - Spawning creates a molecule (real issues) from the proto
-  - Variables (&#123;&#123;key&#125;&#125;) are substituted during spawning
-  - Bonding combines protos or molecules into compounds
-  - Distilling extracts a proto from an ad-hoc epic
+분자 은유:
+  - 프로토는 미인스턴스화된 템플릿(재사용 가능한 작업 패턴)입니다
+  - 스폰닝은 프로토에서 분자(실제 이슈)를 생성합니다
+  - 변수 (&#123;&#123;key&#125;&#125;)는 스폰닝 중에 대체됩니다
+  - 결합은 프로토 또는 분자를 화합물로 결합합니다
+  - 증류는 임시 에픽에서 프로토를 추출합니다
 
-Commands:
-  show       Show proto/molecule structure and variables
-  pour       Instantiate proto as persistent mol (liquid phase)
-  wisp       Instantiate proto as ephemeral wisp (vapor phase)
-  bond       Polymorphic combine: proto+proto, proto+mol, mol+mol
-  squash     Condense molecule to digest
-  burn       Discard wisp
-  distill    Extract proto from ad-hoc epic
+명령어:
+  show       proto/molecule 구조와 변수를 표시합니다
+  pour       proto를 영구 mol(액체 상태)로 인스턴스화
+  wisp       proto를 일회성 wisp(기체 상태)로 인스턴스화
+  bond       다형성 결합: proto+proto, proto+mol, mol+mol
+  squash     분자를 digest로 응축
+  burn       wisp를 폐기
+  distill    임시 epic에서 proto를 추출
 
-Use "bd formula list" to list available formulas.
+사용 가능한 공식 목록을 나열하려면 "bd formula list"를 사용하세요.
 
 ```
 bd mol
 ```
 
-**Aliases:** protomolecule
+**별칭:** protomolecule
 
 #### bd mol bond
 
-Bond two protos or molecules to create a compound.
+두 개의 protos 또는 분자를 결합하여 화합물을 생성합니다.
 
-The bond command is polymorphic - it handles different operand types:
+bond 명령은 다형적입니다 - 다양한 피연산자 유형을 처리합니다:
 
-  formula + formula → cook both, compound proto
-  formula + proto   → cook formula, compound proto
-  formula + mol     → cook formula, spawn and attach
-  proto + proto     → compound proto (reusable template)
-  proto + mol       → spawn proto, attach to molecule
-  mol + proto       → spawn proto, attach to molecule
-  mol + mol         → join into compound molecule
+  formula + formula → 둘 다 처리하고, proto를 복합화
+  formula + proto   → formula를 처리하고, proto를 복합화
+  formula + mol     → formula를 처리하고 스폰 후 분자에 부착
+  proto + proto     → proto를 복합화 (재사용 가능한 템플릿)
+  proto + mol       → proto를 스폰하고 분자에 부착
+  mol + proto       → proto를 스폰하고 분자에 부착
+  mol + mol         → 결합해 복합 분자를 생성
 
-Formula names (e.g., mol-polecat-arm) are cooked inline as ephemeral protos.
-This avoids needing pre-cooked proto beads in the database.
+Formula 이름(예: mol-polecat-arm)은 임시 proto로 인라인에서 조리됩니다.
+이는 데이터베이스에서 사전 조리된 proto beads를 사용할 필요가 없게 합니다.
 
-Bond types:
-  sequential (default) - B runs after A completes
-  parallel            - B runs alongside A
-  conditional         - B runs only if A fails
+결합 유형:
+  sequential (기본값) - B는 A가 완료된 후 실행됩니다
+  parallel            - B는 A와 병렬로 실행됩니다
+  conditional         - B는 A가 실패할 경우에만 실행됩니다
 
-Phase control:
-  By default, spawned protos follow the target's phase:
-  - Attaching to mol (Ephemeral=false) → spawns as persistent (Ephemeral=false)
-  - Attaching to ephemeral issue (Ephemeral=true) → spawns as ephemeral (Ephemeral=true)
+단계 제어:
+  기본적으로 생성된 proto는 대상의 phase를 따른다:
+  - mol에 연결할 때 (Ephemeral=false) → 영구로 생성됨 (Ephemeral=false)
+  - 임시 이슈에 연결할 때 (Ephemeral=true) → 임시로 생성됨 (Ephemeral=true)
 
-  Override with:
-  --pour  Force spawn as liquid (persistent, Ephemeral=false)
-  --ephemeral  Force spawn as vapor (ephemeral, Ephemeral=true, excluded from Dolt sync via dolt_ignore)
+  다음으로 대체:
+  --pour  액체 상태로 강제 생성 (영구, Ephemeral=false)
+  --ephemeral  기체 상태로 강제 생성 (일시적, Ephemeral=true, dolt_ignore를 통해 Dolt 동기화에서 제외)
 
-Dynamic bonding (Christmas Ornament pattern):
-  Use --ref to specify a custom child reference with variable substitution.
-  This creates IDs like "parent.child-ref" instead of random hashes.
+동적 바인딩(크리스마스 오너먼트 패턴):
+  --ref를 사용해 변수 치환이 적용된 사용자 지정 하위 참조를 지정합니다.
+  이는 임의의 해시 대신 "parent.child-ref"와 같은 ID를 생성합니다.
 
-  Example:
+  예시:
     bd mol bond mol-worker-arm bd-patrol --ref arm-&#123;&#123;worker_name&#125;&#125; --var worker_name=ace
-    # Creates: bd-patrol.arm-ace (and children like bd-patrol.arm-ace.capture)
+    # 생성됨: bd-patrol.arm-ace (및 bd-patrol.arm-ace.capture와 같은 하위 항목)
 
-Use cases:
-  - Found important bug during patrol? Use --pour to persist it
-  - Need ephemeral diagnostic on persistent feature? Use --ephemeral
-  - Spawning per-worker arms on a patrol? Use --ref for readable IDs
+사용 사례:
+  - 순찰 중에 중요한 버그를 발견했나요? 그 버그를 영구적으로 기록하려면 --pour를 사용하세요
+  - 영구 기능에서 일시적인 진단이 필요하신가요? --ephemeral 사용
+  - 순찰에서 작업자별 arm를 생성하나요? 가독성 있는 ID를 위해 --ref 사용
 
-Examples:
-  bd mol bond mol-feature mol-deploy                    # Compound proto
-  bd mol bond mol-feature mol-deploy --type parallel    # Run in parallel
-  bd mol bond mol-feature bd-abc123                     # Attach proto to molecule
-  bd mol bond bd-abc123 bd-def456                       # Join two molecules
-  bd mol bond mol-critical-bug wisp-patrol --pour       # Persist found bug
-  bd mol bond mol-temp-check bd-feature --ephemeral          # Ephemeral diagnostic
-  bd mol bond mol-arm bd-patrol --ref arm-&#123;&#123;name&#125;&#125; --var name=ace  # Dynamic child ID
+예시:
+  bd mol bond mol-feature mol-deploy                    # 복합 프로토
+  bd mol bond mol-feature mol-deploy --type parallel    # 병렬 실행
+  bd mol bond mol-feature bd-abc123                     # 분자에 프로토 연결
+  bd mol bond bd-abc123 bd-def456                       # 두 분자 결합
+  bd mol bond mol-critical-bug wisp-patrol --pour       # 발견된 버그 영구 저장
+  bd mol bond mol-temp-check bd-feature --ephemeral          # 임시 진단
+  bd mol bond mol-arm bd-patrol --ref arm-&#123;&#123;name&#125;&#125; --var name=ace  # 동적 하위 ID
 
 ```
 bd mol bond <A> <B> [flags]
 ```
 
-**Aliases:** fart
+**별칭:** fart
 
-**Flags:**
+**플래그:**
 
 ```
-      --as string         Custom title for compound proto (proto+proto only)
-      --dry-run           Preview what would be created
-      --ephemeral         Force spawn as vapor (ephemeral, Ephemeral=true)
-      --pour              Force spawn as liquid (persistent, Ephemeral=false)
-      --ref string        Custom child reference with {{var}} substitution (e.g., arm-{{polecat_name}})
-      --type string       Bond type: sequential, parallel, or conditional (default "sequential")
-      --var stringArray   Variable substitution for spawned protos (key=value)
+      --as string         compound proto의 사용자 정의 제목(proto+proto 전용)
+      --dry-run           생성될 항목 미리 보기
+      --ephemeral         기체로 스폰 강제(임시, Ephemeral=true)
+      --pour              액체로 스폰 강제(영구, Ephemeral=false)
+      --ref string        {{var}} 치환이 있는 사용자 정의 하위 참조(예: arm-{{polecat_name}})
+      --type string       bond 유형: sequential, parallel 또는 conditional(기본값 "sequential")
+      --var stringArray   스폰된 proto의 변수 치환(key=value)
 ```
 
 #### bd mol burn
 
-Burn a molecule, deleting it without creating a digest.
+분자를 삭제하면서 다이제스트를 생성하지 않습니다.
 
-Unlike squash (which creates a permanent digest before deletion), burn
-completely removes the molecule with no trace. Use this for:
-  - Abandoned patrol cycles
-  - Crashed or failed workflows
-  - Test/debug molecules you don't want to preserve
+삭제 전에 영구 다이제스트를 생성한 뒤 삭제하는 squash와는 달리 burn
+는 분자를 완전히 제거해 흔적을 남기지 않습니다. 다음과 같이 사용합니다:
+  - 버려진 patrol 사이클
+  - 크래시되었거나 실패한 워크플로우
+  - 보존하지 않으려는 테스트/디버그 molecule
 
-The burn operation differs based on molecule phase:
-  - Wisp (ephemeral): Direct delete
-  - Mol (persistent): Cascade delete (syncs to remotes)
+소각 작업은 분자 단계에 따라 다릅니다:
+  - Wisp (일시적): 직접 삭제
+  - Mol (영구적): 연쇄 삭제(원격으로 동기화)
 
-CAUTION: This is a destructive operation. The molecule's data will be
-permanently lost. If you want to preserve a summary, use 'bd mol squash'.
+주의: 이는 파괴적인 작업입니다. molecule의 데이터는
+영구적으로 손실됩니다. 요약을 보존하려면 'bd mol squash'를 사용하세요.
 
-Example:
-  bd mol burn bd-abc123              # Delete molecule with no trace
-  bd mol burn bd-abc123 --dry-run    # Preview what would be deleted
-  bd mol burn bd-abc123 --force      # Skip confirmation
-  bd mol burn bd-a1 bd-b2 bd-c3      # Batch delete multiple wisps
+예시:
+  bd mol burn bd-abc123              # 흔적 없이 분자 삭제
+  bd mol burn bd-abc123 --dry-run    # 삭제될 항목 미리보기
+  bd mol burn bd-abc123 --force      # 확인 건너뛰기
+  bd mol burn bd-a1 bd-b2 bd-c3      # 여러 wisp를 한 번에 삭제
 
 ```
 bd mol burn <molecule-id> [molecule-id...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview what would be deleted
-      --force     Skip confirmation prompt
+      --dry-run   삭제될 항목 미리 보기
+      --force     확인 프롬프트 건너뛰기
 ```
 
 #### bd mol current
 
-Show where you are in a molecule workflow.
+molecule 워크플로우에서 현재 위치를 표시합니다.
 
-If molecule-id is given, show status for that molecule.
-If not given, infer from in_progress issues assigned to current agent.
+molecule-id가 주어지면 해당 분자의 상태를 표시합니다.
+주어지지 않으면 현재 agent에 할당된 in_progress 이슈에서 유추합니다.
 
-The output shows all steps with status indicators:
-  [done]     - Step is complete (closed)
-  [current]  - Step is in_progress (you are here)
-  [ready]    - Step is ready to start (unblocked)
-  [blocked]  - Step is blocked by dependencies
-  [pending]  - Step is waiting
+이 출력은 상태 표시기가 있는 모든 단계를 보여줍니다:
+  [done]     - 단계가 완료되었습니다 (닫힘)
+  [current]  - 단계가 진행 중입니다 (여기가 여기입니다)
+  [ready]    - 단계가 시작할 준비가 되어 있습니다 (차단되지 않음)
+  [blocked]  - 단계가 의존성에 의해 차단됩니다
+  [pending]  - 단계가 대기 중입니다
 
-For large molecules (&gt;100 steps), a summary is shown instead.
-Use --limit or --range to view specific steps:
-  bd mol current &lt;id&gt; --limit 50       # Show first 50 steps
-  bd mol current &lt;id&gt; --range 100-150  # Show steps 100-150
+대형 분자(&gt;100 단계)의 경우, 대신 요약이 표시됩니다.
+특정 단계를 보려면 --limit 또는 --range를 사용하십시오:
+  bd mol current &lt;id&gt; --limit 50       # 처음 50단계 표시
+  bd mol current &lt;id&gt; --range 100-150  # 100-150단계 표시
 
 ```
 bd mol current [molecule-id] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --for string     Show molecules for a specific agent/assignee
-      --limit int      Maximum number of steps to display (0 = auto, use 'all' threshold)
-      --range string   Display specific step range (e.g., '1-50', '100-150')
+      --for string     특정 에이전트/담당자의 molecule 표시
+      --limit int      표시할 최대 단계 수(0 = 자동, 'all' 임곗값 사용)
+      --range string   특정 단계 범위 표시(예: '1-50', '100-150')
 ```
 
 #### bd mol distill
 
-Distill a molecule by extracting a reusable formula from an existing epic.
+기존 에픽에서 재사용 가능한 공식(formula)을 추출해 분자를 증류합니다.
 
-This is the reverse of pour: instead of formula → molecule, it's molecule → formula.
+이는 pour의 반대입니다: formula → molecule 대신 molecule → formula입니다.
 
-The distill command:
-  1. Loads the existing epic and all its children
-  2. Converts the structure to a .formula.json file
-  3. Replaces concrete values with &#123;&#123;variable&#125;&#125; placeholders (via --var flags)
+distill 명령은 다음과 같습니다:
+  1. 기존 에픽과 모든 하위 항목을 로드합니다
+  2. 구조를 .formula.json 파일로 변환합니다
+  3. --var 플래그로 구체적인 값을 &#123;&#123;variable&#125;&#125; 플레이스홀더로 바꿉니다
 
-Use cases:
-  - Team develops good workflow organically, wants to reuse it
-  - Capture tribal knowledge as executable templates
-  - Create starting point for similar future work
+사용 사례:
+  - 팀이 좋은 워크플로를 자연스럽게 개발해 재사용하고자 하는 경우
+  - 실행 가능한 템플릿으로 팀의 노하우를 캡처
+  - 유사한 미래 작업의 시작점 생성
 
-Variable syntax (both work - we detect which side is the concrete value):
-  --var branch=feature-auth    Spawn-style: variable=value (recommended)
-  --var feature-auth=branch    Substitution-style: value=variable
+변수 구문(둘 다 작동함 - 어떤 쪽이 구체적인 값인지 감지함):
+  --var branch=feature-auth    생성 스타일: variable=value (권장)
+  --var feature-auth=branch    치환 스타일: value=variable
 
-Output locations (first writable wins):
-  1. &lt;resolved-beads-dir&gt;/formulas/ (project-level, default)
-  2. &lt;checkout-root&gt;/.beads/formulas/ (repo-local formulas)
-  3. ~/.beads/formulas/     (user-level, if project not writable)
+출력 위치(쓰기 가능한 첫 번째 항목이 우선됨):
+  1. &lt;resolved-beads-dir&gt;/formulas/ (프로젝트 수준, 기본값)
+  2. &lt;checkout-root&gt;/.beads/formulas/ (레포지토리 로컬 formulas)
+  3. ~/.beads/formulas/     (사용자 수준, 프로젝트가 쓰기 가능하지 않은 경우)
 
-Examples:
+예시:
   bd mol distill bd-o5xe my-workflow
   bd mol distill bd-abc release-workflow --var feature_name=auth-refactor
 
@@ -6223,27 +6223,27 @@ Examples:
 bd mol distill <epic-id> [formula-name] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run           Preview what would be created
-      --output string     Output directory for formula file
-      --var stringArray   Replace value with {{variable}} placeholder (variable=value)
+      --dry-run           생성될 항목 미리 보기
+      --output string     formula 파일 출력 디렉터리
+      --var stringArray   값을 {{variable}} 자리표시자로 교체(variable=value)
 ```
 
 #### bd mol last-activity
 
-Show the most recent activity timestamp for a molecule.
+분자에 대한 가장 최근 활동 타임스탬프를 표시합니다.
 
-Returns the timestamp of the most recent change to any step in the molecule,
-making it easy to detect stale or stuck molecules.
+molecule의 어떤 step이든 가장 최근에 변경된 타임스탬프를 반환하여,
+오래되었거나 멈춘 molecule을 쉽게 감지할 수 있게 합니다.
 
-Activity sources:
-  step_closed      - A step was closed
-  step_updated     - A step was updated (claimed, edited, etc.)
-  molecule_updated - The molecule root itself was updated
+활동 소스:
+  step_closed      - 단계가 닫혔습니다
+  step_updated     - 단계가 업데이트되었습니다(할당됨, 편집됨 등)
+  molecule_updated - molecule 루트 자체가 업데이트되었습니다
 
-Examples:
+예시:
   bd mol last-activity hq-wisp-0laki
   bd mol last-activity hq-wisp-0laki --json
 
@@ -6253,62 +6253,62 @@ bd mol last-activity <molecule-id>
 
 #### bd mol pour
 
-Pour a proto into a persistent mol - like pouring molten metal into a mold.
+프로토를 영구적인 mol에 붓는다 - 녹은 금속을 거푸집에 부어 넣는 것처럼.
 
-This is the chemistry-inspired command for creating PERSISTENT work from templates.
-The resulting mol lives in .beads/ (permanent storage) and is synced with git.
+이는 템플릿을 통해 PERSISTENT 작업을 만드는 화학에서 영감을 받은 명령입니다.
+결과 mol은 .beads/(영구 저장소)에 존재하며 git과 동기화됩니다.
 
-Phase transition: Proto (solid) -&gt; pour -&gt; Mol (liquid)
+상태 전이: Proto (고체) -&gt; pour -&gt; Mol (액체)
 
-WHEN TO USE POUR vs WISP:
-  pour (liquid): Persistent work that needs audit trail
-    - Feature implementations spanning multiple sessions
-    - Work you may need to reference later
-    - Anything worth preserving in git history
+POUR와 WISP를 사용하는 경우:
+  pour (liquid): 감사 추적이 필요한 지속적인 작업
+    - 여러 세션에 걸친 기능 구현
+    - 나중에 참조해야 할 수 있는 작업
+    - Git 이력에 보존할 가치가 있는 모든 항목
 
-  wisp (vapor): Ephemeral work that auto-cleans up
-    - Release workflows (one-time execution)
-    - Operational loops and recurring cycles
-    - Health checks and diagnostics
-    - Any operational workflow without audit value
+  wisp (vapor): 자동으로 정리되는 임시 작업
+    - 릴리스 워크플로우(일회성 실행)
+    - 운영 루프 및 반복 주기
+    - 상태 검사 및 진단
+    - 감사 가치가 없는 모든 운영 워크플로우
 
-TIP: Formulas can specify phase:"vapor" to recommend wisp usage.
-     If you pour a vapor-phase formula, you'll get a warning.
+팁: Formula는 phase:"vapor"를 지정하여 wisp 사용을 권장할 수 있습니다.
+     기체 단계 formula를 배치하면 경고가 표시됩니다.
 
-Examples:
-  bd mol pour mol-feature --var name=auth    # Persistent feature work
-  bd mol pour mol-review --var pr=123        # Persistent code review
+예시:
+  bd mol pour mol-feature --var name=auth    # 지속적인 기능 작업
+  bd mol pour mol-review --var pr=123        # 지속적인 코드 리뷰
 
 ```
 bd mol pour <proto-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --assignee string      Assign the root issue to this agent/user
-      --attach strings       Proto to attach after spawning (repeatable)
-      --attach-type string   Bond type for attachments: sequential, parallel, or conditional (default "sequential")
-      --dry-run              Preview what would be created
-      --var stringArray      Variable substitution (key=value)
+      --assignee string      루트 이슈를 이 에이전트/사용자에게 할당
+      --attach strings       스폰 후 연결할 proto(반복 가능)
+      --attach-type string   연결할 bond 유형: sequential, parallel 또는 conditional(기본값 "sequential")
+      --dry-run              생성될 항목 미리 보기
+      --var stringArray      변수 치환(key=value)
 ```
 
 #### bd mol progress
 
-Show efficient progress summary for a molecule.
+분자에 대한 효율적인 진행 상황 요약을 표시합니다.
 
-This command uses indexed queries to count progress without loading all steps,
-making it suitable for very large molecules (millions of steps).
+이 명령은 모든 단계를 로드하지 않고 인덱스 쿼리를 사용하여 진행 상태를 계산하므로,
+매우 큰 분자(수백만 단계)에서도 적합합니다.
 
-If no molecule-id is given, shows progress for any molecule you're working on.
+molecule-id가 지정되지 않은 경우, 작업 중인 어떤 분자의 진행 상태를 표시합니다.
 
-Output includes:
-  - Progress: completed / total (percentage)
-  - Current step: the in-progress step (if any)
-  - Rate: steps/hour based on closure times
-  - ETA: estimated time to completion
+출력 항목:
+  - 진행률: 완료 / 전체 (퍼센트)
+  - 현재 단계: 진행 중인 단계(있는 경우)
+  - 속도: 마감 시간을 기반으로 한 steps/hour
+  - ETA: 완료까지 예상 시간
 
-Example:
+예시:
   bd mol progress bd-hanoi-xyz
 
 ```
@@ -6317,20 +6317,20 @@ bd mol progress [molecule-id]
 
 #### bd mol ready
 
-Find molecules where a gate has closed and the workflow is ready to resume.
+게이트가 닫혔고 워크플로우가 재개할 준비가 된 분자들을 찾습니다.
 
-This command discovers molecules waiting at a gate step where:
-1. The molecule has a gate bead that blocks a step
-2. The gate bead is now closed (condition satisfied)
-3. The blocked step is now ready to proceed
-4. No agent currently has this molecule hooked
+이 명령은 게이트 단계에서 대기 중인 분자를 다음 조건에서 찾아냅니다:
+1. 분자에 단계를 차단하는 게이트 비드가 있다
+2. 게이트 비드가 이제 닫혀 있다(조건 충족)
+3. 차단된 단계가 이제 진행할 준비가 되었다
+4. 현재 어떤 에이전트도 이 분자를 훅하지 않았다
 
-This enables discovery-based resume without explicit waiter tracking.
-The patrol system uses this to find and dispatch gate-ready molecules.
+이것은 명시적인 waiter 추적 없이 discovery-based resume를 가능하게 합니다.
+패트롤 시스템은 이를 사용해 gate-ready 분자를 찾아 배포합니다.
 
-Examples:
-  bd mol ready --gated           # Find all gate-ready molecules
-  bd mol ready --gated --json    # JSON output for automation
+예시:
+  bd mol ready --gated           # 게이트 준비 분자 모두 찾기
+  bd mol ready --gated --json    # 자동화를 위한 JSON 출력
 
 ```
 bd mol ready --gated
@@ -6338,298 +6338,298 @@ bd mol ready --gated
 
 #### bd mol seed
 
-Verify that a formula is accessible and can be cooked.
+포뮬러에 접근할 수 있고 빌드할 수 있는지 확인합니다.
 
-The seed command checks formula search paths to ensure a formula exists
-and can be loaded. This is useful for verifying system health before
-attempting to spawn work from a formula.
+seed 명령은 formula 검색 경로를 검사하여 formula가 존재하고
+그리고 로드될 수 있는지 확인합니다. 이는 formula에서 작업을
+시작하기 전에 시스템 상태를 확인하는 데 유용합니다.
 
-Formula search paths (checked in order):
-  1. &lt;resolved-beads-dir&gt;/formulas/ (active project)
-  2. &lt;checkout-root&gt;/.beads/formulas/ (repo-local formulas)
-  3. ~/.beads/formulas/ (user level)
-  4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
+수식 검색 경로(순서대로 확인):
+  1. &lt;resolved-beads-dir&gt;/formulas/ (활성 프로젝트)
+  2. &lt;checkout-root&gt;/.beads/formulas/ (저장소 로컬 수식)
+  3. ~/.beads/formulas/ (사용자 수준)
+  4. $GT_ROOT/.beads/formulas/ (공유 워크스페이스 루트, GT_ROOT가 설정된 경우)
 
-Examples:
-  bd mol seed mol-feature                 # Verify specific formula
-  bd mol seed mol-review --var name=test  # Verify with variable substitution
+예시:
+  bd mol seed mol-feature                 # 특정 수식 검증
+  bd mol seed mol-review --var name=test  # 변수 치환으로 검증
 
 ```
 bd mol seed <formula-name> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --var stringArray   Variable substitution for condition filtering (key=value)
+      --var stringArray   조건 필터링용 변수 치환(key=value)
 ```
 
 #### bd mol show
 
-Show molecule structure and details.
+분자 구조와 세부 정보를 표시합니다.
 
-The --parallel flag highlights parallelizable steps:
-  - Steps with no blocking dependencies can run in parallel
-  - Shows which steps are ready to start now
-  - Identifies parallel groups (steps that can run concurrently)
+--parallel 플래그는 병렬 처리 가능한 단계를 강조 표시합니다:
+  - 차단하는 의존성이 없는 단계는 병렬로 실행할 수 있습니다
+  - 어떤 단계가 지금 바로 시작할 수 있는지 표시합니다
+  - 병렬 그룹(동시에 실행될 수 있는 단계)을 식별합니다
 
-Example:
+예시:
   bd mol show bd-patrol --parallel
 
 ```
 bd mol show <molecule-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -p, --parallel   Show parallel step analysis
+  -p, --parallel   병렬 단계 분석 표시
 ```
 
 #### bd mol squash
 
-Squash a molecule's ephemeral children into a single digest issue.
+분자의 임시 자식들을 하나의 다이제스트 이슈로 스쿼시합니다.
 
-This command collects all ephemeral child issues of a molecule (Ephemeral=true),
-generates a summary digest, and promotes the wisps to persistent by
-clearing their Wisp flag (or optionally deletes them).
+이 명령은 molecule의 모든 임시 하위 이슈(Ephemeral=true)를 수집하고,
+요약 다이제스트를 생성한 뒤 wisps를 영구 항목으로 승격하기 위해
+그들의 Wisp 플래그를 해제합니다(또는 선택적으로 삭제).
 
-The squash operation:
-  1. Loads the molecule and all its children
-  2. Filters to only wisps (ephemeral issues with Ephemeral=true)
-  3. Generates a digest (summary of work done)
-  4. Creates a permanent digest issue (Ephemeral=false)
-  5. Clears Wisp flag on children (promotes to persistent)
-     OR keeps them with --keep-children (default: delete)
+squash 작업:
+  1. molecule과 모든 하위 항목을 로드합니다
+  2. wisps만 필터링합니다 (Ephemeral=true인 임시 이슈)
+  3. digest를 생성합니다 (작업 완료 요약)
+  4. 영구적인 digest 이슈를 생성합니다 (Ephemeral=false)
+  5. 자식 항목의 Wisp 플래그를 해제합니다 (영구 항목으로 승격)
+     또는 --keep-children로 유지합니다 (기본값: delete)
 
-AGENT INTEGRATION:
-Use --summary to provide an AI-generated summary. This keeps bd as a pure
-tool - the calling agent (orchestrator worker, Claude Code, etc.) is responsible
-for generating intelligent summaries. Without --summary, a basic concatenation
-of child issue content is used.
+에이전트 통합:
+--summary를 사용하면 AI가 생성한 요약을 제공합니다. 이는 bd를 순수한
+도구로 유지합니다. 호출 에이전트(오케스트레이터 워커, Claude Code, 등)가
+지능적인 요약을 생성할 책임이 있습니다. --summary가 없으면 기본적으로 자식
+이슈 내용의 기본 연결이 사용됩니다.
 
-This is part of the wisp workflow: spawn creates wisps,
-execution happens, squash compresses the trace into an outcome (digest).
+이는 wisp 워크플로의 일부입니다. spawn이 wisps를 생성하고,
+실행이 진행되면 squash가 흔적을 결과물(digest)로 압축합니다.
 
-Example:
-  bd mol squash bd-abc123                    # Squash and promote children
-  bd mol squash bd-abc123 --dry-run          # Preview what would be squashed
-  bd mol squash bd-abc123 --keep-children    # Keep wisps after digest
-  bd mol squash bd-abc123 --summary "Agent-generated summary of work done"
+예시:
+  bd mol squash bd-abc123                    # 자식 항목을 squash하고 승격
+  bd mol squash bd-abc123 --dry-run          # squash될 항목을 미리 보기
+  bd mol squash bd-abc123 --keep-children    # digest 후 wisps 유지
+  bd mol squash bd-abc123 --summary "에이전트가 생성한 완료된 작업 요약"
 
 ```
 bd mol squash <molecule-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run          Preview what would be squashed
-      --keep-children    Don't delete ephemeral children after squash
-      --summary string   Agent-provided summary (bypasses auto-generation)
+      --dry-run          squash될 항목 미리 보기
+      --keep-children    squash 후 임시 하위 이슈를 삭제하지 않음
+      --summary string   에이전트 제공 요약(자동 생성 우회)
 ```
 
 #### bd mol stale
 
-Detect molecules (epics with children) that are complete but still open.
+완료되었지만 여전히 열려 있는 분자(자식이 있는 에픽)를 감지합니다.
 
-A molecule is considered stale if:
-  1. All children are closed (Completed == Total)
-  2. Root issue is still open
-  3. Not assigned to anyone (optional, use --unassigned)
-  4. Is blocking other work (optional, use --blocking)
+molecule은 다음 조건을 충족하면 stale로 간주됩니다:
+  1. 모든 하위 항목이 닫힘(Completed == Total)
+  2. 루트 이슈가 아직 열려 있음
+  3. 누구에게도 할당되지 않음(선택 사항, --unassigned 사용)
+  4. 다른 작업을 차단함(선택 사항, --blocking 사용)
 
-By default, shows all complete-but-unclosed molecules.
+기본적으로 닫히지 않았지만 완료된 모든 분자를 표시합니다.
 
-Examples:
-  bd mol stale              # List all stale molecules
-  bd mol stale --json       # Machine-readable output
-  bd mol stale --blocking   # Only show those blocking other work
-  bd mol stale --unassigned # Only show unassigned molecules
-  bd mol stale --all        # Include molecules with 0 children
+예시:
+  bd mol stale              # 모든 오래된 분자 나열
+  bd mol stale --json       # 기계 판독 가능한 출력
+  bd mol stale --blocking   # 다른 작업을 차단하는 분자만 표시
+  bd mol stale --unassigned # 할당되지 않은 분자만 표시
+  bd mol stale --all        # 자식이 0개인 분자 포함
 
 ```
 bd mol stale [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --all          Include molecules with 0 children
-      --blocking     Only show molecules blocking other work
-      --unassigned   Only show unassigned molecules
+      --all          하위 이슈가 0개인 molecule 포함
+      --blocking     다른 작업을 차단하는 molecule만 표시
+      --unassigned   할당되지 않은 molecule만 표시
 ```
 
 #### bd mol wisp
 
-Create or manage wisps - EPHEMERAL molecules for operational workflows.
+운영 워크플로우를 위한 EPHEMERAL 분자인 wisps를 생성하거나 관리합니다.
 
-When called with a proto-id argument, creates a wisp from that proto.
-When called with a subcommand (list, gc), manages existing wisps.
+proto-id 인수로 호출되면 해당 proto로부터 wisp를 생성합니다.
+하위 명령(list, gc)으로 호출되면 기존 wisp를 관리합니다.
 
-Wisps are issues with Ephemeral=true in the main database. They're stored
-locally but NOT synced via git.
+Wisps는 주 데이터베이스에서 Ephemeral=true인 이슈입니다. 로컬에 저장되지만
+git을 통해 동기화되지 않습니다.
 
-WHEN TO USE WISP vs POUR:
-  wisp (vapor): Ephemeral work that auto-cleans up
-    - Release workflows (one-time execution)
-    - Operational loops and recurring cycles
-    - Health checks and diagnostics
-    - Any operational workflow without audit value
+WISP와 POUR 사용 시기:
+  wisp (vapor): 자동으로 정리되는 임시 작업
+    - 릴리스 워크플로우(일회성 실행)
+    - 운영 루프 및 반복 주기
+    - 헬스 체크 및 진단
+    - 감사 가치가 없는 모든 운영 워크플로우
 
-  pour (liquid): Persistent work that needs audit trail
-    - Feature implementations spanning multiple sessions
-    - Work you may need to reference later
-    - Anything worth preserving in git history
+  pour (liquid): 감사 추적이 필요한 지속적인 작업
+    - 여러 세션에 걸친 기능 구현
+    - 나중에 참조가 필요할 수 있는 작업
+    - git 히스토리에 보존할 가치가 있는 모든 것
 
-TIP: Formulas can specify phase:"vapor" to recommend wisp usage.
-     If you use pour on a vapor-phase formula, you'll get a warning.
+팁: Formula는 phase:"vapor"를 지정하여 wisp 사용을 권장할 수 있습니다.
+     기체 단계 formula에 pour를 사용하면 경고가 표시됩니다.
 
-The wisp lifecycle:
-  1. Create: bd mol wisp &lt;proto&gt; or bd create --ephemeral
-  2. Execute: Normal bd operations work on wisp issues
-  3. Squash: bd mol squash &lt;id&gt; (clears Ephemeral flag, promotes to persistent)
-  4. Or burn: bd mol burn &lt;id&gt; (deletes without creating digest)
+wisp 수명 주기:
+  1. 생성: bd mol wisp &lt;proto&gt; 또는 bd create --ephemeral
+  2. 실행: 일반 bd 작업은 wisp 이슈에서 작동합니다
+  3. 스쿼시: bd mol squash &lt;id&gt; (Ephemeral 플래그를 해제하고 영구 상태로 승격)
+  4. 또는 소각: bd mol burn &lt;id&gt; (다이제스트를 생성하지 않고 삭제)
 
-Examples:
-  bd mol wisp beads-release --var version=1.0  # Release workflow
-  bd mol wisp mol-my-workflow                  # Ephemeral operational cycle
-  bd mol wisp list                             # List all wisps
-  bd mol wisp gc                               # Garbage collect old wisps
+예시:
+  bd mol wisp beads-release --var version=1.0  # 릴리스 워크플로우
+  bd mol wisp mol-my-workflow                  # 임시 운영 사이클
+  bd mol wisp list                             # 모든 wisp 나열
+  bd mol wisp gc                               # 오래된 wisp 정리
 
-Subcommands:
-  list  List all wisps in current context
-  gc    Garbage collect orphaned wisps
+하위 명령어:
+  list  현재 컨텍스트의 모든 wisps를 나열합니다
+  gc    고아 wisps를 가비지 컬렉션합니다
 
 ```
 bd mol wisp [proto-id] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run           Preview what would be created
-      --root-only         Create only the root issue (no child step issues)
-      --var stringArray   Variable substitution (key=value)
+      --dry-run           생성될 항목 미리 보기
+      --root-only         루트 이슈만 생성(하위 단계 이슈 없음)
+      --var stringArray   변수 치환(key=value)
 ```
 
 ##### bd mol wisp create
 
-Create a wisp from a proto - sublimation from solid to vapor.
+프로토에서 한 줄기 연무를 생성합니다 - 고체가 증기로 승화되는 과정입니다.
 
-This is the chemistry-inspired command for creating ephemeral work from templates.
-The resulting wisp is stored in the main database with Ephemeral=true and NOT synced via git.
+이것은 템플릿에서 일시적인 작업을 생성하기 위한 화학에서 영감을 받은 명령입니다.
+결과 wisp는 Ephemeral=true로 메인 데이터베이스에 저장되며 git을 통해 동기화되지 않습니다.
 
-Phase transition: Proto (solid) -&gt; Wisp (vapor)
+상전이: Proto (고체) -&gt; Wisp (증기)
 
-Use wisp for:
-  - Operational loops and recurring cycles
-  - Health checks and monitoring
-  - One-shot orchestration runs
-  - Routine operations with no audit value
+wisp는 다음 용도로 사용합니다:
+  - 운영 루프 및 반복 주기
+  - 상태 점검 및 모니터링
+  - 일회성 오케스트레이션 실행
+  - 감사 가치가 없는 정기 작업
 
-The wisp will:
-  - Be stored in main database with Ephemeral=true flag
-  - NOT be synced via git
-  - Either evaporate (burn) or condense to digest (squash)
+wisp는:
+  - Ephemeral=true 플래그와 함께 메인 데이터베이스에 저장됩니다
+  - git을 통해 동기화되지 않습니다
+  - 증발(연소)하거나 다이제스트로 응축(squash)됩니다
 
-Examples:
-  bd mol wisp create mol-patrol                    # Ephemeral patrol cycle
-  bd mol wisp create mol-health-check              # One-time health check
-  bd mol wisp create mol-diagnostics --var target=db  # Diagnostic run
+예제:
+  bd mol wisp create mol-patrol                    # 일시적인 순찰 주기
+  bd mol wisp create mol-health-check              # 일회성 상태 점검
+  bd mol wisp create mol-diagnostics --var target=db  # 진단 실행
 
 ```
 bd mol wisp create <proto-id> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run           Preview what would be created
-      --root-only         Create only the root issue (no child step issues)
-      --var stringArray   Variable substitution (key=value)
+      --dry-run           생성될 항목 미리 보기
+      --root-only         루트 이슈만 생성(하위 단계 이슈 없음)
+      --var stringArray   변수 치환(key=value)
 ```
 
 ##### bd mol wisp gc
 
-Garbage collect old or abandoned wisps from the database.
+데이터베이스에서 오래되었거나 방치된 wisps를 가비지 수집합니다.
 
-A wisp is considered abandoned if:
-  - It hasn't been updated in --age duration and is not closed
+Wisp가 다음 조건에서 버려진 것으로 간주됩니다:
+  - --age 기간 동안 업데이트되지 않았고 닫히지 않은 경우
 
-Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
-if you want to preserve a summary before garbage collection.
+버려진 wisps는 다이제스트를 생성하지 않고 삭제됩니다. 'bd mol squash'
+가비지 컬렉션 전에 요약을 보존하려면 이를 사용하세요.
 
-Use --closed to purge ALL closed wisps (regardless of age). This is the
-fastest way to reclaim space from accumulated wisp bloat. Safe by default:
-requires --force to actually delete.
+모든 닫힌 wisp를(나이와 관계없이) 삭제하려면 --closed를 사용하세요. 이는
+누적된 wisp 팽창으로 인한 공간 점유를 회수하는 가장 빠른 방법입니다. 기본적으로는
+안전합니다: 실제로 삭제하려면 --force가 필요합니다.
 
-Note: This uses time-based cleanup, appropriate for ephemeral wisps.
-For graph-pressure staleness detection (blocking other work), see 'bd mol stale'.
+참고: 이는 시간 기반 정리를 사용하므로 일시적인 wisps에 적합합니다.
+그래프 압력 staleness 감지(다른 작업 차단)에는 'bd mol stale'를 참조하세요.
 
-Examples:
-  bd mol wisp gc                                    # Clean abandoned wisps (default: 1h threshold)
-  bd mol wisp gc --dry-run                          # Preview what would be cleaned
-  bd mol wisp gc --age 24h                          # Custom age threshold
-  bd mol wisp gc --all                              # Also clean closed wisps older than threshold
-  bd mol wisp gc --closed                           # Preview closed wisp deletion
-  bd mol wisp gc --closed --force                   # Delete all closed wisps
-  bd mol wisp gc --closed --dry-run                 # Explicit dry-run (same as no --force)
-  bd mol wisp gc --exclude-type agent,rig           # Protect agent and rig wisps from GC
-  bd mol wisp gc --closed --force --exclude-type mol # Delete closed wisps except mol type
+예시:
+  bd mol wisp gc                                    # 버려진 wisp 정리 (기본값: 1h 임계값)
+  bd mol wisp gc --dry-run                          # 정리될 항목 미리보기
+  bd mol wisp gc --age 24h                          # 사용자 지정 연령 임계값
+  bd mol wisp gc --all                              # 임계값보다 오래된 닫힌 wisp도 정리
+  bd mol wisp gc --closed                           # 닫힌 wisp 삭제 미리보기
+  bd mol wisp gc --closed --force                   # 모든 닫힌 wisp 삭제
+  bd mol wisp gc --closed --dry-run                 # 명시적 dry-run (no --force와 동일)
+  bd mol wisp gc --exclude-type agent,rig           # GC에서 agent 및 rig wisp 보호
+  bd mol wisp gc --closed --force --exclude-type mol # mol 타입을 제외한 닫힌 wisp 삭제
 
 ```
 bd mol wisp gc [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --age string             Age threshold for abandoned wisp detection (default "1h")
-      --all                    Also clean closed wisps older than threshold
-      --closed                 Delete all closed wisps (ignores --age threshold)
-      --dry-run                Preview what would be cleaned
-      --exclude-type strings   Exclude wisps of these types from GC (comma-separated, e.g., agent,rig)
-  -f, --force                  Actually delete (default: preview only)
+      --age string             중단된 wisp 감지용 나이 임곗값(기본값 "1h")
+      --all                    임곗값보다 오래된 닫힌 wisp도 정리
+      --closed                 닫힌 모든 wisp 삭제(--age 임곗값 무시)
+      --dry-run                정리될 항목 미리 보기
+      --exclude-type strings   해당 유형의 wisp를 GC에서 제외(쉼표로 구분, 예: agent,rig)
+  -f, --force                  실제 삭제(기본값: 미리 보기만)
 ```
 
 ##### bd mol wisp list
 
-List all wisps (ephemeral molecules) in the current context.
+현재 컨텍스트의 모든 wisp(일시적 분자)를 나열합니다.
 
-Wisps are issues with Ephemeral=true in the main database. They are stored
-locally but not synced via git.
+Wisps는 기본 데이터베이스에서 Ephemeral=true인 이슈입니다.
+로컬에 저장되지만 git을 통해 동기화되지 않습니다.
 
-The list shows:
-  - ID: Issue ID of the wisp
-  - Title: Wisp title
-  - Status: Current status (open, in_progress, closed)
-  - Started: When the wisp was created
-  - Updated: Last modification time
+목록은 다음을 보여줍니다:
+  - ID: wisp의 이슈 ID
+  - 제목: wisp 제목
+  - Status: 현재 상태 (open, in_progress, closed)
+  - Started: wisp가 생성된 시점
+  - Updated: 마지막 수정 시간
 
-Old wisp detection:
-  - Old wisps haven't been updated in 24+ hours
-  - Use 'bd mol wisp gc' to clean up old/abandoned wisps
+오래된 wisp 감지:
+  - 오래된 wisp는 24시간 이상 업데이트되지 않았습니다
+  - 오래되었거나 방치된 wisp를 정리하려면 'bd mol wisp gc'를 사용하세요
 
-Examples:
-  bd mol wisp list              # List all wisps
-  bd mol wisp list --json       # JSON output for programmatic use
-  bd mol wisp list --all        # Include closed wisps
+예제:
+  bd mol wisp list              # 모든 wisp를 목록으로 표시
+  bd mol wisp list --json       # 프로그래밍 방식 사용을 위한 JSON 출력
+  bd mol wisp list --all        # 닫힌 wisp를 포함하십시오
 
 ```
 bd mol wisp list [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --all           Include closed wisps
-      --type string   Filter by issue type (e.g., agent, task, patrol)
+      --all           닫힌 wisp 포함
+      --type string   이슈 유형으로 필터링(예: agent, task, patrol)
 ```
 
 ### bd notion
 
-Commands for syncing issues between beads and Notion.
+beads와 Notion 간 이슈 동기화를 위한 명령어입니다.
 
 ```
 bd notion
@@ -6637,70 +6637,70 @@ bd notion
 
 #### bd notion connect
 
-Connect bd to an existing Notion database or data source
+기존 Notion 데이터베이스 또는 데이터 소스에 bd를 연결합니다
 
 ```
 bd notion connect [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --url string   Existing Notion database or data source URL
+      --url string   기존 Notion 데이터베이스 또는 데이터 소스 URL
 ```
 
 #### bd notion init
 
-Create a dedicated Beads database in Notion
+Notion에서 전용 Beads 데이터베이스를 생성하세요
 
 ```
 bd notion init [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --parent string   Parent page ID
-      --title string    Database title (default "Beads Issues")
+      --parent string   상위 페이지 ID
+      --title string    데이터베이스 제목(기본값 "Beads Issues")
 ```
 
 #### bd notion pull
 
-Pull one or more items from Notion.
+Notion에서 하나 이상의 항목을 가져옵니다.
 
-Accepts bead IDs or external references as positional arguments.
-Equivalent to: bd notion sync --pull --issues &lt;refs&gt;
+비드 ID 또는 외부 참조를 위치 인수로 받습니다.
+동일함: bd notion sync --pull --issues &lt;refs&gt;
 
 ```
 bd notion pull [refs...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview pull without making changes
+      --dry-run   변경하지 않고 pull 미리 보기
 ```
 
 #### bd notion push
 
-Push one or more beads issues to Notion.
+하나 이상의 beads 이슈를 Notion에 푸시합니다.
 
-Accepts bead IDs as positional arguments.
-Equivalent to: bd notion sync --push --issues &lt;ids&gt;
+위치 인수로 bead ID를 받습니다.
+다음과 동일합니다: bd notion sync --push --issues &lt;ids&gt;
 
 ```
 bd notion push [bead-ids...] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview push without making changes
+      --dry-run   변경하지 않고 push 미리 보기
 ```
 
 #### bd notion status
 
-Show Notion sync status
+Notion 동기화 상태를 표시합니다
 
 ```
 bd notion status
@@ -6708,122 +6708,122 @@ bd notion status
 
 #### bd notion sync
 
-Synchronize issues between beads and Notion.
+beads와 Notion 간의 이슈를 동기화합니다.
 
-By default this performs bidirectional sync. Use --pull or --push to limit direction.
+기본적으로 이는 양방향 동기화를 수행합니다. 방향을 제한하려면 --pull 또는 --push를 사용하세요.
 
 ```
 bd notion sync [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --create-only     Only create missing remote pages, do not update existing ones
-      --dry-run         Preview changes without making mutations
-      --issues string   Comma-separated bead IDs to sync selectively (e.g., bd-abc,bd-def). Mutually exclusive with --parent.
-      --parent string   Limit push to this bead and its descendants (push only). Mutually exclusive with --issues.
-      --prefer-local    On conflict, keep the local beads version
-      --prefer-notion   On conflict, use the Notion version
-      --pull            Only pull issues from Notion
-      --push            Only push issues to Notion
-      --state string    Issue state to sync: open, closed, or all (default "all")
+      --create-only     누락된 원격 페이지만 생성하고 기존 페이지는 업데이트하지 않음
+      --dry-run         변경을 적용하지 않고 미리 보기
+      --issues string   선택적으로 동기화할 쉼표 구분 bead ID(예: bd-abc,bd-def). --parent와 함께 사용할 수 없음.
+      --parent string   이 bead와 하위 항목으로 push 제한(push 전용). --issues와 함께 사용할 수 없음.
+      --prefer-local    충돌 시 로컬 beads 버전 유지
+      --prefer-notion   충돌 시 Notion 버전 사용
+      --pull            Notion에서 이슈만 pull
+      --push            Notion으로 이슈만 push
+      --state string    동기화할 이슈 상태: open, closed 또는 all(기본값 "all")
 ```
 
 ### bd orphans
 
-Identify orphaned issues - issues that are referenced in commit messages but remain open or in_progress in the database.
+커밋 메시지에서 참조되지만 데이터베이스에 open 또는 in_progress로 남은 고립 이슈를 식별합니다.
 
-This helps identify work that has been implemented but not formally closed.
+이것은 구현은 되었지만 공식적으로 닫히지 않은 작업을 식별하는 데 도움이 됩니다.
 
-Examples:
-  bd orphans              # Show orphaned issues
-  bd orphans --json       # Machine-readable output
-  bd orphans --details    # Show full commit information
-  bd orphans --fix        # Close orphaned issues with confirmation
-  bd orphans --label theme:personal             # Only orphans with this label
-  bd orphans --label-any theme:personal,theme:ventures  # Orphans with either label
+예시:
+  bd orphans              # 고아 이슈 표시
+  bd orphans --json       # 기계 판독 가능한 출력
+  bd orphans --details    # 전체 커밋 정보 표시
+  bd orphans --fix        # 확인 후 고아 이슈 닫기
+  bd orphans --label theme:personal             # 이 라벨이 있는 고아 이슈만 표시
+  bd orphans --label-any theme:personal,theme:ventures  # 이 라벨 중 하나라도 해당되는 고아 이슈
 
 ```
 bd orphans [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --details             Show full commit information
-  -f, --fix                 Close orphaned issues with confirmation
-  -l, --label strings       Filter by labels (AND: must have ALL). Can combine with --label-any
-      --label-any strings   Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
+      --details             전체 커밋 정보 표시
+  -f, --fix                 확인 후 고립 이슈 닫기
+  -l, --label strings       레이블로 필터링(AND: 모두 있어야 함). --label-any와 함께 사용 가능
+      --label-any strings   레이블로 필터링(OR: 하나 이상 있어야 함). --label과 함께 사용 가능
 ```
 
 ### bd ready
 
-Show ready work (open issues with no active blockers).
+준비된 작업 표시(활성 차단 항목이 없는 열린 이슈).
 
-Excludes in_progress, blocked, deferred, and hooked issues. This uses the
-GetReadyWork API which applies blocker-aware semantics to find truly claimable work.
+in_progress, blocked, deferred, 그리고 hooked 이슈를 제외합니다. 이 기능은
+GetReadyWork API를 사용하여 차단 요소 인식 의미론을 적용해 실제로 클레임 가능한 작업을 찾습니다.
 
-Note: 'bd list --ready' uses the same blocker-aware ready-work semantics.
+참고: 'bd list --ready'는 동일한 차단 요소 인식 준비 작업 의미론을 사용합니다.
 
-Use --mol to filter to a specific molecule's steps:
-  bd ready --mol bd-patrol   # Show ready steps within molecule
+특정 molecule의 단계를 필터링하려면 --mol을 사용하세요:
+  bd ready --mol bd-patrol   # 분자 내 준비 단계 표시
 
-Use --gated to find molecules ready for gate-resume dispatch:
-  bd ready --gated           # Find molecules where a gate closed
+--gated를 사용해 gate-resume dispatch에 준비된 분자를 찾습니다:
+  bd ready --gated           # 게이트가 닫힌 분자를 찾기
 
-Use --claim to atomically claim the first ready issue matching the filters:
+필터와 일치하는 첫 번째 준비 상태의 이슈를 원자적으로 클레임하려면 --claim을 사용하세요:
   bd ready --claim --json
 
-This is useful for agents executing molecules to see which steps can run next.
+이것은 molecules를 실행하는 에이전트가 다음에 실행할 수 있는 단계를 확인하는 데 유용합니다.
 
 ```
 bd ready [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -a, --assignee string              Filter by assignee
-      --claim                        Atomically claim the first ready issue matching the filters
-      --exclude-label strings        Exclude issues that have ANY of these labels
-      --exclude-type strings         Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)
-      --explain                      Show dependency-aware reasoning for why issues are ready or blocked
-      --gated                        Find molecules ready for gate-resume dispatch
-      --has-metadata-key string      Filter issues that have this metadata key set
-      --include-deferred             Include issues with future defer_until timestamps
-      --include-ephemeral            Include ephemeral issues (wisps) in results
-  -l, --label strings                Filter by labels (AND: must have ALL). Can combine with --label-any
-      --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
-  -n, --limit int                    Maximum issues to show (use 0 for unlimited) (default 100)
-      --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
-      --mol string                   Filter to steps within a specific molecule
-      --mol-type string              Filter by molecule type: swarm, patrol, or work
-      --offset int                   Skip the first N matching results (0-based). Only supported under --proxied-server.
-      --parent string                Filter to descendants of this bead/epic
-      --plain                        Display issues as a plain numbered list
-      --pretty                       Display issues in a tree format with status/priority symbols (default true)
-  -p, --priority int                 Filter by priority
-  -s, --sort string                  Sort policy: priority (default), hybrid, oldest (default "priority")
-  -t, --type string                  Filter by issue type (task, bug, feature, epic, decision, merge-request). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision
-  -u, --unassigned                   Show only unassigned issues
+  -a, --assignee string              담당자로 필터링
+      --claim                        필터와 일치하는 첫 준비 이슈를 원자적으로 맡기
+      --exclude-label strings        지정 레이블 중 하나라도 있는 이슈 제외
+      --exclude-type strings         결과에서 이슈 유형 제외(쉼표로 구분하거나 반복 가능, 예: --exclude-type=convoy,epic)
+      --explain                      이슈가 준비되거나 차단된 이유를 의존성 인식 방식으로 표시
+      --gated                        gate-resume 디스패치 준비가 된 molecule 찾기
+      --has-metadata-key string      이 메타데이터 키가 설정된 이슈 필터링
+      --include-deferred             향후 defer_until 타임스탬프가 있는 이슈 포함
+      --include-ephemeral            결과에 임시 이슈(wisp) 포함
+  -l, --label strings                레이블로 필터링(AND: 모두 있어야 함). --label-any와 함께 사용 가능
+      --label-any strings            레이블로 필터링(OR: 하나 이상 있어야 함). --label과 함께 사용 가능
+  -n, --limit int                    표시할 최대 이슈 수(무제한은 0 사용)(기본값 100)
+      --metadata-field stringArray   메타데이터 필드로 필터링(key=value, 반복 가능)
+      --mol string                   특정 molecule 내 단계로 필터링
+      --mol-type string              molecule 유형으로 필터링: swarm, patrol 또는 work
+      --offset int                   처음 N개의 일치 결과 건너뛰기(0부터 시작). --proxied-server에서만 지원.
+      --parent string                이 bead/epic의 하위 항목으로 필터링
+      --plain                        이슈를 일반 번호 목록으로 표시
+      --pretty                       상태/우선순위 기호가 있는 트리 형식으로 이슈 표시(기본값 true)
+  -p, --priority int                 우선순위로 필터링
+  -s, --sort string                  정렬 정책: priority(기본값), hybrid, oldest(기본값 "priority")
+  -t, --type string                  이슈 유형으로 필터링(task, bug, feature, epic, decision, merge-request). 별칭: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision
+  -u, --unassigned                   담당자 없는 이슈만 표시
 ```
 
 ### bd rename
 
-Rename an issue from one ID to another.
+이슈의 ID를 다른 ID로 변경합니다.
 
-This updates:
-- The issue's primary ID
-- All references in other issues (descriptions, titles, notes, etc.)
-- Dependencies pointing to/from this issue
-- Labels, comments, and events
+이 항목은 다음을 업데이트합니다:
+- 이슈의 기본 ID
+- 다른 이슈의 모든 참조(설명, 제목, 노트, 등)
+- 이 이슈에 대한/에서의 의존성
+- 라벨, 댓글 및 이벤트
 
-Examples:
-  bd rename bd-w382l bd-dolt     # Rename to memorable ID
-  bd rename gt-abc123 gt-auth    # Use descriptive ID
+예제:
+  bd rename bd-w382l bd-dolt     # 기억에 남는 ID로 이름 변경
+  bd rename gt-abc123 gt-auth    # 설명적인 ID 사용
 
-Note: The new ID must use a valid prefix for this database.
+참고: 새 ID는 이 데이터베이스에 대한 유효한 접두사를 사용해야 합니다.
 
 ```
 bd rename <old-id> <new-id>
@@ -6831,45 +6831,45 @@ bd rename <old-id> <new-id>
 
 ### bd ship
 
-Ship a capability to satisfy cross-project dependencies.
+프로젝트 간 의존성을 충족할 수 있는 기능을 제공합니다.
 
-This command:
-  1. Finds issue with export:&lt;capability&gt; label
-  2. Validates issue is closed (or --force to override)
-  3. Adds provides:&lt;capability&gt; label
+이 명령은:
+  1. export:&lt;capability&gt; 레이블이 있는 이슈를 찾습니다
+  2. 이슈가 닫혔는지 확인합니다 (--force를 사용해 덮어쓰기)
+  3. provides:&lt;capability&gt; 레이블을 추가합니다
 
-External projects can depend on this capability using:
+외부 프로젝트는 이 기능에 의존하기 위해 다음을 사용할 수 있습니다:
   bd dep add &lt;issue&gt; external:&lt;project&gt;:&lt;capability&gt;
 
-The capability is resolved when the external project has a closed issue
-with the provides:&lt;capability&gt; label.
+해당 기능은 외부 프로젝트에 닫힌 이슈가 있을 때 해결됩니다
+해당 이슈에는 provides:&lt;capability&gt; 라벨이 있어야 합니다.
 
-Examples:
-  bd ship mol-run-assignee              # Ship the mol-run-assignee capability
-  bd ship mol-run-assignee --force      # Ship even if issue is not closed
-  bd ship mol-run-assignee --dry-run    # Preview without making changes
+예시:
+  bd ship mol-run-assignee              # mol-run-assignee 기능을 배포
+  bd ship mol-run-assignee --force      # 이슈가 닫히지 않았더라도 배포
+  bd ship mol-run-assignee --dry-run    # 변경 없이 미리보기
 
 ```
 bd ship <capability> [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --dry-run   Preview without making changes
-      --force     Ship even if issue is not closed
+      --dry-run   변경 없이 미리 보기
+      --force     이슈가 닫히지 않아도 배포
 ```
 
 ### bd undefer
 
-Undefer issues to restore them to open status.
+이슈를 연기 해제하여 열린 상태로 복원합니다.
 
-This brings issues back from the icebox so they can be worked on again.
-Issues will appear in 'bd ready' if they have no blockers.
+이것은 이슈를 icebox로부터 다시 가져와서 다시 작업할 수 있게 합니다.
+차단 요소가 없으면 이슈가 'bd ready'에 표시됩니다.
 
-Examples:
-  bd undefer bd-abc        # Undefer a single issue
-  bd undefer bd-abc bd-def # Undefer multiple issues
+예제:
+  bd undefer bd-abc        # 단일 이슈를 연기 해제
+  bd undefer bd-abc bd-def # 여러 개의 이슈를 연기 해제
 
 ```
 bd undefer [id...]
@@ -6877,7 +6877,7 @@ bd undefer [id...]
 
 ### bd version
 
-Print version information
+버전 정보를 출력합니다
 
 ```
 bd version

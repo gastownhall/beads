@@ -1,62 +1,62 @@
 ---
 title: "bd count"
-description: "Count issues matching the specified filters."
+description: "지정한 필터와 일치하는 이슈 수를 계산합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc count`.
+`bd help --doc count`에서 생성되었습니다.
 
-Count issues matching the specified filters.
+지정한 필터와 일치하는 이슈 수를 계산합니다.
 
-By default, returns the total count of issues matching the filters.
-Use --by-* flags to group counts by different attributes.
+기본적으로 필터와 일치하는 총 이슈 수를 반환합니다.
+다른 속성별로 수를 그룹화하려면 --by-* 플래그를 사용하세요.
 
-Examples:
-  bd count                          # Count all issues
-  bd count --status open            # Count open issues
-  bd count --by-status              # Group count by status
-  bd count --by-priority            # Group count by priority
-  bd count --by-type                # Group count by issue type
-  bd count --by-assignee            # Group count by assignee
-  bd count --by-label               # Group count by label
-  bd count --assignee alice --by-status  # Count alice's issues by status
-  bd count --include-infra          # Count issues + wisps tier (matches 'bd list --include-infra --all' cardinality)
+예시:
+  bd count                          # 모든 이슈 수 계산
+  bd count --status open            # 열린 이슈 수 계산
+  bd count --by-status              # 상태별 수 그룹화
+  bd count --by-priority            # 우선순위별 수 그룹화
+  bd count --by-type                # 이슈 유형별 수 그룹화
+  bd count --by-assignee            # 담당자별 수 그룹화
+  bd count --by-label               # 레이블별 수 그룹화
+  bd count --assignee alice --by-status  # alice의 이슈 수를 상태별로 계산
+  bd count --include-infra          # 이슈 + wisp 계층 수 계산('bd list --include-infra --all'의 카디널리티와 일치)
 
 
 ```
 bd count [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-  -a, --assignee string         Filter by assignee
-      --by-assignee             Group count by assignee
-      --by-label                Group count by label
-      --by-priority             Group count by priority
-      --by-status               Group count by status
-      --by-type                 Group count by issue type
-      --closed-after string     Filter issues closed after date (YYYY-MM-DD or RFC3339)
-      --closed-before string    Filter issues closed before date (YYYY-MM-DD or RFC3339)
-      --created-after string    Filter issues created after date (YYYY-MM-DD or RFC3339)
-      --created-before string   Filter issues created before date (YYYY-MM-DD or RFC3339)
-      --desc-contains string    Filter by description substring
-      --empty-description       Filter issues with empty description
-      --id string               Filter by specific issue IDs (comma-separated)
-      --include-infra           Include infrastructure beads and the wisps tier (matches 'bd list --include-infra --all' cardinality)
-  -l, --label strings           Filter by labels (AND: must have ALL)
-      --label-any strings       Filter by labels (OR: must have AT LEAST ONE)
-      --no-assignee             Filter issues with no assignee
-      --no-labels               Filter issues with no labels
-      --notes-contains string   Filter by notes substring
-  -p, --priority int            Filter by priority (0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)
-      --priority-max int        Filter by maximum priority (inclusive)
-      --priority-min int        Filter by minimum priority (inclusive)
-  -s, --status string           Filter by stored status (open, in_progress, blocked, deferred, closed). Note: dependency-blocked issues use 'bd blocked'
-      --title string            Filter by title text (case-insensitive substring match)
-      --title-contains string   Filter by title substring
-  -t, --type string             Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)
-      --updated-after string    Filter issues updated after date (YYYY-MM-DD or RFC3339)
-      --updated-before string   Filter issues updated before date (YYYY-MM-DD or RFC3339)
+  -a, --assignee string         담당자로 필터링
+      --by-assignee             담당자별 수 그룹화
+      --by-label                레이블별 수 그룹화
+      --by-priority             우선순위별 수 그룹화
+      --by-status               상태별 수 그룹화
+      --by-type                 이슈 유형별 수 그룹화
+      --closed-after string     지정 날짜 이후 닫힌 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --closed-before string    지정 날짜 이전 닫힌 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --created-after string    지정 날짜 이후 생성된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --created-before string   지정 날짜 이전 생성된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --desc-contains string    설명 부분 문자열로 필터링
+      --empty-description       설명이 비어 있는 이슈 필터링
+      --id string               특정 이슈 ID로 필터링(쉼표로 구분)
+      --include-infra           인프라 bead와 wisp 계층 포함('bd list --include-infra --all'의 카디널리티와 일치)
+  -l, --label strings           레이블로 필터링(AND: 모두 있어야 함)
+      --label-any strings       레이블로 필터링(OR: 하나 이상 있어야 함)
+      --no-assignee             담당자가 없는 이슈 필터링
+      --no-labels               레이블이 없는 이슈 필터링
+      --notes-contains string   메모 부분 문자열로 필터링
+  -p, --priority int            우선순위로 필터링(0-4: 0=critical, 1=high, 2=medium, 3=low, 4=backlog)
+      --priority-max int        최대 우선순위로 필터링(경계값 포함)
+      --priority-min int        최소 우선순위로 필터링(경계값 포함)
+  -s, --status string           저장된 상태로 필터링(open, in_progress, blocked, deferred, closed). 참고: 의존성으로 차단된 이슈에는 'bd blocked' 사용
+      --title string            제목 텍스트로 필터링(대소문자 구분 없는 부분 문자열 일치)
+      --title-contains string   제목 부분 문자열로 필터링
+  -t, --type string             유형으로 필터링(bug, feature, task, epic, chore, decision, merge-request, molecule, gate)
+      --updated-after string    지정 날짜 이후 업데이트된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
+      --updated-before string   지정 날짜 이전 업데이트된 이슈 필터링(YYYY-MM-DD 또는 RFC3339)
 ```

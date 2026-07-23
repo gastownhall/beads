@@ -1,26 +1,26 @@
 ---
 title: "bd formula"
-description: "Manage workflow formulas - the source layer for molecule templates."
+description: "molecule 템플릿의 소스 계층인 워크플로 formula를 관리합니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc formula`.
+`bd help --doc formula`에서 생성되었습니다.
 
-Manage workflow formulas - the source layer for molecule templates.
+molecule 템플릿의 소스 계층인 워크플로 formula를 관리합니다.
 
-Formulas are TOML/JSON files that define workflows with composition rules.
-Define formulas, cook them into protos, then pour or wisp them into work.
+formula는 구성 규칙으로 워크플로를 정의하는 TOML/JSON 파일입니다. formula를 정의하고
+proto로 cook한 뒤 작업으로 pour하거나 wisp로 만드세요.
 
-Search paths (in order):
-  1. &lt;resolved-beads-dir&gt;/formulas/ (active project)
-  2. &lt;checkout-root&gt;/.beads/formulas/ (repo-local formulas)
-  3. ~/.beads/formulas/ (user)
-  4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
+검색 경로(순서대로):
+  1. &lt;resolved-beads-dir&gt;/formulas/(활성 프로젝트)
+  2. &lt;checkout-root&gt;/.beads/formulas/(저장소 로컬 formula)
+  3. ~/.beads/formulas/(사용자)
+  4. $GT_ROOT/.beads/formulas/(공유 워크스페이스 루트, GT_ROOT가 설정된 경우)
 
-Commands:
-  list   List available formulas from all search paths
-  show   Show formula details, steps, and composition rules
+명령:
+  list   모든 검색 경로에서 사용 가능한 formula 나열
+  show   formula 세부 정보, 단계, 구성 규칙 표시
 
 ```
 bd formula [flags]
@@ -28,48 +28,48 @@ bd formula [flags]
 
 ## bd formula convert
 
-Convert formula files from JSON to TOML format.
+formula 파일을 JSON에서 TOML 형식으로 변환합니다.
 
-TOML format provides better ergonomics:
-  - Multi-line strings without \n escaping
-  - Human-readable diffs
-  - Comments allowed
+TOML 형식은 더 나은 사용성을 제공합니다:
+  - \n 이스케이프가 필요 없는 여러 줄 문자열
+  - 사람이 읽을 수 있는 diff
+  - 댓글 허용
 
-The convert command reads a .formula.json file and outputs .formula.toml.
-The original JSON file is preserved (use --delete to remove it).
+convert 명령은 .formula.json 파일을 읽고 .formula.toml을 출력합니다.
+원본 JSON 파일은 보존됩니다(제거하려면 --delete 사용).
 
-Examples:
-  bd formula convert shiny              # Convert shiny.formula.json to .toml
-  bd formula convert ./my.formula.json  # Convert specific file
-  bd formula convert --all              # Convert all JSON formulas
-  bd formula convert shiny --delete     # Convert and remove JSON file
-  bd formula convert shiny --stdout     # Print TOML to stdout
+예시:
+  bd formula convert shiny              # shiny.formula.json을 .toml로 변환
+  bd formula convert ./my.formula.json  # 특정 파일 변환
+  bd formula convert --all              # 모든 JSON formula 변환
+  bd formula convert shiny --delete     # 변환 후 JSON 파일 제거
+  bd formula convert shiny --stdout     # TOML을 stdout에 출력
 
 ```
 bd formula convert <formula-name|path> [--all] [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --all      Convert all JSON formulas
-      --delete   Delete JSON file after conversion
-      --stdout   Print TOML to stdout instead of file
+      --all      모든 JSON formula 변환
+      --delete   변환 후 JSON 파일 삭제
+      --stdout   파일 대신 stdout에 TOML 출력
 ```
 
 ## bd formula list
 
-List all formulas from search paths.
+검색 경로의 모든 formula를 나열합니다.
 
-Search paths (in order of priority):
-  1. &lt;resolved-beads-dir&gt;/formulas/ (active project - highest priority)
-  2. &lt;checkout-root&gt;/.beads/formulas/ (repo-local formulas)
-  3. ~/.beads/formulas/ (user)
-  4. $GT_ROOT/.beads/formulas/ (shared workspace root, if GT_ROOT set)
+검색 경로(우선순위순):
+  1. &lt;resolved-beads-dir&gt;/formulas/(활성 프로젝트 - 가장 높은 우선순위)
+  2. &lt;checkout-root&gt;/.beads/formulas/(저장소 로컬 formula)
+  3. ~/.beads/formulas/(사용자)
+  4. $GT_ROOT/.beads/formulas/(공유 워크스페이스 루트, GT_ROOT가 설정된 경우)
 
-Formulas in earlier paths shadow those with the same name in later paths.
+앞선 경로의 formula가 뒤 경로의 같은 이름 formula를 가립니다.
 
-Examples:
+예시:
   bd formula list
   bd formula list --json
   bd formula list --type workflow
@@ -79,24 +79,24 @@ Examples:
 bd formula list [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --type string   Filter by type (workflow, expansion, aspect, convoy)
+      --type string   유형으로 필터링(workflow, expansion, aspect, convoy)
 ```
 
 ## bd formula show
 
-Show detailed information about a formula.
+formula의 상세 정보를 표시합니다.
 
-Displays:
-  - Formula metadata (name, type, description)
-  - Variables with defaults and constraints
-  - Steps with dependencies
-  - Composition rules (extends, aspects, expansions)
-  - Bond points for external composition
+표시 항목:
+  - formula 메타데이터(name, type, description)
+  - 기본값과 제약 조건이 있는 변수
+  - 의존성이 있는 단계
+  - 구성 규칙(extends, aspects, expansions)
+  - 외부 구성용 bond 지점
 
-Examples:
+예시:
   bd formula show shiny
   bd formula show rule-of-five
   bd formula show security-audit --json

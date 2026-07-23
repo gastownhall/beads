@@ -1,20 +1,20 @@
 ---
 title: "bd blocked"
-description: "Show blocked issues"
+description: "차단된 이슈를 표시합니다"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc blocked`.
+`bd help --doc blocked`에서 생성되었습니다.
 
-Show blocked issues
+차단된 이슈를 표시합니다
 
 ```
 bd blocked [flags]
 ```
 
-**Flags:**
+**플래그:**
 
 ```
-      --parent string   Filter to descendants of this bead/epic
+      --parent string   이 bead/epic의 하위 항목으로 필터링
 ```

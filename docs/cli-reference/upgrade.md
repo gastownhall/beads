@@ -1,20 +1,20 @@
 ---
 title: "bd upgrade"
-description: "Commands for checking bd version upgrades and reviewing changes."
+description: "bd 버전 업그레이드를 확인하고 변경 사항을 검토하는 명령입니다."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
 
-Generated from `bd help --doc upgrade`.
+`bd help --doc upgrade`에서 생성되었습니다.
 
-Commands for checking bd version upgrades and reviewing changes.
+bd 버전 업그레이드를 확인하고 변경 사항을 검토하는 명령입니다.
 
-The upgrade command helps you stay aware of bd version changes:
-  - bd upgrade status: Check if bd version changed since last use
-  - bd upgrade review: Show what's new since your last version
-  - bd upgrade ack: Acknowledge the current version
+upgrade 명령은 bd 버전 변경 사항을 파악하는 데 도움이 됩니다:
+  - bd upgrade status: 마지막 사용 이후 bd 버전 변경 여부 확인
+  - bd upgrade review: 마지막 버전 이후 새 변경 사항 표시
+  - bd upgrade ack: 현재 버전 확인 처리
 
-Version tracking is automatic - bd updates metadata.json on every run.
+버전 추적은 자동이며 bd가 실행될 때마다 metadata.json을 업데이트합니다.
 
 ```
 bd upgrade [flags]
@@ -22,16 +22,15 @@ bd upgrade [flags]
 
 ## bd upgrade ack
 
-Mark the current bd version as acknowledged.
+현재 bd 버전을 확인한 것으로 표시합니다.
 
-This updates metadata.json to record that you've seen the current
-version. Mainly useful after reviewing upgrade changes to suppress
-future upgrade notifications.
+현재 버전을 확인했다는 기록을 metadata.json에 업데이트합니다. 업그레이드 변경 사항을
+검토한 후 향후 업그레이드 알림을 숨기는 데 주로 유용합니다.
 
-Note: Version tracking happens automatically, so you don't need to
-run this command unless you want to explicitly mark acknowledgement.
+참고: 버전 추적은 자동으로 수행되므로 명시적으로 확인 표시를 하려는 경우가 아니면
+이 명령을 실행할 필요가 없습니다.
 
-Examples:
+예시:
   bd upgrade ack
   bd upgrade ack --json
 
@@ -41,15 +40,14 @@ bd upgrade ack [flags]
 
 ## bd upgrade review
 
-Show what's new in bd since the last version you used.
+마지막으로 사용한 버전 이후 bd의 새 변경 사항을 표시합니다.
 
-Unlike 'bd info --whats-new' which shows the last 3 versions,
-this command shows ALL changes since your specific last version.
+최근 3개 버전을 표시하는 'bd info --whats-new'와 달리 이 명령은 사용한 마지막
+특정 버전 이후의 모든 변경 사항을 표시합니다.
 
-If you're upgrading from an old version, you'll see the complete
-changelog of everything that changed since then.
+구버전에서 업그레이드하는 경우 그 이후 변경된 모든 항목의 전체 변경 로그가 표시됩니다.
 
-Examples:
+예시:
   bd upgrade review
   bd upgrade review --json
 
@@ -59,12 +57,11 @@ bd upgrade review [flags]
 
 ## bd upgrade status
 
-Check if bd has been upgraded since you last used it.
+마지막 사용 이후 bd가 업그레이드되었는지 확인합니다.
 
-This command uses the version tracking that happens automatically
-at startup to detect if bd was upgraded.
+이 명령은 시작 시 자동으로 수행되는 버전 추적을 사용해 bd 업그레이드 여부를 감지합니다.
 
-Examples:
+예시:
   bd upgrade status
   bd upgrade status --json
 
