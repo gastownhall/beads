@@ -12,7 +12,32 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
+
+// renderManagedConfigWithAutoGCBehavior builds a Beads-managed config.yaml
+// (marker included) whose auto_gc_behavior block is exactly gc — unlike
+// renderProxiedServerConfig, which only ever sets ArchiveLevel_. Used to
+// seed the sibling-field-preservation tests below (a user-set "enable"
+// alongside — or in place of — archive_level).
+func renderManagedConfigWithAutoGCBehavior(t *testing.T, port int, gc *servercfg.AutoGCBehaviorYAMLConfig) []byte {
+	t.Helper()
+	host := proxiedServerListenerHost
+	logLevel := string(servercfg.LogLevel_Info)
+	yc := &servercfg.YAMLConfig{
+		LogLevelStr: &logLevel,
+		ListenerConfig: servercfg.ListenerYAMLConfig{
+			HostStr:    &host,
+			PortNumber: &port,
+		},
+		BehaviorConfig: servercfg.BehaviorYAMLConfig{
+			AutoGCBehavior: gc,
+		},
+	}
+	body, err := yaml.Marshal(yc)
+	require.NoError(t, err)
+	return append([]byte(managedProxiedServerConfigMarker), body...)
+}
 
 func TestRenderProxiedServerConfig_RoundTrips(t *testing.T) {
 	body, err := renderProxiedServerConfig(54321, true)
@@ -183,6 +208,71 @@ func TestReconcileManagedProxiedServerConfig_NoOpWhenAlreadyAligned(t *testing.T
 	})
 }
 
+// TestReconcileManagedProxiedServerConfig_PreservesSiblingFields covers the
+// round-3 verification finding (gastownhall/beads#4986): reconcile must
+// inspect and modify only ArchiveLevel_, not treat "the whole
+// auto_gc_behavior block is present" as equivalent to "archive_level is
+// set". A block carrying only a user-set "enable" (no archive_level) must
+// both gain archive_level when supported, and keep its "enable" setting
+// when the (now-absent-again) archive_level is later stripped on an
+// unsupported binary — the earlier (buggy) whole-block check would have
+// either left archive_level unset in the first case, or discarded "enable"
+// entirely in the second.
+func TestReconcileManagedProxiedServerConfig_PreservesSiblingFields(t *testing.T) {
+	enable := true
+
+	t.Run("block with only enable gains archive_level; enable preserved", func(t *testing.T) {
+		before := renderManagedConfigWithAutoGCBehavior(t, 45678, &servercfg.AutoGCBehaviorYAMLConfig{
+			Enable_: &enable,
+		})
+		require.Contains(t, string(before), "enable: true")
+		require.NotContains(t, string(before), "archive_level")
+
+		after, changed, err := reconcileManagedProxiedServerConfig(before, true)
+		require.NoError(t, err)
+		assert.True(t, changed)
+
+		cfg, err := servercfg.NewYamlConfig(after)
+		require.NoError(t, err)
+		gc := cfg.AutoGCBehavior()
+		require.NotNil(t, gc)
+		assert.Equal(t, 0, gc.ArchiveLevel())
+		assert.True(t, gc.Enable(), "enable must be preserved, not defaulted/lost")
+	})
+
+	t.Run("block with only enable on unsupported binary is untouched", func(t *testing.T) {
+		before := renderManagedConfigWithAutoGCBehavior(t, 45678, &servercfg.AutoGCBehaviorYAMLConfig{
+			Enable_: &enable,
+		})
+
+		after, changed, err := reconcileManagedProxiedServerConfig(before, false)
+		require.NoError(t, err)
+		assert.False(t, changed, "nothing to strip when archive_level was never set")
+		assert.Equal(t, before, after)
+	})
+
+	t.Run("block with both on unsupported binary keeps enable, loses archive_level", func(t *testing.T) {
+		archiveLevel := 0
+		before := renderManagedConfigWithAutoGCBehavior(t, 45678, &servercfg.AutoGCBehaviorYAMLConfig{
+			Enable_:       &enable,
+			ArchiveLevel_: &archiveLevel,
+		})
+		require.Contains(t, string(before), "enable: true")
+		require.Contains(t, string(before), "archive_level: 0")
+
+		after, changed, err := reconcileManagedProxiedServerConfig(before, false)
+		require.NoError(t, err)
+		assert.True(t, changed)
+		assert.NotContains(t, string(after), "archive_level")
+
+		cfg, err := servercfg.NewYamlConfig(after)
+		require.NoError(t, err)
+		gc := cfg.AutoGCBehavior()
+		require.NotNil(t, gc, "block must survive since enable is still set")
+		assert.True(t, gc.Enable(), "enable must be preserved when only archive_level is stripped")
+	})
+}
+
 // TestEnsureProxiedServerConfig_ManagedWithoutKeyGainsIt is the
 // ensureProxiedServerConfig-level counterpart to
 // TestReconcileManagedProxiedServerConfig_AddsKey: an upgraded install
@@ -300,6 +390,40 @@ func TestEnsureProxiedServerConfig_PreMarkerDefaultConfigUntouchedWithWarning(t 
 	require.NoError(t, err)
 	assert.Equal(t, seed, after, "pre-marker default config must never be rewritten")
 	assert.Contains(t, got, "not Beads-managed")
+}
+
+// TestEnsureProxiedServerConfig_CustomConfigEnvVarInterpolation covers the
+// round-3 verification finding (gastownhall/beads#4986): a custom config
+// using Dolt's ${VAR}-style environment interpolation (see
+// servercfg/env_interpolate.go, applied by YamlConfigFromFile before
+// parsing) must be ACCEPTED, not rejected. An earlier version of this
+// function validated custom configs via servercfg.NewYamlConfig on raw
+// bytes, which skips interpolation entirely and would fail on a valid
+// ${VAR} placeholder with a YAML/type error before the server ever starts.
+func TestEnsureProxiedServerConfig_CustomConfigEnvVarInterpolation(t *testing.T) {
+	t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+	t.Setenv("BEADS_TEST_PROXIED_SERVER_PORT", "54321")
+	bd := t.TempDir()
+
+	customDir := t.TempDir()
+	customPath := filepath.Join(customDir, "my-server.yaml")
+	// listener.port as a raw ${VAR} placeholder — only valid after
+	// interpolation; NewYamlConfig on the raw bytes would fail to unmarshal
+	// "${BEADS_TEST_PROXIED_SERVER_PORT}" into the int Port field.
+	const tmpl = "listener:\n  host: 127.0.0.1\n  port: ${BEADS_TEST_PROXIED_SERVER_PORT}\n"
+	require.NoError(t, os.WriteFile(customPath, []byte(tmpl), 0o600))
+
+	writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: customPath})
+
+	path, err := ensureProxiedServerConfig(bd, true)
+	require.NoError(t, err, "a valid ${VAR} custom config must not be rejected pre-start")
+	assert.Equal(t, customPath, path)
+
+	// The file on disk must still carry the literal, un-interpolated
+	// placeholder — ensureProxiedServerConfig never rewrites custom configs.
+	after, err := os.ReadFile(customPath)
+	require.NoError(t, err)
+	assert.Equal(t, tmpl, string(after))
 }
 
 func TestProxiedServerPathHelpers(t *testing.T) {

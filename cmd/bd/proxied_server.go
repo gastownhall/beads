@@ -47,15 +47,27 @@ func isManagedProxiedServerConfig(body []byte) bool {
 }
 
 // reconcileManagedProxiedServerConfig parse-modify-rewrites a Beads-managed
-// config.yaml's auto_gc_behavior so it matches the resolved external dolt's
-// capability, preserving every other field (including port) by round
-// tripping through the servercfg YAML structs rather than string surgery:
+// config.yaml's auto_gc_behavior.archive_level so it matches the resolved
+// external dolt's capability, preserving every other field (including
+// port, and sibling auto_gc_behavior fields such as a user-set "enable")
+// by round tripping through the servercfg YAML structs rather than string
+// surgery:
 //
-//   - archiveLevelSupported and the key is absent: add
-//     auto_gc_behavior.archive_level: 0 (auto-GC stays enabled).
-//   - !archiveLevelSupported and the key is present: strip auto_gc_behavior
-//     entirely, so a dolt downgrade cannot hard-fail on yaml.UnmarshalStrict
-//     seeing a key its own older YAMLConfig struct does not have.
+//   - archiveLevelSupported and archive_level is absent: set it to 0
+//     (auto-GC stays enabled), creating the auto_gc_behavior block if
+//     necessary but preserving any existing sibling fields on it.
+//   - !archiveLevelSupported and archive_level is present: clear only
+//     archive_level, so a dolt downgrade cannot hard-fail on
+//     yaml.UnmarshalStrict seeing a key its own older YAMLConfig struct
+//     does not have. The block itself is only removed if doing so leaves
+//     it entirely empty (no enable, no incremental_file_size either).
+//
+// Deliberately inspects only ArchiveLevel_, not "the whole block is
+// present" — an earlier version of this function tested
+// cfg.BehaviorConfig.AutoGCBehavior != nil, which meant a block carrying
+// only a user-set "enable" (no archive_level) both failed to gain
+// archive_level when supported, and lost its "enable" setting entirely
+// when the whole block was stripped on an unsupported binary.
 //
 // Returns the rewritten bytes (with the marker re-prepended) and whether a
 // rewrite is actually needed; callers should skip the write when unchanged.
@@ -65,16 +77,28 @@ func reconcileManagedProxiedServerConfig(body []byte, archiveLevelSupported bool
 		return nil, false, fmt.Errorf("parse: %w", err)
 	}
 
-	hasKey := cfg.BehaviorConfig.AutoGCBehavior != nil
+	gc := cfg.BehaviorConfig.AutoGCBehavior
+	hasArchiveLevel := gc != nil && gc.ArchiveLevel_ != nil
+	changed := false
+
 	switch {
-	case archiveLevelSupported && !hasKey:
-		archiveLevel := 0
-		cfg.BehaviorConfig.AutoGCBehavior = &servercfg.AutoGCBehaviorYAMLConfig{
-			ArchiveLevel_: &archiveLevel,
+	case archiveLevelSupported && !hasArchiveLevel:
+		if gc == nil {
+			gc = &servercfg.AutoGCBehaviorYAMLConfig{}
+			cfg.BehaviorConfig.AutoGCBehavior = gc
 		}
-	case !archiveLevelSupported && hasKey:
-		cfg.BehaviorConfig.AutoGCBehavior = nil
-	default:
+		archiveLevel := 0
+		gc.ArchiveLevel_ = &archiveLevel
+		changed = true
+	case !archiveLevelSupported && hasArchiveLevel:
+		gc.ArchiveLevel_ = nil
+		if isAutoGCBehaviorEmpty(gc) {
+			cfg.BehaviorConfig.AutoGCBehavior = nil
+		}
+		changed = true
+	}
+
+	if !changed {
 		return body, false, nil
 	}
 
@@ -83,6 +107,13 @@ func reconcileManagedProxiedServerConfig(body []byte, archiveLevelSupported bool
 		return nil, false, fmt.Errorf("render: %w", err)
 	}
 	return append([]byte(managedProxiedServerConfigMarker), rendered...), true, nil
+}
+
+// isAutoGCBehaviorEmpty reports whether gc has no fields set at all, i.e.
+// it is now safe to omit the whole auto_gc_behavior block rather than
+// render an empty "{}" or "auto_gc_behavior:" with no children.
+func isAutoGCBehaviorEmpty(gc *servercfg.AutoGCBehaviorYAMLConfig) bool {
+	return gc.Enable_ == nil && gc.ArchiveLevel_ == nil && gc.IncrementalFileSize_ == nil
 }
 
 // warnUnmanagedProxiedServerConfig emits a one-line notice for a config.yaml
@@ -96,15 +127,12 @@ func reconcileManagedProxiedServerConfig(body []byte, archiveLevelSupported bool
 //     dolt may refuse to start on this file (yaml.UnmarshalStrict on an
 //     unrecognized key).
 //
-// body must already be known to parse (callers validate before calling);
-// a parse error here is treated as a defensive no-op rather than surfaced,
-// since the caller's own validation error takes precedence.
-func warnUnmanagedProxiedServerConfig(path string, body []byte, archiveLevelSupported bool) {
-	cfg, err := servercfg.NewYamlConfig(body)
-	if err != nil {
-		return
-	}
-	hasKey := cfg.BehaviorConfig.AutoGCBehavior != nil
+// cfg must be the ALREADY-PARSED config (via servercfg.YamlConfigFromFile,
+// not NewYamlConfig on raw bytes) — callers own an unmanaged file's parse,
+// and that parse must be interpolation-aware (see the ensureProxiedServerConfig
+// doc comment on why raw-bytes parsing is wrong for these files).
+func warnUnmanagedProxiedServerConfig(path string, cfg servercfg.ServerConfig, archiveLevelSupported bool) {
+	hasKey := cfg.AutoGCBehavior() != nil
 	switch {
 	case archiveLevelSupported && !hasKey:
 		fmt.Fprintf(os.Stderr,
@@ -200,8 +228,17 @@ func resolveProxiedServerLogPath(beadsDir string) (path string, isCustom bool, e
 // ensureProxiedServerConfig resolves (creating if needed) the managed
 // sql-server config.yaml. archiveLevelSupported gates whether a freshly
 // generated config sets auto_gc_behavior.archive_level: 0 (see
-// renderProxiedServerConfig); it has no effect on an existing config.yaml,
-// which is loaded as-is.
+// renderProxiedServerConfig).
+//
+// Parsing an EXISTING file (custom path, or a pre-marker default-path file
+// we only warn about — never a Beads-managed one) MUST go through
+// servercfg.YamlConfigFromFile, not servercfg.NewYamlConfig on raw bytes:
+// YamlConfigFromFile expands ${VAR}-style environment placeholders before
+// parsing (servercfg/env_interpolate.go), and a user's custom config is
+// entitled to use that syntax the same way `dolt sql-server --config`
+// itself would accept it. NewYamlConfig on raw bytes is only safe for a
+// Beads-managed file (marker present), because Beads itself never writes
+// interpolation syntax into a file it generates.
 func ensureProxiedServerConfig(beadsDir string, archiveLevelSupported bool) (string, error) {
 	path, isCustom, err := resolveProxiedServerConfigPath(beadsDir)
 	if err != nil {
@@ -216,16 +253,13 @@ func ensureProxiedServerConfig(beadsDir string, archiveLevelSupported bool) (str
 		if !info.Mode().IsRegular() {
 			return "", fmt.Errorf("ensureProxiedServerConfig: custom config %s: not a regular file", path)
 		}
-		body, err := os.ReadFile(path) //nolint:gosec // G304: path is caller-supplied config (env var / sidecar), validated above as a regular file, not raw user-request input
+		cfg, err := servercfg.YamlConfigFromFile(filesys.LocalFS, path)
 		if err != nil {
-			return "", fmt.Errorf("ensureProxiedServerConfig: custom config %s: %w", path, err)
-		}
-		if _, err := servercfg.NewYamlConfig(body); err != nil {
 			return "", fmt.Errorf("ensureProxiedServerConfig: custom config %s: parse: %w", path, err)
 		}
 		// A custom config is always user-owned, whether or not it happens to
 		// carry the marker — never rewritten, only warned about.
-		warnUnmanagedProxiedServerConfig(path, body, archiveLevelSupported)
+		warnUnmanagedProxiedServerConfig(path, cfg, archiveLevelSupported)
 		return path, nil
 	}
 
@@ -236,28 +270,35 @@ func ensureProxiedServerConfig(beadsDir string, archiveLevelSupported bool) (str
 
 	switch _, err := os.Stat(path); {
 	case err == nil:
+		// The marker is a literal comment line Beads itself writes and never
+		// interpolates — safe to check on raw bytes before deciding which
+		// (interpolation-aware or not) parse path applies below.
 		body, err := os.ReadFile(path) //nolint:gosec // G304: path is Beads' own default config.yaml location, not user-request input
 		if err != nil {
 			return "", fmt.Errorf("ensureProxiedServerConfig: read existing config %s: %w", path, err)
 		}
-		if _, err := servercfg.NewYamlConfig(body); err != nil {
-			return "", fmt.Errorf("ensureProxiedServerConfig: existing config %s: parse: %w", path, err)
-		}
 		if isManagedProxiedServerConfig(body) {
+			// Beads-managed: never carries interpolation syntax, so raw-bytes
+			// parsing (inside reconcileManagedProxiedServerConfig) is safe and
+			// avoids a redundant interpolation pass.
 			reconciled, changed, rerr := reconcileManagedProxiedServerConfig(body, archiveLevelSupported)
 			if rerr != nil {
 				return "", fmt.Errorf("ensureProxiedServerConfig: reconcile managed config %s: %w", path, rerr)
 			}
 			if changed {
-				if werr := os.WriteFile(path, reconciled, 0o600); werr != nil {
+				if werr := atomicWriteFile(path, reconciled); werr != nil {
 					return "", fmt.Errorf("ensureProxiedServerConfig: rewrite managed config %s: %w", path, werr)
 				}
 			}
 		} else {
 			// Pre-marker default-path file (created by a Beads version before
-			// this fix). Conservative: never rewrite a file we can't prove we
-			// own, just warn.
-			warnUnmanagedProxiedServerConfig(path, body, archiveLevelSupported)
+			// this fix) — treat like a custom config: interpolation-aware
+			// parse, never rewritten, only warned about.
+			cfg, err := servercfg.YamlConfigFromFile(filesys.LocalFS, path)
+			if err != nil {
+				return "", fmt.Errorf("ensureProxiedServerConfig: existing config %s: parse: %w", path, err)
+			}
+			warnUnmanagedProxiedServerConfig(path, cfg, archiveLevelSupported)
 		}
 		return path, nil
 	case !os.IsNotExist(err):
@@ -277,7 +318,7 @@ func ensureProxiedServerConfig(beadsDir string, archiveLevelSupported bool) (str
 	if err != nil {
 		return "", fmt.Errorf("ensureProxiedServerConfig: render YAML: %w", err)
 	}
-	if err := os.WriteFile(path, body, 0o600); err != nil {
+	if err := atomicWriteFile(path, body); err != nil {
 		return "", fmt.Errorf("ensureProxiedServerConfig: write %s: %w", path, err)
 	}
 	return path, nil
