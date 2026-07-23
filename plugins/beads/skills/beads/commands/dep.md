@@ -1,6 +1,6 @@
 ---
 description: Manage dependencies between issues
-argument-hint: [command] [from-id] [to-id]
+argument-hint: "[command] [from-id] [to-id]"
 ---
 
 Manage dependencies between beads issues.

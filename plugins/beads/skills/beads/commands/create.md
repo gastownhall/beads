@@ -1,6 +1,6 @@
 ---
 description: Create a new issue interactively
-argument-hint: [title] [type] [priority]
+argument-hint: "[title] [type] [priority]"
 ---
 
 Create a new beads issue. If arguments are provided:
