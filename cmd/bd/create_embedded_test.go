@@ -445,6 +445,42 @@ func TestEmbeddedCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("initial_status_builtin", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sb")
+		issue := bdCreate(t, bd, dir, "Blocked issue", "--status", "blocked")
+		if issue.Status != types.StatusBlocked {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusBlocked)
+		}
+	})
+
+	t.Run("initial_status_custom", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sc")
+		bdConfig(t, bd, dir, "set", "status.custom", "review:wip")
+		issue := bdCreate(t, bd, dir, "Review issue", "--status", "review")
+		if issue.Status != types.Status("review") {
+			t.Errorf("status: got %q, want review", issue.Status)
+		}
+	})
+
+	t.Run("initial_status_invalid", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "si")
+		out := bdCreateFail(t, bd, dir, "Invalid status issue", "--status", "not_a_status")
+		if !strings.Contains(out, `invalid status "not_a_status"`) {
+			t.Fatalf("expected invalid status error, got:\n%s", out)
+		}
+	})
+
+	t.Run("initial_status_wins_over_defer", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sd")
+		issue := bdCreate(t, bd, dir, "Deferred but blocked issue", "--status", "blocked", "--defer", "+2h")
+		if issue.Status != types.StatusBlocked {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusBlocked)
+		}
+		if issue.DeferUntil == nil {
+			t.Fatal("expected DeferUntil to be set")
+		}
+	})
+
 	t.Run("ephemeral", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ep")
 		issue := bdCreate(t, bd, dir, "Ephemeral issue", "--ephemeral")
@@ -900,12 +936,6 @@ func TestEmbeddedCreateCommitPending(t *testing.T) {
 		store := openStore(t, beadsDir, "cp2")
 		ctx := t.Context()
 
-		if pending, err := store.HasPendingChanges(ctx); err != nil {
-			t.Fatalf("HasPendingChanges: %v", err)
-		} else if pending {
-			t.Error("expected clean working set before write")
-		}
-
 		// Create an issue (writes to working set, no dolt commit in embedded mode)
 		issue := &types.Issue{
 			Title:     "Pending issue",
@@ -917,30 +947,12 @@ func TestEmbeddedCreateCommitPending(t *testing.T) {
 			t.Fatalf("CreateIssue: %v", err)
 		}
 
-		if pending, err := store.HasPendingChanges(ctx); err != nil {
-			t.Fatalf("HasPendingChanges: %v", err)
-		} else if !pending {
-			t.Error("expected dirty working set after write")
-		}
-
 		committed, err := store.CommitPending(ctx, "test")
 		if err != nil {
 			t.Fatalf("CommitPending: %v", err)
 		}
 		if !committed {
 			t.Error("expected commit with pending changes")
-		}
-
-		// The batch commit message should describe what changed (bd-6dnrw.11).
-		commits, err := store.Log(ctx, 1)
-		if err != nil {
-			t.Fatalf("Log: %v", err)
-		}
-		if len(commits) == 0 {
-			t.Fatal("expected at least one commit")
-		}
-		if msg := commits[0].Message; !strings.Contains(msg, "1 created") {
-			t.Errorf("expected descriptive batch commit message, got %q", msg)
 		}
 
 		// Second call should be no-op

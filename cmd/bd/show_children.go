@@ -13,7 +13,7 @@ import (
 )
 
 // showIssueChildren displays only the children of the specified issue(s)
-func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMode bool) {
+func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMode bool) error {
 	// Collect all children for all issues
 	allChildren := make(map[string][]*types.IssueWithDependencyMetadata)
 
@@ -60,8 +60,7 @@ func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMo
 
 	// Output results
 	if jsonOut {
-		outputJSON(allChildren)
-		return
+		return outputJSON(allChildren)
 	}
 
 	// Display children
@@ -81,11 +80,12 @@ func showIssueChildren(ctx context.Context, args []string, jsonOut bool, shortMo
 		}
 		fmt.Println()
 	}
+	return nil
 }
 
 // showIssueAsOf displays issues as they existed at a specific commit or branch ref.
 // This requires a versioned storage backend (e.g., Dolt).
-func showIssueAsOf(ctx context.Context, args []string, ref string, shortMode bool) {
+func showIssueAsOf(ctx context.Context, args []string, ref string, shortMode bool) error {
 	var allIssues []*types.Issue
 	for idx, id := range args {
 		issue, err := store.AsOf(ctx, id, ref)
@@ -123,6 +123,7 @@ func showIssueAsOf(ctx context.Context, args []string, ref string, shortMode boo
 	}
 
 	if jsonOutput && len(allIssues) > 0 {
-		outputJSON(allIssues)
+		return outputJSON(allIssues)
 	}
+	return nil
 }

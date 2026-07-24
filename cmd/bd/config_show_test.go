@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -304,4 +306,93 @@ func TestCollectViperEntriesWithEnvOverride(t *testing.T) {
 		}
 	}
 	t.Error("expected actor key in Viper entries")
+}
+
+// TestCollectViperEntriesMetricsUserGlobalProvenance verifies that user-global
+// metrics.* keys report the user-global value AND the user-global config path as
+// their source, even when a project .beads/config.yaml sets a conflicting value
+// that the runtime ignores. This is the provenance contract `bd config show`
+// shares with `bd config get`: metrics consent/endpoint live in the user-global
+// config only, so the displayed value must never be attributed to a project file.
+func TestCollectViperEntriesMetricsUserGlobalProvenance(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	// User-global config opts out of metrics; this is the value the runtime honors.
+	userCfgDir := filepath.Join(home, ".config", "bd")
+	if err := os.MkdirAll(userCfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir user config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(userCfgDir, "config.yaml"), []byte("metrics:\n  disabled: true\n"), 0o600); err != nil {
+		t.Fatalf("write user config: %v", err)
+	}
+
+	// A project config tries to flip metrics back on through the highest-precedence
+	// BEADS_DIR config. The runtime ignores it, but it makes GetValueSource report
+	// SourceConfigFile so the regression covers the misattribution case.
+	projectBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(projectBeadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir project .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectBeadsDir, "config.yaml"), []byte("metrics.disabled: false\n"), 0o644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	t.Setenv("BEADS_DIR", projectBeadsDir)
+
+	config.ResetForTesting()
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize() failed: %v", err)
+	}
+	defer func() {
+		config.ResetForTesting()
+		_ = config.Initialize()
+	}()
+
+	// Precondition: the project override is live in the merged config, so the
+	// generic "config.yaml" source label would otherwise misattribute the value.
+	if config.GetBool("metrics.disabled") {
+		t.Fatalf("precondition: merged metrics.disabled should be false (project override), got true")
+	}
+
+	var entry *configEntry
+	entries := collectViperEntries()
+	for i := range entries {
+		if entries[i].Key == "metrics.disabled" {
+			entry = &entries[i]
+			break
+		}
+	}
+	if entry == nil {
+		t.Fatal("expected metrics.disabled in Viper entries")
+	}
+
+	// Value comes from the user-global file, not the project override.
+	if entry.Value != "true" {
+		t.Errorf("metrics.disabled value = %q, want %q (user-global, not project override)", entry.Value, "true")
+	}
+	// Source is the explicit user-global path, matching `bd config get`, not the
+	// generic project "config.yaml" label.
+	wantSource := config.UserConfigYamlPath()
+	if entry.Source != wantSource {
+		t.Errorf("metrics.disabled source = %q, want %q (user-global path)", entry.Source, wantSource)
+	}
+	if entry.Source == "config.yaml" {
+		t.Error("metrics.disabled source must not be the generic project config.yaml label")
+	}
+
+	// The `config show --json` output serializes exactly these fields, so assert
+	// the marshaled entry reports the user-global value and never the project
+	// "config.yaml" provenance the runtime ignores.
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("json.Marshal(entry): %v", err)
+	}
+	if !strings.Contains(string(encoded), `"value":"true"`) {
+		t.Errorf("config show --json entry %s missing user-global value", encoded)
+	}
+	if strings.Contains(string(encoded), `"source":"config.yaml"`) {
+		t.Errorf("config show --json entry %s misattributes user-global value to project config.yaml", encoded)
+	}
 }

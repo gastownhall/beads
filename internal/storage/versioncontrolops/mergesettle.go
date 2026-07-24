@@ -10,14 +10,25 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/kvkeys"
 )
+
+// memoryConfigKeyPrefix is the config-table key prefix under which `bd remember`
+// stores persistent memories. It is sourced from the shared kvkeys package so it
+// can never drift from the prefix cmd/bd actually writes (kvkeys.Prefix "kv." +
+// kvkeys.MemoryPrefix "memory."), which cmd/bd also reserves against generic
+// `bd kv set` keys. Config rows with this prefix are the only config class safe
+// to auto-resolve on merge; any other key (issue_prefix above all) is left for
+// the operator.
+const memoryConfigKeyPrefix = kvkeys.MemoryConfigKeyPrefix
 
 // This file holds the merge-settlement machinery shared by server-mode
 // DoltStore (which drives it inside an explicit *sql.Tx) and the embedded
 // store's pull path (which drives it on a pinned autocommit connection via
 // MergeAndSettle): auto-resolving the conflict classes that are safe without
 // operator input (GH#2466 metadata, #4259 audit-only dependency edges,
-// bd-6dnrw.29 schema_migrations vintage rows) and repairing FK cascade
+// bd-6dnrw.29 schema_migrations vintage rows, GH#2474 convergent kv.memory.*
+// config rows) and repairing FK cascade
 // violations (bd-6dnrw.4). All functions take a DBConn, which *sql.Tx,
 // *sql.Conn, and *sql.DB all satisfy.
 
@@ -184,10 +195,11 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 
 // TryAutoResolveMergeConflicts auto-resolves merge conflicts that are safe to
 // resolve without operator input, and returns (true, nil) only if ALL conflicts
-// were resolved. It handles three classes:
+// were resolved. It handles four classes:
 //
 //   - metadata: machine-local rows (e.g. dolt_auto_push_*) that routinely diverge
 //     across clones (GH#2466). Resolved with "theirs".
+//
 //   - dependencies: with deterministic ids (#4259) the same logical edge has the
 //     same primary key on every clone, so a same-PK conflict is the SAME edge.
 //     When the two sides differ only in audit columns (created_at, created_by,
@@ -196,6 +208,7 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     convergent across clones pulling from the same remote). A conflict where the
 //     dependency type differs, or one side deleted the edge, is a real semantic
 //     conflict and is left for the operator.
+//
 //   - schema_migrations: pre-#4270 binaries record (version, NULL content_hash)
 //     while post-#4270 binaries record (version, sha256), so two clones applying
 //     the SAME migration with mixed binary vintages conflict on the cursor row
@@ -205,9 +218,33 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     Two DIFFERENT non-empty hashes are the #4259 schema fork itself and are
 //     left for the operator (bd doctor reports them as Migration Content Skew).
 //
-// Any conflict on another table, or an unresolvable dependencies or
-// schema_migrations conflict, returns (false, nil) so the caller fails the pull
-// and the operator resolves it.
+//   - config: persistent memories live in config as kv.memory.* rows (the
+//     pre-pull auto-commit now commits config so they sync). Like metadata,
+//     same-key memory edits across clones are machine-convergent: resolved with
+//     "theirs", so all clones pulling from one remote converge on the remote's
+//     value. A conflict touching ANY non-memory config key (issue_prefix above
+//     all) is a real semantic conflict and is left for the operator.
+//
+//   - issues: modify/modify conflicts where both sides updated the same issue
+//     are resolved row-wise by last-write-wins (updated_at) — whichever side
+//     has the strictly newer timestamp wins the whole row. add/add (no base
+//     row) and delete/modify are left for the operator, as are rows where both
+//     sides share the same updated_at (ambiguous). A row is only auto-resolved
+//     when the losing side's updated_at predates the merge base (equals the
+//     base row's updated_at): if the losing side also moved its updated_at past
+//     the base value, both sides made real edits since the last sync and LWW
+//     would silently drop the losing side's field-level changes, so the row is
+//     left for the operator. This eliminates the biggest manual wall in
+//     multi-clone sync: the issues-table conflicts that follow routine
+//     cross-clone pulls (GH#4698), while preserving the common case where one
+//     side's conflict is a migration artifact (the row was rewritten by a
+//     schema change but updated_at did not move) and the other side made the
+//     only real edit. bd is primarily single-user-multi-machine so concurrent
+//     same-issue edits since a shared merge base are rare.
+//
+// Any conflict on another table, or an unresolvable dependencies,
+// schema_migrations, config, or issues conflict, returns (false, nil) so the
+// caller fails the pull and the operator resolves it.
 //
 // The resolved tables are staged but NOT committed: the caller must run
 // CommitResolvedConflicts after the FK cascade repair, because DOLT_COMMIT
@@ -265,6 +302,24 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 				return false, nil
 			}
 			resolvable = append(resolvable, "schema_migrations")
+		case "config":
+			memoryOnly, err := configConflictsAreMemoryConvergent(ctx, db)
+			if err != nil {
+				return false, err
+			}
+			if !memoryOnly {
+				return false, nil
+			}
+			resolvable = append(resolvable, "config")
+		case "issues":
+			lwwSafe, err := issuesConflictsAreLWWSafe(ctx, db)
+			if err != nil {
+				return false, err
+			}
+			if !lwwSafe {
+				return false, nil
+			}
+			resolvable = append(resolvable, "issues")
 		default:
 			return false, nil
 		}
@@ -273,13 +328,33 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 	// Resolve each safe table and stage only that table (GH#2455).
 	// table is from the fixed allowlist above, never user input.
 	for _, table := range resolvable {
-		if table == "schema_migrations" {
+		switch table {
+		case "schema_migrations":
 			// Row-wise: keep whichever side recorded a content hash, so the
 			// table-level --ours/--theirs choice can never drop one.
 			if err := resolveSchemaMigrationsVintageConflicts(ctx, db); err != nil {
 				return false, err
 			}
-		} else {
+		case "config":
+			// --theirs makes this clone's local kv.memory.* edit lose to the
+			// remote value (the same convergent trade-off metadata makes). That
+			// supersession is otherwise undiagnosable, so name the resolved keys
+			// first. Best-effort: a diagnostics query failure must not abort an
+			// otherwise-correct resolution.
+			if keys, kerr := resolvedConfigConflictKeys(ctx, db); kerr == nil && len(keys) > 0 {
+				fmt.Fprintf(os.Stderr,
+					"Notice: auto-resolved %d memory config conflict(s) with the remote value (--theirs); "+
+						"local edits to %s were superseded\n",
+					len(keys), strings.Join(keys, ", "))
+			}
+			if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'config')"); err != nil {
+				return false, fmt.Errorf("failed to resolve config conflicts: %w", err)
+			}
+		case "issues":
+			if err := resolveIssuesLWWConflicts(ctx, db); err != nil {
+				return false, err
+			}
+		default:
 			//nolint:gosec // G201: table is one of the hardcoded constants above.
 			if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', '"+table+"')"); err != nil {
 				return false, fmt.Errorf("failed to resolve %s conflicts: %w", table, err)
@@ -302,8 +377,136 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 // cascade violation could never settle while the resolver committed first
 // (bd-578h9.14).
 func CommitResolvedConflicts(ctx context.Context, db DBConn) error {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts (GH#2466, #4259)')"); err != nil {
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts (GH#2466, #4259, GH#2474, GH#4698)')"); err != nil {
 		return fmt.Errorf("failed to commit resolved conflicts: %w", err)
+	}
+	return nil
+}
+
+// issuesConflictsAreLWWSafe reports whether every conflicted row in the issues
+// table is a modify/modify conflict (the row existed at the merge base and was
+// modified on both sides) with strictly different updated_at timestamps where
+// the losing side's timestamp predates the merge base — the only class safe to
+// auto-resolve by last-write-wins. add/add conflicts (no base row),
+// delete/modify conflicts (one side deleted), rows where both sides share the
+// same updated_at (ambiguous), and rows where the losing side's updated_at
+// moved past the base value (both sides made real edits since the last sync)
+// are left for the operator.
+func issuesConflictsAreLWWSafe(ctx context.Context, db DBConn) (bool, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT base_id, our_id, their_id, base_updated_at, our_updated_at, their_updated_at
+		FROM dolt_conflicts_issues`)
+	if err != nil {
+		return false, fmt.Errorf("query issues conflicts: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var baseID, ourID, theirID sql.NullString
+		var baseUpdatedAt, ourUpdatedAt, theirUpdatedAt sql.NullTime
+		if err := rows.Scan(&baseID, &ourID, &theirID, &baseUpdatedAt, &ourUpdatedAt, &theirUpdatedAt); err != nil {
+			return false, fmt.Errorf("scan issues conflict: %w", err)
+		}
+		// One side deleted the row (delete/modify): leave for the operator.
+		if !ourID.Valid || !theirID.Valid {
+			return false, nil
+		}
+		// No base row means both sides added (add/add): leave for the operator.
+		if !baseID.Valid {
+			return false, nil
+		}
+		// Both timestamps must be present to compare.
+		if !ourUpdatedAt.Valid || !theirUpdatedAt.Valid {
+			return false, nil
+		}
+		// Equal timestamps are ambiguous: leave for the operator.
+		if ourUpdatedAt.Time.Equal(theirUpdatedAt.Time) {
+			return false, nil
+		}
+		// The base row exists (modify/modify was confirmed above), so its
+		// updated_at should always be valid (the column is NOT NULL). Guard
+		// defensively: if it is somehow absent we cannot evaluate the
+		// predates check, so leave the row for the operator.
+		if !baseUpdatedAt.Valid {
+			return false, nil
+		}
+		// The losing side (older updated_at) must not have edited the issue
+		// since the merge base. If its updated_at moved past the base value,
+		// both sides made real edits since the last sync and row-level LWW
+		// would silently drop the losing side's field-level changes — leave
+		// that concurrent-edit case for the operator (GH#4698 Risk).
+		losing := ourUpdatedAt.Time
+		if theirUpdatedAt.Time.Before(losing) {
+			losing = theirUpdatedAt.Time
+		}
+		if losing.After(baseUpdatedAt.Time) {
+			return false, nil
+		}
+	}
+	return true, rows.Err()
+}
+
+// resolveIssuesLWWConflicts resolves modify/modify issues-table conflicts
+// (validated by issuesConflictsAreLWWSafe) row-wise by last-write-wins: for
+// each conflicted row, whichever side has the strictly newer updated_at wins
+// the whole row. DOLT_CONFLICTS_RESOLVE is table-level (--ours/--theirs), so
+// per-row resolution uses Dolt's manual-resolution path: for rows where ours
+// wins, deleting the conflict row from dolt_conflicts_issues signals resolution
+// (the working set already holds our values); the remaining rows (theirs wins)
+// are then resolved with a single --theirs call.
+func resolveIssuesLWWConflicts(ctx context.Context, db DBConn) error {
+	rows, err := db.QueryContext(ctx, `
+		SELECT our_id, our_updated_at, their_updated_at
+		FROM dolt_conflicts_issues`)
+	if err != nil {
+		return fmt.Errorf("query issues conflicts for LWW: %w", err)
+	}
+
+	type oursWin struct {
+		id string
+	}
+	var oursWins []oursWin
+	theirsCount := 0
+	for rows.Next() {
+		var ourID sql.NullString
+		var ourUpdatedAt, theirUpdatedAt sql.NullTime
+		if err := rows.Scan(&ourID, &ourUpdatedAt, &theirUpdatedAt); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan issues conflict for LWW: %w", err)
+		}
+		if !ourID.Valid || !ourUpdatedAt.Valid || !theirUpdatedAt.Valid {
+			// issuesConflictsAreLWWSafe already screened these out; a row
+			// that slipped through must not be silently resolved.
+			_ = rows.Close()
+			return fmt.Errorf("unexpected invalid conflict row in dolt_conflicts_issues (safety check bypassed)")
+		}
+		if ourUpdatedAt.Time.After(theirUpdatedAt.Time) {
+			oursWins = append(oursWins, oursWin{id: ourID.String})
+		} else {
+			theirsCount++
+		}
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return err
+	}
+
+	// For rows where ours wins: delete the conflict row. The working set
+	// already holds our values, so deleting the conflict entry signals
+	// resolution. Dolt applies this per-row using the primary key.
+	for _, w := range oursWins {
+		if _, err := db.ExecContext(ctx,
+			"DELETE FROM dolt_conflicts_issues WHERE our_id = ?", w.id); err != nil {
+			return fmt.Errorf("delete ours-wins conflict for issue %s: %w", w.id, err)
+		}
+	}
+
+	// For the remaining rows (theirs wins): resolve with --theirs. If there
+	// are none, skip the call — DOLT_CONFLICTS_RESOLVE on a conflict-free
+	// table is a no-op but skipping it avoids an unnecessary round-trip.
+	if theirsCount > 0 {
+		if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'issues')"); err != nil {
+			return fmt.Errorf("failed to resolve theirs-wins issues conflicts: %w", err)
+		}
 	}
 	return nil
 }
@@ -370,6 +573,68 @@ func dependencyConflictsAreAuditOnly(ctx context.Context, db DBConn) (bool, erro
 		}
 	}
 	return true, rows.Err()
+}
+
+// configConflictsAreMemoryConvergent reports whether every conflicted config
+// row is a persistent-memory row (key prefixed memoryConfigKeyPrefix). Memories
+// are the only config class safe to auto-resolve with --theirs: like metadata,
+// all clones pulling from the same remote converge on the remote's value (a
+// local edit to the same memory key loses, the same convergent trade-off
+// metadata makes). Any other config key in conflict — issue_prefix above all,
+// whose stale-value sweep GH#2455 specifically guards against — is a real
+// semantic conflict, so the whole config table is left for the operator.
+//
+// The key column is config's primary key, so a same-key conflict carries the
+// identical key on both sides; an add/delete conflict leaves one side NULL. A
+// row is convergent only if every key it presents is a memory key.
+func configConflictsAreMemoryConvergent(ctx context.Context, db DBConn) (bool, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT our_key, their_key FROM dolt_conflicts_config`)
+	if err != nil {
+		return false, fmt.Errorf("query config conflicts: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ourKey, theirKey sql.NullString
+		if err := rows.Scan(&ourKey, &theirKey); err != nil {
+			return false, fmt.Errorf("scan config conflict: %w", err)
+		}
+		for _, k := range []sql.NullString{ourKey, theirKey} {
+			if k.Valid && !strings.HasPrefix(k.String, memoryConfigKeyPrefix) {
+				return false, nil
+			}
+		}
+	}
+	return true, rows.Err()
+}
+
+// resolvedConfigConflictKeys returns the keys of the config rows currently in
+// conflict, used only to name the kv.memory.* keys whose local value the
+// --theirs auto-resolution is about to supersede. It must be called BEFORE
+// DOLT_CONFLICTS_RESOLVE clears dolt_conflicts_config. config's primary key is
+// `key`, so a same-key conflict carries the identical key on both sides; an
+// add/delete conflict leaves one side NULL, so COALESCE picks whichever side has
+// it.
+func resolvedConfigConflictKeys(ctx context.Context, db DBConn) ([]string, error) {
+	rows, err := db.QueryContext(ctx,
+		"SELECT COALESCE(our_key, their_key) FROM dolt_conflicts_config")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []string
+	for rows.Next() {
+		var key sql.NullString
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		if key.Valid {
+			keys = append(keys, key.String)
+		}
+	}
+	return keys, rows.Err()
 }
 
 // schemaMigrationsConflictsAreVintageOnly reports whether every conflicted

@@ -50,26 +50,24 @@ func (r *RoutedResult) Close() {
 // Tries the local store first, then prefix-based routing via routes.jsonl,
 // then falls back to contributor auto-routing.
 //
-// Routed stores are opened read-only; mutating commands must use
-// resolveAndGetIssueWithRoutingForWrite instead.
-//
 // Returns a RoutedResult containing the issue, resolved ID, and the store to use.
 // The caller MUST call result.Close() when done to release any routed storage.
+//
+// Prefix-routed target stores are opened read-only; mutating commands must use
+// resolveAndGetIssueForMutation instead so a routed read can never write
+// migrations or other open-time mutations into a foreign project (GH#3231, #4141).
 func resolveAndGetIssueWithRouting(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
-	return resolveAndGetIssueWithRoutingMode(ctx, localStore, id, false)
+	return resolveAndGetIssueWithRoutingAccess(ctx, localStore, id, false)
 }
 
-// resolveAndGetIssueWithRoutingForWrite is the write-intent variant of
-// resolveAndGetIssueWithRouting: a prefix-routed target store is opened
-// writable so mutating commands can write through it and commit on the
-// target store's head (#4141). Read paths must keep the read-only variant so
-// a routed read can never write migrations or other open-time mutations into
-// a foreign project's history (bd-6dnrw.32, GH#3231).
-func resolveAndGetIssueWithRoutingForWrite(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
-	return resolveAndGetIssueWithRoutingMode(ctx, localStore, id, true)
+// resolveAndGetIssueForMutation resolves an issue like
+// resolveAndGetIssueWithRouting, but opens prefix-routed target stores in
+// writable mode so mutation commands can commit to the routed repository.
+func resolveAndGetIssueForMutation(ctx context.Context, localStore storage.DoltStorage, id string) (*RoutedResult, error) {
+	return resolveAndGetIssueWithRoutingAccess(ctx, localStore, id, true)
 }
 
-func resolveAndGetIssueWithRoutingMode(ctx context.Context, localStore storage.DoltStorage, id string, forWrite bool) (*RoutedResult, error) {
+func resolveAndGetIssueWithRoutingAccess(ctx context.Context, localStore storage.DoltStorage, id string, writablePrefixRoute bool) (*RoutedResult, error) {
 	// Try local store first.
 	result, err := resolveAndGetFromStore(ctx, localStore, id, false)
 	if err == nil {
@@ -80,14 +78,14 @@ func resolveAndGetIssueWithRoutingMode(ctx context.Context, localStore storage.D
 	// This handles cross-rig lookups where the ID's prefix maps to a different
 	// database (e.g., hr-8wn.1 routes to the herald rig's database).
 	if isNotFoundErr(err) {
-		if prefixResult, prefixErr := resolveViaPrefixRoutingMode(ctx, id, forWrite); prefixErr == nil {
+		if prefixResult, prefixErr := resolveViaPrefixRoutingWithAccess(ctx, id, writablePrefixRoute); prefixErr == nil {
 			return prefixResult, nil
 		}
 	}
 
 	// If not found via prefix routing, try contributor auto-routing as fallback (GH#2345).
-	// Auto-routed stores stay read-only even for write-intent callers: this
-	// path hydrates foreign contributor projects, which must never be mutated.
+	// Auto-routed stores stay read-only even for write-intent callers (writablePrefixRoute):
+	// this path hydrates foreign contributor projects, which must never be mutated.
 	if isNotFoundErr(err) {
 		if autoResult, autoErr := resolveViaAutoRouting(ctx, localStore, id); autoErr == nil {
 			return autoResult, nil
@@ -150,15 +148,18 @@ type prefixRoute struct {
 // (e.g., crew/beercan → town/.beads with database "hq"), a bead ID like "hr-8wn.1"
 // can be resolved by following the "hr-" route to the herald rig's .beads directory,
 // which declares dolt_database="herald".
+//
+// The read-only open guarantees a routed read cannot mutate the target; mutation
+// commands must route through resolveViaPrefixRoutingWithAccess with writable=true.
 func resolveViaPrefixRouting(ctx context.Context, id string) (*RoutedResult, error) {
-	return resolveViaPrefixRoutingMode(ctx, id, false)
+	return resolveViaPrefixRoutingWithAccess(ctx, id, false)
 }
 
-// resolveViaPrefixRoutingMode is resolveViaPrefixRouting with an explicit
-// store-open mode. forWrite opens the routed target writable, behaving like
-// running the command inside that rig; false keeps the read-only open that
-// guarantees a routed read cannot mutate the target (bd-6dnrw.32).
-func resolveViaPrefixRoutingMode(ctx context.Context, id string, forWrite bool) (*RoutedResult, error) {
+// resolveViaPrefixRoutingWithAccess is the shared implementation that selects the
+// store-open mode. writable opens the routed target writable, behaving like running
+// the command inside that rig; false keeps the read-only open that guarantees a
+// routed read cannot mutate the target (bd-6dnrw.32).
+func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable bool) (*RoutedResult, error) {
 	// Extract prefix from the bead ID (e.g., "hr-" from "hr-8wn.1")
 	prefix := extractBeadPrefix(id)
 	if prefix == "" {
@@ -210,26 +211,25 @@ func resolveViaPrefixRoutingMode(ctx context.Context, id string, forWrite bool) 
 
 	debug.Logf("[routing] Prefix %q matched route to %s (database: %s)\n", prefix, matchedRoute.Path, targetDB)
 
-	// Open a store for the target database — read-only unless the caller
-	// declared write intent (routed writes must commit on the target head,
-	// which a read-only open refuses).
-	// We need to temporarily override BEADS_DOLT_SERVER_DATABASE so the store
-	// connects to the correct database on the shared Dolt server.
-	openStore := newReadOnlyStoreFromConfig
-	if forWrite {
-		openStore = newDoltStoreFromConfig
-	}
+	// We need to temporarily override BEADS_DOLT_SERVER_DATABASE so server-mode
+	// stores connect to the correct database on the shared Dolt server.
 	origDB := os.Getenv("BEADS_DOLT_SERVER_DATABASE")
 	_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", targetDB)
-	targetStore, err := openStore(ctx, targetBeadsDir)
+	var targetStore storage.DoltStorage
+	var openErr error
+	if writable {
+		targetStore, openErr = newDoltStoreFromConfig(ctx, targetBeadsDir)
+	} else {
+		targetStore, openErr = newReadOnlyStoreFromConfig(ctx, targetBeadsDir)
+	}
 	// Restore the original env var
 	if origDB != "" {
 		_ = os.Setenv("BEADS_DOLT_SERVER_DATABASE", origDB)
 	} else {
 		_ = os.Unsetenv("BEADS_DOLT_SERVER_DATABASE")
 	}
-	if err != nil {
-		return nil, fmt.Errorf("opening routed store for %s: %w", matchedRoute.Path, err)
+	if openErr != nil {
+		return nil, fmt.Errorf("opening routed store for %s: %w", matchedRoute.Path, openErr)
 	}
 
 	result, err := resolveAndGetFromStore(ctx, targetStore, id, true)

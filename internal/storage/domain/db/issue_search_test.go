@@ -607,7 +607,7 @@ func (s *testSuite) paginationSeedReady(prefix, isolationLabel string, n int) []
 		iss.CreatedAt = now.Add(time.Duration(i) * time.Minute)
 		s.Require().NoError(r.Insert(s.Ctx(), iss, "tester", domain.InsertIssueOpts{}))
 		s.Require().NoError(labelRepo.Insert(s.Ctx(), id, isolationLabel, "tester", domain.LabelOpts{}))
-		expected = append([]string{id}, expected...) // prepend → newest-first
+		expected = append(expected, id) // append → oldest-first (FIFO)
 	}
 	return expected
 }
@@ -687,9 +687,9 @@ func (s *testSuite) paginationReadyUnionInterleaves() {
 	}
 
 	want := []string{
-		"bd-pgr-int-w-2", "bd-pgr-int-i-2",
-		"bd-pgr-int-w-1", "bd-pgr-int-i-1",
-		"bd-pgr-int-w-0", "bd-pgr-int-i-0",
+		"bd-pgr-int-i-0", "bd-pgr-int-w-0",
+		"bd-pgr-int-i-1", "bd-pgr-int-w-1",
+		"bd-pgr-int-i-2", "bd-pgr-int-w-2",
 	}
 
 	walked := s.readyPageWalkByLabel(r, label, types.SortPolicyPriority, 2)

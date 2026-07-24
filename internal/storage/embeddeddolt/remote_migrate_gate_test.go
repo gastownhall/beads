@@ -21,6 +21,8 @@ func TestEmbeddedRemoteMigrateGate_BlocksReopen(t *testing.T) {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
 	}
 	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	// Blunt-gate coverage: pin the (default-on) smart router off.
+	t.Setenv(schema.SmartGateEnv, "0")
 
 	ctx := t.Context()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
@@ -71,6 +73,8 @@ func TestEmbeddedOpenReadOnly_SkipsGateAndMigrations(t *testing.T) {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
 	}
 	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	// Blunt-gate coverage: pin the (default-on) smart router off.
+	t.Setenv(schema.SmartGateEnv, "0")
 
 	ctx := t.Context()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
@@ -192,6 +196,8 @@ func TestEmbeddedOpenForReadOnlyCommand_LenientGate(t *testing.T) {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
 	}
 	t.Setenv(schema.AllowRemoteMigrateEnv, "0")
+	// Blunt-gate coverage: pin the (default-on) smart router off.
+	t.Setenv(schema.SmartGateEnv, "0")
 
 	ctx := t.Context()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")

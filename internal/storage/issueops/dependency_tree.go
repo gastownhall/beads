@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -10,12 +9,12 @@ import (
 // GetDependencyTreeInTx returns a flattened dependency tree for visualization.
 // It performs a recursive BFS traversal up to maxDepth, using GetIssueInTx and
 // GetDependenciesInTx/GetDependentsInTx which handle wisp routing.
-func GetDependencyTreeInTx(ctx context.Context, tx *sql.Tx, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
+func GetDependencyTreeInTx(ctx context.Context, tx DBTX, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
 	visited := make(map[string]bool)
 	return buildDependencyTreeInTx(ctx, tx, issueID, 0, maxDepth, reverse, visited, "", "")
 }
 
-func buildDependencyTreeInTx(ctx context.Context, tx *sql.Tx, issueID string, depth, maxDepth int, reverse bool, visited map[string]bool, parentID string, edgeFromParent types.DependencyType) ([]*types.TreeNode, error) {
+func buildDependencyTreeInTx(ctx context.Context, tx DBTX, issueID string, depth, maxDepth int, reverse bool, visited map[string]bool, parentID string, edgeFromParent types.DependencyType) ([]*types.TreeNode, error) {
 	if depth >= maxDepth || visited[issueID] {
 		return nil, nil
 	}

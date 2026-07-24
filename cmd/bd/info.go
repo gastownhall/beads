@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -28,146 +29,144 @@ Examples:
   bd info --whats-new
   bd info --whats-new --json
   bd info --thanks`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("info")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		schemaFlag, _ := cmd.Flags().GetBool("schema")
 		whatsNewFlag, _ := cmd.Flags().GetBool("whats-new")
 		thanksFlag, _ := cmd.Flags().GetBool("thanks")
 
-		// Handle --thanks flag
 		if thanksFlag {
 			printThanksPage()
-			return
+			return nil
 		}
 
-		// Handle --whats-new flag
 		if whatsNewFlag {
-			showWhatsNew()
-			return
+			return showWhatsNew()
 		}
 
-		// Get database path (absolute)
-		absDBPath, err := filepath.Abs(dbPath)
-		if err != nil {
-			absDBPath = dbPath
+		if usesProxiedServer() {
+			return runInfoProxiedServer(rootCtx, schemaFlag)
 		}
 
-		// Build info structure
+		absDBPath := absoluteDBPath()
+
 		info := map[string]interface{}{
 			"database_path": absDBPath,
 			"mode":          "direct",
 		}
 
-		// Get issue count from direct store
 		if store != nil {
 			ctx := rootCtx
 
-			filter := types.IssueFilter{}
-			issues, err := store.SearchIssues(ctx, "", filter)
+			issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 			if err == nil {
 				info["issue_count"] = len(issues)
 			}
-		}
 
-		// Add config to info output
-		if store != nil {
-			ctx := rootCtx
 			configMap, err := store.GetAllConfig(ctx)
 			if err == nil && len(configMap) > 0 {
 				info["config"] = configMap
 			}
-		}
 
-		// Add schema information if requested
-		if schemaFlag && store != nil {
-			ctx := rootCtx
-
-			// Get schema version
-			schemaVersion, err := store.GetLocalMetadata(ctx, "bd_version")
-			if err != nil {
-				schemaVersion = "unknown"
-			}
-
-			// Get tables
-			tables := []string{"issues", "dependencies", "labels", "config", "metadata"}
-
-			// Get config
-			configMap := make(map[string]string)
-			prefix, _ := store.GetConfig(ctx, "issue_prefix") // Best effort: empty prefix is valid
-			if prefix != "" {
-				configMap["issue_prefix"] = prefix
-			}
-
-			// Get sample issue IDs
-			filter := types.IssueFilter{}
-			issues, err := store.SearchIssues(ctx, "", filter)
-			sampleIDs := []string{}
-			detectedPrefix := ""
-			if err == nil && len(issues) > 0 {
-				// Get first 3 issue IDs as samples
-				maxSamples := 3
-				if len(issues) < maxSamples {
-					maxSamples = len(issues)
+			if schemaFlag {
+				schemaVersion, err := store.GetLocalMetadata(ctx, "bd_version")
+				if err != nil {
+					schemaVersion = "unknown"
 				}
-				for i := 0; i < maxSamples; i++ {
-					sampleIDs = append(sampleIDs, issues[i].ID)
-				}
-				// Detect prefix from first issue
-				if len(issues) > 0 {
-					detectedPrefix = extractPrefix(issues[0].ID)
-				}
-			}
-
-			info["schema"] = map[string]interface{}{
-				"tables":           tables,
-				"schema_version":   schemaVersion,
-				"config":           configMap,
-				"sample_issue_ids": sampleIDs,
-				"detected_prefix":  detectedPrefix,
+				prefix, _ := store.GetConfig(ctx, "issue_prefix") // Best effort: empty prefix is valid
+				info["schema"] = buildInfoSchema(schemaVersion, prefix, issues)
 			}
 		}
 
-		// JSON output
-		if jsonOutput {
-			outputJSON(info)
-			return
-		}
-
-		// Human-readable output
-		fmt.Println("\nBeads Database Information")
-		fmt.Println("===========================")
-		fmt.Printf("Database: %s\n", absDBPath)
-		fmt.Printf("Mode: direct\n")
-
-		// Show issue count
-		if count, ok := info["issue_count"].(int); ok {
-			fmt.Printf("\nIssue Count: %d\n", count)
-		}
-
-		// Show schema information if requested
-		if schemaFlag {
-			if schemaInfo, ok := info["schema"].(map[string]interface{}); ok {
-				fmt.Println("\nSchema Information:")
-				fmt.Printf("  Tables: %v\n", schemaInfo["tables"])
-				if version, ok := schemaInfo["schema_version"].(string); ok {
-					fmt.Printf("  Schema Version: %s\n", version)
-				}
-				if prefix, ok := schemaInfo["detected_prefix"].(string); ok && prefix != "" {
-					fmt.Printf("  Detected Prefix: %s\n", prefix)
-				}
-				if samples, ok := schemaInfo["sample_issue_ids"].([]string); ok && len(samples) > 0 {
-					fmt.Printf("  Sample Issues: %v\n", samples)
-				}
-			}
-		}
-
-		// Check git hooks status
-		hookStatuses := CheckGitHooks()
-		if warning := FormatHookWarnings(hookStatuses); warning != "" {
-			fmt.Printf("\n%s\n", warning)
-		}
-
-		fmt.Println()
+		return renderInfo(info, schemaFlag, absDBPath)
 	},
+}
+
+func absoluteDBPath() string {
+	absDBPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		return dbPath
+	}
+	return absDBPath
+}
+
+func buildInfoSchema(schemaVersion, prefix string, issues []*types.Issue) map[string]interface{} {
+	tables := []string{"issues", "dependencies", "labels", "config", "metadata"}
+
+	configMap := make(map[string]string)
+	if prefix != "" {
+		configMap["issue_prefix"] = prefix
+	}
+
+	sampleIDs := []string{}
+	detectedPrefix := ""
+	if len(issues) > 0 {
+		maxSamples := 3
+		if len(issues) < maxSamples {
+			maxSamples = len(issues)
+		}
+		for i := 0; i < maxSamples; i++ {
+			sampleIDs = append(sampleIDs, issues[i].ID)
+		}
+		detectedPrefix = extractPrefix(issues[0].ID)
+	}
+
+	return map[string]interface{}{
+		"tables":           tables,
+		"schema_version":   schemaVersion,
+		"config":           configMap,
+		"sample_issue_ids": sampleIDs,
+		"detected_prefix":  detectedPrefix,
+	}
+}
+
+func renderInfo(info map[string]interface{}, schemaFlag bool, absDBPath string) error {
+	if jsonOutput {
+		return outputJSON(info)
+	}
+
+	mode, _ := info["mode"].(string)
+
+	fmt.Println("\nBeads Database Information")
+	fmt.Println("===========================")
+	fmt.Printf("Database: %s\n", absDBPath)
+	fmt.Printf("Mode: %s\n", mode)
+
+	if count, ok := info["issue_count"].(int); ok {
+		fmt.Printf("\nIssue Count: %d\n", count)
+	}
+
+	if schemaFlag {
+		if schemaInfo, ok := info["schema"].(map[string]interface{}); ok {
+			fmt.Println("\nSchema Information:")
+			fmt.Printf("  Tables: %v\n", schemaInfo["tables"])
+			if version, ok := schemaInfo["schema_version"].(string); ok {
+				fmt.Printf("  Schema Version: %s\n", version)
+			}
+			if prefix, ok := schemaInfo["detected_prefix"].(string); ok && prefix != "" {
+				fmt.Printf("  Detected Prefix: %s\n", prefix)
+			}
+			if samples, ok := schemaInfo["sample_issue_ids"].([]string); ok && len(samples) > 0 {
+				fmt.Printf("  Sample Issues: %v\n", samples)
+			}
+		}
+	}
+
+	hookStatuses := CheckGitHooks()
+	if warning := FormatHookWarnings(hookStatuses); warning != "" {
+		fmt.Printf("\n%s\n", warning)
+	}
+
+	fmt.Println()
+	return nil
 }
 
 // extractPrefix extracts the prefix from an issue ID (e.g., "bd-123" -> "bd")
@@ -209,6 +208,41 @@ type VersionChange struct {
 
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
+	{
+		Version: "1.1.0",
+		Date:    "2026-07-04",
+		Changes: []string{
+			"STABLE: first stable 1.1.x release; includes the rc.1 and rc.2 cross-clone migration-safety work plus post-rc.2 recovery fixes.",
+			"UPGRADE: back up with bd export --all before migrating older or remote-backed databases; the upgrade docs now carry the stable 1.1.0 recipes.",
+			"FIX: failed v53 migrations can self-heal on the next open, including wisp_dependencies split-column drift and dirty snapshot tables left by a half-applied pass (#4555, #4558).",
+			"FIX: bd dolt commit and bd vc commit can commit a dirty embedded working set that is blocking a pending schema migration; after that, bd migrate can proceed (#4566, #4567).",
+			"NEW: the state-aware remote-migrate gate is enabled by default; safe first-mover migrations proceed, while remote-ahead or content-skew cases still stop for adoption or human review (#4516).",
+		},
+	},
+	{
+		Version: "1.1.0-rc.2",
+		Date:    "2026-07-02",
+		Changes: []string{
+			"RC: fixes the two upgrade-breaking migration regressions reported against rc.1 (#4502, #4534); back up with bd export --all before migrating a remote-backed database.",
+			"FIX: the v53 migration no longer fails with Unknown column on databases whose issues table predates the rig/agent columns; the runner repairs the drift before applying (#4502).",
+			"FIX: an orphaned child_counters row no longer bricks every bd create after the fk_counter_parent constraint returned; a clone-local cleanup migration heals affected databases automatically (#4534).",
+			"FIX: old binaries fail fast on writable opens of a schema-newer database instead of proceeding blind (#4531).",
+			"NEW: the remote-migrate gate is state-aware and agent-safe — provably safe migrations auto-resolve; risky states still require BD_ALLOW_REMOTE_MIGRATE=1 by the designated migrator (#4515, #4516).",
+			"UPGRADE: the upgrade guide now carries a validated remote-backed / multi-clone recipe with a pre-migrate backup step (#4514).",
+		},
+	},
+	{
+		Version: "1.1.0-rc.1",
+		Date:    "2026-06-23",
+		Changes: []string{
+			"RC: v1.0.5 was pulled from the default release path after #4259; this candidate carries the cross-clone data-safety fixes for validation before stable promotion.",
+			"UPGRADE: For multiple clones sharing one Dolt remote, sync every clone before upgrading, designate one machine to migrate and push, then upgrade/pull the remaining clones before doing tracked work.",
+			"NEW: bd refuses silent in-place schema migrations on existing remote-backed databases unless BD_ALLOW_REMOTE_MIGRATE=1 is set by the designated migrator.",
+			"NEW: schema_migrations records per-migration content hashes, and bd doctor reports migration-content skew against the cached remote-tracking ref.",
+			"FIX: dependencies and wisp_dependencies now use deterministic natural-key-derived IDs, with migration 0050 rekeying existing rows and same-edge pull conflicts auto-resolved when only audit columns differ.",
+			"FIX: Dolt primary-key merge refusals are classified with recovery guidance instead of surfacing only a raw Error 1105.",
+		},
+	},
 	{
 		Version: "1.0.5",
 		Date:    "2026-05-28",
@@ -717,7 +751,7 @@ var versionChanges = []VersionChange{
 			"FIX: Import custom issue types (#1322)",
 			"FIX: SQLite transaction improvements (#1272, #1276)",
 			"FIX: Multiple Dolt backend fixes for hooks, routing, and daemon compatibility",
-			"DOCS: Comprehensive docs/DOLT.md guide (#1310)",
+			"DOCS: Comprehensive Dolt backend guide, now at docs/architecture/dolt.md (#1310)",
 		},
 	},
 	{
@@ -1377,16 +1411,14 @@ var versionChanges = []VersionChange{
 	},
 }
 
-// showWhatsNew displays agent-relevant changes from recent versions
-func showWhatsNew() {
-	currentVersion := Version // from version.go
+func showWhatsNew() error {
+	currentVersion := Version
 
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"current_version": currentVersion,
 			"recent_changes":  versionChanges,
 		})
-		return
 	}
 
 	// Human-readable output
@@ -1411,12 +1443,12 @@ func showWhatsNew() {
 
 	fmt.Println("💡 Tip: Use `bd info --whats-new --json` for machine-readable output")
 	fmt.Println()
+	return nil
 }
 
 func init() {
 	infoCmd.Flags().Bool("schema", false, "Include schema information in output")
 	infoCmd.Flags().Bool("whats-new", false, "Show agent-relevant changes from recent versions")
 	infoCmd.Flags().Bool("thanks", false, "Show thank you page for contributors")
-	infoCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	rootCmd.AddCommand(infoCmd)
 }

@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unicode"
@@ -21,6 +23,9 @@ var helpDocFlag string
 // helpListFlag is the --list flag for listing available commands
 var helpListFlag bool
 
+// helpDocsRootFlag is the --docs-root flag for generating repository docs in one process.
+var helpDocsRootFlag string
+
 // registerHelpAllFlag adds the --all, --doc, and --list flags to Cobra's auto-generated help command.
 // Must be called after rootCmd.InitDefaultHelpCmd() has run (i.e., after first Execute
 // or explicit init). We hook it in init() after all subcommands are registered.
@@ -34,14 +39,25 @@ func registerHelpAllFlag() {
 			cmd.Flags().BoolVar(&helpAllFlag, "all", false, "Show help for all commands in a single document")
 			cmd.Flags().StringVar(&helpDocFlag, "doc", "", "Generate markdown docs for a single command")
 			cmd.Flags().BoolVar(&helpListFlag, "list", false, "List all available commands")
+			cmd.Flags().StringVar(&helpDocsRootFlag, "docs-root", "", "Generate repository CLI docs under this root")
 
 			// Wrap the existing Run to check --all, --doc, and --list first
 			originalRun := cmd.Run
-			cmd.Run = func(cmd *cobra.Command, args []string) {
+			cmd.Run = nil
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			cmd.RunE = func(cmd *cobra.Command, args []string) error {
+				if helpDocsRootFlag != "" {
+					if err := writeGeneratedCLIDocs(rootCmd, helpDocsRootFlag); err != nil {
+						fmt.Fprintln(os.Stderr, err)
+						return SilentExit()
+					}
+					return nil
+				}
 				if helpListFlag {
 					// Handle --list flag: list all available commands
 					listAllCommands(os.Stdout, rootCmd)
-					return
+					return nil
 				}
 				if helpDocFlag != "" {
 					// Handle --doc flag: generate single command docs
@@ -52,17 +68,18 @@ func registerHelpAllFlag() {
 					if err := writeSingleCommandDoc(os.Stdout, rootCmd, cmdPath); err != nil {
 						fmt.Fprintln(os.Stderr, err)
 						fmt.Fprintf(os.Stderr, "Available commands: %s\n", strings.Join(availableCommandNames(rootCmd), " "))
-						os.Exit(1)
+						return SilentExit()
 					}
-					return
+					return nil
 				}
 				if helpAllFlag {
 					writeAllHelp(os.Stdout, rootCmd)
-					return
+					return nil
 				}
 				if originalRun != nil {
 					originalRun(cmd, args)
 				}
+				return nil
 			}
 			return
 		}
@@ -161,31 +178,7 @@ func writeCommandHelp(w io.Writer, cmd *cobra.Command, parentPath string, depth 
 
 	fmt.Fprintf(w, "%s %s\n\n", heading, fullPath)
 
-	// Description
-	if cmd.Long != "" {
-		fmt.Fprintf(w, "%s\n\n", escapeMDXText(cmd.Long))
-	} else if cmd.Short != "" {
-		fmt.Fprintf(w, "%s\n\n", escapeMDXText(cmd.Short))
-	}
-
-	// Usage
-	fmt.Fprintf(w, "```\n%s\n```\n\n", strings.TrimRight(cmd.UseLine(), " "))
-
-	// Aliases
-	if len(cmd.Aliases) > 0 {
-		fmt.Fprintf(w, "**Aliases:** %s\n\n", strings.Join(cmd.Aliases, ", "))
-	}
-
-	// Examples
-	if cmd.Example != "" {
-		fmt.Fprintf(w, "**Examples:**\n\n```bash\n%s\n```\n\n", cmd.Example)
-	}
-
-	// Local flags (not inherited/global)
-	localFlags := cmd.NonInheritedFlags()
-	if localFlags.HasFlags() {
-		fmt.Fprintf(w, "**Flags:**\n\n```\n%s```\n\n", localFlags.FlagUsages())
-	}
+	writeCommandBody(w, cmd)
 
 	// Subcommands
 	subCmds := cmd.Commands()
@@ -207,36 +200,54 @@ func writeCommandHelp(w io.Writer, cmd *cobra.Command, parentPath string, depth 
 	}
 }
 
-// sidebarPositionMap maps command names to their Docusaurus sidebar position
-// This controls the ordering of commands in the website sidebar.
-var sidebarPositionMap = map[string]int{
-	"create":  10,
-	"list":    20,
-	"ready":   30,
-	"show":    40,
-	"update":  50,
-	"close":   60,
-	"delete":  70,
-	"reopen":  80,
-	"dep":     100,
-	"label":   110,
-	"state":   120,
-	"sync":    200,
-	"import":  210,
-	"export":  220,
-	"mol":     300,
-	"formula": 310,
-	"init":    400,
-	"setup":   410,
-	"config":  420,
-	"prime":   500,
-	"doctor":  600,
-	"admin":   610,
-	"migrate": 620,
+// writeCommandBody writes the heading-independent parts of a command's help:
+// description, usage, aliases, examples, and local flags.
+func writeCommandBody(w io.Writer, cmd *cobra.Command) {
+	// Description
+	if cmd.Long != "" {
+		fmt.Fprintf(w, "%s\n\n", escapeMDXText(cmd.Long))
+	} else if cmd.Short != "" {
+		fmt.Fprintf(w, "%s\n\n", escapeMDXText(cmd.Short))
+	}
+
+	// Usage — mirror the binary's --help output: a runnable command shows its
+	// UseLine; a command with subcommands also shows `<path> [command]`.
+	// UseLine() alone appends "[flags]" even on non-runnable parents, which
+	// the binary's help never prints.
+	var usage []string
+	if cmd.Runnable() {
+		usage = append(usage, strings.TrimRight(cmd.UseLine(), " "))
+	}
+	if cmd.HasAvailableSubCommands() {
+		usage = append(usage, cmd.CommandPath()+" [command]")
+	}
+	if len(usage) == 0 {
+		usage = append(usage, strings.TrimRight(cmd.UseLine(), " "))
+	}
+	fmt.Fprintf(w, "```\n%s\n```\n\n", strings.Join(usage, "\n"))
+
+	// Aliases
+	if len(cmd.Aliases) > 0 {
+		fmt.Fprintf(w, "**Aliases:** %s\n\n", strings.Join(cmd.Aliases, ", "))
+	}
+
+	// Examples
+	if cmd.Example != "" {
+		fmt.Fprintf(w, "**Examples:**\n\n```bash\n%s\n```\n\n", cmd.Example)
+	}
+
+	// Local flags (not inherited/global)
+	localFlags := cmd.NonInheritedFlags()
+	if localFlags.HasFlags() {
+		fmt.Fprintf(w, "**Flags:**\n\n```\n%s```\n\n", localFlags.FlagUsages())
+	}
 }
 
-// writeSingleCommandDoc generates markdown documentation for a single command
-// with Docusaurus frontmatter for website integration.
+// writeSingleCommandDoc generates one command's documentation page as generic
+// Markdown: title/description frontmatter and portable CommonMark. bd never
+// emits site-generator-specific output (Docusaurus ids/slugs, Mintlify JSX,
+// navigation fragments) — repo post-processors adapt these pages to whatever
+// the documentation site needs.
 func writeSingleCommandDoc(w io.Writer, root *cobra.Command, cmdName string) error {
 	// Find the command (handle nested commands like "mol pour")
 	cmd := findCommand(root, cmdName)
@@ -245,32 +256,136 @@ func writeSingleCommandDoc(w io.Writer, root *cobra.Command, cmdName string) err
 	}
 
 	docCommand := strings.TrimSpace(strings.TrimPrefix(commandPath(cmd), root.Name()))
-	docCommand = strings.TrimSpace(docCommand)
 	if docCommand == "" {
 		return errors.New("Error: cannot generate docs for root command")
 	}
-	docID := commandDocID(docCommand)
 
-	// Get sidebar position (default to 999 if not in map)
-	position := 999
-	if pos, ok := sidebarPositionMap[docCommand]; ok {
-		position = pos
+	fmt.Fprintf(w, "---\n")
+	fmt.Fprintf(w, "title: %q\n", "bd "+docCommand)
+	if cmd.Short != "" {
+		fmt.Fprintf(w, "description: %q\n", cmd.Short)
+	}
+	fmt.Fprintf(w, "---\n\n")
+	fmt.Fprintf(w, "<!-- AUTO-GENERATED: do not edit manually -->\n\n")
+	fmt.Fprintf(w, "Generated from `bd help --doc %s`.\n\n", docCommand)
+
+	// The frontmatter title serves as the page heading, so the top command
+	// emits its body without a duplicate heading; subcommands start at ##.
+	writeCommandBody(w, cmd)
+
+	fullPath := commandPath(cmd)
+	for _, sub := range cmd.Commands() {
+		if !sub.IsAvailableCommand() {
+			continue
+		}
+		writeCommandHelp(w, sub, fullPath, 2)
+	}
+	return nil
+}
+
+// writeGeneratedCLIDocs writes the repository's generated CLI documentation:
+// the single-file reference at docs/CLI_REFERENCE.md and a generic per-command
+// staging tree at build/cli-docs/ for post-processors to consume
+// (scripts/generate-cli-docs.sh runs them). The staging tree is not committed.
+func writeGeneratedCLIDocs(root *cobra.Command, repoRoot string) error {
+	repoRoot = filepath.Clean(repoRoot)
+
+	var all bytes.Buffer
+	writeAllHelp(&all, root)
+	if err := writeMarkdownFile(filepath.Join(repoRoot, "docs", "CLI_REFERENCE.md"), all.String()); err != nil {
+		return err
 	}
 
-	// Generate Docusaurus frontmatter
-	fmt.Fprintf(w, "---\n")
-	fmt.Fprintf(w, "id: %s\n", docID)
-	fmt.Fprintf(w, "title: bd %s\n", docCommand)
-	fmt.Fprintf(w, "slug: /cli-reference/%s\n", docID)
-	fmt.Fprintf(w, "sidebar_position: %d\n", position)
-	fmt.Fprintf(w, "---\n")
-	fmt.Fprintf(w, "\n")
-	fmt.Fprintf(w, "<!-- AUTO-GENERATED: do not edit manually -->\n")
-	fmt.Fprintf(w, "Generated from `bd help --doc %s`\n\n", docCommand)
+	return writeGenericCLIDocsDir(filepath.Join(repoRoot, "build", "cli-docs"), root)
+}
 
-	// Generate the command help (using h2 for single command)
-	parentPath := strings.TrimSuffix(commandPath(cmd), " "+cmd.Name())
-	writeCommandHelp(w, cmd, parentPath, 2)
+// writeGenericCLIDocsDir emits the generic per-command pages plus an index
+// into outDir, removing any pages left over from commands that no longer
+// exist.
+func writeGenericCLIDocsDir(outDir string, root *cobra.Command) error {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return err
+	}
+	if err := removeMarkdownFiles(outDir); err != nil {
+		return err
+	}
+
+	commands := availableCommandNames(root)
+	if err := writeMarkdownFile(filepath.Join(outDir, "index.md"), genericCLIReferenceIndex(root, commands)); err != nil {
+		return err
+	}
+
+	// commandDocID collapses punctuation, so distinct command names can map
+	// to the same page file; the later write would silently win.
+	seen := make(map[string]string, len(commands))
+	for _, name := range commands {
+		id := commandDocID(name)
+		if prev, ok := seen[id]; ok {
+			return fmt.Errorf("commands %q and %q both map to doc page %s.md; rename one", prev, name, id)
+		}
+		seen[id] = name
+
+		var out bytes.Buffer
+		if err := writeSingleCommandDoc(&out, root, name); err != nil {
+			return err
+		}
+		path := filepath.Join(outDir, id+".md")
+		if err := writeMarkdownFile(path, out.String()); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func genericCLIReferenceIndex(root *cobra.Command, commands []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "---\n")
+	fmt.Fprintf(&b, "title: CLI Reference\n")
+	fmt.Fprintf(&b, "description: Generated reference for every bd command\n")
+	fmt.Fprintf(&b, "---\n\n")
+	fmt.Fprintf(&b, "<!-- AUTO-GENERATED: do not edit manually -->\n\n")
+	fmt.Fprintf(&b, "Generated from `bd help --docs-root`.\n\n")
+	fmt.Fprintf(&b, "This reference covers all %d live top-level `bd` commands. Regenerate it with:\n\n", len(commands))
+	fmt.Fprintf(&b, "```bash\n")
+	fmt.Fprintf(&b, "./scripts/generate-cli-docs.sh\n")
+	fmt.Fprintf(&b, "```\n\n")
+	// The per-command pages list only local flags, mirroring `--help`; the
+	// global flags apply everywhere and are published once, here.
+	if root.PersistentFlags().HasFlags() {
+		fmt.Fprintf(&b, "## Global Flags\n\n")
+		fmt.Fprintf(&b, "These flags apply to all commands:\n\n")
+		fmt.Fprintf(&b, "```\n%s```\n\n", root.PersistentFlags().FlagUsages())
+	}
+	fmt.Fprintf(&b, "## Commands\n\n")
+	for _, cmd := range commands {
+		fmt.Fprintf(&b, "- [`bd %s`](./%s.md)\n", cmd, commandDocID(cmd))
+	}
+	return b.String()
+}
+
+func writeMarkdownFile(path, content string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	content = strings.TrimRight(content, "\n") + "\n"
+	// #nosec G306: generated repository Markdown should be readable like source files.
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func removeMarkdownFiles(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".md" {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -362,6 +477,10 @@ func commandDocID(commandPath string) string {
 	return id
 }
 
+// escapeMDXText entity-escapes characters that MDX-based renderers treat as
+// JSX (angle brackets, braces). The entities are plain HTML entities — valid
+// CommonMark — so the generic output stays portable while remaining safe for
+// MDX consumers.
 func escapeMDXText(s string) string {
 	replacer := strings.NewReplacer(
 		"&", "&amp;",

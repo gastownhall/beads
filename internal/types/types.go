@@ -4,11 +4,13 @@ package types
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Issue represents a trackable work item.
@@ -44,6 +46,37 @@ type Issue struct {
 	ClosedAt        *time.Time `json:"closed_at,omitempty"`
 	CloseReason     string     `json:"close_reason,omitempty"`      // Reason provided when closing
 	ClosedBySession string     `json:"closed_by_session,omitempty"` // Claude Code session that closed this issue
+
+	// ===== Leasing (claim TTL + heartbeat; migrations 0054/0055) =====
+	// Hydrated from the ephemeral, node-local leases table (bd-lrgn1), not
+	// from issues columns. NULL when there is no active lease on this node.
+	// row_lock is an internal serialization mechanism (an issues column); it is
+	// surfaced read-only to Go callers as RowVersion in the Concurrency group
+	// below (json:"-", never serialized).
+	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"` // When the current claim's lease expires
+	HeartbeatAt    *time.Time `json:"heartbeat_at,omitempty"`     // Last heartbeat from the lease owner
+
+	// ===== Concurrency (Go-only; never serialized) =====
+	// RowVersion is an opaque optimistic-concurrency token for the library's own
+	// Go call sites: the issues/wisps row_lock cell, a random non-zero value the
+	// engine rewrites on every status/ownership-mutating write. It is
+	// EQUALITY-ONLY — compare it, never order or interpret it — and a change
+	// signals the row was mutated since you read it. It is json:"-" on purpose:
+	// row_lock is random per write, so serializing it would break stable bd
+	// --json goldens and bd export round-trips; a Go consumer reads
+	// issue.RowVersion directly instead.
+	//
+	// Coverage is deliberately partial: it changes on claim/close/unclaim and the
+	// generic update path, but NOT on direct-UPDATE paths that rewrite text
+	// without touching row_lock (RestoreFromSnapshotInTx, the compaction
+	// text-truncation path). For a complete change-detection key, combine it with
+	// updated_at (which those paths DO bump), status, and the label set
+	// (label-only and reopen writes change those, not row_lock).
+	//
+	// 0 appears only on legacy rows backfilled by migration 0054 (DEFAULT 0) that
+	// have not been mutated since; any issue created by the current code path is
+	// non-zero (create stamps freshRowLock()).
+	RowVersion int64 `json:"-"`
 
 	// ===== Time-Based Scheduling (GH#820) =====
 	DueAt      *time.Time `json:"due_at,omitempty"`      // When this issue should be completed
@@ -205,6 +238,26 @@ func (w hashFieldWriter) flag(b bool, label string) {
 	w.h.Write([]byte{0})
 }
 
+// MaxFieldLen is the maximum length (in characters) of the assignee, owner, and
+// label fields, matching their VARCHAR(255) columns.
+const MaxFieldLen = 255
+
+// ErrFieldTooLong is returned when assignee, owner, or a label exceeds
+// MaxFieldLen characters. Callers can errors.Is it instead of matching a raw
+// backend "data too long" string.
+var ErrFieldTooLong = errors.New("field exceeds maximum length")
+
+// CheckFieldLen returns ErrFieldTooLong (wrapped with context) when val exceeds
+// MaxFieldLen characters. name is the field label used in the message. Length is
+// counted in runes, not bytes, so a multibyte value up to MaxFieldLen characters
+// fits the VARCHAR(255) column and passes.
+func CheckFieldLen(name, val string) error {
+	if n := utf8.RuneCountInString(val); n > MaxFieldLen {
+		return fmt.Errorf("%w: %s is %d characters (max %d)", ErrFieldTooLong, name, n, MaxFieldLen)
+	}
+	return nil
+}
+
 // Validate checks if the issue has valid field values (built-in statuses only)
 func (i *Issue) Validate() error {
 	return i.ValidateWithCustomStatuses(nil)
@@ -254,6 +307,14 @@ func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
 	if i.Ephemeral && i.NoHistory {
 		return fmt.Errorf("ephemeral and no_history are mutually exclusive")
 	}
+	// Bound the VARCHAR(255) assignment columns up front so callers get a typed
+	// ErrFieldTooLong rejection instead of a raw backend "data too long" error.
+	if err := CheckFieldLen("assignee", i.Assignee); err != nil {
+		return err
+	}
+	if err := CheckFieldLen("owner", i.Owner); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -297,6 +358,14 @@ func (i *Issue) ValidateForImport(customStatuses []string) error {
 		if !json.Valid(i.Metadata) {
 			return fmt.Errorf("metadata must be valid JSON")
 		}
+	}
+	// Bound the VARCHAR(255) assignment columns on the import path too, so an
+	// over-length assignee/owner is rejected here instead of by the backend.
+	if err := CheckFieldLen("assignee", i.Assignee); err != nil {
+		return err
+	}
+	if err := CheckFieldLen("owner", i.Owner); err != nil {
+		return err
 	}
 	return nil
 }
@@ -714,6 +783,12 @@ func (w WorkType) IsValid() bool {
 
 // Dependency represents a relationship between issues
 type Dependency struct {
+	// ID is the dependency row's deterministic surrogate primary key,
+	// depid.New(issue_id, target) — a UUIDv5 that is stable and globally unique
+	// across the durable and wisp dependency tables. Populated only by reads
+	// that select it (e.g. GetDependentRecords, which keysets on it); left empty
+	// by the source-keyed reads that never needed it.
+	ID          string         `json:"id,omitempty"`
 	IssueID     string         `json:"issue_id"`
 	DependsOnID string         `json:"depends_on_id"`
 	Type        DependencyType `json:"type"`
@@ -997,6 +1072,7 @@ type EventType string
 const (
 	EventCreated           EventType = "created"
 	EventUpdated           EventType = "updated"
+	EventClaimed           EventType = "claimed"
 	EventStatusChanged     EventType = "status_changed"
 	EventCommented         EventType = "commented"
 	EventClosed            EventType = "closed"
@@ -1006,6 +1082,9 @@ const (
 	EventLabelAdded        EventType = "label_added"
 	EventLabelRemoved      EventType = "label_removed"
 	EventCompacted         EventType = "compacted"
+	// EventLeaseReclaimed records that a stale lease was reverted to ready by
+	// bd reclaim (dead-worker recovery). old_value is the previous owner.
+	EventLeaseReclaimed EventType = "lease_reclaimed"
 )
 
 // BlockedIssue extends Issue with blocking information
@@ -1214,6 +1293,7 @@ type IssueFilter struct {
 	DescriptionContains string
 	NotesContains       string
 	ExternalRefContains string
+	ExternalRef         *string // exact match on external_ref
 
 	// Date ranges
 	CreatedAfter  *time.Time
@@ -1224,6 +1304,23 @@ type IssueFilter struct {
 	ClosedBefore  *time.Time
 	StartedAfter  *time.Time
 	StartedBefore *time.Time
+
+	// Keyset pagination over the (created_at DESC, id ASC) total order.
+	//
+	// When AfterCreatedAt != nil the query is restricted to rows strictly after
+	// the keyset position (AfterCreatedAt, AfterID) under that order — i.e.
+	// (created_at < AfterCreatedAt) OR (created_at = AfterCreatedAt AND id > AfterID).
+	// id is the primary key, so the tie-break is total: a same-second group
+	// larger than one page still pages completely with no dropped or duplicated
+	// row (unlike a created_at-only cursor, which loses same-second overflow).
+	// AfterID is meaningful only when AfterCreatedAt is set; "" starts the
+	// same-second group from its first id.
+	//
+	// This composes with every other filter (including CreatedBefore, which it
+	// does not replace). Pair it with SortBy="created", SortDesc=false so the
+	// ORDER BY is created_at DESC, id ASC — the order the predicate assumes.
+	AfterCreatedAt *time.Time
+	AfterID        string
 
 	// Empty/null checks
 	EmptyDescription bool
@@ -1242,6 +1339,12 @@ type IssueFilter struct {
 
 	// Pinned filtering
 	Pinned *bool // Filter by pinned flag (nil = any, true = only pinned, false = only non-pinned)
+
+	// Blocked filtering: the denormalized, transitive is_blocked column (direct ∨
+	// inherited parent-child ∨ waits-for gate), maintained by the write paths and
+	// index-backed by idx_issues_is_blocked(is_blocked, status). The projection
+	// column alone is not a filter; this optional predicate makes it one.
+	IsBlocked *bool // nil = any, true = only is_blocked, false = only unblocked
 
 	// Template filtering
 	IsTemplate *bool // Filter by template flag (nil = any, true = only templates, false = exclude templates)
@@ -1318,6 +1421,15 @@ func (s SortPolicy) IsValid() bool {
 		return true
 	}
 	return false
+}
+
+// ReclaimedLease names an issue whose stale lease was reverted to ready by
+// bd reclaim, together with the owner the lease was taken from. Returned so
+// callers (the CLI, a supervisor) can report which dead workers' work was
+// recovered.
+type ReclaimedLease struct {
+	ID            string `json:"id"`
+	PreviousOwner string `json:"previous_owner"`
 }
 
 // WorkFilter is used to filter ready work queries

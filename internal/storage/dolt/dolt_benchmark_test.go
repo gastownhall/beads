@@ -12,6 +12,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -995,11 +996,15 @@ func insertBenchIssues(ctx context.Context, tx *sql.Tx, table string, issues []*
 			if metadata == "" {
 				metadata = "{}"
 			}
-			placeholders = append(placeholders, "(?, ?, ?, '', '', '', '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 			args = append(args,
 				issue.ID,
 				issue.ContentHash,
 				issue.Title,
+				issue.Description,
+				issue.Design,
+				issue.AcceptanceCriteria,
+				issue.Notes,
 				issue.Status,
 				issue.Priority,
 				issue.IssueType,
@@ -1189,6 +1194,95 @@ func BenchmarkPerfResolvePartialIDInvalidInput_5K(b *testing.B) {
 	}
 }
 
+// BenchmarkPerfIDProjectionVsHydration_5K isolates the value of the narrow
+// id-only projection (SearchIssueIDs) against the two hydration alternatives on
+// an identical, large result set. All three arms share the same WHERE clause
+// via issueops.searchInTx, so the only variable is projection + row hydration:
+//
+//   - SearchIssueIDs          — projects only `id`; no row structs, no labels.
+//   - SearchIssues+SkipLabels — full IssueSelectColumns scan into *types.Issue
+//     (description/design/notes/metadata/...), but skips the labels JOIN.
+//   - SearchIssues (full)     — full column scan plus label hydration.
+//
+// The narrow-vs-SkipLabels delta is the figure that justifies the projection
+// over simply reusing upstream's SkipLabels: SkipLabels suppresses labels but
+// still materializes every heavy TEXT column, which this fixture populates.
+func BenchmarkPerfIDProjectionVsHydration_5K(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	const total = 5000
+	// Heavy TEXT payloads approximate real issues. The narrow projection never
+	// scans these columns; SkipLabels does not help with them.
+	bigText := strings.Repeat("lorem ipsum dolor sit amet consectetur ", 24) // ~936 B
+	bigJSON := json.RawMessage(`{"k":"` + strings.Repeat("v", 256) + `"}`)
+
+	issues := make([]*types.Issue, 0, total)
+	for i := 0; i < total; i++ {
+		issues = append(issues, &types.Issue{
+			ID:                 fmt.Sprintf("narrowbench-%05d", i),
+			Title:              fmt.Sprintf("narrowbench issue %05d", i),
+			Description:        bigText,
+			Design:             bigText,
+			AcceptanceCriteria: bigText,
+			Notes:              bigText,
+			Metadata:           bigJSON,
+			Status:             types.StatusOpen,
+			Priority:           (i % 4) + 1,
+			IssueType:          types.TypeTask,
+			Labels:             []string{"area-narrow", fmt.Sprintf("bucket-%03d", i%100)},
+		})
+	}
+	createBenchIssueBatch(b, store, issues)
+
+	ctx := context.Background()
+	// "narrowbench" appears in every id and title, so id/title LIKE matches the
+	// full set — maximizing per-row hydration cost, the dimension under test.
+	const query = "narrowbench"
+
+	// Guard: all three arms must see the same cardinality, else the comparison
+	// would be measuring row count rather than projection.
+	if ids, err := store.SearchIssueIDs(ctx, query, types.IssueFilter{}); err != nil {
+		b.Fatalf("setup SearchIssueIDs: %v", err)
+	} else if len(ids) != total {
+		b.Fatalf("fixture: expected %d matches, got %d", total, len(ids))
+	}
+
+	b.Run("SearchIssueIDs_narrow", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssueIDs(ctx, query, types.IssueFilter{}); err != nil {
+				b.Fatalf("SearchIssueIDs: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssueIDs: got %d want %d", len(got), total)
+			}
+		}
+	})
+
+	b.Run("SearchIssues_SkipLabels", func(b *testing.B) {
+		b.ReportAllocs()
+		filter := types.IssueFilter{SkipLabels: true}
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssues(ctx, query, filter); err != nil {
+				b.Fatalf("SearchIssues SkipLabels: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssues SkipLabels: got %d want %d", len(got), total)
+			}
+		}
+	})
+
+	b.Run("SearchIssues_full", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssues(ctx, query, types.IssueFilter{}); err != nil {
+				b.Fatalf("SearchIssues full: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssues full: got %d want %d", len(got), total)
+			}
+		}
+	})
+}
+
 func BenchmarkPerfAddDependencyCycleCheck_DiamondDAG(b *testing.B) {
 	store, cleanup := setupBenchStore(b)
 	defer cleanup()
@@ -1298,13 +1392,13 @@ func BenchmarkPerfReadyWorkLimited_LargeBlockedGraph(b *testing.B) {
 	}
 }
 
-func BenchmarkPerfReadyWorkLimited_GasCityWispHeavy(b *testing.B) {
+func BenchmarkPerfReadyWorkLimited_ExampleOrgWispHeavy(b *testing.B) {
 	const (
 		wispCount    = 8000
 		readyLimit   = 20
-		gcAssignee   = "gascity/workflows.codex-min-11"
-		gcRoute      = "gascity/workflows.codex-min-11"
-		routeJSON    = `{"gc.routed_to":"gascity/workflows.codex-min-11"}`
+		gcAssignee   = "example-org/workflows.codex-min-11"
+		gcRoute      = "example-org/workflows.codex-min-11"
+		routeJSON    = `{"route.routed_to":"example-org/workflows.codex-min-11"}`
 		emptyJSON    = `{}`
 		closedStatus = types.StatusClosed
 	)
@@ -1355,7 +1449,7 @@ func BenchmarkPerfReadyWorkLimited_GasCityWispHeavy(b *testing.B) {
 			name: "MetadataRouteDenseLimit20Of8000",
 			filter: types.WorkFilter{
 				Unassigned:       true,
-				MetadataFields:   map[string]string{"gc.routed_to": gcRoute},
+				MetadataFields:   map[string]string{"route.routed_to": gcRoute},
 				IncludeEphemeral: true,
 				Limit:            readyLimit,
 				SortPolicy:       types.SortPolicyPriority,
@@ -1452,10 +1546,10 @@ func BenchmarkPerfReadyWorkLimited_GasCityWispHeavy(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				results, err := store.GetReadyWork(ctx, tc.filter)
 				if err != nil {
-					b.Fatalf("GetReadyWork gascity wisps: %v", err)
+					b.Fatalf("GetReadyWork example-org wisps: %v", err)
 				}
 				if len(results) != readyLimit {
-					b.Fatalf("GetReadyWork gascity wisps returned %d issues, want %d", len(results), readyLimit)
+					b.Fatalf("GetReadyWork example-org wisps returned %d issues, want %d", len(results), readyLimit)
 				}
 			}
 		})
@@ -1901,4 +1995,47 @@ func BenchmarkGetIssuesByIDs_SmallNLargeW_10_10K(b *testing.B) {
 }
 func BenchmarkGetIssuesByIDs_SmallNLargeW_100_5K(b *testing.B) {
 	benchmarkGetIssuesByIDsSmallN(b, 5000, 100)
+}
+
+// =============================================================================
+// Schema Probe Benchmarks
+// =============================================================================
+
+// BenchmarkContentHashColumnProbe compares the retired INFORMATION_SCHEMA.COLUMNS
+// existence probe against the SHOW COLUMNS probe that replaced it.
+// schema.MigrateUp's migrationWorkNeeded runs this probe twice on every
+// connection. INFORMATION_SCHEMA.COLUMNS forces Dolt to materialize the full
+// column catalog because the predicate is not pushed down; SHOW COLUMNS reads a
+// single table's schema directly. The gap measured here understates production:
+// on a multi-database deployment the old probe was measured at 19-60 ms/conn
+// versus ~0 ms on the new one.
+func BenchmarkContentHashColumnProbe(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+	ctx := context.Background()
+
+	b.Run("InformationSchema", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var count int
+			if err := store.db.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'content_hash'`,
+				"schema_migrations").Scan(&count); err != nil {
+				b.Fatalf("information_schema probe: %v", err)
+			}
+		}
+	})
+
+	b.Run("ShowColumns", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			rows, err := store.db.QueryContext(ctx, "SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'")
+			if err != nil {
+				b.Fatalf("show columns probe: %v", err)
+			}
+			for rows.Next() { //nolint:revive // draining the result set is the point
+			}
+			_ = rows.Close()
+		}
+	})
 }

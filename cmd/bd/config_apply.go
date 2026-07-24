@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -50,21 +51,33 @@ Examples:
   bd config apply
   bd config apply --dry-run
   bd config apply --json`,
-	Run: func(cmd *cobra.Command, _ []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("config-apply")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		results := runApply(dryRun)
 
 		if jsonOutput {
-			outputJSON(results)
+			if err := outputJSON(results); err != nil {
+				return err
+			}
 		} else {
 			printApplyResults(results)
 		}
 
 		for _, r := range results {
 			if r.Status == applyStatusError {
-				os.Exit(1)
+				return SilentExit()
 			}
 		}
+		return nil
 	},
 }
 
@@ -378,6 +391,18 @@ func applyServer(drifted bool, dryRun bool) ApplyResult {
 			Action:  "none",
 			Status:  applyStatusSkipped,
 			Message: "Server is running but dolt.shared-server is not enabled; not stopping (use 'bd dolt stop' manually)",
+		}
+	}
+
+	// Reconciliation must honor the same auto-start policy as implicit storage
+	// opens. A disabled auto-start means the server is externally managed; keep
+	// Action="start" to describe the skipped reconciliation action consistently.
+	if doltserver.IsAutoStartDisabled() {
+		return ApplyResult{
+			Check:   "server",
+			Action:  "start",
+			Status:  applyStatusSkipped,
+			Message: "Dolt shared server not started because auto-start is disabled; the server is externally managed",
 		}
 	}
 

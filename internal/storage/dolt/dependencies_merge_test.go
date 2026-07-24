@@ -100,6 +100,76 @@ func TestDependencyDeterministicIDMergesAcrossBranches(t *testing.T) {
 	})
 }
 
+// TestInsertBackfillIDPathsAgree pins the invariant that the production insert
+// path (AddDependency) and the backfill path (rekeyDependencyIDs / migration
+// 0050) compute the same dependency primary key from the same edge.
+//
+// Insert path:  depid.New(dep.IssueID, dep.DependsOnID); dep.DependsOnID is
+//
+//	stored in depends_on_issue_id.
+//
+// Backfill path: SELECT issue_id, COALESCE(depends_on_issue_id,
+//
+//	depends_on_wisp_id, depends_on_external) FROM dependencies;
+//	then depid.New(issue_id, coalesced_target).
+//
+// The two paths agree because AddDependency writes DependsOnID to
+// depends_on_issue_id and the backfill reads that column first via COALESCE.
+// If AddDependency ever begins encoding the target differently, or the
+// backfill's COALESCE column order changes, the stored id diverges from what
+// the backfill would derive — and two independently-upgraded clones would fork
+// again (#4259). This test creates a real edge via AddDependency, reads back
+// the exact column values the backfill would use, recomputes depid.New over
+// them, and asserts they match.
+func TestInsertBackfillIDPathsAgree(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	db := store.db
+	for _, id := range []string{"ibp-src", "ibp-dst"} {
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type) VALUES (?, ?, '', '', '', '', 'open', 2, 'task')",
+			id, id); err != nil {
+			t.Fatalf("seed issue %s: %v", id, err)
+		}
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: "ibp-src", DependsOnID: "ibp-dst", Type: types.DepBlocks,
+	}, "test"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+
+	// What the insert path stored.
+	var insertID string
+	if err := db.QueryRowContext(ctx,
+		"SELECT id FROM dependencies WHERE issue_id = 'ibp-src' AND depends_on_issue_id = 'ibp-dst'",
+	).Scan(&insertID); err != nil {
+		t.Fatalf("read insert id: %v", err)
+	}
+
+	// What the backfill would compute from the stored column values:
+	// rekeyDependencyTable selects (issue_id, COALESCE(depends_on_issue_id,
+	// depends_on_wisp_id, depends_on_external)) then calls depid.New.
+	var issueID, coalesceTarget string
+	if err := db.QueryRowContext(ctx,
+		"SELECT issue_id, COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) "+
+			"FROM dependencies WHERE issue_id = 'ibp-src'",
+	).Scan(&issueID, &coalesceTarget); err != nil {
+		t.Fatalf("read backfill inputs: %v", err)
+	}
+	backfillID := depid.New(issueID, coalesceTarget)
+
+	if insertID != backfillID {
+		t.Errorf("insert path stored id %q but backfill would derive %q from "+
+			"(issue_id=%q, coalesce_target=%q): the two paths have diverged — "+
+			"independently-upgraded clones would produce different ids and bd dolt pull would fork (#4259)",
+			insertID, backfillID, issueID, coalesceTarget)
+	}
+}
+
 // runTwoBranchEdgeMerge seeds issues x and y on the shared ancestor, forks a peer
 // branch from it, runs insA on the current branch and insB on the peer branch
 // (each committed), then merges the peer back into the current branch. It returns

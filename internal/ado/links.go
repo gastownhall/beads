@@ -184,12 +184,34 @@ type adoLinkKey struct {
 	Commented bool // true if the link has a discovered-from comment
 }
 
+// removableRelTypes are the forward-direction ADO relation types beads emits
+// and therefore owns. Only links of these types may be removed during push.
+//
+// Reverse-direction link types — Hierarchy-Reverse (parent) and
+// Dependency-Reverse (predecessor/successor) — are deliberately excluded:
+// beads represents those relationships via the forward link on the *other*
+// work item, so they never appear in the desired set and must not be deleted.
+// Likewise, any other relation type (hyperlinks, attachments, custom link
+// types) is left untouched. See GH#4522.
+var removableRelTypes = map[string]bool{
+	RelDependsOn: true, // Dependency-Forward
+	RelChild:     true, // Hierarchy-Forward
+	RelRelated:   true, // Related
+}
+
 // PushLinks synchronizes beads dependencies to ADO work item relations.
 // It compares the desired state (from beads deps) against current ADO relations,
 // adding missing links and removing stale ones for idempotent convergence.
 // Errors on individual links are collected and returned together; processing
 // continues on partial failures.
-func (r *LinkResolver) PushLinks(ctx context.Context, workItemID int, currentRelations []WorkItemRelation, desiredDeps []tracker.DependencyInfo) []error {
+//
+// managedTargets is the set of ADO work item IDs that beads tracks. A current
+// link is only removed when beads owns it: its relation type is one beads emits
+// (see removableRelTypes) AND its target is in managedTargets. This read-merge-
+// write behavior preserves links beads does not manage — reverse-direction
+// links and human-created Related/Predecessor-Successor links to untracked
+// items — instead of clobbering them. See GH#4522.
+func (r *LinkResolver) PushLinks(ctx context.Context, workItemID int, currentRelations []WorkItemRelation, desiredDeps []tracker.DependencyInfo, managedTargets map[int]bool) []error {
 	// Build desired link set.
 	desired := make(map[adoLinkKey]tracker.DependencyInfo)
 	for _, dep := range desiredDeps {
@@ -234,12 +256,23 @@ func (r *LinkResolver) PushLinks(ctx context.Context, workItemID int, currentRel
 	var errs []error
 
 	// Find relations to remove (in current but not desired).
+	// Only remove links beads owns: a forward-direction type it emits, pointing
+	// at a work item beads tracks. Reverse-direction links and links to
+	// untracked items (e.g. human-created Related / Predecessor-Successor links)
+	// are left untouched so the push does not clobber them. See GH#4522.
 	// Collect indices and remove in reverse order to avoid index shifting.
 	var removeIndices []int
 	for _, cl := range current {
-		if _, ok := desired[cl.key]; !ok {
-			removeIndices = append(removeIndices, cl.index)
+		if _, ok := desired[cl.key]; ok {
+			continue
 		}
+		if !removableRelTypes[cl.key.Rel] {
+			continue
+		}
+		if !managedTargets[cl.key.TargetID] {
+			continue
+		}
+		removeIndices = append(removeIndices, cl.index)
 	}
 	// Sort descending so higher indices are removed first.
 	sort.Sort(sort.Reverse(sort.IntSlice(removeIndices)))

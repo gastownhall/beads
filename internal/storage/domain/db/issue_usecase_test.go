@@ -20,6 +20,8 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
 	runner := s.Runner()
+	labelUC := domain.NewLabelUseCase(NewLabelSQLRepository(runner))
+	depUC := domain.NewDependencyUseCase(NewDependencySQLRepository(runner))
 	return domain.NewIssueUseCase(
 		NewIssueSQLRepository(runner),
 		NewDependencySQLRepository(runner),
@@ -27,6 +29,9 @@ func (s *testSuite) issueUseCase() domain.IssueUseCase {
 		NewChildCounterSQLRepository(runner),
 		NewCommentSQLRepository(runner),
 		NewConfigSQLRepository(runner),
+		NewEventsSQLRepository(runner),
+		labelUC,
+		depUC,
 	)
 }
 
@@ -153,6 +158,12 @@ func (s *testSuite) TestIssueUseCase_ApplyGraph() {
 	s.Run("DifferentTypeOverParentChildPairErrors", s.applyGraphDifferentTypeOverPair)
 	s.Run("ReverseBlockingOverParentChildPairErrors", s.applyGraphReverseBlocking)
 	s.Run("LiveCycleThroughExistingDepsErrors", s.applyGraphLiveCycle)
+	s.Run("ExternalIDIntraBatchBlockingCycleErrors", s.applyGraphExternalIDBlockingCycle)
+	s.Run("CombinedSchedulingCycleErrors", s.applyGraphCombinedSchedulingCycle)
+	s.Run("RegularGraphCycleThroughExistingWispDepErrors", s.applyGraphRegularCycleThroughWispDep)
+	s.Run("WispGraphCycleThroughExistingRegularDepErrors", s.applyGraphWispCycleThroughRegularDep)
+	s.Run("RejectsBlockingThroughExistingParentChild", s.applyGraphRejectsBlockingThroughParentChild)
+	s.Run("RejectsBlockingThroughPlannedHierarchy", s.applyGraphRejectsBlockingThroughPlannedHierarchy)
 	s.Run("HealthyPlanRoundTrips", s.applyGraphHealthy)
 	s.Run("WispGraphRoutesToWispTables", s.applyGraphWispRouting)
 }
@@ -431,6 +442,178 @@ func (s *testSuite) applyGraphLiveCycle() {
 	deps := s.loadDepRows("dependencies", "gE-%")
 	for _, d := range deps {
 		s.NotEqual(string(types.DepParentChild), d.depType, "parent-child dep must not be written when live cycle detected: %+v", d)
+	}
+}
+
+// applyGraphExternalIDBlockingCycle proves the ported whole-graph preflight
+// (validatePlannedBlockingCycles) rejects an intra-batch blocking cycle formed
+// entirely by external-ID edges, before any edge is inserted.
+func (s *testSuite) applyGraphExternalIDBlockingCycle() {
+	s.resetMintConfig("gH", "")
+	uc := s.issueUseCase()
+
+	issueRepo := NewIssueSQLRepository(s.Runner())
+	p := newTestIssue("gH-existing-p", "existing P")
+	q := newTestIssue("gH-existing-q", "existing Q")
+	s.Require().NoError(issueRepo.Insert(s.Ctx(), p, "seeder", domain.InsertIssueOpts{}))
+	s.Require().NoError(issueRepo.Insert(s.Ctx(), q, "seeder", domain.InsertIssueOpts{}))
+
+	// Two planned blocking edges between existing issues, referenced by ID,
+	// close a 2-cycle within a single graph-apply batch.
+	_, err := uc.ApplyIssueGraph(s.Ctx(), domain.GraphPlan{
+		Edges: []domain.GraphEdge{
+			{FromID: "gH-existing-p", ToID: "gH-existing-q", Type: types.DepBlocks},
+			{FromID: "gH-existing-q", ToID: "gH-existing-p", Type: types.DepBlocks},
+		},
+	}, "tester")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "creates a blocking dependency cycle")
+
+	deps := s.loadDepRows("dependencies", "gH-%")
+	s.Empty(deps, "no blocking edge may be written when an intra-batch external-ID cycle is detected")
+}
+
+func (s *testSuite) applyGraphCombinedSchedulingCycle() {
+	s.resetMintConfig("gM", "")
+	uc := s.issueUseCase()
+
+	_, err := uc.ApplyIssueGraph(s.Ctx(), domain.GraphPlan{
+		Nodes: []domain.GraphNode{
+			newGraphNode("a", "A"),
+			newGraphNode("b", "B"),
+			newGraphNode("c", "C"),
+		},
+		Edges: []domain.GraphEdge{
+			{FromKey: "a", ToKey: "b", Type: types.DepBlocks},
+			{FromKey: "b", ToKey: "c", Type: types.DepParentChild},
+			{FromKey: "c", ToKey: "a", Type: types.DepConditionalBlocks},
+		},
+	}, "tester")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "cycle")
+	// This low-level suite calls the use case without its normal outer UOW, so
+	// earlier acyclic writes may remain. The edge that closes the cycle must not.
+	for _, d := range s.loadDepRows("dependencies", "gM-%") {
+		s.NotEqual(string(types.DepConditionalBlocks), d.depType, "cycle-closing edge must not be written: %+v", d)
+	}
+}
+
+// applyGraphRegularCycleThroughWispDep proves a regular graph-apply rejects a
+// planned blocking edge that closes a cycle through an existing blocking edge
+// living in wisp_dependencies. The per-edge depRepo.HasCycle probe this
+// preflight replaced walked both dependency tables, so the whole-graph walk
+// must too — otherwise a mixed regular/wisp blocking cycle commits undetected.
+func (s *testSuite) applyGraphRegularCycleThroughWispDep() {
+	s.resetMintConfig("gI", "")
+	uc := s.issueUseCase()
+
+	s.seedWispRow("gI-w")
+	s.seedIssueRow("gI-r")
+
+	// Existing blocking edge gI-w -> gI-r lives in wisp_dependencies.
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("gI-w", "gI-r", types.DepBlocks), "seeder",
+		domain.DepInsertOpts{UseWispsTable: true}))
+
+	// Regular graph-apply adds gI-r -> gI-w (blocks) into dependencies, closing
+	// a blocking cycle that crosses the regular and wisp dependency tables.
+	_, err := uc.ApplyIssueGraph(s.Ctx(), domain.GraphPlan{
+		Edges: []domain.GraphEdge{
+			{FromID: "gI-r", ToID: "gI-w", Type: types.DepBlocks},
+		},
+	}, "tester")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "creates a blocking dependency cycle")
+
+	s.Empty(s.loadDepRows("dependencies", "gI-%"),
+		"no regular blocking edge may be written when the cycle closes through an existing wisp dep")
+}
+
+// applyGraphWispCycleThroughRegularDep is the mirror of the case above: a wisp
+// graph-apply must reject a planned blocking edge that closes a cycle through
+// an existing blocking edge living in the regular dependencies table.
+func (s *testSuite) applyGraphWispCycleThroughRegularDep() {
+	s.resetMintConfig("gJ", "")
+	uc := s.issueUseCase()
+
+	s.seedIssueRow("gJ-r")
+	s.seedWispRow("gJ-w")
+
+	// Existing blocking edge gJ-r -> gJ-w lives in the regular dependencies
+	// table (with a wisp target column).
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("gJ-r", "gJ-w", types.DepBlocks), "seeder",
+		domain.DepInsertOpts{}))
+
+	// Wisp graph-apply adds gJ-w -> gJ-r (blocks) into wisp_dependencies,
+	// closing a cross-table blocking cycle.
+	_, err := uc.ApplyWispGraph(s.Ctx(), domain.GraphPlan{
+		Edges: []domain.GraphEdge{
+			{FromID: "gJ-w", ToID: "gJ-r", Type: types.DepBlocks},
+		},
+	}, "tester")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "creates a blocking dependency cycle")
+
+	s.Empty(s.loadDepRows("wisp_dependencies", "gJ-%"),
+		"no wisp blocking edge may be written when the cycle closes through an existing regular dep")
+}
+
+// applyGraphRejectsBlockingThroughParentChild verifies that graph apply uses
+// the same hierarchy-deadlock guard as a single dependency add. This is not a
+// mixed-edge cycle check: the parent-child edge only establishes that the
+// proposed blocker is the source's own descendant.
+func (s *testSuite) applyGraphRejectsBlockingThroughParentChild() {
+	s.resetMintConfig("gK", "")
+	uc := s.issueUseCase()
+
+	s.seedIssueRow("gK-parent")
+	s.seedIssueRow("gK-child")
+
+	// Existing parent-child dep gK-child -> gK-parent: the only return path.
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("gK-child", "gK-parent", types.DepParentChild), "seeder",
+		domain.DepInsertOpts{}))
+
+	// A planned blocking edge gK-parent -> gK-child would gate the parent on its
+	// own descendant and can never clear under blocked-state cascading.
+	_, err := uc.ApplyIssueGraph(s.Ctx(), domain.GraphPlan{
+		Edges: []domain.GraphEdge{
+			{FromID: "gK-parent", ToID: "gK-child", Type: types.DepBlocks},
+		},
+	}, "tester")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "cannot be blocked by its descendant")
+
+	for _, d := range s.loadDepRows("dependencies", "gK-%") {
+		if d.depType == string(types.DepBlocks) && d.issueID == "gK-parent" && d.dependsOnID == "gK-child" {
+			s.Fail("hierarchy-deadlocking blocking edge must not be written")
+		}
+	}
+}
+
+func (s *testSuite) applyGraphRejectsBlockingThroughPlannedHierarchy() {
+	s.resetMintConfig("gL", "")
+	uc := s.issueUseCase()
+
+	grand := newGraphNode("grand", "grand")
+	parent := newGraphNode("parent", "parent")
+	child := newGraphNode("child", "child")
+	_, err := uc.ApplyIssueGraph(s.Ctx(), domain.GraphPlan{
+		Nodes: []domain.GraphNode{grand, parent, child},
+		Edges: []domain.GraphEdge{
+			{FromKey: "child", ToKey: "grand", Type: types.DepConditionalBlocks}, // Deliberately first.
+			{FromKey: "child", ToKey: "parent", Type: types.DepParentChild},
+			{FromKey: "parent", ToKey: "grand", Type: types.DepParentChild},
+		},
+	}, "tester")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "cannot be blocked by its ancestor")
+
+	for _, d := range s.loadDepRows("dependencies", "gL-%") {
+		if d.depType == string(types.DepConditionalBlocks) {
+			s.Fail("block-first graph edge must not escape planned hierarchy validation")
+		}
 	}
 }
 

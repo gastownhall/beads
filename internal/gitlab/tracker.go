@@ -30,6 +30,8 @@ var glShorthandPattern = regexp.MustCompile(`^gitlab:([1-9]\d*)$`)
 // milestoneIDPattern matches GitLab milestone URLs: .../-/milestones/5
 var milestoneIDPattern = regexp.MustCompile(`/-/milestones/(\d+)`)
 
+const gitLabMilestoneIdentifierPrefix = "milestone:"
+
 // Tracker implements tracker.IssueTracker for GitLab.
 type Tracker struct {
 	client      *Client
@@ -42,6 +44,9 @@ type Tracker struct {
 func (t *Tracker) Name() string         { return "gitlab" }
 func (t *Tracker) DisplayName() string  { return "GitLab" }
 func (t *Tracker) ConfigPrefix() string { return "gitlab" }
+
+// GitLabClient returns the underlying GitLab API client.
+func (t *Tracker) GitLabClient() *Client { return t.client }
 
 func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
 	t.store = store
@@ -169,6 +174,18 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 }
 
 func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*tracker.TrackerIssue, error) {
+	if milestoneIID, ok, err := parseMilestoneIdentifier(identifier); ok || err != nil {
+		if err != nil {
+			return nil, err
+		}
+		ms, err := t.client.FetchMilestoneByIID(ctx, milestoneIID)
+		if err != nil || ms == nil {
+			return nil, err
+		}
+		ti := milestoneToTrackerIssue(ms)
+		return ti, nil
+	}
+
 	iid, err := strconv.Atoi(identifier)
 	if err != nil {
 		return nil, fmt.Errorf("invalid GitLab IID %q: %w", identifier, err)
@@ -216,7 +233,27 @@ func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker
 		}
 	}
 
+	// GitLab's POST /issues cannot set state, so a closed bead is created
+	// "opened". Close it with a follow-up update so the state carries. On
+	// failure we keep the created issue and its external_ref (returning an error
+	// here would strand the issue and re-create a duplicate on the next push).
+	// The trade-off: the push skip-guard treats the just-created remote as
+	// up-to-date, so a failed close is not retried until the bead is next
+	// modified — hence the warning. A closed-state push is the common bulk case
+	// and this call rarely fails.
+	var warnings []string
+	if issue.Status == types.StatusClosed {
+		if closed, err := t.client.UpdateIssue(ctx, created.IID, map[string]interface{}{
+			"state_event": "close",
+		}); err == nil {
+			created = closed
+		} else {
+			warnings = append(warnings, fmt.Sprintf("created GitLab issue %d but failed to close it (left open): %v", created.IID, err))
+		}
+	}
+
 	ti := gitlabToTrackerIssue(created)
+	ti.Warnings = warnings
 	return &ti, nil
 }
 
@@ -255,14 +292,45 @@ func (t *Tracker) createMilestone(ctx context.Context, issue *types.Issue) (*tra
 	if err != nil {
 		return nil, fmt.Errorf("creating milestone for epic: %w", err)
 	}
-	return milestoneToTrackerIssue(ms), nil
+
+	// Milestones are created active; close it with a follow-up update if the
+	// epic is closed so its state carries. Best effort with the same failure
+	// trade-off as CreateIssue (a failed close is not retried until the epic is
+	// next modified).
+	var warnings []string
+	if issue.Status == types.StatusClosed {
+		if closed, err := t.client.UpdateMilestone(ctx, ms.ID, map[string]interface{}{
+			"state_event": "close",
+		}); err == nil {
+			ms = closed
+		} else {
+			warnings = append(warnings, fmt.Sprintf("created GitLab milestone %d but failed to close it (left active): %v", ms.ID, err))
+		}
+	}
+	ti := milestoneToTrackerIssue(ms)
+	ti.Warnings = warnings
+	return ti, nil
 }
 
 // updateMilestone updates a GitLab milestone for an epic bead.
 func (t *Tracker) updateMilestone(ctx context.Context, externalID string, issue *types.Issue) (*tracker.TrackerIssue, error) {
-	mid, err := strconv.Atoi(externalID)
+	mid, ok, err := parseMilestoneIdentifier(externalID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid milestone ID %q: %w", externalID, err)
+		return nil, err
+	}
+	if !ok {
+		mid, err = strconv.Atoi(externalID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid milestone ID %q: %w", externalID, err)
+		}
+	}
+	apiID := mid
+	msByIID, err := t.client.FetchMilestoneByIID(ctx, mid)
+	if err != nil {
+		return nil, fmt.Errorf("resolving milestone IID %d: %w", mid, err)
+	}
+	if msByIID != nil {
+		apiID = msByIID.ID
 	}
 
 	updates := map[string]interface{}{
@@ -275,7 +343,7 @@ func (t *Tracker) updateMilestone(ctx context.Context, externalID string, issue 
 		updates["state_event"] = "activate"
 	}
 
-	ms, err := t.client.UpdateMilestone(ctx, mid, updates)
+	ms, err := t.client.UpdateMilestone(ctx, apiID, updates)
 	if err != nil {
 		return nil, fmt.Errorf("updating milestone for epic: %w", err)
 	}
@@ -344,13 +412,26 @@ func (t *Tracker) createTaskWorkItem(ctx context.Context, issue *types.Issue, pa
 	// Build URL from project path and IID
 	webURL := fmt.Sprintf("%s/%s/-/work_items/%s", t.client.BaseURL, t.projectPath, wi.IID)
 
+	iid, _ := strconv.Atoi(wi.IID)
+
 	// Also set milestone if there's a grandparent epic
 	if milestoneID := t.findParentEpicMilestone(ctx, issue.ID); milestoneID > 0 {
-		iid, _ := strconv.Atoi(wi.IID)
 		if iid > 0 {
 			_, _ = t.client.UpdateIssue(ctx, iid, map[string]interface{}{
 				"milestone_id": milestoneID,
 			})
+		}
+	}
+
+	// Work items are created open; close via the issues API (work items share
+	// the project IID space, as the milestone assignment above relies on) if the
+	// bead is closed. Best effort with the same failure trade-off as CreateIssue.
+	var warnings []string
+	if issue.Status == types.StatusClosed && iid > 0 {
+		if _, err := t.client.UpdateIssue(ctx, iid, map[string]interface{}{
+			"state_event": "close",
+		}); err != nil {
+			warnings = append(warnings, fmt.Sprintf("created GitLab work item %s but failed to close it (left open): %v", wi.IID, err))
 		}
 	}
 
@@ -359,6 +440,7 @@ func (t *Tracker) createTaskWorkItem(ctx context.Context, issue *types.Issue, pa
 		Identifier: wi.IID,
 		URL:        webURL,
 		Title:      wi.Title,
+		Warnings:   warnings,
 	}, nil
 }
 
@@ -404,12 +486,21 @@ func (t *Tracker) findParentStoryGID(ctx context.Context, issueID string) string
 
 // milestoneToTrackerIssue converts a GitLab Milestone to a TrackerIssue.
 func milestoneToTrackerIssue(ms *Milestone) *tracker.TrackerIssue {
-	return &tracker.TrackerIssue{
-		ID:         strconv.Itoa(ms.ID),
-		Identifier: strconv.Itoa(ms.ID),
-		URL:        ms.WebURL,
-		Title:      ms.Title,
+	ti := &tracker.TrackerIssue{
+		ID:          strconv.Itoa(ms.ID),
+		Identifier:  strconv.Itoa(ms.ID),
+		URL:         ms.WebURL,
+		Title:       ms.Title,
+		Description: ms.Description,
+		State:       ms.State,
 	}
+	if ms.CreatedAt != nil {
+		ti.CreatedAt = *ms.CreatedAt
+	}
+	if ms.UpdatedAt != nil {
+		ti.UpdatedAt = *ms.UpdatedAt
+	}
+	return ti
 }
 
 func (t *Tracker) FieldMapper() tracker.FieldMapper {
@@ -436,13 +527,25 @@ func (t *Tracker) ExtractIdentifier(ref string) string {
 	}
 	// Try milestone pattern first (more specific path)
 	if matches := milestoneIDPattern.FindStringSubmatch(ref); len(matches) >= 2 {
-		return matches[1]
+		return gitLabMilestoneIdentifierPrefix + matches[1]
 	}
 	// Fall back to issue pattern
 	if matches := issueIIDPattern.FindStringSubmatch(ref); len(matches) >= 2 {
 		return matches[1]
 	}
 	return ""
+}
+
+func parseMilestoneIdentifier(identifier string) (int, bool, error) {
+	if !strings.HasPrefix(identifier, gitLabMilestoneIdentifierPrefix) {
+		return 0, false, nil
+	}
+	raw := strings.TrimPrefix(identifier, gitLabMilestoneIdentifierPrefix)
+	iid, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, true, fmt.Errorf("invalid GitLab milestone identifier %q: %w", identifier, err)
+	}
+	return iid, true, nil
 }
 
 // IsMilestoneRef checks if an external_ref points to a milestone (not an issue).

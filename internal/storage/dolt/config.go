@@ -186,7 +186,7 @@ func (s *DoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {
 
 // GetInfraTypes returns infrastructure type names from config.
 // Infrastructure types are routed to the wisps table to keep the versioned
-// issues table clean. Defaults to ["agent", "rig", "role", "message"] if
+// issues table clean. Defaults to ["agent", "role", "message"] if
 // no custom configuration exists.
 // Falls back: DB config "types.infra" → config.yaml types.infra → defaults.
 // Results are cached per DoltStore lifetime and invalidated when SetConfig

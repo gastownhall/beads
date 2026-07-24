@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -38,7 +39,19 @@ Examples:
   bd gc --skip-decay                 # Skip issue deletion, just compact+GC
   bd gc --skip-dolt                  # Skip Dolt GC, just decay+compact
   bd gc --force                      # Skip confirmation prompt`,
-	Run: func(cmd *cobra.Command, _ []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("gc is not supported in proxied-server mode")
+		}
+		evt := metrics.NewCommandEvent("gc")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if !gcDryRun {
 			CheckReadonly("gc")
 		}
@@ -46,10 +59,9 @@ Examples:
 		start := time.Now()
 
 		if gcOlderThan < 0 {
-			FatalError("--older-than must be non-negative")
+			return HandleErrorRespectJSON("--older-than must be non-negative")
 		}
 
-		// Phase tracking for summary
 		type phaseResult struct {
 			name    string
 			skipped bool
@@ -57,7 +69,6 @@ Examples:
 		}
 		var results []phaseResult
 
-		// ── Phase 1: DECAY ──
 		if gcSkipDecay {
 			results = append(results, phaseResult{name: "Decay", skipped: true})
 		} else {
@@ -75,7 +86,7 @@ Examples:
 
 			closedIssues, err := store.SearchIssues(ctx, "", filter)
 			if err != nil {
-				FatalError("searching closed issues: %v", err)
+				return HandleErrorRespectJSON("searching closed issues: %v", err)
 			}
 
 			var stats closedDeletionCandidateStats
@@ -97,7 +108,7 @@ Examples:
 					results = append(results, phaseResult{name: "Decay", detail: fmt.Sprintf("%d issues (dry-run)", len(closedIssues))})
 				} else {
 					if !gcForce {
-						FatalErrorWithHint(
+						return HandleErrorWithHintRespectJSON(
 							fmt.Sprintf("would delete %d closed issue(s) older than %d days", len(closedIssues), cutoffDays),
 							"Use --force to confirm or --dry-run to preview.")
 					}
@@ -127,7 +138,6 @@ Examples:
 			}
 		}
 
-		// ── Phase 2: COMPACT (report only — actual squashing is bd flatten) ──
 		if !jsonOutput {
 			fmt.Println("Phase 2/3: Compact (Dolt commit history info)")
 		}
@@ -160,7 +170,7 @@ Examples:
 			}
 		}
 
-		// ── Phase 3: Dolt GC ──
+		var gcSizeInfo map[string]interface{}
 		if gcSkipDolt {
 			results = append(results, phaseResult{name: "Dolt GC", skipped: true})
 		} else {
@@ -180,14 +190,34 @@ Examples:
 				}
 				results = append(results, phaseResult{name: "Dolt GC", detail: "dry-run"})
 			} else {
+				// bd gc runs without a preceding squash, so remote-tracking
+				// refs are left alone here (they cache the remote tip for the
+				// migrate gate); flatten/compact prune them before their GC
+				// (bd-agctw). Sizes are reported so a no-op reclaim is visible.
+				sizeBefore := storeSizeBytes()
+				remoteRefs, tags := listRemoteRefsAndTags(ctx)
 				if err := gc.DoltGC(ctx); err != nil {
 					WarnError("dolt gc failed: %v", err)
 					results = append(results, phaseResult{name: "Dolt GC", detail: "failed"})
 				} else {
-					if !jsonOutput {
-						fmt.Println("  Done")
+					sizeAfter := storeSizeBytes()
+					detail := "complete"
+					if line := gcSizeLine(sizeBefore, sizeAfter); line != "" {
+						detail = "complete: " + line
 					}
-					results = append(results, phaseResult{name: "Dolt GC", detail: "complete"})
+					if !jsonOutput {
+						fmt.Printf("  Done (%s)\n", detail)
+						if len(remoteRefs)+len(tags) > 0 {
+							fmt.Printf("  Note: %d remote-tracking ref(s) and %d tag(s) anchor history;\n", len(remoteRefs), len(tags))
+							fmt.Printf("  after a history squash, use bd flatten / bd compact so they are pruned first.\n")
+						}
+					}
+					results = append(results, phaseResult{name: "Dolt GC", detail: detail})
+					gcSizeInfo = map[string]interface{}{
+						"remote_refs": len(remoteRefs),
+						"tags":        len(tags),
+					}
+					addGCSizeJSON(gcSizeInfo, sizeBefore, sizeAfter)
 				}
 			}
 			if !jsonOutput {
@@ -197,7 +227,6 @@ Examples:
 
 		elapsed := time.Since(start)
 
-		// ── Summary ──
 		if jsonOutput {
 			summaryMap := make(map[string]interface{})
 			summaryMap["dry_run"] = gcDryRun
@@ -214,8 +243,10 @@ Examples:
 				phases = append(phases, p)
 			}
 			summaryMap["phases"] = phases
-			outputJSON(summaryMap)
-			return
+			if gcSizeInfo != nil {
+				summaryMap["dolt_gc"] = gcSizeInfo
+			}
+			return outputJSON(summaryMap)
 		}
 
 		mode := "✓ GC complete"
@@ -230,6 +261,7 @@ Examples:
 				fmt.Printf("  %s: %s\n", r.name, r.detail)
 			}
 		}
+		return nil
 	},
 }
 

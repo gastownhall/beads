@@ -142,6 +142,12 @@ func TestBlockedEnvVars(t *testing.T) {
 			if err != nil && !strings.Contains(err.Error(), tt.envVar) {
 				t.Errorf("expected error to mention %s, got: %v", tt.envVar, err)
 			}
+			if err != nil && !strings.Contains(err.Error(), "bd help init-safety") {
+				t.Errorf("expected error to point to safe reinitialization guidance, got: %v", err)
+			}
+			if err != nil && strings.Contains(err.Error(), "bd migrate dolt") {
+				t.Errorf("error must not recommend the removed backend-conversion command: %v", err)
+			}
 		})
 	}
 

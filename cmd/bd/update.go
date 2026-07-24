@@ -9,7 +9,10 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
+	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -24,16 +27,33 @@ var updateCmd = &cobra.Command{
 	Long: `Update one or more issues.
 
 If no issue ID is provided, updates the last touched issue (from most recent
-create, update, show, or close operation).`,
-	Args: cobra.MinimumNArgs(0),
-	Run: func(cmd *cobra.Command, args []string) {
+create, update, show, or close operation).
+
+Updates are applied per issue ID, not atomically across IDs: when some IDs
+fail, the remaining issues are still updated, every failed ID is reported on
+stderr, and the command exits nonzero.`,
+	Args:          cobra.MinimumNArgs(0),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("update")
+
+		evt := metrics.NewCommandEvent("update")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			return runUpdateProxiedServer(cmd, rootCtx, args)
+		}
 
 		// If no IDs provided, use last touched issue
 		if len(args) == 0 {
 			lastTouched := GetLastTouchedID()
 			if lastTouched == "" {
-				FatalErrorRespectJSON("no issue ID provided and no last touched issue")
+				return HandleErrorRespectJSON("no issue ID provided and no last touched issue")
 			}
 			args = []string{lastTouched}
 		}
@@ -58,7 +78,7 @@ create, update, show, or close operation).`,
 				}
 			}
 			if !types.Status(status).IsValidWithCustom(customStatuses) {
-				FatalErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", status)
+				return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", status)
 			}
 			updates["status"] = status
 
@@ -77,7 +97,7 @@ create, update, show, or close operation).`,
 			priorityStr, _ := cmd.Flags().GetString("priority")
 			priority, err := validation.ValidatePriority(priorityStr)
 			if err != nil {
-				FatalErrorRespectJSON("%v", err)
+				return HandleErrorRespectJSON("%v", err)
 			}
 			updates["priority"] = priority
 		}
@@ -85,7 +105,7 @@ create, update, show, or close operation).`,
 			title, _ := cmd.Flags().GetString("title")
 			title = strings.TrimSpace(title)
 			if title == "" {
-				FatalErrorRespectJSON("title cannot be empty")
+				return HandleErrorRespectJSON("title cannot be empty")
 			}
 			updates["title"] = title
 		}
@@ -93,19 +113,25 @@ create, update, show, or close operation).`,
 			assignee, _ := cmd.Flags().GetString("assignee")
 			updates["assignee"] = assignee
 		}
-		description, descChanged := getDescriptionFlag(cmd)
+		description, descChanged, err := getDescriptionFlag(cmd)
+		if err != nil {
+			return err
+		}
 		if descChanged {
 			if err := validateDescriptionUpdate(cmd, description, descChanged); err != nil {
-				FatalErrorRespectJSON("%v", err)
+				return HandleErrorRespectJSON("%v", err)
 			}
 			updates["description"] = description
 		}
-		design, designChanged := getDesignFlag(cmd)
+		design, designChanged, err := getDesignFlag(cmd)
+		if err != nil {
+			return err
+		}
 		if designChanged {
 			updates["design"] = design
 		}
 		if cmd.Flags().Changed("notes") && cmd.Flags().Changed("append-notes") {
-			FatalErrorRespectJSON("cannot specify both --notes and --append-notes")
+			return HandleErrorRespectJSON("cannot specify both --notes and --append-notes")
 		}
 		if cmd.Flags().Changed("notes") {
 			notes, _ := cmd.Flags().GetString("notes")
@@ -113,7 +139,7 @@ create, update, show, or close operation).`,
 		}
 		if cmd.Flags().Changed("append-notes") {
 			appendNotes, _ := cmd.Flags().GetString("append-notes")
-			updates["append_notes"] = appendNotes
+			updates[issueops.OpAppendNotes] = appendNotes
 		}
 		if cmd.Flags().Changed("acceptance") || cmd.Flags().Changed("acceptance-criteria") {
 			var acceptanceCriteria string
@@ -142,7 +168,7 @@ create, update, show, or close operation).`,
 		if cmd.Flags().Changed("estimate") {
 			estimate, _ := cmd.Flags().GetInt("estimate")
 			if estimate < 0 {
-				FatalErrorRespectJSON("estimate must be a non-negative number of minutes")
+				return HandleErrorRespectJSON("estimate must be a non-negative number of minutes")
 			}
 			updates["estimated_minutes"] = estimate
 		}
@@ -184,7 +210,7 @@ create, update, show, or close operation).`,
 			} else {
 				t, err := timeparsing.ParseRelativeTime(dueStr, time.Now())
 				if err != nil {
-					FatalErrorRespectJSON("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
+					return HandleErrorRespectJSON("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
 				}
 				updates["due_at"] = t
 			}
@@ -201,7 +227,7 @@ create, update, show, or close operation).`,
 			} else {
 				t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
 				if err != nil {
-					FatalErrorRespectJSON("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
+					return HandleErrorRespectJSON("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
 				}
 				// Warn if defer date is in the past (user probably meant future)
 				inPast := t.Before(time.Now())
@@ -227,13 +253,13 @@ create, update, show, or close operation).`,
 		noHistoryChanged := cmd.Flags().Changed("no-history")
 		historyChanged := cmd.Flags().Changed("history")
 		if ephemeralChanged && persistentChanged {
-			FatalErrorRespectJSON("cannot specify both --ephemeral and --persistent flags")
+			return HandleErrorRespectJSON("cannot specify both --ephemeral and --persistent flags")
 		}
 		if noHistoryChanged && ephemeralChanged {
-			FatalErrorRespectJSON("cannot specify both --no-history and --ephemeral flags")
+			return HandleErrorRespectJSON("cannot specify both --no-history and --ephemeral flags")
 		}
 		if noHistoryChanged && historyChanged {
-			FatalErrorRespectJSON("cannot specify both --no-history and --history flags")
+			return HandleErrorRespectJSON("cannot specify both --no-history and --history flags")
 		}
 		if ephemeralChanged {
 			updates["wisp"] = true
@@ -257,7 +283,7 @@ create, update, show, or close operation).`,
 				// #nosec G304 -- user explicitly provides file path via @file.json syntax
 				data, err := os.ReadFile(filePath)
 				if err != nil {
-					FatalErrorRespectJSON("failed to read metadata file %s: %v", filePath, err)
+					return HandleErrorRespectJSON("failed to read metadata file %s: %v", filePath, err)
 				}
 				metadataJSON = string(data)
 			} else {
@@ -265,20 +291,25 @@ create, update, show, or close operation).`,
 			}
 			// Validate JSON
 			if !json.Valid([]byte(metadataJSON)) {
-				FatalErrorRespectJSON("invalid JSON in --metadata: must be valid JSON")
+				return HandleErrorRespectJSON("invalid JSON in --metadata: must be valid JSON")
 			}
-			updates["metadata"] = json.RawMessage(metadataJSON)
+			// Passed as a merge OPERATION, not a pre-merged value: the storage
+			// layer re-reads and merges inside the mutation transaction so a
+			// concurrent writer's keys survive (lost-update fix).
+			updates[issueops.OpMergeMetadata] = json.RawMessage(metadataJSON)
 		}
 
 		// Incremental metadata edits (GH#1406)
 		setMetadataFlags, _ := cmd.Flags().GetStringArray("set-metadata")
 		unsetMetadataFlags, _ := cmd.Flags().GetStringArray("unset-metadata")
 		if (len(setMetadataFlags) > 0 || len(unsetMetadataFlags) > 0) && cmd.Flags().Changed("metadata") {
-			FatalErrorRespectJSON("cannot combine --metadata with --set-metadata or --unset-metadata")
+			return HandleErrorRespectJSON("cannot combine --metadata with --set-metadata or --unset-metadata")
 		}
-		if len(setMetadataFlags) > 0 || len(unsetMetadataFlags) > 0 {
-			updates["_set_metadata"] = setMetadataFlags
-			updates["_unset_metadata"] = unsetMetadataFlags
+		if len(setMetadataFlags) > 0 {
+			updates[issueops.OpSetMetadata] = setMetadataFlags
+		}
+		if len(unsetMetadataFlags) > 0 {
+			updates[issueops.OpUnsetMetadata] = unsetMetadataFlags
 		}
 
 		// Get claim flag
@@ -286,14 +317,19 @@ create, update, show, or close operation).`,
 
 		if len(updates) == 0 && !claimFlag {
 			fmt.Println("No updates specified")
-			return
+			return nil
 		}
 
 		ctx := rootCtx
 
 		updatedIssues := []*types.Issue{}
 		var firstUpdatedID string // Track first successful update for last-touched
+		var failures []updateIDFailure
+		recordFailure := func(id, reason string) {
+			failures = append(failures, updateIDFailure{ID: id, Error: reason})
+		}
 		mutatedStores := map[storage.DoltStorage][]string{}
+		notesOverwriteWarnings := map[storage.DoltStorage][]string{}
 		mutatedResults := map[*RoutedResult]bool{}
 		pendingCloseResults := []*RoutedResult{}
 		trackMutation := func(result *RoutedResult) {
@@ -322,14 +358,14 @@ create, update, show, or close operation).`,
 			pendingCloseResults = nil
 		}
 		for _, id := range args {
-			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig).
-			// Write-intent: update commits through the routed target store (#4141).
-			result, err := resolveAndGetIssueWithRoutingForWrite(ctx, store, id)
+			// Resolve and get issue with routing (e.g., gt-xyz routes to another rig)
+			result, err := resolveAndGetIssueForMutation(ctx, store, id)
 			if err != nil {
 				if result != nil {
 					result.Close()
 				}
 				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+				recordFailure(id, fmt.Sprintf("resolving issue: %v", err))
 				continue
 			}
 			if result == nil || result.Issue == nil {
@@ -337,6 +373,7 @@ create, update, show, or close operation).`,
 					result.Close()
 				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+				recordFailure(id, "issue not found")
 				continue
 			}
 			issue := result.Issue
@@ -344,6 +381,7 @@ create, update, show, or close operation).`,
 
 			if err := validateIssueUpdatable(id, issue); err != nil {
 				fmt.Fprintf(os.Stderr, "%s\n", err)
+				recordFailure(id, err.Error())
 				closeIfUnmutated(result)
 				continue
 			}
@@ -352,17 +390,23 @@ create, update, show, or close operation).`,
 			if claimFlag {
 				if err := issueStore.ClaimIssue(ctx, result.ResolvedID, actor); err != nil {
 					fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
+					recordFailure(id, fmt.Sprintf("claiming issue: %v", err))
 					closeIfUnmutated(result)
 					continue
 				}
 				trackMutation(result)
 			}
 
-			// Apply regular field updates if any
+			// Apply regular field updates if any. Metadata edits (--metadata,
+			// --set-metadata, --unset-metadata) and --append-notes pass through
+			// as merge OPERATIONS: the storage layer resolves them against the
+			// row re-read inside the mutation transaction. Merging here against
+			// the `issue` snapshot (read in an earlier transaction) silently
+			// erased concurrent writers' keys — both processes exited 0, one
+			// process's committed write vanished.
 			regularUpdates := make(map[string]interface{})
 			for k, v := range updates {
-				if k != "add_labels" && k != "remove_labels" && k != "set_labels" && k != "parent" && k != "append_notes" &&
-					k != "_set_metadata" && k != "_unset_metadata" {
+				if k != "add_labels" && k != "remove_labels" && k != "set_labels" && k != "parent" {
 					regularUpdates[k] = v
 				}
 			}
@@ -372,40 +416,19 @@ create, update, show, or close operation).`,
 			if clearDeferStatus && issue.Status == types.StatusDeferred {
 				regularUpdates["status"] = string(types.StatusOpen)
 			}
+			notesOverwritten := replacesExistingNotes(issue.Notes, updates)
 
-			// Handle --metadata: merge with existing metadata instead of replacing
-			if newMeta, ok := regularUpdates["metadata"].(json.RawMessage); ok && len(issue.Metadata) > 0 {
-				merged, err := mergeMetadata(issue.Metadata, newMeta)
-				if err != nil {
-					FatalErrorRespectJSON("metadata merge failed for %s: %v", id, err)
-				}
-				regularUpdates["metadata"] = merged
-			}
-			// Handle incremental metadata edits (GH#1406)
-			if setMeta, ok := updates["_set_metadata"].([]string); ok {
-				unsetMeta, _ := updates["_unset_metadata"].([]string)
-				merged, err := applyMetadataEdits(issue.Metadata, setMeta, unsetMeta)
-				if err != nil {
-					FatalErrorRespectJSON("metadata edit failed for %s: %v", id, err)
-				}
-				regularUpdates["metadata"] = merged
-			}
-			// Handle append_notes: combine existing notes with new content
-			if appendNotes, ok := updates["append_notes"].(string); ok {
-				combined := issue.Notes
-				if combined != "" {
-					combined += "\n"
-				}
-				combined += appendNotes
-				regularUpdates["notes"] = combined
-			}
 			if len(regularUpdates) > 0 {
 				if err := issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor); err != nil {
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+					recordFailure(id, fmt.Sprintf("updating issue: %v", err))
 					closeIfUnmutated(result)
 					continue
 				}
 				trackMutation(result)
+				if notesOverwritten {
+					notesOverwriteWarnings[issueStore] = append(notesOverwriteWarnings[issueStore], id)
+				}
 				// Audit log key field changes (survives Dolt GC flatten)
 				if s, ok := regularUpdates["status"].(string); ok {
 					audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), s, actor, "")
@@ -432,6 +455,7 @@ create, update, show, or close operation).`,
 			if len(setLabels) > 0 || len(addLabels) > 0 || len(removeLabels) > 0 {
 				if err := applyLabelUpdates(ctx, issueStore, result.ResolvedID, actor, setLabels, addLabels, removeLabels); err != nil {
 					fmt.Fprintf(os.Stderr, "Error updating labels for %s: %v\n", id, err)
+					recordFailure(id, fmt.Sprintf("updating labels: %v", err))
 					closeIfUnmutated(result)
 					continue
 				}
@@ -445,11 +469,13 @@ create, update, show, or close operation).`,
 					parentIssue, err := issueStore.GetIssue(ctx, newParent)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "Error getting parent %s: %v\n", newParent, err)
+						recordFailure(id, fmt.Sprintf("getting parent %s: %v", newParent, err))
 						closeIfUnmutated(result)
 						continue
 					}
 					if parentIssue == nil {
 						fmt.Fprintf(os.Stderr, "Error: parent issue %s not found\n", newParent)
+						recordFailure(id, fmt.Sprintf("parent issue %s not found", newParent))
 						closeIfUnmutated(result)
 						continue
 					}
@@ -459,18 +485,31 @@ create, update, show, or close operation).`,
 				deps, err := issueStore.GetDependencyRecords(ctx, result.ResolvedID)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error getting dependencies for %s: %v\n", id, err)
+					recordFailure(id, fmt.Sprintf("getting dependencies: %v", err))
 					closeIfUnmutated(result)
 					continue
 				}
+				oldParentRemoveFailed := false
 				for _, dep := range deps {
 					if dep.Type == types.DepParentChild {
 						if err := issueStore.RemoveDependency(ctx, result.ResolvedID, dep.DependsOnID, actor); err != nil {
+							// Reparenting removes the old parent edge before adding
+							// the new one; if removal fails, adding the new edge would
+							// leave the issue with two parents. Record the failed ID
+							// and stop so it surfaces in the nonzero-exit report
+							// instead of being silently counted as a success.
 							fmt.Fprintf(os.Stderr, "Error removing old parent dependency: %v\n", err)
+							recordFailure(id, fmt.Sprintf("removing old parent dependency: %v", err))
+							oldParentRemoveFailed = true
 						} else {
 							trackMutation(result)
 						}
 						break
 					}
+				}
+				if oldParentRemoveFailed {
+					closeIfUnmutated(result)
+					continue
 				}
 
 				// Add new parent-child dependency (if not removing parent)
@@ -482,6 +521,7 @@ create, update, show, or close operation).`,
 					}
 					if err := issueStore.AddDependency(ctx, newDep, actor); err != nil {
 						fmt.Fprintf(os.Stderr, "Error adding parent dependency: %v\n", err)
+						recordFailure(id, fmt.Sprintf("adding parent dependency: %v", err))
 						closeIfUnmutated(result)
 						continue
 					}
@@ -501,7 +541,7 @@ create, update, show, or close operation).`,
 					updatedIssues = append(updatedIssues, updatedIssue)
 				}
 			} else {
-				fmt.Printf("%s Updated issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, updateTitle))
+				debug.PrintNormal("%s Updated issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, updateTitle))
 			}
 
 			// Track first successful update for last-touched
@@ -521,7 +561,10 @@ create, update, show, or close operation).`,
 					IssueIDs: ids,
 				}); err != nil {
 					closePendingResults()
-					FatalErrorRespectJSON("failed to commit: %v", err)
+					return HandleErrorRespectJSON("failed to commit: %v", err)
+				}
+				for _, id := range notesOverwriteWarnings[s] {
+					warnNotesReplacement(id)
 				}
 			}
 		}
@@ -533,109 +576,95 @@ create, update, show, or close operation).`,
 		}
 
 		if jsonOutput && len(updatedIssues) > 0 {
-			outputJSON(updatedIssues)
+			if jerr := outputJSON(updatedIssues); jerr != nil {
+				return jerr
+			}
 		}
 
-		// Exit non-zero if no issues were actually updated (claim failures
-		// and other soft errors should surface as non-zero exit codes for scripting)
-		if len(args) > 0 && firstUpdatedID == "" {
-			os.Exit(1)
+		// Updates are per-ID, not atomic across IDs: successful updates above
+		// stay applied (and committed), but any per-ID failure must surface as
+		// a nonzero exit so callers can detect a partial batch (GH audit:
+		// multi-ID update used to exit 0 after mid-batch failures).
+		if len(failures) > 0 {
+			return reportUpdateFailures(failures, len(args))
 		}
+		return nil
 	},
+}
+
+func replacesExistingNotes(existing string, fields map[string]any) bool {
+	newNotes, replacing := fields["notes"].(string)
+	return replacing && existing != "" && newNotes != existing
+}
+
+func warnNotesReplacement(id string) {
+	fmt.Fprintf(os.Stderr, "warning: %s: --notes replaced existing notes (use --append-notes to preserve history)\n", id) //nolint:gosec // G705: stderr, not a browser context
+}
+
+// updateIDFailure records one issue ID that could not be updated and why.
+type updateIDFailure struct {
+	ID    string `json:"id"`
+	Error string `json:"error"`
+}
+
+// reportUpdateFailures emits a per-ID failure report on stderr and returns a
+// nonzero exit error. In --json mode the report is a single compact JSON
+// line — the last line on stderr — so callers can parse which IDs failed
+// while stdout keeps the plain array-of-updated-issues success shape. In
+// text mode the individual errors were already printed inline; this adds a
+// summary naming every failed ID.
+func reportUpdateFailures(failures []updateIDFailure, total int) error {
+	msg := fmt.Sprintf("%d of %d issues failed to update", len(failures), total)
+	if jsonOutput {
+		inner := map[string]interface{}{
+			"error":  msg,
+			"failed": failures,
+		}
+		var payload interface{}
+		if jsonEnvelopeEnabled() {
+			payload = map[string]interface{}{
+				"schema_version": JSONSchemaVersion,
+				"data":           inner,
+			}
+		} else {
+			inner["schema_version"] = JSONSchemaVersion
+			payload = inner
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			// Marshaling flat strings cannot realistically fail; fall back to
+			// the text summary rather than exiting silently.
+			fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+		} else {
+			fmt.Fprintln(os.Stderr, string(data))
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+		for _, f := range failures {
+			fmt.Fprintf(os.Stderr, "  %s: %s\n", f.ID, f.Error)
+		}
+	}
+	return &exitError{Code: 1}
 }
 
 // mergeMetadata merges new metadata JSON into existing metadata.
 // Keys from newMeta overwrite keys in existing; keys only in existing are preserved.
+// Thin alias over the shared storage helper (also used in-transaction by issueops).
 func mergeMetadata(existing, newMeta json.RawMessage) (json.RawMessage, error) {
-	base := make(map[string]json.RawMessage)
-	if len(existing) > 0 {
-		trimmed := strings.TrimSpace(string(existing))
-		if trimmed != "" && trimmed != "null" {
-			if err := json.Unmarshal(existing, &base); err != nil {
-				return nil, fmt.Errorf("existing metadata is not a JSON object: %w", err)
-			}
-		}
-	}
-
-	incoming := make(map[string]json.RawMessage)
-	if err := json.Unmarshal(newMeta, &incoming); err != nil {
-		return nil, fmt.Errorf("new metadata is not a JSON object: %w", err)
-	}
-
-	for k, v := range incoming {
-		base[k] = v
-	}
-
-	result, err := json.Marshal(base)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal merged metadata: %w", err)
-	}
-	return json.RawMessage(result), nil
+	return storage.MergeMetadataJSON(existing, newMeta)
 }
 
 // applyMetadataEdits applies --set-metadata and --unset-metadata edits to existing metadata.
-// Returns the merged JSON as json.RawMessage.
+// Thin alias over the shared storage helper (also used in-transaction by issueops).
 func applyMetadataEdits(existing json.RawMessage, setFlags, unsetFlags []string) (json.RawMessage, error) {
-	// Parse existing metadata (or start with empty object)
-	data := make(map[string]json.RawMessage)
-	if len(existing) > 0 {
-		trimmed := strings.TrimSpace(string(existing))
-		if trimmed != "" && trimmed != "null" {
-			if err := json.Unmarshal(existing, &data); err != nil {
-				return nil, fmt.Errorf("existing metadata is not a JSON object: %w", err)
-			}
-		}
-	}
-
-	// Apply --set-metadata key=value pairs
-	for _, kv := range setFlags {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok || k == "" {
-			return nil, fmt.Errorf("invalid --set-metadata: expected key=value, got %q", kv)
-		}
-		if err := storage.ValidateMetadataKey(k); err != nil {
-			return nil, err
-		}
-		// Store as JSON value: try to preserve type (number, bool, null)
-		data[k] = toJSONValue(v)
-	}
-
-	// Apply --unset-metadata keys
-	for _, k := range unsetFlags {
-		if err := storage.ValidateMetadataKey(k); err != nil {
-			return nil, err
-		}
-		delete(data, k)
-	}
-
-	result, err := json.Marshal(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal metadata: %w", err)
-	}
-	return json.RawMessage(result), nil
+	return storage.ApplyMetadataEdits(existing, setFlags, unsetFlags)
 }
 
-// toJSONValue converts a string value to its most appropriate JSON representation.
-// Recognizes numbers, booleans, and null; everything else becomes a JSON string.
+// toJSONValue stores a CLI metadata value as a JSON string.
+// Previous behavior inferred types (numbers, booleans) from content,
+// which silently broke map[string]string round-trips (GH#4146).
 func toJSONValue(s string) json.RawMessage {
-	// Check for null
-	if s == "null" {
-		return json.RawMessage("null")
-	}
-	// Check for booleans
-	if s == "true" || s == "false" {
-		return json.RawMessage(s)
-	}
-	// Check for numbers (integer or float)
-	if _, err := fmt.Sscanf(s, "%f", new(float64)); err == nil {
-		// Verify it round-trips cleanly (not NaN, Inf, etc.)
-		if json.Valid([]byte(s)) {
-			return json.RawMessage(s)
-		}
-	}
-	// Default to JSON string
-	b, _ := json.Marshal(s)
-	return json.RawMessage(b)
+	return storage.MetadataEditValue(s)
 }
 
 func init() {
@@ -644,6 +673,7 @@ func init() {
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|decision); custom types require types.custom config")
 	registerCommonIssueFlags(updateCmd)
+	updateCmd.Flags().Lookup("notes").Usage = "Additional notes (replaces existing notes; use --append-notes to append)"
 	updateCmd.Flags().Bool("allow-empty-description", false, "Allow empty description replacement when reading from stdin or file")
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
@@ -653,7 +683,7 @@ func init() {
 	updateCmd.Flags().StringSlice("remove-label", nil, "Remove labels (repeatable)")
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
-	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you)")
+	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)")
 	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)")
 	// Time-based scheduling flags (GH#820)
 	// Examples:

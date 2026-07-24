@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -12,7 +11,7 @@ import (
 // DetectCyclesInTx finds dependency cycles across both the dependencies and
 // wisp_dependencies tables. Returns slices of issues forming each cycle.
 // Only considers "blocks" and "conditional-blocks" dependencies for cycle detection.
-func DetectCyclesInTx(ctx context.Context, tx *sql.Tx) ([][]*types.Issue, error) {
+func DetectCyclesInTx(ctx context.Context, tx DBTX) ([][]*types.Issue, error) {
 	// Build adjacency list from both dependency tables.
 	graph := make(map[string][]string)
 	if err := AppendBlockingGraphInTx(ctx, tx, []string{"dependencies", "wisp_dependencies"}, graph); err != nil {
@@ -82,34 +81,46 @@ func DetectCyclesInTx(ctx context.Context, tx *sql.Tx) ([][]*types.Issue, error)
 // separate ignored tx).
 //
 //nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-func AppendBlockingGraphInTx(ctx context.Context, tx *sql.Tx, depTables []string, graph map[string][]string) error {
+func AppendBlockingGraphInTx(ctx context.Context, tx DBTX, depTables []string, graph map[string][]string) error {
+	return appendDependencyGraphInTx(ctx, tx, depTables, graph, false)
+}
+
+// AppendSchedulingGraphInTx adds blocks, conditional-blocks, and parent-child
+// edges to graph for validating mutations against the combined scheduling
+// graph. DetectCycles intentionally continues to use AppendBlockingGraphInTx.
+func AppendSchedulingGraphInTx(ctx context.Context, tx DBTX, depTables []string, graph map[string][]string) error {
+	return appendDependencyGraphInTx(ctx, tx, depTables, graph, true)
+}
+
+func appendDependencyGraphInTx(ctx context.Context, tx DBTX, depTables []string, graph map[string][]string, includeParentChild bool) error {
 	for _, depTable := range depTables {
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT issue_id, %s AS depends_on_id, type
 			FROM %s
 		`, DepTargetExpr, depTable))
 		if err != nil {
-			return fmt.Errorf("blocking graph: query %s: %w", depTable, err)
+			return fmt.Errorf("dependency graph: query %s: %w", depTable, err)
 		}
 		for rows.Next() {
 			var issueID, dependsOnID, depType string
 			if err := rows.Scan(&issueID, &dependsOnID, &depType); err != nil {
 				_ = rows.Close()
-				return fmt.Errorf("blocking graph: scan %s: %w", depTable, err)
+				return fmt.Errorf("dependency graph: scan %s: %w", depTable, err)
 			}
-			if types.DependencyType(depType) == types.DepBlocks || types.DependencyType(depType) == types.DepConditionalBlocks {
+			t := types.DependencyType(depType)
+			if t == types.DepBlocks || t == types.DepConditionalBlocks || (includeParentChild && t == types.DepParentChild) {
 				graph[issueID] = append(graph[issueID], dependsOnID)
 			}
 		}
 		_ = rows.Close()
 		if err := rows.Err(); err != nil {
-			return fmt.Errorf("blocking graph: rows %s: %w", depTable, err)
+			return fmt.Errorf("dependency graph: rows %s: %w", depTable, err)
 		}
 	}
 	return nil
 }
 
-// CycleThroughEdgesInGraph reports a rendered blocking cycle that traverses
+// CycleThroughEdgesInGraph reports a rendered cycle that traverses
 // one of the new edges (issueID -> dependsOnID pairs), or "" when no new edge
 // lies on a cycle. An edge u -> v is on a cycle exactly when u is reachable
 // from v, so this is precise where cycle enumeration is not: a DFS-based

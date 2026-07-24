@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -31,6 +32,17 @@ func TestSchemaAfterInit(t *testing.T) {
 		t.Fatalf("OpenSQL: %v", err)
 	}
 	t.Cleanup(func() { _ = cleanup() })
+
+	// Verify D4v2 indexes exist on the issues table.
+	var ignoredName, createStmt string
+	if err := db.QueryRowContext(ctx, "SHOW CREATE TABLE `issues`").Scan(&ignoredName, &createStmt); err != nil {
+		t.Fatalf("SHOW CREATE TABLE issues: %v", err)
+	}
+	for _, idx := range []string{"idx_issues_status_updated_at", "idx_issues_defer_until"} {
+		if !strings.Contains(createStmt, idx) {
+			t.Errorf("issues table missing index %q", idx)
+		}
+	}
 
 	var maxVersion int
 	if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion); err != nil {

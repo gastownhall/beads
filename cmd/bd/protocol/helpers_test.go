@@ -67,6 +67,34 @@ func testMainInner(m *testing.M) int {
 	return code
 }
 
+// requireDoltStore enforces the Dolt-backed store precondition for a test.
+// Locally (and in any job where Dolt is best-effort) a missing container skips
+// the test, so contributors without Docker stay green. Two cases turn a missing
+// store into a hard failure instead of a silent skip:
+//
+//   - The required contract-corpus CI job sets BEADS_PROTOCOL_REQUIRE_DOLT=1, so
+//     it can never report success without exercising the golden or double-run
+//     checks when the Dolt container fails to start.
+//   - -corpus.update (i.e. `make corpus-regen`) means the caller intends to
+//     regenerate the committed corpus. Skipping then would exit 0 while writing
+//     nothing, letting a deliberate wire-shape change leave stale committed blobs
+//     on disk — the exact footgun the corpus gate exists to prevent. Guarding the
+//     intent here (not just in the Makefile) also covers a direct
+//     `go test -corpus.update` invocation.
+func requireDoltStore(t *testing.T, what string) {
+	t.Helper()
+	if testDoltPort != 0 {
+		return
+	}
+	if os.Getenv("BEADS_PROTOCOL_REQUIRE_DOLT") == "1" {
+		t.Fatalf("%s requires a live Dolt store, but the test container is unavailable and BEADS_PROTOCOL_REQUIRE_DOLT=1; the required contract-corpus job must not skip these checks", what)
+	}
+	if *updateCorpus {
+		t.Fatalf("%s: -corpus.update needs a live Dolt store, but the test container is unavailable; regenerating without it would silently write nothing and leave the committed corpus stale. Start Docker/Dolt, then rerun `make corpus-regen`.", what)
+	}
+	t.Skipf("%s: test Dolt server not available", what)
+}
+
 func buildBD(t *testing.T) string {
 	t.Helper()
 	bdOnce.Do(func() {
@@ -145,6 +173,10 @@ type workspace struct {
 	dir string
 	bd  string
 	t   *testing.T
+	// prefix is the id prefix this workspace was initialized with — the
+	// interchange tests need it to mint well-formed ids in hand-written
+	// JSONL fixtures.
+	prefix string
 }
 
 // testPrefix returns a unique prefix with a random suffix to ensure each test
@@ -161,9 +193,7 @@ func testPrefix(t *testing.T) string {
 func newWorkspace(t *testing.T) *workspace {
 	t.Helper()
 	testutil.RequireDoltBinary(t)
-	if testDoltPort == 0 {
-		t.Skip("skipping: test Dolt server not available")
-	}
+	requireDoltStore(t, "protocol workspace")
 	bd := buildBD(t)
 	dir := t.TempDir()
 	w := &workspace{dir: dir, bd: bd, t: t}
@@ -180,6 +210,7 @@ func newWorkspace(t *testing.T) *workspace {
 
 	prefix := testPrefix(t)
 	w.run("init", "--prefix", prefix, "--quiet")
+	w.prefix = prefix
 	return w
 }
 
@@ -189,6 +220,13 @@ func (w *workspace) env() []string {
 		"HOME=" + w.dir,
 		"GIT_CONFIG_NOSYSTEM=1",
 		"BEADS_TEST_MODE=1",
+		// Metrics off. Two reasons, one of them a test-stability bug: bd spawns a
+		// DETACHED `bd send-metrics` child that writes $HOME/.beads/eventsData
+		// after the parent exits, and HOME here is the t.TempDir() workspace — so
+		// the child races Go's RemoveAll and the test fails its own cleanup with
+		// "unlinkat …: directory not empty". (The other reason: a test suite
+		// should not ship telemetry.)
+		"BD_DISABLE_METRICS=1",
 	}
 	if testDoltPort > 0 {
 		env = append(env, "BEADS_DOLT_PORT="+strconv.Itoa(testDoltPort))
@@ -273,12 +311,36 @@ func (w *workspace) create(args ...string) string {
 }
 
 // showJSON runs bd show <id> --json and returns the first issue object.
+//
+// The payload is count-only: labels and dependencies are inline, but comments
+// and dependents are reported as comment_count / dependent_count and their
+// bodies are omitted. Use showJSONFull to assert on comment or dependent
+// content.
 func (w *workspace) showJSON(id string) map[string]any {
 	w.t.Helper()
 	out := w.run("show", id, "--json")
 	items := parseJSONOutput(w.t, out)
 	if len(items) == 0 {
 		w.t.Fatalf("bd show %s --json returned no items", id)
+	}
+	return items[0]
+}
+
+// showJSONFull runs bd show <id> --json with the opt-in relational payloads and
+// returns the first issue object — the shape to assert against when a test
+// cares about comment or dependent CONTENT rather than counts.
+//
+// bd show --json has been count-only by default since cfcc95799 ("count-only
+// JSON details with opt-in streamed payloads", be-ijck6q): materializing every
+// comment and dependent made show pathologically slow on hub beads, so the full
+// lists moved behind --include-comments / --include-dependents. The data is
+// still there — these flags are how you ask for it.
+func (w *workspace) showJSONFull(id string) map[string]any {
+	w.t.Helper()
+	out := w.run("show", id, "--json", "--include-comments", "--include-dependents")
+	items := parseJSONOutput(w.t, out)
+	if len(items) == 0 {
+		w.t.Fatalf("bd show %s --json --include-comments --include-dependents returned no items", id)
 	}
 	return items[0]
 }

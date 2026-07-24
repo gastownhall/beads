@@ -21,7 +21,7 @@ updates:
       - "ci"
 
   # Python (beads-mcp)
-  - package-ecosystem: "pip"
+  - package-ecosystem: "uv"
     directory: "/integrations/beads-mcp"
     schedule:
       interval: "weekly"

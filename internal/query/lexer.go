@@ -229,12 +229,19 @@ func (l *Lexer) readString(quote rune, startPos int) (Token, error) {
 }
 
 // readNumberOrDuration reads a number or duration (e.g., 7d, 24h).
+//
+// Unsigned digit-led tokens that continue into identifier characters
+// (e.g. "1-alpha", "42day-sla", "9.3.1") are re-lexed as identifiers so
+// they can stand in unquoted on the value side of comparisons like
+// "label=1-alpha". Signed forms ("-3-foo") still error — the user has
+// to quote them.
 func (l *Lexer) readNumberOrDuration(startPos int) (Token, error) {
 	var sb strings.Builder
 
 	// Handle optional sign
 	r := l.next()
-	if r == '-' || r == '+' {
+	hadSign := r == '-' || r == '+'
+	if hadSign {
 		sb.WriteRune(r)
 		r = l.next()
 	}
@@ -256,13 +263,26 @@ func (l *Lexer) readNumberOrDuration(startPos int) (Token, error) {
 		sb.WriteRune(r)
 	}
 
-	// Check for duration suffix
-	if r != 0 && isDurationSuffix(r) {
+	// Check for duration suffix. Only commit to a duration when the suffix
+	// stands alone — if more identifier characters follow (e.g. "7day"),
+	// fall through to the identifier-fallback below.
+	if r != 0 && isDurationSuffix(r) && !isIdentChar(l.peek()) {
 		sb.WriteRune(r)
 		return Token{Type: TokenDuration, Value: sb.String(), Pos: startPos}, nil
 	}
 
-	// Not a duration suffix, back up
+	// Identifier-continuation fallback: an unsigned digit-led run that
+	// butts against more identifier characters is an identifier, not a
+	// number. Restart the lex at the original position and read it as an
+	// identifier so "1-alpha", "2bravo", "42d-sla" all tokenize as one
+	// TokenIdent.
+	if !hadSign && r != 0 && isIdentChar(r) {
+		l.pos = startPos
+		return l.readIdent(startPos)
+	}
+
+	// Not a duration suffix and not an identifier — back up the lookahead
+	// rune.
 	if r != 0 {
 		l.backup()
 	}

@@ -30,6 +30,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var issue types.Issue
 	var createdAtStr, updatedAtStr sql.NullString // scanned as strings, parsed with format fallbacks
 	var startedAt, closedAt, compactedAt, dueAt, deferUntil sql.NullTime
+	var leaseExpiresAt, heartbeatAt sql.NullTime // lease columns (migration 0054); NULL when no active lease
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
 	var createdBy sql.NullString
 	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
@@ -39,6 +40,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var awaitType, awaitID, waiters sql.NullString
 	var ephemeral, noHistory, pinned, isTemplate sql.NullInt64
 	var metadata sql.NullString
+	var rowLock sql.NullInt64 // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
 
 	dests := []any{
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -51,7 +53,8 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&molType,
 		&eventKind, &actor, &target, &payload,
 		&dueAt, &deferUntil,
-		&workType, &sourceSystem, &metadata,
+		&workType, &sourceSystem, &metadata, &rowLock,
+		&leaseExpiresAt, &heartbeatAt,
 	}
 	dests = append(dests, extra...)
 	if err := s.Scan(dests...); err != nil {
@@ -170,6 +173,16 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	// Custom metadata field (GH#1406)
 	if metadata.Valid && metadata.String != "" && metadata.String != "{}" {
 		issue.Metadata = []byte(metadata.String)
+	}
+	// row_lock surfaced as the opaque RowVersion token. NOT NULL DEFAULT 0, so
+	// this is normally valid; a NULL (defensive) maps to 0.
+	issue.RowVersion = rowLock.Int64
+	// Lease columns (migration 0054); NULL when no active lease.
+	if leaseExpiresAt.Valid {
+		issue.LeaseExpiresAt = &leaseExpiresAt.Time
+	}
+	if heartbeatAt.Valid {
+		issue.HeartbeatAt = &heartbeatAt.Time
 	}
 
 	return &issue, nil

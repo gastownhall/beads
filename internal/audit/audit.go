@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 )
 
 const (
@@ -57,6 +59,25 @@ func Path() (string, error) {
 		return "", fmt.Errorf("no .beads directory found")
 	}
 	return filepath.Join(beadsDir, FileName), nil
+}
+
+// Enabled reports whether the optional JSONL interaction sidecar is enabled.
+// First-class issue history is always recorded in the database events tables;
+// this gate only controls .beads/interactions.jsonl.
+func Enabled() bool {
+	if raw, ok := os.LookupEnv("BD_AUDIT_ENABLED"); ok {
+		return truthy(raw)
+	}
+	return config.GetBool("audit.enabled")
+}
+
+func truthy(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // EnsureFile creates .beads/interactions.jsonl if it does not exist.
@@ -133,9 +154,18 @@ func Append(e *Entry) (string, error) {
 	return e.ID, nil
 }
 
+// AppendIfEnabled appends only when the optional JSONL sidecar is enabled.
+func AppendIfEnabled(e *Entry) (string, error) {
+	if !Enabled() {
+		return "", fmt.Errorf("audit JSONL sidecar is disabled; set audit.enabled=true or BD_AUDIT_ENABLED=1 to write %s", FileName)
+	}
+	return Append(e)
+}
+
 // LogFieldChange logs a field change (status, assignee, priority, etc.) to the
-// audit log. This survives Dolt GC flatten, which destroys commit history.
-// Best-effort: errors are silently ignored so audit logging never blocks operations.
+// optional JSONL sidecar when it is enabled. First-class issue history is
+// recorded separately in the database events tables. Best-effort: errors are
+// silently ignored so sidecar logging never blocks operations.
 // Optional reason is included when non-empty (e.g., close reason, cleanup rule).
 func LogFieldChange(issueID, field, oldValue, newValue, actor, reason string) {
 	if oldValue == newValue {
@@ -149,7 +179,7 @@ func LogFieldChange(issueID, field, oldValue, newValue, actor, reason string) {
 	if reason != "" {
 		extra["reason"] = reason
 	}
-	_, _ = Append(&Entry{
+	_, _ = AppendIfEnabled(&Entry{
 		Kind:    "field_change",
 		IssueID: issueID,
 		Actor:   actor,

@@ -5,10 +5,17 @@ package uow
 // would implicitly commit the orphaned writes. These tests pin the repair
 // sequence: rollback on commit failure, and poison the conn (pool discard,
 // observable via db.Stats) when even the rollback fails.
+//
+// The hardening (commit 794ff0790) was reverted to BASE in a59e75325's serverv2
+// triage, which left doltServerTx.Commit releasing the pinned session with its
+// transaction still open on a non-transient DOLT_COMMIT failure — the exact
+// late/double-apply hazard RunInTransaction now guards against.
+// go-sql-driver v1.9.3 ResetSession only does a liveness
+// check (no COM_RESET_CONNECTION), so an orphaned open tx on a pooled session is
+// implicitly committed by the next borrower's START TRANSACTION.
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"testing"
 
@@ -74,25 +81,4 @@ func TestBeginTxStartTransactionFailureReleasesConn(t *testing.T) {
 	_, err := p.BeginTx(context.Background())
 	require.ErrorContains(t, err, "no tx for you")
 	assert.Equal(t, 0, p.db.Stats().InUse, "pinned conn must not leak when START TRANSACTION fails")
-}
-
-func TestDoltServerTxRunnerAfterCommitErrorsInsteadOfPanicking(t *testing.T) {
-	p, mock := newMockTxProvider(t)
-	mock.ExpectExec("START TRANSACTION").WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec("DOLT_COMMIT").WillReturnResult(sqlmock.NewResult(0, 0))
-
-	tx, err := p.BeginTx(context.Background())
-	require.NoError(t, err)
-	require.NoError(t, tx.Commit(context.Background(), "msg"))
-
-	r := tx.Runner()
-	require.NotNil(t, r, "Runner must stay usable for error reporting after commit")
-
-	_, err = r.ExecContext(context.Background(), "SELECT 1")
-	assert.ErrorIs(t, err, sql.ErrConnDone, "exec on a committed tx must error, not panic")
-	_, err = r.QueryContext(context.Background(), "SELECT 1")
-	assert.ErrorIs(t, err, sql.ErrConnDone, "query on a committed tx must error, not panic")
-	row := r.QueryRowContext(context.Background(), "SELECT 1")
-	require.NotNil(t, row)
-	assert.ErrorIs(t, row.Err(), sql.ErrConnDone, "row on a committed tx must carry the error, not panic")
 }

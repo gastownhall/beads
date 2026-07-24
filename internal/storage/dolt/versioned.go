@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -43,6 +44,23 @@ func (s *DoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]*storage
 	return result, err
 }
 
+// PreviousExternalRef returns the external_ref value recorded for issueID
+// as of the most recent commit at or before asOf.
+// Implements storage.ExternalRefHistoryQuerier.
+func (s *DoltStore) PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (string, bool, error) {
+	var ref string
+	var found bool
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		ref, found, err = issueops.PreviousExternalRefInTx(ctx, tx, issueID, asOf)
+		if err != nil {
+			return wrapQueryError("get previous external ref", err)
+		}
+		return nil
+	})
+	return ref, found, err
+}
+
 // ListBranches returns the names of all branches.
 // Implements storage.VersionedStorage.
 func (s *DoltStore) ListBranches(ctx context.Context) ([]string, error) {
@@ -58,6 +76,20 @@ func (s *DoltStore) GetCurrentCommit(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to get current commit: %w", err)
 	}
 	return hash, nil
+}
+
+// GetStateHash returns a hash of the entire database including the working
+// set. Unlike GetCurrentCommit it moves on uncommitted writes, so callers can
+// detect changes even when dolt auto-commit is off (SQL-server mode, where
+// writes land in the working set and HEAD does not advance).
+// Implements storage.StateHasher.
+func (s *DoltStore) GetStateHash(ctx context.Context) (string, error) {
+	var hash string
+	if err := s.db.QueryRowContext(ctx, "SELECT DOLT_HASHOF_DB()").Scan(&hash); err == nil {
+		return hash, nil
+	}
+	// Older servers predate DOLT_HASHOF_DB; degrade to HEAD-based detection.
+	return s.GetCurrentCommit(ctx)
 }
 
 // GetConflicts returns any merge conflicts in the current state.

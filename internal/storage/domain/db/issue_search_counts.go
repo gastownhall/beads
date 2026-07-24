@@ -138,7 +138,7 @@ func (r *issueSQLRepositoryImpl) runFilterSearchQuery(ctx context.Context, query
 
 //nolint:gosec // G201: SQL fragments are built from hardcoded table names and parameterized filters.
 func (r *issueSQLRepositoryImpl) runSearchQuery(ctx context.Context, tables filterTables, whereSQL, orderBySQL, limitSQL string, args []any, includeWispReverseDeps bool, skipLabels bool) ([]*types.IssueWithCounts, error) {
-	searchSQL := sqlbuild.SearchCountsSQL(tables, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, skipLabels)
+	searchSQL, _ := sqlbuild.SearchCountsSQL(tables, nil, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, skipLabels)
 
 	rows, err := r.runner.QueryContext(ctx, searchSQL, args...)
 	if err != nil {

@@ -1068,8 +1068,6 @@ func TestCLI_CreateDryRun(t *testing.T) {
 	})
 
 	t.Run("DryRunWithFileReturnsError", func(t *testing.T) {
-		// This test must use exec.Command because FatalError calls os.Exit(1)
-		// which would kill the test process if run in-process
 		tmpDir := createTempDirWithCleanup(t)
 
 		// Initialize the database first

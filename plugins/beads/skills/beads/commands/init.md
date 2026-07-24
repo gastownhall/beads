@@ -1,6 +1,6 @@
 ---
 description: Initialize beads in the current project
-argument-hint: [prefix]
+argument-hint: "[prefix]"
 ---
 
 Initialize beads issue tracking in the current directory.

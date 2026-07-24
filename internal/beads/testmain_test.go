@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/doltserver"
 )
 
 func TestMain(m *testing.M) {
@@ -40,6 +42,13 @@ func TestMain(m *testing.M) {
 	}
 
 	code := m.Run()
+
+	// Best-effort reap of any dolt sql-server left running under this
+	// suite's temp root (e.g. auto-started by the BEADS_TEST_BD_BINARY
+	// this TestMain builds, if a SIGKILLed run left one behind) — see
+	// gastownhall/beads mybd-q6cz.
+	doltserver.SweepOrphanedTestServers(root)
+
 	integrationCleanup()
 	_ = os.RemoveAll(root)
 	os.Exit(code)

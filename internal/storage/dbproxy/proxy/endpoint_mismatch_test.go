@@ -3,7 +3,6 @@ package proxy_test
 import (
 	"errors"
 	"net"
-	"os"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -24,7 +23,7 @@ func TestGetCreateDatabaseProxyServerEndpoint_RejectsUpstreamMismatch(t *testing
 
 	existingCfg := configfile.ExternalDoltConfig{Host: "10.0.0.1", Port: 3306}
 	require.NoError(t, pidfile.Write(root, proxy.PIDFileName, pidfile.PidFile{
-		Pid:        os.Getpid(),
+		Pid:        12345,
 		Port:       port,
 		UpstreamID: server.ExternalDoltServerID(existingCfg),
 	}))
@@ -55,7 +54,7 @@ func TestGetCreateDatabaseProxyServerEndpoint_ReusesMatchingUpstream(t *testing.
 
 	cfg := configfile.ExternalDoltConfig{Host: "10.0.0.1", Port: 3306}
 	require.NoError(t, pidfile.Write(root, proxy.PIDFileName, pidfile.PidFile{
-		Pid:        os.Getpid(),
+		Pid:        12345,
 		Port:       port,
 		UpstreamID: server.ExternalDoltServerID(cfg),
 	}))
@@ -79,7 +78,7 @@ func TestGetCreateDatabaseProxyServerEndpoint_LegacyPidfileWithoutIDReused(t *te
 	port := ln.Addr().(*net.TCPAddr).Port
 
 	require.NoError(t, pidfile.Write(root, proxy.PIDFileName, pidfile.PidFile{
-		Pid:  os.Getpid(),
+		Pid:  12345,
 		Port: port,
 	}))
 
@@ -87,61 +86,6 @@ func TestGetCreateDatabaseProxyServerEndpoint_LegacyPidfileWithoutIDReused(t *te
 		Backend:     proxy.BackendExternal,
 		External:    configfile.ExternalDoltConfig{Host: "10.0.0.1", Port: 3306},
 		LogFilePath: root + "/server.log",
-	})
-	require.NoError(t, err)
-	assert.Equal(t, port, ep.Port)
-}
-
-func TestGetCreateDatabaseProxyServerEndpoint_RejectsLocalUpstreamMismatch(t *testing.T) {
-	root := t.TempDir()
-	otherRoot := t.TempDir()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-	port := ln.Addr().(*net.TCPAddr).Port
-
-	// A live proxy fronting some OTHER workspace's managed dolt (e.g. a
-	// recycled pid/port) must not be handed out for this rootDir.
-	require.NoError(t, pidfile.Write(root, proxy.PIDFileName, pidfile.PidFile{
-		Pid:        os.Getpid(),
-		Port:       port,
-		UpstreamID: server.LocalDoltServerID(otherRoot),
-	}))
-
-	_, err = proxy.GetCreateDatabaseProxyServerEndpoint(root, proxy.OpenOpts{
-		Backend:        proxy.BackendLocalServer,
-		ConfigFilePath: root + "/dolt-config.yaml",
-		LogFilePath:    root + "/server.log",
-		DoltBinPath:    "dolt",
-	})
-	require.Error(t, err)
-
-	var mismatch *proxy.ErrUpstreamMismatch
-	require.True(t, errors.As(err, &mismatch), "expected ErrUpstreamMismatch, got %T: %v", err, err)
-	assert.Equal(t, server.LocalDoltServerID(root), mismatch.Want)
-	assert.Equal(t, server.LocalDoltServerID(otherRoot), mismatch.Have)
-}
-
-func TestGetCreateDatabaseProxyServerEndpoint_ReusesMatchingLocalUpstream(t *testing.T) {
-	root := t.TempDir()
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-	port := ln.Addr().(*net.TCPAddr).Port
-
-	require.NoError(t, pidfile.Write(root, proxy.PIDFileName, pidfile.PidFile{
-		Pid:        os.Getpid(),
-		Port:       port,
-		UpstreamID: server.LocalDoltServerID(root),
-	}))
-
-	ep, err := proxy.GetCreateDatabaseProxyServerEndpoint(root, proxy.OpenOpts{
-		Backend:        proxy.BackendLocalServer,
-		ConfigFilePath: root + "/dolt-config.yaml",
-		LogFilePath:    root + "/server.log",
-		DoltBinPath:    "dolt",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, port, ep.Port)

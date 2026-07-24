@@ -2,14 +2,10 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,16 +22,10 @@ const (
 var codexHookMarkerDirOverride string
 
 var codexHookExecPrime = func(ctx context.Context, memoriesOnly bool) (string, error) {
-	args := []string{"prime"}
 	if memoriesOnly {
-		args = append(args, "--memories-only")
+		return runBdPrime(ctx, "--memories-only")
 	}
-	cmd := exec.CommandContext(ctx, os.Args[0], args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("bd %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return string(out), nil
+	return runBdPrime(ctx)
 }
 
 type codexHookInput struct {
@@ -114,11 +104,7 @@ func codexHookPreCompactCheck(ctx context.Context, stdout io.Writer) error {
 }
 
 func codexHookMarkNeedsRefresh(input codexHookInput) error {
-	path := codexHookRefreshMarkerPath(input)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil
-	}
-	return os.WriteFile(path, []byte("1\n"), 0o600) // #nosec G306 -- user-private cache marker
+	return writeAgentHookMarker(codexHookRefreshMarkerPath(input))
 }
 
 func codexHookMaybeRefresh(ctx context.Context, input codexHookInput, stdout io.Writer) error {
@@ -138,27 +124,11 @@ func codexHookMaybeRefresh(ctx context.Context, input codexHookInput, stdout io.
 }
 
 func codexHookRefreshMarkerPath(input codexHookInput) string {
-	base := codexHookMarkerBaseDir()
-	sessionID := input.SessionID
-	if sessionID == "" {
-		sessionID = "unknown-session"
-	}
-	workspace := input.CWD
-	if workspace == "" {
-		workspace = "unknown-workspace"
-	}
-	sum := sha256.Sum256([]byte(sessionID + "\x00" + filepath.Clean(workspace)))
-	return filepath.Join(base, hex.EncodeToString(sum[:])+".refresh")
+	return agentHookMarkerPath(codexHookMarkerBaseDir(), input.SessionID, input.CWD)
 }
 
 func codexHookMarkerBaseDir() string {
-	if codexHookMarkerDirOverride != "" {
-		return codexHookMarkerDirOverride
-	}
-	if dir, err := os.UserCacheDir(); err == nil && dir != "" {
-		return filepath.Join(dir, "beads", "codex-hooks")
-	}
-	return filepath.Join(os.TempDir(), "beads-codex-hooks")
+	return agentHookMarkerBaseDir("codex-hooks", codexHookMarkerDirOverride)
 }
 
 func writeCodexHookAdditionalContext(stdout io.Writer, event, context string) error {

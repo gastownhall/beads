@@ -1,6 +1,6 @@
 ---
 description: Record, list, and manage project decisions with rationale tracking
-argument-hint: record|list|show|supersede
+argument-hint: "record|list|show|supersede"
 ---
 
 Record and track project decisions as beads issues with structured rationale, alternatives considered, and links to affected work.
@@ -9,7 +9,7 @@ Decisions use `--type decision`. The description field holds the structured deci
 
 ## Record a Decision
 
-When the user wants to record a decision (or you invoke `bd decision record`):
+When the user wants to record a decision (i.e. the `record` action of this command):
 
 1. Gather the following (ask if not provided):
    - **Title**: Short summary of what was decided (required)

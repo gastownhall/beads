@@ -31,7 +31,7 @@ func startTestDoltServer() func() {
 		return func() {}
 	}
 	if os.Getenv("BEADS_TEST_PROXIED_SERVER") == "1" {
-		return func() {}
+		return func() { testutil.TerminateDoltContainer() }
 	}
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)

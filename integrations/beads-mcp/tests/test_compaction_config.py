@@ -14,13 +14,22 @@ import pytest
 MCP_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _python_env() -> dict[str, str]:
+    """Return an environment that imports the local source tree in subprocesses."""
+    env = os.environ.copy()
+    src_path = str(MCP_ROOT / "src")
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = src_path if not existing_pythonpath else f"{src_path}{os.pathsep}{existing_pythonpath}"
+    return env
+
+
 class TestCompactionConfigEnvironmentVariables:
     """Test environment variable configuration for compaction settings."""
 
     def test_default_compaction_threshold(self):
         """Test default COMPACTION_THRESHOLD is 20."""
-        # Import in a clean environment
-        env = os.environ.copy()
+        # Import in a clean environment with the local source tree importable
+        env = _python_env()
         env.pop("BEADS_MCP_COMPACTION_THRESHOLD", None)
         env.pop("BEADS_MCP_PREVIEW_COUNT", None)
 
@@ -46,32 +55,6 @@ print(f"preview={server.PREVIEW_COUNT}")
 
         assert "threshold=20" in result.stdout
         assert "preview=5" in result.stdout
-
-    def test_custom_compaction_threshold_via_env(self):
-        """Test custom COMPACTION_THRESHOLD via environment variable."""
-        env = os.environ.copy()
-        env["BEADS_MCP_COMPACTION_THRESHOLD"] = "50"
-        env["BEADS_MCP_PREVIEW_COUNT"] = "10"
-
-        code = """
-import os
-os.environ['BEADS_MCP_COMPACTION_THRESHOLD'] = '50'
-os.environ['BEADS_MCP_PREVIEW_COUNT'] = '10'
-
-from beads_mcp import server
-print(f"threshold={server.COMPACTION_THRESHOLD}")
-print(f"preview={server.PREVIEW_COUNT}")
-"""
-        result = subprocess.run(
-            [sys.executable, "-c", code],
-            env=env,
-            capture_output=True,
-            text=True,
-            cwd=MCP_ROOT,
-        )
-
-        assert "threshold=50" in result.stdout or "threshold=20" in result.stdout  # May be cached
-        # Due to module caching, we test the function directly instead
 
     def test_get_compaction_settings_with_defaults(self):
         """Test _get_compaction_settings() returns defaults when no env vars set."""

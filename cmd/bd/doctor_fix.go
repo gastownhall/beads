@@ -200,8 +200,12 @@ func applyFixesInteractive(path string, issues []doctorCheck) {
 	}
 }
 
-// applyFixList applies a list of fixes and reports results
-func applyFixList(path string, fixes []doctorCheck) {
+// orderDoctorFixes sorts doctor fixes in place into a dependency-aware apply
+// order. Extracted from applyFixList so the ordering invariants are unit
+// testable without a live database — notably that "Blocked State" (the full
+// is_blocked recompute) runs after every graph-mutating fix, so it recomputes
+// from the corrected graph rather than a pre-repair one (bd-6dnrw.37).
+func orderDoctorFixes(fixes []doctorCheck) {
 	// Apply fixes in a dependency-aware order.
 	// Rough dependency chain:
 	// gitignore (fast, security-critical) → permissions/lock cleanup → config sanity → DB integrity/migrations.
@@ -220,18 +224,26 @@ func applyFixList(path string, fixes []doctorCheck) {
 		"Schema Compatibility",
 		"Project Identity",
 	}
-	priority := make(map[string]int, len(order))
+	priority := make(map[string]int, len(order)+1)
 	for i, name := range order {
 		priority[name] = i
 	}
+	// "Blocked State" recomputes is_blocked from the dependency graph, so it must
+	// run after every graph-mutating fix (Dependency Keys, Orphaned/Child-Parent
+	// Dependencies, Cross-Table Duplicates). Those are all unlisted and share the
+	// default priority below, and their relative order would otherwise be decided
+	// by check-append order alone. Pin Blocked State to an explicit terminal
+	// priority so it is provably last regardless of append order (bd-6dnrw.37).
+	const defaultPriority = 1000
+	priority["Blocked State"] = defaultPriority + 1
 	slices.SortStableFunc(fixes, func(a, b doctorCheck) int {
 		pa, oka := priority[a.Name]
 		if !oka {
-			pa = 1000
+			pa = defaultPriority
 		}
 		pb, okb := priority[b.Name]
 		if !okb {
-			pb = 1000
+			pb = defaultPriority
 		}
 		if pa < pb {
 			return -1
@@ -241,6 +253,11 @@ func applyFixList(path string, fixes []doctorCheck) {
 		}
 		return 0
 	})
+}
+
+// applyFixList applies a list of fixes and reports results
+func applyFixList(path string, fixes []doctorCheck) {
+	orderDoctorFixes(fixes)
 
 	fixedCount := 0
 	errorCount := 0
@@ -255,7 +272,16 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Gitignore":
 			err = doctor.FixGitignore(path)
 		case "Project Gitignore":
-			err = doctor.FixProjectGitignore(path)
+			// Stealth / no-git-ops repos must not get a tracked .gitignore; route the patterns into
+			// .git/info/exclude instead (matches bd init --stealth) and strip any beads section a
+			// previous run leaked into the tracked .gitignore so stealth leaves no trace.
+			if isStealthRepo(path) {
+				if err = addProjectPatternsToGitExclude(path, doctor.ProjectGitignorePatterns, false); err == nil {
+					_, err = removeBeadsProjectGitignoreSection(path)
+				}
+			} else {
+				err = doctor.FixProjectGitignore(path)
+			}
 		case "Redirect Tracking":
 			err = doctor.FixRedirectTracking(path)
 		case "Last-Touched Tracking":
@@ -294,10 +320,17 @@ func applyFixList(path string, fixes []doctorCheck) {
 		case "Untracked Files":
 			fmt.Printf("  ⚠ Untracked JSONL fix removed (Dolt-native storage)\n")
 			continue
+		case "Cross-Table Duplicates":
+			err = fix.CrossTableDuplicates(path, doctorVerbose)
 		case "Orphaned Dependencies":
 			err = fix.OrphanedDependencies(path, doctorVerbose)
 		case "Dependency Keys":
 			err = fix.DependencyKeys(path, doctorVerbose)
+		case "Blocked State":
+			// bd-6dnrw.37: full is_blocked recompute. Pinned to a terminal
+			// priority in the sort above so it runs after every graph-mutating
+			// fix, recomputing from the corrected graph.
+			err = fix.RecomputeBlocked(path)
 		case "Child-Parent Dependencies":
 			// Requires explicit opt-in flag (destructive, may remove intentional deps)
 			if !doctorFixChildParent {

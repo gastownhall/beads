@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -10,7 +9,7 @@ import (
 
 // GetEpicsEligibleForClosureInTx returns epics whose children are all closed.
 // nolint:gosec // G201: table names are hardcoded, placeholders contain only ? markers
-func GetEpicsEligibleForClosureInTx(ctx context.Context, tx *sql.Tx) ([]*types.EpicStatus, error) {
+func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.EpicStatus, error) {
 	// Step 1: Get open epic IDs (single-table scan)
 	epicRows, err := tx.QueryContext(ctx, `
 		SELECT id FROM issues

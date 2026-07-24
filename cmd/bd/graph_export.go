@@ -214,7 +214,7 @@ const htmlTemplate = `<!DOCTYPE html>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; background: #1a1a2e; color: #eee; overflow: hidden; }
-svg { width: 100vw; height: 100vh; display: block; }
+#graph { width: 100vw; height: 100vh; display: block; }
 .node rect { rx: 6; ry: 6; stroke-width: 1.5; cursor: pointer; }
 .node text { font-size: 11px; pointer-events: none; }
 .node .id-text { font-size: 9px; fill: #999; }
@@ -247,6 +247,7 @@ svg { width: 100vw; height: 100vh; display: block; }
   <div class="legend-item"><svg width="30" height="10"><line x1="0" y1="5" x2="30" y2="5" stroke="#666" stroke-width="1.5" stroke-dasharray="5,3"/></svg> parent-child</div>
 </div>
 <div id="controls">
+  <button onclick="fitToView()">Fit View</button>
   <button onclick="resetZoom()">Reset View</button>
   <button onclick="toggleLabels()">Toggle Labels</button>
   Drag nodes to rearrange. Scroll to zoom. Click for details.
@@ -320,11 +321,29 @@ simulation.on("tick", () => {
 function dragStart(e, d) { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; }
 function dragged(e, d) { d.fx = e.x; d.fy = e.y; }
 function dragEnd(e, d) { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }
-function resetZoom() { svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity); }
+function fitToView() {
+  if (!nodes.length) return;
+  const padding = 40;
+  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+  nodes.forEach(d => {
+    if (typeof d.x !== "number" || typeof d.y !== "number") return;
+    xMin = Math.min(xMin, d.x - nodeW/2);
+    xMax = Math.max(xMax, d.x + nodeW/2);
+    yMin = Math.min(yMin, d.y - nodeH/2);
+    yMax = Math.max(yMax, d.y + nodeH/2);
+  });
+  if (!isFinite(xMin)) return;
+  const bboxW = xMax - xMin + 2*padding;
+  const bboxH = yMax - yMin + 2*padding;
+  const scale = Math.min(width/bboxW, height/bboxH, 4);
+  const tx = width/2 - scale * (xMin + xMax)/2;
+  const ty = height/2 - scale * (yMin + yMax)/2;
+  svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+}
+function resetZoom() { fitToView(); }
 function toggleLabels() { showLabels = !showLabels; node.selectAll("text").style("opacity", showLabels ? 1 : 0); }
 
-// Initial zoom to fit
-svg.call(zoom.transform, d3.zoomIdentity.translate(width/4, height/4).scale(0.8));
+setTimeout(fitToView, 1500);
 </script>
 </body>
 </html>
