@@ -1,6 +1,6 @@
 ---
 description: Rename the issue prefix for all issues
-argument-hint: <new-prefix> [--dry-run]
+argument-hint: "<new-prefix> [--dry-run]"
 ---
 
 Rename the issue prefix for all issues in the database.

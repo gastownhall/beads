@@ -37,7 +37,10 @@ const waitsForGateBlockedSQL = `
 		  )
 		)
 		AND NOT (
-		  JSON_UNQUOTE(JSON_EXTRACT(d.metadata, '$.gate')) = 'any-children'
+		  -- COALESCE: metadata without a gate key (legacy '{}' rows) means the
+		  -- all-children default; a NULL here would poison the AND/NOT chain
+		  -- and unblock the gate as soon as any child closes.
+		  COALESCE(JSON_UNQUOTE(JSON_EXTRACT(d.metadata, '$.gate')), 'all-children') = 'any-children'
 		  AND (
 		    EXISTS (
 		      SELECT 1 FROM dependencies cd JOIN issues child ON child.id = cd.issue_id

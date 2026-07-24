@@ -2,63 +2,96 @@
 #
 # Format: <total_shards> <shard_number> <top_level_test_name>
 #
-# There is no committed recent duration artifact for these tests. This manifest
-# pins a conservative, duration-weighted split for the 8-shard CI matrix while
-# proxied-test-shard.sh continues to hash-distribute newly-added tests that are
-# not listed here.
-#
-# TestProxiedServerUpdate (~55 subtests) dominates runtime and cannot be split
-# below its own wall-clock, so it owns shard 1 alone; the remaining suites are
-# greedily packed to keep shards 2-8 roughly even.
-8 1 TestProxiedServerUpdate
+# 15-shard split, bin-packed longest-processing-time-first by
+# estimated cost (bd-init count; per-init migration chains dominate).
+# Regenerate with scripts/ci/gen_proxied_shard_manifest.py after adding,
+# splitting, or reweighting TestProxiedServer* functions. Newly-added
+# tests not listed here hash-distribute via proxied-test-shard.sh.
 
-8 2 TestProxiedServerDep
-8 2 TestProxiedServerDeleteWisp
-8 2 TestProxiedServerReadyConcurrent
-8 2 TestProxiedServerQuick
-8 2 TestProxiedServerSQL
+15 1 TestProxiedServerChildren
+15 1 TestProxiedServerConfigSetMany
+15 1 TestProxiedServerDeferUndefer
+15 1 TestProxiedServerDelete
+15 1 TestProxiedServerFindDuplicates
+15 1 TestProxiedServerPriority
+15 1 TestProxiedServerUpdateConcurrentClaim
 
-8 3 TestProxiedServerClose
-8 3 TestProxiedServerComment
-8 3 TestProxiedServerExternalCreate
-8 3 TestProxiedServerState
-8 3 TestProxiedServerGateList
-8 3 TestProxiedServerPriority
+15 2 TestProxiedServerCloseConcurrent
+15 2 TestProxiedServerDeleteConcurrent
+15 2 TestProxiedServerEpic
+15 2 TestProxiedServerLink
+15 2 TestProxiedServerQuery
+15 2 TestProxiedServerUpdate
+15 2 TestProxiedServerUpdateConcurrentMetadata
 
-8 4 TestProxiedServerReady
-8 4 TestProxiedServerReopen
-8 4 TestProxiedServerDeleteConcurrent
-8 4 TestProxiedServerReadyWisp
-8 4 TestProxiedServerBlocked
-8 4 TestProxiedServerTag
-8 4 TestProxiedServerPathHelpers
+15 3 TestProxiedServerConfigConcurrent
+15 3 TestProxiedServerDepConcurrent
+15 3 TestProxiedServerGateList
+15 3 TestProxiedServerList
+15 3 TestProxiedServerReadyClaimConcurrent
+15 3 TestProxiedServerUpdate2
 
-8 5 TestProxiedServerShow
-8 5 TestProxiedServerCloseConcurrent
-8 5 TestProxiedServerConfigConcurrent
-8 5 TestProxiedServerUpdateConcurrentClaim
-8 5 TestProxiedServerTodo
-8 5 TestProxiedServerEdit
+15 4 TestProxiedServerClose2
+15 4 TestProxiedServerContext
+15 4 TestProxiedServerDoltRemoteRemove
+15 4 TestProxiedServerEdit
+15 4 TestProxiedServerReadyConcurrent
+15 4 TestProxiedServerTodo
 
-8 6 TestProxiedServerCreate
-8 6 TestProxiedServerQuery
-8 6 TestProxiedServerUpdateWisp
-8 6 TestProxiedServerDepConcurrent
-8 6 TestProxiedServerUpdateHooks
-8 6 TestProxiedServerLink
-8 6 TestProxiedServerContext
+15 5 TestProxiedServerAssign
+15 5 TestProxiedServerCreate2
+15 5 TestProxiedServerDuplicates
+15 5 TestProxiedServerExternalCreate
+15 5 TestProxiedServerQuick
+15 5 TestProxiedServerReclaim
 
-8 7 TestProxiedServerDelete
-8 7 TestProxiedServerLabel
-8 7 TestProxiedServerPrune
-8 7 TestProxiedServerReadyClaimConcurrent
-8 7 TestProxiedServerAssign
-8 7 TestProxiedServerConfigSetMany
-8 7 TestProxiedServerNote
+15 6 TestProxiedServerClose
+15 6 TestProxiedServerGraph
+15 6 TestProxiedServerPrune
+15 6 TestProxiedServerReopenConcurrent
 
-8 8 TestProxiedServerList
-8 8 TestProxiedServerSearch
-8 8 TestProxiedServerConfig
-8 8 TestProxiedServerReopenConcurrent
-8 8 TestProxiedServerDoltRemoteRemove
-8 8 TestProxiedServerChildren
+15 7 TestProxiedServerCount
+15 7 TestProxiedServerCreate
+15 7 TestProxiedServerHistory
+15 7 TestProxiedServerSQL
+15 7 TestProxiedServerUpdateWisp
+
+15 8 TestProxiedServerDep2
+15 8 TestProxiedServerInfo
+15 8 TestProxiedServerSetState
+15 8 TestProxiedServerState
+15 8 TestProxiedServerStatus
+
+15 9 TestProxiedServerBlocked
+15 9 TestProxiedServerLabel
+15 9 TestProxiedServerLint
+15 9 TestProxiedServerSearch
+15 9 TestProxiedServerStale
+15 9 TestProxiedServerTag
+
+15 10 TestProxiedServerCountIncludeInfra
+15 10 TestProxiedServerDeleteWisp
+15 10 TestProxiedServerNote
+15 10 TestProxiedServerReady
+15 10 TestProxiedServerStatuses
+
+15 11 TestProxiedServerOrphans
+15 11 TestProxiedServerReady2
+15 11 TestProxiedServerReadyWisp
+15 11 TestProxiedServerTypes
+15 11 TestProxiedServerUpdateHooks
+
+15 12 TestProxiedServerDep
+15 12 TestProxiedServerShow3
+
+15 13 TestProxiedServerConfig
+15 13 TestProxiedServerReopen
+
+15 14 TestProxiedServerComment
+15 14 TestProxiedServerShow
+15 14 TestProxiedServerUnclaim
+
+15 15 TestProxiedServerPathHelpers
+15 15 TestProxiedServerShow2
+15 15 TestProxiedServerUpdate3
+15 15 TestProxiedServerUpdateConcurrentAppendNotes

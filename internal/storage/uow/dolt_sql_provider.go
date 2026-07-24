@@ -98,12 +98,13 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 
 func buildDSN(ep proxy.Endpoint, database, user, password, tlsConfigName string) string {
 	return util.DoltServerDSN{
-		Host:          ep.Host,
-		Port:          ep.Port,
-		User:          user,
-		Password:      password,
-		Database:      database,
-		TLSConfigName: tlsConfigName,
+		Host:            ep.Host,
+		Port:            ep.Port,
+		User:            user,
+		Password:        password,
+		Database:        database,
+		TLSConfigName:   tlsConfigName,
+		ClientFoundRows: true,
 	}.String()
 }
 

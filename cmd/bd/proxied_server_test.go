@@ -12,10 +12,35 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
+// renderManagedConfigWithAutoGCBehavior builds a Beads-managed config.yaml
+// (marker included) whose auto_gc_behavior block is exactly gc — unlike
+// renderProxiedServerConfig, which only ever sets ArchiveLevel_. Used to
+// seed the sibling-field-preservation tests below (a user-set "enable"
+// alongside — or in place of — archive_level).
+func renderManagedConfigWithAutoGCBehavior(t *testing.T, port int, gc *servercfg.AutoGCBehaviorYAMLConfig) []byte {
+	t.Helper()
+	host := proxiedServerListenerHost
+	logLevel := string(servercfg.LogLevel_Info)
+	yc := &servercfg.YAMLConfig{
+		LogLevelStr: &logLevel,
+		ListenerConfig: servercfg.ListenerYAMLConfig{
+			HostStr:    &host,
+			PortNumber: &port,
+		},
+		BehaviorConfig: servercfg.BehaviorYAMLConfig{
+			AutoGCBehavior: gc,
+		},
+	}
+	body, err := yaml.Marshal(yc)
+	require.NoError(t, err)
+	return append([]byte(managedProxiedServerConfigMarker), body...)
+}
+
 func TestRenderProxiedServerConfig_RoundTrips(t *testing.T) {
-	body, err := renderProxiedServerConfig(54321)
+	body, err := renderProxiedServerConfig(54321, true)
 	require.NoError(t, err)
 
 	cfg, err := servercfg.NewYamlConfig(body)
@@ -26,10 +51,41 @@ func TestRenderProxiedServerConfig_RoundTrips(t *testing.T) {
 	assert.Equal(t, servercfg.LogLevel_Info, cfg.LogLevel(), "LogLevel mismatch")
 }
 
+// TestRenderProxiedServerConfig_ArchiveLevel covers the actual Snappy-GC fix
+// (gastownhall/beads#4986): when archiveLevelSupported is true, the
+// generated config sets auto_gc_behavior.archive_level: 0 with auto-GC left
+// enabled; when false, the key is omitted entirely so an older external
+// dolt's yaml.UnmarshalStrict loader never sees an unrecognized key.
+func TestRenderProxiedServerConfig_ArchiveLevel(t *testing.T) {
+	t.Run("supported: archive_level 0, auto-GC enabled", func(t *testing.T) {
+		body, err := renderProxiedServerConfig(54321, true)
+		require.NoError(t, err)
+		assert.Contains(t, string(body), "archive_level: 0")
+
+		cfg, err := servercfg.NewYamlConfig(body)
+		require.NoError(t, err)
+		gc := cfg.AutoGCBehavior()
+		require.NotNil(t, gc, "AutoGCBehavior must be set when archiveLevelSupported is true")
+		assert.Equal(t, 0, gc.ArchiveLevel())
+		assert.True(t, gc.Enable(), "auto-GC must remain enabled")
+	})
+
+	t.Run("unsupported: no auto_gc_behavior key at all", func(t *testing.T) {
+		body, err := renderProxiedServerConfig(54321, false)
+		require.NoError(t, err)
+		assert.NotContains(t, string(body), "archive_level")
+		assert.NotContains(t, string(body), "auto_gc_behavior")
+
+		cfg, err := servercfg.NewYamlConfig(body)
+		require.NoError(t, err)
+		assert.Nil(t, cfg.AutoGCBehavior())
+	})
+}
+
 func TestEnsureProxiedServerConfig_CreatesAndIsIdempotent(t *testing.T) {
 	beadsDir := t.TempDir()
 
-	path1, err := ensureProxiedServerConfig(beadsDir)
+	path1, err := ensureProxiedServerConfig(beadsDir, true)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(beadsDir, "dolt", "config.yaml"), path1)
 
@@ -39,7 +95,7 @@ func TestEnsureProxiedServerConfig_CreatesAndIsIdempotent(t *testing.T) {
 	require.True(t, strings.Contains(string(body1), proxiedServerListenerHost))
 
 	// Second call must NOT rewrite — running daemon is bound to the existing port.
-	path2, err := ensureProxiedServerConfig(beadsDir)
+	path2, err := ensureProxiedServerConfig(beadsDir, true)
 	require.NoError(t, err)
 	assert.Equal(t, path1, path2)
 
@@ -59,18 +115,457 @@ func TestEnsureProxiedServerConfig_ReusesExistingConfig(t *testing.T) {
 	root := filepath.Join(beadsDir, "dolt")
 	require.NoError(t, os.MkdirAll(root, 0o755))
 
-	existing, err := renderProxiedServerConfig(45678)
+	existing, err := renderProxiedServerConfig(45678, true)
 	require.NoError(t, err)
 	cfgPath := filepath.Join(root, "config.yaml")
 	require.NoError(t, os.WriteFile(cfgPath, existing, 0o600))
 
-	path, err := ensureProxiedServerConfig(beadsDir)
+	path, err := ensureProxiedServerConfig(beadsDir, true)
 	require.NoError(t, err)
 	assert.Equal(t, cfgPath, path)
 
 	got, err := os.ReadFile(cfgPath)
 	require.NoError(t, err)
 	assert.Equal(t, existing, got, "existing config.yaml must be reused unchanged")
+}
+
+// TestIsManagedProxiedServerConfig covers the marker-detection helper in
+// isolation from any file I/O.
+func TestIsManagedProxiedServerConfig(t *testing.T) {
+	managed, err := renderProxiedServerConfig(1234, true)
+	require.NoError(t, err)
+	assert.True(t, isManagedProxiedServerConfig(managed))
+
+	assert.False(t, isManagedProxiedServerConfig([]byte("listener:\n  port: 1234\n")))
+	assert.False(t, isManagedProxiedServerConfig(nil))
+}
+
+// TestReconcileManagedProxiedServerConfig_AddsKey covers the (a) direction
+// (gastownhall/beads#4986 round 2 major 2): a Beads-managed config that
+// predates archive_level support gains the key once the resolved dolt
+// supports it, with every other field (including port) preserved via the
+// servercfg struct round trip.
+func TestReconcileManagedProxiedServerConfig_AddsKey(t *testing.T) {
+	before, err := renderProxiedServerConfig(45678, false)
+	require.NoError(t, err)
+	require.NotContains(t, string(before), "archive_level")
+
+	after, changed, err := reconcileManagedProxiedServerConfig(before, true)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.True(t, isManagedProxiedServerConfig(after), "marker must survive reconcile")
+
+	cfg, err := servercfg.NewYamlConfig(after)
+	require.NoError(t, err)
+	assert.Equal(t, 45678, cfg.Port(), "port must be preserved")
+	gc := cfg.AutoGCBehavior()
+	require.NotNil(t, gc)
+	assert.Equal(t, 0, gc.ArchiveLevel())
+	assert.True(t, gc.Enable())
+}
+
+// TestReconcileManagedProxiedServerConfig_StripsKey covers the (b)
+// direction: a Beads-managed config written with archive_level set loses
+// the key when the resolved dolt no longer supports it (e.g. a downgrade),
+// so a later yaml.UnmarshalStrict on that older dolt cannot hard-fail.
+func TestReconcileManagedProxiedServerConfig_StripsKey(t *testing.T) {
+	before, err := renderProxiedServerConfig(45678, true)
+	require.NoError(t, err)
+	require.Contains(t, string(before), "archive_level")
+
+	after, changed, err := reconcileManagedProxiedServerConfig(before, false)
+	require.NoError(t, err)
+	assert.True(t, changed)
+	assert.NotContains(t, string(after), "archive_level")
+	assert.NotContains(t, string(after), "auto_gc_behavior")
+
+	cfg, err := servercfg.NewYamlConfig(after)
+	require.NoError(t, err)
+	assert.Equal(t, 45678, cfg.Port(), "port must be preserved")
+	assert.Nil(t, cfg.AutoGCBehavior())
+}
+
+// TestReconcileManagedProxiedServerConfig_NoOpWhenAlreadyAligned asserts
+// reconcile reports changed=false (and ensureProxiedServerConfig therefore
+// skips the rewrite) when the config already matches the probe result —
+// the steady-state case on every ordinary bd invocation.
+func TestReconcileManagedProxiedServerConfig_NoOpWhenAlreadyAligned(t *testing.T) {
+	t.Run("already has key, still supported", func(t *testing.T) {
+		body, err := renderProxiedServerConfig(1, true)
+		require.NoError(t, err)
+		after, changed, err := reconcileManagedProxiedServerConfig(body, true)
+		require.NoError(t, err)
+		assert.False(t, changed)
+		assert.Equal(t, body, after)
+	})
+	t.Run("already lacks key, still unsupported", func(t *testing.T) {
+		body, err := renderProxiedServerConfig(1, false)
+		require.NoError(t, err)
+		after, changed, err := reconcileManagedProxiedServerConfig(body, false)
+		require.NoError(t, err)
+		assert.False(t, changed)
+		assert.Equal(t, body, after)
+	})
+}
+
+// TestReconcileManagedProxiedServerConfig_PreservesSiblingFields covers the
+// round-3 verification finding (gastownhall/beads#4986): reconcile must
+// inspect and modify only ArchiveLevel_, not treat "the whole
+// auto_gc_behavior block is present" as equivalent to "archive_level is
+// set". A block carrying only a user-set "enable" (no archive_level) must
+// both gain archive_level when supported, and keep its "enable" setting
+// when the (now-absent-again) archive_level is later stripped on an
+// unsupported binary — the earlier (buggy) whole-block check would have
+// either left archive_level unset in the first case, or discarded "enable"
+// entirely in the second.
+func TestReconcileManagedProxiedServerConfig_PreservesSiblingFields(t *testing.T) {
+	enable := true
+
+	t.Run("block with only enable gains archive_level; enable preserved", func(t *testing.T) {
+		before := renderManagedConfigWithAutoGCBehavior(t, 45678, &servercfg.AutoGCBehaviorYAMLConfig{
+			Enable_: &enable,
+		})
+		require.Contains(t, string(before), "enable: true")
+		require.NotContains(t, string(before), "archive_level")
+
+		after, changed, err := reconcileManagedProxiedServerConfig(before, true)
+		require.NoError(t, err)
+		assert.True(t, changed)
+
+		cfg, err := servercfg.NewYamlConfig(after)
+		require.NoError(t, err)
+		gc := cfg.AutoGCBehavior()
+		require.NotNil(t, gc)
+		assert.Equal(t, 0, gc.ArchiveLevel())
+		assert.True(t, gc.Enable(), "enable must be preserved, not defaulted/lost")
+	})
+
+	t.Run("block with only enable on unsupported binary is untouched", func(t *testing.T) {
+		before := renderManagedConfigWithAutoGCBehavior(t, 45678, &servercfg.AutoGCBehaviorYAMLConfig{
+			Enable_: &enable,
+		})
+
+		after, changed, err := reconcileManagedProxiedServerConfig(before, false)
+		require.NoError(t, err)
+		assert.False(t, changed, "nothing to strip when archive_level was never set")
+		assert.Equal(t, before, after)
+	})
+
+	t.Run("block with both on unsupported binary keeps enable, loses archive_level", func(t *testing.T) {
+		archiveLevel := 0
+		before := renderManagedConfigWithAutoGCBehavior(t, 45678, &servercfg.AutoGCBehaviorYAMLConfig{
+			Enable_:       &enable,
+			ArchiveLevel_: &archiveLevel,
+		})
+		require.Contains(t, string(before), "enable: true")
+		require.Contains(t, string(before), "archive_level: 0")
+
+		after, changed, err := reconcileManagedProxiedServerConfig(before, false)
+		require.NoError(t, err)
+		assert.True(t, changed)
+		assert.NotContains(t, string(after), "archive_level")
+
+		cfg, err := servercfg.NewYamlConfig(after)
+		require.NoError(t, err)
+		gc := cfg.AutoGCBehavior()
+		require.NotNil(t, gc, "block must survive since enable is still set")
+		assert.True(t, gc.Enable(), "enable must be preserved when only archive_level is stripped")
+	})
+}
+
+// TestEnsureProxiedServerConfig_ManagedWithoutKeyGainsIt is the
+// ensureProxiedServerConfig-level counterpart to
+// TestReconcileManagedProxiedServerConfig_AddsKey: an upgraded install
+// whose config.yaml predates this fix gets archive_level added in place on
+// the very next command, without a manual regenerate.
+func TestEnsureProxiedServerConfig_ManagedWithoutKeyGainsIt(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	cfgPath := filepath.Join(root, "config.yaml")
+
+	seed, err := renderProxiedServerConfig(45678, false)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, seed, 0o600))
+
+	path, err := ensureProxiedServerConfig(beadsDir, true)
+	require.NoError(t, err)
+	assert.Equal(t, cfgPath, path)
+
+	got, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(got), "archive_level: 0")
+
+	cfg, err := servercfg.NewYamlConfig(got)
+	require.NoError(t, err)
+	assert.Equal(t, 45678, cfg.Port(), "port must survive the rewrite")
+}
+
+// TestEnsureProxiedServerConfig_ManagedWithKeyOnOldBinaryLosesIt is the
+// ensureProxiedServerConfig-level counterpart to
+// TestReconcileManagedProxiedServerConfig_StripsKey: a dolt downgrade after
+// a managed config already set archive_level must not hard-fail server
+// startup on the next command.
+func TestEnsureProxiedServerConfig_ManagedWithKeyOnOldBinaryLosesIt(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	cfgPath := filepath.Join(root, "config.yaml")
+
+	seed, err := renderProxiedServerConfig(45678, true)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, seed, 0o600))
+
+	path, err := ensureProxiedServerConfig(beadsDir, false)
+	require.NoError(t, err)
+	assert.Equal(t, cfgPath, path)
+
+	got, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(got), "archive_level")
+
+	cfg, err := servercfg.NewYamlConfig(got)
+	require.NoError(t, err)
+	assert.Equal(t, 45678, cfg.Port(), "port must survive the rewrite")
+}
+
+// TestEnsureProxiedServerConfig_CustomConfigUntouchedWithWarning asserts a
+// genuinely user-owned config (env var / sidecar custom path) is NEVER
+// rewritten, and instead gets a one-line stderr warning when it lacks
+// archive_level on a capable binary.
+func TestEnsureProxiedServerConfig_CustomConfigUntouchedWithWarning(t *testing.T) {
+	t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+	bd := t.TempDir()
+
+	customDir := t.TempDir()
+	customPath := filepath.Join(customDir, "my-server.yaml")
+	before, err := renderProxiedServerConfig(54321, false)
+	require.NoError(t, err)
+	// Strip the marker: this is meant to look like a genuinely hand-written
+	// custom config, not one Beads happened to generate elsewhere.
+	before = before[len(managedProxiedServerConfigMarker):]
+	require.NoError(t, os.WriteFile(customPath, before, 0o600))
+
+	writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: customPath})
+
+	var got string
+	var path string
+	got = captureStderr(t, func() {
+		path, err = ensureProxiedServerConfig(bd, true)
+	})
+	require.NoError(t, err)
+	assert.Equal(t, customPath, path)
+
+	after, err := os.ReadFile(customPath)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "custom config must never be rewritten")
+	assert.Contains(t, got, "not Beads-managed")
+	assert.Contains(t, got, customPath)
+}
+
+// TestEnsureProxiedServerConfig_PreMarkerDefaultConfigUntouchedWithWarning
+// covers the other unmanaged case: a default-path config.yaml written by a
+// Beads version that predates the marker. Same contract as the custom-path
+// case — never rewritten, only warned about — since Beads cannot prove it
+// owns the file.
+func TestEnsureProxiedServerConfig_PreMarkerDefaultConfigUntouchedWithWarning(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	cfgPath := filepath.Join(root, "config.yaml")
+
+	seed, err := renderProxiedServerConfig(45678, false)
+	require.NoError(t, err)
+	seed = seed[len(managedProxiedServerConfigMarker):] // simulate a pre-marker file
+	require.NoError(t, os.WriteFile(cfgPath, seed, 0o600))
+
+	var path string
+	got := captureStderr(t, func() {
+		path, err = ensureProxiedServerConfig(beadsDir, true)
+	})
+	require.NoError(t, err)
+	assert.Equal(t, cfgPath, path)
+
+	after, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, seed, after, "pre-marker default config must never be rewritten")
+	assert.Contains(t, got, "not Beads-managed")
+}
+
+// TestEnsureProxiedServerConfig_CustomConfigEnvVarInterpolation covers the
+// round-3 verification finding (gastownhall/beads#4986): a custom config
+// using Dolt's ${VAR}-style environment interpolation (see
+// servercfg/env_interpolate.go, applied by YamlConfigFromFile before
+// parsing) must be ACCEPTED, not rejected. An earlier version of this
+// function validated custom configs via servercfg.NewYamlConfig on raw
+// bytes, which skips interpolation entirely and would fail on a valid
+// ${VAR} placeholder with a YAML/type error before the server ever starts.
+func TestEnsureProxiedServerConfig_CustomConfigEnvVarInterpolation(t *testing.T) {
+	t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+	t.Setenv("BEADS_TEST_PROXIED_SERVER_PORT", "54321")
+	bd := t.TempDir()
+
+	customDir := t.TempDir()
+	customPath := filepath.Join(customDir, "my-server.yaml")
+	// listener.port as a raw ${VAR} placeholder — only valid after
+	// interpolation; NewYamlConfig on the raw bytes would fail to unmarshal
+	// "${BEADS_TEST_PROXIED_SERVER_PORT}" into the int Port field.
+	const tmpl = "listener:\n  host: 127.0.0.1\n  port: ${BEADS_TEST_PROXIED_SERVER_PORT}\n"
+	require.NoError(t, os.WriteFile(customPath, []byte(tmpl), 0o600))
+
+	writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: customPath})
+
+	path, err := ensureProxiedServerConfig(bd, true)
+	require.NoError(t, err, "a valid ${VAR} custom config must not be rejected pre-start")
+	assert.Equal(t, customPath, path)
+
+	// The file on disk must still carry the literal, un-interpolated
+	// placeholder — ensureProxiedServerConfig never rewrites custom configs.
+	after, err := os.ReadFile(customPath)
+	require.NoError(t, err)
+	assert.Equal(t, tmpl, string(after))
+}
+
+// TestEnsureProxiedServerConfig_ManagedFileWithPlaceholderDegradesGracefully
+// covers the round-4 verification finding (gastownhall/beads#4986): the
+// managedProxiedServerConfigMarker only proves Beads generated a file
+// ORIGINALLY, not that an operator hasn't hand-edited it since (e.g. to add
+// a ${VAR} placeholder). reconcileManagedProxiedServerConfig's raw-bytes
+// parse (deliberately non-interpolating — see its doc comment) then fails.
+//
+// Verified before this fix: that parse error propagated as a hard error
+// out of ensureProxiedServerConfig, which cmd/bd/uow_factory.go's
+// newManagedProxiedServerUOWProvider returns directly — aborting the
+// ENTIRE bd command before ever attempting to start the managed dolt
+// server, even though a real dolt process would happily interpolate and
+// start against the same file. This test asserts the fixed behavior:
+// degrade to the unmanaged (warn-only, never-rewrite) treatment instead.
+func TestEnsureProxiedServerConfig_ManagedFileWithPlaceholderDegradesGracefully(t *testing.T) {
+	t.Setenv("BEADS_TEST_PROXIED_SERVER_PORT2", "54321")
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	cfgPath := filepath.Join(root, "config.yaml")
+
+	// Marker present (looks Beads-managed) but hand-edited afterward with a
+	// ${VAR} placeholder in a field NewYamlConfig cannot unmarshal without
+	// interpolation (an int field fed a string).
+	seed := managedProxiedServerConfigMarker + "listener:\n  host: 127.0.0.1\n  port: ${BEADS_TEST_PROXIED_SERVER_PORT2}\n"
+	require.NoError(t, os.WriteFile(cfgPath, []byte(seed), 0o600))
+
+	var path string
+	var err error
+	got := captureStderr(t, func() {
+		path, err = ensureProxiedServerConfig(beadsDir, true)
+	})
+	require.NoError(t, err, "a managed file that fails the raw parse must not fail the whole command")
+	assert.Equal(t, cfgPath, path)
+	assert.Contains(t, got, "failed to parse", "must explain why it's degrading to unmanaged treatment")
+
+	after, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, seed, string(after), "file must be left untouched when the managed parse fails")
+}
+
+// TestWarnUnmanagedProxiedServerConfig_EnableOnlyFieldLevel covers the
+// round-4 verification finding (gastownhall/beads#4986): the unmanaged
+// warning must inspect ArchiveLevel_ specifically, not "the whole
+// auto_gc_behavior block is present" — otherwise an enable-only custom
+// config both misses the zstd-risk warning on a capable dolt, and gets a
+// FALSE incompatibility warning on an incapable one (since the block is
+// present even though archive_level itself was never set).
+func TestWarnUnmanagedProxiedServerConfig_EnableOnlyFieldLevel(t *testing.T) {
+	enable := true
+
+	newEnableOnlyCustomConfig := func(t *testing.T) string {
+		t.Helper()
+		t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+		body := renderManagedConfigWithAutoGCBehavior(t, 54321, &servercfg.AutoGCBehaviorYAMLConfig{
+			Enable_: &enable,
+		})
+		// Strip the marker: this must be evaluated as a genuinely
+		// hand-written custom config, not a Beads-managed one.
+		body = body[len(managedProxiedServerConfigMarker):]
+		require.NotContains(t, string(body), "archive_level")
+
+		bd := t.TempDir()
+		customPath := filepath.Join(t.TempDir(), "my-server.yaml")
+		require.NoError(t, os.WriteFile(customPath, body, 0o600))
+		writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: customPath})
+		return bd
+	}
+
+	t.Run("capable dolt: gets the zstd-risk warning", func(t *testing.T) {
+		bd := newEnableOnlyCustomConfig(t)
+		var err error
+		got := captureStderr(t, func() {
+			_, err = ensureProxiedServerConfig(bd, true)
+		})
+		require.NoError(t, err)
+		assert.Contains(t, got, "zstd auto-GC may still be active",
+			"an enable-only block must still be treated as archive_level-absent")
+	})
+
+	t.Run("incapable dolt: no false incompatibility warning", func(t *testing.T) {
+		bd := newEnableOnlyCustomConfig(t)
+		var err error
+		got := captureStderr(t, func() {
+			_, err = ensureProxiedServerConfig(bd, false)
+		})
+		require.NoError(t, err)
+		assert.Empty(t, got,
+			"an enable-only block (no archive_level) has nothing incompatible with an older dolt; "+
+				"the old block-presence check would have warned here anyway")
+	})
+}
+
+// TestEnsureProxiedServerConfig_ManagedConfigBehindSymlinkPreservesSymlink
+// covers the round-4 verification finding (gastownhall/beads#4986):
+// os.Rename's destination argument does not follow a symlink — it
+// replaces whatever is directly AT that path. Before this fix, reconciling
+// a managed config.yaml that was itself a symlink (e.g. an operator
+// centralizing config outside the per-project .beads/dolt directory) would
+// silently replace the symlink with a regular file at the SAME location,
+// losing the indirection and leaving whatever the symlink pointed at
+// unmodified and now orphaned.
+func TestEnsureProxiedServerConfig_ManagedConfigBehindSymlinkPreservesSymlink(t *testing.T) {
+	beadsDir := t.TempDir()
+	root := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+
+	// The physical file lives elsewhere; config.yaml in the managed
+	// location is a symlink to it.
+	physicalPath := filepath.Join(t.TempDir(), "real-config.yaml")
+	seed, err := renderProxiedServerConfig(45678, false) // lacks archive_level: 0
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(physicalPath, seed, 0o600))
+
+	cfgPath := filepath.Join(root, "config.yaml")
+	if err := os.Symlink(physicalPath, cfgPath); err != nil {
+		t.Skipf("symlink not supported on this platform: %v", err)
+	}
+
+	path, err := ensureProxiedServerConfig(beadsDir, true) // now supported -> should reconcile
+	require.NoError(t, err)
+	assert.Equal(t, cfgPath, path)
+
+	// The symlink itself must survive, still pointing at the same physical file.
+	linkInfo, err := os.Lstat(cfgPath)
+	require.NoError(t, err)
+	require.True(t, linkInfo.Mode()&os.ModeSymlink != 0, "config.yaml must still be a symlink")
+	target, err := os.Readlink(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, physicalPath, target)
+
+	// The PHYSICAL file must carry the reconciled content.
+	physicalBody, err := os.ReadFile(physicalPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(physicalBody), "archive_level: 0")
+
+	// Reading through the symlink must observe the same reconciled content.
+	throughLink, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, physicalBody, throughLink)
 }
 
 func TestProxiedServerPathHelpers(t *testing.T) {
@@ -165,7 +660,7 @@ func TestResolveProxiedServerConfigPath(t *testing.T) {
 // and returns the path. Used to exercise the custom-config success path.
 func writeValidServerYAML(t *testing.T, path string) string {
 	t.Helper()
-	body, err := renderProxiedServerConfig(54321)
+	body, err := renderProxiedServerConfig(54321, true)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(path, body, 0o600))
 	return path
@@ -182,7 +677,7 @@ func TestEnsureProxiedServerConfig_CustomPathExists(t *testing.T) {
 	customPath := writeValidServerYAML(t, filepath.Join(customDir, "my-server.yaml"))
 
 	writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: customPath})
-	got, err := ensureProxiedServerConfig(bd)
+	got, err := ensureProxiedServerConfig(bd, true)
 	require.NoError(t, err)
 	assert.Equal(t, customPath, got)
 
@@ -199,7 +694,7 @@ func TestEnsureProxiedServerConfig_CustomPathMissing(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist.yaml")
 
 	writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: missing})
-	_, err := ensureProxiedServerConfig(bd)
+	_, err := ensureProxiedServerConfig(bd, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), missing)
 }
@@ -215,7 +710,7 @@ func TestEnsureProxiedServerConfig_CustomPathInvalidYAML(t *testing.T) {
 	require.NoError(t, os.WriteFile(bad, []byte("listener: [host: 127.0.0.1\n"), 0o600))
 
 	writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: bad})
-	_, err := ensureProxiedServerConfig(bd)
+	_, err := ensureProxiedServerConfig(bd, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), bad)
 	assert.Contains(t, strings.ToLower(err.Error()), "parse")
@@ -229,7 +724,7 @@ func TestEnsureProxiedServerConfig_CustomPathIsDirectory(t *testing.T) {
 	dir := t.TempDir()
 
 	writeProxiedClientInfo(t, bd, &configfile.ProxiedServerClientInfo{ConfigPath: dir})
-	_, err := ensureProxiedServerConfig(bd)
+	_, err := ensureProxiedServerConfig(bd, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), dir)
 	assert.Contains(t, err.Error(), "not a regular file")

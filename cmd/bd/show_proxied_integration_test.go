@@ -294,6 +294,13 @@ func TestProxiedServerShow(t *testing.T) {
 		}
 	})
 
+}
+
+func TestProxiedServerShow2(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
 	t.Run("show_external_ref_rendered", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sxr")
@@ -588,6 +595,13 @@ func TestProxiedServerShow(t *testing.T) {
 			t.Errorf("expected wisp child %s in --children: %s", childW.ID, out)
 		}
 	})
+
+}
+
+func TestProxiedServerShow3(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("show_as_of_historical_title", func(t *testing.T) {
 		t.Parallel()

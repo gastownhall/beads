@@ -73,12 +73,7 @@ var createCmd = &cobra.Command{
 				return HandleError("cannot specify both title and --graph flag")
 			}
 			graphDryRun, _ := cmd.Flags().GetBool("dry-run")
-			wisp, _ := cmd.Flags().GetBool("ephemeral")
-			noHistory, _ := cmd.Flags().GetBool("no-history")
-			graphOpts := GraphApplyOptions{
-				Ephemeral: wisp,
-				NoHistory: noHistory,
-			}
+			graphOpts := graphApplyOptionsFromFlags(cmd)
 			if err := graphOpts.Validate(); err != nil {
 				return HandleError("invalid graph options: %v", err)
 			}
@@ -166,15 +161,7 @@ var createCmd = &cobra.Command{
 		assignee, _ := cmd.Flags().GetString("assignee")
 		statusFlag, _ := cmd.Flags().GetString("status")
 		if statusFlag != "" {
-			var customStatuses []string
-			// store is nil for `create --repo=<remote URL>` with no local
-			// .beads/; fall back to built-in statuses only.
-			if store != nil {
-				if cs, err := store.GetCustomStatuses(rootCtx); err == nil {
-					customStatuses = cs
-				}
-			}
-			if !types.Status(statusFlag).IsValidWithCustom(customStatuses) {
+			if !types.Status(statusFlag).IsValidWithCustom(loadEmbeddedCustomStatuses()) {
 				return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", statusFlag)
 			}
 		}
@@ -481,15 +468,10 @@ var createCmd = &cobra.Command{
 				return HandleError("%v", err)
 			}
 
-			ctx := createCtx
-
-			var dbPrefix, allowedPrefixes string
-			if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
-				dbPrefix = yamlPrefix
-			} else {
-				dbPrefix, _ = store.GetConfig(ctx, "issue_prefix")
-			}
-			allowedPrefixes, _ = store.GetConfig(ctx, "allowed_prefixes")
+			// Validate prefix matches database prefix (YAML config takes
+			// precedence over DB, except under --global — see
+			// loadEmbeddedIDPrefixes).
+			dbPrefix, allowedPrefixes := loadEmbeddedIDPrefixes()
 
 			if err := validation.ValidateIDPrefixAllowed(explicitID, dbPrefix, allowedPrefixes, forceCreate); err != nil {
 				return HandleError("%v", err)
@@ -698,6 +680,16 @@ func mergeCreateLabels(labels, inheritedLabels []string) []string {
 		return nil
 	}
 	return merged
+}
+
+func selectCreateIDPrefix(global bool, yamlPrefix, storePrefix string) string {
+	if global {
+		return storePrefix
+	}
+	if yamlPrefix != "" {
+		return yamlPrefix
+	}
+	return storePrefix
 }
 
 func renderCreateDryRunPreview(issue *types.Issue, labels, deps []string) {

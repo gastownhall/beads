@@ -198,99 +198,106 @@ func (s *DoltStore) PromoteFromEphemeral(ctx context.Context, id string, actor s
 //
 // Called by UpdateIssue when no_history=true or wisp=true is set on a regular issue.
 func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
-	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		if _, err := issueops.UpdateIssueWithoutEventInTx(ctx, tx, id, updates, actor); err != nil {
-			return fmt.Errorf("update issue before demotion: %w", err)
-		}
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		return s.demoteToWispInTx(ctx, tx, id, updates, actor)
+	})
+}
 
-		issue, err := scanIssueTxFromTable(ctx, tx, "issues", id)
-		if err != nil {
-			return fmt.Errorf("failed to get updated issue for demotion: %w", err)
-		}
+// demoteToWispInTx is DemoteToWisp's transaction body: it applies the field
+// update without an intermediate event, then migrates the issue to the wisps
+// table (insert into wisps, copy auxiliary rows, delete from issues) and stages
+// the demotion commit. Extracted so UpdateIssueChecked can wrap it with an
+// atomic version precondition in the same transaction; DemoteToWisp's behavior
+// is unchanged.
+func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) error {
+	if _, err := issueops.UpdateIssueWithoutEventInTx(ctx, tx, id, updates, actor); err != nil {
+		return fmt.Errorf("update issue before demotion: %w", err)
+	}
 
-		if err := insertIssueTxIntoTable(ctx, tx, "wisps", issue); err != nil {
-			return fmt.Errorf("failed to insert issue into wisps: %w", err)
-		}
+	issue, err := scanIssueTxFromTable(ctx, tx, "issues", id)
+	if err != nil {
+		return fmt.Errorf("failed to get updated issue for demotion: %w", err)
+	}
 
-		if _, err := tx.ExecContext(ctx, `
+	if err := insertIssueTxIntoTable(ctx, tx, "wisps", issue); err != nil {
+		return fmt.Errorf("failed to insert issue into wisps: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
 		INSERT IGNORE INTO wisp_labels (issue_id, label)
 		SELECT issue_id, label FROM labels WHERE issue_id = ?
 	`, id); err != nil {
-			return fmt.Errorf("copy labels for demoted issue %s: %w", id, err)
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM labels WHERE issue_id = ?`, id); err != nil {
-			return fmt.Errorf("delete copied labels for demoted issue %s: %w", id, err)
-		}
+		return fmt.Errorf("copy labels for demoted issue %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM labels WHERE issue_id = ?`, id); err != nil {
+		return fmt.Errorf("delete copied labels for demoted issue %s: %w", id, err)
+	}
 
-		// Demotion is the inverse of promotion: carry id across so the wisp edge
-		// keeps the deterministic key its dependency had. Both tables key id on
-		// (issue_id, target), and wisp_dependencies.id also has no DEFAULT now, so
-		// the copy is both consistent and required (#4259).
-		if _, err := tx.ExecContext(ctx, `
+	// Demotion is the inverse of promotion: carry id across so the wisp edge
+	// keeps the deterministic key its dependency had. Both tables key id on
+	// (issue_id, target), and wisp_dependencies.id also has no DEFAULT now, so
+	// the copy is both consistent and required (#4259).
+	if _, err := tx.ExecContext(ctx, `
 		INSERT IGNORE INTO wisp_dependencies (id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id)
 		SELECT id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id
 		FROM dependencies WHERE issue_id = ?
 	`, id); err != nil {
-			return fmt.Errorf("copy dependencies for demoted issue %s: %w", id, err)
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ?`, id); err != nil {
-			return fmt.Errorf("delete copied dependencies for demoted issue %s: %w", id, err)
-		}
+		return fmt.Errorf("copy dependencies for demoted issue %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM dependencies WHERE issue_id = ?`, id); err != nil {
+		return fmt.Errorf("delete copied dependencies for demoted issue %s: %w", id, err)
+	}
 
-		if _, err := tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT IGNORE INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value, comment, created_at)
 		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
 		FROM events WHERE issue_id = ?
 	`, id); err != nil {
-			return fmt.Errorf("copy events for demoted issue %s: %w", id, err)
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE issue_id = ?`, id); err != nil {
-			return fmt.Errorf("delete copied events for demoted issue %s: %w", id, err)
-		}
+		return fmt.Errorf("copy events for demoted issue %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM events WHERE issue_id = ?`, id); err != nil {
+		return fmt.Errorf("delete copied events for demoted issue %s: %w", id, err)
+	}
 
-		if _, err := tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT IGNORE INTO wisp_comments (id, issue_id, author, text, created_at)
 		SELECT id, issue_id, author, text, created_at
 		FROM comments WHERE issue_id = ?
 	`, id); err != nil {
-			return fmt.Errorf("copy comments for demoted issue %s: %w", id, err)
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, id); err != nil {
-			return fmt.Errorf("delete copied comments for demoted issue %s: %w", id, err)
-		}
+		return fmt.Errorf("copy comments for demoted issue %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, id); err != nil {
+		return fmt.Errorf("delete copied comments for demoted issue %s: %w", id, err)
+	}
 
-		if _, err := tx.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value)
 		VALUES (?, ?, ?, ?, ?, ?)
 	`, issueops.NewEventID(), id, types.EventUpdated, actor, "", "demoted to wisp"); err != nil {
-			return fmt.Errorf("record demotion event for demoted issue %s: %w", id, err)
-		}
+		return fmt.Errorf("record demotion event for demoted issue %s: %w", id, err)
+	}
 
-		if err := issueops.RetargetInboundDependenciesToWispInTx(ctx, tx, id); err != nil {
-			return err
-		}
-
-		if _, err := tx.ExecContext(ctx, "DELETE FROM issues WHERE id = ?", id); err != nil {
-			return fmt.Errorf("failed to delete issue from issues: %w", err)
-		}
-		// Wisps are never leased: drop any lease the issue held.
-		if err := issueops.DeleteLeaseInTx(ctx, tx, id); err != nil {
-			return err
-		}
-
-		affectedIssues, affectedWisps, aerr := issueops.AffectedByStatusChangeForWispInTx(ctx, tx, id)
-		if aerr != nil {
-			return fmt.Errorf("affected by demote for %s: %w", id, aerr)
-		}
-		if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
-			return fmt.Errorf("recompute is_blocked after demote for %s: %w", id, err)
-		}
-
-		return s.doltAddAndCommitInTx(ctx, tx, permanentIssueAuxTables, fmt.Sprintf("bd: demote %s to wisp", id))
-	}); err != nil {
+	if err := issueops.RetargetInboundDependenciesToWispInTx(ctx, tx, id); err != nil {
 		return err
 	}
-	return nil
+
+	if _, err := tx.ExecContext(ctx, "DELETE FROM issues WHERE id = ?", id); err != nil {
+		return fmt.Errorf("failed to delete issue from issues: %w", err)
+	}
+	// Wisps are never leased: drop any lease the issue held.
+	if err := issueops.DeleteLeaseInTx(ctx, tx, id); err != nil {
+		return err
+	}
+
+	affectedIssues, affectedWisps, aerr := issueops.AffectedByStatusChangeForWispInTx(ctx, tx, id)
+	if aerr != nil {
+		return fmt.Errorf("affected by demote for %s: %w", id, aerr)
+	}
+	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+		return fmt.Errorf("recompute is_blocked after demote for %s: %w", id, err)
+	}
+
+	return s.doltAddAndCommitInTx(ctx, tx, permanentIssueAuxTables, fmt.Sprintf("bd: demote %s to wisp", id))
 }
 
 func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables []string, commitMsg string) error {

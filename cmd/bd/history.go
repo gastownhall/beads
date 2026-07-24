@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -30,9 +31,6 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("history is not supported in proxied-server mode")
-		}
 		evt := metrics.NewCommandEvent("history")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -40,68 +38,80 @@ Examples:
 			}
 		}()
 
-		ctx := rootCtx
 		issueID := args[0]
 
-		if historyEvents {
-			events, err := collectHistoryEvents(ctx, issueID, historyLimit)
-			if err != nil {
-				return HandleErrorRespectJSON("failed to get history events: %v", err)
-			}
-			if jsonOutput {
-				return outputJSON(events)
-			}
-			printHistoryEvents(issueID, events)
-			return nil
+		if usesProxiedServer() {
+			return runHistoryProxiedServer(rootCtx, issueID, historyLimit, historyEvents)
 		}
 
-		history, err := store.History(ctx, issueID)
+		return runHistory(rootCtx, store, issueID, historyLimit, historyEvents)
+	},
+}
+
+type historyBackend interface {
+	History(ctx context.Context, id string) ([]*storage.HistoryEntry, error)
+	IterEvents(ctx context.Context, id string, limit int) (storage.Iter[types.Event], error)
+}
+
+func runHistory(ctx context.Context, backend historyBackend, issueID string, limit int, showEvents bool) error {
+	if showEvents {
+		events, err := collectHistoryEvents(ctx, backend, issueID, limit)
 		if err != nil {
-			return HandleErrorRespectJSON("failed to get history: %v", err)
+			return HandleErrorRespectJSON("failed to get history events: %v", err)
 		}
-
-		if len(history) == 0 {
-			if jsonOutput {
-				return outputJSON(history)
-			}
-			fmt.Printf("No history found for issue %s\n", issueID)
-			return nil
+		if jsonOutput {
+			return outputJSON(events)
 		}
+		printHistoryEvents(issueID, events)
+		return nil
+	}
 
-		if historyLimit > 0 && historyLimit < len(history) {
-			history = history[:historyLimit]
-		}
+	history, err := backend.History(ctx, issueID)
+	if err != nil {
+		return HandleErrorRespectJSON("failed to get history: %v", err)
+	}
 
+	if len(history) == 0 {
 		if jsonOutput {
 			return outputJSON(history)
 		}
-
-		fmt.Printf("\n%s History for %s (%d entries)\n\n",
-			ui.RenderAccent("📜"), issueID, len(history))
-
-		for i, entry := range history {
-			fmt.Printf("%s %s\n",
-				ui.RenderMuted(entry.CommitHash[:8]),
-				ui.RenderMuted(entry.CommitDate.Format("2006-01-02 15:04:05")))
-			fmt.Printf("  Author: %s\n", entry.Committer)
-
-			if entry.Issue != nil {
-				statusIcon := ui.GetStatusIcon(string(entry.Issue.Status))
-				fmt.Printf("  %s %s: %s [P%d - %s]\n",
-					statusIcon,
-					entry.Issue.ID,
-					entry.Issue.Title,
-					entry.Issue.Priority,
-					entry.Issue.Status)
-			}
-
-			if i < len(history)-1 {
-				fmt.Println()
-			}
-		}
-		fmt.Println()
+		fmt.Printf("No history found for issue %s\n", issueID)
 		return nil
-	},
+	}
+
+	if limit > 0 && limit < len(history) {
+		history = history[:limit]
+	}
+
+	if jsonOutput {
+		return outputJSON(history)
+	}
+
+	fmt.Printf("\n%s History for %s (%d entries)\n\n",
+		ui.RenderAccent("📜"), issueID, len(history))
+
+	for i, entry := range history {
+		fmt.Printf("%s %s\n",
+			ui.RenderMuted(entry.CommitHash[:8]),
+			ui.RenderMuted(entry.CommitDate.Format("2006-01-02 15:04:05")))
+		fmt.Printf("  Author: %s\n", entry.Committer)
+
+		if entry.Issue != nil {
+			statusIcon := ui.GetStatusIcon(string(entry.Issue.Status))
+			fmt.Printf("  %s %s: %s [P%d - %s]\n",
+				statusIcon,
+				entry.Issue.ID,
+				entry.Issue.Title,
+				entry.Issue.Priority,
+				entry.Issue.Status)
+		}
+
+		if i < len(history)-1 {
+			fmt.Println()
+		}
+	}
+	fmt.Println()
+	return nil
 }
 
 func init() {
@@ -111,8 +121,8 @@ func init() {
 	rootCmd.AddCommand(historyCmd)
 }
 
-func collectHistoryEvents(ctx context.Context, issueID string, limit int) ([]types.Event, error) {
-	iter, err := store.IterEvents(ctx, issueID, limit)
+func collectHistoryEvents(ctx context.Context, backend historyBackend, issueID string, limit int) ([]types.Event, error) {
+	iter, err := backend.IterEvents(ctx, issueID, limit)
 	if err != nil {
 		return nil, err
 	}
