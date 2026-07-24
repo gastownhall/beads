@@ -80,8 +80,8 @@ func TestMigrateIssues_FilterHasZeroMaxRows(t *testing.T) {
 	// Seed one row in the source repo so findCandidateIssues has
 	// something to find. The migration uses SourceRepo as the
 	// filter discriminator.
-	if _, err := inner.DB().ExecContext(ctx, `INSERT INTO issues (id, title, description, status, priority, issue_type, source_repo) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"mig-mr-1", "Migration MaxRows gate seed", "body", "open", 1, "task", "source-repo-a"); err != nil {
+	if _, err := inner.DB().ExecContext(ctx, `INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, source_repo) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"mig-mr-1", "Migration MaxRows gate seed", "body", "", "", "", "open", 1, "task", "source-repo-a"); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 

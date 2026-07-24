@@ -134,7 +134,14 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 	}
 
 	// Skip wisps merge entirely when caller opts out (Q2: perf escape hatch).
+	// This is also a terminal return of the row set actually handed back to
+	// the caller, so — like the empty-wisps-table early return above — it
+	// must enforce the cap itself; skipping it here would let SkipWisps
+	// callers (e.g. bd list's default filter) silently bypass MaxRows.
 	if filter.SkipWisps {
+		if err := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); err != nil {
+			return nil, err
+		}
 		return results, nil
 	}
 

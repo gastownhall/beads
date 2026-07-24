@@ -27,7 +27,7 @@ func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, f
 				return nil, err
 			}
 			if len(wisps) > 0 {
-				return finishSearchIssuesWithCounts(wisps, filter), nil
+				return finishSearchIssuesWithCounts(wisps, filter)
 			}
 		}
 		// Fall through: the wisps tier is missing/empty or matched no rows.
@@ -40,7 +40,7 @@ func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, f
 		if err != nil {
 			return nil, err
 		}
-		return finishSearchIssuesWithCounts(out, filter), nil
+		return finishSearchIssuesWithCounts(out, filter)
 	}
 
 	out, err := runFilterSearchQueryInTx(ctx, tx, query, filter, IssuesFilterTables, wispDepsExist)
@@ -50,7 +50,7 @@ func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, f
 
 	// Skip wisps merge entirely when caller opts out (Q2: perf escape hatch).
 	if filter.SkipWisps {
-		return finishSearchIssuesWithCounts(out, filter), nil
+		return finishSearchIssuesWithCounts(out, filter)
 	}
 
 	empty, probeErr := wispsTableEmptyOrMissingInTx(ctx, tx)
@@ -58,21 +58,21 @@ func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, f
 		return nil, fmt.Errorf("search issues with counts: wisp probe: %w", probeErr)
 	}
 	if empty {
-		return finishSearchIssuesWithCounts(out, filter), nil
+		return finishSearchIssuesWithCounts(out, filter)
 	}
 	if !wispDepsExist {
-		return finishSearchIssuesWithCounts(out, filter), nil
+		return finishSearchIssuesWithCounts(out, filter)
 	}
 
 	wisps, err := runFilterSearchQueryInTx(ctx, tx, query, filter, WispsFilterTables, true)
 	if err != nil {
 		if isTableNotExistError(err) {
-			return finishSearchIssuesWithCounts(out, filter), nil
+			return finishSearchIssuesWithCounts(out, filter)
 		}
 		return nil, err
 	}
 	if len(wisps) == 0 {
-		return finishSearchIssuesWithCounts(out, filter), nil
+		return finishSearchIssuesWithCounts(out, filter)
 	}
 
 	// Prefer the canonical wisp record when an ID exists in both tables (be-iabdi).
@@ -93,7 +93,7 @@ func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, f
 		}
 	}
 	kept = append(kept, wisps...)
-	return finishSearchIssuesWithCounts(kept, filter), nil
+	return finishSearchIssuesWithCounts(kept, filter)
 }
 
 func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter, tables FilterTables, includeWispReverseDeps bool) ([]*types.IssueWithCounts, error) {
@@ -106,8 +106,8 @@ func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, fil
 		whereSQL = "WHERE " + joinAnd(whereClauses)
 	}
 	limitSQL := ""
-	if filter.Limit > 0 {
-		limitSQL = fmt.Sprintf("LIMIT %d", filter.Limit)
+	if eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows); eff > 0 {
+		limitSQL = fmt.Sprintf("LIMIT %d", eff)
 	}
 	orderBy := sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, "i")
 	return runSearchQueryInTx(ctx, tx, tables, whereSQL, orderBy, limitSQL, args, includeWispReverseDeps, filter.SkipLabels)
@@ -154,12 +154,24 @@ func scanCountsRowsInTx(ctx context.Context, tx *sql.Tx, mainTable, query string
 	return out, nil
 }
 
-func finishSearchIssuesWithCounts(items []*types.IssueWithCounts, filter types.IssueFilter) []*types.IssueWithCounts {
+// finishSearchIssuesWithCounts is the single terminal hook every
+// SearchIssuesWithCountsInTx exit path routes through: it sorts the merged
+// result, enforces the defensive MaxRows cap (be-x42v) on the row count
+// actually assembled — mirroring searchInTx's terminal EnforceMaxRowsCap
+// calls — and only then applies the caller-facing Limit trim. Checking the
+// cap before the Limit trim matters: runFilterSearchQueryInTx sizes its SQL
+// LIMIT via EffectiveSearchLimit (cap+1 when Limit is absent or looser than
+// the cap) specifically so overage is still visible here before Limit
+// silently truncates it away.
+func finishSearchIssuesWithCounts(items []*types.IssueWithCounts, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
 	sortSearchIssuesWithCounts(items, filter.SortBy, filter.SortDesc)
-	if filter.Limit > 0 && len(items) > filter.Limit {
-		return items[:filter.Limit]
+	if err := EnforceMaxRowsCap(len(items), filter.MaxRows, filter.MaxRowsSource); err != nil {
+		return nil, err
 	}
-	return items
+	if filter.Limit > 0 && len(items) > filter.Limit {
+		return items[:filter.Limit], nil
+	}
+	return items, nil
 }
 
 // sortSearchIssuesWithCounts must order the merged issues+wisps rows the same

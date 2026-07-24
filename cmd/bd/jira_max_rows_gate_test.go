@@ -85,8 +85,8 @@ func TestJiraSync_FilterHasZeroMaxRows(t *testing.T) {
 	// Seed one row with an external ref so DetectConflicts has
 	// something to consider (defending against an early bail-out that
 	// would skip the spy capture).
-	if _, err := inner.DB().ExecContext(ctx, `INSERT INTO issues (id, title, status, priority, issue_type, external_ref) VALUES (?, ?, ?, ?, ?, ?)`,
-		"jira-mr-1", "Jira MaxRows gate seed", "open", 1, "task", "https://stubmr.test/EXT-1"); err != nil {
+	if _, err := inner.DB().ExecContext(ctx, `INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, external_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"jira-mr-1", "Jira MaxRows gate seed", "", "", "", "", "open", 1, "task", "https://stubmr.test/EXT-1"); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
