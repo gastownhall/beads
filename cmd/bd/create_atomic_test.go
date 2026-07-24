@@ -50,6 +50,34 @@ type createAtomicFakeStore struct {
 
 func (s *createAtomicFakeStore) IsInfraTypeCtx(context.Context, types.IssueType) bool { return false }
 
+// SearchIssues + GetConfig satisfy utils.ResolvePartialID for --deps target
+// normalization (GH#5005). Known IDs resolve to themselves; unknown bare
+// slugs become prefix-qualified and also resolve so unit tests can exercise
+// the resolve path without a real store.
+func (s *createAtomicFakeStore) GetConfig(_ context.Context, key string) (string, error) {
+	if key == "issue_prefix" {
+		return "fake", nil
+	}
+	return "", nil
+}
+
+func (s *createAtomicFakeStore) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) ([]*types.Issue, error) {
+	out := make([]*types.Issue, 0, len(filter.IDs))
+	for _, id := range filter.IDs {
+		if id == "" {
+			continue
+		}
+		// Real stores never mint bare slugs as issue IDs; only return hits for
+		// prefix-qualified forms so ResolvePartialID exercises the bare→prefix
+		// path used by create --deps (GH#5005).
+		if !strings.Contains(id, "-") {
+			continue
+		}
+		out = append(out, &types.Issue{ID: id, Title: "resolved", Status: types.StatusOpen, IssueType: types.TypeTask})
+	}
+	return out, nil
+}
+
 func (s *createAtomicFakeStore) CreateIssue(_ context.Context, issue *types.Issue, _ string) error {
 	s.storeCreateCalls++
 	if issue.ID == "" {
