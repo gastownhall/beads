@@ -63,6 +63,23 @@ Configuration keys for 'bd dolt set':
   user      MySQL user (default: root)
   data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
 
+Remote server authentication (password + TLS) is NOT stored via 'bd dolt set'
+(keeps secrets out of metadata.json). Configure them with:
+
+  BEADS_DOLT_PASSWORD       Server password (highest priority)
+  BEADS_DOLT_SERVER_TLS     Enable TLS (set to "1" or "true")
+  BEADS_DOLT_SERVER_USER    MySQL user override (else use 'bd dolt set user')
+  BEADS_CREDENTIALS_FILE    Optional path to credentials file
+
+  Default credentials file: ~/.config/beads/credentials (Linux/macOS)
+                            %APPDATA%\\beads\\credentials (Windows)
+  Format (INI, section = host:port of the resolved connection):
+    [127.0.0.1:3307]
+    password = secret
+
+  Password resolution: BEADS_DOLT_PASSWORD → credentials [host:port] → empty.
+  Full reference: docs/architecture/dolt.md (Environment Variables / Credentials).
+
 Flags for 'bd dolt set':
   --update-config  Also write to config.yaml for team-wide defaults
 
@@ -70,6 +87,7 @@ Examples:
   bd dolt set database myproject
   bd dolt set host 192.168.1.100 --update-config
   bd dolt set data-dir /home/user/.beads-dolt/myproject
+  export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1
   bd dolt test`,
 }
 
@@ -97,13 +115,28 @@ Keys:
   user      MySQL user (default: root)
   data-dir  Custom dolt data directory (absolute path; default: .beads/dolt)
 
+There is no 'password' or 'tls' key here on purpose — secrets and TLS must
+not land in metadata.json. Use environment variables or the credentials file:
+
+  BEADS_DOLT_PASSWORD     Server password (highest priority)
+  BEADS_DOLT_SERVER_TLS   Enable TLS ("1" or "true")
+  BEADS_CREDENTIALS_FILE  Optional override path for credentials
+
+  Default credentials file: ~/.config/beads/credentials
+  Format:
+    [host:port]
+    password = secret
+
+  See: bd dolt --help and docs/architecture/dolt.md
+
 Use --update-config to also write to config.yaml for team-wide defaults.
 
 Examples:
   bd dolt set database myproject
   bd dolt set host 192.168.1.100
   bd dolt set port 3307 --update-config
-  bd dolt set data-dir /home/user/.beads-dolt/myproject`,
+  bd dolt set data-dir /home/user/.beads-dolt/myproject
+  export BEADS_DOLT_PASSWORD=... BEADS_DOLT_SERVER_TLS=1`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		beadsDir := selectedDoltBeadsDir()
