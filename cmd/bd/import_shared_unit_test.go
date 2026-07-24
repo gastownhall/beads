@@ -117,6 +117,58 @@ func TestFilterStaleImportIssuesReportsTieConflicts(t *testing.T) {
 	}
 }
 
+// GH#4901 follow-up: title-only rows (no ID) and zero-UpdatedAt rows can't
+// be stale-checked against a local timestamp, but they still write on
+// execution. filterStaleImportIssues must classify them via an existence
+// lookup — nonexistent -> New, existing -> Updated — instead of silently
+// passing them through unclassified.
+func TestFilterStaleImportIssuesClassifiesUntimestampedRows(t *testing.T) {
+	base := time.Date(2026, 5, 27, 12, 0, 0, 0, time.UTC)
+
+	t.Run("mixed_with_a_local_match", func(t *testing.T) {
+		store := &fakeImportIssueLookupStore{issues: []*types.Issue{
+			{ID: "bd-existing", Title: "old title", UpdatedAt: base},
+		}}
+		incoming := []*types.Issue{
+			{Title: "title only, no id"},            // new: no ID to look up
+			{ID: "bd-existing", Title: "new title"}, // zero UpdatedAt, matches local
+			{ID: "bd-brand-new", Title: "zero UpdatedAt, no local match"},
+		}
+
+		_, _, plan, err := filterStaleImportIssues(context.Background(), store, incoming)
+		if err != nil {
+			t.Fatalf("filterStaleImportIssues: %v", err)
+		}
+		if plan.NewCount != 2 {
+			t.Fatalf("plan.NewCount = %d, want 2 (title-only + bd-brand-new)", plan.NewCount)
+		}
+		if len(plan.NewIDs) != 1 || plan.NewIDs[0] != "bd-brand-new" {
+			t.Fatalf("plan.NewIDs = %#v, want [bd-brand-new] (title-only row has no ID to report)", plan.NewIDs)
+		}
+		if len(plan.Updates) != 1 || plan.Updates[0].ID != "bd-existing" {
+			t.Fatalf("plan.Updates = %#v, want [bd-existing]", plan.Updates)
+		}
+	})
+
+	t.Run("no_local_matches_at_all", func(t *testing.T) {
+		store := &fakeImportIssueLookupStore{} // empty db: exercises the short-circuit path
+		incoming := []*types.Issue{
+			{Title: "title only, no id"},
+			{ID: "bd-new", Title: "zero UpdatedAt"},
+		}
+		_, _, plan, err := filterStaleImportIssues(context.Background(), store, incoming)
+		if err != nil {
+			t.Fatalf("filterStaleImportIssues: %v", err)
+		}
+		if plan.NewCount != 2 {
+			t.Fatalf("plan.NewCount = %d, want 2", plan.NewCount)
+		}
+		if len(plan.NewIDs) != 1 || plan.NewIDs[0] != "bd-new" {
+			t.Fatalf("plan.NewIDs = %#v, want [bd-new]", plan.NewIDs)
+		}
+	})
+}
+
 // GH#4901: plan.NewIDs must cover rows with no local match, including the
 // "first import into an empty db" case, which used to short-circuit before
 // ever populating it.
@@ -215,19 +267,111 @@ func TestClassifyDryRunImport(t *testing.T) {
 		}
 	})
 
-	t.Run("allow_stale_forces_every_row_through_as_created", func(t *testing.T) {
+	// GH#4901 follow-up: --allow-stale still bypasses the stale guard (no
+	// row is skipped or tie-kept), but a row matching an existing local
+	// issue is an update, not a create — the old blanket "every row is
+	// Created" report didn't match execution, which upserts (not inserts)
+	// a row whose ID already exists.
+	t.Run("allow_stale_classifies_existing_rows_as_updated", func(t *testing.T) {
 		store := &fakeImportIssueLookupStore{issues: []*types.Issue{
 			{ID: "bd-stale", Title: "t", UpdatedAt: base.Add(time.Hour)},
 		}}
 		incoming := []*types.Issue{
 			{ID: "bd-stale", Title: "restored older snapshot", UpdatedAt: base},
+			{ID: "bd-new", Title: "brand new", UpdatedAt: base},
 		}
 		result, err := classifyDryRunImport(context.Background(), store, incoming, true)
 		if err != nil {
 			t.Fatalf("classifyDryRunImport: %v", err)
 		}
-		if result.Created != 1 || result.Skipped != 0 {
-			t.Fatalf("Created = %d, Skipped = %d, want Created=1, Skipped=0 under --allow-stale", result.Created, result.Skipped)
+		if result.Updated != 1 || len(result.UpdatedIssues) != 1 || result.UpdatedIssues[0].ID != "bd-stale" {
+			t.Fatalf("Updated = %d, UpdatedIssues = %#v, want [bd-stale]", result.Updated, result.UpdatedIssues)
+		}
+		if result.Created != 1 || len(result.ImportedIDs) != 1 || result.ImportedIDs[0] != "bd-new" {
+			t.Fatalf("Created = %d, ImportedIDs = %#v, want [bd-new]", result.Created, result.ImportedIDs)
+		}
+		if result.Skipped != 0 {
+			t.Fatalf("Skipped = %d, want 0 under --allow-stale (never stale-skips)", result.Skipped)
+		}
+	})
+
+	// GH#4901 follow-up: a title-only row (no ID) and a zero-UpdatedAt row
+	// have nothing to stale-check, but they still write on execution — the
+	// pre-filter must classify them via an existence lookup instead of
+	// falling through as "unchanged".
+	t.Run("title_only_and_untimestamped_rows_never_unchanged", func(t *testing.T) {
+		store := &fakeImportIssueLookupStore{issues: []*types.Issue{
+			{ID: "bd-existing", Title: "old title", UpdatedAt: base},
+		}}
+		incoming := []*types.Issue{
+			{Title: "title only, no id"},            // new: no ID to look up
+			{ID: "bd-existing", Title: "new title"}, // zero UpdatedAt, matches local -> update
+		}
+		result, err := classifyDryRunImport(context.Background(), store, incoming, false)
+		if err != nil {
+			t.Fatalf("classifyDryRunImport: %v", err)
+		}
+		if result.Unchanged != 0 {
+			t.Fatalf("Unchanged = %d, want 0 (neither row is a clean re-import)", result.Unchanged)
+		}
+		if result.Created != 1 {
+			t.Fatalf("Created = %d, want 1 (title-only row)", result.Created)
+		}
+		if len(result.ImportedIDs) != 0 {
+			t.Fatalf("ImportedIDs = %#v, want empty (title-only row has no ID to report)", result.ImportedIDs)
+		}
+		if result.Updated != 1 || len(result.UpdatedIssues) != 1 || result.UpdatedIssues[0].ID != "bd-existing" {
+			t.Fatalf("Updated = %d, UpdatedIssues = %#v, want [bd-existing]", result.Updated, result.UpdatedIssues)
+		}
+	})
+
+	// bd-hj85c cleanup: a tie-kept row (same-second timestamp, differing
+	// content) is not rewritten by the upsert, so it belongs in Unchanged,
+	// not Updated — it's still surfaced separately via TieKeptLocalIDs, and
+	// the three category counts must sum to the rows considered.
+	t.Run("tie_kept_local_counts_as_unchanged_not_updated", func(t *testing.T) {
+		store := &fakeImportIssueLookupStore{issues: []*types.Issue{
+			{ID: "bd-tie", Title: "t", Notes: "local notes", UpdatedAt: base},
+		}}
+		incoming := []*types.Issue{
+			{ID: "bd-tie", Title: "t", UpdatedAt: base},
+		}
+		result, err := classifyDryRunImport(context.Background(), store, incoming, false)
+		if err != nil {
+			t.Fatalf("classifyDryRunImport: %v", err)
+		}
+		if result.Updated != 0 {
+			t.Fatalf("Updated = %d, want 0 (tie-kept rows are not rewritten)", result.Updated)
+		}
+		if result.Unchanged != 1 {
+			t.Fatalf("Unchanged = %d, want 1", result.Unchanged)
+		}
+		if len(result.TieKeptLocalIDs) != 1 || result.TieKeptLocalIDs[0] != "bd-tie" {
+			t.Fatalf("TieKeptLocalIDs = %#v, want [bd-tie]", result.TieKeptLocalIDs)
+		}
+		if sum := result.Created + result.Updated + result.Unchanged; sum != 1 {
+			t.Fatalf("counts do not sum to the row considered: %+v (sum=%d)", result, sum)
+		}
+	})
+
+	// Cleanup: duplicate incoming rows for the same ID must not produce a
+	// duplicate entry in the reported ID list, but each row still counts
+	// toward Created so the totals reflect every row considered.
+	t.Run("dedupes_new_ids_for_duplicate_incoming_rows", func(t *testing.T) {
+		store := &fakeImportIssueLookupStore{} // empty db: nothing matches
+		incoming := []*types.Issue{
+			{ID: "bd-dup", Title: "first", UpdatedAt: base},
+			{ID: "bd-dup", Title: "second copy of same row", UpdatedAt: base},
+		}
+		result, err := classifyDryRunImport(context.Background(), store, incoming, false)
+		if err != nil {
+			t.Fatalf("classifyDryRunImport: %v", err)
+		}
+		if len(result.ImportedIDs) != 1 || result.ImportedIDs[0] != "bd-dup" {
+			t.Fatalf("ImportedIDs = %#v, want deduped [bd-dup]", result.ImportedIDs)
+		}
+		if result.Created != 2 {
+			t.Fatalf("Created = %d, want 2 (both rows counted even though the ID is deduped for display)", result.Created)
 		}
 	})
 

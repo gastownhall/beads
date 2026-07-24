@@ -301,8 +301,13 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 		if jsonOutput {
 			return outputJSON(result)
 		}
+		// The leading count is the sum of the breakdown that follows it
+		// (not len(issues)), which can be larger when rows were stale
+		// skipped — those are reported separately below instead of being
+		// folded into a total the breakdown then wouldn't add up to.
+		considered := result.Created + result.Updated + result.Unchanged
 		fmt.Fprintf(os.Stderr, "Would import %d issues (%d new, %d updated, %d unchanged) and %d memories from %s",
-			len(issues), result.Created, result.Updated, result.Unchanged, len(memories), source)
+			considered, result.Created, result.Updated, result.Unchanged, len(memories), source)
 		if dedupHits > 0 {
 			fmt.Fprintf(os.Stderr, " (%d duplicates skipped)", dedupHits)
 		}
