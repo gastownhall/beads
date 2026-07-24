@@ -10,16 +10,26 @@
 #   - time command (bash built-in)
 #
 # What this demonstrates:
-#   The bug fired in migrateServerRootRemotes (federation.go) when bd
-#   called doltutil.ListCLIRemotes() against the dolt server root.
 #   A multi-DB server root has .dolt/sql-server.info but no repo_state.json;
 #   `dolt remote -v` in such a dir takes ~12 s before failing with
-#   "not a valid dolt repository."
+#   "not a valid dolt repository." That's raw upstream dolt CLI behavior,
+#   reproduced here directly, unmediated by bd.
 #
-#   The fix (Layer 1, federation.go) sentinel-stats repo_state.json before
-#   invoking ListCLIRemotes, skipping the slow call entirely.
-#   The fix (Layer 2, remotes.go) also adds a 2 s context timeout as a
-#   backstop for any future variant.
+#   What be-1he ships against that slowness:
+#     - Layer 2 (internal/storage/doltutil/remotes.go): ListCLIRemotes caps
+#       its own `dolt remote -v` subprocess at 2 s when the target directory
+#       lacks repo_state.json (this script's SERVER_ROOT case) and at a
+#       generous 30 s otherwise, so a slow-but-valid remote list from a real
+#       repo is never mistaken for "remote absent". This script calls the
+#       raw `dolt` binary directly, not bd's ListCLIRemotes, so the timings
+#       below are never capped — they demonstrate the underlying dolt
+#       slowness the cap protects against.
+#     - Layer 3 (cmd/bd/version_tracking.go): a read-only bd_version probe
+#       before autoMigrateOnVersionBump opens the store writeable, saving an
+#       unnecessary initSchema round-trip when no migration is needed.
+#   (An earlier draft of this fix also described a "Layer 1" sentinel in
+#   internal/storage/dolt/federation.go; that never shipped in be-1he and is
+#   not part of this repro.)
 
 set -euo pipefail
 
@@ -48,32 +58,39 @@ echo
 
 # ── 2. Baseline: dolt remote -v against the broken server root (slow) ────────
 echo "--- Timing 'dolt remote -v' against broken server root (no repo_state.json) ---"
-echo "    Expected: ~12 s (or 2 s with the Layer 2 timeout)"
+echo "    Expected: ~12 s. This runs the raw dolt binary directly inside SERVER_ROOT,"
+echo "    not through bd's timeout-wrapped ListCLIRemotes, so nothing here caps it."
 START=$(date +%s%3N)
-dolt remote -v 2>&1 || true  # expected to fail
+(cd "$SERVER_ROOT" && dolt remote -v 2>&1) || true  # expected to fail
 END=$(date +%s%3N)
 ELAPSED=$(( END - START ))
 echo "    Elapsed: ${ELAPSED} ms"
 echo
 
 if [[ $ELAPSED -gt 5000 ]]; then
-    echo "SLOW PATH CONFIRMED: elapsed ${ELAPSED}ms > 5000ms (Layer 1 not active)"
+    echo "SLOW PATH CONFIRMED: elapsed ${ELAPSED}ms > 5000ms — matches the ~12s upstream"
+    echo "dolt CLI failure mode this repro targets. Raw dolt call, uncapped by bd."
 elif [[ $ELAPSED -gt 1500 ]]; then
-    echo "PARTIAL FIX: elapsed ${ELAPSED}ms — Layer 2 timeout capped it, but Layer 1 (repo_state.json check) is not in effect for this direct test"
+    echo "SLOW PATH PARTIALLY OBSERVED: elapsed ${ELAPSED}ms — clearly slower than a"
+    echo "healthy repo's ~130ms, just short of the full ~12s this time. Still a raw,"
+    echo "uncapped dolt call: bd's own 2s cap (Layer 2) is not exercised by this script."
 else
-    echo "FAST PATH: elapsed ${ELAPSED}ms — dolt exited quickly (dolt version may have fixed the underlying issue)"
+    echo "FAST PATH: elapsed ${ELAPSED}ms — dolt exited quickly (this dolt version may"
+    echo "have fixed the underlying issue upstream)"
 fi
 
-# ── 3. Show what the sentinel check (Layer 1 fix) looks like ─────────────────
+# ── 3. Show how bd's Layer 2 cap is scoped ────────────────────────────────────
 echo
-echo "--- Layer 1 fix: sentinel check for repo_state.json ---"
+echo "--- Layer 2 cap scoping: repo_state.json presence decides bd's timeout ---"
 REPO_STATE="$SERVER_ROOT/.dolt/repo_state.json"
 if [[ -f "$REPO_STATE" ]]; then
-    echo "    repo_state.json EXISTS → ListCLIRemotes would be called"
+    echo "    repo_state.json EXISTS → bd's ListCLIRemotes uses the generous 30s cap"
+    echo "    (this looks like a real repo; a slow-but-valid answer must not be"
+    echo "    mistaken for 'remote absent' by callers like FindCLIRemote)."
 else
-    echo "    repo_state.json ABSENT → ListCLIRemotes is SKIPPED (be-1he fix)"
-    echo "    This is the fix: federation.go now checks for repo_state.json before"
-    echo "    invoking ListCLIRemotes, preventing the 12 s dolt subprocess."
+    echo "    repo_state.json ABSENT → bd's ListCLIRemotes uses the aggressive 2s cap"
+    echo "    (this is the broken multi-DB server-root case be-1he targets; there is"
+    echo "    no real answer coming from here, so failing fast is safe)."
 fi
 
 # ── 4. Create a proper dolt repo for contrast ────────────────────────────────
@@ -81,7 +98,7 @@ echo
 echo "--- Contrast: dolt remote -v against a proper dolt repo (fast) ---"
 PROPER_REPO="$TMPDIR/proper_repo"
 mkdir -p "$PROPER_REPO"
-(cd "$PROPER_REPO" && dolt init --quiet 2>/dev/null)
+(cd "$PROPER_REPO" && dolt init >/dev/null 2>&1)
 START=$(date +%s%3N)
 (cd "$PROPER_REPO" && dolt remote -v 2>&1) || true
 END=$(date +%s%3N)
@@ -90,10 +107,13 @@ echo "    Elapsed: ${ELAPSED} ms (expected < 500 ms)"
 
 echo
 echo "=== Summary ==="
-echo "The 12 s slow path was: bd command → autoMigrateOnVersionBump →"
-echo "syncCLIRemotesToSQL → ListCLIRemotes('.beads/dolt/') →"
-echo "dolt remote -v in server root → 12 s failure"
+echo "The historical 12 s slow path (pre-be-1he, and before an unrelated main-branch"
+echo "rework of remote migration around doltutil.PersistedRemotes) was:"
+echo "  bd command -> autoMigrateOnVersionBump -> writeable store open ->"
+echo "  ListCLIRemotes('.beads/dolt/') -> dolt remote -v in server root -> 12 s failure"
 echo
-echo "Layer 1 fix (federation.go): skip ListCLIRemotes if repo_state.json absent"
-echo "Layer 2 fix (remotes.go):    2 s context.WithTimeout on ListCLIRemotes"
-echo "Layer 3 fix (version_tracking.go): read-only probe avoids openDB writeable"
+echo "What be-1he ships against the remaining exposure:"
+echo "Layer 2 fix (remotes.go):          2 s cap on ListCLIRemotes when repo_state.json"
+echo "                                    is absent, 30 s cap otherwise"
+echo "Layer 3 fix (version_tracking.go): read-only bd_version probe avoids an"
+echo "                                    unnecessary writeable store open"

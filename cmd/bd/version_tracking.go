@@ -193,8 +193,11 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	}
 
 	// Read-only probe: if the DB is already at the current version, skip the
-	// writeable open. The writeable path triggers syncCLIRemotesToSQL, which
-	// can be slow against multi-database server roots. (be-1he)
+	// writeable open. On current main the writeable-open gate reads remotes
+	// via doltutil.PersistedRemotes, a fast on-disk repo_state.json probe —
+	// not a `dolt remote -v` subprocess — so this doesn't save a 12s hang;
+	// it saves an unnecessary initSchema round-trip when no migration is
+	// needed. (be-1he)
 	if roStore, roErr := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true}); roErr == nil {
 		dbVersion, _ := roStore.GetLocalMetadata(ctx, "bd_version")
 		_ = roStore.Close()

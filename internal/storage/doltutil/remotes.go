@@ -24,10 +24,35 @@ func cliRemoteLock(dbPath string) *sync.Mutex {
 	return lock.(*sync.Mutex)
 }
 
-// listCLIRemotesTimeout caps `dolt remote -v` wallclock. A real repo responds
-// in ~130ms; >1s indicates the broken-parent-dir failure mode that takes ~12s
-// to error out. (be-1he)
-const listCLIRemotesTimeout = 2 * time.Second
+// listCLIRemotesTimeoutBroken caps `dolt remote -v` wallclock for a database
+// directory that lacks .dolt/repo_state.json — the known broken-parent-dir
+// failure mode (e.g. a multi-DB server root) that otherwise takes ~12s to
+// error out. There is never a real answer coming from a directory in this
+// state, so failing fast here carries no risk of mistaking a slow-but-valid
+// remote list for "absent". (be-1he)
+const listCLIRemotesTimeoutBroken = 2 * time.Second
+
+// listCLIRemotesTimeoutHealthy caps `dolt remote -v` wallclock for a
+// directory that does have .dolt/repo_state.json — a real Dolt repo. This is
+// deliberately generous: callers such as FindCLIRemote fold any
+// ListCLIRemotes error (including a timeout) into "remote absent", and
+// EnsureCLIRemote then blind-adds on that signal, which hard-fails if the
+// remote in fact exists. A real repo's `dolt remote -v` is ~130ms even when
+// under load, so 30s only ever bites a genuinely hung subprocess — it must
+// not be tightened to a value a slow-but-valid call could plausibly cross
+// (review should-fix, 2026-07-24).
+const listCLIRemotesTimeoutHealthy = 30 * time.Second
+
+// listCLIRemotesTimeout picks the wallclock cap for dbPath based on whether
+// it looks like a real Dolt repo (has .dolt/repo_state.json) or the known
+// broken-parent-dir case (doesn't). Pure and stat-only so it's cheap to call
+// per-invocation and independently testable without shelling out to dolt.
+func listCLIRemotesTimeout(dbPath string) time.Duration {
+	if _, err := os.Stat(filepath.Join(dbPath, ".dolt", "repo_state.json")); err != nil {
+		return listCLIRemotesTimeoutBroken
+	}
+	return listCLIRemotesTimeoutHealthy
+}
 
 // ShellQuote returns s wrapped in single quotes with any embedded single
 // quotes escaped, making it safe to interpolate into a shell command string.
@@ -90,7 +115,7 @@ func PersistedRemotes(dbPath string) ([]storage.RemoteInfo, error) {
 // directory. This is a read-only guard for deciding whether CLI push/pull/fetch
 // can safely run from that directory; remote mutation still goes through SQL.
 func ListCLIRemotes(dbPath string) ([]storage.RemoteInfo, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), listCLIRemotesTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), listCLIRemotesTimeout(dbPath))
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "dolt", "remote", "-v") // #nosec G204 -- fixed command
 	cmd.Dir = dbPath
