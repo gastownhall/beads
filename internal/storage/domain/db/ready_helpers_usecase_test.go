@@ -190,7 +190,8 @@ func (s *testSuite) ucStatsEmpty() {
 	stats, err := uc.GetStatistics(s.Ctx())
 	s.Require().NoError(err)
 	s.Equal(0, stats.TotalIssues)
-	s.Equal(0, stats.ReadyIssues)
+	s.Require().NotNil(stats.ReadyIssues)
+	s.Equal(0, *stats.ReadyIssues)
 	s.Require().NotNil(stats.BlockedIssues)
 	s.Equal(0, *stats.BlockedIssues)
 }
@@ -233,7 +234,8 @@ func (s *testSuite) ucStatsReadyDerived() {
 	s.Equal(2, stats.OpenIssues)
 	s.Require().NotNil(stats.BlockedIssues)
 	s.Equal(1, *stats.BlockedIssues)
-	s.Equal(1, stats.ReadyIssues, "UC must surface ready = open - blocked")
+	s.Require().NotNil(stats.ReadyIssues)
+	s.Equal(1, *stats.ReadyIssues, "UC must surface ready = open - blocked")
 }
 
 // ---------- DetectCycles UC ----------

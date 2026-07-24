@@ -301,8 +301,12 @@ func testAuditStatistics(t *testing.T, f Factory) {
 		t.Errorf("BlockedIssues = %d, want 1", got)
 	}
 	// Ready = Open(2) - Blocked(1) = 1 (the blocked issue is in_progress, not open).
-	if stats.ReadyIssues != 1 {
-		t.Errorf("ReadyIssues = %d, want 1", stats.ReadyIssues)
+	if stats.ReadyIssues == nil || *stats.ReadyIssues != 1 {
+		got := -1
+		if stats.ReadyIssues != nil {
+			got = *stats.ReadyIssues
+		}
+		t.Errorf("ReadyIssues = %d, want 1", got)
 	}
 }
 
@@ -331,8 +335,12 @@ func testAuditStatisticsReadyClamp(t *testing.T, f Factory) {
 		t.Errorf("BlockedIssues = %d, want 2", got)
 	}
 	// 0 - 2 = -2, clamped to 0.
-	if stats.ReadyIssues != 0 {
-		t.Errorf("ReadyIssues = %d, want 0 (clamped)", stats.ReadyIssues)
+	if stats.ReadyIssues == nil || *stats.ReadyIssues != 0 {
+		got := -1
+		if stats.ReadyIssues != nil {
+			got = *stats.ReadyIssues
+		}
+		t.Errorf("ReadyIssues = %d, want 0 (clamped)", got)
 	}
 }
 
