@@ -1078,6 +1078,9 @@ func exportDiagnostics(result doctorResult, outputPath string) error {
 }
 
 func printDiagnostics(result doctorResult) {
+	// GH#4993: rewrite Fix tips that steer operators into --fix under schema skew.
+	fixGate := doctor.AssessSchemaFixGate(result.Path)
+
 	// Pre-calculate counts and collect issues grouped by category
 	checksByCategory := make(map[string][]doctorCheck)
 	issuesByCategory := make(map[string][]doctorCheck)
@@ -1085,6 +1088,10 @@ func printDiagnostics(result doctorResult) {
 	hasIssues := false
 
 	for _, check := range result.Checks {
+		// Sanitize per-check fix recommendations before display
+		if check.Fix != "" {
+			check.Fix = doctor.SanitizeFixRecommendation(check.Fix, fixGate)
+		}
 		cat := check.Category
 		if cat == "" {
 			cat = "Other"
@@ -1222,6 +1229,11 @@ func printDiagnostics(result doctorResult) {
 			noun = "warnings"
 		}
 		fmt.Printf("%s\n", ui.RenderMuted(fmt.Sprintf("(%d %s suppressed via doctor.suppress config)", result.SuppressedCount, noun)))
+	}
+
+	// GH#4993: surface schema gate when --fix would be unsafe
+	if !fixGate.Safe && fixGate.Reason != "" {
+		fmt.Printf("\n%s Schema fix-gate: %s\n", ui.RenderWarn("⚠"), fixGate.Reason)
 	}
 }
 

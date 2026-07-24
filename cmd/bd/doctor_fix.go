@@ -17,11 +17,22 @@ import (
 
 // previewFixes shows what would be fixed without applying changes
 func previewFixes(result doctorResult) {
+	gate := doctor.AssessSchemaFixGate(result.Path)
+	if gate.RefuseDoctorFix() {
+		fmt.Printf("\n%s Refusing --fix dry-run: %s\n", ui.RenderFail("✗"), gate.Reason)
+		return
+	}
+	if !gate.Safe && gate.Reason != "" {
+		fmt.Printf("\n%s Schema gate: %s\n", ui.RenderWarn("⚠"), gate.Reason)
+	}
+
 	// Collect all fixable issues
 	var fixableIssues []doctorCheck
 	for _, check := range result.Checks {
 		if (check.Status == statusWarning || check.Status == statusError) && check.Fix != "" {
-			fixableIssues = append(fixableIssues, check)
+			c := check
+			c.Fix = doctor.SanitizeFixRecommendation(c.Fix, gate)
+			fixableIssues = append(fixableIssues, c)
 		}
 	}
 
@@ -50,10 +61,24 @@ func previewFixes(result doctorResult) {
 	}
 
 	fmt.Printf("[DRY-RUN] Would attempt to fix %d issue(s)\n", len(fixableIssues))
-	fmt.Println("Run 'bd doctor --fix' to apply these fixes")
+	if gate.Safe {
+		fmt.Println("Run 'bd doctor --fix' to apply these fixes")
+	} else {
+		fmt.Println("Schema gate active — re-check AssessSchemaFixGate before applying --fix")
+	}
 }
 
 func applyFixes(result doctorResult) {
+	// GH#4993: never apply --fix when the DB schema is ahead of this binary.
+	gate := doctor.AssessSchemaFixGate(result.Path)
+	if gate.RefuseDoctorFix() {
+		fmt.Printf("\n%s Refusing --fix: %s\n", ui.RenderFail("✗"), gate.Reason)
+		return
+	}
+	if !gate.Safe && gate.Reason != "" {
+		fmt.Printf("\n%s Schema gate: %s\n", ui.RenderWarn("⚠"), gate.Reason)
+	}
+
 	// Collect all fixable issues
 	var fixableIssues []doctorCheck
 	for _, check := range result.Checks {
