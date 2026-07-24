@@ -65,6 +65,9 @@ var createCmd = &cobra.Command{
 			if dryRun {
 				return HandleError("--dry-run is not supported with --file flag")
 			}
+			if err := rejectSingleIssueFlagsForMarkdown(cmd); err != nil {
+				return err
+			}
 			return createIssuesFromMarkdown(cmd, file)
 		}
 
@@ -76,6 +79,9 @@ var createCmd = &cobra.Command{
 			graphOpts := graphApplyOptionsFromFlags(cmd)
 			if err := graphOpts.Validate(); err != nil {
 				return HandleError("invalid graph options: %v", err)
+			}
+			if err := rejectSingleIssueFlagsForGraph(cmd); err != nil {
+				return err
 			}
 			return createIssuesFromGraph(graphFile, graphDryRun, graphOpts)
 		}
@@ -452,6 +458,18 @@ var createCmd = &cobra.Command{
 			return renderDryRun()
 		}
 
+		// Parse every requested dependency edge BEFORE reserving a child ID
+		// or creating anything so a malformed spec aborts with no burned
+		// child ID and no orphan issue behind it.
+		depSpecs, err := parseDepSpecs(deps)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate, cmd.Flags().Changed("waits-for-gate"))
+		if err != nil {
+			return HandleError("%v", err)
+		}
+
 		createCtx := rootCtx
 		if parentID != "" {
 			childID, err := store.GetNextChildID(rootCtx, parentID)
@@ -509,17 +527,6 @@ var createCmd = &cobra.Command{
 		})
 
 		ctx := createCtx
-
-		// Parse every requested dependency edge BEFORE creating anything so
-		// a malformed spec aborts with no orphan issue behind it.
-		depSpecs, err := parseDepSpecs(deps)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate, cmd.Flags().Changed("waits-for-gate"))
-		if err != nil {
-			return HandleError("%v", err)
-		}
 
 		// If a discovered-from dependency is present, inherit source_repo
 		// from the referenced parent issue.
