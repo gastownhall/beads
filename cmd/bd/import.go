@@ -340,6 +340,9 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 	// Sync issue_prefix from config.yaml to the database if stale (be-llaf).
 	// store.Commit skips the config table (GH#2455), so we use CommitWithConfig
 	// for this intentional config update after the issues commit completes.
+	// config.yaml is authoritative here and existing issue IDs are intentionally
+	// left unchanged: this deliberately bypasses the `bd config set issue_prefix`
+	// guard for the import/migration flow and is not a rename.
 	if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
 		if dbPrefix, _ := store.GetConfig(ctx, "issue_prefix"); dbPrefix != yamlPrefix {
 			if setErr := store.SetConfig(ctx, "issue_prefix", yamlPrefix); setErr == nil {
