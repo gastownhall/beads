@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -31,7 +32,12 @@ create, update, show, or close operation).
 
 Updates are applied per issue ID, not atomically across IDs: when some IDs
 fail, the remaining issues are still updated, every failed ID is reported on
-stderr, and the command exits nonzero.`,
+stderr, and the command exits nonzero.
+
+Exit codes: 1 for general failures; 13 when every failure is a stale
+--if-assignee/--if-status guard (the precondition no longer held, nothing was
+written — another actor won the race, so retrying the same guard is
+pointless).`,
 	Args:          cobra.MinimumNArgs(0),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -441,7 +447,11 @@ stderr, and the command exits nonzero.`,
 				}
 				if updateErr != nil {
 					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
-					recordFailure(id, fmt.Sprintf("updating issue: %v", updateErr))
+					failures = append(failures, updateIDFailure{
+						ID:            id,
+						Error:         fmt.Sprintf("updating issue: %v", updateErr),
+						GuardMismatch: isGuardMismatch(updateErr),
+					})
 					closeIfUnmutated(result)
 					continue
 				}
@@ -621,18 +631,39 @@ func warnNotesReplacement(id string) {
 	fmt.Fprintf(os.Stderr, "warning: %s: --notes replaced existing notes (use --append-notes to preserve history)\n", id) //nolint:gosec // G705: stderr, not a browser context
 }
 
+// ExitGuardMismatch is the exit code when a `bd update` run failed solely
+// because --if-assignee/--if-status guards did not match: the precondition no
+// longer held, nothing was written, and retrying is pointless — another actor
+// won the race. Scripts branch on it to tell "racer won, skip gracefully"
+// (13) from infra failure (1, retry/abort). Mixed batches — any failure that
+// is NOT a guard mismatch — exit 1, the conservative "something needs a
+// retry" verdict. The stderr line carries the machine-greppable sentinel
+// text ("assignee mismatch" / "status mismatch") either way.
+const ExitGuardMismatch = 13
+
+// isGuardMismatch reports whether err is a bd-wsqvw conditional-update guard
+// refusal (stale --if-assignee/--if-status), the failure class that exits
+// ExitGuardMismatch instead of 1.
+func isGuardMismatch(err error) bool {
+	return errors.Is(err, storage.ErrAssigneeMismatch) || errors.Is(err, storage.ErrStatusMismatch)
+}
+
 // updateIDFailure records one issue ID that could not be updated and why.
+// GuardMismatch marks a --if-assignee/--if-status refusal so JSON consumers
+// can distinguish it without parsing the error text.
 type updateIDFailure struct {
-	ID    string `json:"id"`
-	Error string `json:"error"`
+	ID            string `json:"id"`
+	Error         string `json:"error"`
+	GuardMismatch bool   `json:"guard_mismatch,omitempty"`
 }
 
 // reportUpdateFailures emits a per-ID failure report on stderr and returns a
-// nonzero exit error. In --json mode the report is a single compact JSON
-// line — the last line on stderr — so callers can parse which IDs failed
-// while stdout keeps the plain array-of-updated-issues success shape. In
-// text mode the individual errors were already printed inline; this adds a
-// summary naming every failed ID.
+// nonzero exit error — ExitGuardMismatch when every failure is a
+// --if-assignee/--if-status guard refusal, 1 otherwise. In --json mode the
+// report is a single compact JSON line — the last line on stderr — so
+// callers can parse which IDs failed while stdout keeps the plain
+// array-of-updated-issues success shape. In text mode the individual errors
+// were already printed inline; this adds a summary naming every failed ID.
 func reportUpdateFailures(failures []updateIDFailure, total int) error {
 	msg := fmt.Sprintf("%d of %d issues failed to update", len(failures), total)
 	if jsonOutput {
@@ -663,6 +694,16 @@ func reportUpdateFailures(failures []updateIDFailure, total int) error {
 		for _, f := range failures {
 			fmt.Fprintf(os.Stderr, "  %s: %s\n", f.ID, f.Error)
 		}
+	}
+	allGuard := len(failures) > 0
+	for _, f := range failures {
+		if !f.GuardMismatch {
+			allGuard = false
+			break
+		}
+	}
+	if allGuard {
+		return &exitError{Code: ExitGuardMismatch}
 	}
 	return &exitError{Code: 1}
 }
@@ -753,8 +794,8 @@ func init() {
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
 	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)")
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
-	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits non-zero. Requires a field update; cannot combine with --claim")
-	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits non-zero. Requires a field update; cannot combine with --claim")
+	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
+	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)")
 	// Time-based scheduling flags (GH#820)
 	// Examples:

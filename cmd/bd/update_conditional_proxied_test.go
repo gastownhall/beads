@@ -3,9 +3,28 @@
 package main
 
 import (
+	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 )
+
+// bdProxiedUpdateFailCode runs a proxied "bd update" expecting failure and
+// returns combined output plus the exit code, for asserting the
+// ExitGuardMismatch contract on the proxied path.
+func bdProxiedUpdateFailCode(t *testing.T, bd, dir string, args ...string) (string, int) {
+	t.Helper()
+	stdout, stderr, err := bdProxiedUpdateRaw(t, bd, dir, args...)
+	if err == nil {
+		t.Fatalf("bd update %s should have failed; got:\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), stdout, stderr)
+	}
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) {
+		t.Fatalf("bd update %s failed without an exit code: %v", strings.Join(args, " "), err)
+	}
+	return stdout + stderr, ee.ExitCode()
+}
 
 // TestProxiedServerUpdateIfGuards proves the bd-wsqvw conditional-update
 // guards hold on the proxied-server path: the guards ride domain.UpdateSpec
@@ -35,8 +54,12 @@ func TestProxiedServerUpdateIfGuards(t *testing.T) {
 			t.Fatalf("assignee = %q after guarded reassign, want mayor", got.Assignee)
 		}
 
-		// The same guard now loses, names the actual holder, and writes nothing.
-		out := bdProxiedUpdateFail(t, bd, p.dir, issue.ID, "--if-assignee", "worker", "--assignee", "thief")
+		// The same guard now loses with the distinct guard-mismatch exit code,
+		// names the actual holder, and writes nothing.
+		out, code := bdProxiedUpdateFailCode(t, bd, p.dir, issue.ID, "--if-assignee", "worker", "--assignee", "thief")
+		if code != ExitGuardMismatch {
+			t.Errorf("stale guard exit code = %d, want %d\n%s", code, ExitGuardMismatch, out)
+		}
 		if !strings.Contains(out, "mayor") {
 			t.Errorf("mismatch error should name the current holder mayor, got:\n%s", out)
 		}
@@ -61,8 +84,11 @@ func TestProxiedServerUpdateIfGuards(t *testing.T) {
 		}
 
 		// Second restore loses: no longer unassigned.
-		out := bdProxiedUpdateFail(t, bd, p.dir, issue.ID,
+		out, code := bdProxiedUpdateFailCode(t, bd, p.dir, issue.ID,
 			"--if-assignee", "", "--if-status", "open", "--assignee", "other", "--status", "in_progress")
+		if code != ExitGuardMismatch {
+			t.Errorf("lost restore exit code = %d, want %d\n%s", code, ExitGuardMismatch, out)
+		}
 		if !strings.Contains(out, "owner") {
 			t.Errorf("mismatch error should name the holder owner, got:\n%s", out)
 		}

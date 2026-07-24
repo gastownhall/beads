@@ -111,7 +111,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still equals the expected value — one atomic transaction, nothing written on
   a mismatch, and a loud non-zero exit naming actual vs expected (typed as
   `storage.ErrAssigneeMismatch` / new `ErrStatusMismatch`). `--if-assignee ''`
-  means "expected unassigned". This closes the two coordination transitions no
+  means "expected unassigned". A guard mismatch is machine-distinguishable
+  from infra failure: exit code **13** when every failure in the run was a
+  stale guard (a racer won — skip gracefully) vs 1 for anything else
+  (retry/abort); in `--json` mode each entry in the failure report's `failed`
+  array additionally carries `"guard_mismatch": true`, and the stderr text
+  always contains the sentinel token `assignee mismatch` / `status mismatch`. This closes the two coordination transitions no
   existing verb could express: reassign X→Y only while X still holds it
   (`bd update <id> --if-assignee worker -a mayor`), and claim-on-behalf with a
   status guard (`bd update <id> --if-assignee '' --if-status open -a owner -s
