@@ -176,8 +176,11 @@ Examples:
 			return HandleErrorRespectJSON("commit message is required (use -m, --message, or --stdin)")
 		}
 
+		// GH#4934: operator-initiated vc commit must include config (same trust
+		// level as bd dolt commit). Plain Commit() excludes config and can report
+		// success while leaving a config-only working set dirty forever.
 		commandDidExplicitDoltCommit = true
-		if err := store.Commit(ctx, vcCommitMessage); err != nil {
+		if err := store.CommitWithConfig(ctx, vcCommitMessage); err != nil {
 			if isDoltNothingToCommit(err) {
 				if jsonOutput {
 					return outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})

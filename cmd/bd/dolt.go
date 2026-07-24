@@ -523,16 +523,27 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 		if st == nil {
 			return HandleError("no store available")
 		}
+		// GH#4934: explicit operator commit must include the config table.
+		// Plain Commit() excludes config (GH#2455), so a config-only dirty
+		// working set printed "Committed." while committing nothing.
 		msg, _ := cmd.Flags().GetString("message")
 		if msg == "" {
-			msg = fmt.Sprintf("bd: dolt commit (auto-commit) by %s", getActor())
-		}
-		if err := st.Commit(ctx, msg); err != nil {
-			if isDoltNothingToCommit(err) {
+			committed, err := st.CommitPending(ctx, getActor())
+			if err != nil {
+				return HandleError("%v", err)
+			}
+			if !committed {
 				fmt.Println("Nothing to commit.")
 				return nil
 			}
-			return HandleError("%v", err)
+		} else {
+			if err := st.CommitWithConfig(ctx, msg); err != nil {
+				if isDoltNothingToCommit(err) {
+					fmt.Println("Nothing to commit.")
+					return nil
+				}
+				return HandleError("%v", err)
+			}
 		}
 		commandDidExplicitDoltCommit = true
 		fmt.Println("Committed.")

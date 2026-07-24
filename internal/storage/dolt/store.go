@@ -2305,22 +2305,17 @@ func (s *DoltStore) assertDirtyConfigUserKVOnly(ctx context.Context, conn *sql.C
 
 // CommitWithConfig creates a Dolt commit that includes the config table.
 // Use this instead of Commit when the caller intentionally modified config
-// (e.g., CommitPending after 'bd config set', 'bd init', or 'bd rename-prefix').
-// GH#2455: Commit() excludes config to prevent sweeping up stale changes.
+// (e.g., CommitPending after 'bd config set', 'bd init', 'bd rename-prefix',
+// or the explicit operator path 'bd dolt commit' / 'bd vc commit').
+//
+// GH#2455: Commit() excludes config to prevent sweeping up stale changes into
+// unrelated auto-commits. Explicit operator commits use this method instead.
+//
+// GH#4934: Implemented via commitWorkingSet(configIncludeAll) with explicit
+// DOLT_ADD per dirty table (including config). DOLT_COMMIT('-Am') was observed
+// not to stage config reliably under the server-mode stored-procedure path.
 func (s *DoltStore) CommitWithConfig(ctx context.Context, message string) error {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to acquire connection: %w", err)
-	}
-	defer conn.Close()
-
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
-		if isDoltNothingToCommit(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to commit: %w", err)
-	}
-	return nil
+	return s.commitWorkingSet(ctx, message, configIncludeAll)
 }
 
 // doltAddAndCommit stages the specified tables and commits on a pinned
