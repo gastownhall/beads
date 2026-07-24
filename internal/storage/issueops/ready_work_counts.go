@@ -75,20 +75,32 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 }
 
 // finishReadyWorkWithCounts is the terminal hook every
-// GetReadyWorkWithCountsInTx exit path routes through: it enforces the
-// defensive MaxRows cap (be-x42v) on the row count actually assembled —
-// mirroring finishSearchIssuesWithCounts in search_counts.go — and only
-// then applies the caller-facing Limit trim. The cap must be checked before
-// the Limit trim: buildReadyWorkPredicates already sizes each table's SQL
-// LIMIT via EffectiveSearchLimit (cap+1 when Limit is absent or looser than
-// the cap), specifically so overage is still visible here before Limit
-// silently truncates it away.
+// GetReadyWorkWithCountsInTx exit path routes through: it applies the
+// caller-facing Limit trim and then enforces the defensive MaxRows cap
+// (be-x42v) on the delivered count — mirroring GetReadyWorkInTx's
+// non-counts path, where mergeReadyWisps already trims the merged
+// issues+wisps set to Limit before EnforceMaxRowsCap runs on it.
+//
+// Trim-before-cap matters specifically for the merged (issues+wisps) case:
+// each table's query is independently bounded by
+// EffectiveSearchLimit(filter.Limit, filter.MaxRows), so with
+// --include-ephemeral the merged pre-trim slice can hold up to ~2x that
+// per-table bound — e.g. Limit=2, MaxRows=3, two rows ready in each table
+// merges to 4, which trips MaxRows even though the actually-delivered page
+// (trimmed to Limit=2) is well within the cap. Checking the cap against the
+// delivered/post-trim count instead avoids that false positive.
+//
+// This does not weaken cap enforcement for the single-table (no wisps, or
+// wisps empty/unmerged) paths: EffectiveSearchLimit already bounds a lone
+// query's LIMIT to at most max(Limit, MaxRows+1), so a single source's
+// result never exceeds Limit when Limit>0 and the trim is a no-op there —
+// only the two-source merge can produce more rows than Limit pre-trim.
 func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
+	if filter.Limit > 0 && len(items) > filter.Limit {
+		items = items[:filter.Limit]
+	}
 	if err := EnforceMaxRowsCap(len(items), filter.MaxRows, filter.MaxRowsSource); err != nil {
 		return nil, err
-	}
-	if filter.Limit > 0 && len(items) > filter.Limit {
-		return items[:filter.Limit], nil
 	}
 	return items, nil
 }

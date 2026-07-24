@@ -43,17 +43,32 @@ func withStorage(ctx context.Context, store storage.DoltStorage, dbPath string, 
 // results than the limit" (GH#3212) by comparing len(results) against the
 // original limit.
 //
-// When a MaxRows cap (be-x42v) is active and no looser than Limit, this
-// bump is skipped: EffectiveSearchLimit already over-fetches to cap+1 in
-// that case for the real overage check, and bumping Limit past MaxRows too
-// would make the delivered set — which can never exceed min(Limit, MaxRows)
-// == Limit once every caller trims back to the original limit — look like
-// it exceeded the cap merely because this purely cosmetic truncation probe
-// asked for one more row than was ever going to be returned. Concretely:
-// `--limit N --max-rows N` must truncate (existing >N-matches semantics),
-// not error, since N rows is never a cap violation of a cap of N.
+// `--limit N --max-rows N` (equal) needs special handling so this bump
+// doesn't collide with the MaxRows cap check: EffectiveSearchLimit treats
+// Limit==MaxRows as "no overage sniff" (returns Limit verbatim, no +1 — see
+// EffectiveSearchLimit's doc and the WithLimit_LimitAtCap_NoError storage
+// test), but bumping Limit to N+1 alone flips that to Limit>MaxRows, which
+// *does* sniff for overage — so the probe row itself would trip
+// EnforceMaxRowsCap(N+1, N, ...) even though the delivered set is always
+// trimmed back to N. Bumping MaxRows by one in lockstep, only in this exact
+// N==M case, keeps the probe row inside the (temporarily N+1) cap so
+// EnforceMaxRowsCap never fires on it while still fetching N+1 rows for the
+// truncation check below. This can't false-negative a real violation: the
+// query's own LIMIT is capped at N+1 either way, so "more than N+1 matches
+// exist" was already undetectable at Limit==MaxRows before this bump ever
+// existed (same "no overage detection above the equal cap" contract
+// EffectiveSearchLimit documents for the unbumped case).
+//
+// This does not change the Limit>MaxRows (tighter-cap) or Limit<MaxRows
+// cases: EffectiveSearchLimit's branch selection there is unaffected by a
+// one-row bump to Limit, and MaxRows is left untouched, so a genuine
+// tighter-cap violation still fires with the correct (unbumped) Cap value
+// in the error message.
 func withFetchOneExtra(filter types.IssueFilter) types.IssueFilter {
-	if filter.Limit > 0 && !(filter.MaxRows > 0 && filter.Limit >= filter.MaxRows) {
+	if filter.Limit > 0 {
+		if filter.MaxRows > 0 && filter.Limit == filter.MaxRows {
+			filter.MaxRows++
+		}
 		filter.Limit++
 	}
 	return filter

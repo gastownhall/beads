@@ -22,6 +22,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // bdRunRaw runs bd with the given args and env extras (appended to bdEnv(dir)).
@@ -162,6 +164,35 @@ func TestEmbeddedMaxRowsNonListPaths(t *testing.T) {
 		}
 		if !strings.Contains(out, "--max-rows=3") {
 			t.Errorf("stderr missing source --max-rows=3:\n%s", out)
+		}
+	})
+
+	// be-x42v.4 round-3 follow-up: GetReadyWorkWithCountsInTx (the `--json`
+	// path) independently bounds each of the issues and wisps queries by
+	// EffectiveSearchLimit(Limit, MaxRows), so with --include-ephemeral the
+	// PRE-TRIM merge of two tables can hold up to ~2x that per-table bound
+	// even though the caller's own --limit already keeps the DELIVERED page
+	// well within the cap. limit=2, cap=3, 2 ready rows in each table: each
+	// table's query returns 2 (2<=limit, no overage sniff at the per-table
+	// level — EffectiveSearchLimit(2,3)=2), the pre-trim merge is 4>cap=3,
+	// but the page actually handed back to the caller is trimmed to 2<=cap.
+	// Must exit 0, not trip the cap on the untrimmed merge.
+	t.Run("ReadyIncludeEphemeralMaxRowsJSON_MergedUnderLimit_NoError", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "mrrm")
+		for i := 0; i < 2; i++ {
+			bdCreate(t, bd, dir, fmt.Sprintf("Plain ready %d", i), "--type", "task")
+		}
+		for i := 0; i < 2; i++ {
+			bdCreate(t, bd, dir, fmt.Sprintf("Ephemeral ready %d", i), "--type", "task", "--ephemeral")
+		}
+
+		out, code := bdRunRaw(t, bd, dir, nil, "ready", "--json", "--include-ephemeral",
+			"--limit", "2", "--max-rows", "3")
+		if code != 0 {
+			t.Fatalf("expected exit 0 (delivered page under cap despite pre-trim merge overage), got %d\n%s", code, out)
+		}
+		if strings.Contains(out, "too many rows") {
+			t.Errorf("delivered-page-under-cap should not emit cap error:\n%s", out)
 		}
 	})
 
@@ -522,14 +553,30 @@ func TestEmbeddedMaxRowsList(t *testing.T) {
 		}
 	})
 
-	// be-x42v.4 follow-up (review MUST-FIX 4): --limit N --max-rows N with
-	// more than N matches must truncate to N and exit 0 (the standard
-	// >N-matches truncation semantics), not error. Before the fix,
-	// withFetchOneExtra unconditionally bumped the storage Limit to N+1
-	// before EffectiveSearchLimit saw it, so N==maxRows crossed the
-	// `limit > maxRows` branch and EnforceMaxRowsCap fired on the N+1
-	// probe row alone — even though the delivered set is always trimmed
-	// back to exactly N.
+	// be-x42v.4 follow-up (review MUST-FIX 4, revised round-3): --limit N
+	// --max-rows N with more than N matches must truncate to N and exit 0
+	// (the standard >N-matches truncation semantics), not error.
+	//
+	// Round-2 fix (regressed, since replaced): unconditionally skipped the
+	// withFetchOneExtra probe-row bump when Limit>=MaxRows. That avoided
+	// the false cap error but also stopped fetching the extra row entirely,
+	// so len(results) could never exceed effectiveLimit and the GH#3212
+	// truncation notice silently stopped firing for this case — a partial
+	// result started presenting as complete.
+	//
+	// Round-3 fix: still fetch the probe row (Limit bumps to N+1 as
+	// normal), but when Limit==MaxRows exactly, bump MaxRows to N+1 too, in
+	// lockstep, so EnforceMaxRowsCap's comparison excludes the probe row
+	// from the cap check while the CLI's own len(results)>effectiveLimit
+	// truncation detection still sees it. See withFetchOneExtra's doc
+	// comment in list.go for why this can't false-negative a real
+	// violation. Covered directly (bump values, not exit behavior) by
+	// TestWithFetchOneExtra_LimitEqualsCap_BumpsBothForTruncationProbe
+	// below, since printTruncationHint's text is gated on
+	// ui.IsStderrTerminal() and unconditionally suppressed for this
+	// subprocess harness's piped stderr (see list_embedded_test.go's
+	// limit_truncation_hint subtest) — these end-to-end subtests can only
+	// assert the absence of the false cap error and the delivered count.
 	t.Run("LimitEqualsCap_TruncatesNotErrors", func(t *testing.T) {
 		out, code := bdRunRaw(t, bd, dir, nil, "list",
 			"--limit", "5", "--max-rows", "5")
@@ -574,4 +621,69 @@ func TestEmbeddedMaxRowsList(t *testing.T) {
 			t.Errorf("expected source `--max-rows=5` in stderr:\n%s", out)
 		}
 	})
+}
+
+// TestWithFetchOneExtra_LimitEqualsCap_BumpsBothForTruncationProbe verifies
+// the exact bump mechanism withFetchOneExtra uses to reconcile the
+// >N-matches truncation probe (GH#3212) with a MaxRows cap equal to the
+// user's --limit (be-x42v.4 round-3 follow-up).
+//
+// The end-to-end LimitEqualsCap_TruncatesNotErrors subprocess test in
+// TestEmbeddedMaxRowsList can only assert the *absence* of the false cap
+// error and the trimmed row count — it can't observe the truncation
+// *notice* text, which printTruncationHint gates on ui.IsStderrTerminal()
+// and is unconditionally suppressed for a subprocess's piped stderr (see
+// list_embedded_test.go's limit_truncation_hint subtest, which documents
+// the same TTY constraint). This unit test instead asserts the underlying
+// signal directly: with Limit==MaxRows, both must bump by one so the query
+// still over-fetches by one row (restoring len(results) > effectiveLimit
+// detection) while EnforceMaxRowsCap doesn't trip on that extra row.
+func TestWithFetchOneExtra_LimitEqualsCap_BumpsBothForTruncationProbe(t *testing.T) {
+	got := withFetchOneExtra(types.IssueFilter{Limit: 5, MaxRows: 5, MaxRowsSource: "--max-rows"})
+	if got.Limit != 6 {
+		t.Errorf("Limit == MaxRows: Limit = %d, want 6 (bumped so the query still fetches the truncation-detection probe row)", got.Limit)
+	}
+	if got.MaxRows != 6 {
+		t.Errorf("Limit == MaxRows: MaxRows = %d, want 6 (bumped in lockstep so the probe row alone doesn't trip EnforceMaxRowsCap)", got.MaxRows)
+	}
+	if got.MaxRowsSource != "--max-rows" {
+		t.Errorf("MaxRowsSource must be preserved unchanged, got %q", got.MaxRowsSource)
+	}
+}
+
+// TestWithFetchOneExtra_LimitOverCap_OnlyBumpsLimit covers the tighter-cap
+// case (--limit 100 --max-rows 5, LimitSet_CapTighter): MaxRows must NOT
+// bump, or a genuine cap violation would report the wrong Cap value (N+1
+// instead of the user's true --max-rows=N) in the error message.
+func TestWithFetchOneExtra_LimitOverCap_OnlyBumpsLimit(t *testing.T) {
+	got := withFetchOneExtra(types.IssueFilter{Limit: 100, MaxRows: 5})
+	if got.Limit != 101 {
+		t.Errorf("Limit = %d, want 101", got.Limit)
+	}
+	if got.MaxRows != 5 {
+		t.Errorf("MaxRows must stay unbumped so a real cap violation reports the true cap; got %d, want 5", got.MaxRows)
+	}
+}
+
+// TestWithFetchOneExtra_LimitUnderCap_OnlyBumpsLimit covers the
+// looser-cap case (--limit 5 --max-rows 100, LimitSet_CapLooser): the
+// probe-row bump alone never crosses EffectiveSearchLimit's `limit >
+// maxRows` branch here, so no MaxRows adjustment is needed.
+func TestWithFetchOneExtra_LimitUnderCap_OnlyBumpsLimit(t *testing.T) {
+	got := withFetchOneExtra(types.IssueFilter{Limit: 5, MaxRows: 100})
+	if got.Limit != 6 {
+		t.Errorf("Limit = %d, want 6", got.Limit)
+	}
+	if got.MaxRows != 100 {
+		t.Errorf("MaxRows must stay unbumped, got %d, want 100", got.MaxRows)
+	}
+}
+
+// TestWithFetchOneExtra_NoLimit_Unaffected covers the unlimited case
+// (Limit == 0): withFetchOneExtra is a no-op regardless of MaxRows.
+func TestWithFetchOneExtra_NoLimit_Unaffected(t *testing.T) {
+	got := withFetchOneExtra(types.IssueFilter{Limit: 0, MaxRows: 5})
+	if got.Limit != 0 || got.MaxRows != 5 {
+		t.Errorf("unlimited Limit must pass through unchanged, got Limit=%d MaxRows=%d", got.Limit, got.MaxRows)
+	}
 }

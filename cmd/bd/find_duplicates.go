@@ -121,8 +121,8 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	}
 
 	if usesProxiedServer() {
-		if filter.MaxRows > 0 {
-			return HandleErrorRespectJSON("--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode")
+		if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
+			return err
 		}
 		return runFindDuplicatesProxiedServer(rootCtx, filter, status, method, threshold, limit, model)
 	}

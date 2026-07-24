@@ -46,9 +46,18 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 		}()
 
+		claimReady, _ := cmd.Flags().GetBool("claim")
+
 		if usesProxiedServer() {
-			if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
-				return err
+			// --claim consumes exactly one row, same reasoning as the
+			// direct-path fix in issueops/claim.go: a rig-wide cap sized
+			// for bulk list/ready reads must not block a single-row claim.
+			// Only the bulk (non-claim) proxied ready listing rejects an
+			// active cap.
+			if !claimReady {
+				if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
+					return err
+				}
 			}
 			return runReadyProxiedServer(cmd, rootCtx)
 		}
@@ -56,8 +65,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if offset, _ := cmd.Flags().GetInt("offset"); offset > 0 {
 			return HandleErrorRespectJSON("--offset is only supported under --proxied-server")
 		}
-
-		claimReady, _ := cmd.Flags().GetBool("claim")
 
 		gated, _ := cmd.Flags().GetBool("gated")
 		if gated {

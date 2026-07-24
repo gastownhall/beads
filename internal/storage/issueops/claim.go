@@ -203,13 +203,20 @@ func ClaimReadyIssueInTx(
 	claimFilter.Status = types.StatusOpen
 	claimFilter.Unassigned = true
 	claimFilter.Assignee = nil
-	// Claim only ever consumes the first ready issue below, so a rig-wide
-	// BEADS_MAX_ROWS/--max-rows cap (sized for bulk list/ready reads) must
-	// not fire here — that would hard-fail a single-row claim just because
-	// the ready pool is large. Bound the internal scan by the cap instead
-	// of enforcing it: reuse MaxRows as an unexported Limit, then clear the
-	// cap fields so GetReadyWorkInTx never returns ErrTooManyRows.
-	claimFilter.Limit = filter.MaxRows
+	// Claim only ever delivers the one issue it successfully claims below —
+	// the breaker's job is to bound delivered payloads, and a claim's
+	// payload is always exactly one row regardless of how large the ready
+	// pool it scanned was. So a rig-wide BEADS_MAX_ROWS/--max-rows cap
+	// (sized for bulk list/ready reads) must not fire here, and the scan
+	// itself must stay unbounded (Limit=0): the loop below walks
+	// readyIssues in order and continues past any that are transiently
+	// unclaimable (already claimed by a racing agent, etc), so bounding
+	// the scan to Limit=MaxRows (e.g. BEADS_MAX_ROWS=1 → scan only the
+	// single top-of-queue row) would make claim spuriously return "nothing
+	// to claim" whenever that narrow window is unclaimable, even with
+	// plenty of other ready work available. Clear the cap fields so
+	// GetReadyWorkInTx never returns ErrTooManyRows either.
+	claimFilter.Limit = 0
 	claimFilter.MaxRows = 0
 	claimFilter.MaxRowsSource = ""
 
