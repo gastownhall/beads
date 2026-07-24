@@ -669,20 +669,6 @@ func filterStaleImportIssues(ctx context.Context, store storage.DoltStorage, iss
 		seen[issue.ID] = struct{}{}
 		ids = append(ids, issue.ID)
 	}
-	if len(ids) == 0 {
-		return issues, nil, plan, nil
-	}
-
-	localIssues, err := store.GetIssuesByIDs(ctx, ids)
-	if err != nil {
-		return nil, nil, plan, fmt.Errorf("check existing issues before import: %w", err)
-	}
-	localByID := make(map[string]*types.Issue, len(localIssues))
-	for _, issue := range localIssues {
-		if issue != nil && issue.ID != "" && !issue.UpdatedAt.IsZero() {
-			localByID[issue.ID] = issue
-		}
-	}
 
 	newIDsSeen := make(map[string]struct{})
 	addNew := func(id string) {
@@ -697,6 +683,29 @@ func filterStaleImportIssues(ctx context.Context, store storage.DoltStorage, iss
 		}
 		newIDsSeen[id] = struct{}{}
 		plan.NewIDs = append(plan.NewIDs, id)
+	}
+
+	if len(ids) == 0 {
+		// There is no ID to look up, but title-only rows still create on
+		// execution. Classify each non-nil row before the short-circuit so a
+		// dry run reports it as created rather than unchanged.
+		for _, issue := range issues {
+			if issue != nil {
+				addNew(issue.ID)
+			}
+		}
+		return issues, nil, plan, nil
+	}
+
+	localIssues, err := store.GetIssuesByIDs(ctx, ids)
+	if err != nil {
+		return nil, nil, plan, fmt.Errorf("check existing issues before import: %w", err)
+	}
+	localByID := make(map[string]*types.Issue, len(localIssues))
+	for _, issue := range localIssues {
+		if issue != nil && issue.ID != "" && !issue.UpdatedAt.IsZero() {
+			localByID[issue.ID] = issue
+		}
 	}
 
 	if len(localByID) == 0 {

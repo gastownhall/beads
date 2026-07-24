@@ -325,6 +325,28 @@ func TestClassifyDryRunImport(t *testing.T) {
 		}
 	})
 
+	// A batch with no IDs takes the filter's title-only short-circuit, which
+	// must still classify every row as created for dry-run reporting.
+	t.Run("all_title_only_rows_report_created", func(t *testing.T) {
+		incoming := []*types.Issue{
+			{Title: "first title-only row"},
+			{Title: "second title-only row"},
+		}
+		result, err := classifyDryRunImport(context.Background(), &fakeImportIssueLookupStore{}, incoming, false)
+		if err != nil {
+			t.Fatalf("classifyDryRunImport: %v", err)
+		}
+		if result.Created != len(incoming) {
+			t.Fatalf("Created = %d, want %d", result.Created, len(incoming))
+		}
+		if result.Updated != 0 || result.Unchanged != 0 {
+			t.Fatalf("Updated = %d, Unchanged = %d, want both 0", result.Updated, result.Unchanged)
+		}
+		if sum := result.Created + result.Updated + result.Unchanged; sum != len(incoming) {
+			t.Fatalf("Created + Updated + Unchanged = %d, want %d", sum, len(incoming))
+		}
+	})
+
 	// bd-hj85c cleanup: a tie-kept row (same-second timestamp, differing
 	// content) is not rewritten by the upsert, so it belongs in Unchanged,
 	// not Updated — it's still surfaced separately via TieKeptLocalIDs, and
