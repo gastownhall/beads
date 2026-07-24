@@ -79,7 +79,20 @@ func saveBackupState(dir string, state *backupState) error {
 	return atomicWriteFile(filepath.Join(dir, "backup_state.json"), data)
 }
 
-// atomicWriteFile writes data to a temp file and renames it into place (crash-safe).
+// atomicWriteFile writes data to a same-directory temp file, fsyncs the
+// temp file's own contents, then renames it into place. This avoids a
+// truncated/partial file at path if the process crashes mid-write.
+//
+// Two caveats this does NOT cover, narrowing the "crash-safe" claim rather
+// than the implementation (existing callers' behavior is unchanged here):
+//   - Only the temp file's contents are fsynced, not the parent directory
+//     entry; a crash between the rename and a subsequent directory fsync
+//     can still lose the rename itself on some filesystems.
+//   - os.Rename's atomic-replace guarantee is a POSIX/Unix property; it is
+//     not guaranteed on Windows. It also does not follow a symlink at
+//     path — it replaces whatever is there, symlink or not — so a caller
+//     that must preserve a symlink's target should resolve path with
+//     filepath.EvalSymlinks first (see cmd/bd/proxied_server.go).
 func atomicWriteFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".backup-tmp-*")

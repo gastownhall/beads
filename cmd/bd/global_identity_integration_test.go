@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -103,8 +104,42 @@ func TestGlobalDBIdentityCheck(t *testing.T) {
 		t.Errorf("metadata.json global_project_id = %q, want %q",
 			cfg.GlobalProjectID, doltserver.GlobalProjectID)
 	}
+	// bd init (non-no-db) stores the prefix in the DB, not config.yaml
+	// (the generated file only carries a commented `# issue-prefix: ""`).
+	// Write the project prefix into config.yaml explicitly so that the
+	// create/show steps below exercise the YAML-first prefix-selection
+	// path exactly as bd-4646 regressed it: unpatched selectCreateIDPrefix
+	// would then incorrectly prefer this "proj0" YAML prefix over the
+	// global store's prefix even in --global mode, and the ID validation
+	// below would fail. See cmd/bd/init_embedded_test.go for the same
+	// pattern.
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue-prefix: proj0\n"), 0o644); err != nil {
+		t.Fatalf("write config.yaml issue-prefix: %v", err)
+	}
+	if yamlPrefix := config.GetStringFromDir(beadsDir, "issue-prefix"); yamlPrefix != "proj0" {
+		t.Fatalf("project YAML issue-prefix = %q, want %q", yamlPrefix, "proj0")
+	}
 
-	out, err := ssExec(ctx, bdBinary, projectDir, env, "list", "--global")
+	explicitGlobalID := doltserver.GlobalIssuePrefix + "-explicit"
+	out, err := ssExec(ctx, bdBinary, projectDir, env,
+		"create", "Global explicit ID", "--global", "--id", explicitGlobalID, "--silent")
+	if err != nil {
+		t.Fatalf("bd create --global --id %s failed: %v\noutput:\n%s", explicitGlobalID, err, out)
+	}
+	if got := strings.TrimSpace(out); got != explicitGlobalID {
+		t.Fatalf("bd create --global --id returned %q, want %q", got, explicitGlobalID)
+	}
+
+	out, err = ssExec(ctx, bdBinary, projectDir, env, "show", "--global", explicitGlobalID)
+	if err != nil {
+		t.Fatalf("bd show --global %s failed: %v\noutput:\n%s", explicitGlobalID, err, out)
+	}
+	if !strings.Contains(out, explicitGlobalID) {
+		t.Fatalf("bd show --global did not return %s from %s:\n%s",
+			explicitGlobalID, doltserver.GlobalDatabaseName, out)
+	}
+
+	out, err = ssExec(ctx, bdBinary, projectDir, env, "list", "--global")
 	if err != nil {
 		t.Fatalf("bd list --global failed: %v\noutput:\n%s", err, out)
 	}

@@ -227,6 +227,11 @@ func TestScanForArtifacts_ValidRedirect(t *testing.T) {
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	// A valid redirect target must have a metadata.json or database
+	// (gastownhall/beads#4692 guard).
+	if err := os.WriteFile(filepath.Join(targetDir, "metadata.json"), []byte(`{"database":"beads.db"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create redirect pointing to valid target
 	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte(targetDir), 0644); err != nil {
@@ -240,6 +245,41 @@ func TestScanForArtifacts_ValidRedirect(t *testing.T) {
 
 	if len(report.RedirectIssues) != 0 {
 		t.Errorf("expected 0 redirect issues for valid target, got %d", len(report.RedirectIssues))
+	}
+}
+
+// TestScanForArtifacts_RedirectTargetHasNoDatabase is a regression test for
+// gastownhall/beads#4692: a redirect target directory that exists but has no
+// metadata.json and no recognizable database is flagged as an actionable
+// warning (not SafeDelete cruft), matching FollowRedirect's own target-
+// validity guard (internal/beads).
+func TestScanForArtifacts_RedirectTargetHasNoDatabase(t *testing.T) {
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	targetDir := filepath.Join(dir, "target-beads")
+
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// targetDir exists but is empty: no metadata.json, no database.
+
+	if err := os.WriteFile(filepath.Join(beadsDir, "redirect"), []byte(targetDir), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := ScanForArtifacts(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(report.RedirectIssues) != 1 {
+		t.Fatalf("expected 1 redirect issue (target has no database), got %d", len(report.RedirectIssues))
+	}
+	if report.RedirectIssues[0].SafeDelete {
+		t.Errorf("expected SafeDelete=false: an invalid-target redirect is an actionable warning, not cruft")
 	}
 }
 

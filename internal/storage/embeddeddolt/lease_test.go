@@ -58,7 +58,7 @@ func TestLeaseLifecycleEmbedded(t *testing.T) {
 
 	// Let the lease expire, then reclaim it.
 	time.Sleep(2500 * time.Millisecond)
-	reclaimed, err := te.store.ReclaimExpiredLeases(ctx, 0, "reaper")
+	reclaimed, err := te.store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, "reaper")
 	if err != nil {
 		t.Fatalf("ReclaimExpiredLeases: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestReclaimExpiredLeaseSurvivesRestartEmbedded(t *testing.T) {
 		time.Sleep(wait)
 	}
 
-	reclaimed, err := store2.ReclaimExpiredLeases(ctx, 0, "reaper")
+	reclaimed, err := store2.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, "reaper")
 	if err != nil {
 		t.Fatalf("ReclaimExpiredLeases after restart: %v", err)
 	}

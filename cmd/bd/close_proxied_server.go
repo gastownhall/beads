@@ -202,15 +202,15 @@ func gatherCloseProxiedInput(cmd *cobra.Command) closeProxiedInput {
 	return in
 }
 
-func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, in closeProxiedInput, errors *[]string) (closeProxiedOutcome, bool) {
+func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, in closeProxiedInput, errs *[]string) (closeProxiedOutcome, bool) {
 	current, isWisp := proxiedResolveIssueOrWisp(ctx, uw, id)
 	if current == nil {
-		*errors = append(*errors, fmt.Sprintf("Issue %s not found", id))
+		*errs = append(*errs, fmt.Sprintf("Issue %s not found", id))
 		return closeProxiedOutcome{}, false
 	}
 
 	if err := validateIssueClosable(id, current, actor, in.force); err != nil {
-		*errors = append(*errors, err.Error())
+		*errs = append(*errs, err.Error())
 		return closeProxiedOutcome{}, false
 	}
 
@@ -223,33 +223,14 @@ func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, 
 			openChildren, err = uw.IssueUseCase().CountOpenChildren(ctx, id)
 		}
 		if err == nil && openChildren > 0 {
-			*errors = append(*errors, fmt.Sprintf("cannot close epic %s: %d open child issue(s); close children first or use --force to override", id, openChildren))
+			*errs = append(*errs, fmt.Sprintf("cannot close epic %s: %d open child issue(s); close children first or use --force to override", id, openChildren))
 			return closeProxiedOutcome{}, false
 		}
 	}
 
 	if !in.force {
 		if err := checkGateSatisfaction(current); err != nil {
-			*errors = append(*errors, fmt.Sprintf("cannot close %s: %s", id, err))
-			return closeProxiedOutcome{}, false
-		}
-	}
-
-	if !in.force {
-		var blocked bool
-		var blockers []string
-		var err error
-		if isWisp {
-			blocked, blockers, err = uw.DependencyUseCase().IsWispBlocked(ctx, id)
-		} else {
-			blocked, blockers, err = uw.DependencyUseCase().IsBlocked(ctx, id)
-		}
-		if err != nil {
-			*errors = append(*errors, fmt.Sprintf("Error checking blockers for %s: %v", id, err))
-			return closeProxiedOutcome{}, false
-		}
-		if blocked && len(blockers) > 0 {
-			*errors = append(*errors, fmt.Sprintf("cannot close %s: blocked by open issues %v (use --force to override)", id, blockers))
+			*errs = append(*errs, fmt.Sprintf("cannot close %s: %s", id, err))
 			return closeProxiedOutcome{}, false
 		}
 	}
@@ -259,13 +240,20 @@ func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, 
 		res domain.CloseIssueResult
 		err error
 	)
+	// The is_blocked guard lives in the library's checked close, so the embedded
+	// and proxied paths converge on storage.ErrCloseBlocked and its message. The
+	// guard and the close share this unit-of-work transaction.
 	if isWisp {
-		res, err = uw.IssueUseCase().CloseWisp(ctx, id, params, actor)
+		res, err = uw.IssueUseCase().CloseWispChecked(ctx, id, params, actor, in.force)
 	} else {
-		res, err = uw.IssueUseCase().CloseIssue(ctx, id, params, actor)
+		res, err = uw.IssueUseCase().CloseIssueChecked(ctx, id, params, actor, in.force)
 	}
 	if err != nil {
-		*errors = append(*errors, fmt.Sprintf("Error closing %s: %v", id, err))
+		if errors.Is(err, storage.ErrCloseBlocked) {
+			*errs = append(*errs, fmt.Sprintf("%v (use --force to override)", err))
+		} else {
+			*errs = append(*errs, fmt.Sprintf("Error closing %s: %v", id, err))
+		}
 		return closeProxiedOutcome{}, false
 	}
 

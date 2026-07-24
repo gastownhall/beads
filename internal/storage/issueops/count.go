@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -14,7 +13,7 @@ import (
 // only the count: ephemeral-only filters route to the wisps table,
 // SkipWisps=true counts the durable issues table only, and otherwise the
 // wisps count is merged in (GH#4387).
-func CountIssuesInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter) (int, error) {
+func CountIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) (int, error) {
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		wispCount, err := countTableInTx(ctx, tx, query, filter, WispsFilterTables)
 		if err != nil && !isTableNotExistError(err) {
@@ -67,7 +66,7 @@ func CountIssuesInTx(ctx context.Context, tx *sql.Tx, query string, filter types
 // Mirrors CountIssuesInTx's wisps-merge semantics: ephemeral-only filters
 // route to the wisps table, SkipWisps=true counts the durable issues table
 // only, and otherwise the wisps tier is merged into each group (GH#4387).
-func CountIssuesByGroupInTx(ctx context.Context, tx *sql.Tx, filter types.IssueFilter, groupBy string) (map[string]int, error) {
+func CountIssuesByGroupInTx(ctx context.Context, tx DBTX, filter types.IssueFilter, groupBy string) (map[string]int, error) {
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		wispCounts, err := countGroupForTablesInTx(ctx, tx, filter, groupBy, WispsFilterTables)
 		if err != nil && !isTableNotExistError(err) {
@@ -117,7 +116,7 @@ func CountIssuesByGroupInTx(ctx context.Context, tx *sql.Tx, filter types.IssueF
 
 // countGroupForTablesInTx runs a grouped count against one table set
 // (issues or wisps) and normalizes keys to bd count's display format.
-func countGroupForTablesInTx(ctx context.Context, tx *sql.Tx, filter types.IssueFilter, groupBy string, tables FilterTables) (map[string]int, error) {
+func countGroupForTablesInTx(ctx context.Context, tx DBTX, filter types.IssueFilter, groupBy string, tables FilterTables) (map[string]int, error) {
 	if groupBy == "label" {
 		return countByLabelInTx(ctx, tx, filter, tables)
 	}
@@ -156,7 +155,7 @@ func countGroupForTablesInTx(ctx context.Context, tx *sql.Tx, filter types.Issue
 }
 
 // countTableInTx runs SELECT COUNT(*) FROM <table> WHERE <query+filter>.
-func countTableInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter, tables FilterTables) (int, error) {
+func countTableInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter, tables FilterTables) (int, error) {
 	clauses, args, err := BuildIssueFilterClauses(query, filter, tables)
 	if err != nil {
 		return 0, err
@@ -176,7 +175,7 @@ func countTableInTx(ctx context.Context, tx *sql.Tx, query string, filter types.
 
 // countByColumnInTx runs SELECT <col>, COUNT(*) GROUP BY <col> against a table.
 // Returns raw column values as keys (callers normalize for display).
-func countByColumnInTx(ctx context.Context, tx *sql.Tx, filter types.IssueFilter, col string, tables FilterTables) (map[string]int, error) {
+func countByColumnInTx(ctx context.Context, tx DBTX, filter types.IssueFilter, col string, tables FilterTables) (map[string]int, error) {
 	clauses, args, err := BuildIssueFilterClauses("", filter, tables)
 	if err != nil {
 		return nil, err
@@ -209,7 +208,7 @@ func countByColumnInTx(ctx context.Context, tx *sql.Tx, filter types.IssueFilter
 // countByLabelInTx counts issues grouped by label using a subquery to avoid
 // Dolt's joinIter panic (join_iters.go:192). Issues with no labels are counted
 // under "(no labels)".
-func countByLabelInTx(ctx context.Context, tx *sql.Tx, filter types.IssueFilter, tables FilterTables) (map[string]int, error) {
+func countByLabelInTx(ctx context.Context, tx DBTX, filter types.IssueFilter, tables FilterTables) (map[string]int, error) {
 	clauses, args, err := BuildIssueFilterClauses("", filter, tables)
 	if err != nil {
 		return nil, err
