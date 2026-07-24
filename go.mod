@@ -3,7 +3,7 @@ module github.com/steveyegge/beads
 go 1.26.5
 
 require (
-	charm.land/glamour/v2 v2.0.0
+	charm.land/glamour/v2 v2.0.1
 	charm.land/huh/v2 v2.0.3
 	charm.land/lipgloss/v2 v2.0.5
 	github.com/BurntSushi/toml v1.6.0
