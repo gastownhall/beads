@@ -22,7 +22,8 @@ bd update bd-42 --claim
 bd ready --claim --json
 
 # Release a claimed issue
-bd unclaim bd-42
+bd assign bd-42 ""              # clear the assignee
+bd update bd-42 --status open   # make it claimable again
 ```
 
 ### Checking Assigned Work

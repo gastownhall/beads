@@ -163,6 +163,10 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
 	}
+	if cfg.GetBackend() != configfile.BackendDolt {
+		debug.Logf("auto-migrate: skipping Dolt migration for backend %q", cfg.GetBackend())
+		return
+	}
 
 	if cfg.IsDoltProxiedServerMode() {
 		debug.Logf("auto-migrate: skipping embedded migration, proxied-server handled after UOW provider init")
@@ -195,6 +199,21 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	if ctx == nil || ctx.Err() != nil {
 		// rootCtx is nil or canceled - use fresh background context
 		ctx = context.Background()
+	}
+
+	// Read-only probe: if the DB is already at the current version, skip the
+	// writeable open. On current main the writeable-open gate reads remotes
+	// via doltutil.PersistedRemotes, a fast on-disk repo_state.json probe —
+	// not a `dolt remote -v` subprocess — so this doesn't save a 12s hang;
+	// it saves an unnecessary initSchema round-trip when no migration is
+	// needed. (be-1he)
+	if roStore, roErr := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true}); roErr == nil {
+		dbVersion, _ := roStore.GetLocalMetadata(ctx, "bd_version")
+		_ = roStore.Close()
+		if dbVersion == Version {
+			debug.Logf("auto-migrate: database already at version %s (ro probe)", Version)
+			return
+		}
 	}
 
 	store, err := dolt.NewFromConfig(ctx, beadsDir)

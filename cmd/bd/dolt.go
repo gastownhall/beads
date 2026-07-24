@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 	"golang.org/x/term"
 )
@@ -106,6 +107,13 @@ Examples:
   bd dolt set data-dir /home/user/.beads-dolt/myproject`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		beadsDir := selectedDoltBeadsDir()
+		if beadsDir == "" {
+			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		}
+		if _, err := loadDoltBackendConfig(beadsDir); err != nil {
+			return HandleError("%v", err)
+		}
 		if !usesSQLServer() {
 			return HandleError("'bd dolt set' is not supported in embedded mode (no Dolt server)")
 		}
@@ -129,6 +137,13 @@ This verifies that:
 
 Use this before switching to server mode to ensure the server is running.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		beadsDir := selectedDoltBeadsDir()
+		if beadsDir == "" {
+			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		}
+		if _, err := loadDoltBackendConfig(beadsDir); err != nil {
+			return HandleError("%v", err)
+		}
 		if !usesSQLServer() {
 			return HandleError("'bd dolt test' is not supported in embedded mode (no Dolt server)")
 		}
@@ -488,30 +503,6 @@ The remote must already exist (see 'bd dolt remote add').`,
 	},
 }
 
-// errExplicitCommitUnsupported returns a typed *storage.ErrUnsupported when the
-// open store has no Dolt commit graph (Postgres/MySQL/SQLite), and nil for Dolt.
-// The SQL backends deliberately expose a no-op Commit so internal write paths can
-// call store.Commit() opportunistically without erroring; an EXPLICIT `bd dolt
-// commit` / `bd vc commit` must not ride that no-op and print a fake "Committed."
-// with no commit graph behind it. Internal opportunistic auto-commit is skipped
-// separately in PostRun for these backends, so gating only the explicit commands
-// keeps that path untouched.
-func errExplicitCommitUnsupported(st storage.DoltStorage, op string) error {
-	ncg, ok := storage.UnwrapStore(st).(storage.NonCommitGraphBackend)
-	if !ok || !ncg.CommitGraphUnsupported() {
-		return nil
-	}
-	backend := "non-dolt"
-	if beadsDir := selectedDoltBeadsDir(); beadsDir != "" {
-		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
-			if b := cfg.GetBackend(); b != "" && b != configfile.BackendDolt {
-				backend = b
-			}
-		}
-	}
-	return &storage.ErrUnsupported{Op: op, Backend: backend}
-}
-
 var doltCommitCmd = &cobra.Command{
 	Use:   "commit",
 	Short: "Create a Dolt commit from pending changes",
@@ -532,9 +523,6 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 		st := getStore()
 		if st == nil {
 			return HandleError("no store available")
-		}
-		if err := errExplicitCommitUnsupported(st, "dolt commit"); err != nil {
-			return HandleError("%v", err)
 		}
 		msg, _ := cmd.Flags().GetString("message")
 		if msg == "" {
@@ -566,12 +554,15 @@ project path. PID and logs are stored in .beads/.
 The server auto-starts transparently when needed, so manual start is rarely
 required. Use this command for explicit control or diagnostics.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if !usesSQLServer() {
-			return HandleError("'bd dolt start' is not supported in embedded mode (no Dolt server)")
-		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		}
+		if _, err := loadDoltBackendConfig(beadsDir); err != nil {
+			return HandleError("%v", err)
+		}
+		if !usesSQLServer() {
+			return HandleError("'bd dolt start' is not supported in embedded mode (no Dolt server)")
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 
@@ -609,12 +600,15 @@ var doltStopCmd = &cobra.Command{
 This sends a graceful shutdown signal. The server will restart automatically
 on the next bd command unless auto-start is disabled.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if !usesSQLServer() {
-			return HandleError("'bd dolt stop' is not supported in embedded mode (no Dolt server)")
-		}
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		}
+		if _, err := loadDoltBackendConfig(beadsDir); err != nil {
+			return HandleError("%v", err)
+		}
+		if !usesSQLServer() {
+			return HandleError("'bd dolt stop' is not supported in embedded mode (no Dolt server)")
 		}
 
 		if usesProxiedServer() {
@@ -659,10 +653,20 @@ endpoint via SQL and reports reachability, server version, and database.`,
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 		}
-		// A non-Dolt backend (postgres/mysql/sqlite) has no Dolt engine at all;
+		cfg, cfgErr := configfile.Load(beadsDir)
+		if cfgErr != nil {
+			return HandleError("loading config: %v", cfgErr)
+		}
+		if cfg == nil {
+			cfg = configfile.DefaultConfig()
+		}
+		if err := validateConfiguredBackend(cfg); err != nil {
+			return HandleError("%v", err)
+		}
+		// A non-Dolt backend (SQLite or a removed-backend tombstone) has no Dolt engine;
 		// report the backend rather than misdescribing an embedded Dolt server
 		// (parity with `bd dolt show`, which already special-cases this).
-		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil && cfg.GetBackend() != configfile.BackendDolt {
+		if cfg.GetBackend() != configfile.BackendDolt {
 			fmt.Printf("Backend: %s (no Dolt engine)\n", cfg.GetBackend())
 			return nil
 		}
@@ -679,19 +683,10 @@ endpoint via SQL and reports reachability, server version, and database.`,
 		//     systemd manages the server lifecycle, be-0eyj)
 		//
 		// IsAutoStartDisabled reads the active (globally-bound) config and
-		// BEADS_DOLT_AUTO_START env, not the per-beadsDir cfg loaded just
-		// below. That coupling is intentional and consistent with every
+		// BEADS_DOLT_AUTO_START env, not the per-beadsDir cfg loaded above.
+		// That coupling is intentional and consistent with every
 		// other call site of IsAutoStartDisabled in this package — both
 		// resolve against the same active workspace at command time.
-		cfg, cfgErr := configfile.Load(beadsDir)
-		if cfgErr != nil {
-			// Don't silently swallow. A corrupted or missing metadata.json
-			// would otherwise mask the externally-managed routing for both
-			// the remote-host and auto-start-disabled-local cases, falling
-			// through to the PID-file path with a misleading "not running"
-			// — which is the exact failure mode this PR addresses.
-			fmt.Fprintf(os.Stderr, "Warning: cannot load .beads config (%v); falling back to PID-file status path\n", cfgErr)
-		}
 		if cfg != nil && shouldUseExternalDoltStatus(cfg, doltserver.IsAutoStartDisabled(), doltserver.IsSharedServerMode()) {
 			runExternalDoltStatus(beadsDir, cfg)
 			return nil
@@ -942,10 +937,15 @@ servers are preserved.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		beadsDir := selectedDoltBeadsDir()
+		if beadsDir != "" {
+			if _, err := loadDoltBackendConfig(beadsDir); err != nil {
+				return HandleError("%v", err)
+			}
+		}
 		if !usesSQLServer() {
 			return HandleError("'bd dolt killall' is not supported in embedded mode (no Dolt server)")
 		}
-		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
 			beadsDir = "." // best effort
 		}
@@ -982,8 +982,8 @@ servers are preserved.`,
 //   - beads_vr    : version-roundtrip / migration fixtures.
 //   - doctest_    : `bd doctor` self-check fixtures.
 //   - doctortest_ : older `bd doctor` fixture name (kept for back-compat).
-//   - benchdb_    : per-bench scratch DBs (uniqueBenchDBName below,
-//     format `benchdb_<pid>_<8 hex>`).
+//   - benchdb_    : per-bench scratch DBs (cmd/bd/template_test.go
+//     newTemplateBenchmarkStore, format `benchdb_<unixnano>`).
 var staleDatabasePrefixes = []string{
 	"testdb_",
 	"beads_test",
@@ -1005,12 +1005,41 @@ on the shared Dolt server from interrupted test runs and terminated agents.
 Stale database prefixes: testdb_*, beads_test*, beads_pt*, beads_vr*, doctest_*, doctortest_*, benchdb_*
 
 These waste server memory and can degrade performance under concurrent load.
-Use --dry-run to see what would be dropped without actually dropping.`,
+Use --dry-run to see what would be dropped without actually dropping.
+
+DROP DATABASE only marks a database as dropped; Dolt keeps its directory
+under .dolt_dropped_databases/ so it can be restored with
+CALL DOLT_UNDROP(name) until an explicit purge — disk is not reclaimed
+until then. Pass --purge-dropped to run CALL DOLT_PURGE_DROPPED_DATABASES()
+after cleanup.
+
+--purge-dropped is SERVER-GLOBAL and IRREVERSIBLE. Dolt has no way to scope
+the purge to only the databases this run dropped: it permanently deletes
+every dropped-but-not-yet-purged database on the server, including ones
+dropped by something else entirely (e.g. an operator's accidental
+DROP DATABASE on an unrelated database that was still recoverable via
+DOLT_UNDROP). It also purges pre-existing residue from earlier
+clean-databases runs even if this run finds no stale databases to drop.
+Only pass it when nothing else on the server may be relying on DOLT_UNDROP
+recovery.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		beadsDir := selectedDoltBeadsDir()
+		if beadsDir == "" {
+			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
+		}
+		if _, err := loadDoltBackendConfig(beadsDir); err != nil {
+			return HandleError("%v", err)
+		}
 		if !usesSQLServer() {
 			return HandleError("'bd dolt clean-databases' is not supported in embedded mode (no Dolt server)")
 		}
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		purgeDropped, _ := cmd.Flags().GetBool("purge-dropped")
+		opts := cleanDatabasesOptions{dryRun: dryRun, purgeDropped: purgeDropped}
+
+		if usesProxiedServer() {
+			return runDoltCleanDatabasesProxied(rootCtx, beadsDir, opts)
+		}
 
 		// Connect directly to the Dolt server via config instead of getStore(),
 		// which isn't initialized for dolt subcommands (beads-9vt).
@@ -1020,101 +1049,38 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 		}
 		defer cleanup()
 
-		listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer listCancel()
-
-		rows, err := db.QueryContext(listCtx, "SHOW DATABASES")
-		if err != nil {
-			return HandleError("listing databases: %v", err)
-		}
-		defer rows.Close()
-
-		var stale []string
-		for rows.Next() {
-			var dbName string
-			if err := rows.Scan(&dbName); err != nil {
-				continue
-			}
-			for _, prefix := range staleDatabasePrefixes {
-				if strings.HasPrefix(dbName, prefix) {
-					stale = append(stale, dbName)
-					break
-				}
-			}
-		}
-
-		if len(stale) == 0 {
-			fmt.Println("No stale databases found.")
-			return nil
-		}
-
-		fmt.Printf("Found %d stale databases:\n", len(stale))
-		for _, name := range stale {
-			fmt.Printf("  %s\n", name)
-		}
-
-		if dryRun {
-			fmt.Println("\n(dry run — no databases dropped)")
-			return nil
-		}
-
-		fmt.Println()
-		dropped := 0
-		failures := 0
-		consecutiveTimeouts := 0
-		const (
-			batchSize         = 5 // Drop this many before pausing
-			batchPause        = 2 * time.Second
-			backoffPause      = 10 * time.Second
-			timeoutThreshold  = 3 // Consecutive timeouts before backoff
-			perDropTimeout    = 30 * time.Second
-			maxConsecFailures = 10 // Stop after this many consecutive failures
-		)
-
-		for i, name := range stale {
-			// Circuit breaker: back off when server is overwhelmed
-			if consecutiveTimeouts >= timeoutThreshold {
-				fmt.Fprintf(os.Stderr, "  ⚠ %d consecutive timeouts — backing off %s\n",
-					consecutiveTimeouts, backoffPause)
-				time.Sleep(backoffPause)
-				consecutiveTimeouts = 0
-			}
-
-			// Stop if too many consecutive failures — server is likely unhealthy
-			if failures >= maxConsecFailures {
-				fmt.Fprintf(os.Stderr, "\n✗ Aborting: %d consecutive failures suggest server is unhealthy.\n", failures)
-				fmt.Fprintf(os.Stderr, "  Dropped %d/%d before stopping.\n", dropped, len(stale))
-				return SilentExit()
-			}
-
-			// Per-operation timeout: DROP DATABASE can be slow on Dolt
-			dropCtx, dropCancel := context.WithTimeout(context.Background(), perDropTimeout)
-			// Escape backticks in database name to prevent SQL injection (` → ``)
-			safeName := strings.ReplaceAll(name, "`", "``")
-			_, err := db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE `%s`", safeName)) //nolint:gosec // G201: identifier-escaped
-			dropCancel()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  FAIL: %s: %v\n", name, err)
-				failures++
-				if isTimeoutError(err) {
-					consecutiveTimeouts++
-				}
-			} else {
-				fmt.Printf("  Dropped: %s\n", name)
-				dropped++
-				failures = 0
-				consecutiveTimeouts = 0
-			}
-
-			// Rate limiting: pause between batches to let the server breathe
-			if (i+1)%batchSize == 0 && i+1 < len(stale) {
-				fmt.Printf("  [%d/%d] pausing %s...\n", i+1, len(stale), batchPause)
-				time.Sleep(batchPause)
-			}
-		}
-		fmt.Printf("\nDropped %d/%d stale databases.\n", dropped, len(stale))
-		return nil
+		return cleanDatabases(rootCtx, db, opts)
 	},
+}
+
+// shouldPurgeDroppedDatabases reports whether clean-databases should invoke
+// the (server-global, irreversible) purge. It gates purely on the
+// --purge-dropped flag and deliberately ignores droppedCount: a prior
+// clean-databases run may have left dropped-but-unpurged residue that this
+// run's SHOW DATABASES scan never sees (the residue is already gone from
+// SHOW DATABASES the moment it was dropped), so --purge-dropped must still
+// fire the purge even when this run drops nothing. Extracted as a pure
+// function so the gating contract itself — not just the SQL-level purge
+// mechanism — has direct unit coverage.
+func shouldPurgeDroppedDatabases(purgeDropped bool, droppedCount int) bool {
+	_ = droppedCount // deliberately unused — see doc comment above
+	return purgeDropped
+}
+
+// purgeDroppedDatabases issues Dolt's DOLT_PURGE_DROPPED_DATABASES() stored
+// procedure, which permanently deletes database directories that DROP
+// DATABASE only moved into .dolt_dropped_databases/. This is server-global:
+// Dolt has no way to scope it to a particular set of databases, so it
+// purges every dropped-but-not-yet-purged database on the server, not just
+// ones this process dropped. Extracted so tests can drive it directly
+// against a live test server without going through the full
+// clean-databases command wiring (config loading, SHOW DATABASES scan,
+// batching/backoff).
+func purgeDroppedDatabases(ctx context.Context, conn versioncontrolops.DBConn) error {
+	purgeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	_, err := conn.ExecContext(purgeCtx, "CALL DOLT_PURGE_DROPPED_DATABASES()")
+	return err
 }
 
 // --- Dolt remote management commands ---
@@ -1403,6 +1369,7 @@ func init() {
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
+	doltCleanDatabasesCmd.Flags().Bool("purge-dropped", false, "After dropping, also run CALL DOLT_PURGE_DROPPED_DATABASES() — server-global and irreversible, see --help")
 	doltRemoteAddCmd.Flags().Bool("allow-git-origin", false, "Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)")
 	doltRemoteCmd.AddCommand(doltRemoteAddCmd)
 	doltRemoteCmd.AddCommand(doltRemoteListCmd)
@@ -1449,6 +1416,9 @@ func showDoltConfig(testConnection bool) error {
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
+	}
+	if err := validateConfiguredBackend(cfg); err != nil {
+		return HandleError("%v", err)
 	}
 
 	backend := cfg.GetBackend()
@@ -1548,16 +1518,9 @@ func setDoltConfig(key, value string, updateConfig bool) error {
 		return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
-	cfg, err := configfile.Load(beadsDir)
+	cfg, err := loadDoltBackendConfig(beadsDir)
 	if err != nil {
-		return HandleError("loading config: %v", err)
-	}
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
-	}
-
-	if cfg.GetBackend() != configfile.BackendDolt {
-		return HandleError("not using Dolt backend")
+		return HandleError("%v", err)
 	}
 
 	var yamlKey string
@@ -1709,16 +1672,9 @@ func testDoltConnection() error {
 		return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
-	cfg, err := configfile.Load(beadsDir)
+	cfg, err := loadDoltBackendConfig(beadsDir)
 	if err != nil {
-		return HandleError("loading config: %v", err)
-	}
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
-	}
-
-	if cfg.GetBackend() != configfile.BackendDolt {
-		return HandleError("not using Dolt backend")
+		return HandleError("%v", err)
 	}
 
 	host := cfg.GetDoltServerHost()
@@ -1878,12 +1834,9 @@ func openDoltServerConnection() (*sql.DB, func(), error) {
 		return nil, nil, HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
-	cfg, err := configfile.Load(beadsDir)
+	cfg, err := loadDoltBackendConfig(beadsDir)
 	if err != nil {
-		return nil, nil, HandleError("loading config: %v", err)
-	}
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
+		return nil, nil, HandleError("%v", err)
 	}
 
 	host := cfg.GetDoltServerHost()

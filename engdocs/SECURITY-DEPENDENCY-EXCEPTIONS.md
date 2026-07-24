@@ -17,7 +17,8 @@ Scope:
 Status:
 
 - `npm audit --omit=dev` is clean.
-- `GOTOOLCHAIN=go1.26.2 govulncheck ./...` is clean.
+- `GOTOOLCHAIN=go1.26.5 govulncheck ./...` is clean (last verified 2026-07-24,
+  after bumping `golang.org/x/text` to v0.39.0 for GO-2026-5970).
 - A full `npm audit` still reports build-time advisories through the
   Docusaurus/webpack toolchain, primarily `serialize-javascript`, `uuid`,
   `sockjs`, and transitive Docusaurus packages.

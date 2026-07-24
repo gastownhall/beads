@@ -1,6 +1,6 @@
 ---
 title: "bd find-duplicates"
-description: "Find semantically similar issues using text analysis or AI"
+description: "Find issues that are semantically similar but not exact duplicates."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

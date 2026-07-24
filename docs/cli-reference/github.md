@@ -1,6 +1,6 @@
 ---
 title: "bd github"
-description: "GitHub integration commands"
+description: "Commands for syncing issues between beads and GitHub."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -17,7 +17,7 @@ Configuration can be set via 'bd config' or environment variables:
   github.url / GITHUB_API_URL           - Custom API URL (GitHub Enterprise)
 
 ```
-bd github [command]
+bd github [flags]
 ```
 
 ## bd github pull

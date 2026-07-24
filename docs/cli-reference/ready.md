@@ -1,6 +1,6 @@
 ---
 title: "bd ready"
-description: "Show ready work (open, no active blockers)"
+description: "Show ready work (open issues with no active blockers)."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

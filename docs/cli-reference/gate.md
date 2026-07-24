@@ -1,6 +1,6 @@
 ---
 title: "bd gate"
-description: "Manage async coordination gates"
+description: "Gates are async wait conditions that block workflow steps."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -17,11 +17,9 @@ Gate types:
   timer   - Expires after timeout (Phase 2)
   gh:run  - Waits for GitHub workflow (Phase 3)
   gh:pr   - Waits for PR merge (Phase 3)
-  bead    - Waits for another bead to close (Phase 4)
+  bead    - Waits for cross-rig bead to close (Phase 4)
 
-For bead gates, await_id is a bead ID in this rig's database (e.g., "bd-abc123").
-The historical cross-rig form &lt;rig&gt;:&lt;bead-id&gt; can no longer be evaluated
-(multi-rig routing removed) and stays pending until resolved manually.
+For bead gates, await_id format is &lt;rig&gt;:&lt;bead-id&gt; (e.g., "other-project:op-abc123").
 
 Examples:
   bd gate list           # Show all open gates
@@ -31,7 +29,7 @@ Examples:
   bd gate resolve &lt;id&gt;   # Close a gate manually
 
 ```
-bd gate [command]
+bd gate [flags]
 ```
 
 ## bd gate add-waiter
@@ -163,16 +161,12 @@ bd gate discover [flags]
 
 ## bd gate list
 
-List gate issues.
-
-With no argument, lists all gate issues in the current beads database.
-With an [issue-id] argument, lists ONLY the gates that block that issue
-(its own dependency gates) — not every gate in the database.
+List all gate issues in the current beads database.
 
 By default, shows only open gates. Use --all to include closed gates.
 
 ```
-bd gate list [issue-id] [flags]
+bd gate list [flags]
 ```
 
 **Flags:**

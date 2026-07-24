@@ -268,9 +268,14 @@ func TestContextInfo_SaveStripAbsoluteDataDir(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
+	// Save() strips DoltDataDir when filepath.IsAbs() reports it absolute, so the
+	// fixture must be absolute ON THIS PLATFORM: a POSIX path like /absolute/path is
+	// NOT absolute on Windows (no volume), which silently turned this into a no-op
+	// assertion there. t.TempDir() is always platform-absolute.
+	absDataDir := filepath.Join(t.TempDir(), "dolt-data")
 	cfg := &configfile.Config{
 		Database:    "dolt",
-		DoltDataDir: "/absolute/path/dolt-data",
+		DoltDataDir: absDataDir,
 	}
 	if err := cfg.Save(beadsDir); err != nil {
 		t.Fatalf("save config: %v", err)

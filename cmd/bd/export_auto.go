@@ -318,7 +318,9 @@ func autoExportFilter(ctx context.Context) types.IssueFilter {
 }
 
 func buildAutoExportFilter(ctx context.Context) (types.IssueFilter, map[string]bool) {
-	filter := types.IssueFilter{Limit: 0}
+	// MaxRows: 0 opts out of BEADS_MAX_ROWS — auto-export is a data-integrity
+	// sweep and must not be capped (designer §4.1).
+	filter := types.IssueFilter{Limit: 0, MaxRows: 0}
 	var infraTypes []string
 	if store != nil {
 		infraSet := store.GetInfraTypes(ctx)

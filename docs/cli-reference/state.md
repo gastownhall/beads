@@ -1,6 +1,6 @@
 ---
 title: "bd state"
-description: "Query the current value of a state dimension"
+description: "Query the current value of a state dimension from an issue's labels."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -23,7 +23,6 @@ Examples:
 
 ```
 bd state <issue-id> <dimension> [flags]
-bd state [command]
 ```
 
 ## bd state list

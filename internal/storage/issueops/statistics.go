@@ -52,10 +52,11 @@ func GetStatisticsInTx(ctx context.Context, tx DBTX) (*types.Statistics, error) 
 	`).Scan(&blocked); err != nil {
 		return nil, fmt.Errorf("count blocked issues: %w", err)
 	}
-	stats.BlockedIssues = blocked
-	stats.ReadyIssues = stats.OpenIssues - stats.BlockedIssues
-	if stats.ReadyIssues < 0 {
-		stats.ReadyIssues = 0
+	stats.BlockedIssues = &blocked
+	ready := stats.OpenIssues - blocked
+	if ready < 0 {
+		ready = 0
 	}
+	stats.ReadyIssues = &ready
 	return stats, nil
 }

@@ -233,17 +233,36 @@ func cleanSQLiteArtifacts(beadsDir string) (removed, skipped, errCount int) {
 }
 
 // cleanCruftBeadsDirFiles removes everything from a .beads directory except
-// the redirect file and .gitkeep.
+// the redirect file, .gitkeep, and (when a redirect file is present)
+// metadata.json.
 func cleanCruftBeadsDirFiles(beadsDir string) (removed, errCount int) {
 	entries, err := os.ReadDir(beadsDir)
 	if err != nil {
 		return 0, 1
 	}
 
+	// gastownhall/beads#4692: a co-located redirect and metadata.json is a
+	// documented, supported topology (see fb51196f7 / docs/reference/
+	// advanced.md "Database Redirects" -- a server-mode source rig's own
+	// metadata.json supplies its dolt_database while the redirect points at
+	// the shared Gas Town root). Deleting metadata.json here would corrupt
+	// that source rig's identity while leaving the redirect itself intact,
+	// so never delete it when a redirect is present in the same directory.
+	hasRedirect := false
+	for _, entry := range entries {
+		if entry.Name() == "redirect" {
+			hasRedirect = true
+			break
+		}
+	}
+
 	for _, entry := range entries {
 		name := entry.Name()
 		// Keep redirect and .gitkeep
 		if name == "redirect" || name == ".gitkeep" {
+			continue
+		}
+		if name == "metadata.json" && hasRedirect {
 			continue
 		}
 

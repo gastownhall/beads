@@ -182,7 +182,7 @@ func testAuditReadyWorkDepCreatedAtParity(t *testing.T, f Factory) {
 }
 
 // countByColumnInTx emits COALESCE(priority, ”) GROUP BY priority; priority is
-// integer NOT NULL. MySQL/Dolt coerce the int to a string key, then
+// integer NOT NULL. Both maintained implementations return a string key, then
 // countGroupForTablesInTx prepends 'P'. Reference keys: P0/P1/P2.
 func testAuditCountByPriority(t *testing.T, f Factory) {
 	s := f(t)
@@ -293,12 +293,20 @@ func testAuditStatistics(t *testing.T, f Factory) {
 	if stats.PinnedIssues != 1 {
 		t.Errorf("PinnedIssues = %d, want 1", stats.PinnedIssues)
 	}
-	if stats.BlockedIssues != 1 {
-		t.Errorf("BlockedIssues = %d, want 1", stats.BlockedIssues)
+	if stats.BlockedIssues == nil || *stats.BlockedIssues != 1 {
+		got := -1
+		if stats.BlockedIssues != nil {
+			got = *stats.BlockedIssues
+		}
+		t.Errorf("BlockedIssues = %d, want 1", got)
 	}
 	// Ready = Open(2) - Blocked(1) = 1 (the blocked issue is in_progress, not open).
-	if stats.ReadyIssues != 1 {
-		t.Errorf("ReadyIssues = %d, want 1", stats.ReadyIssues)
+	if stats.ReadyIssues == nil || *stats.ReadyIssues != 1 {
+		got := -1
+		if stats.ReadyIssues != nil {
+			got = *stats.ReadyIssues
+		}
+		t.Errorf("ReadyIssues = %d, want 1", got)
 	}
 }
 
@@ -319,12 +327,20 @@ func testAuditStatisticsReadyClamp(t *testing.T, f Factory) {
 	if stats.OpenIssues != 0 {
 		t.Errorf("OpenIssues = %d, want 0", stats.OpenIssues)
 	}
-	if stats.BlockedIssues != 2 {
-		t.Errorf("BlockedIssues = %d, want 2", stats.BlockedIssues)
+	if stats.BlockedIssues == nil || *stats.BlockedIssues != 2 {
+		got := -1
+		if stats.BlockedIssues != nil {
+			got = *stats.BlockedIssues
+		}
+		t.Errorf("BlockedIssues = %d, want 2", got)
 	}
 	// 0 - 2 = -2, clamped to 0.
-	if stats.ReadyIssues != 0 {
-		t.Errorf("ReadyIssues = %d, want 0 (clamped)", stats.ReadyIssues)
+	if stats.ReadyIssues == nil || *stats.ReadyIssues != 0 {
+		got := -1
+		if stats.ReadyIssues != nil {
+			got = *stats.ReadyIssues
+		}
+		t.Errorf("ReadyIssues = %d, want 0 (clamped)", got)
 	}
 }
 
@@ -366,7 +382,7 @@ func testAuditSearchIdenticalTimestampIDOrder(t *testing.T, f Factory) {
 }
 
 // SortBy="closed" emits ORDER BY closed_at DESC, id ASC. closed_at is nullable;
-// MySQL/Dolt place NULLs LAST on DESC. The open (NULL-closed) rows follow the
+// the storage contract places NULLs last on DESC. The open (NULL-closed) rows follow the
 // closed ones, ordered by id ASC.
 func testAuditSearchSortByClosedNullsLast(t *testing.T, f Factory) {
 	s := f(t)
@@ -409,9 +425,9 @@ func testAuditSearchTextIDBranchExternalRef(t *testing.T, f Factory) {
 	}
 }
 
-// LIKE over raw-cased operands is case-sensitive on every backend: Dolt/MySQL use
-// the utf8mb4_0900_bin table collation, Postgres uses collation "C", and SQLite
-// sets PRAGMA case_sensitive_like (sqlite/dsn.go) — its default LIKE is
+// LIKE over raw-cased operands is case-sensitive on both implementations: Dolt uses
+// a binary table collation, and SQLite set PRAGMA case_sensitive_like (formerly sqlite/dsn.go).
+// SQLite's default LIKE is
 // ASCII-case-insensitive and silently diverged (bd-oyvc2.10). IDPrefix filtering
 // (sqlbuild/filter.go `id LIKE ?`) must therefore distinguish test-AB from test-ab.
 func testAuditSearchIDPrefixCaseSensitive(t *testing.T, f Factory) {

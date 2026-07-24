@@ -55,6 +55,24 @@ const DefaultSQLPort = 3307
 // testDatabasePrefixes are name prefixes that indicate a test database.
 // Used by isTestDatabaseName to prevent test databases from being created
 // on the production Dolt server (Clown Shows #12-#18).
+//
+// Origin of each prefix:
+//   - testdb_     : applyConfigDefaults derives this for BEADS_TEST_MODE=1
+//     without an explicit Database (FNV hash of cfg.Path).
+//   - beads_test  : convention for hand-written integration tests.
+//   - beads_pt    : property-test fixtures.
+//   - beads_vr    : version-roundtrip / migration fixtures.
+//   - doctest_    : `bd doctor` self-check fixtures.
+//   - doctortest_ : older `bd doctor` fixture name (kept for back-compat).
+//   - benchdb_    : per-bench scratch DBs (cmd/bd/template_test.go
+//     newTemplateBenchmarkStore, format `benchdb_<unixnano>`). Added by
+//     AD-01 (be-c5p).
+//
+// This list is the firewall side of the test/prod split. Two sibling lists
+// must converge with it (be-avn): cmd/bd/dolt.go:staleDatabasePrefixes (used
+// by `bd dolt clean-databases`) and the formula-side `gc dolt cleanup`
+// stale-prefix list. Any prefix added here must be mirrored to those lists,
+// or stale fixtures will leak past clean-up.
 var testDatabasePrefixes = []string{
 	"testdb_",
 	"beads_test",
@@ -62,6 +80,7 @@ var testDatabasePrefixes = []string{
 	"beads_vr",
 	"doctest_",
 	"doctortest_",
+	"benchdb_",
 }
 
 // isTestDatabaseName returns true if the database name matches known test patterns.
@@ -73,6 +92,84 @@ func isTestDatabaseName(name string) bool {
 		}
 	}
 	return false
+}
+
+// productionPortReasons returns human-readable labels for each rule that
+// flags cfg.ServerPort as a production port. An empty slice means the port
+// is not detected as production.
+//
+// Detection sources, in order:
+//  1. cfg.ServerPort == DefaultSQLPort (legacy default 3307). Unconditional —
+//     never suppressed by BEADS_TEST_SERVER=1. The well-known Dolt default
+//     port is the single highest-confidence production signal, and a
+//     dedicated test server opting out of the other heuristics still must
+//     not bind to it.
+//  2. BEADS_PRODUCTION_PORT env var, parsed to int, matches cfg.ServerPort.
+//  3. cfg.BeadsDir/dolt-server.port file present and contains cfg.ServerPort.
+//
+// Rules 2 and 3 are suppressed when BEADS_TEST_SERVER=1: they are
+// heuristics (an env var or an on-disk port file, either of which can be
+// stale or misconfigured) rather than the fixed default port, so an
+// operator's explicit opt-in into a dedicated test-server lane is honored
+// for those two only.
+//
+// Rule 3 deliberately does not fall back to filepath.Dir(cfg.Path) when
+// BeadsDir is empty — the port-resolution chain in applyConfigDefaults
+// already does that fallback for resolution purposes, but using it here
+// would treat any cfg.Path under a directory that happens to contain a
+// stray dolt-server.port file (e.g. /tmp/dolt-server.port from a leaked
+// dev server) as production. Test fixtures commonly set cfg.Path under
+// /tmp without a real BeadsDir; only an explicitly set BeadsDir is
+// considered authoritative for the production check.
+//
+// All rules read deterministic state (constant, env, on-disk port file).
+// No state is mutated. Multiple rules can match; the panic message lists all.
+func productionPortReasons(cfg *Config) []string {
+	if cfg == nil || cfg.ServerPort <= 0 {
+		return nil
+	}
+	var reasons []string
+	if cfg.ServerPort == DefaultSQLPort {
+		reasons = append(reasons, fmt.Sprintf("port %d == DefaultSQLPort", cfg.ServerPort))
+	}
+	// Rules 2 and 3 are the suppressible heuristics: honor the operator's
+	// BEADS_TEST_SERVER=1 opt-in for a dedicated test server by skipping
+	// them. Rule 1 above is intentionally evaluated before this check and
+	// is never suppressed.
+	if os.Getenv("BEADS_TEST_SERVER") == "1" {
+		return reasons
+	}
+	if env := os.Getenv("BEADS_PRODUCTION_PORT"); env != "" {
+		if p, err := strconv.Atoi(env); err == nil && p > 0 && p == cfg.ServerPort {
+			reasons = append(reasons, fmt.Sprintf("BEADS_PRODUCTION_PORT=%d matches", p))
+		}
+	}
+	if cfg.BeadsDir != "" {
+		if p := doltserver.ReadPortFile(cfg.BeadsDir); p > 0 && p == cfg.ServerPort {
+			reasons = append(reasons, fmt.Sprintf("%s/%s contains %d", cfg.BeadsDir, doltserver.PortFileName, p))
+		}
+	}
+	return reasons
+}
+
+// isProductionPort reports whether cfg.ServerPort matches any production-port
+// indicator. Pure at call time — port resolution itself happens earlier in
+// applyConfigDefaults; this helper only inspects already-resolved state.
+//
+// BEADS_TEST_SERVER=1 narrows detection to Rule 1 only (port ==
+// DefaultSQLPort): the operator has explicitly opted into the dedicated
+// test-server lane (e.g. a per-test container, an external test port), which
+// suppresses the BEADS_PRODUCTION_PORT and dolt-server.port heuristics
+// (Rules 2 and 3, see productionPortReasons). Rule 1 stays unconditional —
+// a test server must never bind to the well-known default port 3307,
+// opt-in or not. The database-name firewall in New is a separate AD-01
+// defense with its own independent BEADS_TEST_SERVER=1 opt-out; it is not
+// affected by this function.
+//
+// See productionPortReasons for the three detection sources and the
+// suppression rule.
+func isProductionPort(cfg *Config) bool {
+	return len(productionPortReasons(cfg)) > 0
 }
 
 // autoStartRefs tracks in-process reference counts for auto-started dolt
@@ -571,15 +668,17 @@ var doltTracer = otel.Tracer("github.com/steveyegge/beads/storage/dolt")
 // Instruments are registered against the global delegating provider at init time,
 // so they automatically forward to the real provider once telemetry.Init() runs.
 var doltMetrics struct {
-	retryCount          metric.Int64Counter
-	lockWaitMs          metric.Float64Histogram
-	circuitTrips        metric.Int64Counter
-	circuitRejected     metric.Int64Counter
-	serializationErrors metric.Int64Counter
-	writeRetries        metric.Int64Counter
-	connAcquireMs       metric.Float64Histogram
-	poolWaitCount       metric.Int64Counter
-	poolWaitMs          metric.Float64Histogram
+	retryCount           metric.Int64Counter
+	lockWaitMs           metric.Float64Histogram
+	circuitTrips         metric.Int64Counter
+	circuitRejected      metric.Int64Counter
+	serializationErrors  metric.Int64Counter
+	writeRetries         metric.Int64Counter
+	connAcquireMs        metric.Float64Histogram
+	poolWaitCount        metric.Int64Counter
+	poolWaitMs           metric.Float64Histogram
+	claimVerifyLost      metric.Int64Counter
+	claimVerifyRecovered metric.Int64Counter
 }
 
 func init() {
@@ -619,6 +718,14 @@ func init() {
 	doltMetrics.poolWaitMs, _ = m.Float64Histogram("bd.db.pool_wait_ms",
 		metric.WithDescription("Total time connections spent waiting due to pool exhaustion"),
 		metric.WithUnit("ms"),
+	)
+	doltMetrics.claimVerifyLost, _ = m.Int64Counter("bd.claim_verify_lost_total",
+		metric.WithDescription("Claim-family writes that reported success but failed verify-by-re-read (label: op=claim|unclaim)"),
+		metric.WithUnit("{write}"),
+	)
+	doltMetrics.claimVerifyRecovered, _ = m.Int64Counter("bd.claim_verify_recovered_total",
+		metric.WithDescription("Indeterminate claim-family commits resolved by re-read (label: op, outcome=applied|replayed)"),
+		metric.WithUnit("{write}"),
 	)
 }
 
@@ -1032,8 +1139,11 @@ func applyConfigDefaults(cfg *Config) {
 	//
 	// Test mode guard: force port 1 (immediate fail) if we'd hit production
 	// or have no port, to prevent test databases leaking onto production.
+	// Production-port detection is generalized via isProductionPort so cities
+	// using non-3307 ports (BEADS_PRODUCTION_PORT or dolt-server.port) are
+	// covered too.
 	if os.Getenv("BEADS_TEST_MODE") == "1" {
-		if cfg.ServerPort == 0 || cfg.ServerPort == DefaultSQLPort {
+		if cfg.ServerPort == 0 || isProductionPort(cfg) {
 			cfg.ServerPort = 1
 		}
 	}
@@ -1064,17 +1174,80 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	applyConfigDefaults(cfg)
 
 	// Hard guard: tests must NEVER connect to the production Dolt server.
-	// If BEADS_TEST_MODE=1 and we're about to hit the default prod port,
-	// something upstream forgot to set BEADS_DOLT_SERVER_PORT. Panic immediately
-	// so the test fails loudly instead of silently polluting prod.
-	if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.ServerPort == DefaultSQLPort {
-		panic(fmt.Sprintf(
-			"BEADS_TEST_MODE=1 but connecting to prod port %d — set BEADS_DOLT_SERVER_PORT or use test helpers (database=%q, path=%q)",
-			DefaultSQLPort, cfg.Database, cfg.Path,
-		))
+	// applyConfigDefaults rewrites a production port to 1 in BEADS_TEST_MODE=1
+	// for fail-loud-but-continue behavior; this panic is defense-in-depth for
+	// any path that bypasses or post-edits the rewrite. Generalized via
+	// isProductionPort so non-3307 production deployments are covered.
+	if os.Getenv("BEADS_TEST_MODE") == "1" && isProductionPort(cfg) {
+		panic(buildTestModeProductionPortPanic(cfg))
+	}
+
+	// Database-name firewall: refuse to open a test-named database on any
+	// server unless the operator opted in via BEADS_TEST_SERVER=1. This is
+	// the second of two AD-01 defenses (the first is the production-port
+	// guard above). Returning an error (not panic) lets tests assert on it.
+	if isTestDatabaseName(cfg.Database) && os.Getenv("BEADS_TEST_SERVER") != "1" {
+		addr := net.JoinHostPort(cfg.ServerHost, strconv.Itoa(cfg.ServerPort))
+		if cfg.ServerSocket != "" {
+			addr = cfg.ServerSocket
+		}
+		return nil, fmt.Errorf(
+			"refusing to connect test database %q to server %s: "+
+				"set BEADS_TEST_SERVER=1 on a dedicated test server, "+
+				"or use test helpers in internal/storage/dolt/testserver",
+			cfg.Database, addr)
 	}
 
 	return newServerMode(ctx, cfg)
+}
+
+// buildTestModeProductionPortPanic returns the multi-line panic message for
+// the BEADS_TEST_MODE=1 + production-port hard-guard. Format follows
+// AD-01 Wireframe 1: scannable header + database/path/server fields,
+// list of detection rules that matched, and a fix block naming each
+// supported escape hatch.
+func buildTestModeProductionPortPanic(cfg *Config) string {
+	addr := net.JoinHostPort(cfg.ServerHost, strconv.Itoa(cfg.ServerPort))
+	if cfg.ServerSocket != "" {
+		addr = cfg.ServerSocket
+	}
+	reasons := productionPortReasons(cfg)
+	if len(reasons) == 0 {
+		// Should be unreachable (caller checks isProductionPort first), but
+		// keep the message coherent if it ever hits.
+		reasons = []string{"production-port heuristic matched"}
+	}
+	var rules strings.Builder
+	for _, r := range reasons {
+		rules.WriteString("    - ")
+		rules.WriteString(r)
+		rules.WriteString("\n")
+	}
+	var fixLines strings.Builder
+	fixLines.WriteString("    - point BEADS_DOLT_SERVER_PORT at a non-production port (test server)\n")
+	fixLines.WriteString("    - or use test helpers in internal/storage/dolt/testserver\n")
+	// BEADS_TEST_SERVER=1 does not suppress Rule 1 (port == DefaultSQLPort,
+	// see productionPortReasons) — only list it as a fix when the port
+	// itself isn't the reason this fired, so the message never claims an
+	// opt-in that would not actually resolve this panic.
+	if cfg.ServerPort != DefaultSQLPort {
+		fixLines.WriteString("    - or set BEADS_TEST_SERVER=1 on the spawned test server's env\n")
+	}
+	return fmt.Sprintf(
+		"refusing to connect: BEADS_TEST_MODE=1 but resolved server port is production\n\n"+
+			"  database: %s\n"+
+			"  path:     %s\n"+
+			"  server:   %s\n"+
+			"  detected as production via:\n"+
+			"%s"+
+			"  fix:\n"+
+			"%s",
+		cfg.Database,
+		cfg.Path,
+		addr,
+		rules.String(),
+		fixLines.String(),
+	)
 }
 
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
@@ -1540,7 +1713,9 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// FIREWALL: Never create test databases on the production server.
 	// This is the last line of defense against test pollution (Clown Shows #12-#18).
 	// Pattern-based, not env-var-based — env vars can be misconfigured or missing.
-	if isTestDatabaseName(cfg.Database) && cfg.ServerPort == DefaultSQLPort {
+	// Production-port detection generalized via isProductionPort so non-3307
+	// production deployments are covered (AD-01).
+	if isTestDatabaseName(cfg.Database) && isProductionPort(cfg) {
 		return nil, "", fmt.Errorf(
 			"REFUSED: will not CREATE DATABASE %q on production port %d — "+
 				"this is a test database name on the production server (see DOLT-WAR-ROOM.md)",
@@ -1858,6 +2033,27 @@ func (s *DoltStore) DoltGC(ctx context.Context) error {
 	}
 	defer conn.Close()
 	return versioncontrolops.DoltGC(ctx, conn)
+}
+
+// ListRemoteRefs returns the names of all cached remote-tracking refs.
+func (s *DoltStore) ListRemoteRefs(ctx context.Context) ([]string, error) {
+	return versioncontrolops.ListRemoteRefs(ctx, s.db)
+}
+
+// PruneRemoteRefs deletes all cached remote-tracking refs so a post-squash GC
+// can reclaim the history they anchor (bd-agctw). Returns the deleted names.
+func (s *DoltStore) PruneRemoteRefs(ctx context.Context) ([]string, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquire connection for remote-ref prune: %w", err)
+	}
+	defer conn.Close()
+	return versioncontrolops.PruneRemoteRefs(ctx, conn)
+}
+
+// ListTags returns the names of all Dolt tags.
+func (s *DoltStore) ListTags(ctx context.Context) ([]string, error) {
+	return versioncontrolops.ListTags(ctx, s.db)
 }
 
 // Flatten squashes all Dolt commit history into a single commit.
@@ -2420,12 +2616,13 @@ func (s *DoltStore) credentialsForRemote(remote string) *remoteCredentials {
 // re-pushes that remote faithfully propagates the dangling reference.
 //
 // If CLIDir is empty or .dolt/noms does not exist, the check is skipped.
-// Five outcomes are possible when fsck exits non-zero (see classifyFSCKFailure):
+// Six outcomes are possible when fsck exits non-zero (see classifyFSCKFailure):
 //   - non-empty output, could-not-open: skipped with a log warning.
 //   - non-empty output, other: ErrDanglingReference — push aborted.
 //   - parent context canceled: cancellation error — push aborted.
 //   - parent context deadline exceeded: ErrFSCKTimeout (caller timeout) — push aborted.
 //   - fsck own timeout: ErrFSCKTimeout (raise BEADS_FSCK_TIMEOUT) — push aborted.
+//   - cancellation phrasing in output, no context error: cancellation error — push aborted.
 func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	dir := s.CLIDir()
 	if dir == "" {
@@ -2450,15 +2647,18 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 	return nil
 }
 
-// classifyFSCKFailure maps a failed dolt fsck exit into one of five outcomes,
+// classifyFSCKFailure maps a failed dolt fsck exit into one of six outcomes,
 // evaluated in priority order:
 //
 //	(a) Non-empty output → route by content: could-not-open → nil (caller logs
-//	    and skips); any other content → ErrDanglingReference abort. Non-empty
-//	    output means fsck actually ran and said something (--quiet fsck is
-//	    silent until it finds a problem), so content wins over context state.
-//	    This also closes the race where real corruption arrives at the deadline
-//	    instant and would otherwise be masked as a timeout.
+//	    and skips); cancellation phrasing (fsckOutputInterrupted) → fall
+//	    through to the context-state branches below, because an interrupted
+//	    fsck prints e.g. "context canceled" before dying and that text is not
+//	    an integrity finding; any other content → ErrDanglingReference abort.
+//	    Non-empty output means fsck actually ran and said something (--quiet
+//	    fsck is silent until it finds a problem), so content wins over context
+//	    state. This also closes the race where real corruption arrives at the
+//	    deadline instant and would otherwise be masked as a timeout.
 //
 //	(b) Parent context canceled (Ctrl-C, caller abort) → plain cancellation
 //	    error wrapping context.Canceled; neither ErrDanglingReference nor
@@ -2474,19 +2674,30 @@ func (s *DoltStore) prePushFSCK(ctx context.Context) error {
 //	(d) fsck's own deadline exceeded, parent still running → ErrFSCKTimeout
 //	    with dolt gc / CALL DOLT_GC() / BEADS_FSCK_TIMEOUT guidance.
 //
-//	(e) Generic non-zero exit, empty output → ErrDanglingReference abort.
+//	(e) Cancellation phrasing in output but no recognized context error — the
+//	    bd process (group) was killed out from under fsck, so neither context
+//	    carries the reason. Plain cancellation error wrapping context.Canceled;
+//	    the store is not implicated.
+//
+//	(f) Generic non-zero exit, empty output → ErrDanglingReference abort.
 //
 // Returning nil for the could-not-open case (branch a) distinguishes "fsck
 // couldn't run at all" from "fsck ran and found a problem". Wrapping an
-// open-failure as ErrDanglingReference misleads users (dolthub/dolt#10915).
+// open-failure as ErrDanglingReference misleads users (dolthub/dolt#10915);
+// so does wrapping an interrupt's "context canceled" noise as corruption
+// (same genus, observed when a background push's process group was killed).
 func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
 	// (a) Non-empty output: fsck actually reported something; route by content.
 	if output != "" {
 		if fsckCouldNotOpen(output) {
 			return nil
 		}
-		return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
-			ErrDanglingReference, output)
+		if !fsckOutputInterrupted(output) {
+			return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks: %s",
+				ErrDanglingReference, output)
+		}
+		// Cancellation phrasing: not an integrity finding — classify by
+		// context state below.
 	}
 	// (b) Parent context canceled — user interrupt or caller abort.
 	if errors.Is(parentErr, context.Canceled) {
@@ -2509,7 +2720,13 @@ func classifyFSCKFailure(parentErr, fsckErr error, output string) error {
 			"the timeout can be raised via the BEADS_FSCK_TIMEOUT environment variable",
 			ErrFSCKTimeout)
 	}
-	// (e) Generic failure with no output and no recognized context error.
+	// (e) Interrupted fsck whose cancellation reason lives only in the output
+	// (process group killed: both contexts look healthy from here).
+	if fsckOutputInterrupted(output) {
+		return fmt.Errorf("pre-push integrity check interrupted: %w: %s",
+			context.Canceled, output)
+	}
+	// (f) Generic failure with no output and no recognized context error.
 	return fmt.Errorf("%w: aborting push to prevent propagating corrupt chunks",
 		ErrDanglingReference)
 }
@@ -2526,6 +2743,26 @@ func fsckCouldNotOpen(output string) bool {
 	default:
 		return false
 	}
+}
+
+// fsckOutputInterrupted reports whether dolt fsck output is cancellation
+// noise from a dying process rather than an integrity finding. An fsck
+// interrupted mid-run (Ctrl-C, killed process group, expired deadline)
+// prints the literal cancellation text to its combined output before
+// exiting; treating that as a dangling-reference finding produces a false
+// corruption report for a plain interrupt (bd-f2b15).
+func fsckOutputInterrupted(output string) bool {
+	for _, phrase := range []string{
+		"context canceled",
+		"context deadline exceeded",
+		"signal: killed",
+		"signal: terminated",
+	} {
+		if strings.Contains(output, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // doltCLIPush shells out to `dolt push` from the database directory.

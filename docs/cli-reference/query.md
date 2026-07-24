@@ -1,6 +1,6 @@
 ---
 title: "bd query"
-description: "Query issues using a simple query language"
+description: "Query issues using a simple query language that supports compound filters,"
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

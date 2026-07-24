@@ -14,6 +14,7 @@ This section provides step-by-step recovery procedures for common Beads issues. 
 | Merge Conflicts | Dolt conflicts during sync | [Merge Conflicts](/recovery/merge-conflicts) |
 | Circular Dependencies | Cycle detection errors | [Circular Dependencies](/recovery/circular-dependencies) |
 | Sync Failures | `bd dolt push`/`bd dolt pull` errors | [Sync Failures](/recovery/sync-failures) |
+| History Bloat | Store grows unbounded; `dolt gc` reclaims nothing | [History Bloat](/recovery/history-squash) |
 | Removing beads | Uninstall bd or strip beads from a repo | [Uninstalling](/recovery/uninstalling) |
 
 ## Quick Diagnostic

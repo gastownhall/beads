@@ -33,6 +33,12 @@ type ClaimResult struct {
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*ClaimResult, error) {
+	// The CAS below writes assignee = actor. actor is user-settable (--actor /
+	// BEADS_ACTOR), so bound it against the VARCHAR(255) assignee column up front
+	// and return a typed ErrFieldTooLong rather than a raw backend error.
+	if err := types.CheckFieldLen("actor", actor); err != nil {
+		return nil, err
+	}
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 
@@ -44,12 +50,12 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 
 	now := time.Now().UTC()
 
-	// Stamp a lease on the claim: lease_expires_at = now + TTL, heartbeat_at =
-	// now, and a fresh row_lock (see lease.go). The lease is what makes a claim
-	// recoverable — a worker that dies stops heartbeating and bd reclaim later
-	// reverts the issue. row_lock here also forces a concurrent reclaim/heartbeat
-	// to conflict rather than silently cell-merge.
-	leaseClause, leaseArgs := leaseSetClause(now, leaseTTL(ctx))
+	// Rewrite row_lock with the claim (see lease.go): a concurrent reclaim or
+	// close on the same row is forced to conflict rather than silently
+	// cell-merge. The lease itself is granted separately below, in the
+	// ephemeral leases table — claims commit (status/assignee are
+	// history-worthy) but lease grants and heartbeats do not (bd-lrgn1).
+	rowLockClause, rowLockArgs := RowLockClause()
 
 	// An issue is claimable from "open" plus any configured custom status whose
 	// category is "active" (e.g. a draft->ready->in_progress lifecycle where
@@ -84,7 +90,7 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 		result sql.Result
 	)
 	if oldIssue.StartedAt == nil {
-		args := append([]interface{}{actor, now, now}, leaseArgs...)
+		args := append([]interface{}{actor, now, now}, rowLockArgs...)
 		args = append(args, id)
 		args = append(args, statusArgs...)
 		args = append(args, assigneeArgs...)
@@ -92,9 +98,9 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 			UPDATE %s
 			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
 			WHERE id = ? AND status IN (%s) AND (%s)
-		`, issueTable, leaseClause, statusPlaceholders, assigneePredicate), args...)
+		`, issueTable, rowLockClause, statusPlaceholders, assigneePredicate), args...)
 	} else {
-		args := append([]interface{}{actor, now}, leaseArgs...)
+		args := append([]interface{}{actor, now}, rowLockArgs...)
 		args = append(args, id)
 		args = append(args, statusArgs...)
 		args = append(args, assigneeArgs...)
@@ -102,7 +108,7 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 			UPDATE %s
 			SET assignee = ?, status = 'in_progress', updated_at = ?, %s
 			WHERE id = ? AND status IN (%s) AND (%s)
-		`, issueTable, leaseClause, statusPlaceholders, assigneePredicate), args...)
+		`, issueTable, rowLockClause, statusPlaceholders, assigneePredicate), args...)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to claim issue: %w", err)
@@ -137,7 +143,7 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 			// non-assignee reason (status changed underneath us): report the
 			// status rather than a misleading held-by-someone refusal.
 			if slices.Contains(pools, assignee) {
-				return nil, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, currentStatus)
+				return nil, fmt.Errorf("%w%s%s", storage.ErrNotClaimable, storage.NotClaimableStatusFragment, currentStatus)
 			}
 			if currentStatus == types.StatusOpen {
 				// Do not name a release command here — not `bd unclaim`, not
@@ -145,12 +151,28 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 				// pattern-matched by batch agents into an unclaim+claim
 				// steamroller of live claims (wy-yuclk). Point at the holder;
 				// bd reclaim is safe to name because it only recovers claims
-				// whose lease has already expired.
-				return nil, fmt.Errorf("issue already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", assignee)
+				// whose lease has already expired. Keep the %w wrap so this
+				// open-but-assigned refusal is still a classifiable claim
+				// conflict: the public IssueClaimer contract promises wrapped
+				// ErrAlreadyClaimed, and errors.Is / ParseClaimConflict (and the
+				// proxied batch exit code) key on it. This mirrors the
+				// domain-stack twin (domain.issueUseCaseImpl.claim, bd-at6rc),
+				// which already wraps the same message.
+				return nil, fmt.Errorf("%w: already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", storage.ErrAlreadyClaimed, assignee)
 			}
-			return nil, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, assignee)
+			return nil, fmt.Errorf("%w%s%s", storage.ErrAlreadyClaimed, storage.ClaimedByFragment, assignee)
 		}
-		return nil, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, currentStatus)
+		return nil, fmt.Errorf("%w%s%s", storage.ErrNotClaimable, storage.NotClaimableStatusFragment, currentStatus)
+	}
+
+	// Grant the lease: what makes the claim recoverable — a worker that dies
+	// stops heartbeating and bd reclaim later reverts the issue. Lease rows
+	// live in the ephemeral leases table (no Dolt commit, node-local). Wisps
+	// are never leased (they are ephemeral, not reclaimable work).
+	if !isWisp {
+		if err := UpsertLeaseInTx(ctx, tx, id, actor, now, leaseTTL(ctx)); err != nil {
+			return nil, err
+		}
 	}
 
 	// Record the claim event.
@@ -161,7 +183,7 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 	}
 	newData, _ := json.Marshal(newUpdates)
 
-	if err := RecordFullEventInTable(ctx, tx, eventTable, id, "claimed", actor, string(oldData), string(newData)); err != nil {
+	if err := RecordFullEventInTable(ctx, tx, eventTable, id, types.EventClaimed, actor, string(oldData), string(newData)); err != nil {
 		return nil, fmt.Errorf("failed to record claim event: %w", err)
 	}
 
@@ -181,7 +203,30 @@ func ClaimReadyIssueInTx(
 	claimFilter.Status = types.StatusOpen
 	claimFilter.Unassigned = true
 	claimFilter.Assignee = nil
+	// Claim only ever delivers the one issue it successfully claims below —
+	// the breaker's job is to bound delivered payloads, and a claim's
+	// payload is always exactly one row regardless of how large the ready
+	// pool it scanned was. So a rig-wide BEADS_MAX_ROWS/--max-rows cap
+	// (sized for bulk list/ready reads) must not fire here, and the scan
+	// itself must stay unbounded (Limit=0): the loop below walks
+	// readyIssues in order and continues past any that are transiently
+	// unclaimable (already claimed by a racing agent, etc), so bounding
+	// the scan to Limit=MaxRows (e.g. BEADS_MAX_ROWS=1 → scan only the
+	// single top-of-queue row) would make claim spuriously return "nothing
+	// to claim" whenever that narrow window is unclaimable, even with
+	// plenty of other ready work available. Clear the cap fields so
+	// GetReadyWorkInTx never returns ErrTooManyRows either.
+	//
+	// This is parity with pre-PR main (which never bounded the claim scan)
+	// and correctness-first: an unbounded scan preserves claim's existing
+	// fairness/ordering guarantee across the whole ready set. A paged scan
+	// that stays bounded while still walking past unclaimable rows is a
+	// reasonable follow-up, but it's a genuine behavior change (not a
+	// MaxRows-cap fix) and is deliberately deferred rather than folded in
+	// here.
 	claimFilter.Limit = 0
+	claimFilter.MaxRows = 0
+	claimFilter.MaxRowsSource = ""
 
 	readyIssues, err := GetReadyWorkInTx(ctx, tx, claimFilter)
 	if err != nil {

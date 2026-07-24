@@ -203,10 +203,14 @@ func executeMigrateIssues(ctx context.Context, p migrateIssuesParams) error {
 }
 
 func validateRepos(ctx context.Context, s storage.DoltStorage, from, to string, strict bool) error {
+	// migrate-issues is a round-trip path — opt out of BEADS_MAX_ROWS
+	// (designer §4.1) so a misconfigured env doesn't abort migration.
 	// Check if source repo has any issues
 	fromIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{
-		SourceRepo: &from,
-		Limit:      1,
+		SourceRepo:    &from,
+		Limit:         1,
+		MaxRows:       0,
+		MaxRowsSource: "",
 	})
 	if err != nil {
 		return fmt.Errorf("failed to check source repository: %w", err)
@@ -224,8 +228,10 @@ func validateRepos(ctx context.Context, s storage.DoltStorage, from, to string, 
 
 	// Check if destination repo exists (just a warning)
 	toIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{
-		SourceRepo: &to,
-		Limit:      1,
+		SourceRepo:    &to,
+		Limit:         1,
+		MaxRows:       0,
+		MaxRowsSource: "",
 	})
 	if err != nil {
 		return fmt.Errorf("failed to check destination repository: %w", err)
@@ -239,9 +245,12 @@ func validateRepos(ctx context.Context, s storage.DoltStorage, from, to string, 
 }
 
 func findCandidateIssues(ctx context.Context, s storage.DoltStorage, p migrateIssuesParams) ([]string, error) {
-	// Build filter from params
+	// Build filter from params. Opt out of BEADS_MAX_ROWS (designer §4.1) —
+	// migrate-issues is round-trip and must enumerate every candidate.
 	filter := types.IssueFilter{
-		SourceRepo: &p.from,
+		SourceRepo:    &p.from,
+		MaxRows:       0,
+		MaxRowsSource: "",
 	}
 
 	// Filter by status
@@ -485,7 +494,9 @@ func checkOrphanedDependencies(ctx context.Context, s storage.DoltStorage) ([]st
 	}
 
 	existingIssues, err := s.SearchIssues(ctx, "", types.IssueFilter{
-		IDs: idList,
+		IDs:           idList,
+		MaxRows:       0,
+		MaxRowsSource: "",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to check issue existence: %w", err)

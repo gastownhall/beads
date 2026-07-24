@@ -37,7 +37,10 @@ const waitsForGateBlockedSQL = `
 		  )
 		)
 		AND NOT (
-		  JSON_UNQUOTE(JSON_EXTRACT(d.metadata, '$.gate')) = 'any-children'
+		  -- COALESCE: metadata without a gate key (legacy '{}' rows) means the
+		  -- all-children default; a NULL here would poison the AND/NOT chain
+		  -- and unblock the gate as soon as any child closes.
+		  COALESCE(JSON_UNQUOTE(JSON_EXTRACT(d.metadata, '$.gate')), 'all-children') = 'any-children'
 		  AND (
 		    EXISTS (
 		      SELECT 1 FROM dependencies cd JOIN issues child ON child.id = cd.issue_id
@@ -332,29 +335,6 @@ func unmarkBlockedTemplateForWisps() string {
 		    )
 		  )
 	`, waitsForGateBlockedSQL)
-}
-
-// SelfReferentialRecomputeTemplates returns the four is_blocked recompute UPDATE
-// statements exactly as issueops emits them to the driver (with a representative
-// IN-clause batch substituted for the placeholder). Each one updates issues/wisps
-// while its WHERE clause self-references that same target table in EXISTS subqueries,
-// which MySQL 8 rejects with error 1093 unless the mysqldialect driver rewrites the
-// statement into a materialized derived-table form.
-//
-// It is exported solely so that rewrite can be regression-tested against these real
-// templates instead of a hand-copied fixture: if a template ever drifts out of the
-// shape the rewrite recognizes (a predicate before `id IN`, a backticked table, a
-// renamed alias, changed whitespace), the mysqldialect rewrite test fails in a normal
-// non-gated `go test` run rather than only under the env-gated MySQL conformance suite.
-func SelfReferentialRecomputeTemplates() []string {
-	placeholders, _ := buildSQLInClause([]string{"a", "b", "c"})
-	render := func(tmpl string) string { return fmt.Sprintf(tmpl, placeholders) }
-	return []string{
-		render(markBlockedTemplateForIssues()),
-		render(unmarkBlockedTemplateForIssues()),
-		render(markBlockedTemplateForWisps()),
-		render(unmarkBlockedTemplateForWisps()),
-	}
 }
 
 //nolint:gosec // G201: callers pass constant templates; only IN-clause placeholders are formatted in.

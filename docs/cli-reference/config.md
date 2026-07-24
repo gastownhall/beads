@@ -1,6 +1,6 @@
 ---
 title: "bd config"
-description: "Manage configuration settings"
+description: "Manage configuration settings for external integrations and preferences."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -17,12 +17,8 @@ Common namespaces:
   - jira.*            Jira integration settings
   - linear.*          Linear integration settings
   - github.*          GitHub integration settings
-  - gitlab.*          GitLab integration settings
-  - ado.*             Azure DevOps integration settings
-  - notion.*          Notion integration settings
   - custom.*          Custom integration settings
   - status.*          Issue status configuration
-  - claim.*           Claim arbitration settings (pool-aware claiming)
   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
 
 Auto-Export (config.yaml):
@@ -56,18 +52,6 @@ Custom Status States:
   This enables issues to use statuses like 'awaiting_review' in addition to
   the built-in statuses (open, in_progress, blocked, deferred, closed).
 
-Claim Pools:
-  A dispatcher can pre-assign issues to a pool pseudo-assignee (e.g.
-  "fable-crew") and let any actor take them with --claim. List the pool
-  aliases in the claim.pools config key, comma-separated:
-
-    bd config set claim.pools "fable-crew,night-crew"
-
-  Issues assigned to a real actor (or to an alias not in the list) keep
-  their anti-steal protection. Pool takes carry the normal lease; note
-  that if a taker's lease expires, bd reclaim returns the issue to the
-  unassigned pool, not to the pool alias it was dispatched to.
-
 Suppressing Doctor Warnings:
   Suppress specific bd doctor warnings by check name slug:
     bd config set doctor.suppress.pending-migrations true
@@ -84,7 +68,6 @@ Examples:
   bd config set jira.url "https://company.atlassian.net"
   bd config set jira.project "PROJ"
   bd config set status.custom "awaiting_review,awaiting_testing"
-  bd config set claim.pools "fable-crew,night-crew"    # Pool aliases claimable by any actor
   bd config set doctor.suppress.pending-migrations true
   bd config set dolt.debug true                        # Enable Dolt sql-server debug mode (loglevel=debug, --prof cpu)
   bd config set dolt.local-only true                   # Skip wiring a Dolt sync remote during bd init
@@ -93,7 +76,7 @@ Examples:
   bd config unset jira.url
 
 ```
-bd config [command]
+bd config [flags]
 ```
 
 ## bd config apply

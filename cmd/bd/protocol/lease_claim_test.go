@@ -235,12 +235,14 @@ func TestProtocol_LeaseFieldsExportToJSONL(t *testing.T) {
 // lease fields must survive the round trip, not just the export. bd import once
 // dropped them (wy-urlct: the sole issue INSERT path, issueops.InsertIssueIntoTable,
 // listed no lease columns), so an issue exported while claimed was imported as
-// in_progress with a NULL lease. Reclaim's stale predicate (L5.1) requires
-// lease_expires_at IS NOT NULL, which made such an issue unreclaimable by any
+// in_progress with a NULL lease. Reclaim only recovers leased claims (L5.1),
+// which made such an issue unreclaimable by any
 // reaper: stranded forever under a worker that may be long dead — exactly the
-// recoverability the lease exists to provide. The lease columns now ride the
-// upsert's stale-guard alongside status/assignee (see issueUpsertColumns), so
-// an import can restore a lease but a stale snapshot can never clobber a live one.
+// recoverability the lease exists to provide. Leases now live in the ephemeral
+// leases table (bd-lrgn1) and import restores them via
+// issueops.RestoreLeaseOnImportInTx, so an import can restore a lease but
+// snapshot data can never clobber a live (unexpired) local lease — pinned by
+// TestProtocol_ImportNeverClobbersLiveLocalLease.
 func TestProtocol_LeaseFieldsRoundTripJSONL(t *testing.T) {
 	t.Parallel()
 	w := newWorkspace(t)
@@ -264,6 +266,60 @@ func TestProtocol_LeaseFieldsRoundTripJSONL(t *testing.T) {
 	if restored["assignee"] != "alice" || restored["status"] != "in_progress" {
 		t.Errorf("L1.2: lease owner did not round-trip: assignee=%v status=%v, want alice/in_progress",
 			restored["assignee"], restored["status"])
+	}
+}
+
+// TestProtocol_ImportNeverClobbersLiveLocalLease pins the lease-restore guard
+// of clause L1.2 under the ephemeral leases table (bd-lrgn1): leases are
+// node-local — only enforceable on the node that granted them — so a snapshot
+// imported over a LIVE (unexpired) local lease must leave the local lease
+// untouched, even when the snapshot's issue row is strictly newer and its
+// other fields win the stale-guard merge. Only an expired (or absent) local
+// lease may be replaced by snapshot lease data.
+func TestProtocol_ImportNeverClobbersLiveLocalLease(t *testing.T) {
+	t.Parallel()
+	w := newWorkspace(t)
+
+	leased := w.create("--title", "Locally claimed", "--type", "task")
+	w.runEnv([]string{"BEADS_ACTOR=alice"}, "update", leased, "--claim")
+	local := w.showJSON(leased)
+	localExpiry := requireRFC3339(t, local, "lease_expires_at", leased)
+	if !localExpiry.After(time.Now()) {
+		t.Fatalf("precondition: local lease already expired (%v)", localExpiry)
+	}
+
+	// Craft a snapshot of the same issue that is strictly NEWER by updated_at
+	// and carries different (also-live) lease timestamps — as if exported from
+	// another node that also believes it holds the claim.
+	snapshot := map[string]any{}
+	for k, v := range local {
+		snapshot[k] = v
+	}
+	delete(snapshot, "labels")
+	snapshot["updated_at"] = time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	snapshot["lease_expires_at"] = time.Now().UTC().Add(30 * time.Hour).Format(time.RFC3339)
+	snapshot["heartbeat_at"] = time.Now().UTC().Add(29 * time.Hour).Format(time.RFC3339)
+	snapshot["notes"] = "remote edit that must land"
+
+	line, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal snapshot: %v", err)
+	}
+	path := filepath.Join(w.dir, "remote.jsonl")
+	if err := os.WriteFile(path, append(line, '\n'), 0o644); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+	w.run("import", path)
+
+	restored := w.showJSON(leased)
+	// The newer snapshot's row fields won the merge...
+	if restored["notes"] != "remote edit that must land" {
+		t.Errorf("newer snapshot's field edit did not land: notes=%v", restored["notes"])
+	}
+	// ...but the live local lease was NOT clobbered by the snapshot's lease.
+	if back := requireRFC3339(t, restored, "lease_expires_at", leased); !back.Equal(localExpiry) {
+		t.Errorf("import clobbered a live local lease: expiry was %v, now %v (snapshot's was ~30h out)",
+			localExpiry, back)
 	}
 }
 
