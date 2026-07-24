@@ -571,15 +571,17 @@ var doltTracer = otel.Tracer("github.com/steveyegge/beads/storage/dolt")
 // Instruments are registered against the global delegating provider at init time,
 // so they automatically forward to the real provider once telemetry.Init() runs.
 var doltMetrics struct {
-	retryCount          metric.Int64Counter
-	lockWaitMs          metric.Float64Histogram
-	circuitTrips        metric.Int64Counter
-	circuitRejected     metric.Int64Counter
-	serializationErrors metric.Int64Counter
-	writeRetries        metric.Int64Counter
-	connAcquireMs       metric.Float64Histogram
-	poolWaitCount       metric.Int64Counter
-	poolWaitMs          metric.Float64Histogram
+	retryCount           metric.Int64Counter
+	lockWaitMs           metric.Float64Histogram
+	circuitTrips         metric.Int64Counter
+	circuitRejected      metric.Int64Counter
+	serializationErrors  metric.Int64Counter
+	writeRetries         metric.Int64Counter
+	connAcquireMs        metric.Float64Histogram
+	poolWaitCount        metric.Int64Counter
+	poolWaitMs           metric.Float64Histogram
+	claimVerifyLost      metric.Int64Counter
+	claimVerifyRecovered metric.Int64Counter
 }
 
 func init() {
@@ -619,6 +621,14 @@ func init() {
 	doltMetrics.poolWaitMs, _ = m.Float64Histogram("bd.db.pool_wait_ms",
 		metric.WithDescription("Total time connections spent waiting due to pool exhaustion"),
 		metric.WithUnit("ms"),
+	)
+	doltMetrics.claimVerifyLost, _ = m.Int64Counter("bd.claim_verify_lost_total",
+		metric.WithDescription("Claim-family writes that reported success but failed verify-by-re-read (label: op=claim|unclaim)"),
+		metric.WithUnit("{write}"),
+	)
+	doltMetrics.claimVerifyRecovered, _ = m.Int64Counter("bd.claim_verify_recovered_total",
+		metric.WithDescription("Indeterminate claim-family commits resolved by re-read (label: op, outcome=applied|replayed)"),
+		metric.WithUnit("{write}"),
 	)
 }
 

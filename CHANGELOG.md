@@ -154,6 +154,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every remote-ahead case, as before
   ([#4259](https://github.com/gastownhall/beads/issues/4259)).
 
+### Fixed
+
+- **Claim-family writes are now verified by re-read in Dolt server mode**
+  (bd-zccb9, from wyvern incident wy-ejph3). Under a degraded sql-server the
+  exit status of `bd update --claim` / `bd claim` / unclaim was not truth in
+  either direction: a claim could report success while the server-side
+  transaction died with the abandoned connection and rolled back (a phantom
+  claim that later cost a duplicate implementation), and conversely a
+  connection error could print with the write actually applied. After the
+  claim transaction, bd now re-reads the issue's assignee and status on a
+  fresh connection and resolves the outcome against the database: a reported
+  success that did not land fails loudly ("treat the claim as NOT applied");
+  an ambiguous commit-phase loss is settled by the re-read — verified applied
+  becomes an accurate success, verified rolled back is replayed once (safe:
+  nothing landed). Applies to claim, ready-claim, and unclaim in server mode;
+  wisps and embedded mode are unchanged. New metrics
+  `bd.claim_verify_lost_total` and `bd.claim_verify_recovered_total` count
+  loud failures and converted outcomes.
+
 ## [1.1.0] - 2026-07-04
 
 First stable release of the 1.1.0 line. It consolidates everything from
