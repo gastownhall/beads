@@ -56,6 +56,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ownership check itself — foreign unclaim requires `--force` — landed in
   [#4675](https://github.com/gastownhall/beads/pull/4675).)
 
+### Fixed
+
+- **`bd dolt clean-databases` now purges what it drops** (be-pq5,
+  [#3663](https://github.com/gastownhall/beads/pull/3663)). `DROP DATABASE`
+  only moves a database's directory under `.dolt_dropped_databases/`; Dolt
+  keeps the on-disk data there until an explicit
+  `CALL DOLT_PURGE_DROPPED_DATABASES()`. The operator-facing cleanup command
+  dropped stale `testdb_*`/`benchdb_*`/etc. databases from `SHOW DATABASES`
+  but never issued that purge, so disk usage on the shared Dolt server stayed
+  high across repeated runs. `clean-databases` now purges once after the drop
+  loop; a failed purge is reported as a warning rather than aborting the
+  command, since the databases are already dropped from the server's active
+  set at that point.
+
 ### Added
 
 - **Pool-aware claiming via the `claim.pools` config key** (bd-bguz6).

@@ -1004,6 +1004,7 @@ on the shared Dolt server from interrupted test runs and terminated agents.
 Stale database prefixes: testdb_*, beads_test*, beads_pt*, beads_vr*, doctest_*, doctortest_*, benchdb_*
 
 These waste server memory and can degrade performance under concurrent load.
+After dropping, runs CALL DOLT_PURGE_DROPPED_DATABASES() to actually reclaim disk.
 Use --dry-run to see what would be dropped without actually dropping.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		beadsDir := selectedDoltBeadsDir()
@@ -1119,8 +1120,37 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 			}
 		}
 		fmt.Printf("\nDropped %d/%d stale databases.\n", dropped, len(stale))
+
+		// DROP DATABASE only marks a database as dropped; Dolt moves its
+		// directory under .dolt_dropped_databases/ so `dolt_undrop()` can
+		// restore it, but leaves the disk footprint in place until an
+		// explicit purge. Without this, repeated clean-databases runs keep
+		// dropping databases from SHOW DATABASES while disk usage stays
+		// high (be-pq5).
+		if dropped > 0 {
+			fmt.Println()
+			if err := purgeDroppedDatabases(context.Background(), db); err != nil {
+				fmt.Fprintf(os.Stderr, "  WARN: PURGE_DROPPED_DATABASES failed: %v\n", err)
+				fmt.Fprintln(os.Stderr, "  Disk may not be reclaimed until purge succeeds. Try `dolt sql -q 'CALL DOLT_PURGE_DROPPED_DATABASES()'`.")
+			} else {
+				fmt.Println("Reclaimed disk for dropped databases.")
+			}
+		}
 		return nil
 	},
+}
+
+// purgeDroppedDatabases issues Dolt's DOLT_PURGE_DROPPED_DATABASES() stored
+// procedure, which permanently deletes database directories that DROP
+// DATABASE only moved into .dolt_dropped_databases/. Extracted so tests can
+// drive it directly against a live test server without going through the
+// full clean-databases command wiring (config loading, SHOW DATABASES scan,
+// batching/backoff).
+func purgeDroppedDatabases(ctx context.Context, db *sql.DB) error {
+	purgeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	_, err := db.ExecContext(purgeCtx, "CALL DOLT_PURGE_DROPPED_DATABASES()")
+	return err
 }
 
 // --- Dolt remote management commands ---
