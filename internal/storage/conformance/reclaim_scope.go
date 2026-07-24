@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -53,17 +54,7 @@ func testReclaimScoped(t *testing.T, f Factory) {
 		must(t, err)
 		return got.Status == types.StatusInProgress
 	}
-	eq := func(got, want []string) bool {
-		if len(got) != len(want) {
-			return false
-		}
-		for i := range got {
-			if got[i] != want[i] {
-				return false
-			}
-		}
-		return true
-	}
+	eq := slices.Equal[[]string]
 
 	// --label (AND-set): only lane-b's stale lease is reverted; the lane-a and
 	// unlabeled claims are untouched even though a global reaper would take them.
