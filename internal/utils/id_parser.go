@@ -151,6 +151,11 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 		if issueHash == hashPart {
 			exactMatch = id
 			// Don't break - keep searching in case there's a full ID match
+		} else if strings.HasPrefix(issueHash, hashPart) {
+			// Leading-prefix abbreviation (documented UX, e.g. "a3f8" -> "a3f8e9...").
+			// HasPrefix rather than Contains: reject interior-substring matches
+			// like "kt8" inside "j0kt8" (GH#4234).
+			matches = append(matches, id)
 		}
 	}
 
@@ -177,8 +182,15 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 				} else {
 					wHash = wID
 				}
-				if wHash == hashPart {
+				// Wisp IDs are shaped "<prefix>-wisp-<hash>", so wHash here is
+				// the composite "wisp-<hash>". Strip the literal "wisp-" infix
+				// before comparing so bare-hash lookups (e.g. "t3st") resolve
+				// against the isolated hash, not the full "wisp-t3st" string.
+				wispHash := strings.TrimPrefix(wHash, "wisp-")
+				if wHash == hashPart || wispHash == hashPart {
 					exactMatch = wID
+				} else if strings.HasPrefix(wispHash, hashPart) {
+					matches = append(matches, wID)
 				}
 			}
 			if exactMatch != "" {
