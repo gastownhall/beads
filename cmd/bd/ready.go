@@ -218,13 +218,13 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if claimReady {
 			CheckReadonly("ready --claim")
 		} else {
-			routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
+			routedStore, routed, routingRule, err := openRoutedReadStore(ctx, activeStore)
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
 			if routed {
 				defer func() { _ = routedStore.Close() }()
-				printContributorRoutingNotice(ctx, activeStore)
+				printContributorRoutingNotice(ctx, activeStore, routingRule)
 				activeStore = routedStore
 			}
 		}
