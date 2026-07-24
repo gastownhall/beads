@@ -14,7 +14,7 @@
 | CI | `gh:run` | GitHub Actions run ID | Wait for GitHub Actions completion |
 | PR | `gh:pr` | PR number | Wait for PR merge |
 | Timer | `timer` | — | Deployment propagation delay |
-| Bead | `bead` | `<rig>:<bead-id>` | Wait for a cross-rig bead to close |
+| Bead | `bead` | `<bead-id>` (local) | Wait for another local bead to close |
 
 ---
 
@@ -37,10 +37,14 @@ bd gate create --type gh:pr --blocks bd-abc \
 bd gate create --type timer --blocks bd-abc \
   --timeout 15m
 
-# Cross-rig bead gate
+# Bead gate (waits for a local bead to close)
 bd gate create --type bead --blocks bd-abc \
-  --await-id other-project:op-abc123
+  --await-id bd-xyz
 ```
+
+> Note: cross-rig await IDs (`<rig>:<bead-id>`) are accepted at create time
+> but are not currently evaluable — the gate stays pending forever. Use a
+> local bead ID.
 
 **Required options**:
 - `--blocks <issue-id>` — Issue that stays blocked until the gate resolves
