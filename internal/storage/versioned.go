@@ -37,6 +37,27 @@ type RemoteInfo struct {
 	URL  string `json:"url"`  // Remote URL (e.g., "dolthub://org/repo")
 }
 
+// RebaseRenumber records a single child issue that was renumbered to clear a
+// cross-clone hierarchical-ID collision. When the renumbered issue had its own
+// descendants, those were rewritten under NewID too (reported only by the
+// top-of-subtree row here).
+type RebaseRenumber struct {
+	OldID  string `json:"old_id"`
+	NewID  string `json:"new_id"`
+	Parent string `json:"parent"`
+}
+
+// RebaseReport summarizes what `bd dolt rebase` did: which side dominated, the
+// pre-mutation backup tag, every renumbered child, and the final child-counter
+// high-water set per affected parent. Renumbered is empty when there were no
+// collisions to resolve (the caller should fall back to a plain pull).
+type RebaseReport struct {
+	Direction   string           `json:"direction"` // "remote-dominates" | "local-dominates"
+	BackupTag   string           `json:"backup_tag"`
+	Renumbered  []RebaseRenumber `json:"renumbered"`
+	CountersSet map[string]int   `json:"counters_set"`
+}
+
 // SyncStatus describes the synchronization state with a peer.
 type SyncStatus struct {
 	Peer         string    // Peer name

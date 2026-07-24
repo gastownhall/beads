@@ -392,6 +392,35 @@ func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
 	})
 }
 
+// RebaseRemote reconciles cross-clone hierarchical child-ID collisions with
+// remote that a plain pull cannot auto-merge (#4796): it fetches, renumbers the
+// losing side's colliding children, and completes the merge. The fetch and the
+// rebase run on one pinned session so the fetched tracking ref and the branch
+// checkouts stay visible across statements, mirroring PullRemote.
+func (s *EmbeddedDoltStore) RebaseRemote(ctx context.Context, remote string, localDominates bool) (*storage.RebaseReport, error) {
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return nil, fmt.Errorf("commit pending before rebase: %w", err)
+	}
+	preHead := s.preMergeHead(ctx)
+	trackingRef := remote + "/" + s.branch
+	var report *storage.RebaseReport
+	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		if ferr := versioncontrolops.Fetch(ctx, db, remote, remoteAuthUser()); ferr != nil {
+			return fmt.Errorf("fetch %s before rebase: %w", remote, ferr)
+		}
+		r, rerr := versioncontrolops.RebaseChildCollisions(ctx, db, trackingRef, localDominates)
+		report = r
+		return rerr
+	})
+	if err != nil {
+		return report, err
+	}
+	if err := s.recomputeBlockedAfterPull(ctx, preHead); err != nil {
+		return report, fmt.Errorf("rebase succeeded but is_blocked recompute failed: %w", err)
+	}
+	return report, nil
+}
+
 func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.Push(ctx, db, peer, s.branch, remoteAuthUser())
