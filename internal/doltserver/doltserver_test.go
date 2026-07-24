@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
+
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 )
@@ -1428,6 +1430,22 @@ func TestSharedServerDir_EnvOverride(t *testing.T) {
 	}
 }
 
+func TestSharedServerPath_EnvOverrideDoesNotCreateDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "not-created")
+	t.Setenv("BEADS_SHARED_SERVER_DIR", dir)
+
+	got, err := SharedServerPath()
+	if err != nil {
+		t.Fatalf("SharedServerPath: %v", err)
+	}
+	if got != dir {
+		t.Fatalf("SharedServerPath = %q, want %q", got, dir)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("SharedServerPath created or touched %q: stat error = %v", dir, err)
+	}
+}
+
 func TestSharedDoltDir_EnvOverride(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("BEADS_SHARED_SERVER_DIR", tmp)
@@ -1889,6 +1907,358 @@ func TestBuildDoltServerArgs_NoDebugFlagsWhenDisabled(t *testing.T) {
 	}
 	if logLevel == "debug" {
 		t.Errorf("non-debug mode must not use --loglevel=debug; got: %v", args)
+	}
+}
+
+// TestBuildDoltServerYAMLConfig verifies the --config counterpart to
+// buildDoltServerArgs: it must round-trip through Dolt's own YAML loader
+// with the same host/port/log-level as the CLI-flag form, plus
+// auto_gc_behavior.archive_level: 0 (the actual Snappy-GC fix,
+// gastownhall/beads#4986) and auto-GC left enabled, plus cfg_dir set to the
+// caller-resolved value (gastownhall/beads#4986 round 2: --config mode
+// skips Dolt's own .doltcfg discovery, so this must be set explicitly).
+func TestBuildDoltServerYAMLConfig(t *testing.T) {
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, false, "/tmp/some/.doltcfg")
+	if err != nil {
+		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
+	}
+
+	cfg, err := servercfg.NewYamlConfig(body)
+	if err != nil {
+		t.Fatalf("servercfg.NewYamlConfig could not parse generated config: %v\nconfig:\n%s", err, body)
+	}
+	if got := cfg.Host(); got != "127.0.0.1" {
+		t.Errorf("Host = %q, want %q", got, "127.0.0.1")
+	}
+	if got := cfg.Port(); got != 54321 {
+		t.Errorf("Port = %d, want %d", got, 54321)
+	}
+	if got := string(cfg.LogLevel()); got != doltServerLogLevel {
+		t.Errorf("LogLevel = %q, want %q", got, doltServerLogLevel)
+	}
+	if got := cfg.CfgDir(); got != "/tmp/some/.doltcfg" {
+		t.Errorf("CfgDir = %q, want %q", got, "/tmp/some/.doltcfg")
+	}
+
+	gc := cfg.AutoGCBehavior()
+	if gc == nil {
+		t.Fatal("AutoGCBehavior is nil; expected archive_level: 0 to be set")
+	}
+	if got := gc.ArchiveLevel(); got != 0 {
+		t.Errorf("ArchiveLevel = %d, want 0 (Snappy, not zstd)", got)
+	}
+	if !gc.Enable() {
+		t.Error("auto-GC must remain enabled; only the archive level should change")
+	}
+}
+
+// TestBuildDoltServerYAMLConfig_DebugLogLevel asserts debug mode raises the
+// YAML config's log level the same way buildDoltServerArgs does for the
+// CLI-flag form.
+func TestBuildDoltServerYAMLConfig_DebugLogLevel(t *testing.T) {
+	body, err := buildDoltServerYAMLConfig("127.0.0.1", 54321, true, "/tmp/some/.doltcfg")
+	if err != nil {
+		t.Fatalf("buildDoltServerYAMLConfig: %v", err)
+	}
+	cfg, err := servercfg.NewYamlConfig(body)
+	if err != nil {
+		t.Fatalf("servercfg.NewYamlConfig: %v", err)
+	}
+	if got := string(cfg.LogLevel()); got != "debug" {
+		t.Errorf("debug mode LogLevel = %q, want %q", got, "debug")
+	}
+}
+
+// physicalTempDir returns t.TempDir() with symlinks resolved. resolveCfgDir
+// deliberately normalizes doltDir via filepath.EvalSymlinks, and on macOS
+// t.TempDir() lives under /var/folders which is a symlink to
+// /private/var/folders — expected paths must be built from the physical
+// root or the comparison fails on that platform alone.
+func physicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(t.TempDir()): %v", err)
+	}
+	return dir
+}
+
+// TestResolveCfgDir_NeitherExists is the common case: no parent or
+// data-dir .doltcfg found on disk, so resolveCfgDir must default to
+// dataDir/.doltcfg — matching Dolt's own flag-mode default ("Assign the one
+// that exists, defaults to current if neither exist" in setupDoltConfig).
+func TestResolveCfgDir_NeitherExists(t *testing.T) {
+	doltDir := filepath.Join(physicalTempDir(t), "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatalf("mkdir doltDir: %v", err)
+	}
+
+	got, err := resolveCfgDir(doltDir)
+	if err != nil {
+		t.Fatalf("resolveCfgDir: %v", err)
+	}
+	want, err := filepath.Abs(filepath.Join(doltDir, doltCfgDirName))
+	if err != nil {
+		t.Fatalf("filepath.Abs: %v", err)
+	}
+	if got != want {
+		t.Errorf("resolveCfgDir = %q, want %q", got, want)
+	}
+}
+
+// TestResolveCfgDir_ParentExists is the actual bug this fix addresses: a
+// legacy deployment previously run in CLI-flag mode discovered a parent
+// ../.doltcfg (holding privileges.db/branch_control.db). --config mode
+// would otherwise silently ignore it; resolveCfgDir must find it and point
+// cfg_dir there instead of a fresh dataDir/.doltcfg.
+func TestResolveCfgDir_ParentExists(t *testing.T) {
+	root := physicalTempDir(t)
+	doltDir := filepath.Join(root, "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatalf("mkdir doltDir: %v", err)
+	}
+	parentCfg := filepath.Join(root, doltCfgDirName)
+	if err := os.MkdirAll(parentCfg, 0o755); err != nil {
+		t.Fatalf("mkdir parent .doltcfg: %v", err)
+	}
+	// Seed it so this test would fail loudly if resolution pointed elsewhere.
+	if err := os.WriteFile(filepath.Join(parentCfg, "privileges.db"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed privileges.db: %v", err)
+	}
+
+	got, err := resolveCfgDir(doltDir)
+	if err != nil {
+		t.Fatalf("resolveCfgDir: %v", err)
+	}
+	want, err := filepath.Abs(parentCfg)
+	if err != nil {
+		t.Fatalf("filepath.Abs: %v", err)
+	}
+	if got != want {
+		t.Errorf("resolveCfgDir = %q, want parent %q (existing users/branch-control must not be abandoned)", got, want)
+	}
+}
+
+// TestResolveCfgDir_CurrentExists asserts a data-dir .doltcfg (no parent
+// one) resolves to itself, matching flag-mode's "look in data directory"
+// branch.
+func TestResolveCfgDir_CurrentExists(t *testing.T) {
+	root := physicalTempDir(t)
+	doltDir := filepath.Join(root, "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatalf("mkdir doltDir: %v", err)
+	}
+	currCfg := filepath.Join(doltDir, doltCfgDirName)
+	if err := os.MkdirAll(currCfg, 0o755); err != nil {
+		t.Fatalf("mkdir data-dir .doltcfg: %v", err)
+	}
+
+	got, err := resolveCfgDir(doltDir)
+	if err != nil {
+		t.Fatalf("resolveCfgDir: %v", err)
+	}
+	want, err := filepath.Abs(currCfg)
+	if err != nil {
+		t.Fatalf("filepath.Abs: %v", err)
+	}
+	if got != want {
+		t.Errorf("resolveCfgDir = %q, want %q", got, want)
+	}
+}
+
+// TestResolveCfgDir_BothExistIsAmbiguous mirrors Dolt's own
+// ErrMultipleDoltCfgDirs case: resolveCfgDir must refuse to guess when both
+// a parent and a data-dir .doltcfg exist, rather than silently picking one
+// and risking the same class of silent data loss this fix exists to
+// prevent.
+func TestResolveCfgDir_BothExistIsAmbiguous(t *testing.T) {
+	root := t.TempDir()
+	doltDir := filepath.Join(root, "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatalf("mkdir doltDir: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, doltCfgDirName), 0o755); err != nil {
+		t.Fatalf("mkdir parent .doltcfg: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(doltDir, doltCfgDirName), 0o755); err != nil {
+		t.Fatalf("mkdir data-dir .doltcfg: %v", err)
+	}
+
+	_, err := resolveCfgDir(doltDir)
+	if err == nil {
+		t.Fatal("resolveCfgDir: expected an error when both parent and data-dir .doltcfg exist, got nil")
+	}
+	if !errors.Is(err, ErrMultipleDoltCfgDirs) {
+		t.Errorf("resolveCfgDir error = %v, want errors.Is(_, ErrMultipleDoltCfgDirs)", err)
+	}
+}
+
+// TestResolveCfgDir_FileNotDirIgnored asserts a plain file named .doltcfg
+// (not a directory) is not mistaken for a real .doltcfg dir — matches
+// Dolt's own dEnv.FS.Exists(...) check, which also requires isDir.
+func TestResolveCfgDir_FileNotDirIgnored(t *testing.T) {
+	root := physicalTempDir(t)
+	doltDir := filepath.Join(root, "dolt")
+	if err := os.MkdirAll(doltDir, 0o755); err != nil {
+		t.Fatalf("mkdir doltDir: %v", err)
+	}
+	// A stray file (not a dir) named .doltcfg next to doltDir must be ignored.
+	if err := os.WriteFile(filepath.Join(root, doltCfgDirName), []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("write stray file: %v", err)
+	}
+
+	got, err := resolveCfgDir(doltDir)
+	if err != nil {
+		t.Fatalf("resolveCfgDir: %v", err)
+	}
+	want, err := filepath.Abs(filepath.Join(doltDir, doltCfgDirName))
+	if err != nil {
+		t.Fatalf("filepath.Abs: %v", err)
+	}
+	if got != want {
+		t.Errorf("resolveCfgDir = %q, want default %q (stray non-dir file must be ignored)", got, want)
+	}
+}
+
+// TestResolveCfgDir_SymlinkedDataDirFindsPhysicalParent covers the round-3
+// verification finding (gastownhall/beads#4986): filepath.Join(doltDir,
+// "..", ...) cleans ".." lexically, without touching the filesystem. If
+// doltDir is itself a symlink, that yields the symlink's own lexical
+// parent directory — not the physical parent of whatever directory the
+// symlink actually points at. But the real `dolt` child process's own
+// "../.doltcfg" lookup is a bare relative path resolved against its
+// actual, kernel-tracked cwd, which chdir into a symlink resolves
+// PHYSICALLY on Linux. A naive lexical join therefore misses a parent
+// .doltcfg that sits next to the physical target directory, silently
+// falling back to a fresh $data_dir/.doltcfg — the exact data-loss
+// scenario this whole fix exists to prevent.
+//
+// Layout:
+//
+//	<root>/physical/parent/target/          (the real data directory)
+//	<root>/physical/parent/.doltcfg/         (the REAL parent .doltcfg)
+//	<root>/lexical/doltlink -> .../target    (symlink passed as doltDir)
+//
+// A lexically-parent-of-the-symlink directory (<root>/lexical/.doltcfg) is
+// deliberately never created, so a buggy lexical resolution would find
+// nothing there and fall through to the (also nonexistent, but still
+// wrong) default $data_dir/.doltcfg instead of the real one.
+func TestResolveCfgDir_SymlinkedDataDirFindsPhysicalParent(t *testing.T) {
+	root := t.TempDir()
+
+	physicalParent := filepath.Join(root, "physical", "parent")
+	physicalTarget := filepath.Join(physicalParent, "target")
+	if err := os.MkdirAll(physicalTarget, 0o755); err != nil {
+		t.Fatalf("mkdir physical target: %v", err)
+	}
+	physicalCfgDir := filepath.Join(physicalParent, doltCfgDirName)
+	if err := os.MkdirAll(physicalCfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir physical .doltcfg: %v", err)
+	}
+	// Seed it so this test would fail loudly if resolution missed it.
+	if err := os.WriteFile(filepath.Join(physicalCfgDir, "privileges.db"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed privileges.db: %v", err)
+	}
+
+	lexicalDir := filepath.Join(root, "lexical")
+	if err := os.MkdirAll(lexicalDir, 0o755); err != nil {
+		t.Fatalf("mkdir lexical dir: %v", err)
+	}
+	symlinkedDoltDir := filepath.Join(lexicalDir, "doltlink")
+	if err := os.Symlink(physicalTarget, symlinkedDoltDir); err != nil {
+		t.Skipf("symlink not supported on this platform: %v", err)
+	}
+
+	got, err := resolveCfgDir(symlinkedDoltDir)
+	if err != nil {
+		t.Fatalf("resolveCfgDir: %v", err)
+	}
+
+	wantPhysical, err := filepath.EvalSymlinks(physicalCfgDir)
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks(physicalCfgDir): %v", err)
+	}
+	want, err := filepath.Abs(wantPhysical)
+	if err != nil {
+		t.Fatalf("filepath.Abs: %v", err)
+	}
+
+	if got != want {
+		t.Errorf("resolveCfgDir(%q) = %q, want the PHYSICAL parent .doltcfg %q "+
+			"(existing users/branch-control must not be abandoned behind a symlinked data dir)",
+			symlinkedDoltDir, got, want)
+	}
+
+	// Sanity: the naive lexical join must NOT be what we got, or this test
+	// would pass vacuously against a regression.
+	lexicalWrong := filepath.Join(lexicalDir, doltCfgDirName)
+	if got == lexicalWrong {
+		t.Errorf("resolveCfgDir resolved to the lexical-parent-of-the-symlink %q, "+
+			"not the physical parent — this is the exact bug this test guards against", lexicalWrong)
+	}
+}
+
+// TestBuildDoltServerArgsWithConfig mirrors TestBuildDoltServerArgs_DebugMode
+// for the --config launch form: --prof/--prof-path must still precede
+// sql-server (top-level dolt flags), and --config must carry the path
+// unmodified. Per Dolt's own sql-server docs, --config causes all other
+// sql-server flags (host/port/log-level) to be ignored, so this form MUST
+// NOT also pass -H/-P/--loglevel.
+func TestBuildDoltServerArgsWithConfig(t *testing.T) {
+	t.Run("non-debug", func(t *testing.T) {
+		args := buildDoltServerArgsWithConfig("/tmp/dolt-server-config.yaml", false, "")
+		if len(args) == 0 || args[0] != "sql-server" {
+			t.Fatalf("args[0] = %q, want %q; full args: %v", firstOrEmpty(args), "sql-server", args)
+		}
+		cfgIdx := indexOf(args, "--config")
+		if cfgIdx < 0 || cfgIdx+1 >= len(args) {
+			t.Fatalf("missing --config <path> in args: %v", args)
+		}
+		if got := args[cfgIdx+1]; got != "/tmp/dolt-server-config.yaml" {
+			t.Errorf("--config value = %q, want %q", got, "/tmp/dolt-server-config.yaml")
+		}
+		for _, flag := range []string{"-H", "-P", "--loglevel"} {
+			if indexOf(args, flag) >= 0 {
+				t.Errorf("--config mode must not also pass %s (Dolt ignores it, and its presence is misleading): %v", flag, args)
+			}
+		}
+	})
+
+	t.Run("debug mode places --prof before sql-server", func(t *testing.T) {
+		const profDir = "/tmp/test-pprof"
+		args := buildDoltServerArgsWithConfig("/tmp/dolt-server-config.yaml", true, profDir)
+		subIdx := indexOf(args, "sql-server")
+		if subIdx < 0 {
+			t.Fatalf("missing sql-server in args: %v", args)
+		}
+		profIdx := indexOf(args, "--prof")
+		if profIdx < 0 || profIdx >= subIdx {
+			t.Fatalf("--prof must precede sql-server; got: %v", args)
+		}
+		pathIdx := indexOf(args, "--prof-path")
+		if pathIdx < 0 || pathIdx >= subIdx {
+			t.Fatalf("--prof-path must precede sql-server; got: %v", args)
+		}
+		if got := args[pathIdx+1]; got != profDir {
+			t.Errorf("--prof-path value = %q, want %q", got, profDir)
+		}
+	})
+}
+
+func TestDoltServerConfigPath(t *testing.T) {
+	got := doltServerConfigPath("/tmp/some/.beads")
+	want := filepath.Join("/tmp/some/.beads", "dolt-server-config.yaml")
+	if got != want {
+		t.Errorf("doltServerConfigPath = %q, want %q", got, want)
+	}
+}
+
+// TestStateFilePaths_IncludesGeneratedConfig guards against the generated
+// sql-server config leaking as an untracked leftover after Stop/RemoveState.
+func TestStateFilePaths_IncludesGeneratedConfig(t *testing.T) {
+	paths := StateFilePaths("/tmp/some/.beads")
+	if indexOf(paths, doltServerConfigPath("/tmp/some/.beads")) < 0 {
+		t.Errorf("StateFilePaths does not include the generated sql-server config; got: %v", paths)
 	}
 }
 

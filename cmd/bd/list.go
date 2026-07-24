@@ -39,8 +39,36 @@ func withStorage(ctx context.Context, store storage.DoltStorage, dbPath string, 
 	return fmt.Errorf("no storage available")
 }
 
+// withFetchOneExtra bumps Limit by one so the caller can detect "more
+// results than the limit" (GH#3212) by comparing len(results) against the
+// original limit.
+//
+// `--limit N --max-rows N` (equal) needs special handling so this bump
+// doesn't collide with the MaxRows cap check: EffectiveSearchLimit treats
+// Limit==MaxRows as "no overage sniff" (returns Limit verbatim, no +1 — see
+// EffectiveSearchLimit's doc and the WithLimit_LimitAtCap_NoError storage
+// test), but bumping Limit to N+1 alone flips that to Limit>MaxRows, which
+// *does* sniff for overage — so the probe row itself would trip
+// EnforceMaxRowsCap(N+1, N, ...) even though the delivered set is always
+// trimmed back to N. Bumping MaxRows by one in lockstep, only in this exact
+// N==M case, keeps the probe row inside the (temporarily N+1) cap so
+// EnforceMaxRowsCap never fires on it while still fetching N+1 rows for the
+// truncation check below. This can't false-negative a real violation: the
+// query's own LIMIT is capped at N+1 either way, so "more than N+1 matches
+// exist" was already undetectable at Limit==MaxRows before this bump ever
+// existed (same "no overage detection above the equal cap" contract
+// EffectiveSearchLimit documents for the unbumped case).
+//
+// This does not change the Limit>MaxRows (tighter-cap) or Limit<MaxRows
+// cases: EffectiveSearchLimit's branch selection there is unaffected by a
+// one-row bump to Limit, and MaxRows is left untouched, so a genuine
+// tighter-cap violation still fires with the correct (unbumped) Cap value
+// in the error message.
 func withFetchOneExtra(filter types.IssueFilter) types.IssueFilter {
 	if filter.Limit > 0 {
+		if filter.MaxRows > 0 && filter.Limit == filter.MaxRows {
+			filter.MaxRows++
+		}
 		filter.Limit++
 	}
 	return filter
@@ -62,6 +90,8 @@ func readyWorkFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 		ExcludeTypes:   filter.ExcludeTypes,
 		MetadataFields: filter.MetadataFields,
 		HasMetadataKey: filter.HasMetadataKey,
+		MaxRows:        filter.MaxRows,
+		MaxRowsSource:  filter.MaxRowsSource,
 	}
 	if filter.IssueType != nil {
 		wf.Type = string(*filter.IssueType)
@@ -200,12 +230,18 @@ func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore
 	displayPrettyListWithDeps(issues, true, allDeps)
 }
 
-func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool, effectiveLimit int) {
+// watchIssues returns an error only for the initial query — a failure there
+// means bd list --watch never displayed anything, so (unlike a mid-poll
+// refresh failure, which just logs and keeps the last good snapshot on
+// screen) it must propagate to the caller. In particular this lets
+// runListCore route a MaxRows cap violation through handleMaxRowsError for
+// exit-code-2 semantics instead of watchIssues swallowing it and exiting 0
+// (be-x42v.4 follow-up, review MUST-FIX 5).
+func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool, effectiveLimit int) error {
 	// Initial display
 	issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error querying issues: %v\n", err)
-		return
+		return err
 	}
 	truncated := effectiveLimit > 0 && len(issues) > effectiveLimit
 	if truncated {
@@ -230,7 +266,7 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 		select {
 		case <-sigChan:
 			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
-			return
+			return nil
 		case <-ticker.C:
 			issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
 			if err != nil {
@@ -483,6 +519,9 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if usesProxiedServer() {
+		if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
+			return err
+		}
 		if err := runListProxiedServer(cmd, rootCtx, in); err != nil {
 			return HandleError("%v", err)
 		}
@@ -501,6 +540,12 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return HandleError("%v", err)
 	}
+	maxRows, maxRowsSource, err := resolveMaxRows(cmd)
+	if err != nil {
+		return err
+	}
+	filter.MaxRows = maxRows
+	filter.MaxRowsSource = maxRowsSource
 
 	ctx := rootCtx
 
@@ -515,7 +560,12 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if in.watchMode {
-		watchIssues(ctx, activeStore, filter, in.readyFlag, in.parentID, in.sortBy, in.reverse, in.effectiveLimit)
+		if err := watchIssues(ctx, activeStore, filter, in.readyFlag, in.parentID, in.sortBy, in.reverse, in.effectiveLimit); err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
+			return HandleError("querying issues: %v", err)
+		}
 		return nil
 	}
 
@@ -528,6 +578,9 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			iwc, err = activeStore.SearchIssuesWithCounts(ctx, "", withFetchOneExtra(filter))
 		}
 		if err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleError("%v", err)
 		}
 		sortIssuesWithCounts(iwc, in.sortBy, in.reverse)
@@ -558,12 +611,18 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		var err error
 		issues, err = activeStore.GetReadyWork(ctx, wf)
 		if err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleError("%v", err)
 		}
 	} else {
 		var err error
 		issues, err = activeStore.SearchIssues(ctx, "", withFetchOneExtra(filter))
 		if err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleError("%v", err)
 		}
 	}
@@ -764,6 +823,9 @@ func init() {
 
 	// Ready filter: show only issues ready to be worked on (bd-ihu31)
 	listCmd.Flags().Bool("ready", false, "Show only ready issues (no active blockers, same semantics as bd ready)")
+
+	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
+	addMaxRowsFlag(listCmd)
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)

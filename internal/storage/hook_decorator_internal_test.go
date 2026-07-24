@@ -25,6 +25,9 @@ type fakeHookStore struct {
 	DoltStorage
 	issues           map[string]*types.Issue
 	dropDependencies bool
+	// updateCheckedErr, when non-nil, is returned by UpdateIssueChecked so a test
+	// can simulate an inner refusal (e.g. ErrVersionMismatch). nil = success.
+	updateCheckedErr error
 }
 
 func (s fakeHookStore) CreateIssue(_ context.Context, issue *types.Issue, _ string) error {
@@ -60,6 +63,10 @@ func (s fakeHookStore) GetDependencyRecords(_ context.Context, id string) ([]*ty
 		return nil, nil
 	}
 	return cloneDependenciesForHook(issue.Dependencies), nil
+}
+
+func (s fakeHookStore) UpdateIssueChecked(_ context.Context, _ string, _ map[string]interface{}, _ string, _ UpdateIssueOptions) error {
+	return s.updateCheckedErr
 }
 
 func (s fakeHookStore) RunInTransaction(ctx context.Context, _ string, fn func(tx Transaction) error) error {
@@ -451,4 +458,50 @@ func TestNewHookFiringStoreNilRunnerSkipsCreateHooks(t *testing.T) {
 	if err := store.CreateIssue(context.Background(), issue, "tester"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
+}
+
+// TestHookFiringStoreUpdateIssueCheckedFiresOnSuccessOnly locks in the
+// HookFiringStore.UpdateIssueChecked override: it fires exactly one on_update
+// hook when the inner update succeeds, and fires NO hook when the inner update
+// refuses (ErrVersionMismatch). Because HookFiringStore embeds DoltStorage, a
+// deleted override would silently passthrough and skip the hook (the success
+// case would fail) — and a refusal must not look like a successful update to
+// hook consumers (the error case).
+func TestHookFiringStoreUpdateIssueCheckedFiresOnSuccessOnly(t *testing.T) {
+	t.Run("success fires one on_update", func(t *testing.T) {
+		runner := &recordingHookRunner{}
+		inner := fakeHookStore{issues: map[string]*types.Issue{
+			"uc-hook": {ID: "uc-hook", Title: "updated"},
+		}}
+		store := &HookFiringStore{DoltStorage: inner, inner: inner, runner: runner}
+
+		if err := store.UpdateIssueChecked(context.Background(), "uc-hook",
+			map[string]interface{}{"title": "updated"}, "tester", UpdateIssueOptions{}); err != nil {
+			t.Fatalf("UpdateIssueChecked: %v", err)
+		}
+		wantEvents := []string{hooks.EventUpdate}
+		if !reflect.DeepEqual(runner.events, wantEvents) {
+			t.Fatalf("events = %v, want %v", runner.events, wantEvents)
+		}
+	})
+
+	t.Run("version-mismatch refusal fires no hook", func(t *testing.T) {
+		runner := &recordingHookRunner{}
+		inner := fakeHookStore{
+			issues:           map[string]*types.Issue{"uc-hook": {ID: "uc-hook"}},
+			updateCheckedErr: ErrVersionMismatch,
+		}
+		store := &HookFiringStore{DoltStorage: inner, inner: inner, runner: runner}
+
+		v := int64(1)
+		err := store.UpdateIssueChecked(context.Background(), "uc-hook",
+			map[string]interface{}{"title": "nope"}, "tester",
+			UpdateIssueOptions{ExpectedVersion: &v})
+		if !errors.Is(err, ErrVersionMismatch) {
+			t.Fatalf("err = %v, want errors.Is(_, ErrVersionMismatch)", err)
+		}
+		if len(runner.events) != 0 {
+			t.Fatalf("events = %v, want none (a refused update must not fire on_update)", runner.events)
+		}
+	})
 }

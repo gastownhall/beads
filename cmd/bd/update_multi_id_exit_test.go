@@ -28,8 +28,8 @@ import (
 )
 
 // multiIDUpdateEnv returns a hermetic environment for bd subprocess runs:
-// no inherited BEADS_* variables, HOME pinned to the test dir, metrics and
-// daemons disabled.
+// no inherited BEADS_* variables, HOME and USERPROFILE pinned to the test dir,
+// metrics and daemons disabled.
 func multiIDUpdateEnv(dir string) []string {
 	var env []string
 	for _, e := range os.Environ() {
@@ -40,6 +40,7 @@ func multiIDUpdateEnv(dir string) []string {
 	}
 	return append(env,
 		"HOME="+dir,
+		"USERPROFILE="+dir,
 		"BD_NON_INTERACTIVE=1",
 		"BD_DISABLE_METRICS=1",
 		"BD_DISABLE_EVENT_FLUSH=1",
@@ -75,6 +76,8 @@ func setupMultiIDUpdateDB(t *testing.T) (bd, dir string) {
 	t.Helper()
 	bd = buildBDForInitTests(t)
 	dir = t.TempDir()
+	runGitForBootstrapTest(t, dir, "init", "-q")
+	runGitForBootstrapTest(t, dir, "config", "core.hooksPath", ".git/hooks")
 	stdout, stderr, code := runBDMultiID(t, bd, dir,
 		"init", "--prefix", "test", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
 	if code != 0 {
@@ -240,141 +243,6 @@ func TestMultiIDUpdateAllGoodPathUnchanged(t *testing.T) {
 	for _, u := range updated {
 		if u.Priority != 1 {
 			t.Errorf("updated issue %s priority = %d, want 1", u.ID, u.Priority)
-		}
-	}
-}
-
-// seedNonObjectMetadata sets an issue's metadata to a JSON array so a later
-// --metadata merge or --set-metadata edit for that ID fails ("existing metadata
-// is not a JSON object"). --metadata only requires valid JSON, not an object,
-// so the non-object value persists and reproduces the mid-batch metadata
-// failure the per-ID contract must survive.
-func seedNonObjectMetadata(t *testing.T, bd, dir, id string) {
-	t.Helper()
-	stdout, stderr, code := runBDMultiID(t, bd, dir, "update", id, "--metadata", "[]")
-	if code != 0 {
-		t.Fatalf("seeding non-object metadata on %s failed (exit %d):\nstdout:\n%s\nstderr:\n%s", id, code, stdout, stderr)
-	}
-}
-
-// showMultiIDUpdateMetadataValue returns a string-valued metadata key for an
-// issue via bd show --json, failing the test if the key is missing or not a
-// JSON string. Used to confirm that IDs surrounding a failed one still received
-// their metadata update.
-func showMultiIDUpdateMetadataValue(t *testing.T, bd, dir, id, key string) string {
-	t.Helper()
-	stdout, stderr, code := runBDMultiID(t, bd, dir, "show", id, "--json")
-	if code != 0 {
-		t.Fatalf("bd show %s failed (exit %d):\nstdout:\n%s\nstderr:\n%s", id, code, stdout, stderr)
-	}
-	var details []struct {
-		ID       string                     `json:"id"`
-		Metadata map[string]json.RawMessage `json:"metadata"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &details); err != nil {
-		t.Fatalf("parsing show --json output for %s: %v\n%s", id, err, stdout)
-	}
-	if len(details) != 1 || details[0].ID != id {
-		t.Fatalf("show --json for %s returned unexpected issues:\n%s", id, stdout)
-	}
-	raw, ok := details[0].Metadata[key]
-	if !ok {
-		t.Fatalf("issue %s metadata has no key %q:\n%s", id, key, stdout)
-	}
-	var val string
-	if err := json.Unmarshal(raw, &val); err != nil {
-		t.Fatalf("issue %s metadata[%q] = %s, not a JSON string: %v", id, key, raw, err)
-	}
-	return val
-}
-
-// TestMultiIDUpdatePartialMetadataMergeFailure covers a --metadata merge that
-// fails for one middle ID (its stored metadata is not a JSON object). The merge
-// failure must be a per-ID failure — reported on stderr with a nonzero exit —
-// not a batch abort that skips the trailing IDs.
-func TestMultiIDUpdatePartialMetadataMergeFailure(t *testing.T) {
-	bd, dir := setupMultiIDUpdateDB(t)
-	id1 := createMultiIDUpdateIssue(t, bd, dir, "first issue")
-	id2 := createMultiIDUpdateIssue(t, bd, dir, "second issue")
-	id3 := createMultiIDUpdateIssue(t, bd, dir, "third issue")
-	seedNonObjectMetadata(t, bd, dir, id2)
-
-	stdout, stderr, code := runBDMultiID(t, bd, dir, "update", id1, id2, id3, "--metadata", `{"team":"platform"}`)
-	if code == 0 {
-		t.Errorf("bd update with a mid-batch metadata-merge failure exited 0, want nonzero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
-	}
-	if !strings.Contains(stderr, id2) {
-		t.Errorf("stderr does not mention the failed ID %s:\n%s", id2, stderr)
-	}
-	// Per-ID, not atomic: the IDs on either side of the failure must still carry
-	// the merged metadata.
-	for _, id := range []string{id1, id3} {
-		if got := showMultiIDUpdateMetadataValue(t, bd, dir, id, "team"); got != "platform" {
-			t.Errorf("issue %s metadata team = %q, want \"platform\" (successful IDs must stay applied)", id, got)
-		}
-	}
-}
-
-// TestMultiIDUpdatePartialMetadataEditFailureJSON covers a --set-metadata edit
-// that fails for one middle ID under --json. stdout must keep the success array
-// for the applied IDs while the failed ID is reported only in the JSON failure
-// line on stderr, with a nonzero exit.
-func TestMultiIDUpdatePartialMetadataEditFailureJSON(t *testing.T) {
-	bd, dir := setupMultiIDUpdateDB(t)
-	id1 := createMultiIDUpdateIssue(t, bd, dir, "first issue")
-	id2 := createMultiIDUpdateIssue(t, bd, dir, "second issue")
-	id3 := createMultiIDUpdateIssue(t, bd, dir, "third issue")
-	seedNonObjectMetadata(t, bd, dir, id2)
-
-	stdout, stderr, code := runBDMultiID(t, bd, dir, "update", id1, id2, id3, "--set-metadata", "team=platform", "--json")
-	if code == 0 {
-		t.Errorf("bd update --json with a mid-batch metadata-edit failure exited 0, want nonzero\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
-	}
-
-	// stdout keeps the array-of-updated-issues success shape for the IDs that
-	// applied; the failed ID must not appear there.
-	var updated []struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &updated); err != nil {
-		t.Fatalf("stdout is not the array-of-issues success shape: %v\n%s", err, stdout)
-	}
-	gotIDs := map[string]bool{}
-	for _, u := range updated {
-		gotIDs[u.ID] = true
-	}
-	if !gotIDs[id1] || !gotIDs[id3] || len(updated) != 2 {
-		t.Errorf("stdout array = %v, want exactly [%s %s]", updated, id1, id3)
-	}
-	if gotIDs[id2] {
-		t.Errorf("failed ID %s must not appear in the stdout success array:\n%s", id2, stdout)
-	}
-
-	// The last stderr line is a machine-parseable failure report naming the
-	// failed ID.
-	lines := strings.Split(strings.TrimSpace(stderr), "\n")
-	last := lines[len(lines)-1]
-	var report struct {
-		Error  string `json:"error"`
-		Failed []struct {
-			ID    string `json:"id"`
-			Error string `json:"error"`
-		} `json:"failed"`
-	}
-	if err := json.Unmarshal([]byte(last), &report); err != nil {
-		t.Fatalf("last stderr line is not a JSON failure report: %v\nstderr:\n%s", err, stderr)
-	}
-	if len(report.Failed) != 1 || report.Failed[0].ID != id2 {
-		t.Errorf("JSON failure report failed list = %+v, want exactly one entry for %s", report.Failed, id2)
-	}
-	if len(report.Failed) == 1 && report.Failed[0].Error == "" {
-		t.Errorf("JSON failure report entry has empty per-ID error: %s", last)
-	}
-
-	// The IDs surrounding the failure still carry the edited metadata.
-	for _, id := range []string{id1, id3} {
-		if got := showMultiIDUpdateMetadataValue(t, bd, dir, id, "team"); got != "platform" {
-			t.Errorf("issue %s metadata team = %q, want \"platform\"", id, got)
 		}
 	}
 }

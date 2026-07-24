@@ -92,6 +92,19 @@ func (s *EmbeddedDoltStore) GetDependencyRecordsForIssues(ctx context.Context, i
 	return result, err
 }
 
+// GetDependentRecordsForIssues returns the raw inbound dependency rows for a SET
+// of target ids in one batched read, keyed by target id. Delegates to
+// issueops.GetDependentRecordsForIssuesInTx for shared query logic.
+func (s *EmbeddedDoltStore) GetDependentRecordsForIssues(ctx context.Context, targetIDs []string) (map[string][]*types.Dependency, error) {
+	var result map[string][]*types.Dependency
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependentRecordsForIssuesInTx(ctx, tx, targetIDs)
+		return err
+	})
+	return result, err
+}
+
 func (s *EmbeddedDoltStore) GetDependencyCounts(ctx context.Context, issueIDs []string) (map[string]*types.DependencyCounts, error) {
 	var result map[string]*types.DependencyCounts
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {

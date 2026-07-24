@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -82,7 +83,10 @@ Examples:
 `,
 	RunE: func(_ *cobra.Command, _ []string) error {
 		if usesProxiedServer() {
-			return HandleErrorRespectJSON("admin compact is not supported in proxied-server mode")
+			if compactDolt {
+				return runCompactDoltProxiedServer(rootCtx)
+			}
+			return HandleErrorRespectJSON("only 'compact --dolt' is supported in proxied-server mode")
 		}
 		// Block mutating operations in embedded mode; allow --stats, --analyze, --dry-run read-only paths.
 		if !compactStats && !compactAnalyze && !compactDryRun {
@@ -807,10 +811,25 @@ func runCompactDolt() error {
 		fmt.Printf("Running Dolt garbage collection...\n")
 	}
 
-	// Run dolt gc
-	cmd := exec.Command("dolt", "gc") // #nosec G204 -- fixed command, no user input
+	// Run dolt gc without archive compression. Level 0 writes classic Snappy
+	// table files instead of zstd archives, matching the in-process GC paths.
+	// The external `dolt` on PATH has no version guarantee (unlike the
+	// in-process paths, which are pinned by go.mod), so an older dolt that
+	// predates --archive-level would otherwise abort compact where plain
+	// `dolt gc` used to work. Detect that specific unknown-flag rejection
+	// and retry with plain `dolt gc` rather than fail outright; any other
+	// error (a genuine GC failure) is not swallowed.
+	cmd := exec.Command("dolt", "gc", "--archive-level", "0") // #nosec G204 -- fixed command, no user input
 	cmd.Dir = doltPath
 	output, err := cmd.CombinedOutput()
+	if err != nil && isUnknownArchiveLevelFlagError(string(output)) {
+		if !jsonOutput {
+			fmt.Fprintf(os.Stderr, "Notice: external dolt does not support --archive-level; falling back to plain 'dolt gc' (new table files may still use zstd archives)\n")
+		}
+		fallbackCmd := exec.Command("dolt", "gc") // #nosec G204 -- fixed command, no user input
+		fallbackCmd.Dir = doltPath
+		output, err = fallbackCmd.CombinedOutput()
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: dolt gc failed: %v\n", err)
 		if len(output) > 0 {
@@ -852,6 +871,29 @@ func runCompactDolt() error {
 	fmt.Printf("  %s → %s (freed %s)\n", formatBytes(sizeBefore), formatBytes(sizeAfter), formatBytes(freed))
 	fmt.Printf("  Time: %v\n", elapsed)
 	return nil
+}
+
+// isUnknownArchiveLevelFlagError reports whether output (the combined
+// stdout+stderr of `dolt gc --archive-level 0`) indicates the external dolt
+// binary rejected --archive-level as an unrecognized flag, rather than a
+// genuine GC failure. Older Dolt releases that predate the flag report this
+// via the pinned dolt module's argparser, e.g.:
+//
+//	error: unknown option `archive-level'
+//
+// (see libraries/utils/argparser/errors.go in the pinned dolthub/dolt/go
+// module). The check requires both an "unknown flag" phrasing AND the flag
+// name to appear in the output, so a real GC failure that happens to
+// contain the word "unknown" elsewhere is never misclassified as a missing
+// flag and silently swallowed — genuine failures continue to fail.
+func isUnknownArchiveLevelFlagError(output string) bool {
+	lower := strings.ToLower(output)
+	if !strings.Contains(lower, "archive-level") && !strings.Contains(lower, "archive_level") {
+		return false
+	}
+	return strings.Contains(lower, "unknown option") ||
+		strings.Contains(lower, "unknown flag") ||
+		strings.Contains(lower, "flag provided but not defined")
 }
 
 // getDirSize calculates the total size of a directory recursively

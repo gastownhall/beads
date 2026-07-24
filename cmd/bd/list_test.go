@@ -568,6 +568,131 @@ func TestListQueryCapabilitiesSuite(t *testing.T) {
 	})
 }
 
+// TestListLabelFiltersAcnquj covers the acceptance criteria for be-acnquj
+// (label/title-contains filters silently ignored). Before the fix, every
+// label filter returned the full open set, breaking factory routing. Each
+// subtest fails if the corresponding filter is not actually applied.
+func TestListLabelFiltersAcnquj(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	mk := func(title string, labels ...string) *types.Issue {
+		issue := &types.Issue{
+			Title:     title,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Status:    types.StatusOpen,
+		}
+		if err := s.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("create %q: %v", title, err)
+		}
+		for _, label := range labels {
+			if err := s.AddLabel(ctx, issue.ID, label, "test-user"); err != nil {
+				t.Fatalf("addLabel %s/%s: %v", issue.ID, label, err)
+			}
+		}
+		return issue
+	}
+
+	apple := mk("apple pie", "fruit", "dessert")
+	orange := mk("orange juice", "fruit", "drink")
+	water := mk("water bottle", "drink")
+	rock := mk("rock formation")
+	techDebt := mk("tech debt: refactor cache", "tech-debt")
+	techLegacy := mk("tech legacy: old API", "tech-legacy")
+
+	idsOf := func(issues []*types.Issue) map[string]bool {
+		out := make(map[string]bool, len(issues))
+		for _, i := range issues {
+			out[i.ID] = true
+		}
+		return out
+	}
+
+	// AC#1: -l X returns ONLY beads with label X.
+	t.Run("label_single", func(t *testing.T) {
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{Labels: []string{"fruit"}})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		got := idsOf(results)
+		if !got[apple.ID] || !got[orange.ID] {
+			t.Errorf("expected apple+orange, got %v", got)
+		}
+		if got[water.ID] || got[rock.ID] {
+			t.Errorf("water/rock should not match -l fruit, got %v", got)
+		}
+	})
+
+	// AC#1 + AC#6: -l X -l Y (AND semantics).
+	t.Run("label_and_composition", func(t *testing.T) {
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{Labels: []string{"fruit", "drink"}})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		got := idsOf(results)
+		if len(got) != 1 || !got[orange.ID] {
+			t.Errorf("expected only orange (fruit AND drink), got %v", got)
+		}
+	})
+
+	// AC#2: --label-any A,B (OR semantics).
+	t.Run("label_any_or_composition", func(t *testing.T) {
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{LabelsAny: []string{"dessert", "drink"}})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		got := idsOf(results)
+		if !got[apple.ID] || !got[orange.ID] || !got[water.ID] {
+			t.Errorf("expected apple+orange+water (dessert OR drink), got %v", got)
+		}
+		if got[rock.ID] {
+			t.Errorf("rock should not match dessert/drink, got %v", got)
+		}
+	})
+
+	// AC#3: --label-pattern glob matches labels by pattern.
+	t.Run("label_pattern_glob", func(t *testing.T) {
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{LabelPattern: "tech-*"})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		got := idsOf(results)
+		if !got[techDebt.ID] || !got[techLegacy.ID] {
+			t.Errorf("expected tech-* labels to match, got %v", got)
+		}
+		if got[apple.ID] || got[water.ID] {
+			t.Errorf("non-tech labels should not match tech-*, got %v", got)
+		}
+	})
+
+	// AC#4: --title-contains case-insensitive substring.
+	t.Run("title_contains_case_insensitive", func(t *testing.T) {
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{TitleContains: "PIE"})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		got := idsOf(results)
+		if len(got) != 1 || !got[apple.ID] {
+			t.Errorf("expected only apple (title contains 'pie'), got %v", got)
+		}
+	})
+
+	// AC#5: -l NONEXISTENT returns empty.
+	t.Run("label_nonexistent_empty", func(t *testing.T) {
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{Labels: []string{"ZZZZZZZZ-no-such-label"}})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		if len(results) != 0 {
+			t.Errorf("expected empty result for nonexistent label, got %d issues", len(results))
+		}
+	})
+}
+
 // TestStableTreeOrdering tests that tree display order is stable across multiple invocations
 // This test specifically addresses the bug where --tree output was non-deterministic due to
 // unstable ordering of root issues and children within the same priority level

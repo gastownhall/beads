@@ -32,9 +32,6 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("info is not supported in proxied-server mode")
-		}
 		evt := metrics.NewCommandEvent("info")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -55,126 +52,121 @@ Examples:
 			return showWhatsNew()
 		}
 
-		// Get database path (absolute)
-		absDBPath, err := filepath.Abs(dbPath)
-		if err != nil {
-			absDBPath = dbPath
+		if usesProxiedServer() {
+			return runInfoProxiedServer(rootCtx, schemaFlag)
 		}
 
-		// Build info structure
+		absDBPath := absoluteDBPath()
+
 		info := map[string]interface{}{
 			"database_path": absDBPath,
 			"mode":          "direct",
 		}
 
-		// Get issue count from direct store
 		if store != nil {
 			ctx := rootCtx
 
-			filter := types.IssueFilter{}
-			issues, err := store.SearchIssues(ctx, "", filter)
+			issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 			if err == nil {
 				info["issue_count"] = len(issues)
 			}
-		}
 
-		// Add config to info output
-		if store != nil {
-			ctx := rootCtx
 			configMap, err := store.GetAllConfig(ctx)
 			if err == nil && len(configMap) > 0 {
 				info["config"] = configMap
 			}
-		}
 
-		// Add schema information if requested
-		if schemaFlag && store != nil {
-			ctx := rootCtx
-
-			// Get schema version
-			schemaVersion, err := store.GetLocalMetadata(ctx, "bd_version")
-			if err != nil {
-				schemaVersion = "unknown"
-			}
-
-			// Get tables
-			tables := []string{"issues", "dependencies", "labels", "config", "metadata"}
-
-			// Get config
-			configMap := make(map[string]string)
-			prefix, _ := store.GetConfig(ctx, "issue_prefix") // Best effort: empty prefix is valid
-			if prefix != "" {
-				configMap["issue_prefix"] = prefix
-			}
-
-			// Get sample issue IDs
-			filter := types.IssueFilter{}
-			issues, err := store.SearchIssues(ctx, "", filter)
-			sampleIDs := []string{}
-			detectedPrefix := ""
-			if err == nil && len(issues) > 0 {
-				// Get first 3 issue IDs as samples
-				maxSamples := 3
-				if len(issues) < maxSamples {
-					maxSamples = len(issues)
+			if schemaFlag {
+				schemaVersion, err := store.GetLocalMetadata(ctx, "bd_version")
+				if err != nil {
+					schemaVersion = "unknown"
 				}
-				for i := 0; i < maxSamples; i++ {
-					sampleIDs = append(sampleIDs, issues[i].ID)
-				}
-				// Detect prefix from first issue
-				if len(issues) > 0 {
-					detectedPrefix = extractPrefix(issues[0].ID)
-				}
-			}
-
-			info["schema"] = map[string]interface{}{
-				"tables":           tables,
-				"schema_version":   schemaVersion,
-				"config":           configMap,
-				"sample_issue_ids": sampleIDs,
-				"detected_prefix":  detectedPrefix,
+				prefix, _ := store.GetConfig(ctx, "issue_prefix") // Best effort: empty prefix is valid
+				info["schema"] = buildInfoSchema(schemaVersion, prefix, issues)
 			}
 		}
 
-		if jsonOutput {
-			return outputJSON(info)
-		}
-
-		fmt.Println("\nBeads Database Information")
-		fmt.Println("===========================")
-		fmt.Printf("Database: %s\n", absDBPath)
-		fmt.Printf("Mode: direct\n")
-
-		// Show issue count
-		if count, ok := info["issue_count"].(int); ok {
-			fmt.Printf("\nIssue Count: %d\n", count)
-		}
-
-		// Show schema information if requested
-		if schemaFlag {
-			if schemaInfo, ok := info["schema"].(map[string]interface{}); ok {
-				fmt.Println("\nSchema Information:")
-				fmt.Printf("  Tables: %v\n", schemaInfo["tables"])
-				if version, ok := schemaInfo["schema_version"].(string); ok {
-					fmt.Printf("  Schema Version: %s\n", version)
-				}
-				if prefix, ok := schemaInfo["detected_prefix"].(string); ok && prefix != "" {
-					fmt.Printf("  Detected Prefix: %s\n", prefix)
-				}
-				if samples, ok := schemaInfo["sample_issue_ids"].([]string); ok && len(samples) > 0 {
-					fmt.Printf("  Sample Issues: %v\n", samples)
-				}
-			}
-		}
-
-		hookStatuses := CheckGitHooks()
-		if warning := FormatHookWarnings(hookStatuses); warning != "" {
-			fmt.Printf("\n%s\n", warning)
-		}
-
-		fmt.Println()
-		return nil
+		return renderInfo(info, schemaFlag, absDBPath)
 	},
+}
+
+func absoluteDBPath() string {
+	absDBPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		return dbPath
+	}
+	return absDBPath
+}
+
+func buildInfoSchema(schemaVersion, prefix string, issues []*types.Issue) map[string]interface{} {
+	tables := []string{"issues", "dependencies", "labels", "config", "metadata"}
+
+	configMap := make(map[string]string)
+	if prefix != "" {
+		configMap["issue_prefix"] = prefix
+	}
+
+	sampleIDs := []string{}
+	detectedPrefix := ""
+	if len(issues) > 0 {
+		maxSamples := 3
+		if len(issues) < maxSamples {
+			maxSamples = len(issues)
+		}
+		for i := 0; i < maxSamples; i++ {
+			sampleIDs = append(sampleIDs, issues[i].ID)
+		}
+		detectedPrefix = extractPrefix(issues[0].ID)
+	}
+
+	return map[string]interface{}{
+		"tables":           tables,
+		"schema_version":   schemaVersion,
+		"config":           configMap,
+		"sample_issue_ids": sampleIDs,
+		"detected_prefix":  detectedPrefix,
+	}
+}
+
+func renderInfo(info map[string]interface{}, schemaFlag bool, absDBPath string) error {
+	if jsonOutput {
+		return outputJSON(info)
+	}
+
+	mode, _ := info["mode"].(string)
+
+	fmt.Println("\nBeads Database Information")
+	fmt.Println("===========================")
+	fmt.Printf("Database: %s\n", absDBPath)
+	fmt.Printf("Mode: %s\n", mode)
+
+	if count, ok := info["issue_count"].(int); ok {
+		fmt.Printf("\nIssue Count: %d\n", count)
+	}
+
+	if schemaFlag {
+		if schemaInfo, ok := info["schema"].(map[string]interface{}); ok {
+			fmt.Println("\nSchema Information:")
+			fmt.Printf("  Tables: %v\n", schemaInfo["tables"])
+			if version, ok := schemaInfo["schema_version"].(string); ok {
+				fmt.Printf("  Schema Version: %s\n", version)
+			}
+			if prefix, ok := schemaInfo["detected_prefix"].(string); ok && prefix != "" {
+				fmt.Printf("  Detected Prefix: %s\n", prefix)
+			}
+			if samples, ok := schemaInfo["sample_issue_ids"].([]string); ok && len(samples) > 0 {
+				fmt.Printf("  Sample Issues: %v\n", samples)
+			}
+		}
+	}
+
+	hookStatuses := CheckGitHooks()
+	if warning := FormatHookWarnings(hookStatuses); warning != "" {
+		fmt.Printf("\n%s\n", warning)
+	}
+
+	fmt.Println()
+	return nil
 }
 
 // extractPrefix extracts the prefix from an issue ID (e.g., "bd-123" -> "bd")
@@ -1458,6 +1450,5 @@ func init() {
 	infoCmd.Flags().Bool("schema", false, "Include schema information in output")
 	infoCmd.Flags().Bool("whats-new", false, "Show agent-relevant changes from recent versions")
 	infoCmd.Flags().Bool("thanks", false, "Show thank you page for contributors")
-	infoCmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	rootCmd.AddCommand(infoCmd)
 }

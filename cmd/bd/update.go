@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -30,7 +32,12 @@ create, update, show, or close operation).
 
 Updates are applied per issue ID, not atomically across IDs: when some IDs
 fail, the remaining issues are still updated, every failed ID is reported on
-stderr, and the command exits nonzero.`,
+stderr, and the command exits nonzero.
+
+Exit codes: 1 for general failures; 13 when every failure is a stale
+--if-assignee/--if-status guard (the precondition no longer held, nothing was
+written — another actor won the race, so retrying the same guard is
+pointless).`,
 	Args:          cobra.MinimumNArgs(0),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -138,7 +145,7 @@ stderr, and the command exits nonzero.`,
 		}
 		if cmd.Flags().Changed("append-notes") {
 			appendNotes, _ := cmd.Flags().GetString("append-notes")
-			updates["append_notes"] = appendNotes
+			updates[issueops.OpAppendNotes] = appendNotes
 		}
 		if cmd.Flags().Changed("acceptance") || cmd.Flags().Changed("acceptance-criteria") {
 			var acceptanceCriteria string
@@ -292,7 +299,10 @@ stderr, and the command exits nonzero.`,
 			if !json.Valid([]byte(metadataJSON)) {
 				return HandleErrorRespectJSON("invalid JSON in --metadata: must be valid JSON")
 			}
-			updates["metadata"] = json.RawMessage(metadataJSON)
+			// Passed as a merge OPERATION, not a pre-merged value: the storage
+			// layer re-reads and merges inside the mutation transaction so a
+			// concurrent writer's keys survive (lost-update fix).
+			updates[issueops.OpMergeMetadata] = json.RawMessage(metadataJSON)
 		}
 
 		// Incremental metadata edits (GH#1406)
@@ -301,9 +311,11 @@ stderr, and the command exits nonzero.`,
 		if (len(setMetadataFlags) > 0 || len(unsetMetadataFlags) > 0) && cmd.Flags().Changed("metadata") {
 			return HandleErrorRespectJSON("cannot combine --metadata with --set-metadata or --unset-metadata")
 		}
-		if len(setMetadataFlags) > 0 || len(unsetMetadataFlags) > 0 {
-			updates["_set_metadata"] = setMetadataFlags
-			updates["_unset_metadata"] = unsetMetadataFlags
+		if len(setMetadataFlags) > 0 {
+			updates[issueops.OpSetMetadata] = setMetadataFlags
+		}
+		if len(unsetMetadataFlags) > 0 {
+			updates[issueops.OpUnsetMetadata] = unsetMetadataFlags
 		}
 
 		// Get claim flag
@@ -312,6 +324,15 @@ stderr, and the command exits nonzero.`,
 		if len(updates) == 0 && !claimFlag {
 			fmt.Println("No updates specified")
 			return nil
+		}
+
+		// Conditional-update guards (bd-wsqvw): validated against the same
+		// status set as --status, mutually exclusive with --claim (which is
+		// its own compare-and-set), and only meaningful with a field update
+		// to ride on.
+		ifAssignee, ifStatus, err := updateGuardsFromFlags(cmd, claimFlag, updates)
+		if err != nil {
+			return err
 		}
 
 		ctx := rootCtx
@@ -323,6 +344,7 @@ stderr, and the command exits nonzero.`,
 			failures = append(failures, updateIDFailure{ID: id, Error: reason})
 		}
 		mutatedStores := map[storage.DoltStorage][]string{}
+		notesOverwriteWarnings := map[storage.DoltStorage][]string{}
 		mutatedResults := map[*RoutedResult]bool{}
 		pendingCloseResults := []*RoutedResult{}
 		trackMutation := func(result *RoutedResult) {
@@ -390,11 +412,16 @@ stderr, and the command exits nonzero.`,
 				trackMutation(result)
 			}
 
-			// Apply regular field updates if any
+			// Apply regular field updates if any. Metadata edits (--metadata,
+			// --set-metadata, --unset-metadata) and --append-notes pass through
+			// as merge OPERATIONS: the storage layer resolves them against the
+			// row re-read inside the mutation transaction. Merging here against
+			// the `issue` snapshot (read in an earlier transaction) silently
+			// erased concurrent writers' keys — both processes exited 0, one
+			// process's committed write vanished.
 			regularUpdates := make(map[string]interface{})
 			for k, v := range updates {
-				if k != "add_labels" && k != "remove_labels" && k != "set_labels" && k != "parent" && k != "append_notes" &&
-					k != "_set_metadata" && k != "_unset_metadata" {
+				if k != "add_labels" && k != "remove_labels" && k != "set_labels" && k != "parent" {
 					regularUpdates[k] = v
 				}
 			}
@@ -404,53 +431,34 @@ stderr, and the command exits nonzero.`,
 			if clearDeferStatus && issue.Status == types.StatusDeferred {
 				regularUpdates["status"] = string(types.StatusOpen)
 			}
+			notesOverwritten := replacesExistingNotes(issue.Notes, updates)
 
-			// Handle --metadata: merge with existing metadata instead of replacing.
-			// A merge failure (e.g. the issue's existing metadata is not a JSON
-			// object) is a per-ID failure, not a batch abort: record it and move
-			// on like the resolve/update/label/parent paths above, so later IDs
-			// still update and the failed ID surfaces in the nonzero-exit report
-			// instead of the generic stdout error path.
-			if newMeta, ok := regularUpdates["metadata"].(json.RawMessage); ok && len(issue.Metadata) > 0 {
-				merged, err := mergeMetadata(issue.Metadata, newMeta)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error merging metadata for %s: %v\n", id, err)
-					recordFailure(id, fmt.Sprintf("merging metadata: %v", err))
-					closeIfUnmutated(result)
-					continue
-				}
-				regularUpdates["metadata"] = merged
-			}
-			// Handle incremental metadata edits (GH#1406). Same per-ID failure
-			// contract as the merge path above.
-			if setMeta, ok := updates["_set_metadata"].([]string); ok {
-				unsetMeta, _ := updates["_unset_metadata"].([]string)
-				merged, err := applyMetadataEdits(issue.Metadata, setMeta, unsetMeta)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error editing metadata for %s: %v\n", id, err)
-					recordFailure(id, fmt.Sprintf("editing metadata: %v", err))
-					closeIfUnmutated(result)
-					continue
-				}
-				regularUpdates["metadata"] = merged
-			}
-			// Handle append_notes: combine existing notes with new content
-			if appendNotes, ok := updates["append_notes"].(string); ok {
-				combined := issue.Notes
-				if combined != "" {
-					combined += "\n"
-				}
-				combined += appendNotes
-				regularUpdates["notes"] = combined
-			}
 			if len(regularUpdates) > 0 {
-				if err := issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor); err != nil {
-					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
-					recordFailure(id, fmt.Sprintf("updating issue: %v", err))
+				// With guards present, route through the checked (CAS) path: a
+				// stale assignee/status refuses atomically with a typed
+				// mismatch error and MUST surface as a non-zero exit — never
+				// collapse it to success (finding #10).
+				var updateErr error
+				if ifAssignee != nil || ifStatus != nil {
+					updateErr = issueStore.UpdateIssueChecked(ctx, result.ResolvedID, regularUpdates, actor,
+						storage.UpdateIssueOptions{ExpectedAssignee: ifAssignee, ExpectedStatus: ifStatus})
+				} else {
+					updateErr = issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor)
+				}
+				if updateErr != nil {
+					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
+					failures = append(failures, updateIDFailure{
+						ID:            id,
+						Error:         fmt.Sprintf("updating issue: %v", updateErr),
+						GuardMismatch: isGuardMismatch(updateErr),
+					})
 					closeIfUnmutated(result)
 					continue
 				}
 				trackMutation(result)
+				if notesOverwritten {
+					notesOverwriteWarnings[issueStore] = append(notesOverwriteWarnings[issueStore], id)
+				}
 				// Audit log key field changes (survives Dolt GC flatten)
 				if s, ok := regularUpdates["status"].(string); ok {
 					audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), s, actor, "")
@@ -585,6 +593,9 @@ stderr, and the command exits nonzero.`,
 					closePendingResults()
 					return HandleErrorRespectJSON("failed to commit: %v", err)
 				}
+				for _, id := range notesOverwriteWarnings[s] {
+					warnNotesReplacement(id)
+				}
 			}
 		}
 		closePendingResults()
@@ -611,18 +622,48 @@ stderr, and the command exits nonzero.`,
 	},
 }
 
+func replacesExistingNotes(existing string, fields map[string]any) bool {
+	newNotes, replacing := fields["notes"].(string)
+	return replacing && existing != "" && newNotes != existing
+}
+
+func warnNotesReplacement(id string) {
+	fmt.Fprintf(os.Stderr, "warning: %s: --notes replaced existing notes (use --append-notes to preserve history)\n", id) //nolint:gosec // G705: stderr, not a browser context
+}
+
+// ExitGuardMismatch is the exit code when a `bd update` run failed solely
+// because --if-assignee/--if-status guards did not match: the precondition no
+// longer held, nothing was written, and retrying is pointless — another actor
+// won the race. Scripts branch on it to tell "racer won, skip gracefully"
+// (13) from infra failure (1, retry/abort). Mixed batches — any failure that
+// is NOT a guard mismatch — exit 1, the conservative "something needs a
+// retry" verdict. The stderr line carries the machine-greppable sentinel
+// text ("assignee mismatch" / "status mismatch") either way.
+const ExitGuardMismatch = 13
+
+// isGuardMismatch reports whether err is a bd-wsqvw conditional-update guard
+// refusal (stale --if-assignee/--if-status), the failure class that exits
+// ExitGuardMismatch instead of 1.
+func isGuardMismatch(err error) bool {
+	return errors.Is(err, storage.ErrAssigneeMismatch) || errors.Is(err, storage.ErrStatusMismatch)
+}
+
 // updateIDFailure records one issue ID that could not be updated and why.
+// GuardMismatch marks a --if-assignee/--if-status refusal so JSON consumers
+// can distinguish it without parsing the error text.
 type updateIDFailure struct {
-	ID    string `json:"id"`
-	Error string `json:"error"`
+	ID            string `json:"id"`
+	Error         string `json:"error"`
+	GuardMismatch bool   `json:"guard_mismatch,omitempty"`
 }
 
 // reportUpdateFailures emits a per-ID failure report on stderr and returns a
-// nonzero exit error. In --json mode the report is a single compact JSON
-// line — the last line on stderr — so callers can parse which IDs failed
-// while stdout keeps the plain array-of-updated-issues success shape. In
-// text mode the individual errors were already printed inline; this adds a
-// summary naming every failed ID.
+// nonzero exit error — ExitGuardMismatch when every failure is a
+// --if-assignee/--if-status guard refusal, 1 otherwise. In --json mode the
+// report is a single compact JSON line — the last line on stderr — so
+// callers can parse which IDs failed while stdout keeps the plain
+// array-of-updated-issues success shape. In text mode the individual errors
+// were already printed inline; this adds a summary naming every failed ID.
 func reportUpdateFailures(failures []updateIDFailure, total int) error {
 	msg := fmt.Sprintf("%d of %d issues failed to update", len(failures), total)
 	if jsonOutput {
@@ -654,86 +695,85 @@ func reportUpdateFailures(failures []updateIDFailure, total int) error {
 			fmt.Fprintf(os.Stderr, "  %s: %s\n", f.ID, f.Error)
 		}
 	}
+	allGuard := len(failures) > 0
+	for _, f := range failures {
+		if !f.GuardMismatch {
+			allGuard = false
+			break
+		}
+	}
+	if allGuard {
+		return &exitError{Code: ExitGuardMismatch}
+	}
 	return &exitError{Code: 1}
 }
 
 // mergeMetadata merges new metadata JSON into existing metadata.
 // Keys from newMeta overwrite keys in existing; keys only in existing are preserved.
+// Thin alias over the shared storage helper (also used in-transaction by issueops).
 func mergeMetadata(existing, newMeta json.RawMessage) (json.RawMessage, error) {
-	base := make(map[string]json.RawMessage)
-	if len(existing) > 0 {
-		trimmed := strings.TrimSpace(string(existing))
-		if trimmed != "" && trimmed != "null" {
-			if err := json.Unmarshal(existing, &base); err != nil {
-				return nil, fmt.Errorf("existing metadata is not a JSON object: %w", err)
-			}
-		}
-	}
-
-	incoming := make(map[string]json.RawMessage)
-	if err := json.Unmarshal(newMeta, &incoming); err != nil {
-		return nil, fmt.Errorf("new metadata is not a JSON object: %w", err)
-	}
-
-	for k, v := range incoming {
-		base[k] = v
-	}
-
-	result, err := json.Marshal(base)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal merged metadata: %w", err)
-	}
-	return json.RawMessage(result), nil
+	return storage.MergeMetadataJSON(existing, newMeta)
 }
 
 // applyMetadataEdits applies --set-metadata and --unset-metadata edits to existing metadata.
-// Returns the merged JSON as json.RawMessage.
+// Thin alias over the shared storage helper (also used in-transaction by issueops).
 func applyMetadataEdits(existing json.RawMessage, setFlags, unsetFlags []string) (json.RawMessage, error) {
-	// Parse existing metadata (or start with empty object)
-	data := make(map[string]json.RawMessage)
-	if len(existing) > 0 {
-		trimmed := strings.TrimSpace(string(existing))
-		if trimmed != "" && trimmed != "null" {
-			if err := json.Unmarshal(existing, &data); err != nil {
-				return nil, fmt.Errorf("existing metadata is not a JSON object: %w", err)
-			}
-		}
-	}
-
-	// Apply --set-metadata key=value pairs
-	for _, kv := range setFlags {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok || k == "" {
-			return nil, fmt.Errorf("invalid --set-metadata: expected key=value, got %q", kv)
-		}
-		if err := storage.ValidateMetadataKey(k); err != nil {
-			return nil, err
-		}
-		// Store as JSON value: try to preserve type (number, bool, null)
-		data[k] = toJSONValue(v)
-	}
-
-	// Apply --unset-metadata keys
-	for _, k := range unsetFlags {
-		if err := storage.ValidateMetadataKey(k); err != nil {
-			return nil, err
-		}
-		delete(data, k)
-	}
-
-	result, err := json.Marshal(data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal metadata: %w", err)
-	}
-	return json.RawMessage(result), nil
+	return storage.ApplyMetadataEdits(existing, setFlags, unsetFlags)
 }
 
 // toJSONValue stores a CLI metadata value as a JSON string.
 // Previous behavior inferred types (numbers, booleans) from content,
 // which silently broke map[string]string round-trips (GH#4146).
 func toJSONValue(s string) json.RawMessage {
-	b, _ := json.Marshal(s)
-	return json.RawMessage(b)
+	return storage.MetadataEditValue(s)
+}
+
+// updateGuardsFromFlags reads the bd-wsqvw conditional-update guards
+// (--if-assignee/--if-status) with presence detected via Changed(), so
+// `--if-assignee ""` is a real guard meaning "expected unassigned" rather than
+// "no guard" (the unclaim.go idiom). It rejects combining guards with --claim
+// (--claim is its own compare-and-set with claim-pool semantics; the guards
+// would silently duplicate or contradict it) and guards with no regular field
+// update to ride on (the CAS applies to the issues-row UPDATE; label and
+// parent edits run outside it and would not be guarded). An --if-status value
+// is validated against the same built-in + custom status set as --status, so a
+// typo fails fast instead of mismatching forever.
+func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[string]interface{}) (ifAssignee, ifStatus *string, err error) {
+	if cmd.Flags().Changed("if-assignee") {
+		v, _ := cmd.Flags().GetString("if-assignee")
+		ifAssignee = &v
+	}
+	if cmd.Flags().Changed("if-status") {
+		v, _ := cmd.Flags().GetString("if-status")
+		var customStatuses []string
+		if store != nil {
+			if cs, csErr := store.GetCustomStatuses(rootCtx); csErr == nil {
+				customStatuses = cs
+			}
+		}
+		if !types.Status(v).IsValidWithCustom(customStatuses) {
+			return nil, nil, HandleErrorRespectJSON("invalid --if-status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", v)
+		}
+		ifStatus = &v
+	}
+	if ifAssignee == nil && ifStatus == nil {
+		return nil, nil, nil
+	}
+	if claimFlag {
+		return nil, nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)")
+	}
+	hasFieldUpdate := false
+	for k := range updates {
+		switch k {
+		case "add_labels", "remove_labels", "set_labels", "parent":
+		default:
+			hasFieldUpdate = true
+		}
+	}
+	if !hasFieldUpdate {
+		return nil, nil, HandleErrorRespectJSON("--if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
+	}
+	return ifAssignee, ifStatus, nil
 }
 
 func init() {
@@ -742,6 +782,7 @@ func init() {
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|decision); custom types require types.custom config")
 	registerCommonIssueFlags(updateCmd)
+	updateCmd.Flags().Lookup("notes").Usage = "Additional notes (replaces existing notes; use --append-notes to append)"
 	updateCmd.Flags().Bool("allow-empty-description", false, "Allow empty description replacement when reading from stdin or file")
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
@@ -752,6 +793,9 @@ func init() {
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
 	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)")
+	// Conditional (compare-and-set) update guards (bd-wsqvw)
+	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
+	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)")
 	// Time-based scheduling flags (GH#820)
 	// Examples:

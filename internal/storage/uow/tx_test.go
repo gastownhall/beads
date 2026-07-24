@@ -27,6 +27,8 @@ func (m *mockUnitOfWork) Commit(ctx context.Context, message string) error {
 	return m.commitErr
 }
 
+func (m *mockUnitOfWork) SwitchDatabase(ctx context.Context, database string) error { return nil }
+
 func (m *mockUnitOfWork) ConfigUseCase() domain.ConfigUseCase         { return nil }
 func (m *mockUnitOfWork) DoltRemoteUseCase() domain.DoltRemoteUseCase { return nil }
 func (m *mockUnitOfWork) BootstrapUseCase() domain.BootstrapUseCase   { return nil }

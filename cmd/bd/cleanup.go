@@ -76,9 +76,14 @@ SEE ALSO:
 
 		ctx := rootCtx
 
+		// Build filter for closed issues. Cleanup is a scripted sweep — opt out
+		// of BEADS_MAX_ROWS (designer §4.1) so a misconfigured env doesn't abort
+		// cleanup mid-run and leave the database in an unswept state.
 		statusClosed := types.StatusClosed
 		filter := types.IssueFilter{
-			Status: &statusClosed,
+			Status:        &statusClosed,
+			MaxRows:       0,
+			MaxRowsSource: "",
 		}
 
 		if olderThanDays > 0 {

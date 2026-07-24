@@ -9,6 +9,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // preLeaseMoveVersion is the last schema version where leases were columns on
@@ -144,7 +145,7 @@ func TestMigration0055MovesLiveLeases(t *testing.T) {
 	}
 
 	// The dead worker's claim is reclaimable through the normal path.
-	reclaimed, err := issueops.ReclaimExpiredLeasesInTx(ctx, conn, time.Now().UTC(), "reaper")
+	reclaimed, err := issueops.ReclaimExpiredLeasesInTx(ctx, conn, time.Now().UTC(), types.ReclaimFilter{}, "reaper")
 	if err != nil {
 		t.Fatalf("reclaim after migration: %v", err)
 	}

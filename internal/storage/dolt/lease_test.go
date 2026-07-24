@@ -283,7 +283,7 @@ func TestBareUpdateClaimDoesNotArmLease(t *testing.T) {
 	// Even a reclaim sweep with its cutoff pushed into the future (which would
 	// reap ANY leased issue) must leave the interactive claim alone: durable
 	// until the actor releases it or a human reclaims.
-	reclaimed, err := store.ReclaimExpiredLeases(ctx, -time.Hour, "reaper")
+	reclaimed, err := store.ReclaimExpiredLeases(ctx, -time.Hour, types.ReclaimFilter{}, "reaper")
 	if err != nil {
 		t.Fatalf("reclaim sweep: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestReclaimRevertsExpiredOnly(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond) // let dead's lease expire
 
 	// Grace window larger than how long the lease has been expired: nothing yet.
-	reclaimed, err := store.ReclaimExpiredLeases(ctx, time.Hour, "reaper")
+	reclaimed, err := store.ReclaimExpiredLeases(ctx, time.Hour, types.ReclaimFilter{}, "reaper")
 	if err != nil {
 		t.Fatalf("reclaim with big grace: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestReclaimRevertsExpiredOnly(t *testing.T) {
 	}
 
 	// Zero grace: the dead lease (expired) is reclaimed, the live one is not.
-	reclaimed, err = store.ReclaimExpiredLeases(ctx, 0, "reaper")
+	reclaimed, err = store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, "reaper")
 	if err != nil {
 		t.Fatalf("reclaim grace=0: %v", err)
 	}
@@ -627,7 +627,7 @@ func TestConcurrentHeartbeatReclaimClose(t *testing.T) {
 				return
 			default:
 			}
-			if _, err := store.ReclaimExpiredLeases(raceCtx, 0, "reaper"); err != nil {
+			if _, err := store.ReclaimExpiredLeases(raceCtx, 0, types.ReclaimFilter{}, "reaper"); err != nil {
 				if raceCtx.Err() == nil {
 					reaperErrs.Add(1)
 				}
@@ -684,7 +684,7 @@ func TestConcurrentHeartbeatReclaimClose(t *testing.T) {
 	// dead workers' issues reach their terminal open state regardless of reaper
 	// timing.
 	time.Sleep(ttl + 1500*time.Millisecond)
-	if _, err := store.ReclaimExpiredLeases(ctx, 0, "final-reaper"); err != nil {
+	if _, err := store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, "final-reaper"); err != nil {
 		t.Fatalf("final reclaim sweep: %v", err)
 	}
 
@@ -782,7 +782,7 @@ func TestStartedAtStampedOnceAcrossClaims(t *testing.T) {
 	}
 	deadStart := dead.startedAt.Time
 	time.Sleep(expiryMargin)
-	reclaimed, err := store.ReclaimExpiredLeases(ctx, 0, "reaper")
+	reclaimed, err := store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, "reaper")
 	if err != nil {
 		t.Fatalf("reclaim: %v", err)
 	}
@@ -826,7 +826,7 @@ func TestHeartbeatRevivesExpiredLease(t *testing.T) {
 		t.Errorf("heartbeat did not revive lease: %v", revived.leaseExpires)
 	}
 
-	reclaimed, err := store.ReclaimExpiredLeases(ctx, 0, "reaper")
+	reclaimed, err := store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, "reaper")
 	if err != nil {
 		t.Fatalf("reclaim grace=0: %v", err)
 	}
@@ -868,7 +868,7 @@ func TestConcurrentReapersAreBenign(t *testing.T) {
 		wg.Add(1)
 		go func(actor string) {
 			defer wg.Done()
-			got, err := store.ReclaimExpiredLeases(ctx, 0, actor)
+			got, err := store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, actor)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
