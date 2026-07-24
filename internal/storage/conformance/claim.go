@@ -65,6 +65,26 @@ func testClaimAlreadyClaimed(t *testing.T, f Factory) {
 	}
 }
 
+// testClaimOpenForeignAssignee: an OPEN issue pre-assigned to a different real
+// actor (a dispatcher set the assignee but nobody claimed it, so status stays
+// open) is still an ErrAlreadyClaimed conflict when another actor tries to claim
+// it. The open-but-assigned refusal branch wraps the sentinel so the public
+// IssueClaimer contract (errors.Is / ParseClaimConflict) holds identically on
+// both backends, matching the already-claimed (in_progress) path above.
+func testClaimOpenForeignAssignee(t *testing.T, f Factory) {
+	s := f(t)
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "cl-fa1", Title: "T", Assignee: "alice", Status: types.StatusOpen}), "dispatcher"))
+	pre, err := s.GetIssue(ctx(), "cl-fa1")
+	must(t, err)
+	if pre.Status != types.StatusOpen || pre.Assignee != "alice" {
+		t.Fatalf("precondition: want open+assigned-to-alice, got status=%q assignee=%q", pre.Status, pre.Assignee)
+	}
+	err = s.ClaimIssue(ctx(), "cl-fa1", "bob")
+	if !errors.Is(err, storage.ErrAlreadyClaimed) {
+		t.Errorf("claim of open issue pre-assigned to another actor: err = %v, want ErrAlreadyClaimed", err)
+	}
+}
+
 // testClaimNotClaimable: claiming a closed issue is ErrNotClaimable.
 func testClaimNotClaimable(t *testing.T, f Factory) {
 	s := f(t)
@@ -197,7 +217,7 @@ func testReclaimExpiredLease(t *testing.T, f Factory) {
 	// cutoff (now - olderThan) into the future, so even the fresh lease counts as
 	// expired. This exercises the revert path deterministically with no wall-clock
 	// wait; ReclaimSkipsFreshLease (olderThan 0) pins the other side of the cutoff.
-	reclaimed, err := s.ReclaimExpiredLeases(ctx(), -time.Hour, "reaper")
+	reclaimed, err := s.ReclaimExpiredLeases(ctx(), -time.Hour, types.ReclaimFilter{}, "reaper")
 	must(t, err)
 	found := false
 	for _, r := range reclaimed {
@@ -234,7 +254,7 @@ func testReclaimSkipsFreshLease(t *testing.T, f Factory) {
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "rc-2", Title: "T"}), "a"))
 	must(t, s.ClaimIssue(ctx(), "rc-2", "liveworker")) // fresh default-TTL lease
 
-	reclaimed, err := s.ReclaimExpiredLeases(ctx(), 0, "reaper")
+	reclaimed, err := s.ReclaimExpiredLeases(ctx(), 0, types.ReclaimFilter{}, "reaper")
 	must(t, err)
 	for _, r := range reclaimed {
 		if r.ID == "rc-2" {

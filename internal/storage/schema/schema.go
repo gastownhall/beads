@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"golang.org/x/term"
@@ -33,6 +34,41 @@ func defaultStderr() io.Writer {
 		return os.Stderr
 	}
 	return io.Discard
+}
+
+const largeRigThreshold = 10000
+
+// issueRowCounter returns the current issues-table row count, or an error if
+// the table is unreachable (fresh install → table doesn't exist yet). The
+// caller uses the error as the "no warning" signal. Variable so tests in this
+// package that exercise runMigrations against a non-DB mock can stub out the
+// query without panicking on QueryRowContext.
+var issueRowCounter = func(ctx context.Context, db DBConn) (int64, error) {
+	var n int64
+	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&n)
+	return n, err
+}
+
+// emitLargeRigNotice writes the one-line large-rig warning to out when the
+// issues count exceeds largeRigThreshold. An error from the counter is
+// treated as "fresh install / table missing" and suppresses the warning —
+// see be-8ja for the UX rationale.
+func emitLargeRigNotice(out io.Writer, count int64, err error) {
+	if err != nil || count <= largeRigThreshold {
+		return
+	}
+	fmt.Fprintf(out, "Large rig detected (%d issues). This migration may take up to 90 seconds; do not interrupt.\n", count)
+}
+
+// humanMigrationName turns "0033_add_date_indexes.up.sql" into
+// "add_date_indexes" for the progress line.
+func humanMigrationName(filename string) string {
+	s := strings.TrimSuffix(filename, ".up.sql")
+	parts := strings.SplitN(s, "_", 2)
+	if len(parts) < 2 {
+		return s
+	}
+	return parts[1]
 }
 
 // DBConn is the minimal interface satisfied by *sql.DB, *sql.Tx, and *sql.Conn.
@@ -317,6 +353,26 @@ func AllMigrationsSQL() string {
 			mainSource.cursorTable, f.version, hex.EncodeToString(sum[:]))
 	}
 	return b.String()
+}
+
+// MigrationSQL returns the frozen SQL content of a main-source migration
+// file by name (e.g. "0057_events_value_columns_idempotent_longtext.up.sql"),
+// read from the same embedded FS runMigrations applies in production
+// (see mainSource.files above). It exists for tests outside this package
+// (internal/storage/embeddeddolt's engine-based frozen-guard tests) that need
+// to execute the byte-exact frozen migration content through a real engine:
+// reading the file from disk by a package-relative path does not reliably
+// resolve across every CI execution context, while the embedded FS is always
+// available and is, in fact, higher-fidelity -- it is the literal bytes
+// runMigrations itself applies, not a copy that could drift from the build.
+// Read-only; callers cannot use it to mutate or bypass the frozen-file
+// hygiene guard (scripts/check-migration-hygiene.sh).
+func MigrationSQL(name string) (string, error) {
+	data, err := mainSource.files.ReadFile(mainSource.dir + "/" + name)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func parseVersion(name string) (int, error) {
@@ -1115,6 +1171,23 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 	if upTo == 0 {
 		upTo = src.latest()
 	}
+
+	// One-shot large-rig notice, ahead of the migration loop below — gated to
+	// the main-source pass only. MigrateUp calls runMigrations once for
+	// mainSource and once for ignoredSource in the same pass; without this
+	// gate a large rig with pending migrations in both sources would print
+	// the warning twice (and issue the COUNT(*) query twice) despite the
+	// "one-shot" framing. Treats a missing issues table as "fresh install"
+	// and emits nothing — on a first-ever run there is no rig to warn about,
+	// and the COUNT(*) query would error on the missing table.
+	// issueRowCounter/emitLargeRigNotice predate this call site (be-8ja);
+	// this just threads them onto main's existing TTY-gated `stderr` writer
+	// instead of a second progressOut.
+	if src.cursorTable == mainSource.cursorTable {
+		rowCount, rowCountErr := issueRowCounter(ctx, db)
+		emitLargeRigNotice(stderr, rowCount, rowCountErr)
+	}
+
 	count := 0
 	for _, mf := range src.list() {
 		if mf.version <= minVersion || mf.version > upTo {
@@ -1124,13 +1197,21 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		if err != nil {
 			return count, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}
-		if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
-			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
-		}
 
-		// Snapshot the working set before the migration runs so the per-step
-		// commit can force-stage only the tables this migration newly dirties,
-		// leaving pre-existing writes to untouched tables in the working set.
+		// Snapshot the working set BEFORE the pre-migration repair runs, not
+		// just before the migration's own SQL. preMigrationRepair (below) can
+		// itself mutate synced tables (e.g. #4690's ensureDependenciesIDColumn
+		// ALTERs `dependencies`); snapshotting after it ran would misclassify
+		// that mutation as pre-existing dirt to exclude from this step's
+		// commit, so the repair would sit uncommitted in the working set while
+		// the cursor row for this version was already committed -- a killed
+		// process between this step and the pass's final commit would leave
+		// history claiming the version applied while the repaired table's
+		// change was never durably recorded, and the version-gated repair
+		// hook cannot re-run to fix it (its version is no longer pending).
+		// Snapshotting first makes repair-hook mutations count as this step's
+		// own newly-dirtied work, so they land in the same atomic commit as
+		// the migration and its cursor row.
 		var dirtyBeforeStep map[string]dirtyTableState
 		if commitEachStep {
 			dirtyBeforeStep, err = dirtyTables(ctx, db, true)
@@ -1139,7 +1220,12 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			}
 		}
 
-		fmt.Fprintf(stderr, "migrating schema: %s\n", mf.name)
+		if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
+			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
+		}
+
+		fmt.Fprintf(stderr, "Applying migration %04d: %s…\n", mf.version, humanMigrationName(mf.name))
+		start := time.Now()
 		if _, err := db.ExecContext(ctx, string(data)); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
 		}
@@ -1150,11 +1236,19 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		}
 		count++
 
+		// commitEachStep's DOLT_ADD/DOLT_COMMIT is the expensive, fallible
+		// part of this step on the production embedded path. The "done" line
+		// (and its timing) must land after that commit succeeds, not before
+		// it: printing "done" and then hitting a commit error would show an
+		// operator a false completion, and timing that stopped before the
+		// commit would understate the step's real cost. A failed commit
+		// returns before either print statement below runs.
 		if commitEachStep {
 			if err := commitMigrationStep(ctx, db, src.cursorTable, mf.name, dirtyBeforeStep); err != nil {
 				return count, fmt.Errorf("committing migration %s: %w", mf.name, err)
 			}
 		}
+		fmt.Fprintf(stderr, "  done (%.1fs)\n", time.Since(start).Seconds())
 
 		if migrateStepFaultHook != nil {
 			if err := migrateStepFaultHook(ctx, db, mf.version); err != nil {

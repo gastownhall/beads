@@ -21,8 +21,10 @@ type BulkIssueStore interface {
 	HeartbeatIssue(ctx context.Context, id, actor string) error
 	// ReclaimExpiredLeases reverts in_progress issues whose lease expired more
 	// than olderThan ago back to ready (clearing the assignee), recovering work
-	// stranded by dead workers. Returns the issues it reclaimed.
-	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error)
+	// stranded by dead workers. filter scopes which stale leases are eligible
+	// (the zero ReclaimFilter reclaims globally, the historical behavior).
+	// Returns the issues it reclaimed.
+	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
 	PromoteFromEphemeral(ctx context.Context, id string, actor string) error
 	GetNextChildID(ctx context.Context, parentID string) (string, error)
 }

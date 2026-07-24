@@ -566,6 +566,208 @@ func TestEmbeddedCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("graph_full_fields", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "gff")
+		plan := `{
+			"nodes": [
+				{
+					"key": "main",
+					"id": "gff-a1b2c3",
+					"title": "Full-field node",
+					"type": "task",
+					"status": "in_progress",
+					"description": "desc",
+					"design": "the design",
+					"acceptance_criteria": "the criteria",
+					"notes": "the notes",
+					"spec_id": "gff-spec1",
+					"external_ref": "gh-42",
+					"assignee": "worker",
+					"owner": "owner@example.com",
+					"priority": 1,
+					"estimated_minutes": 45,
+					"due_at": "2030-01-02T15:04:05Z",
+					"labels": ["x", "y"],
+					"metadata": {"str": "v", "num": 3},
+					"mol_type": "swarm",
+					"pinned": true
+				},
+				{
+					"key": "deferred",
+					"title": "Deferred node",
+					"defer_until": "2030-01-01T00:00:00Z"
+				},
+				{
+					"key": "done",
+					"title": "Closed node",
+					"status": "closed"
+				},
+				{
+					"key": "evt",
+					"title": "Event node",
+					"type": "event",
+					"event_kind": "agent.started",
+					"actor": "agent://a",
+					"target": "bead://b",
+					"payload": "{\"k\":1}"
+				}
+			]
+		}`
+		planFile := filepath.Join(dir, "full-fields-plan.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
+			t.Fatalf("write graph plan: %v", err)
+		}
+		result := bdCreateGraph(t, bd, dir, planFile)
+
+		if result.IDs["main"] != "gff-a1b2c3" {
+			t.Errorf("explicit id: got %q, want gff-a1b2c3", result.IDs["main"])
+		}
+
+		issue := bdShow(t, bd, dir, result.IDs["main"])
+		if issue.Status != types.StatusInProgress {
+			t.Errorf("status: got %q, want in_progress", issue.Status)
+		}
+		if issue.Description != "desc" || issue.Design != "the design" || issue.AcceptanceCriteria != "the criteria" || issue.Notes != "the notes" {
+			t.Errorf("content fields lost: %+v", issue)
+		}
+		if issue.SpecID != "gff-spec1" {
+			t.Errorf("spec_id: got %q", issue.SpecID)
+		}
+		if issue.ExternalRef == nil || *issue.ExternalRef != "gh-42" {
+			t.Errorf("external_ref: got %v", issue.ExternalRef)
+		}
+		if issue.Assignee != "worker" {
+			t.Errorf("assignee: got %q", issue.Assignee)
+		}
+		if issue.Owner != "owner@example.com" {
+			t.Errorf("owner: got %q", issue.Owner)
+		}
+		if issue.Priority != 1 {
+			t.Errorf("priority: got %d, want 1", issue.Priority)
+		}
+		if issue.EstimatedMinutes == nil || *issue.EstimatedMinutes != 45 {
+			t.Errorf("estimated_minutes: got %v, want 45", issue.EstimatedMinutes)
+		}
+		if issue.DueAt == nil || issue.DueAt.Format("2006-01-02") != "2030-01-02" {
+			t.Errorf("due_at: got %v", issue.DueAt)
+		}
+		if issue.MolType != types.MolType("swarm") {
+			t.Errorf("mol_type: got %q", issue.MolType)
+		}
+		if !issue.Pinned {
+			t.Errorf("pinned not set")
+		}
+		var meta map[string]any
+		if err := json.Unmarshal(issue.Metadata, &meta); err != nil {
+			t.Fatalf("metadata not valid JSON: %v", err)
+		}
+		if meta["str"] != "v" || meta["num"] != float64(3) {
+			t.Errorf("metadata round-trip wrong (non-string values must survive): %v", meta)
+		}
+
+		deferred := bdShow(t, bd, dir, result.IDs["deferred"])
+		if deferred.Status != types.StatusDeferred {
+			t.Errorf("deferred status: got %q, want deferred", deferred.Status)
+		}
+		if deferred.DeferUntil == nil {
+			t.Errorf("defer_until lost")
+		}
+
+		done := bdShow(t, bd, dir, result.IDs["done"])
+		if done.Status != types.StatusClosed {
+			t.Errorf("closed status: got %q, want closed", done.Status)
+		}
+		if done.ClosedAt == nil {
+			t.Errorf("closed node missing auto-filled closed_at")
+		}
+
+		evt := bdShow(t, bd, dir, result.IDs["evt"])
+		if evt.EventKind != "agent.started" || evt.Actor != "agent://a" || evt.Target != "bead://b" || evt.Payload != `{"k":1}` {
+			t.Errorf("event fields lost: kind=%q actor=%q target=%q payload=%q", evt.EventKind, evt.Actor, evt.Target, evt.Payload)
+		}
+	})
+
+	t.Run("graph_waits_for_gate", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gw")
+		plan := `{
+			"nodes": [
+				{"key": "gate", "title": "Fanout gate"},
+				{"key": "spawner", "title": "Spawner step"}
+			],
+			"edges": [
+				{"from_key": "gate", "to_key": "spawner", "type": "waits-for", "gate": "any-children", "spawner_key": "spawner"}
+			]
+		}`
+		planFile := filepath.Join(dir, "gate-plan.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
+			t.Fatalf("write graph plan: %v", err)
+		}
+		result := bdCreateGraph(t, bd, dir, planFile)
+		gateID := result.IDs["gate"]
+		spawnerID := result.IDs["spawner"]
+
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gw", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+
+		var metadata string
+		err = db.QueryRowContext(t.Context(),
+			"SELECT COALESCE(metadata, '') FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ? AND type = 'waits-for'",
+			gateID, spawnerID).Scan(&metadata)
+		if err != nil {
+			t.Fatalf("query waits-for dep: %v", err)
+		}
+		var meta types.WaitsForMeta
+		if err := json.Unmarshal([]byte(metadata), &meta); err != nil {
+			t.Fatalf("dep metadata not WaitsForMeta JSON (%q): %v", metadata, err)
+		}
+		if meta.Gate != types.WaitsForAnyChildren {
+			t.Errorf("gate: got %q, want any-children", meta.Gate)
+		}
+		if meta.SpawnerID != spawnerID {
+			t.Errorf("spawner: got %q, want resolved key %q", meta.SpawnerID, spawnerID)
+		}
+	})
+
+	t.Run("graph_per_node_storage_class", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gs")
+		plan := `{
+			"nodes": [
+				{"key": "durable", "title": "Durable node"},
+				{"key": "wisp", "title": "Wisp node", "ephemeral": true}
+			]
+		}`
+		planFile := filepath.Join(dir, "storage-plan.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
+			t.Fatalf("write graph plan: %v", err)
+		}
+		result := bdCreateGraph(t, bd, dir, planFile)
+
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gs", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+
+		var count int
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues WHERE id = ?", result.IDs["durable"]).Scan(&count); err != nil {
+			t.Fatalf("query issues: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("durable node not in issues table")
+		}
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM wisps WHERE id = ?", result.IDs["wisp"]).Scan(&count); err != nil {
+			t.Fatalf("query wisps: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("per-node ephemeral override not routed to wisps table")
+		}
+	})
+
 	t.Run("estimate", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "es")
 		issue := bdCreate(t, bd, dir, "Estimated issue", "-e", "60")

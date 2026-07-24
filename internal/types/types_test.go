@@ -939,6 +939,43 @@ func TestIssueLeaseJSONSerialization(t *testing.T) {
 	}
 }
 
+// TestRowVersionNeverSerialized locks in the Go-only decision for RowVersion:
+// it is a live Go field (library call sites build an optimistic-concurrency
+// token from it) but json:"-", so its random-per-write value never reaches any
+// bd --json surface or bd export. Serializing it would break stable protocol
+// goldens and export round-trips because the value is regenerated on every
+// write. The value must be absent from the bare Issue and from the two
+// embedding wrappers that back show/list/ready (IssueDetails, IssueWithCounts).
+func TestRowVersionNeverSerialized(t *testing.T) {
+	iss := Issue{ID: "test-1", Title: "Versioned", Status: StatusOpen, RowVersion: 123456789}
+
+	// The Go field stays populated — this is what library call sites read.
+	if iss.RowVersion != 123456789 {
+		t.Fatalf("RowVersion Go field = %d, want 123456789", iss.RowVersion)
+	}
+
+	surfaces := []struct {
+		name string
+		v    any
+	}{
+		{"Issue", iss},
+		{"IssueDetails", IssueDetails{Issue: iss}},
+		{"IssueWithCounts", IssueWithCounts{Issue: &iss}},
+	}
+	for _, tc := range surfaces {
+		b, err := json.Marshal(tc.v)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", tc.name, err)
+		}
+		s := string(b)
+		for _, forbidden := range []string{"row_version", "RowVersion", "row_lock", "123456789"} {
+			if strings.Contains(s, forbidden) {
+				t.Errorf("%s JSON must not contain %q, got: %s", tc.name, forbidden, s)
+			}
+		}
+	}
+}
+
 func TestReclaimedLeaseJSONSerialization(t *testing.T) {
 	b, err := json.Marshal(ReclaimedLease{ID: "bd-1", PreviousOwner: "worker-a"})
 	if err != nil {

@@ -367,6 +367,48 @@ func TestEmbeddedList(t *testing.T) {
 		if !containsID(issues, seed.openBug) {
 			t.Error("openBug with label 'backend' should match pattern 'back*'")
 		}
+		// be-ucslk4 regression guard: prior version returned the full set
+		// because LabelPattern was set on IssueFilter but never consumed by
+		// the SQL builder. Issues without a 'back*' label must be excluded.
+		if containsID(issues, seed.feature) {
+			t.Error("feature (no 'back*' label) should NOT match pattern 'back*'")
+		}
+		if containsID(issues, seed.chore) {
+			t.Error("chore (no 'back*' label) should NOT match pattern 'back*'")
+		}
+	})
+
+	t.Run("label_regex", func(t *testing.T) {
+		issues := bdListJSON(t, bd, dir, "--label-regex", "back(end|log)")
+		if !containsID(issues, seed.openBug) {
+			t.Error("openBug with label 'backend' should match regex 'back(end|log)'")
+		}
+		if !containsID(issues, seed.readyTask) {
+			t.Error("readyTask with label 'backend' should match regex 'back(end|log)'")
+		}
+		// be-ucslk4 regression guard: prior version returned the full set
+		// because LabelRegex was set on IssueFilter but never consumed by
+		// the SQL builder. Issues without a 'back(end|log)' label must be excluded.
+		if containsID(issues, seed.feature) {
+			t.Error("feature (label 'frontend') should NOT match regex 'back(end|log)'")
+		}
+		if containsID(issues, seed.epic) {
+			t.Error("epic (label 'planning') should NOT match regex 'back(end|log)'")
+		}
+
+		// Alternation across unrelated labels: verifies REGEXP semantics
+		// (not just glob-style prefix matching) — 'urgent' and 'planning'
+		// share no substring, so only a true regex OR catches both.
+		altIssues := bdListJSON(t, bd, dir, "--label-regex", "urgent|planning")
+		if !containsID(altIssues, seed.openBug) {
+			t.Error("openBug with label 'urgent' should match regex 'urgent|planning'")
+		}
+		if !containsID(altIssues, seed.epic) {
+			t.Error("epic with label 'planning' should match regex 'urgent|planning'")
+		}
+		if containsID(altIssues, seed.task) {
+			t.Error("task (label 'backend' only) should NOT match regex 'urgent|planning'")
+		}
 	})
 
 	t.Run("exclude_label", func(t *testing.T) {

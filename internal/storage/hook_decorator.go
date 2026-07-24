@@ -116,6 +116,17 @@ func (h *HookFiringStore) UpdateIssue(ctx context.Context, id string, updates ma
 	return nil
 }
 
+// UpdateIssueChecked applies the guarded update (optional ExpectedVersion CAS)
+// and fires on_update on success — mirroring UpdateIssue. A version mismatch
+// (ErrVersionMismatch) or any other error returns without firing.
+func (h *HookFiringStore) UpdateIssueChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts UpdateIssueOptions) error {
+	if err := h.inner.UpdateIssueChecked(ctx, id, updates, actor, opts); err != nil {
+		return err
+	}
+	h.fireHookByID(ctx, hooks.EventUpdate, id)
+	return nil
+}
+
 // ReopenIssue reopens an issue and fires on_update.
 func (h *HookFiringStore) ReopenIssue(ctx context.Context, id string, reason string, actor string) error {
 	if err := h.inner.ReopenIssue(ctx, id, reason, actor); err != nil {
@@ -163,7 +174,16 @@ func (h *HookFiringStore) AddDependency(ctx context.Context, dep *types.Dependen
 	if err := h.inner.AddDependency(ctx, dep, actor); err != nil {
 		return err
 	}
-	h.fireDependencyHookByID(ctx, hooks.EventUpdate, dep.IssueID)
+	h.fireDependencyHookByID(ctx, dep.IssueID)
+	return nil
+}
+
+// AddDependencyWithOptions adds a dependency with options and fires on_update.
+func (h *HookFiringStore) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, opts DependencyAddOptions) error {
+	if err := h.inner.AddDependencyWithOptions(ctx, dep, actor, opts); err != nil {
+		return err
+	}
+	h.fireDependencyHookByID(ctx, dep.IssueID)
 	return nil
 }
 
@@ -172,7 +192,16 @@ func (h *HookFiringStore) RemoveDependency(ctx context.Context, issueID, depends
 	if err := h.inner.RemoveDependency(ctx, issueID, dependsOnID, actor); err != nil {
 		return err
 	}
-	h.fireDependencyHookByID(ctx, hooks.EventUpdate, issueID)
+	h.fireDependencyHookByID(ctx, issueID)
+	return nil
+}
+
+// RemoveDependencyWithOptions removes a dependency with options and fires on_update.
+func (h *HookFiringStore) RemoveDependencyWithOptions(ctx context.Context, issueID, dependsOnID string, actor string, opts DependencyRemoveOptions) error {
+	if err := h.inner.RemoveDependencyWithOptions(ctx, issueID, dependsOnID, actor, opts); err != nil {
+		return err
+	}
+	h.fireDependencyHookByID(ctx, issueID)
 	return nil
 }
 
@@ -250,7 +279,7 @@ func (h *HookFiringStore) fireHookByID(ctx context.Context, event, id string) {
 	h.runner.Run(event, issue)
 }
 
-func (h *HookFiringStore) fireDependencyHookByID(ctx context.Context, event, id string) {
+func (h *HookFiringStore) fireDependencyHookByID(ctx context.Context, id string) {
 	if h.runner == nil {
 		return
 	}
@@ -258,7 +287,7 @@ func (h *HookFiringStore) fireDependencyHookByID(ctx context.Context, event, id 
 	if err != nil {
 		return
 	}
-	h.runner.Run(event, issue)
+	h.runner.Run(hooks.EventUpdate, issue)
 }
 
 // ── Hook tracking transaction ───────────────────────────────────────
@@ -509,7 +538,11 @@ func (t *hookTrackingTransaction) AddDependencyWithOptions(ctx context.Context, 
 }
 
 func (t *hookTrackingTransaction) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	if err := t.Transaction.RemoveDependency(ctx, issueID, dependsOnID, actor); err != nil {
+	return t.RemoveDependencyWithOptions(ctx, issueID, dependsOnID, actor, DependencyRemoveOptions{})
+}
+
+func (t *hookTrackingTransaction) RemoveDependencyWithOptions(ctx context.Context, issueID, dependsOnID string, actor string, opts DependencyRemoveOptions) error {
+	if err := t.Transaction.RemoveDependencyWithOptions(ctx, issueID, dependsOnID, actor, opts); err != nil {
 		return err
 	}
 	if issue, err := dependencySnapshot(ctx, issueID, t.Transaction.GetIssue, t.Transaction.GetDependencyRecords); err == nil {
@@ -566,6 +599,9 @@ var (
 	} = (*HookFiringStore)(nil)
 	_ interface {
 		UpdateIssue(context.Context, string, map[string]interface{}, string) error
+	} = (*HookFiringStore)(nil)
+	_ interface {
+		UpdateIssueChecked(context.Context, string, map[string]interface{}, string, UpdateIssueOptions) error
 	} = (*HookFiringStore)(nil)
 	_ interface {
 		CloseIssue(context.Context, string, string, string, string) error

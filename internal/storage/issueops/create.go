@@ -771,7 +771,8 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			if (dep.Type == types.DepParentChild) != parentPhase {
 				continue
 			}
-			kind := ClassifyDepTarget(ctx, tx, dep, false)
+			isCrossPrefix := types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID)
+			kind := ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
 
 			if kind != DepTargetExternal {
 				lookupTable := "issues"
@@ -902,20 +903,47 @@ func ReconcileChildCounters(ctx context.Context, tx *sql.Tx, issues []*types.Iss
 		}
 	}
 
+	unknownParentIDs := make([]string, 0, len(parents))
+	for parentID, b := range parents {
+		if b.maxChild > 0 && !b.known {
+			unknownParentIDs = append(unknownParentIDs, parentID)
+		}
+	}
+	wispParents, err := WispIDSetInTx(ctx, tx, unknownParentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to route child counter parents: %w", err)
+	}
+	for _, parentID := range unknownParentIDs {
+		_, parents[parentID].isWisp = wispParents[parentID]
+	}
+
 	for parentID, b := range parents {
 		if b.maxChild == 0 {
 			continue
 		}
-		if !b.known {
-			b.isWisp = IsActiveWispInTx(ctx, tx, parentID)
-		}
 		table := "child_counters"
+		parentTable := "issues"
 		if b.isWisp {
 			table = "wisp_child_counters"
+			parentTable = "wisps"
+		}
+		var parentExists int
+		// Orphaned hierarchical IDs are valid import input when the parent was
+		// deleted before export. Their auxiliary counter has no owner and must
+		// not be inserted: both counter tables enforce a parent foreign key.
+		//nolint:gosec // G201: parentTable is one of two hardcoded constants.
+		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+			SELECT 1 FROM %s WHERE id = ?
+		`, parentTable), parentID).Scan(&parentExists)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to check child counter parent %s: %w", parentID, err)
 		}
 		var current int
 		//nolint:gosec // G201: table is one of two hardcoded constants.
-		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+		err = tx.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT last_child FROM %s WHERE parent_id = ?
 		`, table), parentID).Scan(&current)
 		if err != nil && err != sql.ErrNoRows {

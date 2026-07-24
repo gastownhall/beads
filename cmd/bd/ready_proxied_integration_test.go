@@ -748,6 +748,86 @@ func TestProxiedServerReady2(t *testing.T) {
 		}
 	})
 
+	// be-x42v.4 round-3 follow-up: rejectMaxRowsUnderProxiedServer must not
+	// block `bd ready --claim` under proxied mode. --claim always delivers
+	// exactly one row (same reasoning as the direct-path fix in
+	// issueops/claim.go), so a rig-wide cap sized for bulk reads must not
+	// hard-fail it. Bulk (non-claim) `bd ready` under proxied mode with an
+	// active cap must still reject, same as `bd list` (see
+	// list_proxied_integration_test.go's reject_max_rows_flag/_env).
+	t.Run("claim_succeeds_under_env_max_rows_cap", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rcmr")
+		// Ready pool (3) exceeds the cap (1) — exactly the scenario a
+		// rig-wide BEADS_MAX_ROWS is meant to guard bulk reads against,
+		// while claim (which only ever returns one row) must still work.
+		for i := 0; i < 3; i++ {
+			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Claim under cap %d", i), "--label", "rcmr-claim")
+		}
+		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
+			[]string{"BEADS_MAX_ROWS=1"},
+			"ready", "--claim", "--json", "--label", "rcmr-claim")
+		if err != nil {
+			t.Fatalf("bd ready --claim --json under BEADS_MAX_ROWS=1 with a larger ready pool should succeed: %v\nstdout:\n%s\nstderr:\n%s",
+				err, stdout, stderr)
+		}
+		var claimed []types.IssueWithCounts
+		s := strings.TrimSpace(stdout)
+		start := strings.Index(s, "[")
+		if start < 0 {
+			t.Fatalf("no JSON array in claim output:\n%s", stdout)
+		}
+		if err := json.Unmarshal([]byte(s[start:]), &claimed); err != nil {
+			t.Fatalf("parse claim JSON: %v\n%s", err, s[start:])
+		}
+		if len(claimed) != 1 {
+			t.Fatalf("expected exactly one claimed issue, got %d: %s", len(claimed), stdout)
+		}
+		if claimed[0].Status != types.StatusInProgress {
+			t.Errorf("Status = %s, want %s", claimed[0].Status, types.StatusInProgress)
+		}
+	})
+
+	// be-x42v.4 round-4 follow-up (codex P2): the claim-exempt branch above
+	// must still validate --max-rows via resolveMaxRows even though it
+	// ignores the resolved (positive) cap — otherwise a malformed value
+	// like -1 is silently accepted under proxied `ready --claim`, unlike
+	// every other command (direct or proxied).
+	t.Run("claim_rejects_invalid_max_rows_flag", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rcim")
+		bdProxiedCreate(t, bd, p.dir, "Claim invalid max-rows seed")
+		out := bdProxiedReadyFail(t, bd, p, "--claim", "--max-rows", "-1")
+		if !strings.Contains(out, "must be non-negative") {
+			t.Errorf("expected --max-rows usage-error rejection, got: %s", out)
+		}
+	})
+
+	t.Run("reject_bulk_ready_under_max_rows_flag", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rbmf")
+		bdProxiedCreate(t, bd, p.dir, "Bulk ready seed")
+		out := bdProxiedReadyFail(t, bd, p, "--max-rows", "1")
+		if !strings.Contains(out, "not supported in proxied-server mode") {
+			t.Errorf("expected --max-rows proxied-server rejection for bulk (non-claim) ready, got: %s", out)
+		}
+	})
+
+	t.Run("reject_bulk_ready_under_max_rows_env", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rbme")
+		bdProxiedCreate(t, bd, p.dir, "Bulk ready env seed")
+		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
+			[]string{"BEADS_MAX_ROWS=1"}, "ready")
+		if err == nil {
+			t.Fatalf("expected BEADS_MAX_ROWS under proxied bulk ready to fail, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		out := stdout + stderr
+		if !strings.Contains(out, "not supported in proxied-server mode") {
+			t.Errorf("expected BEADS_MAX_ROWS proxied-server rejection for bulk (non-claim) ready, got: %s", out)
+		}
+	})
+
 	t.Run("exclude_type_csv_and_repeated", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rxt")

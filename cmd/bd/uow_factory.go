@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
@@ -99,7 +100,13 @@ func newManagedProxiedServerUOWProvider(
 		return nil, fmt.Errorf("newProxiedServerUOWProvider: proxied server root (from env or %s): %w", configfile.ProxiedServerClientInfoFileName, err)
 	}
 
-	configPath, err := ensureProxiedServerConfig(beadsDir)
+	// Gate auto_gc_behavior.archive_level: 0 on the resolved external dolt's
+	// version — Dolt's YAML config loader uses yaml.UnmarshalStrict, so an
+	// older dolt whose own YAMLConfig struct lacks this field would refuse
+	// to start rather than ignore the unknown key (gastownhall/beads#4986).
+	archiveLevelSupported := doltserver.SupportsArchiveLevelConfig(doltBin)
+
+	configPath, err := ensureProxiedServerConfig(beadsDir, archiveLevelSupported)
 	if err != nil {
 		return nil, err
 	}

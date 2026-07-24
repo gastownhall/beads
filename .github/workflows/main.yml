@@ -296,7 +296,7 @@ jobs:
 
       - name: Set up Node.js
         if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '24'
 
@@ -844,10 +844,18 @@ jobs:
         run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.skip '^TestConformance$'
 
   test-embedded-conformance:
-    name: Test (Embedded Dolt Conformance)
+    name: Test (Embedded Dolt Conformance - ${{ matrix.partition }})
     needs: [detect-ci-tier, build-embedded]
     if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        partition: [core, audit]
+    env:
+      BEADS_TEST_EMBEDDED_DOLT: "1"
+      BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
@@ -865,16 +873,18 @@ jobs:
           git config --global user.name "CI Bot"
           git config --global user.email "ci@beads.test"
 
-      - name: Test
-        env:
-          BEADS_TEST_EMBEDDED_DOLT: "1"
-          BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
-        # Conformance suite (conformance.RunAll via TestConformance) against
-        # the embedded Dolt backend, split from test-embedded-storage so each
-        # job stays well under its timeout - same structure as pr-risk.yml.
-        # 30m matches the repo's integration timeout: the audit suite is large and
-        # embedded Dolt under -race is slow, so 15m no longer left headroom.
-        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.run '^TestConformance$'
+      - name: Test core conformance
+        if: matrix.partition == 'core'
+        # RunAll has a natural Audit seam. Run everything except Audit in the
+        # core shard and Audit alone in the other shard. The combined suite has
+        # exceeded 30m under runner variance; each half currently takes ~15m.
+        # Keep the Go timeout below the job timeout so a real stall still emits
+        # a diagnostic goroutine dump before Actions stops the job.
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.run '^TestConformance$' -test.skip '^TestConformance$/^Audit$'
+
+      - name: Test audit conformance
+        if: matrix.partition == 'audit'
+        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.run '^TestConformance$/^Audit$'
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
@@ -977,7 +987,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
-      - uses: DeterminateSystems/determinate-nix-action@629b284231c2a82554b724e357e47fc6020833c8 # v3
+      - uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb # v3
       - name: Run bd help via Nix
         id: nix_help
         run: |

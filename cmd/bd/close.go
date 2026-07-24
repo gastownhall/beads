@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -106,7 +107,8 @@ the flags appear in the command line.`,
 		// Direct mode
 		closedIssues := []*types.Issue{}
 		closedCount := 0
-		firstClosedID := ""
+		alreadyClosed := 0
+		firstSettledID := ""
 
 		for i, id := range resolvedIDs {
 			result := results[i]
@@ -143,42 +145,80 @@ the flags appear in the command line.`,
 				}
 			}
 
-			// Check if issue has open blockers (GH#962)
-			if !force {
-				blocked, blockers, err := activeStore.IsBlocked(ctx, id)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error checking blockers for %s: %v\n", id, err)
-					continue
+			// Delegate the is_blocked guard to the engine (GH#962). CloseIssueChecked
+			// runs the guard and the close in ONE transaction, so there is no
+			// read-then-write TOCTOU window between the check and the close. --force
+			// bypasses the guard; ExpectedVersion is unused on this path.
+			res, err := activeStore.CloseIssueChecked(ctx, id, actor, storage.CloseIssueOptions{
+				Reason:  reason,
+				Session: session,
+				Force:   force,
+			})
+			if err != nil {
+				if errors.Is(err, storage.ErrCloseBlocked) {
+					// The guard refused atomically; ErrCloseBlocked's message names the
+					// blockers. Preserve the actionable hint.
+					fmt.Fprintf(os.Stderr, "%v (use --force to override)\n", err)
+				} else {
+					fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				}
-				if blocked && len(blockers) > 0 {
-					fmt.Fprintf(os.Stderr, "cannot close %s: blocked by open issues %v (use --force to override)\n", id, blockers)
-					continue
-				}
-			}
-
-			if err := activeStore.CloseIssue(ctx, id, reason, actor, session); err != nil {
-				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
 				continue
 			}
-			mutatedStores[activeStore] = append(mutatedStores[activeStore], id)
+			if res.Unchanged {
+				// Already closed: an idempotent no-op on the step's stored state. The
+				// old CloseIssue path also returned nil here and still reported the
+				// (already-closed) issue, so keep OUTPUT parity via the shared display
+				// block below — the issue stays in --json output and the text report
+				// exactly as before. Suppress the step's own real-state-change side
+				// effects (the audit entry, so no spurious closed→closed; the
+				// closedCount bump; step-level pending-commit tracking, since the step
+				// write itself is a no-op), but still count the command as a successful
+				// close for its retry-safe post-close contracts (last-touched,
+				// --continue, --suggest-next, --claim-next) via alreadyClosed below.
+				// Exit stays 0.
+				alreadyClosed++
 
-			// Audit log the close (survives Dolt GC flatten)
-			oldStatus := "open"
-			if issue != nil {
-				oldStatus = string(issue.Status)
+				// Molecule auto-close is itself a retry-safe, fully state-derived
+				// post-close contract, so it must replay on an already-closed re-close
+				// just like the contracts above. If the final step's real close
+				// persisted but its molecule auto-close did not (a crash between the two
+				// commits, or the root CloseIssue failing with only a warning), this
+				// idempotent re-close is the ONLY thing that re-drives it — otherwise the
+				// molecule root is stranded open forever. autoCloseCompletedMolecule
+				// early-returns unless the root is genuinely open, auto-close-eligible,
+				// and complete, so it heals only that case and reintroduces none of the
+				// suppressed real-close side effects (no audit, no closed→closed on the
+				// step). Register the store when it actually closed the root so the
+				// pending-commit sweep persists it — closedCount==0 would not commit.
+				if molID := autoCloseCompletedMolecule(ctx, activeStore, id, actor, session); molID != "" {
+					mutatedStores[activeStore] = append(mutatedStores[activeStore], molID)
+				}
+			} else {
+				mutatedStores[activeStore] = append(mutatedStores[activeStore], id)
+
+				// Audit log the close (survives Dolt GC flatten)
+				oldStatus := "open"
+				if issue != nil {
+					oldStatus = string(issue.Status)
+				}
+				audit.LogFieldChange(id, "status", oldStatus, "closed", actor, reason)
+
+				closedCount++
+
+				// Auto-close parent molecule if all steps are now complete.
+				// Runs against the same store the step was closed in.
+				autoCloseCompletedMolecule(ctx, activeStore, id, actor, session)
 			}
-			audit.LogFieldChange(id, "status", oldStatus, "closed", actor, reason)
 
-			closedCount++
-			if firstClosedID == "" {
-				firstClosedID = id
+			// First id this command settled as closed — a real close or an
+			// already-closed no-op both "touch" it. Drives the retry-safe last-touched
+			// contract below so a re-close still points default-target commands at it.
+			if firstSettledID == "" {
+				firstSettledID = id
 			}
 
-			// Auto-close parent molecule if all steps are now complete.
-			// Runs against the same store the step was closed in.
-			autoCloseCompletedMolecule(ctx, activeStore, id, actor, session)
-
-			// Re-fetch for display
+			// Re-fetch for display. A real close and an idempotent no-op both report
+			// the closed issue here, matching the historical output shape.
 			closedIssue, _ := activeStore.GetIssue(ctx, id)
 
 			if jsonOutput {
@@ -190,13 +230,26 @@ the flags appear in the command line.`,
 			}
 		}
 
+		// A close command "succeeds" for its user-facing, retry-safe contracts when it
+		// settled the target as closed — whether it performed the real state change
+		// (closedCount) or confirmed an already-closed idempotent no-op
+		// (alreadyClosed). last-touched, --continue, --suggest-next, and --claim-next
+		// all re-derive their result from current state, so they must replay on an
+		// already-closed retry; `bd close --continue` in particular is a workflow-
+		// advancement trigger a crash/retry has to be able to re-drive. The real
+		// close-mutation side effects (audit, event, molecule auto-close) stay
+		// suppressed for an already-closed no-op via the `else` branch above; the
+		// pending-commit sweep is gated on mutatedStores, which a post-close claim
+		// also populates.
+		closedForCommand := closedCount > 0 || alreadyClosed > 0
+
 		// Record the closed issue as last-touched so `bd close` honors its own
 		// documented contract (the "last touched issue ... from create, update,
 		// show, or close" behavior) and downstream write-marker consumers see the
 		// close (GH#3965). Mirrors bd update's firstUpdatedID pattern. A later
 		// --claim-next overwrites this with the claimed issue (the newer touch).
-		if closedCount > 0 {
-			SetLastTouchedID(firstClosedID)
+		if closedForCommand {
+			SetLastTouchedID(firstSettledID)
 		}
 
 		// Pick a store for post-close work (--suggest-next, --continue, --claim-next).
@@ -208,7 +261,7 @@ the flags appear in the command line.`,
 			postCloseStore = results[0].Store
 		}
 
-		if suggestNext && len(resolvedIDs) == 1 && closedCount > 0 {
+		if suggestNext && len(resolvedIDs) == 1 && closedForCommand {
 			unblocked, err := postCloseStore.GetNewlyUnblockedByClose(ctx, resolvedIDs[0])
 			if err == nil && len(unblocked) > 0 {
 				if jsonOutput {
@@ -224,7 +277,7 @@ the flags appear in the command line.`,
 			}
 		}
 
-		if continueFlag && len(resolvedIDs) == 1 && closedCount > 0 {
+		if continueFlag && len(resolvedIDs) == 1 && closedForCommand {
 			autoClaim := !noAuto
 			result, err := AdvanceToNextStep(ctx, postCloseStore, resolvedIDs[0], autoClaim, actor)
 			if err != nil {
@@ -237,6 +290,12 @@ the flags appear in the command line.`,
 				// closed step. See gastownhall/beads#3769.
 				if result.AutoAdvanced && result.NextStep != nil {
 					SetLastTouchedID(result.NextStep.ID)
+					// The auto-claim mutated postCloseStore's working set. Register it
+					// so the pending-commit sweep below persists the advance — parity
+					// with --claim-next, and required when the close itself was an
+					// already-closed no-op (closedCount==0 wouldn't otherwise commit).
+					// Same-pointer key dedupes with the closed store on a real close.
+					mutatedStores[postCloseStore] = append(mutatedStores[postCloseStore], result.NextStep.ID)
 				}
 				if jsonOutput {
 					return outputJSON(map[string]interface{}{
@@ -250,7 +309,7 @@ the flags appear in the command line.`,
 
 		// Handle --claim-next flag
 		var claimedNextIssue *types.Issue
-		if claimNext && closedCount > 0 && !continueFlag {
+		if claimNext && closedForCommand && !continueFlag {
 			readyIssues, err := postCloseStore.GetReadyWork(ctx, types.WorkFilter{
 				Status:     "open",
 				Limit:      1,
@@ -293,7 +352,15 @@ the flags appear in the command line.`,
 			}
 		}
 
-		if closedCount > 0 {
+		// Commit whenever a store was actually mutated — a real close, an auto-claimed
+		// --continue advance, or a --claim-next claim. Gating on mutatedStores rather
+		// than closedCount matters for an already-closed re-close that still advanced
+		// or claimed via a retry-safe post-close flag: the mutation lives in the
+		// working set and must be persisted, not left for a later write to sweep. For
+		// existing paths this is equivalent to closedCount>0 (only real closes and
+		// post-close claims populate mutatedStores). Commit is a no-op if there is
+		// genuinely nothing pending.
+		if len(mutatedStores) > 0 {
 			for s, ids := range mutatedStores {
 				if s == nil {
 					continue
@@ -308,7 +375,7 @@ the flags appear in the command line.`,
 		}
 
 		totalAttempted := len(resolvedIDs)
-		if totalAttempted > 0 && closedCount == 0 {
+		if totalAttempted > 0 && closedCount == 0 && alreadyClosed == 0 {
 			return SilentExit()
 		}
 		return nil
@@ -481,7 +548,7 @@ func checkGateSatisfaction(issue *types.Issue) error {
 
 	switch {
 	case strings.HasPrefix(issue.AwaitType, "gh:run"):
-		resolved, escalated, reason, err = checkGHRun(issue, true)
+		resolved, escalated, reason, err = checkGHRun(issue, func(gateID, runID string) error { return updateGateAwaitIDFunc(nil, gateID, runID) })
 	case strings.HasPrefix(issue.AwaitType, "gh:pr"):
 		resolved, escalated, reason, err = checkGHPR(issue)
 	case issue.AwaitType == "timer":
@@ -514,38 +581,45 @@ func checkGateSatisfaction(issue *types.Issue) error {
 // autoCloseCompletedMolecule checks if closing a step completed an auto-closing
 // parent molecule, and if so, closes the molecule root. Ordinary epics remain
 // open when all children finish so they can become explicitly close-eligible
-// instead of being closed as a side effect of the final child close.
-func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, closedStepID, actorName, session string) {
+// instead of being closed as a side effect of the final child close. It returns
+// the molecule root ID when it actually closed the root (and "" otherwise) so a
+// caller that did not otherwise mutate the store — an already-closed re-close in
+// particular — can register the store for the pending-commit sweep. The check is
+// fully state-derived and idempotent: it early-returns unless the root is open,
+// auto-close-eligible, and has all steps complete, so re-invoking it never
+// double-closes or reintroduces side effects.
+func autoCloseCompletedMolecule(ctx context.Context, s storage.DoltStorage, closedStepID, actorName, session string) string {
 	moleculeID := findParentMolecule(ctx, s, closedStepID)
 	if moleculeID == "" {
-		return // Not part of a molecule
+		return "" // Not part of a molecule
 	}
 
 	// Check if molecule root is already closed
 	root, err := s.GetIssue(ctx, moleculeID)
 	if err != nil || root == nil || root.Status == types.StatusClosed || !shouldAutoCloseCompletedRoot(root) {
-		return
+		return ""
 	}
 
 	// Load progress to check completion
 	progress, err := getMoleculeProgress(ctx, s, moleculeID)
 	if err != nil {
-		return // Best effort — don't fail the close
+		return "" // Best effort — don't fail the close
 	}
 
 	if progress.Completed < progress.Total {
-		return // Not all steps complete yet
+		return "" // Not all steps complete yet
 	}
 
 	// All steps complete — auto-close the molecule root
 	if err := s.CloseIssue(ctx, moleculeID, "all steps complete", actorName, session); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not auto-close completed molecule %s: %v\n", moleculeID, err)
-		return
+		return ""
 	}
 
 	if !jsonOutput {
 		debug.PrintNormal("%s Auto-closed completed molecule %s\n", ui.RenderPass("✓"), formatFeedbackID(moleculeID, root.Title))
 	}
+	return moleculeID
 }
 
 // shouldAutoCloseCompletedRoot returns true for molecule roots that should
