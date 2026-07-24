@@ -1264,8 +1264,8 @@ type Statistics struct {
 	ClosedIssues            int     `json:"closed_issues"`
 	BlockedIssues           *int    `json:"blocked_issues"`  // nil when --no-blocked skips computation
 	DeferredIssues          int     `json:"deferred_issues"` // Issues on ice
-	ReadyIssues             int     `json:"ready_issues"`
-	PinnedIssues            int     `json:"pinned_issues"` // Persistent issues
+	ReadyIssues             *int    `json:"ready_issues"`    // nil when --no-blocked skips computation (readiness needs the blocked set)
+	PinnedIssues            int     `json:"pinned_issues"`   // Persistent issues
 	EpicsEligibleForClosure int     `json:"epics_eligible_for_closure"`
 	AverageLeadTime         float64 `json:"average_lead_time_hours"`
 }

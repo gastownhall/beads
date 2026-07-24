@@ -131,16 +131,18 @@ func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error
 	}
 	stats.BlockedIssues = &blockedCount
 
-	stats.ReadyIssues = stats.OpenIssues - blockedCount
-	if stats.ReadyIssues < 0 {
-		stats.ReadyIssues = 0
+	ready := stats.OpenIssues - blockedCount
+	if ready < 0 {
+		ready = 0
 	}
+	stats.ReadyIssues = &ready
 
 	return stats, nil
 }
 
 // GetStatisticsNoBlocked returns aggregate counts without the blocked-set traversal.
-// BlockedIssues is nil in the result. Use for bd stats --no-blocked fast path.
+// BlockedIssues and ReadyIssues are nil in the result (readiness needs the blocked
+// set). Use for bd stats --no-blocked fast path.
 func (s *DoltStore) GetStatisticsNoBlocked(ctx context.Context) (*types.Statistics, error) {
 	stats := &types.Statistics{}
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {

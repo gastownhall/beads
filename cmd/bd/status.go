@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -76,6 +77,9 @@ Examples:
 		}
 
 		if usesProxiedServer() {
+			if noBlocked {
+				fmt.Fprintln(os.Stderr, "warning: --no-blocked is not supported in proxied-server mode; running the full blocked-count query")
+			}
 			return runStatusProxiedServer(rootCtx, showAssigned, noActivity)
 		}
 
@@ -104,11 +108,11 @@ Examples:
 			recentActivity = getGitActivity(24)
 		}
 
-		return renderStatus(stats, recentActivity, noBlocked)
+		return renderStatus(stats, recentActivity)
 	},
 }
 
-func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary, noBlocked bool) error {
+func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary) error {
 	output := &StatusOutput{
 		Summary:             stats,
 		BlockedCountSkipped: stats.BlockedIssues == nil,
@@ -125,22 +129,22 @@ func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary
 	fmt.Printf("  Total Issues:           %d\n", stats.TotalIssues)
 	fmt.Printf("  Open:                   %s\n", ui.RenderPass(fmt.Sprintf("%d", stats.OpenIssues)))
 	fmt.Printf("  In Progress:            %s\n", ui.RenderWarn(fmt.Sprintf("%d", stats.InProgressIssues)))
-	if noBlocked {
+	// Skip-state is derived from the data itself (nil BlockedIssues/ReadyIssues),
+	// not the --no-blocked flag: --assigned recomputes fully-populated stats even
+	// when --no-blocked was also passed, so the flag alone would misrender those
+	// as skipped.
+	if stats.BlockedIssues == nil {
 		fmt.Printf("  Blocked:                %s\n", ui.MutedStyle.Render("(skipped)"))
-	} else if stats.BlockedIssues != nil && *stats.BlockedIssues > 0 {
+	} else if *stats.BlockedIssues > 0 {
 		fmt.Printf("  Blocked:                %s\n", ui.RenderFail(fmt.Sprintf("%d", *stats.BlockedIssues)))
 	} else {
-		blocked := 0
-		if stats.BlockedIssues != nil {
-			blocked = *stats.BlockedIssues
-		}
-		fmt.Printf("  Blocked:                %d\n", blocked)
+		fmt.Printf("  Blocked:                %d\n", *stats.BlockedIssues)
 	}
 	fmt.Printf("  Closed:                 %d\n", stats.ClosedIssues)
-	if noBlocked {
+	if stats.ReadyIssues == nil {
 		fmt.Printf("  Ready to Work:          %s\n", ui.MutedStyle.Render("(skipped)"))
 	} else {
-		fmt.Printf("  Ready to Work:          %s\n", ui.RenderPass(fmt.Sprintf("%d", stats.ReadyIssues)))
+		fmt.Printf("  Ready to Work:          %s\n", ui.RenderPass(fmt.Sprintf("%d", *stats.ReadyIssues)))
 	}
 
 	// Extended statistics (only show if non-zero)
@@ -227,8 +231,7 @@ func buildAssignedStats(issues []*types.Issue, readyCount int) *types.Statistics
 		}
 	}
 	stats.BlockedIssues = &blockedCount
-
-	stats.ReadyIssues = readyCount
+	stats.ReadyIssues = &readyCount
 	return stats
 }
 
@@ -236,7 +239,7 @@ func init() {
 	statusCmd.Flags().Bool("all", false, "Show all issues (default behavior)")
 	statusCmd.Flags().Bool("assigned", false, "Show issues assigned to current user")
 	statusCmd.Flags().Bool("no-activity", false, "Skip git activity summary (faster)")
-	statusCmd.Flags().Bool("no-blocked", false, "Skip blocked-count computation (faster on large rigs)")
+	statusCmd.Flags().Bool("no-blocked", false, "Skip blocked-count computation (faster on large rigs; not supported in proxied-server mode)")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(statusCmd)
 }

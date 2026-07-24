@@ -44,5 +44,5 @@ bd status [flags]
       --all           Show all issues (default behavior)
       --assigned      Show issues assigned to current user
       --no-activity   Skip git activity summary (faster)
-      --no-blocked    Skip blocked-count computation (faster on large rigs)
+      --no-blocked    Skip blocked-count computation (faster on large rigs; not supported in proxied-server mode)
 ```
