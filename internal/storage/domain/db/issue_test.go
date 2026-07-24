@@ -745,7 +745,7 @@ func (s *testSuite) issueClaimStampsLease() {
 	tx, err := s.db.BeginTx(s.Ctx(), nil)
 	s.Require().NoError(err)
 	defer func() { _ = tx.Rollback() }()
-	reclaimed, err := issueops.ReclaimExpiredLeasesInTx(s.Ctx(), tx, time.Now().Add(time.Hour), "reaper")
+	reclaimed, err := issueops.ReclaimExpiredLeasesInTx(s.Ctx(), tx, time.Now().Add(time.Hour), types.ReclaimFilter{}, "reaper")
 	s.Require().NoError(err)
 	s.Require().NoError(tx.Commit())
 	var owner string

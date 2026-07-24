@@ -46,15 +46,35 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 		}()
 
+		claimReady, _ := cmd.Flags().GetBool("claim")
+
 		if usesProxiedServer() {
+			// --claim consumes exactly one row, same reasoning as the
+			// direct-path fix in issueops/claim.go: a rig-wide cap sized
+			// for bulk list/ready reads must not block a single-row claim.
+			// Only the bulk (non-claim) proxied ready listing rejects an
+			// active cap.
+			if !claimReady {
+				if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
+					return err
+				}
+			} else {
+				// Still validate --max-rows/BEADS_MAX_ROWS here even though
+				// the resolved cap is ignored below: resolveMaxRows is also
+				// where a malformed value (e.g. --max-rows -1) is rejected
+				// with exit 1, and skipping it entirely for the claim-exempt
+				// branch would silently accept a usage error that every
+				// other command (direct or proxied) rejects.
+				if _, _, err := resolveMaxRows(cmd); err != nil {
+					return err
+				}
+			}
 			return runReadyProxiedServer(cmd, rootCtx)
 		}
 
 		if offset, _ := cmd.Flags().GetInt("offset"); offset > 0 {
 			return HandleErrorRespectJSON("--offset is only supported under --proxied-server")
 		}
-
-		claimReady, _ := cmd.Flags().GetBool("claim")
 
 		gated, _ := cmd.Flags().GetBool("gated")
 		if gated {
@@ -132,6 +152,10 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				}
 			}
 		}
+		maxRows, maxRowsSource, err := resolveMaxRows(cmd)
+		if err != nil {
+			return err
+		}
 		filter := types.WorkFilter{
 			Status:           "open", // Only show open issues, not in_progress (matches bd list --ready)
 			Type:             issueType,
@@ -144,6 +168,8 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			IncludeDeferred:  includeDeferred,  // GH#820: respect --include-deferred flag
 			IncludeEphemeral: includeEphemeral, // bd-i5k5x: allow ephemeral issues (e.g., merge-requests)
 			ExcludeTypes:     excludeTypes,
+			MaxRows:          maxRows,
+			MaxRowsSource:    maxRowsSource,
 		}
 		// Use Changed() to properly handle P0 (priority=0)
 		if cmd.Flags().Changed("priority") {
@@ -205,6 +231,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if claimReady {
 			claimed, err := activeStore.ClaimReadyIssue(ctx, filter, actor)
 			if err != nil {
+				if capErr := handleMaxRowsError(err); capErr != nil {
+					return capErr
+				}
 				return HandleErrorRespectJSON("%v", err)
 			}
 			if claimed == nil {
@@ -231,6 +260,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if jsonOutput {
 			results, err := activeStore.GetReadyWorkWithCounts(ctx, filter)
 			if err != nil {
+				if capErr := handleMaxRowsError(err); capErr != nil {
+					return capErr
+				}
 				return HandleErrorRespectJSON("%v", err)
 			}
 			totalReady := len(results)
@@ -272,6 +304,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		issues, err := activeStore.GetReadyWork(ctx, filter)
 		if err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleErrorRespectJSON("%v", err)
 		}
 
@@ -769,6 +804,8 @@ func init() {
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
+	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
+	addMaxRowsFlag(readyCmd)
 	rootCmd.AddCommand(readyCmd)
 	blockedCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
 	rootCmd.AddCommand(blockedCmd)

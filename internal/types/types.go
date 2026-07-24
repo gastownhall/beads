@@ -1262,10 +1262,10 @@ type Statistics struct {
 	OpenIssues              int     `json:"open_issues"`
 	InProgressIssues        int     `json:"in_progress_issues"`
 	ClosedIssues            int     `json:"closed_issues"`
-	BlockedIssues           int     `json:"blocked_issues"`
+	BlockedIssues           *int    `json:"blocked_issues"`  // nil when --no-blocked skips computation
 	DeferredIssues          int     `json:"deferred_issues"` // Issues on ice
-	ReadyIssues             int     `json:"ready_issues"`
-	PinnedIssues            int     `json:"pinned_issues"` // Persistent issues
+	ReadyIssues             *int    `json:"ready_issues"`    // nil when --no-blocked skips computation (readiness needs the blocked set)
+	PinnedIssues            int     `json:"pinned_issues"`   // Persistent issues
 	EpicsEligibleForClosure int     `json:"epics_eligible_for_closure"`
 	AverageLeadTime         float64 `json:"average_lead_time_hours"`
 }
@@ -1393,6 +1393,21 @@ type IssueFilter struct {
 	Offset   int
 	SortBy   string
 	SortDesc bool
+
+	// MaxRows is a defensive cap on the number of rows a search may return.
+	// 0 (the default) disables the cap. When >0, the storage layer issues
+	// LIMIT MaxRows+1 (to detect overage) and returns *issueops.ErrTooManyRows
+	// if the scan yielded more than MaxRows rows. MaxRows is independent of
+	// Limit: Limit=0 still means "unlimited" at the contract level; MaxRows is
+	// a safety knob layered on top. When both are set, the effective SQL LIMIT
+	// is min(Limit, MaxRows+1). Library users may set MaxRows directly; the
+	// CLI layer resolves it from --max-rows / BEADS_MAX_ROWS.
+	MaxRows int
+
+	// MaxRowsSource attributes which knob set MaxRows, used in error messages.
+	// Expected values: "--max-rows", "BEADS_MAX_ROWS", or "" (library users
+	// who set MaxRows directly without source attribution).
+	MaxRowsSource string
 }
 
 // SortPolicy determines how ready work is ordered
@@ -1430,6 +1445,31 @@ func (s SortPolicy) IsValid() bool {
 type ReclaimedLease struct {
 	ID            string `json:"id"`
 	PreviousOwner string `json:"previous_owner"`
+}
+
+// ReclaimFilter scopes which stale-lease issues bd reclaim may revert. The
+// zero value reclaims every stale lease (the historical global behavior);
+// every populated field narrows the set further (fields AND-combine).
+//
+// Scoping matters on a federated deployment: each replica's view of another
+// machine's liveness is stale by up to one sync interval, so an unscoped
+// reaper can revert a unit that is very much alive on the machine that granted
+// its lease. Partitioning reclaim by the same label surface the claim side is
+// partitioned by (--label/--label-any/--exclude-label, plus --assignee/--id)
+// turns after-the-fact revert auditing into prevention.
+type ReclaimFilter struct {
+	IDs           []string // Only these issue IDs are eligible
+	Assignees     []string // Only leases held by one of these owners
+	Labels        []string // AND semantics: issue must have ALL these labels
+	LabelsAny     []string // OR semantics: issue must have AT LEAST ONE of these labels
+	ExcludeLabels []string // Exclusion: issue must NOT have ANY of these labels
+}
+
+// IsEmpty reports whether the filter constrains nothing, i.e. reclaim runs in
+// its global, unscoped form.
+func (f ReclaimFilter) IsEmpty() bool {
+	return len(f.IDs) == 0 && len(f.Assignees) == 0 &&
+		len(f.Labels) == 0 && len(f.LabelsAny) == 0 && len(f.ExcludeLabels) == 0
 }
 
 // WorkFilter is used to filter ready work queries
@@ -1478,6 +1518,15 @@ type WorkFilter struct {
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
 
 	Offset int
+
+	// MaxRows enforces a hard upper bound on the row count returned. Mirrors
+	// IssueFilter.MaxRows so bd ready honors --max-rows / BEADS_MAX_ROWS
+	// symmetrically with bd list. 0 (the default) disables the cap.
+	MaxRows int
+
+	// MaxRowsSource attributes which knob set MaxRows. Expected values:
+	// "--max-rows", "BEADS_MAX_ROWS", or "" (library users with no source).
+	MaxRowsSource string
 }
 
 // StaleFilter is used to filter stale issue queries

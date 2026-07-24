@@ -1,0 +1,121 @@
+# Managed-local proxied smoke lane.
+#
+# The proxied shards in main.yml exercise command behavior against an
+# EXTERNALLY managed Dolt testcontainer. This lane covers the production
+# local-first path those shards cannot: bd launches its own loopback proxy,
+# the proxy launches a locally installed `dolt sql-server`, and the whole
+# lifecycle (create/read, loopback-only listeners, idle shutdown,
+# transparent restart with persistence) runs INSIDE a network namespace
+# with only loopback up — proving no outbound network is needed once the
+# binaries are installed. Linux first; Windows/macOS parity is tracked
+# separately.
+
+name: Proxied Local Smoke
+
+on:
+  workflow_dispatch:
+  merge_group:
+  push:
+    branches: [main]
+    paths:
+      - 'cmd/bd/proxied_local_*'
+      - 'cmd/bd/proxied_server*.go'
+      - 'cmd/bd/*_proxied_server.go'
+      - 'cmd/bd/db_proxy_child.go'
+      - 'cmd/bd/init*.go'
+      - 'cmd/bd/proxied_integration_helpers_test.go'
+      - 'cmd/bd/store_factory*.go'
+      - 'cmd/bd/test_dolt_server_cgo_test.go'
+      - 'cmd/bd/uow_factory.go'
+      - 'internal/configfile/**'
+      - 'internal/doltserver/**'
+      - 'internal/storage/dbproxy/**'
+      - 'internal/storage/uow/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/proxied-local-smoke.yml'
+  pull_request:
+    paths:
+      - 'cmd/bd/proxied_local_*'
+      - 'cmd/bd/proxied_server*.go'
+      - 'cmd/bd/*_proxied_server.go'
+      - 'cmd/bd/db_proxy_child.go'
+      - 'cmd/bd/init*.go'
+      - 'cmd/bd/proxied_integration_helpers_test.go'
+      - 'cmd/bd/store_factory*.go'
+      - 'cmd/bd/test_dolt_server_cgo_test.go'
+      - 'cmd/bd/uow_factory.go'
+      - 'internal/configfile/**'
+      - 'internal/doltserver/**'
+      - 'internal/storage/dbproxy/**'
+      - 'internal/storage/uow/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/proxied-local-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  managed-local-smoke:
+    name: Managed-local proxied lifecycle (Linux, offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CGO_ENABLED: "1"
+      # Pinned so the lane tests a known dolt CLI, not whatever the installer
+      # resolves on a given day. Bump deliberately.
+      DOLT_VERSION: 2.2.2
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install pinned Dolt CLI
+        run: |
+          curl -fsSL "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-amd64.tar.gz" -o /tmp/dolt.tar.gz
+          tar -xzf /tmp/dolt.tar.gz -C /tmp
+          sudo install /tmp/dolt-linux-amd64/bin/dolt /usr/local/bin/dolt
+          dolt version
+
+      - name: Build bd and compile the test binary (online)
+        run: |
+          go build -tags gms_pure_go -o /tmp/bd-under-test ./cmd/bd
+          go test -tags gms_pure_go -c -o /tmp/proxied-local-smoke.test ./cmd/bd
+
+      - name: Assert the managed-local smoke test is compiled in
+        run: |
+          listed="$(
+            BEADS_TEST_PROXIED_LOCAL=1 \
+            BEADS_TEST_SKIP=dolt \
+            /tmp/proxied-local-smoke.test \
+              -test.list '^TestManagedLocalProxiedLifecycleSmoke$'
+          )"
+          if [[ "$listed" != 'TestManagedLocalProxiedLifecycleSmoke' ]]; then
+            echo "managed-local smoke test missing or ambiguous; got: '$listed'" >&2
+            exit 1
+          fi
+
+      - name: Run managed-local lifecycle smoke offline (loopback-only netns)
+        run: |
+          sudo env \
+            "PATH=$PATH" \
+            BEADS_TEST_PROXIED_LOCAL=1 \
+            BEADS_TEST_SKIP=dolt \
+            BEADS_TEST_BD_BINARY=/tmp/bd-under-test \
+            unshare --net -- bash -euxc '
+              ip link set lo up
+              # Prove the namespace really has no outbound network before
+              # trusting anything the test reports.
+              if timeout 3 bash -c "exec 3<>/dev/tcp/1.1.1.1/443" 2>/dev/null; then
+                echo "outbound network unexpectedly available inside the netns" >&2
+                exit 1
+              fi
+              cd cmd/bd
+              /tmp/proxied-local-smoke.test \
+                -test.run "^TestManagedLocalProxiedLifecycleSmoke$" \
+                -test.v -test.timeout 15m
+            '

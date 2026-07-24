@@ -65,6 +65,15 @@ func TestPullWithAutoResolve_BranchTrackingFallback(t *testing.T) {
 }
 
 func TestPullWithAutoResolve_BranchTrackingFallbackSuccess(t *testing.T) {
+	// The fallback assertion needs a real file:// remote, which is built with the
+	// dolt CLI (runDoltCmdForBranchTracking / runDoltSQLForBranchTracking). Skip when
+	// the binary is absent, matching the existing guard in this package
+	// (bootstrap_test.go, fsck_test.go). The store itself talks the MySQL protocol
+	// and needs no local dolt binary.
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt CLI not available")
+	}
+
 	remoteDir := filepath.Join(t.TempDir(), "remote")
 	if err := os.MkdirAll(remoteDir, 0o755); err != nil {
 		t.Fatalf("mkdir remote: %v", err)
