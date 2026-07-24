@@ -211,32 +211,53 @@ func TestEmbeddedHistory(t *testing.T) {
 		bdCreate(t, bd, dir, "Ambiguous candidate one", "--type", "task", "--id", "hi-zzzaaa1")
 		bdCreate(t, bd, dir, "Ambiguous candidate two", "--type", "task", "--id", "hi-zzzaaa2")
 
-		out := bdHistoryFail(t, bd, dir, "zzzaaa")
+		cmd := exec.Command(bd, "history", "zzzaaa")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		var stdout, stderr strings.Builder
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			t.Fatalf("expected bd history zzzaaa to fail, but succeeded:\n%s", stdout.String())
+		}
+		out := stderr.String()
 		if !strings.Contains(strings.ToLower(out), "ambiguous") {
 			t.Errorf("expected ambiguity error for shared partial id, got: %s", out)
+		}
+		for _, candidate := range []string{"hi-zzzaaa1", "hi-zzzaaa2"} {
+			if !strings.Contains(out, candidate) {
+				t.Errorf("expected ambiguity error to list candidate %q, got: %s", candidate, out)
+			}
 		}
 		if strings.Contains(out, "No history found") {
 			t.Errorf("ambiguous partial id incorrectly fell through to 'No history found': %s", out)
 		}
 
-		cmd := exec.Command(bd, "history", "--json", "zzzaaa")
+		cmd = exec.Command(bd, "history", "--json", "zzzaaa")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		jsonOut, err := cmd.CombinedOutput()
+		stdout.Reset()
+		stderr.Reset()
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err := cmd.Run()
 		if err == nil {
-			t.Fatalf("expected bd history --json zzzaaa to fail, but succeeded:\n%s", jsonOut)
+			t.Fatalf("expected bd history --json zzzaaa to fail, but succeeded:\n%s", stdout.String())
 		}
-		s := strings.TrimSpace(string(jsonOut))
-		start := strings.Index(s, "{")
-		if start < 0 {
-			t.Fatalf("expected JSON error object, got: %s", s)
-		}
+		// HandleErrorRespectJSON writes the JSON error envelope to stdout.
+		s := strings.TrimSpace(stdout.String())
 		var errResp map[string]interface{}
-		if err := json.Unmarshal([]byte(s[start:]), &errResp); err != nil {
-			t.Fatalf("parse error JSON: %v\n%s", err, s)
+		if err := json.Unmarshal([]byte(s), &errResp); err != nil {
+			t.Fatalf("parse error JSON: %v\nstdout: %s\nstderr: %s", err, s, stderr.String())
 		}
-		if !strings.Contains(strings.ToLower(s), "ambiguous") {
+		errBody, _ := errResp["error"].(string)
+		if !strings.Contains(strings.ToLower(errBody), "ambiguous") {
 			t.Errorf("expected error JSON to mention ambiguity, got: %s", s)
+		}
+		for _, candidate := range []string{"hi-zzzaaa1", "hi-zzzaaa2"} {
+			if !strings.Contains(errBody, candidate) {
+				t.Errorf("expected error JSON to list candidate %q, got: %s", candidate, s)
+			}
 		}
 	})
 
