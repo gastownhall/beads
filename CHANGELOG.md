@@ -437,6 +437,16 @@ gate that rc.1 introduced, and ships the validated upgrade documentation.
 
 ### Added
 
+- **Schema-version guard**: `bd` now hard-fails at database-open time when the
+  database schema is ahead of the binary's embedded migrations. This protects
+  against cryptic SQL errors (e.g., `column X could not be found in any table
+  in scope`) that occur when an older binary opens a database migrated by a
+  newer one. The error message names the exact version mismatch and provides a
+  copy-paste rebuild command. Use `--ignore-schema-skew` (or env var
+  `BD_IGNORE_SCHEMA_SKEW=1`) to bypass the guard when you know the forward
+  migrations are safe for your workload. Fresh databases and normal
+  forward-migration paths are unaffected.
+
 - **Foreign keys across issue and wisp tables.** Migrations `0040`–`0042` and the new `ignored/0001`–`ignored/0004` add explicit FKs with `ON DELETE CASCADE ON UPDATE CASCADE` on `dependencies`, `labels`, `comments`, `events`, `issue_snapshots`, `compaction_snapshots`, `child_counters`, and the matching `wisp_*` tables. Deleting or renaming a parent row now cascades automatically — the manual cleanup loops in `issueops/delete.go`, `dolt/wisps.go`, `dolt/ephemeral_routing.go`, and `cmd/bd/rename_prefix.go` have been removed (net ~300 lines down). ([#3952](https://github.com/gastownhall/beads/pull/3952))
 - **`issueops.DeleteWispFromDependenciesInTx` / `UpdateWispIDInDependenciesInTx`.** Because Dolt forbids foreign keys from tracked tables (`dependencies`) to `dolt_ignore`'d tables (`wisps`), wisp deletion and rename now invoke these helpers explicitly to keep `dependencies.depends_on_wisp_id` consistent. The standard store APIs (`DeleteIssue`, `UpdateIssueID`, `deleteWispBatch`, etc.) wire them up automatically; only call them directly if you bypass those entry points. ([#3952](https://github.com/gastownhall/beads/pull/3952))
 - **Forward schema-skew guard.** `bd` now hard-fails when it opens a database that has been migrated to a *newer* schema version than the binary understands, instead of operating blindly on forward-migrated data. ([#4152](https://github.com/gastownhall/beads/pull/4152))

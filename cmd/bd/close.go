@@ -548,7 +548,7 @@ func checkGateSatisfaction(issue *types.Issue) error {
 
 	switch {
 	case strings.HasPrefix(issue.AwaitType, "gh:run"):
-		resolved, escalated, reason, err = checkGHRun(issue, true)
+		resolved, escalated, reason, err = checkGHRun(issue, func(gateID, runID string) error { return updateGateAwaitIDFunc(nil, gateID, runID) })
 	case strings.HasPrefix(issue.AwaitType, "gh:pr"):
 		resolved, escalated, reason, err = checkGHPR(issue)
 	case issue.AwaitType == "timer":

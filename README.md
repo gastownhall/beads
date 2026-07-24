@@ -142,6 +142,39 @@ migrate between modes with `bd backup`; reclaim space with `bd prune` /
 Full detail — connection flags, sockets, maintenance, backup, and migration —
 in the [Dolt backend guide](docs/architecture/dolt.md).
 
+### Schema Version Guard
+
+`bd` checks the database schema version at open time. If the database has been
+migrated by a newer binary and an older binary tries to open it, `bd` exits
+with an actionable error rather than issuing queries that fail with cryptic SQL
+errors:
+
+````
+schema version mismatch: database is at v45, binary knows up to v42 (3 migrations ahead)
+
+  Your bd binary is stale. Queries for dropped or renamed columns will fail
+  with cryptic SQL errors (e.g. "column X could not be found in any table in scope").
+
+  Rebuild from main:
+    CGO_ENABLED=0 go build -tags gms_pure_go ./cmd/bd
+
+  Or install the latest release:
+    CGO_ENABLED=0 go install -tags gms_pure_go github.com/steveyegge/beads/cmd/bd@latest
+
+  To proceed despite the risk (some read commands may still work):
+    BD_IGNORE_SCHEMA_SKEW=1 bd <command>
+    bd --ignore-schema-skew <command>
+````
+
+**When this fires:** only when the database schema is *ahead* of the binary
+(a newer binary migrated the database; this binary doesn't know those
+migrations). Normal upgrades, where the binary migrates the database forward,
+are unaffected.
+
+**Escape hatch:** `BD_IGNORE_SCHEMA_SKEW=1` (or `--ignore-schema-skew`) bypasses
+the guard with a warning on stderr. Use this only if you know the forward
+migrations are additive and safe for your specific workload.
+
 ## 🌐 Community Tools
 
 See [docs/community-tools.md](docs/community-tools.md) for a curated list of community-built UIs, extensions, and integrations—including terminal interfaces, web UIs, editor extensions, and native apps.

@@ -113,16 +113,17 @@ type fakeUOW struct {
 	commit  func() error
 }
 
-func (f *fakeUOW) Close(ctx context.Context)                        {}
-func (f *fakeUOW) Commit(ctx context.Context, message string) error { return f.commit() }
-func (f *fakeUOW) ConfigUseCase() domain.ConfigUseCase              { return nil }
-func (f *fakeUOW) DoltRemoteUseCase() domain.DoltRemoteUseCase      { return nil }
-func (f *fakeUOW) BootstrapUseCase() domain.BootstrapUseCase        { return nil }
-func (f *fakeUOW) IssueUseCase() domain.IssueUseCase                { return f.issueUC }
-func (f *fakeUOW) DependencyUseCase() domain.DependencyUseCase      { return nil }
-func (f *fakeUOW) LabelUseCase() domain.LabelUseCase                { return nil }
-func (f *fakeUOW) CommentUseCase() domain.CommentUseCase            { return nil }
-func (f *fakeUOW) RawSQLUseCase() domain.RawSQLUseCase              { return nil }
+func (f *fakeUOW) Close(ctx context.Context)                                 {}
+func (f *fakeUOW) Commit(ctx context.Context, message string) error          { return f.commit() }
+func (f *fakeUOW) SwitchDatabase(ctx context.Context, database string) error { return nil }
+func (f *fakeUOW) ConfigUseCase() domain.ConfigUseCase                       { return nil }
+func (f *fakeUOW) DoltRemoteUseCase() domain.DoltRemoteUseCase               { return nil }
+func (f *fakeUOW) BootstrapUseCase() domain.BootstrapUseCase                 { return nil }
+func (f *fakeUOW) IssueUseCase() domain.IssueUseCase                         { return f.issueUC }
+func (f *fakeUOW) DependencyUseCase() domain.DependencyUseCase               { return nil }
+func (f *fakeUOW) LabelUseCase() domain.LabelUseCase                         { return nil }
+func (f *fakeUOW) CommentUseCase() domain.CommentUseCase                     { return nil }
+func (f *fakeUOW) RawSQLUseCase() domain.RawSQLUseCase                       { return nil }
 
 type fakeUOWProvider struct {
 	uows   atomic.Int64

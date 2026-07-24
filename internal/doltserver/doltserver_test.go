@@ -1969,12 +1969,26 @@ func TestBuildDoltServerYAMLConfig_DebugLogLevel(t *testing.T) {
 	}
 }
 
+// physicalTempDir returns t.TempDir() with symlinks resolved. resolveCfgDir
+// deliberately normalizes doltDir via filepath.EvalSymlinks, and on macOS
+// t.TempDir() lives under /var/folders which is a symlink to
+// /private/var/folders — expected paths must be built from the physical
+// root or the comparison fails on that platform alone.
+func physicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks(t.TempDir()): %v", err)
+	}
+	return dir
+}
+
 // TestResolveCfgDir_NeitherExists is the common case: no parent or
 // data-dir .doltcfg found on disk, so resolveCfgDir must default to
 // dataDir/.doltcfg — matching Dolt's own flag-mode default ("Assign the one
 // that exists, defaults to current if neither exist" in setupDoltConfig).
 func TestResolveCfgDir_NeitherExists(t *testing.T) {
-	doltDir := filepath.Join(t.TempDir(), "dolt")
+	doltDir := filepath.Join(physicalTempDir(t), "dolt")
 	if err := os.MkdirAll(doltDir, 0o755); err != nil {
 		t.Fatalf("mkdir doltDir: %v", err)
 	}
@@ -1998,7 +2012,7 @@ func TestResolveCfgDir_NeitherExists(t *testing.T) {
 // would otherwise silently ignore it; resolveCfgDir must find it and point
 // cfg_dir there instead of a fresh dataDir/.doltcfg.
 func TestResolveCfgDir_ParentExists(t *testing.T) {
-	root := t.TempDir()
+	root := physicalTempDir(t)
 	doltDir := filepath.Join(root, "dolt")
 	if err := os.MkdirAll(doltDir, 0o755); err != nil {
 		t.Fatalf("mkdir doltDir: %v", err)
@@ -2029,7 +2043,7 @@ func TestResolveCfgDir_ParentExists(t *testing.T) {
 // one) resolves to itself, matching flag-mode's "look in data directory"
 // branch.
 func TestResolveCfgDir_CurrentExists(t *testing.T) {
-	root := t.TempDir()
+	root := physicalTempDir(t)
 	doltDir := filepath.Join(root, "dolt")
 	if err := os.MkdirAll(doltDir, 0o755); err != nil {
 		t.Fatalf("mkdir doltDir: %v", err)
@@ -2083,7 +2097,7 @@ func TestResolveCfgDir_BothExistIsAmbiguous(t *testing.T) {
 // (not a directory) is not mistaken for a real .doltcfg dir — matches
 // Dolt's own dEnv.FS.Exists(...) check, which also requires isDir.
 func TestResolveCfgDir_FileNotDirIgnored(t *testing.T) {
-	root := t.TempDir()
+	root := physicalTempDir(t)
 	doltDir := filepath.Join(root, "dolt")
 	if err := os.MkdirAll(doltDir, 0o755); err != nil {
 		t.Fatalf("mkdir doltDir: %v", err)
