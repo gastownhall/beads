@@ -602,6 +602,46 @@ func TestEmbeddedMaxRowsList(t *testing.T) {
 		}
 	})
 
+	// be-x42v.4 round-4 follow-up: the round-3 fix to
+	// finishReadyWorkWithCounts (trim to Limit before EnforceMaxRowsCap)
+	// wasn't mirrored onto the sibling bd list search paths
+	// (searchInTx in search.go, finishSearchIssuesWithCounts in
+	// search_counts.go), which still capped the pre-trim merged
+	// issues+wisps set. `--include-infra` disables the default SkipWisps
+	// escape hatch, so the wisps merge actually runs. limit=2, cap=5, 3
+	// durable + 3 wisp issues: each leg's query is independently bounded
+	// by EffectiveSearchLimit, so the merge can produce up to 6 rows
+	// pre-trim (>cap=5) even though the delivered page (trimmed to 2) is
+	// well within the cap. Covers both bd list output modes (opus's live
+	// repro found both non-JSON and --json tripping the false cap error).
+	t.Run("IncludeInfraMergedUnderLimit_NoError", func(t *testing.T) {
+		mDir, _, _ := bdInit(t, bd, "--prefix", "mrii")
+		for i := 0; i < 3; i++ {
+			bdCreate(t, bd, mDir, fmt.Sprintf("Durable infra %d", i), "--type", "task")
+		}
+		for i := 0; i < 3; i++ {
+			bdCreate(t, bd, mDir, fmt.Sprintf("Wisp infra %d", i), "--type", "task", "--ephemeral")
+		}
+
+		out, code := bdRunRaw(t, bd, mDir, nil, "list", "--include-infra",
+			"--limit", "2", "--max-rows", "5")
+		if code != 0 {
+			t.Fatalf("expected exit 0 (delivered page under cap despite pre-trim merge overage), got %d\n%s", code, out)
+		}
+		if strings.Contains(out, "too many rows") {
+			t.Errorf("delivered-page-under-cap should not emit cap error:\n%s", out)
+		}
+
+		outJSON, codeJSON := bdRunRaw(t, bd, mDir, nil, "list", "--include-infra", "--json",
+			"--limit", "2", "--max-rows", "5")
+		if codeJSON != 0 {
+			t.Fatalf("expected exit 0 under --json (delivered page under cap despite pre-trim merge overage), got %d\n%s", codeJSON, outJSON)
+		}
+		if strings.Contains(outJSON, "too many rows") {
+			t.Errorf("delivered-page-under-cap under --json should not emit cap error:\n%s", outJSON)
+		}
+	})
+
 	// be-x42v.4 follow-up (review MUST-FIX 5): the initial query under
 	// `bd list --watch` must surface a cap violation with exit 2, same as
 	// non-watch `bd list`. Before the fix, watchIssues logged the error to

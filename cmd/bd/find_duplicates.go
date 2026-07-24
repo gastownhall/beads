@@ -121,7 +121,11 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	}
 
 	if usesProxiedServer() {
-		if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
+		// maxRows was already resolved above (to build filter); reject using
+		// that value directly instead of re-resolving via
+		// rejectMaxRowsUnderProxiedServer, which would call resolveMaxRows a
+		// second time and double any malformed-env warning it emits.
+		if err := rejectResolvedMaxRowsUnderProxiedServer(maxRows); err != nil {
 			return err
 		}
 		return runFindDuplicatesProxiedServer(rootCtx, filter, status, method, threshold, limit, model)

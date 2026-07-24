@@ -120,6 +120,7 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 			return nil, fmt.Errorf("search wisps (ephemeral filter): %w", err)
 		}
 		if len(results) > 0 {
+			results = trimToSearchLimit(results, filter.Limit)
 			if capErr := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); capErr != nil {
 				return nil, capErr
 			}
@@ -139,6 +140,7 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 	// must enforce the cap itself; skipping it here would let SkipWisps
 	// callers (e.g. bd list's default filter) silently bypass MaxRows.
 	if filter.SkipWisps {
+		results = trimToSearchLimit(results, filter.Limit)
 		if err := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); err != nil {
 			return nil, err
 		}
@@ -162,6 +164,7 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 			// exceed the cap (the merge path below enforces it at line ~74;
 			// this early return must enforce it too, or the cap is silently
 			// skipped whenever the wisps table is empty).
+			results = trimToSearchLimit(results, filter.Limit)
 			if err := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); err != nil {
 				return nil, err
 			}
@@ -189,16 +192,36 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 		}
 	}
 
-	// Apply the defensive cap on the merged result set. searchTableInTx already
-	// over-fetches by one (LIMIT MaxRows+1) so this check is sufficient — but
-	// when issues and wisps are merged, the combined count can exceed the cap
-	// even though neither leg did individually. Check after merge so the cap
-	// reflects the row count actually returned to the caller.
+	// Apply the defensive cap on the merged, delivered result set. Each leg
+	// (issues, wisps) is independently bounded by EffectiveSearchLimit, so
+	// the merged pre-trim count can exceed the cap even when filter.Limit
+	// itself does not — e.g. Limit=2, MaxRows=5, 3 rows in each table merges
+	// to 6, which would trip MaxRows even though the page actually handed
+	// back to the caller (trimmed to Limit=2) is well within the cap.
+	// Trimming before the cap check (mirrors GetReadyWorkInTx's
+	// mergeReadyWisps, which trims before its caller's EnforceMaxRowsCap
+	// runs) avoids that false positive; a single-source result never
+	// exceeds Limit when Limit>0 in the first place, so this trim is a
+	// no-op there and a genuine overage still fires (Limit=0, or
+	// Limit>MaxRows overage that survives the trim).
+	results = trimToSearchLimit(results, filter.Limit)
 	if err := EnforceMaxRowsCap(len(results), filter.MaxRows, filter.MaxRowsSource); err != nil {
 		return nil, err
 	}
 
 	return results, nil
+}
+
+// trimToSearchLimit truncates results to filter.Limit (when set, Limit>0)
+// before the caller-facing MaxRows cap check runs. Every searchInTx exit
+// path routes results returned to the caller through this before
+// EnforceMaxRowsCap — see the comment above the final merge check for why
+// (be-x42v.4 round-4 follow-up, mirrors finishReadyWorkWithCounts).
+func trimToSearchLimit[T any](results []T, limit int) []T {
+	if limit > 0 && len(results) > limit {
+		return results[:limit]
+	}
+	return results
 }
 
 // searchTableInTxT runs a filtered search against a specific table set

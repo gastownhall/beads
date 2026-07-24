@@ -45,6 +45,16 @@ func rejectMaxRowsUnderProxiedServer(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	return rejectResolvedMaxRowsUnderProxiedServer(maxRows)
+}
+
+// rejectResolvedMaxRowsUnderProxiedServer is rejectMaxRowsUnderProxiedServer
+// split out for callers that have already resolved the cap for their own
+// purposes (e.g. to build a filter) and would otherwise call resolveMaxRows
+// a second time — resolveMaxRowsEnvOnly emits a stderr warning on a
+// malformed BEADS_MAX_ROWS every time it runs, so a second resolve doubles
+// that warning under proxied mode (be-x42v.4 round-4 follow-up).
+func rejectResolvedMaxRowsUnderProxiedServer(maxRows int) error {
 	if maxRows > 0 {
 		return HandleErrorRespectJSON("--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode")
 	}

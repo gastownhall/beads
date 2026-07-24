@@ -58,6 +58,16 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
 					return err
 				}
+			} else {
+				// Still validate --max-rows/BEADS_MAX_ROWS here even though
+				// the resolved cap is ignored below: resolveMaxRows is also
+				// where a malformed value (e.g. --max-rows -1) is rejected
+				// with exit 1, and skipping it entirely for the claim-exempt
+				// branch would silently accept a usage error that every
+				// other command (direct or proxied) rejects.
+				if _, _, err := resolveMaxRows(cmd); err != nil {
+					return err
+				}
 			}
 			return runReadyProxiedServer(cmd, rootCtx)
 		}

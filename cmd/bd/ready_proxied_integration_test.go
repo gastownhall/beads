@@ -788,6 +788,21 @@ func TestProxiedServerReady2(t *testing.T) {
 		}
 	})
 
+	// be-x42v.4 round-4 follow-up (codex P2): the claim-exempt branch above
+	// must still validate --max-rows via resolveMaxRows even though it
+	// ignores the resolved (positive) cap — otherwise a malformed value
+	// like -1 is silently accepted under proxied `ready --claim`, unlike
+	// every other command (direct or proxied).
+	t.Run("claim_rejects_invalid_max_rows_flag", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rcim")
+		bdProxiedCreate(t, bd, p.dir, "Claim invalid max-rows seed")
+		out := bdProxiedReadyFail(t, bd, p, "--claim", "--max-rows", "-1")
+		if !strings.Contains(out, "must be non-negative") {
+			t.Errorf("expected --max-rows usage-error rejection, got: %s", out)
+		}
+	})
+
 	t.Run("reject_bulk_ready_under_max_rows_flag", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rbmf")

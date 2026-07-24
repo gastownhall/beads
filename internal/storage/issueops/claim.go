@@ -216,6 +216,14 @@ func ClaimReadyIssueInTx(
 	// to claim" whenever that narrow window is unclaimable, even with
 	// plenty of other ready work available. Clear the cap fields so
 	// GetReadyWorkInTx never returns ErrTooManyRows either.
+	//
+	// This is parity with pre-PR main (which never bounded the claim scan)
+	// and correctness-first: an unbounded scan preserves claim's existing
+	// fairness/ordering guarantee across the whole ready set. A paged scan
+	// that stays bounded while still walking past unclaimable rows is a
+	// reasonable follow-up, but it's a genuine behavior change (not a
+	// MaxRows-cap fix) and is deliberately deferred rather than folded in
+	// here.
 	claimFilter.Limit = 0
 	claimFilter.MaxRows = 0
 	claimFilter.MaxRowsSource = ""

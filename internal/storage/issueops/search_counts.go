@@ -156,20 +156,33 @@ func scanCountsRowsInTx(ctx context.Context, tx *sql.Tx, mainTable, query string
 
 // finishSearchIssuesWithCounts is the single terminal hook every
 // SearchIssuesWithCountsInTx exit path routes through: it sorts the merged
-// result, enforces the defensive MaxRows cap (be-x42v) on the row count
-// actually assembled — mirroring searchInTx's terminal EnforceMaxRowsCap
-// calls — and only then applies the caller-facing Limit trim. Checking the
-// cap before the Limit trim matters: runFilterSearchQueryInTx sizes its SQL
-// LIMIT via EffectiveSearchLimit (cap+1 when Limit is absent or looser than
-// the cap) specifically so overage is still visible here before Limit
-// silently truncates it away.
+// result, applies the caller-facing Limit trim, and only then enforces the
+// defensive MaxRows cap (be-x42v) on the delivered count — mirroring
+// searchInTx's trimToSearchLimit-before-EnforceMaxRowsCap ordering and
+// finishReadyWorkWithCounts in ready_work_counts.go.
+//
+// Trim-before-cap matters for the merged (issues+wisps) case:
+// runFilterSearchQueryInTx sizes each leg's SQL LIMIT independently via
+// EffectiveSearchLimit(filter.Limit, filter.MaxRows), so the merged
+// pre-trim slice can hold up to ~2x that per-leg bound — e.g. Limit=2,
+// MaxRows=5, 3 rows in each table merges to 6, which would trip MaxRows
+// even though the page actually handed back to the caller (trimmed to
+// Limit=2) is well within the cap. Checking the cap against the delivered
+// count instead avoids that false positive.
+//
+// This does not weaken cap enforcement for a single-source result: a lone
+// query's LIMIT is already bounded to at most max(Limit, MaxRows+1), so its
+// result never exceeds Limit when Limit>0 and the trim is a no-op there —
+// only the two-source merge can produce more rows than Limit pre-trim, and
+// a genuine overage (Limit=0, or Limit>MaxRows overage that survives the
+// trim) still fires.
 func finishSearchIssuesWithCounts(items []*types.IssueWithCounts, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
 	sortSearchIssuesWithCounts(items, filter.SortBy, filter.SortDesc)
+	if filter.Limit > 0 && len(items) > filter.Limit {
+		items = items[:filter.Limit]
+	}
 	if err := EnforceMaxRowsCap(len(items), filter.MaxRows, filter.MaxRowsSource); err != nil {
 		return nil, err
-	}
-	if filter.Limit > 0 && len(items) > filter.Limit {
-		return items[:filter.Limit], nil
 	}
 	return items, nil
 }
