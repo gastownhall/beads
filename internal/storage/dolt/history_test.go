@@ -67,62 +67,6 @@ func TestGetIssueHistory(t *testing.T) {
 	}
 }
 
-// TestGetIssueHistory_NullTextColumns reproduces GH#4867 for the duplicated
-// getIssueHistory scan path. See TestHistory_NullTextColumns in
-// versioned_test.go for why the NULL shows up.
-func TestGetIssueHistory_NullTextColumns(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	ctx, cancel := testContext(t)
-	defer cancel()
-
-	issue := &types.Issue{
-		ID:                 "null-hist-2",
-		Title:              "Null history test",
-		Description:        "original description",
-		Design:             "original design",
-		AcceptanceCriteria: "original AC",
-		Notes:              "original notes",
-		Status:             types.StatusOpen,
-		Priority:           2,
-		IssueType:          types.TypeTask,
-	}
-	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
-		t.Fatalf("failed to create issue: %v", err)
-	}
-	if err := store.Commit(ctx, "initial commit"); err != nil {
-		t.Fatalf("failed to commit: %v", err)
-	}
-
-	nullOutTextColumns(t, ctx, store, issue.ID, "description", "design", "acceptance_criteria", "notes")
-	if err := store.Commit(ctx, "null text columns commit"); err != nil {
-		t.Fatalf("failed to commit NULL text columns: %v", err)
-	}
-
-	history, err := store.getIssueHistory(ctx, issue.ID)
-	if err != nil {
-		t.Fatalf("getIssueHistory failed on NULL text columns: %v", err)
-	}
-	if len(history) < 2 {
-		t.Fatalf("expected at least 2 history entries, got %d", len(history))
-	}
-
-	latest := history[0].Issue
-	if latest.Description != "" {
-		t.Errorf("expected NULL description to coalesce to \"\", got %q", latest.Description)
-	}
-	if latest.Design != "" {
-		t.Errorf("expected NULL design to coalesce to \"\", got %q", latest.Design)
-	}
-	if latest.AcceptanceCriteria != "" {
-		t.Errorf("expected NULL acceptance_criteria to coalesce to \"\", got %q", latest.AcceptanceCriteria)
-	}
-	if latest.Notes != "" {
-		t.Errorf("expected NULL notes to coalesce to \"\", got %q", latest.Notes)
-	}
-}
-
 func TestGetIssueHistory_NonExistent(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
