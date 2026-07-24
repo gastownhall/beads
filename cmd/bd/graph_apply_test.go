@@ -3,12 +3,49 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
+
+// TestDocsGraphPlanExampleValidates pins the --graph doc supplement's example
+// to the validator: the canonical example must stay a plan `bd create --graph`
+// actually accepts (review caught it shipping with event fields on a task
+// node and edges duplicating parent_key). The embedded supplement is the
+// source of truth; the docs drift gate keeps the generated CLI reference
+// byte-equal to it.
+func TestDocsGraphPlanExampleValidates(t *testing.T) {
+	const fence = "```json\n"
+	start := strings.Index(createGraphPlanSupplement, fence)
+	if start < 0 {
+		t.Fatal("example JSON block not found in create_graph_plan.md supplement")
+	}
+	rest := createGraphPlanSupplement[start+len(fence):]
+	end := strings.Index(rest, "```")
+	if end < 0 {
+		t.Fatal("example JSON block not terminated")
+	}
+	planJSON := []byte(rest[:end])
+
+	if unknown := detectUnknownGraphFields(planJSON); len(unknown) > 0 {
+		t.Errorf("documented example uses unknown fields: %v", unknown)
+	}
+	var plan GraphApplyPlan
+	if err := json.Unmarshal(planJSON, &plan); err != nil {
+		t.Fatalf("documented example is not valid plan JSON: %v", err)
+	}
+	if err := validateGraphApplyPlan(&plan, nil, nil, GraphApplyOptions{}); err != nil {
+		t.Errorf("documented example rejected by validator: %v", err)
+	}
+	if _, err := validateGraphApplyStorageClasses(&plan, GraphApplyOptions{}, false); err != nil {
+		t.Errorf("documented example rejected by storage-class validation: %v", err)
+	}
+}
 
 func TestValidateGraphApplyPlanAcceptsCustomTypes(t *testing.T) {
 	plan := &GraphApplyPlan{
@@ -17,7 +54,7 @@ func TestValidateGraphApplyPlanAcceptsCustomTypes(t *testing.T) {
 			{Key: "spec", Title: "Step spec", Type: "spec"},
 		},
 	}
-	if err := validateGraphApplyPlan(plan, []string{"spec"}); err != nil {
+	if err := validateGraphApplyPlan(plan, []string{"spec"}, nil, GraphApplyOptions{}); err != nil {
 		t.Fatalf("expected custom type %q to validate, got %v", "spec", err)
 	}
 }
@@ -28,11 +65,11 @@ func TestValidateGraphApplyPlanRejectsTypeWhenCustomTypesAbsent(t *testing.T) {
 			{Key: "spec", Title: "Step spec", Type: "spec"},
 		},
 	}
-	err := validateGraphApplyPlan(plan, nil)
+	err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
 	if err == nil {
 		t.Fatal("expected custom type to fail when nil customTypes")
 	}
-	want := `node "spec": invalid type "spec"`
+	want := `node "spec": invalid issue type: spec`
 	if err.Error() != want {
 		t.Fatalf("error = %q, want %q", err.Error(), want)
 	}
@@ -44,11 +81,11 @@ func TestValidateGraphApplyPlanRejectsInvalidTypes(t *testing.T) {
 			{Key: "root", Title: "Root", Type: "definitely-not-a-type"},
 		},
 	}
-	err := validateGraphApplyPlan(plan, nil)
+	err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
 	if err == nil {
 		t.Fatal("expected error for invalid type")
 	}
-	want := `node "root": invalid type "definitely-not-a-type"`
+	want := `node "root": invalid issue type: definitely-not-a-type`
 	if err.Error() != want {
 		t.Fatalf("error = %q, want %q", err.Error(), want)
 	}
@@ -61,7 +98,7 @@ func TestValidateGraphApplyPlanAcceptsBuiltInTypes(t *testing.T) {
 				{Key: "n1", Title: "Node", Type: typ},
 			},
 		}
-		if err := validateGraphApplyPlan(plan, nil); err != nil {
+		if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
 			t.Errorf("type %q rejected: %v", typ, err)
 		}
 	}
@@ -73,7 +110,7 @@ func TestValidateGraphApplyPlanAcceptsEmptyType(t *testing.T) {
 			{Key: "n1", Title: "Node", Type: ""},
 		},
 	}
-	if err := validateGraphApplyPlan(plan, nil); err != nil {
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
 		t.Fatalf("empty type rejected: %v", err)
 	}
 }
@@ -101,13 +138,15 @@ func TestValidateGraphApplyPlanAcceptsNewFields(t *testing.T) {
 			},
 		},
 	}
-	if err := validateGraphApplyPlan(plan, nil); err != nil {
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
 		t.Fatalf("unexpected validation error: %v", err)
 	}
 }
 
 // TestValidateGraphApplyPlanRejectsNegativeEstimate verifies that a negative
-// estimate is caught at validation time. (GH#4064)
+// estimate (via the alias) is caught at validation time — even when
+// estimated_minutes is also set and would win the alias fold, so the bad
+// value can't be silently discarded by the precedence. (GH#4064)
 func TestValidateGraphApplyPlanRejectsNegativeEstimate(t *testing.T) {
 	neg := -5
 	plan := &GraphApplyPlan{
@@ -115,9 +154,19 @@ func TestValidateGraphApplyPlanRejectsNegativeEstimate(t *testing.T) {
 			{Key: "n", Title: "Node", Estimate: &neg},
 		},
 	}
-	err := validateGraphApplyPlan(plan, nil)
+	err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
 	if err == nil {
 		t.Fatal("expected error for negative estimate")
+	}
+	if !strings.Contains(err.Error(), "estimate cannot be negative") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	canonical := 10
+	plan.Nodes[0].EstimatedMinutes = &canonical
+	err = validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
+	if err == nil {
+		t.Fatal("expected error for negative estimate alongside estimated_minutes")
 	}
 	if !strings.Contains(err.Error(), "estimate cannot be negative") {
 		t.Fatalf("unexpected error: %v", err)
@@ -132,7 +181,7 @@ func TestValidateGraphApplyPlanRejectsEmptyDepTarget(t *testing.T) {
 			{Key: "n", Title: "Node", Deps: []GraphApplyNodeDep{{Target: ""}}},
 		},
 	}
-	err := validateGraphApplyPlan(plan, nil)
+	err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
 	if err == nil {
 		t.Fatal("expected error for empty dep target")
 	}
@@ -150,7 +199,7 @@ func TestValidateGraphApplyPlanParentAliasResolvesCorrectly(t *testing.T) {
 			{Key: "child", Title: "Child", Parent: "root"},
 		},
 	}
-	if err := validateGraphApplyPlan(plan, nil); err != nil {
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
 		t.Fatalf("parent alias should resolve: %v", err)
 	}
 }
@@ -163,7 +212,7 @@ func TestValidateGraphApplyPlanParentAliasRejectsUnknownKey(t *testing.T) {
 			{Key: "child", Title: "Child", Parent: "nonexistent"},
 		},
 	}
-	err := validateGraphApplyPlan(plan, nil)
+	err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
 	if err == nil {
 		t.Fatal("expected error for unknown parent key via alias")
 	}
@@ -182,7 +231,7 @@ func TestEmitGraphApplyDryRun_ParentAlias(t *testing.T) {
 		},
 	}
 	out := captureStdout(t, func() error {
-		emitGraphApplyDryRun(plan)
+		emitGraphApplyDryRun(plan, GraphApplyOptions{})
 		return nil
 	})
 	if !strings.Contains(out, "1 parent-child link(s)") {
@@ -309,43 +358,6 @@ func TestWarnUnknownGraphFields_NoUnknownsIsSilent(t *testing.T) {
 	}
 }
 
-// TestKnownGraphFieldSetsMatchStructTags is a guardrail: the
-// knownGraphPlanFields / knownGraphNodeFields / knownGraphEdgeFields sets
-// must match the json tags on the corresponding structs so that adding a
-// new field on the schema doesn't silently re-introduce the false-positive
-// warning that GH#3367 was trying to remove. Reflection lets us spot drift
-// at test time without forcing manual upkeep on the schema author.
-func TestKnownGraphFieldSetsMatchStructTags(t *testing.T) {
-	check := func(name string, sample interface{}, known map[string]struct{}) {
-		t.Helper()
-		typ := reflect.TypeOf(sample)
-		tagged := make(map[string]struct{})
-		for i := 0; i < typ.NumField(); i++ {
-			tag := typ.Field(i).Tag.Get("json")
-			if tag == "" || tag == "-" {
-				continue
-			}
-			if comma := strings.IndexByte(tag, ','); comma >= 0 {
-				tag = tag[:comma]
-			}
-			tagged[tag] = struct{}{}
-		}
-		for k := range tagged {
-			if _, ok := known[k]; !ok {
-				t.Errorf("%s: json tag %q present on struct but missing from known set (would be flagged as unknown)", name, k)
-			}
-		}
-		for k := range known {
-			if _, ok := tagged[k]; !ok {
-				t.Errorf("%s: %q in known set but not on struct (stale entry)", name, k)
-			}
-		}
-	}
-	check("GraphApplyPlan", GraphApplyPlan{}, knownGraphPlanFields)
-	check("GraphApplyNode", GraphApplyNode{}, knownGraphNodeFields)
-	check("GraphApplyEdge", GraphApplyEdge{}, knownGraphEdgeFields)
-}
-
 // TestEmitGraphApplyDryRun_Counts verifies the dry-run preview reports the
 // node count, edge count, and parent-link count without performing any
 // writes. Captures stdout (the dry-run path writes to stdout, with warnings
@@ -363,7 +375,7 @@ func TestEmitGraphApplyDryRun_Counts(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		emitGraphApplyDryRun(plan)
+		emitGraphApplyDryRun(plan, GraphApplyOptions{})
 		return nil
 	})
 
@@ -401,7 +413,7 @@ func TestValidateGraphApplyPlanRejectsLocalBlockingCycle(t *testing.T) {
 		},
 	}
 
-	err := validateGraphApplyPlan(plan, nil)
+	err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
 	if err == nil {
 		t.Fatal("expected local graph cycle to be rejected")
 	}
@@ -424,7 +436,7 @@ func TestValidateGraphApplyPlanReportsDeterministicCycleNode(t *testing.T) {
 		},
 	}
 
-	err := validateGraphApplyPlan(plan, nil)
+	err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
 	if err == nil {
 		t.Fatal("expected local graph cycle to be rejected")
 	}
@@ -445,7 +457,7 @@ func TestValidateGraphApplyPlanAllowsNonBlockingLocalCycle(t *testing.T) {
 		},
 	}
 
-	if err := validateGraphApplyPlan(plan, nil); err != nil {
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
 		t.Fatalf("non-blocking cycle rejected: %v", err)
 	}
 }
@@ -461,7 +473,7 @@ func TestValidateGraphApplyPlanRejectsImplicitParentChildReverseBlockingCycle(t 
 		},
 	}
 
-	err := validateGraphApplyPlan(plan, nil)
+	err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
 	if err == nil {
 		t.Fatal("expected implicit parent-child plus reverse blocking edge to be rejected")
 	}
@@ -482,7 +494,7 @@ func TestValidateGraphApplyPlanIgnoresIDOverridesForLocalCycleValidation(t *test
 		},
 	}
 
-	if err := validateGraphApplyPlan(plan, nil); err != nil {
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
 		t.Fatalf("ID override edge should not be treated as a local key cycle: %v", err)
 	}
 }
@@ -563,7 +575,7 @@ func TestEmitGraphApplyDryRun_JSON(t *testing.T) {
 	defer func() { jsonOutput = oldJSON }()
 
 	out := captureStdout(t, func() error {
-		emitGraphApplyDryRun(plan)
+		emitGraphApplyDryRun(plan, GraphApplyOptions{})
 		return nil
 	})
 
@@ -656,5 +668,339 @@ func TestCreateIssuesFromGraph_DryRunDoesNotPersist(t *testing.T) {
 	}
 	if result.ParentDeps != 1 {
 		t.Errorf("parent_deps = %d, want 1", result.ParentDeps)
+	}
+}
+
+// singleNodePlanErr validates a one-node plan built by mutate and returns the
+// validation error (nil when the plan is accepted).
+func singleNodePlanErr(customStatuses []string, mutate func(*GraphApplyNode)) error {
+	node := GraphApplyNode{Key: "a", Title: "A"}
+	mutate(&node)
+	plan := &GraphApplyPlan{Nodes: []GraphApplyNode{node}}
+	return validateGraphApplyPlan(plan, nil, customStatuses, GraphApplyOptions{})
+}
+
+func TestValidateGraphApplyPlanNodeFieldRules(t *testing.T) {
+	neg := -5
+	on := true
+	cases := []struct {
+		name           string
+		customStatuses []string
+		mutate         func(*GraphApplyNode)
+		wantErr        string
+	}{
+		{name: "invalid status", mutate: func(n *GraphApplyNode) { n.Status = "bogus" }, wantErr: "invalid status"},
+		{name: "alias type accepted like bd create", mutate: func(n *GraphApplyNode) { n.Type = "feat" }},
+		{name: "builtin status accepted", mutate: func(n *GraphApplyNode) { n.Status = "in_progress" }},
+		{name: "custom status accepted", customStatuses: []string{"triage"}, mutate: func(n *GraphApplyNode) { n.Status = "triage" }},
+		{name: "custom status rejected without config", mutate: func(n *GraphApplyNode) { n.Status = "triage" }, wantErr: "invalid status"},
+		{name: "negative estimate", mutate: func(n *GraphApplyNode) { n.EstimatedMinutes = &neg }, wantErr: "estimated_minutes"},
+		{name: "priority out of range", mutate: func(n *GraphApplyNode) { p := 9; n.Priority = &p }, wantErr: "priority must be between 0 and 4"},
+		{name: "priority bounds accepted", mutate: func(n *GraphApplyNode) { p := 0; n.Priority = &p }},
+		{name: "invalid wisp_type", mutate: func(n *GraphApplyNode) { n.WispType = "bogus" }, wantErr: "invalid wisp_type"},
+		{name: "valid wisp_type", mutate: func(n *GraphApplyNode) { n.WispType = "heartbeat" }},
+		{name: "invalid mol_type", mutate: func(n *GraphApplyNode) { n.MolType = "bogus" }, wantErr: "invalid mol_type"},
+		{name: "valid mol_type", mutate: func(n *GraphApplyNode) { n.MolType = "swarm" }},
+		{name: "event fields require event type", mutate: func(n *GraphApplyNode) { n.EventKind = "agent.started" }, wantErr: "require type"},
+		{name: "event fields on event node", mutate: func(n *GraphApplyNode) {
+			n.Type = "event"
+			n.EventKind = "agent.started"
+			n.Actor = "x"
+			n.Target = "y"
+			n.Payload = "{}"
+		}},
+		{name: "node-level ephemeral+no_history conflict", mutate: func(n *GraphApplyNode) { n.Ephemeral = &on; n.NoHistory = &on }, wantErr: "mutually exclusive"},
+		{name: "bad explicit id format", mutate: func(n *GraphApplyNode) { n.ID = "nohyphen" }, wantErr: "invalid ID format"},
+		{name: "valid explicit id", mutate: func(n *GraphApplyNode) { n.ID = "bd-a1b2c3" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := singleNodePlanErr(tc.customStatuses, tc.mutate)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected plan to validate, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestValidateGraphApplyPlanRejectsDuplicateExplicitIDs(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A", ID: "bd-a1b2c3"},
+			{Key: "b", Title: "B", ID: "bd-a1b2c3"},
+		},
+	}
+	err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
+	if err == nil || !strings.Contains(err.Error(), "duplicate explicit id") {
+		t.Fatalf("expected duplicate explicit id error, got %v", err)
+	}
+}
+
+func TestValidateGraphApplyExplicitIDCollisions(t *testing.T) {
+	plan := &GraphApplyPlan{
+		Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A", ID: "bd-taken"},
+			{Key: "b", Title: "B"},
+		},
+	}
+
+	t.Run("nil probe skips", func(t *testing.T) {
+		if err := validateGraphApplyExplicitIDCollisions(plan, nil); err != nil {
+			t.Fatalf("nil probe: want nil error, got %v", err)
+		}
+	})
+
+	t.Run("collision rejected with node context", func(t *testing.T) {
+		err := validateGraphApplyExplicitIDCollisions(plan, func(id string) (bool, error) {
+			return id == "bd-taken", nil
+		})
+		if err == nil || !strings.Contains(err.Error(), "already exists") ||
+			!strings.Contains(err.Error(), "bd-taken") || !strings.Contains(err.Error(), `"a"`) {
+			t.Fatalf("expected already-exists error naming id and node, got %v", err)
+		}
+	})
+
+	t.Run("free id passes and probe skips id-less nodes", func(t *testing.T) {
+		var probed []string
+		err := validateGraphApplyExplicitIDCollisions(plan, func(id string) (bool, error) {
+			probed = append(probed, id)
+			return false, nil
+		})
+		if err != nil {
+			t.Fatalf("free id: want nil error, got %v", err)
+		}
+		if len(probed) != 1 || probed[0] != "bd-taken" {
+			t.Fatalf("want exactly the explicit id probed, got %v", probed)
+		}
+	})
+
+	t.Run("probe error propagates", func(t *testing.T) {
+		err := validateGraphApplyExplicitIDCollisions(plan, func(string) (bool, error) {
+			return false, fmt.Errorf("store offline")
+		})
+		if err == nil || !strings.Contains(err.Error(), "store offline") {
+			t.Fatalf("expected probe error to propagate, got %v", err)
+		}
+	})
+}
+
+func TestValidateGraphApplyPlanEdgeGateRules(t *testing.T) {
+	twoNodes := []GraphApplyNode{
+		{Key: "gate", Title: "Gate"},
+		{Key: "spawner", Title: "Spawner"},
+	}
+	cases := []struct {
+		name    string
+		edge    GraphApplyEdge
+		wantErr string
+	}{
+		{name: "gate requires waits-for", edge: GraphApplyEdge{FromKey: "gate", ToKey: "spawner", Type: "blocks", Gate: "all-children"}, wantErr: "require type"},
+		{name: "gate defaults-to-blocks edge rejected", edge: GraphApplyEdge{FromKey: "gate", ToKey: "spawner", Gate: "all-children"}, wantErr: "require type"},
+		{name: "invalid gate value", edge: GraphApplyEdge{FromKey: "gate", ToKey: "spawner", Type: "waits-for", Gate: "bogus"}, wantErr: "invalid gate"},
+		{name: "spawner_key and spawner_id conflict", edge: GraphApplyEdge{FromKey: "gate", ToKey: "spawner", Type: "waits-for", SpawnerKey: "spawner", SpawnerID: "bd-x"}, wantErr: "cannot specify both"},
+		{name: "unknown spawner_key", edge: GraphApplyEdge{FromKey: "gate", ToKey: "spawner", Type: "waits-for", SpawnerKey: "ghost"}, wantErr: "spawner key"},
+		{name: "spawner_key must match to_key", edge: GraphApplyEdge{FromKey: "gate", ToKey: "spawner", Type: "waits-for", SpawnerKey: "gate"}, wantErr: "must match to_key"},
+		{name: "spawner_key with ambiguous to_id rejected", edge: GraphApplyEdge{FromKey: "gate", ToKey: "spawner", ToID: "bd-ext1", Type: "waits-for", SpawnerKey: "spawner"}, wantErr: "cannot be combined with to_id"},
+		{name: "spawner_id must match to_id", edge: GraphApplyEdge{FromKey: "gate", ToID: "bd-ext1", Type: "waits-for", SpawnerID: "bd-other"}, wantErr: "must match to_id"},
+		{name: "matching spawner_id accepted", edge: GraphApplyEdge{FromKey: "gate", ToID: "bd-ext1", Type: "waits-for", SpawnerID: "bd-ext1"}},
+		{name: "valid gated waits-for edge", edge: GraphApplyEdge{FromKey: "gate", ToKey: "spawner", Type: "waits-for", Gate: "any-children", SpawnerKey: "spawner"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := &GraphApplyPlan{Nodes: twoNodes, Edges: []GraphApplyEdge{tc.edge}}
+			err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{})
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected plan to validate, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestGraphApplyEdgeDependencyGateMetadata(t *testing.T) {
+	resolve := map[string]string{"spawner": "bd-spawn1"}
+
+	t.Run("gate and spawner_key resolve into waits-for metadata", func(t *testing.T) {
+		dep, err := types.NewGraphEdgeDependency("bd-from", "bd-to", types.DepWaitsFor, "any-children", "spawner", "", "", resolve)
+		if err != nil {
+			t.Fatalf("NewGraphEdgeDependency: %v", err)
+		}
+		var meta types.WaitsForMeta
+		if err := json.Unmarshal([]byte(dep.Metadata), &meta); err != nil {
+			t.Fatalf("metadata not valid WaitsForMeta JSON: %v", err)
+		}
+		if meta.Gate != types.WaitsForAnyChildren || meta.SpawnerID != "bd-spawn1" {
+			t.Errorf("meta = %+v, want any-children gate with resolved spawner", meta)
+		}
+	})
+
+	t.Run("gate defaults to all-children when spawner is set", func(t *testing.T) {
+		dep, err := types.NewGraphEdgeDependency("bd-from", "bd-to", types.DepWaitsFor, "", "", "bd-ext1", "", resolve)
+		if err != nil {
+			t.Fatalf("NewGraphEdgeDependency: %v", err)
+		}
+		var meta types.WaitsForMeta
+		if err := json.Unmarshal([]byte(dep.Metadata), &meta); err != nil {
+			t.Fatalf("metadata not valid WaitsForMeta JSON: %v", err)
+		}
+		if meta.Gate != types.WaitsForAllChildren || meta.SpawnerID != "bd-ext1" {
+			t.Errorf("meta = %+v, want all-children default with explicit spawner", meta)
+		}
+	})
+
+	t.Run("plain edge carries no metadata and passes thread_id", func(t *testing.T) {
+		dep, err := types.NewGraphEdgeDependency("bd-from", "bd-to", types.DepRepliesTo, "", "", "", "thread-9", resolve)
+		if err != nil {
+			t.Fatalf("NewGraphEdgeDependency: %v", err)
+		}
+		if dep.Metadata != "" {
+			t.Errorf("Metadata = %q, want empty for ungated edge", dep.Metadata)
+		}
+		if dep.ThreadID != "thread-9" {
+			t.Errorf("ThreadID = %q, want thread-9", dep.ThreadID)
+		}
+	})
+
+	t.Run("ungated waits-for edge still gets all-children metadata", func(t *testing.T) {
+		// '{}' metadata must never be stored for waits-for deps: the gate SQL
+		// reads $.gate and NULL poisons its NOT(... AND ...) predicate,
+		// unblocking the gate as soon as the first child closes.
+		dep, err := types.NewGraphEdgeDependency("bd-from", "bd-to", types.DepWaitsFor, "", "", "", "", resolve)
+		if err != nil {
+			t.Fatalf("NewGraphEdgeDependency: %v", err)
+		}
+		var meta types.WaitsForMeta
+		if err := json.Unmarshal([]byte(dep.Metadata), &meta); err != nil {
+			t.Fatalf("metadata not valid WaitsForMeta JSON (%q): %v", dep.Metadata, err)
+		}
+		if meta.Gate != types.WaitsForAllChildren {
+			t.Errorf("gate = %q, want all-children default for ungated waits-for edge", meta.Gate)
+		}
+	})
+
+	t.Run("unresolved spawner_key errors instead of writing empty spawner", func(t *testing.T) {
+		if _, err := types.NewGraphEdgeDependency("bd-from", "bd-to", types.DepWaitsFor, "", "ghost", "", "", resolve); err == nil {
+			t.Fatal("expected error for unresolved spawner key")
+		}
+	})
+}
+
+// TestDetectUnknownGraphFields_CaseInsensitive: encoding/json binds
+// case-variant keys to the matching field, so they must not be reported as
+// silently dropped — only genuinely unknown names are.
+func TestDetectUnknownGraphFields_CaseInsensitive(t *testing.T) {
+	planJSON := []byte(`{
+        "nodes": [{"key": "n", "title": "N", "Pinned": true, "Bogus": 1}]
+    }`)
+	got := detectUnknownGraphFields(planJSON)
+	if !reflect.DeepEqual(got, map[string][]string{`node["n"]`: {"Bogus"}}) {
+		t.Fatalf("case-variant known field misreported: %#v", got)
+	}
+}
+
+func TestValidateGraphApplyStorageClasses(t *testing.T) {
+	on := true
+	plan := &GraphApplyPlan{Nodes: []GraphApplyNode{
+		{Key: "a", Title: "A"},
+		{Key: "b", Title: "B", NoHistory: &on},
+	}}
+
+	t.Run("effective flag+node conflict caught at validation time", func(t *testing.T) {
+		_, err := validateGraphApplyStorageClasses(plan, GraphApplyOptions{Ephemeral: true}, false)
+		if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Fatalf("expected effective ephemeral+no_history conflict, got %v", err)
+		}
+	})
+
+	t.Run("mixed storage classes rejected only when uniformity is required", func(t *testing.T) {
+		if _, err := validateGraphApplyStorageClasses(plan, GraphApplyOptions{}, false); err != nil {
+			t.Fatalf("embedded mode allows mixed plans, got %v", err)
+		}
+		_, err := validateGraphApplyStorageClasses(plan, GraphApplyOptions{}, true)
+		if err == nil || !strings.Contains(err.Error(), "uniform") {
+			t.Fatalf("expected uniformity error in proxied mode, got %v", err)
+		}
+	})
+
+	t.Run("resolved useWisp reported from node 0", func(t *testing.T) {
+		useWisp, err := validateGraphApplyStorageClasses(&GraphApplyPlan{Nodes: []GraphApplyNode{
+			{Key: "a", Title: "A", NoHistory: &on},
+			{Key: "b", Title: "B", NoHistory: &on},
+		}}, GraphApplyOptions{}, true)
+		if err != nil {
+			t.Fatalf("uniform wisp plan rejected: %v", err)
+		}
+		if !useWisp {
+			t.Error("useWisp = false, want true for no_history plan")
+		}
+	})
+}
+
+func TestValidateGraphApplyExplicitIDPrefixes(t *testing.T) {
+	plan := &GraphApplyPlan{Nodes: []GraphApplyNode{
+		{Key: "gen", Title: "Generated"},
+		{Key: "pinnedID", Title: "Pinned", ID: "zz-a1b2c3"},
+	}}
+
+	if err := validateGraphApplyExplicitIDPrefixes(plan, "bd", "", false); err == nil {
+		t.Fatal("expected foreign-prefix explicit id to be rejected")
+	} else if !strings.Contains(err.Error(), `node "pinnedID"`) {
+		t.Fatalf("error should name the node, got %v", err)
+	}
+	if err := validateGraphApplyExplicitIDPrefixes(plan, "zz", "", false); err != nil {
+		t.Fatalf("matching prefix rejected: %v", err)
+	}
+	if err := validateGraphApplyExplicitIDPrefixes(plan, "bd", "zz", false); err != nil {
+		t.Fatalf("allowed_prefixes rejected: %v", err)
+	}
+	if err := validateGraphApplyExplicitIDPrefixes(plan, "bd", "", true); err != nil {
+		t.Fatalf("--force rejected: %v", err)
+	}
+}
+
+// TestGraphApplyNodeCoversCreateIssueParams pins full issue-model parity
+// between single-issue `bd create` and graph plans: every createIssueParams
+// field must be addressable from a GraphApplyNode or listed here with a
+// reason. This keeps the schema gap from silently reopening as create grows.
+//
+// Limitation: the check is name-based — it proves a same-named GraphApplyNode
+// field exists, not that graphApplyNodeIssue actually wires it into its
+// createIssueParams literal. A new field added everywhere but omitted from
+// that literal would still pass here and materialize as a zero value; the
+// value round-trip in TestEmbeddedCreate/graph_full_fields is the wiring
+// backstop.
+func TestGraphApplyNodeCoversCreateIssueParams(t *testing.T) {
+	renamed := map[string]string{
+		"IssueType":     "Type",
+		"InitialStatus": "Status",
+	}
+	excluded := map[string]string{
+		"CreatedBy": "always the ambient actor identity; plans do not impersonate creators",
+	}
+
+	nodeType := reflect.TypeOf(GraphApplyNode{})
+	paramsType := reflect.TypeOf(createIssueParams{})
+	for i := 0; i < paramsType.NumField(); i++ {
+		name := paramsType.Field(i).Name
+		if _, ok := excluded[name]; ok {
+			continue
+		}
+		if alias, ok := renamed[name]; ok {
+			name = alias
+		}
+		if _, ok := nodeType.FieldByName(name); !ok {
+			t.Errorf("createIssueParams field %q is not addressable from graph plans; add it to GraphApplyNode (or the exclusion list with a reason)", name)
+		}
 	}
 }

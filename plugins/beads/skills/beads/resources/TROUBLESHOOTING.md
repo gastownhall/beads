@@ -22,7 +22,7 @@ Common issues encountered when using bd and how to resolve them.
 - [Dependencies Not Persisting](#dependencies-not-persisting)
 - [Status Updates Not Visible](#status-updates-not-visible)
 - [Dolt Server Won't Start](#dolt-server-wont-start)
-- [Database Errors on Cloud Storage](#database-errors-on-cloud-storage)
+- [Database Errors in Cloud-Synced Folders](#database-errors-in-cloud-synced-folders)
 - [Database Not Initialized](#database-not-initialized)
 - [Version Requirements](#version-requirements)
 
@@ -195,7 +195,7 @@ bd dolt start
 
 ---
 
-## Database Errors on Cloud Storage
+## Database Errors in Cloud-Synced Folders
 
 ### Symptom
 ```bash
@@ -205,64 +205,97 @@ bd init myproject
 # OR: Error: database is locked
 ```
 
-### Root Cause
-**SQLite incompatibility with cloud sync filesystems.**
+### Current Storage Model
+Current versions of bd do not store project data in SQLite. The default
+embedded mode runs Dolt in-process, stores the live database under
+`.beads/embeddeddolt/`, and permits one writer at a time using a file lock.
+A locally managed, per-project SQL server normally stores data under
+`.beads/dolt/` and routes concurrent access through the Dolt SQL server.
+Shared-server data normally lives under `~/.beads/shared-server/dolt/` instead,
+while an externally managed server owns data on its host. Proxied-server and
+custom configurations can use another configured root.
 
-Cloud services (Google Drive, Dropbox, OneDrive, iCloud) don't support:
-- POSIX file locking (required by SQLite)
-- Consistent file handles across sync operations
-- Atomic write operations
-
-This is a **known SQLite limitation**, not a bd bug.
+In embedded or locally managed per-project mode, a cloud-synced project can
+therefore sync a live Dolt directory tree. In shared, external, or custom-root
+server modes, the project `.beads/` directory may contain only client
+configuration, not the live database. Cloud-folder replication is different
+from using a Dolt remote or a Dolt-native backup, and SQLite-era advice about
+standalone database files or a shared local database workaround does not apply.
 
 ### Resolution
 
-**Move bd database to local filesystem:**
+**1. Capture diagnostics before changing the database:**
 
 ```bash
-# Wrong location (cloud sync)
-~/Google Drive/My Work/project/.beads/  # ✗ Will fail
-
-# Correct location (local disk)
-~/Repos/project/.beads/                 # ✓ Works reliably
-~/Projects/project/.beads/              # ✓ Works reliably
+bd version
+bd doctor
+bd dolt status
 ```
 
-**Migration steps:**
+Do not delete or reinitialize `.beads/` while diagnosing the problem. Before
+any repair, identify which mode owns the live database and stop its writers.
+In embedded mode, exit every bd process before copying `.beads/`. For a locally
+managed per-project server, stop that server before copying `.beads/`. For a
+shared, external, proxied, or custom-root server, do not assume that copying
+the project `.beads/` captures the data or stop a shared service unilaterally;
+coordinate with its operator and use its supported backup procedure for the
+actual configured data root.
 
-1. **Move project to local disk:**
-   ```bash
-   mv ~/Google\ Drive/project ~/Repos/project
-   cd ~/Repos/project
-   ```
+**2. Isolate filesystem behavior:**
 
-2. **Re-initialize bd (if needed):**
-   ```bash
-   bd init myproject
-   ```
+For embedded or locally managed per-project mode, stop the owning processes,
+pause or quit the cloud sync client, copy the project to a local path that is
+not being synchronized, and retry there. Moving only the project does not move
+a shared or external server database; for those modes, use the server
+operator's storage and backup procedure. If the error occurs only when the live
+Dolt root is cloud-synchronized, keep that root on a local filesystem and use a
+supported sync mechanism.
 
-3. **Import existing issues (if you have a JSONL backup):**
-   ```bash
-   bd init myproject --from-jsonl issues-backup.jsonl
-   ```
+**3. Use a Dolt remote to share live issue history between working copies:**
 
-**Alternative: Use global `~/.beads/` database**
-
-If you must keep work on cloud storage:
 ```bash
-# Don't initialize bd in cloud-synced directory
-# Use global database instead
-cd ~/Google\ Drive/project
-bd create "My task"
-# Uses ~/.beads/default.db (on local disk)
+# Existing, verified-authoritative working copy
+bd dolt remote list
+
+# If no Dolt remote is configured, push can adopt the project's Git origin.
+bd dolt push
 ```
 
-**Workaround limitations:**
-- No per-project database isolation
-- All projects share same issue prefix
-- Manual tracking of which issues belong to which project
+In a fresh Git clone whose origin contains `refs/dolt/data`:
 
-**Recommendation:** Keep code/projects on local disk, sync final deliverables to cloud.
+```bash
+bd bootstrap
+
+# Normal synchronization after bootstrap
+bd dolt pull
+bd dolt push
+```
+
+`bd dolt push` and `bd dolt pull` synchronize Dolt history; a normal Git clone
+does not fetch `refs/dolt/data`, so new clones must run `bd bootstrap`.
+Before the first push, verify that this local database is the authoritative,
+healthy copy. If the remote already contains different Dolt history, stop and
+reconcile it instead of forcing or replacing either side.
+
+**4. Use `bd backup` for a restorable copy:**
+
+```bash
+# Embedded or same-host locally managed server:
+# the Dolt process must be able to access this absolute filesystem path.
+bd backup init ~/Dropbox/beads-backup
+bd backup sync
+bd backup status
+```
+
+Filesystem backup URLs are opened by the Dolt process. For an external server,
+use a destination that the server can access and follow the server operator's
+backup procedure. In shared-server mode, coordinate the destination because
+clients register a server-side backup name. `bd backup` is not supported in
+proxied-server mode; back up its configured data root using the owning
+operator's procedure instead.
+
+A successful Dolt-native backup preserves branches, commit history, and
+working-set data. A JSONL export is not a full Dolt database backup.
 
 ---
 
@@ -400,9 +433,9 @@ bd version
 # 2. Dolt server status
 bd doctor
 
-# 3. Database location
-echo $PWD/.beads/*.db
-ls -la .beads/
+# 3. Dolt mode, reachability, branch, and current commit
+bd dolt status
+bd vc status  # Branch and HEAD only; skip in proxied-server mode
 
 # 4. Git status
 git status
@@ -445,7 +478,7 @@ If the **bd-issue-tracking skill** provides incorrect guidance:
 | Dependencies not saving | Upgrade to bd v0.15.0+ |
 | Status updates lag | Use server mode (ensure Dolt server is running) |
 | Dolt server won't start | Run `git init` first |
-| Database errors on Google Drive | Move to local filesystem |
+| Database errors in a cloud-synced folder | Diagnose from a local copy; sync with a Dolt remote or `bd backup` |
 | Database not initialized | Run `bd init` in the project directory |
 | Dependencies backwards (MCP) | Update to v0.15.0+, use `issue_id/depends_on_id` correctly |
 

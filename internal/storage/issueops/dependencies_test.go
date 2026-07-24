@@ -2,6 +2,7 @@ package issueops
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"regexp"
 	"strings"
@@ -9,7 +10,64 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/steveyegge/beads/internal/storage/depid"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/types"
 )
+
+// TestCheckDependencyCycleInTxSelfDependencyIsWrapPreserving proves the
+// self-dependency guard now returns a typed sentinel (errors.Is-able) while its
+// user-facing message text stays byte-identical to the pre-taxonomy string.
+func TestCheckDependencyCycleInTxSelfDependencyIsWrapPreserving(t *testing.T) {
+	t.Parallel()
+
+	_, _, tx := beginMockTx(t)
+	dep := &types.Dependency{IssueID: "dep-a", DependsOnID: "dep-a", Type: types.DepBlocks}
+
+	err := CheckDependencyCycleInTx(context.Background(), tx, dep, nil)
+	if err == nil {
+		t.Fatal("CheckDependencyCycleInTx(self-dep) = nil, want error")
+	}
+	if !errors.Is(err, domain.ErrSelfDependency) {
+		t.Errorf("errors.Is(err, domain.ErrSelfDependency) = false, want true; err = %v", err)
+	}
+	// Byte-identical to the pre-taxonomy message: the sentinel is the static
+	// prefix rendered by %w, the rest is unchanged.
+	const want = "cannot add self-dependency: dep-a cannot depend on itself"
+	if err.Error() != want {
+		t.Errorf("message = %q, want byte-identical %q", err.Error(), want)
+	}
+}
+
+// TestCheckDependencyCycleInTxCycleIsWrapPreserving proves the cycle guard now
+// returns a typed sentinel while its user-facing message text stays
+// byte-identical to the pre-taxonomy string.
+func TestCheckDependencyCycleInTxCycleIsWrapPreserving(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	dep := &types.Dependency{IssueID: "dep-a", DependsOnID: "dep-b", Type: types.DepBlocks}
+
+	// WouldCreateSchedulingCycleInTx queries reachability with (dependsOnID, issueID).
+	mock.ExpectQuery("WITH RECURSIVE reachable").
+		WithArgs("dep-b", "dep-a").
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+
+	err := CheckDependencyCycleInTx(context.Background(), tx, dep, nil)
+	if err == nil {
+		t.Fatal("CheckDependencyCycleInTx(cycle) = nil, want error")
+	}
+	if !errors.Is(err, domain.ErrDependencyCycle) {
+		t.Errorf("errors.Is(err, domain.ErrDependencyCycle) = false, want true; err = %v", err)
+	}
+	// Byte-identical to the pre-taxonomy message (the bare sentinel text).
+	const want = "adding dependency would create a cycle"
+	if err.Error() != want {
+		t.Errorf("message = %q, want byte-identical %q", err.Error(), want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
 
 func TestReplaceDependencyTargetNormalizesTargetColumns(t *testing.T) {
 	t.Parallel()

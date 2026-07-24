@@ -3,10 +3,12 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -224,6 +226,11 @@ func TestRunInTransactionCrossTierCycleRejected(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "would create a cycle") {
 		t.Fatalf("RunInTransaction error = %v, want cycle rejection", err)
 	}
+	// The cross-tier gate must return the typed sentinel, not a bare string, so
+	// consumers see the same taxonomy as the same-tier path (guarded-ops S1).
+	if !errors.Is(err, domain.ErrDependencyCycle) {
+		t.Fatalf("cross-tier cycle error = %v, want errors.Is(domain.ErrDependencyCycle)", err)
+	}
 	assertWispCount(ctx, t, store.db, wisp.ID, 0)
 	if deps, derr := store.GetDependencyRecords(ctx, regular.ID); derr != nil || len(deps) != 0 {
 		t.Fatalf("regular issue dependency records after rollback = %v (err %v), want none", deps, derr)
@@ -294,6 +301,11 @@ func TestRunInTransactionMixedTierCycleSameTierClosingEdgeRejected(t *testing.T)
 	})
 	if err == nil || !strings.Contains(err.Error(), "would create a cycle") {
 		t.Fatalf("RunInTransaction error = %v, want cycle rejection", err)
+	}
+	// Same-tier closing edge on a cross-tier cycle must still surface the typed
+	// sentinel (guarded-ops S1).
+	if !errors.Is(err, domain.ErrDependencyCycle) {
+		t.Fatalf("mixed-tier cycle error = %v, want errors.Is(domain.ErrDependencyCycle)", err)
 	}
 
 	// The under-test transaction must roll back entirely: R never lands and no

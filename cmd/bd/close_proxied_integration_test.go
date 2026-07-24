@@ -447,6 +447,13 @@ func TestProxiedServerClose(t *testing.T) {
 		}
 	})
 
+}
+
+func TestProxiedServerClose2(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
 	t.Run("close_suggest_next_json", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "csnj")

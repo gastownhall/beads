@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 	"sort"
@@ -705,6 +706,80 @@ func testSlots(t *testing.T, f Factory) {
 	if err := s.SlotSet(c, "test-missing", "k", "v", "a"); err == nil {
 		t.Error("SlotSet on a missing issue: want error, got nil")
 	}
+
+	// MergeMetadata stores a raw JSON value, so nested objects/arrays are
+	// preserved rather than stringified, and independent keys coexist. (At this
+	// point "test-sl" metadata is {"k2":"other"}.) Backends canonicalize JSON
+	// whitespace differently (compact vs. spaced), so assert values semantically.
+	must(t, s.MergeMetadata(c, "test-sl", "nested", json.RawMessage(`{"pr":7}`), "a"))
+	must(t, s.MergeMetadata(c, "test-sl", "flag", json.RawMessage(`true`), "a"))
+	meta := readMetadata(t, s, "test-sl")
+	if pr := nestedField(t, meta, "nested"); pr != 7 {
+		t.Errorf("MergeMetadata nested value pr = %v, want 7 (nested object round-trip)", pr)
+	}
+	if string(meta["flag"]) != `true` {
+		t.Errorf("MergeMetadata flag value = %s, want true", meta["flag"])
+	}
+	if v := jsonString(t, meta["k2"]); v != "other" {
+		t.Errorf("pre-existing k2 clobbered by MergeMetadata: %q", v)
+	}
+
+	// SlotClear removes only its key; the other merged key survives (the atomic
+	// single-key delete every backend must honor).
+	must(t, s.SlotClear(c, "test-sl", "nested", "a"))
+	meta = readMetadata(t, s, "test-sl")
+	if _, ok := meta["nested"]; ok {
+		t.Error("nested key still present after SlotClear")
+	}
+	if string(meta["flag"]) != `true` {
+		t.Errorf("flag wrongly affected by clearing nested: %s", meta["flag"])
+	}
+
+	// MergeMetadata on a non-existent issue is an error.
+	if err := s.MergeMetadata(c, "test-missing", "k", json.RawMessage(`"v"`), "a"); err == nil {
+		t.Error("MergeMetadata on a missing issue: want error, got nil")
+	}
+}
+
+// readMetadata reads an issue's metadata JSON back as a raw-value map for slot
+// assertions.
+func readMetadata(t *testing.T, s storage.DoltStorage, id string) map[string]json.RawMessage {
+	t.Helper()
+	iss, err := s.GetIssue(ctx(), id)
+	if err != nil {
+		t.Fatalf("GetIssue(%s): %v", id, err)
+	}
+	m := make(map[string]json.RawMessage)
+	if len(iss.Metadata) > 0 {
+		if err := json.Unmarshal(iss.Metadata, &m); err != nil {
+			t.Fatalf("unmarshal metadata for %s (%s): %v", id, iss.Metadata, err)
+		}
+	}
+	return m
+}
+
+// nestedField parses meta[key] as a JSON object and returns its "pr" field,
+// proving the value round-tripped as a nested object (not a stringified blob)
+// regardless of a backend's JSON whitespace canonicalization.
+func nestedField(t *testing.T, meta map[string]json.RawMessage, key string) float64 {
+	t.Helper()
+	var obj struct {
+		PR float64 `json:"pr"`
+	}
+	if err := json.Unmarshal(meta[key], &obj); err != nil {
+		t.Fatalf("metadata[%q]=%s did not round-trip as an object: %v", key, meta[key], err)
+	}
+	return obj.PR
+}
+
+// jsonString parses a raw JSON string value.
+func jsonString(t *testing.T, raw json.RawMessage) string {
+	t.Helper()
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatalf("value %s is not a JSON string: %v", raw, err)
+	}
+	return s
 }
 
 func commentTexts(cs []*types.Comment) []string {

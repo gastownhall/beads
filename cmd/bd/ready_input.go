@@ -62,7 +62,7 @@ func gatherReadyInput(cmd *cobra.Command) (readyInput, error) {
 	if molTypeStr != "" {
 		mt := types.MolType(molTypeStr)
 		if !mt.IsValid() {
-			return in, HandleError("invalid mol-type %q (must be swarm, patrol, or work)", molTypeStr)
+			return in, HandleError("invalid mol-type %q (must be %s)", molTypeStr, types.ValidMolTypeNames())
 		}
 		molType = &mt
 	}

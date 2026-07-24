@@ -14,6 +14,13 @@ import (
 func savePersistentPreRunState(t *testing.T) {
 	t.Helper()
 
+	// Track env vars that PersistentPreRun may modify via prepareSelectedCommandContext
+	// or applyChangeDirSelection. Without this, a call to PersistentPreRun leaves
+	// BEADS_DIR set to the project's .beads dir, corrupting subsequent tests.
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
+		t.Setenv(key, os.Getenv(key))
+	}
+
 	oldServerMode := serverMode
 	oldCmdCtx := cmdCtx
 	oldDBPath := dbPath
