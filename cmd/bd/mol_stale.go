@@ -13,16 +13,18 @@ import (
 
 var molStaleCmd = &cobra.Command{
 	Use:   "stale",
-	Short: "Detect complete-but-unclosed molecules",
-	Long: `Detect molecules (epics with children) that are complete but still open.
+	Short: "Detect molecules with all children closed but root still open",
+	Long: `Detect molecules (epics with children) whose children are all closed
+with completing reasons, but the root is still open.
 
 A molecule is considered stale if:
-  1. All children are closed (Completed == Total)
+  1. Every child is closed with a completing reason (not duplicate/wontfix/superseded)
   2. Root issue is still open
   3. Not assigned to anyone (optional, use --unassigned)
   4. Is blocking other work (optional, use --blocking)
 
-By default, shows all complete-but-unclosed molecules.
+Review whether epic scope is actually finished before closing — child
+closure alone does not prove the epic's stated work is done (GH#5026).
 
 Examples:
   bd mol stale              # List all stale molecules
@@ -92,10 +94,10 @@ func runMolStale(cmd *cobra.Command, args []string) error {
 	}
 
 	if blockingOnly {
-		fmt.Printf("%s Stale molecules (complete but unclosed, blocking work):\n\n",
+		fmt.Printf("%s Molecules with all children closed (review scope; blocking work):\n\n",
 			ui.RenderWarnIcon())
 	} else {
-		fmt.Printf("%s Stale molecules (complete but unclosed):\n\n",
+		fmt.Printf("%s Molecules with all children closed (review scope before closing):\n\n",
 			ui.RenderInfoIcon())
 	}
 

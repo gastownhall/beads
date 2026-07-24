@@ -187,9 +187,11 @@ func CheckStaleMolecules(path string) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Stale Molecules",
 		Status:   StatusWarning,
-		Message:  fmt.Sprintf("%d complete-but-unclosed molecule(s)", staleCount),
+		// Wording: all children closed with completing reasons — still review
+		// before close (scope may exceed the child set). GH#5026.
+		Message:  fmt.Sprintf("%d molecule(s) with all children closed (review scope before closing)", staleCount),
 		Detail:   detail,
-		Fix:      "Run 'bd mol stale' to review, then 'bd close <id>' for each",
+		Fix:      "Run 'bd mol stale' to review whether epic scope is actually done, then 'bd close <id>' if so",
 		Category: CategoryMaintenance,
 	}
 }
