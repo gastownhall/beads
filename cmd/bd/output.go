@@ -16,7 +16,7 @@ const JSONSchemaVersion = 1
 // whenever the result set was capped by a --limit.
 type PaginationMeta struct {
 	Returned  int  `json:"returned"`
-	Total     int  `json:"total"`
+	Total     int  `json:"total,omitempty"`
 	Truncated bool `json:"truncated"`
 }
 
