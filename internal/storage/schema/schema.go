@@ -1172,14 +1172,21 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		upTo = src.latest()
 	}
 
-	// One-shot large-rig notice, ahead of the migration loop below. Treats a
-	// missing issues table as "fresh install" and emits nothing — on a
-	// first-ever run there is no rig to warn about, and the COUNT(*) query
-	// would error on the missing table. issueRowCounter/emitLargeRigNotice
-	// predate this call site (be-8ja); this just threads them onto main's
-	// existing TTY-gated `stderr` writer instead of a second progressOut.
-	rowCount, rowCountErr := issueRowCounter(ctx, db)
-	emitLargeRigNotice(stderr, rowCount, rowCountErr)
+	// One-shot large-rig notice, ahead of the migration loop below — gated to
+	// the main-source pass only. MigrateUp calls runMigrations once for
+	// mainSource and once for ignoredSource in the same pass; without this
+	// gate a large rig with pending migrations in both sources would print
+	// the warning twice (and issue the COUNT(*) query twice) despite the
+	// "one-shot" framing. Treats a missing issues table as "fresh install"
+	// and emits nothing — on a first-ever run there is no rig to warn about,
+	// and the COUNT(*) query would error on the missing table.
+	// issueRowCounter/emitLargeRigNotice predate this call site (be-8ja);
+	// this just threads them onto main's existing TTY-gated `stderr` writer
+	// instead of a second progressOut.
+	if src.cursorTable == mainSource.cursorTable {
+		rowCount, rowCountErr := issueRowCounter(ctx, db)
+		emitLargeRigNotice(stderr, rowCount, rowCountErr)
+	}
 
 	count := 0
 	for _, mf := range src.list() {
@@ -1227,14 +1234,21 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO "+src.cursorTable+" (version, content_hash) VALUES (?, ?)", mf.version, contentHash); err != nil {
 			return count, fmt.Errorf("recording %s in %s: %w", mf.name, src.cursorTable, err)
 		}
-		fmt.Fprintf(stderr, "  done (%.1fs)\n", time.Since(start).Seconds())
 		count++
 
+		// commitEachStep's DOLT_ADD/DOLT_COMMIT is the expensive, fallible
+		// part of this step on the production embedded path. The "done" line
+		// (and its timing) must land after that commit succeeds, not before
+		// it: printing "done" and then hitting a commit error would show an
+		// operator a false completion, and timing that stopped before the
+		// commit would understate the step's real cost. A failed commit
+		// returns before either print statement below runs.
 		if commitEachStep {
 			if err := commitMigrationStep(ctx, db, src.cursorTable, mf.name, dirtyBeforeStep); err != nil {
 				return count, fmt.Errorf("committing migration %s: %w", mf.name, err)
 			}
 		}
+		fmt.Fprintf(stderr, "  done (%.1fs)\n", time.Since(start).Seconds())
 
 		if migrateStepFaultHook != nil {
 			if err := migrateStepFaultHook(ctx, db, mf.version); err != nil {

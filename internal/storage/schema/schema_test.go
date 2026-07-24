@@ -1984,3 +1984,39 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 		t.Errorf("runMigrations ignored its source argument: main and ignored both returned %d", main)
 	}
 }
+
+// TestRunMigrationsLargeRigNoticeOnlyOnMainSource pins the round-2 review
+// fix: MigrateUp calls runMigrations once for mainSource and once for
+// ignoredSource in the same pass (schema.go's MigrateUp). Without gating the
+// large-rig notice to the main-source pass, a large rig with pending
+// migrations in both sources would print the "one-shot" warning twice (and
+// issue the COUNT(*) query twice). The notice must fire on the mainSource
+// call and stay silent on the ignoredSource call.
+func TestRunMigrationsLargeRigNoticeOnlyOnMainSource(t *testing.T) {
+	origCounter := issueRowCounter
+	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 49_187, nil }
+	defer func() { issueRowCounter = origCounter }()
+
+	var mainBuf bytes.Buffer
+	orig := stderr
+	stderr = &mainBuf
+	if _, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 46, false); err != nil {
+		stderr = orig
+		t.Fatalf("runMigrations(mainSource): %v", err)
+	}
+	if !strings.Contains(mainBuf.String(), "Large rig detected") {
+		stderr = orig
+		t.Errorf("expected mainSource pass to emit the large-rig notice; got: %q", mainBuf.String())
+	}
+
+	var ignoredBuf bytes.Buffer
+	stderr = &ignoredBuf
+	_, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 46, false)
+	stderr = orig
+	if err != nil {
+		t.Fatalf("runMigrations(ignoredSource): %v", err)
+	}
+	if strings.Contains(ignoredBuf.String(), "Large rig detected") {
+		t.Errorf("expected ignoredSource pass to stay silent on the large-rig notice (main-source pass already warned); got: %q", ignoredBuf.String())
+	}
+}
