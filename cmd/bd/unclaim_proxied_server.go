@@ -90,13 +90,13 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 	return nil
 }
 
-func runReclaimProxiedServer(ctx context.Context, olderThan time.Duration) error {
+func runReclaimProxiedServer(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter) error {
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
 
 	reclaimed, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) ([]types.ReclaimedLease, string, error) {
-		out, rerr := uw.IssueUseCase().ReclaimExpiredLeases(ctx, olderThan, actor)
+		out, rerr := uw.IssueUseCase().ReclaimExpiredLeases(ctx, olderThan, filter, actor)
 		if rerr != nil {
 			return nil, "", rerr
 		}
@@ -117,5 +117,5 @@ func runReclaimProxiedServer(ctx context.Context, olderThan time.Duration) error
 		commandDidWrite.Store(true)
 	}
 
-	return renderReclaim(reclaimed)
+	return renderReclaim(reclaimed, !filter.IsEmpty())
 }

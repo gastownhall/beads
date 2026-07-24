@@ -944,11 +944,12 @@ func (r *issueSQLRepositoryImpl) GetStatistics(ctx context.Context) (*types.Stat
 	`).Scan(&blocked); err != nil {
 		return nil, fmt.Errorf("db: IssueSQLRepository.GetStatistics: count blocked: %w", err)
 	}
-	stats.BlockedIssues = blocked
-	stats.ReadyIssues = stats.OpenIssues - blocked
-	if stats.ReadyIssues < 0 {
-		stats.ReadyIssues = 0
+	stats.BlockedIssues = &blocked
+	ready := stats.OpenIssues - blocked
+	if ready < 0 {
+		ready = 0
 	}
+	stats.ReadyIssues = &ready
 	return stats, nil
 }
 
@@ -1007,9 +1008,9 @@ func (r *issueSQLRepositoryImpl) UnclaimIssue(ctx context.Context, id, actor str
 	return nil
 }
 
-func (r *issueSQLRepositoryImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error) {
+func (r *issueSQLRepositoryImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {
 	cutoff := time.Now().UTC().Add(-olderThan)
-	out, err := issueops.ReclaimExpiredLeasesInTx(ctx, r.runner, cutoff, actor)
+	out, err := issueops.ReclaimExpiredLeasesInTx(ctx, r.runner, cutoff, filter, actor)
 	if err != nil {
 		return nil, fmt.Errorf("db: IssueSQLRepository.ReclaimExpiredLeases: %w", err)
 	}

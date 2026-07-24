@@ -2,7 +2,6 @@ package domain
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -70,7 +69,7 @@ type IssueSQLRepository interface {
 	GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 	UnclaimIssue(ctx context.Context, id, actor string, force bool) error
-	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error)
+	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
 }
 
 type CloseRowParams struct {
@@ -189,6 +188,14 @@ type GraphNode struct {
 	AssignAfterCreate bool
 	MetadataRefs      map[string]string
 	Labels            []string
+	Deps              []GraphNodeDep
+}
+
+// GraphNodeDep is an inline dependency on a single graph node. Target is
+// resolved as a plan-local key first, then treated as a literal issue ID.
+type GraphNodeDep struct {
+	Type   types.DependencyType
+	Target string
 }
 
 type GraphEdge struct {
@@ -197,6 +204,13 @@ type GraphEdge struct {
 	ToKey   string
 	ToID    string
 	Type    types.DependencyType
+	// Gate and spawner describe fanout-gate metadata for waits-for edges;
+	// SpawnerKey references a plan-local node and is resolved after IDs mint.
+	Gate       string
+	SpawnerKey string
+	SpawnerID  string
+	// ThreadID threads conversation edges (replies-to).
+	ThreadID string
 }
 
 type GraphApplyResult struct {
@@ -220,6 +234,18 @@ type UpdateSpec struct {
 	RemoveLabels []string
 	SetLabels    *[]string
 	Reparent     *string
+
+	// ExpectedAssignee and ExpectedStatus are the bd-wsqvw compare-and-set
+	// guards (`bd update --if-assignee/--if-status`): when non-nil, the whole
+	// update applies only if the issue's current assignee/status equals the
+	// expected value, else ApplyUpdate refuses with
+	// storage.ErrAssigneeMismatch/ErrStatusMismatch and nothing is written. A
+	// non-nil pointer to "" means "expected unassigned". The guard read shares
+	// the unit of work's transaction; a writer that commits mid-flight
+	// collides on the row_lock rewrite at commit time and the caller's
+	// whole-attempt retry re-checks the guards on the redo.
+	ExpectedAssignee *string
+	ExpectedStatus   *string
 }
 
 type IssueUseCase interface {
@@ -240,7 +266,7 @@ type IssueUseCase interface {
 	GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 	Unclaim(ctx context.Context, id, actor string, force bool) error
-	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error)
+	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
 
 	CreateIssue(ctx context.Context, params CreateIssueParams, actor string) (CreateIssueResult, error)
 	CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error)
@@ -465,6 +491,35 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 	useWisp, err := u.isWispID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("ApplyUpdate %s: %w", id, err)
+	}
+
+	// bd-wsqvw field guards: refuse the whole spec atomically on a stale
+	// assignee/status. The read shares this unit of work's transaction, and
+	// every field update rewrites row_lock, so a writer that commits during
+	// the attempt collides at commit time and the caller's whole-attempt
+	// retry re-checks here on the redo — same CAS invariant as the store-level
+	// UpdateIssueChecked path.
+	if spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil {
+		var current *types.Issue
+		if useWisp {
+			current, err = u.GetWisp(ctx, id)
+		} else {
+			current, err = u.GetIssue(ctx, id)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("ApplyUpdate: read %s for guards: %w", id, err)
+		}
+		if current == nil {
+			return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+		}
+		if spec.ExpectedAssignee != nil && current.Assignee != *spec.ExpectedAssignee {
+			return nil, fmt.Errorf("%w: %s is held by %q, expected %q",
+				storage.ErrAssigneeMismatch, id, current.Assignee, *spec.ExpectedAssignee)
+		}
+		if spec.ExpectedStatus != nil && string(current.Status) != *spec.ExpectedStatus {
+			return nil, fmt.Errorf("%w: %s has status %q, expected %q",
+				storage.ErrStatusMismatch, id, current.Status, *spec.ExpectedStatus)
+		}
 	}
 
 	if spec.Claim {
@@ -725,19 +780,10 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	}
 
 	if params.WaitsFor != nil {
-		gate := params.WaitsFor.Gate
-		if gate == "" {
-			gate = types.WaitsForAllChildren
-		}
-		metaJSON, err := json.Marshal(types.WaitsForMeta{Gate: gate})
+		// Spawner identity is the depends_on_id; metadata carries the gate.
+		dep, err := types.NewWaitsForDependency(issue.ID, params.WaitsFor.SpawnerID, params.WaitsFor.Gate)
 		if err != nil {
 			return result, fmt.Errorf("create: marshal waits-for meta: %w", err)
-		}
-		dep := &types.Dependency{
-			IssueID:     issue.ID,
-			DependsOnID: params.WaitsFor.SpawnerID,
-			Type:        types.DepWaitsFor,
-			Metadata:    string(metaJSON),
 		}
 		if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
 			return result, fmt.Errorf("create: add waits-for: %w", err)
@@ -791,6 +837,12 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 		if node.Issue == nil {
 			return GraphApplyResult{}, fmt.Errorf("applyGraph: node %d (key=%q) has nil Issue", i, node.Key)
 		}
+		// The whole plan routes to one table, so every node's storage class
+		// must match. The CLI pre-validates this; guard here too so other
+		// callers cannot route wisp-flagged issues into the durable table.
+		if nodeWisp := node.Issue.Ephemeral || node.Issue.NoHistory; nodeWisp != useWisp {
+			return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q storage class (ephemeral=%t, no_history=%t) does not match plan routing (wisp=%t)", node.Key, node.Issue.Ephemeral, node.Issue.NoHistory, useWisp)
+		}
 
 		if node.AssignAfterCreate {
 			pendingAssignees[i] = node.Assignee
@@ -818,24 +870,11 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 		if len(node.MetadataRefs) == 0 {
 			continue
 		}
-		merged := make(map[string]string, len(node.MetadataRefs))
-		if len(node.Issue.Metadata) > 0 {
-			if err := json.Unmarshal(node.Issue.Metadata, &merged); err != nil {
-				return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: re-parsing metadata: %w", node.Key, err)
-			}
-		}
-		for metaKey, refKey := range node.MetadataRefs {
-			resolvedID, ok := keyToID[refKey]
-			if !ok {
-				return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: metadata_ref %q references unknown key %q", node.Key, metaKey, refKey)
-			}
-			merged[metaKey] = resolvedID
-		}
-		metaJSON, err := json.Marshal(merged)
+		metaJSON, err := types.MergeMetadataRefs(node.Issue.Metadata, node.MetadataRefs, keyToID)
 		if err != nil {
-			return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: marshaling merged metadata: %w", node.Key, err)
+			return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: %w", node.Key, err)
 		}
-		updates := map[string]any{"metadata": json.RawMessage(metaJSON)}
+		updates := map[string]any{"metadata": metaJSON}
 		if err := u.issueRepo.Update(ctx, keyToID[node.Key], updates, actor, IssueTableOpts{UseWispsTable: useWisp}); err != nil {
 			return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: updating metadata refs: %w", node.Key, err)
 		}
@@ -939,16 +978,35 @@ func (u *issueUseCaseImpl) applyGraph(ctx context.Context, plan GraphPlan, actor
 				return GraphApplyResult{}, fmt.Errorf("applyGraph: edge %d %s->%s creates a blocking reverse of a parent-child relationship", i, fromID, toID)
 			}
 
-			dep := &types.Dependency{
-				IssueID:     fromID,
-				DependsOnID: toID,
-				Type:        depType,
+			dep, err := types.NewGraphEdgeDependency(fromID, toID, depType, edge.Gate, edge.SpawnerKey, edge.SpawnerID, edge.ThreadID, keyToID)
+			if err != nil {
+				return GraphApplyResult{}, fmt.Errorf("applyGraph: edge %d: %w", i, err)
 			}
 			if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
 				return GraphApplyResult{}, fmt.Errorf("applyGraph: edge %d (%s -> %s): %w", i, fromID, toID, err)
 			}
 			if isSchedulingDep(depType) {
 				newSchedulingEdges = append(newSchedulingEdges, [2]string{fromID, toID})
+			}
+		}
+
+		// Per-node inline deps in stable order for this phase, resolved by the
+		// same shared builder as the embedded executeGraphApply (cmd/bd/graph_apply.go).
+		for _, node := range plan.Nodes {
+			for _, nd := range node.Deps {
+				dep, err := types.NewGraphNodeDependency(keyToID[node.Key], nd.Type, nd.Target, keyToID)
+				if err != nil {
+					return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: %w", node.Key, err)
+				}
+				if (dep.Type == types.DepParentChild) != parentPhase {
+					continue
+				}
+				if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
+					return GraphApplyResult{}, fmt.Errorf("applyGraph: node %q: adding dep to %q: %w", node.Key, nd.Target, err)
+				}
+				if isSchedulingDep(dep.Type) {
+					newSchedulingEdges = append(newSchedulingEdges, [2]string{dep.IssueID, dep.DependsOnID})
+				}
 			}
 		}
 	}
@@ -1025,14 +1083,15 @@ func readyPathDepType(t types.DependencyType) bool {
 	return t.AffectsReadyWork()
 }
 
-// resolveEdgeRef returns the ID for an edge endpoint: the keyToID lookup
-// when key is set, else the explicit id. Returns "" when neither resolves,
-// which the caller should treat as a structural error.
+// resolveEdgeRef returns the ID for an edge endpoint: the explicit id when set
+// (an ID override wins over a plan-local key, matching the CLI embedded path),
+// else the keyToID lookup. Returns "" when neither resolves, which the caller
+// should treat as a structural error.
 func resolveEdgeRef(key, id string, keyToID map[string]string) string {
-	if key != "" {
-		return keyToID[key]
+	if id != "" {
+		return id
 	}
-	return id
+	return keyToID[key]
 }
 
 // validatePlannedBlockingPaths rejects plans that would close a cycle
@@ -1598,8 +1657,8 @@ func (u *issueUseCaseImpl) Unclaim(ctx context.Context, id, actor string, force 
 	return nil
 }
 
-func (u *issueUseCaseImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error) {
-	out, err := u.issueRepo.ReclaimExpiredLeases(ctx, olderThan, actor)
+func (u *issueUseCaseImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {
+	out, err := u.issueRepo.ReclaimExpiredLeases(ctx, olderThan, filter, actor)
 	if err != nil {
 		return nil, fmt.Errorf("ReclaimExpiredLeases: %w", err)
 	}

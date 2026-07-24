@@ -69,9 +69,16 @@ Examples:
 		if len(args) > 0 {
 			issues = lintCollectByIDs(ctx, args, store.GetIssue)
 		} else {
+			// Lint all matching issues (env-only cap; designer §4 doctor family).
+			filter := buildLintFilter(typeFilter, statusFilter)
+			filter.MaxRows, filter.MaxRowsSource = resolveMaxRowsEnvOnly()
+
 			var err error
-			issues, err = store.SearchIssues(ctx, "", buildLintFilter(typeFilter, statusFilter))
+			issues, err = store.SearchIssues(ctx, "", filter)
 			if err != nil {
+				if capErr := handleMaxRowsError(err); capErr != nil {
+					return capErr
+				}
 				return HandleError("%v", err)
 			}
 		}

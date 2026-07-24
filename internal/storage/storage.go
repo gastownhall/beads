@@ -69,6 +69,12 @@ var ErrCloseBlocked = errors.New("cannot close blocked issue")
 // precondition from other errors.
 var ErrVersionMismatch = errors.New("version mismatch")
 
+// ErrStatusMismatch is returned by UpdateIssueChecked given an ExpectedStatus
+// that no longer matches the issue's current status. The caller's view of the
+// issue was stale; the issue is left untouched. The assignee analog is
+// ErrAssigneeMismatch, shared with UnclaimIssueIfAssignee.
+var ErrStatusMismatch = errors.New("status mismatch")
+
 // CommentPageCursor is the resume position for a keyset page of an issue's
 // comments: the (created_at, id) of the last comment already returned. The zero
 // value starts a walk from the beginning of the thread.
@@ -329,6 +335,21 @@ type UpdateIssueOptions struct {
 	// nil disables the check. A pointer so nil is distinct from requiring a
 	// legacy version of 0.
 	ExpectedVersion *int64
+
+	// ExpectedAssignee and ExpectedStatus are semantic-field compare-and-swap
+	// guards (bd-wsqvw, `bd update --if-assignee/--if-status`): when non-nil,
+	// the update proceeds only if the issue's current assignee/status equals
+	// the expected value, else it refuses atomically with
+	// ErrAssigneeMismatch/ErrStatusMismatch naming the actual state. A non-nil
+	// pointer to "" is a real guard meaning "expected unassigned" — nil, not
+	// the empty string, disables a check. Guards present together must ALL
+	// hold (conjunction), and compose with ExpectedVersion. The guard read and
+	// the update share one transaction, so there is no internal TOCTOU; a
+	// concurrent writer that commits mid-transaction collides on the row_lock
+	// cell rewrite and is replayed by the store's retry loop, which re-reads
+	// and refuses (the same invariant as ExpectedVersion).
+	ExpectedAssignee *string
+	ExpectedStatus   *string
 }
 
 // MergeSlotStatus is returned by MergeSlotCheck and describes the current
@@ -356,6 +377,14 @@ type MergeSlotResult struct {
 	Position int
 }
 
+// FastStatisticsStore provides a statistics method that skips the blocked-count
+// traversal for callers that don't need it (e.g. bd stats --no-blocked).
+type FastStatisticsStore interface {
+	// GetStatisticsNoBlocked returns aggregate counts without the blocked-set
+	// computation (computeBlockedIDs). BlockedIssues is nil in the result.
+	GetStatisticsNoBlocked(ctx context.Context) (*types.Statistics, error)
+}
+
 // DoltStorage is the full interface for Dolt-backed stores, composing the core
 // Storage interface with all capability sub-interfaces. Both DoltStore and
 // EmbeddedDoltStore satisfy this interface.
@@ -373,6 +402,7 @@ type DoltStorage interface {
 	ConfigMetadataStore
 	CompactionStore
 	AdvancedQueryStore
+	FastStatisticsStore
 }
 
 // RawDBAccessor provides raw *sql.DB access for diagnostics and migrations.

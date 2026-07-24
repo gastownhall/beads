@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -288,18 +289,27 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 // are never leased work. Returns the issues it reverted (id + the owner it took
 // the lease from) so the caller can log/emit recovery events. The caller owns
 // Dolt versioning.
-func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, actor string) ([]types.ReclaimedLease, error) {
+//
+// filter narrows which stale leases are eligible (see types.ReclaimFilter); the
+// zero filter keeps the historical global behavior. Scoping is applied to the
+// snapshot SELECT only — the per-row DELETE/UPDATE re-checks staleness by id,
+// and the ids it re-checks all came from the already-scoped snapshot, so a
+// label removed mid-reclaim cannot smuggle an out-of-scope issue into the
+// revert.
+func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {
 	// Snapshot the stale set first so we can report exactly which issues we
 	// reverted and record per-issue recovery events. The DELETE below repeats
 	// the expiry predicate, so an issue that a concurrent heartbeat rescued
 	// between the SELECT and the DELETE is simply skipped (0 rows) — it never
 	// appears as reclaimed.
+	scopeSQL, scopeArgs := sqlbuild.ReclaimScopeSQL(filter, sqlbuild.IssuesFilterTables, "i")
+	args := append([]any{cutoff}, scopeArgs...)
 	rows, err := tx.QueryContext(ctx, `
 		SELECT l.issue_id, COALESCE(i.assignee, '') FROM leases l
 		JOIN issues i ON i.id = l.issue_id
 		WHERE i.status = 'in_progress'
 		  AND l.lease_expires_at < ?
-	`, cutoff)
+	`+scopeSQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("scan for stale leases: %w", err)
 	}
