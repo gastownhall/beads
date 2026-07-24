@@ -46,9 +46,23 @@ hydrated, and `Issue.IsLitePartial` is `false`.
   (`IssueSelectColumns`, `IssueSelectColumnsLite`, `HeavyDropList`).
 - Scan helpers: `ScanIssueFrom` (full) and `ScanIssueLiteFrom` (lite,
   sets `IsLitePartial`).
-- SELECT dispatch: `internal/storage/issueops/search.go::searchTableInTx`
-  switches the SELECT and the scan helper on `filter.Lite`.
+- SELECT dispatch: `internal/storage/issueops/search.go` — `SearchIssuesInTx`
+  selects `issueProjection` or `issueLiteProjection` on `filter.Lite`; both
+  are `searchProjection[*types.Issue]` literals sharing the wisp-merge and
+  hydration machinery in `searchTableInTxT`.
 - Schema-parity guard:
   `internal/storage/issueops/scan_test.go::TestIssueSelectColumns_LitePlusHeavyEqualsFull`
   fails CI if a future column is added to `IssueSelectColumns` without
   being classified into `IssueSelectColumnsLite` or `HeavyDropList`.
+
+### Backend coverage
+
+`filter.Lite` is currently honored only by the issueops-backed stores
+(Dolt, embedded Dolt) via the dispatch above. The proxied-server
+(`internal/storage/domain/db`) path — `issueSQLRepositoryImpl.searchTable`
+/ `fetchIssuesByIDs` — does not check `filter.Lite` yet: it always issues
+the full `issueSelectColumns` SELECT and returns fully-hydrated issues
+with `IsLitePartial == false`. This is correct-but-unoptimized (no lite
+callers exist yet, so the difference is invisible today); wiring
+`filter.Lite` through the domain/db stack is deferred to the CLI-wiring
+follow-up (be-uwvs.2+), not part of this foundation.

@@ -1551,6 +1551,12 @@ type IssueFilter struct {
 	// (DescriptionContains, NotesContains, EmptyDescription) keep working — they
 	// reference columns in WHERE regardless of SELECT shape. Default false preserves
 	// today's behavior at every call site.
+	//
+	// Backend coverage: honored by the issueops-backed stores (Dolt, embedded
+	// Dolt). The proxied-server (domain/db) path does not check this field yet
+	// and always returns fully-hydrated issues with IsLitePartial=false —
+	// correct results, no lite optimization. Wiring Lite through domain/db is
+	// deferred to the CLI-wiring follow-up. See docs/EXTENDING.md.
 	Lite bool
 }
 
