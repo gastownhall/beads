@@ -21,7 +21,8 @@ import (
 // uses depends_on_id in either position fails with errno 1105.
 //
 // The historically supported infra issue types are covered: agent, rig, role,
-// and message.
+// and message. Across this test and the companion demotion tests below, all
+// three split target columns are exercised.
 func TestDemoteToWisp_InfraDepMirrorUsesSplitColumns(t *testing.T) {
 	infraTypes := []types.IssueType{"agent", "rig", "role", "message"}
 
@@ -192,6 +193,63 @@ func TestDemoteToWisp_InfraDepToWispUsesWispColumn(t *testing.T) {
 				t.Errorf("depends_on_issue_id = %q, want NULL", depIssueID.String)
 			}
 		})
+	}
+}
+
+// TestDemoteToWisp_InfraDepToExternalUsesExternalColumn verifies that an
+// external dependency is mirrored through depends_on_external while the issue
+// and wisp target columns remain NULL.
+func TestDemoteToWisp_InfraDepToExternalUsesExternalColumn(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	infraID := "test-external-agent"
+	externalTarget := "external:ticket-123"
+	now := time.Now().UTC()
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO issues
+			(id, title, description, design, acceptance_criteria, notes,
+			 status, priority, issue_type, created_at, updated_at, created_by)
+		VALUES (?, 'agent external dep', '', '', '', '', 'open', 2, 'agent', ?, ?, 'tester')
+	`, infraID, now, now); err != nil {
+		t.Fatalf("insert legacy infra issue: %v", err)
+	}
+
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO dependencies
+			(id, issue_id, depends_on_external, type, created_at, created_by)
+		VALUES (UUID(), ?, ?, 'blocks', ?, 'tester')
+	`, infraID, externalTarget, now); err != nil {
+		t.Fatalf("insert external dep in dependencies: %v", err)
+	}
+
+	if err := store.UpdateIssue(ctx, infraID, map[string]interface{}{
+		"no_history": true,
+	}, "tester"); err != nil {
+		t.Fatalf("DemoteToWisp: %v", err)
+	}
+
+	var depIssueID sql.NullString
+	var depWispID sql.NullString
+	var depExternal string
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT depends_on_issue_id, depends_on_wisp_id, depends_on_external
+		FROM wisp_dependencies
+		WHERE issue_id = ?
+	`, infraID).Scan(&depIssueID, &depWispID, &depExternal); err != nil {
+		t.Fatalf("query wisp_dependencies: %v", err)
+	}
+	if depIssueID.Valid {
+		t.Errorf("depends_on_issue_id = %q, want NULL", depIssueID.String)
+	}
+	if depWispID.Valid {
+		t.Errorf("depends_on_wisp_id = %q, want NULL", depWispID.String)
+	}
+	if depExternal != externalTarget {
+		t.Errorf("depends_on_external = %q, want %q", depExternal, externalTarget)
 	}
 }
 
