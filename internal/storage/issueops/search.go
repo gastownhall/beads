@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
@@ -50,6 +51,19 @@ type searchProjection[T any] struct {
 	// joinLeases adds the leases LEFT JOIN to the FROM clause; required by
 	// any projection whose columns include sqlbuild.LeaseSelectColumns.
 	joinLeases bool
+	// less, when non-nil, orders two elements the same way SQL's ORDER BY
+	// ordered each per-table query (sqlbuild.OrderBy), given the same
+	// sortBy/sortDesc values the caller's filter carried. searchInTx's
+	// merge branch (issues+wisps) needs this to re-sort the concatenation
+	// of two independently-ordered legs before trimming to filter.Limit —
+	// without it, the trim keeps whichever leg happens to come first in
+	// the concatenation regardless of sort rank (be-x42v.4 round-5
+	// follow-up). nil for projections with no sortable payload to compare
+	// (idProjection scans bare IDs, no column data); safe today because no
+	// caller combines Limit>0 with a merged (non-SkipWisps) ID-only search
+	// — see the merge-trim call site for the fallback behavior if that
+	// changes.
+	less func(a, b T, sortBy string, sortDesc bool) bool
 }
 
 var issueProjection = searchProjection[*types.Issue]{
@@ -57,6 +71,7 @@ var issueProjection = searchProjection[*types.Issue]{
 	scan:       func(rows *sql.Rows) (*types.Issue, error) { return ScanIssueFrom(rows) },
 	id:         func(issue *types.Issue) string { return issue.ID },
 	hydrate:    hydrateIssueLabelsAndDeps,
+	less:       sqlbuild.Less,
 	idShrink:   true,
 	joinLeases: true,
 }
@@ -189,6 +204,15 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 				}
 			}
 			results = append(filtered, wispResults...)
+			// The concatenation above is two independently ORDER BY'd legs,
+			// not a globally ordered set: re-sort by the same key before
+			// the merge's trimToSearchLimit call below, or trimming just
+			// keeps "however many durable rows fit" and can silently drop
+			// a higher-ranked wisp in favor of a lower-ranked durable row
+			// (be-x42v.4 round-5 follow-up). Mirrors
+			// finishSearchIssuesWithCounts's sortSearchIssuesWithCounts,
+			// which already sorts before its own trim.
+			sortMergedResults(results, proj.less, filter.SortBy, filter.SortDesc)
 		}
 	}
 
@@ -210,6 +234,22 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 	}
 
 	return results, nil
+}
+
+// sortMergedResults re-sorts results in place by the same key SQL's ORDER BY
+// applied to each per-leg query, so a subsequent trimToSearchLimit call on a
+// concatenation of two independently-ordered legs (issues+wisps) keeps the
+// globally correct top-N page rather than an arbitrary prefix of the
+// concatenation. No-ops when less is nil (no sortable payload for this
+// projection — see searchProjection.less's doc comment) or when there's
+// nothing to reorder.
+func sortMergedResults[T any](results []T, less func(a, b T, sortBy string, sortDesc bool) bool, sortBy string, sortDesc bool) {
+	if less == nil || len(results) <= 1 {
+		return
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		return less(results[i], results[j], sortBy, sortDesc)
+	})
 }
 
 // trimToSearchLimit truncates results to filter.Limit (when set, Limit>0)

@@ -642,6 +642,41 @@ func TestEmbeddedMaxRowsList(t *testing.T) {
 		}
 	})
 
+	// be-x42v.4 round-5 follow-up: searchInTx's merge branch concatenates
+	// two independently ORDER BY'd legs (`append(filtered, wispResults...)`)
+	// and round-4's trimToSearchLimit then sliced that unsorted
+	// concatenation — with Limit small enough that durable rows alone fill
+	// it, a higher-ranked wisp was silently dropped from the page even
+	// though the CLI's pre-round-4 behavior (return the full merged set,
+	// let the caller sort-then-trim) surfaced it correctly. Default sort is
+	// priority ASC: 3 durable issues at P2, one wisp at P0 (highest rank)
+	// — with --limit 1 the P0 wisp must be the sole delivered row, not one
+	// of the P2 durable rows the unsorted concatenation happened to put
+	// first. Must fail against 77227aa67.
+	t.Run("IncludeInfraMerged_WispOutranksDurable_InDeliveredPage", func(t *testing.T) {
+		mDir, _, _ := bdInit(t, bd, "--prefix", "mrwo")
+		for i := 0; i < 3; i++ {
+			bdCreate(t, bd, mDir, fmt.Sprintf("Durable p2 %d", i), "--type", "task", "--priority", "2")
+		}
+		wisp := bdCreate(t, bd, mDir, "Wisp p0 outranks", "--type", "task", "--priority", "0", "--ephemeral")
+
+		out, code := bdRunRaw(t, bd, mDir, nil, "list", "--include-infra", "--limit", "1")
+		if code != 0 {
+			t.Fatalf("expected exit 0, got %d\n%s", code, out)
+		}
+		if !strings.Contains(out, wisp.ID) {
+			t.Errorf("P0 wisp %s must be the sole row in a --limit 1 page (default sort is priority ASC), got:\n%s", wisp.ID, out)
+		}
+
+		outJSON, codeJSON := bdRunRaw(t, bd, mDir, nil, "list", "--include-infra", "--json", "--limit", "1")
+		if codeJSON != 0 {
+			t.Fatalf("expected exit 0 under --json, got %d\n%s", codeJSON, outJSON)
+		}
+		if !strings.Contains(outJSON, wisp.ID) {
+			t.Errorf("P0 wisp %s must be the sole row in a --limit 1 --json page, got:\n%s", wisp.ID, outJSON)
+		}
+	})
+
 	// be-x42v.4 follow-up (review MUST-FIX 5): the initial query under
 	// `bd list --watch` must surface a cap violation with exit 2, same as
 	// non-watch `bd list`. Before the fix, watchIssues logged the error to
