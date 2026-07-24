@@ -8,6 +8,96 @@ import (
 	"testing"
 )
 
+func TestWorktreeRemoveWindowsOrdinalGitSelectorRemovesOrdinaryWorktree(t *testing.T) {
+	fixture := newWorktreeRemovalFixture(t)
+	fixture.git(t, fixture.repo, "config", "core.ignorecase", "true")
+
+	result := runWorktreeRemoveProcess(
+		t,
+		fixture.repo,
+		nil,
+		fixture.lane,
+		"--merged-into",
+		"main",
+	)
+	result.requireSuccess(t)
+	fixture.assertRemovedAndCleaned(t)
+}
+
+func TestWorktreeRemoveWindowsOrdinalGitSelectorProtectsCaseSiblingAfterTargetDisappears(
+	t *testing.T,
+) {
+	fixture, upperLane, _ := newWindowsCaseSensitiveRemovalFixture(t, true)
+	upperFingerprint, err := fingerprintWorktreeFilesystem(upperLane)
+	if err != nil {
+		t.Fatalf("fingerprint uppercase sibling: %v", err)
+	}
+	lowerFingerprint, err := fingerprintWorktreeFilesystem(fixture.lane)
+	if err != nil {
+		t.Fatalf("fingerprint lowercase target: %v", err)
+	}
+	upperBranch := fixture.git(t, fixture.repo, "rev-parse", "refs/heads/upper-lane")
+	lowerBranch := fixture.git(t, fixture.repo, "rev-parse", "refs/heads/lane")
+
+	result := runWorktreeRemoveProcess(
+		t,
+		fixture.repo,
+		[]string{
+			worktreeRemoveHelperHookEnv + "=" + worktreeRemoveHookCaseRace,
+			worktreeRemoveHelperMain + "=" + fixture.repo,
+			worktreeRemoveHelperTarget + "=" + fixture.lane,
+		},
+		fixture.lane,
+		"--merged-into",
+		"main",
+	)
+	result.requireSuccess(t)
+
+	movedLower := fixture.lane + "-moved"
+	if !windowsRegisteredWorktreePathExact(t, fixture, upperLane) {
+		t.Fatal("uppercase sibling registration was removed after lowercase target disappeared")
+	}
+	if windowsRegisteredWorktreePathExact(t, fixture, fixture.lane) {
+		t.Fatal("disappeared lowercase target remains registered")
+	}
+	if _, err := os.Stat(upperLane); err != nil {
+		t.Fatalf("uppercase sibling path was not preserved: %v", err)
+	}
+	if _, err := os.Stat(fixture.lane); !os.IsNotExist(err) {
+		t.Fatalf("lowercase target path unexpectedly exists: %v", err)
+	}
+	if _, err := os.Stat(movedLower); err != nil {
+		t.Fatalf("interleaved moved target was not preserved: %v", err)
+	}
+	gotUpperFingerprint, err := fingerprintWorktreeFilesystem(upperLane)
+	if err != nil {
+		t.Fatalf("fingerprint preserved uppercase sibling: %v", err)
+	}
+	if gotUpperFingerprint != upperFingerprint {
+		t.Fatal("uppercase sibling changed after lowercase target disappeared")
+	}
+	gotLowerFingerprint, err := fingerprintWorktreeFilesystem(movedLower)
+	if err != nil {
+		t.Fatalf("fingerprint interleaved moved target: %v", err)
+	}
+	if gotLowerFingerprint != lowerFingerprint {
+		t.Fatal("interleaved moved target changed during exact-registration removal")
+	}
+	if got := fixture.git(t, fixture.repo, "rev-parse", "refs/heads/upper-lane"); got != upperBranch {
+		t.Fatalf("uppercase branch changed: got %s, want %s", got, upperBranch)
+	}
+	if got := fixture.git(t, fixture.repo, "rev-parse", "refs/heads/lane"); got != lowerBranch {
+		t.Fatalf("lowercase branch changed: got %s, want %s", got, lowerBranch)
+	}
+	if got := fixture.git(t, fixture.repo, "config", "--get", "core.ignorecase"); got != "true" {
+		t.Fatalf("race hook did not change core.ignorecase: got %q", got)
+	}
+	wantGitignore := "# bd worktree\nLane/\nignored/\n"
+	if got := fixture.readGitignore(t); got != wantGitignore {
+		t.Fatalf(".gitignore cleanup targeted the wrong case sibling\ngot:  %q\nwant: %q", got, wantGitignore)
+	}
+}
+
 func TestWorktreeRemoveWindowsCaseSensitiveSiblingPaths(t *testing.T) {
 	fixture, upperLane, _ := newWindowsCaseSensitiveRemovalFixture(t, true)
 
@@ -148,8 +238,15 @@ func TestWorktreeRemoveWindowsTwoPrunableCaseVariantsStayDistinct(t *testing.T) 
 
 func TestWorktreeRemoveWindowsPrunableWrongCaseRestorationRefuses(t *testing.T) {
 	fixture, upperLane, upperStage, lowerStage, _ :=
-		newWindowsPrunableCaseVariantFixture(t, false)
+		newWindowsPrunableCaseVariantFixture(t, true)
 	before := captureWindowsPrunableState(t, fixture, upperStage, lowerStage)
+	adminFingerprint, err := fingerprintWorktreeFilesystem(
+		filepath.Join(fixture.repo, ".git", "worktrees"),
+	)
+	if err != nil {
+		t.Fatalf("fingerprint worktree registry: %v", err)
+	}
+	sentinel := filepath.Join(t.TempDir(), "restore-hook-reached")
 
 	result := runWorktreeRemoveProcess(
 		t,
@@ -158,12 +255,56 @@ func TestWorktreeRemoveWindowsPrunableWrongCaseRestorationRefuses(t *testing.T) 
 			worktreeRemoveHelperHookEnv + "=" + worktreeRemoveHookRestore,
 			worktreeRemoveHelperTarget + "=" + upperLane,
 			worktreeRemoveHelperRestore + "=" + upperStage,
+			worktreeRemoveHelperSentinel + "=" + sentinel,
 		},
 		fixture.lane,
 		"--force",
 	)
-	result.requireFailure(t, "registered worktree not found")
-	assertWindowsPrunableState(t, fixture, upperLane, upperStage, lowerStage, before)
+	result.requireFailure(t, "failed to resolve target git directory")
+	if content, err := os.ReadFile(sentinel); err != nil {
+		t.Fatalf("restore hook did not publish its sentinel: %v", err)
+	} else if string(content) != "reached\n" {
+		t.Fatalf("restore hook sentinel = %q, want %q", content, "reached\n")
+	}
+	if !windowsRegisteredWorktreePathExact(t, fixture, upperLane) ||
+		!windowsRegisteredWorktreePathExact(t, fixture, fixture.lane) {
+		t.Fatal("wrong-case restoration removed a registered case variant")
+	}
+	gotAdminFingerprint, err := fingerprintWorktreeFilesystem(
+		filepath.Join(fixture.repo, ".git", "worktrees"),
+	)
+	if err != nil {
+		t.Fatalf("fingerprint preserved worktree registry: %v", err)
+	}
+	if gotAdminFingerprint != adminFingerprint {
+		t.Fatal("worktree administrative registry changed after wrong-case restoration")
+	}
+	if _, err := os.Stat(upperStage); !os.IsNotExist(err) {
+		t.Fatalf("uppercase staging path still exists after restoration: %v", err)
+	}
+	upperFingerprint, err := fingerprintWorktreeFilesystem(upperLane)
+	if err != nil {
+		t.Fatalf("fingerprint restored uppercase worktree: %v", err)
+	}
+	if upperFingerprint != before.upperFingerprint {
+		t.Fatal("restored uppercase worktree changed during lowercase refusal")
+	}
+	lowerFingerprint, err := fingerprintWorktreeFilesystem(lowerStage)
+	if err != nil {
+		t.Fatalf("fingerprint staged lowercase worktree: %v", err)
+	}
+	if lowerFingerprint != before.lowerFingerprint {
+		t.Fatal("staged lowercase worktree changed during wrong-case restoration")
+	}
+	if got := fixture.git(t, fixture.repo, "rev-parse", "refs/heads/upper-lane"); got != before.upperBranchOID {
+		t.Fatalf("uppercase branch changed: got %s, want %s", got, before.upperBranchOID)
+	}
+	if got := fixture.git(t, fixture.repo, "rev-parse", "refs/heads/lane"); got != before.lowerBranchOID {
+		t.Fatalf("lowercase branch changed: got %s, want %s", got, before.lowerBranchOID)
+	}
+	if got := fixture.readGitignore(t); got != before.gitignore {
+		t.Fatalf(".gitignore changed after wrong-case restoration\ngot:  %q\nwant: %q", got, before.gitignore)
+	}
 }
 
 type windowsPrunableState struct {
@@ -306,10 +447,21 @@ func windowsRegisteredWorktreePathExact(
 ) bool {
 	t.Helper()
 	want = filepath.Clean(want)
+	wantParent, err := os.Stat(filepath.Dir(want))
+	if err != nil {
+		t.Fatalf("stat expected registry parent: %v", err)
+	}
 	output := fixture.git(t, fixture.repo, "worktree", "list", "--porcelain", "-z")
 	for _, field := range strings.Split(output, "\x00") {
-		if strings.HasPrefix(field, "worktree ") &&
-			filepath.Clean(strings.TrimPrefix(field, "worktree ")) == want {
+		if !strings.HasPrefix(field, "worktree ") {
+			continue
+		}
+		registered := filepath.Clean(strings.TrimPrefix(field, "worktree "))
+		if filepath.Base(registered) != filepath.Base(want) {
+			continue
+		}
+		registeredParent, err := os.Stat(filepath.Dir(registered))
+		if err == nil && os.SameFile(registeredParent, wantParent) {
 			return true
 		}
 	}

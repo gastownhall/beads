@@ -21,6 +21,7 @@ const (
 	worktreeRemoveHelperMain     = "BD_WORKTREE_REMOVE_PROCESS_MAIN"
 	worktreeRemoveHelperBase     = "BD_WORKTREE_REMOVE_PROCESS_BASE"
 	worktreeRemoveHelperRestore  = "BD_WORKTREE_REMOVE_PROCESS_RESTORE_SOURCE"
+	worktreeRemoveHelperSentinel = "BD_WORKTREE_REMOVE_PROCESS_SENTINEL"
 	worktreeRemoveHookReplace    = "replace-target"
 	worktreeRemoveHookSymlink    = "symlink-target"
 	worktreeRemoveHookMoveMain   = "move-main"
@@ -28,6 +29,7 @@ const (
 	worktreeRemoveHookRewrite    = "rewrite-dirty-target"
 	worktreeRemoveHookAdvance    = "advance-target"
 	worktreeRemoveHookMoveTarget = "move-target-before-remove"
+	worktreeRemoveHookCaseRace   = "case-race-before-remove"
 	worktreeRemoveHookGitignore  = "change-gitignore-after-remove"
 	worktreeRemoveHookRestore    = "restore-target-after-resolution"
 	worktreeRemoveHookLock       = "lock-target-before-final"
@@ -55,6 +57,11 @@ func TestWorktreeRemoveProcessHelper(t *testing.T) {
 	case "":
 	case worktreeRemoveHookRestore:
 		hooks.afterTargetResolution = func() error {
+			if sentinel := os.Getenv(worktreeRemoveHelperSentinel); sentinel != "" {
+				if err := os.WriteFile(sentinel, []byte("reached\n"), 0600); err != nil {
+					return err
+				}
+			}
 			return os.Rename(
 				os.Getenv(worktreeRemoveHelperRestore),
 				os.Getenv(worktreeRemoveHelperTarget),
@@ -158,6 +165,19 @@ func TestWorktreeRemoveProcessHelper(t *testing.T) {
 				"--",
 				os.Getenv(worktreeRemoveHelperTarget),
 				os.Getenv(worktreeRemoveHelperTarget)+"-moved",
+			)
+		}
+	case worktreeRemoveHookCaseRace:
+		hooks.beforeRemove = func() error {
+			target := os.Getenv(worktreeRemoveHelperTarget)
+			if err := os.Rename(target, target+"-moved"); err != nil {
+				return err
+			}
+			return runWorktreeRemoveHookGit(
+				os.Getenv(worktreeRemoveHelperMain),
+				"config",
+				"core.ignorecase",
+				"true",
 			)
 		}
 	case worktreeRemoveHookGitignore:

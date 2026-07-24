@@ -487,7 +487,11 @@ func runWorktreeRemove(
 		}
 	}
 
-	removeArgs := []string{"worktree", "remove"}
+	// Git uses core.ignorecase while selecting a registration by path. The
+	// target path comes from the exact registry spelling, so force ordinal
+	// matching for the destructive command: a concurrent disappearance or
+	// config change must not redirect removal to a case-variant sibling.
+	removeArgs := []string{"-c", "core.ignorecase=false", "worktree", "remove"}
 	if options.force.value {
 		removeArgs = append(removeArgs, "--force")
 	}
@@ -987,12 +991,32 @@ func sameWorktreePath(left, right string) bool {
 	leftAbsolute = filepath.Clean(leftAbsolute)
 	rightAbsolute = filepath.Clean(rightAbsolute)
 
-	leftInfo, leftStatErr := os.Stat(leftAbsolute)
-	rightInfo, rightStatErr := os.Stat(rightAbsolute)
-	if leftStatErr == nil && rightStatErr == nil {
-		return os.SameFile(leftInfo, rightInfo)
+	// When both paths are missing, peel exact components in lockstep until
+	// existing ancestors can prove physical identity. This accepts equivalent
+	// ancestor spellings such as a Windows 8.3 alias without ever case-folding
+	// an unresolved component.
+	for {
+		leftInfo, leftStatErr := os.Stat(leftAbsolute)
+		rightInfo, rightStatErr := os.Stat(rightAbsolute)
+		if leftStatErr == nil || rightStatErr == nil {
+			return leftStatErr == nil &&
+				rightStatErr == nil &&
+				os.SameFile(leftInfo, rightInfo)
+		}
+		if !os.IsNotExist(leftStatErr) || !os.IsNotExist(rightStatErr) {
+			return false
+		}
+		if filepath.Base(leftAbsolute) != filepath.Base(rightAbsolute) {
+			return false
+		}
+		leftParent := filepath.Dir(leftAbsolute)
+		rightParent := filepath.Dir(rightAbsolute)
+		if leftParent == leftAbsolute || rightParent == rightAbsolute {
+			return false
+		}
+		leftAbsolute = leftParent
+		rightAbsolute = rightParent
 	}
-	return leftAbsolute == rightAbsolute
 }
 
 func findRegisteredWorktreeByPath(
