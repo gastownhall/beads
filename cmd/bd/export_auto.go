@@ -214,15 +214,21 @@ func countIssueRecordsInJSONL(path string) (int, error) {
 }
 
 func missingJSONLIssueIDsInStore(ctx context.Context, path string) ([]string, error) {
-	existingIDs, err := issueIDsInJSONL(path)
+	// GH#4988: only refuse when *in-scope* JSONL issue records are absent from
+	// the store. Ephemeral wisps, templates, and infra types are outside
+	// auto-export scope (buildAutoExportFilter / GH#3649). Compaction can
+	// delete wisps from Dolt while an older JSONL still lists them; treating
+	// those as hard orphans wedged auto-export permanently.
+	existing, err := issueRecordsInJSONL(path)
 	if err != nil {
 		return nil, err
 	}
-	if len(existingIDs) == 0 {
+	if len(existing) == 0 {
 		return nil, nil
 	}
 
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Limit: 0})
+	filter, infraTypeSet := buildAutoExportFilter(ctx)
+	issues, err := store.SearchIssues(ctx, "", filter)
 	if err != nil {
 		return nil, fmt.Errorf("failed to search issues: %w", err)
 	}
@@ -232,15 +238,29 @@ func missingJSONLIssueIDsInStore(ctx context.Context, path string) ([]string, er
 	}
 
 	missing := make([]string, 0)
-	for _, id := range existingIDs {
-		if _, ok := localIDs[id]; !ok {
-			missing = append(missing, id)
+	for _, rec := range existing {
+		if rec.Ephemeral || rec.IsTemplate || infraTypeSet[string(rec.IssueType)] {
+			continue
+		}
+		if _, ok := localIDs[rec.ID]; !ok {
+			missing = append(missing, rec.ID)
 		}
 	}
 	return missing, nil
 }
 
-func issueIDsInJSONL(path string) ([]string, error) {
+// jsonlIssueRecord is a lightweight issue line from issues.jsonl used by
+// auto-export safety guards.
+type jsonlIssueRecord struct {
+	ID         string
+	IssueType  types.IssueType
+	IsTemplate bool
+	Ephemeral  bool
+}
+
+// issueRecordsInJSONL returns issue records (id + scope fields) from a JSONL
+// export file. Tombstones and non-issue record types are skipped.
+func issueRecordsInJSONL(path string) ([]jsonlIssueRecord, error) {
 	f, err := os.Open(path) //nolint:gosec
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -254,7 +274,7 @@ func issueIDsInJSONL(path string) ([]string, error) {
 	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
 
 	seen := make(map[string]struct{})
-	var ids []string
+	var records []jsonlIssueRecord
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -273,11 +293,11 @@ func issueIDsInJSONL(path string) ([]string, error) {
 			}
 		}
 
-		var id string
+		var rec jsonlIssueRecord
 		if rawID, ok := raw["id"]; ok {
-			_ = json.Unmarshal(rawID, &id)
+			_ = json.Unmarshal(rawID, &rec.ID)
 		}
-		if id == "" {
+		if rec.ID == "" {
 			continue
 		}
 
@@ -289,17 +309,39 @@ func issueIDsInJSONL(path string) ([]string, error) {
 			continue
 		}
 
-		if _, ok := seen[id]; ok {
+		if rawIT, ok := raw["issue_type"]; ok {
+			_ = json.Unmarshal(rawIT, &rec.IssueType)
+		}
+		if rawTpl, ok := raw["is_template"]; ok {
+			_ = json.Unmarshal(rawTpl, &rec.IsTemplate)
+		}
+		if rawEph, ok := raw["ephemeral"]; ok {
+			_ = json.Unmarshal(rawEph, &rec.Ephemeral)
+		}
+
+		if _, ok := seen[rec.ID]; ok {
 			continue
 		}
-		seen[id] = struct{}{}
-		ids = append(ids, id)
+		seen[rec.ID] = struct{}{}
+		records = append(records, rec)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
 
-	sort.Strings(ids)
+	sort.Slice(records, func(i, j int) bool { return records[i].ID < records[j].ID })
+	return records, nil
+}
+
+func issueIDsInJSONL(path string) ([]string, error) {
+	records, err := issueRecordsInJSONL(path)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(records))
+	for i, rec := range records {
+		ids[i] = rec.ID
+	}
 	return ids, nil
 }
 
@@ -499,16 +541,20 @@ func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMe
 		return fmt.Errorf("auto-export shrink guard: inspect existing JSONL: %w", err)
 	}
 
-	if stats.FilteredRecords == 0 {
+	// Only block on records we must not silently drop: memories (when excluded)
+	// and unknown record types. Ephemeral / template / infra issues are outside
+	// auto-export scope by design (GH#3649); allowing the rewrite clears stale
+	// wisps left after TTL compaction (GH#4988).
+	if stats.Memories == 0 && stats.UnknownRecords == 0 {
 		return nil
 	}
-	return fmt.Errorf("auto-export shrink guard: refusing to overwrite %s because it contains %d record(s) outside auto-export scope (%d memories, %d infra/template/ephemeral issues, %d unknown); run an explicit export if you want to replace it", path, stats.FilteredRecords, stats.Memories, stats.FilteredIssues, stats.UnknownRecords)
+	return fmt.Errorf("auto-export shrink guard: refusing to overwrite %s because it contains %d record(s) that auto-export would drop (%d memories, %d unknown); run an explicit export if you want to replace it", path, stats.Memories+stats.UnknownRecords, stats.Memories, stats.UnknownRecords)
 }
 
 type autoExportOverwriteStats struct {
-	FilteredRecords int
+	FilteredRecords int // retained for tests / logging; blocking uses Memories+Unknown
 	Memories        int
-	FilteredIssues  int
+	FilteredIssues  int // ephemeral/infra/template — non-blocking (GH#4988)
 	UnknownRecords  int
 }
 
@@ -537,8 +583,9 @@ func classifyExistingAutoExportRecord(line []byte, infraTypes map[string]bool, i
 			stats.UnknownRecords++
 			return nil
 		}
+		// Out-of-scope issue types: count for observability but do not block
+		// auto-export overwrite (stale wisps after compaction — GH#4988).
 		if infraTypes[string(record.IssueType)] || record.IsTemplate || record.Ephemeral {
-			stats.FilteredRecords++
 			stats.FilteredIssues++
 		}
 		return nil

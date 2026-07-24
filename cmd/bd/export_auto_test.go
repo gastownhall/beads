@@ -364,16 +364,53 @@ func TestGuardAutoExportOverwriteBlocksRicherJSONL(t *testing.T) {
 		t.Fatal("expected guardAutoExportOverwrite to reject richer JSONL, got nil")
 	}
 	msg := err.Error()
+	// Memories + unknown still block. Ephemeral/infra/template do not (GH#4988).
 	for _, want := range []string{
 		"refusing to overwrite",
-		"5 record(s) outside auto-export scope",
+		"2 record(s) that auto-export would drop",
 		"1 memories",
-		"3 infra/template/ephemeral issues",
 		"1 unknown",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("guard error %q does not contain %q", msg, want)
 		}
+	}
+}
+
+func TestGuardAutoExportOverwriteAllowsStaleEphemeralWisp(t *testing.T) {
+	// GH#4988: JSONL still lists a compacted wisp; auto-export must rewrite.
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	writeJSONLLines(t, path,
+		map[string]any{"_type": "issue", "id": "bd-1", "issue_type": "task", "title": "kept"},
+		map[string]any{"_type": "issue", "id": "bd-wisp", "issue_type": "task", "ephemeral": true, "title": "stale wisp"},
+	)
+
+	if err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false); err != nil {
+		t.Fatalf("stale ephemeral-only richer JSONL should be rewritable: %v", err)
+	}
+}
+
+func TestIssueRecordsInJSONL_SkipsTombstoneAndNonIssue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	writeJSONLLines(t, path,
+		map[string]any{"_type": "issue", "id": "bd-1", "issue_type": "task", "ephemeral": false},
+		map[string]any{"_type": "issue", "id": "bd-wisp", "issue_type": "task", "ephemeral": true},
+		map[string]any{"_type": "issue", "id": "bd-gone", "status": "tombstone"},
+		map[string]any{"_type": "memory", "key": "k", "value": "v"},
+	)
+	recs, err := issueRecordsInJSONL(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("got %d records, want 2 (tombstone+memory skipped): %+v", len(recs), recs)
+	}
+	byID := map[string]jsonlIssueRecord{}
+	for _, r := range recs {
+		byID[r.ID] = r
+	}
+	if !byID["bd-wisp"].Ephemeral {
+		t.Fatal("expected bd-wisp ephemeral=true")
 	}
 }
 
