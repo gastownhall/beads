@@ -60,7 +60,7 @@ func TestPullLinks_DirectRelations(t *testing.T) {
 	// Dependency-Forward: 100 blocks 200 (no swap)
 	assertDep(t, deps[0], testWebURL(100), testWebURL(200), "blocks")
 	// Hierarchy-Forward: 100 is parent of 300 (no swap)
-	assertDep(t, deps[1], testWebURL(100), testWebURL(300), "parent")
+	assertDep(t, deps[1], testWebURL(100), testWebURL(300), "parent-child")
 	// Related: 100 related to 400
 	assertDep(t, deps[2], testWebURL(100), testWebURL(400), "related")
 }
@@ -95,7 +95,7 @@ func TestPullLinks_ReverseDirectionNormalization(t *testing.T) {
 	// Dependency-Reverse swapped: 200 blocks 100
 	assertDep(t, deps[0], testWebURL(200), testWebURL(100), "blocks")
 	// Hierarchy-Reverse swapped: 300 is parent of 100
-	assertDep(t, deps[1], testWebURL(300), testWebURL(100), "parent")
+	assertDep(t, deps[1], testWebURL(300), testWebURL(100), "parent-child")
 }
 
 func TestPullLinks_DiscoveredFrom(t *testing.T) {
@@ -188,15 +188,15 @@ func TestAdoRelToBeadsDep(t *testing.T) {
 			wantSwap: true,
 		},
 		{
-			name:     "Child → parent, no swap",
+			name:     "Child → parent-child, no swap",
 			rel:      RelChild,
-			wantType: "parent",
+			wantType: "parent-child",
 			wantSwap: false,
 		},
 		{
-			name:     "Parent → parent, swap",
+			name:     "Parent → parent-child, swap",
 			rel:      RelParent,
-			wantType: "parent",
+			wantType: "parent-child",
 			wantSwap: true,
 		},
 		{
@@ -250,7 +250,8 @@ func TestBeadsDepToADORel(t *testing.T) {
 		wantRel string
 	}{
 		{"blocks", RelDependsOn},
-		{"parent", RelChild},
+		{"parent-child", RelChild}, // canonical beads storage type (GH#4961)
+		{"parent", RelChild},       // obsolete alias still accepted
 		{"related", RelRelated},
 		{"discovered-from", RelRelated},
 		{"unknown", RelRelated}, // default
@@ -385,7 +386,7 @@ func TestPushLinks_AddMissing(t *testing.T) {
 
 	desired := []tracker.DependencyInfo{
 		{FromExternalID: "100", ToExternalID: "200", Type: "blocks"},
-		{FromExternalID: "100", ToExternalID: "300", Type: "parent"},
+		{FromExternalID: "100", ToExternalID: "300", Type: "parent-child"},
 	}
 
 	errs := resolver.PushLinks(context.Background(), 100, nil, desired, nil)

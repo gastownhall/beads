@@ -51,6 +51,8 @@ const discoveredFromComment = "beads:discovered-from"
 // adoRelToBeadsDep maps an ADO relation type to a beads dependency type.
 // Returns the dep type and whether the from/to should be swapped
 // (true for reverse link types that need direction normalization).
+// Hierarchy links use beads storage vocabulary "parent-child" (types.DepParentChild),
+// not the obsolete "parent" alias (GH#4961).
 func adoRelToBeadsDep(rel string, attributes map[string]interface{}) (depType string, swap bool) {
 	switch rel {
 	case RelDependsOn: // Dependency-Forward: this item is predecessor (blocks target)
@@ -58,9 +60,9 @@ func adoRelToBeadsDep(rel string, attributes map[string]interface{}) (depType st
 	case RelDependencyOf: // Dependency-Reverse: target blocks this item → swap
 		return "blocks", true
 	case RelChild: // Hierarchy-Forward: this item is parent of target
-		return "parent", false
+		return "parent-child", false
 	case RelParent: // Hierarchy-Reverse: target is parent of this item → swap
-		return "parent", true
+		return "parent-child", true
 	case RelRelated:
 		if hasDiscoveredFromAttribute(attributes) {
 			return "discovered-from", false
@@ -89,11 +91,13 @@ func hasDiscoveredFromAttribute(attributes map[string]interface{}) bool {
 }
 
 // beadsDepToADORel maps a beads dependency type to an ADO relation type.
+// Accepts both "parent-child" (canonical storage type) and the obsolete
+// "parent" alias so older in-memory values still map to hierarchy (GH#4961).
 func beadsDepToADORel(depType string) string {
 	switch depType {
 	case "blocks":
 		return RelDependsOn
-	case "parent":
+	case "parent-child", "parent": // "parent" kept as alias only
 		return RelChild
 	case "related":
 		return RelRelated
