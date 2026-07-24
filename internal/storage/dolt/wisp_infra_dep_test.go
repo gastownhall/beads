@@ -20,7 +20,8 @@ import (
 // ignored/0003+0005 remove it from `wisp_dependencies`, any code that still
 // uses depends_on_id in either position fails with errno 1105.
 //
-// All four canonical infra issue types are covered: agent, rig, role, message.
+// The historically supported infra issue types are covered: agent, rig, role,
+// and message.
 func TestDemoteToWisp_InfraDepMirrorUsesSplitColumns(t *testing.T) {
 	infraTypes := []types.IssueType{"agent", "rig", "role", "message"}
 
@@ -63,8 +64,8 @@ func TestDemoteToWisp_InfraDepMirrorUsesSplitColumns(t *testing.T) {
 			// (post-migration 0041/0043 schema — no physical depends_on_id).
 			if _, err := store.db.ExecContext(ctx, `
 				INSERT INTO dependencies
-					(issue_id, depends_on_issue_id, type, created_at, created_by)
-				VALUES (?, ?, 'blocks', ?, 'tester')
+					(id, issue_id, depends_on_issue_id, type, created_at, created_by)
+				VALUES (UUID(), ?, ?, 'blocks', ?, 'tester')
 			`, infraID, target.ID, now); err != nil {
 				t.Fatalf("insert dep in dependencies: %v", err)
 			}
@@ -161,8 +162,8 @@ func TestDemoteToWisp_InfraDepToWispUsesWispColumn(t *testing.T) {
 			// Dep in `dependencies` referencing the wisp target via depends_on_wisp_id.
 			if _, err := store.db.ExecContext(ctx, `
 				INSERT INTO dependencies
-					(issue_id, depends_on_wisp_id, type, created_at, created_by)
-				VALUES (?, ?, 'blocks', ?, 'tester')
+					(id, issue_id, depends_on_wisp_id, type, created_at, created_by)
+				VALUES (UUID(), ?, ?, 'blocks', ?, 'tester')
 			`, infraID, wispTarget.ID, now); err != nil {
 				t.Fatalf("insert dep with wisp target: %v", err)
 			}
@@ -210,8 +211,11 @@ func TestAddWispDep_InfraWispToInfraWisp(t *testing.T) {
 			ctx, cancel := testContext(t)
 			defer cancel()
 
-			// Register non-built-in infra types as custom types so CreateIssue
-			// validation accepts them. "message" is already built-in (TypeMessage).
+			// Register the historical set as infra types and the non-built-in
+			// values as custom types. "rig" is no longer an infra default.
+			if err := store.SetConfig(ctx, "types.infra", "agent,rig,role,message"); err != nil {
+				t.Fatalf("SetConfig types.infra: %v", err)
+			}
 			if err := store.SetConfig(ctx, "types.custom", "agent,rig,role"); err != nil {
 				t.Fatalf("SetConfig types.custom: %v", err)
 			}
@@ -293,7 +297,11 @@ func TestAddWispDep_InfraWispToIssue(t *testing.T) {
 			ctx, cancel := testContext(t)
 			defer cancel()
 
-			// Register non-built-in infra types so CreateIssue validation passes.
+			// Register the historical set as infra types and the non-built-in
+			// values as custom types. "rig" is no longer an infra default.
+			if err := store.SetConfig(ctx, "types.infra", "agent,rig,role,message"); err != nil {
+				t.Fatalf("SetConfig types.infra: %v", err)
+			}
 			if err := store.SetConfig(ctx, "types.custom", "agent,rig,role"); err != nil {
 				t.Fatalf("SetConfig types.custom: %v", err)
 			}
