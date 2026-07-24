@@ -340,10 +340,9 @@ func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter
 	// no real row locking — FOR UPDATE / SKIP LOCKED are parse-only no-ops
 	// (https://www.dolthub.com/blog/2023-10-23-hold-my-beer/) — so retry is the
 	// safety net. withRetryTx owns BeginTx and the final Commit.
-	var claimed *types.Issue
-	write := func() error {
-		claimed = nil
-		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	write := func() (*types.Issue, error) {
+		var claimed *types.Issue
+		err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 			var err error
 			claimed, err = issueops.ClaimReadyIssueInTx(ctx, tx, filter, actor)
 			if err != nil {
@@ -363,12 +362,20 @@ func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter
 			}
 			return nil
 		})
+		return claimed, err
 	}
-	// verify-by-re-read (bd-zccb9): the claimed ID is only known once the body
-	// has run, so this cannot ride verifiedClaimWrite's id parameter — but the
-	// resolution protocol is the same. A replay after a verified rollback
-	// re-scans the ready front and may legitimately claim a different issue.
-	err := write()
+	return s.verifiedReadyClaim(ctx, actor, write)
+}
+
+// verifiedReadyClaim resolves a ready-claim write by verify-by-re-read
+// (bd-zccb9): the claimed ID is only known once the write body has run, so
+// this cannot ride verifiedClaimWrite's id parameter — but the resolution
+// protocol is the same. A replay after a verified rollback re-scans the ready
+// front and may legitimately claim a different issue. Split from
+// ClaimReadyIssue so injection tests can drive the write seam directly, the
+// same way the verifiedClaimWrite tests do.
+func (s *DoltStore) verifiedReadyClaim(ctx context.Context, actor string, write func() (*types.Issue, error)) (*types.Issue, error) {
+	claimed, err := write()
 	if err != nil && !(errors.Is(err, errCommitPhase) && claimed != nil && s.serverMode) {
 		return nil, err
 	}
@@ -396,10 +403,24 @@ func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter
 			// Verified rolled back: nothing landed, safe to replay once.
 			doltMetrics.claimVerifyRecovered.Add(ctx, 1, metric.WithAttributes(
 				attribute.String("op", "ready-claim"), attribute.String("outcome", "replayed")))
-			if err = write(); err != nil {
+			claimed, err = write()
+			// The replay carries the same commit-phase ambiguity as the first
+			// attempt: an errCommitPhase with a selection made must fall
+			// through to the verify pass — attempt is past the replay budget
+			// now, so a second verified rollback still exhausts with the
+			// honest "did not land" error — never surface the raw
+			// indeterminate error, which would reintroduce the wy-x543k
+			// false-failure and could orphan an applied claim on a DIFFERENT
+			// ready issue than the first attempt selected.
+			if err != nil && !(errors.Is(err, errCommitPhase) && claimed != nil) {
 				return nil, err
 			}
 			if claimed == nil {
+				if err != nil {
+					// Commit-phase loss before anything was selected: nothing
+					// to verify, honest indeterminate error.
+					return nil, err
+				}
 				return nil, nil
 			}
 			continue

@@ -156,6 +156,54 @@ func TestVerifiedClaimWriteIndeterminateStaysIndeterminateTwice(t *testing.T) {
 	}
 }
 
+// TestVerifiedReadyClaimReplayConvertsAppliedIndeterminate: the replay leg of
+// the bespoke ready-claim path must keep the wrapper's verify semantics (lion
+// review on PR #5006). First attempt: commit-phase loss, verified rolled back
+// (nothing landed) -> replay. The replay actually lands the claim but ALSO
+// reports commit-phase loss (the wy-x543k direction, now on attempt two). The
+// verify pass must convert that into an accurate success instead of returning
+// the raw indeterminate error — which would leave an applied claim orphaned
+// on an issue the caller was told it failed to claim.
+func TestVerifiedReadyClaimReplayConvertsAppliedIndeterminate(t *testing.T) {
+	s, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	id := claimVerifyTestIssue(t, s)
+
+	calls := 0
+	got, err := s.verifiedReadyClaim(ctx, "alice", func() (*types.Issue, error) {
+		calls++
+		if calls == 1 {
+			// Commit-phase loss, transaction rolled back: nothing landed.
+			return &types.Issue{ID: id}, fmt.Errorf("write commit result indeterminate after connection loss: i/o timeout (%w)", errCommitPhase)
+		}
+		// Replay: the claim lands, but the connection dies during commit again.
+		if err := rawClaim(t, s, id, "alice"); err != nil {
+			return nil, err
+		}
+		return &types.Issue{ID: id}, fmt.Errorf("write commit result indeterminate after connection loss: i/o timeout (%w)", errCommitPhase)
+	})
+	if err != nil {
+		t.Fatalf("expected applied-indeterminate replay to resolve to success, got: %v", err)
+	}
+	if got == nil || got.ID != id {
+		t.Fatalf("recovered success must return the claimed issue %s, got %+v", id, got)
+	}
+	if calls != 2 {
+		t.Fatalf("expected exactly one replay (2 write runs), got %d", calls)
+	}
+
+	assignee, status, verr := s.readClaimState(ctx, id)
+	if verr != nil {
+		t.Fatalf("read claim state: %v", verr)
+	}
+	if assignee != "alice" || status != types.StatusInProgress {
+		t.Fatalf("claim not in effect after recovered replay: assignee=%q status=%q", assignee, status)
+	}
+}
+
 // TestClaimUnclaimVerifiedEndToEnd: the public paths still work with the
 // verify layer in place — a healthy claim and unclaim pass their
 // postconditions and leave the expected states.
