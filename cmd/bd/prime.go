@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads"
-	internalbeads "github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 )
@@ -316,15 +316,12 @@ func isMCPActive() bool {
 	return false
 }
 
-// isEphemeralBranch detects if current branch has no upstream (ephemeral/local-only)
+// isEphemeralBranch detects if current branch has no upstream (ephemeral/local-only).
+// Uses process CWD git independently of BEADS_DIR validation (GH#4927).
 var isEphemeralBranch = func() bool {
 	// git rev-parse --abbrev-ref --symbolic-full-name @{u}
 	// Returns error code 128 if no upstream configured
-	rc, err := internalbeads.GetRepoContext()
-	if err != nil {
-		return true // Default to ephemeral if we can't determine context
-	}
-	cmd := rc.GitCmdCWD(context.Background(), "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
 	return cmd.Run() != nil
 }
 
@@ -341,13 +338,32 @@ var primeAgentProfile = func() config.AgentProfile {
 	return config.GetAgentProfile()
 }
 
-// primeHasGitRemote detects if any git remote is configured (stubbable for tests)
+// primeHasGitRemote detects if any git remote is configured (stubbable for tests).
+//
+// GH#4927: Probe the process CWD git workspace directly. Do not require a valid
+// RepoContext / BEADS_DIR — external BEADS_DIR under another account's home
+// (common in agent sandboxes) fails isPathInSafeBoundary and must not be
+// misreported as "no git remote" when `git remote` in CWD succeeds. SEC-003
+// boundary on BEADS_DIR remains enforced elsewhere.
 var primeHasGitRemote = func() bool {
-	rc, err := internalbeads.GetRepoContext()
+	return gitCWDHasRemote()
+}
+
+// gitCWDHasRemote reports whether the process CWD git repo has any remote.
+// Exported behavior for tests via the pure helper (no BEADS_DIR coupling).
+func gitCWDHasRemote() bool {
+	cmd := exec.Command("git", "remote")
+	out, err := cmd.Output()
 	if err != nil {
 		return false
 	}
-	cmd := rc.GitCmdCWD(context.Background(), "remote")
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// gitDirHasRemote is like gitCWDHasRemote but for an explicit working tree path.
+func gitDirHasRemote(dir string) bool {
+	cmd := exec.Command("git", "remote")
+	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
 		return false
