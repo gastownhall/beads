@@ -75,6 +75,16 @@ func unclaimed() claimPostcondition {
 // an annoyance, not a phantom claim). The postcondition checks only the
 // coordination fields the update actually sets, since the others may be
 // legitimately touched by concurrent writers.
+//
+// Attribution narrowness (lion review, PR #5008): because only the SET
+// coordination fields are checked, a commit-phase loss whose transaction
+// verifiably rolled back can still verify as "applied" when a racing actor
+// landed the SAME target values inside the verify window. The coordination
+// state is then correct but it is the racer's write, not ours: any ordinary
+// fields riding the same update (title, notes, …) and our event row are
+// silently gone despite the reported success. Mitigation is usage-side, not
+// machinery: keep guarded coordination writes single-purpose (assignee/status
+// only), which is how the wheelhouse park/restore consumers use them.
 func guardedUpdatePostcondition(opts storage.UpdateIssueOptions, updates map[string]interface{}) (claimPostcondition, bool) {
 	if opts.ExpectedAssignee == nil && opts.ExpectedStatus == nil {
 		return claimPostcondition{}, false
