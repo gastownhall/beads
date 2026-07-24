@@ -417,15 +417,19 @@ func checkDoltConflicts(beadsDir string) DoctorCheck {
 
 // checkChildParentDependenciesDB is the core logic for CheckChildParentDependencies.
 func checkChildParentDependenciesDB(db *sql.DB) DoctorCheck {
-	// Query for child→parent BLOCKING dependencies where issue_id starts with target id + "."
-	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
-	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.
+	// Blocking edges that cross a parent-child ID hierarchy deadlock ready-work:
+	//   child→parent  (issue_id is child of depends_on_id)  — already guarded by bd dep add
+	//   parent→child  (depends_on_id is child of issue_id)  — was invisible (GH#4814)
+	// Only blocks / conditional-blocks / waits-for; legitimate 'parent-child' edges are excluded.
 	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.issue_id, d.depends_on_id
 		FROM (` + doctorDependencyUnionSQL() + `) d
-		WHERE d.issue_id LIKE CONCAT(d.depends_on_id, '.%')
-		  AND d.type IN ('blocks', 'conditional-blocks', 'waits-for')
+		WHERE d.type IN ('blocks', 'conditional-blocks', 'waits-for')
+		  AND (
+			d.issue_id LIKE CONCAT(d.depends_on_id, '.%')
+			OR d.depends_on_id LIKE CONCAT(d.issue_id, '.%')
+		  )
 	`
 	rows, err := db.Query(query)
 	if err != nil {
@@ -457,7 +461,7 @@ func checkChildParentDependenciesDB(db *sql.DB) DoctorCheck {
 		return DoctorCheck{
 			Name:     "Child-Parent Dependencies",
 			Status:   "ok",
-			Message:  "No child→parent dependencies",
+			Message:  "No hierarchy-blocking anti-patterns",
 			Category: CategoryMetadata,
 		}
 	}
@@ -470,7 +474,7 @@ func checkChildParentDependenciesDB(db *sql.DB) DoctorCheck {
 	return DoctorCheck{
 		Name:     "Child-Parent Dependencies",
 		Status:   "warning",
-		Message:  fmt.Sprintf("%d child→parent dependency detected (may cause deadlock)", len(badDeps)),
+		Message:  fmt.Sprintf("%d hierarchy-blocking dependency(ies) detected (may cause deadlock)", len(badDeps)),
 		Detail:   detail,
 		Fix:      "Run 'bd doctor --fix --fix-child-parent' to remove (if unintentional)",
 		Category: CategoryMetadata,
