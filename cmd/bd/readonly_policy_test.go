@@ -331,7 +331,10 @@ func TestConfigValidateReadOnlyIsHermetic(t *testing.T) {
 			_, _ = db.ExecContext(context.Background(), fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", database)) //nolint:gosec // generated test name
 		}
 	})
-	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue-prefix: readonly\ndolt.auto-start: false\n"), 0o644); err != nil {
+	// federation.remote is required for `bd config validate` to pass since
+	// the JSONL-removal change; without it the canary fails on validation
+	// rather than exercising the hermeticity contract.
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue-prefix: readonly\ndolt.auto-start: false\nfederation:\n  remote: https://github.com/example/beads-remote\n"), 0o644); err != nil {
 		t.Fatalf("write isolated config: %v", err)
 	}
 

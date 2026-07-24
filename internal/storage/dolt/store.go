@@ -1465,7 +1465,7 @@ var (
 )
 
 func initializeServerCircuitBreaker(cfg *Config) *circuitBreaker {
-	if cfg.ReadOnly || os.Getenv("BEADS_TEST_MODE") == "1" {
+	if cfg.DisableAutoStart || os.Getenv("BEADS_TEST_MODE") == "1" {
 		return nil
 	}
 	// Clean stale circuit breaker files before checking — prevents leftover
@@ -1474,13 +1474,19 @@ func initializeServerCircuitBreaker(cfg *Config) *circuitBreaker {
 	return newServerCircuitBreaker(cfg.ServerHost, cfg.ServerPort, cfg.Database)
 }
 
+// serverOpenCanAutoStart reports whether a stopped managed dolt server may be
+// auto-started for this open. This is keyed off DisableAutoStart (the strict
+// --readonly signal threaded from policy.disableAutoStart in cmd/bd/main.go),
+// not cfg.ReadOnly: ordinary classified-read commands (bd show, bd list, ...)
+// also set cfg.ReadOnly but must still be able to auto-start a stopped
+// managed server, per dolt_autostart_lifecycle_integration_test.go.
 func serverOpenCanAutoStart(cfg *Config) bool {
-	return !cfg.ReadOnly && cfg.AutoStart && cfg.Path != "" &&
+	return !cfg.DisableAutoStart && cfg.AutoStart && cfg.Path != "" &&
 		cfg.ServerSocket == "" && isLocalHost(cfg.ServerHost)
 }
 
 func persistResolvedPortFile(cfg *Config, beadsDir string) error {
-	if cfg.ReadOnly || !shouldPersistResolvedPortFile() {
+	if cfg.DisableAutoStart || !shouldPersistResolvedPortFile() {
 		return nil
 	}
 	return ensureResolvedPortFile(beadsDir, cfg.ServerPort)
