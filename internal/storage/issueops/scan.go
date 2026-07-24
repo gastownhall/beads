@@ -22,6 +22,15 @@ const IssueSelectColumns = sqlbuild.IssueSelectColumns
 // skip materializing large text bodies on listing paths.
 //
 // metadata is intentionally retained — it is small and read by routing.
+//
+// row_lock and the leases.* overlay (lease_expires_at, heartbeat_at; added by
+// migration 0054 after this list was first written, see #4150 and the lease
+// join in searchTableInTxT) are also retained: all three are small, non-TEXT
+// columns that routing/claim code reads (optimistic concurrency token,
+// active-lease state), not the multi-KB bodies this split exists to skip. Any
+// query selecting IssueSelectColumnsLite must include sqlbuild.LeaseJoin(table)
+// in its FROM clause, exactly as full hydration does (see issueLiteProjection
+// in search.go, joinLeases: true).
 const IssueSelectColumnsLite = `id, content_hash, title,
 	       status, priority, issue_type, assignee, estimated_minutes,
 	       created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
@@ -31,7 +40,8 @@ const IssueSelectColumnsLite = `id, content_hash, title,
 	       mol_type,
 	       event_kind, actor, target,
 	       due_at, defer_until,
-	       work_type, source_system, metadata`
+	       work_type, source_system, metadata, row_lock,
+	       leases.lease_expires_at, leases.heartbeat_at`
 
 // HeavyDropList enumerates the columns omitted from IssueSelectColumnsLite.
 // Test-only: the schema-parity test asserts
@@ -234,6 +244,7 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var issue types.Issue
 	var createdAtStr, updatedAtStr sql.NullString // TEXT columns - must parse manually
 	var startedAt, closedAt, compactedAt, dueAt, deferUntil sql.NullTime
+	var leaseExpiresAt, heartbeatAt sql.NullTime // lease columns (migration 0054); NULL when no active lease
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
 	var createdBy sql.NullString
 	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
@@ -243,6 +254,7 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var awaitType, awaitID sql.NullString
 	var ephemeral, noHistory, pinned, isTemplate sql.NullInt64
 	var metadata sql.NullString
+	var rowLock sql.NullInt64 // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
 
 	dests := []any{
 		&issue.ID, &contentHash, &issue.Title,
@@ -255,7 +267,8 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&molType,
 		&eventKind, &actor, &target,
 		&dueAt, &deferUntil,
-		&workType, &sourceSystem, &metadata,
+		&workType, &sourceSystem, &metadata, &rowLock,
+		&leaseExpiresAt, &heartbeatAt,
 	}
 	dests = append(dests, extra...)
 	if err := s.Scan(dests...); err != nil {
@@ -365,6 +378,16 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	}
 	if metadata.Valid && metadata.String != "" && metadata.String != "{}" {
 		issue.Metadata = []byte(metadata.String)
+	}
+	// row_lock surfaced as the opaque RowVersion token. NOT NULL DEFAULT 0, so
+	// this is normally valid; a NULL (defensive) maps to 0.
+	issue.RowVersion = rowLock.Int64
+	// Lease columns (migration 0054); NULL when no active lease.
+	if leaseExpiresAt.Valid {
+		issue.LeaseExpiresAt = &leaseExpiresAt.Time
+	}
+	if heartbeatAt.Valid {
+		issue.HeartbeatAt = &heartbeatAt.Time
 	}
 
 	issue.IsLitePartial = true

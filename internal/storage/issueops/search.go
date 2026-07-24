@@ -16,7 +16,11 @@ import (
 // dependencies via filter.IncludeDependencies). Routing, wisp-merge, and
 // overlap detection live in the shared searchInTx wrapper.
 func SearchIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	return searchInTx(ctx, tx, query, filter, issueProjection)
+	proj := issueProjection
+	if filter.Lite {
+		proj = issueLiteProjection
+	}
+	return searchInTx(ctx, tx, query, filter, proj)
 }
 
 // SearchIssueIDsInTx is the narrow-projection variant of SearchIssuesInTx:
@@ -72,6 +76,23 @@ var issueProjection = searchProjection[*types.Issue]{
 	id:         func(issue *types.Issue) string { return issue.ID },
 	hydrate:    hydrateIssueLabelsAndDeps,
 	less:       sqlbuild.Less,
+	idShrink:   true,
+	joinLeases: true,
+}
+
+// issueLiteProjection is the opt-in lite variant of issueProjection: it reads
+// IssueSelectColumnsLite instead of IssueSelectColumns and scans with
+// ScanIssueLiteFrom, which leaves the six heavy TEXT columns (description,
+// design, acceptance_criteria, notes, payload, waiters) zero-valued and sets
+// IsLitePartial=true. Selected by SearchIssuesInTx when filter.Lite is set;
+// everything else (label/dep hydration, wisp merge, id-shrink pattern B,
+// lease join) is shared with issueProjection via searchProjection[T]. See
+// docs/EXTENDING.md for the caller contract.
+var issueLiteProjection = searchProjection[*types.Issue]{
+	columns:    func(_ FilterTables) string { return IssueSelectColumnsLite },
+	scan:       func(rows *sql.Rows) (*types.Issue, error) { return ScanIssueLiteFrom(rows) },
+	id:         func(issue *types.Issue) string { return issue.ID },
+	hydrate:    hydrateIssueLabelsAndDeps,
 	idShrink:   true,
 	joinLeases: true,
 }
