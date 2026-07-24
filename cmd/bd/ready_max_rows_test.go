@@ -166,3 +166,49 @@ func TestGetReadyWork_MaxRowsSuite(t *testing.T) {
 		}
 	})
 }
+
+// TestClaimReadyIssue_MaxRows_LargePoolUnderLowCap is the be-x42v.4-follow-up
+// regression for ClaimReadyIssueInTx: a rig-wide BEADS_MAX_ROWS cap (sized
+// for bulk list/ready reads) must never fail a claim, which only ever
+// consumes a single row regardless of how large the ready pool is.
+// Before the claim.go:206 fix, ClaimReadyIssueInTx forwarded MaxRows into
+// its internal unbounded GetReadyWorkInTx scan, so a ready pool bigger than
+// the cap made every claim attempt exit with ErrTooManyRows.
+func TestClaimReadyIssue_MaxRows_LargePoolUnderLowCap(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	store := newTestStore(t, tmpDir)
+	ctx := context.Background()
+
+	// Ready pool (10) is well above the cap (3) — this is exactly the
+	// agent-rig scenario the flag targets: a low defensive cap on bulk
+	// reads, but claim must still succeed.
+	const totalReady = 10
+	for i := 0; i < totalReady; i++ {
+		iss := &types.Issue{
+			ID:        fmt.Sprintf("mr-claim-%d", i),
+			Title:     fmt.Sprintf("Claim max-rows %d", i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, iss, "test"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", iss.ID, err)
+		}
+	}
+
+	claimed, err := store.ClaimReadyIssue(ctx, types.WorkFilter{
+		Status:        "open",
+		MaxRows:       3,
+		MaxRowsSource: "BEADS_MAX_ROWS",
+	}, "claimant")
+	if err != nil {
+		t.Fatalf("ClaimReadyIssue under cap=3 with %d-issue ready pool: unexpected error: %v", totalReady, err)
+	}
+	if claimed == nil {
+		t.Fatal("ClaimReadyIssue returned nil issue, want a claimed issue")
+	}
+	if claimed.Status != types.StatusInProgress {
+		t.Errorf("claimed issue status = %q, want %q", claimed.Status, types.StatusInProgress)
+	}
+}

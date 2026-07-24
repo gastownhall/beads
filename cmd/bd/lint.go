@@ -76,7 +76,9 @@ Examples:
 			var err error
 			issues, err = store.SearchIssues(ctx, "", filter)
 			if err != nil {
-				handleMaxRowsError(err)
+				if capErr := handleMaxRowsError(err); capErr != nil {
+					return capErr
+				}
 				return HandleError("%v", err)
 			}
 		}

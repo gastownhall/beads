@@ -27,14 +27,39 @@ func addMaxRowsFlag(cmd *cobra.Command) {
 		"Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) "+
 			"and an error to stderr if exceeded. 0 disables (the default). Overrides "+
 			"BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a "+
-			"circuit breaker against pathological queries.")
+			"circuit breaker against pathological queries. Not supported under "+
+			"--proxied-server: an explicit --max-rows or BEADS_MAX_ROWS cap errors out "+
+			"rather than silently going unenforced.")
+}
+
+// rejectMaxRowsUnderProxiedServer errors out when an explicit --max-rows
+// flag or BEADS_MAX_ROWS env cap resolves to a nonzero cap but the command
+// is about to divert to proxied-server mode. The proxied repository path
+// (internal/storage/domain/db) doesn't thread MaxRows through the UOW
+// pipeline, so silently ignoring the cap there would be the worst outcome
+// for a safety flag — reject explicitly instead of no-oping. Call this
+// after usesProxiedServer() is known true but before diverting to the
+// *ProxiedServer function, on every command that calls addMaxRowsFlag.
+func rejectMaxRowsUnderProxiedServer(cmd *cobra.Command) error {
+	maxRows, _, err := resolveMaxRows(cmd)
+	if err != nil {
+		return err
+	}
+	if maxRows > 0 {
+		return HandleErrorRespectJSON("--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode")
+	}
+	return nil
 }
 
 // resolveMaxRows picks the effective cap from --max-rows then BEADS_MAX_ROWS.
-// Returns (cap, source) where cap == 0 disables the cap and source is one of
-// "--max-rows", "BEADS_MAX_ROWS", or "". A negative flag is a usage error
-// and aborts with exit code 1. A non-integer env value emits a warning to
-// stderr and is ignored (returns cap == 0).
+// Returns (cap, source, err) where cap == 0 disables the cap and source is
+// one of "--max-rows", "BEADS_MAX_ROWS", or "". A negative flag or bad int
+// is a usage error: err is non-nil (exit code 1, main.go's
+// exitCodeFromError convention — see HandleErrorRespectJSON) and the
+// caller must propagate it immediately (`if err != nil { return err }`),
+// mirroring how gatherListInput's callers already handle its (T, error)
+// return. A non-integer env value emits a warning to stderr and is ignored
+// (returns cap == 0, err == nil).
 //
 // Precedence (designer §2.1):
 //
@@ -45,34 +70,19 @@ func addMaxRowsFlag(cmd *cobra.Command) {
 // --max-rows 0 explicitly disables the cap even when BEADS_MAX_ROWS=N is set.
 // This is intentional: ops shells with a global env can run a known-unbounded
 // query without unsetting the env first.
-func resolveMaxRows(cmd *cobra.Command) (int, string) {
+func resolveMaxRows(cmd *cobra.Command) (int, string, error) {
 	if cmd != nil && cmd.Flags().Changed(maxRowsFlagName) {
 		n, err := cmd.Flags().GetInt(maxRowsFlagName)
 		if err != nil {
-			fatalMaxRowsUsage("--max-rows: %v", err)
+			return 0, "", HandleErrorRespectJSON("--max-rows: %v", err)
 		}
 		if n < 0 {
-			fatalMaxRowsUsage("--max-rows must be non-negative; got %d", n)
+			return 0, "", HandleErrorRespectJSON("--max-rows must be non-negative; got %d", n)
 		}
-		return n, "--" + maxRowsFlagName
+		return n, "--" + maxRowsFlagName, nil
 	}
-	return resolveMaxRowsEnvOnly()
-}
-
-// fatalMaxRowsUsage reports a --max-rows usage error (bad int, negative
-// value) and exits with code 1. resolveMaxRows is called deep inside each
-// command's RunE, well before the point where an error could propagate back
-// up as a returned error (as HandleError does elsewhere in this package), so
-// it exits directly here instead — mirroring the removed FatalError helper's
-// jsonOutput-aware behavior.
-func fatalMaxRowsUsage(format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	if jsonOutput {
-		jsonStderrError(msg, "")
-	} else {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
-	}
-	os.Exit(1)
+	maxRows, source := resolveMaxRowsEnvOnly()
+	return maxRows, source, nil
 }
 
 // resolveMaxRowsEnvOnly reads BEADS_MAX_ROWS without consulting any flag.
@@ -102,20 +112,36 @@ func resolveMaxRowsEnvOnly() (int, string) {
 
 // handleMaxRowsError checks whether err is a *issueops.ErrTooManyRows from
 // the storage layer and, if so, emits the two-line stderr error message
-// (designer §2.3) and exits with code 2. Returns without action when err
-// is nil or any other type, letting the caller continue its existing error
-// path.
+// (designer §2.3) and returns an exit-coded error (code 2, main.go's
+// exitCodeFromError convention — see &exitError{Code: 2} elsewhere in this
+// package, e.g. list_input.go's skip-labels-conflict check). Returns nil
+// when err is nil or any other type, letting the caller continue its
+// existing error path (typically `return HandleError(...)`).
+//
+// Every caller must check the return value and propagate it immediately:
+//
+//	if capErr := handleMaxRowsError(err); capErr != nil {
+//	    return capErr
+//	}
+//	return HandleError("%v", err)
+//
+// This used to call os.Exit(2) directly, which — since it runs from deep
+// inside RunE, sometimes several calls below it — bypassed both the
+// calling command's own `defer func() { metrics.CloseEventAndAdd(evt) }()`
+// and main()'s post-ExecuteC metrics.CloseAndFlush(), stranding queued
+// metrics. Returning through RunE like every other command error lets both
+// run before process exit.
 //
 // The error is intentionally rendered without ANSI color and without
 // touching stdout: a half-rendered JSON array on stdout would cause `jq`
 // downstream to fail in a way unrelated to the cap, hiding the real cause.
-func handleMaxRowsError(err error) {
+func handleMaxRowsError(err error) error {
 	if err == nil {
-		return
+		return nil
 	}
 	var capErr *issueops.ErrTooManyRows
 	if !errors.As(err, &capErr) {
-		return
+		return nil
 	}
 	source := capErr.Source
 	if source == "" {
@@ -127,5 +153,5 @@ func handleMaxRowsError(err error) {
 		"       Refine the query (add filters, set --limit), or raise the cap with")
 	fmt.Fprintln(os.Stderr,
 		"       --max-rows N or BEADS_MAX_ROWS=N.")
-	os.Exit(2)
+	return &exitError{Code: 2}
 }

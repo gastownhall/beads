@@ -107,7 +107,10 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Fetch issues
-	maxRows, maxRowsSource := resolveMaxRows(cmd)
+	maxRows, maxRowsSource, err := resolveMaxRows(cmd)
+	if err != nil {
+		return err
+	}
 	filter := types.IssueFilter{
 		MaxRows:       maxRows,
 		MaxRowsSource: maxRowsSource,
@@ -118,12 +121,17 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	}
 
 	if usesProxiedServer() {
+		if filter.MaxRows > 0 {
+			return HandleErrorRespectJSON("--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode")
+		}
 		return runFindDuplicatesProxiedServer(rootCtx, filter, status, method, threshold, limit, model)
 	}
 
 	issues, err := store.SearchIssues(rootCtx, "", filter)
 	if err != nil {
-		handleMaxRowsError(err)
+		if capErr := handleMaxRowsError(err); capErr != nil {
+			return capErr
+		}
 		return HandleErrorRespectJSON("fetching issues: %v", err)
 	}
 	issues = filterClosedIfNoStatus(issues, status)

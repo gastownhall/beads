@@ -28,7 +28,9 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 		MaxRowsSource: maxRowsSource,
 	})
 	if err != nil {
-		handleMaxRowsError(err)
+		if capErr := handleMaxRowsError(err); capErr != nil {
+			return capErr
+		}
 		return HandleError("fetching issues: %v", err)
 	}
 

@@ -1018,7 +1018,11 @@ Examples:
   bd dep tree gt-0iqq                    # Show what blocks gt-0iqq
   bd dep tree gt-0iqq --direction=up     # Show what gt-0iqq blocks
   bd dep tree gt-0iqq --status=open      # Only show open issues
-  bd dep tree gt-0iqq --depth=3          # Limit to 3 levels deep`,
+  bd dep tree gt-0iqq --depth=3          # Limit to 3 levels deep
+
+--max-rows / BEADS_MAX_ROWS caveat: the tree walk has no query filter to
+thread the cap through, so the full tree is always built first and the
+node count is checked afterward (post-hoc), not during the walk.`,
 	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -1031,6 +1035,9 @@ Examples:
 		}()
 
 		if usesProxiedServer() {
+			if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
+				return err
+			}
 			return runDepTreeProxiedServer(cmd, rootCtx, args)
 		}
 
@@ -1095,12 +1102,18 @@ Examples:
 		// Apply defensive row cap (be-x42v) on the final tree-node count.
 		// Tree walks have no IssueFilter to thread through, so the cap is
 		// enforced at the CLI layer instead of in storage.
-		if maxRows, maxRowsSource := resolveMaxRows(cmd); maxRows > 0 && len(tree) > maxRows {
-			handleMaxRowsError(&issueops.ErrTooManyRows{
+		treeMaxRows, treeMaxRowsSource, err := resolveMaxRows(cmd)
+		if err != nil {
+			return err
+		}
+		if treeMaxRows > 0 && len(tree) > treeMaxRows {
+			if capErr := handleMaxRowsError(&issueops.ErrTooManyRows{
 				Found:  len(tree),
-				Cap:    maxRows,
-				Source: maxRowsSource,
-			})
+				Cap:    treeMaxRows,
+				Source: treeMaxRowsSource,
+			}); capErr != nil {
+				return capErr
+			}
 		}
 
 		// Handle format presets (json handled earlier, near flag read)

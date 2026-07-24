@@ -310,6 +310,15 @@ func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 		Pinned:         &pinnedFalse,
 		MetadataFields: filter.MetadataFields,
 		HasMetadataKey: filter.HasMetadataKey,
+		// be-x42v.4 follow-up (review SHOULD-FIX 8): without this,
+		// getReadyWispsInTx's unbounded (Limit<=0) branch called
+		// searchTableInTxT with MaxRows=0, so EffectiveSearchLimit emitted
+		// no SQL LIMIT at all — the entire wisps table matching the
+		// predicate was scanned and hydrated before GetReadyWorkInTx's
+		// post-merge EnforceMaxRowsCap ever ran. Propagating the cap here
+		// lets EffectiveSearchLimit bound that query to cap+1 up front.
+		MaxRows:       filter.MaxRows,
+		MaxRowsSource: filter.MaxRowsSource,
 	}
 	if filter.Status != "" {
 		s := filter.Status

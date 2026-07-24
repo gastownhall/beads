@@ -203,7 +203,15 @@ func ClaimReadyIssueInTx(
 	claimFilter.Status = types.StatusOpen
 	claimFilter.Unassigned = true
 	claimFilter.Assignee = nil
-	claimFilter.Limit = 0
+	// Claim only ever consumes the first ready issue below, so a rig-wide
+	// BEADS_MAX_ROWS/--max-rows cap (sized for bulk list/ready reads) must
+	// not fire here — that would hard-fail a single-row claim just because
+	// the ready pool is large. Bound the internal scan by the cap instead
+	// of enforcing it: reuse MaxRows as an unexported Limit, then clear the
+	// cap fields so GetReadyWorkInTx never returns ErrTooManyRows.
+	claimFilter.Limit = filter.MaxRows
+	claimFilter.MaxRows = 0
+	claimFilter.MaxRowsSource = ""
 
 	readyIssues, err := GetReadyWorkInTx(ctx, tx, claimFilter)
 	if err != nil {

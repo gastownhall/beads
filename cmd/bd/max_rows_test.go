@@ -101,6 +101,70 @@ func TestEmbeddedMaxRowsNonListPaths(t *testing.T) {
 		}
 	})
 
+	// `bd ready --json` and `bd list --ready --json` route through
+	// GetReadyWorkWithCountsInTx, a separate query path from the plain
+	// `bd ready` above (GetReadyWorkInTx). Mirrors
+	// TestEmbeddedMaxRowsList/Flag_OverCap's --json coverage for `bd list`.
+	t.Run("ReadyMaxRowsJSON_FlagOverCap_Exits2", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "mrrjf")
+		seedReadyIssues(t, bd, dir, 6)
+
+		out, code := bdRunRaw(t, bd, dir, nil, "ready", "--json", "--max-rows", "3")
+		if code != 2 {
+			t.Fatalf("expected exit 2 (cap exceeded), got %d\n%s", code, out)
+		}
+		if !strings.Contains(out, "too many rows") {
+			t.Errorf("stderr missing 'too many rows':\n%s", out)
+		}
+		if !strings.Contains(out, "--max-rows=3") {
+			t.Errorf("stderr missing source --max-rows=3:\n%s", out)
+		}
+		if idx := strings.Index(out, "Error: too many rows"); idx >= 0 {
+			if strings.Contains(out[:idx], "[") {
+				t.Errorf("stdout JSON output leaked before error message:\nfull=%s", out)
+			}
+		}
+	})
+
+	t.Run("ListReadyMaxRowsJSON_FlagOverCap_Exits2", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "mrrjl")
+		seedReadyIssues(t, bd, dir, 6)
+
+		out, code := bdRunRaw(t, bd, dir, nil, "list", "--ready", "--json", "--max-rows", "3")
+		if code != 2 {
+			t.Fatalf("expected exit 2 (cap exceeded), got %d\n%s", code, out)
+		}
+		if !strings.Contains(out, "too many rows") {
+			t.Errorf("stderr missing 'too many rows':\n%s", out)
+		}
+		if !strings.Contains(out, "--max-rows=3") {
+			t.Errorf("stderr missing source --max-rows=3:\n%s", out)
+		}
+	})
+
+	// be-x42v.4 follow-up (review SHOULD-FIX 8): confirms the cap still
+	// fires end-to-end for --include-ephemeral after propagating MaxRows
+	// into getReadyWispsInTx's wisp query (internal/storage/issueops/
+	// ready_work.go) — that change bounds the query itself but must not
+	// change whether the post-merge cap check in GetReadyWorkInTx trips.
+	t.Run("ReadyIncludeEphemeralMaxRows_FlagOverCap_Exits2", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "mrre")
+		for i := 0; i < 6; i++ {
+			bdCreate(t, bd, dir, fmt.Sprintf("Ephemeral ready %d", i), "--type", "task", "--ephemeral")
+		}
+
+		out, code := bdRunRaw(t, bd, dir, nil, "ready", "--include-ephemeral", "--max-rows", "3")
+		if code != 2 {
+			t.Fatalf("expected exit 2 (cap exceeded), got %d\n%s", code, out)
+		}
+		if !strings.Contains(out, "too many rows") {
+			t.Errorf("stderr missing 'too many rows':\n%s", out)
+		}
+		if !strings.Contains(out, "--max-rows=3") {
+			t.Errorf("stderr missing source --max-rows=3:\n%s", out)
+		}
+	})
+
 	// ----------- bd dep tree -----------
 
 	t.Run("DepTreeMaxRows_TreeNodes_Exits2", func(t *testing.T) {
@@ -155,6 +219,45 @@ func TestEmbeddedMaxRowsNonListPaths(t *testing.T) {
 		}
 		if !strings.Contains(out, "--max-rows=3") {
 			t.Errorf("stderr missing source --max-rows=3:\n%s", out)
+		}
+	})
+
+	// be-x42v.4 follow-up (review SHOULD-FIX 7): `bd graph <issue>` without
+	// --all never resolved the cap at all before the fix — loadGraphSubgraph
+	// is a BFS over per-ID GetDependents/GetDependencies lookups with no
+	// IssueFilter to thread MaxRows through, so this checks the final
+	// connected-component node count post-hoc, mirroring dep tree.
+	t.Run("GraphSingleIssueMaxRows_NodeCount_Exits2", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "mrgs")
+		root := bdCreate(t, bd, dir, "Graph root", "--type", "task")
+		for i := 0; i < 5; i++ {
+			child := bdCreate(t, bd, dir, fmt.Sprintf("Graph dep %d", i), "--type", "task")
+			bdDepAdd(t, bd, dir, root.ID, child.ID)
+		}
+
+		// Connected component of size 6 (root + 5), cap of 2 → exit 2.
+		out, code := bdRunRaw(t, bd, dir, nil, "graph", root.ID, "--max-rows", "2")
+		if code != 2 {
+			t.Fatalf("expected exit 2 (subgraph size > cap), got %d\n%s", code, out)
+		}
+		if !strings.Contains(out, "too many rows") {
+			t.Errorf("stderr missing 'too many rows':\n%s", out)
+		}
+		if !strings.Contains(out, "--max-rows=2") {
+			t.Errorf("stderr missing source --max-rows=2:\n%s", out)
+		}
+	})
+
+	t.Run("GraphSingleIssueMaxRows_UnderCap_NoError", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "mrgu")
+		root := bdCreate(t, bd, dir, "Graph root under cap", "--type", "task")
+
+		out, code := bdRunRaw(t, bd, dir, nil, "graph", root.ID, "--max-rows", "5")
+		if code != 0 {
+			t.Fatalf("expected exit 0 (single-node subgraph under cap), got %d\n%s", code, out)
+		}
+		if strings.Contains(out, "too many rows") {
+			t.Errorf("under-cap single-issue graph should not emit cap error:\n%s", out)
 		}
 	})
 
@@ -416,6 +519,59 @@ func TestEmbeddedMaxRowsList(t *testing.T) {
 		}
 		if got := countListIDs(out, "mrl"); got != 5 {
 			t.Errorf("expected exactly 5 issue IDs in output, got %d:\n%s", got, out)
+		}
+	})
+
+	// be-x42v.4 follow-up (review MUST-FIX 4): --limit N --max-rows N with
+	// more than N matches must truncate to N and exit 0 (the standard
+	// >N-matches truncation semantics), not error. Before the fix,
+	// withFetchOneExtra unconditionally bumped the storage Limit to N+1
+	// before EffectiveSearchLimit saw it, so N==maxRows crossed the
+	// `limit > maxRows` branch and EnforceMaxRowsCap fired on the N+1
+	// probe row alone — even though the delivered set is always trimmed
+	// back to exactly N.
+	t.Run("LimitEqualsCap_TruncatesNotErrors", func(t *testing.T) {
+		out, code := bdRunRaw(t, bd, dir, nil, "list",
+			"--limit", "5", "--max-rows", "5")
+		if code != 0 {
+			t.Fatalf("expected exit 0 (limit==cap truncates, does not error), got %d\n%s", code, out)
+		}
+		if strings.Contains(out, "too many rows") {
+			t.Errorf("limit==cap should not emit cap error:\n%s", out)
+		}
+		if got := countListIDs(out, "mrl"); got != 5 {
+			t.Errorf("expected exactly 5 issue IDs in output, got %d:\n%s", got, out)
+		}
+	})
+
+	t.Run("LimitEqualsCap_JSON_TruncatesNotErrors", func(t *testing.T) {
+		out, code := bdRunRaw(t, bd, dir, nil, "list", "--json",
+			"--limit", "5", "--max-rows", "5")
+		if code != 0 {
+			t.Fatalf("expected exit 0 (limit==cap truncates under --json), got %d\n%s", code, out)
+		}
+		if strings.Contains(out, "too many rows") {
+			t.Errorf("limit==cap under --json should not emit cap error:\n%s", out)
+		}
+	})
+
+	// be-x42v.4 follow-up (review MUST-FIX 5): the initial query under
+	// `bd list --watch` must surface a cap violation with exit 2, same as
+	// non-watch `bd list`. Before the fix, watchIssues logged the error to
+	// stderr itself and returned void, so the process always exited 0 —
+	// the failure never reached RunE/handleMaxRowsError. This subprocess
+	// exercises only the initial-query failure path (returns before
+	// entering the polling loop), so it terminates without needing Ctrl+C.
+	t.Run("Watch_FlagOverCap_Exits2", func(t *testing.T) {
+		out, code := bdRunRaw(t, bd, dir, nil, "list", "--watch", "--max-rows", "5")
+		if code != 2 {
+			t.Fatalf("expected exit 2 (cap exceeded under --watch), got %d\n%s", code, out)
+		}
+		if !strings.Contains(out, "too many rows") {
+			t.Errorf("expected 'too many rows' in stderr:\n%s", out)
+		}
+		if !strings.Contains(out, "--max-rows=5") {
+			t.Errorf("expected source `--max-rows=5` in stderr:\n%s", out)
 		}
 	})
 }

@@ -47,6 +47,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}()
 
 		if usesProxiedServer() {
+			if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
+				return err
+			}
 			return runReadyProxiedServer(cmd, rootCtx)
 		}
 
@@ -132,7 +135,10 @@ This is useful for agents executing molecules to see which steps can run next.`,
 				}
 			}
 		}
-		maxRows, maxRowsSource := resolveMaxRows(cmd)
+		maxRows, maxRowsSource, err := resolveMaxRows(cmd)
+		if err != nil {
+			return err
+		}
 		filter := types.WorkFilter{
 			Status:           "open", // Only show open issues, not in_progress (matches bd list --ready)
 			Type:             issueType,
@@ -208,7 +214,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if claimReady {
 			claimed, err := activeStore.ClaimReadyIssue(ctx, filter, actor)
 			if err != nil {
-				handleMaxRowsError(err)
+				if capErr := handleMaxRowsError(err); capErr != nil {
+					return capErr
+				}
 				return HandleErrorRespectJSON("%v", err)
 			}
 			if claimed == nil {
@@ -235,6 +243,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if jsonOutput {
 			results, err := activeStore.GetReadyWorkWithCounts(ctx, filter)
 			if err != nil {
+				if capErr := handleMaxRowsError(err); capErr != nil {
+					return capErr
+				}
 				return HandleErrorRespectJSON("%v", err)
 			}
 			totalReady := len(results)
@@ -276,7 +287,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		issues, err := activeStore.GetReadyWork(ctx, filter)
 		if err != nil {
-			handleMaxRowsError(err)
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleErrorRespectJSON("%v", err)
 		}
 

@@ -31,10 +31,10 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 		return nil, fmt.Errorf("get ready work with counts: wisp probe: %w", probeErr)
 	}
 	if empty {
-		return out, nil
+		return finishReadyWorkWithCounts(out, filter)
 	}
 	if !wispDepsExist {
-		return out, nil
+		return finishReadyWorkWithCounts(out, filter)
 	}
 
 	wispPreds, err := buildReadyWorkPredicates(ctx, tx, filter, WispsFilterTables)
@@ -44,12 +44,12 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 	wisps, err := runReadyCountsInTx(ctx, tx, WispsFilterTables, filter.Limit, wispPreds, true, false)
 	if err != nil {
 		if isTableNotExistError(err) {
-			return out, nil
+			return finishReadyWorkWithCounts(out, filter)
 		}
 		return nil, err
 	}
 	if len(wisps) == 0 {
-		return out, nil
+		return finishReadyWorkWithCounts(out, filter)
 	}
 
 	// Prefer the canonical wisp record when an ID exists in both tables (be-iabdi).
@@ -71,10 +71,26 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 	}
 	kept = append(kept, wisps...)
 	sortIssuesWithCountsByPolicy(kept, filter.SortPolicy)
-	if filter.Limit > 0 && len(kept) > filter.Limit {
-		kept = kept[:filter.Limit]
+	return finishReadyWorkWithCounts(kept, filter)
+}
+
+// finishReadyWorkWithCounts is the terminal hook every
+// GetReadyWorkWithCountsInTx exit path routes through: it enforces the
+// defensive MaxRows cap (be-x42v) on the row count actually assembled —
+// mirroring finishSearchIssuesWithCounts in search_counts.go — and only
+// then applies the caller-facing Limit trim. The cap must be checked before
+// the Limit trim: buildReadyWorkPredicates already sizes each table's SQL
+// LIMIT via EffectiveSearchLimit (cap+1 when Limit is absent or looser than
+// the cap), specifically so overage is still visible here before Limit
+// silently truncates it away.
+func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
+	if err := EnforceMaxRowsCap(len(items), filter.MaxRows, filter.MaxRowsSource); err != nil {
+		return nil, err
 	}
-	return kept, nil
+	if filter.Limit > 0 && len(items) > filter.Limit {
+		return items[:filter.Limit], nil
+	}
+	return items, nil
 }
 
 // runReadyCountsInTx renders the ready-work counts mega-query for one table

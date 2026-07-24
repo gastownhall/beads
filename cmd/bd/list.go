@@ -39,8 +39,21 @@ func withStorage(ctx context.Context, store storage.DoltStorage, dbPath string, 
 	return fmt.Errorf("no storage available")
 }
 
+// withFetchOneExtra bumps Limit by one so the caller can detect "more
+// results than the limit" (GH#3212) by comparing len(results) against the
+// original limit.
+//
+// When a MaxRows cap (be-x42v) is active and no looser than Limit, this
+// bump is skipped: EffectiveSearchLimit already over-fetches to cap+1 in
+// that case for the real overage check, and bumping Limit past MaxRows too
+// would make the delivered set — which can never exceed min(Limit, MaxRows)
+// == Limit once every caller trims back to the original limit — look like
+// it exceeded the cap merely because this purely cosmetic truncation probe
+// asked for one more row than was ever going to be returned. Concretely:
+// `--limit N --max-rows N` must truncate (existing >N-matches semantics),
+// not error, since N rows is never a cap violation of a cap of N.
 func withFetchOneExtra(filter types.IssueFilter) types.IssueFilter {
-	if filter.Limit > 0 {
+	if filter.Limit > 0 && !(filter.MaxRows > 0 && filter.Limit >= filter.MaxRows) {
 		filter.Limit++
 	}
 	return filter
@@ -202,12 +215,18 @@ func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore
 	displayPrettyListWithDeps(issues, true, allDeps)
 }
 
-func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool, effectiveLimit int) {
+// watchIssues returns an error only for the initial query — a failure there
+// means bd list --watch never displayed anything, so (unlike a mid-poll
+// refresh failure, which just logs and keeps the last good snapshot on
+// screen) it must propagate to the caller. In particular this lets
+// runListCore route a MaxRows cap violation through handleMaxRowsError for
+// exit-code-2 semantics instead of watchIssues swallowing it and exiting 0
+// (be-x42v.4 follow-up, review MUST-FIX 5).
+func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool, effectiveLimit int) error {
 	// Initial display
 	issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error querying issues: %v\n", err)
-		return
+		return err
 	}
 	truncated := effectiveLimit > 0 && len(issues) > effectiveLimit
 	if truncated {
@@ -232,7 +251,7 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 		select {
 		case <-sigChan:
 			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
-			return
+			return nil
 		case <-ticker.C:
 			issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
 			if err != nil {
@@ -485,6 +504,9 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if usesProxiedServer() {
+		if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
+			return err
+		}
 		if err := runListProxiedServer(cmd, rootCtx, in); err != nil {
 			return HandleError("%v", err)
 		}
@@ -503,7 +525,10 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	maxRows, maxRowsSource := resolveMaxRows(cmd)
+	maxRows, maxRowsSource, err := resolveMaxRows(cmd)
+	if err != nil {
+		return err
+	}
 	filter.MaxRows = maxRows
 	filter.MaxRowsSource = maxRowsSource
 
@@ -520,7 +545,12 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if in.watchMode {
-		watchIssues(ctx, activeStore, filter, in.readyFlag, in.parentID, in.sortBy, in.reverse, in.effectiveLimit)
+		if err := watchIssues(ctx, activeStore, filter, in.readyFlag, in.parentID, in.sortBy, in.reverse, in.effectiveLimit); err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
+			return HandleError("querying issues: %v", err)
+		}
 		return nil
 	}
 
@@ -533,7 +563,9 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			iwc, err = activeStore.SearchIssuesWithCounts(ctx, "", withFetchOneExtra(filter))
 		}
 		if err != nil {
-			handleMaxRowsError(err)
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleError("%v", err)
 		}
 		sortIssuesWithCounts(iwc, in.sortBy, in.reverse)
@@ -564,14 +596,18 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		var err error
 		issues, err = activeStore.GetReadyWork(ctx, wf)
 		if err != nil {
-			handleMaxRowsError(err)
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleError("%v", err)
 		}
 	} else {
 		var err error
 		issues, err = activeStore.SearchIssues(ctx, "", withFetchOneExtra(filter))
 		if err != nil {
-			handleMaxRowsError(err)
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleError("%v", err)
 		}
 	}
