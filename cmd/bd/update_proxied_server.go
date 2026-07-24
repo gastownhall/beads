@@ -170,6 +170,12 @@ func applyUpdateProxiedAttempt(ctx context.Context, id string, in *updateInput) 
 			fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
 			return nil, fmt.Sprintf("claiming issue: %v", err), false, nil
 		}
+		if errors.Is(err, storage.ErrAssigneeMismatch) || errors.Is(err, storage.ErrStatusMismatch) {
+			// bd-wsqvw guard verdict: the precondition no longer holds, nothing
+			// was written. Loud and non-zero, never collapsed to success.
+			fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+			return nil, fmt.Sprintf("precondition failed: %v", err), false, nil
+		}
 		fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
 		return nil, fmt.Sprintf("updating: %v", err), false, nil
 	}
@@ -274,11 +280,13 @@ func buildUpdateSpecForIssue(current *types.Issue, in *updateInput) domain.Updat
 	}
 
 	return domain.UpdateSpec{
-		Fields:       fields,
-		Claim:        in.claim,
-		AddLabels:    in.addLabels,
-		RemoveLabels: in.removeLabels,
-		SetLabels:    in.setLabels,
-		Reparent:     in.reparent,
+		Fields:           fields,
+		Claim:            in.claim,
+		AddLabels:        in.addLabels,
+		RemoveLabels:     in.removeLabels,
+		SetLabels:        in.setLabels,
+		Reparent:         in.reparent,
+		ExpectedAssignee: in.ifAssignee,
+		ExpectedStatus:   in.ifStatus,
 	}
 }

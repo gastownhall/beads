@@ -220,6 +220,18 @@ type UpdateSpec struct {
 	RemoveLabels []string
 	SetLabels    *[]string
 	Reparent     *string
+
+	// ExpectedAssignee and ExpectedStatus are the bd-wsqvw compare-and-set
+	// guards (`bd update --if-assignee/--if-status`): when non-nil, the whole
+	// update applies only if the issue's current assignee/status equals the
+	// expected value, else ApplyUpdate refuses with
+	// storage.ErrAssigneeMismatch/ErrStatusMismatch and nothing is written. A
+	// non-nil pointer to "" means "expected unassigned". The guard read shares
+	// the unit of work's transaction; a writer that commits mid-flight
+	// collides on the row_lock rewrite at commit time and the caller's
+	// whole-attempt retry re-checks the guards on the redo.
+	ExpectedAssignee *string
+	ExpectedStatus   *string
 }
 
 type IssueUseCase interface {
@@ -465,6 +477,35 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 	useWisp, err := u.isWispID(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("ApplyUpdate %s: %w", id, err)
+	}
+
+	// bd-wsqvw field guards: refuse the whole spec atomically on a stale
+	// assignee/status. The read shares this unit of work's transaction, and
+	// every field update rewrites row_lock, so a writer that commits during
+	// the attempt collides at commit time and the caller's whole-attempt
+	// retry re-checks here on the redo — same CAS invariant as the store-level
+	// UpdateIssueChecked path.
+	if spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil {
+		var current *types.Issue
+		if useWisp {
+			current, err = u.GetWisp(ctx, id)
+		} else {
+			current, err = u.GetIssue(ctx, id)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("ApplyUpdate: read %s for guards: %w", id, err)
+		}
+		if current == nil {
+			return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+		}
+		if spec.ExpectedAssignee != nil && current.Assignee != *spec.ExpectedAssignee {
+			return nil, fmt.Errorf("%w: %s is held by %q, expected %q",
+				storage.ErrAssigneeMismatch, id, current.Assignee, *spec.ExpectedAssignee)
+		}
+		if spec.ExpectedStatus != nil && string(current.Status) != *spec.ExpectedStatus {
+			return nil, fmt.Errorf("%w: %s has status %q, expected %q",
+				storage.ErrStatusMismatch, id, current.Status, *spec.ExpectedStatus)
+		}
 	}
 
 	if spec.Claim {

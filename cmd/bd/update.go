@@ -320,6 +320,15 @@ stderr, and the command exits nonzero.`,
 			return nil
 		}
 
+		// Conditional-update guards (bd-wsqvw): validated against the same
+		// status set as --status, mutually exclusive with --claim (which is
+		// its own compare-and-set), and only meaningful with a field update
+		// to ride on.
+		ifAssignee, ifStatus, err := updateGuardsFromFlags(cmd, claimFlag, updates)
+		if err != nil {
+			return err
+		}
+
 		ctx := rootCtx
 
 		updatedIssues := []*types.Issue{}
@@ -419,9 +428,20 @@ stderr, and the command exits nonzero.`,
 			notesOverwritten := replacesExistingNotes(issue.Notes, updates)
 
 			if len(regularUpdates) > 0 {
-				if err := issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor); err != nil {
-					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
-					recordFailure(id, fmt.Sprintf("updating issue: %v", err))
+				// With guards present, route through the checked (CAS) path: a
+				// stale assignee/status refuses atomically with a typed
+				// mismatch error and MUST surface as a non-zero exit — never
+				// collapse it to success (finding #10).
+				var updateErr error
+				if ifAssignee != nil || ifStatus != nil {
+					updateErr = issueStore.UpdateIssueChecked(ctx, result.ResolvedID, regularUpdates, actor,
+						storage.UpdateIssueOptions{ExpectedAssignee: ifAssignee, ExpectedStatus: ifStatus})
+				} else {
+					updateErr = issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor)
+				}
+				if updateErr != nil {
+					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
+					recordFailure(id, fmt.Sprintf("updating issue: %v", updateErr))
 					closeIfUnmutated(result)
 					continue
 				}
@@ -667,6 +687,54 @@ func toJSONValue(s string) json.RawMessage {
 	return storage.MetadataEditValue(s)
 }
 
+// updateGuardsFromFlags reads the bd-wsqvw conditional-update guards
+// (--if-assignee/--if-status) with presence detected via Changed(), so
+// `--if-assignee ""` is a real guard meaning "expected unassigned" rather than
+// "no guard" (the unclaim.go idiom). It rejects combining guards with --claim
+// (--claim is its own compare-and-set with claim-pool semantics; the guards
+// would silently duplicate or contradict it) and guards with no regular field
+// update to ride on (the CAS applies to the issues-row UPDATE; label and
+// parent edits run outside it and would not be guarded). An --if-status value
+// is validated against the same built-in + custom status set as --status, so a
+// typo fails fast instead of mismatching forever.
+func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[string]interface{}) (ifAssignee, ifStatus *string, err error) {
+	if cmd.Flags().Changed("if-assignee") {
+		v, _ := cmd.Flags().GetString("if-assignee")
+		ifAssignee = &v
+	}
+	if cmd.Flags().Changed("if-status") {
+		v, _ := cmd.Flags().GetString("if-status")
+		var customStatuses []string
+		if store != nil {
+			if cs, csErr := store.GetCustomStatuses(rootCtx); csErr == nil {
+				customStatuses = cs
+			}
+		}
+		if !types.Status(v).IsValidWithCustom(customStatuses) {
+			return nil, nil, HandleErrorRespectJSON("invalid --if-status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", v)
+		}
+		ifStatus = &v
+	}
+	if ifAssignee == nil && ifStatus == nil {
+		return nil, nil, nil
+	}
+	if claimFlag {
+		return nil, nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)")
+	}
+	hasFieldUpdate := false
+	for k := range updates {
+		switch k {
+		case "add_labels", "remove_labels", "set_labels", "parent":
+		default:
+			hasFieldUpdate = true
+		}
+	}
+	if !hasFieldUpdate {
+		return nil, nil, HandleErrorRespectJSON("--if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
+	}
+	return ifAssignee, ifStatus, nil
+}
+
 func init() {
 	updateCmd.Flags().StringP("status", "s", "", "New status")
 	registerPriorityFlag(updateCmd, "")
@@ -684,6 +752,9 @@ func init() {
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
 	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)")
+	// Conditional (compare-and-set) update guards (bd-wsqvw)
+	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits non-zero. Requires a field update; cannot combine with --claim")
+	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits non-zero. Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)")
 	// Time-based scheduling flags (GH#820)
 	// Examples:

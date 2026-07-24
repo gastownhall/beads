@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -64,6 +65,47 @@ func unclaimed() claimPostcondition {
 		},
 		desc: fmt.Sprintf("assignee=%q status=%q", "", types.StatusOpen),
 	}
+}
+
+// guardedUpdatePostcondition derives the postcondition for a guarded update
+// (bd-wsqvw: UpdateIssueOptions.ExpectedAssignee/ExpectedStatus) that writes
+// the coordination fields. ok is false — no verification — when the update
+// carries no guard, or when it guards but writes neither assignee nor status
+// (a guarded edit of ordinary fields is not claim-family: a lost notes edit is
+// an annoyance, not a phantom claim). The postcondition checks only the
+// coordination fields the update actually sets, since the others may be
+// legitimately touched by concurrent writers.
+func guardedUpdatePostcondition(opts storage.UpdateIssueOptions, updates map[string]interface{}) (claimPostcondition, bool) {
+	if opts.ExpectedAssignee == nil && opts.ExpectedStatus == nil {
+		return claimPostcondition{}, false
+	}
+	newAssignee, setsAssignee := updates["assignee"].(string)
+	newStatus, setsStatus := updates["status"].(string)
+	if !setsAssignee && !setsStatus {
+		return claimPostcondition{}, false
+	}
+	var desc string
+	switch {
+	case setsAssignee && setsStatus:
+		desc = fmt.Sprintf("assignee=%q status=%q", newAssignee, newStatus)
+	case setsAssignee:
+		desc = fmt.Sprintf("assignee=%q", newAssignee)
+	default:
+		desc = fmt.Sprintf("status=%q", newStatus)
+	}
+	return claimPostcondition{
+		op: "guarded-update",
+		want: func(assignee string, status types.Status) bool {
+			if setsAssignee && assignee != newAssignee {
+				return false
+			}
+			if setsStatus && status != types.Status(newStatus) {
+				return false
+			}
+			return true
+		},
+		desc: desc,
+	}, true
 }
 
 // readClaimState re-reads an issue's assignee and status on a fresh
