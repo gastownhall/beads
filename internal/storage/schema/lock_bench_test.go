@@ -15,23 +15,24 @@ import (
 )
 
 // startBenchDoltServer launches a throwaway dolt sql-server, creates a fresh
-// database, and migrates it to current so MigrateUpWithLock benchmarks measure
-// the steady-state no-work path every bd command pays at open.
-func startBenchDoltServer(b *testing.B) *sql.DB {
-	b.Helper()
+// database, and migrates it to current so MigrateUpWithLock benchmarks (and
+// the real-server lock tests) exercise the steady-state no-work path every bd
+// command pays at open.
+func startBenchDoltServer(tb testing.TB) *sql.DB {
+	tb.Helper()
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
-		b.Skip("dolt binary not in PATH")
+		tb.Skip("dolt binary not in PATH")
 	}
 
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		b.Fatalf("pick free port: %v", err)
+		tb.Fatalf("pick free port: %v", err)
 	}
 	port := lis.Addr().(*net.TCPAddr).Port
 	_ = lis.Close()
 
-	home := b.TempDir()
+	home := tb.TempDir()
 	for _, args := range [][]string{
 		{"config", "--global", "--add", "user.name", "bench"},
 		{"config", "--global", "--add", "user.email", "bench@example.com"},
@@ -39,50 +40,51 @@ func startBenchDoltServer(b *testing.B) *sql.DB {
 		cmd := exec.Command(doltBin, args...)
 		cmd.Env = append(os.Environ(), "HOME="+home)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			b.Fatalf("dolt %v: %v: %s", args, err, out)
+			tb.Fatalf("dolt %v: %v: %s", args, err, out)
 		}
 	}
 
-	dataDir := b.TempDir()
+	dataDir := tb.TempDir()
 	server := exec.Command(doltBin, "sql-server", "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--data-dir", dataDir)
 	server.Env = append(os.Environ(), "HOME="+home)
 	if err := server.Start(); err != nil {
-		b.Fatalf("start dolt sql-server: %v", err)
+		tb.Fatalf("start dolt sql-server: %v", err)
 	}
-	b.Cleanup(func() {
+	tb.Cleanup(func() {
 		_ = server.Process.Kill()
 		_, _ = server.Process.Wait()
 	})
 
 	base := fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port)
 	const params = "?multiStatements=true&parseTime=true"
-	db, err := sql.Open("mysql", base+params)
+	setupDB, err := sql.Open("mysql", base+params)
 	if err != nil {
-		b.Fatalf("open dolt connection: %v", err)
+		tb.Fatalf("open dolt connection: %v", err)
 	}
+	tb.Cleanup(func() { _ = setupDB.Close() })
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		if err := db.Ping(); err == nil {
+		if err := setupDB.Ping(); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
-			b.Fatalf("dolt sql-server did not become ready on port %d", port)
+			tb.Fatalf("dolt sql-server did not become ready on port %d", port)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	if _, err := db.Exec("CREATE DATABASE benchdb"); err != nil {
-		b.Fatalf("create bench database: %v", err)
+	if _, err := setupDB.Exec("CREATE DATABASE benchdb"); err != nil {
+		tb.Fatalf("create bench database: %v", err)
 	}
-	_ = db.Close()
+	_ = setupDB.Close()
 
-	db, err = sql.Open("mysql", base+"benchdb"+params)
+	db, err := sql.Open("mysql", base+"benchdb"+params)
 	if err != nil {
-		b.Fatalf("open bench database: %v", err)
+		tb.Fatalf("open bench database: %v", err)
 	}
-	b.Cleanup(func() { _ = db.Close() })
+	tb.Cleanup(func() { _ = db.Close() })
 
 	if _, err := MigrateUp(context.Background(), db); err != nil {
-		b.Fatalf("migrate bench database to current: %v", err)
+		tb.Fatalf("migrate bench database to current: %v", err)
 	}
 	return db
 }

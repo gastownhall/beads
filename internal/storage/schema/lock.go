@@ -54,7 +54,9 @@ func MigrationLockName(databaseName string) string {
 // relies on the embedded driver's file/concurrency controls instead of
 // sql-server session locks.
 //
-// A database that is already fully migrated and seeded skips the lock and the
+// A database that is already fully migrated and seeded — with a complete pass
+// recorded by the pass-completion sentinel (migrationPassCompleteKey), so no
+// other process's pass tail can still be in flight — skips the lock and the
 // migration pass entirely: the currency probe is strictly read-only, so any
 // number of concurrent processes can take the fast path without coordination.
 // Without it, every store open in a fleet of bd processes serializes on the

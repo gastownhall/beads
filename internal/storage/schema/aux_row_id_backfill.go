@@ -64,11 +64,10 @@ func auxRekeyResumePending(ctx context.Context, db DBConn) (bool, error) {
 func setAuxRekeyInProgress(ctx context.Context, db DBConn) error {
 	// local_metadata is dolt-ignored, hence clone-local: a fresh clone whose
 	// main cursor is already past 0029 does not have the table (the migration
-	// will not re-run) until EnsureIgnoredTables recreates it. Create it here
-	// with 0029's DDL — its dolt_ignore pattern is committed history, so the
-	// sentinel stays clone-local.
-	if _, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS local_metadata (`key` VARCHAR(255) PRIMARY KEY, value TEXT NOT NULL DEFAULT '')"); err != nil {
-		return fmt.Errorf("ensuring local_metadata: %w", err)
+	// will not re-run) until EnsureIgnoredTables recreates it. Create it on
+	// demand so the sentinel stays clone-local.
+	if err := ensureLocalMetadataTable(ctx, db); err != nil {
+		return err
 	}
 	_, err := db.ExecContext(ctx,
 		"REPLACE INTO local_metadata (`key`, value) VALUES (?, '1')",

@@ -3,11 +3,13 @@ package schema
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 func TestMigrationLockNameUsesRawNameWhenBounded(t *testing.T) {
@@ -74,8 +76,9 @@ func TestMigrateUpWithLockUsesDatabaseScopedLockOnly(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Pre-lock fast-path probe: seed present, but the main cursor is behind,
-	// so migration work is needed and the locked pass runs.
+	// Pre-lock fast-path probe: pass sentinel current and seed present, but the
+	// main cursor is behind, so migration work is needed and the locked pass runs.
+	expectPassSentinelCurrent(mock)
 	expectSeedPatternsPresent(mock, doltIgnorePatterns)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion()-1)
 
@@ -120,13 +123,9 @@ func TestMigrateUpWithLockSkipsLockWhenCurrent(t *testing.T) {
 	}
 	defer conn.Close()
 
+	expectPassSentinelCurrent(mock)
 	expectSeedPatternsPresent(mock, doltIgnorePatterns)
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
-	expectContentHashColumnExists(mock)
-	expectContentHashColumnExists(mock)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectNoMigrationWork(mock)
 
 	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
 	if err != nil {
@@ -157,7 +156,9 @@ func TestMigrateUpWithLockReseedsUnderLockWhenSeedMissing(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Fast-path probe: one canonical pattern missing -> not current.
+	// Fast-path probe: sentinel current, but one canonical pattern missing ->
+	// not current.
+	expectPassSentinelCurrent(mock)
 	expectSeedPatternsPresent(mock, doltIgnorePatterns[1:])
 
 	lockName := MigrationLockName("testdb")
@@ -165,18 +166,15 @@ func TestMigrateUpWithLockReseedsUnderLockWhenSeedMissing(t *testing.T) {
 		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 	// Under the lock, MigrateUp reseeds (rows change), finds no migration
-	// work, and commits the seed scoped and labeled.
+	// work, and commits the seed scoped and labeled. The sentinel is already
+	// current, so no restamp follows.
 	expectIgnorePatternSeed(mock)
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
-	expectContentHashColumnExists(mock)
-	expectContentHashColumnExists(mock)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectNoMigrationWork(mock)
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	expectPassSentinelCurrent(mock)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
 		WithArgs(lockName).
 		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
@@ -210,6 +208,7 @@ func TestMigrateUpWithLockFallsThroughOnProbeError(t *testing.T) {
 	}
 	defer conn.Close()
 
+	expectPassSentinelCurrent(mock)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT pattern FROM dolt_ignore")).
 		WillReturnError(errors.New("transient catalog race"))
 
@@ -218,12 +217,8 @@ func TestMigrateUpWithLockFallsThroughOnProbeError(t *testing.T) {
 		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
 	expectIgnorePatternSeedNoop(mock)
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
-	expectContentHashColumnExists(mock)
-	expectContentHashColumnExists(mock)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectNoMigrationWork(mock)
+	expectPassSentinelCurrent(mock)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
 		WithArgs(lockName).
 		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
@@ -257,18 +252,14 @@ func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
 	expectIgnorePatternSeed(mock)
 	// migrationWorkNeeded: both cursors at latest, both content_hash columns
 	// present, no custom backfill pending -> no work, MigrateUp short-circuits.
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
-	expectContentHashColumnExists(mock)
-	expectContentHashColumnExists(mock)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectNoMigrationWork(mock)
 	// The seed inserted rows and no migration pass follows to commit them, so
 	// MigrateUp must commit the heal itself, scoped and labeled.
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	expectPassSentinelCurrent(mock)
 
 	applied, err := MigrateUp(context.Background(), db)
 	if err != nil {
@@ -295,12 +286,8 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 
 	expectIgnorePatternSeedNoop(mock)
 	// migrationWorkNeeded: no work, MigrateUp short-circuits.
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
-	expectContentHashColumnExists(mock)
-	expectContentHashColumnExists(mock)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
-	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	expectNoMigrationWork(mock)
+	expectPassSentinelCurrent(mock)
 
 	applied, err := MigrateUp(context.Background(), db)
 	if err != nil {
@@ -312,6 +299,136 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations (no-op seed must not trigger a scoped commit): %v", err)
 	}
+}
+
+// TestMigrateUpWithLockLocksWhenPassSentinelMissing pins the review finding on
+// the fast path's interleaving hazard: probe inputs alone (seeds present, both
+// cursors at latest, hash columns, backfill done) are all satisfied MID-PASS by
+// another process's per-step commits — before its dependency rekey and final
+// staging commit have run. The database state a prober observes at that moment
+// is exactly "everything current, pass-completion sentinel absent" (the running
+// pass cleared it at pass start). A prober seeing that state must NOT take the
+// lock-free fast path: it must queue on GET_LOCK like pre-fast-path code, and
+// the locked pass restamps the sentinel once it proves the database current.
+func TestMigrateUpWithLockLocksWhenPassSentinelMissing(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	// Fast-path probe: sentinel row absent -> not current, no further probe
+	// reads, straight to the locked pass.
+	expectPassSentinel(mock, sqlmock.NewRows([]string{"value"}))
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	// Under the lock: reseed no-ops, no migration work — and the sentinel is
+	// (re)stamped so subsequent opens regain the fast path.
+	expectIgnorePatternSeedNoop(mock)
+	expectNoMigrationWork(mock)
+	expectPassSentinel(mock, sqlmock.NewRows([]string{"value"}))
+	expectPassSentinelStamp(mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 0", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (missing pass-completion sentinel must send the open through the lock and restamp): %v", err)
+	}
+}
+
+// TestMigrateUpWithLockLocksWhenPassSentinelStale: a sentinel stamped by an
+// older binary (lower main version) proves a complete pass finished — but not
+// through THIS binary's migrations. The probe must refuse the fast path.
+func TestMigrateUpWithLockLocksWhenPassSentinelStale(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	stale := fmt.Sprintf("%d/%d", LatestVersion()-1, LatestIgnoredVersion())
+	expectPassSentinel(mock, sqlmock.NewRows([]string{"value"}).AddRow(stale))
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectOnePendingMigration(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 1", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (stale pass-completion sentinel must send the open through the lock): %v", err)
+	}
+}
+
+// expectPassSentinel mocks the read of the pass-completion sentinel row.
+func expectPassSentinel(mock sqlmock.Sqlmock, rows *sqlmock.Rows) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT value FROM local_metadata WHERE `key` = ?")).
+		WithArgs(migrationPassCompleteKey).
+		WillReturnRows(rows)
+}
+
+// expectPassSentinelCurrent mocks the sentinel read returning this binary's
+// own latest versions — a complete pass has finished at (or past) them.
+func expectPassSentinelCurrent(mock sqlmock.Sqlmock) {
+	value := fmt.Sprintf("%d/%d", LatestVersion(), LatestIgnoredVersion())
+	expectPassSentinel(mock, sqlmock.NewRows([]string{"value"}).AddRow(value))
+}
+
+// expectPassSentinelStamp mocks the ensure-table + REPLACE pair that records
+// pass completion.
+func expectPassSentinelStamp(mock sqlmock.Sqlmock) {
+	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS local_metadata`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("REPLACE INTO local_metadata (`key`, value) VALUES (?, ?)")).
+		WithArgs(migrationPassCompleteKey, fmt.Sprintf("%d/%d", LatestVersion(), LatestIgnoredVersion())).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+}
+
+// expectNoMigrationWork mocks migrationWorkNeeded reporting a fully current
+// database: both cursors at latest, both content_hash columns present, custom
+// backfill done.
+func expectNoMigrationWork(mock sqlmock.Sqlmock) {
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectContentHashColumnExists(mock)
+	expectContentHashColumnExists(mock)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
 }
 
 // expectSeedPatternsPresent mocks the fast-path read-only seed probe
@@ -354,6 +471,13 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 
 	expectIgnorePatternSeed(mock)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
+	// Work is needed: the pass revokes the fast path before its first
+	// mutation. This mocked world has no local_metadata table (the
+	// INFORMATION_SCHEMA probe below reports it absent), so the DELETE hits
+	// table-not-exist — tolerated, the sentinel simply has nothing to clear.
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM local_metadata WHERE `key` = ?")).
+		WithArgs(migrationPassCompleteKey).
+		WillReturnError(&mysql.MySQLError{Number: 1146, Message: "table not found: local_metadata"})
 	expectDoltStatusRows(mock)
 	// The seed changed rows (expectIgnorePatternSeed reports RowsAffected=1),
 	// so MigrateUp commits it scoped+labeled before the pass runs (#4566: the
@@ -427,6 +551,11 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: apply migrations')")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
+	// The pass finished: only now is the completion sentinel stamped, making
+	// the fast path satisfiable again. Ordered expectations pin the invariant
+	// the review demanded: no REPLACE before the final DOLT_COMMIT above.
+	expectPassSentinel(mock, sqlmock.NewRows([]string{"value"}))
+	expectPassSentinelStamp(mock)
 }
 
 // expectColumnExists mocks the INFORMATION_SCHEMA.COLUMNS probe still used by
