@@ -419,6 +419,7 @@ func displayReadyList(issues []*types.Issue, parentEpicMap map[string]string) {
 	fmt.Printf("Ready: %d issues with no active blockers\n", len(issues))
 	fmt.Println()
 	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	fmt.Println("Priority: P0–P4 (label only; not a status icon)")
 }
 
 // readyExplainFilter is the filter both --explain routes run, derived from the

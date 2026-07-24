@@ -57,13 +57,12 @@ func formatPrettyIssue(issue *types.Issue) string {
 	}
 
 	// Format: STATUS_ICON ID PRIORITY [Type] Title
-	// Priority uses ● icon with color, no brackets needed
 	// Closed issues: entire line is muted
 	if issue.Status == types.StatusClosed {
 		return fmt.Sprintf("%s %s %s %s%s",
 			statusIcon,
 			ui.RenderMuted(issue.ID),
-			ui.RenderMuted(fmt.Sprintf("● P%d", issue.Priority)),
+			ui.RenderMuted(fmt.Sprintf("P%d", issue.Priority)),
 			ui.RenderMuted(string(issue.IssueType)),
 			ui.RenderMuted(" "+issue.Title))
 	}

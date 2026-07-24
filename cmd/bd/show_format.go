@@ -32,7 +32,7 @@ func formatShortIssue(issue *types.Issue) string {
 		return fmt.Sprintf("%s %s %s %s%s",
 			statusIcon,
 			ui.RenderMuted(issue.ID),
-			ui.RenderMuted(fmt.Sprintf("● P%d", issue.Priority)),
+			ui.RenderMuted(fmt.Sprintf("P%d", issue.Priority)),
 			ui.RenderMuted(string(issue.IssueType)),
 			ui.RenderMuted(" "+issue.Title))
 	}
@@ -49,7 +49,7 @@ func formatIssueHeader(issue *types.Issue) string {
 	statusStyle := ui.GetStatusStyle(string(issue.Status))
 	statusStr := statusStyle.Render(strings.ToUpper(string(issue.Status)))
 
-	// Priority with semantic color (includes ● icon)
+	// Priority with semantic color (P-label only)
 	priorityTag := ui.RenderPriority(issue.Priority)
 
 	// Type badge for notable types
@@ -179,7 +179,7 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 			prefix, statusIcon,
 			ui.RenderMuted(dep.ID),
 			ui.RenderMuted(dep.Title),
-			ui.RenderMuted(fmt.Sprintf("● P%d", dep.Priority)))
+			ui.RenderMuted(fmt.Sprintf("P%d", dep.Priority)))
 	}
 
 	// Active items: ID with status color, priority with semantic color
@@ -209,7 +209,7 @@ func formatSimpleDependencyLine(prefix string, dep *types.Issue) string {
 			prefix, statusIcon,
 			ui.RenderMuted(dep.ID),
 			ui.RenderMuted(dep.Title),
-			ui.RenderMuted(fmt.Sprintf("● P%d", dep.Priority)))
+			ui.RenderMuted(fmt.Sprintf("P%d", dep.Priority)))
 	}
 
 	// Active items: use semantic colors
