@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"golang.org/x/term"
@@ -34,12 +35,6 @@ func defaultStderr() io.Writer {
 	}
 	return io.Discard
 }
-
-// progressOut is where migration progress lines are written. Defaults to
-// os.Stderr so that JSON pipelines on stdout (e.g. bd list --json | jq) are
-// not polluted. Unexported so tests in this package can swap it without
-// leaking a setter into production API.
-var progressOut io.Writer = os.Stderr
 
 const largeRigThreshold = 10000
 
@@ -1176,6 +1171,16 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 	if upTo == 0 {
 		upTo = src.latest()
 	}
+
+	// One-shot large-rig notice, ahead of the migration loop below. Treats a
+	// missing issues table as "fresh install" and emits nothing — on a
+	// first-ever run there is no rig to warn about, and the COUNT(*) query
+	// would error on the missing table. issueRowCounter/emitLargeRigNotice
+	// predate this call site (be-8ja); this just threads them onto main's
+	// existing TTY-gated `stderr` writer instead of a second progressOut.
+	rowCount, rowCountErr := issueRowCounter(ctx, db)
+	emitLargeRigNotice(stderr, rowCount, rowCountErr)
+
 	count := 0
 	for _, mf := range src.list() {
 		if mf.version <= minVersion || mf.version > upTo {
@@ -1212,7 +1217,8 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
 		}
 
-		fmt.Fprintf(stderr, "migrating schema: %s\n", mf.name)
+		fmt.Fprintf(stderr, "Applying migration %04d: %s…\n", mf.version, humanMigrationName(mf.name))
+		start := time.Now()
 		if _, err := db.ExecContext(ctx, string(data)); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
 		}
@@ -1221,6 +1227,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		if _, err := db.ExecContext(ctx, "INSERT IGNORE INTO "+src.cursorTable+" (version, content_hash) VALUES (?, ?)", mf.version, contentHash); err != nil {
 			return count, fmt.Errorf("recording %s in %s: %w", mf.name, src.cursorTable, err)
 		}
+		fmt.Fprintf(stderr, "  done (%.1fs)\n", time.Since(start).Seconds())
 		count++
 
 		if commitEachStep {

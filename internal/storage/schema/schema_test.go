@@ -1910,11 +1910,19 @@ func TestRunMigrationsStderrOutput(t *testing.T) {
 	stderr = &buf
 	defer func() { stderr = orig }()
 
+	// mockDB.QueryRowContext panics, so stub issueRowCounter (be-8ja's
+	// large-rig check, which now runs unconditionally at the top of
+	// runMigrations) to report a small rig — no warning line, so this test's
+	// line-count assertion stays scoped to the per-migration progress lines.
+	origCounter := issueRowCounter
+	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
+	defer func() { issueRowCounter = origCounter }()
+
 	// Bounded below migration 47: that version's preMigrationRepair (and 53's)
 	// issues real INFORMATION_SCHEMA probes (see
 	// TestPreMigrationRepairScopedToMain0047 /
 	// TestPreMigrationRepairScopedToMain0053), which mockDB.QueryRowContext
-	// doesn't support. This test only exercises the stderr line, not the
+	// doesn't support. This test only exercises the stderr lines, not the
 	// repair path.
 	n, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 46, false)
 	if err != nil {
@@ -1925,12 +1933,16 @@ func TestRunMigrationsStderrOutput(t *testing.T) {
 	}
 
 	got := buf.String()
-	if !strings.Contains(got, "migrating schema: ") {
-		t.Errorf("expected stderr to contain 'migrating schema: ', got: %q", got)
+	if !strings.Contains(got, "Applying migration ") {
+		t.Errorf("expected stderr to contain 'Applying migration ', got: %q", got)
 	}
+	if !strings.Contains(got, "  done (") {
+		t.Errorf("expected stderr to contain a '  done (Ns)' timing line, got: %q", got)
+	}
+	// One "Applying" line + one "done" line per migration.
 	lines := strings.Split(strings.TrimRight(got, "\n"), "\n")
-	if len(lines) != n {
-		t.Errorf("expected %d stderr lines, got %d", n, len(lines))
+	if len(lines) != 2*n {
+		t.Errorf("expected %d stderr lines (2 per migration), got %d", 2*n, len(lines))
 	}
 }
 
@@ -1942,6 +1954,12 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	orig := stderr
 	stderr = &bytes.Buffer{}
 	defer func() { stderr = orig }()
+
+	// Stub the large-rig row counter for the same reason as
+	// TestRunMigrationsStderrOutput: mockDB.QueryRowContext panics.
+	origCounter := issueRowCounter
+	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
+	defer func() { issueRowCounter = origCounter }()
 
 	// Bounded below migration 47 for the same reason as
 	// TestRunMigrationsStderrOutput: mockDB can't answer the real

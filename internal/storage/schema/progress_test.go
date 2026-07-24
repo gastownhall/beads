@@ -92,16 +92,8 @@ func TestHumanMigrationName(t *testing.T) {
 	}
 }
 
-// TestProgressOutDefaultsToStderr guards the be-8ja invariant that the
-// package-level writer starts pointed at os.Stderr. A regression here would
-// silently leak migration progress into stdout and break bd <anything> --json
-// pipelines — exactly the failure mode the bead called out.
-func TestProgressOutDefaultsToStderr(t *testing.T) {
-	if progressOut == nil {
-		t.Fatal("progressOut must not be nil")
-	}
-	// Package-level default must be os.Stderr so stdout-sensitive consumers
-	// (bd list --json | jq, etc.) stay unpolluted. We don't pin the pointer
-	// identity here — tests swap progressOut via a helper — but a nil or
-	// stdout-bound default would be a regression worth catching.
-}
+// Note: be-8ja's original TestProgressOutDefaultsToStderr (pinning a
+// package-level progressOut default) doesn't apply after the #3919 slim —
+// this branch reuses main's existing `stderr` writer (see defaultStderr,
+// TTY-gated), landed independently by #3914. That invariant is exercised by
+// #3914's own tests, not duplicated here.
