@@ -202,6 +202,44 @@ func TestEmbeddedHistory(t *testing.T) {
 		}
 	})
 
+	// ===== Ambiguous partial ID (GH#4868 review follow-up) =====
+
+	// Two issues with explicit IDs sharing a common hash substring: a partial
+	// ID that matches both must report the ambiguity rather than silently
+	// falling through to the "No history found" not-found path.
+	t.Run("ambiguous_partial_id_errors", func(t *testing.T) {
+		bdCreate(t, bd, dir, "Ambiguous candidate one", "--type", "task", "--id", "hi-zzzaaa1")
+		bdCreate(t, bd, dir, "Ambiguous candidate two", "--type", "task", "--id", "hi-zzzaaa2")
+
+		out := bdHistoryFail(t, bd, dir, "zzzaaa")
+		if !strings.Contains(strings.ToLower(out), "ambiguous") {
+			t.Errorf("expected ambiguity error for shared partial id, got: %s", out)
+		}
+		if strings.Contains(out, "No history found") {
+			t.Errorf("ambiguous partial id incorrectly fell through to 'No history found': %s", out)
+		}
+
+		cmd := exec.Command(bd, "history", "--json", "zzzaaa")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		jsonOut, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected bd history --json zzzaaa to fail, but succeeded:\n%s", jsonOut)
+		}
+		s := strings.TrimSpace(string(jsonOut))
+		start := strings.Index(s, "{")
+		if start < 0 {
+			t.Fatalf("expected JSON error object, got: %s", s)
+		}
+		var errResp map[string]interface{}
+		if err := json.Unmarshal([]byte(s[start:]), &errResp); err != nil {
+			t.Fatalf("parse error JSON: %v\n%s", err, s)
+		}
+		if !strings.Contains(strings.ToLower(s), "ambiguous") {
+			t.Errorf("expected error JSON to mention ambiguity, got: %s", s)
+		}
+	})
+
 	// ===== Nonexistent issue ID =====
 
 	t.Run("nonexistent_issue_empty_history", func(t *testing.T) {
