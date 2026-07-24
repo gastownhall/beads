@@ -293,12 +293,20 @@ func testAuditStatistics(t *testing.T, f Factory) {
 	if stats.PinnedIssues != 1 {
 		t.Errorf("PinnedIssues = %d, want 1", stats.PinnedIssues)
 	}
-	if stats.BlockedIssues != 1 {
-		t.Errorf("BlockedIssues = %d, want 1", stats.BlockedIssues)
+	if stats.BlockedIssues == nil || *stats.BlockedIssues != 1 {
+		got := -1
+		if stats.BlockedIssues != nil {
+			got = *stats.BlockedIssues
+		}
+		t.Errorf("BlockedIssues = %d, want 1", got)
 	}
 	// Ready = Open(2) - Blocked(1) = 1 (the blocked issue is in_progress, not open).
-	if stats.ReadyIssues != 1 {
-		t.Errorf("ReadyIssues = %d, want 1", stats.ReadyIssues)
+	if stats.ReadyIssues == nil || *stats.ReadyIssues != 1 {
+		got := -1
+		if stats.ReadyIssues != nil {
+			got = *stats.ReadyIssues
+		}
+		t.Errorf("ReadyIssues = %d, want 1", got)
 	}
 }
 
@@ -319,12 +327,20 @@ func testAuditStatisticsReadyClamp(t *testing.T, f Factory) {
 	if stats.OpenIssues != 0 {
 		t.Errorf("OpenIssues = %d, want 0", stats.OpenIssues)
 	}
-	if stats.BlockedIssues != 2 {
-		t.Errorf("BlockedIssues = %d, want 2", stats.BlockedIssues)
+	if stats.BlockedIssues == nil || *stats.BlockedIssues != 2 {
+		got := -1
+		if stats.BlockedIssues != nil {
+			got = *stats.BlockedIssues
+		}
+		t.Errorf("BlockedIssues = %d, want 2", got)
 	}
 	// 0 - 2 = -2, clamped to 0.
-	if stats.ReadyIssues != 0 {
-		t.Errorf("ReadyIssues = %d, want 0 (clamped)", stats.ReadyIssues)
+	if stats.ReadyIssues == nil || *stats.ReadyIssues != 0 {
+		got := -1
+		if stats.ReadyIssues != nil {
+			got = *stats.ReadyIssues
+		}
+		t.Errorf("ReadyIssues = %d, want 0 (clamped)", got)
 	}
 }
 

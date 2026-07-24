@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -332,6 +333,20 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 			// upsert kept every local column (bd-hj85c).
 			if !strings.Contains(err.Error(), "nothing to commit") {
 				return fmt.Errorf("commit: %w", err)
+			}
+		}
+	}
+
+	// Sync issue_prefix from config.yaml to the database if stale (be-llaf).
+	// store.Commit skips the config table (GH#2455), so we use CommitWithConfig
+	// for this intentional config update after the issues commit completes.
+	// config.yaml is authoritative here and existing issue IDs are intentionally
+	// left unchanged: this deliberately bypasses the `bd config set issue_prefix`
+	// guard for the import/migration flow and is not a rename.
+	if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
+		if dbPrefix, _ := store.GetConfig(ctx, "issue_prefix"); dbPrefix != yamlPrefix {
+			if setErr := store.SetConfig(ctx, "issue_prefix", yamlPrefix); setErr == nil {
+				_ = store.CommitWithConfig(ctx, "bd import: sync issue_prefix from config.yaml")
 			}
 		}
 	}

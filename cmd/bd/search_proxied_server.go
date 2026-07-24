@@ -64,10 +64,7 @@ func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		Limit: limit,
 	}
 
-	if status != "" && status != "all" {
-		s := types.Status(status)
-		filter.Status = &s
-	} else if status != "all" {
+	if status == "" {
 		filter.ExcludeStatus = []types.Status{types.StatusClosed}
 	}
 
@@ -193,6 +190,16 @@ func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		return HandleErrorRespectJSON("%v", err)
 	}
 	defer uw.Close(ctx)
+
+	if status != "" && status != "all" {
+		cfg, err := loadProxiedListFilterConfig(ctx, uw)
+		if err != nil {
+			return HandleErrorRespectJSON("loading status configuration: %v", err)
+		}
+		if err := applyStatusFilter(&filter, status, cfg.customStatusNames()); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+	}
 
 	if jsonOutput {
 		page, err := uw.IssueUseCase().SearchIssuesWithCounts(ctx, query, filter)

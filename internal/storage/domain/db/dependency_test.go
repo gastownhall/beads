@@ -16,6 +16,9 @@ func (s *testSuite) TestDependencySQLRepository() {
 		s.Run("DifferentTypeIsRejected", s.depInsertConflictingType)
 		s.Run("MissingTargetIssueFailsFK", s.depInsertFKViolation)
 		s.Run("ThreadIDPersists", s.depInsertThreadID)
+		s.Run("EmitsDependencyAddedEventWhenEmitEventSet", s.depInsertEmitsAddedEvent)
+		s.Run("RecordsNoEventWithoutEmitEvent", s.depInsertWithoutEmitEventRecordsNoEvent)
+		s.Run("IdempotentReAddEmitsNoSecondEvent", s.depInsertIdempotentNoDoubleEvent)
 	})
 	s.Run("Delete", func() {
 		s.Run("ReturnsFoundFalseOnMissingEdge", s.depDeleteMissingEdge)
@@ -23,6 +26,8 @@ func (s *testSuite) TestDependencySQLRepository() {
 		s.Run("RemovesRow", s.depDeleteRemovesRow)
 		s.Run("RejectsEmptyIDs", s.depDeleteEmptyIDs)
 		s.Run("WispRoutesToWispDependencies", s.depDeleteWispRouting)
+		s.Run("EmitsDependencyRemovedEvent", s.depDeleteEmitsRemovedEvent)
+		s.Run("MissingEdgeEmitsNoEvent", s.depDeleteMissingEdgeEmitsNoEvent)
 	})
 	s.Run("HasCycle", func() {
 		s.Run("StraightLineIsAcyclic", s.depCycleAcyclic)
@@ -144,6 +149,16 @@ func (s *testSuite) depInsertConflictingType() {
 	err := r.Insert(s.Ctx(), newDep("bd-dep-conf-1", "bd-dep-conf-2", types.DepRelated), "tester", domain.DepInsertOpts{})
 	s.Require().Error(err)
 	s.Contains(err.Error(), "already exists with type")
+
+	// Parity with the embedded issueops/DoltStore stack: the conflict is a typed
+	// *domain.DependencyTypeConflictError, errors.As-able with the existing and
+	// requested types readable off it.
+	var conflict *domain.DependencyTypeConflictError
+	s.Require().ErrorAs(err, &conflict)
+	s.Equal("bd-dep-conf-1", conflict.IssueID)
+	s.Equal("bd-dep-conf-2", conflict.DependsOnID)
+	s.Equal("blocks", conflict.ExistingType)
+	s.Equal("related", conflict.RequestedType)
 }
 
 func (s *testSuite) depInsertFKViolation() {
@@ -165,6 +180,116 @@ func (s *testSuite) depInsertThreadID() {
 	s.Require().NoError(err)
 	s.Require().Len(out.Outgoing["bd-dep-th-1"], 1)
 	s.Equal("thread-xyz", out.Outgoing["bd-dep-th-1"][0].ThreadID)
+}
+
+// depInsertEmitsAddedEvent proves the repo records a dependency_added event for
+// a genuine new edge when the caller sets EmitEvent (the explicit dep verb). The
+// descriptive string matches the embedded/issueops AddDependencyInTx path.
+func (s *testSuite) depInsertEmitsAddedEvent() {
+	s.seedIssueRow("bd-dep-evt-a")
+	s.seedIssueRow("bd-dep-evt-b")
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("bd-dep-evt-a", "bd-dep-evt-b", types.DepBlocks), "tester", domain.DepInsertOpts{EmitEvent: true}))
+
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-dep-evt-a", string(types.EventDependencyAdded)).Scan(&count))
+	s.Equal(1, count, "one dependency_added event expected on the source")
+
+	var actor, newValue string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT actor, new_value FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-dep-evt-a", string(types.EventDependencyAdded)).Scan(&actor, &newValue))
+	s.Equal("tester", actor)
+	s.Equal("Added dependency: bd-dep-evt-a blocks bd-dep-evt-b", newValue)
+}
+
+// depInsertWithoutEmitEventRecordsNoEvent proves the create-with-deps path (which
+// calls Insert directly with EmitEvent unset) records no event, matching the
+// embedded PersistDependencies behavior — the edge is created but has no history.
+func (s *testSuite) depInsertWithoutEmitEventRecordsNoEvent() {
+	s.seedIssueRow("bd-dep-evt-noemit-a")
+	s.seedIssueRow("bd-dep-evt-noemit-b")
+	r := s.depRepo()
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-dep-evt-noemit-a", "bd-dep-evt-noemit-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+
+	var eventCount int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-dep-evt-noemit-a", string(types.EventDependencyAdded)).Scan(&eventCount))
+	s.Equal(0, eventCount, "Insert without EmitEvent must record no dependency_added event")
+
+	// The edge itself must still exist — only the event is suppressed.
+	var edgeCount int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
+		"bd-dep-evt-noemit-a", "bd-dep-evt-noemit-b").Scan(&edgeCount))
+	s.Equal(1, edgeCount, "the dependency edge must be created even with EmitEvent unset")
+}
+
+// depInsertIdempotentNoDoubleEvent proves the idempotent same-type re-add (a
+// metadata-only refresh that returns before the INSERT) records no second event
+// even with EmitEvent set on both calls.
+func (s *testSuite) depInsertIdempotentNoDoubleEvent() {
+	s.seedIssueRow("bd-dep-evt-idem-a")
+	s.seedIssueRow("bd-dep-evt-idem-b")
+	r := s.depRepo()
+	dep := newDep("bd-dep-evt-idem-a", "bd-dep-evt-idem-b", types.DepBlocks)
+	s.Require().NoError(r.Insert(s.Ctx(), dep, "tester", domain.DepInsertOpts{EmitEvent: true}))
+	dep.Metadata = `{"v":2}`
+	s.Require().NoError(r.Insert(s.Ctx(), dep, "tester", domain.DepInsertOpts{EmitEvent: true}))
+
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-dep-evt-idem-a", string(types.EventDependencyAdded)).Scan(&count))
+	s.Equal(1, count, "idempotent same-type re-add must not emit a second dependency_added event")
+}
+
+// depDeleteEmitsRemovedEvent proves the repo records a dependency_removed event
+// when a real edge is deleted with EmitEvent set (the explicit dep remove verb).
+func (s *testSuite) depDeleteEmitsRemovedEvent() {
+	s.seedIssueRow("bd-dep-evt-rm-a")
+	s.seedIssueRow("bd-dep-evt-rm-b")
+	r := s.depRepo()
+	s.Require().NoError(r.Insert(s.Ctx(),
+		newDep("bd-dep-evt-rm-a", "bd-dep-evt-rm-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+
+	res, err := r.Delete(s.Ctx(), "bd-dep-evt-rm-a", "bd-dep-evt-rm-b", "remover", domain.DepInsertOpts{EmitEvent: true})
+	s.Require().NoError(err)
+	s.True(res.Found)
+
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-dep-evt-rm-a", string(types.EventDependencyRemoved)).Scan(&count))
+	s.Equal(1, count, "one dependency_removed event expected on the source")
+
+	var actor, newValue string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT actor, new_value FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-dep-evt-rm-a", string(types.EventDependencyRemoved)).Scan(&actor, &newValue))
+	s.Equal("remover", actor)
+	s.Equal("Removed dependency on bd-dep-evt-rm-b", newValue)
+}
+
+// depDeleteMissingEdgeEmitsNoEvent proves a no-op delete of a non-existent edge
+// records nothing (the type lookup short-circuits before the emission), even
+// with EmitEvent set.
+func (s *testSuite) depDeleteMissingEdgeEmitsNoEvent() {
+	s.seedIssueRow("bd-dep-evt-noop-a")
+	s.seedIssueRow("bd-dep-evt-noop-b")
+	res, err := s.depRepo().Delete(s.Ctx(), "bd-dep-evt-noop-a", "bd-dep-evt-noop-b", "remover", domain.DepInsertOpts{EmitEvent: true})
+	s.Require().NoError(err)
+	s.False(res.Found)
+
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-dep-evt-noop-a", string(types.EventDependencyRemoved)).Scan(&count))
+	s.Equal(0, count, "no-op delete must not emit a dependency_removed event")
 }
 
 func (s *testSuite) depCycleAcyclic() {

@@ -1,6 +1,6 @@
 ---
 description: Export issues to JSONL format
-argument-hint: [-o output-file]
+argument-hint: "[-o output-file]"
 ---
 
 Export all issues to JSON Lines format (one JSON object per line).
@@ -9,7 +9,7 @@ Export all issues to JSON Lines format (one JSON object per line).
 
 - **To stdout**: `bd export`
 - **To file**: `bd export -o issues.jsonl`
-- **Filter by status**: `bd export --status open`
+- **Include all records**: `bd export --all -o full.jsonl`
 
 Issues are sorted by ID for consistent diffs, making git diffs readable.
 

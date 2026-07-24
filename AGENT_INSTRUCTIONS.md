@@ -503,7 +503,12 @@ collected. Events are written under `~/.beads/eventsData` and POSTed to
 Metrics are enabled by default (opt-out). The friendliest way to see or change
 them is `bd metrics` (`bd metrics on` / `bd metrics off` / `bd metrics example`),
 which takes effect on the next command with no restart. `BD_DISABLE_METRICS=1`
-still works as a one-off, shell-scoped override.
+still works as a one-off, shell-scoped override. The cross-tool
+[`DO_NOT_TRACK`](https://donottrack.sh/) standard is honored as a disable-only
+opt-out: `DO_NOT_TRACK=1` opts out, while a falsey or empty value
+(`DO_NOT_TRACK=0`, `false`, or unset-but-present) falls through to your saved
+`bd metrics` preference instead of forcing metrics back on. `BD_DISABLE_METRICS`
+is the bidirectional override and takes precedence when both are set.
 
 ## Questions?
 

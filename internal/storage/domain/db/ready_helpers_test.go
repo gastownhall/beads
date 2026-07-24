@@ -336,10 +336,12 @@ func (s *testSuite) statsEmpty() {
 	s.Equal(0, out.OpenIssues)
 	s.Equal(0, out.InProgressIssues)
 	s.Equal(0, out.ClosedIssues)
-	s.Equal(0, out.BlockedIssues)
+	s.Require().NotNil(out.BlockedIssues)
+	s.Equal(0, *out.BlockedIssues)
 	s.Equal(0, out.DeferredIssues)
 	s.Equal(0, out.PinnedIssues)
-	s.Equal(0, out.ReadyIssues)
+	s.Require().NotNil(out.ReadyIssues)
+	s.Equal(0, *out.ReadyIssues)
 }
 
 func (s *testSuite) statsCountsByStatus() {
@@ -378,7 +380,8 @@ func (s *testSuite) statsCountsBlocked() {
 
 	out, err := r.GetStatistics(s.Ctx())
 	s.Require().NoError(err)
-	s.Equal(1, out.BlockedIssues)
+	s.Require().NotNil(out.BlockedIssues)
+	s.Equal(1, *out.BlockedIssues)
 }
 
 func (s *testSuite) statsCountsPinned() {
@@ -406,8 +409,10 @@ func (s *testSuite) statsReadyDerived() {
 	out, err := r.GetStatistics(s.Ctx())
 	s.Require().NoError(err)
 	s.Equal(3, out.OpenIssues)
-	s.Equal(1, out.BlockedIssues)
-	s.Equal(2, out.ReadyIssues, "ready = open - blocked")
+	s.Require().NotNil(out.BlockedIssues)
+	s.Equal(1, *out.BlockedIssues)
+	s.Require().NotNil(out.ReadyIssues)
+	s.Equal(2, *out.ReadyIssues, "ready = open - blocked")
 }
 
 func (s *testSuite) statsReadyClamped() {
@@ -421,7 +426,8 @@ func (s *testSuite) statsReadyClamped() {
 
 	out, err := r.GetStatistics(s.Ctx())
 	s.Require().NoError(err)
-	s.GreaterOrEqual(out.ReadyIssues, 0, "ready must never go negative")
+	s.Require().NotNil(out.ReadyIssues)
+	s.GreaterOrEqual(*out.ReadyIssues, 0, "ready must never go negative")
 }
 
 // ---------- DetectCycles ----------

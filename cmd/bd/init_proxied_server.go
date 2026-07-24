@@ -448,7 +448,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 			fmt.Fprintf(os.Stderr, "  %s\n\n", ui.RenderAccent("git remote add upstream <repo-url>"))
 		}
 		if !in.stealth && !in.initRemoteChanged && t.remoteURL == "" {
-			printInitNoDoltRemoteWarning()
+			printInitNoDoltRemoteWarning(false)
 		}
 	}
 

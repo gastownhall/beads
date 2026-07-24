@@ -1911,7 +1911,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				fmt.Fprintf(os.Stderr, "  %s\n\n", ui.RenderAccent("git remote add upstream <repo-url>"))
 			}
 			if !stealth && !initRemoteChanged && !shouldWireInitRemote(syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin) {
-				printInitNoDoltRemoteWarning()
+				printInitNoDoltRemoteWarning(true)
 			}
 		}
 
@@ -2702,10 +2702,12 @@ func configureInitDoltRemote(ctx context.Context, store storage.DoltStorage, syn
 	}
 }
 
-func printInitNoDoltRemoteWarning() {
+func printInitNoDoltRemoteWarning(withExportNote bool) {
 	fmt.Fprintf(os.Stderr, "\n%s No Dolt remote configured\n", ui.RenderWarn("⚠"))
-	fmt.Fprintln(os.Stderr, "  Issues are stored in local Dolt. .beads/issues.jsonl is an export,")
-	fmt.Fprintln(os.Stderr, "  not cross-machine sync or the source of truth.")
+	if withExportNote {
+		fmt.Fprintln(os.Stderr, "  Issues are stored in local Dolt. .beads/issues.jsonl is an export,")
+		fmt.Fprintln(os.Stderr, "  not cross-machine sync or the source of truth.")
+	}
 	if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 		fmt.Fprintln(os.Stderr, "  To use your git origin for durable sync, run:")
 		fmt.Fprintf(os.Stderr, "    %s\n", ui.RenderAccent("bd dolt remote add origin "+normalizeRemoteURL(originURL)))

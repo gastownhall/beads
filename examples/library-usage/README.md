@@ -78,6 +78,9 @@ The `beads.Storage` interface provides:
 - `CreateIssues(ctx, issues, actor)` - Batch create issues
 - `GetIssue(ctx, id)` - Get issue by ID
 - `UpdateIssue(ctx, id, updates, actor)` - Update issue fields
+- `UpdateIssueChecked(ctx, id, updates, actor, opts)` - Update with an optional
+  optimistic-concurrency (CAS) precondition (`opts.ExpectedVersion`); see
+  Concurrency below
 - `CloseIssue(ctx, id, reason, actor)` - Close an issue
 - `SearchIssues(ctx, query, filter)` - Search with filters
 
@@ -106,6 +109,26 @@ The `beads.Storage` interface provides:
 
 ### Statistics
 - `GetStatistics(ctx)` - Get aggregate metrics
+
+### Concurrency & Metadata
+- `UpdateIssueChecked(ctx, id, updates, actor, opts)` - Like `UpdateIssue`, but
+  when `opts.ExpectedVersion` is set the update proceeds only if the issue's
+  current `RowVersion` still matches, else it refuses with
+  `beads.ErrVersionMismatch`. The version read and the write share one
+  transaction (a true compare-and-swap). `RowVersion` is surfaced read-only on
+  `Issue` reads.
+- `MergeMetadata(ctx, issueID, key, value, actor)` - Atomically merge a single
+  key into an issue's metadata JSON. Two concurrent merges of *different* keys
+  both survive rather than clobbering each other.
+
+> **Implementer note (interface change):** `UpdateIssueChecked` and
+> `MergeMetadata` are now **required** methods on the `beads.Storage` interface.
+> Code that only *consumes* `beads.Storage` needs no change, but any external
+> type that *implements* `beads.Storage` (a custom store, mock, or proxy) must
+> add these two methods to compile. If you only need the base behavior,
+> `UpdateIssueChecked` with a nil `opts.ExpectedVersion` is identical to
+> `UpdateIssue`, and `MergeMetadata` can be layered over a read-modify-write of
+> the issue's metadata.
 
 ## Types
 

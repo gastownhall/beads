@@ -226,6 +226,7 @@ func TestApplyConfigDefaults_TestModeUseSentinelPort(t *testing.T) {
 			os.Setenv("BEADS_DOLT_PORT", origPort)
 		}
 	}()
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
 
 	os.Setenv("BEADS_TEST_MODE", "1")
 	os.Unsetenv("BEADS_DOLT_PORT")
@@ -251,6 +252,7 @@ func TestApplyConfigDefaults_TestModeWithPort(t *testing.T) {
 			os.Setenv("BEADS_DOLT_PORT", origPort)
 		}
 	}()
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
 
 	os.Setenv("BEADS_TEST_MODE", "1")
 	os.Setenv("BEADS_DOLT_PORT", "13307")
@@ -267,9 +269,18 @@ func TestApplyConfigDefaults_TestModeWithPort(t *testing.T) {
 // forces port 1 even when BEADS_DOLT_PORT is explicitly set to the production port.
 // This is the fix for Clown Show #14: The orchestrator's beads module injects
 // BEADS_DOLT_PORT=3307 from metadata.json, bypassing the test mode guard.
+//
+// AD-01 (be-c5p): port == DefaultSQLPort (3307) is never suppressed by
+// BEADS_TEST_SERVER=1 (see productionPortReasons Rule 1); only the
+// BEADS_PRODUCTION_PORT and dolt-server.port heuristics honor that opt-in.
+// This case covers the no-opt-in path (operator did NOT signal "I'm on a
+// test server"), where the guard must still force port 1. See
+// TestApplyConfigDefaults_TestModeBlocksProdPort_EvenWithTestServerOptIn for
+// the opt-in case, which must reach the same outcome.
 func TestApplyConfigDefaults_TestModeBlocksProdPort(t *testing.T) {
 	origTestMode := os.Getenv("BEADS_TEST_MODE")
 	origPort := os.Getenv("BEADS_DOLT_PORT")
+	origTestServer := os.Getenv("BEADS_TEST_SERVER")
 	defer func() {
 		if origTestMode == "" {
 			os.Unsetenv("BEADS_TEST_MODE")
@@ -281,16 +292,67 @@ func TestApplyConfigDefaults_TestModeBlocksProdPort(t *testing.T) {
 		} else {
 			os.Setenv("BEADS_DOLT_PORT", origPort)
 		}
+		if origTestServer == "" {
+			os.Unsetenv("BEADS_TEST_SERVER")
+		} else {
+			os.Setenv("BEADS_TEST_SERVER", origTestServer)
+		}
 	}()
 
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
 	os.Setenv("BEADS_TEST_MODE", "1")
 	os.Setenv("BEADS_DOLT_PORT", "3307") // Production port
+	os.Unsetenv("BEADS_TEST_SERVER")     // No test-server opt-in for this case.
 
 	cfg := &Config{}
 	applyConfigDefaults(cfg)
 
 	if cfg.ServerPort != 1 {
 		t.Errorf("BEADS_TEST_MODE=1 with BEADS_DOLT_PORT=3307 should force port 1, got %d", cfg.ServerPort)
+	}
+}
+
+// TestApplyConfigDefaults_TestModeBlocksProdPort_EvenWithTestServerOptIn
+// verifies that BEADS_TEST_SERVER=1 does NOT suppress Rule 1 of
+// productionPortReasons (port == DefaultSQLPort): even with the operator's
+// dedicated-test-server opt-in set, port 3307 must still be forced to 1
+// under BEADS_TEST_MODE=1. Only the BEADS_PRODUCTION_PORT and
+// dolt-server.port heuristics (Rules 2 and 3) are suppressed by that
+// opt-in — the well-known default port is never suppressible, so a
+// dedicated test server must still not bind to it.
+func TestApplyConfigDefaults_TestModeBlocksProdPort_EvenWithTestServerOptIn(t *testing.T) {
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	origPort := os.Getenv("BEADS_DOLT_PORT")
+	origTestServer := os.Getenv("BEADS_TEST_SERVER")
+	defer func() {
+		if origTestMode == "" {
+			os.Unsetenv("BEADS_TEST_MODE")
+		} else {
+			os.Setenv("BEADS_TEST_MODE", origTestMode)
+		}
+		if origPort == "" {
+			os.Unsetenv("BEADS_DOLT_PORT")
+		} else {
+			os.Setenv("BEADS_DOLT_PORT", origPort)
+		}
+		if origTestServer == "" {
+			os.Unsetenv("BEADS_TEST_SERVER")
+		} else {
+			os.Setenv("BEADS_TEST_SERVER", origTestServer)
+		}
+	}()
+
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
+	os.Setenv("BEADS_TEST_MODE", "1")
+	os.Setenv("BEADS_DOLT_PORT", "3307") // Production port
+	os.Setenv("BEADS_TEST_SERVER", "1")  // Opt-in IS set for this case.
+
+	cfg := &Config{}
+	applyConfigDefaults(cfg)
+
+	if cfg.ServerPort != 1 {
+		t.Errorf("BEADS_TEST_MODE=1 with BEADS_DOLT_PORT=3307 should force port 1 even with "+
+			"BEADS_TEST_SERVER=1 (Rule 1 is unconditional), got %d", cfg.ServerPort)
 	}
 }
 
@@ -314,7 +376,8 @@ func TestApplyConfigDefaults_EnvOverridesConfig(t *testing.T) {
 		}
 	}()
 
-	os.Unsetenv("BEADS_TEST_MODE") // NOT in test mode
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
+	os.Unsetenv("BEADS_TEST_MODE")         // NOT in test mode
 	os.Setenv("BEADS_DOLT_PORT", "19999")
 
 	// Simulate metadata.json having set port to production default
@@ -346,6 +409,7 @@ func TestApplyConfigDefaults_ProductionFallback(t *testing.T) {
 		}
 	}()
 
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env
 	os.Unsetenv("BEADS_TEST_MODE")
 	os.Unsetenv("BEADS_DOLT_PORT")
 
