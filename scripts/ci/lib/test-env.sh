@@ -44,6 +44,10 @@ beads_test_env_enter() {
     export GIT_CONFIG_NOSYSTEM=1
     export GIT_CONFIG_GLOBAL="$root/gitconfig"
     export BEADS_TEST_IGNORE_REPO_CONFIG=1
+    # Default: skip Dolt-backed tests in hermetic wrappers (keeps pr-core fast
+    # and avoids false fails when dolt/Docker are absent). Jobs that install
+    # Dolt and want those suites must set BEADS_TEST_ENV_RUN_DOLT=1 (and clear
+    # BEADS_TEST_SKIP) — see .github/workflows/pr.yml test-doctor-dolt (#4860).
     if [[ "${BEADS_TEST_ENV_RUN_DOLT:-0}" != "1" ]]; then
         beads_test_env_add_skip "dolt"
     fi

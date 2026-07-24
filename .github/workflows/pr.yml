@@ -663,6 +663,77 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/race
         run: go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./...
 
+  # Gap from gastownhall/beads#4860: pr-core goes through beads_test_env_enter,
+  # which sets BEADS_TEST_SKIP=dolt unless BEADS_TEST_ENV_RUN_DOLT=1. That meant
+  # every RequireDoltBinary doctor/fix test skipped on every PR, even though
+  # other jobs install Dolt. This job is the dedicated PR path that actually
+  # executes those packages with Dolt available and the skip flag off.
+  #
+  # Advisory (continue-on-error, absent from ci-gate's needs/CI_GATE_REQUIRED):
+  # the first run here surfaced two pre-existing doctor test failures
+  # (TestCheckRepoFingerprint_UsesTargetRepoOutsideCWD,
+  # TestCheckTestPollution_NoTestIssues_EmptyDB) that look like stale test
+  # expectations, not regressions from this job. Promote to required once
+  # both are fixed and this job is green.
+  test-doctor-dolt:
+    name: Test (doctor Dolt + fix)
+    runs-on: ubuntu-latest
+    needs: build-artifacts
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt CLI
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Verify dolt on PATH
+        run: dolt version
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Pull Dolt sql-server image
+        # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
+        run: docker pull dolthub/dolt-sql-server:2.2.0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: ci-build-artifacts
+          path: ci-build-artifacts
+
+      - name: Verify build artifacts
+        run: |
+          set -euo pipefail
+          cd ci-build-artifacts
+          sha256sum -c SHA256SUMS
+          chmod +x bd-linux-gms-pure
+
+      - name: Test doctor + doctor/fix with Dolt
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+          # Opt out of beads_test_env_enter's default BEADS_TEST_SKIP=dolt
+          # (scripts/ci/lib/test-env.sh). Without this, RequireDoltBinary skips.
+          BEADS_TEST_ENV_RUN_DOLT: "1"
+          # Clear any inherited skip so doctor Dolt suites actually run.
+          BEADS_TEST_SKIP: ""
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/ci/lib/test-env.sh
+          source scripts/ci/lib/test-env.sh
+          beads_test_env_enter
+          go test -tags gms_pure_go -race -count=1 -timeout=25m \
+            ./cmd/bd/doctor/ ./cmd/bd/doctor/fix/
+
   # Producer-side guard for the Beads<->consumer CLI contract. Runs the whole
   # cmd/bd/protocol package: the golden corpus (regenerated from this branch's
   # bd and byte-compared to the committed testdata/corpus/, so an unreviewed
@@ -973,6 +1044,7 @@ jobs:
       - pr-core-wrapper
       - pr-lint-wrapper
       - test-domain-uow
+      - test-doctor-dolt
       - contract-corpus
       - fmt-check
       - lint
@@ -1002,6 +1074,7 @@ jobs:
             PR_CORE_WRAPPER
             PR_LINT_WRAPPER
             TEST_DOMAIN_UOW
+            TEST_DOCTOR_DOLT
             CONTRACT_CORPUS
             FMT_CHECK
             LINT
@@ -1023,6 +1096,7 @@ jobs:
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
           PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
           TEST_DOMAIN_UOW: ${{ needs.test-domain-uow.result }}
+          TEST_DOCTOR_DOLT: ${{ needs.test-doctor-dolt.result }}
           CONTRACT_CORPUS: ${{ needs.contract-corpus.result }}
           FMT_CHECK: ${{ needs.fmt-check.result }}
           LINT: ${{ needs.lint.result }}
