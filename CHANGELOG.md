@@ -58,17 +58,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`bd dolt clean-databases` now purges what it drops** (be-pq5,
+- **`bd dolt clean-databases` gains an opt-in `--purge-dropped` flag to
+  reclaim disk from what it drops** (be-pq5,
   [#3663](https://github.com/gastownhall/beads/pull/3663)). `DROP DATABASE`
   only moves a database's directory under `.dolt_dropped_databases/`; Dolt
-  keeps the on-disk data there until an explicit
-  `CALL DOLT_PURGE_DROPPED_DATABASES()`. The operator-facing cleanup command
-  dropped stale `testdb_*`/`benchdb_*`/etc. databases from `SHOW DATABASES`
-  but never issued that purge, so disk usage on the shared Dolt server stayed
-  high across repeated runs. `clean-databases` now purges once after the drop
-  loop; a failed purge is reported as a warning rather than aborting the
-  command, since the databases are already dropped from the server's active
-  set at that point.
+  keeps the on-disk data there — recoverable via `CALL DOLT_UNDROP(name)` —
+  until an explicit `CALL DOLT_PURGE_DROPPED_DATABASES()`. The operator-facing
+  cleanup command dropped stale `testdb_*`/`benchdb_*`/etc. databases from
+  `SHOW DATABASES` but never issued that purge, so disk usage on the shared
+  Dolt server stayed high across repeated runs. `--purge-dropped` runs the
+  purge after cleanup (a failed purge is reported as a warning rather than
+  aborting the command, since the databases are already dropped from the
+  server's active set at that point) and fires even on a run that finds
+  nothing stale to drop, since a prior run's dropped-but-unpurged residue
+  isn't visible to `SHOW DATABASES` either. **`CALL
+  DOLT_PURGE_DROPPED_DATABASES()` is server-global and irreversible** — Dolt
+  has no way to scope it to only the databases a given run dropped, so
+  `--purge-dropped` also permanently deletes every other dropped-but-not-yet-
+  purged database on the server, removing `DOLT_UNDROP` recovery for all of
+  them. It defaults to off for that reason; without it, dropped databases are
+  left in place, recoverable via `DOLT_UNDROP`, same as before this change.
 
 ### Added
 
