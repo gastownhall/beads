@@ -380,6 +380,13 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 	})
 
+}
+
+func TestProxiedServerDep2(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
 	t.Run("Remove", func(t *testing.T) {
 		t.Parallel()
 		t.Run("basic", func(t *testing.T) {

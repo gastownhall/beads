@@ -1,6 +1,6 @@
 ---
 description: Record, list, and manage project decisions with rationale tracking
-argument-hint: record|list|show|supersede
+argument-hint: "record|list|show|supersede"
 ---
 
 Record and track project decisions as beads issues with structured rationale, alternatives considered, and links to affected work.

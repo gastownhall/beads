@@ -288,6 +288,70 @@ func TestBuildIssueFilterClauses_ExcludeLabelsWithInclude(t *testing.T) {
 	}
 }
 
+// TestBuildIssueFilterClauses_LabelPattern covers be-ucslk4: the LabelPattern
+// field on IssueFilter was previously set by the cobra layer but never
+// consumed by BuildIssueFilterClauses, so --label-pattern silently returned
+// the full set instead of filtering. This test pins the SQL emission so the
+// regression cannot recur.
+func TestBuildIssueFilterClauses_LabelPattern(t *testing.T) {
+	t.Parallel()
+
+	filter := types.IssueFilter{LabelPattern: "tech-*"}
+	clauses, args, err := BuildIssueFilterClauses("", filter, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(clauses) != 1 {
+		t.Fatalf("expected 1 clause for LabelPattern, got %d: %v", len(clauses), clauses)
+	}
+	if !strings.Contains(clauses[0], "label LIKE ? ESCAPE '|'") {
+		t.Errorf("expected LIKE ESCAPE clause, got %q", clauses[0])
+	}
+	if !strings.Contains(clauses[0], "FROM labels") {
+		t.Errorf("expected subquery against labels table, got %q", clauses[0])
+	}
+	if len(args) != 1 || args[0] != "tech-%" {
+		t.Errorf("expected glob 'tech-*' converted to LIKE 'tech-%%', got %v", args)
+	}
+}
+
+func TestBuildIssueFilterClauses_LabelPatternWispsTable(t *testing.T) {
+	t.Parallel()
+
+	filter := types.IssueFilter{LabelPattern: "back*"}
+	clauses, _, err := BuildIssueFilterClauses("", filter, WispsFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(clauses) != 1 {
+		t.Fatalf("expected 1 clause, got %d", len(clauses))
+	}
+	if !strings.Contains(clauses[0], "FROM wisp_labels") {
+		t.Errorf("expected subquery against wisp_labels table, got %q", clauses[0])
+	}
+}
+
+// TestBuildIssueFilterClauses_LabelRegex covers be-ucslk4 for the regex
+// variant: --label-regex was likewise being dropped on the floor.
+func TestBuildIssueFilterClauses_LabelRegex(t *testing.T) {
+	t.Parallel()
+
+	filter := types.IssueFilter{LabelRegex: "needs-.*"}
+	clauses, args, err := BuildIssueFilterClauses("", filter, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(clauses) != 1 {
+		t.Fatalf("expected 1 clause for LabelRegex, got %d: %v", len(clauses), clauses)
+	}
+	if !strings.Contains(clauses[0], "label REGEXP ?") {
+		t.Errorf("expected REGEXP clause, got %q", clauses[0])
+	}
+	if len(args) != 1 || args[0] != "needs-.*" {
+		t.Errorf("expected regex passed through verbatim, got %v", args)
+	}
+}
+
 func TestBuildIssueFilterClauses_DateFilters(t *testing.T) {
 	t.Parallel()
 
@@ -386,6 +450,50 @@ func TestBuildIssueFilterClauses_PinnedFilter(t *testing.T) {
 				t.Errorf("got clause %v, want %q", clauses, tt.wantSQL)
 			}
 		})
+	}
+}
+
+func TestBuildIssueFilterClauses_IsBlockedFilter(t *testing.T) {
+	t.Parallel()
+
+	blockedTrue := true
+	blockedFalse := false
+
+	tests := []struct {
+		name      string
+		isBlocked *bool
+		wantSQL   string
+		wantArg   int
+	}{
+		{name: "is_blocked=true", isBlocked: &blockedTrue, wantSQL: "is_blocked = ?", wantArg: 1},
+		{name: "is_blocked=false", isBlocked: &blockedFalse, wantSQL: "is_blocked = ?", wantArg: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clauses, args, err := BuildIssueFilterClauses("", types.IssueFilter{IsBlocked: tt.isBlocked}, IssuesFilterTables)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(clauses) != 1 || clauses[0] != tt.wantSQL {
+				t.Fatalf("got clauses %v, want [%q]", clauses, tt.wantSQL)
+			}
+			if len(args) != 1 || args[0] != tt.wantArg {
+				t.Errorf("got args %v, want [%d] (index-backed integer bind)", args, tt.wantArg)
+			}
+		})
+	}
+
+	// nil is the unset case: no is_blocked clause is emitted (filter is inert).
+	clauses, _, err := BuildIssueFilterClauses("", types.IssueFilter{IsBlocked: nil}, IssuesFilterTables)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, c := range clauses {
+		if strings.Contains(c, "is_blocked") {
+			t.Errorf("nil IsBlocked emitted an is_blocked clause %q, want none", c)
+		}
 	}
 }
 

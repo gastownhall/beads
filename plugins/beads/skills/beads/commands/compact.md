@@ -1,6 +1,6 @@
 ---
 description: Compact old closed issues using semantic summarization
-argument-hint: [--all] [--id issue-id] [--dry-run]
+argument-hint: "[--all] [--id issue-id] [--dry-run]"
 ---
 
 Reduce database size by summarizing closed issues no longer actively referenced.

@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -71,6 +72,16 @@ with a field-level summary (updated_issues), so local state changed by
 an import is visible. To deliberately restore an older snapshot, pass
 --allow-stale, which imports every row even when it overwrites newer
 local state.
+
+Large imports are written in bounded transactions (a few hundred issues
+each, with a short pause between commits) with progress on stderr, so
+concurrent bd commands keep working while the import runs instead of
+stalling on one batch-wide write lock. Rows land in dependency order
+with their blocking edges in the same transaction, so a half-finished
+import never shows a blocked issue as ready. If an import fails partway,
+the already-committed chunks are durable and the command exits nonzero;
+re-running the same import is safe and converges (rows upsert,
+labels/comments/dependencies deduplicate).
 
 EXAMPLES:
   bd import                        # Import from configured import.path
@@ -322,6 +333,20 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 			// upsert kept every local column (bd-hj85c).
 			if !strings.Contains(err.Error(), "nothing to commit") {
 				return fmt.Errorf("commit: %w", err)
+			}
+		}
+	}
+
+	// Sync issue_prefix from config.yaml to the database if stale (be-llaf).
+	// store.Commit skips the config table (GH#2455), so we use CommitWithConfig
+	// for this intentional config update after the issues commit completes.
+	// config.yaml is authoritative here and existing issue IDs are intentionally
+	// left unchanged: this deliberately bypasses the `bd config set issue_prefix`
+	// guard for the import/migration flow and is not a rename.
+	if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
+		if dbPrefix, _ := store.GetConfig(ctx, "issue_prefix"); dbPrefix != yamlPrefix {
+			if setErr := store.SetConfig(ctx, "issue_prefix", yamlPrefix); setErr == nil {
+				_ = store.CommitWithConfig(ctx, "bd import: sync issue_prefix from config.yaml")
 			}
 		}
 	}

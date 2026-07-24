@@ -77,7 +77,7 @@ func buildWaitsFor(spawnerID, gate string, gateExplicit bool) (*domain.WaitsForS
 	if gate == "" {
 		gate = types.WaitsForAllChildren
 	}
-	if gate != types.WaitsForAllChildren && gate != types.WaitsForAnyChildren {
+	if !types.IsValidWaitsForGate(gate) {
 		return nil, fmt.Errorf("invalid --waits-for-gate value %q (valid: all-children, any-children)", gate)
 	}
 	return &domain.WaitsForSpec{SpawnerID: spawnerID, Gate: gate}, nil

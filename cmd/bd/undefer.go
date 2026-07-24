@@ -26,17 +26,18 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("undefer is not supported in proxied-server mode")
-		}
-		CheckReadonly("undefer")
-
 		evt := metrics.NewCommandEvent("undefer")
 		defer func() {
 			if c := metrics.Global(); c != nil {
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		CheckReadonly("undefer")
+
+		if usesProxiedServer() {
+			return runUndeferProxiedServer(rootCtx, args)
+		}
 
 		ctx := rootCtx
 

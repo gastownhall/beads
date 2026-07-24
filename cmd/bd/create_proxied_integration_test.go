@@ -289,6 +289,13 @@ func TestProxiedServerCreate(t *testing.T) {
 		}
 	})
 
+}
+
+func TestProxiedServerCreate2(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
 	t.Run("ephemeral", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "ep")

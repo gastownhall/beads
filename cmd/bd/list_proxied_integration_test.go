@@ -728,6 +728,38 @@ func TestProxiedServerList(t *testing.T) {
 		}
 	})
 
+	// The proxied repository path (internal/storage/domain/db) doesn't
+	// thread MaxRows through the UOW pipeline, so an explicit cap must be
+	// rejected rather than silently going unenforced (be-x42v.4 follow-up).
+	t.Run("reject_max_rows_flag", func(t *testing.T) {
+		out := bdProxiedListFail(t, bd, p, "--max-rows", "1")
+		if !strings.Contains(out, "not supported in proxied-server mode") {
+			t.Errorf("expected --max-rows proxied-server rejection, got: %s", out)
+		}
+	})
+
+	t.Run("reject_max_rows_env", func(t *testing.T) {
+		fullArgs := []string{"list"}
+		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
+			[]string{"BEADS_MAX_ROWS=1"}, fullArgs...)
+		if err == nil {
+			t.Fatalf("expected BEADS_MAX_ROWS under proxied-server to fail, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		out := stdout + stderr
+		if !strings.Contains(out, "not supported in proxied-server mode") {
+			t.Errorf("expected BEADS_MAX_ROWS proxied-server rejection, got: %s", out)
+		}
+	})
+
+	t.Run("allow_max_rows_zero", func(t *testing.T) {
+		// --max-rows 0 explicitly disables the cap, so it must not trip the
+		// proxied-server rejection.
+		issues := bdProxiedListJSON(t, bd, p, "--max-rows", "0", "--all")
+		if len(issues) == 0 {
+			t.Error("--max-rows 0 --all under proxied-server unexpectedly returned no issues")
+		}
+	})
+
 	// --- O. Lightweight race: 4 workers × 5 (create + list) iterations ---
 
 	t.Run("concurrent_create_and_list", func(t *testing.T) {

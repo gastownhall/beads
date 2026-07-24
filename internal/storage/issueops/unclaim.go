@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -29,7 +28,7 @@ import (
 //   - Issue is claimed by a different actor and force is false (ErrNotOwner)
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func UnclaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string, force bool) error {
+func UnclaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, force bool) error {
 	// Route to the correct table (issues/wisps) automatically, matching
 	// ClaimIssueInTx — a wisp claim lives in the wisp tables, so its release
 	// must update them too rather than no-op against the permanent issues table.
@@ -110,7 +109,7 @@ func UnclaimIssueInTx(ctx context.Context, tx *sql.Tx, id string, actor string, 
 // no-op when none exists, e.g. a wisp or an open-but-assigned issue that was
 // never leased) and records the "unclaimed" event. The row mutation
 // (assignee/status/started_at/row_lock) must already have been applied in tx.
-func finishUnclaimInTx(ctx context.Context, tx *sql.Tx, eventTable string, id string, actor string, oldIssue *types.Issue) error {
+func finishUnclaimInTx(ctx context.Context, tx DBTX, eventTable string, id string, actor string, oldIssue *types.Issue) error {
 	if err := DeleteLeaseInTx(ctx, tx, id); err != nil {
 		return err
 	}
@@ -139,7 +138,7 @@ func finishUnclaimInTx(ctx context.Context, tx *sql.Tx, eventTable string, id st
 // untouched. actor is recorded as the event author.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func UnclaimIssueIfAssigneeInTx(ctx context.Context, tx *sql.Tx, id string, actor string, expectedAssignee string) error {
+func UnclaimIssueIfAssigneeInTx(ctx context.Context, tx DBTX, id string, actor string, expectedAssignee string) error {
 	if expectedAssignee == "" {
 		return fmt.Errorf("conditional unclaim of %s: expected assignee must not be empty (use UnclaimIssueInTx for an unconditional release)", id)
 	}
