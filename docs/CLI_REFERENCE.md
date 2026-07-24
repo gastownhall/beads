@@ -922,7 +922,6 @@ bd list [flags]
       --label-regex string           Filter by label regex pattern (e.g., 'tech-(debt|legacy)')
   -n, --limit int                    Limit results (default 50, use 0 for unlimited) (default 50)
       --long                         Show detailed multi-line output for each issue
-      --max-rows int                 Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
       --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
       --mol-type string              Filter by molecule type: swarm, patrol, or work
       --no-assignee                  Filter issues with no assignee
@@ -1614,7 +1613,6 @@ bd find-duplicates [flags]
 
 ```
   -n, --limit int         Maximum number of pairs to show (default 50)
-      --max-rows int      Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
       --method string     Detection method: mechanical, ai (default "mechanical")
       --model string      AI model to use (only with --method ai; default from config ai.model)
   -s, --status string     Filter by status (default: non-closed)
@@ -1933,7 +1931,6 @@ bd dep tree [issue-id] [flags]
       --direction string   Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'
       --format string      Output format: 'mermaid' for Mermaid.js flowchart
   -d, --max-depth int      Maximum tree depth to display (safety limit) (default 50)
-      --max-rows int       Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
       --reverse            Show dependent tree (deprecated: use --direction=up)
       --show-all-paths     Show all paths to nodes (no deduplication for diamond dependencies)
       --status string      Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)
@@ -2070,12 +2067,11 @@ bd graph [issue-id] [flags]
 **Flags:**
 
 ```
-      --all            Show graph for all open issues
-      --box            ASCII boxes showing layers
-      --compact        Tree format, one line per issue, more scannable
-      --dot            Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)
-      --html           Output self-contained interactive HTML (redirect to file)
-      --max-rows int   Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
+      --all       Show graph for all open issues
+      --box       ASCII boxes showing layers
+      --compact   Tree format, one line per issue, more scannable
+      --dot       Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)
+      --html      Output self-contained interactive HTML (redirect to file)
 ```
 
 #### bd graph check
@@ -6800,7 +6796,6 @@ bd ready [flags]
   -l, --label strings                Filter by labels (AND: must have ALL). Can combine with --label-any
       --label-any strings            Filter by labels (OR: must have AT LEAST ONE). Can combine with --label
   -n, --limit int                    Maximum issues to show (use 0 for unlimited) (default 100)
-      --max-rows int                 Hard upper bound on rows fetched from storage. Returns a non-zero exit (code 2) and an error to stderr if exceeded. 0 disables (the default). Overrides BEADS_MAX_ROWS for this invocation. Useful in CI/agent rigs that want a circuit breaker against pathological queries.
       --metadata-field stringArray   Filter by metadata field (key=value, repeatable)
       --mol string                   Filter to steps within a specific molecule
       --mol-type string              Filter by molecule type: swarm, patrol, or work
