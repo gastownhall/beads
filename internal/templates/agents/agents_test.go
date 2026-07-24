@@ -33,7 +33,7 @@ func TestEmbeddedDefault(t *testing.T) {
 // build wrong mental models (treating JSONL as source of truth, manually
 // running bd import, etc.) and have to discover the four deeper architecture
 // docs the hard way. The summary must appear before the Quick Reference and
-// link to the canonical SYNC_CONCEPTS.md entry-point.
+// link to the canonical sync-concepts entry-point.
 func TestEmbeddedDefaultArchitectureSummary(t *testing.T) {
 	content := EmbeddedDefault()
 
@@ -41,7 +41,7 @@ func TestEmbeddedDefaultArchitectureSummary(t *testing.T) {
 		"Architecture in one line",
 		"refs/dolt/data",
 		"passive export",
-		"SYNC_CONCEPTS.md",
+		"docs/core-concepts/sync-concepts.md",
 	}
 	for _, want := range required {
 		if !strings.Contains(content, want) {
@@ -110,5 +110,32 @@ func TestDefaultContainsBothSections(t *testing.T) {
 	}
 	if beadsIdx > completionIdx {
 		t.Error("beads section should come before session completion section")
+	}
+}
+
+func TestEmbeddedDefaultManagedMarkerIsCurrent(t *testing.T) {
+	content := EmbeddedDefault()
+
+	idx := strings.Index(content, "<!-- BEGIN BEADS INTEGRATION")
+	if idx == -1 {
+		t.Fatal("missing managed section marker")
+	}
+	line := content[idx:]
+	if nl := strings.Index(line, "\n"); nl != -1 {
+		line = line[:nl]
+	}
+
+	meta := ParseMarker(line)
+	if meta == nil {
+		t.Fatalf("failed to parse managed marker %q", line)
+	}
+	if meta.Version != MarkerVersion {
+		t.Errorf("marker version = %d, want %d", meta.Version, MarkerVersion)
+	}
+	if meta.Profile != ProfileFull {
+		t.Errorf("marker profile = %q, want %q", meta.Profile, ProfileFull)
+	}
+	if meta.Hash != CurrentHash(ProfileFull) {
+		t.Errorf("marker hash = %q, want %q", meta.Hash, CurrentHash(ProfileFull))
 	}
 }

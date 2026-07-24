@@ -7,10 +7,13 @@ import pytest
 
 from beads_mcp.bd_client import BdClient, BdCommandError, BdNotFoundError
 from beads_mcp.models import (
+    AddCommentParams,
     AddDependencyParams,
+    AddNoteParams,
     ClaimIssueParams,
     CloseIssueParams,
     CreateIssueParams,
+    ListCommentsParams,
     ListIssuesParams,
     ReadyWorkParams,
     ReopenIssueParams,
@@ -197,9 +200,7 @@ async def test_ready_with_issue_type(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_ready_invalid_response(bd_client, mock_process):
     """Test ready method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process):
         params = ReadyWorkParams(limit=10)
@@ -235,9 +236,7 @@ async def test_list_issues(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_list_issues_invalid_response(bd_client, mock_process):
     """Test list_issues method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process):
         params = ListIssuesParams(status="open")
@@ -492,9 +491,7 @@ async def test_close(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_close_invalid_response(bd_client, mock_process):
     """Test close method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with (
         patch("asyncio.create_subprocess_exec", return_value=mock_process),
@@ -596,9 +593,7 @@ async def test_reopen_with_reason(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_reopen_invalid_response(bd_client, mock_process):
     """Test reopen method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with (
         patch("asyncio.create_subprocess_exec", return_value=mock_process),
@@ -744,9 +739,7 @@ async def test_blocked(bd_client, mock_process):
 @pytest.mark.asyncio
 async def test_blocked_invalid_response(bd_client, mock_process):
     """Test blocked method with invalid response type."""
-    mock_process.communicate = AsyncMock(
-        return_value=(json.dumps({"error": "not a list"}).encode(), b"")
-    )
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "not a list"}).encode(), b""))
 
     with patch("asyncio.create_subprocess_exec", return_value=mock_process):
         result = await bd_client.blocked()
@@ -780,3 +773,144 @@ async def test_init_failure(bd_client, mock_process):
         pytest.raises(BdCommandError, match="bd init failed"),
     ):
         await bd_client.init()
+
+
+@pytest.mark.asyncio
+async def test_validate_routes_to_doctor(bd_client):
+    """validate() routes to `bd doctor --check=validate` (GH#4037)."""
+    with patch.object(bd_client, "_run_command", new=AsyncMock(return_value={})) as run:
+        await bd_client.validate()
+    run.assert_awaited_once_with("doctor", "--check=validate")
+
+
+@pytest.mark.asyncio
+async def test_validate_fix_all_adds_fix_yes(bd_client):
+    """validate(fix_all=True) appends --fix --yes for non-interactive fixing."""
+    with patch.object(bd_client, "_run_command", new=AsyncMock(return_value={})) as run:
+        await bd_client.validate(fix_all=True)
+    run.assert_awaited_once_with("doctor", "--check=validate", "--fix", "--yes")
+
+
+@pytest.mark.asyncio
+async def test_validate_ignores_checks_arg(bd_client):
+    """The legacy `checks` arg is accepted but no longer forwarded to bd."""
+    with patch.object(bd_client, "_run_command", new=AsyncMock(return_value={})) as run:
+        await bd_client.validate(checks="orphans,duplicates")
+    run.assert_awaited_once_with("doctor", "--check=validate")
+
+
+@pytest.mark.asyncio
+async def test_detect_pollution_routes_to_doctor(bd_client):
+    """detect_pollution() routes to `bd doctor --check=pollution` (GH#4037)."""
+    with patch.object(bd_client, "_run_command", new=AsyncMock(return_value={})) as run:
+        await bd_client.detect_pollution()
+    run.assert_awaited_once_with("doctor", "--check=pollution")
+
+
+@pytest.mark.asyncio
+async def test_detect_pollution_clean_adds_flags(bd_client):
+    """detect_pollution(clean=True) appends --clean --yes."""
+    with patch.object(bd_client, "_run_command", new=AsyncMock(return_value={})) as run:
+        await bd_client.detect_pollution(clean=True)
+    run.assert_awaited_once_with("doctor", "--check=pollution", "--clean", "--yes")
+
+
+@pytest.mark.asyncio
+async def test_add_comment(bd_client, mock_process):
+    """Test add_comment method (bd comment <id> <text>)."""
+    mock_process.communicate = AsyncMock(return_value=(b"Comment added\n", b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        params = AddCommentParams(issue_id="bd-1", text="Working on this now")
+        result = await bd_client.add_comment(params)
+
+    assert "bd-1" in result
+    # Verify the comment subcommand and positional args were passed through
+    call_args = mock_exec.call_args[0]
+    assert "comment" in call_args
+    assert "bd-1" in call_args
+    assert "Working on this now" in call_args
+
+
+@pytest.mark.asyncio
+async def test_add_comment_failure(bd_client, mock_process):
+    """Test add_comment surfaces a bd failure."""
+    mock_process.returncode = 1
+    mock_process.communicate = AsyncMock(return_value=(b"", b"issue not found"))
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_process),
+        pytest.raises(BdCommandError, match="bd comment failed"),
+    ):
+        params = AddCommentParams(issue_id="bd-999", text="hi")
+        await bd_client.add_comment(params)
+
+
+@pytest.mark.asyncio
+async def test_add_comment_not_found(bd_client):
+    """Test add_comment when bd executable not found."""
+    with (
+        patch("asyncio.create_subprocess_exec", side_effect=FileNotFoundError()),
+        pytest.raises(BdNotFoundError, match="bd CLI not found"),
+    ):
+        params = AddCommentParams(issue_id="bd-1", text="hi")
+        await bd_client.add_comment(params)
+
+
+@pytest.mark.asyncio
+async def test_add_note(bd_client, mock_process):
+    """Test add_note method (bd note <id> <text>)."""
+    mock_process.communicate = AsyncMock(return_value=(b"Note appended\n", b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process) as mock_exec:
+        params = AddNoteParams(issue_id="bd-1", text="Fixed the flaky test")
+        result = await bd_client.add_note(params)
+
+    assert "bd-1" in result
+    call_args = mock_exec.call_args[0]
+    assert "note" in call_args
+    assert "bd-1" in call_args
+
+
+@pytest.mark.asyncio
+async def test_list_comments(bd_client, mock_process):
+    """Test list_comments parses `bd comments --json` output."""
+    comments_data = [
+        {
+            "id": "c-1",
+            "issue_id": "bd-1",
+            "author": "alice",
+            "text": "First comment",
+            "created_at": "2025-01-25T00:00:00Z",
+        },
+        {
+            "id": "c-2",
+            "issue_id": "bd-1",
+            "author": None,
+            "text": "Second comment",
+            "created_at": "2025-01-25T01:00:00Z",
+        },
+    ]
+    mock_process.communicate = AsyncMock(return_value=(json.dumps(comments_data).encode(), b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+        params = ListCommentsParams(issue_id="bd-1")
+        comments = await bd_client.list_comments(params)
+
+    assert len(comments) == 2
+    assert comments[0].id == "c-1"
+    assert comments[0].author == "alice"
+    assert comments[1].author is None
+    assert comments[1].text == "Second comment"
+
+
+@pytest.mark.asyncio
+async def test_list_comments_invalid_response(bd_client, mock_process):
+    """Test list_comments returns [] for a non-list response."""
+    mock_process.communicate = AsyncMock(return_value=(json.dumps({"error": "nope"}).encode(), b""))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_process):
+        params = ListCommentsParams(issue_id="bd-1")
+        comments = await bd_client.list_comments(params)
+
+    assert comments == []

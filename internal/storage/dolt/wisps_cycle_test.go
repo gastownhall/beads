@@ -2,53 +2,11 @@ package dolt
 
 import (
 	"context"
-	"reflect"
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
-
-func TestWispCycleDetectionTablesUseBothTables(t *testing.T) {
-	got := wispCycleDetectionTables()
-	want := []string{"dependencies", "wisp_dependencies"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-}
-
-func TestWispCycleReachabilityQuerySingleTableJoinsDirectly(t *testing.T) {
-	query := wispCycleReachabilityQuery([]string{"wisp_dependencies"})
-	if !strings.Contains(query, "JOIN wisp_dependencies d ON d.issue_id = r.node") {
-		t.Fatalf("query does not join wisp_dependencies directly:\n%s", query)
-	}
-	if strings.Contains(query, "JOIN (SELECT") {
-		t.Fatalf("single-table wisp cycle query should not materialize a derived dependency table:\n%s", query)
-	}
-	if !strings.Contains(query, "d.type = 'blocks'") {
-		t.Fatalf("query does not filter blocks at the direct join:\n%s", query)
-	}
-	if strings.Contains(query, "UNION ALL") || strings.Contains(query, "depth") {
-		t.Fatalf("wisp cycle query should traverse unique nodes, not enumerate paths:\n%s", query)
-	}
-}
-
-func TestWispCycleReachabilityQueryMultipleTablesTraversesUniqueNodes(t *testing.T) {
-	query := wispCycleReachabilityQuery([]string{"dependencies", "wisp_dependencies"})
-	if strings.Contains(query, "UNION ALL") || strings.Contains(query, "depth") {
-		t.Fatalf("multi-table wisp cycle query should traverse unique nodes, not enumerate paths:\n%s", query)
-	}
-	if !strings.Contains(query, "FROM dependencies") {
-		t.Fatalf("query does not include dependencies table:\n%s", query)
-	}
-	if !strings.Contains(query, "FROM wisp_dependencies") {
-		t.Fatalf("query does not include wisp_dependencies table:\n%s", query)
-	}
-	if !strings.Contains(query, issueops.DepTargetExpr) {
-		t.Fatalf("query does not resolve depends_on_id via DepTargetExpr:\n%s", query)
-	}
-}
 
 func TestAddDependencyRejectsPermanentEndpointCycleThroughWisp(t *testing.T) {
 	store, cleanup := setupTestStore(t)

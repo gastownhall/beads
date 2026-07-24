@@ -16,13 +16,13 @@ import (
 // For hot-path callers that partition a batch of IDs by wisp status,
 // prefer WispIDSetInTx + partitionByWispSet to amortize the per-ID
 // query cost into a single scoped query over the batch.
-func IsActiveWispInTx(ctx context.Context, tx *sql.Tx, id string) bool {
+func IsActiveWispInTx(ctx context.Context, tx DBTX, id string) bool {
 	var exists int
 	err := tx.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", id).Scan(&exists)
 	return err == nil
 }
 
-func wispsTableEmptyOrMissingInTx(ctx context.Context, tx *sql.Tx) (bool, error) {
+func wispsTableEmptyOrMissingInTx(ctx context.Context, tx DBTX) (bool, error) {
 	var probe int
 	err := tx.QueryRowContext(ctx, "SELECT 1 FROM wisps LIMIT 1").Scan(&probe)
 	switch {
@@ -64,7 +64,7 @@ func optionalTableExistsInTx(ctx context.Context, tx *sql.Tx, table string) (boo
 // Returns an empty set when ids is empty; never issues a query.
 //
 //nolint:gosec // G201: query uses placeholder-only interpolation
-func WispIDSetInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[string]struct{}, error) {
+func WispIDSetInTx(ctx context.Context, tx DBTX, ids []string) (map[string]struct{}, error) {
 	set := make(map[string]struct{})
 	if len(ids) == 0 {
 		return set, nil
@@ -128,7 +128,7 @@ func partitionByWispSet(ids []string, wispSet map[string]struct{}) (wispIDs, per
 // and can push bulk hydration past the context deadline (see GH#3414).
 // IDs not present in the wisps table are treated as permanent issue IDs.
 // Returned slices preserve the input ordering within each bucket.
-func PartitionWispIDsInTx(ctx context.Context, tx *sql.Tx, ids []string) (wispIDs, permIDs []string, err error) {
+func PartitionWispIDsInTx(ctx context.Context, tx DBTX, ids []string) (wispIDs, permIDs []string, err error) {
 	if len(ids) == 0 {
 		return nil, nil, nil
 	}

@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/beads/internal/git"
 )
 
 var gitCommandRunner = func(repoPath string, args ...string) ([]byte, error) {
@@ -34,16 +36,23 @@ const (
 // 3. Default to maintainer for local projects (no remote configured)
 func DetectUserRole(repoPath string) (UserRole, error) {
 	// First check for explicit role in git config (preferred source)
-	output, err := gitCommandRunner(repoPath, "config", "--get", "beads.role")
-	if err == nil {
-		role := strings.TrimSpace(string(output))
-		if role == string(Maintainer) {
-			return Maintainer, nil
+	if role, ok := roleFromGitConfig(repoPath); ok {
+		return role, nil
+	}
+
+	// jj secondary workspaces have no .git of their own, so the lookup above
+	// fails even when the primary workspace has beads.role set. Resolve the
+	// primary workspace and retry there, then run the remaining fallbacks
+	// against the primary's git repo since the secondary has no usable git
+	// context. The resolution is anchored at repoPath (not cwd) so it stays
+	// consistent with the git-config lookup above. (GH#2950)
+	if _, isSecondary := git.JJSecondaryWorkspaceRootFrom(repoPath); isSecondary {
+		if primaryRoot, err := git.GetJJPrimaryWorkspaceRootFrom(repoPath); err == nil {
+			if role, ok := roleFromGitConfig(primaryRoot); ok {
+				return role, nil
+			}
+			repoPath = primaryRoot
 		}
-		if role == string(Contributor) {
-			return Contributor, nil
-		}
-		// Invalid role value - fall through with warning
 	}
 
 	// Fallback to URL heuristic (deprecated, with warning)
@@ -52,6 +61,23 @@ func DetectUserRole(repoPath string) (UserRole, error) {
 	fmt.Fprintln(os.Stderr, "  Fix: git config beads.role maintainer")
 	fmt.Fprintln(os.Stderr, "  Or:  git config beads.role contributor")
 	return detectFromURL(repoPath), nil
+}
+
+// roleFromGitConfig reads beads.role from the git config of repoPath.
+// Returns (role, true) only for a valid explicit value; (_, false) when the
+// config is unset, git is unavailable, or the value is not a recognized role.
+func roleFromGitConfig(repoPath string) (UserRole, bool) {
+	output, err := gitCommandRunner(repoPath, "config", "--get", "beads.role")
+	if err != nil {
+		return "", false
+	}
+	switch UserRole(strings.TrimSpace(string(output))) {
+	case Maintainer:
+		return Maintainer, true
+	case Contributor:
+		return Contributor, true
+	}
+	return "", false
 }
 
 // detectFromURL uses remote URL patterns to infer user role.

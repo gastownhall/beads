@@ -17,39 +17,43 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/fs"
 	"github.com/steveyegge/beads/internal/storage/git"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
 type initProxiedServerInput struct {
-	prefix            string
-	database          string
-	roleFlag          string
-	initRemote        string
-	initRemoteChanged bool
-	destroyToken      string
-	serverConfigPath  string
-	serverLogPath     string
-	serverRootPath    string
-	quiet             bool
-	stealth           bool
-	skipHooks         bool
-	skipAgents        bool
-	reinitLocal       bool
-	contributor       bool
-	team              bool
-	fromJSONL         bool
-	nonInteractive    bool
+	prefix                 string
+	database               string
+	roleFlag               string
+	initRemote             string
+	initRemoteChanged      bool
+	destroyToken           string
+	serverConfigPath       string
+	serverLogPath          string
+	serverRootPath         string
+	serverProxyPort        int
+	serverProxyIdleTimeout time.Duration
+	externalConfig         *configfile.ExternalDoltConfig
+	quiet                  bool
+	stealth                bool
+	skipHooks              bool
+	skipAgents             bool
+	reinitLocal            bool
+	contributor            bool
+	team                   bool
+	fromJSONL              bool
+	nonInteractive         bool
 }
 
-func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput) {
+func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput) error {
 	if in.fromJSONL {
-		FatalError("--from-jsonl is not supported with --proxied-server")
+		return fmt.Errorf("--from-jsonl is not supported with --proxied-server")
 	}
 	if in.contributor {
-		FatalError("--contributor is not supported with --proxied-server")
+		return fmt.Errorf("--contributor is not supported with --proxied-server")
 	}
 	if in.team {
-		FatalError("--team is not supported with --proxied-server")
+		return fmt.Errorf("--team is not supported with --proxied-server")
 	}
 
 	if err := config.Initialize(); err != nil {
@@ -57,12 +61,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	if err := checkExistingBeadsData(in.prefix); err != nil {
-		FatalError("%v", err)
+		return err
 	}
 
 	cwd, err := os.Getwd()
 	if err != nil {
-		FatalError("failed to get current directory: %v", err)
+		return fmt.Errorf("failed to get current directory: %v", err)
 	}
 
 	fsProvider := fs.NewFileSystemProvider(cwd, newBeadsDirTemplates(), newFileSystemAdapters())
@@ -71,19 +75,22 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 
 	if in.stealth {
 		if err := fsUseCase.SetupStealthMode(ctx, !in.quiet); err != nil {
-			FatalError("setting up stealth mode: %v", err)
+			return fmt.Errorf("setting up stealth mode: %v", err)
 		}
 		in.skipHooks = true
 	}
 
-	prefix := resolveInitPrefix(in.prefix)
+	prefix, err := resolveInitPrefix(in.prefix)
+	if err != nil {
+		return err
+	}
 
 	proxiedInit, err := fsUseCase.ResolveProxiedInit(ctx, domain.ResolveProxiedInitParams{
 		Prefix: prefix,
 		DBFlag: in.database,
 	})
 	if err != nil {
-		FatalError("resolving proxied init: %v", err)
+		return fmt.Errorf("resolving proxied init: %v", err)
 	}
 	beadsDir, hasExplicitBeadsDir := proxiedInit.BeadsDir, proxiedInit.HasExplicit
 	dbName, projectID := proxiedInit.DBName, proxiedInit.ProjectID
@@ -92,15 +99,13 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 
 	if strings.Contains(filepath.Clean(cwd), string(filepath.Separator)+".beads"+string(filepath.Separator)) ||
 		strings.HasSuffix(filepath.Clean(cwd), string(filepath.Separator)+".beads") {
-		fmt.Fprintf(os.Stderr, "Error: cannot initialize bd inside a .beads directory\n")
-		fmt.Fprintf(os.Stderr, "Current directory: %s\n", cwd)
-		os.Exit(1)
+		return fmt.Errorf("cannot initialize bd inside a .beads directory\nCurrent directory: %s", cwd)
 	}
 
 	if !hasExplicitBeadsDir {
 		res, err := gitUC.EnsureGitRepo(ctx)
 		if err != nil {
-			FatalError("failed to initialize git repository: %v", err)
+			return fmt.Errorf("failed to initialize git repository: %v", err)
 		}
 		if res.DidInit && !in.quiet {
 			fmt.Printf("  %s Initialized git repository\n", ui.RenderPass("✓"))
@@ -108,22 +113,25 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	metadataBody, err := composeProxiedServerMetadataJSON(proxiedMetadataInputs{
-		dbName:           dbName,
-		projectID:        projectID,
-		serverConfigPath: in.serverConfigPath,
-		serverLogPath:    in.serverLogPath,
-		serverRootPath:   in.serverRootPath,
+		dbName:    dbName,
+		projectID: projectID,
 	})
 	if err != nil {
-		FatalError("composing metadata.json: %v", err)
+		return fmt.Errorf("composing metadata.json: %v", err)
 	}
 	configYAMLBody := renderInitConfigYAML("", false)
 
+	clientInfo, err := buildProxiedServerClientInfo(in.serverRootPath, in.serverConfigPath, in.serverLogPath, in.serverProxyPort, in.serverProxyIdleTimeout, in.externalConfig)
+	if err != nil {
+		return err
+	}
+
 	fsParams := domain.InitializeBeadsDirParams{
-		MetadataJSONBody:      metadataBody,
-		ConfigYAMLBody:        configYAMLBody,
-		SetNoCOW:              true,
-		WriteProjectGitignore: useLocalBeads && beadsDirIsLocal,
+		MetadataJSONBody:        metadataBody,
+		ConfigYAMLBody:          configYAMLBody,
+		ProxiedServerClientInfo: clientInfo,
+		SetNoCOW:                true,
+		WriteProjectGitignore:   useLocalBeads && beadsDirIsLocal,
 	}
 	if useLocalBeads {
 		fsParams.LocalVersion = Version
@@ -131,7 +139,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 
 	fsResult, err := fsUseCase.InitializeBeadsDir(ctx, fsParams)
 	if err != nil {
-		FatalError("initializing .beads directory: %v", err)
+		return fmt.Errorf("initializing .beads directory: %v", err)
 	}
 	if fsResult.NoCOWErr != nil && !in.quiet {
 		fmt.Fprintf(os.Stderr, "Warning: failed to set FS_NOCOW_FL on %s: %v\n", beadsDir, fsResult.NoCOWErr)
@@ -140,59 +148,62 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize version tracking: %v\n", fsResult.LocalVersionErr)
 	}
 
-	uowProvider, err := newProxiedServerUOWProvider(ctx, beadsDir)
+	initUOWProvider, err := newProxiedServerUOWProvider(ctx, beadsDir)
 	if err != nil {
-		FatalError("failed to open uow provider: %v", err)
+		return fmt.Errorf("failed to open uow provider: %v", err)
 	}
+	defer func() { _ = initUOWProvider.Close(ctx) }()
 
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		FatalError("failed to open unit of work: %v", err)
-	}
-	defer uw.Close(ctx)
+	remoteURL := resolveProxiedInitRemoteURL(ctx, gitUC, in)
 
-	bootstrapParams := domain.BootstrapProjectParams{
-		Prefix:         prefix,
-		ProjectID:      projectID,
-		BdVersion:      Version,
-		LastImportTime: time.Now(),
-	}
-
-	if repoID, err := beads.ComputeRepoID(); err == nil {
-		bootstrapParams.RepoID = repoID
+	var repoID, cloneID string
+	if id, err := beads.ComputeRepoID(); err == nil {
+		repoID = id
 	} else if !in.quiet {
 		fmt.Fprintf(os.Stderr, "Warning: could not compute repository ID: %v\n", err)
 	}
-	if cloneID, err := beads.GetCloneID(); err == nil {
-		bootstrapParams.CloneID = cloneID
+	if id, err := beads.GetCloneID(); err == nil {
+		cloneID = id
 	} else if !in.quiet {
 		fmt.Fprintf(os.Stderr, "Warning: could not compute clone ID: %v\n", err)
 	}
-	if remoteURL := resolveProxiedInitRemoteURL(ctx, gitUC, in); remoteURL != "" {
-		bootstrapParams.RemoteName = "origin"
-		bootstrapParams.RemoteURL = remoteURL
+
+	err = uow.RunTx(ctx, initUOWProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		bootstrapParams := domain.BootstrapProjectParams{
+			Prefix:         prefix,
+			ProjectID:      projectID,
+			BdVersion:      Version,
+			LastImportTime: time.Now(),
+			RepoID:         repoID,
+			CloneID:        cloneID,
+		}
+		if remoteURL != "" {
+			bootstrapParams.RemoteName = "origin"
+			bootstrapParams.RemoteURL = remoteURL
+		}
+
+		if _, err := uw.BootstrapUseCase().BootstrapProject(ctx, bootstrapParams); err != nil {
+			return "", fmt.Errorf("bootstrap project: %w", err)
+		}
+
+		return "bd init", nil
+	})
+	if err != nil {
+		return HandleError("%v", err)
 	}
 
-	if _, err := uw.BootstrapUseCase().BootstrapProject(ctx, bootstrapParams); err != nil {
-		FatalError("bootstrap project: %v", err)
-	}
-
-	if err := uw.Commit(ctx, "bd init"); err != nil {
-		FatalError("commit init: %v", err)
-	}
-
-	runInitProxiedServerTail(cmd, ctx, in, runInitTailContext{
+	return runInitProxiedServerTail(cmd, ctx, in, runInitTailContext{
 		beadsDir:      beadsDir,
 		prefix:        prefix,
 		dbName:        dbName,
 		useLocalBeads: useLocalBeads,
-		remoteURL:     bootstrapParams.RemoteURL,
+		remoteURL:     remoteURL,
 		fsUseCase:     fsUseCase,
 		gitUC:         gitUC,
 	})
 }
 
-func resolveInitPrefix(flagPrefix string) string {
+func resolveInitPrefix(flagPrefix string) (string, error) {
 	prefix := flagPrefix
 	if prefix == "" {
 		prefix = config.GetString("issue-prefix")
@@ -200,7 +211,7 @@ func resolveInitPrefix(flagPrefix string) string {
 	if prefix == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
-			FatalError("failed to get current directory: %v", err)
+			return "", fmt.Errorf("failed to get current directory: %v", err)
 		}
 		prefix = filepath.Base(cwd)
 	}
@@ -210,7 +221,7 @@ func resolveInitPrefix(flagPrefix string) string {
 	if len(prefix) > 0 && !((prefix[0] >= 'a' && prefix[0] <= 'z') || (prefix[0] >= 'A' && prefix[0] <= 'Z') || prefix[0] == '_') {
 		prefix = "bd_" + prefix
 	}
-	return prefix
+	return prefix, nil
 }
 
 func resolveProxiedInitRemoteURL(ctx context.Context, gitUC domain.GitUseCase, in initProxiedServerInput) string {
@@ -230,11 +241,8 @@ func resolveProxiedInitRemoteURL(ctx context.Context, gitUC domain.GitUseCase, i
 }
 
 type proxiedMetadataInputs struct {
-	dbName           string
-	projectID        string
-	serverConfigPath string
-	serverLogPath    string
-	serverRootPath   string
+	dbName    string
+	projectID string
 }
 
 func composeProxiedServerMetadataJSON(in proxiedMetadataInputs) ([]byte, error) {
@@ -245,24 +253,51 @@ func composeProxiedServerMetadataJSON(in proxiedMetadataInputs) ([]byte, error) 
 	cfg.DoltMode = configfile.DoltModeProxiedServer
 	cfg.ProjectID = in.projectID
 
-	cfg.DoltProxiedServerConfig = in.serverConfigPath
-	cfg.DoltProxiedServerLog = in.serverLogPath
-	cfg.DoltProxiedServerRootPath = in.serverRootPath
-
 	if filepath.IsAbs(cfg.DoltDataDir) {
 		cfg.DoltDataDir = ""
 	}
-	if filepath.IsAbs(cfg.DoltProxiedServerConfig) {
-		cfg.DoltProxiedServerConfig = ""
-	}
-	if filepath.IsAbs(cfg.DoltProxiedServerLog) {
-		cfg.DoltProxiedServerLog = ""
-	}
-	if filepath.IsAbs(cfg.DoltProxiedServerRootPath) {
-		cfg.DoltProxiedServerRootPath = ""
-	}
 
 	return json.MarshalIndent(cfg, "", "  ")
+}
+
+func buildProxiedServerClientInfo(rootPath, configPath, logPath string, port int, idleTimeout time.Duration, external *configfile.ExternalDoltConfig) (*configfile.ProxiedServerClientInfo, error) {
+	if rootPath == "" && configPath == "" && logPath == "" && port == 0 && idleTimeout == 0 && external == nil {
+		return nil, nil
+	}
+	clean := func(p string) (string, error) {
+		if p == "" {
+			return "", nil
+		}
+		if !filepath.IsAbs(p) {
+			return "", fmt.Errorf("buildProxiedServerClientInfo: path %q is not absolute", p)
+		}
+		return filepath.Clean(p), nil
+	}
+	rootAbs, err := clean(rootPath)
+	if err != nil {
+		return nil, err
+	}
+	configAbs, err := clean(configPath)
+	if err != nil {
+		return nil, err
+	}
+	logAbs, err := clean(logPath)
+	if err != nil {
+		return nil, err
+	}
+	if external != nil {
+		if err := external.Validate(); err != nil {
+			return nil, fmt.Errorf("buildProxiedServerClientInfo: %w", err)
+		}
+	}
+	return &configfile.ProxiedServerClientInfo{
+		RootPath:    rootAbs,
+		ConfigPath:  configAbs,
+		LogPath:     logAbs,
+		Port:        port,
+		IdleTimeout: idleTimeout,
+		External:    external,
+	}, nil
 }
 
 type runInitTailContext struct {
@@ -275,7 +310,7 @@ type runInitTailContext struct {
 	gitUC         domain.GitUseCase
 }
 
-func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput, t runInitTailContext) {
+func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initProxiedServerInput, t runInitTailContext) error {
 	isRepo := t.gitUC.IsGitRepo(ctx)
 
 	if isRepo {
@@ -306,7 +341,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				shouldExclude, err := promptForkExclude(upstreamURL, in.quiet)
 				if err != nil && isCanceled(err) {
 					fmt.Fprintln(os.Stderr, "Setup canceled.")
-					exitCanceled()
+					return errCanceled()
 				}
 				if shouldExclude {
 					if err := t.fsUseCase.SetupForkExclude(ctx, !in.quiet); err != nil {
@@ -355,8 +390,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 		agentsFile, _ := cmd.Flags().GetString("agents-file")
 		if agentsFile != "" {
 			if err := config.ValidateAgentsFile(agentsFile); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --agents-file: %v\n", err)
-				return
+				return HandleError("invalid --agents-file: %v", err)
 			}
 			if err := t.fsUseCase.SetYAMLConfig(ctx, "agents.file", agentsFile); err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: failed to persist agents.file to config: %v\n", err)
@@ -378,6 +412,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				TemplatePath: agentsTemplate,
 				Profile:      agentsProfileStr,
 				HasRemote:    t.remoteURL != "",
+				NoPush:       config.GetBool("no-push"),
 			})
 			if err := t.fsUseCase.InstallClaudeProject(ctx, in.stealth); err != nil && !in.quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to setup Claude hooks: %v\n", err)
@@ -394,8 +429,9 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				"CLAUDE.md",
 				".gitignore",
 			},
-			Message:  "bd init: initialize beads issue tracking",
-			NoVerify: true,
+			Message:   "bd init: initialize beads issue tracking",
+			NoVerify:  true,
+			SkipHooks: true,
 		})
 		switch {
 		case err != nil && !in.quiet:
@@ -412,12 +448,12 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 			fmt.Fprintf(os.Stderr, "  %s\n\n", ui.RenderAccent("git remote add upstream <repo-url>"))
 		}
 		if !in.stealth && !in.initRemoteChanged && t.remoteURL == "" {
-			printInitNoDoltRemoteWarning()
+			printInitNoDoltRemoteWarning(false)
 		}
 	}
 
 	if in.quiet {
-		return
+		return nil
 	}
 	fmt.Printf("\n%s bd initialized successfully!\n\n", ui.RenderPass("✓"))
 	fmt.Printf("  Backend: %s\n", ui.RenderAccent(configfile.BackendDolt))
@@ -426,4 +462,5 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 	fmt.Printf("  Issue prefix: %s\n", ui.RenderAccent(t.prefix))
 	fmt.Printf("  Issues will be named: %s\n\n", ui.RenderAccent(t.prefix+"-<hash> (e.g., "+t.prefix+"-a3f2dd)"))
 	fmt.Printf("Run %s to get started.\n\n", ui.RenderAccent("bd quickstart"))
+	return nil
 }

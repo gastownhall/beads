@@ -1,0 +1,47 @@
+name: Deploy legacy docs redirect
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/pages-redirect/**'
+      - '.github/workflows/deploy-pages-redirect.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: ${{ github.repository == 'gastownhall/beads' }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+        with:
+          sparse-checkout: .github/pages-redirect
+
+      - name: Build redirect artifact
+        run: |
+          mkdir -p _site
+          cp -f .github/pages-redirect/index.html _site/index.html
+          cp -f .github/pages-redirect/index.html _site/404.html
+
+      - name: Upload redirect artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

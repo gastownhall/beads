@@ -45,6 +45,39 @@ func bdUpdateFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
+// bdUpdateCapture runs "bd update" expecting success, returning stdout and
+// stderr separately (stdout may be JSON; warnings must not pollute it).
+func bdUpdateCapture(t *testing.T, bd, dir string, args ...string) (stdout, stderr string) {
+	t.Helper()
+	fullArgs := append([]string{"update"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	outBuf, errBuf, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd update %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, outBuf.String(), errBuf.String())
+	}
+	return outBuf.String(), errBuf.String()
+}
+
+func embeddedCurrentCommit(t *testing.T, beadsDir, database string) string {
+	t.Helper()
+	store, err := embeddeddolt.Open(t.Context(), beadsDir, database, "main")
+	if err != nil {
+		t.Fatalf("open embedded store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	head, err := store.GetCurrentCommit(t.Context())
+	if err != nil {
+		t.Fatalf("GetCurrentCommit: %v", err)
+	}
+	if head == "" {
+		t.Fatal("GetCurrentCommit returned empty hash")
+	}
+	return head
+}
+
 // bdShowJSON runs "bd show <id> --json" and returns the raw JSON output.
 func bdShowJSON(t *testing.T, bd, dir, id string) string {
 	t.Helper()
@@ -119,6 +152,71 @@ func showDeps(t *testing.T, bd, dir, id string) []struct {
 }
 
 // ===== Update tests =====
+
+func TestEmbeddedUpdateBatchAutoCommitDoesNotAdvanceHead(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt update tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ub")
+	issue := bdCreate(t, bd, dir, "Batch update")
+	before := embeddedCurrentCommit(t, beadsDir, "ub")
+
+	cmd := exec.Command(bd, "--dolt-auto-commit", "batch", "update", issue.ID, "--title", "Deferred batch update")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd --dolt-auto-commit batch update failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	after := embeddedCurrentCommit(t, beadsDir, "ub")
+	if after != before {
+		t.Fatalf("batch-mode update advanced HEAD; before=%s after=%s", before, after)
+	}
+}
+
+func TestEmbeddedUpdateRoutedStoreCommitsTargetHead(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt update tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "src")
+
+	targetDir := filepath.Join(dir, "target-repo")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+	runBDInit(t, bd, targetDir, "--prefix", "tgt")
+
+	issue := bdCreate(t, bd, targetDir, "Routed target issue")
+	route := `{"prefix":"tgt-","path":"target-repo"}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, ".beads", "routes.jsonl"), []byte(route), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	targetBeadsDir := filepath.Join(targetDir, ".beads")
+	before := embeddedCurrentCommit(t, targetBeadsDir, "tgt")
+	bdUpdate(t, bd, dir, issue.ID, "--title", "Updated through route")
+	after := embeddedCurrentCommit(t, targetBeadsDir, "tgt")
+	if after == before {
+		t.Fatalf("routed update did not advance target HEAD; before=%s after=%s", before, after)
+	}
+
+	targetStore := openStore(t, targetBeadsDir, "tgt")
+	got, err := targetStore.GetIssue(t.Context(), issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue in target: %v", err)
+	}
+	if got.Title != "Updated through route" {
+		t.Fatalf("target title = %q, want routed update title", got.Title)
+	}
+}
 
 func TestEmbeddedUpdate(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
@@ -249,6 +347,42 @@ func TestEmbeddedUpdate(t *testing.T) {
 			t.Errorf("expected conflict error, got: %s", out)
 		}
 	})
+
+	noteWarningCases := []struct {
+		name        string
+		initial     string
+		args        []string
+		wantWarning bool
+		wantNotes   string
+	}{
+		{name: "overwrite_warns", initial: "original notes", args: []string{"--notes", "replacement notes"}, wantWarning: true, wantNotes: "replacement notes"},
+		{name: "empty_is_silent", args: []string{"--notes", "first notes"}, wantNotes: "first notes"},
+		{name: "append_is_silent", initial: "original notes", args: []string{"--append-notes", "more"}, wantNotes: "original notes\nmore"},
+		{name: "same_value_is_silent", initial: "unchanged notes", args: []string{"--notes", "unchanged notes"}, wantNotes: "unchanged notes"},
+	}
+	for _, tc := range noteWarningCases {
+		t.Run("update_notes_"+tc.name, func(t *testing.T) {
+			issue := bdCreate(t, bd, dir, "Notes warning test", "--type", "task")
+			if tc.initial != "" {
+				bdUpdate(t, bd, dir, issue.ID, "--notes", tc.initial)
+			}
+
+			stdout, stderr := bdUpdateCapture(t, bd, dir, append([]string{issue.ID}, tc.args...)...)
+			warning := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
+			if tc.wantWarning && !strings.Contains(stderr, warning) {
+				t.Errorf("expected stderr to contain %q, got: %s", warning, stderr)
+			}
+			if !tc.wantWarning && strings.Contains(stderr, "--notes replaced existing notes") {
+				t.Errorf("expected no overwrite warning, got stderr: %s", stderr)
+			}
+			if strings.Contains(stdout, "warning:") {
+				t.Errorf("warning must not appear on stdout, got: %s", stdout)
+			}
+			if got := bdShow(t, bd, dir, issue.ID); got.Notes != tc.wantNotes {
+				t.Errorf("expected notes %q, got %q", tc.wantNotes, got.Notes)
+			}
+		})
+	}
 
 	t.Run("update_acceptance", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "AC test", "--type", "task")
@@ -582,8 +716,48 @@ func TestEmbeddedUpdate(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Claim fail test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--assignee", "alice")
 		out := bdUpdateFail(t, bd, dir, issue.ID, "--claim")
-		if !strings.Contains(out, "already claimed") {
-			t.Errorf("expected 'already claimed' error, got: %s", out)
+		if !strings.Contains(out, "already assigned to") {
+			t.Errorf("expected 'already assigned to' error, got: %s", out)
+		}
+		// The refusal must steer toward the holder, not teach an
+		// unclaim-then-claim eviction of a live claim (bd-at6rc / wy-zs5s2).
+		if !strings.Contains(out, "coordinate with the holder") {
+			t.Errorf("refusal should say coordinate-with-holder, got: %s", out)
+		}
+		if strings.Contains(out, "to release it before re-claiming") {
+			t.Errorf("refusal must not suggest plain unclaim of a foreign claim, got: %s", out)
+		}
+		// Nor may it name unclaim or --force at all: copy that names an
+		// eviction command gets pattern-matched by batch agents into
+		// `unclaim --force; claim` — a stronger steamroller than the one
+		// this fix removed (wy-yuclk).
+		if strings.Contains(out, "unclaim") || strings.Contains(out, "--force") {
+			t.Errorf("claim refusal must not name an eviction command, got: %s", out)
+		}
+	})
+
+	// A batch where one claim is lost and another is won must exit non-zero, so
+	// the lost claim is not hidden from exit-code automation (beads audit
+	// finding #10). The winner is still committed.
+	t.Run("update_claim_batch_partial_loss_exits_nonzero", func(t *testing.T) {
+		lost := bdCreate(t, bd, dir, "Batch lost", "--type", "task")
+		won := bdCreate(t, bd, dir, "Batch won", "--type", "task")
+		// Pre-assign `lost` to someone else so the default actor's claim loses.
+		bdUpdate(t, bd, dir, lost.ID, "--assignee", "alice")
+
+		out := bdUpdateFail(t, bd, dir, lost.ID, won.ID, "--claim")
+		if !strings.Contains(out, "already assigned to") {
+			t.Errorf("expected 'already assigned to' error in batch output, got: %s", out)
+		}
+		// The winning claim still lands despite the batch exiting non-zero.
+		gotWon := bdShow(t, bd, dir, won.ID)
+		if gotWon.Status != types.StatusInProgress {
+			t.Errorf("winning claim %s: status = %s, want in_progress", won.ID, gotWon.Status)
+		}
+		// The lost issue is untouched.
+		gotLost := bdShow(t, bd, dir, lost.ID)
+		if gotLost.Assignee != "alice" {
+			t.Errorf("lost issue %s assignee = %q, want alice (unchanged)", lost.ID, gotLost.Assignee)
 		}
 	})
 

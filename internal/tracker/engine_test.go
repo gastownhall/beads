@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
@@ -42,205 +41,6 @@ func newTestStore(t *testing.T) *dolt.DoltStore {
 		store.Close()
 	})
 	return store
-}
-
-// mockTracker implements IssueTracker for testing.
-type mockTracker struct {
-	name            string
-	issues          []TrackerIssue
-	created         []*types.Issue
-	updated         map[string]*types.Issue
-	fetchErr        error
-	fetchIssueErr   error
-	createErr       error
-	createFailAfter int // fail after this many successful creates (0 = fail immediately)
-	updateErr       error
-	fieldMapper     FieldMapper
-	fetchIssues     func(context.Context, FetchOptions) ([]TrackerIssue, error)
-}
-
-type mockExternalRefTracker struct {
-	*mockTracker
-	buildRef func(*TrackerIssue) string
-	extract  func(string) string
-	isRef    func(string) bool
-}
-
-type mockBatchTracker struct {
-	*mockTracker
-	batchResult   *BatchPushResult
-	batchDryRun   *BatchPushResult
-	batchErr      error
-	batchCalls    int
-	batchDryCalls int
-	batchIssues   []*types.Issue
-	batchForceIDs map[string]bool
-}
-
-func newMockTracker(name string) *mockTracker {
-	return &mockTracker{
-		name:        name,
-		updated:     make(map[string]*types.Issue),
-		fieldMapper: &mockMapper{},
-	}
-}
-
-func (m *mockExternalRefTracker) IsExternalRef(ref string) bool {
-	if m.isRef != nil {
-		return m.isRef(ref)
-	}
-	return m.mockTracker.IsExternalRef(ref)
-}
-
-func (m *mockExternalRefTracker) ExtractIdentifier(ref string) string {
-	if m.extract != nil {
-		return m.extract(ref)
-	}
-	return m.mockTracker.ExtractIdentifier(ref)
-}
-
-func (m *mockExternalRefTracker) BuildExternalRef(issue *TrackerIssue) string {
-	if m.buildRef != nil {
-		return m.buildRef(issue)
-	}
-	return m.mockTracker.BuildExternalRef(issue)
-}
-
-func (m *mockTracker) Name() string                                    { return m.name }
-func (m *mockTracker) DisplayName() string                             { return m.name }
-func (m *mockTracker) ConfigPrefix() string                            { return m.name }
-func (m *mockTracker) Init(_ context.Context, _ storage.Storage) error { return nil }
-func (m *mockTracker) Validate() error                                 { return nil }
-func (m *mockTracker) Close() error                                    { return nil }
-func (m *mockTracker) FieldMapper() FieldMapper                        { return m.fieldMapper }
-func (m *mockTracker) IsExternalRef(ref string) bool                   { return len(ref) > 0 }
-func (m *mockTracker) ExtractIdentifier(ref string) string {
-	// Extract "EXT-1" from "https://test.test/EXT-1"
-	if i := strings.LastIndex(ref, "/"); i >= 0 {
-		return ref[i+1:]
-	}
-	return ref
-}
-func (m *mockTracker) BuildExternalRef(issue *TrackerIssue) string {
-	return fmt.Sprintf("https://%s.test/%s", m.name, issue.Identifier)
-}
-
-func (m *mockBatchTracker) BatchPush(_ context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error) {
-	if m.batchErr != nil {
-		return nil, m.batchErr
-	}
-	m.batchCalls++
-	m.batchIssues = append(m.batchIssues, issues...)
-	m.batchForceIDs = forceIDs
-	if m.batchResult != nil {
-		return m.batchResult, nil
-	}
-	return &BatchPushResult{}, nil
-}
-
-func (m *mockBatchTracker) BatchPushDryRun(_ context.Context, issues []*types.Issue, forceIDs map[string]bool) (*BatchPushResult, error) {
-	if m.batchErr != nil {
-		return nil, m.batchErr
-	}
-	m.batchDryCalls++
-	m.batchIssues = append(m.batchIssues, issues...)
-	m.batchForceIDs = forceIDs
-	if m.batchDryRun != nil {
-		return m.batchDryRun, nil
-	}
-	return &BatchPushResult{}, nil
-}
-
-func (m *mockTracker) FetchIssues(ctx context.Context, opts FetchOptions) ([]TrackerIssue, error) {
-	if m.fetchErr != nil {
-		return nil, m.fetchErr
-	}
-	if m.fetchIssues != nil {
-		return m.fetchIssues(ctx, opts)
-	}
-	return m.issues, nil
-}
-
-func (m *mockTracker) FetchIssue(_ context.Context, identifier string) (*TrackerIssue, error) {
-	if m.fetchIssueErr != nil {
-		return nil, m.fetchIssueErr
-	}
-	if m.fetchErr != nil {
-		return nil, m.fetchErr
-	}
-	for i := range m.issues {
-		if m.issues[i].Identifier == identifier {
-			return &m.issues[i], nil
-		}
-	}
-	return nil, nil
-}
-
-func (m *mockTracker) CreateIssue(_ context.Context, issue *types.Issue) (*TrackerIssue, error) {
-	if m.createErr != nil {
-		if m.createFailAfter > 0 && len(m.created) < m.createFailAfter {
-			// Allow first N creates to succeed
-		} else {
-			return nil, m.createErr
-		}
-	}
-	m.created = append(m.created, issue)
-	return &TrackerIssue{
-		ID:         "ext-" + issue.ID,
-		Identifier: "EXT-" + issue.ID,
-		URL:        fmt.Sprintf("https://%s.test/EXT-%s", m.name, issue.ID),
-		Title:      issue.Title,
-	}, nil
-}
-
-func (m *mockTracker) UpdateIssue(_ context.Context, externalID string, issue *types.Issue) (*TrackerIssue, error) {
-	if m.updateErr != nil {
-		return nil, m.updateErr
-	}
-	m.updated[externalID] = issue
-	return &TrackerIssue{
-		ID:         externalID,
-		Identifier: externalID,
-		Title:      issue.Title,
-	}, nil
-}
-
-// mockMapper implements FieldMapper for testing.
-type mockMapper struct {
-	issueToBeads func(*TrackerIssue) *IssueConversion
-}
-
-func (m *mockMapper) PriorityToBeads(p interface{}) int {
-	if v, ok := p.(int); ok {
-		return v
-	}
-	return 2
-}
-func (m *mockMapper) PriorityToTracker(p int) interface{}         { return p }
-func (m *mockMapper) StatusToBeads(_ interface{}) types.Status    { return types.StatusOpen }
-func (m *mockMapper) StatusToTracker(s types.Status) interface{}  { return string(s) }
-func (m *mockMapper) TypeToBeads(_ interface{}) types.IssueType   { return types.TypeTask }
-func (m *mockMapper) TypeToTracker(t types.IssueType) interface{} { return string(t) }
-func (m *mockMapper) IssueToTracker(issue *types.Issue) map[string]interface{} {
-	return map[string]interface{}{
-		"title":       issue.Title,
-		"description": issue.Description,
-	}
-}
-
-func (m *mockMapper) IssueToBeads(ti *TrackerIssue) *IssueConversion {
-	if m.issueToBeads != nil {
-		return m.issueToBeads(ti)
-	}
-	return &IssueConversion{
-		Issue: &types.Issue{
-			Title:       ti.Title,
-			Description: ti.Description,
-			Priority:    2,
-			Status:      types.StatusOpen,
-			IssueType:   types.TypeTask,
-		},
-	}
 }
 
 func TestEnginePullMatchesExistingIssueByLocalID(t *testing.T) {
@@ -1094,10 +894,11 @@ func TestEngineConflictResolution(t *testing.T) {
 	store := newTestStore(t)
 	defer store.Close()
 
-	// Set up last_sync (use UTC to avoid DATETIME timezone round-trip issues)
+	// Set up last_sync (use UTC to avoid DATETIME timezone round-trip issues).
+	// The engine reads last_sync from local metadata, not config.
 	lastSync := time.Now().UTC().Add(-1 * time.Hour)
-	if err := store.SetConfig(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
-		t.Fatalf("SetConfig() error: %v", err)
+	if err := store.SetLocalMetadata(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetLocalMetadata() error: %v", err)
 	}
 
 	// Create a local issue that was modified after last_sync
@@ -1146,8 +947,8 @@ func TestEngineSyncDoesNotCreateFalseConflictsAfterPull(t *testing.T) {
 	defer store.Close()
 
 	lastSync := time.Now().UTC().Add(-1 * time.Hour)
-	if err := store.SetConfig(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
-		t.Fatalf("SetConfig() error: %v", err)
+	if err := store.SetLocalMetadata(ctx, "test.last_sync", lastSync.Format(time.RFC3339)); err != nil {
+		t.Fatalf("SetLocalMetadata() error: %v", err)
 	}
 
 	issue := &types.Issue{
@@ -2994,5 +2795,247 @@ func TestEngineWarnCollectsMessages(t *testing.T) {
 	}
 	if len(engine.warnings) != 3 {
 		t.Errorf("expected 3 total warnings, got %d", len(engine.warnings))
+	}
+}
+
+// TestEngineExcludeIDPrefix verifies that beads whose ID starts with the
+// configured prefix are skipped from push. Mirrors mayor's bd-ee0
+// houmanoids_www use case where `hw-mol-*` workflow-artifact beads must
+// not propagate to Linear regardless of issue type.
+func TestEngineExcludeIDPrefix(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, id := range []string{"hw-mol-foo", "hw-mol-bar", "hw-real-1", "hw-real-2"} {
+		issue := &types.Issue{
+			ID: id, Title: "Issue " + id, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", id, err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, ExcludeIDPrefix: "hw-mol-"})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Sync() not successful: %s", result.Error)
+	}
+	if len(tracker.created) != 2 {
+		t.Errorf("created %d issues; want 2 (only hw-real-*)", len(tracker.created))
+	}
+	for _, i := range tracker.created {
+		if strings.HasPrefix(i.ID, "hw-mol-") {
+			t.Errorf("hw-mol- bead leaked through filter: %s", i.ID)
+		}
+	}
+}
+
+// TestEngineExcludeIDPatterns verifies the comma-separated substring filter:
+// beads whose ID contains ANY listed substring (anywhere in the ID) are
+// skipped.
+func TestEngineExcludeIDPatterns(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, id := range []string{"hw-mol-x", "hw-wisp-y", "hw-sandbox-z", "hw-real-keep"} {
+		issue := &types.Issue{
+			ID: id, Title: "Issue " + id, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", id, err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{
+		Push:              true,
+		ExcludeIDPatterns: []string{"mol-", "wisp-", "sandbox-"},
+	})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Sync() not successful: %s", result.Error)
+	}
+	if len(tracker.created) != 1 || tracker.created[0].ID != "hw-real-keep" {
+		ids := make([]string, len(tracker.created))
+		for i, c := range tracker.created {
+			ids[i] = c.ID
+		}
+		t.Errorf("created IDs = %v, want [hw-real-keep]", ids)
+	}
+}
+
+// TestEngineExcludeIDBoth verifies union semantics: a bead matching EITHER
+// the prefix rule OR the patterns rule is excluded.
+func TestEngineExcludeIDBoth(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, id := range []string{
+		"hw-mol-via-prefix",  // matches prefix
+		"hw-evt-via-pattern", // matches pattern (-evt-)
+		"hw-mol-evt-both",    // matches both
+		"hw-real-keep",       // matches neither — pushed
+	} {
+		issue := &types.Issue{
+			ID: id, Title: "Issue " + id, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", id, err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{
+		Push:              true,
+		ExcludeIDPrefix:   "hw-mol-",
+		ExcludeIDPatterns: []string{"-evt-"},
+	})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Sync() not successful: %s", result.Error)
+	}
+	if len(tracker.created) != 1 || tracker.created[0].ID != "hw-real-keep" {
+		ids := make([]string, len(tracker.created))
+		for i, c := range tracker.created {
+			ids[i] = c.ID
+		}
+		t.Errorf("created IDs = %v, want [hw-real-keep]", ids)
+	}
+}
+
+// TestEngineExcludeID_AlreadySynced verifies that a bead with an existing
+// external_ref but matching an exclude rule produces NO update API call.
+// The Linear-side issue is left alone (the spec calls this out: users who
+// add a rule for an already-synced bead must manually archive/delete the
+// remote issue if desired).
+func TestEngineExcludeID_AlreadySynced(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	// A previously-synced bead — has external_ref. After the new exclude
+	// rule lands, it must not be updated.
+	stale := &types.Issue{
+		ID: "hw-mol-stale", Title: "Previously synced", Status: types.StatusOpen,
+		IssueType: types.TypeTask, Priority: 2,
+		ExternalRef: strPtr("https://test.test/EXT-STALE"),
+	}
+	if err := store.CreateIssue(ctx, stale, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{
+		{ID: "EXT-STALE", Identifier: "EXT-STALE", Title: "Old remote title"},
+	}
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, ExcludeIDPrefix: "hw-mol-"})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Sync() not successful: %s", result.Error)
+	}
+	if len(tracker.updated) != 0 {
+		t.Errorf("excluded already-synced bead was updated: %v", tracker.updated)
+	}
+	if len(tracker.created) != 0 {
+		t.Errorf("excluded already-synced bead was created: %d", len(tracker.created))
+	}
+}
+
+// TestEngineDryRunRespectsExcludeID verifies that --dry-run does not print
+// "Would create" / "Would update" lines for excluded beads. Asserts via the
+// engine's stats: an excluded bead increments Skipped, not Created or
+// Updated.
+func TestEngineDryRunRespectsExcludeID(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	for _, id := range []string{"hw-mol-skip", "hw-real-1"} {
+		issue := &types.Issue{
+			ID: id, Title: "Issue " + id, Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+			t.Fatalf("CreateIssue(%s) error: %v", id, err)
+		}
+	}
+
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, store, "test-actor")
+
+	result, err := engine.Sync(ctx, SyncOptions{Push: true, DryRun: true, ExcludeIDPrefix: "hw-mol-"})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("Sync() not successful: %s", result.Error)
+	}
+	// Dry-run should NOT have called the tracker (even for the unexcluded one,
+	// since DryRun=true short-circuits the API call).
+	if len(tracker.created) != 0 {
+		t.Errorf("dry-run created issues: %d", len(tracker.created))
+	}
+	// PushStats.Created counts intended creates; the excluded bead must NOT
+	// count there. Only hw-real-1 should be classified as a would-be create.
+	if result.PushStats.Created != 1 {
+		t.Errorf("PushStats.Created = %d, want 1 (only hw-real-1 should be a would-be create)", result.PushStats.Created)
+	}
+	if result.PushStats.Skipped != 1 {
+		t.Errorf("PushStats.Skipped = %d, want 1 (hw-mol-skip should be Skipped)", result.PushStats.Skipped)
+	}
+}
+
+// TestShouldPushIssue_ExcludeIDDirect tests the filter logic in isolation,
+// without the storage layer. Runs locally without Dolt/Docker.
+func TestShouldPushIssue_ExcludeIDDirect(t *testing.T) {
+	tracker := newMockTracker("test")
+	engine := NewEngine(tracker, nil, "test-actor")
+
+	tests := []struct {
+		name string
+		opts SyncOptions
+		id   string
+		want bool
+	}{
+		{"prefix match excludes", SyncOptions{ExcludeIDPrefix: "hw-mol-"}, "hw-mol-foo", false},
+		{"prefix non-match passes", SyncOptions{ExcludeIDPrefix: "hw-mol-"}, "hw-real-1", true},
+		{"empty prefix is no-op", SyncOptions{ExcludeIDPrefix: ""}, "hw-mol-foo", true},
+		{"prefix is case-sensitive", SyncOptions{ExcludeIDPrefix: "hw-mol-"}, "HW-MOL-foo", true},
+		{"pattern match anywhere excludes", SyncOptions{ExcludeIDPatterns: []string{"-wisp-"}}, "hw-wisp-x", false},
+		{"pattern match middle excludes", SyncOptions{ExcludeIDPatterns: []string{"sandbox"}}, "x-sandbox-y", false},
+		{"pattern non-match passes", SyncOptions{ExcludeIDPatterns: []string{"sandbox"}}, "hw-real-1", true},
+		{"empty pattern entry skipped", SyncOptions{ExcludeIDPatterns: []string{"", "wisp-"}}, "hw-wisp-x", false},
+		{"all empty patterns no-op", SyncOptions{ExcludeIDPatterns: []string{""}}, "hw-mol-foo", true},
+		{"prefix and pattern union: prefix match", SyncOptions{ExcludeIDPrefix: "hw-mol-", ExcludeIDPatterns: []string{"-evt-"}}, "hw-mol-foo", false},
+		{"prefix and pattern union: pattern match", SyncOptions{ExcludeIDPrefix: "hw-mol-", ExcludeIDPatterns: []string{"-evt-"}}, "hw-evt-foo", false},
+		{"prefix and pattern union: neither", SyncOptions{ExcludeIDPrefix: "hw-mol-", ExcludeIDPatterns: []string{"-evt-"}}, "hw-real-foo", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &types.Issue{ID: tt.id, IssueType: types.TypeTask, Status: types.StatusOpen}
+			got := engine.shouldPushIssue(issue, tt.opts)
+			if got != tt.want {
+				t.Errorf("shouldPushIssue(%q, %+v) = %v, want %v", tt.id, tt.opts, got, tt.want)
+			}
+		})
 	}
 }

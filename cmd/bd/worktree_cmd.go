@@ -12,7 +12,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -62,8 +64,10 @@ Examples:
   bd worktree create feature-auth           # Create at ./feature-auth
   bd worktree create bugfix --branch fix-1  # Create with branch name
   bd worktree create ../agents/worker-1     # Create at relative path`,
-	Args: cobra.ExactArgs(1),
-	RunE: runWorktreeCreate,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runWorktreeCreate,
 }
 
 var worktreeListCmd = &cobra.Command{
@@ -80,8 +84,10 @@ Shows each worktree with:
 Examples:
   bd worktree list          # List all worktrees
   bd worktree list --json   # JSON output`,
-	Args: cobra.NoArgs,
-	RunE: runWorktreeList,
+	Args:          cobra.NoArgs,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runWorktreeList,
 }
 
 var worktreeRemoveCmd = &cobra.Command{
@@ -99,8 +105,10 @@ Use --force to skip safety checks (not recommended).
 Examples:
   bd worktree remove feature-auth         # Remove with safety checks
   bd worktree remove feature-auth --force # Skip safety checks`,
-	Args: cobra.ExactArgs(1),
-	RunE: runWorktreeRemove,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runWorktreeRemove,
 }
 
 var worktreeInfoCmd = &cobra.Command{
@@ -117,8 +125,10 @@ If the current directory is in a git worktree, shows:
 Examples:
   bd worktree info          # Show current worktree info
   bd worktree info --json   # JSON output`,
-	Args: cobra.NoArgs,
-	RunE: runWorktreeInfo,
+	Args:          cobra.NoArgs,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runWorktreeInfo,
 }
 
 var (
@@ -137,8 +147,29 @@ func init() {
 	rootCmd.AddCommand(worktreeCmd)
 }
 
+// repairWorktreeBeadsPermissions applies FixBeadsDirPermissions to worktreePath/.beads when
+// the directory exists. Git worktree checkout can leave tracked .beads/ at permissive modes.
+func repairWorktreeBeadsPermissions(worktreePath string) {
+	beadsDir := filepath.Join(worktreePath, ".beads")
+	if fixed, err := config.FixBeadsDirPermissions(beadsDir); err != nil {
+		if !jsonOutput {
+			fmt.Fprintf(os.Stderr, "Warning: could not fix worktree .beads permissions: %v\n", err)
+		}
+	} else if fixed && !jsonOutput {
+		fmt.Fprintf(os.Stderr, "Fixed .beads permissions to %04o\n", config.BeadsDirPerm)
+	}
+}
+
 func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 	CheckReadonly("worktree create")
+
+	evt := metrics.NewCommandEvent("worktree-create")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	ctx := context.Background()
 
 	name := args[0]
@@ -184,6 +215,10 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Tracked .beads/ checked out by git worktree add can inherit umask defaults (0755).
+	// Align with bd init / GH#3391 so agent loops do not hit permission warnings (GH#3593).
+	repairWorktreeBeadsPermissions(worktreePath)
+
 	// Add to .gitignore if worktree is inside repo root
 	if strings.HasPrefix(worktreePath, repoRoot+string(os.PathSeparator)) {
 		// Use relative path from repo root for gitignore entry
@@ -213,6 +248,13 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runWorktreeList(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("worktree-list")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	ctx := context.Background()
 
 	// Get repository context
@@ -286,6 +328,14 @@ func runWorktreeList(cmd *cobra.Command, args []string) error {
 
 func runWorktreeRemove(cmd *cobra.Command, args []string) error {
 	CheckReadonly("worktree remove")
+
+	evt := metrics.NewCommandEvent("worktree-remove")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	ctx := context.Background()
 
 	name := args[0]
@@ -360,6 +410,13 @@ func runWorktreeRemove(cmd *cobra.Command, args []string) error {
 }
 
 func runWorktreeInfo(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("worktree-info")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	ctx := context.Background()
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -434,14 +491,14 @@ func runWorktreeInfo(cmd *cobra.Command, args []string) error {
 // This is used for worktree operations that need to run in a specific location
 // (either the CWD repo root or a specific worktree path).
 //
-// Security: Sets GIT_HOOKS_PATH and GIT_TEMPLATE_DIR to disable hooks/templates
+// Security: Sets core.hooksPath and GIT_TEMPLATE_DIR to disable hooks/templates
 // for defense-in-depth, matching the pattern in RepoContext.GitCmd().
 func gitCmdInDir(ctx context.Context, dir string, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	gitArgs := append([]string{"-c", "core.hooksPath="}, args...)
+	cmd := exec.CommandContext(ctx, "git", gitArgs...)
 	cmd.Dir = dir
 	// Security: Disable git hooks and templates (SEC-001, SEC-002)
 	cmd.Env = append(os.Environ(),
-		"GIT_HOOKS_PATH=",
 		"GIT_TEMPLATE_DIR=",
 	)
 	return cmd

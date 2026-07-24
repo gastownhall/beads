@@ -12,7 +12,6 @@ func TestCheckNameToSlug(t *testing.T) {
 		{"Git Hooks", "git-hooks"},
 		{"CLI Version", "cli-version"},
 		{"Pending Migrations", "pending-migrations"},
-		{"Remote Consistency", "remote-consistency"},
 		{"Role Configuration", "role-configuration"},
 		{"Stale Closed Issues", "stale-closed-issues"},
 		{"Large Database", "large-database"},

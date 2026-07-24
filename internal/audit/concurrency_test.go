@@ -13,7 +13,7 @@ import (
 // TestAppend_ConcurrentWritersUniqueIDs proves the audit log's uniqueness
 // invariant under concurrent writers.
 //
-// Background: a related bug in gascity's events.jsonl recorder uses an
+// Background: a related bug in a downstream consumer's events.jsonl recorder uses an
 // in-process sequence counter that is seeded by scanning the file. Two
 // FileRecorder instances sharing a file race on the seed and produce
 // duplicate sequence numbers.
@@ -42,10 +42,11 @@ func TestAppend_ConcurrentWritersUniqueIDs(t *testing.T) {
 		t.Fatalf("write metadata.json: %v", err)
 	}
 	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BD_AUDIT_ENABLED", "1")
 
 	const (
 		writers          = 8
-		entriesPerWriter = 250
+		entriesPerWriter = 1000
 		totalEntries     = writers * entriesPerWriter
 	)
 

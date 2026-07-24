@@ -7,6 +7,415 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Public `beads.Storage` interface gained two required methods**
+  ([#4911](https://github.com/gastownhall/beads/pull/4911)). `UpdateIssueChecked`
+  (an optional `ExpectedVersion` compare-and-swap on updates) and `MergeMetadata`
+  (atomic single-key metadata merge) are now part of the `beads.Storage` /
+  `storage.Storage` contract. Consumers that only *call* the interface are
+  unaffected; any external type that *implements* it (a custom store, mock, or
+  proxy) must add both methods to compile. `UpdateIssueChecked` with a nil
+  `ExpectedVersion` behaves exactly like `UpdateIssue`, and `MergeMetadata` can
+  be layered over a read-modify-write of issue metadata. See
+  [examples/library-usage](examples/library-usage/README.md#concurrency--metadata).
+
+- **Storage backend scope simplified** (bd-sadcd). The recently merged direct
+  PostgreSQL and MySQL adapters have been rolled back before entering a tagged
+  release. Supporting additional general-purpose server databases introduced
+  dialect, credential, schema-lifecycle, migration, CI, and operational
+  complexity at odds with our goal of keeping Beads as simple as possible and
+  consuming as few resources as possible. The storage interface, shared issue
+  core, SQLite implementation, and conformance harness remain; embedded Dolt,
+  Dolt server, and SQLite are the supported storage paths. Dolt server mode and
+  its use of the MySQL wire protocol are unchanged. Existing PostgreSQL or
+  MySQL workspaces stop before their configured databases are opened or
+  modified; see the [migration
+  guide](docs/architecture/storage-backends.md#existing-postgresql-or-mysql-workspaces).
+- **Cross-type blocking dependencies are now allowed** (bd-wg7ve,
+  [#4034](https://github.com/gastownhall/beads/pull/4034)).
+  `bd dep add <task> <epic>` — gating a work item on an epic (program)
+  completing — previously failed with a backwards-reading error ("tasks can
+  only block other tasks, not epics"). The blanket same-type rule (GH#1495)
+  is replaced by a hierarchy deadlock guard that rejects only the cases that
+  actually wedge the graph: gating an issue on its own ancestor (the ancestor
+  can't close until its descendants finish) or on its own descendant (blocked
+  status cascades down to the very issue that must close to clear the gate).
+  Sibling ordering edges stay allowed. The guard now also covers
+  `conditional-blocks`, which previously skipped cross-type validation
+  entirely. A task gated on an epic becomes ready when the epic itself is
+  closed, consistent with `bd ready`/`bd blocked`.
+
+- **Claim/unclaim refusals now steer toward the holder instead of teaching
+  eviction** (bd-at6rc, wyvern wy-zs5s2). The `--claim` refusal for an issue
+  assigned to someone else suggested `bd unclaim <id>` — in a multi-agent
+  fleet that copy taught an unclaim-then-claim steamroller that evicted a
+  live, heartbeated claim mid-review. The refusal now says to coordinate
+  with the holder, and unclaim's ownership rejection frames `--force` as an
+  abandoned-claim escape hatch rather than a routine override. (The
+  ownership check itself — foreign unclaim requires `--force` — landed in
+  [#4675](https://github.com/gastownhall/beads/pull/4675).)
+
+### Added
+
+- **Pool-aware claiming via the `claim.pools` config key** (bd-bguz6).
+  Dispatcher fleets pre-assign issues to a pool pseudo-assignee (e.g.
+  `fable-crew`); `--claim` previously refused those ("already assigned"),
+  forcing a two-step `--assignee <me> -s in_progress` per issue. Aliases
+  listed in `bd config set claim.pools "fable-crew,night-crew"` are now
+  claimable by any actor through the same atomic compare-and-swap — the
+  claim stamps the normal lease, and issues assigned to a real actor (or
+  to an alias not in the config) keep their anti-steal protection.
+  Pool-aware claiming works in every dolt mode — the proxied-server claim
+  path applies the same predicate — and `claim.*` is a recognized config
+  namespace (documented in `bd config --help`). Note: if a pool take's
+  lease expires, `bd reclaim` returns the issue to the unassigned pool,
+  not to the pool alias it was dispatched to.
+  Off by default: with no `claim.pools` configured, behavior is unchanged.
+
+- **Work leases: claim-TTL, heartbeat, and reclaim for dead-worker recovery**
+  (schema v54, migration `0054`)
+  ([#4537](https://github.com/gastownhall/beads/pull/4537)). A claim was
+  previously permanent — a worker that died mid-task stranded its issue
+  `in_progress` forever. Claims now carry a lease:
+  - Claiming stamps `lease_expires_at = now + TTL` (default 5m) and
+    `heartbeat_at`.
+  - `bd heartbeat <id>` — owner-only; pushes the lease forward. Fails once
+    the lease is gone.
+  - `bd reclaim --older-than <dur>` — reverts `in_progress` issues whose
+    lease expired more than `<dur>` ago back to ready (clears
+    assignee/started_at, records a `lease_reclaimed` event). Default grace
+    2×TTL.
+
+  Because Dolt has no row locking and merges concurrent commits
+  cell-by-cell, every status/ownership/lease-mutating path also rewrites a
+  shared `row_lock` cell, forcing a racing heartbeat vs. reclaim to a
+  serialization conflict that the retry layer replays — instead of silently
+  cell-merging into a zombie claim. The same landing wraps the work-queue
+  hot paths (`bd ready --claim`, claim, update, close) in serialization-
+  conflict retry, so N concurrent workers draining one queue no longer
+  surface MySQL 1213/1205 errors.
+- `bd migrate --force` (and `bd migrate schema --force`): CLI flag twin of
+  `BD_ALLOW_REMOTE_MIGRATE=1` for bypassing the remote-migrate gate (#4259)
+  as the single designated migrator; process-local so it cannot leak into
+  child processes (git hooks, dolt subprocesses).
+- **Cursor agent hooks.** `bd setup cursor` now installs `.cursor/hooks.json`
+  alongside the existing rules file, wiring three Cursor lifecycle events to a
+  new hidden `bd cursor-hook` command:
+  - `sessionStart` injects full `bd prime` context into every new agent session.
+  - `preCompact` arms a one-shot refresh marker (and notifies the user).
+  - `postToolUse` re-injects `bd prime` exactly once after a compaction, then
+    no-ops.
+
+  This brings Cursor (IDE and recent `cursor-agent` CLI builds — verified on the
+  2026.06 line; early-2026 CLI builds only fired shell hooks) to parity with
+  the Claude Code / Codex hook integrations, so Beads context survives context
+  compaction instead of being forgotten. Existing user hooks in
+  `.cursor/hooks.json` are preserved, and `bd setup cursor --remove` only
+  removes the Beads-managed entries.
+
+  The integration now matches Claude/Codex on several more fronts:
+  - **`bd init` auto-installs Cursor** (rules + skill + hooks) the same way it
+    auto-sets up Claude Code and Codex, and stages `.cursor/` for commit.
+  - **`bd setup cursor --global`** writes hooks to `~/.cursor/hooks.json` (and the
+    agent skill to `~/.agents/skills/beads`) so they apply to every project.
+    (Global scope is hooks + skill only; Cursor has no reliable file-based global
+    *rules* location — those live in Cursor Settings.)
+  - **Canonical rules content.** `.cursor/rules/beads.mdc` now wraps the shared
+    `recipes.Template` (the same content every other file-based recipe uses)
+    instead of a hand-maintained copy, so it no longer drifts or omits the Issue
+    Types / Priorities / git-authority sections.
+  - **Agent skill.** `bd setup cursor` installs the shared
+    `.agents/skills/beads/SKILL.md` (which Cursor loads natively), so Cursor-only
+    users get the same progressive-disclosure skill Codex installs. The skill is
+    shared with Codex and is only removed once no integration still relies on it.
+  - **`bd doctor`** reports `Cursor Integration`, `Cursor Settings Health`
+    (malformed `.cursor/hooks.json` → error), and `Cursor Hook Completeness`
+  (all three lifecycle events present) checks — with agent-mode enrichment —
+  paralleling the Claude integration checks.
+
+### Changed
+
+- **Remote-ahead adopts fast-forward automatically when it is provably
+  loss-free AND lands exactly at this binary's latest migration.** When the
+  smart remote-migrate gate
+  ([#4516](https://github.com/gastownhall/beads/issues/4516)) finds the
+  remote ahead with no content skew, this clone's local Dolt history a
+  strict ancestor of the remote's with a clean working set, AND the
+  fast-forward would land exactly at the binary's own latest migration
+  (nothing pending after it, nothing beyond what this binary supports), `bd`
+  now fast-forwards to the remote's migrated schema automatically instead of
+  stopping with an adopt directive — nothing local is discarded. An unpushed
+  local commit, a dirty working set, or a remote that is not exactly at this
+  binary's latest migration all disqualify the automatic fast-forward and
+  fall back to the existing manual `bd bootstrap` adopt directive (with the
+  sharper loss-free guidance whenever ancestor+clean still hold), never a
+  forced write. Set `BD_SMART_GATE=0` to opt out and keep the manual wall for
+  every remote-ahead case, as before
+  ([#4259](https://github.com/gastownhall/beads/issues/4259)).
+
+## [1.1.0] - 2026-07-04
+
+First stable release of the 1.1.0 line. It consolidates everything from
+[1.1.0-rc.1] and [1.1.0-rc.2] (see those sections below for the full feature
+set) plus the post-rc.2 migration-recovery fixes listed here. The theme of
+1.1.0 is a safe schema-migration and upgrade path: it repairs the v52/v53
+drift classes that broke real-world rc.1/rc.2 upgrades, makes an interrupted
+migration recoverable in-tool instead of a dead end, and turns the
+remote-migrate gate from a blunt block into a state-aware one.
+
+### Upgrade Notes
+
+- **Back up before migrating** (`bd export --all -o backup.jsonl`) before
+  running `bd migrate` on an older, especially remote-backed, database. The
+  fixes below repair databases that reached a migration with drifted state;
+  an export is cheap insurance while such drift is being repaired.
+
+### Changed
+
+- **The state-aware remote-migrate gate is now on by default.** rc.2 shipped
+  the smart gate behind an opt-in env var, but nothing in the gate's block
+  message or docs surfaced that the var existed, so in practice everyone kept
+  hitting the blunt always-block behavior. The provably-safe first-mover case
+  (remote at the same schema version as this clone) now auto-migrates without
+  `BD_ALLOW_REMOTE_MIGRATE`; remote-ahead still stops with an adopt directive
+  and content skew still stops for a human. Set `BD_SMART_GATE=0` to opt out
+  and restore the unconditional block
+  ([#4516](https://github.com/gastownhall/beads/issues/4516)).
+
+### Fixed
+
+- **`--label-any` is no longer silently dropped by `bd ready` and
+  `bd ready --claim`.** The ready-work WHERE builder emitted clauses for
+  `--label` and `--exclude-label` but none for `--label-any`, so the OR-set
+  filter was ignored on the ready/claim path (with or without `--parent`) on
+  every backend — while `bd list`/`bd search` honored it. On an *atomic claim*
+  this was dangerous rather than merely wrong: a worker fencing itself to its
+  own lane (`bd ready --claim --label-any lane-a --parent epic-1`) would
+  happily claim another lane's issue and believe it was fenced. `--label-any`
+  now emits an OR-set membership clause that AND-combines with `--label`,
+  `--exclude-label`, and `--parent`, exactly as the flag help promises; an
+  exhausted lane now claims nothing instead of falling back to unfenced work.
+
+- **A failed v53 migration no longer traps the database, and the v53 repair
+  now covers `wisp_dependencies` split-column drift.** rc.2 repaired the
+  `issues` rig columns, but a database coming from schema v49 could still fail
+  v53 when its `wisp_dependencies` table was missing the split target columns
+  (`depends_on_issue_id`, `depends_on_wisp_id`, `depends_on_external`) — and a
+  half-applied v53 then bricked every subsequent command on open
+  ([#4555](https://github.com/gastownhall/beads/issues/4555)). The migration
+  runner now adds and backfills the missing split columns before v53, and a
+  narrow recovery gate lets an already-failed-v53 database self-heal on the
+  next open — including the `issue_snapshots` / `compaction_snapshots` tables
+  that migration 0051 leaves dirty during a single-pass v49→v53 upgrade
+  ([#4558](https://github.com/gastownhall/beads/pull/4558)).
+- **A dirty working set no longer deadlocks migration recovery in embedded
+  mode.** Every store open runs the migration, which correctly refuses to
+  alter tables that have uncommitted working-set changes — but the documented
+  recovery (commit the working set) is itself a command that opens the store
+  and hits the same refusal, a deadlock with no in-tool escape
+  ([#4566](https://github.com/gastownhall/beads/issues/4566)). `bd dolt commit`
+  and `bd vc commit` now open past that guard, commit at the current schema,
+  after which a normal `bd migrate` applies cleanly; the refusal message now
+  names the recovery path
+  ([#4567](https://github.com/gastownhall/beads/pull/4567)).
+
+## [1.1.0-rc.2] - 2026-07-02
+
+Second release candidate for 1.1.0. Fixes the two upgrade-breaking migration
+regressions reported against rc.1 (#4502, #4534), hardens the remote-migrate
+gate that rc.1 introduced, and ships the validated upgrade documentation.
+
+### Upgrade Notes
+
+- **Back up before migrating.** The upgrade guide's remote-backed recipes now
+  start with a JSONL export (`bd export --all -o ...`) before
+  `BD_ALLOW_REMOTE_MIGRATE=1 bd migrate`. The two fixes below repair real
+  databases that reached a migration with drifted state; an export is the
+  cheap insurance while such drift is being repaired.
+
+### Fixed
+
+- **v53 migration no longer fails on pre-rig `issues` tables.** The rig/agent
+  columns (`hook_bead`, `role_bead`, `agent_state`, `last_activity`,
+  `role_type`, `rig`) were only ever added to the squashed bootstrap
+  `0001_create_issues`, so a database bootstrapped before they existed sits at
+  schema v52 without them — and migration 0053, which copies those columns
+  from `wisps`, failed with `Unknown column 'agent_state' in 'issues'` even
+  with zero rig wisps to repair
+  ([#4502](https://github.com/gastownhall/beads/issues/4502)). The migration
+  runner now repairs the drift in code immediately before applying v53,
+  adding whichever of the six columns are missing (databases in the wild may
+  have some but not all). Shipped migration files stay frozen — the repair
+  lives in the runner because a failing migration can never be fixed forward
+  by a later migration file.
+- **One orphaned `child_counters` row no longer bricks every `bd create`.**
+  Migration 0039 dropped `fk_counter_parent` and clone-local migration 0002
+  re-added it under `FOREIGN_KEY_CHECKS = 0`, so a counter row orphaned during
+  the FK-less window (an interrupted create, a parent deleted without cascade)
+  survived the constraint's return — and Dolt then failed constraint
+  validation on every subsequent insert, including brand-new top-level issues,
+  on an otherwise healthy database
+  ([#4534](https://github.com/gastownhall/beads/issues/4534)). A new
+  clone-local migration moves any live-wisp counters to `wisp_child_counters`
+  and deletes rows dangling from `issues` — the same rows the FK's
+  `ON DELETE CASCADE` would have removed had it been in force. Runs
+  automatically on the next command with the new binary; already-bitten
+  databases are healed in place.
+- **Old binaries fail fast on writable opens of a schema-newer database**
+  instead of proceeding against a schema they do not understand
+  ([#4531](https://github.com/gastownhall/beads/pull/4531)) — the guard rail
+  for the mixed-version window during multi-clone upgrades.
+- **Prerelease GitHub releases now ship prerelease-correct install
+  instructions.** The release notes header previously showed the stable
+  install methods (brew, install scripts), three of which do not deliver a
+  prerelease ([#4530](https://github.com/gastownhall/beads/pull/4530)).
+- **`bd remember` no longer clobbers a memory whose content is its own key**,
+  and a bare `bd remember <existing-key>` now recalls instead of overwriting.
+
+### Added
+
+- **Smarter remote-migrate gate.** The gate introduced in rc.1 is now
+  state-aware and agent-safe: cases that are provably safe to migrate
+  auto-resolve instead of stopping every agent at the wall, while genuinely
+  risky states still require the designated migrator
+  ([#4515](https://github.com/gastownhall/beads/pull/4515),
+  [#4516](https://github.com/gastownhall/beads/pull/4516)).
+- **Backend-agnostic storage conformance test suite**
+  ([#4414](https://github.com/gastownhall/beads/pull/4414)).
+
+### Documentation
+
+- **Validated upgrade recipe for remote-backed / multi-clone databases** in
+  the upgrade guide, exercised end-to-end on a live database
+  ([#4514](https://github.com/gastownhall/beads/pull/4514)), plus a
+  consolidated Homebrew tap-migration snippet across install docs, a README
+  pointer to the upgrade guide, and a pre-migrate backup step in the
+  recipes (this release).
+
+## [1.1.0-rc.1] - 2026-06-23
+
+### Upgrade Notes
+
+- **Mixed bd versions sharing one Dolt remote.** Pre-1.0.6 binaries record
+  applied migrations as `(version, NULL)` while 1.0.6+ records
+  `(version, sha256)` in `schema_migrations`, so two clones applying the same
+  migration with different bd vintages used to produce a row conflict on
+  `bd dolt pull`. The pull auto-resolver now resolves this class by keeping
+  whichever side recorded the hash. Two *different* recorded hashes for the
+  same version are the real [#4259](https://github.com/gastownhall/beads/issues/4259)
+  schema fork and are still surfaced to the operator (see the `bd doctor`
+  Migration Content Skew check). To avoid the mixed-vintage window entirely,
+  upgrade all clones of a shared remote together, letting one designated
+  machine migrate and `bd dolt push` first.
+
+- **Upgrading a remote-backed database: one machine migrates, the rest adopt.**
+  This release reshapes the `dependencies` primary key (migration `0050`), and
+  `bd` now refuses to silently migrate a database that has a Dolt remote
+  configured. If two clones cross the `0050` boundary with un-synced dependency
+  edits on both sides, their histories become permanently un-mergeable — Dolt
+  refuses the merge outright (`cannot merge because table dependencies has
+  different primary keys in its common ancestor`) before the pull auto-resolver
+  can run. Replacing the binary alone is not enough; follow the ordered recipe:
+
+  1. With your **current** binary, on **every** clone: `bd dolt push` +
+     `bd dolt pull` until all are in sync, then stop editing. Once the new
+     binary is installed, `push`/`pull` are gated too, so this must happen
+     first.
+  2. Designated migrator **only**: install the new binary, then
+     `BD_ALLOW_REMOTE_MIGRATE=1 bd migrate` and `bd dolt push`.
+  3. Every **other** clone: install the new binary, then `bd bootstrap` to adopt
+     the migrated database (`bd dolt pull` is refused while the clone still has
+     pending migrations; do not migrate on these clones).
+  4. Confirm with `bd version`; in server mode, `bd doctor` adds a
+     migration-content-skew check (not available in embedded mode).
+
+  A single clone with a remote follows the same gate (push with the old binary,
+  then migrate and push). Full recipe and the single-clone variant:
+  [Upgrading bd — remote-backed databases and multiple clones](website/docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones).
+  If clones have already forked, see the recovery playbook:
+  [docs/RECOVERY.md#pk-fork-refused](docs/RECOVERY.md#pk-fork-refused).
+
+### Added
+
+- **perf(schema):** composite `(status, updated_at)` and standalone `defer_until` indexes on `issues` (migration 0052). Speeds up `bd stale` and `bd ready` on large rigs. First run after upgrade applies the migration — expect a one-time 10–25 s pause on rigs with >10K issues. Do not interrupt.
+- **Per-migration content hash.** `schema_migrations` now records the SHA-256 of each migration's file content alongside its version (`content_hash`), so two clones at the same `MAX(version)` but with divergent migration content become detectable (reporter fix No.2 for [#4259](https://github.com/gastownhall/beads/issues/4259)). The column is added to fresh databases via the bootstrap schema and idempotently to existing databases at migrate time; already-applied rows keep a NULL hash. The column definition and the hashes are deterministic, so `schema_migrations` still merges cleanly across clones.
+- **`bd doctor` migration-content-skew check.** Using the recorded hashes, `bd doctor` now compares the local `schema_migrations` against the cached remote-tracking ref (no network fetch) and warns when this database and its remote applied different content for the same migration version — the silent schema fork from [#4259](https://github.com/gastownhall/beads/issues/4259), surfaced as a clear advisory instead of a cryptic merge failure. Read-only diagnostic (it does not gate push/pull); the comparison primitive (`schema.ContentHashSkew`) is reusable.
+- **Remote-migrate prevention gate.** `bd` now refuses to silently auto-apply pending schema migrations to an existing database that has a remote configured (in both server and embedded mode), and tells the operator to choose: migrate (as the single designated migrator, then `bd dolt push`) or adopt the already-migrated database from the remote (`bd bootstrap`). Migrating each clone independently forks the schema and breaks `bd dolt pull` ([#4259](https://github.com/gastownhall/beads/issues/4259)). The gate is a no-op for fresh databases, databases already at the binary's version, databases with no remote, and read-only opens. The designated migrator proceeds with `BD_ALLOW_REMOTE_MIGRATE=1`. In server mode the gate also detects remotes persisted on disk in `.dolt/config`, so a freshly (auto-)started server — whose in-memory `dolt_remotes` table is not yet populated — cannot slip a remote-backed database past the gate.
+
+- **Recovery guidance for Dolt primary-key merge refusals.** When `bd dolt pull` (or `push`) fails with Dolt's hard refusal `cannot merge because table X has different primary keys [in its common ancestor]` — the un-mergeable schema fork left behind by independently-migrated clones straddling a PK-reshaping migration ([#4259](https://github.com/gastownhall/beads/issues/4259)) — `bd` now recognizes the error class and prints the bootstrap-from-canonical-clone recovery recipe instead of just the raw error. Full playbook: [docs/RECOVERY.md#pk-fork-refused](docs/RECOVERY.md#pk-fork-refused).
+
+### Fixed
+
+- **Cross-clone issue-delete vs child-row-insert merges now converge.** The
+  synced child tables (`dependencies`, `labels`, `comments`, `events`,
+  snapshots) carry `FOREIGN KEY ... ON DELETE CASCADE` to `issues` (migrations
+  `0041`/`0042`), but Dolt merges row-wise and never re-executes cascades: if
+  clone A deleted an issue while clone B added a dependency, label, or comment
+  referencing it, `bd dolt pull` failed outright with a foreign-key constraint
+  violation ("transaction rolled back"), recorded nothing in `dolt_conflicts`,
+  and could never converge on retry. The pull auto-resolver (SQL and CLI
+  routes) now repairs this class by applying the foreign key's own cascade
+  semantics — deleting the merged-in rows whose issue reference dangles — and
+  refuses, exactly as before, any constraint violation it does not recognize
+  (different constraint type, table bd does not own, FK to another parent).
+  The repair converges across clones: it deletes precisely the rows the
+  cascade already removed on the deleting clone. (bd-6dnrw.4)
+
+- **`is_blocked` recompute no longer misses auto-resolved merges.** A pull
+  whose merge bd auto-resolved (conflicts) or cascade-repaired (constraint
+  violations) lands in the working set without advancing HEAD — the merge
+  commit is created later — so the bd-6dnrw.3 post-pull recompute mistook it
+  for "nothing merged" and skipped, leaving `is_blocked` stale exactly when
+  the merge had needed intervention. The recompute now diffs to the working
+  set and skips only when `issues`/`dependencies` are clean too. (bd-6dnrw.39)
+
+- **`is_blocked` recomputed after `bd dolt pull`.** The denormalized
+  `is_blocked` column (migration `0046`) was maintained only by local write
+  paths, so a pull that merged another clone's writes silently left it stale —
+  e.g. clone A closes blocker X while clone B adds an edge W→X, and the merged
+  result carries `W.is_blocked=1` with a closed blocker, hiding W from
+  `bd ready`. Every pull path (server SQL and CLI routes, peer pulls, embedded
+  mode) now recomputes the column for exactly the rows the merge changed,
+  scoped via `dolt_diff` between the pre- and post-pull HEADs and expanded
+  through the same affected-set logic the local write paths use. Oversized or
+  schema-reshaping merges fall back to a full recompute; conflicted pulls skip
+  it until the operator resolves. (bd-6dnrw.3, PR 4107 follow-up)
+
+- **Stale `is_blocked` is now repairable — `bd recompute-blocked`.** The
+  post-pull recompute above is scoped to the merge diff and is skipped when a
+  re-pull merges nothing (`HEAD` unchanged), so a recompute that failed *after*
+  its merge committed — or a conflicted pull resolved by hand (which skips the
+  recompute) — could leave `is_blocked` stale with no way to repair it: rerunning
+  `bd dolt pull` merged nothing and recomputed nothing. The new
+  `bd recompute-blocked` command runs a full, unconditional recompute over every
+  issue and wisp and commits the result; it is idempotent and works in **both**
+  embedded and server mode (unlike `bd doctor`, which is server-mode only).
+  Server-mode `bd doctor` also gains a read-only **Blocked State** check that
+  reports stale rows and a `bd doctor --fix` that runs the same repair.
+  (bd-6dnrw.37)
+
+- **Deterministic history-table primary keys (cross-clone merge-safety).**
+  Migration `0037` converted the legacy BIGINT primary keys of `events`,
+  `comments`, `issue_snapshots` and `compaction_snapshots` by backfilling
+  `UUID()` — a different random value on every clone, the same hazard class as
+  the `dependencies` fork below. Two legacy clones that upgraded independently
+  held identical history rows under different primary keys, so their merges
+  duplicated every pre-upgrade event and comment (or refused outright). A
+  one-time-per-clone upgrade backfill now rewrites those ids to deterministic
+  values derived from each row's content (`internal/storage/rowid`), so
+  independently-migrated clones converge to byte-identical history tables;
+  exact-duplicate rows are kept distinct via per-duplicate ordinals. The pass
+  is gated on a clone-local marker (ignored migration `0009`), so steady-state
+  opens never re-key — rows inserted after the pass are minted once and reach
+  other clones by merge, so their ids are already consistent. (bd-6dnrw.2,
+  the history-table sibling of
+  [#4259](https://github.com/gastownhall/beads/issues/4259))
+
+- **Deterministic dependency primary keys (cross-clone merge-safety).** `dependencies.id` (and `wisp_dependencies.id`) were filled by `DEFAULT (UUID())`, a per-clone-random value. Two clones that created the same edge — or that applied migration `0043` independently — diverged on the primary key, so `bd dolt pull` failed unrecoverably (`cannot merge because table dependencies has different primary keys in its common ancestor`, or a `uk_dep_*` unique-key violation). `id` is now derived deterministically from the natural edge key `(issue_id, target)` at every insert site (`internal/storage/depid`); migration `0050` drops the random default and idempotently re-asserts the natural-identity unique keys; and an upgrade backfill rewrites existing rows. Independently-migrated clones now converge to byte-identical, merge-safe `dependencies`. And because the same edge now has the same primary key on every clone, `bd dolt pull` **auto-resolves** a same-edge dependency conflict that differs only in audit columns (created_at/created_by/metadata/thread_id) the same way it already does for the metadata table — so two machines that each run `bd dep add X Y` between syncs merge cleanly. A conflict where the dependency *type* differs is still surfaced for the operator. ([#4259](https://github.com/gastownhall/beads/issues/4259))
+
+## [1.0.5] - 2026-05-28
+
 ### Upgrade Notes
 
 - **JSONL auto-export and auto-staging are now opt-in.** Repositories that
@@ -30,8 +439,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Foreign keys across issue and wisp tables.** Migrations `0040`–`0042` and the new `ignored/0001`–`ignored/0004` add explicit FKs with `ON DELETE CASCADE ON UPDATE CASCADE` on `dependencies`, `labels`, `comments`, `events`, `issue_snapshots`, `compaction_snapshots`, `child_counters`, and the matching `wisp_*` tables. Deleting or renaming a parent row now cascades automatically — the manual cleanup loops in `issueops/delete.go`, `dolt/wisps.go`, `dolt/ephemeral_routing.go`, and `cmd/bd/rename_prefix.go` have been removed (net ~300 lines down). ([#3952](https://github.com/gastownhall/beads/pull/3952))
 - **`issueops.DeleteWispFromDependenciesInTx` / `UpdateWispIDInDependenciesInTx`.** Because Dolt forbids foreign keys from tracked tables (`dependencies`) to `dolt_ignore`'d tables (`wisps`), wisp deletion and rename now invoke these helpers explicitly to keep `dependencies.depends_on_wisp_id` consistent. The standard store APIs (`DeleteIssue`, `UpdateIssueID`, `deleteWispBatch`, etc.) wire them up automatically; only call them directly if you bypass those entry points. ([#3952](https://github.com/gastownhall/beads/pull/3952))
+- **Forward schema-skew guard.** `bd` now hard-fails when it opens a database that has been migrated to a *newer* schema version than the binary understands, instead of operating blindly on forward-migrated data. ([#4152](https://github.com/gastownhall/beads/pull/4152))
+- **`dolt.mode` config key.** New `dolt.mode` (`server` | `embedded`) configuration key with validation; `bd init` now warns on ambiguous configs and hard-fails when `dolt.host`/`dolt.port` are set without server mode.
+- **`bd list --skip-labels`.** New toggle to skip label hydration for faster listings; honored in both text and JSON output.
+- **`bd show` count-only JSON details.** `bd show --json` can return count-only relationship details with opt-in streamed payloads, avoiding large hydrations when only counts are needed.
+- **Server-side custom type validation.** Storage now honors `.beads/config.yaml` `types.custom` during server-side validation. ([#4024](https://github.com/gastownhall/beads/pull/4024), [#4026](https://github.com/gastownhall/beads/pull/4026))
+- **`bd init` contributor routing.** On fork detection, `bd init` auto-configures contributor routing. ([#4028](https://github.com/gastownhall/beads/pull/4028))
 
 ### Changed
+
+- **Large content columns widened to `LONGTEXT`.** Issue content and event/wisp-event value columns are migrated from `TEXT` to `LONGTEXT`, lifting the previous ~64 KB per-field ceiling. ([#4027](https://github.com/gastownhall/beads/pull/4027), [#3682](https://github.com/gastownhall/beads/pull/3682))
 
 - **`dependencies.depends_on_id` is now a STORED generated column.** The polymorphic target has been split into three typed columns: `depends_on_issue_id`, `depends_on_wisp_id`, `depends_on_external`. `depends_on_id` remains as `COALESCE(...) STORED` for read paths; **writes to `depends_on_id` will fail** — code that inserts dependencies must populate exactly one typed column (enforced by a new `ck_dep_one_target` CHECK). Same split mirrored to `wisp_dependencies` with a corresponding `ck_wisp_dep_one_target`. Migrations `0041` (tracked) and `ignored/0003` (wisps) perform the column split, copy existing rows by classifying their targets against `issues` / `wisps`, and add the new typed-target indexes. ([#3952](https://github.com/gastownhall/beads/pull/3952))
 - **Most existing dependency-table FKs now use `ON UPDATE CASCADE`.** Migration `0042` rebuilds `fk_dep_issue`, `fk_labels_issue`, `fk_comments_issue`, `fk_events_issue`, `fk_snapshots_issue`, and `fk_comp_snap_issue` to cascade on both delete and update. Same treatment for the wisp-side FKs in `ignored/0003`. Prefix rename and ID-update paths rely on this cascade instead of touching aux tables manually. ([#3952](https://github.com/gastownhall/beads/pull/3952))
@@ -39,6 +456,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Symlinked `CLAUDE.md` repair guidance** - troubleshooting docs now include
+  a tested `git update-index --cacheinfo` recipe for repositories that already
+  contain a corrupted `mode 120000` `CLAUDE.md` entry with Markdown content.
+  The setup bug was fixed in [#4192](https://github.com/gastownhall/beads/pull/4192);
+  this note is for repairing affected clones.
+- **Codex hook metadata isolation** - Codex hook metadata now lives under
+  `.codex-plugin/hooks/`, preventing Claude from loading Codex-only hooks from
+  the shared plugin root while keeping Codex setup pointed at `bd codex-hook`.
+  ([#3924](https://github.com/gastownhall/beads/issues/3924))
+- **Hook and prime wait bounds** - generated git hooks now fall back from
+  `timeout` to `gtimeout` to Perl `alarm`, and `bd prime` memory loading is
+  bounded by `BEADS_PRIME_TIMEOUT` (default 10s). Non-positive
+  `BEADS_PRIME_TIMEOUT` values fall back to the default instead of silently
+  disabling the safety bound. Internal beads-repo git operations also run with
+  hooks suppressed via `core.hooksPath=` so automated `.beads/` commits and
+  pushes cannot recurse through user hook managers. `GitCmdCWD()` remains for
+  user-working-repo status/ref operations and does not perform beads commits.
+  ([#4172](https://github.com/gastownhall/beads/pull/4172))
 - **JSONL auto-export shrink guard** - when opt-in `export.auto` is enabled,
   auto-export now refuses to overwrite an existing `.beads/issues.jsonl` that
   contains records outside the auto-export scope (memories, infrastructure
@@ -48,15 +483,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `bd quick` now treats label insertion as part of issue creation: label
   failures abort the create instead of being silently dropped.
 - **`bd dolt status` reports externally-managed local servers truthfully** - when a rig is configured as `dolt_mode: server` pointing at a local host but `dolt.auto-start: false` (so an orchestrator or systemd owns the sql-server lifecycle), `bd dolt status` previously said `not running` because no PID file existed. It now SQL-probes the configured endpoint, matching the path already used for non-local hosts, and reports `running (external)` with host/port/database/version when the server answers. **JSON output shape change**: on affected rigs, `bd dolt status --json` now emits `{"running": true, "mode": "external", ...}` instead of `{"running": false, "pid": 0, ...}`. Automation that parsed the old `running:false` as a "needs restart" sentinel should switch to checking `running` directly. (be-0eyj, [#3550](https://github.com/gastownhall/beads/pull/3550))
+- **Migrations run on a connection with no read timeout**, so large or slow schema migrations no longer fail under the default query timeout. ([#4154](https://github.com/gastownhall/beads/pull/4154))
+- **Duplicate migration version numbers now hard-fail** instead of silently under-applying a release's migrations. ([#4197](https://github.com/gastownhall/beads/pull/4197))
+- **`bd close` supports per-id reasons** when closing multiple issues at once ([#4194](https://github.com/gastownhall/beads/pull/4194)), and **re-closing an already-closed issue is now an idempotent success** instead of an error. ([#4025](https://github.com/gastownhall/beads/issues/4025))
+- **`bd create --defer <future-date>` creates a deferred issue** (status `deferred`) rather than an open one. ([#4071](https://github.com/gastownhall/beads/issues/4071))
+- **`bd create` commits labels atomically** during initial issue creation; label-insertion failures abort the create instead of being silently dropped. ([#4149](https://github.com/gastownhall/beads/pull/4149))
+- **JSONL import preserves comment IDs and skips stale issue snapshots.** ([#4103](https://github.com/gastownhall/beads/pull/4103), [#4204](https://github.com/gastownhall/beads/pull/4204))
+- **`bd init` Dolt wiring hardening** - honor local-only remote wiring ([#4227](https://github.com/gastownhall/beads/pull/4227)), apply config server mode before validation, platform-accurate config-path warnings, and tighter Dolt marker handling ([#4083](https://github.com/gastownhall/beads/pull/4083)).
+- **MCP `validate` and `detect-pollution` route to `bd doctor`.** ([#4037](https://github.com/gastownhall/beads/issues/4037))
+- **`bd dolt` detects managed handoff port conflicts.** ([#4217](https://github.com/gastownhall/beads/pull/4217))
+- **`bd list` keeps `relates-to` out of dependency tree mode** and honors `--skip-labels` in JSON output. ([#3936](https://github.com/gastownhall/beads/pull/3936))
+- **Audit `newID` entropy widened** to reduce ID-collision risk under high create volume. ([#4046](https://github.com/gastownhall/beads/pull/4046))
+- **Performance:** `bd count` uses a SQL `COUNT(*)` aggregate instead of fetching and counting rows; `bd ready` narrows deferred-parent child filtering; `bd get` queries primary issues before falling back to wisps; and `bd search` gains skip-wisps merge and wisp-count caching.
 
 ## [1.0.4] - 2026-05-07
 
 ### Added
 
-- **`bd init --reinit-local` / `--discard-remote`** — named-intent flags for local re-initialization and explicit remote-history override. Replaces the overloaded `--force`. See [`bd help init-safety`](docs/adr/0002-init-safety-invariants.md) and [`docs/RECOVERY.md`](docs/RECOVERY.md).
+- **`bd init --reinit-local` / `--discard-remote`** — named-intent flags for local re-initialization and explicit remote-history override. Replaces the overloaded `--force`. See [`bd help init-safety`](engdocs/adr/0002-init-safety-invariants.md) and [`docs/recovery/init-safety.md`](docs/recovery/init-safety.md).
 - **`bd init-safety`** — documents the init flag surface + destroy-token format. Referenced by every init refusal message.
 - **Stable exit codes for init refusals** — `10` remote divergence, `11` local exists, `12` destroy-token missing. Grep-safe for CI.
-- **[ADR 0002 — `bd init` safety invariants](docs/adr/0002-init-safety-invariants.md)** — encodes the single-source identity rule, scope-bound `--force`/`--reinit-local`, the `CheckRemoteSafety` chokepoint, the error-text-no-echo rule, and the race-safety invariant.
+- **[ADR 0002 — `bd init` safety invariants](engdocs/adr/0002-init-safety-invariants.md)** — encodes the single-source identity rule, scope-bound `--force`/`--reinit-local`, the `CheckRemoteSafety` chokepoint, the error-text-no-echo rule, and the race-safety invariant.
 - **[`docs/RECOVERY.md`](docs/RECOVERY.md)** — playbooks for each named init refusal.
 - **CODEOWNERS** — `cmd/bd/init*.go` routes review to maintainers with an ADR-linked acknowledgment requirement.
 - **`bd -C <path>`** — run bd from another directory without changing the caller's shell cwd. Useful for hooks, agents, and scripts that coordinate multiple workspaces.

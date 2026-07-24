@@ -18,36 +18,28 @@ import (
 // runCheckHealth runs lightweight health checks for git hooks.
 // Silent on success, prints a hint if issues detected.
 // Respects hints.doctor config setting.
-func runCheckHealth(path string) {
+func runCheckHealth(path string) error {
 	beadsDir := doctor.ResolveBeadsDirForRepo(path)
 
-	// Check if .beads/ exists
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-		// No .beads directory - nothing to check
-		return
+		return nil
 	}
 
-	// Load config for Dolt server connection info
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
-		// Can't load config - only check hooks
 		if issue := doctor.CheckHooksQuick(Version); issue != "" {
-			printCheckHealthHint([]string{issue})
+			return printCheckHealthHint([]string{issue})
 		}
-		return
+		return nil
 	}
 
-	// Try connecting to Dolt server for config/version checks.
-	// Use doltserver.DefaultConfig for port resolution — GetDoltServerPort
-	// falls back to 3307 which is wrong for ephemeral ports.
 	host := cfg.GetDoltServerHost()
 	port := doltserver.DefaultConfig(beadsDir).Port
 	if port == 0 {
-		// No server running yet — skip DB checks, only check hooks.
 		if issue := doctor.CheckHooksQuick(Version); issue != "" {
-			printCheckHealthHint([]string{issue})
+			return printCheckHealthHint([]string{issue})
 		}
-		return
+		return nil
 	}
 	database := cfg.GetDoltDatabase()
 
@@ -65,35 +57,28 @@ func runCheckHealth(path string) {
 	db, err := sql.Open("mysql", dsn)
 	if err == nil {
 		defer db.Close()
-		// Quick ping to verify server is reachable
 		if pingErr := db.Ping(); pingErr == nil {
-			// Check if hints.doctor is disabled in config
 			if hintsDisabledDB(db) {
-				return
+				return nil
 			}
-			// Check version mismatch
 			if issue := checkVersionMismatchDB(db); issue != "" {
 				issues = append(issues, issue)
 			}
 		}
-		// If ping fails, server not running — skip DB checks silently
 	}
 
-	// Check outdated git hooks
 	if issue := doctor.CheckHooksQuick(Version); issue != "" {
 		issues = append(issues, issue)
 	}
 
-	// If any issues found, print hint
 	if len(issues) > 0 {
-		printCheckHealthHint(issues)
+		return printCheckHealthHint(issues)
 	}
-	// Silent exit on success
+	return nil
 }
 
 // runDeepValidation runs full graph integrity validation
-func runDeepValidation(path string) {
-	// Show warning about potential slowness
+func runDeepValidation(path string) error {
 	fmt.Println("Running deep validation (may be slow on large databases)...")
 	fmt.Println()
 
@@ -102,7 +87,7 @@ func runDeepValidation(path string) {
 	if jsonOutput {
 		jsonBytes, err := doctor.DeepValidationResultJSON(result)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 		fmt.Println(string(jsonBytes))
 	} else {
@@ -110,18 +95,19 @@ func runDeepValidation(path string) {
 	}
 
 	if !result.OverallOK {
-		os.Exit(1)
+		return SilentExit()
 	}
+	return nil
 }
 
 // runServerHealth runs Dolt server mode health checks
-func runServerHealth(path string) {
+func runServerHealth(path string) error {
 	result := doctor.RunServerHealthChecks(path)
 
 	if jsonOutput {
 		jsonBytes, err := json.Marshal(result)
 		if err != nil {
-			FatalError("failed to marshal health check result: %v", err)
+			return HandleError("failed to marshal health check result: %v", err)
 		}
 		fmt.Println(string(jsonBytes))
 	} else {
@@ -131,8 +117,9 @@ func runServerHealth(path string) {
 	}
 
 	if !result.OverallOK {
-		os.Exit(1)
+		return SilentExit()
 	}
+	return nil
 }
 
 // printServerHealthResult prints the server health check results
@@ -203,15 +190,14 @@ func printServerHealthResult(result doctor.ServerHealthResult) {
 	}
 }
 
-// printCheckHealthHint prints the health check hint and exits with error.
-func printCheckHealthHint(issues []string) {
+func printCheckHealthHint(issues []string) error {
 	fmt.Fprintf(os.Stderr, "💡 bd doctor recommends a health check:\n")
 	for _, issue := range issues {
 		fmt.Fprintf(os.Stderr, "   • %s\n", issue)
 	}
 	fmt.Fprintf(os.Stderr, "   Run 'bd doctor' for details, or 'bd doctor --fix' to auto-repair\n")
 	fmt.Fprintf(os.Stderr, "   (Suppress with: bd config set %s false)\n", ConfigKeyHintsDoctor)
-	os.Exit(1)
+	return SilentExit()
 }
 
 // hintsDisabledDB checks if hints.doctor is set to "false" using an existing DB connection.

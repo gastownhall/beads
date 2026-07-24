@@ -3,10 +3,10 @@ package db
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -30,6 +30,27 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("EmptyUpdatesIsNoop", s.issueUpdateEmpty)
 		s.Run("NormalizesStatusType", s.issueUpdateStatusType)
 		s.Run("NormalizesTimestampToUTC", s.issueUpdateNormalizesTimestamp)
+		s.Run("MissingIDWithStatusChangeReturnsErrNoRows", s.issueUpdateMissingIDWithStatus)
+	})
+	s.Run("RowVersion", func() {
+		s.Run("NonZeroAfterCreate", s.issueRowVersionNonZeroOnCreate)
+		s.Run("ChangesOnUpdate", s.issueRowVersionChangesOnUpdate)
+		s.Run("WispNonZeroAfterCreate", s.wispRowVersionNonZeroOnCreate)
+		s.Run("WispChangesOnUpdate", s.wispRowVersionChangesOnUpdate)
+	})
+	s.Run("Claim", func() {
+		s.Run("FreshOpenSetsAssigneeAndStartedAt", s.issueClaimFresh)
+		s.Run("IdempotentReclaimBySameActor", s.issueClaimIdempotent)
+		s.Run("PreservesStartedAtOnReclaim", s.issueClaimPreservesStartedAt)
+		s.Run("ConflictReturnsForeignAssignee", s.issueClaimConflict)
+		s.Run("NotClaimableWhenClosed", s.issueClaimClosed)
+		s.Run("EmptyIDReturnsError", s.issueClaimEmptyID)
+		s.Run("RecordsClaimedEvent", s.issueClaimRecordsEvent)
+		s.Run("StampsLeaseAndIsReclaimable", s.issueClaimStampsLease)
+		s.Run("PoolAliasClaimableByAnyActor", s.issueClaimPoolAlias)
+		s.Run("UnconfiguredAliasStillProtected", s.issueClaimPoolUnconfiguredAlias)
+		s.Run("PoolStatusConflictFlagsPoolAssignee", s.issueClaimPoolStatusConflict)
+		s.Run("CustomActiveStatusClaimable", s.issueClaimCustomActiveStatus)
 	})
 	s.Run("Get", func() {
 		s.Run("MissingIDReturnsErrNoRows", s.issueGetMissing)
@@ -39,20 +60,31 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("EmptySliceReturnsNil", s.issueGetByIDsEmpty)
 		s.Run("ReturnsOnlyExistingRows", s.issueGetByIDsPartial)
 	})
-	s.Run("Search", func() {
-		s.Run("NoFilterReturnsAll", s.issueSearchAll)
-		s.Run("FilterByStatus", s.issueSearchByStatus)
-		s.Run("FilterByIssueType", s.issueSearchByIssueType)
-		s.Run("FilterByIDPrefix", s.issueSearchByIDPrefix)
-		s.Run("FilterByIDs", s.issueSearchByIDs)
-		s.Run("LimitRespected", s.issueSearchLimit)
-	})
 	s.Run("Wisp", func() {
 		s.Run("InsertRoutesToWispsTable", s.issueWispInsertRouting)
 		s.Run("GetReadsFromWispsTable", s.issueWispGet)
 		s.Run("UpdateWritesToWispsTable", s.issueWispUpdate)
-		s.Run("SearchReadsFromWispsTable", s.issueWispSearch)
 		s.Run("CrossRoutedLookupsAreEmpty", s.issueWispIsolated)
+	})
+	s.Run("Exists", func() {
+		s.Run("MissingReturnsFalse", s.issueExistsMissing)
+		s.Run("PresentReturnsTrue", s.issueExistsPresent)
+		s.Run("EmptyIDReturnsError", s.issueExistsEmptyID)
+		s.Run("RoutedToWisps", s.issueExistsWispRouting)
+	})
+	s.Run("CountForPrefix", func() {
+		s.Run("EmptyTableReturnsZero", s.issueCountForPrefixEmpty)
+		s.Run("CountsMatching", s.issueCountForPrefixMatches)
+		s.Run("ExcludesChildIDs", s.issueCountForPrefixExcludesChildren)
+		s.Run("RoutedToWisps", s.issueCountForPrefixWispRouting)
+		s.Run("EmptyPrefixReturnsError", s.issueCountForPrefixEmptyPrefix)
+	})
+	s.Run("NextCounterID", func() {
+		s.Run("FreshDBInsertsAtOne", s.issueNextCounterIDFresh)
+		s.Run("MonotonicIncrement", s.issueNextCounterIDIncrement)
+		s.Run("SeedsFromMaxExisting", s.issueNextCounterIDSeedsFromMax)
+		s.Run("IgnoresChildIDsWhenSeeding", s.issueNextCounterIDSeedSkipsChildren)
+		s.Run("EmptyPrefixReturnsError", s.issueNextCounterIDEmptyPrefix)
 	})
 }
 
@@ -190,6 +222,68 @@ func (s *testSuite) issueInsertBatchStopsOnError() {
 	s.Equal("bd-stop-1", got[0].ID)
 }
 
+// issueRowVersionNonZeroOnCreate proves a proxied/domain create stamps a
+// non-zero row_lock so types.Issue.RowVersion is a live CAS token from the
+// first write, matching the classic insert (issueops/helpers.go) rather than
+// the schema DEFAULT 0.
+func (s *testSuite) issueRowVersionNonZeroOnCreate() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-rv-create", "row version create"), "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.Get(s.Ctx(), "bd-rv-create", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.NotZero(out.RowVersion, "create must stamp a non-zero row_lock / RowVersion")
+}
+
+// issueRowVersionChangesOnUpdate proves the generic proxied/domain update path
+// rewrites row_lock, so RowVersion advances on a plain field edit exactly like
+// the classic issueops.updateIssueInTx invariant.
+func (s *testSuite) issueRowVersionChangesOnUpdate() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-rv-update", "before"), "tester", domain.InsertIssueOpts{}))
+	before, err := r.Get(s.Ctx(), "bd-rv-update", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().NotZero(before.RowVersion)
+
+	s.Require().NoError(r.Update(s.Ctx(), "bd-rv-update", map[string]any{"title": "after"}, "tester", domain.IssueTableOpts{}))
+	after, err := r.Get(s.Ctx(), "bd-rv-update", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.NotZero(after.RowVersion)
+	s.NotEqual(before.RowVersion, after.RowVersion, "a generic update must rewrite row_lock / RowVersion")
+}
+
+// wispRowVersionNonZeroOnCreate is the wisp-table counterpart of
+// issueRowVersionNonZeroOnCreate: the same insert chokepoint (insertIssueRow)
+// serves both tables, so a wisp create must also stamp a non-zero token.
+func (s *testSuite) wispRowVersionNonZeroOnCreate() {
+	r := s.issueRepo()
+	wisp := newTestIssue("bd-rv-wisp-create", "wisp row version")
+	wisp.Ephemeral = true
+	s.Require().NoError(r.Insert(s.Ctx(), wisp, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+
+	out, err := r.Get(s.Ctx(), "bd-rv-wisp-create", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.NotZero(out.RowVersion, "wisp create must stamp a non-zero row_lock / RowVersion")
+}
+
+// wispRowVersionChangesOnUpdate is the wisp-table counterpart of
+// issueRowVersionChangesOnUpdate.
+func (s *testSuite) wispRowVersionChangesOnUpdate() {
+	r := s.issueRepo()
+	wisp := newTestIssue("bd-rv-wisp-update", "before")
+	wisp.Ephemeral = true
+	s.Require().NoError(r.Insert(s.Ctx(), wisp, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+	before, err := r.Get(s.Ctx(), "bd-rv-wisp-update", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.Require().NotZero(before.RowVersion)
+
+	s.Require().NoError(r.Update(s.Ctx(), "bd-rv-wisp-update", map[string]any{"title": "after"}, "tester", domain.IssueTableOpts{UseWispsTable: true}))
+	after, err := r.Get(s.Ctx(), "bd-rv-wisp-update", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.NotZero(after.RowVersion)
+	s.NotEqual(before.RowVersion, after.RowVersion, "a generic wisp update must rewrite row_lock / RowVersion")
+}
+
 func (s *testSuite) issueUpdateAllowedFields() {
 	r := s.issueRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-upd-1", "before"), "tester", domain.InsertIssueOpts{}))
@@ -296,85 +390,6 @@ func (s *testSuite) issueGetByIDsPartial() {
 	s.True(ids["bd-pres-2"])
 }
 
-func (s *testSuite) issueSearchAll() {
-	r := s.issueRepo()
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-srch-1", "a"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-srch-2", "b"), "tester", domain.InsertIssueOpts{}))
-
-	out, err := r.Search(s.Ctx(), types.IssueFilter{}, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.GreaterOrEqual(len(out), 2)
-}
-
-func (s *testSuite) issueSearchByStatus() {
-	r := s.issueRepo()
-
-	open1 := newTestIssue("bd-stat-open", "open one")
-	s.Require().NoError(r.Insert(s.Ctx(), open1, "tester", domain.InsertIssueOpts{}))
-
-	closed := newTestIssue("bd-stat-closed", "closed one")
-	closed.Status = types.StatusClosed
-	s.Require().NoError(r.Insert(s.Ctx(), closed, "tester", domain.InsertIssueOpts{}))
-
-	// Scope by ID prefix — earlier subtests share the DB state and may have
-	// created closed rows.
-	closedStatus := types.StatusClosed
-	out, err := r.Search(s.Ctx(), types.IssueFilter{Status: &closedStatus, IDPrefix: "bd-stat-"}, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.Len(out, 1)
-	s.Equal("bd-stat-closed", out[0].ID)
-}
-
-func (s *testSuite) issueSearchByIssueType() {
-	r := s.issueRepo()
-
-	bug := newTestIssue("bd-type-bug", "bug")
-	bug.IssueType = types.TypeBug
-	s.Require().NoError(r.Insert(s.Ctx(), bug, "tester", domain.InsertIssueOpts{}))
-
-	task := newTestIssue("bd-type-task", "task")
-	s.Require().NoError(r.Insert(s.Ctx(), task, "tester", domain.InsertIssueOpts{}))
-
-	// Scope by ID prefix to isolate from earlier subtests.
-	bugType := types.TypeBug
-	out, err := r.Search(s.Ctx(), types.IssueFilter{IssueType: &bugType, IDPrefix: "bd-type-"}, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.Len(out, 1)
-	s.Equal("bd-type-bug", out[0].ID)
-}
-
-func (s *testSuite) issueSearchByIDPrefix() {
-	r := s.issueRepo()
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-pfx-a", "a"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-pfx-b", "b"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("other-1", "other"), "tester", domain.InsertIssueOpts{}))
-
-	out, err := r.Search(s.Ctx(), types.IssueFilter{IDPrefix: "bd-pfx-"}, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.Len(out, 2)
-}
-
-func (s *testSuite) issueSearchByIDs() {
-	r := s.issueRepo()
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-ids-1", "a"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-ids-2", "b"), "tester", domain.InsertIssueOpts{}))
-	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-ids-3", "c"), "tester", domain.InsertIssueOpts{}))
-
-	out, err := r.Search(s.Ctx(), types.IssueFilter{IDs: []string{"bd-ids-1", "bd-ids-3"}}, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.Len(out, 2)
-}
-
-func (s *testSuite) issueSearchLimit() {
-	r := s.issueRepo()
-	for i := 0; i < 5; i++ {
-		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(fmt.Sprintf("bd-lim-%d", i), "x"), "tester", domain.InsertIssueOpts{}))
-	}
-	out, err := r.Search(s.Ctx(), types.IssueFilter{Limit: 3, IDPrefix: "bd-lim-"}, domain.IssueTableOpts{})
-	s.Require().NoError(err)
-	s.Len(out, 3)
-}
-
 func (s *testSuite) issueWispInsertRouting() {
 	r := s.issueRepo()
 	wisp := newTestIssue("bd-iss-wisp-1", "wisp issue")
@@ -429,21 +444,6 @@ func (s *testSuite) issueWispUpdate() {
 	s.Equal(0, permEvtCount)
 }
 
-func (s *testSuite) issueWispSearch() {
-	r := s.issueRepo()
-	for i := 0; i < 3; i++ {
-		w := newTestIssue(fmt.Sprintf("bd-iss-wsrch-%d", i), "x")
-		w.Ephemeral = true
-		s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
-	}
-	out, err := r.Search(s.Ctx(),
-		types.IssueFilter{IDPrefix: "bd-iss-wsrch-"},
-		domain.IssueTableOpts{UseWispsTable: true},
-	)
-	s.Require().NoError(err)
-	s.Len(out, 3)
-}
-
 func (s *testSuite) issueWispIsolated() {
 	r := s.issueRepo()
 	perm := newTestIssue("bd-iss-iso-perm", "perm")
@@ -462,4 +462,437 @@ func (s *testSuite) issueWispIsolated() {
 	got, err := r.GetByIDs(s.Ctx(), []string{"bd-iss-iso-perm"}, domain.IssueTableOpts{UseWispsTable: true})
 	s.Require().NoError(err)
 	s.Empty(got)
+}
+
+func (s *testSuite) issueExistsMissing() {
+	r := s.issueRepo()
+	got, err := r.Exists(s.Ctx(), "bd-not-there", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(got)
+}
+
+func (s *testSuite) issueExistsPresent() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-exists-yes", "present"), "tester", domain.InsertIssueOpts{}))
+	got, err := r.Exists(s.Ctx(), "bd-exists-yes", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.True(got)
+}
+
+func (s *testSuite) issueExistsEmptyID() {
+	r := s.issueRepo()
+	_, err := r.Exists(s.Ctx(), "", domain.IssueTableOpts{})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "id must not be empty")
+}
+
+func (s *testSuite) issueExistsWispRouting() {
+	r := s.issueRepo()
+	w := newTestIssue("bd-exists-wisp", "wisp")
+	w.Ephemeral = true
+	s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+
+	got, err := r.Exists(s.Ctx(), "bd-exists-wisp", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.True(got, "should find wisp via wisps table")
+
+	got, err = r.Exists(s.Ctx(), "bd-exists-wisp", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(got, "should not find wisp via issues table")
+}
+
+func (s *testSuite) issueCountForPrefixEmpty() {
+	// Use a fresh prefix that no prior test inserts under. The suite shares
+	// state across s.Run subtests within a single TestXxx method, so we
+	// can't rely on "bd" being empty here.
+	r := s.issueRepo()
+	got, err := r.CountForPrefix(s.Ctx(), "cfpEmpty", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(0, got)
+}
+
+func (s *testSuite) issueCountForPrefixMatches() {
+	r := s.issueRepo()
+	for _, id := range []string{"cfpMat-c1", "cfpMat-c2", "cfpMat-c3"} {
+		s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, id), "tester", domain.InsertIssueOpts{}))
+	}
+	// Decoy with a different prefix should not be counted.
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("cfpMatX-c1", "decoy"), "tester", domain.InsertIssueOpts{}))
+
+	got, err := r.CountForPrefix(s.Ctx(), "cfpMat", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(3, got)
+}
+
+func (s *testSuite) issueCountForPrefixExcludesChildren() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("cfpChld-parent", "parent"), "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("cfpChld-parent.1", "child 1"), "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("cfpChld-parent.2", "child 2"), "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("cfpChld-sibling", "sibling"), "tester", domain.InsertIssueOpts{}))
+
+	got, err := r.CountForPrefix(s.Ctx(), "cfpChld", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(2, got, "child IDs containing '.' must not be counted")
+}
+
+func (s *testSuite) issueCountForPrefixWispRouting() {
+	r := s.issueRepo()
+	w := newTestIssue("cfpWisp-c1", "wisp count")
+	w.Ephemeral = true
+	s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+
+	got, err := r.CountForPrefix(s.Ctx(), "cfpWisp", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.Equal(1, got)
+	got, err = r.CountForPrefix(s.Ctx(), "cfpWisp", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(0, got, "issues table should not see wisp rows")
+}
+
+func (s *testSuite) issueCountForPrefixEmptyPrefix() {
+	r := s.issueRepo()
+	_, err := r.CountForPrefix(s.Ctx(), "", domain.IssueTableOpts{})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "prefix must not be empty")
+}
+
+func (s *testSuite) issueNextCounterIDFresh() {
+	// Unique prefix per subtest because subtests share state within a single
+	// TestXxx method (testify suite quirk).
+	r := s.issueRepo()
+	got, err := r.NextCounterID(s.Ctx(), "ctrFresh")
+	s.Require().NoError(err)
+	s.Equal(1, got, "first counter call on a fresh prefix should yield 1")
+}
+
+func (s *testSuite) issueNextCounterIDIncrement() {
+	r := s.issueRepo()
+	a, err := r.NextCounterID(s.Ctx(), "ctrInc")
+	s.Require().NoError(err)
+	b, err := r.NextCounterID(s.Ctx(), "ctrInc")
+	s.Require().NoError(err)
+	c, err := r.NextCounterID(s.Ctx(), "ctrInc")
+	s.Require().NoError(err)
+	s.Equal(a+1, b)
+	s.Equal(b+1, c)
+
+	// Sanity: another prefix is independent.
+	other, err := r.NextCounterID(s.Ctx(), "ctrIncAlt")
+	s.Require().NoError(err)
+	s.Equal(1, other)
+}
+
+func (s *testSuite) issueNextCounterIDSeedsFromMax() {
+	r := s.issueRepo()
+	// Pre-seed two issues with numeric suffixes; no issue_counter row exists.
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("ctrSeed-7", "seven"), "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("ctrSeed-12", "twelve"), "tester", domain.InsertIssueOpts{}))
+
+	got, err := r.NextCounterID(s.Ctx(), "ctrSeed")
+	s.Require().NoError(err)
+	s.Equal(13, got, "should seed from max(7,12)=12 and return 13")
+}
+
+func (s *testSuite) issueNextCounterIDSeedSkipsChildren() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("ctrSkip-3", "three"), "tester", domain.InsertIssueOpts{}))
+	// A child of ctrSkip-3 with a numeric child suffix — must be skipped during seed.
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("ctrSkip-3.99", "child"), "tester", domain.InsertIssueOpts{}))
+
+	got, err := r.NextCounterID(s.Ctx(), "ctrSkip")
+	s.Require().NoError(err)
+	s.Equal(4, got, "must ignore child IDs when seeding from max")
+}
+
+func (s *testSuite) issueNextCounterIDEmptyPrefix() {
+	r := s.issueRepo()
+	_, err := r.NextCounterID(s.Ctx(), "")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "prefix must not be empty")
+}
+
+func (s *testSuite) issueUpdateMissingIDWithStatus() {
+	r := s.issueRepo()
+	err := r.Update(s.Ctx(), "bd-status-missing",
+		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{})
+	s.Require().Error(err)
+	s.True(errors.Is(err, sql.ErrNoRows), "expected sql.ErrNoRows, got %v", err)
+}
+
+func (s *testSuite) issueClaimFresh() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-fresh", "x"), "tester", domain.InsertIssueOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-fresh", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.True(res.Updated, "fresh open+unassigned must claim")
+	s.True(res.StartedAtWasZero, "fresh row has no prior started_at")
+	s.Equal("alice", res.CurrentAssignee)
+	s.Equal(types.StatusInProgress, res.CurrentStatus)
+	s.Require().NotNil(res.OldIssue)
+	s.Equal(types.StatusOpen, res.OldIssue.Status)
+
+	out, err := r.Get(s.Ctx(), "bd-claim-fresh", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal("alice", out.Assignee)
+	s.Equal(types.StatusInProgress, out.Status)
+	s.Require().NotNil(out.StartedAt, "first claim must set started_at")
+}
+
+func (s *testSuite) issueClaimIdempotent() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-idem", "x"), "tester", domain.InsertIssueOpts{}))
+	_, err := r.Claim(s.Ctx(), "bd-claim-idem", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-idem", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(res.Updated, "re-claim by same actor must not flip rows")
+	s.Equal("alice", res.CurrentAssignee)
+	s.Equal(types.StatusInProgress, res.CurrentStatus)
+}
+
+func (s *testSuite) issueClaimPreservesStartedAt() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-sa", "x"), "tester", domain.InsertIssueOpts{}))
+
+	res1, err := r.Claim(s.Ctx(), "bd-claim-sa", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().True(res1.Updated)
+
+	first, err := r.Get(s.Ctx(), "bd-claim-sa", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().NotNil(first.StartedAt)
+	originalStart := *first.StartedAt
+
+	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-sa",
+		map[string]any{"status": string(types.StatusOpen)}, "tester", domain.IssueTableOpts{}))
+
+	res2, err := r.Claim(s.Ctx(), "bd-claim-sa", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.True(res2.Updated)
+	s.False(res2.StartedAtWasZero, "second claim must see prior started_at")
+
+	second, err := r.Get(s.Ctx(), "bd-claim-sa", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().NotNil(second.StartedAt)
+	s.Equal(originalStart.Unix(), second.StartedAt.Unix(), "started_at must not be overwritten")
+}
+
+func (s *testSuite) issueClaimConflict() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-conflict", "x"), "tester", domain.InsertIssueOpts{}))
+	_, err := r.Claim(s.Ctx(), "bd-claim-conflict", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-conflict", "bob", domain.IssueTableOpts{})
+	s.Require().NoError(err, "conflict surfaces via Updated=false, not as a SQL error")
+	s.False(res.Updated)
+	s.Equal("alice", res.CurrentAssignee, "must surface the existing assignee for use-case error wrapping")
+	s.Equal(types.StatusInProgress, res.CurrentStatus)
+}
+
+func (s *testSuite) issueClaimClosed() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-closed", "x"), "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(r.Update(s.Ctx(), "bd-claim-closed",
+		map[string]any{"status": string(types.StatusClosed)}, "tester", domain.IssueTableOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-closed", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(res.Updated)
+	s.Equal(types.StatusClosed, res.CurrentStatus, "closed issues are not claimable; CurrentStatus drives ErrNotClaimable in the use case")
+	s.Equal("", res.CurrentAssignee)
+}
+
+func (s *testSuite) issueClaimEmptyID() {
+	_, err := s.issueRepo().Claim(s.Ctx(), "", "alice", domain.IssueTableOpts{})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "id must not be empty")
+}
+
+// issueClaimStampsLease asserts the proxied-server (uow) claim path grants a
+// lease row and rewrites row_lock, so a claim made through this path is
+// visible to bd reclaim rather than stranded (the C2 gap).
+func (s *testSuite) issueClaimStampsLease() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-lease", "x"), "tester", domain.InsertIssueOpts{}))
+
+	ctx := issueops.WithLeaseTTL(s.Ctx(), 30*time.Second)
+	res, err := r.Claim(ctx, "bd-claim-lease", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().True(res.Updated)
+
+	var (
+		leaseExpires sql.NullTime
+		heartbeatAt  sql.NullTime
+		rowLock      int64
+	)
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT l.lease_expires_at, l.heartbeat_at, i.row_lock FROM issues i "+
+			"LEFT JOIN leases l ON l.issue_id = i.id WHERE i.id = ?", "bd-claim-lease").
+		Scan(&leaseExpires, &heartbeatAt, &rowLock))
+	s.Require().True(leaseExpires.Valid, "proxied claim must grant a lease row")
+	s.Require().True(heartbeatAt.Valid, "proxied claim must stamp heartbeat_at on the lease row")
+	s.NotZero(rowLock, "proxied claim must rewrite row_lock")
+
+	// The stamped lease must be recoverable. A cutoff in the future makes the
+	// lease look expired without waiting on the real TTL. Sibling subtests share
+	// this database (SetupTest resets per suite method, not per s.Run), so the
+	// sweep may also reclaim their leftover claims — assert ours is among them
+	// rather than that it is the only one.
+	tx, err := s.db.BeginTx(s.Ctx(), nil)
+	s.Require().NoError(err)
+	defer func() { _ = tx.Rollback() }()
+	reclaimed, err := issueops.ReclaimExpiredLeasesInTx(s.Ctx(), tx, time.Now().Add(time.Hour), "reaper")
+	s.Require().NoError(err)
+	s.Require().NoError(tx.Commit())
+	var owner string
+	found := false
+	for _, rl := range reclaimed {
+		if rl.ID == "bd-claim-lease" {
+			found = true
+			owner = rl.PreviousOwner
+		}
+	}
+	s.Require().True(found, "proxied-mode claim must be visible to reclaim, got %+v", reclaimed)
+	s.Equal("alice", owner)
+
+	out, err := r.Get(s.Ctx(), "bd-claim-lease", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal(types.StatusOpen, out.Status, "reclaim reverts the proxied claim to open")
+	s.Equal("", out.Assignee)
+}
+
+// setClaimPools configures claim.pools for a subtest and returns a cleanup
+// func. Sibling subtests share this database (SetupTest resets per suite
+// method, not per s.Run), so the key must not leak past the subtest.
+func (s *testSuite) setClaimPools(value string) func() {
+	s.Require().NoError(issueops.SetConfigInTx(s.Ctx(), s.Runner(), "claim.pools", value))
+	return func() {
+		_, err := s.db.ExecContext(s.Ctx(), "DELETE FROM config WHERE `key` = 'claim.pools'")
+		s.Require().NoError(err)
+	}
+}
+
+// issueClaimPoolAlias asserts the proxied-server (uow) claim path honors
+// claim.pools (bd-bguz6): an issue pre-assigned to a configured pool alias is
+// claimable by any actor, exactly like the primary issueops.ClaimIssueInTx
+// path.
+func (s *testSuite) issueClaimPoolAlias() {
+	cleanup := s.setClaimPools("fable-crew, night-crew")
+	defer cleanup()
+
+	r := s.issueRepo()
+	in := newTestIssue("bd-claim-pool", "pool-dispatched item")
+	in.Assignee = "fable-crew"
+	s.Require().NoError(r.Insert(s.Ctx(), in, "dispatcher", domain.InsertIssueOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-pool", "bob", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().True(res.Updated, "pool-assigned issue must be claimable by any actor through the proxied path")
+
+	out, err := r.Get(s.Ctx(), "bd-claim-pool", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal("bob", out.Assignee)
+	s.Equal(types.StatusInProgress, out.Status)
+
+	var leaseExpires sql.NullTime
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT lease_expires_at FROM leases WHERE issue_id = ?", "bd-claim-pool").Scan(&leaseExpires))
+	s.Require().True(leaseExpires.Valid, "a pool take is a normal claim and must grant a lease")
+}
+
+// issueClaimPoolUnconfiguredAlias asserts an alias absent from claim.pools
+// keeps the anti-steal protection on this path too.
+func (s *testSuite) issueClaimPoolUnconfiguredAlias() {
+	cleanup := s.setClaimPools("fable-crew")
+	defer cleanup()
+
+	r := s.issueRepo()
+	in := newTestIssue("bd-claim-pool-other", "other crew's work")
+	in.Assignee = "other-crew"
+	s.Require().NoError(r.Insert(s.Ctx(), in, "dispatcher", domain.InsertIssueOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-pool-other", "bob", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(res.Updated, "unconfigured alias must not be claimable")
+	s.Equal("other-crew", res.CurrentAssignee)
+	s.False(res.CurrentAssigneeIsPool, "unconfigured alias is not a pool")
+}
+
+// issueClaimPoolStatusConflict asserts a pool-assigned issue that loses the
+// CAS on status is flagged CurrentAssigneeIsPool, so the use-case layer
+// reports a status conflict instead of a held-by-pseudo-assignee refusal.
+func (s *testSuite) issueClaimPoolStatusConflict() {
+	cleanup := s.setClaimPools("fable-crew")
+	defer cleanup()
+
+	r := s.issueRepo()
+	in := newTestIssue("bd-claim-pool-blocked", "blocked pool item")
+	in.Assignee = "fable-crew"
+	in.Status = types.StatusBlocked
+	s.Require().NoError(r.Insert(s.Ctx(), in, "dispatcher", domain.InsertIssueOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-pool-blocked", "bob", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(res.Updated)
+	s.True(res.CurrentAssigneeIsPool, "pool assignee must be flagged for status-conflict error mapping")
+	s.Equal(types.StatusBlocked, res.CurrentStatus)
+}
+
+// issueClaimCustomActiveStatus asserts the proxied-server claim path claims
+// from custom active-category statuses like the primary path's
+// ClaimableSourceStatusesInTx (bd-pq7m2), not from a hardcoded
+// status = 'open' — and that non-active customs keep their anti-steal
+// protection (GH-3570 parity).
+func (s *testSuite) issueClaimCustomActiveStatus() {
+	_, err := s.db.ExecContext(s.Ctx(),
+		"INSERT INTO custom_statuses (name, category) VALUES ('triaged', 'active'), ('polishing', 'wip')")
+	s.Require().NoError(err)
+	defer func() {
+		_, err := s.db.ExecContext(s.Ctx(),
+			"DELETE FROM custom_statuses WHERE name IN ('triaged', 'polishing')")
+		s.Require().NoError(err)
+	}()
+
+	r := s.issueRepo()
+	in := newTestIssue("bd-claim-custom-active", "triaged item")
+	in.Status = types.Status("triaged")
+	s.Require().NoError(r.Insert(s.Ctx(), in, "tester", domain.InsertIssueOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-custom-active", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().True(res.Updated, "custom active-category status must be claimable through the proxied path (bd-pq7m2)")
+
+	out, err := r.Get(s.Ctx(), "bd-claim-custom-active", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal("alice", out.Assignee)
+	s.Equal(types.StatusInProgress, out.Status)
+
+	// A wip-category custom status stays unclaimable (anti-steal parity).
+	wip := newTestIssue("bd-claim-custom-wip", "being polished")
+	wip.Status = types.Status("polishing")
+	s.Require().NoError(r.Insert(s.Ctx(), wip, "tester", domain.InsertIssueOpts{}))
+
+	res, err = r.Claim(s.Ctx(), "bd-claim-custom-wip", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.False(res.Updated, "wip-category custom status must not be claimable")
+	s.Equal(types.Status("polishing"), res.CurrentStatus)
+}
+
+func (s *testSuite) issueClaimRecordsEvent() {
+	r := s.issueRepo()
+	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue("bd-claim-evt", "x"), "tester", domain.InsertIssueOpts{}))
+
+	res, err := r.Claim(s.Ctx(), "bd-claim-evt", "alice", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Require().True(res.Updated)
+
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		"bd-claim-evt", "claimed").Scan(&count))
+	s.Equal(1, count, "successful claim must record exactly one 'claimed' event")
 }

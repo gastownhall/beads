@@ -1110,7 +1110,7 @@ func TestCreateIssues(t *testing.T) {
 		}
 
 		te.exec(t, ctx,
-			"INSERT INTO dependencies (issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+			"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, ?, ?)",
 			dirtyOwner.ID, dirtyTarget.ID, types.DepBlocks, time.Now().UTC(), "tester")
 
 		wispSource := &types.Issue{

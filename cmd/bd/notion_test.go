@@ -304,7 +304,7 @@ func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 
-	err := renderNotionSyncResult(cmd, &tracker.SyncResult{
+	renderNotionSyncResult(cmd, &tracker.SyncResult{
 		Stats: tracker.SyncStats{Pulled: 2, Pushed: 3, Conflicts: 1},
 		Warnings: []string{
 			"Skipped unsupported Notion issue types: event=2",
@@ -322,9 +322,6 @@ func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {
 			Updated: 1,
 		},
 	})
-	if err != nil {
-		t.Fatalf("renderNotionSyncResult returned error: %v", err)
-	}
 	out := stdout.String()
 	for _, want := range []string{
 		"Dry run mode",
@@ -358,15 +355,12 @@ func TestRenderNotionSyncResultOmitsMutationSummaryForSameMinuteNoopDryRun(t *te
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 
-	err := renderNotionSyncResult(cmd, &tracker.SyncResult{
+	renderNotionSyncResult(cmd, &tracker.SyncResult{
 		PullStats: tracker.PullStats{
 			Queried:    49,
 			Candidates: 3,
 		},
 	})
-	if err != nil {
-		t.Fatalf("renderNotionSyncResult returned error: %v", err)
-	}
 	out := stdout.String()
 	for _, want := range []string{
 		"Dry run mode",

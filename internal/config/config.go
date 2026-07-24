@@ -91,6 +91,7 @@ func Initialize() error {
 		// <module-root>/.beads/config.yaml (where module-root is the nearest parent containing go.mod).
 		ignoreRepoConfig := os.Getenv("BEADS_TEST_IGNORE_REPO_CONFIG") != ""
 		var moduleRoot string
+		ignoredRepoConfigPaths := map[string]bool{}
 		if ignoreRepoConfig {
 			// Find module root by walking up to go.mod.
 			for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
@@ -98,6 +99,12 @@ func Initialize() error {
 					moduleRoot = dir
 					break
 				}
+			}
+			if moduleRoot != "" {
+				ignoredRepoConfigPaths[filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))] = true
+			}
+			if fallbackPath := worktreeFallbackConfigPath(cwd); fallbackPath != "" {
+				ignoredRepoConfigPaths[filepath.Clean(fallbackPath)] = true
 			}
 		}
 
@@ -108,12 +115,8 @@ func Initialize() error {
 			if _, err := os.Stat(path); err != nil {
 				return false
 			}
-			if ignoreRepoConfig && moduleRoot != "" {
-				// Only ignore the repo-local config (moduleRoot/.beads/config.yaml).
-				wantIgnore := filepath.Clean(path) == filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))
-				if wantIgnore {
-					return false
-				}
+			if ignoreRepoConfig && ignoredRepoConfigPaths[filepath.Clean(path)] {
+				return false
 			}
 			configPaths = append(configPaths, path)
 			primaryConfigPath = path
@@ -138,7 +141,7 @@ func Initialize() error {
 
 		// Worktree/shared fallback: the active workspace may live outside the
 		// worktree tree, so the parent walk above won't find it.
-		if primaryConfigPath == "" {
+		if primaryConfigPath == "" && beadsEnvConfigPath == "" {
 			p := worktreeFallbackConfigPath(cwd)
 			_ = tryProjectConfig(p)
 		}
@@ -168,6 +171,7 @@ func Initialize() error {
 	// Set defaults for all flags
 	v.SetDefault("json", false)
 	v.SetDefault("events-export", false)
+	v.SetDefault("audit.enabled", false)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
 	v.SetDefault("db", "")
@@ -191,6 +195,9 @@ func Initialize() error {
 	// Sync configuration defaults (bd-4u8)
 	v.SetDefault("sync.require_confirmation_on_mass_delete", false)
 
+	v.SetDefault("metrics.disabled", false)
+	v.SetDefault("metrics.endpoint", "https://gastownhall-eventsapi.com/mp/collect")
+
 	// Federation configuration (optional Dolt remote)
 	v.SetDefault("federation.remote", "")                          // e.g., dolthub://org/beads, gs://bucket/beads, s3://bucket/beads, az://account.blob.core.windows.net/container/beads
 	v.SetDefault("federation.sovereignty", "")                     // T1 | T2 | T3 | T4 (empty = no restriction)
@@ -199,6 +206,13 @@ func Initialize() error {
 
 	// Push configuration defaults
 	v.SetDefault("no-push", false)
+
+	// Agent profile configuration (gh#3423, follow-up to #4220)
+	// Explicit runtime knob for the policy profile (git/commit authority)
+	// documented in docs/getting-started/ide-setup.md. `bd prime` uses this to select its
+	// close-protocol wording. Values: conservative | minimal | team-maintainer.
+	// Invalid values fall back to "conservative" (see GetAgentProfile).
+	v.SetDefault("agent.profile", string(ProfileConservative))
 
 	// Create command defaults
 	v.SetDefault("create.require-description", false)
@@ -253,6 +267,9 @@ func Initialize() error {
 
 	// AI configuration defaults
 	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")
+
+	// List command defaults
+	v.SetDefault("list.limit", 50)
 
 	// Output configuration (GH#1384)
 	// Controls title display in command feedback messages.

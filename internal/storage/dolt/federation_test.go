@@ -5,13 +5,11 @@ package dolt
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -388,6 +386,58 @@ func TestFederationSyncStatus(t *testing.T) {
 	}
 }
 
+func TestFederationSyncCommitsPendingPeerMetadataBeforeFetch(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	peer := &storage.FederationPeer{
+		Name:        "peer-metadata-sync",
+		RemoteURL:   "file:///tmp/beads-no-such-federation-peer",
+		Sovereignty: "T2",
+	}
+	if err := store.AddFederationPeer(ctx, peer); err != nil {
+		t.Fatalf("add federation peer: %v", err)
+	}
+
+	if federationStatusHasTable(t, ctx, store, "federation_peers") {
+		t.Fatal("add-peer should commit federation_peers metadata")
+	}
+
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE federation_peers SET sovereignty = ? WHERE name = ?", "T3", peer.Name,
+	); err != nil {
+		t.Fatalf("dirty federation peer metadata: %v", err)
+	}
+	if !federationStatusHasTable(t, ctx, store, "federation_peers") {
+		t.Fatal("expected direct federation_peers update to dirty the working set")
+	}
+
+	_, err := store.Sync(ctx, peer.Name, "")
+	if err == nil {
+		t.Fatal("expected sync to fail for nonexistent file remote")
+	}
+	if federationStatusHasTable(t, ctx, store, "federation_peers") {
+		t.Fatal("sync should commit pending federation_peers metadata before fetch/merge")
+	}
+}
+
+func federationStatusHasTable(t *testing.T, ctx context.Context, store *DoltStore, table string) bool {
+	t.Helper()
+
+	var count int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_status WHERE table_name = ?", table,
+	).Scan(&count); err != nil {
+		t.Fatalf("query dolt_status for %s: %v", table, err)
+	}
+	return count > 0
+}
+
 // TestFederationPushPullMethods tests PushTo and PullFrom
 func TestFederationPushPullMethods(t *testing.T) {
 	skipIfNoDolt(t)
@@ -419,195 +469,6 @@ func TestFederationPushPullMethods(t *testing.T) {
 	} else {
 		t.Logf("✓ Fetch correctly failed: %v", err)
 	}
-}
-
-// TestSyncCLIRemotesToSQL verifies GH#2315: after a server restart, CLI-only
-// remotes are re-registered into the SQL server by syncCLIRemotesToSQL.
-func TestSyncCLIRemotesToSQL(t *testing.T) {
-	skipIfNoDolt(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	remoteName := "test-sync-remote"
-	remoteURL := "file:///tmp/test-sync-remote"
-
-	// Ensure cliDir exists with a dolt init so CLI remote commands work.
-	// In test mode, dbPath/database may not exist on the filesystem.
-	dir := store.CLIDir()
-	if dir == "" {
-		t.Skip("no CLI dir available")
-	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatalf("failed to create CLI dir: %v", err)
-	}
-	initCmd := exec.Command("dolt", "init", "--name", "test", "--email", "test@test.com")
-	initCmd.Dir = dir
-	if out, err := initCmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt init failed: %s: %v", out, err)
-	}
-
-	// Add remote via SQL so it exists in dolt_remotes
-	if err := store.AddRemote(ctx, remoteName, remoteURL); err != nil {
-		t.Fatalf("failed to add SQL remote: %v", err)
-	}
-
-	// Also add it to CLI so it persists across restarts
-	if err := doltutil.AddCLIRemote(dir, remoteName, remoteURL); err != nil {
-		t.Fatalf("failed to add CLI remote: %v", err)
-	}
-
-	// Verify remote exists in SQL
-	has, err := store.HasRemote(ctx, remoteName)
-	if err != nil {
-		t.Fatalf("HasRemote failed: %v", err)
-	}
-	if !has {
-		t.Fatal("expected remote to exist in SQL after add")
-	}
-
-	// Simulate server restart: remove the remote from SQL only
-	if err := store.RemoveRemote(ctx, remoteName); err != nil {
-		t.Fatalf("failed to remove SQL remote: %v", err)
-	}
-
-	// Verify it's gone from SQL
-	has, err = store.HasRemote(ctx, remoteName)
-	if err != nil {
-		t.Fatalf("HasRemote after remove failed: %v", err)
-	}
-	if has {
-		t.Fatal("expected remote to be absent from SQL after remove")
-	}
-
-	// Run sync — should re-register the CLI remote into SQL
-	store.syncCLIRemotesToSQL(ctx)
-
-	// Verify it's back in SQL
-	has, err = store.HasRemote(ctx, remoteName)
-	if err != nil {
-		t.Fatalf("HasRemote after sync failed: %v", err)
-	}
-	if !has {
-		t.Fatal("expected syncCLIRemotesToSQL to re-register the CLI remote into SQL")
-	}
-
-	// Verify the URL matches
-	remotes, err := store.ListRemotes(ctx)
-	if err != nil {
-		t.Fatalf("ListRemotes failed: %v", err)
-	}
-	found := false
-	for _, r := range remotes {
-		if r.Name == remoteName {
-			if r.URL != remoteURL {
-				t.Errorf("expected URL %s, got %s", remoteURL, r.URL)
-			}
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("remote %s not found in ListRemotes after sync", remoteName)
-	}
-
-	// Clean up CLI remote
-	_ = doltutil.RemoveCLIRemote(dir, remoteName)
-	_ = store.RemoveRemote(ctx, remoteName)
-}
-
-// TestMigrateServerRootRemotes verifies GH#2118: remotes added in the dolt
-// server root directory (.beads/dolt/) are propagated to the database
-// subdirectory (.beads/dolt/<database>/) during syncCLIRemotesToSQL.
-// This handles the common case where users run `dolt remote add` in the
-// visible server root instead of the database subdirectory.
-func TestMigrateServerRootRemotes(t *testing.T) {
-	skipIfNoDolt(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-
-	remoteName := "test-root-remote"
-	remoteURL := "file:///tmp/test-root-remote"
-
-	// Set up CLIDir with dolt init (database directory)
-	cliDir := store.CLIDir()
-	if cliDir == "" {
-		t.Skip("no CLI dir available")
-	}
-	if err := os.MkdirAll(cliDir, 0755); err != nil {
-		t.Fatalf("failed to create CLI dir: %v", err)
-	}
-	initCmd := exec.Command("dolt", "init", "--name", "test", "--email", "test@test.com")
-	initCmd.Dir = cliDir
-	if out, err := initCmd.CombinedOutput(); err != nil {
-		// Might already be initialized
-		if !strings.Contains(string(out), "already") {
-			t.Fatalf("dolt init in CLIDir failed: %s: %v", out, err)
-		}
-	}
-
-	// Set up server root (dbPath) with dolt init — separate from CLIDir
-	rootDir := store.Path()
-	if rootDir == "" || rootDir == cliDir {
-		t.Skip("dbPath same as CLIDir — migration not applicable")
-	}
-	if _, err := os.Stat(filepath.Join(rootDir, ".dolt")); err != nil {
-		// Initialize root dir if needed
-		if err := os.MkdirAll(rootDir, 0755); err != nil {
-			t.Fatalf("failed to create root dir: %v", err)
-		}
-		initRootCmd := exec.Command("dolt", "init", "--name", "test", "--email", "test@test.com")
-		initRootCmd.Dir = rootDir
-		if out, err := initRootCmd.CombinedOutput(); err != nil {
-			if !strings.Contains(string(out), "already") {
-				t.Fatalf("dolt init in root failed: %s: %v", out, err)
-			}
-		}
-	}
-
-	// Add remote to server root (the wrong place — simulates the user's mistake)
-	if err := doltutil.AddCLIRemote(rootDir, remoteName, remoteURL); err != nil {
-		t.Fatalf("failed to add remote to server root: %v", err)
-	}
-	defer func() { _ = doltutil.RemoveCLIRemote(rootDir, remoteName) }()
-
-	// Verify remote is NOT in CLIDir before migration
-	if url := doltutil.FindCLIRemote(cliDir, remoteName); url != "" {
-		t.Fatalf("remote should not be in CLIDir before migration, found: %s", url)
-	}
-
-	// Remove from SQL if present (simulate clean state)
-	_ = store.RemoveRemote(ctx, remoteName)
-
-	// Run sync — should discover remote in server root and migrate to CLIDir + SQL
-	store.syncCLIRemotesToSQL(ctx)
-
-	// Verify remote was migrated to CLIDir
-	if url := doltutil.FindCLIRemote(cliDir, remoteName); url == "" {
-		t.Error("expected remote to be migrated to CLIDir")
-	} else if url != remoteURL {
-		t.Errorf("CLIDir remote URL = %q, want %q", url, remoteURL)
-	}
-
-	// Verify remote was registered in SQL
-	has, err := store.HasRemote(ctx, remoteName)
-	if err != nil {
-		t.Fatalf("HasRemote failed: %v", err)
-	}
-	if !has {
-		t.Error("expected remote to be registered in SQL after migration")
-	}
-
-	// Clean up
-	_ = doltutil.RemoveCLIRemote(cliDir, remoteName)
-	_ = store.RemoveRemote(ctx, remoteName)
 }
 
 // TestFilteredPushExcludesWisp verifies that filteredPushToPeer with

@@ -33,8 +33,8 @@ type Conflict struct {
 
 // RemoteInfo describes a configured remote.
 type RemoteInfo struct {
-	Name string // Remote name (e.g., "town-beta")
-	URL  string // Remote URL (e.g., "dolthub://org/repo")
+	Name string `json:"name"` // Remote name (e.g., "town-beta")
+	URL  string `json:"url"`  // Remote URL (e.g., "dolthub://org/repo")
 }
 
 // SyncStatus describes the synchronization state with a peer.

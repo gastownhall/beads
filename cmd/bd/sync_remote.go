@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -39,17 +38,7 @@ func resolveSyncRemoteFromDir(beadsDir string) string {
 // nothing to commit). Used by bd dolt remote add/remove to keep the
 // working tree clean after persisting sync.remote.
 func commitBeadsConfig(msg string) {
-	addCmd := exec.Command("git", "add", ".beads/config.yaml")
-	if err := addCmd.Run(); err != nil {
-		return
-	}
-	commitCmd := exec.Command("git", "commit", "-m", msg) //nolint:gosec // G702: msg is from internal callers only, not user input
-	if out, err := commitCmd.CombinedOutput(); err != nil {
-		// "nothing to commit" is normal if the file was already staged
-		if !strings.Contains(string(out), "nothing to commit") {
-			fmt.Fprintf(os.Stderr, "Warning: failed to commit config change: %v\n", err)
-		}
-	}
+	commitBeadsConfigForActiveRepo(context.Background(), msg)
 }
 
 func commitBeadsConfigForActiveRepo(ctx context.Context, msg string) {

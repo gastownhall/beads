@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/beads/internal/debug"
@@ -112,6 +113,21 @@ const issuesQuery = `
 	}
 `
 
+type rateLimitState struct {
+	mu        sync.RWMutex
+	remaining int
+	resetsAt  time.Time
+}
+
+// maxRateLimitResetHorizon accommodates Linear's short quota windows and
+// clock skew without allowing a nonsensical timestamp to block requests
+// effectively forever.
+const maxRateLimitResetHorizon = 24 * time.Hour
+
+func newRateLimitState() *rateLimitState {
+	return &rateLimitState{remaining: -1}
+}
+
 // NewClient creates a new Linear client with the given API key and team ID.
 func NewClient(apiKey, teamID string) *Client {
 	return &Client{
@@ -122,6 +138,7 @@ func NewClient(apiKey, teamID string) *Client {
 		HTTPClient: &http.Client{
 			Timeout: DefaultTimeout,
 		},
+		rateLimitState: newRateLimitState(),
 	}
 }
 
@@ -136,6 +153,7 @@ func NewOAuthClient(oauthConfig OAuthConfig, teamID string) *Client {
 		HTTPClient: &http.Client{
 			Timeout: DefaultTimeout,
 		},
+		rateLimitState: newRateLimitState(),
 	}
 }
 
@@ -151,6 +169,7 @@ func (c *Client) WithEndpoint(endpoint string) *Client {
 		AuthMode:       c.AuthMode,
 		TokenManager:   c.TokenManager,
 		RateLimitFloor: c.RateLimitFloor,
+		rateLimitState: c.rateLimitState,
 	}
 }
 
@@ -166,6 +185,7 @@ func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
 		AuthMode:       c.AuthMode,
 		TokenManager:   c.TokenManager,
 		RateLimitFloor: c.RateLimitFloor,
+		rateLimitState: c.rateLimitState,
 	}
 }
 
@@ -181,6 +201,7 @@ func (c *Client) WithProjectID(projectID string) *Client {
 		AuthMode:       c.AuthMode,
 		TokenManager:   c.TokenManager,
 		RateLimitFloor: c.RateLimitFloor,
+		rateLimitState: c.rateLimitState,
 	}
 }
 
@@ -210,7 +231,45 @@ func (c *Client) WithRateLimitFloor(floor int) *Client {
 		AuthMode:       c.AuthMode,
 		TokenManager:   c.TokenManager,
 		RateLimitFloor: floor,
+		rateLimitState: c.rateLimitState,
 	}
+}
+
+func (c *Client) circuitBreakerError() *ErrRateLimitExhausted {
+	if c.rateLimitState == nil {
+		return nil
+	}
+	c.rateLimitState.mu.Lock()
+	defer c.rateLimitState.mu.Unlock()
+	if c.rateLimitState.remaining < 0 || c.rateLimitState.remaining >= c.rateLimitFloor() {
+		return nil
+	}
+	if !c.rateLimitState.resetsAt.IsZero() && !time.Now().Before(c.rateLimitState.resetsAt) {
+		c.rateLimitState.remaining = -1
+		c.rateLimitState.resetsAt = time.Time{}
+		return nil
+	}
+	return &ErrRateLimitExhausted{
+		Remaining: c.rateLimitState.remaining,
+		Floor:     c.rateLimitFloor(),
+		ResetsAt:  c.rateLimitState.resetsAt,
+	}
+}
+
+func (c *Client) recordRateLimitHeaders(info RateLimitInfo) {
+	if c.rateLimitState == nil || info.RequestsRemaining < 0 {
+		return
+	}
+	c.rateLimitState.mu.Lock()
+	defer c.rateLimitState.mu.Unlock()
+	now := time.Now()
+	if info.RequestsReset.IsZero() || !now.Before(info.RequestsReset) || info.RequestsReset.After(now.Add(maxRateLimitResetHorizon)) {
+		c.rateLimitState.remaining = -1
+		c.rateLimitState.resetsAt = time.Time{}
+		return
+	}
+	c.rateLimitState.remaining = info.RequestsRemaining
+	c.rateLimitState.resetsAt = info.RequestsReset
 }
 
 // rateLimitFloor returns the effective circuit-breaker floor, using the
@@ -254,8 +313,8 @@ func parseRateLimitHeaders(h http.Header) RateLimitInfo {
 		}
 	}
 	if v := h.Get("X-RateLimit-Requests-Reset"); v != "" {
-		if t, err := time.Parse(time.RFC3339, v); err == nil {
-			info.RequestsReset = t
+		if milliseconds, err := strconv.ParseInt(v, 10, 64); err == nil && milliseconds > 0 {
+			info.RequestsReset = time.UnixMilli(milliseconds).UTC()
 		}
 	}
 	return info
@@ -298,6 +357,10 @@ func (c *Client) executeOnce(ctx context.Context, req *GraphQLRequest) (json.Raw
 	var lastErr error
 	var lastStatus int
 	for attempt := 0; attempt <= MaxRetries; attempt++ {
+		if rlErr := c.circuitBreakerError(); rlErr != nil {
+			return nil, lastStatus, rlErr
+		}
+
 		httpReq, err := http.NewRequestWithContext(ctx, "POST", c.Endpoint, bytes.NewReader(body))
 		if err != nil {
 			return nil, 0, fmt.Errorf("failed to create request: %w", err)
@@ -325,15 +388,7 @@ func (c *Client) executeOnce(ctx context.Context, req *GraphQLRequest) (json.Raw
 
 		lastStatus = resp.StatusCode
 		rl := parseRateLimitHeaders(resp.Header)
-
-		// Circuit breaker: stop early when remaining quota is critically low.
-		if rl.RequestsRemaining >= 0 && rl.RequestsRemaining < c.rateLimitFloor() {
-			return nil, lastStatus, &ErrRateLimitExhausted{
-				Remaining: rl.RequestsRemaining,
-				Floor:     c.rateLimitFloor(),
-				ResetsAt:  rl.RequestsReset,
-			}
-		}
+		c.recordRateLimitHeaders(rl)
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			delay := rl.RetryAfter
@@ -602,6 +657,80 @@ func (c *Client) GetTeamStates(ctx context.Context) ([]State, error) {
 	return teamResp.Team.States.Nodes, nil
 }
 
+// GetTeamLabels returns all issue labels defined for the team (paginated).
+func (c *Client) GetTeamLabels(ctx context.Context) ([]Label, error) {
+	const pageSize = 250
+	query := `
+		query TeamLabels($teamId: String!, $first: Int!, $after: String) {
+			team(id: $teamId) {
+				labels(first: $first, after: $after) {
+					nodes {
+						id
+						name
+					}
+					pageInfo {
+						hasNextPage
+						endCursor
+					}
+				}
+			}
+		}
+	`
+
+	var all []Label
+	var after *string
+	for {
+		vars := map[string]interface{}{
+			"teamId": c.TeamID,
+			"first":  pageSize,
+			"after":  nil,
+		}
+		if after != nil {
+			vars["after"] = *after
+		}
+
+		req := &GraphQLRequest{
+			Query:     query,
+			Variables: vars,
+		}
+
+		data, err := c.Execute(ctx, req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch team labels: %w", err)
+		}
+
+		var page struct {
+			Team struct {
+				Labels *struct {
+					Nodes    []Label `json:"nodes"`
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+				} `json:"labels"`
+			} `json:"team"`
+		}
+		if err := json.Unmarshal(data, &page); err != nil {
+			return nil, fmt.Errorf("failed to parse team labels response: %w", err)
+		}
+		if page.Team.Labels == nil {
+			return nil, fmt.Errorf("no labels connection found for team")
+		}
+
+		all = append(all, page.Team.Labels.Nodes...)
+		if !page.Team.Labels.PageInfo.HasNextPage {
+			break
+		}
+		if page.Team.Labels.PageInfo.EndCursor == "" {
+			break
+		}
+		cursor := page.Team.Labels.PageInfo.EndCursor
+		after = &cursor
+	}
+
+	return all, nil
+}
+
 // FindIssueByDescriptionContains searches for an issue whose description
 // contains the given text. This powers idempotency dedup: we embed a
 // deterministic marker in the description and search for it before creating.
@@ -755,7 +884,11 @@ func (c *Client) createIssueSingleAttempt(ctx context.Context, title, descriptio
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", c.APIKey)
+	authValue, err := c.authHeader()
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Authorization", authValue)
 
 	resp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {

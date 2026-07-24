@@ -74,7 +74,7 @@ func TestRenderSectionFullSingleMarkers(t *testing.T) {
 // hash-freshness re-renders propagate it on subsequent runs.
 func TestRenderSectionFullIncludesArchPointer(t *testing.T) {
 	section := RenderSection(ProfileFull)
-	for _, want := range []string{"refs/dolt/data", "SYNC_CONCEPTS.md"} {
+	for _, want := range []string{"refs/dolt/data", "docs/core-concepts/sync-concepts.md"} {
 		if !strings.Contains(section, want) {
 			t.Errorf("full profile missing architecture pointer fragment %q", want)
 		}
@@ -83,11 +83,11 @@ func TestRenderSectionFullIncludesArchPointer(t *testing.T) {
 
 // TestRenderSectionMinimalIncludesArchPointer guards GH#3683 for the
 // minimal profile. The minimal body is intentionally pointer-only, but a
-// single architecture sentence with the canonical SYNC_CONCEPTS.md URL
+// single architecture sentence with the canonical sync-concepts URL
 // fits the profile's "point at the docs" character.
 func TestRenderSectionMinimalIncludesArchPointer(t *testing.T) {
 	section := RenderSection(ProfileMinimal)
-	for _, want := range []string{"refs/dolt/data", "SYNC_CONCEPTS.md"} {
+	for _, want := range []string{"refs/dolt/data", "docs/core-concepts/sync-concepts.md"} {
 		if !strings.Contains(section, want) {
 			t.Errorf("minimal profile missing architecture pointer fragment %q", want)
 		}
@@ -137,7 +137,7 @@ func TestCodexSectionBody(t *testing.T) {
 		"bd prime",
 		"bd remember",
 		"refs/dolt/data",
-		"SYNC_CONCEPTS.md",
+		"docs/core-concepts/sync-concepts.md",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("CodexSectionBody missing %q", want)

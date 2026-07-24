@@ -1,0 +1,88 @@
+# Auto-fix stale generated CLI docs on PRs.
+#
+# The PR workflow's check-doc-flags job already computes the exact
+# regeneration patch with CI's canonical pinned build and uploads it as the
+# cli-docs-freshness-patch artifact (scripts/check-cli-docs-drift.sh). This
+# workflow closes the loop: when a PR run fails and left that artifact, it
+# pushes the regen commit to the PR branch (same-repo PRs) or leaves an
+# idempotent comment with the one-liner apply recipe (fork PRs).
+#
+# SECURITY MODEL: this runs with write permissions via workflow_run, so it
+# never checks out or executes PR code. It checks out the base default branch
+# for scripts, and treats the artifact strictly as data: every path in the
+# patch must match an anchored generated-docs allowlist (single path segment,
+# no traversal, no symlink modes) and `git apply --index` supplies the
+# underlying escape guards (scripts/docs-autofix-push.sh), so a hostile patch
+# can at most rewrite generated doc files on its own PR branch.
+#
+# TOKEN NOTE: pushes made with the default GITHUB_TOKEN do not retrigger PR
+# checks. Configure a DOCS_AUTOFIX_TOKEN repo secret (fine-grained PAT or
+# GitHub App token with contents:write on this repo) for fully hands-off
+# operation on same-repo PRs; without it the pushed fix still lands but
+# checks need a manual re-run. Fork PRs always get the apply-recipe comment -
+# no token we hold can push to a fork.
+
+name: Docs Autofix
+
+on:
+  workflow_run:
+    workflows: ["PR"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: docs-autofix-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+jobs:
+  autofix:
+    name: Apply CLI docs regeneration to PR
+    if: >
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      # Trusted side only: base repo default branch, never the PR head.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Download docs freshness patch (if any)
+        id: patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          artifact_ids="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts" \
+            --jq '.artifacts[] | select(.name == "cli-docs-freshness-patch") | .id')"
+          artifact_id="$(printf '%s\n' "$artifact_ids" | head -1)"
+          if [ -z "$artifact_id" ]; then
+            echo "No docs patch artifact on run ${RUN_ID}; PR failed for other reasons."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > patch.zip
+          unzip -o patch.zip -d "${RUNNER_TEMP}/docs-patch"
+          ls -la "${RUNNER_TEMP}/docs-patch"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+
+      - name: Push regen commit or leave apply recipe
+        if: steps.patch.outputs.found == 'true'
+        env:
+          BASE_REPO: ${{ github.repository }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PATCH_FILE: ${{ runner.temp }}/docs-patch/cli-docs-freshness.patch
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          # Split tokens: gh api calls (PR lookup, comments) always use the
+          # workflow token, which carries this job's pull-requests:write; the
+          # optional PAT is used ONLY for the git push, so it needs no more
+          # than contents:write.
+          GH_TOKEN: ${{ github.token }}
+          PUSH_TOKEN: ${{ secrets.DOCS_AUTOFIX_TOKEN || github.token }}
+          AUTOFIX_TOKEN_KIND: ${{ secrets.DOCS_AUTOFIX_TOKEN && 'pat' || 'default' }}
+        run: ./scripts/docs-autofix-push.sh

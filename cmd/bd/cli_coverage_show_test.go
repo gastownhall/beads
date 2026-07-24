@@ -171,9 +171,6 @@ func parseCreatedIssueID(t *testing.T, out string) string {
 }
 
 func TestCoverage_ShowUpdateClose(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping CLI coverage test in short mode")
-	}
 
 	dir := t.TempDir()
 	runBDForCoverage(t, dir, "init", "--prefix", "test", "--quiet")
@@ -248,9 +245,6 @@ func TestCoverage_ShowUpdateClose(t *testing.T) {
 }
 
 func TestCoverage_TemplateAndPinnedProtections(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping CLI coverage test in short mode")
-	}
 
 	dir := t.TempDir()
 	runBDForCoverage(t, dir, "init", "--prefix", "test", "--quiet")
@@ -344,9 +338,6 @@ func TestCoverage_TemplateAndPinnedProtections(t *testing.T) {
 }
 
 func TestCoverage_ShowThread(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping CLI coverage test in short mode")
-	}
 
 	dir := t.TempDir()
 	runBDForCoverage(t, dir, "init", "--prefix", "test", "--quiet")

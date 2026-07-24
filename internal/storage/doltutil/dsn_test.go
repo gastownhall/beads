@@ -21,6 +21,22 @@ func TestServerDSN_TLSExplicitlyDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestServerDSN_InterpolatesParams(t *testing.T) {
+	dsn := ServerDSN{
+		Host: "dolt.example.com",
+		Port: 3307,
+		User: "root",
+	}.String()
+
+	// InterpolateParams collapses parameterized statements from a server-side
+	// PREPARE + EXECUTE pair to a single round-trip, which matters over
+	// high-latency connections. The formatted DSN must carry it so every
+	// connection built from this struct benefits.
+	if !strings.Contains(dsn, "interpolateParams=true") {
+		t.Errorf("DSN should contain interpolateParams=true; got %q", dsn)
+	}
+}
+
 func TestServerDSN_UnixSocket(t *testing.T) {
 	dsn := ServerDSN{
 		Socket: "/tmp/dolt.sock",

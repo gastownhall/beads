@@ -11,8 +11,9 @@ import (
 )
 
 type PidFile struct {
-	Pid  int `json:"pid"`
-	Port int `json:"port"`
+	Pid        int    `json:"pid"`
+	Port       int    `json:"port"`
+	UpstreamID string `json:"upstream_id,omitempty"`
 }
 
 func Path(rootDir, name string) string {

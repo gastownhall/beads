@@ -8,7 +8,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -87,7 +87,7 @@ func (s *EmbeddedDoltStore) GetLocalMetadata(ctx context.Context, key string) (s
 
 // GetInfraTypes returns the set of infrastructure types that should be routed
 // to the wisps table. Reads from DB config "types.infra", falls back to YAML,
-// then to hardcoded defaults (agent, rig, role, message).
+// then to hardcoded defaults (agent, role, message).
 func (s *EmbeddedDoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 	var result map[string]bool
 	if err := s.withConn(ctx, false, func(tx *sql.Tx) error {
@@ -99,7 +99,7 @@ func (s *EmbeddedDoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 		if yamlTypes := config.GetInfraTypesFromYAML(); len(yamlTypes) > 0 {
 			typeList = yamlTypes
 		} else {
-			typeList = storage.DefaultInfraTypes()
+			typeList = domain.DefaultInfraTypes()
 		}
 		result = make(map[string]bool, len(typeList))
 		for _, t := range typeList {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -122,12 +123,22 @@ by default. This approach:
   • bd prime provides dynamic, always-current workflow details
   • Hooks auto-inject bd prime at session start
 
-For agents that don't support hooks (Codex, Factory, etc.), use
+For agents or environments that do not auto-inject hook output, use
 'bd init --agents-profile=full' to embed the complete command reference.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("onboard")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := renderOnboardInstructions(cmd.OutOrStdout()); err != nil {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
+			return HandleError("%v", err)
 		}
+		return nil
 	},
 }
 

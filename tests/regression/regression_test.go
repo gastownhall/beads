@@ -330,6 +330,8 @@ func (w *workspace) runEnv() []string {
 		// up front so it cannot race t.TempDir cleanup by writing .beads files.
 		"BD_NO_DAEMON=1",
 		"BEADS_NO_DAEMON=1",
+		"BD_DISABLE_METRICS=1",
+		"BD_DISABLE_EVENT_FLUSH=1",
 		"GIT_CONFIG_NOSYSTEM=1",
 	}
 	if testDoltServerPort != 0 {

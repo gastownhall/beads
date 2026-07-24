@@ -10,7 +10,11 @@ Key scripts include version bumping, installation helpers that inject git inform
 
 ## generate-cli-docs.sh
 
-Generates maintained CLI reference docs from the live Cobra command tree exposed by `bd help`.
+Generates maintained CLI reference docs from the live Cobra command tree in
+two stages: `bd help --docs-root` emits vendor-neutral output (the single-file
+reference plus a generic per-command tree in uncommitted staging), then
+`tools/docsmint` post-processes the staging tree into the committed Mintlify
+pages and splices the CLI Reference pages array in `docs/docs.json`.
 
 ### Usage
 
@@ -25,11 +29,27 @@ Generates maintained CLI reference docs from the live Cobra command tree exposed
 
 ### Outputs
 
-- `docs/CLI_REFERENCE.md` from `bd help --all`
-- `website/docs/cli-reference/*.md` from `bd help --list` and `bd help --doc <command>`
-- `website/versioned_docs/version-1.0.0/cli-reference/*.md` so the published default docs and llms artifact source stay in sync
+- `docs/CLI_REFERENCE.md` from the live Cobra command tree
+- `docs/cli-reference/*.md` (Mintlify pages) via `tools/docsmint`
+- the CLI Reference pages array in `docs/docs.json`
 
-`scripts/check-doc-flags.sh` runs the `--check` mode in CI and fails when live top-level commands are missing from generated docs.
+`scripts/check-cli-docs-drift.sh` runs the `--check` mode in CI and fails when
+the committed copies are stale relative to the live command tree.
+
+## check-doc-freshness.sh
+
+Validates marker-based freshness for reference-shaped docs that are not generated from a single clean source.
+
+### Usage
+
+```bash
+./scripts/check-doc-freshness.sh
+make check-docs
+```
+
+The script currently checks the reference docs named in `engdocs/DOC_INVENTORY.md`: `CONFIG.md`, `SETUP.md`, `ADO_CONFIG.md`, `JSON_SCHEMA.md`, `RECOVERY.md`, `ERROR_HANDLING.md`, `LINTING.md`, and `design/otel/otel-data-model.md`. Each doc must be listed in the inventory, include a recent `Last reviewed:` marker, include a `Freshness source:` marker, and name source paths or globs that exist in the repository.
+
+Set `DOC_FRESHNESS_MAX_AGE_DAYS` to override the default 90-day review window. Set `DOC_FRESHNESS_TODAY=YYYY-MM-DD` when testing date behaviour.
 
 ### How it fits into the larger codebase
 

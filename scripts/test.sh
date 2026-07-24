@@ -11,6 +11,10 @@ SKIP_FILE="$REPO_ROOT/.test-skip"
 # Opt-in ICU-path coverage remains available via scripts/test-icu-path.sh.
 # shellcheck source=../.buildflags
 source "$REPO_ROOT/.buildflags"
+# shellcheck source=ci/lib/test-env.sh
+source "$REPO_ROOT/scripts/ci/lib/test-env.sh"
+
+beads_test_env_enter
 
 # Build skip pattern from .test-skip file
 build_skip_pattern() {
@@ -26,6 +30,8 @@ build_skip_pattern() {
 
 # Default values
 TIMEOUT="${TEST_TIMEOUT:-3m}"
+GO_TEST_PKG_PARALLEL="${GO_TEST_PKG_PARALLEL:-4}"
+GO_TEST_PARALLEL="${GO_TEST_PARALLEL:-4}"
 SKIP_PATTERN=$(build_skip_pattern)
 VERBOSE="${TEST_VERBOSE:-}"
 RUN_PATTERN="${TEST_RUN:-}"
@@ -111,7 +117,7 @@ if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" ]]; th
                 wait "$SHARED_DOLT_PID" 2>/dev/null || true
                 rm -rf "$SHARED_DOLT_DIR"
             }
-            trap cleanup_shared_server EXIT
+            trap 'cleanup_shared_server; beads_test_env_cleanup' EXIT
         else
             echo "WARN: shared Dolt server failed to start, falling back to per-package servers" >&2
             kill "$SHARED_DOLT_PID" 2>/dev/null || true
@@ -121,7 +127,7 @@ if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" ]]; th
 fi
 
 # Build go test command
-CMD=(go test -timeout "$TIMEOUT")
+CMD=(go test -p "$GO_TEST_PKG_PARALLEL" -parallel "$GO_TEST_PARALLEL" -timeout "$TIMEOUT")
 
 if [[ -n "$VERBOSE" ]]; then
     CMD+=(-v)

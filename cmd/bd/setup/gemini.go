@@ -73,17 +73,12 @@ func geminiAgentsEnv(env geminiEnv) agentsEnv {
 	}
 }
 
-// InstallGemini installs Gemini CLI hooks
-func InstallGemini(project bool, stealth bool) {
+func InstallGemini(project bool, stealth bool) error {
 	env, err := geminiEnvProvider()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := installGemini(env, project, stealth); err != nil {
-		setupExit(1)
-	}
+	return installGemini(env, project, stealth)
 }
 
 func installGemini(env geminiEnv, project bool, stealth bool) error {
@@ -172,17 +167,12 @@ func installGemini(env geminiEnv, project bool, stealth bool) error {
 	return nil
 }
 
-// CheckGemini checks if Gemini integration is installed
-func CheckGemini() {
+func CheckGemini() error {
 	env, err := geminiEnvProvider()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := checkGemini(env); err != nil {
-		setupExit(1)
-	}
+	return checkGemini(env)
 }
 
 func checkGemini(env geminiEnv) error {
@@ -213,17 +203,12 @@ func checkGemini(env geminiEnv) error {
 	return checkAgents(geminiAgentsEnv(env), geminiAgentsIntegration)
 }
 
-// RemoveGemini removes Gemini CLI hooks
-func RemoveGemini(project bool) {
+func RemoveGemini(project bool) error {
 	env, err := geminiEnvProvider()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := removeGemini(env, project); err != nil {
-		setupExit(1)
-	}
+	return removeGemini(env, project)
 }
 
 func removeGemini(env geminiEnv, project bool) error {

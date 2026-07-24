@@ -21,6 +21,18 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	return result, err
 }
 
+// SearchIssueIDs is the narrow-projection variant of SearchIssues; returns
+// only matching IDs.
+func (s *DoltStore) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	var result []string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchIssueIDsInTx(ctx, tx, query, filter)
+		return err
+	})
+	return result, err
+}
+
 func (s *DoltStore) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
 	var result []*types.IssueWithCounts
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
@@ -49,6 +61,20 @@ func (s *DoltStore) GetReadyWorkWithCounts(ctx context.Context, filter types.Wor
 		return err
 	})
 	return result, err
+}
+
+// CountReadyWork returns the total ready-work count for filter. It is identical
+// to len(GetReadyWorkWithCounts(filter with Limit=0)) but sizes the total with
+// cheap indexed COUNT(*)s instead of re-running the counts mega-query. Backs the
+// storage.ReadyWorkCounter capability.
+func (s *DoltStore) CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error) {
+	var n int
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		n, err = issueops.CountReadyWorkInTx(ctx, tx, filter)
+		return err
+	})
+	return n, err
 }
 
 func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {

@@ -8,6 +8,17 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// DBTX is the minimal statement-execution surface the blocked-state
+// recompute needs. *sql.Tx satisfies it (the classic embedded path) and so
+// does the domain/db Runner (the server/proxied path): is_blocked is derived
+// state shared by both stacks, so they must derive it with the same code
+// (bd-6dnrw.44 item 3).
+type DBTX interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 const waitsForGateBlockedSQL = `
 		(
 		  EXISTS (
@@ -46,7 +57,7 @@ const waitsForGateBlockedSQL = `
 		)
 `
 
-func RecomputeIsBlockedInTx(ctx context.Context, tx *sql.Tx, issueIDs, wispIDs []string) error {
+func RecomputeIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) error {
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
 		return nil
 	}
@@ -71,7 +82,7 @@ func RecomputeIsBlockedInTx(ctx context.Context, tx *sql.Tx, issueIDs, wispIDs [
 	}
 }
 
-func MarkIsBlockedInTx(ctx context.Context, tx *sql.Tx, issueIDs, wispIDs []string) error {
+func MarkIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) error {
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
 		return nil
 	}
@@ -96,16 +107,16 @@ func MarkIsBlockedInTx(ctx context.Context, tx *sql.Tx, issueIDs, wispIDs []stri
 	}
 }
 
-func RecomputeIsBlockedForIDsInTx(ctx context.Context, tx *sql.Tx, ids []string) error {
+func RecomputeIsBlockedForIDsInTx(ctx context.Context, tx DBTX, ids []string) error {
 	return RecomputeIsBlockedInTx(ctx, tx, ids, nil)
 }
 
-func RecomputeIsBlockedForWispIDsInTx(ctx context.Context, tx *sql.Tx, ids []string) error {
+func RecomputeIsBlockedForWispIDsInTx(ctx context.Context, tx DBTX, ids []string) error {
 	return RecomputeIsBlockedInTx(ctx, tx, nil, ids)
 }
 
 //nolint:gosec // G201: SQL templates are constant; only IN-clause placeholders are formatted in.
-func recomputeIsBlockedPassForIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string) (int64, error) {
+func recomputeIsBlockedPassForIssuesInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -113,16 +124,23 @@ func recomputeIsBlockedPassForIssuesInTx(ctx context.Context, tx *sql.Tx, ids []
 	return runMarkUnmarkBatchedInTx(ctx, tx, markBlockedTemplateForIssues(), unmarkBlockedTemplateForIssues(), ids)
 }
 
-func markIsBlockedPassForIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string) (int64, error) {
+func markIsBlockedPassForIssuesInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
 	return runMarkBatchedInTx(ctx, tx, markBlockedTemplateForIssues(), ids)
 }
 
+// The mark/unmark templates explicitly assign updated_at to itself:
+// issues.updated_at (and wisps.updated_at) carry ON UPDATE CURRENT_TIMESTAMP,
+// and is_blocked is DERIVED state - letting a recompute bump updated_at
+// plants per-clone wall clock in a synced table (merge conflicts between
+// clones that recomputed the same flip at different times, bd-578h9.19) and
+// makes stale-guard/conflict-guard consumers treat the row as user-edited.
+// An explicit assignment suppresses the ON UPDATE clause.
 func markBlockedTemplateForIssues() string {
 	return fmt.Sprintf(`
-		UPDATE issues i SET i.is_blocked = 1
+		UPDATE issues i SET i.is_blocked = 1, i.updated_at = i.updated_at
 		WHERE i.id IN (%%s)
 		  AND i.is_blocked = 0
 		  AND i.status <> 'closed' AND i.status <> 'pinned'
@@ -166,7 +184,7 @@ func markBlockedTemplateForIssues() string {
 
 func unmarkBlockedTemplateForIssues() string {
 	return fmt.Sprintf(`
-		UPDATE issues i SET i.is_blocked = 0
+		UPDATE issues i SET i.is_blocked = 0, i.updated_at = i.updated_at
 		WHERE i.id IN (%%s)
 		  AND i.is_blocked = 1
 		  AND (
@@ -211,7 +229,7 @@ func unmarkBlockedTemplateForIssues() string {
 }
 
 //nolint:gosec // G201: SQL templates are constant; only IN-clause placeholders are formatted in.
-func recomputeIsBlockedPassForWispsInTx(ctx context.Context, tx *sql.Tx, ids []string) (int64, error) {
+func recomputeIsBlockedPassForWispsInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -219,7 +237,7 @@ func recomputeIsBlockedPassForWispsInTx(ctx context.Context, tx *sql.Tx, ids []s
 	return runMarkUnmarkBatchedInTx(ctx, tx, markBlockedTemplateForWisps(), unmarkBlockedTemplateForWisps(), ids)
 }
 
-func markIsBlockedPassForWispsInTx(ctx context.Context, tx *sql.Tx, ids []string) (int64, error) {
+func markIsBlockedPassForWispsInTx(ctx context.Context, tx DBTX, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
@@ -228,7 +246,7 @@ func markIsBlockedPassForWispsInTx(ctx context.Context, tx *sql.Tx, ids []string
 
 func markBlockedTemplateForWisps() string {
 	return fmt.Sprintf(`
-		UPDATE wisps w SET w.is_blocked = 1
+		UPDATE wisps w SET w.is_blocked = 1, w.updated_at = w.updated_at
 		WHERE w.id IN (%%s)
 		  AND w.is_blocked = 0
 		  AND w.status <> 'closed' AND w.status <> 'pinned'
@@ -272,7 +290,7 @@ func markBlockedTemplateForWisps() string {
 
 func unmarkBlockedTemplateForWisps() string {
 	return fmt.Sprintf(`
-		UPDATE wisps w SET w.is_blocked = 0
+		UPDATE wisps w SET w.is_blocked = 0, w.updated_at = w.updated_at
 		WHERE w.id IN (%%s)
 		  AND w.is_blocked = 1
 		  AND (
@@ -317,7 +335,7 @@ func unmarkBlockedTemplateForWisps() string {
 }
 
 //nolint:gosec // G201: callers pass constant templates; only IN-clause placeholders are formatted in.
-func runMarkUnmarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl, unmarkTmpl string, ids []string) (int64, error) {
+func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl, unmarkTmpl string, ids []string) (int64, error) {
 	var changed int64
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
@@ -344,7 +362,7 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl, unmarkT
 }
 
 //nolint:gosec // G201: callers pass constant templates; only IN-clause placeholders are formatted in.
-func runMarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl string, ids []string) (int64, error) {
+func runMarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl string, ids []string) (int64, error) {
 	var changed int64
 	for start := 0; start < len(ids); start += queryBatchSize {
 		end := start + queryBatchSize
@@ -363,7 +381,7 @@ func runMarkBatchedInTx(ctx context.Context, tx *sql.Tx, markTmpl string, ids []
 	return changed, nil
 }
 
-func AffectedByStatusChangeInTx(ctx context.Context, tx *sql.Tx, id string) ([]string, []string, error) {
+func AffectedByStatusChangeInTx(ctx context.Context, tx DBTX, id string) ([]string, []string, error) {
 	issueSeed := []string{id}
 	issueSeen := map[string]bool{id: true}
 	var wispSeed []string
@@ -378,7 +396,7 @@ func AffectedByStatusChangeInTx(ctx context.Context, tx *sql.Tx, id string) ([]s
 	return expandByParentChildDescendantsInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen)
 }
 
-func AffectedByStatusChangeForWispInTx(ctx context.Context, tx *sql.Tx, id string) ([]string, []string, error) {
+func AffectedByStatusChangeForWispInTx(ctx context.Context, tx DBTX, id string) ([]string, []string, error) {
 	var issueSeed []string
 	issueSeen := make(map[string]bool)
 	wispSeed := []string{id}
@@ -393,7 +411,7 @@ func AffectedByStatusChangeForWispInTx(ctx context.Context, tx *sql.Tx, id strin
 	return expandByParentChildDescendantsInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen)
 }
 
-func AffectedByDepChangeInTx(ctx context.Context, tx *sql.Tx, source, target string, depType types.DependencyType) ([]string, []string, error) {
+func AffectedByDepChangeInTx(ctx context.Context, tx DBTX, source, target string, depType types.DependencyType) ([]string, []string, error) {
 	switch depType {
 	case types.DepBlocks, types.DepConditionalBlocks, types.DepWaitsFor, types.DepParentChild:
 		issueSeed := []string{source}
@@ -411,7 +429,7 @@ func AffectedByDepChangeInTx(ctx context.Context, tx *sql.Tx, source, target str
 	}
 }
 
-func AffectedByDepChangeForWispInTx(ctx context.Context, tx *sql.Tx, source, target string, depType types.DependencyType) ([]string, []string, error) {
+func AffectedByDepChangeForWispInTx(ctx context.Context, tx DBTX, source, target string, depType types.DependencyType) ([]string, []string, error) {
 	switch depType {
 	case types.DepBlocks, types.DepConditionalBlocks, types.DepWaitsFor, types.DepParentChild:
 		var issueSeed []string
@@ -430,7 +448,7 @@ func AffectedByDepChangeForWispInTx(ctx context.Context, tx *sql.Tx, source, tar
 }
 
 func loadBlockingDependersInTx(
-	ctx context.Context, tx *sql.Tx,
+	ctx context.Context, tx DBTX,
 	targetCol, id string,
 	issueSeed *[]string, issueSeen map[string]bool,
 	wispSeed *[]string, wispSeen map[string]bool,
@@ -440,7 +458,7 @@ func loadBlockingDependersInTx(
 
 //nolint:gosec // G201: targetCol is one of two constant column names.
 func loadBlockingDependersForIDsInTx(
-	ctx context.Context, tx *sql.Tx,
+	ctx context.Context, tx DBTX,
 	targetCol string, ids []string,
 	issueSeed *[]string, issueSeen map[string]bool,
 	wispSeed *[]string, wispSeen map[string]bool,
@@ -489,7 +507,7 @@ func loadBlockingDependersForIDsInTx(
 }
 
 func AffectedByDeletionInTx(
-	ctx context.Context, tx *sql.Tx,
+	ctx context.Context, tx DBTX,
 	deletedIssues, deletedWisps []string,
 ) ([]string, []string, error) {
 	if len(deletedIssues) == 0 && len(deletedWisps) == 0 {
@@ -550,7 +568,7 @@ func AffectedByDeletionInTx(
 }
 
 func expandByParentChildDescendantsInTx(
-	ctx context.Context, tx *sql.Tx,
+	ctx context.Context, tx DBTX,
 	issueSeed, wispSeed []string,
 	issueSeen, wispSeen map[string]bool,
 ) ([]string, []string, error) {
@@ -595,7 +613,7 @@ func expandByParentChildDescendantsInTx(
 
 //nolint:gosec // G201: depTable and parentCol come from constant call sites.
 func appendChildrenInTx(
-	ctx context.Context, tx *sql.Tx,
+	ctx context.Context, tx DBTX,
 	depTable, parentCol string,
 	parentIDs []string,
 	seen map[string]bool, queue *[]string,
@@ -633,7 +651,7 @@ func appendChildrenInTx(
 }
 
 func loadWaitersWhoseSpawnerIsParentOfInTx(
-	ctx context.Context, tx *sql.Tx,
+	ctx context.Context, tx DBTX,
 	childID string, childIsWisp bool,
 	issueSeed *[]string, issueSeen map[string]bool,
 	wispSeed *[]string, wispSeen map[string]bool,
@@ -684,7 +702,7 @@ func loadWaitersWhoseSpawnerIsParentOfInTx(
 }
 
 func loadWaitersOnSpawnerIDsInTx(
-	ctx context.Context, tx *sql.Tx,
+	ctx context.Context, tx DBTX,
 	spawnerIDs []string,
 	issueSeed *[]string, issueSeen map[string]bool,
 	wispSeed *[]string, wispSeen map[string]bool,
@@ -697,7 +715,7 @@ func loadWaitersOnSpawnerIDsInTx(
 
 //nolint:gosec // G201: targetCol is one of two constant column names.
 func loadWaitersOnSpawnerIDsByColInTx(
-	ctx context.Context, tx *sql.Tx,
+	ctx context.Context, tx DBTX,
 	targetCol string, spawnerIDs []string,
 	issueSeed *[]string, issueSeen map[string]bool,
 	wispSeed *[]string, wispSeen map[string]bool,

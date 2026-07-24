@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,91 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 )
-
-type fakeRemoteStore struct {
-	remotes []storage.RemoteInfo
-}
-
-func (f fakeRemoteStore) AddRemote(context.Context, string, string) error { return nil }
-func (f fakeRemoteStore) RemoveRemote(context.Context, string) error      { return nil }
-func (f fakeRemoteStore) HasRemote(context.Context, string) (bool, error) { return false, nil }
-func (f fakeRemoteStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
-	return f.remotes, nil
-}
-func (f fakeRemoteStore) Push(context.Context) error                     { return nil }
-func (f fakeRemoteStore) Pull(context.Context) error                     { return nil }
-func (f fakeRemoteStore) ForcePush(context.Context) error                { return nil }
-func (f fakeRemoteStore) PushRemote(context.Context, string, bool) error { return nil }
-func (f fakeRemoteStore) PullRemote(context.Context, string) error       { return nil }
-func (f fakeRemoteStore) Fetch(context.Context, string) error            { return nil }
-func (f fakeRemoteStore) PushTo(context.Context, string) error           { return nil }
-func (f fakeRemoteStore) PullFrom(context.Context, string) ([]storage.Conflict, error) {
-	return nil, nil
-}
-
-func TestListRemoteSurfacesEmbeddedSkipsCLI(t *testing.T) {
-	oldList := listDoltCLIRemotes
-	defer func() { listDoltCLIRemotes = oldList }()
-
-	called := false
-	listDoltCLIRemotes = func(string) ([]storage.RemoteInfo, error) {
-		called = true
-		return []storage.RemoteInfo{{Name: "cli", URL: "file:///cli"}}, nil
-	}
-
-	remote := storage.RemoteInfo{Name: "origin", URL: "file:///origin"}
-	sqlRemotes, sqlErr, cliRemotes, cliErr := listRemoteSurfaces(
-		context.Background(),
-		fakeRemoteStore{remotes: []storage.RemoteInfo{remote}},
-		"/unused",
-		true,
-	)
-	if sqlErr != nil || cliErr != nil {
-		t.Fatalf("unexpected errors: sql=%v cli=%v", sqlErr, cliErr)
-	}
-	if called {
-		t.Fatal("embedded remote surface lookup must not shell out to dolt CLI")
-	}
-	if len(sqlRemotes) != 1 || len(cliRemotes) != 1 || sqlRemotes[0] != remote || cliRemotes[0] != remote {
-		t.Fatalf("embedded surfaces = sql:%v cli:%v, want both %v", sqlRemotes, cliRemotes, remote)
-	}
-}
-
-func TestListRemoteSurfacesServerUsesCLI(t *testing.T) {
-	oldList := listDoltCLIRemotes
-	defer func() { listDoltCLIRemotes = oldList }()
-
-	cliRemote := storage.RemoteInfo{Name: "origin", URL: "file:///cli-origin"}
-	called := false
-	listDoltCLIRemotes = func(dbPath string) ([]storage.RemoteInfo, error) {
-		called = true
-		if dbPath != "/db/path" {
-			t.Fatalf("dbPath = %q, want /db/path", dbPath)
-		}
-		return []storage.RemoteInfo{cliRemote}, nil
-	}
-
-	sqlRemote := storage.RemoteInfo{Name: "origin", URL: "file:///sql-origin"}
-	sqlRemotes, sqlErr, cliRemotes, cliErr := listRemoteSurfaces(
-		context.Background(),
-		fakeRemoteStore{remotes: []storage.RemoteInfo{sqlRemote}},
-		"/db/path",
-		false,
-	)
-	if sqlErr != nil || cliErr != nil {
-		t.Fatalf("unexpected errors: sql=%v cli=%v", sqlErr, cliErr)
-	}
-	if !called {
-		t.Fatal("server-mode remote surface lookup should inspect CLI remotes")
-	}
-	if len(sqlRemotes) != 1 || sqlRemotes[0] != sqlRemote || len(cliRemotes) != 1 || cliRemotes[0] != cliRemote {
-		t.Fatalf("surfaces = sql:%v cli:%v", sqlRemotes, cliRemotes)
-	}
-}
 
 func TestDoltShowConfigNotInRepo(t *testing.T) {
 	// Change to a temp dir without .beads
@@ -1105,6 +1026,54 @@ func TestIsDivergedHistoryErr(t *testing.T) {
 	}
 }
 
+func TestIsAncestorPKMismatchErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"unrelated error", fmt.Errorf("connection refused"), false},
+		{"diverged history", fmt.Errorf("no common ancestor"), false},
+		{"row conflict", fmt.Errorf("merge has unresolved conflicts"), false},
+		{"ancestor PK variant", fmt.Errorf("error: cannot merge because table dependencies has different primary keys in its common ancestor"), true},
+		{"head PK variant", fmt.Errorf("error: cannot merge because table dependencies has different primary keys"), true},
+		{"wrapped", fmt.Errorf("pull failed: %w", fmt.Errorf("error: cannot merge because table issues has different primary keys in its common ancestor")), true},
+		{"sql error envelope", fmt.Errorf("Error 1105 (HY000): error: cannot merge because table dependencies has different primary keys in its common ancestor"), true},
+		{"mixed case", fmt.Errorf("Cannot Merge Because Table dependencies Has Different Primary Keys"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isAncestorPKMismatchErr(tt.err)
+			if got != tt.want {
+				t.Errorf("isAncestorPKMismatchErr(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAncestorPKMismatchTable(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil error", nil, ""},
+		{"no match", fmt.Errorf("no common ancestor"), ""},
+		{"ancestor variant", fmt.Errorf("error: cannot merge because table dependencies has different primary keys in its common ancestor"), "dependencies"},
+		{"head variant", fmt.Errorf("error: cannot merge because table wisp_dependencies has different primary keys"), "wisp_dependencies"},
+		{"sql error envelope", fmt.Errorf("Error 1105 (HY000): error: cannot merge because table issues has different primary keys in its common ancestor"), "issues"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ancestorPKMismatchTable(tt.err)
+			if got != tt.want {
+				t.Errorf("ancestorPKMismatchTable(%v) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsRemoteNotFoundErr(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1121,6 +1090,60 @@ func TestIsRemoteNotFoundErr(t *testing.T) {
 			got := isRemoteNotFoundErr(tt.err)
 			if got != tt.want {
 				t.Errorf("isRemoteNotFoundErr(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+type fakeRemoteLister struct {
+	remotes []storage.RemoteInfo
+	err     error
+}
+
+func (f fakeRemoteLister) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
+	return f.remotes, f.err
+}
+
+// fakeProbingRemoteLister also implements persistedRemoteProber, like the
+// server-mode DoltStore.
+type fakeProbingRemoteLister struct {
+	fakeRemoteLister
+	persisted bool
+}
+
+func (f fakeProbingRemoteLister) HasPersistedRemote() bool {
+	return f.persisted
+}
+
+// bd-6dnrw.7: the exit-0 "no remote configured" skip must only fire when
+// dolt_remotes is actually empty. A remote-not-found error with remotes
+// configured (deleted remote-side repo, missing branch, typo) is a real sync
+// failure and must stay on the exit-1 path. bd-578h9.10: an empty table is
+// still not proof at server cold start — a remote persisted on disk
+// (repo_state.json, GH#2118) must also veto the skip.
+func TestIsConfirmedNoRemote(t *testing.T) {
+	ctx := context.Background()
+	notFound := fmt.Errorf("remote 'origin' not found")
+	tests := []struct {
+		name   string
+		err    error
+		lister remoteLister
+		want   bool
+	}{
+		{"no remotes configured", notFound, fakeRemoteLister{}, true},
+		{"remotes exist", notFound, fakeRemoteLister{remotes: []storage.RemoteInfo{{Name: "origin"}}}, false},
+		{"list fails", notFound, fakeRemoteLister{err: fmt.Errorf("server unreachable")}, false},
+		{"unrelated error", fmt.Errorf("connection refused"), fakeRemoteLister{}, false},
+		{"nil error", nil, fakeRemoteLister{}, false},
+		{"empty table but remote persisted on disk", notFound, fakeProbingRemoteLister{persisted: true}, false},
+		{"empty table and no persisted remote", notFound, fakeProbingRemoteLister{}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isConfirmedNoRemote(ctx, tt.lister, tt.err)
+			if got != tt.want {
+				t.Errorf("isConfirmedNoRemote(%v, %#v) = %v, want %v",
+					tt.err, tt.lister, got, tt.want)
 			}
 		})
 	}
@@ -1179,6 +1202,44 @@ func TestPrintDivergedHistoryGuidance(t *testing.T) {
 	}
 	if !strings.Contains(output, "rm -rf .beads/dolt") {
 		t.Error("expected guidance to mention manual recovery")
+	}
+}
+
+func TestPrintAncestorPKMismatchGuidance(t *testing.T) {
+	// Capture stderr output
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	printAncestorPKMismatchGuidance(fmt.Errorf("error: cannot merge because table dependencies has different primary keys in its common ancestor"))
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	output := buf.String()
+
+	if !strings.Contains(output, `table "dependencies"`) {
+		t.Error("expected guidance to name the refused table")
+	}
+	if !strings.Contains(output, "schema fork") {
+		t.Error("expected guidance to explain this is a schema fork")
+	}
+	if !strings.Contains(output, "Retrying will not help") {
+		t.Error("expected guidance to say retrying cannot converge the clones")
+	}
+	if !strings.Contains(output, "bd dolt push --force") {
+		t.Error("expected guidance to mention making the canonical clone authoritative")
+	}
+	if !strings.Contains(output, "bd export --all") {
+		t.Error("expected guidance to mention saving local-only work")
+	}
+	if !strings.Contains(output, "bd bootstrap") {
+		t.Error("expected guidance to mention re-cloning via bd bootstrap")
+	}
+	if !strings.Contains(output, "docs/recovery/init-safety.md#pk-fork-refused") {
+		t.Error("expected guidance to link the full recovery playbook")
 	}
 }
 
@@ -1293,15 +1354,17 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 // TestShouldUseExternalDoltStatus covers the routing predicate for
 // `bd dolt status`. The predicate decides whether to ping the configured
 // SQL endpoint (externally-managed server) or read the local PID file
-// (bd-managed server). Three scenarios qualify as externally-managed:
-// non-local hosts, and local hosts where bd does not own the lifecycle
-// (auto-start disabled — be-0eyj). Other configurations should keep the
-// PID-file path so bd-managed servers continue to report PID/log/data.
+// (bd-managed server). Scenarios that qualify as externally-managed:
+// shared-server mode (GH#3218), non-local hosts, and local hosts where bd
+// does not own the lifecycle (auto-start disabled — be-0eyj). Other
+// configurations should keep the PID-file path so bd-managed servers
+// continue to report PID/log/data.
 func TestShouldUseExternalDoltStatus(t *testing.T) {
 	tests := []struct {
 		name              string
 		cfg               *configfile.Config
 		autoStartDisabled bool
+		sharedServerMode  bool
 		want              bool
 	}{
 		{
@@ -1350,6 +1413,61 @@ func TestShouldUseExternalDoltStatus(t *testing.T) {
 			want:              false,
 		},
 		{
+			// GH#3218: a shared server on localhost with bd auto-start
+			// ENABLED previously fell through to the PID-file path and
+			// reported "not running" though bd could connect fine. Shared
+			// mode means bd never owns the lifecycle, so probe SQL.
+			name: "server mode + local host + auto-start enabled + shared-server routes to external (GH#3218)",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "127.0.0.1",
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  true,
+			want:              true,
+		},
+		{
+			name: "server mode + empty host + shared-server routes to external (GH#3218)",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: "server",
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  true,
+			want:              true,
+		},
+		{
+			// GH#2946/#3218: shared-server mode (e.g. dolt.shared-server:
+			// true in config.yaml) wins over a stale metadata.json that
+			// still pins dolt_mode="embedded". IsDoltServerMode() does not
+			// consult dolt.shared-server, so without the shared-server
+			// branch preceding the server-mode guard this workspace would
+			// fall through to the PID-file "not running" path.
+			name: "shared-server flag wins over stale embedded metadata (GH#2946/#3218)",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: "embedded",
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  true,
+			want:              true,
+		},
+		{
+			// Proxied-server mode is excluded from the shared-server
+			// override (matches main.go's !psm guard): bd talks through the
+			// proxy, so keep the non-external path even if the shared-server
+			// flag is also set.
+			name: "proxied-server mode + shared-server flag stays non-external",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: configfile.DoltModeProxiedServer,
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  true,
+			want:              false,
+		},
+		{
 			name: "server mode + local host + auto-start disabled routes to external (be-0eyj)",
 			cfg: &configfile.Config{
 				Backend:        "dolt",
@@ -1388,7 +1506,7 @@ func TestShouldUseExternalDoltStatus(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := shouldUseExternalDoltStatus(tc.cfg, tc.autoStartDisabled)
+			got := shouldUseExternalDoltStatus(tc.cfg, tc.autoStartDisabled, tc.sharedServerMode)
 			if got != tc.want {
 				t.Errorf("shouldUseExternalDoltStatus = %v, want %v", got, tc.want)
 			}
@@ -1550,4 +1668,117 @@ func TestRenderLocalDoltStatus(t *testing.T) {
 			t.Errorf("did not expect mode=external on bd-managed path, got:\n%s", out)
 		}
 	})
+}
+
+// minimalPullStore implements storage.DoltStorage by embedding the interface
+// (all methods panic on nil) with Pull overridden for controlled testing.
+type minimalPullStore struct {
+	storage.DoltStorage
+	pullCalled bool
+	pullErr    error
+}
+
+func (m *minimalPullStore) Pull(ctx context.Context) error {
+	m.pullCalled = true
+	return m.pullErr
+}
+
+// ListRemotes is exercised by current main's pull failure handling
+// (isConfirmedNoRemote -> st.ListRemotes during error classification). The
+// embedded nil DoltStorage would panic, so report "no remotes": this keeps a
+// simulated pull failure on the benign no-remote path (clean exit) while still
+// proving the no-push guard does not short-circuit bd dolt pull.
+func (m *minimalPullStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
+	return nil, nil
+}
+
+// minimalPushStore implements storage.DoltStorage by embedding the interface
+// (all methods panic on nil) with Push and ForcePush overridden for controlled testing.
+type minimalPushStore struct {
+	storage.DoltStorage
+	pushCalled bool
+}
+
+func (m *minimalPushStore) Push(ctx context.Context) error {
+	m.pushCalled = true
+	return nil
+}
+
+func (m *minimalPushStore) ForcePush(ctx context.Context) error {
+	m.pushCalled = true
+	return nil
+}
+
+func TestNoPushSkipsDoltPush(t *testing.T) {
+	// no-push guard must exit with a skip message and must NOT call the store's
+	// Push() when no-push: true. Regression guard for PR #4212 guard at
+	// cmd/bd/dolt.go:247-249.
+
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	fake := &minimalPushStore{}
+	store = fake
+
+	t.Setenv("BD_NO_PUSH", "true")
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("no-push") {
+		t.Fatal("test setup: BD_NO_PUSH=true must make no-push=true")
+	}
+
+	out := captureStdout(t, func() error {
+		return doltPushCmd.RunE(doltPushCmd, nil)
+	})
+
+	if fake.pushCalled {
+		t.Error("bd dolt push must not call Push() when no-push: true; Push() was called")
+	}
+	if !strings.Contains(out, "skipping push") {
+		t.Errorf("expected 'skipping push' output, got: %q", out)
+	}
+}
+
+func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
+	// no-push is a push-only guard. bd dolt pull must contact the remote even when
+	// no-push: true — contributor clones need to receive upstream updates.
+	// Regression guard for be-ve2x6 (PR #4212, maphew review-4382359270).
+
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	fake := &minimalPullStore{
+		// Return "remote not found" so the command exits cleanly without os.Exit.
+		pullErr: errors.New("remote not found"),
+	}
+	store = fake
+
+	t.Setenv("BD_NO_PUSH", "true")
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("no-push") {
+		t.Fatal("test setup: BD_NO_PUSH=true must make no-push=true")
+	}
+
+	out := captureStdout(t, func() error {
+		return doltPullCmd.RunE(doltPullCmd, nil)
+	})
+
+	if !fake.pullCalled {
+		t.Error("bd dolt pull must attempt the pull even when no-push: true; Pull() was not called")
+	}
+	if strings.Contains(out, "skipping pull") {
+		t.Errorf("bd dolt pull must not skip under no-push: true; got output: %q", out)
+	}
+	if !strings.Contains(out, "Pulling from Dolt remote") {
+		t.Errorf("expected pull attempt output, got: %q", out)
+	}
 }

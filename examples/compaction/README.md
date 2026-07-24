@@ -65,17 +65,17 @@ chmod +x auto-compact.sh
 # Custom threshold
 ./auto-compact.sh --threshold 50
 
-# Tier 2 ultra-compression
-./auto-compact.sh --tier 2 --threshold 20
-
 # Preview without compacting
 ./auto-compact.sh --dry-run
 ```
 
+(Tier 2 ultra-compression is planned but not yet implemented; only `--tier 1`
+works today.)
+
 **Features:**
 - Configurable eligibility threshold
 - Skips compaction if below threshold
-- Supports both tiers
+- Tier 1 semantic compression (Tier 2 planned)
 - Dry-run mode for testing
 
 **When to use:** 

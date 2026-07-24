@@ -7,7 +7,8 @@ import (
 
 // linearFieldMapper implements tracker.FieldMapper for Linear.
 type linearFieldMapper struct {
-	config *MappingConfig
+	config     *MappingConfig
+	labelCache *LabelCache // optional; when set, IssueToTracker includes labelIds
 }
 
 func (m *linearFieldMapper) PriorityToBeads(trackerPriority interface{}) int {
@@ -80,6 +81,11 @@ func (m *linearFieldMapper) IssueToTracker(issue *types.Issue) map[string]interf
 		"title":       issue.Title,
 		"description": issue.Description,
 		"priority":    PriorityToLinear(issue.Priority, m.config),
+	}
+	if m.labelCache != nil {
+		if ids, _ := ResolveLabelIDs(issue, m.labelCache, m.config); len(ids) > 0 {
+			updates["labelIds"] = ids
+		}
 	}
 	return updates
 }

@@ -2,7 +2,6 @@ package tracker
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -161,7 +160,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 
 	// Phase 2: Pull
 	if opts.Pull {
-		pullStats, err := e.doPull(ctx, opts, allowPullOverwriteIDs)
+		pullStats, err := e.doPull(ctx, opts, allowPullOverwriteIDs, skipPushIDs)
 		if err != nil {
 			result.Success = false
 			result.Error = fmt.Sprintf("pull failed: %v", err)
@@ -207,9 +206,13 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		attribute.Int("sync.errors", result.Stats.Errors),
 	)
 
-	// Update last_sync timestamp
+	// Update last_sync timestamp. Dolt DATETIME columns round sub-second
+	// values, so rows this sync just wrote can carry updated_at values up
+	// to half a second in the future of wall clock. Record last_sync at
+	// the next whole second so the engine's own writes are never misread
+	// as local edits by the next pull's conflict guard.
 	if !opts.DryRun {
-		lastSync := time.Now().UTC().Format(time.RFC3339Nano)
+		lastSync := time.Now().UTC().Truncate(time.Second).Add(time.Second).Format(time.RFC3339Nano)
 		key := e.Tracker.ConfigPrefix() + ".last_sync"
 		if err := e.Store.SetLocalMetadata(ctx, key, lastSync); err != nil {
 			e.warn("Failed to update last_sync: %v", err)
@@ -217,7 +220,9 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.LastSync = lastSync
 	}
 
-	result.Warnings = e.warnings
+	// Batch-push warnings were already appended above; e.warn-collected
+	// warnings join them rather than replacing them.
+	result.Warnings = append(result.Warnings, e.warnings...)
 	return result, nil
 }
 
@@ -288,7 +293,10 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 }
 
 // doPull imports issues from the external tracker into beads.
-func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs map[string]bool) (*PullStats, error) {
+// doPull imports tracker issues. IDs of issues it creates or updates are
+// added to pulledIDs so a bidirectional sync's push phase does not echo the
+// freshly pulled content straight back to the tracker.
+func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs, pulledIDs map[string]bool) (*PullStats, error) {
 	ctx, span := syncTracer.Start(ctx, "tracker.pull",
 		trace.WithAttributes(
 			attribute.String("sync.tracker", e.Tracker.DisplayName()),
@@ -505,6 +513,9 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Updated++
+			if pulledIDs != nil {
+				pulledIDs[existing.ID] = true
+			}
 		} else {
 			// Create new issue
 			conv.Issue.ExternalRef = strPtr(ref)
@@ -516,6 +527,9 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Created++
+			if pulledIDs != nil {
+				pulledIDs[conv.Issue.ID] = true
+			}
 		}
 	}
 
@@ -678,36 +692,53 @@ func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssu
 	return hydrated, hydratedLocalIDs, nil
 }
 
-type dbProvider interface {
-	DB() *sql.DB
-}
-
+// externalRefChangedAfter reports whether local's external_ref differed
+// from currentRef as of lastSync. When the backing store can answer this
+// precisely (storage.ExternalRefHistoryQuerier — Dolt-shaped stores that
+// expose dolt_history_issues), it does; otherwise it falls back to a
+// coarser timestamp heuristic.
+//
+// The fast path is gated on the ExternalRefHistoryQuerier capability, not on
+// whether the store happens to expose a raw *sql.DB: some Dolt-shaped
+// backends (e.g. embeddeddolt.EmbeddedDoltStore) support the
+// dolt_history_issues query without a pooled *sql.DB, and a non-Dolt SQL
+// backend could expose *sql.DB without having that Dolt system table at
+// all. Gating on the capability keeps this correct in both directions.
 func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (bool, error) {
 	if local == nil {
 		return false, nil
 	}
-	provider, ok := e.Store.(dbProvider)
-	if !ok || provider.DB() == nil {
+	querier, ok := externalRefHistoryQuerier(e.Store)
+	if !ok {
 		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), nil
 	}
 
-	var previousRef sql.NullString
-	err := provider.DB().QueryRowContext(ctx, `
-		SELECT external_ref
-		FROM (
-			SELECT id, external_ref, commit_date FROM dolt_history_issues
-		) h
-		WHERE h.id = ? AND h.commit_date <= ?
-		ORDER BY h.commit_date DESC
-		LIMIT 1
-	`, local.ID, lastSync.UTC()).Scan(&previousRef)
-	if err == sql.ErrNoRows {
-		return true, nil
-	}
+	previousRef, found, err := querier.PreviousExternalRef(ctx, local.ID, lastSync)
 	if err != nil {
 		return false, err
 	}
-	return !previousRef.Valid || strings.TrimSpace(previousRef.String) != strings.TrimSpace(currentRef), nil
+	if !found {
+		return true, nil
+	}
+	return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef), nil
+}
+
+// externalRefHistoryQuerier type-asserts store to storage.ExternalRefHistoryQuerier,
+// unwrapping storage decorators (HookFiringStore, telemetry.InstrumentedStorage,
+// etc.) first if needed. Decorators embed only the base storage.DoltStorage
+// interface for passthrough, so a direct assertion on a decorated store would
+// never see this optional capability even when the concrete store underneath
+// implements it — the same reason cmd/bd type-asserts through
+// storage.UnwrapStore for RawDBAccessor, StoreLocator, and friends.
+func externalRefHistoryQuerier(store storage.Storage) (storage.ExternalRefHistoryQuerier, bool) {
+	if q, ok := store.(storage.ExternalRefHistoryQuerier); ok {
+		return q, true
+	}
+	if dolt, ok := store.(storage.DoltStorage); ok {
+		q, ok := storage.UnwrapStore(dolt).(storage.ExternalRefHistoryQuerier)
+		return q, ok
+	}
+	return nil, false
 }
 
 func syncIssueLabels(ctx context.Context, tx storage.Transaction, issueID string, desired []string, actor string) error {
@@ -953,6 +984,12 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				stats.Errors++
 				// Note: issue WAS created externally, so we still count Created
 				// but also flag the error so the user knows the link is broken
+			}
+			// Surface any partial-success warnings from the create (e.g. a
+			// follow-up state change that failed) through the sync result so a
+			// degraded push is visible rather than silently swallowed.
+			for _, w := range created.Warnings {
+				e.warn("%s (%s)", w, issue.ID)
 			}
 			stats.Created++
 		} else if !opts.CreateOnly || forceIDs[issue.ID] {
@@ -1287,6 +1324,19 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 		if issue := byExternal[strings.ToLower(externalID)]; issue != nil {
 			return issue, nil
 		}
+		// Tracker refs come in URL variants (e.g. Linear URLs with and
+		// without the title slug); match on the extracted identifier the
+		// same way the index above was built.
+		if e.Tracker.IsExternalRef(externalID) {
+			if identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(externalID)); identifier != "" {
+				if issue := byExternal[identifier]; issue != nil {
+					return issue, nil
+				}
+				if issue := byExternal[strings.ToLower(identifier)]; issue != nil {
+					return issue, nil
+				}
+			}
+		}
 		if strings.Contains(externalID, "://") {
 			return e.Store.GetIssueByExternalRef(ctx, externalID)
 		}
@@ -1363,6 +1413,20 @@ func (e *Engine) shouldPushIssue(issue *types.Issue, opts SyncOptions) bool {
 
 	for _, t := range opts.ExcludeTypes {
 		if issue.IssueType == t {
+			return false
+		}
+	}
+
+	// ExcludeIDPrefix: case-sensitive prefix match on the bead ID. Filters
+	// workflow-artifact beads (e.g. "hw-mol-foo") from external sync without
+	// requiring them to share a type or label.
+	if opts.ExcludeIDPrefix != "" && strings.HasPrefix(issue.ID, opts.ExcludeIDPrefix) {
+		return false
+	}
+	// ExcludeIDPatterns: case-sensitive substring match anywhere in the ID.
+	// Union with ExcludeIDPrefix — matching either rule excludes the issue.
+	for _, p := range opts.ExcludeIDPatterns {
+		if p != "" && strings.Contains(issue.ID, p) {
 			return false
 		}
 	}

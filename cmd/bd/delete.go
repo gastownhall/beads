@@ -3,13 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -46,89 +46,93 @@ Cascade: Recursively delete all dependents
 
 Force: Delete and orphan dependents
   bd delete bd-1 --force`,
-	Args: cobra.MinimumNArgs(0),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.MinimumNArgs(0),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("delete")
+
+		evt := metrics.NewCommandEvent("delete")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			return runDeleteProxiedServer(cmd, rootCtx, args)
+		}
+
 		fromFile, _ := cmd.Flags().GetString("from-file")
 		force, _ := cmd.Flags().GetBool("force")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		cascade, _ := cmd.Flags().GetBool("cascade")
-		// Use global jsonOutput set by PersistentPreRun
-		// Collect issue IDs from args and/or file
 		issueIDs := make([]string, 0, len(args))
 		issueIDs = append(issueIDs, args...)
 		if fromFile != "" {
 			fileIDs, err := readIssueIDsFromFile(fromFile)
 			if err != nil {
-				FatalError("reading file: %v", err)
+				return HandleError("reading file: %v", err)
 			}
 			issueIDs = append(issueIDs, fileIDs...)
 		}
 		if len(issueIDs) == 0 {
 			_ = cmd.Usage()
-			FatalError("no issue IDs provided")
+			return HandleError("no issue IDs provided")
 		}
-		// Remove duplicates
 		issueIDs = uniqueStrings(issueIDs)
 
-		// Direct mode - ensure store is available
 		if store == nil {
 			if err := ensureStoreActive(); err != nil {
-				FatalError("%v", err)
+				return HandleError("%v", err)
 			}
 		}
 
-		// Handle batch deletion in direct mode
-		// Also use batch path for cascade (which needs to expand dependents)
 		if len(issueIDs) > 1 || cascade {
-			deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false)
-			return
+			if err := deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false); err != nil {
+				return HandleError("%v", err)
+			}
+			return nil
 		}
 
-		// Single issue deletion (legacy behavior)
 		issueID := issueIDs[0]
 		ctx := rootCtx
 		// Get the issue to be deleted, using prefix-based routing
-		routedResult, err := resolveAndGetIssueWithRouting(ctx, store, issueID)
+		routedResult, err := resolveAndGetIssueForMutation(ctx, store, issueID)
 		if err != nil {
 			if isNotFoundErr(err) {
-				FatalError("issue %s not found", issueID)
+				return HandleError("issue %s not found", issueID)
 			}
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 		defer routedResult.Close()
 		issue := routedResult.Issue
 		issueID = routedResult.ResolvedID
 		activeStore := routedResult.Store
-		// Find all connected issues (dependencies in both directions)
 		connectedIssues := make(map[string]*types.Issue)
-		// Get dependencies (issues this one depends on)
 		deps, err := activeStore.GetDependencies(ctx, issueID)
 		if err != nil {
-			FatalError("getting dependencies: %v", err)
+			return HandleError("getting dependencies: %v", err)
 		}
 		for _, dep := range deps {
 			connectedIssues[dep.ID] = dep
 		}
-		// Get dependents (issues that depend on this one)
 		dependents, err := activeStore.GetDependents(ctx, issueID)
 		if err != nil {
-			FatalError("getting dependents: %v", err)
+			return HandleError("getting dependents: %v", err)
 		}
 		for _, dependent := range dependents {
 			connectedIssues[dependent.ID] = dependent
 		}
-		// Get dependency records (outgoing) to count how many we'll remove
 		depRecords, err := activeStore.GetDependencyRecords(ctx, issueID)
 		if err != nil {
-			FatalError("getting dependency records: %v", err)
+			return HandleError("getting dependency records: %v", err)
 		}
 		// Build the regex pattern for matching issue IDs (handles hyphenated IDs properly)
 		// Pattern: (^|non-word-char)(issueID)($|non-word-char) where word-char includes hyphen
 		idPattern := `(^|[^A-Za-z0-9_-])(` + regexp.QuoteMeta(issueID) + `)($|[^A-Za-z0-9_-])`
 		re := regexp.MustCompile(idPattern)
 		replacementText := `$1[deleted:` + issueID + `]$3`
-		// Preview mode
 		if !force {
 			fmt.Printf("\n%s\n", ui.RenderFail("⚠️  DELETE PREVIEW"))
 			fmt.Printf("\nIssue to delete:\n")
@@ -147,7 +151,6 @@ Force: Delete and orphan dependents
 				fmt.Printf("\nConnected issues where text references will be updated:\n")
 				issuesWithRefs := 0
 				for id, connIssue := range connectedIssues {
-					// Check if there are actually text references using the fixed regex
 					hasRefs := re.MatchString(connIssue.Description) ||
 						(connIssue.Notes != "" && re.MatchString(connIssue.Notes)) ||
 						(connIssue.Design != "" && re.MatchString(connIssue.Design)) ||
@@ -163,13 +166,11 @@ Force: Delete and orphan dependents
 			}
 			fmt.Printf("\n%s\n", ui.RenderWarn("This operation cannot be undone!"))
 			fmt.Printf("To proceed, run: %s\n\n", ui.RenderWarn("bd delete "+issueID+" --force"))
-			return
+			return nil
 		}
-		// Actually delete — all writes in a single transaction
 		updatedIssueCount := 0
 		totalDepsRemoved := 0
-		deleteErr := transact(ctx, activeStore, fmt.Sprintf("bd: delete %s", issueID), func(tx storage.Transaction) error {
-			// 1. Update text references in connected issues
+		deleteErr := transactHonoringAutoCommit(ctx, activeStore, fmt.Sprintf("bd: delete %s", issueID), func(tx storage.Transaction) error {
 			for id, connIssue := range connectedIssues {
 				updates := make(map[string]interface{})
 				if re.MatchString(connIssue.Description) {
@@ -191,43 +192,43 @@ Force: Delete and orphan dependents
 					updatedIssueCount++
 				}
 			}
-			// 2. Remove outgoing dependency links
 			for _, dep := range depRecords {
 				if err := tx.RemoveDependency(ctx, dep.IssueID, dep.DependsOnID, actor); err != nil {
 					return fmt.Errorf("remove dependency %s → %s: %w", dep.IssueID, dep.DependsOnID, err)
 				}
 				totalDepsRemoved++
 			}
-			// 3. Remove inbound dependency links
 			for _, dep := range dependents {
 				if err := tx.RemoveDependency(ctx, dep.ID, issueID, actor); err != nil {
 					return fmt.Errorf("remove dependency %s → %s: %w", dep.ID, issueID, err)
 				}
 				totalDepsRemoved++
 			}
-			// 4. Delete the issue
 			if err := tx.DeleteIssue(ctx, issueID); err != nil {
 				return fmt.Errorf("delete %s: %w", issueID, err)
 			}
 			return nil
 		})
 		if deleteErr != nil {
-			FatalError("deleting issue: %v", deleteErr)
+			return HandleError("deleting issue: %v", deleteErr)
 		}
 
 		commandDidWrite.Store(true)
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if err := outputJSON(map[string]interface{}{
 				"deleted":              issueID,
 				"dependencies_removed": totalDepsRemoved,
 				"references_updated":   updatedIssueCount,
-			})
+			}); err != nil {
+				return err
+			}
 		} else {
 			fmt.Printf("%s Deleted %s\n", ui.RenderPass("✓"), issueID)
 			fmt.Printf("  Removed %d dependency link(s)\n", totalDepsRemoved)
 			fmt.Printf("  Updated text references in %d issue(s)\n", updatedIssueCount)
 		}
+		return nil
 	},
 }
 
@@ -236,28 +237,24 @@ func deleteIssue(ctx context.Context, issueID string) error {
 	return store.DeleteIssue(ctx, issueID)
 }
 
-// deleteBatch handles deletion of multiple issues
-//
 //nolint:unparam // cmd parameter required for potential future use
-func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool, _ bool, _ ...string) {
-	// Ensure we have a direct store
+func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool, _ bool, _ ...string) error {
 	if store == nil {
 		if err := ensureStoreActive(); err != nil {
-			FatalError("%v", err)
+			return err
 		}
 	}
 	ctx := rootCtx
-	// Verify all issues exist (using routing for prefix resolution)
 	issues := make(map[string]*types.Issue)
 	notFound := []string{}
 	var routedStore storage.DoltStorage
 	for _, id := range issueIDs {
-		result, err := resolveAndGetIssueWithRouting(ctx, store, id)
+		result, err := resolveAndGetIssueForMutation(ctx, store, id)
 		if err != nil {
 			if isNotFoundErr(err) {
 				notFound = append(notFound, id)
 			} else {
-				FatalError("getting issue %s: %v", id, err)
+				return fmt.Errorf("getting issue %s: %v", id, err)
 			}
 		} else {
 			issues[result.ResolvedID] = result.Issue
@@ -272,20 +269,17 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 		defer func() { _ = routedStore.Close() }()
 	}
 	if len(notFound) > 0 {
-		FatalError("issues not found: %s", strings.Join(notFound, ", "))
+		return fmt.Errorf("issues not found: %s", strings.Join(notFound, ", "))
 	}
-	// Use the routed store if available, otherwise the local store
 	batchStore := store
 	if routedStore != nil {
 		batchStore = routedStore
 	}
-	// Dry-run or preview mode
 	if dryRun || !force {
 		result, err := batchStore.DeleteIssues(ctx, issueIDs, cascade, false, true)
 		if err != nil {
-			// Try to show preview even if there are dependency issues
 			showDeletionPreview(issueIDs, issues, cascade, err)
-			os.Exit(1)
+			return err
 		}
 		showDeletionPreview(issueIDs, issues, cascade, nil)
 		fmt.Printf("\nWould delete: %d issues\n", result.DeletedCount)
@@ -306,16 +300,14 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 					ui.RenderWarn("bd delete "+strings.Join(issueIDs, " ")+" --force"))
 			}
 		}
-		return
+		return nil
 	}
-	// Pre-collect connected issues before deletion (so we can update their text references)
 	connectedIssues := make(map[string]*types.Issue)
 	idSet := make(map[string]bool)
 	for _, id := range issueIDs {
 		idSet[id] = true
 	}
 	for _, id := range issueIDs {
-		// Get dependencies (issues this one depends on)
 		deps, err := batchStore.GetDependencies(ctx, id)
 		if err == nil {
 			for _, dep := range deps {
@@ -324,7 +316,6 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 				}
 			}
 		}
-		// Get dependents (issues that depend on this one)
 		dependents, err := batchStore.GetDependents(ctx, id)
 		if err == nil {
 			for _, dep := range dependents {
@@ -334,20 +325,17 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 			}
 		}
 	}
-	// Actually delete
 	result, err := batchStore.DeleteIssues(ctx, issueIDs, cascade, force, false)
 	if err != nil {
-		FatalError("%v", err)
+		return err
 	}
 
-	// Update text references in connected issues (using pre-collected issues)
 	updatedCount := updateTextReferencesInIssues(ctx, issueIDs, connectedIssues)
 
 	commandDidWrite.Store(true)
 
-	// Output results
 	if jsonOutput {
-		outputJSON(map[string]interface{}{
+		if err := outputJSON(map[string]interface{}{
 			"deleted":              issueIDs,
 			"deleted_count":        result.DeletedCount,
 			"dependencies_removed": result.DependenciesCount,
@@ -355,7 +343,9 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 			"events_removed":       result.EventsCount,
 			"references_updated":   updatedCount,
 			"orphaned_issues":      result.OrphanedIssues,
-		})
+		}); err != nil {
+			return err
+		}
 	} else {
 		fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), result.DeletedCount)
 		fmt.Printf("  Removed %d dependency link(s)\n", result.DependenciesCount)
@@ -367,133 +357,7 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 				ui.RenderWarn("⚠"), len(result.OrphanedIssues), strings.Join(result.OrphanedIssues, ", "))
 		}
 	}
-}
-
-// deleteBatchFallback handles batch deletion for non-SQLite storage (e.g., MemoryStorage in --no-db mode)
-// It iterates through issues one by one, deleting each.
-func deleteBatchFallback(issueIDs []string, force bool, dryRun bool, cascade bool, jsonOutput bool) {
-	ctx := rootCtx
-
-	// Cascade not supported in fallback mode
-	if cascade {
-		FatalError("--cascade not supported in --no-db mode")
-	}
-
-	// Verify all issues exist first
-	issues := make(map[string]*types.Issue)
-	notFound := []string{}
-	for _, id := range issueIDs {
-		issue, err := store.GetIssue(ctx, id)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				notFound = append(notFound, id)
-			} else {
-				FatalError("getting issue %s: %v", id, err)
-			}
-		} else {
-			issues[id] = issue
-		}
-	}
-	if len(notFound) > 0 {
-		FatalError("issues not found: %s", strings.Join(notFound, ", "))
-	}
-
-	// Preview mode
-	if dryRun || !force {
-		fmt.Printf("\n%s\n", ui.RenderFail("⚠️  DELETE PREVIEW"))
-		fmt.Printf("\nIssues to delete (%d):\n", len(issueIDs))
-		for _, id := range issueIDs {
-			if issue := issues[id]; issue != nil {
-				fmt.Printf("  %s: %s\n", id, issue.Title)
-			}
-		}
-		if dryRun {
-			fmt.Printf("\n(Dry-run mode - no changes made)\n")
-		} else {
-			fmt.Printf("\n%s\n", ui.RenderWarn("This operation cannot be undone!"))
-			fmt.Printf("To proceed, run: %s\n",
-				ui.RenderWarn("bd delete "+strings.Join(issueIDs, " ")+" --force"))
-		}
-		return
-	}
-
-	// Pre-collect connected issues before deletion (for text reference updates)
-	connectedIssues := make(map[string]*types.Issue)
-	idSet := make(map[string]bool)
-	for _, id := range issueIDs {
-		idSet[id] = true
-	}
-	for _, id := range issueIDs {
-		deps, err := store.GetDependencies(ctx, id)
-		if err == nil {
-			for _, dep := range deps {
-				if !idSet[dep.ID] {
-					connectedIssues[dep.ID] = dep
-				}
-			}
-		}
-		dependents, err := store.GetDependents(ctx, id)
-		if err == nil {
-			for _, dep := range dependents {
-				if !idSet[dep.ID] {
-					connectedIssues[dep.ID] = dep
-				}
-			}
-		}
-	}
-
-	// Delete each issue
-	deleteActor := getActorWithGit()
-	deletedCount := 0
-	depsRemoved := 0
-
-	for _, issueID := range issueIDs {
-		// Remove dependencies (outgoing)
-		depRecords, err := store.GetDependencyRecords(ctx, issueID)
-		if err == nil {
-			for _, dep := range depRecords {
-				if err := store.RemoveDependency(ctx, dep.IssueID, dep.DependsOnID, deleteActor); err == nil {
-					depsRemoved++
-				}
-			}
-		}
-
-		// Remove dependencies (inbound)
-		dependents, err := store.GetDependents(ctx, issueID)
-		if err == nil {
-			for _, dep := range dependents {
-				if err := store.RemoveDependency(ctx, dep.ID, issueID, deleteActor); err == nil {
-					depsRemoved++
-				}
-			}
-		}
-
-		// Delete the issue
-		if err := deleteIssue(ctx, issueID); err != nil {
-			fmt.Fprintf(os.Stderr, "Error deleting issue %s: %v\n", issueID, err)
-			continue
-		}
-		deletedCount++
-	}
-
-	// Update text references in connected issues
-	updatedCount := updateTextReferencesInIssues(ctx, issueIDs, connectedIssues)
-
-	commandDidWrite.Store(true)
-
-	// Output results
-	if jsonOutput {
-		outputJSON(map[string]interface{}{
-			"deleted":              issueIDs,
-			"deleted_count":        deletedCount,
-			"dependencies_removed": depsRemoved,
-			"references_updated":   updatedCount,
-		})
-	} else {
-		fmt.Printf("%s Deleted %d issue(s)\n", ui.RenderPass("✓"), deletedCount)
-		fmt.Printf("  Removed %d dependency link(s)\n", depsRemoved)
-		fmt.Printf("  Updated text references in %d issue(s)\n", updatedCount)
-	}
+	return nil
 }
 
 // showDeletionPreview shows what would be deleted

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -194,7 +195,7 @@ func TestInsertDependenciesWritesTypedIssueTargetColumn(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectExec(`INSERT INTO dependencies\s+\(issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
+	mock.ExpectExec(`INSERT INTO dependencies\s+\(id, issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := insertDependencies(context.Background(), db, 1, 100000); err != nil {
@@ -212,13 +213,13 @@ func TestInsertDependenciesUsesConfiguredIssueRange(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectExec(`INSERT INTO dependencies\s+\(issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
+	mock.ExpectExec(`INSERT INTO dependencies\s+\(id, issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
 		WithArgs(
-			"perf-000000", "perf-000004", "blocks", "bench", "{}",
-			"perf-000001", "perf-000000", "blocks", "bench", "{}",
-			"perf-000002", "perf-000001", "blocks", "bench", "{}",
-			"perf-000003", "perf-000002", "blocks", "bench", "{}",
-			"perf-000004", "perf-000003", "blocks", "bench", "{}",
+			depid.New("perf-000000", "perf-000004"), "perf-000000", "perf-000004", "blocks", "bench", "{}",
+			depid.New("perf-000001", "perf-000000"), "perf-000001", "perf-000000", "blocks", "bench", "{}",
+			depid.New("perf-000002", "perf-000001"), "perf-000002", "perf-000001", "blocks", "bench", "{}",
+			depid.New("perf-000003", "perf-000002"), "perf-000003", "perf-000002", "blocks", "bench", "{}",
+			depid.New("perf-000004", "perf-000003"), "perf-000004", "perf-000003", "blocks", "bench", "{}",
 		).
 		WillReturnResult(sqlmock.NewResult(0, 5))
 
@@ -253,7 +254,7 @@ func TestInsertDepAddChainsWritesTypedIssueTargetColumn(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectExec(`INSERT INTO dependencies\s+\(issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
+	mock.ExpectExec(`INSERT INTO dependencies\s+\(id, issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := insertDepAddChains(context.Background(), db, 1, 1); err != nil {
@@ -315,9 +316,9 @@ func TestSeedProductionShapeFullCoversTypedDependencyInserts(t *testing.T) {
 
 	mock.ExpectExec(`INSERT INTO issues\s+\(id, title, description, design, acceptance_criteria, notes,\s+status, priority, issue_type, assignee, metadata\)\s+VALUES`).
 		WillReturnResult(sqlmock.NewResult(0, 8))
-	mock.ExpectExec(`INSERT INTO dependencies\s+\(issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
+	mock.ExpectExec(`INSERT INTO dependencies\s+\(id, issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(`INSERT INTO dependencies\s+\(issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
+	mock.ExpectExec(`INSERT INTO dependencies\s+\(id, issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('-A')")).
 		WillReturnResult(sqlmock.NewResult(0, 0))

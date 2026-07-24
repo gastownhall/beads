@@ -36,6 +36,8 @@ push-state.json
 # Local version tracking (prevents upgrade notification spam after git ops)
 .local_version
 
+proxied_server_client_info.json
+
 # Worktree redirect file (contains relative path to main repo's .beads/)
 # Must not be committed as paths would be wrong in other clones
 redirect
@@ -45,6 +47,7 @@ redirect
 .sync.lock
 export-state/
 export-state.json
+last_pull
 
 # Ephemeral store (SQLite - wisps/molecules, intentionally not versioned)
 ephemeral.sqlite3
@@ -107,6 +110,7 @@ var requiredPatterns = []string{
 	".sync.lock",
 	"export-state/",
 	"export-state.json",
+	"last_pull",
 	"dolt/",
 	"embeddeddolt/",
 	"proxieddb/",
@@ -120,6 +124,9 @@ var requiredPatterns = []string{
 	"*.lock",
 	"*.corrupt.backup/",
 	".beads-credential-key",
+	"proxied_server_client_info.json",
+	".local_version",
+	"backup/",
 }
 
 // CheckGitignore checks if .beads/.gitignore is up to date.
@@ -140,13 +147,7 @@ func CheckGitignore(repoPath string) DoctorCheck {
 
 	// Check for required patterns
 	contentStr := string(content)
-	var missing []string
-	for _, pattern := range requiredPatterns {
-		if !strings.Contains(contentStr, pattern) {
-			missing = append(missing, pattern)
-		}
-	}
-
+	missing := missingGitignorePatterns(contentStr)
 	if len(missing) > 0 {
 		return DoctorCheck{
 			Name:    "Gitignore",
@@ -164,12 +165,71 @@ func CheckGitignore(repoPath string) DoctorCheck {
 	}
 }
 
+// EnsureGitignoreForBeadsDir writes the canonical .beads/.gitignore when it is
+// missing or outdated. If the file does not exist, it writes the full template.
+// If it exists but is outdated, it safely appends missing required patterns so
+// local additions are preserved.
+func EnsureGitignoreForBeadsDir(beadsDir string) error {
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+
+	content, err := os.ReadFile(gitignorePath) // #nosec G304 -- caller supplies the active .beads dir
+	if os.IsNotExist(err) {
+		return writeGitignoreTemplate(gitignorePath)
+	}
+	if err != nil {
+		return fmt.Errorf("read .beads/.gitignore: %w", err)
+	}
+
+	missing := missingGitignorePatterns(string(content))
+	if len(missing) == 0 {
+		return nil
+	}
+
+	if info, err := os.Stat(gitignorePath); err == nil {
+		if info.Mode().Perm()&0200 == 0 {
+			if err := os.Chmod(gitignorePath, 0600); err != nil {
+				return fmt.Errorf("chmod .beads/.gitignore: %w", err)
+			}
+		}
+	}
+
+	existingContent := string(content)
+	newContent := existingContent
+	if len(newContent) > 0 && !strings.HasSuffix(newContent, "\n") {
+		newContent += "\n"
+	}
+
+	newContent += "\n# Added by bd (missing required patterns)\n"
+	for _, pattern := range missing {
+		newContent += pattern + "\n"
+	}
+
+	if err := os.WriteFile(gitignorePath, []byte(newContent), 0600); err != nil {
+		return fmt.Errorf("ensure .beads/.gitignore: %w", err)
+	}
+
+	return nil
+}
+
 // FixGitignore updates .beads/.gitignore to the current template.
 // If a redirect exists, it writes to the redirect target's .gitignore instead.
 // repoPath is the project root directory.
 func FixGitignore(repoPath string) error {
 	gitignorePath := filepath.Join(ResolveBeadsDirForRepo(repoPath), ".gitignore")
+	return writeGitignoreTemplate(gitignorePath)
+}
 
+func missingGitignorePatterns(content string) []string {
+	var missing []string
+	for _, pattern := range requiredPatterns {
+		if !containsGitignorePattern(content, pattern) {
+			missing = append(missing, pattern)
+		}
+	}
+	return missing
+}
+
+func writeGitignoreTemplate(gitignorePath string) error {
 	// If file exists and is read-only, fix permissions first
 	if info, err := os.Stat(gitignorePath); err == nil {
 		if info.Mode().Perm()&0200 == 0 { // No write permission for owner

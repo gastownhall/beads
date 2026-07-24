@@ -596,3 +596,38 @@ func TestTrackerBatchPushDryRunSkipsLabelOrderOnlyDifference(t *testing.T) {
 		t.Fatalf("unexpected mutation create=%q update=%q", api.lastCreateDSID, api.lastUpdatePageID)
 	}
 }
+
+// TestGetConfig_YamlOnlyKeyBypassesStore verifies that yaml-only keys
+// bypass the Dolt store entirely, falling through to config.yaml and env var.
+// Notion doesn't currently have yaml-only secret keys, but this ensures the
+// code path works correctly if one is added in the future.
+func TestGetConfig_YamlOnlyKeyBypassesStore(t *testing.T) {
+	ctx := context.Background()
+	tr := &Tracker{store: nil}
+
+	// Use a key that's yaml-only via prefix match (dolt.* keys are yaml-only).
+	// This exercises the yaml-only branch without needing a Notion-specific secret.
+	t.Run("yaml-only key falls back to env var", func(t *testing.T) {
+		t.Setenv("TEST_YAML_ONLY", "env-value")
+		got := tr.getConfig(ctx, "dolt.test-key", "TEST_YAML_ONLY")
+		if got != "env-value" {
+			t.Errorf("getConfig(dolt.test-key) = %q, want %q", got, "env-value")
+		}
+	})
+
+	t.Run("yaml-only key returns empty when no value is set", func(t *testing.T) {
+		t.Setenv("TEST_YAML_ONLY", "")
+		got := tr.getConfig(ctx, "dolt.test-key", "TEST_YAML_ONLY")
+		if got != "" {
+			t.Errorf("getConfig(dolt.test-key) = %q, want empty", got)
+		}
+	})
+
+	t.Run("non-yaml key with nil store returns env var", func(t *testing.T) {
+		t.Setenv("NOTION_DATA_SOURCE_ID", "env-ds-id")
+		got := tr.getConfig(ctx, "notion.data_source_id", "NOTION_DATA_SOURCE_ID")
+		if got != "env-ds-id" {
+			t.Errorf("getConfig(notion.data_source_id) = %q, want %q", got, "env-ds-id")
+		}
+	})
+}

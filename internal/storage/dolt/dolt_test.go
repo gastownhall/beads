@@ -22,7 +22,12 @@ import (
 // The embedded Dolt driver can be slow, especially for complex JOIN queries.
 // If tests are timing out, it may indicate an issue with the embedded Dolt
 // driver's async operations rather than with the DoltStore implementation.
-const testTimeout = 30 * time.Second
+// testTimeout bounds each test's context. It must cover a cold store setup —
+// container-assisted connect plus the FULL migration chain (every versioned +
+// ignored migration, each Dolt-committed), which grows as migrations
+// accumulate — with headroom for a loaded machine; some tests set up two
+// stores under one context.
+const testTimeout = 45 * time.Second
 
 // testSem limits concurrent database-touching tests to avoid overwhelming the
 // shared Dolt testcontainer. Without this, 200+ parallel tests cause a
@@ -125,7 +130,7 @@ func setupTestStore(t *testing.T) (*DoltStore, func()) {
 
 	// Create an isolated branch for this test
 	_, branchCleanup := testutil.StartTestBranch(t, store.db, testSharedDB)
-	if err := initSchemaOnDB(ctx, store.db); err != nil {
+	if _, err := initSchemaOnDB(ctx, store.db); err != nil {
 		branchCleanup()
 		store.Close()
 		os.RemoveAll(tmpDir)
@@ -627,6 +632,26 @@ func TestDoltStoreIssueClose(t *testing.T) {
 	}
 }
 
+// TestCloseIssueNotFound verifies that closing a non-existent issue returns an
+// error that wraps storage.ErrNotFound, for parity with GetIssue/UpdateIssue/
+// DeleteIssue. Guards against the regression where CloseIssue returned a bare
+// fmt.Errorf that errors.Is(err, storage.ErrNotFound) could not match (mybd-fv7r).
+func TestCloseIssueNotFound(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	err := store.CloseIssue(ctx, "does-not-exist", "completed", "tester", "session123")
+	if err == nil {
+		t.Fatal("expected error closing non-existent issue, got nil")
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("expected error to wrap storage.ErrNotFound, got: %v", err)
+	}
+}
+
 // TestClosePromotedWisp verifies that bd close works for wisps that were
 // promoted to the issues table via PromoteFromEphemeral (bd-ftc).
 // Promoted wisps have -wisp- in their ID but live in the issues table,
@@ -766,8 +791,8 @@ func TestDoltStoreDependencies(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	// Create parent and child issues (both tasks — cross-type blocking
-	// is disallowed per GH#1495)
+	// Create parent and child issues (both tasks for a same-type blocks
+	// pair; cross-type blocks edges are now allowed for unrelated issues).
 	parent := &types.Issue{
 		ID:          "test-parent",
 		Title:       "Parent Issue",
@@ -1442,8 +1467,8 @@ func TestDeleteIssuesCircularDeps(t *testing.T) {
 	// the cycle detection in AddDependency -- this test exercises DeleteIssues'
 	// ability to handle cycles that may exist in the database, not AddDependency.
 	if _, err := store.execContext(ctx, `
-		INSERT INTO dependencies (issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
-		VALUES (?, ?, 'blocks', NOW(), 'tester', '{}')
+		INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by, metadata)
+		VALUES (UUID(), ?, ?, 'blocks', NOW(), 'tester', '{}')
 	`, "circ-a", "circ-c"); err != nil {
 		t.Fatalf("failed to insert cycle-completing dep circ-a->circ-c: %v", err)
 	}
@@ -1833,9 +1858,6 @@ func TestDoltStoreGetReadyWork(t *testing.T) {
 }
 
 func TestDoltStoreGetReadyWorkWaitsForChildrenOfSpawner(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow Dolt integration test in short mode")
-	}
 
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -2004,7 +2026,7 @@ func TestGetReadyWorkSortPolicy(t *testing.T) {
 
 	// Create issues with distinct priorities and creation times.
 	// "old-p3" is 3 days old (outside the 48h hybrid window).
-	// "recent-p2" and "recent-p1" are recent (within 48h).
+	// The "recent-*" issues are recent (within 48h).
 	issues := []*types.Issue{
 		{
 			ID:        "test-old-p3",
@@ -2013,6 +2035,14 @@ func TestGetReadyWorkSortPolicy(t *testing.T) {
 			Priority:  3,
 			IssueType: types.TypeTask,
 			CreatedAt: now.Add(-72 * time.Hour), // 3 days ago
+		},
+		{
+			ID:        "test-recent-p1-older",
+			Title:     "Recent P1 Older",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(-90 * time.Minute), // 90 min ago
 		},
 		{
 			ID:        "test-recent-p2",
@@ -2047,8 +2077,8 @@ func TestGetReadyWorkSortPolicy(t *testing.T) {
 		}
 
 		ids := issueIDs(result)
-		// Priority order: P1 < P2 < P3
-		assertOrder(t, ids, "test-recent-p1", "test-recent-p2", "test-old-p3")
+		// Priority order: P1 < P2 < P3, FIFO within the same priority.
+		assertOrder(t, ids, "test-recent-p1-older", "test-recent-p1", "test-recent-p2", "test-old-p3")
 	})
 
 	t.Run("SortPolicyOldest", func(t *testing.T) {
@@ -2060,8 +2090,8 @@ func TestGetReadyWorkSortPolicy(t *testing.T) {
 		}
 
 		ids := issueIDs(result)
-		// Oldest first: old-p3, recent-p2, recent-p1
-		assertOrder(t, ids, "test-old-p3", "test-recent-p2", "test-recent-p1")
+		// Oldest first, regardless of priority.
+		assertOrder(t, ids, "test-old-p3", "test-recent-p1-older", "test-recent-p2", "test-recent-p1")
 	})
 
 	t.Run("SortPolicyHybrid", func(t *testing.T) {
@@ -2074,7 +2104,7 @@ func TestGetReadyWorkSortPolicy(t *testing.T) {
 
 		ids := issueIDs(result)
 		// Hybrid: recent bucket (P1 before P2) first, then old bucket
-		assertOrder(t, ids, "test-recent-p1", "test-recent-p2", "test-old-p3")
+		assertOrder(t, ids, "test-recent-p1-older", "test-recent-p1", "test-recent-p2", "test-old-p3")
 	})
 
 	t.Run("DefaultSortIsHybrid", func(t *testing.T) {
@@ -2085,8 +2115,62 @@ func TestGetReadyWorkSortPolicy(t *testing.T) {
 
 		ids := issueIDs(result)
 		// Default (empty string) behaves like hybrid
-		assertOrder(t, ids, "test-recent-p1", "test-recent-p2", "test-old-p3")
+		assertOrder(t, ids, "test-recent-p1-older", "test-recent-p1", "test-recent-p2", "test-old-p3")
 	})
+}
+
+func TestDoltStoreClaimReadyIssuePriorityFIFO(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	now := time.Now().UTC()
+	issues := []*types.Issue{
+		{
+			ID:        "claim-ready-first",
+			Title:     "First task",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(-2 * time.Hour),
+		},
+		{
+			ID:        "claim-ready-second",
+			Title:     "Second task",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(-1 * time.Hour),
+		},
+		{
+			ID:        "claim-ready-third",
+			Title:     "Third task",
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+			CreatedAt: now.Add(-30 * time.Minute),
+		},
+	}
+	for _, issue := range issues {
+		if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("failed to create issue %s: %v", issue.ID, err)
+		}
+	}
+
+	claimed, err := store.ClaimReadyIssue(ctx, types.WorkFilter{
+		SortPolicy: types.SortPolicyPriority,
+	}, "agent")
+	if err != nil {
+		t.Fatalf("ClaimReadyIssue failed: %v", err)
+	}
+	if claimed == nil {
+		t.Fatal("ClaimReadyIssue returned nil")
+	}
+	if claimed.ID != "claim-ready-first" {
+		t.Fatalf("ClaimReadyIssue claimed %s, want claim-ready-first", claimed.ID)
+	}
 }
 
 // issueIDs extracts IDs from a slice of issues.

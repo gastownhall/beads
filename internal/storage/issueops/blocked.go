@@ -19,7 +19,7 @@ func optionalBlockedTable(table string) bool {
 	return table == "wisps" || table == "wisp_dependencies"
 }
 
-func loadBlockingDepsForIssueIDsInTx(ctx context.Context, tx *sql.Tx, depTables []string, issueIDs []string) ([]blockingDepRecord, error) {
+func loadBlockingDepsForIssueIDsInTx(ctx context.Context, tx DBTX, depTables []string, issueIDs []string) ([]blockingDepRecord, error) {
 	var deps []blockingDepRecord
 	for _, depTable := range depTables {
 		//nolint:gosec // G201: depTable is a hardcoded constant.
@@ -53,7 +53,7 @@ func loadBlockingDepsForIssueIDsInTx(ctx context.Context, tx *sql.Tx, depTables 
 	return deps, nil
 }
 
-func loadParentIDsForChildrenInTx(ctx context.Context, tx *sql.Tx, depTables []string, childIDs []string) (map[string]string, error) {
+func loadParentIDsForChildrenInTx(ctx context.Context, tx DBTX, depTables []string, childIDs []string) (map[string]string, error) {
 	childParents := make(map[string]string)
 	for _, depTable := range depTables {
 		//nolint:gosec // G201: depTable is a hardcoded constant.
@@ -88,7 +88,7 @@ func loadParentIDsForChildrenInTx(ctx context.Context, tx *sql.Tx, depTables []s
 }
 
 //nolint:gosec // G201: tables are hardcoded
-func GetChildrenWithParentsInTx(ctx context.Context, tx *sql.Tx, parentIDs []string) (map[string]string, error) {
+func GetChildrenWithParentsInTx(ctx context.Context, tx DBTX, parentIDs []string) (map[string]string, error) {
 	if len(parentIDs) == 0 {
 		return nil, nil
 	}
@@ -124,7 +124,7 @@ func GetChildrenWithParentsInTx(ctx context.Context, tx *sql.Tx, parentIDs []str
 }
 
 //nolint:gosec // G201: tables are hardcoded
-func GetChildrenOfIssuesInTx(ctx context.Context, tx *sql.Tx, parentIDs []string) ([]string, error) {
+func GetChildrenOfIssuesInTx(ctx context.Context, tx DBTX, parentIDs []string) ([]string, error) {
 	if len(parentIDs) == 0 {
 		return nil, nil
 	}
@@ -159,7 +159,7 @@ func GetChildrenOfIssuesInTx(ctx context.Context, tx *sql.Tx, parentIDs []string
 	return children, nil
 }
 
-func GetDescendantIDsInTx(ctx context.Context, tx *sql.Tx, rootID string, maxDepth int) ([]string, error) {
+func GetDescendantIDsInTx(ctx context.Context, tx DBTX, rootID string, maxDepth int) ([]string, error) {
 	if rootID == "" {
 		return nil, nil
 	}
@@ -237,7 +237,7 @@ func GetDescendantIDsInTx(ctx context.Context, tx *sql.Tx, rootID string, maxDep
 }
 
 //nolint:gosec // G201: tables are hardcoded
-func GetBlockedIssuesInTx(ctx context.Context, tx *sql.Tx, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
+func GetBlockedIssuesInTx(ctx context.Context, tx DBTX, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	var blockedIDList []string
 	blockedSet := make(map[string]bool)
 	for _, table := range []string{"issues", "wisps"} {

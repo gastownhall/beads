@@ -72,7 +72,7 @@ func TestSqlCommand(t *testing.T) {
 	t.Run("select count", func(t *testing.T) {
 		jsonOutput = true
 		output := captureStdout(t, func() error {
-			sqlCmd.Run(sqlCmd, []string{"SELECT COUNT(*) as count FROM issues"})
+			_ = sqlCmd.RunE(sqlCmd, []string{"SELECT COUNT(*) as count FROM issues"})
 			return nil
 		})
 
@@ -96,7 +96,7 @@ func TestSqlCommand(t *testing.T) {
 	t.Run("select with filter", func(t *testing.T) {
 		jsonOutput = true
 		output := captureStdout(t, func() error {
-			sqlCmd.Run(sqlCmd, []string{`SELECT id, title FROM issues WHERE status = 'open'`})
+			_ = sqlCmd.RunE(sqlCmd, []string{`SELECT id, title FROM issues WHERE status = 'open'`})
 			return nil
 		})
 
@@ -117,7 +117,7 @@ func TestSqlCommand(t *testing.T) {
 	t.Run("empty result json", func(t *testing.T) {
 		jsonOutput = true
 		output := captureStdout(t, func() error {
-			sqlCmd.Run(sqlCmd, []string{`SELECT * FROM issues WHERE title = 'nonexistent'`})
+			_ = sqlCmd.RunE(sqlCmd, []string{`SELECT * FROM issues WHERE title = 'nonexistent'`})
 			return nil
 		})
 
@@ -134,7 +134,7 @@ func TestSqlCommand(t *testing.T) {
 	t.Run("table output", func(t *testing.T) {
 		jsonOutput = false
 		output := captureStdout(t, func() error {
-			sqlCmd.Run(sqlCmd, []string{"SELECT COUNT(*) as count FROM issues"})
+			_ = sqlCmd.RunE(sqlCmd, []string{"SELECT COUNT(*) as count FROM issues"})
 			return nil
 		})
 
@@ -149,7 +149,7 @@ func TestSqlCommand(t *testing.T) {
 	t.Run("empty table output", func(t *testing.T) {
 		jsonOutput = false
 		output := captureStdout(t, func() error {
-			sqlCmd.Run(sqlCmd, []string{`SELECT * FROM issues WHERE title = 'nonexistent'`})
+			_ = sqlCmd.RunE(sqlCmd, []string{`SELECT * FROM issues WHERE title = 'nonexistent'`})
 			return nil
 		})
 

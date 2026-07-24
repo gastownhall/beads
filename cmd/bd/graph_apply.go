@@ -22,18 +22,22 @@ type GraphApplyPlan struct {
 
 // GraphApplyNode describes a single bead to create.
 type GraphApplyNode struct {
-	Key               string            `json:"key"`
-	Title             string            `json:"title"`
-	Type              string            `json:"type,omitempty"`
-	Description       string            `json:"description,omitempty"`
-	Assignee          string            `json:"assignee,omitempty"`
-	AssignAfterCreate bool              `json:"assign_after_create,omitempty"`
-	Priority          *int              `json:"priority,omitempty"` // nil defaults to P2
-	Labels            []string          `json:"labels,omitempty"`
-	Metadata          map[string]string `json:"metadata,omitempty"`
-	MetadataRefs      map[string]string `json:"metadata_refs,omitempty"`
-	ParentKey         string            `json:"parent_key,omitempty"`
-	ParentID          string            `json:"parent_id,omitempty"`
+	Key               string              `json:"key"`
+	Title             string              `json:"title"`
+	Type              string              `json:"type,omitempty"`
+	Description       string              `json:"description,omitempty"`
+	Assignee          string              `json:"assignee,omitempty"`
+	AssignAfterCreate bool                `json:"assign_after_create,omitempty"`
+	Priority          *int                `json:"priority,omitempty"` // nil defaults to P2
+	Estimate          *int                `json:"estimate,omitempty"` // minutes
+	Labels            []string            `json:"labels,omitempty"`
+	Metadata          map[string]string   `json:"metadata,omitempty"`
+	MetadataRefs      map[string]string   `json:"metadata_refs,omitempty"`
+	ExternalRef       string              `json:"external_ref,omitempty"`
+	Parent            string              `json:"parent,omitempty"` // alias for parent_key
+	ParentKey         string              `json:"parent_key,omitempty"`
+	ParentID          string              `json:"parent_id,omitempty"`
+	Deps              []GraphApplyNodeDep `json:"deps,omitempty"`
 }
 
 // GraphApplyEdge describes a dependency edge.
@@ -43,6 +47,13 @@ type GraphApplyEdge struct {
 	ToKey   string `json:"to_key,omitempty"`
 	ToID    string `json:"to_id,omitempty"`
 	Type    string `json:"type,omitempty"`
+}
+
+// GraphApplyNodeDep describes an inline dependency on a single graph node.
+// Target is resolved as a plan key first, then treated as a literal issue ID.
+type GraphApplyNodeDep struct {
+	Type   string `json:"type,omitempty"`
+	Target string `json:"target"`
 }
 
 // GraphApplyResult returns the concrete bead IDs assigned to each symbolic key.
@@ -107,11 +118,15 @@ var knownGraphNodeFields = map[string]struct{}{
 	"assignee":            {},
 	"assign_after_create": {},
 	"priority":            {},
+	"estimate":            {},
 	"labels":              {},
 	"metadata":            {},
 	"metadata_refs":       {},
+	"external_ref":        {},
+	"parent":              {},
 	"parent_key":          {},
 	"parent_id":           {},
+	"deps":                {},
 }
 
 // knownGraphEdgeFields lists the JSON keys recognized on a GraphApplyEdge.
@@ -130,10 +145,9 @@ var knownGraphEdgeFields = map[string]struct{}{
 // a "parent" string instead of "parent_key", or "blocks" arrays instead of
 // the top-level edges array). (GH#3367)
 var graphFieldHints = map[string]string{
-	"parent":   "use 'parent_key' (referencing another node's 'key') or 'parent_id' (an existing issue ID)",
-	"blocks":   "use the top-level 'edges' array, e.g. {\"from_key\": \"a\", \"to_key\": \"b\", \"type\": \"blocks\"}",
-	"depends":  "use the top-level 'edges' array with type 'blocks'",
-	"children": "set 'parent_key' on each child instead of listing children on the parent",
+	"blocks":   "use the top-level 'edges' array or per-node 'deps', e.g. {\"deps\": [{\"target\": \"key\", \"type\": \"blocks\"}]}",
+	"depends":  "use the top-level 'edges' array or per-node 'deps' with type 'blocks'",
+	"children": "set 'parent_key' or 'parent' on each child instead of listing children on the parent",
 }
 
 // detectUnknownGraphFields scans the raw plan JSON and returns unknown field
@@ -210,9 +224,11 @@ func unknownKeys(have map[string]json.RawMessage, known map[string]struct{}) []s
 
 // warnUnknownGraphFields prints a single warning line per location in the
 // plan with one or more unknown fields, plus a per-field hint when one is
-// available. Output goes to w (typically os.Stderr). Returns the set of
-// distinct unknown field names that were warned about, primarily for tests.
-// (GH#3367)
+// available. Output goes to w (typically os.Stderr). Returns the sorted
+// list of distinct unknown field names for test assertion; production
+// callers may safely ignore the result. (GH#3367)
+//
+//nolint:unparam // return value used by tests for assertion; production callers ignore
 func warnUnknownGraphFields(w io.Writer, unknown map[string][]string) []string {
 	if len(unknown) == 0 {
 		return nil
@@ -248,15 +264,19 @@ func warnUnknownGraphFields(w io.Writer, unknown map[string][]string) []string {
 	return hintFields
 }
 
-// createIssuesFromGraph handles `bd create --graph <plan-file>`.
-// When dryRun is true, the plan is parsed and validated but no writes occur;
-// a preview is emitted to stdout (JSON when jsonOutput is set, otherwise
-// human-readable). Unknown plan/node/edge fields are reported to stderr in
-// both modes so schema gaps are visible before any writes happen. (GH#3367)
-func createIssuesFromGraph(planFile string, dryRun bool, opts GraphApplyOptions) {
+func loadEmbeddedCustomTypes() []string {
+	if store != nil {
+		if ct, err := store.GetCustomTypes(rootCtx); err == nil && len(ct) > 0 {
+			return ct
+		}
+	}
+	return config.GetCustomTypesFromYAML()
+}
+
+func createIssuesFromGraph(planFile string, dryRun bool, opts GraphApplyOptions) error {
 	data, err := os.ReadFile(planFile) // #nosec G304 -- user-provided path is intentional
 	if err != nil {
-		FatalError("reading graph plan: %v", err)
+		return HandleErrorRespectJSON("reading graph plan: %v", err)
 	}
 
 	if unknown := detectUnknownGraphFields(data); len(unknown) > 0 {
@@ -265,42 +285,38 @@ func createIssuesFromGraph(planFile string, dryRun bool, opts GraphApplyOptions)
 
 	var plan GraphApplyPlan
 	if err := json.Unmarshal(data, &plan); err != nil {
-		FatalError("parsing graph plan: %v", err)
+		return HandleErrorRespectJSON("parsing graph plan: %v", err)
 	}
 
-	if err := validateGraphApplyPlan(&plan); err != nil {
-		FatalError("invalid graph plan: %v", err)
+	if err := validateGraphApplyPlan(&plan, loadEmbeddedCustomTypes()); err != nil {
+		return HandleErrorRespectJSON("invalid graph plan: %v", err)
 	}
 
 	if dryRun {
-		emitGraphApplyDryRun(&plan)
-		return
+		return emitGraphApplyDryRun(&plan)
 	}
 
 	result, err := executeGraphApply(rootCtx, &plan, opts)
 	if err != nil {
-		FatalError("graph create: %v", err)
+		return HandleErrorRespectJSON("graph create: %v", err)
 	}
 
 	if jsonOutput {
-		outputJSON(result)
-	} else {
-		fmt.Printf("Created %d issues\n", len(result.IDs))
-		keys := make([]string, 0, len(result.IDs))
-		for key := range result.IDs {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			fmt.Printf("  %s -> %s\n", key, result.IDs[key])
-		}
+		return outputJSON(result)
 	}
+	fmt.Printf("Created %d issues\n", len(result.IDs))
+	keys := make([]string, 0, len(result.IDs))
+	for key := range result.IDs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		fmt.Printf("  %s -> %s\n", key, result.IDs[key])
+	}
+	return nil
 }
 
-// emitGraphApplyDryRun prints what `bd create --graph` would do without
-// performing any writes. Mirrors the JSON-vs-human split of the live path.
-// (GH#3367)
-func emitGraphApplyDryRun(plan *GraphApplyPlan) {
+func emitGraphApplyDryRun(plan *GraphApplyPlan) error {
 	parentDeps := 0
 	rows := make([]GraphApplyDryRunRow, 0, len(plan.Nodes))
 	for _, node := range plan.Nodes {
@@ -312,7 +328,11 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan) {
 		if node.Priority != nil {
 			priority = *node.Priority
 		}
-		if node.ParentKey != "" || node.ParentID != "" {
+		effectiveParentKey := node.ParentKey
+		if effectiveParentKey == "" {
+			effectiveParentKey = node.Parent
+		}
+		if effectiveParentKey != "" || node.ParentID != "" {
 			parentDeps++
 		}
 		rows = append(rows, GraphApplyDryRunRow{
@@ -320,7 +340,7 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan) {
 			Title:     node.Title,
 			Type:      issueType,
 			Priority:  priority,
-			ParentKey: node.ParentKey,
+			ParentKey: effectiveParentKey,
 			ParentID:  node.ParentID,
 		})
 	}
@@ -335,8 +355,7 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan) {
 	}
 
 	if jsonOutput {
-		outputJSON(preview)
-		return
+		return outputJSON(preview)
 	}
 
 	fmt.Printf("Dry run: would create %d issue(s) and %d edge(s) (%d parent-child link(s))\n",
@@ -352,22 +371,12 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan) {
 		}
 		fmt.Printf("  %s [%s] P%d %q%s\n", row.Key, row.Type, row.Priority, row.Title, parent)
 	}
+	return nil
 }
 
-// validateGraphApplyPlan checks the plan for structural errors before any writes.
-func validateGraphApplyPlan(plan *GraphApplyPlan) error {
+func validateGraphApplyPlan(plan *GraphApplyPlan, customTypes []string) error {
 	if len(plan.Nodes) == 0 {
 		return fmt.Errorf("plan has no nodes")
-	}
-
-	// Load custom types so user-configured types (spec, session, etc.) are accepted.
-	var customTypes []string
-	if store != nil {
-		ct, _ := store.GetCustomTypes(rootCtx)
-		customTypes = ct
-	}
-	if len(customTypes) == 0 {
-		customTypes = config.GetCustomTypesFromYAML()
 	}
 
 	seenKeys := make(map[string]bool, len(plan.Nodes))
@@ -403,16 +412,34 @@ func validateGraphApplyPlan(plan *GraphApplyPlan) error {
 				}
 			}
 		}
-		if node.ParentKey != "" && !seenKeys[node.ParentKey] {
+		parentKey := node.ParentKey
+		if parentKey == "" {
+			parentKey = node.Parent
+		}
+		if parentKey != "" && !seenKeys[parentKey] {
 			found := false
 			for _, other := range plan.Nodes {
-				if other.Key == node.ParentKey {
+				if other.Key == parentKey {
 					found = true
 					break
 				}
 			}
 			if !found {
-				return fmt.Errorf("node %q: parent key %q not found in plan", node.Key, node.ParentKey)
+				return fmt.Errorf("node %q: parent key %q not found in plan", node.Key, parentKey)
+			}
+		}
+		if node.Estimate != nil && *node.Estimate < 0 {
+			return fmt.Errorf("node %q: estimate cannot be negative", node.Key)
+		}
+		for j, dep := range node.Deps {
+			if dep.Target == "" {
+				return fmt.Errorf("node %q: dep %d has empty target", node.Key, j)
+			}
+			if dep.Type != "" {
+				dt := types.DependencyType(dep.Type)
+				if !dt.IsValid() {
+					return fmt.Errorf("node %q: dep %d: invalid dependency type %q", node.Key, j, dep.Type)
+				}
 			}
 		}
 	}
@@ -456,7 +483,7 @@ func validateGraphApplyLocalCycles(plan *GraphApplyPlan, knownKeys map[string]bo
 	}
 	for _, edge := range plan.Edges {
 		depType := graphApplyDependencyType(edge.Type)
-		if !graphApplyEdgeCanSkipSQLCycleCheck(edge, depType) {
+		if !graphApplyEdgeIsLocalCycleRelevant(edge, depType) {
 			continue
 		}
 		if !knownKeys[edge.FromKey] || !knownKeys[edge.ToKey] {
@@ -543,6 +570,12 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphAppl
 			if node.Description != "" {
 				issue.Description = node.Description
 			}
+			if node.Estimate != nil {
+				issue.EstimatedMinutes = node.Estimate
+			}
+			if node.ExternalRef != "" {
+				issue.ExternalRef = &node.ExternalRef
+			}
 			if node.Assignee != "" {
 				if node.AssignAfterCreate {
 					pendingAssignees[i] = node.Assignee
@@ -589,44 +622,36 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphAppl
 		}
 
 		parentDepPairs := graphApplyParentDepPairs(plan.Nodes, keyToID)
+		newSchedulingEdges := make([][2]string, 0, len(plan.Nodes)+len(plan.Edges))
 		if err := validateGraphApplyPlannedParentBlockingPaths(ctx, tx, plan, keyToID, parentDepPairs); err != nil {
 			return err
 		}
-		canSkipLocalCycleChecks := graphApplyPlanCanSkipSQLCycleChecks(plan)
-
-		// Add dependencies from edges.
+		if err := validateGraphApplyPlannedBlockingCycles(ctx, tx, plan, keyToID); err != nil {
+			return err
+		}
 		for i, edge := range plan.Edges {
 			fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
 			toID := resolveEdgeRef(edge.ToKey, edge.ToID, keyToID)
 			depType := graphApplyDependencyType(edge.Type)
-			if parentDepPairs[graphApplyDepPairKey(fromID, toID)] {
-				if depType == types.DepParentChild {
-					continue
-				}
+			if parentDepPairs[graphApplyDepPairKey(fromID, toID)] && depType != types.DepParentChild {
 				return fmt.Errorf("edge %d %s->%s duplicates a parent-child relationship with dependency type %q", i, fromID, toID, depType)
 			}
 			if parentDepPairs[graphApplyDepPairKey(toID, fromID)] && graphApplyCycleRelevantDependencyType(depType) {
 				return fmt.Errorf("edge %d %s->%s creates a blocking reverse of a parent-child relationship", i, fromID, toID)
 			}
-			dep := &types.Dependency{
-				IssueID:     fromID,
-				DependsOnID: toID,
-				Type:        depType,
-			}
-			addOpts := storage.DependencyAddOptions{}
-			if canSkipLocalCycleChecks && graphApplyEdgeCanSkipSQLCycleCheck(edge, depType) {
-				addOpts.SkipCycleCheck = true
-			}
-			if err := tx.AddDependencyWithOptions(ctx, dep, actor, addOpts); err != nil {
-				return fmt.Errorf("adding edge %s->%s: %w", fromID, toID, err)
-			}
 		}
 
-		// Add parent-child dependencies.
+		// Add node parent-child dependencies first. The explicit and inline
+		// dependency sources below are also processed parent-first, so every
+		// blocking edge sees the plan's full hierarchy in storage.
 		for i, node := range plan.Nodes {
+			parentKey := node.ParentKey
+			if parentKey == "" {
+				parentKey = node.Parent
+			}
 			parentID := node.ParentID
-			if node.ParentKey != "" {
-				parentID = keyToID[node.ParentKey]
+			if parentKey != "" {
+				parentID = keyToID[parentKey]
 			}
 			if parentID != "" {
 				dep := &types.Dependency{
@@ -637,7 +662,77 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphAppl
 				if err := tx.AddDependency(ctx, dep, actor); err != nil {
 					return fmt.Errorf("node %q: adding parent-child dep: %w", node.Key, err)
 				}
+				newSchedulingEdges = append(newSchedulingEdges, [2]string{dep.IssueID, dep.DependsOnID})
 			}
+		}
+
+		for phase := 0; phase < 2; phase++ {
+			parentPhase := phase == 0
+			// Add explicit edges in stable order for this phase.
+			for i, edge := range plan.Edges {
+				fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
+				toID := resolveEdgeRef(edge.ToKey, edge.ToID, keyToID)
+				depType := graphApplyDependencyType(edge.Type)
+				if (depType == types.DepParentChild) != parentPhase {
+					continue
+				}
+				if parentDepPairs[graphApplyDepPairKey(fromID, toID)] {
+					if depType == types.DepParentChild {
+						continue
+					}
+					return fmt.Errorf("edge %d %s->%s duplicates a parent-child relationship with dependency type %q", i, fromID, toID, depType)
+				}
+				if parentDepPairs[graphApplyDepPairKey(toID, fromID)] && graphApplyCycleRelevantDependencyType(depType) {
+					return fmt.Errorf("edge %d %s->%s creates a blocking reverse of a parent-child relationship", i, fromID, toID)
+				}
+				dep := &types.Dependency{
+					IssueID:     fromID,
+					DependsOnID: toID,
+					Type:        depType,
+				}
+				if err := tx.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{}); err != nil {
+					return fmt.Errorf("adding edge %s->%s: %w", fromID, toID, err)
+				}
+				if graphApplySchedulingDependencyType(depType) {
+					newSchedulingEdges = append(newSchedulingEdges, [2]string{fromID, toID})
+				}
+			}
+
+			// Add per-node inline dependencies in stable order for this phase.
+			for i, node := range plan.Nodes {
+				for _, dep := range node.Deps {
+					depType := types.DependencyType(dep.Type)
+					if depType == "" {
+						depType = types.DepBlocks
+					}
+					if (depType == types.DepParentChild) != parentPhase {
+						continue
+					}
+					targetID := keyToID[dep.Target]
+					if targetID == "" {
+						targetID = dep.Target
+					}
+					if targetID == "" {
+						return fmt.Errorf("node %q: dep target %q not found", node.Key, dep.Target)
+					}
+					d := &types.Dependency{
+						IssueID:     issues[i].ID,
+						DependsOnID: targetID,
+						Type:        depType,
+					}
+					if err := tx.AddDependency(ctx, d, actor); err != nil {
+						return fmt.Errorf("node %q: adding dep to %q: %w", node.Key, dep.Target, err)
+					}
+					if graphApplySchedulingDependencyType(depType) {
+						newSchedulingEdges = append(newSchedulingEdges, [2]string{d.IssueID, d.DependsOnID})
+					}
+				}
+			}
+		}
+		if cyclePath, err := tx.CycleThroughEdges(ctx, newSchedulingEdges); err != nil {
+			return fmt.Errorf("final graph cycle check: %w", err)
+		} else if cyclePath != "" {
+			return fmt.Errorf("graph dependency cycle would be created: %s", cyclePath)
 		}
 
 		// Apply deferred assignees.
@@ -658,6 +753,58 @@ func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphAppl
 	return &GraphApplyResult{IDs: keyToID}, nil
 }
 
+// validateGraphApplyPlannedBlockingCycles rejects planned blocking edges that
+// would close a blocking-dependency cycle, evaluated whole-graph before any
+// insert. This early preflight is restricted to blocking edges for precise
+// plan errors. Each stored edge still runs issueops.CheckDependencyCycleInTx,
+// which enforces the combined blocks + conditional-blocks + parent-child graph.
+func validateGraphApplyPlannedBlockingCycles(ctx context.Context, tx storage.Transaction, plan *GraphApplyPlan, keyToID map[string]string) error {
+	type plannedEdge struct {
+		index  int
+		fromID string
+		toID   string
+	}
+
+	adj := make(map[string][]string)
+	checks := make([]plannedEdge, 0, len(plan.Edges))
+	for i, edge := range plan.Edges {
+		depType := graphApplyDependencyType(edge.Type)
+		if !graphApplyCycleRelevantDependencyType(depType) {
+			continue
+		}
+		fromID := resolveEdgeRef(edge.FromKey, edge.FromID, keyToID)
+		toID := resolveEdgeRef(edge.ToKey, edge.ToID, keyToID)
+		if fromID == "" || toID == "" {
+			continue
+		}
+		if fromID == toID {
+			return fmt.Errorf("edge %d %s->%s creates a blocking dependency cycle", i, fromID, toID)
+		}
+		adj[fromID] = append(adj[fromID], toID)
+		checks = append(checks, plannedEdge{index: i, fromID: fromID, toID: toID})
+	}
+
+	depCache := make(map[string][]*types.Dependency)
+	for _, edge := range checks {
+		hasPath, err := graphApplyHasPath(ctx, tx, adj, depCache, edge.toID, edge.fromID, graphApplyCycleRelevantDependencyType)
+		if err != nil {
+			return fmt.Errorf("edge %d %s->%s: checking planned blocking cycle: %w", edge.index, edge.fromID, edge.toID, err)
+		}
+		if hasPath {
+			return fmt.Errorf("edge %d %s->%s creates a blocking dependency cycle", edge.index, edge.fromID, edge.toID)
+		}
+	}
+	return nil
+}
+
+// validateGraphApplyPlannedParentBlockingPaths rejects plans where a planned
+// blocking edge would create a path from a parent to its child. Unlike
+// validateGraphApplyPlannedBlockingCycles, its existing-dep walk follows the
+// full AffectsReadyWork set (blocks, conditional-blocks, parent-child,
+// waits-for) because a parent→child path closed through any ready-affecting
+// dependency is a real ready-work deadlock. The two predicates must stay
+// distinct: narrowing this one would miss real deadlocks, while this broader
+// walk may additionally reject a return path through waits-for.
 func validateGraphApplyPlannedParentBlockingPaths(ctx context.Context, tx storage.Transaction, plan *GraphApplyPlan, keyToID map[string]string, parentDepPairs map[string]bool) error {
 	adj := make(map[string][]string)
 	for pair := range parentDepPairs {
@@ -694,7 +841,7 @@ func validateGraphApplyPlannedParentBlockingPaths(ctx context.Context, tx storag
 		if childID == "" || parentID == "" {
 			continue
 		}
-		hasPath, err := graphApplyHasPath(ctx, tx, adj, depCache, parentID, childID)
+		hasPath, err := graphApplyHasPath(ctx, tx, adj, depCache, parentID, childID, graphApplyReadyPathDependencyType)
 		if err != nil {
 			return err
 		}
@@ -705,7 +852,11 @@ func validateGraphApplyPlannedParentBlockingPaths(ctx context.Context, tx storag
 	return nil
 }
 
-func graphApplyHasPath(ctx context.Context, tx storage.Transaction, adj map[string][]string, depCache map[string][]*types.Dependency, fromID, toID string) (bool, error) {
+// graphApplyHasPath reports whether fromID can reach toID by following the
+// in-memory planned adjacency plus existing store dependencies. followExistingDep
+// selects which existing dep types the walk traverses, letting callers mirror
+// either the early blocking-only preflight or the broader ready-work graph.
+func graphApplyHasPath(ctx context.Context, tx storage.Transaction, adj map[string][]string, depCache map[string][]*types.Dependency, fromID, toID string, followExistingDep func(types.DependencyType) bool) (bool, error) {
 	seen := make(map[string]bool)
 	var visit func(string) (bool, error)
 	visit = func(id string) (bool, error) {
@@ -732,7 +883,7 @@ func graphApplyHasPath(ctx context.Context, tx storage.Transaction, adj map[stri
 			depCache[id] = deps
 		}
 		for _, dep := range deps {
-			if !graphApplyReadyPathDependencyType(dep.Type) {
+			if !followExistingDep(dep.Type) {
 				continue
 			}
 			found, err := visit(dep.DependsOnID)
@@ -745,20 +896,11 @@ func graphApplyHasPath(ctx context.Context, tx storage.Transaction, adj map[stri
 	return visit(fromID)
 }
 
-func graphApplyPlanCanSkipSQLCycleChecks(plan *GraphApplyPlan) bool {
-	for _, edge := range plan.Edges {
-		depType := graphApplyDependencyType(edge.Type)
-		if !graphApplyCycleRelevantDependencyType(depType) {
-			continue
-		}
-		if !graphApplyEdgeCanSkipSQLCycleCheck(edge, depType) {
-			return false
-		}
-	}
-	return true
-}
-
-func graphApplyEdgeCanSkipSQLCycleCheck(edge GraphApplyEdge, depType types.DependencyType) bool {
+// graphApplyEdgeIsLocalCycleRelevant reports whether an edge participates in the
+// in-memory local cycle check run by validateGraphApplyLocalCycles: it must be a
+// fully-local edge (both endpoints addressed by key, neither by an existing ID)
+// of a cycle-relevant dependency type.
+func graphApplyEdgeIsLocalCycleRelevant(edge GraphApplyEdge, depType types.DependencyType) bool {
 	if edge.FromKey == "" || edge.ToKey == "" || edge.FromID != "" || edge.ToID != "" {
 		return false
 	}
@@ -774,6 +916,10 @@ func graphApplyDependencyType(depType string) types.DependencyType {
 
 func graphApplyCycleRelevantDependencyType(depType types.DependencyType) bool {
 	return depType == types.DepBlocks || depType == types.DepConditionalBlocks
+}
+
+func graphApplySchedulingDependencyType(depType types.DependencyType) bool {
+	return graphApplyCycleRelevantDependencyType(depType) || depType == types.DepParentChild
 }
 
 func graphApplyReadyPathDependencyType(depType types.DependencyType) bool {

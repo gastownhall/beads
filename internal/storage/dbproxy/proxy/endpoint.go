@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -9,11 +10,34 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 )
+
+type ErrUpstreamMismatch struct {
+	RootDir string
+	Want    string
+	Have    string
+}
+
+func (e *ErrUpstreamMismatch) Error() string {
+	return fmt.Sprintf("proxy at %s fronts upstream %s, not %s", e.RootDir, e.Have, e.Want)
+}
+
+func IsUpstreamMismatch(err error) bool {
+	var m *ErrUpstreamMismatch
+	return errors.As(err, &m)
+}
+
+func intendedUpstreamID(opts OpenOpts) string {
+	if opts.Backend == BackendExternal {
+		return server.ExternalDoltServerID(opts.External)
+	}
+	return ""
+}
 
 type Endpoint struct {
 	Host string
@@ -30,6 +54,9 @@ type OpenOpts struct {
 	ConfigFilePath string
 	LogFilePath    string
 	DoltBinPath    string
+	Database       string
+	Port           int
+	External       configfile.ExternalDoltConfig
 }
 
 const (
@@ -54,7 +81,11 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 	if err := opts.Backend.Validate(); err != nil {
 		return Endpoint{}, fmt.Errorf("OpenOpts.Backend: %w", err)
 	}
-	if opts.Backend == BackendLocalServer {
+	if opts.Port != 0 && (opts.Port < 1 || opts.Port > 65535) {
+		return Endpoint{}, fmt.Errorf("OpenOpts.Port: must be 0 or 1-65535, got %d", opts.Port)
+	}
+	switch opts.Backend {
+	case BackendLocalServer:
 		if opts.ConfigFilePath == "" {
 			return Endpoint{}, fmt.Errorf("OpenOpts.ConfigFilePath is required for backend %q", opts.Backend)
 		}
@@ -64,6 +95,13 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 		if opts.DoltBinPath == "" {
 			return Endpoint{}, fmt.Errorf("OpenOpts.DoltBinPath is required for backend %q", opts.Backend)
 		}
+	case BackendExternal:
+		if opts.LogFilePath == "" {
+			return Endpoint{}, fmt.Errorf("OpenOpts.LogFilePath is required for backend %q", opts.Backend)
+		}
+		if err := opts.External.Validate(); err != nil {
+			return Endpoint{}, fmt.Errorf("OpenOpts.External: %w", err)
+		}
 	}
 	deadline := time.Now().Add(openDeadline)
 
@@ -72,13 +110,21 @@ func GetCreateDatabaseProxyServerEndpoint(rootDir string, opts OpenOpts) (Endpoi
 	poll := time.NewTicker(openPollInterval)
 	defer poll.Stop()
 
+	want := intendedUpstreamID(opts)
+
 	var lastSpawnErr error
 	for {
-		if ep, ok := readAndDial(rootDir); ok {
+		if ep, pf, ok := readAndDial(rootDir); ok {
+			if want != "" && pf.UpstreamID != "" && pf.UpstreamID != want {
+				return Endpoint{}, &ErrUpstreamMismatch{
+					RootDir: rootDir,
+					Want:    want,
+					Have:    pf.UpstreamID,
+				}
+			}
 			return ep, nil
 		}
 
-		// unlocked prior to spawn of child process
 		lock, err := util.TryLock(filepath.Join(rootDir, LockFileName))
 		switch {
 		case err == nil:
@@ -128,13 +174,16 @@ func spawnAndHandoff(rootDir string, opts OpenOpts, deadline time.Time, lock *ut
 		}
 	}
 
-	port, err := PickFreePort()
-	if err != nil {
-		return Endpoint{}, fmt.Errorf("pick port: %w", err)
+	port := opts.Port
+	if port == 0 {
+		var err error
+		if port, err = PickFreePort(); err != nil {
+			return Endpoint{}, fmt.Errorf("pick port: %w", err)
+		}
 	}
 
 	handedOff = true
-	cmd, done, err := forkExecChild(rootDir, opts.ConfigFilePath, opts.LogFilePath, opts.DoltBinPath, port, opts.IdleTimeout, opts.Backend, lock)
+	cmd, done, err := forkExecChild(rootDir, opts, port, lock)
 	if err != nil {
 		return Endpoint{}, fmt.Errorf("fork child: %w", err)
 	}
@@ -145,7 +194,7 @@ func spawnAndHandoff(rootDir string, opts OpenOpts, deadline time.Time, lock *ut
 	defer poll.Stop()
 
 	for {
-		if ep, ok := readAndDial(rootDir); ok {
+		if ep, _, ok := readAndDial(rootDir); ok {
 			return ep, nil
 		}
 		select {
@@ -163,7 +212,7 @@ func spawnAndHandoff(rootDir string, opts OpenOpts, deadline time.Time, lock *ut
 	}
 }
 
-func forkExecChild(rootDir, configFilePath, logFilePath, doltBinPath string, port int, idleTimeout time.Duration, backend Backend, lock *util.Lock) (*exec.Cmd, <-chan struct{}, error) {
+func forkExecChild(rootDir string, opts OpenOpts, port int, lock *util.Lock) (*exec.Cmd, <-chan struct{}, error) {
 	released := false
 	defer func() {
 		if !released {
@@ -176,8 +225,9 @@ func forkExecChild(rootDir, configFilePath, logFilePath, doltBinPath string, por
 		return nil, nil, fmt.Errorf("locate bd executable: %w", err)
 	}
 
+	idleTimeout := opts.IdleTimeout
 	if idleTimeout < 0 {
-		idleTimeout = 0
+		idleTimeout = IdleTimeoutNever
 	}
 
 	args := []string{
@@ -185,21 +235,39 @@ func forkExecChild(rootDir, configFilePath, logFilePath, doltBinPath string, por
 		"--root", rootDir,
 		"--port", strconv.Itoa(port),
 		"--idle-timeout", idleTimeout.String(),
-		"--backend", string(backend),
+		"--backend", string(opts.Backend),
 	}
-	if configFilePath != "" {
-		args = append(args, "--config", configFilePath)
+	if opts.ConfigFilePath != "" {
+		args = append(args, "--config", opts.ConfigFilePath)
 	}
-	if logFilePath != "" {
-		args = append(args, "--logpath", logFilePath)
+	if opts.LogFilePath != "" {
+		args = append(args, "--logpath", opts.LogFilePath)
 	}
-	if doltBinPath != "" {
-		args = append(args, "--dolt-bin", doltBinPath)
+	if opts.DoltBinPath != "" {
+		args = append(args, "--dolt-bin", opts.DoltBinPath)
+	}
+	if opts.Database != "" {
+		args = append(args, "--database", opts.Database)
+	}
+	if opts.Backend == BackendExternal {
+		ext := opts.External
+		if ext.Host != "" {
+			args = append(args, "--external-host", ext.Host)
+		}
+		if ext.Port != 0 {
+			args = append(args, "--external-port", strconv.Itoa(ext.Port))
+		}
+		if ext.Socket != "" {
+			args = append(args, "--external-socket-path", ext.Socket)
+		}
+		if ext.KeepAlivePeriod != 0 {
+			args = append(args, "--external-keep-alive", ext.KeepAlivePeriod.String())
+		}
 	}
 
-	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: logFilePath is caller-derived (workspace path), not user-request input
+	logFile, err := os.OpenFile(opts.LogFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: logFilePath is caller-derived (workspace path), not user-request input
 	if err != nil {
-		return nil, nil, fmt.Errorf("open log file %q: %w", logFilePath, err)
+		return nil, nil, fmt.Errorf("open log file %q: %w", opts.LogFilePath, err)
 	}
 
 	cmd := exec.Command(self, args...)
@@ -226,16 +294,24 @@ func forkExecChild(rootDir, configFilePath, logFilePath, doltBinPath string, por
 	return cmd, done, nil
 }
 
-func readAndDial(rootDir string) (Endpoint, bool) {
+func IsRunning(rootDir string) (bool, int) {
+	_, pf, ok := readAndDial(rootDir)
+	if !ok {
+		return false, 0
+	}
+	return true, pf.Pid
+}
+
+func readAndDial(rootDir string) (Endpoint, *pidfile.PidFile, bool) {
 	pf, err := pidfile.Read(rootDir, PIDFileName)
 	if err != nil || pf == nil {
-		return Endpoint{}, false
+		return Endpoint{}, nil, false
 	}
 	ep := Endpoint{Host: "127.0.0.1", Port: pf.Port}
 	if !probePort(ep, 500*time.Millisecond) {
-		return Endpoint{}, false
+		return Endpoint{}, nil, false
 	}
-	return ep, true
+	return ep, pf, true
 }
 
 func probePort(ep Endpoint, timeout time.Duration) bool {

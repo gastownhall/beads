@@ -1,0 +1,32 @@
+name: Conformance
+
+# Runs the same two-tier storage conformance suite developers run locally:
+# the in-process store corpus and the real-binary CLI harness.
+
+on:
+  pull_request:
+    branches: [ main ]
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+
+jobs:
+  conformance:
+    name: Storage backend conformance (embedded Dolt oracle)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run conformance (embedded Dolt oracle)
+        run: ./scripts/conformance.sh

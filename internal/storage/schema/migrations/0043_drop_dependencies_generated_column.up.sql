@@ -1,3 +1,11 @@
+-- NOTE (gastownhall/beads#4259): this migration introduces the surrogate
+-- `id CHAR(36) ... DEFAULT (UUID())` primary key below. UUID() is per-clone-random
+-- and makes the dependencies table merge-unsafe across Dolt clones. The fix lives
+-- in migration 0050 + the rekeyDependencyIDs backfill, which derive id
+-- deterministically from (issue_id, target) and drop this random default. As a
+-- belt-and-suspenders for clones that have NOT yet applied this migration, the
+-- random default is also dropped at the end of this file, so a freshly migrated
+-- clone reaches the no-default schema directly here rather than only at 0050.
 SET FOREIGN_KEY_CHECKS = 0;
 
 SET @needs_drop = (
@@ -97,6 +105,24 @@ PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 SET @sql = IF(@needs_drop = 1 AND @has_fk_issue_target = 1,
     'ALTER TABLE dependencies ADD CONSTRAINT fk_dep_issue_target FOREIGN KEY (depends_on_issue_id) REFERENCES issues(id) ON DELETE CASCADE ON UPDATE CASCADE',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- #4259: drop the per-clone-random DEFAULT (UUID()) so the application's
+-- deterministic id (set explicitly at every insert site) is the only source of
+-- the primary key. Guarded on COLUMN_DEFAULT so it is idempotent and a no-op when
+-- the default is already gone (e.g. after migration 0050 has run). The existing
+-- rows' transient random ids are rewritten by the rekeyDependencyIDs backfill.
+SET @id_has_default = (
+    SELECT IF(COUNT(*) > 0, 1, 0)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'dependencies'
+      AND COLUMN_NAME = 'id'
+      AND COLUMN_DEFAULT IS NOT NULL
+);
+SET @sql = IF(@id_has_default = 1,
+    'ALTER TABLE dependencies ALTER COLUMN id DROP DEFAULT',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 

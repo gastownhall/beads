@@ -185,9 +185,11 @@ func TestEmbeddedImport(t *testing.T) {
 		// Create an issue via bd create
 		id := bdCreateSilent(t, bd, dir, "Original Title")
 
-		// Import with updated title for the same ID
+		// Import with updated title for the same ID. UpdatedAt must be
+		// strictly newer than the created row's second-granularity
+		// updated_at: equal-timestamp rows keep the local row (bd-hj85c).
 		jsonlPath := filepath.Join(t.TempDir(), "upsert.jsonl")
-		now := time.Now().UTC()
+		now := time.Now().UTC().Add(time.Hour)
 		writeJSONLFile(t, jsonlPath, []types.Issue{
 			{ID: id, Title: "Updated Title", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
 		})

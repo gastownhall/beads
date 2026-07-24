@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // YamlOnlyKeys are configuration keys that must be stored in config.yaml
@@ -33,6 +35,7 @@ var YamlOnlyKeys = map[string]bool{
 	"git.no-gpg-sign": true,
 	"no-push":         true,
 	"no-git-ops":      true, // Disable git ops in bd prime session close protocol (GH#593)
+	"agent.profile":   true, // Explicit policy profile for bd prime's close protocol (GH#3423)
 
 	// Sync settings
 	"sync.remote":     true, // Primary: any Dolt-compatible remote URL
@@ -47,6 +50,11 @@ var YamlOnlyKeys = map[string]bool{
 
 	// Create command settings
 	"create.require-description": true,
+
+	// Prime memory-injection caps (read at session start, possibly before
+	// the database is reachable, so they must live in yaml)
+	"prime.max-memories":     true,
+	"prime.max-memory-chars": true,
 
 	// Validation settings (bd-t7jq)
 	// Values: "warn" | "error" | "none"
@@ -64,6 +72,7 @@ var YamlOnlyKeys = map[string]bool{
 	"backup.git-repo": true,
 
 	// Import settings
+	"import.auto": true,
 	"import.path": true,
 
 	// Dolt server settings
@@ -78,6 +87,9 @@ var YamlOnlyKeys = map[string]bool{
 	"linear.api_key":             true,
 	"linear.oauth_client_id":     true,
 	"linear.oauth_client_secret": true,
+	"jira.api_token":             true,
+	"gitlab.token":               true,
+	"ado.pat":                    true,
 }
 
 // IsYamlOnlyKey returns true if the given key should be stored in config.yaml
@@ -89,7 +101,7 @@ func IsYamlOnlyKey(key string) bool {
 	}
 
 	// Check prefix matches for nested keys
-	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation."}
+	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics.", "list.", "audit."}
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(key, prefix) {
 			return true
@@ -232,6 +244,162 @@ func SetYamlConfigInDir(beadsDir, key, value string) error {
 	return setYamlConfigAtPath(configPath, key, value)
 }
 
+var userGlobalKeyPrefixes = []string{"metrics."}
+
+func IsUserGlobalKey(key string) bool {
+	for _, prefix := range userGlobalKeyPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// readUserGlobalYamlValue reads a single dotted key from the user-global
+// config.yaml ONLY, never project or BEADS_DIR config. It accepts both the
+// nested form (metrics:\n  disabled: true) and the flat dotted form
+// (metrics.disabled: true). It returns the raw scalar string and whether the
+// key was present.
+//
+// Consent-bearing settings (metrics enablement and endpoint) are resolved
+// through this rather than merged viper so a repository's .beads/config.yaml can
+// never re-enable metrics for a user who opted out, nor redirect where metrics
+// are sent. See MetricsDisabledByUserConfig / UserMetricsEndpoint.
+func readUserGlobalYamlValue(key string) (string, bool) {
+	path := UserConfigYamlPath()
+	data, err := os.ReadFile(path) //nolint:gosec // path is the user-global config path from UserConfigYamlPath
+	if err != nil {
+		return "", false
+	}
+	var root map[string]interface{}
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return "", false
+	}
+	if raw, ok := root[key]; ok { // flat dotted form
+		return yamlScalarString(raw)
+	}
+	var node interface{} = root // nested form
+	for _, part := range strings.Split(key, ".") {
+		m, ok := node.(map[string]interface{})
+		if !ok {
+			return "", false
+		}
+		node, ok = m[part]
+		if !ok {
+			return "", false
+		}
+	}
+	return yamlScalarString(node)
+}
+
+func yamlScalarString(v interface{}) (string, bool) {
+	switch s := v.(type) {
+	case nil:
+		return "", false
+	case string:
+		return s, true
+	default:
+		return fmt.Sprintf("%v", s), true
+	}
+}
+
+// GetUserYamlConfig reads a single dotted key from the user-global config.yaml
+// ONLY, never project/BEADS_DIR config, returning "" if unset. It is the read
+// counterpart of SetUserYamlConfig/UnsetUserYamlConfig and the generic form of
+// the per-key consent helpers below. User-global keys (see IsUserGlobalKey —
+// currently metrics.*) must be read through this so `bd config get` reports the
+// value that actually governs runtime behavior, not the merged value a project's
+// .beads/config.yaml could shadow.
+func GetUserYamlConfig(key string) string {
+	raw, _ := readUserGlobalYamlValue(key)
+	return strings.TrimSpace(raw)
+}
+
+// MetricsDisabledByUserConfig reports whether the user-global config.yaml sets
+// metrics.disabled: true. Project/BEADS_DIR config is intentionally ignored so a
+// repository can never re-enable metrics for a user who opted out globally.
+// Absent or unparseable values read as "not disabled" (the default).
+func MetricsDisabledByUserConfig() bool {
+	raw, ok := readUserGlobalYamlValue("metrics.disabled")
+	if !ok {
+		return false
+	}
+	disabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return disabled
+}
+
+// UserMetricsEndpoint returns the metrics endpoint configured in the user-global
+// config.yaml, or "" if unset. Project/BEADS_DIR config is intentionally ignored
+// so a repository can never redirect a user's metrics endpoint. Callers fall
+// back to the built-in default when this is empty.
+func UserMetricsEndpoint() string {
+	raw, _ := readUserGlobalYamlValue("metrics.endpoint")
+	return strings.TrimSpace(raw)
+}
+
+// MetricsNoticeShownByUserConfig reports whether the user-global config.yaml
+// records that the first-run metrics disclosure was already shown. Like consent
+// and endpoint, it is resolved from the user-global config ONLY: a repository's
+// .beads/config.yaml must not be able to set metrics.notice_shown: true and
+// suppress the one-time disclosure for a user who has never actually seen it.
+// Absent or unparseable values read as "not shown" (the default).
+func MetricsNoticeShownByUserConfig() bool {
+	raw, ok := readUserGlobalYamlValue("metrics.notice_shown")
+	if !ok {
+		return false
+	}
+	shown, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return shown
+}
+
+func UnsetUserYamlConfig(key string) error {
+	configPath := UserConfigYamlPath()
+	normalizedKey := normalizeYamlKey(key)
+
+	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from UserConfigYamlPath
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read user config.yaml: %w", err)
+	}
+
+	newContent := commentOutYamlKey(string(content), normalizedKey)
+
+	// Preserve the owner-private 0600 posture every other user-global writer
+	// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
+	// rewriting at 0644 would relax this shared user config to world-readable.
+	if err := os.WriteFile(configPath, []byte(newContent), 0o600); err != nil { //nolint:gosec // configPath is from UserConfigYamlPath
+		return fmt.Errorf("failed to write user config.yaml: %w", err)
+	}
+
+	return nil
+}
+
+func SetUserYamlConfig(key, value string) error {
+	if err := validateYamlConfigValue(key, value); err != nil {
+		return err
+	}
+	configPath := UserConfigYamlPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return fmt.Errorf("failed to create user config directory: %w", err)
+	}
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		if err := os.WriteFile(configPath, []byte{}, 0o600); err != nil {
+			return fmt.Errorf("failed to create user config.yaml: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("failed to stat user config.yaml: %w", err)
+	}
+	return setYamlConfigAtPath(configPath, key, value)
+}
+
 func setYamlConfigAtPath(configPath, key, value string) error {
 
 	// Normalize key to canonical yaml format
@@ -347,6 +515,32 @@ func projectConfigPathFromLoadedState() string {
 	return configPath
 }
 
+// UserConfigYamlPath returns the platform-appropriate path for the
+// user-level config.yaml file. On Linux this is typically
+// ~/.config/bd/config.yaml; on macOS it checks ~/.config/bd/ first
+// (the documented cross-platform path) and falls back to
+// ~/Library/Application Support/bd/.
+func UserConfigYamlPath() string {
+	// Prefer ~/.config/bd/config.yaml — it's the documented path and
+	// works on all platforms after GH#3532.
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		xdgPath := filepath.Join(homeDir, ".config", "bd", "config.yaml")
+		if _, err := os.Stat(xdgPath); err == nil {
+			return xdgPath
+		}
+		// If it doesn't exist yet, still prefer it as the recommendation
+		// unless the os.UserConfigDir() path already has a file.
+		if configDir, err := os.UserConfigDir(); err == nil {
+			osPath := filepath.Join(configDir, "bd", "config.yaml")
+			if _, err := os.Stat(osPath); err == nil {
+				return osPath
+			}
+		}
+		return xdgPath // recommend the cross-platform path
+	}
+	return "~/.config/bd/config.yaml" // fallback display string
+}
+
 func findProjectBeadsDir() string {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -374,7 +568,14 @@ func findProjectBeadsDir() string {
 //
 //nolint:unparam // error return kept for future validation
 func updateYamlKey(content, key, value string) (string, error) {
-	// Format the value appropriately
+	if strings.Contains(key, ".") {
+		if updated, ok, err := updateNestedYamlKey(content, key, value); err != nil {
+			return "", err
+		} else if ok {
+			return updated, nil
+		}
+	}
+
 	formattedValue := formatYamlValue(value)
 	newLine := fmt.Sprintf("%s: %s", key, formattedValue)
 
@@ -415,10 +616,111 @@ func updateYamlKey(content, key, value string) (string, error) {
 	return strings.Join(result, "\n"), nil
 }
 
-// commentOutYamlKey comments out a key in yaml content by prefixing the line with "# ".
-// If the key is already commented or not found, the content is returned unchanged.
+func updateNestedYamlKey(content, key, value string) (string, bool, error) {
+	parts := strings.Split(key, ".")
+	if len(parts) < 2 {
+		return "", false, nil
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(content), &root); err != nil {
+		return "", false, err
+	}
+	if len(root.Content) == 0 {
+		return "", false, nil
+	}
+	mapping := root.Content[0]
+	if mapping.Kind != yaml.MappingNode {
+		return "", false, nil
+	}
+
+	if findMappingChild(mapping, key) != -1 {
+		return "", false, nil
+	}
+
+	leaf, ok := findOrCreateNestedScalar(mapping, parts)
+	if !ok {
+		return "", false, nil
+	}
+
+	leaf.Kind = yaml.ScalarNode
+	leaf.Tag = ""
+	leaf.Style = scalarStyleFor(value)
+	leaf.Value = value
+
+	out, err := yaml.Marshal(&root)
+	if err != nil {
+		return "", false, err
+	}
+	return string(out), true, nil
+}
+
+func findOrCreateNestedScalar(mapping *yaml.Node, parts []string) (*yaml.Node, bool) {
+	current := mapping
+	for i, part := range parts {
+		if current.Kind != yaml.MappingNode {
+			return nil, false
+		}
+		idx := findMappingChild(current, part)
+		isLeaf := i == len(parts)-1
+		if idx == -1 {
+			keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: part}
+			var valNode *yaml.Node
+			if isLeaf {
+				valNode = &yaml.Node{Kind: yaml.ScalarNode}
+			} else {
+				valNode = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			}
+			current.Content = append(current.Content, keyNode, valNode)
+			if isLeaf {
+				return valNode, true
+			}
+			current = valNode
+			continue
+		}
+		child := current.Content[idx+1]
+		if isLeaf {
+			return child, true
+		}
+		if child.Kind != yaml.MappingNode {
+			return nil, false
+		}
+		current = child
+	}
+	return nil, false
+}
+
+func findMappingChild(mapping *yaml.Node, name string) int {
+	for i := 0; i < len(mapping.Content); i += 2 {
+		k := mapping.Content[i]
+		if k.Kind == yaml.ScalarNode && k.Value == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func scalarStyleFor(value string) yaml.Style {
+	if value == "" {
+		return yaml.DoubleQuotedStyle
+	}
+	if _, err := strconv.ParseBool(value); err == nil {
+		return 0
+	}
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return 0
+	}
+	switch value {
+	case "null", "Null", "NULL", "~", "yes", "no", "on", "off":
+		return yaml.DoubleQuotedStyle
+	}
+	if strings.ContainsAny(value, ":#\n\"'") || strings.HasPrefix(value, " ") || strings.HasSuffix(value, " ") {
+		return yaml.DoubleQuotedStyle
+	}
+	return 0
+}
+
 func commentOutYamlKey(content, key string) string {
-	// Match the key line (not already commented)
 	keyPattern := regexp.MustCompile(`^(\s*)` + regexp.QuoteMeta(key) + `\s*:`)
 
 	var result []string
@@ -492,21 +794,6 @@ func isDuration(s string) bool {
 	return isNumeric(s[:len(s)-1])
 }
 
-func needsQuoting(s string) bool {
-	// Quote if contains special YAML characters
-	special := []string{":", "#", "[", "]", "{", "}", ",", "&", "*", "!", "|", ">", "'", "\"", "%", "@", "`"}
-	for _, c := range special {
-		if strings.Contains(s, c) {
-			return true
-		}
-	}
-	// Quote if starts/ends with whitespace
-	if strings.TrimSpace(s) != s {
-		return true
-	}
-	return false
-}
-
 // validateYamlConfigValue validates a configuration value before setting.
 // Returns an error if the value is invalid for the given key.
 func validateYamlConfigValue(key, value string) error {
@@ -529,6 +816,27 @@ func validateYamlConfigValue(key, value string) error {
 		lower := strings.ToLower(value)
 		if lower != "true" && lower != "false" {
 			return fmt.Errorf("dolt.debug must be \"true\" or \"false\", got %q", value)
+		}
+	case "dolt.mode":
+		lower := strings.ToLower(value)
+		if lower != "server" && lower != "embedded" {
+			return fmt.Errorf("dolt.mode must be \"server\" or \"embedded\", got %q", value)
+		}
+	case "prime.max-memories":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("prime.max-memories must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+		if n < 0 {
+			return fmt.Errorf("prime.max-memories must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+	case "prime.max-memory-chars":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("prime.max-memory-chars must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+		if n < 0 {
+			return fmt.Errorf("prime.max-memory-chars must be a non-negative integer (0 = unlimited), got %q", value)
 		}
 	}
 	return nil

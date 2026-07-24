@@ -221,8 +221,8 @@ func TestPromoteFromEphemeralRejectsCrossTypedTargetCollision(t *testing.T) {
 		t.Fatalf("AddDependency before promote: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx, `
-		INSERT INTO dependencies (issue_id, depends_on_external, type, created_at, created_by, metadata)
-		VALUES (?, ?, ?, NOW(), ?, ?)
+		INSERT INTO dependencies (id, issue_id, depends_on_external, type, created_at, created_by, metadata)
+		VALUES (UUID(), ?, ?, ?, NOW(), ?, ?)
 	`, "mixed-promote-collision-source", "mixed-promote-collision-target", types.DepRelated, "tester", "{}"); err != nil {
 		t.Fatalf("seed external collision: %v", err)
 	}
@@ -650,24 +650,40 @@ func TestGetNewlyUnblockedByCloseKeepsCandidateBlockedByNoHistoryWisp(t *testing
 	}
 }
 
-func TestSearchIssuesRejectsDuplicateIssueWispID(t *testing.T) {
+func TestSearchIssuesPreferWispOnDuplicateID(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
 	ctx, cancel := testContext(t)
 	defer cancel()
 
+	// Create an issue in the issues table (title: "perm mixed-search-duplicate")
 	createPerm(t, ctx, store, "mixed-search-duplicate")
+	// Insert a row with the same ID into wisps with a distinct title
 	if _, err := store.execContext(ctx, `
 		INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral, no_history)
 		VALUES (?, ?, '', '', '', '', ?, ?, ?, ?, ?)
-	`, "mixed-search-duplicate", "duplicate wisp", types.StatusOpen, 2, types.TypeTask, false, true); err != nil {
+	`, "mixed-search-duplicate", "wisp canonical", types.StatusOpen, 2, types.TypeTask, false, true); err != nil {
 		t.Fatalf("insert duplicate wisp row: %v", err)
 	}
 
-	_, err := store.SearchIssues(ctx, "", types.IssueFilter{})
-	if err == nil || !strings.Contains(err.Error(), `id "mixed-search-duplicate" exists in both issues and wisps`) {
-		t.Fatalf("SearchIssues error = %v, want duplicate issue/wisp ID error", err)
+	// SearchIssues must succeed and return the wisp (canonical) copy, not error.
+	results, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues error = %v, want no error on cross-table dup", err)
+	}
+	var found *types.Issue
+	for _, r := range results {
+		if r.ID == "mixed-search-duplicate" {
+			found = r
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("SearchIssues: mixed-search-duplicate not found in results")
+	}
+	if found.Title != "wisp canonical" {
+		t.Errorf("SearchIssues: got title %q, want %q (wisp preferred over issues copy)", found.Title, "wisp canonical")
 	}
 }
 

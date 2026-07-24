@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -10,17 +11,31 @@ import (
 
 // AddLabel adds a label to an issue
 func (s *DoltStore) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	isWisp := s.isActiveWisp(ctx, issueID)
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor)
-	})
+	}); err != nil {
+		return err
+	}
+	if isWisp {
+		return nil
+	}
+	return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label add %s", issueID))
 }
 
 // RemoveLabel removes a label from an issue.
 // Delegates SQL work to issueops.RemoveLabelInTx which handles wisp routing.
 func (s *DoltStore) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+	isWisp := s.isActiveWisp(ctx, issueID)
+	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		return issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
-	})
+	}); err != nil {
+		return err
+	}
+	if isWisp {
+		return nil
+	}
+	return s.doltAddAndCommit(ctx, []string{"events", "labels"}, fmt.Sprintf("bd: label remove %s", issueID))
 }
 
 // GetLabels retrieves all labels for an issue

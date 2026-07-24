@@ -63,7 +63,7 @@ func TestHelperSchemaInit(t *testing.T) {
 		os.Exit(1)
 	}
 
-	err = initSchemaOnDB(ctx, db)
+	_, err = initSchemaOnDB(ctx, db)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: initSchemaOnDB: %v\n", err)
 		os.Exit(1)
@@ -270,7 +270,8 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 			defer db.Close()
 			db.SetMaxOpenConns(2)
 			<-ready
-			return initSchemaOnDB(egCtx, db)
+			_, err = initSchemaOnDB(egCtx, db)
+			return err
 		})
 	}
 	close(ready)

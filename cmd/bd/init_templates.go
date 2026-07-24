@@ -60,6 +60,12 @@ func renderInitConfigYAML(prefix string, noDbMode bool) []byte {
 # Default actor for audit trails (overridden by BEADS_ACTOR or --actor)
 # actor: ""
 
+# Optional JSONL sidecar for explicit agent/tool interaction audit records.
+# Issue history is always recorded in the database and is visible with
+# bd history <id> --events; this only controls .beads/interactions.jsonl.
+# audit:
+#   enabled: false
+
 # Export events (audit trail) to .beads/events.jsonl on each flush/sync
 # When enabled, new events are appended incrementally using a high-water mark.
 # Use 'bd export --events' to trigger manually regardless of this setting.

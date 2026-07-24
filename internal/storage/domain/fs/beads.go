@@ -40,10 +40,7 @@ func resolveBeadsDir(workDir string) (string, bool) {
 	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
 		return utils.CanonicalizePath(envBeadsDir), true
 	}
-	if dir := beads.GetWorktreeFallbackBeadsDir(); dir != "" {
-		return dir, false
-	}
-	return beads.FollowRedirect(filepath.Join(workDir, ".beads")), false
+	return beads.ResolveBeadsDirForRepo(workDir), false
 }
 
 func (r *beadsDirFSRepositoryImpl) ResolveBeadsDirPath(ctx context.Context) domain.BeadsDirResolution {
@@ -51,16 +48,16 @@ func (r *beadsDirFSRepositoryImpl) ResolveBeadsDirPath(ctx context.Context) doma
 }
 
 func (r *beadsDirFSRepositoryImpl) BeadsDirIsLocal(ctx context.Context) bool {
-	workDirAbs, err := filepath.Abs(r.workDir)
+	workDir := filepath.Clean(utils.CanonicalizePath(r.workDir))
+	beadsDir := filepath.Clean(utils.CanonicalizePath(r.beadsDir))
+	if beadsDir == workDir {
+		return true
+	}
+	rel, err := filepath.Rel(workDir, beadsDir)
 	if err != nil {
 		return false
 	}
-	beadsDirAbs, err := filepath.Abs(r.beadsDir)
-	if err != nil {
-		return false
-	}
-	return strings.HasPrefix(beadsDirAbs, filepath.Clean(workDirAbs)+string(filepath.Separator)) ||
-		filepath.Clean(beadsDirAbs) == filepath.Clean(workDirAbs)
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (r *beadsDirFSRepositoryImpl) CreateBeadsDir(ctx context.Context) error {
@@ -238,6 +235,27 @@ func (r *beadsDirFSRepositoryImpl) ReadBeadsConfig(ctx context.Context) (*config
 		return nil, fmt.Errorf("fs: ReadBeadsConfig: %w", err)
 	}
 	return cfg, nil
+}
+
+func (r *beadsDirFSRepositoryImpl) WriteProxiedServerClientInfo(ctx context.Context, info *configfile.ProxiedServerClientInfo) error {
+	if r.beadsDir == "" {
+		return fmt.Errorf("fs: WriteProxiedServerClientInfo: beadsDir not resolved")
+	}
+	if err := configfile.SaveProxiedServerClientInfo(r.beadsDir, info); err != nil {
+		return fmt.Errorf("fs: WriteProxiedServerClientInfo: %w", err)
+	}
+	return nil
+}
+
+func (r *beadsDirFSRepositoryImpl) ReadProxiedServerClientInfo(ctx context.Context) (*configfile.ProxiedServerClientInfo, error) {
+	if r.beadsDir == "" {
+		return nil, fmt.Errorf("fs: ReadProxiedServerClientInfo: beadsDir not resolved")
+	}
+	info, err := configfile.LoadProxiedServerClientInfo(r.beadsDir)
+	if err != nil {
+		return nil, fmt.Errorf("fs: ReadProxiedServerClientInfo: %w", err)
+	}
+	return info, nil
 }
 
 func fileExists(path, opLabel string) (bool, error) {

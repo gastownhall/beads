@@ -46,25 +46,23 @@ func (s *EmbeddedDoltStore) CreateIssuesWithFullOptions(ctx context.Context, iss
 		return nil
 	}
 
-	// All-wisps fast path: create each wisp/no-history issue individually within
-	// its own transaction, threading opts through so that callers'
-	// SkipPrefixValidation / OrphanHandling settings are respected.
+	// An all-wisps batch marks every issue ephemeral (unless it is explicitly
+	// no-history) so the rows route to the wisp tables; wisps skip Dolt versioning
+	// either way. Every batch — all-wisps or mixed/durable — then runs in ONE
+	// transaction through the batch issueops.CreateIssuesInTx.
+	//
+	// Do NOT loop the single-issue CreateIssueInTx for the all-wisps case: it never
+	// runs the batch dependency-persist pass, so an all-wisps batch carrying inline
+	// dependencies (e.g. importing no-history beads with inter-bead edges, which
+	// export does include) would silently drop every edge — not even reported via
+	// OnSkippedDependency — and one transaction per issue would forfeit batch
+	// atomicity. This mirrors the server-mode DoltStore's all-wisps arm.
 	if issueops.AllWisps(issues) {
 		for _, issue := range issues {
 			if !issue.NoHistory {
 				issue.Ephemeral = true
 			}
-			if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
-				bc, err := issueops.NewBatchContext(ctx, tx, opts)
-				if err != nil {
-					return err
-				}
-				return issueops.CreateIssueInTx(ctx, tx, bc, issue, actor)
-			}); err != nil {
-				return err
-			}
 		}
-		return nil
 	}
 
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {

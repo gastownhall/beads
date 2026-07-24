@@ -7,7 +7,7 @@ import (
 	"log"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -186,7 +186,7 @@ func (s *DoltStore) GetCustomTypes(ctx context.Context) ([]string, error) {
 
 // GetInfraTypes returns infrastructure type names from config.
 // Infrastructure types are routed to the wisps table to keep the versioned
-// issues table clean. Defaults to ["agent", "rig", "role", "message"] if
+// issues table clean. Defaults to ["agent", "role", "message"] if
 // no custom configuration exists.
 // Falls back: DB config "types.infra" → config.yaml types.infra → defaults.
 // Results are cached per DoltStore lifetime and invalidated when SetConfig
@@ -210,7 +210,7 @@ func (s *DoltStore) GetInfraTypes(ctx context.Context) map[string]bool {
 		if yamlTypes := config.GetInfraTypesFromYAML(); len(yamlTypes) > 0 {
 			typeList = yamlTypes
 		} else {
-			typeList = storage.DefaultInfraTypes()
+			typeList = domain.DefaultInfraTypes()
 		}
 		result = make(map[string]bool, len(typeList))
 		for _, t := range typeList {

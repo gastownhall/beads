@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/audit"
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 var (
@@ -28,9 +29,14 @@ var (
 var auditCmd = &cobra.Command{
 	Use:   "audit",
 	Short: "Record and label agent interactions (append-only JSONL)",
-	Long: `Audit log entries are appended to .beads/interactions.jsonl.
+	Long: `Record explicit agent/tool interaction audit entries in .beads/interactions.jsonl.
 
-Each line is one event. This file is intended to be versioned in git and used for:
+This optional JSONL sidecar is disabled by default. Enable it with:
+
+  bd config set audit.enabled true
+
+Issue history is always recorded in the database and is visible with
+bd history <id> --events. The JSONL sidecar is for explicit interaction capture:
 - auditing ("why did the agent do that?")
 - dataset generation (SFT/RL fine-tuning)
 
@@ -38,14 +44,21 @@ Entries are append-only. Labeling creates a new "label" entry that references a 
 }
 
 var auditRecordCmd = &cobra.Command{
-	Use:   "record",
-	Short: "Append an audit interaction entry",
-	Run: func(cmd *cobra.Command, _ []string) {
+	Use:           "record",
+	Short:         "Append an audit interaction entry",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("audit-record")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		var e audit.Entry
 
-		// If stdin is piped and no explicit record fields were provided, assume stdin JSON.
-		// This matches "or pipe JSON via stdin" without requiring a flag.
-		fi, _ := os.Stdin.Stat() // Best effort: nil FileInfo means not a pipe, use default behavior
+		fi, _ := os.Stdin.Stat()
 		stdinPiped := fi != nil && (fi.Mode()&os.ModeCharDevice) == 0
 		noFieldsProvided := auditRecordKind == "" &&
 			auditRecordModel == "" &&
@@ -59,21 +72,17 @@ var auditRecordCmd = &cobra.Command{
 		if auditRecordStdin || (stdinPiped && noFieldsProvided) {
 			b, err := io.ReadAll(os.Stdin)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: failed to read stdin: %v\n", err)
-				os.Exit(1)
+				return HandleError("failed to read stdin: %v", err)
 			}
 			if err := json.Unmarshal(b, &e); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid JSON on stdin: %v\n", err)
-				os.Exit(1)
+				return HandleError("invalid JSON on stdin: %v", err)
 			}
-			// Allow --actor to override/augment stdin.
 			if actor != "" {
 				e.Actor = actor
 			}
 		} else {
 			if auditRecordKind == "" {
-				fmt.Fprintf(os.Stderr, "Error: --kind is required\n")
-				os.Exit(1)
+				return HandleError("--kind is required")
 			}
 			e = audit.Entry{
 				Kind:     auditRecordKind,
@@ -91,33 +100,40 @@ var auditRecordCmd = &cobra.Command{
 			}
 		}
 
-		id, err := audit.Append(&e)
+		id, err := audit.AppendIfEnabled(&e)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return HandleError("%v", err)
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]any{
+			return outputJSON(map[string]any{
 				"id":   id,
 				"kind": e.Kind,
 			})
-			return
 		}
 
 		fmt.Println(id)
+		return nil
 	},
 }
 
 var auditLabelCmd = &cobra.Command{
-	Use:   "label <entry-id>",
-	Short: "Append a label entry referencing an existing interaction",
-	Args:  cobra.ExactArgs(1),
-	Run: func(_ *cobra.Command, args []string) {
+	Use:           "label <entry-id>",
+	Short:         "Append a label entry referencing an existing interaction",
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(_ *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("audit-label")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		parentID := args[0]
 		if auditLabelValue == "" {
-			fmt.Fprintf(os.Stderr, "Error: --label is required\n")
-			os.Exit(1)
+			return HandleError("--label is required")
 		}
 		e := audit.Entry{
 			Kind:     "label",
@@ -127,22 +143,21 @@ var auditLabelCmd = &cobra.Command{
 			Reason:   auditLabelReason,
 		}
 
-		id, err := audit.Append(&e)
+		id, err := audit.AppendIfEnabled(&e)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+			return HandleError("%v", err)
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]any{
+			return outputJSON(map[string]any{
 				"id":        id,
 				"parent_id": parentID,
 				"label":     auditLabelValue,
 			})
-			return
 		}
 
 		fmt.Println(id)
+		return nil
 	},
 }
 
@@ -160,7 +175,6 @@ func init() {
 	auditLabelCmd.Flags().StringVar(&auditLabelValue, "label", "", `Label value (e.g. "good" or "bad")`)
 	auditLabelCmd.Flags().StringVar(&auditLabelReason, "reason", "", "Reason for label")
 
-	// Issue ID completions
 	auditCmd.ValidArgsFunction = issueIDCompletion
 
 	auditCmd.AddCommand(auditRecordCmd)

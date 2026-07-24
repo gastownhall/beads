@@ -6,18 +6,22 @@ import os
 import re
 import sys
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional
+from typing import Any
 
 from .config import load_config
 from .models import (
+    AddCommentParams,
     AddDependencyParams,
-    ClaimIssueParams,
+    AddNoteParams,
     BlockedIssue,
     BlockedParams,
+    ClaimIssueParams,
     CloseIssueParams,
+    Comment,
     CreateIssueParams,
     InitParams,
     Issue,
+    ListCommentsParams,
     ListIssuesParams,
     ReadyWorkParams,
     ReopenIssueParams,
@@ -27,7 +31,7 @@ from .models import (
 )
 
 
-def _sanitize_issue_deps(issue: dict) -> dict:
+def _sanitize_issue_deps(issue: dict[str, Any]) -> dict[str, Any]:
     """Strip raw dependency records that don't match the LinkedIssue schema.
 
     bd list/ready/blocked --json returns raw dep records (issue_id, depends_on_id,
@@ -40,11 +44,9 @@ def _sanitize_issue_deps(issue: dict) -> dict:
         ("dependents", "dependent_count"),
     ]:
         raw = issue.get(field)
-        if isinstance(raw, list) and raw:
-            # Check if these are raw dep records (have depends_on_id) vs enriched
-            if isinstance(raw[0], dict) and "depends_on_id" in raw[0]:
-                issue[count_field] = len(raw)
-                issue[field] = []
+        if isinstance(raw, list) and raw and isinstance(raw[0], dict) and "depends_on_id" in raw[0]:
+            issue[count_field] = len(raw)
+            issue[field] = []
     return issue
 
 
@@ -99,12 +101,12 @@ class BdClientBase(ABC):
     """Abstract base class for bd clients (CLI or daemon)."""
 
     @abstractmethod
-    async def ready(self, params: Optional[ReadyWorkParams] = None) -> List[Issue]:
+    async def ready(self, params: ReadyWorkParams | None = None) -> list[Issue]:
         """Get ready work (issues with no blockers)."""
         pass
 
     @abstractmethod
-    async def list_issues(self, params: Optional[ListIssuesParams] = None) -> List[Issue]:
+    async def list_issues(self, params: ListIssuesParams | None = None) -> list[Issue]:
         """List issues with optional filters."""
         pass
 
@@ -129,18 +131,33 @@ class BdClientBase(ABC):
         pass
 
     @abstractmethod
-    async def close(self, params: CloseIssueParams) -> List[Issue]:
+    async def close(self, params: CloseIssueParams) -> list[Issue]:
         """Close one or more issues."""
         pass
 
     @abstractmethod
-    async def reopen(self, params: ReopenIssueParams) -> List[Issue]:
+    async def reopen(self, params: ReopenIssueParams) -> list[Issue]:
         """Reopen one or more closed issues."""
         pass
 
     @abstractmethod
     async def add_dependency(self, params: AddDependencyParams) -> None:
         """Add a dependency between issues."""
+        pass
+
+    @abstractmethod
+    async def add_comment(self, params: AddCommentParams) -> str:
+        """Add a comment to an issue."""
+        pass
+
+    @abstractmethod
+    async def list_comments(self, params: ListCommentsParams) -> list[Comment]:
+        """List comments on an issue."""
+        pass
+
+    @abstractmethod
+    async def add_note(self, params: AddNoteParams) -> str:
+        """Append a note to an issue's notes field."""
         pass
 
     @abstractmethod
@@ -154,12 +171,12 @@ class BdClientBase(ABC):
         pass
 
     @abstractmethod
-    async def blocked(self, params: Optional[BlockedParams] = None) -> List[BlockedIssue]:
+    async def blocked(self, params: BlockedParams | None = None) -> list[BlockedIssue]:
         """Get blocked issues."""
         pass
 
     @abstractmethod
-    async def init(self, params: Optional[InitParams] = None) -> str:
+    async def init(self, params: InitParams | None = None) -> str:
         """Initialize a new beads database."""
         pass
 
@@ -176,10 +193,10 @@ class BdClientBase(ABC):
     @abstractmethod
     async def repair_deps(self, fix: bool = False) -> dict[str, Any]:
         """Find and optionally fix orphaned dependency references.
-        
+
         Args:
             fix: If True, automatically remove orphaned dependencies
-            
+
         Returns:
             Dict with orphans_found, orphans list, and fixed count if fix=True
         """
@@ -188,10 +205,10 @@ class BdClientBase(ABC):
     @abstractmethod
     async def detect_pollution(self, clean: bool = False) -> dict[str, Any]:
         """Detect test issues that leaked into production database.
-        
+
         Args:
             clean: If True, delete detected test issues
-            
+
         Returns:
             Dict with detected test issues and deleted count if clean=True
         """
@@ -200,11 +217,11 @@ class BdClientBase(ABC):
     @abstractmethod
     async def validate(self, checks: str | None = None, fix_all: bool = False) -> dict[str, Any]:
         """Run database validation checks.
-        
+
         Args:
             checks: Comma-separated list of checks (orphans,duplicates,pollution,conflicts)
             fix_all: If True, auto-fix all fixable issues
-            
+
         Returns:
             Dict with validation results for each check
         """
@@ -305,7 +322,6 @@ class BdCliClient(BdClientBase):
             env["BEADS_DB"] = self.beads_db
 
         # Log database routing for debugging
-        import sys
         if self.beads_dir:
             db_info = f"BEADS_DIR={self.beads_dir}"
         elif self.beads_db:
@@ -390,7 +406,9 @@ class BdCliClient(BdClientBase):
         if version < min_version:
             min_ver_str = ".".join(str(x) for x in min_version)
             cur_ver_str = ".".join(str(x) for x in version)
-            install_cmd = "curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash"
+            install_cmd = (
+                "curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash"
+            )
             raise BdVersionError(
                 f"bd version {cur_ver_str} is too old. "
                 f"This MCP server requires bd >= {min_ver_str}. "
@@ -491,7 +509,7 @@ class BdCliClient(BdClientBase):
             if not data:
                 raise BdCommandError(f"Issue not found: {params.issue_id}")
             data = data[0]
-        
+
         if not isinstance(data, dict):
             raise BdCommandError(f"Invalid response for show {params.issue_id}")
 
@@ -567,7 +585,7 @@ class BdCliClient(BdClientBase):
             if not data:
                 raise BdCommandError(f"Issue not found: {params.issue_id}")
             data = data[0]
-        
+
         if not isinstance(data, dict):
             raise BdCommandError(f"Invalid response for update {params.issue_id}")
 
@@ -675,6 +693,80 @@ class BdCliClient(BdClientBase):
                 stderr=stderr.decode(),
                 returncode=process.returncode or 1,
             )
+
+    async def _run_text_command(self, *args: str) -> str:
+        """Run a bd command that returns plain text (not JSON) and return stdout.
+
+        Used for subcommands like `comment`/`note` that print a confirmation
+        line rather than JSON. Mirrors _run_command's env and error handling.
+        """
+        cmd = [self.bd_path, *args, *self._global_flags()]
+
+        env = os.environ.copy()
+        if self.beads_dir:
+            env["BEADS_DIR"] = self.beads_dir
+        elif self.beads_db:
+            env["BEADS_DB"] = self.beads_db
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.DEVNULL,  # Prevent inheriting MCP's stdin
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._get_working_dir(),
+                env=env,
+            )
+            stdout, stderr = await process.communicate()
+        except FileNotFoundError as e:
+            raise BdNotFoundError(BdNotFoundError.installation_message(self.bd_path)) from e
+
+        if process.returncode != 0:
+            raise BdCommandError(
+                f"bd {args[0]} failed: {stderr.decode()}",
+                stderr=stderr.decode(),
+                returncode=process.returncode or 1,
+            )
+
+        return stdout.decode().strip()
+
+    async def add_comment(self, params: AddCommentParams) -> str:
+        """Add a comment to an issue via `bd comment <id> <text>`.
+
+        Args:
+            params: Comment parameters (issue_id, text)
+
+        Returns:
+            Confirmation message
+        """
+        await self._run_text_command("comment", params.issue_id, params.text)
+        return f"Added comment to {params.issue_id}"
+
+    async def list_comments(self, params: ListCommentsParams) -> list[Comment]:
+        """List comments on an issue via `bd comments <id>`.
+
+        Args:
+            params: Parameters containing the issue_id
+
+        Returns:
+            List of comments in chronological order
+        """
+        data = await self._run_command("comments", params.issue_id)
+        if not isinstance(data, list):
+            return []
+        return [Comment.model_validate(comment) for comment in data]
+
+    async def add_note(self, params: AddNoteParams) -> str:
+        """Append a note to an issue's notes field via `bd note <id> <text>`.
+
+        Args:
+            params: Note parameters (issue_id, text)
+
+        Returns:
+            Confirmation message
+        """
+        await self._run_text_command("note", params.issue_id, params.text)
+        return f"Appended note to {params.issue_id}"
 
     async def quickstart(self) -> str:
         """Get bd quickstart guide.
@@ -786,34 +878,37 @@ class BdCliClient(BdClientBase):
         Returns:
             Dict with detected test issues and deleted count if clean=True
         """
-        args = ["detect-pollution"]
+        args = ["doctor", "--check=pollution"]
         if clean:
             args.extend(["--clean", "--yes"])
 
         data = await self._run_command(*args)
         if not isinstance(data, dict):
-            raise BdCommandError("Invalid response for detect-pollution")
+            raise BdCommandError("Invalid response for doctor --check=pollution")
         return data
 
     async def validate(self, checks: str | None = None, fix_all: bool = False) -> dict[str, Any]:
-        """Run database validation checks.
+        """Run database validation checks via bd doctor --check=validate.
 
         Args:
-            checks: Comma-separated list of checks (orphans,duplicates,pollution,conflicts)
+            checks: Accepted for backward compatibility but no longer applied.
+                bd doctor --check=validate runs the full data-integrity suite
+                (duplicates, orphaned issues, conflicts) and has no flag for
+                selecting a subset. Use detect_pollution() for the pollution check.
             fix_all: If True, auto-fix all fixable issues
 
         Returns:
             Dict with validation results for each check
         """
-        args = ["validate"]
-        if checks:
-            args.extend(["--checks", checks])
+        del checks  # subset selection is unsupported by bd doctor (see docstring)
+        args = ["doctor", "--check=validate"]
         if fix_all:
-            args.append("--fix-all")
+            args.append("--fix")
+            args.append("--yes")
 
         data = await self._run_command(*args)
         if not isinstance(data, dict):
-            raise BdCommandError("Invalid response for validate")
+            raise BdCommandError("Invalid response for doctor --check=validate")
         return data
 
     async def init(self, params: InitParams | None = None) -> str:
@@ -865,13 +960,13 @@ BdClient = BdCliClient
 
 def create_bd_client(
     prefer_daemon: bool = False,
-    bd_path: Optional[str] = None,
-    beads_dir: Optional[str] = None,
-    beads_db: Optional[str] = None,
-    actor: Optional[str] = None,
-    no_auto_flush: Optional[bool] = None,
-    no_auto_import: Optional[bool] = None,
-    working_dir: Optional[str] = None,
+    bd_path: str | None = None,
+    beads_dir: str | None = None,
+    beads_db: str | None = None,
+    actor: str | None = None,
+    no_auto_flush: bool | None = None,
+    no_auto_import: bool | None = None,
+    working_dir: str | None = None,
 ) -> BdClientBase:
     """Create a bd CLI client.
 

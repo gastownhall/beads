@@ -318,9 +318,9 @@ func TestInstallAgentsSymlinkSafety(t *testing.T) {
 	realFile := filepath.Join(dir, "AGENTS.md")
 	linkPath := filepath.Join(dir, "CLAUDE.md")
 
-	// Write full profile content to the real file
-	fullSection := agents.RenderSection(agents.ProfileFull)
-	if err := os.WriteFile(realFile, []byte(fullSection), 0644); err != nil {
+	// Seed the target with content that should remain unchanged.
+	original := "# Existing target content\n"
+	if err := os.WriteFile(realFile, []byte(original), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -345,13 +345,65 @@ func TestInstallAgentsSymlinkSafety(t *testing.T) {
 		t.Fatalf("installAgents via symlink: %v", err)
 	}
 
-	// Read the real file — should still have full profile
+	// Symlink should still be a symlink.
+	if info, err := os.Lstat(linkPath); err != nil {
+		t.Fatalf("lstat symlink: %v", err)
+	} else if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("expected CLAUDE.md to remain a symlink")
+	}
+
+	// Read the real file — should be untouched (no managed section injection).
 	data, err := os.ReadFile(realFile)
 	if err != nil {
 		t.Fatalf("read real file: %v", err)
 	}
-	if !strings.Contains(string(data), "profile:full") {
-		t.Error("symlink target should preserve full profile")
+	if string(data) != original {
+		t.Errorf("symlink target changed:\n got: %q\nwant: %q", string(data), original)
+	}
+	if strings.Contains(string(data), "BEGIN BEADS INTEGRATION") {
+		t.Error("symlink target should not receive managed section")
+	}
+	if stdout.String() != "Installing ClaudeCode integration...\n" {
+		t.Errorf("expected stdout to contain only install start, got: %q", stdout.String())
+	}
+	stderrText := stderr.String()
+	if !strings.Contains(stderrText, "CLAUDE.md is a symlink to "+realFile) {
+		t.Errorf("expected warning to include symlink target, got: %s", stderrText)
+	}
+	if !strings.Contains(stderrText, "re-run 'bd setup claude'") {
+		t.Errorf("expected warning to include corrective command, got: %s", stderrText)
+	}
+}
+
+func TestInstallAgentsInspectError(t *testing.T) {
+	dir := t.TempDir()
+	notDir := filepath.Join(dir, "not-dir")
+	if err := os.WriteFile(notDir, []byte("not a directory"), 0644); err != nil {
+		t.Fatalf("write sentinel file: %v", err)
+	}
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	env := agentsEnv{
+		agentsPath: filepath.Join(notDir, "AGENTS.md"),
+		stdout:     stdout,
+		stderr:     stderr,
+	}
+	integration := agentsIntegration{
+		name:         "TestAgent",
+		setupCommand: "bd setup testagent",
+		profile:      agents.ProfileMinimal,
+	}
+
+	err := installAgents(env, integration)
+	if err == nil {
+		t.Fatal("expected inspect error")
+	}
+	if os.IsNotExist(err) {
+		t.Fatalf("expected non-not-exist error, got: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "Error: failed to inspect") {
+		t.Errorf("expected inspect error on stderr, got: %s", stderr.String())
 	}
 }
 
