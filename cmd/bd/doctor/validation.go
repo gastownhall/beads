@@ -213,15 +213,21 @@ func CheckTestPollution(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
-	// Look for common test patterns in titles
+	// Approximate gate aligned with detectTestPollution policy (GH#5025):
+	// open non-epics only; case-insensitive title match; stronger fixture patterns
+	// (not bare "test-*" prefixes used by real infra bugs). Full scoring with
+	// corroboration lives in `bd doctor --check=pollution`.
 	query := `
 		SELECT COUNT(*) FROM issues
-		WHERE (
-			title LIKE 'test-%' OR
-			title LIKE 'Test Issue%' OR
-			title LIKE '%test issue%' OR
-			id LIKE 'test-%'
-		)
+		WHERE status != 'closed'
+		  AND issue_type != 'epic'
+		  AND (
+			LOWER(title) LIKE 'test issue%' OR
+			LOWER(title) LIKE '% test issue%' OR
+			LOWER(title) LIKE 'issue for testing%' OR
+			LOWER(title) LIKE 'sample issue%' OR
+			LOWER(id) LIKE 'test-%'
+		  )
 	`
 	var count int
 	if err := db.QueryRow(query).Scan(&count); err != nil {
@@ -244,8 +250,8 @@ func CheckTestPollution(path string) DoctorCheck {
 		Name:    "Test Pollution",
 		Status:  "warning",
 		Message: fmt.Sprintf("%d potential test issue(s) detected", count),
-		Detail:  "Test issues may have leaked into production database",
-		Fix:     "Run 'bd doctor --check=pollution' to review and clean test issues",
+		Detail:  "Open issues matching fixture-like titles/ids may have leaked into the database (review before cleaning)",
+		Fix:     "Run 'bd doctor --check=pollution' to review; only use --clean after confirming fixtures",
 	}
 }
 

@@ -30,61 +30,72 @@ func isTestIssue(title string) bool {
 	return testPrefixPattern.MatchString(strings.ToLower(title))
 }
 
+// detectTestPollution scores candidates that look like leaked test fixtures.
+//
+// Policy (GH#5025):
+//   - Only open non-epic issues (closed work and epics are never pollution-clean targets).
+//   - A title prefix like "test-" alone is NOT enough — real engineering uses those prefixes.
+//   - Require at least one corroborating signal (empty/minimal description, sequential bare ID
+//     with thin description, or generic "test issue" title).
+//   - Same-minute bulk creation is NOT evidence of pollution (it is the signature of imports).
 func detectTestPollution(issues []*types.Issue) []pollutionResult {
 	var results []pollutionResult
 	sequentialPattern := regexp.MustCompile(`^[a-z]+-\d+$`)
 
-	// Group issues by creation time to detect rapid succession
-	issuesByMinute := make(map[int64][]*types.Issue)
 	for _, issue := range issues {
-		minute := issue.CreatedAt.Unix() / 60
-		issuesByMinute[minute] = append(issuesByMinute[minute], issue)
-	}
+		if issue == nil {
+			continue
+		}
+		// Never flag closed issues or epics (destructive --clean must not touch real work).
+		if issue.Status == types.StatusClosed {
+			continue
+		}
+		if issue.IssueType == types.TypeEpic {
+			continue
+		}
 
-	for _, issue := range issues {
 		score := 0.0
 		var reasons []string
+		corroboration := false
 
 		title := strings.ToLower(issue.Title)
+		desc := strings.TrimSpace(issue.Description)
 
-		// Check for test prefixes (strong signal)
+		// Title prefix is a weak signal alone (0.4) — real bugs/infra use "test-*" names.
 		if testPrefixPattern.MatchString(title) {
-			score += 0.7
+			score += 0.4
 			reasons = append(reasons, "Title starts with test prefix")
 		}
 
-		// Check for sequential numbering (medium signal)
-		if sequentialPattern.MatchString(issue.ID) && len(issue.Description) < 20 {
+		// Sequential bare ID + minimal description (corroborates fixture-style issues).
+		if sequentialPattern.MatchString(issue.ID) && len(desc) < 20 {
 			score += 0.4
+			corroboration = true
 			reasons = append(reasons, "Sequential ID with minimal description")
 		}
 
-		// Check for generic/empty description (weak signal)
-		if len(strings.TrimSpace(issue.Description)) == 0 {
-			score += 0.2
+		// Empty / near-empty description (corroborates throwaway fixtures).
+		if len(desc) == 0 {
+			score += 0.4
+			corroboration = true
 			reasons = append(reasons, "No description")
-		} else if len(issue.Description) < 20 {
-			score += 0.1
+		} else if len(desc) < 20 {
+			score += 0.2
+			corroboration = true
 			reasons = append(reasons, "Very short description")
 		}
 
-		// Check for rapid creation (created with many others in same minute)
-		minute := issue.CreatedAt.Unix() / 60
-		if len(issuesByMinute[minute]) >= 10 {
-			score += 0.3
-			reasons = append(reasons, fmt.Sprintf("Created with %d other issues in same minute", len(issuesByMinute[minute])-1))
-		}
-
-		// Check for generic test titles
+		// Explicit generic fixture titles (strong corroboration).
 		if strings.Contains(title, "issue for testing") ||
 			strings.Contains(title, "test issue") ||
 			strings.Contains(title, "sample issue") {
 			score += 0.5
+			corroboration = true
 			reasons = append(reasons, "Generic test title")
 		}
 
-		// Only include if score is above threshold
-		if score >= 0.7 {
+		// Threshold AND corroboration: prefix-only titled real work stays unflagged.
+		if score >= 0.7 && corroboration {
 			results = append(results, pollutionResult{
 				issue:   issue,
 				score:   score,
