@@ -981,8 +981,8 @@ servers are preserved.`,
 //   - beads_vr    : version-roundtrip / migration fixtures.
 //   - doctest_    : `bd doctor` self-check fixtures.
 //   - doctortest_ : older `bd doctor` fixture name (kept for back-compat).
-//   - benchdb_    : per-bench scratch DBs (uniqueBenchDBName below,
-//     format `benchdb_<pid>_<8 hex>`).
+//   - benchdb_    : per-bench scratch DBs (cmd/bd/template_test.go
+//     newTemplateBenchmarkStore, format `benchdb_<unixnano>`).
 var staleDatabasePrefixes = []string{
 	"testdb_",
 	"beads_test",
