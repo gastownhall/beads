@@ -11,9 +11,17 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// Shared by both bulk-loader query shapes so they can't drift apart.
+const dependencyProjectionRegex = `SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type, created_at, created_by, metadata, thread_id\s+FROM `
+
 func allDependencyRecordsQueryRegex(table string) string {
-	return `(?s)SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type, created_at, created_by, metadata, thread_id\s+FROM ` +
-		regexp.QuoteMeta(table) + `\s+ORDER BY issue_id, depends_on_id, type`
+	return `(?s)` + dependencyProjectionRegex +
+		regexp.QuoteMeta(table) + `\s+ORDER BY issue_id, depends_on_id, type, id`
+}
+
+func dependencyRecordsForIssuesQueryRegex(table string) string {
+	return `(?s)` + dependencyProjectionRegex +
+		regexp.QuoteMeta(table) + ` WHERE issue_id IN \(\?\) ORDER BY issue_id, depends_on_id, type, id`
 }
 
 func dependencyRows() *sqlmock.Rows {
@@ -105,13 +113,10 @@ func TestGetDependencyRecordsForIssuesOrdersByDependsOnID(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	// PartitionWispIDsInTx: empty wisps → all permanent.
-	// Match whatever partition query looks like loosely if used; if Partition expects
-	// specific SQL, use ExpectQuery with a flexible pattern.
-	// Simpler path: call getDependencyRecordsIntoFromTable via FromTable helper.
+	// The FromTable fast path skips PartitionWispIDsInTx, so no partition query.
 	now := time.Now()
-	flex := `(?s)SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type, created_at, created_by, metadata, thread_id\s+FROM dependencies WHERE issue_id IN \(\?\) ORDER BY issue_id, depends_on_id, type`
-	mock.ExpectQuery(flex).
+	depsForIssuesRegex := dependencyRecordsForIssuesQueryRegex("dependencies")
+	mock.ExpectQuery(depsForIssuesRegex).
 		WithArgs("src").
 		WillReturnRows(dependencyRows().
 			AddRow("src", "a-target", types.DepBlocks, now, "t", "{}", "").
