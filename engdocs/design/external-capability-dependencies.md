@@ -14,8 +14,8 @@ could refresh the derived column.
 
 ## Decision
 
-Resolve explicit external references in a storage decorator above the local
-database transaction.
+Resolve explicit external references at both storage and server-UOW policy
+seams. This keeps direct, routed, and proxied-server commands on one policy.
 
 The decorator:
 
@@ -29,6 +29,9 @@ The decorator:
   and failed foreign reads as unsatisfied;
 - filters ready and claim candidates, augments blocked output, and appends
   synthetic external leaves to dependency trees;
+- rejects `parent-child` external edges: hierarchy has no foreign lifecycle
+  semantics, while scheduling edges have an explicit capability predicate;
+- applies the same guard to checked close and batch blocked-state reads.
 - leaves non-blocking external relationships visible without allowing them to
   gate readiness.
 
@@ -51,6 +54,7 @@ behavior without weakening local ready-selection or claim safety.
 ## Verification
 
 Regression tests cover unsatisfied and shipped capabilities, fail-closed
-resolution, non-blocking edges, paginated ready work, claim selection, blocked
-output, dependency-tree synthesis, and decorator wiring. Existing storage and
-CLI suites remain the compatibility gate.
+resolution (including foreign read failure), non-blocking edges, paginated
+ready work, claim selection, blocked output, dependency-tree synthesis,
+checked-close and batch guards, and direct/proxied decorator wiring. Existing
+storage and CLI suites remain the compatibility gate.

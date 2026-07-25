@@ -1567,7 +1567,7 @@ var rootCmd = &cobra.Command{
 				hookRunner = hooks.NewRunner(filepath.Join(beadsDir, "hooks"))
 				uowSinks.Hook = hookRunner
 			}
-			uowProvider = uow.NewNotifyingProvider(p, uowSinks)
+			uowProvider = wireExternalDependencyUOWProvider(uow.NewNotifyingProvider(p, uowSinks))
 
 			if !previewMode {
 				reconcileVersionProxiedServer(rootCtx)

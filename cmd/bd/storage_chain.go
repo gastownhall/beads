@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/externaldeps"
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/telemetry"
 )
 
@@ -32,6 +33,15 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 	store = telemetry.WrapStorage(store)
 	if hookRunner != nil && !hooksDisabled {
 		store = storage.NewHookFiringStore(store, hookRunner)
+	}
+	return wireExternalDependencyPolicy(store)
+}
+
+// wireExternalDependencyPolicy applies only the read/guard policy. Routed
+// stores must use this without inheriting the caller's hooks or telemetry.
+func wireExternalDependencyPolicy(store storage.DoltStorage) storage.DoltStorage {
+	if store == nil {
+		return nil
 	}
 	return externaldeps.New(
 		store,
@@ -62,4 +72,17 @@ func waitForCommandHooks() {
 		return
 	}
 	hookRunner.Wait(hookRunner.Timeout())
+}
+
+func wireExternalDependencyUOWProvider(provider uow.UnitOfWorkProvider) uow.UnitOfWorkProvider {
+	return externaldeps.WrapUOWProvider(
+		provider,
+		func(project externaldeps.ProjectName) (string, bool) {
+			path := config.ResolveExternalProjectPath(string(project))
+			return path, path != ""
+		},
+		func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
+			return newReadOnlyStoreFromConfig(ctx, filepath.Join(projectRoot, ".beads"))
+		},
+	)
 }

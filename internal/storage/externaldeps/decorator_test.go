@@ -17,9 +17,11 @@ type fakeStore struct {
 	tree       []*types.TreeNode
 	deps       map[string][]*types.Dependency
 	labels     map[string][]*types.Issue
+	labelErr   error
 	claimed    []string
 	isBlocked  bool
 	blockerIDs []string
+	closed     []string
 }
 
 func (f *fakeStore) GetReadyWork(_ context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
@@ -52,6 +54,30 @@ func (f *fakeStore) IsBlocked(_ context.Context, _ string) (bool, []string, erro
 	return f.isBlocked, slices.Clone(f.blockerIDs), nil
 }
 
+func (f *fakeStore) IsBlockedBatch(_ context.Context, ids []string) (map[string]bool, error) {
+	result := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		result[id] = f.isBlocked
+	}
+	return result, nil
+}
+
+func (f *fakeStore) CloseIssueChecked(ctx context.Context, id, _ string, _ storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	issue, err := f.GetIssue(ctx, id)
+	if err != nil {
+		return storage.CloseIssueResult{}, err
+	}
+	if issue == nil {
+		return storage.CloseIssueResult{}, storage.ErrNotFound
+	}
+	if issue.Status == types.StatusClosed {
+		return storage.CloseIssueResult{Unchanged: true}, nil
+	}
+	issue.Status = types.StatusClosed
+	f.closed = append(f.closed, id)
+	return storage.CloseIssueResult{}, nil
+}
+
 func (f *fakeStore) GetAllDependencyRecords(_ context.Context) (map[string][]*types.Dependency, error) {
 	return f.deps, nil
 }
@@ -69,6 +95,9 @@ func (f *fakeStore) GetDependencyRecordsForIssues(_ context.Context, issueIDs []
 }
 
 func (f *fakeStore) GetIssuesByLabel(_ context.Context, label string) ([]*types.Issue, error) {
+	if f.labelErr != nil {
+		return nil, f.labelErr
+	}
 	return f.labels[label], nil
 }
 
@@ -234,6 +263,22 @@ func TestGetReadyWorkFailsClosedForUnconfiguredProject(t *testing.T) {
 	}
 }
 
+func TestGetReadyWorkFailsClosedWhenForeignReadFails(t *testing.T) {
+	a := issue("be-a")
+	raw := &fakeStore{ready: []*types.Issue{a}, deps: map[string][]*types.Dependency{
+		a.ID: {externalDep(a.ID, "external:remote:payments", types.DepBlocks)},
+	}}
+	store := testStore(raw, &fakeStore{labelErr: errors.New("foreign database unavailable")}, true)
+
+	got, err := store.GetReadyWork(t.Context(), types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ready = %v, want no issues after foreign read failure", issueIDs(got))
+	}
+}
+
 func TestGetReadyWorkOpensEachForeignProjectOnce(t *testing.T) {
 	a, b := issue("be-a"), issue("be-b")
 	raw := &fakeStore{
@@ -352,6 +397,42 @@ func TestIsBlockedIncludesUnsatisfiedExternalRef(t *testing.T) {
 	}
 	if !blocked || !slices.Equal(blockers, []string{ref}) {
 		t.Fatalf("IsBlocked = %v, %v; want true, [%s]", blocked, blockers, ref)
+	}
+}
+
+func TestIsBlockedBatchIncludesUnsatisfiedExternalRef(t *testing.T) {
+	a, b := issue("be-a"), issue("be-b")
+	ref := "external:remote:payments"
+	raw := &fakeStore{ready: []*types.Issue{a, b}, deps: map[string][]*types.Dependency{
+		a.ID: {externalDep(a.ID, ref, types.DepBlocks)},
+	}}
+	store := testStore(raw, &fakeStore{}, true)
+
+	got, err := store.IsBlockedBatch(t.Context(), []string{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("IsBlockedBatch: %v", err)
+	}
+	if !got[a.ID] || got[b.ID] {
+		t.Fatalf("IsBlockedBatch = %v, want only %s blocked", got, a.ID)
+	}
+}
+
+func TestCloseIssueCheckedRefusesUnsatisfiedExternalRef(t *testing.T) {
+	a := issue("be-a")
+	ref := "external:remote:payments"
+	raw := &fakeStore{ready: []*types.Issue{a}, deps: map[string][]*types.Dependency{
+		a.ID: {externalDep(a.ID, ref, types.DepBlocks)},
+	}}
+	store := testStore(raw, &fakeStore{}, true)
+
+	if _, err := store.CloseIssueChecked(t.Context(), a.ID, "tester", storage.CloseIssueOptions{}); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Fatalf("CloseIssueChecked error = %v, want ErrCloseBlocked", err)
+	}
+	if len(raw.closed) != 0 {
+		t.Fatalf("raw close calls = %v, want none", raw.closed)
+	}
+	if _, err := store.CloseIssueChecked(t.Context(), a.ID, "tester", storage.CloseIssueOptions{Force: true}); err != nil {
+		t.Fatalf("forced CloseIssueChecked: %v", err)
 	}
 }
 

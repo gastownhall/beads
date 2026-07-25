@@ -51,6 +51,10 @@ func (s *Store) loadBlockingState(ctx context.Context) (blockingState, error) {
 		return blockingState{}, fmt.Errorf("external dependencies: list blocking records: %w", err)
 	}
 
+	return s.blockingStateFromRecords(ctx, allDeps)
+}
+
+func (s *Store) blockingStateFromRecords(ctx context.Context, allDeps map[string][]*types.Dependency) (blockingState, error) {
 	refs := make([]reference, 0)
 	refsByIssue := make(map[string][]string)
 	for issueID, deps := range allDeps {
@@ -264,6 +268,63 @@ func (s *Store) IsBlocked(ctx context.Context, issueID string) (bool, []string, 
 	return blocked || len(blockers) > 0, blockers, nil
 }
 
+// IsBlockedBatch preserves the external blocker invariant for batch callers.
+// The embedded Dolt implementation promotes this method from the wrapped
+// store, so it must be declared explicitly here rather than relying on
+// IsBlocked alone.
+func (s *Store) IsBlockedBatch(ctx context.Context, issueIDs []string) (map[string]bool, error) {
+	blocked, err := s.inner.IsBlockedBatch(ctx, issueIDs)
+	if err != nil {
+		return nil, err
+	}
+	deps, err := s.inner.GetDependencyRecordsForIssues(ctx, issueIDs)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]reference, 0)
+	for _, issueDeps := range deps {
+		for _, dep := range issueDeps {
+			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) {
+				refs = append(refs, parseReference(dep.DependsOnID))
+			}
+		}
+	}
+	satisfied, err := s.resolveReferences(ctx, refs)
+	if err != nil {
+		return nil, err
+	}
+	for issueID, issueDeps := range deps {
+		for _, dep := range issueDeps {
+			if dep != nil && dep.Type.IsBlockingEdge() && isExternalReference(dep.DependsOnID) && !satisfied[dep.DependsOnID] {
+				blocked[issueID] = true
+			}
+		}
+	}
+	return blocked, nil
+}
+
+// CloseIssueChecked applies the external guard before the atomic local close.
+// The local store cannot see foreign capability state, so promoting its method
+// would allow an externally blocked issue to close without --force.
+func (s *Store) CloseIssueChecked(ctx context.Context, issueID, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	if !opts.Force {
+		issue, err := s.inner.GetIssue(ctx, issueID)
+		if err != nil {
+			return storage.CloseIssueResult{}, err
+		}
+		if issue != nil && issue.Status != types.StatusClosed {
+			blocked, blockers, err := s.IsBlocked(ctx, issueID)
+			if err != nil {
+				return storage.CloseIssueResult{}, err
+			}
+			if blocked && len(blockers) > 0 {
+				return storage.CloseIssueResult{}, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, issueID, blockers)
+			}
+		}
+	}
+	return s.inner.CloseIssueChecked(ctx, issueID, actor, opts)
+}
+
 // GetDependencyTree appends external refs as synthetic leaf nodes because no
 // local issue row exists for the normal graph hydrator to return.
 func (s *Store) GetDependencyTree(ctx context.Context, issueID string, maxDepth int, showAllPaths bool, reverse bool) ([]*types.TreeNode, error) {
@@ -282,6 +343,10 @@ func (s *Store) GetDependencyTree(ctx context.Context, issueID string, maxDepth 
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: load tree edges: %w", err)
 	}
+	return s.appendTreeExternalReferences(ctx, tree, deps, maxDepth, showAllPaths)
+}
+
+func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.TreeNode, deps map[string][]*types.Dependency, maxDepth int, showAllPaths bool) ([]*types.TreeNode, error) {
 	refs := make([]reference, 0)
 	for _, issueDeps := range deps {
 		for _, dep := range issueDeps {
@@ -318,7 +383,7 @@ func (s *Store) GetDependencyTree(ctx context.Context, issueID string, maxDepth 
 			}
 			ref := parseReference(dep.DependsOnID)
 			status := types.StatusBlocked
-			title := "⏳ " + externalTitle(ref)
+			title := "○ " + externalTitle(ref)
 			if satisfied[ref.raw] {
 				status = types.StatusClosed
 				title = "✓ " + externalTitle(ref)
