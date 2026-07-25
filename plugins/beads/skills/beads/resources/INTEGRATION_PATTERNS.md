@@ -312,8 +312,8 @@ TESTS: All 12 tests passing (auth, rotation, expiry, error handling)"
    bd dep add validation-2 auth-epic --type parent-child
    bd dep add middleware-3 auth-epic --type parent-child
    bd dep add tests-4 auth-epic --type parent-child
-   # Or use --parent at creation time:
-   # bd create "Update login endpoint" -t task --parent auth-epic
+   # Or use --parent at creation time (--no-inherit-labels if epic has size labels):
+   # bd create "Update login endpoint" -t task --parent auth-epic --no-inherit-labels
 
    # Add ordering
    bd dep add validation-2 login-1  # validation depends on login

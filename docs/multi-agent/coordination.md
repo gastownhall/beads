@@ -77,10 +77,10 @@ bd list --status in_progress --json
 Split work, then merge:
 
 ```bash
-# Fan-out
-bd create "Part A" --parent bd-epic
-bd create "Part B" --parent bd-epic
-bd create "Part C" --parent bd-epic
+# Fan-out (use --no-inherit-labels if epic size labels must not land on children)
+bd create "Part A" --parent bd-epic --no-inherit-labels
+bd create "Part B" --parent bd-epic --no-inherit-labels
+bd create "Part C" --parent bd-epic --no-inherit-labels
 
 bd assign bd-epic.1 agent-a
 bd assign bd-epic.2 agent-b

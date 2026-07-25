@@ -46,9 +46,10 @@ Create the epic and wire the dependencies directly:
 
 ```bash
 bd create "Feature X" -t epic
-bd create "Design" -t task --parent <epic-id>
-bd create "Implement" -t task --parent <epic-id>
-bd create "Test" -t task --parent <epic-id>
+# --no-inherit-labels if the epic has size labels children should not share
+bd create "Design" -t task --parent <epic-id> --no-inherit-labels
+bd create "Implement" -t task --parent <epic-id> --no-inherit-labels
+bd create "Test" -t task --parent <epic-id> --no-inherit-labels
 bd dep add <implement-id> <design-id>   # implement needs design
 bd dep add <test-id> <implement-id>     # test needs implement
 ```
