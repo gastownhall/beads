@@ -57,6 +57,13 @@ func TestSharedServerCfgNilHonorsSharedServer(t *testing.T) {
 		// shared-server path fails fast instead of spinning up a server.
 		"BEADS_DOLT_AUTO_START=0",
 		"BEADS_DOLT_SERVER_PORT=59999",
+		// Disable the metrics flusher: bd otherwise spawns a DETACHED
+		// `bd send-metrics` child that keeps writing $HOME/.beads/eventsData
+		// after the parent exits. HOME here is a t.TempDir(), so that child
+		// races Go's automatic RemoveAll and the test fails its own cleanup with
+		// "unlinkat …: directory not empty" (matches the sibling shared-server
+		// and protocol tests, which disable it for the same reason).
+		"BD_DISABLE_EVENT_FLUSH=1",
 		"BEADS_TEST_MODE=1",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ASKPASS=",
