@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -388,7 +389,7 @@ func TestProtocol_GrantingReplicaRoundTripsJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reclaim on laptop: %v\n%s", err, reclaimOut)
 	}
-	if strings.Contains(reclaimOut, leased) {
+	if slices.Contains(reclaimedIDs(t, reclaimOut), leased) {
 		t.Errorf("laptop reclaimed a lease granted by mini:\n%s", reclaimOut)
 	}
 	if after := fresh.showJSON(leased); after["status"] != "in_progress" {
@@ -403,13 +404,41 @@ func TestProtocol_GrantingReplicaRoundTripsJSONL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reclaim --any-replica on laptop: %v\n%s", err, overrideOut)
 	}
-	if !strings.Contains(overrideOut, leased) {
+	if !slices.Contains(reclaimedIDs(t, overrideOut), leased) {
 		t.Errorf("--any-replica did not reclaim the foreign stale lease:\n%s", overrideOut)
 	}
 	if after := fresh.showJSON(leased); after["status"] != "open" || after["assignee"] != nil {
 		t.Errorf("after --any-replica reclaim: status=%v assignee=%v, want open/unassigned",
 			after["status"], after["assignee"])
 	}
+}
+
+// reclaimedIDs extracts the reclaimed issue ids from a `reclaim --json`
+// invocation captured with CombinedOutput. The replica-guard audit lines on
+// stderr name the skipped issue id too (warnReplica), so a raw
+// strings.Contains on the combined stream reads a correctly-declined reclaim
+// as a reclamation. Only the JSON payload on stdout is the machine truth;
+// decode exactly one JSON value starting at the first brace so audit lines on
+// either side of it are ignored.
+func reclaimedIDs(t *testing.T, out string) []string {
+	t.Helper()
+	start := strings.Index(out, "{")
+	if start < 0 {
+		t.Fatalf("no JSON object in reclaim output:\n%s", out)
+	}
+	var payload struct {
+		Reclaimed []struct {
+			ID string `json:"id"`
+		} `json:"reclaimed"`
+	}
+	if err := json.NewDecoder(strings.NewReader(out[start:])).Decode(&payload); err != nil {
+		t.Fatalf("parse reclaim JSON: %v\n%s", err, out)
+	}
+	ids := make([]string, 0, len(payload.Reclaimed))
+	for _, r := range payload.Reclaimed {
+		ids = append(ids, r.ID)
+	}
+	return ids
 }
 
 // ageLeaseInExport rewrites id's record in a JSONL export so its lease reads as
