@@ -381,6 +381,11 @@ func runCook(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return HandleError("%v", err)
 	}
+	if flags.runtimeMode {
+		if err := formula.ValidateVars(resolved, flags.inputVars); err != nil {
+			return HandleError("%v", err)
+		}
+	}
 
 	protoID := resolved.Formula
 	if flags.prefix != "" {

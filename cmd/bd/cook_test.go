@@ -2,7 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/types"
@@ -11,6 +17,91 @@ import (
 // =============================================================================
 // Cook Tests (gt-8tmz.23: Compile-time vs Runtime Cooking)
 // =============================================================================
+
+func TestRunCookRejectsInvalidEnumVariable(t *testing.T) {
+	formulaDir := t.TempDir()
+	formulaPath := filepath.Join(formulaDir, "enum-validation.formula.toml")
+	formulaTOML := `formula = "enum-validation"
+version = 1
+type = "workflow"
+
+[vars.policy]
+required = true
+enum = ["merge-completes", "tracking-only"]
+
+[[steps]]
+id = "publish"
+title = "Publish with {{policy}}"
+`
+	if err := os.WriteFile(formulaPath, []byte(formulaTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		formulaArg  string
+		searchPaths []string
+	}{
+		{
+			name:       "exact path",
+			formulaArg: formulaPath,
+		},
+		{
+			name:        "registry name",
+			formulaArg:  "enum-validation",
+			searchPaths: []string{formulaDir},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newCookValidationTestCommand(tt.searchPaths, "policy=merge-comtes")
+			stderr, err := runCookCapturingStderr(cmd, tt.formulaArg)
+			if err == nil {
+				t.Fatal("runCook accepted a value outside the declared enum")
+			}
+			if !strings.Contains(stderr, `variable "policy": value "merge-comtes" not in allowed values [merge-completes tracking-only]`) {
+				t.Fatalf("runCook stderr = %q", stderr)
+			}
+
+			cmd = newCookValidationTestCommand(tt.searchPaths, "policy=merge-completes")
+			stderr, err = runCookCapturingStderr(cmd, tt.formulaArg)
+			if err != nil {
+				t.Fatalf("runCook rejected a declared enum value: %v; stderr = %q", err, stderr)
+			}
+		})
+	}
+}
+
+func runCookCapturingStderr(cmd *cobra.Command, formulaArg string) (string, error) {
+	oldStderr := os.Stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return "", err
+	}
+	os.Stderr = writer
+	runErr := runCook(cmd, []string{formulaArg})
+	_ = writer.Close()
+	os.Stderr = oldStderr
+	output, readErr := io.ReadAll(reader)
+	_ = reader.Close()
+	if readErr != nil {
+		return "", readErr
+	}
+	return string(output), runErr
+}
+
+func newCookValidationTestCommand(searchPaths []string, variable string) *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("dry-run", true, "")
+	cmd.Flags().Bool("persist", false, "")
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().StringSlice("search-path", searchPaths, "")
+	cmd.Flags().String("prefix", "", "")
+	cmd.Flags().StringArray("var", []string{variable}, "")
+	cmd.Flags().String("mode", "", "")
+	return cmd
+}
 
 // TestSubstituteFormulaVars tests variable substitution in formulas
 func TestSubstituteFormulaVars(t *testing.T) {
