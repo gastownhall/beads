@@ -19,6 +19,27 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 )
 
+// TestCheckRemoteSafety_ConfiguredRemoteWithoutDoltData pins GH#4861:
+// a configured sync.remote that does NOT advertise refs/dolt/data must be
+// treated as RemoteHasDoltData=false by the caller (after ls-remote probe).
+// With that input, --reinit-local must not refuse as "remote has history".
+func TestCheckRemoteSafety_ConfiguredRemoteWithoutDoltData(t *testing.T) {
+	got := CheckRemoteSafety(RemoteSafetyInput{
+		RemoteHasDoltData: false,
+		ReinitLocal:       true,
+	})
+	if got.Action != ActionNoRemoteData {
+		t.Fatalf("action = %v, want ActionNoRemoteData when probe found no refs/dolt/data", got.Action)
+	}
+	got = CheckRemoteSafety(RemoteSafetyInput{
+		RemoteHasDoltData: true,
+		ReinitLocal:       true,
+	})
+	if got.Action != ActionRefuseDivergence {
+		t.Fatalf("action = %v, want ActionRefuseDivergence when refs/dolt/data exists", got.Action)
+	}
+}
+
 func TestCheckRemoteSafety_GuardMatrix(t *testing.T) {
 	cases := []struct {
 		name     string

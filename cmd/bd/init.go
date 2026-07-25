@@ -768,7 +768,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					earlyRemoteHasDoltData = gitRemoteHasDoltDataRef(earlySyncURL)
 				}
 			} else if earlyRemoteSource == initSyncRemoteConfigured {
-				earlyRemoteHasDoltData = true // sync.remote configured = user intends bootstrap
+				// Probe refs/dolt/data — do NOT treat mere presence of
+				// sync.remote as proof of remote history (GH#4861). A git
+				// remote with only ordinary branches must not refuse
+				// --reinit-local / local init.
+				earlyRemoteHasDoltData = gitRemoteHasDoltDataRef(earlySyncURL)
 			} else if earlyRemoteSource == initSyncRemoteNone && !stealth && isGitRepo() && !isBareGitRepo() {
 				if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 					earlySyncURL = normalizeRemoteURL(originURL)
@@ -788,10 +792,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				})
 				if _, err := handleRemoteSafetyDecision(earlyDecision, prefix, earlySyncURL, destroyToken, func() bool {
 					switch earlyRemoteSource {
-					case initSyncRemoteExplicit:
+					case initSyncRemoteExplicit, initSyncRemoteConfigured:
 						return gitRemoteHasDoltDataRef(earlySyncURL)
-					case initSyncRemoteConfigured:
-						return earlyRemoteHasDoltData
 					default:
 						return gitOriginHasDoltDataRef()
 					}
@@ -1099,9 +1101,9 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// configured explicitly by the user (GH#3339).
 			if syncRemoteSource == initSyncRemoteExplicit && !fromJSONL {
 				syncFromRemote = true
-			} else if syncRemoteSource == initSyncRemoteConfigured {
-				remoteHasDoltData = true
-			} else if syncRemoteSource == initSyncRemoteExplicit {
+			} else if syncRemoteSource == initSyncRemoteConfigured || syncRemoteSource == initSyncRemoteExplicit {
+				// Always verify refs/dolt/data rather than assuming history
+				// from a configured URL alone (GH#4861).
 				remoteHasDoltData = gitRemoteHasDoltDataRef(syncURL)
 			}
 			if !syncFromRemote {
@@ -1116,10 +1118,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					IsInteractive:     term.IsTerminal(int(os.Stdin.Fd())),
 				})
 				bootstrap, err := handleRemoteSafetyDecision(decision, prefix, syncURL, destroyToken, func() bool {
-					if syncRemoteSource == initSyncRemoteExplicit {
-						return gitRemoteHasDoltDataRef(syncURL)
-					}
-					return remoteHasDoltData
+					return gitRemoteHasDoltDataRef(syncURL)
 				}, remoteHasDoltData, &remoteDivergenceConfirmed)
 				if err != nil {
 					return err
