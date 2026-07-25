@@ -182,6 +182,74 @@ func TestProxiedServerShow(t *testing.T) {
 		}
 	})
 
+	// ga-clgh: proxied path mirror of the direct-path fix (a2a69f5e9). The
+	// proxied handler used to leave comments_omitted unset entirely, so a
+	// caller reading only `.comments` couldn't tell "none" from "left out".
+	t.Run("show_json_comments_omitted_flag_set", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjco1")
+		issue := bdProxiedCreate(t, bd, p.dir, "Omitted flag", "--type", "task")
+
+		db := openProxiedDB(t, p)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES (?, ?, ?, ?, NOW())",
+			fmt.Sprintf("cmt-%d", time.Now().UnixNano()), issue.ID, "tester", "Hidden"); err != nil {
+			t.Fatalf("insert comment: %v", err)
+		}
+
+		m := bdProxiedShowDetailsFirst(t, bd, p.dir, issue.ID)
+		if _, ok := m["comments"]; ok {
+			t.Errorf("comments slice should be absent by default: %v", m)
+		}
+		omitted, present := m["comments_omitted"]
+		if !present {
+			t.Fatalf("expected comments_omitted present when comment_count>0 without --include-comments: %v", m)
+		}
+		if omitted != true {
+			t.Errorf("comments_omitted: got %v, want true", omitted)
+		}
+	})
+
+	t.Run("show_json_comments_omitted_flag_absent_when_included", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjco2")
+		issue := bdProxiedCreate(t, bd, p.dir, "Included flag", "--type", "task")
+
+		db := openProxiedDB(t, p)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES (?, ?, ?, ?, NOW())",
+			fmt.Sprintf("cmt-%d", time.Now().UnixNano()), issue.ID, "tester", "Visible"); err != nil {
+			t.Fatalf("insert comment: %v", err)
+		}
+
+		m := bdProxiedShowDetailsFirst(t, bd, p.dir, issue.ID, "--include-comments")
+		comments, _ := m["comments"].([]interface{})
+		if len(comments) == 0 {
+			t.Errorf("expected comments with --include-comments: %v", m)
+		}
+		if v, present := m["comments_omitted"]; present {
+			t.Errorf("comments_omitted should be absent under --include-comments, got %v", v)
+		}
+	})
+
+	t.Run("show_json_comments_omitted_flag_absent_when_zero", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjco3")
+		issue := bdProxiedCreate(t, bd, p.dir, "No comments", "--type", "task")
+
+		m := bdProxiedShowDetailsFirst(t, bd, p.dir, issue.ID)
+		if got, _ := m["comment_count"].(float64); got != 0 {
+			t.Errorf("comment_count: got %v, want 0", m["comment_count"])
+		}
+		if v, present := m["comments_omitted"]; present {
+			t.Errorf("comments_omitted should be absent when comment_count=0, got %v", v)
+		}
+	})
+
 	t.Run("show_json_includes_dependents_under_flag", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sjidep")

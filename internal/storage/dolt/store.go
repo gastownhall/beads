@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -244,6 +245,7 @@ func shouldStopAutoStartedServerOnClose(cfg *Config) bool {
 var _ storage.DoltStorage = (*DoltStore)(nil)
 var _ storage.RawDBAccessor = (*DoltStore)(nil)
 var _ storage.StoreLocator = (*DoltStore)(nil)
+var _ storage.ActiveDatabaseSizer = (*DoltStore)(nil)
 var _ storage.LifecycleManager = (*DoltStore)(nil)
 var _ storage.PendingCommitter = (*DoltStore)(nil)
 var _ storage.GarbageCollector = (*DoltStore)(nil)
@@ -263,6 +265,11 @@ type DoltStore struct {
 	mu            sync.RWMutex // Protects concurrent access
 	readOnly      bool         // True if opened in read-only mode
 	credentialKey []byte       // Random encryption key for federation credentials
+
+	// localActiveDatabaseDir is the exact active database directory when this
+	// store instance has authoritative local filesystem access. It is resolved
+	// once at construction; empty means sizing is unsupported for this instance.
+	localActiveDatabaseDir string
 
 	customStatusDetailedCache []types.CustomStatus
 	customStatusCache         []string
@@ -831,6 +838,62 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 	})
 }
 
+// withReadTxLongTimeout is like withReadTx but runs fn against a dedicated
+// one-shot connection with a 5-minute read timeout (see openLongTimeoutConn)
+// instead of the shared pool's 10s ReadTimeout (see buildServerDSN). Use for
+// read queries that are known to legitimately run long, e.g. dolt_history_*
+// system-table scans on issues with many revisions — the pooled 10s client
+// timeout otherwise surfaces as an intermittent MySQL i/o timeout / invalid
+// connection error (ga-ahnxx) well before the query would have finished on
+// its own. Note this only removes the client-side ceiling: the Dolt server's
+// own read_timeout_millis (often configured short to bound orphaned-connection
+// pileup — see the comment next to it) still applies server-side and can
+// independently abort a query whose
+// per-row production stalls past that window.
+func (s *DoltStore) withReadTxLongTimeout(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	if s.closed.Load() {
+		return ErrStoreClosed
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.withRetry(ctx, func() error {
+		db, err := s.openLongTimeoutConn()
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		// The fresh one-shot connection defaults to the default branch, not
+		// whatever branch the store's pooled session (s.db) is actually
+		// checked out to. The pool is branch-isolated (MaxOpenConns(1)
+		// semantics — see the comment on MaxOpenConns above), so ask it for
+		// its real active branch and reproduce that checkout here before
+		// starting the read tx; otherwise a query like dolt_history_* would
+		// silently read the wrong branch after any in-process checkout,
+		// including a test-harness CALL DOLT_CHECKOUT run directly against
+		// s.db, which bypasses Store.Checkout and leaves s.branch stale.
+		var branch string
+		if scanErr := s.db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); scanErr == nil {
+			if branch != "" {
+				if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
+					return fmt.Errorf("checkout active branch %q on long-timeout connection: %w", branch, err)
+				}
+			}
+		} else if s.branch != "" {
+			// Fall back to the store's recorded branch rather than failing
+			// the whole call outright.
+			if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", s.branch); err != nil {
+				return fmt.Errorf("checkout fallback branch %q on long-timeout connection: %w", s.branch, err)
+			}
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin read tx: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		return fn(tx)
+	})
+}
+
 func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = 25 * time.Millisecond
@@ -1201,6 +1264,36 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	return newServerMode(ctx, cfg)
 }
 
+// resolveLocalActiveDatabaseDir returns an authoritative local path only for
+// server configurations whose storage ownership is known. It deliberately
+// does not infer locality from Path, CLIDir, or filesystem existence: external
+// servers may leave unrelated client-local directories at those locations.
+func resolveLocalActiveDatabaseDir(cfg *Config) string {
+	if cfg == nil || cfg.BeadsDir == "" || cfg.Database == "" ||
+		cfg.Gateway || cfg.ProxiedServer || cfg.ServerSocket != "" ||
+		cfg.ServerTLS || !isLocalHost(cfg.ServerHost) {
+		return ""
+	}
+
+	// An endpoint supplied directly by the environment may be any server,
+	// including a container or tunnel on localhost. It is not proof that this
+	// process can inspect the server's data directory.
+	if os.Getenv("BEADS_DOLT_SERVER_PORT") != "" || os.Getenv("BEADS_DOLT_PORT") != "" {
+		return ""
+	}
+
+	if doltserver.IsSharedServerMode() {
+		return filepath.Join(doltserver.ResolveDoltDir(cfg.BeadsDir), cfg.Database)
+	}
+
+	// Owned mode plus effective auto-start authority is the affirmative proof
+	// that the configured data root belongs to this local beads instance.
+	if !cfg.AutoStart || doltserver.ResolveServerMode(cfg.BeadsDir) != doltserver.ServerModeOwned {
+		return ""
+	}
+	return filepath.Join(cfg.Path, cfg.Database)
+}
+
 // buildTestModeProductionPortPanic returns the multi-line panic message for
 // the BEADS_TEST_MODE=1 + production-port hard-guard. Format follows
 // AD-01 Wireframe 1: scannable header + database/path/server fields,
@@ -1250,6 +1343,47 @@ func buildTestModeProductionPortPanic(cfg *Config) string {
 	)
 }
 
+// dialProbe reports whether an address accepts a connection within timeout.
+// Declared as a var (not a plain call) so unit tests can stub connectivity
+// without a live Dolt server. Returns nil when the endpoint is reachable.
+var dialProbe = func(network, addr string, timeout time.Duration) error {
+	conn, err := net.DialTimeout(network, addr, timeout)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
+
+// resolveSocketTransport applies a socket-first / TCP-fallback policy and
+// returns the effective unix socket path to use ("" means use TCP).
+//
+// A configured unix socket is a preference, not a hard requirement. Dolt's
+// /tmp/mysql.sock is created only on some server start paths and is frequently
+// absent while the server is fully reachable on its TCP port — when that
+// happens, every socket-mode bd operation (and `gt mq submit`, cross-rig bead
+// reads that route through bd) fails hard with no fallback (gt-28itz). This
+// mirrors the conservative socket-first/TCP-fallback semantics already used on
+// the gt-CLI side (internal/cmd/dolt_dsn.go localDoltSocketPath/buildDoltDSN).
+//
+// Returns the socket unchanged when: no socket is configured, the socket is
+// connectable, or neither the socket nor TCP is reachable (the latter is left
+// to the normal error path so its socket-specific hint still surfaces a true
+// outage rather than masking it behind a TCP error).
+func resolveSocketTransport(socket, host string, port int, timeout time.Duration) string {
+	if socket == "" {
+		return ""
+	}
+	if dialProbe("unix", socket, timeout) == nil {
+		return socket // socket is live — keep using it
+	}
+	if port > 0 && dialProbe("tcp", net.JoinHostPort(host, strconv.Itoa(port)), timeout) == nil {
+		debug.Logf("dolt: socket %s unreachable, falling back to TCP %s\n", socket, net.JoinHostPort(host, strconv.Itoa(port)))
+		return "" // socket down but TCP up — transparently fall back to TCP
+	}
+	return socket // both down (or no TCP port) — keep socket for the error path
+}
+
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
 func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
@@ -1273,6 +1407,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		resolvedBeadsDir = filepath.Dir(cfg.Path) // fallback: cfg.Path is .beads/dolt → parent is .beads/
 	}
 	serverDir := doltserver.ResolveServerDir(resolvedBeadsDir)
+
+	// Socket-first / TCP-fallback (gt-28itz): a configured unix socket that
+	// isn't currently connectable must not block operations when the server is
+	// reachable over TCP. Normalizing here means the fail-fast dial below and
+	// the DSN built in openServerConnection agree on the transport.
+	cfg.ServerSocket = resolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, 500*time.Millisecond)
 
 	// Fail-fast connectivity check before MySQL protocol initialization.
 	// This gives an immediate, clear error if the Dolt server isn't running,
@@ -1393,21 +1533,22 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 
 	store := &DoltStore{
-		db:                   db,
-		dbPath:               cfg.Path,
-		beadsDir:             beadsDir,
-		database:             cfg.Database,
-		connStr:              connStr,
-		breaker:              breaker,
-		committerName:        cfg.CommitterName,
-		committerEmail:       cfg.CommitterEmail,
-		remote:               cfg.Remote,
-		branch:               "main",
-		remoteUser:           cfg.RemoteUser,
-		remotePassword:       cfg.RemotePassword,
-		serverMode:           true,
-		readOnly:             cfg.ReadOnly,
-		autoStartedServerDir: autoStartedDir,
+		db:                     db,
+		dbPath:                 cfg.Path,
+		beadsDir:               beadsDir,
+		database:               cfg.Database,
+		localActiveDatabaseDir: resolveLocalActiveDatabaseDir(cfg),
+		connStr:                connStr,
+		breaker:                breaker,
+		committerName:          cfg.CommitterName,
+		committerEmail:         cfg.CommitterEmail,
+		remote:                 cfg.Remote,
+		branch:                 "main",
+		remoteUser:             cfg.RemoteUser,
+		remotePassword:         cfg.RemotePassword,
+		serverMode:             true,
+		readOnly:               cfg.ReadOnly,
+		autoStartedServerDir:   autoStartedDir,
 	}
 
 	// Forward-drift guard runs on read-only AND writable opens. A binary older
@@ -2024,6 +2165,23 @@ func (s *DoltStore) CLIDir() string {
 	return filepath.Join(s.dbPath, s.database)
 }
 
+// ActiveDatabaseSize returns the approximate size of the active database.
+// External server instances have no authoritative local path and report the
+// capability as unsupported even if a stale client-local directory exists.
+func (s *DoltStore) ActiveDatabaseSize(ctx context.Context) (int64, error) {
+	if s.localActiveDatabaseDir == "" {
+		return 0, &storage.ErrUnsupported{
+			Op:      "ActiveDatabaseSize",
+			Backend: "dolt-server",
+		}
+	}
+	size, err := storage.MeasureDirectorySize(ctx, s.localActiveDatabaseDir)
+	if err != nil {
+		return 0, fmt.Errorf("measure active database directory %q: %w", s.localActiveDatabaseDir, err)
+	}
+	return size, nil
+}
+
 // DoltGC runs Dolt garbage collection to reclaim disk space.
 // Pins a single connection to avoid session state loss on pooled *sql.DB.
 func (s *DoltStore) DoltGC(ctx context.Context) error {
@@ -2232,6 +2390,16 @@ func (s *DoltStore) commitWorkingSet(ctx context.Context, message string, mode c
 	}
 
 	if len(tables) == 0 {
+		// A merge resolution with a clean working set is NOT a no-op: it is
+		// the `--ours` case, where our values already stood and resolving the
+		// conflict dirtied nothing. Returning here left is_merging true while
+		// the caller reported "Merge committed", and the next pull re-wedged
+		// on the unconcluded merge (wy-36ilm, caught by the F9 integration
+		// test). Only the merge-conclusion mode takes this path: for the
+		// other modes an empty working set really is nothing to commit.
+		if mode == configIncludeAll {
+			return s.concludeOpenMerge(ctx, conn, message)
+		}
 		return nil // Nothing to commit (all changes were config-only or dolt_ignore'd)
 	}
 
@@ -2258,6 +2426,31 @@ func (s *DoltStore) commitWorkingSet(ctx context.Context, message string, mode c
 		return fmt.Errorf("failed to commit: %w", err)
 	}
 
+	return nil
+}
+
+// concludeOpenMerge commits an open merge whose resolution left the working
+// set clean, so the merge is actually concluded rather than left open with
+// nothing to show for it. It is a no-op when no merge is in progress, and it
+// runs on the CALLER'S pinned connection because dolt's merge state is
+// session state. isDoltNothingToCommit still absorbs the race where the merge
+// closed between the status read and the commit.
+func (s *DoltStore) concludeOpenMerge(ctx context.Context, conn *sql.Conn, message string) error {
+	var merging bool
+	if err := conn.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		// No merge status to read is no evidence of a merge — keep the old
+		// "nothing to commit" behavior rather than failing a resolution.
+		return nil //nolint:nilerr // diagnosis only; never a gate
+	}
+	if !merging {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
+		if isDoltNothingToCommit(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to conclude merge: %w", err)
+	}
 	return nil
 }
 

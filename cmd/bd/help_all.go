@@ -241,6 +241,11 @@ func writeCommandBody(w io.Writer, cmd *cobra.Command) {
 	if localFlags.HasFlags() {
 		fmt.Fprintf(w, "**Flags:**\n\n```\n%s```\n\n", localFlags.FlagUsages())
 	}
+
+	// Embedded doc supplement (raw Markdown, no MDX escaping).
+	if sup, ok := commandDocSupplements[cmd.CommandPath()]; ok {
+		fmt.Fprintf(w, "%s\n\n", strings.TrimSpace(sup))
+	}
 }
 
 // writeSingleCommandDoc generates one command's documentation page as generic

@@ -31,6 +31,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var createdAtStr, updatedAtStr sql.NullString // scanned as strings, parsed with format fallbacks
 	var startedAt, closedAt, compactedAt, dueAt, deferUntil sql.NullTime
 	var leaseExpiresAt, heartbeatAt sql.NullTime // lease columns (migration 0054); NULL when no active lease
+	var leaseGrantedNode sql.NullString          // granting replica (ignored migration 0016); NULL when no active lease
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
 	var createdBy sql.NullString
 	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
@@ -54,7 +55,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&eventKind, &actor, &target, &payload,
 		&dueAt, &deferUntil,
 		&workType, &sourceSystem, &metadata, &rowLock,
-		&leaseExpiresAt, &heartbeatAt,
+		&leaseExpiresAt, &heartbeatAt, &leaseGrantedNode,
 	}
 	dests = append(dests, extra...)
 	if err := s.Scan(dests...); err != nil {
@@ -184,6 +185,9 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	if heartbeatAt.Valid {
 		issue.HeartbeatAt = &heartbeatAt.Time
 	}
+	// Granting replica (ignored migration 0016); "" when the lease predates
+	// the column or the deployment cannot name its replicas.
+	issue.LeaseGrantedNode = leaseGrantedNode.String
 
 	return &issue, nil
 }

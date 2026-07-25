@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"time"
 
@@ -13,9 +14,15 @@ import (
 )
 
 // History returns the complete version history for an issue.
+//
+// Uses withReadTxLongTimeout rather than withReadTx: the underlying
+// dolt_history_issues scan can take several seconds to tens of seconds on
+// issues with many revisions, which exceeds the shared pool's 10s
+// ReadTimeout and otherwise surfaces as an intermittent MySQL i/o timeout
+// (ga-ahnxx).
 func (s *DoltStore) History(ctx context.Context, issueID string) ([]*storage.HistoryEntry, error) {
 	var result []*storage.HistoryEntry
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+	err := s.withReadTxLongTimeout(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.HistoryInTx(ctx, tx, issueID)
 		if err != nil {
@@ -96,6 +103,50 @@ func (s *DoltStore) GetStateHash(ctx context.Context) (string, error) {
 // Implements storage.VersionedStorage.
 func (s *DoltStore) GetConflicts(ctx context.Context) ([]storage.Conflict, error) {
 	return versioncontrolops.GetConflicts(ctx, s.db)
+}
+
+// The CLI reaches these two methods through storage.UnwrapStore, so the
+// assertion must keep holding on the concrete store.
+var _ storage.ConflictInspector = (*DoltStore)(nil)
+
+// GetConflictRows returns the live conflicted rows of table, per field.
+// Implements storage.ConflictInspector (backs `bd conflicts list|show`).
+func (s *DoltStore) GetConflictRows(ctx context.Context, table string) ([]storage.ConflictRow, error) {
+	return versioncontrolops.GetConflictRows(ctx, s.db, table)
+}
+
+// The CLI reaches this through storage.UnwrapStore too.
+var _ storage.MergeBlockerInspector = (*DoltStore)(nil)
+
+// GetMergeBlockers reports schema conflicts, constraint violations, and
+// whether a merge is open. Implements storage.MergeBlockerInspector.
+func (s *DoltStore) GetMergeBlockers(ctx context.Context) (storage.MergeBlockers, error) {
+	return versioncontrolops.GetMergeBlockers(ctx, s.db)
+}
+
+// ResolveConflictRows resolves individual conflicted rows of table by key.
+// Implements storage.ConflictInspector (backs `bd conflicts resolve <id>`).
+//
+// It runs on a pinned connection, not the pool: the resolution sets dolt's
+// conflict-tolerance session flags, and on *sql.DB a follow-up statement could
+// land on a different connection that never saw them.
+// The flags it sets are session-scoped, so they are reset before the
+// connection goes back to the pool; if the reset fails the connection is
+// discarded rather than returned dirty (the discipline
+// autoResolveConflictsAfterCLIPull already follows, store.go:3323).
+func (s *DoltStore) ResolveConflictRows(ctx context.Context, table string, keys []string, strategy string) (int, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("acquire connection for conflict resolution: %w", err)
+	}
+	defer func() {
+		if _, err := conn.ExecContext(ctx,
+			"SET @@dolt_allow_commit_conflicts = 0, @@dolt_force_transaction_commit = 0"); err != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
+	return versioncontrolops.ResolveConflictRows(ctx, conn, table, keys, strategy)
 }
 
 // CommitExists checks whether a commit hash exists in the repository.

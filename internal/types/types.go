@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -55,6 +56,15 @@ type Issue struct {
 	// below (json:"-", never serialized).
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"` // When the current claim's lease expires
 	HeartbeatAt    *time.Time `json:"heartbeat_at,omitempty"`     // Last heartbeat from the lease owner
+	// LeaseGrantedNode names the replica that granted the lease
+	// (config.NodeID() at claim time). A lease is only enforceable there: on
+	// any other replica the liveness view is stale by up to one sync interval,
+	// so reclaim refuses a positively-foreign lease unless explicitly
+	// overridden. Empty means "provenance unknown" (a pre-0016 lease row, or a
+	// deployment that cannot name its replicas), which is treated as local.
+	// It rides the JSONL interchange so an imported lease keeps its true
+	// granting replica.
+	LeaseGrantedNode string `json:"lease_granted_node,omitempty"`
 
 	// ===== Concurrency (Go-only; never serialized) =====
 	// RowVersion is an opaque optimistic-concurrency token for the library's own
@@ -725,13 +735,21 @@ const (
 	MolTypeWork   MolType = "work"   // Work molecule: regular assigned work (default)
 )
 
+// validMolTypes is the canonical value list; IsValid and ValidMolTypeNames
+// both derive from it so the two cannot drift.
+var validMolTypes = []MolType{MolTypeSwarm, MolTypePatrol, MolTypeWork}
+
 // IsValid checks if the mol type value is valid
 func (m MolType) IsValid() bool {
-	switch m {
-	case MolTypeSwarm, MolTypePatrol, MolTypeWork, "":
+	if m == "" {
 		return true // empty is valid (defaults to work)
 	}
-	return false
+	return slices.Contains(validMolTypes, m)
+}
+
+// ValidMolTypeNames enumerates the accepted mol-type values for error messages.
+func ValidMolTypeNames() string {
+	return joinNamesWithOr(validMolTypes)
 }
 
 // WispType categorizes ephemeral wisps for TTL-based compaction (gt-9br)
@@ -753,14 +771,36 @@ const (
 	WispTypeEscalation WispType = "escalation" // Human escalations
 )
 
+// validWispTypes is the canonical value list; IsValid and ValidWispTypeNames
+// both derive from it so the two cannot drift.
+var validWispTypes = []WispType{
+	WispTypeHeartbeat, WispTypePing, WispTypePatrol, WispTypeGCReport,
+	WispTypeRecovery, WispTypeError, WispTypeEscalation,
+}
+
 // IsValid checks if the wisp type value is valid
 func (w WispType) IsValid() bool {
-	switch w {
-	case WispTypeHeartbeat, WispTypePing, WispTypePatrol, WispTypeGCReport,
-		WispTypeRecovery, WispTypeError, WispTypeEscalation, "":
+	if w == "" {
 		return true // empty is valid (uses default TTL)
 	}
-	return false
+	return slices.Contains(validWispTypes, w)
+}
+
+// ValidWispTypeNames enumerates the accepted wisp-type values for error messages.
+func ValidWispTypeNames() string {
+	return joinNamesWithOr(validWispTypes)
+}
+
+// joinNamesWithOr formats a value list as "a, b, or c" for error messages.
+func joinNamesWithOr[T ~string](names []T) string {
+	strs := make([]string, len(names))
+	for i, n := range names {
+		strs[i] = string(n)
+	}
+	if len(strs) == 1 {
+		return strs[0]
+	}
+	return strings.Join(strs[:len(strs)-1], ", ") + ", or " + strs[len(strs)-1]
 }
 
 // WorkType categorizes how work assignment operates for a bead (Decision 006)
@@ -840,6 +880,14 @@ type IssueDetails struct {
 	DependentCount  *int64 `json:"dependent_count,omitempty"`
 	DependencyCount *int64 `json:"dependency_count,omitempty"`
 	CommentCount    *int64 `json:"comment_count,omitempty"`
+
+	// CommentsOmitted is set true only when CommentCount is nonzero AND
+	// Comments was left nil (count-only mode, no --include-comments). Without
+	// it, a positive CommentCount with no Comments key reads as a client bug,
+	// and a caller checking only `.comments` sees `null`/absent and concludes
+	// "no comments" — both wrong (ga-clgh). Never set alongside a populated
+	// Comments slice or a zero count: a true empty stays plain omission.
+	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
 
 	// Epic progress fields (populated only for issue_type=epic with children)
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
@@ -943,6 +991,102 @@ const (
 	WaitsForAllChildren = "all-children" // Wait for all dynamic children to complete
 	WaitsForAnyChildren = "any-children" // Proceed when first child completes (future)
 )
+
+// IsValidWaitsForGate reports whether gate names a known waits-for fanout gate.
+func IsValidWaitsForGate(gate string) bool {
+	return gate == WaitsForAllChildren || gate == WaitsForAnyChildren
+}
+
+// NewGraphEdgeDependency builds the dependency record for a graph plan edge,
+// shared by the embedded and domain apply paths so they cannot drift. Every
+// waits-for edge gets gate metadata (empty gate defaults to all-children):
+// stored rows stay self-describing rather than depending on every reader
+// defaulting a missing gate (the runtime SQL predicate COALESCEs to
+// all-children, but readers before migration 0059 did not, so '{}' or empty
+// metadata must never be stored for graph-created waits-for dependencies).
+// A plan-local spawnerKey resolves through keyToID; the spawner is recorded
+// for compatibility only — gate evaluation reads the spawner from
+// dependencies.depends_on_id (see ParseWaitsForGateMetadata).
+func NewGraphEdgeDependency(fromID, toID string, depType DependencyType, gate, spawnerKey, spawnerID, threadID string, keyToID map[string]string) (*Dependency, error) {
+	dep := &Dependency{
+		IssueID:     fromID,
+		DependsOnID: toID,
+		Type:        depType,
+		ThreadID:    threadID,
+	}
+	if depType == DepWaitsFor {
+		if spawnerKey != "" {
+			resolved, ok := keyToID[spawnerKey]
+			if !ok {
+				return nil, fmt.Errorf("serializing waits-for metadata: unresolved spawner key %q", spawnerKey)
+			}
+			spawnerID = resolved
+		}
+		if gate == "" {
+			gate = WaitsForAllChildren
+		}
+		raw, err := json.Marshal(WaitsForMeta{Gate: gate, SpawnerID: spawnerID})
+		if err != nil {
+			return nil, fmt.Errorf("serializing waits-for metadata: %w", err)
+		}
+		dep.Metadata = string(raw)
+	}
+	return dep, nil
+}
+
+// NewWaitsForDependency builds the waits-for dependency record for a single
+// issue outside a graph plan: the spawner is the depends_on target and the
+// metadata carries the gate (defaulted to all-children). Shares
+// NewGraphEdgeDependency so single-issue and graph-created waits-for rows
+// cannot drift.
+func NewWaitsForDependency(issueID, spawnerID, gate string) (*Dependency, error) {
+	return NewGraphEdgeDependency(issueID, spawnerID, DepWaitsFor, gate, "", "", "", nil)
+}
+
+// NewGraphNodeDependency builds the dependency record for a graph-plan node's
+// inline dep, shared by the embedded and domain apply paths so their
+// resolution semantics cannot drift: an empty type defaults to blocks, and
+// the target resolves as a plan-local key first, then as a literal issue ID.
+// Waits-for deps carry gate metadata like waits-for edges (all-children
+// default, no explicit spawner).
+func NewGraphNodeDependency(issueID string, depType DependencyType, target string, keyToID map[string]string) (*Dependency, error) {
+	if depType == "" {
+		depType = DepBlocks
+	}
+	targetID := keyToID[target]
+	if targetID == "" {
+		targetID = target
+	}
+	if targetID == "" {
+		return nil, fmt.Errorf("dep target %q not found", target)
+	}
+	return NewGraphEdgeDependency(issueID, targetID, depType, "", "", "", "", nil)
+}
+
+// MergeMetadataRefs merges resolved metadata_refs into an issue's existing
+// metadata JSON: each refs entry maps a metadata key to a plan-local node
+// key, which is replaced with its minted ID from keyToID. Shared by the
+// embedded and domain graph-apply paths.
+func MergeMetadataRefs(existing json.RawMessage, refs map[string]string, keyToID map[string]string) (json.RawMessage, error) {
+	merged := make(map[string]json.RawMessage, len(refs))
+	if len(existing) > 0 {
+		if err := json.Unmarshal(existing, &merged); err != nil {
+			return nil, fmt.Errorf("re-parsing metadata: %w", err)
+		}
+	}
+	for metaKey, refKey := range refs {
+		resolvedID, ok := keyToID[refKey]
+		if !ok {
+			return nil, fmt.Errorf("metadata_ref %q references unknown key %q", metaKey, refKey)
+		}
+		idJSON, err := json.Marshal(resolvedID)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling metadata ref %q: %w", metaKey, err)
+		}
+		merged[metaKey] = idJSON
+	}
+	return json.Marshal(merged)
+}
 
 // ParseWaitsForGateMetadata extracts the waits-for gate type from dependency metadata.
 // Note: spawner identity comes from dependencies.depends_on_id in storage/query paths;
@@ -1463,10 +1607,21 @@ type ReclaimFilter struct {
 	Labels        []string // AND semantics: issue must have ALL these labels
 	LabelsAny     []string // OR semantics: issue must have AT LEAST ONE of these labels
 	ExcludeLabels []string // Exclusion: issue must NOT have ANY of these labels
+
+	// AnyReplica is the one field here that WIDENS rather than narrows: it
+	// disarms the granting-replica guard, letting this reaper revert a lease
+	// another replica granted (see issueops.ReclaimExpiredLeasesInTx). It is
+	// an operator escape hatch for a permanently-departed replica or a
+	// renamed node, never a normal setting — the machine that granted a lease
+	// is the only one with a first-hand view of whether its holder is alive.
+	// It does NOT widen past staleness or past the scope fields above.
+	AnyReplica bool
 }
 
 // IsEmpty reports whether the filter constrains nothing, i.e. reclaim runs in
-// its global, unscoped form.
+// its global, unscoped form. AnyReplica is deliberately excluded: it is an
+// override, not a scope, so a reaper reporting "scoped" still means "narrowed
+// to a partition".
 func (f ReclaimFilter) IsEmpty() bool {
 	return len(f.IDs) == 0 && len(f.Assignees) == 0 &&
 		len(f.Labels) == 0 && len(f.LabelsAny) == 0 && len(f.ExcludeLabels) == 0
