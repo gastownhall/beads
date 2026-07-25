@@ -1556,7 +1556,7 @@ type IssueFilter struct {
 	// Dolt). The proxied-server (domain/db) path does not check this field yet
 	// and always returns fully-hydrated issues with IsLitePartial=false —
 	// correct results, no lite optimization. Wiring Lite through domain/db is
-	// deferred to the CLI-wiring follow-up. See docs/EXTENDING.md.
+	// deferred to the CLI-wiring follow-up. See engdocs/EXTENDING.md.
 	Lite bool
 }
 

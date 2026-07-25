@@ -87,12 +87,13 @@ var issueProjection = searchProjection[*types.Issue]{
 // IsLitePartial=true. Selected by SearchIssuesInTx when filter.Lite is set;
 // everything else (label/dep hydration, wisp merge, id-shrink pattern B,
 // lease join) is shared with issueProjection via searchProjection[T]. See
-// docs/EXTENDING.md for the caller contract.
+// engdocs/EXTENDING.md for the caller contract.
 var issueLiteProjection = searchProjection[*types.Issue]{
 	columns:    func(_ FilterTables) string { return IssueSelectColumnsLite },
 	scan:       func(rows *sql.Rows) (*types.Issue, error) { return ScanIssueLiteFrom(rows) },
 	id:         func(issue *types.Issue) string { return issue.ID },
 	hydrate:    hydrateIssueLabelsAndDeps,
+	less:       sqlbuild.Less,
 	idShrink:   true,
 	joinLeases: true,
 }
