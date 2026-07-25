@@ -56,39 +56,92 @@ title = "Publish with {{policy}}"
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := newCookValidationTestCommand(tt.searchPaths, "policy=merge-comtes")
-			stderr, err := runCookCapturingStderr(cmd, tt.formulaArg)
+			stdout, stderr, err := runCookCapturingOutput(t, cmd, tt.formulaArg)
 			if err == nil {
 				t.Fatal("runCook accepted a value outside the declared enum")
+			}
+			if stdout != "" {
+				t.Fatalf("runCook stdout = %q, want no dry-run output after validation failure", stdout)
 			}
 			if !strings.Contains(stderr, `variable "policy": value "merge-comtes" not in allowed values [merge-completes tracking-only]`) {
 				t.Fatalf("runCook stderr = %q", stderr)
 			}
 
 			cmd = newCookValidationTestCommand(tt.searchPaths, "policy=merge-completes")
-			stderr, err = runCookCapturingStderr(cmd, tt.formulaArg)
+			stdout, stderr, err = runCookCapturingOutput(t, cmd, tt.formulaArg)
 			if err != nil {
 				t.Fatalf("runCook rejected a declared enum value: %v; stderr = %q", err, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("runCook stderr = %q, want no error output for a declared enum value", stderr)
+			}
+			if !strings.Contains(stdout, "Dry run: would cook formula enum-validation") {
+				t.Fatalf("runCook stdout = %q, want the captured dry-run preview", stdout)
 			}
 		})
 	}
 }
 
-func runCookCapturingStderr(cmd *cobra.Command, formulaArg string) (string, error) {
-	oldStderr := os.Stderr
-	reader, writer, err := os.Pipe()
+func runCookCapturingOutput(t *testing.T, cmd *cobra.Command, formulaArg string) (string, string, error) {
+	t.Helper()
+
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+
+	stdoutReader, stdoutWriter, err := os.Pipe()
 	if err != nil {
-		return "", err
+		t.Fatalf("create stdout pipe: %v", err)
 	}
-	os.Stderr = writer
-	runErr := runCook(cmd, []string{formulaArg})
-	_ = writer.Close()
-	os.Stderr = oldStderr
-	output, readErr := io.ReadAll(reader)
-	_ = reader.Close()
-	if readErr != nil {
-		return "", readErr
+	defer stdoutReader.Close()
+
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		_ = stdoutReader.Close()
+		_ = stdoutWriter.Close()
+		t.Fatalf("create stderr pipe: %v", err)
 	}
-	return string(output), runErr
+	defer stderrReader.Close()
+
+	type captureResult struct {
+		output string
+		err    error
+	}
+	drain := func(reader *os.File) <-chan captureResult {
+		done := make(chan captureResult, 1)
+		go func() {
+			output, readErr := io.ReadAll(reader)
+			done <- captureResult{output: string(output), err: readErr}
+		}()
+		return done
+	}
+	stdoutDone := drain(stdoutReader)
+	stderrDone := drain(stderrReader)
+
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	os.Stdout = stdoutWriter
+	os.Stderr = stderrWriter
+
+	runErr := func() error {
+		defer func() {
+			os.Stdout = oldStdout
+			os.Stderr = oldStderr
+			_ = stdoutWriter.Close()
+			_ = stderrWriter.Close()
+		}()
+		return runCook(cmd, []string{formulaArg})
+	}()
+
+	stdout := <-stdoutDone
+	stderr := <-stderrDone
+	if stdout.err != nil {
+		t.Fatalf("read stdout: %v", stdout.err)
+	}
+	if stderr.err != nil {
+		t.Fatalf("read stderr: %v", stderr.err)
+	}
+
+	return stdout.output, stderr.output, runErr
 }
 
 func newCookValidationTestCommand(searchPaths []string, variable string) *cobra.Command {
