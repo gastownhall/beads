@@ -376,6 +376,11 @@ func TestIsPathInSafeBoundary(t *testing.T) {
 		// Safe paths - should be accepted
 		{"user home directory", filepath.Join(homeDir, "projects/.beads"), true},
 		{"temp directory", os.TempDir(), true},
+		// A not-yet-created BEADS_DIR under the temp dir (the common real case --
+		// the directory is created after this check passes) must still validate;
+		// resolveLongestExistingAncestor is what makes this safe despite the
+		// trailing components not existing yet (be-kghzr SEC-003 hardening).
+		{"temp directory not-yet-created subpath", filepath.Join(os.TempDir(), "be-kghzr-nonexistent-subpath", ".beads"), true},
 
 		// Another user's home directory - should be rejected regardless of $HOME
 		{"other user home /home", "/home/some-other-nonexistent-user/.beads", false},
@@ -476,6 +481,38 @@ func TestIsPathInSafeBoundary_SharedSymlinkEscape(t *testing.T) {
 	// The escaping symlink itself also resolves outside the boundary.
 	if isPathInSafeBoundary(link) {
 		t.Errorf("isPathInSafeBoundary(%q) = true, want false (symlink under /Users/Shared escaping to /etc)", link)
+	}
+}
+
+// TestIsPathInSafeBoundary_TempDirSymlinkEscape mirrors
+// TestIsPathInSafeBoundary_SharedSymlinkEscape for the os.TempDir() carve-out
+// (be-kghzr SEC-003 hardening). Unlike /Users/Shared, os.TempDir() is
+// cross-platform and always present, so this test is not OS-gated.
+func TestIsPathInSafeBoundary_TempDirSymlinkEscape(t *testing.T) {
+	tempDir := os.TempDir()
+
+	// Plant a symlink under the world-writable OS temp dir pointing OUTSIDE the
+	// boundary, at /etc (a system dir). Best-effort clear of any stale link from a
+	// crashed run, then register cleanup.
+	link := filepath.Join(tempDir, fmt.Sprintf(".be-kghzr-escape-test-%d", os.Getpid()))
+	_ = os.Remove(link)
+	if err := os.Symlink("/etc", link); err != nil {
+		t.Skipf("cannot create symlink in %s (not writable?): %v", tempDir, err)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+
+	// A BEADS_DIR routed *through* the escaping symlink must be rejected: its bytes
+	// resolve into /etc, outside the temp dir. The trailing ".beads" component does
+	// NOT exist, so a bare filepath.EvalSymlinks(absPath) fails on the full path --
+	// this is the exact shape that tripped the old unresolved-path fallback.
+	target := filepath.Join(link, ".beads")
+	if isPathInSafeBoundary(target) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (path through symlink escaping temp dir to /etc)", target)
+	}
+
+	// The escaping symlink itself also resolves outside the boundary.
+	if isPathInSafeBoundary(link) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (symlink under temp dir escaping to /etc)", link)
 	}
 }
 
