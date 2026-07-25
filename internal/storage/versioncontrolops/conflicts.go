@@ -2,6 +2,7 @@ package versioncontrolops
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -333,6 +334,36 @@ func loadConflictRow(ctx context.Context, db DBConn, table, keyCol, key string) 
 	return rawConflictRow{cols: cols, vals: vals}, errors.Join(rows.Err(), rows.Close())
 }
 
+// conflictTargetStillPresent reports whether key still names a row of table.
+//
+// It is the matched-rows check the resolvers need after a write, because
+// RowsAffected is rows CHANGED, not rows MATCHED: the DSN sets parseTime and
+// multiStatements but NOT clientFoundRows (doltutil/dsn.go), so an UPDATE the
+// backend normalizes to the bytes already stored reports zero exactly as a
+// vanished row does. Only asking can tell the two apart.
+//
+// It confirms that the key still resolves to a row — NOT that our values are
+// the stored ones. On the autocommit path (an embedded Pull, where db is not a
+// transaction) a row deleted and re-inserted between the UPDATE and this check
+// would read as present; in server mode the caller holds a transaction and the
+// window does not exist. Comparing the written values instead would reintroduce
+// the very normalization sensitivity this check exists to absorb.
+func conflictTargetStillPresent(ctx context.Context, db DBConn, table, keyCol string, key any) (bool, error) {
+	if err := ValidateConflictTable(table); err != nil {
+		return false, err
+	}
+	if err := ValidateConflictTable(keyCol); err != nil {
+		return false, err
+	}
+	//nolint:gosec // table and key column validated as identifiers just above.
+	q := fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE `%s` = ?", table, keyCol)
+	var n int
+	if err := db.QueryRowContext(ctx, q, key).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // resolveOneConflictRow applies strategy to a single modify/modify row.
 //
 // "ours" is dolt's manual-resolution path: the working set already holds our
@@ -377,12 +408,21 @@ func resolveOneConflictRow(ctx context.Context, db DBConn, table, keyCol, key, s
 		if err != nil {
 			return fmt.Errorf("apply their values for %s %s: %w", table, key, err)
 		}
-		// Zero rows means the row we read the conflict for is no longer
+		// Zero rows would mean the row we read the conflict for is no longer
 		// there — another session on the same branch deleted it between the
 		// read and the write. Clearing the conflict now would discard their
-		// side under a --theirs invocation, undetectably. Stop instead.
-		if n, err := res.RowsAffected(); err == nil && n == 0 {
-			return fmt.Errorf("their values for %s %s matched no row (was it deleted concurrently?); conflict left unresolved", table, key)
+		// side under a --theirs invocation, undetectably. But zero is not
+		// proof of that on its own (see conflictTargetStillPresent), so ask
+		// before refusing: an operator who named this row deserves the abort
+		// only when the row really is gone.
+		if n, err := res.RowsAffected(); err != nil || n == 0 {
+			present, err := conflictTargetStillPresent(ctx, db, table, keyCol, ourKey)
+			if err != nil {
+				return fmt.Errorf("confirm %s %s still exists after writing their values: %w", table, key, err)
+			}
+			if !present {
+				return fmt.Errorf("their values for %s %s matched no row (was it deleted concurrently?); conflict left unresolved", table, key)
+			}
 		}
 	}
 
@@ -395,4 +435,120 @@ func resolveOneConflictRow(ctx context.Context, db DBConn, table, keyCol, key, s
 		return fmt.Errorf("conflict for %s %s was not cleared (no conflict row deleted)", table, key)
 	}
 	return nil
+}
+
+// GetMergeBlockers reports the merge state that `bd conflicts` cannot show as
+// rows: whether a merge is open at all, plus the schema conflicts and
+// constraint violations that make dolt refuse the merge commit even when
+// every dolt_conflicts row is resolved (wy-36ilm F12). Without it, that state
+// surfaced only as a raw dolt error from CommitMergeResolution, after the
+// operator had been told "0 conflicts remain".
+//
+// Each source is read independently and a MISSING source table is not an
+// error: dolt_schema_conflicts and dolt_constraint_violations are dolt system
+// tables whose presence has varied across versions, and a diagnosis helper
+// must never be the thing that fails the command.
+func GetMergeBlockers(ctx context.Context, db DBConn) (storage.MergeBlockers, error) {
+	var out storage.MergeBlockers
+	var errs []error
+
+	if merging, err := mergeInProgress(ctx, db); err != nil {
+		errs = append(errs, err)
+	} else {
+		out.Merging = merging
+	}
+	if tables, err := schemaConflictTables(ctx, db); err != nil {
+		errs = append(errs, err)
+	} else {
+		out.SchemaConflictTables = tables
+	}
+	if violations, err := constraintViolationCounts(ctx, db); err != nil {
+		errs = append(errs, err)
+	} else {
+		out.ConstraintViolations = violations
+	}
+	// Partial results are still useful — the caller gets what was readable
+	// plus the reason the rest was not.
+	return out, errors.Join(errs...)
+}
+
+// mergeInProgress reads dolt_merge_status.is_merging: true between a halted
+// DOLT_MERGE and its concluding commit. It is what lets `--conclude` tell
+// "resolved but uncommitted" apart from "nothing to conclude".
+func mergeInProgress(ctx context.Context, db DBConn) (bool, error) {
+	var merging bool
+	err := db.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging)
+	if err != nil {
+		if isMissingSystemTable(err) || errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("query merge status: %w", err)
+	}
+	return merging, nil
+}
+
+// schemaConflictTables lists the tables whose SCHEMAS conflict — dolt keeps
+// them out of dolt_conflicts entirely, so totalConflicts cannot see them.
+func schemaConflictTables(ctx context.Context, db DBConn) ([]string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT table_name FROM dolt_schema_conflicts")
+	if err != nil {
+		if isMissingSystemTable(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query schema conflicts: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var tables []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, fmt.Errorf("scan schema conflict: %w", err)
+		}
+		tables = append(tables, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate schema conflicts: %w", err)
+	}
+	return tables, nil
+}
+
+// constraintViolationCounts lists the tables carrying outstanding constraint
+// violations. mergesettle.go repairs the FK-cascade class on the auto path;
+// anything it declined lands here, blocking the commit.
+func constraintViolationCounts(ctx context.Context, db DBConn) ([]storage.ConstraintViolation, error) {
+	rows, err := db.QueryContext(ctx,
+		"SELECT `table`, num_violations FROM dolt_constraint_violations WHERE num_violations > 0")
+	if err != nil {
+		if isMissingSystemTable(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query constraint violations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []storage.ConstraintViolation
+	for rows.Next() {
+		var v storage.ConstraintViolation
+		if err := rows.Scan(&v.Table, &v.Count); err != nil {
+			return nil, fmt.Errorf("scan constraint violation: %w", err)
+		}
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate constraint violations: %w", err)
+	}
+	return out, nil
+}
+
+// isMissingSystemTable reports whether err is dolt/MySQL's "table does not
+// exist". Matched on the message because the embedded engine and the MySQL
+// driver report it as different error types.
+func isMissingSystemTable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "table not found") ||
+		strings.Contains(msg, "doesn't exist") ||
+		strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "unknown table")
 }

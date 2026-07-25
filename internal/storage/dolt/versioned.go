@@ -109,6 +109,15 @@ func (s *DoltStore) GetConflictRows(ctx context.Context, table string) ([]storag
 	return versioncontrolops.GetConflictRows(ctx, s.db, table)
 }
 
+// The CLI reaches this through storage.UnwrapStore too.
+var _ storage.MergeBlockerInspector = (*DoltStore)(nil)
+
+// GetMergeBlockers reports schema conflicts, constraint violations, and
+// whether a merge is open. Implements storage.MergeBlockerInspector.
+func (s *DoltStore) GetMergeBlockers(ctx context.Context) (storage.MergeBlockers, error) {
+	return versioncontrolops.GetMergeBlockers(ctx, s.db)
+}
+
 // ResolveConflictRows resolves individual conflicted rows of table by key.
 // Implements storage.ConflictInspector (backs `bd conflicts resolve <id>`).
 //

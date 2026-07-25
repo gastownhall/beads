@@ -1,8 +1,13 @@
 package versioncontrolops
 
 import (
+	"context"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 func TestSplitConflictColumn(t *testing.T) {
@@ -202,4 +207,55 @@ func TestSupportsRowResolve(t *testing.T) {
 	if SupportsRowResolve("dependencies") {
 		t.Error("only tables with a registered key column may claim per-row resolution")
 	}
+}
+
+// TestResolveOneConflictRowZeroAffectedRows pins the operator path's half of
+// the matched-rows fix: `bd conflicts resolve --theirs <id>` writes their
+// values, and an UPDATE that changes nothing because the stored bytes already
+// match must not be reported to the operator as a concurrent deletion of the
+// very row they named. A row that really is gone is still refused, with no
+// conflict cleared.
+func TestResolveOneConflictRowZeroAffectedRows(t *testing.T) {
+	ctx := context.Background()
+	row := rawConflictRow{
+		cols: []string{"base_id", "our_id", "their_id", "base_status", "our_status", "their_status"},
+		vals: []any{"bd-1", "bd-1", "bd-1", "open", "open", "closed"},
+	}
+	const updateSQL = "UPDATE `issues` SET `status` = ? WHERE `id` = ?"
+	const existsSQL = "SELECT COUNT(*) FROM `issues` WHERE `id` = ?"
+	const deleteSQL = "DELETE FROM `dolt_conflicts_issues` WHERE `our_id` = ?"
+
+	t.Run("a live row resolves", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta(updateSQL)).WithArgs("closed", "bd-1").
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta(existsSQL)).WithArgs("bd-1").
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+		mock.ExpectExec(regexp.QuoteMeta(deleteSQL)).WithArgs("bd-1").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		if err := resolveOneConflictRow(ctx, db, "issues", "id", "bd-1", ConflictStrategyTheirs, row); err != nil {
+			t.Fatalf("a write the backend normalized to a no-op must not abort the resolve: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("a vanished row is still refused", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta(updateSQL)).WithArgs("closed", "bd-1").
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta(existsSQL)).WithArgs("bd-1").
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+		// No delete: their side must not be discarded silently.
+
+		err := resolveOneConflictRow(ctx, db, "issues", "id", "bd-1", ConflictStrategyTheirs, row)
+		if err == nil || !strings.Contains(err.Error(), "deleted concurrently") {
+			t.Fatalf("err = %v, want the concurrent-deletion refusal", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
 }

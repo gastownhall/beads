@@ -309,17 +309,15 @@ func isPathInSafeBoundary(path string) bool {
 		return false
 	}
 
-	// Allow OS-designated temp directories (e.g., /var/folders on macOS)
-	// On macOS, TempDir() returns paths under /var/folders which symlinks to /private/var/folders
-	tempDir := os.TempDir()
-	resolvedTemp, _ := filepath.EvalSymlinks(tempDir)
-	resolvedPath, _ := filepath.EvalSymlinks(absPath)
-	if resolvedTemp != "" && strings.HasPrefix(resolvedPath, resolvedTemp) {
-		return true
-	}
-	// Also check unresolved paths (in case symlink resolution fails)
-	if strings.HasPrefix(absPath, tempDir) {
-		return true
+	// Allow OS-designated temp directories (e.g., /var/folders on macOS, which
+	// symlinks to /private/var/folders). World-writable, so resolve symlinks
+	// before admitting: a symlink planted under the temp dir whose target
+	// escapes the boundary must be rejected, not followed into a system
+	// directory — same treatment as the /Users/Shared carve-out below
+	// (be-kghzr SEC-003 hardening).
+	tempDir := strings.TrimSuffix(os.TempDir(), "/")
+	if absPath == tempDir || strings.HasPrefix(absPath, tempDir+"/") {
+		return resolvedPathWithinRoot(absPath, tempDir)
 	}
 
 	// Allow /var/home as a valid user home directory (Fedora Silverblue, Bluefin, etc.)

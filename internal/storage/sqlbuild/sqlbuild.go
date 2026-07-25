@@ -50,7 +50,7 @@ const IssueBaseColumns = `id, content_hash, title, description, design, acceptan
 // live in the ephemeral leases table (bd-lrgn1), not on the issues row, so
 // every query selecting these must also add LeaseJoin to its FROM clause —
 // a query that forgets the join fails loudly on the leases.* reference.
-const LeaseSelectColumns = `leases.lease_expires_at, leases.heartbeat_at`
+const LeaseSelectColumns = `leases.lease_expires_at, leases.heartbeat_at, leases.granted_node`
 
 // IssueSelectColumns is the canonical column list for full issue hydration.
 // Every query that reads a complete types.Issue should use this constant

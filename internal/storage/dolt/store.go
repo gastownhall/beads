@@ -2232,6 +2232,16 @@ func (s *DoltStore) commitWorkingSet(ctx context.Context, message string, mode c
 	}
 
 	if len(tables) == 0 {
+		// A merge resolution with a clean working set is NOT a no-op: it is
+		// the `--ours` case, where our values already stood and resolving the
+		// conflict dirtied nothing. Returning here left is_merging true while
+		// the caller reported "Merge committed", and the next pull re-wedged
+		// on the unconcluded merge (wy-36ilm, caught by the F9 integration
+		// test). Only the merge-conclusion mode takes this path: for the
+		// other modes an empty working set really is nothing to commit.
+		if mode == configIncludeAll {
+			return s.concludeOpenMerge(ctx, conn, message)
+		}
 		return nil // Nothing to commit (all changes were config-only or dolt_ignore'd)
 	}
 
@@ -2258,6 +2268,31 @@ func (s *DoltStore) commitWorkingSet(ctx context.Context, message string, mode c
 		return fmt.Errorf("failed to commit: %w", err)
 	}
 
+	return nil
+}
+
+// concludeOpenMerge commits an open merge whose resolution left the working
+// set clean, so the merge is actually concluded rather than left open with
+// nothing to show for it. It is a no-op when no merge is in progress, and it
+// runs on the CALLER'S pinned connection because dolt's merge state is
+// session state. isDoltNothingToCommit still absorbs the race where the merge
+// closed between the status read and the commit.
+func (s *DoltStore) concludeOpenMerge(ctx context.Context, conn *sql.Conn, message string) error {
+	var merging bool
+	if err := conn.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		// No merge status to read is no evidence of a merge — keep the old
+		// "nothing to commit" behavior rather than failing a resolution.
+		return nil //nolint:nilerr // diagnosis only; never a gate
+	}
+	if !merging {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
+		if isDoltNothingToCommit(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to conclude merge: %w", err)
+	}
 	return nil
 }
 
