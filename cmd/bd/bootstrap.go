@@ -309,6 +309,21 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	isSharedServer := bootstrapSharedServerMode(beadsDir)
 	isServer := cfg.IsDoltServerMode() || isSharedServer
 
+	// Prefer an existing local database over re-clone (GH#5037). Previously
+	// sync.remote returned Action=sync unconditionally, so a second
+	// `bd bootstrap` on an already-cloned workspace ran DOLT_CLONE into the
+	// existing dir and failed with Error 1007 (database exists) — contradicting
+	// help text ("If database already exists: validates and reports status")
+	// and the multi-clone upgrade guide. If the local beadsDir does not exist
+	// yet, still prefer sync recovery first for Action=="none" so a default
+	// shared-server "beads" DB from another project cannot mask a real clone.
+	if dbAction, ok := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer); ok {
+		if beadsDirExists || dbAction.Action != "none" {
+			return dbAction
+		}
+		plan = dbAction
+	}
+
 	// Check sync.remote (primary) or sync.git-remote (deprecated fallback)
 	syncRemote := resolveSyncRemote()
 	if syncRemote != "" {
@@ -333,20 +348,6 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 				return plan
 			}
 		}
-	}
-
-	if dbAction, ok := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer); ok {
-		// If the local beadsDir does not exist yet, prefer recovering via sync
-		// first. This avoids false "nothing to do" results when the default
-		// shared-server database name happens to exist for another project.
-		if beadsDirExists || dbAction.Action != "none" {
-			return dbAction
-		}
-		// For synthesized paths with no local workspace directory yet, defer the
-		// existing-db no-op until we've ruled out all other recovery paths.
-		// This preserves the sync-precedence fix without downgrading the
-		// legitimate "database already exists" case into a fresh init.
-		plan = dbAction
 	}
 
 	// Check for backup JSONL files (must be non-empty to be useful)

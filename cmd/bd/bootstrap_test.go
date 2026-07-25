@@ -367,6 +367,62 @@ func TestDetectBootstrapAction_ExplicitSyncRemotePreservesRemotesAPIURL(t *testi
 	}
 }
 
+// TestDetectBootstrapAction_ExistingEmbeddedDBWithSyncRemoteIsNoOp is a
+// regression for GH#5037: when sync.remote is set AND embeddeddolt already
+// exists, plan must be Action=none (validate/report), not Action=sync which
+// would DOLT_CLONE into the existing database and fail with Error 1007.
+func TestDetectBootstrapAction_ExistingEmbeddedDBWithSyncRemoteIsNoOp(t *testing.T) {
+	restore := snapshotBootstrapEnv(t)
+	defer restore()
+	config.ResetForTesting()
+	defer config.ResetForTesting()
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Non-empty embedded database footprint (what a prior successful bootstrap left).
+	embedded := filepath.Join(beadsDir, "embeddeddolt")
+	if err := os.MkdirAll(filepath.Join(embedded, "mydb"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(embedded, "mydb", ".keep"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const syncRemote = "http://myserver:7007/mydb"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("sync.remote: "+syncRemote+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize failed: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	plan := detectBootstrapAction(beadsDir, cfg)
+
+	if plan.Action != "none" {
+		t.Fatalf("action = %q reason=%q, want none (existing DB must not re-clone when sync.remote set)", plan.Action, plan.Reason)
+	}
+	if !plan.HasExisting {
+		t.Error("HasExisting = false, want true")
+	}
+	if !strings.Contains(plan.Reason, "already exists") {
+		t.Errorf("Reason = %q, want to mention already exists", plan.Reason)
+	}
+}
+
 func TestDetectBootstrapAction_InitWhenOriginHasNoDoltRef(t *testing.T) {
 	t.Setenv("BEADS_DOLT_DATA_DIR", "")
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
