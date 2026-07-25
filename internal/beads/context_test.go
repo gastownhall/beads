@@ -385,6 +385,15 @@ func TestIsPathInSafeBoundary(t *testing.T) {
 		// user's home — it must be accepted (be-vc1 / SEC-003 carve-out).
 		{"macOS shared subdir", "/Users/Shared/portharbour/.beads", true},
 		{"macOS shared root", "/Users/Shared", true},
+
+		// /var/tmp is the FHS-standard secondary temp directory (persists across
+		// reboots, unlike /tmp) and must be accepted despite matching the /var
+		// unsafePrefixes entry above. Go's own test/build tooling can root
+		// GOTMPDIR-influenced temp dirs here even when os.TempDir() itself still
+		// reports /tmp, so the os.TempDir()-based carve-out above doesn't cover it
+		// (be-odye4).
+		{"var/tmp root", "/var/tmp", true},
+		{"var/tmp GOTMPDIR-style subdir", "/var/tmp/gotmp/TestSomething1234/001/.beads", true},
 	}
 
 	for _, tt := range tests {
@@ -476,6 +485,37 @@ func TestIsPathInSafeBoundary_SharedSymlinkEscape(t *testing.T) {
 	// The escaping symlink itself also resolves outside the boundary.
 	if isPathInSafeBoundary(link) {
 		t.Errorf("isPathInSafeBoundary(%q) = true, want false (symlink under /Users/Shared escaping to /etc)", link)
+	}
+}
+
+// TestIsPathInSafeBoundary_VarTmpSymlinkEscape proves the /var/tmp carve-out
+// (be-odye4) applies the same symlink-safe resolution as /Users/Shared: /var/tmp
+// is world-writable (drwxrwxrwt) on Linux/BSD, so a co-located user could plant a
+// symlink under it whose target escapes to a rejected system directory. Skipped
+// when /var/tmp is absent or not writable, so it never fails spuriously.
+func TestIsPathInSafeBoundary_VarTmpSymlinkEscape(t *testing.T) {
+	const varTmp = "/var/tmp"
+	if info, err := os.Stat(varTmp); err != nil || !info.IsDir() {
+		t.Skipf("%s not present as a directory: %v", varTmp, err)
+	}
+
+	link := filepath.Join(varTmp, fmt.Sprintf(".be-odye4-escape-test-%d", os.Getpid()))
+	_ = os.Remove(link)
+	if err := os.Symlink("/etc", link); err != nil {
+		t.Skipf("cannot create symlink in %s (not writable?): %v", varTmp, err)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+
+	// A BEADS_DIR routed *through* the escaping symlink must be rejected: its bytes
+	// resolve into /etc, outside /var/tmp.
+	target := filepath.Join(link, ".beads")
+	if isPathInSafeBoundary(target) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (path through symlink escaping /var/tmp to /etc)", target)
+	}
+
+	// The escaping symlink itself also resolves outside the boundary.
+	if isPathInSafeBoundary(link) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (symlink under /var/tmp escaping to /etc)", link)
 	}
 }
 

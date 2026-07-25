@@ -327,6 +327,18 @@ func isPathInSafeBoundary(path string) bool {
 		return true
 	}
 
+	// Allow /var/tmp as the FHS-standard secondary temp directory (persists across
+	// reboots, unlike /tmp). This is distinct from the os.TempDir() carve-out
+	// above: a machine's build tooling can set GOTMPDIR to redirect Go's own
+	// test/compile temp dirs under /var/tmp even while os.TempDir() itself still
+	// reports /tmp, so t.TempDir() in a test binary can land here without the
+	// os.TempDir() check ever seeing it (be-odye4). Like /Users/Shared, /var/tmp is
+	// world-writable (drwxrwxrwt), so resolve symlinks before admitting (SEC-003):
+	// a symlink planted under it must not be followed into a rejected directory.
+	if absPath == "/var/tmp" || strings.HasPrefix(absPath, "/var/tmp/") {
+		return resolvedPathWithinRoot(absPath, "/var/tmp")
+	}
+
 	for _, prefix := range unsafePrefixes {
 		if strings.HasPrefix(absPath, prefix+"/") || absPath == prefix {
 			return false
