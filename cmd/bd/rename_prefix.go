@@ -138,21 +138,33 @@ NOTE: This is a rare operation. Most users never need this command.`,
 		}
 
 		if dryRun {
-			fmt.Printf("DRY RUN: Would rename %d issues from prefix '%s' to '%s'\n\n", len(issues), oldPrefix, newPrefix)
+			fmt.Printf("DRY RUN: Would rename issues from config prefix '%s' to '%s'\n\n", oldPrefix, newPrefix)
 			fmt.Printf("Sample changes:\n")
-			for i, issue := range issues {
-				if i >= 5 {
-					fmt.Printf("... and %d more issues\n", len(issues)-5)
-					break
+			unchanged := 0
+			shown := 0
+			for _, issue := range issues {
+				newID := rewriteIssueID(oldPrefix, newPrefix, issue.ID)
+				if newID == issue.ID {
+					unchanged++
+					continue
 				}
-				oldID := fmt.Sprintf("%s-%s", oldPrefix, strings.TrimPrefix(issue.ID, oldPrefix+"-"))
-				newID := fmt.Sprintf("%s-%s", newPrefix, strings.TrimPrefix(issue.ID, oldPrefix+"-"))
-				fmt.Printf("  %s -> %s\n", ui.RenderAccent(oldID), ui.RenderAccent(newID))
+				if shown < 5 {
+					fmt.Printf("  %s -> %s\n", ui.RenderAccent(issue.ID), ui.RenderAccent(newID))
+					shown++
+				}
+			}
+			if shown == 0 {
+				fmt.Printf("  (all %d issue IDs already use prefix %s — would only update config)\n", len(issues), newPrefix)
+			} else if len(issues)-shown-unchanged > 0 {
+				fmt.Printf("... and more\n")
+			}
+			if unchanged > 0 && shown > 0 {
+				fmt.Printf("  (%d IDs already on target prefix — left unchanged)\n", unchanged)
 			}
 			return nil
 		}
 
-		fmt.Printf("Renaming %d issues from prefix '%s' to '%s'...\n", len(issues), oldPrefix, newPrefix)
+		fmt.Printf("Renaming issues from config prefix '%s' to '%s'...\n", oldPrefix, newPrefix)
 
 		if err := renamePrefixInDB(ctx, oldPrefix, newPrefix, issues); err != nil {
 			return HandleError("failed to rename prefix: %v", err)
@@ -356,24 +368,41 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	return nil
 }
 
+// rewriteIssueID maps oldID from oldPrefix to newPrefix without doubling when
+// the ID already uses the target prefix (GH#4827 half-migrated config cell).
+func rewriteIssueID(oldPrefix, newPrefix, oldID string) string {
+	oldP := strings.TrimRight(oldPrefix, "-")
+	newP := strings.TrimRight(newPrefix, "-")
+	if oldP == "" || newP == "" {
+		return oldID
+	}
+	// Already on the destination prefix — leave alone (config may still be stale).
+	if strings.HasPrefix(oldID, newP+"-") {
+		return oldID
+	}
+	if strings.HasPrefix(oldID, oldP+"-") {
+		return newP + "-" + strings.TrimPrefix(oldID, oldP+"-")
+	}
+	return oldID
+}
+
 func renamePrefixInDB(ctx context.Context, oldPrefix, newPrefix string, issues []*types.Issue) error {
 	// NOTE: Each issue is updated in its own transaction. A failure mid-way could leave
 	// the database in a mixed state with some issues renamed and others not.
 	// For production use, consider implementing a single atomic RenamePrefix() method
 	// in the storage layer that wraps all updates in one transaction.
 
-	oldPrefixPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(oldPrefix) + `-(\d+)\b`)
+	oldP := strings.TrimRight(oldPrefix, "-")
+	newP := strings.TrimRight(newPrefix, "-")
+	oldPrefixPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(oldP) + `-(\d+)\b`)
 
 	replaceFunc := func(match string) string {
-		return strings.Replace(match, oldPrefix+"-", newPrefix+"-", 1)
+		return strings.Replace(match, oldP+"-", newP+"-", 1)
 	}
 
 	for _, issue := range issues {
 		oldID := issue.ID
-		numPart := strings.TrimPrefix(oldID, oldPrefix+"-")
-		newID := fmt.Sprintf("%s-%s", newPrefix, numPart)
-
-		issue.ID = newID
+		newID := rewriteIssueID(oldP, newP, oldID)
 
 		issue.Title = oldPrefixPattern.ReplaceAllStringFunc(issue.Title, replaceFunc)
 		issue.Description = oldPrefixPattern.ReplaceAllStringFunc(issue.Description, replaceFunc)
@@ -387,12 +416,19 @@ func renamePrefixInDB(ctx context.Context, oldPrefix, newPrefix string, issues [
 			issue.Notes = oldPrefixPattern.ReplaceAllStringFunc(issue.Notes, replaceFunc)
 		}
 
+		// ID already on the target prefix (stale config cell only): skip UpdateIssueID
+		// so we never produce atlas-atlas-* (GH#4827).
+		if newID == oldID {
+			continue
+		}
+
+		issue.ID = newID
 		if err := store.UpdateIssueID(ctx, oldID, newID, issue, actor); err != nil {
 			return fmt.Errorf("failed to update issue %s: %w", oldID, err)
 		}
 	}
 
-	if err := store.SetConfig(ctx, "issue_prefix", newPrefix); err != nil {
+	if err := store.SetConfig(ctx, "issue_prefix", newP); err != nil {
 		return fmt.Errorf("failed to update config: %w", err)
 	}
 
