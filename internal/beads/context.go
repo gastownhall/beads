@@ -315,8 +315,16 @@ func isPathInSafeBoundary(path string) bool {
 	// escapes the boundary must be rejected, not followed into a system
 	// directory — same treatment as the /Users/Shared carve-out below
 	// (be-kghzr SEC-003 hardening).
+	// The carve-out must admit both spellings of the temp root: os.TempDir()
+	// itself (on macOS the symlinked /var/folders/... form) and its physical
+	// resolution (/private/var/folders/...). A caller-supplied path that has
+	// already been symlink-resolved arrives in the physical form and would
+	// otherwise skip this branch and be rejected by the /private deny prefix
+	// below.
 	tempDir := strings.TrimSuffix(os.TempDir(), "/")
-	if absPath == tempDir || strings.HasPrefix(absPath, tempDir+"/") {
+	physTempDir := strings.TrimSuffix(resolveLongestExistingAncestor(tempDir), "/")
+	if absPath == tempDir || strings.HasPrefix(absPath, tempDir+"/") ||
+		absPath == physTempDir || strings.HasPrefix(absPath, physTempDir+"/") {
 		return resolvedPathWithinRoot(absPath, tempDir)
 	}
 
