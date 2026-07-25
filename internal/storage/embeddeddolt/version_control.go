@@ -301,6 +301,51 @@ func (s *EmbeddedDoltStore) ResolveConflicts(ctx context.Context, table string, 
 	})
 }
 
+// The CLI reaches these two methods through storage.UnwrapStore, so the
+// assertion must keep holding on the concrete store.
+var _ storage.ConflictInspector = (*EmbeddedDoltStore)(nil)
+
+// GetConflictRows returns the live conflicted rows of table, per field.
+// Implements storage.ConflictInspector (backs `bd conflicts list|show`).
+func (s *EmbeddedDoltStore) GetConflictRows(ctx context.Context, table string) ([]storage.ConflictRow, error) {
+	var rows []storage.ConflictRow
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		rows, err = versioncontrolops.GetConflictRows(ctx, db, table)
+		return err
+	})
+	return rows, err
+}
+
+// The CLI reaches this through storage.UnwrapStore too.
+var _ storage.MergeBlockerInspector = (*EmbeddedDoltStore)(nil)
+
+// GetMergeBlockers reports schema conflicts, constraint violations, and
+// whether a merge is open. Implements storage.MergeBlockerInspector.
+func (s *EmbeddedDoltStore) GetMergeBlockers(ctx context.Context) (storage.MergeBlockers, error) {
+	var blockers storage.MergeBlockers
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		blockers, err = versioncontrolops.GetMergeBlockers(ctx, db)
+		return err
+	})
+	return blockers, err
+}
+
+// ResolveConflictRows resolves individual conflicted rows of table by key.
+// Implements storage.ConflictInspector (backs `bd conflicts resolve <id>`).
+// It runs on a PINNED connection: the resolution sets dolt's
+// conflict-tolerance session flags, which the writes that follow must see.
+func (s *EmbeddedDoltStore) ResolveConflictRows(ctx context.Context, table string, keys []string, strategy string) (int, error) {
+	var n int
+	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		n, err = versioncontrolops.ResolveConflictRows(ctx, db, table, keys, strategy)
+		return err
+	})
+	return n, err
+}
+
 // ---------------------------------------------------------------------------
 // Remote operations
 // ---------------------------------------------------------------------------

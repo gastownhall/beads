@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -1146,6 +1147,89 @@ func TestIsConfirmedNoRemote(t *testing.T) {
 					tt.err, tt.lister, got, tt.want)
 			}
 		})
+	}
+}
+
+// fakeProbingDoltStore stands in for the concrete server-mode *dolt.DoltStore
+// at the bottom of the real decorator chain: a full storage.DoltStorage (via
+// the embedded nil interface — only the methods below may be called) that
+// reports its dolt_remotes rows and its on-disk repo_state.json separately.
+type fakeProbingDoltStore struct {
+	storage.DoltStorage
+	remotes   []storage.RemoteInfo
+	persisted bool
+}
+
+func (f *fakeProbingDoltStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
+	return f.remotes, nil
+}
+
+func (f *fakeProbingDoltStore) HasPersistedRemote() bool { return f.persisted }
+
+// wy-xtv17: the GH#2118 persisted-remote probe must survive the storage
+// decorator chain. bd never holds the raw *dolt.DoltStore — main.go wires
+// caller → HookFiringStore → InstrumentedStorage → DoltStore — and
+// HasPersistedRemote is on neither decorator, so asserting straight on the
+// passed store skipped the probe on all but a no-hooks rig (the hook layer is
+// wired whenever there is a dbPath; the telemetry layer only under
+// BD_OTEL_METRICS_URL / BD_OTEL_STDOUT). That turned a cold-started sql-server (remote in
+// .dolt/repo_state.json, dolt_remotes not yet populated) into a permanent
+// silent no-op: `bd sync` printing "No remote is configured" and exiting 0 on
+// every tick, forever, with --json consumers reading it as success.
+func TestHasNoRemoteConfigured_ProbesThroughDecoratedStore(t *testing.T) {
+	ctx := context.Background()
+	notFound := fmt.Errorf("remote 'origin' not found")
+	for _, chain := range []struct {
+		name      string
+		telemetry bool
+	}{
+		{"hooks only", false},
+		{"hooks + telemetry", true},
+	} {
+		t.Run(chain.name, func(t *testing.T) {
+			clearTelemetryEnv(t)
+			if chain.telemetry {
+				t.Setenv("BD_OTEL_STDOUT", "true")
+			}
+			decorate := func(raw storage.DoltStorage) storage.DoltStorage {
+				return wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+			}
+
+			// The load-bearing case: dolt_remotes is empty, but the remote is
+			// on disk. The skip must NOT fire.
+			persisted := decorate(&fakeProbingDoltStore{persisted: true})
+			if _, direct := persisted.(persistedRemoteProber); direct {
+				t.Fatalf("%T implements persistedRemoteProber directly; this test no longer exercises the peel", persisted)
+			}
+			if hasNoRemoteConfigured(ctx, persisted) {
+				t.Error("hasNoRemoteConfigured = true through a decorated store whose remote is persisted on disk; the GH#2118 probe was skipped")
+			}
+			// bd dolt push/pull reach the same probe via isConfirmedNoRemote.
+			if isConfirmedNoRemote(ctx, persisted, notFound) {
+				t.Error("isConfirmedNoRemote = true through a decorated store whose remote is persisted on disk")
+			}
+
+			// A genuinely remote-less rig still gets its benign exit-0 skip.
+			if solo := decorate(&fakeProbingDoltStore{}); !hasNoRemoteConfigured(ctx, solo) {
+				t.Error("hasNoRemoteConfigured = false for a decorated store with no remote anywhere; the solo-rig skip regressed")
+			}
+
+			// And a configured remote is still vetoed on the ListRemotes
+			// evidence alone — the decorators forward that call.
+			configured := decorate(&fakeProbingDoltStore{remotes: []storage.RemoteInfo{{Name: "origin"}}})
+			if hasNoRemoteConfigured(ctx, configured) {
+				t.Error("hasNoRemoteConfigured = true through a decorated store with remotes configured")
+			}
+		})
+	}
+}
+
+// A store that is neither a prober nor a decorator must not be treated as one:
+// the probe is optional, and its absence means "no on-disk evidence", not
+// "remote persisted".
+func TestPersistedRemoteProberFor_PlainStore(t *testing.T) {
+	if _, ok := persistedRemoteProberFor(fakeRemoteLister{}); ok {
+		t.Error("persistedRemoteProberFor found a prober on a plain remoteLister")
 	}
 }
 

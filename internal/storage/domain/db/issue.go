@@ -1008,9 +1008,9 @@ func (r *issueSQLRepositoryImpl) UnclaimIssue(ctx context.Context, id, actor str
 	return nil
 }
 
-func (r *issueSQLRepositoryImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error) {
+func (r *issueSQLRepositoryImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {
 	cutoff := time.Now().UTC().Add(-olderThan)
-	out, err := issueops.ReclaimExpiredLeasesInTx(ctx, r.runner, cutoff, actor)
+	out, err := issueops.ReclaimExpiredLeasesInTx(ctx, r.runner, cutoff, filter, actor)
 	if err != nil {
 		return nil, fmt.Errorf("db: IssueSQLRepository.ReclaimExpiredLeases: %w", err)
 	}

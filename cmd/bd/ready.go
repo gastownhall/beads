@@ -122,7 +122,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if molTypeStr != "" {
 			mt := types.MolType(molTypeStr)
 			if !mt.IsValid() {
-				return HandleErrorRespectJSON("invalid mol-type %q (must be swarm, patrol, or work)", molTypeStr)
+				return HandleErrorRespectJSON("invalid mol-type %q (must be %s)", molTypeStr, types.ValidMolTypeNames())
 			}
 			molType = &mt
 		}

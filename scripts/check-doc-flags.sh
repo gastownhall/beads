@@ -57,7 +57,13 @@ echo ""
 # --- Check 1: Known-removed commands ---
 echo "=== Check 1: Removed commands ==="
 
-# bd sync (removed in v0.51)
+# bd sync: the JSONL-era command was removed in v0.51, and a top-level `bd sync`
+# was reintroduced (wy-jpd3.4) as the federation loop — pull, positive conflict
+# check, recompute-blocked, push. So the stale reference to hunt is no longer
+# any mention of the command; it is docs still describing it as removed,
+# deprecated, or a no-op, which is exactly what its own command doc said until
+# the verb came back. CHANGELOG and the staged-for-removal audits are history
+# and legitimately say so.
 SYNC_REFS=$(grep -rn 'bd sync\b' \
     "$PROJECT_ROOT"/docs/*.md \
     "$PROJECT_ROOT"/docs/*/*.md \
@@ -69,15 +75,17 @@ SYNC_REFS=$(grep -rn 'bd sync\b' \
     "$PROJECT_ROOT"/plugins/beads/skills/beads/commands/*.md \
     "$PROJECT_ROOT"/plugins/beads/skills/beads/resources/*.md \
     2>/dev/null \
-    | grep -v 'CHANGELOG\|audit-sync-mode\|deprecated\|no-op\|removed\|was removed\|has been removed' \
+    | grep -v 'CHANGELOG\|audit-sync-mode' \
+    | grep -i 'deprecated\|no-op\|removed\|unknown-command' \
+    | grep -vi 'removed in v0\.51\|JSONL-era' \
     || true)
 
 if [ -n "$SYNC_REFS" ]; then
-    echo "FAIL: Found references to removed 'bd sync' command:"
+    echo "FAIL: Found docs describing 'bd sync' as removed/deprecated — it is a live command:"
     echo "$SYNC_REFS" | head -20
     ERRORS=$((ERRORS + 1))
 else
-    echo "PASS: No stale 'bd sync' references"
+    echo "PASS: No stale 'bd sync is removed' references"
 fi
 
 echo ""

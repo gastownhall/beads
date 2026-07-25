@@ -1,11 +1,45 @@
 # Makefile for beads project
 
-# On Windows, GNU Make defaults to cmd.exe which doesn't support POSIX
-# shell syntax used throughout this Makefile. Use Git for Windows' bash.
+# Native Windows GNU Make needs Git for Windows' bash for the POSIX shell
+# syntax used throughout this Makefile. MSYS2 and Cygwin Make already provide
+# POSIX shell semantics, despite inheriting OS=Windows_NT, so leave them alone.
 ifeq ($(OS),Windows_NT)
-GIT_BASH := $(shell where git 2>/dev/null)
-ifneq ($(GIT_BASH),)
-SHELL := $(subst cmd,bin,$(subst git.exe,bash.exe,$(GIT_BASH)))
+ifneq ($(filter Windows32 mingw32 %-mingw32,$(MAKE_HOST)),)
+override BASH_ENV :=
+unexport BASH_ENV
+unexport GIT_EXEC_PATH
+unexport BASHOPTS
+unexport SHELLOPTS
+SHELL := cmd.exe
+.SHELLFLAGS := /d /c
+GIT_WINDOWS_EXEC_PATH := $(strip $(shell set "GIT_EXEC_PATH=" && git.exe --exec-path))
+ifeq ($(GIT_WINDOWS_EXEC_PATH),)
+$(error Git for Windows is required to run this Makefile)
+endif
+GIT_WINDOWS_ROOT := $(strip $(shell cd /d "$(GIT_WINDOWS_EXEC_PATH)/../../.." && cd))
+ifeq ($(GIT_WINDOWS_ROOT),)
+$(error Could not resolve the Git for Windows installation from $(GIT_WINDOWS_EXEC_PATH))
+endif
+GIT_WINDOWS_BASH := $(GIT_WINDOWS_ROOT)/bin/bash.exe
+GIT_WINDOWS_SED := $(GIT_WINDOWS_ROOT)/usr/bin/sed.exe
+GIT_WINDOWS_ENV := $(GIT_WINDOWS_ROOT)/usr/bin/env.exe
+ifneq ($(strip $(shell if exist "$(GIT_WINDOWS_BASH)" echo ready)),ready)
+$(error Could not find Git for Windows' bash at $(GIT_WINDOWS_BASH))
+endif
+ifneq ($(strip $(shell if exist "$(GIT_WINDOWS_SED)" echo ready)),ready)
+$(error Could not find Git for Windows' sed at $(GIT_WINDOWS_SED))
+endif
+ifneq ($(strip $(shell if exist "$(GIT_WINDOWS_ENV)" echo ready)),ready)
+$(error Could not find Git for Windows' env at $(GIT_WINDOWS_ENV))
+endif
+SHELL := $(GIT_WINDOWS_BASH)
+.SHELLFLAGS := -c
+ifneq ($(strip $(shell printf '%s' ready;)),ready)
+$(error Could not start Git for Windows' bash at $(SHELL))
+endif
+# GNU Make may launch simple commands and shebang interpreters directly instead
+# of through SHELL, so expose Git's POSIX tools to those process lookups too.
+export PATH := $(GIT_WINDOWS_ROOT)/usr/bin;$(PATH)
 endif
 endif
 

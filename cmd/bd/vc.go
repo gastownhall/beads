@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -26,6 +27,36 @@ This subcommand provides additional operations like merge and commit.`,
 }
 
 var vcMergeStrategy string
+
+// blockedAfterMergeRecomputer is the narrow store surface that repairs the
+// denormalized is_blocked column for the rows a merge brought in
+// (bd-578h9.11). Only the concrete stores implement it
+// (internal/storage/dolt/store.go, internal/storage/embeddeddolt/version_control.go);
+// it is NOT part of storage.DoltStorage.
+type blockedAfterMergeRecomputer interface {
+	RecomputeBlockedAfterMerge(ctx context.Context, fromCommit string) error
+}
+
+// blockedAfterMergeRecomputerFor peels the storage decorator chain before
+// asserting, so the optional interface is looked up on the concrete store.
+//
+// getStore() hands back the wireStorageDecorators chain — caller →
+// HookFiringStore → InstrumentedStorage → concrete store
+// (cmd/bd/storage_chain.go) — and both decorators embed the storage.DoltStorage
+// INTERFACE, so their promoted method sets are exactly DoltStorage's.
+// RecomputeBlockedAfterMerge is not in that set, so asserting on the chain
+// itself always failed and the post-merge recompute was silently skipped on
+// every rig carrying a hook layer, which is essentially all of them
+// (main.go builds a hook runner whenever dbPath != ""; only no-hooks:true /
+// BD_NO_HOOKS=1 leaves it off). Same defect class as wy-xtv17's
+// persistedRemoteProber; wy-163oy.
+func blockedAfterMergeRecomputerFor(st storage.DoltStorage) (blockedAfterMergeRecomputer, bool) {
+	if st == nil {
+		return nil, false
+	}
+	rs, ok := storage.UnwrapStore(st).(blockedAfterMergeRecomputer)
+	return rs, ok
+}
 
 var vcMergeCmd = &cobra.Command{
 	Use:   "merge <branch>",
@@ -88,12 +119,16 @@ Examples:
 				if err := store.CommitMergeResolution(ctx, fmt.Sprintf("Resolve merge conflicts from %s using %s strategy", branchName, vcMergeStrategy)); err != nil {
 					return HandleErrorRespectJSON("conflicts resolved but commit failed: %v", err)
 				}
-				if rs, ok := store.(interface {
-					RecomputeBlockedAfterMerge(ctx context.Context, fromCommit string) error
-				}); ok {
+				if rs, ok := blockedAfterMergeRecomputerFor(store); ok {
 					if err := rs.RecomputeBlockedAfterMerge(ctx, preHead); err != nil {
 						return HandleErrorRespectJSON("conflicts resolved but is_blocked recompute failed: %v", err)
 					}
+				} else {
+					// Never silent: a skipped recompute leaves 'bd ready' stale
+					// for every dependency edge the merge brought in, and the
+					// old `if ok` with no else is exactly how this went
+					// unnoticed for the whole life of the decorator chain.
+					fmt.Fprintf(os.Stderr, "Warning: storage backend %T cannot recompute is_blocked after a merge; 'bd ready' may be stale until 'bd recompute-blocked' runs\n", storage.UnwrapStore(store))
 				}
 				if jsonOutput {
 					return outputJSON(map[string]interface{}{

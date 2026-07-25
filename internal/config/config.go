@@ -180,6 +180,8 @@ func Initialize() error {
 	// Additional environment variables (not prefixed with BD_)
 	_ = v.BindEnv("identity", "BEADS_IDENTITY") // BindEnv only fails with zero args, which can't happen here
 	v.SetDefault("identity", "")
+	_ = v.BindEnv("node_id", "BEADS_NODE_ID", "BD_NODE_ID") // replica identity; see NodeID
+	v.SetDefault("node_id", "")
 
 	// Dolt configuration defaults
 	// Controls whether beads should automatically create Dolt commits after write commands.
@@ -879,6 +881,40 @@ func GetIdentity(flagValue string) string {
 	}
 
 	return "unknown"
+}
+
+// NodeID returns the identity of THIS replica: the beads STORE that grants
+// and enforces leases here. A lease is enforceable exactly as far as that
+// store reaches, and the replica-aware reclaim guard
+// (issueops.ReclaimExpiredLeasesInTx) refuses to revert a lease some OTHER
+// node granted.
+//
+// It is read from BEADS_NODE_ID / BD_NODE_ID, or node_id in config.yaml, and
+// from nowhere else. It deliberately does NOT fall back to os.Hostname(),
+// because the hostname answers the wrong question — it names the client
+// PROCESS's machine, not the store:
+//
+//   - With a shared or remote dolt sql-server (BEADS_DOLT_SERVER_HOST, or any
+//     ServerModeExternal deployment — systemd, Docker, Hosted Dolt, a VPS),
+//     many hosts are clients of ONE store. There is no sync interval between
+//     them and no stale liveness view to defend against, but per-hostname
+//     identity would make a supervisor unable to reap any worker's lease —
+//     reclaim would return 0 forever and every dead worker's unit would sit
+//     in_progress permanently.
+//   - In a container the hostname is the container ID, regenerated on every
+//     run, so a replaced worker's own single-machine leases would look
+//     foreign to its successor.
+//   - On macOS/DHCP the transient hostname changes with the network.
+//
+// Each of those is a fail-CLOSED regression on a deployment that has no
+// federation at all, which is a far worse failure than the cross-replica
+// reclaim this guard exists to prevent. So the guard is armed only where an
+// operator has said, explicitly, that this store is one replica among
+// several. "" means "this deployment does not name its replicas" and is the
+// default: every consumer degrades to the pre-replica-aware behavior rather
+// than fail closed.
+func NodeID() string {
+	return strings.TrimSpace(GetString("node_id"))
 }
 
 // FederationConfig holds the federation (Dolt remote) configuration.
