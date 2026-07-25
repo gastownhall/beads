@@ -164,6 +164,21 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 		return result, err
 	}
 	result.ChangedTables = mergeChangedTables(result.ChangedTables, commentResult.ChangedTables)
+
+	// Advance child_counters when a singular create materializes a hierarchical
+	// ID (e.g. bd create --id P.8). The batch path already calls
+	// ReconcileChildCounters after CreateIssuesInTx; without this, explicit --id
+	// creates leave last_child behind the live suffix high-water mark and the
+	// next bd create --parent can recycle lower suffixes (GH#4750).
+	if isNew {
+		if _, childNum, ok := ParseHierarchicalID(issue.ID); ok && childNum > 0 {
+			changedCounters, err := ReconcileChildCounters(ctx, tx, []*types.Issue{issue})
+			if err != nil {
+				return result, err
+			}
+			result.ChangedTables = mergeChangedTables(result.ChangedTables, changedCounters)
+		}
+	}
 	return result, nil
 }
 
