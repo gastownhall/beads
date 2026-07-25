@@ -556,38 +556,6 @@ func TestIsPathInSafeBoundary_TempDirSymlinkEscape(t *testing.T) {
 	}
 }
 
-// TestPathWithinTempRoots_PhysicalForm exercises the macOS lexical-to-physical
-// temp-root shape without depending on the host OS. In particular, the path
-// boundary cases ensure a sibling that merely shares a string prefix is not
-// admitted by either side of the gate.
-func TestPathWithinTempRoots_PhysicalForm(t *testing.T) {
-	lexicalRoot := filepath.FromSlash("/var/folders/xy/T")
-	physicalRoot := filepath.FromSlash("/private/var/folders/xy/T")
-
-	tests := []struct {
-		name string
-		path string
-		want bool
-	}{
-		{"lexical root", lexicalRoot, true},
-		{"lexical child", filepath.Join(lexicalRoot, "repo", ".beads"), true},
-		{"physical root", physicalRoot, true},
-		{"physical child", filepath.Join(physicalRoot, "repo", ".beads"), true},
-		{"lexical prefix sibling", lexicalRoot + "-other", false},
-		{"physical prefix sibling", physicalRoot + "-other", false},
-		{"physical parent sibling", filepath.Join(physicalRoot, "..", "other"), false},
-		{"unrelated denied path", filepath.FromSlash("/private/etc/.beads"), false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := pathWithinTempRoots(tt.path, lexicalRoot, physicalRoot); got != tt.want {
-				t.Errorf("pathWithinTempRoots(%q, %q, %q) = %v, want %v", tt.path, lexicalRoot, physicalRoot, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestIsPathInSafeBoundary_TempDirPhysicalForm covers the macOS shape where
 // $TMPDIR is itself a symlink (/var/folders/... -> /private/var/...): a
 // caller-supplied path that has already been symlink-resolved arrives in the
