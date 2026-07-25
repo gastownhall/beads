@@ -516,6 +516,41 @@ func TestIsPathInSafeBoundary_TempDirSymlinkEscape(t *testing.T) {
 	}
 }
 
+// TestIsPathInSafeBoundary_TempDirPhysicalForm covers the macOS shape where
+// $TMPDIR is itself a symlink (/var/folders/... -> /private/var/...): a
+// caller-supplied path that has already been symlink-resolved arrives in the
+// PHYSICAL form, does not share the unresolved os.TempDir() prefix, and must
+// still be admitted by the temp-dir carve-out. On macOS the physical form
+// falls under the denied /private prefix, so without the carve-out this test
+// fails (the exact TestContext* regression from the be-kghzr hardening); on
+// platforms whose physical temp root is not under a denied prefix the
+// assertion is satisfied either way — the macos-latest CI lane is the
+// distinguishing runner.
+func TestIsPathInSafeBoundary_TempDirPhysicalForm(t *testing.T) {
+	base := t.TempDir()
+	phys := filepath.Join(base, "phys")
+	if err := os.MkdirAll(phys, 0o755); err != nil {
+		t.Fatalf("mkdir phys: %v", err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(phys, link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	t.Setenv("TMPDIR", link)
+
+	// Physical form of a (not-yet-created) subpath of the temp dir: must be safe.
+	target := filepath.Join(phys, "proj", ".beads")
+	if !isPathInSafeBoundary(target) {
+		t.Errorf("isPathInSafeBoundary(%q) = false, want true (physical form of TMPDIR subpath)", target)
+	}
+
+	// The symlinked form keeps working too.
+	linked := filepath.Join(link, "proj", ".beads")
+	if !isPathInSafeBoundary(linked) {
+		t.Errorf("isPathInSafeBoundary(%q) = false, want true (symlinked form of TMPDIR subpath)", linked)
+	}
+}
+
 // TestGetRepoContextForWorkspace_RedirectToUnsafeLocation tests that redirects
 // to unsafe locations are rejected (TS-SEC-003 integration test).
 func TestGetRepoContextForWorkspace_RedirectToUnsafeLocation(t *testing.T) {
