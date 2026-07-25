@@ -314,6 +314,13 @@ func analyzeEpicForSwarm(ctx context.Context, s SwarmStorage, epic *types.Issue)
 	return analysis, nil
 }
 
+// issueIsClosed reports whether id is closed. Closed issues count as satisfied
+// and are excluded from cycle detection and ready-front scheduling (GH#4564).
+func issueIsClosed(analysis *SwarmAnalysis, id string) bool {
+	n, ok := analysis.Issues[id]
+	return ok && n.Status == string(types.StatusClosed)
+}
+
 // detectStructuralIssues looks for common problems in the dependency graph.
 //
 //nolint:unparam // issues reserved for future use
@@ -402,6 +409,7 @@ func detectStructuralIssues(analysis *SwarmAnalysis, _ []*types.Issue) {
 
 	// 5. Detect cycles using simple DFS
 	// (The main DetectCycles in storage is more sophisticated, but we do a simple check here)
+	// Closed issues are excluded: a closed cycle must not block open children (GH#4564).
 	inProgress := make(map[string]bool)
 	completed := make(map[string]bool)
 	var cyclePath []string
@@ -409,6 +417,9 @@ func detectStructuralIssues(analysis *SwarmAnalysis, _ []*types.Issue) {
 
 	var detectCycle func(id string) bool
 	detectCycle = func(id string) bool {
+		if issueIsClosed(analysis, id) {
+			return false
+		}
 		if completed[id] {
 			return false
 		}
@@ -434,6 +445,9 @@ func detectStructuralIssues(analysis *SwarmAnalysis, _ []*types.Issue) {
 	}
 
 	for id := range analysis.Issues {
+		if issueIsClosed(analysis, id) {
+			continue
+		}
 		if !completed[id] {
 			if detectCycle(id) {
 				break
@@ -457,8 +471,7 @@ func computeReadyFronts(analysis *SwarmAnalysis) {
 	}
 
 	isClosed := func(id string) bool {
-		n, ok := analysis.Issues[id]
-		return ok && n.Status == string(types.StatusClosed)
+		return issueIsClosed(analysis, id)
 	}
 
 	// Kahn's algorithm over open issues only; in-degree counts open blockers.
