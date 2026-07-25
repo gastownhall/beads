@@ -107,7 +107,7 @@ func runListProxiedHierarchicalParent(ctx context.Context, uw uow.UnitOfWork, in
 		return err
 	}
 
-	displayPrettyListWithDeps(treeIssues, false, depsByIssueID)
+	displayPrettyListWithDepsMode(treeIssues, false, depsByIssueID, in.depsMode)
 	printSkipLabelsFooter(in.skipLabels)
 	return nil
 }
@@ -296,7 +296,7 @@ func renderProxiedListText(ctx context.Context, uw uow.UnitOfWork, issues []*typ
 		if err != nil {
 			return err
 		}
-		displayPrettyListWithDeps(issues, false, depsByIssueID)
+		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode)
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.skipLabels)
 		return nil
