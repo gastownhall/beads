@@ -538,8 +538,16 @@ func TestIsPathInSafeBoundary_TempDirPhysicalForm(t *testing.T) {
 	}
 	t.Setenv("TMPDIR", link)
 
-	// Physical form of a (not-yet-created) subpath of the temp dir: must be safe.
-	target := filepath.Join(phys, "proj", ".beads")
+	// Physical form of a (not-yet-created) subpath of the temp dir: must be
+	// safe. On macOS the join base itself sits under the symlinked
+	// /var/folders, so resolve it to the true physical spelling first — the
+	// probe must match what a caller supplies after EvalSymlinks, which is
+	// exactly resolveLongestExistingAncestor(TMPDIR)'s form.
+	physResolved, err := filepath.EvalSymlinks(phys)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", phys, err)
+	}
+	target := filepath.Join(physResolved, "proj", ".beads")
 	if !isPathInSafeBoundary(target) {
 		t.Errorf("isPathInSafeBoundary(%q) = false, want true (physical form of TMPDIR subpath)", target)
 	}
