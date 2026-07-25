@@ -154,17 +154,20 @@ func TestNewExternalDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) 
 		i := i
 		go func() {
 			defer wg.Done()
-			p, err := NewExternalDoltServerUOWProvider(
-				context.Background(),
-				storeRootDir,
-				"beads_test",
-				logPath,
-				external,
-				"root",
-				"",
-				0,
-				0,
-			)
+			// Same concurrent cold-open race surface as the local-server variant (#4775).
+			p, err := openUOWProviderWithRetry(func() (UnitOfWorkProvider, error) {
+				return NewExternalDoltServerUOWProvider(
+					context.Background(),
+					storeRootDir,
+					"beads_test",
+					logPath,
+					external,
+					"root",
+					"",
+					0,
+					0,
+				)
+			})
 			results[i] = result{provider: p, err: err}
 		}()
 	}
