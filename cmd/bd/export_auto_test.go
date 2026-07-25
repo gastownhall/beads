@@ -584,6 +584,77 @@ func TestGitAddFile_NonHookContext_GuardDoesNotFire(t *testing.T) {
 	}
 }
 
+// TestGitAddFile_RelativePathDoesNotDoubleRoot is a regression test for
+// GH#4351: gitAddFile sets cmd.Dir to filepath.Dir(path). When path is
+// relative (e.g. ".beads/issues.jsonl"), passing that full path as the
+// git-add argument becomes `cd .beads && git add .beads/issues.jsonl`,
+// which looks for a non-existent nested path and exits 128. The fix is
+// to pass filepath.Base(path) so the pathspec is relative to cmd.Dir.
+func TestGitAddFile_RelativePathDoesNotDoubleRoot(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "bd-gh4351-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+	tmpDir, err = filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repo := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = repo
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "-q")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "README.md")
+	runGit("commit", "-qm", "init")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".beads", "issues.jsonl"), []byte(`{"id":"x"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Unsetenv("GIT_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	// Repo-relative path — the double-root trigger. Must stage successfully.
+	t.Chdir(repo)
+	relPath := filepath.Join(".beads", "issues.jsonl")
+	if err := gitAddFile(relPath); err != nil {
+		t.Fatalf("gitAddFile(%q): %v", relPath, err)
+	}
+
+	c := exec.Command("git", "diff", "--cached", "--name-only")
+	c.Dir = repo
+	data, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git diff --cached: %v\n%s", err, data)
+	}
+	staged := strings.TrimSpace(string(data))
+	if !strings.Contains(staged, ".beads/issues.jsonl") && !strings.Contains(staged, filepath.ToSlash(relPath)) {
+		t.Errorf("expected .beads/issues.jsonl staged, got: %q", staged)
+	}
+}
+
 // TestGitAddFile_CapturesStderrOnFailure verifies that when `git add` fails,
 // the returned error wraps git's stderr text instead of just the bare exit
 // status. Regression guard for the silent "Warning: auto-export: git add
