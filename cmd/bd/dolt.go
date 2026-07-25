@@ -555,7 +555,9 @@ The remote must already exist (see 'bd dolt remote add').`,
 		force, _ := cmd.Flags().GetBool("force")
 		remote, _ := cmd.Flags().GetString("remote")
 		if remote != "" {
-			fmt.Printf("Pushing to Dolt remote %q...\n", remote)
+			if !isQuiet() {
+				fmt.Printf("Pushing to Dolt remote %q...\n", remote)
+			}
 			if err := st.PushRemote(ctx, remote, force); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				if isRemoteNotFoundErr(err) {
@@ -569,7 +571,9 @@ The remote must already exist (see 'bd dolt remote add').`,
 				}
 				return SilentExit()
 			}
-			fmt.Println("Push complete.")
+			if !isQuiet() {
+				fmt.Println("Push complete.")
+			}
 			return nil
 		}
 		assumeYes, _ := cmd.Flags().GetBool("yes")
@@ -580,7 +584,9 @@ The remote must already exist (see 'bd dolt remote add').`,
 		} else if adopted {
 			fmt.Println("Configured Dolt remote origin from git origin.")
 		}
-		fmt.Println("Pushing to Dolt remote...")
+		if !isQuiet() {
+			fmt.Println("Pushing to Dolt remote...")
+		}
 
 		var pushErr error
 		if force {
@@ -605,7 +611,9 @@ The remote must already exist (see 'bd dolt remote add').`,
 			}
 			return SilentExit()
 		}
-		fmt.Println("Push complete.")
+		if !isQuiet() {
+			fmt.Println("Push complete.")
+		}
 		return nil
 	},
 }
@@ -756,8 +764,9 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 			return nil
 		}
 		commandDidExplicitDoltCommit = true
-
-		fmt.Println("Committed.")
+		if !isQuiet() {
+			fmt.Println("Committed.")
+		}
 		return nil
 	},
 }
