@@ -315,8 +315,9 @@ func isPathInSafeBoundary(path string) bool {
 	// escapes the boundary must be rejected, not followed into a system
 	// directory — same treatment as the /Users/Shared carve-out below
 	// (be-kghzr SEC-003 hardening).
-	tempDir := strings.TrimSuffix(os.TempDir(), "/")
-	if absPath == tempDir || strings.HasPrefix(absPath, tempDir+"/") {
+	tempDir := filepath.Clean(os.TempDir())
+	physicalTempDir := resolveLongestExistingAncestor(tempDir)
+	if pathWithinTempRoots(absPath, tempDir, physicalTempDir) {
 		return resolvedPathWithinRoot(absPath, tempDir)
 	}
 
@@ -405,6 +406,24 @@ func resolveLongestExistingAncestor(path string) string {
 		remainder = filepath.Join(filepath.Base(cur), remainder)
 		cur = parent
 	}
+}
+
+// pathWithinRoot performs a syntactic, path-boundary-aware containment check.
+// Both paths are cleaned first so sibling prefixes and ".." components cannot
+// make an unrelated path appear to be within root.
+func pathWithinRoot(path, root string) bool {
+	path = filepath.Clean(path)
+	root = filepath.Clean(root)
+	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
+}
+
+// pathWithinTempRoots gates the OS temp-directory carve-out for both forms seen
+// on macOS: the lexical /var/folders form returned by os.TempDir and the
+// canonical /private/var/folders form produced by symlink resolution. This is
+// only the syntactic gate; resolvedPathWithinRoot makes the final, symlink-safe
+// containment decision.
+func pathWithinTempRoots(path, lexicalRoot, physicalRoot string) bool {
+	return pathWithinRoot(path, lexicalRoot) || pathWithinRoot(path, physicalRoot)
 }
 
 // resolvedPathWithinRoot reports whether absPath, after symlink resolution, still
