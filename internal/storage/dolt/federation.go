@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -517,12 +516,12 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 	if err := s.prePushFSCK(ctx); err != nil {
 		return err
 	}
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "push", peer, refspec)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "push", peer, refspec)
 	defer cancel()
 	applyNoGitHooksToCmd(cmd) // GH#3724
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to push to peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
+		return cliTransferError(fmt.Sprintf("push to peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }
@@ -531,11 +530,11 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 // Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to pull from peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
+		return cliTransferError(fmt.Sprintf("pull from peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }
@@ -544,11 +543,11 @@ func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds 
 // Used for git-protocol remotes where CALL DOLT_FETCH times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIFetchFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to fetch from peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
+		return cliTransferError(fmt.Sprintf("fetch from peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }

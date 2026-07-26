@@ -1,6 +1,6 @@
 ---
 title: "bd compact"
-description: "Squash old Dolt commits to reduce history size"
+description: "Squash Dolt commits older than N days into a single commit."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

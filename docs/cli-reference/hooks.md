@@ -1,6 +1,6 @@
 ---
 title: "bd hooks"
-description: "Manage git hooks for beads integration"
+description: "Install, uninstall, or list git hooks for beads integration."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -17,7 +17,7 @@ The hooks provide:
 - prepare-commit-msg: Add agent identity trailers for forensics
 
 ```
-bd hooks [command]
+bd hooks [flags]
 ```
 
 ## bd hooks install

@@ -1,6 +1,6 @@
 ---
 title: "bd bootstrap"
-description: "Non-destructive database setup for fresh clones and recovery"
+description: "Bootstrap sets up the beads database without destroying existing data."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

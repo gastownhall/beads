@@ -1,6 +1,6 @@
 ---
 title: "bd memories"
-description: "List or search persistent memories"
+description: "List all memories, or search by keyword."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

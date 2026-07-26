@@ -3,9 +3,11 @@
 package embeddeddolt_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -59,5 +61,39 @@ func TestEmbeddedRecomputeAllBlockedWiring(t *testing.T) {
 	}
 	if again, err := rc.RecomputeAllBlocked(ctx); err != nil || again != 0 {
 		t.Fatalf("recompute must stay a no-op: got changed=%d err=%v", again, err)
+	}
+}
+
+// TestEmbeddedRecomputeAllBlockedDirtyGraphIsTyped pins the EMBEDDED half of
+// the guard's error contract: RecomputeAllBlocked must return an error that
+// errors.Is-matches issueops.ErrBlockedRecomputeDirtyGraph, not a re-created or
+// stringified one.
+//
+// 'bd sync' classifies this condition as retryable from that sentinel alone
+// (cmd/bd/sync.go, isRecomputeDirtyGraphErr, wy-mlnz2). The embedded path
+// returns the guard error through withConn's errors.Join, which preserves the
+// chain today — but nothing failed if someone rewrote that as a %v wrap, which
+// would silently demote a concurrent writer's transient dirty working set back
+// to a hard exit-1 sync failure on every embedded rig. The server-mode half is
+// pinned by internal/storage/dolt/blocked_recompute_guard_test.go.
+func TestEmbeddedRecomputeAllBlockedDirtyGraphIsTyped(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "rcbdirty")
+	ctx := t.Context()
+
+	// An uncommitted write leaves `issues` dirty in the working set — exactly
+	// the state a concurrent writer produces mid-transaction.
+	iss := &types.Issue{ID: "rcbdirty-a", Title: "dirty", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.CreateIssue(ctx, iss, "tester"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	rc, ok := storage.UnwrapStore(te.store).(storage.BlockedRecomputer)
+	if !ok {
+		t.Fatal("embedded store must implement storage.BlockedRecomputer")
+	}
+	changed, err := rc.RecomputeAllBlocked(ctx)
+	if !errors.Is(err, issueops.ErrBlockedRecomputeDirtyGraph) {
+		t.Fatalf("want ErrBlockedRecomputeDirtyGraph, got changed=%d err=%v", changed, err)
 	}
 }

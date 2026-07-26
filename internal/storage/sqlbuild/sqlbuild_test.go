@@ -194,6 +194,47 @@ func TestBuildReadyWorkWhereLabelsAny(t *testing.T) {
 	}
 }
 
+// ga-hqchm: filter.LabelPattern was parsed from --label-pattern and stored
+// on WorkFilter, but BuildReadyWorkWhere never read it — the flag was dead
+// code on the ready path and silently returned unfiltered results.
+// BuildIssueFilterClauses coverage for LabelPattern/LabelRegex lives with
+// the list path (be402a022, #3971); this covers only the ready path's own
+// clause shape, which mirrors filter.go's LIKE ... ESCAPE '|' pattern.
+func TestBuildReadyWorkWhereLabelPattern(t *testing.T) {
+	t.Parallel()
+
+	where, args, err := BuildReadyWorkWhere(types.WorkFilter{LabelPattern: "tech-*"}, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantClause := "id IN (SELECT issue_id FROM " + IssuesFilterTables.Labels + " WHERE label LIKE ? ESCAPE '|')"
+	if !strings.Contains(where, wantClause) {
+		t.Errorf("LabelPattern clause missing.\n where = %s\n want substring = %s", where, wantClause)
+	}
+	if len(args) == 0 || args[len(args)-1] != "tech-%" {
+		t.Errorf("args tail = %v, want last arg %q", args, "tech-%")
+	}
+}
+
+// #4884 intent: filter.LabelRegex was likewise dead on the ready path.
+// BuildReadyWorkWhere must emit a REGEXP subquery mirroring filter.go's
+// LabelRegex clause.
+func TestBuildReadyWorkWhereLabelRegex(t *testing.T) {
+	t.Parallel()
+
+	where, args, err := BuildReadyWorkWhere(types.WorkFilter{LabelRegex: "^tech-"}, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantClause := "id IN (SELECT issue_id FROM " + IssuesFilterTables.Labels + " WHERE label REGEXP ?)"
+	if !strings.Contains(where, wantClause) {
+		t.Errorf("LabelRegex clause missing.\n where = %s\n want substring = %s", where, wantClause)
+	}
+	if len(args) == 0 || args[len(args)-1] != "^tech-" {
+		t.Errorf("args tail = %v, want last arg %q", args, "^tech-")
+	}
+}
+
 func TestSearchCountsSQLShape(t *testing.T) {
 	t.Parallel()
 

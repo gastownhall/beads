@@ -1,6 +1,6 @@
 ---
 title: "bd recall"
-description: "Retrieve a specific memory"
+description: "Retrieve the full content of a memory by its key."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

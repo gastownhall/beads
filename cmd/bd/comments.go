@@ -33,15 +33,16 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("comments is not supported in proxied-server mode")
-		}
 		evt := metrics.NewCommandEvent("comments")
 		defer func() {
 			if c := metrics.Global(); c != nil {
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runCommentsProxiedServer(cmd, rootCtx, args)
+		}
 
 		localTime, _ := cmd.Flags().GetBool("local-time")
 		issueID := args[0]
@@ -135,9 +136,6 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("comments add is not supported in proxied-server mode")
-		}
 		CheckReadonly("comment add")
 
 		evt := metrics.NewCommandEvent("comments-add")
@@ -146,6 +144,10 @@ Examples:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runCommentsAddProxiedServer(cmd, rootCtx, args)
+		}
 
 		issueID := args[0]
 

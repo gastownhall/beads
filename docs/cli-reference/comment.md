@@ -1,6 +1,6 @@
 ---
 title: "bd comment"
-description: "Add a comment to an issue"
+description: "Add a comment to an issue."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

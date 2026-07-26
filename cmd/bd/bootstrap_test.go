@@ -919,7 +919,10 @@ func TestBootstrapRigSubdirUsesParentDBName(t *testing.T) {
 	cfg, cfgErr := configfile.Load(synthesizedDir)
 	if cfgErr != nil || cfg == nil {
 		// This is the fix path: search parent directories for metadata.json
-		cfg = findParentConfig(synthesizedDir)
+		cfg, cfgErr = findParentConfig(synthesizedDir)
+		if cfgErr != nil {
+			t.Fatalf("findParentConfig: %v", cfgErr)
+		}
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
@@ -939,6 +942,37 @@ func TestBootstrapRigSubdirUsesParentDBName(t *testing.T) {
 	}
 }
 
+func TestFindParentConfigDoesNotSkipCorruptNearestAncestor(t *testing.T) {
+	root := t.TempDir()
+	higherBeadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(higherBeadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(higherBeadsDir, "metadata.json"), []byte(`{"dolt_database":"wrong_higher_database"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	nearestBeadsDir := filepath.Join(root, "workspace", ".beads")
+	if err := os.MkdirAll(nearestBeadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := []byte("{\n")
+	metadataPath := filepath.Join(nearestBeadsDir, "metadata.json")
+	if err := os.WriteFile(metadataPath, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	synthesizedDir := filepath.Join(root, "workspace", "rig", ".beads")
+	if cfg, err := findParentConfig(synthesizedDir); err == nil {
+		t.Fatalf("findParentConfig skipped corrupt nearest metadata and selected higher database %q", cfg.GetDoltDatabase())
+	} else if !strings.Contains(err.Error(), filepath.Join("workspace", ".beads", "metadata.json")) {
+		t.Fatalf("findParentConfig error = %v, want nearest metadata path", err)
+	}
+	if after, err := os.ReadFile(metadataPath); err != nil || string(after) != string(corrupt) {
+		t.Fatalf("corrupt nearest metadata changed: got %q, err %v", after, err)
+	}
+}
+
 // TestDetectBootstrapAction_SharedServerEnvUsesSharedPath verifies that when
 // BEADS_DOLT_SHARED_SERVER=1 is set but cfg.DoltMode is the default (embedded),
 // detectBootstrapAction looks in the shared-server directory — not embeddeddolt/.
@@ -955,9 +989,12 @@ func TestDetectBootstrapAction_SharedServerEnvUsesSharedPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Override HOME so SharedDoltDir() resolves to our temp directory
-	// instead of the real ~/.beads/shared-server/dolt/.
+	// Override the home dir so SharedDoltDir() resolves to our temp directory
+	// instead of the real ~/.beads/shared-server/dolt/. It goes through
+	// os.UserHomeDir(), which reads USERPROFILE on Windows and HOME elsewhere,
+	// so both must be set for this to be portable.
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	// Create a database directory at the shared-server location.
 	// SharedDoltDir() returns $HOME/.beads/shared-server/dolt/.
@@ -1052,7 +1089,10 @@ func TestDetectBootstrapAction_WorktreeSynthesizedDirPrefersSyncOverDefaultShare
 	synthesizedDir := filepath.Join(localBare, ".beads")
 	cfg, cfgErr := configfile.Load(synthesizedDir)
 	if cfgErr != nil || cfg == nil {
-		cfg = findParentConfig(synthesizedDir)
+		cfg, cfgErr = findParentConfig(synthesizedDir)
+		if cfgErr != nil {
+			t.Fatalf("findParentConfig: %v", cfgErr)
+		}
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
@@ -1093,7 +1133,11 @@ func TestDetectBootstrapAction_SynthesizedDirWithoutRecoveryStillUsesExistingSha
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 
 	homeDir := t.TempDir()
+	// detectBootstrapAction resolves the home dir with os.UserHomeDir(), which reads
+	// USERPROFILE on Windows and HOME elsewhere; set both so the shared-server probe
+	// looks inside the temp home on every platform.
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
 
 	worktreeDir := filepath.Join(t.TempDir(), "worktree")
 	if err := os.MkdirAll(worktreeDir, 0o750); err != nil {

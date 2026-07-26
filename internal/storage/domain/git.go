@@ -29,8 +29,9 @@ type GitRepository interface {
 }
 
 type GitCommitParams struct {
-	Message  string
-	NoVerify bool
+	Message   string
+	NoVerify  bool
+	SkipHooks bool
 }
 
 type GitCommitResult struct {
@@ -67,6 +68,7 @@ type CommitInitArtifactsParams struct {
 	OptionalPaths []string
 	Message       string
 	NoVerify      bool
+	SkipHooks     bool
 }
 
 type CommitInitArtifactsResult struct {
@@ -203,7 +205,11 @@ func (u *gitUseCaseImpl) CommitInitArtifacts(ctx context.Context, params CommitI
 		return CommitInitArtifactsResult{}, fmt.Errorf("CommitInitArtifacts: add: %w", err)
 	}
 
-	commit, err := u.repo.Commit(ctx, GitCommitParams{Message: params.Message, NoVerify: params.NoVerify})
+	commit, err := u.repo.Commit(ctx, GitCommitParams{
+		Message:   params.Message,
+		NoVerify:  params.NoVerify,
+		SkipHooks: params.SkipHooks,
+	})
 	if err != nil {
 		return CommitInitArtifactsResult{}, fmt.Errorf("CommitInitArtifacts: commit: %w", err)
 	}

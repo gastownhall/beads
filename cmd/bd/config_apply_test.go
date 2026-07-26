@@ -2,6 +2,8 @@ package main
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -124,6 +126,66 @@ func TestApplyServerDryRun(t *testing.T) {
 	// Without beads dir, should skip even in dry-run
 	if result.Status != applyStatusSkipped {
 		t.Errorf("expected status %q, got %q", applyStatusSkipped, result.Status)
+	}
+}
+
+func TestApplyServerSkipsWhenAutoStartDisabled(t *testing.T) {
+	tests := []struct {
+		name         string
+		autoStartEnv string
+		autoStartYML string
+	}{
+		{
+			name:         "environment disables auto-start",
+			autoStartEnv: "0",
+			autoStartYML: "true",
+		},
+		{
+			name:         "workspace config disables auto-start",
+			autoStartEnv: "",
+			autoStartYML: "false",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			beadsDir := filepath.Join(root, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatalf("create .beads: %v", err)
+			}
+			configYAML := "dolt:\n  shared-server: true\n  auto-start: " + tt.autoStartYML + "\n"
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(configYAML), 0o600); err != nil {
+				t.Fatalf("write config.yaml: %v", err)
+			}
+			sharedDir := filepath.Join(root, "shared-server")
+			t.Setenv("BEADS_DIR", beadsDir)
+			t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+			t.Setenv("BEADS_DOLT_AUTO_START", tt.autoStartEnv)
+			initConfigForTest(t)
+
+			for _, dryRun := range []bool{false, true} {
+				name := "apply"
+				if dryRun {
+					name = "dry-run"
+				}
+				t.Run(name, func(t *testing.T) {
+					result := applyServer(true, dryRun)
+					if result.Status != applyStatusSkipped {
+						t.Fatalf("status = %q, want %q: %+v", result.Status, applyStatusSkipped, result)
+					}
+					if result.Action != "start" {
+						t.Fatalf("action = %q, want %q", result.Action, "start")
+					}
+					if !strings.Contains(result.Message, "auto-start is disabled") || !strings.Contains(result.Message, "externally managed") {
+						t.Fatalf("message does not explain skip policy: %q", result.Message)
+					}
+					if _, err := os.Stat(sharedDir); !os.IsNotExist(err) {
+						t.Fatalf("applyServer created shared server state despite disabled auto-start: %v", err)
+					}
+				})
+			}
+		})
 	}
 }
 

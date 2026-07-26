@@ -3,6 +3,7 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -10,6 +11,12 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// ErrAmbiguousID is the sentinel wrapped into the error ResolvePartialID
+// returns when a partial ID matches more than one issue. Callers use
+// errors.Is(err, ErrAmbiguousID) to distinguish "ambiguous" from
+// "not found" and surface the candidate list instead of a generic failure.
+var ErrAmbiguousID = errors.New("ambiguous issue ID")
 
 // parseIssueID ensures an issue ID has the configured prefix.
 // If the input already has the prefix (e.g., "bd-a3f8e9"), returns it as-is.
@@ -151,10 +158,10 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 		if issueHash == hashPart {
 			exactMatch = id
 			// Don't break - keep searching in case there's a full ID match
-		}
-
-		// Check if the issue hash contains the input hash as substring
-		if strings.Contains(issueHash, hashPart) {
+		} else if strings.HasPrefix(issueHash, hashPart) {
+			// Leading-prefix abbreviation (documented UX, e.g. "a3f8" -> "a3f8e9...").
+			// HasPrefix rather than Contains: reject interior-substring matches
+			// like "kt8" inside "j0kt8" (GH#4234).
 			matches = append(matches, id)
 		}
 	}
@@ -182,10 +189,14 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 				} else {
 					wHash = wID
 				}
-				if wHash == hashPart {
+				// Wisp IDs are shaped "<prefix>-wisp-<hash>", so wHash here is
+				// the composite "wisp-<hash>". Strip the literal "wisp-" infix
+				// before comparing so bare-hash lookups (e.g. "t3st") resolve
+				// against the isolated hash, not the full "wisp-t3st" string.
+				wispHash := strings.TrimPrefix(wHash, "wisp-")
+				if wHash == hashPart || wispHash == hashPart {
 					exactMatch = wID
-				}
-				if strings.Contains(wHash, hashPart) {
+				} else if strings.HasPrefix(wispHash, hashPart) {
 					matches = append(matches, wID)
 				}
 			}
@@ -199,15 +210,13 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 		return "", fmt.Errorf("no issue found matching %q", input)
 	}
 
-	// Sort so the ambiguity error lists IDs deterministically. matches is built
-	// in SearchIssues return order, whose primary sort is created_at DESC; that
-	// order is not stable across backends (Postgres timestamp(0) vs Dolt), so an
-	// unsorted list makes the same ambiguous input print in different orders on
-	// different storage. Sorting by ID pins the message regardless of backend.
+	// Sort so the ambiguity error lists IDs deterministically. SearchIssues return
+	// order is not a contract for ambiguous matches, so sorting by ID pins the same
+	// message for every storage implementation.
 	sort.Strings(matches)
 
 	if len(matches) > 1 {
-		return "", fmt.Errorf("ambiguous ID %q matches %d issues: %v\nUse more characters to disambiguate", input, len(matches), matches)
+		return "", fmt.Errorf("%w: %q matches %d issues: %v\nUse more characters to disambiguate", ErrAmbiguousID, input, len(matches), matches)
 	}
 
 	return matches[0], nil

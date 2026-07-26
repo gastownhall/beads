@@ -144,7 +144,7 @@ func TestValidateCheck_DetectsOrphanedDeps(t *testing.T) {
 }
 
 func TestValidateCheck_GitConflicts_DoltClean(t *testing.T) {
-	// Since GetBackend() always returns "dolt" (SQLite removed in 87493ce9),
+	// When metadata is absent, GetBackend() defaults to "dolt",
 	// the Git Conflicts check now queries dolt_conflicts (GH-2249).
 	// Verify it reports OK for a clean Dolt database.
 	tmpDir, store := setupValidateTestDB(t, "val")

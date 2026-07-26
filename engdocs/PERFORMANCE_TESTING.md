@@ -82,7 +82,7 @@ Benchmarks automatically generate CPU profiles:
 make bench
 
 # View profile in browser (flamegraph)
-cd internal/storage/sqlite
+cd internal/storage/dolt
 go tool pprof -http=:8080 bench-cpu-*.prof
 ```
 
