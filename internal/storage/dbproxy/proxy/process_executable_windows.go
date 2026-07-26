@@ -18,7 +18,7 @@ func processExecutableBasename(pid int) (basename string, gone bool, err error) 
 		}
 		return "", false, err
 	}
-	defer windows.CloseHandle(process)
+	defer func() { _ = windows.CloseHandle(process) }()
 
 	buffer := make([]uint16, 32768)
 	size := uint32(len(buffer))

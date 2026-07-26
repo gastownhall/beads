@@ -32,7 +32,7 @@ func Capture(pid int) (Token, error) {
 	if err != nil {
 		return "", fmt.Errorf("procid: open process %d: %w", pid, err)
 	}
-	defer windows.CloseHandle(process)
+	defer func() { _ = windows.CloseHandle(process) }()
 	return tokenForProcess(process)
 }
 
@@ -44,7 +44,7 @@ func Verify(pid int, tok Token) (bool, error) {
 		}
 		return false, fmt.Errorf("procid: open process %d: %w", pid, err)
 	}
-	defer windows.CloseHandle(process)
+	defer func() { _ = windows.CloseHandle(process) }()
 	current, err := tokenForProcess(process)
 	if err != nil {
 		if errors.Is(err, errProcessExited) {
