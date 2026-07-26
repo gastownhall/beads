@@ -1149,6 +1149,62 @@ func TestCLI_CommentsListMisplacedSyntax(t *testing.T) {
 	}
 }
 
+// TestCLI_CommentsSwappedAddRejectedBeforeStoreOpen is a regression test for
+// GH#4642's should-fix: the swapped-order rejection (`bd comments <id> add
+// <text>`) must fire from commentsCmd's Args validator, before
+// PersistentPreRunE ever opens a store or runs a migration, and before
+// RunE's usesProxiedServer() dispatch — not from a check inside RunE that
+// only the local-store branch reaches. Using a directory with no .beads/ at
+// all proves the store was never touched: the old RunE-only check needed an
+// already-initialized store (PersistentPreRunE would have failed first with
+// "no beads database found"), so this would fail with the wrong error before
+// the fix.
+func TestCLI_CommentsSwappedAddRejectedBeforeStoreOpen(t *testing.T) {
+	noBeadsCwd := t.TempDir()
+	if _, err := os.Stat(filepath.Join(noBeadsCwd, ".beads")); err == nil {
+		t.Fatalf("test setup: %s unexpectedly has a .beads dir", noBeadsCwd)
+	}
+
+	stdout, stderr, err := runBDInProcessAllowError(t, noBeadsCwd, "comments", "bd-123", "add", "should not be stored")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for swapped-order add, got success:\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if strings.Contains(combined, "no beads database found") {
+		t.Fatalf("Args validation did not run before store open: got the pre-fix error.\nOutput:\n%s", combined)
+	}
+	if !strings.Contains(combined, "bd comments add") {
+		t.Errorf("expected hint pointing to `bd comments add`, got:\n%s", combined)
+	}
+}
+
+// TestCLI_CommentsSwappedAddRejectedInProxiedServerMode is the proxied-server
+// counterpart: forcing proxiedServerMode simulates the dispatch that GH#4642's
+// merge-base drift routes around a RunE-only check (main added
+// runCommentsProxiedServer after this fix branched, consuming only args[0]
+// and ignoring trailing `add <text>`). Because validateCommentsArgs runs in
+// Args — before RunE ever branches on usesProxiedServer() — the rejection
+// fires identically regardless of backend, without needing a real proxied
+// server.
+func TestCLI_CommentsSwappedAddRejectedInProxiedServerMode(t *testing.T) {
+	origProxied := proxiedServerMode
+	t.Cleanup(func() { proxiedServerMode = origProxied })
+	proxiedServerMode = true
+
+	tmpDir := setupCLITestDB(t)
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comments", "bd-123", "add", "should not be stored")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for swapped-order add in proxied-server mode, got success:\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if strings.Contains(combined, "not supported in proxied-server mode") {
+		t.Fatalf("Args validation did not run before the proxied dispatch: got RunE's proxied-mode stub error instead.\nOutput:\n%s", combined)
+	}
+	if !strings.Contains(combined, "bd comments add") {
+		t.Errorf("expected hint pointing to `bd comments add`, got:\n%s", combined)
+	}
+}
+
 // TestCLI_CommentsAddShortID tests that 'comments add' accepts short IDs (issue #1070)
 // Most bd commands accept short IDs (e.g., "5wbm") but comments add previously required
 // full IDs (e.g., "mike.vibe-coding-5wbm"). This test ensures short IDs work.
