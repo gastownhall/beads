@@ -174,7 +174,11 @@ items, plus:
 - `description` (string)
 - `acceptance_criteria` (string)
 - `dependencies` (object[]): Full dependency records
-- `comments` (object[]): Comment thread
+- `comments` (object[]): Comment thread — present only with `--include-comments`;
+  the default response returns `comment_count` only (count-only, be-ijck6q)
+- `comments_omitted` (boolean, optional): `true` only when `comment_count` is
+  nonzero and `comments` was left out of the response (no `--include-comments`).
+  Absent when comments were included or when there are none to omit (ga-clgh)
 
 ### `import --json`
 

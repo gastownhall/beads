@@ -2,7 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/types"
@@ -11,6 +17,144 @@ import (
 // =============================================================================
 // Cook Tests (gt-8tmz.23: Compile-time vs Runtime Cooking)
 // =============================================================================
+
+func TestRunCookRejectsInvalidEnumVariable(t *testing.T) {
+	formulaDir := t.TempDir()
+	formulaPath := filepath.Join(formulaDir, "enum-validation.formula.toml")
+	formulaTOML := `formula = "enum-validation"
+version = 1
+type = "workflow"
+
+[vars.policy]
+required = true
+enum = ["merge-completes", "tracking-only"]
+
+[[steps]]
+id = "publish"
+title = "Publish with {{policy}}"
+`
+	if err := os.WriteFile(formulaPath, []byte(formulaTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		formulaArg  string
+		searchPaths []string
+	}{
+		{
+			name:       "exact path",
+			formulaArg: formulaPath,
+		},
+		{
+			name:        "registry name",
+			formulaArg:  "enum-validation",
+			searchPaths: []string{formulaDir},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newCookValidationTestCommand(tt.searchPaths, "policy=merge-comtes")
+			stdout, stderr, err := runCookCapturingOutput(t, cmd, tt.formulaArg)
+			if err == nil {
+				t.Fatal("runCook accepted a value outside the declared enum")
+			}
+			if stdout != "" {
+				t.Fatalf("runCook stdout = %q, want no dry-run output after validation failure", stdout)
+			}
+			if !strings.Contains(stderr, `variable "policy": value "merge-comtes" not in allowed values [merge-completes tracking-only]`) {
+				t.Fatalf("runCook stderr = %q", stderr)
+			}
+
+			cmd = newCookValidationTestCommand(tt.searchPaths, "policy=merge-completes")
+			stdout, stderr, err = runCookCapturingOutput(t, cmd, tt.formulaArg)
+			if err != nil {
+				t.Fatalf("runCook rejected a declared enum value: %v; stderr = %q", err, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("runCook stderr = %q, want no error output for a declared enum value", stderr)
+			}
+			if !strings.Contains(stdout, "Dry run: would cook formula enum-validation") {
+				t.Fatalf("runCook stdout = %q, want the captured dry-run preview", stdout)
+			}
+		})
+	}
+}
+
+func runCookCapturingOutput(t *testing.T, cmd *cobra.Command, formulaArg string) (string, string, error) {
+	t.Helper()
+
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	defer stdoutReader.Close()
+
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		_ = stdoutReader.Close()
+		_ = stdoutWriter.Close()
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	defer stderrReader.Close()
+
+	type captureResult struct {
+		output string
+		err    error
+	}
+	drain := func(reader *os.File) <-chan captureResult {
+		done := make(chan captureResult, 1)
+		go func() {
+			output, readErr := io.ReadAll(reader)
+			done <- captureResult{output: string(output), err: readErr}
+		}()
+		return done
+	}
+	stdoutDone := drain(stdoutReader)
+	stderrDone := drain(stderrReader)
+
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	os.Stdout = stdoutWriter
+	os.Stderr = stderrWriter
+
+	runErr := func() error {
+		defer func() {
+			os.Stdout = oldStdout
+			os.Stderr = oldStderr
+			_ = stdoutWriter.Close()
+			_ = stderrWriter.Close()
+		}()
+		return runCook(cmd, []string{formulaArg})
+	}()
+
+	stdout := <-stdoutDone
+	stderr := <-stderrDone
+	if stdout.err != nil {
+		t.Fatalf("read stdout: %v", stdout.err)
+	}
+	if stderr.err != nil {
+		t.Fatalf("read stderr: %v", stderr.err)
+	}
+
+	return stdout.output, stderr.output, runErr
+}
+
+func newCookValidationTestCommand(searchPaths []string, variable string) *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("dry-run", true, "")
+	cmd.Flags().Bool("persist", false, "")
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().StringSlice("search-path", searchPaths, "")
+	cmd.Flags().String("prefix", "", "")
+	cmd.Flags().StringArray("var", []string{variable}, "")
+	cmd.Flags().String("mode", "", "")
+	return cmd
+}
 
 // TestSubstituteFormulaVars tests variable substitution in formulas
 func TestSubstituteFormulaVars(t *testing.T) {

@@ -88,6 +88,20 @@ func TestProxiedServerReady(t *testing.T) {
 		}
 	})
 
+	t.Run("label_pattern_and_regex_filter", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rdlpr")
+		matched := bdProxiedCreate(t, bd, p.dir, "Matched", "--label", "tech-debt")
+		bdProxiedCreate(t, bd, p.dir, "Unmatched", "--label", "product")
+
+		for _, args := range [][]string{{"--label-pattern", "tech-*"}, {"--label-regex", "^tech-(debt|legacy)$"}} {
+			ready := bdProxiedReadyJSON(t, bd, p, args...)
+			if len(ready) != 1 || ready[0].ID != matched.ID {
+				t.Errorf("bd ready %s = %#v, want only %s", strings.Join(args, " "), ready, matched.ID)
+			}
+		}
+	})
+
 	t.Run("default_text_output", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rdt")

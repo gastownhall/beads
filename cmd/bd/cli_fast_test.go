@@ -696,6 +696,15 @@ func TestCLI_Import(t *testing.T) {
 var testBD string
 
 func init() {
+	// Helper-process re-execs (worktree_remove_test.go's
+	// runWorktreeRemoveProcess) run this init in a child whose cwd is a temp
+	// git repo: the repo-root probe below misses and the `go build .`
+	// fallback panics with "cannot find main module" — which is what six
+	// Main integration shards reported at cd25e0919. The helper never uses
+	// testBD, so skip the work entirely in that child.
+	if os.Getenv(worktreeRemoveHelperEnv) != "" {
+		return
+	}
 	// Use existing bd binary from repo root if available, otherwise build once
 	bdBinary := "bd"
 	if runtime.GOOS == "windows" {

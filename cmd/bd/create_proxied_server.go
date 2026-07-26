@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -11,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
@@ -109,11 +112,7 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 			}
 		}
 		if in.status != "" {
-			customStatuses, err := uw.ConfigUseCase().GetCustomStatuses(ctx)
-			if err != nil {
-				return nil, "", fmt.Errorf("failed to get custom statuses: %w", err)
-			}
-			if !types.Status(in.status).IsValidWithCustom(types.CustomStatusNames(customStatuses)) {
+			if !types.Status(in.status).IsValidWithCustom(types.CustomStatusNames(cctx.CustomStatuses)) {
 				return nil, "", fmt.Errorf("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", in.status)
 			}
 		}
@@ -388,15 +387,19 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 			return HandleError("open unit of work: %v", err)
 		}
 		cctx, err := dryUW.ConfigUseCase().LoadCreateContext(ctx)
-		dryUW.Close(ctx)
 		if err != nil {
+			dryUW.Close(ctx)
 			return HandleError("load create context: %v", err)
 		}
-		if err := validateGraphApplyPlan(&plan, resolveProxiedCustomTypes(cctx.CustomTypes)); err != nil {
+		// Keep the UOW open through validation: the explicit-ID collision
+		// preflight reads through it.
+		_, err = validateProxiedGraphPlan(&plan, in, cctx, uowIssueExists(ctx, dryUW))
+		dryUW.Close(ctx)
+		if err != nil {
 			return HandleError("invalid graph plan: %v", err)
 		}
-		if err := emitGraphApplyDryRun(&plan); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		if err := emitGraphApplyDryRun(&plan, in.graphApplyOptions()); err != nil {
+			return HandleError("%v", err)
 		}
 		return nil
 	}
@@ -417,13 +420,18 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 			return nil, "", fmt.Errorf("load create context: %w", err)
 		}
 
-		if err := validateGraphApplyPlan(&plan, resolveProxiedCustomTypes(cctx.CustomTypes)); err != nil {
+		// validateProxiedGraphPlan enforces a uniform storage class, so its
+		// resolved useWisp decides which table the whole plan routes to. The
+		// collision preflight runs inside this transaction, so it cannot race
+		// a concurrent create of the same explicit ID.
+		useWisp, err := validateProxiedGraphPlan(&plan, in, cctx, uowIssueExists(ctx, uw))
+		if err != nil {
 			return nil, "", fmt.Errorf("invalid graph plan: %w", err)
 		}
 
 		var result domain.GraphApplyResult
 		var applyErr error
-		if in.ephemeral {
+		if useWisp {
 			result, applyErr = uw.IssueUseCase().ApplyWispGraph(ctx, domainPlan, in.createdBy)
 		} else {
 			result, applyErr = uw.IssueUseCase().ApplyIssueGraph(ctx, domainPlan, in.createdBy)
@@ -458,65 +466,90 @@ func runCreateProxiedGraph(_ *cobra.Command, ctx context.Context, in createInput
 	return nil
 }
 
+// validateProxiedGraphPlan runs full plan validation for proxied-server mode:
+// shared plan checks, uniform storage class (proxied routes the whole plan to
+// one table), explicit-ID prefix checks against the server's config, and the
+// explicit-ID collision preflight through the unit of work's issue lookup.
+// The returned useWisp is the plan-wide table routing decision.
+func validateProxiedGraphPlan(plan *GraphApplyPlan, in createInput, cctx domain.CreateContext, issueExists func(id string) (bool, error)) (useWisp bool, err error) {
+	cfg := graphPlanConfig{
+		customTypes: resolveProxiedCustomTypes(cctx.CustomTypes),
+		// No YAML fallback for statuses — the server database is authoritative
+		// (that's where 'bd config set status.custom' writes) and statuses are
+		// store-only everywhere (single-issue create, list filters), unlike
+		// custom types.
+		customStatuses:  types.CustomStatusNames(cctx.CustomStatuses),
+		dbPrefix:        overlayYAMLPrefix(cctx.IssuePrefix),
+		allowedPrefixes: cctx.AllowedPrefixes,
+		issueExists:     issueExists,
+	}
+	return validateFullGraphPlan(plan, cfg, in.graphApplyOptions(), true)
+}
+
+// uowIssueExists adapts a unit of work's issue lookups to the plan
+// validator's explicit-ID collision probe, bound to the caller's context so
+// in-transaction validation reads its own transaction. Issues and wisps share
+// one ID space but the domain getters are per-table, so probe both.
+func uowIssueExists(ctx context.Context, uw uow.UnitOfWork) func(id string) (bool, error) {
+	isNotFound := func(err error) bool {
+		return errors.Is(err, storage.ErrNotFound) || errors.Is(err, sql.ErrNoRows)
+	}
+	return func(id string) (bool, error) {
+		if _, err := uw.IssueUseCase().GetIssue(ctx, id); err == nil {
+			return true, nil
+		} else if !isNotFound(err) {
+			return false, err
+		}
+		if _, err := uw.IssueUseCase().GetWisp(ctx, id); err == nil {
+			return true, nil
+		} else if !isNotFound(err) {
+			return false, err
+		}
+		return false, nil
+	}
+}
+
+// graphApplyNodeIssue path (full issue-model parity with `bd create`).
 func buildDomainGraphPlan(plan GraphApplyPlan, in createInput) (domain.GraphPlan, error) {
+	opts := in.graphApplyOptions()
 	nodes := make([]domain.GraphNode, 0, len(plan.Nodes))
 	for _, n := range plan.Nodes {
-		issue, err := materializeGraphNodeIssue(n, in)
+		issue, err := graphApplyNodeIssue(n, opts, in.createdBy, in.owner)
 		if err != nil {
-			return domain.GraphPlan{}, err
+			return domain.GraphPlan{}, fmt.Errorf("invalid graph plan: %w", err)
+		}
+		deps := make([]domain.GraphNodeDep, 0, len(n.Deps))
+		for _, d := range n.Deps {
+			deps = append(deps, domain.GraphNodeDep{
+				Type:   graphApplyDependencyType(d.Type),
+				Target: d.Target,
+			})
 		}
 		nodes = append(nodes, domain.GraphNode{
 			Key:               n.Key,
 			Issue:             issue,
-			ParentKey:         n.ParentKey,
+			ParentKey:         n.effectiveParentKey(),
 			ParentID:          n.ParentID,
 			Assignee:          n.Assignee,
 			AssignAfterCreate: n.AssignAfterCreate,
 			MetadataRefs:      n.MetadataRefs,
 			Labels:            n.Labels,
+			Deps:              deps,
 		})
 	}
 	edges := make([]domain.GraphEdge, 0, len(plan.Edges))
 	for _, e := range plan.Edges {
 		edges = append(edges, domain.GraphEdge{
-			FromKey: e.FromKey,
-			FromID:  e.FromID,
-			ToKey:   e.ToKey,
-			ToID:    e.ToID,
-			Type:    graphApplyDependencyType(e.Type),
+			FromKey:    e.FromKey,
+			FromID:     e.FromID,
+			ToKey:      e.ToKey,
+			ToID:       e.ToID,
+			Type:       graphApplyDependencyType(e.Type),
+			Gate:       e.Gate,
+			SpawnerKey: e.SpawnerKey,
+			SpawnerID:  e.SpawnerID,
+			ThreadID:   e.ThreadID,
 		})
 	}
 	return domain.GraphPlan{Nodes: nodes, Edges: edges}, nil
-}
-
-func materializeGraphNodeIssue(n GraphApplyNode, in createInput) (*types.Issue, error) {
-	issueType := types.IssueType(n.Type)
-	if issueType == "" {
-		issueType = types.TypeTask
-	}
-	priority := 2
-	if n.Priority != nil {
-		priority = *n.Priority
-	}
-	var metadataJSON json.RawMessage
-	if len(n.Metadata) > 0 {
-		raw, err := json.Marshal(n.Metadata)
-		if err != nil {
-			return nil, HandleError("node %q: marshaling metadata: %v", n.Key, err)
-		}
-		metadataJSON = raw
-	}
-	return &types.Issue{
-		Title:       n.Title,
-		Description: n.Description,
-		IssueType:   issueType,
-		Status:      types.StatusOpen,
-		Priority:    priority,
-		Labels:      n.Labels,
-		Metadata:    metadataJSON,
-		Ephemeral:   in.ephemeral,
-		NoHistory:   in.noHistory,
-		CreatedBy:   in.createdBy,
-		Owner:       in.owner,
-	}, nil
 }

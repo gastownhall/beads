@@ -286,14 +286,13 @@ func proxiedCommitCount(t *testing.T, bd string, p proxiedProject) int {
 }
 
 func TestProxiedServerCleanDatabases(t *testing.T) {
-	requireSharedProxiedServer(t)
+	requireProxiedServerEnv(t)
 	t.Parallel()
 	bd := buildEmbeddedBD(t)
-	p := newSharedProxiedProject(t, bd, "clean")
+	p := bdProxiedInit(t, bd, "clean")
 
-	suffix := strings.ReplaceAll(p.database, "bdtest_", "")
-	staleDB := fmt.Sprintf("testdb_clean_probe_%s", suffix)
-	keepDB := fmt.Sprintf("keepdb_clean_probe_%s", suffix)
+	staleDB := "testdb_clean_probe"
+	keepDB := "keepdb_clean_probe"
 	bdProxiedSQL(t, bd, p.dir, "CREATE DATABASE "+staleDB)
 	bdProxiedSQL(t, bd, p.dir, "CREATE DATABASE "+keepDB)
 	t.Cleanup(func() {

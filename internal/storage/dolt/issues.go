@@ -243,17 +243,21 @@ func (s *DoltStore) UpdateIssueChecked(ctx context.Context, id string, updates m
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
 	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
 	if s.isActiveWisp(ctx, id) {
-		return s.updateWispChecked(ctx, id, updates, actor, opts.ExpectedVersion)
+		return s.updateWispChecked(ctx, id, updates, actor, opts)
 	}
 
 	// If updating a regular issue to no-history or ephemeral, migrate it to the
-	// wisps table instead of updating in-place (mirrors UpdateIssue). The version
-	// check shares the demotion transaction so the CAS stays atomic on this path.
+	// wisps table instead of updating in-place (mirrors UpdateIssue). The
+	// precondition checks share the demotion transaction so the CAS stays
+	// atomic on this path.
 	_, settingNoHistory := updates["no_history"]
 	_, settingWisp := updates["wisp"]
 	if settingNoHistory || settingWisp {
 		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
 			if err := checkExpectedVersionInTx(ctx, tx, id, opts.ExpectedVersion); err != nil {
+				return err
+			}
+			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
 				return err
 			}
 			return s.demoteToWispInTx(ctx, tx, id, updates, actor)
@@ -263,30 +267,47 @@ func (s *DoltStore) UpdateIssueChecked(ctx context.Context, id string, updates m
 	// Wrap in withRetryTx exactly like UpdateIssue so a concurrent writer that
 	// loses Dolt's optimistic commit-time merge (MySQL 1213/1205, guaranteed
 	// server-side rollback) is retried rather than surfaced as a hard failure.
-	// A version mismatch (storage.ErrVersionMismatch) is NOT a serialization
-	// error, so withRetryTx surfaces it permanently and the transaction rolls
-	// back — no update and no event are written (the atomic-refuse property). A
+	// A precondition mismatch (storage.ErrVersionMismatch /
+	// ErrAssigneeMismatch / ErrStatusMismatch) is NOT a serialization error, so
+	// withRetryTx surfaces it permanently and the transaction rolls back — no
+	// update and no event are written (the atomic-refuse property). A
 	// concurrent write that commits DURING this tx collides on the row_lock cell
-	// and is replayed by withRetryTx, which re-reads the new version here and
+	// and is replayed by withRetryTx, which re-reads the preconditions here and
 	// refuses. withRetryTx owns BeginTx and the final Commit.
-	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		if err := checkExpectedVersionInTx(ctx, tx, id, opts.ExpectedVersion); err != nil {
-			return err
-		}
-		if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
-			return err
-		}
+	write := func() error {
+		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			if err := checkExpectedVersionInTx(ctx, tx, id, opts.ExpectedVersion); err != nil {
+				return err
+			}
+			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
+				return err
+			}
+			if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
+				return err
+			}
 
-		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
-		}
-		commitMsg := fmt.Sprintf("bd: update %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
-			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-			return fmt.Errorf("dolt commit: %w", err)
-		}
-		return nil
-	})
+			for _, table := range []string{"issues", "events"} {
+				_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+			}
+			commitMsg := fmt.Sprintf("bd: update %s", id)
+			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+				return fmt.Errorf("dolt commit: %w", err)
+			}
+			return nil
+		})
+	}
+
+	// A guarded update that writes the coordination fields (a reassign or a
+	// claim-on-behalf, bd-wsqvw) is claim-family: resolve it by verify-by-re-read
+	// (bd-zccb9) instead of trusting the exit status. Safe to replay after a
+	// verified rollback — the guards are re-checked inside the replayed
+	// transaction, so a racing writer makes the replay refuse rather than
+	// clobber. Unguarded or non-coordination updates keep their exit status.
+	if post, ok := guardedUpdatePostcondition(opts, updates); ok {
+		return s.verifiedClaimWrite(ctx, id, post, write)
+	}
+	return write()
 }
 
 // ClaimIssue atomically claims an issue using compare-and-swap semantics.
