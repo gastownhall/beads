@@ -303,6 +303,161 @@ func TestPRPreflightPlatformsRunsTestScriptPrebuiltBinaryContract(t *testing.T) 
 	}
 }
 
+func TestRepositoryTextEOLPolicyWorkflow(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "check-doc-freshness-platforms")
+
+	if want := "${{ matrix.os }}"; job.RunsOn != want {
+		t.Errorf("check-doc-freshness-platforms runs-on = %q, want %q", job.RunsOn, want)
+	}
+	wantMatrix := map[string]string{
+		"ubuntu-latest":  "linux",
+		"macos-latest":   "darwin",
+		"windows-latest": "windows",
+	}
+	if len(job.Strategy.Matrix.OS) != 0 {
+		t.Errorf("check-doc-freshness-platforms retains an unbound os-list matrix: %v", job.Strategy.Matrix.OS)
+	}
+	if got, want := len(job.Strategy.Matrix.Include), len(wantMatrix); got != want {
+		t.Fatalf("check-doc-freshness-platforms include tuple count = %d, want %d", got, want)
+	}
+	seen := make(map[string]bool, len(wantMatrix))
+	for _, tuple := range job.Strategy.Matrix.Include {
+		wantGOOS, ok := wantMatrix[tuple.OS]
+		if !ok {
+			t.Errorf("unexpected check-doc-freshness-platforms runner tuple: %+v", tuple)
+			continue
+		}
+		if seen[tuple.OS] {
+			t.Errorf("duplicate check-doc-freshness-platforms runner tuple for %q", tuple.OS)
+		}
+		seen[tuple.OS] = true
+		if tuple.ExpectedGOOS != wantGOOS {
+			t.Errorf("runner %q expected_goos = %q, want %q", tuple.OS, tuple.ExpectedGOOS, wantGOOS)
+		}
+		if tuple.Coverage || tuple.TestFlags != "" {
+			t.Errorf(
+				"runner %q has unexpected shared matrix fields: coverage=%t test-flags=%q",
+				tuple.OS,
+				tuple.Coverage,
+				tuple.TestFlags,
+			)
+		}
+		if len(tuple.Extra) != 0 {
+			t.Errorf("runner %q has unexpected matrix fields: %v", tuple.OS, tuple.Extra)
+		}
+	}
+
+	docStep := job.step(t, "Exercise native date and Bash process boundary")
+	const wantDocCommand = "go test '-tags=integration,gms_pure_go' -count=1 -run '^TestDocFreshness' ./scripts"
+	if docStep.Run != wantDocCommand {
+		t.Errorf("doc-freshness command = %q, want exact original %q", docStep.Run, wantDocCommand)
+	}
+
+	eolStep := job.step(t, "Exercise repository text EOL policy boundary")
+	const wantEOLCommand = "go test '-tags=integration,gms_pure_go' -count=1 ./scripts/gitattributespolicy -args -required-host -expected-goos '${{ matrix.expected_goos }}'"
+	if eolStep.Run != wantEOLCommand {
+		t.Errorf("repository EOL command = %q, want %q", eolStep.Run, wantEOLCommand)
+	}
+	if eolStep.If != "" {
+		t.Errorf("repository EOL step has conditional if = %q", eolStep.If)
+	}
+	if strings.Contains(eolStep.Run, "-run") {
+		t.Errorf("repository EOL step may not filter the narrow package: %q", eolStep.Run)
+	}
+	if job.stepIndex(t, "Exercise native date and Bash process boundary") >=
+		job.stepIndex(t, "Exercise repository text EOL policy boundary") {
+		t.Error("repository EOL step must remain separate and follow doc freshness")
+	}
+
+	gate := workflow.job(t, "ci-gate")
+	if !contains(gate.Needs, "check-doc-freshness-platforms") {
+		t.Errorf("ci-gate does not need check-doc-freshness-platforms: %v", gate.Needs)
+	}
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	const gateKey = "CHECK_DOC_FRESHNESS_PLATFORMS"
+	if want := "${{ needs.check-doc-freshness-platforms.result }}"; gateEnv[gateKey] != want {
+		t.Errorf("ci-gate env %s = %q, want %q", gateKey, gateEnv[gateKey], want)
+	}
+	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), gateKey) {
+		t.Errorf("ci-gate CI_GATE_REQUIRED does not include %q", gateKey)
+	}
+}
+
+func TestPRCIGateHostBinding(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	gate := workflow.job(t, "ci-gate")
+	if gate.RunsOn != "ubuntu-latest" {
+		t.Errorf("ci-gate runs-on = %q, want ubuntu-latest", gate.RunsOn)
+	}
+
+	step := gate.step(t, "Evaluate CI gate")
+	const wantShell = "/usr/bin/env -u BASH_ENV -u ENV -u BASHOPTS -u SHELLOPTS /usr/bin/bash --noprofile --norc -p -euo pipefail {0}"
+	if step.Shell != wantShell {
+		t.Errorf("ci-gate shell = %q, want %q", step.Shell, wantShell)
+	}
+	if step.If != "" {
+		t.Errorf("Evaluate CI gate has conditional if = %q", step.If)
+	}
+
+	const wantRun = `host_kernel="$(/usr/bin/uname -s)"
+if [[ "$host_kernel" != "Linux" ]]; then
+  echo "::error::ci-gate requires Linux from /usr/bin/uname, got '$host_kernel'"
+  exit 1
+fi
+if [[ "$BASH" != "/usr/bin/bash" ]]; then
+  echo "::error::ci-gate requires /usr/bin/bash, got '$BASH'"
+  exit 1
+fi
+if [[ -z "${GITHUB_WORKSPACE:-}" || "$GITHUB_WORKSPACE" != /* ]]; then
+  echo "::error::ci-gate requires a nonempty POSIX-absolute GITHUB_WORKSPACE, got '${GITHUB_WORKSPACE:-<unset>}'"
+  exit 1
+fi
+if [[ "$PWD" != "$GITHUB_WORKSPACE" ]]; then
+  echo "::error::ci-gate requires PWD to equal GITHUB_WORKSPACE, got PWD='$PWD' workspace='$GITHUB_WORKSPACE'"
+  exit 1
+fi
+skipped_ok=""
+if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
+  skipped_ok="CHECK_NO_BEADS_CHANGES"
+fi
+export CI_GATE_SKIPPED_OK="$skipped_ok"
+exec /usr/bin/bash --noprofile --norc -p -euo pipefail -- .github/scripts/ci-gate.sh`
+	if strings.TrimSpace(step.Run) != wantRun {
+		t.Errorf("ci-gate run script is not the protected host-bound exec sequence:\n%s", step.Run)
+	}
+	const finalExec = "exec /usr/bin/bash --noprofile --norc -p -euo pipefail -- .github/scripts/ci-gate.sh"
+	if strings.Count(step.Run, finalExec) != 1 {
+		t.Errorf("ci-gate must exec its fixed repo-local script through privileged Bash exactly once:\n%s", step.Run)
+	}
+	for _, forbidden := range []string{
+		"source .github/scripts/ci-gate.sh",
+		". .github/scripts/ci-gate.sh",
+		"bash .github/scripts/ci-gate.sh",
+		"/usr/bin/bash .github/scripts/ci-gate.sh",
+		"exec bash ",
+	} {
+		if strings.Contains(step.Run, forbidden) {
+			t.Errorf("ci-gate contains a source or ambient-shell fallback through %q", forbidden)
+		}
+	}
+	if strings.Count(step.Run, ".github/scripts/ci-gate.sh") != 1 {
+		t.Errorf("ci-gate script path must occur only in the final exec:\n%s", step.Run)
+	}
+
+	const gateKey = "CHECK_DOC_FRESHNESS_PLATFORMS"
+	if !contains(gate.Needs, "check-doc-freshness-platforms") {
+		t.Errorf("ci-gate does not need check-doc-freshness-platforms: %v", gate.Needs)
+	}
+	gateEnv := step.Env
+	if want := "${{ needs.check-doc-freshness-platforms.result }}"; gateEnv[gateKey] != want {
+		t.Errorf("ci-gate env %s = %q, want %q", gateKey, gateEnv[gateKey], want)
+	}
+	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), gateKey) {
+		t.Errorf("ci-gate CI_GATE_REQUIRED does not include %q", gateKey)
+	}
+}
+
 func TestGoCacheOwnershipTopology(t *testing.T) {
 	workflows := map[string]ciWorkflow{
 		"main.yml":    readCIWorkflow(t, "main.yml"),
@@ -802,9 +957,11 @@ type ciWorkflowMatrix struct {
 }
 
 type ciWorkflowMatrixInclude struct {
-	OS        string `yaml:"os"`
-	Coverage  bool   `yaml:"coverage"`
-	TestFlags string `yaml:"test-flags"`
+	OS           string         `yaml:"os"`
+	ExpectedGOOS string         `yaml:"expected_goos"`
+	Coverage     bool           `yaml:"coverage"`
+	TestFlags    string         `yaml:"test-flags"`
+	Extra        map[string]any `yaml:",inline"`
 }
 
 type ciWorkflowStep struct {
