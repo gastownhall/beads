@@ -14,10 +14,11 @@ func TestIsBackupAutoEnabled(t *testing.T) {
 	// Cannot be parallel: modifies global primeHasGitRemote and env vars.
 
 	tests := []struct {
-		name       string
-		envVal     string // "\x00" = not set, "" = set to empty, "true"/"false"/"0" = explicit
-		hasRemote  bool
-		wantResult bool
+		name         string
+		envVal       string // "\x00" = not set, "" = set to empty, "true"/"false"/"0" = explicit
+		hasRemote    bool
+		sharedServer bool // BEADS_DOLT_SHARED_SERVER=1 → usesSQLServer() true
+		wantResult   bool
 	}{
 		{
 			name:       "default + git remote → enabled",
@@ -55,6 +56,25 @@ func TestIsBackupAutoEnabled(t *testing.T) {
 			hasRemote:  true,
 			wantResult: false,
 		},
+		{
+			// wy-zrmqr: unset default must NOT auto-enable in sql-server
+			// mode even with a git remote — N clients racing one backup
+			// name was the storm amplifier in the 2026-07 CPU-pin incident.
+			name:         "default + git remote + sql-server mode → disabled",
+			envVal:       "\x00",
+			hasRemote:    true,
+			sharedServer: true,
+			wantResult:   false,
+		},
+		{
+			// Explicit opt-in still honored in sql-server mode: operators
+			// who coordinate destinations themselves may turn it on.
+			name:         "explicit true + sql-server mode → enabled",
+			envVal:       "true",
+			hasRemote:    false,
+			sharedServer: true,
+			wantResult:   true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -63,6 +83,13 @@ func TestIsBackupAutoEnabled(t *testing.T) {
 			orig := primeHasGitRemote
 			primeHasGitRemote = func() bool { return tt.hasRemote }
 			t.Cleanup(func() { primeHasGitRemote = orig })
+
+			if tt.sharedServer {
+				t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+			} else {
+				os.Unsetenv("BEADS_DOLT_SHARED_SERVER")
+				t.Cleanup(func() { os.Unsetenv("BEADS_DOLT_SHARED_SERVER") })
+			}
 
 			// Set env var: "\x00" = unset, anything else = set to that value
 			if tt.envVal == "\x00" {

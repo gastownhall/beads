@@ -236,7 +236,15 @@ func (p *Parser) parseComparison() (Node, error) {
 		return nil, fmt.Errorf("expected field name at position %d, got %s", p.current.Pos, p.current.Type.String())
 	}
 
+	// Field names are case-insensitive, but the key suffix of a
+	// metadata.<key> field keeps its original case: metadata keys are
+	// case-sensitive JSON keys (has_metadata_key and the --metadata flag
+	// already preserve case), so lowercasing it would make mixed-case keys
+	// silently unqueryable.
 	field := strings.ToLower(p.current.Value)
+	if strings.HasPrefix(field, "metadata.") && len(field) > len("metadata.") {
+		field = "metadata." + p.current.Value[len("metadata."):]
+	}
 	if err := p.advance(); err != nil {
 		return nil, err
 	}

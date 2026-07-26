@@ -157,6 +157,81 @@ func TestBatchPush_SkipsUnchangedIssue(t *testing.T) {
 	}
 }
 
+// TestBatchPush_SkipsUnchangedIssueWithPreformattedDescription verifies that
+// BatchPush skip semantics still work when descriptions were pre-formatted by
+// the engine's FormatDescription hook (BuildLinearDescription). This guards
+// against double-formatting during skip comparison.
+func TestBatchPush_SkipsUnchangedIssueWithPreformattedDescription(t *testing.T) {
+	var updateCalled bool
+	formattedDescription := "Base body\n\n## Acceptance Criteria\nMust pass"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req GraphQLRequest
+		_ = json.Unmarshal(body, &req)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case strings.Contains(req.Query, "TeamStates"):
+			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
+		case strings.Contains(req.Query, "IssueByIdentifier"):
+			json.NewEncoder(w).Encode(issueByIdentifierResp(
+				"remote-uuid", "TEAM-1", "My Issue", formattedDescription, 0,
+				"state-open", "Backlog", "backlog",
+			))
+		case strings.Contains(req.Query, "issueUpdate"):
+			updateCalled = true
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"issueUpdate": map[string]interface{}{
+						"success": true,
+						"issue":   map[string]interface{}{"id": "remote-uuid", "url": "https://linear.app/team/issue/TEAM-1", "updatedAt": "2026-01-01T00:00:00Z"},
+					},
+				},
+			})
+		}
+	}))
+	defer server.Close()
+
+	cfg := DefaultMappingConfig()
+	cfg.ExplicitStateMap = map[string]string{"backlog": "open"}
+
+	extRef := "https://linear.app/team/issue/TEAM-1"
+	local := &types.Issue{
+		ID:                 "local-1",
+		Title:              "My Issue",
+		Description:        formattedDescription,
+		AcceptanceCriteria: "Must pass",
+		Status:             types.StatusOpen,
+		Priority:           4,
+		ExternalRef:        &extRef,
+	}
+
+	tr := &Tracker{
+		teamIDs: []string{"team-1"},
+		clients: map[string]*Client{
+			"team-1": NewClient("key", "team-1").WithEndpoint(server.URL),
+		},
+		config: cfg,
+	}
+
+	result, err := tr.BatchPush(context.Background(), []*types.Issue{local}, nil)
+	if err != nil {
+		t.Fatalf("BatchPush: %v", err)
+	}
+	if updateCalled {
+		t.Error("UpdateIssue was called for an unchanged pre-formatted issue; expected it to be skipped")
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0] != "local-1" {
+		t.Errorf("Skipped = %v, want [local-1]", result.Skipped)
+	}
+	if len(result.Updated) != 0 {
+		t.Errorf("Updated = %v, want []", result.Updated)
+	}
+}
+
 // TestBatchPush_ForceBypassesSkip verifies that an issue in forceIDs is
 // updated even when PushFieldsEqual would normally skip it.
 func TestBatchPush_ForceBypassesSkip(t *testing.T) {

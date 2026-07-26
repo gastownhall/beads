@@ -10,6 +10,23 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// KeysetCreatedAtIDPredicate is the SARGABLE (created_at DESC, id ASC) keyset
+// predicate emitted for IssueFilter.AfterCreatedAt/AfterID. Its three ?
+// placeholders bind, in order: created_at (the sargable upper bound), created_at
+// (strict, drops the same-second rows already returned), and id (the same-second
+// tie-break).
+//
+// It is logically "(created_at, id) is strictly after (cursor)" under
+// created_at DESC, id ASC — i.e. (created_at < ?) OR (created_at = ? AND id > ?)
+// — but rewritten with a redundant `created_at <= ?` leading bound so the planner
+// seeks idx_issues_created_at (an IndexedTableAccess range on Dolt, an index/
+// BitmapOr scan on Postgres) instead of full-scanning and filtering. The two
+// forms select the same rows: created_at <= C is true whenever the OR is, and
+// prunes only created_at > C, which the OR already excludes. It is exported so
+// the backend sargability guards EXPLAIN this exact string rather than a copy —
+// a change here then breaks the guard.
+const KeysetCreatedAtIDPredicate = "(created_at <= ? AND ((created_at < ?) OR (id > ?)))"
+
 // BuildIssueFilterClauses builds WHERE clause fragments and args from a query
 // string and IssueFilter. The tables parameter controls which table names are
 // referenced in subqueries (issues vs wisps).
@@ -166,6 +183,14 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 	if filter.NoLabels {
 		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT DISTINCT issue_id FROM %s)", tables.Labels))
 	}
+	if filter.LabelPattern != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label LIKE ? ESCAPE '|')", tables.Labels))
+		args = append(args, globToLikePattern(filter.LabelPattern))
+	}
+	if filter.LabelRegex != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label REGEXP ?)", tables.Labels))
+		args = append(args, filter.LabelRegex)
+	}
 
 	if filter.Pinned != nil {
 		if *filter.Pinned {
@@ -191,6 +216,19 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 		} else {
 			whereClauses = append(whereClauses, "(is_template = 0 OR is_template IS NULL)")
 		}
+	}
+	if filter.IsBlocked != nil {
+		// is_blocked is NOT NULL DEFAULT 0 on both issues and wisps, so a plain
+		// equality is exact (no IS NULL arm needed) and index-backed by
+		// idx_issues_is_blocked(is_blocked, status). Bound as an int so the same
+		// clause is portable across every backend (Dolt/MySQL/SQLite native, and
+		// pgdialect rewrites ? → $n).
+		blocked := 0
+		if *filter.IsBlocked {
+			blocked = 1
+		}
+		whereClauses = append(whereClauses, "is_blocked = ?")
+		args = append(args, blocked)
 	}
 
 	if filter.EmptyDescription {
@@ -221,6 +259,18 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 			whereClauses = append(whereClauses, fmt.Sprintf("%s %s ?", tc.col, tc.op))
 			args = append(args, tc.v.Format(time.RFC3339))
 		}
+	}
+
+	if filter.AfterCreatedAt != nil {
+		// Bind the cursor time as time.Time, not a formatted string: the issues/
+		// wisps created_at columns are DATETIME (NUMERIC affinity), so an RFC3339
+		// string parameter mis-compares on the SQLite backend, while a time.Time
+		// value compares correctly on every backend — the same binding EventsSince
+		// uses. Bound twice (the sargable upper bound and the strict bound), then
+		// the id tie-break.
+		ac := *filter.AfterCreatedAt
+		whereClauses = append(whereClauses, KeysetCreatedAtIDPredicate)
+		args = append(args, ac, ac, filter.AfterID)
 	}
 
 	if filter.Deferred {
@@ -266,6 +316,29 @@ func AppendMetadataClauses(where []string, args []any, hasKey string, fields map
 		}
 	}
 	return where, args, nil
+}
+
+// globToLikePattern converts a shell-style glob (* and ?) to a SQL LIKE
+// pattern. Literal % and _ in the input — and the '|' escape char itself —
+// are escaped so they don't act as LIKE wildcards. The resulting SQL must
+// use ESCAPE '|'.
+func globToLikePattern(pattern string) string {
+	var b strings.Builder
+	b.Grow(len(pattern))
+	for _, c := range pattern {
+		switch c {
+		case '%', '_', '|':
+			b.WriteByte('|')
+			b.WriteRune(c)
+		case '*':
+			b.WriteByte('%')
+		case '?':
+			b.WriteByte('_')
+		default:
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
 }
 
 // LooksLikeIssueID returns true if the query string looks like a beads issue ID.

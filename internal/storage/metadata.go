@@ -206,26 +206,119 @@ func ValidateMetadataSchema(metadata json.RawMessage, schema MetadataSchemaConfi
 }
 
 // validMetadataKeyRe validates metadata key names for use in JSON path expressions.
-// Allows alphanumeric, underscore, and dot (for nested paths like "jira.sprint").
-var validMetadataKeyRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.]*$`)
+// Allows alphanumeric, underscore, dot (dotted keys like "jira.sprint"), and
+// slash (path-style keys like "jira/sprint").
+var validMetadataKeyRe = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_./]*$`)
 
 // ValidateMetadataKey checks that a metadata key is safe for use in JSON path
 // expressions. Keys must start with a letter or underscore and contain only
-// alphanumeric characters, underscores, and dots.
+// alphanumeric characters, underscores, dots, and slashes.
 func ValidateMetadataKey(key string) error {
 	if !validMetadataKeyRe.MatchString(key) {
-		return fmt.Errorf("invalid metadata key %q: must match [a-zA-Z_][a-zA-Z0-9_.]*", key)
+		return fmt.Errorf("invalid metadata key %q: must match %s", key, validMetadataKeyRe.String())
 	}
 	return nil
 }
 
 // JSONMetadataPath returns a MySQL/Dolt JSON path expression for the given
-// metadata key. Keys containing dots are quoted so that "gc.routed_to"
-// produces '$."gc.routed_to"' instead of '$.gc.routed_to' (which dolt
-// interprets as a nested path: {gc: {routed_to: ...}}).
+// metadata key. The key is always quoted so that "gc.routed_to" produces
+// '$."gc.routed_to"' instead of '$.gc.routed_to' (which dolt interprets as a
+// nested path: {gc: {routed_to: ...}}); quoting is valid for plain keys too,
+// so no character list needs to stay in sync with validMetadataKeyRe. Slash
+// and mixed-case keys are proven to round-trip through the real Dolt/
+// go-mysql-server JSON path parser (see TestMetadataFilterSuite's
+// MetadataFieldMatchSlashKey and MetadataFieldMatchMixedCaseKey subtests in
+// cmd/bd/metadata_filter_test.go).
+//
+// Backslashes and quotes are also escaped, but every production caller
+// (sqlbuild.AppendMetadataClauses and doltTransaction.SearchIssues) validates
+// the key with ValidateMetadataKey first, which rejects `"` and `\`, so those escaping
+// branches are unreachable in practice today and are exercised only by the
+// string-level unit test in metadata_jsonpath_test.go, not against the real
+// SQL engines. Treat that escaping as defense-in-depth, not a proven
+// contract, unless a caller starts passing unvalidated keys here.
 func JSONMetadataPath(key string) string {
-	if strings.Contains(key, ".") {
-		return `$."` + key + `"`
+	return `$."` + jsonPathEscaper.Replace(key) + `"`
+}
+
+var jsonPathEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+
+// MergeMetadataJSON merges incoming metadata JSON into existing metadata.
+// Top-level keys from incoming overwrite keys in existing; keys only in
+// existing are preserved. Both inputs must be JSON objects (or empty/null).
+func MergeMetadataJSON(existing, incoming json.RawMessage) (json.RawMessage, error) {
+	base := make(map[string]json.RawMessage)
+	if len(existing) > 0 {
+		trimmed := strings.TrimSpace(string(existing))
+		if trimmed != "" && trimmed != "null" {
+			if err := json.Unmarshal(existing, &base); err != nil {
+				return nil, fmt.Errorf("existing metadata is not a JSON object: %w", err)
+			}
+		}
 	}
-	return "$." + key
+
+	overlay := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(incoming, &overlay); err != nil {
+		return nil, fmt.Errorf("new metadata is not a JSON object: %w", err)
+	}
+
+	for k, v := range overlay {
+		base[k] = v
+	}
+
+	result, err := json.Marshal(base)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal merged metadata: %w", err)
+	}
+	return json.RawMessage(result), nil
+}
+
+// ApplyMetadataEdits applies incremental set (key=value) and unset (key) edits
+// to existing metadata and returns the merged JSON. Set values are typed via
+// MetadataEditValue; keys are validated with ValidateMetadataKey.
+func ApplyMetadataEdits(existing json.RawMessage, setFlags, unsetFlags []string) (json.RawMessage, error) {
+	data := make(map[string]json.RawMessage)
+	if len(existing) > 0 {
+		trimmed := strings.TrimSpace(string(existing))
+		if trimmed != "" && trimmed != "null" {
+			if err := json.Unmarshal(existing, &data); err != nil {
+				return nil, fmt.Errorf("existing metadata is not a JSON object: %w", err)
+			}
+		}
+	}
+
+	for _, kv := range setFlags {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || k == "" {
+			return nil, fmt.Errorf("invalid --set-metadata: expected key=value, got %q", kv)
+		}
+		if err := ValidateMetadataKey(k); err != nil {
+			return nil, err
+		}
+		data[k] = MetadataEditValue(v)
+	}
+
+	for _, k := range unsetFlags {
+		if err := ValidateMetadataKey(k); err != nil {
+			return nil, err
+		}
+		delete(data, k)
+	}
+
+	result, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+	return json.RawMessage(result), nil
+}
+
+// MetadataEditValue converts a --set-metadata string value to JSON. Per the CLI
+// contract (GH#4146), --set-metadata values are ALWAYS stored as JSON strings;
+// inferring numbers/booleans/null from string content silently broke
+// map[string]string round-trips for Go consumers (a numeric-looking id or a
+// version like "1e3" came back as a JSON number). Typed values go through the
+// explicit --metadata / --metadata-json path (MergeMetadataJSON).
+func MetadataEditValue(s string) json.RawMessage {
+	b, _ := json.Marshal(s)
+	return json.RawMessage(b)
 }

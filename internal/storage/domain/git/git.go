@@ -200,7 +200,11 @@ func (r *gitRepositoryImpl) Commit(ctx context.Context, params domain.GitCommitP
 	if params.Message == "" {
 		return domain.GitCommitResult{}, fmt.Errorf("git: Commit: Message must not be empty")
 	}
-	args := []string{"commit"}
+	args := []string{}
+	if params.SkipHooks {
+		args = append(args, "-c", "core.hooksPath=")
+	}
+	args = append(args, "commit")
 	if params.NoVerify {
 		args = append(args, "--no-verify")
 	}

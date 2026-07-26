@@ -132,6 +132,12 @@ func getLabelsIntoFromTable(ctx context.Context, tx DBTX, labelTable string, ids
 // transaction. Automatically routes to wisp tables if the ID is an active wisp.
 // Uses INSERT IGNORE for idempotency.
 func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string) error {
+	// Reject an over-length label up front. The INSERT IGNORE below would
+	// otherwise silently truncate it to the VARCHAR(255) column, storing a label
+	// the caller never sent; a typed ErrFieldTooLong is the clean rejection.
+	if err := types.CheckFieldLen("label", label); err != nil {
+		return err
+	}
 	if labelTable == "" || eventTable == "" {
 		isWisp := IsActiveWispInTx(ctx, tx, issueID)
 		_, lt, et, _ := WispTableRouting(isWisp)

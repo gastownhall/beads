@@ -21,6 +21,12 @@ func (s *testSuite) TestCommentUseCase() {
 		s.Run("CountCommentsForWispRoutes", s.commentUCWispCount)
 		s.Run("PermLookupOfWispCommentsReturnsEmpty", s.commentUCWispIsolated)
 	})
+	s.Run("Add", func() {
+		s.Run("AddCommentToIssueIsReadableBack", s.commentUCAddIssue)
+		s.Run("AddCommentToWispRoutes", s.commentUCAddWisp)
+		s.Run("AddToMissingIssueReturnsError", s.commentUCAddMissing)
+		s.Run("EmptyIDRejected", s.commentUCAddEmptyID)
+	})
 }
 
 func (s *testSuite) commentUseCase() domain.CommentUseCase {
@@ -130,6 +136,60 @@ func (s *testSuite) commentUCWispCount() {
 	n, err := s.commentUseCase().CountCommentsForWisp(s.Ctx(), "bd-cuc-wisp-cnt")
 	s.Require().NoError(err)
 	s.Equal(int64(2), n)
+}
+
+func (s *testSuite) commentUCAddIssue() {
+	s.seedIssueRow("bd-cuc-add")
+	uc := s.commentUseCase()
+
+	added, err := uc.AddCommentToIssue(s.Ctx(), "bd-cuc-add", "alice", "working on it")
+	s.Require().NoError(err)
+	s.Require().NotNil(added)
+	s.NotEmpty(added.ID)
+
+	out, err := uc.GetCommentsForIssue(s.Ctx(), "bd-cuc-add")
+	s.Require().NoError(err)
+	s.Require().Len(out, 1)
+	s.Equal(added.ID, out[0].ID)
+	s.Equal("alice", out[0].Author)
+	s.Equal("working on it", out[0].Text)
+}
+
+func (s *testSuite) commentUCAddWisp() {
+	s.seedWispRow("bd-cuc-add-wisp")
+	uc := s.commentUseCase()
+
+	_, err := uc.AddCommentToWisp(s.Ctx(), "bd-cuc-add-wisp", "bob", "wisp note")
+	s.Require().NoError(err)
+
+	out, err := uc.GetCommentsForWisp(s.Ctx(), "bd-cuc-add-wisp")
+	s.Require().NoError(err)
+	s.Require().Len(out, 1)
+	s.Equal("wisp note", out[0].Text)
+
+	perm, err := uc.GetCommentsForIssue(s.Ctx(), "bd-cuc-add-wisp")
+	s.Require().NoError(err)
+	s.Empty(perm, "wisp comment must not land in the permanent table")
+}
+
+func (s *testSuite) commentUCAddMissing() {
+	uc := s.commentUseCase()
+
+	_, err := uc.AddCommentToIssue(s.Ctx(), "bd-cuc-add-ghost", "alice", "hi")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "not found")
+}
+
+func (s *testSuite) commentUCAddEmptyID() {
+	uc := s.commentUseCase()
+
+	_, err := uc.AddCommentToIssue(s.Ctx(), "", "alice", "hi")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "id must not be empty")
+
+	_, err = uc.AddCommentToWisp(s.Ctx(), "", "alice", "hi")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "id must not be empty")
 }
 
 func (s *testSuite) commentUCWispIsolated() {

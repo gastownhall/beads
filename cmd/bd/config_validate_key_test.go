@@ -13,6 +13,7 @@ func TestIsRecognizedConfigKey(t *testing.T) {
 		"doctor.suppress.git-hooks", "no-git-ops", "beads.role",
 		"status.custom", "types.custom", "types.infra", "ai.model",
 		"backup.enabled", "import.path", "dolt.local-only", "agent.profile",
+		"claim.pools",
 		// Tracker namespaces are derived from the registry (GH#4427); cover
 		// ado (the original bug) plus the others removed from the static list.
 		"ado.org", "ado.project", "github.token", "linear.api-key",

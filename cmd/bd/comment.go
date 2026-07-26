@@ -28,9 +28,6 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("comment is not supported in proxied-server mode")
-		}
 		CheckReadonly("comment")
 
 		evt := metrics.NewCommandEvent("comment")
@@ -39,6 +36,10 @@ Examples:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runCommentProxiedServer(cmd, rootCtx, args)
+		}
 
 		id := args[0]
 		textArgs := args[1:]

@@ -43,11 +43,13 @@ func bdProxiedPruneFail(t *testing.T, bd, dir string, args ...string) string {
 }
 
 func TestProxiedServerPrune(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("requires_filter", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "prf")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "prf")
 		out := bdProxiedPruneFail(t, bd, p.dir)
 		if !strings.Contains(out, "requires --older-than or --pattern") {
 			t.Errorf("expected requires-filter error, got: %s", out)
@@ -55,7 +57,8 @@ func TestProxiedServerPrune(t *testing.T) {
 	})
 
 	t.Run("dry_run_deletes_nothing", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pdr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pdr")
 		issue := bdProxiedCreate(t, bd, p.dir, "Prune me")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		out := bdProxiedPrune(t, bd, p.dir, "--pattern", "*", "--dry-run")
@@ -69,7 +72,8 @@ func TestProxiedServerPrune(t *testing.T) {
 	})
 
 	t.Run("force_deletes_closed", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pfd")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pfd")
 		issue := bdProxiedCreate(t, bd, p.dir, "Delete me")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		bdProxiedPrune(t, bd, p.dir, "--pattern", "*", "--force")
@@ -80,7 +84,8 @@ func TestProxiedServerPrune(t *testing.T) {
 	})
 
 	t.Run("skips_open", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pso")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pso")
 		open := bdProxiedCreate(t, bd, p.dir, "Still open")
 		closed := bdProxiedCreate(t, bd, p.dir, "Now closed")
 		bdProxiedClose(t, bd, p.dir, closed.ID)
@@ -95,7 +100,8 @@ func TestProxiedServerPrune(t *testing.T) {
 	})
 
 	t.Run("reference_aware_skip", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pras")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pras")
 		referenced := bdProxiedCreate(t, bd, p.dir, "Cited decision")
 		_ = bdProxiedCreate(t, bd, p.dir, "Open citer",
 			"--description", "per "+referenced.ID+" we decided X")
@@ -112,7 +118,8 @@ func TestProxiedServerPrune(t *testing.T) {
 	})
 
 	t.Run("ignore_references_deletes_referenced", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pir")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pir")
 		referenced := bdProxiedCreate(t, bd, p.dir, "Cited decision")
 		_ = bdProxiedCreate(t, bd, p.dir, "Open citer",
 			"--description", "per "+referenced.ID+" we decided X")
@@ -126,7 +133,8 @@ func TestProxiedServerPrune(t *testing.T) {
 	})
 
 	t.Run("json_output", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pjo")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pjo")
 		a := bdProxiedCreate(t, bd, p.dir, "JSON prune A")
 		b := bdProxiedCreate(t, bd, p.dir, "JSON prune B")
 		bdProxiedClose(t, bd, p.dir, a.ID, b.ID)
@@ -159,7 +167,8 @@ func TestProxiedServerPrune(t *testing.T) {
 	})
 
 	t.Run("commits_deletion", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "pcd")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "pcd")
 		issue := bdProxiedCreate(t, bd, p.dir, "Commit prune")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		db := openProxiedDB(t, p)

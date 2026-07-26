@@ -1114,9 +1114,9 @@ func TestEmbeddedInit(t *testing.T) {
 	t.Run("auto_commit_bypasses_hooks", func(t *testing.T) {
 		dir := t.TempDir()
 		initGitRepoAt(t, dir)
-		preCommitPath := filepath.Join(dir, ".git", "hooks", "pre-commit")
-		preCommit := "#!/bin/sh\necho hook-fired >> .hook-ran\nexit 1\n"
-		if err := os.WriteFile(preCommitPath, []byte(preCommit), 0755); err != nil {
+		hookPath := filepath.Join(dir, ".git", "hooks", "prepare-commit-msg")
+		hook := "#!/bin/sh\necho hook-fired >> .hook-ran\nexit 1\n"
+		if err := os.WriteFile(hookPath, []byte(hook), 0755); err != nil {
 			t.Fatal(err)
 		}
 		unsetHooksPath := exec.Command("git", "config", "--unset", "core.hooksPath")
@@ -1377,24 +1377,18 @@ func TestEmbeddedInit(t *testing.T) {
 	})
 
 	t.Run("sql_backend_flags", func(t *testing.T) {
-		// SQLite is a supported pluggable backend now: init succeeds and records it.
-		_, beadsDir, _ := bdInit(t, bd, "--prefix", "sqlt", "--backend", "sqlite")
-		cfg, err := configfile.Load(beadsDir)
-		if err != nil {
-			t.Fatalf("failed to load metadata.json: %v", err)
-		}
-		if cfg.Backend != configfile.BackendSQLite {
-			t.Errorf("backend: got %q, want %q", cfg.Backend, configfile.BackendSQLite)
+		// The SQLite backend was rolled back with the other alternative
+		// backends: init fails closed with its own rationale.
+		sqliteOut := bdInitFail(t, bd, "--backend", "sqlite")
+		if !strings.Contains(sqliteOut, "no longer supported") || !strings.Contains(sqliteOut, "single engine") {
+			t.Errorf("sqlite should report the backend rollback: %s", sqliteOut)
 		}
 
-		// Postgres is recognized, not an unknown backend: it fails only because the
-		// required connection config is absent (bdEnv strips any ambient DSN).
-		pgOut := bdInitFail(t, bd, "--backend", "postgres")
-		if strings.Contains(pgOut, "unknown backend") {
-			t.Errorf("postgres should be recognized, got unknown-backend error: %s", pgOut)
-		}
-		if !strings.Contains(pgOut, "--pg-url") {
-			t.Errorf("postgres init should request --pg-url, got: %s", pgOut)
+		for _, backend := range []string{"postgres", "mysql"} {
+			out := bdInitFail(t, bd, "--backend", backend)
+			if !strings.Contains(out, "no longer supported") {
+				t.Errorf("%s should report the backend rollback: %s", backend, out)
+			}
 		}
 
 		// A genuinely unsupported backend is still rejected.

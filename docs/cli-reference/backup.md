@@ -1,6 +1,6 @@
 ---
 title: "bd backup"
-description: "Back up your beads database"
+description: "Back up your beads database for off-machine recovery."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -26,7 +26,7 @@ DoltHub is recommended for cloud backup:
   Set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD for authentication.
 
 ```
-bd backup [command]
+bd backup [flags]
 ```
 
 ## bd backup init

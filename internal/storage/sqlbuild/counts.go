@@ -3,8 +3,9 @@ package sqlbuild
 import "fmt"
 
 // ReadyWorkIssueColumns is IssueSelectColumns qualified with the "i." alias
-// used by the counts mega-query.
-var ReadyWorkIssueColumns = QualifyColumns(IssueSelectColumns, "i.")
+// used by the counts mega-query. The lease overlay columns keep their own
+// leases. qualifier (the mega-query FROM includes LeaseJoin("i")).
+var ReadyWorkIssueColumns = QualifyColumns(IssueBaseColumns, "i.") + ", " + LeaseSelectColumns
 
 // DepJSONObject renders one dependency row as JSON for JSON_ARRAYAGG
 // aggregation in the counts mega-query. Field names must match the JSON tags
@@ -109,6 +110,7 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 			d.deps_json      AS deps_json
 		FROM %s i
 		%s
+		%s
 		LEFT JOIN (
 			SELECT issue_id, COUNT(*) AS cnt
 			FROM %s
@@ -144,6 +146,7 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 		ReadyWorkIssueColumns,
 		labelsSelect,
 		tables.Main,
+		LeaseJoin("i"),
 		labelsJoin,
 		tables.Dependencies, depBlocksExtra,
 		reverseBlockerSelect,

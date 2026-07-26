@@ -7,6 +7,16 @@ import (
 	"testing"
 )
 
+func TestConfigValidationStoreOptionsAreStrictReadOnly(t *testing.T) {
+	cfg := configValidationStoreOptions()
+	if !cfg.ReadOnly {
+		t.Fatal("config validation store must be read-only")
+	}
+	if !cfg.DisableAutoStart {
+		t.Fatal("config validation store must disable auto-start")
+	}
+}
+
 func setupDoctorSharedWorktree(t *testing.T) (mainRepoDir, worktreeDir string) {
 	t.Helper()
 

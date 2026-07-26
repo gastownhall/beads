@@ -31,8 +31,6 @@ bd list [flags]
       --empty-description            Filter issues with empty or missing description
       --exclude-label strings        Exclude issues that have ANY of these labels
       --exclude-type strings         Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)
-      --external-contains string     Filter by external ref substring (case-insensitive)
-      --external-ref string          Filter by exact external_ref value
       --flat                         Disable tree format and use legacy flat list output
       --format string                Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template
       --has-metadata-key string      Filter issues that have this metadata key set

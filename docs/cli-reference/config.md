@@ -1,6 +1,6 @@
 ---
 title: "bd config"
-description: "Manage configuration settings"
+description: "Manage configuration settings for external integrations and preferences."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -17,9 +17,6 @@ Common namespaces:
   - jira.*            Jira integration settings
   - linear.*          Linear integration settings
   - github.*          GitHub integration settings
-  - gitlab.*          GitLab integration settings
-  - ado.*             Azure DevOps integration settings
-  - notion.*          Notion integration settings
   - custom.*          Custom integration settings
   - status.*          Issue status configuration
   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
@@ -79,7 +76,7 @@ Examples:
   bd config unset jira.url
 
 ```
-bd config [command]
+bd config [flags]
 ```
 
 ## bd config apply

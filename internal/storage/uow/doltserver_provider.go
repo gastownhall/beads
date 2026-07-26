@@ -68,5 +68,5 @@ func NewDoltServerUOWProvider(
 		return nil, fmt.Errorf("uow: get proxy endpoint: %w", err)
 	}
 
-	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword)
+	return openAndInitSchema(ctx, ep, database, rootUser, rootPassword, "")
 }

@@ -2263,8 +2263,12 @@ func TestGetStatistics_EmptyStore(t *testing.T) {
 	if stats.ClosedIssues != 0 {
 		t.Errorf("expected 0 closed issues, got %d", stats.ClosedIssues)
 	}
-	if stats.BlockedIssues != 0 {
-		t.Errorf("expected 0 blocked issues, got %d", stats.BlockedIssues)
+	if stats.BlockedIssues == nil || *stats.BlockedIssues != 0 {
+		got := 0
+		if stats.BlockedIssues != nil {
+			got = *stats.BlockedIssues
+		}
+		t.Errorf("expected 0 blocked issues, got %d", got)
 	}
 }
 
@@ -2356,8 +2360,12 @@ func TestGetStatistics_BlockedCount(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if stats.BlockedIssues != 1 {
-		t.Errorf("expected 1 blocked issue, got %d", stats.BlockedIssues)
+	if stats.BlockedIssues == nil || *stats.BlockedIssues != 1 {
+		got := 0
+		if stats.BlockedIssues != nil {
+			got = *stats.BlockedIssues
+		}
+		t.Errorf("expected 1 blocked issue, got %d", got)
 	}
 }
 
@@ -2468,8 +2476,84 @@ func TestGetStatistics_ReadyIssuesExcludesBlocked(t *testing.T) {
 	}
 
 	// 3 open issues, 1 blocked => ready = 3 - 1 = 2
-	if stats.ReadyIssues != 2 {
-		t.Errorf("expected 2 ready issues (3 open - 1 blocked), got %d", stats.ReadyIssues)
+	if stats.ReadyIssues == nil || *stats.ReadyIssues != 2 {
+		got := -1
+		if stats.ReadyIssues != nil {
+			got = *stats.ReadyIssues
+		}
+		t.Errorf("expected 2 ready issues (3 open - 1 blocked), got %d", got)
+	}
+}
+
+// TestGetStatisticsNoBlocked_LeavesBlockedAndReadyNil verifies the --no-blocked
+// fast path (GetStatisticsNoBlocked) leaves BlockedIssues and ReadyIssues nil
+// (readiness needs the blocked set), while the full GetStatistics path on the
+// same data populates both. Guards against a *int fake-zero regression: a nil
+// pointer must never silently render/serialize as 0.
+func TestGetStatisticsNoBlocked_LeavesBlockedAndReadyNil(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	blocker := &types.Issue{
+		ID:        "stat-nb-blocker",
+		Title:     "Blocker",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	blocked := &types.Issue{
+		ID:        "stat-nb-blocked",
+		Title:     "Blocked",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	for _, iss := range []*types.Issue{blocker, blocked} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+	}
+	dep := &types.Dependency{
+		IssueID:     blocked.ID,
+		DependsOnID: blocker.ID,
+		Type:        types.DepBlocks,
+	}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("failed to add dependency: %v", err)
+	}
+
+	noBlocked, err := store.GetStatisticsNoBlocked(ctx)
+	if err != nil {
+		t.Fatalf("GetStatisticsNoBlocked: unexpected error: %v", err)
+	}
+	if noBlocked.TotalIssues != 2 {
+		t.Errorf("GetStatisticsNoBlocked: expected 2 total issues, got %d", noBlocked.TotalIssues)
+	}
+	if noBlocked.BlockedIssues != nil {
+		t.Errorf("GetStatisticsNoBlocked: expected BlockedIssues nil, got %d", *noBlocked.BlockedIssues)
+	}
+	if noBlocked.ReadyIssues != nil {
+		t.Errorf("GetStatisticsNoBlocked: expected ReadyIssues nil, got %d", *noBlocked.ReadyIssues)
+	}
+
+	full, err := store.GetStatistics(ctx)
+	if err != nil {
+		t.Fatalf("GetStatistics: unexpected error: %v", err)
+	}
+	if full.BlockedIssues == nil {
+		t.Fatal("GetStatistics: expected BlockedIssues populated, got nil")
+	}
+	if *full.BlockedIssues != 1 {
+		t.Errorf("GetStatistics: expected 1 blocked issue, got %d", *full.BlockedIssues)
+	}
+	if full.ReadyIssues == nil {
+		t.Fatal("GetStatistics: expected ReadyIssues populated, got nil")
+	}
+	if *full.ReadyIssues != 1 {
+		t.Errorf("GetStatistics: expected 1 ready issue (2 open - 1 blocked), got %d", *full.ReadyIssues)
 	}
 }
 

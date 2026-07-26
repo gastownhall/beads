@@ -24,8 +24,10 @@ it up. Heartbeat pushes lease_expires_at forward and stamps heartbeat_at = now.
 Only the current owner may heartbeat. If the lease has already been reclaimed or
 the issue closed, heartbeat fails so the worker learns to stop.
 
-Heartbeat writes a Dolt commit, so heartbeat well below the TTL but not so fast
-it bloats history — cadence should be a small fraction of the TTL, not per-op.
+Leases live in an ephemeral, node-local table: heartbeats write no Dolt commit
+and no history, so any cadence comfortably below the TTL is fine. Leases are
+only enforceable on the node that granted them; cross-machine claim visibility
+rides the issue's status and assignee, which do commit.
 
 Examples:
   bd heartbeat bd-123

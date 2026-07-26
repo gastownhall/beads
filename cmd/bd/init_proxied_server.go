@@ -152,6 +152,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	if err != nil {
 		return fmt.Errorf("failed to open uow provider: %v", err)
 	}
+	defer func() { _ = initUOWProvider.Close(ctx) }()
 
 	remoteURL := resolveProxiedInitRemoteURL(ctx, gitUC, in)
 
@@ -428,8 +429,9 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 				"CLAUDE.md",
 				".gitignore",
 			},
-			Message:  "bd init: initialize beads issue tracking",
-			NoVerify: true,
+			Message:   "bd init: initialize beads issue tracking",
+			NoVerify:  true,
+			SkipHooks: true,
 		})
 		switch {
 		case err != nil && !in.quiet:
@@ -446,7 +448,7 @@ func runInitProxiedServerTail(cmd *cobra.Command, ctx context.Context, in initPr
 			fmt.Fprintf(os.Stderr, "  %s\n\n", ui.RenderAccent("git remote add upstream <repo-url>"))
 		}
 		if !in.stealth && !in.initRemoteChanged && t.remoteURL == "" {
-			printInitNoDoltRemoteWarning()
+			printInitNoDoltRemoteWarning(false)
 		}
 	}
 

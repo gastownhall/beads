@@ -1,6 +1,6 @@
 ---
 title: "bd flatten"
-description: "Squash all Dolt history into a single commit"
+description: "Nuclear option: squash ALL Dolt commit history into a single commit."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

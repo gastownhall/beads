@@ -282,6 +282,17 @@ func findPrebuiltBDBinary() (string, error) {
 	return "", nil
 }
 
+// isCGOBuild reports whether the binary at path was compiled with CGO enabled.
+// Subprocess init tests require embedded Dolt which is only available in CGO builds.
+// Returns true when the build info cannot be read (assumes CGO capable).
+func isCGOBuild(path string) bool {
+	out, err := exec.Command("go", "version", "-m", path).Output()
+	if err != nil {
+		return true
+	}
+	return !strings.Contains(string(out), "\tbuild\tCGO_ENABLED=0\n")
+}
+
 // buildBDForInitTests builds (or locates) a bd binary suitable for subprocess
 // tests. Uses the gms_pure_go tag so the resulting binary works in either
 // CGO mode. Lives in the pure-Go helpers file so subprocess-style tests can
@@ -303,11 +314,17 @@ func buildBDForInitTests(t *testing.T) string {
 			bdBinary = "bd.exe"
 		}
 		// Preserve the existing local optimization: if a bd binary exists in
-		// the repository root, init-style subprocess tests can reuse it.
+		// the repository root, init-style subprocess tests can reuse it —
+		// but only if it was compiled with CGO enabled. Embedded Dolt requires
+		// CGO; a CGO_ENABLED=0 binary will fail bd init without --server.
 		existingBD := filepath.Join("..", "..", bdBinary)
 		if _, err := os.Stat(existingBD); err == nil {
-			initTestBD, _ = filepath.Abs(existingBD)
-			return
+			absPath, _ := filepath.Abs(existingBD)
+			if isCGOBuild(absPath) {
+				initTestBD = absPath
+				return
+			}
+			// Pre-built binary is CGO-disabled — fall through to build fresh.
 		}
 		// Fall back to building.
 		tmpDir, err := testTempDir("bd-init-test-*")

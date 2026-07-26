@@ -34,6 +34,11 @@ var markdownLinkRE = regexp.MustCompile(`\[[^][]*\]\(([^)]+)\)`)
 // (engdocs/decisions/2026-07-10-mintlify-docs-overhaul.md, decision 6).
 var docsPublishExemptions = map[string]bool{
 	"CLI_REFERENCE.md": true, // generated single-file reference (bd help --all)
+	// Deliberate exception to decision 6: released bd binaries print this
+	// path (v1.1.0 printAncestorPKMismatchGuidance emits
+	// docs/RECOVERY.md#pk-fork-refused), and github.com blob URLs cannot be
+	// redirected. Keep until no supported release prints it.
+	"RECOVERY.md": true,
 }
 
 // rootDocFiles are the curated root-level markdown files whose local links

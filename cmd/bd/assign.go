@@ -24,13 +24,7 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("assign is not supported in proxied-server mode")
-		}
 		CheckReadonly("assign")
-
-		id := args[0]
-		assignee := args[1]
 
 		evt := metrics.NewCommandEvent("assign")
 		defer func() {
@@ -38,6 +32,13 @@ Examples:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runAssignProxiedServer(rootCtx, args)
+		}
+
+		id := args[0]
+		assignee := args[1]
 
 		ctx := rootCtx
 
