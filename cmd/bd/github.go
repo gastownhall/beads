@@ -419,8 +419,9 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 	engine.OnMessage = func(msg string) { _, _ = fmt.Fprintln(out, "  "+msg) }
 	engine.OnWarning = func(msg string) { _, _ = fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
-	// Set up GitHub-specific pull hooks
+	// Set up GitHub-specific pull and push hooks
 	engine.PullHooks = buildGitHubPullHooks(ctx)
+	engine.PushHooks = buildGitHubPushHooks(ctx)
 
 	// Build sync options from CLI flags
 	pull := !githubSyncPushOnly
@@ -496,6 +497,22 @@ func buildGitHubPullHooks(ctx context.Context) *tracker.PullHooks {
 				issue.ID = generateIssueID(prefix)
 			}
 			return nil
+		},
+	}
+}
+
+func buildGitHubPushHooks(ctx context.Context) *tracker.PushHooks {
+	return &tracker.PushHooks{
+		FormatDescription: func(issue *types.Issue) string {
+			dependencies, depErr := store.GetDependenciesWithMetadata(ctx, issue.ID)
+			dependents, dependentErr := store.GetDependentsWithMetadata(ctx, issue.ID)
+			if depErr != nil {
+				dependencies = nil
+			}
+			if dependentErr != nil {
+				dependents = nil
+			}
+			return github.RenderGitHubIssueBody(issue, dependencies, dependents)
 		},
 	}
 }

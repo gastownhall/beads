@@ -2,6 +2,7 @@
 package github
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -328,6 +329,7 @@ func TestBeadsIssueToGitHubFields(t *testing.T) {
 	config := DefaultMappingConfig()
 
 	beadsIssue := &types.Issue{
+		ID:          "bd-abc123",
 		Title:       "New feature request",
 		Description: "Add dark mode support",
 		IssueType:   types.TypeFeature,
@@ -342,8 +344,15 @@ func TestBeadsIssueToGitHubFields(t *testing.T) {
 	if fields["title"] != "New feature request" {
 		t.Errorf("fields[\"title\"] = %v, want \"New feature request\"", fields["title"])
 	}
-	if fields["body"] != "Add dark mode support" {
-		t.Errorf("fields[\"body\"] = %v, want \"Add dark mode support\"", fields["body"])
+	body, ok := fields["body"].(string)
+	if !ok {
+		t.Fatalf("fields[\"body\"] is not string")
+	}
+	if !strings.Contains(body, "Add dark mode support") {
+		t.Errorf("body = %q, want original description", body)
+	}
+	if !strings.Contains(body, "<!-- bd: bd-abc123 sync=github-v1 -->") {
+		t.Errorf("body = %q, want hidden bd ID marker", body)
 	}
 
 	// Verify labels include type, priority, and status
@@ -395,6 +404,98 @@ func TestBeadsIssueToGitHubFields_ClosedState(t *testing.T) {
 
 	if fields["state"] != "closed" {
 		t.Errorf("fields[\"state\"] = %v, want \"closed\"", fields["state"])
+	}
+}
+
+func TestRenderGitHubIssueBodyIncludesDependencyTasklists(t *testing.T) {
+	blockerRef := "https://github.com/org/repo/issues/12"
+	dependentRef := "https://github.com/org/repo/issues/34"
+	issue := &types.Issue{
+		ID:          "bd-target",
+		Description: "target body",
+	}
+	deps := []*types.IssueWithDependencyMetadata{
+		{
+			Issue: types.Issue{
+				ID:          "bd-blocker",
+				Title:       "blocking issue",
+				ExternalRef: &blockerRef,
+			},
+			DependencyType: types.DepBlocks,
+		},
+	}
+	dependents := []*types.IssueWithDependencyMetadata{
+		{
+			Issue: types.Issue{
+				ID:          "bd-dependent",
+				Title:       "dependent issue",
+				ExternalRef: &dependentRef,
+			},
+			DependencyType: types.DepBlocks,
+		},
+	}
+
+	body := RenderGitHubIssueBody(issue, deps, dependents)
+
+	for _, want := range []string{
+		"target body",
+		"<!-- bd: bd-target sync=github-v1 -->",
+		"### Dependencies",
+		"- [ ] #12 — blocking issue (`bd-blocker`, blocked by)",
+		"### Blocked by this issue",
+		"- [ ] #34 — dependent issue (`bd-dependent`, blocks)",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("body missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestGitHubIssueToBeadsStripsGeneratedSyncBlock(t *testing.T) {
+	config := DefaultMappingConfig()
+	ghIssue := &Issue{
+		ID:     123,
+		Number: 7,
+		Title:  "Synced issue",
+		Body: "User-authored body\n\n<!-- bd-github-sync: start -->\n" +
+			"<!-- bd: bd-abc sync=github-v1 -->\n" +
+			"## Beads\n\nSource: `bd-abc`\n" +
+			"<!-- bd-github-sync: end -->\n",
+		State:   "open",
+		HTMLURL: "https://github.com/org/repo/issues/7",
+	}
+
+	conversion := GitHubIssueToBeads(ghIssue, config)
+	if conversion.Issue.ID != "bd-abc" {
+		t.Fatalf("ID = %q, want bd ID from hidden marker", conversion.Issue.ID)
+	}
+	if conversion.Issue.Description != "User-authored body" {
+		t.Fatalf("Description = %q, want generated sync block stripped", conversion.Issue.Description)
+	}
+}
+
+func TestExtractBDIDFromGitHubSyncBlockSupportsLegacyMarker(t *testing.T) {
+	body := "body\n\n<!-- bd: bd_0x2c-tkg7 -->"
+	if got := ExtractBDIDFromGitHubSyncBlock(body); got != "bd_0x2c-tkg7" {
+		t.Fatalf("ExtractBDIDFromGitHubSyncBlock() = %q, want legacy marker ID", got)
+	}
+}
+
+func TestBeadsIssueToGitHubFieldsPreservesPreRenderedDependencyTasklists(t *testing.T) {
+	config := DefaultMappingConfig()
+	body := "body\n\n<!-- bd-github-sync: start -->\n" +
+		"<!-- bd: bd-target sync=github-v1 -->\n" +
+		"## Beads\n\nSource: `bd-target`\n\n" +
+		"### Dependencies\n" +
+		"- [ ] #12 — blocking issue (`bd-blocker`, blocked by)\n" +
+		"<!-- bd-github-sync: end -->"
+	fields := BeadsIssueToGitHubFields(&types.Issue{
+		ID:          "bd-target",
+		Title:       "target",
+		Description: body,
+	}, config)
+	if fields["body"] != body {
+		t.Fatalf("body was re-rendered without dependency tasklists:\n%v", fields["body"])
 	}
 }
 

@@ -135,8 +135,10 @@ func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*tracker.T
 func (t *Tracker) CreateIssue(ctx context.Context, issue *types.Issue) (*tracker.TrackerIssue, error) {
 	fields := BeadsIssueToGitHubFields(issue, t.config)
 	labels, _ := fields["labels"].([]string)
+	title, _ := fields["title"].(string)
+	body, _ := fields["body"].(string)
 
-	created, err := t.client.CreateIssue(ctx, issue.Title, issue.Description, labels)
+	created, err := t.client.CreateIssue(ctx, title, body, labels)
 	if err != nil {
 		return nil, err
 	}
