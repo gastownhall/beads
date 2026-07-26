@@ -1,6 +1,7 @@
 package doltserver
 
 import (
+	"strconv"
 	"strings"
 )
 
@@ -98,4 +99,46 @@ func isUnderDir(dir, root string) bool {
 		return true
 	}
 	return strings.HasPrefix(dir, root+"/")
+}
+
+// gatherPSCandidates parses the output of `ps -axo pid=,command=` and
+// resolves the working directory of each dolt sql-server candidate. Darwin
+// uses this path because it has no /proc filesystem.
+//
+// cwdForPID returns the resolved cwd, whether that cwd has been deleted, and
+// whether it could be determined. Keeping the command execution outside this
+// parser makes the safety-critical selection path deterministic to test.
+func gatherPSCandidates(psOutput []byte, cwdForPID func(int) (string, bool, bool)) []serverCandidate {
+	var candidates []serverCandidate
+	for _, line := range strings.Split(string(psOutput), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		pidText, cmdline, found := strings.Cut(line, " ")
+		if !found {
+			continue
+		}
+		pid, err := strconv.Atoi(pidText)
+		if err != nil || pid <= 0 {
+			continue
+		}
+		cmdline = strings.TrimSpace(cmdline)
+		if !isDoltServerCmdline(cmdline) {
+			continue
+		}
+
+		cwd, deleted, ok := cwdForPID(pid)
+		if !ok {
+			continue
+		}
+		candidates = append(candidates, serverCandidate{
+			pid:        pid,
+			cmdline:    cmdline,
+			cwd:        cwd,
+			cwdDeleted: deleted,
+		})
+	}
+	return candidates
 }

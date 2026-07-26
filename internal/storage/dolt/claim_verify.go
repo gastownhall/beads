@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -64,6 +65,57 @@ func unclaimed() claimPostcondition {
 		},
 		desc: fmt.Sprintf("assignee=%q status=%q", "", types.StatusOpen),
 	}
+}
+
+// guardedUpdatePostcondition derives the postcondition for a guarded update
+// (bd-wsqvw: UpdateIssueOptions.ExpectedAssignee/ExpectedStatus) that writes
+// the coordination fields. ok is false — no verification — when the update
+// carries no guard, or when it guards but writes neither assignee nor status
+// (a guarded edit of ordinary fields is not claim-family: a lost notes edit is
+// an annoyance, not a phantom claim). The postcondition checks only the
+// coordination fields the update actually sets, since the others may be
+// legitimately touched by concurrent writers.
+//
+// Attribution narrowness (lion review, PR #5008): because only the SET
+// coordination fields are checked, a commit-phase loss whose transaction
+// verifiably rolled back can still verify as "applied" when a racing actor
+// landed the SAME target values inside the verify window. The coordination
+// state is then correct but it is the racer's write, not ours: any ordinary
+// fields riding the same update (title, notes, …) and our event row are
+// silently gone despite the reported success. Mitigation is usage-side, not
+// machinery: keep guarded coordination writes single-purpose (assignee/status
+// only), which is how the wheelhouse park/restore consumers use them.
+func guardedUpdatePostcondition(opts storage.UpdateIssueOptions, updates map[string]interface{}) (claimPostcondition, bool) {
+	if opts.ExpectedAssignee == nil && opts.ExpectedStatus == nil {
+		return claimPostcondition{}, false
+	}
+	newAssignee, setsAssignee := updates["assignee"].(string)
+	newStatus, setsStatus := updates["status"].(string)
+	if !setsAssignee && !setsStatus {
+		return claimPostcondition{}, false
+	}
+	var desc string
+	switch {
+	case setsAssignee && setsStatus:
+		desc = fmt.Sprintf("assignee=%q status=%q", newAssignee, newStatus)
+	case setsAssignee:
+		desc = fmt.Sprintf("assignee=%q", newAssignee)
+	default:
+		desc = fmt.Sprintf("status=%q", newStatus)
+	}
+	return claimPostcondition{
+		op: "guarded-update",
+		want: func(assignee string, status types.Status) bool {
+			if setsAssignee && assignee != newAssignee {
+				return false
+			}
+			if setsStatus && status != types.Status(newStatus) {
+				return false
+			}
+			return true
+		},
+		desc: desc,
+	}, true
 }
 
 // readClaimState re-reads an issue's assignee and status on a fresh

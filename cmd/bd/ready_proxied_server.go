@@ -104,8 +104,20 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		if results == nil {
 			results = []*types.IssueWithCounts{}
 		}
-		_ = outputJSON(results)
-		if page.HasMore && in.filter.Limit > 0 {
+		truncated := page.HasMore && in.filter.Limit > 0
+		// Parity with the direct route: the pagination key is emitted only
+		// when truncated. Total is unavailable from this backend's domain
+		// page (no cheap COUNT(*) equivalent on the proxied path), so it is
+		// left unset (0) unlike the direct route's fully-populated meta.
+		var pag *PaginationMeta
+		if truncated {
+			pag = &PaginationMeta{
+				Returned:  len(results),
+				Truncated: true,
+			}
+		}
+		_ = outputJSONWithPagination(results, pag)
+		if truncated {
 			fmt.Fprintf(os.Stderr, "Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results))
 		}
 		return nil

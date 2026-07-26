@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -129,6 +130,18 @@ func formatIssueMetadata(issue *types.Issue) string {
 		leaseLine := fmt.Sprintf("Lease: expires %s", formatTimeUntil(*issue.LeaseExpiresAt))
 		if issue.HeartbeatAt != nil {
 			leaseLine += fmt.Sprintf(" (heartbeat %s)", formatTimeAgo(*issue.HeartbeatAt))
+		}
+		// Granting replica: only worth a reader's attention when it is NOT
+		// this node, since that is the case where the lease is unenforceable
+		// here and bd reclaim will decline it. Unknown provenance ("") stays
+		// silent — it is the pre-wy-jpd3.7 shape, not a fact about the lease.
+		// The local node being unnamed silences it too: the guard is disarmed
+		// there, so reclaim will NOT decline the lease and claiming otherwise
+		// would be a promise the reaper does not keep.
+		if local := config.NodeID(); local != "" {
+			if node := issue.LeaseGrantedNode; node != "" && node != local {
+				leaseLine += fmt.Sprintf(" — granted by replica %s", node)
+			}
 		}
 		lines = append(lines, ui.RenderMuted(leaseLine))
 	}

@@ -1,11 +1,45 @@
 # Makefile for beads project
 
-# On Windows, GNU Make defaults to cmd.exe which doesn't support POSIX
-# shell syntax used throughout this Makefile. Use Git for Windows' bash.
+# Native Windows GNU Make needs Git for Windows' bash for the POSIX shell
+# syntax used throughout this Makefile. MSYS2 and Cygwin Make already provide
+# POSIX shell semantics, despite inheriting OS=Windows_NT, so leave them alone.
 ifeq ($(OS),Windows_NT)
-GIT_BASH := $(shell where git 2>/dev/null)
-ifneq ($(GIT_BASH),)
-SHELL := $(subst cmd,bin,$(subst git.exe,bash.exe,$(GIT_BASH)))
+ifneq ($(filter Windows32 mingw32 %-mingw32,$(MAKE_HOST)),)
+override BASH_ENV :=
+unexport BASH_ENV
+unexport GIT_EXEC_PATH
+unexport BASHOPTS
+unexport SHELLOPTS
+SHELL := cmd.exe
+.SHELLFLAGS := /d /c
+GIT_WINDOWS_EXEC_PATH := $(strip $(shell set "GIT_EXEC_PATH=" && git.exe --exec-path))
+ifeq ($(GIT_WINDOWS_EXEC_PATH),)
+$(error Git for Windows is required to run this Makefile)
+endif
+GIT_WINDOWS_ROOT := $(strip $(shell cd /d "$(GIT_WINDOWS_EXEC_PATH)/../../.." && cd))
+ifeq ($(GIT_WINDOWS_ROOT),)
+$(error Could not resolve the Git for Windows installation from $(GIT_WINDOWS_EXEC_PATH))
+endif
+GIT_WINDOWS_BASH := $(GIT_WINDOWS_ROOT)/bin/bash.exe
+GIT_WINDOWS_SED := $(GIT_WINDOWS_ROOT)/usr/bin/sed.exe
+GIT_WINDOWS_ENV := $(GIT_WINDOWS_ROOT)/usr/bin/env.exe
+ifneq ($(strip $(shell if exist "$(GIT_WINDOWS_BASH)" echo ready)),ready)
+$(error Could not find Git for Windows' bash at $(GIT_WINDOWS_BASH))
+endif
+ifneq ($(strip $(shell if exist "$(GIT_WINDOWS_SED)" echo ready)),ready)
+$(error Could not find Git for Windows' sed at $(GIT_WINDOWS_SED))
+endif
+ifneq ($(strip $(shell if exist "$(GIT_WINDOWS_ENV)" echo ready)),ready)
+$(error Could not find Git for Windows' env at $(GIT_WINDOWS_ENV))
+endif
+SHELL := $(GIT_WINDOWS_BASH)
+.SHELLFLAGS := -c
+ifneq ($(strip $(shell printf '%s' ready;)),ready)
+$(error Could not start Git for Windows' bash at $(SHELL))
+endif
+# GNU Make may launch simple commands and shebang interpreters directly instead
+# of through SHELL, so expose Git's POSIX tools to those process lookups too.
+export PATH := $(GIT_WINDOWS_ROOT)/usr/bin;$(PATH)
 endif
 endif
 
@@ -19,6 +53,9 @@ BUILD_DIR := .
 GIT_BUILD := $(shell git rev-parse --short HEAD)
 ifeq ($(OS),Windows_NT)
 INSTALL_DIR := $(USERPROFILE)/.local/bin
+WINDOWS_MINGW_BIN ?= /c/ProgramData/mingw64/mingw64/bin
+WINDOWS_MINGW_GCC := $(WINDOWS_MINGW_BIN)/gcc.exe
+WINDOWS_CGO_BINS ?= $(WINDOWS_MINGW_BIN) /c/msys64/clangarm64/bin /c/msys64/ucrt64/bin /c/msys64/mingw64/bin /c/msys64/clang64/bin
 else
 INSTALL_DIR := $(HOME)/.local/bin
 endif
@@ -29,7 +66,9 @@ endif
 # Windows notes:
 #   - ICU is NOT required. go-icu-regex has a pure-Go fallback (regex_windows.go)
 #     and gms_pure_go tag tells go-mysql-server to use pure-Go regex too.
-#   - CGO_ENABLED=1 needs a C compiler (MinGW/MSYS2) but does NOT need ICU.
+#   - CGO_ENABLED=1 needs a GCC-compatible Windows CGO compiler but does NOT
+#     need ICU. Supported local toolchains include MinGW-w64/MSYS2 gcc and
+#     MSYS2 clang/LLVM targeting windows-gnu.
 export CGO_ENABLED := 1
 
 # When go.mod requires a newer Go version than the locally installed one,
@@ -53,7 +92,31 @@ REGRESSION_TIMEOUT ?= 20m
 build:
 	@echo "Building bd..."
 ifeq ($(OS),Windows_NT)
-	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd
+	@if [ -n "$$CC" ]; then \
+		echo "Using CC=$$CC"; \
+		go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+	elif command -v gcc >/dev/null 2>&1; then \
+		CC=gcc go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+	elif command -v clang >/dev/null 2>&1 && clang -dumpmachine 2>/dev/null | grep -qi 'windows.*gnu'; then \
+		CC=clang go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+	else \
+		for bin in $(WINDOWS_CGO_BINS); do \
+			if [ -x "$$bin/gcc.exe" ]; then \
+				echo "Using Windows CGO gcc from $$bin"; \
+				PATH="$$bin:$$PATH" CC=gcc go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+				exit $$?; \
+			fi; \
+			if [ -x "$$bin/clang.exe" ] && "$$bin/clang.exe" -dumpmachine 2>/dev/null | grep -qi 'windows.*gnu'; then \
+				echo "Using Windows CGO clang from $$bin"; \
+				PATH="$$bin:$$PATH" CC=clang go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+				exit $$?; \
+			fi; \
+		done; \
+		echo "ERROR: Windows CGO builds require a GCC-compatible compiler." >&2; \
+		echo "       Install MinGW-w64/MSYS2 gcc or MSYS2 clang/LLVM targeting windows-gnu." >&2; \
+		echo "       Put it on PATH, set CC, or set WINDOWS_CGO_BINS=/path/to/toolchain/bin." >&2; \
+		exit 1; \
+	fi
 else
 	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
 ifeq ($(shell uname),Darwin)

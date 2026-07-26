@@ -1,3 +1,5 @@
+//go:build integration
+
 package scripts_test
 
 import (
@@ -14,6 +16,50 @@ import (
 const (
 	closingIssuesOne  = `{"data":{"repository":{"pullRequest":{"closingIssuesReferences":{"nodes":[{"id":"I_kwDOExample"}]}}}}}`
 	closingIssuesZero = `{"data":{"repository":{"pullRequest":{"closingIssuesReferences":{"nodes":[]}}}}}`
+	fakeGHFunction    = `gh() {
+  if [ "${PR_PREFLIGHT_HOST_SENTINEL:-}" = present ]; then
+    printf 'inherited host environment reached fake gh\n' >&2
+    return 70
+  fi
+  case ":${BASHOPTS:-}:" in
+    *:failglob:*)
+      printf 'inherited failglob option reached fake gh\n' >&2
+      return 71
+      ;;
+  esac
+
+  printf '%s\0' "$#" >>"$GH_CALL_LOG"
+  printf '%s\0' "$@" >>"$GH_CALL_LOG"
+
+  case "$1 $2" in
+    "pr view")
+      for arg in "$@"; do
+        case "$arg" in
+          *closingIssuesReferences*)
+            printf 'Unknown JSON field: "closingIssuesReferences"\n' >&2
+            return 1
+            ;;
+        esac
+      done
+      printf '%s\n' "{\"number\":${PR_NUMBER},\"title\":\"Compatibility fixture\",\"author\":{\"login\":\"contributor\"},\"url\":\"${PR_URL}\",\"baseRefName\":\"main\",\"headRefName\":\"fix/preflight\",\"headRepositoryOwner\":{\"login\":\"contributor\"},\"isCrossRepository\":true,\"isDraft\":false,\"maintainerCanModify\":true,\"mergeStateStatus\":\"CLEAN\",\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"changedFiles\":1,\"additions\":1,\"deletions\":0,\"files\":[{\"path\":\"README.md\"}],\"statusCheckRollup\":[],\"latestReviews\":[]}"
+      ;;
+    "run list")
+      printf '[]\n'
+      ;;
+    "api graphql")
+      if [ "$GRAPHQL_EXIT" != 0 ]; then
+        printf 'simulated GraphQL failure\n' >&2
+        return "$GRAPHQL_EXIT"
+      fi
+      printf '%s\n' "$GRAPHQL_RESPONSE"
+      ;;
+    *)
+      printf 'unexpected gh invocation\n' >&2
+      return 68
+      ;;
+  esac
+}
+`
 )
 
 type preflightFixture struct {
@@ -180,6 +226,40 @@ func TestPRPreflightSupportsGitHubCLIWithoutClosingIssuesReferences(t *testing.T
 	}
 }
 
+func TestPRPreflightFixtureIgnoresHostShellAndGitHubState(t *testing.T) {
+	hostState := t.TempDir()
+	startupMarker := filepath.Join(hostState, "startup-invoked")
+	hostStartup := filepath.Join(hostState, "host-startup.sh")
+	if err := os.WriteFile(
+		hostStartup,
+		[]byte("printf 'invoked\\n' >"+shSingleQuote(msysPath(startupMarker))+"\nexit 97\n"),
+		0o600,
+	); err != nil {
+		t.Fatalf("write hostile host startup: %v", err)
+	}
+
+	t.Setenv("BASH_ENV", msysPath(hostStartup))
+	t.Setenv("ENV", msysPath(hostStartup))
+	t.Setenv("BASHOPTS", "failglob")
+	t.Setenv("SHELLOPTS", "nounset")
+	t.Setenv("GH_CONFIG_DIR", filepath.Join(hostState, "gh"))
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(hostState, "gitconfig"))
+	t.Setenv("PR_PREFLIGHT_HOST_SENTINEL", "present")
+
+	run := runPRPreflightWithFakeGH(t, preflightFixture{})
+	if run.err != nil {
+		t.Fatalf("curated preflight process failed under hostile host state: %v\n%s", run.err, run.output)
+	}
+	if _, err := os.Stat(startupMarker); err == nil {
+		t.Fatal("preflight process sourced the inherited host startup file")
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("inspect hostile startup marker: %v", err)
+	}
+	if len(run.calls) == 0 {
+		t.Fatal("controlled gh function did not intercept any calls")
+	}
+}
+
 func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightRun {
 	t.Helper()
 
@@ -199,73 +279,136 @@ func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightR
 		fixture.graphQLExit = "0"
 	}
 
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skipf("bash is required to test pr-preflight.sh: %v", err)
-	}
-	if _, err := exec.LookPath("jq"); err != nil {
-		t.Skipf("jq is required to test pr-preflight.sh: %v", err)
-	}
+	bash, path := prPreflightProcessTools(t)
 
-	bin := t.TempDir()
-	callLog := filepath.Join(t.TempDir(), "gh-calls")
+	runDir := t.TempDir()
+	callLog := filepath.Join(runDir, "gh-calls")
 	if err := os.WriteFile(callLog, nil, 0o600); err != nil {
 		t.Fatalf("initialize fake gh call log: %v", err)
 	}
-	writeExecutable(t, filepath.Join(bin, "gh"), `#!/bin/sh
-set -eu
-printf '%s\0' "$#" >>"$GH_CALL_LOG"
-printf '%s\0' "$@" >>"$GH_CALL_LOG"
+	bashEnvironment := filepath.Join(runDir, "bash-env.sh")
+	if err := os.WriteFile(bashEnvironment, []byte(fakeGHFunction), 0o600); err != nil {
+		t.Fatalf("write controlled Bash environment: %v", err)
+	}
 
-case "$1 $2" in
-  "pr view")
-    for arg in "$@"; do
-      case "$arg" in
-        *closingIssuesReferences*)
-          printf 'Unknown JSON field: "closingIssuesReferences"\n' >&2
-          exit 1
-          ;;
-      esac
-    done
-    printf '%s\n' "{\"number\":${PR_NUMBER},\"title\":\"Compatibility fixture\",\"author\":{\"login\":\"contributor\"},\"url\":\"${PR_URL}\",\"baseRefName\":\"main\",\"headRefName\":\"fix/preflight\",\"headRepositoryOwner\":{\"login\":\"contributor\"},\"isCrossRepository\":true,\"isDraft\":false,\"maintainerCanModify\":true,\"mergeStateStatus\":\"CLEAN\",\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"changedFiles\":1,\"additions\":1,\"deletions\":0,\"files\":[{\"path\":\"README.md\"}],\"statusCheckRollup\":[],\"latestReviews\":[]}"
-    ;;
-  "run list")
-    printf '[]\n'
-    ;;
-  "api graphql")
-    if [ "$GRAPHQL_EXIT" != 0 ]; then
-      printf 'simulated GraphQL failure\n' >&2
-      exit "$GRAPHQL_EXIT"
-    fi
-    printf '%s\n' "$GRAPHQL_RESPONSE"
-    ;;
-  *)
-    printf 'unexpected gh invocation\n' >&2
-    exit 68
-    ;;
-esac
-`)
-
-	root := preflightRepoRoot(t)
-	cmd := exec.Command(bash, shellPath(t, filepath.Join(root, "scripts", "pr-preflight.sh")), fixture.prArg, "--repo", "default/repo")
-	cmd.Dir = root
-	cmd.Env = []string{
-		"PATH=" + shellPath(t, bin) + ":" + bashPathList(t, os.Getenv("PATH")) + ":/usr/bin:/bin",
-		"HOME=" + shellPath(t, t.TempDir()),
+	root := sourceRepoRoot(t)
+	cmd := exec.Command(
+		bash,
+		"--noprofile",
+		"--norc",
+		msysPath(filepath.Join(root, "scripts", "pr-preflight.sh")),
+		fixture.prArg, "--repo", "default/repo",
+	)
+	cmd.Dir = runDir
+	cmd.Env = append(prPreflightWindowsRuntimeEnv(),
+		"PATH="+path,
+		"HOME="+msysPath(runDir),
+		"XDG_CONFIG_HOME="+msysPath(filepath.Join(runDir, "xdg-config")),
+		"XDG_STATE_HOME="+msysPath(filepath.Join(runDir, "xdg-state")),
+		"GH_CONFIG_DIR="+msysPath(filepath.Join(runDir, "gh-config")),
 		"LC_ALL=C",
 		"LANG=C",
-		"GH_CALL_LOG=" + shellPath(t, callLog),
-		"GRAPHQL_EXIT=" + fixture.graphQLExit,
-		"GRAPHQL_RESPONSE=" + fixture.graphQLResponse,
-		"PR_NUMBER=" + fixture.returnedNumber,
-		"PR_URL=" + fixture.canonicalURL,
-	}
+		"BASH_ENV="+msysPath(bashEnvironment),
+		"ENV=",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_TERMINAL_PROMPT=0",
+		"GH_CALL_LOG="+msysPath(callLog),
+		"GRAPHQL_EXIT="+fixture.graphQLExit,
+		"GRAPHQL_RESPONSE="+fixture.graphQLResponse,
+		"PR_NUMBER="+fixture.returnedNumber,
+		"PR_URL="+fixture.canonicalURL,
+	)
 	out, runErr := cmd.CombinedOutput()
 	logBytes, readErr := os.ReadFile(callLog)
 	if readErr != nil {
 		t.Fatalf("read fake gh call log: %v", readErr)
 	}
 	return preflightRun{output: string(out), calls: parseGHCalls(t, logBytes), err: runErr}
+}
+
+func prPreflightProcessTools(t *testing.T) (string, string) {
+	t.Helper()
+
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatalf("bash is required to exercise pr-preflight.sh: %v", err)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("git is required to exercise pr-preflight.sh: %v", err)
+	}
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Fatalf("jq is required to exercise pr-preflight.sh: %v", err)
+	}
+
+	entries := []string{
+		msysPath(filepath.Dir(git)),
+		msysPath(filepath.Dir(jq)),
+		"/usr/bin",
+		"/bin",
+	}
+	path := strings.Join(uniqueStrings(entries), ":")
+	probeScript := `set -eu
+test -n "$BASH_VERSION"
+command -v git >/dev/null
+command -v jq >/dev/null
+`
+	if runtime.GOOS == "windows" {
+		probeScript += `case "$(uname -s)" in
+  MINGW*|MSYS*) ;;
+  *) printf 'expected Git Bash, found %s\n' "$(uname -s)" >&2; exit 64 ;;
+esac
+`
+	}
+	probe := exec.Command(bash, "--noprofile", "--norc", "-c", probeScript)
+	probe.Env = append(prPreflightWindowsRuntimeEnv(),
+		"PATH="+path,
+		"HOME="+msysPath(t.TempDir()),
+		"LC_ALL=C",
+		"LANG=C",
+		"BASH_ENV=",
+		"ENV=",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+	)
+	if output, err := probe.CombinedOutput(); err != nil {
+		t.Fatalf("selected Bash cannot provide the required preflight boundary: %v\n%s", err, output)
+	}
+	return bash, path
+}
+
+func prPreflightWindowsRuntimeEnv() []string {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+
+	var env []string
+	for _, key := range []string{"SYSTEMROOT", "WINDIR", "COMSPEC"} {
+		if value := os.Getenv(key); value != "" {
+			env = append(env, key+"="+value)
+		}
+	}
+	return env
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func parseGHCalls(t *testing.T, log []byte) [][]string {
@@ -337,13 +480,4 @@ func exitCode(err error) int {
 		return exitErr.ExitCode()
 	}
 	return -1
-}
-
-func preflightRepoRoot(t *testing.T) string {
-	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	return filepath.Dir(filepath.Dir(file))
 }
