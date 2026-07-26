@@ -3438,7 +3438,18 @@ func (s *DoltStore) recomputeBlockedAfterPull(ctx context.Context, fromCommit st
 // operator resolved by hand — leaves is_blocked stale until this full pass runs.
 // Idempotent: a consistent database corrects nothing.
 func (s *DoltStore) RecomputeAllBlocked(ctx context.Context) (int, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	// The full pass's batched UPDATEs carry five correlated EXISTS subqueries
+	// each; on a loaded shared server a single batch can outlive the pool's
+	// per-I/O deadline (default 10s, see buildServerDSN), killing the repair
+	// with "i/o timeout" — and the retry dies the same way, so the owed
+	// recompute never lands (bd-bn8jo). Run it on a dedicated long-timeout
+	// connection like the other known-long maintenance ops.
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin is_blocked recompute: %w", err)
 	}
@@ -3470,9 +3481,17 @@ func (s *DoltStore) RecomputeAllBlocked(ctx context.Context) (int, error) {
 }
 
 // recomputeBlockedTx runs the post-merge is_blocked recompute in its own
-// transaction.
+// transaction. Like RecomputeAllBlocked it runs on a long-timeout connection:
+// a heavy merge scopes the recompute over a large diff, and a pool-deadline
+// kill here is what turns into the owed full recompute in the first place
+// (bd-bn8jo).
 func (s *DoltStore) recomputeBlockedTx(ctx context.Context, fromCommit string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin is_blocked recompute: %w", err)
 	}
