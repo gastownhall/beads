@@ -257,6 +257,27 @@ func TestEmbeddedEpic(t *testing.T) {
 			t.Errorf("closed = %v, want it to contain %s", closed, e.ID)
 		}
 	})
+
+	t.Run("close_eligible_human_output_ends_with_reason", func(t *testing.T) {
+		dir9, _, _ := bdInit(t, bd, "--prefix", "ep9")
+		e := bdCreate(t, bd, dir9, "Output epic", "--type", "epic")
+		ch := bdCreate(t, bd, dir9, "Output child", "--type", "task")
+		bdDep(t, bd, dir9, "add", ch.ID, e.ID, "--type", "parent-child")
+		bdClose(t, bd, dir9, ch.ID)
+
+		out := bdEpic(t, bd, dir9, "close-eligible", "--reason", "ship it")
+		lines := strings.Split(strings.TrimSpace(out), "\n")
+		lastLine := lines[len(lines)-1]
+		if !strings.Contains(lastLine, "ship it") {
+			t.Errorf("final output line should contain the reason, got: %q", lastLine)
+		}
+		if !strings.Contains(lastLine, "Closed") {
+			t.Errorf("final output line should contain Closed summary, got: %q", lastLine)
+		}
+		if !strings.Contains(out, e.ID) {
+			t.Errorf("output should list closed epic ID %s, got: %s", e.ID, out)
+		}
+	})
 }
 
 // TestEmbeddedEpicConcurrent exercises epic operations concurrently.

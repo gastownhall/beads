@@ -120,6 +120,10 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		reason := resolveCloseEligibleReason(cmd)
 
+		if err := validateCloseReasons([]string{reason}); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+
 		if usesProxiedServer() {
 			return runCloseEligibleEpicsProxiedServer(rootCtx, dryRun, reason)
 		}
@@ -133,7 +137,7 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		}
 		eligibleEpics := filterEligibleEpics(epics)
 		if len(eligibleEpics) == 0 {
-			return outputNoEligibleEpics()
+			return outputNoEligibleEpics(reason)
 		}
 		if dryRun {
 			return outputCloseEligibleDryRun(eligibleEpics, reason)
@@ -154,9 +158,13 @@ var closeEligibleEpicsCmd = &cobra.Command{
 	},
 }
 
-func outputNoEligibleEpics() error {
+func outputNoEligibleEpics(reason string) error {
 	if jsonOutput {
-		return outputJSON([]*types.EpicStatus{})
+		return outputJSON(map[string]interface{}{
+			"closed": []string{},
+			"count":  0,
+			"reason": reason,
+		})
 	}
 	fmt.Println("No epics eligible for closure")
 	return nil
@@ -181,10 +189,10 @@ func outputCloseEligibleResult(closedIDs []string, reason string) error {
 			"reason": reason,
 		})
 	}
-	fmt.Printf("✓ Closed %d epic(s) with reason %q\n", len(closedIDs), reason)
 	for _, id := range closedIDs {
 		fmt.Printf("  - %s\n", id)
 	}
+	fmt.Printf("✓ Closed %d epic(s) with reason %q\n", len(closedIDs), reason)
 	return nil
 }
 

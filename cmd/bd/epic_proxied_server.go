@@ -37,7 +37,7 @@ func runCloseEligibleEpicsProxiedServer(ctx context.Context, dryRun bool, reason
 	uw.Close(ctx)
 
 	if len(eligibleEpics) == 0 {
-		return outputNoEligibleEpics()
+		return outputNoEligibleEpics(reason)
 	}
 	if dryRun {
 		return outputCloseEligibleDryRun(eligibleEpics, reason)
