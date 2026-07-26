@@ -1441,27 +1441,36 @@ func selectedDoltBeadsDir() string {
 // `show` is a no-store diagnostic command, so getStore() is usually nil and
 // ListRemotes is unavailable. Fall back to on-disk repo_state.json (same
 // source as the remote-migrate gate) so remotes match `bd dolt remote list`
-// in embedded mode (GH#4619).
-func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config, embeddedDataDir string) []storage.RemoteInfo {
+// (GH#4619).
+//
+// Only the candidate path(s) for the active mode (embedded vs. server) are
+// probed; a repo in one mode must not surface stale remotes persisted under
+// the other mode's data directory. Within the mode-appropriate candidates,
+// the first repo_state.json found on disk is authoritative: an empty
+// remotes list there means "no remotes", not "keep looking" — this stops
+// an authoritative-but-empty active database from falling through to a
+// stale candidate. A corrupt or unreadable repo_state.json is surfaced as a
+// warning rather than silently rendered as "(none)".
+func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config, embeddedDataDir string, embedded bool) []storage.RemoteInfo {
 	ctx := context.Background()
 	if st := getStore(); st != nil {
 		if remotes, err := st.ListRemotes(ctx); err == nil && len(remotes) > 0 {
 			return remotes
 		}
 	}
-	// Probe persisted remotes under common Dolt data roots without opening a store.
 	dbName := ""
 	if cfg != nil {
 		dbName = cfg.GetDoltDatabase()
 	}
 	var candidates []string
-	if embeddedDataDir != "" {
-		candidates = append(candidates, embeddedDataDir)
-		if dbName != "" {
-			candidates = append(candidates, filepath.Join(embeddedDataDir, dbName))
+	if embedded {
+		if embeddedDataDir != "" {
+			candidates = append(candidates, embeddedDataDir)
+			if dbName != "" {
+				candidates = append(candidates, filepath.Join(embeddedDataDir, dbName))
+			}
 		}
-	}
-	if beadsDir != "" {
+	} else if beadsDir != "" {
 		candidates = append(candidates, filepath.Join(beadsDir, "dolt"))
 		if dbName != "" {
 			candidates = append(candidates, filepath.Join(beadsDir, "dolt", dbName))
@@ -1471,10 +1480,19 @@ func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config, embeddedDat
 		if dir == "" {
 			continue
 		}
-		remotes, err := doltutil.PersistedRemotes(dir)
-		if err != nil || len(remotes) == 0 {
+		statePath := filepath.Join(dir, ".dolt", "repo_state.json")
+		if _, err := os.Stat(statePath); err != nil {
+			// No dolt repo state at this candidate; try the next
+			// mode-appropriate candidate.
 			continue
 		}
+		remotes, err := doltutil.PersistedRemotes(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", ui.RenderWarn(fmt.Sprintf("could not read remotes from %s: %v", statePath, err)))
+			return nil
+		}
+		// repo_state.json exists at this candidate: its remotes (even if
+		// empty) are authoritative for the active mode.
 		return remotes
 	}
 	return nil
@@ -1563,7 +1581,7 @@ func showDoltConfig(testConnection bool) error {
 	}
 
 	fmt.Println("\nRemotes:")
-	remotes := resolveDoltShowRemotes(beadsDir, cfg, embeddedDataDir)
+	remotes := resolveDoltShowRemotes(beadsDir, cfg, embeddedDataDir, embedded)
 	if len(remotes) == 0 {
 		fmt.Println("  (none)")
 	} else {
