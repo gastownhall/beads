@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/fs"
 	"github.com/steveyegge/beads/internal/storage/git"
@@ -54,6 +55,39 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 	if in.team {
 		return fmt.Errorf("--team is not supported with --proxied-server")
+	}
+
+	// Preflight the external dolt binary before any .beads/ write below
+	// (checkExistingBeadsData onward). This only applies to managed
+	// proxied-server mode (in.externalConfig == nil): external mode talks
+	// to a remote/pre-existing dolt sql-server over the network and never
+	// spawns a local dolt binary, so it has nothing to preflight here.
+	// Failing here means a missing/broken dolt produces a clean preflight
+	// error instead of a half-initialized .beads/ directory from a later
+	// failure in newManagedProxiedServerUOWProvider.
+	if in.externalConfig == nil {
+		doltBin, doltSrc, err := doltversion.Resolve(doltversion.ResolveOptions{
+			EnvValue: doltversion.ReadEnvOverride(),
+			// SidecarValue hook point only in this PR; PR-2 wires the
+			// clone-local sidecar reader.
+			SidecarValue: "",
+		})
+		if err != nil {
+			return fmt.Errorf(
+				"bd init --proxied-server: resolving dolt binary (source: %s): %w; install from https://docs.dolthub.com/introduction/installation",
+				doltSrc, err,
+			)
+		}
+		_, doltWarn, err := doltversion.ProbeWithPolicy(ctx, doltBin)
+		if err != nil {
+			return fmt.Errorf(
+				"bd init --proxied-server: probing dolt binary %q (source: %s): %w; install from https://docs.dolthub.com/introduction/installation",
+				doltBin, doltSrc, err,
+			)
+		}
+		if doltWarn != nil && !in.quiet {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", doltWarn.Message())
+		}
 	}
 
 	if err := config.Initialize(); err != nil {
