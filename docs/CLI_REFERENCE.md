@@ -6556,13 +6556,6 @@ Garbage collect old or abandoned wisps from the database.
 
 A wisp is considered abandoned if:
   - It hasn't been updated in --age duration and is not closed
-  - AND it is not live work: blocked steps (waiting on a dependency), pinned
-    beads, and any step whose status category is wip (in_progress, blocked,
-    hooked) or frozen (deferred, pinned) are never reclaimed by age, no matter
-    how long they have been waiting (GH#4394). Custom statuses count by their
-    configured category, so only plain open (active) and closed (done) steps
-    are age-reclaimable. If the blocked set or the custom-status list cannot be
-    read, the GC aborts rather than risk reclaiming live steps.
 
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
