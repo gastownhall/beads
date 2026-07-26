@@ -396,6 +396,17 @@ type Config struct {
 	// connection before the server reaps it server-side; otherwise the next
 	// query handed a server-reaped connection fails with "invalid connection".
 	ConnMaxIdleTime time.Duration
+
+	// PoolReadTimeout / PoolWriteTimeout override the per-I/O read/write
+	// deadlines on shared-pool connections (0 = default 10s each; see
+	// buildServerDSN). The default's fast-fail is right for a healthy local
+	// server, but on an overloaded shared server it kills ordinary queries
+	// mid-flight ("client connection went away", wy-b72dj/bd-vz0y9); raising
+	// it is the intended relief valve for such deployments. Known-long
+	// operations should not lean on this — route them through
+	// execWithLongTimeout/openLongTimeoutConn instead.
+	PoolReadTimeout  time.Duration
+	PoolWriteTimeout time.Duration
 }
 
 // Defaults for the *sql.DB connection pool. Exported for tests/callers that
@@ -410,6 +421,14 @@ const (
 	// before the server reaps it; this prevents the next read from picking up a
 	// server-closed connection and failing with "invalid connection".
 	defaultConnMaxIdleTime = 20 * time.Second
+	// defaultPoolReadTimeout / defaultPoolWriteTimeout are the per-I/O
+	// deadlines on shared-pool connections. Overridable via
+	// Config.PoolReadTimeout/PoolWriteTimeout (BEADS_DOLT_POOL_READ_TIMEOUT /
+	// BEADS_DOLT_POOL_WRITE_TIMEOUT, dolt.pool-read-timeout /
+	// dolt.pool-write-timeout); the defaults themselves are deliberately
+	// unchanged (bd-vz0y9).
+	defaultPoolReadTimeout  = 10 * time.Second
+	defaultPoolWriteTimeout = 10 * time.Second
 )
 
 // cliExecTimeout is the default maximum time to wait for dolt CLI
@@ -448,7 +467,14 @@ func withCLIExecTimeout(ctx context.Context) (context.Context, context.CancelFun
 // time.ParseDuration strings (e.g. "2m", "90s") or bare numbers treated as
 // seconds (e.g. "90") are accepted.
 func timeoutFromEnv(env string, fallback time.Duration) time.Duration {
-	raw := strings.TrimSpace(os.Getenv(env))
+	return parseTimeout(os.Getenv(env), fallback)
+}
+
+// parseTimeout parses a duration setting, falling back to fallback when raw is
+// empty, unparsable, or non-positive. Valid time.ParseDuration strings (e.g.
+// "2m", "90s") or bare numbers treated as seconds (e.g. "90") are accepted.
+func parseTimeout(raw string, fallback time.Duration) time.Duration {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return fallback
 	}
@@ -1733,8 +1759,14 @@ func buildServerDSN(cfg *Config, database string) string {
 	if err != nil {
 		return base.String()
 	}
-	parsed.ReadTimeout = 10 * time.Second
-	parsed.WriteTimeout = 10 * time.Second
+	parsed.ReadTimeout = defaultPoolReadTimeout
+	if cfg.PoolReadTimeout > 0 {
+		parsed.ReadTimeout = cfg.PoolReadTimeout
+	}
+	parsed.WriteTimeout = defaultPoolWriteTimeout
+	if cfg.PoolWriteTimeout > 0 {
+		parsed.WriteTimeout = cfg.PoolWriteTimeout
+	}
 	return parsed.FormatDSN()
 }
 
