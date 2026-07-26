@@ -540,7 +540,6 @@ func resolveCommandBeadsDir(dbPath string) string {
 	return filepath.Dir(dbPath)
 }
 
-// getActorWithGit returns the actor for audit trails with git config fallback.
 // resolveConfiguredActor returns the actor implied by env/config when no
 // explicit --actor flag was passed, honoring the documented priority
 // BEADS_ACTOR > BD_ACTOR (deprecated) > config.yaml `actor`.
@@ -557,6 +556,7 @@ func resolveConfiguredActor() string {
 	return config.GetString("actor")
 }
 
+// getActorWithGit returns the actor for audit trails with git config fallback.
 // Priority: --actor flag > BEADS_ACTOR env > BD_ACTOR env (deprecated) > git config user.name > $USER > "unknown"
 // This provides a sensible default for developers: their git identity is used unless
 // explicitly overridden

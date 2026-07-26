@@ -248,6 +248,37 @@ func TestCLI_Create(t *testing.T) {
 	}
 }
 
+// TestCLI_CreateActorPrecedence is a CLI-level regression test for GH#4645:
+// with both BEADS_ACTOR and the deprecated BD_ACTOR set, `bd create` must
+// stamp created_by with BEADS_ACTOR's value. Unlike TestResolveConfiguredActor
+// (which calls resolveConfiguredActor() directly), this drives the real
+// command through rootCmd.Execute() so it also covers the root
+// PersistentPreRunE / refreshBoundCommandConfig wiring that pre-populates the
+// global actor before create.go ever runs — reverting either call site would
+// leave TestResolveConfiguredActor green but this test red.
+func TestCLI_CreateActorPrecedence(t *testing.T) {
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
+	tmpDir := setupCLITestDB(t)
+	t.Setenv("BD_ACTOR", "from-bd-actor")
+	t.Setenv("BEADS_ACTOR", "from-beads-actor")
+
+	out := runBDInProcess(t, tmpDir, "create", "Actor precedence test", "-p", "1", "--json")
+
+	jsonStart := strings.Index(out, "{")
+	if jsonStart == -1 {
+		t.Fatalf("No JSON found in output: %s", out)
+	}
+	jsonOut := out[jsonStart:]
+
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, jsonOut)
+	}
+	if result["created_by"] != "from-beads-actor" {
+		t.Errorf("created_by = %v, want %q (BEADS_ACTOR must outrank deprecated BD_ACTOR)", result["created_by"], "from-beads-actor")
+	}
+}
+
 func TestCLI_List(t *testing.T) {
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
