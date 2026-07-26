@@ -317,6 +317,21 @@ func (s *EmbeddedDoltStore) GetConflictRows(ctx context.Context, table string) (
 	return rows, err
 }
 
+// The CLI reaches this through storage.UnwrapStore too.
+var _ storage.MergeBlockerInspector = (*EmbeddedDoltStore)(nil)
+
+// GetMergeBlockers reports schema conflicts, constraint violations, and
+// whether a merge is open. Implements storage.MergeBlockerInspector.
+func (s *EmbeddedDoltStore) GetMergeBlockers(ctx context.Context) (storage.MergeBlockers, error) {
+	var blockers storage.MergeBlockers
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		blockers, err = versioncontrolops.GetMergeBlockers(ctx, db)
+		return err
+	})
+	return blockers, err
+}
+
 // ResolveConflictRows resolves individual conflicted rows of table by key.
 // Implements storage.ConflictInspector (backs `bd conflicts resolve <id>`).
 // It runs on a PINNED connection: the resolution sets dolt's

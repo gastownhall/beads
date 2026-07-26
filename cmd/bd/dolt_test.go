@@ -1224,6 +1224,114 @@ func TestHasNoRemoteConfigured_ProbesThroughDecoratedStore(t *testing.T) {
 	}
 }
 
+// fakeAdoptingDoltStore is fakeProbingDoltStore plus the write side of the
+// adoption path: it records AddRemote instead of performing it, so a
+// regression surfaces as an assertion here rather than as a real remote write
+// (and stops before adoption can touch the workspace config or git).
+type fakeAdoptingDoltStore struct {
+	fakeProbingDoltStore
+	listErr        error
+	addRemoteCalls int
+}
+
+func (f *fakeAdoptingDoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.fakeProbingDoltStore.ListRemotes(ctx)
+}
+
+func (f *fakeAdoptingDoltStore) AddRemote(_ context.Context, name, url string) error {
+	f.addRemoteCalls++
+	return fmt.Errorf("fakeAdoptingDoltStore: AddRemote(%q, %q) must not be called", name, url)
+}
+
+// wy-82hc5: `bd dolt push` adopts the git origin as the Dolt remote when the
+// rig appears to have none, and it judged that on an empty dolt_remotes alone
+// — the same unhardened assumption wy-xtv17 removed from the no-remote gate.
+// In the GH#2118 cold-start window (sql-server just started, remote persisted
+// in .dolt/repo_state.json but dolt_remotes not yet populated) that re-derives
+// the remote from git, silently repointing push whenever the persisted remote
+// and the git origin disagree. The on-disk probe must veto first, and it can
+// only be reached through the storage decorator chain.
+func TestAdoptGitOriginRemoteForPush_PersistedRemoteVetoesAdoption(t *testing.T) {
+	ctx := context.Background()
+	for _, chain := range []struct {
+		name      string
+		telemetry bool
+	}{
+		{"hooks only", false},
+		{"hooks + telemetry", true},
+	} {
+		t.Run(chain.name, func(t *testing.T) {
+			clearTelemetryEnv(t)
+			if chain.telemetry {
+				t.Setenv("BD_OTEL_STDOUT", "true")
+			}
+			decorate := func(raw storage.DoltStorage) storage.DoltStorage {
+				return wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+			}
+
+			// The load-bearing case, driven through the real call site:
+			// dolt_remotes is empty, the remote is on disk. Adoption must be
+			// a quiet no-op — no AddRemote, no error, and no walk into the
+			// workspace/git half of the function.
+			raw := &fakeAdoptingDoltStore{fakeProbingDoltStore: fakeProbingDoltStore{persisted: true}}
+			persisted := decorate(raw)
+			if _, direct := persisted.(persistedRemoteProber); direct {
+				t.Fatalf("%T implements persistedRemoteProber directly; this test no longer exercises the peel", persisted)
+			}
+			adopted, err := adoptGitOriginRemoteForPush(ctx, persisted)
+			if err != nil {
+				t.Errorf("adoptGitOriginRemoteForPush returned error %v; a persisted remote is a no-op, not a failure", err)
+			}
+			if adopted {
+				t.Error("adoptGitOriginRemoteForPush adopted the git origin although the remote is persisted on disk (GH#2118 cold-start window)")
+			}
+			if raw.addRemoteCalls != 0 {
+				t.Errorf("AddRemote called %d times; the persisted-remote veto did not fire", raw.addRemoteCalls)
+			}
+
+			// The structural decision behind it, through the same chain.
+			// This block, not the call-site block above, is the assertion
+			// that fails in EVERY environment when the veto is removed: with
+			// the fix reverted, adoption above bails early at
+			// selectedDoltBeadsDir() on a machine with no resolvable
+			// workspace, so its `adopted` / addRemoteCalls assertions are
+			// environment-dependent. Do not drop these as redundant.
+			for _, tc := range []struct {
+				name  string
+				store *fakeAdoptingDoltStore
+				want  bool
+			}{
+				{"persisted on disk only", &fakeAdoptingDoltStore{fakeProbingDoltStore: fakeProbingDoltStore{persisted: true}}, true},
+				{"listed in dolt_remotes", &fakeAdoptingDoltStore{fakeProbingDoltStore: fakeProbingDoltStore{remotes: []storage.RemoteInfo{{Name: "origin"}}}}, true},
+				{"no remote anywhere", &fakeAdoptingDoltStore{}, false},
+			} {
+				got, err := hasConfiguredRemote(ctx, decorate(tc.store))
+				if err != nil {
+					t.Errorf("hasConfiguredRemote(%s) error: %v", tc.name, err)
+				}
+				if got != tc.want {
+					t.Errorf("hasConfiguredRemote(%s) = %v, want %v", tc.name, got, tc.want)
+				}
+			}
+
+			// A failed ListRemotes is still a real error, not "no remote":
+			// guessing a remote off a broken listing is how the wrong URL
+			// gets adopted.
+			listErr := fmt.Errorf("dolt_remotes unavailable")
+			broken := decorate(&fakeAdoptingDoltStore{listErr: listErr})
+			if _, err := hasConfiguredRemote(ctx, broken); !errors.Is(err, listErr) {
+				t.Errorf("hasConfiguredRemote swallowed a ListRemotes failure: err = %v", err)
+			}
+			if adopted, err := adoptGitOriginRemoteForPush(ctx, broken); adopted || !errors.Is(err, listErr) {
+				t.Errorf("adoptGitOriginRemoteForPush(list error) = (%v, %v), want (false, the list error)", adopted, err)
+			}
+		})
+	}
+}
+
 // A store that is neither a prober nor a decorator must not be treated as one:
 // the probe is optional, and its absence means "no on-disk evidence", not
 // "remote persisted".

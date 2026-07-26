@@ -11,7 +11,8 @@ import (
 // runConventionsCheck runs a composite conventions check: lint, stale, and orphans.
 // All findings are advisory (warning, never error) - conventions are a choice.
 func runConventionsCheck(path string) error {
-	// doctor is in noDbCommands so PersistentPreRun doesn't open the store.
+	// doctor opts out of PersistentPreRun DB init via skipStoreAnnotation, so
+	// PersistentPreRun doesn't open the store.
 	// The lint/stale/orphans primitives all require the global store, so
 	// initialize it lazily here; ensureDirectMode routes to embedded or
 	// server based on metadata.json (GH#3597).

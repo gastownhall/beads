@@ -77,7 +77,7 @@ SYNC_REFS=$(grep -rn 'bd sync\b' \
     2>/dev/null \
     | grep -v 'CHANGELOG\|audit-sync-mode' \
     | grep -i 'deprecated\|no-op\|removed\|unknown-command' \
-    | grep -vi 'removed in v0\.51\|JSONL-era' \
+    | grep -vi 'JSONL-era' \
     || true)
 
 if [ -n "$SYNC_REFS" ]; then

@@ -177,6 +177,7 @@ var graphFieldHints = map[string]string{
 	"depends":        "use the top-level 'edges' array or per-node 'deps' with type 'blocks'",
 	"children":       "set 'parent_key' or 'parent' on each child instead of listing children on the parent",
 	"acceptance":     "use 'acceptance_criteria' (matching the issue model's JSON field)",
+	"body":           "use 'description' (matching the issue model's JSON field)",
 	"due":            "use 'due_at' with an RFC3339 timestamp",
 	"defer":          "use 'defer_until' with an RFC3339 timestamp",
 	"event_category": "use 'event_kind' (matching the issue model's JSON field)",

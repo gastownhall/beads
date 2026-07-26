@@ -2,11 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -24,11 +30,23 @@ type syncOpsRecorder struct {
 	recomputeVals []int
 	recomputeErrs []error
 	pushErrs      []error
+	// fingerprints/fingerprintErrs script the dirty-graph evidence hook, one
+	// entry per blocked attempt. Both empty leaves the hook NIL, which is the
+	// production shape for a store that cannot answer the question at all.
+	fingerprints    []string
+	fingerprintErrs []error
+	// mergeBlockers/mergeBlockersErrs script the positive constraint-violation
+	// hook, one entry per blocked attempt. Both empty leaves the hook NIL,
+	// mirroring fingerprints above.
+	mergeBlockers     []storage.MergeBlockers
+	mergeBlockersErrs []error
 
-	pulls      int
-	conflicts  int
-	recomputes int
-	pushes     int
+	pulls              int
+	conflicts          int
+	recomputes         int
+	pushes             int
+	fingerprintCalls   int
+	mergeBlockersCalls int
 }
 
 func scriptedErr(script []error, call int) error {
@@ -42,7 +60,43 @@ func scriptedErr(script []error, call int) error {
 }
 
 func (r *syncOpsRecorder) ops() syncOps {
+	var fingerprint func(context.Context) (string, error)
+	if len(r.fingerprints) > 0 || len(r.fingerprintErrs) > 0 {
+		fingerprint = func(context.Context) (string, error) {
+			call := r.fingerprintCalls
+			r.fingerprintCalls++
+			if err := scriptedErr(r.fingerprintErrs, call); err != nil {
+				return "", err
+			}
+			if len(r.fingerprints) == 0 {
+				return "", nil
+			}
+			if call >= len(r.fingerprints) {
+				return r.fingerprints[len(r.fingerprints)-1], nil
+			}
+			return r.fingerprints[call], nil
+		}
+	}
+	var blockers func(context.Context) (storage.MergeBlockers, error)
+	if len(r.mergeBlockers) > 0 || len(r.mergeBlockersErrs) > 0 {
+		blockers = func(context.Context) (storage.MergeBlockers, error) {
+			call := r.mergeBlockersCalls
+			r.mergeBlockersCalls++
+			if err := scriptedErr(r.mergeBlockersErrs, call); err != nil {
+				return storage.MergeBlockers{}, err
+			}
+			if len(r.mergeBlockers) == 0 {
+				return storage.MergeBlockers{}, nil
+			}
+			if call >= len(r.mergeBlockers) {
+				return r.mergeBlockers[len(r.mergeBlockers)-1], nil
+			}
+			return r.mergeBlockers[call], nil
+		}
+	}
 	return syncOps{
+		dirtyFingerprint: fingerprint,
+		mergeBlockers:    blockers,
 		pull: func(context.Context) ([]string, error) {
 			call := r.pulls
 			r.pulls++
@@ -229,6 +283,50 @@ func TestRunSyncLoopConflictWinsOverPullError(t *testing.T) {
 	}
 	if r.pushes != 0 {
 		t.Errorf("pushes = %d, want 0", r.pushes)
+	}
+}
+
+// wy-j6q2z finding 7: on a shared sql-server, a live conflict left by ANOTHER
+// writer can coincide with THIS run's own pull failing for an unrelated
+// reason (transport, auth). classifyPullError only extracts table names from
+// a *versioncontrolops.MergeConflictsError, so an unrelated error leaves
+// `merged` empty — the conflict branch still fires (from the live check), and
+// the unrelated error must not vanish silently.
+func TestRunSyncLoopDiscardedPullErrorOnLiveConflict(t *testing.T) {
+	r := &syncOpsRecorder{
+		pullErrs:     []error{errors.New("dial tcp: connection refused")},
+		conflictsSeq: [][]string{nil, {"issues"}},
+	}
+	out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Status != syncStatusConflict {
+		t.Fatalf("status = %q, want %q", out.Status, syncStatusConflict)
+	}
+	if out.DiscardedPullError != "dial tcp: connection refused" {
+		t.Errorf("DiscardedPullError = %q, want the unrelated pull error preserved", out.DiscardedPullError)
+	}
+}
+
+// The companion case: when the pull error IS what the merge captured (merged
+// non-empty), it is already fully described by out.Conflicts — recording it a
+// second time as "discarded" would be misleading, since nothing was actually
+// dropped.
+func TestRunSyncLoopNoDiscardedPullErrorWhenPullCapturedTheConflict(t *testing.T) {
+	r := &syncOpsRecorder{
+		pullConflicts: [][]string{{"issues"}},
+		pullErrs:      []error{errors.New("merge conflict in issues")},
+	}
+	out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Status != syncStatusConflict {
+		t.Fatalf("status = %q, want %q", out.Status, syncStatusConflict)
+	}
+	if out.DiscardedPullError != "" {
+		t.Errorf("DiscardedPullError = %q, want empty when the pull's own error described the conflict", out.DiscardedPullError)
 	}
 }
 
@@ -463,16 +561,40 @@ func TestIsNoRemoteConfiguredErr(t *testing.T) {
 
 // Every error the narrower dolt-verb classifier accepts must still be accepted
 // by sync's, or sync would exit non-zero where `bd dolt pull` exits 0.
+// TestIsNoRemoteConfiguredErrSupersetOfRemoteNotFound checks the widening
+// isNoRemoteConfiguredErr's doc comment promises: every "remote not found"
+// wording it delegates to isRemoteNotFoundErr is also accepted directly, AND
+// the bare "no remote" wording isRemoteNotFoundErr rejects is still accepted.
+// The original version of this test asserted
+// `isRemoteNotFoundErr(err) && !isNoRemoteConfiguredErr(err)`, which is
+// unsatisfiable by construction — isNoRemoteConfiguredErr's implementation is
+// literally `isRemoteNotFoundErr(err) || ...` — so it passed vacuously
+// regardless of either function's behavior.
 func TestIsNoRemoteConfiguredErrSupersetOfRemoteNotFound(t *testing.T) {
 	for _, msg := range []string{
 		`remote "origin" not found`,
 		"REMOTE NOT FOUND",
-		"could not be found: unknown remote",
+		"not found: remote origin",
 	} {
 		err := errors.New(msg)
-		if isRemoteNotFoundErr(err) && !isNoRemoteConfiguredErr(err) {
+		if !isRemoteNotFoundErr(err) {
+			t.Fatalf("test fixture %q is not accepted by isRemoteNotFoundErr; fix the fixture", msg)
+		}
+		if !isNoRemoteConfiguredErr(err) {
 			t.Errorf("%q: accepted by isRemoteNotFoundErr but rejected by isNoRemoteConfiguredErr", msg)
 		}
+	}
+
+	// The widening is not vacuous: Dolt's bare "no remote" phrasing is exactly
+	// what isRemoteNotFoundErr misses (it requires both "remote" and "not
+	// found"), and it is the whole reason isNoRemoteConfiguredErr exists.
+	bareNoRemote := "Error 1105: no remote"
+	err := errors.New(bareNoRemote)
+	if isRemoteNotFoundErr(err) {
+		t.Fatalf("test fixture %q is unexpectedly accepted by isRemoteNotFoundErr; fix the fixture", bareNoRemote)
+	}
+	if !isNoRemoteConfiguredErr(err) {
+		t.Errorf("%q: bare no-remote wording should be accepted by isNoRemoteConfiguredErr even though isRemoteNotFoundErr rejects it", bareNoRemote)
 	}
 }
 
@@ -725,6 +847,34 @@ func TestSyncConflictMessage(t *testing.T) {
 			t.Errorf("single-attempt halt mentions an earlier attempt:\n%s", quiet)
 		}
 	})
+
+	// Every halt describes an operator action, but only a live conflict has one
+	// that runs right now — "resolve the divergence" with no command named
+	// left the operator to go find bd conflicts on their own.
+	t.Run("live and pre-existing conflicts name a concrete resolve command", func(t *testing.T) {
+		for _, out := range []*syncOutcome{
+			{Conflicts: []string{"issues"}, ConflictsLive: true},
+			{Conflicts: []string{"issues"}, ConflictsPreexisting: true, ConflictsLive: true},
+		} {
+			got := joined(out)
+			if !strings.Contains(got, "bd conflicts resolve") {
+				t.Errorf("message does not name a resolve command:\n%s", got)
+			}
+		}
+	})
+
+	// The aborted-merge case has nothing live for `bd conflicts` to show, so it
+	// must not point at that command as if the working set were conflicted —
+	// but it still must not leave the operator with zero next step.
+	t.Run("aborted conflict names a next step without claiming a live conflict", func(t *testing.T) {
+		got := joined(&syncOutcome{Conflicts: []string{"issues"}})
+		if !strings.Contains(got, "bd conflicts list") {
+			t.Errorf("message does not mention checking for live conflicts:\n%s", got)
+		}
+		if strings.Contains(got, "bd conflicts resolve") {
+			t.Errorf("aborted-merge halt must not send the operator to resolve a conflict that is not live:\n%s", got)
+		}
+	})
 }
 
 func TestSyncCommandRegistered(t *testing.T) {
@@ -761,6 +911,9 @@ func TestSyncExitCodesArePinned(t *testing.T) {
 	}
 	if ExitSyncRetriesExhausted != 3 {
 		t.Errorf("ExitSyncRetriesExhausted = %d, want 3", ExitSyncRetriesExhausted)
+	}
+	if ExitSyncDirtyStuck != 4 {
+		t.Errorf("ExitSyncDirtyStuck = %d, want 4", ExitSyncDirtyStuck)
 	}
 }
 
@@ -849,6 +1002,113 @@ func TestRunSyncLoopDirtyGraphRetriesExhausted(t *testing.T) {
 	}
 	if out.LastRecomputeError == "" {
 		t.Error("LastRecomputeError is empty, want the guard error recorded")
+	}
+}
+
+// The positive escalation this bead adds (wy-mhouc): a graph table dirty
+// because of a constraint violation no writer will ever commit is knowable on
+// the FIRST blocked attempt, from storage.MergeBlockerInspector — it must not
+// wait out syncStuckTicks the way the tick-count inference does.
+func TestRunSyncLoopConstraintViolationEscalatesOnAttemptOne(t *testing.T) {
+	r := &syncOpsRecorder{
+		recomputeErrs: []error{dirtyGraphErr()},
+		mergeBlockers: []storage.MergeBlockers{{
+			ConstraintViolations: []storage.ConstraintViolation{{Table: "issues", Count: 3}},
+		}},
+	}
+	out, err := runSyncLoop(context.Background(), r.ops(), defaultSyncAttempts)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Status != syncStatusDirtyStuck {
+		t.Fatalf("status = %q, want %q", out.Status, syncStatusDirtyStuck)
+	}
+	if out.Attempts != 1 {
+		t.Errorf("Attempts = %d, want 1 (escalated on the first blocked attempt)", out.Attempts)
+	}
+	if r.recomputes != 1 {
+		t.Errorf("recomputes = %d, want 1 (no retry budget spent once escalated)", r.recomputes)
+	}
+	if r.pushes != 0 {
+		t.Errorf("pushes = %d, want 0", r.pushes)
+	}
+	if len(out.ConstraintViolations) != 1 || out.ConstraintViolations[0].Table != "issues" || out.ConstraintViolations[0].Count != 3 {
+		t.Errorf("ConstraintViolations = %+v, want [{issues 3}]", out.ConstraintViolations)
+	}
+}
+
+// No constraint violations on the graph tables means the existing tick-count
+// inference is unchanged: a single blocked attempt still just reports
+// retries-exhausted, not an immediate escalation.
+func TestRunSyncLoopNoConstraintViolationsLeavesTickInferenceUnchanged(t *testing.T) {
+	r := &syncOpsRecorder{
+		recomputeErrs: []error{dirtyGraphErr()},
+		mergeBlockers: []storage.MergeBlockers{{}},
+	}
+	out, err := runSyncLoop(context.Background(), r.ops(), 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Status != syncStatusRetriesExhausted {
+		t.Fatalf("status = %q, want %q (no violations, so no positive escalation)", out.Status, syncStatusRetriesExhausted)
+	}
+	if len(out.ConstraintViolations) != 0 {
+		t.Errorf("ConstraintViolations = %+v, want none", out.ConstraintViolations)
+	}
+}
+
+// A constraint violation on some OTHER table (not one of the graph tables the
+// guard found dirty) must not escalate — it is evidence about a table this
+// sync's repair does not even read.
+func TestRunSyncLoopConstraintViolationOnUnrelatedTableDoesNotEscalate(t *testing.T) {
+	r := &syncOpsRecorder{
+		recomputeErrs: []error{dirtyGraphErr()},
+		mergeBlockers: []storage.MergeBlockers{{
+			ConstraintViolations: []storage.ConstraintViolation{{Table: "wisps", Count: 9}},
+		}},
+	}
+	out, err := runSyncLoop(context.Background(), r.ops(), 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Status != syncStatusRetriesExhausted {
+		t.Fatalf("status = %q, want %q (violation is on a non-graph table)", out.Status, syncStatusRetriesExhausted)
+	}
+	if len(out.ConstraintViolations) != 0 {
+		t.Errorf("ConstraintViolations = %+v, want none", out.ConstraintViolations)
+	}
+}
+
+// A blockers-probe failure must never escalate: unavailable evidence is not
+// evidence of being stuck, exactly like the dirty-fingerprint hook's contract.
+func TestRunSyncLoopMergeBlockersProbeFailureDoesNotEscalate(t *testing.T) {
+	r := &syncOpsRecorder{
+		recomputeErrs:     []error{dirtyGraphErr()},
+		mergeBlockersErrs: []error{errors.New("connection refused")},
+	}
+	out, err := runSyncLoop(context.Background(), r.ops(), 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Status != syncStatusRetriesExhausted {
+		t.Fatalf("status = %q, want %q (a probe failure must fall back to the transient exit)", out.Status, syncStatusRetriesExhausted)
+	}
+	if len(out.ConstraintViolations) != 0 {
+		t.Errorf("ConstraintViolations = %+v, want none", out.ConstraintViolations)
+	}
+}
+
+// A nil mergeBlockers hook (production shape for a store without
+// MergeBlockerInspector) must behave exactly like production did before this
+// bead: no escalation, ever.
+func TestRunSyncLoopNilMergeBlockersHookDoesNotEscalate(t *testing.T) {
+	r := &syncOpsRecorder{recomputeErrs: []error{dirtyGraphErr()}}
+	out, err := runSyncLoop(context.Background(), r.ops(), 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Status != syncStatusRetriesExhausted {
+		t.Fatalf("status = %q, want %q", out.Status, syncStatusRetriesExhausted)
 	}
 }
 
@@ -1010,5 +1270,827 @@ func TestSyncConflictMessageReportsABlockedRepair(t *testing.T) {
 	quiet := strings.Join(syncConflictMessage(&syncOutcome{Conflicts: []string{"issues"}}), "\n")
 	if strings.Contains(quiet, "blocked by a dirty working set") {
 		t.Errorf("a clean single-attempt halt mentions a blocked repair:\n%s", quiet)
+	}
+}
+
+// wy-j6q2z finding 7: a conflict halt that also masked an unrelated pull
+// error must say so, naming the error text, so the operator does not assume
+// resolving the conflict is the whole fix.
+func TestSyncConflictMessageReportsADiscardedPullError(t *testing.T) {
+	got := strings.Join(syncConflictMessage(&syncOutcome{
+		Conflicts:          []string{"issues"},
+		ConflictsLive:      true,
+		DiscardedPullError: "dial tcp: connection refused",
+	}), "\n")
+	if !strings.Contains(got, "dial tcp: connection refused") {
+		t.Errorf("message does not name the discarded pull error:\n%s", got)
+	}
+	quiet := strings.Join(syncConflictMessage(&syncOutcome{Conflicts: []string{"issues"}, ConflictsLive: true}), "\n")
+	if strings.Contains(quiet, "pull error:") {
+		t.Errorf("a halt with no discarded pull error must not mention one:\n%s", quiet)
+	}
+}
+
+// fakeSyncStore is a minimal storage.DoltStorage for driving runSyncCommand
+// end to end without a live Dolt server. Embedding storage.DoltStorage means
+// every unoverridden method panics if called, so a test that reaches one is a
+// test exercising a path it did not mean to.
+type fakeSyncStore struct {
+	storage.DoltStorage
+
+	pullErr       error
+	pullRemoteErr error
+	pushErr       error
+	pushRemoteErr error
+	conflicts     []storage.Conflict
+	conflictsErr  error
+	recomputed    int
+	recomputeErr  error
+	remotes       []storage.RemoteInfo
+
+	pullCalls       int
+	pullRemoteCalls int
+	pushCalls       int
+	pushRemoteCalls int
+	lastRemoteArg   string
+}
+
+func (f *fakeSyncStore) Pull(context.Context) error { f.pullCalls++; return f.pullErr }
+func (f *fakeSyncStore) PullRemote(_ context.Context, remote string) error {
+	f.pullRemoteCalls++
+	f.lastRemoteArg = remote
+	return f.pullRemoteErr
+}
+func (f *fakeSyncStore) Push(context.Context) error { f.pushCalls++; return f.pushErr }
+func (f *fakeSyncStore) PushRemote(_ context.Context, remote string, _ bool) error {
+	f.pushRemoteCalls++
+	f.lastRemoteArg = remote
+	return f.pushRemoteErr
+}
+func (f *fakeSyncStore) GetConflicts(context.Context) ([]storage.Conflict, error) {
+	return f.conflicts, f.conflictsErr
+}
+func (f *fakeSyncStore) RecomputeAllBlocked(context.Context) (int, error) {
+	return f.recomputed, f.recomputeErr
+}
+func (f *fakeSyncStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
+	return f.remotes, nil
+}
+
+// setupSyncCommandTest wires the fake store, resets the sync command's flags
+// and the globals runSyncCommand reads directly (rootCtx, jsonOutput), and
+// restores everything on cleanup. Cannot be parallel: modifies process
+// globals.
+//
+// It also stubs syncAdoptGitOrigin to the "nothing to adopt" answer. That is
+// the default every pre-existing case here means (a solo rig with no git origin
+// to adopt), and it is load-bearing safety: the real adoption resolves the
+// active workspace, shells out to git, and can write and COMMIT
+// .beads/config.yaml, so leaving it live would let a unit test mutate whatever
+// repo the suite is run from. A case that is about adoption reassigns the seam
+// after calling this.
+func setupSyncCommandTest(t *testing.T, fake *fakeSyncStore) {
+	t.Helper()
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	oldJSON := jsonOutput
+	oldCtx := rootCtx
+	oldQuiet := quietFlag
+	oldAdopt := syncAdoptGitOrigin
+	t.Cleanup(func() {
+		jsonOutput = oldJSON
+		rootCtx = oldCtx
+		quietFlag = oldQuiet
+		syncAdoptGitOrigin = oldAdopt
+		_ = syncCmd.Flags().Set("attempts", fmt.Sprintf("%d", defaultSyncAttempts))
+		_ = syncCmd.Flags().Set("remote", "")
+	})
+	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage) (bool, error) { return false, nil }
+
+	store = fake
+	rootCtx = context.Background()
+	jsonOutput = false
+	quietFlag = false
+
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+}
+
+// TestRunSyncCommandNoRemoteExitsZero covers the benign solo-rig path
+// (wy-xtv17): a default-remote pull failing with Dolt's "no remote"
+// wording, on a rig hasNoRemoteConfigured can positively confirm has none,
+// must exit 0 rather than fail every tick of a timer.
+func TestRunSyncCommandNoRemoteExitsZero(t *testing.T) {
+	fake := &fakeSyncStore{
+		pullErr: errors.New(`Error 1105: no remote`),
+		remotes: nil,
+	}
+	setupSyncCommandTest(t, fake)
+
+	err := runSyncCommand(syncCmd, nil)
+	if err != nil {
+		t.Fatalf("runSyncCommand() error = %v, want nil (confirmed no-remote must exit 0)", err)
+	}
+	if fake.pushCalls != 0 {
+		t.Errorf("push must not be attempted when the pull never got past the no-remote failure, got %d calls", fake.pushCalls)
+	}
+}
+
+// TestRunSyncCommandNoRemoteJSON covers the JSON envelope for the no-remote
+// path specifically: status must be "no-remote", not the zero-value "ok".
+func TestRunSyncCommandNoRemoteJSON(t *testing.T) {
+	fake := &fakeSyncStore{pullErr: errors.New(`Error 1105: no remote`)}
+	setupSyncCommandTest(t, fake)
+	jsonOutput = true
+
+	out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
+	var got syncOutcome
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("json.Unmarshal(%q): %v", out, err)
+	}
+	if got.Status != syncStatusNoRemote {
+		t.Errorf("Status = %q, want %q", got.Status, syncStatusNoRemote)
+	}
+}
+
+// TestRunSyncCommandNoPushSetsPushSkipped covers the noPush -> PushSkipped
+// correction: a successful ok-status run with BD_NO_PUSH=true must not call
+// Push, and the outcome the operator sees must say so (PushSkipped=true,
+// Pushed=false) rather than silently reporting an ordinary successful push.
+func TestRunSyncCommandNoPushSetsPushSkipped(t *testing.T) {
+	fake := &fakeSyncStore{recomputed: 2}
+	setupSyncCommandTest(t, fake)
+	t.Setenv("BD_NO_PUSH", "true")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("no-push") {
+		t.Fatal("test setup: BD_NO_PUSH=true must make no-push=true")
+	}
+	jsonOutput = true
+
+	out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
+	if fake.pushCalls != 0 {
+		t.Errorf("Push() must not be called under no-push: true; called %d time(s)", fake.pushCalls)
+	}
+	var got syncOutcome
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("json.Unmarshal(%q): %v", out, err)
+	}
+	if got.Status != syncStatusOK {
+		t.Errorf("Status = %q, want %q", got.Status, syncStatusOK)
+	}
+	if got.Pushed {
+		t.Error("Pushed = true under no-push: true, want false")
+	}
+	if !got.PushSkipped {
+		t.Error("PushSkipped = false under no-push: true, want true")
+	}
+}
+
+// TestRunSyncCommandAttemptsZeroRejected covers --attempts validation:
+// runSyncCommand must refuse to run the loop at all on a non-positive
+// budget, rather than silently flooring it (the loop itself floors <1 to 1,
+// but the command's own validation is what actually surfaces the mistake to
+// the operator instead of quietly running once).
+func TestRunSyncCommandAttemptsZeroRejected(t *testing.T) {
+	fake := &fakeSyncStore{}
+	setupSyncCommandTest(t, fake)
+	if err := syncCmd.Flags().Set("attempts", "0"); err != nil {
+		t.Fatalf("Flags().Set(attempts, 0): %v", err)
+	}
+
+	err := runSyncCommand(syncCmd, nil)
+	if err == nil {
+		t.Fatal("runSyncCommand() error = nil, want a rejection of --attempts 0")
+	}
+	if code, ok := exitCodeFromError(err); !ok || code != 1 {
+		t.Errorf("exitCodeFromError(err) = (%d, %v), want (1, true)", code, ok)
+	}
+	if fake.pullCalls != 0 {
+		t.Errorf("pull must not run when --attempts is rejected, got %d call(s)", fake.pullCalls)
+	}
+}
+
+// TestRunSyncCommandExitCodeMapping covers the exitError the command layer
+// derives from each terminal syncOutcome.Status — the mapping a sync timer
+// actually branches on (see the exit-code table in syncCmd's Long text).
+func TestRunSyncCommandExitCodeMapping(t *testing.T) {
+	tests := []struct {
+		name     string
+		fake     *fakeSyncStore
+		wantCode int
+		wantErr  bool
+	}{
+		{
+			name:    "ok",
+			fake:    &fakeSyncStore{},
+			wantErr: false,
+		},
+		{
+			name:     "conflict",
+			fake:     &fakeSyncStore{conflicts: []storage.Conflict{{Field: "issues"}}},
+			wantCode: ExitSyncConflict,
+			wantErr:  true,
+		},
+		{
+			name:     "retries-exhausted",
+			fake:     &fakeSyncStore{pushErr: errors.New("local branch is behind remote")},
+			wantCode: ExitSyncRetriesExhausted,
+			wantErr:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupSyncCommandTest(t, tt.fake)
+			jsonOutput = true // silence the operator-facing stderr report; the exit code is what's under test
+
+			err := runSyncCommand(syncCmd, nil)
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("runSyncCommand() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("runSyncCommand() error = nil, want non-nil")
+			}
+			code, ok := exitCodeFromError(err)
+			if !ok {
+				t.Fatalf("exitCodeFromError(%v) ok = false, want true", err)
+			}
+			if code != tt.wantCode {
+				t.Errorf("exit code = %d, want %d", code, tt.wantCode)
+			}
+		})
+	}
+}
+
+// TestRunSyncCommandJSONEnvelopePerStatus covers the --json outcome for each
+// terminal status: the field values a sync timer parses (status, pushed,
+// push_skipped) must match what actually happened, not just the exit code.
+func TestRunSyncCommandJSONEnvelopePerStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		fake       *fakeSyncStore
+		wantStatus string
+		wantPushed bool
+	}{
+		{
+			name:       "ok",
+			fake:       &fakeSyncStore{recomputed: 3},
+			wantStatus: syncStatusOK,
+			wantPushed: true,
+		},
+		{
+			name:       "conflict",
+			fake:       &fakeSyncStore{conflicts: []storage.Conflict{{Field: "issues"}}},
+			wantStatus: syncStatusConflict,
+			wantPushed: false,
+		},
+		{
+			name:       "retries-exhausted",
+			fake:       &fakeSyncStore{pushErr: errors.New("local branch is behind remote")},
+			wantStatus: syncStatusRetriesExhausted,
+			wantPushed: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupSyncCommandTest(t, tt.fake)
+			jsonOutput = true
+
+			out := captureStdout(t, func() error {
+				_ = runSyncCommand(syncCmd, nil)
+				return nil // the command's own error is asserted elsewhere; capture must not fail on the expected non-nil ones
+			})
+			var got syncOutcome
+			if err := json.Unmarshal([]byte(out), &got); err != nil {
+				t.Fatalf("json.Unmarshal(%q): %v", out, err)
+			}
+			if got.Status != tt.wantStatus {
+				t.Errorf("Status = %q, want %q", got.Status, tt.wantStatus)
+			}
+			if got.Pushed != tt.wantPushed {
+				t.Errorf("Pushed = %v, want %v", got.Pushed, tt.wantPushed)
+			}
+		})
+	}
+}
+
+// TestRunSyncCommandQuietSilencesSuccessOutput covers the -q asymmetry: a
+// successful sync must print nothing when quiet, matching the per-step
+// progress lines which were already gated on isQuiet(). Before this fix,
+// "Sync complete." printed unconditionally regardless of -q.
+func TestRunSyncCommandQuietSilencesSuccessOutput(t *testing.T) {
+	fake := &fakeSyncStore{recomputed: 2}
+	setupSyncCommandTest(t, fake)
+	quietFlag = true
+
+	out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
+	if out != "" {
+		t.Errorf("stdout = %q, want empty under -q", out)
+	}
+}
+
+// TestRunSyncCommandQuietSilencesNoRemoteGuidance covers the same asymmetry
+// for the benign no-remote path: printNoRemoteGuidance's ~15 lines of
+// onboarding text is exactly the non-essential output -q exists to silence
+// on a solo rig's unattended timer.
+func TestRunSyncCommandQuietSilencesNoRemoteGuidance(t *testing.T) {
+	fake := &fakeSyncStore{pullErr: errors.New("Error 1105: no remote")}
+	setupSyncCommandTest(t, fake)
+	quietFlag = true
+
+	out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
+	if out != "" {
+		t.Errorf("stdout = %q, want empty under -q", out)
+	}
+}
+
+// TestRunSyncCommandQuietDoesNotSilenceConflict covers the other half of the
+// asymmetry: -q means "errors only", and a merge conflict IS the error, so it
+// must still be reported even under -q (unlike the success-path prints
+// above).
+func TestRunSyncCommandQuietDoesNotSilenceConflict(t *testing.T) {
+	fake := &fakeSyncStore{conflicts: []storage.Conflict{{Field: "issues"}}}
+	setupSyncCommandTest(t, fake)
+	quietFlag = true
+
+	// captureStdout and captureStderr share one non-reentrant mutex, so they
+	// cannot nest; the conflict report goes to stderr only (see
+	// printSyncOutcome), so that is the one stream under test here.
+	stderr := captureStderr(t, func() { _ = runSyncCommand(syncCmd, nil) })
+	if !strings.Contains(stderr, "merge conflict") {
+		t.Errorf("stderr = %q, want a conflict report even under -q", stderr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// wy-gpzg7: sync's default-remote path adopts a git origin as the Dolt remote,
+// the same way `bd dolt push` does.
+// ---------------------------------------------------------------------------
+
+// The bug: a first-time federation rig (git origin configured, no Dolt remote
+// registered yet) that runs `bd sync` as its bring-up step used to get a silent
+// no-op — pull fails with Dolt's bare no-remote wording, the confirmed-no-remote
+// gate agrees because nothing ever adopted the origin, status=no-remote, exit 0
+// — where `bd dolt push` on the very same rig would have adopted origin and
+// pushed. Adoption must run BEFORE the loop, so the pull benefits from it too.
+func TestRunSyncCommandAdoptsGitOriginOnDefaultRemote(t *testing.T) {
+	fake := &fakeSyncStore{pullErr: errors.New("Error 1105: no remote"), recomputed: 2}
+	setupSyncCommandTest(t, fake)
+	adoptCalls := 0
+	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage) (bool, error) {
+		adoptCalls++
+		// What adoption does on a real first-time rig: the remote now exists,
+		// so the pull that was failing with "no remote" succeeds and
+		// dolt_remotes lists it.
+		fake.pullErr = nil
+		fake.remotes = []storage.RemoteInfo{{Name: "origin"}}
+		return true, nil
+	}
+
+	jsonOutput = true
+	out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
+
+	if adoptCalls != 1 {
+		t.Fatalf("adoption ran %d time(s), want exactly 1 on the default-remote path", adoptCalls)
+	}
+	var got syncOutcome
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("json.Unmarshal(%q): %v", out, err)
+	}
+	if got.Status != syncStatusOK {
+		t.Errorf("Status = %q, want %q — adoption before the loop is what makes the pull work", got.Status, syncStatusOK)
+	}
+	if fake.pushCalls != 1 {
+		t.Errorf("Push() called %d time(s), want 1: an adopted rig must actually publish, not report no-remote", fake.pushCalls)
+	}
+}
+
+// Adoption must precede the PULL, not merely the push: a rig that had to adopt
+// its remote has nothing to pull from until it has one, so an adoption wired in
+// front of the push only (mirroring `bd dolt push` too literally) would still
+// leave sync failing on its first step.
+func TestRunSyncCommandAdoptsBeforePull(t *testing.T) {
+	fake := &fakeSyncStore{}
+	setupSyncCommandTest(t, fake)
+	pullsAtAdoption := -1
+	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage) (bool, error) {
+		pullsAtAdoption = fake.pullCalls
+		return true, nil
+	}
+
+	if err := runSyncCommand(syncCmd, nil); err != nil {
+		t.Fatalf("runSyncCommand() error = %v, want nil", err)
+	}
+	if pullsAtAdoption != 0 {
+		t.Errorf("Pull() had run %d time(s) when adoption was reached, want 0 (adoption must come first)", pullsAtAdoption)
+	}
+}
+
+// A rig with no git origin to adopt is the ordinary solo rig, and it must keep
+// the benign exit-0 no-remote report rather than acquiring a failure mode:
+// adoption declining is not an error.
+func TestRunSyncCommandNoGitOriginStillExitsZero(t *testing.T) {
+	fake := &fakeSyncStore{pullErr: errors.New("Error 1105: no remote")}
+	setupSyncCommandTest(t, fake)
+	// setupSyncCommandTest already stubs "nothing to adopt"; assert the
+	// no-remote contract survives it explicitly.
+	jsonOutput = true
+
+	out := captureStdout(t, func() error { return runSyncCommand(syncCmd, nil) })
+	var got syncOutcome
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("json.Unmarshal(%q): %v", out, err)
+	}
+	if got.Status != syncStatusNoRemote {
+		t.Errorf("Status = %q, want %q", got.Status, syncStatusNoRemote)
+	}
+}
+
+// An explicitly named --remote must never adopt: the operator named a remote
+// they expect to exist, and inventing a different one from git origin would
+// sync somewhere they never asked for. Same reason the no-remote exit-0 gate is
+// default-remote-only.
+func TestRunSyncCommandNamedRemoteNeverAdopts(t *testing.T) {
+	fake := &fakeSyncStore{}
+	setupSyncCommandTest(t, fake)
+	adoptCalls := 0
+	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage) (bool, error) {
+		adoptCalls++
+		return true, nil
+	}
+	if err := syncCmd.Flags().Set("remote", "mini"); err != nil {
+		t.Fatalf("Flags().Set(remote, mini): %v", err)
+	}
+
+	if err := runSyncCommand(syncCmd, nil); err != nil {
+		t.Fatalf("runSyncCommand() error = %v, want nil", err)
+	}
+	if adoptCalls != 0 {
+		t.Errorf("adoption ran %d time(s) on --remote mini, want 0", adoptCalls)
+	}
+	if fake.pullRemoteCalls != 1 || fake.lastRemoteArg != "mini" {
+		t.Errorf("named-remote pull = (%d calls, %q), want (1, %q)", fake.pullRemoteCalls, fake.lastRemoteArg, "mini")
+	}
+}
+
+// A failed adoption is a real error, not a benign skip: it means the rig has no
+// Dolt remote AND bd could not derive one (a broken dolt_remotes listing, an
+// AddRemote refusal, an unwritable config.yaml). Reporting exit 0 there would
+// hide the very misconfiguration that stops the rig from ever federating, and
+// nothing may be pulled or pushed on top of it.
+func TestRunSyncCommandAdoptionErrorFailsLoudly(t *testing.T) {
+	fake := &fakeSyncStore{}
+	setupSyncCommandTest(t, fake)
+	adoptErr := errors.New("dolt_remotes unavailable")
+	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage) (bool, error) {
+		return false, adoptErr
+	}
+
+	err := runSyncCommand(syncCmd, nil)
+	if err == nil {
+		t.Fatal("runSyncCommand() error = nil, want a failure when adoption errors")
+	}
+	if code, ok := exitCodeFromError(err); !ok || code != 1 {
+		t.Errorf("exitCodeFromError(err) = (%d, %v), want (1, true)", code, ok)
+	}
+	if fake.pullCalls != 0 || fake.pushCalls != 0 {
+		t.Errorf("pull/push ran (%d/%d) after a failed adoption, want (0/0)", fake.pullCalls, fake.pushCalls)
+	}
+}
+
+// The seam only buys hermetic tests if it is still bolted to the real thing in
+// production. Every case above replaces syncAdoptGitOrigin, so nothing else
+// would notice it being left rewired — or never wired at all, which is the
+// original bug restated.
+func TestSyncAdoptGitOriginIsWiredToAdoption(t *testing.T) {
+	got := reflect.ValueOf(syncAdoptGitOrigin).Pointer()
+	want := reflect.ValueOf(adoptGitOriginRemoteForPush).Pointer()
+	if got != want {
+		t.Error("syncAdoptGitOrigin is not bound to adoptGitOriginRemoteForPush; sync would silently stop adopting a git origin")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// wy-wub2s: telling a STUCK working set from a BUSY one, and reporting a run
+// that fought more than one transient condition.
+// ---------------------------------------------------------------------------
+
+// Every blocked attempt seeing byte-identical pending edits is the evidence the
+// cross-tick detector compares. The loop reports it; it does not itself decide
+// anything is wrong.
+func TestRunSyncLoopFoldsIdenticalDirtyEvidence(t *testing.T) {
+	r := &syncOpsRecorder{
+		recomputeErrs: []error{dirtyGraphErr()},
+		fingerprints:  []string{"issues:aaa"},
+	}
+	out, err := runSyncLoop(context.Background(), r.ops(), 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Status != syncStatusRetriesExhausted {
+		t.Fatalf("status = %q, want %q (the loop never escalates on its own)", out.Status, syncStatusRetriesExhausted)
+	}
+	if out.DirtyGraphFingerprint != "issues:aaa" {
+		t.Errorf("DirtyGraphFingerprint = %q, want %q", out.DirtyGraphFingerprint, "issues:aaa")
+	}
+	if r.fingerprintCalls != 3 {
+		t.Errorf("fingerprint samples = %d, want 3 (one per blocked attempt)", r.fingerprintCalls)
+	}
+}
+
+// A working set that visibly moves between attempts is a BUSY fleet. Reporting
+// a fingerprint for it would let the cross-tick detector escalate contention as
+// a wedge, so the run must prove nothing.
+func TestRunSyncLoopMovingDirtyEvidenceProvesNothing(t *testing.T) {
+	cases := []struct {
+		name            string
+		fingerprints    []string
+		fingerprintErrs []error
+	}{
+		{name: "dirty set changed between attempts", fingerprints: []string{"issues:aaa", "issues:bbb", "issues:aaa"}},
+		{name: "evidence unavailable", fingerprintErrs: []error{errors.New("dolt_diff unsupported")}},
+		{
+			name:         "sampled clean: the other writer committed after the guard fired",
+			fingerprints: []string{""},
+		},
+		{
+			name:         "one unavailable sample disqualifies the run",
+			fingerprints: []string{"issues:aaa", "issues:aaa", "issues:aaa"},
+			// The middle sample fails, so the attempts either side cannot be
+			// claimed to be identical to it.
+			fingerprintErrs: []error{nil, errors.New("read timeout"), nil},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &syncOpsRecorder{
+				recomputeErrs:   []error{dirtyGraphErr()},
+				fingerprints:    tc.fingerprints,
+				fingerprintErrs: tc.fingerprintErrs,
+			}
+			out, err := runSyncLoop(context.Background(), r.ops(), 3)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if out.DirtyGraphFingerprint != "" {
+				t.Errorf("DirtyGraphFingerprint = %q, want empty", out.DirtyGraphFingerprint)
+			}
+		})
+	}
+}
+
+// A store with no way to answer the question leaves the hook nil. That must be
+// treated as unavailable evidence, not as "nothing changed".
+func TestRunSyncLoopWithoutEvidenceHookNeverEscalates(t *testing.T) {
+	r := &syncOpsRecorder{recomputeErrs: []error{dirtyGraphErr()}}
+	out, err := runSyncLoop(context.Background(), r.ops(), 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.DirtyGraphFingerprint != "" {
+		t.Errorf("DirtyGraphFingerprint = %q, want empty with no evidence hook", out.DirtyGraphFingerprint)
+	}
+	if _, stuck := classifyDirtyProgress(out, &syncState{StuckTicks: 99}, time.Now()); stuck {
+		t.Error("escalated with no evidence at all")
+	}
+}
+
+// A repair that succeeds is the working set demonstrably advancing, so earlier
+// blocked attempts in the same run must not leave stuck-looking evidence behind
+// for a later push-race exhaustion to inherit.
+func TestRunSyncLoopSuccessfulRepairDropsDirtyEvidence(t *testing.T) {
+	r := &syncOpsRecorder{
+		recomputeErrs: []error{dirtyGraphErr(), nil},
+		pushErrs:      []error{raceErr()},
+		fingerprints:  []string{"issues:aaa"},
+	}
+	out, err := runSyncLoop(context.Background(), r.ops(), 3)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Status != syncStatusRetriesExhausted {
+		t.Fatalf("status = %q, want %q", out.Status, syncStatusRetriesExhausted)
+	}
+	if out.DirtyGraphFingerprint != "" {
+		t.Errorf("DirtyGraphFingerprint = %q, want empty (the repair ran, so the dirt cleared)", out.DirtyGraphFingerprint)
+	}
+}
+
+// The mixed-history record (F7/F8): LastPushError/LastRecomputeError still name
+// only the final attempt, and Transients is where "what did this run fight"
+// lives.
+func TestRunSyncLoopRecordsEveryTransient(t *testing.T) {
+	r := &syncOpsRecorder{
+		pushErrs:      []error{raceErr()},
+		recomputeErrs: []error{nil, dirtyGraphErr()},
+	}
+	out, err := runSyncLoop(context.Background(), r.ops(), 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out.Transients) != 2 {
+		t.Fatalf("Transients = %+v, want two entries", out.Transients)
+	}
+	if out.Transients[0].Kind != syncTransientPushRace || out.Transients[0].Attempt != 1 {
+		t.Errorf("first transient = %+v, want a push race on attempt 1", out.Transients[0])
+	}
+	if out.Transients[1].Kind != syncTransientDirtyGraph || out.Transients[1].Attempt != 2 {
+		t.Errorf("second transient = %+v, want a dirty graph on attempt 2", out.Transients[1])
+	}
+	if out.Transients[0].Error == "" || out.Transients[1].Error == "" {
+		t.Error("transients must quote the error each attempt failed on")
+	}
+	// The pre-existing discriminator is unchanged: the final attempt only.
+	if out.LastRecomputeError == "" || out.LastPushError != "" {
+		t.Errorf("Last*Error = %q/%q, want only the final attempt's failure",
+			out.LastPushError, out.LastRecomputeError)
+	}
+	if !out.sawTransient(syncTransientPushRace) || !out.sawTransient(syncTransientDirtyGraph) {
+		t.Error("sawTransient does not report both conditions")
+	}
+}
+
+func TestClassifyDirtyProgress(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	exhausted := func() *syncOutcome {
+		return &syncOutcome{
+			Status:                syncStatusRetriesExhausted,
+			LastRecomputeError:    dirtyGraphErr().Error(),
+			DirtyGraphFingerprint: "issues:aaa",
+		}
+	}
+
+	t.Run("first sighting arms the marker without escalating", func(t *testing.T) {
+		next, stuck := classifyDirtyProgress(exhausted(), &syncState{}, now)
+		if stuck {
+			t.Error("escalated on the first sighting — one run cannot tell stuck from busy")
+		}
+		if next.StuckTicks != 1 || next.DirtyGraphFingerprint != "issues:aaa" {
+			t.Errorf("next = %+v, want the fingerprint at 1 tick", next)
+		}
+		if !next.FirstSeen.Equal(now) {
+			t.Errorf("FirstSeen = %v, want %v", next.FirstSeen, now)
+		}
+	})
+
+	t.Run("escalates when the same evidence survives the threshold", func(t *testing.T) {
+		first := now.Add(-10 * time.Minute)
+		prev := &syncState{DirtyGraphFingerprint: "issues:aaa", StuckTicks: syncStuckTicks - 1, FirstSeen: first}
+		next, stuck := classifyDirtyProgress(exhausted(), prev, now)
+		if !stuck {
+			t.Fatalf("did not escalate at %d consecutive runs", next.StuckTicks)
+		}
+		if next.StuckTicks != syncStuckTicks {
+			t.Errorf("StuckTicks = %d, want %d", next.StuckTicks, syncStuckTicks)
+		}
+		// The operator wants to know how long this has been wedged, so the
+		// first sighting must survive the increments.
+		if !next.FirstSeen.Equal(first) {
+			t.Errorf("FirstSeen = %v, want the original sighting %v", next.FirstSeen, first)
+		}
+	})
+
+	t.Run("different pending edits reset the count", func(t *testing.T) {
+		prev := &syncState{DirtyGraphFingerprint: "issues:bbb", StuckTicks: syncStuckTicks + 5}
+		next, stuck := classifyDirtyProgress(exhausted(), prev, now)
+		if stuck {
+			t.Error("escalated across a CHANGED dirty set — that is a busy fleet, not a wedge")
+		}
+		if next.StuckTicks != 1 {
+			t.Errorf("StuckTicks = %d, want 1", next.StuckTicks)
+		}
+	})
+
+	t.Run("any non-dirty outcome clears the marker", func(t *testing.T) {
+		armed := &syncState{DirtyGraphFingerprint: "issues:aaa", StuckTicks: syncStuckTicks - 1}
+		for _, out := range []*syncOutcome{
+			{Status: syncStatusOK, Pushed: true},
+			{Status: syncStatusConflict, Conflicts: []string{"issues"}},
+			// Exhausted, but on a push race: this replica is not wedged on
+			// pending graph edits.
+			{Status: syncStatusRetriesExhausted, LastPushError: "non-fast-forward", DirtyGraphFingerprint: "issues:aaa"},
+			// Exhausted on dirt, but with no comparable evidence.
+			{Status: syncStatusRetriesExhausted, LastRecomputeError: dirtyGraphErr().Error()},
+		} {
+			next, stuck := classifyDirtyProgress(out, armed, now)
+			if stuck {
+				t.Errorf("status %q escalated", out.Status)
+			}
+			if next.DirtyGraphFingerprint != "" || next.StuckTicks != 0 {
+				t.Errorf("status %q left marker %+v, want it cleared", out.Status, next)
+			}
+		}
+	})
+}
+
+// The stuck report is the one that must NOT say "transient, retry on the next
+// tick": that is the wording an operator has already been ignoring for however
+// many ticks it took to get here.
+func TestSyncStuckMessage(t *testing.T) {
+	got := strings.Join(syncStuckMessage(&syncOutcome{
+		Status:                syncStatusDirtyStuck,
+		Attempts:              3,
+		DirtyGraphStuckTicks:  4,
+		LastRecomputeError:    dirtyGraphErr().Error(),
+		DirtyGraphFingerprint: "issues:aaa",
+	}), "\n")
+	if !strings.Contains(got, "4 consecutive sync run(s)") {
+		t.Errorf("message does not report how long this has been wedged:\n%s", got)
+	}
+	if !strings.Contains(got, "Nothing is advancing") {
+		t.Errorf("message does not state the evidence:\n%s", got)
+	}
+	if !strings.Contains(got, "Resolve it by hand") {
+		t.Errorf("message does not give the operator a next step:\n%s", got)
+	}
+	if strings.Contains(got, "retry on the next tick") {
+		t.Errorf("stuck message still tells the operator to wait:\n%s", got)
+	}
+}
+
+// The positive (constraint-violation) branch names the violating table(s)
+// instead of a tick count, and must not claim a consecutive-run history it
+// never measured.
+func TestSyncStuckMessageConstraintViolations(t *testing.T) {
+	got := strings.Join(syncStuckMessage(&syncOutcome{
+		Status:               syncStatusDirtyStuck,
+		Attempts:             1,
+		LastRecomputeError:   dirtyGraphErr().Error(),
+		ConstraintViolations: []storage.ConstraintViolation{{Table: "issues", Count: 3}},
+	}), "\n")
+	if !strings.Contains(got, "constraint violations") {
+		t.Errorf("message does not name constraint violations as the cause:\n%s", got)
+	}
+	if !strings.Contains(got, "issues (3 row(s))") {
+		t.Errorf("message does not name the violating table and count:\n%s", got)
+	}
+	if !strings.Contains(got, "Resolve it by hand") {
+		t.Errorf("message does not give the operator a next step:\n%s", got)
+	}
+	if strings.Contains(got, "consecutive sync run(s)") {
+		t.Errorf("positive-evidence message must not claim a tick-count history:\n%s", got)
+	}
+	if strings.Contains(got, "retry on the next tick") {
+		t.Errorf("stuck message still tells the operator to wait:\n%s", got)
+	}
+}
+
+func TestSyncMixedTransientNote(t *testing.T) {
+	mixed := &syncOutcome{
+		Attempts:           2,
+		LastRecomputeError: dirtyGraphErr().Error(),
+		Transients: []syncTransient{
+			{Attempt: 1, Kind: syncTransientPushRace, Error: "non-fast-forward"},
+			{Attempt: 2, Kind: syncTransientDirtyGraph, Error: dirtyGraphErr().Error()},
+		},
+	}
+	got := strings.Join(syncRetriesExhaustedMessage(mixed), "\n")
+	if !strings.Contains(got, "BOTH transient conditions") {
+		t.Errorf("mixed run is not reported as mixed:\n%s", got)
+	}
+	// A single-condition run must stay short: the note is only worth its lines
+	// when the headline is genuinely incomplete.
+	single := &syncOutcome{
+		Attempts:           2,
+		LastRecomputeError: dirtyGraphErr().Error(),
+		Transients: []syncTransient{
+			{Attempt: 1, Kind: syncTransientDirtyGraph, Error: dirtyGraphErr().Error()},
+		},
+	}
+	if quiet := strings.Join(syncRetriesExhaustedMessage(single), "\n"); strings.Contains(quiet, "BOTH") {
+		t.Errorf("single-condition run claims a mixed history:\n%s", quiet)
+	}
+}
+
+// The marker round-trips through the same .beads scratch file the next tick
+// reads, and a cleared marker leaves no stale file behind.
+func TestSyncStatePersistence(t *testing.T) {
+	dir := t.TempDir()
+	if got := loadSyncState(dir); got.DirtyGraphFingerprint != "" || got.StuckTicks != 0 {
+		t.Fatalf("missing marker loaded as %+v, want zero", got)
+	}
+	saveSyncState(dir, &syncState{DirtyGraphFingerprint: "issues:aaa", StuckTicks: 2, FirstSeen: time.Unix(1700000000, 0)})
+	got := loadSyncState(dir)
+	if got.DirtyGraphFingerprint != "issues:aaa" || got.StuckTicks != 2 {
+		t.Fatalf("round-tripped marker = %+v", got)
+	}
+	saveSyncState(dir, &syncState{})
+	if _, err := os.Stat(filepath.Join(dir, syncStateFile)); !os.IsNotExist(err) {
+		t.Errorf("cleared marker left a file behind (stat err = %v)", err)
+	}
+	// A corrupt marker must degrade to "no evidence", never fail the sync.
+	if err := os.WriteFile(filepath.Join(dir, syncStateFile), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadSyncState(dir); got.DirtyGraphFingerprint != "" {
+		t.Errorf("corrupt marker loaded as %+v, want zero", got)
 	}
 }

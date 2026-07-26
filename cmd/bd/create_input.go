@@ -38,6 +38,7 @@ type createInput struct {
 	deps               []string
 	waitsFor           string
 	waitsForGate       string
+	waitsForGateSet    bool // true when --waits-for-gate was explicitly passed (not relying on default)
 	silent             bool
 	dryRun             bool
 	force              bool
@@ -182,6 +183,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	in.parentID, _ = cmd.Flags().GetString("parent")
 	in.waitsFor, _ = cmd.Flags().GetString("waits-for")
 	in.waitsForGate, _ = cmd.Flags().GetString("waits-for-gate")
+	in.waitsForGateSet = cmd.Flags().Changed("waits-for-gate")
 
 	if in.explicitID != "" && in.parentID != "" {
 		return in, HandleError("cannot specify both --id and --parent flags")

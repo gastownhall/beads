@@ -370,9 +370,31 @@ git commit -m "chore: Update plugin marketplaces to v0.22.0"
 The published docs are the Mintlify site rooted at `docs/`, deployed from
 main via the Mintlify GitHub integration — no release-time docs snapshot is
 needed. The site documents the current release line only (see
-engdocs/decisions/2026-07-10-mintlify-docs-overhaul.md). The generated CLI
-reference is kept fresh by `scripts/generate-cli-docs.sh` and its PR drift
-gate, not by the release process.
+engdocs/decisions/2026-07-10-mintlify-docs-overhaul.md). Day to day, the
+generated CLI reference is kept fresh by `scripts/generate-cli-docs.sh` and
+its PR drift gate, not by the release process.
+
+**But the release pin IS a release-time step.** `docs/cli-docs.pin` names
+the release tag the docs corpus is generated from and validated against
+(engdocs/decisions/2026-07-17-docs-release-pin.md); it lags `main` between
+releases by design, so any command or flag added on `main` since the last
+bump is invisible to `scripts/check-doc-flags.sh` Check 4 ("covers all live
+top-level CLI commands" passes vacuously for it, e.g. wy-gx5rj for `bd
+sync`). Bump it as part of THIS release, not a follow-up:
+
+```bash
+# After tagging (see "Update Version and Create Release Tag" above):
+echo "v0.22.0" > docs/cli-docs.pin
+./scripts/generate-cli-docs.sh
+git add docs/cli-docs.pin docs/CLI_REFERENCE.md docs/cli-reference docs/docs.json
+git commit -m "docs: bump CLI docs pin to v0.22.0"
+git push origin main
+```
+
+Skipping this step doesn't fail fast — Check 4 stays green (it validates
+against the *old* pin) until the next bump, at which point every command
+added across the skipped releases shows up at once as a pile of "missing
+from docs/CLI_REFERENCE.md" failures with no obvious release to blame.
 
 ## 6. npm Package Release
 
@@ -502,6 +524,15 @@ bd version
 curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 bd version
 ```
+
+### CLI Docs Pin
+
+```bash
+cat docs/cli-docs.pin  # should be the tag just released, not an older one
+```
+
+If it's stale, do the bump from the "Documentation Site (Mintlify)" step
+above before calling the release done.
 
 ## Prerelease / Release Candidate (RC) Workflow
 

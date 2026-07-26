@@ -633,6 +633,12 @@ func cloneSubgraph(ctx context.Context, s storage.DoltStorage, subgraph *Templat
 				IssueID:     newFromID,
 				DependsOnID: newToID,
 				Type:        dep.Type,
+				// Carry template metadata through to the clone (GH#3875):
+				// waits-for edges store their gate (and, for a collapsed
+				// needs/depends_on edge, also_blocks) here. Dropping it
+				// silently reset every poured waits-for edge to the
+				// default all-children gate with also_blocks unset.
+				Metadata: dep.Metadata,
 			}
 			if err := tx.AddDependency(ctx, newDep, opts.Actor); err != nil {
 				return fmt.Errorf("failed to create dependency: %w", err)

@@ -55,7 +55,7 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	waitsFor, err := buildWaitsFor(in.waitsFor, in.waitsForGate)
+	waitsFor, err := buildWaitsFor(in.waitsFor, in.waitsForGate, in.waitsForGateSet)
 	if err != nil {
 		return HandleError("%v", err)
 	}

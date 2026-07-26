@@ -419,6 +419,14 @@ type StoreLocator interface {
 	CLIDir() string
 }
 
+// ActiveDatabaseSizer reports the approximate on-disk size of the active
+// database when the current store instance has authoritative local filesystem
+// access. Implementations return *ErrUnsupported when that particular instance
+// is backed by storage that is not locally measurable.
+type ActiveDatabaseSizer interface {
+	ActiveDatabaseSize(ctx context.Context) (int64, error)
+}
+
 // GarbageCollector provides Dolt garbage collection capability.
 // Callers that need to reclaim disk space should type-assert to this interface.
 type GarbageCollector interface {

@@ -47,6 +47,8 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}()
 
 		claimReady, _ := cmd.Flags().GetBool("claim")
+		labelPattern, _ := cmd.Flags().GetString("label-pattern")
+		labelRegex, _ := cmd.Flags().GetString("label-regex")
 
 		if usesProxiedServer() {
 			// --claim consumes exactly one row, same reasoning as the
@@ -165,6 +167,8 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			Labels:           labels,
 			LabelsAny:        labelsAny,
 			ExcludeLabels:    excludeLabels,
+			LabelPattern:     labelPattern,
+			LabelRegex:       labelRegex,
 			IncludeDeferred:  includeDeferred,  // GH#820: respect --include-deferred flag
 			IncludeEphemeral: includeEphemeral, // bd-i5k5x: allow ephemeral issues (e.g., merge-requests)
 			ExcludeTypes:     excludeTypes,
@@ -218,12 +222,13 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if claimReady {
 			CheckReadonly("ready --claim")
 		} else {
-			routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
+			routedStore, routed, routingRule, err := openRoutedReadStore(ctx, activeStore)
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
 			if routed {
 				defer func() { _ = routedStore.Close() }()
+				printContributorRoutingNotice(ctx, activeStore, routingRule)
 				activeStore = routedStore
 			}
 		}
@@ -293,7 +298,15 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if results == nil {
 				results = []*types.IssueWithCounts{}
 			}
-			if jerr := outputJSON(results); jerr != nil {
+			var pag *PaginationMeta
+			if truncated {
+				pag = &PaginationMeta{
+					Returned:  len(results),
+					Total:     totalReady,
+					Truncated: true,
+				}
+			}
+			if jerr := outputJSONWithPagination(results, pag); jerr != nil {
 				return jerr
 			}
 			if truncated {
@@ -789,6 +802,8 @@ func init() {
 	readyCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	readyCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	readyCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
+	readyCmd.Flags().String("label-pattern", "", "Filter by label glob pattern (e.g., 'tech-*' matches tech-debt, tech-legacy)")
+	readyCmd.Flags().String("label-regex", "", "Filter by label regex pattern (e.g., 'tech-(debt|legacy)')")
 	readyCmd.Flags().StringP("type", "t", "", "Filter by issue type (task, bug, feature, epic, decision, merge-request). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision")
 	readyCmd.Flags().String("mol", "", "Filter to steps within a specific molecule")
 	readyCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")

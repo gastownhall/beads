@@ -202,14 +202,44 @@ func isConfirmedNoRemote(ctx context.Context, st remoteLister, err error) bool {
 // runs on a timer and must not fail every tick on a solo rig — can reuse the
 // proof without loosening it.
 func hasNoRemoteConfigured(ctx context.Context, st remoteLister) bool {
+	configured, listErr := hasConfiguredRemote(ctx, st)
+	return listErr == nil && !configured
+}
+
+// hasConfiguredRemote decides, from evidence, whether a rig has a Dolt remote
+// at all. It is the one decider for the push/sync no-remote question: both
+// hasNoRemoteConfigured (the `bd sync` / `bd dolt push|pull` exit-0 gate) and
+// adoptGitOriginRemoteForPush go through it. It is NOT yet the only reader of
+// that evidence in cmd/bd — `bd config apply`, ensureDoltRemote, and the
+// doctor/drift diagnostics still judge from len(ListRemotes) alone and have
+// the same cold-start hole; converging them is wy-6k7f7. Do not assume a new
+// remote-related decision is covered by this function: route it here.
+//
+// Two sources of evidence, because dolt_remotes alone is not enough: a
+// server-mode rig whose sql-server has just cold-started can report an EMPTY
+// dolt_remotes while the remote IS persisted on disk in .dolt/repo_state.json
+// (GH#2118), so the on-disk probe gets a veto. The probe has to be reached
+// through the storage decorator chain, since HasPersistedRemote is not part of
+// storage.DoltStorage and the store bd holds is all but always decorated —
+// that is wy-xtv17.
+//
+// A failed listing is neither evidence: it returns the error, and callers must
+// not read it as "no remote". Having two sibling functions decide this from
+// different evidence is what left `bd dolt push` still trusting an empty
+// dolt_remotes after wy-xtv17 hardened the no-remote gate (wy-82hc5), so the
+// rule lives here once.
+func hasConfiguredRemote(ctx context.Context, st remoteLister) (bool, error) {
 	remotes, listErr := st.ListRemotes(ctx)
-	if listErr != nil || len(remotes) > 0 {
-		return false
+	if listErr != nil {
+		return false, listErr
+	}
+	if len(remotes) > 0 {
+		return true, nil
 	}
 	if prober, ok := persistedRemoteProberFor(st); ok && prober.HasPersistedRemote() {
-		return false
+		return true, nil
 	}
-	return true
+	return false, nil
 }
 
 // persistedRemoteProberFor finds the on-disk remote probe behind any chain of
@@ -334,13 +364,20 @@ func printNoRemoteGuidance() {
 	fmt.Println("  • Azure Blob Storage: az://account.blob.core.windows.net/container/path")
 }
 
+// adoptGitOriginRemoteForPush gives a rig with no Dolt remote the one its git
+// origin implies, so `bd dolt push` works out of the box.
+//
+// It asks hasConfiguredRemote rather than reading len(ListRemotes) itself: an
+// empty dolt_remotes is not proof of a remote-less rig during the GH#2118
+// cold-start window, and adopting there re-derives the remote from git.
+// Usually that is the same URL and the AddRemote is a harmless re-add, but
+// when the persisted remote and the git origin disagree — a Dolt remote
+// deliberately pointed elsewhere, or a renamed/redirected origin — the rig
+// starts pushing somewhere else on the strength of a stale listing (wy-82hc5).
 func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage) (bool, error) {
-	remotes, err := st.ListRemotes(ctx)
-	if err != nil {
+	configured, err := hasConfiguredRemote(ctx, st)
+	if err != nil || configured {
 		return false, err
-	}
-	if len(remotes) > 0 {
-		return false, nil
 	}
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {

@@ -77,6 +77,41 @@ type ConflictInspector interface {
 	ResolveConflictRows(ctx context.Context, table string, keys []string, strategy string) (int, error)
 }
 
+// ConstraintViolation is one table's outstanding post-merge constraint
+// violations (dolt_constraint_violations).
+type ConstraintViolation struct {
+	Table string `json:"table"`
+	Count int    `json:"count"`
+}
+
+// MergeBlockers is the merge state that blocks concluding a merge but never
+// appears in dolt_conflicts: a schema conflict, or a constraint violation the
+// auto-repair path (mergesettle.go) declined. Both can be outstanding while
+// every ROW conflict is resolved, which used to make the commit fail with a
+// raw dolt error and no guidance (wy-36ilm F12).
+type MergeBlockers struct {
+	// Merging reports dolt_merge_status.is_merging: a merge is open and
+	// awaiting its commit.
+	Merging bool `json:"merging"`
+	// SchemaConflictTables are the tables in dolt_schema_conflicts.
+	SchemaConflictTables []string `json:"schema_conflict_tables,omitempty"`
+	// ConstraintViolations are the tables with outstanding violations.
+	ConstraintViolations []ConstraintViolation `json:"constraint_violations,omitempty"`
+}
+
+// Blocked reports whether anything here would refuse a merge commit.
+func (b MergeBlockers) Blocked() bool {
+	return len(b.SchemaConflictTables) > 0 || len(b.ConstraintViolations) > 0
+}
+
+// MergeBlockerInspector is the optional companion to ConflictInspector: the
+// non-row merge state (schema conflicts, constraint violations, whether a
+// merge is even open). Implemented by the Dolt-backed stores only; callers
+// must type-assert, and a backend without it simply reports nothing.
+type MergeBlockerInspector interface {
+	GetMergeBlockers(ctx context.Context) (MergeBlockers, error)
+}
+
 // VersionControl provides branch, commit, merge, and status operations.
 type VersionControl interface {
 	Branch(ctx context.Context, name string) error

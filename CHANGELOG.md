@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Replica-aware leases: `bd reclaim` no longer reverts a lease another
+  replica granted** (wy-jpd3.7). A lease is only meaningful on the replica that
+  granted it — the other machine's liveness view is stale by up to one sync
+  interval — so each lease now records its granting node (`leases.granted_node`,
+  ignored migration 0016; `types.Issue.LeaseGrantedNode`, which rides the JSONL
+  interchange so an imported lease keeps its provenance). `bd reclaim` skips a
+  lease that positively names a different replica, naming each skip on stderr,
+  and the new `bd reclaim --any-replica` (`types.ReclaimFilter.AnyReplica`) is
+  the escape hatch for a replica that is permanently gone. `bd show` annotates a
+  lease granted elsewhere.
+
+  The guard is **opt-in and fail-open**. It arms only where you set the new
+  `node_id` config key (`BEADS_NODE_ID` / `BD_NODE_ID`, or
+  `bd config set node_id <name>`, which writes the per-machine
+  `~/.config/bd/config.yaml` — a `node_id` in the git-tracked project
+  `.beads/config.yaml` would give every clone the same identity and leave the
+  guard armed but inert). There is deliberately no hostname fallback: the
+  hostname names the client process's machine, not the store, so on a shared or
+  remote dolt sql-server — where many hosts are clients of ONE store and there is
+  no sync interval to defend against — it would stop a supervisor reaping any
+  worker's lease at all. Unset (the default), and a lease of unknown provenance,
+  behave exactly as before, so an upgrade can never strand a lease the reaper
+  could previously recover. Also documents the invariant the guard *cannot*
+  enforce: grace window > sync interval, and lease TTL > sync interval.
+
 - **`bd sync` — one verb for the federation loop** (wy-jpd3.4). Every
   multi-machine beads deployment hand-rolls the same sequence in shell; this
   ships it. `bd sync [--remote <name>] [--attempts N]` pulls, checks for merge
