@@ -5,7 +5,8 @@ Utility scripts for maintaining the beads project.
 ## ci/
 
 Repository-owned CI command wrappers. These scripts are the source of truth for
-the target CI tiers; Make targets are aliases for local discoverability.
+the target CI tiers. `make ci-pr-lint` is the authoritative public v2 lint
+entrypoint; calling its private scripts or hooks directly is not equivalent.
 
 ```bash
 make ci-pr-core
@@ -18,6 +19,29 @@ make ci-package-npm
 Each wrapper auto-detects the repository root, sources `.buildflags` when it
 invokes Go in the default build mode, and records per-command timing through
 `scripts/ci/lib/timing.sh`.
+
+`make ci-pr-lint` first enters `scripts/ci/pr-lint-host.sh` through the exact
+Make and Bash selected by its caller. Workflow-policy callers always invoke
+that public target with `-f Makefile`: Linux uses `/usr/bin/make` with
+`/usr/bin/bash`, macOS uses its stock `/usr/bin/make` 3.81 with `/bin/bash`,
+and native Windows uses GNU Make 4.4.1 under the sole name
+`mingw32-make.exe` with one exact Git-for-Windows bundle. The host resolves
+and checks each executable path, family, and required behavior once, privately installs golangci-lint
+2.10.1 in one validated direct child of `RUNNER_TEMP`, confirms its removal,
+and runs the internal lint target under a curated environment. Local callers
+must provide golangci-lint 2.10.1 on `PATH` and may select one validated Go
+target tuple. Hosted caller values may be absent or exactly equal to the
+protected tuple, while conflicts fail before lint. Every lint names
+`.golangci.yml`, disables workspace discovery, and forces readonly module
+mode. The protected Go and linter versions are exact.
+
+The PR gate keeps three real full-host routes: Linux/amd64/CGO, Darwin
+arm64/CGO on `macos-15`, and native Windows/amd64/CGO with MinGW 16.1.0; each
+also covers Windows/non-CGO where needed. MSYS2 and Cygwin lanes claim only
+their narrower shell/bootstrap smokes. `ci-pr-lint-bound` is private and
+refuses callers that bypass the binding. The staged-file Git hook,
+`.pre-commit-config.yaml`, and `cmd/bd` preflight lint remain useful
+conveniences, but none substitutes for `make ci-pr-lint`.
 
 Broad Go test wrappers also source `scripts/ci/lib/test-env.sh`, which creates a
 temporary HOME/XDG/Dolt root, isolates Git global/system config, clears runtime

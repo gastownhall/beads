@@ -33,7 +33,8 @@
 #     contents:write, pull_requests:write)
 #   - Git configured with remotes for upstream and (if fork) push target
 #   - `bd` (beads) installed with molecule/wisp support
-#   - `make`, `golangci-lint` available for quality gates (fix-merge path)
+#   - `make`, Bash, and golangci-lint 2.10.1 available for repository quality
+#     gates (fix-merge path)
 #
 # Pager safety (CRITICAL for non-interactive execution):
 #   - ALL `gh` commands MUST use: GH_PAGER=cat gh ...
@@ -361,7 +362,7 @@ Based on the classification, fix the identified blockers:
 ### Run quality gates (on the clean-base transplant)
 ```
 make test
-golangci-lint run ./...
+make ci-pr-lint
 make build
 ```
 

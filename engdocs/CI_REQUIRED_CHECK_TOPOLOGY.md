@@ -1,8 +1,10 @@
 # Required Check Topology
 
-Status: initial aggregate gate jobs implemented on branch
-`ci/bd-am3.1-wrapper-commands`. Do not change branch protection until the new
-checks have appeared and passed on at least one recent commit.
+Status: aggregate gate jobs exist in the repository workflow source, and the
+current lint candidate extends their dependency graph. GitHub server enforcement
+has not been rolled out. As of 2026-07-26, active ruleset
+`Protect main - light (beads and gastown)` (ID `15646382`) contains only
+`deletion` and `non_fast_forward`; it has no required-status-check rule.
 
 ## Problem
 
@@ -32,8 +34,9 @@ Current PR-related workflow names:
 
 - `.github/workflows/pr.yml`: `PR`
   Runs on `pull_request` and `merge_group`. Contains the baseline PR jobs,
-  Linux build artifact stage, policy/lint compatibility jobs, package gates
-  that consume the Linux artifact, focused storage domain/uow coverage, and
+  Linux build artifact stage, Darwin/arm64 and native-Windows lint-host routes,
+  MSYS2/Cygwin smokes, policy/lint compatibility jobs, package gates that
+  consume the Linux artifact, focused storage/domain/contract coverage, and
   the baseline aggregate gate `PR / CI Gate / Required`.
 - `.github/workflows/pr-risk.yml`: `PR Risk`
   Runs on `pull_request` and `merge_group`. Contains embedded Dolt risk
@@ -58,24 +61,21 @@ Current PR-related workflow names:
   Runs on `pull_request_target` for Dependabot Go bumps. It mutates Dependabot
   branches and must not be a required PR check.
 
-As of 2026-05-26, the live `gastownhall/beads` ruleset named
-`Protect main - light (beads and gastown)` enforces deletion and non-fast-forward
-protection on the default branch. It does not currently require status checks.
+## Workflow-Policy Required Check Contract
 
-## Required Check Contract
-
-After the aggregate checks are verified on the branch, branch protection or the
+In this document, “required” describes repository workflow policy and aggregate
+job dependencies. It does not mean GitHub currently blocks merges when a check
+is absent or failing. If server enforcement is enabled, branch protection or the
 default-branch ruleset should require stable aggregate GitHub Actions checks
-from unfiltered workflows. The original single-check proposal assumed all PR
-jobs lived in one workflow; after the workflow split, a single in-workflow
-aggregate can only cover jobs in that same workflow. The implemented first
-rollout uses one aggregate per required workflow. An external status aggregator
-would only be needed if maintainers still want exactly one required check.
+from unfiltered workflows. One in-workflow aggregate can only cover jobs in
+that workflow, so the current topology uses one aggregate per workflow-policy
+required workflow.
 
 - Baseline aggregate candidate: `PR / CI Gate / Required`
 - Risk aggregate candidate: `PR Risk / CI Gate / Required`
 - Source: GitHub Actions
-- Required on: pull requests and merge queue groups targeting `main`
+- Intended server-enforcement scope: pull requests and merge queue groups
+  targeting `main`
 
 Do not require these existing check names directly:
 
@@ -84,16 +84,20 @@ Do not require these existing check names directly:
 - `Check cmd/bd pure-Go tests compile (CGO_ENABLED=0)`
 - `Check version consistency`
 - `Check doc flags freshness`
+- `Check doc freshness (<platform>)`
+- `PR preflight process (<platform>)`
 - `Check for .beads changes`
 - `Test (ubuntu-latest)`
 - `Test (macos-latest)`
 - `Test (storage domain + uow)`
+- `Contract corpus (golden + determinism + conformance)`
 - `Build (Embedded Dolt)`
 - `Test (Embedded Dolt Storage)`
 - `Test (Embedded Dolt Cmd 1/20)` through `Test (Embedded Dolt Cmd 20/20)`
 - `Test (Windows - smoke)`
 - `Check formatting`
 - `Lint`
+- `Windows Make shell (<host>)`
 - `Test Nix Flake`
 - `Differential Regression (v0.49.6 baseline)`
 - `Upgrade smoke (<version> -> candidate)`
@@ -135,23 +139,27 @@ Do not add `paths`, `paths-ignore`, or narrower branch filters to `pr.yml` or
       - build-artifacts
       - check-build-tags
       - check-cmd-bd-puregeo-tests
+      - worktree-remove-windows
       - check-version-consistency
-      - check-no-duplicate-migrations
+      - check-migration-hygiene
       - check-doc-flags
+      - check-doc-freshness-platforms
+      - pr-preflight-platforms
       - check-no-beads-changes
       - detect-package-gates
       - package-mcp
       - package-npm
-      - package-website
       - pr-policy-wrapper
       - pr-core-wrapper
       - pr-lint-wrapper
       - test-domain-uow
+      - contract-corpus
       - fmt-check
       - lint
+      - windows-make-shell
     if: ${{ always() }}
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Evaluate CI gate
         env:
@@ -160,37 +168,45 @@ Do not add `paths`, `paths-ignore`, or narrower branch filters to `pr.yml` or
             BUILD_ARTIFACTS
             CHECK_BUILD_TAGS
             CHECK_CMD_BD_PUREGEO_TESTS
+            WORKTREE_REMOVE_WINDOWS
             CHECK_VERSION_CONSISTENCY
-            CHECK_NO_DUPLICATE_MIGRATIONS
+            CHECK_MIGRATION_HYGIENE
             CHECK_DOC_FLAGS
+            CHECK_DOC_FRESHNESS_PLATFORMS
+            PR_PREFLIGHT_PLATFORMS
             CHECK_NO_BEADS_CHANGES
             DETECT_PACKAGE_GATES
             PACKAGE_MCP
             PACKAGE_NPM
-            PACKAGE_WEBSITE
             PR_POLICY_WRAPPER
             PR_CORE_WRAPPER
             PR_LINT_WRAPPER
             TEST_DOMAIN_UOW
+            CONTRACT_CORPUS
             FMT_CHECK
             LINT
+            WINDOWS_MAKE_SHELL
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
           CHECK_BUILD_TAGS: ${{ needs.check-build-tags.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
+          WORKTREE_REMOVE_WINDOWS: ${{ needs.worktree-remove-windows.result }}
           CHECK_VERSION_CONSISTENCY: ${{ needs.check-version-consistency.result }}
-          CHECK_NO_DUPLICATE_MIGRATIONS: ${{ needs.check-no-duplicate-migrations.result }}
+          CHECK_MIGRATION_HYGIENE: ${{ needs.check-migration-hygiene.result }}
           CHECK_DOC_FLAGS: ${{ needs.check-doc-flags.result }}
+          CHECK_DOC_FRESHNESS_PLATFORMS: ${{ needs.check-doc-freshness-platforms.result }}
+          PR_PREFLIGHT_PLATFORMS: ${{ needs.pr-preflight-platforms.result }}
           CHECK_NO_BEADS_CHANGES: ${{ needs.check-no-beads-changes.result }}
           DETECT_PACKAGE_GATES: ${{ needs.detect-package-gates.result }}
           PACKAGE_MCP: ${{ needs.package-mcp.result }}
           PACKAGE_NPM: ${{ needs.package-npm.result }}
-          PACKAGE_WEBSITE: ${{ needs.package-website.result }}
           PR_POLICY_WRAPPER: ${{ needs.pr-policy-wrapper.result }}
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
           PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
           TEST_DOMAIN_UOW: ${{ needs.test-domain-uow.result }}
+          CONTRACT_CORPUS: ${{ needs.contract-corpus.result }}
           FMT_CHECK: ${{ needs.fmt-check.result }}
           LINT: ${{ needs.lint.result }}
+          WINDOWS_MAKE_SHELL: ${{ needs.windows-make-shell.result }}
         run: |
           skipped_ok=""
           if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
@@ -325,7 +341,8 @@ Policy for `merge_group`:
 
 ## Rollout Steps
 
-1. Add `.github/scripts/ci-gate.sh` and aggregate gate jobs to the required PR
+1. Add `.github/scripts/ci-gate.sh` and aggregate gate jobs to the
+   workflow-policy PR
    workflows. Initial implementation exists on branch
    `ci/bd-am3.1-wrapper-commands`.
 2. Open a PR and verify the new aggregate check names appear exactly as

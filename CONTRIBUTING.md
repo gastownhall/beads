@@ -6,10 +6,11 @@ Thank you for your interest in contributing to bd! This document provides guidel
 
 ### Prerequisites
 
-- Go (see `go.mod` for the required version; currently 1.26+)
+- Go at the exact three-component version in `go.mod` (currently 1.26.5)
 - Git
 - A C compiler (CGO is required for the embedded Dolt database)
-- (Optional) golangci-lint for local linting
+- GNU Make and Bash 3.2 or newer for the authoritative lint gate
+- golangci-lint 2.10.1 for local linting
 - ICU headers are **not required** for building -- see [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md)
 
 ### Getting Started
@@ -71,19 +72,21 @@ We follow standard Go conventions:
 
 ### Linting
 
-We use golangci-lint for code quality checks:
+Use the repository-owned gate for formatting and lint:
 
 ```bash
-# Install golangci-lint
-brew install golangci-lint  # macOS
-# or
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+# Install the exact v2 local linter once.
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
-# Run linter
-golangci-lint run ./...
+make ci-pr-lint
 ```
 
-**Note**: The linter currently reports ~100 warnings. These are documented false positives and idiomatic Go patterns (deferred cleanup, Cobra interface requirements, etc.). See [engdocs/LINTING.md](engdocs/LINTING.md) for details. When contributing, focus on avoiding *new* issues rather than the baseline warnings.
+Required CI installs a private golangci-lint 2.10.1 and runs the same public
+target. The target pins the repository configuration, readonly module mode,
+the caller's native target, and the Windows/non-CGO target. A direct
+`golangci-lint run`, the staged-file pre-commit hooks, and the pre-commit
+framework configuration are optional conveniences, not equivalent substitutes.
+The authoritative gate has no tolerated warning baseline.
 
 CI will automatically run linting on all pull requests.
 
@@ -102,7 +105,7 @@ engine, or expand the database schema when issue metadata is sufficient.
 2. Create a feature branch (`git checkout -b feature/my-feature`)
 3. Make your changes
 4. Add tests for new functionality
-5. Run tests and linter locally
+5. Run tests and `make ci-pr-lint` locally
 6. Commit your changes with clear messages
 7. Push to your fork
 8. Open a pull request

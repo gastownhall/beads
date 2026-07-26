@@ -8,8 +8,8 @@ This document contains detailed operational instructions for AI agents working o
 
 ### Code Standards
 
-- **Go version**: see `go.mod` for the required version (currently 1.26+)
-- **Linting**: `golangci-lint run ./...` (baseline warnings documented in [engdocs/LINTING.md](engdocs/LINTING.md))
+- **Go version**: use the exact three-component version in `go.mod` (currently 1.26.5)
+- **Linting**: `make ci-pr-lint` (the authoritative v2 host, target, format, and lint contract documented in [engdocs/LINTING.md](engdocs/LINTING.md))
 - **Testing**: All new features need tests (`make test` for the normal local/CI path, `make test-icu-path` only when intentionally exercising the opt-in ICU regex path)
 - **Documentation**: Update relevant .md files
 
@@ -73,7 +73,7 @@ test runs if `du -sh /tmp/beads-* /tmp/bd-*` shows accumulation. See bd-3q2u.
 
 1. **Run tests**: `make test` (or `./scripts/test.sh`)
    - Only if intentionally exercising the ICU regex path: `make test-icu-path`
-2. **Run linter**: `golangci-lint run ./...` (ignore baseline warnings)
+2. **Run lint gate**: `make ci-pr-lint` (all findings are failures; there is no ignored baseline)
 3. **Update docs**: If you changed behavior, update README.md or other docs
 4. **Commit**: With git hooks installed (`bd hooks install`), Dolt changes are auto-committed
 

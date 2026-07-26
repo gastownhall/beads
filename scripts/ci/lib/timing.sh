@@ -50,7 +50,7 @@ ci_time() {
     esac
 
     printf '==> %s\n' "$label"
-    start="$(date +%s)"
+    start="$SECONDS"
 
     set +e
     "$@"
@@ -61,7 +61,7 @@ ci_time() {
         set +e
     fi
 
-    end="$(date +%s)"
+    end="$SECONDS"
     duration=$((end - start))
 
     if [[ "$status" -eq 0 ]]; then

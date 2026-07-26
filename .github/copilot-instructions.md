@@ -13,7 +13,7 @@
 
 ## Tech Stack
 
-- **Language**: Go 1.21+
+- **Language**: exact version from `go.mod` (currently Go 1.26.5)
 - **Storage**: Dolt (version-controlled SQL database)
 - **CLI Framework**: Cobra
 - **Testing**: Go standard testing + table-driven tests
@@ -29,7 +29,8 @@
 - Never create test issues in production DB (use temporary DB)
 
 ### Code Style
-- Run `golangci-lint run ./...` before committing
+- Run `make ci-pr-lint`; direct lint and pre-commit hooks are not equivalent to
+  the repository-owned v2 gate
 - Follow existing patterns in `cmd/bd/` for new commands
 - Add `--json` flag to all commands for programmatic use
 - Update docs when changing behavior

@@ -62,14 +62,21 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
-
       - name: Run policy checks
         run: make ci-pr-policy
 
-      - name: Run lint checks
-        run: make ci-pr-lint
+      - name: Run bound lint checks
+        shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+        env:
+          BASH_ENV: ""
+          ENV: ""
+          BEADS_CI_EXPECTED_OUTER_OS: linux
+          BEADS_CI_EXPECTED_TARGET_GOOS: linux
+          BEADS_CI_EXPECTED_TARGET_GOARCH: amd64
+          BEADS_CI_EXPECTED_TARGET_CGO_ENABLED: "1"
+          BEADS_CI_EXPECTED_GOLANGCI_LINT_VERSION: "2.10.1"
+          BEADS_CI_INSTALL_GOLANGCI_LINT: "1"
+        run: env -u MAKE -u MAKEFLAGS -u MFLAGS -u GNUMAKEFLAGS -u MAKEFILES /usr/bin/make -f Makefile CI_BASH=/usr/bin/bash ci-pr-lint
 
       - name: Build reusable Linux artifacts
         run: |
@@ -380,7 +387,8 @@ jobs:
 
   pr-lint-wrapper:
     name: PR Lint (wrapper timing)
-    runs-on: ubuntu-latest
+    runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -389,11 +397,22 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
-
-      - name: Run PR lint wrapper
-        run: make ci-pr-lint
+      - name: Run bound PR lint wrapper
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        env:
+          BASH_ENV: ""
+          ENV: ""
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+          BEADS_CI_EXPECTED_OUTER_OS: macos
+          BEADS_CI_EXPECTED_TARGET_GOOS: darwin
+          BEADS_CI_EXPECTED_TARGET_GOARCH: arm64
+          BEADS_CI_EXPECTED_TARGET_CGO_ENABLED: "1"
+          BEADS_CI_EXPECTED_MAKE_VERSION: "3.81"
+          BEADS_CI_EXPECTED_GOLANGCI_LINT_VERSION: "2.10.1"
+          BEADS_CI_INSTALL_GOLANGCI_LINT: "1"
+        run: env -u MAKE -u MAKEFLAGS -u MFLAGS -u GNUMAKEFLAGS -u MAKEFILES /usr/bin/make -f Makefile CI_BASH=/bin/bash ci-pr-lint
 
   # Cross-platform test matrix (Linux/macOS only - Windows uses smoke tests)
   test:
@@ -977,9 +996,11 @@ jobs:
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        env:
+          GOWORK: "off"
         with:
-          version: latest
-          args: --timeout=5m --build-tags=gms_pure_go
+          version: v2.10.1
+          args: --config=.golangci.yml --modules-download-mode=readonly --timeout=5m --build-tags=gms_pure_go
 
   test-nix:
     name: Test Nix Flake

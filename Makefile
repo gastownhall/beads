@@ -1,56 +1,85 @@
 # Makefile for beads project
 
-# Native Windows GNU Make needs Git for Windows' bash for the POSIX shell
+# Tool variables are overrideable so required CI can resolve each executable
+# exactly once and pass the absolute identity through every recursive boundary.
+# Interactive use retains the ordinary command-name defaults.
+CI_BASH ?= /bin/bash
+CI_GIT ?= git
+CI_SED ?= sed
+CI_GOFMT ?= gofmt
+override BASH_ENV :=
+override ENV :=
+unexport BASH_ENV
+unexport ENV
+override CI_INVOKING_MAKE := $(if $(or $(findstring /,$(MAKE)),$(findstring \,$(MAKE))),$(MAKE),)
+override CI_INVOKING_MAKE_ORIGIN := $(origin MAKE)
+override CI_INVOKING_MAKEFILE_LIST := $(strip $(MAKEFILE_LIST))
+override CI_INVOKING_MAKEFLAGS_ORIGIN := $(origin MAKEFLAGS)
+override CI_INVOKING_MFLAGS := $(MFLAGS)
+override CI_INVOKING_GNUMAKEFLAGS := $(GNUMAKEFLAGS)
+override CI_INVOKING_MAKEFILES_ORIGIN := $(origin MAKEFILES)
+override CI_INVOKING_MAKEFILES := $(MAKEFILES)
+# Freeze caller-supplied target state before this file applies its normal
+# CGO default. Required CI uses this to reject conflicting ambient state
+# without rejecting exact-equal state inherited from the hosted runner.
+override CI_AMBIENT_GOOS_PRESENT := $(if $(filter environment environment override command line,$(origin GOOS)),1,0)
+override CI_AMBIENT_GOOS := $(GOOS)
+override CI_AMBIENT_GOARCH_PRESENT := $(if $(filter environment environment override command line,$(origin GOARCH)),1,0)
+override CI_AMBIENT_GOARCH := $(GOARCH)
+override CI_AMBIENT_CGO_ENABLED_PRESENT := $(if $(filter environment environment override command line,$(origin CGO_ENABLED)),1,0)
+override CI_AMBIENT_CGO_ENABLED := $(CGO_ENABLED)
+
+# Native Windows GNU Make needs the hosted Windows Git bundle's POSIX shell
 # syntax used throughout this Makefile. MSYS2 and Cygwin Make already provide
-# POSIX shell semantics, despite inheriting OS=Windows_NT, so leave them alone.
+# their own POSIX shell semantics despite inheriting OS=Windows_NT.
 ifeq ($(OS),Windows_NT)
 ifneq ($(filter Windows32 mingw32 %-mingw32,$(MAKE_HOST)),)
-override BASH_ENV :=
-unexport BASH_ENV
+WINDOWS_CMD_EXE ?= cmd.exe
+GIT_WINDOWS_EXE ?= git.exe
 unexport GIT_EXEC_PATH
 unexport BASHOPTS
 unexport SHELLOPTS
-SHELL := cmd.exe
+SHELL := $(WINDOWS_CMD_EXE)
 .SHELLFLAGS := /d /c
-GIT_WINDOWS_EXEC_PATH := $(strip $(shell set "GIT_EXEC_PATH=" && git.exe --exec-path))
+GIT_WINDOWS_EXEC_PATH := $(strip $(shell set "GIT_EXEC_PATH=" && "$(GIT_WINDOWS_EXE)" --exec-path))
 ifeq ($(GIT_WINDOWS_EXEC_PATH),)
-$(error Git for Windows is required to run this Makefile)
+$(error A Windows Git POSIX tool bundle is required to run this Makefile)
 endif
 GIT_WINDOWS_ROOT := $(strip $(shell cd /d "$(GIT_WINDOWS_EXEC_PATH)/../../.." && cd))
 ifeq ($(GIT_WINDOWS_ROOT),)
-$(error Could not resolve the Git for Windows installation from $(GIT_WINDOWS_EXEC_PATH))
+$(error Could not resolve the Windows Git POSIX tool bundle from $(GIT_WINDOWS_EXEC_PATH))
 endif
-GIT_WINDOWS_BASH := $(GIT_WINDOWS_ROOT)/bin/bash.exe
+GIT_WINDOWS_BASH := $(GIT_WINDOWS_ROOT)/usr/bin/bash.exe
 GIT_WINDOWS_SED := $(GIT_WINDOWS_ROOT)/usr/bin/sed.exe
 GIT_WINDOWS_ENV := $(GIT_WINDOWS_ROOT)/usr/bin/env.exe
 ifneq ($(strip $(shell if exist "$(GIT_WINDOWS_BASH)" echo ready)),ready)
-$(error Could not find Git for Windows' bash at $(GIT_WINDOWS_BASH))
+$(error Could not find the Windows Git POSIX bundle's bash at $(GIT_WINDOWS_BASH))
 endif
 ifneq ($(strip $(shell if exist "$(GIT_WINDOWS_SED)" echo ready)),ready)
-$(error Could not find Git for Windows' sed at $(GIT_WINDOWS_SED))
+$(error Could not find the Windows Git POSIX bundle's sed at $(GIT_WINDOWS_SED))
 endif
 ifneq ($(strip $(shell if exist "$(GIT_WINDOWS_ENV)" echo ready)),ready)
-$(error Could not find Git for Windows' env at $(GIT_WINDOWS_ENV))
+$(error Could not find the Windows Git POSIX bundle's env at $(GIT_WINDOWS_ENV))
 endif
 SHELL := $(GIT_WINDOWS_BASH)
 .SHELLFLAGS := -c
 ifneq ($(strip $(shell printf '%s' ready;)),ready)
-$(error Could not start Git for Windows' bash at $(SHELL))
+$(error Could not start the Windows Git POSIX bundle's bash at $(SHELL))
 endif
 # GNU Make may launch simple commands and shebang interpreters directly instead
-# of through SHELL, so expose Git's POSIX tools to those process lookups too.
+# of through SHELL, so expose the bound POSIX tools to those process lookups too.
 export PATH := $(GIT_WINDOWS_ROOT)/usr/bin;$(PATH)
 endif
 endif
 
 .PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
-.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-package-mcp ci-package-npm
+.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-pr-lint-bound ci-package-mcp ci-package-npm
 
 # Default target
 all: build
 
 BUILD_DIR := .
-GIT_BUILD := $(shell git rev-parse --short HEAD)
+GIT_BUILD = $(shell "$(CI_GIT)" rev-parse --short HEAD)
 ifeq ($(OS),Windows_NT)
 INSTALL_DIR := $(USERPROFILE)/.local/bin
 WINDOWS_MINGW_BIN ?= /c/ProgramData/mingw64/mingw64/bin
@@ -75,7 +104,7 @@ export CGO_ENABLED := 1
 # GOTOOLCHAIN=auto downloads the right compiler but coverage instrumentation
 # may still use the local toolchain's compile tool, causing version mismatch.
 # Force the go.mod version to ensure all tools match.
-GO_VERSION := $(shell sed -n 's/^go //p' go.mod)
+GO_VERSION ?= $(shell "$(CI_SED)" -n 's/^go //p' go.mod)
 ifneq ($(GO_VERSION),)
 export GOTOOLCHAIN := go$(GO_VERSION)
 endif
@@ -187,7 +216,33 @@ ci-pr-policy:
 	@./scripts/ci/pr-policy.sh
 
 ci-pr-lint:
-	@./scripts/ci/pr-lint.sh
+	@unset BASH_ENV ENV; \
+		BEADS_CI_INVOKING_MAKE="$(CI_INVOKING_MAKE)" \
+		BEADS_CI_INVOKING_MAKE_ORIGIN="$(CI_INVOKING_MAKE_ORIGIN)" \
+		BEADS_CI_INVOKING_MAKEFILE_LIST="$(CI_INVOKING_MAKEFILE_LIST)" \
+		BEADS_CI_INVOKING_MAKEFLAGS_ORIGIN="$(CI_INVOKING_MAKEFLAGS_ORIGIN)" \
+		BEADS_CI_INVOKING_MFLAGS="$(CI_INVOKING_MFLAGS)" \
+		BEADS_CI_INVOKING_GNUMAKEFLAGS="$(CI_INVOKING_GNUMAKEFLAGS)" \
+		BEADS_CI_INVOKING_MAKEFILES_ORIGIN="$(CI_INVOKING_MAKEFILES_ORIGIN)" \
+		BEADS_CI_INVOKING_MAKEFILES="$(CI_INVOKING_MAKEFILES)" \
+		BEADS_CI_INVOKING_GIT="$(CI_GIT)" \
+		BEADS_CI_INVOKING_WINDOWS_GIT="$(GIT_WINDOWS_EXE)" \
+		BEADS_CI_AMBIENT_GOOS_PRESENT="$(CI_AMBIENT_GOOS_PRESENT)" \
+		BEADS_CI_AMBIENT_GOOS="$(CI_AMBIENT_GOOS)" \
+		BEADS_CI_AMBIENT_GOARCH_PRESENT="$(CI_AMBIENT_GOARCH_PRESENT)" \
+		BEADS_CI_AMBIENT_GOARCH="$(CI_AMBIENT_GOARCH)" \
+		BEADS_CI_AMBIENT_CGO_ENABLED_PRESENT="$(CI_AMBIENT_CGO_ENABLED_PRESENT)" \
+		BEADS_CI_AMBIENT_CGO_ENABLED="$(CI_AMBIENT_CGO_ENABLED)" \
+		"$(CI_BASH)" --noprofile --norc ./scripts/ci/pr-lint-host.sh
+
+ci-pr-lint-bound:
+	@test "$(BEADS_CI_TOOLCHAIN_BOUND)" = 1 || { \
+		printf '%s\n' \
+			'ci-pr-lint-bound requires BEADS_CI_TOOLCHAIN_BOUND=1' >&2; \
+		exit 1; \
+	}
+	@"$(BEADS_CI_BASH)" --noprofile --norc ./scripts/ci/pr-lint-routing-test.sh
+	@"$(BEADS_CI_BASH)" --noprofile --norc ./scripts/ci/pr-lint.sh
 
 ci-package-mcp:
 	@./scripts/ci/package-mcp.sh
@@ -296,7 +351,12 @@ fmt:
 # Check that all Go files are properly formatted (for CI)
 fmt-check:
 	@echo "Checking Go formatting..."
-	@UNFORMATTED=$$(gofmt -l .); \
+	@UNFORMATTED=$$("$(CI_GOFMT)" -l .); \
+	status=$$?; \
+	if [ "$$status" -ne 0 ]; then \
+		echo "gofmt failed while checking formatting" >&2; \
+		exit "$$status"; \
+	fi; \
 	if [ -n "$$UNFORMATTED" ]; then \
 		echo "The following files are not properly formatted:"; \
 		echo "$$UNFORMATTED"; \

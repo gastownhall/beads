@@ -28,14 +28,21 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
-
       - name: Run policy checks
         run: make ci-pr-policy
 
-      - name: Run lint checks
-        run: make ci-pr-lint
+      - name: Run bound lint checks
+        shell: /usr/bin/bash --noprofile --norc -euo pipefail {0}
+        env:
+          BASH_ENV: ""
+          ENV: ""
+          BEADS_CI_EXPECTED_OUTER_OS: linux
+          BEADS_CI_EXPECTED_TARGET_GOOS: linux
+          BEADS_CI_EXPECTED_TARGET_GOARCH: amd64
+          BEADS_CI_EXPECTED_TARGET_CGO_ENABLED: "1"
+          BEADS_CI_EXPECTED_GOLANGCI_LINT_VERSION: "2.10.1"
+          BEADS_CI_INSTALL_GOLANGCI_LINT: "1"
+        run: env -u MAKE -u MAKEFLAGS -u MFLAGS -u GNUMAKEFLAGS -u MAKEFILES /usr/bin/make -f Makefile CI_BASH=/usr/bin/bash ci-pr-lint
 
       - name: Build reusable Linux artifacts
         run: |
@@ -439,7 +446,8 @@ jobs:
 
   pr-lint-wrapper:
     name: PR Lint (wrapper timing)
-    runs-on: ubuntu-latest
+    runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -448,11 +456,386 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
+      - name: Refuse conflicting hosted and cleanup authority
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        env:
+          BASH_ENV: ""
+          ENV: ""
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+          BEADS_CI_EXPECTED_OUTER_OS: macos
+          BEADS_CI_EXPECTED_TARGET_GOOS: darwin
+          BEADS_CI_EXPECTED_TARGET_GOARCH: arm64
+          BEADS_CI_EXPECTED_TARGET_CGO_ENABLED: "1"
+          BEADS_CI_EXPECTED_MAKE_VERSION: "3.81"
+          BEADS_CI_EXPECTED_GOLANGCI_LINT_VERSION: "2.10.1"
+          BEADS_CI_INSTALL_GOLANGCI_LINT: "1"
+        run: |
+          refusal_count=0
+          public_make=(
+            env
+            -u MAKE
+            -u MAKEFLAGS
+            -u MFLAGS
+            -u GNUMAKEFLAGS
+            -u MAKEFILES
+            /usr/bin/make
+            -f
+            Makefile
+          )
+          assert_refusal() {
+            local name="$1"
+            local expected="$2"
+            shift 2
+            local output="$RUNNER_TEMP/pr-lint-refusal-$name.output"
+            if "$@" >"$output" 2>&1; then
+              printf 'Refusal case %s unexpectedly succeeded\n' "$name" >&2
+              exit 1
+            fi
+            grep -F -- "$expected" "$output" >/dev/null || {
+              printf 'Refusal case %s failed for an unrelated reason\n' "$name" >&2
+              cat "$output" >&2
+              exit 1
+            }
+            refusal_count=$((refusal_count + 1))
+          }
 
-      - name: Run PR lint wrapper
-        run: make ci-pr-lint
+          assert_refusal make-origin \
+            'MAKE origin must be default in GitHub Actions' \
+            "${public_make[@]}" MAKE=/tmp/forged CI_BASH=/bin/bash ci-pr-lint
+          assert_refusal makeflags-origin \
+            'MAKEFLAGS origin must be file in GitHub Actions' \
+            "${public_make[@]}" MAKEFLAGS=-s CI_BASH=/bin/bash ci-pr-lint
+          # Detection occurs after Make parsing; the missing path cannot run
+          # parse-time content and does not claim containment for malicious argv.
+          assert_refusal makefiles-origin \
+            'MAKEFILES must be absent at the public Make boundary' \
+            "${public_make[@]}" MAKEFILES=/definitely-missing-beads-forged.mk \
+              CI_BASH=/bin/bash ci-pr-lint
+          assert_refusal goos \
+            'GOOS conflicts with the protected hosted target' \
+            env GOOS=plan9 "${public_make[@]}" \
+              CI_AMBIENT_GOOS_PRESENT=0 CI_AMBIENT_GOOS=darwin \
+              CI_BASH=/bin/bash ci-pr-lint
+          assert_refusal goarch \
+            'GOARCH conflicts with the protected hosted target' \
+            env GOARCH=386 "${public_make[@]}" \
+              CI_AMBIENT_GOARCH_PRESENT=0 CI_AMBIENT_GOARCH=arm64 \
+              CI_BASH=/bin/bash ci-pr-lint
+          assert_refusal cgo \
+            'CGO_ENABLED conflicts with the protected hosted target' \
+            env CGO_ENABLED=0 "${public_make[@]}" \
+              CI_AMBIENT_CGO_ENABLED_PRESENT=0 CI_AMBIENT_CGO_ENABLED=1 \
+              CI_BASH=/bin/bash ci-pr-lint
+
+          cleanup_target="$RUNNER_TEMP/pr-lint-cleanup-target"
+          cleanup_link="$RUNNER_TEMP/pr-lint-cleanup-link"
+          mkdir "$cleanup_target"
+          ln -s "$cleanup_target" "$cleanup_link"
+          trap 'rm -f "$cleanup_link"; rmdir "$cleanup_target"' EXIT
+          assert_refusal cleanup-root \
+            'RUNNER_TEMP must not be a symbolic link' \
+            env RUNNER_TEMP="$cleanup_link" \
+              "${public_make[@]}" CI_BASH=/bin/bash ci-pr-lint
+
+          cleanup_probe_root="$RUNNER_TEMP/pr-lint-cleanup-probes"
+          cleanup_probe_bin="$cleanup_probe_root/mktemp-bin"
+          mkdir -p "$cleanup_probe_bin"
+          alternate_make="$cleanup_probe_root/alternate-make"
+          ln -s /usr/bin/make "$alternate_make"
+          assert_refusal make-invocation-leaf \
+            'stock macOS GNU Make must be invoked through /usr/bin/make' \
+            env \
+              -u MAKE \
+              -u MAKEFLAGS \
+              -u MFLAGS \
+              -u GNUMAKEFLAGS \
+              -u MAKEFILES \
+              "$alternate_make" \
+              -f \
+              Makefile \
+              CI_BASH=/bin/bash \
+              ci-pr-lint
+          cat >"$cleanup_probe_bin/mktemp" <<'PROBE_MKTEMP'
+          #!/bin/bash
+          set -euo pipefail
+          case "${CLEANUP_PROBE_CASE:?}" in
+            malformed)
+              created="$RUNNER_TEMP/beads-pr-lint-tools.BAD"
+              ;;
+            outside)
+              created="${RUNNER_TEMP%/*}/beads-pr-lint-tools.OUTSIDE1"
+              ;;
+            nested)
+              created="$RUNNER_TEMP/pr-lint-cleanup-probes/nested/beads-pr-lint-tools.NESTED01"
+              ;;
+            *)
+              exit 91
+              ;;
+          esac
+          [[ ! -e "$created" && ! -L "$created" ]]
+          "$PROBE_MKDIR" -p -- "$created"
+          printf '%s\n' "$created" >"$CLEANUP_PROBE_RECEIPT"
+          printf '%s\n' "$created"
+          PROBE_MKTEMP
+          chmod +x "$cleanup_probe_bin/mktemp"
+
+          for cleanup_case in malformed outside nested; do
+            cleanup_receipt="$cleanup_probe_root/$cleanup_case.receipt"
+            assert_refusal "cleanup-$cleanup_case" \
+              'mktemp returned an unauthorized private linter directory' \
+              env \
+                PATH="$cleanup_probe_bin:$PATH" \
+                CLEANUP_PROBE_CASE="$cleanup_case" \
+                CLEANUP_PROBE_RECEIPT="$cleanup_receipt" \
+                PROBE_MKDIR="$(command -v mkdir)" \
+                "${public_make[@]}" CI_BASH=/bin/bash ci-pr-lint
+            retained_path="$(cat "$cleanup_receipt")"
+            [[ -d "$retained_path" && ! -L "$retained_path" ]] || {
+              printf 'Cleanup case %s did not retain %s\n' \
+                "$cleanup_case" "$retained_path" >&2
+              exit 1
+            }
+            rm -rf -- "$retained_path"
+          done
+
+          replace_probe_bin="$cleanup_probe_root/replace-bin"
+          mkdir -p "$replace_probe_bin"
+          real_go="$(command -v go)"
+          real_gofmt="${real_go%/*}/gofmt"
+          [[ -f "$real_gofmt" && -x "$real_gofmt" ]]
+          ln -s "$real_gofmt" "$replace_probe_bin/gofmt"
+          cat >"$replace_probe_bin/go" <<'PROBE_GO'
+          #!/bin/bash
+          set -euo pipefail
+          if [[ "${1:-}" == "tool" &&
+                "${2:-}" == "dist" &&
+                "${3:-}" == "list" &&
+                -f "${0%/*}/dist-list-failure" ]]; then
+            printf 'darwin/arm64\n'
+            exit 88
+          fi
+          if [[ "${1:-}" == "install" ]]; then
+            [[ "${GOENV:-}" == off ]]
+            [[ "${GOWORK:-}" == off ]]
+            [[ -n "${GOFLAGS+x}" && -z "$GOFLAGS" ]]
+            [[ "${GOTOOLCHAIN:-}" == local ]]
+            [[ -n "${GOEXPERIMENT+x}" && -z "$GOEXPERIMENT" ]]
+            [[ "${GOOS:-}" == darwin ]]
+            [[ "${GOARCH:-}" == arm64 ]]
+            [[ "${CGO_ENABLED:-}" == 0 ]]
+            [[ "${GOARM64:-}" == v8.0 ]]
+            [[ -z "${GOAMD64+x}" ]]
+            [[ -z "${GOROOT+x}" ]]
+            [[ -z "${CC+x}" && -z "${CXX+x}" ]]
+            if [[ -f "${0%/*}/partial-install-failure" ]]; then
+              printf 'partial\n' >"$GOBIN/partial-linter"
+              printf '%s\n' "$GOBIN" >"${0%/*}/partial-install.receipt"
+              exit 89
+            fi
+            linter="$GOBIN/golangci-lint"
+            cat >"$linter" <<'PROBE_LINTER'
+          #!/bin/bash
+          set -euo pipefail
+          case "${1:-}" in
+            version)
+              root="${0%/*}"
+              case "${CLEANUP_PROBE_MODE:?}" in
+                replaced)
+                  retained="${root}.retained"
+                  "$PROBE_MV" "$root" "$retained"
+                  "$PROBE_LN" -s "$retained" "$root"
+                  ;;
+                unexpected)
+                  printf 'unexpected\n' >"$root/unexpected-entry"
+                  ;;
+                clean)
+                  ;;
+                ordinary)
+                  printf '%s\n' "$root" >"$CLEANUP_PROBE_RECEIPT"
+                  exit 94
+                  ;;
+                int|term|hup)
+                  printf '%s\n' "$root" >"$CLEANUP_PROBE_RECEIPT"
+                  case "$CLEANUP_PROBE_MODE" in
+                    int) signal=INT ;;
+                    term) signal=TERM ;;
+                    hup) signal=HUP ;;
+                  esac
+                  kill -s "$signal" "$PPID"
+                  read -r -t 1 _ </dev/null || :
+                  ;;
+                *)
+                  exit 93
+                  ;;
+              esac
+              printf '%s\n' "$root" >"$CLEANUP_PROBE_RECEIPT"
+              printf 'golangci-lint has version 2.10.1\n'
+              ;;
+            run)
+              exit 0
+              ;;
+            *)
+              exit 92
+              ;;
+          esac
+          PROBE_LINTER
+            chmod +x "$linter"
+            exit 0
+          fi
+          exec "$PROBE_REAL_GO" "$@"
+          PROBE_GO
+          chmod +x "$replace_probe_bin/go"
+
+          touch "$replace_probe_bin/dist-list-failure"
+          assert_refusal dist-list-producer-failure \
+            'the bound Go executable could not enumerate supported Go targets' \
+            env \
+              PATH="$replace_probe_bin:$PATH" \
+              PROBE_REAL_GO="$real_go" \
+              "${public_make[@]}" CI_BASH=/bin/bash ci-pr-lint
+          rm -f "$replace_probe_bin/dist-list-failure"
+
+          touch "$replace_probe_bin/partial-install-failure"
+          assert_refusal cleanup-partial-install \
+            'refused unsafe private-tool cleanup' \
+            env \
+              PATH="$replace_probe_bin:$PATH" \
+              PROBE_REAL_GO="$real_go" \
+              "${public_make[@]}" CI_BASH=/bin/bash ci-pr-lint
+          rm -f "$replace_probe_bin/partial-install-failure"
+          partial_path="$(cat "$replace_probe_bin/partial-install.receipt")"
+          [[ -d "$partial_path" &&
+             ! -L "$partial_path" &&
+             -f "$partial_path/partial-linter" ]] || {
+            printf 'Partial installation was not retained at %s\n' \
+              "$partial_path" >&2
+            exit 1
+          }
+          rm -rf -- "$partial_path"
+
+          handled_cleanup_count=0
+          assert_handled_cleanup() {
+            local mode="$1"
+            local receipt="$cleanup_probe_root/$mode.receipt"
+            if env \
+                PATH="$replace_probe_bin:$PATH" \
+                CLEANUP_PROBE_MODE="$mode" \
+                CLEANUP_PROBE_RECEIPT="$receipt" \
+                PROBE_LN="$(command -v ln)" \
+                PROBE_MV="$(command -v mv)" \
+                PROBE_REAL_GO="$real_go" \
+                "${public_make[@]}" CI_BASH=/bin/bash ci-pr-lint \
+                >"$cleanup_probe_root/$mode.output" 2>&1; then
+              printf 'Handled cleanup case %s unexpectedly succeeded\n' \
+                "$mode" >&2
+              exit 1
+            fi
+            local cleaned_path
+            cleaned_path="$(cat "$receipt")"
+            [[ ! -e "$cleaned_path" && ! -L "$cleaned_path" ]] || {
+              printf 'Handled cleanup case %s retained %s\n' \
+                "$mode" "$cleaned_path" >&2
+              exit 1
+            }
+            handled_cleanup_count=$((handled_cleanup_count + 1))
+          }
+          for handled_mode in ordinary int term hup; do
+            assert_handled_cleanup "$handled_mode"
+          done
+          [[ "$handled_cleanup_count" -eq 4 ]]
+
+          ambient_receipt="$cleanup_probe_root/ambient-state.receipt"
+          env \
+            PATH="$replace_probe_bin:$PATH" \
+            GOFLAGS='-tags=ambient_install_poison' \
+            GOENV="$cleanup_probe_root/ambient-goenv" \
+            GOWORK="$cleanup_probe_root/ambient-go.work" \
+            GOTOOLCHAIN=auto \
+            GOEXPERIMENT=ambient_poison \
+            CLEANUP_PROBE_MODE=clean \
+            CLEANUP_PROBE_RECEIPT="$ambient_receipt" \
+            PROBE_LN="$(command -v ln)" \
+            PROBE_MV="$(command -v mv)" \
+            PROBE_REAL_GO="$real_go" \
+            "${public_make[@]}" CI_BASH=/bin/bash ci-pr-lint
+          ambient_path="$(cat "$ambient_receipt")"
+          [[ ! -e "$ambient_path" && ! -L "$ambient_path" ]] || {
+            printf 'Curated installation-state case retained %s\n' \
+              "$ambient_path" >&2
+            exit 1
+          }
+
+          replace_receipt="$cleanup_probe_root/replaced.receipt"
+          assert_refusal cleanup-replaced \
+            'refused unsafe private-tool cleanup' \
+            env \
+              PATH="$replace_probe_bin:$PATH" \
+              CLEANUP_PROBE_MODE=replaced \
+              CLEANUP_PROBE_RECEIPT="$replace_receipt" \
+              PROBE_CAT="$(command -v cat)" \
+              PROBE_CHMOD="$(command -v chmod)" \
+              PROBE_LN="$(command -v ln)" \
+              PROBE_MV="$(command -v mv)" \
+              PROBE_REAL_GO="$real_go" \
+              "${public_make[@]}" CI_BASH=/bin/bash ci-pr-lint
+          replaced_path="$(cat "$replace_receipt")"
+          [[ -L "$replaced_path" &&
+             -d "${replaced_path}.retained" &&
+             ! -L "${replaced_path}.retained" ]] || {
+            printf 'Cleanup replacement was not retained at %s\n' \
+              "$replaced_path" >&2
+            exit 1
+          }
+          rm -f -- "$replaced_path"
+          rm -rf -- "${replaced_path}.retained"
+
+          unexpected_receipt="$cleanup_probe_root/unexpected.receipt"
+          assert_refusal cleanup-unexpected \
+            'refused unsafe private-tool cleanup' \
+            env \
+              PATH="$replace_probe_bin:$PATH" \
+              CLEANUP_PROBE_MODE=unexpected \
+              CLEANUP_PROBE_RECEIPT="$unexpected_receipt" \
+              PROBE_CAT="$(command -v cat)" \
+              PROBE_CHMOD="$(command -v chmod)" \
+              PROBE_LN="$(command -v ln)" \
+              PROBE_MV="$(command -v mv)" \
+              PROBE_REAL_GO="$real_go" \
+              "${public_make[@]}" CI_BASH=/bin/bash ci-pr-lint
+          unexpected_path="$(cat "$unexpected_receipt")"
+          [[ -d "$unexpected_path" &&
+             ! -L "$unexpected_path" &&
+             -f "$unexpected_path/golangci-lint" &&
+             -f "$unexpected_path/unexpected-entry" ]] || {
+            printf 'Unexpected-entry cleanup was not retained at %s\n' \
+              "$unexpected_path" >&2
+            exit 1
+          }
+          rm -rf -- "$unexpected_path"
+          rm -rf -- "$cleanup_probe_root"
+
+          [[ "$refusal_count" -eq 15 ]]
+          printf 'PR lint host falsifiers passed (%s refusals; %s handled-cleanup signals/failures; ambient Go state curated)\n' \
+            "$refusal_count" "$handled_cleanup_count"
+
+      - name: Run bound PR lint wrapper
+        shell: /bin/bash --noprofile --norc -euo pipefail {0}
+        env:
+          BASH_ENV: ""
+          ENV: ""
+          GOOS: darwin
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+          BEADS_CI_EXPECTED_OUTER_OS: macos
+          BEADS_CI_EXPECTED_TARGET_GOOS: darwin
+          BEADS_CI_EXPECTED_TARGET_GOARCH: arm64
+          BEADS_CI_EXPECTED_TARGET_CGO_ENABLED: "1"
+          BEADS_CI_EXPECTED_MAKE_VERSION: "3.81"
+          BEADS_CI_EXPECTED_GOLANGCI_LINT_VERSION: "2.10.1"
+          BEADS_CI_INSTALL_GOLANGCI_LINT: "1"
+        run: env -u MAKE -u MAKEFLAGS -u MFLAGS -u GNUMAKEFLAGS -u MAKEFILES /usr/bin/make -f Makefile CI_BASH=/bin/bash ci-pr-lint
 
   # Focused job for the hexagonal storage layer (internal/storage/domain/* and
   # internal/storage/uow). These packages back the proxied-server init path and
@@ -589,13 +972,16 @@ jobs:
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        env:
+          GOWORK: "off"
         with:
-          version: latest
-          args: --timeout=5m --build-tags=gms_pure_go
+          version: v2.10.1
+          args: --config=.golangci.yml --modules-download-mode=readonly --timeout=5m --build-tags=gms_pure_go
 
   windows-make-shell:
     name: Windows Make shell (${{ matrix.host }})
     runs-on: windows-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -606,10 +992,74 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
-      - name: Install native GNU Make
+      - name: Set up exact native Go
         if: matrix.host == 'native'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+
+      - name: Install native GNU Make and MinGW
+        if: matrix.host == 'native'
+        id: native_toolchain
         shell: pwsh
-        run: choco install make --version=4.4.1 --yes --no-progress
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install make --version=4.4.1 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not install exact GNU Make 4.4.1'
+          }
+          choco install mingw --version=16.1.0 --yes --no-progress
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not install exact MinGW 16.1.0'
+          }
+          # Chocolatey updates the machine PATH, but the current job process
+          # retains the hosted image's older C:\mingw64 entry. Bind the exact
+          # package layout instead of relying on a shell refresh or PATH order.
+          $compilerBin = [IO.Path]::GetFullPath(
+            (Join-Path $env:ProgramData 'mingw64\mingw64\bin'))
+          $compilers = @(
+            [pscustomobject]@{
+              Name = 'gcc.exe'
+              Path = Join-Path $compilerBin 'gcc.exe'
+            },
+            [pscustomobject]@{
+              Name = 'g++.exe'
+              Path = Join-Path $compilerBin 'g++.exe'
+            }
+          )
+          foreach ($compiler in $compilers) {
+            if (-not [IO.Path]::IsPathFullyQualified($compiler.Path) -or
+                [IO.Path]::GetFileName($compiler.Path) -ne $compiler.Name -or
+                -not (Test-Path -LiteralPath $compiler.Path -PathType Leaf) -or
+                [IO.Path]::GetFullPath((Split-Path $compiler.Path)) -ne $compilerBin) {
+              throw "The exact Chocolatey MinGW compiler is missing: '$($compiler.Path)'"
+            }
+            $compilerVersion = @(& $compiler.Path --version)
+            $compilerExitCode = $LASTEXITCODE
+            $compilerFirstLine = if ($compilerVersion.Count -gt 0) {
+              $compilerVersion[0].Trim()
+            } else {
+              '<no output>'
+            }
+            if ($compilerExitCode -ne 0 -or
+                $compilerFirstLine -notmatch '(^|\s)16\.1\.0(\s|$)') {
+              throw "Expected MinGW 16.1.0 at '$($compiler.Path)', observed '$compilerFirstLine'"
+            }
+            $compilerMachine = (& $compiler.Path -dumpmachine).Trim()
+            if ($LASTEXITCODE -ne 0 -or
+                $compilerMachine -ne 'x86_64-w64-mingw32') {
+              throw "Expected x86_64-w64-mingw32 at '$($compiler.Path)', observed '$compilerMachine'"
+            }
+          }
+          [string]$outputPayload = (
+            "gcc={0}`ngxx={1}`n" -f
+              $compilers[0].Path,
+              $compilers[1].Path
+          )
+          [IO.File]::AppendAllText(
+            $env:GITHUB_OUTPUT,
+            $outputPayload,
+            [Text.UTF8Encoding]::new($false))
 
       - name: Set up MSYS2 GNU Make
         if: matrix.host == 'msys2'
@@ -630,18 +1080,215 @@ jobs:
       - name: Exercise native Windows Make
         if: matrix.host == 'native'
         shell: pwsh
+        env:
+          BEADS_CI_EXPECTED_OUTER_OS: windows
+          BEADS_CI_EXPECTED_MAKE_VERSION: "4.4.1"
+          BEADS_CI_NATIVE_GCC: ${{ steps.native_toolchain.outputs.gcc }}
+          BEADS_CI_NATIVE_GXX: ${{ steps.native_toolchain.outputs.gxx }}
         run: |
           $ErrorActionPreference = 'Stop'
+          foreach ($makeControl in @(
+            'MAKE',
+            'MAKEFLAGS',
+            'MFLAGS',
+            'GNUMAKEFLAGS',
+            'MAKEFILES'
+          )) {
+            Remove-Item -LiteralPath "Env:$makeControl" -ErrorAction SilentlyContinue
+          }
+          if ($env:BEADS_CI_EXPECTED_OUTER_OS -ne 'windows' -or
+              -not $IsWindows -or
+              -not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+                  [System.Runtime.InteropServices.OSPlatform]::Windows)) {
+            throw 'The protected native lane expected and requires actual Windows'
+          }
+          $pwsh = (Get-Process -Id $PID -ErrorAction Stop).Path
+          if (-not [IO.Path]::IsPathFullyQualified($pwsh) -or
+              [IO.Path]::GetFileName($pwsh) -ne 'pwsh.exe' -or
+              $PSVersionTable.PSEdition -ne 'Core' -or
+              $PSVersionTable.PSVersion.Major -lt 7) {
+            throw "Expected an absolute PowerShell 7+ Core host, found '$pwsh'"
+          }
+
           $make = (Get-Command make.exe -ErrorAction Stop).Source
-          $hostOutput = & $make --no-print-directory -f NUL --eval '$(info MAKE_HOST=$(MAKE_HOST))' --eval 'noop:;' noop
+          if (-not [IO.Path]::IsPathFullyQualified($make) -or
+              [IO.Path]::GetFileName($make) -ne 'make.exe') {
+            throw "GNU Make did not resolve to one absolute make.exe: '$make'"
+          }
+          $makeVersion = @(& $make --version)
+          if ($LASTEXITCODE -ne 0 -or
+              $makeVersion.Count -eq 0 -or
+              $makeVersion[0].Trim() -ne "GNU Make $env:BEADS_CI_EXPECTED_MAKE_VERSION") {
+            throw "Expected GNU Make $env:BEADS_CI_EXPECTED_MAKE_VERSION at '$make'"
+          }
+          $hostProbe = @'
+          $(info MAKE_HOST=$(MAKE_HOST))
+          .PHONY: noop
+          noop: ;
+          '@
+          $hostOutput = $hostProbe | & $make --no-print-directory -f - noop
           $makeHost = (($hostOutput | Where-Object { $_ -like 'MAKE_HOST=*' }) -replace '^MAKE_HOST=', '').Trim()
           if ($LASTEXITCODE -ne 0 -or ($makeHost -ne 'Windows32' -and $makeHost -notmatch '-mingw32$')) {
             throw "Expected native Windows GNU Make, found '$makeHost' at '$make'"
           }
+          $makeOnlyDirectory = Join-Path $env:RUNNER_TEMP 'mingw32-make-only'
+          New-Item -ItemType Directory -Force -Path $makeOnlyDirectory | Out-Null
+          $mingwOnlyMake = Join-Path $makeOnlyDirectory 'mingw32-make.exe'
+          Copy-Item -LiteralPath $make -Destination $mingwOnlyMake
+          if (Test-Path -LiteralPath (Join-Path $makeOnlyDirectory 'make.exe')) {
+            throw 'The no-make-alias fixture unexpectedly contains make.exe'
+          }
+          $make = $mingwOnlyMake
+          $copiedMakeVersion = @(& $make --version)
+          if ($LASTEXITCODE -ne 0 -or
+              $copiedMakeVersion.Count -eq 0 -or
+              $copiedMakeVersion[0].Trim() -ne "GNU Make $env:BEADS_CI_EXPECTED_MAKE_VERSION") {
+            throw "The isolated mingw32-make.exe lost GNU Make authority: '$make'"
+          }
 
           $git = (Get-Command git.exe -ErrorAction Stop).Source
+          if (-not [IO.Path]::IsPathFullyQualified($git) -or
+              [IO.Path]::GetFileName($git) -ne 'git.exe') {
+            throw "Git did not resolve to one absolute git.exe: '$git'"
+          }
           if ($git -notmatch ' ') {
-            throw "Expected the hosted Git for Windows path to contain a space, found '$git'"
+            throw "Expected the hosted Windows Git bundle path to contain a space, found '$git'"
+          }
+          Get-ChildItem Env: |
+            Where-Object {
+              $_.Name -like 'GIT_CONFIG_*' -or
+              $_.Name -like 'GIT_TRACE*'
+            } |
+            ForEach-Object {
+              Remove-Item -LiteralPath "Env:$($_.Name)" -ErrorAction Stop
+            }
+          Remove-Item Env:GIT_EXEC_PATH -ErrorAction SilentlyContinue
+          $env:GIT_CONFIG_NOSYSTEM = '1'
+          $env:GIT_CONFIG_GLOBAL = 'NUL'
+          $env:GIT_TERMINAL_PROMPT = '0'
+          $gitVersion = (& $git --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $gitVersion -notmatch '^git version \S+$') {
+            throw "The bound Windows Git executable did not report a coherent version: '$gitVersion'"
+          }
+          $gitRootProbe = (& $git -c core.hooksPath=NUL -C $env:GITHUB_WORKSPACE rev-parse --show-toplevel).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              [IO.Path]::GetFullPath($gitRootProbe) -ne
+              [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)) {
+            throw "The bound Windows Git executable resolved the wrong repository: '$gitRootProbe'"
+          }
+          $gitExecPath = (& $git --exec-path).Trim()
+          if ($LASTEXITCODE -ne 0 -or -not [IO.Path]::IsPathFullyQualified($gitExecPath)) {
+            throw "The bound Windows Git executable returned an invalid exec path: '$gitExecPath'"
+          }
+          $gitRoot = [IO.Path]::GetFullPath((Join-Path $gitExecPath '..\..\..'))
+          $bash = Join-Path $gitRoot 'usr\bin\bash.exe'
+          $cygpath = Join-Path $gitRoot 'usr\bin\cygpath.exe'
+          $allowedGitLeaves = @(
+            (Join-Path $gitRoot 'cmd\git.exe'),
+            (Join-Path $gitRoot 'bin\git.exe'),
+            (Join-Path $gitRoot 'mingw64\bin\git.exe')
+          ) | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+          if (-not (
+            $allowedGitLeaves |
+              Where-Object {
+                [IO.Path]::GetFullPath($_).Equals(
+                  [IO.Path]::GetFullPath($git),
+                  [StringComparison]::OrdinalIgnoreCase)
+              }
+          )) {
+            throw "The bootstrap Git is not an exact executable leaf of '$gitRoot'"
+          }
+          $resolvedGit = Join-Path $gitRoot 'mingw64\bin\git.exe'
+          if (-not [IO.Path]::IsPathFullyQualified($resolvedGit) -or
+              -not (Test-Path -LiteralPath $resolvedGit -PathType Leaf)) {
+            throw "The mixed-PATH Git leaf is missing from '$gitRoot'"
+          }
+          $requiredPosixTools = @(
+            $bash,
+            $cygpath,
+            (Join-Path $gitRoot 'usr\bin\cat.exe'),
+            (Join-Path $gitRoot 'usr\bin\chmod.exe'),
+            (Join-Path $gitRoot 'usr\bin\cp.exe'),
+            (Join-Path $gitRoot 'usr\bin\diff.exe'),
+            (Join-Path $gitRoot 'usr\bin\env.exe'),
+            (Join-Path $gitRoot 'usr\bin\mkdir.exe'),
+            (Join-Path $gitRoot 'usr\bin\mktemp.exe'),
+            (Join-Path $gitRoot 'usr\bin\readlink.exe'),
+            (Join-Path $gitRoot 'usr\bin\rm.exe'),
+            (Join-Path $gitRoot 'usr\bin\rmdir.exe'),
+            (Join-Path $gitRoot 'usr\bin\sed.exe'),
+            (Join-Path $gitRoot 'usr\bin\uname.exe')
+          )
+          foreach ($tool in $requiredPosixTools) {
+            if (-not [IO.Path]::IsPathFullyQualified($tool) -or
+                -not (Test-Path -LiteralPath $tool -PathType Leaf)) {
+              throw "The Windows Git POSIX bundle is missing '$tool'"
+            }
+          }
+          $bashProbe = (& $bash --noprofile --norc -c @'
+          test "$BASH" = /usr/bin/bash
+          case "$OSTYPE" in cygwin*|msys*) ;; *) exit 72;; esac
+          case "$(uname -s)" in MINGW*_NT-*|MSYS*_NT-*|CYGWIN*_NT-*) ;; *) exit 73;; esac
+          printf '%s' 'bound Windows Bash passed'
+          '@).Trim()
+          if ($LASTEXITCODE -ne 0 -or $bashProbe -ne 'bound Windows Bash passed') {
+            throw "The bound Windows Bash failed its family/path probe: '$bashProbe'"
+          }
+
+          $cmd = Join-Path $env:SystemRoot 'System32\cmd.exe'
+          if (-not [IO.Path]::IsPathFullyQualified($cmd) -or
+              -not (Test-Path -LiteralPath $cmd -PathType Leaf)) {
+            throw "Could not bind the Windows command processor: '$cmd'"
+          }
+          $goDirective = @(
+            Get-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'go.mod') |
+              Where-Object { $_ -match '^go [0-9]+\.[0-9]+\.[0-9]+$' }
+          )
+          if ($goDirective.Count -ne 1) {
+            throw 'go.mod must contain one exact three-component Go version'
+          }
+          $goVersion = ($goDirective[0] -replace '^go ', '').Trim()
+          if ($goVersion -ne '1.26.5') {
+            throw "Expected protected Go 1.26.5, found '$goVersion'"
+          }
+          $go = (Get-Command go.exe -ErrorAction Stop).Source
+          if (-not [IO.Path]::IsPathFullyQualified($go) -or
+              [IO.Path]::GetFileName($go) -ne 'go.exe' -or
+              (& $go version).Trim() -notmatch '^go version go1\.26\.5 windows/amd64$') {
+            throw "Expected exact native Go 1.26.5 windows/amd64 at '$go'"
+          }
+          $expectedCompilerBin = [IO.Path]::GetFullPath(
+            (Join-Path $env:ProgramData 'mingw64\mingw64\bin'))
+          $gcc = $env:BEADS_CI_NATIVE_GCC
+          $gxx = $env:BEADS_CI_NATIVE_GXX
+          foreach ($compiler in @(
+            [pscustomobject]@{ Name = 'gcc.exe'; Path = $gcc },
+            [pscustomobject]@{ Name = 'g++.exe'; Path = $gxx }
+          )) {
+            if (-not [IO.Path]::IsPathFullyQualified($compiler.Path) -or
+                [IO.Path]::GetFileName($compiler.Path) -ne $compiler.Name -or
+                -not (Test-Path -LiteralPath $compiler.Path -PathType Leaf) -or
+                [IO.Path]::GetFullPath((Split-Path $compiler.Path)) -ne
+                  $expectedCompilerBin) {
+              throw "A protected MinGW compiler is not the exact installed leaf: '$($compiler.Path)'"
+            }
+            $compilerVersion = @(& $compiler.Path --version)
+            $compilerExitCode = $LASTEXITCODE
+            $compilerFirstLine = if ($compilerVersion.Count -gt 0) {
+              $compilerVersion[0].Trim()
+            } else {
+              '<no output>'
+            }
+            if ($compilerExitCode -ne 0 -or
+                $compilerFirstLine -notmatch '(^|\s)16\.1\.0(\s|$)') {
+              throw "Expected MinGW 16.1.0 at '$($compiler.Path)', observed '$compilerFirstLine'"
+            }
+          }
+          if ((& $gcc -dumpmachine).Trim() -ne 'x86_64-w64-mingw32') {
+            throw "Expected the x86_64 MinGW compiler at '$gcc'"
+          }
+          if ((& $gxx -dumpmachine).Trim() -ne 'x86_64-w64-mingw32') {
+            throw "Expected the x86_64 MinGW C++ compiler at '$gxx'"
           }
 
           $profile = Join-Path $env:RUNNER_TEMP 'profile with spaces'
@@ -649,63 +1296,258 @@ jobs:
           $poison = Join-Path $profile 'poison bash env.sh'
           Set-Content -LiteralPath $poison -Encoding utf8 -Value 'exit 97'
 
-          $env:USERPROFILE = $profile
           $env:BASH_ENV = $poison
           $env:BASHOPTS = 'failglob'
           $env:SHELLOPTS = 'nounset'
           $env:GIT_EXEC_PATH = Join-Path $profile 'missing git exec path'
-          $env:PATH = "$(Split-Path $git);$env:SystemRoot\System32"
+          # Deliberately resolve Git from mingw64/bin while Make bootstraps from
+          # cmd/git.exe. The host must accept distinct exact leaves of one
+          # bundle and reject any leaf from another root.
+          $env:PATH = @(
+            (Split-Path $make),
+            (Split-Path $go),
+            (Split-Path $gcc),
+            (Split-Path $resolvedGit),
+            (Split-Path $git),
+            (Join-Path $env:SystemRoot 'System32')
+          ) -join ';'
+          if (Get-Command make.exe -ErrorAction SilentlyContinue) {
+            throw 'The full native boundary still has a make.exe alias'
+          }
+          $onlyNamedMake = (Get-Command mingw32-make.exe -ErrorAction Stop).Source
+          if ([IO.Path]::GetFullPath($onlyNamedMake) -ne [IO.Path]::GetFullPath($make)) {
+            throw "The isolated Make name resolved to an unexpected executable: '$onlyNamedMake'"
+          }
 
-          & $make --no-print-directory help | Out-Null
+          $makeAuthority = @(
+            "WINDOWS_CMD_EXE=$cmd",
+            "GIT_WINDOWS_EXE=$git",
+            "CI_GIT=$resolvedGit",
+            "CI_BASH=$($bash.Replace('\', '/'))",
+            "GO_VERSION=$goVersion",
+            "EXPECTED_WINDOWS_BASH=$($bash.Replace('\', '/'))"
+          )
+          & $make -f Makefile @makeAuthority --no-print-directory help | Out-Null
           if ($LASTEXITCODE -ne 0) {
             throw 'Native Make failed while parsing or running help'
           }
 
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          $env:CGO_ENABLED = '1'
+          $env:BEADS_CI_EXPECTED_TARGET_GOOS = 'windows'
+          $env:BEADS_CI_EXPECTED_TARGET_GOARCH = 'amd64'
+          $env:BEADS_CI_EXPECTED_TARGET_CGO_ENABLED = '1'
+          $env:BEADS_CI_EXPECTED_CC_VERSION = '16.1.0'
+          $env:BEADS_CI_EXPECTED_GOLANGCI_LINT_VERSION = '2.10.1'
+          $env:BEADS_CI_INSTALL_GOLANGCI_LINT = '1'
+          $env:BEADS_CI_INVOKING_WINDOWS_GIT = $git
+          $env:RUNNER_TEMP = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+
+          $wrongRoot = Join-Path $env:RUNNER_TEMP 'wrong git bundle'
+          $wrongBin = Join-Path $wrongRoot 'bin'
+          New-Item -ItemType Directory -Force -Path $wrongBin | Out-Null
+          $wrongGit = Join-Path $wrongBin 'git'
+          $delegateGit = (& $cygpath -u $resolvedGit).Trim()
+          if ($LASTEXITCODE -ne 0 -or $delegateGit -notmatch '^/') {
+            throw "Could not translate the resolved Git leaf: '$delegateGit'"
+          }
+          $wrongGitScript = "#!/usr/bin/bash`nexec `"$delegateGit`" `"`$@`"`n"
+          [IO.File]::WriteAllText(
+            $wrongGit,
+            $wrongGitScript,
+            [Text.UTF8Encoding]::new($false))
+          $wrongOutput = Join-Path $env:RUNNER_TEMP 'wrong-git-bundle.output'
+          & $make @(
+            '-f',
+            'Makefile',
+            "WINDOWS_CMD_EXE=$cmd",
+            "GIT_WINDOWS_EXE=$git",
+            "CI_GIT=$wrongGit",
+            "CI_BASH=$($bash.Replace('\', '/'))",
+            "GO_VERSION=$goVersion",
+            'ci-pr-lint'
+          ) *> $wrongOutput
+          if ($LASTEXITCODE -eq 0) {
+            throw 'The public lint target accepted a Git executable from the wrong bundle root'
+          }
+          if ((Get-Content -LiteralPath $wrongOutput -Raw) -notmatch
+              'the resolved Git executable is outside the GIT_WINDOWS_EXE bundle') {
+            throw 'The wrong-bundle falsifier failed for an unrelated reason'
+          }
+
+          & $make -f Makefile @makeAuthority ci-pr-lint
+          if ($LASTEXITCODE -ne 0) {
+            throw 'The native Windows public PR lint target failed'
+          }
+          if (Get-ChildItem -LiteralPath $env:RUNNER_TEMP -Directory -Filter 'beads-pr-lint-tools.*') {
+            throw 'The native Windows lint target left a private tool directory behind'
+          }
+
+          # The exact-equal ambient tuple above is accepted. Each conflicting
+          # field must fail through the same public Make target before lint.
+          $targetRefusalCount = 0
+          foreach ($conflict in @(
+            @{ Name = 'GOOS'; Value = 'plan9' },
+            @{ Name = 'GOARCH'; Value = '386' },
+            @{ Name = 'CGO_ENABLED'; Value = '0' }
+          )) {
+            $saved = [Environment]::GetEnvironmentVariable($conflict.Name, 'Process')
+            [Environment]::SetEnvironmentVariable(
+              $conflict.Name,
+              $conflict.Value,
+              'Process')
+            try {
+              $conflictPath = Join-Path (
+                $env:RUNNER_TEMP) "conflict-$($conflict.Name).output"
+              & $make -f Makefile @makeAuthority ci-pr-lint *> $conflictPath
+              if ($LASTEXITCODE -eq 0) {
+                throw "The public lint target accepted conflicting $($conflict.Name)"
+              }
+              $conflictOutput = Get-Content -LiteralPath $conflictPath -Raw
+              if ($conflictOutput -notmatch "$($conflict.Name) conflicts with the protected hosted target") {
+                throw "The $($conflict.Name) falsifier failed for an unrelated reason"
+              }
+              $targetRefusalCount++
+            } finally {
+              [Environment]::SetEnvironmentVariable(
+                $conflict.Name,
+                $saved,
+                'Process')
+            }
+          }
+          if ($targetRefusalCount -ne 3) {
+            throw "Expected three native target refusals, observed $targetRefusalCount"
+          }
+          Write-Output "Native PR lint authority falsifiers passed (3 target; 1 bundle)"
+
+          $env:BEADS_CI_TOOLCHAIN_BOUND = '1'
+          $env:BEADS_CI_EXPECTED_OUTER_OS = 'windows'
+          $env:BEADS_CI_BASH = '/usr/bin/bash'
+          $env:BEADS_CI_ENV = '/usr/bin/env'
+          $env:BEADS_CI_MKDIR = '/usr/bin/mkdir'
+          $env:BEADS_CI_MKTEMP = '/usr/bin/mktemp'
+          $env:BEADS_CI_READLINK = '/usr/bin/readlink'
+          $env:BEADS_CI_RM = '/usr/bin/rm'
+          $env:BEADS_CI_UNAME = '/usr/bin/uname'
+          $env:GO_VERSION = $goVersion
+
+          $smokeMakefile = Join-Path $env:GITHUB_WORKSPACE (
+            '.native-windows-make-smoke.mk')
           @'
           include Makefile
           .RECIPEPREFIX := >
           .PHONY: windows-make-shell-smoke
           windows-make-shell-smoke:
-          >@case "$(SHELL)" in */bin/bash.exe) ;; *) exit 1;; esac
+          >@test "$(MAKEFILE_LIST)" = ".native-windows-make-smoke.mk Makefile"
+          >@test "$(SHELL)" = "$(EXPECTED_WINDOWS_BASH)"
+          >@test "$$BASH" = /usr/bin/bash
           >@test -n "$$BASH_VERSION"
+          >@case "$$OSTYPE" in cygwin*|msys*) ;; *) exit 1;; esac
+          >@case "$$(uname -s)" in MINGW*_NT-*|MSYS*_NT-*|CYGWIN*_NT-*) ;; *) exit 1;; esac
+          >@test "$$(command -v bash)" = /usr/bin/bash
           >@test "$$(command -v sed)" = /usr/bin/sed
           >@test "$$(command -v env)" = /usr/bin/env
+          >@test "$$(command -v mkdir)" = /usr/bin/mkdir
+          >@test "$$(command -v mktemp)" = /usr/bin/mktemp
+          >@test "$$(command -v readlink)" = /usr/bin/readlink
+          >@test "$$(command -v rm)" = /usr/bin/rm
+          >@test "$$(command -v rmdir)" = /usr/bin/rmdir
+          >@test "$$(command -v uname)" = /usr/bin/uname
           >@test -z "$${BASH_ENV+x}"
+          >@test -z "$${ENV+x}"
           >@case "$$-" in *u*) exit 1;; esac
           >@shopt -q failglob && exit 1 || :
           >@test -z "$${GIT_EXEC_PATH+x}"
           >@env printf '%s\n' 'native Windows Make shell smoke passed'
-          '@ | & $make --no-print-directory -f - windows-make-shell-smoke
-          if ($LASTEXITCODE -ne 0) {
-            throw 'Native Make shell smoke failed'
+          '@ | Set-Content -LiteralPath $smokeMakefile -Encoding utf8NoBOM
+          try {
+            & $make @makeAuthority --no-print-directory `
+              -f '.native-windows-make-smoke.mk' windows-make-shell-smoke
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Native Make shell smoke failed'
+            }
+          } finally {
+            Remove-Item -LiteralPath $smokeMakefile -ErrorAction Stop
           }
+          Set-Content -LiteralPath (
+            Join-Path $env:RUNNER_TEMP 'windows-make-shell-native.ok'
+          ) -Encoding ascii -Value 'native'
 
       - name: Exercise MSYS2-hosted Make
         if: matrix.host == 'msys2'
         shell: msys2 {0}
         run: |
           set -euo pipefail
+          export PATH=/usr/bin
+          resolve_tool() {
+            local name="$1"
+            local path=""
+            path="$(type -P -- "$name")"
+            [[ "$path" == /* && -f "$path" && -x "$path" ]] || {
+              printf 'Could not bind MSYS2 tool %s: %s\n' "$name" "$path" >&2
+              exit 1
+            }
+            printf '%s' "$path"
+          }
+          bash_path="$(resolve_tool bash)"
+          cat_path="$(resolve_tool cat)"
+          cygpath_path="$(resolve_tool cygpath)"
+          env_path="$(resolve_tool env)"
+          git_path="$(resolve_tool git)"
+          make_path="$(resolve_tool make)"
+          mkdir_path="$(resolve_tool mkdir)"
+          sed_path="$(resolve_tool sed)"
+          sh_path="$(resolve_tool sh)"
+          uname_path="$(resolve_tool uname)"
+
+          [[ "$BASH" == "$bash_path" ]]
+          case "$("$uname_path" -s)" in
+            MSYS*_NT-*|MINGW*_NT-*) ;;
+            *) printf 'Expected actual MSYS2-on-Windows outer OS\n' >&2; exit 1 ;;
+          esac
+          [[ "$("$git_path" --version)" == "git version "* ]]
+          git_root="$(
+            GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+              "$git_path" -C "$GITHUB_WORKSPACE" rev-parse --show-toplevel
+          )"
+          [[ "$("$cygpath_path" -aw "$git_root")" == "$("$cygpath_path" -aw "$GITHUB_WORKSPACE")" ]]
+          make_version="$("$make_path" --version)"
+          [[ "${make_version%%$'\n'*}" == "GNU Make "* ]]
           make_host="$(
-            make --no-print-directory -f /dev/null \
-              --eval '$(info $(MAKE_HOST))' \
-              --eval 'noop:;' noop |
-              sed -n '1p'
+            printf '%s\n' \
+              '$(info $(MAKE_HOST))' \
+              '.PHONY: noop' \
+              'noop: ;' |
+              "$make_path" --no-print-directory -f - noop |
+              "$sed_path" -n '1p'
           )"
           case "$make_host" in
             *-msys|*-cygwin) ;;
             *) echo "Expected a POSIX-hosted MSYS2 GNU Make, found '$make_host'" >&2; exit 1 ;;
           esac
 
-          profile="$(cygpath -u "$RUNNER_TEMP")/profile with spaces"
-          mkdir -p "$profile"
+          go_version="$("$sed_path" -n 's/^go //p' go.mod)"
+          go_version="${go_version%$'\r'}"
+          [[ "$go_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          profile="$("$cygpath_path" -u "$RUNNER_TEMP")/profile with spaces"
+          "$mkdir_path" -p "$profile"
           bash_env="$profile/compat bash env.sh"
           printf '%s\n' 'exit 97' > "$bash_env"
+          env_file="$profile/compat env.sh"
+          printf '%s\n' 'exit 96' > "$env_file"
           export BASH_ENV="$bash_env"
+          export ENV="$env_file"
           export GIT_EXEC_PATH="$profile/missing git exec path"
-          export PATH=/usr/bin
 
-          make --no-print-directory help >/dev/null
-          cat > "$profile/smoke.mk" <<'MAKE_EOF'
+          make_authority=(
+            "SHELL=$sh_path"
+            "CI_GIT=$git_path"
+            "CI_SED=$sed_path"
+            "GO_VERSION=$go_version"
+          )
+          "$make_path" "${make_authority[@]}" --no-print-directory help >/dev/null
+          "$cat_path" > "$profile/smoke.mk" <<'MAKE_EOF'
           include Makefile
           .RECIPEPREFIX := >
           .PHONY: windows-make-shell-smoke
@@ -714,12 +1556,15 @@ jobs:
           >@test -n "$$BASH_VERSION"
           >@test "$$(command -v sed)" = /usr/bin/sed
           >@test "$$(command -v env)" = /usr/bin/env
-          >@test -f "$$BASH_ENV"
+          >@test -z "$${BASH_ENV+x}"
+          >@test -z "$${ENV+x}"
           >@test -n "$$GIT_EXEC_PATH"
           >@case "$$PATH" in *';'*) exit 1;; esac
           >@env printf '%s\n' 'MSYS2 Make shell smoke passed'
           MAKE_EOF
-          make --no-print-directory -f "$profile/smoke.mk" windows-make-shell-smoke
+          "$make_path" "${make_authority[@]}" --no-print-directory \
+            -f "$profile/smoke.mk" windows-make-shell-smoke
+          printf '%s\n' msys2 >"$("$cygpath_path" -u "$RUNNER_TEMP")/windows-make-shell-msys2.ok"
 
       - name: Exercise Cygwin-hosted Make
         if: matrix.host == 'cygwin'
@@ -728,32 +1573,105 @@ jobs:
           CYGWIN_ROOT: ${{ steps.cygwin.outputs.root }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if (-not $IsWindows -or
+              -not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+                  [System.Runtime.InteropServices.OSPlatform]::Windows)) {
+            throw 'The protected Cygwin lane expected and requires actual Windows'
+          }
           $bash = Join-Path $env:CYGWIN_ROOT 'bin\bash.exe'
+          if (-not [IO.Path]::IsPathFullyQualified($bash) -or
+              -not (Test-Path -LiteralPath $bash -PathType Leaf)) {
+            throw "Could not bind the Cygwin Bash executable: '$bash'"
+          }
           $script = @'
           set -euo pipefail
           export PATH=/usr/bin
-          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+          resolve_tool() {
+            local name="$1"
+            local path=""
+            path="$(type -P -- "$name")"
+            [[ "$path" == /* && -f "$path" && -x "$path" ]] || {
+              printf 'Could not bind Cygwin tool %s: %s\n' "$name" "$path" >&2
+              exit 1
+            }
+            printf '%s' "$path"
+          }
+          bash_path="$(resolve_tool bash)"
+          cat_path="$(resolve_tool cat)"
+          cygpath_path="$(resolve_tool cygpath)"
+          env_path="$(resolve_tool env)"
+          git_path="$(resolve_tool git)"
+          make_path="$(resolve_tool make)"
+          mktemp_path="$(resolve_tool mktemp)"
+          rm_path="$(resolve_tool rm)"
+          sed_path="$(resolve_tool sed)"
+          sh_path="$(resolve_tool sh)"
+          uname_path="$(resolve_tool uname)"
+
+          [[ "$BASH" == "$bash_path" ]]
+          case "$("$uname_path" -s)" in
+            CYGWIN*_NT-*) ;;
+            *) printf 'Expected actual Cygwin-on-Windows outer OS\n' >&2; exit 1 ;;
+          esac
+          cd "$("$cygpath_path" -u "$GITHUB_WORKSPACE")"
+          profile="$("$mktemp_path" -d)"
+          cleanup() {
+            "$rm_path" -rf -- "$profile"
+          }
+          trap cleanup EXIT
+          # actions/checkout registers the Win32 spelling in Git for Windows'
+          # temporary global config. Cygwin Git sees a distinct canonical
+          # spelling and ownership domain, so give only this script an isolated
+          # protected config containing the exact repository it just entered.
+          git_config="$profile/gitconfig"
+          GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+            "$git_path" config --file "$git_config" --add safe.directory "$PWD"
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_CONFIG_GLOBAL="$git_config"
+          safe_directory="$(
+            "$git_path" config --global --get-all safe.directory
+          )"
+          [[ "$("$cygpath_path" -aw "$safe_directory")" == "$("$cygpath_path" -aw "$PWD")" ]]
+          [[ "$("$git_path" --version)" == "git version "* ]]
+          git_root="$(
+            "$git_path" -C "$PWD" rev-parse --show-toplevel
+          )"
+          [[ "$("$cygpath_path" -aw "$git_root")" == "$("$cygpath_path" -aw "$PWD")" ]]
+          make_version="$("$make_path" --version)"
+          [[ "${make_version%%$'\n'*}" == "GNU Make "* ]]
 
           make_host="$(
-            make --no-print-directory -f /dev/null \
-              --eval '$(info $(MAKE_HOST))' \
-              --eval 'noop:;' noop |
-              sed -n '1p'
+            printf '%s\n' \
+              '$(info $(MAKE_HOST))' \
+              '.PHONY: noop' \
+              'noop: ;' |
+              "$make_path" --no-print-directory -f - noop |
+              "$sed_path" -n '1p'
           )"
           case "$make_host" in
             *-cygwin) ;;
             *) echo "Expected Cygwin GNU Make, found '$make_host'" >&2; exit 1 ;;
           esac
 
-          profile="$(mktemp -d)"
-          trap 'rm -rf -- "$profile"' EXIT
+          go_version="$("$sed_path" -n 's/^go //p' go.mod)"
+          go_version="${go_version%$'\r'}"
+          [[ "$go_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           bash_env="$profile/cygwin bash env.sh"
           printf '%s\n' 'exit 97' > "$bash_env"
+          env_file="$profile/cygwin env.sh"
+          printf '%s\n' 'exit 96' > "$env_file"
           export BASH_ENV="$bash_env"
+          export ENV="$env_file"
           export GIT_EXEC_PATH="$profile/missing git exec path"
 
-          make --no-print-directory help >/dev/null
-          cat > "$profile/smoke.mk" <<'MAKE_EOF'
+          make_authority=(
+            "SHELL=$sh_path"
+            "CI_GIT=$git_path"
+            "CI_SED=$sed_path"
+            "GO_VERSION=$go_version"
+          )
+          "$make_path" "${make_authority[@]}" --no-print-directory help >/dev/null
+          "$cat_path" > "$profile/smoke.mk" <<'MAKE_EOF'
           include Makefile
           .RECIPEPREFIX := >
           .PHONY: windows-make-shell-smoke
@@ -762,17 +1680,41 @@ jobs:
           >@test -n "$$BASH_VERSION"
           >@test "$$(command -v sed)" = /usr/bin/sed
           >@test "$$(command -v env)" = /usr/bin/env
-          >@test -f "$$BASH_ENV"
+          >@test -z "$${BASH_ENV+x}"
+          >@test -z "$${ENV+x}"
           >@test -n "$$GIT_EXEC_PATH"
           >@case "$$PATH" in *';'*) exit 1;; esac
           >@env printf '%s\n' 'Cygwin Make shell smoke passed'
           MAKE_EOF
-          make --no-print-directory -f "$profile/smoke.mk" windows-make-shell-smoke
+          "$make_path" "${make_authority[@]}" --no-print-directory \
+            -f "$profile/smoke.mk" windows-make-shell-smoke
+          printf '%s\n' cygwin >"$("$cygpath_path" -u "$RUNNER_TEMP")/windows-make-shell-cygwin.ok"
           '@
           $script = $script.Replace("`r`n", "`n")
           & $bash --noprofile --norc -c $script
           if ($LASTEXITCODE -ne 0) {
             throw 'Cygwin Make shell smoke failed'
+          }
+
+      - name: Require the selected Windows Make lane
+        if: ${{ always() }}
+        shell: pwsh
+        env:
+          EXPECTED_HOST: ${{ matrix.host }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:EXPECTED_HOST -notin @('native', 'msys2', 'cygwin')) {
+            throw "Unsupported Windows Make matrix host '$env:EXPECTED_HOST'"
+          }
+          $marker = Join-Path $env:RUNNER_TEMP (
+            "windows-make-shell-$env:EXPECTED_HOST.ok"
+          )
+          if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) {
+            throw "The $env:EXPECTED_HOST semantic lane did not execute successfully"
+          }
+          $observed = (Get-Content -LiteralPath $marker -Raw).Trim()
+          if ($observed -ne $env:EXPECTED_HOST) {
+            throw "The $env:EXPECTED_HOST marker contained '$observed'"
           }
 
   ci-gate:

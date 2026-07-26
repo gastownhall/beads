@@ -1,6 +1,6 @@
 # CI Cleanup Plan
 
-Last reviewed: 2026-05-29
+Last reviewed: 2026-07-26
 
 Freshness source: `engdocs/CI_TEST_SURFACE_AUDIT.md`, `.github/workflows/*.yml`,
 `.buildflags`, `.golangci.yml`, package test manifests, and maintainer decision
@@ -10,10 +10,16 @@ This document records the agreed target shape for CI cleanup. It is the policy
 and roadmap layer; the current inventory remains in
 [`CI_TEST_SURFACE_AUDIT.md`](CI_TEST_SURFACE_AUDIT.md).
 
+Scoped update (2026-07-26): the goals, tier wording, and `pr-lint` sections were
+reviewed for the current lint-contract candidate. Measurements, non-lint tiers,
+release policy, and the remaining roadmap retain their 2026-05-29 review
+authority.
+
 ## Goals
 
 - Make every important CI tier reproducible through a repository-owned command.
-- Keep PR checks fast, required, and Linux-only unless risk justifies more.
+- Keep broad PR checks Linux-first while retaining narrow real-host required
+  lanes where a host contract cannot be established from Linux.
 - Run expensive platform and integration coverage on `main`, manual dispatch, or
   scheduled background jobs after measuring wall-clock cost.
 - Make release/package checks rerun release-critical validation before
@@ -23,7 +29,9 @@ and roadmap layer; the current inventory remains in
 ## Non-Goals
 
 - Do not make `.test-skip` part of CI. It is a local human optimization file.
-- Do not run macOS or Windows checks on PRs by default.
+- Do not add broad macOS or Windows suites to PRs by default. Narrow required
+  platform-boundary checks remain appropriate when the contract cannot be
+  exercised from Linux alone.
 - Do not make Codecov/upload success block PRs or `main`.
 - Do not broaden `pull_request_target` usage for package validation.
 
@@ -33,26 +41,36 @@ and roadmap layer; the current inventory remains in
 |---|---|---:|---|---|
 | `pr-core` | Every PR and merge queue run | Yes | Linux | Fast baseline Go validation for the shipped default path. |
 | `pr-policy` | Every PR and merge queue run | Yes | Linux | Repository policy checks that should fail before expensive tests matter. |
-| `pr-lint` | Every PR and merge queue run | Yes | Linux | Required `gofmt` and `golangci-lint` gate. |
+| `pr-lint` | Every PR and merge queue run | Yes | Linux amd64 CGO, Darwin arm64 CGO, native Windows amd64 CGO/non-CGO; MSYS2/Cygwin smokes | Required `gofmt`, authority-bound native lint, Windows/non-CGO coverage, public routing, and host/bundle falsifiers. |
 | `pr-risk-*` | PRs matching risky paths or maintainer labels | Yes when applicable | Linux | Descriptive risk checks such as embedded, regression, Nix, packages, and release paths. |
 | `main-*` | Every push to `main` | Yes for branch health | Linux plus selected macOS/Windows | Detect after-merge issues from direct pushes and platform-specific behavior. |
 | `measure-*` | Manual dispatch | No | Per suite | Collect wall-clock and sharding data before promoting suites. |
 | `nightly-*` | Scheduled/manual | No, but failures require triage | Linux unless measured otherwise | Expensive background coverage not ready for every `main` push. |
 | `release-*` | Tags/manual release | Yes before publish | Per artifact | Re-run release-critical checks and publish only after package gates pass. |
 
-`merge_group` means GitHub Merge Queue. Treat it like a PR event: run Linux
-`pr-core`, `pr-policy`, `pr-lint`, and the same risk checks; do not add macOS or
-Windows there.
+`merge_group` means GitHub Merge Queue. Treat it like a PR event: run the Linux
+`pr-core`, `pr-policy`, and `pr-lint` jobs, including the narrow full macOS and
+native Windows lint-host boundaries, and the same risk checks. This does not
+add the broad macOS or Windows test fanout to merge-queue runs.
 
 ## Required PR Checks
 
 Every PR, including docs-only PRs, should run the required Linux baseline:
-`pr-core`, `pr-policy`, and `pr-lint`.
+`pr-core`, `pr-policy`, and `pr-lint`. The latter includes required real
+Darwin/arm64 and native Windows/amd64 host boundaries; MSYS2 and Cygwin remain
+narrow bootstrap smokes.
+
+“Required” in this plan is a repository workflow-policy designation. It does not
+assert current GitHub merge enforcement. As of 2026-07-26, active ruleset
+`15646382` has no required-status-check rule; server-side rollout of the
+aggregate checks remains pending.
 
 ## Wrapper Conventions
 
-Shell scripts under `scripts/ci/` are the source of truth. Make targets should
-be aliases for discoverability, not a second implementation of command policy.
+Shell scripts under `scripts/ci/` own implementation. The public
+`make ci-pr-lint` target is nevertheless part of lint contract v2: it captures
+caller state and exact Make/Bash/Git authority before entering private scripts.
+Direct script or hook invocation is not an equivalent alias.
 
 Wrapper rules:
 
@@ -117,15 +135,18 @@ macOS short, and Windows smoke. Main can tolerate more jobs than PRs, but should
 still avoid rebuilding the same Linux candidate binary in each consumer.
 
 Initial implementation on branch `ci/bd-am3.1-wrapper-commands` adds the
-`Build Artifacts` CI job. It runs `make ci-pr-policy`, `make ci-pr-lint`, builds
+`Build Artifacts` CI job. It runs `make ci-pr-policy`, enters the bound lint
+contract through absolute
+`/usr/bin/make -f Makefile CI_BASH=/usr/bin/bash ci-pr-lint`,
+and builds
 `bd-linux-gms-pure`, writes `SHA256SUMS` and `build-manifest.txt`, then uploads
 the run-scoped `ci-build-artifacts` artifact. The first consumers are
 `PR Core (wrapper timing)`, `Test (ubuntu-latest)`, and
 `Test (storage domain + uow)`, all of which verify `SHA256SUMS`; the Linux test
 consumers pass the binary through `BEADS_TEST_BD_BINARY` for subprocess tests.
-The legacy cross-platform `Test` matrix and Windows smoke job are gated to
-push-to-main only, so PR and merge queue events do not run macOS, Windows, or
-coverage collection.
+The legacy cross-platform `Test` matrix and broad Windows smoke job are gated
+to push-to-main only. PR and merge queue events retain only narrow required
+platform-boundary coverage, not the broad macOS, Windows, or coverage suites.
 
 ### `pr-core`
 
@@ -159,11 +180,91 @@ Additional rules:
 
 ### `pr-lint`
 
-`pr-lint` is required. It should stay separate from policy so lint failures are
-easy to identify and rerun. It includes:
+`pr-lint` is required. It stays separate from policy so lint failures are easy
+to identify and rerun. Local `make ci-pr-lint` and the required workflow host
+driver converge on one bound internal target containing:
 
-- `make fmt-check`.
-- `golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...`.
+- a strict eleven-case black-box regression for target routing, one-query
+  snapshot, target-state change between snapshot and lint, explicit frozen
+  normal-pass values, both linter-pass failures, Make failure propagation, and
+  nonzero execution,
+  plus four fail-closed authority cases for config, workspace, vendor, and
+  public-target substitution, plus a nonzero-gofmt end-to-end refusal;
+- `make fmt-check`;
+- one lint with the validated tuple frozen by a single
+  `go env GOOS GOARCH CGO_ENABLED` call; and
+- unless that tuple is already Windows/non-CGO, one lint with
+  `GOOS=windows`, the frozen `GOARCH`, and `CGO_ENABLED=0`.
+
+Every maintained workflow caller uses `-f Makefile` with an absolute public
+Make target. PR/main `Build Artifacts` provide Linux/amd64/CGO=1 through
+`/usr/bin/make` and
+`/usr/bin/bash`; PR/main `PR Lint (wrapper timing)` provide
+Darwin/arm64/CGO=1 on `macos-15` through stock `/usr/bin/make` 3.81 and
+`/bin/bash`, with a 30-minute job bound; manual measurements retain a Linux
+timing caller. Hosted values
+may be absent or exact-equal to the protected tuple, while wrong GOOS, GOARCH,
+or CGO values fail. Protected callers strip ambient `MAKE`, `MAKEFLAGS`,
+`MFLAGS`, `GNUMAKEFLAGS`, and `MAKEFILES`; the host requires GNU Make's
+unmodified `default` `MAKE` origin and refuses command-line Make/control
+substitution. The fixed workflow argv never supplies `MAKEFILES`; its
+missing-path falsifier verifies the post-parse origin/value check but is not
+containment for a malicious command-line makefile, because Make loads
+`MAKEFILES` before any recipe can run.
+The public boundary also requires `MAKEFILE_LIST` to be exactly `Makefile`.
+Local callers carry one validated tuple through both Make boundaries. Each
+lint explicitly names
+`.golangci.yml`, disables Go workspace discovery, and uses readonly module mode.
+The workflow-required native-Windows row runs the full public route with exact
+Go 1.26.5, GNU Make 4.4.1 under the sole command name
+`mingw32-make.exe`, with no `make.exe` alias, and MinGW 16.1.0 (`gcc` and `g++` both target
+`x86_64-w64-mingw32`), and private golangci-lint 2.10.1 for
+Windows/amd64/CGO=1 and CGO=0. One bootstrap Git derives the bundle root;
+resolved Git and all POSIX leaves must remain in that root. Mixed-PATH,
+wrong-bundle, and wrong-target falsifiers fail closed. MSYS2 and Cygwin rows
+are shell/bootstrap smokes. Static per-row markers make a skipped or unknown
+Windows matrix route fail. The matrix has a 45-minute outer bound for cold
+tool installation plus the full native route.
+
+Private linter cleanup is authority-bearing: only a canonical, non-symlinked
+`RUNNER_TEMP` direct child matching
+`beads-pr-lint-tools.<8 alphanumerics>` can receive deletion authority. The
+same canonical path, directory type, and allowed shape are revalidated
+immediately before deletion; this does not claim portable file identity.
+The contract relies on the trusted private runner temp having one owner and no
+concurrent same-type replacement writer during cleanup. Malformed, nested,
+outside, symlink-replaced, or unexpected paths are retained and fail.
+Production cleanup enters that canonical directory, permits exactly one
+verified regular linter leaf, unlinks only that leaf, and applies
+bound nonrecursive `rmdir` to the now-empty exact directory. Any unexpected
+entry is retained; production never uses recursive deletion. Handled ordinary
+failure and INT, TERM, or HUP run the same cleanup handler; SIGKILL, caller
+loss, and power loss instead depend on runner teardown. A partial installation
+is deliberately retained because no verified linter leaf exists.
+The workflow-required macOS caller black-boxes three hosted-target conflicts, a symlinked cleanup
+root, malformed, outside, nested, replaced, and unexpected-entry private tool
+paths, plus forged command-line `MAKE`, `MAKEFLAGS`, and `MAKEFILES`: exactly
+fifteen refusal cases including an alternate Make invocation leaf, a nonzero
+target-enumerator producer, and partial installation. It separately proves
+cleanup after ordinary failure and INT/TERM/HUP and proves ambient Go build
+state cannot enter private install.
+
+Version authority is deliberately field-specific: Go matches the exact
+three-component `go.mod` directive and golangci-lint is exactly 2.10.1. The
+native Windows lane claims GNU Make 4.4.1 because it installs that exact
+version. Linux binds one GNU Make executable without claiming a mutable package
+version, then exercises every GNU Make capability the full lint gate consumes.
+macOS binds stock GNU Make 3.81 using a stdin makefile probe and no modern
+`.SHELLFLAGS` assumption. Its Apple build may omit `MAKE_HOST`; that fallback
+is restricted to the exact `/usr/bin/make` invocation leaf with exact
+first-line version `GNU Make 3.81` after the outer Darwin host has already been
+proved. The canonical target must be executable; the remaining free-form build
+banner is deliberately not authority. MSYS2 and Cygwin make only their narrower
+shell/bootstrap claims.
+
+The authoritative protected surface and affected-caller list live in
+[`LINTING.md`](LINTING.md); required-check review must include the workflow
+aggregate helper and timing helper as well as the visible wrapper scripts.
 
 Known false positives must be handled in `.golangci.yml` or with targeted
 `//nolint` comments. CI should not use a tolerated failing lint baseline.
@@ -303,6 +404,9 @@ not make final tiering or sharding decisions from one run.
 | `pr-policy` | 91s | 65s | `build bd for docs checks` at 53s |
 | `pr-core` | 593s | 577s | `go test -race -short -skip '^TestEmbedded' ./...` |
 | `pr-lint` | 211s | 143s, plus 54s tool install | `golangci-lint` at 143s |
+
+These historical measurements predate the frozen-target two-pass lint contract.
+Use a fresh measurement before treating them as current capacity evidence.
 
 Same-run job-level observations:
 

@@ -10,6 +10,14 @@ This is an audit snapshot, not the final CI policy. Use it to reason from first
 principles about what the repository can validate, what CI currently validates,
 and what should be cleaned up next.
 
+Scoped update (2026-07-26): only the lint-contract rows and related CI-topology
+descriptions were reviewed against the current lint candidate's `Makefile`,
+`scripts/ci/pr-lint-host.sh`, `scripts/ci/pr-lint.sh`,
+`scripts/ci/pr-lint-routing-test.sh`, `.github/workflows/pr.yml`,
+`.github/workflows/main.yml`, `.github/workflows/ci-measurements.yml`,
+`engdocs/LINTING.md`, and `engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md`. Inventory
+counts and all other findings remain the 2026-05-26 snapshot identified above.
+
 Accepted cleanup decisions and implementation order are tracked in
 [`CI_CLEANUP_PLAN.md`](CI_CLEANUP_PLAN.md).
 
@@ -65,6 +73,7 @@ exists only as an opt-in maintainer path.
 | `make bench` | `go test -bench=. ./internal/storage/dolt/` | Full Dolt benchmark suite. |
 | `make bench-quick` | Shorter benchmark run | Local performance iteration. |
 | `make fmt-check` | `gofmt -l .` | Formatting gate. |
+| `make ci-pr-lint` | Public v2 host contract, eleven routing cases, `fmt-check`, native-target lint, Windows/non-CGO lint | Candidate authoritative local/workflow-policy lint gate. |
 | `make check-docs` | Build no-CGO binary, then `scripts/check-doc-flags.sh` | CLI-doc flag freshness. |
 
 ### Go Test Runner
@@ -154,9 +163,10 @@ These are valuable but are not one unified release gate in CI today.
 The former monolithic `ci.yml` has been split by tier/domain:
 
 - `pr.yml`: pull request and merge queue baseline. It owns the Linux build
-  artifact stage, PR policy/core/lint wrappers, compatibility policy/lint jobs,
-  package gates that consume the Linux artifact, storage domain/uow tests, and
-  the aggregate check `PR / CI Gate / Required`.
+  artifact stage, Darwin/arm64 and native-Windows full lint-host routes,
+  MSYS2/Cygwin smokes, PR policy/core wrappers, compatibility jobs, package
+  gates that consume the Linux artifact, storage domain/uow tests, and the
+  aggregate check `PR / CI Gate / Required`.
 - `pr-risk.yml`: pull request and merge queue risk jobs. It owns embedded Dolt
   risk detection, embedded build/storage/cmd shards, the Nix flake smoke, and
   the aggregate check `PR Risk / CI Gate / Required`.
@@ -166,18 +176,23 @@ The former monolithic `ci.yml` has been split by tier/domain:
 
 Key jobs preserved by display name:
 
-- `Build Artifacts`: runs `make ci-pr-policy`, `make ci-pr-lint`, builds
+- `Build Artifacts`: runs `make ci-pr-policy`, enters lint v2 through absolute
+  `/usr/bin/make -f Makefile CI_BASH=/usr/bin/bash ci-pr-lint`, builds
   `bd-linux-gms-pure`, and uploads checksummed run-scoped artifacts.
 - `Check build-tag policy`: runs `scripts/check-build-tags.sh` and
   `scripts/check-go-install-guidance.sh`.
 - `Check cmd/bd pure-Go tests compile (CGO_ENABLED=0)`: CGO-disabled cmd/bd
   build, test-binary compile, and a focused pure-Go test subset.
-- `Check version consistency`, `Check no duplicate migration versions`,
-  `Check doc flags freshness`, and PR-only `Check for .beads changes`.
-- `PR Policy (wrapper timing)`, `PR Core (wrapper timing)`, and
-  `PR Lint (wrapper timing)`.
-- `Package Gate (MCP)`, `Package Gate (npm)`, and `Package Gate (website)`.
-- `Test (storage domain + uow)`.
+- `Check version consistency`, `Check migration hygiene`,
+  `Check doc flags freshness`, `Check doc freshness (<platform>)`,
+  `PR preflight process (<platform>)`, and PR-only
+  `Check for .beads changes`.
+- `PR Policy (wrapper timing)`, `PR Core (wrapper timing)`, and Darwin/arm64
+  `PR Lint (wrapper timing)` on `macos-15`.
+- `Package Gate (MCP)` and `Package Gate (npm)`.
+- `Worktree remove boundary (Windows)`, `Test (storage domain + uow)`,
+  `Contract corpus (golden + determinism + conformance)`, and
+  `Windows Make shell (<host>)`.
 - `Build (Embedded Dolt)`, `Test (Embedded Dolt Storage)`, and
   `Test (Embedded Dolt Cmd N/20)`.
 - Aggregate required-check candidates: `PR / CI Gate / Required` and
@@ -262,9 +277,12 @@ paths.
 Impact: package-specific regressions can reach release/publish workflows
 without the package's own tests having run.
 
-### P2: Windows Is Smoke-Only
+### P2: Broad Windows Tests Remain Smoke-Only
 
-Windows CI builds and runs `version` and `help`, but it does not run Go tests.
+Windows CI still limits broad product validation to build/version/help smoke,
+but the workflow-policy lint route now runs the real native Windows/amd64/CGO=1 and
+non-CGO analysis through exact Go, Make, MinGW, Git-bundle, and linter
+authority.
 
 Impact: Windows-specific filesystem, path, shell, and CGO behavior depends on
 limited coverage. This may be the right tradeoff, but it should be an explicit
@@ -278,19 +296,18 @@ captures benchmark artifacts or runs labeled performance checks.
 Impact: performance-sensitive changes rely on human/agent discipline rather
 than a repeatable CI path.
 
-### P2: Existing Docs Have Drift
+### P2: Remaining Historical Docs May Drift
 
 Examples:
 
 - `engdocs/TESTING.md` says the wrapper script is consistent with CI, but PR CI
   uses direct `go test`.
-- `engdocs/LINTING.md` says CI may not fail on known lint issues, while the
-  workflow uses the standard `golangci-lint` action without an explicit
-  non-failing issues exit code.
 - Older staged audit docs contain obsolete test counts.
 
-Impact: stale docs undermine the cleanup effort because they hide the actual
-current contract.
+The earlier lint-baseline and direct-entrypoint drift is resolved by lint
+contract v2 and its expanded freshness source set. Remaining historical counts
+still need ordinary inventory review rather than being treated as gate
+authority.
 
 ## Roadmap
 

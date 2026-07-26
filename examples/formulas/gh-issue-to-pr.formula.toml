@@ -30,7 +30,8 @@
 #   - Git configured with remotes for upstream and (if fork) push target
 #   - `bd` (beads) installed with molecule/wisp support
 #   - `council` installed (or rubber-duck agent available as fallback)
-#   - `make`, `golangci-lint` available for quality gates
+#   - `make`, Bash, and golangci-lint 2.10.1 available for repository quality
+#     gates
 #   - `make test` may take 3-5 minutes on a full run
 #
 # Pager safety (CRITICAL for non-interactive execution):
@@ -468,11 +469,11 @@ ALL THREE quality gates are MANDATORY — do not skip any without explicit justi
    ```
    make test
    ```
-2. Run the linter:
+2. Run the authoritative lint gate:
    ```
-   golangci-lint run ./...
+   make ci-pr-lint
    ```
-   (Ignore baseline warnings documented in engdocs/LINTING.md — focus on NEW issues)
+   All findings fail; there is no tolerated baseline.
 3. Build the project:
    ```
    make build
@@ -504,7 +505,7 @@ CGO_ENABLED=1 go test -tags gms_pure_go ./cmd/bd/...
 ```
 
 If you need to abort after this step, clean up the worktree first (see worktree-setup)."""
-acceptance = "make test passes (or failures documented as pre-existing/flaky), golangci-lint clean (no new warnings), make build succeeds"
+acceptance = "make test passes (or failures documented as pre-existing/flaky), make ci-pr-lint passes, make build succeeds"
 
 [[steps]]
 id = "council-review"
@@ -632,7 +633,7 @@ WORKING DIRECTORY: This step runs in the worktree.
 
    ## Testing
    - All tests pass (make test)
-   - Linter clean (golangci-lint)
+   - Authoritative lint gate passes (make ci-pr-lint)
    - Build succeeds (make build)
    <If any flaky/pre-existing failures were noted, document them here>
 

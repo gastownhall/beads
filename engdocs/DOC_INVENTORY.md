@@ -1,6 +1,7 @@
 # Documentation Disposition Inventory
 
-Reviewed: 2026-07-07 (paths updated 2026-07-10 for the Mintlify port: user docs now live in the docs/ site tree; this ledger and other internal docs live in engdocs/)
+Reviewed: 2026-07-26 (Mintlify paths remain current; lint-contract authority
+and CI topology entries were re-reviewed against their complete source set.)
 
 CI cleanup entry added: 2026-05-28
 
@@ -34,7 +35,7 @@ freshness source.
 | `reference/json-schema.md` | `Last reviewed:` marker tied to `cmd/bd/output.go`, `cmd/bd/errors.go`, and protocol tests. (Mintlify port: was `JSON_SCHEMA.md`.) |
 | `recovery/init-safety.md` | `Last reviewed:` marker tied to `cmd/bd/init*.go` safety code and tests. (Mintlify port: was `RECOVERY.md`.) |
 | `ERROR_HANDLING.md` | `Last reviewed:` marker tied to current command error exits and JSON error helpers. |
-| `LINTING.md` | `Last reviewed:` marker tied to `.golangci.yml` and current lint output. |
+| `LINTING.md` | `Last reviewed:` marker tied to the v2 Make/host/routing scripts, protected config/module inputs, PR aggregate and host workflows, affected caller workflows, contributor/agent guidance, formula guidance, and freshness checker/tests. |
 | `CI_CLEANUP_PLAN.md` | `Last reviewed:` marker tied to CI audit, workflow files, package manifests, and maintainer decision review. |
 | `design/otel/otel-data-model.md` | `Last reviewed:` marker tied to telemetry, Dolt storage, hooks, and AI call sites. |
 
@@ -89,7 +90,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `INTERNALS.md` | Keep | Internal architecture/runtime deep dive. |
 | `JSON_SCHEMA.md` | Keep with freshness | JSON contract; marker tied to schema constant and tests. |
 | `LABELS.md` | Keep | User-facing label philosophy plus examples; generated CLI handles command reference. |
-| `LINTING.md` | Revise with freshness | Stale fixed-count wording removed; marker tied to current lint output. |
+| `LINTING.md` | Keep with freshness | Authoritative v2 public entrypoint, real-host matrix, target/bundle/cleanup contract, and exact protected/review corpus are tied to the complete freshness source set. |
 | `messaging.md` | Keep | Design doc for messaging issue types. |
 | `METADATA.md` | Keep | Behaviour doc for metadata field semantics. |
 | `MOLECULES.md` | Keep | User-facing workflow concept doc. |

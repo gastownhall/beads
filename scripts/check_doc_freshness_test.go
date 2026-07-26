@@ -22,7 +22,39 @@ var freshnessDocuments = []struct {
 	{"docs/reference/json-schema.md", []string{"cmd/bd/output.go", "cmd/bd/errors.go", "cmd/bd/protocol/json_contract_test.go"}},
 	{"docs/recovery/init-safety.md", []string{"cmd/bd/init.go", "cmd/bd/init_safety.go", "cmd/bd/init_safety_test.go"}},
 	{"engdocs/ERROR_HANDLING.md", []string{"cmd/bd/*.go", "cmd/bd/errors.go"}},
-	{"engdocs/LINTING.md", []string{".golangci.yml"}},
+	{"engdocs/LINTING.md", []string{
+		".golangci.yml",
+		".buildflags",
+		"go.mod",
+		"go.sum",
+		"Makefile",
+		"scripts/ci/pr-lint-host.sh",
+		"scripts/ci/pr-lint.sh",
+		"scripts/ci/pr-lint-routing-test.sh",
+		"scripts/pr_lint_ci_contract_test.go",
+		"scripts/ci/lib/timing.sh",
+		".github/scripts/ci-gate.sh",
+		".github/workflows/pr.yml",
+		".github/workflows/main.yml",
+		".github/workflows/ci-measurements.yml",
+		"CONTRIBUTING.md",
+		"AGENTS.md",
+		"AGENT_INSTRUCTIONS.md",
+		".github/copilot-instructions.md",
+		"scripts/README.md",
+		"engdocs/CI_CLEANUP_PLAN.md",
+		"engdocs/CI_TEST_SURFACE_AUDIT.md",
+		"engdocs/CI_REQUIRED_CHECK_TOPOLOGY.md",
+		"engdocs/TESTING.md",
+		"engdocs/DOC_INVENTORY.md",
+		"examples/formulas/gh-pr-review.formula.toml",
+		"examples/formulas/gh-issue-to-pr.formula.toml",
+		".pre-commit-config.yaml",
+		".githooks/pre-commit",
+		"cmd/bd/preflight.go",
+		"scripts/check-doc-freshness.sh",
+		"scripts/check_doc_freshness_test.go",
+	}},
 	{"engdocs/design/otel/otel-data-model.md", []string{"internal/telemetry/", "internal/storage/dolt/store.go", "internal/compact/haiku.go", "cmd/bd/find_duplicates.go", "internal/hooks/"}},
 }
 
@@ -454,6 +486,11 @@ func createFreshnessSource(t *testing.T, root, source string) {
 
 	source = strings.ReplaceAll(source, "*", "fixture")
 	source = strings.ReplaceAll(source, "?", "x")
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(source))); err == nil {
+		return
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("inspect existing source %s: %v", source, err)
+	}
 	writeFixtureFile(t, root, source, "")
 }
 
