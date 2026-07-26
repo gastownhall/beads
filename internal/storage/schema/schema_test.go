@@ -2036,7 +2036,7 @@ func TestRunMigrationsLargeRigNoticeOnlyOnMainSource(t *testing.T) {
 	}
 }
 
-func TestIgnoredMigration0015AddsWispsDeferUntilIndexThroughDoltCLI(t *testing.T) {
+func TestIgnoredMigration0017AddsWispsDeferUntilIndexThroughDoltCLI(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
 	dir := filepath.Join(t.TempDir(), "wisps-defer-until-index")
@@ -2046,9 +2046,9 @@ func TestIgnoredMigration0015AddsWispsDeferUntilIndexThroughDoltCLI(t *testing.T
 	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
 	runDoltSQL(t, dir, AllMigrationsSQL())
 
-	migrationSQL, err := ignoredSource.files.ReadFile("migrations/ignored/0015_add_wisps_defer_until_index.up.sql")
+	migrationSQL, err := ignoredSource.files.ReadFile("migrations/ignored/0017_add_wisps_defer_until_index.up.sql")
 	if err != nil {
-		t.Fatalf("read ignored 0015 up migration: %v", err)
+		t.Fatalf("read ignored 0017 up migration: %v", err)
 	}
 	const indexCountQuery = `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps' AND INDEX_NAME = 'idx_wisps_defer_until'`
 
@@ -2060,7 +2060,7 @@ func TestIgnoredMigration0015AddsWispsDeferUntilIndexThroughDoltCLI(t *testing.T
 	requireDoltCount(t, dir, indexCountQuery, "1")
 }
 
-func TestIgnoredMigration0015NoopsWithoutWispsTableThroughDoltCLI(t *testing.T) {
+func TestIgnoredMigration0017NoopsWithoutWispsTableThroughDoltCLI(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
 	dir := filepath.Join(t.TempDir(), "wisps-defer-until-index-no-wisps")
@@ -2078,9 +2078,9 @@ DROP TABLE IF EXISTS wisp_labels;
 DROP TABLE IF EXISTS wisps;
 `)
 
-	migrationSQL, err := ignoredSource.files.ReadFile("migrations/ignored/0015_add_wisps_defer_until_index.up.sql")
+	migrationSQL, err := ignoredSource.files.ReadFile("migrations/ignored/0017_add_wisps_defer_until_index.up.sql")
 	if err != nil {
-		t.Fatalf("read ignored 0015 up migration: %v", err)
+		t.Fatalf("read ignored 0017 up migration: %v", err)
 	}
 	runDoltSQL(t, dir, string(migrationSQL))
 	requireDoltCount(t, dir,
