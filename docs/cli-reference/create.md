@@ -24,7 +24,7 @@ bd create [title] [flags]
       --body-file string        Read description from file (use - for stdin)
       --context string          Additional context for the issue
       --defer string            Defer until date (issue hidden from bd ready until then). Same formats as --due
-      --deps strings            Dependencies as 'type:id' or bare 'id'. Bare 'id', 'depends-on:id', and 'blocked-by:id' all make THIS issue depend on id; 'blocks:id' reverses direction (id depends on this issue). E.g. 'blocked-by:bd-20,discovered-from:bd-15'
+      --deps strings            Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')
   -d, --description string      Issue description
       --design string           Design notes
       --design-file string      Read design from file (use - for stdin)
