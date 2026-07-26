@@ -2,6 +2,7 @@ package externaldeps
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"slices"
 	"sort"
@@ -28,6 +29,18 @@ type uowProvider struct {
 }
 
 var _ uow.UnitOfWorkProvider = (*uowProvider)(nil)
+var _ uow.MaintenanceProvider = (*uowProvider)(nil)
+
+// RunNonTx preserves the optional maintenance capability exposed by the
+// proxied provider. Wrapping the provider must not make unrelated commands
+// such as compact lose access to their pinned connection.
+func (p *uowProvider) RunNonTx(ctx context.Context, fn func(context.Context, *sql.Conn) error) error {
+	provider, ok := p.UnitOfWorkProvider.(uow.MaintenanceProvider)
+	if !ok {
+		return fmt.Errorf("external dependency UOW wrapper: maintenance operations unsupported")
+	}
+	return provider.RunNonTx(ctx, fn)
+}
 
 func (p *uowProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {
 	inner, err := p.UnitOfWorkProvider.NewUOW(ctx)
