@@ -106,7 +106,11 @@ func TestInitCancel_E2E(t *testing.T) {
 		}
 	case err := <-waitCh:
 		t.Fatalf("bd init exited before prompt: %v\nOutput: %s", err, getOutput())
-	case <-time.After(5 * time.Second):
+	// This deadline guards against a hung init, not startup speed: before the
+	// wizard prints anything, bd init creates the embedded dolt store, which
+	// under the nightly full-suite -race load takes ~5s on CI runners and grew
+	// past the old 5s limit (4.71s -> 4.92s -> 5.02s across 2026-07-23..25).
+	case <-time.After(60 * time.Second):
 		_ = cmd.Process.Kill()
 		err := <-waitCh
 		t.Fatalf("timeout waiting for prompt (exit=%v)\nOutput: %s", err, getOutput())

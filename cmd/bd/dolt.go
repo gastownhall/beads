@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 	"golang.org/x/term"
 )
@@ -191,14 +192,90 @@ func isConfirmedNoRemote(ctx context.Context, st remoteLister, err error) bool {
 	if !isRemoteNotFoundErr(err) {
 		return false
 	}
+	return hasNoRemoteConfigured(ctx, st)
+}
+
+// hasNoRemoteConfigured is the structural half of isConfirmedNoRemote: the
+// positive proof that this rig really has no remote, independent of how the
+// failure worded itself. It is what actually makes an exit-0 skip safe, so a
+// caller with a different (broader) error classification — `bd sync`, which
+// runs on a timer and must not fail every tick on a solo rig — can reuse the
+// proof without loosening it.
+func hasNoRemoteConfigured(ctx context.Context, st remoteLister) bool {
+	configured, listErr := hasConfiguredRemote(ctx, st)
+	return listErr == nil && !configured
+}
+
+// hasConfiguredRemote decides, from evidence, whether a rig has a Dolt remote
+// at all. It is the one decider for the push/sync no-remote question: both
+// hasNoRemoteConfigured (the `bd sync` / `bd dolt push|pull` exit-0 gate) and
+// adoptGitOriginRemoteForPush go through it. It is NOT yet the only reader of
+// that evidence in cmd/bd — `bd config apply`, ensureDoltRemote, and the
+// doctor/drift diagnostics still judge from len(ListRemotes) alone and have
+// the same cold-start hole; converging them is wy-6k7f7. Do not assume a new
+// remote-related decision is covered by this function: route it here.
+//
+// Two sources of evidence, because dolt_remotes alone is not enough: a
+// server-mode rig whose sql-server has just cold-started can report an EMPTY
+// dolt_remotes while the remote IS persisted on disk in .dolt/repo_state.json
+// (GH#2118), so the on-disk probe gets a veto. The probe has to be reached
+// through the storage decorator chain, since HasPersistedRemote is not part of
+// storage.DoltStorage and the store bd holds is all but always decorated —
+// that is wy-xtv17.
+//
+// A failed listing is neither evidence: it returns the error, and callers must
+// not read it as "no remote". Having two sibling functions decide this from
+// different evidence is what left `bd dolt push` still trusting an empty
+// dolt_remotes after wy-xtv17 hardened the no-remote gate (wy-82hc5), so the
+// rule lives here once.
+func hasConfiguredRemote(ctx context.Context, st remoteLister) (bool, error) {
 	remotes, listErr := st.ListRemotes(ctx)
-	if listErr != nil || len(remotes) > 0 {
-		return false
+	if listErr != nil {
+		return false, listErr
 	}
-	if prober, ok := st.(persistedRemoteProber); ok && prober.HasPersistedRemote() {
-		return false
+	if len(remotes) > 0 {
+		return true, nil
 	}
-	return true
+	if prober, ok := persistedRemoteProberFor(st); ok && prober.HasPersistedRemote() {
+		return true, nil
+	}
+	return false, nil
+}
+
+// persistedRemoteProberFor finds the on-disk remote probe behind any chain of
+// storage decorators.
+//
+// HasPersistedRemote is not part of storage.DoltStorage — only the concrete
+// *dolt.DoltStore implements it — while the store bd actually holds is the
+// composed chain caller → HookFiringStore → InstrumentedStorage → DoltStore
+// (wireStorageDecorators). The hook layer is present on essentially every rig:
+// main.go builds a hook runner whenever there is a dbPath, whether or not any
+// hook scripts exist, so only no-hooks:true / BD_NO_HOOKS=1 leaves it off.
+// Asserting straight on the passed store therefore all but always failed,
+// silently skipping the GH#2118 cold-start probe and letting `bd sync` /
+// `bd dolt push|pull` report "no remote configured" and exit 0 forever on a rig
+// whose remote is persisted in .dolt/repo_state.json (wy-xtv17).
+//
+// It peels via storage.Unwrapper, the same contract storage.UnwrapStore uses,
+// rather than calling UnwrapStore itself: this helper takes the narrow
+// remoteLister, not a storage.DoltStorage. A store that implements the probe
+// directly is honored before any peeling, so test doubles and any future
+// decorator that forwards HasPersistedRemote keep working.
+func persistedRemoteProberFor(st remoteLister) (persistedRemoteProber, bool) {
+	for {
+		if prober, ok := st.(persistedRemoteProber); ok {
+			return prober, true
+		}
+		u, ok := st.(storage.Unwrapper)
+		if !ok {
+			return nil, false
+		}
+		inner := u.Unwrap()
+		if inner == nil {
+			return nil, false
+		}
+		st = inner
+	}
 }
 
 // isDivergedHistoryErr checks whether the error indicates that local and remote
@@ -287,13 +364,20 @@ func printNoRemoteGuidance() {
 	fmt.Println("  • Azure Blob Storage: az://account.blob.core.windows.net/container/path")
 }
 
+// adoptGitOriginRemoteForPush gives a rig with no Dolt remote the one its git
+// origin implies, so `bd dolt push` works out of the box.
+//
+// It asks hasConfiguredRemote rather than reading len(ListRemotes) itself: an
+// empty dolt_remotes is not proof of a remote-less rig during the GH#2118
+// cold-start window, and adopting there re-derives the remote from git.
+// Usually that is the same URL and the AddRemote is a harmless re-add, but
+// when the persisted remote and the git origin disagree — a Dolt remote
+// deliberately pointed elsewhere, or a renamed/redirected origin — the rig
+// starts pushing somewhere else on the strength of a stale listing (wy-82hc5).
 func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage) (bool, error) {
-	remotes, err := st.ListRemotes(ctx)
-	if err != nil {
+	configured, err := hasConfiguredRemote(ctx, st)
+	if err != nil || configured {
 		return false, err
-	}
-	if len(remotes) > 0 {
-		return false, nil
 	}
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
@@ -981,8 +1065,8 @@ servers are preserved.`,
 //   - beads_vr    : version-roundtrip / migration fixtures.
 //   - doctest_    : `bd doctor` self-check fixtures.
 //   - doctortest_ : older `bd doctor` fixture name (kept for back-compat).
-//   - benchdb_    : per-bench scratch DBs (uniqueBenchDBName below,
-//     format `benchdb_<pid>_<8 hex>`).
+//   - benchdb_    : per-bench scratch DBs (cmd/bd/template_test.go
+//     newTemplateBenchmarkStore, format `benchdb_<unixnano>`).
 var staleDatabasePrefixes = []string{
 	"testdb_",
 	"beads_test",
@@ -1004,7 +1088,23 @@ on the shared Dolt server from interrupted test runs and terminated agents.
 Stale database prefixes: testdb_*, beads_test*, beads_pt*, beads_vr*, doctest_*, doctortest_*, benchdb_*
 
 These waste server memory and can degrade performance under concurrent load.
-Use --dry-run to see what would be dropped without actually dropping.`,
+Use --dry-run to see what would be dropped without actually dropping.
+
+DROP DATABASE only marks a database as dropped; Dolt keeps its directory
+under .dolt_dropped_databases/ so it can be restored with
+CALL DOLT_UNDROP(name) until an explicit purge — disk is not reclaimed
+until then. Pass --purge-dropped to run CALL DOLT_PURGE_DROPPED_DATABASES()
+after cleanup.
+
+--purge-dropped is SERVER-GLOBAL and IRREVERSIBLE. Dolt has no way to scope
+the purge to only the databases this run dropped: it permanently deletes
+every dropped-but-not-yet-purged database on the server, including ones
+dropped by something else entirely (e.g. an operator's accidental
+DROP DATABASE on an unrelated database that was still recoverable via
+DOLT_UNDROP). It also purges pre-existing residue from earlier
+clean-databases runs even if this run finds no stale databases to drop.
+Only pass it when nothing else on the server may be relying on DOLT_UNDROP
+recovery.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
@@ -1017,6 +1117,12 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 			return HandleError("'bd dolt clean-databases' is not supported in embedded mode (no Dolt server)")
 		}
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		purgeDropped, _ := cmd.Flags().GetBool("purge-dropped")
+		opts := cleanDatabasesOptions{dryRun: dryRun, purgeDropped: purgeDropped}
+
+		if usesProxiedServer() {
+			return runDoltCleanDatabasesProxied(rootCtx, beadsDir, opts)
+		}
 
 		// Connect directly to the Dolt server via config instead of getStore(),
 		// which isn't initialized for dolt subcommands (beads-9vt).
@@ -1026,101 +1132,38 @@ Use --dry-run to see what would be dropped without actually dropping.`,
 		}
 		defer cleanup()
 
-		listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer listCancel()
-
-		rows, err := db.QueryContext(listCtx, "SHOW DATABASES")
-		if err != nil {
-			return HandleError("listing databases: %v", err)
-		}
-		defer rows.Close()
-
-		var stale []string
-		for rows.Next() {
-			var dbName string
-			if err := rows.Scan(&dbName); err != nil {
-				continue
-			}
-			for _, prefix := range staleDatabasePrefixes {
-				if strings.HasPrefix(dbName, prefix) {
-					stale = append(stale, dbName)
-					break
-				}
-			}
-		}
-
-		if len(stale) == 0 {
-			fmt.Println("No stale databases found.")
-			return nil
-		}
-
-		fmt.Printf("Found %d stale databases:\n", len(stale))
-		for _, name := range stale {
-			fmt.Printf("  %s\n", name)
-		}
-
-		if dryRun {
-			fmt.Println("\n(dry run — no databases dropped)")
-			return nil
-		}
-
-		fmt.Println()
-		dropped := 0
-		failures := 0
-		consecutiveTimeouts := 0
-		const (
-			batchSize         = 5 // Drop this many before pausing
-			batchPause        = 2 * time.Second
-			backoffPause      = 10 * time.Second
-			timeoutThreshold  = 3 // Consecutive timeouts before backoff
-			perDropTimeout    = 30 * time.Second
-			maxConsecFailures = 10 // Stop after this many consecutive failures
-		)
-
-		for i, name := range stale {
-			// Circuit breaker: back off when server is overwhelmed
-			if consecutiveTimeouts >= timeoutThreshold {
-				fmt.Fprintf(os.Stderr, "  ⚠ %d consecutive timeouts — backing off %s\n",
-					consecutiveTimeouts, backoffPause)
-				time.Sleep(backoffPause)
-				consecutiveTimeouts = 0
-			}
-
-			// Stop if too many consecutive failures — server is likely unhealthy
-			if failures >= maxConsecFailures {
-				fmt.Fprintf(os.Stderr, "\n✗ Aborting: %d consecutive failures suggest server is unhealthy.\n", failures)
-				fmt.Fprintf(os.Stderr, "  Dropped %d/%d before stopping.\n", dropped, len(stale))
-				return SilentExit()
-			}
-
-			// Per-operation timeout: DROP DATABASE can be slow on Dolt
-			dropCtx, dropCancel := context.WithTimeout(context.Background(), perDropTimeout)
-			// Escape backticks in database name to prevent SQL injection (` → ``)
-			safeName := strings.ReplaceAll(name, "`", "``")
-			_, err := db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE `%s`", safeName)) //nolint:gosec // G201: identifier-escaped
-			dropCancel()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  FAIL: %s: %v\n", name, err)
-				failures++
-				if isTimeoutError(err) {
-					consecutiveTimeouts++
-				}
-			} else {
-				fmt.Printf("  Dropped: %s\n", name)
-				dropped++
-				failures = 0
-				consecutiveTimeouts = 0
-			}
-
-			// Rate limiting: pause between batches to let the server breathe
-			if (i+1)%batchSize == 0 && i+1 < len(stale) {
-				fmt.Printf("  [%d/%d] pausing %s...\n", i+1, len(stale), batchPause)
-				time.Sleep(batchPause)
-			}
-		}
-		fmt.Printf("\nDropped %d/%d stale databases.\n", dropped, len(stale))
-		return nil
+		return cleanDatabases(rootCtx, db, opts)
 	},
+}
+
+// shouldPurgeDroppedDatabases reports whether clean-databases should invoke
+// the (server-global, irreversible) purge. It gates purely on the
+// --purge-dropped flag and deliberately ignores droppedCount: a prior
+// clean-databases run may have left dropped-but-unpurged residue that this
+// run's SHOW DATABASES scan never sees (the residue is already gone from
+// SHOW DATABASES the moment it was dropped), so --purge-dropped must still
+// fire the purge even when this run drops nothing. Extracted as a pure
+// function so the gating contract itself — not just the SQL-level purge
+// mechanism — has direct unit coverage.
+func shouldPurgeDroppedDatabases(purgeDropped bool, droppedCount int) bool {
+	_ = droppedCount // deliberately unused — see doc comment above
+	return purgeDropped
+}
+
+// purgeDroppedDatabases issues Dolt's DOLT_PURGE_DROPPED_DATABASES() stored
+// procedure, which permanently deletes database directories that DROP
+// DATABASE only moved into .dolt_dropped_databases/. This is server-global:
+// Dolt has no way to scope it to a particular set of databases, so it
+// purges every dropped-but-not-yet-purged database on the server, not just
+// ones this process dropped. Extracted so tests can drive it directly
+// against a live test server without going through the full
+// clean-databases command wiring (config loading, SHOW DATABASES scan,
+// batching/backoff).
+func purgeDroppedDatabases(ctx context.Context, conn versioncontrolops.DBConn) error {
+	purgeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	_, err := conn.ExecContext(purgeCtx, "CALL DOLT_PURGE_DROPPED_DATABASES()")
+	return err
 }
 
 // --- Dolt remote management commands ---
@@ -1409,6 +1452,7 @@ func init() {
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
+	doltCleanDatabasesCmd.Flags().Bool("purge-dropped", false, "After dropping, also run CALL DOLT_PURGE_DROPPED_DATABASES() — server-global and irreversible, see --help")
 	doltRemoteAddCmd.Flags().Bool("allow-git-origin", false, "Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)")
 	doltRemoteCmd.AddCommand(doltRemoteAddCmd)
 	doltRemoteCmd.AddCommand(doltRemoteListCmd)

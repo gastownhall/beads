@@ -74,15 +74,18 @@ func (s *EmbeddedDoltStore) UpdateIssue(ctx context.Context, id string, updates 
 	})
 }
 
-// UpdateIssueChecked applies the update like UpdateIssue, adding an optional
-// optimistic-concurrency precondition: when opts.ExpectedVersion is non-nil the
-// update proceeds only if the issue's current RowVersion (row_lock) still equals
-// *opts.ExpectedVersion, else it refuses with storage.ErrVersionMismatch. The
-// version read and the update share ONE transaction, so a mismatch returns
-// before any write and the transaction rolls back with the issue unchanged (a
-// true compare-and-swap). nil disables the check, leaving behavior identical to
-// UpdateIssue. Delegates SQL work to issueops; EmbeddedDolt auto-commits the
-// transaction.
+// UpdateIssueChecked applies the update like UpdateIssue, adding optional
+// atomic preconditions: when opts.ExpectedVersion is non-nil the update
+// proceeds only if the issue's current RowVersion (row_lock) still equals
+// *opts.ExpectedVersion, else it refuses with storage.ErrVersionMismatch; when
+// opts.ExpectedAssignee/ExpectedStatus are non-nil the update proceeds only if
+// the issue's current assignee/status match, else it refuses with
+// storage.ErrAssigneeMismatch/ErrStatusMismatch (bd-wsqvw field guards; a
+// pointer to "" means "expected unassigned"). The precondition reads and the
+// update share ONE transaction, so a mismatch returns before any write and the
+// transaction rolls back with the issue unchanged (a true compare-and-swap).
+// nil disables a check, leaving behavior identical to UpdateIssue. Delegates
+// SQL work to issueops; EmbeddedDolt auto-commits the transaction.
 func (s *EmbeddedDoltStore) UpdateIssueChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts storage.UpdateIssueOptions) error {
 	// Validate metadata against schema before routing.
 	if rawMeta, ok := updates["metadata"]; ok {
@@ -100,6 +103,9 @@ func (s *EmbeddedDoltStore) UpdateIssueChecked(ctx context.Context, id string, u
 			if err := issueops.CheckVersionInTx(ctx, tx, id, *opts.ExpectedVersion); err != nil {
 				return err
 			}
+		}
+		if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
+			return err
 		}
 		_, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
 		return err
@@ -120,12 +126,12 @@ func (s *EmbeddedDoltStore) HeartbeatIssue(ctx context.Context, id, actor string
 
 // ReclaimExpiredLeases reverts in_progress issues whose lease expired more than
 // olderThan ago back to ready, recovering work stranded by dead workers.
-func (s *EmbeddedDoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error) {
+func (s *EmbeddedDoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {
 	cutoff := time.Now().UTC().Add(-olderThan)
 	var reclaimed []types.ReclaimedLease
 	err := s.withConn(ctx, true, func(tx *sql.Tx) error {
 		var err error
-		reclaimed, err = issueops.ReclaimExpiredLeasesInTx(ctx, tx, cutoff, actor)
+		reclaimed, err = issueops.ReclaimExpiredLeasesInTx(ctx, tx, cutoff, filter, actor)
 		return err
 	})
 	return reclaimed, err

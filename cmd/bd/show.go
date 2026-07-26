@@ -221,6 +221,12 @@ var showCmd = &cobra.Command{
 						result.Close()
 						return HandleErrorRespectJSON("iter comments %s: %v", issue.ID, err)
 					}
+				} else if cmtCount > 0 {
+					// ga-clgh: comment_count alone announces content exists without
+					// saying the representation is partial. Flag it explicitly so a
+					// caller reading only `.comments` doesn't read absence as "none".
+					omitted := true
+					details.CommentsOmitted = &omitted
 				}
 
 				// Compute parent from dependencies.

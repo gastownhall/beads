@@ -183,6 +183,14 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 	if filter.NoLabels {
 		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT DISTINCT issue_id FROM %s)", tables.Labels))
 	}
+	if filter.LabelPattern != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label LIKE ? ESCAPE '|')", tables.Labels))
+		args = append(args, globToLikePattern(filter.LabelPattern))
+	}
+	if filter.LabelRegex != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label REGEXP ?)", tables.Labels))
+		args = append(args, filter.LabelRegex)
+	}
 
 	if filter.Pinned != nil {
 		if *filter.Pinned {
@@ -308,6 +316,29 @@ func AppendMetadataClauses(where []string, args []any, hasKey string, fields map
 		}
 	}
 	return where, args, nil
+}
+
+// globToLikePattern converts a shell-style glob (* and ?) to a SQL LIKE
+// pattern. Literal % and _ in the input — and the '|' escape char itself —
+// are escaped so they don't act as LIKE wildcards. The resulting SQL must
+// use ESCAPE '|'.
+func globToLikePattern(pattern string) string {
+	var b strings.Builder
+	b.Grow(len(pattern))
+	for _, c := range pattern {
+		switch c {
+		case '%', '_', '|':
+			b.WriteByte('|')
+			b.WriteRune(c)
+		case '*':
+			b.WriteByte('%')
+		case '?':
+			b.WriteByte('_')
+		default:
+			b.WriteRune(c)
+		}
+	}
+	return b.String()
 }
 
 // LooksLikeIssueID returns true if the query string looks like a beads issue ID.

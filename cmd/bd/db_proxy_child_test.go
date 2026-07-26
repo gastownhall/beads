@@ -1,6 +1,8 @@
 package main
 
 import (
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -34,10 +36,18 @@ func TestNewDatabaseServer_BackendExternal(t *testing.T) {
 	})
 
 	t.Run("unix socket config builds an ExternalDoltServer", func(t *testing.T) {
+		// ExternalDoltConfig.Validate() requires an absolute Socket via filepath.IsAbs,
+		// which is platform-dependent: /var/run/dolt.sock is NOT absolute on Windows
+		// (no volume). Use a platform-absolute socket path so the same construction
+		// path is exercised everywhere.
+		socket := "/var/run/dolt.sock"
+		if runtime.GOOS == "windows" {
+			socket = filepath.Join(t.TempDir(), "dolt.sock")
+		}
 		srv, err := newDatabaseServer(
 			proxy.BackendExternal,
 			"", "", "", "", "",
-			configfile.ExternalDoltConfig{Socket: "/var/run/dolt.sock"},
+			configfile.ExternalDoltConfig{Socket: socket},
 		)
 		require.NoError(t, err)
 		require.NotNil(t, srv)

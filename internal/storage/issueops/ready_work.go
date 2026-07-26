@@ -75,8 +75,8 @@ func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFil
 	args = append(args, orderBy.Args...)
 
 	var limitSQL string
-	if filter.Limit > 0 {
-		limitSQL = fmt.Sprintf("LIMIT %d", filter.Limit)
+	if eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows); eff > 0 {
+		limitSQL = fmt.Sprintf("LIMIT %d", eff)
 	}
 
 	return &readyWorkPredicates{
@@ -134,6 +134,12 @@ func GetReadyWorkInTx(
 	}
 	if len(wisps) > 0 {
 		ordered = mergeReadyWisps(ordered, wisps, filter)
+	}
+
+	// Apply the defensive cap on the row count returned to the caller.
+	// LIMIT cap+1 was issued above so a count of cap+1 indicates overage.
+	if err := EnforceMaxRowsCap(len(ordered), filter.MaxRows, filter.MaxRowsSource); err != nil {
+		return nil, err
 	}
 
 	return ordered, nil
@@ -304,6 +310,15 @@ func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 		Pinned:         &pinnedFalse,
 		MetadataFields: filter.MetadataFields,
 		HasMetadataKey: filter.HasMetadataKey,
+		// be-x42v.4 follow-up (review SHOULD-FIX 8): without this,
+		// getReadyWispsInTx's unbounded (Limit<=0) branch called
+		// searchTableInTxT with MaxRows=0, so EffectiveSearchLimit emitted
+		// no SQL LIMIT at all — the entire wisps table matching the
+		// predicate was scanned and hydrated before GetReadyWorkInTx's
+		// post-merge EnforceMaxRowsCap ever ran. Propagating the cap here
+		// lets EffectiveSearchLimit bound that query to cap+1 up front.
+		MaxRows:       filter.MaxRows,
+		MaxRowsSource: filter.MaxRowsSource,
 	}
 	if filter.Status != "" {
 		s := filter.Status

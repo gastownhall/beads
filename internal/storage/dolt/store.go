@@ -39,6 +39,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -55,6 +56,24 @@ const DefaultSQLPort = 3307
 // testDatabasePrefixes are name prefixes that indicate a test database.
 // Used by isTestDatabaseName to prevent test databases from being created
 // on the production Dolt server (Clown Shows #12-#18).
+//
+// Origin of each prefix:
+//   - testdb_     : applyConfigDefaults derives this for BEADS_TEST_MODE=1
+//     without an explicit Database (FNV hash of cfg.Path).
+//   - beads_test  : convention for hand-written integration tests.
+//   - beads_pt    : property-test fixtures.
+//   - beads_vr    : version-roundtrip / migration fixtures.
+//   - doctest_    : `bd doctor` self-check fixtures.
+//   - doctortest_ : older `bd doctor` fixture name (kept for back-compat).
+//   - benchdb_    : per-bench scratch DBs (cmd/bd/template_test.go
+//     newTemplateBenchmarkStore, format `benchdb_<unixnano>`). Added by
+//     AD-01 (be-c5p).
+//
+// This list is the firewall side of the test/prod split. Two sibling lists
+// must converge with it (be-avn): cmd/bd/dolt.go:staleDatabasePrefixes (used
+// by `bd dolt clean-databases`) and the formula-side `gc dolt cleanup`
+// stale-prefix list. Any prefix added here must be mirrored to those lists,
+// or stale fixtures will leak past clean-up.
 var testDatabasePrefixes = []string{
 	"testdb_",
 	"beads_test",
@@ -62,6 +81,7 @@ var testDatabasePrefixes = []string{
 	"beads_vr",
 	"doctest_",
 	"doctortest_",
+	"benchdb_",
 }
 
 // isTestDatabaseName returns true if the database name matches known test patterns.
@@ -73,6 +93,84 @@ func isTestDatabaseName(name string) bool {
 		}
 	}
 	return false
+}
+
+// productionPortReasons returns human-readable labels for each rule that
+// flags cfg.ServerPort as a production port. An empty slice means the port
+// is not detected as production.
+//
+// Detection sources, in order:
+//  1. cfg.ServerPort == DefaultSQLPort (legacy default 3307). Unconditional —
+//     never suppressed by BEADS_TEST_SERVER=1. The well-known Dolt default
+//     port is the single highest-confidence production signal, and a
+//     dedicated test server opting out of the other heuristics still must
+//     not bind to it.
+//  2. BEADS_PRODUCTION_PORT env var, parsed to int, matches cfg.ServerPort.
+//  3. cfg.BeadsDir/dolt-server.port file present and contains cfg.ServerPort.
+//
+// Rules 2 and 3 are suppressed when BEADS_TEST_SERVER=1: they are
+// heuristics (an env var or an on-disk port file, either of which can be
+// stale or misconfigured) rather than the fixed default port, so an
+// operator's explicit opt-in into a dedicated test-server lane is honored
+// for those two only.
+//
+// Rule 3 deliberately does not fall back to filepath.Dir(cfg.Path) when
+// BeadsDir is empty — the port-resolution chain in applyConfigDefaults
+// already does that fallback for resolution purposes, but using it here
+// would treat any cfg.Path under a directory that happens to contain a
+// stray dolt-server.port file (e.g. /tmp/dolt-server.port from a leaked
+// dev server) as production. Test fixtures commonly set cfg.Path under
+// /tmp without a real BeadsDir; only an explicitly set BeadsDir is
+// considered authoritative for the production check.
+//
+// All rules read deterministic state (constant, env, on-disk port file).
+// No state is mutated. Multiple rules can match; the panic message lists all.
+func productionPortReasons(cfg *Config) []string {
+	if cfg == nil || cfg.ServerPort <= 0 {
+		return nil
+	}
+	var reasons []string
+	if cfg.ServerPort == DefaultSQLPort {
+		reasons = append(reasons, fmt.Sprintf("port %d == DefaultSQLPort", cfg.ServerPort))
+	}
+	// Rules 2 and 3 are the suppressible heuristics: honor the operator's
+	// BEADS_TEST_SERVER=1 opt-in for a dedicated test server by skipping
+	// them. Rule 1 above is intentionally evaluated before this check and
+	// is never suppressed.
+	if os.Getenv("BEADS_TEST_SERVER") == "1" {
+		return reasons
+	}
+	if env := os.Getenv("BEADS_PRODUCTION_PORT"); env != "" {
+		if p, err := strconv.Atoi(env); err == nil && p > 0 && p == cfg.ServerPort {
+			reasons = append(reasons, fmt.Sprintf("BEADS_PRODUCTION_PORT=%d matches", p))
+		}
+	}
+	if cfg.BeadsDir != "" {
+		if p := doltserver.ReadPortFile(cfg.BeadsDir); p > 0 && p == cfg.ServerPort {
+			reasons = append(reasons, fmt.Sprintf("%s/%s contains %d", cfg.BeadsDir, doltserver.PortFileName, p))
+		}
+	}
+	return reasons
+}
+
+// isProductionPort reports whether cfg.ServerPort matches any production-port
+// indicator. Pure at call time — port resolution itself happens earlier in
+// applyConfigDefaults; this helper only inspects already-resolved state.
+//
+// BEADS_TEST_SERVER=1 narrows detection to Rule 1 only (port ==
+// DefaultSQLPort): the operator has explicitly opted into the dedicated
+// test-server lane (e.g. a per-test container, an external test port), which
+// suppresses the BEADS_PRODUCTION_PORT and dolt-server.port heuristics
+// (Rules 2 and 3, see productionPortReasons). Rule 1 stays unconditional —
+// a test server must never bind to the well-known default port 3307,
+// opt-in or not. The database-name firewall in New is a separate AD-01
+// defense with its own independent BEADS_TEST_SERVER=1 opt-out; it is not
+// affected by this function.
+//
+// See productionPortReasons for the three detection sources and the
+// suppression rule.
+func isProductionPort(cfg *Config) bool {
+	return len(productionPortReasons(cfg)) > 0
 }
 
 // autoStartRefs tracks in-process reference counts for auto-started dolt
@@ -147,6 +245,7 @@ func shouldStopAutoStartedServerOnClose(cfg *Config) bool {
 var _ storage.DoltStorage = (*DoltStore)(nil)
 var _ storage.RawDBAccessor = (*DoltStore)(nil)
 var _ storage.StoreLocator = (*DoltStore)(nil)
+var _ storage.ActiveDatabaseSizer = (*DoltStore)(nil)
 var _ storage.LifecycleManager = (*DoltStore)(nil)
 var _ storage.PendingCommitter = (*DoltStore)(nil)
 var _ storage.GarbageCollector = (*DoltStore)(nil)
@@ -166,6 +265,11 @@ type DoltStore struct {
 	mu            sync.RWMutex // Protects concurrent access
 	readOnly      bool         // True if opened in read-only mode
 	credentialKey []byte       // Random encryption key for federation credentials
+
+	// localActiveDatabaseDir is the exact active database directory when this
+	// store instance has authoritative local filesystem access. It is resolved
+	// once at construction; empty means sizing is unsupported for this instance.
+	localActiveDatabaseDir string
 
 	customStatusDetailedCache []types.CustomStatus
 	customStatusCache         []string
@@ -571,15 +675,17 @@ var doltTracer = otel.Tracer("github.com/steveyegge/beads/storage/dolt")
 // Instruments are registered against the global delegating provider at init time,
 // so they automatically forward to the real provider once telemetry.Init() runs.
 var doltMetrics struct {
-	retryCount          metric.Int64Counter
-	lockWaitMs          metric.Float64Histogram
-	circuitTrips        metric.Int64Counter
-	circuitRejected     metric.Int64Counter
-	serializationErrors metric.Int64Counter
-	writeRetries        metric.Int64Counter
-	connAcquireMs       metric.Float64Histogram
-	poolWaitCount       metric.Int64Counter
-	poolWaitMs          metric.Float64Histogram
+	retryCount           metric.Int64Counter
+	lockWaitMs           metric.Float64Histogram
+	circuitTrips         metric.Int64Counter
+	circuitRejected      metric.Int64Counter
+	serializationErrors  metric.Int64Counter
+	writeRetries         metric.Int64Counter
+	connAcquireMs        metric.Float64Histogram
+	poolWaitCount        metric.Int64Counter
+	poolWaitMs           metric.Float64Histogram
+	claimVerifyLost      metric.Int64Counter
+	claimVerifyRecovered metric.Int64Counter
 }
 
 func init() {
@@ -619,6 +725,14 @@ func init() {
 	doltMetrics.poolWaitMs, _ = m.Float64Histogram("bd.db.pool_wait_ms",
 		metric.WithDescription("Total time connections spent waiting due to pool exhaustion"),
 		metric.WithUnit("ms"),
+	)
+	doltMetrics.claimVerifyLost, _ = m.Int64Counter("bd.claim_verify_lost_total",
+		metric.WithDescription("Claim-family writes that reported success but failed verify-by-re-read (label: op=claim|unclaim)"),
+		metric.WithUnit("{write}"),
+	)
+	doltMetrics.claimVerifyRecovered, _ = m.Int64Counter("bd.claim_verify_recovered_total",
+		metric.WithDescription("Indeterminate claim-family commits resolved by re-read (label: op, outcome=applied|replayed)"),
+		metric.WithUnit("{write}"),
 	)
 }
 
@@ -716,6 +830,62 @@ func (s *DoltStore) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) e
 	defer s.mu.RUnlock()
 	return s.withRetry(ctx, func() error {
 		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin read tx: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+		return fn(tx)
+	})
+}
+
+// withReadTxLongTimeout is like withReadTx but runs fn against a dedicated
+// one-shot connection with a 5-minute read timeout (see openLongTimeoutConn)
+// instead of the shared pool's 10s ReadTimeout (see buildServerDSN). Use for
+// read queries that are known to legitimately run long, e.g. dolt_history_*
+// system-table scans on issues with many revisions — the pooled 10s client
+// timeout otherwise surfaces as an intermittent MySQL i/o timeout / invalid
+// connection error (ga-ahnxx) well before the query would have finished on
+// its own. Note this only removes the client-side ceiling: the Dolt server's
+// own read_timeout_millis (often configured short to bound orphaned-connection
+// pileup — see the comment next to it) still applies server-side and can
+// independently abort a query whose
+// per-row production stalls past that window.
+func (s *DoltStore) withReadTxLongTimeout(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	if s.closed.Load() {
+		return ErrStoreClosed
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.withRetry(ctx, func() error {
+		db, err := s.openLongTimeoutConn()
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		// The fresh one-shot connection defaults to the default branch, not
+		// whatever branch the store's pooled session (s.db) is actually
+		// checked out to. The pool is branch-isolated (MaxOpenConns(1)
+		// semantics — see the comment on MaxOpenConns above), so ask it for
+		// its real active branch and reproduce that checkout here before
+		// starting the read tx; otherwise a query like dolt_history_* would
+		// silently read the wrong branch after any in-process checkout,
+		// including a test-harness CALL DOLT_CHECKOUT run directly against
+		// s.db, which bypasses Store.Checkout and leaves s.branch stale.
+		var branch string
+		if scanErr := s.db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); scanErr == nil {
+			if branch != "" {
+				if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
+					return fmt.Errorf("checkout active branch %q on long-timeout connection: %w", branch, err)
+				}
+			}
+		} else if s.branch != "" {
+			// Fall back to the store's recorded branch rather than failing
+			// the whole call outright.
+			if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", s.branch); err != nil {
+				return fmt.Errorf("checkout fallback branch %q on long-timeout connection: %w", s.branch, err)
+			}
+		}
+		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("begin read tx: %w", err)
 		}
@@ -1032,8 +1202,11 @@ func applyConfigDefaults(cfg *Config) {
 	//
 	// Test mode guard: force port 1 (immediate fail) if we'd hit production
 	// or have no port, to prevent test databases leaking onto production.
+	// Production-port detection is generalized via isProductionPort so cities
+	// using non-3307 ports (BEADS_PRODUCTION_PORT or dolt-server.port) are
+	// covered too.
 	if os.Getenv("BEADS_TEST_MODE") == "1" {
-		if cfg.ServerPort == 0 || cfg.ServerPort == DefaultSQLPort {
+		if cfg.ServerPort == 0 || isProductionPort(cfg) {
 			cfg.ServerPort = 1
 		}
 	}
@@ -1064,17 +1237,151 @@ func New(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	applyConfigDefaults(cfg)
 
 	// Hard guard: tests must NEVER connect to the production Dolt server.
-	// If BEADS_TEST_MODE=1 and we're about to hit the default prod port,
-	// something upstream forgot to set BEADS_DOLT_SERVER_PORT. Panic immediately
-	// so the test fails loudly instead of silently polluting prod.
-	if os.Getenv("BEADS_TEST_MODE") == "1" && cfg.ServerPort == DefaultSQLPort {
-		panic(fmt.Sprintf(
-			"BEADS_TEST_MODE=1 but connecting to prod port %d — set BEADS_DOLT_SERVER_PORT or use test helpers (database=%q, path=%q)",
-			DefaultSQLPort, cfg.Database, cfg.Path,
-		))
+	// applyConfigDefaults rewrites a production port to 1 in BEADS_TEST_MODE=1
+	// for fail-loud-but-continue behavior; this panic is defense-in-depth for
+	// any path that bypasses or post-edits the rewrite. Generalized via
+	// isProductionPort so non-3307 production deployments are covered.
+	if os.Getenv("BEADS_TEST_MODE") == "1" && isProductionPort(cfg) {
+		panic(buildTestModeProductionPortPanic(cfg))
+	}
+
+	// Database-name firewall: refuse to open a test-named database on any
+	// server unless the operator opted in via BEADS_TEST_SERVER=1. This is
+	// the second of two AD-01 defenses (the first is the production-port
+	// guard above). Returning an error (not panic) lets tests assert on it.
+	if isTestDatabaseName(cfg.Database) && os.Getenv("BEADS_TEST_SERVER") != "1" {
+		addr := net.JoinHostPort(cfg.ServerHost, strconv.Itoa(cfg.ServerPort))
+		if cfg.ServerSocket != "" {
+			addr = cfg.ServerSocket
+		}
+		return nil, fmt.Errorf(
+			"refusing to connect test database %q to server %s: "+
+				"set BEADS_TEST_SERVER=1 on a dedicated test server, "+
+				"or use test helpers in internal/storage/dolt/testserver",
+			cfg.Database, addr)
 	}
 
 	return newServerMode(ctx, cfg)
+}
+
+// resolveLocalActiveDatabaseDir returns an authoritative local path only for
+// server configurations whose storage ownership is known. It deliberately
+// does not infer locality from Path, CLIDir, or filesystem existence: external
+// servers may leave unrelated client-local directories at those locations.
+func resolveLocalActiveDatabaseDir(cfg *Config) string {
+	if cfg == nil || cfg.BeadsDir == "" || cfg.Database == "" ||
+		cfg.Gateway || cfg.ProxiedServer || cfg.ServerSocket != "" ||
+		cfg.ServerTLS || !isLocalHost(cfg.ServerHost) {
+		return ""
+	}
+
+	// An endpoint supplied directly by the environment may be any server,
+	// including a container or tunnel on localhost. It is not proof that this
+	// process can inspect the server's data directory.
+	if os.Getenv("BEADS_DOLT_SERVER_PORT") != "" || os.Getenv("BEADS_DOLT_PORT") != "" {
+		return ""
+	}
+
+	if doltserver.IsSharedServerMode() {
+		return filepath.Join(doltserver.ResolveDoltDir(cfg.BeadsDir), cfg.Database)
+	}
+
+	// Owned mode plus effective auto-start authority is the affirmative proof
+	// that the configured data root belongs to this local beads instance.
+	if !cfg.AutoStart || doltserver.ResolveServerMode(cfg.BeadsDir) != doltserver.ServerModeOwned {
+		return ""
+	}
+	return filepath.Join(cfg.Path, cfg.Database)
+}
+
+// buildTestModeProductionPortPanic returns the multi-line panic message for
+// the BEADS_TEST_MODE=1 + production-port hard-guard. Format follows
+// AD-01 Wireframe 1: scannable header + database/path/server fields,
+// list of detection rules that matched, and a fix block naming each
+// supported escape hatch.
+func buildTestModeProductionPortPanic(cfg *Config) string {
+	addr := net.JoinHostPort(cfg.ServerHost, strconv.Itoa(cfg.ServerPort))
+	if cfg.ServerSocket != "" {
+		addr = cfg.ServerSocket
+	}
+	reasons := productionPortReasons(cfg)
+	if len(reasons) == 0 {
+		// Should be unreachable (caller checks isProductionPort first), but
+		// keep the message coherent if it ever hits.
+		reasons = []string{"production-port heuristic matched"}
+	}
+	var rules strings.Builder
+	for _, r := range reasons {
+		rules.WriteString("    - ")
+		rules.WriteString(r)
+		rules.WriteString("\n")
+	}
+	var fixLines strings.Builder
+	fixLines.WriteString("    - point BEADS_DOLT_SERVER_PORT at a non-production port (test server)\n")
+	fixLines.WriteString("    - or use test helpers in internal/storage/dolt/testserver\n")
+	// BEADS_TEST_SERVER=1 does not suppress Rule 1 (port == DefaultSQLPort,
+	// see productionPortReasons) — only list it as a fix when the port
+	// itself isn't the reason this fired, so the message never claims an
+	// opt-in that would not actually resolve this panic.
+	if cfg.ServerPort != DefaultSQLPort {
+		fixLines.WriteString("    - or set BEADS_TEST_SERVER=1 on the spawned test server's env\n")
+	}
+	return fmt.Sprintf(
+		"refusing to connect: BEADS_TEST_MODE=1 but resolved server port is production\n\n"+
+			"  database: %s\n"+
+			"  path:     %s\n"+
+			"  server:   %s\n"+
+			"  detected as production via:\n"+
+			"%s"+
+			"  fix:\n"+
+			"%s",
+		cfg.Database,
+		cfg.Path,
+		addr,
+		rules.String(),
+		fixLines.String(),
+	)
+}
+
+// dialProbe reports whether an address accepts a connection within timeout.
+// Declared as a var (not a plain call) so unit tests can stub connectivity
+// without a live Dolt server. Returns nil when the endpoint is reachable.
+var dialProbe = func(network, addr string, timeout time.Duration) error {
+	conn, err := net.DialTimeout(network, addr, timeout)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
+
+// resolveSocketTransport applies a socket-first / TCP-fallback policy and
+// returns the effective unix socket path to use ("" means use TCP).
+//
+// A configured unix socket is a preference, not a hard requirement. Dolt's
+// /tmp/mysql.sock is created only on some server start paths and is frequently
+// absent while the server is fully reachable on its TCP port — when that
+// happens, every socket-mode bd operation (and `gt mq submit`, cross-rig bead
+// reads that route through bd) fails hard with no fallback (gt-28itz). This
+// mirrors the conservative socket-first/TCP-fallback semantics already used on
+// the gt-CLI side (internal/cmd/dolt_dsn.go localDoltSocketPath/buildDoltDSN).
+//
+// Returns the socket unchanged when: no socket is configured, the socket is
+// connectable, or neither the socket nor TCP is reachable (the latter is left
+// to the normal error path so its socket-specific hint still surfaces a true
+// outage rather than masking it behind a TCP error).
+func resolveSocketTransport(socket, host string, port int, timeout time.Duration) string {
+	if socket == "" {
+		return ""
+	}
+	if dialProbe("unix", socket, timeout) == nil {
+		return socket // socket is live — keep using it
+	}
+	if port > 0 && dialProbe("tcp", net.JoinHostPort(host, strconv.Itoa(port)), timeout) == nil {
+		debug.Logf("dolt: socket %s unreachable, falling back to TCP %s\n", socket, net.JoinHostPort(host, strconv.Itoa(port)))
+		return "" // socket down but TCP up — transparently fall back to TCP
+	}
+	return socket // both down (or no TCP port) — keep socket for the error path
 }
 
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
@@ -1100,6 +1407,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		resolvedBeadsDir = filepath.Dir(cfg.Path) // fallback: cfg.Path is .beads/dolt → parent is .beads/
 	}
 	serverDir := doltserver.ResolveServerDir(resolvedBeadsDir)
+
+	// Socket-first / TCP-fallback (gt-28itz): a configured unix socket that
+	// isn't currently connectable must not block operations when the server is
+	// reachable over TCP. Normalizing here means the fail-fast dial below and
+	// the DSN built in openServerConnection agree on the transport.
+	cfg.ServerSocket = resolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, 500*time.Millisecond)
 
 	// Fail-fast connectivity check before MySQL protocol initialization.
 	// This gives an immediate, clear error if the Dolt server isn't running,
@@ -1220,21 +1533,22 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 
 	store := &DoltStore{
-		db:                   db,
-		dbPath:               cfg.Path,
-		beadsDir:             beadsDir,
-		database:             cfg.Database,
-		connStr:              connStr,
-		breaker:              breaker,
-		committerName:        cfg.CommitterName,
-		committerEmail:       cfg.CommitterEmail,
-		remote:               cfg.Remote,
-		branch:               "main",
-		remoteUser:           cfg.RemoteUser,
-		remotePassword:       cfg.RemotePassword,
-		serverMode:           true,
-		readOnly:             cfg.ReadOnly,
-		autoStartedServerDir: autoStartedDir,
+		db:                     db,
+		dbPath:                 cfg.Path,
+		beadsDir:               beadsDir,
+		database:               cfg.Database,
+		localActiveDatabaseDir: resolveLocalActiveDatabaseDir(cfg),
+		connStr:                connStr,
+		breaker:                breaker,
+		committerName:          cfg.CommitterName,
+		committerEmail:         cfg.CommitterEmail,
+		remote:                 cfg.Remote,
+		branch:                 "main",
+		remoteUser:             cfg.RemoteUser,
+		remotePassword:         cfg.RemotePassword,
+		serverMode:             true,
+		readOnly:               cfg.ReadOnly,
+		autoStartedServerDir:   autoStartedDir,
 	}
 
 	// Forward-drift guard runs on read-only AND writable opens. A binary older
@@ -1540,7 +1854,9 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 	// FIREWALL: Never create test databases on the production server.
 	// This is the last line of defense against test pollution (Clown Shows #12-#18).
 	// Pattern-based, not env-var-based — env vars can be misconfigured or missing.
-	if isTestDatabaseName(cfg.Database) && cfg.ServerPort == DefaultSQLPort {
+	// Production-port detection generalized via isProductionPort so non-3307
+	// production deployments are covered (AD-01).
+	if isTestDatabaseName(cfg.Database) && isProductionPort(cfg) {
 		return nil, "", fmt.Errorf(
 			"REFUSED: will not CREATE DATABASE %q on production port %d — "+
 				"this is a test database name on the production server (see DOLT-WAR-ROOM.md)",
@@ -1849,6 +2165,23 @@ func (s *DoltStore) CLIDir() string {
 	return filepath.Join(s.dbPath, s.database)
 }
 
+// ActiveDatabaseSize returns the approximate size of the active database.
+// External server instances have no authoritative local path and report the
+// capability as unsupported even if a stale client-local directory exists.
+func (s *DoltStore) ActiveDatabaseSize(ctx context.Context) (int64, error) {
+	if s.localActiveDatabaseDir == "" {
+		return 0, &storage.ErrUnsupported{
+			Op:      "ActiveDatabaseSize",
+			Backend: "dolt-server",
+		}
+	}
+	size, err := storage.MeasureDirectorySize(ctx, s.localActiveDatabaseDir)
+	if err != nil {
+		return 0, fmt.Errorf("measure active database directory %q: %w", s.localActiveDatabaseDir, err)
+	}
+	return size, nil
+}
+
 // DoltGC runs Dolt garbage collection to reclaim disk space.
 // Pins a single connection to avoid session state loss on pooled *sql.DB.
 func (s *DoltStore) DoltGC(ctx context.Context) error {
@@ -2057,6 +2390,16 @@ func (s *DoltStore) commitWorkingSet(ctx context.Context, message string, mode c
 	}
 
 	if len(tables) == 0 {
+		// A merge resolution with a clean working set is NOT a no-op: it is
+		// the `--ours` case, where our values already stood and resolving the
+		// conflict dirtied nothing. Returning here left is_merging true while
+		// the caller reported "Merge committed", and the next pull re-wedged
+		// on the unconcluded merge (wy-36ilm, caught by the F9 integration
+		// test). Only the merge-conclusion mode takes this path: for the
+		// other modes an empty working set really is nothing to commit.
+		if mode == configIncludeAll {
+			return s.concludeOpenMerge(ctx, conn, message)
+		}
 		return nil // Nothing to commit (all changes were config-only or dolt_ignore'd)
 	}
 
@@ -2083,6 +2426,31 @@ func (s *DoltStore) commitWorkingSet(ctx context.Context, message string, mode c
 		return fmt.Errorf("failed to commit: %w", err)
 	}
 
+	return nil
+}
+
+// concludeOpenMerge commits an open merge whose resolution left the working
+// set clean, so the merge is actually concluded rather than left open with
+// nothing to show for it. It is a no-op when no merge is in progress, and it
+// runs on the CALLER'S pinned connection because dolt's merge state is
+// session state. isDoltNothingToCommit still absorbs the race where the merge
+// closed between the status read and the commit.
+func (s *DoltStore) concludeOpenMerge(ctx context.Context, conn *sql.Conn, message string) error {
+	var merging bool
+	if err := conn.QueryRowContext(ctx, "SELECT is_merging FROM dolt_merge_status").Scan(&merging); err != nil {
+		// No merge status to read is no evidence of a merge — keep the old
+		// "nothing to commit" behavior rather than failing a resolution.
+		return nil //nolint:nilerr // diagnosis only; never a gate
+	}
+	if !merging {
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
+		if isDoltNothingToCommit(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to conclude merge: %w", err)
+	}
 	return nil
 }
 

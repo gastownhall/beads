@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
 	"slices"
@@ -87,6 +88,7 @@ var (
 	profileEnabled    bool
 	profileFile       *os.File
 	traceFile         *os.File
+	memProfilePath    string
 	verboseFlag       bool // Enable verbose/debug output
 	quietFlag         bool // Suppress non-essential output
 
@@ -610,6 +612,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&globalFlag, "global", false, "Use the global shared-server database (beads_global)")
 	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit")
 	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
+	rootCmd.PersistentFlags().StringVar(&memProfilePath, "mem-profile", "", "Write heap profile to FILE on exit (also respects BEADS_MEM_PROFILE)")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
 	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
 	rootCmd.PersistentFlags().BoolVar(&ignoreSchemaSkew, "ignore-schema-skew", false, "Proceed despite forward schema drift (some queries may fail)")
@@ -1468,6 +1471,32 @@ var rootCmd = &cobra.Command{
 		if traceFile != nil {
 			trace.Stop()
 			_ = traceFile.Close() // Best effort cleanup
+		}
+
+		// Heap profiling: --mem-profile flag or BEADS_MEM_PROFILE env var.
+		// Runs a GC first by default; BEADS_MEM_PROFILE_NOGC=1 skips it to capture peak.
+		heapDest := memProfilePath
+		if heapDest == "" {
+			heapDest = os.Getenv("BEADS_MEM_PROFILE")
+		}
+		if heapDest != "" {
+			if os.Getenv("BEADS_MEM_PROFILE_NOGC") == "" {
+				runtime.GC()
+			}
+			if f, err := os.Create(heapDest); err == nil { // #nosec G304 -- user-supplied profiling path
+				_ = pprof.WriteHeapProfile(f)
+				_ = f.Close()
+			}
+		}
+		// Optional one-line MemStats summary: BEADS_MEM_STATS=/path/to/stats.txt
+		if statsDest := os.Getenv("BEADS_MEM_STATS"); statsDest != "" {
+			var ms runtime.MemStats
+			runtime.ReadMemStats(&ms)
+			if f, err := os.Create(statsDest); err == nil { // #nosec G304 -- user-supplied profiling path
+				fmt.Fprintf(f, "HeapAlloc=%d HeapSys=%d HeapInuse=%d HeapObjects=%d\n",
+					ms.HeapAlloc, ms.HeapSys, ms.HeapInuse, ms.HeapObjects)
+				_ = f.Close()
+			}
 		}
 
 		// Cancel the signal context to clean up resources

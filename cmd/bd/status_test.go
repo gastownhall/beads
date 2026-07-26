@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,10 +106,10 @@ func TestStatusCommand(t *testing.T) {
 	if stats.InProgressIssues != 1 {
 		t.Errorf("Expected 1 in-progress issue, got %d", stats.InProgressIssues)
 	}
-	if stats.BlockedIssues != 0 {
+	if stats.BlockedIssues != nil && *stats.BlockedIssues != 0 {
 		// Note: BlockedIssues counts issues that are blocked by dependencies
 		// Our test issue with status=blocked doesn't have dependencies, so count is 0
-		t.Logf("BlockedIssues: %d (expected 0, status=blocked without deps)", stats.BlockedIssues)
+		t.Logf("BlockedIssues: %d (expected 0, status=blocked without deps)", *stats.BlockedIssues)
 	}
 	if stats.ClosedIssues != 1 {
 		t.Errorf("Expected 1 closed issue, got %d", stats.ClosedIssues)
@@ -255,5 +256,165 @@ func TestGetAssignedStatistics(t *testing.T) {
 
 	if bobStats.TotalIssues != 1 {
 		t.Errorf("Expected 1 issue for bob, got %d", bobStats.TotalIssues)
+	}
+}
+
+// TestRenderStatus_SkipJSONEmitsNullNotZero verifies that when BlockedIssues/
+// ReadyIssues are nil (the --no-blocked shape), the JSON envelope reports
+// blocked_count_skipped:true and emits literal `null` for both fields rather
+// than a fake 0 that a CI consumer could misread as "nothing blocked / ready".
+func TestRenderStatus_SkipJSONEmitsNullNotZero(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = true
+	defer func() { jsonOutput = oldJSON }()
+
+	stats := &types.Statistics{
+		TotalIssues:   3,
+		OpenIssues:    2,
+		ClosedIssues:  1,
+		BlockedIssues: nil,
+		ReadyIssues:   nil,
+	}
+
+	out := captureStdout(t, func() error {
+		return renderStatus(stats, nil)
+	})
+
+	var decoded struct {
+		BlockedCountSkipped bool `json:"blocked_count_skipped"`
+		Summary             struct {
+			BlockedIssues *int `json:"blocked_issues"`
+			ReadyIssues   *int `json:"ready_issues"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("failed to unmarshal renderStatus JSON output: %v\nraw: %s", err, out)
+	}
+
+	if !decoded.BlockedCountSkipped {
+		t.Errorf("expected blocked_count_skipped: true, got false\nraw: %s", out)
+	}
+	if decoded.Summary.BlockedIssues != nil {
+		t.Errorf("expected summary.blocked_issues: null, got %d\nraw: %s", *decoded.Summary.BlockedIssues, out)
+	}
+	if decoded.Summary.ReadyIssues != nil {
+		t.Errorf("expected summary.ready_issues: null, got %d\nraw: %s", *decoded.Summary.ReadyIssues, out)
+	}
+
+	// Literal "null" must actually be present in the raw bytes -- a stray
+	// custom MarshalJSON or a non-pointer regression would silently coerce
+	// this back to 0 without failing the struct-decode assertions above.
+	if !strings.Contains(out, `"blocked_issues": null`) {
+		t.Errorf("expected literal \"blocked_issues\": null in raw JSON, got:\n%s", out)
+	}
+	if !strings.Contains(out, `"ready_issues": null`) {
+		t.Errorf("expected literal \"ready_issues\": null in raw JSON, got:\n%s", out)
+	}
+}
+
+// TestRenderStatus_SkipHumanRendersSkippedNotZero verifies the human-readable
+// branch renders "(skipped)" for Blocked and Ready to Work when their stats
+// fields are nil, derived from the data (nil pointers) rather than a
+// separately-tracked flag -- so it stays correct even when a caller (like
+// --assigned) recomputes fully-populated stats.
+func TestRenderStatus_SkipHumanRendersSkippedNotZero(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = false
+	defer func() { jsonOutput = oldJSON }()
+
+	stats := &types.Statistics{
+		TotalIssues:   3,
+		OpenIssues:    2,
+		ClosedIssues:  1,
+		BlockedIssues: nil,
+		ReadyIssues:   nil,
+	}
+
+	out := captureStdout(t, func() error {
+		return renderStatus(stats, nil)
+	})
+
+	if n := strings.Count(out, "(skipped)"); n != 2 {
+		t.Errorf("expected \"(skipped)\" to render twice (Blocked + Ready to Work), got %d times:\n%s", n, out)
+	}
+}
+
+// TestRenderStatus_AssignedIgnoresSkipEvenWithNoBlockedFlag guards the
+// data-derived skip-state fix directly: fully-populated stats (as
+// getAssignedStatistics/buildAssignedStats always produce) must never render
+// "(skipped)", regardless of what --no-blocked was passed on the command
+// line -- renderStatus no longer takes a noBlocked flag at all.
+func TestRenderStatus_AssignedIgnoresSkipEvenWithNoBlockedFlag(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = false
+	defer func() { jsonOutput = oldJSON }()
+
+	stats := buildAssignedStats([]*types.Issue{
+		{Status: types.StatusOpen},
+		{Status: types.StatusBlocked},
+	}, 1)
+	if stats.BlockedIssues == nil || stats.ReadyIssues == nil {
+		t.Fatalf("buildAssignedStats should always populate BlockedIssues/ReadyIssues; got %+v", stats)
+	}
+
+	out := captureStdout(t, func() error {
+		return renderStatus(stats, nil)
+	})
+
+	if strings.Contains(out, "(skipped)") {
+		t.Errorf("expected no \"(skipped)\" rendering for fully-populated assigned stats, got:\n%s", out)
+	}
+}
+
+// TestGetStatisticsNoBlocked verifies the --no-blocked fast path leaves
+// BlockedIssues and ReadyIssues nil, while the same store's full GetStatistics
+// call populates both -- guarding the *int fake-zero regression this PR fixes.
+func TestGetStatisticsNoBlocked(t *testing.T) {
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, ".beads", "test.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
+		t.Fatalf("Failed to create .beads directory: %v", err)
+	}
+
+	testStore, err := dolt.New(context.Background(), &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer testStore.Close()
+
+	ctx := context.Background()
+	if err := testStore.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set issue prefix: %v", err)
+	}
+
+	if err := testStore.CreateIssue(ctx, &types.Issue{
+		Title:     "Open issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to create test issue: %v", err)
+	}
+
+	noBlocked, err := testStore.GetStatisticsNoBlocked(ctx)
+	if err != nil {
+		t.Fatalf("GetStatisticsNoBlocked failed: %v", err)
+	}
+	if noBlocked.BlockedIssues != nil {
+		t.Errorf("expected BlockedIssues nil under --no-blocked, got %d", *noBlocked.BlockedIssues)
+	}
+	if noBlocked.ReadyIssues != nil {
+		t.Errorf("expected ReadyIssues nil under --no-blocked, got %d", *noBlocked.ReadyIssues)
+	}
+
+	full, err := testStore.GetStatistics(ctx)
+	if err != nil {
+		t.Fatalf("GetStatistics failed: %v", err)
+	}
+	if full.BlockedIssues == nil {
+		t.Fatal("expected BlockedIssues populated by full GetStatistics, got nil")
+	}
+	if full.ReadyIssues == nil {
+		t.Fatal("expected ReadyIssues populated by full GetStatistics, got nil")
 	}
 }

@@ -961,6 +961,7 @@ func allRecognizedConfigPrefixes() []string {
 var recognizedConfigKeys = map[string]bool{
 	"no-db": true, "json": true, "db": true, "actor": true,
 	"identity": true, "no-push": true, "no-git-ops": true,
+	"node_id":                    true, // replica identity for the lease guard (read from yaml/env, never the DB)
 	"create.require-description": true, "beads.role": true,
 	"auto_compact_enabled": true, "schema_version": true,
 	"output.title-length": true,

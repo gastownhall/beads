@@ -2,6 +2,8 @@ package issueops
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
@@ -35,6 +37,20 @@ var ErrBlockedRecomputeDirtyGraph = errors.New("is_blocked recompute needs a cle
 // working set the recompute will read. Returns a wrapped
 // ErrBlockedRecomputeDirtyGraph naming the dirty tables, or nil when clean.
 func GuardBlockedRecomputeWorkingSet(ctx context.Context, tx DBTX) error {
+	dirty, err := dirtyBlockedRecomputeGraphTables(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("check working set before is_blocked recompute: %w", err)
+	}
+	if len(dirty) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: commit or discard pending changes to %s first",
+		ErrBlockedRecomputeDirtyGraph, strings.Join(dirty, ", "))
+}
+
+// dirtyBlockedRecomputeGraphTables returns the sorted subset of the graph tables
+// that have uncommitted working-set changes right now.
+func dirtyBlockedRecomputeGraphTables(ctx context.Context, tx DBTX) ([]string, error) {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(blockedRecomputeGraphTables)), ",")
 	args := make([]any, len(blockedRecomputeGraphTables))
 	for i, t := range blockedRecomputeGraphTables {
@@ -43,7 +59,7 @@ func GuardBlockedRecomputeWorkingSet(ctx context.Context, tx DBTX) error {
 	rows, err := tx.QueryContext(ctx,
 		"SELECT DISTINCT table_name FROM dolt_status WHERE table_name IN ("+placeholders+")", args...)
 	if err != nil {
-		return fmt.Errorf("check working set before is_blocked recompute: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -51,19 +67,160 @@ func GuardBlockedRecomputeWorkingSet(ctx context.Context, tx DBTX) error {
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return fmt.Errorf("check working set before is_blocked recompute: %w", err)
+			return nil, err
 		}
 		dirty = append(dirty, name)
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("check working set before is_blocked recompute: %w", err)
-	}
-	if len(dirty) == 0 {
-		return nil
+		return nil, err
 	}
 	sort.Strings(dirty)
-	return fmt.Errorf("%w: commit or discard pending changes to %s first",
-		ErrBlockedRecomputeDirtyGraph, strings.Join(dirty, ", "))
+	return dirty, nil
+}
+
+// DirtyGraphFingerprint fingerprints the uncommitted graph state that
+// GuardBlockedRecomputeWorkingSet refuses to recompute over: the dirty table
+// set, plus the identity of every changed row in each dirty table.
+//
+// It exists so a caller that retries the guard can tell a STUCK working set
+// from a BUSY one (wy-wub2s). The guard's error says only "issues is dirty",
+// which is equally true of a fleet committing thousands of rows a minute and of
+// a table left permanently dirty by constraint violations no writer will ever
+// commit. Those need opposite operator responses — wait, versus resolve by hand
+// — and only evidence gathered ACROSS observations can separate them: a busy
+// working set's fingerprint churns, a stuck one's is byte-identical forever.
+//
+// Contract, which the caller's escalation logic depends on:
+//
+//   - "" with a nil error means the graph tables are CLEAN. Never treat that as
+//     a fingerprint value; comparing it across observations would read a
+//     recovered working set as a stuck one.
+//   - a non-empty fingerprint is comparable only against another fingerprint
+//     from this same function, and only for equality. Its encoding is not
+//     stable across versions and must not be persisted as anything but an
+//     opaque token.
+//   - an error means the evidence is UNAVAILABLE (an older engine without the
+//     dolt_diff table function, a revoked read). A caller must then decline to
+//     escalate rather than assume either answer: no evidence is not evidence of
+//     being stuck.
+//
+// The row identities come from dolt_diff('HEAD','WORKING',<table>) rather than
+// a whole-database hash (storage.StateHasher / DOLT_HASHOF_DB). The whole-DB
+// hash is the wrong instrument here precisely on the topology that motivated
+// this: on a shared sql-server every other agent's commits keep it moving, so a
+// permanently-dirty table would look like progress forever.
+func DirtyGraphFingerprint(ctx context.Context, tx DBTX) (string, error) {
+	dirty, err := dirtyBlockedRecomputeGraphTables(ctx, tx)
+	if err != nil {
+		return "", fmt.Errorf("fingerprint dirty graph: %w", err)
+	}
+	if len(dirty) == 0 {
+		return "", nil
+	}
+	parts := make([]string, 0, len(dirty))
+	for _, table := range dirty {
+		sig, err := dirtyGraphTableSignature(ctx, tx, table)
+		if err != nil {
+			return "", fmt.Errorf("fingerprint dirty graph: %s: %w", table, err)
+		}
+		parts = append(parts, table+":"+sig)
+	}
+	return strings.Join(parts, " "), nil
+}
+
+// dirtyGraphTableSignature hashes the identity of every row the working set
+// changes in table, order-independently, so two observations of the same
+// pending edits agree.
+//
+// The commit-metadata columns are excluded: dolt_diff reports the WORKING side
+// with a null to_commit and the HEAD side with whatever commit HEAD is, so
+// including them would make the fingerprint change every time anyone else
+// commits anything — the same false-progress signal the whole-DB hash has.
+func dirtyGraphTableSignature(ctx context.Context, tx DBTX, table string) (string, error) {
+	if !isBlockedRecomputeGraphTable(table) {
+		// Unreachable via dirtyBlockedRecomputeGraphTables (it filters on the
+		// same allowlist), and the check is what makes the literal below safe.
+		return "", fmt.Errorf("refusing to fingerprint unexpected table %q", table)
+	}
+	// dolt_diff requires a literal table argument, so it cannot be a bind
+	// parameter; table is a member of blockedRecomputeGraphTables, asserted
+	// above, never caller- or row-supplied text.
+	//nolint:gosec // table is from a fixed allowlist, checked immediately above.
+	rows, err := tx.QueryContext(ctx, "SELECT * FROM dolt_diff('HEAD', 'WORKING', '"+table+"')")
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return "", err
+	}
+
+	var rowSignatures []string
+	for rows.Next() {
+		values := make([]any, len(columns))
+		dest := make([]any, len(columns))
+		for i := range values {
+			dest[i] = &values[i]
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return "", err
+		}
+		var b strings.Builder
+		for i, column := range columns {
+			if isDiffCommitMetadataColumn(column) {
+				continue
+			}
+			b.WriteString(column)
+			b.WriteByte('=')
+			writeDiffSignatureValue(&b, values[i])
+			b.WriteByte(0)
+		}
+		rowSignatures = append(rowSignatures, b.String())
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	sort.Strings(rowSignatures)
+
+	h := sha256.New()
+	for _, row := range rowSignatures {
+		_, _ = h.Write([]byte(row))
+		_, _ = h.Write([]byte{0xff})
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func isBlockedRecomputeGraphTable(table string) bool {
+	for _, t := range blockedRecomputeGraphTables {
+		if t == table {
+			return true
+		}
+	}
+	return false
+}
+
+func isDiffCommitMetadataColumn(column string) bool {
+	switch strings.ToLower(column) {
+	case "from_commit", "to_commit", "from_commit_date", "to_commit_date":
+		return true
+	default:
+		return false
+	}
+}
+
+func writeDiffSignatureValue(b *strings.Builder, v any) {
+	switch typed := v.(type) {
+	case nil:
+		b.WriteString("<nil>")
+	case []byte:
+		b.Write(typed)
+	case string:
+		b.WriteString(typed)
+	default:
+		fmt.Fprintf(b, "%v", typed)
+	}
 }
 
 // RecomputeAllIsBlockedInTx recomputes the denormalized is_blocked column for

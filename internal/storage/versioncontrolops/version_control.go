@@ -123,8 +123,8 @@ func GetConflicts(ctx context.Context, db DBConn) ([]storage.Conflict, error) {
 		}
 		conflicts = append(conflicts, storage.Conflict{
 			Field: tableName,
+			Count: numConflicts,
 		})
-		_ = numConflicts // available if needed in the future
 	}
 	return conflicts, rows.Err()
 }

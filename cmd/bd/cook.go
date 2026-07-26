@@ -941,18 +941,11 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 
 			if spawnerStepID != "" {
 				if spawnerIssueID, ok := idMapping[spawnerStepID]; ok {
-					// Create WaitsFor dependency with metadata
-					meta := types.WaitsForMeta{
-						Gate: waitsForSpec.Gate,
+					// Spawner identity is the depends_on_id; metadata carries
+					// the gate.
+					if dep, err := types.NewWaitsForDependency(issueID, spawnerIssueID, waitsForSpec.Gate); err == nil {
+						*deps = append(*deps, dep)
 					}
-					metaJSON, _ := json.Marshal(meta)
-
-					*deps = append(*deps, &types.Dependency{
-						IssueID:     issueID,
-						DependsOnID: spawnerIssueID,
-						Type:        types.DepWaitsFor,
-						Metadata:    string(metaJSON),
-					})
 				}
 			}
 		}
