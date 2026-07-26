@@ -1535,25 +1535,17 @@ func showDoltConfig(testConnection bool) error {
 		}
 	}
 
-	// Server-port resolution order — must match doltserver.DefaultConfig
-	// (env > port file > config.yaml/global > metadata.json deprecated). GH#4511.
 	printDoltShowConfigSources(os.Stdout)
 	return nil
 }
 
-// doltShowConfigSourceLines is the operator-facing priority list for server port
-// resolution. Keep in lockstep with internal/doltserver.DefaultConfig (GH#4511).
-var doltShowConfigSourceLines = []string{
-	"Config sources for server port (priority order):",
-	"  1. Environment variables (BEADS_DOLT_SERVER_PORT / BEADS_DOLT_*)",
-	"  2. .beads/dolt-server.port (gitignored, primary local)",
-	"  3. config.yaml / global config (dolt.port)",
-	"  4. metadata.json dolt_server_port (deprecated, git-tracked fallback)",
-}
-
+// printDoltShowConfigSources renders doltserver.PortSourceLabels(), the same
+// slice DefaultConfig resolves against, so this list can't drift from actual
+// resolution behavior (GH#4511).
 func printDoltShowConfigSources(w io.Writer) {
-	for _, line := range doltShowConfigSourceLines {
-		fmt.Fprintln(w, line)
+	fmt.Fprintln(w, "\nConfig sources for server port (priority order):")
+	for i, label := range doltserver.PortSourceLabels() {
+		fmt.Fprintf(w, "  %d. %s\n", i+1, label)
 	}
 }
 
