@@ -924,11 +924,20 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 		}
 	}
 
+	// waitsForCollapsedBlocks records whether we actually skipped emitting a
+	// DepBlocks edge for the waits_for spawner below (i.e. the spawner step ID
+	// really did appear in depends_on/needs and resolve to a known issue). If
+	// so, the DepWaitsFor edge emitted below must carry also_blocks so it
+	// does not silently drop the blocking semantics that edge collapsed away
+	// (GH#3783 review gap).
+	var waitsForCollapsedBlocks bool
+
 	// Process depends_on field
 	for _, depID := range step.DependsOn {
 		if depID == waitsForSpawnerStepID {
 			// This target is also the waits_for spawner; the DepWaitsFor edge
 			// emitted below subsumes the blocking semantics for this pair.
+			waitsForCollapsedBlocks = true
 			continue
 		}
 		depIssueID, ok := idMapping[depID]
@@ -948,6 +957,7 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 		if needID == waitsForSpawnerStepID {
 			// This target is also the waits_for spawner; the DepWaitsFor edge
 			// emitted below subsumes the blocking semantics for this pair.
+			waitsForCollapsedBlocks = true
 			continue
 		}
 		needIssueID, ok := idMapping[needID]
@@ -966,8 +976,17 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 	if waitsForSpec != nil && waitsForSpawnerStepID != "" {
 		if spawnerIssueID, ok := idMapping[waitsForSpawnerStepID]; ok {
 			// Spawner identity is the depends_on_id; metadata carries
-			// the gate.
-			if dep, err := types.NewWaitsForDependency(issueID, spawnerIssueID, waitsForSpec.Gate); err == nil {
+			// the gate. A collapsed needs/depends_on edge additionally marks
+			// also_blocks so the gate blocks while the spawner itself is
+			// open, not only while it has an open child (GH#3783).
+			var dep *types.Dependency
+			var err error
+			if waitsForCollapsedBlocks {
+				dep, err = types.NewWaitsForBlockingDependency(issueID, spawnerIssueID, waitsForSpec.Gate)
+			} else {
+				dep, err = types.NewWaitsForDependency(issueID, spawnerIssueID, waitsForSpec.Gate)
+			}
+			if err == nil {
 				*deps = append(*deps, dep)
 			}
 		}

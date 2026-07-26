@@ -984,6 +984,16 @@ type WaitsForMeta struct {
 	// SpawnerID identifies which step/issue spawns the children to wait for.
 	// If empty, waits for all direct children of the depends_on_id issue.
 	SpawnerID string `json:"spawner_id,omitempty"`
+	// AlsoBlocks marks a waits-for edge that was collapsed from a redundant
+	// depends_on/needs blocks edge onto the same spawner (GH#3783): the
+	// caller skipped emitting a separate DepBlocks edge because it collided
+	// with this DepWaitsFor edge, so this edge must additionally carry
+	// classic blocking semantics — it blocks while the spawner itself is
+	// open, not only while the spawner has an open child. Omitted (and thus
+	// COALESCEd to false by readers) for a plain waits_for with no matching
+	// needs/depends_on entry, which must retain the original fanout-only
+	// semantics.
+	AlsoBlocks bool `json:"also_blocks,omitempty"`
 }
 
 // WaitsForGate constants
@@ -1041,6 +1051,32 @@ func NewGraphEdgeDependency(fromID, toID string, depType DependencyType, gate, s
 // cannot drift.
 func NewWaitsForDependency(issueID, spawnerID, gate string) (*Dependency, error) {
 	return NewGraphEdgeDependency(issueID, spawnerID, DepWaitsFor, gate, "", "", "", nil)
+}
+
+// NewWaitsForBlockingDependency builds a waits-for dependency that also
+// carries classic blocking semantics (GH#3783): set also_blocks in the
+// metadata so waitsForGateBlockedSQL additionally blocks while the spawner
+// itself is open, not only while it has an open parent-child child. Use this
+// instead of NewWaitsForDependency exactly when the caller is collapsing a
+// would-be DepBlocks edge (from needs/depends_on) into this waits-for edge
+// because the two would otherwise collide on the same (source, target) pair
+// — never for a plain waits_for with no matching needs/depends_on entry.
+func NewWaitsForBlockingDependency(issueID, spawnerID, gate string) (*Dependency, error) {
+	dep, err := NewWaitsForDependency(issueID, spawnerID, gate)
+	if err != nil {
+		return nil, err
+	}
+	var meta WaitsForMeta
+	if err := json.Unmarshal([]byte(dep.Metadata), &meta); err != nil {
+		return nil, fmt.Errorf("parsing waits-for metadata to set also_blocks: %w", err)
+	}
+	meta.AlsoBlocks = true
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("serializing waits-for also_blocks metadata: %w", err)
+	}
+	dep.Metadata = string(raw)
+	return dep, nil
 }
 
 // NewGraphNodeDependency builds the dependency record for a graph-plan node's
