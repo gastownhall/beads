@@ -26,12 +26,27 @@ import (
 	"github.com/steveyegge/beads/internal/validation"
 )
 
+// validateCreateArgs runs as cobra's Args validation, which executes before
+// PersistentPreRunE opens the store or runs migrations. It reuses
+// resolveTitle — the same shared validator gatherCreateInput calls for the
+// proxied-server create path — so a whitespace-only title (GH#4771) is
+// rejected identically for both backends, and before any invocation that is
+// guaranteed to fail wastes a store open/migration.
+func validateCreateArgs(cmd *cobra.Command, args []string) error {
+	markdownFile, _ := cmd.Flags().GetString("file")
+	graphFile, _ := cmd.Flags().GetString("graph")
+	titleFlag, _ := cmd.Flags().GetString("title")
+
+	_, err := resolveTitle(args, titleFlag, markdownFile, graphFile)
+	return err
+}
+
 var createCmd = &cobra.Command{
 	Use:           "create [title]",
 	GroupID:       "issues",
 	Aliases:       []string{"new"},
 	Short:         "Create a new issue (or batch from markdown/graph JSON)",
-	Args:          cobra.MinimumNArgs(0),
+	Args:          validateCreateArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -86,29 +101,9 @@ var createCmd = &cobra.Command{
 		}
 
 		titleFlag, _ := cmd.Flags().GetString("title")
-		var title string
-
-		if len(args) > 0 && titleFlag != "" {
-			if args[0] != titleFlag {
-				return HandleError("cannot specify different titles as both positional argument and --title flag\n  Positional: %q\n  --title:    %q", args[0], titleFlag)
-			}
-			title = args[0]
-		} else if len(args) > 0 {
-			if strings.HasPrefix(args[0], "-") {
-				return HandleError("title %q looks like a flag (starts with '-').\n  Run 'bd create --help' for available options.\n  To use this title anyway, pass it explicitly: bd create --title=%q", args[0], args[0])
-			}
-			title = args[0]
-		} else if titleFlag != "" {
-			title = titleFlag
-		} else {
-			return HandleError("title required (or use --file to create from markdown)")
-		}
-
-		// Refuse a whitespace-only title. Such a bead is functionally invisible
-		// in title-based views (board scans, search, title-sorted listings) and
-		// reads as "no title" to any downstream consumer (GH#4771).
-		if strings.TrimSpace(title) == "" {
-			return HandleError("title cannot be empty or whitespace-only")
+		title, err := resolveTitle(args, titleFlag, "", "")
+		if err != nil {
+			return err
 		}
 
 		// Get silent flag

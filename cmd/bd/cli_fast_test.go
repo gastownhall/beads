@@ -1350,6 +1350,49 @@ func TestCLI_CreateRejectsEmptyTitle(t *testing.T) {
 	}
 }
 
+// TestCLI_CreateRejectsEmptyTitle_ProxiedServerMode is a proxied-server
+// regression for GH#4771. Before this fix, the whitespace-only guard lived
+// only in create's local-store RunE branch: gatherCreateInput/
+// runCreateProxiedServer (the path taken when usesProxiedServer() is true)
+// never re-checked, so proxied-mode create still minted a blank-titled bead.
+// The fix moved the check into resolveTitle, invoked from createCmd's Args
+// validator — which runs for every invocation regardless of backend, before
+// RunE ever branches on usesProxiedServer(). Setting proxiedServerMode here
+// exercises that dispatch without needing a real proxied server: Args
+// validation must reject before gatherCreateInput/runCreateProxiedServer (or
+// any store open) ever runs.
+func TestCLI_CreateRejectsEmptyTitle_ProxiedServerMode(t *testing.T) {
+	origProxied := proxiedServerMode
+	t.Cleanup(func() { proxiedServerMode = origProxied })
+	proxiedServerMode = true
+
+	// createCmd is a shared package-level *cobra.Command, so a --title value
+	// set by an earlier in-process test invocation (e.g. TestCLI_CreateRejectsEmptyTitle's
+	// own FlagTab case) survives on the FlagSet across rootCmd.Execute() calls.
+	// Reset it explicitly so this test's outcome doesn't depend on suite
+	// ordering — a pre-existing gap, not something this test should also fall
+	// victim to.
+	titleFlag := createCmd.Flags().Lookup("title")
+	origTitleValue := titleFlag.Value.String()
+	origTitleChanged := titleFlag.Changed
+	t.Cleanup(func() {
+		_ = titleFlag.Value.Set(origTitleValue)
+		titleFlag.Changed = origTitleChanged
+	})
+	_ = titleFlag.Value.Set("")
+	titleFlag.Changed = false
+
+	tmpDir := setupCLITestDB(t)
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "create", "   ", "-p", "2")
+	if err == nil {
+		t.Fatalf("expected error for whitespace-only title in proxied-server mode, got success\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "title cannot be empty") {
+		t.Errorf("expected 'title cannot be empty' error, got: %s", combined)
+	}
+}
+
 // TestCLI_CreateNoHistory tests that the --no-history CLI flag is wired through
 // to the created issue (GH#2619). A storage-layer test already covers the DB
 // semantics; this test verifies the CLI flag is actually parsed and passed.
