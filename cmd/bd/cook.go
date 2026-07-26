@@ -905,27 +905,13 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 func collectDependencies(step *formula.Step, idMapping map[string]string, deps *[]*types.Dependency) {
 	issueID := idMapping[step.ID]
 
-	// Process depends_on field
-	for _, depID := range step.DependsOn {
-		depIssueID, ok := idMapping[depID]
-		if !ok {
-			continue // Will be caught during validation
-		}
-
-		*deps = append(*deps, &types.Dependency{
-			IssueID:     issueID,
-			DependsOnID: depIssueID,
-			Type:        types.DepBlocks,
-		})
-	}
-
-	// Pre-compute the waits_for spawner so we can dedupe against needs below.
-	// When waits_for has no explicit `from:`, it infers its spawner from
-	// needs[0] — and `needs` would otherwise emit a DepBlocks edge on the same
-	// (source, target) pair that `waits_for` emits a DepWaitsFor edge on.
-	// Storage rejects the duplicate. The DepWaitsFor edge subsumes the
-	// blocking semantics, so we skip the redundant DepBlocks for that
-	// specific target (GH#3783).
+	// Pre-compute the waits_for spawner so we can dedupe against depends_on
+	// and needs below. When waits_for has no explicit `from:`, it infers its
+	// spawner from needs[0] — and `depends_on`/`needs` would otherwise emit a
+	// DepBlocks edge on the same (source, target) pair that `waits_for`
+	// emits a DepWaitsFor edge on. Storage rejects the duplicate. The
+	// DepWaitsFor edge subsumes the blocking semantics, so we skip the
+	// redundant DepBlocks for that specific target (GH#3783).
 	var waitsForSpec *formula.WaitsForSpec
 	var waitsForSpawnerStepID string
 	if step.WaitsFor != "" {
@@ -936,6 +922,25 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 				waitsForSpawnerStepID = step.Needs[0]
 			}
 		}
+	}
+
+	// Process depends_on field
+	for _, depID := range step.DependsOn {
+		if depID == waitsForSpawnerStepID {
+			// This target is also the waits_for spawner; the DepWaitsFor edge
+			// emitted below subsumes the blocking semantics for this pair.
+			continue
+		}
+		depIssueID, ok := idMapping[depID]
+		if !ok {
+			continue // Will be caught during validation
+		}
+
+		*deps = append(*deps, &types.Dependency{
+			IssueID:     issueID,
+			DependsOnID: depIssueID,
+			Type:        types.DepBlocks,
+		})
 	}
 
 	// Process needs field - simpler alias for sibling dependencies
