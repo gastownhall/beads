@@ -1,6 +1,6 @@
 ---
 title: "bd comments"
-description: "View or manage comments on an issue"
+description: "View or manage comments on an issue."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -24,7 +24,6 @@ Examples:
 
 ```
 bd comments [issue-id] [flags]
-bd comments [command]
 ```
 
 **Flags:**

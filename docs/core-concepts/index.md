@@ -12,8 +12,8 @@ Work survives the agent; the next session picks up where the last one died.
 
 ```mermaid
 flowchart LR
-    create["bd create<br/>new bead"] --> graph["dependency<br/>graph"]
-    graph --> ready["bd ready<br/>claimable work"]
+    create["bd create<br/>new bead"] --> depgraph["dependency<br/>graph"]
+    depgraph --> ready["bd ready<br/>claimable work"]
     ready --> claim["bd update --claim<br/>agent takes it"]
     claim --> close["bd close<br/>work done"]
     close -->|blockers released| ready
@@ -147,9 +147,8 @@ is not the database, not the sync protocol, and not a backup. The full model
 | **Server** | `bd init --server` | `.beads/dolt/` | many concurrent |
 
 Embedded runs Dolt in-process and is right for almost everyone; server mode
-connects to an external `dolt sql-server` for multi-writer setups. Other SQL
-backends exist without Dolt's history — see
-[Storage Backends](/architecture/storage-backends) and the
+connects to an external `dolt sql-server` for multi-writer setups — see the
+[Dolt backend](/architecture/dolt) and the
 [architecture overview](/architecture/index).
 
 ## Where to go next

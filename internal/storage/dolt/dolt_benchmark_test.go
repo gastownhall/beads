@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -27,6 +28,41 @@ import (
 
 func benchDatabaseName() string {
 	return fmt.Sprintf("beads_test_bench_%d", time.Now().UnixNano())
+}
+
+// benchDoltServerPort decides whether benchmarks may connect to a real Dolt
+// server. Benchmarks must never resolve their server port from ambient
+// BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT: gc agent shells set those to point
+// at a shared production Dolt server, and there is no way to distinguish "a
+// dedicated throwaway benchmark port" from "the shared prod port" other than
+// requiring an explicit, benchmark-only opt-in (be-cfm3z).
+//
+// Returns skip=true with a reason when BEADS_BENCH_DOLT_PORT is unset or
+// invalid; the caller should b.Skip(reason) rather than connect.
+func benchDoltServerPort() (port int, skip bool, reason string) {
+	v := os.Getenv("BEADS_BENCH_DOLT_PORT")
+	if v == "" {
+		return 0, true, "set BEADS_BENCH_DOLT_PORT to a dedicated throwaway dolt server to run benchmarks"
+	}
+	p, err := strconv.Atoi(v)
+	if err != nil || p <= 0 {
+		return 0, true, fmt.Sprintf("BEADS_BENCH_DOLT_PORT=%q is not a valid port", v)
+	}
+	return p, false, ""
+}
+
+// dropBenchDatabase best-effort drops a benchmark-created database from the
+// server described by cfg. Opens its own short-lived admin connection rather
+// than reusing a *DoltStore's pool, so it works regardless of that store's
+// close state. Errors are ignored: this is cleanup, not the test assertion.
+func dropBenchDatabase(cfg *Config, name string) {
+	dsn := buildServerDSN(cfg, "")
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	_, _ = db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", name))
 }
 
 // setupBenchStore creates a store for benchmarks
@@ -42,17 +78,32 @@ func setupBenchStore(b *testing.B) (*DoltStore, func()) {
 		}
 	}
 
+	// Never resolve the benchmark's server port from ambient env — gc agent
+	// shells set BEADS_DOLT_SERVER_PORT to point at a shared production
+	// server (be-cfm3z).
+	b.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	b.Setenv("BEADS_DOLT_PORT", "")
+	b.Setenv("BEADS_TEST_MODE", "1")
+	b.Setenv("BEADS_TEST_SERVER", "1") // forward-compat opt-in for PR #3632/AD-01's firewall
+
+	port, skip, reason := benchDoltServerPort()
+	if skip {
+		b.Skip(reason)
+	}
+
 	ctx := context.Background()
 	tmpDir, err := os.MkdirTemp("", "dolt-bench-*")
 	if err != nil {
 		b.Fatalf("failed to create temp dir: %v", err)
 	}
 
+	dbName := benchDatabaseName()
 	cfg := &Config{
 		Path:            tmpDir,
 		CommitterName:   "bench",
 		CommitterEmail:  "bench@example.com",
-		Database:        benchDatabaseName(),
+		Database:        dbName,
+		ServerPort:      port,
 		CreateIfMissing: true,
 	}
 
@@ -70,6 +121,7 @@ func setupBenchStore(b *testing.B) (*DoltStore, func()) {
 
 	cleanup := func() {
 		store.Close()
+		dropBenchDatabase(cfg, dbName)
 		os.RemoveAll(tmpDir)
 	}
 
@@ -91,6 +143,19 @@ func BenchmarkBootstrapEmbedded(b *testing.B) {
 		}
 	}
 
+	// Never resolve the benchmark's server port from ambient env — gc agent
+	// shells set BEADS_DOLT_SERVER_PORT to point at a shared production
+	// server (be-cfm3z).
+	b.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	b.Setenv("BEADS_DOLT_PORT", "")
+	b.Setenv("BEADS_TEST_MODE", "1")
+	b.Setenv("BEADS_TEST_SERVER", "1") // forward-compat opt-in for PR #3632/AD-01's firewall
+
+	port, skip, reason := benchDoltServerPort()
+	if skip {
+		b.Skip(reason)
+	}
+
 	tmpDir, err := os.MkdirTemp("", "dolt-bootstrap-bench-*")
 	if err != nil {
 		b.Fatalf("failed to create temp dir: %v", err)
@@ -100,11 +165,13 @@ func BenchmarkBootstrapEmbedded(b *testing.B) {
 	ctx := context.Background()
 
 	// Create initial store to set up schema
+	dbName := benchDatabaseName()
 	cfg := &Config{
 		Path:            tmpDir,
 		CommitterName:   "bench",
 		CommitterEmail:  "bench@example.com",
-		Database:        benchDatabaseName(),
+		Database:        dbName,
+		ServerPort:      port,
 		CreateIfMissing: true,
 	}
 
@@ -113,6 +180,7 @@ func BenchmarkBootstrapEmbedded(b *testing.B) {
 		b.Fatalf("failed to create initial store: %v", err)
 	}
 	initStore.Close()
+	defer dropBenchDatabase(cfg, dbName)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

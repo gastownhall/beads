@@ -14,6 +14,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -64,18 +66,36 @@ func resolveIDForMutation(ctx context.Context, localStore storage.DoltStorage, i
 // isChildOf returns true if childID is a hierarchical child of parentID.
 // For example, "bd-abc.1" is a child of "bd-abc", and "bd-abc.1.2" is a child of "bd-abc.1".
 func isChildOf(childID, parentID string) bool {
+	_, isAncestor := hierarchicalParentRelation(childID, parentID)
+	return isAncestor
+}
+
+func hierarchicalParentRelation(childID, targetID string) (immediateParent string, isAncestor bool) {
 	// A child ID has the format "parentID.N" or "parentID.N.M" etc.
 	// Use ParseHierarchicalID to get the actual parent
 	_, actualParentID, depth := types.ParseHierarchicalID(childID)
 	if depth == 0 {
-		return false // Not a hierarchical ID
+		return "", false // Not a hierarchical ID
 	}
 	// Check if the immediate parent matches
-	if actualParentID == parentID {
-		return true
+	if actualParentID == targetID {
+		return actualParentID, true
 	}
-	// Also check if parentID is an ancestor (e.g., "bd-abc" is parent of "bd-abc.1.2")
-	return strings.HasPrefix(childID, parentID+".")
+	// Also check if targetID is an ancestor (e.g., "bd-abc" is an ancestor of "bd-abc.1.2")
+	return actualParentID, strings.HasPrefix(childID, targetID+".")
+}
+
+// isDisallowedHierarchicalDependency reports whether an explicit dependency
+// conflicts with hierarchy encoded in a dotted issue ID. The one allowed match
+// is a parent-child edge to the immediate dotted-ID parent; blocking and other
+// edge types to any parent/ancestor, plus parent-child edges to higher ancestors,
+// remain rejected.
+func isDisallowedHierarchicalDependency(fromID, toID string, depType types.DependencyType) bool {
+	immediateParent, isAncestor := hierarchicalParentRelation(fromID, toID)
+	if !isAncestor {
+		return false
+	}
+	return depType != types.DepParentChild || toID != immediateParent
 }
 
 // warnIfCyclesExist checks for dependency cycles and prints a warning if found.
@@ -174,7 +194,7 @@ Examples:
 			}
 			defer toCleanup()
 
-			if isChildOf(fromID, toID) {
+			if isDisallowedHierarchicalDependency(fromID, toID, types.DepBlocks) {
 				return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 			}
 
@@ -184,7 +204,7 @@ Examples:
 				Type:        types.DependencyType(depType),
 			}
 
-			if err := fromStore.AddDependency(ctx, dep, actor); err != nil {
+			if err := fromStore.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{EmitEvent: true}); err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
 
@@ -358,11 +378,11 @@ Examples:
 			}
 		}
 
-		if isChildOf(fromID, toID) {
+		dt := types.DependencyType(depType)
+		if isDisallowedHierarchicalDependency(fromID, toID, dt) {
 			return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 		}
 
-		dt := types.DependencyType(depType)
 		if !dt.IsValid() {
 			return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
 		}
@@ -373,7 +393,7 @@ Examples:
 			Type:        dt,
 		}
 
-		if err := fromStore.AddDependency(ctx, dep, actor); err != nil {
+		if err := fromStore.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{EmitEvent: true}); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
@@ -515,7 +535,7 @@ func addBulkDependenciesInTx(ctx context.Context, tx storage.Transaction, edges 
 				continue
 			}
 			dep := &types.Dependency{IssueID: edge.IssueID, DependsOnID: edge.DependsOnID, Type: edge.Type}
-			if err := tx.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{SkipCycleCheck: noCycleCheck}); err != nil {
+			if err := tx.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{SkipCycleCheck: noCycleCheck, EmitEvent: true}); err != nil {
 				return fmt.Errorf("line %d: %w", edge.Line, err)
 			}
 		}
@@ -527,7 +547,11 @@ func addBulkDependenciesInTx(ctx context.Context, tx storage.Transaction, edges 
 		return fmt.Errorf("final cycle check failed (no edges added): %w", cycleErr)
 	}
 	if cyclePath != "" {
-		return fmt.Errorf("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
+		// Type this rejection so callers can errors.Is(err, domain.ErrDependencyCycle),
+		// matching the proxied/domain bulk final gate. NewCycleError renders the
+		// message verbatim (no sentinel text appended), so the user-facing string
+		// is unchanged.
+		return domain.NewCycleError("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
 	}
 	return nil
 }
@@ -652,7 +676,7 @@ func validateBulkDepEdges(ctx context.Context, edges []bulkDepEdge) ([]bulkDepEd
 			current.DependsOnID = toID
 		}
 
-		if isChildOf(current.IssueID, current.DependsOnID) {
+		if isDisallowedHierarchicalDependency(current.IssueID, current.DependsOnID, current.Type) {
 			errs = append(errs, fmt.Sprintf("line %d: cannot add dependency: %s is already a child of %s", edge.Line, current.IssueID, current.DependsOnID))
 			resolved = append(resolved, current)
 			continue
@@ -953,7 +977,9 @@ var depRemoveCmd = &cobra.Command{
 		fullFromID := fromID
 		fullToID := toID
 
-		if err := fromStore.RemoveDependency(ctx, fullFromID, fullToID, actor); err != nil {
+		// Explicit dep verb: record a dependency_removed history event (parity
+		// with bd dep add's EmitEvent and the proxied bd dep remove path).
+		if err := fromStore.RemoveDependencyWithOptions(ctx, fullFromID, fullToID, actor, storage.DependencyRemoveOptions{EmitEvent: true}); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
@@ -992,7 +1018,11 @@ Examples:
   bd dep tree gt-0iqq                    # Show what blocks gt-0iqq
   bd dep tree gt-0iqq --direction=up     # Show what gt-0iqq blocks
   bd dep tree gt-0iqq --status=open      # Only show open issues
-  bd dep tree gt-0iqq --depth=3          # Limit to 3 levels deep`,
+  bd dep tree gt-0iqq --depth=3          # Limit to 3 levels deep
+
+--max-rows / BEADS_MAX_ROWS caveat: the tree walk has no query filter to
+thread the cap through, so the full tree is always built first and the
+node count is checked afterward (post-hoc), not during the walk.`,
 	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -1005,6 +1035,9 @@ Examples:
 		}()
 
 		if usesProxiedServer() {
+			if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
+				return err
+			}
 			return runDepTreeProxiedServer(cmd, rootCtx, args)
 		}
 
@@ -1066,6 +1099,24 @@ Examples:
 			tree = filterTreeByStatus(tree, types.Status(statusFilter))
 		}
 
+		// Apply defensive row cap (be-x42v) on the final tree-node count.
+		// Tree walks have no IssueFilter to thread through, so the cap is
+		// enforced at the CLI layer instead of in storage.
+		treeMaxRows, treeMaxRowsSource, err := resolveMaxRows(cmd)
+		if err != nil {
+			return err
+		}
+		if treeMaxRows > 0 && len(tree) > treeMaxRows {
+			if capErr := handleMaxRowsError(&issueops.ErrTooManyRows{
+				Found:  len(tree),
+				Cap:    treeMaxRows,
+				Source: treeMaxRowsSource,
+			}); capErr != nil {
+				return capErr
+			}
+		}
+
+		// Handle format presets (json handled earlier, near flag read)
 		if formatStr == "mermaid" {
 			outputMermaidTree(tree, args[0])
 			return nil
@@ -1534,6 +1585,8 @@ func init() {
 	depTreeCmd.Flags().String("direction", "", "Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'")
 	depTreeCmd.Flags().String("status", "", "Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)")
 	depTreeCmd.Flags().String("format", "", "Output format: 'mermaid' for Mermaid.js flowchart")
+	// Defensive row cap (be-x42v): applied to TreeNode count after the tree is built.
+	addMaxRowsFlag(depTreeCmd)
 	// Note: --type flag intentionally omitted from depTreeCmd — TreeNode lacks
 	// dependency type info so filtering is not possible. Use 'bd dep list --type' instead.
 

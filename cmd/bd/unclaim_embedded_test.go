@@ -188,6 +188,11 @@ func TestEmbeddedUnclaim(t *testing.T) {
 		if !strings.Contains(out, "held by alice") && !strings.Contains(out, "claimed by a different actor") {
 			t.Errorf("expected ownership-rejection error, got: %s", out)
 		}
+		// The rejection should frame --force as an abandoned-claim escape
+		// hatch, not a routine override (bd-at6rc / wy-zs5s2).
+		if !strings.Contains(out, "coordinate with the holder") {
+			t.Errorf("rejection should say coordinate-with-holder, got: %s", out)
+		}
 
 		// The claim must be untouched after the rejected release.
 		got := bdShow(t, bd, dir, issue.ID)

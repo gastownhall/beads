@@ -29,6 +29,10 @@ var YamlOnlyKeys = map[string]bool{
 	"db":       true,
 	"actor":    true,
 	"identity": true,
+	// Replica identity: config.NodeID() reads this through viper (yaml/env)
+	// only, so a DB-backed write would be silently unread — exactly the
+	// GH#536 class this map exists to prevent.
+	"node_id": true,
 
 	// Git settings
 	"git.author":      true,
@@ -246,7 +250,27 @@ func SetYamlConfigInDir(beadsDir, key, value string) error {
 
 var userGlobalKeyPrefixes = []string{"metrics."}
 
+// userGlobalExactKeys are per-MACHINE settings that must never be written to
+// the project .beads/config.yaml, which is a git-TRACKED file (see
+// cmd/bd/doctor/gitignore.go: nothing in .beads/.gitignore excludes it). A
+// committed value propagates one machine's answer to every clone that pulls
+// it, which for these keys is worse than having no value at all.
+//
+// node_id is the exemplar: it names the beads STORE that grants leases here,
+// and the reclaim guard (issueops.ReclaimExpiredLeasesInTx) compares it
+// against each lease's granted_node. Commit "node_id: mini" and every replica
+// reads "mini", so every comparison matches and the guard is simultaneously
+// fully ARMED and fully INERT — laptop reaps mini's leases exactly as if they
+// were local, which is the precise hazard the guard exists to close, now
+// happening while the operator believes they are protected. Routing the write
+// to ~/.config/bd/config.yaml keeps it per-machine; viper still merges that
+// file, so config.NodeID() reads it back.
+var userGlobalExactKeys = map[string]bool{"node_id": true}
+
 func IsUserGlobalKey(key string) bool {
+	if userGlobalExactKeys[key] {
+		return true
+	}
 	for _, prefix := range userGlobalKeyPrefixes {
 		if strings.HasPrefix(key, prefix) {
 			return true

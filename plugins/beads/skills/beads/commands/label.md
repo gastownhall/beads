@@ -1,6 +1,6 @@
 ---
 description: Manage issue labels
-argument-hint: [command] [issue-id] [label]
+argument-hint: "[command] [issue-id] [label]"
 ---
 
 Manage labels on beads issues. Labels provide flexible cross-cutting metadata beyond structured fields (status, priority, type).

@@ -121,12 +121,15 @@ func bdProxiedDepWithInputFail(t *testing.T, bd, dir, input string, args ...stri
 }
 
 func TestProxiedServerDep(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("Blocks", func(t *testing.T) {
+		t.Parallel()
 		t.Run("happy_path", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpb1")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpb1")
 			a := bdProxiedCreate(t, bd, p.dir, "Block A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "Block B", "--type", "task")
 			out := bdProxiedDep(t, bd, p.dir, a.ID, "--blocks", b.ID)
@@ -137,8 +140,10 @@ func TestProxiedServerDep(t *testing.T) {
 	})
 
 	t.Run("Add", func(t *testing.T) {
+		t.Parallel()
 		t.Run("positional_args", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa1")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa1")
 			a := bdProxiedCreate(t, bd, p.dir, "Pos A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "Pos B", "--type", "task")
 			out := bdProxiedDep(t, bd, p.dir, "add", a.ID, b.ID)
@@ -148,7 +153,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("type_parent_child", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa2")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa2")
 			epic := bdProxiedCreate(t, bd, p.dir, "Epic", "--type", "epic")
 			c1 := bdProxiedCreate(t, bd, p.dir, "Child 1", "--type", "task")
 			c2 := bdProxiedCreate(t, bd, p.dir, "Child 2", "--type", "task")
@@ -161,7 +167,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("type_tracks", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa3")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa3")
 			tracker := bdProxiedCreate(t, bd, p.dir, "Tracker", "--type", "task")
 			tracked := bdProxiedCreate(t, bd, p.dir, "Tracked", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", tracker.ID, tracked.ID, "--type", "tracks")
@@ -172,7 +179,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("type_related", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa4")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa4")
 			r1 := bdProxiedCreate(t, bd, p.dir, "Related 1", "--type", "task")
 			r2 := bdProxiedCreate(t, bd, p.dir, "Related 2", "--type", "task")
 			out := bdProxiedDep(t, bd, p.dir, "add", r1.ID, r2.ID, "--type", "related")
@@ -182,7 +190,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("blocked_by_flag", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa5")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa5")
 			x := bdProxiedCreate(t, bd, p.dir, "Blocked", "--type", "task")
 			y := bdProxiedCreate(t, bd, p.dir, "Blocker", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", x.ID, "--blocked-by", y.ID)
@@ -193,7 +202,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("depends_on_flag", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa6")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa6")
 			x := bdProxiedCreate(t, bd, p.dir, "Dependent", "--type", "task")
 			y := bdProxiedCreate(t, bd, p.dir, "Dependency", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", x.ID, "--depends-on", y.ID)
@@ -204,7 +214,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("cycle_rejected", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa7")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa7")
 			a := bdProxiedCreate(t, bd, p.dir, "Cyc A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "Cyc B", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", a.ID, b.ID)
@@ -215,7 +226,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("child_parent_antipattern", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa8")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa8")
 			parent := bdProxiedCreate(t, bd, p.dir, "AP Parent", "--type", "epic")
 			child := bdProxiedCreate(t, bd, p.dir, "AP Child", "--type", "task", "--parent", parent.ID)
 			out := bdProxiedDepFail(t, bd, p.dir, "add", child.ID, parent.ID)
@@ -225,7 +237,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("json_output", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa9")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa9")
 			j1 := bdProxiedCreate(t, bd, p.dir, "JSON A", "--type", "task")
 			j2 := bdProxiedCreate(t, bd, p.dir, "JSON B", "--type", "task")
 			m := bdProxiedDepJSON(t, bd, p.dir, "add", j1.ID, j2.ID)
@@ -238,7 +251,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("bulk_file_jsonl", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa10")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa10")
 			b1 := bdProxiedCreate(t, bd, p.dir, "Bulk A", "--type", "task")
 			b2 := bdProxiedCreate(t, bd, p.dir, "Bulk B", "--type", "task")
 			b3 := bdProxiedCreate(t, bd, p.dir, "Bulk C", "--type", "task")
@@ -263,7 +277,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("bulk_file_validation_atomic", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa11")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa11")
 			v1 := bdProxiedCreate(t, bd, p.dir, "Valid A", "--type", "task")
 			v2 := bdProxiedCreate(t, bd, p.dir, "Valid B", "--type", "task")
 			path := filepath.Join(t.TempDir(), "bad-deps.jsonl")
@@ -283,7 +298,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("no_cycle_check_chain", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa12")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa12")
 			const n = 10
 			ids := make([]string, n)
 			for i := 0; i < n; i++ {
@@ -305,7 +321,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("bulk_no_cycle_check_whole_graph_gate", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa13")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa13")
 			a := bdProxiedCreate(t, bd, p.dir, "Gate A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "Gate B", "--type", "task")
 			c := bdProxiedCreate(t, bd, p.dir, "Gate C", "--type", "task")
@@ -330,7 +347,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("commit_visible_to_subsequent_invocation", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa14")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa14")
 			a := bdProxiedCreate(t, bd, p.dir, "Commit A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "Commit B", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", a.ID, b.ID)
@@ -341,7 +359,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("bulk_external_ref_passthrough", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpa15")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpa15")
 			src := bdProxiedCreate(t, bd, p.dir, "Ext src", "--type", "task")
 			input := fmt.Sprintf("{\"from\":%q,\"to\":\"external:other:capability\"}\n", src.ID)
 			cmd := exec.Command(bd, "dep", "add", "--file", "-")
@@ -361,9 +380,18 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 	})
 
+}
+
+func TestProxiedServerDep2(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
 	t.Run("Remove", func(t *testing.T) {
+		t.Parallel()
 		t.Run("basic", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpr1")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpr1")
 			a := bdProxiedCreate(t, bd, p.dir, "Rm A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "Rm B", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", a.ID, b.ID)
@@ -374,7 +402,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("rm_alias", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpr2")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpr2")
 			a := bdProxiedCreate(t, bd, p.dir, "Rm A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "Rm B", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", a.ID, b.ID)
@@ -385,7 +414,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("json_output", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpr3")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpr3")
 			a := bdProxiedCreate(t, bd, p.dir, "Rm JSON A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "Rm JSON B", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", a.ID, b.ID)
@@ -397,8 +427,10 @@ func TestProxiedServerDep(t *testing.T) {
 	})
 
 	t.Run("List", func(t *testing.T) {
+		t.Parallel()
 		t.Run("default_direction_down", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpl1")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpl1")
 			a := bdProxiedCreate(t, bd, p.dir, "L A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "L B", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", a.ID, b.ID)
@@ -409,7 +441,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("direction_up", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpl2")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpl2")
 			a := bdProxiedCreate(t, bd, p.dir, "Up A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "Up B", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", a.ID, b.ID)
@@ -420,7 +453,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("type_filter", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpl3")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpl3")
 			epic := bdProxiedCreate(t, bd, p.dir, "TF epic", "--type", "epic")
 			c1 := bdProxiedCreate(t, bd, p.dir, "TF c1", "--type", "task")
 			c2 := bdProxiedCreate(t, bd, p.dir, "TF c2", "--type", "task")
@@ -433,7 +467,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("json_output", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpl4")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpl4")
 			a := bdProxiedCreate(t, bd, p.dir, "LJ A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "LJ B", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", a.ID, b.ID)
@@ -448,7 +483,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("batch_multi_arg", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpl5")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpl5")
 			a := bdProxiedCreate(t, bd, p.dir, "B A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "B B", "--type", "task")
 			c := bdProxiedCreate(t, bd, p.dir, "B C", "--type", "task")
@@ -466,7 +502,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("batch_partitions_wisp_and_issue_ids", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpl6")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpl6")
 			issueSrc := bdProxiedCreate(t, bd, p.dir, "WP issue src", "--type", "task")
 			issueTgt := bdProxiedCreate(t, bd, p.dir, "WP issue tgt", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", issueSrc.ID, issueTgt.ID)
@@ -497,8 +534,10 @@ func TestProxiedServerDep(t *testing.T) {
 	})
 
 	t.Run("Tree", func(t *testing.T) {
+		t.Parallel()
 		t.Run("basic", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpt1")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpt1")
 			root := bdProxiedCreate(t, bd, p.dir, "Tree root", "--type", "task")
 			child := bdProxiedCreate(t, bd, p.dir, "Tree child", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", root.ID, child.ID)
@@ -509,7 +548,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("direction_up", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpt2")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpt2")
 			root := bdProxiedCreate(t, bd, p.dir, "Up tree root", "--type", "task")
 			dep := bdProxiedCreate(t, bd, p.dir, "Up tree dep", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", root.ID, dep.ID)
@@ -520,7 +560,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("direction_both", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpt3")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpt3")
 			root := bdProxiedCreate(t, bd, p.dir, "Both root", "--type", "task")
 			dep := bdProxiedCreate(t, bd, p.dir, "Both dep", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", root.ID, dep.ID)
@@ -531,7 +572,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("both_does_not_duplicate_root", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpt4")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpt4")
 			root := bdProxiedCreate(t, bd, p.dir, "Dedup root", "--type", "task")
 			depDown := bdProxiedCreate(t, bd, p.dir, "Dedup down", "--type", "task")
 			depUp := bdProxiedCreate(t, bd, p.dir, "Dedup up", "--type", "task")
@@ -554,7 +596,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("max_depth", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpt5")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpt5")
 			a := bdProxiedCreate(t, bd, p.dir, "MD A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "MD B", "--type", "task")
 			c := bdProxiedCreate(t, bd, p.dir, "MD C", "--type", "task")
@@ -567,7 +610,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("status_filter", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpt6")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpt6")
 			root := bdProxiedCreate(t, bd, p.dir, "SF root", "--type", "task")
 			dep := bdProxiedCreate(t, bd, p.dir, "SF dep", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", root.ID, dep.ID)
@@ -575,7 +619,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("format_mermaid", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpt7")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpt7")
 			root := bdProxiedCreate(t, bd, p.dir, "Mer root", "--type", "task")
 			dep := bdProxiedCreate(t, bd, p.dir, "Mer dep", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", root.ID, dep.ID)
@@ -586,7 +631,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("json_output", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpt8")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpt8")
 			root := bdProxiedCreate(t, bd, p.dir, "JT root", "--type", "task")
 			dep := bdProxiedCreate(t, bd, p.dir, "JT dep", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", root.ID, dep.ID)
@@ -598,7 +644,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("ignores_relates_to", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpt9")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpt9")
 			root := bdProxiedCreate(t, bd, p.dir, "Rel root", "--type", "task")
 			blocker := bdProxiedCreate(t, bd, p.dir, "Real blocker", "--type", "task")
 			related := bdProxiedCreate(t, bd, p.dir, "Loose relation", "--type", "task")
@@ -627,8 +674,10 @@ func TestProxiedServerDep(t *testing.T) {
 	})
 
 	t.Run("Cycles", func(t *testing.T) {
+		t.Parallel()
 		t.Run("detect", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpc1")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpc1")
 			a := bdProxiedCreate(t, bd, p.dir, "C A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "C B", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", a.ID, b.ID)
@@ -647,7 +696,8 @@ func TestProxiedServerDep(t *testing.T) {
 		})
 
 		t.Run("none", func(t *testing.T) {
-			p := bdProxiedInit(t, bd, "dpc2")
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpc2")
 			a := bdProxiedCreate(t, bd, p.dir, "NC A", "--type", "task")
 			b := bdProxiedCreate(t, bd, p.dir, "NC B", "--type", "task")
 			bdProxiedDep(t, bd, p.dir, "add", a.ID, b.ID)
@@ -660,9 +710,10 @@ func TestProxiedServerDep(t *testing.T) {
 }
 
 func TestProxiedServerDepConcurrent(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
-	p := bdProxiedInit(t, bd, "dpcon")
+	p := newSharedProxiedProject(t, bd, "dpcon")
 
 	var ids []string
 	for i := 0; i < 16; i++ {

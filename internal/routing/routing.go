@@ -173,31 +173,61 @@ type RoutingConfig struct {
 	ExplicitOverride string // Explicit --repo flag override
 }
 
+// RoutingRule identifies which clause of DetermineTargetRepo matched, so
+// callers can explain *why* a repo was routed instead of assuming a single
+// cause (e.g. the contributor-role rule).
+type RoutingRule int
+
+const (
+	// RuleNone means no routing rule matched; the current repo was used.
+	RuleNone RoutingRule = iota
+	// RuleExplicitOverride means config.ExplicitOverride took precedence.
+	RuleExplicitOverride
+	// RuleMaintainer means auto mode routed via MaintainerRepo for a
+	// maintainer-role user.
+	RuleMaintainer
+	// RuleContributor means auto mode routed via ContributorRepo for a
+	// contributor-role user.
+	RuleContributor
+	// RuleDefault means the unconditional DefaultRepo fallback matched,
+	// independent of user role.
+	RuleDefault
+)
+
 // DetermineTargetRepo determines which repo should receive a new issue
-// based on routing configuration and user role
+// based on routing configuration and user role.
 func DetermineTargetRepo(config *RoutingConfig, userRole UserRole, repoPath string) string {
+	repo, _ := DetermineTargetRepoWithRule(config, userRole, repoPath)
+	return repo
+}
+
+// DetermineTargetRepoWithRule is DetermineTargetRepo, but also reports which
+// rule matched so callers can produce an accurate diagnosis (e.g. a notice
+// explaining why a read was routed elsewhere) instead of assuming a single
+// hardcoded cause.
+func DetermineTargetRepoWithRule(config *RoutingConfig, userRole UserRole, repoPath string) (string, RoutingRule) {
 	// Explicit override takes precedence
 	if config.ExplicitOverride != "" {
-		return config.ExplicitOverride
+		return config.ExplicitOverride, RuleExplicitOverride
 	}
 
 	// Auto mode: route based on user role
 	if config.Mode == "auto" {
 		if userRole == Maintainer && config.MaintainerRepo != "" {
-			return config.MaintainerRepo
+			return config.MaintainerRepo, RuleMaintainer
 		}
 		if userRole == Contributor && config.ContributorRepo != "" {
-			return config.ContributorRepo
+			return config.ContributorRepo, RuleContributor
 		}
 	}
 
 	// Fall back to default repo
 	if config.DefaultRepo != "" {
-		return config.DefaultRepo
+		return config.DefaultRepo, RuleDefault
 	}
 
 	// No routing configured - use current repo
-	return "."
+	return ".", RuleNone
 }
 
 // ExpandPath expands ~ to home directory and resolves relative paths to absolute.

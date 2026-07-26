@@ -36,15 +36,16 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("state is not supported in proxied-server mode")
-		}
 		evt := metrics.NewCommandEvent("state")
 		defer func() {
 			if c := metrics.Global(); c != nil {
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runStateProxiedServer(rootCtx, args[0], args[1])
+		}
 
 		ctx := rootCtx
 		issueID := args[0]
@@ -119,11 +120,6 @@ The --reason flag provides context for the event bead (recommended).`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("set-state is not supported in proxied-server mode")
-		}
-		CheckReadonly("set-state")
-
 		evt := metrics.NewCommandEvent("set-state")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -131,7 +127,6 @@ The --reason flag provides context for the event bead (recommended).`,
 			}
 		}()
 
-		ctx := rootCtx
 		issueID := args[0]
 		stateSpec := args[1]
 
@@ -143,6 +138,14 @@ The --reason flag provides context for the event bead (recommended).`,
 		newValue := parts[1]
 
 		reason, _ := cmd.Flags().GetString("reason")
+
+		CheckReadonly("set-state")
+
+		if usesProxiedServer() {
+			return runSetStateProxiedServer(rootCtx, issueID, dimension, newValue, reason)
+		}
+
+		ctx := rootCtx
 
 		var fullID string
 		var err error
@@ -278,15 +281,16 @@ Example:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("state list is not supported in proxied-server mode")
-		}
 		evt := metrics.NewCommandEvent("state-list")
 		defer func() {
 			if c := metrics.Global(); c != nil {
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runStateListProxiedServer(rootCtx, args[0])
+		}
 
 		ctx := rootCtx
 		issueID := args[0]

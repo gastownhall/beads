@@ -2,6 +2,7 @@ package types
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -938,6 +939,43 @@ func TestIssueLeaseJSONSerialization(t *testing.T) {
 	}
 }
 
+// TestRowVersionNeverSerialized locks in the Go-only decision for RowVersion:
+// it is a live Go field (library call sites build an optimistic-concurrency
+// token from it) but json:"-", so its random-per-write value never reaches any
+// bd --json surface or bd export. Serializing it would break stable protocol
+// goldens and export round-trips because the value is regenerated on every
+// write. The value must be absent from the bare Issue and from the two
+// embedding wrappers that back show/list/ready (IssueDetails, IssueWithCounts).
+func TestRowVersionNeverSerialized(t *testing.T) {
+	iss := Issue{ID: "test-1", Title: "Versioned", Status: StatusOpen, RowVersion: 123456789}
+
+	// The Go field stays populated — this is what library call sites read.
+	if iss.RowVersion != 123456789 {
+		t.Fatalf("RowVersion Go field = %d, want 123456789", iss.RowVersion)
+	}
+
+	surfaces := []struct {
+		name string
+		v    any
+	}{
+		{"Issue", iss},
+		{"IssueDetails", IssueDetails{Issue: iss}},
+		{"IssueWithCounts", IssueWithCounts{Issue: &iss}},
+	}
+	for _, tc := range surfaces {
+		b, err := json.Marshal(tc.v)
+		if err != nil {
+			t.Fatalf("marshal %s: %v", tc.name, err)
+		}
+		s := string(b)
+		for _, forbidden := range []string{"row_version", "RowVersion", "row_lock", "123456789"} {
+			if strings.Contains(s, forbidden) {
+				t.Errorf("%s JSON must not contain %q, got: %s", tc.name, forbidden, s)
+			}
+		}
+	}
+}
+
 func TestReclaimedLeaseJSONSerialization(t *testing.T) {
 	b, err := json.Marshal(ReclaimedLease{ID: "bd-1", PreviousOwner: "worker-a"})
 	if err != nil {
@@ -1677,5 +1715,125 @@ func TestBondRefUnmarshalJSON(t *testing.T) {
 				t.Errorf("BondType = %q, want %q", b.BondType, tt.wantBondType)
 			}
 		})
+	}
+}
+
+// validIssue returns a minimal issue that passes ValidateWithCustom, so
+// field-length tests below isolate the assignee/owner bound.
+func validIssue() Issue {
+	return Issue{
+		Title:     "Test Issue",
+		Status:    StatusOpen,
+		Priority:  1,
+		IssueType: TypeTask,
+	}
+}
+
+// TestValidateFieldLength proves ValidateWithCustom bounds assignee and owner at
+// MaxFieldLen and that the bound is measured in runes, not bytes: a 255-rune
+// multibyte value (~510 bytes) fits the VARCHAR(255) column and passes, while a
+// 256-rune value is rejected with a typed ErrFieldTooLong.
+func TestValidateFieldLength(t *testing.T) {
+	// "é" (U+00E9) encodes as 2 bytes, so 255 of them is 255 runes / 510 bytes.
+	const multibyte = "é"
+
+	tests := []struct {
+		name    string
+		mutate  func(*Issue)
+		wantErr bool
+	}{
+		{
+			name:    "255-rune assignee passes",
+			mutate:  func(i *Issue) { i.Assignee = strings.Repeat("a", MaxFieldLen) },
+			wantErr: false,
+		},
+		{
+			name:    "256-rune assignee fails",
+			mutate:  func(i *Issue) { i.Assignee = strings.Repeat("a", MaxFieldLen+1) },
+			wantErr: true,
+		},
+		{
+			name:    "255-rune owner passes",
+			mutate:  func(i *Issue) { i.Owner = strings.Repeat("o", MaxFieldLen) },
+			wantErr: false,
+		},
+		{
+			name:    "256-rune owner fails",
+			mutate:  func(i *Issue) { i.Owner = strings.Repeat("o", MaxFieldLen+1) },
+			wantErr: true,
+		},
+		{
+			name:    "255-rune multibyte assignee passes (rune-count, not byte-count)",
+			mutate:  func(i *Issue) { i.Assignee = strings.Repeat(multibyte, MaxFieldLen) },
+			wantErr: false,
+		},
+		{
+			name:    "256-rune multibyte assignee fails",
+			mutate:  func(i *Issue) { i.Assignee = strings.Repeat(multibyte, MaxFieldLen+1) },
+			wantErr: true,
+		},
+		{
+			name:    "255-rune multibyte owner passes (rune-count, not byte-count)",
+			mutate:  func(i *Issue) { i.Owner = strings.Repeat(multibyte, MaxFieldLen) },
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := validIssue()
+			tt.mutate(&issue)
+			err := issue.ValidateWithCustom(nil, nil)
+			if tt.wantErr {
+				if !errors.Is(err, ErrFieldTooLong) {
+					t.Errorf("ValidateWithCustom() error = %v, want errors.Is(ErrFieldTooLong)", err)
+				}
+			} else if err != nil {
+				t.Errorf("ValidateWithCustom() error = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// TestValidateForImportFieldLength proves the import path bounds assignee and
+// owner too, so a federated import can't smuggle in an over-length value that
+// the backend would otherwise reject with a raw "data too long" error.
+func TestValidateForImportFieldLength(t *testing.T) {
+	t.Run("256-rune assignee fails", func(t *testing.T) {
+		issue := validIssue()
+		issue.Assignee = strings.Repeat("a", MaxFieldLen+1)
+		if err := issue.ValidateForImport(nil); !errors.Is(err, ErrFieldTooLong) {
+			t.Errorf("ValidateForImport() error = %v, want errors.Is(ErrFieldTooLong)", err)
+		}
+	})
+	t.Run("256-rune owner fails", func(t *testing.T) {
+		issue := validIssue()
+		issue.Owner = strings.Repeat("o", MaxFieldLen+1)
+		if err := issue.ValidateForImport(nil); !errors.Is(err, ErrFieldTooLong) {
+			t.Errorf("ValidateForImport() error = %v, want errors.Is(ErrFieldTooLong)", err)
+		}
+	})
+	t.Run("255-rune multibyte assignee passes", func(t *testing.T) {
+		issue := validIssue()
+		issue.Assignee = strings.Repeat("é", MaxFieldLen)
+		if err := issue.ValidateForImport(nil); err != nil {
+			t.Errorf("ValidateForImport() error = %v, want nil", err)
+		}
+	})
+}
+
+// TestCheckFieldLen unit-tests the helper directly, including the rune vs byte
+// boundary and the wrapped, typed error it returns.
+func TestCheckFieldLen(t *testing.T) {
+	if err := CheckFieldLen("assignee", strings.Repeat("a", MaxFieldLen)); err != nil {
+		t.Errorf("CheckFieldLen(255 runes) = %v, want nil", err)
+	}
+	if err := CheckFieldLen("assignee", strings.Repeat("é", MaxFieldLen)); err != nil {
+		t.Errorf("CheckFieldLen(255 multibyte runes / %d bytes) = %v, want nil",
+			len(strings.Repeat("é", MaxFieldLen)), err)
+	}
+	err := CheckFieldLen("assignee", strings.Repeat("é", MaxFieldLen+1))
+	if !errors.Is(err, ErrFieldTooLong) {
+		t.Errorf("CheckFieldLen(256 runes) = %v, want errors.Is(ErrFieldTooLong)", err)
 	}
 }

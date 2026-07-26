@@ -15,13 +15,16 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// leaseState reads the lease columns for an issue directly, for assertions.
+// leaseState reads an issue's claim state plus its lease-row overlay (the
+// ephemeral leases table, bd-lrgn1) directly, for assertions. leaseExpires/
+// heartbeatAt are NULL when the issue has no lease row.
 type leaseState struct {
 	status        string
 	assignee      sql.NullString
 	leaseExpires  sql.NullTime
 	heartbeatAt   sql.NullTime
 	rowLock       int64
+	startedAt     sql.NullTime
 	startedAtNull bool
 }
 
@@ -30,12 +33,14 @@ func readLeaseState(t *testing.T, ctx context.Context, store *DoltStore, id stri
 	var ls leaseState
 	var startedAt sql.NullTime
 	err := store.db.QueryRowContext(ctx, `
-		SELECT status, assignee, lease_expires_at, heartbeat_at, row_lock, started_at
-		FROM issues WHERE id = ?
+		SELECT i.status, i.assignee, l.lease_expires_at, l.heartbeat_at, i.row_lock, i.started_at
+		FROM issues i LEFT JOIN leases l ON l.issue_id = i.id
+		WHERE i.id = ?
 	`, id).Scan(&ls.status, &ls.assignee, &ls.leaseExpires, &ls.heartbeatAt, &ls.rowLock, &startedAt)
 	if err != nil {
 		t.Fatalf("read lease state for %s: %v", id, err)
 	}
+	ls.startedAt = startedAt
 	ls.startedAtNull = !startedAt.Valid
 	return ls
 }
@@ -106,8 +111,8 @@ func TestHeartbeatExtendsLeaseAndGuardsOwnership(t *testing.T) {
 	if !after.leaseExpires.Time.After(before.leaseExpires.Time) {
 		t.Errorf("heartbeat did not extend lease: before=%v after=%v", before.leaseExpires.Time, after.leaseExpires.Time)
 	}
-	if after.rowLock == before.rowLock {
-		t.Error("heartbeat did not rewrite row_lock")
+	if after.rowLock != before.rowLock {
+		t.Error("heartbeat touched the issues row (row_lock changed) — heartbeats must write only the leases table (bd-lrgn1)")
 	}
 
 	// A non-owner cannot heartbeat.
@@ -278,7 +283,7 @@ func TestBareUpdateClaimDoesNotArmLease(t *testing.T) {
 	// Even a reclaim sweep with its cutoff pushed into the future (which would
 	// reap ANY leased issue) must leave the interactive claim alone: durable
 	// until the actor releases it or a human reclaims.
-	reclaimed, err := store.ReclaimExpiredLeases(ctx, -time.Hour, "reaper")
+	reclaimed, err := store.ReclaimExpiredLeases(ctx, -time.Hour, types.ReclaimFilter{}, "reaper")
 	if err != nil {
 		t.Fatalf("reclaim sweep: %v", err)
 	}
@@ -343,7 +348,7 @@ func TestReclaimRevertsExpiredOnly(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond) // let dead's lease expire
 
 	// Grace window larger than how long the lease has been expired: nothing yet.
-	reclaimed, err := store.ReclaimExpiredLeases(ctx, time.Hour, "reaper")
+	reclaimed, err := store.ReclaimExpiredLeases(ctx, time.Hour, types.ReclaimFilter{}, "reaper")
 	if err != nil {
 		t.Fatalf("reclaim with big grace: %v", err)
 	}
@@ -352,7 +357,7 @@ func TestReclaimRevertsExpiredOnly(t *testing.T) {
 	}
 
 	// Zero grace: the dead lease (expired) is reclaimed, the live one is not.
-	reclaimed, err = store.ReclaimExpiredLeases(ctx, 0, "reaper")
+	reclaimed, err = store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, "reaper")
 	if err != nil {
 		t.Fatalf("reclaim grace=0: %v", err)
 	}
@@ -388,15 +393,17 @@ func TestReclaimRevertsExpiredOnly(t *testing.T) {
 
 // TestRowLockForcesConflictOnDisjointCellWrites is the regression guard for the
 // row_lock trick. It shows, against real Dolt, that two concurrent transactions
-// writing DISJOINT cells of the same issue row silently cell-merge into a
-// corrupt "zombie" state — UNLESS both also rewrite the shared row_lock cell,
-// which forces the second commit to conflict (1213) so withRetryTx can replay.
+// writing DISJOINT cells of the same issue row silently cell-merge — UNLESS
+// both also rewrite the shared row_lock cell, which forces the second commit
+// to conflict (1213) so withRetryTx can replay.
 //
-// The dangerous pair: a worker's heartbeat (writes heartbeat_at) racing a reaper
-// reverting the row to ready (writes status/assignee). Without a shared lock
-// cell Dolt merges them, producing an open+unassigned issue that still carries
-// the worker's fresh heartbeat — the worker believes it owns work that another
-// worker can now also claim.
+// Since bd-lrgn1 heartbeats no longer touch the issues row (they live on the
+// leases table, where a racing reclaim contends on the SAME row — see
+// TestHeartbeatReclaimContendOnLeaseRow). The disjoint-cell pair guarded here
+// is a worker-side field edit (e.g. priority, via updateIssueInTx) racing a
+// reaper reverting the row to ready (status/assignee): without the shared
+// lock cell Dolt merges them silently, so the edit path never learns its row
+// was reverted underneath it.
 func TestRowLockForcesConflictOnDisjointCellWrites(t *testing.T) {
 	store, cleanup := setupConcurrentTestStore(t)
 	defer cleanup()
@@ -417,44 +424,48 @@ func TestRowLockForcesConflictOnDisjointCellWrites(t *testing.T) {
 			t.Fatalf("begin tx2: %v", err)
 		}
 
-		hbSQL := "UPDATE issues SET heartbeat_at = ? WHERE id = ?"
+		editSQL := "UPDATE issues SET priority = 0 WHERE id = ?"
 		reclaimSQL := "UPDATE issues SET status = 'open', assignee = NULL WHERE id = ?"
-		hbArgs := []any{time.Now().UTC(), id}
+		editArgs := []any{id}
 		reclaimArgs := []any{id}
 		if withLock {
-			hbSQL = "UPDATE issues SET heartbeat_at = ?, row_lock = ? WHERE id = ?"
-			hbArgs = []any{time.Now().UTC(), int64(111111), id}
+			editSQL = "UPDATE issues SET priority = 0, row_lock = ? WHERE id = ?"
+			editArgs = []any{int64(111111), id}
 			reclaimSQL = "UPDATE issues SET status = 'open', assignee = NULL, row_lock = ? WHERE id = ?"
 			reclaimArgs = []any{int64(222222), id}
 		}
 
-		if _, err := tx1.ExecContext(ctx, hbSQL, hbArgs...); err != nil {
-			t.Fatalf("tx1 heartbeat exec: %v", err)
+		if _, err := tx1.ExecContext(ctx, editSQL, editArgs...); err != nil {
+			t.Fatalf("tx1 edit exec: %v", err)
 		}
 		if _, err := tx2.ExecContext(ctx, reclaimSQL, reclaimArgs...); err != nil {
 			t.Fatalf("tx2 reclaim exec: %v", err)
 		}
-		// Commit the heartbeat first, then the reclaim. The reclaim is the loser
+		// Commit the edit first, then the reclaim. The reclaim is the loser
 		// that must conflict when both touch row_lock.
 		if err := tx1.Commit(); err != nil {
-			t.Fatalf("tx1 commit (heartbeat): %v", err)
+			t.Fatalf("tx1 commit (edit): %v", err)
 		}
 		return tx2.Commit()
 	}
 
-	// WITHOUT row_lock: the disjoint writes merge with no error, leaving a zombie.
+	// WITHOUT row_lock: the disjoint writes merge with no error.
 	if err := runRace("zombie-norowlock", false); err != nil {
 		// A conflict here would also be acceptable (still safe), but the point of
 		// the test is to demonstrate the silent merge, so surface if Dolt's
 		// behavior changed.
 		t.Skipf("expected silent merge without row_lock, got conflict %v (Dolt merge semantics changed)", err)
 	}
-	z := readLeaseState(t, ctx, store, "zombie-norowlock")
-	zombie := z.status == "open" && z.heartbeatAt.Valid && (!z.assignee.Valid || z.assignee.String == "")
-	if !zombie {
-		t.Fatalf("without row_lock expected a merged zombie (open+unassigned+heartbeat), got %+v", z)
+	var priority int
+	var status string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT priority, status FROM issues WHERE id = ?", "zombie-norowlock").Scan(&priority, &status); err != nil {
+		t.Fatalf("read merged row: %v", err)
 	}
-	t.Logf("without row_lock: cell-merge produced zombie state %+v", z)
+	if priority != 0 || status != "open" {
+		t.Fatalf("without row_lock expected a silent merge (priority=0 AND status=open), got priority=%d status=%s", priority, status)
+	}
+	t.Logf("without row_lock: cell-merge landed both writes (priority=%d, status=%s)", priority, status)
 
 	// WITH row_lock: both writers touch the shared cell, so the second commit
 	// conflicts (1213/1205) instead of silently merging.
@@ -466,6 +477,99 @@ func TestRowLockForcesConflictOnDisjointCellWrites(t *testing.T) {
 		t.Fatalf("with row_lock got err %v, want a serialization conflict (1213/1205)", err)
 	}
 	t.Logf("with row_lock: second commit correctly conflicted: %v", err)
+}
+
+// TestHeartbeatReclaimContendOnLeaseRow pins the property that replaced the
+// old heartbeat-vs-reaper row_lock guard (bd-lrgn1): a heartbeat (UPDATE of
+// the lease row) and a reclaim (DELETE of the same lease row) contend on the
+// SAME leases row, so Dolt's commit-time merge forces the second committer to
+// conflict — no shared lock cell needed. The loser's withRetryTx replay then
+// sees the winner's state: a replayed heartbeat finds its lease gone (worker
+// learns it lost the claim), a replayed reclaim finds a fresh expiry and
+// leaves the rescued claim alone.
+func TestHeartbeatReclaimContendOnLeaseRow(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seedClaimedIssue(t, ctx, store, "lease-contend", "owner", time.Hour)
+
+	tx1, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx1: %v", err)
+	}
+	tx2, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx2: %v", err)
+	}
+
+	// tx1: heartbeat pushes the expiry forward. tx2: reclaim deletes the row.
+	if _, err := tx1.ExecContext(ctx,
+		"UPDATE leases SET lease_expires_at = ?, heartbeat_at = ? WHERE issue_id = ?",
+		time.Now().UTC().Add(2*time.Hour), time.Now().UTC(), "lease-contend"); err != nil {
+		t.Fatalf("tx1 heartbeat exec: %v", err)
+	}
+	if _, err := tx2.ExecContext(ctx,
+		"DELETE FROM leases WHERE issue_id = ?", "lease-contend"); err != nil {
+		t.Fatalf("tx2 reclaim exec: %v", err)
+	}
+	if err := tx1.Commit(); err != nil {
+		t.Fatalf("tx1 commit (heartbeat): %v", err)
+	}
+	err = tx2.Commit()
+	if err == nil {
+		t.Fatal("update-vs-delete of the same lease row did not conflict — the heartbeat/reclaim race guard is gone")
+	}
+	if !isSerializationError(err) {
+		t.Fatalf("lease-row contention err = %v, want a serialization conflict (1213/1205)", err)
+	}
+	t.Logf("lease-row update-vs-delete correctly conflicted: %v", err)
+}
+
+// TestHeartbeatMintsNoDoltCommits is acceptance criterion (1) of bd-lrgn1: a
+// claim followed by N heartbeats produces exactly the claim's own commit and
+// ZERO further commits — heartbeats write only the dolt_ignored leases table.
+// Status/assignee transitions (claim, close) still commit (criterion 2).
+func TestHeartbeatMintsNoDoltCommits(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	commitCount := func() int {
+		var n int
+		if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_log").Scan(&n); err != nil {
+			t.Fatalf("count dolt_log: %v", err)
+		}
+		return n
+	}
+
+	seedClaimedIssue(t, ctx, store, "lease-nocommit", "alice", time.Hour)
+	afterClaim := commitCount()
+
+	for i := 0; i < 5; i++ {
+		if err := store.HeartbeatIssue(ctx, "lease-nocommit", "alice"); err != nil {
+			t.Fatalf("heartbeat %d: %v", i, err)
+		}
+	}
+	if got := commitCount(); got != afterClaim {
+		t.Errorf("heartbeats minted %d dolt commit(s) — want zero (leases are dolt_ignored)", got-afterClaim)
+	}
+
+	// The lease is genuinely renewed even though nothing committed.
+	ls := readLeaseState(t, ctx, store, "lease-nocommit")
+	if !ls.leaseExpires.Valid || !ls.leaseExpires.Time.After(time.Now()) {
+		t.Errorf("lease not renewed after heartbeats: %+v", ls)
+	}
+
+	// A status transition still commits: close mints a commit.
+	if err := store.CloseIssue(ctx, "lease-nocommit", "done", "alice", ""); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if got := commitCount(); got <= afterClaim {
+		t.Errorf("close minted no dolt commit: count %d, want > %d", got, afterClaim)
+	}
 }
 
 // TestConcurrentHeartbeatReclaimClose is the integration race (the lease analog
@@ -523,7 +627,7 @@ func TestConcurrentHeartbeatReclaimClose(t *testing.T) {
 				return
 			default:
 			}
-			if _, err := store.ReclaimExpiredLeases(raceCtx, 0, "reaper"); err != nil {
+			if _, err := store.ReclaimExpiredLeases(raceCtx, 0, types.ReclaimFilter{}, "reaper"); err != nil {
 				if raceCtx.Err() == nil {
 					reaperErrs.Add(1)
 				}
@@ -580,7 +684,7 @@ func TestConcurrentHeartbeatReclaimClose(t *testing.T) {
 	// dead workers' issues reach their terminal open state regardless of reaper
 	// timing.
 	time.Sleep(ttl + 1500*time.Millisecond)
-	if _, err := store.ReclaimExpiredLeases(ctx, 0, "final-reaper"); err != nil {
+	if _, err := store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, "final-reaper"); err != nil {
 		t.Fatalf("final reclaim sweep: %v", err)
 	}
 
@@ -611,5 +715,203 @@ func TestConcurrentHeartbeatReclaimClose(t *testing.T) {
 	// Every live issue should have ended closed; every dead one open.
 	if closed == 0 || open == 0 {
 		t.Errorf("expected a mix of closed (live) and open (reclaimed) issues, got closed=%d open=%d", closed, open)
+	}
+}
+
+// expiryMargin is how long a test waits for a shortLeaseTTL lease to become
+// reclaimable. Dolt's DATETIME columns hold whole seconds and round on write,
+// so conformance tests must stay clear of sub-second lease behavior (L1.3).
+const (
+	shortLeaseTTL = time.Second
+	expiryMargin  = 2500 * time.Millisecond
+)
+
+// TestStartedAtStampedOnceAcrossClaims pins L2.2: claims set started_at only
+// when it is absent. Idempotent claims and re-claims after a status-only reopen
+// preserve the original value. Reaper reclaim remains the deliberate contrast:
+// L5.2 clears started_at, so the next claimant receives a fresh start time.
+func TestStartedAtStampedOnceAcrossClaims(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seedClaimedIssue(t, ctx, store, "started-keep", "alice", time.Hour)
+	first := readLeaseState(t, ctx, store, "started-keep")
+	if first.startedAtNull {
+		t.Fatal("claim did not stamp started_at")
+	}
+	origin := first.startedAt.Time
+
+	time.Sleep(1100 * time.Millisecond) // DATETIME is second-granular
+	if err := store.ClaimIssue(ctx, "started-keep", "alice"); err != nil {
+		t.Fatalf("idempotent re-claim: %v", err)
+	}
+	if got := readLeaseState(t, ctx, store, "started-keep").startedAt.Time; !got.Equal(origin) {
+		t.Errorf("idempotent re-claim moved started_at: %v -> %v", origin, got)
+	}
+
+	// A status-only reopen keeps both the assignee and started_at. Re-claiming
+	// therefore exercises the COALESCE(started_at, now) preservation branch.
+	if err := store.UpdateIssue(ctx, "started-keep", map[string]interface{}{"status": string(types.StatusOpen)}, "dispatcher"); err != nil {
+		t.Fatalf("reopen through update: %v", err)
+	}
+	reopened := readLeaseState(t, ctx, store, "started-keep")
+	if reopened.assignee.String != "alice" {
+		t.Errorf("status-only update cleared the assignee: %q", reopened.assignee.String)
+	}
+	if reopened.startedAtNull || !reopened.startedAt.Time.Equal(origin) {
+		t.Fatalf("reopen moved started_at: %v -> %+v", origin, reopened.startedAt)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+	if err := store.ClaimIssue(ctx, "started-keep", "alice"); err != nil {
+		t.Fatalf("re-claim after reopen: %v", err)
+	}
+	after := readLeaseState(t, ctx, store, "started-keep")
+	if after.status != "in_progress" || !after.startedAt.Time.Equal(origin) {
+		t.Errorf("re-claim did not preserve started_at %v: %+v", origin, after)
+	}
+
+	// Reclaim is explicitly different: L5.2 clears started_at, and the next
+	// claim starts a new work interval.
+	seedClaimedIssue(t, ctx, store, "started-reclaim", "dead-worker", shortLeaseTTL)
+	dead := readLeaseState(t, ctx, store, "started-reclaim")
+	if dead.startedAtNull {
+		t.Fatal("claim did not stamp started_at on started-reclaim")
+	}
+	deadStart := dead.startedAt.Time
+	time.Sleep(expiryMargin)
+	reclaimed, err := store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, "reaper")
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if len(reclaimed) != 1 || reclaimed[0].ID != "started-reclaim" {
+		t.Fatalf("reclaimed = %+v, want exactly [started-reclaim]", reclaimed)
+	}
+	if !readLeaseState(t, ctx, store, "started-reclaim").startedAtNull {
+		t.Fatal("reclaim did not clear started_at (L5.2)")
+	}
+	if err := store.ClaimIssue(ctx, "started-reclaim", "bob"); err != nil {
+		t.Fatalf("claim after reclaim: %v", err)
+	}
+	fresh := readLeaseState(t, ctx, store, "started-reclaim")
+	if fresh.startedAtNull || !fresh.startedAt.Time.After(deadStart) {
+		t.Errorf("claim after reclaim did not stamp a fresh start: previous=%v current=%+v", deadStart, fresh.startedAt)
+	}
+}
+
+// TestHeartbeatRevivesExpiredLease pins L4.3: expiry alone transfers nothing.
+// The owner may revive an expired lease until reclaim actually returns the issue
+// to the pool; after reclaim, the old owner's heartbeat is not claimable.
+func TestHeartbeatRevivesExpiredLease(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	seedClaimedIssue(t, ctx, store, "lease-revive", "alice", shortLeaseTTL)
+	seedClaimedIssue(t, ctx, store, "lease-lost", "bob", shortLeaseTTL)
+	time.Sleep(expiryMargin)
+
+	expired := readLeaseState(t, ctx, store, "lease-revive")
+	if !expired.leaseExpires.Valid || expired.leaseExpires.Time.After(time.Now()) {
+		t.Fatalf("precondition: lease-revive should be expired, got %v", expired.leaseExpires)
+	}
+	if err := store.HeartbeatIssue(ctx, "lease-revive", "alice"); err != nil {
+		t.Fatalf("owner heartbeat on expired unreclaimed lease: %v", err)
+	}
+	revived := readLeaseState(t, ctx, store, "lease-revive")
+	if !revived.leaseExpires.Valid || !revived.leaseExpires.Time.After(time.Now()) {
+		t.Errorf("heartbeat did not revive lease: %v", revived.leaseExpires)
+	}
+
+	reclaimed, err := store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, "reaper")
+	if err != nil {
+		t.Fatalf("reclaim grace=0: %v", err)
+	}
+	if len(reclaimed) != 1 || reclaimed[0].ID != "lease-lost" {
+		t.Fatalf("reclaimed = %+v, want exactly [lease-lost]", reclaimed)
+	}
+	if still := readLeaseState(t, ctx, store, "lease-revive"); still.status != "in_progress" || still.assignee.String != "alice" {
+		t.Errorf("reaper disturbed revived claim: %+v", still)
+	}
+	if err := store.HeartbeatIssue(ctx, "lease-lost", "bob"); !errors.Is(err, storage.ErrNotClaimable) {
+		t.Errorf("heartbeat after reclaim err = %v, want ErrNotClaimable", err)
+	}
+}
+
+// TestConcurrentReapersAreBenign pins L5.5: two reapers racing the same stale
+// set neither error nor double-report a reclaim, and do not disturb live work.
+func TestConcurrentReapersAreBenign(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const staleCount = 4
+	stale := make([]string, 0, staleCount)
+	for i := 0; i < staleCount; i++ {
+		id := fmt.Sprintf("reapers-stale-%d", i)
+		seedClaimedIssue(t, ctx, store, id, fmt.Sprintf("dead-%d", i), shortLeaseTTL)
+		stale = append(stale, id)
+	}
+	seedClaimedIssue(t, ctx, store, "reapers-live", "live-worker", time.Hour)
+	time.Sleep(expiryMargin)
+
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		results = map[string][]string{}
+	)
+	for _, reaper := range []string{"reaper-a", "reaper-b"} {
+		wg.Add(1)
+		go func(actor string) {
+			defer wg.Done()
+			got, err := store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, actor)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				t.Errorf("%s surfaced reclaim error: %v", actor, err)
+				return
+			}
+			for _, r := range got {
+				results[actor] = append(results[actor], r.ID)
+			}
+		}(reaper)
+	}
+	wg.Wait()
+
+	seen := map[string]string{}
+	for actor, ids := range results {
+		for _, id := range ids {
+			if previous, duplicate := seen[id]; duplicate {
+				t.Errorf("%s reported by both %s and %s", id, previous, actor)
+			}
+			seen[id] = actor
+		}
+	}
+	for _, id := range stale {
+		if _, ok := seen[id]; !ok {
+			t.Errorf("stale issue %s was not reclaimed", id)
+		}
+		ls := readLeaseState(t, ctx, store, id)
+		if ls.status != "open" || (ls.assignee.Valid && ls.assignee.String != "") || ls.leaseExpires.Valid || ls.heartbeatAt.Valid || !ls.startedAtNull {
+			t.Errorf("%s left in inconsistent state: %+v", id, ls)
+		}
+		var events int
+		if err := store.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = 'lease_reclaimed'`, id).Scan(&events); err != nil {
+			t.Fatalf("count reclaim events for %s: %v", id, err)
+		}
+		if events != 1 {
+			t.Errorf("%s lease_reclaimed events = %d, want 1", id, events)
+		}
+	}
+	if actor := seen["reapers-live"]; actor != "" {
+		t.Errorf("live issue was reclaimed by %s", actor)
+	}
+	if live := readLeaseState(t, ctx, store, "reapers-live"); live.status != "in_progress" || live.assignee.String != "live-worker" {
+		t.Errorf("live issue disturbed: %+v", live)
 	}
 }

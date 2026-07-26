@@ -293,7 +293,11 @@ func TestProtocol_CloseGuardRespectDepTypes(t *testing.T) {
 		w.run("dep", "add", a, b, "--type", "blocks")
 
 		out, _ := w.tryRun("close", a)
-		if !strings.Contains(out, "blocked by open issues") {
+		// Both close paths now delegate to a library checked close and surface
+		// storage.ErrCloseBlocked ("cannot close blocked issue: <id> is blocked
+		// by [...]"). The older "blocked by open issues" arm is kept so this
+		// discovery test still matches pre-delegation binaries.
+		if !strings.Contains(out, "blocked by open issues") && !strings.Contains(out, "cannot close") {
 			t.Errorf("close of blocked issue should be rejected, got: %s", out)
 		}
 
@@ -1411,12 +1415,17 @@ func TestDiscovery_ConditionalBlocksCycleUndetected(t *testing.T) {
 // TestDiscovery_LabelPatternFilterDeadCode verifies that --label-pattern
 // actually filters results.
 //
-// FINDING: bd list --label-pattern "tech-*" sets filter.LabelPattern in the
-// IssueFilter struct, but SearchIssues() in queries.go NEVER reads or processes
-// this field. The SQL query builder completely ignores it. The user gets
-// unfiltered results while believing they filtered.
+// FIXED (PR #3971): bd list --label-pattern "tech-*" used to set
+// filter.LabelPattern in the IssueFilter struct without SearchIssues() ever
+// reading or processing that field — the SQL query builder ignored it
+// completely and the user got unfiltered results while believing they
+// filtered. BuildIssueFilterClauses now wires LabelPattern (glob -> SQL
+// LIKE) and LabelRegex (-> SQL REGEXP) into the query. This test's
+// assertions describe the correct/filtered behavior and previously failed
+// against the candidate binary; it now passes and stays as a regression
+// lock against the dead-code bug recurring.
 //
-// Classification: BUG — dead filter gives silently wrong results.
+// Classification: BUG (fixed) — dead filter gave silently wrong results.
 func TestDiscovery_LabelPatternFilterDeadCode(t *testing.T) {
 	w := newCandidateWorkspace(t)
 
