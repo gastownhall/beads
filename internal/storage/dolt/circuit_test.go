@@ -417,15 +417,61 @@ func TestCircuitBreakerDir_UsesSubdirectory(t *testing.T) {
 	cb := newCircuitBreaker("127.0.0.1", 44444, "")
 	t.Cleanup(func() { os.Remove(cb.filePath) })
 
-	if filepath.Dir(cb.filePath) != filepath.Clean(circuitBreakerDir) {
+	wantDir, _ := circuitBreakerPaths()
+	if filepath.Dir(cb.filePath) != wantDir {
 		t.Errorf("circuit breaker file should be in %s, got dir %s",
-			circuitBreakerDir, filepath.Dir(cb.filePath))
+			wantDir, filepath.Dir(cb.filePath))
 	}
 
 	// Write state and verify file lands in the subdirectory
 	cb.writeState(circuitState{State: circuitClosed})
 	if _, err := os.Stat(cb.filePath); err != nil {
 		t.Errorf("circuit breaker file should exist at %s: %v", cb.filePath, err)
+	}
+}
+
+func TestCircuitBreakerPathsTestOverrideIsolatesCurrentAndLegacyState(t *testing.T) {
+	testDir := t.TempDir()
+	t.Setenv(testCircuitBreakerDirEnv, testDir)
+	t.Setenv("BEADS_TEST_MODE", "")
+
+	dir, legacy := circuitBreakerPaths()
+	if dir != testDir {
+		t.Fatalf("circuit directory = %q, want %q", dir, testDir)
+	}
+	wantLegacy := filepath.Join(testDir, "beads-dolt-circuit-0.json")
+	if legacy != wantLegacy {
+		t.Fatalf("legacy circuit file = %q, want %q", legacy, wantLegacy)
+	}
+	cb := newCircuitBreaker("127.0.0.1", 44444, "isolated")
+	if filepath.Dir(cb.filePath) != testDir {
+		t.Fatalf("breaker path = %q, want directory %q", cb.filePath, testDir)
+	}
+	if err := os.WriteFile(wantLegacy, []byte("legacy"), 0o600); err != nil {
+		t.Fatalf("write isolated legacy state: %v", err)
+	}
+	CleanStaleCircuitBreakerFiles()
+	if _, err := os.Stat(wantLegacy); !os.IsNotExist(err) {
+		t.Fatalf("isolated legacy cleanup error = %v, want not-exist", err)
+	}
+}
+
+func TestCircuitBreakerPathsProductionDefaultsUnchanged(t *testing.T) {
+	t.Setenv(testCircuitBreakerDirEnv, "")
+	dir, legacy := circuitBreakerPaths()
+	if dir != "/tmp/beads-circuit" {
+		t.Fatalf("production circuit directory = %q", dir)
+	}
+	if legacy != "/tmp/beads-dolt-circuit-0.json" {
+		t.Fatalf("production legacy circuit file = %q", legacy)
+	}
+}
+
+func TestCircuitBreakerPathsRejectsRelativeOverride(t *testing.T) {
+	t.Setenv(testCircuitBreakerDirEnv, "relative-test-dir")
+	dir, legacy := circuitBreakerPaths()
+	if dir != circuitBreakerDir || legacy != legacyCircuitBreakerFile {
+		t.Fatalf("relative override selected paths dir=%q legacy=%q", dir, legacy)
 	}
 }
 

@@ -28,7 +28,7 @@ func newFileSystemAdapters() domain.BeadsDirFSAdapters {
 		},
 		InstallJJHooks: installJJHooks,
 		AddAgentsInstructions: func(p domain.AgentsFileParams) {
-			addAgentsInstructions(p.File, p.Verbose, p.TemplatePath, agents.Profile(p.Profile), agents.RenderOpts{HasRemote: p.HasRemote})
+			addAgentsInstructions(p.File, p.Verbose, p.TemplatePath, agents.Profile(p.Profile), agents.RenderOpts{HasRemote: p.HasRemote, NoPush: p.NoPush})
 		},
 		InstallClaudeProject: setup.InstallClaudeProject,
 		SetYAMLConfig:        config.SetYamlConfig,

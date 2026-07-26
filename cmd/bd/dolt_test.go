@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,8 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/hooks"
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 func TestDoltShowConfigNotInRepo(t *testing.T) {
@@ -1022,6 +1027,54 @@ func TestIsDivergedHistoryErr(t *testing.T) {
 	}
 }
 
+func TestIsAncestorPKMismatchErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"unrelated error", fmt.Errorf("connection refused"), false},
+		{"diverged history", fmt.Errorf("no common ancestor"), false},
+		{"row conflict", fmt.Errorf("merge has unresolved conflicts"), false},
+		{"ancestor PK variant", fmt.Errorf("error: cannot merge because table dependencies has different primary keys in its common ancestor"), true},
+		{"head PK variant", fmt.Errorf("error: cannot merge because table dependencies has different primary keys"), true},
+		{"wrapped", fmt.Errorf("pull failed: %w", fmt.Errorf("error: cannot merge because table issues has different primary keys in its common ancestor")), true},
+		{"sql error envelope", fmt.Errorf("Error 1105 (HY000): error: cannot merge because table dependencies has different primary keys in its common ancestor"), true},
+		{"mixed case", fmt.Errorf("Cannot Merge Because Table dependencies Has Different Primary Keys"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isAncestorPKMismatchErr(tt.err)
+			if got != tt.want {
+				t.Errorf("isAncestorPKMismatchErr(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAncestorPKMismatchTable(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil error", nil, ""},
+		{"no match", fmt.Errorf("no common ancestor"), ""},
+		{"ancestor variant", fmt.Errorf("error: cannot merge because table dependencies has different primary keys in its common ancestor"), "dependencies"},
+		{"head variant", fmt.Errorf("error: cannot merge because table wisp_dependencies has different primary keys"), "wisp_dependencies"},
+		{"sql error envelope", fmt.Errorf("Error 1105 (HY000): error: cannot merge because table issues has different primary keys in its common ancestor"), "issues"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ancestorPKMismatchTable(tt.err)
+			if got != tt.want {
+				t.Errorf("ancestorPKMismatchTable(%v) = %q, want %q", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsRemoteNotFoundErr(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1040,6 +1093,251 @@ func TestIsRemoteNotFoundErr(t *testing.T) {
 				t.Errorf("isRemoteNotFoundErr(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+type fakeRemoteLister struct {
+	remotes []storage.RemoteInfo
+	err     error
+}
+
+func (f fakeRemoteLister) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
+	return f.remotes, f.err
+}
+
+// fakeProbingRemoteLister also implements persistedRemoteProber, like the
+// server-mode DoltStore.
+type fakeProbingRemoteLister struct {
+	fakeRemoteLister
+	persisted bool
+}
+
+func (f fakeProbingRemoteLister) HasPersistedRemote() bool {
+	return f.persisted
+}
+
+// bd-6dnrw.7: the exit-0 "no remote configured" skip must only fire when
+// dolt_remotes is actually empty. A remote-not-found error with remotes
+// configured (deleted remote-side repo, missing branch, typo) is a real sync
+// failure and must stay on the exit-1 path. bd-578h9.10: an empty table is
+// still not proof at server cold start — a remote persisted on disk
+// (repo_state.json, GH#2118) must also veto the skip.
+func TestIsConfirmedNoRemote(t *testing.T) {
+	ctx := context.Background()
+	notFound := fmt.Errorf("remote 'origin' not found")
+	tests := []struct {
+		name   string
+		err    error
+		lister remoteLister
+		want   bool
+	}{
+		{"no remotes configured", notFound, fakeRemoteLister{}, true},
+		{"remotes exist", notFound, fakeRemoteLister{remotes: []storage.RemoteInfo{{Name: "origin"}}}, false},
+		{"list fails", notFound, fakeRemoteLister{err: fmt.Errorf("server unreachable")}, false},
+		{"unrelated error", fmt.Errorf("connection refused"), fakeRemoteLister{}, false},
+		{"nil error", nil, fakeRemoteLister{}, false},
+		{"empty table but remote persisted on disk", notFound, fakeProbingRemoteLister{persisted: true}, false},
+		{"empty table and no persisted remote", notFound, fakeProbingRemoteLister{}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isConfirmedNoRemote(ctx, tt.lister, tt.err)
+			if got != tt.want {
+				t.Errorf("isConfirmedNoRemote(%v, %#v) = %v, want %v",
+					tt.err, tt.lister, got, tt.want)
+			}
+		})
+	}
+}
+
+// fakeProbingDoltStore stands in for the concrete server-mode *dolt.DoltStore
+// at the bottom of the real decorator chain: a full storage.DoltStorage (via
+// the embedded nil interface — only the methods below may be called) that
+// reports its dolt_remotes rows and its on-disk repo_state.json separately.
+type fakeProbingDoltStore struct {
+	storage.DoltStorage
+	remotes   []storage.RemoteInfo
+	persisted bool
+}
+
+func (f *fakeProbingDoltStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
+	return f.remotes, nil
+}
+
+func (f *fakeProbingDoltStore) HasPersistedRemote() bool { return f.persisted }
+
+// wy-xtv17: the GH#2118 persisted-remote probe must survive the storage
+// decorator chain. bd never holds the raw *dolt.DoltStore — main.go wires
+// caller → HookFiringStore → InstrumentedStorage → DoltStore — and
+// HasPersistedRemote is on neither decorator, so asserting straight on the
+// passed store skipped the probe on all but a no-hooks rig (the hook layer is
+// wired whenever there is a dbPath; the telemetry layer only under
+// BD_OTEL_METRICS_URL / BD_OTEL_STDOUT). That turned a cold-started sql-server (remote in
+// .dolt/repo_state.json, dolt_remotes not yet populated) into a permanent
+// silent no-op: `bd sync` printing "No remote is configured" and exiting 0 on
+// every tick, forever, with --json consumers reading it as success.
+func TestHasNoRemoteConfigured_ProbesThroughDecoratedStore(t *testing.T) {
+	ctx := context.Background()
+	notFound := fmt.Errorf("remote 'origin' not found")
+	for _, chain := range []struct {
+		name      string
+		telemetry bool
+	}{
+		{"hooks only", false},
+		{"hooks + telemetry", true},
+	} {
+		t.Run(chain.name, func(t *testing.T) {
+			clearTelemetryEnv(t)
+			if chain.telemetry {
+				t.Setenv("BD_OTEL_STDOUT", "true")
+			}
+			decorate := func(raw storage.DoltStorage) storage.DoltStorage {
+				return wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+			}
+
+			// The load-bearing case: dolt_remotes is empty, but the remote is
+			// on disk. The skip must NOT fire.
+			persisted := decorate(&fakeProbingDoltStore{persisted: true})
+			if _, direct := persisted.(persistedRemoteProber); direct {
+				t.Fatalf("%T implements persistedRemoteProber directly; this test no longer exercises the peel", persisted)
+			}
+			if hasNoRemoteConfigured(ctx, persisted) {
+				t.Error("hasNoRemoteConfigured = true through a decorated store whose remote is persisted on disk; the GH#2118 probe was skipped")
+			}
+			// bd dolt push/pull reach the same probe via isConfirmedNoRemote.
+			if isConfirmedNoRemote(ctx, persisted, notFound) {
+				t.Error("isConfirmedNoRemote = true through a decorated store whose remote is persisted on disk")
+			}
+
+			// A genuinely remote-less rig still gets its benign exit-0 skip.
+			if solo := decorate(&fakeProbingDoltStore{}); !hasNoRemoteConfigured(ctx, solo) {
+				t.Error("hasNoRemoteConfigured = false for a decorated store with no remote anywhere; the solo-rig skip regressed")
+			}
+
+			// And a configured remote is still vetoed on the ListRemotes
+			// evidence alone — the decorators forward that call.
+			configured := decorate(&fakeProbingDoltStore{remotes: []storage.RemoteInfo{{Name: "origin"}}})
+			if hasNoRemoteConfigured(ctx, configured) {
+				t.Error("hasNoRemoteConfigured = true through a decorated store with remotes configured")
+			}
+		})
+	}
+}
+
+// fakeAdoptingDoltStore is fakeProbingDoltStore plus the write side of the
+// adoption path: it records AddRemote instead of performing it, so a
+// regression surfaces as an assertion here rather than as a real remote write
+// (and stops before adoption can touch the workspace config or git).
+type fakeAdoptingDoltStore struct {
+	fakeProbingDoltStore
+	listErr        error
+	addRemoteCalls int
+}
+
+func (f *fakeAdoptingDoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.fakeProbingDoltStore.ListRemotes(ctx)
+}
+
+func (f *fakeAdoptingDoltStore) AddRemote(_ context.Context, name, url string) error {
+	f.addRemoteCalls++
+	return fmt.Errorf("fakeAdoptingDoltStore: AddRemote(%q, %q) must not be called", name, url)
+}
+
+// wy-82hc5: `bd dolt push` adopts the git origin as the Dolt remote when the
+// rig appears to have none, and it judged that on an empty dolt_remotes alone
+// — the same unhardened assumption wy-xtv17 removed from the no-remote gate.
+// In the GH#2118 cold-start window (sql-server just started, remote persisted
+// in .dolt/repo_state.json but dolt_remotes not yet populated) that re-derives
+// the remote from git, silently repointing push whenever the persisted remote
+// and the git origin disagree. The on-disk probe must veto first, and it can
+// only be reached through the storage decorator chain.
+func TestAdoptGitOriginRemoteForPush_PersistedRemoteVetoesAdoption(t *testing.T) {
+	ctx := context.Background()
+	for _, chain := range []struct {
+		name      string
+		telemetry bool
+	}{
+		{"hooks only", false},
+		{"hooks + telemetry", true},
+	} {
+		t.Run(chain.name, func(t *testing.T) {
+			clearTelemetryEnv(t)
+			if chain.telemetry {
+				t.Setenv("BD_OTEL_STDOUT", "true")
+			}
+			decorate := func(raw storage.DoltStorage) storage.DoltStorage {
+				return wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+			}
+
+			// The load-bearing case, driven through the real call site:
+			// dolt_remotes is empty, the remote is on disk. Adoption must be
+			// a quiet no-op — no AddRemote, no error, and no walk into the
+			// workspace/git half of the function.
+			raw := &fakeAdoptingDoltStore{fakeProbingDoltStore: fakeProbingDoltStore{persisted: true}}
+			persisted := decorate(raw)
+			if _, direct := persisted.(persistedRemoteProber); direct {
+				t.Fatalf("%T implements persistedRemoteProber directly; this test no longer exercises the peel", persisted)
+			}
+			adopted, err := adoptGitOriginRemoteForPush(ctx, persisted)
+			if err != nil {
+				t.Errorf("adoptGitOriginRemoteForPush returned error %v; a persisted remote is a no-op, not a failure", err)
+			}
+			if adopted {
+				t.Error("adoptGitOriginRemoteForPush adopted the git origin although the remote is persisted on disk (GH#2118 cold-start window)")
+			}
+			if raw.addRemoteCalls != 0 {
+				t.Errorf("AddRemote called %d times; the persisted-remote veto did not fire", raw.addRemoteCalls)
+			}
+
+			// The structural decision behind it, through the same chain.
+			// This block, not the call-site block above, is the assertion
+			// that fails in EVERY environment when the veto is removed: with
+			// the fix reverted, adoption above bails early at
+			// selectedDoltBeadsDir() on a machine with no resolvable
+			// workspace, so its `adopted` / addRemoteCalls assertions are
+			// environment-dependent. Do not drop these as redundant.
+			for _, tc := range []struct {
+				name  string
+				store *fakeAdoptingDoltStore
+				want  bool
+			}{
+				{"persisted on disk only", &fakeAdoptingDoltStore{fakeProbingDoltStore: fakeProbingDoltStore{persisted: true}}, true},
+				{"listed in dolt_remotes", &fakeAdoptingDoltStore{fakeProbingDoltStore: fakeProbingDoltStore{remotes: []storage.RemoteInfo{{Name: "origin"}}}}, true},
+				{"no remote anywhere", &fakeAdoptingDoltStore{}, false},
+			} {
+				got, err := hasConfiguredRemote(ctx, decorate(tc.store))
+				if err != nil {
+					t.Errorf("hasConfiguredRemote(%s) error: %v", tc.name, err)
+				}
+				if got != tc.want {
+					t.Errorf("hasConfiguredRemote(%s) = %v, want %v", tc.name, got, tc.want)
+				}
+			}
+
+			// A failed ListRemotes is still a real error, not "no remote":
+			// guessing a remote off a broken listing is how the wrong URL
+			// gets adopted.
+			listErr := fmt.Errorf("dolt_remotes unavailable")
+			broken := decorate(&fakeAdoptingDoltStore{listErr: listErr})
+			if _, err := hasConfiguredRemote(ctx, broken); !errors.Is(err, listErr) {
+				t.Errorf("hasConfiguredRemote swallowed a ListRemotes failure: err = %v", err)
+			}
+			if adopted, err := adoptGitOriginRemoteForPush(ctx, broken); adopted || !errors.Is(err, listErr) {
+				t.Errorf("adoptGitOriginRemoteForPush(list error) = (%v, %v), want (false, the list error)", adopted, err)
+			}
+		})
+	}
+}
+
+// A store that is neither a prober nor a decorator must not be treated as one:
+// the probe is optional, and its absence means "no on-disk evidence", not
+// "remote persisted".
+func TestPersistedRemoteProberFor_PlainStore(t *testing.T) {
+	if _, ok := persistedRemoteProberFor(fakeRemoteLister{}); ok {
+		t.Error("persistedRemoteProberFor found a prober on a plain remoteLister")
 	}
 }
 
@@ -1096,6 +1394,44 @@ func TestPrintDivergedHistoryGuidance(t *testing.T) {
 	}
 	if !strings.Contains(output, "rm -rf .beads/dolt") {
 		t.Error("expected guidance to mention manual recovery")
+	}
+}
+
+func TestPrintAncestorPKMismatchGuidance(t *testing.T) {
+	// Capture stderr output
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	printAncestorPKMismatchGuidance(fmt.Errorf("error: cannot merge because table dependencies has different primary keys in its common ancestor"))
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	output := buf.String()
+
+	if !strings.Contains(output, `table "dependencies"`) {
+		t.Error("expected guidance to name the refused table")
+	}
+	if !strings.Contains(output, "schema fork") {
+		t.Error("expected guidance to explain this is a schema fork")
+	}
+	if !strings.Contains(output, "Retrying will not help") {
+		t.Error("expected guidance to say retrying cannot converge the clones")
+	}
+	if !strings.Contains(output, "bd dolt push --force") {
+		t.Error("expected guidance to mention making the canonical clone authoritative")
+	}
+	if !strings.Contains(output, "bd export --all") {
+		t.Error("expected guidance to mention saving local-only work")
+	}
+	if !strings.Contains(output, "bd bootstrap") {
+		t.Error("expected guidance to mention re-cloning via bd bootstrap")
+	}
+	if !strings.Contains(output, "docs/recovery/init-safety.md#pk-fork-refused") {
+		t.Error("expected guidance to link the full recovery playbook")
 	}
 }
 
@@ -1210,15 +1546,17 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 // TestShouldUseExternalDoltStatus covers the routing predicate for
 // `bd dolt status`. The predicate decides whether to ping the configured
 // SQL endpoint (externally-managed server) or read the local PID file
-// (bd-managed server). Three scenarios qualify as externally-managed:
-// non-local hosts, and local hosts where bd does not own the lifecycle
-// (auto-start disabled — be-0eyj). Other configurations should keep the
-// PID-file path so bd-managed servers continue to report PID/log/data.
+// (bd-managed server). Scenarios that qualify as externally-managed:
+// shared-server mode (GH#3218), non-local hosts, and local hosts where bd
+// does not own the lifecycle (auto-start disabled — be-0eyj). Other
+// configurations should keep the PID-file path so bd-managed servers
+// continue to report PID/log/data.
 func TestShouldUseExternalDoltStatus(t *testing.T) {
 	tests := []struct {
 		name              string
 		cfg               *configfile.Config
 		autoStartDisabled bool
+		sharedServerMode  bool
 		want              bool
 	}{
 		{
@@ -1267,6 +1605,61 @@ func TestShouldUseExternalDoltStatus(t *testing.T) {
 			want:              false,
 		},
 		{
+			// GH#3218: a shared server on localhost with bd auto-start
+			// ENABLED previously fell through to the PID-file path and
+			// reported "not running" though bd could connect fine. Shared
+			// mode means bd never owns the lifecycle, so probe SQL.
+			name: "server mode + local host + auto-start enabled + shared-server routes to external (GH#3218)",
+			cfg: &configfile.Config{
+				Backend:        "dolt",
+				DoltMode:       "server",
+				DoltServerHost: "127.0.0.1",
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  true,
+			want:              true,
+		},
+		{
+			name: "server mode + empty host + shared-server routes to external (GH#3218)",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: "server",
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  true,
+			want:              true,
+		},
+		{
+			// GH#2946/#3218: shared-server mode (e.g. dolt.shared-server:
+			// true in config.yaml) wins over a stale metadata.json that
+			// still pins dolt_mode="embedded". IsDoltServerMode() does not
+			// consult dolt.shared-server, so without the shared-server
+			// branch preceding the server-mode guard this workspace would
+			// fall through to the PID-file "not running" path.
+			name: "shared-server flag wins over stale embedded metadata (GH#2946/#3218)",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: "embedded",
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  true,
+			want:              true,
+		},
+		{
+			// Proxied-server mode is excluded from the shared-server
+			// override (matches main.go's !psm guard): bd talks through the
+			// proxy, so keep the non-external path even if the shared-server
+			// flag is also set.
+			name: "proxied-server mode + shared-server flag stays non-external",
+			cfg: &configfile.Config{
+				Backend:  "dolt",
+				DoltMode: configfile.DoltModeProxiedServer,
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  true,
+			want:              false,
+		},
+		{
 			name: "server mode + local host + auto-start disabled routes to external (be-0eyj)",
 			cfg: &configfile.Config{
 				Backend:        "dolt",
@@ -1305,7 +1698,7 @@ func TestShouldUseExternalDoltStatus(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := shouldUseExternalDoltStatus(tc.cfg, tc.autoStartDisabled)
+			got := shouldUseExternalDoltStatus(tc.cfg, tc.autoStartDisabled, tc.sharedServerMode)
 			if got != tc.want {
 				t.Errorf("shouldUseExternalDoltStatus = %v, want %v", got, tc.want)
 			}
@@ -1467,4 +1860,117 @@ func TestRenderLocalDoltStatus(t *testing.T) {
 			t.Errorf("did not expect mode=external on bd-managed path, got:\n%s", out)
 		}
 	})
+}
+
+// minimalPullStore implements storage.DoltStorage by embedding the interface
+// (all methods panic on nil) with Pull overridden for controlled testing.
+type minimalPullStore struct {
+	storage.DoltStorage
+	pullCalled bool
+	pullErr    error
+}
+
+func (m *minimalPullStore) Pull(ctx context.Context) error {
+	m.pullCalled = true
+	return m.pullErr
+}
+
+// ListRemotes is exercised by current main's pull failure handling
+// (isConfirmedNoRemote -> st.ListRemotes during error classification). The
+// embedded nil DoltStorage would panic, so report "no remotes": this keeps a
+// simulated pull failure on the benign no-remote path (clean exit) while still
+// proving the no-push guard does not short-circuit bd dolt pull.
+func (m *minimalPullStore) ListRemotes(context.Context) ([]storage.RemoteInfo, error) {
+	return nil, nil
+}
+
+// minimalPushStore implements storage.DoltStorage by embedding the interface
+// (all methods panic on nil) with Push and ForcePush overridden for controlled testing.
+type minimalPushStore struct {
+	storage.DoltStorage
+	pushCalled bool
+}
+
+func (m *minimalPushStore) Push(ctx context.Context) error {
+	m.pushCalled = true
+	return nil
+}
+
+func (m *minimalPushStore) ForcePush(ctx context.Context) error {
+	m.pushCalled = true
+	return nil
+}
+
+func TestNoPushSkipsDoltPush(t *testing.T) {
+	// no-push guard must exit with a skip message and must NOT call the store's
+	// Push() when no-push: true. Regression guard for PR #4212 guard at
+	// cmd/bd/dolt.go:247-249.
+
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	fake := &minimalPushStore{}
+	store = fake
+
+	t.Setenv("BD_NO_PUSH", "true")
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("no-push") {
+		t.Fatal("test setup: BD_NO_PUSH=true must make no-push=true")
+	}
+
+	out := captureStdout(t, func() error {
+		return doltPushCmd.RunE(doltPushCmd, nil)
+	})
+
+	if fake.pushCalled {
+		t.Error("bd dolt push must not call Push() when no-push: true; Push() was called")
+	}
+	if !strings.Contains(out, "skipping push") {
+		t.Errorf("expected 'skipping push' output, got: %q", out)
+	}
+}
+
+func TestNoPushDoesNotSkipDoltPull(t *testing.T) {
+	// no-push is a push-only guard. bd dolt pull must contact the remote even when
+	// no-push: true — contributor clones need to receive upstream updates.
+	// Regression guard for be-ve2x6 (PR #4212, maphew review-4382359270).
+
+	// Cannot be parallel: modifies process-global store and config.
+	saveAndRestoreGlobals(t)
+	resetCommandContext()
+
+	fake := &minimalPullStore{
+		// Return "remote not found" so the command exits cleanly without os.Exit.
+		pullErr: errors.New("remote not found"),
+	}
+	store = fake
+
+	t.Setenv("BD_NO_PUSH", "true")
+	config.ResetForTesting()
+	t.Cleanup(func() { config.ResetForTesting() })
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	if !config.GetBool("no-push") {
+		t.Fatal("test setup: BD_NO_PUSH=true must make no-push=true")
+	}
+
+	out := captureStdout(t, func() error {
+		return doltPullCmd.RunE(doltPullCmd, nil)
+	})
+
+	if !fake.pullCalled {
+		t.Error("bd dolt pull must attempt the pull even when no-push: true; Pull() was not called")
+	}
+	if strings.Contains(out, "skipping pull") {
+		t.Errorf("bd dolt pull must not skip under no-push: true; got output: %q", out)
+	}
+	if !strings.Contains(out, "Pulling from Dolt remote") {
+		t.Errorf("expected pull attempt output, got: %q", out)
+	}
 }

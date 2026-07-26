@@ -96,6 +96,7 @@ type AgentsFileParams struct {
 	TemplatePath string
 	Profile      string
 	HasRemote    bool
+	NoPush       bool
 }
 
 type BeadsDirFSAdapters struct {
@@ -184,9 +185,6 @@ func (u *beadsDirFSUseCaseImpl) InitializeBeadsDir(ctx context.Context, params I
 		if err := u.fsRepo.WriteProxiedServerClientInfo(ctx, params.ProxiedServerClientInfo); err != nil {
 			return InitializeBeadsDirResult{}, err
 		}
-	}
-	if err := u.fsRepo.WriteInteractionsLog(ctx); err != nil {
-		return InitializeBeadsDirResult{}, err
 	}
 	if err := u.fsRepo.WriteReadme(ctx); err != nil {
 		return InitializeBeadsDirResult{}, err

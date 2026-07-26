@@ -330,8 +330,9 @@ func TestCheckAider_NotInstalled(t *testing.T) {
 		}
 	}()
 
-	// CheckAider calls os.Exit(1) when not installed
-	// We can't easily test that, but we document expected behavior
+	if err := CheckAider(); err == nil {
+		t.Fatal("CheckAider should return error when not installed")
+	}
 }
 
 func TestCheckAider_Installed(t *testing.T) {

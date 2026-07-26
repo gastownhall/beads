@@ -37,7 +37,7 @@ import (
 //     so we avoid it entirely and verify via `dolt sql -q ... -r csv`.
 //
 // Prerequisites:
-//   - dolt >= 1.88.1
+//   - dolt >= 2.2.0
 //   - git CLI available
 //
 // Run:
@@ -463,9 +463,9 @@ func TestGitRemoteRoundTripAllTables(t *testing.T) {
 
 	// Comments
 	runDoltSQL(t, setup.sourceDir,
-		`INSERT INTO comments (issue_id, author, text, created_at) VALUES `+
-			`('rt-child', 'alice', 'Working on this', NOW()), `+
-			`('rt-child', 'bob', 'Looks good', NOW())`)
+		`INSERT INTO comments (id, issue_id, author, text, created_at) VALUES `+
+			`(UUID(), 'rt-child', 'alice', 'Working on this', NOW()), `+
+			`(UUID(), 'rt-child', 'bob', 'Looks good', NOW())`)
 
 	// Dependency
 	runDoltSQL(t, setup.sourceDir,
@@ -1066,8 +1066,8 @@ func TestCreateIssueAfterPull(t *testing.T) {
 	doltClone(t, setup.remoteURL, cloneDir)
 	sourceInsertIssue(t, cloneDir, "ai-clone-001", "Clone issue generating events")
 	runDoltSQL(t, cloneDir,
-		`INSERT INTO events (issue_id, event_type, actor, created_at) `+
-			`VALUES ('ai-clone-001', 'created', 'clone-user', NOW())`)
+		`INSERT INTO events (id, issue_id, event_type, actor, created_at) `+
+			`VALUES (UUID(), 'ai-clone-001', 'created', 'clone-user', NOW())`)
 	sourceCommitAndPush(t, cloneDir, "Add ai-clone-001 with event")
 
 	// Pull into the source store — this is the code path under test.

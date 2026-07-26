@@ -39,7 +39,7 @@ func filteredEnvForContextBinding(keys ...string) []string {
 			filtered = append(filtered, entry)
 		}
 	}
-	return filtered
+	return append(filtered, "BD_DISABLE_METRICS=1", "BD_DISABLE_EVENT_FLUSH=1")
 }
 
 func TestListExplicitDBPathRebindsTargetContext(t *testing.T) {
@@ -121,6 +121,9 @@ func TestListExplicitDBPathRebindsTargetContext(t *testing.T) {
 		"HOME="+t.TempDir(),
 		"XDG_CONFIG_HOME="+t.TempDir(),
 		"BEADS_TEST_MODE=1",
+		// AD-01 (be-c5p): the subprocess connects to a testdb_*-named DB on
+		// the test container; pass the firewall opt-in so dolt.New allows it.
+		"BEADS_TEST_SERVER=1",
 		"BEADS_DIR="+callerBeadsDir,
 		"BEADS_DB=",
 	)

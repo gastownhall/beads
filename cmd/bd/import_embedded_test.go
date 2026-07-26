@@ -185,9 +185,11 @@ func TestEmbeddedImport(t *testing.T) {
 		// Create an issue via bd create
 		id := bdCreateSilent(t, bd, dir, "Original Title")
 
-		// Import with updated title for the same ID
+		// Import with updated title for the same ID. UpdatedAt must be
+		// strictly newer than the created row's second-granularity
+		// updated_at: equal-timestamp rows keep the local row (bd-hj85c).
 		jsonlPath := filepath.Join(t.TempDir(), "upsert.jsonl")
-		now := time.Now().UTC()
+		now := time.Now().UTC().Add(time.Hour)
 		writeJSONLFile(t, jsonlPath, []types.Issue{
 			{ID: id, Title: "Updated Title", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
 		})
@@ -204,6 +206,51 @@ func TestEmbeddedImport(t *testing.T) {
 		}
 		if !strings.Contains(stdout.String(), "Updated Title") {
 			t.Errorf("expected 'Updated Title' after upsert, got: %s", stdout.String())
+		}
+	})
+
+	t.Run("prefix_sync", func(t *testing.T) {
+		// Simulate a stale DB: init with --prefix bd (DB has issue_prefix=bd),
+		// then overwrite config.yaml with issue-prefix: be. bd import must sync
+		// the DB to match config.yaml (be-llaf).
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "bd")
+
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue-prefix: be\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		jsonlPath := filepath.Join(t.TempDir(), "prefix-sync.jsonl")
+		now := time.Now().UTC()
+		writeJSONLFile(t, jsonlPath, []types.Issue{
+			{ID: "bd-sync1", Title: "Prefix Sync Issue", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		})
+
+		bdImport(t, bd, dir, jsonlPath)
+
+		if val := readBack(t, beadsDir, "bd", "issue_prefix", false); val != "be" {
+			t.Errorf("issue_prefix after import: got %q, want %q", val, "be")
+		}
+	})
+
+	t.Run("prefix_sync_no_config_key", func(t *testing.T) {
+		// config.yaml with no issue-prefix key must not touch the DB's
+		// issue_prefix; the sync block only fires when yamlPrefix != "" (be-llaf).
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "bd")
+
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("export:\n  auto: false\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		jsonlPath := filepath.Join(t.TempDir(), "prefix-sync-no-key.jsonl")
+		now := time.Now().UTC()
+		writeJSONLFile(t, jsonlPath, []types.Issue{
+			{ID: "bd-nokey1", Title: "No Prefix Key Issue", Status: types.StatusOpen, IssueType: types.TypeTask, CreatedAt: now, UpdatedAt: now},
+		})
+
+		bdImport(t, bd, dir, jsonlPath)
+
+		if val := readBack(t, beadsDir, "bd", "issue_prefix", false); val != "bd" {
+			t.Errorf("issue_prefix after import: got %q, want %q", val, "bd")
 		}
 	})
 }

@@ -186,22 +186,39 @@ func isLowerAlphaName(s string) bool {
 	return true
 }
 
-// recoverCorruptManifest detects the GH#3290 corrupt-manifest condition by
-// scanning the dolt server log for the "root hash doesn't exist" signature
-// and confirming that every affected database has no recoverable data. If
-// both conditions hold, each corrupt .dolt/ directory is backed up with a
-// timestamped suffix and the database is reinitialized in place.
-//
-// Returns the list of backup paths created. If the preconditions do not
-// hold, returns (nil, nil) so the caller can surface the original start
-// failure.
-func recoverCorruptManifest(beadsDir, doltDir string) ([]string, error) {
+// DetectCorruptManifest detects the GH#3290 corrupt-manifest condition by
+// scanning the dolt server log tail for the "root hash doesn't exist"
+// signature and confirming that the affected databases hold no recoverable
+// data (empty journal, empty oldgen). Returns the corrupt .dolt/noms
+// directories, or nil when the condition does not hold. Detection only —
+// never modifies anything; repair is RecoverCorruptManifest, which must stay
+// behind an explicit user action (bd doctor --fix; bd-6dnrw.6).
+func DetectCorruptManifest(beadsDir string) ([]string, error) {
+	return detectCorruptManifest(beadsDir, ResolveDoltDir(beadsDir))
+}
+
+func detectCorruptManifest(beadsDir, doltDir string) ([]string, error) {
 	hasErr, err := logHasCorruptManifestError(logPath(beadsDir))
 	if err != nil || !hasErr {
 		return nil, err
 	}
+	return findCorruptNomsDirs(doltDir)
+}
 
-	nomsDirs, err := findCorruptNomsDirs(doltDir)
+// RecoverCorruptManifest repairs the GH#3290 corrupt-manifest condition
+// reported by DetectCorruptManifest: each corrupt .dolt/ directory is backed
+// up with a timestamped suffix and the database is reinitialized in place.
+// Destructive — callers must only invoke this on explicit user request
+// (bd doctor --fix), never automatically (bd-6dnrw.6).
+//
+// Returns the list of backup paths created. If the preconditions do not
+// hold, returns (nil, nil).
+func RecoverCorruptManifest(beadsDir string) ([]string, error) {
+	return recoverCorruptManifest(beadsDir, ResolveDoltDir(beadsDir))
+}
+
+func recoverCorruptManifest(beadsDir, doltDir string) ([]string, error) {
+	nomsDirs, err := detectCorruptManifest(beadsDir, doltDir)
 	if err != nil {
 		return nil, err
 	}

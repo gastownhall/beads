@@ -1,5 +1,15 @@
 #!/bin/bash
 # generate-cli-docs.sh — Generate CLI reference docs from the live bd command tree.
+#
+# Two stages:
+#   1. `bd help --docs-root <root>` emits vendor-neutral output only:
+#      docs/CLI_REFERENCE.md plus a generic per-command tree at
+#      build/cli-docs/ (uncommitted staging).
+#   2. `go run ./tools/docsmint <root>` post-processes the staging tree into
+#      the committed Mintlify pages at docs/cli-reference/ and splices the
+#      CLI Reference pages array in docs/docs.json.
+# bd never emits site-generator-specific formats; all Mintlify targeting
+# lives in tools/docsmint.
 
 set -euo pipefail
 export LC_ALL=C
@@ -8,14 +18,46 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 CHECK_MODE=0
-if [ "${1:-}" = "--check" ]; then
-    CHECK_MODE=1
-    shift
-fi
-
-BD_ARG="${1:-}"
+BD_ARG=""
 TMP_BUILD_DIR=""
 TMP_OUTPUT_DIR=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --check)
+            CHECK_MODE=1
+            shift
+            ;;
+        -h|--help)
+            cat <<'EOF'
+Usage: scripts/generate-cli-docs.sh [--check] [path-to-bd]
+
+Generate the committed CLI docs (docs/CLI_REFERENCE.md, docs/cli-reference/,
+and the CLI pages array in docs/docs.json) from one bd process plus the
+tools/docsmint post-processor. --check regenerates into a scratch root and
+fails if the committed copies are stale.
+
+When docs/cli-docs.pin names a release tag, bd is built from that tag
+(the published docs describe the pinned release, not this checkout) and a
+supplied binary is ignored; set BD_DOCS_IGNORE_PIN=1 to bypass the pin.
+
+If the resolved bd binary is CGO-enabled it emits the full `bd federation`
+help tree that CI (CGO_ENABLED=0) stubs out; the script rebuilds a pinned
+pure-go binary to keep committed docs in sync. Set BD_DOCS_ALLOW_CGO=1 to
+bypass that rebuild and trust the supplied binary as-is.
+EOF
+            exit 0
+            ;;
+        *)
+            if [ -n "$BD_ARG" ]; then
+                echo "Error: multiple bd binaries supplied: $BD_ARG and $1" >&2
+                exit 2
+            fi
+            BD_ARG="$1"
+            shift
+            ;;
+    esac
+done
 
 cleanup() {
     if [ -n "$TMP_BUILD_DIR" ]; then
@@ -27,9 +69,26 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ -n "$BD_ARG" ]; then
+# Release pin (docs/cli-docs.pin): the published docs describe the pinned
+# release, so the pipeline builds bd from that tag and ignores any supplied
+# binary. Set BD_DOCS_IGNORE_PIN=1 to bypass (e.g. to preview docs for an
+# unreleased emitter).
+PINNED_BD=""
+if [ "${BD_DOCS_IGNORE_PIN:-0}" != "1" ]; then
+    PINNED_BD="$("$SCRIPT_DIR/resolve-docs-bd.sh")"
+fi
+
+if [ -n "$PINNED_BD" ]; then
+    if [ -n "$BD_ARG" ] && [ "$BD_ARG" != "$PINNED_BD" ]; then
+        echo "Note: docs are pinned via docs/cli-docs.pin; ignoring supplied binary $BD_ARG." >&2
+    fi
+    BD="$PINNED_BD"
+elif [ -n "$BD_ARG" ]; then
     BD="$BD_ARG"
-elif [ -x "$PROJECT_ROOT/bd" ]; then
+elif [ "$CHECK_MODE" -eq 0 ] && [ -x "$PROJECT_ROOT/bd" ]; then
+    # Convenience for regeneration only. --check never trusts a repo-root
+    # ./bd it wasn't explicitly given: the guard below detects CGO-ness, not
+    # staleness, so a stale pure-go ./bd would produce a false "fresh".
     BD="$PROJECT_ROOT/bd"
 else
     TMP_BUILD_DIR="$(mktemp -d)"
@@ -38,123 +97,70 @@ else
     (cd "$PROJECT_ROOT" && CGO_ENABLED=0 go build -tags gms_pure_go -o "$BD" ./cmd/bd/)
 fi
 
+# Guard against a CGO-enabled bd: it exposes the full `bd federation` subcommand tree
+# that CI never produces (scripts/ci/pr-policy.sh build_docs_binary uses env
+# CGO_ENABLED=0 go build). A CGO build therefore emits ~hundreds of lines of federation
+# help that the committed, CI-built docs stub out ("built without CGO support"), so a
+# naive regen on a machine with a C compiler produces spurious federation churn.
+#
+# The pure-go federation stub prints "Federation commands require CGO" (see
+# cmd/bd/federation_nocgo.go); a CGO build does not. If the resolved binary is missing
+# that stub marker, warn and rebuild a pinned CGO_ENABLED=0 -tags gms_pure_go binary so
+# the committed docs always match CI. Set BD_DOCS_ALLOW_CGO=1 to bypass the rebuild and
+# trust the supplied binary as-is (e.g. to deliberately regenerate the full federation
+# tree); you then own any federation churn the diff introduces.
+if [ -z "$PINNED_BD" ] && [ -x "$BD" ] && ! "$BD" federation --help 2>&1 | grep -q "Federation commands require CGO"; then
+    if [ "${BD_DOCS_ALLOW_CGO:-0}" = "1" ]; then
+        echo "WARNING: $BD looks CGO-enabled and emits the full 'bd federation' help tree," >&2
+        echo "         which CI's pure-go docs build stubs out. BD_DOCS_ALLOW_CGO=1 is set," >&2
+        echo "         using it anyway; expect federation doc churn unless that is intended." >&2
+    else
+        echo "WARNING: $BD looks CGO-enabled; its 'bd federation' help differs from CI's" >&2
+        echo "         pure-go build and would add spurious federation doc churn." >&2
+        echo "         Rebuilding a pinned pure-go (CGO_ENABLED=0 -tags gms_pure_go) binary" >&2
+        echo "         for CI-consistent docs. Set BD_DOCS_ALLOW_CGO=1 to use it as-is." >&2
+        if [ -z "$TMP_BUILD_DIR" ]; then
+            TMP_BUILD_DIR="$(mktemp -d)"
+        fi
+        BD="$TMP_BUILD_DIR/bd-pure"
+        (cd "$PROJECT_ROOT" && CGO_ENABLED=0 go build -tags gms_pure_go -o "$BD" ./cmd/bd/)
+    fi
+fi
+
 if [ ! -x "$BD" ]; then
     echo "Error: bd binary not found or not executable: $BD" >&2
     echo "Usage: $0 [--check] [path-to-bd]" >&2
     exit 1
 fi
 
-command_doc_id() {
-    printf '%s' "$1" \
-        | tr '[:upper:] ' '[:lower:]-' \
-        | sed -E 's/[^a-z0-9-]+/-/g; s/-+/-/g; s/^-//; s/-$//'
-}
-
-trim_trailing_blank_lines() {
-    perl -0pi -e 's/\n+\z/\n/' "$1"
-}
-
-generate_index() {
-    local out_dir="$1"
-    local commands_file="$2"
-    local version_label="$3"
-    local count
-    count="$(wc -l < "$commands_file" | tr -d ' ')"
-
-    cat > "$out_dir/index.md" << EOF
----
-id: index
-title: CLI Reference
-sidebar_position: 0
----
-
-# CLI Reference
-
-<!-- AUTO-GENERATED: do not edit manually -->
-Reference for bd ${version_label}. Generated from \`bd help --list\` and \`bd help --doc <command>\`.
-
-This reference covers all ${count} live top-level \`bd\` commands. Regenerate it with:
-
-\`\`\`bash
-./scripts/generate-cli-docs.sh
-\`\`\`
-
-## Commands
-
-EOF
-
-    while IFS= read -r cmd; do
-        cmd="${cmd%$'\r'}"
-        local doc_id
-        doc_id="$(command_doc_id "$cmd")"
-        printf -- "- [\`bd %s\`](./%s.md)\n" "$cmd" "$doc_id" >> "$out_dir/index.md"
-    done < "$commands_file"
-}
-
-generate_cli_dir() {
-    local out_dir="$1"
-    local commands_file="$2"
-    local version_label="$3"
-
-    mkdir -p "$out_dir"
-    rm -f "$out_dir"/*.md
-    generate_index "$out_dir" "$commands_file" "$version_label"
-
-    while IFS= read -r cmd; do
-        cmd="${cmd%$'\r'}"
-        local doc_id
-        doc_id="$(command_doc_id "$cmd")"
-        "$BD" help --doc "$cmd" < /dev/null > "$out_dir/$doc_id.md"
-        trim_trailing_blank_lines "$out_dir/$doc_id.md"
-    done < "$commands_file"
-}
-
 generate_all() {
     local root="$1"
-    local commands_file="$root/.cli-commands.txt"
-
-    mkdir -p "$root/docs"
-    "$BD" help --list > "$commands_file"
-    "$BD" help --all > "$root/docs/CLI_REFERENCE.md"
-    trim_trailing_blank_lines "$root/docs/CLI_REFERENCE.md"
-
-    generate_cli_dir "$root/website/docs/cli-reference" "$commands_file" "Latest"
-
-    # Versioned snapshots: parse the semver tag from the directory name
-    # (e.g. "version-1.0.0" -> "v1.0.0") so a release bump alone produces
-    # zero diff on the dev tree.
-    local versioned_parent="$PROJECT_ROOT/website/versioned_docs"
-    if [ -d "$versioned_parent" ]; then
-        local versioned_dir
-        for versioned_dir in "$versioned_parent"/version-*; do
-            [ -d "$versioned_dir" ] || continue
-            local dir_name
-            dir_name="$(basename "$versioned_dir")"
-            local version_tag="v${dir_name#version-}"
-            generate_cli_dir \
-                "$root/website/versioned_docs/$dir_name/cli-reference" \
-                "$commands_file" \
-                "$version_tag"
-        done
+    local had_website=0
+    [ -d "$root/website" ] && had_website=1
+    # Clear stale staging so docsmint can only consume what this bd emitted
+    # (a pinned legacy bd stages under website/, not build/cli-docs).
+    rm -rf "$root/build/cli-docs"
+    "$BD" help --docs-root "$root"
+    (cd "$PROJECT_ROOT" && go run -tags=gms_pure_go ./tools/docsmint "$root")
+    # A pinned legacy emitter (bd <= v1.1.0) stages Docusaurus pages under
+    # website/; docsmint has consumed them, so drop the scaffolding.
+    if [ "$had_website" -eq 0 ] && [ -d "$root/website" ]; then
+        rm -rf "$root/website"
     fi
-
-    rm -f "$commands_file"
 }
 
 if [ "$CHECK_MODE" -eq 1 ]; then
     TMP_OUTPUT_DIR="$(mktemp -d)"
-    mkdir -p "$TMP_OUTPUT_DIR/website"
-    cp -Rf "$PROJECT_ROOT/website/docs" "$TMP_OUTPUT_DIR/website/docs"
-    if [ -d "$PROJECT_ROOT/website/versioned_docs" ]; then
-        cp -Rf "$PROJECT_ROOT/website/versioned_docs" "$TMP_OUTPUT_DIR/website/versioned_docs"
-    fi
-    if [ -f "$PROJECT_ROOT/website/versions.json" ]; then
-        cp -f "$PROJECT_ROOT/website/versions.json" "$TMP_OUTPUT_DIR/website/versions.json"
+    mkdir -p "$TMP_OUTPUT_DIR/docs"
+    # Seed the committed artifacts the pipeline rewrites, then regenerate and diff.
+    cp -f "$PROJECT_ROOT/docs/docs.json" "$TMP_OUTPUT_DIR/docs/docs.json"
+    if [ -d "$PROJECT_ROOT/docs/cli-reference" ]; then
+        cp -Rf "$PROJECT_ROOT/docs/cli-reference" "$TMP_OUTPUT_DIR/docs/cli-reference"
     fi
 
     generate_all "$TMP_OUTPUT_DIR"
 
-    if ! diff -qr \
+    if ! diff -q \
         "$PROJECT_ROOT/docs/CLI_REFERENCE.md" \
         "$TMP_OUTPUT_DIR/docs/CLI_REFERENCE.md" >/dev/null; then
         echo "FAIL: docs/CLI_REFERENCE.md is out of sync with live CLI help."
@@ -163,30 +169,23 @@ if [ "$CHECK_MODE" -eq 1 ]; then
         exit 1
     fi
 
-    check_dirs=("website/docs/cli-reference")
-    if [ -d "$PROJECT_ROOT/website/versioned_docs" ]; then
-        for vdir in "$PROJECT_ROOT/website/versioned_docs"/version-*; do
-            [ -d "$vdir" ] || continue
-            check_dirs+=("website/versioned_docs/$(basename "$vdir")/cli-reference")
-        done
+    if ! diff -q "$PROJECT_ROOT/docs/docs.json" "$TMP_OUTPUT_DIR/docs/docs.json" >/dev/null; then
+        echo "FAIL: docs/docs.json CLI Reference navigation is out of sync with live CLI help."
+        echo "Run: ./scripts/generate-cli-docs.sh ${BD_ARG:-}"
+        diff -u "$PROJECT_ROOT/docs/docs.json" "$TMP_OUTPUT_DIR/docs/docs.json" | sed -n '1,80p' || true
+        exit 1
     fi
 
-    for rel in "${check_dirs[@]}"; do
-        if [ -d "$PROJECT_ROOT/$rel" ]; then
-            if ! diff -qr "$PROJECT_ROOT/$rel" "$TMP_OUTPUT_DIR/$rel" >/dev/null; then
-                echo "FAIL: $rel is out of sync with live CLI help."
-                echo "Run: ./scripts/generate-cli-docs.sh ${BD_ARG:-}"
-                diff -ur "$PROJECT_ROOT/$rel" "$TMP_OUTPUT_DIR/$rel" | sed -n '1,160p' || true
-                exit 1
-            fi
-        fi
-    done
-
-    "$PROJECT_ROOT/scripts/generate-llms-full.sh" --check --source-root "$TMP_OUTPUT_DIR"
+    if ! diff -qr "$PROJECT_ROOT/docs/cli-reference" "$TMP_OUTPUT_DIR/docs/cli-reference" >/dev/null; then
+        echo "FAIL: docs/cli-reference is out of sync with live CLI help."
+        echo "Run: ./scripts/generate-cli-docs.sh ${BD_ARG:-}"
+        diff -ur "$PROJECT_ROOT/docs/cli-reference" "$TMP_OUTPUT_DIR/docs/cli-reference" | sed -n '1,160p' || true
+        exit 1
+    fi
 
     echo "PASS: generated CLI docs are fresh"
 else
     generate_all "$PROJECT_ROOT"
     echo "Generated CLI docs from: $($BD version 2>/dev/null | head -1 || echo "$BD")"
-    echo "Updated docs/CLI_REFERENCE.md and website CLI reference pages"
+    echo "Updated docs/CLI_REFERENCE.md, docs/cli-reference/, and the docs.json CLI nav"
 fi

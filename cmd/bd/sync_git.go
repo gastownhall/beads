@@ -98,15 +98,23 @@ func gitOriginGetURLForActiveRepo(ctx context.Context) (string, error) {
 // Uses a 10s timeout since this is a network call used for auto-detection,
 // and suppresses credential prompts to avoid blocking on SSH remotes.
 func gitOriginHasDoltDataRef() bool {
+	return gitRemoteHasDoltDataRef("origin")
+}
+
+func gitRemoteHasDoltDataRef(remote string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "ls-remote", "origin", "refs/dolt/data")
+	cmd := exec.CommandContext(ctx, "git", "ls-remote", gitRemoteURLForLsRemote(remote), "refs/dolt/data")
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	output, err := cmd.Output()
 	if err != nil {
 		return false
 	}
 	return strings.TrimSpace(string(output)) != ""
+}
+
+func gitRemoteURLForLsRemote(remote string) string {
+	return strings.TrimPrefix(remote, "git+")
 }
 
 // gitURLToDoltRemote converts a git remote URL to dolt's remote format.

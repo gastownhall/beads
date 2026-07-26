@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -57,7 +58,17 @@ func init() {
 }
 
 func runDuplicate(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("duplicate is not supported in proxied-server mode")
+	}
 	CheckReadonly("duplicate")
+
+	evt := metrics.NewCommandEvent("duplicate")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
 
 	ctx := getRootContext()
 	store := getStore()
@@ -108,12 +119,11 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 	commandDidWrite.Store(true)
 
 	if isJSONOutput() {
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"duplicate": duplicateID,
 			"canonical": canonicalID,
 			"status":    "closed",
 		})
-		return nil
 	}
 
 	fmt.Printf("%s Marked %s as duplicate of %s (closed)\n", ui.RenderPass("✓"), duplicateID, canonicalID)
@@ -121,7 +131,17 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 }
 
 func runSupersede(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("supersede is not supported in proxied-server mode")
+	}
 	CheckReadonly("supersede")
+
+	evt := metrics.NewCommandEvent("supersede")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
 
 	ctx := getRootContext()
 	store := getStore()
@@ -172,12 +192,11 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 	commandDidWrite.Store(true)
 
 	if isJSONOutput() {
-		outputJSON(map[string]interface{}{
+		return outputJSON(map[string]interface{}{
 			"superseded":  oldID,
 			"replacement": newID,
 			"status":      "closed",
 		})
-		return nil
 	}
 
 	fmt.Printf("%s Marked %s as superseded by %s (closed)\n", ui.RenderPass("✓"), oldID, newID)

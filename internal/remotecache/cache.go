@@ -189,11 +189,19 @@ func (c *Cache) doltExists(dbPath string) bool {
 
 // doltClone clones a remote into the target directory.
 func (c *Cache) doltClone(ctx context.Context, remoteURL, target string) error {
-	cmd := exec.CommandContext(ctx, "dolt", "clone", remoteURL, target)
+	cmd := exec.CommandContext(ctx, "dolt", doltCloneArgs(remoteURL, target)...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w\nOutput: %s", err, output)
 	}
 	return nil
+}
+
+func doltCloneArgs(remoteURL, target string) []string {
+	args := []string{"clone"}
+	if user := os.Getenv("DOLT_REMOTE_USER"); user != "" {
+		args = append(args, "--user", user)
+	}
+	return append(args, remoteURL, target)
 }
 
 // doltPull pulls from origin in the given database directory.

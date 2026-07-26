@@ -1,6 +1,8 @@
 package main
 
 import (
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -14,7 +16,7 @@ func TestNewDatabaseServer_BackendExternal(t *testing.T) {
 	t.Run("valid tcp config builds an ExternalDoltServer", func(t *testing.T) {
 		srv, err := newDatabaseServer(
 			proxy.BackendExternal,
-			"", "", "", "",
+			"", "", "", "", "",
 			configfile.ExternalDoltConfig{Host: "db.internal", Port: 3306},
 		)
 		require.NoError(t, err)
@@ -26,7 +28,7 @@ func TestNewDatabaseServer_BackendExternal(t *testing.T) {
 	t.Run("invalid config bubbles validation error", func(t *testing.T) {
 		_, err := newDatabaseServer(
 			proxy.BackendExternal,
-			"", "", "", "",
+			"", "", "", "", "",
 			configfile.ExternalDoltConfig{},
 		)
 		require.Error(t, err)
@@ -34,10 +36,18 @@ func TestNewDatabaseServer_BackendExternal(t *testing.T) {
 	})
 
 	t.Run("unix socket config builds an ExternalDoltServer", func(t *testing.T) {
+		// ExternalDoltConfig.Validate() requires an absolute Socket via filepath.IsAbs,
+		// which is platform-dependent: /var/run/dolt.sock is NOT absolute on Windows
+		// (no volume). Use a platform-absolute socket path so the same construction
+		// path is exercised everywhere.
+		socket := "/var/run/dolt.sock"
+		if runtime.GOOS == "windows" {
+			socket = filepath.Join(t.TempDir(), "dolt.sock")
+		}
 		srv, err := newDatabaseServer(
 			proxy.BackendExternal,
-			"", "", "", "",
-			configfile.ExternalDoltConfig{Socket: "/var/run/dolt.sock"},
+			"", "", "", "", "",
+			configfile.ExternalDoltConfig{Socket: socket},
 		)
 		require.NoError(t, err)
 		require.NotNil(t, srv)
@@ -49,7 +59,7 @@ func TestNewDatabaseServer_BackendExternal(t *testing.T) {
 func TestNewDatabaseServer_BackendLocalSharedServerStillStubbed(t *testing.T) {
 	_, err := newDatabaseServer(
 		proxy.BackendLocalSharedServer,
-		"/tmp/root", "/tmp/cfg", "/tmp/log", "/usr/bin/dolt",
+		"/tmp/root", "/tmp/cfg", "/tmp/log", "/usr/bin/dolt", "",
 		configfile.ExternalDoltConfig{},
 	)
 	require.Error(t, err)
@@ -59,7 +69,7 @@ func TestNewDatabaseServer_BackendLocalSharedServerStillStubbed(t *testing.T) {
 func TestNewDatabaseServer_UnknownBackendRejected(t *testing.T) {
 	_, err := newDatabaseServer(
 		proxy.Backend("bogus"),
-		"", "", "", "",
+		"", "", "", "", "",
 		configfile.ExternalDoltConfig{},
 	)
 	require.Error(t, err)
@@ -74,9 +84,6 @@ func TestDbProxyChildRegistersExternalFlags(t *testing.T) {
 		{"external-host", ""},
 		{"external-port", "0"},
 		{"external-socket-path", ""},
-		{"external-tls", "false"},
-		{"external-tls-cert-path", ""},
-		{"external-tls-key-path", ""},
 		{"external-keep-alive", "0s"},
 	}
 	for _, tc := range cases {

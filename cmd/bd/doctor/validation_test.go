@@ -553,8 +553,8 @@ func TestCheckOrphanedDependenciesDB_WispDependencyMissingTargetDetected(t *test
 		t.Fatal(err)
 	}
 	_, err := db.ExecContext(ctx,
-		`INSERT INTO wisp_dependencies (issue_id, depends_on_issue_id, type, created_at, created_by)
-		 VALUES (?, ?, 'blocks', NOW(), 'test')`,
+		`INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by)
+		 VALUES (UUID(), ?, ?, 'blocks', NOW(), 'test')`,
 		wisp.ID, "test-missing-target")
 	if err != nil {
 		t.Fatalf("insert wisp orphan dependency: %v", err)

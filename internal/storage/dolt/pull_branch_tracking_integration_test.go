@@ -99,7 +99,7 @@ func TestPullWithAutoResolve_BranchTrackingSuccess(t *testing.T) {
 	t.Logf("confirmed GH#3144 scenario: DOLT_PULL produced tracking error: %v", rawPullErr)
 
 	// ── Verify the fix: pullWithAutoResolve succeeds via fallback ──────────────
-	err = localStore.pullWithAutoResolve(ctx, "CALL DOLT_PULL(?, ?)", "origin", "main")
+	err = localStore.pullWithAutoResolve(ctx, "origin", "CALL DOLT_PULL(?, ?)", "origin", "main")
 	if err != nil {
 		t.Errorf("pullWithAutoResolve should succeed via DOLT_FETCH+DOLT_MERGE fallback, got: %v", err)
 	}

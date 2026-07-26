@@ -101,10 +101,12 @@ func TestIgnoreSchemaSkewFlagPropagatesEnvVar(t *testing.T) {
 	ignoreSchemaSkew = true
 	t.Cleanup(func() { ignoreSchemaSkew = old })
 
-	if rootCmd.PersistentPreRun == nil {
-		t.Fatal("rootCmd.PersistentPreRun must be set")
+	if rootCmd.PersistentPreRunE == nil {
+		t.Fatal("rootCmd.PersistentPreRunE must be set")
 	}
-	rootCmd.PersistentPreRun(versionCmd, nil)
+	if err := rootCmd.PersistentPreRunE(versionCmd, nil); err != nil {
+		t.Fatalf("PersistentPreRunE: %v", err)
+	}
 
 	if got := os.Getenv("BD_IGNORE_SCHEMA_SKEW"); got != "1" {
 		t.Errorf("BD_IGNORE_SCHEMA_SKEW = %q after PersistentPreRun with --ignore-schema-skew; want 1", got)

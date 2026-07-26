@@ -28,6 +28,7 @@ from beads_mcp.models import (
     BlockedIssue,
     BriefDep,
     BriefIssue,
+    Comment,
     CompactedResult,
     DependencyType,
     Issue,
@@ -39,7 +40,9 @@ from beads_mcp.models import (
     Stats,
 )
 from beads_mcp.tools import (
+    beads_add_comment,
     beads_add_dependency,
+    beads_add_note,
     beads_blocked,
     beads_claim_issue,
     beads_close_issue,
@@ -48,6 +51,7 @@ from beads_mcp.tools import (
     beads_get_schema_info,
     beads_init,
     beads_inspect_migration,
+    beads_list_comments,
     beads_list_issues,
     beads_quickstart,
     beads_ready_work,
@@ -345,6 +349,9 @@ _TOOL_CATALOG = {
     "close": "Close/complete an issue",
     "reopen": "Reopen closed issues",
     "dep": "Add dependency between issues",
+    "comment": "Add a comment to an issue (durable, timestamped work record)",
+    "comments": "List all comments on an issue",
+    "note": "Append a note to an issue's notes field",
     "stats": "Get issue statistics",
     "blocked": "Show blocked issues and what blocks them",
     "context": "Manage workspace context (set, show, init)",
@@ -526,6 +533,38 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             },
             "returns": "Confirmation message",
             "example": "dep(issue_id='bd-f1a2', depends_on_id='bd-a1b2', dep_type='blocks')",
+        },
+        "comment": {
+            "name": "comment",
+            "description": "Add a durable, timestamped comment to an issue (a record of work/decisions)",
+            "parameters": {
+                "issue_id": "str (required)",
+                "text": "str (required) - human-readable summary of what changed/was decided/verified",
+                "workspace_root": "str (optional)",
+            },
+            "returns": "Confirmation message",
+            "example": "comment(issue_id='bd-a1b2', text='Fixed the race in worker.py; tests pass')",
+        },
+        "comments": {
+            "name": "comments",
+            "description": "List all comments on an issue (show reports comment_count but not the bodies)",
+            "parameters": {
+                "issue_id": "str (required)",
+                "workspace_root": "str (optional)",
+            },
+            "returns": "List of Comment {id, issue_id, author, text, created_at}",
+            "example": "comments(issue_id='bd-a1b2')",
+        },
+        "note": {
+            "name": "note",
+            "description": "Append a note to an issue's notes field (for a per-turn trail, prefer comment)",
+            "parameters": {
+                "issue_id": "str (required)",
+                "text": "str (required) - note text to append",
+                "workspace_root": "str (optional)",
+            },
+            "returns": "Confirmation message",
+            "example": "note(issue_id='bd-a1b2', text='Blocked on upstream PR #56954')",
         },
         "stats": {
             "name": "stats",
@@ -1234,6 +1273,56 @@ async def add_dependency(
         depends_on_id=depends_on_id,
         dep_type=dep_type,
     )
+
+
+@mcp.tool(
+    name="comment",
+    description=(
+        "Add a human-readable comment to an issue — a durable, timestamped record of what "
+        "changed, was decided, or verified, so nobody has to read the agent transcript. "
+        "Prefer this over overwriting notes; comments accumulate as a per-turn trail."
+    ),
+)
+@with_workspace
+@require_context
+async def comment(
+    issue_id: str,
+    text: str,
+    workspace_root: str | None = None,
+) -> str:
+    """Add a comment to an issue."""
+    return await beads_add_comment(issue_id=issue_id, text=text)
+
+
+@mcp.tool(
+    name="comments",
+    description="List all comments on an issue (show reports comment_count but not the comment bodies).",
+)
+@with_workspace
+async def comments(
+    issue_id: str,
+    workspace_root: str | None = None,
+) -> list[Comment]:
+    """List all comments on an issue in chronological order."""
+    return await beads_list_comments(issue_id=issue_id)
+
+
+@mcp.tool(
+    name="note",
+    description=(
+        "Append a note to an issue's notes field. For a per-turn, timestamped trail that "
+        "multiple actors can follow, prefer comment()."
+    ),
+)
+@with_workspace
+@require_context
+async def note(
+    issue_id: str,
+    text: str,
+    workspace_root: str | None = None,
+) -> str:
+    """Append a note to an issue's notes field."""
+    return await beads_add_note(issue_id=issue_id, text=text)
 
 
 @mcp.tool(

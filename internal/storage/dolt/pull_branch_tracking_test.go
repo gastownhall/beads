@@ -45,10 +45,10 @@ func TestPullWithAutoResolve_BranchTrackingFallback(t *testing.T) {
 
 	// pullWithAutoResolve executes the query inside a transaction, checks the
 	// error with isBranchTrackingError, and — on match — falls back to
-	// DOLT_FETCH(s.remote, s.branch). The test store's s.remote is "" (no
+	// DOLT_FETCH(remote, s.branch). The test store's s.remote is "" (no
 	// remote configured), so DOLT_FETCH immediately fails, producing the
 	// "fetch from /" error that confirms the fallback was entered.
-	err := store.pullWithAutoResolve(ctx, "CALL inject_tracking_error()")
+	err := store.pullWithAutoResolve(ctx, store.remote, "CALL inject_tracking_error()")
 
 	// The error must come from the DOLT_FETCH attempt, not from the original
 	// DOLT_PULL proxy. If the fallback was not triggered, the error would
@@ -65,6 +65,15 @@ func TestPullWithAutoResolve_BranchTrackingFallback(t *testing.T) {
 }
 
 func TestPullWithAutoResolve_BranchTrackingFallbackSuccess(t *testing.T) {
+	// The fallback assertion needs a real file:// remote, which is built with the
+	// dolt CLI (runDoltCmdForBranchTracking / runDoltSQLForBranchTracking). Skip when
+	// the binary is absent, matching the existing guard in this package
+	// (bootstrap_test.go, fsck_test.go). The store itself talks the MySQL protocol
+	// and needs no local dolt binary.
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt CLI not available")
+	}
+
 	remoteDir := filepath.Join(t.TempDir(), "remote")
 	if err := os.MkdirAll(remoteDir, 0o755); err != nil {
 		t.Fatalf("mkdir remote: %v", err)
@@ -103,7 +112,7 @@ func TestPullWithAutoResolve_BranchTrackingFallbackSuccess(t *testing.T) {
 		t.Skipf("DOLT_PULL failed with an unexpected non-tracking error: %v", rawPullErr)
 	}
 
-	if err := store.pullWithAutoResolve(ctx, "CALL DOLT_PULL(?, ?)", "origin", "main"); err != nil {
+	if err := store.pullWithAutoResolve(ctx, "origin", "CALL DOLT_PULL(?, ?)", "origin", "main"); err != nil {
 		t.Fatalf("pullWithAutoResolve fallback failed: %v", err)
 	}
 

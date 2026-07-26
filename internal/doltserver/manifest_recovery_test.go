@@ -160,6 +160,45 @@ func TestFindCorruptNomsDirs(t *testing.T) {
 	}
 }
 
+// bd-6dnrw.6: detection must report the corrupt databases without modifying
+// anything on disk — repair only happens via the explicit doctor --fix path.
+func TestDetectCorruptManifest_ReportsWithoutModifying(t *testing.T) {
+	beadsDir := t.TempDir()
+	doltDir := filepath.Join(beadsDir, "dolt")
+	nomsDir := writeNomsDir(t, filepath.Join(doltDir, "bd"), 40, 0, 0)
+
+	// Without the log signature, nothing is reported even though the noms
+	// dir looks corrupt.
+	dirs, err := detectCorruptManifest(beadsDir, doltDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 0 {
+		t.Fatalf("expected no detection without log signature, got %v", dirs)
+	}
+
+	logContent := "error: root hash doesn't exist: abc123\n"
+	if err := os.WriteFile(logPath(beadsDir), []byte(logContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	dirs, err = detectCorruptManifest(beadsDir, doltDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dirs) != 1 || dirs[0] != nomsDir {
+		t.Fatalf("expected detection of %s, got %v", nomsDir, dirs)
+	}
+
+	// Detection must not have touched the corrupt database.
+	if _, err := os.Stat(filepath.Join(nomsDir, "manifest")); err != nil {
+		t.Errorf("detection modified the corrupt database: %v", err)
+	}
+	if backupGlob, _ := filepath.Glob(filepath.Join(doltDir, "bd", ".dolt.*")); len(backupGlob) != 0 {
+		t.Errorf("detection created backups: %v", backupGlob)
+	}
+}
+
 func TestRecoverCorruptManifest_NoLogSignatureNoop(t *testing.T) {
 	beadsDir := t.TempDir()
 	doltDir := filepath.Join(beadsDir, "dolt")

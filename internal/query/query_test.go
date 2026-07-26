@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -114,6 +115,36 @@ func TestLexer(t *testing.T) {
 			input:    "label=gt:merge-request",
 			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
 			values:   []string{"label", "=", "gt:merge-request", ""},
+		},
+		{
+			name:     "digit-led identifier on the value side",
+			input:    "assignee=1-alpha",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"assignee", "=", "1-alpha", ""},
+		},
+		{
+			name:     "digit-led identifier in a compound expression",
+			input:    "assignee=2-bravo AND status=open",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"assignee", "=", "2-bravo", "AND", "status", "=", "open", ""},
+		},
+		{
+			name:     "digit-led identifier with duration-suffix prefix",
+			input:    "label=7day-window",
+			expected: []TokenType{TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"label", "=", "7day-window", ""},
+		},
+		{
+			name:     "duration still wins when the suffix stands alone",
+			input:    "updated>30d",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenEOF},
+			values:   []string{"updated", ">", "30d", ""},
+		},
+		{
+			name:     "duration with trailing space stays a duration",
+			input:    "updated>30d AND status=open",
+			expected: []TokenType{TokenIdent, TokenGreater, TokenDuration, TokenAnd, TokenIdent, TokenEquals, TokenIdent, TokenEOF},
+			values:   []string{"updated", ">", "30d", "AND", "status", "=", "open", ""},
 		},
 	}
 
@@ -675,6 +706,20 @@ func TestEvaluatorMetadataQueries(t *testing.T) {
 			},
 		},
 		{
+			name:  "metadata.jira/sprint=Q1",
+			query: "metadata.jira/sprint=Q1",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.MetadataFields != nil && f.MetadataFields["jira/sprint"] == "Q1"
+			},
+		},
+		{
+			name:  "metadata.Sprint=Q1 preserves key case",
+			query: "metadata.Sprint=Q1",
+			expectFilter: func(f *types.IssueFilter) bool {
+				return f.MetadataFields != nil && f.MetadataFields["Sprint"] == "Q1"
+			},
+		},
+		{
 			name:  "metadata combined with status",
 			query: "status=open AND metadata.team=platform",
 			expectFilter: func(f *types.IssueFilter) bool {
@@ -713,6 +758,33 @@ func TestEvaluatorMetadataQueries(t *testing.T) {
 				t.Errorf("RequiresPredicate = %v, want %v for %q", result.RequiresPredicate, tt.requiresPredicate, tt.query)
 			}
 		})
+	}
+}
+
+// TestMetadataKeysAreQueryable enforces the cross-package invariant that
+// every key accepted by storage.ValidateMetadataKey can be queried as
+// "metadata.<key>=<value>". The lexer's identifier alphabet and the storage
+// key regex are maintained independently; a character admitted to the regex
+// but not to isIdentChar would produce keys that store fine but are
+// unqueryable (the bug this test guards against). Metadata keys are
+// case-sensitive JSON keys, so the filter key must preserve the query key's
+// case even though field names are otherwise case-insensitive.
+func TestMetadataKeysAreQueryable(t *testing.T) {
+	now := time.Date(2025, 2, 4, 12, 0, 0, 0, time.UTC)
+
+	for c := rune(' '); c <= '~'; c++ {
+		key := "a" + string(c) + "b"
+		if storage.ValidateMetadataKey(key) != nil {
+			continue
+		}
+		result, err := EvaluateAt("metadata."+key+"=v", now)
+		if err != nil {
+			t.Errorf("key %q is valid per ValidateMetadataKey but not queryable: %v", key, err)
+			continue
+		}
+		if result.Filter.MetadataFields[key] != "v" {
+			t.Errorf("key %q is valid per ValidateMetadataKey but query parsed to filter %+v", key, result.Filter)
+		}
 	}
 }
 

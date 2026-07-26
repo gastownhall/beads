@@ -96,6 +96,14 @@ func resolveBeadsDirForDBPath(dbPath string) string {
 		if utils.PathsEqual(beadsDir, dbPath) || utils.PathsEqual(beadsDir, actualDBPath) {
 			return beadsDir
 		}
+		// dbPath is the data directory living directly inside beadsDir
+		// (<beadsDir>/embeddeddolt for embedded, <beadsDir>/dolt for server).
+		// Match on that parent relationship so resolution works for embedded
+		// stores regardless of the beads dir name; Config.DatabasePath alone
+		// returns the "dolt" name and misses embeddeddolt/ (GH#4574).
+		if utils.PathsEqual(filepath.Dir(dbPath), beadsDir) || utils.PathsEqual(filepath.Dir(actualDBPath), beadsDir) {
+			return beadsDir
+		}
 		if utils.PathsEqual(cfg.DatabasePath(beadsDir), dbPath) || utils.PathsEqual(cfg.DatabasePath(beadsDir), actualDBPath) {
 			return beadsDir
 		}

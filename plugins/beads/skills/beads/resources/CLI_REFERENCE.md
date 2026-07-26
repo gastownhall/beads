@@ -8,6 +8,6 @@ Use these live sources instead:
 - `bd <command> --help` for command-specific usage
 - `bd help --all` for the complete local CLI reference
 - `docs/CLI_REFERENCE.md` in the beads repository for the generated Markdown reference
-- <https://gastownhall.github.io/beads/cli-reference/> for the published generated reference
+- <https://beads.gascity.com/cli-reference/> for the published generated reference
 
 Maintainers: regenerate repository CLI docs with `./scripts/generate-cli-docs.sh`. Do not paste generated command output into this skill resource.

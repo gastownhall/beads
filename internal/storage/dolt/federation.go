@@ -2,13 +2,15 @@ package dolt
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
+	"os"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -59,58 +61,91 @@ func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Confli
 	// GH#2474: Auto-commit pending changes before pull to prevent
 	// "cannot merge with uncommitted changes" errors.
 	if !s.readOnly {
-		if err := s.Commit(ctx, "auto-commit before pull"); err != nil {
+		if err := s.commitBeforePull(ctx, "auto-commit before pull"); err != nil {
 			if !isDoltNothingToCommit(err) {
 				return nil, fmt.Errorf("failed to commit pending changes before pull: %w", err)
 			}
 		}
 	}
 
-	var conflicts []storage.Conflict
-	if useCLI, err := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); err != nil {
-		return nil, err
-	} else if useCLI {
-		err := s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
-			if pullErr := s.doltCLIPullFromPeer(ctx, peer, creds); pullErr != nil {
-				c, conflictErr := s.GetConflicts(ctx)
-				if conflictErr == nil && len(c) > 0 {
-					conflicts = c
-					return nil
-				}
-				return fmt.Errorf("failed to pull from peer %s: %w", peer, pullErr)
-			}
-			return nil
-		})
-		return conflicts, err
+	// bd-6dnrw.3: pre-pull HEAD for the post-merge is_blocked recompute; an
+	// unreadable HEAD degrades to a full recompute.
+	preHead := ""
+	if !s.readOnly {
+		if h, err := s.GetCurrentCommit(ctx); err == nil {
+			preHead = h
+		}
 	}
-	err := s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+
+	// bd-578h9.3: every peer-pull route funnels through the same settle
+	// machinery as the default-remote pull (pullTransport): the CLI routes
+	// through finishCLIPull, the SQL route through pullWithAutoResolve. A bare
+	// peer pull used to leave non-convergent merges behind — an FK
+	// delete-vs-insert divergence rolls the merge back with nothing in
+	// dolt_conflicts, and mixed-vintage schema_migrations rows conflict on
+	// every retry.
+	var conflicts []storage.Conflict
+	var err error
+	if useCLI, routeErr := s.prepareCLIRouteForPeerGitProtocol(ctx, peer); routeErr != nil {
+		return nil, routeErr
+	} else if useCLI {
+		err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
+			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
+			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
+		})
+		return s.finishPeerPull(ctx, conflicts, err, preHead)
+	}
+	err = s.withPeerCredentials(ctx, peer, func(creds *remoteCredentials) error {
 		// Credential CLI routing: mirrors git-protocol peer pull path.
 		if useCLI, err := s.prepareCLIRouteForPeerCredentials(ctx, peer, creds); err != nil {
 			return err
 		} else if useCLI {
-			if pullErr := s.doltCLIPullFromPeer(ctx, peer, creds); pullErr != nil {
-				c, conflictErr := s.GetConflicts(ctx)
-				if conflictErr == nil && len(c) > 0 {
-					conflicts = c
-					return nil
-				}
-				return fmt.Errorf("failed to pull from peer %s: %w", peer, pullErr)
-			}
-			return nil
+			pullErr := s.finishCLIPull(ctx, s.doltCLIPullFromPeer(ctx, peer, creds))
+			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		}
 		return withEnvCredentials(creds, func() error {
-			if pullErr := s.execWithLongTimeout(ctx, "CALL DOLT_PULL(?)", peer); pullErr != nil {
-				c, conflictErr := s.GetConflicts(ctx)
-				if conflictErr == nil && len(c) > 0 {
-					conflicts = c
-					return nil
-				}
-				return fmt.Errorf("failed to pull from peer %s: %w", peer, pullErr)
-			}
-			return nil
+			pullErr := s.pullWithAutoResolve(ctx, peer, "CALL DOLT_PULL(?)", peer)
+			return s.peerPullOutcome(ctx, peer, pullErr, &conflicts)
 		})
 	})
-	return conflicts, err
+	return s.finishPeerPull(ctx, conflicts, err, preHead)
+}
+
+// peerPullOutcome converts a settled peer pull's result into PullFrom's
+// contract: conflicts the settle machinery could not auto-resolve are returned
+// as data for the caller, anything else stays an error. The SQL route rolls
+// the conflicted merge back before returning, so its conflicts arrive only via
+// MergeConflictsError, captured pre-rollback (bd-578h9.15); the CLI route's
+// subprocess writes conflicts to the on-disk working set where GetConflicts
+// still sees them.
+func (s *DoltStore) peerPullOutcome(ctx context.Context, peer string, pullErr error, conflicts *[]storage.Conflict) error {
+	if pullErr == nil {
+		return nil
+	}
+	var mce *versioncontrolops.MergeConflictsError
+	if errors.As(pullErr, &mce) {
+		*conflicts = mce.Conflicts
+		return nil
+	}
+	if c, conflictErr := s.GetConflicts(ctx); conflictErr == nil && len(c) > 0 {
+		*conflicts = c
+		return nil
+	}
+	return fmt.Errorf("failed to pull from peer %s: %w", peer, pullErr)
+}
+
+// finishPeerPull runs the post-merge is_blocked recompute (bd-6dnrw.3) after a
+// successful, conflict-free peer pull and passes the pull result through
+// otherwise. Conflicted pulls skip the recompute: the caller resolves the
+// conflicts first, and the next sync picks the rows up.
+func (s *DoltStore) finishPeerPull(ctx context.Context, conflicts []storage.Conflict, pullErr error, preHead string) ([]storage.Conflict, error) {
+	if pullErr != nil || len(conflicts) > 0 || s.readOnly {
+		return conflicts, pullErr
+	}
+	if err := s.recomputeBlockedAfterPull(ctx, preHead); err != nil {
+		return conflicts, fmt.Errorf("pull succeeded but is_blocked recompute failed: %w", err)
+	}
+	return conflicts, nil
 }
 
 // Fetch fetches refs from a peer without merging.
@@ -145,6 +180,50 @@ func (s *DoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, erro
 	return versioncontrolops.ListRemotes(ctx, s.db)
 }
 
+// hasPersistedCLIRemote reports whether a Dolt remote is persisted on disk in
+// .dolt/repo_state.json — in the database CLI directory (CLIDir) or the dolt
+// server root (Path, per GH#2118). A freshly (auto-)started sql-server can
+// report an empty dolt_remotes table at store open even though remotes are
+// persisted on disk. The #4259 remote-migrate gate therefore consults this
+// directly so a cold-start open cannot miss the remote and migrate the shared
+// database in place.
+//
+// The probe reads repo_state.json itself (no dolt CLI subprocess), so a
+// missing dolt binary can no longer disable the gate. A directory that is not
+// a dolt repository is a definite "no remote here"; a read/parse failure still
+// fails open (migration is not wedged on unrelated corruption) but is logged,
+// never swallowed (bd-6dnrw.33).
+func (s *DoltStore) hasPersistedCLIRemote() bool {
+	return s.HasPersistedRemote()
+}
+
+// HasPersistedRemote is the exported on-disk probe for callers that must not
+// trust an empty dolt_remotes table at cold start: the remote-migrate gate
+// and the push/pull "no remote configured" exit-0 skip (bd-578h9.10).
+func (s *DoltStore) HasPersistedRemote() bool {
+	cliDir := s.CLIDir()
+	dirs := []string{cliDir}
+	if s.dbPath != "" && s.dbPath != cliDir {
+		dirs = append(dirs, s.dbPath)
+	}
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		remotes, err := doltutil.PersistedRemotes(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr,
+				"Warning: remote-migrate gate could not inspect %s for persisted remotes (assuming none): %v\n",
+				dir, err)
+			continue
+		}
+		if len(remotes) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // RemoveRemote removes a configured remote.
 func (s *DoltStore) RemoveRemote(ctx context.Context, name string) error {
 	return versioncontrolops.RemoveRemote(ctx, s.db, name)
@@ -156,23 +235,31 @@ func (s *DoltStore) SyncStatus(ctx context.Context, peer string) (*storage.SyncS
 		Peer: peer,
 	}
 
-	// Get ahead/behind counts by comparing refs
-	// This requires the peer to have been fetched first
-	query := `
-		SELECT
-			(SELECT COUNT(*) FROM dolt_log WHERE commit_hash NOT IN
-				(SELECT commit_hash FROM dolt_log AS OF CONCAT(?, '/', ?))) as ahead,
-			(SELECT COUNT(*) FROM dolt_log AS OF CONCAT(?, '/', ?) WHERE commit_hash NOT IN
-				(SELECT commit_hash FROM dolt_log)) as behind
-	`
-
-	err := s.db.QueryRowContext(ctx, query, peer, s.branch, peer, s.branch).
-		Scan(&status.LocalAhead, &status.LocalBehind)
-	if err != nil {
-		// If we can't get the status, return a partial result
-		// This happens when the remote branch doesn't exist locally yet
+	// Get ahead/behind counts by comparing refs.
+	// This requires the peer to have been fetched first.
+	// Dolt's AS OF requires a literal ref: bind parameters (even inside CONCAT)
+	// fail server-side with `unbound variable "v1" in query`, so validate the
+	// ref and interpolate it (same pattern as embeddeddolt SyncStatus).
+	remoteRef := peer + "/" + s.branch
+	if err := issueops.ValidateRef(remoteRef); err != nil {
 		status.LocalAhead = -1
 		status.LocalBehind = -1
+	} else {
+		//nolint:gosec // G201: remoteRef is validated by issueops.ValidateRef above — AS OF requires a literal
+		query := fmt.Sprintf(`
+			SELECT
+				(SELECT COUNT(*) FROM dolt_log WHERE commit_hash NOT IN
+					(SELECT commit_hash FROM dolt_log AS OF '%s')) as ahead,
+				(SELECT COUNT(*) FROM dolt_log AS OF '%s' WHERE commit_hash NOT IN
+					(SELECT commit_hash FROM dolt_log)) as behind
+		`, remoteRef, remoteRef)
+		if err := s.db.QueryRowContext(ctx, query).
+			Scan(&status.LocalAhead, &status.LocalBehind); err != nil {
+			// If we can't get the status, return a partial result.
+			// This happens when the remote branch doesn't exist locally yet.
+			status.LocalAhead = -1
+			status.LocalBehind = -1
+		}
 	}
 
 	// Check for conflicts
@@ -223,6 +310,20 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 		StartTime: time.Now(),
 	}
 
+	// GH#2474: match PullFrom — commit pending changes before the merge,
+	// INCLUDING config (where kv.memory.* rows live). Plain Commit excludes
+	// config (GH#2455), so federation metadata writes such as add-peer plus any
+	// persistent memories would otherwise leave the working set dirty and wedge
+	// DOLT_MERGE ("cannot merge with uncommitted changes").
+	if !s.readOnly {
+		if err := s.commitBeforePull(ctx, "auto-commit before sync"); err != nil {
+			if !isDoltNothingToCommit(err) {
+				result.Error = fmt.Errorf("failed to commit pending changes before sync: %w", err)
+				return result, result.Error
+			}
+		}
+	}
+
 	// Step 1: Fetch from peer
 	if err := s.Fetch(ctx, peer); err != nil {
 		result.Error = fmt.Errorf("fetch failed: %w", err)
@@ -260,9 +361,21 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 		}
 		result.ConflictsResolved = true
 
-		// Commit the resolution
-		if err := s.Commit(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
+		// Commit the resolution INCLUDING config: the operator chose this
+		// strategy, and plain Commit excludes config (GH#2455). A config-only
+		// conflict — routine now that kv.memory.* memories sync through config —
+		// would otherwise resolve but never commit, leaving the merge
+		// unconcluded and re-wedging the next sync.
+		if err := s.CommitMergeResolution(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
 			result.Error = fmt.Errorf("failed to commit conflict resolution: %w", err)
+			return result, result.Error
+		}
+
+		// bd-578h9.11: the conflicted merge skipped the automatic is_blocked
+		// recompute (unresolved rows would have fed it garbage); now that the
+		// resolution is committed, cover the whole merge+resolution window.
+		if err := s.RecomputeBlockedAfterMerge(ctx, beforeCommit); err != nil {
+			result.Error = fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
 			return result, result.Error
 		}
 	}
@@ -403,12 +516,12 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 	if err := s.prePushFSCK(ctx); err != nil {
 		return err
 	}
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "push", peer, refspec)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "push", peer, refspec)
 	defer cancel()
 	applyNoGitHooksToCmd(cmd) // GH#3724
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to push to peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
+		return cliTransferError(fmt.Sprintf("push to peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }
@@ -417,11 +530,11 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 // Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to pull from peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
+		return cliTransferError(fmt.Sprintf("pull from peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }
@@ -430,11 +543,11 @@ func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds 
 // Used for git-protocol remotes where CALL DOLT_FETCH times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIFetchFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to fetch from peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
+		return cliTransferError(fmt.Sprintf("fetch from peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }

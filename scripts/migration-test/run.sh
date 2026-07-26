@@ -159,11 +159,20 @@ test_direct_path() {
 
         local violations=0
         check_fidelity "$version" "$SNAPSHOTS_DIR/before.json" "$SNAPSHOTS_DIR/after.json" || violations=$?
+
+        local blocker_violations=0
+        check_blocker_paths "$WS" "$cand_bin" || blocker_violations=$?
+        violations=$((violations + blocker_violations))
+
         stop_dolt_server "$WS"
 
         cleanup_workspace "$WS"
         rm -rf "$SNAPSHOTS_DIR"
-        record_result "$path_label" "AUTO" "direct upgrade, $violations fidelity violations" "" "$violations"
+        if [ "$blocker_violations" -gt 0 ]; then
+            record_result "$path_label" "BLOCKED" "direct upgrade, $violations fidelity/blocker violations" "" "$violations"
+        else
+            record_result "$path_label" "AUTO" "direct upgrade, $violations fidelity violations" "" "$violations"
+        fi
         return 0
     fi
 
@@ -213,11 +222,20 @@ test_direct_path() {
 
         local violations=0
         check_fidelity "$version" "$SNAPSHOTS_DIR/before.json" "$SNAPSHOTS_DIR/after.json" || violations=$?
+
+        local blocker_violations=0
+        check_blocker_paths "$WS" "$cand_bin" || blocker_violations=$?
+        violations=$((violations + blocker_violations))
+
         stop_dolt_server "$WS"
 
         cleanup_workspace "$WS"
         rm -rf "$SNAPSHOTS_DIR"
-        record_result "$path_label" "MANUAL" "recipe: $recipe_name, $violations fidelity violations" "$recipe_name" "$violations"
+        if [ "$blocker_violations" -gt 0 ]; then
+            record_result "$path_label" "BLOCKED" "recipe: $recipe_name, $violations fidelity/blocker violations" "$recipe_name" "$violations"
+        else
+            record_result "$path_label" "MANUAL" "recipe: $recipe_name, $violations fidelity violations" "$recipe_name" "$violations"
+        fi
         return 0
     fi
 
@@ -365,10 +383,18 @@ test_stepping_stone_path() {
     local violations=0
     check_fidelity "${first_ver}" "$SNAPSHOTS_DIR/before.json" "$SNAPSHOTS_DIR/after.json" || violations=$?
 
+    local blocker_violations=0
+    check_blocker_paths "$WS" "$cand_bin" || blocker_violations=$?
+    violations=$((violations + blocker_violations))
+
     stop_dolt_server "$WS"
     cleanup_workspace "$WS"
     rm -rf "$SNAPSHOTS_DIR"
-    record_result "$path_label" "AUTO" "all steps passed, $violations fidelity violations" "" "$violations"
+    if [ "$blocker_violations" -gt 0 ]; then
+        record_result "$path_label" "BLOCKED" "steps passed, $violations fidelity/blocker violations" "" "$violations"
+    else
+        record_result "$path_label" "AUTO" "all steps passed, $violations fidelity violations" "" "$violations"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -449,8 +475,16 @@ if $SELF_TEST; then
             violations=0
             check_fidelity "candidate" "$SNAPSHOTS_DIR/before.json" "$SNAPSHOTS_DIR/after.json" || violations=$?
 
+            blocker_violations=0
+            check_blocker_paths "$WS" "$CAND_BIN" || blocker_violations=$?
+            violations=$((violations + blocker_violations))
+
             stop_dolt_server "$WS"
-            record_result "candidate → candidate" "AUTO" "self-test, $violations fidelity violations" "" "$violations"
+            if [ "$blocker_violations" -gt 0 ]; then
+                record_result "candidate → candidate" "BLOCKED" "self-test, $violations fidelity/blocker violations" "" "$violations"
+            else
+                record_result "candidate → candidate" "AUTO" "self-test, $violations fidelity violations" "" "$violations"
+            fi
         else
             record_result "candidate → candidate" "BLOCKED" "could not create test data"
         fi

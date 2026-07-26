@@ -17,7 +17,7 @@ const ConfigFileName = "metadata.json"
 
 type Config struct {
 	Database string `json:"database"`
-	Backend  string `json:"backend,omitempty"` // Deprecated: always "dolt". Kept for JSON compat.
+	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default); legacy "postgres"/"mysql"/"sqlite" values are rejection tombstones. Read via GetBackend().
 
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
@@ -35,6 +35,18 @@ type Config struct {
 	DoltDataDir        string `json:"dolt_data_dir,omitempty"`        // Custom dolt data directory (absolute path; default: .beads/dolt)
 	DoltRemotesAPIPort int    `json:"dolt_remotesapi_port,omitempty"` // Dolt remotesapi port for federation (default: 8080)
 	// Note: Password should be set via BEADS_DOLT_PASSWORD env var for security
+
+	// Deprecated backend fields are retained only to round-trip metadata written by
+	// the short-lived PostgreSQL/MySQL implementations. They are not connection
+	// configuration for current builds; store selection rejects those backends.
+	PostgresDSN    string `json:"postgres_dsn,omitempty"`
+	PostgresSchema string `json:"postgres_schema,omitempty"`
+	MySQLDSN       string `json:"mysql_dsn,omitempty"`
+	MySQLDatabase  string `json:"mysql_database,omitempty"`
+
+	// Deprecated: retained only to round-trip metadata written by the removed
+	// SQLite backend (backend="sqlite"); store selection rejects that backend.
+	SQLitePath string `json:"sqlite_path,omitempty"` // database file, relative to the beads dir (default beads.db)
 
 	// Project identity — unique ID generated at bd init time.
 	// Used to detect cross-project data leakage when a client connects
@@ -121,11 +133,40 @@ func (c *Config) Save(beadsDir string) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+	// Write-temp-then-rename: a plain os.WriteFile truncates in place, so a
+	// concurrent Load can observe an empty or partial metadata.json and feed
+	// store selection a corrupt config. Rename within the same directory is
+	// atomic, so readers see either the old or the new file, never a torn one.
+	if err := writeFileAtomic(configPath, data, 0o600); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 
 	return nil
+}
+
+// writeFileAtomic writes data to a temp file in path's directory and renames
+// it over path, so concurrent readers never observe a truncated or partial
+// file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck // no-op after successful rename
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func (c *Config) DatabasePath(beadsDir string) string {
@@ -169,7 +210,10 @@ func (c *Config) GetStaleClosedIssuesDays() int {
 
 // Backend constants
 const (
-	BackendDolt = "dolt"
+	BackendDolt     = "dolt"
+	BackendPostgres = "postgres"
+	BackendMySQL    = "mysql"
+	BackendSQLite   = "sqlite"
 )
 
 // BackendCapabilities describes behavioral constraints for a storage backend.
@@ -186,9 +230,9 @@ type BackendCapabilities struct {
 	SingleProcessOnly bool
 }
 
-// CapabilitiesForBackend returns capabilities for a backend string.
-// Dolt is the only supported backend. Returns SingleProcessOnly=true by default;
-// use Config.GetCapabilities() to properly handle server mode.
+// CapabilitiesForBackend returns capabilities for a backend string. Embedded Dolt
+// is single-process-only; use Config.GetCapabilities() to account for
+// Dolt server and proxied-server modes.
 func CapabilitiesForBackend(_ string) BackendCapabilities {
 	return BackendCapabilities{SingleProcessOnly: true}
 }
@@ -204,9 +248,40 @@ func (c *Config) GetCapabilities() BackendCapabilities {
 	return CapabilitiesForBackend(backend)
 }
 
-// GetBackend returns the backend type. Always returns "dolt".
+// IsSupportedBackend reports whether backend selects an implementation shipped by
+// beads. The empty value is the legacy/default spelling of Dolt.
+func IsSupportedBackend(backend string) bool {
+	return backend == "" || backend == BackendDolt
+}
+
+// GetBackend returns the configured storage backend. PostgreSQL, MySQL, and
+// SQLite remain recognizable here so workspaces created by earlier builds can
+// fail loudly at store selection instead of silently falling back to an empty
+// Dolt database.
+// Empty and explicit Dolt retain the established Dolt behavior. GetBackend keeps
+// the historical Dolt fallback for unknown values, so storage-selection callers
+// must check IsSupportedBackend(c.Backend) before opening or creating storage.
 func (c *Config) GetBackend() string {
+	if c != nil {
+		switch c.Backend {
+		case BackendPostgres:
+			return BackendPostgres
+		case BackendMySQL:
+			return BackendMySQL
+		case BackendSQLite:
+			return BackendSQLite
+		}
+	}
 	return BackendDolt
+}
+
+// GetSQLitePath returns the SQLite database file path (relative to the beads dir, or
+// absolute). Empty means the default (beads.db).
+func (c *Config) GetSQLitePath() string {
+	if c == nil {
+		return ""
+	}
+	return c.SQLitePath
 }
 
 // Dolt mode constants
@@ -337,6 +412,18 @@ func (c *Config) GetDoltServerUser() string {
 		return c.DoltServerUser
 	}
 	return DefaultDoltServerUser
+}
+
+// GetDoltCredentialCommand returns the server credential command:
+// BEADS_DOLT_CREDENTIAL_COMMAND. Empty means no command — the static
+// BEADS_DOLT_SERVER_USER / dolt_server_user path applies. The command's stdout is a
+// short-lived token (bare, or a {token,expirationTimestamp} / {access_token,expires_in}
+// envelope) presented as the connection username to an authenticating gateway server,
+// which verifies it and routes to the database. It is deliberately read from the
+// environment only, NOT metadata.json: a metadata-sourced command is arbitrary code run
+// on open, so persisting it waits on a workspace-trust gate.
+func (c *Config) GetDoltCredentialCommand() string {
+	return os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")
 }
 
 // GetDoltDatabase returns the Dolt SQL database name.

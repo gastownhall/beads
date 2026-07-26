@@ -220,6 +220,43 @@ func TestFormatJSONStringArray(t *testing.T) {
 	}
 }
 
+func TestGetCustomStatusesTxParsesTypedConfigNames(t *testing.T) {
+	t.Parallel()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	mock.ExpectBegin()
+	mock.ExpectQuery("SELECT name, category FROM custom_statuses ORDER BY name").
+		WillReturnRows(sqlmock.NewRows([]string{"name", "category"}))
+	mock.ExpectQuery("SELECT value FROM config WHERE `key` = \\?").
+		WithArgs("status.custom").
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow("review:wip,on_hold:frozen"))
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("db.Begin: %v", err)
+	}
+	mock.ExpectRollback()
+
+	got, err := GetCustomStatusesTx(context.Background(), tx)
+	if err != nil {
+		t.Fatalf("GetCustomStatusesTx returned error: %v", err)
+	}
+	want := []string{"review", "on_hold"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("GetCustomStatusesTx() = %#v, want %#v", got, want)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("tx.Rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
 func TestReadConfigPrefix(t *testing.T) {
 	t.Parallel()
 

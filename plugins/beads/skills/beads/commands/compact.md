@@ -1,6 +1,6 @@
 ---
 description: Compact old closed issues using semantic summarization
-argument-hint: [--all] [--id issue-id] [--dry-run]
+argument-hint: "[--all] [--id issue-id] [--dry-run]"
 ---
 
 Reduce database size by summarizing closed issues no longer actively referenced.
@@ -8,7 +8,7 @@ Reduce database size by summarizing closed issues no longer actively referenced.
 ## Compaction Tiers
 
 - **Tier 1**: Semantic compression (30+ days closed, ~70% size reduction)
-- **Tier 2**: Ultra compression (90+ days closed, ~95% size reduction)
+- **Tier 2**: Ultra compression (90+ days closed) — planned, not yet implemented
 
 ## Usage
 

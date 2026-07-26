@@ -85,8 +85,13 @@ func generateUniqueTestID(t *testing.T, prefix string, index int) string {
 // TestMain resets viper, but any test calling config.Initialize() re-loads the real config.
 // This helper ensures viper is reset after the test completes, preventing state pollution
 // (e.g., repo config values leaking into JSONL export tests).
+//
+// Tests automatically opt out of <module-root>/.beads/config.yaml via
+// BEADS_TEST_IGNORE_REPO_CONFIG; tests that want the repo config must override
+// before calling this helper.
 func initConfigForTest(t *testing.T) {
 	t.Helper()
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	config.ResetForTesting()
 	if err := config.Initialize(); err != nil {
 		t.Fatalf("config.Initialize: %v", err)
@@ -208,17 +213,24 @@ func captureStdout(t *testing.T, fn func() error) string {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r)
+		done <- buf.String()
+	}()
+
 	err := fn()
 
 	w.Close()
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
 	os.Stdout = oldStdout
+	out := <-done
+	_ = r.Close()
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	return buf.String()
+	return out
 }
 
 // captureStderr captures stderr output from fn and returns it as a string.
@@ -270,6 +282,17 @@ func findPrebuiltBDBinary() (string, error) {
 	return "", nil
 }
 
+// isCGOBuild reports whether the binary at path was compiled with CGO enabled.
+// Subprocess init tests require embedded Dolt which is only available in CGO builds.
+// Returns true when the build info cannot be read (assumes CGO capable).
+func isCGOBuild(path string) bool {
+	out, err := exec.Command("go", "version", "-m", path).Output()
+	if err != nil {
+		return true
+	}
+	return !strings.Contains(string(out), "\tbuild\tCGO_ENABLED=0\n")
+}
+
 // buildBDForInitTests builds (or locates) a bd binary suitable for subprocess
 // tests. Uses the gms_pure_go tag so the resulting binary works in either
 // CGO mode. Lives in the pure-Go helpers file so subprocess-style tests can
@@ -291,11 +314,17 @@ func buildBDForInitTests(t *testing.T) string {
 			bdBinary = "bd.exe"
 		}
 		// Preserve the existing local optimization: if a bd binary exists in
-		// the repository root, init-style subprocess tests can reuse it.
+		// the repository root, init-style subprocess tests can reuse it —
+		// but only if it was compiled with CGO enabled. Embedded Dolt requires
+		// CGO; a CGO_ENABLED=0 binary will fail bd init without --server.
 		existingBD := filepath.Join("..", "..", bdBinary)
 		if _, err := os.Stat(existingBD); err == nil {
-			initTestBD, _ = filepath.Abs(existingBD)
-			return
+			absPath, _ := filepath.Abs(existingBD)
+			if isCGOBuild(absPath) {
+				initTestBD = absPath
+				return
+			}
+			// Pre-built binary is CGO-disabled — fall through to build fresh.
 		}
 		// Fall back to building.
 		tmpDir, err := testTempDir("bd-init-test-*")

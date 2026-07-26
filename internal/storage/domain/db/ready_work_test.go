@@ -1,6 +1,8 @@
 package db
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -23,6 +25,10 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("LimitRespected", s.readyLimitRespected)
 	s.Run("SortByPriority", s.readySortByPriority)
 	s.Run("CrossTableCollisionError", s.readyCollisionError)
+	s.Run("OffsetSkipsLeadingRows", s.readyOffsetSkipsLeadingRows)
+	s.Run("OffsetWithLooseLimitReturnsRemainder", s.readyOffsetWithoutLimit)
+	s.Run("OffsetHasMoreSignaling", s.readyOffsetHasMoreSignaling)
+	s.Run("OffsetWalksAllPages", s.readyOffsetWalksAllPages)
 }
 
 func (s *testSuite) readyOpenAndInProgress() {
@@ -99,6 +105,14 @@ func (s *testSuite) readyExcludesDefaultTypes() {
 	gate.IssueType = types.TypeGate
 	s.Require().NoError(r.Insert(s.Ctx(), gate, "tester", domain.InsertIssueOpts{}))
 
+	rig := newTestIssue("bd-rdy-dt-rig", "rig")
+	rig.IssueType = types.IssueType("rig")
+	s.Require().NoError(r.Insert(s.Ctx(), rig, "tester", domain.InsertIssueOpts{}))
+
+	message := newTestIssue("bd-rdy-dt-message", "message")
+	message.IssueType = types.TypeMessage
+	s.Require().NoError(r.Insert(s.Ctx(), message, "tester", domain.InsertIssueOpts{}))
+
 	task := newTestIssue("bd-rdy-dt-task", "task")
 	s.Require().NoError(r.Insert(s.Ctx(), task, "tester", domain.InsertIssueOpts{}))
 
@@ -108,6 +122,8 @@ func (s *testSuite) readyExcludesDefaultTypes() {
 	s.Contains(got, "bd-rdy-dt-task")
 	s.NotContains(got, "bd-rdy-dt-mol")
 	s.NotContains(got, "bd-rdy-dt-gate")
+	s.NotContains(got, "bd-rdy-dt-rig")
+	s.NotContains(got, "bd-rdy-dt-message")
 }
 
 func (s *testSuite) readyFilterByPriority() {
@@ -251,6 +267,150 @@ func (s *testSuite) readyCollisionError() {
 	_, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
 	s.Require().Error(err)
 	s.Contains(err.Error(), "exists in both issues and wisps")
+}
+
+func (s *testSuite) readyOffsetSkipsLeadingRows() {
+	r := s.issueRepo()
+	labelRepo := NewLabelSQLRepository(s.Runner())
+	const isoLabel = "rdy-off-isolate"
+	for i := 1; i <= 5; i++ {
+		id := fmt.Sprintf("bd-rdy-off-p%d", i)
+		iss := newTestIssue(id, fmt.Sprintf("p%d", i))
+		iss.Priority = i
+		s.Require().NoError(r.Insert(s.Ctx(), iss, "tester", domain.InsertIssueOpts{}))
+		s.Require().NoError(labelRepo.Insert(s.Ctx(), id, isoLabel, "tester", domain.LabelOpts{}))
+	}
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{
+		Offset:     2,
+		Limit:      2,
+		SortPolicy: types.SortPolicyPriority,
+		Labels:     []string{isoLabel},
+	})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+
+	s.Require().Len(got, 2, "expected exactly 2 paginated results, got %v", got)
+	s.Equal("bd-rdy-off-p3", got[0], "Offset=2 must skip p1+p2")
+	s.Equal("bd-rdy-off-p4", got[1], "Limit=2 must stop after p4")
+}
+
+func (s *testSuite) readyOffsetWithoutLimit() {
+	r := s.issueRepo()
+	labelRepo := NewLabelSQLRepository(s.Runner())
+	const n = 5
+	const isoLabel = "rdy-owl-isolate"
+	for i := 1; i <= n; i++ {
+		id := fmt.Sprintf("bd-rdy-owl-p%d", i)
+		iss := newTestIssue(id, fmt.Sprintf("p%d", i))
+		iss.Priority = i
+		s.Require().NoError(r.Insert(s.Ctx(), iss, "tester", domain.InsertIssueOpts{}))
+		s.Require().NoError(labelRepo.Insert(s.Ctx(), id, isoLabel, "tester", domain.LabelOpts{}))
+	}
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{
+		Offset:     3,
+		Limit:      100,
+		SortPolicy: types.SortPolicyPriority,
+		Labels:     []string{isoLabel},
+	})
+	s.Require().NoError(err)
+
+	s.Require().Len(out.Items, n-3, "Offset=3 must skip 3 of 5, got %v", issueIDsFrom(out))
+	s.Equal("bd-rdy-owl-p4", out.Items[0].ID, "first remaining row must be p4")
+	s.Equal("bd-rdy-owl-p5", out.Items[1].ID, "second remaining row must be p5")
+}
+
+func (s *testSuite) readyOffsetHasMoreSignaling() {
+	r := s.issueRepo()
+	labelRepo := NewLabelSQLRepository(s.Runner())
+	const n = 6
+	const isoLabel = "rdy-hms-isolate"
+	for i := 1; i <= n; i++ {
+		id := fmt.Sprintf("bd-rdy-hms-p%d", i)
+		iss := newTestIssue(id, fmt.Sprintf("p%d", i))
+		iss.Priority = 1
+		s.Require().NoError(r.Insert(s.Ctx(), iss, "tester", domain.InsertIssueOpts{}))
+		s.Require().NoError(labelRepo.Insert(s.Ctx(), id, isoLabel, "tester", domain.LabelOpts{}))
+	}
+	filter := types.WorkFilter{
+		Labels:     []string{isoLabel},
+		SortPolicy: types.SortPolicyPriority,
+	}
+
+	first, err := r.GetReadyWork(s.Ctx(), withOffsetLimit(filter, 0, 3))
+	s.Require().NoError(err)
+	s.Require().Len(first.Items, 3, "page 1 should have exactly 3 items")
+	s.True(first.HasMore, "HasMore must be true when more rows exist beyond Limit")
+
+	boundary, err := r.GetReadyWork(s.Ctx(), withOffsetLimit(filter, 3, 3))
+	s.Require().NoError(err)
+	s.Require().Len(boundary.Items, 3, "boundary page should fill exactly")
+	s.False(boundary.HasMore, "HasMore must be false at exact boundary (N+1 overfetch returns no extra)")
+
+	partial, err := r.GetReadyWork(s.Ctx(), withOffsetLimit(filter, 4, 3))
+	s.Require().NoError(err)
+	s.Require().Len(partial.Items, 2, "tail page should return remaining 2 items")
+	s.False(partial.HasMore, "HasMore must be false on the partial tail page")
+}
+
+func withOffsetLimit(base types.WorkFilter, offset, limit int) types.WorkFilter {
+	base.Offset = offset
+	base.Limit = limit
+	return base
+}
+
+func (s *testSuite) readyOffsetWalksAllPages() {
+	r := s.issueRepo()
+	labelRepo := NewLabelSQLRepository(s.Runner())
+	const n = 6
+	const pageSize = 2
+	const isoLabel = "rdy-walk-isolate"
+	for i := 1; i <= n; i++ {
+		id := fmt.Sprintf("bd-rdy-walk-p%d", i)
+		iss := newTestIssue(id, fmt.Sprintf("p%d", i))
+		iss.Priority = 1
+		s.Require().NoError(r.Insert(s.Ctx(), iss, "tester", domain.InsertIssueOpts{}))
+		s.Require().NoError(labelRepo.Insert(s.Ctx(), id, isoLabel, "tester", domain.LabelOpts{}))
+	}
+	base := types.WorkFilter{Labels: []string{isoLabel}, SortPolicy: types.SortPolicyPriority}
+
+	unpaginated, err := r.GetReadyWork(s.Ctx(), withOffsetLimit(base, 0, 0))
+	s.Require().NoError(err)
+	s.Require().Len(unpaginated.Items, n, "baseline must return all %d items", n)
+	wantIDs := issueIDsFrom(unpaginated)
+
+	var walked []string
+	for page := 0; ; page++ {
+		offset := page * pageSize
+		got, err := r.GetReadyWork(s.Ctx(), withOffsetLimit(base, offset, pageSize))
+		s.Require().NoError(err)
+		for _, iss := range got.Items {
+			walked = append(walked, iss.ID)
+		}
+		if !got.HasMore {
+			if page == 0 || page == 1 {
+				s.Failf("HasMore false too early", "page %d HasMore=false (only walked %d/%d)", page, len(walked), n)
+			}
+			break
+		}
+		if page > n {
+			s.Failf("walk did not terminate", "more than %d pages", n)
+			break
+		}
+	}
+
+	s.Equal(wantIDs, walked, "concatenated pages must equal the full unpaginated result with no gaps or duplicates")
+}
+
+func filterPrefix(ids []string, prefix string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if strings.HasPrefix(id, prefix) {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func issueIDsFrom(page domain.SearchPage) []string {

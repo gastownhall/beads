@@ -1,0 +1,22 @@
+# Loop.range — computed-bound loop with an iteration variable.
+#
+# `loop.range = "1..3"` plus `loop.var = "n"` exposes {n} = 1, 2, 3 to the
+# body's title and description. The body step `move` becomes three issues
+# titled "Move 1", "Move 2", "Move 3" — the smoke harness asserts those
+# substituted titles appear.
+formula = "loop-range"
+description = "Loop.range with var=n exposes {n} for title substitution."
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "moves"
+title = "Tower moves"
+
+[steps.loop]
+range = "1..3"
+var = "n"
+
+[[steps.loop.body]]
+id = "move"
+title = "Move {n}"

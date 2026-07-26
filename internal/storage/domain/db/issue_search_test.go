@@ -607,7 +607,7 @@ func (s *testSuite) paginationSeedReady(prefix, isolationLabel string, n int) []
 		iss.CreatedAt = now.Add(time.Duration(i) * time.Minute)
 		s.Require().NoError(r.Insert(s.Ctx(), iss, "tester", domain.InsertIssueOpts{}))
 		s.Require().NoError(labelRepo.Insert(s.Ctx(), id, isolationLabel, "tester", domain.LabelOpts{}))
-		expected = append([]string{id}, expected...) // prepend → newest-first
+		expected = append(expected, id) // append → oldest-first (FIFO)
 	}
 	return expected
 }
@@ -676,18 +676,20 @@ func (s *testSuite) paginationReadyUnionInterleaves() {
 		s.Require().NoError(r.Insert(s.Ctx(), iss, "tester", domain.InsertIssueOpts{}))
 		s.Require().NoError(labelRepo.Insert(s.Ctx(), iss.ID, label, "tester", domain.LabelOpts{}))
 
+		// NoHistory wisp (ephemeral=0): default ready work excludes true
+		// ephemerals on both stacks, and the interleaving under test is
+		// about the union page walk, not the ephemeral predicate.
 		w := newTestIssue(fmt.Sprintf("bd-pgr-int-w-%d", i), "wisp")
 		w.Priority = 1
 		w.CreatedAt = now.Add(time.Duration(2*i+1) * time.Second)
-		w.Ephemeral = true
 		s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
 		s.Require().NoError(labelRepo.Insert(s.Ctx(), w.ID, label, "tester", domain.LabelOpts{UseWispsTable: true}))
 	}
 
 	want := []string{
-		"bd-pgr-int-w-2", "bd-pgr-int-i-2",
-		"bd-pgr-int-w-1", "bd-pgr-int-i-1",
-		"bd-pgr-int-w-0", "bd-pgr-int-i-0",
+		"bd-pgr-int-i-0", "bd-pgr-int-w-0",
+		"bd-pgr-int-i-1", "bd-pgr-int-w-1",
+		"bd-pgr-int-i-2", "bd-pgr-int-w-2",
 	}
 
 	walked := s.readyPageWalkByLabel(r, label, types.SortPolicyPriority, 2)

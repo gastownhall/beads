@@ -50,7 +50,7 @@ func (s *testSuite) searchCountsComment() {
 
 	for i := 0; i < 3; i++ {
 		_, err := s.Runner().ExecContext(s.Ctx(),
-			"INSERT INTO comments (issue_id, author, text) VALUES (?, ?, ?)",
+			"INSERT INTO comments (id, issue_id, author, text) VALUES (UUID(), ?, ?, ?)",
 			"bd-srxc-cmt-1", "tester", "comment")
 		s.Require().NoError(err)
 	}

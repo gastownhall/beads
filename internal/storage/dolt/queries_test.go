@@ -30,6 +30,62 @@ func TestGetReadyWork_EmptyStore(t *testing.T) {
 	}
 }
 
+func TestRigIssueIsPersistentButHiddenFromReady(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	rig := &types.Issue{
+		ID:        "rw-rig-durable",
+		Title:     "Rig identity",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.IssueType("rig"),
+	}
+	if err := store.CreateIssue(ctx, rig, "tester"); err != nil {
+		t.Fatalf("CreateIssue rig: %v", err)
+	}
+	if rig.Ephemeral {
+		t.Fatal("CreateIssue marked type=rig as ephemeral")
+	}
+
+	got, err := store.GetIssue(ctx, rig.ID)
+	if err != nil {
+		t.Fatalf("GetIssue rig: %v", err)
+	}
+	if got.Ephemeral {
+		t.Fatal("stored type=rig issue is ephemeral")
+	}
+
+	var issueRows int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", rig.ID).Scan(&issueRows); err != nil {
+		t.Fatalf("count rig issue rows: %v", err)
+	}
+	if issueRows != 1 {
+		t.Fatalf("type=rig rows in issues = %d, want 1", issueRows)
+	}
+
+	var wispRows int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM wisps WHERE id = ?", rig.ID).Scan(&wispRows); err != nil {
+		t.Fatalf("count rig wisp rows: %v", err)
+	}
+	if wispRows != 0 {
+		t.Fatalf("type=rig rows in wisps = %d, want 0", wispRows)
+	}
+
+	work, err := store.GetReadyWork(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	for _, item := range work {
+		if item.ID == rig.ID {
+			t.Fatalf("type=rig issue appeared in ready work: %v", issueIDs(work))
+		}
+	}
+}
+
 func TestGetReadyWork_ExcludesClosedIssues(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -1727,6 +1783,28 @@ func TestSearchIssues_ByExternalRef(t *testing.T) {
 	if len(results) != 0 {
 		t.Fatalf("expected no results for unrelated external ref, got %d", len(results))
 	}
+
+	// ExternalRef exact match should find the issue.
+	results, err = store.SearchIssues(ctx, "", types.IssueFilter{ExternalRef: &linearURL})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("ExternalRef exact match: expected 1 result, got %d", len(results))
+	}
+	if results[0].ID != issue.ID {
+		t.Errorf("expected %s, got %s", issue.ID, results[0].ID)
+	}
+
+	// ExternalRef exact match with wrong value should return nothing.
+	wrongRef := "jira-WRONG-123"
+	results, err = store.SearchIssues(ctx, "", types.IssueFilter{ExternalRef: &wrongRef})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("ExternalRef exact match with wrong value: expected 0 results, got %d", len(results))
+	}
 }
 
 func TestSearchIssues_ByID(t *testing.T) {
@@ -2185,8 +2263,12 @@ func TestGetStatistics_EmptyStore(t *testing.T) {
 	if stats.ClosedIssues != 0 {
 		t.Errorf("expected 0 closed issues, got %d", stats.ClosedIssues)
 	}
-	if stats.BlockedIssues != 0 {
-		t.Errorf("expected 0 blocked issues, got %d", stats.BlockedIssues)
+	if stats.BlockedIssues == nil || *stats.BlockedIssues != 0 {
+		got := 0
+		if stats.BlockedIssues != nil {
+			got = *stats.BlockedIssues
+		}
+		t.Errorf("expected 0 blocked issues, got %d", got)
 	}
 }
 
@@ -2278,8 +2360,12 @@ func TestGetStatistics_BlockedCount(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if stats.BlockedIssues != 1 {
-		t.Errorf("expected 1 blocked issue, got %d", stats.BlockedIssues)
+	if stats.BlockedIssues == nil || *stats.BlockedIssues != 1 {
+		got := 0
+		if stats.BlockedIssues != nil {
+			got = *stats.BlockedIssues
+		}
+		t.Errorf("expected 1 blocked issue, got %d", got)
 	}
 }
 
@@ -2390,8 +2476,84 @@ func TestGetStatistics_ReadyIssuesExcludesBlocked(t *testing.T) {
 	}
 
 	// 3 open issues, 1 blocked => ready = 3 - 1 = 2
-	if stats.ReadyIssues != 2 {
-		t.Errorf("expected 2 ready issues (3 open - 1 blocked), got %d", stats.ReadyIssues)
+	if stats.ReadyIssues == nil || *stats.ReadyIssues != 2 {
+		got := -1
+		if stats.ReadyIssues != nil {
+			got = *stats.ReadyIssues
+		}
+		t.Errorf("expected 2 ready issues (3 open - 1 blocked), got %d", got)
+	}
+}
+
+// TestGetStatisticsNoBlocked_LeavesBlockedAndReadyNil verifies the --no-blocked
+// fast path (GetStatisticsNoBlocked) leaves BlockedIssues and ReadyIssues nil
+// (readiness needs the blocked set), while the full GetStatistics path on the
+// same data populates both. Guards against a *int fake-zero regression: a nil
+// pointer must never silently render/serialize as 0.
+func TestGetStatisticsNoBlocked_LeavesBlockedAndReadyNil(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	blocker := &types.Issue{
+		ID:        "stat-nb-blocker",
+		Title:     "Blocker",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	blocked := &types.Issue{
+		ID:        "stat-nb-blocked",
+		Title:     "Blocked",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	for _, iss := range []*types.Issue{blocker, blocked} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("failed to create issue: %v", err)
+		}
+	}
+	dep := &types.Dependency{
+		IssueID:     blocked.ID,
+		DependsOnID: blocker.ID,
+		Type:        types.DepBlocks,
+	}
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("failed to add dependency: %v", err)
+	}
+
+	noBlocked, err := store.GetStatisticsNoBlocked(ctx)
+	if err != nil {
+		t.Fatalf("GetStatisticsNoBlocked: unexpected error: %v", err)
+	}
+	if noBlocked.TotalIssues != 2 {
+		t.Errorf("GetStatisticsNoBlocked: expected 2 total issues, got %d", noBlocked.TotalIssues)
+	}
+	if noBlocked.BlockedIssues != nil {
+		t.Errorf("GetStatisticsNoBlocked: expected BlockedIssues nil, got %d", *noBlocked.BlockedIssues)
+	}
+	if noBlocked.ReadyIssues != nil {
+		t.Errorf("GetStatisticsNoBlocked: expected ReadyIssues nil, got %d", *noBlocked.ReadyIssues)
+	}
+
+	full, err := store.GetStatistics(ctx)
+	if err != nil {
+		t.Fatalf("GetStatistics: unexpected error: %v", err)
+	}
+	if full.BlockedIssues == nil {
+		t.Fatal("GetStatistics: expected BlockedIssues populated, got nil")
+	}
+	if *full.BlockedIssues != 1 {
+		t.Errorf("GetStatistics: expected 1 blocked issue, got %d", *full.BlockedIssues)
+	}
+	if full.ReadyIssues == nil {
+		t.Fatal("GetStatistics: expected ReadyIssues populated, got nil")
+	}
+	if *full.ReadyIssues != 1 {
+		t.Errorf("GetStatistics: expected 1 ready issue (2 open - 1 blocked), got %d", *full.ReadyIssues)
 	}
 }
 

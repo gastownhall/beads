@@ -406,6 +406,37 @@ async def test_add_dependency_tool(mcp_client):
 
 
 @pytest.mark.asyncio
+async def test_comment_comments_and_note_tools(mcp_client):
+    """Test comment, comments, and note tools end to end."""
+    import json
+
+    issue_result = await mcp_client.call_tool(
+        "create", {"title": "Comment tool target", "priority": 1, "issue_type": "task", "brief": False}
+    )
+    issue = json.loads(issue_result.content[0].text)
+
+    # Add a comment
+    comment_result = await mcp_client.call_tool("comment", {"issue_id": issue["id"], "text": "Comment via MCP"})
+    assert issue["id"] in comment_result.content[0].text
+
+    # Read comments back
+    comments_result = await mcp_client.call_tool("comments", {"issue_id": issue["id"]})
+    comments = json.loads(comments_result.content[0].text)
+    if isinstance(comments, dict):
+        comments = [comments]
+    assert any(c["text"] == "Comment via MCP" for c in comments)
+    assert all(c["issue_id"] == issue["id"] for c in comments)
+
+    # Append a note and verify via show
+    note_result = await mcp_client.call_tool("note", {"issue_id": issue["id"], "text": "Note via MCP"})
+    assert issue["id"] in note_result.content[0].text
+
+    show_result = await mcp_client.call_tool("show", {"issue_id": issue["id"]})
+    shown = json.loads(show_result.content[0].text)
+    assert "Note via MCP" in (shown.get("notes") or "")
+
+
+@pytest.mark.asyncio
 async def test_create_with_all_fields(mcp_client):
     """Test create_issue with all optional fields."""
     import json

@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -25,6 +28,78 @@ This subcommand provides additional operations like merge and commit.`,
 
 var vcMergeStrategy string
 
+// blockedAfterMergeRecomputer is the narrow store surface that repairs the
+// denormalized is_blocked column for the rows a merge brought in
+// (bd-578h9.11). Only the concrete stores implement it
+// (internal/storage/dolt/store.go, internal/storage/embeddeddolt/version_control.go);
+// it is NOT part of storage.DoltStorage.
+type blockedAfterMergeRecomputer interface {
+	RecomputeBlockedAfterMerge(ctx context.Context, fromCommit string) error
+}
+
+// blockedAfterMergeRecomputerFor peels the storage decorator chain before
+// asserting, so the optional interface is looked up on the concrete store.
+//
+// getStore() hands back the wireStorageDecorators chain — caller →
+// HookFiringStore → InstrumentedStorage → concrete store
+// (cmd/bd/storage_chain.go) — and both decorators embed the storage.DoltStorage
+// INTERFACE, so their promoted method sets are exactly DoltStorage's.
+// RecomputeBlockedAfterMerge is not in that set, so asserting on the chain
+// itself always failed and the post-merge recompute was silently skipped on
+// every rig carrying a hook layer, which is essentially all of them
+// (main.go builds a hook runner whenever dbPath != ""; only no-hooks:true /
+// BD_NO_HOOKS=1 leaves it off). Same defect class as wy-xtv17's
+// persistedRemoteProber; wy-163oy.
+func blockedAfterMergeRecomputerFor(st storage.DoltStorage) (blockedAfterMergeRecomputer, bool) {
+	if st == nil {
+		return nil, false
+	}
+	rs, ok := storage.UnwrapStore(st).(blockedAfterMergeRecomputer)
+	return rs, ok
+}
+
+// resolveMergeConflictsAndRecompute concludes a merge whose conflicts were
+// resolved with an explicit --strategy: applies the strategy to every
+// conflicted table, commits the resolution, and repairs is_blocked for the
+// rows the merge brought in. Factored out of vcMergeCmd's RunE so the
+// recompute call site — same helper + warn-not-skip contract as
+// conflicts.go's commitMergeResolution — is reachable by a test against a
+// fake store, without needing store.Merge to produce a live conflict (F4,
+// wy-9k58l).
+func resolveMergeConflictsAndRecompute(ctx context.Context, branchName string, conflicts []storage.Conflict, strategy, preHead string) error {
+	for _, conflict := range conflicts {
+		table := conflict.Field
+		if table == "" {
+			table = "issues"
+		}
+		if err := store.ResolveConflicts(ctx, table, strategy); err != nil {
+			return fmt.Errorf("failed to resolve conflicts: %w", err)
+		}
+	}
+	// Conclude the merge: an unresolved-then-resolved working set stays
+	// uncommitted otherwise, and the merged-in writes bypassed every
+	// is_blocked hook (bd-578h9.11). Use CommitMergeResolution, not Commit:
+	// server-mode Commit excludes config (GH#2455), so a resolved config
+	// conflict — routine now that kv.* user data syncs through config —
+	// would be silently dropped, leaving the merge unconcluded and
+	// re-wedging the next pull/sync (GH#2474).
+	if err := store.CommitMergeResolution(ctx, fmt.Sprintf("Resolve merge conflicts from %s using %s strategy", branchName, strategy)); err != nil {
+		return fmt.Errorf("conflicts resolved but commit failed: %w", err)
+	}
+	if rs, ok := blockedAfterMergeRecomputerFor(store); ok {
+		if err := rs.RecomputeBlockedAfterMerge(ctx, preHead); err != nil {
+			return fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
+		}
+	} else {
+		// Never silent: a skipped recompute leaves 'bd ready' stale for
+		// every dependency edge the merge brought in, and the old `if ok`
+		// with no else is exactly how this went unnoticed for the whole
+		// life of the decorator chain.
+		fmt.Fprintf(os.Stderr, "Warning: storage backend %T cannot recompute is_blocked after a merge; 'bd ready' may be stale until 'bd recompute-blocked' runs\n", storage.UnwrapStore(store))
+	}
+	return nil
+}
+
 var vcMergeCmd = &cobra.Command{
 	Use:   "merge <branch>",
 	Short: "Merge a branch into the current branch",
@@ -37,50 +112,55 @@ Examples:
   bd vc merge feature-xyz                    # Merge feature-xyz into current branch
   bd vc merge feature-xyz --strategy ours    # Merge, preferring our changes on conflict
   bd vc merge feature-xyz --strategy theirs  # Merge, preferring their changes on conflict`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("vc merge is not supported in proxied-server mode")
+		}
+		evt := metrics.NewCommandEvent("vc-merge")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 		branchName := args[0]
+
+		// Pre-merge HEAD scopes the post-resolution is_blocked recompute
+		// (bd-578h9.11); empty degrades to a full-graph pass.
+		preHead, _ := store.GetCurrentCommit(ctx)
 
 		// Perform merge
 		conflicts, err := store.Merge(ctx, branchName)
 		if err != nil {
-			FatalErrorRespectJSON("failed to merge branch: %v", err)
+			return HandleErrorRespectJSON("failed to merge branch: %v", err)
 		}
 
-		// Handle conflicts
 		if len(conflicts) > 0 {
 			if vcMergeStrategy != "" {
-				// Auto-resolve conflicts with specified strategy
-				for _, conflict := range conflicts {
-					table := conflict.Field // Field contains table name from GetConflicts
-					if table == "" {
-						table = "issues" // Default to issues table
-					}
-					if err := store.ResolveConflicts(ctx, table, vcMergeStrategy); err != nil {
-						FatalErrorRespectJSON("failed to resolve conflicts: %v", err)
-					}
+				if err := resolveMergeConflictsAndRecompute(ctx, branchName, conflicts, vcMergeStrategy, preHead); err != nil {
+					return HandleErrorRespectJSON("%v", err)
 				}
 				if jsonOutput {
-					outputJSON(map[string]interface{}{
+					return outputJSON(map[string]interface{}{
 						"merged":        branchName,
 						"conflicts":     len(conflicts),
 						"resolved_with": vcMergeStrategy,
 					})
-					return
 				}
 				fmt.Printf("Merged %s with %d conflicts resolved using '%s' strategy\n",
 					ui.RenderAccent(branchName), len(conflicts), vcMergeStrategy)
-				return
+				return nil
 			}
 
-			// Report conflicts without auto-resolution
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				return outputJSON(map[string]interface{}{
 					"merged":    branchName,
 					"conflicts": conflicts,
 				})
-				return
 			}
 
 			fmt.Printf("\n%s Merge completed with conflicts:\n\n", ui.RenderAccent("!!"))
@@ -88,18 +168,18 @@ Examples:
 				fmt.Printf("  - %s\n", conflict.Field)
 			}
 			fmt.Printf("\nResolve conflicts with: bd vc merge %s --strategy [ours|theirs]\n\n", branchName)
-			return
+			return nil
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"merged":    branchName,
 				"conflicts": 0,
 			})
-			return
 		}
 
 		fmt.Printf("Successfully merged %s\n", ui.RenderAccent(branchName))
+		return nil
 	},
 }
 
@@ -115,54 +195,63 @@ Examples:
   bd vc commit -m "Added new feature issues"
   bd vc commit --message "Fixed priority on several issues"
   echo "Multi-line message" | bd vc commit --stdin`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("vc commit is not supported in proxied-server mode")
+		}
+		evt := metrics.NewCommandEvent("vc-commit")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 
 		if vcCommitStdin {
 			if vcCommitMessage != "" {
-				FatalErrorRespectJSON("cannot specify both --stdin and -m/--message")
+				return HandleErrorRespectJSON("cannot specify both --stdin and -m/--message")
 			}
 			b, err := io.ReadAll(os.Stdin)
 			if err != nil {
-				FatalErrorRespectJSON("failed to read commit message from stdin: %v", err)
+				return HandleErrorRespectJSON("failed to read commit message from stdin: %v", err)
 			}
 			vcCommitMessage = strings.TrimRight(string(b), "\n")
 		}
 
 		if vcCommitMessage == "" {
-			FatalErrorRespectJSON("commit message is required (use -m, --message, or --stdin)")
+			return HandleErrorRespectJSON("commit message is required (use -m, --message, or --stdin)")
 		}
 
-		// We are explicitly creating a Dolt commit; avoid redundant auto-commit in PersistentPostRun.
 		commandDidExplicitDoltCommit = true
 		if err := store.Commit(ctx, vcCommitMessage); err != nil {
 			if isDoltNothingToCommit(err) {
 				if jsonOutput {
-					outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
-				} else {
-					fmt.Println("Nothing to commit")
+					return outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
 				}
-				return
+				fmt.Println("Nothing to commit")
+				return nil
 			}
-			FatalErrorRespectJSON("failed to commit: %v", err)
+			return HandleErrorRespectJSON("failed to commit: %v", err)
 		}
 
-		// Get the new commit hash
 		hash, err := store.GetCurrentCommit(ctx)
 		if err != nil {
 			hash = "(unknown)"
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"committed": true,
 				"hash":      hash,
 				"message":   vcCommitMessage,
 			})
-			return
 		}
 
 		fmt.Printf("Created commit %s\n", ui.RenderMuted(hash[:8]))
+		return nil
 	},
 }
 
@@ -173,12 +262,24 @@ var vcStatusCmd = &cobra.Command{
 
 Examples:
   bd vc status`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("vc status is not supported in proxied-server mode")
+		}
+		evt := metrics.NewCommandEvent("vc-status")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 
 		currentBranch, err := store.CurrentBranch(ctx)
 		if err != nil {
-			FatalErrorRespectJSON("failed to get current branch: %v", err)
+			return HandleErrorRespectJSON("failed to get current branch: %v", err)
 		}
 
 		currentCommit, err := store.GetCurrentCommit(ctx)
@@ -187,17 +288,17 @@ Examples:
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"branch": currentBranch,
 				"commit": currentCommit,
 			})
-			return
 		}
 
 		fmt.Printf("\n%s Version Control Status\n\n", ui.RenderAccent("📊"))
 		fmt.Printf("  Branch: %s\n", ui.StatusInProgressStyle.Render(currentBranch))
 		fmt.Printf("  Commit: %s\n", ui.RenderMuted(currentCommit[:8]))
 		fmt.Println()
+		return nil
 	},
 }
 

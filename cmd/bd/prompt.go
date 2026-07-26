@@ -63,6 +63,6 @@ func isCanceled(err error) bool {
 	return errors.Is(err, context.Canceled)
 }
 
-func exitCanceled() {
-	os.Exit(exitCodeCanceled)
+func errCanceled() error {
+	return &exitError{Code: exitCodeCanceled}
 }

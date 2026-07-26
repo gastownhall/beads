@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/templates/agents"
 )
 
@@ -70,24 +71,91 @@ func globalSettingsPath(home string) string {
 }
 
 func claudeAgentsEnv(env claudeEnv) agentsEnv {
-	return agentsEnv{
-		agentsPath: filepath.Join(env.projectDir, claudeInstructionsFile),
-		stdout:     env.stdout,
-		stderr:     env.stderr,
-	}
+	ae, _ := claudeAgentsEnvRedirect(env)
+	return ae
 }
 
-// InstallClaude installs Claude Code hooks
-func InstallClaude(global bool, stealth bool) {
+// claudeAgentsEnvRedirect is claudeAgentsEnv plus a bool reporting whether the
+// AGENTS.md redirect activated, so callers that need to clean up a stale
+// CLAUDE.md block (installClaude, removeClaude) can tell the redirected case
+// apart from the plain CLAUDE.md-is-authoritative case.
+func claudeAgentsEnvRedirect(env claudeEnv) (agentsEnv, bool) {
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+
+	// If CLAUDE.md is a thin stub that imports AGENTS.md via the @-include
+	// convention (Claude Code expands @-imports), redirect the managed beads
+	// section to AGENTS.md instead of duplicating it in the stub. This matches
+	// the shared-authoritative-file pattern used by repos that keep AGENTS.md
+	// as the single source of agent instructions.
+	agentsFile := config.SafeAgentsFile()
+	agentsPath := filepath.Join(env.projectDir, agentsFile)
+	if data, err := env.readFile(claudePath); err == nil {
+		if isAgentsImportStub(string(data), agentsFile) {
+			if _, err := env.readFile(agentsPath); err == nil {
+				return agentsEnv{
+					agentsPath: agentsPath,
+					stdout:     env.stdout,
+					stderr:     env.stderr,
+				}, true
+			}
+		}
+	}
+
+	return agentsEnv{
+		agentsPath: claudePath,
+		stdout:     env.stdout,
+		stderr:     env.stderr,
+	}, false
+}
+
+// stripStaleClaudeBlock removes a beads-managed block left behind in CLAUDE.md
+// by an older bd version, once the AGENTS.md redirect is active. Older bd
+// releases wrote the managed block directly into CLAUDE.md; a project that has
+// since adopted the "@AGENTS.md" import-stub pattern would otherwise carry a
+// stale duplicate of that block alongside the one now maintained in AGENTS.md.
+func stripStaleClaudeBlock(env claudeEnv) error {
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	data, err := env.readFile(claudePath)
+	if err != nil {
+		return nil
+	}
+
+	content := string(data)
+	if !containsBeadsMarker(content) {
+		return nil
+	}
+
+	newContent := removeBeadsSection(content)
+	if err := env.writeFile(claudePath, []byte(newContent)); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(env.stdout, "✓ Removed stale beads block from %s (now redirected to %s)\n", claudeInstructionsFile, config.SafeAgentsFile())
+	return nil
+}
+
+// isAgentsImportStub reports whether content contains an @-include directive
+// for the given agents file (e.g. "@AGENTS.md" on its own line), indicating
+// the file is a thin stub that imports shared agent instructions from the
+// agents file rather than carrying its own content.
+func isAgentsImportStub(content, agentsFile string) bool {
+	directives := []string{"@" + agentsFile, "@./" + agentsFile}
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		for _, directive := range directives {
+			if trimmed == directive {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func InstallClaude(global bool, stealth bool) error {
 	env, err := claudeEnvProvider()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := installClaude(env, global, stealth); err != nil {
-		setupExit(1)
-	}
+	return installClaude(env, global, stealth)
 }
 
 // InstallClaudeProject installs project-local Claude hooks, returning an error
@@ -204,12 +272,23 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 
 	// Install minimal beads section in CLAUDE.md.
 	// Hooks handle the heavy lifting via bd prime; CLAUDE.md just needs a pointer.
-	agentsEnv := claudeAgentsEnv(env)
+	agentsEnv, redirected := claudeAgentsEnvRedirect(env)
 	agentsSkipped := false
 	agentsEnv.skipped = &agentsSkipped
 	if err := installAgents(agentsEnv, claudeAgentsIntegration); err != nil {
 		// Non-fatal: hooks are already installed
 		_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", claudeInstructionsFile, err)
+	}
+
+	// Only strip the stale CLAUDE.md block once the redirect has actually
+	// written the replacement to AGENTS.md. If installAgents skipped injection
+	// (e.g. AGENTS.md is a symlink), stripping here would delete-before-write
+	// and leave the project with no beads section anywhere.
+	if redirected && !agentsSkipped {
+		if err := stripStaleClaudeBlock(env); err != nil {
+			// Non-fatal: the redirect itself already succeeded above
+			_, _ = fmt.Fprintf(env.stderr, "Warning: failed to clean stale beads block from %s: %v\n", claudeInstructionsFile, err)
+		}
 	}
 
 	if agentsSkipped {
@@ -281,17 +360,12 @@ func warnIfClaudeHooksUseRemovedSync(env claudeEnv) {
 	}
 }
 
-// CheckClaude checks if Claude integration is installed
-func CheckClaude() {
+func CheckClaude() error {
 	env, err := claudeEnvProvider()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := checkClaude(env); err != nil {
-		setupExit(1)
-	}
+	return checkClaude(env)
 }
 
 func checkClaude(env claudeEnv) error {
@@ -321,17 +395,12 @@ func checkClaude(env claudeEnv) error {
 	return checkAgents(claudeAgentsEnv(env), claudeAgentsIntegration)
 }
 
-// RemoveClaude removes Claude Code hooks
-func RemoveClaude(global bool) {
+func RemoveClaude(global bool) error {
 	env, err := claudeEnvProvider()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		setupExit(1)
-		return
+		return HandleError("%v", err)
 	}
-	if err := removeClaude(env, global); err != nil {
-		setupExit(1)
-	}
+	return removeClaude(env, global)
 }
 
 func removeClaude(env claudeEnv, global bool) error {
@@ -395,9 +464,21 @@ func removeClaude(env claudeEnv, global bool) error {
 		}
 	}
 
-	if err := removeAgents(claudeAgentsEnv(env), claudeAgentsIntegration); err != nil {
-		// Non-fatal
-		_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", claudeInstructionsFile, err)
+	agentsEnv, redirected := claudeAgentsEnvRedirect(env)
+	if redirected {
+		// When redirected, AGENTS.md carries the project-authoritative shared
+		// beads section (created by `bd init` or another agent's setup), not a
+		// Claude-specific one. Removing Claude integration must not delete it;
+		// only clean up any stale block left directly in CLAUDE.md.
+		_, _ = fmt.Fprintf(env.stdout, "  Leaving shared beads section in %s untouched (project-authoritative, not Claude-specific)\n", config.SafeAgentsFile())
+		if err := stripStaleClaudeBlock(env); err != nil {
+			_, _ = fmt.Fprintf(env.stderr, "Warning: failed to clean stale beads block from %s: %v\n", claudeInstructionsFile, err)
+		}
+	} else {
+		if err := removeAgents(agentsEnv, claudeAgentsIntegration); err != nil {
+			// Non-fatal
+			_, _ = fmt.Fprintf(env.stderr, "Warning: failed to update %s: %v\n", claudeInstructionsFile, err)
+		}
 	}
 
 	_, _ = fmt.Fprintln(env.stdout, "✓ Claude hooks removed")
@@ -545,7 +626,12 @@ func checkBeadsPluginInFile(readFile func(string) ([]byte, error), path string) 
 		return false
 	}
 	for key, value := range enabledPlugins {
-		if strings.Contains(strings.ToLower(key), "beads") {
+		// enabledPlugins keys are "<pluginName>@<marketplace>". Match the
+		// plugin-name segment exactly: a substring test (GH#4244) mistakes any
+		// "*beads*" plugin (e.g. design-to-beads) for the beads hook plugin and
+		// wrongly skips the SessionStart hook write.
+		name, _, _ := strings.Cut(strings.ToLower(key), "@")
+		if name == "beads" {
 			if enabled, ok := value.(bool); ok && enabled {
 				return true
 			}

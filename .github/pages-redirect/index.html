@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="robots" content="noindex" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="redirect-destination" content="https://beads.gascity.com" />
+    <meta http-equiv="refresh" content="1; url=https://beads.gascity.com/" />
+    <title>Beads documentation has moved</title>
+  </head>
+  <body>
+    <p>
+      The Beads documentation has moved to
+      <a id="destination" href="https://beads.gascity.com/">beads.gascity.com</a>.
+    </p>
+    <noscript>
+      <p>
+        JavaScript is required to preserve this page's path. Continue to the
+        <a href="https://beads.gascity.com/">current Beads documentation</a>.
+      </p>
+    </noscript>
+    <script>
+      (function () {
+        var path = window.location.pathname;
+        var destinationPath = path;
+
+        if (path === "/beads" || path === "/beads/") {
+          destinationPath = "/";
+        } else if (path.indexOf("/beads/") === 0) {
+          destinationPath = path.slice("/beads".length);
+        }
+
+        var destination =
+          document.querySelector('meta[name="redirect-destination"]').content +
+          destinationPath +
+          window.location.search +
+          window.location.hash;
+
+        document.getElementById("destination").href = destination;
+        window.location.replace(destination);
+      })();
+    </script>
+  </body>
+</html>

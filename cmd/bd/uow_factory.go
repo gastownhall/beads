@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
@@ -24,17 +26,25 @@ func newProxiedServerUOWProvider(ctx context.Context, beadsDir string) (uow.Unit
 	}
 
 	info, _ := configfile.LoadProxiedServerClientInfo(beadsDir)
+	var proxyPort int
+	var proxyIdleTimeout time.Duration
+	if info != nil {
+		proxyPort = info.Port
+		proxyIdleTimeout = info.IdleTimeout
+	}
 	if info != nil && info.External != nil {
-		return newExternalProxiedServerUOWProvider(ctx, beadsDir, database, info.External)
+		return newExternalProxiedServerUOWProvider(ctx, beadsDir, database, info.External, proxyPort, proxyIdleTimeout)
 	}
 
-	return newManagedProxiedServerUOWProvider(ctx, beadsDir, database)
+	return newManagedProxiedServerUOWProvider(ctx, beadsDir, database, proxyPort, proxyIdleTimeout)
 }
 
 func newExternalProxiedServerUOWProvider(
 	ctx context.Context,
 	beadsDir, database string,
 	external *configfile.ExternalDoltConfig,
+	proxyPort int,
+	proxyIdleTimeout time.Duration,
 ) (uow.UnitOfWorkProvider, error) {
 	rootPath, err := resolveProxiedServerRootPath(beadsDir)
 	if err != nil {
@@ -66,12 +76,16 @@ func newExternalProxiedServerUOWProvider(
 		*external,
 		external.ResolvedUser(),
 		os.Getenv(configfile.ExternalDoltPasswordEnvVar),
+		proxyPort,
+		proxyIdleTimeout,
 	)
 }
 
 func newManagedProxiedServerUOWProvider(
 	ctx context.Context,
 	beadsDir, database string,
+	proxyPort int,
+	proxyIdleTimeout time.Duration,
 ) (uow.UnitOfWorkProvider, error) {
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
@@ -86,7 +100,13 @@ func newManagedProxiedServerUOWProvider(
 		return nil, fmt.Errorf("newProxiedServerUOWProvider: proxied server root (from env or %s): %w", configfile.ProxiedServerClientInfoFileName, err)
 	}
 
-	configPath, err := ensureProxiedServerConfig(beadsDir)
+	// Gate auto_gc_behavior.archive_level: 0 on the resolved external dolt's
+	// version — Dolt's YAML config loader uses yaml.UnmarshalStrict, so an
+	// older dolt whose own YAMLConfig struct lacks this field would refuse
+	// to start rather than ignore the unknown key (gastownhall/beads#4986).
+	archiveLevelSupported := doltserver.SupportsArchiveLevelConfig(doltBin)
+
+	configPath, err := ensureProxiedServerConfig(beadsDir, archiveLevelSupported)
 	if err != nil {
 		return nil, err
 	}
@@ -111,5 +131,7 @@ func newManagedProxiedServerUOWProvider(
 		"root",
 		"", // proxy is loopback-only, no auth
 		doltBin,
+		proxyPort,
+		proxyIdleTimeout,
 	)
 }

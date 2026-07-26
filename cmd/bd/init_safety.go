@@ -2,7 +2,7 @@ package main
 
 // Init-safety decision logic.
 //
-// See docs/adr/0002-init-safety-invariants.md for the ADR this encodes.
+// See engdocs/adr/0002-init-safety-invariants.md for the ADR this encodes.
 // The invariant: every `bd init` resolves `project_id` from exactly one
 // explicitly-named source; ambiguous sources refuse. `--force` (or its
 // replacement `--reinit-local`) bypasses the local data-safety guard only;
@@ -14,14 +14,14 @@ package main
 // Error-message contract: no runtime error may emit a complete destructive
 // invocation. Flag identifiers and safe-tool names are permitted; token
 // values and other friction-bearing arguments live in `bd help init-safety`
-// and `docs/RECOVERY.md` only.
+// and `docs/recovery/init-safety.md` only.
 
 import "fmt"
 
 // Exit codes for init-safety refusals. Stable values so CI scripts can
 // branch on them without grep'ing stderr.
 const (
-	// ExitRemoteDivergenceRefused signals `bd init --force` was called
+	// ExitRemoteDivergenceRefused signals a local-source init was called
 	// against a remote that already has `refs/dolt/data`, without
 	// `--discard-remote`. Ambiguous identity source.
 	ExitRemoteDivergenceRefused = 10
@@ -76,8 +76,12 @@ type RemoteSafetyInput struct {
 	// Flag state. Force is kept as a separate field so callers can route
 	// deprecation warnings at the call site; CheckRemoteSafety treats it
 	// as equivalent to ReinitLocal.
-	Force         bool
-	ReinitLocal   bool
+	Force       bool
+	ReinitLocal bool
+	// FromJSONL selects local JSONL as the init source instead of remote
+	// Dolt history. When remote history exists, this is a local-source
+	// override and must not silently diverge without DiscardRemote.
+	FromJSONL     bool
 	DiscardRemote bool
 
 	// Destroy-token supplied on the command line, plus the token the
@@ -118,11 +122,12 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 		return RemoteSafetyDecision{Action: ActionNoRemoteData, Reason: "no-remote-data"}
 	}
 
-	// Any explicit override intent (force / reinit-local / discard-remote)
+	// Any explicit override intent (force / reinit-local / from-jsonl /
+	// discard-remote)
 	// means the user is not accepting the default bootstrap. DiscardRemote
 	// is treated as override-intent too — naming discard explicitly
 	// implies the user knows the remote has data and wants to replace it.
-	userOverride := in.Force || in.ReinitLocal || in.DiscardRemote
+	userOverride := in.Force || in.ReinitLocal || in.FromJSONL || in.DiscardRemote
 
 	// Remote has data, user did not override anything. Bootstrap is the
 	// safe adoption path — this is the existing correct behavior.
@@ -131,7 +136,8 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	}
 
 	// User wanted to override but did NOT authorize the cross-boundary
-	// operation. This is the bd-q83 bug in pre-fix code: `--force` without
+	// operation. This is the bd-q83 bug class: a local-source init flag
+	// (`--force`, `--reinit-local`, or `--from-jsonl`) without
 	// `--discard-remote`. Refuse with structured message.
 	if !in.DiscardRemote {
 		return RemoteSafetyDecision{
@@ -158,16 +164,17 @@ func CheckRemoteSafety(in RemoteSafetyInput) RemoteSafetyDecision {
 	return RemoteSafetyDecision{Action: ActionProceedWithDivergence, Reason: "authorized-divergence"}
 }
 
-// refusalMessageDivergence returns the What/Why/Next refusal text for the
-// `--force` / `--reinit-local` without `--discard-remote` case. Deliberately
-// does not echo a complete destructive invocation — the ADR invariant bars
-// runtime error output from constructing a copy-pasteable override.
+// refusalMessageDivergence returns the What/Why/Next refusal text for local
+// source selection without `--discard-remote`. Deliberately does not echo a
+// complete destructive invocation — the ADR invariant bars runtime error
+// output from constructing a copy-pasteable override.
 func refusalMessageDivergence() string {
 	return `bd init refuses: remote 'origin' already has Dolt history (refs/dolt/data).
 
-  Why: --force / --reinit-local bypasses only the LOCAL data-safety
-       guard. It does not authorize silent divergence of remote history.
-       Proceeding would orphan-push over the team's data on first write.
+  Why: this init mode would create or reuse local history instead of
+       adopting the remote. --force / --reinit-local bypasses only the
+       LOCAL data-safety guard; --from-jsonl selects JSONL as the local
+       source. Neither authorizes silent divergence of remote history.
 
   Next:
     Adopt the remote (recommended):
@@ -197,7 +204,7 @@ func refusalMessageTokenMissing() string {
 
 // FormatDestroyToken returns the destroy-token the caller should supply
 // for a given issue prefix. Callers that need to surface this to users
-// should do so via `bd help init-safety` or `docs/RECOVERY.md` — NOT via
+// should do so via `bd help init-safety` or `docs/recovery/init-safety.md` — NOT via
 // runtime error text (see the ADR invariant).
 func FormatDestroyToken(prefix string) string {
 	return fmt.Sprintf("DESTROY-%s", prefix)

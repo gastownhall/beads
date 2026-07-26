@@ -1,0 +1,21 @@
+# Allowlist for scripts/check-migration-hygiene.sh check B (nondeterministic SQL).
+#
+# Format: <path relative to migrations/> <whitespace> <justification>.
+# Every entry needs a justification on the same line; stale entries fail CI.
+# Adding an entry means asserting the nondeterminism cannot cause cross-clone
+# divergence in replicated tables (the #4259 failure mode). New migrations
+# should compute values in application code instead — see bd-6dnrw.18.
+#
+# -- Shipped before this guard existed (frozen by check C; cannot be edited) --
+0004_create_comments.up.sql        DEFAULT (UUID()) on synced PK; shipped pre-guard; insert sites set explicit ids per bd-6dnrw.18
+0005_create_events.up.sql          DEFAULT (UUID()) on synced PK; shipped pre-guard; insert sites set explicit ids per bd-6dnrw.18
+0009_create_issue_snapshots.up.sql DEFAULT (UUID()) on synced PK; shipped pre-guard; insert sites set explicit ids per bd-6dnrw.18
+0010_create_compaction_snapshots.up.sql DEFAULT (UUID()) on synced PK; shipped pre-guard; insert sites set explicit ids per bd-6dnrw.18
+0021_create_wisp_auxiliary.up.sql  DEFAULT (UUID()) on wisp aux PKs; shipped pre-guard
+0037_uuid_primary_keys.up.sql      UUID() PK backfill on existing rows; shipped pre-guard; divergence hazard tracked as bd-6dnrw.2
+0043_drop_dependencies_generated_column.up.sql Conditional re-add of DEFAULT (UUID()) inside dynamic SQL; shipped pre-guard; superseded by 0050 deterministic ids
+#
+# -- Genuinely safe uses --
+0017_create_ready_issues_view.up.sql NOW() inside a VIEW body evaluates at query time, identically on every clone; nothing nondeterministic is stored
+ignored/0001_create_local_state_tables.up.sql DEFAULT (UUID()) on local-only tables (dolt_ignore'd, never replicated); per-clone values cannot skew merges
+ignored/0005_drop_wisp_dependencies_generated_column.up.sql DEFAULT (UUID()) re-add inside dynamic SQL on local-only wisp table (dolt_ignore'd, never replicated)
