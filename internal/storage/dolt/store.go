@@ -2790,6 +2790,25 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 			return true, nil
 		}
 	}
+	// Not visible in dolt_remotes — but that is not proof it is absent: a
+	// freshly (auto-)started sql-server can report an empty dolt_remotes
+	// while the remote is persisted on disk (GH#2118, wy-6k7f7). Recover the
+	// persisted truth: a git-protocol remote routes over the CLI anyway, so
+	// the push can proceed; a non-git remote would need the SQL route, which
+	// the cold server would refuse with a bare "remote not found" — fail
+	// with the cold-start explanation instead.
+	for _, r := range s.PersistedRemoteInfos() {
+		if r.Name != remote {
+			continue
+		}
+		if !doltutil.IsGitProtocolURL(r.URL) {
+			return false, fmt.Errorf("remote %q (%s) is persisted on disk but not yet visible to this sql-server (GH#2118 cold start); retry shortly, or restart the dolt sql-server if it persists", remote, r.URL)
+		}
+		if err := s.ensureMatchingCLIRemote(remote, r.URL); err != nil {
+			return false, fmt.Errorf("remote %q uses git protocol and requires CLI routing: %w", remote, err)
+		}
+		return true, nil
+	}
 	return false, nil
 }
 

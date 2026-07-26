@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 func TestApplyHooksNoDrift(t *testing.T) {
@@ -344,4 +348,69 @@ func TestPrintApplyResults(t *testing.T) {
 	defer func() { os.Stdout = old }()
 	printApplyResults(results)
 	printApplyResults(nil)
+}
+
+// fakeOriginRemoteEvidence simulates the two evidence sources
+// currentOriginRemoteURL consults: the SQL-visible dolt_remotes listing and
+// the on-disk .dolt/repo_state.json enumeration.
+type fakeOriginRemoteEvidence struct {
+	listed    []storage.RemoteInfo
+	listErr   error
+	persisted []storage.RemoteInfo
+}
+
+func (f *fakeOriginRemoteEvidence) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, error) {
+	return f.listed, f.listErr
+}
+
+func (f *fakeOriginRemoteEvidence) PersistedRemoteInfos() []storage.RemoteInfo {
+	return f.persisted
+}
+
+// TestCurrentOriginRemoteURL pins the wy-6k7f7 evidence rule for
+// `bd config apply`: an empty dolt_remotes listing alone is not proof there
+// is no origin — a cold-started sql-server hides a persisted remote
+// (GH#2118), and blind-adding over it was the defect. The SQL listing wins
+// when populated; the persisted enumeration is the fallback; a failed
+// listing is an error, never evidence.
+func TestCurrentOriginRemoteURL(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("listing_wins_when_populated", func(t *testing.T) {
+		url, err := currentOriginRemoteURL(ctx, &fakeOriginRemoteEvidence{
+			listed:    []storage.RemoteInfo{{Name: "origin", URL: "https://sql.example/repo"}},
+			persisted: []storage.RemoteInfo{{Name: "origin", URL: "https://disk.example/repo"}},
+		})
+		if err != nil || url != "https://sql.example/repo" {
+			t.Fatalf("got (%q, %v), want the SQL-visible URL", url, err)
+		}
+	})
+
+	t.Run("cold_start_recovers_persisted_origin", func(t *testing.T) {
+		url, err := currentOriginRemoteURL(ctx, &fakeOriginRemoteEvidence{
+			persisted: []storage.RemoteInfo{{Name: "origin", URL: "https://disk.example/repo"}},
+		})
+		if err != nil || url != "https://disk.example/repo" {
+			t.Fatalf("got (%q, %v), want the persisted on-disk URL", url, err)
+		}
+	})
+
+	t.Run("no_evidence_means_no_origin", func(t *testing.T) {
+		url, err := currentOriginRemoteURL(ctx, &fakeOriginRemoteEvidence{
+			persisted: []storage.RemoteInfo{{Name: "peer-mini", URL: "https://disk.example/other"}},
+		})
+		if err != nil || url != "" {
+			t.Fatalf("got (%q, %v), want empty with no error", url, err)
+		}
+	})
+
+	t.Run("list_failure_is_an_error_not_evidence", func(t *testing.T) {
+		_, err := currentOriginRemoteURL(ctx, &fakeOriginRemoteEvidence{
+			listErr:   errors.New("connection refused"),
+			persisted: []storage.RemoteInfo{{Name: "origin", URL: "https://disk.example/repo"}},
+		})
+		if err == nil {
+			t.Fatal("a failed listing must surface as an error, not fall through to disk")
+		}
+	})
 }
