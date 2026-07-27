@@ -189,6 +189,7 @@ type importResultJSON struct {
 	Source              string         `json:"source"`
 	Created             int            `json:"created"`
 	Updated             int            `json:"updated,omitempty"`
+	Unchanged           int            `json:"unchanged,omitempty"`
 	Skipped             int            `json:"skipped"`
 	DedupHits           int            `json:"dedup_skipped,omitempty"`
 	Memories            int            `json:"memories,omitempty"`
@@ -281,15 +282,37 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 	}
 
 	if importDryRun {
-		result.Created = len(issues)
 		result.Memories = len(memories)
 		result.Skipped = dedupHits
+
+		classification, err := classifyDryRunImport(ctx, store, issues, importAllowStale)
+		if err != nil {
+			return fmt.Errorf("dry-run: %w", err)
+		}
+		result.Created = classification.Created
+		result.Updated = classification.Updated
+		result.Unchanged = classification.Unchanged
+		result.Skipped += classification.Skipped
+		result.IDs = append(result.IDs, classification.ImportedIDs...)
+		result.StaleSkippedIDs = classification.StaleSkippedIDs
+		result.UpdatedIssues = classification.UpdatedIssues
+		result.TieKeptLocalIDs = classification.TieKeptLocalIDs
+
 		if jsonOutput {
 			return outputJSON(result)
 		}
-		fmt.Fprintf(os.Stderr, "Would import %d issues and %d memories from %s", len(issues), len(memories), source)
+		// The leading count is the sum of the breakdown that follows it
+		// (not len(issues)), which can be larger when rows were stale
+		// skipped — those are reported separately below instead of being
+		// folded into a total the breakdown then wouldn't add up to.
+		considered := result.Created + result.Updated + result.Unchanged
+		fmt.Fprintf(os.Stderr, "Would import %d issues (%d new, %d updated, %d unchanged) and %d memories from %s",
+			considered, result.Created, result.Updated, result.Unchanged, len(memories), source)
 		if dedupHits > 0 {
 			fmt.Fprintf(os.Stderr, " (%d duplicates skipped)", dedupHits)
+		}
+		if len(result.StaleSkippedIDs) > 0 {
+			fmt.Fprintf(os.Stderr, " (%d stale skipped)", len(result.StaleSkippedIDs))
 		}
 		fmt.Fprintln(os.Stderr)
 		return nil

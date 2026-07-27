@@ -45,6 +45,10 @@ redirect
 # Sync state (local-only, per-machine)
 # These files are machine-specific and should not be shared across clones
 .sync.lock
+
+# Workspace operation gate (internal/workspacegate): physical-root gate
+# files live beside the guarded root inside .beads (e.g. dolt.gate.lock)
+*.gate.lock*
 export-state/
 export-state.json
 last_pull
@@ -95,6 +99,10 @@ var ProjectGitignorePatterns = []string{
 	"*.db",
 	".beads-credential-key",
 	".beads/proxieddb/",
+	// Workspace-gate artifacts (internal/workspacegate): the workspace
+	// gate file sits BESIDE .beads in the project root, so .beads/
+	// patterns cannot cover it.
+	"*.gate.lock*",
 }
 
 // ProjectGitignoreHeader is the section header added to the project .gitignore
@@ -108,6 +116,7 @@ var requiredPatterns = []string{
 	"last-touched",
 	"bd.sock.startlock",
 	".sync.lock",
+	"*.gate.lock*",
 	"export-state/",
 	"export-state.json",
 	"last_pull",

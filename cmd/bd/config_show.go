@@ -151,6 +151,20 @@ func collectViperEntries() []configEntry {
 		source := config.GetValueSource(key)
 		sourceLabel := viperSourceLabel(key, source)
 
+		// The "actor" key gets the same BEADS_ACTOR > BD_ACTOR precedence as
+		// the runtime path (resolveConfiguredActor in main.go): viper's
+		// AutomaticEnv binds the deprecated BD_ACTOR ahead of any explicit
+		// binding, so config.GetString("actor")/viperSourceLabel alone would
+		// report BD_ACTOR's value and provenance even when BEADS_ACTOR is
+		// also set — contradicting the actor that mutations actually use
+		// (GH#4645). Recompute both here so `config show` matches reality.
+		if key == "actor" {
+			value = formatViperValue(resolveConfiguredActor())
+			if beadsActor := os.Getenv("BEADS_ACTOR"); beadsActor != "" {
+				sourceLabel = "env: BEADS_ACTOR"
+			}
+		}
+
 		// User-global keys (metrics.*) are honored at runtime from the user-global
 		// config.yaml only, never merged project config; report that authoritative
 		// value AND its user-global source so the listing matches what bd actually

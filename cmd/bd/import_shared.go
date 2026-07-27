@@ -644,6 +644,15 @@ type importChangePlan struct {
 	// every stored column for these (second-granularity timestamp tie),
 	// while their aux data still merges.
 	TieKeptLocal []string
+	// NewIDs lists incoming rows with no local match (would-create), deduped
+	// by ID for display and excluding title-only rows that carry no ID at
+	// all. NewCount is the authoritative row count for those same rows: it
+	// counts every classified-new row, including duplicate IDs and ID-less
+	// rows, so dry-run counts sum to the number of rows considered instead
+	// of undercounting when NewIDs collapses duplicates.
+	NewIDs []string
+	// NewCount is the number of incoming rows classified as new. See NewIDs.
+	NewCount int
 }
 
 func filterStaleImportIssues(ctx context.Context, store storage.DoltStorage, issues []*types.Issue) ([]*types.Issue, []string, importChangePlan, error) {
@@ -660,7 +669,31 @@ func filterStaleImportIssues(ctx context.Context, store storage.DoltStorage, iss
 		seen[issue.ID] = struct{}{}
 		ids = append(ids, issue.ID)
 	}
+
+	newIDsSeen := make(map[string]struct{})
+	addNew := func(id string) {
+		plan.NewCount++
+		if id == "" {
+			// Title-only rows have no ID to look up or report — they always
+			// create, but there's nothing to add to the display list.
+			return
+		}
+		if _, dup := newIDsSeen[id]; dup {
+			return
+		}
+		newIDsSeen[id] = struct{}{}
+		plan.NewIDs = append(plan.NewIDs, id)
+	}
+
 	if len(ids) == 0 {
+		// There is no ID to look up, but title-only rows still create on
+		// execution. Classify each non-nil row before the short-circuit so a
+		// dry run reports it as created rather than unchanged.
+		for _, issue := range issues {
+			if issue != nil {
+				addNew(issue.ID)
+			}
+		}
 		return issues, nil, plan, nil
 	}
 
@@ -674,20 +707,45 @@ func filterStaleImportIssues(ctx context.Context, store storage.DoltStorage, iss
 			localByID[issue.ID] = issue
 		}
 	}
+
 	if len(localByID) == 0 {
+		// Nothing matched locally, so every considered row is new.
+		for _, issue := range issues {
+			if issue == nil {
+				continue
+			}
+			addNew(issue.ID)
+		}
 		return issues, nil, plan, nil
 	}
 
 	filtered := make([]*types.Issue, 0, len(issues))
 	skippedIDs := make([]string, 0)
 	for _, issue := range issues {
-		if issue == nil || issue.ID == "" || issue.UpdatedAt.IsZero() {
+		if issue == nil {
+			filtered = append(filtered, issue)
+			continue
+		}
+		if issue.ID == "" || issue.UpdatedAt.IsZero() {
+			// No incoming timestamp to stale-check (or, for a title-only
+			// row, no ID at all): these rows still write on execution, so
+			// classify them via an existence lookup instead of silently
+			// falling through as unchanged (GH#4901 follow-up).
+			if local, ok := localByID[issue.ID]; ok {
+				plan.Updates = append(plan.Updates, ImportChange{
+					ID:      issue.ID,
+					Changes: importRowChangeSummary(local, issue),
+				})
+			} else {
+				addNew(issue.ID)
+			}
 			filtered = append(filtered, issue)
 			continue
 		}
 		local, ok := localByID[issue.ID]
 		if !ok {
 			filtered = append(filtered, issue)
+			addNew(issue.ID)
 			continue
 		}
 		// Compare at second granularity: updated_at is DATETIME(0) in the
@@ -709,6 +767,110 @@ func filterStaleImportIssues(ctx context.Context, store storage.DoltStorage, iss
 		filtered = append(filtered, issue)
 	}
 	return filtered, skippedIDs, plan, nil
+}
+
+// classifyImportIssuesExistence classifies incoming rows as created or
+// updated purely by whether their ID already exists locally, without the
+// staleness policy: the --allow-stale dry-run path (like the real
+// --allow-stale write) imports every row regardless of timestamp ordering,
+// so no row is ever stale-skipped or tie-kept — existence is the only
+// question.
+func classifyImportIssuesExistence(ctx context.Context, store storage.DoltStorage, issues []*types.Issue) (importChangePlan, error) {
+	var plan importChangePlan
+	ids := make([]string, 0, len(issues))
+	seen := make(map[string]struct{}, len(issues))
+	for _, issue := range issues {
+		if issue == nil || issue.ID == "" {
+			continue
+		}
+		if _, ok := seen[issue.ID]; ok {
+			continue
+		}
+		seen[issue.ID] = struct{}{}
+		ids = append(ids, issue.ID)
+	}
+	localByID := make(map[string]*types.Issue)
+	if len(ids) > 0 {
+		localIssues, err := store.GetIssuesByIDs(ctx, ids)
+		if err != nil {
+			return plan, fmt.Errorf("check existing issues before import: %w", err)
+		}
+		for _, issue := range localIssues {
+			if issue != nil && issue.ID != "" {
+				localByID[issue.ID] = issue
+			}
+		}
+	}
+
+	newIDsSeen := make(map[string]struct{})
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		local, ok := localByID[issue.ID]
+		if !ok {
+			plan.NewCount++
+			if issue.ID == "" {
+				continue
+			}
+			if _, dup := newIDsSeen[issue.ID]; dup {
+				continue
+			}
+			newIDsSeen[issue.ID] = struct{}{}
+			plan.NewIDs = append(plan.NewIDs, issue.ID)
+			continue
+		}
+		plan.Updates = append(plan.Updates, ImportChange{
+			ID:      issue.ID,
+			Changes: importRowChangeSummary(local, issue),
+		})
+	}
+	return plan, nil
+}
+
+// classifyDryRunImport runs the same id lookup as a real import, without
+// writing anything, so --dry-run can report create/update/skip counts
+// instead of treating every row as a create (GH#4901).
+func classifyDryRunImport(ctx context.Context, store storage.DoltStorage, issues []*types.Issue, allowStale bool) (*ImportResult, error) {
+	if len(issues) == 0 {
+		return &ImportResult{}, nil
+	}
+	if allowStale {
+		// Matches the real path: --allow-stale skips the stale guard
+		// entirely, so a row is never stale-skipped or tie-kept here — but a
+		// row matching an existing local issue still writes as an update,
+		// not a create (GH#4901 follow-up).
+		plan, err := classifyImportIssuesExistence(ctx, store, issues)
+		if err != nil {
+			return nil, err
+		}
+		return &ImportResult{
+			Created:       plan.NewCount,
+			Updated:       len(plan.Updates),
+			ImportedIDs:   plan.NewIDs,
+			UpdatedIssues: plan.Updates,
+		}, nil
+	}
+
+	filtered, staleSkippedIDs, plan, err := filterStaleImportIssues(ctx, store, issues)
+	if err != nil {
+		return nil, err
+	}
+	// TieKeptLocal rows are not rewritten (the stale-guarded upsert keeps
+	// every stored column), so they belong in Unchanged, not Updated —
+	// they're still reported separately via TieKeptLocalIDs.
+	created := plan.NewCount
+	updated := len(plan.Updates)
+	return &ImportResult{
+		Created:         created,
+		Updated:         updated,
+		Unchanged:       len(filtered) - created - updated,
+		Skipped:         len(staleSkippedIDs),
+		ImportedIDs:     plan.NewIDs,
+		StaleSkippedIDs: staleSkippedIDs,
+		UpdatedIssues:   plan.Updates,
+		TieKeptLocalIDs: plan.TieKeptLocal,
+	}, nil
 }
 
 // importRowChangeSummary summarizes the differences between the local issue

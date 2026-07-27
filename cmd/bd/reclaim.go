@@ -31,15 +31,37 @@ least this long ago are reclaimed, so a worker briefly paused (GC, clock skew)
 is not robbed of live work. Run it from a supervisor on a timer with a window
 of roughly 2× the claim TTL.
 
-By default reclaim is global: every stale lease in the database is fair game.
-The scope filters below narrow it, using the same label surface claiming is
+By default reclaim covers every stale lease THIS replica granted. The scope
+filters below narrow it further, using the same label surface claiming is
 scoped by (--label / --label-any / --exclude-label), plus --assignee and --id.
-Scoping matters on a federated deployment: each replica's view of the other
-machine's liveness is stale by up to one sync interval, so an unscoped reaper on
-one machine can revert a unit that is alive on the machine that granted its
-lease. Point each supervisor's reclaim at its own claim partition and that
-cannot happen. Filters AND-combine and never widen the set: a reclaimed lease
-must still be stale.
+Filters AND-combine and never widen the set: a reclaimed lease must still be
+stale.
+
+Replicas and leases (federated deployments)
+-------------------------------------------
+A lease is only meaningful on the replica that granted it. Every other
+replica's view of the holder's liveness is stale by up to one sync interval,
+so a reaper elsewhere can revert a unit that is very much alive over there.
+reclaim therefore records the granting replica on each lease and SKIPS a lease
+another replica granted, naming it on stderr. Reap it where it was granted; use
+--any-replica only when that replica is permanently gone (or when this node was
+renamed and its own old leases now look foreign).
+
+Two invariants the guard cannot enforce for you:
+
+  grace window > sync interval, and lease TTL > sync interval.
+
+A TTL or grace shorter than the cadence at which replicas exchange state is
+meaningless across the bridge — the remote view is a full interval old by
+construction. Raise the TTL/grace above the sync interval, never the reverse.
+The guard is opt-in: set BEADS_NODE_ID, or run 'bd config set node_id <name>'
+(which writes the per-machine ~/.config/bd/config.yaml — never commit a node_id
+to the git-tracked .beads/config.yaml, or every clone reads the same name and
+the guard goes armed-but-inert). One id per STORE, not per host: machines that
+are clients of the same dolt sql-server are ONE replica and must share one value
+or leave it unset. There is no hostname fallback — the hostname names the client
+process's machine, not the store — so an unnamed deployment keeps the old,
+unguarded behavior instead of stranding its own work.
 
 Examples:
   bd reclaim                       # default grace window (2× the lease TTL)
@@ -48,7 +70,8 @@ Examples:
   bd reclaim --label lane-a        # only this machine's claim partition
   bd reclaim --label-any lane-a,lane-b --exclude-label pinned
   bd reclaim --assignee zelda --assignee epona   # only these workers' leases
-  bd reclaim --id wy-abc --id wy-def             # exactly these issues`,
+  bd reclaim --id wy-abc --id wy-def             # exactly these issues
+  bd reclaim --any-replica         # also reap leases granted by a departed replica`,
 	Args:          cobra.NoArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -136,6 +159,8 @@ func registerReclaimScopeFlags(fs *pflag.FlagSet) {
 	fs.StringSliceP("label", "l", nil, "Only reclaim issues with ALL these labels (AND). Can combine with --label-any")
 	fs.StringSlice("label-any", nil, "Only reclaim issues with AT LEAST ONE of these labels (OR). Can combine with --label")
 	fs.StringSlice("exclude-label", nil, "Never reclaim issues carrying ANY of these labels")
+	fs.Bool("any-replica", false,
+		"Also reclaim leases granted by ANOTHER replica (unsafe unless that replica is gone; see 'Replicas and leases')")
 }
 
 // reclaimFilterFromFlags maps the scope flags onto a types.ReclaimFilter,
@@ -183,6 +208,13 @@ func reclaimFilterFromFlags(cmd *cobra.Command) (types.ReclaimFilter, error) {
 	}
 	if filter.ExcludeLabels, err = get("exclude-label"); err != nil {
 		return types.ReclaimFilter{}, err
+	}
+	// --any-replica is an override, not a scope: it WIDENS the set past the
+	// granting-replica guard, so it deliberately skips the empty-value hard
+	// error above (a bool flag has no empty-value hazard) and never counts
+	// toward "scoped" in the reclaim report.
+	if filter.AnyReplica, err = cmd.Flags().GetBool("any-replica"); err != nil {
+		return types.ReclaimFilter{}, fmt.Errorf("--any-replica: %w", err)
 	}
 	return filter, nil
 }

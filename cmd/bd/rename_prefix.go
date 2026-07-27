@@ -34,7 +34,6 @@ USE CASES:
 - Migrating to team naming standards
 
 Prefix validation rules:
-- Max length: 8 characters
 - Allowed characters: lowercase letters, numbers, hyphens
 - Must start with a letter
 - Must end with a hyphen (e.g., 'kw-', 'work-')

@@ -2,12 +2,18 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"strings"
+
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"os"
 )
+
+// defaultCloseEligibleReason is the close reason `bd epic close-eligible` has
+// always used; --reason overrides it (GH#4817).
+const defaultCloseEligibleReason = "All children completed"
 
 var epicCmd = &cobra.Command{
 	Use:     "epic",
@@ -90,6 +96,14 @@ func filterEligibleEpics(epics []*types.EpicStatus) []*types.EpicStatus {
 	return filtered
 }
 
+func resolveCloseEligibleReason(cmd *cobra.Command) string {
+	reason, _ := cmd.Flags().GetString("reason")
+	if strings.TrimSpace(reason) == "" {
+		return defaultCloseEligibleReason
+	}
+	return reason
+}
+
 var closeEligibleEpicsCmd = &cobra.Command{
 	Use:           "close-eligible",
 	Short:         "Close epics where all children are complete",
@@ -104,9 +118,14 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		}()
 
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		reason := resolveCloseEligibleReason(cmd)
+
+		if err := validateCloseReasons([]string{reason}); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 
 		if usesProxiedServer() {
-			return runCloseEligibleEpicsProxiedServer(rootCtx, dryRun)
+			return runCloseEligibleEpicsProxiedServer(rootCtx, dryRun, reason)
 		}
 
 		if !dryRun {
@@ -118,14 +137,14 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		}
 		eligibleEpics := filterEligibleEpics(epics)
 		if len(eligibleEpics) == 0 {
-			return outputNoEligibleEpics()
+			return outputNoEligibleEpics(reason)
 		}
 		if dryRun {
-			return outputCloseEligibleDryRun(eligibleEpics)
+			return outputCloseEligibleDryRun(eligibleEpics, reason)
 		}
 		closedIDs := []string{}
 		for _, epicStatus := range eligibleEpics {
-			err := store.CloseIssue(rootCtx, epicStatus.Epic.ID, "All children completed", "system", "")
+			err := store.CloseIssue(rootCtx, epicStatus.Epic.ID, reason, "system", "")
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", epicStatus.Epic.ID, err)
 				continue
@@ -135,40 +154,45 @@ var closeEligibleEpicsCmd = &cobra.Command{
 		if len(closedIDs) > 0 {
 			commandDidWrite.Store(true)
 		}
-		return outputCloseEligibleResult(closedIDs)
+		return outputCloseEligibleResult(closedIDs, reason)
 	},
 }
 
-func outputNoEligibleEpics() error {
+func outputNoEligibleEpics(reason string) error {
 	if jsonOutput {
-		return outputJSON([]*types.EpicStatus{})
+		return outputJSON(map[string]interface{}{
+			"closed": []string{},
+			"count":  0,
+			"reason": reason,
+		})
 	}
 	fmt.Println("No epics eligible for closure")
 	return nil
 }
 
-func outputCloseEligibleDryRun(eligibleEpics []*types.EpicStatus) error {
+func outputCloseEligibleDryRun(eligibleEpics []*types.EpicStatus, reason string) error {
 	if jsonOutput {
 		return outputJSON(eligibleEpics)
 	}
-	fmt.Printf("Would close %d epic(s):\n", len(eligibleEpics))
+	fmt.Printf("Would close %d epic(s) with reason %q:\n", len(eligibleEpics), reason)
 	for _, epicStatus := range eligibleEpics {
 		fmt.Printf("  - %s: %s\n", epicStatus.Epic.ID, epicStatus.Epic.Title)
 	}
 	return nil
 }
 
-func outputCloseEligibleResult(closedIDs []string) error {
+func outputCloseEligibleResult(closedIDs []string, reason string) error {
 	if jsonOutput {
 		return outputJSON(map[string]interface{}{
 			"closed": closedIDs,
 			"count":  len(closedIDs),
+			"reason": reason,
 		})
 	}
-	fmt.Printf("✓ Closed %d epic(s)\n", len(closedIDs))
 	for _, id := range closedIDs {
 		fmt.Printf("  - %s\n", id)
 	}
+	fmt.Printf("✓ Closed %d epic(s) with reason %q\n", len(closedIDs), reason)
 	return nil
 }
 
@@ -177,5 +201,6 @@ func init() {
 	epicCmd.AddCommand(closeEligibleEpicsCmd)
 	epicStatusCmd.Flags().Bool("eligible-only", false, "Show only epics eligible for closure")
 	closeEligibleEpicsCmd.Flags().Bool("dry-run", false, "Preview what would be closed without making changes")
+	closeEligibleEpicsCmd.Flags().StringP("reason", "r", defaultCloseEligibleReason, "Close reason applied to every epic closed")
 	rootCmd.AddCommand(epicCmd)
 }

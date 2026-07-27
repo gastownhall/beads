@@ -320,10 +320,13 @@ func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 		MaxRows:       filter.MaxRows,
 		MaxRowsSource: filter.MaxRowsSource,
 	}
-	if filter.Status != "" {
+	switch {
+	case filter.Status != "":
 		s := filter.Status
 		wispFilter.Status = &s
-	} else {
+	case len(filter.Statuses) > 0:
+		wispFilter.Statuses = append([]types.Status(nil), filter.Statuses...)
+	default:
 		wispFilter.Statuses = []types.Status{types.StatusOpen, types.StatusInProgress}
 	}
 	if filter.Type != "" {

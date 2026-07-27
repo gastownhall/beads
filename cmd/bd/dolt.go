@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/ui"
 	"golang.org/x/term"
 )
@@ -191,14 +192,90 @@ func isConfirmedNoRemote(ctx context.Context, st remoteLister, err error) bool {
 	if !isRemoteNotFoundErr(err) {
 		return false
 	}
+	return hasNoRemoteConfigured(ctx, st)
+}
+
+// hasNoRemoteConfigured is the structural half of isConfirmedNoRemote: the
+// positive proof that this rig really has no remote, independent of how the
+// failure worded itself. It is what actually makes an exit-0 skip safe, so a
+// caller with a different (broader) error classification — `bd sync`, which
+// runs on a timer and must not fail every tick on a solo rig — can reuse the
+// proof without loosening it.
+func hasNoRemoteConfigured(ctx context.Context, st remoteLister) bool {
+	configured, listErr := hasConfiguredRemote(ctx, st)
+	return listErr == nil && !configured
+}
+
+// hasConfiguredRemote decides, from evidence, whether a rig has a Dolt remote
+// at all. It is the one decider for the push/sync no-remote question: both
+// hasNoRemoteConfigured (the `bd sync` / `bd dolt push|pull` exit-0 gate) and
+// adoptGitOriginRemoteForPush go through it. It is NOT yet the only reader of
+// that evidence in cmd/bd — `bd config apply`, ensureDoltRemote, and the
+// doctor/drift diagnostics still judge from len(ListRemotes) alone and have
+// the same cold-start hole; converging them is wy-6k7f7. Do not assume a new
+// remote-related decision is covered by this function: route it here.
+//
+// Two sources of evidence, because dolt_remotes alone is not enough: a
+// server-mode rig whose sql-server has just cold-started can report an EMPTY
+// dolt_remotes while the remote IS persisted on disk in .dolt/repo_state.json
+// (GH#2118), so the on-disk probe gets a veto. The probe has to be reached
+// through the storage decorator chain, since HasPersistedRemote is not part of
+// storage.DoltStorage and the store bd holds is all but always decorated —
+// that is wy-xtv17.
+//
+// A failed listing is neither evidence: it returns the error, and callers must
+// not read it as "no remote". Having two sibling functions decide this from
+// different evidence is what left `bd dolt push` still trusting an empty
+// dolt_remotes after wy-xtv17 hardened the no-remote gate (wy-82hc5), so the
+// rule lives here once.
+func hasConfiguredRemote(ctx context.Context, st remoteLister) (bool, error) {
 	remotes, listErr := st.ListRemotes(ctx)
-	if listErr != nil || len(remotes) > 0 {
-		return false
+	if listErr != nil {
+		return false, listErr
 	}
-	if prober, ok := st.(persistedRemoteProber); ok && prober.HasPersistedRemote() {
-		return false
+	if len(remotes) > 0 {
+		return true, nil
 	}
-	return true
+	if prober, ok := persistedRemoteProberFor(st); ok && prober.HasPersistedRemote() {
+		return true, nil
+	}
+	return false, nil
+}
+
+// persistedRemoteProberFor finds the on-disk remote probe behind any chain of
+// storage decorators.
+//
+// HasPersistedRemote is not part of storage.DoltStorage — only the concrete
+// *dolt.DoltStore implements it — while the store bd actually holds is the
+// composed chain caller → HookFiringStore → InstrumentedStorage → DoltStore
+// (wireStorageDecorators). The hook layer is present on essentially every rig:
+// main.go builds a hook runner whenever there is a dbPath, whether or not any
+// hook scripts exist, so only no-hooks:true / BD_NO_HOOKS=1 leaves it off.
+// Asserting straight on the passed store therefore all but always failed,
+// silently skipping the GH#2118 cold-start probe and letting `bd sync` /
+// `bd dolt push|pull` report "no remote configured" and exit 0 forever on a rig
+// whose remote is persisted in .dolt/repo_state.json (wy-xtv17).
+//
+// It peels via storage.Unwrapper, the same contract storage.UnwrapStore uses,
+// rather than calling UnwrapStore itself: this helper takes the narrow
+// remoteLister, not a storage.DoltStorage. A store that implements the probe
+// directly is honored before any peeling, so test doubles and any future
+// decorator that forwards HasPersistedRemote keep working.
+func persistedRemoteProberFor(st remoteLister) (persistedRemoteProber, bool) {
+	for {
+		if prober, ok := st.(persistedRemoteProber); ok {
+			return prober, true
+		}
+		u, ok := st.(storage.Unwrapper)
+		if !ok {
+			return nil, false
+		}
+		inner := u.Unwrap()
+		if inner == nil {
+			return nil, false
+		}
+		st = inner
+	}
 }
 
 // isDivergedHistoryErr checks whether the error indicates that local and remote
@@ -287,13 +364,20 @@ func printNoRemoteGuidance() {
 	fmt.Println("  • Azure Blob Storage: az://account.blob.core.windows.net/container/path")
 }
 
+// adoptGitOriginRemoteForPush gives a rig with no Dolt remote the one its git
+// origin implies, so `bd dolt push` works out of the box.
+//
+// It asks hasConfiguredRemote rather than reading len(ListRemotes) itself: an
+// empty dolt_remotes is not proof of a remote-less rig during the GH#2118
+// cold-start window, and adopting there re-derives the remote from git.
+// Usually that is the same URL and the AddRemote is a harmless re-add, but
+// when the persisted remote and the git origin disagree — a Dolt remote
+// deliberately pointed elsewhere, or a renamed/redirected origin — the rig
+// starts pushing somewhere else on the strength of a stale listing (wy-82hc5).
 func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage) (bool, error) {
-	remotes, err := st.ListRemotes(ctx)
-	if err != nil {
+	configured, err := hasConfiguredRemote(ctx, st)
+	if err != nil || configured {
 		return false, err
-	}
-	if len(remotes) > 0 {
-		return false, nil
 	}
 	beadsDir := selectedDoltBeadsDir()
 	if beadsDir == "" {
@@ -597,7 +681,14 @@ var doltStopCmd = &cobra.Command{
 	Long: `Stop the dolt sql-server managed by beads for the current project.
 
 This sends a graceful shutdown signal. The server will restart automatically
-on the next bd command unless auto-start is disabled.`,
+on the next bd command unless auto-start is disabled.
+
+For a managed proxied server, --force can recover unverifiable or legacy
+process records (both the proxy and its backend) only after each live process
+executable is matched to bd or dolt and its command line ties it to this
+workspace. In that recovery path, force still refuses to signal a process
+whose executable identity cannot be matched to bd or dolt, or whose workspace
+scope cannot be established.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		beadsDir := selectedDoltBeadsDir()
 		if beadsDir == "" {
@@ -609,28 +700,204 @@ on the next bd command unless auto-start is disabled.`,
 		if !usesSQLServer() {
 			return HandleError("'bd dolt stop' is not supported in embedded mode (no Dolt server)")
 		}
+		force, _ := cmd.Flags().GetBool("force")
 
 		if usesProxiedServer() {
 			rootDir, err := resolveProxiedServerRootPath(beadsDir)
 			if err != nil {
 				return HandleError("%v", err)
 			}
-			if err := proxy.Shutdown(rootDir); err != nil {
-				return HandleError("%v", err)
+			shutdownErr := proxy.Shutdown(rootDir)
+			if shutdownErr == nil {
+				return renderDoltStopResult(doltStopResult{
+					Stopped:  true,
+					Force:    force,
+					Verified: boolPointer(true),
+				})
 			}
-			fmt.Println("Dolt server stopped.")
-			return nil
+			if !force || !proxy.CanForceStopUnverified(shutdownErr) {
+				return HandleErrorRespectJSON("%v", shutdownErr)
+			}
+
+			report, forceErr := proxy.ForceStopUnverified(rootDir)
+			return renderDoltStopResult(newForcedDoltStopResult(shutdownErr, report, forceErr))
 		}
 
 		serverDir := doltserver.ResolveServerDir(beadsDir)
-		force, _ := cmd.Flags().GetBool("force")
 
 		if err := doltserver.StopWithForce(serverDir, force); err != nil {
 			return HandleError("%v", err)
 		}
+		return renderDoltStopResult(doltStopResult{
+			Stopped: true,
+			Force:   force,
+		})
+	},
+}
+
+// doltStopResult is the shared JSON object for successful and refused stop
+// operations. Force-stop recovery deliberately exposes each irreversible
+// action so automation can distinguish a matched executable from a signaled
+// process and a quarantined record from one left in place.
+type doltStopResult struct {
+	Stopped               bool                  `json:"stopped"`
+	Force                 bool                  `json:"force"`
+	ForcedRecovery        bool                  `json:"forced_recovery,omitempty"`
+	Verified              *bool                 `json:"verified,omitempty"`
+	VerifiedShutdownError string                `json:"verified_shutdown_error,omitempty"`
+	RecordFound           bool                  `json:"record_found,omitempty"`
+	RecordPath            string                `json:"record_path,omitempty"`
+	RecordLeftAlone       bool                  `json:"record_left_alone,omitempty"`
+	LockWasHeld           bool                  `json:"lock_was_held,omitempty"`
+	PID                   int                   `json:"pid,omitempty"`
+	Executable            string                `json:"executable,omitempty"`
+	ExecutableVerified    *bool                 `json:"executable_verified,omitempty"`
+	ProcessWasGone        bool                  `json:"process_was_gone,omitempty"`
+	SignalSent            bool                  `json:"signal_sent,omitempty"`
+	ProcessLeftAlone      bool                  `json:"process_left_alone,omitempty"`
+	QuarantinedPath       string                `json:"quarantined_path,omitempty"`
+	Backend               *doltStopRecordResult `json:"backend,omitempty"`
+	Error                 string                `json:"error,omitempty"`
+}
+
+// doltStopRecordResult mirrors the per-record force-stop fields for the
+// backend (proxy-child) record.
+type doltStopRecordResult struct {
+	RecordFound     bool   `json:"record_found,omitempty"`
+	RecordPath      string `json:"record_path,omitempty"`
+	LockWasHeld     bool   `json:"lock_was_held,omitempty"`
+	PID             int    `json:"pid,omitempty"`
+	Executable      string `json:"executable,omitempty"`
+	ProcessWasGone  bool   `json:"process_was_gone,omitempty"`
+	SignalSent      bool   `json:"signal_sent,omitempty"`
+	QuarantinedPath string `json:"quarantined_path,omitempty"`
+}
+
+func newForcedDoltStopResult(
+	shutdownErr error,
+	report proxy.ForceStopReport,
+	forceErr error,
+) doltStopResult {
+	result := doltStopResult{
+		Stopped:               forceErr == nil,
+		Force:                 true,
+		ForcedRecovery:        true,
+		Verified:              boolPointer(false),
+		VerifiedShutdownError: shutdownErr.Error(),
+		RecordFound:           report.RecordFound,
+		RecordPath:            report.RecordPath,
+		LockWasHeld:           report.LockWasHeld,
+		PID:                   report.PID,
+		Executable:            report.Executable,
+		ProcessWasGone:        report.ProcessWasGone,
+		SignalSent:            report.SignalSent,
+		QuarantinedPath:       report.QuarantinedPath,
+	}
+	if report.Executable != "" {
+		result.ExecutableVerified = boolPointer(
+			report.Executable == "bd" || report.Executable == "dolt",
+		)
+	}
+	result.ProcessLeftAlone = report.RecordFound &&
+		!report.ProcessWasGone &&
+		!report.SignalSent
+	result.RecordLeftAlone = report.RecordFound && report.QuarantinedPath == ""
+	if report.Backend != nil {
+		result.Backend = &doltStopRecordResult{
+			RecordFound:     report.Backend.RecordFound,
+			RecordPath:      report.Backend.RecordPath,
+			LockWasHeld:     report.Backend.LockWasHeld,
+			PID:             report.Backend.PID,
+			Executable:      report.Backend.Executable,
+			ProcessWasGone:  report.Backend.ProcessWasGone,
+			SignalSent:      report.Backend.SignalSent,
+			QuarantinedPath: report.Backend.QuarantinedPath,
+		}
+	}
+	if forceErr != nil {
+		result.Error = forceErr.Error()
+	}
+	return result
+}
+
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+func renderDoltStopResult(result doltStopResult) error {
+	if jsonOutput {
+		if err := outputJSON(result); err != nil {
+			return HandleError("encode dolt stop result: %v", err)
+		}
+		if result.Error != "" {
+			return SilentExit()
+		}
+		return nil
+	}
+
+	if !result.ForcedRecovery {
 		fmt.Println("Dolt server stopped.")
 		return nil
-	},
+	}
+
+	fmt.Printf("Verified shutdown refused: %s\n", result.VerifiedShutdownError)
+	if result.Error == "" {
+		fmt.Println("Dolt server stopped with --force.")
+	} else if result.ProcessLeftAlone {
+		fmt.Println("Force stop refused; the recorded process was left alone.")
+	} else {
+		fmt.Println("Force stop incomplete; completed actions are reported below.")
+	}
+	if result.RecordFound {
+		fmt.Printf("  Record: %s\n", result.RecordPath)
+	}
+	if result.PID != 0 {
+		fmt.Printf("  PID: %d\n", result.PID)
+	}
+	if result.Executable != "" {
+		if result.ExecutableVerified != nil && *result.ExecutableVerified {
+			fmt.Printf("  Executable: %s (matched bd/dolt)\n", result.Executable)
+		} else {
+			fmt.Printf("  Executable: %s (not bd/dolt)\n", result.Executable)
+		}
+	}
+	switch {
+	case result.SignalSent:
+		fmt.Println("  Process: signal sent")
+	case result.ProcessWasGone:
+		fmt.Println("  Process: already gone; no signal sent")
+	case result.ProcessLeftAlone:
+		fmt.Println("  Process: left alone; no signal sent")
+	}
+	switch {
+	case result.QuarantinedPath != "":
+		fmt.Printf("  Record quarantined: %s\n", result.QuarantinedPath)
+	case result.RecordLeftAlone:
+		fmt.Println("  Record: left unchanged")
+	}
+	if backend := result.Backend; backend != nil {
+		fmt.Printf("  Backend record: %s\n", backend.RecordPath)
+		if backend.PID != 0 {
+			fmt.Printf("  Backend PID: %d\n", backend.PID)
+		}
+		switch {
+		case backend.SignalSent:
+			fmt.Println("  Backend process: signal sent")
+		case backend.ProcessWasGone:
+			fmt.Println("  Backend process: already gone; no signal sent")
+		default:
+			fmt.Println("  Backend process: left alone; no signal sent")
+		}
+		if backend.QuarantinedPath != "" {
+			fmt.Printf("  Backend record quarantined: %s\n", backend.QuarantinedPath)
+		} else {
+			fmt.Println("  Backend record: left unchanged")
+		}
+	}
+	if result.Error != "" {
+		return HandleError("%s", result.Error)
+	}
+	return nil
 }
 
 var doltStatusCmd = &cobra.Command{
@@ -1034,9 +1301,10 @@ recovery.`,
 		}
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		purgeDropped, _ := cmd.Flags().GetBool("purge-dropped")
+		opts := cleanDatabasesOptions{dryRun: dryRun, purgeDropped: purgeDropped}
 
 		if usesProxiedServer() {
-			return runDoltCleanDatabasesProxied(rootCtx, beadsDir, dryRun)
+			return runDoltCleanDatabasesProxied(rootCtx, beadsDir, opts)
 		}
 
 		// Connect directly to the Dolt server via config instead of getStore(),
@@ -1047,125 +1315,7 @@ recovery.`,
 		}
 		defer cleanup()
 
-		listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer listCancel()
-
-		rows, err := db.QueryContext(listCtx, "SHOW DATABASES")
-		if err != nil {
-			return HandleError("listing databases: %v", err)
-		}
-		defer rows.Close()
-
-		var stale []string
-		for rows.Next() {
-			var dbName string
-			if err := rows.Scan(&dbName); err != nil {
-				continue
-			}
-			for _, prefix := range staleDatabasePrefixes {
-				if strings.HasPrefix(dbName, prefix) {
-					stale = append(stale, dbName)
-					break
-				}
-			}
-		}
-
-		if len(stale) == 0 {
-			fmt.Println("No stale databases found.")
-		} else {
-			fmt.Printf("Found %d stale databases:\n", len(stale))
-			for _, name := range stale {
-				fmt.Printf("  %s\n", name)
-			}
-		}
-
-		if dryRun {
-			if len(stale) > 0 {
-				fmt.Println("\n(dry run — no databases dropped)")
-			}
-			if purgeDropped {
-				fmt.Println("(dry run — --purge-dropped ignored; no purge performed)")
-			}
-			return nil
-		}
-
-		dropped := 0
-		if len(stale) > 0 {
-			fmt.Println()
-			failures := 0
-			consecutiveTimeouts := 0
-			const (
-				batchSize         = 5 // Drop this many before pausing
-				batchPause        = 2 * time.Second
-				backoffPause      = 10 * time.Second
-				timeoutThreshold  = 3 // Consecutive timeouts before backoff
-				perDropTimeout    = 30 * time.Second
-				maxConsecFailures = 10 // Stop after this many consecutive failures
-			)
-
-			for i, name := range stale {
-				// Circuit breaker: back off when server is overwhelmed
-				if consecutiveTimeouts >= timeoutThreshold {
-					fmt.Fprintf(os.Stderr, "  ⚠ %d consecutive timeouts — backing off %s\n",
-						consecutiveTimeouts, backoffPause)
-					time.Sleep(backoffPause)
-					consecutiveTimeouts = 0
-				}
-
-				// Stop if too many consecutive failures — server is likely unhealthy
-				if failures >= maxConsecFailures {
-					fmt.Fprintf(os.Stderr, "\n✗ Aborting: %d consecutive failures suggest server is unhealthy.\n", failures)
-					fmt.Fprintf(os.Stderr, "  Dropped %d/%d before stopping.\n", dropped, len(stale))
-					return SilentExit()
-				}
-
-				// Per-operation timeout: DROP DATABASE can be slow on Dolt
-				dropCtx, dropCancel := context.WithTimeout(context.Background(), perDropTimeout)
-				// Escape backticks in database name to prevent SQL injection (` → ``)
-				safeName := strings.ReplaceAll(name, "`", "``")
-				_, err := db.ExecContext(dropCtx, fmt.Sprintf("DROP DATABASE `%s`", safeName)) //nolint:gosec // G201: identifier-escaped
-				dropCancel()
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "  FAIL: %s: %v\n", name, err)
-					failures++
-					if isTimeoutError(err) {
-						consecutiveTimeouts++
-					}
-				} else {
-					fmt.Printf("  Dropped: %s\n", name)
-					dropped++
-					failures = 0
-					consecutiveTimeouts = 0
-				}
-
-				// Rate limiting: pause between batches to let the server breathe
-				if (i+1)%batchSize == 0 && i+1 < len(stale) {
-					fmt.Printf("  [%d/%d] pausing %s...\n", i+1, len(stale), batchPause)
-					time.Sleep(batchPause)
-				}
-			}
-			fmt.Printf("\nDropped %d/%d stale databases.\n", dropped, len(stale))
-		}
-
-		// DROP DATABASE only marks a database as dropped; Dolt moves its
-		// directory under .dolt_dropped_databases/ so `dolt_undrop()` can
-		// restore it, but leaves the disk footprint in place until an
-		// explicit purge (be-pq5).
-		fmt.Println()
-		if shouldPurgeDroppedDatabases(purgeDropped, dropped) {
-			if err := purgeDroppedDatabases(context.Background(), db); err != nil {
-				fmt.Fprintf(os.Stderr, "  WARN: PURGE_DROPPED_DATABASES failed: %v\n", err)
-				fmt.Fprintln(os.Stderr, "  Try `dolt sql -q 'CALL DOLT_PURGE_DROPPED_DATABASES()'`.")
-			} else {
-				fmt.Println("Purged all dropped databases on this server (server-global, irreversible —")
-				fmt.Println("CALL DOLT_UNDROP is no longer available for any of them, not just this run's).")
-			}
-		} else {
-			fmt.Println("Dropped databases remain recoverable via `CALL DOLT_UNDROP(name)` until purged.")
-			fmt.Println("Pass --purge-dropped to permanently reclaim their disk. This purges ALL dropped")
-			fmt.Println("databases on the server (server-global), not just the ones from this run.")
-		}
-		return nil
+		return cleanDatabases(rootCtx, db, opts)
 	},
 }
 
@@ -1192,10 +1342,10 @@ func shouldPurgeDroppedDatabases(purgeDropped bool, droppedCount int) bool {
 // against a live test server without going through the full
 // clean-databases command wiring (config loading, SHOW DATABASES scan,
 // batching/backoff).
-func purgeDroppedDatabases(ctx context.Context, db *sql.DB) error {
+func purgeDroppedDatabases(ctx context.Context, conn versioncontrolops.DBConn) error {
 	purgeCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	_, err := db.ExecContext(purgeCtx, "CALL DOLT_PURGE_DROPPED_DATABASES()")
+	_, err := conn.ExecContext(purgeCtx, "CALL DOLT_PURGE_DROPPED_DATABASES()")
 	return err
 }
 
@@ -1479,7 +1629,7 @@ func isTimeoutError(err error) bool {
 
 func init() {
 	doltSetCmd.Flags().Bool("update-config", false, "Also write to config.yaml for team-wide defaults")
-	doltStopCmd.Flags().Bool("force", false, "Force stop the server")
+	doltStopCmd.Flags().Bool("force", false, "Force stop (proxied recovery still requires a bd/dolt executable match)")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
@@ -1518,6 +1668,67 @@ func selectedDoltBeadsDir() string {
 	}
 	prepareSelectedNoDBContext(beadsDir)
 	return beadsDir
+}
+
+// resolveDoltShowRemotes returns remotes for `bd dolt show`.
+// `show` is a no-store diagnostic command, so getStore() is usually nil and
+// ListRemotes is unavailable. Fall back to on-disk repo_state.json (same
+// source as the remote-migrate gate) so remotes match `bd dolt remote list`
+// (GH#4619).
+//
+// Only the candidate path(s) for the active mode (embedded vs. server) are
+// probed; a repo in one mode must not surface stale remotes persisted under
+// the other mode's data directory. Within the mode-appropriate candidates,
+// the first repo_state.json found on disk is authoritative: an empty
+// remotes list there means "no remotes", not "keep looking" — this stops
+// an authoritative-but-empty active database from falling through to a
+// stale candidate. A corrupt or unreadable repo_state.json is surfaced as a
+// warning rather than silently rendered as "(none)".
+func resolveDoltShowRemotes(beadsDir string, cfg *configfile.Config, embeddedDataDir string, embedded bool) []storage.RemoteInfo {
+	ctx := context.Background()
+	if st := getStore(); st != nil {
+		if remotes, err := st.ListRemotes(ctx); err == nil && len(remotes) > 0 {
+			return remotes
+		}
+	}
+	dbName := ""
+	if cfg != nil {
+		dbName = cfg.GetDoltDatabase()
+	}
+	var candidates []string
+	if embedded {
+		if embeddedDataDir != "" {
+			candidates = append(candidates, embeddedDataDir)
+			if dbName != "" {
+				candidates = append(candidates, filepath.Join(embeddedDataDir, dbName))
+			}
+		}
+	} else if beadsDir != "" {
+		candidates = append(candidates, filepath.Join(beadsDir, "dolt"))
+		if dbName != "" {
+			candidates = append(candidates, filepath.Join(beadsDir, "dolt", dbName))
+		}
+	}
+	for _, dir := range candidates {
+		if dir == "" {
+			continue
+		}
+		statePath := filepath.Join(dir, ".dolt", "repo_state.json")
+		if _, err := os.Stat(statePath); err != nil {
+			// No dolt repo state at this candidate; try the next
+			// mode-appropriate candidate.
+			continue
+		}
+		remotes, err := doltutil.PersistedRemotes(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", ui.RenderWarn(fmt.Sprintf("could not read remotes from %s: %v", statePath, err)))
+			return nil
+		}
+		// repo_state.json exists at this candidate: its remotes (even if
+		// empty) are authoritative for the active mode.
+		return remotes
+	}
+	return nil
 }
 
 func showDoltConfig(testConnection bool) error {
@@ -1606,12 +1817,7 @@ func showDoltConfig(testConnection bool) error {
 	}
 
 	fmt.Println("\nRemotes:")
-	ctx := context.Background()
-	st := getStore()
-	var remotes []storage.RemoteInfo
-	if st != nil {
-		remotes, _ = st.ListRemotes(ctx)
-	}
+	remotes := resolveDoltShowRemotes(beadsDir, cfg, embeddedDataDir, embedded)
 	if len(remotes) == 0 {
 		fmt.Println("  (none)")
 	} else {
