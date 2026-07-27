@@ -297,6 +297,11 @@ fmt:
 fmt-check:
 	@echo "Checking Go formatting..."
 	@UNFORMATTED=$$(gofmt -l .); \
+	status=$$?; \
+	if [ "$$status" -ne 0 ]; then \
+		echo "gofmt failed while checking formatting" >&2; \
+		exit "$$status"; \
+	fi; \
 	if [ -n "$$UNFORMATTED" ]; then \
 		echo "The following files are not properly formatted:"; \
 		echo "$$UNFORMATTED"; \

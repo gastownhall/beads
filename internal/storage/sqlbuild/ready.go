@@ -83,11 +83,25 @@ type ReadyWorkWhereInputs struct {
 // BuildReadyWorkWhere renders the full ready-work WHERE clause for one table
 // family. Both stacks must keep ready semantics identical (Seam A parity
 // suite); all ready predicates live here.
+//
+// Invariant: every clause must reference only main-table columns or correlated
+// subqueries keyed by id — never the counts mega-query's aggregate aliases
+// (labels_json, dep_count, rdep_count, comment_count, parent_id, deps_json).
+// SearchCountsSQL renders this WHERE inside a pre-join subquery where those
+// aliases are out of scope. See the SearchCountsSQL doc comment for why a
+// violation fails loud.
 func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyWorkWhereInputs) (string, []any, error) {
 	var statusClause string
-	if filter.Status != "" {
+	var args []any
+	switch {
+	case filter.Status != "":
 		statusClause = "status = ?"
-	} else {
+		args = append(args, string(filter.Status))
+	case len(filter.Statuses) > 0:
+		ph, statusArgs := InPlaceholders(filter.Statuses)
+		statusClause = fmt.Sprintf("status IN (%s)", ph)
+		args = append(args, statusArgs...)
+	default:
 		statusClause = "status IN ('open', 'in_progress')"
 	}
 	whereClauses := []string{
@@ -97,10 +111,6 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 	}
 	if !filter.IncludeEphemeral {
 		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
-	}
-	var args []any
-	if filter.Status != "" {
-		args = append(args, string(filter.Status))
 	}
 
 	if filter.Priority != nil {
