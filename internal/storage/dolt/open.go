@@ -301,7 +301,7 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		}
 	}
 
-	// Pool per-I/O deadlines: env var > config.yaml > caller override > default
+	// Pool per-I/O deadlines: caller override > env var > config.yaml > default
 	// (10s, see buildServerDSN). The default fast-fail is right for healthy
 	// local servers; overloaded shared-server deployments raise it so ordinary
 	// queries stop dying with "i/o timeout" under load (bd-vz0y9).
