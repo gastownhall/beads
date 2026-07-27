@@ -113,16 +113,75 @@ func OrderBy(sortBy string, sortDesc bool, table string) string {
 	})
 }
 
+// sortFields holds exactly the columns Less/LessSummary compare. Sharing one
+// comparator core (lessFields/sortKeyCompareFields) between types.Issue and
+// types.IssueSummary means the correctness-critical NULL-first and tie-break
+// rules are written once instead of drifting across two hand-copied switch
+// statements.
+type sortFields struct {
+	id        string
+	priority  int
+	createdAt time.Time
+	updatedAt time.Time
+	closedAt  *time.Time
+	status    string
+	issueType string
+	assignee  string
+	title     string
+}
+
+func issueSortFields(i *types.Issue) sortFields {
+	return sortFields{
+		id:        i.ID,
+		priority:  i.Priority,
+		createdAt: i.CreatedAt,
+		updatedAt: i.UpdatedAt,
+		closedAt:  i.ClosedAt,
+		status:    string(i.Status),
+		issueType: string(i.IssueType),
+		assignee:  i.Assignee,
+		title:     i.Title,
+	}
+}
+
+func summarySortFields(s *types.IssueSummary) sortFields {
+	return sortFields{
+		id:        s.ID,
+		priority:  s.Priority,
+		createdAt: s.CreatedAt,
+		updatedAt: s.UpdatedAt,
+		closedAt:  s.ClosedAt,
+		status:    string(s.Status),
+		issueType: string(s.IssueType),
+		assignee:  s.Assignee,
+		title:     s.Title,
+	}
+}
+
 // Less is the Go-side mirror of OrderBy for merge sorts over rows fetched
 // from separate queries (issues + wisps). It must order exactly the way the
 // SQL does, including NULL-first ascending semantics for nullable columns;
 // otherwise a post-merge limit cut keeps a different row set than SQL
 // selected.
 func Less(a, b *types.Issue, sortBy string, sortDesc bool) bool {
+	return lessFields(issueSortFields(a), issueSortFields(b), sortBy, sortDesc)
+}
+
+// LessSummary is Less's sibling for types.IssueSummary, used by the
+// summaryProjection merge sort (internal/storage/issueops.searchInTx). It
+// shares lessFields with Less so the two can never drift on the NULL/tie-break
+// rules that make a post-merge limit cut safe.
+func LessSummary(a, b *types.IssueSummary, sortBy string, sortDesc bool) bool {
+	return lessFields(summarySortFields(a), summarySortFields(b), sortBy, sortDesc)
+}
+
+func lessFields(a, b sortFields, sortBy string, sortDesc bool) bool {
 	if sortBy == "id" {
 		// This key used to ignore sortDesc, so a reversed id merge kept the
 		// byte-FIRST rows (the sibling bug idSrcPage.sortGoSide's doc named).
-		return LessID(a.ID, b.ID, sortDesc)
+		// Living in the shared body means LessSummary honors sortDesc too,
+		// rather than needing its own copy of the same fix.
+		return LessID(a.id, b.id, sortDesc)
 	}
 	def, ok := SortDefs[sortBy]
 	if !ok {
@@ -133,46 +192,46 @@ func Less(a, b *types.Issue, sortBy string, sortDesc bool) bool {
 	if sortDesc {
 		descending = !descending
 	}
-	if c := sortKeyCompare(a, b, sortBy); c != 0 {
+	if c := sortKeyCompareFields(a, b, sortBy); c != 0 {
 		if descending {
 			return c > 0
 		}
 		return c < 0
 	}
-	if (sortBy == "" || sortBy == "priority") && !a.CreatedAt.Equal(b.CreatedAt) {
-		return a.CreatedAt.After(b.CreatedAt)
+	if (sortBy == "" || sortBy == "priority") && !a.createdAt.Equal(b.createdAt) {
+		return a.createdAt.After(b.createdAt)
 	}
-	return a.ID < b.ID
+	return a.id < b.id
 }
 
-// sortKeyCompare three-way compares the primary sort column in ascending
-// order, with MySQL NULL-first semantics for nullable columns.
-func sortKeyCompare(a, b *types.Issue, sortBy string) int {
+// sortKeyCompareFields three-way compares the primary sort column in
+// ascending order, with MySQL NULL-first semantics for nullable columns.
+func sortKeyCompareFields(a, b sortFields, sortBy string) int {
 	switch sortBy {
 	case "created":
-		return compareTimesAsc(a.CreatedAt, b.CreatedAt)
+		return compareTimesAsc(a.createdAt, b.createdAt)
 	case "updated":
-		return compareTimesAsc(a.UpdatedAt, b.UpdatedAt)
+		return compareTimesAsc(a.updatedAt, b.updatedAt)
 	case "closed":
 		switch {
-		case a.ClosedAt == nil && b.ClosedAt == nil:
+		case a.closedAt == nil && b.closedAt == nil:
 			return 0
-		case a.ClosedAt == nil:
+		case a.closedAt == nil:
 			return -1
-		case b.ClosedAt == nil:
+		case b.closedAt == nil:
 			return 1
 		}
-		return compareTimesAsc(*a.ClosedAt, *b.ClosedAt)
+		return compareTimesAsc(*a.closedAt, *b.closedAt)
 	case "status":
-		return strings.Compare(string(a.Status), string(b.Status))
+		return strings.Compare(a.status, b.status)
 	case "type":
-		return strings.Compare(string(a.IssueType), string(b.IssueType))
+		return strings.Compare(a.issueType, b.issueType)
 	case "assignee":
-		return strings.Compare(a.Assignee, b.Assignee)
+		return strings.Compare(a.assignee, b.assignee)
 	case "title":
-		return strings.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
+		return strings.Compare(strings.ToLower(a.title), strings.ToLower(b.title))
 	}
-	return a.Priority - b.Priority
+	return a.priority - b.priority
 }
 
 func compareTimesAsc(a, b time.Time) int {
