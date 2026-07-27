@@ -57,6 +57,14 @@ var HeavyDropList = []string{
 	"payload",
 }
 
+// IssueSummaryColumns is the column list for types.IssueSummary hydration —
+// the narrowest projection, used by list-shaped rendering paths that never
+// dereference TEXT/JSON columns. Labels are hydrated separately (they live
+// in a join table, not a column); see hydrateSummaryLabels in search.go.
+// ScanIssueSummaryFrom below scans it positionally and must stay in agreement.
+const IssueSummaryColumns = `id, title, status, priority, issue_type, assignee,
+	       pinned, created_at, updated_at, closed_at`
+
 // IssueScanner is the common interface between *sql.Row and *sql.Rows,
 // allowing a single scan function to work with both single-row and
 // multi-row query results.
@@ -413,6 +421,43 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 
 	issue.IsLitePartial = true
 	return &issue, nil
+}
+
+// ScanIssueSummaryFrom scans a narrow issue summary from any source
+// implementing IssueScanner. The caller must ensure the query selected
+// exactly IssueSummaryColumns in order. Labels are not populated here — the
+// caller must hydrate them separately (see hydrateSummaryLabels in search.go).
+func ScanIssueSummaryFrom(s IssueScanner) (*types.IssueSummary, error) {
+	var summary types.IssueSummary
+	var assignee sql.NullString
+	var pinned sql.NullInt64
+	var createdAtStr, updatedAtStr sql.NullString
+	var closedAt sql.NullTime
+
+	if err := s.Scan(
+		&summary.ID, &summary.Title, &summary.Status, &summary.Priority, &summary.IssueType,
+		&assignee, &pinned, &createdAtStr, &updatedAtStr, &closedAt,
+	); err != nil {
+		return nil, err
+	}
+
+	if assignee.Valid {
+		summary.Assignee = assignee.String
+	}
+	if pinned.Valid && pinned.Int64 != 0 {
+		summary.Pinned = true
+	}
+	if createdAtStr.Valid {
+		summary.CreatedAt = ParseTimeString(createdAtStr.String)
+	}
+	if updatedAtStr.Valid {
+		summary.UpdatedAt = ParseTimeString(updatedAtStr.String)
+	}
+	if closedAt.Valid {
+		summary.ClosedAt = &closedAt.Time
+	}
+
+	return &summary, nil
 }
 
 // ParseTimeString parses a time string from database TEXT columns (non-nullable).
