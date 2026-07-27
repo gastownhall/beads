@@ -248,13 +248,18 @@ func TestConflictsResolveRefusesAnUnknownIssue(t *testing.T) {
 	}
 }
 
-// TestConflictInspectorSurvivesTheStoreDecoratorChain is the regression test
-// for the wy-jpd3.5 review BLOCKER: the CLI never holds the concrete store,
-// it holds a decorator that embeds the DoltStorage interface and so promotes
-// only that interface's methods. Asserting ConflictInspector on the wrapper
-// is always false — which made `bd conflicts` report "No merge conflicts"
-// over a wedged merge. storage.UnwrapStore is the fix, and this test fails if
-// either half of it regresses.
+// TestConflictInspectorSurvivesTheStoreDecoratorChain is the BEHAVIORAL half
+// of the wy-jpd3.5 review BLOCKER guard: the CLI never holds the concrete
+// store, it holds decorators, and the conflict surface reached through
+// storage.UnwrapStore must see and resolve a REAL wedged merge — not merely
+// type-assert. The type-level half (which chains UnwrapStore peels, and why a
+// naked assertion is not enough) is conflicts_unwrap_test.go, which needs no
+// dolt and so runs everywhere this test skips (wy-wrq9o F6).
+//
+// This test deliberately makes no claim about what the decorator does or does
+// not satisfy on its own: teaching HookFiringStore to forward the optional
+// interfaces would be a strict improvement, and must not turn this red
+// (wy-wrq9o F7).
 func TestConflictInspectorSurvivesTheStoreDecoratorChain(t *testing.T) {
 	const issueID = "conflict-decorator-1"
 	store, ctx := wedgeIssueConflict(t, issueID)
@@ -262,10 +267,6 @@ func TestConflictInspectorSurvivesTheStoreDecoratorChain(t *testing.T) {
 	// Two decorators deep, exactly as cmd/bd's chain can be.
 	var decorated storage.DoltStorage = storage.NewHookFiringStore(store, nil)
 	decorated = storage.NewHookFiringStore(decorated, nil)
-
-	if _, ok := decorated.(storage.ConflictInspector); ok {
-		t.Error("the decorator itself satisfies ConflictInspector — the UnwrapStore rule this test guards would be moot, and the naked assertion is no longer the trap it was")
-	}
 
 	inspector, ok := storage.UnwrapStore(decorated).(storage.ConflictInspector)
 	if !ok {
@@ -298,5 +299,181 @@ func TestConflictInspectorSurvivesTheStoreDecoratorChain(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("resolved %d rows through the decorator chain, want 1", n)
+	}
+}
+
+// ── The BLOCKING merge state (wy-36ilm F12), dolt-backed ────────────────
+//
+// GetMergeBlockers reads two dolt system tables whose column names it cannot
+// see at compile time: dolt_schema_conflicts.table_name, and
+// dolt_constraint_violations.(`table`, num_violations). wy-wrq9o F5: those
+// reads had no test at all — a column rename, a dropped `WHERE num_violations
+// > 0`, or a Blocked() inversion would have landed green. These reproduce
+// both blocker classes for real and assert the storage half of the gate:
+// blockers are visible and Blocked() is true. The command-level commit hold
+// and remedies are covered in cmd/bd/conflicts_conclude*_test.go.
+
+// wedgeConstraintViolation leaves a real FK constraint violation in the
+// working set: our branch deleted an issue, the peer added a child row
+// referencing it, and the merge ran WITHOUT the settle pass that repairs the
+// cascade (mergesettle.go) — exactly the state a halted CLI-level pull hands
+// `bd conflicts`.
+func wedgeConstraintViolation(t *testing.T, tc fkCascadeCase) (*DoltStore, context.Context) {
+	t.Helper()
+	store, cleanup := setupTestStore(t)
+	t.Cleanup(cleanup)
+
+	ctx, cancel := testContext(t)
+	t.Cleanup(cancel)
+
+	peerBranch := seedFKCascadeDivergence(ctx, t, store.db, tc)
+
+	// The same conflict-tolerance flags the resolution path sets: without
+	// them the violating merge rolls back and leaves nothing to inspect.
+	// MaxOpenConns is 1 for these stores, so the session state persists.
+	for _, stmt := range []string{
+		"SET @@dolt_allow_commit_conflicts = 1",
+		"SET @@dolt_force_transaction_commit = 1",
+	} {
+		if _, err := store.db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch); err != nil {
+		// Some dolt versions report the violation through the CALL's error;
+		// the assertions below are the real check.
+		t.Logf("DOLT_MERGE returned: %v", err)
+	}
+	return store, ctx
+}
+
+// TestGetMergeBlockersSeesAConstraintViolation drives the constraint-violation
+// half of GetMergeBlockers against real dolt: the table name and the count
+// come out of dolt_constraint_violations' own columns, so this fails if
+// either is renamed.
+func TestGetMergeBlockersSeesAConstraintViolation(t *testing.T) {
+	for _, tc := range fkCascadeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, ctx := wedgeConstraintViolation(t, tc)
+
+			// The violation is NOT a row conflict: dolt_conflicts is empty,
+			// which is precisely why "0 conflicts remain" used to be a lie.
+			rows, err := store.GetConflictRows(ctx, "issues")
+			if err != nil {
+				t.Fatalf("GetConflictRows: %v", err)
+			}
+			if len(rows) != 0 {
+				t.Errorf("expected no ROW conflicts alongside the violation, got %d", len(rows))
+			}
+
+			blockers, err := store.GetMergeBlockers(ctx)
+			if err != nil {
+				t.Fatalf("GetMergeBlockers: %v", err)
+			}
+			if !blockers.Blocked() {
+				t.Fatalf("a live constraint violation must block the merge commit, got %+v", blockers)
+			}
+			if len(blockers.SchemaConflictTables) != 0 {
+				t.Errorf("no schema conflict was staged, got %v", blockers.SchemaConflictTables)
+			}
+			found := false
+			for _, v := range blockers.ConstraintViolations {
+				if v.Table == tc.name {
+					found = true
+					if v.Count < 1 {
+						t.Errorf("violation count for %s = %d, want >= 1 (is `WHERE num_violations > 0` still filtering, and is num_violations still the column?)", v.Table, v.Count)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("GetMergeBlockers did not report the %s violations: %+v", tc.name, blockers.ConstraintViolations)
+			}
+		})
+	}
+}
+
+// TestGetMergeBlockersSeesASchemaConflict is the other class: two branches
+// that added the SAME column with different types. Dolt keeps schema
+// conflicts out of dolt_conflicts entirely, so this is the state
+// `bd conflicts list` used to render as "No merge conflicts."
+func TestGetMergeBlockersSeesASchemaConflict(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	db := store.db
+
+	const probeTable = "schema_conflict_probe"
+
+	var currentBranch string
+	if err := db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&currentBranch); err != nil {
+		t.Fatalf("get current branch: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"CREATE TABLE "+probeTable+" (id INT PRIMARY KEY)"); err != nil {
+		t.Fatalf("create probe table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed probe table')"); err != nil {
+		t.Fatalf("commit probe table: %v", err)
+	}
+
+	peerBranch := currentBranch + "_schema_peer"
+	if _, err := db.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD')", peerBranch); err != nil {
+		t.Fatalf("create peer branch: %v", err)
+	}
+	defer func() {
+		_, _ = db.ExecContext(context.Background(), "CALL DOLT_MERGE('--abort')")
+		_, _ = db.ExecContext(context.Background(), "CALL DOLT_CHECKOUT(?)", currentBranch)
+		_, _ = db.ExecContext(context.Background(), "CALL DOLT_BRANCH('-Df', ?)", peerBranch)
+	}()
+
+	// Divergent ALTER TABLE: same column name, incompatible types.
+	if _, err := db.ExecContext(ctx, "ALTER TABLE "+probeTable+" ADD COLUMN note VARCHAR(32)"); err != nil {
+		t.Fatalf("alter on current: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'our column')"); err != nil {
+		t.Fatalf("commit our column: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", peerBranch); err != nil {
+		t.Fatalf("checkout peer: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "ALTER TABLE "+probeTable+" ADD COLUMN note BIGINT"); err != nil {
+		t.Fatalf("alter on peer: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'their column')"); err != nil {
+		t.Fatalf("commit their column: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch); err != nil {
+		t.Fatalf("checkout current: %v", err)
+	}
+
+	for _, stmt := range []string{
+		"SET @@dolt_allow_commit_conflicts = 1",
+		"SET @@dolt_force_transaction_commit = 1",
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_MERGE(?)", peerBranch); err != nil {
+		t.Logf("DOLT_MERGE returned: %v", err)
+	}
+
+	blockers, err := store.GetMergeBlockers(ctx)
+	if err != nil {
+		t.Fatalf("GetMergeBlockers: %v", err)
+	}
+	if !blockers.Blocked() {
+		t.Fatalf("a live schema conflict must block the merge commit, got %+v", blockers)
+	}
+	found := false
+	for _, tbl := range blockers.SchemaConflictTables {
+		if tbl == probeTable {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("GetMergeBlockers did not report the %s schema conflict (is dolt_schema_conflicts.table_name still the column?): %+v",
+			probeTable, blockers)
 	}
 }

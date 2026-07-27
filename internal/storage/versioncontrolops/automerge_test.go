@@ -1,8 +1,15 @@
 package versioncontrolops
 
 import (
+	"context"
+	"database/sql"
+	"errors"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/DATA-DOG/go-sqlmock"
 )
 
 // conflictRowFor builds a rawConflictRow the way dolt_conflicts_<table> reports
@@ -488,4 +495,276 @@ func TestUnionRowIsSafe(t *testing.T) {
 			t.Error("an append-only row whose columns diverge must go to the operator")
 		}
 	})
+}
+
+// TestResolveIssuesFieldMerge_ZeroAffectedRowsIsNotProofOfDeletion pins the
+// distinction the resolver used to miss: without clientFoundRows an UPDATE
+// reports rows CHANGED, so a merged write the backend normalizes to the stored
+// bytes affects zero rows even though the row is right there. The resolver must
+// confirm with a matched-rows check before it accuses another session of having
+// deleted the row, and must still refuse when the row really is gone.
+func TestResolveIssuesFieldMerge_ZeroAffectedRowsIsNotProofOfDeletion(t *testing.T) {
+	ctx := context.Background()
+	plan := []issuesRowMerge{{
+		ourKey:  "bd-1",
+		columns: []string{"status", "updated_at"},
+		values:  []any{"open", "2026-07-25 10:00:00"},
+	}}
+	const updateSQL = "UPDATE `issues` SET `status` = ?, `updated_at` = ? WHERE `id` = ?"
+	const existsSQL = "SELECT COUNT(*) FROM `issues` WHERE `id` = ?"
+	const deleteSQL = "DELETE FROM dolt_conflicts_issues WHERE our_id = ?"
+
+	t.Run("no-op write on a live row resolves", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta(updateSQL)).
+			WithArgs("open", "2026-07-25 10:00:00", "bd-1").
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta(existsSQL)).WithArgs("bd-1").
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+		mock.ExpectExec(regexp.QuoteMeta(deleteSQL)).WithArgs("bd-1").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		if err := resolveIssuesFieldMerge(ctx, db, plan); err != nil {
+			t.Fatalf("a write the backend normalized to a no-op must not abort the merge: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("an unreadable RowsAffected still checks the row", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta(updateSQL)).
+			WithArgs("open", "2026-07-25 10:00:00", "bd-1").
+			WillReturnResult(sqlmock.NewErrorResult(errors.New("driver has no row count")))
+		mock.ExpectQuery(regexp.QuoteMeta(existsSQL)).WithArgs("bd-1").
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(1))
+		mock.ExpectExec(regexp.QuoteMeta(deleteSQL)).WithArgs("bd-1").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		if err := resolveIssuesFieldMerge(ctx, db, plan); err != nil {
+			t.Fatalf("an unreadable affected-row count must be settled by the check, not by guessing: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("a genuinely vanished row is still refused", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta(updateSQL)).
+			WithArgs("open", "2026-07-25 10:00:00", "bd-1").
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta(existsSQL)).WithArgs("bd-1").
+			WillReturnRows(sqlmock.NewRows([]string{"c"}).AddRow(0))
+		// No delete: the conflict must be left for the operator.
+
+		err := resolveIssuesFieldMerge(ctx, db, plan)
+		if err == nil || !strings.Contains(err.Error(), "deleted concurrently") {
+			t.Fatalf("err = %v, want the concurrent-deletion refusal", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("a failed check refuses rather than clearing the conflict", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta(updateSQL)).
+			WithArgs("open", "2026-07-25 10:00:00", "bd-1").
+			WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectQuery(regexp.QuoteMeta(existsSQL)).WithArgs("bd-1").
+			WillReturnError(errors.New("connection reset"))
+
+		err := resolveIssuesFieldMerge(ctx, db, plan)
+		if err == nil || !strings.Contains(err.Error(), "confirm issue") {
+			t.Fatalf("err = %v, want the unconfirmable-row refusal", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("an ordinary changed row skips the extra check", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectExec(regexp.QuoteMeta(updateSQL)).
+			WithArgs("open", "2026-07-25 10:00:00", "bd-1").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(regexp.QuoteMeta(deleteSQL)).WithArgs("bd-1").
+			WillReturnResult(sqlmock.NewResult(0, 1))
+
+		if err := resolveIssuesFieldMerge(ctx, db, plan); err != nil {
+			t.Fatalf("resolveIssuesFieldMerge: %v", err)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+}
+
+// TestDuplicateConflictKey covers the second half: the resolvers delete by
+// our-side key, so two live conflict rows sharing one key would be cleared
+// together and make the next iteration abort on a message about the wrong
+// thing. Rows with no our-side key cannot collide in a keyed delete and must
+// keep flowing to the per-row safety checks.
+func TestDuplicateConflictKey(t *testing.T) {
+	rowsOf := func(cells ...map[string][3]any) []rawConflictRow {
+		rows := make([]rawConflictRow, 0, len(cells))
+		for _, c := range cells {
+			rows = append(rows, conflictRowFor(t, c))
+		}
+		return rows
+	}
+	issuesKey := []string{issuesKeyColumn}
+
+	t.Run("two rows for one issue are reported", func(t *testing.T) {
+		rows := rowsOf(
+			map[string][3]any{"id": {"bd-1", "bd-1", "bd-1"}, "status": {"open", "open", "closed"}},
+			map[string][3]any{"id": {"bd-1", "bd-1", "bd-1"}, "status": {"open", "closed", "open"}},
+		)
+		dup, ok := duplicateConflictKey(issuesKey, rows)
+		if !ok || dup != "bd-1" {
+			t.Fatalf("duplicateConflictKey = %q, %v; want bd-1, true", dup, ok)
+		}
+	})
+
+	t.Run("distinct issues pass", func(t *testing.T) {
+		rows := rowsOf(
+			map[string][3]any{"id": {"bd-1", "bd-1", "bd-1"}},
+			map[string][3]any{"id": {"bd-2", "bd-2", "bd-2"}},
+		)
+		if dup, ok := duplicateConflictKey(issuesKey, rows); ok {
+			t.Fatalf("distinct keys must pass, got duplicate %q", dup)
+		}
+	})
+
+	t.Run("byte and string spellings of one key still collide", func(t *testing.T) {
+		rows := rowsOf(
+			map[string][3]any{"id": {"bd-1", []byte("bd-1"), "bd-1"}},
+			map[string][3]any{"id": {"bd-1", "bd-1", "bd-1"}},
+		)
+		if _, ok := duplicateConflictKey(issuesKey, rows); !ok {
+			t.Error("a []byte key and its string spelling name the same row; the guard must see through the driver's choice")
+		}
+	})
+
+	t.Run("rows with no our side are left to the safety checks", func(t *testing.T) {
+		// Both are delete/modify conflicts of ONE issue: their-side keys agree,
+		// and only the NULL our-side keeps them from reading as duplicates.
+		// Such a row is never the target of a keyed delete, so declining the
+		// whole table here would refuse merges the safety checks handle.
+		rows := rowsOf(
+			map[string][3]any{"id": {"bd-1", nil, "bd-1"}},
+			map[string][3]any{"id": {"bd-1", nil, "bd-1"}},
+		)
+		if dup, ok := duplicateConflictKey(issuesKey, rows); ok {
+			t.Fatalf("delete/modify conflicts must not be read as duplicates, got %q", dup)
+		}
+	})
+
+	t.Run("union tables key on every key column", func(t *testing.T) {
+		keyCols := unionConflictKeyColumns["labels"]
+		same := rowsOf(
+			map[string][3]any{"issue_id": {"bd-1", "bd-1", "bd-1"}, "label": {"tier:opus", "tier:opus", "tier:opus"}},
+			map[string][3]any{"issue_id": {"bd-1", "bd-1", "bd-1"}, "label": {"tier:opus", "tier:opus", "tier:opus"}},
+		)
+		if _, ok := duplicateConflictKey(keyCols, same); !ok {
+			t.Error("two conflict rows for one (issue_id, label) must be reported")
+		}
+		differing := rowsOf(
+			map[string][3]any{"issue_id": {"bd-1", "bd-1", "bd-1"}, "label": {"tier:opus", "tier:opus", "tier:opus"}},
+			map[string][3]any{"issue_id": {"bd-1", "bd-1", "bd-1"}, "label": {"tier:fleet", "tier:fleet", "tier:fleet"}},
+		)
+		if dup, ok := duplicateConflictKey(keyCols, differing); ok {
+			t.Fatalf("two labels of one issue are distinct rows, got duplicate %q", dup)
+		}
+	})
+
+	t.Run("no key columns means no guard", func(t *testing.T) {
+		rows := rowsOf(map[string][3]any{"id": {"x", "x", "x"}}, map[string][3]any{"id": {"x", "x", "x"}})
+		if _, ok := duplicateConflictKey(nil, rows); ok {
+			t.Error("without known key columns there is no keyed delete to guard")
+		}
+	})
+}
+
+// TestDuplicateConflictRowsDeclineRatherThanError pins the shape of the
+// refusal, not just its trigger. The pre-screens must DECLINE (ok=false, nil
+// error) so the caller still builds the MergeConflictsError that names the
+// unresolved tables for the operator; a hard error there is swallowed by
+// SettleMerge and turns a reportable conflict into an opaque pull failure.
+func TestDuplicateConflictRowsDeclineRatherThanError(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("issues", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `dolt_conflicts_issues`")).
+			WillReturnRows(sqlmock.NewRows([]string{"base_id", "our_id", "their_id"}).
+				AddRow("bd-1", "bd-1", "bd-1").
+				AddRow("bd-1", "bd-1", "bd-1"))
+
+		plan, mergeable, err := issuesConflictsAreFieldMergeable(ctx, db)
+		if err != nil {
+			t.Fatalf("duplicate rows must decline, not error: %v", err)
+		}
+		if mergeable || plan != nil {
+			t.Fatalf("mergeable = %v, plan = %v; want a decline", mergeable, plan)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+
+	t.Run("union tables", func(t *testing.T) {
+		db, mock := newMockDB(t)
+		mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `dolt_conflicts_labels`")).
+			WillReturnRows(sqlmock.NewRows([]string{"base_issue_id", "our_issue_id", "their_issue_id", "base_label", "our_label", "their_label"}).
+				AddRow("bd-1", "bd-1", "bd-1", "tier:opus", "tier:opus", "tier:opus").
+				AddRow("bd-1", "bd-1", "bd-1", "tier:opus", "tier:opus", "tier:opus"))
+
+		plan, safe, err := unionConflictsAreSafe(ctx, db, "labels")
+		if err != nil {
+			t.Fatalf("duplicate rows must decline, not error: %v", err)
+		}
+		if safe || plan != nil {
+			t.Fatalf("safe = %v, plan = %v; want a decline", safe, plan)
+		}
+		if err := mock.ExpectationsWereMet(); err != nil {
+			t.Fatalf("unmet expectations: %v", err)
+		}
+	})
+}
+
+// TestIssuesConflictsAreFieldMergeableLoadsEveryRow guards the guard: distinct
+// conflict rows must still flow through the real entry point and be planned.
+func TestIssuesConflictsAreFieldMergeableLoadsEveryRow(t *testing.T) {
+	ctx := context.Background()
+	db, mock := newMockDB(t)
+	cols := []string{"base_id", "our_id", "their_id", "base_status", "our_status", "their_status", "base_updated_at", "our_updated_at", "their_updated_at"}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT * FROM `dolt_conflicts_issues`")).
+		WillReturnRows(sqlmock.NewRows(cols).
+			AddRow("bd-1", "bd-1", "bd-1", "open", "open", "closed", "2026-07-25 09:00:00", "2026-07-25 09:00:00", "2026-07-25 10:00:00").
+			AddRow("bd-2", "bd-2", "bd-2", "open", "open", "closed", "2026-07-25 09:00:00", "2026-07-25 09:00:00", "2026-07-25 10:00:00"))
+
+	plan, mergeable, err := issuesConflictsAreFieldMergeable(ctx, db)
+	if err != nil {
+		t.Fatalf("issuesConflictsAreFieldMergeable: %v", err)
+	}
+	if !mergeable || len(plan) != 2 {
+		t.Fatalf("mergeable = %v, len(plan) = %d; want true, 2", mergeable, len(plan))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// newMockDB returns a sqlmock-backed *sql.DB, which satisfies DBConn.
+func newMockDB(t *testing.T) (*sql.DB, sqlmock.Sqlmock) {
+	t.Helper()
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db, mock
 }

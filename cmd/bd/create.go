@@ -26,12 +26,27 @@ import (
 	"github.com/steveyegge/beads/internal/validation"
 )
 
+// validateCreateArgs runs as cobra's Args validation, which executes before
+// PersistentPreRunE opens the store or runs migrations. It reuses
+// resolveTitle — the same shared validator gatherCreateInput calls for the
+// proxied-server create path — so a whitespace-only title (GH#4771) is
+// rejected identically for both backends, and before any invocation that is
+// guaranteed to fail wastes a store open/migration.
+func validateCreateArgs(cmd *cobra.Command, args []string) error {
+	markdownFile, _ := cmd.Flags().GetString("file")
+	graphFile, _ := cmd.Flags().GetString("graph")
+	titleFlag, _ := cmd.Flags().GetString("title")
+
+	_, err := resolveTitle(args, titleFlag, markdownFile, graphFile)
+	return err
+}
+
 var createCmd = &cobra.Command{
 	Use:           "create [title]",
 	GroupID:       "issues",
 	Aliases:       []string{"new"},
 	Short:         "Create a new issue (or batch from markdown/graph JSON)",
-	Args:          cobra.MinimumNArgs(0),
+	Args:          validateCreateArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -65,6 +80,9 @@ var createCmd = &cobra.Command{
 			if dryRun {
 				return HandleError("--dry-run is not supported with --file flag")
 			}
+			if err := rejectSingleIssueFlagsForMarkdown(cmd); err != nil {
+				return err
+			}
 			return createIssuesFromMarkdown(cmd, file)
 		}
 
@@ -77,26 +95,16 @@ var createCmd = &cobra.Command{
 			if err := graphOpts.Validate(); err != nil {
 				return HandleError("invalid graph options: %v", err)
 			}
+			if err := rejectSingleIssueFlagsForGraph(cmd); err != nil {
+				return err
+			}
 			return createIssuesFromGraph(graphFile, graphDryRun, graphOpts)
 		}
 
 		titleFlag, _ := cmd.Flags().GetString("title")
-		var title string
-
-		if len(args) > 0 && titleFlag != "" {
-			if args[0] != titleFlag {
-				return HandleError("cannot specify different titles as both positional argument and --title flag\n  Positional: %q\n  --title:    %q", args[0], titleFlag)
-			}
-			title = args[0]
-		} else if len(args) > 0 {
-			if strings.HasPrefix(args[0], "-") {
-				return HandleError("title %q looks like a flag (starts with '-').\n  Run 'bd create --help' for available options.\n  To use this title anyway, pass it explicitly: bd create --title=%q", args[0], args[0])
-			}
-			title = args[0]
-		} else if titleFlag != "" {
-			title = titleFlag
-		} else {
-			return HandleError("title required (or use --file to create from markdown)")
+		title, err := resolveTitle(args, titleFlag, "", "")
+		if err != nil {
+			return err
 		}
 
 		// Get silent flag
@@ -452,6 +460,18 @@ var createCmd = &cobra.Command{
 			return renderDryRun()
 		}
 
+		// Parse every requested dependency edge BEFORE reserving a child ID
+		// or creating anything so a malformed spec aborts with no burned
+		// child ID and no orphan issue behind it.
+		depSpecs, err := parseDepSpecs(deps)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate, cmd.Flags().Changed("waits-for-gate"))
+		if err != nil {
+			return HandleError("%v", err)
+		}
+
 		createCtx := rootCtx
 		if parentID != "" {
 			childID, err := store.GetNextChildID(rootCtx, parentID)
@@ -509,17 +529,6 @@ var createCmd = &cobra.Command{
 		})
 
 		ctx := createCtx
-
-		// Parse every requested dependency edge BEFORE creating anything so
-		// a malformed spec aborts with no orphan issue behind it.
-		depSpecs, err := parseDepSpecs(deps)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate)
-		if err != nil {
-			return HandleError("%v", err)
-		}
 
 		// If a discovered-from dependency is present, inherit source_repo
 		// from the referenced parent issue.
@@ -762,7 +771,7 @@ func init() {
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
 	createCmd.Flags().String("parent", "", "Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')")
 	createCmd.Flags().Bool("no-inherit-labels", false, "Don't inherit labels from parent issue")
-	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
+	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies as 'type:id' or bare 'id'. Bare 'id', 'depends-on:id', and 'blocked-by:id' all make THIS issue depend on id; 'blocks:id' reverses direction (id depends on this issue). E.g. 'blocked-by:bd-20,discovered-from:bd-15'")
 	createCmd.Flags().String("waits-for", "", "Spawner issue ID to wait for (creates waits-for dependency for fanout gate)")
 	createCmd.Flags().String("waits-for-gate", "all-children", "Gate type: all-children (wait for all) or any-children (wait for first)")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")

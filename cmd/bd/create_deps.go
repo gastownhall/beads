@@ -62,9 +62,16 @@ func parseDepSpec(raw string) (domain.DependencySpec, error) {
 	return spec, nil
 }
 
-func buildWaitsFor(spawnerID, gate string) (*domain.WaitsForSpec, error) {
+// buildWaitsFor validates and constructs a WaitsForSpec from the --waits-for
+// and --waits-for-gate flag values. gateExplicit must be true when the caller
+// explicitly passed --waits-for-gate (not relying on its default); in that case
+// a missing spawnerID is rejected rather than silently ignored.
+func buildWaitsFor(spawnerID, gate string, gateExplicit bool) (*domain.WaitsForSpec, error) {
 	spawnerID = strings.TrimSpace(spawnerID)
 	if spawnerID == "" {
+		if gateExplicit {
+			return nil, fmt.Errorf("--waits-for-gate requires --waits-for (no spawner ID specified)")
+		}
 		return nil, nil
 	}
 	if gate == "" {

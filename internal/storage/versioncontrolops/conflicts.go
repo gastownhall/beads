@@ -334,6 +334,36 @@ func loadConflictRow(ctx context.Context, db DBConn, table, keyCol, key string) 
 	return rawConflictRow{cols: cols, vals: vals}, errors.Join(rows.Err(), rows.Close())
 }
 
+// conflictTargetStillPresent reports whether key still names a row of table.
+//
+// It is the matched-rows check the resolvers need after a write, because
+// RowsAffected is rows CHANGED, not rows MATCHED: the DSN sets parseTime and
+// multiStatements but NOT clientFoundRows (doltutil/dsn.go), so an UPDATE the
+// backend normalizes to the bytes already stored reports zero exactly as a
+// vanished row does. Only asking can tell the two apart.
+//
+// It confirms that the key still resolves to a row — NOT that our values are
+// the stored ones. On the autocommit path (an embedded Pull, where db is not a
+// transaction) a row deleted and re-inserted between the UPDATE and this check
+// would read as present; in server mode the caller holds a transaction and the
+// window does not exist. Comparing the written values instead would reintroduce
+// the very normalization sensitivity this check exists to absorb.
+func conflictTargetStillPresent(ctx context.Context, db DBConn, table, keyCol string, key any) (bool, error) {
+	if err := ValidateConflictTable(table); err != nil {
+		return false, err
+	}
+	if err := ValidateConflictTable(keyCol); err != nil {
+		return false, err
+	}
+	//nolint:gosec // table and key column validated as identifiers just above.
+	q := fmt.Sprintf("SELECT COUNT(*) FROM `%s` WHERE `%s` = ?", table, keyCol)
+	var n int
+	if err := db.QueryRowContext(ctx, q, key).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // resolveOneConflictRow applies strategy to a single modify/modify row.
 //
 // "ours" is dolt's manual-resolution path: the working set already holds our
@@ -378,12 +408,21 @@ func resolveOneConflictRow(ctx context.Context, db DBConn, table, keyCol, key, s
 		if err != nil {
 			return fmt.Errorf("apply their values for %s %s: %w", table, key, err)
 		}
-		// Zero rows means the row we read the conflict for is no longer
+		// Zero rows would mean the row we read the conflict for is no longer
 		// there — another session on the same branch deleted it between the
 		// read and the write. Clearing the conflict now would discard their
-		// side under a --theirs invocation, undetectably. Stop instead.
-		if n, err := res.RowsAffected(); err == nil && n == 0 {
-			return fmt.Errorf("their values for %s %s matched no row (was it deleted concurrently?); conflict left unresolved", table, key)
+		// side under a --theirs invocation, undetectably. But zero is not
+		// proof of that on its own (see conflictTargetStillPresent), so ask
+		// before refusing: an operator who named this row deserves the abort
+		// only when the row really is gone.
+		if n, err := res.RowsAffected(); err != nil || n == 0 {
+			present, err := conflictTargetStillPresent(ctx, db, table, keyCol, ourKey)
+			if err != nil {
+				return fmt.Errorf("confirm %s %s still exists after writing their values: %w", table, key, err)
+			}
+			if !present {
+				return fmt.Errorf("their values for %s %s matched no row (was it deleted concurrently?); conflict left unresolved", table, key)
+			}
 		}
 	}
 

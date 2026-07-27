@@ -167,9 +167,113 @@ func TestCreateDepsAtomicity(t *testing.T) {
 		}
 	})
 
+	// Defect A: --waits-for-gate without --waits-for silently no-ops.
+	// Before the fix, both commands below exited 0 and created a normal bead
+	// with no gate or dependency wired, regardless of the gate value (including
+	// invalid values). An operator who wrote --waits-for-gate believing they had
+	// armed a hold got a dispatchable bead instead.
+	t.Run("waits_for_gate_without_waits_for_is_rejected", func(t *testing.T) {
+		for _, gate := range []string{"all-children", "TOTALLY-BOGUS"} {
+			title := "gate-no-spawner-" + gate
+			out, err := runCreateDepsBDRaw(bd, dir, "create", title, "--json",
+				"--waits-for-gate", gate)
+			if err == nil {
+				t.Errorf("create --waits-for-gate %s (no --waits-for) exited 0 (was silently ignored); output:\n%s", gate, out)
+			}
+			if createDepsIssueTitles(t, bd, dir)[title] {
+				t.Errorf("issue %q persisted despite rejected command (should not exist)", title)
+			}
+		}
+	})
+
+	// Defect B: with both --waits-for and --waits-for-gate INVALID, the bead
+	// was written before validation ran, leaving a dep-less dispatchable orphan.
+	// After the refactor in create_atomic.go, validation runs pre-write; this
+	// test documents the contract and guards against regressions.
+	t.Run("invalid_waits_for_gate_value_is_rejected_before_write", func(t *testing.T) {
+		out, err := runCreateDepsBDRaw(bd, dir, "create", "invalid-gate-probe", "--json",
+			"--waits-for", blocker, "--waits-for-gate", "TOTALLY-BOGUS")
+		if err == nil {
+			t.Errorf("create with invalid --waits-for-gate exited 0; output:\n%s", out)
+		}
+		if !strings.Contains(out, "TOTALLY-BOGUS") {
+			t.Errorf("error should name the invalid gate value; got:\n%s", out)
+		}
+		if createDepsIssueTitles(t, bd, dir)["invalid-gate-probe"] {
+			t.Error("issue \"invalid-gate-probe\" persisted despite failed command (half-write: bead created before validation)")
+		}
+	})
+
+	// 2026-07-23 maintainer review of PR gastownhall/beads#4918 (should-fix 1):
+	// --waits-for-gate without --waits-for was only rejected on the single-issue
+	// create path. The non-proxied --file and --graph dispatch in create.go's
+	// RunE called createIssuesFromMarkdown/createIssuesFromGraph directly,
+	// bypassing rejectSingleIssueFlagsForMarkdown/rejectSingleIssueFlagsForGraph
+	// (which already list "waits-for"/"waits-for-gate" in singleIssueOnlyFlags),
+	// so the same silently-ignored gate defect survived on the batch routes.
+	t.Run("waits_for_gate_rejected_on_file_batch_route", func(t *testing.T) {
+		mdFile := filepath.Join(dir, "batch-plan.md")
+		if err := os.WriteFile(mdFile, []byte("# Batch issue\n\nDescription\n"), 0o600); err != nil {
+			t.Fatalf("write markdown plan: %v", err)
+		}
+		out, err := runCreateDepsBDRaw(bd, dir, "create", "--file", mdFile, "--waits-for-gate", "all-children")
+		if err == nil {
+			t.Errorf("create --file with --waits-for-gate (no --waits-for) exited 0; output:\n%s", out)
+		}
+		if !strings.Contains(out, "waits-for-gate") {
+			t.Errorf("error should name the rejected --waits-for-gate flag, got:\n%s", out)
+		}
+	})
+
+	t.Run("waits_for_gate_rejected_on_graph_batch_route", func(t *testing.T) {
+		graphFile := filepath.Join(dir, "batch-plan.json")
+		plan := `{"nodes":[{"key":"root","title":"Graph batch root","type":"task"}]}`
+		if err := os.WriteFile(graphFile, []byte(plan), 0o600); err != nil {
+			t.Fatalf("write graph plan: %v", err)
+		}
+		out, err := runCreateDepsBDRaw(bd, dir, "create", "--graph", graphFile, "--waits-for-gate", "all-children")
+		if err == nil {
+			t.Errorf("create --graph with --waits-for-gate (no --waits-for) exited 0; output:\n%s", out)
+		}
+		if !strings.Contains(out, "waits-for-gate") {
+			t.Errorf("error should name the rejected --waits-for-gate flag, got:\n%s", out)
+		}
+		if createDepsIssueTitles(t, bd, dir)["Graph batch root"] {
+			t.Error("graph node \"Graph batch root\" persisted despite rejected --waits-for-gate combo")
+		}
+	})
+
+	// 2026-07-23 maintainer review of PR gastownhall/beads#4918 (should-fix 2):
+	// store.GetNextChildID reserved (and committed) a child ID before
+	// buildWaitsFor validation ran, so a rejected `--parent X --waits-for-gate
+	// BOGUS` (no --waits-for) still burned a child ID even though the create
+	// itself failed. Validation now runs before the reservation, so a failed
+	// attempt must leave no gap in the child numbering.
+	t.Run("waits_for_gate_validation_failure_does_not_burn_child_id", func(t *testing.T) {
+		parentOut := runCreateDepsBD(t, bd, dir, "create", "child-id-burn-parent", "--json")
+		parentID := createDepsExtractID(t, parentOut)
+
+		out, err := runCreateDepsBDRaw(bd, dir, "create", "should-not-exist-child", "--json",
+			"--parent", parentID, "--waits-for-gate", "all-children")
+		if err == nil {
+			t.Errorf("create --parent with --waits-for-gate (no --waits-for) exited 0; output:\n%s", out)
+		}
+
+		childOut := runCreateDepsBD(t, bd, dir, "create", "first-real-child", "--json", "--parent", parentID)
+		childID := createDepsExtractID(t, childOut)
+
+		wantChildID := parentID + ".1"
+		if childID != wantChildID {
+			t.Errorf("child ID = %q, want %q (rejected --waits-for-gate attempt burned a child ID)", childID, wantChildID)
+		}
+	})
+
 	t.Run("ready_never_offers_a_failed_create", func(t *testing.T) {
 		out := runCreateDepsBD(t, bd, dir, "ready", "--json")
-		for _, title := range []string{"orphan candidate", "partial dep issue", "waits-for orphan"} {
+		for _, title := range []string{
+			"orphan candidate", "partial dep issue", "waits-for orphan",
+			"gate-no-spawner-all-children", "gate-no-spawner-TOTALLY-BOGUS", "invalid-gate-probe",
+		} {
 			if strings.Contains(out, title) {
 				t.Errorf("bd ready offers %q, a bead whose create should have been rolled back:\n%s", title, out)
 			}

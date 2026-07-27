@@ -28,9 +28,11 @@ const DepJSONObject = `JSON_OBJECT(
 //
 // There are two forms of the same projection, selected by ids:
 //
-//   - Predicate form (ids empty): the driver is bounded by whereSQL/orderBySQL/
-//     limitSQL and each count subquery aggregates its whole side table. The
-//     caller supplies its own args; the returned args slice is nil.
+//   - Predicate form (ids empty): whereSQL bounds the driver in an inner
+//     subquery BEFORE the aggregate LEFT JOINs (see below); orderBySQL and
+//     limitSQL stay at the outer level, after the joins. Each count subquery
+//     aggregates its whole side table. The caller supplies its own args; the
+//     returned args slice is nil.
 //
 //   - By-IDs form (ids non-empty): whereSQL/orderBySQL/limitSQL are ignored and
 //     the driver AND every count subquery are constrained to ids. This keeps
@@ -49,6 +51,34 @@ const DepJSONObject = `JSON_OBJECT(
 // guarantee one), but it is the same in both forms: restricting the aggregate's
 // input to ids drops only rows for other issues, so the per-issue rows it
 // aggregates — and their relative order — are unchanged.
+//
+// In the predicate form, whereSQL filters the main table in an inner subquery,
+// BEFORE the aggregate LEFT JOINs. The joins all preserve every main row, so
+// filtering before vs. after them yields the identical row set — but it changes
+// the plan Dolt picks: instead of materializing the dep/rdep/comment/label/parent
+// aggregates and joining them to every main row before the WHERE prunes the
+// result, the joins now drive off the already-narrowed set. That is the win for
+// the narrow ephemeral-work searches that dominate the hot path. Only the WHERE
+// moves inward; orderBySQL and limitSQL remain after the joins, because ORDER BY
+// and LIMIT must see the projected aggregate columns and must apply to the final
+// joined result. An empty whereSQL keeps the plain "FROM <main> i" driver: there
+// is no predicate to push down, so the derived table would only interpose a
+// needless wrapper between the planner and the base table.
+//
+// That shape REQUIRES that whereSQL reference only main-table columns (or
+// correlated subqueries against labels/deps/comments keyed by id) — never the
+// six aggregate aliases (labels_json, dep_count, rdep_count, comment_count,
+// parent_id, deps_json), which are projected by the OUTER query and are not in
+// scope inside the derived subquery. The only producers of whereSQL,
+// BuildIssueFilterClauses and BuildReadyWorkWhere, uphold this by construction.
+// The invariant is self-enforcing: a predicate that referenced an aggregate
+// would reference an out-of-scope column, so Dolt errors at query time rather
+// than silently returning wrong rows — the failure is loud, not subtle. (The
+// subquery scoping that makes it loud is pinned by TestSearchCountsSQLShape.)
+//
+// The by-IDs form keeps the plain "FROM <main> i" driver with its id predicate
+// at the outer level: its subqueries are already id-constrained, so there is no
+// join-then-filter blowup to avoid and no reason to interpose a derived table.
 //
 // The reverse-blocker rc subquery unions wisp_dependencies only when the caller
 // has probed that the table exists (includeWispReverseDeps).
@@ -95,7 +125,20 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 		labelsJoin = ""
 	}
 
-	outerClause := fmt.Sprintf("%s\n\t\t%s\n\t\t%s", whereSQL, orderBySQL, limitSQL)
+	// Predicate form with a filter: whereSQL filters the main table inside a
+	// derived table so the aggregate joins drive off the already-narrowed set;
+	// ORDER BY and LIMIT stay outer, after the joins. Everything else — empty
+	// whereSQL (nothing to push down) and the by-IDs form (subqueries already
+	// id-constrained) — keeps the plain driver.
+	driverSQL := fmt.Sprintf("%s i", tables.Main)
+	if !byIDs && whereSQL != "" {
+		driverSQL = fmt.Sprintf(`(
+			SELECT i.*
+			FROM %s i
+			%s
+		) i`, tables.Main, whereSQL)
+	}
+	outerClause := fmt.Sprintf("%s\n\t\t%s", orderBySQL, limitSQL)
 	if byIDs {
 		outerClause = fmt.Sprintf("WHERE i.id IN (%s)", inSQL)
 	}
@@ -108,7 +151,7 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 			COALESCE(cc.cnt, 0) AS comment_count,
 			pc.parent_id     AS parent_id,
 			d.deps_json      AS deps_json
-		FROM %s i
+		FROM %s
 		%s
 		%s
 		LEFT JOIN (
@@ -145,7 +188,7 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 	`,
 		ReadyWorkIssueColumns,
 		labelsSelect,
-		tables.Main,
+		driverSQL,
 		LeaseJoin("i"),
 		labelsJoin,
 		tables.Dependencies, depBlocksExtra,

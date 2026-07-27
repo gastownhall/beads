@@ -43,7 +43,11 @@ func testTempDir(pattern string) (string, error) {
 // This is the suite most likely to leak — most e2e tests here run a real
 // `bd` binary against a `.beads` dir under testTempRoot with auto-start
 // enabled. See gastownhall/beads mybd-q6cz.
-func runTestsAndSweep(m *testing.M) int {
+type testRunner interface {
+	Run() int
+}
+
+func runTestsAndSweep(m testRunner) int {
 	code := m.Run()
 	doltserver.SweepOrphanedTestServers(testTempRoot)
 	return code
@@ -142,6 +146,8 @@ func testMainInner(m *testing.M) int {
 	// test-server lane so dolt.New's database-name firewall allows
 	// testdb_*, benchdb_*, etc. on the spawned test container.
 	_ = os.Setenv("BEADS_TEST_SERVER", "1")
+	_ = os.Setenv("BEADS_TEST_CIRCUIT_DIR", filepath.Join(tmp, "circuit"))
+	defer os.Unsetenv("BEADS_TEST_CIRCUIT_DIR")
 
 	// Clear BEADS_DIR to prevent tests from accidentally picking up the project's
 	// .beads directory via git repo detection when there's a redirect file.

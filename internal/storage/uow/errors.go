@@ -2,6 +2,7 @@ package uow
 
 import (
 	"errors"
+	"strings"
 
 	mysql "github.com/go-sql-driver/mysql"
 )
@@ -26,4 +27,22 @@ func isSerializationError(err error) bool {
 		return false
 	}
 	return mysqlErr.Number == 1213 || mysqlErr.Number == 1205
+}
+
+// isDatabaseExistsError reports whether err is the server refusing a bare
+// CREATE DATABASE because the database already exists (MySQL 1007,
+// ER_DB_CREATE_EXISTS). The message fallback matches how the rest of the
+// codebase detects Dolt's variant of this error (see internal/doltserver and
+// internal/storage/dolt), whose text is "can't create database ...; database
+// exists" but whose driver error number has not always been populated.
+func isDatabaseExistsError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1007 {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	errLower := strings.ToLower(err.Error())
+	return strings.Contains(errLower, "database exists") || strings.Contains(errLower, "1007")
 }

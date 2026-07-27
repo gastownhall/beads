@@ -14,9 +14,15 @@ import (
 )
 
 // History returns the complete version history for an issue.
+//
+// Uses withReadTxLongTimeout rather than withReadTx: the underlying
+// dolt_history_issues scan can take several seconds to tens of seconds on
+// issues with many revisions, which exceeds the shared pool's 10s
+// ReadTimeout and otherwise surfaces as an intermittent MySQL i/o timeout
+// (ga-ahnxx).
 func (s *DoltStore) History(ctx context.Context, issueID string) ([]*storage.HistoryEntry, error) {
 	var result []*storage.HistoryEntry
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+	err := s.withReadTxLongTimeout(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.HistoryInTx(ctx, tx, issueID)
 		if err != nil {

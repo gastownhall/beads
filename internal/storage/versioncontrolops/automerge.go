@@ -121,6 +121,70 @@ func loadConflictRows(ctx context.Context, db DBConn, table string) ([]rawConfli
 	return out, nil
 }
 
+// duplicateConflictKey reports the first our-side key held by more than one
+// live conflict row. Both resolvers settle a row by deleting its conflict BY
+// KEY, so two rows sharing one key would both be cleared by the first delete
+// and make the second iteration abort on "no conflict row deleted" — a message
+// about the wrong thing entirely, after a row was resolved without ever being
+// merged. loadConflictRow refuses the same shape on the operator's single-row
+// path (conflicts.go); the auto-merge pre-screens instead DECLINE on it, which
+// is this file's idiom and what lets the caller still build the
+// MergeConflictsError that tells an operator which tables need them.
+//
+// Rows whose our-side key is absent are skipped: a delete/modify conflict NULLs
+// our whole side, such a row is never the target of a keyed delete (the safety
+// checks decline it first), and treating several of them as one repeated key
+// would decline merges that are perfectly settleable.
+//
+// Keys are compared by their rendered bytes, which is stricter than the
+// collation the DELETE itself matches under: a case-insensitive collation could
+// still let two rows the guard reads as distinct be deleted together. Dolt's
+// default is a binary collation and the beads schema pins no other, so the two
+// agree today.
+func duplicateConflictKey(keyCols []string, rows []rawConflictRow) (string, bool) {
+	if len(keyCols) == 0 {
+		return "", false
+	}
+	seen := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		parts := make([]string, 0, len(keyCols))
+		for _, k := range keyCols {
+			v, has := row.value("our", k)
+			if !has {
+				break
+			}
+			s := formatConflictValue(v)
+			if s == nil {
+				break
+			}
+			parts = append(parts, *s)
+		}
+		if len(parts) != len(keyCols) {
+			continue
+		}
+		key := strings.Join(parts, "\x00")
+		if seen[key] {
+			return strings.Join(parts, "/"), true
+		}
+		seen[key] = true
+	}
+	return "", false
+}
+
+// declineDuplicateConflictRows reports (and explains) a duplicate-key decline.
+// The reason is otherwise undiagnosable: the caller only learns that the table
+// was not auto-merged, the same courtesy the resolver pays a superseded cell.
+func declineDuplicateConflictRows(table string, keyCols []string, rows []rawConflictRow) bool {
+	dup, ok := duplicateConflictKey(keyCols, rows)
+	if !ok {
+		return false
+	}
+	fmt.Fprintf(os.Stderr,
+		"Notice: not auto-merging %s; several live conflict rows share the key %s, which must be resolved by hand\n",
+		table, dup)
+	return true
+}
+
 // dataColumns returns the row's data column names (conflict metadata and the
 // named excluded columns dropped), in conflict-table order and de-duplicated.
 // A column is only reported when the row actually carries a value for it on
@@ -414,6 +478,9 @@ func issuesConflictsAreFieldMergeable(ctx context.Context, db DBConn) ([]issuesR
 	if err != nil {
 		return nil, false, err
 	}
+	if declineDuplicateConflictRows("issues", []string{issuesKeyColumn}, rows) {
+		return nil, false, nil
+	}
 	plan := make([]issuesRowMerge, 0, len(rows))
 	for _, row := range rows {
 		merged, ok := mergeIssuesConflictRow(row)
@@ -465,11 +532,21 @@ func resolveIssuesFieldMerge(ctx context.Context, db DBConn, plan []issuesRowMer
 			if err != nil {
 				return fmt.Errorf("apply merged values for issue %v: %w", m.ourKey, err)
 			}
-			// Zero rows means the row we planned against is gone — another
-			// session deleted it between the read and the write. Clearing the
-			// conflict now would discard their side undetectably.
-			if n, err := res.RowsAffected(); err == nil && n == 0 {
-				return fmt.Errorf("merged values for issue %v matched no row (was it deleted concurrently?); conflict left unresolved", m.ourKey)
+			// Zero rows would mean the row we planned against is gone —
+			// another session deleted it between the read and the write, and
+			// clearing the conflict now would discard their side undetectably.
+			// But RowsAffected is rows CHANGED, not rows MATCHED: the DSN does
+			// not set clientFoundRows (doltutil/dsn.go), so a write the backend
+			// normalizes to the bytes already stored also reports zero. Only a
+			// follow-up existence check can tell "vanished" from "no-op".
+			if n, err := res.RowsAffected(); err != nil || n == 0 {
+				present, err := conflictTargetStillPresent(ctx, db, "issues", issuesKeyColumn, m.ourKey)
+				if err != nil {
+					return fmt.Errorf("confirm issue %v still exists after writing merged values: %w", m.ourKey, err)
+				}
+				if !present {
+					return fmt.Errorf("merged values for issue %v matched no row (was it deleted concurrently?); conflict left unresolved", m.ourKey)
+				}
 			}
 		}
 		res, err := db.ExecContext(ctx,
@@ -497,6 +574,9 @@ func unionConflictsAreSafe(ctx context.Context, db DBConn, table string) ([]unio
 	rows, err := loadConflictRows(ctx, db, table)
 	if err != nil {
 		return nil, false, err
+	}
+	if declineDuplicateConflictRows(table, keyCols, rows) {
+		return nil, false, nil
 	}
 	plan := make([]unionRowKey, 0, len(rows))
 	for _, row := range rows {

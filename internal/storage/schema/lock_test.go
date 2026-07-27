@@ -302,3 +302,124 @@ func expectDoltStatusRows(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
 		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
 }
+
+// expectDirtyGuardRefusal mocks a MigrateUp invocation that walks up to the
+// #4566 pre-flight guard and gets refused: the cursor is one migration behind,
+// `issues` is dirty in the working set, and the pending (latest) migration
+// touches `issues`. This is the interrupted-fresh-bootstrap shape from
+// gastownhall/beads#5012 — a previous attempt's step debris, read by a retry.
+// It relies on the latest migration touching `issues`; if a future latest
+// migration stops doing so, sqlmock will fail loudly on the unexpected query
+// flow and this helper should dirty a table that migration does touch.
+func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
+	t.Helper()
+
+	latest := LatestVersion()
+
+	expectIgnorePatternSeedNoop(mock)
+	// migrationWorkNeeded: main cursor behind -> work needed (short-circuits).
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
+	// dirtyBeforeAll: `issues` dirty (working set only, not staged).
+	expectDoltStatusDirtyIssues(mock)
+	// Nothing staged -> no unstage exec; seed was a no-op -> no seed commit.
+	// committableDirtyTables re-reads dolt_status (ignored tables excluded).
+	expectDoltStatusDirtyIssues(mock)
+	// auxRekeyResumePending: no local_metadata table, no crashed rekey pass.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	// pendingMigrationDirtyTables: cursor read, then the pending latest
+	// migration's SQL touches `issues` -> DirtyTablesError.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
+}
+
+func expectDoltStatusDirtyIssues(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
+		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}).AddRow("issues", false))
+}
+
+// TestMigrateUpWithLockDirtyGuardStaysFatalWithoutHeal pins the default
+// behavior: without WithFreshBootstrapHeal, the #4566 guard refusal surfaces
+// as *DirtyTablesError and no DOLT_RESET runs (sqlmock's ordered expectations
+// fail the test on any unexpected reset call).
+func TestMigrateUpWithLockDirtyGuardStaysFatalWithoutHeal(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectDirtyGuardRefusal(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	if applied != 0 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 0", applied)
+	}
+	var dirtyErr *DirtyTablesError
+	if !errors.As(err, &dirtyErr) {
+		t.Fatalf("MigrateUpWithLock() error = %v, want *DirtyTablesError", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestMigrateUpWithLockFreshBootstrapHealResetsAndRetries is the unit-level
+// regression for gastownhall/beads#5012: with WithFreshBootstrapHeal (the
+// caller created the database within this init), a #4566 guard refusal is
+// healed under the held migration lock — DOLT_RESET('--hard') discards the
+// interrupted bootstrap's working-set debris and the pass re-runs to
+// completion on the same session.
+func TestMigrateUpWithLockFreshBootstrapHealResetsAndRetries(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	// First MigrateUp: refused by the dirty guard.
+	expectDirtyGuardRefusal(t, mock)
+	// Heal: discard the bootstrap debris on the same locked session.
+	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_RESET('--hard')")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	// Second MigrateUp: clean working set, one pending migration applies.
+	expectOnePendingMigration(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb", WithFreshBootstrapHeal())
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 1", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}

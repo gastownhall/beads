@@ -19,6 +19,8 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/procid"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
@@ -102,6 +104,9 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return fmt.Errorf("acquire %s: %w", LockFileName, err)
 	}
 	defer lock.Unlock()
+	if err := clearSpawnMarkerAfterLock(p.rootDir); err != nil {
+		return fmt.Errorf("clear proxy spawn marker: %w", err)
+	}
 
 	logPath := filepath.Join(p.rootDir, LogFileName)
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- logPath is derived from operator-supplied config, not untrusted request input
@@ -143,6 +148,30 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	p.listener = ln
 	defer func() { _ = ln.Close() }()
 	p.stats.IncListenAndServe()
+	dataPort, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		return fmt.Errorf("proxy: unexpected data listener address %T", ln.Addr())
+	}
+
+	if _, err := identity.WriteSecret(p.rootDir); err != nil {
+		return fmt.Errorf("write proxy secret: %w", err)
+	}
+
+	var identMu sync.RWMutex
+	identReply := identity.IdentReply{
+		Schema:   pidfile.SchemaV2,
+		Role:     pidfile.KindProxy,
+		DataPort: dataPort.Port,
+	}
+	control, err := startControl(p.rootDir, func() identity.IdentReply {
+		identMu.RLock()
+		defer identMu.RUnlock()
+		return identReply
+	})
+	if err != nil {
+		return fmt.Errorf("start control listener: %w", err)
+	}
+	defer func() { _ = control.Close() }()
 
 	p.stats.IncBackendStart()
 	if err := p.server.Start(ctx); err != nil {
@@ -154,11 +183,36 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		_ = stopBackendBounded(p.server)
 		return fmt.Errorf("database server not ready: %w", err)
 	}
+	birth, err := procid.Capture(os.Getpid())
+	if err != nil {
+		p.stats.IncBackendStop()
+		_ = stopBackendBounded(p.server)
+		return fmt.Errorf("capture proxy birth identity: %w", err)
+	}
+	rootID, err := identity.RootID(p.rootDir)
+	if err != nil {
+		p.stats.IncBackendStop()
+		_ = stopBackendBounded(p.server)
+		return fmt.Errorf("resolve proxy root identity: %w", err)
+	}
+	upstreamID := p.server.ID(ctx)
+	identMu.Lock()
+	identReply.RootID = rootID
+	identReply.UpstreamID = upstreamID
+	identReply.PID = os.Getpid()
+	identReply.Birth = string(birth)
+	identReply.ControlPort = control.Port()
+	identMu.Unlock()
 
 	if err := pidfile.Write(p.rootDir, PIDFileName, pidfile.PidFile{
-		Pid:        os.Getpid(),
-		Port:       p.port,
-		UpstreamID: p.server.ID(ctx),
+		Pid:         os.Getpid(),
+		Port:        dataPort.Port,
+		UpstreamID:  upstreamID,
+		Schema:      pidfile.SchemaV2,
+		Kind:        pidfile.KindProxy,
+		Birth:       string(birth),
+		RootID:      rootID,
+		ControlPort: control.Port(),
 	}); err != nil {
 		p.stats.IncBackendStop()
 		_ = stopBackendBounded(p.server)
@@ -170,6 +224,7 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	g.Go(func() error {
 		<-gctx.Done()
 		_ = p.listener.Close()
+		_ = control.Close()
 		return nil
 	})
 	g.Go(func() error { return p.idleWatcher(gctx) })

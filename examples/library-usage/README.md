@@ -56,6 +56,26 @@ func main() {
 }
 ```
 
+### Filtering ready work by status
+
+`WorkFilter` offers two status fields:
+
+- `Status` filters to exactly one status.
+- `Statuses` filters to any of the given statuses (OR semantics) in a single
+  query, so multi-status callers avoid one `GetReadyWork` round trip per
+  status. Custom statuses participate like built-ins.
+
+`Status` takes precedence: when it is set, `Statuses` is ignored. When both
+are empty, the default of `('open', 'in_progress')` applies.
+
+```go
+    // One query for open OR blocked ready work
+    ready, err := store.GetReadyWork(ctx, beads.WorkFilter{
+        Statuses: []beads.Status{beads.StatusOpen, beads.StatusBlocked},
+        Limit:    10,
+    })
+```
+
 ## Running This Example
 
 ```bash

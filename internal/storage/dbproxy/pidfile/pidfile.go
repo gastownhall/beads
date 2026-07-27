@@ -11,9 +11,49 @@ import (
 )
 
 type PidFile struct {
-	Pid        int    `json:"pid"`
-	Port       int    `json:"port"`
-	UpstreamID string `json:"upstream_id,omitempty"`
+	Pid         int    `json:"pid"`
+	Port        int    `json:"port"`
+	UpstreamID  string `json:"upstream_id,omitempty"`
+	Schema      int    `json:"schema,omitempty"`
+	Kind        string `json:"kind,omitempty"`
+	Birth       string `json:"birth,omitempty"`
+	RootID      string `json:"root_id,omitempty"`
+	ControlPort int    `json:"control_port,omitempty"`
+}
+
+const SchemaV2 = 2
+
+const (
+	KindProxy       = "db-proxy"
+	KindDoltBackend = "dolt-backend"
+)
+
+var (
+	ErrLegacySchema = errors.New("pidfile: legacy schema")
+	ErrBadPid       = errors.New("pidfile: invalid pid")
+	ErrBadPort      = errors.New("pidfile: invalid port")
+	ErrKindMismatch = errors.New("pidfile: kind mismatch")
+	ErrMissingBirth = errors.New("pidfile: missing birth token")
+)
+
+// ValidateV2 validates the fields required for a schema v2 pidfile.
+func (p *PidFile) ValidateV2(wantKind string) error {
+	if p.Schema < SchemaV2 {
+		return ErrLegacySchema
+	}
+	if p.Pid <= 0 {
+		return ErrBadPid
+	}
+	if p.Port < 1 || p.Port > 65535 || (p.ControlPort != 0 && (p.ControlPort < 1 || p.ControlPort > 65535)) {
+		return ErrBadPort
+	}
+	if p.Kind != wantKind {
+		return ErrKindMismatch
+	}
+	if p.Birth == "" {
+		return ErrMissingBirth
+	}
+	return nil
 }
 
 func Path(rootDir, name string) string {
