@@ -189,6 +189,28 @@ type Issue struct {
 	IsLitePartial bool `json:"-"`
 }
 
+// IssueSummary is a read-only narrow projection of Issue for list-shaped
+// rendering paths that don't dereference TEXT/JSON columns. Populated by
+// storage.SearchIssueSummaries, which SELECTs only the columns listed here.
+// Shape ratified by be-nu4.3.1 addendum: Pinned IS included, Metadata is NOT
+// — adding Metadata would re-introduce the JSON parse cost D3 exists to
+// eliminate.
+//
+// IssueSummary is read-only. No write methods accept it.
+type IssueSummary struct {
+	ID        string
+	Title     string
+	Status    Status
+	Priority  int
+	IssueType IssueType
+	Assignee  string
+	Pinned    bool
+	Labels    []string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	ClosedAt  *time.Time
+}
+
 // ComputeContentHash creates a deterministic hash of the issue's content.
 // Uses all substantive fields (excluding ID, timestamps, and compaction metadata)
 // to ensure that identical content produces identical hashes across all clones.
@@ -1978,7 +2000,12 @@ type IssueFilter struct {
 	SkipWisps  bool // Q2: skip wisps table merge entirely (for callers that never return ephemeral results)
 	NoIDShrink bool // Q3: force Pattern A (full 47-col scan) even when Limit > 0
 
-	Offset   int
+	Offset int
+	// SortBy and SortDesc are honored by SearchIssues, SearchIssueIDs, and
+	// SearchIssueSummaries alike. All three sort implementations (SQL ORDER BY
+	// and the Go-side merge comparators) must order identically for a given
+	// SortBy value, or a post-merge limit cut can keep a different row set
+	// than SQL selected.
 	SortBy   string
 	SortDesc bool
 

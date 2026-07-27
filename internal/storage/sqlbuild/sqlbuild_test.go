@@ -88,6 +88,30 @@ func TestLessIDHonorsSortDesc(t *testing.T) {
 	}
 }
 
+// TestLessSummaryMirrorsOrderBy is TestLessMirrorsOrderBy's sibling for
+// LessSummary/types.IssueSummary. Less and LessSummary share the lessFields
+// core, so this mostly guards against a future adapter (summarySortFields)
+// dropping or mis-mapping a field rather than the tie-break logic itself.
+func TestLessSummaryMirrorsOrderBy(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now().UTC()
+	older := now.Add(-time.Hour)
+	a := &types.IssueSummary{ID: "a", Priority: 1, CreatedAt: now}
+	b := &types.IssueSummary{ID: "b", Priority: 2, CreatedAt: now}
+	if !LessSummary(a, b, "", false) || LessSummary(b, a, "", false) {
+		t.Error("default sort must order priority 1 before priority 2")
+	}
+	c := &types.IssueSummary{ID: "c", Priority: 1, CreatedAt: older}
+	if !LessSummary(a, c, "", false) {
+		t.Error("equal priority must order newer created_at first (created_at DESC)")
+	}
+	d := &types.IssueSummary{ID: "d", Priority: 1, CreatedAt: now}
+	if !LessSummary(a, d, "", false) || LessSummary(d, a, "", false) {
+		t.Error("full tie must break by id ASC")
+	}
+}
+
 func TestBuildReadyWorkOrderPriorityFIFO(t *testing.T) {
 	t.Parallel()
 

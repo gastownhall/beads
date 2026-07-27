@@ -1351,6 +1351,91 @@ func BenchmarkPerfIDProjectionVsHydration_5K(b *testing.B) {
 	})
 }
 
+// BenchmarkPerfSummaryProjectionVsHydration_5K is the three-way wide/lite/
+// summary A/B: SearchIssueSummaries (narrow projection, IssueSummaryColumns)
+// vs SearchIssues with Lite:true (IssueSelectColumnsLite, defers 6 heavy TEXT
+// columns) vs SearchIssues full (IssueSelectColumns, hydrates everything).
+// Mirrors BenchmarkPerfIDProjectionVsHydration_5K's shape; the extra middle
+// arm exists because #3906 (Lite) landed after PR #3458's original two-way
+// A/B was measured, so summary-vs-full alone would overclaim, some of that
+// win is now Lite's.
+func BenchmarkPerfSummaryProjectionVsHydration_5K(b *testing.B) {
+	store, cleanup := setupBenchStore(b)
+	defer cleanup()
+
+	const total = 5000
+	// Heavy TEXT payloads approximate real issues. Neither the summary nor the
+	// lite projection scans these columns; SkipLabels does not help with them.
+	bigText := strings.Repeat("lorem ipsum dolor sit amet consectetur ", 24) // ~936 B
+	bigJSON := json.RawMessage(`{"k":"` + strings.Repeat("v", 256) + `"}`)
+
+	issues := make([]*types.Issue, 0, total)
+	for i := 0; i < total; i++ {
+		issues = append(issues, &types.Issue{
+			ID:                 fmt.Sprintf("summarybench-%05d", i),
+			Title:              fmt.Sprintf("summarybench issue %05d", i),
+			Description:        bigText,
+			Design:             bigText,
+			AcceptanceCriteria: bigText,
+			Notes:              bigText,
+			Metadata:           bigJSON,
+			Status:             types.StatusOpen,
+			Priority:           (i % 4) + 1,
+			IssueType:          types.TypeTask,
+			Labels:             []string{"area-summary", fmt.Sprintf("bucket-%03d", i%100)},
+		})
+	}
+	createBenchIssueBatch(b, store, issues)
+
+	ctx := context.Background()
+	// "summarybench" appears in every id and title, so id/title LIKE matches
+	// the full set — maximizing per-row hydration cost, the dimension under
+	// test.
+	const query = "summarybench"
+
+	// Guard: all three arms must see the same cardinality, else the
+	// comparison would be measuring row count rather than projection width.
+	if ids, err := store.SearchIssueIDs(ctx, query, types.IssueFilter{}); err != nil {
+		b.Fatalf("setup SearchIssueIDs: %v", err)
+	} else if len(ids) != total {
+		b.Fatalf("fixture: expected %d matches, got %d", total, len(ids))
+	}
+
+	b.Run("SearchIssueSummaries_narrow", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssueSummaries(ctx, query, types.IssueFilter{}); err != nil {
+				b.Fatalf("SearchIssueSummaries: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssueSummaries: got %d want %d", len(got), total)
+			}
+		}
+	})
+
+	b.Run("SearchIssues_Lite", func(b *testing.B) {
+		b.ReportAllocs()
+		filter := types.IssueFilter{Lite: true}
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssues(ctx, query, filter); err != nil {
+				b.Fatalf("SearchIssues Lite: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssues Lite: got %d want %d", len(got), total)
+			}
+		}
+	})
+
+	b.Run("SearchIssues_full", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			if got, err := store.SearchIssues(ctx, query, types.IssueFilter{}); err != nil {
+				b.Fatalf("SearchIssues full: %v", err)
+			} else if len(got) != total {
+				b.Fatalf("SearchIssues full: got %d want %d", len(got), total)
+			}
+		}
+	})
+}
+
 func BenchmarkPerfAddDependencyCycleCheck_DiamondDAG(b *testing.B) {
 	store, cleanup := setupBenchStore(b)
 	defer cleanup()

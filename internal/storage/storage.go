@@ -382,6 +382,11 @@ type Storage interface {
 	// returns only matching issue IDs. Use when full row hydration is wasted
 	// (e.g., partial-ID resolution in internal/utils/id_parser.go).
 	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	// SearchIssueSummaries is a narrow-projection variant of SearchIssues that
+	// returns []*types.IssueSummary instead of full issues, for list-shaped
+	// rendering paths that never dereference TEXT/JSON columns. SortBy/SortDesc
+	// are honored identically to SearchIssues.
+	SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error)
 
 	// Dependencies
 	AddDependency(ctx context.Context, dep *types.Dependency, actor string) error
