@@ -89,6 +89,6 @@ func (s *sweeper) Sweep(ctx context.Context, req issueops.SweepRequest) (issueop
 // commit. It is the same list DeleteIssues stages, because a sweep IS a
 // delete of a selected set.
 var sweptTables = []string{
-	"issues", "dependencies", "labels", "comments", "events",
+	"issues", "dependencies", "labels", "comments", "events", "provenance_events",
 	"child_counters", "issue_snapshots", "compaction_snapshots",
 }

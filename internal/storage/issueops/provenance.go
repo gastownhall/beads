@@ -13,7 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// Provenance event log on types.ProvenanceEvent (migration 0055; see ADR-0003).
+// Provenance event log on types.ProvenanceEvent (migration 0063; see ADR-0003).
 
 // knownProvKinds is the closed set of structurally-valid provenance kinds.
 var knownProvKinds = map[types.ProvKind]struct{}{

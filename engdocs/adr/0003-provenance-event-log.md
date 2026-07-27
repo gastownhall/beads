@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Proposed
 
 ## Date
 
@@ -41,7 +41,7 @@ durable upstream version.
 
 ## Decision
 
-Add a dedicated, append-only `provenance_events` table (migration 0055) and a
+Add a dedicated, append-only `provenance_events` table (migration 0063) and a
 `bd provenance` command group with exactly three verbs: `record`, `log`,
 `by-ref`. There is deliberately **no** update or delete verb.
 
@@ -51,6 +51,14 @@ only if the issue itself is deleted (`ON DELETE CASCADE`), identical to the
 `events` audit table (migration 0005). In bd, `issues` is the source of truth, so
 a provenance event for a deleted issue is meaningless; cascading on issue delete
 matches the existing audit-log precedent rather than leaving orphaned rows.
+
+**Wisp demotion is a delete for this purpose.** Demoting a permanent issue to a
+wisp (`bd update <id> --ephemeral`) deletes the row from `issues` — a wisp is a
+separate table, not a status on the same row — so it drops that issue's
+provenance events for the same `ON DELETE CASCADE` reason as any other issue
+deletion. This is an accepted consequence, not a gap: wisps are cheap,
+short-lived, ephemeral-by-design records, and there is deliberately no wisp
+counterpart to `provenance_events` to preserve history across the demotion.
 
 Key design points:
 
