@@ -704,7 +704,7 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			return nil, fmt.Errorf("no auto-routed store available")
 		}
 		sharedRoutedTried = true
-		rs, routed, err := openRoutedReadStore(ctx, localStore)
+		rs, routed, _, err := openRoutedReadStore(ctx, localStore)
 		if err != nil {
 			return nil, err
 		}

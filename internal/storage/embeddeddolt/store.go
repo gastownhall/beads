@@ -25,6 +25,7 @@ import (
 // Compile-time interface checks.
 var _ storage.DoltStorage = (*EmbeddedDoltStore)(nil)
 var _ storage.StoreLocator = (*EmbeddedDoltStore)(nil)
+var _ storage.ActiveDatabaseSizer = (*EmbeddedDoltStore)(nil)
 var _ storage.GarbageCollector = (*EmbeddedDoltStore)(nil)
 var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
@@ -753,6 +754,24 @@ func (s *EmbeddedDoltStore) CLIDir() string {
 		return ""
 	}
 	return filepath.Join(s.dataDir, s.database)
+}
+
+// ActiveDatabaseSize returns the approximate size of this store's active
+// database directory. Sibling databases under the embedded data root are not
+// part of the result.
+func (s *EmbeddedDoltStore) ActiveDatabaseSize(ctx context.Context) (int64, error) {
+	if s.closed.Load() {
+		return 0, errClosed
+	}
+	activeDir := s.CLIDir()
+	if activeDir == "" {
+		return 0, fmt.Errorf("embeddeddolt: active database directory is empty")
+	}
+	size, err := storage.MeasureDirectorySize(ctx, activeDir)
+	if err != nil {
+		return 0, fmt.Errorf("measure active database directory %q: %w", activeDir, err)
+	}
+	return size, nil
 }
 
 // ---------------------------------------------------------------------------

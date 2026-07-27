@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -41,9 +42,15 @@ func testMainInner(m *testing.M) int {
 	// unique to this test run and removed when it exits.
 	suiteTempRoot, tempRootErr := os.MkdirTemp("", "beads-storage-dolt-tests-*")
 	if tempRootErr != nil {
-		fmt.Fprintf(os.Stderr, "WARN: failed to create suite temp root: %v\n", tempRootErr)
+		fmt.Fprintf(os.Stderr, "FATAL: failed to create suite temp root: %v\n", tempRootErr)
+		return 1
 	} else {
 		defer os.RemoveAll(suiteTempRoot)
+		if err := os.Setenv(testCircuitBreakerDirEnv, filepath.Join(suiteTempRoot, "circuit")); err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: failed to isolate circuit state: %v\n", err)
+			return 1
+		}
+		defer os.Unsetenv(testCircuitBreakerDirEnv)
 	}
 
 	// AD-01 (be-c5p): the test/bench harness opens a process-local dolt

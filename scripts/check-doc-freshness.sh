@@ -13,7 +13,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 MAX_AGE_DAYS="${DOC_FRESHNESS_MAX_AGE_DAYS:-90}"
-TODAY="${DOC_FRESHNESS_TODAY:-$(date +%F)}"
+TODAY="${DOC_FRESHNESS_TODAY:-}"
+TODAY_SOURCE="override"
+TODAY_DAY=""
 ERRORS=0
 
 DOCS=(
@@ -27,21 +29,68 @@ DOCS=(
     "engdocs/design/otel/otel-data-model.md|internal/telemetry/;internal/storage/dolt/store.go;internal/compact/haiku.go;cmd/bd/find_duplicates.go;internal/hooks/"
 )
 
-echo "Checking reference doc freshness markers..."
-echo "Max age: ${MAX_AGE_DAYS} days"
-echo "Today: ${TODAY}"
-echo ""
+date_day_number() {
+    local value="$1"
+    local value_pattern='^([0-9]{4})-([0-9]{2})-([0-9]{2})$'
+    local year
+    local month
+    local day
+    local max_day
+    local adjusted_year
+    local era
+    local year_of_era
+    local month_prime
+    local day_of_year
+    local day_of_era
+
+    [[ "$value" =~ $value_pattern ]] || return 1
+    year=$((10#${BASH_REMATCH[1]}))
+    month=$((10#${BASH_REMATCH[2]}))
+    day=$((10#${BASH_REMATCH[3]}))
+    (( year >= 1 && year <= 9999 )) || return 1
+
+    case "$month" in
+        1|3|5|7|8|10|12)
+            max_day=31
+            ;;
+        4|6|9|11)
+            max_day=30
+            ;;
+        2)
+            max_day=28
+            if (( year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) )); then
+                max_day=29
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    (( day >= 1 && day <= max_day )) || return 1
+
+    # Map the proleptic Gregorian date to a monotonic day number. March is
+    # month zero, so leap day sits at the end of each transformed year.
+    adjusted_year=$year
+    if (( month <= 2 )); then
+        adjusted_year=$((adjusted_year - 1))
+    fi
+    era=$((adjusted_year / 400))
+    year_of_era=$((adjusted_year - era * 400))
+    if (( month > 2 )); then
+        month_prime=$((month - 3))
+    else
+        month_prime=$((month + 9))
+    fi
+    day_of_year=$(((153 * month_prime + 2) / 5 + day - 1))
+    day_of_era=$((year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year))
+    printf '%s\n' "$((era * 146097 + day_of_era))"
+}
 
 date_age_days() {
-    local reviewed="$1"
-    python3 - "$reviewed" "$TODAY" <<'PY'
-import datetime
-import sys
+    local reviewed_day
 
-reviewed = datetime.date.fromisoformat(sys.argv[1])
-today = datetime.date.fromisoformat(sys.argv[2])
-print((today - reviewed).days)
-PY
+    reviewed_day="$(date_day_number "$1")" || return 1
+    printf '%s\n' "$((TODAY_DAY - reviewed_day))"
 }
 
 inventory_ref_for_doc() {
@@ -60,6 +109,27 @@ path_exists_or_glob_matches() {
         [[ -e "$PROJECT_ROOT/$pattern" ]]
     fi
 }
+
+if [[ -z "$TODAY" ]]; then
+    TODAY_SOURCE="provider"
+    if ! TODAY="$(date '+%Y-%m-%d' 2>/dev/null)"; then
+        echo "ERROR: check-doc-freshness could not determine today's date" >&2
+        exit 2
+    fi
+fi
+if ! TODAY_DAY="$(date_day_number "$TODAY")"; then
+    if [[ "$TODAY_SOURCE" == "provider" ]]; then
+        echo "ERROR: date returned an invalid current date: $TODAY" >&2
+    else
+        echo "ERROR: invalid DOC_FRESHNESS_TODAY date: $TODAY" >&2
+    fi
+    exit 2
+fi
+
+echo "Checking reference doc freshness markers..."
+echo "Max age: ${MAX_AGE_DAYS} days"
+echo "Today: ${TODAY}"
+echo ""
 
 for entry in "${DOCS[@]}"; do
     IFS='|' read -r doc sources <<<"$entry"

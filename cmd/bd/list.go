@@ -550,12 +550,13 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	ctx := rootCtx
 
 	activeStore := store
-	routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
+	routedStore, routed, routingRule, err := openRoutedReadStore(ctx, activeStore)
 	if err != nil {
 		return HandleError("%v", err)
 	}
 	if routed {
 		defer func() { _ = routedStore.Close() }()
+		printContributorRoutingNotice(ctx, activeStore, routingRule)
 		activeStore = routedStore
 	}
 

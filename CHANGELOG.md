@@ -9,6 +9,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Replica-aware leases: `bd reclaim` no longer reverts a lease another
+  replica granted** (wy-jpd3.7). A lease is only meaningful on the replica that
+  granted it — the other machine's liveness view is stale by up to one sync
+  interval — so each lease now records its granting node (`leases.granted_node`,
+  ignored migration 0016; `types.Issue.LeaseGrantedNode`, which rides the JSONL
+  interchange so an imported lease keeps its provenance). `bd reclaim` skips a
+  lease that positively names a different replica, naming each skip on stderr,
+  and the new `bd reclaim --any-replica` (`types.ReclaimFilter.AnyReplica`) is
+  the escape hatch for a replica that is permanently gone. `bd show` annotates a
+  lease granted elsewhere.
+
+  The guard is **opt-in and fail-open**. It arms only where you set the new
+  `node_id` config key (`BEADS_NODE_ID` / `BD_NODE_ID`, or
+  `bd config set node_id <name>`, which writes the per-machine
+  `~/.config/bd/config.yaml` — a `node_id` in the git-tracked project
+  `.beads/config.yaml` would give every clone the same identity and leave the
+  guard armed but inert). There is deliberately no hostname fallback: the
+  hostname names the client process's machine, not the store, so on a shared or
+  remote dolt sql-server — where many hosts are clients of ONE store and there is
+  no sync interval to defend against — it would stop a supervisor reaping any
+  worker's lease at all. Unset (the default), and a lease of unknown provenance,
+  behave exactly as before, so an upgrade can never strand a lease the reaper
+  could previously recover. Also documents the invariant the guard *cannot*
+  enforce: grace window > sync interval, and lease TTL > sync interval.
+
+- **`bd sync` — one verb for the federation loop** (wy-jpd3.4). Every
+  multi-machine beads deployment hand-rolls the same sequence in shell; this
+  ships it. `bd sync [--remote <name>] [--attempts N]` pulls, checks for merge
+  conflicts, runs the full `is_blocked` recompute, and pushes — retrying a
+  bounded number of times (default 3) when another replica wins the push race.
+  Two properties are the point of the verb. Conflicts are detected
+  **positively**, from the merge's own captured conflict rows and from
+  `dolt_conflicts`, never inferred from the pull's exit status: a pull fails for
+  plenty of reasons that are not conflicts, and a settled merge that *is*
+  conflicted aborts and leaves `dolt_conflicts` empty, so an exit-status guess
+  invents phantom conflicts and misses real ones. And a conflict sync cannot
+  settle is **never** resolved by picking a side: it halts before recomputing or
+  pushing and exits 2, with no `--strategy`-style override to make it do
+  otherwise. (The pull underneath still auto-settles the convergent classes it
+  always has — machine-local metadata, audit-only dependency rows, LWW on issue
+  cells; anything past those halts.) The halt message reports which state the
+  halt left behind, read from which detection source fired rather than assumed:
+  the SQL pull route aborts the merge and restores the working set, while the
+  CLI/git-protocol route deliberately leaves the conflict rows live. The
+  recompute between pull and push is not bookkeeping either: `is_blocked` is
+  denormalized, so a merge that brings in a dependency edge from another replica
+  leaves `bd ready` stale until it runs. It runs unconditionally, on every
+  attempt — `RecomputeAllBlocked` is precisely the repair that does not depend
+  on a merge advancing HEAD, so gating it on "did anything merge" would mean a
+  column left stale by a hand-resolved conflict (a state `bd sync` creates by
+  exiting 2) is never repaired again while every tick reports success.
+  Exit codes are the machine contract, so a sync timer can branch without
+  parsing output: `0` synced, `1` error, `2` merge conflict (halted, nothing
+  pushed), `3` push-race retries exhausted (transient — retry next tick).
+  `--json` reports the outcome as `{"status", "attempts", "conflicts",
+  "conflicts_live", "rows_corrected", "pushed"}` on every non-error exit; exit 1
+  emits bd's standard `{"error": ...}` envelope. A confirmed-no-remote rig exits
+  0 with the same guidance `bd dolt push` prints; `dolt.local-only` and
+  `no-push` are honored.
+
 - **`bd reclaim` scope filters** (wy-jpd3.3). `bd reclaim` gained
   `--label` / `--label-any` / `--exclude-label` / `--assignee` / `--id`,
   mirroring the claim-side label surface (`bd ready --claim`), so a supervisor
@@ -81,6 +141,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Proxied-server CI shard 1 flake: `TestProxiedServerCleanDatabases` ran a
+  server-global destructive command against the shared test container**
+  (p1-9lf, hazard tracked in p1-8dz). The test used the shared external Dolt
+  container under `t.Parallel()`, and `bd dolt clean-databases` drops every
+  database matching `staleDatabasePrefixes` on the server it is pointed at.
+  The container is bootstrapped with a database named `beads_test`
+  (`internal/testutil/container_provider.go`), which matches one of those
+  prefixes — so every run of this test dropped the shared container's own
+  bootstrap database out from under whatever sibling tests were mid-flight,
+  which is timing-correlated with the `busy buffer` / "pending schema
+  migrations alter pre-existing dirty tables" failures seen in
+  `TestProxiedServerDelete` and `TestProxiedServerFindDuplicates`. The test now
+  runs against a dedicated proxied server (`bdProxiedInit`), like the new purge
+  test, so its blast radius is its own server.
+
+- **`bd dolt clean-databases --purge-dropped` now works in proxied-server
+  mode** (p1-9lf). The command read the flag and then dropped it on the floor
+  before dispatching to the proxied-server implementation, so under
+  `--proxied-server` stale databases were dropped but never purged: their
+  directories stayed under `.dolt_dropped_databases/`, disk was never
+  reclaimed, and nothing reported that the flag had done nothing. The proxied
+  dual had drifted further than that one flag — it also lacked the
+  batching/circuit-breaker drop loop, the dry-run "purge ignored" notice, and
+  the `DOLT_UNDROP` recoverability trailer, and its early return on "nothing
+  stale found" was incompatible with purge semantics (a prior run's residue is
+  invisible to `SHOW DATABASES`, so `--purge-dropped` must still fire when this
+  run drops nothing). Both topologies now share one implementation keyed on
+  `versioncontrolops.DBConn`, which `*sql.DB` (direct server) and the pinned
+  non-transactional `*sql.Conn` (proxied server, via
+  `uow.MaintenanceProvider.RunNonTx`) both satisfy, so the behavior cannot
+  diverge again. Per-operation timeouts now derive from the command's context
+  on both paths, so Ctrl-C interrupts a long clean.
+
 - **`bd dolt clean-databases` gains an opt-in `--purge-dropped` flag to
   reclaim disk from what it drops** (be-pq5,
   [#3663](https://github.com/gastownhall/beads/pull/3663)). `DROP DATABASE`
@@ -103,6 +196,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left in place, recoverable via `DOLT_UNDROP`, same as before this change.
 
 ### Added
+
+- **Conditional (compare-and-set) updates: `bd update --if-assignee` /
+  `--if-status`** (bd-wsqvw, from wyvern's wheelhouse hostile-review epic
+  wy-mdi5h; design in `PROPOSAL-cas-conditional-update.md`). When either guard
+  is present the update applies only if the issue's current assignee/status
+  still equals the expected value — one atomic transaction, nothing written on
+  a mismatch, and a loud non-zero exit naming actual vs expected (typed as
+  `storage.ErrAssigneeMismatch` / new `ErrStatusMismatch`). `--if-assignee ''`
+  means "expected unassigned". A guard mismatch is machine-distinguishable
+  from infra failure: exit code **13** when every failure in the run was a
+  stale guard (a racer won — skip gracefully) vs 1 for anything else
+  (retry/abort); in `--json` mode each entry in the failure report's `failed`
+  array additionally carries `"guard_mismatch": true`, and the stderr text
+  always contains the sentinel token `assignee mismatch` / `status mismatch`. This closes the two coordination transitions no
+  existing verb could express: reassign X→Y only while X still holds it
+  (`bd update <id> --if-assignee worker -a mayor`), and claim-on-behalf with a
+  status guard (`bd update <id> --if-assignee '' --if-status open -a owner -s
+  in_progress`). Guards require a field update to ride on, are mutually
+  exclusive with `--claim` (its own CAS), compose with each other and with the
+  engine's `ExpectedVersion` row CAS, and work in every dolt mode. In Dolt
+  server mode a guarded update that writes assignee/status is claim-family and
+  is resolved by the bd-zccb9 verify-by-re-read protocol, so its exit code
+  stays truthful under a degraded server. Library consumers get the same
+  guards via new `UpdateIssueOptions.ExpectedAssignee`/`ExpectedStatus` fields
+  on the existing `UpdateIssueChecked` — no interface change; out-of-tree
+  `Storage` implementations that ignore the new fields simply do not enforce
+  them and should add support before advertising guard semantics.
 
 - **Pool-aware claiming via the `claim.pools` config key** (bd-bguz6).
   Dispatcher fleets pre-assign issues to a pool pseudo-assignee (e.g.
@@ -218,6 +338,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wisps and embedded mode are unchanged. New metrics
   `bd.claim_verify_lost_total` and `bd.claim_verify_recovered_total` count
   loud failures and converted outcomes.
+
+## [1.1.2] - 2026-07-26
+
+Hotfix release cut from v1.1.0. (There is no 1.1.1 release: its tag was cut
+but the release pipeline's package gate failed on a stale MCP lockfile before
+publishing anything, and the version number was burned rather than moving the
+tag.) If `bd migrate` on 1.1.0 aborted with
+`rekey aux row ids: <table>: ... invalid hash length` and the database then
+refused to open, this release lets the migration complete.
+
+### Fixed
+
+- **The v53 aux row re-key survives dolt#11131 encoding drift.** On storage
+  affected by the upstream Dolt adaptive-encoding bug, reading the drifted
+  cells panics (`invalid hash length: 19`), which aborted the migration and
+  left the database unopenable under 1.1.0. The re-key now skips such a
+  table with a warning, records it in a clone-local drift record
+  (`aux_row_rekey_drifted` in `local_metadata`), and completes the
+  migration; recorded tables are retried on later migration passes and are
+  exempted from the changed-signature dirty-table guard so the retry cannot
+  re-brick the database
+  ([#4380](https://github.com/gastownhall/beads/issues/4380)).
 
 ## [1.1.0] - 2026-07-04
 

@@ -57,7 +57,7 @@ type circuitState struct {
 // degradation in one project from tripping the breaker for all worktrees
 // sharing the same server (GH#3140).
 //
-// It uses a file in /tmp for cross-process state sharing and an in-process
+// It uses a file under os.TempDir() for cross-process state sharing and an in-process
 // mutex for thread safety within a single process.
 type circuitBreaker struct {
 	host     string
@@ -82,10 +82,30 @@ func maybeNewCircuitBreaker(host string, port int, database string) *circuitBrea
 	return newCircuitBreaker(host, port, database)
 }
 
-// circuitBreakerDir is the dedicated directory for circuit breaker state files.
-// Using a subdirectory avoids scanning all of /tmp (which may contain millions
-// of entries) when cleaning up stale breaker files on startup.
-const circuitBreakerDir = "/tmp/beads-circuit"
+// circuitBreakerDir returns the dedicated directory for circuit breaker state
+// files. Using a subdirectory avoids scanning all of the temp root (which may
+// contain millions of entries) when cleaning up stale breaker files on
+// startup. Derived from os.TempDir() so it is correct on every platform:
+// hardcoding "/tmp" resolved to C:\tmp on Windows, silently accumulating
+// breaker files there forever (GH#4636).
+func circuitBreakerDir() string {
+	return filepath.Join(os.TempDir(), "beads-circuit")
+}
+
+const (
+	legacyCircuitBreakerFile = "/tmp/beads-dolt-circuit-0.json"
+	testCircuitBreakerDirEnv = "BEADS_TEST_CIRCUIT_DIR"
+)
+
+// circuitBreakerPaths returns production paths unless the test harness provides
+// a suite-owned circuit directory. The override redirects both current and
+// legacy state even when an individual test temporarily unsets BEADS_TEST_MODE.
+func circuitBreakerPaths() (dir, legacyFile string) {
+	if testDir := filepath.Clean(os.Getenv(testCircuitBreakerDirEnv)); filepath.IsAbs(testDir) {
+		return testDir, filepath.Join(testDir, "beads-dolt-circuit-0.json")
+	}
+	return circuitBreakerDir(), legacyCircuitBreakerFile
+}
 
 // newCircuitBreaker creates a circuit breaker for the given Dolt server
 // host:port:database. The database name is included in the file path so each
@@ -107,12 +127,13 @@ func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 		filename = fmt.Sprintf("beads-dolt-circuit-%s-%d.json", safeHost, port)
 	}
 
-	_ = os.MkdirAll(circuitBreakerDir, 0755)
+	dir, _ := circuitBreakerPaths()
+	_ = os.MkdirAll(dir, 0755)
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
 		database: database,
-		filePath: filepath.Join(circuitBreakerDir, filename),
+		filePath: filepath.Join(dir, filename),
 	}
 }
 
@@ -324,18 +345,50 @@ func (cb *circuitBreaker) writeState(state circuitState) {
 //
 // Called during init to ensure a clean starting state (GH#2598).
 func CleanStaleCircuitBreakerFiles() {
-	// Remove legacy files that lived directly in /tmp (before the subdirectory move).
-	// Direct path removal — no directory scan needed.
-	_ = os.Remove("/tmp/beads-dolt-circuit-0.json")
+	dir, legacyFile := circuitBreakerPaths()
 
-	// Clean stale files in the dedicated subdirectory (fast — typically 0-2 files).
-	_ = os.MkdirAll(circuitBreakerDir, 0755)
-	cleanStaleCircuitBreakerFilesIn(circuitBreakerDir)
+	// Remove the legacy port-0 file that lived directly in the temp root before
+	// the subdirectory move (GH#2598). Best-effort: remove from the resolved
+	// legacy path and, for real (non-test) runs, from the historical hardcoded
+	// "/tmp" location too (which resolved to C:\tmp on Windows, GH#4636).
+	// Double-remove is harmless when they coincide.
+	_ = os.Remove(legacyFile)
+	if os.Getenv(testCircuitBreakerDirEnv) == "" {
+		_ = os.Remove(filepath.Join("/tmp", "beads-dolt-circuit-0.json"))
+	}
+
+	// Clean stale files in the dedicated subdirectory (fast — typically 0-2
+	// files). Only open/half-open state past circuitStaleTTL is removed here;
+	// closed files are left alone since a live server keeps writing them.
+	_ = os.MkdirAll(dir, 0755)
+	cleanStaleCircuitBreakerFilesIn(dir, false)
+
+	// Also sweep the legacy hardcoded "/tmp/beads-circuit" location
+	// (C:\tmp\beads-circuit on Windows) where older builds accumulated files
+	// before the os.TempDir() fix (GH#4636). Unlike the live directory above,
+	// remove *closed* files here too: every successful circuit reset leaves a
+	// closed sidecar (RecordSuccess), and ephemeral ports mint a distinct
+	// filename each time, so closed files accumulate indefinitely in this
+	// abandoned directory with no live process left to reuse or clean them.
+	if os.Getenv(testCircuitBreakerDirEnv) == "" {
+		if legacy := filepath.Join("/tmp", "beads-circuit"); legacy != dir {
+			cleanStaleCircuitBreakerFilesIn(legacy, true)
+		}
+	}
 }
 
 // cleanStaleCircuitBreakerFilesIn is the testable implementation of
 // CleanStaleCircuitBreakerFiles that accepts a directory parameter.
-func cleanStaleCircuitBreakerFilesIn(dir string) {
+//
+// removeClosed additionally removes closed-state files, regardless of age.
+// This is only safe for directories that no longer receive live writes (e.g.
+// the abandoned legacy "/tmp/beads-circuit" directory, GH#4636): a closed
+// state file is written on every successful RecordSuccess, and since
+// ephemeral ports mint a distinct filename per connection, closed sidecars
+// accumulate indefinitely in a directory with no other cleanup path. The
+// live directory must not pass true here — a closed file there reflects a
+// healthy, currently-in-use breaker.
+func cleanStaleCircuitBreakerFilesIn(dir string, removeClosed bool) {
 	pattern := filepath.Join(dir, "beads-dolt-circuit-*.json")
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
@@ -360,6 +413,13 @@ func cleanStaleCircuitBreakerFilesIn(dir string) {
 		if err := json.Unmarshal(data, &state); err != nil {
 			// Corrupt file — remove it
 			_ = os.Remove(path)
+			continue
+		}
+		if state.State == circuitClosed {
+			if removeClosed {
+				_ = os.Remove(path)
+				log.Printf("[circuit-breaker] removed legacy closed breaker file: %s", path)
+			}
 			continue
 		}
 		if state.State != circuitOpen && state.State != circuitHalfOpen {
