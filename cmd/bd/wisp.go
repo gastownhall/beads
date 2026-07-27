@@ -575,6 +575,13 @@ var wispGCCmd = &cobra.Command{
 
 A wisp is considered abandoned if:
   - It hasn't been updated in --age duration and is not closed
+  - AND it is not live work: blocked steps (waiting on a dependency), pinned
+    beads, and any step whose status category is wip (in_progress, blocked,
+    hooked) or frozen (deferred, pinned) are never reclaimed by age, no matter
+    how long they have been waiting (GH#4394). Custom statuses count by their
+    configured category, so only plain open (active) and closed (done) steps
+    are age-reclaimable. If the blocked set or the custom-status list cannot be
+    read, the GC aborts rather than risk reclaiming live steps.
 
 Abandoned wisps are deleted without creating a digest. Use 'bd mol squash'
 if you want to preserve a summary before garbage collection.
@@ -607,6 +614,70 @@ type WispGCResult struct {
 	CleanedCount int      `json:"cleaned_count"`
 	Candidates   int      `json:"candidates,omitempty"`
 	DryRun       bool     `json:"dry_run,omitempty"`
+}
+
+// protectedWispStatuses returns the statuses whose category means a wisp is
+// live work rather than abandoned, so age-based GC must never reclaim it.
+//
+// Protection is derived from the status *category* rather than a hand-written
+// list: CategoryWIP (in_progress/blocked/hooked) is work in flight, and
+// CategoryFrozen (deferred/pinned) is work deliberately put on ice — reclaiming
+// something a user explicitly deferred defeats the point of deferring it. Only
+// CategoryActive (plain open) and CategoryDone (closed) are age-reclaimable.
+//
+// Custom statuses (status.custom) participate on the same footing, matching the
+// sibling destructive command in purge.go. Reading them is required, not
+// best-effort: if we cannot enumerate them we must not under-protect and risk
+// deleting live molecule steps, so the error propagates and aborts the GC.
+func protectedWispStatuses(ctx context.Context) (map[types.Status]bool, error) {
+	protected := make(map[types.Status]bool)
+	for _, s := range []types.Status{
+		types.StatusOpen,
+		types.StatusInProgress,
+		types.StatusBlocked,
+		types.StatusClosed,
+		types.StatusDeferred,
+		types.StatusPinned,
+		types.StatusHooked,
+	} {
+		switch types.BuiltInStatusCategory(s) {
+		case types.CategoryWIP, types.CategoryFrozen:
+			protected[s] = true
+		}
+	}
+
+	customStatuses, err := store.GetCustomStatusesDetailed(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading custom statuses for wisp age GC: %w", err)
+	}
+	for _, cs := range customStatuses {
+		switch cs.Category {
+		case types.CategoryWIP, types.CategoryFrozen:
+			protected[types.Status(cs.Name)] = true
+		}
+	}
+	return protected, nil
+}
+
+// isProtectedWisp reports whether a wisp is live work that age-based GC must
+// never reclaim. A wisp is protected if it is explicitly pinned, if it is
+// blocked on an open dependency (blockedSet, derived from is_blocked), or if
+// its status falls in a protected category. Reclaiming any of these
+// mid-execution destroys active molecules (GH#4394).
+//
+// Named isProtectedWisp rather than isActiveWisp to avoid confusion with
+// (*DoltStore).isActiveWisp in internal/storage/dolt, which is in this same
+// delete path but means only "a row for this ID exists in the wisps table".
+func isProtectedWisp(issue *types.Issue, blockedSet map[string]bool, protectedStatuses map[types.Status]bool) bool {
+	// The pinned flag is independent of the pinned status; the closed-purge
+	// branch of this same command already honors it (see runWispPurgeClosed).
+	if issue.Pinned {
+		return true
+	}
+	if blockedSet[issue.ID] {
+		return true
+	}
+	return protectedStatuses[issue.Status]
 }
 
 func runWispGC(cmd *cobra.Command, args []string) error {
@@ -661,6 +732,31 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 		return HandleError("listing wisps: %v", err)
 	}
 
+	// Wisps that are still actively blocked on an open dependency are live
+	// molecule steps waiting their turn, not abandoned. is_blocked is derived
+	// state and a recompute deliberately does NOT bump updated_at, so a step
+	// that has been waiting longer than --age otherwise looks stale and gets
+	// reclaimed mid-execution, killing the molecule (GH#4394).
+	//
+	// Determining blocked state is required, not best-effort. Falling back to
+	// an empty set on error would silently re-expose every live blocked step to
+	// deletion, and status is not a usable substitute because is_blocked is
+	// derived state independent of it (a blocked-but-status=open step would
+	// lose all protection). Abort instead.
+	blocked, bErr := store.GetBlockedIssues(ctx, types.WorkFilter{})
+	if bErr != nil {
+		return HandleError("determining blocked wisps for age GC: %v", bErr)
+	}
+	blockedSet := make(map[string]bool, len(blocked))
+	for _, b := range blocked {
+		blockedSet[b.ID] = true
+	}
+
+	protectedStatuses, psErr := protectedWispStatuses(ctx)
+	if psErr != nil {
+		return HandleError("%v", psErr)
+	}
+
 	// Find old/abandoned wisps
 	now := time.Now()
 	var abandoned []*types.Issue
@@ -672,6 +768,12 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 
 		// Skip closed issues unless --all is specified
 		if issue.Status == types.StatusClosed && !cleanAll {
+			continue
+		}
+
+		// Never reclaim active wisps by age — blocked/in-progress steps are
+		// live molecule work, not abandoned (GH#4394).
+		if isProtectedWisp(issue, blockedSet, protectedStatuses) {
 			continue
 		}
 
@@ -712,6 +814,12 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 					}
 					// Never cascade to infra types
 					if store.IsInfraTypeCtx(ctx, child.IssueType) {
+						continue
+					}
+					// Never cascade into active wisps — a blocked/in-progress
+					// step is live work even if its parent looks abandoned
+					// (GH#4394).
+					if isProtectedWisp(child, blockedSet, protectedStatuses) {
 						continue
 					}
 					abandoned = append(abandoned, child)

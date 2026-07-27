@@ -209,6 +209,13 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.1.2",
+		Date:    "2026-07-26",
+		Changes: []string{
+			"FIX: the v53 aux row re-key no longer aborts the migration on dolt#11131 encoding drift ('invalid hash length' panic); drifted tables are skipped with a warning, recorded clone-locally, and retried on later passes instead of leaving the database unopenable (#4380).",
+		},
+	},
+	{
 		Version: "1.1.0",
 		Date:    "2026-07-04",
 		Changes: []string{

@@ -102,22 +102,32 @@ func (r *issueSQLRepositoryImpl) searchUnionWithCounts(ctx context.Context, quer
 	return domain.SearchCountsPage{Items: out, HasMore: hasMore}, nil
 }
 
+// fetchCountsByIDs hydrates counts rows for explicit IDs via the by-IDs form
+// of the counts mega-query, which also constrains every aggregate subquery to
+// the page (row order is restored by the caller from the union page). It must
+// not hand-build an id predicate for the predicate form: that form renders
+// whereSQL inside a derived subquery, so a caller-written "i."-qualified
+// clause would silently couple to the subquery's internal alias. The IDs are
+// chunked so the by-IDs form's up-to-eightfold placeholder binding stays
+// within per-statement limits (mirrors issueops.runReadyCountsInTx).
 func (r *issueSQLRepositoryImpl) fetchCountsByIDs(ctx context.Context, ids []string, tables filterTables, includeWispReverseDeps bool, skipLabels bool) (map[string]*types.IssueWithCounts, error) {
-	if len(ids) == 0 {
-		return map[string]*types.IssueWithCounts{}, nil
-	}
-	placeholders, args := buildInPlaceholders(ids)
-	whereSQL := fmt.Sprintf("WHERE i.id IN (%s)", placeholders)
-	items, err := r.runSearchQuery(ctx, tables, whereSQL, "", "", args, includeWispReverseDeps, skipLabels)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]*types.IssueWithCounts, len(items))
-	for _, iwc := range items {
-		if iwc == nil || iwc.Issue == nil {
-			continue
+	out := make(map[string]*types.IssueWithCounts, len(ids))
+	for start := 0; start < len(ids); start += queryBatchSize {
+		end := start + queryBatchSize
+		if end > len(ids) {
+			end = len(ids)
 		}
-		out[iwc.Issue.ID] = iwc
+		countsSQL, args := sqlbuild.SearchCountsSQL(tables, ids[start:end], "", "", "", includeWispReverseDeps, skipLabels)
+		items, err := r.scanCountsQuery(ctx, tables, countsSQL, args)
+		if err != nil {
+			return nil, err
+		}
+		for _, iwc := range items {
+			if iwc == nil || iwc.Issue == nil {
+				continue
+			}
+			out[iwc.Issue.ID] = iwc
+		}
 	}
 	return out, nil
 }
@@ -139,8 +149,13 @@ func (r *issueSQLRepositoryImpl) runFilterSearchQuery(ctx context.Context, query
 //nolint:gosec // G201: SQL fragments are built from hardcoded table names and parameterized filters.
 func (r *issueSQLRepositoryImpl) runSearchQuery(ctx context.Context, tables filterTables, whereSQL, orderBySQL, limitSQL string, args []any, includeWispReverseDeps bool, skipLabels bool) ([]*types.IssueWithCounts, error) {
 	searchSQL, _ := sqlbuild.SearchCountsSQL(tables, nil, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, skipLabels)
+	return r.scanCountsQuery(ctx, tables, searchSQL, args)
+}
 
-	rows, err := r.runner.QueryContext(ctx, searchSQL, args...)
+// scanCountsQuery runs a prebuilt counts mega-query and hydrates each row,
+// deduping by issue ID (mirrors issueops.scanCountsRowsInTx).
+func (r *issueSQLRepositoryImpl) scanCountsQuery(ctx context.Context, tables filterTables, query string, args []any) ([]*types.IssueWithCounts, error) {
+	rows, err := r.runner.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search count %s: %w", tables.Main, err)
 	}

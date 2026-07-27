@@ -12,8 +12,9 @@ import (
 // and the CLI reaches it through storage.UnwrapStore exactly as it reaches
 // the server-mode one. The reads run against the embedded engine's own
 // dolt_merge_status / dolt_schema_conflicts / dolt_constraint_violations, so
-// a system table or column the embedded engine names differently (or does not
-// expose at all) shows up here and nowhere else.
+// a system table or column the embedded engine names differently is caught
+// here. Missing optional system tables are intentionally tolerated and appear
+// as empty blocker classes.
 
 // TestEmbeddedGetMergeBlockersOnAQuietStore is the baseline every other
 // caller depends on: with no merge open, GetMergeBlockers must report an

@@ -153,6 +153,14 @@ type Issue struct {
 	Actor     string `json:"actor,omitempty"`      // Entity URI who caused this event
 	Target    string `json:"target,omitempty"`     // Entity URI or bead ID affected
 	Payload   string `json:"payload,omitempty"`    // Event-specific JSON data
+
+	// ===== Internal Hydration Flags (not serialized) =====
+	// IsLitePartial is set to true when this Issue was produced by a lite SELECT
+	// (see issueops.ScanIssueLiteFrom). When true, the heavy text columns
+	// (Description, Design, AcceptanceCriteria, Notes, Payload, Waiters) were not
+	// hydrated and remain zero-valued. Callers that need the full body must call
+	// store.GetIssue(ctx, id) to refetch. Internal-only — never on the wire.
+	IsLitePartial bool `json:"-"`
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.
@@ -984,6 +992,16 @@ type WaitsForMeta struct {
 	// SpawnerID identifies which step/issue spawns the children to wait for.
 	// If empty, waits for all direct children of the depends_on_id issue.
 	SpawnerID string `json:"spawner_id,omitempty"`
+	// AlsoBlocks marks a waits-for edge that was collapsed from a redundant
+	// depends_on/needs blocks edge onto the same spawner (GH#3783): the
+	// caller skipped emitting a separate DepBlocks edge because it collided
+	// with this DepWaitsFor edge, so this edge must additionally carry
+	// classic blocking semantics — it blocks while the spawner itself is
+	// open, not only while the spawner has an open child. Omitted (and thus
+	// COALESCEd to false by readers) for a plain waits_for with no matching
+	// needs/depends_on entry, which must retain the original fanout-only
+	// semantics.
+	AlsoBlocks bool `json:"also_blocks,omitempty"`
 }
 
 // WaitsForGate constants
@@ -1041,6 +1059,32 @@ func NewGraphEdgeDependency(fromID, toID string, depType DependencyType, gate, s
 // cannot drift.
 func NewWaitsForDependency(issueID, spawnerID, gate string) (*Dependency, error) {
 	return NewGraphEdgeDependency(issueID, spawnerID, DepWaitsFor, gate, "", "", "", nil)
+}
+
+// NewWaitsForBlockingDependency builds a waits-for dependency that also
+// carries classic blocking semantics (GH#3783): set also_blocks in the
+// metadata so waitsForGateBlockedSQL additionally blocks while the spawner
+// itself is open, not only while it has an open parent-child child. Use this
+// instead of NewWaitsForDependency exactly when the caller is collapsing a
+// would-be DepBlocks edge (from needs/depends_on) into this waits-for edge
+// because the two would otherwise collide on the same (source, target) pair
+// — never for a plain waits_for with no matching needs/depends_on entry.
+func NewWaitsForBlockingDependency(issueID, spawnerID, gate string) (*Dependency, error) {
+	dep, err := NewWaitsForDependency(issueID, spawnerID, gate)
+	if err != nil {
+		return nil, err
+	}
+	var meta WaitsForMeta
+	if err := json.Unmarshal([]byte(dep.Metadata), &meta); err != nil {
+		return nil, fmt.Errorf("parsing waits-for metadata to set also_blocks: %w", err)
+	}
+	meta.AlsoBlocks = true
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("serializing waits-for also_blocks metadata: %w", err)
+	}
+	dep.Metadata = string(raw)
+	return dep, nil
 }
 
 // NewGraphNodeDependency builds the dependency record for a graph-plan node's
@@ -1552,6 +1596,21 @@ type IssueFilter struct {
 	// Expected values: "--max-rows", "BEADS_MAX_ROWS", or "" (library users
 	// who set MaxRows directly without source attribution).
 	MaxRowsSource string
+
+	// Lite, when true, switches the SELECT shape to issueops.IssueSelectColumnsLite,
+	// which omits heavy TEXT columns (description, design, acceptance_criteria, notes,
+	// payload, waiters). Returned issues carry IsLitePartial=true; their heavy fields
+	// are zero-valued. WHERE-clause filters that reference heavy columns
+	// (DescriptionContains, NotesContains, EmptyDescription) keep working — they
+	// reference columns in WHERE regardless of SELECT shape. Default false preserves
+	// today's behavior at every call site.
+	//
+	// Backend coverage: honored by the issueops-backed stores (Dolt, embedded
+	// Dolt). The proxied-server (domain/db) path does not check this field yet
+	// and always returns fully-hydrated issues with IsLitePartial=false —
+	// correct results, no lite optimization. Wiring Lite through domain/db is
+	// deferred to the CLI-wiring follow-up. See engdocs/EXTENDING.md.
+	Lite bool
 }
 
 // SortPolicy determines how ready work is ordered
@@ -1629,7 +1688,12 @@ func (f ReclaimFilter) IsEmpty() bool {
 
 // WorkFilter is used to filter ready work queries
 type WorkFilter struct {
-	Status        Status
+	Status Status
+	// Statuses filters to any of the given statuses (OR semantics) in a
+	// single query, so multi-status callers avoid one GetReadyWork round
+	// trip per status. Ignored when Status is set; when both are empty the
+	// legacy default of ('open', 'in_progress') applies.
+	Statuses      []Status
 	Type          string // Filter by issue type (task, bug, feature, epic, merge-request, etc.)
 	Priority      *int
 	Assignee      *string

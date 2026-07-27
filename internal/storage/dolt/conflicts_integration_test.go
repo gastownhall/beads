@@ -309,10 +309,9 @@ func TestConflictInspectorSurvivesTheStoreDecoratorChain(t *testing.T) {
 // dolt_constraint_violations.(`table`, num_violations). wy-wrq9o F5: those
 // reads had no test at all — a column rename, a dropped `WHERE num_violations
 // > 0`, or a Blocked() inversion would have landed green. These reproduce
-// both blocker classes for real and assert the whole gate behaves: blockers
-// visible, Blocked() true, and the merge commit held rather than failing with
-// a raw dolt error. The pure-logic half of the gate (planConclude,
-// shouldCommitResolution, the remedy text) is in cmd/bd/conflicts_conclude_test.go.
+// both blocker classes for real and assert the storage half of the gate:
+// blockers are visible and Blocked() is true. The command-level commit hold
+// and remedies are covered in cmd/bd/conflicts_conclude*_test.go.
 
 // wedgeConstraintViolation leaves a real FK constraint violation in the
 // working set: our branch deleted an issue, the peer added a child row
@@ -422,10 +421,11 @@ func TestGetMergeBlockersSeesASchemaConflict(t *testing.T) {
 	if _, err := db.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD')", peerBranch); err != nil {
 		t.Fatalf("create peer branch: %v", err)
 	}
-	t.Cleanup(func() {
-		db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", currentBranch)
-		db.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", peerBranch)
-	})
+	defer func() {
+		_, _ = db.ExecContext(context.Background(), "CALL DOLT_MERGE('--abort')")
+		_, _ = db.ExecContext(context.Background(), "CALL DOLT_CHECKOUT(?)", currentBranch)
+		_, _ = db.ExecContext(context.Background(), "CALL DOLT_BRANCH('-Df', ?)", peerBranch)
+	}()
 
 	// Divergent ALTER TABLE: same column name, incompatible types.
 	if _, err := db.ExecContext(ctx, "ALTER TABLE "+probeTable+" ADD COLUMN note VARCHAR(32)"); err != nil {

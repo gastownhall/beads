@@ -382,13 +382,15 @@ func commitMergeResolution(ctx context.Context, msg, preHead string) error {
 		return fmt.Errorf("commit failed: %w", err)
 	}
 	// Same unwrap rule as conflictInspector: RecomputeBlockedAfterMerge lives
-	// on the concrete Dolt store, not on DoltStorage.
-	if rs, ok := storage.UnwrapStore(store).(interface {
-		RecomputeBlockedAfterMerge(ctx context.Context, fromCommit string) error
-	}); ok {
+	// on the concrete Dolt store, not on DoltStorage. Route through the shared
+	// helper (cmd/bd/vc.go) so the package has one declaration of the optional
+	// interface, and never skip silently (bd vc merge's else branch, wy-163oy).
+	if rs, ok := blockedAfterMergeRecomputerFor(store); ok {
 		if err := rs.RecomputeBlockedAfterMerge(ctx, preHead); err != nil {
 			return fmt.Errorf("is_blocked recompute failed: %w", err)
 		}
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: storage backend %T cannot recompute is_blocked after a merge; 'bd ready' may be stale until 'bd recompute-blocked' runs\n", storage.UnwrapStore(store))
 	}
 	// The store's merge-conclusion path can no-op silently (an unreadable
 	// dolt_merge_status degrades to "nothing to commit"), and reporting
@@ -479,11 +481,6 @@ func concludeResolvedMerge(ctx context.Context) error {
 	remaining, err := totalConflicts(ctx)
 	if err != nil {
 		return HandleErrorRespectJSON("failed to read conflicts: %v", err)
-	}
-	// Short-circuit before the blocker read: with rows still conflicted the
-	// blockers cannot change the answer, and there is nothing to diagnose yet.
-	if remaining > 0 {
-		return HandleErrorRespectJSON("%d conflict(s) are still live; resolve them first (bd conflicts list)", remaining)
 	}
 	blockers, blockerErr := mergeBlockers(ctx)
 	if blockerErr != nil {
@@ -637,7 +634,11 @@ func writeMergeBlockers(w io.Writer, b storage.MergeBlockers) {
 	}
 	if len(b.ConstraintViolations) > 0 {
 		fmt.Fprintln(w, "  Constraint violations:  inspect dolt_constraint_violations_<table>, delete the offending rows,")
-		fmt.Fprintln(w, "                          then conclude with: bd conflicts resolve --conclude")
+		if len(b.SchemaConflictTables) > 0 {
+			fmt.Fprintln(w, "                          then re-inspect after aborting and re-merging the schema change")
+		} else {
+			fmt.Fprintln(w, "                          then conclude with: bd conflicts resolve --conclude")
+		}
 	}
 }
 

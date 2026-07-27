@@ -50,6 +50,8 @@ func gatherReadyInput(cmd *cobra.Command) (readyInput, error) {
 	labels, _ := cmd.Flags().GetStringSlice("label")
 	labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 	excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+	labelPattern, _ := cmd.Flags().GetString("label-pattern")
+	labelRegex, _ := cmd.Flags().GetString("label-regex")
 	issueType, _ := cmd.Flags().GetString("type")
 	issueType = utils.NormalizeIssueType(issueType)
 	in.parentID, _ = cmd.Flags().GetString("parent")
@@ -122,6 +124,8 @@ func gatherReadyInput(cmd *cobra.Command) (readyInput, error) {
 		Labels:           labels,
 		LabelsAny:        labelsAny,
 		ExcludeLabels:    excludeLabels,
+		LabelPattern:     labelPattern,
+		LabelRegex:       labelRegex,
 		IncludeDeferred:  includeDeferred,
 		IncludeEphemeral: includeEphemeral,
 		ExcludeTypes:     excludeTypes,

@@ -243,3 +243,42 @@ func TestGetChildrenOfDeferredParentsInTx_IgnoresMissingWispDependenciesTable(t 
 		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
+
+func TestGetReadyWorkInTxStatusesSingleQuery(t *testing.T) {
+	t.Parallel()
+
+	_, mock, tx := beginMockTx(t)
+	mock.ExpectQuery(deferredParentProbeRegex("issues")).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(deferredParentProbeRegex("wisps")).WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(`SELECT id FROM issues\s+WHERE status IN \(\?,\?\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectQuery(`SELECT 1 FROM wisps LIMIT 1`).WillReturnError(sql.ErrNoRows)
+
+	got, err := GetReadyWorkInTx(
+		context.Background(),
+		tx,
+		types.WorkFilter{Statuses: []types.Status{"open", "blocked"}},
+	)
+	if err != nil {
+		t.Fatalf("GetReadyWorkInTx: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected no rows, got %d", len(got))
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+func TestReadyWorkWispIssueFilterPropagatesStatuses(t *testing.T) {
+	t.Parallel()
+
+	filter := readyWorkWispIssueFilter(types.WorkFilter{Statuses: []types.Status{"open", "blocked"}})
+	if filter.Status != nil {
+		t.Fatalf("wisp filter Status = %v, want nil", *filter.Status)
+	}
+	want := []types.Status{"open", "blocked"}
+	if !reflect.DeepEqual(filter.Statuses, want) {
+		t.Fatalf("wisp filter Statuses = %v, want %v", filter.Statuses, want)
+	}
+}

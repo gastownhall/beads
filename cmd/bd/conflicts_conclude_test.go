@@ -7,14 +7,10 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-// Coverage for `bd conflicts resolve --conclude` and the BLOCKING merge state
-// (wy-36ilm F12) — the paths wy-wrq9o F5 found untested. The three decisions
-// they turn on are pure functions of the merge state (planConclude,
-// shouldCommitResolution, concludeFlagConflict) plus the remedy text
-// (writeMergeBlockers), so a Blocked() inversion, a dropped merge-status
-// check, or a remedy pointing back at the dolt command that always errors
-// (adversarial review F1) is caught with no dolt and no Docker. The real
-// system-table column names are guarded separately, dolt-backed, in
+// Pure-logic coverage for `bd conflicts resolve --conclude` and the BLOCKING
+// merge state (wy-36ilm F12). Command wiring, JSON output and real merge
+// transitions are covered, dolt-backed, in conflicts_conclude_integration_test.go.
+// The real system-table column names are guarded separately in
 // internal/storage/dolt/conflicts_integration_test.go.
 
 func schemaBlockers(tables ...string) storage.MergeBlockers {
@@ -239,6 +235,9 @@ func TestWriteMergeBlockersRemedies(t *testing.T) {
 		out := sb.String()
 		if !strings.Contains(out, "Schema conflicts:") || !strings.Contains(out, "Constraint violations:") {
 			t.Errorf("both classes outstanding must show both remedies:\n%s", out)
+		}
+		if strings.Contains(out, "bd conflicts resolve --conclude") {
+			t.Errorf("must not recommend --conclude while a schema conflict makes it refuse:\n%s", out)
 		}
 	})
 }

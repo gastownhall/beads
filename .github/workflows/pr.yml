@@ -24,7 +24,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -90,7 +90,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -116,6 +116,26 @@ jobs:
         # not run the full suite.
         run: |
           go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir)' ./cmd/bd
+
+  # Destructive worktree removal depends on native Windows path identity.
+  # This focused process suite requires NTFS per-directory case sensitivity
+  # and fails (rather than skips) when the runner cannot provide it.
+  worktree-remove-windows:
+    name: Worktree remove boundary (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run native Windows worktree removal boundary tests
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -count=1 -run '^TestWorktreeRemove' ./cmd/bd
 
   # Fast check to ensure all version files are in sync
   check-version-consistency:
@@ -157,7 +177,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -184,6 +204,25 @@ jobs:
           path: ${{ runner.temp }}/cli-docs-freshness.patch
           if-no-files-found: ignore
 
+  check-doc-freshness-platforms:
+    name: Check doc freshness (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Exercise native date and Bash process boundary
+        run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestDocFreshness' ./scripts
+
   pr-preflight-platforms:
     name: PR preflight process (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -193,10 +232,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -269,7 +308,7 @@ jobs:
 
       - name: Set up Python
         if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14'
 
@@ -351,7 +390,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -366,7 +405,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -405,7 +444,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -429,7 +468,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -493,7 +532,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -530,7 +569,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -544,15 +583,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        env:
+          GOWORK: "off"
         with:
-          version: latest
-          args: --timeout=5m --build-tags=gms_pure_go
+          version: v2.10.1
+          args: --config=.golangci.yml --modules-download-mode=readonly --timeout=5m --build-tags=gms_pure_go
 
   windows-make-shell:
     name: Windows Make shell (${{ matrix.host }})
@@ -743,9 +784,11 @@ jobs:
       - build-artifacts
       - check-build-tags
       - check-cmd-bd-puregeo-tests
+      - worktree-remove-windows
       - check-version-consistency
       - check-migration-hygiene
       - check-doc-flags
+      - check-doc-freshness-platforms
       - pr-preflight-platforms
       - check-no-beads-changes
       - detect-package-gates
@@ -770,9 +813,11 @@ jobs:
             BUILD_ARTIFACTS
             CHECK_BUILD_TAGS
             CHECK_CMD_BD_PUREGEO_TESTS
+            WORKTREE_REMOVE_WINDOWS
             CHECK_VERSION_CONSISTENCY
             CHECK_MIGRATION_HYGIENE
             CHECK_DOC_FLAGS
+            CHECK_DOC_FRESHNESS_PLATFORMS
             PR_PREFLIGHT_PLATFORMS
             CHECK_NO_BEADS_CHANGES
             DETECT_PACKAGE_GATES
@@ -789,9 +834,11 @@ jobs:
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
           CHECK_BUILD_TAGS: ${{ needs.check-build-tags.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
+          WORKTREE_REMOVE_WINDOWS: ${{ needs.worktree-remove-windows.result }}
           CHECK_VERSION_CONSISTENCY: ${{ needs.check-version-consistency.result }}
           CHECK_MIGRATION_HYGIENE: ${{ needs.check-migration-hygiene.result }}
           CHECK_DOC_FLAGS: ${{ needs.check-doc-flags.result }}
+          CHECK_DOC_FRESHNESS_PLATFORMS: ${{ needs.check-doc-freshness-platforms.result }}
           PR_PREFLIGHT_PLATFORMS: ${{ needs.pr-preflight-platforms.result }}
           CHECK_NO_BEADS_CHANGES: ${{ needs.check-no-beads-changes.result }}
           DETECT_PACKAGE_GATES: ${{ needs.detect-package-gates.result }}
