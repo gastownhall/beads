@@ -248,8 +248,9 @@ func marshalIndentNoEscape(v any) ([]byte, error) {
 }
 
 // showQueuedEvents pretty-prints the real, locally-buffered event payloads from
-// ~/.beads/eventsData (the same files the flusher reads before sending), so the
-// user sees exactly what would leave their machine. Returns how many event
+// metrics.DataDir() (~/.beads/eventsData by default, or $BEADS_DIR/eventsData
+// when BEADS_DIR is set; the same files the flusher reads before sending), so
+// the user sees exactly what would leave their machine. Returns how many event
 // files were shown.
 func showQueuedEvents(out interface{ Write([]byte) (int, error) }) int {
 	dir, err := metrics.DataDir()
