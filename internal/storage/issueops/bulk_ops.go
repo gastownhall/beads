@@ -286,7 +286,7 @@ func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issu
 
 // FindWispDependentsRecursiveInTx walks wisp_dependencies to find all transitive
 // dependents of the given IDs.
-func FindWispDependentsRecursiveInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[string]bool, error) {
+func FindWispDependentsRecursiveInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}

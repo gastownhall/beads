@@ -770,6 +770,10 @@ func (r *issueSQLRepositoryImpl) SearchAcrossIssuesAndWispsWithCounts(ctx contex
 	return r.searchAcrossIssuesAndWispsWithCounts(ctx, query, filter)
 }
 
+func (r *issueSQLRepositoryImpl) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	return issueops.SearchIssueIDsInTx(ctx, r.runner, query, filter)
+}
+
 func (r *issueSQLRepositoryImpl) GetReadyWork(ctx context.Context, filter types.WorkFilter) (domain.SearchPage, error) {
 	return r.getReadyWorkUnion(ctx, filter)
 }
@@ -862,6 +866,10 @@ func (r *issueSQLRepositoryImpl) FindAllDependents(ctx context.Context, ids []st
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+func (r *issueSQLRepositoryImpl) FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error) {
+	return issueops.FindWispDependentsRecursiveInTx(ctx, r.runner, ids)
 }
 
 func (r *issueSQLRepositoryImpl) AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) ([]string, []string, error) {

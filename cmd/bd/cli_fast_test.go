@@ -736,19 +736,20 @@ func init() {
 	if os.Getenv(worktreeRemoveHelperEnv) != "" {
 		return
 	}
-	// Use existing bd binary from repo root if available, otherwise build once
+	// Prebuilt fast path (scripts/test.sh and CI export this), else build
+	// once. No repo-root ./bd reuse: a stale checkout-root binary silently
+	// substitutes itself for the source under test (wy-4mtr0).
+	if prebuilt := os.Getenv("BEADS_TEST_BD_BINARY"); prebuilt != "" {
+		if abs, err := filepath.Abs(prebuilt); err == nil {
+			if _, statErr := os.Stat(abs); statErr == nil {
+				testBD = abs
+				return
+			}
+		}
+	}
 	bdBinary := "bd"
 	if runtime.GOOS == "windows" {
 		bdBinary = "bd.exe"
-	}
-
-	// Check if bd binary exists in repo root (../../bd from cmd/bd/)
-	repoRoot := filepath.Join("..", "..")
-	existingBD := filepath.Join(repoRoot, bdBinary)
-	if _, err := os.Stat(existingBD); err == nil {
-		// Use existing binary
-		testBD, _ = filepath.Abs(existingBD)
-		return
 	}
 
 	// Fall back to building once (for CI or fresh checkouts)

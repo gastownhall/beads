@@ -260,13 +260,22 @@ func ClaimPoolAliasesInTx(ctx context.Context, tx DBTX) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ParseClaimPools(raw), nil
+}
+
+// ParseClaimPools parses a raw claim.pools config value (comma-separated,
+// whitespace-trimmed) into the pool alias list. Shared by the claim CAS
+// (ClaimPoolAliasesInTx, and its domain/db dual) and the cmd-layer reassign
+// fence (bd-98s5c), so the alias set can never drift between --claim and
+// -a/--assignee — the two verbs must agree on which holders are pools.
+func ParseClaimPools(raw string) []string {
 	var pools []string
 	for _, p := range strings.Split(raw, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			pools = append(pools, p)
 		}
 	}
-	return pools, nil
+	return pools
 }
 
 // ClaimableSourceStatusesInTx returns the set of statuses an issue may be

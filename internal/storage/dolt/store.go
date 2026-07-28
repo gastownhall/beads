@@ -396,6 +396,17 @@ type Config struct {
 	// connection before the server reaps it server-side; otherwise the next
 	// query handed a server-reaped connection fails with "invalid connection".
 	ConnMaxIdleTime time.Duration
+
+	// PoolReadTimeout / PoolWriteTimeout override the per-I/O read/write
+	// deadlines on shared-pool connections (0 = default 10s each; see
+	// buildServerDSN). The default's fast-fail is right for a healthy local
+	// server, but on an overloaded shared server it kills ordinary queries
+	// mid-flight ("client connection went away", wy-b72dj/bd-vz0y9); raising
+	// it is the intended relief valve for such deployments. Known-long
+	// operations should not lean on this — route them through
+	// execWithLongTimeout/openLongTimeoutConn instead.
+	PoolReadTimeout  time.Duration
+	PoolWriteTimeout time.Duration
 }
 
 // Defaults for the *sql.DB connection pool. Exported for tests/callers that
@@ -410,6 +421,14 @@ const (
 	// before the server reaps it; this prevents the next read from picking up a
 	// server-closed connection and failing with "invalid connection".
 	defaultConnMaxIdleTime = 20 * time.Second
+	// defaultPoolReadTimeout / defaultPoolWriteTimeout are the per-I/O
+	// deadlines on shared-pool connections. Overridable via
+	// Config.PoolReadTimeout/PoolWriteTimeout (BEADS_DOLT_POOL_READ_TIMEOUT /
+	// BEADS_DOLT_POOL_WRITE_TIMEOUT, dolt.pool-read-timeout /
+	// dolt.pool-write-timeout); the defaults themselves are deliberately
+	// unchanged (bd-vz0y9).
+	defaultPoolReadTimeout  = 10 * time.Second
+	defaultPoolWriteTimeout = 10 * time.Second
 )
 
 // cliExecTimeout is the default maximum time to wait for dolt CLI
@@ -448,7 +467,14 @@ func withCLIExecTimeout(ctx context.Context) (context.Context, context.CancelFun
 // time.ParseDuration strings (e.g. "2m", "90s") or bare numbers treated as
 // seconds (e.g. "90") are accepted.
 func timeoutFromEnv(env string, fallback time.Duration) time.Duration {
-	raw := strings.TrimSpace(os.Getenv(env))
+	return parseTimeout(os.Getenv(env), fallback)
+}
+
+// parseTimeout parses a duration setting, falling back to fallback when raw is
+// empty, unparsable, or non-positive. Valid time.ParseDuration strings (e.g.
+// "2m", "90s") or bare numbers treated as seconds (e.g. "90") are accepted.
+func parseTimeout(raw string, fallback time.Duration) time.Duration {
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return fallback
 	}
@@ -997,8 +1023,15 @@ func (s *DoltStore) BackupAdd(ctx context.Context, name, url string) error {
 }
 
 // BackupSync pushes the database to the named backup destination.
+// Runs on a long-timeout connection: a sync to a remote destination
+// streams the database and outlives the pool's 10s ReadTimeout.
 func (s *DoltStore) BackupSync(ctx context.Context, name string) error {
-	return versioncontrolops.BackupSync(ctx, s.db, name)
+	db, err := s.oneShotConn(0)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return versioncontrolops.BackupSync(ctx, db, name)
 }
 
 // BackupRemove removes a configured Dolt backup destination.
@@ -1023,6 +1056,12 @@ func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
 	}
 	backupName := "backup_export"
 
+	syncDB, err := s.oneShotConn(0)
+	if err != nil {
+		return err
+	}
+	defer syncDB.Close()
+
 	// Register as a backup remote (idempotent — remove first if exists).
 	_ = versioncontrolops.BackupRemove(ctx, s.db, backupName)
 	if err := versioncontrolops.BackupAdd(ctx, s.db, backupName, backupURL); err != nil {
@@ -1030,14 +1069,14 @@ func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
 		// already point to this URL. In that case, sync using the existing
 		// remote name rather than failing.
 		if conflict := versioncontrolops.ExtractAddressConflictName(err); conflict != "" {
-			if syncErr := versioncontrolops.BackupSync(ctx, s.db, conflict); syncErr != nil {
+			if syncErr := versioncontrolops.BackupSync(ctx, syncDB, conflict); syncErr != nil {
 				return fmt.Errorf("sync to backup: %w", syncErr)
 			}
 			return nil
 		}
 		return fmt.Errorf("register backup remote: %w", err)
 	}
-	if err := versioncontrolops.BackupSync(ctx, s.db, backupName); err != nil {
+	if err := versioncontrolops.BackupSync(ctx, syncDB, backupName); err != nil {
 		return fmt.Errorf("sync to backup: %w", err)
 	}
 	return nil
@@ -1058,7 +1097,12 @@ func (s *DoltStore) RestoreDatabase(ctx context.Context, dir string, force bool)
 	if err != nil {
 		return err
 	}
-	return versioncontrolops.BackupRestore(ctx, s.db, backupURL, s.database, force)
+	db, err := s.oneShotConn(0)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return versioncontrolops.BackupRestore(ctx, db, backupURL, s.database, force)
 }
 
 // QueryContext wraps s.db.QueryContext with retry for transient errors.
@@ -1733,8 +1777,14 @@ func buildServerDSN(cfg *Config, database string) string {
 	if err != nil {
 		return base.String()
 	}
-	parsed.ReadTimeout = 10 * time.Second
-	parsed.WriteTimeout = 10 * time.Second
+	parsed.ReadTimeout = defaultPoolReadTimeout
+	if cfg.PoolReadTimeout > 0 {
+		parsed.ReadTimeout = cfg.PoolReadTimeout
+	}
+	parsed.WriteTimeout = defaultPoolWriteTimeout
+	if cfg.PoolWriteTimeout > 0 {
+		parsed.WriteTimeout = cfg.PoolWriteTimeout
+	}
 	return parsed.FormatDSN()
 }
 
@@ -1774,19 +1824,35 @@ func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args 
 // handling above, and DOLT_PUSH has diverged from direct `dolt push` behavior
 // when wrapped in a SQL transaction.
 func (s *DoltStore) execWithLongTimeoutNoTx(ctx context.Context, query string, args ...any) error {
-	cfg, err := mysql.ParseDSN(s.connStr)
+	db, err := s.oneShotConn(5 * time.Minute)
 	if err != nil {
-		return fmt.Errorf("failed to parse DSN for long-timeout connection: %w", err)
-	}
-	cfg.ReadTimeout = 5 * time.Minute
-	db, err := sql.Open("mysql", cfg.FormatDSN())
-	if err != nil {
-		return fmt.Errorf("failed to open long-timeout connection: %w", err)
+		return err
 	}
 	defer db.Close()
-	db.SetMaxOpenConns(1)
 	_, err = db.ExecContext(ctx, query, args...)
 	return err
+}
+
+// oneShotConn opens a one-shot connection with the given read deadline
+// (0 = no deadline), for callers that pass a DBConn into versioncontrolops.
+// The pool's 10s ReadTimeout kills any server-side procedure that performs
+// sustained network I/O; push/pull use 5m, while backup sync/restore use no
+// deadline at all — a first sync to a remote destination (gs://) can exceed
+// any fixed budget, and the server aborts the transfer when the client
+// connection drops, so a too-short deadline can never converge by retrying.
+// Caller closes.
+func (s *DoltStore) oneShotConn(readTimeout time.Duration) (*sql.DB, error) {
+	cfg, err := mysql.ParseDSN(s.connStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse DSN for long-timeout connection: %w", err)
+	}
+	cfg.ReadTimeout = readTimeout
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return nil, fmt.Errorf("failed to open long-timeout connection: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	return db, nil
 }
 
 // applyPoolLimits configures the pool on db using the sensible-default
@@ -2790,6 +2856,25 @@ func (s *DoltStore) prepareCLIRouteForGitProtocol(ctx context.Context, remote st
 			return true, nil
 		}
 	}
+	// Not visible in dolt_remotes — but that is not proof it is absent: a
+	// freshly (auto-)started sql-server can report an empty dolt_remotes
+	// while the remote is persisted on disk (GH#2118, wy-6k7f7). Recover the
+	// persisted truth: a git-protocol remote routes over the CLI anyway, so
+	// the push can proceed; a non-git remote would need the SQL route, which
+	// the cold server would refuse with a bare "remote not found" — fail
+	// with the cold-start explanation instead.
+	for _, r := range s.PersistedRemoteInfos() {
+		if r.Name != remote {
+			continue
+		}
+		if !doltutil.IsGitProtocolURL(r.URL) {
+			return false, fmt.Errorf("remote %q (%s) is persisted on disk but not yet visible to this sql-server (GH#2118 cold start); retry shortly, or restart the dolt sql-server if it persists", remote, r.URL)
+		}
+		if err := s.ensureMatchingCLIRemote(remote, r.URL); err != nil {
+			return false, fmt.Errorf("remote %q uses git protocol and requires CLI routing: %w", remote, err)
+		}
+		return true, nil
+	}
 	return false, nil
 }
 
@@ -3438,7 +3523,18 @@ func (s *DoltStore) recomputeBlockedAfterPull(ctx context.Context, fromCommit st
 // operator resolved by hand — leaves is_blocked stale until this full pass runs.
 // Idempotent: a consistent database corrects nothing.
 func (s *DoltStore) RecomputeAllBlocked(ctx context.Context) (int, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	// The full pass's batched UPDATEs carry five correlated EXISTS subqueries
+	// each; on a loaded shared server a single batch can outlive the pool's
+	// per-I/O deadline (default 10s, see buildServerDSN), killing the repair
+	// with "i/o timeout" — and the retry dies the same way, so the owed
+	// recompute never lands (bd-bn8jo). Run it on a dedicated long-timeout
+	// connection like the other known-long maintenance ops.
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin is_blocked recompute: %w", err)
 	}
@@ -3470,9 +3566,17 @@ func (s *DoltStore) RecomputeAllBlocked(ctx context.Context) (int, error) {
 }
 
 // recomputeBlockedTx runs the post-merge is_blocked recompute in its own
-// transaction.
+// transaction. Like RecomputeAllBlocked it runs on a long-timeout connection:
+// a heavy merge scopes the recompute over a large diff, and a pool-deadline
+// kill here is what turns into the owed full recompute in the first place
+// (bd-bn8jo).
 func (s *DoltStore) recomputeBlockedTx(ctx context.Context, fromCommit string) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin is_blocked recompute: %w", err)
 	}

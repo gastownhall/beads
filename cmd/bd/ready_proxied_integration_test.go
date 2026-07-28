@@ -515,8 +515,8 @@ func TestProxiedServerReady(t *testing.T) {
 		}
 
 		text, _ := bdProxiedReadyCapture(t, bd, p, "--gated")
-		if !strings.Contains(text, "No closed gates found") {
-			t.Errorf("expected 'No closed gates found' text, got: %s", text)
+		if !strings.Contains(text, "No molecules ready for gate-resume dispatch") {
+			t.Errorf("expected 'No molecules ready for gate-resume dispatch' text, got: %s", text)
 		}
 	})
 

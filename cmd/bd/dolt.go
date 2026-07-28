@@ -209,11 +209,13 @@ func hasNoRemoteConfigured(ctx context.Context, st remoteLister) bool {
 // hasConfiguredRemote decides, from evidence, whether a rig has a Dolt remote
 // at all. It is the one decider for the push/sync no-remote question: both
 // hasNoRemoteConfigured (the `bd sync` / `bd dolt push|pull` exit-0 gate) and
-// adoptGitOriginRemoteForPush go through it. It is NOT yet the only reader of
-// that evidence in cmd/bd — `bd config apply`, ensureDoltRemote, and the
-// doctor/drift diagnostics still judge from len(ListRemotes) alone and have
-// the same cold-start hole; converging them is wy-6k7f7. Do not assume a new
-// remote-related decision is covered by this function: route it here.
+// adoptGitOriginRemoteForPush go through it. The MUTATING siblings —
+// `bd config apply`, ensureDoltRemote, and the git-protocol CLI push route —
+// consult the same persisted evidence via PersistedRemoteInfos (wy-6k7f7);
+// the read-only doctor/drift diagnostics still judge from len(ListRemotes)
+// alone and can report a false "no origin remote" during the cold-start
+// window. Do not assume a new remote-related decision is covered by this
+// function: route it here.
 //
 // Two sources of evidence, because dolt_remotes alone is not enough: a
 // server-mode rig whose sql-server has just cold-started can report an EMPTY
@@ -273,6 +275,37 @@ func persistedRemoteProberFor(st remoteLister) (persistedRemoteProber, bool) {
 		inner := u.Unwrap()
 		if inner == nil {
 			return nil, false
+		}
+		st = inner
+	}
+}
+
+// persistedRemoteInfoLister is the recovery-grade sibling of
+// persistedRemoteProber: stores that can enumerate the on-disk remotes
+// (name AND url) rather than only report their existence (server-mode
+// DoltStore). Callers use it in the GH#2118 cold-start window to act on the
+// invisible remote's actual URL instead of merely refusing (wy-6k7f7).
+type persistedRemoteInfoLister interface {
+	PersistedRemoteInfos() []storage.RemoteInfo
+}
+
+// persistedRemoteInfosFor finds the on-disk remote enumeration behind any
+// chain of storage decorators, peeling exactly like persistedRemoteProberFor
+// (a direct implementer is honored before any peeling, so test doubles work).
+// Returns nil when no store in the chain can enumerate persisted remotes —
+// embedded rigs, where GH#2118 cannot occur.
+func persistedRemoteInfosFor(st any) []storage.RemoteInfo {
+	for {
+		if lister, ok := st.(persistedRemoteInfoLister); ok {
+			return lister.PersistedRemoteInfos()
+		}
+		u, ok := st.(storage.Unwrapper)
+		if !ok {
+			return nil
+		}
+		inner := u.Unwrap()
+		if inner == nil {
+			return nil
 		}
 		st = inner
 	}
@@ -1395,6 +1428,17 @@ func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url stri
 	}
 
 	existingURL := findDoltRemoteURL(remotes, name)
+	existingFromDiskOnly := false
+	if existingURL == "" {
+		// An empty listing is not proof the remote is absent: a freshly
+		// (auto-)started sql-server can report empty dolt_remotes while the
+		// remote is persisted on disk (GH#2118, wy-6k7f7). Recover the
+		// persisted URL so the add gets the same match/confirm treatment it
+		// would after the window, instead of silently writing over an
+		// invisible remote.
+		existingURL = findDoltRemoteURL(persistedRemoteInfosFor(st), name)
+		existingFromDiskOnly = existingURL != ""
+	}
 	if existingURL == "" {
 		if err := st.AddRemote(ctx, name, url); err != nil {
 			return doltRemoteAddResult{}, fmt.Errorf("add remote %s: %w", name, err)
@@ -1410,7 +1454,12 @@ func ensureDoltRemote(ctx context.Context, st doltRemoteAddStore, name, url stri
 		return doltRemoteAddResult{Canceled: true}, nil
 	}
 	if err := st.RemoveRemote(ctx, name); err != nil {
-		return doltRemoteAddResult{}, fmt.Errorf("remove existing remote %s: %w", name, err)
+		// A remote known only from disk may not be removable through a
+		// cold-started server that doesn't see it yet; the confirmed add
+		// below is what establishes the new URL either way.
+		if !existingFromDiskOnly {
+			return doltRemoteAddResult{}, fmt.Errorf("remove existing remote %s: %w", name, err)
+		}
 	}
 	if err := st.AddRemote(ctx, name, url); err != nil {
 		return doltRemoteAddResult{}, fmt.Errorf("add remote %s: %w", name, err)

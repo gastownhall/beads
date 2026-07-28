@@ -564,6 +564,72 @@ func TestExecWithLongTimeoutDSNRewrite(t *testing.T) {
 	}
 }
 
+// TestBuildServerDSN_PoolTimeouts verifies the shared pool's per-I/O deadlines:
+// 10s defaults when unset, and Config.PoolReadTimeout/PoolWriteTimeout
+// overrides carried through to the DSN (bd-vz0y9).
+func TestBuildServerDSN_PoolTimeouts(t *testing.T) {
+	tests := []struct {
+		name         string
+		readTimeout  time.Duration
+		writeTimeout time.Duration
+		wantRead     time.Duration
+		wantWrite    time.Duration
+	}{
+		{"defaults when unset", 0, 0, 10 * time.Second, 10 * time.Second},
+		{"read override only", 90 * time.Second, 0, 90 * time.Second, 10 * time.Second},
+		{"write override only", 0, 45 * time.Second, 10 * time.Second, 45 * time.Second},
+		{"both overridden", 2 * time.Minute, 30 * time.Second, 2 * time.Minute, 30 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				ServerUser:       "root",
+				ServerHost:       "127.0.0.1",
+				ServerPort:       3307,
+				Database:         "testdb",
+				PoolReadTimeout:  tt.readTimeout,
+				PoolWriteTimeout: tt.writeTimeout,
+			}
+			parsed, err := mysql.ParseDSN(buildServerDSN(cfg, cfg.Database))
+			if err != nil {
+				t.Fatalf("failed to parse DSN: %v", err)
+			}
+			if parsed.ReadTimeout != tt.wantRead {
+				t.Errorf("expected readTimeout=%v, got %v", tt.wantRead, parsed.ReadTimeout)
+			}
+			if parsed.WriteTimeout != tt.wantWrite {
+				t.Errorf("expected writeTimeout=%v, got %v", tt.wantWrite, parsed.WriteTimeout)
+			}
+		})
+	}
+}
+
+// TestParseTimeout verifies the shared duration-setting parser: ParseDuration
+// strings, bare seconds, and fallback on empty/invalid/non-positive input.
+func TestParseTimeout(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", 0},
+		{"30s", 30 * time.Second},
+		{"2m", 2 * time.Minute},
+		{"90", 90 * time.Second},
+		{" 45 ", 45 * time.Second},
+		{"bogus", 0},
+		{"-5s", 0},
+		{"0", 0},
+	}
+	for _, tt := range tests {
+		if got := parseTimeout(tt.raw, 0); got != tt.want {
+			t.Errorf("parseTimeout(%q, 0) = %v, want %v", tt.raw, got, tt.want)
+		}
+	}
+	if got := parseTimeout("bogus", 7*time.Second); got != 7*time.Second {
+		t.Errorf("parseTimeout(bogus, 7s) = %v, want fallback 7s", got)
+	}
+}
+
 // TestBuildServerDSN_SpecialCharacterPassword verifies that passwords with
 // characters that collide with DSN delimiters (@ : / ? & < > etc.) are
 // properly escaped by FormatDSN. This was a real bug — passwords from Secret
