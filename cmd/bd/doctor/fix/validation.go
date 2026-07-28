@@ -1,12 +1,14 @@
 package fix
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"path/filepath"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // getDatabasePath returns the actual database directory path, respecting dolt_data_dir.
@@ -121,6 +123,19 @@ func OrphanedDependencies(path string, verbose bool) error {
 // constraint validation on subsequent writes, silently bricking every
 // `bd create` (#4539, follow-up to #4534). Credit: check suggested by
 // @eitsupi in #4534.
+//
+// The pinned engine defaults to repeatable-read with `FOR UPDATE` as a no-op,
+// so the delete below re-checks parent absence at delete time via a NOT
+// EXISTS predicate rather than keying off a pre-scanned list — a parent
+// created between the scan and the delete keeps its (now valid) counter.
+//
+// Mirrors DoltStore.runDoltTransaction (internal/storage/dolt/transaction.go,
+// GH#2455): the DML transaction, staging, and DOLT_COMMIT all run on one
+// pinned *sql.Conn, since each pool connection has an independent working set
+// in Dolt SQL server mode and mixing connections would let DOLT_COMMIT see
+// stale or unrelated state. Only the tables actually touched are staged, so
+// an unrelated dirty working set is not swept under this commit.
+//
 // If verbose is true, prints each removed row; otherwise shows only summary.
 func OrphanedChildCounters(path string, verbose bool) error {
 	beadsDir, err := resolvedWorkspaceBeadsDir(path)
@@ -135,8 +150,11 @@ func OrphanedChildCounters(path string, verbose bool) error {
 	}
 	defer db.Close()
 
+	ctx := context.Background()
+
 	// Find child_counters rows dangling from issues and wisp_child_counters
-	// rows dangling from wisps.
+	// rows dangling from wisps, for reporting only — the deletes below
+	// re-check parent absence themselves rather than keying off this list.
 	query := `
 		SELECT 'child_counters' AS counter_table, cc.parent_id
 		FROM child_counters cc
@@ -148,11 +166,10 @@ func OrphanedChildCounters(path string, verbose bool) error {
 		LEFT JOIN wisps w ON wcc.parent_id = w.id
 		WHERE w.id IS NULL
 	`
-	rows, err := db.Query(query)
+	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("failed to query orphaned child counters: %w", err)
 	}
-	defer rows.Close()
 
 	type orphan struct {
 		counterTable string
@@ -167,51 +184,86 @@ func OrphanedChildCounters(path string, verbose bool) error {
 		}
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return fmt.Errorf("row iteration error: %w", err)
 	}
+	_ = rows.Close()
 
 	if len(orphans) == 0 {
 		fmt.Println("  No orphaned child counters to fix")
 		return nil
 	}
 
-	// Delete orphaned child counter rows.
-	// Uses explicit transaction so writes persist when @@autocommit is OFF
-	// (e.g. Dolt server started with --no-auto-commit).
 	showIndividual := verbose || len(orphans) < 20
-	tx, err := db.Begin()
+	if showIndividual {
+		for _, o := range orphans {
+			fmt.Printf("  Removing orphaned %s row: parent_id=%s\n", o.counterTable, o.parentID)
+		}
+	}
+
+	// Pin a single connection for the whole sequence: the DML transaction,
+	// staging, and DOLT_COMMIT (GH#2455).
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	defer conn.Close()
+
+	// Explicit transaction so writes persist when @@autocommit is OFF (e.g. a
+	// Dolt server started with --no-auto-commit).
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	var removed int
-	for _, o := range orphans {
-		var err error
-		switch o.counterTable {
-		case "child_counters":
-			_, err = tx.Exec("DELETE FROM child_counters WHERE parent_id = ?", o.parentID)
-		case "wisp_child_counters":
-			_, err = tx.Exec("DELETE FROM wisp_child_counters WHERE parent_id = ?", o.parentID)
-		default:
-			fmt.Printf("  Warning: skipped orphaned child counter from unexpected table %s\n", o.counterTable)
-			continue
-		}
-		if err != nil {
-			fmt.Printf("  Warning: failed to remove %s row for %s: %v\n", o.counterTable, o.parentID, err)
-		} else {
-			removed++
-			if showIndividual {
-				fmt.Printf("  Removed orphaned %s row: parent_id=%s\n", o.counterTable, o.parentID)
-			}
-		}
+
+	ccRes, err := tx.ExecContext(ctx,
+		`DELETE FROM child_counters cc WHERE NOT EXISTS (SELECT 1 FROM issues i WHERE i.id = cc.parent_id)`)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to remove orphaned child_counters rows: %w", err)
 	}
+	wccRes, err := tx.ExecContext(ctx,
+		`DELETE FROM wisp_child_counters wcc WHERE NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = wcc.parent_id)`)
+	if err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to remove orphaned wisp_child_counters rows: %w", err)
+	}
+
+	ccRemoved, _ := ccRes.RowsAffected()
+	wccRemoved, _ := wccRes.RowsAffected()
+	removed := int(ccRemoved + wccRemoved)
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit orphaned child counter removals: %w", err)
 	}
 
-	// Commit changes in Dolt
-	_, _ = db.Exec("CALL DOLT_COMMIT('-Am', 'doctor: remove orphaned child counter rows')") // Best effort: commit advisory; schema fix already applied in-memory
+	// Stage only the tables actually touched (not a blanket `-Am`, which would
+	// sweep up unrelated dirty state) and commit in Dolt, on the same pinned
+	// connection so DOLT_COMMIT sees exactly what was just staged. Surface a
+	// failed commit rather than swallowing it: reporting "Fixed" over a
+	// commit that didn't land would leave the repair in the working set only,
+	// silently undone by the next pull.
+	if ccRemoved > 0 {
+		if _, err := conn.ExecContext(ctx, "CALL DOLT_ADD(?)", "child_counters"); err != nil {
+			return fmt.Errorf("failed to stage child_counters repairs: %w", err)
+		}
+	}
+	if wccRemoved > 0 {
+		if _, err := conn.ExecContext(ctx, "CALL DOLT_ADD(?)", "wisp_child_counters"); err != nil {
+			return fmt.Errorf("failed to stage wisp_child_counters repairs: %w", err)
+		}
+	}
+	if removed > 0 {
+		if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'doctor: remove orphaned child counter rows')"); err != nil && !issueops.IsNothingToCommitError(err) {
+			return fmt.Errorf("failed to commit orphaned child counter removals to Dolt: %w", err)
+		}
+	}
 
-	fmt.Printf("  Fixed %d orphaned child counter row(s)\n", removed)
+	if removed < len(orphans) {
+		fmt.Printf("  Fixed %d orphaned child counter row(s) (%d no longer orphaned by delete time)\n", removed, len(orphans)-removed)
+	} else {
+		fmt.Printf("  Fixed %d orphaned child counter row(s)\n", removed)
+	}
 	return nil
 }
 
