@@ -166,7 +166,7 @@ func TestFlusherChildEnvPinsSanctionedEndpoint(t *testing.T) {
 	}
 	const sanctioned = "https://gastownhall-eventsapi.com/mp/collect"
 
-	got := flusherChildEnv(parent, sanctioned)
+	got := flusherChildEnv(parent, sanctioned, "")
 
 	// Unrelated environment is preserved so the child can still find HOME/PATH.
 	if !envContains(got, "HOME=/home/user") || !envContains(got, "PATH=/usr/bin") {
@@ -188,6 +188,36 @@ func TestFlusherChildEnvPinsSanctionedEndpoint(t *testing.T) {
 	// The flusher marker is set so the child cannot spawn another flusher.
 	if !envContains(got, EnvIsFlusher+"=1") {
 		t.Errorf("flusherChildEnv did not set %s=1: %v", EnvIsFlusher, got)
+	}
+}
+
+// TestFlusherChildEnvPinsResolvedDataDir covers the parent/child split-write
+// half of GH#4807: the parent writes its queue under the workspace it selected,
+// so the child must flush that same directory instead of re-deriving one from an
+// inherited BEADS_DIR.
+func TestFlusherChildEnvPinsResolvedDataDir(t *testing.T) {
+	parent := []string{
+		"BEADS_DIR=/ambient/workspace",
+		// A previous run leaked its own resolved dir into the environment.
+		EnvDataDir + "=/stale/eventsData",
+	}
+	const resolved = "/selected/workspace/eventsData"
+
+	got := flusherChildEnv(parent, "", resolved)
+
+	var dirs []string
+	for _, kv := range got {
+		if strings.HasPrefix(kv, EnvDataDir+"=") {
+			dirs = append(dirs, kv)
+		}
+	}
+	if len(dirs) != 1 || dirs[0] != EnvDataDir+"="+resolved {
+		t.Errorf("data dir env = %v, want exactly [%s=%s]", dirs, EnvDataDir, resolved)
+	}
+
+	// BEADS_DIR itself is still handed through; only the queue path is pinned.
+	if !envContains(got, "BEADS_DIR=/ambient/workspace") {
+		t.Errorf("flusherChildEnv dropped BEADS_DIR: %v", got)
 	}
 }
 

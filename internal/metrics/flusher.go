@@ -13,6 +13,11 @@ import (
 const (
 	EnvEndpoint = "BEADS_METRICS_ENDPOINT"
 
+	// EnvDataDir carries the parent's already-resolved event queue directory to
+	// the detached flusher, so the child never re-derives it from an inherited
+	// BEADS_DIR that may not match the workspace the parent selected.
+	EnvDataDir = "BD_EVENTS_DIR"
+
 	flushTimeout = 30 * time.Second
 )
 
@@ -21,10 +26,13 @@ func RunSendMetrics() int {
 		return 0
 	}
 
-	dir, err := DataDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "send-metrics: %v\n", err)
-		return 1
+	dir := os.Getenv(EnvDataDir)
+	if dir == "" {
+		var err error
+		if dir, err = DataDir(); err != nil {
+			fmt.Fprintf(os.Stderr, "send-metrics: %v\n", err)
+			return 1
+		}
 	}
 
 	// Bound the queue before flushing: TTL out stale batches and orphaned

@@ -146,7 +146,7 @@ func MaybeSpawnFlusher() {
 	// uploaded. Pin the endpoint to the value the parent already resolved from
 	// env + user-global config (see resolveMetricsEndpoint in cmd/bd) and mark
 	// the child as the flusher so it cannot recurse.
-	cmd.Env = flusherChildEnv(os.Environ(), Endpoint())
+	cmd.Env = flusherChildEnv(os.Environ(), Endpoint(), switchEmitter.attachedDir())
 	if err := cmd.Start(); err != nil {
 		return
 	}
@@ -158,16 +158,20 @@ func MaybeSpawnFlusher() {
 // example one a project .beads/.env loaded into the parent process) is dropped
 // so the detached flusher cannot be redirected by project-controlled
 // environment.
-func flusherChildEnv(env []string, endpoint string) []string {
+func flusherChildEnv(env []string, endpoint, dataDir string) []string {
 	out := make([]string, 0, len(env)+2)
 	for _, kv := range env {
-		if strings.HasPrefix(kv, EnvEndpoint+"=") || strings.HasPrefix(kv, EnvIsFlusher+"=") {
+		if strings.HasPrefix(kv, EnvEndpoint+"=") || strings.HasPrefix(kv, EnvIsFlusher+"=") ||
+			strings.HasPrefix(kv, EnvDataDir+"=") {
 			continue
 		}
 		out = append(out, kv)
 	}
 	if endpoint != "" {
 		out = append(out, EnvEndpoint+"="+endpoint)
+	}
+	if dataDir != "" {
+		out = append(out, EnvDataDir+"="+dataDir)
 	}
 	out = append(out, EnvIsFlusher+"=1")
 	return out
