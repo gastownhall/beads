@@ -503,9 +503,11 @@ gh issue view 201
 record carrying only the command name; each batch also carries the bd version
 and OS platform, keyed by a machine-derived, HMAC-protected distinct ID. No
 email, repo path, remote URL, issue content, or user-supplied strings are
-collected. Events are written under `~/.beads/eventsData` by default, or under
-`$BEADS_DIR/eventsData` once the workspace is resolved (via `-C`, `.beads/.env`,
-or `BEADS_DIR`), and POSTed to `https://gastownhall-eventsapi.com/mp/collect`.
+collected. Events are written under `$BEADS_DIR/eventsData` once the workspace is
+resolved (via `-C`, `.beads/.env`, or `BEADS_DIR`) and that directory exists,
+and under `~/.beads/eventsData` otherwise — telemetry never creates a workspace
+that a command did not. They are POSTed to
+`https://gastownhall-eventsapi.com/mp/collect`.
 
 Metrics are enabled by default (opt-out). The friendliest way to see or change
 them is `bd metrics` (`bd metrics on` / `bd metrics off` / `bd metrics example`),
