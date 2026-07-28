@@ -647,14 +647,20 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 				return nil
 			}
 
-			allDeps, _ := activeStore.GetAllDependencyRecords(ctx)
-			displayPrettyListWithDeps(treeIssues, false, allDeps)
+			allDeps, depErr := activeStore.GetAllDependencyRecords(ctx)
+			if depErr != nil && in.depsMode != "" {
+				return HandleError("loading dependencies for --deps: %v", depErr)
+			}
+			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode)
 			printSkipLabelsFooter(in.skipLabels)
 			return nil
 		}
 
-		allDeps, _ := activeStore.GetAllDependencyRecords(ctx)
-		displayPrettyListWithDeps(issues, false, allDeps)
+		allDeps, depErr := activeStore.GetAllDependencyRecords(ctx)
+		if depErr != nil && in.depsMode != "" {
+			return HandleError("loading dependencies for --deps: %v", depErr)
+		}
+		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode)
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.skipLabels)
 		return nil
@@ -814,6 +820,12 @@ func init() {
 	listCmd.Flags().Bool("tree", true, "Hierarchical tree format (default: true; use --flat to disable)")
 	listCmd.Flags().Bool("flat", false, "Disable tree format and use legacy flat list output")
 	listCmd.Flags().BoolP("watch", "w", false, "Watch for changes and auto-update display (implies --pretty)")
+	// --deps annotates the tree with dependency edges and orders siblings by them.
+	// Bare --deps means "scheduling"; --deps=all also shows knowledge-graph edges.
+	listCmd.Flags().String("deps", "", "Annotate tree with dependency edges and order siblings by them: 'scheduling' (bare --deps) or 'all'")
+	if f := listCmd.Flags().Lookup("deps"); f != nil {
+		f.NoOptDefVal = "scheduling"
+	}
 
 	// Metadata filtering (GH#1406)
 	listCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")

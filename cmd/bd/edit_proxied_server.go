@@ -119,7 +119,7 @@ func runEditProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 		return HandleErrorRespectJSON("title cannot be empty")
 	}
 
-	updated, err := proxiedUpdateIssueFields(ctx, id, "bd: edit "+id, map[string]any{fieldToEdit: newValue})
+	updated, err := proxiedUpdateIssueFields(ctx, id, "bd: edit "+id, map[string]any{fieldToEdit: newValue}, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Your edits are preserved in: %s\n", tmpPath) //nolint:gosec // G705: stderr, not a browser context
 		return HandleErrorRespectJSON("updating issue: %v", err)

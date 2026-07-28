@@ -420,13 +420,17 @@ const (
 	StatusHooked     Status = "hooked" // Work actively claimed by a worker
 )
 
+// AllStatuses lists the built-in issue statuses (excludes custom statuses). It
+// is the single source consulted by Status.IsValid and the `bd schema` enum, so
+// adding a status here surfaces it in both validation and the published schema.
+var AllStatuses = []Status{
+	StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred,
+	StatusClosed, StatusPinned, StatusHooked,
+}
+
 // IsValid checks if the status value is valid (built-in statuses only)
 func (s Status) IsValid() bool {
-	switch s {
-	case StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred, StatusClosed, StatusPinned, StatusHooked:
-		return true
-	}
-	return false
+	return slices.Contains(AllStatuses, s)
 }
 
 // IsValidWithCustom checks if the status is valid, including custom statuses.
@@ -637,16 +641,19 @@ const TypeEvent IssueType = "event"
 //   - event: set-state audit trail beads (GH#1356)
 // (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
+// AllIssueTypes lists the built-in issue types (excludes TypeEvent and custom
+// types, matching IssueType.IsValid). Single source for IsValid and the
+// `bd schema` enum.
+var AllIssueTypes = []IssueType{
+	TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision,
+	TypeMessage, TypeMolecule, TypeGate, TypeSpike, TypeStory, TypeMilestone,
+}
+
 // IsValid checks if the issue type is a core work type.
 // Core work types (bug, feature, task, epic, chore, decision, message, spike, story, milestone)
 // and internal types (molecule, gate) are built-in. Other types require types.custom configuration.
 func (t IssueType) IsValid() bool {
-	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision, TypeMessage, TypeMolecule,
-		TypeGate, TypeSpike, TypeStory, TypeMilestone:
-		return true
-	}
-	return false
+	return slices.Contains(AllIssueTypes, t)
 }
 
 // IsBuiltIn returns true for core work types and system-internal types
@@ -941,6 +948,19 @@ const (
 	// Delegation types (work delegation chains)
 	DepDelegatedFrom DependencyType = "delegated-from" // Work delegated from parent; completion cascades up
 )
+
+// AllDependencyTypes lists the built-in dependency types, in declaration order.
+// Single source for the `bd schema` enum so the published schema enumerates
+// exactly the types bd recognizes.
+var AllDependencyTypes = []DependencyType{
+	DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor,
+	DepRelated, DepDiscoveredFrom,
+	DepRepliesTo, DepRelatesTo, DepDuplicates, DepSupersedes,
+	DepAuthoredBy, DepAssignedTo, DepApprovedBy, DepAttests,
+	DepTracks,
+	DepUntil, DepCausedBy, DepValidates,
+	DepDelegatedFrom,
+}
 
 // IsValid checks if the dependency type value is valid.
 // Accepts any non-empty string up to 50 characters.

@@ -246,17 +246,10 @@ func TestListUsesRepoBeadsDirWhenDoltDataDirEscapesDotBeads(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	t.Setenv("BEADS_DOLT_PORT", "")
 
-	binPath := filepath.Join(t.TempDir(), "bd-under-test")
-	packageDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	buildCmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", binPath, ".")
-	buildCmd.Dir = packageDir
-	buildOut, err := buildCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build failed: %v\n%s", err, buildOut)
-	}
+	// Shared once-per-process binary (honors BEADS_TEST_BD_BINARY) instead of
+	// a per-test go build — the in-test link steps dominated cmd/bd's wall
+	// clock (wy-4mtr0).
+	binPath := buildBDForInitTests(t)
 
 	listCmd := exec.Command(binPath, "list", "--json")
 	listCmd.Dir = repoDir
