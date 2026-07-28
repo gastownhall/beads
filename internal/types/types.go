@@ -153,6 +153,14 @@ type Issue struct {
 	Actor     string `json:"actor,omitempty"`      // Entity URI who caused this event
 	Target    string `json:"target,omitempty"`     // Entity URI or bead ID affected
 	Payload   string `json:"payload,omitempty"`    // Event-specific JSON data
+
+	// ===== Internal Hydration Flags (not serialized) =====
+	// IsLitePartial is set to true when this Issue was produced by a lite SELECT
+	// (see issueops.ScanIssueLiteFrom). When true, the heavy text columns
+	// (Description, Design, AcceptanceCriteria, Notes, Payload, Waiters) were not
+	// hydrated and remain zero-valued. Callers that need the full body must call
+	// store.GetIssue(ctx, id) to refetch. Internal-only — never on the wire.
+	IsLitePartial bool `json:"-"`
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.
@@ -412,13 +420,17 @@ const (
 	StatusHooked     Status = "hooked" // Work actively claimed by a worker
 )
 
+// AllStatuses lists the built-in issue statuses (excludes custom statuses). It
+// is the single source consulted by Status.IsValid and the `bd schema` enum, so
+// adding a status here surfaces it in both validation and the published schema.
+var AllStatuses = []Status{
+	StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred,
+	StatusClosed, StatusPinned, StatusHooked,
+}
+
 // IsValid checks if the status value is valid (built-in statuses only)
 func (s Status) IsValid() bool {
-	switch s {
-	case StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred, StatusClosed, StatusPinned, StatusHooked:
-		return true
-	}
-	return false
+	return slices.Contains(AllStatuses, s)
 }
 
 // IsValidWithCustom checks if the status is valid, including custom statuses.
@@ -629,16 +641,19 @@ const TypeEvent IssueType = "event"
 //   - event: set-state audit trail beads (GH#1356)
 // (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
+// AllIssueTypes lists the built-in issue types (excludes TypeEvent and custom
+// types, matching IssueType.IsValid). Single source for IsValid and the
+// `bd schema` enum.
+var AllIssueTypes = []IssueType{
+	TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision,
+	TypeMessage, TypeMolecule, TypeGate, TypeSpike, TypeStory, TypeMilestone,
+}
+
 // IsValid checks if the issue type is a core work type.
 // Core work types (bug, feature, task, epic, chore, decision, message, spike, story, milestone)
 // and internal types (molecule, gate) are built-in. Other types require types.custom configuration.
 func (t IssueType) IsValid() bool {
-	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision, TypeMessage, TypeMolecule,
-		TypeGate, TypeSpike, TypeStory, TypeMilestone:
-		return true
-	}
-	return false
+	return slices.Contains(AllIssueTypes, t)
 }
 
 // IsBuiltIn returns true for core work types and system-internal types
@@ -933,6 +948,19 @@ const (
 	// Delegation types (work delegation chains)
 	DepDelegatedFrom DependencyType = "delegated-from" // Work delegated from parent; completion cascades up
 )
+
+// AllDependencyTypes lists the built-in dependency types, in declaration order.
+// Single source for the `bd schema` enum so the published schema enumerates
+// exactly the types bd recognizes.
+var AllDependencyTypes = []DependencyType{
+	DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor,
+	DepRelated, DepDiscoveredFrom,
+	DepRepliesTo, DepRelatesTo, DepDuplicates, DepSupersedes,
+	DepAuthoredBy, DepAssignedTo, DepApprovedBy, DepAttests,
+	DepTracks,
+	DepUntil, DepCausedBy, DepValidates,
+	DepDelegatedFrom,
+}
 
 // IsValid checks if the dependency type value is valid.
 // Accepts any non-empty string up to 50 characters.
@@ -1588,6 +1616,21 @@ type IssueFilter struct {
 	// Expected values: "--max-rows", "BEADS_MAX_ROWS", or "" (library users
 	// who set MaxRows directly without source attribution).
 	MaxRowsSource string
+
+	// Lite, when true, switches the SELECT shape to issueops.IssueSelectColumnsLite,
+	// which omits heavy TEXT columns (description, design, acceptance_criteria, notes,
+	// payload, waiters). Returned issues carry IsLitePartial=true; their heavy fields
+	// are zero-valued. WHERE-clause filters that reference heavy columns
+	// (DescriptionContains, NotesContains, EmptyDescription) keep working — they
+	// reference columns in WHERE regardless of SELECT shape. Default false preserves
+	// today's behavior at every call site.
+	//
+	// Backend coverage: honored by the issueops-backed stores (Dolt, embedded
+	// Dolt). The proxied-server (domain/db) path does not check this field yet
+	// and always returns fully-hydrated issues with IsLitePartial=false —
+	// correct results, no lite optimization. Wiring Lite through domain/db is
+	// deferred to the CLI-wiring follow-up. See engdocs/EXTENDING.md.
+	Lite bool
 }
 
 // SortPolicy determines how ready work is ordered
@@ -1665,7 +1708,12 @@ func (f ReclaimFilter) IsEmpty() bool {
 
 // WorkFilter is used to filter ready work queries
 type WorkFilter struct {
-	Status        Status
+	Status Status
+	// Statuses filters to any of the given statuses (OR semantics) in a
+	// single query, so multi-status callers avoid one GetReadyWork round
+	// trip per status. Ignored when Status is set; when both are empty the
+	// legacy default of ('open', 'in_progress') applies.
+	Statuses      []Status
 	Type          string // Filter by issue type (task, bug, feature, epic, merge-request, etc.)
 	Priority      *int
 	Assignee      *string

@@ -35,6 +35,9 @@ type updateInput struct {
 	// guard).
 	ifAssignee *string
 	ifStatus   *string
+	// bd-98s5c: --force bypasses the live-claim reassign fence (mutually
+	// exclusive with --if-assignee at the flag-group level).
+	force bool
 }
 
 func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, error) {
@@ -76,6 +79,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		assignee, _ := cmd.Flags().GetString("assignee")
 		in.fields["assignee"] = assignee
 	}
+	in.force, _ = cmd.Flags().GetBool("force")
 	description, descChanged, err := getDescriptionFlag(cmd)
 	if err != nil {
 		return nil, HandleErrorRespectJSON("%v", err)

@@ -40,8 +40,18 @@ func proxiedMutateIssue(ctx context.Context, id, commitMsg string, mutate func(c
 	return updated, nil
 }
 
-func proxiedUpdateIssueFields(ctx context.Context, id, commitMsg string, updates map[string]any) (*types.Issue, error) {
+// force applies only to assignee updates: it bypasses the live-claim reassign
+// fence (bd-98s5c). Callers whose updates never carry "assignee" pass false.
+func proxiedUpdateIssueFields(ctx context.Context, id, commitMsg string, updates map[string]any, force bool) (*types.Issue, error) {
 	return proxiedMutateIssue(ctx, id, commitMsg, func(ctx context.Context, uw uow.UnitOfWork, issue *types.Issue, isWisp bool) error {
+		// bd-98s5c: an unguarded assignee update (bd assign via the proxied
+		// server) must not silently overwrite another actor's live claim.
+		if newAssignee, ok := updates["assignee"].(string); ok {
+			if err := validateIssueReassignable(id, issue, actor, newAssignee,
+				uowClaimPoolAliases(ctx, uw), force); err != nil {
+				return err
+			}
+		}
 		if isWisp {
 			return uw.IssueUseCase().UpdateWisp(ctx, issue.ID, updates, actor)
 		}
@@ -49,10 +59,10 @@ func proxiedUpdateIssueFields(ctx context.Context, id, commitMsg string, updates
 	})
 }
 
-func runAssignProxiedServer(ctx context.Context, args []string) error {
+func runAssignProxiedServer(ctx context.Context, args []string, force bool) error {
 	id := args[0]
 	assignee := args[1]
-	updated, err := proxiedUpdateIssueFields(ctx, id, "bd: assign "+id, map[string]any{"assignee": assignee})
+	updated, err := proxiedUpdateIssueFields(ctx, id, "bd: assign "+id, map[string]any{"assignee": assignee}, force)
 	if err != nil {
 		return HandleErrorRespectJSON("assign %s: %v", id, err)
 	}
@@ -77,7 +87,7 @@ func runPriorityProxiedServer(ctx context.Context, args []string) error {
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	updated, err := proxiedUpdateIssueFields(ctx, id, "bd: priority "+id, map[string]any{"priority": priority})
+	updated, err := proxiedUpdateIssueFields(ctx, id, "bd: priority "+id, map[string]any{"priority": priority}, false)
 	if err != nil {
 		return HandleErrorRespectJSON("priority %s: %v", id, err)
 	}

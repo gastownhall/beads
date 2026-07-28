@@ -331,20 +331,26 @@ func resolveTitle(args []string, titleFlag, markdownFile, graphFile string) (str
 		return "", nil
 	}
 
+	var title string
 	switch {
 	case len(args) > 0 && titleFlag != "":
 		if args[0] != titleFlag {
 			return "", HandleError("cannot specify different titles as both positional argument and --title flag\n  Positional: %q\n  --title:    %q", args[0], titleFlag)
 		}
-		return args[0], nil
+		title = args[0]
 	case len(args) > 0:
 		if strings.HasPrefix(args[0], "-") {
 			return "", HandleError("title %q looks like a flag (starts with '-').\n  Run 'bd create --help' for available options.\n  To use this title anyway, pass it explicitly: bd create --title=%q", args[0], args[0])
 		}
-		return args[0], nil
+		title = args[0]
 	case titleFlag != "":
-		return titleFlag, nil
+		title = titleFlag
 	default:
 		return "", HandleError("title required (or use --file to create from markdown)")
 	}
+
+	if strings.TrimSpace(title) == "" {
+		return "", HandleError("title cannot be empty or whitespace-only")
+	}
+	return title, nil
 }
