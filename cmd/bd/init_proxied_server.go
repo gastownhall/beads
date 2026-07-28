@@ -14,7 +14,6 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/fs"
 	"github.com/steveyegge/beads/internal/storage/git"
@@ -65,28 +64,16 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	// Failing here means a missing/broken dolt produces a clean preflight
 	// error instead of a half-initialized .beads/ directory from a later
 	// failure in newManagedProxiedServerUOWProvider.
+	//
+	// Shares resolveAndProbeDolt (uow_factory.go) with
+	// newManagedProxiedServerUOWProvider, which this same `bd init
+	// --proxied-server` invocation goes on to call a few lines below via
+	// newProxiedServerUOWProvider: the shared doltVersionWarnOnce means the
+	// version advisory prints at most once for the command, not once per
+	// call site.
 	if in.externalConfig == nil {
-		doltBin, doltSrc, err := doltversion.Resolve(doltversion.ResolveOptions{
-			EnvValue: doltversion.ReadEnvOverride(),
-			// SidecarValue hook point only in this PR; PR-2 wires the
-			// clone-local sidecar reader.
-			SidecarValue: "",
-		})
-		if err != nil {
-			return fmt.Errorf(
-				"bd init --proxied-server: resolving dolt binary (source: %s): %w; install from https://docs.dolthub.com/introduction/installation",
-				doltSrc, err,
-			)
-		}
-		_, doltWarn, err := doltversion.ProbeWithPolicy(ctx, doltBin)
-		if err != nil {
-			return fmt.Errorf(
-				"bd init --proxied-server: probing dolt binary %q (source: %s): %w; install from https://docs.dolthub.com/introduction/installation",
-				doltBin, doltSrc, err,
-			)
-		}
-		if doltWarn != nil && !in.quiet {
-			fmt.Fprintf(os.Stderr, "Warning: %s\n", doltWarn.Message())
+		if _, _, err := resolveAndProbeDolt(ctx, "bd init --proxied-server"); err != nil {
+			return err
 		}
 	}
 
