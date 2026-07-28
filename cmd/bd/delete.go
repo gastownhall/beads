@@ -90,6 +90,9 @@ Force: Delete and orphan dependents
 
 		if len(issueIDs) > 1 || cascade {
 			if err := deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false); err != nil {
+				if _, ok := exitCodeFromError(err); ok {
+					return err
+				}
 				return HandleError("%v", err)
 			}
 			return nil
@@ -140,6 +143,9 @@ Force: Delete and orphan dependents
 				if err != nil {
 					if previewErr := outputDeletionPreview([]string{issueID}, map[string]*types.Issue{issueID: issue}, false, true, previewResult, err, jsonOutput); previewErr != nil {
 						return previewErr
+					}
+					if jsonOutput {
+						return outputJSONError(err, "")
 					}
 					return HandleError("previewing deletion: %v", err)
 				}
@@ -302,6 +308,9 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 		if err != nil {
 			if previewErr := outputDeletionPreview(issueIDs, issues, cascade, dryRun, result, err, jsonOutput); previewErr != nil {
 				return previewErr
+			}
+			if jsonOutput {
+				return outputJSONError(err, "")
 			}
 			return err
 		}
