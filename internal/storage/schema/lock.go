@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"strings"
 	"time"
 )
 
@@ -47,13 +48,39 @@ func MigrationLockName(databaseName string) string {
 	return fmt.Sprintf("%s%016x", migrationLockPrefix, h.Sum64())
 }
 
+// MigrateLockOption configures MigrateUpWithLock.
+type MigrateLockOption func(*migrateLockOptions)
+
+type migrateLockOptions struct {
+	freshBootstrapHeal bool
+}
+
+// WithFreshBootstrapHeal enables the fresh-bootstrap self-heal for the #4566
+// dirty-table guard (gastownhall/beads#5012). Callers must pass it only when
+// they created the database within the current logical operation (it did not
+// exist before this init began), so any working-set dirt the guard reads can
+// only be a previous migration attempt's own half-applied step — a session
+// that died between a migration's SQL and its per-step Dolt commit — never
+// pre-existing user data. When the guard fires under this option, the working
+// set is discarded with DOLT_RESET('--hard') (per-step commits already in
+// history survive) and the migration pass is re-run once, all on the same
+// locked session so no concurrent migrator can be mid-pass.
+func WithFreshBootstrapHeal() MigrateLockOption {
+	return func(o *migrateLockOptions) { o.freshBootstrapHeal = true }
+}
+
 // MigrateUpWithLock serializes schema migrations for a single Dolt sql-server
 // database. conn must be a pinned *sql.Conn because MySQL/Dolt named locks are
 // session-scoped; GET_LOCK, migrations, and RELEASE_LOCK must run on the same
 // server session. Embedded Dolt intentionally uses bare MigrateUp because it
 // relies on the embedded driver's file/concurrency controls instead of
 // sql-server session locks.
-func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string) (applied int, err error) {
+func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string, opts ...MigrateLockOption) (applied int, err error) {
+	var o migrateLockOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+
 	lockName := MigrationLockName(databaseName)
 	if err := AcquireMigrationLock(ctx, conn, lockName); err != nil {
 		return 0, err
@@ -64,7 +91,22 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string)
 		}
 	}()
 
-	return MigrateUp(ctx, conn)
+	applied, err = MigrateUp(ctx, conn)
+	var dirtyErr *DirtyTablesError
+	if err != nil && o.freshBootstrapHeal && errors.As(err, &dirtyErr) {
+		// The database was created by this init and we hold its migration
+		// lock: the dirt the guard refused is a previous attempt's own
+		// bootstrap debris (mid-step session death), not user data. Discard
+		// it and re-run the pass instead of failing an init that a plain
+		// retry can never converge (gastownhall/beads#5012).
+		fmt.Fprintf(stderr, "Discarding interrupted-bootstrap working set (%s) and re-running migrations…\n",
+			strings.Join(dirtyErr.Tables, ", "))
+		if _, resetErr := conn.ExecContext(ctx, "CALL DOLT_RESET('--hard')"); resetErr != nil {
+			return applied, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
+		}
+		applied, err = MigrateUp(ctx, conn)
+	}
+	return applied, err
 }
 
 // AcquireMigrationLock acquires the named schema migration lock on the pinned

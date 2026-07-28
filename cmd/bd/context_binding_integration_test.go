@@ -103,17 +103,10 @@ func TestListExplicitDBPathRebindsTargetContext(t *testing.T) {
 		t.Fatalf("create issue: %v", err)
 	}
 
-	binPath := filepath.Join(t.TempDir(), "bd-under-test")
-	packageDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
-	buildCmd.Dir = packageDir
-	buildOut, err := buildCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build failed: %v\n%s", err, buildOut)
-	}
+	// Shared once-per-process binary (honors BEADS_TEST_BD_BINARY) instead of
+	// a per-test go build — the in-test link steps dominated cmd/bd's wall
+	// clock (wy-4mtr0).
+	binPath := buildBDForInitTests(t)
 
 	listCmd := exec.Command(binPath, "list", "--db", filepath.Join(targetBeadsDir, "dolt"), "--json")
 	listCmd.Dir = callerRepo
@@ -121,6 +114,9 @@ func TestListExplicitDBPathRebindsTargetContext(t *testing.T) {
 		"HOME="+t.TempDir(),
 		"XDG_CONFIG_HOME="+t.TempDir(),
 		"BEADS_TEST_MODE=1",
+		// AD-01 (be-c5p): the subprocess connects to a testdb_*-named DB on
+		// the test container; pass the firewall opt-in so dolt.New allows it.
+		"BEADS_TEST_SERVER=1",
 		"BEADS_DIR="+callerBeadsDir,
 		"BEADS_DB=",
 	)

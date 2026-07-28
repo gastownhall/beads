@@ -88,6 +88,20 @@ func TestProxiedServerReady(t *testing.T) {
 		}
 	})
 
+	t.Run("label_pattern_and_regex_filter", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rdlpr")
+		matched := bdProxiedCreate(t, bd, p.dir, "Matched", "--label", "tech-debt")
+		bdProxiedCreate(t, bd, p.dir, "Unmatched", "--label", "product")
+
+		for _, args := range [][]string{{"--label-pattern", "tech-*"}, {"--label-regex", "^tech-(debt|legacy)$"}} {
+			ready := bdProxiedReadyJSON(t, bd, p, args...)
+			if len(ready) != 1 || ready[0].ID != matched.ID {
+				t.Errorf("bd ready %s = %#v, want only %s", strings.Join(args, " "), ready, matched.ID)
+			}
+		}
+	})
+
 	t.Run("default_text_output", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rdt")
@@ -176,6 +190,72 @@ func TestProxiedServerReady(t *testing.T) {
 		}
 		if !strings.Contains(stderr, "more matched but were hidden by --limit") {
 			t.Errorf("expected HasMore-based hint wording on stderr, got: %q", stderr)
+		}
+	})
+
+	t.Run("pagination_envelope_truncated", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rdpgt")
+		for i := 0; i < 4; i++ {
+			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Pag item %d", i), "--label", "rdpgt")
+		}
+		stdout, _, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, []string{"BD_JSON_ENVELOPE=1"},
+			"ready", "--json", "--limit", "2", "--label", "rdpgt")
+		if err != nil {
+			t.Fatalf("bd ready --json --limit 2 failed: %v\nstdout: %s", err, stdout)
+		}
+		var envelope struct {
+			Data       []*types.IssueWithCounts `json:"data"`
+			Pagination *PaginationMeta          `json:"pagination"`
+		}
+		s := strings.TrimSpace(stdout)
+		start := strings.Index(s, "{")
+		if start < 0 {
+			t.Fatalf("no JSON envelope object in stdout: %s", stdout)
+		}
+		if err := json.Unmarshal([]byte(s[start:]), &envelope); err != nil {
+			t.Fatalf("parse envelope JSON: %v\n%s", err, s[start:])
+		}
+		if len(envelope.Data) != 2 {
+			t.Fatalf("envelope.data length = %d, want 2", len(envelope.Data))
+		}
+		if envelope.Pagination == nil {
+			t.Fatal("missing 'pagination' key in truncated envelope")
+		}
+		if !envelope.Pagination.Truncated {
+			t.Error("pagination.truncated = false, want true")
+		}
+		if envelope.Pagination.Returned != 2 {
+			t.Errorf("pagination.returned = %d, want 2", envelope.Pagination.Returned)
+		}
+		// Total is unavailable on the proxied backend; omitempty must drop
+		// the key rather than emit a false "total": 0.
+		if strings.Contains(s[start:], `"total"`) {
+			t.Errorf("unexpected 'total' key in proxied pagination (unavailable on this backend): %s", s[start:])
+		}
+	})
+
+	t.Run("pagination_envelope_not_truncated", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rdpgn")
+		bdProxiedCreate(t, bd, p.dir, "Pag not truncated", "--label", "rdpgn")
+		stdout, _, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, []string{"BD_JSON_ENVELOPE=1"},
+			"ready", "--json", "--limit", "10", "--label", "rdpgn")
+		if err != nil {
+			t.Fatalf("bd ready --json --limit 10 failed: %v\nstdout: %s", err, stdout)
+		}
+		var envelope map[string]json.RawMessage
+		s := strings.TrimSpace(stdout)
+		start := strings.Index(s, "{")
+		if start < 0 {
+			t.Fatalf("no JSON envelope object in stdout: %s", stdout)
+		}
+		if err := json.Unmarshal([]byte(s[start:]), &envelope); err != nil {
+			t.Fatalf("parse envelope JSON: %v\n%s", err, s[start:])
+		}
+		// Parity with the direct route: no pagination key when not truncated.
+		if raw, ok := envelope["pagination"]; ok {
+			t.Errorf("unexpected 'pagination' key when not truncated: %s", raw)
 		}
 	})
 
@@ -435,10 +515,17 @@ func TestProxiedServerReady(t *testing.T) {
 		}
 
 		text, _ := bdProxiedReadyCapture(t, bd, p, "--gated")
-		if !strings.Contains(text, "No closed gates found") {
-			t.Errorf("expected 'No closed gates found' text, got: %s", text)
+		if !strings.Contains(text, "No molecules ready for gate-resume dispatch") {
+			t.Errorf("expected 'No molecules ready for gate-resume dispatch' text, got: %s", text)
 		}
 	})
+
+}
+
+func TestProxiedServerReady2(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
 
 	t.Run("gated_json_shape_with_open_gate", func(t *testing.T) {
 		t.Parallel()
@@ -738,6 +825,86 @@ func TestProxiedServerReady(t *testing.T) {
 					t.Errorf("expected '--claim cannot be combined' error, got: %s", out)
 				}
 			})
+		}
+	})
+
+	// be-x42v.4 round-3 follow-up: rejectMaxRowsUnderProxiedServer must not
+	// block `bd ready --claim` under proxied mode. --claim always delivers
+	// exactly one row (same reasoning as the direct-path fix in
+	// issueops/claim.go), so a rig-wide cap sized for bulk reads must not
+	// hard-fail it. Bulk (non-claim) `bd ready` under proxied mode with an
+	// active cap must still reject, same as `bd list` (see
+	// list_proxied_integration_test.go's reject_max_rows_flag/_env).
+	t.Run("claim_succeeds_under_env_max_rows_cap", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rcmr")
+		// Ready pool (3) exceeds the cap (1) — exactly the scenario a
+		// rig-wide BEADS_MAX_ROWS is meant to guard bulk reads against,
+		// while claim (which only ever returns one row) must still work.
+		for i := 0; i < 3; i++ {
+			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Claim under cap %d", i), "--label", "rcmr-claim")
+		}
+		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
+			[]string{"BEADS_MAX_ROWS=1"},
+			"ready", "--claim", "--json", "--label", "rcmr-claim")
+		if err != nil {
+			t.Fatalf("bd ready --claim --json under BEADS_MAX_ROWS=1 with a larger ready pool should succeed: %v\nstdout:\n%s\nstderr:\n%s",
+				err, stdout, stderr)
+		}
+		var claimed []types.IssueWithCounts
+		s := strings.TrimSpace(stdout)
+		start := strings.Index(s, "[")
+		if start < 0 {
+			t.Fatalf("no JSON array in claim output:\n%s", stdout)
+		}
+		if err := json.Unmarshal([]byte(s[start:]), &claimed); err != nil {
+			t.Fatalf("parse claim JSON: %v\n%s", err, s[start:])
+		}
+		if len(claimed) != 1 {
+			t.Fatalf("expected exactly one claimed issue, got %d: %s", len(claimed), stdout)
+		}
+		if claimed[0].Status != types.StatusInProgress {
+			t.Errorf("Status = %s, want %s", claimed[0].Status, types.StatusInProgress)
+		}
+	})
+
+	// be-x42v.4 round-4 follow-up (codex P2): the claim-exempt branch above
+	// must still validate --max-rows via resolveMaxRows even though it
+	// ignores the resolved (positive) cap — otherwise a malformed value
+	// like -1 is silently accepted under proxied `ready --claim`, unlike
+	// every other command (direct or proxied).
+	t.Run("claim_rejects_invalid_max_rows_flag", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rcim")
+		bdProxiedCreate(t, bd, p.dir, "Claim invalid max-rows seed")
+		out := bdProxiedReadyFail(t, bd, p, "--claim", "--max-rows", "-1")
+		if !strings.Contains(out, "must be non-negative") {
+			t.Errorf("expected --max-rows usage-error rejection, got: %s", out)
+		}
+	})
+
+	t.Run("reject_bulk_ready_under_max_rows_flag", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rbmf")
+		bdProxiedCreate(t, bd, p.dir, "Bulk ready seed")
+		out := bdProxiedReadyFail(t, bd, p, "--max-rows", "1")
+		if !strings.Contains(out, "not supported in proxied-server mode") {
+			t.Errorf("expected --max-rows proxied-server rejection for bulk (non-claim) ready, got: %s", out)
+		}
+	})
+
+	t.Run("reject_bulk_ready_under_max_rows_env", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rbme")
+		bdProxiedCreate(t, bd, p.dir, "Bulk ready env seed")
+		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
+			[]string{"BEADS_MAX_ROWS=1"}, "ready")
+		if err == nil {
+			t.Fatalf("expected BEADS_MAX_ROWS under proxied bulk ready to fail, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		out := stdout + stderr
+		if !strings.Contains(out, "not supported in proxied-server mode") {
+			t.Errorf("expected BEADS_MAX_ROWS proxied-server rejection for bulk (non-claim) ready, got: %s", out)
 		}
 	})
 

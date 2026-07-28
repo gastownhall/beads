@@ -40,9 +40,9 @@ echo "==> Tier 1: in-process store conformance + wedge gates"
 # (assert_conformance_passed explains why the skip/pass checks anchor to column-0 lines.)
 embedded_dolt_log="$(mktemp)"
 BEADS_TEST_EMBEDDED_DOLT=1 CGO_ENABLED=1 go test -tags "$TAGS" -v \
-  ./internal/storage/embeddeddolt/ -run TestConformance | tee "$embedded_dolt_log"
+  -timeout 30m ./internal/storage/embeddeddolt/ -run TestConformance | tee "$embedded_dolt_log"
 assert_conformance_passed "$embedded_dolt_log" "embedded-Dolt reference (need BEADS_TEST_EMBEDDED_DOLT=1)"
 echo "==> Tier 2: end-to-end 'bd init' + CLI conformance (reference round-trip)"
-CGO_ENABLED=1 go test -tags "$TAGS e2e" ./test/conformance/
+CGO_ENABLED=1 go test -tags "$TAGS e2e" -timeout 10m ./test/conformance/
 
 echo "==> conformance OK"

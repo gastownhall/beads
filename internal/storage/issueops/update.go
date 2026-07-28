@@ -227,6 +227,20 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		}
 	}
 
+	// Bound the VARCHAR(255) assignment columns before touching SQL, so an
+	// over-length assignee/owner aborts with a typed ErrFieldTooLong instead of
+	// a raw backend "data too long" error. Create validates these via
+	// ValidateWithCustom; the generic update path does not, so guard it here.
+	for _, field := range []string{"assignee", "owner"} {
+		if raw, ok := updates[field]; ok {
+			if val, ok := raw.(string); ok {
+				if err := types.CheckFieldLen(field, val); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+
 	// Build SET clauses.
 	setClauses := []string{"updated_at = ?"}
 	args := []interface{}{time.Now().UTC()}

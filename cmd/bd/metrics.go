@@ -137,11 +137,27 @@ func metricsEnabledByConfig() bool {
 	return !config.MetricsDisabledByUserConfig()
 }
 
-// warnIfMetricsEnvOverride tells the user when BD_DISABLE_METRICS is set and
-// would override the config they just changed, so the toggle never silently
+// metricsEnvOverride returns the metrics opt-out env var in effect for this
+// shell, if any, preferring BD_DISABLE_METRICS over its DO_NOT_TRACK alias.
+// BD_DISABLE_METRICS is a bidirectional override, so it counts whenever it is
+// set. DO_NOT_TRACK is disable-only: a falsey or empty DO_NOT_TRACK falls
+// through to saved config and overrides nothing, so it is reported as an active
+// override only when truthy — matching resolveMetricsEnabled.
+func metricsEnvOverride() (name, value string, ok bool) {
+	if v, found := os.LookupEnv(metrics.EnvDisableMetrics); found {
+		return metrics.EnvDisableMetrics, v, true
+	}
+	if v, found := os.LookupEnv(metrics.EnvDoNotTrack); found && envTruthyValue(v) {
+		return metrics.EnvDoNotTrack, v, true
+	}
+	return "", "", false
+}
+
+// warnIfMetricsEnvOverride tells the user when an environment override is set
+// and would override the config they just changed, so the toggle never silently
 // does nothing.
 func warnIfMetricsEnvOverride(cmd *cobra.Command, wantDisabled bool) {
-	v, ok := os.LookupEnv(metrics.EnvDisableMetrics)
+	name, v, ok := metricsEnvOverride()
 	if !ok {
 		return
 	}
@@ -152,7 +168,7 @@ func warnIfMetricsEnvOverride(cmd *cobra.Command, wantDisabled bool) {
 	fmt.Fprintf(cmd.ErrOrStderr(),
 		"\nNote: %s=%s is set in your environment and overrides this for the current shell.\n"+
 			"      Your config preference is saved; unset %s to let it take effect.\n",
-		metrics.EnvDisableMetrics, v, metrics.EnvDisableMetrics)
+		name, v, name)
 }
 
 func runMetricsStatus(cmd *cobra.Command) {
@@ -177,11 +193,11 @@ func runMetricsStatus(cmd *cobra.Command) {
 	}
 
 	// Surface the env override if it disagrees with the saved config.
-	if v, ok := os.LookupEnv(metrics.EnvDisableMetrics); ok {
+	if name, v, ok := metricsEnvOverride(); ok {
 		if envTruthyValue(v) == metricsEnabledByConfig() {
 			fmt.Fprintf(cmd.ErrOrStderr(),
 				"\nNote: %s=%s is overriding your saved config (which is %q) for this shell.\n",
-				metrics.EnvDisableMetrics, v, map[bool]string{true: "on", false: "off"}[metricsEnabledByConfig()])
+				name, v, map[bool]string{true: "on", false: "off"}[metricsEnabledByConfig()])
 		}
 	}
 }

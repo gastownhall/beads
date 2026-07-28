@@ -989,9 +989,12 @@ func TestDetectBootstrapAction_SharedServerEnvUsesSharedPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Override HOME so SharedDoltDir() resolves to our temp directory
-	// instead of the real ~/.beads/shared-server/dolt/.
+	// Override the home dir so SharedDoltDir() resolves to our temp directory
+	// instead of the real ~/.beads/shared-server/dolt/. It goes through
+	// os.UserHomeDir(), which reads USERPROFILE on Windows and HOME elsewhere,
+	// so both must be set for this to be portable.
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	// Create a database directory at the shared-server location.
 	// SharedDoltDir() returns $HOME/.beads/shared-server/dolt/.
@@ -1130,7 +1133,11 @@ func TestDetectBootstrapAction_SynthesizedDirWithoutRecoveryStillUsesExistingSha
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 
 	homeDir := t.TempDir()
+	// detectBootstrapAction resolves the home dir with os.UserHomeDir(), which reads
+	// USERPROFILE on Windows and HOME elsewhere; set both so the shared-server probe
+	// looks inside the temp home on every platform.
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
 
 	worktreeDir := filepath.Join(t.TempDir(), "worktree")
 	if err := os.MkdirAll(worktreeDir, 0o750); err != nil {

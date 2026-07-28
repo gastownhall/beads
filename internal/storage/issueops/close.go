@@ -29,10 +29,36 @@ func CloseIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, reason,
 }
 
 // CloseIssueCheckedInTx closes an issue within a transaction, refusing with
-// storage.ErrCloseBlocked when it is still blocked (is_blocked=1) unless force
-// is set. The guard (IsBlockedInTx) and the close (CloseIssueInTx) share the
-// SAME transaction, so no blocker can clear between the check and the close.
-func CloseIssueCheckedInTx(ctx context.Context, tx DBTX, id, reason, actor, session string, force bool) (*CloseResult, error) {
+// storage.ErrCloseBlocked when it has a LIVE direct blocker unless force is set.
+// The guard (IsBlockedInTx) and the close (CloseIssueInTx) share the SAME
+// transaction, so no blocker can clear between the check and the close.
+//
+// The refuse predicate is the exact historical `bd close` guard:
+// blocked && len(blockers) > 0 — refuse only when the denormalized is_blocked
+// column is set AND there is at least one live, open direct blocker
+// (blocks/waits-for/conditional-blocks). A bare is_blocked=1 with no live direct
+// blocker is deliberately NOT refused: it is either a purely transitive block
+// (a parent-child child of a blocked parent — historically closable) or a stale
+// is_blocked column whose direct blockers have since closed. Reading the live
+// blocker list self-heals against a stale column instead of acting on it.
+//
+// When expectedVersion is non-nil it adds an ORTHOGONAL optimistic-concurrency
+// precondition: the row's current RowVersion (row_lock) must still equal
+// *expectedVersion or the close refuses with storage.ErrVersionMismatch. This
+// runs first — before the is_blocked guard and before force short-circuits it —
+// so force bypasses only the is_blocked guard, never the version check. Because
+// the read shares this transaction, a mismatch returns before any write and the
+// transaction rolls back with the issue unchanged (a true compare-and-swap).
+// row_lock only tracks lifecycle/ownership writes (status, assignee, started_at),
+// so this guards against a concurrent lifecycle change — not against concurrent
+// label, dependency, rename, or is_blocked writes that leave row_lock untouched
+// (see the freshRowLock invariant in lease.go).
+func CloseIssueCheckedInTx(ctx context.Context, tx DBTX, id, reason, actor, session string, force bool, expectedVersion *int64) (*CloseResult, error) {
+	if expectedVersion != nil {
+		if err := CheckVersionInTx(ctx, tx, id, *expectedVersion); err != nil {
+			return nil, err
+		}
+	}
 	if !force {
 		// The blocked guard only has meaning for an open→closed transition. An
 		// already-closed row is an idempotent no-op (Unchanged=true per the
@@ -53,15 +79,8 @@ func CloseIssueCheckedInTx(ctx context.Context, tx DBTX, id, reason, actor, sess
 			if err != nil {
 				return nil, err
 			}
-			if blocked {
-				// A purely transitive block (e.g. an active parent-child chain)
-				// sets is_blocked=1 without any direct blocks/waits-for/
-				// conditional-blocks edge, so blockers is empty — omit the "blocked
-				// by" clause rather than render "blocked by []".
-				if len(blockers) > 0 {
-					return nil, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
-				}
-				return nil, fmt.Errorf("%w: %s", storage.ErrCloseBlocked, id)
+			if blocked && len(blockers) > 0 {
+				return nil, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
 			}
 		}
 	}

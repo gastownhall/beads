@@ -123,18 +123,10 @@ func TestE2E_AutoStartedRepoLocalServerPersistsAcrossCommands(t *testing.T) {
 
 func buildLifecycleTestBinary(t *testing.T) string {
 	t.Helper()
-	pkgDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	bdBinary := filepath.Join(t.TempDir(), "bd")
-	cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", bdBinary, ".")
-	cmd.Dir = pkgDir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build failed: %v\n%s", err, out)
-	}
-	return bdBinary
+	// Shared once-per-process binary (honors BEADS_TEST_BD_BINARY) instead of
+	// a per-test go build — the in-test link steps dominated cmd/bd's wall
+	// clock (wy-4mtr0).
+	return buildBDForInitTests(t)
 }
 
 func runBDExecWithBinary(t *testing.T, bdBinary string, dir string, env []string, args ...string) (string, error) {

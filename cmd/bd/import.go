@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -188,6 +189,7 @@ type importResultJSON struct {
 	Source              string         `json:"source"`
 	Created             int            `json:"created"`
 	Updated             int            `json:"updated,omitempty"`
+	Unchanged           int            `json:"unchanged,omitempty"`
 	Skipped             int            `json:"skipped"`
 	DedupHits           int            `json:"dedup_skipped,omitempty"`
 	Memories            int            `json:"memories,omitempty"`
@@ -280,15 +282,37 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 	}
 
 	if importDryRun {
-		result.Created = len(issues)
 		result.Memories = len(memories)
 		result.Skipped = dedupHits
+
+		classification, err := classifyDryRunImport(ctx, store, issues, importAllowStale)
+		if err != nil {
+			return fmt.Errorf("dry-run: %w", err)
+		}
+		result.Created = classification.Created
+		result.Updated = classification.Updated
+		result.Unchanged = classification.Unchanged
+		result.Skipped += classification.Skipped
+		result.IDs = append(result.IDs, classification.ImportedIDs...)
+		result.StaleSkippedIDs = classification.StaleSkippedIDs
+		result.UpdatedIssues = classification.UpdatedIssues
+		result.TieKeptLocalIDs = classification.TieKeptLocalIDs
+
 		if jsonOutput {
 			return outputJSON(result)
 		}
-		fmt.Fprintf(os.Stderr, "Would import %d issues and %d memories from %s", len(issues), len(memories), source)
+		// The leading count is the sum of the breakdown that follows it
+		// (not len(issues)), which can be larger when rows were stale
+		// skipped — those are reported separately below instead of being
+		// folded into a total the breakdown then wouldn't add up to.
+		considered := result.Created + result.Updated + result.Unchanged
+		fmt.Fprintf(os.Stderr, "Would import %d issues (%d new, %d updated, %d unchanged) and %d memories from %s",
+			considered, result.Created, result.Updated, result.Unchanged, len(memories), source)
 		if dedupHits > 0 {
 			fmt.Fprintf(os.Stderr, " (%d duplicates skipped)", dedupHits)
+		}
+		if len(result.StaleSkippedIDs) > 0 {
+			fmt.Fprintf(os.Stderr, " (%d stale skipped)", len(result.StaleSkippedIDs))
 		}
 		fmt.Fprintln(os.Stderr)
 		return nil
@@ -332,6 +356,20 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 			// upsert kept every local column (bd-hj85c).
 			if !strings.Contains(err.Error(), "nothing to commit") {
 				return fmt.Errorf("commit: %w", err)
+			}
+		}
+	}
+
+	// Sync issue_prefix from config.yaml to the database if stale (be-llaf).
+	// store.Commit skips the config table (GH#2455), so we use CommitWithConfig
+	// for this intentional config update after the issues commit completes.
+	// config.yaml is authoritative here and existing issue IDs are intentionally
+	// left unchanged: this deliberately bypasses the `bd config set issue_prefix`
+	// guard for the import/migration flow and is not a rename.
+	if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
+		if dbPrefix, _ := store.GetConfig(ctx, "issue_prefix"); dbPrefix != yamlPrefix {
+			if setErr := store.SetConfig(ctx, "issue_prefix", yamlPrefix); setErr == nil {
+				_ = store.CommitWithConfig(ctx, "bd import: sync issue_prefix from config.yaml")
 			}
 		}
 	}

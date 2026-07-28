@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +23,47 @@ import (
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 )
+
+const (
+	fakeBDModeEnv      = "BEADS_REPRO_TIMEOUTS_TEST_BD_MODE"
+	fakeBDParentPIDEnv = "BEADS_REPRO_TIMEOUTS_TEST_BD_PARENT_PID"
+	fakeBDSuccess      = "BEADS_REPRO_TIMEOUTS_TEST_BD_OK"
+)
+
+// init handles the self-reexec fixture before the generated test runner parses
+// the production-style bd arguments appended by runBD. Both executable name
+// and live parent identity keep an ambient environment value from turning the
+// ordinary test runner into a successful helper process.
+func init() {
+	mode := os.Getenv(fakeBDModeEnv)
+	if mode == "" || filepath.Base(os.Args[0]) != nativeBDExecutableName() {
+		return
+	}
+	if os.Getenv(fakeBDParentPIDEnv) != strconv.Itoa(os.Getppid()) {
+		fmt.Fprintln(os.Stderr, "fake bd parent identity mismatch")
+		os.Exit(95)
+	}
+	os.Exit(runFakeBDTestProcess(mode))
+}
+
+func runFakeBDTestProcess(mode string) int {
+	if mode != "assert-no-dolt-overrides" {
+		fmt.Fprintf(os.Stderr, "unknown fake bd mode %q\n", mode)
+		return 97
+	}
+	if !slices.Equal(os.Args[1:], []string{"status"}) {
+		fmt.Fprintf(os.Stderr, "fake bd args = %q, want [status]\n", os.Args[1:])
+		return 96
+	}
+	for _, key := range subprocessEnvDenylist {
+		if value := os.Getenv(key); value != "" {
+			fmt.Fprintf(os.Stderr, "%s inherited: %s\n", key, value)
+			return 42
+		}
+	}
+	fmt.Fprintln(os.Stderr, fakeBDSuccess)
+	return 0
+}
 
 func TestIsDriverReadTimeout(t *testing.T) {
 	result := opResult{
@@ -64,10 +108,7 @@ func TestDepFixtureIssueCountIncludesChainTargets(t *testing.T) {
 
 func TestResolveExecutablePathReturnsAbsolutePath(t *testing.T) {
 	tmp := t.TempDir()
-	bd := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	bd := writeNativeBDTestExecutable(t, tmp)
 	t.Chdir(tmp)
 
 	got, err := resolveExecutablePath("./bd")
@@ -115,18 +156,50 @@ func TestBenchmarkSubprocessesStripDoltEnvOverrides(t *testing.T) {
 	}
 
 	tmp := t.TempDir()
-	bd := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bd, []byte("#!/bin/sh\n"+noDoltOverrideEnvScript()), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	bd := writeNativeBDTestExecutable(t, tmp)
 
-	cfg := config{BDPath: bd, Timeout: time.Second}
+	cfg := config{BDPath: bd, Timeout: 5 * time.Second}
 	ws := &workspace{Dir: tmp}
-	if got := runBD(context.Background(), cfg, ws, job{Kind: "env", Argv: []string{"status"}}); got.Err != "" {
+	fakeEnv := []string{
+		fakeBDModeEnv + "=assert-no-dolt-overrides",
+		fakeBDParentPIDEnv + "=" + strconv.Itoa(os.Getpid()),
+	}
+	got := runBD(context.Background(), cfg, ws, job{
+		Kind: "env",
+		Argv: []string{"status"},
+		Env:  fakeEnv,
+	})
+	if got.Err != "" {
 		t.Fatalf("runBD inherited denied env: err=%q stderr=%q", got.Err, got.StderrTail)
+	}
+	if got.StderrTail != fakeBDSuccess {
+		t.Fatalf("runBD fake receipt = %q, want %q", got.StderrTail, fakeBDSuccess)
 	}
 	if got := runShell(context.Background(), cfg, ws, job{Kind: "env", Sh: noDoltOverrideEnvScript()}); got.Err != "" {
 		t.Fatalf("runShell inherited denied env: err=%q stderr=%q", got.Err, got.StderrTail)
+	}
+}
+
+func TestNativeBDHelperRejectsWrongParent(t *testing.T) {
+	bd := writeNativeBDTestExecutable(t, t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bd, "-test.run=^$")
+	cmd.WaitDelay = time.Second
+	cmd.Env = subprocessEnv(
+		fakeBDModeEnv+"=assert-no-dolt-overrides",
+		fakeBDParentPIDEnv+"=0",
+	)
+
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("wrong-parent fake bd did not terminate promptly: %v", ctx.Err())
+	}
+	if err == nil {
+		t.Fatalf("wrong-parent fake bd succeeded: %s", output)
+	}
+	if !strings.Contains(string(output), "fake bd parent identity mismatch") {
+		t.Fatalf("wrong-parent output = %q", output)
 	}
 }
 
@@ -146,6 +219,42 @@ func TestControlQueryScriptPreservesReadyProbeFailure(t *testing.T) {
 	if !strings.Contains(result.StderrTail, "ready failed") {
 		t.Fatalf("stderr tail = %q, want ready probe stderr", result.StderrTail)
 	}
+}
+
+func writeNativeBDTestExecutable(t *testing.T, directory string) string {
+	t.Helper()
+
+	sourcePath, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve current test executable: %v", err)
+	}
+	targetPath := filepath.Join(directory, nativeBDExecutableName())
+
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		t.Fatalf("open current test executable: %v", err)
+	}
+	defer source.Close()
+
+	target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
+	if err != nil {
+		t.Fatalf("create native test executable: %v", err)
+	}
+	if _, err := io.Copy(target, source); err != nil {
+		_ = target.Close()
+		t.Fatalf("copy native test executable: %v", err)
+	}
+	if err := target.Close(); err != nil {
+		t.Fatalf("close native test executable: %v", err)
+	}
+	return targetPath
+}
+
+func nativeBDExecutableName() string {
+	if runtime.GOOS == "windows" {
+		return "bd.exe"
+	}
+	return "bd"
 }
 
 func noDoltOverrideEnvScript() string {

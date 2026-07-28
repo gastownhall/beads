@@ -800,6 +800,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// to ensure consistent path representation.
 		beadsDir := beadsDirForInit
 
+		if initProxiedServer && externalConfig == nil {
+			if err := validateManagedProxiedServerConfigAtInit(beadsDir, serverConfigPath, serverRootPath); err != nil {
+				return fmt.Errorf("managed proxied-server config: %w", err)
+			}
+		}
+
 		// Prevent nested .beads directories
 		// Check if current working directory is inside a .beads directory
 		if strings.Contains(filepath.Clean(cwd), string(filepath.Separator)+".beads"+string(filepath.Separator)) ||
@@ -1911,7 +1917,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				fmt.Fprintf(os.Stderr, "  %s\n\n", ui.RenderAccent("git remote add upstream <repo-url>"))
 			}
 			if !stealth && !initRemoteChanged && !shouldWireInitRemote(syncURL, syncFromRemote, syncURLFromConfig, syncURLFromGitOrigin) {
-				printInitNoDoltRemoteWarning()
+				printInitNoDoltRemoteWarning(true)
 			}
 		}
 
@@ -2048,7 +2054,7 @@ func init() {
 	initCmd.Flags().Bool("external", false, "Server is externally managed (skip server startup); use with --shared-server or --server")
 	initCmd.Flags().Bool("debug", false, "Run the managed Dolt sql-server with --loglevel=debug and CPU profiling (--prof cpu). Persisted to config.yaml as dolt.debug. No effect on externally-managed servers.")
 	initCmd.Flags().Bool("proxied-server", false, "[EXPERIMENTAL] Use a per-workspace proxied dolt sql-server (proxy + child dolt) rooted at .beads/dolt")
-	initCmd.Flags().String("proxied-server-config-path", "", "[EXPERIMENTAL] Absolute path to an existing dolt sql-server YAML config (proxied-server mode only). When set, bd uses this file instead of auto-generating one. Relative paths are rejected.")
+	initCmd.Flags().String("proxied-server-config-path", "", "[EXPERIMENTAL] Absolute path to an existing dolt sql-server YAML config (proxied-server mode only). When set, bd uses this file instead of auto-generating one. Relative paths are rejected. Managed mode requires listener.host to be a numeric loopback IP (hostnames including localhost, non-loopback addresses, listener.socket, remotesapi, and cluster config are rejected); the same policy applies to BEADS_PROXIED_SERVER_CONFIG.")
 	initCmd.Flags().String("proxied-server-log-path", "", "[EXPERIMENTAL] Absolute path to the proxied dolt sql-server log file (proxied-server mode only). Default: <beadsDir>/dolt/server.log. Relative paths are rejected.")
 	initCmd.Flags().String("proxied-server-root-path", "", "[EXPERIMENTAL] Absolute directory holding the proxied dolt sql-server's lockfiles, pidfiles, and child .dolt repository (proxied-server mode only). Default: <beadsDir>/dolt. May not exist yet — bd will create it. Relative paths are rejected.")
 	initCmd.Flags().Int("proxied-server-port", 0, "[EXPERIMENTAL] Fixed TCP port for the proxy's loopback listener (proxied-server mode only). Default 0 = an OS-assigned free port. Startup fails if the port is already in use.")
@@ -2702,10 +2708,12 @@ func configureInitDoltRemote(ctx context.Context, store storage.DoltStorage, syn
 	}
 }
 
-func printInitNoDoltRemoteWarning() {
+func printInitNoDoltRemoteWarning(withExportNote bool) {
 	fmt.Fprintf(os.Stderr, "\n%s No Dolt remote configured\n", ui.RenderWarn("⚠"))
-	fmt.Fprintln(os.Stderr, "  Issues are stored in local Dolt. .beads/issues.jsonl is an export,")
-	fmt.Fprintln(os.Stderr, "  not cross-machine sync or the source of truth.")
+	if withExportNote {
+		fmt.Fprintln(os.Stderr, "  Issues are stored in local Dolt. .beads/issues.jsonl is an export,")
+		fmt.Fprintln(os.Stderr, "  not cross-machine sync or the source of truth.")
+	}
 	if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
 		fmt.Fprintln(os.Stderr, "  To use your git origin for durable sync, run:")
 		fmt.Fprintf(os.Stderr, "    %s\n", ui.RenderAccent("bd dolt remote add origin "+normalizeRemoteURL(originURL)))

@@ -55,9 +55,20 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, e
 		return dolt.New(ctx, cfg)
 	}
 	if cfg.ReadOnly {
-		// Read-only commands must not be bricked by the #4259
-		// remote-migrate gate (bd-578h9.5); server mode's ReadOnly opens
-		// already skip migration entirely.
+		if cfg.DisableAutoStart {
+			// Strict --readonly (cfg.DisableAutoStart is the strict-only
+			// signal threaded from policy.disableAutoStart): the command
+			// must not write anything, not even incidentally (schema
+			// init, migrations, the post-command autocommit net). Use the
+			// genuinely write-refusing open — same one used for cross-repo
+			// hydration of foreign projects (GH#3231, bd-6dnrw.32) — instead
+			// of OpenForReadOnlyCommand, which is "otherwise a normal
+			// writable store".
+			return embeddeddolt.OpenReadOnly(ctx, cfg.BeadsDir, cfg.Database, "main")
+		}
+		// Ordinary classified-read commands (bd show, bd list, ...) must
+		// not be bricked by the #4259 remote-migrate gate (bd-578h9.5);
+		// server mode's ReadOnly opens already skip migration entirely.
 		return embeddeddolt.OpenForReadOnlyCommand(ctx, cfg.BeadsDir, cfg.Database, "main")
 	}
 	if cfg.LenientOpen {

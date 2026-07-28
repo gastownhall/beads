@@ -1,6 +1,6 @@
 ---
 description: List issues with optional filters
-argument-hint: [--status] [--priority] [--type] [--assignee] [--label]
+argument-hint: "[--status] [--priority] [--type] [--assignee] [--label]"
 ---
 
 List beads issues with optional filtering.

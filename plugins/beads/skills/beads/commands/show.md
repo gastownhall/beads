@@ -1,6 +1,6 @@
 ---
 description: Show detailed information about an issue
-argument-hint: [issue-id]
+argument-hint: "[issue-id]"
 ---
 
 Display detailed information about a beads issue.

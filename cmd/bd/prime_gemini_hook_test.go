@@ -468,6 +468,61 @@ func TestPrime_NoMemories_MemoriesOnlyWins(t *testing.T) {
 	}
 }
 
+// TestPrime_NoTelemetryInIsolatedHome is the regression guard for wy-12x1p:
+// a `bd` subprocess launched by this suite must not write a telemetry queue
+// into its isolated HOME. That queue is the visible half of the real problem —
+// the other half is the DETACHED `bd send-metrics` child metrics.CloseAndFlush
+// spawns alongside it, which outlives its parent and keeps mutating
+// $HOME/.beads/eventsData while Go's t.TempDir cleanup is trying to delete the
+// tree. The result was an intermittent, assertion-free
+// "TempDir RemoveAll cleanup: ... directory not empty" that reddened the whole
+// cmd/bd package (the TestPrime_HookJSON_* tests were the observed victims).
+//
+// The fix is the metrics opt-out set process-wide in testMainInner; this test
+// pins it from the outside, because the failure it prevents is load-dependent
+// and would otherwise creep back unnoticed. The assertion is deterministic:
+// metrics.Init creates the eventsData dir eagerly (and synchronously, in the
+// parent) whenever metrics are enabled, so its absence proves the flusher was
+// never armed.
+func TestPrime_NoTelemetryInIsolatedHome(t *testing.T) {
+	binPath := buildBDUnderTest(t)
+	workDir := t.TempDir()
+	initBeadsWorkspace(t, binPath, workDir)
+
+	home := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binPath, "prime", "--hook-json")
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"XDG_CONFIG_HOME="+t.TempDir(),
+		"BEADS_TEST_IGNORE_REPO_CONFIG=1",
+		"BEADS_DIR=",
+		"BEADS_DB=",
+		"LINEAR_API_KEY=",
+	)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd prime --hook-json: %v\nstdout: %s\nstderr: %s", err, outBuf.String(), errBuf.String())
+	}
+
+	eventsData := filepath.Join(home, ".beads", "eventsData")
+	if _, err := os.Stat(eventsData); !os.IsNotExist(err) {
+		entries, _ := os.ReadDir(eventsData)
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("telemetry queue %s exists after a suite-launched bd run (stat err: %v, entries: %v); "+
+			"metrics are enabled for this subprocess, so a detached `bd send-metrics` child is racing t.TempDir cleanup — "+
+			"see the metrics opt-out in testMainInner (wy-12x1p)", eventsData, err, names)
+	}
+}
+
 func firstN(s string, n int) string {
 	if len(s) <= n {
 		return s

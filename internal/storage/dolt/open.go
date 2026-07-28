@@ -301,6 +301,23 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		}
 	}
 
+	// Pool per-I/O deadlines: caller override > env var > config.yaml > default
+	// (10s, see buildServerDSN). The default fast-fail is right for healthy
+	// local servers; overloaded shared-server deployments raise it so ordinary
+	// queries stop dying with "i/o timeout" under load (bd-vz0y9).
+	if cfg.PoolReadTimeout == 0 {
+		cfg.PoolReadTimeout = timeoutFromEnv("BEADS_DOLT_POOL_READ_TIMEOUT", 0)
+	}
+	if cfg.PoolReadTimeout == 0 {
+		cfg.PoolReadTimeout = parseTimeout(config.GetString("dolt.pool-read-timeout"), 0)
+	}
+	if cfg.PoolWriteTimeout == 0 {
+		cfg.PoolWriteTimeout = timeoutFromEnv("BEADS_DOLT_POOL_WRITE_TIMEOUT", 0)
+	}
+	if cfg.PoolWriteTimeout == 0 {
+		cfg.PoolWriteTimeout = parseTimeout(config.GetString("dolt.pool-write-timeout"), 0)
+	}
+
 	return nil
 }
 

@@ -113,16 +113,17 @@ type fakeUOW struct {
 	commit  func() error
 }
 
-func (f *fakeUOW) Close(ctx context.Context)                        {}
-func (f *fakeUOW) Commit(ctx context.Context, message string) error { return f.commit() }
-func (f *fakeUOW) ConfigUseCase() domain.ConfigUseCase              { return nil }
-func (f *fakeUOW) DoltRemoteUseCase() domain.DoltRemoteUseCase      { return nil }
-func (f *fakeUOW) BootstrapUseCase() domain.BootstrapUseCase        { return nil }
-func (f *fakeUOW) IssueUseCase() domain.IssueUseCase                { return f.issueUC }
-func (f *fakeUOW) DependencyUseCase() domain.DependencyUseCase      { return nil }
-func (f *fakeUOW) LabelUseCase() domain.LabelUseCase                { return nil }
-func (f *fakeUOW) CommentUseCase() domain.CommentUseCase            { return nil }
-func (f *fakeUOW) RawSQLUseCase() domain.RawSQLUseCase              { return nil }
+func (f *fakeUOW) Close(ctx context.Context)                                 {}
+func (f *fakeUOW) Commit(ctx context.Context, message string) error          { return f.commit() }
+func (f *fakeUOW) SwitchDatabase(ctx context.Context, database string) error { return nil }
+func (f *fakeUOW) ConfigUseCase() domain.ConfigUseCase                       { return nil }
+func (f *fakeUOW) DoltRemoteUseCase() domain.DoltRemoteUseCase               { return nil }
+func (f *fakeUOW) BootstrapUseCase() domain.BootstrapUseCase                 { return nil }
+func (f *fakeUOW) IssueUseCase() domain.IssueUseCase                         { return f.issueUC }
+func (f *fakeUOW) DependencyUseCase() domain.DependencyUseCase               { return nil }
+func (f *fakeUOW) LabelUseCase() domain.LabelUseCase                         { return nil }
+func (f *fakeUOW) CommentUseCase() domain.CommentUseCase                     { return nil }
+func (f *fakeUOW) RawSQLUseCase() domain.RawSQLUseCase                       { return nil }
 
 type fakeUOWProvider struct {
 	uows   atomic.Int64
@@ -197,12 +198,12 @@ func TestApplyUpdateProxiedOne_RetriesWholeAttemptOnConflict(t *testing.T) {
 	withFakeProxiedUpdateEnv(t, provider)
 
 	in := &updateInput{fields: map[string]any{"title": "renamed"}}
-	got, failReason, err := applyUpdateProxiedOne(context.Background(), "bd-retry-1", in)
+	got, fail, err := applyUpdateProxiedOne(context.Background(), "bd-retry-1", in)
 	if err != nil {
 		t.Fatalf("applyUpdateProxiedOne: %v", err)
 	}
-	if failReason != "" {
-		t.Fatalf("expected update to succeed after conflict retries, got failure: %s", failReason)
+	if fail != nil {
+		t.Fatalf("expected update to succeed after conflict retries, got failure: %s", fail.Error)
 	}
 	if got == nil || got.ID != "bd-retry-1" {
 		t.Fatalf("updated issue = %v, want bd-retry-1", got)
@@ -230,17 +231,20 @@ func TestApplyUpdateProxiedOne_ExhaustedConflictsFailLoudly(t *testing.T) {
 	withFakeProxiedUpdateEnv(t, provider)
 
 	var got *types.Issue
-	var failReason string
+	var fail *updateIDFailure
 	var err error
 	stderr := captureStderrDuring(t, func() {
 		in := &updateInput{fields: map[string]any{"title": "never lands"}}
-		got, failReason, err = applyUpdateProxiedOne(context.Background(), "bd-retry-2", in)
+		got, fail, err = applyUpdateProxiedOne(context.Background(), "bd-retry-2", in)
 	})
 	if err != nil {
 		t.Fatalf("applyUpdateProxiedOne returned hard error: %v", err)
 	}
-	if failReason == "" || got != nil {
-		t.Fatalf("failReason=%q issue=%v: a write that never landed must be reported as a failure", failReason, got)
+	if fail == nil || got != nil {
+		t.Fatalf("fail=%v issue=%v: a write that never landed must be reported as a failure", fail, got)
+	}
+	if fail.GuardMismatch {
+		t.Errorf("exhausted conflicts must not masquerade as a guard mismatch (that would exit 13 and tell scripts not to retry)")
 	}
 	if !strings.Contains(stderr, "retries exhausted") {
 		t.Errorf("stderr = %q, want a loud retries-exhausted failure", stderr)
@@ -264,12 +268,12 @@ func TestApplyUpdateProxiedOne_NothingToCommitWithoutConflictSucceeds(t *testing
 	withFakeProxiedUpdateEnv(t, provider)
 
 	in := &updateInput{fields: map[string]any{"title": "wisp-shaped"}}
-	got, failReason, err := applyUpdateProxiedOne(context.Background(), "bd-retry-3", in)
+	got, fail, err := applyUpdateProxiedOne(context.Background(), "bd-retry-3", in)
 	if err != nil {
 		t.Fatalf("applyUpdateProxiedOne: %v", err)
 	}
-	if failReason != "" || got == nil {
-		t.Fatalf("failReason=%q issue=%v: empty-working-set commit on an unconflicted attempt is a success", failReason, got)
+	if fail != nil || got == nil {
+		t.Fatalf("fail=%v issue=%v: empty-working-set commit on an unconflicted attempt is a success", fail, got)
 	}
 	if n := provider.uows.Load(); n != 1 {
 		t.Errorf("unit-of-work attempts = %d, want 1 (nothing-to-commit must not trigger retries)", n)

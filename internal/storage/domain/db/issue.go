@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
@@ -92,6 +93,19 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		return nil
 	}
 
+	// Bound the VARCHAR(255) assignment columns before touching SQL, mirroring
+	// issueops.updateIssueInTx: an over-length assignee/owner aborts with a typed
+	// ErrFieldTooLong instead of a raw backend "data too long" error.
+	for _, field := range []string{"assignee", "owner"} {
+		if raw, ok := updates[field]; ok {
+			if val, ok := raw.(string); ok {
+				if err := types.CheckFieldLen(field, val); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	table := pickIssueTable(opts.UseWispsTable)
 
 	_, statusChanging := updates["status"]
@@ -158,6 +172,16 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		setClauses, args = issueops.ManageClosedAt(oldIssue, updates, setClauses, args)
 		setClauses, args = issueops.ManageStartedAt(oldIssue, updates, setClauses, args)
 	}
+
+	// Rewrite row_lock on every generic update, mirroring the classic
+	// issueops.updateIssueInTx invariant (update.go): a concurrent
+	// status/ownership mutation collides on this shared cell instead of
+	// silently cell-merging, and the row's RowVersion CAS token advances so
+	// the "generic update path changes RowVersion" contract
+	// (types.Issue.RowVersion) holds on the proxied backend too.
+	rowLockClause, rowLockArgs := issueops.RowLockClause()
+	setClauses = append(setClauses, rowLockClause)
+	args = append(args, rowLockArgs...)
 
 	args = append(args, id)
 
@@ -229,6 +253,12 @@ func coerceStatus(v any) types.Status {
 func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, opts domain.IssueTableOpts) (domain.ClaimRowResult, error) {
 	if id == "" {
 		return domain.ClaimRowResult{}, errors.New("db: Claim: id must not be empty")
+	}
+	// The CAS below writes assignee = actor. actor is user-settable (--actor /
+	// BEADS_ACTOR), so bound it against the VARCHAR(255) assignee column up front
+	// and return a typed ErrFieldTooLong rather than a raw backend error.
+	if err := types.CheckFieldLen("actor", actor); err != nil {
+		return domain.ClaimRowResult{}, err
 	}
 
 	oldIssue, err := r.Get(ctx, id, opts)
@@ -556,6 +586,23 @@ func pickIssueTable(useWisps bool) string {
 
 //nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
 func insertIssueRow(ctx context.Context, runner Runner, table string, issue *types.Issue) error {
+	// Bound the VARCHAR(255) assignment columns at the raw-SQL chokepoint, so
+	// every proxied-server (uow) create — single, batch, and import — rejects an
+	// over-length assignee/owner with a typed ErrFieldTooLong instead of a raw
+	// backend "data too long" error. Mirrors ValidateWithCustom on the embedded
+	// create path.
+	if err := types.CheckFieldLen("assignee", issue.Assignee); err != nil {
+		return err
+	}
+	if err := types.CheckFieldLen("owner", issue.Owner); err != nil {
+		return err
+	}
+	// Stamp a fresh non-zero row_lock at create, exactly like the classic
+	// insertIssueIntoTable (issueops/helpers.go). Without it a proxied-server
+	// (uow) create leaves row_lock at the schema DEFAULT 0, so the row's
+	// RowVersion CAS token is stale-zero on read — the backend-divergent break
+	// the RowVersion contract (types.Issue.RowVersion) forbids. The duplicate-key
+	// path rewrites it too so an upsert also advances the token.
 	_, err := runner.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -566,7 +613,8 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			mol_type, work_type, source_system, source_repo, close_reason,
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
-			due_at, defer_until, metadata
+			due_at, defer_until, metadata,
+			row_lock
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
@@ -576,7 +624,8 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?,
-			?, ?, ?
+			?, ?, ?,
+			?
 		)
 		ON DUPLICATE KEY UPDATE
 			content_hash = VALUES(content_hash),
@@ -596,7 +645,8 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			external_ref = VALUES(external_ref),
 			source_repo = VALUES(source_repo),
 			close_reason = VALUES(close_reason),
-			metadata = VALUES(metadata)
+			metadata = VALUES(metadata),
+			row_lock = VALUES(row_lock)
 	`, table),
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		string(issue.Status), issue.Priority, string(issue.IssueType), nullString(issue.Assignee), nullIntPtr(issue.EstimatedMinutes),
@@ -607,6 +657,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, jsonMetadata(issue.Metadata),
+		issueops.FreshRowLock(),
 	)
 	if err != nil {
 		return fmt.Errorf("db: insert into %s: %w", table, err)
@@ -719,6 +770,10 @@ func (r *issueSQLRepositoryImpl) SearchAcrossIssuesAndWispsWithCounts(ctx contex
 	return r.searchAcrossIssuesAndWispsWithCounts(ctx, query, filter)
 }
 
+func (r *issueSQLRepositoryImpl) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	return issueops.SearchIssueIDsInTx(ctx, r.runner, query, filter)
+}
+
 func (r *issueSQLRepositoryImpl) GetReadyWork(ctx context.Context, filter types.WorkFilter) (domain.SearchPage, error) {
 	return r.getReadyWorkUnion(ctx, filter)
 }
@@ -813,6 +868,10 @@ func (r *issueSQLRepositoryImpl) FindAllDependents(ctx context.Context, ids []st
 	return out, nil
 }
 
+func (r *issueSQLRepositoryImpl) FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error) {
+	return issueops.FindWispDependentsRecursiveInTx(ctx, r.runner, ids)
+}
+
 func (r *issueSQLRepositoryImpl) AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) ([]string, []string, error) {
 	return issueops.AffectedByDeletionInTx(ctx, r.runner, issueIDs, wispIDs)
 }
@@ -893,12 +952,77 @@ func (r *issueSQLRepositoryImpl) GetStatistics(ctx context.Context) (*types.Stat
 	`).Scan(&blocked); err != nil {
 		return nil, fmt.Errorf("db: IssueSQLRepository.GetStatistics: count blocked: %w", err)
 	}
-	stats.BlockedIssues = blocked
-	stats.ReadyIssues = stats.OpenIssues - blocked
-	if stats.ReadyIssues < 0 {
-		stats.ReadyIssues = 0
+	stats.BlockedIssues = &blocked
+	ready := stats.OpenIssues - blocked
+	if ready < 0 {
+		ready = 0
 	}
+	stats.ReadyIssues = &ready
 	return stats, nil
+}
+
+func (r *issueSQLRepositoryImpl) CountIssues(ctx context.Context, query string, filter types.IssueFilter) (int64, error) {
+	n, err := issueops.CountIssuesInTx(ctx, r.runner, query, filter)
+	if err != nil {
+		return 0, fmt.Errorf("db: IssueSQLRepository.CountIssues: %w", err)
+	}
+	return int64(n), nil
+}
+
+func (r *issueSQLRepositoryImpl) CountIssuesByGroup(ctx context.Context, filter types.IssueFilter, groupBy string) (map[string]int, error) {
+	out, err := issueops.CountIssuesByGroupInTx(ctx, r.runner, filter, groupBy)
+	if err != nil {
+		return nil, fmt.Errorf("db: IssueSQLRepository.CountIssuesByGroup: %w", err)
+	}
+	return out, nil
+}
+
+func (r *issueSQLRepositoryImpl) History(ctx context.Context, id string) ([]*storage.HistoryEntry, error) {
+	out, err := issueops.HistoryInTx(ctx, r.runner, id)
+	if err != nil {
+		return nil, fmt.Errorf("db: IssueSQLRepository.History: %w", err)
+	}
+	return out, nil
+}
+
+func (r *issueSQLRepositoryImpl) IterEvents(ctx context.Context, id string, limit int) (storage.Iter[types.Event], error) {
+	events, err := issueops.GetEventsInTx(ctx, r.runner, id, limit)
+	if err != nil {
+		return nil, fmt.Errorf("db: IssueSQLRepository.IterEvents: %w", err)
+	}
+	return storage.NewSliceIter(events), nil
+}
+
+func (r *issueSQLRepositoryImpl) GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error) {
+	out, err := issueops.GetStaleIssuesInTx(ctx, r.runner, filter)
+	if err != nil {
+		return nil, fmt.Errorf("db: IssueSQLRepository.GetStaleIssues: %w", err)
+	}
+	return out, nil
+}
+
+func (r *issueSQLRepositoryImpl) GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error) {
+	out, err := issueops.GetEpicsEligibleForClosureInTx(ctx, r.runner)
+	if err != nil {
+		return nil, fmt.Errorf("db: IssueSQLRepository.GetEpicsEligibleForClosure: %w", err)
+	}
+	return out, nil
+}
+
+func (r *issueSQLRepositoryImpl) UnclaimIssue(ctx context.Context, id, actor string, force bool) error {
+	if err := issueops.UnclaimIssueInTx(ctx, r.runner, id, actor, force); err != nil {
+		return fmt.Errorf("db: IssueSQLRepository.UnclaimIssue: %w", err)
+	}
+	return nil
+}
+
+func (r *issueSQLRepositoryImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {
+	cutoff := time.Now().UTC().Add(-olderThan)
+	out, err := issueops.ReclaimExpiredLeasesInTx(ctx, r.runner, cutoff, filter, actor)
+	if err != nil {
+		return nil, fmt.Errorf("db: IssueSQLRepository.ReclaimExpiredLeases: %w", err)
+	}
+	return out, nil
 }
 
 const deleteBatchSize = 200
