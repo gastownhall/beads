@@ -217,13 +217,13 @@ func OrphanedChildCounters(path string, verbose bool) error {
 	}
 
 	ccRes, err := tx.ExecContext(ctx,
-		`DELETE FROM child_counters cc WHERE NOT EXISTS (SELECT 1 FROM issues i WHERE i.id = cc.parent_id)`)
+		`DELETE FROM child_counters WHERE NOT EXISTS (SELECT 1 FROM issues i WHERE i.id = child_counters.parent_id)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("failed to remove orphaned child_counters rows: %w", err)
 	}
 	wccRes, err := tx.ExecContext(ctx,
-		`DELETE FROM wisp_child_counters wcc WHERE NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = wcc.parent_id)`)
+		`DELETE FROM wisp_child_counters WHERE NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = wisp_child_counters.parent_id)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("failed to remove orphaned wisp_child_counters rows: %w", err)
