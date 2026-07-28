@@ -42,12 +42,22 @@ var (
 type switchableEmitter struct {
 	mu      sync.RWMutex
 	current eventkit.Emitter
+	dir     string
 }
 
-func (s *switchableEmitter) set(e eventkit.Emitter) {
+func (s *switchableEmitter) set(e eventkit.Emitter, dir string) {
 	s.mu.Lock()
 	s.current = e
+	s.dir = dir
 	s.mu.Unlock()
+}
+
+// attachedDir reports the data dir AttachFileEmitter resolved, or "" if the
+// emitter is still the no-op one.
+func (s *switchableEmitter) attachedDir() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.dir
 }
 
 func (s *switchableEmitter) Send(ctx context.Context, req *eventkit.LogEventsRequest) error {
@@ -90,7 +100,7 @@ func Init(version string, enable bool, metricsEndpoint string) (func(context.Con
 		endpoint = DefaultEndpoint
 	}
 
-	switchEmitter.set(eventkit.NullEmitter{})
+	switchEmitter.set(eventkit.NullEmitter{}, "")
 	// The distinct ID is resolved only on the enabled path: computing it can
 	// fork a platform probe (see cachedMachineID), and a disabled collector
 	// never emits an event that would carry it. The placeholder below is inert
@@ -124,7 +134,7 @@ func AttachFileEmitter(dataDir string) error {
 	if err != nil {
 		return fmt.Errorf("metrics: file emitter: %w", err)
 	}
-	switchEmitter.set(fe)
+	switchEmitter.set(fe, dataDir)
 	return nil
 }
 
