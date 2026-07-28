@@ -11,13 +11,20 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
-func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool) error {
+func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool, database string) error {
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
 
-	if sqlQueryIsRead(query) {
+	multiStatement := isMultiStatementSQL(query)
+
+	if !multiStatement && sqlQueryIsRead(query) {
 		result, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (*domain.RawSQLResult, error) {
+			if database != "" {
+				if err := uw.SwitchDatabase(ctx, database); err != nil {
+					return nil, err
+				}
+			}
 			return uw.RawSQLUseCase().Query(ctx, query)
 		})
 		if err != nil {
@@ -29,6 +36,11 @@ func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool) erro
 	CheckReadonly("sql")
 
 	affected, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (int64, string, error) {
+		if database != "" {
+			if err := uw.SwitchDatabase(ctx, database); err != nil {
+				return 0, "", err
+			}
+		}
 		affected, err := uw.RawSQLUseCase().Exec(ctx, query)
 		if err != nil {
 			return 0, "", err
@@ -39,6 +51,16 @@ func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool) erro
 		return HandleErrorRespectJSON("exec error: %v", err)
 	}
 
+	if multiStatement {
+		if jsonOutput {
+			return outputJSON(map[string]interface{}{
+				"status": "ok",
+			})
+		}
+		fmt.Println("OK")
+		return nil
+	}
+
 	if jsonOutput {
 		return outputJSON(map[string]interface{}{
 			"rows_affected": affected,
@@ -47,6 +69,79 @@ func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool) erro
 
 	fmt.Printf("OK, %d rows affected\n", affected)
 	return nil
+}
+
+func isMultiStatementSQL(query string) bool {
+	return topLevelStatementCount(query) > 1
+}
+
+func topLevelStatementCount(query string) int {
+	count := 0
+	hasContent := false
+	n := len(query)
+	for i := 0; i < n; {
+		c := query[i]
+		switch c {
+		case '\'', '"', '`':
+			quote := c
+			i++
+			for i < n {
+				if query[i] == '\\' && quote != '`' {
+					i += 2
+					continue
+				}
+				if query[i] == quote {
+					if i+1 < n && query[i+1] == quote {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+			hasContent = true
+		case '-':
+			if i+1 < n && query[i+1] == '-' && (i+2 >= n || query[i+2] == ' ' || query[i+2] == '\t' || query[i+2] == '\n' || query[i+2] == '\r') {
+				for i < n && query[i] != '\n' && query[i] != '\r' {
+					i++
+				}
+			} else {
+				hasContent = true
+				i++
+			}
+		case '#':
+			for i < n && query[i] != '\n' && query[i] != '\r' {
+				i++
+			}
+		case '/':
+			if i+1 < n && query[i+1] == '*' {
+				i += 2
+				for i+1 < n && !(query[i] == '*' && query[i+1] == '/') {
+					i++
+				}
+				i += 2
+			} else {
+				hasContent = true
+				i++
+			}
+		case ';':
+			if hasContent {
+				count++
+				hasContent = false
+			}
+			i++
+		case ' ', '\t', '\n', '\r':
+			i++
+		default:
+			hasContent = true
+			i++
+		}
+	}
+	if hasContent {
+		count++
+	}
+	return count
 }
 
 func sqlQueryIsRead(query string) bool {

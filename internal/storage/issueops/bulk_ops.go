@@ -197,6 +197,13 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		return 0, fmt.Errorf("affected by source-repo delete: %w", aerr)
 	}
 
+	// Deleted issues hold no leases: clear them while the id set is still
+	// joinable (before the issues rows go away).
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM leases WHERE issue_id IN (SELECT id FROM issues WHERE source_repo = ?)`, sourceRepo); err != nil {
+		return 0, fmt.Errorf("delete leases: %w", err)
+	}
+
 	result, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE source_repo = ?`, sourceRepo)
 	if err != nil {
 		return 0, fmt.Errorf("delete issues: %w", err)
@@ -240,6 +247,12 @@ func updateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, iss
 		return err
 	}
 
+	// A live lease follows its issue across the rename.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE leases SET issue_id = ? WHERE issue_id = ?`, newID, oldID); err != nil {
+		return fmt.Errorf("rename lease row: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO events (id, issue_id, event_type, actor, old_value, new_value)
 		VALUES (?, ?, 'renamed', ?, ?, ?)
@@ -273,7 +286,7 @@ func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issu
 
 // FindWispDependentsRecursiveInTx walks wisp_dependencies to find all transitive
 // dependents of the given IDs.
-func FindWispDependentsRecursiveInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[string]bool, error) {
+func FindWispDependentsRecursiveInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}

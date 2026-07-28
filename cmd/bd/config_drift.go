@@ -262,10 +262,24 @@ func checkServerDrift() []DriftItem {
 		}}
 	}
 
-	sharedServerEnabled := config.GetString("dolt.shared-server")
-	wantServer := strings.EqualFold(sharedServerEnabled, "true")
+	wantServer := doltserver.IsSharedServerMode()
 
-	serverRunning := isServerProbablyRunning(beadsDir)
+	serverDir := beadsDir
+	if wantServer {
+		var err error
+		serverDir, err = doltserver.SharedServerPath()
+		if err != nil {
+			return []DriftItem{{
+				Check:    "server",
+				Status:   driftStatusDrift,
+				Message:  fmt.Sprintf("dolt.shared-server is enabled but its state directory cannot be resolved: %v", err),
+				Expected: "resolvable shared server state directory",
+				Actual:   "unavailable",
+			}}
+		}
+	}
+
+	serverRunning := isServerProbablyRunning(serverDir)
 
 	if wantServer && !serverRunning {
 		return []DriftItem{{

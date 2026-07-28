@@ -1,6 +1,6 @@
 ---
 title: "bd recompute-blocked"
-description: "Recompute is_blocked for all issues (repairs stale flags after a pull)"
+description: "Recompute the denormalized is_blocked flag for every issue and wisp."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

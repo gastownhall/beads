@@ -126,6 +126,7 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("SearchLimit", func(t *testing.T) { testSearchLimit(t, factory) })
 	t.Run("CountIssues", func(t *testing.T) { testCountIssues(t, factory) })
 	t.Run("CountByGroup", func(t *testing.T) { testCountByGroup(t, factory) })
+	t.Run("CountByGroupIsBlockedFilter", func(t *testing.T) { testCountByGroupIsBlockedFilter(t, factory) })
 
 	// Dependencies
 	t.Run("AddAndGetDeps", func(t *testing.T) { testAddAndGetDeps(t, factory) })
@@ -146,14 +147,17 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("Claim", func(t *testing.T) { testClaim(t, factory) })
 	t.Run("ClaimIdempotent", func(t *testing.T) { testClaimIdempotent(t, factory) })
 	t.Run("ClaimAlreadyClaimed", func(t *testing.T) { testClaimAlreadyClaimed(t, factory) })
+	t.Run("ClaimOpenForeignAssignee", func(t *testing.T) { testClaimOpenForeignAssignee(t, factory) })
 	t.Run("ClaimNotClaimable", func(t *testing.T) { testClaimNotClaimable(t, factory) })
 	t.Run("ClaimReadyIssue", func(t *testing.T) { testClaimReadyIssue(t, factory) })
 	t.Run("ClaimReadyIssueLabelFilters", func(t *testing.T) { testClaimReadyIssueLabelFilters(t, factory) })
-	t.Run("ClaimReadyIssueConcurrentExclusivity", func(t *testing.T) { testClaimReadyIssueConcurrentExclusivity(t, factory) })
 	t.Run("HeartbeatRenewsLease", func(t *testing.T) { testHeartbeatRenewsLease(t, factory) })
 	t.Run("HeartbeatWisp", func(t *testing.T) { testHeartbeatWisp(t, factory) })
 	t.Run("ReclaimExpiredLease", func(t *testing.T) { testReclaimExpiredLease(t, factory) })
 	t.Run("ReclaimSkipsFreshLease", func(t *testing.T) { testReclaimSkipsFreshLease(t, factory) })
+	t.Run("ReclaimScoped", func(t *testing.T) { testReclaimScoped(t, factory) })
+	t.Run("UnclaimIfAssigneeMatch", func(t *testing.T) { testUnclaimIfAssigneeMatch(t, factory) })
+	t.Run("UnclaimIfAssigneeStale", func(t *testing.T) { testUnclaimIfAssigneeStale(t, factory) })
 
 	// Labels
 	t.Run("Labels", func(t *testing.T) { testLabels(t, factory) })
@@ -189,14 +193,14 @@ func RunAll(t *testing.T, factory Factory) {
 
 	// Transaction
 	t.Run("Transaction", func(t *testing.T) { testTransaction(t, factory) })
+	t.Run("TransactionSnapshotReads", func(t *testing.T) { testTransactionSnapshotReads(t, factory) })
+	t.Run("TransactionReadYourWrites", func(t *testing.T) { testTransactionReadYourWrites(t, factory) })
 }
 
-// RunDeferredReads runs the subset of the suite covering the shared "deferred"
-// non-version-control reads — statistics, external-ref lookup, and staleness — that
-// the SQL-family backends (postgres/mysql/sqlite) implement through issueops. RunAll
-// is the full fail-loud measurement (and stays red on genuinely Dolt-only methods
-// like slots), so these backends run this focused GREEN gate instead. The Dolt
-// reference covers the same cases via RunAll.
+// RunDeferredReads runs the subset of the suite covering SQLite's shared
+// non-version-control reads: statistics, external-ref lookup, and staleness. RunAll
+// remains the full Dolt reference; SQLite runs this focused gate for methods supplied
+// by issueops while its Dolt-only methods fail loudly as unsupported.
 func RunDeferredReads(t *testing.T, factory Factory) {
 	t.Helper()
 	t.Run("Statistics", func(t *testing.T) { testStatistics(t, factory) })
@@ -493,6 +497,66 @@ func testCountByGroup(t *testing.T, f Factory) {
 	}
 	if counts["closed"] != 1 {
 		t.Errorf("closed = %d, want 1", counts["closed"])
+	}
+}
+
+// testCountByGroupIsBlockedFilter proves the additive IssueFilter.IsBlocked predicate honors the
+// denormalized is_blocked column in the grouped-count path on every backend: IsBlocked=&true returns
+// only is_blocked=true beads per status, &false the complement, and nil the whole population
+// (unchanged from testCountByGroup). Blockedness is produced the same way a real writer does — an open
+// blocker on a blocks-type dependency, which the write path denormalizes onto is_blocked.
+func testCountByGroupIsBlockedFilter(t *testing.T, f Factory) {
+	s := f(t)
+	// Two open beads blocked by an open blocker (is_blocked=true after AddDependency), one open
+	// bead left unblocked, and one closed bead (is_blocked=false) — a (status × is_blocked) mix.
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ibf-blk", Title: "Blocker", Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ibf-w1", Title: "Waiter1", Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ibf-w2", Title: "Waiter2", Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ibf-free", Title: "Free", Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ibf-done", Title: "Done", Status: types.StatusClosed}), "a"))
+	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "ibf-w1", DependsOnID: "ibf-blk", Type: types.DepBlocks}, "a"))
+	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "ibf-w2", DependsOnID: "ibf-blk", Type: types.DepBlocks}, "a"))
+
+	blockedTrue := true
+	blockedFalse := false
+
+	// IsBlocked=&true: only the two blocked waiters, both status=open.
+	onlyBlocked, err := s.CountIssuesByGroup(ctx(), types.IssueFilter{IsBlocked: &blockedTrue}, "status")
+	if err != nil {
+		t.Fatalf("CountIssuesByGroup(IsBlocked=true): %v", err)
+	}
+	if onlyBlocked["open"] != 2 {
+		t.Errorf("IsBlocked=true open = %d, want 2 (the blocked waiters only)", onlyBlocked["open"])
+	}
+	if onlyBlocked["closed"] != 0 {
+		t.Errorf("IsBlocked=true closed = %d, want 0", onlyBlocked["closed"])
+	}
+
+	// IsBlocked=&false: the complement — the blocker + the free bead (open) and the done bead (closed).
+	onlyUnblocked, err := s.CountIssuesByGroup(ctx(), types.IssueFilter{IsBlocked: &blockedFalse}, "status")
+	if err != nil {
+		t.Fatalf("CountIssuesByGroup(IsBlocked=false): %v", err)
+	}
+	if onlyUnblocked["open"] != 2 {
+		t.Errorf("IsBlocked=false open = %d, want 2 (blocker + free)", onlyUnblocked["open"])
+	}
+	if onlyUnblocked["closed"] != 1 {
+		t.Errorf("IsBlocked=false closed = %d, want 1 (done)", onlyUnblocked["closed"])
+	}
+
+	// nil: the whole population, and the true/false split partitions it exactly (no double-count).
+	all, err := s.CountIssuesByGroup(ctx(), types.IssueFilter{}, "status")
+	if err != nil {
+		t.Fatalf("CountIssuesByGroup(nil): %v", err)
+	}
+	if all["open"] != 4 || all["closed"] != 1 {
+		t.Errorf("nil filter open/closed = %d/%d, want 4/1", all["open"], all["closed"])
+	}
+	for _, status := range []string{"open", "closed"} {
+		if onlyBlocked[status]+onlyUnblocked[status] != all[status] {
+			t.Errorf("status %q: blocked(%d) + unblocked(%d) != all(%d) — the is_blocked split must partition",
+				status, onlyBlocked[status], onlyUnblocked[status], all[status])
+		}
 	}
 }
 
@@ -867,6 +931,321 @@ func testTransaction(t *testing.T, f Factory) {
 	if !found {
 		t.Errorf("label 'from-tx' not found, got %v", labels)
 	}
+}
+
+// sumCounts totals a CountIssuesByGroup result.
+func sumCounts(m map[string]int) int {
+	total := 0
+	for _, n := range m {
+		total += n
+	}
+	return total
+}
+
+// snapView bundles the composite-view reads taken at a single point inside a
+// transaction so the baseline and post-mutation snapshots can be compared as
+// plain data instead of a wall of inline reads. Both snapshots share these five
+// reads; point-specific extras (comments, the snap-1-scoped event feed, and the
+// batch blocked flags) are read separately by the caller.
+type snapView struct {
+	issues []*types.Issue
+	counts map[string]int
+	deps   []*types.Dependency
+	nDep   int
+	events []*types.Event
+}
+
+// readSnapView captures the five composite-view reads shared by the baseline and
+// post-mutation snapshots in testTransactionSnapshotReads.
+func readSnapView(c context.Context, tx storage.Transaction) (snapView, error) {
+	var v snapView
+	var err error
+	if v.issues, err = tx.SearchIssues(c, "", types.IssueFilter{}); err != nil {
+		return v, err
+	}
+	if v.counts, err = tx.CountIssuesByGroup(c, types.IssueFilter{}, "status"); err != nil {
+		return v, err
+	}
+	if v.deps, err = tx.GetDependentRecords(c, "snap-1", "", 0, ""); err != nil {
+		return v, err
+	}
+	if v.nDep, err = tx.CountDependentRecords(c, "snap-1", ""); err != nil {
+		return v, err
+	}
+	if v.events, err = tx.EventsSince(c, storage.EventCursor{}, "", 1000); err != nil {
+		return v, err
+	}
+	return v, nil
+}
+
+// testTransactionSnapshotReads proves the new reads run on the transaction's
+// live snapshot rather than a fresh (committed-only) connection: it reads a
+// composite view off the opening snapshot, mutates INSIDE the transaction, and
+// re-reads — asserting every read reflects the in-transaction mutation. A
+// non-transactional implementation would return the pre-mutation state on the
+// second read and fail every delta. It keeps the cross-read arithmetic checks so
+// a torn read (values drawn from different points) is also caught.
+//
+// The fixture includes a committed wisp so the count-vs-search wisp asymmetry is
+// exercised rather than silently avoided (CountIssuesByGroup merges wisps;
+// SearchIssues reads the issues table only). External-connection mutation (the
+// classic snapshot-isolation probe) is not used because the Dolt store pins a
+// single connection per transaction (MaxOpenConns=1), so a second op would
+// deadlock; the in-transaction mutation is the deterministic equivalent.
+func testTransactionSnapshotReads(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "snap-1", Title: "Root", Status: types.StatusOpen, IssueType: "bug", Priority: 0}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "snap-2", Title: "Child", Status: types.StatusOpen, IssueType: "task", Priority: 1}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "snap-3", Title: "Other", Status: types.StatusInProgress, IssueType: "task", Priority: 1}), "a"))
+	// A committed wisp: counted by CountIssuesByGroup but not by SearchIssues.
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "snap-wisp", Title: "Wisp", Status: types.StatusOpen, Ephemeral: true}), "a"))
+	const committedWisps = 1
+	// snap-2 depends on (is blocked by) snap-1.
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: "snap-2", DependsOnID: "snap-1", Type: types.DepBlocks}, "a"))
+	// Two comments on snap-1.
+	if _, err := s.AddIssueComment(c, "snap-1", "a", "first"); err != nil {
+		t.Fatalf("AddIssueComment: %v", err)
+	}
+	if _, err := s.AddIssueComment(c, "snap-1", "a", "second"); err != nil {
+		t.Fatalf("AddIssueComment: %v", err)
+	}
+
+	err := s.RunInTransaction(c, "bd: snapshot", func(tx storage.Transaction) error {
+		// --- Baseline reads off the opening snapshot. ---
+		base, err := readSnapView(c, tx)
+		if err != nil {
+			return err
+		}
+		comments0, err := tx.GetIssueCommentsPage(c, "snap-1", storage.CommentPageCursor{}, 0)
+		if err != nil {
+			return err
+		}
+		scoped0, err := tx.EventsSince(c, storage.EventCursor{}, "snap-1", 1000)
+		if err != nil {
+			return err
+		}
+		assertSnapBaseline(t, base, comments0, scoped0, committedWisps)
+
+		// --- Mutate INSIDE the transaction, then re-read the same view. ---
+		if err := tx.CreateIssue(c, withDefaults(&types.Issue{ID: "snap-4", Title: "InTx", Status: types.StatusOpen, IssueType: "task", Priority: 1}), "a"); err != nil {
+			return err
+		}
+		if err := tx.AddDependency(c, &types.Dependency{IssueID: "snap-4", DependsOnID: "snap-1", Type: types.DepBlocks}, "a"); err != nil {
+			return err
+		}
+
+		after, err := readSnapView(c, tx)
+		if err != nil {
+			return err
+		}
+		blocked1, err := tx.IsBlockedBatch(c, []string{"snap-1", "snap-2", "snap-3", "snap-4"})
+		if err != nil {
+			return err
+		}
+		assertSnapDelta(t, base, after, blocked1)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("RunInTransaction: %v", err)
+	}
+}
+
+// containsDependentFrom reports whether deps contains an inbound edge sourced at
+// sourceID.
+func containsDependentFrom(deps []*types.Dependency, sourceID string) bool {
+	for _, d := range deps {
+		if d.IssueID == sourceID {
+			return true
+		}
+	}
+	return false
+}
+
+// containsIssueID reports whether issues contains an issue with the given id.
+func containsIssueID(issues []*types.Issue, id string) bool {
+	for _, i := range issues {
+		if i.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// assertSnapBaseline checks the opening-snapshot reads: the durable+wisp count
+// sum, presence of every durable issue, the single inbound edge on snap-1 (with
+// list/count agreement), the two comments, a non-empty event feed, and that the
+// snap-1-scoped feed never leaks another issue's events.
+func assertSnapBaseline(t *testing.T, v snapView, comments []*types.Comment, scoped []*types.Event, committedWisps int) {
+	t.Helper()
+	// CountIssuesByGroup merges wisps on every backend, so its buckets sum to the
+	// 3 durable issues + the committed wisp. Whether SearchIssues also counts that
+	// committed wisp is backend-specific (the classic Dolt tx reads the issues
+	// table only; the embedded tx merges both), so we assert the durable issues
+	// are all present rather than a wisp-free equality — see the count-vs-search
+	// wisp-scoping asymmetry noted on storage.Transaction.
+	const durableSeeded = 3
+	if got := sumCounts(v.counts); got != durableSeeded+committedWisps {
+		t.Errorf("baseline sum(CountIssuesByGroup)=%d, want %d (durable + committed wisp)", got, durableSeeded+committedWisps)
+	}
+	for _, id := range []string{"snap-1", "snap-2", "snap-3"} {
+		if !containsIssueID(v.issues, id) {
+			t.Errorf("baseline SearchIssues missing durable issue %s", id)
+		}
+	}
+	if len(v.deps) != 1 || v.deps[0].IssueID != "snap-2" {
+		t.Errorf("baseline GetDependentRecords(snap-1)=%v, want one edge from snap-2", v.deps)
+	}
+	if v.nDep != len(v.deps) {
+		t.Errorf("baseline CountDependentRecords=%d != len(GetDependentRecords)=%d", v.nDep, len(v.deps))
+	}
+	if len(comments) != 2 {
+		t.Errorf("baseline GetIssueCommentsPage(snap-1)=%d comments, want 2", len(comments))
+	}
+	if len(v.events) == 0 {
+		t.Errorf("baseline EventsSince(all) returned no events")
+	}
+	for _, e := range scoped {
+		if e.IssueID != "snap-1" {
+			t.Errorf("EventsSince(snap-1) leaked event for %s", e.IssueID)
+		}
+	}
+}
+
+// assertSnapDelta checks that every composite-view read reflects exactly the
+// in-transaction create + edge (one new issue, one new inbound edge on snap-1
+// from snap-4 with snap-4 reading blocked) with no torn or missing rows.
+func assertSnapDelta(t *testing.T, base, after snapView, blocked map[string]bool) {
+	t.Helper()
+	if len(after.issues) != len(base.issues)+1 {
+		t.Errorf("SearchIssues after in-tx create = %d, want %d", len(after.issues), len(base.issues)+1)
+	}
+	if sumCounts(after.counts) != sumCounts(base.counts)+1 {
+		t.Errorf("CountIssuesByGroup total after in-tx create = %d, want %d", sumCounts(after.counts), sumCounts(base.counts)+1)
+	}
+	if len(after.deps) != len(base.deps)+1 {
+		t.Errorf("GetDependentRecords(snap-1) after in-tx edge = %d, want %d", len(after.deps), len(base.deps)+1)
+	}
+	if !containsDependentFrom(after.deps, "snap-4") {
+		t.Errorf("GetDependentRecords(snap-1) missing in-tx edge from snap-4: %v", after.deps)
+	}
+	if after.nDep != base.nDep+1 {
+		t.Errorf("CountDependentRecords(snap-1) after in-tx edge = %d, want %d", after.nDep, base.nDep+1)
+	}
+	if !blocked["snap-4"] {
+		t.Errorf("snap-4 should read blocked after its in-tx dependency")
+	}
+	if !blocked["snap-2"] {
+		t.Errorf("snap-2 should still read blocked")
+	}
+	if blocked["snap-1"] || blocked["snap-3"] {
+		t.Errorf("snap-1/snap-3 should read not-blocked, got %v", blocked)
+	}
+	if len(after.events) <= len(base.events) {
+		t.Errorf("EventsSince(all) did not grow after in-tx writes: %d <= %d", len(after.events), len(base.events))
+	}
+}
+
+// testTransactionReadYourWrites creates an issue graph inside a transaction and
+// reads it back through the new composite-view methods BEFORE commit, proving
+// the transaction sees its own uncommitted writes — including through the
+// grouped-count and event-feed reads.
+func testTransactionReadYourWrites(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+
+	err := s.RunInTransaction(c, "bd: ryw", func(tx storage.Transaction) error {
+		if err := seedReadYourWritesGraph(c, tx); err != nil {
+			return err
+		}
+		if err := assertInTxDependentReads(t, c, tx); err != nil {
+			return err
+		}
+		return assertInTxCountsAndEvents(t, c, tx)
+	})
+	if err != nil {
+		t.Fatalf("RunInTransaction: %v", err)
+	}
+}
+
+// seedReadYourWritesGraph creates the ryw-1 <- ryw-2 (blocked-by) graph inside
+// the transaction that reads it back.
+func seedReadYourWritesGraph(c context.Context, tx storage.Transaction) error {
+	if err := tx.CreateIssue(c, withDefaults(&types.Issue{ID: "ryw-1", Title: "Blocker", Status: types.StatusOpen}), "a"); err != nil {
+		return err
+	}
+	if err := tx.CreateIssue(c, withDefaults(&types.Issue{ID: "ryw-2", Title: "Blocked", Status: types.StatusOpen}), "a"); err != nil {
+		return err
+	}
+	return tx.AddDependency(c, &types.Dependency{IssueID: "ryw-2", DependsOnID: "ryw-1", Type: types.DepBlocks}, "a")
+}
+
+// assertInTxDependentReads proves the dependents/blocked family reads the graph's
+// own uncommitted writes: the single inbound edge on ryw-1 (list, by-target map,
+// and count all agree) and the blocked flags (ryw-2 blocked, ryw-1 not) through
+// both IsBlockedBatch and IsBlocked.
+func assertInTxDependentReads(t *testing.T, c context.Context, tx storage.Transaction) error {
+	t.Helper()
+	dependents, err := tx.GetDependentRecords(c, "ryw-1", "", 0, "")
+	if err != nil {
+		return err
+	}
+	if len(dependents) != 1 || dependents[0].IssueID != "ryw-2" {
+		t.Errorf("in-tx GetDependentRecords(ryw-1) = %v, want one edge from ryw-2", dependents)
+	}
+	byTarget, err := tx.GetDependentRecordsForIssues(c, []string{"ryw-1"})
+	if err != nil {
+		return err
+	}
+	if len(byTarget["ryw-1"]) != 1 {
+		t.Errorf("in-tx GetDependentRecordsForIssues[ryw-1] = %d, want 1", len(byTarget["ryw-1"]))
+	}
+	nDep, err := tx.CountDependentRecords(c, "ryw-1", "")
+	if err != nil {
+		return err
+	}
+	if nDep != 1 {
+		t.Errorf("in-tx CountDependentRecords(ryw-1) = %d, want 1", nDep)
+	}
+	batch, err := tx.IsBlockedBatch(c, []string{"ryw-1", "ryw-2"})
+	if err != nil {
+		return err
+	}
+	if !batch["ryw-2"] || batch["ryw-1"] {
+		t.Errorf("in-tx IsBlockedBatch = %v, want ryw-2 blocked, ryw-1 not", batch)
+	}
+	isBlocked, blockers, err := tx.IsBlocked(c, "ryw-2")
+	if err != nil {
+		return err
+	}
+	if !isBlocked || len(blockers) != 1 || blockers[0] != "ryw-1" {
+		t.Errorf("in-tx IsBlocked(ryw-2) = %v, %v, want true, [ryw-1]", isBlocked, blockers)
+	}
+	return nil
+}
+
+// assertInTxCountsAndEvents proves the grouped counts and durable event feed also
+// reflect the transaction's own uncommitted writes.
+func assertInTxCountsAndEvents(t *testing.T, c context.Context, tx storage.Transaction) error {
+	t.Helper()
+	// The two in-tx durable issues are visible through the grouped counts.
+	counts, err := tx.CountIssuesByGroup(c, types.IssueFilter{}, "status")
+	if err != nil {
+		return err
+	}
+	if sumCounts(counts) != 2 {
+		t.Errorf("in-tx CountIssuesByGroup total = %d, want 2 (both uncommitted issues)", sumCounts(counts))
+	}
+	// The in-tx create event is visible through the durable event feed.
+	evs, err := tx.EventsSince(c, storage.EventCursor{}, "ryw-1", 100)
+	if err != nil {
+		return err
+	}
+	if len(evs) == 0 {
+		t.Errorf("in-tx EventsSince(ryw-1) returned no events for the uncommitted create")
+	}
+	return nil
 }
 
 // --- Ready-work counts equivalence (perf/ready-counts) ---

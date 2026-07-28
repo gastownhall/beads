@@ -195,7 +195,7 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 
 // TryAutoResolveMergeConflicts auto-resolves merge conflicts that are safe to
 // resolve without operator input, and returns (true, nil) only if ALL conflicts
-// were resolved. It handles four classes:
+// were resolved. It handles these classes:
 //
 //   - metadata: machine-local rows (e.g. dolt_auto_push_*) that routinely diverge
 //     across clones (GH#2466). Resolved with "theirs".
@@ -225,26 +225,33 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     value. A conflict touching ANY non-memory config key (issue_prefix above
 //     all) is a real semantic conflict and is left for the operator.
 //
-//   - issues: modify/modify conflicts where both sides updated the same issue
-//     are resolved row-wise by last-write-wins (updated_at) — whichever side
-//     has the strictly newer timestamp wins the whole row. add/add (no base
-//     row) and delete/modify are left for the operator, as are rows where both
-//     sides share the same updated_at (ambiguous). A row is only auto-resolved
-//     when the losing side's updated_at predates the merge base (equals the
-//     base row's updated_at): if the losing side also moved its updated_at past
-//     the base value, both sides made real edits since the last sync and LWW
-//     would silently drop the losing side's field-level changes, so the row is
-//     left for the operator. This eliminates the biggest manual wall in
-//     multi-clone sync: the issues-table conflicts that follow routine
-//     cross-clone pulls (GH#4698), while preserving the common case where one
-//     side's conflict is a migration artifact (the row was rewritten by a
-//     schema change but updated_at did not move) and the other side made the
-//     only real edit. bd is primarily single-user-multi-machine so concurrent
-//     same-issue edits since a shared merge base are rare.
+//   - issues: modify/modify conflicts are merged FIELD BY FIELD against the
+//     merge base (automerge.go). A cell only one side changed keeps that
+//     side's value, so disjoint edits both survive; a cell both sides changed
+//     to different values is settled last-write-wins by updated_at, which also
+//     merges updated_at itself to max(ours, theirs). This is the flagship of
+//     the federation asks: because beads stamps updated_at on every mutation,
+//     ANY two same-issue edits between syncs conflict on that cell even when
+//     the semantic fields are disjoint, so the conflict rate is far higher
+//     than the semantic-conflict rate. add/add (no base row), delete/modify
+//     (one side removed it), and a contested cell whose two sides carry equal
+//     or unparseable updated_at values are left for the operator.
+//
+//   - labels: set-union. The table is all key columns, so two sides adding
+//     DIFFERENT labels are disjoint rows dolt already unions and a conflict
+//     can only be the same (issue_id, label) on both sides — identical data,
+//     resolved by keeping it.
+//
+//   - comments/events: append-only union. Rows are insert-only and keyed by a
+//     per-machine-unique id, so creation is disjoint; a same-id conflict whose
+//     columns agree is the same append on both sides and is resolved by
+//     keeping it. A row missing on one side, or diverging columns in a
+//     supposedly immutable row, is left for the operator.
 //
 // Any conflict on another table, or an unresolvable dependencies,
-// schema_migrations, config, or issues conflict, returns (false, nil) so the
-// caller fails the pull and the operator resolves it.
+// schema_migrations, config, issues, labels, comments, or events conflict,
+// returns (false, nil) so the caller fails the pull and the operator resolves
+// it.
 //
 // The resolved tables are staged but NOT committed: the caller must run
 // CommitResolvedConflicts after the FK cascade repair, because DOLT_COMMIT
@@ -280,6 +287,8 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 	// Decide which conflicted tables are safe to auto-resolve. If any conflict is
 	// not safely resolvable, resolve nothing and let the pull fail.
 	var resolvable []string
+	var issuesPlan []issuesRowMerge
+	var unionPlans map[string][]unionRowKey
 	for _, c := range conflicts {
 		switch c.table {
 		case "metadata":
@@ -312,14 +321,28 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 			}
 			resolvable = append(resolvable, "config")
 		case "issues":
-			lwwSafe, err := issuesConflictsAreLWWSafe(ctx, db)
+			plan, mergeable, err := issuesConflictsAreFieldMergeable(ctx, db)
 			if err != nil {
 				return false, err
 			}
-			if !lwwSafe {
+			if !mergeable {
 				return false, nil
 			}
+			issuesPlan = plan
 			resolvable = append(resolvable, "issues")
+		case "labels", "comments", "events":
+			unionPlan, unionSafe, err := unionConflictsAreSafe(ctx, db, c.table)
+			if err != nil {
+				return false, err
+			}
+			if !unionSafe {
+				return false, nil
+			}
+			if unionPlans == nil {
+				unionPlans = make(map[string][]unionRowKey, len(conflicts))
+			}
+			unionPlans[c.table] = unionPlan
+			resolvable = append(resolvable, c.table)
 		default:
 			return false, nil
 		}
@@ -351,7 +374,14 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 				return false, fmt.Errorf("failed to resolve config conflicts: %w", err)
 			}
 		case "issues":
-			if err := resolveIssuesLWWConflicts(ctx, db); err != nil {
+			// Field-level three-way merge, not a table-level --ours/--theirs:
+			// a cell only one side changed keeps that side's value and only a
+			// genuinely contested cell falls to LWW (automerge.go).
+			if err := resolveIssuesFieldMerge(ctx, db, issuesPlan); err != nil {
+				return false, err
+			}
+		case "labels", "comments", "events":
+			if err := resolveUnionConflicts(ctx, db, table, unionPlans[table]); err != nil {
 				return false, err
 			}
 		default:
@@ -377,136 +407,8 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 // cascade violation could never settle while the resolver committed first
 // (bd-578h9.14).
 func CommitResolvedConflicts(ctx context.Context, db DBConn) error {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts (GH#2466, #4259, GH#2474, GH#4698)')"); err != nil {
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)')"); err != nil {
 		return fmt.Errorf("failed to commit resolved conflicts: %w", err)
-	}
-	return nil
-}
-
-// issuesConflictsAreLWWSafe reports whether every conflicted row in the issues
-// table is a modify/modify conflict (the row existed at the merge base and was
-// modified on both sides) with strictly different updated_at timestamps where
-// the losing side's timestamp predates the merge base — the only class safe to
-// auto-resolve by last-write-wins. add/add conflicts (no base row),
-// delete/modify conflicts (one side deleted), rows where both sides share the
-// same updated_at (ambiguous), and rows where the losing side's updated_at
-// moved past the base value (both sides made real edits since the last sync)
-// are left for the operator.
-func issuesConflictsAreLWWSafe(ctx context.Context, db DBConn) (bool, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT base_id, our_id, their_id, base_updated_at, our_updated_at, their_updated_at
-		FROM dolt_conflicts_issues`)
-	if err != nil {
-		return false, fmt.Errorf("query issues conflicts: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var baseID, ourID, theirID sql.NullString
-		var baseUpdatedAt, ourUpdatedAt, theirUpdatedAt sql.NullTime
-		if err := rows.Scan(&baseID, &ourID, &theirID, &baseUpdatedAt, &ourUpdatedAt, &theirUpdatedAt); err != nil {
-			return false, fmt.Errorf("scan issues conflict: %w", err)
-		}
-		// One side deleted the row (delete/modify): leave for the operator.
-		if !ourID.Valid || !theirID.Valid {
-			return false, nil
-		}
-		// No base row means both sides added (add/add): leave for the operator.
-		if !baseID.Valid {
-			return false, nil
-		}
-		// Both timestamps must be present to compare.
-		if !ourUpdatedAt.Valid || !theirUpdatedAt.Valid {
-			return false, nil
-		}
-		// Equal timestamps are ambiguous: leave for the operator.
-		if ourUpdatedAt.Time.Equal(theirUpdatedAt.Time) {
-			return false, nil
-		}
-		// The base row exists (modify/modify was confirmed above), so its
-		// updated_at should always be valid (the column is NOT NULL). Guard
-		// defensively: if it is somehow absent we cannot evaluate the
-		// predates check, so leave the row for the operator.
-		if !baseUpdatedAt.Valid {
-			return false, nil
-		}
-		// The losing side (older updated_at) must not have edited the issue
-		// since the merge base. If its updated_at moved past the base value,
-		// both sides made real edits since the last sync and row-level LWW
-		// would silently drop the losing side's field-level changes — leave
-		// that concurrent-edit case for the operator (GH#4698 Risk).
-		losing := ourUpdatedAt.Time
-		if theirUpdatedAt.Time.Before(losing) {
-			losing = theirUpdatedAt.Time
-		}
-		if losing.After(baseUpdatedAt.Time) {
-			return false, nil
-		}
-	}
-	return true, rows.Err()
-}
-
-// resolveIssuesLWWConflicts resolves modify/modify issues-table conflicts
-// (validated by issuesConflictsAreLWWSafe) row-wise by last-write-wins: for
-// each conflicted row, whichever side has the strictly newer updated_at wins
-// the whole row. DOLT_CONFLICTS_RESOLVE is table-level (--ours/--theirs), so
-// per-row resolution uses Dolt's manual-resolution path: for rows where ours
-// wins, deleting the conflict row from dolt_conflicts_issues signals resolution
-// (the working set already holds our values); the remaining rows (theirs wins)
-// are then resolved with a single --theirs call.
-func resolveIssuesLWWConflicts(ctx context.Context, db DBConn) error {
-	rows, err := db.QueryContext(ctx, `
-		SELECT our_id, our_updated_at, their_updated_at
-		FROM dolt_conflicts_issues`)
-	if err != nil {
-		return fmt.Errorf("query issues conflicts for LWW: %w", err)
-	}
-
-	type oursWin struct {
-		id string
-	}
-	var oursWins []oursWin
-	theirsCount := 0
-	for rows.Next() {
-		var ourID sql.NullString
-		var ourUpdatedAt, theirUpdatedAt sql.NullTime
-		if err := rows.Scan(&ourID, &ourUpdatedAt, &theirUpdatedAt); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("scan issues conflict for LWW: %w", err)
-		}
-		if !ourID.Valid || !ourUpdatedAt.Valid || !theirUpdatedAt.Valid {
-			// issuesConflictsAreLWWSafe already screened these out; a row
-			// that slipped through must not be silently resolved.
-			_ = rows.Close()
-			return fmt.Errorf("unexpected invalid conflict row in dolt_conflicts_issues (safety check bypassed)")
-		}
-		if ourUpdatedAt.Time.After(theirUpdatedAt.Time) {
-			oursWins = append(oursWins, oursWin{id: ourID.String})
-		} else {
-			theirsCount++
-		}
-	}
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-		return err
-	}
-
-	// For rows where ours wins: delete the conflict row. The working set
-	// already holds our values, so deleting the conflict entry signals
-	// resolution. Dolt applies this per-row using the primary key.
-	for _, w := range oursWins {
-		if _, err := db.ExecContext(ctx,
-			"DELETE FROM dolt_conflicts_issues WHERE our_id = ?", w.id); err != nil {
-			return fmt.Errorf("delete ours-wins conflict for issue %s: %w", w.id, err)
-		}
-	}
-
-	// For the remaining rows (theirs wins): resolve with --theirs. If there
-	// are none, skip the call — DOLT_CONFLICTS_RESOLVE on a conflict-free
-	// table is a no-op but skipping it avoids an unnecessary round-trip.
-	if theirsCount > 0 {
-		if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'issues')"); err != nil {
-			return fmt.Errorf("failed to resolve theirs-wins issues conflicts: %w", err)
-		}
 	}
 	return nil
 }

@@ -94,11 +94,30 @@ func collectConfigEntries() []configEntry {
 	// 4. Git config (beads.role)
 	entries = append(entries, collectGitConfigEntries()...)
 
+	// 5. Standalone env vars not bound to Viper keys
+	entries = append(entries, collectStandaloneEnvEntries()...)
+
 	// Sort by key for stable output
 	sort.Slice(entries, func(i, j int) bool {
 		return entries[i].Key < entries[j].Key
 	})
 
+	return entries
+}
+
+// collectStandaloneEnvEntries returns entries for env vars that bd reads
+// directly (without going through Viper). Keeping these out of Viper avoids
+// polluting the default-value table for opt-in operator knobs.
+func collectStandaloneEnvEntries() []configEntry {
+	var entries []configEntry
+	// BEADS_MAX_ROWS (be-x42v): defensive row cap for SearchIssues.
+	if raw, ok := os.LookupEnv("BEADS_MAX_ROWS"); ok && raw != "" {
+		entries = append(entries, configEntry{
+			Key:    "BEADS_MAX_ROWS",
+			Value:  raw,
+			Source: "env: BEADS_MAX_ROWS",
+		})
+	}
 	return entries
 }
 
@@ -131,6 +150,20 @@ func collectViperEntries() []configEntry {
 		value := formatViperValue(config.GetString(key))
 		source := config.GetValueSource(key)
 		sourceLabel := viperSourceLabel(key, source)
+
+		// The "actor" key gets the same BEADS_ACTOR > BD_ACTOR precedence as
+		// the runtime path (resolveConfiguredActor in main.go): viper's
+		// AutomaticEnv binds the deprecated BD_ACTOR ahead of any explicit
+		// binding, so config.GetString("actor")/viperSourceLabel alone would
+		// report BD_ACTOR's value and provenance even when BEADS_ACTOR is
+		// also set — contradicting the actor that mutations actually use
+		// (GH#4645). Recompute both here so `config show` matches reality.
+		if key == "actor" {
+			value = formatViperValue(resolveConfiguredActor())
+			if beadsActor := os.Getenv("BEADS_ACTOR"); beadsActor != "" {
+				sourceLabel = "env: BEADS_ACTOR"
+			}
+		}
 
 		// User-global keys (metrics.*) are honored at runtime from the user-global
 		// config.yaml only, never merged project config; report that authoritative

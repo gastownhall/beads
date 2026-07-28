@@ -26,12 +26,27 @@ import (
 	"github.com/steveyegge/beads/internal/validation"
 )
 
+// validateCreateArgs runs as cobra's Args validation, which executes before
+// PersistentPreRunE opens the store or runs migrations. It reuses
+// resolveTitle — the same shared validator gatherCreateInput calls for the
+// proxied-server create path — so a whitespace-only title (GH#4771) is
+// rejected identically for both backends, and before any invocation that is
+// guaranteed to fail wastes a store open/migration.
+func validateCreateArgs(cmd *cobra.Command, args []string) error {
+	markdownFile, _ := cmd.Flags().GetString("file")
+	graphFile, _ := cmd.Flags().GetString("graph")
+	titleFlag, _ := cmd.Flags().GetString("title")
+
+	_, err := resolveTitle(args, titleFlag, markdownFile, graphFile)
+	return err
+}
+
 var createCmd = &cobra.Command{
 	Use:           "create [title]",
 	GroupID:       "issues",
 	Aliases:       []string{"new"},
 	Short:         "Create a new issue (or batch from markdown/graph JSON)",
-	Args:          cobra.MinimumNArgs(0),
+	Args:          validateCreateArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -65,6 +80,9 @@ var createCmd = &cobra.Command{
 			if dryRun {
 				return HandleError("--dry-run is not supported with --file flag")
 			}
+			if err := rejectSingleIssueFlagsForMarkdown(cmd); err != nil {
+				return err
+			}
 			return createIssuesFromMarkdown(cmd, file)
 		}
 
@@ -73,35 +91,20 @@ var createCmd = &cobra.Command{
 				return HandleError("cannot specify both title and --graph flag")
 			}
 			graphDryRun, _ := cmd.Flags().GetBool("dry-run")
-			wisp, _ := cmd.Flags().GetBool("ephemeral")
-			noHistory, _ := cmd.Flags().GetBool("no-history")
-			graphOpts := GraphApplyOptions{
-				Ephemeral: wisp,
-				NoHistory: noHistory,
-			}
+			graphOpts := graphApplyOptionsFromFlags(cmd)
 			if err := graphOpts.Validate(); err != nil {
 				return HandleError("invalid graph options: %v", err)
+			}
+			if err := rejectSingleIssueFlagsForGraph(cmd); err != nil {
+				return err
 			}
 			return createIssuesFromGraph(graphFile, graphDryRun, graphOpts)
 		}
 
 		titleFlag, _ := cmd.Flags().GetString("title")
-		var title string
-
-		if len(args) > 0 && titleFlag != "" {
-			if args[0] != titleFlag {
-				return HandleError("cannot specify different titles as both positional argument and --title flag\n  Positional: %q\n  --title:    %q", args[0], titleFlag)
-			}
-			title = args[0]
-		} else if len(args) > 0 {
-			if strings.HasPrefix(args[0], "-") {
-				return HandleError("title %q looks like a flag (starts with '-').\n  Run 'bd create --help' for available options.\n  To use this title anyway, pass it explicitly: bd create --title=%q", args[0], args[0])
-			}
-			title = args[0]
-		} else if titleFlag != "" {
-			title = titleFlag
-		} else {
-			return HandleError("title required (or use --file to create from markdown)")
+		title, err := resolveTitle(args, titleFlag, "", "")
+		if err != nil {
+			return err
 		}
 
 		// Get silent flag
@@ -166,15 +169,7 @@ var createCmd = &cobra.Command{
 		assignee, _ := cmd.Flags().GetString("assignee")
 		statusFlag, _ := cmd.Flags().GetString("status")
 		if statusFlag != "" {
-			var customStatuses []string
-			// store is nil for `create --repo=<remote URL>` with no local
-			// .beads/; fall back to built-in statuses only.
-			if store != nil {
-				if cs, err := store.GetCustomStatuses(rootCtx); err == nil {
-					customStatuses = cs
-				}
-			}
-			if !types.Status(statusFlag).IsValidWithCustom(customStatuses) {
+			if !types.Status(statusFlag).IsValidWithCustom(loadEmbeddedCustomStatuses()) {
 				return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", statusFlag)
 			}
 		}
@@ -465,6 +460,18 @@ var createCmd = &cobra.Command{
 			return renderDryRun()
 		}
 
+		// Parse every requested dependency edge BEFORE reserving a child ID
+		// or creating anything so a malformed spec aborts with no burned
+		// child ID and no orphan issue behind it.
+		depSpecs, err := parseDepSpecs(deps)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate, cmd.Flags().Changed("waits-for-gate"))
+		if err != nil {
+			return HandleError("%v", err)
+		}
+
 		createCtx := rootCtx
 		if parentID != "" {
 			childID, err := store.GetNextChildID(rootCtx, parentID)
@@ -481,15 +488,10 @@ var createCmd = &cobra.Command{
 				return HandleError("%v", err)
 			}
 
-			ctx := createCtx
-
-			var dbPrefix, allowedPrefixes string
-			if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
-				dbPrefix = yamlPrefix
-			} else {
-				dbPrefix, _ = store.GetConfig(ctx, "issue_prefix")
-			}
-			allowedPrefixes, _ = store.GetConfig(ctx, "allowed_prefixes")
+			// Validate prefix matches database prefix (YAML config takes
+			// precedence over DB, except under --global — see
+			// loadEmbeddedIDPrefixes).
+			dbPrefix, allowedPrefixes := loadEmbeddedIDPrefixes()
 
 			if err := validation.ValidateIDPrefixAllowed(explicitID, dbPrefix, allowedPrefixes, forceCreate); err != nil {
 				return HandleError("%v", err)
@@ -528,162 +530,33 @@ var createCmd = &cobra.Command{
 
 		ctx := createCtx
 
-		// Check if any dependencies are discovered-from type
-		// If so, inherit source_repo from the parent issue
-		var discoveredFromParentID string
-		for _, depSpec := range deps {
-			depSpec = strings.TrimSpace(depSpec)
-			if depSpec == "" {
-				continue
-			}
-
-			var depType types.DependencyType
-			var dependsOnID string
-
-			if strings.Contains(depSpec, ":") {
-				parts := strings.SplitN(depSpec, ":", 2)
-				if len(parts) == 2 {
-					depType = types.DependencyType(strings.TrimSpace(parts[0]))
-					dependsOnID = strings.TrimSpace(parts[1])
-
-					if depType == types.DepDiscoveredFrom && dependsOnID != "" {
-						discoveredFromParentID = dependsOnID
-						break
-					}
-				}
-			}
-		}
-
-		// If we found a discovered-from dependency, inherit source_repo from parent
-		if discoveredFromParentID != "" {
-			parentIssue, err := store.GetIssue(ctx, discoveredFromParentID)
+		// If a discovered-from dependency is present, inherit source_repo
+		// from the referenced parent issue.
+		if dfParent := discoveredFromParent(deps); dfParent != "" {
+			parentIssue, err := store.GetIssue(ctx, dfParent)
 			if err == nil && parentIssue.SourceRepo != "" {
 				issue.SourceRepo = parentIssue.SourceRepo
 			}
 			// If error getting parent or parent has no source_repo, continue with default
 		}
 
-		if err := store.CreateIssue(ctx, issue, actor); err != nil {
-			return HandleError("%v", err)
+		edges := createDepEdges{parentID: parentID, specs: depSpecs, waitsFor: waitsForSpec}
+		if err := createIssueWithDeps(ctx, store, issue, actor, edges); err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		// Track whether any post-create writes occurred. CreateIssue commits
-		// the issue and its initial labels to Dolt internally, but subsequent
-		// AddDependency calls only write to the working set. A follow-up Dolt
-		// commit is needed to persist them (GH#2009).
-		postCreateWrites := false
-
-		// If parent was specified, add parent-child dependency
-		if parentID != "" {
-			dep := &types.Dependency{
-				IssueID:     issue.ID,
-				DependsOnID: parentID,
-				Type:        types.DepParentChild,
-			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				WarnError("failed to add parent-child dependency %s -> %s: %v", issue.ID, parentID, err)
-			} else {
-				postCreateWrites = true
-			}
-		}
-
-		// Add dependencies if specified (format: type:id or just id for default "blocks" type)
-		for _, depSpec := range deps {
-			depSpec = strings.TrimSpace(depSpec)
-			if depSpec == "" {
-				continue
-			}
-
-			var depType types.DependencyType
-			var dependsOnID string
-			swapDirection := false
-
-			if strings.Contains(depSpec, ":") {
-				parts := strings.SplitN(depSpec, ":", 2)
-				if len(parts) != 2 {
-					WarnError("invalid dependency format '%s', expected 'type:id' or 'id'", depSpec)
-					continue
-				}
-				rawType := types.DependencyType(strings.TrimSpace(parts[0]))
-				dependsOnID = strings.TrimSpace(parts[1])
-
-				switch rawType {
-				case "depends-on", "blocked-by":
-					// Alias: the new issue depends on the target. Store as a blocks edge.
-					depType = types.DepBlocks
-				case types.DepBlocks:
-					// Explicit "blocks:X" means the new issue blocks X, so store X -> new issue.
-					depType = types.DepBlocks
-					swapDirection = true
-				default:
-					depType = rawType
-				}
-			} else {
-				depType = types.DepBlocks
-				dependsOnID = depSpec
-			}
-
-			if !depType.IsValid() {
-				return HandleErrorRespectJSON("invalid dependency type %q (must be non-empty, max 50 chars); valid types: %s", depType, createDepsAcceptedTypeList())
-			}
-			if !depType.IsWellKnown() {
-				return HandleErrorRespectJSON("unknown dependency type %q; valid types: %s", depType, createDepsAcceptedTypeList())
-			}
-
-			dep := &types.Dependency{
-				IssueID:     issue.ID,
-				DependsOnID: dependsOnID,
-				Type:        depType,
-			}
-			if swapDirection {
-				dep.IssueID = dependsOnID
-				dep.DependsOnID = issue.ID
-			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				WarnError("failed to add dependency %s -> %s: %v", issue.ID, dependsOnID, err)
-			} else {
-				postCreateWrites = true
-			}
-		}
-
-		if waitsFor != "" {
-			gate := waitsForGate
-			if gate == "" {
-				gate = types.WaitsForAllChildren
-			}
-			if gate != types.WaitsForAllChildren && gate != types.WaitsForAnyChildren {
-				return HandleError("invalid --waits-for-gate value '%s' (valid: all-children, any-children)", gate)
-			}
-
-			meta := types.WaitsForMeta{
-				Gate: gate,
-			}
-			metaJSON, err := json.Marshal(meta)
+		if edges.empty() {
+			// Bare create: preserve the embedded-mode follow-up Dolt commit.
+			// The deps path commits inside its transaction instead.
+			shouldCommit, err := shouldCommitCreatePostWrites(issue, false)
 			if err != nil {
-				return HandleError("failed to serialize waits-for metadata: %v", err)
+				return HandleError("dolt auto-commit failed: %v", err)
 			}
-
-			dep := &types.Dependency{
-				IssueID:     issue.ID,
-				DependsOnID: waitsFor,
-				Type:        types.DepWaitsFor,
-				Metadata:    string(metaJSON),
-			}
-			if err := store.AddDependency(ctx, dep, actor); err != nil {
-				WarnError("failed to add waits-for dependency %s -> %s: %v", issue.ID, waitsFor, err)
-			} else {
-				postCreateWrites = true
-			}
-		}
-
-		shouldCommit, err := shouldCommitCreatePostWrites(issue, postCreateWrites)
-		if err != nil {
-			return HandleError("dolt auto-commit failed: %v", err)
-		}
-		if shouldCommit {
-			commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
-			if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-				WarnError("failed to commit: %v", err)
+			if shouldCommit {
+				commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
+				if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
+					WarnError("failed to commit: %v", err)
+				}
 			}
 		}
 
@@ -818,6 +691,16 @@ func mergeCreateLabels(labels, inheritedLabels []string) []string {
 	return merged
 }
 
+func selectCreateIDPrefix(global bool, yamlPrefix, storePrefix string) string {
+	if global {
+		return storePrefix
+	}
+	if yamlPrefix != "" {
+		return yamlPrefix
+	}
+	return storePrefix
+}
+
 func renderCreateDryRunPreview(issue *types.Issue, labels, deps []string) {
 	idDisplay := issue.ID
 	if idDisplay == "" {
@@ -888,7 +771,7 @@ func init() {
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
 	createCmd.Flags().String("parent", "", "Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')")
 	createCmd.Flags().Bool("no-inherit-labels", false, "Don't inherit labels from parent issue")
-	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
+	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies as 'type:id' or bare 'id'. Bare 'id', 'depends-on:id', and 'blocked-by:id' all make THIS issue depend on id; 'blocks:id' reverses direction (id depends on this issue). E.g. 'blocked-by:bd-20,discovered-from:bd-15'")
 	createCmd.Flags().String("waits-for", "", "Spawner issue ID to wait for (creates waits-for dependency for fanout gate)")
 	createCmd.Flags().String("waits-for-gate", "all-children", "Gate type: all-children (wait for all) or any-children (wait for first)")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")

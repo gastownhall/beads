@@ -1,6 +1,6 @@
 ---
 title: "bd orphans"
-description: "Identify orphaned issues (referenced in commits but still open)"
+description: "Identify orphaned issues - issues that are referenced in commit messages but remain open or in_progress in the database."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

@@ -15,9 +15,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
-	beadsmysql "github.com/steveyegge/beads/internal/storage/mysql"
-	"github.com/steveyegge/beads/internal/storage/postgres"
-	beadssqlite "github.com/steveyegge/beads/internal/storage/sqlite"
 )
 
 func usesSQLServer() bool {
@@ -58,9 +55,20 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, e
 		return dolt.New(ctx, cfg)
 	}
 	if cfg.ReadOnly {
-		// Read-only commands must not be bricked by the #4259
-		// remote-migrate gate (bd-578h9.5); server mode's ReadOnly opens
-		// already skip migration entirely.
+		if cfg.DisableAutoStart {
+			// Strict --readonly (cfg.DisableAutoStart is the strict-only
+			// signal threaded from policy.disableAutoStart): the command
+			// must not write anything, not even incidentally (schema
+			// init, migrations, the post-command autocommit net). Use the
+			// genuinely write-refusing open — same one used for cross-repo
+			// hydration of foreign projects (GH#3231, bd-6dnrw.32) — instead
+			// of OpenForReadOnlyCommand, which is "otherwise a normal
+			// writable store".
+			return embeddeddolt.OpenReadOnly(ctx, cfg.BeadsDir, cfg.Database, "main")
+		}
+		// Ordinary classified-read commands (bd show, bd list, ...) must
+		// not be bricked by the #4259 remote-migrate gate (bd-578h9.5);
+		// server mode's ReadOnly opens already skip migration entirely.
 		return embeddeddolt.OpenForReadOnlyCommand(ctx, cfg.BeadsDir, cfg.Database, "main")
 	}
 	if cfg.LenientOpen {
@@ -110,14 +118,8 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 		// metadata.json (cfg == nil, err == nil) keeps the embedded default.
 		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
 	}
-	if cfg != nil && cfg.GetBackend() == configfile.BackendPostgres {
-		return postgres.NewFromConfig(ctx, beadsDir)
-	}
-	if cfg != nil && cfg.GetBackend() == configfile.BackendMySQL {
-		return beadsmysql.NewFromConfig(ctx, beadsDir)
-	}
-	if cfg != nil && cfg.GetBackend() == configfile.BackendSQLite {
-		return beadssqlite.NewFromConfig(ctx, beadsDir)
+	if err := validateConfiguredBackend(cfg); err != nil {
+		return nil, err
 	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
@@ -199,17 +201,8 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 		// "database not found" the embedded open would produce.
 		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
 	}
-	if cfg != nil && cfg.GetBackend() == configfile.BackendPostgres {
-		// Postgres has no read-only open mode in the wedge; a normal open is fine
-		// (reads don't mutate, and search_path is per-workspace).
-		return postgres.NewFromConfig(ctx, beadsDir)
-	}
-	if cfg != nil && cfg.GetBackend() == configfile.BackendMySQL {
-		// MySQL likewise has no separate read-only open in the wedge; reads don't mutate.
-		return beadsmysql.NewFromConfig(ctx, beadsDir)
-	}
-	if cfg != nil && cfg.GetBackend() == configfile.BackendSQLite {
-		return beadssqlite.NewFromConfig(ctx, beadsDir)
+	if err := validateConfiguredBackend(cfg); err != nil {
+		return nil, err
 	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider

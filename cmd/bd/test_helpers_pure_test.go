@@ -286,6 +286,15 @@ func findPrebuiltBDBinary() (string, error) {
 // tests. Uses the gms_pure_go tag so the resulting binary works in either
 // CGO mode. Lives in the pure-Go helpers file so subprocess-style tests can
 // run without the test package itself depending on cgo at compile time.
+//
+// The fast path is BEADS_TEST_BD_BINARY (exported by scripts/test.sh and CI),
+// via findPrebuiltBDBinary. There is deliberately NO repo-root ./bd reuse
+// here anymore: that "optimization" silently ran subprocess tests against
+// whatever stale binary happened to sit in the checkout root — a two-day-old
+// one produced phantom TestCreateDepsAtomicity failures (features the source
+// under test had, the binary didn't). Tests must exercise the checkout's
+// source or an explicitly supplied binary, never an incidental artifact
+// (wy-4mtr0).
 func buildBDForInitTests(t *testing.T) string {
 	t.Helper()
 	initTestBDOnce.Do(func() {
@@ -301,13 +310,6 @@ func buildBDForInitTests(t *testing.T) string {
 		bdBinary := "bd"
 		if runtime.GOOS == windowsOS {
 			bdBinary = "bd.exe"
-		}
-		// Preserve the existing local optimization: if a bd binary exists in
-		// the repository root, init-style subprocess tests can reuse it.
-		existingBD := filepath.Join("..", "..", bdBinary)
-		if _, err := os.Stat(existingBD); err == nil {
-			initTestBD, _ = filepath.Abs(existingBD)
-			return
 		}
 		// Fall back to building.
 		tmpDir, err := testTempDir("bd-init-test-*")

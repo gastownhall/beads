@@ -213,11 +213,11 @@ func TestExternalDoltServer_DSN(t *testing.T) {
 		assert.Contains(t, dsn, "tls=false")
 	})
 
-	t.Run("tcp with tls required", func(t *testing.T) {
+	t.Run("tls terminates client-side, not in this dsn", func(t *testing.T) {
 		s, err := NewExternalDoltServer(configfile.ExternalDoltConfig{Host: "db", Port: 3306, TLSRequired: true})
 		require.NoError(t, err)
 		dsn := s.DSN(context.Background(), "beads", "root", "")
-		assert.Contains(t, dsn, "tls=true")
+		assert.Contains(t, dsn, "tls=false")
 	})
 
 	t.Run("unix socket", func(t *testing.T) {

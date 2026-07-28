@@ -1,15 +1,26 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 func TestResolveDoltBackupURL(t *testing.T) {
 	t.Parallel()
+
+	// Build the absolute-path fixture with platform-native semantics.
+	// A hard-coded POSIX literal like "/mnt/usb/beads-backup" is not absolute
+	// on Windows (no volume name), so resolveDoltBackupURL would resolve it
+	// against the current drive and return "file://C:\\mnt\\usb\\...".
+	// t.TempDir() is absolute and already cleaned on every platform.
+	absBackup := filepath.Join(t.TempDir(), "beads-backup")
 
 	tests := []struct {
 		name      string
@@ -43,9 +54,9 @@ func TestResolveDoltBackupURL(t *testing.T) {
 			wantExact: "gs://bucket/path",
 		},
 		{
-			name:    "absolute path gets file:// prefix",
-			input:   "/mnt/usb/beads-backup",
-			wantPfx: "file:///mnt/usb/beads-backup",
+			name:      "absolute path gets file:// prefix",
+			input:     absBackup,
+			wantExact: "file://" + absBackup,
 		},
 		{
 			name:    "relative path gets resolved and prefixed",
@@ -175,29 +186,57 @@ func TestFormatBytes(t *testing.T) {
 	}
 }
 
-func TestDirSize(t *testing.T) {
+type backupSizeStub struct {
+	size int64
+	err  error
+}
+
+func (s backupSizeStub) ActiveDatabaseSize(context.Context) (int64, error) {
+	return s.size, s.err
+}
+
+func TestDoltBackupSizeFromSizer(t *testing.T) {
 	t.Parallel()
-	dir := t.TempDir()
 
-	// Create a few test files
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0600); err != nil {
-		t.Fatalf("write: %v", err)
+	failure := errors.New("measurement failed")
+	tests := []struct {
+		name          string
+		sizer         storage.ActiveDatabaseSizer
+		wantSize      int64
+		wantAvailable bool
+		wantErr       error
+	}{
+		{
+			name:          "available",
+			sizer:         backupSizeStub{size: 42},
+			wantSize:      42,
+			wantAvailable: true,
+		},
+		{
+			name: "unsupported",
+			sizer: backupSizeStub{err: &storage.ErrUnsupported{
+				Op:      "ActiveDatabaseSize",
+				Backend: "external",
+			}},
+		},
+		{
+			name:    "declared local failure",
+			sizer:   backupSizeStub{err: failure},
+			wantErr: failure,
+		},
 	}
-	sub := filepath.Join(dir, "sub")
-	if err := os.MkdirAll(sub, 0700); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(sub, "b.txt"), []byte("world!"), 0600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-
-	size, err := dirSize(dir)
-	if err != nil {
-		t.Fatalf("dirSize: %v", err)
-	}
-	// "hello" = 5 bytes, "world!" = 6 bytes = 11 total
-	if size != 11 {
-		t.Errorf("dirSize = %d, want 11", size)
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			size, available, err := doltBackupSizeFromSizer(t.Context(), tc.sizer)
+			if size != tc.wantSize || available != tc.wantAvailable || !errors.Is(err, tc.wantErr) {
+				t.Fatalf(
+					"doltBackupSizeFromSizer = (%d, %v, %v), want (%d, %v, %v)",
+					size, available, err, tc.wantSize, tc.wantAvailable, tc.wantErr,
+				)
+			}
+		})
 	}
 }
 

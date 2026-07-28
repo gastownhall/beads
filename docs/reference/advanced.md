@@ -30,7 +30,7 @@ bd rename-prefix kw-            # Every knowledge-work-* ID becomes kw-*
 ```
 
 The rename updates all issue IDs and all text references across all fields.
-Prefixes are at most 8 characters of lowercase letters, numbers, and hyphens,
+Prefixes are lowercase letters, numbers, and hyphens,
 must start with a letter, and must end with a hyphen. If a corrupted database
 contains issues with multiple prefixes, `bd rename-prefix <prefix> --repair`
 consolidates them. See [bd rename-prefix](/cli-reference/rename-prefix).

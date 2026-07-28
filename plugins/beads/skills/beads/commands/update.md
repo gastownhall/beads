@@ -1,6 +1,6 @@
 ---
 description: Update an issue's status, priority, or other fields
-argument-hint: [issue-id] [status]
+argument-hint: "[issue-id] [status]"
 ---
 
 Update a beads issue.

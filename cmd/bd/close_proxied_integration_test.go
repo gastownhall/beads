@@ -197,11 +197,13 @@ func readDoltLogCountSince(t *testing.T, db *sql.DB, sinceHash string) int {
 }
 
 func TestProxiedServerClose(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("basic_close", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cb")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cb")
 		issue := bdProxiedCreate(t, bd, p.dir, "Close me")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		got := bdProxiedShow(t, bd, p.dir, issue.ID)
@@ -214,7 +216,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_default_reason", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cdr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cdr")
 		issue := bdProxiedCreate(t, bd, p.dir, "Default reason")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		db := openProxiedDB(t, p)
@@ -224,7 +227,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_with_reason", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cwr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cwr")
 		issue := bdProxiedCreate(t, bd, p.dir, "Reason test")
 		bdProxiedClose(t, bd, p.dir, issue.ID, "--reason", "done")
 		db := openProxiedDB(t, p)
@@ -234,7 +238,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_with_reason_short", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cwrs")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cwrs")
 		issue := bdProxiedCreate(t, bd, p.dir, "Short reason")
 		bdProxiedClose(t, bd, p.dir, issue.ID, "-r", "fixed")
 		db := openProxiedDB(t, p)
@@ -244,7 +249,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_with_message_alias", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cwma")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cwma")
 		issue := bdProxiedCreate(t, bd, p.dir, "Message alias")
 		bdProxiedClose(t, bd, p.dir, issue.ID, "-m", "via message")
 		db := openProxiedDB(t, p)
@@ -254,7 +260,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_with_resolution_alias", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cwra")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cwra")
 		issue := bdProxiedCreate(t, bd, p.dir, "Resolution alias")
 		bdProxiedClose(t, bd, p.dir, issue.ID, "--resolution", "wontfix")
 		db := openProxiedDB(t, p)
@@ -264,7 +271,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_with_comment_alias", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cwca")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cwca")
 		issue := bdProxiedCreate(t, bd, p.dir, "Comment alias")
 		bdProxiedClose(t, bd, p.dir, issue.ID, "--comment", "duplicate")
 		db := openProxiedDB(t, p)
@@ -274,7 +282,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_multiple_ids", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cmi")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cmi")
 		a := bdProxiedCreate(t, bd, p.dir, "Multi A")
 		b := bdProxiedCreate(t, bd, p.dir, "Multi B")
 		bdProxiedClose(t, bd, p.dir, a.ID, b.ID)
@@ -288,7 +297,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_multiple_ids_with_per_id_reasons", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cmpr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cmpr")
 		a := bdProxiedCreate(t, bd, p.dir, "Multi reason A")
 		b := bdProxiedCreate(t, bd, p.dir, "Multi reason B")
 		bdProxiedClose(t, bd, p.dir, a.ID, "--reason", "fixed A", b.ID, "--reason", "fixed B")
@@ -302,7 +312,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_already_closed", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cac")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cac")
 		issue := bdProxiedCreate(t, bd, p.dir, "Double close")
 		bdProxiedClose(t, bd, p.dir, issue.ID, "--reason", "first")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "close", issue.ID, "--reason", "second")
@@ -316,7 +327,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_nonexistent_id", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cni")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cni")
 		out := bdProxiedCloseFail(t, bd, p.dir, "cni-does-not-exist")
 		if !strings.Contains(out, "not found") {
 			t.Errorf("expected 'not found' error, got: %s", out)
@@ -324,7 +336,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_blocked_refuses_without_force", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cbr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbr")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker")
 		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked", "--deps", "depends-on:"+blocker.ID)
 		out := bdProxiedCloseFail(t, bd, p.dir, blocked.ID)
@@ -338,7 +351,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_blocked_with_force", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cbf")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbf")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker force")
 		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked force", "--deps", "depends-on:"+blocker.ID)
 		bdProxiedClose(t, bd, p.dir, blocked.ID, "--force")
@@ -349,7 +363,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_pinned_refuses_without_force", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cpr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cpr")
 		issue := bdProxiedCreate(t, bd, p.dir, "Pinned")
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "-s", "pinned")
 		bdProxiedCloseFail(t, bd, p.dir, issue.ID)
@@ -360,7 +375,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_pinned_with_force", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cpf")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cpf")
 		issue := bdProxiedCreate(t, bd, p.dir, "Pinned force")
 		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "-s", "pinned")
 		bdProxiedClose(t, bd, p.dir, issue.ID, "--force")
@@ -371,7 +387,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_epic_open_children_refuses", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ceor")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ceor")
 		epic := bdProxiedCreate(t, bd, p.dir, "Epic", "-t", "epic")
 		_ = bdProxiedCreate(t, bd, p.dir, "Child", "--parent", epic.ID)
 		out := bdProxiedCloseFail(t, bd, p.dir, epic.ID)
@@ -381,7 +398,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_epic_open_children_force", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ceof")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ceof")
 		epic := bdProxiedCreate(t, bd, p.dir, "Epic force", "-t", "epic")
 		_ = bdProxiedCreate(t, bd, p.dir, "Child force", "--parent", epic.ID)
 		bdProxiedClose(t, bd, p.dir, epic.ID, "--force")
@@ -392,7 +410,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_last_child_keeps_regular_epic_open", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "clce")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "clce")
 		epic := bdProxiedCreate(t, bd, p.dir, "Regular epic", "-t", "epic")
 		child := bdProxiedCreate(t, bd, p.dir, "Last child", "--parent", epic.ID)
 		bdProxiedClose(t, bd, p.dir, child.ID)
@@ -403,7 +422,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_unblocks_dependent", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cud")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cud")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Unblock blocker")
 		blocked := bdProxiedCreate(t, bd, p.dir, "Unblock blocked", "--deps", "depends-on:"+blocker.ID)
 		db := openProxiedDB(t, p)
@@ -417,7 +437,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_suggest_next", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "csn")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "csn")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Suggest blocker")
 		blocked := bdProxiedCreate(t, bd, p.dir, "Suggest blocked", "--deps", "depends-on:"+blocker.ID)
 		out := bdProxiedClose(t, bd, p.dir, blocker.ID, "--suggest-next")
@@ -426,8 +447,16 @@ func TestProxiedServerClose(t *testing.T) {
 		}
 	})
 
+}
+
+func TestProxiedServerClose2(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
 	t.Run("close_suggest_next_json", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "csnj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "csnj")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Suggest JSON blocker")
 		blocked := bdProxiedCreate(t, bd, p.dir, "Suggest JSON blocked", "--deps", "depends-on:"+blocker.ID)
 		env := bdProxiedCloseJSONEnvelope(t, bd, p.dir, blocker.ID, "--suggest-next")
@@ -445,7 +474,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_claim_next", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ccn")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ccn")
 		toClose := bdProxiedCreate(t, bd, p.dir, "Claim next close")
 		nextIssue := bdProxiedCreate(t, bd, p.dir, "Claim next target")
 		bdProxiedClose(t, bd, p.dir, toClose.ID, "--claim-next")
@@ -459,7 +489,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_claim_next_no_ready", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ccnr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ccnr")
 		issue := bdProxiedCreate(t, bd, p.dir, "Only issue")
 		out := bdProxiedClose(t, bd, p.dir, issue.ID, "--claim-next")
 		if !strings.Contains(out, "No ready issues") {
@@ -468,7 +499,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_claim_next_json", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ccnj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ccnj")
 		toClose := bdProxiedCreate(t, bd, p.dir, "Claim JSON close")
 		_ = bdProxiedCreate(t, bd, p.dir, "Claim JSON target")
 		env := bdProxiedCloseJSONEnvelope(t, bd, p.dir, toClose.ID, "--claim-next")
@@ -481,7 +513,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_with_session", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cws")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cws")
 		issue := bdProxiedCreate(t, bd, p.dir, "Session flag")
 		bdProxiedClose(t, bd, p.dir, issue.ID, "--session", "sess-456")
 		db := openProxiedDB(t, p)
@@ -491,10 +524,12 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_session_from_env", func(t *testing.T) {
-		t.Setenv("CLAUDE_SESSION_ID", "sess-env")
-		p := bdProxiedInit(t, bd, "cse")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cse")
 		issue := bdProxiedCreate(t, bd, p.dir, "Session env")
-		bdProxiedClose(t, bd, p.dir, issue.ID)
+		if _, stderr, err := bdProxiedRunEnv(t, bd, p.dir, []string{"CLAUDE_SESSION_ID=sess-env"}, "close", issue.ID); err != nil {
+			t.Fatalf("close failed: %v\n%s", err, stderr)
+		}
 		db := openProxiedDB(t, p)
 		if got := readClosedBySession(t, db, issue.ID); got != "sess-env" {
 			t.Errorf("closed_by_session: got %q, want %q", got, "sess-env")
@@ -502,7 +537,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_json_output", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cjo")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cjo")
 		issue := bdProxiedCreate(t, bd, p.dir, "JSON close")
 		issues := bdProxiedCloseJSON(t, bd, p.dir, issue.ID)
 		if len(issues) != 1 || issues[0].ID != issue.ID {
@@ -514,7 +550,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("done_alias", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "da")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "da")
 		issue := bdProxiedCreate(t, bd, p.dir, "Done alias")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "done", issue.ID)
 		if err != nil {
@@ -527,7 +564,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("done_positional_reason", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dpr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dpr")
 		issue := bdProxiedCreate(t, bd, p.dir, "Done reason")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "done", issue.ID, "the reason")
 		if err != nil {
@@ -540,7 +578,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_continue_multiple_ids_fails", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ccmi")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ccmi")
 		a := bdProxiedCreate(t, bd, p.dir, "Continue multi A")
 		b := bdProxiedCreate(t, bd, p.dir, "Continue multi B")
 		out := bdProxiedCloseFail(t, bd, p.dir, a.ID, b.ID, "--continue")
@@ -550,7 +589,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_suggest_next_multiple_ids_fails", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "csmi")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "csmi")
 		a := bdProxiedCreate(t, bd, p.dir, "Suggest multi A")
 		b := bdProxiedCreate(t, bd, p.dir, "Suggest multi B")
 		out := bdProxiedCloseFail(t, bd, p.dir, a.ID, b.ID, "--suggest-next")
@@ -560,7 +600,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("single_transaction_dolt_commit", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "stdc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "stdc")
 		a := bdProxiedCreate(t, bd, p.dir, "Tx A")
 		b := bdProxiedCreate(t, bd, p.dir, "Tx B")
 		c := bdProxiedCreate(t, bd, p.dir, "Tx C")
@@ -583,7 +624,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("no_ids_errors", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "nie")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "nie")
 		out := bdProxiedCloseFail(t, bd, p.dir)
 		if !strings.Contains(out, "no issue ID provided") {
 			t.Errorf("expected 'no issue ID provided', got: %s", out)
@@ -591,7 +633,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("last_touched_not_supported", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ltns")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ltns")
 		_ = bdProxiedCreate(t, bd, p.dir, "Recent create")
 		out := bdProxiedCloseFail(t, bd, p.dir)
 		if !strings.Contains(out, "no issue ID provided") {
@@ -600,7 +643,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_wisp_issue", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cwi")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cwi")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp close", "--ephemeral")
 		bdProxiedClose(t, bd, p.dir, wisp.ID)
 		db := openProxiedDB(t, p)
@@ -615,7 +659,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_wisp_epic_open_children", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cweoc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cweoc")
 		wispEpic := bdProxiedCreate(t, bd, p.dir, "Wisp epic", "-t", "epic", "--ephemeral")
 		_ = bdProxiedCreate(t, bd, p.dir, "Wisp child", "--ephemeral", "--parent", wispEpic.ID)
 		out := bdProxiedCloseFail(t, bd, p.dir, wispEpic.ID)
@@ -625,7 +670,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("close_wisp_blocked_refuses", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cwbr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cwbr")
 		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker for wisp")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Blocked wisp", "--ephemeral", "--deps", "depends-on:"+blocker.ID)
 		out := bdProxiedCloseFail(t, bd, p.dir, wisp.ID)
@@ -635,7 +681,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("continue_advances_to_next_ready_step", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cantrs")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cantrs")
 		root := bdProxiedCreate(t, bd, p.dir, "Molecule root", "-t", "epic", "--labels", "template")
 		step1 := bdProxiedCreate(t, bd, p.dir, "Step 1", "--parent", root.ID)
 		step2 := bdProxiedCreate(t, bd, p.dir, "Step 2", "--parent", root.ID, "--deps", "depends-on:"+step1.ID)
@@ -651,7 +698,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("continue_no_auto_does_not_claim", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cnac")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cnac")
 		root := bdProxiedCreate(t, bd, p.dir, "Molecule root", "-t", "epic", "--labels", "template")
 		step1 := bdProxiedCreate(t, bd, p.dir, "Step 1", "--parent", root.ID)
 		step2 := bdProxiedCreate(t, bd, p.dir, "Step 2", "--parent", root.ID, "--deps", "depends-on:"+step1.ID)
@@ -666,7 +714,8 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("auto_close_completed_molecule", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "accm")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "accm")
 		root := bdProxiedCreate(t, bd, p.dir, "Molecule root", "-t", "epic", "--labels", "template")
 		s1 := bdProxiedCreate(t, bd, p.dir, "Step 1", "--parent", root.ID)
 		s2 := bdProxiedCreate(t, bd, p.dir, "Step 2", "--parent", root.ID)
@@ -681,12 +730,13 @@ func TestProxiedServerClose(t *testing.T) {
 	})
 
 	t.Run("hooks_fire_on_close", func(t *testing.T) {
+		t.Parallel()
 		marker := filepath.Join(t.TempDir(), "on_close_marker")
 		script := "#!/bin/sh\nprintf '%s\\n' \"$1\" > " + shellQuote(marker) + "\n"
 		if runtime.GOOS == "windows" {
 			t.Skip("hook script form is POSIX shell")
 		}
-		p := bdProxiedInitWithHooks(t, bd, "hfc", map[string]string{"on_close": script})
+		p := newSharedProxiedProjectWithHooks(t, bd, "hfc", map[string]string{"on_close": script})
 		issue := bdProxiedCreate(t, bd, p.dir, "Hook fire")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
 		data, err := os.ReadFile(marker)
@@ -704,10 +754,11 @@ func shellQuote(s string) string {
 }
 
 func TestProxiedServerCloseConcurrent(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
-	p := bdProxiedInit(t, bd, "cxc")
+	p := newSharedProxiedProject(t, bd, "cxc")
 
 	const (
 		numWorkers      = 10

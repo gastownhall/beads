@@ -8,11 +8,13 @@ import (
 )
 
 func TestProxiedServerQuick(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("q_creates_and_outputs_id", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "qk")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "qk")
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "q", "Quick captured task")
 		if err != nil {
 			t.Fatalf("q failed: %v\nstderr:\n%s", err, stderr)
@@ -28,7 +30,8 @@ func TestProxiedServerQuick(t *testing.T) {
 	})
 
 	t.Run("q_with_parent_creates_child", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "qp")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "qp")
 		parent := bdProxiedCreate(t, bd, p.dir, "Quick parent", "--type", "epic")
 		bdProxiedLabel(t, bd, p.dir, "add", parent.ID, "inherited")
 
@@ -58,11 +61,13 @@ func TestProxiedServerQuick(t *testing.T) {
 }
 
 func TestProxiedServerTodo(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("add_list_done", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "td")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "td")
 
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "todo", "add", "Write the tests")
 		if err != nil {
@@ -82,7 +87,8 @@ func TestProxiedServerTodo(t *testing.T) {
 	})
 
 	t.Run("add_json_and_done", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "tj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "tj")
 		created := bdProxiedCreate(t, bd, p.dir, "Task to finish", "--type", "task")
 
 		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "todo", "done", created.ID)
@@ -98,7 +104,8 @@ func TestProxiedServerTodo(t *testing.T) {
 	})
 
 	t.Run("bare_todo_lists_open_tasks", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "tb")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "tb")
 		open := bdProxiedCreate(t, bd, p.dir, "Open todo", "--type", "task")
 		done := bdProxiedCreate(t, bd, p.dir, "Done todo", "--type", "task")
 		if _, _, err := bdProxiedRunBuffers(t, bd, p.dir, "todo", "done", done.ID); err != nil {

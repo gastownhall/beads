@@ -22,16 +22,8 @@ import (
 
 const migrateLockFileName = "migrate.lock"
 
-func migrateModeGate(cmd *cobra.Command) error {
-	return fmt.Errorf("%s is not yet implemented", cmd.CommandPath())
-}
-
 func migrateToProxiedRunE(metricName, checkName string, shared bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
-		if err := migrateModeGate(cmd); err != nil {
-			return err
-		}
-
 		evt := metrics.NewCommandEvent(metricName)
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -54,10 +46,6 @@ func migrateToProxiedRunE(metricName, checkName string, shared bool) func(*cobra
 
 func migrateFromProxiedRunE(metricName, checkName string, shared bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
-		if err := migrateModeGate(cmd); err != nil {
-			return err
-		}
-
 		evt := metrics.NewCommandEvent(metricName)
 		defer func() {
 			if c := metrics.Global(); c != nil {

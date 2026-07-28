@@ -16,12 +16,12 @@ Beads provides a persistent, structured memory for coding agents. It replaces me
 
 ```mermaid
 flowchart LR
-    create["bd create<br/>new bead"] --> graph["dependency<br/>graph"]
-    graph --> ready["bd ready<br/>claimable work"]
+    create["bd create<br/>new bead"] --> depgraph["dependency<br/>graph"]
+    depgraph --> ready["bd ready<br/>claimable work"]
     ready --> claim["bd update --claim<br/>agent takes it"]
     claim --> close["bd close<br/>work done"]
     close -->|blockers released| ready
-    graph <-->|"bd dolt push / pull"| remote[("other machines<br/>and agents")]
+    depgraph <-->|"bd dolt push / pull"| remote[("other machines<br/>and agents")]
 ```
 
 ## ⚡ Quick Start
@@ -109,7 +109,7 @@ version: sync remote-backed databases with your current `bd`, back up with
 `bd export --all`, upgrade the binary, then run `bd info --whats-new`,
 `bd hooks install`, and `bd version`. If the upgrade crosses a schema
 migration on a remote-backed database, exactly one designated clone runs
-`bd migrate --force` and `bd dolt push`; other clones install the new binary
+`bd migrate` and `bd dolt push`; other clones install the new binary
 and run `bd bootstrap`. See the full
 [upgrade guide](https://beads.gascity.com/getting-started/upgrading)
 or [docs/getting-started/installation.md](docs/getting-started/installation.md#updating-bd).
@@ -140,10 +140,40 @@ migrate between modes with `bd backup`; reclaim space with `bd prune` /
 `bd purge`.
 
 Full detail — connection flags, sockets, maintenance, backup, and migration —
-in the [Dolt backend guide](docs/architecture/dolt.md). Prefer a different
-database? [Storage Backends](docs/architecture/storage-backends.md) covers
-Postgres, MySQL, and SQLite (Dolt stays the default and the only backend
-with history).
+in the [Dolt backend guide](docs/architecture/dolt.md).
+
+### Schema Version Guard
+
+`bd` checks the database schema version at open time. If the database has been
+migrated by a newer binary and an older binary tries to open it, `bd` exits
+with an actionable error rather than issuing queries that fail with cryptic SQL
+errors:
+
+````
+schema version mismatch: database is at v45, binary knows up to v42 (3 migrations ahead)
+
+  Your bd binary is stale. Queries for dropped or renamed columns will fail
+  with cryptic SQL errors (e.g. "column X could not be found in any table in scope").
+
+  Rebuild from main:
+    CGO_ENABLED=0 go build -tags gms_pure_go ./cmd/bd
+
+  Or install the latest release:
+    CGO_ENABLED=0 go install -tags gms_pure_go github.com/steveyegge/beads/cmd/bd@latest
+
+  To proceed despite the risk (some read commands may still work):
+    BD_IGNORE_SCHEMA_SKEW=1 bd <command>
+    bd --ignore-schema-skew <command>
+````
+
+**When this fires:** only when the database schema is *ahead* of the binary
+(a newer binary migrated the database; this binary doesn't know those
+migrations). Normal upgrades, where the binary migrates the database forward,
+are unaffected.
+
+**Escape hatch:** `BD_IGNORE_SCHEMA_SKEW=1` (or `--ignore-schema-skew`) bypasses
+the guard with a warning on stderr. Use this only if you know the forward
+migrations are additive and safe for your specific workload.
 
 ## 🌐 Community Tools
 
@@ -178,9 +208,6 @@ This is useful for:
 - **Monorepos** — point `BEADS_DIR` at a specific subdirectory
 - **CI/CD** — isolated task tracking without repo-level side effects
 - **Evaluation/testing** — ephemeral databases in `/tmp`
-
-For daemon mode without git, use `bd daemon start --local`
-(see [PR #433](https://github.com/gastownhall/beads/pull/433)).
 
 ## 📝 Documentation
 

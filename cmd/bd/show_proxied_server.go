@@ -537,6 +537,12 @@ func proxiedBuildDetails(ctx context.Context, uw uow.UnitOfWork, issue *types.Is
 		if err == nil {
 			details.Comments = comments
 		}
+	} else if cmtCount > 0 {
+		// ga-clgh: comment_count alone announces content exists without
+		// saying the representation is partial. Flag it explicitly so a
+		// caller reading only `.comments` doesn't read absence as "none".
+		omitted := true
+		details.CommentsOmitted = &omitted
 	}
 
 	for _, dep := range details.Dependencies {

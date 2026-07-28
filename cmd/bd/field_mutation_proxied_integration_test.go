@@ -24,11 +24,13 @@ func bdProxiedRunEnv(t *testing.T, bd, dir string, extraEnv []string, args ...st
 }
 
 func TestProxiedServerAssign(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("assign_then_unassign", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "as")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "as")
 		issue := bdProxiedCreate(t, bd, p.dir, "Assign target")
 
 		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "assign", issue.ID, "alice")
@@ -55,7 +57,8 @@ func TestProxiedServerAssign(t *testing.T) {
 	})
 
 	t.Run("assign_missing_issue_fails", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "am")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "am")
 		_, _, err := bdProxiedRunBuffers(t, bd, p.dir, "assign", "as-nope99", "alice")
 		if err == nil {
 			t.Error("expected assign of missing issue to fail")
@@ -64,10 +67,11 @@ func TestProxiedServerAssign(t *testing.T) {
 }
 
 func TestProxiedServerPriority(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
-	p := bdProxiedInit(t, bd, "pr")
+	p := newSharedProxiedProject(t, bd, "pr")
 	issue := bdProxiedCreate(t, bd, p.dir, "Priority target", "--priority", "3")
 
 	out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "priority", issue.ID, "0")
@@ -83,10 +87,11 @@ func TestProxiedServerPriority(t *testing.T) {
 }
 
 func TestProxiedServerNote(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
-	p := bdProxiedInit(t, bd, "nt")
+	p := newSharedProxiedProject(t, bd, "nt")
 	issue := bdProxiedCreate(t, bd, p.dir, "Note target")
 
 	if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "note", issue.ID, "first note"); err != nil {
@@ -106,11 +111,13 @@ func TestProxiedServerNote(t *testing.T) {
 }
 
 func TestProxiedServerTag(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("tag_issue", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "tg")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "tg")
 		issue := bdProxiedCreate(t, bd, p.dir, "Tag target")
 
 		out, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "tag", issue.ID, "needs-review")
@@ -129,7 +136,8 @@ func TestProxiedServerTag(t *testing.T) {
 	})
 
 	t.Run("tag_wisp_routes_to_wisp_labels", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "tw")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "tw")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Tag wisp", "--ephemeral")
 
 		if _, _, err := bdProxiedRunBuffers(t, bd, p.dir, "tag", wisp.ID, "wtag"); err != nil {
@@ -151,10 +159,11 @@ func TestProxiedServerTag(t *testing.T) {
 }
 
 func TestProxiedServerEdit(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
-	p := bdProxiedInit(t, bd, "ed")
+	p := newSharedProxiedProject(t, bd, "ed")
 	issue := bdProxiedCreate(t, bd, p.dir, "Edit target", "--description", "original body")
 
 	editorScript := filepath.Join(p.dir, "editor.sh")

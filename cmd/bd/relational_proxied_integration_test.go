@@ -8,11 +8,13 @@ import (
 )
 
 func TestProxiedServerLink(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("link_default_blocks", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "lk")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lk")
 		a := bdProxiedCreate(t, bd, p.dir, "Link from")
 		b := bdProxiedCreate(t, bd, p.dir, "Link to")
 
@@ -29,7 +31,8 @@ func TestProxiedServerLink(t *testing.T) {
 	})
 
 	t.Run("link_with_type", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "lt")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lt")
 		a := bdProxiedCreate(t, bd, p.dir, "Rel from")
 		b := bdProxiedCreate(t, bd, p.dir, "Rel to")
 
@@ -42,7 +45,8 @@ func TestProxiedServerLink(t *testing.T) {
 	})
 
 	t.Run("link_invalid_type_rejected", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "li")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "li")
 		a := bdProxiedCreate(t, bd, p.dir, "Bad from")
 		b := bdProxiedCreate(t, bd, p.dir, "Bad to")
 		_, out, err := bdProxiedRunBuffers(t, bd, p.dir, "link", a.ID, b.ID, "--type", "")
@@ -53,10 +57,11 @@ func TestProxiedServerLink(t *testing.T) {
 }
 
 func TestProxiedServerChildren(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
-	p := bdProxiedInit(t, bd, "ch")
+	p := newSharedProxiedProject(t, bd, "ch")
 	parent := bdProxiedCreate(t, bd, p.dir, "Parent", "--type", "epic")
 	c1 := bdProxiedCreate(t, bd, p.dir, "Child 1", "--parent", parent.ID)
 	c2 := bdProxiedCreate(t, bd, p.dir, "Child 2", "--parent", parent.ID)
@@ -71,11 +76,13 @@ func TestProxiedServerChildren(t *testing.T) {
 }
 
 func TestProxiedServerGateList(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("db_wide_lists_gates", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ga")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ga")
 		gate := bdProxiedCreate(t, bd, p.dir, "A gate", "--type", "gate")
 		bdProxiedCreate(t, bd, p.dir, "Not a gate", "--type", "task")
 
@@ -89,7 +96,8 @@ func TestProxiedServerGateList(t *testing.T) {
 	})
 
 	t.Run("bead_scoped_lists_blocking_gates", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "gb")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "gb")
 		work := bdProxiedCreate(t, bd, p.dir, "Blocked work")
 		gate := bdProxiedCreate(t, bd, p.dir, "Blocking gate", "--type", "gate")
 		unrelated := bdProxiedCreate(t, bd, p.dir, "Unrelated gate", "--type", "gate")

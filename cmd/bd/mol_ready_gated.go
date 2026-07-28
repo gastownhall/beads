@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -49,9 +48,6 @@ Examples:
 }
 
 func runMolReadyGated(cmd *cobra.Command, args []string) error {
-	if usesProxiedServer() {
-		return HandleErrorRespectJSON("mol ready is not supported in proxied-server mode")
-	}
 	evt := metrics.NewCommandEvent("mol-ready-gated")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -68,6 +64,10 @@ func runMolReadyGated(cmd *cobra.Command, args []string) error {
 // standalone runMolReadyGated entrypoint records "mol-ready-gated"; this keeps a
 // single `bd ready --gated` invocation to exactly one cli_command event.
 func runMolReadyGatedCore(_ *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return runMolReadyGatedProxiedServer(rootCtx)
+	}
+
 	ctx := rootCtx
 
 	if store == nil {
@@ -79,6 +79,10 @@ func runMolReadyGatedCore(_ *cobra.Command, _ []string) error {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
+	return renderGatedReadyMolecules(molecules)
+}
+
+func renderGatedReadyMolecules(molecules []*GatedMolecule) error {
 	if jsonOutput {
 		output := GatedReadyOutput{
 			Molecules: molecules,
@@ -122,7 +126,7 @@ func runMolReadyGatedCore(_ *cobra.Command, _ []string) error {
 // 3. Check if that step is now ready (unblocked)
 // 4. Find the parent molecule
 // 5. Filter out molecules that are already hooked by someone
-func findGateReadyMolecules(ctx context.Context, s storage.DoltStorage) ([]*GatedMolecule, error) {
+func findGateReadyMolecules(ctx context.Context, s molReader) ([]*GatedMolecule, error) {
 	// Step 1: Find all closed gate beads
 	gateType := types.IssueType("gate")
 	closedStatus := types.StatusClosed

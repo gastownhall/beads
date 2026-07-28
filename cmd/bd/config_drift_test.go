@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
 )
 
@@ -104,6 +106,96 @@ func TestIsServerProbablyRunningOwnPID(t *testing.T) {
 	}
 	if !isServerProbablyRunning(tmpDir) {
 		t.Error("expected true for own PID")
+	}
+}
+
+func setupServerDriftTest(t *testing.T, sharedServer bool) (beadsDir, sharedDir string) {
+	t.Helper()
+	root := t.TempDir()
+	beadsDir = filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create project beads dir: %v", err)
+	}
+	configBody := fmt.Sprintf("dolt:\n  shared-server: %t\n", sharedServer)
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(configBody), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+	sharedDir = filepath.Join(root, "shared-server")
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+	initConfigForTest(t)
+	return beadsDir, sharedDir
+}
+
+func writeLiveServerPID(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create server state dir: %v", err)
+	}
+	pidFile := filepath.Join(dir, doltserver.PIDFileName)
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+		t.Fatalf("write live PID file: %v", err)
+	}
+}
+
+func requireServerPIDLivenessForDriftTest(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("signal-0 PID liveness is not supported on Windows; covered by #4808")
+	}
+}
+
+func TestCheckServerDriftSharedServerHealthyWithoutProjectPID(t *testing.T) {
+	requireServerPIDLivenessForDriftTest(t)
+	beadsDir, sharedDir := setupServerDriftTest(t, true)
+	writeLiveServerPID(t, sharedDir)
+
+	items := checkServerDrift()
+	if len(items) != 1 || items[0].Status != driftStatusOK {
+		t.Fatalf("checkServerDrift = %+v, want one ok item", items)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, doltserver.PIDFileName)); !os.IsNotExist(err) {
+		t.Fatalf("project PID file unexpectedly exists: %v", err)
+	}
+}
+
+func TestCheckServerDriftSharedServerEnvOverride(t *testing.T) {
+	requireServerPIDLivenessForDriftTest(t)
+	beadsDir, sharedDir := setupServerDriftTest(t, false)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	writeLiveServerPID(t, sharedDir)
+
+	items := checkServerDrift()
+	if len(items) != 1 || items[0].Status != driftStatusOK {
+		t.Fatalf("checkServerDrift = %+v, want one ok item", items)
+	}
+	if _, err := os.Stat(filepath.Join(beadsDir, doltserver.PIDFileName)); !os.IsNotExist(err) {
+		t.Fatalf("project PID file unexpectedly exists: %v", err)
+	}
+}
+
+func TestCheckServerDriftSharedServerMissingIgnoresProjectPID(t *testing.T) {
+	requireServerPIDLivenessForDriftTest(t)
+	beadsDir, sharedDir := setupServerDriftTest(t, true)
+	writeLiveServerPID(t, beadsDir)
+
+	items := checkServerDrift()
+	if len(items) != 1 || items[0].Status != driftStatusDrift {
+		t.Fatalf("checkServerDrift = %+v, want one drift item", items)
+	}
+	if _, err := os.Stat(sharedDir); !os.IsNotExist(err) {
+		t.Fatalf("read-only drift check created or touched shared dir %q: %v", sharedDir, err)
+	}
+}
+
+func TestCheckServerDriftStandaloneRunningPreservesInfo(t *testing.T) {
+	requireServerPIDLivenessForDriftTest(t)
+	beadsDir, _ := setupServerDriftTest(t, false)
+	writeLiveServerPID(t, beadsDir)
+
+	items := checkServerDrift()
+	if len(items) != 1 || items[0].Status != driftStatusInfo {
+		t.Fatalf("checkServerDrift = %+v, want one info item", items)
 	}
 }
 

@@ -138,6 +138,16 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 	}
 	result.markChanged(issueTable)
 
+	// Reconcile the ephemeral lease row with the accepted issue state
+	// (restore an imported lease / drop an orphaned one — see
+	// RestoreLeaseOnImportInTx). Wisps are never leased. The leases table is
+	// dolt_ignored, so this is deliberately not marked as a changed table.
+	if issueTable == "issues" {
+		if err := RestoreLeaseOnImportInTx(ctx, tx, issue, isNew); err != nil {
+			return result, err
+		}
+	}
+
 	if isNew {
 		if err := RecordEventInTable(ctx, tx, eventTable, issue.ID, types.EventCreated, actor, ""); err != nil {
 			return result, fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
@@ -289,6 +299,17 @@ func stageableChangedTables(changed map[string]bool) map[string]bool {
 func ValidateCreateIssuesMixedBucketDependencies(issues []*types.Issue) error {
 	_, err := filterCreateIssuesMixedBucketDependencies(issues, storage.BatchCreateOptions{})
 	return err
+}
+
+// FilterCreateIssuesMixedBucketDependencies applies the same cross-bucket
+// dependency policy as CreateIssuesInTx, but over the full issue set. Callers
+// that split one logical batch into bounded sub-batches (chunked import) must
+// run this once up front: the per-batch filter inside the engine only sees one
+// sub-batch, so it could no longer detect an edge whose endpoints land in
+// different chunks. Filtered edges are reported via opts.OnSkippedDependency;
+// issues whose dependency list changes are copied, never mutated.
+func FilterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
+	return filterCreateIssuesMixedBucketDependencies(issues, opts)
 }
 
 func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
@@ -623,6 +644,14 @@ func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, e
 			continue
 		}
 		seen[label] = struct{}{}
+		// Reject an over-length label before the INSERT IGNORE, which would
+		// otherwise silently truncate it to VARCHAR(255). This is the create and
+		// import chokepoint (AddLabelInTx guards the bd label-add path). The whole
+		// create runs in one transaction, so returning here rolls it back — the
+		// issue and its labels are not persisted.
+		if err := types.CheckFieldLen("label", label); err != nil {
+			return result, err
+		}
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		sqlResult, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT IGNORE INTO %s (issue_id, label)
@@ -742,7 +771,8 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			if (dep.Type == types.DepParentChild) != parentPhase {
 				continue
 			}
-			kind := ClassifyDepTarget(ctx, tx, dep, false)
+			isCrossPrefix := types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID)
+			kind := ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
 
 			if kind != DepTargetExternal {
 				lookupTable := "issues"
@@ -873,20 +903,47 @@ func ReconcileChildCounters(ctx context.Context, tx *sql.Tx, issues []*types.Iss
 		}
 	}
 
+	unknownParentIDs := make([]string, 0, len(parents))
+	for parentID, b := range parents {
+		if b.maxChild > 0 && !b.known {
+			unknownParentIDs = append(unknownParentIDs, parentID)
+		}
+	}
+	wispParents, err := WispIDSetInTx(ctx, tx, unknownParentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to route child counter parents: %w", err)
+	}
+	for _, parentID := range unknownParentIDs {
+		_, parents[parentID].isWisp = wispParents[parentID]
+	}
+
 	for parentID, b := range parents {
 		if b.maxChild == 0 {
 			continue
 		}
-		if !b.known {
-			b.isWisp = IsActiveWispInTx(ctx, tx, parentID)
-		}
 		table := "child_counters"
+		parentTable := "issues"
 		if b.isWisp {
 			table = "wisp_child_counters"
+			parentTable = "wisps"
+		}
+		var parentExists int
+		// Orphaned hierarchical IDs are valid import input when the parent was
+		// deleted before export. Their auxiliary counter has no owner and must
+		// not be inserted: both counter tables enforce a parent foreign key.
+		//nolint:gosec // G201: parentTable is one of two hardcoded constants.
+		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+			SELECT 1 FROM %s WHERE id = ?
+		`, parentTable), parentID).Scan(&parentExists)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to check child counter parent %s: %w", parentID, err)
 		}
 		var current int
 		//nolint:gosec // G201: table is one of two hardcoded constants.
-		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+		err = tx.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT last_child FROM %s WHERE parent_id = ?
 		`, table), parentID).Scan(&current)
 		if err != nil && err != sql.ErrNoRows {
@@ -895,10 +952,9 @@ func ReconcileChildCounters(ctx context.Context, tx *sql.Tx, issues []*types.Iss
 		if err == nil && current >= b.maxChild {
 			continue
 		}
-		// Qualify the existing-row column with the table name. Bare `last_child`
-		// on the update RHS is a valid MySQL "current row value" reference, but
-		// Postgres sees it as ambiguous between the target row and EXCLUDED
-		// (SQLSTATE 42702); table-qualifying it is unambiguous on every backend.
+		// Qualify the existing-row column with the table name so the canonical
+		// MySQL form and SQLite's translated ON CONFLICT form both unambiguously
+		// refer to the target row rather than the incoming value.
 		//nolint:gosec // G201: table is one of two hardcoded constants.
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %[1]s (parent_id, last_child) VALUES (?, ?)
