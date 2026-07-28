@@ -80,12 +80,22 @@ func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
 		t.Fatalf("Enabled() = false, want true")
 	}
 
+	dir, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	if want := filepath.Join(home, ".beads", "eventsData"); dir != want {
+		t.Fatalf("DataDir() = %q, want %q", dir, want)
+	}
+	if err := AttachFileEmitter(dir); err != nil {
+		t.Fatalf("AttachFileEmitter: %v", err)
+	}
+
 	evt := NewCommandEvent("init")
 	evt.SetAttribute("dolt_mode", "embedded")
 	Global().CloseEventAndAdd(evt)
 	closeFn(context.Background())
 
-	dir := filepath.Join(home, ".beads", "eventsData")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read eventsData: %v", err)
@@ -99,6 +109,26 @@ func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("enabled Init did not produce any .evtq file in %s", dir)
+	}
+}
+
+// TestInitDoesNotCreateDataDirBeforeAttach is the regression for the eager
+// mkdir bug (GH#4807): Init alone (before AttachFileEmitter) must not touch
+// disk, because at PersistentPreRunE time the workspace directory may not be
+// resolved yet (see applyChangeDirSelection in cmd/bd/main.go). Only
+// AttachFileEmitter, called after the workspace is known, may create it.
+func TestInitDoesNotCreateDataDirBeforeAttach(t *testing.T) {
+	home := isolateUserProfile(t)
+
+	closeFn, err := Init("0.0.0-test", true, "")
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	defer closeFn(context.Background())
+
+	dir := filepath.Join(home, ".beads", "eventsData")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("Init created %s before AttachFileEmitter (stat error: %v)", dir, err)
 	}
 }
 
@@ -189,6 +219,13 @@ func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
 	if _, err := Init("0.0.0-test", true, ""); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
+	dir, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	if err := AttachFileEmitter(dir); err != nil {
+		t.Fatalf("AttachFileEmitter: %v", err)
+	}
 
 	evt := NewCommandEvent("create")
 	Global().CloseEventAndAdd(evt)
@@ -196,7 +233,9 @@ func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
 	// Simulate an os.Exit guard finalizing metrics without the RunE/ExecuteC tail.
 	CloseAndFlush()
 
-	dir := filepath.Join(home, ".beads", "eventsData")
+	if want := filepath.Join(home, ".beads", "eventsData"); dir != want {
+		t.Fatalf("DataDir() = %q, want %q", dir, want)
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read eventsData: %v", err)

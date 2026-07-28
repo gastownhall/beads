@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/dolthub/eventkit"
@@ -30,7 +31,31 @@ const (
 var (
 	enabled  bool
 	endpoint string
+
+	switchEmitter = &switchableEmitter{current: eventkit.NullEmitter{}}
 )
+
+// switchableEmitter lets the collector's destination change after construction:
+// eventkit.Collector bakes its emitter into the sendingThread with no way to
+// replace it, so Init registers the collector wired to this wrapper and
+// AttachFileEmitter redirects Send once the data dir is known.
+type switchableEmitter struct {
+	mu      sync.RWMutex
+	current eventkit.Emitter
+}
+
+func (s *switchableEmitter) set(e eventkit.Emitter) {
+	s.mu.Lock()
+	s.current = e
+	s.mu.Unlock()
+}
+
+func (s *switchableEmitter) Send(ctx context.Context, req *eventkit.LogEventsRequest) error {
+	s.mu.RLock()
+	e := s.current
+	s.mu.RUnlock()
+	return e.Send(ctx, req)
+}
 
 func Enabled() bool {
 	return enabled
@@ -40,11 +65,10 @@ func Endpoint() string {
 	return endpoint
 }
 
-// DataDir returns the directory used for on-disk telemetry queues.
-// When BEADS_DIR is set, events live under $BEADS_DIR/eventsData so a custom
-// workspace does not create a phantom ~/.beads/ tree that confuses discovery.
-// Otherwise the default is $HOME/.beads/eventsData.
-// BEADS_DIR is read the same way as FindBeadsDir (bare getenv, no TrimSpace).
+// DataDir returns the on-disk telemetry queue directory, under the current
+// BEADS_DIR or $HOME/.beads when unset. Call it only after the workspace has
+// been selected (applyChangeDirSelection in cmd/bd); earlier, BEADS_DIR may
+// still hold the ambient value rather than bd's resolved workspace.
 func DataDir() (string, error) {
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
 		return filepath.Join(beadsDir, "eventsData"), nil
@@ -56,6 +80,9 @@ func DataDir() (string, error) {
 	return filepath.Join(home, dataDirName, "eventsData"), nil
 }
 
+// Init registers the global collector wired to a no-op emitter, so events
+// emitted before the workspace is known are buffered rather than written to the
+// wrong directory. Call AttachFileEmitter once it is resolved.
 func Init(version string, enable bool, metricsEndpoint string) (func(context.Context), error) {
 	enabled = enable
 	endpoint = metricsEndpoint
@@ -63,26 +90,17 @@ func Init(version string, enable bool, metricsEndpoint string) (func(context.Con
 		endpoint = DefaultEndpoint
 	}
 
-	var emitter eventkit.Emitter = eventkit.NullEmitter{}
+	switchEmitter.set(eventkit.NullEmitter{})
 	// The distinct ID is resolved only on the enabled path: computing it can
 	// fork a platform probe (see cachedMachineID), and a disabled collector
 	// never emits an event that would carry it. The placeholder below is inert
 	// — NullEmitter drops everything and WithDisabled gates emission anyway.
 	distinctID := "disabled"
 	if enabled {
-		dir, err := DataDir()
-		if err != nil {
-			return func(context.Context) {}, fmt.Errorf("metrics: resolve data dir: %w", err)
-		}
-		fe, err := eventkit.NewFileEmitter(dir)
-		if err != nil {
-			return func(context.Context) {}, fmt.Errorf("metrics: file emitter: %w", err)
-		}
-		emitter = fe
 		distinctID = cachedMachineID(AppName)
 	}
 
-	c := eventkit.NewCollector(emitter,
+	c := eventkit.NewCollector(switchEmitter,
 		eventkit.WithDistinctID(distinctID),
 		eventkit.WithAppName(AppName),
 		eventkit.WithAppVersion(version),
@@ -93,6 +111,21 @@ func Init(version string, enable bool, metricsEndpoint string) (func(context.Con
 	return func(ctx context.Context) {
 		_ = c.Close(ctx)
 	}, nil
+}
+
+// AttachFileEmitter swaps the on-disk emitter for dataDir into the collector
+// Init registered, flushing anything queued since. dataDir is passed in rather
+// than read here so resolution stays with the caller. No-op when disabled.
+func AttachFileEmitter(dataDir string) error {
+	if !enabled {
+		return nil
+	}
+	fe, err := eventkit.NewFileEmitter(dataDir)
+	if err != nil {
+		return fmt.Errorf("metrics: file emitter: %w", err)
+	}
+	switchEmitter.set(fe)
+	return nil
 }
 
 func Global() *eventkit.Collector {
