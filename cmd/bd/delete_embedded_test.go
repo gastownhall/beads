@@ -96,6 +96,43 @@ func TestEmbeddedDelete(t *testing.T) {
 		}
 	})
 
+	t.Run("delete_single_quiet_forced_dry_run_is_payload_blind", func(t *testing.T) {
+		titleMarker := "EMBEDDED_QUIET_TITLE_MARKER"
+		descriptionMarker := "EMBEDDED_QUIET_DESCRIPTION_MARKER"
+		notesMarker := "EMBEDDED_QUIET_NOTES_MARKER"
+		payloadMarker := "EMBEDDED_QUIET_PAYLOAD_MARKER"
+		parent := bdCreate(t, bd, dir, titleMarker,
+			"--type", "task",
+			"--description", descriptionMarker,
+			"--notes", notesMarker,
+			"--metadata", `{"marker":"`+payloadMarker+`"}`)
+		child := bdCreate(t, bd, dir, "Embedded quiet dependent", "--type", "task")
+		bdDepAdd(t, bd, dir, child.ID, parent.ID)
+
+		cmd := exec.Command(bd, "delete", parent.ID, "--force", "--dry-run", "--quiet")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("single forced quiet dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("quiet dry-run produced stdout: %s", stdout.String())
+		}
+		combined := stdout.String() + stderr.String()
+		for _, marker := range []string{titleMarker, descriptionMarker, notesMarker, payloadMarker} {
+			if strings.Contains(combined, marker) {
+				t.Fatalf("quiet dry-run leaked %q: %s", marker, combined)
+			}
+		}
+		if got := bdShowDetails(t, bd, dir, parent.ID); got["id"] != parent.ID {
+			t.Fatalf("forced dry-run removed parent: got %v, want %q", got["id"], parent.ID)
+		}
+		if got := bdShowDetails(t, bd, dir, child.ID); got["id"] != child.ID {
+			t.Fatalf("forced dry-run removed dependent: got %v, want %q", got["id"], child.ID)
+		}
+	})
+
 	t.Run("delete_force_orphans_dependents", func(t *testing.T) {
 		parent := bdCreate(t, bd, dir, "Force parent", "--type", "task")
 		child := bdCreate(t, bd, dir, "Force child", "--type", "task")
