@@ -160,6 +160,14 @@ func printContributorRoutingNotice(ctx context.Context, localStore storage.DoltS
 // returned routing.RoutingRule identifies which rule matched, for callers
 // that print a routing notice.
 func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storage.DoltStorage, bool, routing.RoutingRule, error) {
+	return openAutoRoutedStore(ctx, store, false)
+}
+
+// openAutoRoutedStore opens the target selected by auto-routing. Contributor
+// routing always stays read-only because it hydrates a foreign planning
+// project. Maintainer/default routes may be opened writable for commands whose
+// mutation home has already been validated.
+func openAutoRoutedStore(ctx context.Context, store storage.DoltStorage, writable bool) (storage.DoltStorage, bool, routing.RoutingRule, error) {
 	repoPath, rule := determineAutoRoutedRepoPath(ctx, store)
 	if repoPath == "" || repoPath == "." {
 		return nil, false, routing.RuleNone, nil
@@ -167,7 +175,13 @@ func openRoutedReadStore(ctx context.Context, store storage.DoltStorage) (storag
 
 	targetRepoPath := routing.ExpandPath(repoPath)
 	targetBeadsDir := filepath.Join(targetRepoPath, ".beads")
-	targetStore, err := newReadOnlyStoreFromConfig(ctx, targetBeadsDir)
+	var targetStore storage.DoltStorage
+	var err error
+	if writable && rule != routing.RuleContributor {
+		targetStore, err = newDoltStoreFromConfig(ctx, targetBeadsDir)
+	} else {
+		targetStore, err = newReadOnlyStoreFromConfig(ctx, targetBeadsDir)
+	}
 	if err != nil {
 		return nil, false, rule, fmt.Errorf("failed to open routed store at %s: %w", targetRepoPath, err)
 	}

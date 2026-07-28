@@ -7,11 +7,13 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var molBondCmd = &cobra.Command{
@@ -108,36 +110,60 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("no database connection")
 	}
 
+	discA, err := discoverMolBondOperand(ctx, store, in.argA)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	defer discA.Close()
+	discB, err := discoverMolBondOperand(ctx, store, in.argB)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	defer discB.Close()
+
+	targetID, targetStoreKey, err := validateMolBondHomes(store, discA, discB)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
+	// Dry-run uses the exact same read-only discovery and store-policy
+	// validation as execution. It stops before writable reopen or formula cook.
 	if in.dryRun {
-		issueA, formulaA, err := resolveOrDescribeWithRouting(ctx, store, in.argA, in.vars)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		issueB, formulaB, err := resolveOrDescribeWithRouting(ctx, store, in.argB, in.vars)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		renderMolBondDryRun(in, issueA, formulaA, issueB, formulaB)
+		renderMolBondDryRun(in, discA.issue, discA.formula, discB.issue, discB.formula)
 		return nil
 	}
 
-	ops, cleanup, err := resolveMolBondOperands(ctx, store, [2]string{in.argA, in.argB}, in.vars)
+	// Close foreign read handles before opening the one accepted target home
+	// writable. Rejected cross-store bonds therefore never writable-open a
+	// foreign rig (and cannot trigger its open-time migrations).
+	discA.Close()
+	discB.Close()
+
+	activeStore := store
+	closeActiveStore := func() {}
+	if targetID != "" && targetStoreKey != dependencyStoreKey(store) {
+		rr, routeErr := resolveAndGetIssueForMutation(ctx, store, targetID)
+		if routeErr != nil {
+			return HandleErrorRespectJSON("%v", routeErr)
+		}
+		if routeErr := verifyMolBondWritableHome(rr, targetStoreKey); routeErr != nil {
+			rr.Close()
+			return HandleErrorRespectJSON("%v", routeErr)
+		}
+		activeStore = wireStorageDecorators(rr.Store, hookRunner, config.GetBool("no-hooks"))
+		closeActiveStore = rr.Close
+	}
+	defer closeActiveStore()
+
+	opA, err := materializeMolBondOperand(ctx, activeStore, discA, in.vars)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	defer cleanup()
-	opA, opB := ops[0], ops[1]
-
-	// The bond mutation runs against the store that owns the operands. When an
-	// operand was resolved via routing (e.g. a prefix-routed rig bead), that is
-	// the routed store, not the local one — otherwise the bond would write to
-	// the wrong database or fail on a cross-store reference (mirrors #3609).
-	activeStore, err := pickBondStore(store, opA, opB)
+	opB, err := materializeMolBondOperand(ctx, activeStore, discB, in.vars)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
-	// No cleanup needed - in-memory subgraphs don't pollute the DB
 	subgraphA, cookedA := opA.subgraph, opA.cooked
 	subgraphB, cookedB := opB.subgraph, opB.cooked
 	issueA := subgraphA.Root
@@ -617,30 +643,136 @@ func minPriority(a, b int) int {
 	return b
 }
 
-// molBondOperand is a resolved mol-bond operand together with the store that
-// owns it. For an existing issue, store is whichever store resolution found the
-// issue in (local or routed) and cooked is false. For a formula cooked inline,
-// store is nil (the cooked protos are in-memory until the bond writes them) and
-// cooked is true. Routed store handles are owned by the cleanup function
-// returned from resolveMolBondOperands, not by the operand.
 type molBondOperand struct {
 	subgraph *TemplateSubgraph
-	cooked   bool                // cooked inline from a formula (no owning store yet)
-	store    storage.DoltStorage // store that owns the issue; nil for cooked formulas
-	routed   bool                // issue was found via routing, not the local store
-	writable bool                // false only for contributor auto-routed stores, which open read-only
+	cooked   bool
 }
 
-// operandFromIssue wraps a resolved issue as a molBondOperand, loading the full
-// proto subgraph when the issue is a proto and wrapping a plain molecule as a
-// single-issue subgraph otherwise.
-func operandFromIssue(ctx context.Context, s storage.DoltStorage, issue *types.Issue, routed, writable bool) (*molBondOperand, error) {
+// molBondDiscovery is the read-only phase of operand resolution. Existing
+// issues retain their logical store home; formulas remain storeless.
+type molBondDiscovery struct {
+	operand           string
+	issue             *types.Issue
+	formula           string
+	store             storage.DoltStorage
+	storeKey          string
+	mutationForbidden bool
+	closeFn           func()
+}
+
+func (d *molBondDiscovery) Close() {
+	if d != nil && d.closeFn != nil {
+		d.closeFn()
+		d.closeFn = nil
+	}
+}
+
+// discoverMolBondOperand resolves issue-first through read-only routing. This
+// lets store-policy validation finish before any foreign database is opened
+// writable. Formula fallback remains unconditional: the parser decides whether
+// an operand names a formula (#3874).
+func discoverMolBondOperand(ctx context.Context, localStore storage.DoltStorage, operand string) (*molBondDiscovery, error) {
+	rr, err := resolveAndGetIssueWithRouting(ctx, localStore, operand)
+	if err == nil {
+		return &molBondDiscovery{
+			operand:           operand,
+			issue:             rr.Issue,
+			store:             rr.Store,
+			storeKey:          dependencyStoreKey(rr.Store),
+			mutationForbidden: rr.MutationForbidden,
+			closeFn:           rr.Close,
+		}, nil
+	}
+	parser := formula.NewParser()
+	f, loadErr := parser.LoadByName(operand)
+	if loadErr == nil {
+		return &molBondDiscovery{operand: operand, formula: f.Formula}, nil
+	}
+	if !isNotFoundErr(err) {
+		return nil, err
+	}
+	return nil, fmt.Errorf("'%s' not found as issue or formula: %w", operand, loadErr)
+}
+
+// validateMolBondHomes returns the issue and logical store that pin the
+// mutation. Formula-only bonds stay local. All checks use read-only handles.
+func validateMolBondHomes(localStore storage.DoltStorage, discoveries ...*molBondDiscovery) (string, string, error) {
+	var targetID, targetKey string
+	var targetStore storage.DoltStorage
+	for _, d := range discoveries {
+		if d == nil || d.issue == nil {
+			continue
+		}
+		if d.mutationForbidden {
+			return "", "", fmt.Errorf("cannot bond issue %s: contributor auto-routing forbids mutation; run the bond from the project that owns the issue", d.issue.ID)
+		}
+		if targetStore == nil {
+			targetID, targetKey, targetStore = d.issue.ID, d.storeKey, d.store
+			continue
+		}
+		if !sameBondStore(targetStore, d.store) {
+			return "", "", fmt.Errorf("cannot bond %s and %s: they live in different stores/rigs; run the bond from the rig that owns them", targetID, d.issue.ID)
+		}
+	}
+	if targetStore == nil {
+		return "", dependencyStoreKey(localStore), nil
+	}
+	return targetID, targetKey, nil
+}
+
+// verifyMolBondWritableHome closes the TOCTOU gap between read-only discovery
+// and writable reopen. Routing or local contents may change between phases; a
+// bond must never mutate a logical store that was not the validated home.
+func verifyMolBondWritableHome(rr *RoutedResult, expectedStoreKey string) error {
+	if rr == nil || rr.Store == nil {
+		return fmt.Errorf("routed bond target reopened without a store")
+	}
+	if rr.MutationForbidden {
+		return fmt.Errorf("cannot bond issue %s: contributor auto-routing forbids mutation; run the bond from the project that owns the issue", rr.ResolvedID)
+	}
+	if actual := dependencyStoreKey(rr.Store); actual != expectedStoreKey {
+		return fmt.Errorf("routed bond target changed between discovery and writable reopen (expected %s, got %s); retry the command", expectedStoreKey, actual)
+	}
+	return nil
+}
+
+// sameBondStore reports whether two store handles refer to the same underlying
+// database. dependencyStoreKey unwraps decorators before consulting
+// StoreLocator, so a HookFiringStore and a separately opened raw route handle
+// onto the same database compare equal.
+func sameBondStore(a, b storage.DoltStorage) bool {
+	if a == b {
+		return true
+	}
+	return dependencyStoreKey(a) == dependencyStoreKey(b)
+}
+
+// materializeMolBondOperand is the writable phase. After validation selects one
+// store home, existing issues are re-read there and formulas are cooked in
+// memory for the bond operation.
+func materializeMolBondOperand(ctx context.Context, activeStore storage.DoltStorage, d *molBondDiscovery, vars map[string]string) (*molBondOperand, error) {
+	if d == nil {
+		return nil, fmt.Errorf("missing mol bond operand")
+	}
+	if d.issue == nil {
+		subgraph, err := resolveAndCookFormulaWithVars(d.operand, nil, vars)
+		if err != nil {
+			return nil, fmt.Errorf("'%s' not found as issue or formula: %w", d.operand, err)
+		}
+		return &molBondOperand{subgraph: subgraph, cooked: true}, nil
+	}
+
+	rr, err := resolveAndGetFromStore(ctx, activeStore, d.issue.ID, false)
+	if err != nil {
+		return nil, err
+	}
+	issue := rr.Issue
 	if isProto(issue) {
-		subgraph, err := loadTemplateSubgraph(ctx, s, issue.ID)
+		subgraph, err := loadTemplateSubgraph(ctx, activeStore, issue.ID)
 		if err != nil {
 			return nil, fmt.Errorf("loading proto subgraph '%s': %w", issue.ID, err)
 		}
-		return &molBondOperand{subgraph: subgraph, store: s, routed: routed, writable: writable}, nil
+		return &molBondOperand{subgraph: subgraph}, nil
 	}
 	return &molBondOperand{
 		subgraph: &TemplateSubgraph{
@@ -648,209 +780,7 @@ func operandFromIssue(ctx context.Context, s storage.DoltStorage, issue *types.I
 			Issues:   []*types.Issue{issue},
 			IssueMap: map[string]*types.Issue{issue.ID: issue},
 		},
-		store:    s,
-		routed:   routed,
-		writable: writable,
 	}, nil
-}
-
-// resolveMolBondOperands resolves both mol-bond operands as existing issues or,
-// failing that, inline formulas. It mirrors resolveCloseTargets: per operand the
-// fallback order is the local store, then a routed store already opened for the
-// other operand of this bond, then a prefix-routed rig via routes.jsonl (opened
-// write-intent so the bond commits where the issue lives, #4141), then the
-// shared contributor auto-routed store. Contributor auto-routed stores open
-// read-only — they hydrate foreign projects that must never be mutated — so
-// their operands are marked non-writable and pickBondStore rejects the bond
-// before any mutation is attempted.
-//
-// Reusing an already-opened routed handle means two operands that live in the
-// same routed rig share one store handle instead of opening the same database
-// twice (and pickBondStore sees one identity, not a spurious cross-store pair).
-//
-// The caller must invoke cleanup() once when done; it releases every routed
-// handle opened for this bond.
-//
-// The vars parameter is used for step condition filtering (bd-7zka.1).
-// Formulas are cooked to in-memory subgraphs (gt-4v1eo, no DB storage).
-func resolveMolBondOperands(ctx context.Context, localStore storage.DoltStorage, operands [2]string, vars map[string]string) ([2]*molBondOperand, func(), error) {
-	type routedHandle struct {
-		store    storage.DoltStorage
-		writable bool
-	}
-	var handles []routedHandle
-	var closers []func()
-	cleanup := func() {
-		for _, c := range closers {
-			c()
-		}
-	}
-
-	var sharedAuto storage.DoltStorage
-	sharedAutoTried := false
-	ensureSharedAuto := func() (storage.DoltStorage, error) {
-		if sharedAuto != nil {
-			return sharedAuto, nil
-		}
-		if sharedAutoTried {
-			return nil, fmt.Errorf("no auto-routed store available")
-		}
-		sharedAutoTried = true
-		rs, routed, err := openRoutedReadStore(ctx, localStore)
-		if err != nil {
-			return nil, err
-		}
-		if !routed {
-			return nil, fmt.Errorf("no auto-routed store available")
-		}
-		sharedAuto = rs
-		closers = append(closers, func() { _ = rs.Close() })
-		return rs, nil
-	}
-
-	resolveOne := func(operand string) (*molBondOperand, error) {
-		// Local first.
-		if rr, err := resolveAndGetFromStore(ctx, localStore, operand, false); err == nil {
-			return operandFromIssue(ctx, localStore, rr.Issue, false, true)
-		} else if !isNotFoundErr(err) {
-			return nil, err
-		}
-		// A routed store already opened for the other operand of this bond.
-		for _, h := range handles {
-			if rr, err := resolveAndGetFromStore(ctx, h.store, operand, true); err == nil {
-				return operandFromIssue(ctx, h.store, rr.Issue, true, h.writable)
-			}
-		}
-		// Write-intent prefix routing: the routed target opens writable so the
-		// bond commits on the target head, like bd close (#4141, #3608/#3609).
-		if rr, err := resolveViaPrefixRoutingWithAccess(ctx, operand, true); err == nil {
-			handles = append(handles, routedHandle{store: rr.Store, writable: true})
-			closers = append(closers, rr.Close)
-			return operandFromIssue(ctx, rr.Store, rr.Issue, true, true)
-		}
-		// Contributor auto-routing uses one shared read-only store (GH#2345).
-		if rs, rerr := ensureSharedAuto(); rerr == nil {
-			if rr, err := resolveAndGetFromStore(ctx, rs, operand, true); err == nil {
-				return operandFromIssue(ctx, rs, rr.Issue, true, false)
-			}
-		}
-		// Not found as issue in any store — fall through to the formula registry.
-		// resolveAndCookFormulaWithVars lets parser.LoadByName decide (it returns
-		// "formula %q not found in search paths" for genuinely unknown names,
-		// which is the right error). This matches the resolution behavior of
-		// bd formula show / bd mol seed / bd mol pour / bd cook (#3874).
-		subgraph, cookErr := resolveAndCookFormulaWithVars(operand, nil, vars)
-		if cookErr != nil {
-			return nil, fmt.Errorf("'%s' not found as issue or formula: %w", operand, cookErr)
-		}
-		return &molBondOperand{subgraph: subgraph, cooked: true, writable: true}, nil
-	}
-
-	opA, err := resolveOne(operands[0])
-	if err != nil {
-		cleanup()
-		return [2]*molBondOperand{}, func() {}, err
-	}
-	opB, err := resolveOne(operands[1])
-	if err != nil {
-		cleanup()
-		return [2]*molBondOperand{}, func() {}, err
-	}
-	return [2]*molBondOperand{opA, opB}, cleanup, nil
-}
-
-// pickBondStore returns the store the bond mutation must run against.
-//
-// Cooked-formula operands are in-memory and store-agnostic, so they impose no
-// constraint. Each existing-issue operand pins the bond to the store that owns
-// it. When both operands are existing issues owned by different stores the bond
-// is a cross-store operation with no well-defined home, so it is rejected rather
-// than silently written to the wrong database. When nothing pins a store (both
-// operands are cooked formulas) the bond stays on the local store.
-//
-// A pinned store that opened read-only (a contributor auto-routed store) is
-// rejected here, before any mutation is attempted, instead of surfacing a
-// store-layer write refusal halfway through the bond.
-func pickBondStore(localStore storage.DoltStorage, a, b *molBondOperand) (storage.DoltStorage, error) {
-	active := localStore
-	var pinnedBy *molBondOperand
-	for _, op := range []*molBondOperand{a, b} {
-		if op.cooked || op.store == nil {
-			continue
-		}
-		if pinnedBy == nil {
-			active = op.store
-			pinnedBy = op
-			continue
-		}
-		if !sameBondStore(op.store, active) {
-			return nil, fmt.Errorf("cannot bond %s and %s: they live in different stores/rigs; run the bond from the rig that owns them",
-				pinnedBy.subgraph.Root.ID, op.subgraph.Root.ID)
-		}
-	}
-	if pinnedBy != nil && !pinnedBy.writable {
-		return nil, fmt.Errorf("%s lives in the contributor auto-routed store, which opens read-only; bd mol bond cannot write there — run the bond from the project that owns it",
-			pinnedBy.subgraph.Root.ID)
-	}
-	return active, nil
-}
-
-// sameBondStore reports whether two store handles refer to the same underlying
-// database. Handle identity covers shared handles; the StoreLocator comparison
-// covers separately-opened handles onto the same database (each route-open
-// constructs a fresh store in server mode), which must not be rejected as a
-// cross-store bond.
-func sameBondStore(a, b storage.DoltStorage) bool {
-	if a == b {
-		return true
-	}
-	la, aok := a.(storage.StoreLocator)
-	lb, bok := b.(storage.StoreLocator)
-	if !aok || !bok {
-		return false
-	}
-	// CLIDir pins the concrete database (path + database name); Path alone can
-	// collide across databases sharing a server root.
-	dirA, dirB := la.CLIDir(), lb.CLIDir()
-	return dirA != "" && dirA == dirB
-}
-
-// resolveOrDescribeWithRouting checks if an operand is an issue or formula
-// without cooking. It is the embedded/server-store dry-run resolver; the
-// proxied-server path retains resolveOrDescribe over its transaction reader.
-//
-// Issue resolution uses the read-only routing fallback (local, then prefix-routed
-// rig, then contributor auto-routing) so a dry run previews routed operands the
-// same way the real bond resolves them.
-func resolveOrDescribeWithRouting(ctx context.Context, localStore storage.DoltStorage, operand string, vars map[string]string) (*types.Issue, string, error) {
-	rr, err := resolveAndGetIssueWithRouting(ctx, localStore, operand)
-	if err == nil {
-		issue := rr.Issue
-		rr.Close()
-		return issue, "", nil
-	}
-	if !isNotFoundErr(err) {
-		return nil, "", err
-	}
-
-	// Not found as issue — fall through to the formula registry. parser.LoadByName
-	// returns "formula %q not found in search paths" for genuinely unknown names,
-	// which is the right error. This matches the resolution behavior of
-	// bd formula show / bd mol seed / bd mol pour / bd cook.
-	parser := formula.NewParser()
-	f, err := parser.LoadByName(operand)
-	if err != nil {
-		return nil, "", fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
-	}
-
-	// A dry-run must fail the same way the real bond would: an enum/pattern/
-	// provided-empty violation in --var values fails resolveOrCookToSubgraph,
-	// so reporting "will be cooked" here would be a false preview.
-	if err := formula.ValidateProvidedVars(f, vars); err != nil {
-		return nil, "", err
-	}
-
-	return nil, f.Formula, nil
 }
 
 // resolveOrDescribe checks if an operand is an issue or formula without cooking.
