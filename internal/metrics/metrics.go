@@ -37,33 +37,54 @@ var (
 
 // switchableEmitter lets the collector's destination change after construction:
 // eventkit.Collector bakes its emitter into the sendingThread with no way to
-// replace it, so Init registers the collector wired to this wrapper and
-// AttachFileEmitter redirects Send once the data dir is known.
+// replace it, so Init wires the collector to this wrapper and AttachFileEmitter
+// points it at the data dir once that is known.
+//
+// It builds the file emitter lazily, on the first event needing a write:
+// NewFileEmitter calls MkdirAll, so building it eagerly would materialize a
+// queue directory for commands that emit nothing.
 type switchableEmitter struct {
-	mu      sync.RWMutex
+	mu      sync.Mutex
 	current eventkit.Emitter
 	dir     string
 }
 
-func (s *switchableEmitter) set(e eventkit.Emitter, dir string) {
+// useNull drops back to the no-op emitter, discarding any armed dir.
+func (s *switchableEmitter) useNull() {
 	s.mu.Lock()
-	s.current = e
+	s.current = eventkit.NullEmitter{}
+	s.dir = ""
+	s.mu.Unlock()
+}
+
+// useDir arms the file emitter for dir without touching disk.
+func (s *switchableEmitter) useDir(dir string) {
+	s.mu.Lock()
+	s.current = nil
 	s.dir = dir
 	s.mu.Unlock()
 }
 
-// attachedDir reports the data dir AttachFileEmitter resolved, or "" if the
-// emitter is still the no-op one.
+// attachedDir reports the armed data dir, or "" if the emitter is still the
+// no-op one.
 func (s *switchableEmitter) attachedDir() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.dir
 }
 
 func (s *switchableEmitter) Send(ctx context.Context, req *eventkit.LogEventsRequest) error {
-	s.mu.RLock()
+	s.mu.Lock()
+	if s.current == nil {
+		fe, err := eventkit.NewFileEmitter(s.dir)
+		if err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf("metrics: file emitter: %w", err)
+		}
+		s.current = fe
+	}
 	e := s.current
-	s.mu.RUnlock()
+	s.mu.Unlock()
 	return e.Send(ctx, req)
 }
 
@@ -79,9 +100,15 @@ func Endpoint() string {
 // BEADS_DIR or $HOME/.beads when unset. Call it only after the workspace has
 // been selected (applyChangeDirSelection in cmd/bd); earlier, BEADS_DIR may
 // still hold the ambient value rather than bd's resolved workspace.
+//
+// A BEADS_DIR that does not exist yet is ignored in favor of the home queue:
+// telemetry may write into a workspace, but must never be the thing that brings
+// one into being (a rejected init would otherwise leave a .beads behind).
 func DataDir() (string, error) {
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
-		return filepath.Join(beadsDir, "eventsData"), nil
+		if _, err := os.Stat(beadsDir); err == nil {
+			return filepath.Join(beadsDir, "eventsData"), nil
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -100,7 +127,7 @@ func Init(version string, enable bool, metricsEndpoint string) (func(context.Con
 		endpoint = DefaultEndpoint
 	}
 
-	switchEmitter.set(eventkit.NullEmitter{}, "")
+	switchEmitter.useNull()
 	// The distinct ID is resolved only on the enabled path: computing it can
 	// fork a platform probe (see cachedMachineID), and a disabled collector
 	// never emits an event that would carry it. The placeholder below is inert
@@ -123,18 +150,18 @@ func Init(version string, enable bool, metricsEndpoint string) (func(context.Con
 	}, nil
 }
 
-// AttachFileEmitter swaps the on-disk emitter for dataDir into the collector
-// Init registered, flushing anything queued since. dataDir is passed in rather
-// than read here so resolution stays with the caller. No-op when disabled.
+// AttachFileEmitter arms the on-disk emitter for dataDir, so events queued since
+// Init start reaching disk. dataDir is passed in rather than read here so
+// resolution stays with the caller, and the directory is not created until there
+// is an event to write. No-op when disabled.
 func AttachFileEmitter(dataDir string) error {
 	if !enabled {
 		return nil
 	}
-	fe, err := eventkit.NewFileEmitter(dataDir)
-	if err != nil {
-		return fmt.Errorf("metrics: file emitter: %w", err)
+	if dataDir == "" {
+		return fmt.Errorf("metrics: empty data dir")
 	}
-	switchEmitter.set(fe, dataDir)
+	switchEmitter.useDir(dataDir)
 	return nil
 }
 

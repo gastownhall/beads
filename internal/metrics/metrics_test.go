@@ -24,6 +24,9 @@ func TestDataDirDefaultUsesHomeBeads(t *testing.T) {
 func TestDataDirRespectsBeadsDir(t *testing.T) {
 	home := isolateUserProfile(t)
 	beadsDir := filepath.Join(t.TempDir(), "custom-beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
 	t.Setenv("BEADS_DIR", beadsDir)
 
 	got, err := DataDir()
@@ -37,6 +40,28 @@ func TestDataDirRespectsBeadsDir(t *testing.T) {
 	// Must not place events under the default home .beads when BEADS_DIR is set.
 	if strings.HasPrefix(got, filepath.Join(home, ".beads")) {
 		t.Fatalf("DataDir() = %q still under $HOME/.beads despite BEADS_DIR", got)
+	}
+}
+
+// TestDataDirIgnoresMissingBeadsDir is the regression for the canary in
+// TestInitBackendFlag/sqlite_is_no_longer_supported: telemetry must not be what
+// creates a workspace. When BEADS_DIR names a directory that does not exist yet,
+// queue events under the home dir so a command rejected before it established
+// its workspace leaves nothing behind.
+func TestDataDirIgnoresMissingBeadsDir(t *testing.T) {
+	home := isolateUserProfile(t)
+	beadsDir := filepath.Join(t.TempDir(), "not-created-yet")
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	got, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	if want := filepath.Join(home, ".beads", "eventsData"); got != want {
+		t.Fatalf("DataDir() = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
+		t.Fatalf("DataDir() created %s (stat error: %v)", beadsDir, err)
 	}
 }
 
