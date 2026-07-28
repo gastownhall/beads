@@ -541,8 +541,10 @@ var createCmd = &cobra.Command{
 		}
 
 		// If a discovered-from dependency is present, inherit source_repo
-		// from the referenced parent issue.
-		if dfParent := discoveredFromParent(deps); dfParent != "" {
+		// from the referenced parent issue. Reuse the already-parsed specs
+		// (not the raw --deps strings) so this can't drift from parseDepSpec's
+		// normalization rules.
+		if dfParent := discoveredFromParentSpec(depSpecs); dfParent != "" {
 			parentIssue, err := store.GetIssue(ctx, dfParent)
 			if err == nil && parentIssue.SourceRepo != "" {
 				issue.SourceRepo = parentIssue.SourceRepo

@@ -132,8 +132,10 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 			InheritLabelsFromParent: !in.noInheritLabels && in.parentID != "",
 			Dependencies:            deps,
 			WaitsFor:                waitsFor,
-			DiscoveredFromParent:    discoveredFromParent(in.deps),
-			ForcePrefix:             in.force,
+			// Reuse the already-parsed specs (not the raw --deps strings) so
+			// this can't drift from parseDepSpec's normalization rules.
+			DiscoveredFromParent: discoveredFromParentSpec(deps),
+			ForcePrefix:          in.force,
 		}
 
 		var result domain.CreateIssueResult

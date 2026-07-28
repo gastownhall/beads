@@ -10,57 +10,57 @@ import (
 )
 
 func parseDepSpecs(deps []string) ([]domain.DependencySpec, error) {
+	// deps arrives already comma-split: cobra's StringSlice flag CSV-decodes
+	// each --deps value, so re-splitting on "," here would double-decode a
+	// CSV-quoted target that legitimately contains a comma. Only trim and
+	// drop empties; splitting is cobra's job.
 	var out []domain.DependencySpec
-	for _, raw := range expandDepFlagValues(deps) {
+	for _, raw := range deps {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
 		spec, err := parseDepSpec(raw)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, spec)
 	}
-	if err := checkDepSpecsUniqueTargets(out); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return dedupeDepSpecs(out)
 }
 
-// expandDepFlagValues flattens comma-separated --deps tokens.
-// Cobra StringSlice already splits on commas, but a single token may still
-// contain "type:id,type:id" when passed as one shell word without slice split.
-func expandDepFlagValues(deps []string) []string {
-	var out []string
-	for _, raw := range deps {
-		for _, part := range strings.Split(raw, ",") {
-			part = strings.TrimSpace(part)
-			if part == "" {
-				continue
-			}
-			out = append(out, part)
-		}
-	}
-	return out
-}
-
-// checkDepSpecsUniqueTargets rejects multi-type edges that would collide on
-// uk_dep_issue_target (unique per (issue_id, target), type not part of the key).
+// dedupeDepSpecs collapses repeated identical edges and rejects edges that
+// would collide on the (issue_id, target) dependency-uniqueness key with a
+// *different* type. Type is not part of that key, so two different types on
+// the same target can't both be stored — but the storage layer already
+// treats a repeated identical (target, type) add as idempotent, so an exact
+// repeat here must be deduped rather than rejected.
 // GH#4626: discovered-from:X,blocked-by:X used to silently keep only one edge.
-func checkDepSpecsUniqueTargets(specs []domain.DependencySpec) error {
+func dedupeDepSpecs(specs []domain.DependencySpec) ([]domain.DependencySpec, error) {
 	// Key: swapDirection|target — same effective endpoint pair for a new issue.
 	seen := make(map[string]types.DependencyType, len(specs))
+	out := make([]domain.DependencySpec, 0, len(specs))
 	for _, s := range specs {
 		key := fmt.Sprintf("%t|%s", s.SwapDirection, s.TargetID)
-		if prev, ok := seen[key]; ok && prev != s.Type {
-			return fmt.Errorf(
-				"--deps cannot attach both %q and %q to the same target %q: dependency uniqueness is per target id, not per type (uk_dep_issue_target). Pick one type, or open a separate issue for the second relationship (GH#4626)",
+		prev, ok := seen[key]
+		switch {
+		case !ok:
+			seen[key] = s.Type
+			out = append(out, s)
+		case prev != s.Type:
+			return nil, fmt.Errorf(
+				"--deps cannot attach both %q and %q to the same target %q: a target can only carry one dependency type at a time. Pick one type, or open a separate issue for the second relationship (GH#4626)",
 				prev, s.Type, s.TargetID,
 			)
+		default:
+			// Identical edge repeated (e.g. blocked-by and depends-on both
+			// normalize to the same type/target) — silently dedupe.
 		}
-		if _, ok := seen[key]; ok {
-			return fmt.Errorf("--deps lists the same dependency on %q more than once", s.TargetID)
-		}
-		seen[key] = s.Type
 	}
-	return nil
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 func parseDepSpec(raw string) (domain.DependencySpec, error) {
@@ -128,6 +128,20 @@ func discoveredFromParent(deps []string) string {
 		target := strings.TrimSpace(parts[1])
 		if depType == types.DepDiscoveredFrom && target != "" {
 			return target
+		}
+	}
+	return ""
+}
+
+// discoveredFromParentSpec is discoveredFromParent's counterpart for callers
+// that already ran deps through parseDepSpecs. It reuses the canonical
+// parsed/normalized specs instead of re-deriving type:target parsing from
+// raw strings a second time, so it can't drift from parseDepSpec's rules
+// (e.g. the depends-on/blocked-by aliasing).
+func discoveredFromParentSpec(specs []domain.DependencySpec) string {
+	for _, s := range specs {
+		if s.Type == types.DepDiscoveredFrom && s.TargetID != "" {
+			return s.TargetID
 		}
 	}
 	return ""
