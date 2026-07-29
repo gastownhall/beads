@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -40,14 +41,16 @@ func Endpoint() string {
 	return endpoint
 }
 
-// DataDir returns the on-disk telemetry queue directory: eventsData beside the
-// user-global config.yaml (~/.config/bd/eventsData on most platforms; see
-// config.UserConfigYamlPath). Telemetry is machine-scoped, not workspace-scoped
-// (see eventkit.MachineID), so this deliberately does not depend on BEADS_DIR or
-// which workspace, if any, a given command resolves — unlike a workspace-local
-// queue, it fixes GH#4807 (including the fresh-install case, where no
-// workspace exists yet) without any dependency on command startup ordering.
+// DataDir returns the telemetry queue directory, eventsData beside the
+// user-global config.yaml. Telemetry is machine-scoped (see eventkit.MachineID),
+// so this deliberately ignores BEADS_DIR and the resolved workspace, which is
+// what fixes GH#4807 on a fresh install where no workspace exists yet.
 func DataDir() (string, error) {
+	// UserConfigYamlPath returns a literal "~/..." display string when the home
+	// dir is unresolvable; joining that would make a directory named "~".
+	if _, err := os.UserHomeDir(); err != nil {
+		return "", fmt.Errorf("metrics: resolve home dir: %w", err)
+	}
 	return filepath.Join(filepath.Dir(config.UserConfigYamlPath()), "eventsData"), nil
 }
 

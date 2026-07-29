@@ -36,6 +36,22 @@ func TestDataDirUsesUserConfigDir(t *testing.T) {
 // under a phantom directory. Since the queue is machine-scoped, not
 // workspace-scoped, DataDir() must not consult BEADS_DIR at all — set,
 // unset, or naming a directory that does not exist.
+func TestDataDirErrorsWithoutResolvableHome(t *testing.T) {
+	// config.UserConfigYamlPath returns the literal "~/.config/bd/config.yaml"
+	// display string when the home dir cannot be resolved. DataDir must reject
+	// that rather than queue events into a directory named "~" under the cwd.
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+
+	got, err := DataDir()
+	if err == nil {
+		t.Fatalf("DataDir() = %q, want error when the home dir cannot be resolved", got)
+	}
+	if got != "" {
+		t.Errorf("DataDir() returned path %q alongside its error, want empty", got)
+	}
+}
+
 func TestDataDirIgnoresBeadsDir(t *testing.T) {
 	isolateUserProfile(t)
 	want := wantDataDir(t)
