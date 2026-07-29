@@ -296,12 +296,16 @@ var configGetCmd = &cobra.Command{
 			}
 
 			value := config.GetYamlConfig(key)
+			// Report real provenance — a constant "config.yaml" for every key
+			// (including defaults and unset keys) made operators believe values
+			// were project-set when they were only Viper defaults (GH#5049).
+			location := configLocationLabel(config.GetValueSource(key))
 
 			if jsonOutput {
 				return outputJSON(map[string]interface{}{
 					"key":      key,
 					"value":    value,
-					"location": "config.yaml",
+					"location": location,
 				})
 			}
 			if value == "" {
@@ -366,6 +370,22 @@ var configGetCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// configLocationLabel maps a config.ConfigSource to the location string
+// emitted by `bd config get --json`. Must stay truthful about provenance
+// (GH#5049) — never hardcode "config.yaml" for defaults/unset keys.
+func configLocationLabel(source config.ConfigSource) string {
+	switch source {
+	case config.SourceEnvVar:
+		return "env"
+	case config.SourceConfigFile:
+		return "config.yaml"
+	case config.SourceFlag:
+		return "flag"
+	default:
+		return "default"
+	}
 }
 
 // runConfigGetBackupEnabled reports the EFFECTIVE value of
