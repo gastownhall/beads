@@ -590,6 +590,7 @@ func TestEmbeddedCreate(t *testing.T) {
 					"labels": ["x", "y"],
 					"metadata": {"str": "v", "num": 3},
 					"mol_type": "swarm",
+					"storage_class": "unversioned",
 					"pinned": true
 				},
 				{
@@ -653,6 +654,9 @@ func TestEmbeddedCreate(t *testing.T) {
 		}
 		if issue.MolType != types.MolType("swarm") {
 			t.Errorf("mol_type: got %q", issue.MolType)
+		}
+		if issue.StorageClass != types.StorageClassUnversioned {
+			t.Errorf("storage_class: got %q, want unversioned", issue.StorageClass)
 		}
 		if !issue.Pinned {
 			t.Errorf("pinned not set")

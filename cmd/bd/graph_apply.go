@@ -55,8 +55,9 @@ type GraphApplyNode struct {
 	ParentKey          string                     `json:"parent_key,omitempty"`
 	ParentID           string                     `json:"parent_id,omitempty"`
 	Deps               []GraphApplyNodeDep        `json:"deps,omitempty"`
-	Ephemeral          *bool                      `json:"ephemeral,omitempty"`  // overrides --ephemeral for this node
-	NoHistory          *bool                      `json:"no_history,omitempty"` // overrides --no-history for this node
+	Ephemeral          *bool                      `json:"ephemeral,omitempty"`     // overrides --ephemeral for this node
+	NoHistory          *bool                      `json:"no_history,omitempty"`    // overrides --no-history for this node
+	StorageClass       string                     `json:"storage_class,omitempty"` // explicit class (C1.3: wins over storage-class.<type> config); "ephemeral" routes to the wisp plane
 	WispType           string                     `json:"wisp_type,omitempty"`
 	MolType            string                     `json:"mol_type,omitempty"`
 	Pinned             bool                       `json:"pinned,omitempty"`
@@ -685,7 +686,7 @@ func validateGraphApplyNodeFields(node GraphApplyNode, customTypes, customStatus
 // the routing decision for the whole plan.
 func validateGraphApplyStorageClasses(plan *GraphApplyPlan, opts GraphApplyOptions, requireUniform bool) (useWisp bool, err error) {
 	for i, node := range plan.Nodes {
-		ephemeral, noHistory, err := graphApplyNodeStorageClass(node, opts)
+		ephemeral, noHistory, _, err := graphApplyNodeStorageClass(node, opts)
 		if err != nil {
 			return false, err
 		}
@@ -805,7 +806,7 @@ func graphApplyNodeIssue(node GraphApplyNode, opts GraphApplyOptions, createdBy,
 		priority = *node.Priority
 	}
 
-	ephemeral, noHistory, err := graphApplyNodeStorageClass(node, opts)
+	ephemeral, noHistory, storageClass, err := graphApplyNodeStorageClass(node, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -841,6 +842,7 @@ func graphApplyNodeIssue(node GraphApplyNode, opts GraphApplyOptions, createdBy,
 		EstimatedMinutes:   estimatedMinutes,
 		Ephemeral:          ephemeral,
 		NoHistory:          noHistory,
+		StorageClass:       storageClass,
 		CreatedBy:          createdBy,
 		Owner:              owner,
 		Labels:             node.Labels,
@@ -869,8 +871,13 @@ func graphApplyNodeIssue(node GraphApplyNode, opts GraphApplyOptions, createdBy,
 }
 
 // graphApplyNodeStorageClass resolves a node's effective storage class from
-// its per-node overrides and the plan-wide CLI flags.
-func graphApplyNodeStorageClass(node GraphApplyNode, opts GraphApplyOptions) (ephemeral, noHistory bool, err error) {
+// its per-node overrides, the plan-wide CLI flags, and the per-type config
+// default, with single-issue create's precedence (Protocol v0.1 C1.3): the
+// node's explicit storage_class wins, then storage-class.<type> config, else
+// unset. "ephemeral" is the spelled-out spelling of ephemeral: true (C1.4) —
+// it routes the node to the wisp plane and leaves the marker cell empty
+// (wisp-plane rows derive their class, C1.2).
+func graphApplyNodeStorageClass(node GraphApplyNode, opts GraphApplyOptions) (ephemeral, noHistory bool, class types.StorageClass, err error) {
 	ephemeral = opts.Ephemeral
 	if node.Ephemeral != nil {
 		ephemeral = *node.Ephemeral
@@ -880,9 +887,27 @@ func graphApplyNodeStorageClass(node GraphApplyNode, opts GraphApplyOptions) (ep
 		noHistory = *node.NoHistory
 	}
 	if ephemeral && noHistory {
-		return false, false, fmt.Errorf("node %q: ephemeral and no_history are mutually exclusive", node.Key)
+		return false, false, "", fmt.Errorf("node %q: ephemeral and no_history are mutually exclusive", node.Key)
 	}
-	return ephemeral, noHistory, nil
+	issueType := types.IssueType(node.Type)
+	if issueType == "" {
+		issueType = types.TypeTask
+	}
+	class, err = resolveStorageClass(node.StorageClass, issueType.Normalize())
+	if err != nil {
+		return false, false, "", fmt.Errorf("node %q: %w", node.Key, err)
+	}
+	if class == types.StorageClassEphemeral {
+		if noHistory {
+			return false, false, "", fmt.Errorf("node %q: storage_class ephemeral and no_history are mutually exclusive", node.Key)
+		}
+		if node.Ephemeral != nil && !*node.Ephemeral {
+			return false, false, "", fmt.Errorf("node %q: storage_class ephemeral conflicts with ephemeral: false", node.Key)
+		}
+		ephemeral = true
+		class = ""
+	}
+	return ephemeral, noHistory, class, nil
 }
 
 func executeGraphApply(ctx context.Context, plan *GraphApplyPlan, opts GraphApplyOptions) (*GraphApplyResult, error) {
