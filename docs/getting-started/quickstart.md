@@ -128,11 +128,10 @@ For large features, use hierarchical IDs to organize work:
 bd create "Auth System" -t epic -p 1
 # Returns: bd-a3f8e9
 
-# Create child tasks (use --parent to attach to the epic).
-# --no-inherit-labels keeps epic-level size/effort labels off children (GH#4562).
-bd create "Design login UI" -p 1 --parent bd-a3f8e9 --no-inherit-labels       # bd-a3f8e9.1
-bd create "Backend validation" -p 1 --parent bd-a3f8e9 --no-inherit-labels    # bd-a3f8e9.2
-bd create "Integration tests" -p 1 --parent bd-a3f8e9 --no-inherit-labels     # bd-a3f8e9.3
+# Create child tasks (use --parent to attach to the epic)
+bd create "Design login UI" -p 1 --parent bd-a3f8e9       # bd-a3f8e9.1
+bd create "Backend validation" -p 1 --parent bd-a3f8e9    # bd-a3f8e9.2
+bd create "Integration tests" -p 1 --parent bd-a3f8e9     # bd-a3f8e9.3
 
 # View hierarchy
 bd dep tree bd-a3f8e9
@@ -147,6 +146,8 @@ Dependency tree for bd-a3f8e9:
   > bd-a3f8e9.2: Backend validation [P1] (open)
   > bd-a3f8e9.3: Integration tests [P1] (open)
 ```
+
+Children inherit the epic's labels by default — if the epic carries a size/effort label, see [Labels](/core-concepts/labels) for how to keep it off the children.
 
 ## Add dependencies
 
