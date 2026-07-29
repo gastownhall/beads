@@ -154,8 +154,12 @@ func TestEmbeddedRenamePrefix(t *testing.T) {
 		if err != nil {
 			t.Fatalf("bd list after rename failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		if !strings.Contains(stdout.String(), "beads-1") {
-			t.Errorf("expected shortened 'beads-1' in list output: %s", stdout.String())
+		// bd create mints hash IDs (beads-cyc), never sequential ones, so assert the
+		// rewritten prefix rather than a number — the beads-vscode- check below is what
+		// carries the real weight. Mirrors rename_basic, which asserts "new-" for the
+		// same reason.
+		if !strings.Contains(stdout.String(), "beads-") {
+			t.Errorf("expected shortened 'beads-' prefix in list output: %s", stdout.String())
 		}
 		if strings.Contains(stdout.String(), "beads-vscode-") {
 			t.Errorf("regression: 'beads-vscode-' IDs were left unrewritten: %s", stdout.String())
