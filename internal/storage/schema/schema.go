@@ -459,7 +459,7 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// pre-existing user writes: dropping them from dirtyBefore exempts them
 	// from the changed-signature guard (the resumed rekey is about to change
 	// them) and lets stageSchemaTables commit them with the rest of the pass.
-	if resuming, err := auxRekeyResumePending(ctx, db); err != nil {
+	if resuming, err := anyAuxRekeyResumePending(ctx, db); err != nil {
 		return 0, fmt.Errorf("reading aux rekey sentinel: %w", err)
 	} else if resuming {
 		for _, t := range auxRekeyTables {
@@ -514,7 +514,11 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	// of churning synced rows on every later migration pass — and on the
 	// pre-pass main cursor, so fresh clones of converged lineages record the
 	// marker without re-running the rewrite (bd-578h9.4).
-	auxRekeyed, err := rekeyAuxRowIDs(ctx, db, mainVersionBefore)
+	// ...and the bd-ri8bd sibling: one more pass over the same tables for the
+	// rows minted with random UUIDv7 ids between the initial backfill and the
+	// switch to content-derived ids at insert time. Same machinery, own
+	// marker/sentinel/shipped-version gates, one shared cursor read.
+	auxRekeyed, err := rekeyAuxRowIDsAllPasses(ctx, db, mainVersionBefore)
 	if err != nil {
 		return applied, fmt.Errorf("rekey aux row ids: %w", err)
 	}
