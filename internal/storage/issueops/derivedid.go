@@ -100,6 +100,17 @@ func InsertDerivedEvent(ctx context.Context, tx DBTX, table string, e AuxEvent) 
 	if e.CreatedAt == "" {
 		e.CreatedAt = NowAuxTime()
 	}
+	if table == "wisp_events" {
+		// wisp_events value columns DEFAULT '' (0021) where events defaults
+		// them NULL; the pre-derivation mint sites omitted unset columns and
+		// stored the default. Keep storing "" so the row — and its digest —
+		// matches legacy wisp rows and the rekey pass's re-derivation.
+		for _, p := range []*sql.NullString{&e.OldValue, &e.NewValue, &e.Comment} {
+			if !p.Valid {
+				*p = str("")
+			}
+		}
+	}
 	digest := rowid.Digest([]sql.NullString{
 		str(e.IssueID), str(string(e.EventType)), str(e.Actor),
 		e.OldValue, e.NewValue, e.Comment, str(e.CreatedAt),
