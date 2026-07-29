@@ -614,7 +614,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
 			due_at, defer_until, metadata,
-			row_lock
+			row_lock, storage_class
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
@@ -625,7 +625,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?,
-			?
+			?, ?
 		)
 		ON DUPLICATE KEY UPDATE
 			content_hash = VALUES(content_hash),
@@ -657,7 +657,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, jsonMetadata(issue.Metadata),
-		issueops.FreshRowLock(),
+		issueops.FreshRowLock(), nullString(string(issue.StorageClass)),
 	)
 	if err != nil {
 		return fmt.Errorf("db: insert into %s: %w", table, err)

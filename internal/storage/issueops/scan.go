@@ -42,7 +42,7 @@ const IssueSelectColumnsLite = `id, content_hash, title,
 	       mol_type,
 	       event_kind, actor, target,
 	       due_at, defer_until,
-	       work_type, source_system, metadata, row_lock,
+	       work_type, source_system, metadata, row_lock, storage_class,
 	       leases.lease_expires_at, leases.heartbeat_at, leases.granted_node`
 
 // HeavyDropList enumerates the columns omitted from IssueSelectColumnsLite.
@@ -89,7 +89,8 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var awaitType, awaitID, waiters sql.NullString
 	var ephemeral, noHistory, pinned, isTemplate sql.NullInt64
 	var metadata sql.NullString
-	var rowLock sql.NullInt64 // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
+	var rowLock sql.NullInt64       // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
+	var storageClass sql.NullString // storage_class column (migration 0060); NULL = unset, resolves per EffectiveStorageClass
 
 	dests := []any{
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -102,7 +103,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&molType,
 		&eventKind, &actor, &target, &payload,
 		&dueAt, &deferUntil,
-		&workType, &sourceSystem, &metadata, &rowLock,
+		&workType, &sourceSystem, &metadata, &rowLock, &storageClass,
 		&leaseExpiresAt, &heartbeatAt, &leaseGrantedNode,
 	}
 	dests = append(dests, extra...)
@@ -226,6 +227,11 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	// row_lock surfaced as the opaque RowVersion token. NOT NULL DEFAULT 0, so
 	// this is normally valid; a NULL (defensive) maps to 0.
 	issue.RowVersion = rowLock.Int64
+	// storage_class (migration 0060); NULL = unset (EffectiveStorageClass
+	// resolves the default per Protocol v0.1 C1.2).
+	if storageClass.Valid {
+		issue.StorageClass = types.StorageClass(storageClass.String)
+	}
 	// Lease columns (migration 0054); NULL when no active lease.
 	if leaseExpiresAt.Valid {
 		issue.LeaseExpiresAt = &leaseExpiresAt.Time
@@ -261,7 +267,8 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var awaitType, awaitID sql.NullString
 	var ephemeral, noHistory, pinned, isTemplate sql.NullInt64
 	var metadata sql.NullString
-	var rowLock sql.NullInt64 // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
+	var rowLock sql.NullInt64       // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
+	var storageClass sql.NullString // storage_class column (migration 0060); NULL = unset, resolves per EffectiveStorageClass
 
 	dests := []any{
 		&issue.ID, &contentHash, &issue.Title,
@@ -274,7 +281,7 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&molType,
 		&eventKind, &actor, &target,
 		&dueAt, &deferUntil,
-		&workType, &sourceSystem, &metadata, &rowLock,
+		&workType, &sourceSystem, &metadata, &rowLock, &storageClass,
 		&leaseExpiresAt, &heartbeatAt, &leaseGrantedNode,
 	}
 	dests = append(dests, extra...)
@@ -389,6 +396,11 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	// row_lock surfaced as the opaque RowVersion token. NOT NULL DEFAULT 0, so
 	// this is normally valid; a NULL (defensive) maps to 0.
 	issue.RowVersion = rowLock.Int64
+	// storage_class (migration 0060); NULL = unset (EffectiveStorageClass
+	// resolves the default per Protocol v0.1 C1.2).
+	if storageClass.Valid {
+		issue.StorageClass = types.StorageClass(storageClass.String)
+	}
 	// Lease columns (migration 0054); NULL when no active lease.
 	if leaseExpiresAt.Valid {
 		issue.LeaseExpiresAt = &leaseExpiresAt.Time

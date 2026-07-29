@@ -120,7 +120,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
 			due_at, defer_until, metadata,
-			row_lock
+			row_lock, storage_class
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
@@ -131,7 +131,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?,
-			?
+			?, ?
 		)
 		ON DUPLICATE KEY UPDATE
 			%s
@@ -145,7 +145,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
-		freshRowLock(),
+		freshRowLock(), NullString(string(issue.StorageClass)),
 	)
 	if err != nil {
 		return fmt.Errorf("insert issue into %s: %w", table, err)

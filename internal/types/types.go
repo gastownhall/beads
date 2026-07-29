@@ -122,6 +122,13 @@ type Issue struct {
 	Ephemeral bool     `json:"ephemeral,omitempty"`  // If true, not synced via git
 	NoHistory bool     `json:"no_history,omitempty"` // If true, stored in wisps table but NOT GC-eligible
 	WispType  WispType `json:"wisp_type,omitempty"`  // Classification for TTL-based compaction (gt-9br)
+
+	// StorageClass declares the record's history/replication contract
+	// (Protocol v0.1 §C, bd-7vb13). Empty means unset: effective class is
+	// ephemeral for wisp-plane records (Ephemeral/NoHistory), else versioned
+	// (C1.2) — see EffectiveStorageClass. Omitted from JSONL when versioned
+	// (C2.4). Set at create, immutable except via promotion (C1.3/C4).
+	StorageClass StorageClass `json:"storage_class,omitempty"`
 	// NOTE: RepliesTo, RelatesTo, DuplicateOf, SupersededBy moved to dependencies table
 	// per Decision 004 (Edge Schema Consolidation). Use dependency API instead.
 
@@ -324,6 +331,23 @@ func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
 	// Ephemeral and NoHistory are mutually exclusive (GH#2619)
 	if i.Ephemeral && i.NoHistory {
 		return fmt.Errorf("ephemeral and no_history are mutually exclusive")
+	}
+	// Storage class must be a known value, and a declared class must agree
+	// with the wisp-plane flags: wisp-plane records are ephemeral-class by
+	// construction, and a durable class on one (or ephemeral class off one)
+	// would silently promise semantics the row's plane doesn't deliver
+	// (Protocol v0.1 §C1.3/C2.1).
+	if !i.StorageClass.IsValid() {
+		return fmt.Errorf("invalid storage class %q (must be %s)", i.StorageClass, ValidStorageClassNames())
+	}
+	if i.StorageClass != "" {
+		wispPlane := i.Ephemeral || i.NoHistory
+		if wispPlane && i.StorageClass != StorageClassEphemeral {
+			return fmt.Errorf("storage class %q conflicts with ephemeral/no_history (wisp-plane records are storage class ephemeral)", i.StorageClass)
+		}
+		if !wispPlane && i.StorageClass == StorageClassEphemeral {
+			return fmt.Errorf("storage class ephemeral requires the ephemeral flag (create with --ephemeral)")
+		}
 	}
 	// Bound the VARCHAR(255) assignment columns up front so callers get a typed
 	// ErrFieldTooLong rejection instead of a raw backend "data too long" error.
@@ -804,6 +828,72 @@ func (w WispType) IsValid() bool {
 // ValidWispTypeNames enumerates the accepted wisp-type values for error messages.
 func ValidWispTypeNames() string {
 	return joinNamesWithOr(validWispTypes)
+}
+
+// StorageClass declares how a record's history and replication are priced
+// (Protocol v0.1 §C, bd-7vb13). The class is a semantic contract, not a table
+// or backend (C1.4): ephemeral happens to live in the dolt_ignore'd wisps
+// plane today, and unversioned's replication leg is tracked separately
+// (bd-1quyq) — the class marker must not imply either mechanism.
+type StorageClass string
+
+const (
+	// StorageClassVersioned is the default (C1.2): durable, replicated with
+	// history, mergeable. Serialized as the empty string — the storage_class
+	// field is omitted when versioned (C2.4), so every pre-v0.1 record is a
+	// valid versioned record unchanged.
+	StorageClassVersioned StorageClass = "versioned"
+	// StorageClassUnversioned is durable and interchanged with no revision-
+	// history promise: only current state is retained and replicated (C2.2).
+	StorageClassUnversioned StorageClass = "unversioned"
+	// StorageClassEphemeral is TTL-bounded operational state: never exported,
+	// never replicated (C2.1). The existing wisp/lease planes have this
+	// character.
+	StorageClassEphemeral StorageClass = "ephemeral"
+)
+
+// validStorageClasses is the canonical value list; IsValid,
+// ParseStorageClass, and ValidStorageClassNames all derive from it.
+var validStorageClasses = []StorageClass{
+	StorageClassVersioned, StorageClassUnversioned, StorageClassEphemeral,
+}
+
+// IsValid reports whether the storage class value is valid. Empty is valid
+// and means "unset": the effective class defaults per C1.2/C1.3.
+func (s StorageClass) IsValid() bool {
+	if s == "" {
+		return true
+	}
+	return slices.Contains(validStorageClasses, s)
+}
+
+// ValidStorageClassNames enumerates the accepted values for error messages.
+func ValidStorageClassNames() string {
+	return joinNamesWithOr(validStorageClasses)
+}
+
+// ParseStorageClass validates a user-supplied storage-class value (flag or
+// config). Empty is rejected here — callers that allow "unset" check for
+// empty before parsing.
+func ParseStorageClass(v string) (StorageClass, error) {
+	s := StorageClass(v)
+	if s == "" || !s.IsValid() {
+		return "", fmt.Errorf("invalid storage class %q (must be %s)", v, ValidStorageClassNames())
+	}
+	return s, nil
+}
+
+// EffectiveStorageClass resolves the record's class per C1.2/C1.3: an
+// explicit declaration wins; otherwise wisp-plane records (Ephemeral or
+// NoHistory) are ephemeral and everything else is versioned.
+func (i *Issue) EffectiveStorageClass() StorageClass {
+	if i.StorageClass != "" {
+		return i.StorageClass
+	}
+	if i.Ephemeral || i.NoHistory {
+		return StorageClassEphemeral
+	}
+	return StorageClassVersioned
 }
 
 // joinNamesWithOr formats a value list as "a, b, or c" for error messages.
