@@ -946,15 +946,6 @@ var rootCmd = &cobra.Command{
 			return err
 		}
 
-		// Attach the metrics emitter now that the workspace is resolved, so
-		// events land under the workspace bd selected rather than whatever
-		// BEADS_DIR held at process start.
-		if dir, err := metrics.DataDir(); err != nil {
-			debug.Logf("warning: resolve metrics data dir failed: %v", err)
-		} else if err := metrics.AttachFileEmitter(dir); err != nil {
-			debug.Logf("warning: attach metrics file emitter failed: %v", err)
-		}
-
 		// Block dangerous env var overrides that could cause data fragmentation (bd-hevyw).
 		if err := checkBlockedEnvVars(); err != nil {
 			return HandleError("%v", err)

@@ -6,67 +6,79 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
-func TestDataDirDefaultUsesHomeBeads(t *testing.T) {
-	home := isolateUserProfile(t)
+// wantDataDir mirrors DataDir()'s own construction, so tests assert against
+// the documented location (beside the user-global config.yaml) rather than
+// duplicating a hardcoded path that could drift from the implementation.
+func wantDataDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(filepath.Dir(config.UserConfigYamlPath()), "eventsData")
+}
+
+func TestDataDirUsesUserConfigDir(t *testing.T) {
+	isolateUserProfile(t)
 
 	got, err := DataDir()
 	if err != nil {
 		t.Fatalf("DataDir: %v", err)
 	}
-	want := filepath.Join(home, ".beads", "eventsData")
-	if got != want {
+	if want := wantDataDir(t); got != want {
 		t.Fatalf("DataDir() = %q, want %q", got, want)
 	}
 }
 
-func TestDataDirRespectsBeadsDir(t *testing.T) {
-	home := isolateUserProfile(t)
-	beadsDir := filepath.Join(t.TempDir(), "custom-beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-		t.Fatalf("mkdir workspace: %v", err)
-	}
-	t.Setenv("BEADS_DIR", beadsDir)
+// TestDataDirIgnoresBeadsDir is the regression for the maintainer-reported gap
+// in GH#4807 that the earlier BEADS_DIR-aware design left open: a fresh
+// install with BEADS_DIR set but no workspace created yet still queued events
+// under a phantom directory. Since the queue is machine-scoped, not
+// workspace-scoped, DataDir() must not consult BEADS_DIR at all — set,
+// unset, or naming a directory that does not exist.
+func TestDataDirIgnoresBeadsDir(t *testing.T) {
+	isolateUserProfile(t)
+	want := wantDataDir(t)
 
-	got, err := DataDir()
-	if err != nil {
-		t.Fatalf("DataDir: %v", err)
-	}
-	want := filepath.Join(beadsDir, "eventsData")
-	if got != want {
-		t.Fatalf("DataDir() = %q, want %q", got, want)
-	}
-	// Must not place events under the default home .beads when BEADS_DIR is set.
-	if strings.HasPrefix(got, filepath.Join(home, ".beads")) {
-		t.Fatalf("DataDir() = %q still under $HOME/.beads despite BEADS_DIR", got)
-	}
-}
+	for _, tc := range []struct {
+		name     string
+		beadsDir string
+	}{
+		{"unset", ""},
+		{"existing_dir", filepath.Join(t.TempDir(), "existing-workspace")},
+		{"not_yet_created", filepath.Join(t.TempDir(), "not-created-yet")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.beadsDir != "" {
+				if tc.name == "existing_dir" {
+					if err := os.MkdirAll(tc.beadsDir, 0o755); err != nil {
+						t.Fatalf("mkdir workspace: %v", err)
+					}
+				}
+				t.Setenv("BEADS_DIR", tc.beadsDir)
+			} else {
+				t.Setenv("BEADS_DIR", "")
+			}
 
-// TestDataDirIgnoresMissingBeadsDir is the regression for the canary in
-// TestInitBackendFlag/sqlite_is_no_longer_supported: telemetry must not be what
-// creates a workspace. When BEADS_DIR names a directory that does not exist yet,
-// queue events under the home dir so a command rejected before it established
-// its workspace leaves nothing behind.
-func TestDataDirIgnoresMissingBeadsDir(t *testing.T) {
-	home := isolateUserProfile(t)
-	beadsDir := filepath.Join(t.TempDir(), "not-created-yet")
-	t.Setenv("BEADS_DIR", beadsDir)
-
-	got, err := DataDir()
-	if err != nil {
-		t.Fatalf("DataDir: %v", err)
-	}
-	if want := filepath.Join(home, ".beads", "eventsData"); got != want {
-		t.Fatalf("DataDir() = %q, want %q", got, want)
-	}
-	if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
-		t.Fatalf("DataDir() created %s (stat error: %v)", beadsDir, err)
+			got, err := DataDir()
+			if err != nil {
+				t.Fatalf("DataDir: %v", err)
+			}
+			if got != want {
+				t.Fatalf("DataDir() = %q, want %q (BEADS_DIR must not affect the machine-scoped queue)", got, want)
+			}
+			if tc.beadsDir != "" && tc.name == "not_yet_created" {
+				if _, err := os.Stat(tc.beadsDir); !os.IsNotExist(err) {
+					t.Fatalf("DataDir() created %s (stat error: %v)", tc.beadsDir, err)
+				}
+			}
+		})
 	}
 }
 
 func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
-	home := isolateUserProfile(t)
+	isolateUserProfile(t)
+	dir := wantDataDir(t)
 
 	closeFn, err := Init("0.0.0-test", false, "")
 	if err != nil {
@@ -82,7 +94,6 @@ func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
 	Global().CloseEventAndAdd(evt)
 	closeFn(context.Background())
 
-	dir := filepath.Join(home, ".beads", "eventsData")
 	if entries, err := os.ReadDir(dir); err == nil {
 		for _, e := range entries {
 			if filepath.Ext(e.Name()) == ".evtq" {
@@ -93,7 +104,7 @@ func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
 }
 
 func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
-	home := isolateUserProfile(t)
+	isolateUserProfile(t)
 
 	closeFn, err := Init("0.0.0-test", true, "")
 	if err != nil {
@@ -109,11 +120,8 @@ func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DataDir: %v", err)
 	}
-	if want := filepath.Join(home, ".beads", "eventsData"); dir != want {
+	if want := wantDataDir(t); dir != want {
 		t.Fatalf("DataDir() = %q, want %q", dir, want)
-	}
-	if err := AttachFileEmitter(dir); err != nil {
-		t.Fatalf("AttachFileEmitter: %v", err)
 	}
 
 	evt := NewCommandEvent("init")
@@ -137,13 +145,13 @@ func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
 	}
 }
 
-// TestInitDoesNotCreateDataDirBeforeAttach is the regression for the eager
-// mkdir bug (GH#4807): Init alone (before AttachFileEmitter) must not touch
-// disk, because at PersistentPreRunE time the workspace directory may not be
-// resolved yet (see applyChangeDirSelection in cmd/bd/main.go). Only
-// AttachFileEmitter, called after the workspace is known, may create it.
-func TestInitDoesNotCreateDataDirBeforeAttach(t *testing.T) {
-	home := isolateUserProfile(t)
+// TestInitEnabledCreatesDataDirImmediately documents the design this PR
+// reverted to: DataDir() is a fixed, machine-scoped location
+// (~/.config/bd/eventsData), never a workspace directory, so it is safe for
+// Init to construct the file emitter (and its eager MkdirAll) unconditionally
+// and immediately, with no ordering dependency on workspace selection.
+func TestInitEnabledCreatesDataDirImmediately(t *testing.T) {
+	isolateUserProfile(t)
 
 	closeFn, err := Init("0.0.0-test", true, "")
 	if err != nil {
@@ -151,9 +159,9 @@ func TestInitDoesNotCreateDataDirBeforeAttach(t *testing.T) {
 	}
 	defer closeFn(context.Background())
 
-	dir := filepath.Join(home, ".beads", "eventsData")
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("Init created %s before AttachFileEmitter (stat error: %v)", dir, err)
+	dir := wantDataDir(t)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("Init did not create %s: %v", dir, err)
 	}
 }
 
@@ -191,7 +199,7 @@ func TestFlusherChildEnvPinsSanctionedEndpoint(t *testing.T) {
 	}
 	const sanctioned = "https://gastownhall-eventsapi.com/mp/collect"
 
-	got := flusherChildEnv(parent, sanctioned, "")
+	got := flusherChildEnv(parent, sanctioned)
 
 	// Unrelated environment is preserved so the child can still find HOME/PATH.
 	if !envContains(got, "HOME=/home/user") || !envContains(got, "PATH=/usr/bin") {
@@ -216,36 +224,6 @@ func TestFlusherChildEnvPinsSanctionedEndpoint(t *testing.T) {
 	}
 }
 
-// TestFlusherChildEnvPinsResolvedDataDir covers the parent/child split-write
-// half of GH#4807: the parent writes its queue under the workspace it selected,
-// so the child must flush that same directory instead of re-deriving one from an
-// inherited BEADS_DIR.
-func TestFlusherChildEnvPinsResolvedDataDir(t *testing.T) {
-	parent := []string{
-		"BEADS_DIR=/ambient/workspace",
-		// A previous run leaked its own resolved dir into the environment.
-		EnvDataDir + "=/stale/eventsData",
-	}
-	const resolved = "/selected/workspace/eventsData"
-
-	got := flusherChildEnv(parent, "", resolved)
-
-	var dirs []string
-	for _, kv := range got {
-		if strings.HasPrefix(kv, EnvDataDir+"=") {
-			dirs = append(dirs, kv)
-		}
-	}
-	if len(dirs) != 1 || dirs[0] != EnvDataDir+"="+resolved {
-		t.Errorf("data dir env = %v, want exactly [%s=%s]", dirs, EnvDataDir, resolved)
-	}
-
-	// BEADS_DIR itself is still handed through; only the queue path is pinned.
-	if !envContains(got, "BEADS_DIR=/ambient/workspace") {
-		t.Errorf("flusherChildEnv dropped BEADS_DIR: %v", got)
-	}
-}
-
 // TestMaybeSpawnFlusherNoOpInsideFlusher guards the structural no-recursion
 // guard: a process already marked as the flusher must never spawn another one,
 // independent of send-metrics' os.Exit.
@@ -266,7 +244,7 @@ func TestMaybeSpawnFlusherNoOpInsideFlusher(t *testing.T) {
 // of bypassing main()'s post-command tail, so an event queued earlier in the run
 // is still written to disk for the uploader rather than stranded.
 func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
-	home := isolateUserProfile(t)
+	isolateUserProfile(t)
 	// Keep the detached uploader from actually forking during the test; we only
 	// assert the on-disk write that CloseAndFlush guarantees before an os.Exit.
 	t.Setenv(EnvDisableEventFlush, "1")
@@ -278,9 +256,6 @@ func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DataDir: %v", err)
 	}
-	if err := AttachFileEmitter(dir); err != nil {
-		t.Fatalf("AttachFileEmitter: %v", err)
-	}
 
 	evt := NewCommandEvent("create")
 	Global().CloseEventAndAdd(evt)
@@ -288,7 +263,7 @@ func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
 	// Simulate an os.Exit guard finalizing metrics without the RunE/ExecuteC tail.
 	CloseAndFlush()
 
-	if want := filepath.Join(home, ".beads", "eventsData"); dir != want {
+	if want := wantDataDir(t); dir != want {
 		t.Fatalf("DataDir() = %q, want %q", dir, want)
 	}
 	entries, err := os.ReadDir(dir)
@@ -311,7 +286,7 @@ func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
 // when metrics are disabled without panicking, spawning a flusher, or writing any
 // queue file.
 func TestCloseAndFlushDisabledIsSafe(t *testing.T) {
-	home := isolateUserProfile(t)
+	isolateUserProfile(t)
 	t.Setenv(EnvDisableEventFlush, "1")
 
 	if _, err := Init("0.0.0-test", false, ""); err != nil {
@@ -320,7 +295,7 @@ func TestCloseAndFlushDisabledIsSafe(t *testing.T) {
 
 	CloseAndFlush()
 
-	dir := filepath.Join(home, ".beads", "eventsData")
+	dir := wantDataDir(t)
 	if entries, err := os.ReadDir(dir); err == nil {
 		for _, e := range entries {
 			if filepath.Ext(e.Name()) == ".evtq" {

@@ -145,8 +145,10 @@ func MaybeSpawnFlusher() {
 	// would let a hostile repository redirect where the user's telemetry is
 	// uploaded. Pin the endpoint to the value the parent already resolved from
 	// env + user-global config (see resolveMetricsEndpoint in cmd/bd) and mark
-	// the child as the flusher so it cannot recurse.
-	cmd.Env = flusherChildEnv(os.Environ(), Endpoint(), switchEmitter.attachedDir())
+	// the child as the flusher so it cannot recurse. The queue directory itself
+	// needs no pinning: DataDir() is machine-scoped (~/.config/bd/eventsData),
+	// not workspace-derived, so parent and child always agree on it.
+	cmd.Env = flusherChildEnv(os.Environ(), Endpoint())
 	if err := cmd.Start(); err != nil {
 		return
 	}
@@ -158,20 +160,16 @@ func MaybeSpawnFlusher() {
 // example one a project .beads/.env loaded into the parent process) is dropped
 // so the detached flusher cannot be redirected by project-controlled
 // environment.
-func flusherChildEnv(env []string, endpoint, dataDir string) []string {
+func flusherChildEnv(env []string, endpoint string) []string {
 	out := make([]string, 0, len(env)+2)
 	for _, kv := range env {
-		if strings.HasPrefix(kv, EnvEndpoint+"=") || strings.HasPrefix(kv, EnvIsFlusher+"=") ||
-			strings.HasPrefix(kv, EnvDataDir+"=") {
+		if strings.HasPrefix(kv, EnvEndpoint+"=") || strings.HasPrefix(kv, EnvIsFlusher+"=") {
 			continue
 		}
 		out = append(out, kv)
 	}
 	if endpoint != "" {
 		out = append(out, EnvEndpoint+"="+endpoint)
-	}
-	if dataDir != "" {
-		out = append(out, EnvDataDir+"="+dataDir)
 	}
 	out = append(out, EnvIsFlusher+"=1")
 	return out
