@@ -343,11 +343,19 @@ func TestGuardAutoExportOverwriteAllowsViewerScopedJSONL(t *testing.T) {
 		map[string]any{"id": "bd-legacy", "issue_type": "bug", "title": "legacy issue record"},
 	)
 
-	if err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false); err != nil {
+	if err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false, nil); err != nil {
 		t.Fatalf("guardAutoExportOverwrite: %v", err)
 	}
 }
 
+// TestGuardAutoExportOverwriteBlocksRicherJSONL is #4069's regression test:
+// infra/template rows that are STILL IN THE STORE must block the shrink
+// guard, or the next auto-export silently overwrites the richer JSONL with
+// the filtered subset (GH#4069 — 89% data loss in the reporter's workspace).
+// bd-wisp is out-of-scope AND absent from the store (a compacted wisp,
+// GH#4988's actual bug) and must NOT count toward the block — see the
+// complement test TestGuardAutoExportOverwriteAllowsStaleEphemeralWisp,
+// which isolates that half of the rule on its own.
 func TestGuardAutoExportOverwriteBlocksRicherJSONL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "issues.jsonl")
 	writeJSONLLines(t, path,
@@ -358,17 +366,25 @@ func TestGuardAutoExportOverwriteBlocksRicherJSONL(t *testing.T) {
 		map[string]any{"_type": "issue", "id": "bd-wisp", "issue_type": "task", "ephemeral": true},
 		map[string]any{"_type": "event", "id": "bd-event"},
 	)
+	// bd-agent and bd-template are still in the store (the #4069 scenario);
+	// bd-wisp has been compacted out of the store already (the #4988
+	// scenario) and is deliberately absent here.
+	storeIDs := map[string]struct{}{
+		"bd-1":        {},
+		"bd-agent":    {},
+		"bd-template": {},
+	}
 
-	err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false)
+	err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false, storeIDs)
 	if err == nil {
 		t.Fatal("expected guardAutoExportOverwrite to reject richer JSONL, got nil")
 	}
 	msg := err.Error()
-	// Memories + unknown still block. Ephemeral/infra/template do not (GH#4988).
 	for _, want := range []string{
 		"refusing to overwrite",
-		"2 record(s) that auto-export would drop",
+		"4 record(s) outside auto-export scope",
 		"1 memories",
+		"2 infra/template/ephemeral issues",
 		"1 unknown",
 	} {
 		if !strings.Contains(msg, want) {
@@ -377,15 +393,20 @@ func TestGuardAutoExportOverwriteBlocksRicherJSONL(t *testing.T) {
 	}
 }
 
+// TestGuardAutoExportOverwriteAllowsStaleEphemeralWisp is the complement of
+// TestGuardAutoExportOverwriteBlocksRicherJSONL: an out-of-scope row that is
+// ALSO absent from the store (compacted away — GH#4988) does not block the
+// rewrite, because nothing extra is lost versus what Dolt already lost.
 func TestGuardAutoExportOverwriteAllowsStaleEphemeralWisp(t *testing.T) {
-	// GH#4988: JSONL still lists a compacted wisp; auto-export must rewrite.
 	path := filepath.Join(t.TempDir(), "issues.jsonl")
 	writeJSONLLines(t, path,
 		map[string]any{"_type": "issue", "id": "bd-1", "issue_type": "task", "title": "kept"},
 		map[string]any{"_type": "issue", "id": "bd-wisp", "issue_type": "task", "ephemeral": true, "title": "stale wisp"},
 	)
+	// bd-1 is in the store; bd-wisp has been compacted away — not present.
+	storeIDs := map[string]struct{}{"bd-1": {}}
 
-	if err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false); err != nil {
+	if err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false, storeIDs); err != nil {
 		t.Fatalf("stale ephemeral-only richer JSONL should be rewritable: %v", err)
 	}
 }
@@ -420,7 +441,7 @@ func TestGuardAutoExportOverwriteAllowsMemoriesWhenIncluded(t *testing.T) {
 		map[string]any{"_type": "memory", "key": "keep-me", "value": "private context"},
 	)
 
-	if err := guardAutoExportOverwrite(path, nil, true); err != nil {
+	if err := guardAutoExportOverwrite(path, nil, true, nil); err != nil {
 		t.Fatalf("guardAutoExportOverwrite with memories included: %v", err)
 	}
 }

@@ -227,8 +227,14 @@ func missingJSONLIssueIDsInStore(ctx context.Context, path string) ([]string, er
 		return nil, nil
 	}
 
-	filter, infraTypeSet := buildAutoExportFilter(ctx)
-	issues, err := store.SearchIssues(ctx, "", filter)
+	// Store-side query stays unfiltered and MaxRows: 0 (opts out of
+	// BEADS_MAX_ROWS). This guard's failure mode is a permanent wedge, so a
+	// narrower filter here — or a row cap — can only ever manufacture
+	// phantom "missing" ids, never fewer (maphew review, GH#4988 follow-up).
+	// buildAutoExportFilter is still consulted for infraTypeSet, which
+	// classifies the JSONL-side records below.
+	_, infraTypeSet := buildAutoExportFilter(ctx)
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Limit: 0, MaxRows: 0})
 	if err != nil {
 		return nil, fmt.Errorf("failed to search issues: %w", err)
 	}
@@ -424,7 +430,18 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 		issues = filterOutOwners(issues, ownerExcludes)
 	}
 
-	if err := guardAutoExportOverwrite(path, infraTypeSet, includeMemories); err != nil {
+	// Store-presence set for the shrink guard (#4069 vs #4988): an
+	// out-of-scope row already in the JSONL only blocks the rewrite when its
+	// id is STILL in the store. Computed unfiltered here — not from the
+	// in-scope `issues` above — because the guard needs to see infra/
+	// template/ephemeral ids too, to tell "still in Dolt" apart from
+	// "compacted away".
+	storeIDs, err := storeKnownIssueIDs(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	if err := guardAutoExportOverwrite(path, infraTypeSet, includeMemories, storeIDs); err != nil {
 		return 0, 0, err
 	}
 
@@ -513,7 +530,28 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 	return issueCount, memoryCount, nil
 }
 
-func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMemories bool) error {
+// storeKnownIssueIDs returns the set of issue ids currently present in the
+// store, ignoring auto-export scope (infra/template/ephemeral rows are
+// included). guardAutoExportOverwrite uses this to implement the
+// store-presence rule: an out-of-scope row already in the JSONL is only
+// safe to drop when its id is no longer in the store (a TTL-compacted wisp,
+// GH#4988); if the store still has it, dropping it repeats #4069's data
+// loss. Deliberately unfiltered + MaxRows: 0, for the same reason as
+// missingJSONLIssueIDsInStore's store-side query: this guard's failure mode
+// is a permanent wedge, so the query must stay maximally permissive.
+func storeKnownIssueIDs(ctx context.Context) (map[string]struct{}, error) {
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Limit: 0, MaxRows: 0})
+	if err != nil {
+		return nil, fmt.Errorf("failed to search issues: %w", err)
+	}
+	ids := make(map[string]struct{}, len(issues))
+	for _, issue := range issues {
+		ids[issue.ID] = struct{}{}
+	}
+	return ids, nil
+}
+
+func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMemories bool, storeIDs map[string]struct{}) error {
 	f, err := os.Open(path) //nolint:gosec
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -533,7 +571,7 @@ func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMe
 		if line == "" {
 			continue
 		}
-		if err := classifyExistingAutoExportRecord([]byte(line), infraTypes, includeMemories, &stats); err != nil {
+		if err := classifyExistingAutoExportRecord([]byte(line), infraTypes, includeMemories, storeIDs, &stats); err != nil {
 			return fmt.Errorf("auto-export shrink guard: inspect existing JSONL line %d: %w", lineNo, err)
 		}
 	}
@@ -541,24 +579,25 @@ func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMe
 		return fmt.Errorf("auto-export shrink guard: inspect existing JSONL: %w", err)
 	}
 
-	// Only block on records we must not silently drop: memories (when excluded)
-	// and unknown record types. Ephemeral / template / infra issues are outside
-	// auto-export scope by design (GH#3649); allowing the rewrite clears stale
-	// wisps left after TTL compaction (GH#4988).
-	if stats.Memories == 0 && stats.UnknownRecords == 0 {
+	// Store-presence rule (#4069 vs #4988): block on memories (when
+	// excluded), unknown record types, and out-of-scope issue rows whose id
+	// is STILL present in the store — those are exactly what #4069 says we
+	// must not silently drop. An out-of-scope row absent from the store
+	// (e.g. a TTL-compacted wisp) is safe to drop and does not block.
+	if stats.FilteredRecords == 0 {
 		return nil
 	}
-	return fmt.Errorf("auto-export shrink guard: refusing to overwrite %s because it contains %d record(s) that auto-export would drop (%d memories, %d unknown); run an explicit export if you want to replace it", path, stats.Memories+stats.UnknownRecords, stats.Memories, stats.UnknownRecords)
+	return fmt.Errorf("auto-export shrink guard: refusing to overwrite %s because it contains %d record(s) outside auto-export scope (%d memories, %d infra/template/ephemeral issues, %d unknown); run an explicit export if you want to replace it", path, stats.FilteredRecords, stats.Memories, stats.FilteredIssues, stats.UnknownRecords)
 }
 
 type autoExportOverwriteStats struct {
-	FilteredRecords int // retained for tests / logging; blocking uses Memories+Unknown
+	FilteredRecords int // blocking total: Memories + FilteredIssues + UnknownRecords
 	Memories        int
-	FilteredIssues  int // ephemeral/infra/template — non-blocking (GH#4988)
+	FilteredIssues  int // infra/template/ephemeral issues still present in the store — blocking (restores GH#4069)
 	UnknownRecords  int
 }
 
-func classifyExistingAutoExportRecord(line []byte, infraTypes map[string]bool, includeMemories bool, stats *autoExportOverwriteStats) error {
+func classifyExistingAutoExportRecord(line []byte, infraTypes map[string]bool, includeMemories bool, storeIDs map[string]struct{}, stats *autoExportOverwriteStats) error {
 	var record struct {
 		Type       string          `json:"_type"`
 		IssueType  types.IssueType `json:"issue_type"`
@@ -583,10 +622,15 @@ func classifyExistingAutoExportRecord(line []byte, infraTypes map[string]bool, i
 			stats.UnknownRecords++
 			return nil
 		}
-		// Out-of-scope issue types: count for observability but do not block
-		// auto-export overwrite (stale wisps after compaction — GH#4988).
 		if infraTypes[string(record.IssueType)] || record.IsTemplate || record.Ephemeral {
-			stats.FilteredIssues++
+			// Store-presence rule: only block when the row still exists in
+			// Dolt (#4069's exact scenario). A row that's gone from the
+			// store (TTL-compacted wisp — GH#4988) is safe to drop; the
+			// rewrite doesn't lose anything the store didn't already lose.
+			if _, present := storeIDs[record.ID]; present {
+				stats.FilteredRecords++
+				stats.FilteredIssues++
+			}
 		}
 		return nil
 	default:
