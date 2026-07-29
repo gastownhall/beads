@@ -846,9 +846,10 @@ const (
 	// StorageClassUnversioned is durable and interchanged with no revision-
 	// history promise: only current state is retained and replicated (C2.2).
 	StorageClassUnversioned StorageClass = "unversioned"
-	// StorageClassEphemeral is TTL-bounded operational state: never exported,
-	// never replicated (C2.1). The existing wisp/lease planes have this
-	// character.
+	// StorageClassEphemeral is operational state that is never exported and
+	// never replicated (C2.1) — typically TTL-bounded, though not always:
+	// no-history rows are class-ephemeral yet TTL-exempt. The existing
+	// wisp/lease planes have this character.
 	StorageClassEphemeral StorageClass = "ephemeral"
 )
 

@@ -46,4 +46,17 @@ func TestValidateStorageClassConfig(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "versioned, unversioned, or ephemeral") {
 		t.Errorf("bad value should be rejected with the value list, got: %v", err)
 	}
+	// The suffix is validated too: create-time lookup keys on the Normalize()d
+	// type, so an alias or typo would otherwise pass here and silently never
+	// match (lion's #5149 should-fix).
+	err = validateStorageClassConfig("storage-class.feat", "unversioned")
+	if err == nil || !strings.Contains(err.Error(), "storage-class.feature") {
+		t.Errorf("alias suffix should be rejected with the canonical key hint, got: %v", err)
+	}
+	if err := validateStorageClassConfig("storage-class.taks", "unversioned"); err == nil {
+		t.Error("unknown (typo) suffix should be rejected")
+	}
+	if err := validateStorageClassConfig("storage-class.task", "unversioned"); err != nil {
+		t.Errorf("canonical built-in suffix rejected: %v", err)
+	}
 }

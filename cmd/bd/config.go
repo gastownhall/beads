@@ -959,9 +959,21 @@ var recognizedConfigPrefixes = []string{
 // set, not discovered broken at create time). The key suffix must name an
 // issue type and the value must be a storage class.
 func validateStorageClassConfig(key, value string) error {
-	issueType := strings.TrimPrefix(key, "storage-class.")
-	if issueType == "" || strings.Contains(issueType, ".") {
+	suffix := strings.TrimPrefix(key, "storage-class.")
+	if suffix == "" || strings.Contains(suffix, ".") {
 		return fmt.Errorf("invalid key %q: expected storage-class.<issue-type> (e.g. storage-class.event)", key)
+	}
+	// The key suffix must be a canonical, known issue type: create-time lookup
+	// keys on the Normalize()d type (resolveStorageClass), so an alias like
+	// storage-class.feat or a typo like storage-class.taks would pass set-time
+	// validation and then silently never match — the C-OQ1 failure mode this
+	// validator exists to prevent.
+	issueType := types.IssueType(suffix)
+	if canonical := issueType.Normalize(); canonical != issueType {
+		return fmt.Errorf("invalid key %q: %q is an alias of %q, and create-time lookup uses the canonical type; set storage-class.%s instead", key, suffix, canonical, canonical)
+	}
+	if !issueType.IsValidWithCustom(loadEmbeddedCustomTypes()) {
+		return fmt.Errorf("invalid key %q: unknown issue type %q (use a built-in type, or add it to types.custom first)", key, suffix)
 	}
 	if _, err := types.ParseStorageClass(value); err != nil {
 		return err
