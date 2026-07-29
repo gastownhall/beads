@@ -663,14 +663,13 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/race
         run: go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./...
 
-  # Gap from gastownhall/beads#4860: pr-core goes through beads_test_env_enter,
-  # which sets BEADS_TEST_SKIP=dolt unless BEADS_TEST_ENV_RUN_DOLT=1. That meant
-  # every RequireDoltBinary doctor/fix test skipped on every PR, even though
-  # other jobs install Dolt. This job is the dedicated PR path that actually
-  # executes those packages with Dolt available and the skip flag off.
-  # Deliberately absent from ci-gate's needs/CI_GATE_REQUIRED below: the suite
-  # surfaces two pre-existing failures (gastownhall/beads#5133). Promote to
-  # required once those are fixed and this job is green.
+  # Gap from gastownhall/beads#4860: pr-core's beads_test_env_enter sets
+  # BEADS_TEST_SKIP=dolt, so RequireDoltBinary doctor/fix tests skipped on
+  # every PR despite other jobs installing Dolt. This job is the dedicated
+  # PR path that runs them with Dolt available and the skip flag off,
+  # deliberately excluded from ci-gate's needs/CI_GATE_REQUIRED and marked
+  # continue-on-error since the suite surfaces two pre-existing failures
+  # (gastownhall/beads#5133); promote to required once those are fixed.
   test-doctor-dolt:
     name: Test (doctor Dolt + fix)
     runs-on: ubuntu-latest
