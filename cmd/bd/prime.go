@@ -422,8 +422,10 @@ var primeHasGitRemote = func() bool {
 }
 
 // gitCWDHasRemote reports whether the process CWD git repo has any remote.
-// It is the BEADS_DIR-independent primitive the GH#4927 regression test drives
-// directly, alongside primeHasGitRemote.
+// Delegates to gitDirHasRemote so the production path and the test-driven
+// path share one implementation (no BEADS_DIR coupling). It is the
+// BEADS_DIR-independent primitive the GH#4927 regression test drives directly,
+// alongside primeHasGitRemote.
 func gitCWDHasRemote() bool {
 	return gitDirHasRemote("")
 }
