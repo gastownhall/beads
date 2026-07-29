@@ -109,7 +109,7 @@ large     # > 3 days
 ```
 
 **Interaction with label inheritance:** `bd create --parent` copies the parent's
-labels onto the child by default (see #2100). If the epic carries a size marker
+labels onto the child by default (see GH#2100). If the epic carries a size marker
 (e.g. `large` or `sp:13`) and children have their own estimates, every child
 will also inherit the epic's size label — so `bd list -l large` returns the
 whole tree, not just epic-scale work. For per-child size labels, pass
@@ -122,8 +122,7 @@ shared can still be added explicitly).
 bd ready --json | jq '.[] | select(.labels[] == "small")'
 
 # Child keeps its own size label without inheriting the epic's
-bd create "Implement auth endpoints" -p 1 --parent bd-a3f8e9 --no-inherit-labels
-bd label add <child-id> small
+bd create "Implement auth endpoints" -p 1 --parent bd-a3f8e9 --no-inherit-labels -l small
 ```
 
 ### 4. Quality Gates
