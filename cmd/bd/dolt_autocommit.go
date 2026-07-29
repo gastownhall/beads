@@ -6,8 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 )
@@ -113,79 +111,6 @@ func maybeAutoCommitStore(ctx context.Context, st storage.DoltStorage, p doltAut
 		return err
 	}
 	return nil
-}
-
-// autoCommitSweepExemptPaths are inspection commands that display version
-// control or working-set state. The unflagged-writes sweep must never run
-// after them: bd dolt status would commit the dirty state it just displayed,
-// destroying the inspect-before-commit flow (bd-578h9.7). Keyed by full
-// command path because leaf names like "status" collide across parents.
-var autoCommitSweepExemptPaths = map[string]bool{
-	"bd dolt status": true,
-	"bd vc status":   true,
-	"bd diff":        true,
-	"bd history":     true,
-}
-
-// autoCommitSweepExempt reports whether cmd must not trigger the
-// dirty-working-set sweep (bd-578h9.7). Read-only commands are exempt for a
-// second reason: they open the embedded store read-only, so the sweep's
-// commit would fail with errReadOnly and turn a successful read into a fatal
-// error. Explicitly flagged writes (commandDidWrite) still auto-commit.
-func autoCommitSweepExempt(cmd *cobra.Command) bool {
-	return isReadOnlyCommand(cmd.Name()) || autoCommitSweepExemptPaths[cmd.CommandPath()]
-}
-
-// formatDoltSweepCommitMessage attributes a sweep commit distinctly from a
-// normal auto-commit: the swept changes belong to an EARLIER command that
-// failed (or forgot commandDidWrite) before its own auto-commit could run —
-// blaming them on the command that merely triggered the sweep corrupts the
-// audit trail (bd-578h9.7).
-func formatDoltSweepCommitMessage(cmd, actor string) string {
-	cmd = strings.TrimSpace(cmd)
-	if cmd == "" {
-		cmd = "write"
-	}
-	actor = strings.TrimSpace(actor)
-	if actor == "" {
-		actor = "unknown"
-	}
-	return fmt.Sprintf("bd: autocommit sweep of earlier uncommitted changes (after %s by %s)", cmd, actor)
-}
-
-// workingSetHasUnflaggedWrites reports whether the embedded working set holds
-// committable changes even though no write path set commandDidWrite. It is the
-// safety net behind that flag: a mutating command that forgets to set it would
-// otherwise leave its writes to be swept into the NEXT command's auto-commit
-// with wrong attribution (bd-6dnrw.11). Only meaningful in embedded mode with
-// auto-commit "on" — batch mode keeps the working set dirty by design.
-func workingSetHasUnflaggedWrites(ctx context.Context, cmdName string) bool {
-	if !isEmbeddedMode() {
-		return false
-	}
-	if mode, err := getDoltAutoCommitMode(); err != nil || mode != doltAutoCommitOn {
-		return false
-	}
-	st := getStore()
-	if st == nil {
-		return false
-	}
-	unwrapped := storage.UnwrapStore(st)
-	if lm, ok := unwrapped.(storage.LifecycleManager); ok && lm.IsClosed() {
-		return false
-	}
-	checker, ok := unwrapped.(interface {
-		HasPendingChanges(ctx context.Context) (bool, error)
-	})
-	if !ok {
-		return false
-	}
-	dirty, err := checker.HasPendingChanges(ctx)
-	if err != nil || !dirty {
-		return false
-	}
-	debug.Logf("command %q left uncommitted changes without setting commandDidWrite; auto-committing anyway (bd-6dnrw.11)", cmdName)
-	return true
 }
 
 func isDoltNothingToCommit(err error) bool {

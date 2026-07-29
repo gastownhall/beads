@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -23,14 +25,22 @@ Examples:
   bd note gt-abc Fixed the flaky test
   echo "note from pipe" | bd note gt-abc --stdin
   bd note gt-abc --file notes.txt`,
-	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
 		CheckReadonly("note")
+
+		evt := metrics.NewCommandEvent("note")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
 
 		id := args[0]
 		textArgs := args[1:]
 
-		// Determine note text from args, stdin, or file
 		stdinFlag, _ := cmd.Flags().GetBool("stdin")
 		fileFlag, _ := cmd.Flags().GetString("file")
 
@@ -39,39 +49,43 @@ Examples:
 		case stdinFlag:
 			content, err := io.ReadAll(os.Stdin)
 			if err != nil {
-				FatalErrorRespectJSON("reading from stdin: %v", err)
+				return HandleErrorRespectJSON("reading from stdin: %v", err)
 			}
 			noteText = strings.TrimRight(string(content), "\n")
 		case fileFlag != "":
 			content, err := readBodyFile(fileFlag)
 			if err != nil {
-				FatalErrorRespectJSON("reading file: %v", err)
+				return HandleErrorRespectJSON("reading file: %v", err)
 			}
 			noteText = content
 		case len(textArgs) > 0:
 			noteText = strings.Join(textArgs, " ")
 		default:
-			FatalErrorRespectJSON("no note text provided (use positional args, --stdin, or --file)")
+			return HandleErrorRespectJSON("no note text provided (use positional args, --stdin, or --file)")
 		}
 
 		if noteText == "" {
-			FatalErrorRespectJSON("note text is empty")
+			return HandleErrorRespectJSON("note text is empty")
+		}
+
+		if usesProxiedServer() {
+			return runNoteProxiedServer(rootCtx, id, noteText)
 		}
 
 		ctx := rootCtx
 
-		result, err := resolveAndGetIssueWithRoutingForWrite(ctx, store, id)
+		result, err := resolveAndGetIssueForMutation(ctx, store, id)
 		if err != nil {
 			if result != nil {
 				result.Close()
 			}
-			FatalErrorRespectJSON("resolving %s: %v", id, err)
+			return HandleErrorRespectJSON("resolving %s: %v", id, err)
 		}
 		if result == nil || result.Issue == nil {
 			if result != nil {
 				result.Close()
 			}
-			FatalErrorRespectJSON("issue %s not found", id)
+			return HandleErrorRespectJSON("issue %s not found", id)
 		}
 		defer result.Close()
 
@@ -79,32 +93,29 @@ Examples:
 		issueStore := result.Store
 
 		if err := validateIssueUpdatable(id, issue); err != nil {
-			FatalErrorRespectJSON("%s", err)
+			return HandleErrorRespectJSON("%s", err)
 		}
 
-		// Append to existing notes
-		combined := issue.Notes
-		if combined != "" {
-			combined += "\n"
-		}
-		combined += noteText
-
+		// Passed as an append OPERATION, not a pre-merged value: the storage
+		// layer re-reads the row inside the mutation transaction and appends
+		// there. Concatenating onto the `issue` snapshot here (read in an
+		// earlier transaction) silently erased notes committed by a concurrent
+		// `bd note` / `bd update --append-notes` — both processes exited 0.
 		updates := map[string]interface{}{
-			"notes": combined,
+			issueops.OpAppendNotes: noteText,
 		}
 		if err := issueStore.UpdateIssue(ctx, result.ResolvedID, updates, actor); err != nil {
-			FatalErrorRespectJSON("updating %s: %v", id, err)
+			return HandleErrorRespectJSON("updating %s: %v", id, err)
 		}
 		if err := commitPendingIfEmbedded(ctx, issueStore, actor, doltAutoCommitParams{
 			Command:  "note",
 			IssueIDs: []string{result.ResolvedID},
 		}); err != nil {
-			FatalErrorRespectJSON("failed to commit: %v", err)
+			return HandleErrorRespectJSON("failed to commit: %v", err)
 		}
 
 		SetLastTouchedID(result.ResolvedID)
 
-		// Re-fetch for display
 		updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
 		title := ""
 		if updatedIssue != nil {
@@ -112,11 +123,12 @@ Examples:
 		}
 		if jsonOutput {
 			if updatedIssue != nil {
-				outputJSON(updatedIssue)
+				return outputJSON(updatedIssue)
 			}
-		} else {
-			fmt.Printf("%s Note added to %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, title))
+			return nil
 		}
+		fmt.Printf("%s Note added to %s\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, title))
+		return nil
 	},
 }
 

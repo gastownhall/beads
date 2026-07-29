@@ -1,6 +1,6 @@
 ---
 description: Reopen closed issues
-argument-hint: [issue-ids...] [--reason]
+argument-hint: "[issue-ids...] [--reason]"
 ---
 
 Reopen one or more closed issues.

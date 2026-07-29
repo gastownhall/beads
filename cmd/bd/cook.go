@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -84,8 +85,10 @@ Output (--persist):
   - The "template" label for proto identification
   - Child issues for each step
   - Dependencies matching depends_on relationships`,
-	Args: cobra.ExactArgs(1),
-	Run:  runCook,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runCook,
 }
 
 // cookResult holds the result of cooking a formula
@@ -306,8 +309,7 @@ func outputCookEphemeral(resolved *formula.Formula, runtimeMode bool, inputVars 
 		// Substitute variables in the formula
 		substituteFormulaVars(resolved, inputVars)
 	}
-	outputJSON(resolved)
-	return nil
+	return outputJSON(resolved)
 }
 
 // persistCookFormula creates a proto bead in the database (persist mode)
@@ -331,14 +333,13 @@ func persistCookFormula(ctx context.Context, resolved *formula.Formula, protoID 
 	}
 
 	if jsonOutput {
-		outputJSON(cookResult{
+		return outputJSON(cookResult{
 			ProtoID:    result.ProtoID,
 			Formula:    resolved.Formula,
 			Created:    result.Created,
 			Variables:  vars,
 			BondPoints: bondPoints,
 		})
-		return nil
 	}
 
 	fmt.Printf("%s Cooked proto: %s\n", ui.RenderPass("✓"), result.ProtoID)
@@ -353,34 +354,44 @@ func persistCookFormula(ctx context.Context, resolved *formula.Formula, protoID 
 	return nil
 }
 
-func runCook(cmd *cobra.Command, args []string) {
-	// Parse and validate flags
+func runCook(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("cook is not supported in proxied-server mode")
+	}
+	evt := metrics.NewCommandEvent("cook")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	flags, err := parseCookFlags(cmd, args)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
-	// Validate store access for persist mode
 	if flags.persist {
 		CheckReadonly("cook --persist")
 		if store == nil {
-			FatalError("no database connection")
+			return HandleError("no database connection")
 		}
 	}
 
-	// Load and resolve the formula
 	resolved, err := loadAndResolveFormula(flags.formulaPath, flags.searchPaths)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
+	}
+	if flags.runtimeMode {
+		if err := formula.ValidateVars(resolved, flags.inputVars); err != nil {
+			return HandleError("%v", err)
+		}
 	}
 
-	// Apply prefix to proto ID if specified
 	protoID := resolved.Formula
 	if flags.prefix != "" {
 		protoID = flags.prefix + resolved.Formula
 	}
 
-	// Extract variables and bond points
 	vars := formula.ExtractVariables(resolved)
 	var bondPoints []string
 	if resolved.Compose != nil {
@@ -389,24 +400,22 @@ func runCook(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	// Handle dry-run mode
 	if flags.dryRun {
 		outputCookDryRun(resolved, protoID, flags.runtimeMode, flags.inputVars, vars, bondPoints)
-		return
+		return nil
 	}
 
-	// Handle ephemeral mode (default)
 	if !flags.persist {
 		if err := outputCookEphemeral(resolved, flags.runtimeMode, flags.inputVars, vars); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
-		return
+		return nil
 	}
 
-	// Handle persist mode
 	if err := persistCookFormula(rootCtx, resolved, protoID, flags.force, vars, bondPoints); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
+	return nil
 }
 
 // cookFormulaResult holds the result of cooking
@@ -896,8 +905,41 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 func collectDependencies(step *formula.Step, idMapping map[string]string, deps *[]*types.Dependency) {
 	issueID := idMapping[step.ID]
 
+	// Pre-compute the waits_for spawner so we can dedupe against depends_on
+	// and needs below. When waits_for has no explicit `from:`, it infers its
+	// spawner from needs[0] — and `depends_on`/`needs` would otherwise emit a
+	// DepBlocks edge on the same (source, target) pair that `waits_for`
+	// emits a DepWaitsFor edge on. Storage rejects the duplicate. The
+	// DepWaitsFor edge subsumes the blocking semantics, so we skip the
+	// redundant DepBlocks for that specific target (GH#3783).
+	var waitsForSpec *formula.WaitsForSpec
+	var waitsForSpawnerStepID string
+	if step.WaitsFor != "" {
+		waitsForSpec = formula.ParseWaitsFor(step.WaitsFor)
+		if waitsForSpec != nil {
+			waitsForSpawnerStepID = waitsForSpec.SpawnerID
+			if waitsForSpawnerStepID == "" && len(step.Needs) > 0 {
+				waitsForSpawnerStepID = step.Needs[0]
+			}
+		}
+	}
+
+	// waitsForCollapsedBlocks records whether we actually skipped emitting a
+	// DepBlocks edge for the waits_for spawner below (i.e. the spawner step ID
+	// really did appear in depends_on/needs and resolve to a known issue). If
+	// so, the DepWaitsFor edge emitted below must carry also_blocks so it
+	// does not silently drop the blocking semantics that edge collapsed away
+	// (GH#3783 review gap).
+	var waitsForCollapsedBlocks bool
+
 	// Process depends_on field
 	for _, depID := range step.DependsOn {
+		if depID == waitsForSpawnerStepID {
+			// This target is also the waits_for spawner; the DepWaitsFor edge
+			// emitted below subsumes the blocking semantics for this pair.
+			waitsForCollapsedBlocks = true
+			continue
+		}
 		depIssueID, ok := idMapping[depID]
 		if !ok {
 			continue // Will be caught during validation
@@ -912,6 +954,12 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 
 	// Process needs field - simpler alias for sibling dependencies
 	for _, needID := range step.Needs {
+		if needID == waitsForSpawnerStepID {
+			// This target is also the waits_for spawner; the DepWaitsFor edge
+			// emitted below subsumes the blocking semantics for this pair.
+			waitsForCollapsedBlocks = true
+			continue
+		}
 		needIssueID, ok := idMapping[needID]
 		if !ok {
 			continue // Will be caught during validation
@@ -925,31 +973,21 @@ func collectDependencies(step *formula.Step, idMapping map[string]string, deps *
 	}
 
 	// Process waits_for field - fanout gate dependency
-	if step.WaitsFor != "" {
-		waitsForSpec := formula.ParseWaitsFor(step.WaitsFor)
-		if waitsForSpec != nil {
-			// Determine spawner ID
-			spawnerStepID := waitsForSpec.SpawnerID
-			if spawnerStepID == "" && len(step.Needs) > 0 {
-				// Infer spawner from first need
-				spawnerStepID = step.Needs[0]
+	if waitsForSpec != nil && waitsForSpawnerStepID != "" {
+		if spawnerIssueID, ok := idMapping[waitsForSpawnerStepID]; ok {
+			// Spawner identity is the depends_on_id; metadata carries
+			// the gate. A collapsed needs/depends_on edge additionally marks
+			// also_blocks so the gate blocks while the spawner itself is
+			// open, not only while it has an open child (GH#3783).
+			var dep *types.Dependency
+			var err error
+			if waitsForCollapsedBlocks {
+				dep, err = types.NewWaitsForBlockingDependency(issueID, spawnerIssueID, waitsForSpec.Gate)
+			} else {
+				dep, err = types.NewWaitsForDependency(issueID, spawnerIssueID, waitsForSpec.Gate)
 			}
-
-			if spawnerStepID != "" {
-				if spawnerIssueID, ok := idMapping[spawnerStepID]; ok {
-					// Create WaitsFor dependency with metadata
-					meta := types.WaitsForMeta{
-						Gate: waitsForSpec.Gate,
-					}
-					metaJSON, _ := json.Marshal(meta)
-
-					*deps = append(*deps, &types.Dependency{
-						IssueID:     issueID,
-						DependsOnID: spawnerIssueID,
-						Type:        types.DepWaitsFor,
-						Metadata:    string(metaJSON),
-					})
-				}
+			if err == nil {
+				*deps = append(*deps, dep)
 			}
 		}
 	}

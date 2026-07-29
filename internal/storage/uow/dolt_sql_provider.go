@@ -61,18 +61,33 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 	}, nil
 }
 
-func (p *doltSQLProvider) initSchema(ctx context.Context, database string, hasRemoteProbe func() bool) error {
+func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error {
 	bo := backoff.NewExponentialBackOff()
 	bo.InitialInterval = 25 * time.Millisecond
-	bo.MaxElapsedTime = 15 * time.Second
+	// This budget must outwait a peer holding the migration lock through a
+	// full cold-start migration pass (every migration + a Dolt commit each),
+	// not just a transient blip — it grows as migrations accumulate.
+	bo.MaxElapsedTime = 60 * time.Second
+	// Fresh-bootstrap ownership proof for the #4566 guard self-heal
+	// (gastownhall/beads#5012): the first attempt issues a bare CREATE
+	// DATABASE (no IF NOT EXISTS), so the server arbitrates creation
+	// atomically — success proves THIS init created the database, and an
+	// already-exists refusal (1007) proves it did not. Only the proven
+	// creator passes WithFreshBootstrapHeal: on a database this init
+	// created, a retry attempt that finds dirty tables can only be seeing a
+	// previous attempt's own half-applied migration step (a session that
+	// died between a step's SQL and its per-step Dolt commit — the "busy
+	// buffer" shape on a loaded shared server), never pre-existing user
+	// data, so the migrate call may discard that debris and converge instead
+	// of failing the init permanently. A concurrent initializer that loses
+	// the create race keeps the guard's refusal unchanged. `created` is
+	// sticky across retry attempts: it is set exactly when this init's
+	// CREATE succeeded, which no later attempt can re-learn from probing.
+	created := false
 	return backoff.Retry(func() error {
-		// Dial/handshake failures here are the NORMAL warmup case — the
-		// freshly spawned child server can accept TCP before the SQL engine
-		// answers — so only mark genuinely permanent errors Permanent
-		// (bd-6dnrw.44 item 8).
 		conn, err := p.db.Conn(ctx)
 		if err != nil {
-			if isRetryableWarmupError(err) {
+			if isSerializationError(err) {
 				return fmt.Errorf("uow: pin connection: %w", err)
 			}
 			return backoff.Permanent(fmt.Errorf("uow: pin connection: %w", err))
@@ -80,36 +95,36 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string, hasRe
 		defer conn.Close()
 
 		ddl := db.NewDDLSQLRepository(conn)
-		if err := ddl.CreateDatabaseIfNotExists(ctx, database); err != nil {
-			if isRetryableWarmupError(err) {
-				return fmt.Errorf("uow: creating database: %w", err)
+		if created {
+			// Re-assert on retries so a database dropped between attempts
+			// (e.g. a concurrent clean-databases) is recreated rather than
+			// failing the USE below.
+			if err := ddl.CreateDatabaseIfNotExists(ctx, database); err != nil {
+				return backoff.Permanent(fmt.Errorf("uow: creating database: %w", err))
 			}
-			return backoff.Permanent(fmt.Errorf("uow: creating database: %w", err))
+		} else {
+			switch err := ddl.CreateDatabase(ctx, database); {
+			case err == nil:
+				created = true
+			case isDatabaseExistsError(err):
+				// Pre-existing (or a concurrent initializer won the create
+				// race): not ours, heal stays off.
+			case isSerializationError(err):
+				return fmt.Errorf("uow: creating database: %w", err)
+			default:
+				return backoff.Permanent(fmt.Errorf("uow: creating database: %w", err))
+			}
 		}
 		if err := ddl.UseDatabase(ctx, database); err != nil {
-			if isRetryableWarmupError(err) {
-				return fmt.Errorf("uow: switching to database: %w", err)
-			}
 			return backoff.Permanent(fmt.Errorf("uow: switching to database: %w", err))
 		}
 
-		// #4259: refuse to silently auto-apply pending migrations to a
-		// remote-backed database — the same gate the dolt and embeddeddolt
-		// store opens run (bd-6dnrw.28: this third store-open path used to
-		// bypass it). hasRemoteProbe is the on-disk fallback for a freshly
-		// started child server whose dolt_remotes table is still empty
-		// (GH#2315); nil disables it (e.g. external servers with no local
-		// data dir). A gate refusal is permanent — never retried into a
-		// migration.
-		if err := schema.CheckRemoteMigrateGateWithRemoteCheck(ctx, conn, hasRemoteProbe); err != nil {
-			if isRetryableWarmupError(err) {
-				return fmt.Errorf("uow: remote-migrate gate: %w", err)
-			}
-			return backoff.Permanent(fmt.Errorf("uow: remote-migrate gate: %w", err))
+		var migrateOpts []schema.MigrateLockOption
+		if created {
+			migrateOpts = append(migrateOpts, schema.WithFreshBootstrapHeal())
 		}
-
-		if _, err := schema.MigrateUpWithLock(ctx, conn, database); err != nil {
-			if isRetryableWarmupError(err) || schema.IsMigrationLockError(err) {
+		if _, err := schema.MigrateUpWithLock(ctx, conn, database, migrateOpts...); err != nil {
+			if isSerializationError(err) || schema.IsMigrationLockError(err) {
 				return fmt.Errorf("uow: migrate: %w", err)
 			}
 			return backoff.Permanent(fmt.Errorf("uow: migrate: %w", err))
@@ -118,13 +133,15 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string, hasRe
 	}, backoff.WithContext(bo, ctx))
 }
 
-func buildDSN(ep proxy.Endpoint, database, user, password string) string {
+func buildDSN(ep proxy.Endpoint, database, user, password, tlsConfigName string) string {
 	return util.DoltServerDSN{
-		Host:     ep.Host,
-		Port:     ep.Port,
-		User:     user,
-		Password: password,
-		Database: database,
+		Host:            ep.Host,
+		Port:            ep.Port,
+		User:            user,
+		Password:        password,
+		Database:        database,
+		TLSConfigName:   tlsConfigName,
+		ClientFoundRows: true,
 	}.String()
 }
 
@@ -139,11 +156,8 @@ func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	return conn, nil
 }
 
-// openAndInitSchema connects to the proxied server, initializes the schema,
-// and returns a ready provider. hasRemoteProbe is the remote-migrate gate's
-// on-disk remote probe (nil to rely on dolt_remotes alone — see initSchema).
-func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword string, hasRemoteProbe func() bool) (UnitOfWorkProvider, error) {
-	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword))
+func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword, tlsConfigName string) (UnitOfWorkProvider, error) {
+	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +167,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 		db:            initDB,
 	}
 
-	if err := initProvider.initSchema(ctx, database, hasRemoteProbe); err != nil {
+	if err := initProvider.initSchema(ctx, database); err != nil {
 		_ = initDB.Close()
 		return nil, fmt.Errorf("uow: init schema: %w", err)
 	}
@@ -162,7 +176,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 		return nil, fmt.Errorf("uow: close init db: %w", err)
 	}
 
-	dbConn, err := openDB(ctx, buildDSN(ep, database, rootUser, rootPassword))
+	dbConn, err := openDB(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
 	}

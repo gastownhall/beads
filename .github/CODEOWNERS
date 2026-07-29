@@ -1,7 +1,7 @@
 # CODEOWNERS — review ownership
 #
 # Changes under cmd/bd/init*.go interact with init-safety invariants
-# documented in docs/adr/0002-init-safety-invariants.md. Reviewers MUST
+# documented in engdocs/adr/0002-init-safety-invariants.md. Reviewers MUST
 # confirm new flags / data sources extend CheckRemoteSafety's guard
 # matrix (cmd/bd/init_safety_test.go) before approving. Silent guard
 # accretion is how we ended up with 8+ paper-over commits before ADR 0002
@@ -11,7 +11,7 @@
 cmd/bd/init.go              @gastownhall/beads-maintainers
 cmd/bd/init_*.go            @gastownhall/beads-maintainers
 cmd/bd/init_safety*.go      @gastownhall/beads-maintainers
-docs/adr/0002-init-safety-invariants.md  @gastownhall/beads-maintainers
+engdocs/adr/0002-init-safety-invariants.md  @gastownhall/beads-maintainers
 
 # Schema-migration critical path (bd-6dnrw.15). The 2026 Apr-Jun window
 # shipped a corrupting migration (PR 4039, DEFAULT (UUID()) PK, zero reviews,

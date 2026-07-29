@@ -13,7 +13,6 @@ make ci-pr-policy
 make ci-pr-lint
 make ci-package-mcp
 make ci-package-npm
-make ci-website
 ```
 
 Each wrapper auto-detects the repository root, sources `.buildflags` when it
@@ -46,8 +45,6 @@ Package gate wrappers validate publishable/package-adjacent surfaces:
 - `make ci-package-npm` builds or consumes the native binary expected by
   `npm-package/bin/bd`, runs the npm package test suite, and checks
   `npm pack --dry-run`.
-- `make ci-website` runs website dependency install, typecheck,
-  `llms-full.txt` generation, and Docusaurus build.
 
 Set `BEADS_TEST_BD_BINARY=/path/to/bd` for MCP and npm package gates to reuse a
 prebuilt candidate binary instead of rebuilding it inside the wrapper.
@@ -68,6 +65,18 @@ It reports contributor/fork status, draft/review/merge/check state, risky diff
 signals such as `.beads/` changes or missing tests, and the required
 contributor-protection next steps. It does not replace code review or local
 validation.
+
+## gh-body-lint
+
+Lint Markdown files before posting them with `gh ... --body-file`.
+
+```bash
+./scripts/gh-body-lint body.md
+./scripts/gh-body-lint --fix body.md
+```
+
+The lint catches literal `\n` sequences, which render poorly on GitHub, and
+`GH#123` references, which do not auto-link like `#123` or `owner/repo#123`.
 
 ## release.sh (⭐ The Easy Button)
 
@@ -92,8 +101,8 @@ This master script automates the **entire release process**:
 3. ✅ Bumps version in all files
 4. ✅ Commits and pushes version bump
 5. ✅ Creates and pushes git tag
-6. ✅ Updates Homebrew formula
-7. ✅ Upgrades local brew installation
+6. ✅ Verifies or opens the Homebrew core formula PR
+7. ✅ Upgrades local Homebrew installation
 8. ✅ Verifies everything works
 
 **After this script completes, your system is running the new version!**
@@ -129,7 +138,8 @@ The script provides colorful, step-by-step progress output:
 After the script finishes:
 - GitHub Actions builds binaries for all platforms (~5 minutes)
 - PyPI package is published automatically
-- Users can `brew upgrade beads` to get the new version
+- Homebrew core formula is verified or tracked through its canonical PR
+- Users can `brew upgrade beads` to get the new version after Homebrew merges
 - GitHub Release is created with binaries and changelog
 
 ---
@@ -242,7 +252,7 @@ This allows releases to work before a certificate is acquired.
 
 Windows code signing helps reduce antivirus false positives that affect Go binaries.
 Kaspersky and other AV software commonly flag unsigned Go executables as potentially
-malicious due to heuristic detection. See `docs/ANTIVIRUS.md` for details.
+malicious due to heuristic detection. See `docs/reference/antivirus.md` for details.
 
 ---
 

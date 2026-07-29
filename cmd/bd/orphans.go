@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -40,70 +41,84 @@ Examples:
   bd orphans --fix        # Close orphaned issues with confirmation
   bd orphans --label theme:personal             # Only orphans with this label
   bd orphans --label-any theme:personal,theme:ventures  # Orphans with either label`,
-	Run: func(cmd *cobra.Command, args []string) {
-		path := "."
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("orphans")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		labels, _ := cmd.Flags().GetStringSlice("label")
 		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
 		labels = utils.NormalizeLabels(labels)
 		labelsAny = utils.NormalizeLabels(labelsAny)
-		orphans, err := findOrphanedIssues(path, labels, labelsAny)
-		if err != nil {
-			FatalError("%v", err)
-		}
-
 		fix, _ := cmd.Flags().GetBool("fix")
 		details, _ := cmd.Flags().GetBool("details")
 
-		if jsonOutput {
-			outputJSON(orphans)
-			return
+		if usesProxiedServer() {
+			return runOrphansProxiedServer(rootCtx, labels, labelsAny, fix, details)
 		}
 
-		if len(orphans) == 0 {
-			fmt.Printf("%s No orphaned issues found\n", ui.RenderPass("✓"))
-			return
+		orphans, err := findOrphanedIssues(".", labels, labelsAny)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		fmt.Printf("\n%s Found %d orphaned issue(s):\n\n", ui.RenderWarn("⚠"), len(orphans))
-
-		// Sort by issue ID for consistent output
-		sort.Slice(orphans, func(i, j int) bool {
-			return orphans[i].IssueID < orphans[j].IssueID
-		})
-
-		for i, orphan := range orphans {
-			fmt.Printf("%d. %s: %s\n", i+1, ui.RenderID(orphan.IssueID), orphan.Title)
-			fmt.Printf("   Status: %s\n", orphan.Status)
-			if details && orphan.LatestCommit != "" {
-				fmt.Printf("   Latest commit: %s - %s\n", orphan.LatestCommit, orphan.LatestCommitMessage)
-			}
-		}
-
-		if fix {
-			fmt.Println()
-			fmt.Printf("This will close %d orphaned issue(s). Continue? (Y/n): ", len(orphans))
-			var response string
-			_, _ = fmt.Scanln(&response)
-			response = strings.ToLower(strings.TrimSpace(response))
-			if response != "" && response != "y" && response != "yes" {
-				fmt.Println("Canceled.")
-				return
-			}
-
-			// Close orphaned issues
-			closedCount := 0
-			for _, orphan := range orphans {
-				err := closeIssue(orphan.IssueID)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", orphan.IssueID, err)
-				} else {
-					fmt.Printf("✓ Closed %s\n", orphan.IssueID)
-					closedCount++
-				}
-			}
-			fmt.Printf("\nClosed %d issue(s)\n", closedCount)
-		}
+		return reportOrphans(orphans, fix, details)
 	},
+}
+
+func reportOrphans(orphans []orphanIssueOutput, fix, details bool) error {
+	if jsonOutput {
+		return outputJSON(orphans)
+	}
+
+	if len(orphans) == 0 {
+		fmt.Printf("%s No orphaned issues found\n", ui.RenderPass("✓"))
+		return nil
+	}
+
+	fmt.Printf("\n%s Found %d orphaned issue(s):\n\n", ui.RenderWarn("⚠"), len(orphans))
+
+	sort.Slice(orphans, func(i, j int) bool {
+		return orphans[i].IssueID < orphans[j].IssueID
+	})
+
+	for i, orphan := range orphans {
+		fmt.Printf("%d. %s: %s\n", i+1, ui.RenderID(orphan.IssueID), orphan.Title)
+		fmt.Printf("   Status: %s\n", orphan.Status)
+		if details && orphan.LatestCommit != "" {
+			fmt.Printf("   Latest commit: %s - %s\n", orphan.LatestCommit, orphan.LatestCommitMessage)
+		}
+	}
+
+	if fix {
+		fmt.Println()
+		fmt.Printf("This will close %d orphaned issue(s). Continue? (Y/n): ", len(orphans))
+		var response string
+		_, _ = fmt.Scanln(&response)
+		response = strings.ToLower(strings.TrimSpace(response))
+		if response != "" && response != "y" && response != "yes" {
+			fmt.Println("Canceled.")
+			return nil
+		}
+
+		closedCount := 0
+		for _, orphan := range orphans {
+			err := closeIssue(orphan.IssueID)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", orphan.IssueID, err)
+			} else {
+				fmt.Printf("✓ Closed %s\n", orphan.IssueID)
+				closedCount++
+			}
+		}
+		fmt.Printf("\nClosed %d issue(s)\n", closedCount)
+	}
+	return nil
 }
 
 // orphanIssueOutput is the JSON output format for orphaned issues
@@ -182,6 +197,10 @@ func findOrphanedIssues(path string, labels, labelsAny []string) ([]orphanIssueO
 	}
 	defer cleanup()
 
+	return findOrphanedIssuesWithProvider(path, provider)
+}
+
+func findOrphanedIssuesWithProvider(path string, provider types.IssueProvider) ([]orphanIssueOutput, error) {
 	orphans, err := doctorFindOrphanedIssues(path, provider)
 	if err != nil {
 		return nil, fmt.Errorf("unable to find orphaned issues: %w", err)

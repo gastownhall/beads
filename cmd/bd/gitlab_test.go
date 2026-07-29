@@ -2,8 +2,18 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/tracker"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestGitLabConfigFromEnv verifies config is read from environment variables.
@@ -28,6 +38,155 @@ func TestGitLabConfigFromEnv(t *testing.T) {
 	}
 	if config.ProjectID != "42" {
 		t.Errorf("ProjectID = %q, want %q", config.ProjectID, "42")
+	}
+}
+
+// TestGitLabConfigValueYamlTokenReadsFromYaml verifies that the yaml-only
+// secret key gitlab.token is resolved from config.yaml by the CLI-layer
+// reader used to build the `bd gitlab sync` client. Before the yaml-only
+// fold-in (upstream 99653e059), getGitLabConfigValue only read the Dolt store
+// and env, so a config.yaml-stored token returned "" here. The store/dbPath
+// globals are cleared to prove the value comes from config.yaml, not the store.
+func TestGitLabConfigValueYamlTokenReadsFromYaml(t *testing.T) {
+	const wantToken = "yaml-cli-token-value"
+
+	oldDBPath, oldStore := dbPath, store
+	dbPath, store = "", nil
+	t.Cleanup(func() { dbPath, store = oldDBPath, oldStore })
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	yamlBody := "gitlab.token: \"" + wantToken + "\"\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(yamlBody), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	t.Setenv("GITLAB_TOKEN", "")
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "xdg"))
+	t.Chdir(tmpDir)
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	if got := getGitLabConfigValue(context.Background(), "gitlab.token"); got != wantToken {
+		t.Errorf("getGitLabConfigValue(gitlab.token) = %q, want %q (config.yaml not consulted?)", got, wantToken)
+	}
+}
+
+// TestGitLabConfigValueYamlTokenFallsBackToEnv verifies that when no
+// config.yaml value is present, the yaml-only key path still falls back to the
+// environment variable rather than the Dolt store.
+func TestGitLabConfigValueYamlTokenFallsBackToEnv(t *testing.T) {
+	oldDBPath, oldStore := dbPath, store
+	dbPath, store = "", nil
+	t.Cleanup(func() { dbPath, store = oldDBPath, oldStore })
+
+	tmpDir := t.TempDir()
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "xdg"))
+	t.Setenv("GITLAB_TOKEN", "env-cli-token-value")
+	t.Chdir(tmpDir)
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	if got := getGitLabConfigValue(context.Background(), "gitlab.token"); got != "env-cli-token-value" {
+		t.Errorf("getGitLabConfigValue(gitlab.token) = %q, want env fallback", got)
+	}
+}
+
+func TestGitLabPushHooksMilestoneContentEqualSkipsOlderRemote(t *testing.T) {
+	now := time.Now().UTC()
+	ref := "https://gitlab.example.com/group/project/-/milestones/4"
+	local := &types.Issue{
+		ID:          "bd-epic",
+		Title:       "Live milestone",
+		Description: "already synced\n",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeEpic,
+		ExternalRef: &ref,
+		UpdatedAt:   now,
+	}
+	remote := &tracker.TrackerIssue{
+		Identifier:  "35",
+		URL:         ref,
+		Title:       "Live milestone",
+		Description: "already synced",
+		State:       "active",
+		UpdatedAt:   now.Add(-time.Minute),
+	}
+
+	hooks := buildGitLabPushHooks()
+	if hooks == nil || hooks.ContentEqual == nil {
+		t.Fatal("expected GitLab ContentEqual hook")
+	}
+	if !hooks.ContentEqual(local, remote) {
+		t.Fatal("expected unchanged milestone content to skip even when remote updated_at is older")
+	}
+}
+
+func TestGitLabPushHooksMilestoneContentChangeDoesNotSkipOlderRemote(t *testing.T) {
+	now := time.Now().UTC()
+	local := &types.Issue{
+		ID:          "bd-epic",
+		Title:       "Live milestone",
+		Description: "local change",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeEpic,
+		UpdatedAt:   now,
+	}
+	remote := &tracker.TrackerIssue{
+		Identifier:  "35",
+		Title:       "Live milestone",
+		Description: "old remote",
+		State:       "active",
+		UpdatedAt:   now.Add(-time.Minute),
+	}
+
+	hooks := buildGitLabPushHooks()
+	if hooks.ContentEqual(local, remote) {
+		t.Fatal("expected changed milestone content to update when remote updated_at is older")
+	}
+}
+
+func TestGitLabPushHooksPreserveTimestampSkipForIssues(t *testing.T) {
+	now := time.Now().UTC()
+	local := &types.Issue{
+		ID:        "bd-task",
+		Title:     "Task",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		UpdatedAt: now,
+	}
+	remote := &tracker.TrackerIssue{
+		Identifier: "42",
+		Title:      "Remote task",
+		State:      "opened",
+		UpdatedAt:  now.Add(time.Minute),
+	}
+
+	hooks := buildGitLabPushHooks()
+	if !hooks.ContentEqual(local, remote) {
+		t.Fatal("expected same-or-newer remote issue timestamp to preserve default skip behavior")
+	}
+
+	remote.UpdatedAt = now.Add(-time.Minute)
+	if hooks.ContentEqual(local, remote) {
+		t.Fatal("expected older remote issue timestamp to preserve default update behavior")
 	}
 }
 
@@ -372,5 +531,210 @@ func TestNoEphemeralDefaultTrue(t *testing.T) {
 	}
 	if f.DefValue != "true" {
 		t.Errorf("--no-ephemeral default = %q, want %q", f.DefValue, "true")
+	}
+}
+
+func TestFilterGitLabLinkScopedIssues(t *testing.T) {
+	issues := []*types.Issue{
+		{ID: "bd-parent", IssueType: types.TypeFeature, Status: types.StatusOpen},
+		{ID: "bd-child", IssueType: types.TypeTask, Status: types.StatusOpen},
+		{ID: "bd-other", IssueType: types.TypeTask, Status: types.StatusOpen},
+		{ID: "bd-mol", IssueType: types.TypeMolecule, Status: types.StatusOpen},
+		{ID: "bd-wisp", IssueType: types.TypeTask, Status: types.StatusOpen, Ephemeral: true},
+	}
+
+	t.Run("issues flag limits dependency owners", func(t *testing.T) {
+		got := filterGitLabLinkScopedIssues(issues, tracker.SyncOptions{
+			IssueIDs: []string{"bd-child", "bd-other"},
+		}, nil)
+
+		assertIssueIDs(t, got, []string{"bd-child", "bd-other"})
+	})
+
+	t.Run("parent scope limits to descendants", func(t *testing.T) {
+		got := filterGitLabLinkScopedIssues(issues, tracker.SyncOptions{}, map[string]bool{
+			"bd-parent": true,
+			"bd-child":  true,
+		})
+
+		assertIssueIDs(t, got, []string{"bd-parent", "bd-child"})
+	})
+
+	t.Run("type and internal filters apply", func(t *testing.T) {
+		got := filterGitLabLinkScopedIssues(issues, tracker.SyncOptions{
+			TypeFilter:       []types.IssueType{types.TypeTask},
+			ExcludeTypes:     []types.IssueType{types.TypeMolecule},
+			ExcludeEphemeral: true,
+		}, nil)
+
+		assertIssueIDs(t, got, []string{"bd-child", "bd-other"})
+	})
+}
+
+func TestCollectGitLabLinkSyncDataScopesEndpoints(t *testing.T) {
+	child := gitLabSyncIssue("bd-child", "https://gitlab.example.com/group/project/-/issues/10", types.TypeTask)
+	blocker := gitLabSyncIssue("bd-blocker", "https://gitlab.example.com/group/project/-/issues/20", types.TypeTask)
+	outside := gitLabSyncIssue("bd-outside", "https://gitlab.example.com/group/project/-/issues/30", types.TypeTask)
+	molecule := gitLabSyncIssue("bd-mol", "https://gitlab.example.com/group/project/-/issues/40", types.TypeMolecule)
+	parent := gitLabSyncIssue("bd-parent", "", types.TypeFeature)
+
+	st := &gitLabSyncFakeStore{
+		issues: []*types.Issue{parent, child, blocker, outside, molecule},
+		deps: map[string][]*types.IssueWithDependencyMetadata{
+			child.ID: {
+				gitLabSyncDep(blocker, types.DepBlocks),
+				gitLabSyncDep(outside, types.DepBlocks),
+				gitLabSyncDep(molecule, types.DepBlocks),
+			},
+		},
+		dependents: map[string][]*types.IssueWithDependencyMetadata{
+			parent.ID: {gitLabSyncDep(child, types.DepParentChild)},
+		},
+	}
+
+	t.Run("issues requires both endpoints", func(t *testing.T) {
+		data, warnings := collectGitLabLinkSyncData(context.Background(), st, tracker.SyncOptions{
+			IssueIDs: []string{child.ID, blocker.ID},
+		})
+		if len(warnings) != 0 {
+			t.Fatalf("warnings = %v", warnings)
+		}
+		if len(data.DesiredLinks) != 1 {
+			t.Fatalf("DesiredLinks len = %d, want 1", len(data.DesiredLinks))
+		}
+		link := data.DesiredLinks[0]
+		if link.SourceIID != 20 || link.TargetIID != 10 || link.LinkType != "blocks" {
+			t.Fatalf("link = %+v, want #20 blocks #10", link)
+		}
+	})
+
+	t.Run("issues excludes out of scope targets", func(t *testing.T) {
+		data, warnings := collectGitLabLinkSyncData(context.Background(), st, tracker.SyncOptions{
+			IssueIDs: []string{child.ID},
+		})
+		if len(warnings) != 0 {
+			t.Fatalf("warnings = %v", warnings)
+		}
+		if len(data.DesiredLinks) != 0 {
+			t.Fatalf("DesiredLinks len = %d, want 0", len(data.DesiredLinks))
+		}
+	})
+
+	t.Run("parent excludes targets outside subtree", func(t *testing.T) {
+		data, warnings := collectGitLabLinkSyncData(context.Background(), st, tracker.SyncOptions{
+			ParentID: parent.ID,
+		})
+		if len(warnings) != 0 {
+			t.Fatalf("warnings = %v", warnings)
+		}
+		if len(data.DesiredLinks) != 0 {
+			t.Fatalf("DesiredLinks len = %d, want 0", len(data.DesiredLinks))
+		}
+	})
+
+	t.Run("type filter excludes target endpoint", func(t *testing.T) {
+		data, warnings := collectGitLabLinkSyncData(context.Background(), st, tracker.SyncOptions{
+			IssueIDs:     []string{child.ID, molecule.ID},
+			ExcludeTypes: []types.IssueType{types.TypeMolecule},
+		})
+		if len(warnings) != 0 {
+			t.Fatalf("warnings = %v", warnings)
+		}
+		if len(data.DesiredLinks) != 0 {
+			t.Fatalf("DesiredLinks len = %d, want 0", len(data.DesiredLinks))
+		}
+	})
+}
+
+func TestGitLabSyncResultJSONIncludesLinksPushed(t *testing.T) {
+	data, err := json.Marshal(gitlabSyncResult{LinksPushed: 2})
+	if err != nil {
+		t.Fatalf("Marshal gitlabSyncResult: %v", err)
+	}
+	if !strings.Contains(string(data), `"links_pushed":2`) {
+		t.Fatalf("JSON = %s, want links_pushed", string(data))
+	}
+}
+
+func TestGitLabSyncResultJSONLicenseSkipped(t *testing.T) {
+	// Present when non-zero (distinct machine-readable signal from warnings/errors).
+	data, err := json.Marshal(gitlabSyncResult{LinksLicenseSkipped: 3})
+	if err != nil {
+		t.Fatalf("Marshal gitlabSyncResult: %v", err)
+	}
+	if !strings.Contains(string(data), `"links_license_skipped":3`) {
+		t.Fatalf("JSON = %s, want links_license_skipped", string(data))
+	}
+	// Omitted when zero so a normal sync doesn't carry noise.
+	data, _ = json.Marshal(gitlabSyncResult{LinksPushed: 1})
+	if strings.Contains(string(data), "links_license_skipped") {
+		t.Fatalf("JSON = %s, should omit links_license_skipped when zero", string(data))
+	}
+}
+
+func TestGitLabLicenseSkipMessage(t *testing.T) {
+	one := gitLabLicenseSkipMessage(1)
+	if !strings.Contains(one, "1 dependency 'blocks' link:") {
+		t.Fatalf("singular message = %q, want singular 'link'", one)
+	}
+	many := gitLabLicenseSkipMessage(2)
+	if !strings.Contains(many, "2 dependency 'blocks' links:") {
+		t.Fatalf("plural message = %q, want plural 'links'", many)
+	}
+	// Must be actionable: name the tier and reassure the rest applied.
+	for _, want := range []string{"Premium/Ultimate", "relates_to", "milestones"} {
+		if !strings.Contains(many, want) {
+			t.Fatalf("message = %q, missing %q", many, want)
+		}
+	}
+}
+
+type gitLabSyncFakeStore struct {
+	storage.Storage
+	issues     []*types.Issue
+	deps       map[string][]*types.IssueWithDependencyMetadata
+	dependents map[string][]*types.IssueWithDependencyMetadata
+}
+
+func (s *gitLabSyncFakeStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
+	return s.issues, nil
+}
+
+func (s *gitLabSyncFakeStore) GetDependenciesWithMetadata(_ context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	return s.deps[issueID], nil
+}
+
+func (s *gitLabSyncFakeStore) GetDependentsWithMetadata(_ context.Context, issueID string) ([]*types.IssueWithDependencyMetadata, error) {
+	return s.dependents[issueID], nil
+}
+
+func gitLabSyncIssue(id, ref string, issueType types.IssueType) *types.Issue {
+	issue := &types.Issue{
+		ID:        id,
+		IssueType: issueType,
+		Status:    types.StatusOpen,
+	}
+	if ref != "" {
+		issue.ExternalRef = &ref
+	}
+	return issue
+}
+
+func gitLabSyncDep(issue *types.Issue, depType types.DependencyType) *types.IssueWithDependencyMetadata {
+	return &types.IssueWithDependencyMetadata{
+		Issue:          *issue,
+		DependencyType: depType,
+	}
+}
+
+func assertIssueIDs(t *testing.T, issues []*types.Issue, want []string) {
+	t.Helper()
+	if len(issues) != len(want) {
+		t.Fatalf("len = %d, want %d (%v)", len(issues), len(want), want)
+	}
+	for i, issue := range issues {
+		if issue.ID != want[i] {
+			t.Fatalf("issue[%d] = %s, want %s", i, issue.ID, want[i])
+		}
 	}
 }

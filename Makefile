@@ -1,16 +1,50 @@
 # Makefile for beads project
 
-# On Windows, GNU Make defaults to cmd.exe which doesn't support POSIX
-# shell syntax used throughout this Makefile. Use Git for Windows' bash.
+# Native Windows GNU Make needs Git for Windows' bash for the POSIX shell
+# syntax used throughout this Makefile. MSYS2 and Cygwin Make already provide
+# POSIX shell semantics, despite inheriting OS=Windows_NT, so leave them alone.
 ifeq ($(OS),Windows_NT)
-GIT_BASH := $(shell where git 2>/dev/null)
-ifneq ($(GIT_BASH),)
-SHELL := $(subst cmd,bin,$(subst git.exe,bash.exe,$(GIT_BASH)))
+ifneq ($(filter Windows32 mingw32 %-mingw32,$(MAKE_HOST)),)
+override BASH_ENV :=
+unexport BASH_ENV
+unexport GIT_EXEC_PATH
+unexport BASHOPTS
+unexport SHELLOPTS
+SHELL := cmd.exe
+.SHELLFLAGS := /d /c
+GIT_WINDOWS_EXEC_PATH := $(strip $(shell set "GIT_EXEC_PATH=" && git.exe --exec-path))
+ifeq ($(GIT_WINDOWS_EXEC_PATH),)
+$(error Git for Windows is required to run this Makefile)
+endif
+GIT_WINDOWS_ROOT := $(strip $(shell cd /d "$(GIT_WINDOWS_EXEC_PATH)/../../.." && cd))
+ifeq ($(GIT_WINDOWS_ROOT),)
+$(error Could not resolve the Git for Windows installation from $(GIT_WINDOWS_EXEC_PATH))
+endif
+GIT_WINDOWS_BASH := $(GIT_WINDOWS_ROOT)/bin/bash.exe
+GIT_WINDOWS_SED := $(GIT_WINDOWS_ROOT)/usr/bin/sed.exe
+GIT_WINDOWS_ENV := $(GIT_WINDOWS_ROOT)/usr/bin/env.exe
+ifneq ($(strip $(shell if exist "$(GIT_WINDOWS_BASH)" echo ready)),ready)
+$(error Could not find Git for Windows' bash at $(GIT_WINDOWS_BASH))
+endif
+ifneq ($(strip $(shell if exist "$(GIT_WINDOWS_SED)" echo ready)),ready)
+$(error Could not find Git for Windows' sed at $(GIT_WINDOWS_SED))
+endif
+ifneq ($(strip $(shell if exist "$(GIT_WINDOWS_ENV)" echo ready)),ready)
+$(error Could not find Git for Windows' env at $(GIT_WINDOWS_ENV))
+endif
+SHELL := $(GIT_WINDOWS_BASH)
+.SHELLFLAGS := -c
+ifneq ($(strip $(shell printf '%s' ready;)),ready)
+$(error Could not start Git for Windows' bash at $(SHELL))
+endif
+# GNU Make may launch simple commands and shebang interpreters directly instead
+# of through SHELL, so expose Git's POSIX tools to those process lookups too.
+export PATH := $(GIT_WINDOWS_ROOT)/usr/bin;$(PATH)
 endif
 endif
 
-.PHONY: all build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
-.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-package-mcp ci-package-npm ci-website
+.PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
+.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-package-mcp ci-package-npm
 
 # Default target
 all: build
@@ -19,6 +53,9 @@ BUILD_DIR := .
 GIT_BUILD := $(shell git rev-parse --short HEAD)
 ifeq ($(OS),Windows_NT)
 INSTALL_DIR := $(USERPROFILE)/.local/bin
+WINDOWS_MINGW_BIN ?= /c/ProgramData/mingw64/mingw64/bin
+WINDOWS_MINGW_GCC := $(WINDOWS_MINGW_BIN)/gcc.exe
+WINDOWS_CGO_BINS ?= $(WINDOWS_MINGW_BIN) /c/msys64/clangarm64/bin /c/msys64/ucrt64/bin /c/msys64/mingw64/bin /c/msys64/clang64/bin
 else
 INSTALL_DIR := $(HOME)/.local/bin
 endif
@@ -29,7 +66,9 @@ endif
 # Windows notes:
 #   - ICU is NOT required. go-icu-regex has a pure-Go fallback (regex_windows.go)
 #     and gms_pure_go tag tells go-mysql-server to use pure-Go regex too.
-#   - CGO_ENABLED=1 needs a C compiler (MinGW/MSYS2) but does NOT need ICU.
+#   - CGO_ENABLED=1 needs a GCC-compatible Windows CGO compiler but does NOT
+#     need ICU. Supported local toolchains include MinGW-w64/MSYS2 gcc and
+#     MSYS2 clang/LLVM targeting windows-gnu.
 export CGO_ENABLED := 1
 
 # When go.mod requires a newer Go version than the locally installed one,
@@ -53,7 +92,31 @@ REGRESSION_TIMEOUT ?= 20m
 build:
 	@echo "Building bd..."
 ifeq ($(OS),Windows_NT)
-	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd
+	@if [ -n "$$CC" ]; then \
+		echo "Using CC=$$CC"; \
+		go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+	elif command -v gcc >/dev/null 2>&1; then \
+		CC=gcc go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+	elif command -v clang >/dev/null 2>&1 && clang -dumpmachine 2>/dev/null | grep -qi 'windows.*gnu'; then \
+		CC=clang go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+	else \
+		for bin in $(WINDOWS_CGO_BINS); do \
+			if [ -x "$$bin/gcc.exe" ]; then \
+				echo "Using Windows CGO gcc from $$bin"; \
+				PATH="$$bin:$$PATH" CC=gcc go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+				exit $$?; \
+			fi; \
+			if [ -x "$$bin/clang.exe" ] && "$$bin/clang.exe" -dumpmachine 2>/dev/null | grep -qi 'windows.*gnu'; then \
+				echo "Using Windows CGO clang from $$bin"; \
+				PATH="$$bin:$$PATH" CC=clang go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+				exit $$?; \
+			fi; \
+		done; \
+		echo "ERROR: Windows CGO builds require a GCC-compatible compiler." >&2; \
+		echo "       Install MinGW-w64/MSYS2 gcc or MSYS2 clang/LLVM targeting windows-gnu." >&2; \
+		echo "       Put it on PATH, set CC, or set WINDOWS_CGO_BINS=/path/to/toolchain/bin." >&2; \
+		exit 1; \
+	fi
 else
 	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
 ifeq ($(shell uname),Darwin)
@@ -61,6 +124,43 @@ ifeq ($(shell uname),Darwin)
 	@echo "Signed bd for macOS"
 endif
 endif
+
+# Diagnose the local build environment for the gms_pure_go/CGO build trap
+# (mybd-t7mk.1). A bare `CGO_ENABLED=1 go build ./cmd/bd` without
+# -tags=gms_pure_go fails with a C-linker error from go-icu-regex
+# (unicode/uregex.h: No such file or directory) because go-mysql-server
+# links ICU by default under cgo; CGO_ENABLED=0 avoids that but can't open
+# embedded Dolt at runtime. See engdocs/ICU-POLICY.md.
+doctor-build:
+	@echo "Build environment diagnostic (doctor-build):"
+	@GOFLAGS_VAL="$$(go env GOFLAGS)"; \
+	CGO_VAL="$$(go env CGO_ENABLED)"; \
+	CC_VAL="$$(go env CC)"; \
+	echo "  GOFLAGS:     $${GOFLAGS_VAL:-<empty>}"; \
+	echo "  CGO_ENABLED: $$CGO_VAL"; \
+	echo "  CC:          $$CC_VAL"; \
+	if command -v "$$CC_VAL" >/dev/null 2>&1; then \
+		echo "  CC on PATH:  yes ($$(command -v "$$CC_VAL"))"; \
+	else \
+		echo "  CC on PATH:  NO - $$CC_VAL not found"; \
+	fi; \
+	echo ""; \
+	EFFECTIVE_TAGS="$$(printf '%s\n' "$$GOFLAGS_VAL" | tr ' ' '\n' | sed -n 's/^-tags=//p' | tail -n 1)"; \
+	case ",$$EFFECTIVE_TAGS," in \
+		*,gms_pure_go,*) \
+			echo "PASS: GOFLAGS carries -tags=gms_pure_go; bare 'go build'/'go test' are safe." ;; \
+		*) \
+			echo "WARN: GOFLAGS is missing -tags=gms_pure_go."; \
+			echo "      A bare 'CGO_ENABLED=1 go build ./cmd/bd' will fail with a C-linker error"; \
+			echo "      (unicode/uregex.h: No such file or directory) from go-icu-regex, because"; \
+			echo "      go-mysql-server links ICU by default under cgo."; \
+			echo ""; \
+			echo "      Remedy - persist the tag so bare go commands pick it up:"; \
+			echo "        go env -w GOFLAGS=-tags=gms_pure_go"; \
+			echo "      Or build explicitly this once (CGO_ENABLED=1 is required for"; \
+			echo "      embedded Dolt at runtime; CGO_ENABLED=0 cannot open it):"; \
+			echo "        CGO_ENABLED=1 go build -tags gms_pure_go ./cmd/bd" ;; \
+	esac
 
 # Run all tests (skips known broken tests listed in .test-skip)
 test:
@@ -95,9 +195,6 @@ ci-package-mcp:
 ci-package-npm:
 	@./scripts/ci/package-npm.sh
 
-ci-website:
-	@./scripts/ci/website.sh
-
 # Run differential regression tests (baseline v0.49.6 vs current worktree).
 # Downloads baseline binary on first run; cached in ~/Library/Caches/beads-regression/.
 # Override baseline: BD_REGRESSION_BASELINE_BIN=/path/to/bd make test-regression
@@ -128,6 +225,13 @@ test-cross-version: build
 test-migration: build
 	@echo "Running migration test harness..."
 	@CANDIDATE_BIN=./bd ./scripts/migration-test/run.sh
+
+# Regenerate the golden-JSON contract corpus (cmd/bd/protocol/testdata/corpus/).
+# Run after any deliberate bd --json wire change; review the diff, then commit.
+# A downstream consumer vendors this corpus to detect cross-version drift. Needs Docker (Dolt).
+corpus-regen:
+	@echo "Regenerating contract corpus..."
+	go test -tags "$(BUILD_TAGS)" ./cmd/bd/protocol -run TestCorpusGolden -corpus.update -count=1
 
 
 # Run performance benchmarks against Dolt storage backend
@@ -193,6 +297,11 @@ fmt:
 fmt-check:
 	@echo "Checking Go formatting..."
 	@UNFORMATTED=$$(gofmt -l .); \
+	status=$$?; \
+	if [ "$$status" -ne 0 ]; then \
+		echo "gofmt failed while checking formatting" >&2; \
+		exit "$$status"; \
+	fi; \
 	if [ -n "$$UNFORMATTED" ]; then \
 		echo "The following files are not properly formatted:"; \
 		echo "$$UNFORMATTED"; \
@@ -208,6 +317,35 @@ check-docs:
 	@CGO_ENABLED=0 go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
 	@./scripts/check-doc-flags.sh ./bd
 	@./scripts/check-doc-freshness.sh
+	@go test -tags=gms_pure_go ./test/docsync
+
+# Render committed Excalidraw diagram sources to SVG (idempotent; only
+# re-renders when the .excalidraw source is newer than its .svg). Both the
+# source and the rendered SVG are committed; docs pages embed
+# /diagrams/excalidraw-rendered/<name>.svg. Rendered images must be looked
+# at before committing — layout problems are invisible in a text diff.
+diagrams-excalidraw:
+	@set -e; \
+	src_dir=docs/diagrams/excalidraw; \
+	out_dir=docs/diagrams/excalidraw-rendered; \
+	mkdir -p "$$out_dir"; \
+	shopt -s nullglob 2>/dev/null || true; \
+	rendered=0; \
+	for f in "$$src_dir"/*.excalidraw; do \
+		[ -e "$$f" ] || continue; \
+		base=$$(basename "$$f" .excalidraw); \
+		out="$$out_dir/$$base.svg"; \
+		if [ ! -e "$$out" ] || [ "$$f" -nt "$$out" ]; then \
+			echo "excalidraw -> $$out"; \
+			npx -y @swiftlysingh/excalidraw-cli convert "$$f" --format svg --padding 16 --output "$$out"; \
+			rendered=$$((rendered+1)); \
+		fi; \
+	done; \
+	echo "excalidraw: rendered $$rendered file(s)"
+
+# Live preview of the Mintlify docs site (docs/) at http://localhost:3000
+docs-dev:
+	./mint.sh dev
 
 # Ensure -short is not used as an implicit CI tier boundary.
 check-testing-short:
@@ -232,6 +370,7 @@ clean-test-tmp:
 help:
 	@echo "Beads Makefile targets:"
 	@echo "  make build        - Build the bd binary"
+	@echo "  make doctor-build - Diagnose build env (GOFLAGS/CGO/CC) for the ICU build trap"
 	@echo "  make test         - Run all tests"
 	@echo "  make test-icu-path - Run opt-in ICU regex path tests (maintainer-only)"
 	@echo "  make test-full-cgo - Deprecated alias for make test-icu-path"
@@ -240,7 +379,6 @@ help:
 	@echo "  make ci-pr-lint  - Run required PR formatting and lint wrapper"
 	@echo "  make ci-package-mcp - Run MCP Python package gate"
 	@echo "  make ci-package-npm - Run npm package gate"
-	@echo "  make ci-website - Run website typecheck/build gate"
 	@echo "  make test-regression - Run differential regression tests (baseline vs candidate)"
 	@echo "  make test-upgrade  - Run upgrade smoke tests (release stability gate)"
 	@echo "  make test-cross-version - Run cross-version smoke tests (last 30 tags)"

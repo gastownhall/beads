@@ -85,8 +85,13 @@ func generateUniqueTestID(t *testing.T, prefix string, index int) string {
 // TestMain resets viper, but any test calling config.Initialize() re-loads the real config.
 // This helper ensures viper is reset after the test completes, preventing state pollution
 // (e.g., repo config values leaking into JSONL export tests).
+//
+// Tests automatically opt out of <module-root>/.beads/config.yaml via
+// BEADS_TEST_IGNORE_REPO_CONFIG; tests that want the repo config must override
+// before calling this helper.
 func initConfigForTest(t *testing.T) {
 	t.Helper()
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	config.ResetForTesting()
 	if err := config.Initialize(); err != nil {
 		t.Fatalf("config.Initialize: %v", err)
@@ -208,17 +213,24 @@ func captureStdout(t *testing.T, fn func() error) string {
 	r, w, _ := os.Pipe()
 	os.Stdout = w
 
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = buf.ReadFrom(r)
+		done <- buf.String()
+	}()
+
 	err := fn()
 
 	w.Close()
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
 	os.Stdout = oldStdout
+	out := <-done
+	_ = r.Close()
 
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	return buf.String()
+	return out
 }
 
 // captureStderr captures stderr output from fn and returns it as a string.
@@ -274,6 +286,15 @@ func findPrebuiltBDBinary() (string, error) {
 // tests. Uses the gms_pure_go tag so the resulting binary works in either
 // CGO mode. Lives in the pure-Go helpers file so subprocess-style tests can
 // run without the test package itself depending on cgo at compile time.
+//
+// The fast path is BEADS_TEST_BD_BINARY (exported by scripts/test.sh and CI),
+// via findPrebuiltBDBinary. There is deliberately NO repo-root ./bd reuse
+// here anymore: that "optimization" silently ran subprocess tests against
+// whatever stale binary happened to sit in the checkout root — a two-day-old
+// one produced phantom TestCreateDepsAtomicity failures (features the source
+// under test had, the binary didn't). Tests must exercise the checkout's
+// source or an explicitly supplied binary, never an incidental artifact
+// (wy-4mtr0).
 func buildBDForInitTests(t *testing.T) string {
 	t.Helper()
 	initTestBDOnce.Do(func() {
@@ -289,13 +310,6 @@ func buildBDForInitTests(t *testing.T) string {
 		bdBinary := "bd"
 		if runtime.GOOS == windowsOS {
 			bdBinary = "bd.exe"
-		}
-		// Preserve the existing local optimization: if a bd binary exists in
-		// the repository root, init-style subprocess tests can reuse it.
-		existingBD := filepath.Join("..", "..", bdBinary)
-		if _, err := os.Stat(existingBD); err == nil {
-			initTestBD, _ = filepath.Abs(existingBD)
-			return
 		}
 		// Fall back to building.
 		tmpDir, err := testTempDir("bd-init-test-*")

@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -123,7 +124,16 @@ Examples:
   bd bootstrap --json       # Output plan as JSON
   bd bootstrap --yes        # Skip confirmation prompt
 `,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("bootstrap")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		yesFlag, _ := cmd.Flags().GetBool("yes")
 		nonInteractiveFlag, _ := cmd.Flags().GetBool("non-interactive")
@@ -153,7 +163,7 @@ Examples:
 						} else {
 							cwd, err := os.Getwd()
 							if err != nil {
-								FatalError("failed to get working directory: %v", err)
+								return HandleError("failed to get working directory: %v", err)
 							}
 							beadsDir = filepath.Join(cwd, ".beads")
 						}
@@ -163,15 +173,15 @@ Examples:
 		}
 
 		if beadsDir == "" {
-			// No .beads and no remote data — nothing to bootstrap from.
 			if jsonOutput {
-				outputJSON(noWorkspaceBootstrapPayload())
-			} else {
-				fmt.Fprintf(os.Stderr, "%s\n", activeWorkspaceNotFoundMessage())
-				fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
-				fmt.Fprintf(os.Stderr, "Bootstrap is for existing projects that need database setup.\n")
+				if err := outputJSON(noWorkspaceBootstrapPayload()); err != nil {
+					return err
+				}
+				return SilentExit()
 			}
-			os.Exit(1)
+			fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
+			fmt.Fprintf(os.Stderr, "Bootstrap is for existing projects that need database setup.\n")
+			return HandleError("%s", activeWorkspaceNotFoundMessage())
 		}
 
 		// Load config from .beads/metadata.json. When the beadsDir was
@@ -181,16 +191,25 @@ Examples:
 		// name (e.g. dolt_database). Without this, server-mode rigs get the
 		// default name "beads" instead of their configured name. (GH#3029)
 		cfg, err := configfile.Load(beadsDir)
-		if err != nil || cfg == nil {
-			cfg = findParentConfig(beadsDir)
+		if err != nil {
+			return HandleError("failed to load %s: %v; no storage database was opened or modified; fix or restore metadata.json and retry", configfile.ConfigPath(beadsDir), err)
+		}
+		if cfg == nil {
+			cfg, err = findParentConfig(beadsDir)
+			if err != nil {
+				return HandleError("failed to load ancestor storage metadata: %v; no storage database was opened or modified; fix or restore metadata.json and retry", err)
+			}
 		}
 		if cfg == nil {
 			cfg = configfile.DefaultConfig()
 		}
+		if err := requireBootstrapDoltBackend(cfg); err != nil {
+			return HandleError("%v", err)
+		}
 
 		resolvedCfg, repairMsg, err := applyBootstrapMetadataRepair(beadsDir, cfg, !dryRun)
 		if err != nil {
-			FatalError("failed to reconcile shared-server metadata: %v", err)
+			return HandleError("failed to reconcile shared-server metadata: %v", err)
 		}
 		if resolvedCfg != nil {
 			cfg = resolvedCfg
@@ -200,9 +219,11 @@ Examples:
 		plan := detectBootstrapAction(beadsDir, cfg)
 
 		if jsonOutput {
-			outputJSON(plan)
+			if err := outputJSON(plan); err != nil {
+				return err
+			}
 			if plan.Action == "none" || dryRun {
-				return
+				return nil
 			}
 		} else {
 			if repairMsg != "" {
@@ -210,14 +231,14 @@ Examples:
 			}
 			printBootstrapPlan(plan)
 			if plan.Action == "none" || dryRun {
-				return
+				return nil
 			}
 		}
 
-		// Execute the plan
 		if err := executeBootstrapPlan(plan, cfg, nonInteractive); err != nil {
-			FatalError("Bootstrap failed: %v", err)
+			return HandleError("Bootstrap failed: %v", err)
 		}
+		return nil
 	},
 }
 
@@ -256,6 +277,13 @@ func noWorkspaceBootstrapPayload() map[string]interface{} {
 		"reason":     activeWorkspaceNotFoundError(),
 		"suggestion": diagHint(),
 	}
+}
+
+func requireBootstrapDoltBackend(cfg *configfile.Config) error {
+	if err := validateConfiguredBackend(cfg); err != nil {
+		return err
+	}
+	return nil
 }
 
 func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPlan {
@@ -501,6 +529,9 @@ func confirmPrompt(message string, nonInteractive bool) bool {
 }
 
 func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInteractive bool) error {
+	if err := requireBootstrapDoltBackend(cfg); err != nil {
+		return err
+	}
 	if !confirmPrompt("Proceed?", nonInteractive) {
 		fmt.Fprintf(os.Stderr, "Aborted.\n")
 		return nil
@@ -699,7 +730,7 @@ func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGate
 			"  Re-running `"+rerunCmd+"` will NOT fix this — the remote itself is behind.\n"+
 			"  Choose one:\n"+
 			"    • This machine is the designated migrator (exactly ONE machine should be):\n"+
-			"        "+schema.AllowRemoteMigrateEnv+"=1 bd migrate\n"+
+			"        bd migrate --force\n"+
 			"        bd dolt push\n"+
 			"      then other machines re-run `bd bootstrap` to adopt the migrated database.\n"+
 			"    • Another machine is the designated migrator: wait for it to push, then\n"+
@@ -834,7 +865,7 @@ func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) e
 	}
 	defer func() { _ = cleanup() }()
 
-	if err := versioncontrolops.DoltClone(ctx, db, remoteURL, dbName); err != nil {
+	if err := versioncontrolops.DoltClone(ctx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER")); err != nil {
 		return fmt.Errorf("clone from remote: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Synced database from %s\n", remoteURL)
@@ -871,7 +902,7 @@ func cloneViaServer(ctx context.Context, beadsDir, remoteURL, dbName string, cfg
 			cfg.GetDoltServerHost(), port, err)
 	}
 
-	if err := versioncontrolops.DoltClone(cloneCtx, db, remoteURL, dbName); err != nil {
+	if err := versioncontrolops.DoltClone(cloneCtx, db, remoteURL, dbName, os.Getenv("DOLT_REMOTE_USER")); err != nil {
 		return fmt.Errorf("clone from remote via server: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "Synced database from %s (via server at %s:%d)\n",
@@ -943,8 +974,10 @@ func isNonInteractiveBootstrap(flagValue bool) bool {
 // findParentConfig walks up from beadsDir's parent looking for a
 // .beads/metadata.json in ancestor directories. This handles the case where a
 // rig subdirectory (its own git repo) doesn't have a local .beads but its
-// parent workspace does. Returns nil if no parent config is found.
-func findParentConfig(beadsDir string) *configfile.Config {
+// parent workspace does. Returns nil if no parent config is found. A malformed
+// or unreadable ancestor metadata file is authoritative and returned as an error;
+// bootstrap must not skip it and select a more distant workspace or defaults.
+func findParentConfig(beadsDir string) (*configfile.Config, error) {
 	// Start from the parent of beadsDir's enclosing directory.
 	// beadsDir is typically "<project>/.beads", so we start from <project>'s parent.
 	start := filepath.Dir(filepath.Dir(beadsDir))
@@ -952,8 +985,12 @@ func findParentConfig(beadsDir string) *configfile.Config {
 
 	for dir := start; dir != "/" && dir != "."; {
 		candidate := filepath.Join(dir, ".beads")
-		if cfg, err := configfile.Load(candidate); err == nil && cfg != nil {
-			return cfg
+		cfg, err := configfile.Load(candidate)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", configfile.ConfigPath(candidate), err)
+		}
+		if cfg != nil {
+			return cfg, nil
 		}
 
 		// Don't search above $HOME
@@ -967,7 +1004,7 @@ func findParentConfig(beadsDir string) *configfile.Config {
 		}
 		dir = parent
 	}
-	return nil
+	return nil, nil
 }
 
 func init() {

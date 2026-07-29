@@ -162,4 +162,15 @@ func TestIsLocked(t *testing.T) {
 			t.Error("IsLocked should return false for non-lock errors")
 		}
 	})
+
+	// born-failing guard for the errors.Is fix (commit 1a83cb08c): pre-fix
+	// pointer-equality (err == errProcessLocked) returned false for a wrapped
+	// ErrLocked, so callers using fmt.Errorf("...: %w", ErrLocked) lost
+	// lock-contention detection.
+	t.Run("true for wrapped ErrLocked", func(t *testing.T) {
+		wrapped := fmt.Errorf("acquire lock: %w", ErrLocked)
+		if !IsLocked(wrapped) {
+			t.Errorf("IsLocked should return true for wrapped ErrLocked, got false for: %v", wrapped)
+		}
+	})
 }

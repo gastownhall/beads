@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -531,7 +532,7 @@ func TestParseRateLimitHeaders(t *testing.T) {
 		h := http.Header{}
 		h.Set("Retry-After", "45")
 		h.Set("X-RateLimit-Requests-Remaining", "80")
-		h.Set("X-RateLimit-Requests-Reset", "2026-01-01T00:00:00Z")
+		h.Set("X-RateLimit-Requests-Reset", "1767225600000")
 
 		info := parseRateLimitHeaders(h)
 		if info.RetryAfter != 45*time.Second {
@@ -540,7 +541,7 @@ func TestParseRateLimitHeaders(t *testing.T) {
 		if info.RequestsRemaining != 80 {
 			t.Errorf("RequestsRemaining = %d, want 80", info.RequestsRemaining)
 		}
-		wantReset, _ := time.Parse(time.RFC3339, "2026-01-01T00:00:00Z")
+		wantReset := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 		if !info.RequestsReset.Equal(wantReset) {
 			t.Errorf("RequestsReset = %v, want %v", info.RequestsReset, wantReset)
 		}
@@ -558,6 +559,16 @@ func TestParseRateLimitHeaders(t *testing.T) {
 			t.Errorf("RequestsReset should be zero, got %v", info.RequestsReset)
 		}
 	})
+
+	for _, value := range []string{"not-a-timestamp", "-1", "9223372036854775808"} {
+		t.Run("invalid reset "+value, func(t *testing.T) {
+			h := http.Header{}
+			h.Set("X-RateLimit-Requests-Reset", value)
+			if got := parseRateLimitHeaders(h).RequestsReset; !got.IsZero() {
+				t.Errorf("RequestsReset = %v, want zero", got)
+			}
+		})
+	}
 }
 
 // mockServer returns an httptest.Server and a function to set the handler per request.
@@ -636,10 +647,13 @@ func TestExecute_NoRetryAfterFallsBackToExponential(t *testing.T) {
 	}
 }
 
-func TestExecute_CircuitBreakerTrips(t *testing.T) {
+func TestExecute_CircuitBreakerTripsOnSubsequentRequest(t *testing.T) {
+	requestCount := 0
+	resetAt := strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10)
 	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
 		w.Header().Set("X-RateLimit-Requests-Remaining", "50")
-		w.Header().Set("X-RateLimit-Requests-Reset", "2026-06-01T00:00:00Z")
+		w.Header().Set("X-RateLimit-Requests-Reset", resetAt)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
 	})
@@ -647,7 +661,16 @@ func TestExecute_CircuitBreakerTrips(t *testing.T) {
 	client := NewClient("key", "team").WithEndpoint(srv.Server.URL)
 	ctx := context.Background()
 
-	_, err := client.Execute(ctx, &GraphQLRequest{Query: "{ viewer { id } }"})
+	data, err := client.Execute(ctx, &GraphQLRequest{Query: "{ viewer { id } }"})
+	if err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if data == nil {
+		t.Fatal("first Execute returned nil data")
+	}
+
+	clone := client.WithProjectID("project-id")
+	_, err = clone.Execute(ctx, &GraphQLRequest{Query: "{ viewer { id } }"})
 	if err == nil {
 		t.Fatal("expected ErrRateLimitExhausted, got nil")
 	}
@@ -661,6 +684,99 @@ func TestExecute_CircuitBreakerTrips(t *testing.T) {
 	}
 	if rlErr.Floor != DefaultRateLimitFloor {
 		t.Errorf("Floor = %d, want %d", rlErr.Floor, DefaultRateLimitFloor)
+	}
+	if requestCount != 1 {
+		t.Errorf("requestCount = %d, want 1 (second call should trip locally)", requestCount)
+	}
+}
+
+func TestExecute_CircuitBreakerAllowsRequestAfterResetThenRearms(t *testing.T) {
+	requestCount := 0
+	pastReset := strconv.FormatInt(time.Now().Add(-time.Hour).UnixMilli(), 10)
+	futureReset := strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10)
+	srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("X-RateLimit-Requests-Remaining", "50")
+		if requestCount == 1 {
+			w.Header().Set("X-RateLimit-Requests-Reset", pastReset)
+		} else {
+			w.Header().Set("X-RateLimit-Requests-Reset", futureReset)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
+	})
+
+	client := NewClient("key", "team").WithEndpoint(srv.Server.URL)
+	ctx := context.Background()
+	request := &GraphQLRequest{Query: "{ viewer { id } }"}
+
+	if _, err := client.Execute(ctx, request); err != nil {
+		t.Fatalf("first Execute returned error: %v", err)
+	}
+	if _, err := client.WithRateLimitFloor(DefaultRateLimitFloor).Execute(ctx, request); err != nil {
+		t.Fatalf("Execute after reset returned error: %v", err)
+	}
+	if _, err := client.Execute(ctx, request); err == nil {
+		t.Fatal("expected re-armed breaker to block after future reset was recorded")
+	}
+	if requestCount != 2 {
+		t.Errorf("requestCount = %d, want 2 (expired breaker should allow one request, then re-arm)", requestCount)
+	}
+}
+
+func TestExecute_CircuitBreakerRequiresValidFutureReset(t *testing.T) {
+	futureReset := strconv.FormatInt(time.Now().Add(maxRateLimitResetHorizon-time.Hour).UnixMilli(), 10)
+	beyondHorizon := strconv.FormatInt(time.Now().Add(maxRateLimitResetHorizon+time.Minute).UnixMilli(), 10)
+	tests := []struct {
+		name      string
+		reset     string
+		wantArmed bool
+	}{
+		{name: "missing reset"},
+		{name: "malformed reset", reset: "not-a-timestamp"},
+		{name: "overflow reset", reset: "9223372036854775808"},
+		{name: "negative reset", reset: "-1"},
+		{name: "maximum int64 reset", reset: "9223372036854775807"},
+		{name: "reset beyond maximum horizon", reset: beyondHorizon},
+		{name: "valid reset near maximum horizon", reset: futureReset, wantArmed: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requestCount := 0
+			srv := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+				requestCount++
+				w.Header().Set("X-RateLimit-Requests-Remaining", "50")
+				if tt.reset != "" {
+					w.Header().Set("X-RateLimit-Requests-Reset", tt.reset)
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
+			})
+
+			client := NewClient("key", "team").WithEndpoint(srv.Server.URL)
+			request := &GraphQLRequest{Query: "{ viewer { id } }"}
+			if data, err := client.Execute(context.Background(), request); err != nil {
+				t.Fatalf("first Execute returned error: %v", err)
+			} else if data == nil {
+				t.Fatal("first Execute returned nil data")
+			}
+
+			_, err := client.WithProjectID("project-id").Execute(context.Background(), request)
+			if tt.wantArmed && err == nil {
+				t.Fatal("expected valid future reset to arm breaker")
+			}
+			if !tt.wantArmed && err != nil {
+				t.Fatalf("invalid reset permanently armed breaker: %v", err)
+			}
+			wantRequests := 2
+			if tt.wantArmed {
+				wantRequests = 1
+			}
+			if requestCount != wantRequests {
+				t.Errorf("requestCount = %d, want %d", requestCount, wantRequests)
+			}
+		})
 	}
 }
 

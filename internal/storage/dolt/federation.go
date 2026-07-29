@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -62,7 +61,7 @@ func (s *DoltStore) PullFrom(ctx context.Context, peer string) ([]storage.Confli
 	// GH#2474: Auto-commit pending changes before pull to prevent
 	// "cannot merge with uncommitted changes" errors.
 	if !s.readOnly {
-		if err := s.Commit(ctx, "auto-commit before pull"); err != nil {
+		if err := s.commitBeforePull(ctx, "auto-commit before pull"); err != nil {
 			if !isDoltNothingToCommit(err) {
 				return nil, fmt.Errorf("failed to commit pending changes before pull: %w", err)
 			}
@@ -202,6 +201,23 @@ func (s *DoltStore) hasPersistedCLIRemote() bool {
 // trust an empty dolt_remotes table at cold start: the remote-migrate gate
 // and the push/pull "no remote configured" exit-0 skip (bd-578h9.10).
 func (s *DoltStore) HasPersistedRemote() bool {
+	return len(s.PersistedRemoteInfos()) > 0
+}
+
+// PersistedRemoteInfos returns the remotes persisted on disk in
+// .dolt/repo_state.json — names AND urls — searching the same directories in
+// the same order as HasPersistedRemote: the database CLI directory first,
+// then the dolt server root (GH#2118). The first directory that yields any
+// remotes wins, mirroring HasPersistedRemote's first-hit semantics.
+//
+// Callers in the GH#2118 cold-start window use this to RECOVER the invisible
+// remote rather than merely detect it: a freshly (auto-)started sql-server
+// can report an empty dolt_remotes even though the remote is persisted on
+// disk, so an empty listing is a reporting artifact, not an unconfigured rig
+// (wy-6k7f7). Read/parse failures are logged and skipped, matching the old
+// HasPersistedRemote behavior — callers only consult this after a SUCCESSFUL
+// (empty) ListRemotes, so a read failure here never masquerades as evidence.
+func (s *DoltStore) PersistedRemoteInfos() []storage.RemoteInfo {
 	cliDir := s.CLIDir()
 	dirs := []string{cliDir}
 	if s.dbPath != "" && s.dbPath != cliDir {
@@ -219,10 +235,10 @@ func (s *DoltStore) HasPersistedRemote() bool {
 			continue
 		}
 		if len(remotes) > 0 {
-			return true
+			return remotes
 		}
 	}
-	return false
+	return nil
 }
 
 // RemoveRemote removes a configured remote.
@@ -311,6 +327,20 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 		StartTime: time.Now(),
 	}
 
+	// GH#2474: match PullFrom — commit pending changes before the merge,
+	// INCLUDING config (where kv.memory.* rows live). Plain Commit excludes
+	// config (GH#2455), so federation metadata writes such as add-peer plus any
+	// persistent memories would otherwise leave the working set dirty and wedge
+	// DOLT_MERGE ("cannot merge with uncommitted changes").
+	if !s.readOnly {
+		if err := s.commitBeforePull(ctx, "auto-commit before sync"); err != nil {
+			if !isDoltNothingToCommit(err) {
+				result.Error = fmt.Errorf("failed to commit pending changes before sync: %w", err)
+				return result, result.Error
+			}
+		}
+	}
+
 	// Step 1: Fetch from peer
 	if err := s.Fetch(ctx, peer); err != nil {
 		result.Error = fmt.Errorf("fetch failed: %w", err)
@@ -348,8 +378,12 @@ func (s *DoltStore) Sync(ctx context.Context, peer string, strategy string) (*Sy
 		}
 		result.ConflictsResolved = true
 
-		// Commit the resolution
-		if err := s.Commit(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
+		// Commit the resolution INCLUDING config: the operator chose this
+		// strategy, and plain Commit excludes config (GH#2455). A config-only
+		// conflict — routine now that kv.memory.* memories sync through config —
+		// would otherwise resolve but never commit, leaving the merge
+		// unconcluded and re-wedging the next sync.
+		if err := s.CommitMergeResolution(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
 			result.Error = fmt.Errorf("failed to commit conflict resolution: %w", err)
 			return result, result.Error
 		}
@@ -499,12 +533,12 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 	if err := s.prePushFSCK(ctx); err != nil {
 		return err
 	}
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "push", peer, refspec)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "push", peer, refspec)
 	defer cancel()
 	applyNoGitHooksToCmd(cmd) // GH#3724
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to push to peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
+		return cliTransferError(fmt.Sprintf("push to peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }
@@ -513,11 +547,11 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 // Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to pull from peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
+		return cliTransferError(fmt.Sprintf("pull from peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }
@@ -526,11 +560,11 @@ func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds 
 // Used for git-protocol remotes where CALL DOLT_FETCH times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIFetchFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to fetch from peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
+		return cliTransferError(fmt.Sprintf("fetch from peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }

@@ -11,6 +11,8 @@ type UnitOfWork interface {
 	Close(ctx context.Context)
 	Commit(ctx context.Context, message string) error
 
+	SwitchDatabase(ctx context.Context, database string) error
+
 	ConfigUseCase() domain.ConfigUseCase
 	DoltRemoteUseCase() domain.DoltRemoteUseCase
 	BootstrapUseCase() domain.BootstrapUseCase
@@ -19,6 +21,7 @@ type UnitOfWork interface {
 	DependencyUseCase() domain.DependencyUseCase
 	LabelUseCase() domain.LabelUseCase
 	CommentUseCase() domain.CommentUseCase
+	RawSQLUseCase() domain.RawSQLUseCase
 }
 
 type UnitOfWorkProvider interface {
@@ -45,6 +48,7 @@ type baseUOW struct {
 	dependencyUseCase domain.DependencyUseCase
 	labelUseCase      domain.LabelUseCase
 	commentUseCase    domain.CommentUseCase
+	rawSQLUseCase     domain.RawSQLUseCase
 }
 
 func (u *baseUOW) Commit(ctx context.Context, message string) error {
@@ -53,6 +57,10 @@ func (u *baseUOW) Commit(ctx context.Context, message string) error {
 
 func (u *baseUOW) Close(ctx context.Context) {
 	u.tx.RollbackUnlessCommitted(ctx)
+}
+
+func (u *baseUOW) SwitchDatabase(ctx context.Context, database string) error {
+	return db.NewDDLSQLRepository(u.tx.Runner()).UseDatabase(ctx, database)
 }
 
 func (u *baseUOW) ConfigUseCase() domain.ConfigUseCase {
@@ -89,6 +97,9 @@ func (u *baseUOW) IssueUseCase() domain.IssueUseCase {
 			db.NewChildCounterSQLRepository(runner),
 			db.NewCommentSQLRepository(runner),
 			db.NewConfigSQLRepository(runner),
+			db.NewEventsSQLRepository(runner),
+			u.LabelUseCase(),
+			u.DependencyUseCase(),
 		)
 	}
 	return u.issueUseCase
@@ -113,4 +124,11 @@ func (u *baseUOW) CommentUseCase() domain.CommentUseCase {
 		u.commentUseCase = domain.NewCommentUseCase(db.NewCommentSQLRepository(u.tx.Runner()))
 	}
 	return u.commentUseCase
+}
+
+func (u *baseUOW) RawSQLUseCase() domain.RawSQLUseCase {
+	if u.rawSQLUseCase == nil {
+		u.rawSQLUseCase = domain.NewRawSQLUseCase(db.NewRawSQLRepository(u.tx.Runner()))
+	}
+	return u.rawSQLUseCase
 }

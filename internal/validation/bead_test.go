@@ -370,6 +370,11 @@ func TestValidateIDPrefixAllowed(t *testing.T) {
 		{"empty allowed list", "gt-abc123", "hq", "", false, true},
 		{"single allowed prefix", "gt-abc123", "hq", "gt", false, false},
 
+		// DB prefix with trailing hyphen (GH#4208)
+		{"db prefix trailing hyphen", "v2-abc123", "v2-", "", false, false},
+		{"db prefix trailing hyphen with allowed", "v2-abc123", "v2-", "v2-", false, false},
+		{"db prefix only hyphen", "abc123", "-", "", false, false},
+
 		// Multi-hyphen allowed prefixes
 		{"multi-hyphen in allowed list", "my-cool-prefix-abc123", "hq", "my-cool-prefix,other", false, false},
 		{"partial match should fail", "hq-cv-extra-test", "hq", "hq-cv-extra", false, false},

@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fix=false
+if [[ "${1:-}" == "--fix" ]]; then
+  fix=true
+  shift
+fi
+
+if [[ "$#" -eq 0 ]]; then
+  echo "usage: scripts/gh-body-lint [--fix] <body.md> [body2.md...]" >&2
+  exit 2
+fi
+
+failed=0
+
+for file in "$@"; do
+  if [[ ! -f "$file" ]]; then
+    echo "$file: not a file" >&2
+    failed=1
+    continue
+  fi
+
+  if grep -q '\\n' "$file"; then
+    echo "$file: contains literal \\\\n sequences; use real newlines" >&2
+    failed=1
+  fi
+
+  if grep -Eq '(^|[^A-Za-z0-9_/-])GH#[0-9]+' "$file"; then
+    if "$fix"; then
+      perl -0pi -e 's/(^|[^A-Za-z0-9_\/-])GH#([0-9]+)/$1#$2/g' "$file"
+    else
+      echo "$file: contains GH#123-style issue refs; use #123 or owner/repo#123" >&2
+      failed=1
+    fi
+  fi
+done
+
+exit "$failed"

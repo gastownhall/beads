@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -387,8 +388,9 @@ func TestCleanStaleCircuitBreakerFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Call the cleanup function with the test directory
-	cleanStaleCircuitBreakerFilesIn(dir)
+	// Call the cleanup function with the test directory, in live-directory
+	// mode (closed files are left alone — they reflect an in-use breaker).
+	cleanStaleCircuitBreakerFilesIn(dir, false)
 
 	// Legacy port-0 file should be removed
 	if _, err := os.Stat(port0File); !os.IsNotExist(err) {
@@ -411,21 +413,126 @@ func TestCleanStaleCircuitBreakerFiles(t *testing.T) {
 	}
 }
 
+// TestCleanStaleCircuitBreakerFilesIn_LegacyRemovesClosed verifies that, in
+// legacy-directory mode (removeClosed=true), closed breaker files are swept
+// too — unlike the live directory. A closed sidecar in the abandoned legacy
+// "/tmp/beads-circuit" location (GH#4636) has no process left to reuse or
+// clean it: every successful circuit reset writes a closed file, and
+// ephemeral ports mint a distinct filename each time, so they would
+// otherwise accumulate there forever.
+func TestCleanStaleCircuitBreakerFilesIn_LegacyRemovesClosed(t *testing.T) {
+	dir := t.TempDir()
+
+	closedFile := filepath.Join(dir, "beads-dolt-circuit-127-0-0-1-9999.json")
+	closedData, _ := json.Marshal(circuitState{State: circuitClosed})
+	if err := os.WriteFile(closedFile, closedData, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh open file should still survive the legacy sweep (age-based rule
+	// still applies to open/half-open state).
+	freshFile := filepath.Join(dir, "beads-dolt-circuit-127-0-0-1-5555.json")
+	freshData, _ := json.Marshal(circuitState{State: circuitOpen, TrippedAt: time.Now()})
+	if err := os.WriteFile(freshFile, freshData, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanStaleCircuitBreakerFilesIn(dir, true)
+
+	if _, err := os.Stat(closedFile); !os.IsNotExist(err) {
+		t.Errorf("legacy closed breaker file should have been removed: %s", closedFile)
+	}
+	if _, err := os.Stat(freshFile); err != nil {
+		t.Errorf("fresh open breaker file should NOT have been removed: %s", freshFile)
+	}
+}
+
 func TestCircuitBreakerDir_UsesSubdirectory(t *testing.T) {
 	// Verify that circuit breaker files are created in the dedicated
-	// subdirectory, not directly in /tmp (which can have millions of entries).
+	// subdirectory, not directly in the temp root (which can have millions of
+	// entries).
 	cb := newCircuitBreaker("127.0.0.1", 44444, "")
 	t.Cleanup(func() { os.Remove(cb.filePath) })
 
-	if filepath.Dir(cb.filePath) != filepath.Clean(circuitBreakerDir) {
+	wantDir, _ := circuitBreakerPaths()
+	if filepath.Dir(cb.filePath) != wantDir {
 		t.Errorf("circuit breaker file should be in %s, got dir %s",
-			circuitBreakerDir, filepath.Dir(cb.filePath))
+			wantDir, filepath.Dir(cb.filePath))
 	}
 
 	// Write state and verify file lands in the subdirectory
 	cb.writeState(circuitState{State: circuitClosed})
 	if _, err := os.Stat(cb.filePath); err != nil {
 		t.Errorf("circuit breaker file should exist at %s: %v", cb.filePath, err)
+	}
+}
+
+// TestCircuitBreakerDir_DerivedFromTempDir verifies the breaker directory is
+// derived from os.TempDir() rather than a hardcoded "/tmp", so on Windows it
+// lands under %TEMP% instead of C:\tmp (GH#4636).
+func TestCircuitBreakerDir_DerivedFromTempDir(t *testing.T) {
+	custom := t.TempDir()
+	// os.TempDir() honors these across platforms (TMPDIR on unix; TMP/TEMP on
+	// Windows), so the breaker dir must follow.
+	t.Setenv("TMPDIR", custom)
+	t.Setenv("TMP", custom)
+	t.Setenv("TEMP", custom)
+
+	got := circuitBreakerDir()
+	if want := filepath.Join(os.TempDir(), "beads-circuit"); got != want {
+		t.Errorf("circuitBreakerDir() = %q, want %q", got, want)
+	}
+	if !strings.HasPrefix(got, os.TempDir()) {
+		t.Errorf("circuitBreakerDir() = %q, want it under os.TempDir() %q", got, os.TempDir())
+	}
+	// When the temp root is not "/tmp", the path must not be the old literal.
+	if os.TempDir() != "/tmp" && got == "/tmp/beads-circuit" {
+		t.Errorf("circuitBreakerDir() still hardcoded to /tmp: %q", got)
+	}
+}
+
+func TestCircuitBreakerPathsTestOverrideIsolatesCurrentAndLegacyState(t *testing.T) {
+	testDir := t.TempDir()
+	t.Setenv(testCircuitBreakerDirEnv, testDir)
+	t.Setenv("BEADS_TEST_MODE", "")
+
+	dir, legacy := circuitBreakerPaths()
+	if dir != testDir {
+		t.Fatalf("circuit directory = %q, want %q", dir, testDir)
+	}
+	wantLegacy := filepath.Join(testDir, "beads-dolt-circuit-0.json")
+	if legacy != wantLegacy {
+		t.Fatalf("legacy circuit file = %q, want %q", legacy, wantLegacy)
+	}
+	cb := newCircuitBreaker("127.0.0.1", 44444, "isolated")
+	if filepath.Dir(cb.filePath) != testDir {
+		t.Fatalf("breaker path = %q, want directory %q", cb.filePath, testDir)
+	}
+	if err := os.WriteFile(wantLegacy, []byte("legacy"), 0o600); err != nil {
+		t.Fatalf("write isolated legacy state: %v", err)
+	}
+	CleanStaleCircuitBreakerFiles()
+	if _, err := os.Stat(wantLegacy); !os.IsNotExist(err) {
+		t.Fatalf("isolated legacy cleanup error = %v, want not-exist", err)
+	}
+}
+
+func TestCircuitBreakerPathsProductionDefaultsUnchanged(t *testing.T) {
+	t.Setenv(testCircuitBreakerDirEnv, "")
+	dir, legacy := circuitBreakerPaths()
+	if want := circuitBreakerDir(); dir != want {
+		t.Fatalf("production circuit directory = %q, want %q", dir, want)
+	}
+	if legacy != legacyCircuitBreakerFile {
+		t.Fatalf("production legacy circuit file = %q, want %q", legacy, legacyCircuitBreakerFile)
+	}
+}
+
+func TestCircuitBreakerPathsRejectsRelativeOverride(t *testing.T) {
+	t.Setenv(testCircuitBreakerDirEnv, "relative-test-dir")
+	dir, legacy := circuitBreakerPaths()
+	if dir != circuitBreakerDir() || legacy != legacyCircuitBreakerFile {
+		t.Fatalf("relative override selected paths dir=%q legacy=%q", dir, legacy)
 	}
 }
 

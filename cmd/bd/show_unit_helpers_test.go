@@ -23,17 +23,36 @@ func TestValidateIssueUpdatable(t *testing.T) {
 }
 
 func TestValidateIssueClosable(t *testing.T) {
-	if err := validateIssueClosable("x", nil, false); err != nil {
+	if err := validateIssueClosable("x", nil, "alice", false); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
-	if err := validateIssueClosable("bd-1", &types.Issue{IsTemplate: true}, false); err == nil {
+	if err := validateIssueClosable("bd-1", &types.Issue{IsTemplate: true}, "alice", false); err == nil {
 		t.Fatalf("expected template close error")
 	}
-	if err := validateIssueClosable("bd-2", &types.Issue{Status: types.StatusPinned}, false); err == nil {
+	if err := validateIssueClosable("bd-2", &types.Issue{Status: types.StatusPinned}, "alice", false); err == nil {
 		t.Fatalf("expected pinned close error")
 	}
-	if err := validateIssueClosable("bd-2", &types.Issue{Status: types.StatusPinned}, true); err != nil {
+	if err := validateIssueClosable("bd-2", &types.Issue{Status: types.StatusPinned}, "alice", true); err != nil {
 		t.Fatalf("expected pinned close to succeed with force, got %v", err)
+	}
+
+	// be-035: actor != assignee must be refused without --force.
+	mismatched := &types.Issue{Assignee: "bob"}
+	if err := validateIssueClosable("bd-3", mismatched, "alice", false); err == nil {
+		t.Fatalf("expected actor/assignee mismatch error")
+	}
+	// --force overrides the authority check.
+	if err := validateIssueClosable("bd-3", mismatched, "alice", true); err != nil {
+		t.Fatalf("expected close to succeed with force despite mismatch, got %v", err)
+	}
+	// Same-actor close is allowed.
+	if err := validateIssueClosable("bd-4", &types.Issue{Assignee: "alice"}, "alice", false); err != nil {
+		t.Fatalf("expected matching-assignee close to succeed, got %v", err)
+	}
+	// Unassigned beads can be closed by anyone (lots of bd's flow involves
+	// closing beads nobody claimed).
+	if err := validateIssueClosable("bd-5", &types.Issue{Assignee: ""}, "alice", false); err != nil {
+		t.Fatalf("expected unassigned close to succeed, got %v", err)
 	}
 }
 

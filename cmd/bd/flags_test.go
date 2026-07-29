@@ -147,7 +147,10 @@ func TestGetDescriptionFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDescriptionFlag(cmd)
+		got, changed, err := getDescriptionFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !changed {
 			t.Error("expected changed=true")
 		}
@@ -169,7 +172,10 @@ func TestGetDescriptionFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDescriptionFlag(cmd)
+		got, changed, err := getDescriptionFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !changed {
 			t.Error("expected changed=true")
 		}
@@ -204,7 +210,10 @@ func TestGetDescriptionFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDescriptionFlag(cmd)
+		got, changed, err := getDescriptionFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !changed {
 			t.Error("expected changed=true")
 		}
@@ -219,7 +228,10 @@ func TestGetDescriptionFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDescriptionFlag(cmd)
+		got, changed, err := getDescriptionFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !changed {
 			t.Error("expected changed=true")
 		}
@@ -234,7 +246,10 @@ func TestGetDescriptionFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDescriptionFlag(cmd)
+		got, changed, err := getDescriptionFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !changed {
 			t.Error("expected changed=true")
 		}
@@ -249,7 +264,10 @@ func TestGetDescriptionFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDescriptionFlag(cmd)
+		got, changed, err := getDescriptionFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if changed {
 			t.Error("expected changed=false when no flags set")
 		}
@@ -272,7 +290,10 @@ func TestGetDescriptionFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDescriptionFlag(cmd)
+		got, changed, err := getDescriptionFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !changed {
 			t.Error("expected changed=true")
 		}
@@ -303,7 +324,10 @@ func TestGetDescriptionFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDescriptionFlag(cmd)
+		got, changed, err := getDescriptionFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !changed {
 			t.Error("expected changed=true")
 		}
@@ -331,7 +355,10 @@ func TestGetDescriptionFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDescriptionFlag(cmd)
+		got, changed, err := getDescriptionFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !changed {
 			t.Error("expected changed=true")
 		}
@@ -358,7 +385,10 @@ func TestGetDesignFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDesignFlag(cmd)
+		got, changed, err := getDesignFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !changed {
 			t.Error("expected changed=true")
 		}
@@ -380,7 +410,10 @@ func TestGetDesignFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDesignFlag(cmd)
+		got, changed, err := getDesignFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !changed {
 			t.Error("expected changed=true")
 		}
@@ -409,7 +442,10 @@ func TestGetDesignFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDesignFlag(cmd)
+		got, changed, err := getDesignFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if !changed {
 			t.Error("expected changed=true")
 		}
@@ -424,7 +460,10 @@ func TestGetDesignFlag(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		got, changed := getDesignFlag(cmd)
+		got, changed, err := getDesignFlag(cmd)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
 		if changed {
 			t.Error("expected changed=false when no flags set")
 		}

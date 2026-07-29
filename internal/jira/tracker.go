@@ -207,7 +207,7 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 
 	// Incremental sync
 	if opts.Since != nil {
-		jql += fmt.Sprintf(" AND updated >= %q", opts.Since.Format("2006-01-02 15:04"))
+		jql += fmt.Sprintf(` AND updated >= "%s"`, opts.Since.UTC().Format("2006-01-02 15:04 UTC"))
 	}
 
 	jql += " ORDER BY updated DESC"

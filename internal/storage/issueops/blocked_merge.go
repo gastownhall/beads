@@ -295,7 +295,7 @@ func recomputeIsBlockedForAll(ctx context.Context, tx *sql.Tx) error {
 }
 
 // allIDs lists every id in table. table must be a hardcoded constant.
-func allIDs(ctx context.Context, tx *sql.Tx, table string) ([]string, error) {
+func allIDs(ctx context.Context, tx DBTX, table string) ([]string, error) {
 	//nolint:gosec // G201: table is a hardcoded constant, never user input.
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf("SELECT id FROM %s", table))
 	if err != nil {

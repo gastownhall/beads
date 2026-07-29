@@ -1,14 +1,21 @@
 package uow
 
 import (
-	"database/sql/driver"
 	"errors"
-	"io"
-	"net"
-	"syscall"
+	"strings"
 
 	mysql "github.com/go-sql-driver/mysql"
 )
+
+// IsSerializationError reports whether err is a Dolt/MySQL serialization
+// failure that guarantees the server rolled the transaction back. Because the
+// rollback discards every uncommitted write in the session, the only safe
+// retry is to redo the WHOLE unit of work (read, merge, write, commit) —
+// retrying just the commit re-commits an empty session, which Dolt reports as
+// "nothing to commit" while the write is silently lost.
+func IsSerializationError(err error) bool {
+	return isSerializationError(err)
+}
 
 // isSerializationError returns true if the error is a Dolt/MySQL serialization
 // failure that guarantees the transaction was rolled back. Safe to retry.
@@ -22,27 +29,20 @@ func isSerializationError(err error) bool {
 	return mysqlErr.Number == 1213 || mysqlErr.Number == 1205
 }
 
-// isRetryableWarmupError reports whether an error during provider warmup is
-// plausibly transient. The managed dolt child (or the proxy relaying to it)
-// can accept TCP before the SQL engine is ready, so dial, reset, and
-// handshake failures must retry within the warmup window rather than abort
-// it (bd-6dnrw.44 item 8). Serialization failures are retryable everywhere;
-// anything else (auth refusal, SQL errors, the remote-migrate gate) is
-// genuinely permanent.
-func isRetryableWarmupError(err error) bool {
+// isDatabaseExistsError reports whether err is the server refusing a bare
+// CREATE DATABASE because the database already exists (MySQL 1007,
+// ER_DB_CREATE_EXISTS). The message fallback matches how the rest of the
+// codebase detects Dolt's variant of this error (see internal/doltserver and
+// internal/storage/dolt), whose text is "can't create database ...; database
+// exists" but whose driver error number has not always been populated.
+func isDatabaseExistsError(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1007 {
+		return true
+	}
 	if err == nil {
 		return false
 	}
-	if isSerializationError(err) {
-		return true
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return true
-	}
-	return errors.Is(err, driver.ErrBadConn) ||
-		errors.Is(err, mysql.ErrInvalidConn) ||
-		errors.Is(err, io.EOF) ||
-		errors.Is(err, syscall.ECONNREFUSED) ||
-		errors.Is(err, syscall.ECONNRESET)
+	errLower := strings.ToLower(err.Error())
+	return strings.Contains(errLower, "database exists") || strings.Contains(errLower, "1007")
 }

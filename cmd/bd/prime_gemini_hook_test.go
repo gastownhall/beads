@@ -322,6 +322,207 @@ func TestPrime_HookJSON_NoBeadsWorkspace(t *testing.T) {
 	}
 }
 
+// rememberInWorkspace stores a persistent memory via `bd remember` so prime can
+// inject it. Memories live in the workspace store, so the same isolated env as
+// initBeadsWorkspace/runPrimeBinary resolves the same database.
+func rememberInWorkspace(t *testing.T, binPath, workDir, key, content string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binPath, "remember", content, "--key", key)
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(),
+		"HOME="+t.TempDir(),
+		"XDG_CONFIG_HOME="+t.TempDir(),
+		"BEADS_TEST_IGNORE_REPO_CONFIG=1",
+		"BEADS_DIR=",
+		"BEADS_DB=",
+		"LINEAR_API_KEY=",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd remember in %s: %v\n%s", workDir, err, out)
+	}
+}
+
+// TestPrime_CustomPrimeMd_AppendsMemories: a custom .beads/PRIME.md replaces the
+// default workflow text, but persistent memories must still be appended so
+// `bd remember` keeps working under a custom template (GH#3941).
+func TestPrime_CustomPrimeMd_AppendsMemories(t *testing.T) {
+	binPath := buildBDUnderTest(t)
+	workDir := t.TempDir()
+	initBeadsWorkspace(t, binPath, workDir)
+	rememberInWorkspace(t, binPath, workDir, "prime-mem-key", "remember this insight")
+
+	const custom = "# Custom local PRIME.md override\nBe excellent.\n"
+	primePath := filepath.Join(workDir, ".beads", "PRIME.md")
+	if err := os.WriteFile(primePath, []byte(custom), 0o644); err != nil {
+		t.Fatalf("write PRIME.md: %v", err)
+	}
+
+	stdout, _ := runPrimeBinary(t, binPath, workDir)
+	out := string(stdout)
+
+	if !strings.Contains(out, "Be excellent.") {
+		t.Errorf("custom PRIME.md content missing from output: %q", firstN(out, 300))
+	}
+	if !strings.Contains(out, "Persistent Memories") {
+		t.Errorf("memories section should be appended under custom PRIME.md, got: %q", firstN(out, 600))
+	}
+	if !strings.Contains(out, "remember this insight") {
+		t.Errorf("memory content should appear under custom PRIME.md, got: %q", firstN(out, 600))
+	}
+}
+
+// TestPrime_MemoriesOnly_WithCustomPrimeMd: --memories-only must return only the
+// memories section even when a custom PRIME.md exists; the PRIME.md content must
+// NOT leak into the output (GH#3941). This is the primary memory-injection path
+// for PreCompact hooks, which a custom PRIME.md previously broke.
+func TestPrime_MemoriesOnly_WithCustomPrimeMd(t *testing.T) {
+	binPath := buildBDUnderTest(t)
+	workDir := t.TempDir()
+	initBeadsWorkspace(t, binPath, workDir)
+	rememberInWorkspace(t, binPath, workDir, "prime-mem-key", "remember this insight")
+
+	const custom = "# Custom local PRIME.md override\nBe excellent.\n"
+	primePath := filepath.Join(workDir, ".beads", "PRIME.md")
+	if err := os.WriteFile(primePath, []byte(custom), 0o644); err != nil {
+		t.Fatalf("write PRIME.md: %v", err)
+	}
+
+	stdout, _ := runPrimeBinary(t, binPath, workDir, "--memories-only")
+	out := string(stdout)
+
+	if strings.Contains(out, "Be excellent.") {
+		t.Errorf("--memories-only must not include custom PRIME.md content, got: %q", firstN(out, 300))
+	}
+	if !strings.Contains(out, "remember this insight") {
+		t.Errorf("--memories-only should include memory content under custom PRIME.md, got: %q", firstN(out, 300))
+	}
+}
+
+// TestPrime_NoMemories_DefaultPath: --no-memories omits the persistent memories
+// section from the default (generated) prime output. A control run without the
+// flag confirms the memory is otherwise present, so the assertion has signal.
+func TestPrime_NoMemories_DefaultPath(t *testing.T) {
+	binPath := buildBDUnderTest(t)
+	workDir := t.TempDir()
+	initBeadsWorkspace(t, binPath, workDir)
+	rememberInWorkspace(t, binPath, workDir, "prime-mem-key", "remember this insight")
+
+	// Control: without --no-memories, the memory is injected.
+	ctrl, _ := runPrimeBinary(t, binPath, workDir, "--full")
+	if !strings.Contains(string(ctrl), "remember this insight") {
+		t.Fatalf("control run should include memory, got: %q", firstN(string(ctrl), 400))
+	}
+
+	// With --no-memories, the memories section is omitted.
+	stdout, _ := runPrimeBinary(t, binPath, workDir, "--full", "--no-memories")
+	out := string(stdout)
+	if strings.Contains(out, "remember this insight") {
+		t.Errorf("--no-memories should omit memory content, got: %q", firstN(out, 400))
+	}
+	if strings.Contains(out, "Persistent Memories") {
+		t.Errorf("--no-memories should omit the Persistent Memories section, got: %q", firstN(out, 400))
+	}
+	// The generated workflow context should still be present.
+	if !strings.Contains(out, "Beads") {
+		t.Errorf("--no-memories should still emit workflow context, got: %q", firstN(out, 400))
+	}
+}
+
+// TestPrime_NoMemories_CustomPrimeMd: --no-memories suppresses the memories that
+// GH#3941 appends under a custom PRIME.md; the custom content itself is unaffected.
+func TestPrime_NoMemories_CustomPrimeMd(t *testing.T) {
+	binPath := buildBDUnderTest(t)
+	workDir := t.TempDir()
+	initBeadsWorkspace(t, binPath, workDir)
+	rememberInWorkspace(t, binPath, workDir, "prime-mem-key", "remember this insight")
+
+	const custom = "# Custom local PRIME.md override\nBe excellent.\n"
+	if err := os.WriteFile(filepath.Join(workDir, ".beads", "PRIME.md"), []byte(custom), 0o644); err != nil {
+		t.Fatalf("write PRIME.md: %v", err)
+	}
+
+	stdout, _ := runPrimeBinary(t, binPath, workDir, "--no-memories")
+	out := string(stdout)
+	if !strings.Contains(out, "Be excellent.") {
+		t.Errorf("custom PRIME.md content should be present, got: %q", firstN(out, 300))
+	}
+	if strings.Contains(out, "remember this insight") || strings.Contains(out, "Persistent Memories") {
+		t.Errorf("--no-memories should omit memories under custom PRIME.md, got: %q", firstN(out, 400))
+	}
+}
+
+// TestPrime_NoMemories_MemoriesOnlyWins: when both --memories-only and
+// --no-memories are set, --memories-only wins and memories are still returned.
+func TestPrime_NoMemories_MemoriesOnlyWins(t *testing.T) {
+	binPath := buildBDUnderTest(t)
+	workDir := t.TempDir()
+	initBeadsWorkspace(t, binPath, workDir)
+	rememberInWorkspace(t, binPath, workDir, "prime-mem-key", "remember this insight")
+
+	stdout, _ := runPrimeBinary(t, binPath, workDir, "--memories-only", "--no-memories")
+	out := string(stdout)
+	if !strings.Contains(out, "remember this insight") {
+		t.Errorf("--memories-only should win over --no-memories and include memories, got: %q", firstN(out, 400))
+	}
+}
+
+// TestPrime_NoTelemetryInIsolatedHome is the regression guard for wy-12x1p:
+// a `bd` subprocess launched by this suite must not write a telemetry queue
+// into its isolated HOME. That queue is the visible half of the real problem —
+// the other half is the DETACHED `bd send-metrics` child metrics.CloseAndFlush
+// spawns alongside it, which outlives its parent and keeps mutating
+// $HOME/.beads/eventsData while Go's t.TempDir cleanup is trying to delete the
+// tree. The result was an intermittent, assertion-free
+// "TempDir RemoveAll cleanup: ... directory not empty" that reddened the whole
+// cmd/bd package (the TestPrime_HookJSON_* tests were the observed victims).
+//
+// The fix is the metrics opt-out set process-wide in testMainInner; this test
+// pins it from the outside, because the failure it prevents is load-dependent
+// and would otherwise creep back unnoticed. The assertion is deterministic:
+// metrics.Init creates the eventsData dir eagerly (and synchronously, in the
+// parent) whenever metrics are enabled, so its absence proves the flusher was
+// never armed.
+func TestPrime_NoTelemetryInIsolatedHome(t *testing.T) {
+	binPath := buildBDUnderTest(t)
+	workDir := t.TempDir()
+	initBeadsWorkspace(t, binPath, workDir)
+
+	home := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binPath, "prime", "--hook-json")
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"XDG_CONFIG_HOME="+t.TempDir(),
+		"BEADS_TEST_IGNORE_REPO_CONFIG=1",
+		"BEADS_DIR=",
+		"BEADS_DB=",
+		"LINEAR_API_KEY=",
+	)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd prime --hook-json: %v\nstdout: %s\nstderr: %s", err, outBuf.String(), errBuf.String())
+	}
+
+	eventsData := filepath.Join(home, ".beads", "eventsData")
+	if _, err := os.Stat(eventsData); !os.IsNotExist(err) {
+		entries, _ := os.ReadDir(eventsData)
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("telemetry queue %s exists after a suite-launched bd run (stat err: %v, entries: %v); "+
+			"metrics are enabled for this subprocess, so a detached `bd send-metrics` child is racing t.TempDir cleanup — "+
+			"see the metrics opt-out in testMainInner (wy-12x1p)", eventsData, err, names)
+	}
+}
+
 func firstN(s string, n int) string {
 	if len(s) <= n {
 		return s

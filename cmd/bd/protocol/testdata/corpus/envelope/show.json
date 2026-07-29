@@ -1,0 +1,35 @@
+{
+  "data": [
+    {
+      "comment_count": 0,
+      "created_at": "<TS>",
+      "created_by": "protocol-test",
+      "dependencies": [
+        {
+          "created_at": "<TS>",
+          "created_by": "protocol-test",
+          "dependency_type": "blocks",
+          "description": "deterministic corpus dependency",
+          "id": "corpus-dep",
+          "issue_type": "task",
+          "owner": "test@protocol.test",
+          "priority": 2,
+          "status": "open",
+          "title": "Corpus dependency issue",
+          "updated_at": "<TS>"
+        }
+      ],
+      "dependency_count": 1,
+      "dependent_count": 0,
+      "description": "deterministic corpus root",
+      "id": "corpus-root",
+      "issue_type": "feature",
+      "owner": "test@protocol.test",
+      "priority": 1,
+      "status": "open",
+      "title": "Corpus root issue",
+      "updated_at": "<TS>"
+    }
+  ],
+  "schema_version": 1
+}

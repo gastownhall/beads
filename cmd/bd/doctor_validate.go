@@ -11,22 +11,23 @@ import (
 	"golang.org/x/term"
 )
 
-// validateCheckResult pairs a doctor check with whether it can be auto-fixed.
 type validateCheckResult struct {
 	check   doctorCheck
 	fixable bool
 }
 
-// runValidateCheck runs focused data-integrity checks and exits non-zero on failure.
-func runValidateCheck(path string) {
-	if !runValidateCheckInner(path) {
-		os.Exit(1)
+func runValidateCheck(path string) error {
+	ok, err := runValidateCheckInner(path)
+	if err != nil {
+		return err
 	}
+	if !ok {
+		return SilentExit()
+	}
+	return nil
 }
 
-// runValidateCheckInner runs the checks and returns true if all passed.
-// Separated from runValidateCheck so tests can call it without os.Exit.
-func runValidateCheckInner(path string) bool {
+func runValidateCheckInner(path string) (bool, error) {
 	checks := collectValidateChecks(path)
 
 	// Apply fixes if --fix is set, then re-check to reflect post-fix state
@@ -50,8 +51,10 @@ func runValidateCheckInner(path string) bool {
 		for _, cr := range checks {
 			result.Checks = append(result.Checks, cr.check)
 		}
-		outputJSON(result)
-		return overallOK
+		if err := outputJSON(result); err != nil {
+			return overallOK, err
+		}
+		return overallOK, nil
 	}
 
 	// Human-readable output
@@ -72,12 +75,13 @@ func runValidateCheckInner(path string) bool {
 		fmt.Printf("%s\n", ui.RenderPass("✓ All data-integrity checks passed"))
 	}
 
-	return overallOK
+	return overallOK, nil
 }
 
-// collectValidateChecks runs the four data-integrity checks.
+// collectValidateChecks runs the data-integrity checks.
 func collectValidateChecks(path string) []validateCheckResult {
 	return []validateCheckResult{
+		{check: convertDoctorCheck(doctor.CheckCrossTableDuplicates(path)), fixable: true},
 		{check: convertDoctorCheck(doctor.CheckDuplicateIssues(path, doctorOrchestrator, orchestratorDuplicatesThreshold))},
 		{check: convertDoctorCheck(doctor.CheckOrphanedDependencies(path)), fixable: true},
 		{check: convertDoctorCheck(doctor.CheckTestPollution(path))},

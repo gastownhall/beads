@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
@@ -53,21 +54,32 @@ Exit codes:
 Examples:
   bd config drift
   bd config drift --json`,
-	Run: func(_ *cobra.Command, _ []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(_ *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("config-drift")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		items := runDriftChecks()
 
 		if jsonOutput {
-			outputJSON(items)
+			if err := outputJSON(items); err != nil {
+				return err
+			}
 		} else {
 			printDriftItems(items)
 		}
 
-		// Exit 1 if any drift detected
 		for _, item := range items {
 			if item.Status == driftStatusDrift {
-				os.Exit(1)
+				return SilentExit()
 			}
 		}
+		return nil
 	},
 }
 
@@ -250,10 +262,24 @@ func checkServerDrift() []DriftItem {
 		}}
 	}
 
-	sharedServerEnabled := config.GetString("dolt.shared-server")
-	wantServer := strings.EqualFold(sharedServerEnabled, "true")
+	wantServer := doltserver.IsSharedServerMode()
 
-	serverRunning := isServerProbablyRunning(beadsDir)
+	serverDir := beadsDir
+	if wantServer {
+		var err error
+		serverDir, err = doltserver.SharedServerPath()
+		if err != nil {
+			return []DriftItem{{
+				Check:    "server",
+				Status:   driftStatusDrift,
+				Message:  fmt.Sprintf("dolt.shared-server is enabled but its state directory cannot be resolved: %v", err),
+				Expected: "resolvable shared server state directory",
+				Actual:   "unavailable",
+			}}
+		}
+	}
+
+	serverRunning := isServerProbablyRunning(serverDir)
 
 	if wantServer && !serverRunning {
 		return []DriftItem{{

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -343,6 +344,13 @@ func TestExportImportRoundTrip(t *testing.T) {
 		"exp-6", "Round Trip", "round trip test", "", "", "", "open", 1, "feature"); err != nil {
 		t.Fatalf("insert issue: %v", err)
 	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     "exp-6",
+		DependsOnID: "mkt-456",
+		Type:        types.DepRelated,
+	}, "test"); err != nil {
+		t.Fatalf("add cross-prefix dependency: %v", err)
+	}
 
 	// Export
 	exportFile := filepath.Join(tmpDir, "roundtrip.jsonl")
@@ -381,6 +389,32 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("expected 1 issue, got %d", count)
+	}
+
+	// Import the exact export into a fresh database. Bare cross-prefix targets
+	// are emitted unchanged (without an "external:" marker), so the bulk import
+	// path must classify the target by its prefix instead of treating it as a
+	// missing local issue and silently skipping the edge.
+	importDir := t.TempDir()
+	baseImportStore := newTestStoreWithPrefix(t, filepath.Join(importDir, "dolt"), "exp")
+	importStore := &dependencySkipCapturingStore{DoltStorage: baseImportStore}
+	imported, err := importFromLocalJSONL(ctx, importStore, exportFile)
+	if err != nil {
+		t.Fatalf("import exported JSONL: %v", err)
+	}
+	if imported != 1 {
+		t.Fatalf("imported count = %d, want 1", imported)
+	}
+	if len(importStore.skippedDependencies) != 0 {
+		t.Fatalf("skipped dependencies = %#v, want none", importStore.skippedDependencies)
+	}
+
+	deps, err := baseImportStore.GetDependencyRecords(ctx, "exp-6")
+	if err != nil {
+		t.Fatalf("GetDependencyRecords(exp-6): %v", err)
+	}
+	if len(deps) != 1 || deps[0].DependsOnID != "mkt-456" || deps[0].Type != types.DepRelated {
+		t.Fatalf("exp-6 deps = %#v, want one related dependency on mkt-456", deps)
 	}
 }
 
@@ -586,7 +620,7 @@ func TestExportMemoryDeterminism(t *testing.T) {
 	// Seed 5 memories with keys that would sort differently than insertion order.
 	memKeys := []string{"zeta-config", "alpha-note", "mu-decision", "beta-lesson", "omega-context"}
 	for _, mk := range memKeys {
-		storageKey := "kv.memory." + mk
+		storageKey := kvkeys.MemoryConfigKeyPrefix + mk
 		if err := s.SetConfig(ctx, storageKey, "value-for-"+mk); err != nil {
 			t.Fatalf("SetConfig(%s): %v", storageKey, err)
 		}
@@ -747,7 +781,7 @@ func TestExportByteStabilityAllRecordTypes(t *testing.T) {
 
 	// Memories, keyed so insertion order differs from sorted order.
 	for _, mk := range []string{"zeta-config", "alpha-note", "mu-decision", "beta-lesson"} {
-		if err := s.SetConfig(ctx, "kv.memory."+mk, "value-for-"+mk); err != nil {
+		if err := s.SetConfig(ctx, kvkeys.MemoryConfigKeyPrefix+mk, "value-for-"+mk); err != nil {
 			t.Fatalf("SetConfig(%s): %v", mk, err)
 		}
 	}
@@ -1014,7 +1048,7 @@ func TestExportExcludesMemoriesByDefault(t *testing.T) {
 
 	// Seed memories.
 	for _, mk := range []string{"secret-api-pattern", "debug-session-notes"} {
-		storageKey := "kv.memory." + mk
+		storageKey := kvkeys.MemoryConfigKeyPrefix + mk
 		if err := s.SetConfig(ctx, storageKey, "sensitive-value-for-"+mk); err != nil {
 			t.Fatalf("SetConfig(%s): %v", storageKey, err)
 		}

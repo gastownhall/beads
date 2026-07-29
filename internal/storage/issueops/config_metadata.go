@@ -9,7 +9,7 @@ import (
 
 // SetConfigInTx sets a configuration value within an existing transaction.
 // Normalizes issue_prefix by stripping trailing hyphens.
-func SetConfigInTx(ctx context.Context, tx *sql.Tx, key, value string) error {
+func SetConfigInTx(ctx context.Context, tx DBTX, key, value string) error {
 	if key == "issue_prefix" {
 		value = strings.TrimSuffix(value, "-")
 	}
@@ -22,7 +22,7 @@ func SetConfigInTx(ctx context.Context, tx *sql.Tx, key, value string) error {
 
 // GetConfigInTx retrieves a configuration value within an existing transaction.
 // Returns ("", nil) if the key does not exist.
-func GetConfigInTx(ctx context.Context, tx *sql.Tx, key string) (string, error) {
+func GetConfigInTx(ctx context.Context, tx DBTX, key string) (string, error) {
 	var value string
 	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", key).Scan(&value)
 	if err == sql.ErrNoRows {
@@ -35,7 +35,7 @@ func GetConfigInTx(ctx context.Context, tx *sql.Tx, key string) (string, error) 
 }
 
 // GetAllConfigInTx retrieves all configuration key-value pairs within an existing transaction.
-func GetAllConfigInTx(ctx context.Context, tx *sql.Tx) (map[string]string, error) {
+func GetAllConfigInTx(ctx context.Context, tx DBTX) (map[string]string, error) {
 	rows, err := tx.QueryContext(ctx, "SELECT `key`, value FROM config")
 	if err != nil {
 		return nil, fmt.Errorf("get all config: %w", err)
@@ -54,7 +54,7 @@ func GetAllConfigInTx(ctx context.Context, tx *sql.Tx) (map[string]string, error
 }
 
 // SetMetadataInTx sets a metadata value within an existing transaction.
-func SetMetadataInTx(ctx context.Context, tx *sql.Tx, key, value string) error {
+func SetMetadataInTx(ctx context.Context, tx DBTX, key, value string) error {
 	_, err := tx.ExecContext(ctx, "REPLACE INTO metadata (`key`, value) VALUES (?, ?)", key, value)
 	if err != nil {
 		return fmt.Errorf("set metadata %s: %w", key, err)
@@ -64,7 +64,7 @@ func SetMetadataInTx(ctx context.Context, tx *sql.Tx, key, value string) error {
 
 // GetMetadataInTx retrieves a metadata value within an existing transaction.
 // Returns ("", nil) if the key does not exist.
-func GetMetadataInTx(ctx context.Context, tx *sql.Tx, key string) (string, error) {
+func GetMetadataInTx(ctx context.Context, tx DBTX, key string) (string, error) {
 	var value string
 	err := tx.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = ?", key).Scan(&value)
 	if err == sql.ErrNoRows {
@@ -79,7 +79,7 @@ func GetMetadataInTx(ctx context.Context, tx *sql.Tx, key string) (string, error
 // SetLocalMetadataInTx sets a value in the dolt-ignored local_metadata table
 // within an existing transaction. Used for clone-local state that should not
 // generate merge conflicts (tip timestamps, version stamps, sync cursors).
-func SetLocalMetadataInTx(ctx context.Context, tx *sql.Tx, key, value string) error {
+func SetLocalMetadataInTx(ctx context.Context, tx DBTX, key, value string) error {
 	_, err := tx.ExecContext(ctx, "REPLACE INTO local_metadata (`key`, value) VALUES (?, ?)", key, value)
 	if err != nil {
 		return fmt.Errorf("set local metadata %s: %w", key, err)
@@ -89,7 +89,7 @@ func SetLocalMetadataInTx(ctx context.Context, tx *sql.Tx, key, value string) er
 
 // GetLocalMetadataInTx retrieves a value from the dolt-ignored local_metadata
 // table within an existing transaction. Returns ("", nil) if the key does not exist.
-func GetLocalMetadataInTx(ctx context.Context, tx *sql.Tx, key string) (string, error) {
+func GetLocalMetadataInTx(ctx context.Context, tx DBTX, key string) (string, error) {
 	var value string
 	err := tx.QueryRowContext(ctx, "SELECT value FROM local_metadata WHERE `key` = ?", key).Scan(&value)
 	if err == sql.ErrNoRows {

@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -48,10 +48,22 @@ Examples:
   bd statuses            # List all statuses with icons and categories
   bd statuses --json     # Output as JSON
 `,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("statuses")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			return runStatusesProxiedServer(rootCtx)
+		}
+
 		if err := ensureDirectMode("statuses command requires direct database access"); err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			return
+			return HandleError("%v", err)
 		}
 
 		var customStatuses []types.CustomStatus
@@ -62,44 +74,47 @@ Examples:
 			}
 		}
 
-		if jsonOutput {
-			result := struct {
-				BuiltInStatuses []statusInfo         `json:"built_in_statuses"`
-				CustomStatuses  []types.CustomStatus `json:"custom_statuses,omitempty"`
-			}{}
-
-			for _, s := range builtInStatuses {
-				result.BuiltInStatuses = append(result.BuiltInStatuses, statusInfo{
-					Name:        string(s.Status),
-					Category:    string(s.Category),
-					Icon:        ui.GetStatusIcon(string(s.Status)),
-					Description: s.Description,
-				})
-			}
-			result.CustomStatuses = customStatuses
-			outputJSON(result)
-			return
-		}
-
-		// Text output
-		fmt.Println("Built-in statuses:")
-		for _, s := range builtInStatuses {
-			icon := ui.RenderStatusIcon(string(s.Status))
-			fmt.Printf("  %s %-14s [%-6s]  %s\n", icon, s.Status, s.Category, s.Description)
-		}
-
-		if len(customStatuses) > 0 {
-			fmt.Println("\nCustom statuses:")
-			for _, cs := range customStatuses {
-				icon := ui.RenderStatusIconWithCategory(cs.Name, cs.Category)
-				fmt.Printf("  %s %-14s [%-6s]\n", icon, cs.Name, cs.Category)
-			}
-		} else {
-			fmt.Println("\nNo custom statuses configured.")
-			fmt.Println("Configure with: bd config set status.custom \"name:category,...\"")
-			fmt.Println("Categories: active, wip, done, frozen")
-		}
+		return renderStatuses(customStatuses)
 	},
+}
+
+func renderStatuses(customStatuses []types.CustomStatus) error {
+	if jsonOutput {
+		result := struct {
+			BuiltInStatuses []statusInfo         `json:"built_in_statuses"`
+			CustomStatuses  []types.CustomStatus `json:"custom_statuses,omitempty"`
+		}{}
+
+		for _, s := range builtInStatuses {
+			result.BuiltInStatuses = append(result.BuiltInStatuses, statusInfo{
+				Name:        string(s.Status),
+				Category:    string(s.Category),
+				Icon:        ui.GetStatusIcon(string(s.Status)),
+				Description: s.Description,
+			})
+		}
+		result.CustomStatuses = customStatuses
+		return outputJSON(result)
+	}
+
+	fmt.Println("Built-in statuses:")
+	for _, s := range builtInStatuses {
+		icon := ui.RenderStatusIcon(string(s.Status))
+		fmt.Printf("  %s %-14s [%-6s]  %s\n", icon, s.Status, s.Category, s.Description)
+	}
+
+	if len(customStatuses) > 0 {
+		fmt.Println("\nCustom statuses:")
+		for _, cs := range customStatuses {
+			icon := ui.RenderStatusIconWithCategory(cs.Name, cs.Category)
+			fmt.Printf("  %s %-14s [%-6s]\n", icon, cs.Name, cs.Category)
+		}
+	} else {
+		fmt.Println("\nNo custom statuses configured.")
+		fmt.Println("Configure with: bd config set status.custom \"name:category,...\"")
+		fmt.Println("Categories: active, wip, done, frozen")
+	}
+	return nil
 }
 
 type statusInfo struct {
