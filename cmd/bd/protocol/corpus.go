@@ -1,4 +1,4 @@
-// corpus.go — producer-side logic for the Beads↔Gas City cross-version
+// corpus.go — producer-side logic for the Beads↔consumer cross-version
 // contract-test system (Phase 2).
 //
 // This file is the dependency-free, unit-testable core: it defines the
@@ -7,7 +7,7 @@
 // independent runs produce byte-identical output, and the manifest that
 // records the corpus's provenance.
 //
-// Gas City vendors the generated corpus (testdata/corpus/) and replays it
+// A downstream consumer vendors the generated corpus (testdata/corpus/) and replays it
 // against its own consumer to detect cross-version drift without needing a
 // live bd. Everything here must stay free of test-only and bd-internal
 // imports so it can be reasoned about (and reused) in isolation.
@@ -100,7 +100,8 @@ func CorpusPlan() []Capture {
 			Args: []string{"dep", "list", CorpusRootID, "--json"},
 		},
 		// MUTATIONS: update/close/reopen return an array of the affected issue;
-		// update pins label + metadata coercion (phase=2 -> integer); close pins
+		// update pins label + metadata coercion (phase=2 -> string "2", since
+		// --set-metadata always stores values as JSON strings); close pins
 		// close_reason + closed_at; dep_remove/delete pin their confirmation shapes.
 		{
 			Name: "update",
@@ -142,7 +143,7 @@ func CorpusPlan() []Capture {
 			Args: []string{"version", "--json"},
 		},
 		// The error capture pins the {error, schema_version} envelope bd emits on
-		// stdout for a missing issue — gascity's isBdNotFound classifier depends on
+		// stdout for a missing issue — a downstream consumer's isBdNotFound classifier depends on
 		// it — plus the non-zero exit status bd returns (see checkCaptureExit).
 		{
 			Name: errorCaptureName,
@@ -330,7 +331,7 @@ type BlobMeta struct {
 
 // Manifest is the corpus index. It pins the schema version (the coordination
 // canary), the generator identity, and a per-blob SHA-256 checksum so consumers
-// (Gas City) can detect tampering or partial vendoring. It deliberately does not
+// can detect tampering or partial vendoring. It deliberately does not
 // pin the live bd version/commit — see the field comment below for why the
 // corpus stays version-agnostic.
 type Manifest struct {

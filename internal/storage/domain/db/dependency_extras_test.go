@@ -163,7 +163,7 @@ func (s *testSuite) depTreeCycleVisitedOnce() {
 	s.seedIssueRow("bd-tree-cyc-b")
 	r := s.depRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newDep("bd-tree-cyc-a", "bd-tree-cyc-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
-	s.Require().NoError(r.Insert(s.Ctx(), newDep("bd-tree-cyc-b", "bd-tree-cyc-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), newDep("bd-tree-cyc-b", "bd-tree-cyc-a", types.DepBlocks), "tester", domain.DepInsertOpts{CycleValidated: true}))
 
 	out, err := r.GetTree(s.Ctx(), "bd-tree-cyc-a", domain.DepTreeOpts{
 		MaxDepth:  10,
@@ -200,7 +200,7 @@ func (s *testSuite) depCTEDetected() {
 	s.seedIssueRow("bd-cte-det-b")
 	r := s.depRepo()
 	s.Require().NoError(r.Insert(s.Ctx(), newDep("bd-cte-det-a", "bd-cte-det-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
-	s.Require().NoError(r.Insert(s.Ctx(), newDep("bd-cte-det-b", "bd-cte-det-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(r.Insert(s.Ctx(), newDep("bd-cte-det-b", "bd-cte-det-a", types.DepBlocks), "tester", domain.DepInsertOpts{CycleValidated: true}))
 
 	out, err := r.CycleThroughEdges(s.Ctx(), [][2]string{{"bd-cte-det-b", "bd-cte-det-a"}})
 	s.Require().NoError(err)
@@ -241,7 +241,7 @@ func (s *testSuite) depCTEAcrossWisp() {
 	// Wisp edge: bd-cte-w-b (wisp) -> bd-cte-w-a (perm) in wisp_dependencies.
 	s.Require().NoError(r.Insert(s.Ctx(),
 		newDep("bd-cte-w-b", "bd-cte-w-a", types.DepBlocks), "tester",
-		domain.DepInsertOpts{UseWispsTable: true}))
+		domain.DepInsertOpts{UseWispsTable: true, CycleValidated: true}))
 
 	out, err := r.CycleThroughEdges(s.Ctx(), [][2]string{{"bd-cte-w-b", "bd-cte-w-a"}})
 	s.Require().NoError(err)

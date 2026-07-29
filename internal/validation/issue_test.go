@@ -177,6 +177,131 @@ func TestAssigneeMatches(t *testing.T) {
 	}
 }
 
+func TestAssigneeNotStolen(t *testing.T) {
+	inProgress := func(assignee string) *types.Issue {
+		return &types.Issue{ID: "bd-test", Assignee: assignee, Status: types.StatusInProgress}
+	}
+	poolsCalled := false
+	pools := func() []string {
+		poolsCalled = true
+		return []string{"fable-crew", "night-crew"}
+	}
+
+	tests := []struct {
+		name        string
+		issue       *types.Issue
+		actor       string
+		newAssignee string
+		pools       func() []string
+		force       bool
+		wantErr     bool
+	}{
+		{
+			name:    "nil issue passes (delegated check)",
+			issue:   nil,
+			actor:   "alice",
+			wantErr: false,
+		},
+		{
+			name:        "unassigned in_progress issue is freely assignable",
+			issue:       inProgress(""),
+			actor:       "alice",
+			newAssignee: "bob",
+			wantErr:     false,
+		},
+		{
+			name:        "actor editing its own claim passes",
+			issue:       inProgress("alice"),
+			actor:       "alice",
+			newAssignee: "bob",
+			wantErr:     false,
+		},
+		{
+			name:        "idempotent re-assert of the current holder passes",
+			issue:       inProgress("bob"),
+			actor:       "alice",
+			newAssignee: "bob",
+			wantErr:     false,
+		},
+		{
+			name:        "reassigning an OPEN assigned bead stays frictionless",
+			issue:       &types.Issue{ID: "bd-test", Assignee: "bob", Status: types.StatusOpen},
+			actor:       "alice",
+			newAssignee: "carol",
+			wantErr:     false,
+		},
+		{
+			name:        "live foreign claim refuses without force",
+			issue:       inProgress("bob"),
+			actor:       "alice",
+			newAssignee: "carol",
+			wantErr:     true,
+		},
+		{
+			name:        "unassign of a live foreign claim refuses (unclaim's rule)",
+			issue:       inProgress("bob"),
+			actor:       "alice",
+			newAssignee: "",
+			wantErr:     true,
+		},
+		{
+			name:        "live foreign claim with force passes",
+			issue:       inProgress("bob"),
+			actor:       "alice",
+			newAssignee: "carol",
+			force:       true,
+			wantErr:     false,
+		},
+		{
+			name:        "claim.pools alias holder is takeable (matches --claim)",
+			issue:       inProgress("fable-crew"),
+			actor:       "alice",
+			newAssignee: "alice",
+			pools:       pools,
+			wantErr:     false,
+		},
+		{
+			name:        "nil pool thunk fails closed on a foreign claim",
+			issue:       inProgress("fable-crew"),
+			actor:       "alice",
+			newAssignee: "alice",
+			pools:       nil,
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := AssigneeNotStolen(tt.actor, tt.newAssignee, tt.pools, tt.force)("bd-test", tt.issue)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("AssigneeNotStolen() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil {
+				// The copy must name the holder, point at coordination, and
+				// name --force explicitly (so script authors can adopt it
+				// deterministically) — never an eviction recipe like the old
+				// "use bd unclaim" claim-refusal copy (wy-zs5s2 item 2).
+				for _, frag := range []string{"held by", "coordinate with the holder", "--force", "bd mail"} {
+					if !strings.Contains(err.Error(), frag) {
+						t.Errorf("AssigneeNotStolen() error %q should contain %q", err.Error(), frag)
+					}
+				}
+			}
+		})
+	}
+
+	// The pool thunk must be consulted only after the cheap clauses pass —
+	// call sites hand it a live config read, and routine dispatch (open-bead
+	// reassigns, self-edits) must not pay that round trip.
+	poolsCalled = false
+	if err := AssigneeNotStolen("alice", "bob", pools, false)("bd-test", &types.Issue{ID: "bd-test", Assignee: "bob", Status: types.StatusOpen}); err != nil {
+		t.Errorf("open-bead reassign should pass, got %v", err)
+	}
+	if poolsCalled {
+		t.Errorf("pool thunk consulted on an open-bead reassign; the config read should be lazy")
+	}
+}
+
 func TestNotClosed(t *testing.T) {
 	tests := []struct {
 		name    string

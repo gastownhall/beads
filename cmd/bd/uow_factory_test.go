@@ -18,7 +18,7 @@ func TestNewProxiedServerUOWProvider_RoutesExternalConfigToExternalProvider(t *t
 		},
 	}))
 
-	_, err := newProxiedServerUOWProvider(context.Background(), beadsDir)
+	_, err := newProxiedServerUOWProvider(context.Background(), beadsDir, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Host requires Port",
 		"expected external validation error proving the external code path was taken; got: %v", err)
@@ -28,7 +28,7 @@ func TestNewExternalProxiedServerUOWProvider_CreatesRootDir(t *testing.T) {
 	beadsDir := t.TempDir()
 	external := &configfile.ExternalDoltConfig{Host: "db.invalid"}
 
-	_, err := newExternalProxiedServerUOWProvider(context.Background(), beadsDir, "beads_test", external)
+	_, err := newExternalProxiedServerUOWProvider(context.Background(), beadsDir, "beads_test", external, 0, 0)
 	require.Error(t, err, "invalid external config must surface a validation error")
 
 	wantRoot := proxiedServerRoot(beadsDir)
@@ -44,7 +44,7 @@ func TestNewExternalProxiedServerUOWProvider_HonorsCustomRootPath(t *testing.T) 
 		External: &configfile.ExternalDoltConfig{Host: "db.invalid"},
 	}))
 
-	_, err := newProxiedServerUOWProvider(context.Background(), beadsDir)
+	_, err := newProxiedServerUOWProvider(context.Background(), beadsDir, "")
 	require.Error(t, err, "invalid external config must surface a validation error")
 
 	assert.DirExists(t, customRoot, "external provider should create the custom root dir, not the default")
@@ -61,7 +61,7 @@ func TestNewExternalProxiedServerUOWProvider_HonorsCustomLogPath(t *testing.T) {
 		External: &configfile.ExternalDoltConfig{Host: "db.invalid"},
 	}))
 
-	_, err := newProxiedServerUOWProvider(context.Background(), beadsDir)
+	_, err := newProxiedServerUOWProvider(context.Background(), beadsDir, "")
 	require.Error(t, err, "invalid external config must surface a validation error")
 	assert.Contains(t, err.Error(), "Host requires Port",
 		"external code path must be the one reached; got: %v", err)

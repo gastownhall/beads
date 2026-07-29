@@ -326,3 +326,38 @@ class InitResult(BaseModel):
     database: str
     prefix: str
     message: str
+
+
+# =============================================================================
+# COMMENTS & NOTES
+# =============================================================================
+
+
+class Comment(BaseModel):
+    """A comment on an issue (matches `bd comments <id> --json`)."""
+
+    id: str
+    issue_id: str
+    author: str | None = None
+    text: str
+    created_at: datetime
+
+
+class AddCommentParams(BaseModel):
+    """Parameters for adding a comment to an issue."""
+
+    issue_id: str
+    text: str
+
+
+class ListCommentsParams(BaseModel):
+    """Parameters for listing comments on an issue."""
+
+    issue_id: str
+
+
+class AddNoteParams(BaseModel):
+    """Parameters for appending a note to an issue's notes field."""
+
+    issue_id: str
+    text: str

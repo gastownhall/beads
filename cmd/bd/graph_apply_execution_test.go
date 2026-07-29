@@ -103,7 +103,7 @@ func TestExecuteGraphApplyRejectsMixedLocalExternalBlockingCycle(t *testing.T) {
 		},
 	}
 
-	if err := validateGraphApplyPlan(plan, nil); err != nil {
+	if err := validateGraphApplyPlan(plan, nil, nil, GraphApplyOptions{}); err != nil {
 		t.Fatalf("validateGraphApplyPlan: %v", err)
 	}
 	_, err := executeGraphApply(ctx, plan, GraphApplyOptions{})

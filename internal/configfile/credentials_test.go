@@ -114,7 +114,9 @@ func TestLookupCredentialsPassword_FallsBackToFile(t *testing.T) {
 	}
 	t.Setenv("BEADS_CREDENTIALS_FILE", credFile)
 
-	// Clear BEADS_DOLT_PASSWORD so file lookup kicks in
+	// Clear port and password env vars so defaults + file lookup kick in.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	t.Setenv("BEADS_DOLT_PASSWORD", "")
 
 	cfg := DefaultConfig()
@@ -138,6 +140,8 @@ password=workServerPass
 		t.Fatalf("failed to write credentials file: %v", err)
 	}
 	t.Setenv("BEADS_CREDENTIALS_FILE", credFile)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	t.Setenv("BEADS_DOLT_PASSWORD", "")
 
 	// Personal project uses localhost
@@ -177,6 +181,8 @@ password=tunnelPass
 		t.Fatalf("failed to write credentials file: %v", err)
 	}
 	t.Setenv("BEADS_CREDENTIALS_FILE", credFile)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	t.Setenv("BEADS_DOLT_PASSWORD", "")
 
 	cfg := DefaultConfig()

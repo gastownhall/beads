@@ -96,6 +96,9 @@ func init() {
 }
 
 func runJiraSync(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("jira sync is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("jira-sync")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -223,6 +226,9 @@ func buildJiraPushHooks(ctx context.Context) *tracker.PushHooks {
 }
 
 func runJiraStatus(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("jira status is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("jira-status")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -245,7 +251,12 @@ func runJiraStatus(cmd *cobra.Command, args []string) error {
 
 	configured := jiraURL != "" && len(projectKeys) > 0
 
-	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	// jira sync is a round-trip path — opt out of BEADS_MAX_ROWS
+	// (designer §4.1) so a misconfigured env doesn't abort partway.
+	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+		MaxRows:       0,
+		MaxRowsSource: "",
+	})
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}

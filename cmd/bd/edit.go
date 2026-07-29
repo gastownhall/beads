@@ -39,6 +39,10 @@ Examples:
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runEditProxiedServer(cmd, rootCtx, args)
+		}
+
 		id := args[0]
 		ctx := rootCtx
 

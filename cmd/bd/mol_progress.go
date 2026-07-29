@@ -6,7 +6,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -40,6 +39,10 @@ Example:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runMolProgressProxiedServer(rootCtx, args)
+		}
 
 		ctx := rootCtx
 
@@ -106,7 +109,7 @@ Example:
 
 // findInProgressMoleculeIDs finds molecule IDs with in_progress steps for an agent.
 // This is a lightweight version that only returns IDs without loading subgraphs.
-func findInProgressMoleculeIDs(ctx context.Context, s storage.DoltStorage, agent string) []string {
+func findInProgressMoleculeIDs(ctx context.Context, s molReader, agent string) []string {
 	// Query for in_progress issues
 	status := types.StatusInProgress
 	filter := types.IssueFilter{Status: &status}

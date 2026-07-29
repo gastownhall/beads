@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -1693,6 +1695,8 @@ type fakeCycleTx struct {
 	gotEdges [][2]string
 	path     string
 	err      error
+	added    []*types.Dependency
+	addOpts  []storage.DependencyAddOptions
 }
 
 func (f *fakeCycleTx) CycleThroughEdges(_ context.Context, edges [][2]string) (string, error) {
@@ -1700,14 +1704,66 @@ func (f *fakeCycleTx) CycleThroughEdges(_ context.Context, edges [][2]string) (s
 	return f.path, f.err
 }
 
-// bd-6dnrw.8 / bd-578h9.9: the bulk-add cycle gate must pass only blocking
-// edge types to the in-tx check, skip the check entirely when no blocking
-// edges are present, and propagate check failures.
+func (f *fakeCycleTx) AddDependencyWithOptions(_ context.Context, dep *types.Dependency, _ string, opts storage.DependencyAddOptions) error {
+	cp := *dep
+	f.added = append(f.added, &cp)
+	f.addOpts = append(f.addOpts, opts)
+	return nil
+}
+
+func TestAddBulkDependenciesInTxOrdersHierarchyAndAlwaysRunsFinalGate(t *testing.T) {
+	t.Parallel()
+	tx := &fakeCycleTx{path: "child → grand → child"}
+	edges := []bulkDepEdge{
+		{Line: 1, IssueID: "child", DependsOnID: "grand", Type: types.DepBlocks},
+		{Line: 2, IssueID: "child", DependsOnID: "parent", Type: types.DepParentChild},
+		{Line: 3, IssueID: "parent", DependsOnID: "grand", Type: types.DepParentChild},
+	}
+
+	err := addBulkDependenciesInTx(context.Background(), tx, edges, false, "tester")
+	if err == nil || !strings.Contains(err.Error(), "dependency cycle would be created") {
+		t.Fatalf("normal-mode final gate error = %v, want rejection", err)
+	}
+	// The embedded bulk final gate must type its rejection identically to the
+	// proxied/domain bulk gate so callers can errors.Is it regardless of plumbing.
+	if !errors.Is(err, domain.ErrDependencyCycle) {
+		t.Fatalf("final gate error must errors.Is domain.ErrDependencyCycle, got %v", err)
+	}
+	// Typing must not alter the rendered text: no sentinel string appended.
+	const wantMsg = "dependency cycle would be created: child → grand → child (no edges added; run 'bd dep cycles' for analysis)"
+	if err.Error() != wantMsg {
+		t.Fatalf("final gate message = %q, want byte-identical %q", err.Error(), wantMsg)
+	}
+	if len(tx.added) != 3 {
+		t.Fatalf("added dependencies = %d, want 3", len(tx.added))
+	}
+	for i := 0; i < 2; i++ {
+		if tx.added[i].Type != types.DepParentChild {
+			t.Fatalf("added[%d].Type = %s, want parent-child before blocking edge", i, tx.added[i].Type)
+		}
+	}
+	if tx.added[2].Type != types.DepBlocks {
+		t.Fatalf("added[2].Type = %s, want blocks last", tx.added[2].Type)
+	}
+	for i, opts := range tx.addOpts {
+		if opts.SkipCycleCheck {
+			t.Fatalf("added[%d] unexpectedly skipped per-edge cycle check", i)
+		}
+	}
+	if len(tx.gotEdges) != 3 {
+		t.Fatalf("final gate saw %d edges, want all 3 scheduling edges", len(tx.gotEdges))
+	}
+}
+
+// bd-6dnrw.8 / bd-578h9.9: the bulk-add cycle gate must pass only scheduling
+// edge types to the in-tx check, skip the check when none are present, and
+// propagate check failures.
 func TestNewCycleThroughEdges(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	edges := []bulkDepEdge{
 		{IssueID: "bd-a", DependsOnID: "bd-b", Type: types.DepBlocks},
+		{IssueID: "bd-pc", DependsOnID: "bd-parent", Type: types.DepParentChild},
 		{IssueID: "bd-c", DependsOnID: "bd-d", Type: types.DependencyType("related")},
 	}
 
@@ -1716,8 +1772,8 @@ func TestNewCycleThroughEdges(t *testing.T) {
 	if err != nil || path != "bd-a → bd-b → bd-a" {
 		t.Errorf("cycle through new edge: got (%q, %v), want rendered path", path, err)
 	}
-	if len(tx.gotEdges) != 1 || tx.gotEdges[0] != [2]string{"bd-a", "bd-b"} {
-		t.Errorf("edges passed to check = %v, want only the blocking edge", tx.gotEdges)
+	if len(tx.gotEdges) != 2 || tx.gotEdges[0] != [2]string{"bd-a", "bd-b"} || tx.gotEdges[1] != [2]string{"bd-pc", "bd-parent"} {
+		t.Errorf("edges passed to check = %v, want blocks and parent-child edges", tx.gotEdges)
 	}
 
 	tx = &fakeCycleTx{}

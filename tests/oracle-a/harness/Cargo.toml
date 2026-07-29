@@ -1,0 +1,25 @@
+[package]
+name = "bd-conformance"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# Standalone conformance harness for Oracle A — the bd refactor-safety
+# differential (see PROVENANCE.md). It is intentionally out-of-workspace: concrete
+# dependency versions and no workspace inheritance, so it builds on its own with a
+# plain `cargo build --release --bins` and captures goldens into its OWN
+# testdata/golden directory (git-ignored, regenerated each run).
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+regex = "1"
+
+[[bin]]
+name = "capture_golden"
+path = "src/bin/capture_golden.rs"
+
+[[bin]]
+name = "scoreboard"
+path = "src/bin/scoreboard.rs"

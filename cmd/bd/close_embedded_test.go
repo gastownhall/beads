@@ -204,6 +204,84 @@ func TestEmbeddedClose(t *testing.T) {
 		cmd.CombinedOutput() // Don't check error — behavior varies.
 	})
 
+	// The delegated close (CloseIssueChecked) reports Unchanged for an already-
+	// closed issue. Re-closing must stay an idempotent success (exit 0, issue
+	// stays closed) — matching the old CloseIssue path, which returned nil for an
+	// already-closed issue. bdClose t.Fatalf's on non-zero exit, so this asserts
+	// the exit code.
+	t.Run("close_already_closed_is_idempotent_success", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Idempotent close", "--type", "task")
+		bdClose(t, bd, dir, issue.ID)
+		bdClose(t, bd, dir, issue.ID) // second close: idempotent no-op, exit 0
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("expected issue to remain closed after idempotent re-close, got %s", got.Status)
+		}
+	})
+
+	// Output parity: `bd close --json` on an already-closed bead must still emit
+	// the issue in the JSON array (the old CloseIssue path re-fetched and reported
+	// it). The Unchanged branch skips the real-close side effects but keeps the
+	// display, so the shape is unchanged.
+	t.Run("close_json_already_closed_emits_issue", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "JSON idempotent", "--type", "task")
+		bdClose(t, bd, dir, issue.ID) // first close
+		cmd := exec.Command(bd, "close", issue.ID, "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd close --json (already closed) failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		s := stdout.String()
+		start := strings.Index(s, "[")
+		if start < 0 {
+			t.Fatalf("expected a JSON array for already-closed --json re-close, got: %s", s)
+		}
+		var issues []json.RawMessage
+		if jsonErr := json.Unmarshal([]byte(s[start:]), &issues); jsonErr != nil {
+			t.Fatalf("expected valid JSON array, got: %s (%v)", s[start:], jsonErr)
+		}
+		if len(issues) != 1 {
+			t.Fatalf("expected 1 issue in JSON for already-closed re-close (parity), got %d: %s", len(issues), s[start:])
+		}
+		if !strings.Contains(s, issue.ID) {
+			t.Errorf("expected already-closed issue %s in JSON output, got: %s", issue.ID, s)
+		}
+	})
+
+	// Mixed batch: one already-closed bead + one live bead. Both must appear in
+	// the JSON array — the already-closed one for output parity, the live one as a
+	// real close.
+	t.Run("close_json_mixed_batch_includes_already_closed", func(t *testing.T) {
+		already := bdCreate(t, bd, dir, "Mixed already", "--type", "task")
+		fresh := bdCreate(t, bd, dir, "Mixed fresh", "--type", "task")
+		bdClose(t, bd, dir, already.ID) // pre-close one
+
+		cmd := exec.Command(bd, "close", already.ID, fresh.ID, "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd close --json (mixed batch) failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		s := stdout.String()
+		start := strings.Index(s, "[")
+		if start < 0 {
+			t.Fatalf("expected a JSON array for mixed-batch --json close, got: %s", s)
+		}
+		var issues []json.RawMessage
+		if jsonErr := json.Unmarshal([]byte(s[start:]), &issues); jsonErr != nil {
+			t.Fatalf("expected valid JSON array, got: %s (%v)", s[start:], jsonErr)
+		}
+		if len(issues) != 2 {
+			t.Fatalf("expected both issues in JSON (real close + already-closed parity), got %d: %s", len(issues), s[start:])
+		}
+		if !strings.Contains(s, already.ID) || !strings.Contains(s, fresh.ID) {
+			t.Errorf("expected both %s and %s in JSON output, got: %s", already.ID, fresh.ID, s)
+		}
+	})
+
 	t.Run("close_nonexistent_id", func(t *testing.T) {
 		bdCloseFail(t, bd, dir, "tc-nonexistent999")
 	})
@@ -232,6 +310,61 @@ func TestEmbeddedClose(t *testing.T) {
 		got := bdShow(t, bd, dir, blocked.ID)
 		if got.Status != types.StatusClosed {
 			t.Errorf("expected closed with --force, got %s", got.Status)
+		}
+	})
+
+	// Proves the S7 delegation: `bd close` on a blocked issue now surfaces the
+	// engine's atomic guard (storage.ErrCloseBlocked) rather than a duplicated
+	// CLI pre-check. The refusal must be atomic — the issue stays open because the
+	// guard and the close share one transaction — and the message must name the
+	// blocker and the --force hint. --force then bypasses the engine guard.
+	t.Run("close_blocked_delegated_guard", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Deleg blocker", "--type", "task")
+		blocked := bdCreate(t, bd, dir, "Deleg blocked", "--type", "task")
+		bdDepAdd(t, bd, dir, blocked.ID, blocker.ID)
+
+		out := bdCloseFail(t, bd, dir, blocked.ID)
+		if !strings.Contains(out, "cannot close") {
+			t.Errorf("expected engine guard message ('cannot close'), got: %s", out)
+		}
+		if !strings.Contains(out, blocker.ID) {
+			t.Errorf("expected guard message to name blocker %s, got: %s", blocker.ID, out)
+		}
+		if !strings.Contains(out, "--force") {
+			t.Errorf("expected guard message to mention --force, got: %s", out)
+		}
+
+		// Atomic refuse: the guard ran in-transaction, so the issue must remain open.
+		got := bdShow(t, bd, dir, blocked.ID)
+		if got.Status == types.StatusClosed {
+			t.Error("expected blocked issue to remain open after the guard refused (atomic)")
+		}
+
+		// --force bypasses the engine guard.
+		bdClose(t, bd, dir, blocked.ID, "--force")
+		got = bdShow(t, bd, dir, blocked.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("expected closed with --force, got %s", got.Status)
+		}
+	})
+
+	// The delegated guard refuses only on a LIVE direct blocker, matching the
+	// historical `bd close` predicate. A transitively-blocked child (parent-child
+	// of a blocked parent) has is_blocked=1 but no direct blocker of its own, so it
+	// must close WITHOUT --force — the historical behavior.
+	t.Run("close_transitively_blocked_closes_without_force", func(t *testing.T) {
+		blocker := bdCreate(t, bd, dir, "Trans blocker", "--type", "task")
+		parent := bdCreate(t, bd, dir, "Trans parent", "--type", "task")
+		child := bdCreate(t, bd, dir, "Trans child", "--type", "task")
+		// parent is blocked by an open blocker; child is a parent-child of parent,
+		// so child inherits is_blocked=1 transitively with no direct blocker.
+		bdDepAdd(t, bd, dir, parent.ID, blocker.ID)
+		bdDepAdd(t, bd, dir, child.ID, parent.ID, "--type", "parent-child")
+
+		bdClose(t, bd, dir, child.ID) // no --force
+		got := bdShow(t, bd, dir, child.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("expected transitively-blocked child to close without --force, got %s", got.Status)
 		}
 	})
 
@@ -619,6 +752,189 @@ func TestEmbeddedClose(t *testing.T) {
 		if gotID != step2.ID {
 			t.Errorf(".beads/last-touched = %q after `bd close %s --continue`, want %q (the auto-advanced step)",
 				gotID, step1.ID, step2.ID)
+		}
+	})
+
+	// Regression for the delegated-close change: routing an already-closed issue
+	// through alreadyClosed instead of closedCount must NOT drop the retry-safe
+	// post-close command contracts. A re-close is an idempotent no-op on stored
+	// state, but it is still a successful `bd close` and must honor last-touched,
+	// --continue, and --claim-next so a crash/retry after the status flip can still
+	// re-drive workflow advancement. Real mutation side effects stay suppressed.
+	t.Run("close_already_closed_updates_last_touched", func(t *testing.T) {
+		target := bdCreate(t, bd, dir, "Reclose last-touched target", "--type", "task")
+		bdClose(t, bd, dir, target.ID) // real close: last-touched = target
+		other := bdCreate(t, bd, dir, "Reclose last-touched other", "--type", "task")
+		bdClose(t, bd, dir, other.ID) // real close moves last-touched to `other`
+
+		// Re-close the already-closed target: idempotent no-op, but it must re-touch
+		// the target so subsequent default-target commands point back at it.
+		bdClose(t, bd, dir, target.ID)
+
+		got, err := os.ReadFile(filepath.Join(beadsDir, "last-touched"))
+		if err != nil {
+			t.Fatalf("read .beads/last-touched: %v", err)
+		}
+		if gotID := strings.TrimSpace(string(got)); gotID != target.ID {
+			t.Errorf(".beads/last-touched = %q after re-closing already-closed %s, want %q",
+				gotID, target.ID, target.ID)
+		}
+	})
+
+	t.Run("close_already_closed_continue_advances", func(t *testing.T) {
+		// Isolated store so molecule progress and the Dolt commit count are
+		// deterministic, mirroring close_already_closed_claim_next.
+		cdir, cbeads, _ := bdInit(t, bd, "--prefix", "rk")
+		countCommits := func() int {
+			dataDir := filepath.Join(cbeads, "embeddeddolt")
+			cfg, _ := configfile.Load(cbeads)
+			database := ""
+			if cfg != nil {
+				database = cfg.GetDoltDatabase()
+			}
+			db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, database, "main")
+			if err != nil {
+				t.Fatalf("OpenSQL: %v", err)
+			}
+			defer cleanup()
+			var count int
+			if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&count); err != nil {
+				t.Fatalf("query dolt_log: %v", err)
+			}
+			return count
+		}
+
+		root := bdCreate(t, bd, cdir, "Reclose continue root", "--type", "epic", "--labels", "template")
+		step1 := bdCreate(t, bd, cdir, "Reclose continue step one", "--type", "task", "--parent", root.ID)
+		step2 := bdCreate(t, bd, cdir, "Reclose continue step two", "--type", "task", "--parent", root.ID)
+		// step2 blocks on step1, so closing step1 makes step2 the next ready step.
+		bdDepAdd(t, bd, cdir, step2.ID, step1.ID)
+
+		if _, err := bdRunWithFlockRetry(t, bd, cdir, "update", step1.ID, "--claim"); err != nil {
+			t.Fatalf("seed claim failed: %v", err)
+		}
+
+		// Close step1 for real WITHOUT --continue — the advancement trigger never ran
+		// (models a crash/retry between the status flip and the advance).
+		bdClose(t, bd, cdir, step1.ID, "--reason", "first")
+
+		// Retry the close WITH --continue against the now already-closed step. The
+		// idempotent re-close must advance the molecule AND persist the advance, not
+		// just mutate the in-memory working set.
+		beforeCommits := countCommits()
+		_ = bdClose(t, bd, cdir, step1.ID, "--reason", "retry", "--continue")
+
+		got, err := os.ReadFile(filepath.Join(cbeads, "last-touched"))
+		if err != nil {
+			t.Fatalf("read .beads/last-touched: %v", err)
+		}
+		if gotID := strings.TrimSpace(string(got)); gotID != step2.ID {
+			t.Errorf(".beads/last-touched = %q after re-closing already-closed %s --continue, want %q (auto-advanced step)",
+				gotID, step1.ID, step2.ID)
+		}
+
+		// Persisted-advancement assertions — the retry-safety property the fix
+		// guarantees, and the gap the reviewer flagged: last-touched alone proves
+		// AdvanceToNextStep ran in the working set, not that the advance was
+		// committed. step2 must be persisted as in_progress, and the already-closed
+		// re-close (closedCount==0) must still produce a Dolt commit for the advance.
+		// The auto-advance moves the step to in_progress via UpdateIssue but, unlike
+		// --claim-next's ClaimIssue, does not set an assignee, so we assert status +
+		// commit rather than assignee.
+		if s2 := bdShow(t, bd, cdir, step2.ID); s2.Status != types.StatusInProgress {
+			t.Errorf("expected step2 %s persisted as in_progress after already-closed --continue, got status=%s",
+				step2.ID, s2.Status)
+		}
+		if afterCommits := countCommits(); afterCommits <= beforeCommits {
+			t.Errorf("expected a Dolt commit for the --continue advance on an already-closed re-close: before=%d after=%d",
+				beforeCommits, afterCommits)
+		}
+	})
+
+	t.Run("close_already_closed_claim_next", func(t *testing.T) {
+		// Isolated store so the ready set is deterministic — the shared store carries
+		// open issues from sibling subtests, and --claim-next claims the global
+		// highest-priority ready issue.
+		cdir, cbeads, _ := bdInit(t, bd, "--prefix", "rc")
+		countCommits := func() int {
+			dataDir := filepath.Join(cbeads, "embeddeddolt")
+			cfg, _ := configfile.Load(cbeads)
+			database := ""
+			if cfg != nil {
+				database = cfg.GetDoltDatabase()
+			}
+			db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, database, "main")
+			if err != nil {
+				t.Fatalf("OpenSQL: %v", err)
+			}
+			defer cleanup()
+			var count int
+			if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&count); err != nil {
+				t.Fatalf("query dolt_log: %v", err)
+			}
+			return count
+		}
+
+		target := bdCreate(t, bd, cdir, "Reclose claim target", "--type", "task")
+		next := bdCreate(t, bd, cdir, "Reclose claim next", "--type", "task")
+		bdClose(t, bd, cdir, target.ID) // real close; `next` is now the only ready issue
+
+		// Re-close the already-closed target with --claim-next: the retry-safe claim
+		// must still fire and claim the next ready issue.
+		beforeCommits := countCommits()
+		_ = bdClose(t, bd, cdir, target.ID, "--claim-next")
+
+		got := bdShow(t, bd, cdir, next.ID)
+		if got.Status != types.StatusInProgress || got.Assignee == "" {
+			t.Errorf("expected next issue %s claimed (in_progress, assigned) after already-closed --claim-next, got status=%s assignee=%q",
+				next.ID, got.Status, got.Assignee)
+		}
+		// The claim is a real mutation, so the already-closed re-close must still
+		// persist it with a Dolt commit — not leave it dangling in the working set
+		// (the close itself is a no-op, so only the claim drives the commit).
+		if afterCommits := countCommits(); afterCommits <= beforeCommits {
+			t.Errorf("expected a Dolt commit for the --claim-next claim on an already-closed re-close: before=%d after=%d",
+				beforeCommits, afterCommits)
+		}
+	})
+
+	// Regression for the delegated-close change: molecule root auto-close is a
+	// state-derived post-close contract, so an already-closed re-close of the final
+	// step must re-drive it. Models the crash where the final step's close persisted
+	// but its molecule-root auto-close did not — the idempotent retry heals the
+	// stranded-open root instead of leaving it open forever.
+	t.Run("close_already_closed_replays_molecule_auto_close", func(t *testing.T) {
+		// Isolated store so molecule progress is deterministic.
+		mdir, _, _ := bdInit(t, bd, "--prefix", "rm")
+		root := bdCreate(t, bd, mdir, "Reclose molecule root", "--type", "epic", "--labels", "template")
+		step1 := bdCreate(t, bd, mdir, "Reclose molecule step one", "--type", "task", "--parent", root.ID)
+		step2 := bdCreate(t, bd, mdir, "Reclose molecule step two", "--type", "task", "--parent", root.ID)
+
+		// Close both steps for real. Closing the final step auto-closes the root.
+		bdClose(t, bd, mdir, step1.ID, "--reason", "one")
+		bdClose(t, bd, mdir, step2.ID, "--reason", "two")
+		if got := bdShow(t, bd, mdir, root.ID); got.Status != types.StatusClosed {
+			t.Fatalf("precondition: expected molecule root %s auto-closed after final step, got %s", root.ID, got.Status)
+		}
+
+		// Strand the molecule: reopen ONLY the root, leaving both steps closed — the
+		// exact state left when a final step's close commits but its root auto-close
+		// does not.
+		bdReopen(t, bd, mdir, root.ID)
+		if got := bdShow(t, bd, mdir, root.ID); got.Status != types.StatusOpen {
+			t.Fatalf("precondition: expected molecule root %s reopened, got %s", root.ID, got.Status)
+		}
+		if got := bdShow(t, bd, mdir, step2.ID); got.Status != types.StatusClosed {
+			t.Fatalf("precondition: expected step2 %s to stay closed after reopening only the root, got %s", step2.ID, got.Status)
+		}
+
+		// Re-close the already-closed final step. The idempotent re-close must replay
+		// molecule auto-close and re-close the stranded-open root.
+		_ = bdClose(t, bd, mdir, step2.ID, "--reason", "retry")
+
+		if got := bdShow(t, bd, mdir, root.ID); got.Status != types.StatusClosed {
+			t.Errorf("expected stranded-open molecule root %s re-closed by an already-closed re-close of the final step, got %s",
+				root.ID, got.Status)
 		}
 	})
 

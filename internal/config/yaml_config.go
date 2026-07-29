@@ -29,12 +29,17 @@ var YamlOnlyKeys = map[string]bool{
 	"db":       true,
 	"actor":    true,
 	"identity": true,
+	// Replica identity: config.NodeID() reads this through viper (yaml/env)
+	// only, so a DB-backed write would be silently unread — exactly the
+	// GH#536 class this map exists to prevent.
+	"node_id": true,
 
 	// Git settings
 	"git.author":      true,
 	"git.no-gpg-sign": true,
 	"no-push":         true,
 	"no-git-ops":      true, // Disable git ops in bd prime session close protocol (GH#593)
+	"agent.profile":   true, // Explicit policy profile for bd prime's close protocol (GH#3423)
 
 	// Sync settings
 	"sync.remote":     true, // Primary: any Dolt-compatible remote URL
@@ -49,6 +54,11 @@ var YamlOnlyKeys = map[string]bool{
 
 	// Create command settings
 	"create.require-description": true,
+
+	// Prime memory-injection caps (read at session start, possibly before
+	// the database is reachable, so they must live in yaml)
+	"prime.max-memories":     true,
+	"prime.max-memory-chars": true,
 
 	// Validation settings (bd-t7jq)
 	// Values: "warn" | "error" | "none"
@@ -66,12 +76,15 @@ var YamlOnlyKeys = map[string]bool{
 	"backup.git-repo": true,
 
 	// Import settings
+	"import.auto": true,
 	"import.path": true,
 
 	// Dolt server settings
-	"dolt.shared-server": true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
-	"dolt.max-conns":     true, // Connection pool size override (default 10, GH#3140)
-	"dolt.debug":         true, // Debug-mode dolt sql-server: --loglevel=debug + --prof cpu
+	"dolt.shared-server":      true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
+	"dolt.max-conns":          true, // Connection pool size override (default 10, GH#3140)
+	"dolt.pool-read-timeout":  true, // Pool per-I/O read deadline override (default 10s, bd-vz0y9)
+	"dolt.pool-write-timeout": true, // Pool per-I/O write deadline override (default 10s, bd-vz0y9)
+	"dolt.debug":              true, // Debug-mode dolt sql-server: --loglevel=debug + --prof cpu
 
 	// Secrets: tokens and API keys must NOT be stored in the Dolt database
 	// because that data is pushed to remotes, triggering secret-scanning
@@ -94,7 +107,7 @@ func IsYamlOnlyKey(key string) bool {
 	}
 
 	// Check prefix matches for nested keys
-	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics.", "list."}
+	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics.", "list.", "audit."}
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(key, prefix) {
 			return true
@@ -239,7 +252,27 @@ func SetYamlConfigInDir(beadsDir, key, value string) error {
 
 var userGlobalKeyPrefixes = []string{"metrics."}
 
+// userGlobalExactKeys are per-MACHINE settings that must never be written to
+// the project .beads/config.yaml, which is a git-TRACKED file (see
+// cmd/bd/doctor/gitignore.go: nothing in .beads/.gitignore excludes it). A
+// committed value propagates one machine's answer to every clone that pulls
+// it, which for these keys is worse than having no value at all.
+//
+// node_id is the exemplar: it names the beads STORE that grants leases here,
+// and the reclaim guard (issueops.ReclaimExpiredLeasesInTx) compares it
+// against each lease's granted_node. Commit "node_id: mini" and every replica
+// reads "mini", so every comparison matches and the guard is simultaneously
+// fully ARMED and fully INERT — laptop reaps mini's leases exactly as if they
+// were local, which is the precise hazard the guard exists to close, now
+// happening while the operator believes they are protected. Routing the write
+// to ~/.config/bd/config.yaml keeps it per-machine; viper still merges that
+// file, so config.NodeID() reads it back.
+var userGlobalExactKeys = map[string]bool{"node_id": true}
+
 func IsUserGlobalKey(key string) bool {
+	if userGlobalExactKeys[key] {
+		return true
+	}
 	for _, prefix := range userGlobalKeyPrefixes {
 		if strings.HasPrefix(key, prefix) {
 			return true
@@ -814,6 +847,22 @@ func validateYamlConfigValue(key, value string) error {
 		lower := strings.ToLower(value)
 		if lower != "server" && lower != "embedded" {
 			return fmt.Errorf("dolt.mode must be \"server\" or \"embedded\", got %q", value)
+		}
+	case "prime.max-memories":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("prime.max-memories must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+		if n < 0 {
+			return fmt.Errorf("prime.max-memories must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+	case "prime.max-memory-chars":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("prime.max-memory-chars must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+		if n < 0 {
+			return fmt.Errorf("prime.max-memory-chars must be a non-negative integer (0 = unlimited), got %q", value)
 		}
 	}
 	return nil

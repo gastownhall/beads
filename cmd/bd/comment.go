@@ -37,6 +37,10 @@ Examples:
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runCommentProxiedServer(cmd, rootCtx, args)
+		}
+
 		id := args[0]
 		textArgs := args[1:]
 

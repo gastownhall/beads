@@ -1,0 +1,120 @@
+# Proxied-server cmd test shard manifest.
+#
+# Format: <total_shards> <shard_number> <top_level_test_name>
+#
+# 15-shard split, bin-packed longest-processing-time-first by
+# estimated cost (bd-init count; per-init migration chains dominate).
+# Regenerate with scripts/ci/gen_proxied_shard_manifest.py after adding,
+# splitting, or reweighting TestProxiedServer* functions. Newly-added
+# tests not listed here hash-distribute via proxied-test-shard.sh.
+
+15 1 TestProxiedServerCount
+15 1 TestProxiedServerDelete
+15 1 TestProxiedServerDoltRemoteRemove
+15 1 TestProxiedServerMolCurrent
+15 1 TestProxiedServerPathHelpers
+15 1 TestProxiedServerTodo
+15 1 TestProxiedServerUpdateConcurrentAppendNotes
+
+15 2 TestProxiedServerCountIncludeInfra
+15 2 TestProxiedServerMolBurn
+15 2 TestProxiedServerPing
+15 2 TestProxiedServerUpdate
+15 2 TestProxiedServerUpdateConcurrentClaim
+15 2 TestProxiedServerUpdateIfGuards
+15 2 TestProxiedServerWispGC
+
+15 3 TestProxiedServerBlocked
+15 3 TestProxiedServerChildren
+15 3 TestProxiedServerDeferUndefer
+15 3 TestProxiedServerMolSquash
+15 3 TestProxiedServerPour
+15 3 TestProxiedServerPriority
+15 3 TestProxiedServerUpdate2
+15 3 TestProxiedServerUpdateConcurrentMetadata
+
+15 4 TestProxiedServerClose2
+15 4 TestProxiedServerDeleteConcurrent
+15 4 TestProxiedServerDuplicates
+15 4 TestProxiedServerMolBond
+15 4 TestProxiedServerQuery
+15 4 TestProxiedServerWispCreate
+
+15 5 TestProxiedServerCreate2
+15 5 TestProxiedServerDepConcurrent
+15 5 TestProxiedServerFindDuplicates
+15 5 TestProxiedServerMolReadyGated
+15 5 TestProxiedServerReadyClaimConcurrent
+15 5 TestProxiedServerWispList
+
+15 6 TestProxiedServerAssign
+15 6 TestProxiedServerCleanDatabases
+15 6 TestProxiedServerEdit
+15 6 TestProxiedServerLink
+15 6 TestProxiedServerReady2
+15 6 TestProxiedServerReadyConcurrent
+15 6 TestProxiedServerState
+
+15 7 TestProxiedServerClose
+15 7 TestProxiedServerCloseConcurrent
+15 7 TestProxiedServerExternalCreate
+15 7 TestProxiedServerMolStale
+15 7 TestProxiedServerReadyWisp
+15 7 TestProxiedServerReclaim
+
+15 8 TestProxiedServerCreate
+15 8 TestProxiedServerGC
+15 8 TestProxiedServerGateCheck
+15 8 TestProxiedServerMolLastActivity
+15 8 TestProxiedServerQuick
+15 8 TestProxiedServerReopenConcurrent
+
+15 9 TestProxiedServerDep2
+15 9 TestProxiedServerGraph
+15 9 TestProxiedServerMolProgress
+15 9 TestProxiedServerPrune
+15 9 TestProxiedServerSQL
+15 9 TestProxiedServerStatus
+
+15 10 TestProxiedServerCompactDolt
+15 10 TestProxiedServerConfigSetMany
+15 10 TestProxiedServerHistory
+15 10 TestProxiedServerLabel
+15 10 TestProxiedServerList
+15 10 TestProxiedServerSQLDatabaseFlag
+15 10 TestProxiedServerUpdateWisp
+
+15 11 TestProxiedServerCompactHistory
+15 11 TestProxiedServerDeleteWisp
+15 11 TestProxiedServerEpic
+15 11 TestProxiedServerInfo
+15 11 TestProxiedServerMolDistill
+15 11 TestProxiedServerReady
+15 11 TestProxiedServerSetState
+
+15 12 TestProxiedServerDep
+15 12 TestProxiedServerLint
+15 12 TestProxiedServerShow3
+15 12 TestProxiedServerStale
+15 12 TestProxiedServerTag
+
+15 13 TestProxiedServerConfig
+15 13 TestProxiedServerConfigConcurrent
+15 13 TestProxiedServerGateList
+15 13 TestProxiedServerMultiStatementSQL
+15 13 TestProxiedServerReopen
+15 13 TestProxiedServerStatuses
+
+15 14 TestProxiedServerComment
+15 14 TestProxiedServerContext
+15 14 TestProxiedServerNote
+15 14 TestProxiedServerSearch
+15 14 TestProxiedServerShow
+15 14 TestProxiedServerTypes
+
+15 15 TestProxiedServerMolShow
+15 15 TestProxiedServerOrphans
+15 15 TestProxiedServerShow2
+15 15 TestProxiedServerUnclaim
+15 15 TestProxiedServerUpdate3
+15 15 TestProxiedServerUpdateHooks

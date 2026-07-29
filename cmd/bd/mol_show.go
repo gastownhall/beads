@@ -39,6 +39,10 @@ Example:
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runMolShowProxiedServer(rootCtx, args[0])
+		}
+
 		ctx := rootCtx
 
 		if store == nil {

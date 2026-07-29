@@ -95,14 +95,117 @@ func TestMigrateUpWithLockUsesDatabaseScopedLockOnly(t *testing.T) {
 	}
 }
 
+// TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded is the regression guard for
+// out-of-band-materialized databases: one whose migration cursors arrived
+// at-latest WITHOUT executing the seeding migrations (out-of-band table
+// copy/rename) reports no migration work, but MigrateUp must still re-assert
+// the full canonical dolt_ignore pattern set before the short-circuit, or the
+// copied database is never healed (1 pattern instead of 5, wisp churn in
+// dolt_status, dirty-gate block on subsequent migrations).
+func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	expectIgnorePatternSeed(mock)
+	// migrationWorkNeeded: both cursors at latest, both content_hash columns
+	// present, no custom backfill pending -> no work, MigrateUp short-circuits.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectContentHashColumnExists(mock)
+	expectContentHashColumnExists(mock)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+	// The seed inserted rows and no migration pass follows to commit them, so
+	// MigrateUp must commit the heal itself, scoped and labeled.
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
+
+	applied, err := MigrateUp(context.Background(), db)
+	if err != nil {
+		t.Fatalf("MigrateUp() error = %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (ignore-pattern seed must run before the no-work short-circuit and be committed when it changed rows): %v", err)
+	}
+}
+
+// TestMigrateUpSkipsSeedCommitWhenNothingChanged is the negative counterpart:
+// on a healthy database every INSERT IGNORE is a no-op (0 rows affected), so
+// the no-work short-circuit must NOT stage or commit dolt_ignore — sqlmock
+// fails the test on any unexpected DOLT_ADD/DOLT_COMMIT call.
+func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	expectIgnorePatternSeedNoop(mock)
+	// migrationWorkNeeded: no work, MigrateUp short-circuits.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectContentHashColumnExists(mock)
+	expectContentHashColumnExists(mock)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
+	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
+
+	applied, err := MigrateUp(context.Background(), db)
+	if err != nil {
+		t.Fatalf("MigrateUp() error = %v", err)
+	}
+	if applied != 0 {
+		t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations (no-op seed must not trigger a scoped commit): %v", err)
+	}
+}
+
+// expectIgnorePatternSeed mocks the unconditional dolt_ignore pattern seed
+// MigrateUp runs before anything else, with every pattern actually inserted
+// (RowsAffected=1: an under-seeded database).
+func expectIgnorePatternSeed(mock sqlmock.Sqlmock) {
+	for _, pattern := range doltIgnorePatterns {
+		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+			WithArgs(pattern).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+}
+
+// expectIgnorePatternSeedNoop mocks the seed on a healthy database: every
+// INSERT IGNORE hits an existing row (RowsAffected=0), nothing changes.
+func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock) {
+	for _, pattern := range doltIgnorePatterns {
+		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+			WithArgs(pattern).
+			WillReturnResult(sqlmock.NewResult(0, 0))
+	}
+}
+
 func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	t.Helper()
 
 	latest := LatestVersion()
 	latestIgnored := LatestIgnoredVersion()
 
+	expectIgnorePatternSeed(mock)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	expectDoltStatusRows(mock)
+	// The seed changed rows (expectIgnorePatternSeed reports RowsAffected=1),
+	// so MigrateUp commits it scoped+labeled before the pass runs (#4566: the
+	// seed must not ride the per-step pass commits).
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 	expectDoltStatusRows(mock)
 	// MigrateUp probes the aux-rekey crash sentinel (bd-578h9.16); this
 	// mocked world has no local_metadata table, so no crashed pass.
@@ -128,11 +231,23 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 			WithArgs("wisp_dependencies").
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	}
+	// Per-step commit (#4566) snapshots the working set before the migration
+	// runs so it can force-stage only the tables this step newly dirties.
+	expectDoltStatusRows(mock)
 	mock.ExpectExec("(?s).*").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO schema_migrations (version, content_hash) VALUES (?, ?)")).
 		WithArgs(latest, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
+	// Per-step commit (#4566): re-read the working set (no table newly dirtied
+	// in this mocked world), force-stage the cursor table, and commit the step.
+	expectDoltStatusRows(mock)
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('-f', ?)")).
+		WithArgs("schema_migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
+		WithArgs(sqlmock.AnyArg()).
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
 	// rekeyDependencyIDs probes whether each edge table has an id column; this
@@ -143,8 +258,6 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	// rekeyAuxRowIDs reads the ignored cursor to see whether its clone-local
 	// marker is pending; at latest it is not, so the re-key no-ops.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
-	mock.ExpectExec(regexp.QuoteMeta("REPLACE INTO dolt_ignore VALUES ('ignored_schema_migrations', true)")).
-		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec("(?s)^CREATE TABLE IF NOT EXISTS ignored_schema_migrations").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectContentHashColumnExists(mock)
@@ -153,11 +266,13 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	expectDoltStatusRows(mock)
 	mock.ExpectQuery("(?s)SELECT t\\.TABLE_NAME\\s+FROM INFORMATION_SCHEMA\\.TABLES t").
 		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).AddRow("schema_migrations"))
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('-f', ?)")).
+	// DOLT_ADD and DOLT_COMMIT run through drainCall (QueryContext) so their
+	// proc result sets are consumed on the pinned conn; mock them as queries.
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('-f', ?)")).
 		WithArgs("schema_migrations").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: apply migrations')")).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: apply migrations')")).
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 }
 
 // expectColumnExists mocks the INFORMATION_SCHEMA.COLUMNS probe still used by
@@ -188,4 +303,125 @@ func expectScalar(mock sqlmock.Sqlmock, query, column string, value any) {
 func expectDoltStatusRows(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
 		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
+}
+
+// expectDirtyGuardRefusal mocks a MigrateUp invocation that walks up to the
+// #4566 pre-flight guard and gets refused: the cursor is one migration behind,
+// `issues` is dirty in the working set, and the pending (latest) migration
+// touches `issues`. This is the interrupted-fresh-bootstrap shape from
+// gastownhall/beads#5012 — a previous attempt's step debris, read by a retry.
+// It relies on the latest migration touching `issues`; if a future latest
+// migration stops doing so, sqlmock will fail loudly on the unexpected query
+// flow and this helper should dirty a table that migration does touch.
+func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
+	t.Helper()
+
+	latest := LatestVersion()
+
+	expectIgnorePatternSeedNoop(mock)
+	// migrationWorkNeeded: main cursor behind -> work needed (short-circuits).
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
+	// dirtyBeforeAll: `issues` dirty (working set only, not staged).
+	expectDoltStatusDirtyIssues(mock)
+	// Nothing staged -> no unstage exec; seed was a no-op -> no seed commit.
+	// committableDirtyTables re-reads dolt_status (ignored tables excluded).
+	expectDoltStatusDirtyIssues(mock)
+	// auxRekeyResumePending: no local_metadata table, no crashed rekey pass.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+	// pendingMigrationDirtyTables: cursor read, then the pending latest
+	// migration's SQL touches `issues` -> DirtyTablesError.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
+}
+
+func expectDoltStatusDirtyIssues(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
+		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}).AddRow("issues", false))
+}
+
+// TestMigrateUpWithLockDirtyGuardStaysFatalWithoutHeal pins the default
+// behavior: without WithFreshBootstrapHeal, the #4566 guard refusal surfaces
+// as *DirtyTablesError and no DOLT_RESET runs (sqlmock's ordered expectations
+// fail the test on any unexpected reset call).
+func TestMigrateUpWithLockDirtyGuardStaysFatalWithoutHeal(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectDirtyGuardRefusal(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	if applied != 0 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 0", applied)
+	}
+	var dirtyErr *DirtyTablesError
+	if !errors.As(err, &dirtyErr) {
+		t.Fatalf("MigrateUpWithLock() error = %v, want *DirtyTablesError", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestMigrateUpWithLockFreshBootstrapHealResetsAndRetries is the unit-level
+// regression for gastownhall/beads#5012: with WithFreshBootstrapHeal (the
+// caller created the database within this init), a #4566 guard refusal is
+// healed under the held migration lock — DOLT_RESET('--hard') discards the
+// interrupted bootstrap's working-set debris and the pass re-runs to
+// completion on the same session.
+func TestMigrateUpWithLockFreshBootstrapHealResetsAndRetries(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	// First MigrateUp: refused by the dirty guard.
+	expectDirtyGuardRefusal(t, mock)
+	// Heal: discard the bootstrap debris on the same locked session.
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET('--hard')")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	// Second MigrateUp: clean working set, one pending migration applies.
+	expectOnePendingMigration(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb", WithFreshBootstrapHeal())
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 1", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
 }

@@ -19,17 +19,17 @@ jobs:
     name: Build Artifacts
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
       - name: Run policy checks
         run: make ci-pr-policy
@@ -67,12 +67,12 @@ jobs:
 
   # Fast check: every `go build|test|run|generate|install` invocation in
   # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
-  # regressions from re-entering the build (see docs/ICU-POLICY.md).
+  # regressions from re-entering the build (see engdocs/ICU-POLICY.md).
   check-build-tags:
     name: Check build-tag policy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - run: ./scripts/check-build-tags.sh
       - run: ./scripts/check-go-install-guidance.sh
 
@@ -87,10 +87,10 @@ jobs:
     name: Check cmd/bd pure-Go tests compile (CGO_ENABLED=0)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -117,12 +117,32 @@ jobs:
         run: |
           go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir)' ./cmd/bd
 
+  # Destructive worktree removal depends on native Windows path identity.
+  # This focused process suite requires NTFS per-directory case sensitivity
+  # and fails (rather than skips) when the runner cannot provide it.
+  worktree-remove-windows:
+    name: Worktree remove boundary (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Run native Windows worktree removal boundary tests
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -count=1 -run '^TestWorktreeRemove' ./cmd/bd
+
   # Fast check to ensure all version files are in sync
   check-version-consistency:
     name: Check version consistency
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Check all versions match
         run: ./scripts/check-versions.sh
@@ -136,7 +156,7 @@ jobs:
     name: Check migration hygiene
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           fetch-depth: 0
 
@@ -150,14 +170,14 @@ jobs:
     name: Check doc flags freshness
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           # Full history so check-cli-docs-drift.sh can regenerate docs at the
           # merge-base and only fail PRs for drift they actually introduced.
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -173,7 +193,9 @@ jobs:
 
       # When the drift check fails, it writes the exact regenerated-docs fix
       # (produced with CI's canonical build) so contributors can apply it with
-      # `git apply` instead of reproducing CI's environment locally.
+      # `git apply` instead of reproducing CI's environment locally. The
+      # docs-autofix.yml workflow_run job consumes this same artifact to push
+      # the fix to same-repo PR branches automatically.
       - name: Upload docs fix patch
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -182,13 +204,52 @@ jobs:
           path: ${{ runner.temp }}/cli-docs-freshness.patch
           if-no-files-found: ignore
 
+  check-doc-freshness-platforms:
+    name: Check doc freshness (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Exercise native date and Bash process boundary
+        run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestDocFreshness' ./scripts
+
+  pr-preflight-platforms:
+    name: PR preflight process (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Exercise the real Bash process boundary
+        shell: bash
+        run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestPRPreflight' ./scripts
+
   # Fast check to catch accidental .beads/issues.jsonl changes from contributors
   check-no-beads-changes:
     name: Check for .beads changes
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           fetch-depth: 0
 
@@ -214,10 +275,9 @@ jobs:
     outputs:
       mcp_package: ${{ steps.detect.outputs.mcp_package }}
       npm_package: ${{ steps.detect.outputs.npm_package }}
-      website: ${{ steps.detect.outputs.website }}
       reason: ${{ steps.detect.outputs.reason }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           fetch-depth: 0
 
@@ -243,12 +303,12 @@ jobs:
             echo "MCP package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
           fi
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         if: steps.applicability.outputs.run == 'true'
 
       - name: Set up Python
         if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14'
 
@@ -290,12 +350,12 @@ jobs:
             echo "npm package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
           fi
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         if: steps.applicability.outputs.run == 'true'
 
       - name: Set up Node.js
         if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: '24'
 
@@ -320,44 +380,17 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
         run: make ci-package-npm
 
-  package-website:
-    name: Package Gate (website)
-    runs-on: ubuntu-latest
-    needs: detect-package-gates
-    steps:
-      - name: Check applicability
-        id: applicability
-        run: |
-          echo "run=${{ needs.detect-package-gates.outputs.website }}" >> "$GITHUB_OUTPUT"
-          if [[ "${{ needs.detect-package-gates.outputs.website }}" != "true" ]]; then
-            echo "website package gate is not applicable: ${{ needs.detect-package-gates.outputs.reason }}"
-          fi
-
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
-        if: steps.applicability.outputs.run == 'true'
-
-      - name: Set up Node.js
-        if: steps.applicability.outputs.run == 'true'
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
-        with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: website/package-lock.json
-
-      - name: Run website package gate
-        if: steps.applicability.outputs.run == 'true'
-        run: make ci-website
 
   pr-policy-wrapper:
     name: PR Policy (wrapper timing)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -369,10 +402,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-artifacts
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -408,15 +441,15 @@ jobs:
     name: PR Lint (wrapper timing)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
       - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.9.0
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
       - name: Run PR lint wrapper
         run: make ci-pr-lint
@@ -432,10 +465,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: build-artifacts
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -455,7 +488,7 @@ jobs:
       - name: Pull Dolt sql-server image
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
         # Without this, RequireDoltContainer reports doltNoImage and TestDomainDB skips.
-        run: docker pull dolthub/dolt-sql-server:2.1.0
+        run: docker pull dolthub/dolt-sql-server:2.2.0
 
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -475,19 +508,31 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
         run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
 
-  # Producer-side guard for the Beads<->Gas City contract corpus. Regenerates
-  # the canonicalized golden corpus from this branch's bd and byte-compares it
-  # to the committed testdata/corpus/; an unreviewed wire change is a hard
-  # failure (run `make corpus-regen`). The double-run test proves determinism.
+  # Producer-side guard for the Beads<->consumer CLI contract. Runs the whole
+  # cmd/bd/protocol package: the golden corpus (regenerated from this branch's
+  # bd and byte-compared to the committed testdata/corpus/, so an unreviewed
+  # wire change is a hard failure — run `make corpus-regen`), the double-run
+  # determinism check, and the TestProtocol_/TestJSONContract_ behavioral
+  # conformance suite that pins the CLI's JSON payloads and semantics.
+  #
+  # Run the PACKAGE, never a -run subset: a filter here is what let the
+  # conformance tests sit red on main for ~3 months while every CI run was
+  # green (they matched no job's -run, and every broad ./... job skips them
+  # for want of a Dolt store). Package scope means a newly added protocol test
+  # is gated the moment it lands.
+  #
   # Needs the Dolt sql-server image (the protocol harness spins a container).
+  # ~10 min: each test builds an isolated Dolt-backed workspace. If that ever
+  # becomes unacceptable on PRs, shard this job by an exhaustive `go test
+  # -list` partition — do not reintroduce a hand-written -run regex.
   contract-corpus:
-    name: Contract corpus (golden + determinism)
+    name: Contract corpus (golden + determinism + conformance)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -503,24 +548,28 @@ jobs:
 
       - name: Pull Dolt sql-server image
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: docker pull dolthub/dolt-sql-server:2.1.0
+        run: docker pull dolthub/dolt-sql-server:2.2.0
 
-      - name: Corpus golden + determinism
+      - name: Protocol conformance + corpus golden + determinism
         # Require a live Dolt store here: this is the gate that must exercise the
-        # golden + double-run checks, so a failed container is a hard failure,
-        # not a silent skip (see requireDoltStore in cmd/bd/protocol tests).
+        # conformance, golden and double-run checks, so a failed container is a
+        # hard failure, not a silent skip (see requireDoltStore in the
+        # cmd/bd/protocol tests).
+        #
+        # -timeout is explicit because the package runs well past `go test`'s
+        # 10m default; without it a slow runner reports a panic, not a verdict.
         env:
           BEADS_PROTOCOL_REQUIRE_DOLT: "1"
-        run: go test -tags gms_pure_go -count=1 -run 'TestCorpusGolden|TestCanonicalize|TestCorpusDoubleRunByteIdentical|TestCheckCaptureExit' ./cmd/bd/protocol
+        run: go test -tags gms_pure_go -count=1 -timeout 30m ./cmd/bd/protocol
 
   fmt-check:
     name: Check formatting
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -531,18 +580,219 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        env:
+          GOWORK: "off"
         with:
-          version: latest
-          args: --timeout=5m --build-tags=gms_pure_go
+          version: v2.10.1
+          args: --config=.golangci.yml --modules-download-mode=readonly --timeout=5m --build-tags=gms_pure_go
+
+  windows-make-shell:
+    name: Windows Make shell (${{ matrix.host }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        host:
+          - native
+          - msys2
+          - cygwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Install native GNU Make
+        if: matrix.host == 'native'
+        shell: pwsh
+        run: choco install make --version=4.4.1 --yes --no-progress
+
+      - name: Set up MSYS2 GNU Make
+        if: matrix.host == 'msys2'
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0
+        with:
+          msystem: MSYS
+          install: git make
+          path-type: minimal
+
+      - name: Set up Cygwin GNU Make
+        if: matrix.host == 'cygwin'
+        id: cygwin
+        # cygwin-install-action downloads setup-x86_64.exe from cygwin.com. That
+        # download times out often enough to red the required check for a reason
+        # unrelated to the change under test. Treat a setup failure as a
+        # (non-blocking) warning: the smoke step below is gated on this step
+        # succeeding, so a genuine Cygwin Make regression still fails loudly,
+        # while a flaky installer download only skips the leg with a warning.
+        continue-on-error: true
+        uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6
+        with:
+          packages: git make
+          add-to-path: 'false'
+
+      - name: Warn when Cygwin setup was skipped by a download failure
+        if: matrix.host == 'cygwin' && steps.cygwin.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::warning title=Cygwin Make-shell leg skipped::cygwin-install-action could not download the Cygwin installer (network flake); skipping the Cygwin-hosted Make smoke test. This is an infrastructure failure, not a code failure."
+
+      - name: Exercise native Windows Make
+        if: matrix.host == 'native'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $make = (Get-Command make.exe -ErrorAction Stop).Source
+          $hostOutput = & $make --no-print-directory -f NUL --eval '$(info MAKE_HOST=$(MAKE_HOST))' --eval 'noop:;' noop
+          $makeHost = (($hostOutput | Where-Object { $_ -like 'MAKE_HOST=*' }) -replace '^MAKE_HOST=', '').Trim()
+          if ($LASTEXITCODE -ne 0 -or ($makeHost -ne 'Windows32' -and $makeHost -notmatch '-mingw32$')) {
+            throw "Expected native Windows GNU Make, found '$makeHost' at '$make'"
+          }
+
+          $git = (Get-Command git.exe -ErrorAction Stop).Source
+          if ($git -notmatch ' ') {
+            throw "Expected the hosted Git for Windows path to contain a space, found '$git'"
+          }
+
+          $profile = Join-Path $env:RUNNER_TEMP 'profile with spaces'
+          New-Item -ItemType Directory -Force -Path $profile | Out-Null
+          $poison = Join-Path $profile 'poison bash env.sh'
+          Set-Content -LiteralPath $poison -Encoding utf8 -Value 'exit 97'
+
+          $env:USERPROFILE = $profile
+          $env:BASH_ENV = $poison
+          $env:BASHOPTS = 'failglob'
+          $env:SHELLOPTS = 'nounset'
+          $env:GIT_EXEC_PATH = Join-Path $profile 'missing git exec path'
+          $env:PATH = "$(Split-Path $git);$env:SystemRoot\System32"
+
+          & $make --no-print-directory help | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Native Make failed while parsing or running help'
+          }
+
+          @'
+          include Makefile
+          .RECIPEPREFIX := >
+          .PHONY: windows-make-shell-smoke
+          windows-make-shell-smoke:
+          >@case "$(SHELL)" in */bin/bash.exe) ;; *) exit 1;; esac
+          >@test -n "$$BASH_VERSION"
+          >@test "$$(command -v sed)" = /usr/bin/sed
+          >@test "$$(command -v env)" = /usr/bin/env
+          >@test -z "$${BASH_ENV+x}"
+          >@case "$$-" in *u*) exit 1;; esac
+          >@shopt -q failglob && exit 1 || :
+          >@test -z "$${GIT_EXEC_PATH+x}"
+          >@env printf '%s\n' 'native Windows Make shell smoke passed'
+          '@ | & $make --no-print-directory -f - windows-make-shell-smoke
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Native Make shell smoke failed'
+          }
+
+      - name: Exercise MSYS2-hosted Make
+        if: matrix.host == 'msys2'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          make_host="$(
+            make --no-print-directory -f /dev/null \
+              --eval '$(info $(MAKE_HOST))' \
+              --eval 'noop:;' noop |
+              sed -n '1p'
+          )"
+          case "$make_host" in
+            *-msys|*-cygwin) ;;
+            *) echo "Expected a POSIX-hosted MSYS2 GNU Make, found '$make_host'" >&2; exit 1 ;;
+          esac
+
+          profile="$(cygpath -u "$RUNNER_TEMP")/profile with spaces"
+          mkdir -p "$profile"
+          bash_env="$profile/compat bash env.sh"
+          printf '%s\n' 'exit 97' > "$bash_env"
+          export BASH_ENV="$bash_env"
+          export GIT_EXEC_PATH="$profile/missing git exec path"
+          export PATH=/usr/bin
+
+          make --no-print-directory help >/dev/null
+          cat > "$profile/smoke.mk" <<'MAKE_EOF'
+          include Makefile
+          .RECIPEPREFIX := >
+          .PHONY: windows-make-shell-smoke
+          windows-make-shell-smoke:
+          >@case "$(SHELL)" in */sh) ;; *) exit 1;; esac
+          >@test -n "$$BASH_VERSION"
+          >@test "$$(command -v sed)" = /usr/bin/sed
+          >@test "$$(command -v env)" = /usr/bin/env
+          >@test -f "$$BASH_ENV"
+          >@test -n "$$GIT_EXEC_PATH"
+          >@case "$$PATH" in *';'*) exit 1;; esac
+          >@env printf '%s\n' 'MSYS2 Make shell smoke passed'
+          MAKE_EOF
+          make --no-print-directory -f "$profile/smoke.mk" windows-make-shell-smoke
+
+      - name: Exercise Cygwin-hosted Make
+        # Only run when the Cygwin toolchain actually installed; a skipped install
+        # (download flake) leaves this leg un-exercised rather than failing on a
+        # missing bash. A real install success followed by a Make regression here
+        # still fails the job as before.
+        if: matrix.host == 'cygwin' && steps.cygwin.outcome == 'success'
+        shell: pwsh
+        env:
+          CYGWIN_ROOT: ${{ steps.cygwin.outputs.root }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bash = Join-Path $env:CYGWIN_ROOT 'bin\bash.exe'
+          $script = @'
+          set -euo pipefail
+          export PATH=/usr/bin
+          cd "$(cygpath -u "$GITHUB_WORKSPACE")"
+
+          make_host="$(
+            make --no-print-directory -f /dev/null \
+              --eval '$(info $(MAKE_HOST))' \
+              --eval 'noop:;' noop |
+              sed -n '1p'
+          )"
+          case "$make_host" in
+            *-cygwin) ;;
+            *) echo "Expected Cygwin GNU Make, found '$make_host'" >&2; exit 1 ;;
+          esac
+
+          profile="$(mktemp -d)"
+          trap 'rm -rf -- "$profile"' EXIT
+          bash_env="$profile/cygwin bash env.sh"
+          printf '%s\n' 'exit 97' > "$bash_env"
+          export BASH_ENV="$bash_env"
+          export GIT_EXEC_PATH="$profile/missing git exec path"
+
+          make --no-print-directory help >/dev/null
+          cat > "$profile/smoke.mk" <<'MAKE_EOF'
+          include Makefile
+          .RECIPEPREFIX := >
+          .PHONY: windows-make-shell-smoke
+          windows-make-shell-smoke:
+          >@case "$(SHELL)" in */sh) ;; *) exit 1;; esac
+          >@test -n "$$BASH_VERSION"
+          >@test "$$(command -v sed)" = /usr/bin/sed
+          >@test "$$(command -v env)" = /usr/bin/env
+          >@test -f "$$BASH_ENV"
+          >@test -n "$$GIT_EXEC_PATH"
+          >@case "$$PATH" in *';'*) exit 1;; esac
+          >@env printf '%s\n' 'Cygwin Make shell smoke passed'
+          MAKE_EOF
+          make --no-print-directory -f "$profile/smoke.mk" windows-make-shell-smoke
+          '@
+          $script = $script.Replace("`r`n", "`n")
+          & $bash --noprofile --norc -c $script
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Cygwin Make shell smoke failed'
+          }
 
   ci-gate:
     name: CI Gate / Required
@@ -551,14 +801,16 @@ jobs:
       - build-artifacts
       - check-build-tags
       - check-cmd-bd-puregeo-tests
+      - worktree-remove-windows
       - check-version-consistency
       - check-migration-hygiene
       - check-doc-flags
+      - check-doc-freshness-platforms
+      - pr-preflight-platforms
       - check-no-beads-changes
       - detect-package-gates
       - package-mcp
       - package-npm
-      - package-website
       - pr-policy-wrapper
       - pr-core-wrapper
       - pr-lint-wrapper
@@ -566,9 +818,10 @@ jobs:
       - contract-corpus
       - fmt-check
       - lint
+      - windows-make-shell
     if: ${{ always() }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Evaluate CI gate
         env:
@@ -577,14 +830,16 @@ jobs:
             BUILD_ARTIFACTS
             CHECK_BUILD_TAGS
             CHECK_CMD_BD_PUREGEO_TESTS
+            WORKTREE_REMOVE_WINDOWS
             CHECK_VERSION_CONSISTENCY
             CHECK_MIGRATION_HYGIENE
             CHECK_DOC_FLAGS
+            CHECK_DOC_FRESHNESS_PLATFORMS
+            PR_PREFLIGHT_PLATFORMS
             CHECK_NO_BEADS_CHANGES
             DETECT_PACKAGE_GATES
             PACKAGE_MCP
             PACKAGE_NPM
-            PACKAGE_WEBSITE
             PR_POLICY_WRAPPER
             PR_CORE_WRAPPER
             PR_LINT_WRAPPER
@@ -592,17 +847,20 @@ jobs:
             CONTRACT_CORPUS
             FMT_CHECK
             LINT
+            WINDOWS_MAKE_SHELL
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
           CHECK_BUILD_TAGS: ${{ needs.check-build-tags.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
+          WORKTREE_REMOVE_WINDOWS: ${{ needs.worktree-remove-windows.result }}
           CHECK_VERSION_CONSISTENCY: ${{ needs.check-version-consistency.result }}
           CHECK_MIGRATION_HYGIENE: ${{ needs.check-migration-hygiene.result }}
           CHECK_DOC_FLAGS: ${{ needs.check-doc-flags.result }}
+          CHECK_DOC_FRESHNESS_PLATFORMS: ${{ needs.check-doc-freshness-platforms.result }}
+          PR_PREFLIGHT_PLATFORMS: ${{ needs.pr-preflight-platforms.result }}
           CHECK_NO_BEADS_CHANGES: ${{ needs.check-no-beads-changes.result }}
           DETECT_PACKAGE_GATES: ${{ needs.detect-package-gates.result }}
           PACKAGE_MCP: ${{ needs.package-mcp.result }}
           PACKAGE_NPM: ${{ needs.package-npm.result }}
-          PACKAGE_WEBSITE: ${{ needs.package-website.result }}
           PR_POLICY_WRAPPER: ${{ needs.pr-policy-wrapper.result }}
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
           PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
@@ -610,6 +868,7 @@ jobs:
           CONTRACT_CORPUS: ${{ needs.contract-corpus.result }}
           FMT_CHECK: ${{ needs.fmt-check.result }}
           LINT: ${{ needs.lint.result }}
+          WINDOWS_MAKE_SHELL: ${{ needs.windows-make-shell.result }}
         run: |
           skipped_ok=""
           if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then

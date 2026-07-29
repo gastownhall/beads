@@ -26,14 +26,18 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("undefer")
-
 		evt := metrics.NewCommandEvent("undefer")
 		defer func() {
 			if c := metrics.Global(); c != nil {
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		CheckReadonly("undefer")
+
+		if usesProxiedServer() {
+			return runUndeferProxiedServer(rootCtx, args)
+		}
 
 		ctx := rootCtx
 

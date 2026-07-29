@@ -48,6 +48,25 @@ func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 	cfg.AutoStart = resolveAutoStart(true, autoStartCfg, mode)
 }
 
+// requireDoltBackend keeps metadata-driven callers from bypassing the storage
+// factory and interpreting another backend's workspace as Dolt. Removed backend
+// identifiers deliberately remain recognizable in metadata so this check can fail
+// closed instead of opening a new, empty Dolt database.
+func requireDoltBackend(fileCfg *configfile.Config) error {
+	switch fileCfg.Backend {
+	case configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite:
+		return fmt.Errorf("configured storage backend %q is no longer supported and cannot be opened as Dolt: %s", fileCfg.Backend, configfile.RemovedBackendDetail(fileCfg.Backend))
+	}
+	if !configfile.IsSupportedBackend(fileCfg.Backend) {
+		return fmt.Errorf("configured storage backend %q in metadata.json is not recognized and cannot be opened as Dolt; %s", fileCfg.Backend, configfile.BackendNotOpenedGuarantee)
+	}
+	backend := fileCfg.GetBackend()
+	if backend != configfile.BackendDolt {
+		return fmt.Errorf("configured storage backend %q cannot be opened as Dolt", backend)
+	}
+	return nil
+}
+
 // NewFromConfig creates a DoltStore based on the metadata.json configuration.
 // beadsDir is the path to the .beads directory.
 func NewFromConfig(ctx context.Context, beadsDir string) (*DoltStore, error) {
@@ -66,6 +85,9 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
 	}
+	if err := requireDoltBackend(fileCfg); err != nil {
+		return nil, err
+	}
 
 	// Apply central server config as defaults for any server fields not
 	// set in the per-project metadata.json. This eliminates the need to
@@ -75,7 +97,9 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 	if cfg == nil {
 		cfg = &Config{}
 	}
-	applyResolvedConfig(beadsDir, fileCfg, cfg)
+	if err := applyResolvedConfig(ctx, beadsDir, fileCfg, cfg); err != nil {
+		return nil, err
+	}
 	ApplyCLIAutoStart(beadsDir, cfg)
 
 	return New(ctx, cfg)
@@ -91,6 +115,9 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	if fileCfg == nil {
 		fileCfg = configfile.DefaultConfig()
 	}
+	if err := requireDoltBackend(fileCfg); err != nil {
+		return nil, err
+	}
 
 	// Apply central server config as defaults for any server fields not
 	// set in the per-project metadata.json.
@@ -100,7 +127,9 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	if cfg == nil {
 		cfg = &Config{}
 	}
-	applyResolvedConfig(beadsDir, fileCfg, cfg)
+	if err := applyResolvedConfig(ctx, beadsDir, fileCfg, cfg); err != nil {
+		return nil, err
+	}
 
 	// Enable auto-start for standalone users (similar to main.go's auto-start
 	// handling), with additional support for BEADS_TEST_MODE and a config.yaml
@@ -193,8 +222,9 @@ func GetBackendFromConfig(beadsDir string) string {
 
 // applyResolvedConfig merges metadata.json-derived defaults into a store config.
 // Server connection fields are always populated because the storage layer is
-// server-backed even when older metadata.json files omit dolt_mode.
-func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Config) {
+// server-backed even when older metadata.json files omit dolt_mode. It returns an
+// error only when a configured server credential command fails (fail-closed).
+func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfile.Config, cfg *Config) error {
 	cfg.Path = fileCfg.DatabasePath(beadsDir)
 	if cfg.BeadsDir == "" {
 		cfg.BeadsDir = beadsDir
@@ -223,7 +253,22 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 		// falls back to 3307 which is wrong for standalone repos.
 		cfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 	}
-	if cfg.ServerUser == "" {
+	// Resolve the server-mode credential (the connection username). In server mode a
+	// configured credential command takes precedence over the static user; it fails
+	// closed (see ApplyGatewayCredential). The command runs only in server mode — an
+	// embedded store never presents a username, so a command exported in the environment
+	// must not run (or fail) an embedded open. The server-mode test mirrors main.go's
+	// (metadata dolt_mode=server, or shared-server via env/config.yaml) so both the CLI
+	// and library/doctor open paths agree on whether to run the command.
+	applied := false
+	if fileCfg.IsDoltServerMode() || doltserver.IsSharedServerMode() {
+		got, err := ApplyGatewayCredential(ctx, fileCfg, cfg)
+		if err != nil {
+			return fmt.Errorf("resolving dolt credential command: %w", err)
+		}
+		applied = got
+	}
+	if !applied && cfg.ServerUser == "" {
 		cfg.ServerUser = fileCfg.GetDoltServerUser()
 	}
 	// Populate password and TLS the same way the CLI CRUD path does. Without
@@ -255,6 +300,25 @@ func applyResolvedConfig(beadsDir string, fileCfg *configfile.Config, cfg *Confi
 			}
 		}
 	}
+
+	// Pool per-I/O deadlines: caller override > env var > config.yaml > default
+	// (10s, see buildServerDSN). The default fast-fail is right for healthy
+	// local servers; overloaded shared-server deployments raise it so ordinary
+	// queries stop dying with "i/o timeout" under load (bd-vz0y9).
+	if cfg.PoolReadTimeout == 0 {
+		cfg.PoolReadTimeout = timeoutFromEnv("BEADS_DOLT_POOL_READ_TIMEOUT", 0)
+	}
+	if cfg.PoolReadTimeout == 0 {
+		cfg.PoolReadTimeout = parseTimeout(config.GetString("dolt.pool-read-timeout"), 0)
+	}
+	if cfg.PoolWriteTimeout == 0 {
+		cfg.PoolWriteTimeout = timeoutFromEnv("BEADS_DOLT_POOL_WRITE_TIMEOUT", 0)
+	}
+	if cfg.PoolWriteTimeout == 0 {
+		cfg.PoolWriteTimeout = parseTimeout(config.GetString("dolt.pool-write-timeout"), 0)
+	}
+
+	return nil
 }
 
 // applyCentralConfigDefaults loads the central server config from

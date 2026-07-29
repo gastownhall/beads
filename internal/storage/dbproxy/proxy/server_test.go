@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/procid"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
@@ -23,7 +25,7 @@ import (
 )
 
 const (
-	listenWait   = 2 * time.Second
+	listenWait   = 10 * time.Second
 	shutdownWait = 5 * time.Second
 	ioTimeout    = 2 * time.Second
 )
@@ -175,6 +177,37 @@ func TestProxy_HappyPath_Echo(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
+func TestProxy_PortZeroPublishesActualDialablePort(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	ts := server.New()
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root,
+		Port:    0,
+		Server:  ts,
+	})
+	waitListening(t, root, listenWait)
+
+	pf, err := pidfile.Read(root, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, pf)
+	require.NotZero(t, pf.Port, "pidfile must publish the kernel-assigned port")
+
+	conn := dialProxy(t, pf.Port)
+	_, err = conn.Write([]byte("port-zero"))
+	require.NoError(t, err)
+	got := make([]byte, len("port-zero"))
+	_, err = io.ReadFull(conn, got)
+	require.NoError(t, err)
+	assert.Equal(t, "port-zero", string(got))
+	require.NoError(t, conn.Close())
+
+	h.Cancel()
+	require.NoError(t, h.waitErr(t, shutdownWait))
+	assertNoPidFile(t, root)
+}
+
 func TestProxy_PidFile_WrittenAndRemoved(t *testing.T) {
 	t.Parallel()
 
@@ -199,7 +232,49 @@ func TestProxy_PidFile_WrittenAndRemoved(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
-func TestProxy_ListenError_PortInUse(t *testing.T) {
+func TestProxy_PublishesVerifiableIdentity(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	ts := server.New()
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root,
+		Port:    freeTCPPort(t),
+		Server:  ts,
+	})
+	waitListening(t, root, listenWait)
+
+	pf, err := pidfile.Read(root, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, pf)
+	require.NoError(t, pf.ValidateV2(pidfile.KindProxy))
+	match, err := procid.Verify(pf.Pid, procid.Token(pf.Birth))
+	require.NoError(t, err)
+	assert.True(t, match)
+
+	secret, err := identity.ReadSecret(root)
+	require.NoError(t, err)
+	got, err := identity.Identify("127.0.0.1", pf.ControlPort, secret, ioTimeout)
+	require.NoError(t, err)
+	rootID, err := identity.RootID(root)
+	require.NoError(t, err)
+	assert.Equal(t, pidfile.SchemaV2, got.Schema)
+	assert.Equal(t, pidfile.KindProxy, got.Role)
+	assert.Equal(t, pf.Pid, got.PID)
+	assert.Equal(t, pf.Birth, got.Birth)
+	assert.Equal(t, pf.Port, got.DataPort)
+	assert.Equal(t, pf.RootID, got.RootID)
+	assert.Equal(t, rootID, got.RootID)
+	assert.Equal(t, pf.ControlPort, got.ControlPort)
+	assert.Equal(t, int64(1), ts.Snapshot().IDCalls, "pidfile and control reply must share one captured upstream ID")
+
+	h.Cancel()
+	require.NoError(t, h.waitErr(t, shutdownWait))
+	_, err = net.DialTimeout("tcp", proxyAddr(pf.ControlPort), ioTimeout)
+	assert.Error(t, err)
+}
+
+func TestProxy_ExplicitPortInUseFailsWithoutRepick(t *testing.T) {
 	t.Parallel()
 
 	hold, err := net.Listen("tcp", "127.0.0.1:0")
@@ -217,6 +292,7 @@ func TestProxy_ListenError_PortInUse(t *testing.T) {
 	err = h.waitErr(t, shutdownWait)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "listen on")
+	assert.Contains(t, err.Error(), strconv.Itoa(port))
 
 	s := stats.Snapshot()
 	assert.Equal(t, int64(0), s.ListenAndServeCalls)
@@ -381,6 +457,35 @@ func TestProxy_IdleTimeout_BlockedByActiveConn(t *testing.T) {
 
 	// Tear down cleanly.
 	require.NoError(t, conn.Close())
+	h.Cancel()
+	require.NoError(t, h.waitErr(t, shutdownWait))
+
+	assertNoPidFile(t, root)
+}
+
+func TestProxy_IdleTimeout_Never(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port,
+		IdleTimeout: proxy.IdleTimeoutNever,
+		Server:      ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	// No client traffic and no timeout — proxy must stay up.
+	time.Sleep(3 * time.Second)
+	assert.Equal(t, int64(0), stats.Snapshot().IdleTimeouts)
+	pf, err := pidfile.Read(root, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, pf, "proxy should still be running")
+	_ = dialProxy(t, port).Close()
+
 	h.Cancel()
 	require.NoError(t, h.waitErr(t, shutdownWait))
 

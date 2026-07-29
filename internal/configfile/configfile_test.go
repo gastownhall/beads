@@ -311,6 +311,9 @@ func TestDoltServerMode(t *testing.T) {
 	})
 
 	t.Run("GetDoltServerPort", func(t *testing.T) {
+		// Clear port env vars so the table-driven configs are the source of truth.
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
 		tests := []struct {
 			name string
 			cfg  *Config
@@ -626,23 +629,57 @@ func TestProxiedServerClientInfo_ResolvedPaths(t *testing.T) {
 	})
 }
 
-// TestGetBackendAlwaysDolt tests that GetBackend always returns "dolt".
-func TestGetBackendAlwaysDolt(t *testing.T) {
-	tests := []struct {
+// TestGetBackendAllowlist verifies the metadata-routing semantics: current backends
+// and removed-backend tombstones remain recognizable, while empty or unknown values
+// retain the historical Dolt fallback. Store selection rejects the tombstones before
+// it can open an empty Dolt database.
+func TestGetBackendAllowlist(t *testing.T) {
+	fallsBackToDolt := []struct {
 		name string
 		cfg  *Config
 	}{
 		{name: "explicit dolt", cfg: &Config{Backend: BackendDolt}},
 		{name: "empty backend", cfg: &Config{Backend: ""}},
 		{name: "legacy config", cfg: &Config{}},
-		{name: "stale sqlite value", cfg: &Config{Backend: "sqlite"}},
-		{name: "unknown backend", cfg: &Config{Backend: "postgres"}},
+		{name: "unknown backend", cfg: &Config{Backend: "mystery"}},
+	}
+	for _, tt := range fallsBackToDolt {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetBackend(); got != BackendDolt {
+				t.Errorf("GetBackend() = %q, want %q", got, BackendDolt)
+			}
+		})
+	}
+
+	honored := []string{BackendPostgres, BackendMySQL, BackendSQLite}
+	for _, backend := range honored {
+		t.Run(backend+" honored", func(t *testing.T) {
+			cfg := &Config{Backend: backend}
+			if got := cfg.GetBackend(); got != backend {
+				t.Errorf("GetBackend() = %q, want %q", got, backend)
+			}
+		})
+	}
+}
+
+func TestSupportedBackendAllowlist(t *testing.T) {
+	tests := []struct {
+		name      string
+		backend   string
+		supported bool
+	}{
+		{name: "implicit dolt", backend: "", supported: true},
+		{name: "dolt", backend: BackendDolt, supported: true},
+		{name: "sqlite", backend: BackendSQLite, supported: false},
+		{name: "postgres", backend: BackendPostgres, supported: false},
+		{name: "mysql", backend: BackendMySQL, supported: false},
+		{name: "unknown", backend: "mystery", supported: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.cfg.GetBackend(); got != BackendDolt {
-				t.Errorf("GetBackend() = %q, want %q", got, BackendDolt)
+			if got := IsSupportedBackend(tt.backend); got != tt.supported {
+				t.Fatalf("IsSupportedBackend(%q) = %v, want %v", tt.backend, got, tt.supported)
 			}
 		})
 	}
@@ -705,6 +742,9 @@ func TestGetCapabilities(t *testing.T) {
 
 // TestDoltServerModeRoundtrip tests that server mode config survives save/load
 func TestDoltServerModeRoundtrip(t *testing.T) {
+	// Clear port env vars so saved/loaded port comes from config, not ambient env.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0750); err != nil {

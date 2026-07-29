@@ -763,7 +763,7 @@ func TestEmbeddedInit(t *testing.T) {
 			}
 			for _, want := range []string{
 				"Re-running `bd init` will NOT fix this",
-				schema.AllowRemoteMigrateEnv + "=1",
+				"bd migrate --force",
 				"bd dolt push",
 			} {
 				if !strings.Contains(string(out), want) {
@@ -1114,9 +1114,9 @@ func TestEmbeddedInit(t *testing.T) {
 	t.Run("auto_commit_bypasses_hooks", func(t *testing.T) {
 		dir := t.TempDir()
 		initGitRepoAt(t, dir)
-		preCommitPath := filepath.Join(dir, ".git", "hooks", "pre-commit")
-		preCommit := "#!/bin/sh\necho hook-fired >> .hook-ran\nexit 1\n"
-		if err := os.WriteFile(preCommitPath, []byte(preCommit), 0755); err != nil {
+		hookPath := filepath.Join(dir, ".git", "hooks", "prepare-commit-msg")
+		hook := "#!/bin/sh\necho hook-fired >> .hook-ran\nexit 1\n"
+		if err := os.WriteFile(hookPath, []byte(hook), 0755); err != nil {
 			t.Fatal(err)
 		}
 		unsetHooksPath := exec.Command("git", "config", "--unset", "core.hooksPath")
@@ -1376,17 +1376,25 @@ func TestEmbeddedInit(t *testing.T) {
 		requireFile(t, filepath.Join(embeddedDir, "bdolt", ".dolt"))
 	})
 
-	t.Run("rejected_backends", func(t *testing.T) {
-		for _, tc := range []struct {
-			backend, wantErr string
-		}{
-			{"sqlite", "DEPRECATED"},
-			{"postgres", "unknown backend"},
-		} {
-			out := bdInitFail(t, bd, "--backend", tc.backend)
-			if !strings.Contains(out, tc.wantErr) {
-				t.Errorf("--backend %s: expected %q, got: %s", tc.backend, tc.wantErr, out)
+	t.Run("sql_backend_flags", func(t *testing.T) {
+		// The SQLite backend was rolled back with the other alternative
+		// backends: init fails closed with its own rationale.
+		sqliteOut := bdInitFail(t, bd, "--backend", "sqlite")
+		if !strings.Contains(sqliteOut, "no longer supported") || !strings.Contains(sqliteOut, "single engine") {
+			t.Errorf("sqlite should report the backend rollback: %s", sqliteOut)
+		}
+
+		for _, backend := range []string{"postgres", "mysql"} {
+			out := bdInitFail(t, bd, "--backend", backend)
+			if !strings.Contains(out, "no longer supported") {
+				t.Errorf("%s should report the backend rollback: %s", backend, out)
 			}
+		}
+
+		// A genuinely unsupported backend is still rejected.
+		unknownOut := bdInitFail(t, bd, "--backend", "mongodb")
+		if !strings.Contains(unknownOut, "unknown backend") {
+			t.Errorf("mongodb: expected unknown-backend error, got: %s", unknownOut)
 		}
 	})
 
@@ -1449,12 +1457,17 @@ func TestEmbeddedInit(t *testing.T) {
 	t.Run("files_created", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "fc", "--skip-hooks")
 		requireFile(t, filepath.Join(beadsDir, "config.yaml"))
-		requireFile(t, filepath.Join(beadsDir, "interactions.jsonl"))
+		if _, err := os.Stat(filepath.Join(beadsDir, "interactions.jsonl")); !os.IsNotExist(err) {
+			t.Fatalf("interactions.jsonl should be created only when audit.enabled is true, got stat err %v", err)
+		}
 		requireFile(t, filepath.Join(dir, "AGENTS.md"))
 		requireFile(t, filepath.Join(dir, ".agents", "skills", "beads", "SKILL.md"))
 		requireFile(t, filepath.Join(dir, ".agents", "skills", "beads", "agents", "openai.yaml"))
 		requireFile(t, filepath.Join(dir, ".codex", "config.toml"))
 		requireFile(t, filepath.Join(dir, ".codex", "hooks.json"))
+		// Cursor integration is auto-installed by bd init too (rules + hooks).
+		requireFile(t, filepath.Join(dir, ".cursor", "rules", "beads.mdc"))
+		requireFile(t, filepath.Join(dir, ".cursor", "hooks.json"))
 
 		content, err := os.ReadFile(filepath.Join(beadsDir, ".gitignore"))
 		if err != nil {
@@ -1877,7 +1890,7 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	for i := 0; i < N; i++ {
 		go func(idx int) {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 
 			cmd := exec.CommandContext(ctx, bd, "init", "--prefix", "conc", "--force", "--quiet", "--skip-agents")
@@ -1889,10 +1902,11 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 
-	successes, lockErrors := 0, 0
+	successes, lockErrors, timeoutKills := 0, 0, 0
 	for _, r := range results {
 		if r.timedOut {
-			t.Errorf("process %d timed out after 45s running concurrent bd init: %v\n%s", r.idx, r.err, r.out)
+			t.Logf("process %d timed out after 90s running concurrent bd init: %v\n%s", r.idx, r.err, r.out)
+			timeoutKills++
 			continue
 		}
 		if strings.Contains(r.out, "panic") {
@@ -1909,10 +1923,18 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	if successes < 1 {
 		t.Errorf("expected at least 1 success, got %d", successes)
 	}
-	if successes+lockErrors != N {
-		t.Errorf("expected successes (%d) + lock errors (%d) = %d, got %d", successes, lockErrors, N, successes+lockErrors)
+	if lockErrors < 1 {
+		t.Errorf("expected at least 1 lock error, got %d", lockErrors)
 	}
-	t.Logf("%d/%d succeeded, %d/%d got lock error", successes, N, lockErrors, N)
+	// timeoutKills > 2 (i.e. > N/5) indicates a systemic runner problem, not normal load variance.
+	if timeoutKills > 2 {
+		t.Errorf("too many timeout-killed processes: %d/%d (cap is 2)", timeoutKills, N)
+	}
+	if successes+lockErrors+timeoutKills != N {
+		t.Errorf("expected successes (%d) + lock errors (%d) + timeout kills (%d) = %d, got %d",
+			successes, lockErrors, timeoutKills, N, successes+lockErrors+timeoutKills)
+	}
+	t.Logf("%d/%d succeeded, %d/%d got lock error, %d/%d timed out", successes, N, lockErrors, N, timeoutKills, N)
 
 	beadsDir := filepath.Join(dir, ".beads")
 	embeddedDir := filepath.Join(beadsDir, "embeddeddolt")

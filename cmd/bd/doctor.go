@@ -68,7 +68,11 @@ const ConfigKeyHintsDoctor = "hints.doctor"
 var doctorCmd = &cobra.Command{
 	Use:     "doctor [path]",
 	GroupID: "maint",
-	Short:   "Check and fix beads installation health (start here)",
+	// doctor diagnoses installation health and must run without opening the
+	// store. It opts out of store init via the annotation seam rather than the
+	// noDbCommands list (see commandOptsOutOfStore in main.go).
+	Annotations: map[string]string{skipStoreAnnotation: "1"},
+	Short:       "Check and fix beads installation health (start here)",
 	Long: `Sanity check the beads installation for the current directory or specified path.
 
 This command checks:
@@ -84,10 +88,17 @@ This command checks:
   - .beads/.gitignore up to date
   - Metadata.json version tracking (LastBdVersion field)
 
+Storage Availability:
+  Full diagnostics, --perf, --deep, --server, --migration, and
+  --check=validate currently require Dolt server mode. Embedded Dolt
+  supports --check=artifacts, --check=conventions, and
+  --check=pollution. --check-health has a limited hook-health fallback.
+  Unsupported combinations return a notice without changing storage.
+
 Performance Mode (--perf):
   Run performance diagnostics on your database:
   - Times key operations (bd ready, bd list, bd show, etc.)
-  - Collects system info (OS, arch, SQLite version, database stats)
+  - Collects system info (OS, arch, database stats)
   - Generates CPU profile for analysis
   - Outputs shareable report for bug reports
 
@@ -123,18 +134,12 @@ Server Mode (--server):
   - Schema compatible: Can query beads tables?
   - Connection pool: Pool health metrics
 
-Migration Validation Mode (--migration):
-  Run Dolt migration validation checks with machine-parseable output.
-  Use --migration=pre before migration to verify readiness:
-  - JSONL file exists and is valid (parseable, no corruption)
-  - All JSONL issues are present in SQLite (or explains discrepancies)
-  - No blocking issues prevent migration
-  Use --migration=post after migration to verify completion:
-  - Dolt database exists and is healthy
-  - All issues from JSONL are present in Dolt
-  - No data was lost during migration
-  - Dolt database has no locks or uncommitted changes
-  Combine with --json for machine-parseable output for automation.
+Legacy Dolt Migration Validation Mode (--migration):
+  Retained for older SQLite-to-Dolt migration workflows and available only in
+  Dolt server mode. It is not the migration path for removed backends
+  (PostgreSQL, MySQL, SQLite); those fail closed with export/import guidance.
+  Combine
+  with --json for machine-parseable diagnostic output.
 
 Agent Mode (--agent):
   Output diagnostics designed for AI agent consumption. Instead of terse
@@ -181,9 +186,9 @@ Examples:
   bd doctor --check=validate --fix   # Auto-fix data-integrity issues
   bd doctor --deep             # Full graph integrity validation
   bd doctor --server           # Dolt server mode health checks
-  bd doctor --migration=pre    # Validate readiness for Dolt migration
-  bd doctor --migration=post   # Validate Dolt migration completed
-  bd doctor --migration=pre --json  # Machine-parseable migration validation`,
+  bd doctor --migration=pre    # Legacy Dolt-server migration diagnostic
+  bd doctor --migration=post   # Legacy Dolt-server completion diagnostic
+  bd doctor --migration=pre --json  # Machine-parseable legacy diagnostic`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -193,21 +198,6 @@ Examples:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
-
-		if !usesSQLServer() {
-			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in embedded mode.")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "For embedded mode troubleshooting:")
-			fmt.Fprintln(os.Stderr, "  • Verify database exists:  ls -la .beads/embeddeddolt/")
-			fmt.Fprintln(os.Stderr, "  • Check bd version:        bd version")
-			fmt.Fprintln(os.Stderr, "  • Reinitialize if needed:  bd init --force")
-			fmt.Fprintln(os.Stderr, "  • Switch to server mode:   bd init --server")
-			return nil
-		}
-		if usesProxiedServer() {
-			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in proxied-server mode.")
-			return nil
-		}
 
 		var checkPath string
 		if len(args) > 0 {
@@ -222,6 +212,14 @@ Examples:
 		if err != nil {
 			return HandleError("failed to resolve path: %v", err)
 		}
+		if err := validateDoctorWorkspaceBackend(absPath); err != nil {
+			return HandleError("%v", err)
+		}
+
+		if usesProxiedServer() {
+			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in proxied-server mode.")
+			return nil
+		}
 
 		if doctorFix && isOrchestratorRoot(absPath) {
 			return HandleErrorWithHint(
@@ -230,30 +228,56 @@ Examples:
 			)
 		}
 
+		// --check-health has a hook-only fallback for embedded mode
+		// (doctor_health.go), so it runs before the embedded-mode gate below.
+		if checkHealthMode {
+			return runCheckHealth(absPath)
+		}
+
+		// --perf opens a live server-mode connection; route embedded users to
+		// the structured stub instead of a hard connection error (GH#3597).
 		if perfMode {
+			if isEmbeddedMode() {
+				printEmbeddedUnsupported("doctor --perf")
+				return nil
+			}
 			if err := doctor.RunPerformanceDiagnostics(absPath); err != nil {
 				return HandleError("performance diagnostics: %v", err)
 			}
 			return nil
 		}
 
-		if checkHealthMode {
-			return runCheckHealth(absPath)
-		}
-
+		// artifacts, conventions, and pollution work in embedded mode and run
+		// unconditionally; validate still requires a server-mode connection
+		// and stays gated (GH#3597).
 		if doctorCheckFlag != "" {
 			switch doctorCheckFlag {
-			case "pollution":
-				return runPollutionCheck(absPath, doctorClean, doctorYes)
-			case "validate":
-				return runValidateCheck(absPath)
 			case "artifacts":
 				return runArtifactsCheck(absPath, doctorClean, doctorYes)
 			case "conventions":
 				return runConventionsCheck(absPath)
+			case "pollution":
+				return runPollutionCheck(absPath, doctorClean, doctorYes)
+			case "validate":
+				if isEmbeddedMode() {
+					printEmbeddedUnsupported("doctor --check=validate")
+					return nil
+				}
+				return runValidateCheck(absPath)
 			default:
 				return HandleErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, pollution, validate")
 			}
+		}
+
+		// Bare `bd doctor` and the remaining mode-specific flags (--deep,
+		// --server, --migration) aren't wired up for embedded mode yet.
+		// Policy (GH#3794): embedded support is enabled one subcommand at a
+		// time, each human-vetted — do not lift this gate wholesale. Checks
+		// that reach into the database layer stay server-gated until the
+		// storage driver interface covers them (AGENTS.md "Storage Boundary").
+		if isEmbeddedMode() {
+			printEmbeddedUnsupported("doctor")
+			return nil
 		}
 
 		if doctorDeep {
@@ -324,12 +348,72 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorOrchestrator, "orchestrator", false, "Running in orchestrator multi-workspace mode (routes.jsonl is expected, higher duplicate tolerance)")
 	doctorCmd.Flags().IntVar(&orchestratorDuplicatesThreshold, "orchestrator-duplicates-threshold", 1000, "Duplicate tolerance threshold for orchestrator mode (wisps are ephemeral)")
 	doctorCmd.Flags().BoolVar(&doctorServer, "server", false, "Run Dolt server mode health checks (connectivity, version, schema)")
-	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run Dolt migration validation: 'pre' (before migration) or 'post' (after migration)")
+	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run legacy Dolt-server migration diagnostics: 'pre' or 'post'")
 	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
 }
 
 func shouldSkipDoctorNetworkChecks() bool {
 	return jsonOutput || !ui.IsTerminal()
+}
+
+// validateDoctorWorkspaceBackend keeps doctor diagnostics read-only when metadata
+// selects a removed or unknown implementation or cannot be parsed. Doctor contains
+// direct diagnostic store paths and may run under shared-server mode, so corrupt
+// metadata must be rejected before version tracking or any database check begins.
+func validateDoctorWorkspaceBackend(path string) error {
+	beadsDir := doctor.ResolveBeadsDirForRepo(path)
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return fmt.Errorf("failed to load %s: %w; no storage database was opened or modified; fix or restore metadata.json and retry", configfile.ConfigPath(beadsDir), err)
+	}
+	return validateConfiguredBackend(cfg)
+}
+
+// printEmbeddedUnsupported reports that a doctor variant is not yet wired up
+// for embedded mode. Emits a structured payload to stderr when --json or
+// --agent is set so downstream tooling can detect the gap without parsing
+// prose, and the existing prose stub otherwise (GH#3597).
+//
+// Follows the bd error-JSON contract (docs/JSON_SCHEMA.md): stderr, includes
+// a `code` field, and is wrapped with schema_version. Exit code stays 0 - a
+// benign refusal, not a failure.
+func printEmbeddedUnsupported(commandLabel string) {
+	hints := []string{
+		"Verify database exists:  ls -la .beads/embeddeddolt/",
+		"Check bd version:        bd version",
+		"Reinitialize if needed:  bd init --reinit-local",
+		"Switch to server mode:   bd init --server",
+	}
+	supported := []string{"artifacts", "conventions", "pollution"}
+	unsupported := []string{"validate"}
+
+	if jsonOutput || doctorAgent {
+		payload := map[string]interface{}{
+			"error":                               fmt.Sprintf("'bd %s' is not yet supported in embedded mode", commandLabel),
+			"code":                                "embedded_unsupported",
+			"unsupported":                         true,
+			"mode":                                "embedded",
+			"command":                             commandLabel,
+			"checks_supported_in_embedded_mode":   supported,
+			"checks_unsupported_in_embedded_mode": unsupported,
+			"hints":                               hints,
+		}
+		encoder := json.NewEncoder(os.Stderr)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(wrapWithSchemaVersion(payload))
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "Note: 'bd %s' is not yet supported in embedded mode.\n\n", commandLabel)
+	fmt.Fprintln(os.Stderr, "For embedded mode troubleshooting:")
+	for _, h := range hints {
+		fmt.Fprintf(os.Stderr, "  • %s\n", h)
+	}
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Checks available in embedded mode:")
+	fmt.Fprintln(os.Stderr, "  • bd doctor --check=artifacts")
+	fmt.Fprintln(os.Stderr, "  • bd doctor --check=conventions")
+	fmt.Fprintln(os.Stderr, "  • bd doctor --check=pollution")
 }
 
 func runDiagnostics(path string) doctorResult {
@@ -415,7 +499,7 @@ func runDiagnostics(path string) doctorResult {
 	}
 
 	// bd-jgxi: Auto-migrate database version before checking it.
-	// Since doctor skips PersistentPreRun DB init (it's in noDbCommands),
+	// Since doctor skips PersistentPreRun DB init (via skipStoreAnnotation),
 	// trackBdVersion() and autoMigrateOnVersionBump() haven't run yet.
 	//
 	// Scope version tracking to the doctor target. Without this, `bd doctor <path>`
@@ -651,7 +735,24 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, bdPathCheck)
 	// Don't fail overall check for missing bd in PATH, just warn
 
-	// Check 11e: Documentation bd prime references match installed version
+	// Check 11e: Cursor integration (agent hooks)
+	cursorCheck := convertWithCategory(doctor.CheckCursor(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, cursorCheck)
+	// Don't fail overall check for missing Cursor integration, just warn
+
+	// Check 11f: Cursor hooks file health (malformed JSON detection)
+	cursorSettingsCheck := convertWithCategory(doctor.CheckCursorSettingsHealth(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, cursorSettingsCheck)
+	if cursorSettingsCheck.Status == statusError {
+		result.OverallOK = false // Malformed hooks.json is a real problem
+	}
+
+	// Check 11g: Cursor hook completeness (all three lifecycle events)
+	cursorHookCheck := convertWithCategory(doctor.CheckCursorHookCompleteness(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, cursorHookCheck)
+	// Don't fail overall check for incomplete hooks, just warn
+
+	// Check 11h: Documentation bd prime references match installed version
 	bdPrimeDocsCheck := convertWithCategory(doctor.CheckDocumentationBdPrimeReference(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, bdPrimeDocsCheck)
 	// Don't fail overall check for doc mismatch, just warn
@@ -899,22 +1000,28 @@ func runInitDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Open one shared store for the database-backed init checks. Server-mode
+	// workspaces may not have a local .beads/dolt directory, so the path-only
+	// checks would otherwise report a false missing database.
+	sharedStore := doctor.NewSharedStore(path)
+	defer sharedStore.Close()
+
 	// Check 2: Database version
-	dbCheck := convertWithCategory(doctor.CheckDatabaseVersion(path, Version), doctor.CategoryCore)
+	dbCheck := convertWithCategory(doctor.CheckDatabaseVersionWithStore(sharedStore, Version), doctor.CategoryCore)
 	result.Checks = append(result.Checks, dbCheck)
 	if dbCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 3: Schema compatibility
-	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
+	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibilityWithStore(sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, schemaCheck)
 	if schemaCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 4: Permissions
-	permCheck := convertWithCategory(doctor.CheckPermissions(path), doctor.CategoryCore)
+	permCheck := convertWithCategory(doctor.CheckPermissionsWithStore(path, sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, permCheck)
 	if permCheck.Status == statusError {
 		result.OverallOK = false

@@ -1,6 +1,7 @@
 package dolt
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -902,10 +903,15 @@ func TestAddDependency_SamePrefix_RequiresTargetExistence(t *testing.T) {
 }
 
 // =============================================================================
-// Cross-Type Blocking Validation Tests (GH#1495)
+// Parent-Child Shadow Blocking Validation Tests (GH#1495)
 // =============================================================================
+//
+// Cross-type blocks edges between unrelated issues are allowed. Only blocks
+// edges that would shadow an existing parent-child relationship are rejected,
+// because they livelock the ready-work computation (the blocked parent
+// propagates its blocked state to all children, including the blocking child).
 
-func TestAddDependency_BlocksCrossType_TaskBlocksEpic(t *testing.T) {
+func TestAddDependency_BlocksCrossType_TaskBlocksEpic_Unrelated(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -933,22 +939,18 @@ func TestAddDependency_BlocksCrossType_TaskBlocksEpic(t *testing.T) {
 		t.Fatalf("failed to create epic: %v", err)
 	}
 
-	// Task blocks epic -> should fail
+	// Task blocks unrelated epic -> should succeed.
 	dep := &types.Dependency{
 		IssueID:     "ct-epic-1",
 		DependsOnID: "ct-task-1",
 		Type:        types.DepBlocks,
 	}
-	err := store.AddDependency(ctx, dep, "tester")
-	if err == nil {
-		t.Fatal("expected error when task blocks epic, got nil")
-	}
-	if !strings.Contains(err.Error(), "can only block") {
-		t.Errorf("unexpected error message: %v", err)
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("task blocking unrelated epic should succeed: %v", err)
 	}
 }
 
-func TestAddDependency_BlocksCrossType_EpicBlocksTask(t *testing.T) {
+func TestAddDependency_BlocksCrossType_EpicBlocksTask_Unrelated(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -976,18 +978,311 @@ func TestAddDependency_BlocksCrossType_EpicBlocksTask(t *testing.T) {
 		t.Fatalf("failed to create epic: %v", err)
 	}
 
-	// Epic blocks task -> should fail
+	// Epic blocks unrelated task -> should succeed.
 	dep := &types.Dependency{
 		IssueID:     "ct-task-2",
 		DependsOnID: "ct-epic-2",
 		Type:        types.DepBlocks,
 	}
-	err := store.AddDependency(ctx, dep, "tester")
-	if err == nil {
-		t.Fatal("expected error when epic blocks task, got nil")
+	if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+		t.Fatalf("epic blocking unrelated task should succeed: %v", err)
 	}
-	if !strings.Contains(err.Error(), "can only block") {
-		t.Errorf("unexpected error message: %v", err)
+}
+
+func TestAddDependency_Blocks_ChildBlocksParent_Rejected(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	epic := &types.Issue{
+		ID:        "sh-epic-1",
+		Title:     "Parent epic",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+	}
+	task := &types.Issue{
+		ID:        "sh-task-1",
+		Title:     "Child task",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, epic, "tester"); err != nil {
+		t.Fatalf("failed to create epic: %v", err)
+	}
+	if err := store.CreateIssue(ctx, task, "tester"); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Establish parent-child: task is a child of epic.
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     "sh-task-1",
+		DependsOnID: "sh-epic-1",
+		Type:        types.DepParentChild,
+	}, "tester"); err != nil {
+		t.Fatalf("parent-child setup failed: %v", err)
+	}
+
+	// Child task tries to block parent epic -> rejected (shadow edge).
+	err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     "sh-epic-1",
+		DependsOnID: "sh-task-1",
+		Type:        types.DepBlocks,
+	}, "tester")
+	if err == nil {
+		t.Fatal("expected rejection of child-blocks-parent edge")
+	}
+	if !strings.Contains(err.Error(), "descendant") {
+		t.Errorf("expected descendant-livelock message, got: %v", err)
+	}
+}
+
+func TestAddDependency_Blocks_ParentBlocksChild_Rejected(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	epic := &types.Issue{
+		ID:        "sh-epic-2",
+		Title:     "Parent epic",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+	}
+	task := &types.Issue{
+		ID:        "sh-task-2",
+		Title:     "Child task",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, epic, "tester"); err != nil {
+		t.Fatalf("failed to create epic: %v", err)
+	}
+	if err := store.CreateIssue(ctx, task, "tester"); err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	// Parent-child: task is a child of epic.
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     "sh-task-2",
+		DependsOnID: "sh-epic-2",
+		Type:        types.DepParentChild,
+	}, "tester"); err != nil {
+		t.Fatalf("parent-child setup failed: %v", err)
+	}
+
+	// Parent epic tries to block its own child task -> rejected.
+	err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     "sh-task-2",
+		DependsOnID: "sh-epic-2",
+		Type:        types.DepBlocks,
+	}, "tester")
+	if err == nil {
+		t.Fatal("expected rejection of parent-blocks-child edge")
+	}
+	// The hierarchy guard runs before the existing-pair type-conflict check,
+	// so the ancestry message wins even though the pair already has a
+	// parent-child row.
+	if !strings.Contains(err.Error(), "ancestor") {
+		t.Errorf("expected ancestor-deadlock message, got: %v", err)
+	}
+}
+
+func TestAddDependency_Blocks_AncestorBlocksDescendant_Rejected(t *testing.T) {
+	// Grandparent epic should not be able to block a grandchild task via a
+	// transitive parent-child path.
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	grandparent := &types.Issue{ID: "sh-gp-1", Title: "Grandparent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	parent := &types.Issue{ID: "sh-p-1", Title: "Parent", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic}
+	child := &types.Issue{ID: "sh-c-1", Title: "Child", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask}
+	for _, iss := range []*types.Issue{grandparent, parent, child} {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", iss.ID, err)
+		}
+	}
+
+	// parent is child of grandparent; child is child of parent.
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: "sh-p-1", DependsOnID: "sh-gp-1", Type: types.DepParentChild}, "tester"); err != nil {
+		t.Fatalf("parent-child p->gp: %v", err)
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: "sh-c-1", DependsOnID: "sh-p-1", Type: types.DepParentChild}, "tester"); err != nil {
+		t.Fatalf("parent-child c->p: %v", err)
+	}
+
+	// Grandparent blocks grandchild -> rejected (transitive shadow).
+	err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     "sh-c-1",
+		DependsOnID: "sh-gp-1",
+		Type:        types.DepBlocks,
+	}, "tester")
+	if err == nil {
+		t.Fatal("expected rejection of grandparent-blocks-grandchild")
+	}
+	if !strings.Contains(err.Error(), "ancestor") {
+		t.Errorf("expected ancestor-deadlock message, got: %v", err)
+	}
+}
+
+func TestAddDependency_Blocks_DeepCrossTypeChain(t *testing.T) {
+	// Build a multi-level chain: each task blocks one epic and is the child
+	// of a different epic. None of the blocks edges shadow a parent-child
+	// relationship, so all should be allowed. Documents the scenario from
+	// the user request: "an epic which depends on a task, which could be
+	// part of another epic, which depends on a different task, and so on."
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const levels = 4
+	for i := 1; i <= levels; i++ {
+		epic := &types.Issue{
+			ID:        fmt.Sprintf("dc-e%d", i),
+			Title:     fmt.Sprintf("Epic %d", i),
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeEpic,
+		}
+		task := &types.Issue{
+			ID:        fmt.Sprintf("dc-t%d", i),
+			Title:     fmt.Sprintf("Task %d", i),
+			Status:    types.StatusOpen,
+			Priority:  1,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, epic, "tester"); err != nil {
+			t.Fatalf("create epic %d: %v", i, err)
+		}
+		if err := store.CreateIssue(ctx, task, "tester"); err != nil {
+			t.Fatalf("create task %d: %v", i, err)
+		}
+	}
+
+	for i := 1; i <= levels; i++ {
+		// Task i blocks Epic i.
+		if err := store.AddDependency(ctx, &types.Dependency{
+			IssueID:     fmt.Sprintf("dc-e%d", i),
+			DependsOnID: fmt.Sprintf("dc-t%d", i),
+			Type:        types.DepBlocks,
+		}, "tester"); err != nil {
+			t.Fatalf("blocks t%d->e%d: %v", i, i, err)
+		}
+		// Task i is a child of Epic i+1 (if it exists). This is what makes
+		// the chain: e_i is blocked by t_i, and t_i belongs to e_{i+1},
+		// which is blocked by t_{i+1}, ...
+		if i+1 <= levels {
+			if err := store.AddDependency(ctx, &types.Dependency{
+				IssueID:     fmt.Sprintf("dc-t%d", i),
+				DependsOnID: fmt.Sprintf("dc-e%d", i+1),
+				Type:        types.DepParentChild,
+			}, "tester"); err != nil {
+				t.Fatalf("parent-child t%d->e%d: %v", i, i+1, err)
+			}
+		}
+	}
+}
+
+func TestAddDependency_CombinedGraphCycle_BlocksClosesLoop(t *testing.T) {
+	// Cycle detection now walks both blocks and parent-child edges so a
+	// closing blocks edge that completes a combined-graph loop is rejected.
+	// The loop: E1 -[blocks]-> T1 -[child-of]-> E2 -[blocks]-> T0 -[child-of]-> E1.
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issues := []*types.Issue{
+		{ID: "cgc-e1", Title: "Epic 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic},
+		{ID: "cgc-e2", Title: "Epic 2", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic},
+		{ID: "cgc-t0", Title: "Task 0", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "cgc-t1", Title: "Task 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+	}
+	for _, iss := range issues {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", iss.ID, err)
+		}
+	}
+
+	setup := []*types.Dependency{
+		{IssueID: "cgc-t0", DependsOnID: "cgc-e1", Type: types.DepParentChild},
+		{IssueID: "cgc-t1", DependsOnID: "cgc-e2", Type: types.DepParentChild},
+		{IssueID: "cgc-e2", DependsOnID: "cgc-t0", Type: types.DepBlocks},
+	}
+	for _, dep := range setup {
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("setup dep %+v: %v", dep, err)
+		}
+	}
+
+	err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     "cgc-e1",
+		DependsOnID: "cgc-t1",
+		Type:        types.DepBlocks,
+	}, "tester")
+	if err == nil {
+		t.Fatal("expected cycle rejection for combined-graph loop")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("expected cycle error, got: %v", err)
+	}
+}
+
+func TestAddDependency_CombinedGraphCycle_ParentChildClosesLoop(t *testing.T) {
+	// Same livelock as above, but inserted in an order where the closing
+	// edge is the parent-child link. Cycle detection runs on parent-child
+	// inserts too.
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issues := []*types.Issue{
+		{ID: "cgp-e1", Title: "Epic 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic},
+		{ID: "cgp-e2", Title: "Epic 2", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeEpic},
+		{ID: "cgp-t0", Title: "Task 0", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "cgp-t1", Title: "Task 1", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+	}
+	for _, iss := range issues {
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("create %s: %v", iss.ID, err)
+		}
+	}
+
+	setup := []*types.Dependency{
+		{IssueID: "cgp-t0", DependsOnID: "cgp-e1", Type: types.DepParentChild},
+		{IssueID: "cgp-e2", DependsOnID: "cgp-t0", Type: types.DepBlocks},
+		{IssueID: "cgp-e1", DependsOnID: "cgp-t1", Type: types.DepBlocks},
+	}
+	for _, dep := range setup {
+		if err := store.AddDependency(ctx, dep, "tester"); err != nil {
+			t.Fatalf("setup dep %+v: %v", dep, err)
+		}
+	}
+
+	err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     "cgp-t1",
+		DependsOnID: "cgp-e2",
+		Type:        types.DepParentChild,
+	}, "tester")
+	if err == nil {
+		t.Fatal("expected cycle rejection for combined-graph loop via parent-child closing edge")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("expected cycle error, got: %v", err)
 	}
 }
 

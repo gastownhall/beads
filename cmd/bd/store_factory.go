@@ -55,9 +55,20 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, e
 		return dolt.New(ctx, cfg)
 	}
 	if cfg.ReadOnly {
-		// Read-only commands must not be bricked by the #4259
-		// remote-migrate gate (bd-578h9.5); server mode's ReadOnly opens
-		// already skip migration entirely.
+		if cfg.DisableAutoStart {
+			// Strict --readonly (cfg.DisableAutoStart is the strict-only
+			// signal threaded from policy.disableAutoStart): the command
+			// must not write anything, not even incidentally (schema
+			// init, migrations, the post-command autocommit net). Use the
+			// genuinely write-refusing open — same one used for cross-repo
+			// hydration of foreign projects (GH#3231, bd-6dnrw.32) — instead
+			// of OpenForReadOnlyCommand, which is "otherwise a normal
+			// writable store".
+			return embeddeddolt.OpenReadOnly(ctx, cfg.BeadsDir, cfg.Database, "main")
+		}
+		// Ordinary classified-read commands (bd show, bd list, ...) must
+		// not be bricked by the #4259 remote-migrate gate (bd-578h9.5);
+		// server mode's ReadOnly opens already skip migration entirely.
 		return embeddeddolt.OpenForReadOnlyCommand(ctx, cfg.BeadsDir, cfg.Database, "main")
 	}
 	if cfg.LenientOpen {
@@ -99,7 +110,18 @@ func acquireEmbeddedLock(beadsDir string, serverMode bool) (util.Unlocker, error
 // auto-sanitized to underscores and the fix is persisted to metadata.json.
 func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
-	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
+	if err != nil {
+		// A present-but-unloadable metadata.json must not degrade to the
+		// embedded default: on server-mode deployments the embedded
+		// directory is an empty relic, and opening it silently turns every
+		// query into an empty result set with exit 0 (false-empty). Absent
+		// metadata.json (cfg == nil, err == nil) keeps the embedded default.
+		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
+	}
+	if err := validateConfiguredBackend(cfg); err != nil {
+		return nil, err
+	}
+	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
 		return nil, fmt.Errorf("proxy server store should be uow provider")
 		// 	return newProxiedServerStore(ctx, &dolt.Config{
@@ -108,7 +130,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 		// 		ProxiedServer: true,
 		// 	})
 	}
-	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
+	if cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfig(ctx, beadsDir)
 	}
 	database := configfile.DefaultDoltDatabase
@@ -172,7 +194,17 @@ func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newNa
 // hydration from mutating foreign projects (GH#3231).
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
-	if err == nil && cfg != nil && cfg.IsDoltProxiedServerMode() {
+	if err != nil {
+		// Same contract as newDoltStoreFromConfig: a present-but-unloadable
+		// metadata.json is a hard error, not a silent embedded fallback —
+		// and the error must name the real cause rather than the downstream
+		// "database not found" the embedded open would produce.
+		return nil, fmt.Errorf("load %s: %w (refusing to fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
+	}
+	if err := validateConfiguredBackend(cfg); err != nil {
+		return nil, err
+	}
+	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
 		return nil, fmt.Errorf("proxy server store needs to be uow provider")
 		// return newProxiedServerStore(ctx, &dolt.Config{
@@ -182,7 +214,7 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 		// 	ReadOnly:      true,
 		// })
 	}
-	if err == nil && cfg != nil && cfg.IsDoltServerMode() {
+	if cfg != nil && cfg.IsDoltServerMode() {
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	}
 	database := configfile.DefaultDoltDatabase

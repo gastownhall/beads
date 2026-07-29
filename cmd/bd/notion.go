@@ -219,6 +219,9 @@ func maskNotionAuth(auth *notion.ResolvedAuth) string {
 }
 
 func runNotionStatus(cmd *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("notion status is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("notion-status")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -289,6 +292,9 @@ func runNotionStatus(cmd *cobra.Command, _ []string) error {
 }
 
 func runNotionInit(cmd *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("notion init is not supported in proxied-server mode")
+	}
 	CheckReadonly("notion init")
 
 	evt := metrics.NewCommandEvent("notion-init")
@@ -339,6 +345,9 @@ func runNotionInit(cmd *cobra.Command, _ []string) error {
 }
 
 func runNotionConnect(cmd *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("notion connect is not supported in proxied-server mode")
+	}
 	CheckReadonly("notion connect")
 
 	evt := metrics.NewCommandEvent("notion-connect")
@@ -428,6 +437,9 @@ func renderNotionStatus(cmd *cobra.Command, auth *notion.ResolvedAuth, cfg notio
 }
 
 func runNotionSync(cmd *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("notion sync is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("notion-sync")
 	defer func() {
 		if c := metrics.Global(); c != nil {

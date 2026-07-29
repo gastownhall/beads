@@ -53,7 +53,7 @@ func BuildReadyWorkOrder(policy types.SortPolicy, createdCol, priorityCol string
 	case types.SortPolicyOldest:
 		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, id ASC", createdCol)}
 	case types.SortPolicyPriority:
-		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, %s DESC, id ASC", priorityCol, createdCol)}
+		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, %s ASC, id ASC", priorityCol, createdCol)}
 	case types.SortPolicyHybrid, "":
 		recentCutoff := time.Now().UTC().Add(-48 * time.Hour)
 		return ReadyWorkOrder{
@@ -64,7 +64,7 @@ func BuildReadyWorkOrder(policy types.SortPolicy, createdCol, priorityCol string
 			Args: []any{recentCutoff, recentCutoff},
 		}
 	default:
-		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, %s DESC, id ASC", priorityCol, createdCol)}
+		return ReadyWorkOrder{SQL: fmt.Sprintf("ORDER BY %s ASC, %s ASC, id ASC", priorityCol, createdCol)}
 	}
 }
 
@@ -83,11 +83,25 @@ type ReadyWorkWhereInputs struct {
 // BuildReadyWorkWhere renders the full ready-work WHERE clause for one table
 // family. Both stacks must keep ready semantics identical (Seam A parity
 // suite); all ready predicates live here.
+//
+// Invariant: every clause must reference only main-table columns or correlated
+// subqueries keyed by id — never the counts mega-query's aggregate aliases
+// (labels_json, dep_count, rdep_count, comment_count, parent_id, deps_json).
+// SearchCountsSQL renders this WHERE inside a pre-join subquery where those
+// aliases are out of scope. See the SearchCountsSQL doc comment for why a
+// violation fails loud.
 func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyWorkWhereInputs) (string, []any, error) {
 	var statusClause string
-	if filter.Status != "" {
+	var args []any
+	switch {
+	case filter.Status != "":
 		statusClause = "status = ?"
-	} else {
+		args = append(args, string(filter.Status))
+	case len(filter.Statuses) > 0:
+		ph, statusArgs := InPlaceholders(filter.Statuses)
+		statusClause = fmt.Sprintf("status IN (%s)", ph)
+		args = append(args, statusArgs...)
+	default:
 		statusClause = "status IN ('open', 'in_progress')"
 	}
 	whereClauses := []string{
@@ -97,10 +111,6 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 	}
 	if !filter.IncludeEphemeral {
 		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
-	}
-	var args []any
-	if filter.Status != "" {
-		args = append(args, string(filter.Status))
 	}
 
 	if filter.Priority != nil {
@@ -141,6 +151,19 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 			args = append(args, label)
 		}
 	}
+	// LabelsAny is an OR-set: an issue qualifies if it carries AT LEAST ONE of
+	// the labels. Previously this clause was absent entirely, so --label-any was
+	// silently dropped on the ready/claim path (with or without --parent) — a
+	// worker believed it was fenced when it was not. It AND-combines with Labels
+	// (the flag help promises "Can combine with --label").
+	if len(filter.LabelsAny) > 0 {
+		placeholders := make([]string, len(filter.LabelsAny))
+		for i, label := range filter.LabelsAny {
+			placeholders[i] = "?"
+			args = append(args, label)
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label IN (%s))", tables.Labels, strings.Join(placeholders, ", ")))
+	}
 	if len(filter.ExcludeLabels) > 0 {
 		placeholders := make([]string, len(filter.ExcludeLabels))
 		for i, label := range filter.ExcludeLabels {
@@ -148,6 +171,14 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 			args = append(args, label)
 		}
 		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT issue_id FROM %s WHERE label IN (%s))", tables.Labels, strings.Join(placeholders, ", ")))
+	}
+	if filter.LabelPattern != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label LIKE ? ESCAPE '|')", tables.Labels))
+		args = append(args, globToLikePattern(filter.LabelPattern))
+	}
+	if filter.LabelRegex != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label REGEXP ?)", tables.Labels))
+		args = append(args, filter.LabelRegex)
 	}
 
 	// Parent filtering: return all transitive descendants of parentID.

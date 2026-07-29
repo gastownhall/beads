@@ -34,7 +34,6 @@ USE CASES:
 - Migrating to team naming standards
 
 Prefix validation rules:
-- Max length: 8 characters
 - Allowed characters: lowercase letters, numbers, hyphens
 - Must start with a letter
 - Must end with a hyphen (e.g., 'kw-', 'work-')
@@ -55,6 +54,9 @@ NOTE: This is a rare operation. Most users never need this command.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("rename-prefix is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("rename-prefix")
 		defer func() {
 			if c := metrics.Global(); c != nil {

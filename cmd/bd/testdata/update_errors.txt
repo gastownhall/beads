@@ -2,9 +2,10 @@
 
 bd init --prefix test
 
-# Update nonexistent issue prints error to stderr (exits 0 - known issue)
-bd update nonexistent-id --title 'New title'
+# Update nonexistent issue prints a per-ID error report and exits nonzero
+! bd update nonexistent-id --title 'New title'
 stderr 'no issue found'
+stderr 'failed to update'
 
 # Create a real issue for validation tests
 bd create 'Test issue'

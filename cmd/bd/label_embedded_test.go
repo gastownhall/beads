@@ -144,6 +144,45 @@ func TestEmbeddedLabel(t *testing.T) {
 		}
 	})
 
+	t.Run("label_add_comma_separated_multi", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Multi label add", "--type", "task")
+		out := bdLabel(t, bd, dir, "add", issue.ID, "multi-a,multi-b,multi-c")
+		if !strings.Contains(out, "Added") {
+			t.Errorf("expected 'Added' in output: %s", out)
+		}
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		labelSet := map[string]bool{}
+		for _, l := range labels {
+			labelSet[l] = true
+		}
+		for _, want := range []string{"multi-a", "multi-b", "multi-c"} {
+			if !labelSet[want] {
+				t.Errorf("expected %q in labels: %v", want, labels)
+			}
+		}
+	})
+
+	t.Run("label_remove_comma_separated_multi", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Multi label remove", "--type", "task",
+			"--label", "rm-a", "--label", "rm-b", "--label", "rm-keep")
+		bdLabel(t, bd, dir, "remove", issue.ID, "rm-a,rm-b")
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		for _, l := range labels {
+			if l == "rm-a" || l == "rm-b" {
+				t.Errorf("label %q should have been removed: %v", l, labels)
+			}
+		}
+		found := false
+		for _, l := range labels {
+			if l == "rm-keep" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected 'rm-keep' to survive: %v", labels)
+		}
+	})
+
 	t.Run("label_add_duplicate_idempotent", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Dup label", "--type", "task")
 		bdLabel(t, bd, dir, "add", issue.ID, "dup")
@@ -321,6 +360,33 @@ func TestEmbeddedLabel(t *testing.T) {
 	t.Run("label_add_reserved_provides", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Reserved label", "--type", "task")
 		bdLabelFail(t, bd, dir, "add", issue.ID, "provides:auth")
+	})
+
+	t.Run("label_add_reserved_provides_in_comma_list", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Reserved label in list", "--type", "task")
+		bdLabelFail(t, bd, dir, "add", issue.ID, "ok-label,provides:auth")
+	})
+
+	t.Run("label_add_unresolvable_id_fails", func(t *testing.T) {
+		bdLabelFail(t, bd, dir, "add", "tl-doesnotexist", "some-label")
+	})
+
+	t.Run("label_add_space_separated_labels_fails_loudly", func(t *testing.T) {
+		// Regression test for bd-vu5kv: "bd label add <id> a b c" used to
+		// treat a/b as unresolvable issue IDs, skip them with a stderr
+		// warning, and exit 0 having applied only "c". It must now fail
+		// hard, apply nothing, and hint at the comma-separated form.
+		issue := bdCreate(t, bd, dir, "Space separated labels", "--type", "task")
+		out := bdLabelFail(t, bd, dir, "add", issue.ID, "space-a", "space-b", "space-c")
+		if !strings.Contains(out, "comma-separated") {
+			t.Errorf("expected comma-separated hint in error output: %s", out)
+		}
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		for _, l := range labels {
+			if strings.HasPrefix(l, "space-") {
+				t.Errorf("no label should have been applied, found %q: %v", l, labels)
+			}
+		}
 	})
 }
 

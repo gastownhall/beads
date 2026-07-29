@@ -86,7 +86,7 @@ func metricsTestEnv(home string, extra ...string) []string {
 	base := bdEnv(home)
 	out := make([]string, 0, len(base)+len(extra)+1)
 	for _, e := range base {
-		if strings.HasPrefix(e, "BD_DISABLE_METRICS=") {
+		if strings.HasPrefix(e, "BD_DISABLE_METRICS=") || strings.HasPrefix(e, "DO_NOT_TRACK=") {
 			continue
 		}
 		out = append(out, e)
@@ -580,41 +580,6 @@ func TestMetricsRootVersionFlagSuppressesFirstRunNotice(t *testing.T) {
 				t.Errorf("`bd %s` marked metrics.notice_shown in user config (must not for a version probe)", flag)
 			}
 		})
-	}
-}
-
-// TestInitProxiedServerRejectedKeepsMetricsGapLatent documents and tests the
-// containment of the proxied-server metrics-flush gap flagged on PR #4419:
-// proxied-server handlers exit via FatalError*/os.Exit, which would bypass the
-// deferred per-command metrics close. That gap is harmless only while
-// proxied-server mode cannot be entered. This asserts `bd init --proxied-server`
-// is rejected as "not yet implemented", so usesProxiedServer() is never true and
-// those FatalError* paths never run. See the FatalError doc comment in errors.go.
-func TestInitProxiedServerRejectedKeepsMetricsGapLatent(t *testing.T) {
-	bd := buildEmbeddedBD(t)
-	home, err := testTempDir("bd-proxied-gate-home-*")
-	if err != nil {
-		t.Fatalf("temp home: %v", err)
-	}
-	repo, err := testTempDir("bd-proxied-gate-repo-*")
-	if err != nil {
-		t.Fatalf("temp repo: %v", err)
-	}
-	initGitRepoAt(t, repo)
-
-	cmd := exec.Command(bd, "init", "--non-interactive", "--quiet", "--proxied-server")
-	cmd.Dir = repo
-	cmd.Env = metricsTestEnv(home)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	runErr := cmd.Run()
-
-	if runErr == nil {
-		t.Fatalf("bd init --proxied-server unexpectedly succeeded; proxied-server mode must stay gated off\nstdout:\n%s", stdout.String())
-	}
-	if !strings.Contains(stderr.String(), "not yet implemented") {
-		t.Errorf("bd init --proxied-server stderr = %q, want it to contain %q", stderr.String(), "not yet implemented")
 	}
 }
 

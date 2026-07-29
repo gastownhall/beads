@@ -1,6 +1,6 @@
 // Package main implements the bd CLI state management commands.
 // These commands provide convenient access to the labels-as-state pattern
-// documented in docs/LABELS.md.
+// documented in docs/core-concepts/labels.md.
 package main
 
 import (
@@ -42,6 +42,10 @@ Examples:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runStateProxiedServer(rootCtx, args[0], args[1])
+		}
 
 		ctx := rootCtx
 		issueID := args[0]
@@ -116,8 +120,6 @@ The --reason flag provides context for the event bead (recommended).`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("set-state")
-
 		evt := metrics.NewCommandEvent("set-state")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -125,7 +127,6 @@ The --reason flag provides context for the event bead (recommended).`,
 			}
 		}()
 
-		ctx := rootCtx
 		issueID := args[0]
 		stateSpec := args[1]
 
@@ -137,6 +138,14 @@ The --reason flag provides context for the event bead (recommended).`,
 		newValue := parts[1]
 
 		reason, _ := cmd.Flags().GetString("reason")
+
+		CheckReadonly("set-state")
+
+		if usesProxiedServer() {
+			return runSetStateProxiedServer(rootCtx, issueID, dimension, newValue, reason)
+		}
+
+		ctx := rootCtx
 
 		var fullID string
 		var err error
@@ -278,6 +287,10 @@ Example:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runStateListProxiedServer(rootCtx, args[0])
+		}
 
 		ctx := rootCtx
 		issueID := args[0]

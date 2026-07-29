@@ -17,6 +17,8 @@ import (
 
 	mysqldrv "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/procid"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,8 +65,12 @@ func newDoltServer(t *testing.T) (*server.DoltServer, string) {
 	port := freePort(t)
 	cfg := writeConfig(t, port)
 	log := filepath.Join(t.TempDir(), "server.log")
-	s, err := server.NewDoltServer(bin, rootDir, cfg, log, 0)
+	s, err := server.NewDoltServer(bin, rootDir, cfg, log, 0, "")
 	require.NoError(t, err)
+	// Close the log file handle before t.TempDir's RemoveAll runs.
+	// On Windows, an open handle prevents directory removal; Stop is
+	// idempotent so this is safe even when the test calls Stop itself.
+	t.Cleanup(func() { _ = s.Stop(context.Background()) })
 	return s, rootDir
 }
 
@@ -99,7 +105,7 @@ func TestNewDoltServer_Validation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s, err := server.NewDoltServer(tc.bin, tc.root, tc.cfg, "", 0)
+			s, err := server.NewDoltServer(tc.bin, tc.root, tc.cfg, "", 0, "")
 			assert.Nil(t, s)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.want)
@@ -112,11 +118,11 @@ func TestDoltServer_ID_Stable(t *testing.T) {
 	rootA := t.TempDir()
 	rootB := t.TempDir()
 
-	a1, err := server.NewDoltServer("dolt", rootA, cfgPath, "", 0)
+	a1, err := server.NewDoltServer("dolt", rootA, cfgPath, "", 0, "")
 	require.NoError(t, err)
-	a2, err := server.NewDoltServer("dolt", rootA, cfgPath, "", 0)
+	a2, err := server.NewDoltServer("dolt", rootA, cfgPath, "", 0, "")
 	require.NoError(t, err)
-	b, err := server.NewDoltServer("dolt", rootB, cfgPath, "", 0)
+	b, err := server.NewDoltServer("dolt", rootB, cfgPath, "", 0, "")
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -126,7 +132,7 @@ func TestDoltServer_ID_Stable(t *testing.T) {
 
 func TestDoltServer_DSN(t *testing.T) {
 	cfgPath := writeConfig(t, 13306)
-	s, err := server.NewDoltServer("dolt", t.TempDir(), cfgPath, "", 0)
+	s, err := server.NewDoltServer("dolt", t.TempDir(), cfgPath, "", 0, "")
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -153,12 +159,19 @@ func TestDoltServer_DSN(t *testing.T) {
 }
 
 func TestDoltServer_StartStop_HappyPath(t *testing.T) {
-	s, _ := newDoltServer(t)
+	s, rootDir := newDoltServer(t)
 	ctx := context.Background()
 
 	require.NoError(t, s.Start(ctx))
 	t.Cleanup(func() { stopWithTimeout(t, s) })
 	assert.True(t, s.Running(ctx))
+	pf, err := pidfile.Read(rootDir, server.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, pf)
+	require.NoError(t, pf.ValidateV2(pidfile.KindDoltBackend))
+	match, err := procid.Verify(pf.Pid, procid.Token(pf.Birth))
+	require.NoError(t, err)
+	assert.True(t, match)
 
 	db, err := sql.Open("mysql", s.DSN(ctx, "", "root", ""))
 	require.NoError(t, err)
@@ -205,7 +218,7 @@ listener:
 	require.NoError(t, os.WriteFile(cfgPath, []byte(body), 0o600))
 
 	logPath := filepath.Join(t.TempDir(), "server.log")
-	s, err := server.NewDoltServer(bin, rootDir, cfgPath, logPath, 0)
+	s, err := server.NewDoltServer(bin, rootDir, cfgPath, logPath, 0, "")
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -233,6 +246,31 @@ listener:
 	require.NoError(t, err)
 	assert.Equal(t, "unix", conn.RemoteAddr().Network())
 	require.NoError(t, conn.Close())
+
+	require.NoError(t, s.Stop(ctx))
+	assert.False(t, s.Running(ctx))
+}
+
+func TestDoltServer_Stop_RunsGCWhenDatabaseSet(t *testing.T) {
+	bin := requireDolt(t)
+	t.Setenv("HOME", t.TempDir())
+	rootDir := t.TempDir()
+	port := freePort(t)
+	cfg := writeConfig(t, port)
+	log := filepath.Join(t.TempDir(), "server.log")
+
+	const dbName = "gc_test_db"
+	s, err := server.NewDoltServer(bin, rootDir, cfg, log, 0, dbName)
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	require.NoError(t, s.Start(ctx))
+
+	db, err := sql.Open("mysql", s.DSN(ctx, "", "root", ""))
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS "+dbName)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
 
 	require.NoError(t, s.Stop(ctx))
 	assert.False(t, s.Running(ctx))
@@ -270,7 +308,7 @@ func TestDoltServer_StartStopStart_NewInstanceSameRootDirSucceeds(t *testing.T) 
 
 	port1 := freePort(t)
 	cfg1 := writeConfig(t, port1)
-	s1, err := server.NewDoltServer(bin, rootDir, cfg1, logPath, 0)
+	s1, err := server.NewDoltServer(bin, rootDir, cfg1, logPath, 0, "")
 	require.NoError(t, err)
 	require.NoError(t, s1.Start(ctx))
 	require.NoError(t, s1.Stop(ctx))
@@ -278,7 +316,7 @@ func TestDoltServer_StartStopStart_NewInstanceSameRootDirSucceeds(t *testing.T) 
 	// Fresh port to dodge any TIME_WAIT lingering on the old one.
 	port2 := freePort(t)
 	cfg2 := writeConfig(t, port2)
-	s2, err := server.NewDoltServer(bin, rootDir, cfg2, logPath, 0)
+	s2, err := server.NewDoltServer(bin, rootDir, cfg2, logPath, 0, "")
 	require.NoError(t, err)
 	require.NoError(t, s2.Start(ctx), "new instance at same rootDir must start")
 	t.Cleanup(func() { stopWithTimeout(t, s2) })
@@ -331,7 +369,7 @@ func TestDoltServer_LogFile_CapturesOutput(t *testing.T) {
 	cfgPath := writeConfig(t, port)
 	logPath := filepath.Join(t.TempDir(), "server.log")
 
-	s, err := server.NewDoltServer(bin, rootDir, cfgPath, logPath, 0)
+	s, err := server.NewDoltServer(bin, rootDir, cfgPath, logPath, 0, "")
 	require.NoError(t, err)
 	ctx := context.Background()
 	require.NoError(t, s.Start(ctx))
@@ -383,7 +421,7 @@ func TestDoltServer_ConcurrentStart_SameRootDir_OneWins(t *testing.T) {
 		port := freePort(t)
 		cfg := writeConfig(t, port)
 		log := filepath.Join(logDir, fmt.Sprintf("server-%d.log", i))
-		s, err := server.NewDoltServer(bin, rootDir, cfg, log, 0)
+		s, err := server.NewDoltServer(bin, rootDir, cfg, log, 0, "")
 		require.NoError(t, err)
 		servers[i] = s
 	}
@@ -444,7 +482,7 @@ func TestDoltServer_DoltInit_Idempotent(t *testing.T) {
 
 	port := freePort(t)
 	cfgPath := writeConfig(t, port)
-	s, err := server.NewDoltServer(bin, rootDir, cfgPath, "", 0)
+	s, err := server.NewDoltServer(bin, rootDir, cfgPath, "", 0, "")
 	require.NoError(t, err)
 
 	ctx := context.Background()

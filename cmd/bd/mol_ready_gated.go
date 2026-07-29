@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -65,6 +64,10 @@ func runMolReadyGated(cmd *cobra.Command, args []string) error {
 // standalone runMolReadyGated entrypoint records "mol-ready-gated"; this keeps a
 // single `bd ready --gated` invocation to exactly one cli_command event.
 func runMolReadyGatedCore(_ *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return runMolReadyGatedProxiedServer(rootCtx)
+	}
+
 	ctx := rootCtx
 
 	if store == nil {
@@ -76,6 +79,10 @@ func runMolReadyGatedCore(_ *cobra.Command, _ []string) error {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
+	return renderGatedReadyMolecules(molecules)
+}
+
+func renderGatedReadyMolecules(molecules []*GatedMolecule) error {
 	if jsonOutput {
 		output := GatedReadyOutput{
 			Molecules: molecules,
@@ -119,7 +126,7 @@ func runMolReadyGatedCore(_ *cobra.Command, _ []string) error {
 // 3. Check if that step is now ready (unblocked)
 // 4. Find the parent molecule
 // 5. Filter out molecules that are already hooked by someone
-func findGateReadyMolecules(ctx context.Context, s storage.DoltStorage) ([]*GatedMolecule, error) {
+func findGateReadyMolecules(ctx context.Context, s molReader) ([]*GatedMolecule, error) {
 	// Step 1: Find all closed gate beads
 	gateType := types.IssueType("gate")
 	closedStatus := types.StatusClosed
@@ -232,7 +239,10 @@ func findGateReadyMolecules(ctx context.Context, s storage.DoltStorage) ([]*Gate
 }
 
 func init() {
-	// Note: --gated flag is registered in ready.go
-	// Also add as a subcommand under mol for discoverability
+	// `bd ready --gated` registers --gated on readyCmd in ready.go.
+	// `bd mol ready` is a separate subcommand under molCmd that always runs
+	// in gated mode, so accept --gated here too: both spellings work and the
+	// documented `bd mol ready --gated` form actually matches the help text.
+	molReadyGatedCmd.Flags().Bool("gated", false, "Find molecules ready for gate-resume dispatch (always on for this subcommand)")
 	molCmd.AddCommand(molReadyGatedCmd)
 }

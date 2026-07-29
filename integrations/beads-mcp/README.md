@@ -218,6 +218,9 @@ await beads_ready_work(workspace_root="/Users/you/project-a")
 - `update` - Update issue (status, priority, design, notes, etc). Note: `status="closed"` or `status="open"` automatically route to `close` or `reopen` tools to respect approval workflows
 - `close` - Close completed issue
 - `dep` - Add dependency (blocks, related, parent-child, discovered-from)
+- `comment` - Add a durable, timestamped comment to an issue (a record of work/decisions)
+- `comments` - List all comments on an issue (`show` reports comment_count but not the bodies)
+- `note` - Append a note to an issue's notes field
 - `blocked` - Get blocked issues
 - `stats` - Get project statistics
 - `reopen` - Reopen a closed issue with optional reason

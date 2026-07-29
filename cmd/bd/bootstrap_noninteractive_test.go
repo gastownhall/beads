@@ -131,7 +131,7 @@ func TestPrintBootstrapRemoteBehindGuidance(t *testing.T) {
 	for _, want := range []string{
 		"needs 1 schema migration (v49 -> v50)",
 		"Re-running `bd bootstrap` will NOT fix this",
-		schema.AllowRemoteMigrateEnv + "=1",
+		"bd migrate --force",
 		"bd dolt push",
 	} {
 		if !strings.Contains(out, want) {

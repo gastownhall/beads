@@ -13,7 +13,6 @@ make ci-pr-policy
 make ci-pr-lint
 make ci-package-mcp
 make ci-package-npm
-make ci-website
 ```
 
 Each wrapper auto-detects the repository root, sources `.buildflags` when it
@@ -46,8 +45,6 @@ Package gate wrappers validate publishable/package-adjacent surfaces:
 - `make ci-package-npm` builds or consumes the native binary expected by
   `npm-package/bin/bd`, runs the npm package test suite, and checks
   `npm pack --dry-run`.
-- `make ci-website` runs website dependency install, typecheck,
-  `llms-full.txt` generation, and Docusaurus build.
 
 Set `BEADS_TEST_BD_BINARY=/path/to/bd` for MCP and npm package gates to reuse a
 prebuilt candidate binary instead of rebuilding it inside the wrapper.
@@ -255,7 +252,7 @@ This allows releases to work before a certificate is acquired.
 
 Windows code signing helps reduce antivirus false positives that affect Go binaries.
 Kaspersky and other AV software commonly flag unsigned Go executables as potentially
-malicious due to heuristic detection. See `docs/ANTIVIRUS.md` for details.
+malicious due to heuristic detection. See `docs/reference/antivirus.md` for details.
 
 ---
 

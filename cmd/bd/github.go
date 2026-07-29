@@ -294,6 +294,9 @@ func getGitHubClient(config GitHubConfig) *github.Client {
 
 // runGitHubStatus implements the github status command.
 func runGitHubStatus(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("github status is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("github-status")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -326,6 +329,9 @@ func runGitHubStatus(cmd *cobra.Command, args []string) error {
 
 // runGitHubRepos implements the github repos command.
 func runGitHubRepos(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("github repos is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("github-repos")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -368,6 +374,9 @@ func runGitHubRepos(cmd *cobra.Command, args []string) error {
 // runGitHubSync implements the github sync command.
 // Uses the tracker.Engine for all sync operations.
 func runGitHubSync(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("github sync is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("github-sync")
 	defer func() {
 		if c := metrics.Global(); c != nil {

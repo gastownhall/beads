@@ -85,7 +85,7 @@ Before starting a release:
 
 - [ ] All tests passing (`go test ./...`)
 - [ ] npm package tests passing (`cd npm-package && npm run test:all`)
-- [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](docs/RELEASE-STABILITY-GATE.md)
+- [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](engdocs/RELEASE-STABILITY-GATE.md)
 - [ ] **Regression tests pass** (`make test-regression`)
 - [ ] **CHANGELOG.md updated with release notes** (see format below)
 - [ ] **Breaking changes documented** with migration steps and recovery instructions
@@ -175,7 +175,6 @@ The tag workflow re-runs release-critical package gates before publishing:
 - `make ci-package-mcp` builds and validates the MCP package, then the PyPI job
   publishes the validated `dist/*` artifact from that gate.
 - `make ci-package-npm` validates the npm wrapper package before npm publish.
-- `make ci-website` validates the release docs/website build before GoReleaser
   publishes GitHub release assets.
 
 The npm publish job also waits for the macOS release assets, because the npm
@@ -366,24 +365,36 @@ git commit -m "chore: Update plugin marketplaces to v0.22.0"
 
 **Note:** These files define how beads appears in Claude Code and Codex plugin marketplaces. Version should match the release version.
 
-### Documentation Site (Docusaurus)
+### Documentation Site (Mintlify)
 
-The published docs at GitHub Pages are versioned. Unreleased edits live in
-`website/docs/` (**Next**); each release should add a snapshot:
+The published docs are the Mintlify site rooted at `docs/`, deployed from
+main via the Mintlify GitHub integration — no release-time docs snapshot is
+needed. The site documents the current release line only (see
+engdocs/decisions/2026-07-10-mintlify-docs-overhaul.md). Day to day, the
+generated CLI reference is kept fresh by `scripts/generate-cli-docs.sh` and
+its PR drift gate, not by the release process.
+
+**But the release pin IS a release-time step.** `docs/cli-docs.pin` names
+the release tag the docs corpus is generated from and validated against
+(engdocs/decisions/2026-07-17-docs-release-pin.md); it lags `main` between
+releases by design, so any command or flag added on `main` since the last
+bump is invisible to `scripts/check-doc-flags.sh` Check 4 ("covers all live
+top-level CLI commands" passes vacuously for it, e.g. wy-gx5rj for `bd
+sync`). Bump it as part of THIS release, not a follow-up:
 
 ```bash
-cd website
-npm ci
-npm run docusaurus docs:version X.Y.Z
+# After tagging (see "Update Version and Create Release Tag" above):
+echo "v0.22.0" > docs/cli-docs.pin
+./scripts/generate-cli-docs.sh
+git add docs/cli-docs.pin docs/CLI_REFERENCE.md docs/cli-reference docs/docs.json
+git commit -m "docs: bump CLI docs pin to v0.22.0"
+git push origin main
 ```
 
-Then set `lastVersion` in `website/docusaurus.config.ts` to `X.Y.Z` so
-visitors default to the latest stable docs (not **Next**).
-
-Commit `website/versioned_docs/`, `website/versioned_sidebars/`, and
-`website/versions.json` with the release. The
-`scripts/generate-llms-full.sh` script pulls from the latest entry in
-`versions.json` so `llms-full.txt` stays aligned with that snapshot.
+Skipping this step doesn't fail fast — Check 4 stays green (it validates
+against the *old* pin) until the next bump, at which point every command
+added across the skipped releases shows up at once as a pile of "missing
+from docs/CLI_REFERENCE.md" failures with no obvious release to blame.
 
 ## 6. npm Package Release
 
@@ -514,6 +525,15 @@ curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/inst
 bd version
 ```
 
+### CLI Docs Pin
+
+```bash
+cat docs/cli-docs.pin  # should be the tag just released, not an older one
+```
+
+If it's stale, do the bump from the "Documentation Site (Mintlify)" step
+above before calling the release done.
+
 ## Prerelease / Release Candidate (RC) Workflow
 
 Release candidates let a build be validated through the full release pipeline
@@ -530,11 +550,9 @@ identifier (e.g. `1.1.0-rc.1`); Python tooling normalizes this to PEP 440 form
 - **PyPI** and **npm** publish jobs are **skipped**. The `publish-pypi` and
   `publish-npm` jobs are gated with `!contains(github.ref_name, '-')`, so a tag
   containing a `-` never reaches the stable package channels.
-- **The stable docs snapshot is not required.** `verify-version-consistency`
-  runs `scripts/check-versions.sh` without `BEADS_REQUIRE_RELEASE_DOCS=1` for
-  prerelease tags, and `scripts/check-docs-version.sh` treats a prerelease
-  canonical version as non-strict. The versioned docs stay on the latest stable
-  release until the base `X.Y.Z` ships.
+- **Docs are unaffected.** The docs site publishes from `main` via the
+  Mintlify GitHub integration; there is no release-time docs snapshot for
+  either prereleases or stable releases.
 
 ### Cut an RC
 
@@ -543,7 +561,6 @@ identifier (e.g. `1.1.0-rc.1`); Python tooling normalizes this to PEP 440 form
 #    same as a stable release. Date the CHANGELOG section.
 
 # 2. Bump versions. update-versions.sh accepts a prerelease identifier and,
-#    for prereleases, skips the Docusaurus docs snapshot automatically.
 ./scripts/update-versions.sh 1.1.0-rc.1
 #    Windows PE numeric fields (winres file_version/product_version and the
 #    manifest <assemblyIdentity> version) are set to the base version 1.1.0,
@@ -578,9 +595,9 @@ above. Tag creation is restricted to release maintainers; see
 - Install the RC from the GitHub prerelease assets and exercise the changes it
   is gating before promoting.
 - To promote to stable, bump to the base version with no suffix
-  (`./scripts/update-versions.sh 1.1.0`). The stable bump **does** require the
-  docs snapshot and **does** publish to Homebrew/PyPI/npm, so follow the
-  standard [Prepare Release](#1-prepare-release) steps from there.
+  (`./scripts/update-versions.sh 1.1.0`). The stable release **does** publish
+  to Homebrew/PyPI/npm, so follow the standard
+  [Prepare Release](#1-prepare-release) steps from there.
 
 ## Hotfix Releases
 

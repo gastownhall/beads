@@ -76,6 +76,9 @@ func init() {
 }
 
 func runExport(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("export is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("export")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -106,7 +109,13 @@ func runExport(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build filter for issues table. Export all statuses by default.
-	filter := types.IssueFilter{Limit: 0}
+	// Opt out of BEADS_MAX_ROWS (designer §4.1) — export is a data-integrity
+	// path and must never abort partway through an export run.
+	filter := types.IssueFilter{
+		Limit:         0,
+		MaxRows:       0,
+		MaxRowsSource: "",
+	}
 
 	// Exclude infra types by default (agents, roles, messages).
 	if !exportAll && !exportIncludeInfra {

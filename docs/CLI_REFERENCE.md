@@ -25,7 +25,6 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd gate list](#bd-gate-list) — List gate issues
   - [bd gate resolve](#bd-gate-resolve) — Manually resolve (close) a gate
   - [bd gate show](#bd-gate-show) — Show a gate issue
-- [bd heartbeat](#bd-heartbeat) — Refresh the lease on an issue you hold in_progress
 - [bd label](#bd-label) — Manage issue labels
   - [bd label add](#bd-label-add) — Add a label to one or more issues
   - [bd label list](#bd-label-list) — List labels for an issue
@@ -44,7 +43,6 @@ Reference for bd Latest. Generated from `bd help --all`.
 - [bd promote](#bd-promote) — Promote a wisp to a permanent bead
 - [bd q](#bd-q) — Quick capture: create issue and output only ID
 - [bd query](#bd-query) — Query issues using a simple query language
-- [bd reclaim](#bd-reclaim) — Revert stale-lease in_progress issues back to ready (dead-worker recovery)
 - [bd reopen](#bd-reopen) — Reopen one or more closed issues
 - [bd search](#bd-search) — Search issues by text query
 - [bd set-state](#bd-set-state) — Set operational state (creates event + updates label)
@@ -158,7 +156,6 @@ Reference for bd Latest. Generated from `bd help --all`.
   - [bd kv list](#bd-kv-list) — List all key-value pairs
   - [bd kv set](#bd-kv-set) — Set a key-value pair
 - [bd memories](#bd-memories) — List or search persistent memories
-- [bd migrate-personal](#bd-migrate-personal) — Move personal planning issues from the project database to your planning repo
 - [bd onboard](#bd-onboard) — Display minimal snippet for agent instructions file
 - [bd prime](#bd-prime) — Output AI-optimized workflow context
 - [bd quickstart](#bd-quickstart) — Quick start guide for bd
@@ -513,7 +510,6 @@ bd create [title] [flags]
       --silent                  Output only the issue ID (for scripting)
       --skills string           Required skills for this issue
       --spec-id string          Link to specification document
-  -s, --status string           Initial status
       --stdin                   Read description from stdin (alias for --body-file -)
       --title string            Issue title (alternative to positional argument)
   -t, --type string             Issue type (bug|feature|task|epic|chore|decision); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision (default "task")
@@ -816,31 +812,6 @@ This is similar to 'bd show' but validates that the issue is a gate.
 ```
 bd gate show <gate-id>
 ```
-
-### bd heartbeat
-
-Refresh the lease on an issue you currently hold in_progress.
-
-A claim carries a lease that expires after a TTL. A worker keeps its claim alive
-by heartbeating faster than the TTL; once it stops (because it died), the lease
-goes stale and 'bd reclaim' reverts the issue to ready so another worker can pick
-it up. Heartbeat pushes lease_expires_at forward and stamps heartbeat_at = now.
-
-Only the current owner may heartbeat. If the lease has already been reclaimed or
-the issue closed, heartbeat fails so the worker learns to stop.
-
-Heartbeat writes a Dolt commit, so heartbeat well below the TTL but not so fast
-it bloats history — cadence should be a small fraction of the TTL, not per-op.
-
-Examples:
-  bd heartbeat bd-123
-  bd hb bd-123
-
-```
-bd heartbeat <id>
-```
-
-**Aliases:** hb
 
 ### bd label
 
@@ -1237,37 +1208,6 @@ bd query [expression] [flags]
       --parse-only    Only parse the query and show the AST (for debugging)
   -r, --reverse       Reverse sort order
       --sort string   Sort by field: priority, created, updated, closed, status, id, title, type, assignee
-```
-
-### bd reclaim
-
-Revert in_progress issues whose lease has gone stale back to ready.
-
-When a worker claims an issue it takes a lease that expires after a TTL, kept
-alive by 'bd heartbeat'. A worker that dies stops heartbeating, so its lease
-expires and its issue would otherwise stay in_progress forever. reclaim is the
-reaper: it finds in_progress issues whose lease expired more than --older-than
-ago, clears the assignee, and sets them back to open so another worker can
-claim them. The previous owner's stale lease is recorded as a recovery event.
-
---older-than is a grace window past lease expiry: only leases that expired at
-least this long ago are reclaimed, so a worker briefly paused (GC, clock skew)
-is not robbed of live work. Run it from a supervisor on a timer with a window
-of roughly 2× the claim TTL.
-
-Examples:
-  bd reclaim                       # default grace window (2× the lease TTL)
-  bd reclaim --older-than 10m      # reclaim leases expired &gt;10m ago
-  bd reclaim --older-than 0s       # reclaim every currently-expired lease
-
-```
-bd reclaim [flags]
-```
-
-**Flags:**
-
-```
-      --older-than duration   Only reclaim leases that expired at least this long ago (grace window) (default 10m0s)
 ```
 
 ### bd reopen
@@ -2439,13 +2379,11 @@ bd export [flags]
 **Flags:**
 
 ```
-      --all                         Include all records (infra, templates, gates, memories)
-      --exclude-owner stringArray   Exclude issues created by this identity (repeatable; also reads export.exclude_owners config)
-      --include-infra               Include infrastructure beads (agents, roles, messages)
-      --include-memories            Include persistent memories (from 'bd remember') in the export
-  -o, --output string               Output file path (default: stdout)
-      --scrub                       Exclude test/pollution records
-      --verbose                     Print filtered issue count when owners are excluded
+      --all                Include all records (infra, templates, gates, memories)
+      --include-infra      Include infrastructure beads (agents, roles, messages)
+      --include-memories   Include persistent memories (from 'bd remember') in the export
+  -o, --output string      Output file path (default: stdout)
+      --scrub              Exclude test/pollution records
 ```
 
 ### bd federation
@@ -3101,13 +3039,7 @@ bd dolt remote
 Add a Dolt remote
 
 ```
-bd dolt remote add <name> <url> [flags]
-```
-
-**Flags:**
-
-```
-      --allow-git-origin   Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)
+bd dolt remote add <name> <url>
 ```
 
 ##### bd dolt remote list
@@ -3184,10 +3116,10 @@ Show the status of the Dolt engine for the current project.
 In embedded mode, reports that the Dolt engine runs in-process and shows
 the on-disk data directory. For beads-managed (local) servers, displays
 PID, port, and data directory from the local PID file. For externally-
-managed servers — a shared server (dolt.shared-server: true), a remote
-dolt_server_host, or a local server managed outside bd (dolt.auto-start:
-false, e.g. an orchestrator-shared sql-server) — pings the configured
-endpoint via SQL and reports reachability, server version, and database.
+managed servers — either a remote dolt_server_host or a local server
+managed outside bd (dolt.auto-start: false, e.g. an orchestrator-shared
+sql-server) — pings the configured endpoint via SQL and reports
+reachability, server version, and database.
 
 ```
 bd dolt status
@@ -3612,33 +3544,6 @@ Examples:
 
 ```
 bd memories [search]
-```
-
-### bd migrate-personal
-
-Identify issues you created in the project database and move them to your
-personal planning repository (~/.beads-planning by default).
-
-This is a one-time migration for contributors who created personal planning
-issues before contributor routing was configured.
-
-The command:
-  1. Finds all issues in the project database created by your git identity
-  2. Shows you the list and asks for confirmation
-  3. Moves them to the planning repo configured in routing.contributor
-
-EXAMPLES:
-  bd migrate-personal        # Interactive: show list and prompt
-  bd migrate-personal -y     # Non-interactive: skip confirmation
-
-```
-bd migrate-personal [flags]
-```
-
-**Flags:**
-
-```
-  -y, --yes   Skip confirmation prompt
 ```
 
 ### bd onboard
@@ -4319,12 +4224,6 @@ Use `--pattern '*'` if you really do want to sweep everything closed.
 Deletes: issues, dependencies, labels, events, and comments for matching beads.
 Skips: pinned beads (protected), open/in-progress beads, and ephemeral beads.
 
-Also skips closed beads whose ID appears in the description, notes, or
-comments of any open / in-progress bead. This protects ADR / decision /
-verification trails that downstream beads still cite. Use
---ignore-references to override (e.g., when bulk-decommissioning a
-retired label across the rig).
-
 To delete closed ephemeral beads (wisps, transient molecules) use
 `bd purge` instead.
 
@@ -4347,7 +4246,6 @@ bd prune [flags]
 ```
       --dry-run             Preview what would be pruned with stats
   -f, --force               Actually prune (without this, shows preview)
-      --ignore-references   Delete closed beads even when referenced by open beads (use with care; see --help for details)
       --older-than string   Only prune beads closed more than N ago (e.g., 30d, 2w, 60)
       --pattern string      Only prune beads matching ID glob pattern (e.g., 'gm-old-*')
 ```
@@ -6069,7 +5967,7 @@ Configuration (checked in order):
 
 Examples:
   # Configure delegation (one-time setup)
-  export BEADS_MAIL_DELEGATE="gt mail"
+  `export BEADS_MAIL_DELEGATE="gt mail"`
   # or
   bd config set mail.delegate "gt mail"
 

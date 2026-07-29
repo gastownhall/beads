@@ -71,32 +71,33 @@ fi
 # The complete set of generated doc artifacts, as git pathspecs.
 GEN_PATHSPECS=(
     "docs/CLI_REFERENCE.md"
-    "website/docs/cli-reference"
-    "website/static/llms-full.txt"
+    "docs/cli-reference"
+    "docs/docs.json"
 )
 
 print_fix_help() {
     echo ""
-    echo "To fix in any environment (build a canonical bd, then regenerate):"
-    echo "  CGO_ENABLED=0 go build -tags gms_pure_go -o ./bd-docs ./cmd/bd/"
-    echo "  ./scripts/generate-cli-docs.sh ./bd-docs"
-    echo "  ./scripts/generate-llms-full.sh"
-    echo "  rm ./bd-docs"
+    echo "To fix in any environment, regenerate with the pipeline's canonical bd"
+    echo "(built from the release pin in docs/cli-docs.pin when set, else from"
+    echo "this checkout, CGO_ENABLED=0 -tags gms_pure_go):"
+    echo "  ./scripts/generate-cli-docs.sh"
 }
 
 # Check out a commit into a scratch worktree and regenerate every generated
-# doc artifact there with the canonical pinned build.
+# doc artifact there with the canonical build: the release pin when that
+# commit has one, else a pure-Go build of the commit's own source.
 regen_worktree() {
     local sha="$1" dir="$2"
     git -C "$PROJECT_ROOT" worktree add --detach --quiet "$dir" "$sha"
     (
         cd "$dir"
-        CGO_ENABLED=0 go build -tags gms_pure_go -o "$dir/.docs-bd" ./cmd/bd/
-        ./scripts/generate-cli-docs.sh "$dir/.docs-bd" >/dev/null
-        if [ -x ./scripts/generate-llms-full.sh ]; then
-            ./scripts/generate-llms-full.sh >/dev/null
+        if [ -x scripts/resolve-docs-bd.sh ] && [ -n "$(scripts/resolve-docs-bd.sh)" ]; then
+            ./scripts/generate-cli-docs.sh >/dev/null
+        else
+            CGO_ENABLED=0 go build -tags gms_pure_go -o "$dir/.docs-bd" ./cmd/bd/
+            ./scripts/generate-cli-docs.sh "$dir/.docs-bd" >/dev/null
+            rm -f "$dir/.docs-bd"
         fi
-        rm -f "$dir/.docs-bd"
     )
 }
 
@@ -107,18 +108,20 @@ surface_fingerprint() {
     (
         cd "$dir"
         local f d
-        for f in docs/CLI_REFERENCE.md website/static/llms-full.txt; do
+        for f in docs/CLI_REFERENCE.md docs/docs.json; do
             if [ -f "$f" ]; then
                 printf '== %s\n' "$f"
                 cat "$f"
             fi
         done
-        if [ -d website/docs/cli-reference ]; then
-            find website/docs/cli-reference -type f -name '*.md' | sort | while IFS= read -r f; do
-                printf '== %s\n' "$f"
-                cat "$f"
-            done
-        fi
+        for d in docs/cli-reference; do
+            if [ -d "$d" ]; then
+                find "$d" -type f -name '*.md' | sort | while IFS= read -r f; do
+                    printf '== %s\n' "$f"
+                    cat "$f"
+                done
+            fi
+        done
     ) | sha256sum | awk '{print $1}'
 }
 
@@ -174,8 +177,11 @@ fi
 
 if git -C "$W_HEAD" diff --quiet; then
     echo "PASS: committed docs are fresh under the canonical pinned build."
-    echo "(The strict probe failed only because the supplied bd binary differs"
-    echo " from the canonical one. Build with: CGO_ENABLED=0 go build -tags gms_pure_go)"
+    echo "(The strict probe failed for a reason that does not affect committed state:"
+    echo " either the supplied bd binary differs from the canonical pinned build"
+    echo " [CGO_ENABLED=0 go build -tags gms_pure_go], or uncommitted local edits"
+    echo " to generated docs made the working tree diverge. Attribution compares"
+    echo " committed states only - commit local changes before relying on it.)"
     exit 0
 fi
 
@@ -194,7 +200,7 @@ if [ -z "$PR_TOUCHED" ] && [ "$FP_HEAD" = "$FP_BASE" ]; then
     echo "this change neither alters the regenerated CLI surface nor touches generated files."
     git -C "$W_HEAD" diff --stat | sed 's/^/  /'
     echo "Not failing this PR. The base branch needs a docs regeneration:"
-    echo "  ./scripts/generate-cli-docs.sh && ./scripts/generate-llms-full.sh"
+    echo "  ./scripts/generate-cli-docs.sh"
     if [ -n "${GITHUB_ACTIONS:-}" ]; then
         echo "::warning::Generated CLI docs are stale on the base branch (inherited drift, not introduced by this PR)."
     fi

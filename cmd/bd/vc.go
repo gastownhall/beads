@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -27,6 +28,36 @@ This subcommand provides additional operations like merge and commit.`,
 
 var vcMergeStrategy string
 
+// blockedAfterMergeRecomputer is the narrow store surface that repairs the
+// denormalized is_blocked column for the rows a merge brought in
+// (bd-578h9.11). Only the concrete stores implement it
+// (internal/storage/dolt/store.go, internal/storage/embeddeddolt/version_control.go);
+// it is NOT part of storage.DoltStorage.
+type blockedAfterMergeRecomputer interface {
+	RecomputeBlockedAfterMerge(ctx context.Context, fromCommit string) error
+}
+
+// blockedAfterMergeRecomputerFor peels the storage decorator chain before
+// asserting, so the optional interface is looked up on the concrete store.
+//
+// getStore() hands back the wireStorageDecorators chain — caller →
+// HookFiringStore → InstrumentedStorage → concrete store
+// (cmd/bd/storage_chain.go) — and both decorators embed the storage.DoltStorage
+// INTERFACE, so their promoted method sets are exactly DoltStorage's.
+// RecomputeBlockedAfterMerge is not in that set, so asserting on the chain
+// itself always failed and the post-merge recompute was silently skipped on
+// every rig carrying a hook layer, which is essentially all of them
+// (main.go builds a hook runner whenever dbPath != ""; only no-hooks:true /
+// BD_NO_HOOKS=1 leaves it off). Same defect class as wy-xtv17's
+// persistedRemoteProber; wy-163oy.
+func blockedAfterMergeRecomputerFor(st storage.DoltStorage) (blockedAfterMergeRecomputer, bool) {
+	if st == nil {
+		return nil, false
+	}
+	rs, ok := storage.UnwrapStore(st).(blockedAfterMergeRecomputer)
+	return rs, ok
+}
+
 var vcMergeCmd = &cobra.Command{
 	Use:   "merge <branch>",
 	Short: "Merge a branch into the current branch",
@@ -43,6 +74,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("vc merge is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("vc-merge")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -53,45 +87,22 @@ Examples:
 		ctx := rootCtx
 		branchName := args[0]
 
-		// Pre-merge HEAD scopes the post-resolution is_blocked recompute
-		// (bd-578h9.11); empty degrades to a full-graph pass.
-		preHead, _ := store.GetCurrentCommit(ctx)
+		if vcMergeStrategy != "" {
+			// #4992: a bare CALL DOLT_MERGE under autocommit rejects any real
+			// conflict before --strategy could ever be applied. MergeWithStrategy
+			// runs the whole merge/resolve/repair/commit sequence on a pinned
+			// session with Dolt's conflict-tolerant flags set, so the strategy
+			// actually reaches DOLT_CONFLICTS_RESOLVE.
+			merger, ok := storage.UnwrapStore(store).(storage.StrategicMerger)
+			if !ok {
+				return HandleErrorRespectJSON("storage backend %T does not support --strategy merges", storage.UnwrapStore(store))
+			}
+			conflicts, err := merger.MergeWithStrategy(ctx, branchName, vcMergeStrategy)
+			if err != nil {
+				return HandleErrorRespectJSON("failed to merge branch: %v", err)
+			}
 
-		// Perform merge
-		conflicts, err := store.Merge(ctx, branchName)
-		if err != nil {
-			return HandleErrorRespectJSON("failed to merge branch: %v", err)
-		}
-
-		if len(conflicts) > 0 {
-			if vcMergeStrategy != "" {
-				for _, conflict := range conflicts {
-					table := conflict.Field
-					if table == "" {
-						table = "issues"
-					}
-					if err := store.ResolveConflicts(ctx, table, vcMergeStrategy); err != nil {
-						return HandleErrorRespectJSON("failed to resolve conflicts: %v", err)
-					}
-				}
-				// Conclude the merge: an unresolved-then-resolved working set
-				// stays uncommitted otherwise, and the merged-in writes
-				// bypassed every is_blocked hook (bd-578h9.11). Use
-				// CommitMergeResolution, not Commit: server-mode Commit excludes
-				// config (GH#2455), so a resolved config conflict — routine now
-				// that kv.* user data syncs through config — would be silently
-				// dropped, leaving the merge unconcluded and re-wedging the next
-				// pull/sync (GH#2474).
-				if err := store.CommitMergeResolution(ctx, fmt.Sprintf("Resolve merge conflicts from %s using %s strategy", branchName, vcMergeStrategy)); err != nil {
-					return HandleErrorRespectJSON("conflicts resolved but commit failed: %v", err)
-				}
-				if rs, ok := store.(interface {
-					RecomputeBlockedAfterMerge(ctx context.Context, fromCommit string) error
-				}); ok {
-					if err := rs.RecomputeBlockedAfterMerge(ctx, preHead); err != nil {
-						return HandleErrorRespectJSON("conflicts resolved but is_blocked recompute failed: %v", err)
-					}
-				}
+			if len(conflicts) > 0 {
 				if jsonOutput {
 					return outputJSON(map[string]interface{}{
 						"merged":        branchName,
@@ -104,6 +115,27 @@ Examples:
 				return nil
 			}
 
+			if jsonOutput {
+				return outputJSON(map[string]interface{}{
+					"merged":    branchName,
+					"conflicts": 0,
+				})
+			}
+			fmt.Printf("Successfully merged %s\n", ui.RenderAccent(branchName))
+			return nil
+		}
+
+		// No --strategy: a real conflict makes store.Merge return an error —
+		// it still runs as a bare DOLT_MERGE under autocommit, which Dolt
+		// rejects on conflict (Error 1105), same as plain `dolt merge` with no
+		// further flags. versioncontrolops.Merge appends the --strategy escape
+		// hatch to that error's message.
+		conflicts, err := store.Merge(ctx, branchName)
+		if err != nil {
+			return HandleErrorRespectJSON("failed to merge branch: %v", err)
+		}
+
+		if len(conflicts) > 0 {
 			if jsonOutput {
 				return outputJSON(map[string]interface{}{
 					"merged":    branchName,
@@ -146,6 +178,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("vc commit is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("vc-commit")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -210,6 +245,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("vc status is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("vc-status")
 		defer func() {
 			if c := metrics.Global(); c != nil {

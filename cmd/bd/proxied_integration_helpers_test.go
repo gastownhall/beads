@@ -144,9 +144,17 @@ func bdProxiedListFail(t *testing.T, bd string, p proxiedProject, args ...string
 
 func bdProxiedRunBuffers(t *testing.T, bd, dir string, args ...string) (string, string, error) {
 	t.Helper()
+	return bdProxiedRunBuffersWithEnv(t, bd, dir, nil, args...)
+}
+
+// bdProxiedRunBuffersWithEnv is bdProxiedRunBuffers with extra environment
+// variables appended after the standard proxied env (so they can override
+// it, e.g. BEADS_MAX_ROWS for the proxied-server MaxRows-rejection tests).
+func bdProxiedRunBuffersWithEnv(t *testing.T, bd, dir string, envExtras []string, args ...string) (string, string, error) {
+	t.Helper()
 	cmd := exec.Command(bd, args...)
 	cmd.Dir = dir
-	cmd.Env = bdProxiedEnv(dir)
+	cmd.Env = append(bdProxiedEnv(dir), envExtras...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -302,7 +310,7 @@ func bdProxiedInitInternal(t *testing.T, bd, prefix string, skipHooks bool, extr
 	dir := t.TempDir()
 	initGitRepoAt(t, dir)
 	beadsDir := filepath.Join(dir, ".beads")
-	proxyRoot := filepath.Join(beadsDir, "proxieddb")
+	proxyRoot := filepath.Join(beadsDir, "dolt")
 	t.Cleanup(func() {
 		if err := proxy.Shutdown(proxyRoot); err != nil {
 			t.Logf("proxy.Shutdown(%s): %v", proxyRoot, err)

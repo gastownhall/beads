@@ -14,10 +14,25 @@ import (
 
 // isBackupAutoEnabled returns whether backup should run.
 // If user explicitly configured backup.enabled, use that.
-// Otherwise, auto-enable when a git remote exists.
+// Otherwise auto-enable when a git remote exists — BUT only in
+// embedded mode.
+//
+// In sql-server / shared-server mode (usesSQLServer()) the default is
+// OFF: N bd clients share a single Dolt server, and the Dolt-native
+// backup path (store.BackupDatabase) registers a server-side backup
+// remote under one fixed name pointing at THIS client's local
+// .beads/backup dir, then full-syncs the whole DB. With many clients
+// that means racing remove/add of the same name plus every client
+// full-syncing the entire history into its own dir — the amplifier
+// behind the 2026-07 shared-dolt CPU-pin incident. Operators who want
+// backups in server mode must opt in explicitly (backup.enabled=true
+// / BD_BACKUP_ENABLED=1) and coordinate destinations themselves.
 func isBackupAutoEnabled() bool {
 	if config.GetValueSource("backup.enabled") != config.SourceDefault {
 		return config.GetBool("backup.enabled")
+	}
+	if usesSQLServer() {
+		return false
 	}
 	return primeHasGitRemote()
 }
