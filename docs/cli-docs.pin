@@ -1,0 +1,12 @@
+# Pins the bd version that the generated CLI docs are produced from and
+# validated against: docs/CLI_REFERENCE.md, docs/cli-reference/, and the
+# CLI Reference pages array in docs/docs.json.
+#
+# The published docs site describes the latest *release*, not main's source,
+# so the docs pipeline builds bd from this tag (CGO_ENABLED=0, pure Go —
+# CI's canonical build) instead of the current checkout. Bump this tag as
+# part of each release, then run ./scripts/generate-cli-docs.sh.
+#
+# Set to HEAD to track the current checkout's source instead (the pre-pin
+# behavior).
+v1.1.0

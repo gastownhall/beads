@@ -103,7 +103,7 @@ osslsigncode sign \
     -pkcs12 "$CERT_FILE" \
     -pass "$WINDOWS_SIGNING_CERT_PASSWORD" \
     -n "beads - AI-supervised issue tracker" \
-    -i "https://github.com/steveyegge/beads" \
+    -i "https://github.com/gastownhall/beads" \
     -t "$TIMESTAMP_SERVER" \
     -in "$EXE_PATH" \
     -out "${EXE_PATH}.signed"

@@ -9,7 +9,7 @@ bd ready              # Find available work (open, no blockers)
 bd blocked            # Show blocked issues and what blocks them
 bd list               # List all issues (with blocker annotations)
 bd show <id>          # View issue details
-bd claim <id>         # Claim work (atomic compare-and-swap)
+bd update <id> --claim  # Claim work (atomic compare-and-swap)
 bd close <id>         # Complete work
 bd dolt push          # Push to Dolt remote
 ```

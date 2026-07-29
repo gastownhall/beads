@@ -15,10 +15,7 @@ import (
 func bdQuick(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
 	fullArgs := append([]string{"q"}, args...)
-	cmd := exec.Command(bd, fullArgs...)
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
 	if err != nil {
 		t.Fatalf("bd q %s failed: %v\n%s", strings.Join(args, " "), err, out)
 	}
@@ -32,7 +29,7 @@ func TestEmbeddedQuick(t *testing.T) {
 	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
-	dir, _, _ := bdInit(t, bd, "--prefix", "qq")
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "qq")
 
 	t.Run("basic_quick_create", func(t *testing.T) {
 		id := bdQuick(t, bd, dir, "Quick task")
@@ -132,6 +129,51 @@ func TestEmbeddedQuick(t *testing.T) {
 			t.Fatalf("expected bd q with no title to fail, got: %s", out)
 		}
 	})
+
+	t.Run("quick_parent", func(t *testing.T) {
+		parent := bdCreate(t, bd, dir, "Quick parent epic", "-t", "epic")
+		id := bdQuick(t, bd, dir, "Quick child", "--parent", parent.ID)
+
+		if !strings.HasPrefix(id, parent.ID+".") {
+			t.Errorf("child ID %q should start with %q.", id, parent.ID)
+		}
+		// Output contract: still ID-only, single line
+		if lines := strings.Split(id, "\n"); len(lines) != 1 {
+			t.Errorf("expected single-line ID output, got %d lines: %q", len(lines), id)
+		}
+
+		assertDepExists(t, beadsDir, "qq", id, parent.ID)
+	})
+
+	t.Run("quick_parent_label_inheritance", func(t *testing.T) {
+		parent := bdCreate(t, bd, dir, "Quick labeled parent", "-t", "epic", "-l", "team-q,inherited")
+		id := bdQuick(t, bd, dir, "Quick labeled child", "--parent", parent.ID, "-l", "own")
+
+		m := bdShowDetails(t, bd, dir, id)
+		labels, _ := m["labels"].([]interface{})
+		labelSet := map[string]bool{}
+		for _, l := range labels {
+			labelSet[l.(string)] = true
+		}
+		for _, want := range []string{"team-q", "inherited", "own"} {
+			if !labelSet[want] {
+				t.Errorf("expected label %q, got %v", want, labels)
+			}
+		}
+	})
+
+	t.Run("quick_parent_not_found_fails", func(t *testing.T) {
+		cmd := exec.Command(bd, "q", "Orphan child", "--parent", "qq-doesnotexist")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected bd q --parent with nonexistent parent to fail, got: %s", out)
+		}
+		if !strings.Contains(string(out), "not found") {
+			t.Errorf("expected 'not found' in error output, got: %s", out)
+		}
+	})
 }
 
 // TestEmbeddedQuickConcurrent exercises quick-create concurrently.
@@ -166,10 +208,7 @@ func TestEmbeddedQuickConcurrent(t *testing.T) {
 
 			for i := 0; i < issuesPerWorker; i++ {
 				title := fmt.Sprintf("w%d-quick-%d", worker, i)
-				cmd := exec.Command(bd, "q", title)
-				cmd.Dir = dir
-				cmd.Env = bdEnv(dir)
-				out, err := cmd.CombinedOutput()
+				out, err := bdRunWithFlockRetry(t, bd, dir, "q", title)
 				if err != nil {
 					r.err = fmt.Errorf("q %s: %v\n%s", title, err, out)
 					results[worker] = r

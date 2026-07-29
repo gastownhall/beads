@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/doltremote"
 )
 
 // resolveSyncRemote returns the effective sync remote URL.
@@ -36,29 +38,24 @@ func resolveSyncRemoteFromDir(beadsDir string) string {
 // nothing to commit). Used by bd dolt remote add/remove to keep the
 // working tree clean after persisting sync.remote.
 func commitBeadsConfig(msg string) {
-	addCmd := exec.Command("git", "add", ".beads/config.yaml")
+	commitBeadsConfigForActiveRepo(context.Background(), msg)
+}
+
+func commitBeadsConfigForActiveRepo(ctx context.Context, msg string) {
+	rc, err := beads.GetRepoContext()
+	if err != nil {
+		return
+	}
+	addCmd := rc.GitCmd(ctx, "add", ".beads/config.yaml")
 	if err := addCmd.Run(); err != nil {
 		return
 	}
-	commitCmd := exec.Command("git", "commit", "-m", msg) //nolint:gosec // G702: msg is from internal callers only, not user input
+	commitCmd := rc.GitCmd(ctx, "commit", "-m", msg)
 	if out, err := commitCmd.CombinedOutput(); err != nil {
-		// "nothing to commit" is normal if the file was already staged
 		if !strings.Contains(string(out), "nothing to commit") {
 			fmt.Fprintf(os.Stderr, "Warning: failed to commit config change: %v\n", err)
 		}
 	}
-}
-
-// doltNativeSchemes are URL schemes that Dolt understands natively
-// and should not be converted through gitURLToDoltRemote.
-var doltNativeSchemes = []string{
-	"dolthub://",
-	"file://",
-	"aws://",
-	"gs://",
-	"git+https://",
-	"git+ssh://",
-	"git+http://",
 }
 
 // normalizeRemoteURL converts a remote URL to a Dolt-compatible format.
@@ -67,20 +64,5 @@ var doltNativeSchemes = []string{
 // via gitURLToDoltRemote. Unknown schemes are returned as-is and let
 // dolt clone decide.
 func normalizeRemoteURL(url string) string {
-	for _, scheme := range doltNativeSchemes {
-		if strings.HasPrefix(url, scheme) {
-			return url
-		}
-	}
-	// Git-style URLs need conversion to dolt remote format
-	if strings.HasPrefix(url, "https://") || strings.HasPrefix(url, "http://") ||
-		strings.HasPrefix(url, "ssh://") {
-		return gitURLToDoltRemote(url)
-	}
-	// SCP-style git@host:path
-	if idx := strings.Index(url, ":"); idx > 0 && !strings.Contains(url[:idx], "/") && strings.Contains(url, "@") {
-		return gitURLToDoltRemote(url)
-	}
-	// Unknown scheme — return as-is, let dolt handle it
-	return url
+	return doltremote.Normalize(url)
 }

@@ -41,6 +41,8 @@ Tests on graphs with different topologies (linear chains, trees, dense graphs):
 ### Search Operations
 - **BenchmarkSearchIssues_Large_NoFilter** - Search all open issues (10K dataset)
 - **BenchmarkSearchIssues_Large_ComplexFilter** - Search with priority/status filters (10K dataset)
+- **BenchmarkPerfSearchTypedLabelFilter_5K** - Label/type search over a 5K issue/label catalog
+- **BenchmarkPerfResolvePartialIDInvalidInput_5K** - Invalid partial-ID rejection without a broad fallback scan
 
 ### CRUD Operations
 - **BenchmarkCreateIssue_Large** - Create new issue in 10K database
@@ -50,6 +52,54 @@ Tests on graphs with different topologies (linear chains, trees, dense graphs):
 ### Specialized Operations
 - **BenchmarkLargeDescription** - Handling 100KB+ issue descriptions (NEW)
 - **BenchmarkSyncMerge** - Simulate sync cycle with create/update operations (NEW)
+
+### Recent Perf Regression References
+
+These benchmarks cover the May 2026 Dolt hot-path changes so future perf PRs can run before/after checks against the same fixture shapes:
+
+| PR / change | Benchmark |
+|-------------|-----------|
+| #3966 `perf(deps): narrow recursive cycle checks` | `BenchmarkPerfAddDependencyCycleCheck_DiamondDAG` |
+| #3967 `perf(search): tighten label and partial-id queries` | `BenchmarkPerfSearchTypedLabelFilter_5K`, `BenchmarkPerfResolvePartialIDInvalidInput_5K` |
+| #3968 `perf(ready): page blocked checks for limited ready work` | `BenchmarkPerfReadyWorkLimited_LargeBlockedGraph` |
+| #4001 `perf(ready): narrow deferred-parent child filtering` | `BenchmarkPerfReadyWorkDeferredParentExclusion_5K` |
+| #4002 `perf(ready): restrict blocked dependency scans to active IDs` | `BenchmarkPerfBlockedIssues_ClosedDependencySkew` |
+| #4003 `perf(get): query primary issues before wisp fallback` | `BenchmarkPerfGetIssuePrimaryFirst_PermanentWithWisps` |
+| #4004 `perf(deps): scan one cycle table for same-storage edges` | No standalone executable perf diff in the landed squash; covered by the cycle-check benchmark above |
+
+Measured with `-benchtime=1x -benchmem -count=1` on the same host, copying this benchmark file onto each before/after ref:
+
+| PR / path | Benchmark | Before | After | Time gain | Alloc gain |
+|-----------|-----------|--------|-------|-----------|------------|
+| #3967 label/type search | `BenchmarkPerfSearchTypedLabelFilter_5K` | 134.8 ms | 51.8 ms | 61.6% | -0.1% |
+| #3967 invalid partial-ID fallback | `BenchmarkPerfResolvePartialIDInvalidInput_5K` | 124.3 ms | 22.5 ms | 81.9% | 43.6% |
+| #3966 dependency cycle check | `BenchmarkPerfAddDependencyCycleCheck_DiamondDAG` | 80.0 ms | 25.8 ms | 67.7% | 1.4% |
+| #3968 limited ready work | `BenchmarkPerfReadyWorkLimited_LargeBlockedGraph` | 1677.4 ms | 341.7 ms | 79.6% | 85.4% |
+| #4001 deferred parent exclusion | `BenchmarkPerfReadyWorkDeferredParentExclusion_5K` | 3257.3 ms | 130.8 ms | 96.0% | 83.1% |
+| #4002 active blocked-dep scan | `BenchmarkPerfBlockedIssues_ClosedDependencySkew` | 44.3 ms | 36.2 ms | 18.1% | 96.0% |
+| #4003 primary issue lookup | `BenchmarkPerfGetIssuePrimaryFirst_PermanentWithWisps` | 9.0 ms | 6.4 ms | 28.7% | 10.7% |
+
+Run the recent perf reference set with:
+
+```bash
+go test -run=^$ -bench='BenchmarkPerf(SearchTypedLabelFilter|ResolvePartialIDInvalidInput|AddDependencyCycleCheck|ReadyWorkLimited|BlockedIssues|ReadyWorkDeferredParentExclusion|GetIssuePrimaryFirst)' -benchtime=1x -benchmem ./internal/storage/dolt
+```
+
+For production-shaped CLI timeout and index experiments, use:
+
+```bash
+go run ./scripts/repro-dolt-prod-timeouts --bd ./bd --scenario all
+go run ./scripts/bench-ready-indexes --dsn 'root@tcp(127.0.0.1:33307)/mc?timeout=30s&readTimeout=30s&writeTimeout=30s'
+```
+
+When `repro-dolt-prod-timeouts` targets an existing workspace with
+`--workspace`, fixture seeding defaults to `--seed-mode=none`; pass
+`--seed-mode=full` or `--seed-mode=dep-only` only when intentionally writing
+and committing synthetic fixture rows into that workspace.
+
+`bench-ready-indexes` drops its candidate indexes again before exit by default;
+pass `--keep-indexes` only when intentionally leaving the final index set
+installed.
 
 ## Performance Targets
 

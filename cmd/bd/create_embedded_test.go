@@ -80,23 +80,56 @@ func bdCreateFail(t *testing.T, bd, dir string, args ...string) string {
 	return string(out)
 }
 
+type graphCreateResult struct {
+	IDs map[string]string `json:"ids"`
+}
+
+func writeGraphCreatePlan(t *testing.T, dir string) string {
+	t.Helper()
+	plan := `{
+		"nodes": [
+			{"key": "root", "title": "Graph root", "type": "task"},
+			{"key": "child", "title": "Graph child", "type": "task", "parent_key": "root"}
+		]
+	}`
+	planFile := filepath.Join(dir, "graph-plan.json")
+	if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
+		t.Fatalf("write graph plan: %v", err)
+	}
+	return planFile
+}
+
+func bdCreateGraph(t *testing.T, bd, dir, planFile string, args ...string) graphCreateResult {
+	t.Helper()
+	fullArgs := append([]string{"create", "--json", "--graph", planFile}, args...)
+	out, err := bdRunWithFlockRetry(t, bd, dir, fullArgs...)
+	if err != nil {
+		t.Fatalf("bd create --graph %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	var result graphCreateResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("parse graph create result: %v\n%s", err, out)
+	}
+	return result
+}
+
 // bdShow runs "bd show <id> --json" and returns the parsed issue.
 func bdShow(t *testing.T, bd, dir, id string) *types.Issue {
 	t.Helper()
 	cmd := exec.Command(bd, "show", id, "--json")
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd show %s --json failed: %v\n%s", id, err, out)
+		t.Fatalf("bd show %s --json failed: %v\nstdout:\n%s\nstderr:\n%s", id, err, stdout.String(), stderr.String())
 	}
-	return parseIssueJSON(t, out)
+	return parseIssueJSON(t, stdout.Bytes())
 }
 
 // openStore opens an EmbeddedDoltStore for direct verification queries.
 func openStore(t *testing.T, beadsDir, database string) *embeddeddolt.EmbeddedDoltStore {
 	t.Helper()
-	store, err := embeddeddolt.New(t.Context(), beadsDir, database, "main")
+	store, err := embeddeddolt.Open(t.Context(), beadsDir, database, "main")
 	if err != nil {
 		t.Fatalf("openStore: %v", err)
 	}
@@ -115,13 +148,34 @@ func assertDepExists(t *testing.T, beadsDir, database, issueID, dependsOnID stri
 	defer cleanup()
 	var count int
 	err = db.QueryRowContext(t.Context(),
-		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_id = ?",
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
 		issueID, dependsOnID).Scan(&count)
 	if err != nil {
 		t.Fatalf("query dependencies: %v", err)
 	}
 	if count == 0 {
 		t.Errorf("expected dependency %s -> %s, not found", issueID, dependsOnID)
+	}
+}
+
+func assertDepExistsWithType(t *testing.T, beadsDir, database, issueID, dependsOnID, expectedType string) {
+	t.Helper()
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+
+	var depType string
+	err = db.QueryRowContext(t.Context(),
+		"SELECT type FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+		issueID, dependsOnID).Scan(&depType)
+	if err != nil {
+		t.Fatalf("query dependencies for %s -> %s: %v", issueID, dependsOnID, err)
+	}
+	if depType != expectedType {
+		t.Errorf("dependency %s -> %s: got type %q, want %q", issueID, dependsOnID, depType, expectedType)
 	}
 }
 
@@ -272,6 +326,34 @@ func TestEmbeddedCreate(t *testing.T) {
 		assertDepExists(t, beadsDir, "dp", parent.ID, child.ID)
 	})
 
+	t.Run("blocked_by_alias", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "bb")
+		blocker := bdCreate(t, bd, dir, "Blocker issue")
+		blocked := bdCreate(t, bd, dir, "Blocked issue", "--deps", "blocked-by:"+blocker.ID)
+
+		assertDepExistsWithType(t, beadsDir, "bb", blocked.ID, blocker.ID, "blocks")
+	})
+
+	t.Run("depends_on_alias", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "do")
+		prereq := bdCreate(t, bd, dir, "Prerequisite")
+		dependent := bdCreate(t, bd, dir, "Dependent issue", "--deps", "depends-on:"+prereq.ID)
+
+		assertDepExistsWithType(t, beadsDir, "do", dependent.ID, prereq.ID, "blocks")
+	})
+
+	t.Run("unknown_dep_type_rejected", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "ud")
+		blocker := bdCreate(t, bd, dir, "Blocker")
+		out := bdCreateFail(t, bd, dir, "Bad dep type", "--deps", "bogus-type:"+blocker.ID)
+		if !strings.Contains(out, "unknown dependency type") {
+			t.Errorf("expected 'unknown dependency type' error, got:\n%s", out)
+		}
+		if !strings.Contains(out, "blocked-by") || !strings.Contains(out, "depends-on") {
+			t.Errorf("expected accepted dependency aliases in error, got:\n%s", out)
+		}
+	})
+
 	t.Run("multiple_dependencies", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "md")
 		dep1 := bdCreate(t, bd, dir, "Dep 1")
@@ -363,6 +445,42 @@ func TestEmbeddedCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("initial_status_builtin", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sb")
+		issue := bdCreate(t, bd, dir, "Blocked issue", "--status", "blocked")
+		if issue.Status != types.StatusBlocked {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusBlocked)
+		}
+	})
+
+	t.Run("initial_status_custom", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sc")
+		bdConfig(t, bd, dir, "set", "status.custom", "review:wip")
+		issue := bdCreate(t, bd, dir, "Review issue", "--status", "review")
+		if issue.Status != types.Status("review") {
+			t.Errorf("status: got %q, want review", issue.Status)
+		}
+	})
+
+	t.Run("initial_status_invalid", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "si")
+		out := bdCreateFail(t, bd, dir, "Invalid status issue", "--status", "not_a_status")
+		if !strings.Contains(out, `invalid status "not_a_status"`) {
+			t.Fatalf("expected invalid status error, got:\n%s", out)
+		}
+	})
+
+	t.Run("initial_status_wins_over_defer", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "sd")
+		issue := bdCreate(t, bd, dir, "Deferred but blocked issue", "--status", "blocked", "--defer", "+2h")
+		if issue.Status != types.StatusBlocked {
+			t.Errorf("status: got %q, want %q", issue.Status, types.StatusBlocked)
+		}
+		if issue.DeferUntil == nil {
+			t.Fatal("expected DeferUntil to be set")
+		}
+	})
+
 	t.Run("ephemeral", func(t *testing.T) {
 		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ep")
 		issue := bdCreate(t, bd, dir, "Ephemeral issue", "--ephemeral")
@@ -389,6 +507,264 @@ func TestEmbeddedCreate(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "No history issue", "--no-history")
 		if issue.ID == "" {
 			t.Fatal("expected issue ID")
+		}
+	})
+
+	t.Run("graph_ephemeral", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "ge")
+		planFile := writeGraphCreatePlan(t, dir)
+		result := bdCreateGraph(t, bd, dir, planFile, "--ephemeral")
+		rootID := result.IDs["root"]
+		childID := result.IDs["child"]
+		if rootID == "" || childID == "" {
+			t.Fatalf("expected root and child IDs, got %#v", result.IDs)
+		}
+
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "ge", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+
+		for _, id := range []string{rootID, childID} {
+			var ephemeral, noHistory int
+			if err := db.QueryRowContext(t.Context(), "SELECT ephemeral, no_history FROM wisps WHERE id = ?", id).Scan(&ephemeral, &noHistory); err != nil {
+				t.Fatalf("query graph ephemeral bead %s: %v", id, err)
+			}
+			if ephemeral != 1 || noHistory != 0 {
+				t.Fatalf("graph ephemeral bead %s flags = ephemeral:%d no_history:%d, want 1/0", id, ephemeral, noHistory)
+			}
+		}
+	})
+
+	t.Run("graph_no_history", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gn")
+		planFile := writeGraphCreatePlan(t, dir)
+		result := bdCreateGraph(t, bd, dir, planFile, "--no-history")
+		rootID := result.IDs["root"]
+		childID := result.IDs["child"]
+		if rootID == "" || childID == "" {
+			t.Fatalf("expected root and child IDs, got %#v", result.IDs)
+		}
+
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gn", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+
+		for _, id := range []string{rootID, childID} {
+			var ephemeral, noHistory int
+			if err := db.QueryRowContext(t.Context(), "SELECT ephemeral, no_history FROM wisps WHERE id = ?", id).Scan(&ephemeral, &noHistory); err != nil {
+				t.Fatalf("query graph no-history bead %s: %v", id, err)
+			}
+			if ephemeral != 0 || noHistory != 1 {
+				t.Fatalf("graph no-history bead %s flags = ephemeral:%d no_history:%d, want 0/1", id, ephemeral, noHistory)
+			}
+		}
+	})
+
+	t.Run("graph_full_fields", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "gff")
+		plan := `{
+			"nodes": [
+				{
+					"key": "main",
+					"id": "gff-a1b2c3",
+					"title": "Full-field node",
+					"type": "task",
+					"status": "in_progress",
+					"description": "desc",
+					"design": "the design",
+					"acceptance_criteria": "the criteria",
+					"notes": "the notes",
+					"spec_id": "gff-spec1",
+					"external_ref": "gh-42",
+					"assignee": "worker",
+					"owner": "owner@example.com",
+					"priority": 1,
+					"estimated_minutes": 45,
+					"due_at": "2030-01-02T15:04:05Z",
+					"labels": ["x", "y"],
+					"metadata": {"str": "v", "num": 3},
+					"mol_type": "swarm",
+					"pinned": true
+				},
+				{
+					"key": "deferred",
+					"title": "Deferred node",
+					"defer_until": "2030-01-01T00:00:00Z"
+				},
+				{
+					"key": "done",
+					"title": "Closed node",
+					"status": "closed"
+				},
+				{
+					"key": "evt",
+					"title": "Event node",
+					"type": "event",
+					"event_kind": "agent.started",
+					"actor": "agent://a",
+					"target": "bead://b",
+					"payload": "{\"k\":1}"
+				}
+			]
+		}`
+		planFile := filepath.Join(dir, "full-fields-plan.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
+			t.Fatalf("write graph plan: %v", err)
+		}
+		result := bdCreateGraph(t, bd, dir, planFile)
+
+		if result.IDs["main"] != "gff-a1b2c3" {
+			t.Errorf("explicit id: got %q, want gff-a1b2c3", result.IDs["main"])
+		}
+
+		issue := bdShow(t, bd, dir, result.IDs["main"])
+		if issue.Status != types.StatusInProgress {
+			t.Errorf("status: got %q, want in_progress", issue.Status)
+		}
+		if issue.Description != "desc" || issue.Design != "the design" || issue.AcceptanceCriteria != "the criteria" || issue.Notes != "the notes" {
+			t.Errorf("content fields lost: %+v", issue)
+		}
+		if issue.SpecID != "gff-spec1" {
+			t.Errorf("spec_id: got %q", issue.SpecID)
+		}
+		if issue.ExternalRef == nil || *issue.ExternalRef != "gh-42" {
+			t.Errorf("external_ref: got %v", issue.ExternalRef)
+		}
+		if issue.Assignee != "worker" {
+			t.Errorf("assignee: got %q", issue.Assignee)
+		}
+		if issue.Owner != "owner@example.com" {
+			t.Errorf("owner: got %q", issue.Owner)
+		}
+		if issue.Priority != 1 {
+			t.Errorf("priority: got %d, want 1", issue.Priority)
+		}
+		if issue.EstimatedMinutes == nil || *issue.EstimatedMinutes != 45 {
+			t.Errorf("estimated_minutes: got %v, want 45", issue.EstimatedMinutes)
+		}
+		if issue.DueAt == nil || issue.DueAt.Format("2006-01-02") != "2030-01-02" {
+			t.Errorf("due_at: got %v", issue.DueAt)
+		}
+		if issue.MolType != types.MolType("swarm") {
+			t.Errorf("mol_type: got %q", issue.MolType)
+		}
+		if !issue.Pinned {
+			t.Errorf("pinned not set")
+		}
+		var meta map[string]any
+		if err := json.Unmarshal(issue.Metadata, &meta); err != nil {
+			t.Fatalf("metadata not valid JSON: %v", err)
+		}
+		if meta["str"] != "v" || meta["num"] != float64(3) {
+			t.Errorf("metadata round-trip wrong (non-string values must survive): %v", meta)
+		}
+
+		deferred := bdShow(t, bd, dir, result.IDs["deferred"])
+		if deferred.Status != types.StatusDeferred {
+			t.Errorf("deferred status: got %q, want deferred", deferred.Status)
+		}
+		if deferred.DeferUntil == nil {
+			t.Errorf("defer_until lost")
+		}
+
+		done := bdShow(t, bd, dir, result.IDs["done"])
+		if done.Status != types.StatusClosed {
+			t.Errorf("closed status: got %q, want closed", done.Status)
+		}
+		if done.ClosedAt == nil {
+			t.Errorf("closed node missing auto-filled closed_at")
+		}
+
+		evt := bdShow(t, bd, dir, result.IDs["evt"])
+		if evt.EventKind != "agent.started" || evt.Actor != "agent://a" || evt.Target != "bead://b" || evt.Payload != `{"k":1}` {
+			t.Errorf("event fields lost: kind=%q actor=%q target=%q payload=%q", evt.EventKind, evt.Actor, evt.Target, evt.Payload)
+		}
+	})
+
+	t.Run("graph_waits_for_gate", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gw")
+		plan := `{
+			"nodes": [
+				{"key": "gate", "title": "Fanout gate"},
+				{"key": "spawner", "title": "Spawner step"}
+			],
+			"edges": [
+				{"from_key": "gate", "to_key": "spawner", "type": "waits-for", "gate": "any-children", "spawner_key": "spawner"}
+			]
+		}`
+		planFile := filepath.Join(dir, "gate-plan.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
+			t.Fatalf("write graph plan: %v", err)
+		}
+		result := bdCreateGraph(t, bd, dir, planFile)
+		gateID := result.IDs["gate"]
+		spawnerID := result.IDs["spawner"]
+
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gw", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+
+		var metadata string
+		err = db.QueryRowContext(t.Context(),
+			"SELECT COALESCE(metadata, '') FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ? AND type = 'waits-for'",
+			gateID, spawnerID).Scan(&metadata)
+		if err != nil {
+			t.Fatalf("query waits-for dep: %v", err)
+		}
+		var meta types.WaitsForMeta
+		if err := json.Unmarshal([]byte(metadata), &meta); err != nil {
+			t.Fatalf("dep metadata not WaitsForMeta JSON (%q): %v", metadata, err)
+		}
+		if meta.Gate != types.WaitsForAnyChildren {
+			t.Errorf("gate: got %q, want any-children", meta.Gate)
+		}
+		if meta.SpawnerID != spawnerID {
+			t.Errorf("spawner: got %q, want resolved key %q", meta.SpawnerID, spawnerID)
+		}
+	})
+
+	t.Run("graph_per_node_storage_class", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gs")
+		plan := `{
+			"nodes": [
+				{"key": "durable", "title": "Durable node"},
+				{"key": "wisp", "title": "Wisp node", "ephemeral": true}
+			]
+		}`
+		planFile := filepath.Join(dir, "storage-plan.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0o600); err != nil {
+			t.Fatalf("write graph plan: %v", err)
+		}
+		result := bdCreateGraph(t, bd, dir, planFile)
+
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gs", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+
+		var count int
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues WHERE id = ?", result.IDs["durable"]).Scan(&count); err != nil {
+			t.Fatalf("query issues: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("durable node not in issues table")
+		}
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM wisps WHERE id = ?", result.IDs["wisp"]).Scan(&count); err != nil {
+			t.Fatalf("query wisps: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("per-node ephemeral override not routed to wisps table")
 		}
 	})
 
@@ -424,6 +800,15 @@ func TestEmbeddedCreate(t *testing.T) {
 		}
 	})
 
+	t.Run("linear_external_ref", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "ler")
+		ref := "https://linear.app/team/issue/TEAM-123/fix-login"
+		issue := bdCreate(t, bd, dir, "Pre-linked Linear issue", "--external-ref", ref)
+		if issue.ExternalRef == nil || *issue.ExternalRef != ref {
+			t.Errorf("external_ref: got %v, want %q", issue.ExternalRef, ref)
+		}
+	})
+
 	t.Run("metadata", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "mt")
 		issue := bdCreate(t, bd, dir, "Metadata issue", "--metadata", `{"key":"value"}`)
@@ -445,15 +830,48 @@ func TestEmbeddedCreate(t *testing.T) {
 		cmd := exec.Command(bd, "create", "--dry-run", "Dry run issue", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd create --dry-run failed: %v\n%s", err, out)
+			t.Fatalf("bd create --dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 
 		// Dry run should not persist anything. Create a real issue and verify
 		// the dry-run issue doesn't exist.
-		if strings.Contains(string(out), "error") {
-			t.Errorf("dry-run produced error output: %s", out)
+		if strings.Contains(stdout.String(), "error") {
+			t.Errorf("dry-run produced error output: %s", stdout.String())
+		}
+	})
+
+	t.Run("dry_run_parent_label_inheritance", func(t *testing.T) {
+		dir, _, _ := bdInit(t, bd, "--prefix", "dp")
+		parent := bdCreate(t, bd, dir, "Parent with labels", "-t", "epic", "-l", "team-a,shared")
+
+		cmd := exec.Command(bd, "create", "--dry-run", "Preview child", "--json",
+			"--parent", parent.ID, "-l", "child,shared")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd create --dry-run --parent failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		preview := parseIssueJSON(t, stdout.Bytes())
+		labelMap := make(map[string]bool)
+		for _, label := range preview.Labels {
+			labelMap[label] = true
+		}
+		for _, want := range []string{"team-a", "shared", "child"} {
+			if !labelMap[want] {
+				t.Fatalf("dry-run labels = %v, want %q", preview.Labels, want)
+			}
+		}
+		if len(preview.Labels) != 3 {
+			t.Fatalf("dry-run labels = %v, want 3 deduped labels", preview.Labels)
+		}
+
+		child := bdCreate(t, bd, dir, "Real child after dry-run", "--parent", parent.ID)
+		if child.ID != parent.ID+".1" {
+			t.Fatalf("child ID after dry-run = %q, want %q", child.ID, parent.ID+".1")
 		}
 	})
 
@@ -520,9 +938,9 @@ A new feature
 		cmd := exec.Command(bd, "create", "-f", mdFile, "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd create -f failed: %v\n%s", err, out)
+			t.Fatalf("bd create -f failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
 
 		// Verify both issues were created
@@ -533,6 +951,62 @@ A new feature
 		}
 		if stats.TotalIssues < 2 {
 			t.Errorf("expected at least 2 issues from markdown, got %d", stats.TotalIssues)
+		}
+	})
+
+	t.Run("graph_initial_labels_not_duplicated", func(t *testing.T) {
+		dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gl")
+		plan := `{
+  "nodes": [
+    {"key": "root", "title": "Graph root", "type": "task", "labels": ["team-a", "shared"]}
+  ]
+}`
+		planFile := filepath.Join(dir, "graph-labels.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		cmd := exec.Command(bd, "create", "--graph", planFile, "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd create --graph failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		var result GraphApplyResult
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatalf("parse graph result: %v\nstdout:\n%s", err, stdout.String())
+		}
+		id := result.IDs["root"]
+		if id == "" {
+			t.Fatalf("graph result missing root ID: %#v", result.IDs)
+		}
+
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "gl", "main")
+		if err != nil {
+			t.Fatalf("OpenSQL: %v", err)
+		}
+		defer cleanup()
+
+		var labelCount int
+		if err := db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = ?", id).Scan(&labelCount); err != nil {
+			t.Fatalf("count labels: %v", err)
+		}
+		if labelCount != 2 {
+			t.Fatalf("label count = %d, want 2", labelCount)
+		}
+
+		var labelEventCount int
+		if err := db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ?",
+			id, types.EventLabelAdded).Scan(&labelEventCount); err != nil {
+			t.Fatalf("count label events: %v", err)
+		}
+		if labelEventCount != 2 {
+			t.Fatalf("label_added event count = %d, want 2", labelEventCount)
 		}
 	})
 
@@ -694,6 +1168,47 @@ func TestEmbeddedCreateCommitPending(t *testing.T) {
 	})
 }
 
+func TestEmbeddedCreateFormCommitsLabelOnlyCreate(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+
+	bd := buildEmbeddedBD(t)
+	_, beadsDir, _ := bdInit(t, bd, "--prefix", "cfl")
+	store := openStore(t, beadsDir, "cfl")
+
+	issue, err := CreateIssueFromFormValues(t.Context(), store, &createFormValues{
+		Title:     "Form labels commit",
+		Priority:  2,
+		IssueType: "task",
+		Labels:    []string{"form", "initial"},
+	}, "tester")
+	if err != nil {
+		t.Fatalf("CreateIssueFromFormValues: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close store: %v", err)
+	}
+
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "cfl", "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+
+	var labelCount int
+	if err := db.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = ?",
+		issue.ID,
+	).Scan(&labelCount); err != nil {
+		t.Fatalf("count committed labels: %v", err)
+	}
+	if labelCount != 2 {
+		t.Fatalf("committed label count = %d, want 2", labelCount)
+	}
+}
+
 // TestEmbeddedCreateCrossRepo verifies that bd create --repo routes to a different
 // repo's embedded dolt store, creates the issue there, and commits it.
 func TestEmbeddedCreateCrossRepo(t *testing.T) {
@@ -777,6 +1292,77 @@ func TestEmbeddedCreateCrossRepoWithParent(t *testing.T) {
 	// Verify parent-child dependency exists in the target store
 	targetBeadsDir := filepath.Join(targetDir, ".beads")
 	assertDepExists(t, targetBeadsDir, "tgt", child.ID, parent.ID)
+}
+
+func TestEmbeddedCreateDryRunRepoDoesNotInitializeTarget(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	dir, _, _ := bdInit(t, bd, "--prefix", "dr")
+	targetDir := filepath.Join(dir, "uninit-dry-run-target")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+
+	cmd := exec.Command(bd, "create", "--dry-run", "Preview only", "--json", "--repo", targetDir)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd create --dry-run --repo failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	if _, err := os.Stat(filepath.Join(targetDir, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf("dry-run target .beads stat err = %v, want not exist", err)
+	}
+}
+
+func TestEmbeddedCreateCrossRepoDryRunWithParent(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	dir, _, _ := bdInit(t, bd, "--prefix", "drp")
+	targetDir := filepath.Join(dir, "target-repo")
+	if err := os.MkdirAll(targetDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepoAt(t, targetDir)
+	runBDInit(t, bd, targetDir, "--prefix", "tgt")
+
+	parent := bdCreate(t, bd, dir, "Parent epic", "-t", "epic", "-l", "team-a,shared", "--repo", targetDir)
+	cmd := exec.Command(bd, "create", "--dry-run", "Preview child", "--json",
+		"--parent", parent.ID, "-l", "child,shared", "--repo", targetDir)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd create --dry-run --repo --parent failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	preview := parseIssueJSON(t, stdout.Bytes())
+	labelMap := make(map[string]bool)
+	for _, label := range preview.Labels {
+		labelMap[label] = true
+	}
+	for _, want := range []string{"team-a", "shared", "child"} {
+		if !labelMap[want] {
+			t.Fatalf("dry-run labels = %v, want %q", preview.Labels, want)
+		}
+	}
+
+	child := bdCreate(t, bd, dir, "Real child after dry-run", "--parent", parent.ID, "--repo", targetDir)
+	if child.ID != parent.ID+".1" {
+		t.Fatalf("child ID after dry-run = %q, want %q", child.ID, parent.ID+".1")
+	}
 }
 
 // TestEmbeddedCreateCrossRepoUninit verifies that bd create --repo works when
@@ -884,10 +1470,7 @@ func TestEmbeddedCreateConcurrent(t *testing.T) {
 			var ids []string
 			for i := 0; i < issuesPerWorker; i++ {
 				title := fmt.Sprintf("worker-%d-issue-%d", worker, i)
-				cmd := exec.Command(bd, "create", "--silent", title)
-				cmd.Dir = dir
-				cmd.Env = bdEnv(dir)
-				out, err := cmd.CombinedOutput()
+				out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--silent", title)
 				if err != nil {
 					results[worker] = result{worker: worker, err: fmt.Errorf("issue %d: %v\n%s", i, err, out)}
 					return

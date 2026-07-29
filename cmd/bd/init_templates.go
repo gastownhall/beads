@@ -16,18 +16,26 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 		return nil
 	}
 
+	body := renderInitConfigYAML(prefix, noDbMode)
+	if err := os.WriteFile(configYamlPath, body, 0600); err != nil {
+		return fmt.Errorf("failed to write config.yaml: %w", err)
+	}
+
+	return nil
+}
+
+func renderInitConfigYAML(prefix string, noDbMode bool) []byte {
 	noDbLine := "# no-db: false"
 	if noDbMode {
 		noDbLine = "no-db: true  # JSONL-only mode, no database"
 	}
 
-	// In no-db mode, we need to persist the prefix in config.yaml
 	prefixLine := "# issue-prefix: \"\""
 	if noDbMode && prefix != "" {
 		prefixLine = fmt.Sprintf("issue-prefix: %q", prefix)
 	}
 
-	configYamlTemplate := fmt.Sprintf(`# Beads Configuration File
+	body := fmt.Sprintf(`# Beads Configuration File
 # This file configures default behavior for all bd commands in this repository
 # All settings can also be set via environment variables (BD_* prefix)
 # or overridden with command-line flags
@@ -38,7 +46,7 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 %s
 
 # Use no-db mode: JSONL-only, no Dolt database
-# When true, bd will use .beads/issues.jsonl as the source of truth
+# When true, .beads/issues.jsonl is the only local store
 %s
 
 # Enable JSON output by default
@@ -51,6 +59,12 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 
 # Default actor for audit trails (overridden by BEADS_ACTOR or --actor)
 # actor: ""
+
+# Optional JSONL sidecar for explicit agent/tool interaction audit records.
+# Issue history is always recorded in the database and is visible with
+# bd history <id> --events; this only controls .beads/interactions.jsonl.
+# audit:
+#   enabled: false
 
 # Export events (audit trail) to .beads/events.jsonl on each flush/sync
 # When enabled, new events are appended incrementally using a high-water mark.
@@ -65,41 +79,39 @@ func createConfigYaml(beadsDir string, noDbMode bool, prefix string) error {
 #     - ~/beads-planning  # Personal planning repo
 #     - ~/work-planning   # Work planning repo
 
-# JSONL backup (periodic export for off-machine recovery)
-# Auto-enabled when a git remote exists. Override explicitly:
+# Dolt-native backup (periodic backup for off-machine recovery)
+# This is full database backup only. Cross-machine sync uses Dolt remotes.
 # backup:
 #   enabled: false     # Disable auto-backup entirely
-#   interval: 15m      # Minimum time between auto-exports
-#   git-push: false    # Disable git push (export locally only)
+#   interval: 15m      # Minimum time between auto-backups
+#   git-push: false    # Disable git push (backup locally only)
 #   git-repo: ""       # Separate git repo for backups (default: project repo)
 
+# Optional JSONL auto-export for viewers, interchange, and issue-level migration.
+# Disabled by default; enable only when an integration needs fresh .beads/issues.jsonl.
+# Use relative paths under .beads/ for JSONL import/export filenames.
+# export:
+#   auto: false
+#   path: issues.jsonl
+#   interval: 60s
+#   git-add: false
+# import:
+#   path: issues.jsonl
+
 # Integration settings (access with 'bd config get/set')
-# These are stored in the database, not in this file:
-# - jira.url
-# - jira.project
-# - linear.url
-# - linear.api-key
-# - github.org
-# - github.repo
+# Non-secret keys (stored in the database):
+# - jira.url, jira.project
+# - linear.team_id
+# - github.org, github.repo
+#
+# Secret keys (stored in this file but prefer env vars to avoid git exposure):
+# - linear.api_key  → use LINEAR_API_KEY env var instead
+# - github.token    → use GITHUB_TOKEN env var instead
 `, prefixLine, noDbLine)
-
-	if err := os.WriteFile(configYamlPath, []byte(configYamlTemplate), 0600); err != nil {
-		return fmt.Errorf("failed to write config.yaml: %w", err)
-	}
-
-	return nil
+	return []byte(body)
 }
 
-// createReadme creates the README.md file in the .beads directory
-func createReadme(beadsDir string) error {
-	readmePath := filepath.Join(beadsDir, "README.md")
-
-	// Skip if already exists
-	if _, err := os.Stat(readmePath); err == nil {
-		return nil
-	}
-
-	readmeTemplate := `# Beads - AI-Native Issue Tracking
+const BeadsReadmeTemplate = `# Beads - AI-Native Issue Tracking
 
 Welcome to Beads! This repository uses **Beads** for issue tracking - a modern, AI-native tool designed to live directly in your codebase alongside your code.
 
@@ -137,7 +149,7 @@ Issues in Beads are:
 - **Git-native**: Stored in Dolt database with version control and branching
 - **AI-friendly**: CLI-first design works perfectly with AI coding agents
 - **Branch-aware**: Issues can follow your branch workflow
-- **Always in sync**: Auto-syncs with your commits
+- **Sync-ready**: Uses Dolt remotes for backup and team sharing
 
 ## Why Beads?
 
@@ -152,7 +164,7 @@ Issues in Beads are:
 - Fast, lightweight, and stays out of your way
 
 🔧 **Git Integration**
-- Automatic sync with git commits
+- Dolt-native sync via bd dolt push / bd dolt pull
 - Branch-aware issue tracking
 - Dolt-native three-way merge resolution
 
@@ -182,9 +194,17 @@ bd create "Try out Beads"
 *Beads: Issue tracking that moves at the speed of thought* ⚡
 `
 
+func createReadme(beadsDir string) error {
+	readmePath := filepath.Join(beadsDir, "README.md")
+
+	// Skip if already exists
+	if _, err := os.Stat(readmePath); err == nil {
+		return nil
+	}
+
 	// Write README.md (0644 is standard for markdown files)
 	// #nosec G306 - README needs to be readable
-	if err := os.WriteFile(readmePath, []byte(readmeTemplate), 0644); err != nil {
+	if err := os.WriteFile(readmePath, []byte(BeadsReadmeTemplate), 0644); err != nil {
 		return fmt.Errorf("failed to write README.md: %w", err)
 	}
 

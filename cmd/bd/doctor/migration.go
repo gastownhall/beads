@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 )
 
@@ -20,8 +19,7 @@ type PendingMigration struct {
 func DetectPendingMigrations(path string) []PendingMigration {
 	var pending []PendingMigration
 
-	// Follow redirect to resolve actual beads directory
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Skip if .beads doesn't exist
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {

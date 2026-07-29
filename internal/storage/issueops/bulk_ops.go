@@ -109,14 +109,11 @@ func GetCommentsForIssuesInTx(ctx context.Context, tx *sql.Tx, issueIDs []string
 
 	result := make(map[string][]*types.Comment)
 
-	// Partition IDs by wisp status.
-	var wispIDs, permIDs []string
-	for _, id := range issueIDs {
-		if IsActiveWispInTx(ctx, tx, id) {
-			wispIDs = append(wispIDs, id)
-		} else {
-			permIDs = append(permIDs, id)
-		}
+	// Partition IDs by wisp status in a single batched query, to avoid N
+	// round-trips on remote backends (GH#3414).
+	wispIDs, permIDs, err := PartitionWispIDsInTx(ctx, tx, issueIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(permIDs) > 0 {
@@ -195,17 +192,16 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 		return 0, nil
 	}
 
-	for _, table := range []string{"dependencies", "events", "comments", "labels"} {
-		for _, id := range issueIDs {
-			if table == "dependencies" {
-				_, err = tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE issue_id = ? OR depends_on_id = ?", table), id, id)
-			} else {
-				_, err = tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE issue_id = ?", table), id)
-			}
-			if err != nil {
-				return 0, fmt.Errorf("delete from %s for %s: %w", table, id, err)
-			}
-		}
+	affectedIssues, affectedWisps, aerr := AffectedByDeletionInTx(ctx, tx, issueIDs, nil)
+	if aerr != nil {
+		return 0, fmt.Errorf("affected by source-repo delete: %w", aerr)
+	}
+
+	// Deleted issues hold no leases: clear them while the id set is still
+	// joinable (before the issues rows go away).
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM leases WHERE issue_id IN (SELECT id FROM issues WHERE source_repo = ?)`, sourceRepo); err != nil {
+		return 0, fmt.Errorf("delete leases: %w", err)
 	}
 
 	result, err := tx.ExecContext(ctx, `DELETE FROM issues WHERE source_repo = ?`, sourceRepo)
@@ -217,21 +213,17 @@ func DeleteIssuesBySourceRepoInTx(ctx context.Context, tx *sql.Tx, sourceRepo st
 	if err != nil {
 		return 0, fmt.Errorf("rows affected: %w", err)
 	}
+
+	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+		return int(rowsAffected), fmt.Errorf("recompute is_blocked after source-repo delete: %w", err)
+	}
+
 	return int(rowsAffected), nil
 }
 
-// UpdateIssueIDInTx renames an issue and updates all references across tables.
-//
 //nolint:gosec // G201: table names are hardcoded
 func UpdateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
-	isWisp := IsActiveWispInTx(ctx, tx, oldID)
-
-	if _, err := tx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS = 0`); err != nil {
-		return fmt.Errorf("disable FK checks: %w", err)
-	}
-	defer func() { _, _ = tx.ExecContext(ctx, `SET FOREIGN_KEY_CHECKS = 1`) }()
-
-	if isWisp {
+	if IsActiveWispInTx(ctx, tx, oldID) {
 		return updateWispIDInTx(ctx, tx, oldID, newID, issue, actor)
 	}
 	return updateIssueIDInTx(ctx, tx, oldID, newID, issue, actor)
@@ -251,31 +243,20 @@ func updateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, iss
 		return fmt.Errorf("issue not found: %s", oldID)
 	}
 
-	refs := []struct{ table, col string }{
-		{"dependencies", "issue_id"},
-		{"dependencies", "depends_on_id"},
-		{"events", "issue_id"},
-		{"labels", "issue_id"},
-		{"comments", "issue_id"},
-		{"issue_snapshots", "issue_id"},
-		{"compaction_snapshots", "issue_id"},
-		{"child_counters", "parent_id"},
-		{"wisp_dependencies", "issue_id"},
-		{"wisp_dependencies", "depends_on_id"},
-		{"wisp_events", "issue_id"},
-		{"wisp_labels", "issue_id"},
-		{"wisp_comments", "issue_id"},
+	if err := UpdateIssueIDInDependenciesInTx(ctx, tx, oldID, newID); err != nil {
+		return err
 	}
-	for _, r := range refs {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?", r.table, r.col, r.col), newID, oldID); err != nil {
-			return fmt.Errorf("update %s.%s: %w", r.table, r.col, err)
-		}
+
+	// A live lease follows its issue across the rename.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE leases SET issue_id = ? WHERE issue_id = ?`, newID, oldID); err != nil {
+		return fmt.Errorf("rename lease row: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO events (issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, 'renamed', ?, ?, ?)
-	`, newID, actor, oldID, newID)
+		INSERT INTO events (id, issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, ?, 'renamed', ?, ?, ?)
+	`, NewEventID(), newID, actor, oldID, newID)
 	return err
 }
 
@@ -293,51 +274,19 @@ func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issu
 		return fmt.Errorf("wisp not found: %s", oldID)
 	}
 
-	refs := []struct{ table, col string }{
-		{"wisp_dependencies", "issue_id"},
-		{"wisp_dependencies", "depends_on_id"},
-		{"wisp_events", "issue_id"},
-		{"wisp_labels", "issue_id"},
-		{"wisp_comments", "issue_id"},
-	}
-	for _, r := range refs {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s = ?", r.table, r.col, r.col), newID, oldID); err != nil {
-			return fmt.Errorf("update %s.%s: %w", r.table, r.col, err)
-		}
+	if _, err = tx.ExecContext(ctx, `
+		INSERT INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value)
+		VALUES (?, ?, 'renamed', ?, ?, ?)
+	`, NewEventID(), newID, actor, oldID, newID); err != nil {
+		return err
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO wisp_events (issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, 'renamed', ?, ?, ?)
-	`, newID, actor, oldID, newID)
-	return err
-}
-
-// RenameDependencyPrefixInTx updates the prefix in all dependency records.
-func RenameDependencyPrefixInTx(ctx context.Context, tx *sql.Tx, oldPrefix, newPrefix string) error {
-	_, err := tx.ExecContext(ctx, `
-		UPDATE dependencies
-		SET issue_id = CONCAT(?, SUBSTRING(issue_id, LENGTH(?) + 1))
-		WHERE issue_id LIKE CONCAT(?, '%')
-	`, newPrefix, oldPrefix, oldPrefix)
-	if err != nil {
-		return fmt.Errorf("update issue_id prefix in dependencies: %w", err)
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		UPDATE dependencies
-		SET depends_on_id = CONCAT(?, SUBSTRING(depends_on_id, LENGTH(?) + 1))
-		WHERE depends_on_id LIKE CONCAT(?, '%')
-	`, newPrefix, oldPrefix, oldPrefix)
-	if err != nil {
-		return fmt.Errorf("update depends_on_id prefix in dependencies: %w", err)
-	}
-	return nil
+	return UpdateWispIDInDependenciesInTx(ctx, tx, oldID, newID)
 }
 
 // FindWispDependentsRecursiveInTx walks wisp_dependencies to find all transitive
 // dependents of the given IDs.
-func FindWispDependentsRecursiveInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[string]bool, error) {
+func FindWispDependentsRecursiveInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -368,7 +317,7 @@ func FindWispDependentsRecursiveInTx(ctx context.Context, tx *sql.Tx, ids []stri
 
 		placeholders, args := buildSQLInClause(batch)
 		rows, err := tx.QueryContext(ctx,
-			fmt.Sprintf(`SELECT issue_id FROM wisp_dependencies WHERE depends_on_id IN (%s)`, placeholders),
+			fmt.Sprintf(`SELECT issue_id FROM wisp_dependencies WHERE %s IN (%s)`, DepTargetExpr, placeholders),
 			args...)
 		if err != nil {
 			return discovered, fmt.Errorf("query wisp dependents: %w", err)

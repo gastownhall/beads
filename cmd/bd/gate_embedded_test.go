@@ -21,11 +21,11 @@ func bdGate(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd gate %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd gate %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdGateFail runs "bd gate" expecting failure.
@@ -49,11 +49,11 @@ func bdGateListJSON(t *testing.T, bd, dir string, args ...string) []map[string]i
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd gate list --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd gate list --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(stdout.String())
 	start := strings.Index(s, "[")
 	if start < 0 {
 		return nil
@@ -350,6 +350,243 @@ func TestEmbeddedGate(t *testing.T) {
 	})
 }
 
+// TestEmbeddedGateCreate exercises the "bd gate create" subcommand.
+func TestEmbeddedGateCreate(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gc")
+
+	// Register "gate" as a custom type so bd gate create works.
+	store := openStore(t, beadsDir, "gc")
+	if err := store.SetConfig(t.Context(), "types.custom", `["gate"]`); err != nil {
+		t.Fatalf("SetConfig types.custom: %v", err)
+	}
+	store.Close()
+
+	t.Run("create_default_human_gate", func(t *testing.T) {
+		task := bdCreate(t, bd, dir, "Task for human gate", "--type", "task")
+
+		out := bdGate(t, bd, dir, "create", "--blocks", task.ID)
+		if !strings.Contains(out, "Created gate") {
+			t.Errorf("expected 'Created gate' in output: %s", out)
+		}
+		if !strings.Contains(out, "type: human") {
+			t.Errorf("expected default type 'human' in output: %s", out)
+		}
+		if !strings.Contains(out, task.ID) {
+			t.Errorf("expected blocked issue ID in output: %s", out)
+		}
+	})
+
+	t.Run("create_gate_json_output", func(t *testing.T) {
+		task := bdCreate(t, bd, dir, "Task for JSON gate", "--type", "task")
+
+		cmd := exec.Command(bd, "gate", "create", "--blocks", task.ID, "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd gate create --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		var gate types.Issue
+		s := strings.TrimSpace(stdout.String())
+		start := strings.Index(s, "{")
+		if start < 0 {
+			t.Fatalf("no JSON in output: %s", s)
+		}
+		if err := json.Unmarshal([]byte(s[start:]), &gate); err != nil {
+			t.Fatalf("parse gate JSON: %v\n%s", err, s)
+		}
+		if gate.IssueType != types.IssueType("gate") {
+			t.Errorf("expected issue_type=gate, got %s", gate.IssueType)
+		}
+		if gate.AwaitType != "human" {
+			t.Errorf("expected await_type=human, got %s", gate.AwaitType)
+		}
+	})
+
+	t.Run("create_gate_with_type_and_reason", func(t *testing.T) {
+		task := bdCreate(t, bd, dir, "Task for timer gate", "--type", "task")
+
+		cmd := exec.Command(bd, "gate", "create", "--blocks", task.ID,
+			"--type", "timer", "--timeout", "2h", "--reason", "Wait for cooldown", "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd gate create --type=timer failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		var gate types.Issue
+		s := strings.TrimSpace(stdout.String())
+		start := strings.Index(s, "{")
+		if err := json.Unmarshal([]byte(s[start:]), &gate); err != nil {
+			t.Fatalf("parse gate JSON: %v\n%s", err, s)
+		}
+		if gate.AwaitType != "timer" {
+			t.Errorf("expected await_type=timer, got %s", gate.AwaitType)
+		}
+		if gate.Timeout != 2*60*60*1e9 { // 2h in nanoseconds
+			t.Errorf("expected timeout=2h, got %v", gate.Timeout)
+		}
+		if !strings.Contains(gate.Description, "Wait for cooldown") {
+			t.Errorf("expected reason in description: %s", gate.Description)
+		}
+	})
+
+	t.Run("create_gate_with_await_id", func(t *testing.T) {
+		task := bdCreate(t, bd, dir, "Task for PR gate", "--type", "task")
+
+		cmd := exec.Command(bd, "gate", "create", "--blocks", task.ID,
+			"--type", "gh:pr", "--await-id", "42", "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd gate create --type=gh:pr failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+
+		var gate types.Issue
+		s := strings.TrimSpace(stdout.String())
+		start := strings.Index(s, "{")
+		if err := json.Unmarshal([]byte(s[start:]), &gate); err != nil {
+			t.Fatalf("parse gate JSON: %v\n%s", err, s)
+		}
+		if gate.AwaitType != "gh:pr" {
+			t.Errorf("expected await_type=gh:pr, got %s", gate.AwaitType)
+		}
+		if gate.AwaitID != "42" {
+			t.Errorf("expected await_id=42, got %s", gate.AwaitID)
+		}
+		if gate.Title != "Gate: gh:pr 42" {
+			t.Errorf("expected title 'Gate: gh:pr 42', got %s", gate.Title)
+		}
+	})
+
+	t.Run("create_gate_blocks_ready", func(t *testing.T) {
+		// Use a fresh db so ready output isn't polluted by other subtests
+		freshDir, freshBeads, _ := bdInit(t, bd, "--prefix", "gr")
+		fs := openStore(t, freshBeads, "gr")
+		if err := fs.SetConfig(t.Context(), "types.custom", `["gate"]`); err != nil {
+			t.Fatalf("SetConfig: %v", err)
+		}
+		fs.Close()
+
+		task := bdCreate(t, bd, freshDir, "Ready test task", "--type", "task")
+
+		// Verify task appears in ready
+		cmd := exec.Command(bd, "ready")
+		cmd.Dir = freshDir
+		cmd.Env = bdEnv(freshDir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd ready failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Ready test task") {
+			t.Fatalf("task should appear in ready before gate: %s", stdout.String())
+		}
+
+		// Create gate blocking the task
+		bdGate(t, bd, freshDir, "create", "--blocks", task.ID)
+
+		// Verify task no longer in ready
+		cmd = exec.Command(bd, "ready")
+		cmd.Dir = freshDir
+		cmd.Env = bdEnv(freshDir)
+		stdout.Reset()
+		stderr.Reset()
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			// bd ready exits 0 even with no results
+			t.Fatalf("bd ready failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if strings.Contains(stdout.String(), "Ready test task") {
+			t.Errorf("task should NOT appear in ready while gate is open: %s", stdout.String())
+		}
+	})
+
+	t.Run("create_gate_resolve_unblocks_ready", func(t *testing.T) {
+		// Use a fresh db for clean ready output
+		freshDir, freshBeads, _ := bdInit(t, bd, "--prefix", "gu")
+		fs := openStore(t, freshBeads, "gu")
+		if err := fs.SetConfig(t.Context(), "types.custom", `["gate"]`); err != nil {
+			t.Fatalf("SetConfig: %v", err)
+		}
+		fs.Close()
+
+		task := bdCreate(t, bd, freshDir, "Unblock test task", "--type", "task")
+
+		// Create and then resolve the gate
+		gateOut := bdGate(t, bd, freshDir, "create", "--blocks", task.ID)
+
+		// Extract gate ID from output ("Created gate gc-xxx ...")
+		var gateID string
+		for _, word := range strings.Fields(gateOut) {
+			if strings.HasPrefix(word, "gu-") {
+				gateID = word
+				break
+			}
+		}
+		if gateID == "" {
+			t.Fatalf("could not extract gate ID from output: %s", gateOut)
+		}
+
+		// Resolve the gate
+		bdGate(t, bd, freshDir, "resolve", gateID)
+
+		// Verify task reappears in ready
+		cmd := exec.Command(bd, "ready")
+		cmd.Dir = freshDir
+		cmd.Env = bdEnv(freshDir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd ready failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Unblock test task") {
+			t.Errorf("task should reappear in ready after gate resolved: %s", stdout.String())
+		}
+	})
+
+	t.Run("create_gate_missing_blocks_flag", func(t *testing.T) {
+		out := bdGateFail(t, bd, dir, "create")
+		if !strings.Contains(out, "blocks") {
+			t.Errorf("expected error about missing --blocks flag: %s", out)
+		}
+	})
+
+	t.Run("create_gate_nonexistent_target", func(t *testing.T) {
+		out := bdGateFail(t, bd, dir, "create", "--blocks", "gc-nonexistent999")
+		if !strings.Contains(out, "not found") {
+			t.Errorf("expected 'not found' error: %s", out)
+		}
+	})
+
+	t.Run("create_gate_appears_in_gate_list", func(t *testing.T) {
+		task := bdCreate(t, bd, dir, "Task for list check", "--type", "task")
+		bdGate(t, bd, dir, "create", "--blocks", task.ID)
+
+		results := bdGateListJSON(t, bd, dir)
+		found := false
+		for _, r := range results {
+			if awaitType, ok := r["await_type"]; ok && awaitType == "human" {
+				if desc, ok := r["description"].(string); ok && strings.Contains(desc, task.ID) {
+					found = true
+					break
+				}
+			}
+		}
+		if !found {
+			t.Errorf("expected gate blocking %s in gate list", task.ID)
+		}
+	})
+}
+
 // TestEmbeddedGateConcurrent exercises gate operations concurrently.
 func TestEmbeddedGateConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
@@ -385,10 +622,7 @@ func TestEmbeddedGateConcurrent(t *testing.T) {
 
 			// Each worker: create a gate, add a waiter, resolve it
 			title := fmt.Sprintf("w%d-gate", worker)
-			cmd := exec.Command(bd, "create", "--silent", title, "--type", "gate")
-			cmd.Dir = dir
-			cmd.Env = bdEnv(dir)
-			out, err := cmd.CombinedOutput()
+			out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--silent", title, "--type", "gate")
 			if err != nil {
 				r.err = fmt.Errorf("create gate: %v\n%s", err, out)
 				results[worker] = r
@@ -397,7 +631,7 @@ func TestEmbeddedGateConcurrent(t *testing.T) {
 			gateID := strings.TrimSpace(string(out))
 
 			// Add waiter
-			cmd = exec.Command(bd, "gate", "add-waiter", gateID, fmt.Sprintf("agent-%d", worker))
+			cmd := exec.Command(bd, "gate", "add-waiter", gateID, fmt.Sprintf("agent-%d", worker))
 			cmd.Dir = dir
 			cmd.Env = bdEnv(dir)
 			out, err = cmd.CombinedOutput()
@@ -427,5 +661,62 @@ func TestEmbeddedGateConcurrent(t *testing.T) {
 		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
+	}
+}
+
+// TestEmbeddedGateListScoped is the integration regression for the bug where
+// `bd gate list <issue-id>` silently ignored the argument and returned the
+// DB-wide gate list. It asserts the scoped list contains only the named issue's
+// own gate and never leaks an unrelated issue's gate.
+func TestEmbeddedGateListScoped(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "gls")
+
+	// Register "gate" as a custom type so bd gate create works.
+	store := openStore(t, beadsDir, "gls")
+	if err := store.SetConfig(t.Context(), "types.custom", `["gate"]`); err != nil {
+		t.Fatalf("SetConfig types.custom: %v", err)
+	}
+	store.Close()
+
+	taskA := bdCreate(t, bd, dir, "Task A", "--type", "task")
+	taskB := bdCreate(t, bd, dir, "Task B", "--type", "task")
+	bdGate(t, bd, dir, "create", "--blocks", taskA.ID, "--type", "gh:pr", "--await-id", "111")
+	bdGate(t, bd, dir, "create", "--blocks", taskB.ID, "--type", "gh:pr", "--await-id", "222")
+
+	// DB-wide (no arg) still lists every gate.
+	if all := bdGateListJSON(t, bd, dir); len(all) != 2 {
+		t.Fatalf("expected 2 gates DB-wide, got %d: %v", len(all), all)
+	}
+
+	// Scoped to A: exactly A's gate, and never B's.
+	scoped := bdGateListJSON(t, bd, dir, taskA.ID)
+	if len(scoped) != 1 {
+		t.Fatalf("expected exactly 1 gate scoped to %s, got %d: %v", taskA.ID, len(scoped), scoped)
+	}
+	if got := scoped[0]["await_id"]; got != "111" {
+		t.Fatalf("expected await_id=111 scoped to %s, got %v", taskA.ID, got)
+	}
+	for _, g := range scoped {
+		if g["await_id"] == "222" {
+			t.Fatalf("gate list %s leaked unrelated gate 222: %v", taskA.ID, scoped)
+		}
+	}
+
+	// Scoped to B: exactly B's gate.
+	scopedB := bdGateListJSON(t, bd, dir, taskB.ID)
+	if len(scopedB) != 1 || scopedB[0]["await_id"] != "222" {
+		t.Fatalf("expected exactly gate 222 scoped to %s, got %v", taskB.ID, scopedB)
+	}
+
+	// Unknown issue id is a clean error, not a DB-wide dump.
+	out := bdGateFail(t, bd, dir, "list", "gls-nope")
+	if !strings.Contains(out, "not found") {
+		t.Fatalf("expected 'not found' error for unknown issue, got: %s", out)
 	}
 }

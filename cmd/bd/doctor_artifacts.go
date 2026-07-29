@@ -11,36 +11,31 @@ import (
 
 // runArtifactsCheck runs detailed classic artifact detection.
 // With --clean, removes safe-to-delete artifacts after confirmation.
-func runArtifactsCheck(path string, clean bool, yes bool) {
+func runArtifactsCheck(path string, clean bool, yes bool) error {
 	report, err := doctor.ScanForArtifacts(path)
 	if err != nil {
-		FatalError("scanning artifacts: %v", err)
+		return HandleError("scanning artifacts: %v", err)
 	}
 
 	if report.TotalCount == 0 {
-		if !jsonOutput {
-			fmt.Println("No classic artifacts detected.")
-		} else {
-			outputJSON(map[string]interface{}{
+		if jsonOutput {
+			return outputJSON(map[string]interface{}{
 				"total_count": 0,
 			})
 		}
-		return
+		fmt.Println("No classic artifacts detected.")
+		return nil
 	}
 
 	if jsonOutput {
-		// GH#2438: When --clean is also set, perform cleanup before outputting
-		// JSON. Previously, --json returned early and skipped the clean logic,
-		// so `bd doctor --check=artifacts --clean --json` would report findings
-		// but never delete them.
+		// GH#2438: When --clean is also set, perform cleanup before outputting JSON.
 		if clean && report.SafeDeleteCount > 0 {
 			if err := fix.ClassicArtifacts(path); err != nil {
-				FatalError("during cleanup: %v", err)
+				return HandleError("during cleanup: %v", err)
 			}
-			// Re-scan to show post-cleanup state
 			report, err = doctor.ScanForArtifacts(path)
 			if err != nil {
-				FatalError("re-scanning artifacts: %v", err)
+				return HandleError("re-scanning artifacts: %v", err)
 			}
 		}
 
@@ -67,8 +62,7 @@ func runArtifactsCheck(path string, clean bool, yes bool) {
 			}
 		}
 		result["findings"] = findings
-		outputJSON(result)
-		return
+		return outputJSON(result)
 	}
 
 	// Human-readable output
@@ -111,27 +105,26 @@ func runArtifactsCheck(path string, clean bool, yes bool) {
 
 	if !clean {
 		fmt.Println("Run 'bd doctor --check=artifacts --clean' to remove safe-to-delete artifacts.")
-		return
+		return nil
 	}
 
 	if report.SafeDeleteCount == 0 {
 		fmt.Println("No artifacts are safe to auto-delete. Manual review required.")
-		return
+		return nil
 	}
 
-	// Confirmation prompt
 	if !yes {
 		fmt.Printf("Delete %d safe-to-delete artifact(s)? [y/N] ", report.SafeDeleteCount)
 		var response string
 		_, _ = fmt.Scanln(&response)
 		if strings.ToLower(response) != "y" {
 			fmt.Println("Canceled.")
-			return
+			return nil
 		}
 	}
 
-	// Perform cleanup
 	if err := fix.ClassicArtifacts(path); err != nil {
-		FatalError("during cleanup: %v", err)
+		return HandleError("during cleanup: %v", err)
 	}
+	return nil
 }

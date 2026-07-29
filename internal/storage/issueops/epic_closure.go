@@ -2,18 +2,14 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // GetEpicsEligibleForClosureInTx returns epics whose children are all closed.
-// Uses separate single-table queries to avoid Dolt's joinIter panic on
-// multi-table JOINs, and batches IN clauses for performance.
-//
 // nolint:gosec // G201: table names are hardcoded, placeholders contain only ? markers
-func GetEpicsEligibleForClosureInTx(ctx context.Context, tx *sql.Tx) ([]*types.EpicStatus, error) {
+func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.EpicStatus, error) {
 	// Step 1: Get open epic IDs (single-table scan)
 	epicRows, err := tx.QueryContext(ctx, `
 		SELECT id FROM issues
@@ -48,11 +44,11 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx *sql.Tx) ([]*types.E
 	}
 	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
 		depRows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-			SELECT depends_on_id, issue_id FROM %s
-			WHERE type = 'parent-child'
-		`, depTable))
+			SELECT %s AS parent_id, issue_id FROM %s
+			WHERE type = 'parent-child' AND %s IS NOT NULL
+		`, DepTargetExpr, depTable, DepTargetExpr))
 		if err != nil {
-			if isTableNotExistError(err) {
+			if optionalBlockedTable(depTable) && isTableNotExistError(err) {
 				continue // wisp_dependencies may not exist on pre-migration databases
 			}
 			return nil, fmt.Errorf("failed to get parent-child deps from %s: %w", depTable, err)
@@ -115,7 +111,7 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx *sql.Tx) ([]*types.E
 			epicsWithChildren = append(epicsWithChildren, epicID)
 		}
 	}
-	epicIssues, err := GetIssuesByIDsInTx(ctx, tx, epicsWithChildren)
+	epicIssues, err := GetIssuesByIDsInTx(ctx, tx, epicsWithChildren, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to batch-fetch epic issues: %w", err)
 	}

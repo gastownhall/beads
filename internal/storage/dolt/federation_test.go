@@ -5,13 +5,11 @@ package dolt
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -388,6 +386,58 @@ func TestFederationSyncStatus(t *testing.T) {
 	}
 }
 
+func TestFederationSyncCommitsPendingPeerMetadataBeforeFetch(t *testing.T) {
+	skipIfNoDolt(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	peer := &storage.FederationPeer{
+		Name:        "peer-metadata-sync",
+		RemoteURL:   "file:///tmp/beads-no-such-federation-peer",
+		Sovereignty: "T2",
+	}
+	if err := store.AddFederationPeer(ctx, peer); err != nil {
+		t.Fatalf("add federation peer: %v", err)
+	}
+
+	if federationStatusHasTable(t, ctx, store, "federation_peers") {
+		t.Fatal("add-peer should commit federation_peers metadata")
+	}
+
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE federation_peers SET sovereignty = ? WHERE name = ?", "T3", peer.Name,
+	); err != nil {
+		t.Fatalf("dirty federation peer metadata: %v", err)
+	}
+	if !federationStatusHasTable(t, ctx, store, "federation_peers") {
+		t.Fatal("expected direct federation_peers update to dirty the working set")
+	}
+
+	_, err := store.Sync(ctx, peer.Name, "")
+	if err == nil {
+		t.Fatal("expected sync to fail for nonexistent file remote")
+	}
+	if federationStatusHasTable(t, ctx, store, "federation_peers") {
+		t.Fatal("sync should commit pending federation_peers metadata before fetch/merge")
+	}
+}
+
+func federationStatusHasTable(t *testing.T, ctx context.Context, store *DoltStore, table string) bool {
+	t.Helper()
+
+	var count int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_status WHERE table_name = ?", table,
+	).Scan(&count); err != nil {
+		t.Fatalf("query dolt_status for %s: %v", table, err)
+	}
+	return count > 0
+}
+
 // TestFederationPushPullMethods tests PushTo and PullFrom
 func TestFederationPushPullMethods(t *testing.T) {
 	skipIfNoDolt(t)
@@ -421,193 +471,219 @@ func TestFederationPushPullMethods(t *testing.T) {
 	}
 }
 
-// TestSyncCLIRemotesToSQL verifies GH#2315: after a server restart, CLI-only
-// remotes are re-registered into the SQL server by syncCLIRemotesToSQL.
-func TestSyncCLIRemotesToSQL(t *testing.T) {
-	skipIfNoDolt(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
+// TestFilteredPushExcludesWisp verifies that filteredPushToPeer with
+// exclude_types=["wisp"] removes ephemeral issues from the staging branch
+// before push. Since we can't push to a real remote in tests, we verify:
+// 1. The staging branch is created and cleaned up
+// 2. Issues matching excluded types are removed from the staging branch
+// 3. Non-excluded issues remain intact
+// 4. The original branch is unchanged after the operation
+func TestFilteredPushExcludesWisp(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
-	remoteName := "test-sync-remote"
-	remoteURL := "file:///tmp/test-sync-remote"
+	ctx, cancel := testContext(t)
+	defer cancel()
 
-	// Ensure cliDir exists with a dolt init so CLI remote commands work.
-	// In test mode, dbPath/database may not exist on the filesystem.
-	dir := store.CLIDir()
-	if dir == "" {
-		t.Skip("no CLI dir available")
+	// Create a regular task (should survive filtering)
+	task := &types.Issue{
+		ID:        "fed-filter-task",
+		Title:     "Regular task",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  1,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
 	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		t.Fatalf("failed to create CLI dir: %v", err)
-	}
-	initCmd := exec.Command("dolt", "init", "--name", "test", "--email", "test@test.com")
-	initCmd.Dir = dir
-	if out, err := initCmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt init failed: %s: %v", out, err)
-	}
-
-	// Add remote via SQL so it exists in dolt_remotes
-	if err := store.AddRemote(ctx, remoteName, remoteURL); err != nil {
-		t.Fatalf("failed to add SQL remote: %v", err)
+	if err := store.CreateIssue(ctx, task, "test"); err != nil {
+		t.Fatalf("create task: %v", err)
 	}
 
-	// Also add it to CLI so it persists across restarts
-	if err := doltutil.AddCLIRemote(dir, remoteName, remoteURL); err != nil {
-		t.Fatalf("failed to add CLI remote: %v", err)
-	}
-
-	// Verify remote exists in SQL
-	has, err := store.HasRemote(ctx, remoteName)
+	// Create an ephemeral issue directly in the issues table (simulates the
+	// edge case where an ephemeral issue leaks into committed data).
+	_, err := store.db.ExecContext(ctx, `INSERT INTO issues
+		(id, title, issue_type, status, priority, ephemeral, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 1, NOW(), NOW())`,
+		"fed-filter-wisp", "Leaked wisp", "task", "open", 1)
 	if err != nil {
-		t.Fatalf("HasRemote failed: %v", err)
-	}
-	if !has {
-		t.Fatal("expected remote to exist in SQL after add")
+		t.Fatalf("insert ephemeral issue: %v", err)
 	}
 
-	// Simulate server restart: remove the remote from SQL only
-	if err := store.RemoveRemote(ctx, remoteName); err != nil {
-		t.Fatalf("failed to remove SQL remote: %v", err)
-	}
-
-	// Verify it's gone from SQL
-	has, err = store.HasRemote(ctx, remoteName)
-	if err != nil {
-		t.Fatalf("HasRemote after remove failed: %v", err)
-	}
-	if has {
-		t.Fatal("expected remote to be absent from SQL after remove")
-	}
-
-	// Run sync — should re-register the CLI remote into SQL
-	store.syncCLIRemotesToSQL(ctx)
-
-	// Verify it's back in SQL
-	has, err = store.HasRemote(ctx, remoteName)
-	if err != nil {
-		t.Fatalf("HasRemote after sync failed: %v", err)
-	}
-	if !has {
-		t.Fatal("expected syncCLIRemotesToSQL to re-register the CLI remote into SQL")
-	}
-
-	// Verify the URL matches
-	remotes, err := store.ListRemotes(ctx)
-	if err != nil {
-		t.Fatalf("ListRemotes failed: %v", err)
-	}
-	found := false
-	for _, r := range remotes {
-		if r.Name == remoteName {
-			if r.URL != remoteURL {
-				t.Errorf("expected URL %s, got %s", remoteURL, r.URL)
-			}
-			found = true
-			break
+	if err := store.Commit(ctx, "create test issues"); err != nil {
+		if !isDoltNothingToCommit(err) {
+			t.Fatalf("commit: %v", err)
 		}
 	}
-	if !found {
-		t.Errorf("remote %s not found in ListRemotes after sync", remoteName)
+
+	// Verify both issues exist before filtering.
+	var count int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
+		t.Fatalf("count issues: %v", err)
+	}
+	if count < 2 {
+		t.Fatalf("expected at least 2 issues before filter, got %d", count)
 	}
 
-	// Clean up CLI remote
-	_ = doltutil.RemoveCLIRemote(dir, remoteName)
-	_ = store.RemoveRemote(ctx, remoteName)
+	// Run filteredPushToPeer — push will fail (no remote) but the staging
+	// branch logic runs first. We verify the staging branch behavior by
+	// checking that the original branch is untouched afterward.
+	pushErr := store.filteredPushToPeer(ctx, "nonexistent-peer", []string{"wisp"})
+	if pushErr == nil {
+		t.Fatal("expected push error for nonexistent peer")
+	}
+
+	// Verify the staging branch was cleaned up.
+	branches, err := store.ListBranches(ctx)
+	if err != nil {
+		t.Fatalf("list branches: %v", err)
+	}
+	for _, b := range branches {
+		if b == federationStagingBranch {
+			t.Errorf("staging branch %s was not cleaned up", federationStagingBranch)
+		}
+	}
+
+	// Verify original branch still has both issues (filter is non-destructive).
+	var taskCount, wispCount int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM issues WHERE id = ?", "fed-filter-task").Scan(&taskCount); err != nil {
+		t.Fatalf("count task: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM issues WHERE id = ?", "fed-filter-wisp").Scan(&wispCount); err != nil {
+		t.Fatalf("count wisp: %v", err)
+	}
+	if taskCount != 1 {
+		t.Errorf("regular task missing after filtered push")
+	}
+	if wispCount != 1 {
+		t.Errorf("ephemeral issue should still exist on original branch, got count=%d", wispCount)
+	}
 }
 
-// TestMigrateServerRootRemotes verifies GH#2118: remotes added in the dolt
-// server root directory (.beads/dolt/) are propagated to the database
-// subdirectory (.beads/dolt/<database>/) during syncCLIRemotesToSQL.
-// This handles the common case where users run `dolt remote add` in the
-// visible server root instead of the database subdirectory.
-func TestMigrateServerRootRemotes(t *testing.T) {
-	skipIfNoDolt(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
+// TestFilteredPushOptOut verifies that setting federation.exclude_types to
+// an empty list disables filtering (backward-compatible opt-out).
+func TestFilteredPushOptOut(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
-	remoteName := "test-root-remote"
-	remoteURL := "file:///tmp/test-root-remote"
+	ctx, cancel := testContext(t)
+	defer cancel()
 
-	// Set up CLIDir with dolt init (database directory)
-	cliDir := store.CLIDir()
-	if cliDir == "" {
-		t.Skip("no CLI dir available")
-	}
-	if err := os.MkdirAll(cliDir, 0755); err != nil {
-		t.Fatalf("failed to create CLI dir: %v", err)
-	}
-	initCmd := exec.Command("dolt", "init", "--name", "test", "--email", "test@test.com")
-	initCmd.Dir = cliDir
-	if out, err := initCmd.CombinedOutput(); err != nil {
-		// Might already be initialized
-		if !strings.Contains(string(out), "already") {
-			t.Fatalf("dolt init in CLIDir failed: %s: %v", out, err)
-		}
-	}
-
-	// Set up server root (dbPath) with dolt init — separate from CLIDir
-	rootDir := store.Path()
-	if rootDir == "" || rootDir == cliDir {
-		t.Skip("dbPath same as CLIDir — migration not applicable")
-	}
-	if _, err := os.Stat(filepath.Join(rootDir, ".dolt")); err != nil {
-		// Initialize root dir if needed
-		if err := os.MkdirAll(rootDir, 0755); err != nil {
-			t.Fatalf("failed to create root dir: %v", err)
-		}
-		initRootCmd := exec.Command("dolt", "init", "--name", "test", "--email", "test@test.com")
-		initRootCmd.Dir = rootDir
-		if out, err := initRootCmd.CombinedOutput(); err != nil {
-			if !strings.Contains(string(out), "already") {
-				t.Fatalf("dolt init in root failed: %s: %v", out, err)
-			}
-		}
-	}
-
-	// Add remote to server root (the wrong place — simulates the user's mistake)
-	if err := doltutil.AddCLIRemote(rootDir, remoteName, remoteURL); err != nil {
-		t.Fatalf("failed to add remote to server root: %v", err)
-	}
-	defer func() { _ = doltutil.RemoveCLIRemote(rootDir, remoteName) }()
-
-	// Verify remote is NOT in CLIDir before migration
-	if url := doltutil.FindCLIRemote(cliDir, remoteName); url != "" {
-		t.Fatalf("remote should not be in CLIDir before migration, found: %s", url)
-	}
-
-	// Remove from SQL if present (simulate clean state)
-	_ = store.RemoveRemote(ctx, remoteName)
-
-	// Run sync — should discover remote in server root and migrate to CLIDir + SQL
-	store.syncCLIRemotesToSQL(ctx)
-
-	// Verify remote was migrated to CLIDir
-	if url := doltutil.FindCLIRemote(cliDir, remoteName); url == "" {
-		t.Error("expected remote to be migrated to CLIDir")
-	} else if url != remoteURL {
-		t.Errorf("CLIDir remote URL = %q, want %q", url, remoteURL)
-	}
-
-	// Verify remote was registered in SQL
-	has, err := store.HasRemote(ctx, remoteName)
+	// Create an ephemeral issue in the committed issues table.
+	_, err := store.db.ExecContext(ctx, `INSERT INTO issues
+		(id, title, issue_type, status, priority, ephemeral, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, 1, NOW(), NOW())`,
+		"fed-optout-wisp", "Wisp for opt-out test", "task", "open", 1)
 	if err != nil {
-		t.Fatalf("HasRemote failed: %v", err)
+		t.Fatalf("insert ephemeral issue: %v", err)
 	}
-	if !has {
-		t.Error("expected remote to be registered in SQL after migration")
+	if err := store.Commit(ctx, "create ephemeral issue"); err != nil {
+		if !isDoltNothingToCommit(err) {
+			t.Fatalf("commit: %v", err)
+		}
 	}
 
-	// Clean up
-	_ = doltutil.RemoveCLIRemote(cliDir, remoteName)
-	_ = store.RemoveRemote(ctx, remoteName)
+	// With empty exclude list, filteredPushToPeer delegates directly to PushTo
+	// (no staging branch created). It will fail due to no remote, but the
+	// important thing is no staging branch is created.
+	pushErr := store.filteredPushToPeer(ctx, "nonexistent-peer", []string{})
+	if pushErr == nil {
+		t.Fatal("expected push error for nonexistent peer")
+	}
+
+	// Verify no staging branch was created (opt-out path skips staging).
+	branches, err := store.ListBranches(ctx)
+	if err != nil {
+		t.Fatalf("list branches: %v", err)
+	}
+	for _, b := range branches {
+		if b == federationStagingBranch {
+			t.Errorf("staging branch should not exist when exclude_types is empty")
+		}
+	}
+}
+
+// TestFilteredPushExcludesCustomType verifies that non-wisp types in
+// federation.exclude_types are filtered by issue_type column.
+func TestFilteredPushExcludesCustomType(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Create a task and a message.
+	task := &types.Issue{
+		ID:        "fed-custom-task",
+		Title:     "Regular task",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  1,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	msg := &types.Issue{
+		ID:        "fed-custom-msg",
+		Title:     "Internal message",
+		IssueType: types.TypeMessage,
+		Status:    types.StatusOpen,
+		Priority:  1,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, task, "test"); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if err := store.CreateIssue(ctx, msg, "test"); err != nil {
+		t.Fatalf("create message: %v", err)
+	}
+	if err := store.Commit(ctx, "create test issues"); err != nil {
+		if !isDoltNothingToCommit(err) {
+			t.Fatalf("commit: %v", err)
+		}
+	}
+
+	// Exclude "message" type — task should remain, message should be filtered.
+	pushErr := store.filteredPushToPeer(ctx, "nonexistent-peer", []string{"message"})
+	if pushErr == nil {
+		t.Fatal("expected push error for nonexistent peer")
+	}
+
+	// Verify original branch still has both issues.
+	var taskCount, msgCount int
+	store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", "fed-custom-task").Scan(&taskCount)
+	store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", "fed-custom-msg").Scan(&msgCount)
+	if taskCount != 1 {
+		t.Errorf("task should survive on original branch")
+	}
+	if msgCount != 1 {
+		t.Errorf("message should survive on original branch (filter is non-destructive)")
+	}
+}
+
+// TestFilteredPushStagingBranchCleanupOnError verifies that the staging
+// branch is always cleaned up, even when the push operation fails.
+func TestFilteredPushStagingBranchCleanupOnError(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	// Run filtered push to a nonexistent peer — will fail, but staging
+	// branch should still be cleaned up.
+	_ = store.filteredPushToPeer(ctx, "no-such-peer", []string{"wisp", "message"})
+
+	branches, err := store.ListBranches(ctx)
+	if err != nil {
+		t.Fatalf("list branches: %v", err)
+	}
+	for _, b := range branches {
+		if b == federationStagingBranch {
+			t.Errorf("staging branch %s should be cleaned up after push error", federationStagingBranch)
+		}
+	}
 }
 
 // setupFederationStore creates a Dolt store for federation testing

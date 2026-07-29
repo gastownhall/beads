@@ -331,3 +331,83 @@ func TestSearchIssuesQueryParam(t *testing.T) {
 		})
 	}
 }
+
+func TestSearchIssuesV3UsesNextPageTokenPagination(t *testing.T) {
+	var gotTokens []string
+	var gotStartAts []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTokens = append(gotTokens, r.URL.Query().Get("nextPageToken"))
+		gotStartAts = append(gotStartAts, r.URL.Query().Get("startAt"))
+		w.Header().Set("Content-Type", "application/json")
+
+		switch len(gotTokens) {
+		case 1:
+			_ = json.NewEncoder(w).Encode(SearchResult{
+				NextPageToken: "page-2",
+				IsLast:        false,
+				Issues:        []Issue{{Key: "PROJ-1"}, {Key: "PROJ-2"}},
+			})
+		case 2:
+			_ = json.NewEncoder(w).Encode(SearchResult{
+				IsLast: true,
+				Issues: []Issue{{Key: "PROJ-3"}},
+			})
+		default:
+			t.Fatalf("unexpected extra pagination request %d", len(gotTokens))
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "3")
+	issues, err := c.SearchIssues(context.Background(), "project = PROJ")
+	if err != nil {
+		t.Fatalf("SearchIssues error: %v", err)
+	}
+	if len(issues) != 3 {
+		t.Fatalf("issues count = %d, want 3", len(issues))
+	}
+	if want := []string{"", "page-2"}; len(gotTokens) != len(want) || gotTokens[0] != want[0] || gotTokens[1] != want[1] {
+		t.Fatalf("nextPageToken values = %#v, want %#v", gotTokens, want)
+	}
+	for i, startAt := range gotStartAts {
+		if startAt != "" {
+			t.Fatalf("request %d unexpectedly sent startAt=%q for v3 token pagination", i+1, startAt)
+		}
+	}
+}
+
+func TestSearchIssuesV2UsesStartAtPagination(t *testing.T) {
+	var gotStartAts []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotStartAts = append(gotStartAts, r.URL.Query().Get("startAt"))
+		w.Header().Set("Content-Type", "application/json")
+
+		switch len(gotStartAts) {
+		case 1:
+			_ = json.NewEncoder(w).Encode(SearchResult{
+				Total:  3,
+				Issues: []Issue{{Key: "PROJ-1"}, {Key: "PROJ-2"}},
+			})
+		case 2:
+			_ = json.NewEncoder(w).Encode(SearchResult{
+				Total:  3,
+				Issues: []Issue{{Key: "PROJ-3"}},
+			})
+		default:
+			t.Fatalf("unexpected extra pagination request %d", len(gotStartAts))
+		}
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv.URL, "2")
+	issues, err := c.SearchIssues(context.Background(), "project = PROJ")
+	if err != nil {
+		t.Fatalf("SearchIssues error: %v", err)
+	}
+	if len(issues) != 3 {
+		t.Fatalf("issues count = %d, want 3", len(issues))
+	}
+	if want := []string{"0", "2"}; len(gotStartAts) != len(want) || gotStartAts[0] != want[0] || gotStartAts[1] != want[1] {
+		t.Fatalf("startAt values = %#v, want %#v", gotStartAts, want)
+	}
+}

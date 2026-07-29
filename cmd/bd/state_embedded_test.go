@@ -19,11 +19,11 @@ func bdState(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd state %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd state %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdSetState runs "bd set-state" with the given args and returns stdout.
@@ -33,11 +33,11 @@ func bdSetState(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd set-state %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd set-state %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 func TestEmbeddedState(t *testing.T) {
@@ -64,11 +64,11 @@ func TestEmbeddedState(t *testing.T) {
 		cmd := exec.Command(bd, "set-state", issue.ID, "env=staging", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd set-state --json failed: %v\n%s", err, out)
+			t.Fatalf("bd set-state --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(stdout.String())
 		start := strings.Index(s, "{")
 		if start >= 0 {
 			var m map[string]interface{}
@@ -106,11 +106,11 @@ func TestEmbeddedState(t *testing.T) {
 		cmd := exec.Command(bd, "state", issue.ID, "phase", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd state --json failed: %v\n%s", err, out)
+			t.Fatalf("bd state --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		_ = out
+		_ = stdout.String()
 	})
 
 	t.Run("state_query_nonexistent_dimension", func(t *testing.T) {
@@ -133,11 +133,11 @@ func TestEmbeddedState(t *testing.T) {
 		cmd := exec.Command(bd, "state", "list", issue.ID, "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd state list --json failed: %v\n%s", err, out)
+			t.Fatalf("bd state list --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		_ = out
+		_ = stdout.String()
 	})
 
 	t.Run("state_list_no_dimensions", func(t *testing.T) {

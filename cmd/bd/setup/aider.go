@@ -32,6 +32,7 @@ This project uses **Beads (bd)** for issue tracking. Aider requires explicit com
 - ` + "`bd list --status=open`" + ` - List all open issues
 - ` + "`bd create --title=\"...\" --type=task`" + ` - Create new issue
 - ` + "`bd update <id> --claim`" + ` - Claim work atomically
+- ` + "`bd unclaim <id>`" + ` - Release stuck issue
 - ` + "`bd close <id>`" + ` - Mark complete
 - ` + "`bd dep add <issue> <depends-on>`" + ` - Add dependency (issue depends on depends-on)
 - ` + "`bd dolt push`" + ` - Push changes to Dolt remote
@@ -145,35 +146,30 @@ The AI will suggest the appropriate ` + "`bd`" + ` command, which you run via ` 
 
 - Run ` + "`bd --help`" + ` for full command reference
 - See ` + "`AGENTS.md`" + ` for detailed AI integration docs
-- See ` + "`QUICKSTART.md`" + ` for human-oriented guide
+- See the beads quickstart (https://github.com/gastownhall/beads/blob/main/docs/getting-started/quickstart.md) for a human-oriented guide
 `
 
-// InstallAider installs Aider integration
-func InstallAider() {
+func InstallAider() error {
 	configPath := ".aider.conf.yml"
 	instructionsPath := ".aider/BEADS.md"
 	readmePath := ".aider/README.md"
 
 	fmt.Println("Installing Aider integration...")
 
-	// Ensure .aider directory exists
 	if err := EnsureDir(".aider", 0755); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
-	// Write config file
 	if err := atomicWriteFile(configPath, []byte(aiderConfigTemplate)); err != nil {
-		FatalError("write config: %v", err)
+		return HandleError("write config: %v", err)
 	}
 
-	// Write instructions file (loaded by AI)
 	if err := atomicWriteFile(instructionsPath, []byte(aiderBeadsInstructions)); err != nil {
-		FatalError("write instructions: %v", err)
+		return HandleError("write instructions: %v", err)
 	}
 
-	// Write README (for humans)
 	if err := atomicWriteFile(readmePath, []byte(aiderReadmeTemplate)); err != nil {
-		FatalError("write README: %v", err)
+		return HandleError("write README: %v", err)
 	}
 
 	fmt.Printf("\n✓ Aider integration installed\n")
@@ -185,21 +181,21 @@ func InstallAider() {
 	fmt.Println("  2. Ask AI for available work (it will suggest: /run bd ready)")
 	fmt.Println("  3. Run suggested commands using /run")
 	fmt.Println("\nNote: Aider requires you to explicitly run commands via /run")
+	return nil
 }
 
-// CheckAider checks if Aider integration is installed
-func CheckAider() {
+func CheckAider() error {
 	configPath := ".aider.conf.yml"
 
 	if !FileExists(configPath) {
-		FatalErrorWithHint("Aider integration not installed", "Run: bd setup aider")
+		return HandleErrorWithHint("Aider integration not installed", "Run: bd setup aider")
 	}
 
 	fmt.Println("✓ Aider integration installed:", configPath)
+	return nil
 }
 
-// RemoveAider removes Aider integration
-func RemoveAider() {
+func RemoveAider() error {
 	configPath := ".aider.conf.yml"
 	instructionsPath := ".aider/BEADS.md"
 	readmePath := ".aider/README.md"
@@ -209,40 +205,37 @@ func RemoveAider() {
 
 	removed := false
 
-	// Remove config
 	if err := os.Remove(configPath); err != nil {
 		if !os.IsNotExist(err) {
-			FatalError("failed to remove config: %v", err)
+			return HandleError("failed to remove config: %v", err)
 		}
 	} else {
 		removed = true
 	}
 
-	// Remove instructions
 	if err := os.Remove(instructionsPath); err != nil {
 		if !os.IsNotExist(err) {
-			FatalError("failed to remove instructions: %v", err)
+			return HandleError("failed to remove instructions: %v", err)
 		}
 	} else {
 		removed = true
 	}
 
-	// Remove README
 	if err := os.Remove(readmePath); err != nil {
 		if !os.IsNotExist(err) {
-			FatalError("failed to remove README: %v", err)
+			return HandleError("failed to remove README: %v", err)
 		}
 	} else {
 		removed = true
 	}
 
-	// Try to remove .aider directory if empty
 	_ = os.Remove(aiderDir)
 
 	if !removed {
 		fmt.Println("No Aider integration files found")
-		return
+		return nil
 	}
 
 	fmt.Println("✓ Removed Aider integration")
+	return nil
 }

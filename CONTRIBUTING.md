@@ -6,29 +6,26 @@ Thank you for your interest in contributing to bd! This document provides guidel
 
 ### Prerequisites
 
-- Go 1.24 or later
+- Go (see `go.mod` for the required version; currently 1.26+)
 - Git
 - A C compiler (CGO is required for the embedded Dolt database)
 - (Optional) golangci-lint for local linting
-- ICU headers are **not required** for building -- see [docs/ICU-POLICY.md](docs/ICU-POLICY.md)
+- ICU headers are **not required** for building -- see [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md)
 
 ### Getting Started
 
 ```bash
 # Clone the repository
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads
 
 # Build the project (uses gms_pure_go tag via Makefile)
 make build
 
-# Run tests
-go test ./...
+# Run tests (uses correct build tags automatically)
+make test
 
-# Run with race detection
-go test -race ./...
-
-# Build and install locally
+# Build and install locally to ~/.local/bin
 make install
 ```
 
@@ -48,18 +45,18 @@ beads/
 ## Running Tests
 
 ```bash
-# Run all tests
-go test ./...
+# Run all tests (recommended — uses correct build tags)
+make test
 
 # Run tests with coverage
-go test -v -coverprofile=coverage.out ./...
+go test -tags gms_pure_go -v -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 
 # Run specific package tests
-go test ./internal/storage/dolt/ -v
+go test -tags gms_pure_go ./internal/storage/dolt/ -v
 
 # Run tests with race detection
-go test -race ./...
+go test -tags gms_pure_go -race ./...
 ```
 
 ## Code Style
@@ -86,11 +83,18 @@ go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 golangci-lint run ./...
 ```
 
-**Note**: The linter currently reports ~100 warnings. These are documented false positives and idiomatic Go patterns (deferred cleanup, Cobra interface requirements, etc.). See [docs/LINTING.md](docs/LINTING.md) for details. When contributing, focus on avoiding *new* issues rather than the baseline warnings.
+**Note**: The linter currently reports ~100 warnings. These are documented false positives and idiomatic Go patterns (deferred cleanup, Cobra interface requirements, etc.). See [engdocs/LINTING.md](engdocs/LINTING.md) for details. When contributing, focus on avoiding *new* issues rather than the baseline warnings.
 
 CI will automatically run linting on all pull requests.
 
 ## Making Changes
+
+### Project Scope
+
+Before adding new feature surface area, read
+[engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md). Beads owns issue tracking
+primitives. It should not encode orchestration-layer policy, become a storage
+engine, or expand the database schema when issue metadata is sufficient.
 
 ### Workflow
 
@@ -127,6 +131,7 @@ Add cycle detection for dependency graphs
 - Update documentation as needed
 - Ensure CI passes before requesting review
 - Respond to review feedback promptly
+- Lead the PR with a brief plain-language `What` and `Why` so reviewers can grasp the goal without reading the diff. `.github/PULL_REQUEST_TEMPLATE.md` is a starting scaffold — replace, expand, or delete sections to fit your change.
 
 ### ZFC (Zero Framework Cognition)
 
@@ -134,130 +139,24 @@ If you are contributing code that involves AI decision-making or orchestration, 
 
 ## Testing Guidelines
 
-### Test Strategy
+For how to run tests, see [engdocs/TESTING.md](engdocs/TESTING.md). For what to
+test and why (the test pyramid and tiering we follow), see
+[engdocs/TESTING_PHILOSOPHY.md](engdocs/TESTING_PHILOSOPHY.md).
 
-We use a two-tier testing approach:
+### Before Opening a PR
 
-- **Fast tests** (unit tests): Run on every PR via CI with `-short` flag (~2s)
-- **Slow tests** (integration tests): Run nightly with full git operations (~14s)
-
-Slow tests use `testing.Short()` to skip when `-short` flag is present.
-
-### Running Tests
-
-```bash
-# Fast tests (recommended for development - skips slow tests)
-# Use this for rapid iteration during development
-go test -short ./...
-
-# Full test suite (before committing - includes all tests)
-# Run this before pushing to ensure nothing breaks
-go test ./...
-
-# With race detection and coverage
-go test -race -coverprofile=coverage.out ./...
-```
-
-**When to use `-short`:**
-- During active development for fast feedback loops
-- When making small changes that don't affect integration points
-- When you want to quickly verify unit tests pass
-
-**When to use full test suite:**
-- Before committing and pushing changes
-- After modifying git operations or multi-clone scenarios
-- When preparing a pull request
-
-### Writing Tests
-
-- Write table-driven tests when testing multiple scenarios
-- Use descriptive test names that explain what is being tested
-- Clean up resources (database files, etc.) in test teardown
-- Use `t.Run()` for subtests to organize related test cases
-- Mark slow tests with `if testing.Short() { t.Skip("slow test") }`
-
-### CGO vs Non-CGO Tests
-
-Tests are split into two categories based on whether they need the embedded Dolt database (which requires CGO):
-
-- **Non-CGO tests** (no build tag): Unit tests for CLI parsing, helpers, and pure logic. These run everywhere.
-- **CGO tests** (`//go:build cgo`): Integration tests that create a real Dolt database. Files often use the `_embedded_test.go` suffix.
-
-```bash
-# Fast non-CGO tests (recommended for development)
-make test                     # or: go test -short ./...
-
-# Full CGO-enabled suite (before committing)
-make test-full-cgo            # or: ./scripts/test-cgo.sh ./...
-
-# Run a specific CGO test
-./scripts/test-cgo.sh -run '^TestMyFeature$' ./cmd/bd/...
-```
-
-On macOS, always use the script or Make target for CGO tests -- they configure the required ICU linker flags automatically.
-
-### ICU and Build Tags
-
-All production builds use `-tags gms_pure_go` to avoid ICU runtime dependencies.
-**Do not add ICU linker flags to the Makefile or `.buildflags`.**
-See [docs/ICU-POLICY.md](docs/ICU-POLICY.md) for the full policy and rationale.
-
-### Test Isolation with `t.TempDir()`
-
-Database tests use `t.TempDir()` for isolation so each test gets a clean environment and nothing touches the production database:
-
-```go
-func TestMyFeature(t *testing.T) {
-    tmpDir := t.TempDir()
-    dbPath := filepath.Join(tmpDir, "test.db")
-    store := newTestStoreWithPrefix(t, dbPath, "bd")
-
-    ctx := context.Background()
-    issue := &types.Issue{
-        ID:     "bd-1",
-        Title:  "Test issue",
-        Status: types.StatusOpen,
-    }
-    if err := store.CreateIssue(ctx, issue, "test"); err != nil {
-        t.Fatalf("CreateIssue failed: %v", err)
-    }
-    // ... assertions ...
-}
-```
-
-Test helpers in `cmd/bd/test_helpers_test.go` provide database setup functions like `newTestStore`, `newTestStoreWithPrefix`, and `newTestStoreSharedBranch` (which uses branch-per-test isolation to avoid expensive CREATE/DROP DATABASE overhead).
-
-### Table-Driven Test Example
-
-```go
-func TestIssueValidation(t *testing.T) {
-    tests := []struct {
-        name    string
-        issue   *types.Issue
-        wantErr bool
-    }{
-        {
-            name:    "valid issue",
-            issue:   &types.Issue{Title: "Test", Status: types.StatusOpen, Priority: 2},
-            wantErr: false,
-        },
-        {
-            name:    "missing title",
-            issue:   &types.Issue{Status: types.StatusOpen, Priority: 2},
-            wantErr: true,
-        },
-    }
-
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            err := tt.issue.Validate()
-            if (err != nil) != tt.wantErr {
-                t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
-            }
-        })
-    }
-}
-```
+- Run `make test` (or `./scripts/test.sh`) locally and make sure it passes.
+- Add tests for new functionality; extend existing tests when fixing bugs.
+- Write table-driven tests for multiple scenarios, use descriptive test
+  names, use `t.Run()` for subtests, and clean up resources (database
+  files, etc.) in test teardown.
+- If you hit a test failure unrelated to your change, don't silently skip
+  it -- check `.test-skip` and file an issue if it's not already tracked
+  (see [engdocs/TESTING.md](engdocs/TESTING.md#known-broken-tests)).
+- Ensure CI passes (`make ci-pr-core`, `make ci-pr-policy`, `make
+  ci-pr-lint`) before requesting review.
+- If your change touches ICU or build tags, see
+  [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md) for the policy and rationale.
 
 ## Documentation
 
@@ -265,6 +164,28 @@ func TestIssueValidation(t *testing.T) {
 - Update relevant .md files in the project root
 - Add inline code comments for complex logic
 - Include examples in documentation
+
+## Storage filter conventions
+
+### `IssueFilter.MaxRows` opt-out rule (be-x42v)
+
+`types.IssueFilter` carries a defensive row cap (`MaxRows int`,
+`MaxRowsSource string`) that the storage layer enforces via
+`*issueops.ErrTooManyRows`. The cap is wired from `--max-rows` /
+`BEADS_MAX_ROWS` on user-facing commands listed in designer §4 of be-x42v
+(`bd list`, `bd ready`, `bd dep tree`, `bd find-duplicates`, `bd graph`,
+plus env-only on the doctor family).
+
+**Rule for new code that builds an `IssueFilter`:** if your call site is
+NOT on the designer's wired-up list, you **MUST** explicitly initialize
+`filter.MaxRows = 0` and `filter.MaxRowsSource = ""`. This makes the
+opt-out intentional in code review and survives future refactors that
+might otherwise let the env var leak into a sweep path that must not
+abort (export, gc, jira sync, migrate-issues, etc.).
+
+The opt-out test gates (be-x42v.4) enforce this for the
+export / migrate / jira / cleanup / gc paths today. New write-side or
+round-trip paths should pattern-match on those tests.
 
 ## Feature Requests and Bug Reports
 
@@ -296,6 +217,42 @@ This project uses AI agents for maintenance. We've established strict rules to p
 
 If any of this goes wrong, please open an issue — we take contributor experience seriously.
 
+Maintainers and agents follow [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md) when triaging, landing, transforming, or closing PRs.
+
+### Refactoring Campaign PR Intake Checklist
+
+Before starting a rewrite, cleanup, or large refactoring pass, maintainers and agents must review open contributor PRs that touch the same area. Use this checklist to decide whether to merge, rebase, incorporate, or close each PR.
+
+1. Identify overlap:
+   - Read the PR description, changed files, linked issues, and latest review comments.
+   - Compare the PR scope with the planned refactor and note any shared files, commands, migrations, tests, docs, or release paths.
+   - If the PR is unrelated, leave it alone unless the refactor would still create a merge conflict.
+
+2. Prefer clean merges:
+   - If the PR is focused, passing CI, and aligned with current design, review it as the first option.
+   - Merge it before the refactor when that reduces conflict risk.
+   - Preserve the contributor's commits and attribution unless the contributor agrees to a squash or rework.
+
+3. Request a rebase when needed:
+   - Ask for a rebase if the PR is still valid but conflicts with main or depends on code that has moved.
+   - Give concrete instructions about the new target files or APIs.
+   - Do not rewrite the same work in parallel while waiting unless there is a release blocker or security issue.
+
+4. Preserve tests and intent:
+   - Treat contributor tests as part of the contribution, not optional scaffolding.
+   - If a refactor supersedes implementation code, port the tests or explain why they are invalid.
+   - Keep user-facing behavior, docs examples, and regression coverage intact unless the PR is explicitly changing the contract.
+
+5. Close superseded PRs with explicit rationale:
+   - Close only after commenting with the replacement commit, PR, or issue.
+   - Explain what was preserved, what changed, and why the original branch will not be merged.
+   - Thank the contributor and invite follow-up if their use case was not fully covered.
+
+6. Leave an audit trail:
+   - Link the intake decision from the refactor PR or Beads issue.
+   - Record any follow-up work as Beads issues instead of hidden notes.
+   - Call out contributor-owned tests or behavior in the refactor PR summary.
+
 ## Code Review Process
 
 All contributions go through code review:
@@ -310,13 +267,14 @@ All contributions go through code review:
 ### Testing Locally
 
 ```bash
-# Build and test your changes quickly
-go build -o bd ./cmd/bd && ./bd init --prefix test
+# Build and install your changes
+make install
 
 # Test specific functionality
-./bd create "Test issue" -p 1 -t bug
-./bd dep add test-2 test-1
-./bd ready
+bd init --prefix test
+bd create "Test issue" -p 1 -t bug
+bd dep add test-2 test-1
+bd ready
 ```
 
 ### Database Inspection
@@ -342,7 +300,9 @@ docker run --rm -v $(pwd):/workspace -w /workspace nixos/nix \
   sh -c 'echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf && nix build .#default && ./result/bin/bd version'
 ```
 
-If the build fails with a `vendorHash` mismatch, update `default.nix` with the `got:` hash from the error message and rebuild.
+If the build fails with a `vendorHash` mismatch, run `./scripts/update-nix-vendorhash.sh` to recompute and update `default.nix`, or update it manually with the `got:` hash from the error message and rebuild.
+
+The `nix build` CI job (`.github/workflows/nix-build.yml`) runs on any PR that touches `go.mod`, `go.sum`, `default.nix`, `flake.nix`, or `flake.lock`, so dependabot bumps that invalidate `vendorHash` fail loudly instead of silently breaking Nix users on main. For dependabot Go-module bumps specifically, `.github/workflows/update-vendor-hash.yml` runs the same `update-nix-vendorhash.sh` script and pushes the hash bump back to the dependabot branch automatically (note: GitHub does not retrigger `pull_request` workflows for `GITHUB_TOKEN`-authored commits, so a maintainer may need to re-run `nix build .#default` once after the auto-fix push to mark the gate green).
 
 ### Debugging
 
@@ -368,7 +328,7 @@ dlv debug ./cmd/bd -- create "Test issue"
 
 ## Questions?
 
-- Check existing [issues](https://github.com/steveyegge/beads/issues)
+- Check existing [issues](https://github.com/gastownhall/beads/issues)
 - Open a new issue for questions
 - Review [README.md](README.md) and other documentation
 

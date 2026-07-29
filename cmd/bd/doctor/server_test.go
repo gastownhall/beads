@@ -2,8 +2,12 @@ package doctor
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
 )
 
 func TestIsValidIdentifier(t *testing.T) {
@@ -159,5 +163,70 @@ func TestCheckDatabaseExists_InvalidIdentifier(t *testing.T) {
 				t.Errorf("isValidIdentifier(%q) = %v, want %v", tt.name, got, tt.valid)
 			}
 		})
+	}
+}
+
+// TestCheckDoltVersion_Unreachable exercises the credential-resolution and
+// DSN-building path in checkDoltVersion with an unreachable server (bd-h5k7).
+// The ping is expected to fail; the important thing is that we take the
+// GetDoltServerPasswordForPort(port) branch without panicking and return a
+// clean StatusError DoctorCheck.
+func TestCheckDoltVersion_Unreachable(t *testing.T) {
+	// Force the resolved port to 1 (guaranteed unreachable on loopback)
+	// so we don't depend on any running server.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+
+	beadsDir := t.TempDir()
+	cfg := &configfile.Config{
+		DoltMode:       "server",
+		DoltServerHost: "127.0.0.1",
+		DoltServerUser: "root",
+		DoltDatabase:   "beads",
+	}
+
+	check, db := checkDoltVersion(cfg, beadsDir)
+	if db != nil {
+		_ = db.Close()
+		t.Fatal("expected nil db handle on unreachable server")
+	}
+	if check.Status != StatusError {
+		t.Errorf("expected Status %q, got %q (message: %s, detail: %s)",
+			StatusError, check.Status, check.Message, check.Detail)
+	}
+	if check.Name != "Dolt Version" {
+		t.Errorf("expected Name %q, got %q", "Dolt Version", check.Name)
+	}
+}
+
+// TestRunDoltServerDiagnostics_Unreachable exercises the credential-resolution
+// branch in runDoltServerDiagnostics (bd-h5k7). metadata.json is loaded so
+// that user / tls / password are pulled from configfile.Load before the DSN
+// is built and the ping fails against the unreachable port.
+func TestRunDoltServerDiagnostics_Unreachable(t *testing.T) {
+	beadsDir := t.TempDir()
+
+	// Write a minimal metadata.json so configfile.Load returns a non-nil
+	// cfg — that's what gates the user/tls/password assignments.
+	meta := `{
+  "database": "beads.db",
+  "dolt_mode": "server",
+  "dolt_server_host": "127.0.0.1",
+  "dolt_server_user": "root",
+  "dolt_database": "beads"
+}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	metrics := &DoltPerfMetrics{}
+	err := runDoltServerDiagnostics(metrics, "127.0.0.1", 1, "beads", beadsDir)
+	if err == nil {
+		t.Fatal("expected error connecting to unreachable server")
+	}
+	if metrics.Backend != "dolt-server" {
+		t.Errorf("expected Backend %q, got %q", "dolt-server", metrics.Backend)
+	}
+	if !metrics.ServerMode {
+		t.Error("expected ServerMode=true")
 	}
 }

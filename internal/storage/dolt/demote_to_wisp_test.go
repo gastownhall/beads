@@ -155,6 +155,49 @@ func TestDemoteToWisp_FieldUpdatesApplied(t *testing.T) {
 	}
 }
 
+func TestDemoteToWisp_MetadataAndClosedAtUpdatesApplied(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		Title:     "will close as wisp",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+		"no_history": true,
+		"status":     string(types.StatusClosed),
+		"metadata":   `{"review":"kept"}`,
+	}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+
+	wisp, err := store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if !wisp.NoHistory {
+		t.Error("NoHistory should be true")
+	}
+	if wisp.Status != types.StatusClosed {
+		t.Errorf("status: got %q, want %q", wisp.Status, types.StatusClosed)
+	}
+	if wisp.ClosedAt == nil {
+		t.Fatal("ClosedAt should be set when demotion closes the issue")
+	}
+	if string(wisp.Metadata) != `{"review":"kept"}` {
+		t.Errorf("metadata: got %s, want %s", string(wisp.Metadata), `{"review":"kept"}`)
+	}
+}
+
 // TestDemoteToWisp_LabelsPreserved verifies that labels are migrated
 // from the permanent labels table to wisp_labels during demotion. (be-x4l)
 func TestDemoteToWisp_LabelsPreserved(t *testing.T) {

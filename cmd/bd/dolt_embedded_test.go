@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,11 +19,11 @@ func bdDolt(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd dolt %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd dolt %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdDoltFail runs "bd dolt" expecting failure and returns stderr+stdout.
@@ -50,15 +51,16 @@ func TestEmbeddedDolt(t *testing.T) {
 
 	// ===== Server-only commands must fail in embedded mode =====
 
+	// status and show are intentionally NOT in this list: they report
+	// embedded-mode state rather than erroring out. See the
+	// embedded_status/embedded_show subtests below.
 	serverOnlyCmds := []struct {
 		name string
 		args []string
 	}{
 		{"start", []string{"start"}},
 		{"stop", []string{"stop"}},
-		{"status", []string{"status"}},
 		{"test", []string{"test"}},
-		{"show", []string{"show"}},
 		{"set", []string{"set", "host", "127.0.0.1"}},
 		{"killall", []string{"killall"}},
 		{"clean-databases", []string{"clean-databases"}},
@@ -72,6 +74,39 @@ func TestEmbeddedDolt(t *testing.T) {
 			}
 		})
 	}
+
+	// ===== Embedded-mode inspection commands succeed with embedded-mode output =====
+
+	t.Run("embedded_status", func(t *testing.T) {
+		out := bdDolt(t, bd, dir, "status")
+		if !strings.Contains(out, "embedded") {
+			t.Errorf("expected embedded-mode status output to mention 'embedded': %s", out)
+		}
+	})
+
+	t.Run("embedded_status_json", func(t *testing.T) {
+		out := bdDolt(t, bd, dir, "status", "--json")
+		var result map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &result); err != nil {
+			t.Fatalf("status --json returned invalid JSON: %v\n%s", err, out)
+		}
+		if result["mode"] != "embedded" {
+			t.Errorf("mode = %v, want embedded", result["mode"])
+		}
+		if result["server_running"] != false {
+			t.Errorf("server_running = %v, want false", result["server_running"])
+		}
+		if _, ok := result["running"]; ok {
+			t.Errorf("running should be omitted for embedded mode; use server_running instead: %v", result["running"])
+		}
+	})
+
+	t.Run("embedded_show", func(t *testing.T) {
+		out := bdDolt(t, bd, dir, "show")
+		if !strings.Contains(out, "Mode:") || !strings.Contains(out, "embedded") {
+			t.Errorf("expected embedded-mode show output to contain 'Mode:' and 'embedded': %s", out)
+		}
+	})
 
 	// ===== Working commands =====
 
@@ -220,10 +255,10 @@ func TestEmbeddedDoltConcurrent(t *testing.T) {
 			case 0:
 				args = []string{"dolt", "commit"}
 			case 1:
-				// Server-only command should fail fast
+				// Status is an embedded-mode inspection command.
 				args = []string{"dolt", "status"}
-				expectFail = true
 			case 2:
+				// Server-only command should fail fast.
 				args = []string{"dolt", "start"}
 				expectFail = true
 			}
@@ -254,5 +289,86 @@ func TestEmbeddedDoltConcurrent(t *testing.T) {
 		if r.err != nil && !strings.Contains(r.err.Error(), "one writer at a time") {
 			t.Errorf("worker %d failed: %v", r.worker, r.err)
 		}
+	}
+}
+
+// TestAdminEmbeddedBlocked verifies that bd admin subcommands are blocked in
+// embedded mode. The guard was previously on adminCmd.PersistentPreRunE which
+// fired before cmdCtx.ServerMode was populated, causing a false "embedded mode"
+// error even in server-mode projects. The guard is now inside each subcommand's
+// Run func, after store init. This test ensures embedded mode still correctly
+// rejects admin commands.
+func TestEmbeddedAdminBlocked(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ta")
+
+	blockedCmds := []struct {
+		name string
+		args []string
+	}{
+		{"compact --dolt", []string{"admin", "compact", "--dolt"}},
+		{"cleanup --dry-run", []string{"admin", "cleanup", "--dry-run"}},
+		{"reset", []string{"admin", "reset"}},
+	}
+
+	for _, tc := range blockedCmds {
+		tc := tc
+		t.Run("blocked_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.Command(bd, tc.args...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Errorf("bd %s should fail in embedded mode but succeeded: %s", tc.name, out)
+				return
+			}
+			if !strings.Contains(string(out), "not yet supported in embedded mode") {
+				t.Errorf("bd %s: expected 'not yet supported in embedded mode', got: %s", tc.name, out)
+			}
+		})
+	}
+}
+
+// TestAdminEmbeddedCompactReadOnlyAllowed verifies read-only compact modes are
+// not blocked by the embedded-mode admin guard.
+func TestEmbeddedAdminCompactReadOnlyAllowed(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "ta")
+
+	readOnlyCmds := []struct {
+		name string
+		args []string
+	}{
+		{"compact --stats", []string{"admin", "compact", "--stats"}},
+		{"compact --dolt --dry-run", []string{"admin", "compact", "--dolt", "--dry-run"}},
+	}
+
+	for _, tc := range readOnlyCmds {
+		tc := tc
+		t.Run("allowed_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := exec.Command(bd, tc.args...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Errorf("bd %s should be allowed in embedded mode: %v\n%s", tc.name, err, out)
+				return
+			}
+			if strings.Contains(string(out), "not yet supported in embedded mode") {
+				t.Errorf("bd %s hit embedded-mode guard unexpectedly: %s", tc.name, out)
+			}
+		})
 	}
 }

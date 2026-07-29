@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -742,6 +743,73 @@ func TestSquashMoleculeWithAgentSummary(t *testing.T) {
 	// Verify auto-generated content is NOT present
 	if strings.Contains(digest.Description, "Wisp Step") {
 		t.Error("Digest should NOT contain auto-generated content when agent summary provided")
+	}
+}
+
+// TestSquashWispMoleculeClearsRootEphemeral verifies that squashing a wisp
+// molecule (root with Ephemeral=true) clears the root's Ephemeral flag in
+// addition to auto-closing it. Without this, auto-export keeps re-emitting
+// the closed root as ephemeral=true on every export cycle, accumulating
+// duplicate JSONL rows.
+func TestSquashWispMoleculeClearsRootEphemeral(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Wisp molecule: root is ephemeral too (created via `bd mol wisp`).
+	root := &types.Issue{
+		Title:     "Wisp Molecule Root",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeEpic,
+		Ephemeral: true,
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create ephemeral root: %v", err)
+	}
+
+	child := &types.Issue{
+		Title:     "Wisp Step",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := s.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("Failed to create child: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: root.ID,
+		Type:        types.DepParentChild,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add dependency: %v", err)
+	}
+
+	result, err := squashMolecule(ctx, s, root, []*types.Issue{child}, false, "", "test")
+	if err != nil {
+		t.Fatalf("squashMolecule failed: %v", err)
+	}
+	if !result.WispSquash {
+		t.Error("expected WispSquash=true for ephemeral root")
+	}
+
+	closed, err := s.GetIssue(ctx, root.ID)
+	if err != nil {
+		t.Fatalf("Failed to get root after squash: %v", err)
+	}
+	if closed.Status != types.StatusClosed {
+		t.Errorf("root status = %v, want closed", closed.Status)
+	}
+	if closed.Ephemeral {
+		t.Errorf("root Ephemeral should be false after squash, got true (issue: closed wisp roots leak as duplicate JSONL rows on every export)")
 	}
 }
 
@@ -1646,6 +1714,172 @@ func TestFindParentMoleculesBatch(t *testing.T) {
 	}
 }
 
+// TestFindParentMolecule_RootShapes covers every shape of molecule root that
+// findParentMolecule(s) needs to recognize:
+//   - TypeEpic + BeadsTemplateLabel  (distilled / older formula path)
+//   - TypeMolecule with no label     (`bd mol pour` path — gastownhall/beads#3719)
+//   - TypeTask + BeadsTemplateLabel  (template-label-only fallback)
+//   - TypeTask, no label             (not a molecule)
+//
+// Before the fix for #3719 the TypeMolecule case returned "", which caused
+// `bd close --continue` to silently no-op for any poured molecule.
+func TestFindParentMolecule_RootShapes(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		rootType   types.IssueType
+		rootLabels []string
+		isMolecule bool
+	}{
+		{"epic with template label", types.TypeEpic, []string{BeadsTemplateLabel}, true},
+		{"poured molecule (no label)", types.TypeMolecule, nil, true},
+		{"task with template label", types.TypeTask, []string{BeadsTemplateLabel}, true},
+		{"plain task is not a molecule", types.TypeTask, nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := &types.Issue{
+				Title:     tt.name + " root",
+				Status:    types.StatusOpen,
+				Priority:  1,
+				IssueType: tt.rootType,
+				Labels:    tt.rootLabels,
+			}
+			if err := s.CreateIssue(ctx, root, "test"); err != nil {
+				t.Fatalf("Failed to create root: %v", err)
+			}
+
+			child := &types.Issue{
+				Title:     tt.name + " child",
+				Status:    types.StatusOpen,
+				Priority:  2,
+				IssueType: types.TypeTask,
+			}
+			if err := s.CreateIssue(ctx, child, "test"); err != nil {
+				t.Fatalf("Failed to create child: %v", err)
+			}
+			if err := s.AddDependency(ctx, &types.Dependency{
+				IssueID:     child.ID,
+				DependsOnID: root.ID,
+				Type:        types.DepParentChild,
+			}, "test"); err != nil {
+				t.Fatalf("Failed to add parent-child: %v", err)
+			}
+
+			wantSingle := ""
+			if tt.isMolecule {
+				wantSingle = root.ID
+			}
+			if got := findParentMolecule(ctx, s, child.ID); got != wantSingle {
+				t.Errorf("findParentMolecule(child) = %q, want %q", got, wantSingle)
+			}
+
+			wantBatch := map[string]string{child.ID: wantSingle}
+			gotBatch := findParentMolecules(ctx, s, []string{child.ID})
+			if got := gotBatch[child.ID]; got != wantBatch[child.ID] {
+				t.Errorf("findParentMolecules(child) = %q, want %q", got, wantBatch[child.ID])
+			}
+		})
+	}
+}
+
+// TestAdvanceToNextStep_PouredMolecule reproduces gastownhall/beads#3719: when a
+// step lives under a TypeMolecule root (as `bd mol pour` creates), AdvanceToNextStep
+// must find the parent molecule and (with autoClaim=true) claim the next ready step.
+// Before the fix it silently returned (nil, nil).
+func TestAdvanceToNextStep_PouredMolecule(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	// Root shaped like `bd mol pour` output: TypeMolecule, no template label.
+	root := &types.Issue{
+		Title:     "Poured Molecule",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeMolecule,
+	}
+	if err := s.CreateIssue(ctx, root, "test"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	step1 := &types.Issue{
+		Title:     "Step 1",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	step2 := &types.Issue{
+		Title:     "Step 2",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	for _, step := range []*types.Issue{step1, step2} {
+		if err := s.CreateIssue(ctx, step, "test"); err != nil {
+			t.Fatalf("Failed to create step: %v", err)
+		}
+		if err := s.AddDependency(ctx, &types.Dependency{
+			IssueID:     step.ID,
+			DependsOnID: root.ID,
+			Type:        types.DepParentChild,
+		}, "test"); err != nil {
+			t.Fatalf("Failed to add parent-child: %v", err)
+		}
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID:     step2.ID,
+		DependsOnID: step1.ID,
+		Type:        types.DepBlocks,
+	}, "test"); err != nil {
+		t.Fatalf("Failed to add blocking dep: %v", err)
+	}
+
+	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, true, "test")
+	if err != nil {
+		t.Fatalf("AdvanceToNextStep failed: %v", err)
+	}
+	if result == nil {
+		t.Fatal("AdvanceToNextStep returned nil result; expected molecule advance for TypeMolecule root")
+	}
+	if result.MoleculeID != root.ID {
+		t.Errorf("MoleculeID = %q, want %q", result.MoleculeID, root.ID)
+	}
+	if result.NextStep == nil || result.NextStep.ID != step2.ID {
+		t.Errorf("NextStep = %v, want step2 (%s)", result.NextStep, step2.ID)
+	}
+	if !result.AutoAdvanced {
+		t.Errorf("AutoAdvanced = false; want true (autoClaim was on)")
+	}
+
+	// Confirm step2 is in_progress now.
+	got, err := s.GetIssue(ctx, step2.ID)
+	if err != nil {
+		t.Fatalf("GetIssue(step2) failed: %v", err)
+	}
+	if got.Status != types.StatusInProgress {
+		t.Errorf("step2 status = %q, want %q", got.Status, types.StatusInProgress)
+	}
+}
+
 // TestFindHookedMolecules tests finding molecules bonded to hooked issues
 func TestFindHookedMolecules(t *testing.T) {
 	ctx := context.Background()
@@ -1790,7 +2024,7 @@ func TestAdvanceToNextStep(t *testing.T) {
 	}
 
 	// Advance from step1 (just closed) without auto-claim
-	result, err := AdvanceToNextStep(ctx, s, step1.ID, false, "test")
+	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, false, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -1816,7 +2050,7 @@ func TestAdvanceToNextStep(t *testing.T) {
 	}
 
 	// Now test with auto-claim
-	result, err = AdvanceToNextStep(ctx, s, step1.ID, true, "test")
+	result, err = AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, true, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep with auto-claim failed: %v", err)
 	}
@@ -1874,7 +2108,7 @@ func TestAdvanceToNextStepMoleculeComplete(t *testing.T) {
 	}
 
 	// Advance from the only step (molecule should be complete)
-	result, err := AdvanceToNextStep(ctx, s, step1.ID, false, "test")
+	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, false, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -1914,7 +2148,7 @@ func TestAdvanceToNextStepOrphanIssue(t *testing.T) {
 	}
 
 	// Advance should return nil (not part of molecule)
-	result, err := AdvanceToNextStep(ctx, s, orphan.ID, false, "test")
+	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), orphan.ID, false, "test")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -2004,7 +2238,7 @@ func TestAdvanceToNextStepConcurrentClaim(t *testing.T) {
 	// Now our agent tries to advance with autoClaim — step2 was identified as
 	// ready during the read phase, but it's already in_progress. The function
 	// should fall back to step3.
-	result, err := AdvanceToNextStep(ctx, s, step1.ID, true, "our-agent")
+	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, true, "our-agent")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -2097,7 +2331,7 @@ func TestAdvanceToNextStepAllClaimed(t *testing.T) {
 	}
 
 	// Advance with autoClaim — should fail gracefully (no steps to claim)
-	result, err := AdvanceToNextStep(ctx, s, step1.ID, true, "our-agent")
+	result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(s), step1.ID, true, "our-agent")
 	if err != nil {
 		t.Fatalf("AdvanceToNextStep failed: %v", err)
 	}
@@ -2985,6 +3219,70 @@ func TestSpawnMoleculeFromFormulaEphemeral(t *testing.T) {
 				t.Errorf("Ephemeral issue %s should not appear in ready work", spawnedID)
 			}
 		}
+	}
+}
+
+// TestSpawnMolecule_PreservesStepMetadata verifies that a cooked formula with
+// per-step metadata results in spawned issues whose Metadata field carries the
+// declared keys through to the database. Regression for gastownhall/beads#3341.
+func TestSpawnMolecule_PreservesStepMetadata(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/test.db"
+	s, err := dolt.New(ctx, &dolt.Config{Path: dbPath})
+	if err != nil {
+		t.Skipf("skipping: Dolt server not available: %v", err)
+	}
+	defer s.Close()
+	if err := s.SetConfig(ctx, "issue_prefix", "test"); err != nil {
+		t.Fatalf("Failed to set config: %v", err)
+	}
+
+	f := &formula.Formula{
+		Formula: "meta-test",
+		Version: 1,
+		Type:    formula.TypeWorkflow,
+		Steps: []*formula.Step{
+			{
+				ID:    "work",
+				Title: "Do the work",
+				Metadata: map[string]interface{}{
+					"reminder_list": "brewery",
+					"origin":        "repro",
+				},
+			},
+		},
+	}
+
+	subgraph, err := cookFormulaToSubgraph(f, "meta-test")
+	if err != nil {
+		t.Fatalf("cookFormulaToSubgraph failed: %v", err)
+	}
+
+	result, err := spawnMolecule(ctx, s, subgraph, nil, "", "test", false, types.IDPrefixMol)
+	if err != nil {
+		t.Fatalf("spawnMolecule failed: %v", err)
+	}
+
+	newWorkID, ok := result.IDMapping["meta-test.work"]
+	if !ok {
+		t.Fatalf("result.IDMapping missing entry for meta-test.work; got %v", result.IDMapping)
+	}
+	spawned, err := s.GetIssue(ctx, newWorkID)
+	if err != nil {
+		t.Fatalf("GetIssue(%s) failed: %v", newWorkID, err)
+	}
+	if len(spawned.Metadata) == 0 {
+		t.Fatalf("spawned issue %s has empty Metadata; want step metadata carried through", newWorkID)
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal(spawned.Metadata, &decoded); err != nil {
+		t.Fatalf("spawned.Metadata is not valid JSON: %v (raw: %s)", err, string(spawned.Metadata))
+	}
+	if got := decoded["reminder_list"]; got != "brewery" {
+		t.Errorf("spawned.Metadata[reminder_list] = %v, want \"brewery\"", got)
+	}
+	if got := decoded["origin"]; got != "repro" {
+		t.Errorf("spawned.Metadata[origin] = %v, want \"repro\"", got)
 	}
 }
 

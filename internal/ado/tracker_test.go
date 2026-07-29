@@ -7,11 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
@@ -89,9 +92,10 @@ func TestTracker_InitFromEnv(t *testing.T) {
 }
 
 func TestTracker_InitFromConfig(t *testing.T) {
+	// ado.pat is yaml-only (secret), so set it via env var.
+	t.Setenv("AZURE_DEVOPS_PAT", "config-pat")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
-		"ado.pat":     "config-pat",
 		"ado.org":     "configorg",
 		"ado.project": "configproject",
 	})
@@ -108,9 +112,10 @@ func TestTracker_InitFromConfig(t *testing.T) {
 }
 
 func TestTracker_InitWithCustomURL(t *testing.T) {
+	// ado.pat is yaml-only (secret), so set it via env var.
+	t.Setenv("AZURE_DEVOPS_PAT", "config-pat")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
-		"ado.pat":     "config-pat",
 		"ado.project": "myproject",
 		"ado.url":     "https://tfs.corp.com/DefaultCollection",
 	})
@@ -145,9 +150,10 @@ func TestTracker_InitMissingPAT(t *testing.T) {
 func TestTracker_InitMissingOrg(t *testing.T) {
 	t.Setenv("AZURE_DEVOPS_ORG", "")
 	t.Setenv("AZURE_DEVOPS_URL", "")
+	// ado.pat is yaml-only (secret), so set it via env var.
+	t.Setenv("AZURE_DEVOPS_PAT", "some-pat")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
-		"ado.pat":     "some-pat",
 		"ado.project": "proj",
 	})
 	err := tr.Init(context.Background(), store)
@@ -161,9 +167,10 @@ func TestTracker_InitMissingOrg(t *testing.T) {
 
 func TestTracker_InitMissingProject(t *testing.T) {
 	t.Setenv("AZURE_DEVOPS_PROJECT", "")
+	// ado.pat is yaml-only (secret), so set it via env var.
+	t.Setenv("AZURE_DEVOPS_PAT", "some-pat")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
-		"ado.pat": "some-pat",
 		"ado.org": "myorg",
 	})
 	err := tr.Init(context.Background(), store)
@@ -176,9 +183,10 @@ func TestTracker_InitMissingProject(t *testing.T) {
 }
 
 func TestTracker_InitWithStateMappings(t *testing.T) {
+	// ado.pat is yaml-only (secret), so set it via env var.
+	t.Setenv("AZURE_DEVOPS_PAT", "some-pat")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
-		"ado.pat":              "some-pat",
 		"ado.org":              "myorg",
 		"ado.project":          "myproject",
 		"ado.state_map.open":   "To Do",
@@ -196,9 +204,10 @@ func TestTracker_InitWithStateMappings(t *testing.T) {
 }
 
 func TestTracker_InitWithCustomTypeMapping(t *testing.T) {
+	// ado.pat is yaml-only (secret), so set it via env var.
+	t.Setenv("AZURE_DEVOPS_PAT", "some-pat")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
-		"ado.pat":              "some-pat",
 		"ado.org":              "myorg",
 		"ado.project":          "myproject",
 		"ado.type_map.story":   "User Story",
@@ -662,32 +671,34 @@ func TestTracker_FieldMapper(t *testing.T) {
 }
 
 func TestTracker_GetConfig_Precedence(t *testing.T) {
-	// Config store value takes precedence over env var.
-	t.Setenv("AZURE_DEVOPS_PAT", "env-pat")
+	// For non-yaml-only keys, config store value takes precedence over env var.
+	// ado.pat is yaml-only (secret), so we test with ado.org instead.
+	t.Setenv("AZURE_DEVOPS_ORG", "env-org")
 	store := newMockStore(map[string]string{
-		"ado.pat": "config-pat",
+		"ado.org": "config-org",
 	})
 	tr := &Tracker{store: store}
-	got := tr.getConfig(context.Background(), "ado.pat", "AZURE_DEVOPS_PAT")
-	if got != "config-pat" {
-		t.Errorf("getConfig() = %q, want %q (config should win)", got, "config-pat")
+	got := tr.getConfig(context.Background(), "ado.org", "AZURE_DEVOPS_ORG")
+	if got != "config-org" {
+		t.Errorf("getConfig() = %q, want %q (config should win)", got, "config-org")
 	}
 }
 
 func TestTracker_GetConfig_EnvFallback(t *testing.T) {
-	t.Setenv("AZURE_DEVOPS_PAT", "env-pat")
+	// For non-yaml-only keys, env var is used when store has no value.
+	t.Setenv("AZURE_DEVOPS_ORG", "env-org")
 	store := newMockStore(nil)
 	tr := &Tracker{store: store}
-	got := tr.getConfig(context.Background(), "ado.pat", "AZURE_DEVOPS_PAT")
-	if got != "env-pat" {
-		t.Errorf("getConfig() = %q, want %q (env fallback)", got, "env-pat")
+	got := tr.getConfig(context.Background(), "ado.org", "AZURE_DEVOPS_ORG")
+	if got != "env-org" {
+		t.Errorf("getConfig() = %q, want %q (env fallback)", got, "env-org")
 	}
 }
 
 func TestTracker_GetConfig_NotFound(t *testing.T) {
 	store := newMockStore(nil)
 	tr := &Tracker{store: store}
-	got := tr.getConfig(context.Background(), "ado.pat", "NONEXISTENT_ENV_VAR_FOR_TEST")
+	got := tr.getConfig(context.Background(), "ado.org", "NONEXISTENT_ENV_VAR_FOR_TEST")
 	if got != "" {
 		t.Errorf("getConfig() = %q, want empty", got)
 	}
@@ -1283,9 +1294,10 @@ func TestTracker_UpdateIssue_NegativeID(t *testing.T) {
 }
 
 func TestTracker_InitValidatesOrg(t *testing.T) {
+	// ado.pat is yaml-only (secret), so set it via env var.
+	t.Setenv("AZURE_DEVOPS_PAT", "some-pat")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
-		"ado.pat":     "some-pat",
 		"ado.org":     "bad org!@#",
 		"ado.project": "myproject",
 	})
@@ -1299,9 +1311,10 @@ func TestTracker_InitValidatesOrg(t *testing.T) {
 }
 
 func TestTracker_InitValidatesProject(t *testing.T) {
+	// ado.pat is yaml-only (secret), so set it via env var.
+	t.Setenv("AZURE_DEVOPS_PAT", "some-pat")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
-		"ado.pat":     "some-pat",
 		"ado.org":     "myorg",
 		"ado.project": "bad<project>",
 	})
@@ -1315,9 +1328,10 @@ func TestTracker_InitValidatesProject(t *testing.T) {
 }
 
 func TestTracker_InitRejectsHTTPURL(t *testing.T) {
+	// ado.pat is yaml-only (secret), so set it via env var.
+	t.Setenv("AZURE_DEVOPS_PAT", "some-pat")
 	tr := &Tracker{}
 	store := newMockStore(map[string]string{
-		"ado.pat":     "some-pat",
 		"ado.project": "myproject",
 		"ado.url":     "http://ado.example.com/collection",
 	})
@@ -1337,4 +1351,68 @@ func maskToken(pat string) string {
 		return "****"
 	}
 	return pat[:4] + strings.Repeat("*", len(pat)-4)
+}
+
+// TestGetConfig_YamlOnlyKeyBypassesStore verifies that yaml-only keys
+// (e.g. ado.pat) bypass the Dolt store entirely. A nil store proves
+// the store is never dereferenced; before the fix this would panic.
+func TestGetConfig_YamlOnlyKeyBypassesStore(t *testing.T) {
+	ctx := context.Background()
+	tr := &Tracker{store: nil}
+
+	t.Run("falls back to env var", func(t *testing.T) {
+		t.Setenv("AZURE_DEVOPS_PAT", "env-pat-value")
+		got := tr.getConfig(ctx, "ado.pat", "AZURE_DEVOPS_PAT")
+		if got != "env-pat-value" {
+			t.Errorf("getConfig(ado.pat) = %q, want %q", got, "env-pat-value")
+		}
+	})
+
+	t.Run("returns empty when no value is set", func(t *testing.T) {
+		t.Setenv("AZURE_DEVOPS_PAT", "")
+		got := tr.getConfig(ctx, "ado.pat", "AZURE_DEVOPS_PAT")
+		if got != "" {
+			t.Errorf("getConfig(ado.pat) = %q, want empty", got)
+		}
+	})
+}
+
+// TestGetConfig_YamlOnlyKeyReadsFromYaml verifies that ado.pat is
+// read from .beads/config.yaml when set there, without depending on the
+// AZURE_DEVOPS_PAT env var.
+func TestGetConfig_YamlOnlyKeyReadsFromYaml(t *testing.T) {
+	const wantPAT = "yaml-config-pat-value"
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	yamlBody := "ado.pat: \"" + wantPAT + "\"\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(yamlBody), 0o600); err != nil {
+		t.Fatalf("write config.yaml: %v", err)
+	}
+
+	t.Setenv("AZURE_DEVOPS_PAT", "")
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "xdg"))
+	t.Chdir(tmpDir)
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+
+	if got := config.GetString("ado.pat"); got != wantPAT {
+		t.Fatalf("config.GetString(ado.pat) = %q, want %q (yaml not loaded?)", got, wantPAT)
+	}
+
+	tr := &Tracker{store: nil}
+	got := tr.getConfig(context.Background(), "ado.pat", "AZURE_DEVOPS_PAT")
+	if got != wantPAT {
+		t.Errorf("getConfig(ado.pat) = %q, want %q (yaml value)", got, wantPAT)
+	}
 }

@@ -220,6 +220,93 @@ func TestDefaultSearchPaths_FallsBackToCwdFormulaDirWithoutBeadsProject(t *testi
 	}
 }
 
+func TestDefaultSearchPaths_IncludesCwdFormulaDirWithResolvedParentProject(t *testing.T) {
+	resetFormulaSearchTestContext(t)
+
+	root := t.TempDir()
+	parentFormulaDir := filepath.Join(root, ".beads", "formulas")
+	if err := os.MkdirAll(filepath.Join(root, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFormulaFixture(t, parentFormulaDir, "shared", "parent formula")
+
+	checkout := filepath.Join(root, "checkout")
+	checkoutFormulaDir := filepath.Join(checkout, ".beads", "formulas")
+	writeFormulaFixture(t, checkoutFormulaDir, "checkout-local", "checkout formula")
+
+	t.Chdir(checkout)
+	resetFormulaSearchCaches()
+
+	paths := DefaultSearchPaths()
+	if len(paths) < 2 {
+		t.Fatalf("DefaultSearchPaths() returned %d paths, want at least 2", len(paths))
+	}
+
+	gotResolved := canonicalTestPath(paths[0])
+	wantResolved := canonicalTestPath(parentFormulaDir)
+	if gotResolved != wantResolved {
+		t.Fatalf("DefaultSearchPaths()[0] = %q, want %q", gotResolved, wantResolved)
+	}
+
+	gotCwd := canonicalTestPath(paths[1])
+	wantCwd := canonicalTestPath(checkoutFormulaDir)
+	if gotCwd != wantCwd {
+		t.Fatalf("DefaultSearchPaths()[1] = %q, want %q", gotCwd, wantCwd)
+	}
+
+	parser := NewParser()
+	if _, err := parser.LoadByName("checkout-local"); err != nil {
+		t.Fatalf("LoadByName(checkout-local) failed: %v", err)
+	}
+}
+
+func TestDefaultSearchPaths_IncludesCheckoutFormulaDirFromSubdirectory(t *testing.T) {
+	resetFormulaSearchTestContext(t)
+
+	root := t.TempDir()
+	parentFormulaDir := filepath.Join(root, ".beads", "formulas")
+	if err := os.MkdirAll(filepath.Join(root, ".beads", "dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFormulaFixture(t, parentFormulaDir, "shared", "parent formula")
+	t.Setenv("BEADS_DIR", filepath.Join(root, ".beads"))
+
+	checkout := filepath.Join(root, "checkout")
+	initFormulaTestRepo(t, checkout)
+	checkoutFormulaDir := filepath.Join(checkout, ".beads", "formulas")
+	writeFormulaFixture(t, checkoutFormulaDir, "checkout-local", "checkout formula")
+
+	subdir := filepath.Join(checkout, "cmd")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(subdir)
+	resetFormulaSearchCaches()
+
+	paths := DefaultSearchPaths()
+	if len(paths) < 2 {
+		t.Fatalf("DefaultSearchPaths() returned %d paths, want at least 2", len(paths))
+	}
+
+	gotResolved := canonicalTestPath(paths[0])
+	wantResolved := canonicalTestPath(parentFormulaDir)
+	if gotResolved != wantResolved {
+		t.Fatalf("DefaultSearchPaths()[0] = %q, want %q", gotResolved, wantResolved)
+	}
+
+	gotCheckout := canonicalTestPath(paths[1])
+	wantCheckout := canonicalTestPath(checkoutFormulaDir)
+	if gotCheckout != wantCheckout {
+		t.Fatalf("DefaultSearchPaths()[1] = %q, want %q", gotCheckout, wantCheckout)
+	}
+
+	parser := NewParser()
+	if _, err := parser.LoadByName("checkout-local"); err != nil {
+		t.Fatalf("LoadByName(checkout-local) failed from subdirectory: %v", err)
+	}
+}
+
 func TestValidate_ValidFormula(t *testing.T) {
 	formula := &Formula{
 		Formula: "mol-valid",
@@ -432,11 +519,19 @@ func TestExtractVariables(t *testing.T) {
 		Steps: []*Step{
 			{ID: "s1", Title: "Deploy {{project}} to {{env}}"},
 			{ID: "s2", Title: "Notify {{owner}}"},
+			{ID: "s3", Gate: &Gate{Type: "gh:{{gate_kind}}", AwaitID: "{{pr_url}}", Timeout: "{{gate_timeout}}"}},
 		},
 	}
 
 	vars := ExtractVariables(formula)
-	want := map[string]bool{"project": true, "env": true, "owner": true}
+	want := map[string]bool{
+		"project":      true,
+		"env":          true,
+		"owner":        true,
+		"gate_kind":    true,
+		"pr_url":       true,
+		"gate_timeout": true,
+	}
 
 	if len(vars) != len(want) {
 		t.Errorf("ExtractVariables found %d vars, want %d", len(vars), len(want))
@@ -1262,6 +1357,7 @@ func TestParse_GateField(t *testing.T) {
       "gate": {
         "type": "gh:run",
         "id": "ci-tests",
+        "await_id": "12345",
         "timeout": "1h"
       }
     },
@@ -1290,6 +1386,9 @@ func TestParse_GateField(t *testing.T) {
 	if gate.ID != "ci-tests" {
 		t.Errorf("Gate.ID = %q, want 'ci-tests'", gate.ID)
 	}
+	if gate.AwaitID != "12345" {
+		t.Errorf("Gate.AwaitID = %q, want '12345'", gate.AwaitID)
+	}
 	if gate.Timeout != "1h" {
 		t.Errorf("Gate.Timeout = %q, want '1h'", gate.Timeout)
 	}
@@ -1306,6 +1405,7 @@ id = "wait-for-approval"
 title = "Wait for human approval"
 [steps.gate]
 type = "human"
+await_id = "approval-ticket"
 timeout = "24h"
 
 [[steps]]
@@ -1331,6 +1431,9 @@ depends_on = ["wait-for-approval"]
 	}
 	if gate.Type != "human" {
 		t.Errorf("Gate.Type = %q, want 'human'", gate.Type)
+	}
+	if gate.AwaitID != "approval-ticket" {
+		t.Errorf("Gate.AwaitID = %q, want 'approval-ticket'", gate.AwaitID)
 	}
 	if gate.Timeout != "24h" {
 		t.Errorf("Gate.Timeout = %q, want '24h'", gate.Timeout)
@@ -1931,5 +2034,74 @@ title = "Test"
 		if v.Description != "A required variable" {
 			t.Errorf("required_var.Description = %q, want 'A required variable'", v.Description)
 		}
+	}
+}
+
+// TestParseTOML_StepMetadata verifies that a `metadata = { ... }` table on a
+// step is preserved through TOML parsing. Regression for gastownhall/beads#3341.
+func TestParseTOML_StepMetadata(t *testing.T) {
+	tomlData := `
+formula = "repro"
+description = "Reproduction case"
+version = 1
+type = "workflow"
+
+[[steps]]
+id = "work"
+title = "Do the work"
+labels = ["worker"]
+metadata = { priority_level = "high", origin = "repro" }
+`
+	p := NewParser()
+	formula, err := p.ParseTOML([]byte(tomlData))
+	if err != nil {
+		t.Fatalf("ParseTOML failed: %v", err)
+	}
+
+	if len(formula.Steps) != 1 {
+		t.Fatalf("len(Steps) = %d, want 1", len(formula.Steps))
+	}
+	step := formula.Steps[0]
+	if len(step.Metadata) != 2 {
+		t.Fatalf("Steps[0].Metadata has %d entries, want 2 (%v)", len(step.Metadata), step.Metadata)
+	}
+	if got := step.Metadata["priority_level"]; got != "high" {
+		t.Errorf("Steps[0].Metadata[priority_level] = %v, want \"high\"", got)
+	}
+	if got := step.Metadata["origin"]; got != "repro" {
+		t.Errorf("Steps[0].Metadata[origin] = %v, want \"repro\"", got)
+	}
+}
+
+// TestParseJSON_StepMetadata verifies that `"metadata": { ... }` on a step is
+// preserved through JSON parsing. Regression for gastownhall/beads#3341.
+func TestParseJSON_StepMetadata(t *testing.T) {
+	jsonData := `{
+  "formula": "repro",
+  "version": 1,
+  "type": "workflow",
+  "steps": [
+    {
+      "id": "work",
+      "title": "Do the work",
+      "metadata": {"priority_level": "high", "origin": "repro"}
+    }
+  ]
+}`
+	p := NewParser()
+	formula, err := p.Parse([]byte(jsonData))
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	if len(formula.Steps) != 1 {
+		t.Fatalf("len(Steps) = %d, want 1", len(formula.Steps))
+	}
+	step := formula.Steps[0]
+	if len(step.Metadata) != 2 {
+		t.Fatalf("Steps[0].Metadata has %d entries, want 2 (%v)", len(step.Metadata), step.Metadata)
+	}
+	if got := step.Metadata["priority_level"]; got != "high" {
+		t.Errorf("Steps[0].Metadata[priority_level] = %v, want \"high\"", got)
 	}
 }

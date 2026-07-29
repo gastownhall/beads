@@ -142,7 +142,7 @@ func TestMultiStoreConcurrent_InProcess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schema connect: %v", err)
 	}
-	if err := initSchemaOnDB(ctx, schemaDB); err != nil {
+	if _, err := initSchemaOnDB(ctx, schemaDB); err != nil {
 		t.Fatalf("initSchemaOnDB: %v", err)
 	}
 	schemaDB.Close()
@@ -287,7 +287,7 @@ func TestMultiStoreConcurrent_Subprocess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schema connect: %v", err)
 	}
-	if err := initSchemaOnDB(ctx, schemaDB); err != nil {
+	if _, err := initSchemaOnDB(ctx, schemaDB); err != nil {
 		t.Fatalf("initSchemaOnDB: %v", err)
 	}
 	schemaDB.Close()

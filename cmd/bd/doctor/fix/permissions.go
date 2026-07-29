@@ -10,19 +10,26 @@ import (
 
 // Permissions fixes file permission issues in the .beads directory
 func Permissions(path string) error {
-	// Validate workspace
-	if err := validateBeadsWorkspace(path); err != nil {
+	dirs, err := resolveWorkspaceBeadsDirs(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := filepath.Join(path, ".beads")
+	beadsDirResolved := dirs.resolved
+	beadsDir := dirs.local
 
 	// Check if .beads/ directory exists
 	// Use Lstat to detect symlinks - we shouldn't chmod symlinked directories
 	// as this would change the target's permissions (problematic on NixOS).
 	info, err := os.Lstat(beadsDir)
 	if err != nil {
-		return fmt.Errorf("failed to stat .beads directory: %w", err)
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("failed to stat .beads directory: %w", err)
+		}
+		beadsDir = beadsDirResolved
+		info, err = os.Lstat(beadsDir)
+		if err != nil {
+			return fmt.Errorf("failed to stat .beads directory: %w", err)
+		}
 	}
 
 	// Skip permission fixes for symlinked .beads directories (common on NixOS with home-manager)
@@ -40,7 +47,6 @@ func Permissions(path string) error {
 
 	// Fix permissions on database file/directory if it exists
 	// Resolve the actual database path from config (supports both SQLite and Dolt)
-	beadsDirResolved := resolveBeadsDir(beadsDir)
 	var dbPath string
 	if cfg, err := configfile.Load(beadsDirResolved); err == nil && cfg != nil {
 		dbPath = cfg.DatabasePath(beadsDirResolved)

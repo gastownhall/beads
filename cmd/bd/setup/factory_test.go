@@ -237,6 +237,8 @@ func TestInstallFactoryReportsWriteError(t *testing.T) {
 }
 
 func TestCheckFactoryScenarios(t *testing.T) {
+	stubDetectRenderOpts(t)
+
 	t.Run("missing file", func(t *testing.T) {
 		env, stdout, _ := newFactoryTestEnv(t)
 		err := checkFactory(env)
@@ -348,32 +350,27 @@ func TestRemoveFactoryScenarios(t *testing.T) {
 	})
 }
 
-func TestWrapperExitsOnError(t *testing.T) {
+func TestWrapperReturnsErrorOnFailure(t *testing.T) {
 	t.Run("InstallFactory", func(t *testing.T) {
-		cap := stubSetupExit(t)
 		env := factoryEnv{agentsPath: filepath.Join(t.TempDir(), "dir"), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
 		if err := os.Mkdir(env.agentsPath, 0o755); err != nil {
 			t.Fatalf("failed to create directory: %v", err)
 		}
 		stubFactoryEnvProvider(t, env)
-		InstallFactory()
-		if !cap.called || cap.code != 1 {
-			t.Fatal("InstallFactory should exit on error")
+		if err := InstallFactory(); err == nil {
+			t.Fatal("InstallFactory should return error")
 		}
 	})
 
 	t.Run("CheckFactory", func(t *testing.T) {
-		cap := stubSetupExit(t)
 		env := factoryEnv{agentsPath: filepath.Join(t.TempDir(), "missing"), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
 		stubFactoryEnvProvider(t, env)
-		CheckFactory()
-		if !cap.called || cap.code != 1 {
-			t.Fatal("CheckFactory should exit on error")
+		if err := CheckFactory(); err == nil {
+			t.Fatal("CheckFactory should return error")
 		}
 	})
 
 	t.Run("RemoveFactory", func(t *testing.T) {
-		cap := stubSetupExit(t)
 		env := factoryEnv{agentsPath: filepath.Join(t.TempDir(), "AGENTS.md"), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}}
 		beadsSection := agents.EmbeddedBeadsSection()
 		if err := os.WriteFile(env.agentsPath, []byte(beadsSection), 0644); err != nil {
@@ -383,9 +380,8 @@ func TestWrapperExitsOnError(t *testing.T) {
 			t.Fatalf("failed to chmod file: %v", err)
 		}
 		stubFactoryEnvProvider(t, env)
-		RemoveFactory()
-		if !cap.called || cap.code != 1 {
-			t.Fatal("RemoveFactory should exit on error")
+		if err := RemoveFactory(); err == nil {
+			t.Fatal("RemoveFactory should return error")
 		}
 	})
 }

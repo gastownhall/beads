@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -42,8 +43,10 @@ var mergeSlotCreateCmd = &cobra.Command{
 
 The slot ID is automatically generated based on the beads prefix (e.g., gt-merge-slot).
 The slot is created with status=open (available).`,
-	Args: cobra.NoArgs,
-	RunE: runMergeSlotCreate,
+	Args:          cobra.NoArgs,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runMergeSlotCreate,
 }
 
 var mergeSlotCheckCmd = &cobra.Command{
@@ -55,8 +58,10 @@ Returns:
   - available: slot can be acquired
   - held by <holder>: slot is currently held
   - not found: no merge slot exists for this rig`,
-	Args: cobra.NoArgs,
-	RunE: runMergeSlotCheck,
+	Args:          cobra.NoArgs,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runMergeSlotCheck,
 }
 
 var mergeSlotAcquireCmd = &cobra.Command{
@@ -72,8 +77,10 @@ If the slot is held (status=in_progress), the command fails unless
 --wait is passed, which adds the requester to the waiters queue.
 
 Use --holder to specify who is acquiring (default: BEADS_ACTOR env var).`,
-	Args: cobra.NoArgs,
-	RunE: runMergeSlotAcquire,
+	Args:          cobra.NoArgs,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runMergeSlotAcquire,
 }
 
 var mergeSlotReleaseCmd = &cobra.Command{
@@ -83,8 +90,10 @@ var mergeSlotReleaseCmd = &cobra.Command{
 
 Sets status back to open and clears the holder field.
 If there are waiters, the highest-priority waiter should then acquire.`,
-	Args: cobra.NoArgs,
-	RunE: runMergeSlotRelease,
+	Args:          cobra.NoArgs,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runMergeSlotRelease,
 }
 
 var (
@@ -105,18 +114,24 @@ func init() {
 }
 
 func runMergeSlotCreate(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("merge-slot create is not supported in proxied-server mode")
+	}
 	CheckReadonly("merge-slot create")
+
+	evt := metrics.NewCommandEvent("merge-slot-create")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
 
 	issue, err := store.MergeSlotCreate(rootCtx, actor)
 	if err != nil {
-		return err
+		return HandleErrorRespectJSON("%v", err)
 	}
 
-	if isEmbeddedMode() && store != nil {
-		if _, err := store.CommitPending(rootCtx, actor); err != nil {
-			return fmt.Errorf("failed to commit: %w", err)
-		}
-	}
+	commandDidWrite.Store(true)
 
 	if jsonOutput {
 		result := map[string]interface{}{
@@ -133,6 +148,16 @@ func runMergeSlotCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runMergeSlotCheck(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("merge-slot check is not supported in proxied-server mode")
+	}
+	evt := metrics.NewCommandEvent("merge-slot-check")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	status, err := store.MergeSlotCheck(rootCtx)
 	if err != nil {
 		if isNotFoundErr(err) {
@@ -151,7 +176,7 @@ func runMergeSlotCheck(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Run 'bd merge-slot create' to create one.\n")
 			return nil
 		}
-		return err
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if jsonOutput {
@@ -183,23 +208,32 @@ func runMergeSlotCheck(cmd *cobra.Command, args []string) error {
 }
 
 func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("merge-slot acquire is not supported in proxied-server mode")
+	}
 	CheckReadonly("merge-slot acquire")
+
+	evt := metrics.NewCommandEvent("merge-slot-acquire")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
 
 	holder := mergeSlotHolder
 	if holder == "" {
 		holder = actor
 	}
 	if holder == "" {
-		return fmt.Errorf("no holder specified; use --holder or set BEADS_ACTOR env var")
+		return HandleError("no holder specified; use --holder or set BEADS_ACTOR env var")
 	}
 
 	result, err := store.MergeSlotAcquire(rootCtx, holder, actor, mergeSlotAddWaiter)
 	if err != nil {
-		return err
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if !result.Acquired && !result.Waiting {
-		// Slot was held, no --wait flag.
 		if jsonOutput {
 			out := map[string]interface{}{
 				"id":       result.SlotID,
@@ -208,12 +242,14 @@ func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
 			}
 			encoder := json.NewEncoder(os.Stdout)
 			encoder.SetIndent("", "  ")
-			_ = encoder.Encode(out)
-		} else {
-			fmt.Printf("%s Slot held by: %s\n", ui.RenderFail("✗"), result.Holder)
-			fmt.Printf("Use --wait to add yourself to the waiters queue.\n")
+			if eerr := encoder.Encode(out); eerr != nil {
+				return eerr
+			}
+			return SilentExit()
 		}
-		os.Exit(1)
+		return HandleErrorWithHint(
+			fmt.Sprintf("slot held by: %s", result.Holder),
+			"Use --wait to add yourself to the waiters queue.")
 	}
 
 	if result.Waiting {
@@ -227,20 +263,18 @@ func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
 			}
 			encoder := json.NewEncoder(os.Stdout)
 			encoder.SetIndent("", "  ")
-			_ = encoder.Encode(out)
-		} else {
-			fmt.Printf("%s Slot held by %s, added to waiters queue (position %d)\n",
-				ui.RenderAccent("○"), result.Holder, result.Position)
+			if eerr := encoder.Encode(out); eerr != nil {
+				return eerr
+			}
+			return SilentExit()
 		}
-		os.Exit(1)
+		fmt.Printf("%s Slot held by %s, added to waiters queue (position %d)\n",
+			ui.RenderAccent("○"), result.Holder, result.Position)
+		return SilentExit()
 	}
 
 	// Successfully acquired.
-	if isEmbeddedMode() && store != nil {
-		if _, err := store.CommitPending(rootCtx, actor); err != nil {
-			return fmt.Errorf("failed to commit: %w", err)
-		}
-	}
+	commandDidWrite.Store(true)
 
 	if jsonOutput {
 		out := map[string]interface{}{
@@ -259,17 +293,23 @@ func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
 }
 
 func runMergeSlotRelease(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("merge-slot release is not supported in proxied-server mode")
+	}
 	CheckReadonly("merge-slot release")
 
+	evt := metrics.NewCommandEvent("merge-slot-release")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if err := store.MergeSlotRelease(rootCtx, mergeSlotHolder, actor); err != nil {
-		return err
+		return HandleErrorRespectJSON("%v", err)
 	}
 
-	if isEmbeddedMode() && store != nil {
-		if _, err := store.CommitPending(rootCtx, actor); err != nil {
-			return fmt.Errorf("failed to commit: %w", err)
-		}
-	}
+	commandDidWrite.Store(true)
 
 	if jsonOutput {
 		slotID := storage.MergeSlotID(rootCtx, store)

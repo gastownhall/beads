@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -67,16 +68,25 @@ func generateHookSection(hookName string) string {
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
 		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
+		"  _bd_used_perl=0\n" +
 		"  if command -v timeout >/dev/null 2>&1; then\n" +
 		"    timeout \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
 		"    _bd_exit=$?\n" +
-		"    if [ $_bd_exit -eq 124 ]; then\n" +
-		"      echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
-		"      _bd_exit=0\n" +
-		"    fi\n" +
+		"  elif command -v gtimeout >/dev/null 2>&1; then\n" +
+		"    gtimeout \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
+		"    _bd_exit=$?\n" +
+		"  elif command -v perl >/dev/null 2>&1; then\n" +
+		"    _bd_used_perl=1\n" +
+		"    perl -e 'alarm shift; exec @ARGV' \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
+		"    _bd_exit=$?\n" +
 		"  else\n" +
+		"    echo >&2 \"beads: hook '" + hookName + "' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT\"\n" +
 		"    bd hooks run " + hookName + " \"$@\"\n" +
 		"    _bd_exit=$?\n" +
+		"  fi\n" +
+		"  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then\n" +
+		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
+		"    _bd_exit=0\n" +
 		"  fi\n" +
 		"  if [ $_bd_exit -eq 3 ]; then\n" +
 		"    echo >&2 \"beads: database not initialized — skipping hook '" + hookName + "'\"\n" +
@@ -143,13 +153,138 @@ func injectHookSectionWithDepth(existing, section string, depth int) string {
 		return injectHookSectionWithDepth(cleaned, section, depth+1)
 	}
 
-	// Case 3: no markers — append
+	// Case 3: no markers. If the existing hook ends in an exec-replacing
+	// block (e.g. the templated hook produced by `pre-commit init-templatedir`,
+	// which ends with `exec "$INSTALL_PYTHON" -mpre_commit ...`), appending
+	// at the bottom would make the bd section unreachable. Detect that
+	// pattern and inject above the exec block instead. (GH#3537)
+	if injectAt := findExecBlockInjectionPoint(existing); injectAt >= 0 {
+		return existing[:injectAt] + section + "\n" + existing[injectAt:]
+	}
+
+	// Case 3 fallback: no markers, no trailing exec — append at end.
 	result := existing
 	if !strings.HasSuffix(result, "\n") {
 		result += "\n"
 	}
 	result += "\n" + section
 	return result
+}
+
+// findExecBlockInjectionPoint inspects the tail of a hook file. If it ends in
+// an exec-replacing chain (a final `exec <cmd>` reachable from the bottom of
+// the file, possibly inside an `if`/`elif`/`else`/`fi` ladder whose other
+// branches only `echo`/`exit`), returns the byte offset where the bd section
+// should be injected — i.e. just above the start of the enclosing control
+// structure (or above the bare `exec` line if there is none). Returns -1 when
+// the file does not end in such a pattern; callers should fall back to
+// appending at the bottom.
+//
+// Motivation: appending below a terminating `exec` makes the appended content
+// unreachable, because `exec` replaces the running shell process. (GH#3537)
+//
+// Limitations (the function uses line-based heuristics, not a shell parser):
+//   - A heredoc body containing a literal line that starts with `exec` is
+//     treated as code, not data. In practice this is harmless because the
+//     terminator line (e.g. `EOF`) is then classified as non-filler and the
+//     scan returns -1, but a contrived terminator name could fool it.
+//   - A trailing comment on an `exec` line (e.g. `exec /bin/foo  # disabled`)
+//     is treated as a live `exec` statement. Use a separate comment line if
+//     intent is to disable it.
+//   - Two disjoint `if/exec` blocks separated by real code: the scan only
+//     considers the LAST one; the real code in the middle correctly causes
+//     the scan to return -1 and the caller falls back to append.
+func findExecBlockInjectionPoint(content string) int {
+	// Trim a trailing newline so strings.Split doesn't produce an empty
+	// sentinel as the last element. The scan then sees lines exactly as
+	// they appear in the file with no off-by-one ambiguity.
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+
+	// 1. Find the last line that is an effective `exec ...` statement.
+	//    Skip blank lines, comments, and the standard tail patterns
+	//    (`fi`, `else`, `elif`, `exit N`, `echo ...`) when scanning back.
+	lastExecLine := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if isExecLine(trimmed) {
+			lastExecLine = i
+			break
+		}
+		if !isAllowedAfterExec(trimmed) {
+			// Found non-trivial code at the tail that isn't part of an
+			// exec-terminated chain — not a pattern we should rewrite.
+			return -1
+		}
+	}
+	if lastExecLine == -1 {
+		return -1
+	}
+
+	// 2. Walk backward from lastExecLine to find the start of the enclosing
+	//    control structure (an `if ...` at column 0, possibly preceded by
+	//    elif/else/then continuations of the same block). If we don't find
+	//    one, treat the exec line itself as the injection target.
+	blockStartLine := lastExecLine
+	for i := lastExecLine - 1; i >= 0; i-- {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// Skip continuations of the if-block we're inside: elif/else/then,
+		// and any indented body line (they belong to the surrounding block).
+		if strings.HasPrefix(trimmed, "elif ") || trimmed == "else" ||
+			strings.HasPrefix(trimmed, "else ") || trimmed == "then" {
+			continue
+		}
+		if line != trimmed { // indented body of an enclosing block
+			continue
+		}
+		// Column-0 line that isn't a continuation. If it opens an if-block,
+		// that's the start of our construct.
+		if strings.HasPrefix(trimmed, "if ") {
+			blockStartLine = i
+		}
+		break
+	}
+
+	// 3. Convert blockStartLine -> byte offset.
+	offset := 0
+	for i := 0; i < blockStartLine; i++ {
+		offset += len(lines[i]) + 1 // +1 for the '\n' that strings.Split removed
+	}
+	return offset
+}
+
+// isExecLine reports whether trimmed is an effective `exec <cmd>` statement.
+func isExecLine(trimmed string) bool {
+	return trimmed == "exec" || strings.HasPrefix(trimmed, "exec ") ||
+		strings.HasPrefix(trimmed, "exec\t")
+}
+
+// isAllowedAfterExec reports whether a trailing line in an exec-terminated
+// chain is harmless filler — control-flow closers, alternative branches,
+// fallback exits, comments, and blanks. Anything else means the file does
+// not strictly terminate via exec, so we should not rewrite it.
+func isAllowedAfterExec(trimmed string) bool {
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return true
+	}
+	switch trimmed {
+	case "fi", "else", "done", "esac", "}", ";;":
+		return true
+	}
+	if strings.HasPrefix(trimmed, "elif ") || strings.HasPrefix(trimmed, "else ") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "exit") {
+		return true
+	}
+	if strings.HasPrefix(trimmed, "echo ") || strings.HasPrefix(trimmed, "echo\t") {
+		// pre-commit's else branch prints a hint before exit 1.
+		return true
+	}
+	return false
 }
 
 // removeOrphanedBeginBlock removes an orphaned BEGIN block starting at beginIdx.
@@ -265,6 +400,67 @@ func removeHookSection(content string) (string, bool) {
 	}
 
 	return result, true
+}
+
+// isOnlyShebangOrEmpty reports whether the given hook content consists of
+// nothing meaningful — only an optional shebang line plus blank lines and
+// comments. Used by shouldPreserveHookContent to decide, after stripping a
+// BEADS INTEGRATION block, whether anything user-owned remains worth
+// preserving.
+//
+// Note: non-shebang comment lines (e.g. `# preamble`) are intentionally
+// treated as non-content. A file that's only a shebang plus a comment is
+// classified empty and skipped — comments alone aren't user logic worth
+// carrying forward to .beads/hooks/<name>. (GH#3536)
+func isOnlyShebangOrEmpty(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#!") || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// shouldPreserveHookContent decides what preservePreexistingHooks should do
+// with one hook file's content. Returns (transformedContent, true) when the
+// file should be preserved into the target directory (possibly with the bd
+// section stripped or the husky helper-layout sanitized); returns
+// ("", false) when preservation should skip this file because it's wholly
+// bd-managed and contains nothing user-owned worth keeping.
+//
+// Decision rules (GH#3536):
+//   - inlineHookMarker (the "# bd (beads)" tag from GH#1120) marks files
+//     that were always wholly bd-owned one-liners — skip.
+//   - hookSectionBeginPrefix marks files that were *user-owned* with bd's
+//     block injected into them (the v0.49+ section-marker model). Strip
+//     the bd block and preserve the remaining user content. If only a
+//     shebang/blank/comments remain, treat as wholly bd-owned and skip.
+//   - When fromHusky is true, sanitize the (possibly stripped) content so
+//     it doesn't depend on husky's helper-layout being mirrored into the
+//     target directory (GH#3132).
+//
+// The function is pure: no I/O, no global state.
+func shouldPreserveHookContent(content string, fromHusky bool) (string, bool) {
+	if strings.Contains(content, inlineHookMarker) {
+		return "", false
+	}
+	if strings.Contains(content, hookSectionBeginPrefix) {
+		stripped, _ := removeHookSection(content)
+		if isOnlyShebangOrEmpty(stripped) {
+			return "", false
+		}
+		// Normalize CRLF → LF on the preserved-and-stripped content so
+		// Windows / autocrlf=true repos don't end up with `\r\n` line
+		// endings in .beads/hooks/<name>. Mirrors the normalization that
+		// injectHookSection does on its output (`hooks.go` ~line 622).
+		content = strings.ReplaceAll(stripped, "\r\n", "\n")
+	}
+	if fromHusky {
+		content = sanitizeHuskyHook(content)
+	}
+	return content, true
 }
 
 // HookStatus represents the status of a single git hook
@@ -446,14 +642,23 @@ Installed hooks:
   - pre-push: Run chained hooks before push
   - post-checkout: Run chained hooks after branch checkout
   - prepare-commit-msg: Add agent identity trailers (for orchestrator agents)`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-install")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		force, _ := cmd.Flags().GetBool("force")
 		shared, _ := cmd.Flags().GetBool("shared")
 		chain, _ := cmd.Flags().GetBool("chain")
 		beadsHooks, _ := cmd.Flags().GetBool("beads")
 
 		if err := installHooksWithOptions(managedHookNames, force, shared, chain, beadsHooks); err != nil {
-			FatalErrorRespectJSON("installing hooks: %v", err)
+			return HandleErrorRespectJSON("installing hooks: %v", err)
 		}
 
 		if jsonOutput {
@@ -485,16 +690,26 @@ Installed hooks:
 				fmt.Printf("  - %s\n", hookName)
 			}
 		}
+		return nil
 	},
 }
 
 var hooksUninstallCmd = &cobra.Command{
-	Use:   "uninstall",
-	Short: "Uninstall bd git hooks",
-	Long:  `Remove bd git hooks from .git/hooks/ directory.`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "uninstall",
+	Short:         "Uninstall bd git hooks",
+	Long:          `Remove bd git hooks from .git/hooks/ directory.`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-uninstall")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		if err := uninstallHooks(); err != nil {
-			FatalErrorRespectJSON("uninstalling hooks: %v", err)
+			return HandleErrorRespectJSON("uninstalling hooks: %v", err)
 		}
 
 		if jsonOutput {
@@ -507,14 +722,24 @@ var hooksUninstallCmd = &cobra.Command{
 		} else {
 			fmt.Println("✓ Git hooks uninstalled successfully")
 		}
+		return nil
 	},
 }
 
 var hooksListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List installed git hooks status",
-	Long:  `Show the status of bd git hooks (installed, outdated, missing).`,
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "list",
+	Short:         "List installed git hooks status",
+	Long:          `Show the status of bd git hooks (installed, outdated, missing).`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-list")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		statuses := CheckGitHooks()
 
 		if jsonOutput {
@@ -538,6 +763,7 @@ var hooksListCmd = &cobra.Command{
 				}
 			}
 		}
+		return nil
 	},
 }
 
@@ -567,8 +793,14 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 		}
 	}
 
-	// Create hooks directory if it doesn't exist
-	if err := os.MkdirAll(hooksDir, 0755); err != nil {
+	// Create hooks directory if it doesn't exist.
+	// Directories inside .beads/ use BeadsDirPerm (0700); git-managed hook
+	// dirs (.git/hooks, .beads-hooks) use 0755 so git can execute them.
+	hooksDirPerm := os.FileMode(0755)
+	if beadsHooks {
+		hooksDirPerm = config.BeadsDirPerm
+	}
+	if err := os.MkdirAll(hooksDir, hooksDirPerm); err != nil {
 		return fmt.Errorf("failed to create hooks directory: %w", err)
 	}
 
@@ -720,19 +952,11 @@ func preservePreexistingHooks(targetDir string) {
 			continue
 		}
 
-		contentStr := string(content)
-		// Skip if it's already a beads hook
-		if strings.Contains(contentStr, hookSectionBeginPrefix) ||
-			strings.Contains(contentStr, inlineHookMarker) {
+		newContent, keep := shouldPreserveHookContent(string(content), fromHusky)
+		if !keep {
 			continue
 		}
-
-		// If this came from a husky directory, rewrite the hook so it no
-		// longer depends on husky's helper layout being mirrored into the
-		// target directory. See sanitizeHuskyHook below for details.
-		if fromHusky {
-			contentStr = sanitizeHuskyHook(contentStr)
-		}
+		contentStr := newContent
 
 		// Don't overwrite existing files in target
 		dstPath := filepath.Join(targetDir, entry.Name())
@@ -746,6 +970,93 @@ func preservePreexistingHooks(targetDir string) {
 			continue
 		}
 		fmt.Printf("  Preserving existing %s hook from %s\n", entry.Name(), currentDir)
+	}
+
+	// GH#3132: Fix husky hook layout after copying.
+	fixHuskyHookLayout(currentDir, targetDir)
+}
+
+// fixHuskyHookLayout handles two husky-specific issues when hooks are copied
+// from a husky-managed directory into .beads/hooks/.
+//
+// Bug 1 (v8): Husky v8 hooks source "$(dirname "$0")/_/husky.sh", but the
+// _/ subdirectory is not copied because preservePreexistingHooks skips
+// directories. Fix: create a relative symlink to the original _/ directory.
+//
+// Bug 2 (v9): Husky v9 uses a "h" dispatcher that resolves user hooks via
+// dirname(dirname($0)), which breaks when relocated. The shims in .husky/_/
+// are wrappers, not actual user hooks. Fix: replace copied shims with the
+// real user hook content from the parent directory (.husky/).
+func fixHuskyHookLayout(sourceDir, targetDir string) {
+	// Bug 1: Symlink _/ helper directory for husky v8 compatibility.
+	// Husky v8 hooks source $(dirname "$0")/_/husky.sh — the _/ directory
+	// must be reachable from the target hooks directory.
+	srcHelper := filepath.Join(sourceDir, "_")
+	if info, err := os.Stat(srcHelper); err == nil && info.IsDir() {
+		tgtHelper := filepath.Join(targetDir, "_")
+		if _, err := os.Lstat(tgtHelper); os.IsNotExist(err) {
+			relPath, relErr := filepath.Rel(targetDir, srcHelper)
+			if relErr == nil {
+				if symlinkErr := os.Symlink(relPath, tgtHelper); symlinkErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: failed to symlink husky helper directory: %v\n", symlinkErr)
+				}
+			}
+		}
+	}
+
+	// Bug 2: Replace husky v9 shims with actual user hook content.
+	// Husky v9 sets core.hooksPath=.husky/_/ where each hook is a shim that
+	// sources "h" (the dispatcher). The dispatcher uses dirname(dirname($0))
+	// to find user hooks in the parent .husky/ directory — this path math
+	// breaks when the shim is relocated to .beads/hooks/.
+	//
+	// Detect v9 by checking for the dispatcher in the *source* directory:
+	// preservePreexistingHooks intentionally skips copying `h` to target, so
+	// keying off targetDir would never match.
+	srcH := filepath.Join(sourceDir, "h")
+	hContent, err := os.ReadFile(srcH) // #nosec G304 -- path is in known hooks directory
+	if err != nil {
+		return // No h dispatcher in source — not a husky v9 source directory
+	}
+	if !strings.Contains(string(hContent), `dirname "$(dirname`) {
+		return // Not the husky v9 dispatcher
+	}
+
+	// Source is .husky/_/ — user hooks live in the parent .husky/ directory.
+	// Iterate the source shims rather than the target: preservePreexistingHooks
+	// has already run sanitizeHuskyHook on the copied shims, which strips the
+	// `. "$(dirname "$0")/h"` line, so a content-based shim check against
+	// target would no longer match. Because every non-`h` file in sourceDir
+	// is a v9 shim by construction, we can map source entry → user hook
+	// directly.
+	userHooksDir := filepath.Dir(sourceDir)
+
+	entries, readErr := os.ReadDir(sourceDir)
+	if readErr != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() == "h" {
+			continue
+		}
+		hookPath := filepath.Join(targetDir, entry.Name())
+		if _, statErr := os.Stat(hookPath); statErr != nil {
+			continue // target hook not copied — nothing to replace
+		}
+		userHookPath := filepath.Join(userHooksDir, entry.Name())
+		userContent, readErr := os.ReadFile(userHookPath) // #nosec G304 -- constrained to husky dir
+		if readErr != nil {
+			continue // No corresponding user hook — leave copied content as-is
+		}
+		// Ensure the content has a shebang (user hooks in .husky/ often omit it)
+		replacement := string(userContent)
+		if !strings.HasPrefix(replacement, "#!") {
+			replacement = "#!/usr/bin/env sh\n" + replacement
+		}
+		// #nosec G306 -- git hooks must be executable
+		if writeErr := os.WriteFile(hookPath, []byte(replacement), 0755); writeErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to replace husky v9 shim %s: %v\n", entry.Name(), writeErr)
+		}
 	}
 }
 
@@ -1077,13 +1388,39 @@ func exportJSONLForCommit() {
 	}
 	fullPath := filepath.Join(beadsDir, exportPath)
 
+	// If the export file is staged for deletion (user ran `git rm`), do not
+	// re-export or re-stage it. GIT_INDEX_FILE is set during an actual commit,
+	// so git-diff-index reads the pending index — where the deletion lives.
+	// Without this guard, git add fullPath would convert the staged deletion
+	// back to a modification and the file would never be removed from the
+	// repo. Reimplements gastownhall/beads#3838 (ckumar1).
+	if isExportFileStagedForDeletion(fullPath) {
+		debug.Logf("pre-commit: %s staged for deletion — skipping export\n", exportPath)
+		return
+	}
+
+	if !preCommitHasStagedBeadsFiles(beadsDir) {
+		debug.Logf("pre-commit: skipping JSONL export — no staged .beads paths\n")
+		return
+	}
+
 	debug.Logf("pre-commit: exporting JSONL to %s\n", fullPath)
+	warnJSONLWithoutDoltRemote("pre-commit auto-export")
 
 	// Shell out to `bd export` which initializes its own store.
 	// Clear BD_GIT_HOOK from the subprocess env so that its
 	// PersistentPostRun auto-export path does not also fire.
+	//
+	// NOTE: we intentionally preserve GIT_DIR et al. in the subprocess
+	// env. The subprocess's PostRun eventually routes through the same
+	// gitAddFile as the parent, which relies on the inherited GIT_DIR to
+	// identify the hook's worktree and apply the cross-worktree staging
+	// guard (GH#3311 part 2). Scrubbing here would disable that guard.
+	// Run from the project root, not .beads/. Embedded Dolt discovery starts
+	// from cwd, so cwd=.beads/ can make the export subprocess look for a
+	// nested .beads/.beads workspace and warn on every commit (GH#3454).
 	cmd := exec.Command("bd", "export", "-o", fullPath)
-	cmd.Dir = beadsDir
+	cmd.Dir = exportSubprocessDir(beadsDir)
 	cmd.Env = filterEnv(os.Environ(), "BD_GIT_HOOK")
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
@@ -1091,14 +1428,136 @@ func exportJSONLForCommit() {
 		return
 	}
 
-	// Stage the exported file if configured.
-	if config.GetBool("export.git-add") {
-		addCmd := exec.Command("git", "add", fullPath)
-		addCmd.Dir = filepath.Dir(fullPath)
-		if err := addCmd.Run(); err != nil {
+	// Stage the exported file if configured. Skip when no-git-ops is set
+	// (GH#3314). gitAddFile scrubs the inherited git hook env vars so git
+	// rediscovers the repo from cwd, and silently skips when fullPath is
+	// outside the hook's worktree (the .beads/redirect case where fullPath
+	// points into the main repo, not this worktree). See GH#3311.
+	if config.GetBool("export.git-add") && !config.GetBool("no-git-ops") {
+		if err := gitAddFile(fullPath); err != nil {
 			debug.Logf("pre-commit: git add failed: %v\n", err)
 		}
 	}
+}
+
+// isExportFileStagedForDeletion reports whether the beads export file at
+// fullPath is staged for deletion (the user ran `git rm` on it). When true,
+// exportJSONLForCommit must skip re-exporting and re-staging it: running
+// `git add` on a freshly regenerated file would convert the staged deletion
+// back into a modification, silently reviving a file the user intentionally
+// removed.
+//
+// Unlike preCommitHasStagedBeadsFiles and gitAddFile, this deliberately runs
+// git with the hook's inherited environment intact rather than scrubbing
+// GIT_* vars. GIT_INDEX_FILE is set during an actual commit and points at
+// the pending index — where the staged deletion lives — so scrubbing it
+// here would make git fall back to the on-disk index and miss the
+// deletion. Reimplements gastownhall/beads#3838 (ckumar1).
+func isExportFileStagedForDeletion(fullPath string) bool {
+	checkCmd := exec.Command("git", "diff", "--cached", "--diff-filter=D", "--name-only", "--", filepath.Base(fullPath))
+	checkCmd.Dir = filepath.Dir(fullPath)
+	out, _ := checkCmd.Output()
+	return len(out) > 0
+}
+
+func preCommitHasStagedBeadsFiles(beadsDir string) bool {
+	cmdDir := exportSubprocessDir(beadsDir)
+	if hookRoot := hookWorkTreeRoot(); hookRoot != "" {
+		cmdDir = hookRoot
+	}
+	cmd := exec.Command("git", "diff", "--cached", "--name-only", "--", ".beads")
+	cmd.Dir = cmdDir
+	cmd.Env = scrubGitHookEnv(os.Environ())
+	out, err := cmd.Output()
+	if err != nil {
+		debug.Logf("pre-commit: failed to inspect staged .beads paths: %v\n", err)
+		return false
+	}
+	return strings.TrimSpace(string(out)) != ""
+}
+
+func exportSubprocessDir(beadsDir string) string {
+	return filepath.Dir(beadsDir)
+}
+
+// syncImportJSONLPath returns the JSONL path used by the legacy git-hook sync
+// import path. Existing projects may have customized export.path before
+// import.path existed, so keep importing from export.path unless import.path is
+// explicitly configured.
+func syncImportJSONLPath(beadsDir string) string {
+	if config.GetValueSource("import.path") == config.SourceDefault {
+		exportPath := config.GetString("export.path")
+		if exportPath != "" {
+			return filepath.Join(beadsDir, exportPath)
+		}
+	}
+	return configuredImportJSONLPath(beadsDir)
+}
+
+// importJSONLForSync imports JSONL into Dolt after a git
+// pull/merge/branch-checkout only for legacy projects with no Dolt remote.
+// When sync.remote is configured, Dolt remains the source of truth and JSONL
+// import is skipped because upsert-only import cannot reconcile stale exports.
+//
+// Errors are logged as warnings but never block the merge/checkout. The
+// import is upsert; running it on an unchanged JSONL is a no-op (bd
+// import returns "Error 1105: nothing to commit", which we tolerate).
+//
+// See GH#3729.
+func importJSONLForSync(reason string) {
+	if !config.GetBool("import.auto") {
+		return
+	}
+	if resolveSyncRemote() != "" {
+		debug.Logf("%s: skipping JSONL import because sync.remote is configured\n", reason)
+		return
+	}
+
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return
+	}
+
+	fullPath := syncImportJSONLPath(beadsDir)
+
+	if info, err := os.Stat(fullPath); err != nil || info.Size() == 0 {
+		return
+	}
+
+	debug.Logf("%s: importing JSONL from %s\n", reason, fullPath)
+	warnJSONLWithoutDoltRemote(reason + " JSONL import")
+
+	// Shell out to `bd import` — same pattern as exportJSONLForCommit.
+	// Clear BD_GIT_HOOK so the subprocess's own hook-detection logic
+	// doesn't suppress its work.
+	cmd := exec.Command("bd", "import", "--quiet", fullPath)
+	cmd.Dir = exportSubprocessDir(beadsDir)
+	cmd.Env = filterEnv(os.Environ(), "BD_GIT_HOOK")
+
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return
+	}
+	// Tolerate the no-op case: when JSONL matches Dolt exactly, bd import
+	// produces "nothing to commit" from the underlying Dolt commit. That
+	// is success for our purposes.
+	if strings.Contains(string(out), "nothing to commit") {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "beads: %s import warning: %v\n%s", reason, err, out)
+}
+
+func warnJSONLWithoutDoltRemote(reason string) {
+	if config.GetBool("no-git-ops") || resolveSyncRemote() != "" || !isGitRepo() {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "beads: %s warning: no Dolt remote configured.\n", reason)
+	fmt.Fprintln(os.Stderr, "beads: .beads/issues.jsonl is an export, not cross-machine sync or source of truth.")
+	if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
+		fmt.Fprintf(os.Stderr, "beads: repair: bd dolt remote add origin %s && bd dolt push\n", normalizeRemoteURL(originURL))
+		return
+	}
+	fmt.Fprintln(os.Stderr, "beads: repair: add a git origin, then run 'bd dolt remote add origin <git-remote-url>' and 'bd dolt push'.")
 }
 
 // filterEnv returns a copy of env with entries matching the given key removed.
@@ -1113,7 +1572,9 @@ func filterEnv(env []string, key string) []string {
 	return out
 }
 
-// runPostMergeHook runs chained hooks after merge.
+// runPostMergeHook runs chained hooks after merge, then runs the legacy
+// JSONL import fallback only when no Dolt remote is configured. See GH#3729.
+//
 // Returns 0 on success (or if not applicable).
 //
 //nolint:unparam // Always returns 0 by design - warnings don't block merges
@@ -1122,6 +1583,7 @@ func runPostMergeHook() int {
 	if exitCode := runChainedHook("post-merge", nil); exitCode != 0 {
 		return exitCode
 	}
+	importJSONLForSync("post-merge")
 	return 0
 }
 
@@ -1135,7 +1597,11 @@ func runPrePushHook(args []string) int {
 	return 0
 }
 
-// runPostCheckoutHook runs chained hooks after branch checkout.
+// runPostCheckoutHook runs chained hooks after branch checkout, then runs
+// the legacy JSONL import fallback when the checkout was a branch switch
+// (flag=1) and no Dolt remote is configured. File-mode checkouts (flag=0)
+// are skipped to avoid spurious imports on `git checkout -- <file>`. See GH#3729.
+//
 // args: [previous-HEAD, new-HEAD, flag] where flag=1 for branch checkout
 // Returns 0 on success (or if not applicable).
 //
@@ -1144,6 +1610,9 @@ func runPostCheckoutHook(args []string) int {
 	// Run chained hook first (if exists)
 	if exitCode := runChainedHook("post-checkout", args); exitCode != 0 {
 		return exitCode
+	}
+	if len(args) >= 3 && args[2] == "1" {
+		importJSONLForSync("post-checkout")
 	}
 	return 0
 }
@@ -1239,13 +1708,17 @@ Supported hooks:
 
 The thin shim pattern ensures hook logic is always in sync with the
 installed bd version - upgrading bd automatically updates hook behavior.`,
-	Args: cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		// Disable terminal color probing to prevent OSC 11 escape sequence leaks (GH#1303).
-		// Our shell shims set BD_GIT_HOOK=1 before invoking bd, but third-party hook
-		// runners (lefthook, husky, etc.) call 'bd hooks run' directly without it.
-		// By this point ui.init() has already run, so we must also reset styles
-		// to suppress ANSI output — the env var alone only helps if set before process start.
+	Args:          cobra.MinimumNArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("hooks-run")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		_ = os.Setenv("BD_GIT_HOOK", "1")
 		ui.DisableColors()
 
@@ -1265,10 +1738,13 @@ installed bd version - upgrading bd automatically updates hook behavior.`,
 		case "prepare-commit-msg":
 			exitCode = runPrepareCommitMsgHook(hookArgs)
 		default:
-			FatalError("unknown hook: %s", hookName)
+			return HandleError("unknown hook: %s", hookName)
 		}
 
-		os.Exit(exitCode)
+		if exitCode != 0 {
+			return &exitError{Code: exitCode}
+		}
+		return nil
 	},
 }
 

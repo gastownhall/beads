@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
@@ -101,12 +100,10 @@ func updateRepoIDInProcess(path string, beadsDir string, autoYes bool) error {
 // All operations are performed in-process to avoid Dolt lock contention
 // that occurs when spawning bd subcommands. (GH#1805)
 func RepoFingerprint(path string, autoYes bool) error {
-	// Validate workspace
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	// In --yes mode, auto-select the recommended safe action [1].
 	if autoYes {

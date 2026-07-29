@@ -20,11 +20,11 @@ func bdComments(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd comments %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd comments %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 func TestEmbeddedCommentsCLI(t *testing.T) {
@@ -51,11 +51,11 @@ func TestEmbeddedCommentsCLI(t *testing.T) {
 		cmd := exec.Command(bd, "comments", "add", issue.ID, "JSON comment text", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd comments add --json failed: %v\n%s", err, out)
+			t.Fatalf("bd comments add --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(stdout.String())
 		start := strings.Index(s, "{")
 		if start < 0 {
 			t.Fatalf("no JSON in output: %s", s)
@@ -92,6 +92,41 @@ func TestEmbeddedCommentsCLI(t *testing.T) {
 		}
 	})
 
+	// Swapped-order add (`bd comments <id> add <text>`) must be rejected, not
+	// silently dropped with exit 0 (GH#4642).
+	t.Run("comments_swapped_add_rejected", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Swapped add target", "--type", "task")
+
+		cmd := exec.Command(bd, "comments", issue.ID, "add", "should not be stored")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected non-zero exit for swapped-order add, got success:\n%s", out)
+		}
+		if !strings.Contains(string(out), "bd comments add") {
+			t.Errorf("expected hint pointing to `bd comments add`, got:\n%s", out)
+		}
+
+		// The stray "add"/text must NOT have been written as a comment.
+		list := bdComments(t, bd, dir, issue.ID)
+		if strings.Contains(list, "should not be stored") {
+			t.Errorf("swapped-order add silently stored a comment:\n%s", list)
+		}
+	})
+
+	// Any other stray trailing arg on the list form is also rejected.
+	t.Run("comments_extra_arg_rejected", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Extra arg target", "--type", "task")
+		cmd := exec.Command(bd, "comments", issue.ID, "stray")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			t.Fatalf("expected non-zero exit for stray trailing arg, got success:\n%s", out)
+		}
+	})
+
 	// ===== comments list =====
 
 	t.Run("comments_list", func(t *testing.T) {
@@ -115,11 +150,11 @@ func TestEmbeddedCommentsCLI(t *testing.T) {
 		cmd := exec.Command(bd, "comments", issue.ID, "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd comments list --json failed: %v\n%s", err, out)
+			t.Fatalf("bd comments list --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(stdout.String())
 		start := strings.Index(s, "[")
 		if start >= 0 {
 			var comments []map[string]interface{}
@@ -146,11 +181,11 @@ func TestEmbeddedCommentsCLI(t *testing.T) {
 		cmd := exec.Command(bd, "comments", issue.ID, "--local-time")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd comments list --local-time failed: %v\n%s", err, out)
+			t.Fatalf("bd comments list --local-time failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		_ = out
+		_ = stdout.String()
 	})
 
 	// ===== Round-trip =====
@@ -162,11 +197,11 @@ func TestEmbeddedCommentsCLI(t *testing.T) {
 		cmd := exec.Command(bd, "comments", issue.ID, "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("list failed: %v\n%s", err, out)
+			t.Fatalf("list failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(stdout.String())
 		start := strings.Index(s, "[")
 		if start >= 0 {
 			var comments []map[string]interface{}

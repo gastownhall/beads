@@ -1,0 +1,6 @@
+-- Reverse of 0043: not reversible. The application no longer writes to a
+-- polymorphic depends_on_id column; reintroducing the generated column would
+-- not be a problem on its own, but the surrogate id PK and the three typed
+-- UNIQUE KEYs cannot be unwound to the original (issue_id, depends_on_id) PK
+-- without rewriting every existing row's key. Intentional no-op; restore from
+-- a prior dolt commit if a rollback is needed.

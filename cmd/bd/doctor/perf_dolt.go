@@ -45,11 +45,12 @@ type DoltPerfMetrics struct {
 
 // RunDoltPerformanceDiagnostics runs performance diagnostics for Dolt backend
 func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerfMetrics, error) {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Verify this is a Dolt backend
 	if !IsDoltBackend(beadsDir) {
-		return nil, fmt.Errorf("SQLite backend is no longer supported. Migrate to Dolt with 'bd migrate'")
+		backend, _ := getBackendAndBeadsDir(path)
+		return nil, fmt.Errorf("Dolt server performance diagnostics do not apply to the configured backend %q", backend)
 	}
 
 	metrics := &DoltPerfMetrics{
@@ -107,12 +108,16 @@ func runDoltServerDiagnostics(metrics *DoltPerfMetrics, host string, port int, d
 	metrics.ServerMode = true
 
 	// Resolve credentials from config and environment, matching openDoltDB behavior.
+	// GetDoltServerPasswordForPort checks BEADS_DOLT_PASSWORD env first, then
+	// falls back to ~/.config/beads/credentials keyed by [host:port] — required
+	// for externally-hosted Dolt servers (bd-h5k7).
 	user := configfile.DefaultDoltServerUser
-	password := os.Getenv("BEADS_DOLT_PASSWORD")
+	var password string
 	var tls bool
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
 		user = cfg.GetDoltServerUser()
 		tls = cfg.GetDoltServerTLS()
+		password = cfg.GetDoltServerPasswordForPort(port)
 	}
 
 	dsn := doltutil.ServerDSN{
@@ -177,7 +182,7 @@ func runDoltDiagnosticQueries(ctx context.Context, db *sql.DB, metrics *DoltPerf
 		WHERE status IN ('open', 'in_progress')
 		AND id NOT IN (
 			SELECT issue_id FROM dependencies
-			WHERE depends_on_id IN (SELECT id FROM issues WHERE status != 'closed')
+			WHERE depends_on_issue_id IN (SELECT id FROM issues WHERE status != 'closed')
 		)
 		LIMIT 100
 	`)
@@ -382,7 +387,7 @@ func assessDoltPerformance(metrics *DoltPerfMetrics) {
 
 // CheckDoltPerformance runs a quick performance check as a doctor check
 func CheckDoltPerformance(path string) DoctorCheck {
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	// Only run for Dolt backend
 	if !IsDoltBackend(beadsDir) {

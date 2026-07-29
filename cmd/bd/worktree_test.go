@@ -68,6 +68,31 @@ func TestGitRevParse(t *testing.T) {
 	}
 }
 
+func TestGitCmdInDirSuppressesHooksViaGitConfig(t *testing.T) {
+	cmd := gitCmdInDir(t.Context(), "/tmp/example", "status", "--porcelain")
+	if cmd.Dir != "/tmp/example" {
+		t.Fatalf("cmd.Dir = %q, want /tmp/example", cmd.Dir)
+	}
+	wantArgs := []string{"-c", "core.hooksPath=", "status", "--porcelain"}
+	if len(cmd.Args) != len(wantArgs)+1 {
+		t.Fatalf("cmd.Args = %#v, want git plus %#v", cmd.Args, wantArgs)
+	}
+	for i, want := range wantArgs {
+		if got := cmd.Args[i+1]; got != want {
+			t.Fatalf("cmd.Args[%d] = %q, want %q; full args: %#v", i+1, got, want, cmd.Args)
+		}
+	}
+	for _, env := range cmd.Env {
+		if env == "GIT_HOOKS_PATH=" {
+			t.Fatal("cmd.Env contains dead GIT_HOOKS_PATH hook suppression")
+		}
+		if env == "GIT_TEMPLATE_DIR=" {
+			return
+		}
+	}
+	t.Fatal("cmd.Env missing GIT_TEMPLATE_DIR suppression")
+}
+
 // TestResolveWorktreePathByName verifies that resolveWorktreePath can find
 // worktrees by name (basename) when they're in subdirectories like .worktrees/
 func TestResolveWorktreePathByName(t *testing.T) {

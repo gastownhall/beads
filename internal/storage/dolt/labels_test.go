@@ -74,6 +74,65 @@ func TestGetLabelsForIssues(t *testing.T) {
 	}
 }
 
+// TestGetLabelsForIssues_MixedWispAndPermanent verifies that GetLabelsForIssues
+// correctly partitions a mixed batch of wisp and permanent issue IDs using the
+// batched partitioner introduced for GH#3414 (rather than one round-trip per
+// ID), and still routes each ID to the right label table.
+func TestGetLabelsForIssues_MixedWispAndPermanent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	perm := &types.Issue{
+		ID:        "mixed-perm",
+		Title:     "Permanent",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	wisp := &types.Issue{
+		ID:        "mixed-wisp",
+		Title:     "Wisp",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+
+	if err := store.CreateIssue(ctx, perm, "tester"); err != nil {
+		t.Fatalf("create perm: %v", err)
+	}
+	if err := store.CreateIssue(ctx, wisp, "tester"); err != nil {
+		t.Fatalf("create wisp: %v", err)
+	}
+
+	if err := store.AddLabel(ctx, perm.ID, "alpha", "tester"); err != nil {
+		t.Fatalf("add label perm: %v", err)
+	}
+	if err := store.AddLabel(ctx, wisp.ID, "beta", "tester"); err != nil {
+		t.Fatalf("add label wisp: %v", err)
+	}
+
+	// Include an unknown ID to confirm PartitionWispIDsInTx treats it as
+	// a perm ID (no round-trip per ID) and we still get sane results.
+	labelsMap, err := store.GetLabelsForIssues(ctx, []string{perm.ID, wisp.ID, "does-not-exist"})
+	if err != nil {
+		t.Fatalf("GetLabelsForIssues: %v", err)
+	}
+
+	if got := labelsMap[perm.ID]; len(got) != 1 || got[0] != "alpha" {
+		t.Errorf("perm labels: want [alpha], got %v", got)
+	}
+	if got := labelsMap[wisp.ID]; len(got) != 1 || got[0] != "beta" {
+		t.Errorf("wisp labels: want [beta], got %v", got)
+	}
+	if got, ok := labelsMap["does-not-exist"]; ok && len(got) != 0 {
+		t.Errorf("unknown id: want none, got %v", got)
+	}
+}
+
 func TestGetLabelsForIssues_EmptyList(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

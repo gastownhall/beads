@@ -22,6 +22,11 @@ type pushState struct {
 	LastCommit string `json:"last_commit"` // Dolt commit hash
 }
 
+type autoPushTarget interface {
+	GetCurrentCommit(ctx context.Context) (string, error)
+	Push(ctx context.Context) error
+}
+
 func pushStatePath() (string, error) {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
@@ -61,27 +66,38 @@ func savePushState(ps *pushState) error {
 	return atomicWriteFile(path, data)
 }
 
+// autoPushTimeout bounds the st.Push() call that shells out to git fetch,
+// which blocks indefinitely when the remote is unreachable (GH#3370).
+const autoPushTimeout = 30 * time.Second
+
 // isDoltAutoPushEnabled returns whether auto-push to Dolt remote should run.
-// If user explicitly configured dolt.auto-push, use that.
-// Otherwise, auto-enable when a Dolt remote named "origin" exists.
-func isDoltAutoPushEnabled(ctx context.Context) bool {
-	if config.GetValueSource("dolt.auto-push") != config.SourceDefault {
-		return config.GetBool("dolt.auto-push")
+// Returns true only when explicitly opted in via dolt.auto-push=true in
+// .beads/config.yaml (or BD_DOLT_AUTO_PUSH=true env var).
+//
+// Previously the default was to auto-enable when an "origin" remote exists.
+// That is unsafe at any concurrency above one writer: git+ssh remotes have no
+// chunk-level upload atomicity, so concurrent dolt pushes race on the remote
+// manifest and can leave it referencing chunks that were never uploaded. Any
+// subsequent fetch/clone/push propagates the dangling reference. Set
+// dolt.auto-push=true to restore the old behavior on single-writer setups.
+func isDoltAutoPushEnabled(_ context.Context) bool {
+	return config.GetBool("dolt.auto-push")
+}
+
+// pushWithContext is a caller-side guard. Push implementations should honor
+// ctx directly, but this keeps auto-push from blocking forever if one does not.
+func pushWithContext(ctx context.Context, target autoPushTarget) error {
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- target.Push(ctx)
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	// Auto-enable when a Dolt remote exists
-	st := getStore()
-	if st == nil {
-		return false
-	}
-	if lm, ok := storage.UnwrapStore(st).(storage.LifecycleManager); ok && lm.IsClosed() {
-		return false
-	}
-	has, err := st.HasRemote(ctx, "origin")
-	if err != nil {
-		debug.Logf("dolt auto-push: failed to check remote: %v\n", err)
-		return false
-	}
-	return has
 }
 
 // maybeAutoPush pushes to the Dolt remote if enabled and the debounce interval has passed.
@@ -89,6 +105,10 @@ func isDoltAutoPushEnabled(ctx context.Context) bool {
 func maybeAutoPush(ctx context.Context) {
 	if isSandboxMode() {
 		debug.Logf("dolt auto-push: skipped (sandbox mode)\n")
+		return
+	}
+	if isDoltLocalOnly() {
+		debug.Logf("dolt auto-push: skipped (dolt.local-only=true)\n")
 		return
 	}
 	if !isDoltAutoPushEnabled(ctx) {
@@ -137,16 +157,42 @@ func maybeAutoPush(ctx context.Context) {
 		return
 	}
 
-	// Push
-	debug.Logf("dolt auto-push: pushing to origin...\n")
-	if err := st.Push(ctx); err != nil {
+	// Push with a bounded timeout so an unreachable remote doesn't block
+	// the CLI indefinitely (GH#3370). The timeout is configurable via
+	// dolt.auto-push-timeout (default 30s).
+	pushTimeout := config.GetDuration("dolt.auto-push-timeout")
+	if pushTimeout == 0 {
+		pushTimeout = autoPushTimeout
+	}
+	pushCtx, pushCancel := context.WithTimeout(ctx, pushTimeout)
+	defer pushCancel()
+
+	debug.Logf("dolt auto-push: pushing to origin (timeout %s)...\n", pushTimeout)
+	if err := pushWithContext(pushCtx, st); err != nil {
 		if !isQuiet() && !jsonOutput {
-			fmt.Fprintf(os.Stderr, "Warning: dolt auto-push failed: %v\n", err)
-			if isDivergedHistoryErr(err) {
+			if pushCtx.Err() == context.DeadlineExceeded {
+				fmt.Fprintf(os.Stderr, "Warning: dolt auto-push timed out after %s (remote may be unreachable)\n", pushTimeout)
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: dolt auto-push failed: %v\n", err)
+			}
+			if isAncestorPKMismatchErr(err) {
+				printAncestorPKMismatchGuidance(err)
+			} else if isDivergedHistoryErr(err) {
 				printDivergedHistoryGuidance("push")
 			}
 		}
 		debug.Logf("dolt auto-push: push error: %v\n", err)
+		// Throttle retries after failure so a hanging remote doesn't make every
+		// subsequent bd command pay the push timeout. We record the attempt
+		// timestamp but NOT a new LastCommit, so when the remote recovers the
+		// change-detection check (currentCommit != LastCommit) still triggers.
+		if ps == nil {
+			ps = &pushState{}
+		}
+		ps.LastPush = time.Now().UTC().Format(time.RFC3339)
+		if saveErr := savePushState(ps); saveErr != nil {
+			debug.Logf("dolt auto-push: failed to save push state after error: %v\n", saveErr)
+		}
 		return
 	}
 

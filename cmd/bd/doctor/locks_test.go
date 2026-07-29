@@ -3,6 +3,7 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -150,6 +151,34 @@ func TestCheckStaleLockFiles(t *testing.T) {
 		// Should mention count
 		if result.Message == "" {
 			t.Error("expected non-empty message for stale locks")
+		}
+	})
+
+	t.Run("shared worktree fallback detects stale locks", func(t *testing.T) {
+		clearResolveBeadsDirCache()
+		t.Cleanup(clearResolveBeadsDirCache)
+
+		mainRepoDir, worktreeDir := setupWorktreeRepo(t)
+		beadsDir := filepath.Join(mainRepoDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		lockPath := filepath.Join(beadsDir, "dolt.bootstrap.lock")
+		if err := os.WriteFile(lockPath, []byte("lock"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		oldTime := time.Now().Add(-10 * time.Minute)
+		if err := os.Chtimes(lockPath, oldTime, oldTime); err != nil {
+			t.Fatal(err)
+		}
+
+		result := CheckStaleLockFiles(worktreeDir)
+		if result.Status != StatusWarning {
+			t.Fatalf("expected Warning for stale shared lock, got %s: %s", result.Status, result.Message)
+		}
+		if !strings.Contains(result.Message, "dolt.bootstrap.lock") {
+			t.Fatalf("expected stale lock message to mention dolt.bootstrap.lock, got %q", result.Message)
 		}
 	})
 }

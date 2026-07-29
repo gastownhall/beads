@@ -1,0 +1,8 @@
+-- Reverse of 0050: intentional no-op.
+--
+-- Re-introducing DEFAULT (UUID()) on dependencies.id would restore the
+-- per-clone-random primary key this migration exists to remove, and the
+-- deterministic ids backfilled into existing rows cannot be unwound to the
+-- original random values (they were discarded). Dropping the re-asserted unique
+-- keys would also be unsafe. Restore from a prior dolt commit if a rollback is
+-- truly needed.

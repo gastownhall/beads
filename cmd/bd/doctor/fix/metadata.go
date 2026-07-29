@@ -3,14 +3,27 @@ package fix
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	mysql "github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
+
+type serverDatabaseMetadata struct {
+	Name      string
+	HasSchema bool
+	ProjectID string
+}
+
+var listServerMetadataDatabases = inspectServerMetadataDatabases
 
 // FixMissingMetadata checks and repairs missing metadata fields in a Dolt database.
 // Fields checked: bd_version, repo_id, clone_id.
@@ -18,11 +31,10 @@ import (
 // in package main, since this package cannot import it directly).
 // Returns nil if all fields are present or successfully repaired.
 func FixMissingMetadata(path string, bdVersion string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
@@ -95,11 +107,10 @@ func FixMissingMetadata(path string, bdVersion string) error {
 // metadata.json and the database metadata table. For pre-GH#2372 projects that
 // lack cross-project identity verification.
 func FixProjectIdentity(path string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
@@ -110,6 +121,13 @@ func FixProjectIdentity(path string) error {
 	}
 	if cfg.GetBackend() != configfile.BackendDolt {
 		return nil // Not a Dolt backend
+	}
+
+	if msg, err := resolveAuthoritativeServerMetadata(path, cfg, true); err != nil {
+		return err
+	} else if msg != "" {
+		fmt.Printf("  %s\n", msg)
+		return nil
 	}
 
 	ctx := context.Background()
@@ -126,7 +144,14 @@ func FixProjectIdentity(path string) error {
 	hasDBID := dbID != ""
 
 	if hasLocalID && hasDBID {
-		return nil // Both already set
+		if cfg.ProjectID == dbID {
+			return nil // Both already set
+		}
+		return fmt.Errorf(
+			"project identity mismatch persists after repair attempt: metadata.json=%s, database=%s",
+			cfg.ProjectID,
+			dbID,
+		)
 	}
 
 	// Determine the ID to use: prefer an existing one, otherwise generate new
@@ -167,11 +192,10 @@ func FixProjectIdentity(path string) error {
 // database. This fix probes the server for a database with beads tables and backfills
 // the config. (GH#2160)
 func FixMissingDoltDatabase(path string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
 
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
@@ -181,9 +205,16 @@ func FixMissingDoltDatabase(path string) error {
 		return nil // Not Dolt backend
 	}
 
-	// Only fix if dolt_database is missing (using default)
+	if msg, err := resolveAuthoritativeServerMetadata(path, cfg, true); err != nil {
+		return err
+	} else if msg != "" {
+		fmt.Printf("  %s\n", msg)
+		return nil
+	}
+
+	// Only fall back to schema-only probing when dolt_database is missing.
 	if cfg.DoltDatabase != "" {
-		return nil // Already configured explicitly
+		return nil
 	}
 
 	// Connect to the server and probe for the correct database
@@ -255,4 +286,223 @@ func probeForCorrectDoltDatabase(db *sql.DB, skipDB string) string {
 	}
 
 	return ""
+}
+
+// ResolveAuthoritativeServerMetadata reconciles local metadata.json against the
+// authoritative server state. In shared-server/server mode this repairs two
+// drift cases without guessing across unrelated projects:
+//  1. A stale dolt_database when another server DB matches the local project_id.
+//  2. A stale/missing local project_id when the currently configured DB has one.
+func ResolveAuthoritativeServerMetadata(path string, apply bool) (*configfile.Config, string, error) {
+	if err := validateBeadsWorkspace(path); err != nil {
+		return nil, "", err
+	}
+
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return cfg, "", err
+	}
+	msg, err := resolveAuthoritativeServerMetadata(path, cfg, apply)
+	return cfg, msg, err
+}
+
+func resolveAuthoritativeServerMetadata(path string, cfg *configfile.Config, apply bool) (string, error) {
+	if cfg == nil || cfg.GetBackend() != configfile.BackendDolt || !(cfg.IsDoltServerMode() || doltserver.IsSharedServerMode()) {
+		return "", nil
+	}
+
+	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	databases, err := listServerMetadataDatabases(beadsDir, cfg)
+	if err != nil {
+		return "", err
+	}
+
+	changed, msg, err := reconcileAuthoritativeServerMetadata(cfg, databases)
+	if err != nil || !changed {
+		return msg, err
+	}
+	if apply {
+		if err := cfg.Save(beadsDir); err != nil {
+			return "", fmt.Errorf("failed to save metadata.json: %w", err)
+		}
+		return msg, nil
+	}
+	return "would " + msg, nil
+}
+
+func reconcileAuthoritativeServerMetadata(cfg *configfile.Config, databases []serverDatabaseMetadata) (bool, string, error) {
+	if cfg == nil {
+		return false, "", nil
+	}
+
+	byName := make(map[string]serverDatabaseMetadata, len(databases))
+	var schemaCandidates []serverDatabaseMetadata
+	for _, db := range databases {
+		byName[db.Name] = db
+		if db.HasSchema {
+			schemaCandidates = append(schemaCandidates, db)
+		}
+	}
+	current, hasCurrent := byName[cfg.GetDoltDatabase()]
+
+	if cfg.ProjectID != "" {
+		var matches []serverDatabaseMetadata
+		for _, db := range schemaCandidates {
+			if db.ProjectID == cfg.ProjectID {
+				matches = append(matches, db)
+			}
+		}
+		if len(matches) > 1 {
+			names := make([]string, 0, len(matches))
+			for _, match := range matches {
+				names = append(names, match.Name)
+			}
+			sort.Strings(names)
+			return false, "", fmt.Errorf(
+				"multiple server databases match project_id %s: %s",
+				cfg.ProjectID,
+				strings.Join(names, ", "),
+			)
+		}
+		if len(matches) == 1 && cfg.DoltDatabase != matches[0].Name {
+			// Safety guard: when the configured database has its own project_id that
+			// disagrees with metadata.json, and a different database matches the local
+			// project_id, we have conflicting identity signals. Auto-switching databases
+			// here can silently attach this workspace to another project.
+			if hasCurrent && current.HasSchema && current.ProjectID != "" && current.ProjectID != cfg.ProjectID {
+				return false, "", fmt.Errorf(
+					"conflicting project identity: metadata.json project_id %s matches database %q, but configured database %q reports project_id %s",
+					cfg.ProjectID,
+					matches[0].Name,
+					current.Name,
+					current.ProjectID,
+				)
+			}
+			from := cfg.GetDoltDatabase()
+			cfg.DoltDatabase = matches[0].Name
+			return true, fmt.Sprintf("repaired dolt_database: %q -> %q using project_id %s", from, matches[0].Name, cfg.ProjectID), nil
+		}
+	}
+
+	if hasCurrent && current.HasSchema && current.ProjectID != "" && cfg.ProjectID != current.ProjectID {
+		from := cfg.ProjectID
+		cfg.ProjectID = current.ProjectID
+		if from == "" {
+			return true, fmt.Sprintf("backfilled project_id %s from database %q", current.ProjectID, current.Name), nil
+		}
+		return true, fmt.Sprintf("repaired project_id: %s -> %s from database %q", from, current.ProjectID, current.Name), nil
+	}
+
+	// In shared-server mode, a sole schema candidate can belong to a different
+	// workspace. Without a local project_id anchor, auto-adopting that database
+	// can redirect this workspace to another project's data.
+	if cfg.ProjectID == "" && len(schemaCandidates) == 1 && !doltserver.IsSharedServerMode() {
+		candidate := schemaCandidates[0]
+		var repairs []string
+		if cfg.DoltDatabase != candidate.Name {
+			repairs = append(repairs, fmt.Sprintf("dolt_database: %q -> %q", cfg.GetDoltDatabase(), candidate.Name))
+			cfg.DoltDatabase = candidate.Name
+		}
+		if candidate.ProjectID != "" {
+			repairs = append(repairs, fmt.Sprintf("project_id: %s", candidate.ProjectID))
+			cfg.ProjectID = candidate.ProjectID
+		}
+		if len(repairs) > 0 {
+			return true, "repaired metadata from the only server database with Beads schema (" + strings.Join(repairs, "; ") + ")", nil
+		}
+	}
+
+	return false, "", nil
+}
+
+func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]serverDatabaseMetadata, error) {
+	db, err := openServerCatalogDB(beadsDir, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("server metadata probe failed: %w", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var databases []serverDatabaseMetadata
+	for rows.Next() {
+		var dbName string
+		if err := rows.Scan(&dbName); err != nil {
+			return nil, err
+		}
+		if dbName == "information_schema" || dbName == "mysql" {
+			continue
+		}
+		meta := serverDatabaseMetadata{Name: dbName}
+
+		// Escape backticks in database name to prevent SQL injection (` → ``)
+		safeName := strings.ReplaceAll(dbName, "`", "``")
+
+		var count int
+		//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
+		if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", safeName)).Scan(&count); err == nil {
+			meta.HasSchema = true
+		} else if !isExpectedProbeError(err) {
+			return nil, fmt.Errorf("probing database %q for schema: %w", dbName, err)
+		}
+
+		var projectID string
+		//nolint:gosec // G201: identifier-escaped, dbName from SHOW DATABASES
+		if err := db.QueryRowContext(ctx,
+			fmt.Sprintf("SELECT value FROM `%s`.metadata WHERE `key` = '_project_id' LIMIT 1", safeName),
+		).Scan(&projectID); err == nil {
+			meta.ProjectID = projectID
+		} else if !isExpectedProbeError(err) {
+			return nil, fmt.Errorf("probing database %q for project_id: %w", dbName, err)
+		}
+
+		databases = append(databases, meta)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return databases, nil
+}
+
+// isExpectedProbeError returns true for errors that indicate the table/row
+// simply doesn't exist — safe to treat as "not present". Permission errors,
+// connection failures, and other unexpected errors should be propagated so
+// that reconciliation doesn't act on an incomplete inventory.
+func isExpectedProbeError(err error) bool {
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return true
+	}
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		switch mysqlErr.Number {
+		case 1049: // Unknown database
+			return true
+		case 1146: // Table doesn't exist
+			return true
+		case 1054: // Unknown column
+			return true
+		}
+	}
+	return false
+}
+
+func openServerCatalogDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
+	port := doltserver.DefaultConfig(beadsDir).Port
+	connStr := doltutil.ServerDSN{
+		Host:     cfg.GetDoltServerHost(),
+		Port:     port,
+		User:     cfg.GetDoltServerUser(),
+		Password: cfg.GetDoltServerPasswordForPort(port),
+		TLS:      cfg.GetDoltServerTLS(),
+	}.String()
+	return sql.Open("mysql", connStr)
 }

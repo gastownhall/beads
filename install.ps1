@@ -1,6 +1,6 @@
 # Beads (bd) Windows installer
 # Usage:
-#   irm https://raw.githubusercontent.com/steveyegge/beads/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/gastownhall/beads/main/install.ps1 | iex
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -182,7 +182,7 @@ function Install-FromRelease {
         return $false
     }
 
-    $apiUrl = "https://api.github.com/repos/steveyegge/beads/releases/latest"
+    $apiUrl = "https://api.github.com/repos/gastownhall/beads/releases/latest"
     try {
         $release = Invoke-RestMethod -Uri $apiUrl -Headers @{ "User-Agent" = "beads-install" }
     } catch {
@@ -286,7 +286,7 @@ function Install-FromSource {
             }
         } else {
             Write-Info "Cloning repository..."
-            & git clone --depth 1 https://github.com/steveyegge/beads.git $repoPath
+            & git clone --depth 1 https://github.com/gastownhall/beads.git $repoPath
             if ($LASTEXITCODE -ne 0) {
                 throw "git clone failed with exit code $LASTEXITCODE"
             }

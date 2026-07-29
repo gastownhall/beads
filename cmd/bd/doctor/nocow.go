@@ -33,7 +33,7 @@ func CheckBtrfsNoCOW(path string) DoctorCheck {
 		}
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		return DoctorCheck{
 			Name:     name,
@@ -135,7 +135,7 @@ func FixBtrfsNoCOW(path string) (string, error) {
 		return "FS_NOCOW_FL fix skipped: not on Linux", nil
 	}
 
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		return "", fmt.Errorf(".beads directory not found at %s", beadsDir)
 	}

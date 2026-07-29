@@ -249,3 +249,26 @@ func TestHasBackupFiles(t *testing.T) {
 		}
 	})
 }
+
+func TestIsBranchTrackingError(t *testing.T) {
+	t.Parallel()
+
+	t.Run("matches dolt branch tracking error", func(t *testing.T) {
+		err := fmt.Errorf("Error 1105: You asked to pull from the remote 'origin', but did not specify a branch. Because this is not the default configured remote for your current branch, you must specify a branch.")
+		if !isBranchTrackingError(err) {
+			t.Error("expected true for branch tracking error")
+		}
+	})
+
+	t.Run("does not match unrelated errors", func(t *testing.T) {
+		if isBranchTrackingError(fmt.Errorf("connection refused")) {
+			t.Error("expected false for connection error")
+		}
+	})
+
+	t.Run("nil error returns false", func(t *testing.T) {
+		if isBranchTrackingError(nil) {
+			t.Error("expected false for nil error")
+		}
+	})
+}

@@ -22,9 +22,7 @@ import (
 // route credential-bearing pushes through the shared Dolt root even when the
 // per-project dbPath is stale and lacks the remote.
 func TestCredentialCLIRoutingE2ESharedServer(t *testing.T) {
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt not installed, skipping test")
-	}
+	testutil.RequireDoltBinary(t)
 	skipIfNoGit(t)
 
 	baseDir, err := os.MkdirTemp("", "credential-cli-routing-shared-server-e2e-*")
@@ -134,7 +132,7 @@ func TestCredentialCLIRoutingE2ESharedServer(t *testing.T) {
 	}
 
 	require.Equal(t, filepath.Join(sharedDoltDir, "testdb"), store.CLIDir(), "shared-server CLIDir should resolve to shared Dolt root")
-	require.True(t, store.shouldUseCLIForCredentials(ctx), "shared-server mode should route credentials via the shared CLI remote")
+	require.True(t, store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()), "shared-server mode should route credentials via the shared CLI remote")
 
 	issue := &types.Issue{
 		ID:        "shared-route-001",

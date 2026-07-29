@@ -36,8 +36,7 @@ func openStoreDB(beadsDir string) (*sql.DB, storage.DoltStorage, error) {
 
 // CheckOrphanedDependencies detects dependencies pointing to non-existent issues.
 func CheckOrphanedDependencies(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
@@ -58,12 +57,13 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 	// Exclude external: refs — these are synthetic cross-rig tracking deps
 	// injected by the JSONL exporter and intentionally reference issues not
 	// present in the local database (#1593).
+	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.issue_id, d.depends_on_id, d.type
-		FROM dependencies d
-		LEFT JOIN issues i ON d.depends_on_id = i.id
-		WHERE i.id IS NULL
-		  AND d.depends_on_id NOT LIKE 'external:%'
+		FROM (` + doctorDependencyUnionSQL() + `) d
+		WHERE d.depends_on_id NOT LIKE 'external:%'
+		  AND NOT EXISTS (SELECT 1 FROM issues i WHERE i.id = d.depends_on_id)
+		  AND NOT EXISTS (SELECT 1 FROM wisps w WHERE w.id = d.depends_on_id)
 	`
 	rows, err := db.Query(query)
 	if err != nil {
@@ -117,8 +117,7 @@ func checkOrphanedDependenciesDB(db *sql.DB) DoctorCheck {
 // When orchestratorMode is true, the threshold parameter defines how many duplicates
 // are acceptable before warning (default 1000 for orchestrator's ephemeral wisps).
 func CheckDuplicateIssues(path string, orchestratorMode bool, orchestratorThreshold int) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
@@ -202,8 +201,7 @@ func checkDuplicateIssuesDB(db *sql.DB, orchestratorMode bool, orchestratorThres
 
 // CheckTestPollution detects test issues that may have leaked into the database.
 func CheckTestPollution(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
@@ -326,8 +324,7 @@ func CheckGitConflicts(path string) DoctorCheck {
 // These often indicate a modeling mistake (deadlock: child waits for parent, parent waits for children).
 // However, they may be intentional in some workflows, so removal requires explicit opt-in.
 func CheckChildParentDependencies(path string) DoctorCheck {
-	// Follow redirect to resolve actual beads directory (bd-tvus fix)
-	beadsDir := resolveBeadsDir(filepath.Join(path, ".beads"))
+	beadsDir := ResolveBeadsDirForRepo(path)
 
 	db, store, err := openStoreDB(beadsDir)
 	if err != nil {
@@ -420,12 +417,13 @@ func checkDoltConflicts(beadsDir string) DoctorCheck {
 
 // checkChildParentDependenciesDB is the core logic for CheckChildParentDependencies.
 func checkChildParentDependenciesDB(db *sql.DB) DoctorCheck {
-	// Query for child→parent BLOCKING dependencies where issue_id starts with depends_on_id + "."
+	// Query for child→parent BLOCKING dependencies where issue_id starts with target id + "."
 	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
 	// Excludes 'parent-child' type which is a legitimate structural hierarchy relationship.
+	//nolint:gosec // G202: doctorDependencyUnionSQL returns a fixed internal SELECT fragment.
 	query := `
 		SELECT d.issue_id, d.depends_on_id
-		FROM dependencies d
+		FROM (` + doctorDependencyUnionSQL() + `) d
 		WHERE d.issue_id LIKE CONCAT(d.depends_on_id, '.%')
 		  AND d.type IN ('blocks', 'conditional-blocks', 'waits-for')
 	`

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -33,7 +34,6 @@ USE CASES:
 - Migrating to team naming standards
 
 Prefix validation rules:
-- Max length: 8 characters
 - Allowed characters: lowercase letters, numbers, hyphens
 - Must start with a letter
 - Must end with a hyphen (e.g., 'kw-', 'work-')
@@ -50,48 +50,55 @@ EXAMPLES:
   bd rename-prefix team- --dry-run    # Preview changes without applying
 
 NOTE: This is a rare operation. Most users never need this command.`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("rename-prefix is not supported in proxied-server mode")
+		}
+		evt := metrics.NewCommandEvent("rename-prefix")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		newPrefix := args[0]
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		repair, _ := cmd.Flags().GetBool("repair")
 
-		// Block writes in readonly mode
 		if !dryRun {
 			CheckReadonly("rename-prefix")
 		}
 
 		ctx := rootCtx
 
-		// rename-prefix requires direct database access
 		if store == nil {
 			if err := ensureStoreActive(); err != nil {
-				FatalError("%v", err)
+				return HandleError("%v", err)
 			}
 		}
 
 		if err := validatePrefix(newPrefix); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		oldPrefix, err := store.GetConfig(ctx, "issue_prefix")
 		if err != nil || oldPrefix == "" {
-			FatalError("failed to get current prefix: %v", err)
+			return HandleError("failed to get current prefix: %v", err)
 		}
 
 		newPrefix = strings.TrimRight(newPrefix, "-")
 
-		// Check for multiple prefixes first
 		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 		if err != nil {
-			FatalError("failed to list issues: %v", err)
+			return HandleError("failed to list issues: %v", err)
 		}
 
 		prefixes := detectPrefixes(issues)
 
 		if len(prefixes) > 1 {
-			// Multiple prefixes detected - requires repair mode
-
 			fmt.Fprintf(os.Stderr, "%s Multiple prefixes detected in database:\n", ui.RenderFail("✗"))
 			for prefix, count := range prefixes {
 				fmt.Fprintf(os.Stderr, "  - %s: %d issues\n", ui.RenderWarn(prefix), count)
@@ -99,43 +106,34 @@ NOTE: This is a rare operation. Most users never need this command.`,
 			fmt.Fprintf(os.Stderr, "\n")
 
 			if !repair {
-				FatalErrorWithHint(
+				return HandleErrorWithHint(
 					"cannot rename with multiple prefixes. Use --repair to consolidate.",
 					fmt.Sprintf("Example: bd rename-prefix %s --repair", newPrefix),
 				)
 			}
 
-			// Repair mode: consolidate all prefixes to newPrefix
 			if err := repairPrefixes(ctx, store, actor, newPrefix, issues, prefixes, dryRun); err != nil {
-				FatalError("failed to repair prefixes: %v", err)
+				return HandleError("failed to repair prefixes: %v", err)
 			}
-			if isEmbeddedMode() && !dryRun && store != nil {
-				if _, err := store.CommitPending(ctx, actor); err != nil {
-					FatalError("failed to commit: %v", err)
-				}
+			if !dryRun {
+				commandDidWrite.Store(true)
 			}
-			return
+			return nil
 		}
 
-		// Single prefix case - check if trying to rename to same prefix
 		if len(prefixes) == 1 && oldPrefix == newPrefix {
-			FatalError("new prefix is the same as current prefix: %s", oldPrefix)
+			return HandleError("new prefix is the same as current prefix: %s", oldPrefix)
 		}
 
-		// issues already fetched above
 		if len(issues) == 0 {
 			fmt.Printf("No issues to rename. Updating prefix to %s\n", newPrefix)
 			if !dryRun {
 				if err := store.SetConfig(ctx, "issue_prefix", newPrefix); err != nil {
-					FatalError("failed to update prefix: %v", err)
+					return HandleError("failed to update prefix: %v", err)
 				}
-				if isEmbeddedMode() && store != nil {
-					if _, err := store.CommitPending(ctx, actor); err != nil {
-						FatalError("failed to commit: %v", err)
-					}
-				}
+				commandDidWrite.Store(true)
 			}
-			return
+			return nil
 		}
 
 		if dryRun {
@@ -150,14 +148,16 @@ NOTE: This is a rare operation. Most users never need this command.`,
 				newID := fmt.Sprintf("%s-%s", newPrefix, strings.TrimPrefix(issue.ID, oldPrefix+"-"))
 				fmt.Printf("  %s -> %s\n", ui.RenderAccent(oldID), ui.RenderAccent(newID))
 			}
-			return
+			return nil
 		}
 
 		fmt.Printf("Renaming %d issues from prefix '%s' to '%s'...\n", len(issues), oldPrefix, newPrefix)
 
 		if err := renamePrefixInDB(ctx, oldPrefix, newPrefix, issues); err != nil {
-			FatalError("failed to rename prefix: %v", err)
+			return HandleError("failed to rename prefix: %v", err)
 		}
+
+		commandDidWrite.Store(true)
 
 		fmt.Printf("%s Successfully renamed prefix from %s to %s\n", ui.RenderPass("✓"), ui.RenderAccent(oldPrefix), ui.RenderAccent(newPrefix))
 
@@ -169,15 +169,12 @@ NOTE: This is a rare operation. Most users never need this command.`,
 			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			_ = enc.Encode(result) // Best effort: JSON encoding of simple struct does not fail in practice
-		}
-
-		// Embedded mode: flush Dolt commit.
-		if isEmbeddedMode() && store != nil {
-			if _, err := store.CommitPending(ctx, actor); err != nil {
-				FatalError("failed to commit: %v", err)
+			if eerr := enc.Encode(result); eerr != nil {
+				return eerr
 			}
 		}
+
+		return nil
 	},
 }
 
@@ -334,24 +331,6 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 		fmt.Printf("  Renamed %s -> %s\n", ui.RenderWarn(oldID), ui.RenderAccent(newID))
 	}
 
-	// Update all dependencies to use new prefix
-	for oldPrefix := range prefixes {
-		if oldPrefix != targetPrefix {
-			if err := st.RenameDependencyPrefix(ctx, oldPrefix, targetPrefix); err != nil {
-				return fmt.Errorf("failed to update dependencies for prefix %s: %w", oldPrefix, err)
-			}
-		}
-	}
-
-	// Update counters for all old prefixes
-	for oldPrefix := range prefixes {
-		if oldPrefix != targetPrefix {
-			if err := st.RenameCounterPrefix(ctx, oldPrefix, targetPrefix); err != nil {
-				return fmt.Errorf("failed to update counter for prefix %s: %w", oldPrefix, err)
-			}
-		}
-	}
-
 	// Set the new prefix in config
 	if err := st.SetConfig(ctx, "issue_prefix", targetPrefix); err != nil {
 		return fmt.Errorf("failed to update config: %w", err)
@@ -410,14 +389,6 @@ func renamePrefixInDB(ctx context.Context, oldPrefix, newPrefix string, issues [
 		if err := store.UpdateIssueID(ctx, oldID, newID, issue, actor); err != nil {
 			return fmt.Errorf("failed to update issue %s: %w", oldID, err)
 		}
-	}
-
-	if err := store.RenameDependencyPrefix(ctx, oldPrefix, newPrefix); err != nil {
-		return fmt.Errorf("failed to update dependencies: %w", err)
-	}
-
-	if err := store.RenameCounterPrefix(ctx, oldPrefix, newPrefix); err != nil {
-		return fmt.Errorf("failed to update counter: %w", err)
 	}
 
 	if err := store.SetConfig(ctx, "issue_prefix", newPrefix); err != nil {

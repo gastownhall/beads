@@ -42,6 +42,7 @@ type Client struct {
 	Owner      string       // Repository owner (user or organization)
 	Repo       string       // Repository name
 	HTTPClient *http.Client // Optional custom HTTP client
+	Retry      RetryConfig  // Retry/backoff policy for rate limits and transient errors
 }
 
 // Issue represents an issue from the GitHub API.
@@ -247,6 +248,10 @@ var typeMapping = map[string]string{
 	"task":        "task",
 	"epic":        "epic",
 	"chore":       "chore",
+	"decision":    "decision",
+	"spike":       "spike",
+	"story":       "story",
+	"milestone":   "milestone",
 	"enhancement": "feature",
 }
 

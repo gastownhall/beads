@@ -6,6 +6,7 @@
 package linear
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -33,16 +34,68 @@ const (
 
 	// MaxResponseSize is the maximum allowed HTTP response body size (50MB).
 	MaxResponseSize = 50 * 1024 * 1024
+
+	// DefaultRateLimitFloor is the minimum remaining API quota before the
+	// circuit breaker pauses sync. Configurable via linear.rate_limit_floor.
+	DefaultRateLimitFloor = 100
+
+	// MaxRetryAfterDelay is the upper bound on Retry-After delays from the server.
+	// If a 429 response carries a Retry-After larger than this, it is capped and
+	// a warning is printed, rather than blocking the process for an arbitrary duration.
+	MaxRetryAfterDelay = 300 * time.Second
+)
+
+// AuthMode indicates which authentication method the client uses.
+type AuthMode int
+
+const (
+	AuthModeAPIKey AuthMode = iota
+	AuthModeOAuth
 )
 
 // Client provides methods to interact with the Linear GraphQL API.
 type Client struct {
-	APIKey     string
-	TeamID     string
-	ProjectID  string // Optional: filter issues to a specific project
-	Endpoint   string // GraphQL endpoint URL (defaults to DefaultAPIEndpoint)
-	HTTPClient *http.Client
+	APIKey         string
+	TeamID         string
+	ProjectID      string // Optional: filter issues to a specific project
+	Endpoint       string // GraphQL endpoint URL (defaults to DefaultAPIEndpoint)
+	HTTPClient     *http.Client
+	AuthMode       AuthMode
+	TokenManager   *OAuthTokenManager
+	RateLimitFloor int // Minimum remaining quota before circuit breaker trips (0 = use DefaultRateLimitFloor)
+	rateLimitState *rateLimitState
 }
+
+// RateLimitInfo captures rate-limit state from Linear API response headers.
+type RateLimitInfo struct {
+	RetryAfter        time.Duration // Parsed Retry-After delay (zero if header absent)
+	RequestsRemaining int           // X-RateLimit-Requests-Remaining (-1 if absent)
+	RequestsReset     time.Time     // X-RateLimit-Requests-Reset (zero if absent)
+}
+
+// ErrRateLimitExhausted is returned when the circuit breaker trips because
+// the remaining API quota dropped below the configured floor.
+type ErrRateLimitExhausted struct {
+	Remaining int
+	Floor     int
+	ResetsAt  time.Time
+}
+
+func (e *ErrRateLimitExhausted) Error() string {
+	msg := fmt.Sprintf("rate limit circuit breaker: %d requests remaining (floor: %d)", e.Remaining, e.Floor)
+	if !e.ResetsAt.IsZero() {
+		msg += fmt.Sprintf(", resets at %s", e.ResetsAt.UTC().Format(time.RFC3339))
+	}
+	return msg
+}
+
+// RateLimitExhausted marks this error as a hard rate-limit exhaustion.
+// Callers (e.g. the sync engine) can detect this via the interface
+//
+//	type rateLimitExhaustedError interface { RateLimitExhausted() bool }
+//
+// without importing this package, avoiding an import cycle.
+func (e *ErrRateLimitExhausted) RateLimitExhausted() bool { return true }
 
 // GraphQLRequest represents a GraphQL request payload.
 type GraphQLRequest struct {
@@ -67,21 +120,22 @@ type GraphQLError struct {
 
 // Issue represents an issue from the Linear API.
 type Issue struct {
-	ID          string     `json:"id"`
-	Identifier  string     `json:"identifier"` // e.g., "TEAM-123"
-	Title       string     `json:"title"`
-	Description string     `json:"description"`
-	URL         string     `json:"url"`
-	Priority    int        `json:"priority"` // 0=no priority, 1=urgent, 2=high, 3=medium, 4=low
-	State       *State     `json:"state"`
-	Assignee    *User      `json:"assignee"`
-	Labels      *Labels    `json:"labels"`
-	Project     *Project   `json:"project,omitempty"`
-	Parent      *Parent    `json:"parent,omitempty"`
-	Relations   *Relations `json:"relations,omitempty"`
-	CreatedAt   string     `json:"createdAt"`
-	UpdatedAt   string     `json:"updatedAt"`
-	CompletedAt string     `json:"completedAt,omitempty"`
+	ID               string            `json:"id"`
+	Identifier       string            `json:"identifier"` // e.g., "TEAM-123"
+	Title            string            `json:"title"`
+	Description      string            `json:"description"`
+	URL              string            `json:"url"`
+	Priority         int               `json:"priority"` // 0=no priority, 1=urgent, 2=high, 3=medium, 4=low
+	State            *State            `json:"state"`
+	Assignee         *User             `json:"assignee"`
+	Labels           *Labels           `json:"labels"`
+	Project          *Project          `json:"project,omitempty"`
+	ProjectMilestone *ProjectMilestone `json:"projectMilestone,omitempty"`
+	Parent           *Parent           `json:"parent,omitempty"`
+	Relations        *Relations        `json:"relations,omitempty"`
+	CreatedAt        string            `json:"createdAt"`
+	UpdatedAt        string            `json:"updatedAt"`
+	CompletedAt      string            `json:"completedAt,omitempty"`
 }
 
 // State represents a workflow state in Linear.
@@ -188,6 +242,15 @@ type Project struct {
 	CompletedAt string  `json:"completedAt,omitempty"`
 }
 
+// ProjectMilestone represents a milestone within a Linear project.
+type ProjectMilestone struct {
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Progress    float64 `json:"progress"`
+	TargetDate  string  `json:"targetDate,omitempty"`
+}
+
 // ProjectsResponse represents the response from projects query.
 type ProjectsResponse struct {
 	Projects struct {
@@ -277,7 +340,13 @@ type DependencyInfo struct {
 	FromLinearID string // Linear identifier of the dependent issue (e.g., "TEAM-123")
 	ToLinearID   string // Linear identifier of the dependency target
 	Type         string // Beads dependency type (blocks, related, duplicates, parent-child)
+	Source       string // Linear relationship origin: parent or relation
 }
+
+const (
+	DependencySourceParent   = "parent"
+	DependencySourceRelation = "relation"
+)
 
 // StateCache caches workflow states for the team to avoid repeated API calls.
 type StateCache struct {
@@ -298,4 +367,34 @@ type TeamsResponse struct {
 	Teams struct {
 		Nodes []Team `json:"nodes"`
 	} `json:"teams"`
+}
+
+// BatchSize is the maximum number of issues per Linear batch mutation call.
+const BatchSize = 50
+
+// IssueBatchCreateResponse represents the response from issueBatchCreate mutation.
+type IssueBatchCreateResponse struct {
+	IssueBatchCreate struct {
+		Success bool    `json:"success"`
+		Issues  []Issue `json:"issues"`
+	} `json:"issueBatchCreate"`
+}
+
+// IssueBatchUpdateResponse represents the response from issueBatchUpdate mutation.
+type IssueBatchUpdateResponse struct {
+	IssueBatchUpdate struct {
+		Success bool    `json:"success"`
+		Issues  []Issue `json:"issues"`
+	} `json:"issueBatchUpdate"`
+}
+
+// IssueCreateInput holds the fields for creating an issue via batch mutation.
+type IssueCreateInput struct {
+	TeamID      string   `json:"teamId"`
+	Title       string   `json:"title"`
+	Description string   `json:"description,omitempty"`
+	Priority    int      `json:"priority,omitempty"`
+	StateID     string   `json:"stateId,omitempty"`
+	LabelIDs    []string `json:"labelIds,omitempty"`
+	ProjectID   string   `json:"projectId,omitempty"`
 }

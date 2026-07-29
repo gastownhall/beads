@@ -4,19 +4,88 @@ on:
   # Run on merges to main
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   # Allow manual trigger
   workflow_dispatch:
 
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+
 jobs:
+  detect-regression-need:
+    name: Detect regression need
+    runs-on: ubuntu-latest
+    outputs:
+      run_regression: ${{ steps.detect.outputs.run_regression }}
+      reason: ${{ steps.detect.outputs.reason }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether to run differential regression tests
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "run_regression=true" >> "$GITHUB_OUTPUT"
+            echo "reason=$EVENT_NAME event always runs regression tests" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          labels="$(jq -r '.pull_request.labels[].name // empty' "$GITHUB_EVENT_PATH")"
+          if grep -Fxq "run-regression" <<<"$labels"; then
+            echo "run_regression=true" >> "$GITHUB_OUTPUT"
+            echo "reason=run-regression label present" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if grep -Fxq "skip-regression" <<<"$labels"; then
+            echo "run_regression=false" >> "$GITHUB_OUTPUT"
+            echo "reason=skip-regression label present" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed="$(git diff --name-only "$PR_BASE_SHA" "$PR_HEAD_SHA")"
+          echo "Changed files:"
+          printf '%s\n' "$changed"
+
+          regression_candidates="$(
+            printf '%s\n' "$changed" |
+              grep -Ev '^(cmd/bd|internal/storage|internal/types)/.*_test\.go$' ||
+              true
+          )"
+
+          risky_pattern='^(\.github/workflows/regression\.yml|Makefile|go\.(mod|sum)|cmd/bd/|internal/storage/|internal/types/|tests/regression/)'
+          if grep -Eq "$risky_pattern" <<<"$regression_candidates"; then
+            echo "run_regression=true" >> "$GITHUB_OUTPUT"
+            echo "reason=PR changes CLI, storage, types, regression, or build inputs" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "run_regression=false" >> "$GITHUB_OUTPUT"
+          echo "reason=PR does not touch regression-sensitive paths" >> "$GITHUB_OUTPUT"
+
   regression:
     name: Differential Regression (v0.49.6 baseline)
+    needs: detect-regression-need
+    if: needs.detect-regression-need.outputs.run_regression == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v6
+      - name: Show regression trigger reason
+        run: echo "${{ needs.detect-regression-need.outputs.reason }}"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -25,11 +94,28 @@ jobs:
           git config --global user.name "CI Bot"
           git config --global user.email "ci@beads.test"
 
+      - name: Install Dolt
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Configure Dolt
+        run: |
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+          dolt version
+
+      - name: Pull Dolt sql-server image
+        # Without this, isDoltImageCached() returns false in TestMain and the
+        # regression suite falls back to embedded Dolt with HOME=<tmpdir>, which
+        # has a known cleanup race (see beads issue: TestCreateWithParentFlag
+        # TempDir RemoveAll "directory not empty" flake). Keep the tag in sync
+        # with internal/testutil/testdoltcommon.go:DoltDockerImage.
+        run: docker pull dolthub/dolt-sql-server:2.2.0
+
       - name: Cache baseline binary
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: ~/.cache/beads-regression
           key: regression-baseline-${{ hashFiles('tests/regression/BASELINE_VERSION') }}
 
       - name: Run regression tests
-        run: go test -tags=regression -timeout=10m -v ./tests/regression/...
+        run: go test -tags=regression,gms_pure_go -timeout=20m -v ./tests/regression/...

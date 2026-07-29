@@ -4,18 +4,56 @@ on:
   schedule:
     # Run at 2am UTC daily
     - cron: '0 2 * * *'
-  workflow_dispatch: # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Nightly suite or measurement suite"
+        required: true
+        type: choice
+        default: full-test
+        options:
+          - full-test
+          - pr-linux
+          - macos-short
+          - macos-candidates
+          - linux-integration
+          - linux-integration-sharded
+          - linux-integration-hybrid-sharded
+          - linux-integration-hybrid-16-sharded
+          - linux-integration-hybrid-prebuilt-sharded
+          - linux-integration-coverage
+          - cross-version-smoke
+          - nix
+          - mcp-package
+          - npm-package
+      smoke_version:
+        description: "Optional previous release for cross-version-smoke"
+        required: false
+        default: ""
+
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
 
 jobs:
+  measure:
+    name: Measure selected CI suite
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.suite != 'full-test' }}
+    uses: ./.github/workflows/ci-measurements.yml
+    with:
+      suite: ${{ inputs.suite }}
+      smoke_version: ${{ inputs.smoke_version }}
+
   full-test:
     name: Full Test Suite
+    if: ${{ github.event_name == 'schedule' || inputs.suite == 'full-test' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -58,8 +96,9 @@ jobs:
           fi
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6
         if: success()
+        continue-on-error: true
         with:
           file: ./coverage.out
           fail_ci_if_error: false

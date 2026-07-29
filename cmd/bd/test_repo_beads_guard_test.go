@@ -9,11 +9,49 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 // beforeTestsHook is set by CGO-tagged test files to perform setup before tests run
 // (e.g., starting a shared test Dolt server). Returns a cleanup function.
 var beforeTestsHook func() func()
+
+// testTempRoot is the parent directory for per-process test temp dirs.
+// It is set by testMainInner and used by the package-level sync.Once
+// helpers (build binaries, isolated HOMEs) that previously called
+// os.MkdirTemp("", ...) and leaked on every run. Anchoring those temp
+// dirs under testTempRoot means the defer in testMainInner cleans them
+// all up in one place (bd-3q2u / gastownhall/beads#4106).
+//
+// When tests run without TestMain (e.g. a single test invoked with the
+// internal test binary directly), testTempRoot is empty and helpers
+// fall back to os.TempDir().
+var testTempRoot string
+
+// testTempDir returns os.MkdirTemp under testTempRoot when it is set,
+// otherwise it falls back to the system temp dir (os.MkdirTemp's
+// default). Use this in package-level sync.Once builders so leaked
+// directories get reaped by testMainInner's deferred cleanup.
+func testTempDir(pattern string) (string, error) {
+	return os.MkdirTemp(testTempRoot, pattern)
+}
+
+// runTestsAndSweep runs the suite and then best-effort reaps any dolt
+// sql-server left running under testTempRoot (e.g. auto-started by a CLI
+// test's embedded `bd` invocation, if a SIGKILLed run left one behind).
+// This is the suite most likely to leak — most e2e tests here run a real
+// `bd` binary against a `.beads` dir under testTempRoot with auto-start
+// enabled. See gastownhall/beads mybd-q6cz.
+type testRunner interface {
+	Run() int
+}
+
+func runTestsAndSweep(m testRunner) int {
+	code := m.Run()
+	doltserver.SweepOrphanedTestServers(testTempRoot)
+	return code
+}
 
 // Guardrail: ensure the cmd/bd test suite does not touch the real repo .beads state.
 // Disable with BEADS_TEST_GUARD_DISABLE=1 (useful when running tests while actively using beads).
@@ -36,6 +74,12 @@ func testMainInner(m *testing.M) int {
 	}
 	defer func() { _ = forceRemoveAll(tmp) }()
 
+	// Anchor package-level sync.Once builders (test binaries, isolated
+	// HOMEs) under this directory so the defer above sweeps them up too.
+	// Without this, those helpers leaked ~179MB-1.4GB per test run into
+	// /tmp and exhausted tmpfs over time (bd-3q2u).
+	testTempRoot = tmp
+
 	// Preserve Go build cache before changing HOME.
 	// On macOS, GOCACHE defaults to $HOME/Library/Caches/go-build.
 	// Changing HOME would cause tests that run `go build` (e.g., TestShow)
@@ -46,10 +90,46 @@ func testMainInner(m *testing.M) int {
 		}
 	}
 
+	// Same for the module cache: GOMODCACHE defaults to $HOME/go/pkg/mod,
+	// so without this the in-test `go build` (buildEmbeddedBD) re-downloads
+	// every dependency into the temp HOME on each run — slow, and a hard
+	// failure when the network is unavailable.
+	if os.Getenv("GOMODCACHE") == "" {
+		if out, err := exec.Command("go", "env", "GOMODCACHE").Output(); err == nil {
+			_ = os.Setenv("GOMODCACHE", strings.TrimSpace(string(out)))
+		}
+	}
+
 	_ = os.Setenv("HOME", tmp)
 	_ = os.Setenv("USERPROFILE", tmp) // Windows compatibility
 	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "xdg-config"))
 	_ = os.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+
+	// Keep telemetry out of the test suite entirely (wy-12x1p).
+	//
+	// Every `bd` run with metrics enabled ends in metrics.CloseAndFlush, which
+	// (a) writes an eventkit queue under $HOME/.beads/eventsData and (b) spawns
+	// a DETACHED `bd send-metrics` child (cmd.Process.Release — no Wait) that
+	// outlives its parent. The e2e tests here run the bd binary with
+	// HOME=t.TempDir(), so those orphans keep creating/removing .evtq files and
+	// holding eventkit.lock under a temp dir the test is about to delete. Go's
+	// t.TempDir cleanup then fails with
+	//
+	//   TempDir RemoveAll cleanup: unlinkat .../NNN: directory not empty
+	//
+	// which reddens the whole cmd/bd package with no assertion failure in
+	// sight. It is load-dependent, so it flaked intermittently on a busy
+	// machine (TestPrime_HookJSON_{Local,Redirected}PrimeOverride were the
+	// observed victims, but every subprocess test here was exposed).
+	//
+	// Both vars are set: EnvDisableEventFlush alone would stop the detached
+	// child, and EnvDisableMetrics additionally keeps the queue files out of
+	// the isolated HOME — and a test suite should never upload telemetry.
+	// Subprocess envs in this package are built with append(os.Environ(), ...),
+	// so setting it here covers all of them. Tests that specifically exercise
+	// metrics resolution already unset these per-test and restore them.
+	_ = os.Setenv(metrics.EnvDisableMetrics, "1")
+	_ = os.Setenv(metrics.EnvDisableEventFlush, "1")
 
 	// Also reset viper state that was loaded by main.go's init().
 	config.ResetForTesting()
@@ -62,6 +142,12 @@ func testMainInner(m *testing.M) int {
 	// Previously each test set/unset this env var via ensureTestMode(),
 	// which raced under t.Parallel().
 	_ = os.Setenv("BEADS_TEST_MODE", "1")
+	// AD-01 (be-c5p): opt the cmd/bd test process into the dedicated
+	// test-server lane so dolt.New's database-name firewall allows
+	// testdb_*, benchdb_*, etc. on the spawned test container.
+	_ = os.Setenv("BEADS_TEST_SERVER", "1")
+	_ = os.Setenv("BEADS_TEST_CIRCUIT_DIR", filepath.Join(tmp, "circuit"))
+	defer os.Unsetenv("BEADS_TEST_CIRCUIT_DIR")
 
 	// Clear BEADS_DIR to prevent tests from accidentally picking up the project's
 	// .beads directory via git repo detection when there's a redirect file.
@@ -84,17 +170,17 @@ func testMainInner(m *testing.M) int {
 	}
 
 	if os.Getenv("BEADS_TEST_GUARD_DISABLE") != "" {
-		return m.Run()
+		return runTestsAndSweep(m)
 	}
 
 	repoRoot := findRepoRootFrom(origWD)
 	if repoRoot == "" {
-		return m.Run()
+		return runTestsAndSweep(m)
 	}
 
 	repoBeadsDir := filepath.Join(repoRoot, ".beads")
 	if _, err := os.Stat(repoBeadsDir); err != nil {
-		return m.Run()
+		return runTestsAndSweep(m)
 	}
 
 	watch := []string{
@@ -111,7 +197,7 @@ func testMainInner(m *testing.M) int {
 	}
 
 	before := snapshotFiles(repoBeadsDir, watch)
-	code := m.Run()
+	code := runTestsAndSweep(m)
 	after := snapshotFiles(repoBeadsDir, watch)
 
 	if diff := diffSnapshots(before, after); diff != "" {

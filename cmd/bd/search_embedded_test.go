@@ -19,11 +19,25 @@ func bdSearch(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd search %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd search %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
+}
+
+// bdSearchFail runs "bd search" and returns combined output from an expected failure.
+func bdSearchFail(t *testing.T, bd, dir string, args ...string) string {
+	t.Helper()
+	fullArgs := append([]string{"search"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err == nil {
+		t.Fatalf("expected bd search %s to fail, got:\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), stdout.String(), stderr.String())
+	}
+	return stdout.String() + stderr.String()
 }
 
 // bdSearchJSON runs "bd search --json" and returns parsed results.
@@ -33,11 +47,11 @@ func bdSearchJSON(t *testing.T, bd, dir string, args ...string) []map[string]int
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd search --json %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd search --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(stdout.String())
 	start := strings.Index(s, "[")
 	if start < 0 {
 		// No results — empty array
@@ -135,6 +149,24 @@ func TestEmbeddedSearch(t *testing.T) {
 		}
 		if !ids[taskA.ID] || !ids[closedTask.ID] {
 			t.Error("expected both open and closed issues with --status all")
+		}
+	})
+
+	t.Run("search_status_comma_separated", func(t *testing.T) {
+		results := bdSearchJSON(t, bd, dir, "sr-", "--status", "open,closed")
+		ids := map[string]bool{}
+		for _, r := range results {
+			ids[r["id"].(string)] = true
+		}
+		if !ids[taskA.ID] || !ids[closedTask.ID] {
+			t.Error("expected both open and closed issues with --status open,closed")
+		}
+	})
+
+	t.Run("search_status_invalid", func(t *testing.T) {
+		out := bdSearchFail(t, bd, dir, "sr-", "--status", "not-a-status")
+		if !strings.Contains(out, "invalid status") || !strings.Contains(out, "not-a-status") {
+			t.Errorf("expected useful invalid status error, got: %s", out)
 		}
 	})
 

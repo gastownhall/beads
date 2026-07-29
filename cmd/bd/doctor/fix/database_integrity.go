@@ -13,7 +13,8 @@ import (
 //  1. Backing up the corrupt database
 //  2. Re-initializing via bd init (which will clone from remote if configured)
 func DatabaseIntegrity(path string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
 
@@ -22,7 +23,6 @@ func DatabaseIntegrity(path string) error {
 		return fmt.Errorf("failed to resolve path: %w", err)
 	}
 
-	beadsDir := filepath.Join(absPath, ".beads")
 	return doltIntegrityRecovery(absPath, beadsDir)
 }
 

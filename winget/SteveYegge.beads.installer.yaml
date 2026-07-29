@@ -8,10 +8,10 @@ NestedInstallerFiles:
     PortableCommandAlias: bd
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/steveyegge/beads/releases/download/v0.30.7/beads_0.30.7_windows_amd64.zip
+    InstallerUrl: https://github.com/gastownhall/beads/releases/download/v0.30.7/beads_0.30.7_windows_amd64.zip
     InstallerSha256: 91A3D0799533DE8FA9AAB6415B8A57BDD542C59A21805FBF80A559A53F3CD02E
   - Architecture: arm64
-    InstallerUrl: https://github.com/steveyegge/beads/releases/download/v0.30.7/beads_0.30.7_windows_arm64.zip
+    InstallerUrl: https://github.com/gastownhall/beads/releases/download/v0.30.7/beads_0.30.7_windows_arm64.zip
     InstallerSha256: "0000000000000000000000000000000000000000000000000000000000000000"
 ManifestType: installer
 ManifestVersion: 1.6.0

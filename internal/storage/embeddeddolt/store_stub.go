@@ -14,15 +14,24 @@ type EmbeddedDoltStore struct {
 	branch   string
 }
 
-// Option configures optional behavior for New (stub: no-op).
-type Option func(*struct{})
+var errNoCGO = errors.New("embeddeddolt: requires CGO (build with CGO_ENABLED=1)")
 
-// WithLock is a no-op in non-CGO builds.
-func WithLock(_ Unlocker) Option {
-	return func(*struct{}) {}
+// Open returns an error when CGO is not enabled.
+func Open(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
+	return nil, errNoCGO
 }
 
-// New returns an error when CGO is not enabled.
-func New(_ context.Context, _, _, _ string, _ ...Option) (*EmbeddedDoltStore, error) {
-	return nil, errors.New("embeddeddolt: requires CGO (build with CGO_ENABLED=1)")
+// OpenReadOnly returns an error when CGO is not enabled.
+func OpenReadOnly(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
+	return nil, errNoCGO
+}
+
+// OpenForReadOnlyCommand returns an error when CGO is not enabled.
+func OpenForReadOnlyCommand(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
+	return nil, errNoCGO
+}
+
+// OpenForWorkingSetReconcile returns an error when CGO is not enabled.
+func OpenForWorkingSetReconcile(_ context.Context, _, _, _ string) (*EmbeddedDoltStore, error) {
+	return nil, errNoCGO
 }

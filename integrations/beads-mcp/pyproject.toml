@@ -1,14 +1,14 @@
 [project]
 name = "beads-mcp"
-version = "1.0.2"
+version = "1.1.0"
 description = "MCP server for beads issue tracker."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
-    "fastmcp==3.2.3",
-    "pydantic==2.12.5",
-    "pydantic-settings==2.13.1",
+    "fastmcp==3.4.4",
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.2",
 ]
 authors = [
     {name = "Beads Contributors"}
@@ -31,10 +31,10 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/steveyegge/beads"
-Repository = "https://github.com/steveyegge/beads"
-Documentation = "https://github.com/steveyegge/beads/blob/main/integrations/beads-mcp/README.md"
-Issues = "https://github.com/steveyegge/beads/issues"
+Homepage = "https://github.com/gastownhall/beads"
+Repository = "https://github.com/gastownhall/beads"
+Documentation = "https://github.com/gastownhall/beads/blob/main/integrations/beads-mcp/README.md"
+Issues = "https://github.com/gastownhall/beads/issues"
 
 [project.scripts]
 beads-mcp = "beads_mcp.server:main"
@@ -93,8 +93,9 @@ asyncio_default_fixture_loop_scope = "function"
 
 [dependency-groups]
 dev = [
+    "build>=1.3.0",
     "mypy>=1.18.2",
-    "pytest>=8.4.2",
+    "pytest>=9.0.3",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
     "ruff>=0.14.0",

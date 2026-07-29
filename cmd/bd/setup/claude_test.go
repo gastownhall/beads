@@ -255,6 +255,38 @@ func TestRemoveHookCommand(t *testing.T) {
 		},
 	}
 
+	// Separate test: sibling commands within the same hook entry must be
+	// preserved when only the matching command is removed. The bug that
+	// prompted this test dropped the entire hook entry on first match,
+	// silently deleting any sibling commands in the same hooks array.
+	t.Run("preserves sibling commands in same hook entry", func(t *testing.T) {
+		hooks := map[string]interface{}{
+			"SessionStart": []interface{}{
+				map[string]interface{}{
+					"matcher": "",
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": "bd prime"},
+						map[string]interface{}{"type": "command", "command": "other-tool"},
+					},
+				},
+			},
+		}
+		removeHookCommand(hooks, "SessionStart", "bd prime")
+
+		entries, ok := hooks["SessionStart"].([]interface{})
+		if !ok || len(entries) != 1 {
+			t.Fatalf("expected 1 hook entry to remain, got %v", hooks["SessionStart"])
+		}
+		entryMap := entries[0].(map[string]interface{})
+		cmds := entryMap["hooks"].([]interface{})
+		if len(cmds) != 1 {
+			t.Fatalf("expected 1 sibling command to remain, got %d", len(cmds))
+		}
+		if cmds[0].(map[string]interface{})["command"] != "other-tool" {
+			t.Errorf("sibling command was lost; commands: %v", cmds)
+		}
+	})
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			removeHookCommand(tt.existingHooks, tt.event, tt.command)
@@ -361,7 +393,7 @@ func TestInstallClaudeCleanupNullHooks(t *testing.T) {
 	if !ok {
 		t.Fatal("hooks section missing")
 	}
-	for _, event := range []string{"SessionStart", "PreCompact"} {
+	for _, event := range []string{"SessionStart"} {
 		eventHooks, ok := hooks[event].([]interface{})
 		if !ok {
 			t.Errorf("%s should be an array, not nil or missing", event)
@@ -369,6 +401,55 @@ func TestInstallClaudeCleanupNullHooks(t *testing.T) {
 		if len(eventHooks) == 0 {
 			t.Errorf("%s should have hooks", event)
 		}
+	}
+}
+
+func TestInstallClaudeUsesPrimeForClaudeHooks(t *testing.T) {
+	env, _, _ := newClaudeTestEnv(t)
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("install failed: %v", err)
+	}
+
+	data, err := env.readFile(projectSettingsPath(env.projectDir))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	settingsJSON := string(data)
+
+	for _, want := range []string{
+		`"command": "bd prime --hook-json"`,
+		`"SessionStart"`,
+	} {
+		if !strings.Contains(settingsJSON, want) {
+			t.Fatalf("settings missing %q:\n%s", want, settingsJSON)
+		}
+	}
+
+	for _, stale := range []string{"bd sync", "bd dolt push"} {
+		if strings.Contains(settingsJSON, stale) {
+			t.Fatalf("settings contain stale Claude hook command %q:\n%s", stale, settingsJSON)
+		}
+	}
+}
+
+func TestClaudeSettingsUsesRemovedSyncCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"empty", "{}", false},
+		{"bd prime only", `{"hooks":{"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"bd prime"}]}]}}`, false},
+		{"bd sync hook", `{"hooks":{"PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"bd sync"}]}]}}`, true},
+		{"bd sync with suffix", `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"bd sync --flush-only"}]}]}}`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := claudeSettingsUsesRemovedSyncCommand([]byte(tt.raw)); got != tt.want {
+				t.Fatalf("claudeSettingsUsesRemovedSyncCommand() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -422,7 +503,7 @@ func TestHasBeadsHooks(t *testing.T) {
 			name: "has bd prime in PreCompact",
 			settingsData: map[string]interface{}{
 				"hooks": map[string]interface{}{
-					"PreCompact": []interface{}{
+					"SessionStart": []interface{}{
 						map[string]interface{}{
 							"matcher": "",
 							"hooks": []interface{}{
@@ -448,6 +529,44 @@ func TestHasBeadsHooks(t *testing.T) {
 								map[string]interface{}{
 									"type":    "command",
 									"command": "bd prime --stealth",
+								},
+							},
+						},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "has bd prime --hook-json hook (current format)",
+			settingsData: map[string]interface{}{
+				"hooks": map[string]interface{}{
+					"SessionStart": []interface{}{
+						map[string]interface{}{
+							"matcher": "",
+							"hooks": []interface{}{
+								map[string]interface{}{
+									"type":    "command",
+									"command": "bd prime --hook-json",
+								},
+							},
+						},
+					},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "has bd prime --stealth --hook-json hook (current format)",
+			settingsData: map[string]interface{}{
+				"hooks": map[string]interface{}{
+					"PreCompact": []interface{}{
+						map[string]interface{}{
+							"matcher": "",
+							"hooks": []interface{}{
+								map[string]interface{}{
+									"type":    "command",
+									"command": "bd prime --stealth --hook-json",
 								},
 							},
 						},
@@ -639,6 +758,8 @@ func TestInstallClaudeErrors(t *testing.T) {
 }
 
 func TestCheckClaudeScenarios(t *testing.T) {
+	stubDetectRenderOpts(t)
+
 	t.Run("global hooks", func(t *testing.T) {
 		env, stdout, _ := newClaudeTestEnv(t)
 		writeSettings(t, globalSettingsPath(env.homeDir), map[string]interface{}{
@@ -796,42 +917,33 @@ func TestRemoveClaudeScenarios(t *testing.T) {
 	})
 }
 
-func TestClaudeWrappersExit(t *testing.T) {
+func TestClaudeWrappersReturnError(t *testing.T) {
 	t.Run("install provider error", func(t *testing.T) {
-		cap := stubSetupExit(t)
 		stubClaudeEnvProvider(t, claudeEnv{}, errors.New("boom"))
-		InstallClaude(false, false)
-		if !cap.called || cap.code != 1 {
-			t.Fatal("InstallClaude should exit on provider error")
+		if err := InstallClaude(false, false); err == nil {
+			t.Fatal("InstallClaude should return error on provider error")
 		}
 	})
 
 	t.Run("install internal error", func(t *testing.T) {
-		cap := stubSetupExit(t)
 		env, _, _ := newClaudeTestEnv(t)
 		env.ensureDir = func(string, os.FileMode) error { return errors.New("boom") }
 		stubClaudeEnvProvider(t, env, nil)
-		// global=false → project-local (default)
-		InstallClaude(false, false)
-		if !cap.called || cap.code != 1 {
-			t.Fatal("InstallClaude should exit when installClaude fails")
+		if err := InstallClaude(false, false); err == nil {
+			t.Fatal("InstallClaude should return error when installClaude fails")
 		}
 	})
 
 	t.Run("check missing hooks", func(t *testing.T) {
-		cap := stubSetupExit(t)
 		env, _, _ := newClaudeTestEnv(t)
 		stubClaudeEnvProvider(t, env, nil)
-		CheckClaude()
-		if !cap.called || cap.code != 1 {
-			t.Fatal("CheckClaude should exit when hooks missing")
+		if err := CheckClaude(); err == nil {
+			t.Fatal("CheckClaude should return error when hooks missing")
 		}
 	})
 
 	t.Run("remove parse error", func(t *testing.T) {
-		cap := stubSetupExit(t)
 		env, _, _ := newClaudeTestEnv(t)
-		// Write invalid JSON to project settings path (default target)
 		path := projectSettingsPath(env.projectDir)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
@@ -840,10 +952,602 @@ func TestClaudeWrappersExit(t *testing.T) {
 			t.Fatalf("write file: %v", err)
 		}
 		stubClaudeEnvProvider(t, env, nil)
-		// global=false → project-local (default)
-		RemoveClaude(false)
-		if !cap.called || cap.code != 1 {
-			t.Fatal("RemoveClaude should exit on parse error")
+		if err := RemoveClaude(false); err == nil {
+			t.Fatal("RemoveClaude should return error on parse error")
 		}
 	})
+}
+
+// settingsWithPlugin returns settings data with the beads plugin enabled.
+func settingsWithPlugin() map[string]interface{} {
+	return map[string]interface{}{
+		"enabledPlugins": map[string]interface{}{
+			"beads@beads-marketplace": true,
+		},
+	}
+}
+
+func TestHasBeadsPlugin(t *testing.T) {
+	t.Run("plugin in project settings", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		writeSettings(t, projectSettingsPath(env.projectDir), settingsWithPlugin())
+		if !hasBeadsPlugin(env) {
+			t.Error("expected plugin to be detected in project settings")
+		}
+	})
+
+	t.Run("plugin in global settings", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		writeSettings(t, globalSettingsPath(env.homeDir), settingsWithPlugin())
+		if !hasBeadsPlugin(env) {
+			t.Error("expected plugin to be detected in global settings")
+		}
+	})
+
+	t.Run("plugin disabled", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		writeSettings(t, projectSettingsPath(env.projectDir), map[string]interface{}{
+			"enabledPlugins": map[string]interface{}{
+				"beads@beads-marketplace": false,
+			},
+		})
+		if hasBeadsPlugin(env) {
+			t.Error("disabled plugin should not be detected")
+		}
+	})
+
+	t.Run("no plugin", func(t *testing.T) {
+		env, _, _ := newClaudeTestEnv(t)
+		if hasBeadsPlugin(env) {
+			t.Error("expected no plugin detected")
+		}
+	})
+
+	t.Run("design-to-beads not mistaken for beads plugin", func(t *testing.T) {
+		// GH#4244: a plugin whose name merely contains "beads" (here
+		// design-to-beads) must NOT be taken for the beads hook plugin, or the
+		// SessionStart hook write is wrongly skipped.
+		env, _, _ := newClaudeTestEnv(t)
+		writeSettings(t, projectSettingsPath(env.projectDir), map[string]interface{}{
+			"enabledPlugins": map[string]interface{}{
+				"design-to-beads@xexr-marketplace": true,
+			},
+		})
+		if hasBeadsPlugin(env) {
+			t.Error("design-to-beads should not be detected as the beads plugin")
+		}
+	})
+
+	t.Run("real beads plugin detected past a decoy", func(t *testing.T) {
+		// The exact-name match must still find a real beads@<marketplace> even
+		// when a *beads*-named decoy is enabled too (GH#3192 preserved).
+		env, _, _ := newClaudeTestEnv(t)
+		writeSettings(t, projectSettingsPath(env.projectDir), map[string]interface{}{
+			"enabledPlugins": map[string]interface{}{
+				"design-to-beads@xexr-marketplace": true,
+				"beads@beads-marketplace":          true,
+			},
+		})
+		if !hasBeadsPlugin(env) {
+			t.Error("real beads@beads-marketplace should be detected even alongside a decoy")
+		}
+	})
+}
+
+func TestInstallClaudeSkipsHooksWhenPluginPresent(t *testing.T) {
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	// Pre-populate project settings with the plugin enabled
+	writeSettings(t, projectSettingsPath(env.projectDir), settingsWithPlugin())
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "plugin-managed") {
+		t.Error("expected plugin-managed message in output")
+	}
+	if strings.Contains(out, "Registered SessionStart hook") {
+		t.Error("should NOT register hooks when plugin is present")
+	}
+
+	// Verify settings file has no hooks written
+	data, err := env.readFile(projectSettingsPath(env.projectDir))
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatalf("parse settings: %v", err)
+	}
+	hooks, _ := settings["hooks"].(map[string]interface{})
+	if hooks != nil {
+		if _, hasSession := hooks["SessionStart"]; hasSession {
+			t.Error("SessionStart hooks should not be written when plugin is present")
+		}
+		if _, hasCompact := hooks["PreCompact"]; hasCompact {
+			t.Error("PreCompact hooks should not be written when plugin is present")
+		}
+	}
+
+	// CLAUDE.md should still be installed
+	instructionsPath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if _, err := os.Stat(instructionsPath); err != nil {
+		t.Errorf("CLAUDE.md should still be installed even with plugin: %v", err)
+	}
+}
+
+func TestInstallClaudeWritesHooksWithoutPlugin(t *testing.T) {
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	out := stdout.String()
+	if strings.Contains(out, "plugin-managed") {
+		t.Error("should NOT show plugin-managed when no plugin")
+	}
+	if !strings.Contains(out, "Registered SessionStart hook") {
+		t.Error("expected hooks to be registered without plugin")
+	}
+}
+
+func TestInstallClaudeReportsSkippedSymlinkInstructions(t *testing.T) {
+	env, stdout, stderr := newClaudeTestEnv(t)
+	target := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.WriteFile(target, []byte("# Shared instructions\n"), 0644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	link := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "Claude Code hooks installed") {
+		t.Fatalf("expected partial hook success message, got:\n%s", out)
+	}
+	if strings.Contains(out, "Claude Code integration installed") {
+		t.Fatalf("should not report full integration success when instructions are skipped:\n%s", out)
+	}
+	if !strings.Contains(out, "Agent instructions skipped: CLAUDE.md is a symlink") {
+		t.Fatalf("expected skipped instructions summary, got:\n%s", out)
+	}
+	if !strings.Contains(stderr.String(), "CLAUDE.md is a symlink") {
+		t.Fatalf("expected symlink warning on stderr, got:\n%s", stderr.String())
+	}
+	if _, err := os.Stat(projectSettingsPath(env.projectDir)); err != nil {
+		t.Fatalf("settings should still be installed: %v", err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if strings.Contains(string(data), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("symlink target should remain untouched:\n%s", data)
+	}
+}
+
+func TestCheckClaudePluginManaged(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	// Plugin enabled but no hooks in settings files
+	writeSettings(t, globalSettingsPath(env.homeDir), settingsWithPlugin())
+
+	// checkClaude needs CLAUDE.md to exist for the agents check
+	instructionsPath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(instructionsPath, []byte(agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	if err := checkClaude(env); err != nil {
+		t.Fatalf("checkClaude: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "plugin-managed") {
+		t.Errorf("expected plugin-managed message, got: %s", out)
+	}
+}
+
+func TestIsAgentsImportStub(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		agentsFile string
+		want       bool
+	}{
+		{
+			name:       "standalone @AGENTS.md directive",
+			content:    "# Claude Code\n\n@AGENTS.md\n\nSome text.\n",
+			agentsFile: "AGENTS.md",
+			want:       true,
+		},
+		{
+			name:       "directive with surrounding whitespace",
+			content:    "# Claude Code\n\n  @AGENTS.md  \n",
+			agentsFile: "AGENTS.md",
+			want:       true,
+		},
+		{
+			name:       "directive inline in prose",
+			content:    "See @AGENTS.md for details.\n",
+			agentsFile: "AGENTS.md",
+			want:       false,
+		},
+		{
+			name:       "no directive",
+			content:    "# Claude Code\n\nFull instructions here.\n",
+			agentsFile: "AGENTS.md",
+			want:       false,
+		},
+		{
+			name:       "custom agents file name",
+			content:    "# Claude Code\n\n@INSTRUCTIONS.md\n",
+			agentsFile: "INSTRUCTIONS.md",
+			want:       true,
+		},
+		{
+			name:       "relative @./AGENTS.md directive",
+			content:    "# Claude Code\n\n@./AGENTS.md\n",
+			agentsFile: "AGENTS.md",
+			want:       true,
+		},
+		{
+			name:       "empty content",
+			content:    "",
+			agentsFile: "AGENTS.md",
+			want:       false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAgentsImportStub(tt.content, tt.agentsFile); got != tt.want {
+				t.Errorf("isAgentsImportStub() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInstallClaudeRedirectsToAgentsMD(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, _, _ := newClaudeTestEnv(t)
+
+	// Create CLAUDE.md as a thin stub that imports AGENTS.md
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	stubContent := "# Claude Code\n\n@AGENTS.md\n\nShared instructions live in AGENTS.md.\n"
+	if err := os.WriteFile(claudePath, []byte(stubContent), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	// Create AGENTS.md with existing content (no beads block yet)
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("# Agent Instructions\n\nSome content.\n"), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	// CLAUDE.md should NOT have a beads section
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if strings.Contains(string(claudeData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("CLAUDE.md should not contain beads section when it imports AGENTS.md:\n%s", claudeData)
+	}
+
+	// AGENTS.md SHOULD have a beads section
+	agentsData, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if !strings.Contains(string(agentsData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("AGENTS.md should contain beads section:\n%s", agentsData)
+	}
+	if !strings.Contains(string(agentsData), "profile:minimal") {
+		t.Fatalf("AGENTS.md should have minimal profile:\n%s", agentsData)
+	}
+}
+
+func TestCheckClaudeRedirectsToAgentsMD(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	// Create CLAUDE.md as a thin stub
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte("# Claude Code\n\n@AGENTS.md\n"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	// Create AGENTS.md with a beads section
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("# Agent Instructions\n\n"+agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	// Install hooks so check passes the hooks stage
+	writeSettings(t, projectSettingsPath(env.projectDir), map[string]interface{}{
+		"hooks": map[string]interface{}{
+			"SessionStart": []interface{}{
+				map[string]interface{}{
+					"matcher": "",
+					"hooks": []interface{}{
+						map[string]interface{}{"type": "command", "command": "bd prime --hook-json"},
+					},
+				},
+			},
+		},
+	})
+
+	if err := checkClaude(env); err != nil {
+		t.Fatalf("checkClaude: %v", err)
+	}
+
+	// Should report AGENTS.md as the integration file, not CLAUDE.md
+	out := stdout.String()
+	if !strings.Contains(out, "AGENTS.md") {
+		t.Fatalf("expected output to reference AGENTS.md, got: %s", out)
+	}
+}
+
+func TestRemoveClaudeRedirectsToAgentsMD(t *testing.T) {
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	// Create CLAUDE.md as a thin stub
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte("# Claude Code\n\n@AGENTS.md\n"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	// Create AGENTS.md with a beads section
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("# Agent Instructions\n\n"+agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	if err := removeClaude(env, false); err != nil {
+		t.Fatalf("removeClaude: %v", err)
+	}
+
+	// AGENTS.md's beads section is project-authoritative (shared with other
+	// agents), not Claude-specific — removing Claude integration must leave
+	// it intact.
+	agentsData, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if !strings.Contains(string(agentsData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("AGENTS.md should still contain the shared beads section after removing Claude:\n%s", agentsData)
+	}
+
+	// CLAUDE.md should be untouched (still a stub)
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if !strings.Contains(string(claudeData), "@AGENTS.md") {
+		t.Fatalf("CLAUDE.md should still contain @AGENTS.md import:\n%s", claudeData)
+	}
+
+	if !strings.Contains(stdout.String(), "AGENTS.md") {
+		t.Fatalf("expected output to reference AGENTS.md, got: %s", stdout.String())
+	}
+}
+
+// TestRemoveClaudeRedirectPreservesFullProfileSharedBlock covers the case
+// where AGENTS.md carries a full-profile shared beads block (e.g. created by
+// `bd init` or `bd setup codex`). Removing Claude integration must not touch
+// it — other agents still depend on it.
+func TestRemoveClaudeRedirectPreservesFullProfileSharedBlock(t *testing.T) {
+	env, stdout, _ := newClaudeTestEnv(t)
+
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte("# Claude Code\n\n@AGENTS.md\n"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	fullBlock := "# Agent Instructions\n\n" + agents.RenderSection(agents.ProfileFull)
+	if err := os.WriteFile(agentsPath, []byte(fullBlock), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	if err := removeClaude(env, false); err != nil {
+		t.Fatalf("removeClaude: %v", err)
+	}
+
+	agentsData, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if string(agentsData) != fullBlock {
+		t.Fatalf("AGENTS.md full-profile shared block should be byte-for-byte unchanged:\ngot:\n%s\nwant:\n%s", agentsData, fullBlock)
+	}
+
+	if !strings.Contains(stdout.String(), "AGENTS.md") {
+		t.Fatalf("expected output to reference AGENTS.md, got: %s", stdout.String())
+	}
+}
+
+func TestInstallClaudeNoRedirectWhenAGENTSMDMissing(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, _, _ := newClaudeTestEnv(t)
+
+	// Create CLAUDE.md as a thin stub, but do NOT create AGENTS.md
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte("# Claude Code\n\n@AGENTS.md\n"), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	// CLAUDE.md should get the beads section (fallback: no AGENTS.md to redirect to)
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if !strings.Contains(string(claudeData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("CLAUDE.md should contain beads section when AGENTS.md is missing:\n%s", claudeData)
+	}
+}
+
+// staleClaudeStubWithBlock builds a CLAUDE.md stub that carries BOTH the
+// @AGENTS.md import line (redirect trigger) and a beads block written by an
+// older bd, simulating a project that adopted the AGENTS.md-import pattern
+// after a beads block was already installed directly into CLAUDE.md.
+func staleClaudeStubWithBlock() string {
+	return "# Claude Code\n\n@AGENTS.md\n\n" +
+		agents.RenderSection(agents.ProfileMinimal) +
+		"\nShared instructions live in AGENTS.md.\n"
+}
+
+func TestInstallClaudeRedirectCleansStaleClaudeBlock(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, _, _ := newClaudeTestEnv(t)
+
+	// CLAUDE.md is a stub that imports AGENTS.md but still carries a stale
+	// beads block from an older bd install.
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte(staleClaudeStubWithBlock()), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	// AGENTS.md already exists (without a beads block yet).
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("# Agent Instructions\n\nSome content.\n"), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	claudeContent := string(claudeData)
+	if strings.Contains(claudeContent, "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("CLAUDE.md should have the stale beads block stripped:\n%s", claudeContent)
+	}
+	if !strings.Contains(claudeContent, "@AGENTS.md") {
+		t.Fatalf("CLAUDE.md should still contain the @AGENTS.md import line:\n%s", claudeContent)
+	}
+	if !strings.Contains(claudeContent, "Shared instructions live in AGENTS.md.") {
+		t.Fatalf("CLAUDE.md should keep its other stub content:\n%s", claudeContent)
+	}
+
+	agentsData, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	agentsContent := string(agentsData)
+	if got := strings.Count(agentsContent, "BEGIN BEADS INTEGRATION"); got != 1 {
+		t.Fatalf("AGENTS.md should contain exactly one beads block, got %d:\n%s", got, agentsContent)
+	}
+}
+
+// TestInstallClaudeRedirectSkipsStripWhenAgentsSymlink is a regression test
+// for the delete-before-write gap: when the redirect target (AGENTS.md) is a
+// symlink, installAgents skips injection (agents.go markSkipped) without
+// writing the beads block anywhere. In that case installClaude must NOT
+// strip the stale block already present in CLAUDE.md, or the project is left
+// with no beads section at all.
+func TestInstallClaudeRedirectSkipsStripWhenAgentsSymlink(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, _, stderr := newClaudeTestEnv(t)
+
+	// CLAUDE.md is a stub that imports AGENTS.md but still carries a stale
+	// beads block from an older bd install.
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte(staleClaudeStubWithBlock()), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	// AGENTS.md is a symlink to a separate target file.
+	target := filepath.Join(env.projectDir, "AGENTS_target.md")
+	if err := os.WriteFile(target, []byte("# Shared instructions\n"), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md target: %v", err)
+	}
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.Symlink(target, agentsPath); err != nil {
+		t.Fatalf("symlink AGENTS.md: %v", err)
+	}
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	// installAgents should have warned and skipped injection.
+	if !strings.Contains(stderr.String(), "AGENTS.md is a symlink") {
+		t.Fatalf("expected symlink warning on stderr, got:\n%s", stderr.String())
+	}
+
+	// The stale beads block in CLAUDE.md must be preserved: the redirect
+	// never wrote a replacement, so stripping it would delete-before-write.
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if !strings.Contains(string(claudeData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("CLAUDE.md should keep its beads block when the AGENTS.md redirect is skipped:\n%s", claudeData)
+	}
+
+	// The symlink target must remain untouched.
+	targetData, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read AGENTS.md target: %v", err)
+	}
+	if strings.Contains(string(targetData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("AGENTS.md symlink target should remain untouched:\n%s", targetData)
+	}
+}
+
+func TestRemoveClaudeRedirectCleansStaleClaudeBlock(t *testing.T) {
+	env, _, _ := newClaudeTestEnv(t)
+
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	if err := os.WriteFile(claudePath, []byte(staleClaudeStubWithBlock()), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("# Agent Instructions\n\n"+agents.RenderSection(agents.ProfileMinimal)), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	if err := removeClaude(env, false); err != nil {
+		t.Fatalf("removeClaude: %v", err)
+	}
+
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if strings.Contains(string(claudeData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("CLAUDE.md should not contain a beads block after remove:\n%s", claudeData)
+	}
+
+	// AGENTS.md's own beads section is project-authoritative and shared with
+	// other agents — removing Claude integration must not delete it, only the
+	// stale duplicate left in CLAUDE.md.
+	agentsData, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if !strings.Contains(string(agentsData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("AGENTS.md should still contain its beads block after remove:\n%s", agentsData)
+	}
 }

@@ -218,9 +218,6 @@ func runBDInProcess(t *testing.T, dir string, args ...string) string {
 }
 
 func TestCLI_Ready(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	runBDInProcess(t, tmpDir, "create", "Ready issue", "-p", "1")
@@ -231,9 +228,6 @@ func TestCLI_Ready(t *testing.T) {
 }
 
 func TestCLI_Create(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Test issue", "-p", "1", "--json")
@@ -254,10 +248,38 @@ func TestCLI_Create(t *testing.T) {
 	}
 }
 
-func TestCLI_List(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
+// TestCLI_CreateActorPrecedence is a CLI-level regression test for GH#4645:
+// with both BEADS_ACTOR and the deprecated BD_ACTOR set, `bd create` must
+// stamp created_by with BEADS_ACTOR's value. Unlike TestResolveConfiguredActor
+// (which calls resolveConfiguredActor() directly), this drives the real
+// command through rootCmd.Execute() so it also covers the root
+// PersistentPreRunE / refreshBoundCommandConfig wiring that pre-populates the
+// global actor before create.go ever runs — reverting either call site would
+// leave TestResolveConfiguredActor green but this test red.
+func TestCLI_CreateActorPrecedence(t *testing.T) {
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
+	tmpDir := setupCLITestDB(t)
+	t.Setenv("BD_ACTOR", "from-bd-actor")
+	t.Setenv("BEADS_ACTOR", "from-beads-actor")
+
+	out := runBDInProcess(t, tmpDir, "create", "Actor precedence test", "-p", "1", "--json")
+
+	jsonStart := strings.Index(out, "{")
+	if jsonStart == -1 {
+		t.Fatalf("No JSON found in output: %s", out)
 	}
+	jsonOut := out[jsonStart:]
+
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, jsonOut)
+	}
+	if result["created_by"] != "from-beads-actor" {
+		t.Errorf("created_by = %v, want %q (BEADS_ACTOR must outrank deprecated BD_ACTOR)", result["created_by"], "from-beads-actor")
+	}
+}
+
+func TestCLI_List(t *testing.T) {
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	runBDInProcess(t, tmpDir, "create", "First", "-p", "1")
@@ -274,9 +296,6 @@ func TestCLI_List(t *testing.T) {
 }
 
 func TestCLI_Update(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Issue to update", "-p", "1", "--json")
@@ -296,9 +315,6 @@ func TestCLI_Update(t *testing.T) {
 }
 
 func TestCLI_UpdateLabels(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Issue for label testing", "-p", "2", "--json")
@@ -361,9 +377,6 @@ func TestCLI_UpdateLabels(t *testing.T) {
 }
 
 func TestCLI_UpdateEphemeral(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Issue for ephemeral testing", "-p", "2", "--json")
@@ -388,9 +401,6 @@ func TestCLI_UpdateEphemeral(t *testing.T) {
 }
 
 func TestCLI_UpdatePersistent(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 
@@ -427,9 +437,6 @@ func TestCLI_UpdatePersistent(t *testing.T) {
 }
 
 func TestCLI_UpdateEphemeralMutualExclusion(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Issue for mutual exclusion test", "-p", "2", "--json")
@@ -449,9 +456,6 @@ func TestCLI_UpdateEphemeralMutualExclusion(t *testing.T) {
 }
 
 func TestCLI_UpdateAppendNotes(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Issue for append-notes test", "-p", "2", "--notes", "Original notes", "--json")
 
@@ -486,9 +490,6 @@ func TestCLI_UpdateAppendNotes(t *testing.T) {
 }
 
 func TestCLI_UpdateAppendNotesMutualExclusion(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Issue for notes mutual exclusion", "-p", "2", "--json")
 
@@ -507,9 +508,6 @@ func TestCLI_UpdateAppendNotesMutualExclusion(t *testing.T) {
 }
 
 func TestCLI_NoteCommand(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	tmpDir := setupCLITestDB(t)
 
 	// Create an issue with initial notes
@@ -561,9 +559,6 @@ func TestCLI_NoteCommand(t *testing.T) {
 }
 
 func TestCLI_Close(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Issue to close", "-p", "1", "--json")
@@ -586,9 +581,6 @@ func TestCLI_Close(t *testing.T) {
 }
 
 func TestCLI_DepAdd(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 
@@ -608,10 +600,45 @@ func TestCLI_DepAdd(t *testing.T) {
 	}
 }
 
-func TestCLI_DepRemove(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
+// TestCLI_DepAdd_TypeBlockedByAliasGates is the regression test for GH#5069:
+// `bd dep add A B --type blocked-by` used to store the literal custom type
+// "blocked-by" instead of normalizing it to the canonical "blocks" type, so
+// the dependency was displayed everywhere but silently never gated `bd
+// ready`/`bd blocked`. Assert the alias now gates exactly like the default
+// (canonical) type does.
+func TestCLI_DepAdd_TypeBlockedByAliasGates(t *testing.T) {
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
+	tmpDir := setupCLITestDB(t)
+
+	out1 := runBDInProcess(t, tmpDir, "create", "Blocker", "-p", "1", "--json")
+	out2 := runBDInProcess(t, tmpDir, "create", "Blocked", "-p", "1", "--json")
+
+	var issue1, issue2 map[string]interface{}
+	json.Unmarshal([]byte(out1), &issue1)
+	json.Unmarshal([]byte(out2), &issue2)
+
+	blockerID := issue1["id"].(string)
+	blockedID := issue2["id"].(string)
+
+	// blockedID depends on (is blocked by) blockerID, using the --type
+	// blocked-by alias rather than the default "blocks" type.
+	out := runBDInProcess(t, tmpDir, "dep", "add", blockedID, blockerID, "--type", "blocked-by")
+	if !strings.Contains(out, "Added dependency") {
+		t.Fatalf("Expected 'Added dependency', got: %s", out)
 	}
+
+	blockedOut := runBDInProcess(t, tmpDir, "blocked")
+	if !strings.Contains(blockedOut, "Blocked") {
+		t.Errorf("Expected 'Blocked' issue in `bd blocked` output after --type blocked-by dep, got: %s", blockedOut)
+	}
+
+	readyOut := runBDInProcess(t, tmpDir, "ready")
+	if strings.Contains(readyOut, "Blocked") {
+		t.Errorf("Expected blocked issue to be excluded from `bd ready` after --type blocked-by dep, got: %s", readyOut)
+	}
+}
+
+func TestCLI_DepRemove(t *testing.T) {
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 
@@ -633,9 +660,6 @@ func TestCLI_DepRemove(t *testing.T) {
 }
 
 func TestCLI_DepTree(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 
@@ -657,9 +681,6 @@ func TestCLI_DepTree(t *testing.T) {
 }
 
 func TestCLI_Blocked(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 
@@ -681,9 +702,6 @@ func TestCLI_Blocked(t *testing.T) {
 }
 
 func TestCLI_Stats(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	runBDInProcess(t, tmpDir, "create", "Issue 1", "-p", "1")
@@ -696,9 +714,6 @@ func TestCLI_Stats(t *testing.T) {
 }
 
 func TestCLI_Show(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Show test", "-p", "1", "--json")
@@ -714,9 +729,6 @@ func TestCLI_Show(t *testing.T) {
 }
 
 func TestCLI_Export(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	runBDInProcess(t, tmpDir, "create", "Export test", "-p", "1")
@@ -730,9 +742,6 @@ func TestCLI_Export(t *testing.T) {
 }
 
 func TestCLI_Import(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	runBDInProcess(t, tmpDir, "create", "Import test", "-p", "1")
@@ -756,19 +765,29 @@ func TestCLI_Import(t *testing.T) {
 var testBD string
 
 func init() {
-	// Use existing bd binary from repo root if available, otherwise build once
+	// Helper-process re-execs (worktree_remove_test.go's
+	// runWorktreeRemoveProcess) run this init in a child whose cwd is a temp
+	// git repo: the repo-root probe below misses and the `go build .`
+	// fallback panics with "cannot find main module" — which is what six
+	// Main integration shards reported at cd25e0919. The helper never uses
+	// testBD, so skip the work entirely in that child.
+	if os.Getenv(worktreeRemoveHelperEnv) != "" {
+		return
+	}
+	// Prebuilt fast path (scripts/test.sh and CI export this), else build
+	// once. No repo-root ./bd reuse: a stale checkout-root binary silently
+	// substitutes itself for the source under test (wy-4mtr0).
+	if prebuilt := os.Getenv("BEADS_TEST_BD_BINARY"); prebuilt != "" {
+		if abs, err := filepath.Abs(prebuilt); err == nil {
+			if _, statErr := os.Stat(abs); statErr == nil {
+				testBD = abs
+				return
+			}
+		}
+	}
 	bdBinary := "bd"
 	if runtime.GOOS == "windows" {
 		bdBinary = "bd.exe"
-	}
-
-	// Check if bd binary exists in repo root (../../bd from cmd/bd/)
-	repoRoot := filepath.Join("..", "..")
-	existingBD := filepath.Join(repoRoot, bdBinary)
-	if _, err := os.Stat(existingBD); err == nil {
-		// Use existing binary
-		testBD, _ = filepath.Abs(existingBD)
-		return
 	}
 
 	// Fall back to building once (for CI or fresh checkouts)
@@ -815,9 +834,6 @@ func runBDExecAllowErrorWithEnv(t *testing.T, dir string, env []string, args ...
 // TestCLI_EndToEnd performs end-to-end testing using the actual binary
 // This ensures the compiled binary works correctly when executed normally
 func TestCLI_EndToEnd(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	if testDoltServerPort == 0 {
 		t.Skip("skipping: Dolt test container not available")
 	}
@@ -855,9 +871,6 @@ func TestCLI_EndToEnd(t *testing.T) {
 }
 
 func TestCLI_Labels(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Label test", "-p", "1", "--json")
@@ -887,9 +900,6 @@ func TestCLI_Labels(t *testing.T) {
 }
 
 func TestCLI_PriorityFormats(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 
@@ -925,9 +935,6 @@ func TestCLI_PriorityFormats(t *testing.T) {
 }
 
 func TestCLI_Reopen(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
 	out := runBDInProcess(t, tmpDir, "create", "Reopen test", "-p", "1", "--json")
@@ -1010,9 +1017,6 @@ func runBDInProcessAllowError(t *testing.T, dir string, args ...string) (string,
 
 // TestCLI_CreateDryRun tests the --dry-run flag for bd create command (bd-nib2)
 func TestCLI_CreateDryRun(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	if testDoltServerPort == 0 {
 		t.Skip("skipping: Dolt test container not available")
 	}
@@ -1143,8 +1147,6 @@ func TestCLI_CreateDryRun(t *testing.T) {
 	})
 
 	t.Run("DryRunWithFileReturnsError", func(t *testing.T) {
-		// This test must use exec.Command because FatalError calls os.Exit(1)
-		// which would kill the test process if run in-process
 		tmpDir := createTempDirWithCleanup(t)
 
 		// Initialize the database first
@@ -1211,15 +1213,83 @@ func TestCLI_CreateDryRun(t *testing.T) {
 	})
 }
 
+// TestCLI_CommentsListMisplacedSyntax ensures "bd comments list" gets a helpful error (GH#3542).
+func TestCLI_CommentsListMisplacedSyntax(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := setupCLITestDB(t)
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comments", "list")
+	if err == nil {
+		t.Fatalf("expected non-zero exit, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "bd comments") || !strings.Contains(combined, "<issue-id>") {
+		t.Fatalf("expected hint with bd comments and issue-id placeholder, got stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+// TestCLI_CommentsSwappedAddRejectedBeforeStoreOpen is a regression test for
+// GH#4642's should-fix: the swapped-order rejection (`bd comments <id> add
+// <text>`) must fire from commentsCmd's Args validator, before
+// PersistentPreRunE ever opens a store or runs a migration, and before
+// RunE's usesProxiedServer() dispatch — not from a check inside RunE that
+// only the local-store branch reaches. Using a directory with no .beads/ at
+// all proves the store was never touched: the old RunE-only check needed an
+// already-initialized store (PersistentPreRunE would have failed first with
+// "no beads database found"), so this would fail with the wrong error before
+// the fix.
+func TestCLI_CommentsSwappedAddRejectedBeforeStoreOpen(t *testing.T) {
+	noBeadsCwd := t.TempDir()
+	if _, err := os.Stat(filepath.Join(noBeadsCwd, ".beads")); err == nil {
+		t.Fatalf("test setup: %s unexpectedly has a .beads dir", noBeadsCwd)
+	}
+
+	stdout, stderr, err := runBDInProcessAllowError(t, noBeadsCwd, "comments", "bd-123", "add", "should not be stored")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for swapped-order add, got success:\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if strings.Contains(combined, "no beads database found") {
+		t.Fatalf("Args validation did not run before store open: got the pre-fix error.\nOutput:\n%s", combined)
+	}
+	if !strings.Contains(combined, "bd comments add") {
+		t.Errorf("expected hint pointing to `bd comments add`, got:\n%s", combined)
+	}
+}
+
+// TestCLI_CommentsSwappedAddRejectedInProxiedServerMode is the proxied-server
+// counterpart: forcing proxiedServerMode simulates the dispatch that GH#4642's
+// merge-base drift routes around a RunE-only check (main added
+// runCommentsProxiedServer after this fix branched, consuming only args[0]
+// and ignoring trailing `add <text>`). Because validateCommentsArgs runs in
+// Args — before RunE ever branches on usesProxiedServer() — the rejection
+// fires identically regardless of backend, without needing a real proxied
+// server.
+func TestCLI_CommentsSwappedAddRejectedInProxiedServerMode(t *testing.T) {
+	origProxied := proxiedServerMode
+	t.Cleanup(func() { proxiedServerMode = origProxied })
+	proxiedServerMode = true
+
+	tmpDir := setupCLITestDB(t)
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comments", "bd-123", "add", "should not be stored")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for swapped-order add in proxied-server mode, got success:\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if strings.Contains(combined, "not supported in proxied-server mode") {
+		t.Fatalf("Args validation did not run before the proxied dispatch: got RunE's proxied-mode stub error instead.\nOutput:\n%s", combined)
+	}
+	if !strings.Contains(combined, "bd comments add") {
+		t.Errorf("expected hint pointing to `bd comments add`, got:\n%s", combined)
+	}
+}
+
 // TestCLI_CommentsAddShortID tests that 'comments add' accepts short IDs (issue #1070)
 // Most bd commands accept short IDs (e.g., "5wbm") but comments add previously required
 // full IDs (e.g., "mike.vibe-coding-5wbm"). This test ensures short IDs work.
 //
 // Note: Short IDs work because the code calls utils.ResolvePartialID().
 func TestCLI_CommentsAddShortID(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 
 	t.Run("ShortIDWithCommentsAdd", func(t *testing.T) {
 		tmpDir := setupCLITestDB(t)
@@ -1335,9 +1405,6 @@ func TestCLI_CommentsAddShortID(t *testing.T) {
 // TestCLI_CreateRejectsFlagLikeTitles verifies that positional arguments starting
 // with - or -- are rejected as likely misinterpreted flags (bd-2c0).
 func TestCLI_CreateRejectsFlagLikeTitles(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 	if testDoltServerPort == 0 {
 		t.Skip("skipping: Dolt test container not available")
 	}
@@ -1391,13 +1458,80 @@ func TestCLI_CreateRejectsFlagLikeTitles(t *testing.T) {
 	})
 }
 
+// TestCLI_CreateRejectsEmptyTitle verifies that a whitespace-only title is
+// refused rather than silently creating a title-less bead (GH#4771). Such a
+// bead is functionally invisible in title-based views.
+func TestCLI_CreateRejectsEmptyTitle(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"FlagSpaces", []string{"create", "--title", "   ", "-p", "2"}},
+		{"FlagTab", []string{"create", "--title", "\t", "-p", "2"}},
+		{"PositionalSpaces", []string{"create", "   ", "-p", "2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := setupCLITestDB(t)
+			stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, tc.args...)
+			if err == nil {
+				t.Fatalf("expected error for whitespace-only title, got success\nstdout: %s", stdout)
+			}
+			combined := stdout + stderr
+			if !strings.Contains(combined, "title cannot be empty") {
+				t.Errorf("expected 'title cannot be empty' error, got: %s", combined)
+			}
+		})
+	}
+}
+
+// TestCLI_CreateRejectsEmptyTitle_ProxiedServerMode is a proxied-server
+// regression for GH#4771. Before this fix, the whitespace-only guard lived
+// only in create's local-store RunE branch: gatherCreateInput/
+// runCreateProxiedServer (the path taken when usesProxiedServer() is true)
+// never re-checked, so proxied-mode create still minted a blank-titled bead.
+// The fix moved the check into resolveTitle, invoked from createCmd's Args
+// validator — which runs for every invocation regardless of backend, before
+// RunE ever branches on usesProxiedServer(). Setting proxiedServerMode here
+// exercises that dispatch without needing a real proxied server: Args
+// validation must reject before gatherCreateInput/runCreateProxiedServer (or
+// any store open) ever runs.
+func TestCLI_CreateRejectsEmptyTitle_ProxiedServerMode(t *testing.T) {
+	origProxied := proxiedServerMode
+	t.Cleanup(func() { proxiedServerMode = origProxied })
+	proxiedServerMode = true
+
+	// createCmd is a shared package-level *cobra.Command, so a --title value
+	// set by an earlier in-process test invocation (e.g. TestCLI_CreateRejectsEmptyTitle's
+	// own FlagTab case) survives on the FlagSet across rootCmd.Execute() calls.
+	// Reset it explicitly so this test's outcome doesn't depend on suite
+	// ordering — a pre-existing gap, not something this test should also fall
+	// victim to.
+	titleFlag := createCmd.Flags().Lookup("title")
+	origTitleValue := titleFlag.Value.String()
+	origTitleChanged := titleFlag.Changed
+	t.Cleanup(func() {
+		_ = titleFlag.Value.Set(origTitleValue)
+		titleFlag.Changed = origTitleChanged
+	})
+	_ = titleFlag.Value.Set("")
+	titleFlag.Changed = false
+
+	tmpDir := setupCLITestDB(t)
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "create", "   ", "-p", "2")
+	if err == nil {
+		t.Fatalf("expected error for whitespace-only title in proxied-server mode, got success\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "title cannot be empty") {
+		t.Errorf("expected 'title cannot be empty' error, got: %s", combined)
+	}
+}
+
 // TestCLI_CreateNoHistory tests that the --no-history CLI flag is wired through
 // to the created issue (GH#2619). A storage-layer test already covers the DB
 // semantics; this test verifies the CLI flag is actually parsed and passed.
 func TestCLI_CreateNoHistory(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 
 	t.Run("NoHistoryFlagSetOnCreatedIssue", func(t *testing.T) {
 		tmpDir := setupCLITestDB(t)
@@ -1453,9 +1587,6 @@ func TestCLI_CreateNoHistory(t *testing.T) {
 
 // TestCLI_WispListTypeFilter tests that bd mol wisp list --type filters correctly.
 func TestCLI_WispListTypeFilter(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 
 	tmpDir := setupCLITestDB(t)
 
@@ -1516,9 +1647,6 @@ func TestCLI_WispListTypeFilter(t *testing.T) {
 // TestCLI_WispGCExcludeType tests that bd mol wisp gc --exclude-type skips
 // wisps of the excluded type during garbage collection.
 func TestCLI_WispGCExcludeType(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping slow CLI test in short mode")
-	}
 
 	tmpDir := setupCLITestDB(t)
 

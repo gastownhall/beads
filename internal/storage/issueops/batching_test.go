@@ -54,6 +54,16 @@ func TestIsTableNotExistError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "column does not exist",
+			err:  errors.New("column 'depends_on_id' doesn't exist"),
+			want: false,
+		},
+		{
+			name: "schema does not exist",
+			err:  errors.New("schema 'archive' does not exist"),
+			want: false,
+		},
+		{
 			name: "different mysql error code",
 			err:  errors.New("Error 1045: Access denied"),
 			want: false,

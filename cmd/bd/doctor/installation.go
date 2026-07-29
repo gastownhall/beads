@@ -173,7 +173,8 @@ func CheckUntrackedBeadsFiles(path string) DoctorCheck {
 		}
 	}
 
-	beadsDir := filepath.Join(path, ".beads")
+	beadsDir := ResolveBeadsDirForRepo(path)
+	repoRoot := resolvedBeadsRepoRoot(path)
 
 	// Skip if .beads doesn't exist
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
@@ -196,7 +197,7 @@ func CheckUntrackedBeadsFiles(path string) DoctorCheck {
 
 	// Run git status --porcelain to find untracked files in .beads/
 	cmd := exec.Command("git", "status", "--porcelain", ".beads/")
-	cmd.Dir = path
+	cmd.Dir = repoRoot
 	output, err := cmd.Output()
 	if err != nil {
 		return DoctorCheck{

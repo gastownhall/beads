@@ -1,0 +1,39 @@
+formula = "feature-workflow"
+description = "Standard feature development workflow: design, implement, review, merge."
+version = 1
+type = "workflow"
+
+[vars.feature_name]
+description = "Name of the feature to implement"
+required = true
+
+[[steps]]
+id = "design"
+title = "Design {{feature_name}}"
+type = "human"
+description = "Create design document or spec. Define scope, approach, and acceptance criteria."
+
+[[steps]]
+id = "implement"
+title = "Implement {{feature_name}}"
+needs = ["design"]
+description = "Write the code. Create tests. Update docs if applicable."
+
+[[steps]]
+id = "test"
+title = "Run test suite"
+needs = ["implement"]
+description = "Run full test suite and linter. Fix any failures before proceeding."
+
+[[steps]]
+id = "review"
+title = "Code review"
+needs = ["test"]
+type = "human"
+description = "Open PR and get code review. Address feedback."
+
+[[steps]]
+id = "merge"
+title = "Merge to main"
+needs = ["review"]
+description = "Merge PR after approval. Delete feature branch."

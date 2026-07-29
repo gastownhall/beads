@@ -5,28 +5,27 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // skipIfNoDolt skips the test when no Dolt server is available.
 // Checks both binary availability and test server status.
 func skipIfNoDolt(t *testing.T) {
 	t.Helper()
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("skipping: dolt not installed")
-	}
+	testutil.RequireDoltBinary(t)
 	if testDoltServerPort == 0 {
 		t.Skip("skipping: Dolt test server not running")
 	}
@@ -227,6 +226,237 @@ func TestInitAlreadyInitialized(t *testing.T) {
 	if prefix != "test" {
 		t.Errorf("Expected prefix 'test', got %q", prefix)
 	}
+}
+
+// GH#3490: `bd init --init-if-missing` makes init idempotent for scaffold
+// scripts. When the workspace is already initialized, init must skip and
+// return without error (exit 0), emitting a benign "Skipping init" message,
+// instead of aborting via os.Exit(1). The default (no-flag) abort path calls
+// os.Exit(1) and therefore cannot be exercised in-process (see the note above
+// TestInitAlreadyInitialized); this test covers the new success path.
+func TestInitIfMissing(t *testing.T) {
+	skipIfNoDolt(t)
+	// Reset global state
+	origDBPath := dbPath
+
+	// Cobra flag values persist across Execute() calls on the shared command
+	// tree (a sibling test may have left --force set, and our own first init
+	// sets --quiet). Normalize the flags this test depends on before each run,
+	// and restore defaults afterward so we neither inherit nor leak state.
+	resetInitFlags := func() {
+		_ = initCmd.Flags().Set("force", "false")
+		_ = initCmd.Flags().Set("reinit-local", "false")
+		_ = initCmd.Flags().Set("init-if-missing", "false")
+		_ = initCmd.Flags().Set("quiet", "false")
+		_ = initCmd.Flags().Set("prefix", "")
+	}
+	defer func() {
+		dbPath = origDBPath
+		resetInitFlags()
+	}()
+	dbPath = ""
+	resetInitFlags()
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	// First init creates the workspace.
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("First init failed: %v", err)
+	}
+
+	// Re-running with --init-if-missing must be a benign no-op that exits 0:
+	// Execute() returns nil rather than the process aborting via os.Exit(1).
+	// Clear --quiet (set by the first run) so the skip message is emitted, and
+	// ensure no stale --force bypasses the already-initialized guard.
+	resetInitFlags()
+
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--init-if-missing"})
+	execErr := rootCmd.Execute()
+
+	w.Close()
+	os.Stderr = oldStderr
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	stderr := buf.String()
+
+	if execErr != nil {
+		t.Fatalf("init --init-if-missing on an initialized workspace should succeed, got: %v", execErr)
+	}
+	if !strings.Contains(stderr, "Skipping init: workspace already initialized") {
+		t.Errorf("expected a 'Skipping init: workspace already initialized' message on stderr, got:\n%s", stderr)
+	}
+
+	// The skip is a no-op: the existing workspace must remain in place (init
+	// returned before touching any data). We assert on the .beads directory
+	// rather than a specific backend layout so the test holds for both the
+	// embedded and server test modes.
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if info, err := os.Stat(beadsDir); err != nil || !info.IsDir() {
+		t.Fatalf("expected existing .beads workspace to remain at %s, stat err: %v", beadsDir, err)
+	}
+}
+
+// TestInitIfMissingPrefixMismatch covers the guard that keeps --init-if-missing
+// from masking a genuine prefix mismatch (review follow-up on #4332/#3490): a
+// re-init that explicitly requests a different prefix than the existing
+// workspace must abort, while a matching prefix (after normalization) or an
+// undeterminable existing name must fall through to the benign skip.
+func TestInitIfMissingPrefixMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		existing  string
+		requested string
+		want      bool
+	}{
+		{name: "exact match", existing: "foo", requested: "foo", want: false},
+		{name: "case-insensitive match", existing: "Foo", requested: "foo", want: false},
+		{name: "hyphen normalizes to underscore", existing: "my_proj", requested: "my-proj", want: false},
+		{name: "trailing hyphen trimmed", existing: "foo", requested: "foo-", want: false},
+		{name: "leading-digit gets bd_ prefix", existing: "bd_001", requested: "001", want: false},
+		{name: "genuine mismatch aborts", existing: "foo", requested: "bar", want: true},
+		{name: "unknown existing falls through", existing: "", requested: "bar", want: false},
+		{name: "empty requested falls through", existing: "foo", requested: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := initIfMissingPrefixMismatch(tt.existing, tt.requested); got != tt.want {
+				t.Errorf("initIfMissingPrefixMismatch(%q, %q) = %v, want %v",
+					tt.existing, tt.requested, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestInitIfMissingMatchingPrefixSkips verifies the mismatch guard does not
+// regress the happy path: re-running with the SAME explicit --prefix as the
+// existing workspace still skips cleanly (exit 0) rather than aborting.
+func TestInitIfMissingMatchingPrefixSkips(t *testing.T) {
+	skipIfNoDolt(t)
+	origDBPath := dbPath
+	resetInitFlags := func() {
+		_ = initCmd.Flags().Set("force", "false")
+		_ = initCmd.Flags().Set("reinit-local", "false")
+		_ = initCmd.Flags().Set("init-if-missing", "false")
+		_ = initCmd.Flags().Set("quiet", "false")
+		_ = initCmd.Flags().Set("prefix", "")
+	}
+	defer func() {
+		dbPath = origDBPath
+		resetInitFlags()
+	}()
+	dbPath = ""
+	resetInitFlags()
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("First init failed: %v", err)
+	}
+
+	resetInitFlags()
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	// Same prefix as the existing workspace: must skip, not abort.
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--init-if-missing"})
+	execErr := rootCmd.Execute()
+
+	w.Close()
+	os.Stderr = oldStderr
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	stderr := buf.String()
+
+	if execErr != nil {
+		t.Fatalf("init --init-if-missing with matching prefix should succeed, got: %v", execErr)
+	}
+	if !strings.Contains(stderr, "Skipping init: workspace already initialized") {
+		t.Errorf("expected benign skip message, got:\n%s", stderr)
+	}
+}
+
+func TestInitIfMissingDatabaseMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		existing  string
+		requested string
+		want      bool
+	}{
+		{name: "exact match", existing: "foo", requested: "foo", want: false},
+		{name: "case-insensitive match", existing: "Foo", requested: "foo", want: false},
+		{name: "genuine mismatch aborts", existing: "foo", requested: "bar", want: true},
+		{name: "unknown existing falls through", existing: "", requested: "bar", want: false},
+		{name: "empty requested falls through", existing: "foo", requested: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := initIfMissingDatabaseMismatch(tt.existing, tt.requested); got != tt.want {
+				t.Errorf("initIfMissingDatabaseMismatch(%q, %q) = %v, want %v",
+					tt.existing, tt.requested, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckExistingBeadsDataOperationalErrorNotMasked verifies the core of the
+// --init-if-missing idempotency fix: only the benign "already initialized"
+// outcome matches errWorkspaceAlreadyInitialized (and may be skipped), while an
+// operational failure must NOT match it — otherwise --init-if-missing would mask
+// a real error (e.g. an unreadable .beads/embeddeddolt) as a successful skip.
+func TestCheckExistingBeadsDataOperationalErrorNotMasked(t *testing.T) {
+	saveEmbeddedConfig := func(t *testing.T, beadsDir string) {
+		t.Helper()
+		cfg := &configfile.Config{
+			Database: "dolt",
+			Backend:  configfile.BackendDolt,
+			DoltMode: configfile.DoltModeEmbedded,
+		}
+		if err := cfg.Save(beadsDir); err != nil {
+			t.Fatalf("save config: %v", err)
+		}
+	}
+
+	t.Run("existing database matches sentinel", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		saveEmbeddedConfig(t, beadsDir)
+		// A real embedded database lives at embeddeddolt/<db>/.dolt.
+		if err := os.MkdirAll(filepath.Join(beadsDir, "embeddeddolt", "mydb", ".dolt"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		err := checkExistingBeadsDataAt(beadsDir, "mydb")
+		if err == nil {
+			t.Fatal("expected already-initialized error, got nil")
+		}
+		if !errors.Is(err, errWorkspaceAlreadyInitialized) {
+			t.Errorf("existing-database error must match errWorkspaceAlreadyInitialized, got: %v", err)
+		}
+	})
+
+	t.Run("operational error not masked", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		saveEmbeddedConfig(t, beadsDir)
+		// Make embeddeddolt a regular file so os.ReadDir fails with a
+		// non-IsNotExist (operational) error rather than "already initialized".
+		if err := os.WriteFile(filepath.Join(beadsDir, "embeddeddolt"), []byte("not a dir"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := checkExistingBeadsDataAt(beadsDir, "mydb")
+		if err == nil {
+			t.Fatal("expected operational error, got nil")
+		}
+		if errors.Is(err, errWorkspaceAlreadyInitialized) {
+			t.Errorf("operational error must NOT match errWorkspaceAlreadyInitialized (would be masked by --init-if-missing): %v", err)
+		}
+	})
 }
 
 func TestInitWithCustomDBPath(t *testing.T) {
@@ -608,31 +838,6 @@ func TestSetupGlobalGitIgnore_ReadOnly(t *testing.T) {
 			t.Error("expected .beads pattern in output")
 		}
 	})
-}
-
-// captureStdout captures stdout output from fn and returns it as a string.
-// Uses stdioMutex to prevent races with concurrent os.Stdout redirection (bd-cqjoi).
-func captureStdout(t *testing.T, fn func() error) string {
-	t.Helper()
-
-	stdioMutex.Lock()
-	defer stdioMutex.Unlock()
-
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := fn()
-
-	w.Close()
-	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	os.Stdout = oldStdout
-
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	return buf.String()
 }
 
 // TestInitPromptRoleConfig tests the beads.role git config read/write functions
@@ -1443,10 +1648,7 @@ func TestInit_WithBEADS_DIR_DoltBackend(t *testing.T) {
 		t.Skip("Skipping BEADS_DIR Dolt test on Windows")
 	}
 
-	// Check if dolt is available
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("Dolt not installed, skipping Dolt backend test")
-	}
+	testutil.RequireDoltBinary(t)
 
 	// Reset global state
 	origDBPath := dbPath
@@ -1515,9 +1717,6 @@ func TestInitDoltMetadata(t *testing.T) {
 	skipIfNoDolt(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping Dolt metadata test on Windows")
-	}
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("Dolt not installed, skipping Dolt metadata test")
 	}
 
 	saveAndRestoreGlobals(t)
@@ -1630,9 +1829,6 @@ func TestInitDoltMetadataNoGit(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Skipping Dolt metadata test on Windows")
 	}
-	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("Dolt not installed, skipping Dolt metadata test")
-	}
 
 	saveAndRestoreGlobals(t)
 	dbPath = ""
@@ -1679,44 +1875,119 @@ func TestInitDoltMetadataNoGit(t *testing.T) {
 	}
 }
 
-// buildBDOnce builds the bd binary once for subprocess tests in this file.
-// Uses sync.Once for efficiency when multiple tests need the binary.
-var (
-	initTestBD     string
-	initTestBDOnce sync.Once
-	initTestBDErr  error
-)
+func TestInitServerModeWritesDoltCompatibilityMarker(t *testing.T) {
+	skipIfNoDolt(t)
+	saveAndRestoreGlobals(t)
+	ensureCleanGlobalState(t)
+	dbPath = ""
+	store = nil
 
-func buildBDForInitTests(t *testing.T) string {
-	t.Helper()
-	initTestBDOnce.Do(func() {
-		// Check if bd binary exists in repo root (../../bd from cmd/bd/)
-		bdBinary := "bd"
-		if runtime.GOOS == "windows" {
-			bdBinary = "bd.exe"
-		}
-		repoRoot := filepath.Join("..", "..")
-		existingBD := filepath.Join(repoRoot, bdBinary)
-		if _, err := os.Stat(existingBD); err == nil {
-			initTestBD, _ = filepath.Abs(existingBD)
-			return
-		}
-		// Fall back to building
-		tmpDir, err := os.MkdirTemp("", "bd-init-test-*")
-		if err != nil {
-			initTestBDErr = fmt.Errorf("failed to create temp dir: %w", err)
-			return
-		}
-		initTestBD = filepath.Join(tmpDir, bdBinary)
-		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", initTestBD, ".")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			initTestBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
-		}
-	})
-	if initTestBDErr != nil {
-		t.Fatalf("Failed to build bd binary: %v", initTestBDErr)
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatalf("creating beads dir: %v", err)
 	}
-	return initTestBD
+	if err := os.MkdirAll(filepath.Join(doltDir, ".dolt"), 0o750); err != nil {
+		t.Fatalf("creating simulated server data dir: %v", err)
+	}
+
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() {
+		dropTestDatabase(database, testDoltServerPort)
+	})
+
+	rootCmd.SetArgs([]string{
+		"init",
+		"--server",
+		"--external",
+		"--server-host", "127.0.0.1",
+		"--server-port", fmt.Sprintf("%d", testDoltServerPort),
+		"--database", database,
+		"--prefix", "marker",
+		"--quiet",
+		"--skip-hooks",
+		"--skip-agents",
+	})
+
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("server init failed: %v", err)
+	}
+
+	markerPath := filepath.Join(doltDir, ".bd-dolt-ok")
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("expected server init to write %s: %v", markerPath, err)
+	}
+}
+
+func TestInitServerModeWarnsOnMarkerFailureInQuietMode(t *testing.T) {
+	skipIfNoDolt(t)
+	saveAndRestoreGlobals(t)
+	ensureCleanGlobalState(t)
+	dbPath = ""
+	store = nil
+
+	tmpDir := t.TempDir()
+	t.Chdir(tmpDir)
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	doltDir := filepath.Join(beadsDir, "dolt")
+	if err := os.MkdirAll(doltDir, 0o700); err != nil {
+		t.Fatalf("creating dolt dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(doltDir, ".dolt"), []byte("not a dir"), 0o600); err != nil {
+		t.Fatalf("creating invalid dot-dolt marker: %v", err)
+	}
+
+	database := uniqueTestDBName(t)
+	t.Cleanup(func() {
+		dropTestDatabase(database, testDoltServerPort)
+	})
+
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stderr: %v", err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = oldStderr
+	}()
+
+	rootCmd.SetArgs([]string{
+		"init",
+		"--server",
+		"--external",
+		"--server-host", "127.0.0.1",
+		"--server-port", fmt.Sprintf("%d", testDoltServerPort),
+		"--database", database,
+		"--prefix", "marker",
+		"--quiet",
+		"--skip-hooks",
+		"--skip-agents",
+	})
+
+	if err := rootCmd.Execute(); err != nil {
+		w.Close()
+		t.Fatalf("server init failed: %v", err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("close stderr writer: %v", err)
+	}
+	var stderr bytes.Buffer
+	if _, err := stderr.ReadFrom(r); err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+
+	if !strings.Contains(stderr.String(), "Warning: failed to write Dolt compatibility marker") {
+		t.Fatalf("expected marker warning in stderr, got:\n%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), doltDir) {
+		t.Fatalf("expected marker warning to include dolt dir %s, got:\n%s", doltDir, stderr.String())
+	}
 }
 
 func setupBareParentInitWorktree(t *testing.T) (string, string) {
@@ -1766,7 +2037,7 @@ func setupBareParentInitWorktree(t *testing.T) (string, string) {
 // TestInitDatabaseFlag tests the --database flag for bd init.
 // Uses subprocess execution because:
 //   - init manipulates extensive Cobra global state that's difficult to reset
-//   - FatalError calls os.Exit(1) for validation errors, which kills in-process tests
+//   - init validation paths call os.Exit(1), which kills in-process tests
 //
 // Each subtest runs bd init in a temp directory and verifies metadata.json.
 func TestInitDatabaseFlag(t *testing.T) {
@@ -2079,47 +2350,81 @@ func TestBareParentWorktreeCoreCommandsWithoutRedirect(t *testing.T) {
 	}
 }
 
+// initBackendTestEnv returns the process environment with all beads-specific
+// variables (BEADS_*, BD_*) removed and BEADS_DIR pinned to beadsDir. Pinning
+// BEADS_DIR isolates each subtest's workspace and stops bd from walking up into
+// an ambient .beads left by another test or tool; HOME is preserved so bd init's
+// git bootstrap still works.
+func initBackendTestEnv(beadsDir string) []string {
+	var env []string
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "BEADS_") || strings.HasPrefix(e, "BD_") {
+			continue
+		}
+		env = append(env, e)
+	}
+	return append(env, "BEADS_DIR="+beadsDir)
+}
+
 func TestInitBackendFlag(t *testing.T) {
 	bd := buildBDForInitTests(t)
 
-	t.Run("sqlite_shows_deprecation", func(t *testing.T) {
+	// The SQLite backend was rolled back with the other alternative backends:
+	// init fails closed with migration guidance and writes no workspace state.
+	t.Run("sqlite_is_no_longer_supported", func(t *testing.T) {
 		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
 
 		cmd := exec.Command(bd, "init", "--backend", "sqlite", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = os.Environ()
+		cmd.Env = initBackendTestEnv(beadsDir)
 		out, err := cmd.CombinedOutput()
 		if err == nil {
-			t.Fatal("Expected non-zero exit for --backend=sqlite, but command succeeded")
+			t.Fatalf("Expected non-zero exit for --backend=sqlite:\n%s", out)
 		}
-
 		outStr := string(out)
-		if !strings.Contains(outStr, "DEPRECATED") {
-			t.Errorf("Expected deprecation notice, got: %s", outStr)
+		if !strings.Contains(outStr, "no longer supported") || !strings.Contains(outStr, "single engine") {
+			t.Errorf("Expected rollback guidance for sqlite, got: %s", outStr)
 		}
-		if !strings.Contains(outStr, "SQLite backend has been removed") {
-			t.Errorf("Expected 'SQLite backend has been removed' message, got: %s", outStr)
-		}
-		if !strings.Contains(outStr, "bd init --from-jsonl") {
-			t.Errorf("Expected migration instructions, got: %s", outStr)
-		}
-
-		// Verify no .beads directory was created
-		beadsDir := filepath.Join(tmpDir, ".beads")
-		if _, err := os.Stat(beadsDir); err == nil {
-			t.Error(".beads directory should not be created when --backend=sqlite is used")
+		if _, statErr := os.Stat(beadsDir); !os.IsNotExist(statErr) {
+			t.Fatalf("rejected sqlite init created workspace state (stat error: %v)", statErr)
 		}
 	})
 
+	for _, backend := range []string{"postgres", "mysql"} {
+		t.Run(backend+"_is_no_longer_supported", func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+
+			cmd := exec.Command(bd, "init", "--backend", backend, "--quiet")
+			cmd.Dir = tmpDir
+			cmd.Env = initBackendTestEnv(beadsDir)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("Expected non-zero exit for --backend=%s", backend)
+			}
+
+			outStr := string(out)
+			if !strings.Contains(outStr, "no longer supported") {
+				t.Errorf("Expected rollback guidance for %s, got: %s", backend, outStr)
+			}
+			if !strings.Contains(outStr, `"dolt"`) {
+				t.Errorf("Expected supported backend guidance for %s, got: %s", backend, outStr)
+			}
+		})
+	}
+
+	// A genuinely unsupported backend value is still rejected up front.
 	t.Run("unknown_backend_errors", func(t *testing.T) {
 		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
 
-		cmd := exec.Command(bd, "init", "--backend", "postgres", "--quiet")
+		cmd := exec.Command(bd, "init", "--backend", "mongodb", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = os.Environ()
+		cmd.Env = initBackendTestEnv(beadsDir)
 		out, err := cmd.CombinedOutput()
 		if err == nil {
-			t.Fatal("Expected non-zero exit for --backend=postgres, but command succeeded")
+			t.Fatal("Expected non-zero exit for a genuinely unknown backend")
 		}
 
 		outStr := string(out)
@@ -2131,10 +2436,11 @@ func TestInitBackendFlag(t *testing.T) {
 	t.Run("dolt_backend_succeeds", func(t *testing.T) {
 		skipIfNoDolt(t)
 		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
 
 		cmd := exec.Command(bd, "init", "--backend", "dolt", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = os.Environ()
+		cmd.Env = initBackendTestEnv(beadsDir)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd init --backend=dolt should succeed: %v\n%s", err, out)
@@ -2144,17 +2450,17 @@ func TestInitBackendFlag(t *testing.T) {
 	t.Run("default_backend_is_dolt", func(t *testing.T) {
 		skipIfNoDolt(t)
 		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
 
 		cmd := exec.Command(bd, "init", "--quiet")
 		cmd.Dir = tmpDir
-		cmd.Env = os.Environ()
+		cmd.Env = initBackendTestEnv(beadsDir)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("bd init should default to dolt: %v\n%s", err, out)
 		}
 
 		// Verify metadata.json has backend: dolt
-		beadsDir := filepath.Join(tmpDir, ".beads")
 		cfg, err := configfile.Load(beadsDir)
 		if err != nil {
 			t.Fatalf("Failed to load metadata.json: %v", err)

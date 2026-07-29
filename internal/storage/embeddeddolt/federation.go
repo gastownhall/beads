@@ -201,6 +201,17 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 		StartTime: time.Now(),
 	}
 
+	// GH#2474 / bd-578h9.2: commit pending changes before the merge, matching
+	// embedded Pull/PullRemote/PullFrom and server-mode Sync. Embedded Commit is
+	// DOLT_COMMIT('-Am'), so it stages config — where kv.memory.* memories live —
+	// and a leftover dirty working set (e.g. a `bd remember` write) would
+	// otherwise make DOLT_MERGE refuse to start ("cannot merge with uncommitted
+	// changes"). CommitPending is a no-op when the working set is already clean.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		result.Error = fmt.Errorf("commit pending before sync: %w", err)
+		return result, result.Error
+	}
+
 	// Step 1: Fetch
 	if err := s.Fetch(ctx, peer); err != nil {
 		result.Error = fmt.Errorf("fetch failed: %w", err)
@@ -238,6 +249,14 @@ func (s *EmbeddedDoltStore) Sync(ctx context.Context, peer string, strategy stri
 
 		if err := s.Commit(ctx, fmt.Sprintf("Resolve conflicts from %s using %s strategy", peer, strategy)); err != nil {
 			result.Error = fmt.Errorf("commit conflict resolution: %w", err)
+			return result, result.Error
+		}
+
+		// bd-578h9.11: the conflicted merge skipped the automatic is_blocked
+		// recompute (unresolved rows would have fed it garbage); now that the
+		// resolution is committed, cover the whole merge+resolution window.
+		if err := s.RecomputeBlockedAfterMerge(ctx, beforeCommit); err != nil {
+			result.Error = fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
 			return result, result.Error
 		}
 	}

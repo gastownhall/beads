@@ -13,6 +13,7 @@ This document describes the complete release process for beads, including GitHub
 - [4. PyPI Release (MCP Server)](#4-pypi-release-mcp-server)
 - [5. npm Package Release](#5-npm-package-release)
 - [6. Verify Release](#6-verify-release)
+- [Prerelease / Release Candidate (RC) Workflow](#prerelease--release-candidate-rc-workflow)
 - [Hotfix Releases](#hotfix-releases)
 - [Rollback Procedure](#rollback-procedure)
 
@@ -25,11 +26,25 @@ A beads release involves multiple distribution channels:
 3. **PyPI** - Python MCP server (`beads-mcp`)
 4. **npm** - Node.js package for Claude Code for Web (`@beads/bd`)
 
+### The Easy Way (Recommended)
+
+For routine releases, use the fully automated release script:
+
+```bash
+./scripts/release.sh 0.22.0
+```
+
+This handles version bump, tests, git tag, Homebrew update, and local
+installation in one shot. See [scripts/README.md](scripts/README.md#releasesh--the-easy-button)
+for details. The rest of this document is the manual / step-by-step process,
+useful for understanding what `release.sh` does and for handling edge cases
+(hotfixes, rollbacks, manual PyPI/npm publishes).
+
 ## Prerequisites
 
 ### Required Tools
 
-- `git` with push access to steveyegge/beads
+- `git` with push access to gastownhall/beads
 - `goreleaser` for building binaries
 - `npm` with authentication (for npm releases)
 - `python3` and `twine` (for PyPI releases)
@@ -38,6 +53,9 @@ A beads release involves multiple distribution channels:
 ### Required Access
 
 - GitHub: Write access to repository and ability to create releases
+- GitHub: Ability to create protected `v*` release tags. The repository should
+  restrict `refs/tags/v*` creation, updates, and deletion to trusted release
+  maintainers.
 - PyPI: Maintainer access to `beads-mcp` package
 - npm: Member of `@beads` organization
 
@@ -45,7 +63,7 @@ A beads release involves multiple distribution channels:
 
 ```bash
 # Check git
-git remote -v  # Should show steveyegge/beads
+git remote -v  # Should show gastownhall/beads
 
 # Check goreleaser
 goreleaser --version
@@ -67,7 +85,7 @@ Before starting a release:
 
 - [ ] All tests passing (`go test ./...`)
 - [ ] npm package tests passing (`cd npm-package && npm run test:all`)
-- [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](docs/RELEASE-STABILITY-GATE.md)
+- [ ] **Upgrade smoke tests pass** (`make test-upgrade`) — see [Release Stability Gate](engdocs/RELEASE-STABILITY-GATE.md)
 - [ ] **Regression tests pass** (`make test-regression`)
 - [ ] **CHANGELOG.md updated with release notes** (see format below)
 - [ ] **Breaking changes documented** with migration steps and recovery instructions
@@ -136,8 +154,9 @@ This updates:
 - `cmd/bd/version.go` - CLI version constant
 - `integrations/beads-mcp/pyproject.toml` - MCP server version
 - `integrations/beads-mcp/src/beads_mcp/__init__.py` - MCP Python version
-- `claude-plugin/.claude-plugin/plugin.json` - Plugin version
-- `.claude-plugin/marketplace.json` - Marketplace version
+- `plugins/beads/.claude-plugin/plugin.json` - Claude plugin version
+- `plugins/beads/.codex-plugin/plugin.json` - Codex plugin version
+- `.claude-plugin/marketplace.json` - Claude marketplace version
 - `npm-package/package.json` - npm package version
 - `cmd/bd/templates/hooks/*` - Git hook versions
 - `README.md` - Documentation version
@@ -150,6 +169,17 @@ The `--commit --tag --push` flags will:
 3. Push both commit and tag to origin
 
 This triggers GitHub Actions to build release artifacts automatically.
+
+The tag workflow re-runs release-critical package gates before publishing:
+
+- `make ci-package-mcp` builds and validates the MCP package, then the PyPI job
+  publishes the validated `dist/*` artifact from that gate.
+- `make ci-package-npm` validates the npm wrapper package before npm publish.
+  publishes GitHub release assets.
+
+The npm publish job also waits for the macOS release assets, because the npm
+`postinstall` script downloads platform-specific archives from the GitHub
+release.
 
 **Recommended workflow:**
 
@@ -164,6 +194,10 @@ git tag -a v0.22.0 -m "Release v0.22.0"
 git push origin main
 git push origin v0.22.0
 ```
+
+The release workflow is intentionally gated to `refs/tags/v*`. A manual
+workflow dispatch from a branch will skip publishing jobs; manual reruns must
+select the release tag.
 
 **Alternative (step-by-step):**
 
@@ -221,7 +255,7 @@ gh release create v0.22.0 \
 
 ### Verify GitHub Release
 
-1. Visit https://github.com/steveyegge/beads/releases
+1. Visit https://github.com/gastownhall/beads/releases
 2. Verify v0.22.0 is marked as "Latest"
 3. Check all platform binaries are present:
    - `beads_0.22.0_darwin_amd64.tar.gz`
@@ -233,7 +267,13 @@ gh release create v0.22.0 \
 
 ## 3. Homebrew Update
 
-Homebrew formula is now in homebrew-core. Updates are handled automatically via GitHub Release artifacts.
+Homebrew uses the `beads` formula in homebrew-core. Do not publish or revive
+the old `bd` formula in `gastownhall/homebrew-beads`; having two independently
+updated Homebrew formulas causes version drift and installs the wrong binary for
+some users.
+
+Updates to the supported Homebrew formula are handled through Homebrew core
+after GitHub Release artifacts are available.
 
 ### Verify Homebrew
 
@@ -303,24 +343,58 @@ pip install beads-mcp==0.22.0
 python -m beads_mcp --version
 ```
 
-## 5. Claude Code Marketplace Update
+## 5. Plugin Marketplace Update
 
-Update the Claude Code marketplace metadata files:
+Update the plugin marketplace metadata files:
 
 ```bash
 # Update .claude-plugin/marketplace.json
 # Change version to match current release
 vim .claude-plugin/marketplace.json
 
-# Update claude-plugin/.claude-plugin/plugin.json if needed
-vim claude-plugin/.claude-plugin/plugin.json
+# Update plugins/beads/.claude-plugin/plugin.json if needed
+vim plugins/beads/.claude-plugin/plugin.json
+
+# Update plugins/beads/.codex-plugin/plugin.json if needed
+vim plugins/beads/.codex-plugin/plugin.json
 
 # Commit changes
-git add .claude-plugin/ claude-plugin/.claude-plugin/
-git commit -m "chore: Update Claude Code marketplace to v0.22.0"
+git add .claude-plugin/ plugins/beads/.claude-plugin/ plugins/beads/.codex-plugin/
+git commit -m "chore: Update plugin marketplaces to v0.22.0"
 ```
 
-**Note:** These files define how beads appears in Claude Code's plugin marketplace. Version should match the release version.
+**Note:** These files define how beads appears in Claude Code and Codex plugin marketplaces. Version should match the release version.
+
+### Documentation Site (Mintlify)
+
+The published docs are the Mintlify site rooted at `docs/`, deployed from
+main via the Mintlify GitHub integration — no release-time docs snapshot is
+needed. The site documents the current release line only (see
+engdocs/decisions/2026-07-10-mintlify-docs-overhaul.md). Day to day, the
+generated CLI reference is kept fresh by `scripts/generate-cli-docs.sh` and
+its PR drift gate, not by the release process.
+
+**But the release pin IS a release-time step.** `docs/cli-docs.pin` names
+the release tag the docs corpus is generated from and validated against
+(engdocs/decisions/2026-07-17-docs-release-pin.md); it lags `main` between
+releases by design, so any command or flag added on `main` since the last
+bump is invisible to `scripts/check-doc-flags.sh` Check 4 ("covers all live
+top-level CLI commands" passes vacuously for it, e.g. wy-gx5rj for `bd
+sync`). Bump it as part of THIS release, not a follow-up:
+
+```bash
+# After tagging (see "Update Version and Create Release Tag" above):
+echo "v0.22.0" > docs/cli-docs.pin
+./scripts/generate-cli-docs.sh
+git add docs/cli-docs.pin docs/CLI_REFERENCE.md docs/cli-reference docs/docs.json
+git commit -m "docs: bump CLI docs pin to v0.22.0"
+git push origin main
+```
+
+Skipping this step doesn't fail fast — Check 4 stays green (it validates
+against the *old* pin) until the next bump, at which point every command
+added across the skipped releases shows up at once as a pile of "missing
+from docs/CLI_REFERENCE.md" failures with no obvious release to blame.
 
 ## 6. npm Package Release
 
@@ -416,7 +490,7 @@ After all distribution channels are updated, verify each one:
 
 ```bash
 # Download and test binary
-wget https://github.com/steveyegge/beads/releases/download/v0.22.0/beads_0.22.0_darwin_arm64.tar.gz
+wget https://github.com/gastownhall/beads/releases/download/v0.22.0/beads_0.22.0_darwin_arm64.tar.gz
 tar -xzf beads_0.22.0_darwin_arm64.tar.gz
 ./bd version
 ```
@@ -447,9 +521,83 @@ bd version
 
 ```bash
 # Test quick install script
-curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 bd version
 ```
+
+### CLI Docs Pin
+
+```bash
+cat docs/cli-docs.pin  # should be the tag just released, not an older one
+```
+
+If it's stale, do the bump from the "Documentation Site (Mintlify)" step
+above before calling the release done.
+
+## Prerelease / Release Candidate (RC) Workflow
+
+Release candidates let a build be validated through the full release pipeline
+without promoting it to the stable channels. An RC carries a SemVer prerelease
+identifier (e.g. `1.1.0-rc.1`); Python tooling normalizes this to PEP 440 form
+(`1.1.0rc1`).
+
+**How a prerelease tag differs from a stable release:**
+
+- **GitHub release** is published and **marked as a prerelease** (goreleaser
+  `release.prerelease: auto`), with binaries for all platforms.
+- **Homebrew** is not updated (goreleaser `brews.skip_upload: true`; the core
+  formula only tracks stable releases).
+- **PyPI** and **npm** publish jobs are **skipped**. The `publish-pypi` and
+  `publish-npm` jobs are gated with `!contains(github.ref_name, '-')`, so a tag
+  containing a `-` never reaches the stable package channels.
+- **Docs are unaffected.** The docs site publishes from `main` via the
+  Mintlify GitHub integration; there is no release-time docs snapshot for
+  either prereleases or stable releases.
+
+### Cut an RC
+
+```bash
+# 1. Update CHANGELOG.md and cmd/bd/info.go with the RC notes (manual step),
+#    same as a stable release. Date the CHANGELOG section.
+
+# 2. Bump versions. update-versions.sh accepts a prerelease identifier and,
+./scripts/update-versions.sh 1.1.0-rc.1
+#    Windows PE numeric fields (winres file_version/product_version and the
+#    manifest <assemblyIdentity> version) are set to the base version 1.1.0,
+#    because PE versions must be purely numeric; gen-winres.sh strips the
+#    prerelease suffix the same way at build time.
+
+# 3. Keep the MCP lockfile in sync (PEP 440 normalizes to 1.1.0rc1), or the
+#    Package Gate (MCP) check goes red:
+(cd integrations/beads-mcp && uv lock)
+
+# 4. Validate locally.
+./scripts/check-versions.sh
+
+# 5. Open a PR for the RC prep and have it reviewed. RC prep should land
+#    through normal review, not auto-merge.
+```
+
+After the RC prep is merged to `main`, cut the tag from the merge commit:
+
+```bash
+git checkout main && git pull
+git tag -a v1.1.0-rc.1 -m "Release candidate v1.1.0-rc.1"
+git push origin v1.1.0-rc.1
+```
+
+Pushing the `v*` tag triggers the release workflow with the prerelease behavior
+above. Tag creation is restricted to release maintainers; see
+[Prerequisites](#prerequisites).
+
+### Validate and promote
+
+- Install the RC from the GitHub prerelease assets and exercise the changes it
+  is gating before promoting.
+- To promote to stable, bump to the base version with no suffix
+  (`./scripts/update-versions.sh 1.1.0`). The stable release **does** publish
+  to Homebrew/PyPI/npm, so follow the standard
+  [Prepare Release](#1-prepare-release) steps from there.
 
 ## Hotfix Releases
 
@@ -654,6 +802,11 @@ Examples:
 - `0.22.0` → `0.22.1`: Bug fix (patch bump)
 - `0.22.1` → `1.0.0`: Stable release (major bump)
 
+**Prereleases:** append a SemVer prerelease identifier for release candidates,
+e.g. `1.1.0-rc.1`. Prerelease tags publish a GitHub prerelease only and stay
+off the stable Homebrew/PyPI/npm channels — see
+[Prerelease / Release Candidate (RC) Workflow](#prerelease--release-candidate-rc-workflow).
+
 ## Release Cadence
 
 - **Minor releases**: Every 2-4 weeks (new features)
@@ -662,5 +815,5 @@ Examples:
 
 ## Questions?
 
-- Open an issue: https://github.com/steveyegge/beads/issues
-- Check existing releases: https://github.com/steveyegge/beads/releases
+- Open an issue: https://github.com/gastownhall/beads/issues
+- Check existing releases: https://github.com/gastownhall/beads/releases

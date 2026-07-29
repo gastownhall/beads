@@ -35,6 +35,36 @@ func TestCheckConfigSetSideEffects_SharedServerFalse(t *testing.T) {
 	}
 }
 
+func TestCheckConfigSetSideEffects_DoltDebugTrue(t *testing.T) {
+	effects := checkConfigSetSideEffects("dolt.debug", "true")
+	if len(effects) != 1 {
+		t.Fatalf("expected 1 effect, got %d", len(effects))
+	}
+	if effects[0].Command != "bd dolt stop && bd dolt start" {
+		t.Errorf("expected restart command, got %q", effects[0].Command)
+	}
+}
+
+func TestCheckConfigSetSideEffects_DoltDebugFalse(t *testing.T) {
+	effects := checkConfigSetSideEffects("dolt.debug", "false")
+	if len(effects) != 1 {
+		t.Fatalf("expected 1 effect, got %d", len(effects))
+	}
+	if effects[0].Command != "bd dolt stop && bd dolt start" {
+		t.Errorf("expected restart command, got %q", effects[0].Command)
+	}
+}
+
+func TestCheckConfigUnsetSideEffects_DoltDebug(t *testing.T) {
+	effects := checkConfigUnsetSideEffects("dolt.debug")
+	if len(effects) != 1 {
+		t.Fatalf("expected 1 effect, got %d", len(effects))
+	}
+	if effects[0].Command != "bd dolt stop && bd dolt start" {
+		t.Errorf("expected restart command, got %q", effects[0].Command)
+	}
+}
+
 func TestCheckConfigSetSideEffects_RoutingModeInvalid(t *testing.T) {
 	effects := checkConfigSetSideEffects("routing.mode", "bogus")
 	if len(effects) != 1 {

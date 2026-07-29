@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 func TestFindDatabasePathEnvVar(t *testing.T) {
@@ -569,6 +571,31 @@ func setupDetachedCommitBeadsWorktree(t *testing.T) (string, string, string) {
 	return filepath.Join(detachedWorktreeDir, ".beads"), mainBeadsDir, mainDoltDir
 }
 
+func setupRegularWorktreeRepo(t *testing.T) (string, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	mainRepoDir := filepath.Join(tmpDir, "main-repo")
+	worktreeDir := filepath.Join(tmpDir, "worktree")
+
+	if err := os.MkdirAll(mainRepoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	runGitInDir(t, mainRepoDir, "init")
+	runGitInDir(t, mainRepoDir, "config", "user.email", "test@example.com")
+	runGitInDir(t, mainRepoDir, "config", "user.name", "Test User")
+
+	if err := os.WriteFile(filepath.Join(mainRepoDir, "README.md"), []byte("# Test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitInDir(t, mainRepoDir, "add", "README.md")
+	runGitInDir(t, mainRepoDir, "commit", "-m", "Initial commit")
+	runGitInDir(t, mainRepoDir, "worktree", "add", worktreeDir, "HEAD")
+
+	return mainRepoDir, worktreeDir
+}
+
 func runGitInDir(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 
@@ -790,6 +817,157 @@ func TestFollowRedirect(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// captureStderr redirects os.Stderr for the duration of fn and returns
+// whatever was written to it.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing stderr pipe writer: %v", err)
+	}
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	return buf.String()
+}
+
+// TestFollowRedirect_IgnoresInvalidTarget is a regression test for
+// gastownhall/beads#4692: a redirect whose target directory exists but has
+// no metadata.json and no recognizable database is ignored (the source dir
+// is returned unchanged) and a warning naming both paths is emitted once on
+// stderr. docs/reference/advanced.md ("Database Redirects") documents this
+// contract: "The target directory must exist and contain a valid database."
+func TestFollowRedirect_IgnoresInvalidTarget(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "worktree", ".beads")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	targetDir := filepath.Join(tmpDir, "empty-target", ".beads")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// targetDir exists but has no metadata.json and no database.
+
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(targetDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var result string
+	stderr := captureStderr(t, func() {
+		result = FollowRedirect(sourceDir)
+	})
+
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	sourceResolved, _ := filepath.EvalSymlinks(sourceDir)
+	if resultResolved != sourceResolved {
+		t.Errorf("FollowRedirect() = %q, want source dir %q (invalid target should be ignored)", result, sourceDir)
+	}
+	if !strings.Contains(stderr, "no database or metadata.json") {
+		t.Errorf("expected an invalid-target warning on stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stderr, sourceDir) || !strings.Contains(stderr, targetDir) {
+		t.Errorf("expected warning to name both source and target paths, got: %q", stderr)
+	}
+}
+
+// TestFollowRedirect_FollowsWhenTargetHasDatabase documents that a redirect
+// to a target with a recognizable database (no metadata.json) is followed as
+// before -- the #4692 guard is about missing databases, not about source
+// mode.
+func TestFollowRedirect_FollowsWhenTargetHasDatabase(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "worktree", ".beads")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// No metadata.json in source (the common worktree-redirect-to-rig-root
+	// pattern).
+
+	targetDir := filepath.Join(tmpDir, "rig", ".beads")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(targetDir, "beads.db"), []byte{}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(targetDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := FollowRedirect(sourceDir)
+
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	targetResolved, _ := filepath.EvalSymlinks(targetDir)
+	if resultResolved != targetResolved {
+		t.Errorf("FollowRedirect() = %q, want target dir %q", result, targetDir)
+	}
+}
+
+// TestFollowRedirect_ServerModeSourceStillFollowsValidTarget is the
+// regression test for the cross-vendor review finding on this fix: a
+// server-mode source rig redirecting to a differently-configured, valid
+// shared Gas Town root (the fb51196f7 / docs "Database Redirects" topology)
+// must still be FOLLOWED. "Source is server-mode" must never, by itself,
+// cause a redirect to be ignored -- only target validity does.
+func TestFollowRedirect_ServerModeSourceStillFollowsValidTarget(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	sourceDir := filepath.Join(tmpDir, "lola", ".beads")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataJSON(t, sourceDir, &configfile.Config{
+		DoltMode:     "server",
+		DoltDatabase: "lola",
+	})
+
+	targetDir := filepath.Join(tmpDir, "town", ".beads")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeMetadataJSON(t, targetDir, &configfile.Config{
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+
+	if err := os.WriteFile(filepath.Join(sourceDir, "redirect"), []byte(targetDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := FollowRedirect(sourceDir)
+
+	resultResolved, _ := filepath.EvalSymlinks(result)
+	targetResolved, _ := filepath.EvalSymlinks(targetDir)
+	if resultResolved != targetResolved {
+		t.Errorf("FollowRedirect() = %q, want target dir %q (server-mode source must still follow a valid redirect)", result, targetDir)
 	}
 }
 
@@ -2135,4 +2313,141 @@ func TestFindDatabasePath_BareParentWorktreeFallback(t *testing.T) {
 	if resultResolved != bareDoltResolved {
 		t.Errorf("FindDatabasePath() = %q, want bare parent db %q", result, bareDoltDir)
 	}
+}
+
+func TestResolveBeadsDirForRepo(t *testing.T) {
+	t.Run("local beads dir preferred for plain repo path", func(t *testing.T) {
+		repoDir := t.TempDir()
+		localBeadsDir := filepath.Join(repoDir, ".beads")
+		if err := os.MkdirAll(localBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got := ResolveBeadsDirForRepo(repoDir)
+		want := utils.CanonicalizePath(localBeadsDir)
+		if got != want {
+			t.Fatalf("ResolveBeadsDirForRepo() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("regular worktree falls back to main repo beads dir", func(t *testing.T) {
+		mainRepoDir, worktreeDir := setupRegularWorktreeRepo(t)
+		mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+		if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got := ResolveBeadsDirForRepo(worktreeDir)
+		want := utils.CanonicalizePath(mainBeadsDir)
+		if got != want {
+			t.Fatalf("ResolveBeadsDirForRepo() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("worktree local beads dir overrides shared fallback", func(t *testing.T) {
+		mainRepoDir, worktreeDir := setupRegularWorktreeRepo(t)
+		mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+		if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		worktreeBeadsDir := filepath.Join(worktreeDir, ".beads")
+		if err := os.MkdirAll(worktreeBeadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		got := ResolveBeadsDirForRepo(worktreeDir)
+		want := utils.CanonicalizePath(worktreeBeadsDir)
+		if got != want {
+			t.Fatalf("ResolveBeadsDirForRepo() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("no beads anywhere falls back to local repo path", func(t *testing.T) {
+		repoDir := filepath.Join(t.TempDir(), "repo")
+		if err := os.MkdirAll(repoDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runGitInDir(t, repoDir, "init")
+		runGitInDir(t, repoDir, "config", "user.email", "test@example.com")
+		runGitInDir(t, repoDir, "config", "user.name", "Test User")
+
+		got := ResolveBeadsDirForRepo(repoDir)
+		want := filepath.Join(utils.CanonicalizePath(repoDir), ".beads")
+		if got != want {
+			t.Fatalf("ResolveBeadsDirForRepo() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestWorktreeFallbackBeadsDirForRepo(t *testing.T) {
+	t.Run("plain repo returns empty string", func(t *testing.T) {
+		repoDir := filepath.Join(t.TempDir(), "repo")
+		if err := os.MkdirAll(repoDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runGitInDir(t, repoDir, "init")
+		runGitInDir(t, repoDir, "config", "user.email", "test@example.com")
+		runGitInDir(t, repoDir, "config", "user.name", "Test User")
+
+		got := worktreeFallbackBeadsDirForRepo(repoDir)
+		if got != "" {
+			t.Fatalf("worktreeFallbackBeadsDirForRepo() = %q, want empty string", got)
+		}
+	})
+
+	t.Run("regular worktree uses parent repo beads dir", func(t *testing.T) {
+		mainRepoDir, worktreeDir := setupRegularWorktreeRepo(t)
+
+		got := worktreeFallbackBeadsDirForRepo(worktreeDir)
+		mainRepoResolved, err := filepath.EvalSymlinks(mainRepoDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join(mainRepoResolved, ".beads")
+		if got != want {
+			t.Fatalf("worktreeFallbackBeadsDirForRepo() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("bare-parent worktree uses common-dir beads dir", func(t *testing.T) {
+		bareDir, worktreeDir := setupBareParentWorktree(t)
+
+		got := worktreeFallbackBeadsDirForRepo(worktreeDir)
+		bareDirResolved, err := filepath.EvalSymlinks(bareDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join(bareDirResolved, ".beads")
+		if got != want {
+			t.Fatalf("worktreeFallbackBeadsDirForRepo() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestGitPathForRepo(t *testing.T) {
+	repoDir := t.TempDir()
+
+	t.Run("empty path returns empty", func(t *testing.T) {
+		if got := gitPathForRepo(repoDir, ""); got != "" {
+			t.Fatalf("gitPathForRepo() = %q, want empty string", got)
+		}
+	})
+
+	t.Run("relative path is resolved under repo", func(t *testing.T) {
+		got := gitPathForRepo(repoDir, ".git/worktrees/feature")
+		want := utils.CanonicalizePath(filepath.Join(repoDir, ".git/worktrees/feature"))
+		if got != want {
+			t.Fatalf("gitPathForRepo() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("absolute path is canonicalized unchanged", func(t *testing.T) {
+		absPath := filepath.Join(repoDir, ".git")
+		got := gitPathForRepo(repoDir, absPath)
+		want := utils.CanonicalizePath(absPath)
+		if got != want {
+			t.Fatalf("gitPathForRepo() = %q, want %q", got, want)
+		}
+	})
 }

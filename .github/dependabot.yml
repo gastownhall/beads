@@ -5,10 +5,39 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    open-pull-requests-limit: 5
+    # Headroom above the group count: grouped PRs count as one, but SemVer-major
+    # singles plus the testcontainers group plus a migration window with old
+    # singleton PRs still open must not wedge at the limit (dependabot opens no
+    # new version PR while the limit is saturated).
+    open-pull-requests-limit: 10
     labels:
       - "dependencies"
       - "go"
+    # Group minor/patch Go bumps into a single PR. Every gomod bump rewrites
+    # go.sum, which invalidates the nix vendorHash in default.nix; N singleton
+    # PRs mean N vendorHash bot-commits and N '@dependabot recreate' rounds
+    # after each merge (see update-vendor-hash.yml caveat). One grouped PR
+    # gets one bot-computed hash. SemVer-majors stay separate so they cannot
+    # block the routine group (note: pre-1.0 modules ship breaking changes as
+    # "minor" bumps, which do ride in the group — dependabot classifies by
+    # version arithmetic only).
+    #
+    # testcontainers-go and its modules/dolt child must bump in lockstep
+    # (the module requires a matching root), and the project pins 0.x
+    # releases with routine breaking changes — so they get their own group:
+    # always coupled together, never blocking go-deps.
+    groups:
+      testcontainers:
+        applies-to: version-updates
+        patterns:
+          - "github.com/testcontainers/testcontainers-go*"
+      go-deps:
+        applies-to: version-updates
+        exclude-patterns:
+          - "github.com/testcontainers/testcontainers-go*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -19,9 +48,14 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+    groups:
+      actions:
+        applies-to: version-updates
+        patterns:
+          - "*"
 
   # Python (beads-mcp)
-  - package-ecosystem: "pip"
+  - package-ecosystem: "uv"
     directory: "/integrations/beads-mcp"
     schedule:
       interval: "weekly"
@@ -30,3 +64,8 @@ updates:
       - "dependencies"
       - "python"
       - "mcp"
+    groups:
+      beads-mcp-python:
+        applies-to: version-updates
+        patterns:
+          - "*"

@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -15,22 +16,29 @@ import (
 
 const storageScopeName = "github.com/steveyegge/beads/storage"
 
-// InstrumentedStorage wraps storage.Storage with OTel tracing and metrics.
-// Every method gets a span and is counted in bd.storage.* metrics.
-// Use WrapStorage to create one; it returns the original store unchanged when
-// telemetry is disabled.
+// InstrumentedStorage wraps storage.DoltStorage with OTel tracing and metrics.
+// Methods on the core Storage interface are overridden to emit bd.storage.*
+// counters, duration histograms, and per-operation spans. Methods on the
+// DoltStorage capability sub-interfaces (VersionControl, HistoryViewer,
+// SyncStore, etc.) pass through to the embedded inner store unchanged —
+// those operations already have their own dolt.* spans inside the dolt
+// implementation, so wrapping them here would double-count.
+//
+// Use WrapStorage to construct one; it returns the original store unchanged
+// when telemetry is disabled.
 type InstrumentedStorage struct {
-	inner      storage.Storage
-	tracer     trace.Tracer
-	ops        metric.Int64Counter
-	dur        metric.Float64Histogram
-	errs       metric.Int64Counter
-	issueGauge metric.Int64Gauge
+	storage.DoltStorage // passthrough for capability methods we don't instrument
+	inner               storage.DoltStorage
+	tracer              trace.Tracer
+	ops                 metric.Int64Counter
+	dur                 metric.Float64Histogram
+	errs                metric.Int64Counter
+	issueGauge          metric.Int64Gauge
 }
 
 // WrapStorage returns s decorated with OTel instrumentation.
 // When telemetry is disabled, s is returned as-is with zero overhead.
-func WrapStorage(s storage.Storage) storage.Storage {
+func WrapStorage(s storage.DoltStorage) storage.DoltStorage {
 	if !Enabled() {
 		return s
 	}
@@ -49,14 +57,19 @@ func WrapStorage(s storage.Storage) storage.Storage {
 		metric.WithDescription("Current number of issues by status (snapshot from GetStatistics)"),
 	)
 	return &InstrumentedStorage{
-		inner:      s,
-		tracer:     Tracer(storageScopeName),
-		ops:        ops,
-		dur:        dur,
-		errs:       errs,
-		issueGauge: issueGauge,
+		DoltStorage: s,
+		inner:       s,
+		tracer:      Tracer(storageScopeName),
+		ops:         ops,
+		dur:         dur,
+		errs:        errs,
+		issueGauge:  issueGauge,
 	}
 }
+
+// Unwrap satisfies storage.Unwrapper so storage.UnwrapStore can peel the
+// instrumentation layer for optional-interface type assertions.
+func (s *InstrumentedStorage) Unwrap() storage.DoltStorage { return s.inner }
 
 // op starts a span and records a metric for the named storage operation.
 func (s *InstrumentedStorage) op(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span, time.Time) {
@@ -140,6 +153,18 @@ func (s *InstrumentedStorage) UpdateIssue(ctx context.Context, id string, update
 	return err
 }
 
+func (s *InstrumentedStorage) UpdateIssueChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts storage.UpdateIssueOptions) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", id),
+		attribute.String("bd.actor", actor),
+		attribute.Int("bd.update.count", len(updates)),
+	}
+	ctx, span, t := s.op(ctx, "UpdateIssueChecked", attrs...)
+	err := s.inner.UpdateIssueChecked(ctx, id, updates, actor, opts)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
 func (s *InstrumentedStorage) ReopenIssue(ctx context.Context, id string, reason string, actor string) error {
 	attrs := []attribute.KeyValue{
 		attribute.String("bd.issue.id", id),
@@ -147,6 +172,30 @@ func (s *InstrumentedStorage) ReopenIssue(ctx context.Context, id string, reason
 	}
 	ctx, span, t := s.op(ctx, "ReopenIssue", attrs...)
 	err := s.inner.ReopenIssue(ctx, id, reason, actor)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
+func (s *InstrumentedStorage) UnclaimIssue(ctx context.Context, id string, actor string, force bool) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", id),
+		attribute.String("bd.actor", actor),
+		attribute.Bool("bd.force", force),
+	}
+	ctx, span, t := s.op(ctx, "UnclaimIssue", attrs...)
+	err := s.inner.UnclaimIssue(ctx, id, actor, force)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
+func (s *InstrumentedStorage) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", id),
+		attribute.String("bd.actor", actor),
+		attribute.String("bd.issue.expected_assignee", expectedAssignee),
+	}
+	ctx, span, t := s.op(ctx, "UnclaimIssueIfAssignee", attrs...)
+	err := s.inner.UnclaimIssueIfAssignee(ctx, id, actor, expectedAssignee)
 	s.done(ctx, span, t, err, attrs...)
 	return err
 }
@@ -174,6 +223,17 @@ func (s *InstrumentedStorage) CloseIssue(ctx context.Context, id string, reason 
 	return err
 }
 
+func (s *InstrumentedStorage) CloseIssueChecked(ctx context.Context, id string, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.issue.id", id),
+		attribute.String("bd.actor", actor),
+	}
+	ctx, span, t := s.op(ctx, "CloseIssueChecked", attrs...)
+	res, err := s.inner.CloseIssueChecked(ctx, id, actor, opts)
+	s.done(ctx, span, t, err, attrs...)
+	return res, err
+}
+
 func (s *InstrumentedStorage) DeleteIssue(ctx context.Context, id string) error {
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", id)}
 	ctx, span, t := s.op(ctx, "DeleteIssue", attrs...)
@@ -193,6 +253,28 @@ func (s *InstrumentedStorage) SearchIssues(ctx context.Context, query string, fi
 	return issues, err
 }
 
+func (s *InstrumentedStorage) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
+	ctx, span, t := s.op(ctx, "SearchIssuesWithCounts", attrs...)
+	v, err := s.inner.SearchIssuesWithCounts(ctx, query, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(v)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return v, err
+}
+
+func (s *InstrumentedStorage) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.query", query)}
+	ctx, span, t := s.op(ctx, "SearchIssueIDs", attrs...)
+	ids, err := s.inner.SearchIssueIDs(ctx, query, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(ids)))
+	}
+	s.done(ctx, span, t, err, attrs...)
+	return ids, err
+}
+
 // ── Dependencies ────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
@@ -207,6 +289,18 @@ func (s *InstrumentedStorage) AddDependency(ctx context.Context, dep *types.Depe
 	return err
 }
 
+func (s *InstrumentedStorage) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, opts storage.DependencyAddOptions) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.dep.from", dep.IssueID),
+		attribute.String("bd.dep.to", dep.DependsOnID),
+		attribute.String("bd.dep.type", string(dep.Type)),
+	}
+	ctx, span, t := s.op(ctx, "AddDependency", attrs...)
+	err := s.inner.AddDependencyWithOptions(ctx, dep, actor, opts)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
 func (s *InstrumentedStorage) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
 	attrs := []attribute.KeyValue{
 		attribute.String("bd.dep.from", issueID),
@@ -214,6 +308,17 @@ func (s *InstrumentedStorage) RemoveDependency(ctx context.Context, issueID, dep
 	}
 	ctx, span, t := s.op(ctx, "RemoveDependency", attrs...)
 	err := s.inner.RemoveDependency(ctx, issueID, dependsOnID, actor)
+	s.done(ctx, span, t, err, attrs...)
+	return err
+}
+
+func (s *InstrumentedStorage) RemoveDependencyWithOptions(ctx context.Context, issueID, dependsOnID string, actor string, opts storage.DependencyRemoveOptions) error {
+	attrs := []attribute.KeyValue{
+		attribute.String("bd.dep.from", issueID),
+		attribute.String("bd.dep.to", dependsOnID),
+	}
+	ctx, span, t := s.op(ctx, "RemoveDependency", attrs...)
+	err := s.inner.RemoveDependencyWithOptions(ctx, issueID, dependsOnID, actor, opts)
 	s.done(ctx, span, t, err, attrs...)
 	return err
 }
@@ -313,6 +418,16 @@ func (s *InstrumentedStorage) GetReadyWork(ctx context.Context, filter types.Wor
 	return v, err
 }
 
+func (s *InstrumentedStorage) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
+	ctx, span, t := s.op(ctx, "GetReadyWorkWithCounts")
+	v, err := s.inner.GetReadyWorkWithCounts(ctx, filter)
+	if err == nil {
+		span.SetAttributes(attribute.Int("bd.result.count", len(v)))
+	}
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
 func (s *InstrumentedStorage) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	ctx, span, t := s.op(ctx, "GetBlockedIssues")
 	v, err := s.inner.GetBlockedIssues(ctx, filter)
@@ -347,6 +462,14 @@ func (s *InstrumentedStorage) GetIssueComments(ctx context.Context, issueID stri
 	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
 	ctx, span, t := s.op(ctx, "GetIssueComments", attrs...)
 	v, err := s.inner.GetIssueComments(ctx, issueID)
+	s.done(ctx, span, t, err, attrs...)
+	return v, err
+}
+
+func (s *InstrumentedStorage) GetIssueCommentsPage(ctx context.Context, issueID string, after storage.CommentPageCursor, limit int) ([]*types.Comment, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "GetIssueCommentsPage", attrs...)
+	v, err := s.inner.GetIssueCommentsPage(ctx, issueID, after, limit)
 	s.done(ctx, span, t, err, attrs...)
 	return v, err
 }
@@ -445,6 +568,126 @@ func (s *InstrumentedStorage) ListWisps(ctx context.Context, filter types.WispFi
 	return v, err
 }
 
+// ── Streaming iterators ─────────────────────────────────────────────────────
+//
+// Iter* methods record a single span covering iterator CONSTRUCTION (the
+// SQL query setup). Per-row work is NOT traced — the returned iterator is
+// the inner store's iterator, unwrapped. Adding per-row tracing would
+// require a wrapper type that ends a long-lived span on Close; that
+// optimization is intentionally deferred until callers need it.
+
+func (s *InstrumentedStorage) IterIssues(ctx context.Context, query string, filter types.IssueFilter) (storage.Iter[types.Issue], error) {
+	ctx, span, t := s.op(ctx, "IterIssues")
+	it, err := s.inner.IterIssues(ctx, query, filter)
+	s.done(ctx, span, t, err)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterDependentsWithMetadata(ctx context.Context, issueID string) (storage.Iter[types.IssueWithDependencyMetadata], error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "IterDependentsWithMetadata", attrs...)
+	it, err := s.inner.IterDependentsWithMetadata(ctx, issueID)
+	s.done(ctx, span, t, err, attrs...)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterDependenciesWithMetadata(ctx context.Context, issueID string) (storage.Iter[types.IssueWithDependencyMetadata], error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "IterDependenciesWithMetadata", attrs...)
+	it, err := s.inner.IterDependenciesWithMetadata(ctx, issueID)
+	s.done(ctx, span, t, err, attrs...)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterIssueComments(ctx context.Context, issueID string) (storage.Iter[types.Comment], error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "IterIssueComments", attrs...)
+	it, err := s.inner.IterIssueComments(ctx, issueID)
+	s.done(ctx, span, t, err, attrs...)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterEvents(ctx context.Context, issueID string, limit int) (storage.Iter[types.Event], error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "IterEvents", attrs...)
+	it, err := s.inner.IterEvents(ctx, issueID, limit)
+	s.done(ctx, span, t, err, attrs...)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterAllEventsSince(ctx context.Context, since time.Time) (storage.Iter[types.Event], error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.since", since.Format(time.RFC3339))}
+	ctx, span, t := s.op(ctx, "IterAllEventsSince", attrs...)
+	it, err := s.inner.IterAllEventsSince(ctx, since)
+	s.done(ctx, span, t, err, attrs...)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterReadyWork(ctx context.Context, filter types.WorkFilter) (storage.Iter[types.Issue], error) {
+	ctx, span, t := s.op(ctx, "IterReadyWork")
+	it, err := s.inner.IterReadyWork(ctx, filter)
+	s.done(ctx, span, t, err)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterBlockedIssues(ctx context.Context, filter types.WorkFilter) (storage.Iter[types.BlockedIssue], error) {
+	ctx, span, t := s.op(ctx, "IterBlockedIssues")
+	it, err := s.inner.IterBlockedIssues(ctx, filter)
+	s.done(ctx, span, t, err)
+	return it, err
+}
+
+func (s *InstrumentedStorage) IterWisps(ctx context.Context, filter types.WispFilter) (storage.Iter[types.Issue], error) {
+	ctx, span, t := s.op(ctx, "IterWisps")
+	it, err := s.inner.IterWisps(ctx, filter)
+	s.done(ctx, span, t, err)
+	return it, err
+}
+
+// ── Count* aggregates ─────────────────────────────────────────────────────────
+
+func (s *InstrumentedStorage) CountIssues(ctx context.Context, query string, filter types.IssueFilter) (int64, error) {
+	ctx, span, t := s.op(ctx, "CountIssues")
+	v, err := s.inner.CountIssues(ctx, query, filter)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) CountIssuesByGroup(ctx context.Context, filter types.IssueFilter, groupBy string) (map[string]int, error) {
+	ctx, span, t := s.op(ctx, "CountIssuesByGroup")
+	v, err := s.inner.CountIssuesByGroup(ctx, filter, groupBy)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) CountDependents(ctx context.Context, issueID string) (int64, error) {
+	ctx, span, t := s.op(ctx, "CountDependents", attribute.String("issue.id", issueID))
+	v, err := s.inner.CountDependents(ctx, issueID)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) CountDependencies(ctx context.Context, issueID string) (int64, error) {
+	ctx, span, t := s.op(ctx, "CountDependencies", attribute.String("issue.id", issueID))
+	v, err := s.inner.CountDependencies(ctx, issueID)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) CountIssueComments(ctx context.Context, issueID string) (int64, error) {
+	ctx, span, t := s.op(ctx, "CountIssueComments", attribute.String("issue.id", issueID))
+	v, err := s.inner.CountIssueComments(ctx, issueID)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
+func (s *InstrumentedStorage) CountEvents(ctx context.Context, issueID string, limit int) (int64, error) {
+	ctx, span, t := s.op(ctx, "CountEvents", attribute.String("issue.id", issueID))
+	v, err := s.inner.CountEvents(ctx, issueID, limit)
+	s.done(ctx, span, t, err)
+	return v, err
+}
+
 // ── MergeSlot ────────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) MergeSlotCreate(ctx context.Context, actor string) (*types.Issue, error) {
@@ -498,8 +741,21 @@ func (s *InstrumentedStorage) SlotClear(ctx context.Context, issueID, key, actor
 	return err
 }
 
+func (s *InstrumentedStorage) MergeMetadata(ctx context.Context, issueID, key string, value json.RawMessage, actor string) error {
+	ctx, span, t := s.op(ctx, "MergeMetadata", attribute.String("slot.key", key))
+	err := s.inner.MergeMetadata(ctx, issueID, key, value, actor)
+	s.done(ctx, span, t, err)
+	return err
+}
+
 // ── Lifecycle ────────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) Close() error {
 	return s.inner.Close()
 }
+
+// Compile-time interface satisfaction.
+var (
+	_ storage.DoltStorage = (*InstrumentedStorage)(nil)
+	_ storage.Unwrapper   = (*InstrumentedStorage)(nil)
+)

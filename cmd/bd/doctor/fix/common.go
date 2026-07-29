@@ -14,6 +14,11 @@ import (
 // This prevents fork bombs when tests call functions that execute bd subcommands.
 var ErrTestBinary = fmt.Errorf("running as test binary - cannot execute bd subcommands")
 
+type workspaceBeadsDirs struct {
+	local    string
+	resolved string
+}
+
 func newBdCmd(bdBinary string, args ...string) *exec.Cmd {
 	cmd := exec.Command(bdBinary, args...) // #nosec G204 -- bdBinary from validated executable path
 	return cmd
@@ -54,19 +59,43 @@ func getBdBinary() (string, error) {
 // validateBeadsWorkspace ensures the path is a valid beads workspace before
 // attempting any fix operations. This prevents path traversal attacks.
 func validateBeadsWorkspace(path string) error {
-	// Convert to absolute path
+	_, err := resolveWorkspaceBeadsDirs(path)
+	return err
+}
+
+func resolveWorkspaceBeadsDirs(path string) (workspaceBeadsDirs, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return fmt.Errorf("invalid path: %w", err)
+		return workspaceBeadsDirs{}, fmt.Errorf("invalid path: %w", err)
 	}
 
-	// Check for .beads directory
-	beadsDir := filepath.Join(absPath, ".beads")
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-		return fmt.Errorf("not a beads workspace: .beads directory not found at %s", absPath)
+	dirs := workspaceBeadsDirs{
+		local:    filepath.Join(absPath, ".beads"),
+		resolved: beads.ResolveBeadsDirForRepo(absPath),
 	}
 
-	return nil
+	if info, err := os.Stat(dirs.resolved); err != nil || !info.IsDir() {
+		return workspaceBeadsDirs{}, fmt.Errorf("not a beads workspace: .beads directory not found for %s", absPath)
+	}
+
+	return dirs, nil
+}
+
+func resolvedWorkspaceBeadsDir(path string) (string, error) {
+	dirs, err := resolveWorkspaceBeadsDirs(path)
+	if err != nil {
+		return "", err
+	}
+
+	return dirs.resolved, nil
+}
+
+func localWorkspaceBeadsDir(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("invalid path: %w", err)
+	}
+	return filepath.Join(absPath, ".beads"), nil
 }
 
 // safeWorkspacePath resolves relPath within the workspace root and ensures it

@@ -6,16 +6,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// requireServerMode returns an error if bd is running in embedded mode.
+// Used by admin subcommands to guard against embedded-mode execution.
+// This must be called inside RunE (after store init), not in PersistentPreRunE,
+// because !usesSQLServer() reads cmdCtx.ServerMode which is only populated
+// after main.go's PersistentPreRun completes (cobra runs child PreRunE before
+// parent PreRun, so the check fires too early if placed on adminCmd itself).
+func requireServerMode(cmdName string) error {
+	if !usesSQLServer() {
+		return fmt.Errorf("'bd admin %s' is not yet supported in embedded mode", cmdName)
+	}
+	return nil
+}
+
 var adminCmd = &cobra.Command{
 	Use:     "admin",
 	GroupID: "advanced",
 	Short:   "Administrative commands for database maintenance",
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		if isEmbeddedMode() {
-			return fmt.Errorf("'bd admin' is not yet supported in embedded mode")
-		}
-		return nil
-	},
 	Long: `Administrative commands for beads database maintenance.
 
 These commands are for advanced users and should be used carefully:

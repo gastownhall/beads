@@ -27,53 +27,82 @@ import (
 type HookFiringStore struct {
 	DoltStorage             // embed for passthrough of non-overridden methods
 	inner       DoltStorage // the real store
-	runner      *hooks.Runner
+	runner      hookRunner
+}
+
+type hookRunner interface {
+	Run(event string, issue *types.Issue)
 }
 
 // NewHookFiringStore wraps store with automatic hook firing.
 // If runner is nil, hooks are silently skipped (passthrough only).
 func NewHookFiringStore(store DoltStorage, runner *hooks.Runner) *HookFiringStore {
+	var r hookRunner
+	if runner != nil {
+		r = runner
+	}
 	return &HookFiringStore{
 		DoltStorage: store,
 		inner:       store,
-		runner:      runner,
+		runner:      r,
 	}
 }
 
-// Inner returns the underlying store, useful for type assertions
-// (e.g., StoreLocator, RawDBAccessor).
-func (h *HookFiringStore) Inner() DoltStorage { return h.inner }
+// Unwrapper is implemented by storage decorators that wrap an inner
+// DoltStorage. UnwrapStore uses this to peel arbitrary chains of
+// decorators (e.g. HookFiringStore wrapping telemetry.InstrumentedStorage
+// wrapping the concrete dolt store) so type assertions to optional
+// interfaces (StoreLocator, BackupStore, etc.) reach the concrete store.
+type Unwrapper interface {
+	Unwrap() DoltStorage
+}
 
-// UnwrapStore returns the underlying concrete store if s is a
-// HookFiringStore decorator, otherwise returns s unchanged.
-// Use this before type assertions to optional interfaces
-// (StoreLocator, BackupStore, Flattener, etc.) so the assertion
-// reaches the concrete store rather than the decorator.
+// Unwrap returns the underlying store, satisfying Unwrapper.
+func (h *HookFiringStore) Unwrap() DoltStorage { return h.inner }
+
+// UnwrapStore peels back any chain of Unwrapper decorators and returns
+// the innermost store. Use this before type-asserting to optional
+// interfaces (StoreLocator, BackupStore, Flattener, RawDBAccessor, etc.)
+// so the assertion reaches the concrete store rather than a decorator.
 func UnwrapStore(s DoltStorage) DoltStorage {
-	if h, ok := s.(*HookFiringStore); ok {
-		return h.inner
+	for {
+		u, ok := s.(Unwrapper)
+		if !ok {
+			return s
+		}
+		s = u.Unwrap()
 	}
-	return s
 }
 
 // ── Issue mutations ─────────────────────────────────────────────────
 
-// CreateIssue creates an issue and fires on_create.
+// CreateIssue creates an issue and fires on_create plus synthetic on_update
+// hooks for initial labels, matching the old post-create AddLabel behavior.
 func (h *HookFiringStore) CreateIssue(ctx context.Context, issue *types.Issue, actor string) error {
 	if err := h.inner.CreateIssue(ctx, issue, actor); err != nil {
 		return err
 	}
-	h.fireHook(hooks.EventCreate, issue)
+	for _, p := range createHookEvents(issue) {
+		h.fireHook(p.event, p.issue)
+	}
 	return nil
 }
 
-// CreateIssues creates multiple issues and fires on_create for each.
+// CreateIssues creates multiple issues and fires create-time hooks for each,
+// followed by dependency update hooks for batch-persisted dependencies.
 func (h *HookFiringStore) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
 	if err := h.inner.CreateIssues(ctx, issues, actor); err != nil {
 		return err
 	}
 	for _, issue := range issues {
-		h.fireHook(hooks.EventCreate, issue)
+		for _, p := range createHookEvents(issue) {
+			h.fireHook(p.event, p.issue)
+		}
+	}
+	if h.runner != nil {
+		for _, p := range dependencyHookEvents(ctx, issues, h.inner.GetIssue, h.inner.GetDependencyRecords) {
+			h.fireHook(p.event, p.issue)
+		}
 	}
 	return nil
 }
@@ -81,6 +110,17 @@ func (h *HookFiringStore) CreateIssues(ctx context.Context, issues []*types.Issu
 // UpdateIssue updates an issue and fires on_update.
 func (h *HookFiringStore) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	if err := h.inner.UpdateIssue(ctx, id, updates, actor); err != nil {
+		return err
+	}
+	h.fireHookByID(ctx, hooks.EventUpdate, id)
+	return nil
+}
+
+// UpdateIssueChecked applies the guarded update (optional ExpectedVersion CAS)
+// and fires on_update on success — mirroring UpdateIssue. A version mismatch
+// (ErrVersionMismatch) or any other error returns without firing.
+func (h *HookFiringStore) UpdateIssueChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts UpdateIssueOptions) error {
+	if err := h.inner.UpdateIssueChecked(ctx, id, updates, actor, opts); err != nil {
 		return err
 	}
 	h.fireHookByID(ctx, hooks.EventUpdate, id)
@@ -114,6 +154,19 @@ func (h *HookFiringStore) CloseIssue(ctx context.Context, id string, reason stri
 	return nil
 }
 
+// CloseIssueChecked closes an issue under the is_blocked guard and fires
+// on_close on success — mirroring CloseIssue, this includes the idempotent
+// no-op when the issue was already closed (res.Unchanged). A guard rejection
+// (ErrCloseBlocked) or any other error returns without firing.
+func (h *HookFiringStore) CloseIssueChecked(ctx context.Context, id string, actor string, opts CloseIssueOptions) (CloseIssueResult, error) {
+	res, err := h.inner.CloseIssueChecked(ctx, id, actor, opts)
+	if err != nil {
+		return res, err
+	}
+	h.fireHookByID(ctx, hooks.EventClose, id)
+	return res, nil
+}
+
 // ── Dependency mutations ────────────────────────────────────────────
 
 // AddDependency adds a dependency and fires on_update for the issue.
@@ -121,7 +174,16 @@ func (h *HookFiringStore) AddDependency(ctx context.Context, dep *types.Dependen
 	if err := h.inner.AddDependency(ctx, dep, actor); err != nil {
 		return err
 	}
-	h.fireHookByID(ctx, hooks.EventUpdate, dep.IssueID)
+	h.fireDependencyHookByID(ctx, dep.IssueID)
+	return nil
+}
+
+// AddDependencyWithOptions adds a dependency with options and fires on_update.
+func (h *HookFiringStore) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, opts DependencyAddOptions) error {
+	if err := h.inner.AddDependencyWithOptions(ctx, dep, actor, opts); err != nil {
+		return err
+	}
+	h.fireDependencyHookByID(ctx, dep.IssueID)
 	return nil
 }
 
@@ -130,7 +192,16 @@ func (h *HookFiringStore) RemoveDependency(ctx context.Context, issueID, depends
 	if err := h.inner.RemoveDependency(ctx, issueID, dependsOnID, actor); err != nil {
 		return err
 	}
-	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
+	h.fireDependencyHookByID(ctx, issueID)
+	return nil
+}
+
+// RemoveDependencyWithOptions removes a dependency with options and fires on_update.
+func (h *HookFiringStore) RemoveDependencyWithOptions(ctx context.Context, issueID, dependsOnID string, actor string, opts DependencyRemoveOptions) error {
+	if err := h.inner.RemoveDependencyWithOptions(ctx, issueID, dependsOnID, actor, opts); err != nil {
+		return err
+	}
+	h.fireDependencyHookByID(ctx, issueID)
 	return nil
 }
 
@@ -208,12 +279,201 @@ func (h *HookFiringStore) fireHookByID(ctx context.Context, event, id string) {
 	h.runner.Run(event, issue)
 }
 
+func (h *HookFiringStore) fireDependencyHookByID(ctx context.Context, id string) {
+	if h.runner == nil {
+		return
+	}
+	issue, err := dependencySnapshot(ctx, id, h.inner.GetIssue, h.inner.GetDependencyRecords)
+	if err != nil {
+		return
+	}
+	h.runner.Run(hooks.EventUpdate, issue)
+}
+
 // ── Hook tracking transaction ───────────────────────────────────────
 
 // pendingHook records a hook to fire after transaction commit.
 type pendingHook struct {
 	event string
 	issue *types.Issue
+}
+
+func createHookEvents(issue *types.Issue) []pendingHook {
+	if issue == nil {
+		return nil
+	}
+	if len(issue.Labels) == 0 {
+		return []pendingHook{{event: hooks.EventCreate, issue: cloneIssueForHook(issue)}}
+	}
+
+	// Initial labels are persisted before hooks fire, but the hook stream keeps
+	// the legacy post-create AddLabel shape: on_create receives a label-free
+	// snapshot, then on_update receives cumulative synthetic label snapshots.
+	// Hook implementations should use the issue payload for that sequence; live
+	// store reads during these synthetic events observe the fully persisted issue.
+	labels := make([]string, 0, len(issue.Labels))
+	seen := make(map[string]struct{}, len(issue.Labels))
+	for _, label := range issue.Labels {
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		labels = append(labels, label)
+	}
+	createSnapshot := cloneIssueForHook(issue)
+	createSnapshot.Labels = nil
+	events := []pendingHook{{event: hooks.EventCreate, issue: createSnapshot}}
+	for i := range labels {
+		updateSnapshot := cloneIssueForHook(issue)
+		updateSnapshot.Labels = append([]string(nil), labels[:i+1]...)
+		events = append(events, pendingHook{event: hooks.EventUpdate, issue: updateSnapshot})
+	}
+	return events
+}
+
+type issueGetter func(context.Context, string) (*types.Issue, error)
+type dependencyRecordsGetter func(context.Context, string) ([]*types.Dependency, error)
+
+func dependencyHookEvents(ctx context.Context, issues []*types.Issue, get issueGetter, getDeps dependencyRecordsGetter) []pendingHook {
+	var events []pendingHook
+	states := make(map[string]*dependencyHookState)
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		for _, dep := range issue.Dependencies {
+			if dep == nil {
+				continue
+			}
+			issueID := dep.IssueID
+			if issueID == "" {
+				issueID = issue.ID
+			}
+			if issueID == "" {
+				continue
+			}
+			state, ok := states[issueID]
+			if !ok {
+				snapshot, err := dependencySnapshot(ctx, issueID, get, getDeps)
+				if err != nil {
+					continue
+				}
+				state = &dependencyHookState{
+					snapshot: snapshot,
+					used:     make([]bool, len(snapshot.Dependencies)),
+				}
+				states[issueID] = state
+			}
+			persisted := state.take(dep, issueID)
+			if persisted == nil {
+				continue
+			}
+			state.emitted = append(state.emitted, persisted)
+			updateSnapshot := cloneIssueForHook(state.snapshot)
+			updateSnapshot.Dependencies = cloneDependenciesForHook(state.emitted)
+			events = append(events, pendingHook{event: hooks.EventUpdate, issue: updateSnapshot})
+		}
+	}
+	return events
+}
+
+func dependencySnapshot(ctx context.Context, issueID string, get issueGetter, getDeps dependencyRecordsGetter) (*types.Issue, error) {
+	snapshot, err := get(ctx, issueID)
+	if err != nil {
+		return nil, err
+	}
+	deps, err := getDeps(ctx, issueID)
+	if err != nil {
+		return nil, err
+	}
+	snapshot.Dependencies = cloneDependenciesForHook(deps)
+	return snapshot, nil
+}
+
+type dependencyHookState struct {
+	snapshot *types.Issue
+	used     []bool
+	emitted  []*types.Dependency
+}
+
+func (s *dependencyHookState) take(requested *types.Dependency, issueID string) *types.Dependency {
+	for i, dep := range s.snapshot.Dependencies {
+		if s.used[i] || !sameDependency(dep, requested, issueID) {
+			continue
+		}
+		s.used[i] = true
+		return dep
+	}
+	return nil
+}
+
+func sameDependency(persisted, requested *types.Dependency, issueID string) bool {
+	if persisted == nil || requested == nil {
+		return false
+	}
+	requestedIssueID := requested.IssueID
+	if requestedIssueID == "" {
+		requestedIssueID = issueID
+	}
+	return persisted.IssueID == requestedIssueID &&
+		persisted.DependsOnID == requested.DependsOnID &&
+		persisted.Type == requested.Type
+}
+
+func cloneIssueForHook(issue *types.Issue) *types.Issue {
+	if issue == nil {
+		return nil
+	}
+	clone := *issue
+	clone.EstimatedMinutes = clonePtr(issue.EstimatedMinutes)
+	clone.StartedAt = clonePtr(issue.StartedAt)
+	clone.ClosedAt = clonePtr(issue.ClosedAt)
+	clone.DueAt = clonePtr(issue.DueAt)
+	clone.DeferUntil = clonePtr(issue.DeferUntil)
+	clone.LeaseExpiresAt = clonePtr(issue.LeaseExpiresAt)
+	clone.HeartbeatAt = clonePtr(issue.HeartbeatAt)
+	clone.ExternalRef = clonePtr(issue.ExternalRef)
+	clone.Labels = append([]string(nil), issue.Labels...)
+	clone.Metadata = append([]byte(nil), issue.Metadata...)
+	clone.CompactedAt = clonePtr(issue.CompactedAt)
+	clone.CompactedAtCommit = clonePtr(issue.CompactedAtCommit)
+	clone.Dependencies = cloneDependenciesForHook(issue.Dependencies)
+	if issue.Comments != nil {
+		clone.Comments = make([]*types.Comment, len(issue.Comments))
+		for i, comment := range issue.Comments {
+			if comment == nil {
+				continue
+			}
+			commentCopy := *comment
+			clone.Comments[i] = &commentCopy
+		}
+	}
+	clone.BondedFrom = append([]types.BondRef(nil), issue.BondedFrom...)
+	clone.Waiters = append([]string(nil), issue.Waiters...)
+	return &clone
+}
+
+func clonePtr[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
+}
+
+func cloneDependenciesForHook(deps []*types.Dependency) []*types.Dependency {
+	if deps == nil {
+		return nil
+	}
+	cloned := make([]*types.Dependency, len(deps))
+	for i, dep := range deps {
+		if dep == nil {
+			continue
+		}
+		depCopy := *dep
+		cloned[i] = &depCopy
+	}
+	return cloned
 }
 
 // hookTrackingTransaction wraps a Transaction, recording mutations
@@ -227,7 +487,7 @@ func (t *hookTrackingTransaction) CreateIssue(ctx context.Context, issue *types.
 	if err := t.Transaction.CreateIssue(ctx, issue, actor); err != nil {
 		return err
 	}
-	t.pending = append(t.pending, pendingHook{hooks.EventCreate, issue})
+	t.pending = append(t.pending, createHookEvents(issue)...)
 	return nil
 }
 
@@ -236,8 +496,9 @@ func (t *hookTrackingTransaction) CreateIssues(ctx context.Context, issues []*ty
 		return err
 	}
 	for _, issue := range issues {
-		t.pending = append(t.pending, pendingHook{hooks.EventCreate, issue})
+		t.pending = append(t.pending, createHookEvents(issue)...)
 	}
+	t.pending = append(t.pending, dependencyHookEvents(ctx, issues, t.Transaction.GetIssue, t.Transaction.GetDependencyRecords)...)
 	return nil
 }
 
@@ -263,20 +524,28 @@ func (t *hookTrackingTransaction) CloseIssue(ctx context.Context, id string, rea
 }
 
 func (t *hookTrackingTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
-	if err := t.Transaction.AddDependency(ctx, dep, actor); err != nil {
+	return t.AddDependencyWithOptions(ctx, dep, actor, DependencyAddOptions{})
+}
+
+func (t *hookTrackingTransaction) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, opts DependencyAddOptions) error {
+	if err := t.Transaction.AddDependencyWithOptions(ctx, dep, actor, opts); err != nil {
 		return err
 	}
-	if issue, err := t.Transaction.GetIssue(ctx, dep.IssueID); err == nil {
+	if issue, err := dependencySnapshot(ctx, dep.IssueID, t.Transaction.GetIssue, t.Transaction.GetDependencyRecords); err == nil {
 		t.pending = append(t.pending, pendingHook{hooks.EventUpdate, issue})
 	}
 	return nil
 }
 
 func (t *hookTrackingTransaction) RemoveDependency(ctx context.Context, issueID, dependsOnID string, actor string) error {
-	if err := t.Transaction.RemoveDependency(ctx, issueID, dependsOnID, actor); err != nil {
+	return t.RemoveDependencyWithOptions(ctx, issueID, dependsOnID, actor, DependencyRemoveOptions{})
+}
+
+func (t *hookTrackingTransaction) RemoveDependencyWithOptions(ctx context.Context, issueID, dependsOnID string, actor string, opts DependencyRemoveOptions) error {
+	if err := t.Transaction.RemoveDependencyWithOptions(ctx, issueID, dependsOnID, actor, opts); err != nil {
 		return err
 	}
-	if issue, err := t.Transaction.GetIssue(ctx, issueID); err == nil {
+	if issue, err := dependencySnapshot(ctx, issueID, t.Transaction.GetIssue, t.Transaction.GetDependencyRecords); err == nil {
 		t.pending = append(t.pending, pendingHook{hooks.EventUpdate, issue})
 	}
 	return nil
@@ -330,6 +599,9 @@ var (
 	} = (*HookFiringStore)(nil)
 	_ interface {
 		UpdateIssue(context.Context, string, map[string]interface{}, string) error
+	} = (*HookFiringStore)(nil)
+	_ interface {
+		UpdateIssueChecked(context.Context, string, map[string]interface{}, string, UpdateIssueOptions) error
 	} = (*HookFiringStore)(nil)
 	_ interface {
 		CloseIssue(context.Context, string, string, string, string) error

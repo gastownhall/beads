@@ -18,6 +18,14 @@ on:
         required: false
         default: '5'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+
 jobs:
   smoke:
     name: Upgrade smoke (${{ matrix.prev_version }} → candidate)
@@ -32,10 +40,10 @@ jobs:
     needs: versions
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
@@ -45,7 +53,7 @@ jobs:
           git config --global user.email "ci@beads.test"
 
       - name: Cache previous release binaries
-        uses: actions/cache@v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
         with:
           path: ~/.cache/beads-regression
           key: smoke-binaries-${{ matrix.prev_version }}-${{ runner.os }}

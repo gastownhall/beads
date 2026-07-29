@@ -90,6 +90,45 @@ func TestListBuildIssueTree_ParentChildByDotID(t *testing.T) {
 	}
 }
 
+// Regression test for gastownhall/beads#3936:
+// `relates-to` is a loose graph link, not a hierarchy edge. It must not nest
+// issues under each other in `bd list` — and a bidirectional relates-to between
+// two epics must not collapse both subtrees out of the root set.
+func TestListBuildIssueTree_RelatesToDoesNotNestEpics(t *testing.T) {
+	epicA := &types.Issue{ID: "bd-a", Title: "Epic A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic}
+	epicB := &types.Issue{ID: "bd-b", Title: "Epic B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic}
+
+	t.Run("OneDirection", func(t *testing.T) {
+		allDeps := map[string][]*types.Dependency{
+			"bd-a": {
+				{IssueID: "bd-a", DependsOnID: "bd-b", Type: types.DepRelatesTo},
+			},
+		}
+		roots, children := buildIssueTreeWithDeps([]*types.Issue{epicA, epicB}, allDeps)
+		if len(roots) != 2 {
+			t.Fatalf("expected both epics as roots, got %d: %+v", len(roots), roots)
+		}
+		if len(children["bd-b"]) != 0 {
+			t.Fatalf("relates-to must not nest under target epic, got children: %+v", children["bd-b"])
+		}
+	})
+
+	t.Run("Bidirectional", func(t *testing.T) {
+		allDeps := map[string][]*types.Dependency{
+			"bd-a": {
+				{IssueID: "bd-a", DependsOnID: "bd-b", Type: types.DepRelatesTo},
+			},
+			"bd-b": {
+				{IssueID: "bd-b", DependsOnID: "bd-a", Type: types.DepRelatesTo},
+			},
+		}
+		roots, _ := buildIssueTreeWithDeps([]*types.Issue{epicA, epicB}, allDeps)
+		if len(roots) != 2 {
+			t.Fatalf("bidirectional relates-to must not drop epics from roots, got %d: %+v", len(roots), roots)
+		}
+	})
+}
+
 // Regression test for https://github.com/steveyegge/beads/issues/1446
 // A task with multiple dependencies on the same epic should only appear once.
 func TestListBuildIssueTree_NoDuplicateChildrenFromMultipleDeps(t *testing.T) {
@@ -114,6 +153,44 @@ func TestListBuildIssueTree_NoDuplicateChildrenFromMultipleDeps(t *testing.T) {
 	}
 	if children["bd-epic"][0].ID != "bd-task" {
 		t.Fatalf("expected bd-task as child, got %s", children["bd-epic"][0].ID)
+	}
+}
+
+// A non-parent-child dependency on an epic (blocks / waits-for / discovered-from)
+// is a workflow edge, not membership. It must not nest the source under the epic
+// in `bd list --tree`. The storage layer already scopes an epic's children to
+// parent-child edges only (epic_closure.go), so the tree view must match: nesting
+// a mere blocker as a child made 2-layer parent trees render as 6+ level tangles
+// and triggered false "the hierarchy is broken" conclusions during grooming.
+func TestListBuildIssueTree_NonParentChildDepOnEpicDoesNotNest(t *testing.T) {
+	epic := &types.Issue{ID: "bd-epic", Title: "Epic", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic}
+
+	// Each non-parent-child edge type that AffectsReadyWork or is otherwise a
+	// legitimate cross-cutting link to an epic — none of these imply parenthood.
+	for _, depType := range []types.DependencyType{
+		types.DepBlocks,
+		types.DepWaitsFor,
+		types.DepConditionalBlocks,
+		types.DepDiscoveredFrom,
+		types.DepRelated,
+	} {
+		t.Run(string(depType), func(t *testing.T) {
+			task := &types.Issue{ID: "bd-task", Title: "Task", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+			allDeps := map[string][]*types.Dependency{
+				"bd-task": {
+					{IssueID: "bd-task", DependsOnID: "bd-epic", Type: depType},
+				},
+			}
+
+			roots, children := buildIssueTreeWithDeps([]*types.Issue{epic, task}, allDeps)
+
+			if len(roots) != 2 {
+				t.Fatalf("expected both epic and task as roots (no nesting), got %d: %+v", len(roots), roots)
+			}
+			if len(children["bd-epic"]) != 0 {
+				t.Fatalf("%s edge on an epic must not nest the source as a child, got: %+v", depType, children["bd-epic"])
+			}
+		})
 	}
 }
 
@@ -296,11 +373,11 @@ func TestLoadWatchedIssues_WithParentIncludesHierarchyAndStableOrder(t *testing.
 	addParentChild(grandchild, child)
 
 	filter := types.IssueFilter{ParentID: &parent.ID}
-	first, err := loadWatchedIssues(ctx, store, filter, parent.ID, "", false)
+	first, err := loadWatchedIssues(ctx, store, filter, false, parent.ID, "", false)
 	if err != nil {
 		t.Fatalf("loadWatchedIssues first call failed: %v", err)
 	}
-	second, err := loadWatchedIssues(ctx, store, filter, parent.ID, "", false)
+	second, err := loadWatchedIssues(ctx, store, filter, false, parent.ID, "", false)
 	if err != nil {
 		t.Fatalf("loadWatchedIssues second call failed: %v", err)
 	}
@@ -319,5 +396,118 @@ func TestLoadWatchedIssues_WithParentIncludesHierarchyAndStableOrder(t *testing.
 	slices.Sort(wantIDs)
 	if !slices.Equal(firstIDs, wantIDs) {
 		t.Fatalf("expected watched issues to be normalized by id for snapshot stability, got %v want %v", firstIDs, wantIDs)
+	}
+}
+
+func TestLoadWatchedIssues_ReadyWithParentPreservesReadySemantics(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	store := newTestStore(t, testDB)
+
+	createIssue := func(title string, issueType types.IssueType) *types.Issue {
+		issue := &types.Issue{
+			Title:     title,
+			Priority:  2,
+			IssueType: issueType,
+			Status:    types.StatusOpen,
+		}
+		if err := store.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("Failed to create issue %s: %v", title, err)
+		}
+		return issue
+	}
+	addDep := func(child, parent *types.Issue, depType types.DependencyType) {
+		dep := &types.Dependency{
+			IssueID:     child.ID,
+			DependsOnID: parent.ID,
+			Type:        depType,
+			CreatedAt:   time.Now(),
+			CreatedBy:   "test-user",
+		}
+		if err := store.AddDependency(ctx, dep, "test-user"); err != nil {
+			t.Fatalf("Failed to add dependency %s -> %s: %v", child.ID, parent.ID, err)
+		}
+	}
+
+	parent := createIssue("Watch ready parent", types.TypeEpic)
+	readyChild := createIssue("Watch ready child", types.TypeTask)
+	blockedChild := createIssue("Watch blocked child", types.TypeTask)
+	blocker := createIssue("Watch blocker", types.TypeTask)
+	addDep(readyChild, parent, types.DepParentChild)
+	addDep(blockedChild, parent, types.DepParentChild)
+	addDep(blockedChild, blocker, types.DepBlocks)
+
+	filter := types.IssueFilter{ParentID: &parent.ID}
+	issues, err := loadWatchedIssues(ctx, store, filter, true, parent.ID, "", false)
+	if err != nil {
+		t.Fatalf("loadWatchedIssues ready parent failed: %v", err)
+	}
+
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+	}
+	if !slices.Contains(ids, readyChild.ID) {
+		t.Fatalf("expected ready child %s in watch ready parent result, got %v", readyChild.ID, ids)
+	}
+	if slices.Contains(ids, blockedChild.ID) {
+		t.Fatalf("blocked child %s should not appear in watch ready parent result, got %v", blockedChild.ID, ids)
+	}
+}
+
+func TestGetHierarchicalChildrenIncludesDescendantsBeyondDepthTen(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	store := newTestStore(t, testDB)
+
+	root := &types.Issue{
+		Title:     "Deep tree root",
+		Priority:  2,
+		IssueType: types.TypeEpic,
+		Status:    types.StatusOpen,
+	}
+	if err := store.CreateIssue(ctx, root, "test-user"); err != nil {
+		t.Fatalf("Failed to create root: %v", err)
+	}
+
+	parent := root
+	var leaf *types.Issue
+	const depth = 12
+	for i := 1; i <= depth; i++ {
+		child := &types.Issue{
+			Title:     "Deep tree child",
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Status:    types.StatusOpen,
+		}
+		if err := store.CreateIssue(ctx, child, "test-user"); err != nil {
+			t.Fatalf("Failed to create child at depth %d: %v", i, err)
+		}
+		dep := &types.Dependency{
+			IssueID:     child.ID,
+			DependsOnID: parent.ID,
+			Type:        types.DepParentChild,
+			CreatedAt:   time.Now(),
+			CreatedBy:   "test-user",
+		}
+		if err := store.AddDependency(ctx, dep, "test-user"); err != nil {
+			t.Fatalf("Failed to add parent-child dependency at depth %d: %v", i, err)
+		}
+		parent = child
+		leaf = child
+	}
+
+	issues, err := getHierarchicalChildren(ctx, store, "", root.ID, types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("getHierarchicalChildren failed: %v", err)
+	}
+	ids := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		ids = append(ids, issue.ID)
+	}
+	if !slices.Contains(ids, leaf.ID) {
+		t.Fatalf("expected descendant at depth %d (%s), got %v", depth, leaf.ID, ids)
 	}
 }

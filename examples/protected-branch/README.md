@@ -249,7 +249,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install bd
-        run: curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+        run: curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash
 
       - name: Check for changes
         id: check
@@ -274,6 +274,6 @@ jobs:
 
 ## See Also
 
-- [docs/PROTECTED_BRANCHES.md](../../docs/PROTECTED_BRANCHES.md) - Complete guide
+- [docs/reference/protected-branches.md](../../docs/reference/protected-branches.md) - Complete guide
 - [AGENTS.md](../../AGENTS.md) - Agent integration instructions
-- [docs/QUICKSTART.md](../../docs/QUICKSTART.md) - `bd dolt push` / `bd dolt pull` usage
+- [docs/getting-started/quickstart.md](../../docs/getting-started/quickstart.md) - `bd dolt push` / `bd dolt pull` usage

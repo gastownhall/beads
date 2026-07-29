@@ -10,7 +10,9 @@ import (
 
 	"charm.land/huh/v2"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -113,6 +115,7 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 			return nil, fmt.Errorf("failed to generate child ID: %w", err)
 		}
 		explicitID = childID
+		ctx = storage.WithReservedChildCounter(ctx, fv.ParentID, childID)
 
 		// Inherit parent labels (GH#2100), matching bd create --parent behavior
 		inheritedLabels, _ = s.GetLabels(ctx, fv.ParentID)
@@ -122,6 +125,8 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 	if fv.ExternalRef != "" {
 		externalRefPtr = &fv.ExternalRef
 	}
+
+	labels := mergeCreateLabels(fv.Labels, inheritedLabels)
 
 	issue := &types.Issue{
 		Title:              fv.Title,
@@ -134,91 +139,26 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 		Assignee:           fv.Assignee,
 		ExternalRef:        externalRefPtr,
 		CreatedBy:          getActorWithGit(), // GH#748: track who created the issue
+		Labels:             labels,
 	}
 
 	if explicitID != "" {
 		issue.ID = explicitID
 	}
 
-	// Check if any dependencies are discovered-from type
-	// If so, inherit source_repo from the parent issue
-	var discoveredFromParentID string
-	for _, depSpec := range fv.Dependencies {
-		depSpec = strings.TrimSpace(depSpec)
-		if depSpec == "" {
-			continue
-		}
-
-		if strings.Contains(depSpec, ":") {
-			parts := strings.SplitN(depSpec, ":", 2)
-			if len(parts) == 2 {
-				depType := types.DependencyType(strings.TrimSpace(parts[0]))
-				dependsOnID := strings.TrimSpace(parts[1])
-
-				if depType == types.DepDiscoveredFrom && dependsOnID != "" {
-					discoveredFromParentID = dependsOnID
-					break
-				}
-			}
-		}
-	}
-
-	// If we found a discovered-from dependency, inherit source_repo from parent
-	if discoveredFromParentID != "" {
-		parentIssue, err := s.GetIssue(ctx, discoveredFromParentID)
+	// If a discovered-from dependency is present, inherit source_repo from
+	// the referenced parent issue.
+	if dfParent := discoveredFromParent(fv.Dependencies); dfParent != "" {
+		parentIssue, err := s.GetIssue(ctx, dfParent)
 		if err == nil && parentIssue != nil && parentIssue.SourceRepo != "" {
 			issue.SourceRepo = parentIssue.SourceRepo
 		}
 	}
 
-	if err := s.CreateIssue(ctx, issue, actor); err != nil {
-		return nil, fmt.Errorf("failed to create issue: %w", err)
-	}
-
-	// Track whether any post-create writes occurred. CreateIssue commits
-	// the issue to Dolt internally, but subsequent AddDependency/AddLabel
-	// calls only write to the working set. A follow-up Dolt commit is
-	// needed to persist them (GH#2009).
-	postCreateWrites := false
-
-	// If parent was specified, add parent-child dependency (GH#1983)
-	if fv.ParentID != "" {
-		dep := &types.Dependency{
-			IssueID:     issue.ID,
-			DependsOnID: fv.ParentID,
-			Type:        types.DepParentChild,
-		}
-		if err := s.AddDependency(ctx, dep, actor); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to add parent-child dependency %s -> %s: %v\n", issue.ID, fv.ParentID, err)
-		} else {
-			postCreateWrites = true
-		}
-	}
-
-	// Merge inherited parent labels with user-specified labels (GH#2100)
-	if len(inheritedLabels) > 0 {
-		seen := make(map[string]bool)
-		for _, l := range fv.Labels {
-			seen[l] = true
-		}
-		for _, l := range inheritedLabels {
-			if !seen[l] {
-				fv.Labels = append(fv.Labels, l)
-			}
-		}
-	}
-
-	// Add labels if specified
-	for _, label := range fv.Labels {
-		if err := s.AddLabel(ctx, issue.ID, label, actor); err != nil {
-			// Log warning but don't fail the entire operation
-			fmt.Fprintf(os.Stderr, "Warning: failed to add label %s: %v\n", label, err)
-		} else {
-			postCreateWrites = true
-		}
-	}
-
-	// Add dependencies if specified
+	// Parse dependency specs before creating anything. The form keeps its
+	// historical lenient parsing (warn and skip malformed entries), but the
+	// edges that do parse commit atomically with the create below.
+	var depSpecs []domain.DependencySpec
 	for _, depSpec := range fv.Dependencies {
 		depSpec = strings.TrimSpace(depSpec)
 		if depSpec == "" {
@@ -230,10 +170,6 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 
 		if strings.Contains(depSpec, ":") {
 			parts := strings.SplitN(depSpec, ":", 2)
-			if len(parts) != 2 {
-				fmt.Fprintf(os.Stderr, "Warning: invalid dependency format '%s', expected 'type:id' or 'id'\n", depSpec)
-				continue
-			}
 			depType = types.DependencyType(strings.TrimSpace(parts[0]))
 			dependsOnID = strings.TrimSpace(parts[1])
 		} else {
@@ -246,27 +182,29 @@ func CreateIssueFromFormValues(ctx context.Context, s storage.DoltStorage, fv *c
 			continue
 		}
 
-		dep := &types.Dependency{
-			IssueID:     issue.ID,
-			DependsOnID: dependsOnID,
-			Type:        depType,
-		}
-		if err := s.AddDependency(ctx, dep, actor); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to add dependency %s -> %s: %v\n", issue.ID, dependsOnID, err)
-		} else {
-			postCreateWrites = true
-		}
+		depSpecs = append(depSpecs, domain.DependencySpec{Type: depType, TargetID: dependsOnID})
 	}
 
-	// Commit post-create metadata (deps, labels) to Dolt. CreateIssue's
-	// internal DOLT_COMMIT only covers the issue row; AddDependency and
-	// AddLabel write to the SQL working set without a Dolt commit. Without
-	// this, the metadata is visible but not durable — it can be lost on
-	// push, sync, or server restart (GH#2009).
-	if postCreateWrites {
-		commitMsg := fmt.Sprintf("bd: create %s (metadata)", issue.ID)
-		if err := s.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
-			WarnError("failed to commit post-create metadata: %v", err)
+	// The issue and its edges (parent-child per GH#1983, plus form deps)
+	// commit in one transaction; a failed edge rolls back the create instead
+	// of leaving a dep-less issue behind (same contract as bd create).
+	edges := createDepEdges{parentID: fv.ParentID, specs: depSpecs}
+	if err := createIssueWithDeps(ctx, s, issue, actor, edges); err != nil {
+		return nil, fmt.Errorf("failed to create issue: %w", err)
+	}
+
+	if edges.empty() {
+		// Bare create: preserve the embedded-mode follow-up Dolt commit.
+		// The deps path commits inside its transaction instead.
+		shouldCommit, err := shouldCommitCreatePostWrites(issue, false)
+		if err != nil {
+			return nil, fmt.Errorf("dolt auto-commit: %w", err)
+		}
+		if shouldCommit {
+			commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
+			if err := s.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
+				WarnError("failed to commit post-create metadata: %v", err)
+			}
 		}
 	}
 
@@ -290,13 +228,26 @@ The form uses keyboard navigation:
   - Enter: Submit the form (on the last field or submit button)
   - Ctrl+C: Cancel and exit
   - Arrow keys: Navigate within select fields`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("create-form is not supported in proxied-server mode")
+		}
 		CheckReadonly("create-form")
-		runCreateForm(cmd)
+
+		evt := metrics.NewCommandEvent("create-form")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		return runCreateForm(cmd)
 	},
 }
 
-func runCreateForm(cmd *cobra.Command) {
+func runCreateForm(cmd *cobra.Command) error {
 	parentID, _ := cmd.Flags().GetString("parent")
 
 	// Raw form input - will be populated by the form
@@ -412,26 +363,24 @@ func runCreateForm(cmd *cobra.Command) {
 	if err != nil {
 		if err == huh.ErrUserAborted {
 			fmt.Fprintln(os.Stderr, "Issue creation canceled.")
-			os.Exit(0)
+			return nil
 		}
-		FatalError("form error: %v", err)
+		return HandleError("form error: %v", err)
 	}
 
-	// Parse the form input
 	fv := parseCreateFormInput(raw)
 	fv.ParentID = parentID
 
-	// Direct mode - use the extracted creation function
 	issue, err := CreateIssueFromFormValues(rootCtx, store, fv, actor)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
 	if jsonOutput {
-		outputJSON(issue)
-	} else {
-		printCreatedIssue(issue)
+		return outputJSON(issue)
 	}
+	printCreatedIssue(issue)
+	return nil
 }
 
 func printCreatedIssue(issue *types.Issue) {

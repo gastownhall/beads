@@ -9,13 +9,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 const ConfigFileName = "metadata.json"
 
 type Config struct {
 	Database string `json:"database"`
-	Backend  string `json:"backend,omitempty"` // Deprecated: always "dolt". Kept for JSON compat.
+	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default); legacy "postgres"/"mysql"/"sqlite" values are rejection tombstones. Read via GetBackend().
 
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
@@ -26,6 +28,7 @@ type Config struct {
 	DoltMode           string `json:"dolt_mode,omitempty"`            // "embedded" (default) or "server"
 	DoltServerHost     string `json:"dolt_server_host,omitempty"`     // Server host (default: 127.0.0.1)
 	DoltServerPort     int    `json:"dolt_server_port,omitempty"`     // Server port (default: 3307)
+	DoltServerSocket   string `json:"dolt_server_socket,omitempty"`   // Unix domain socket path (overrides host/port)
 	DoltServerUser     string `json:"dolt_server_user,omitempty"`     // MySQL user (default: root)
 	DoltDatabase       string `json:"dolt_database,omitempty"`        // SQL database name (default: beads)
 	DoltServerTLS      bool   `json:"dolt_server_tls,omitempty"`      // Enable TLS for server connections (required for Hosted Dolt)
@@ -33,15 +36,25 @@ type Config struct {
 	DoltRemotesAPIPort int    `json:"dolt_remotesapi_port,omitempty"` // Dolt remotesapi port for federation (default: 8080)
 	// Note: Password should be set via BEADS_DOLT_PASSWORD env var for security
 
+	// Deprecated backend fields are retained only to round-trip metadata written by
+	// the short-lived PostgreSQL/MySQL implementations. They are not connection
+	// configuration for current builds; store selection rejects those backends.
+	PostgresDSN    string `json:"postgres_dsn,omitempty"`
+	PostgresSchema string `json:"postgres_schema,omitempty"`
+	MySQLDSN       string `json:"mysql_dsn,omitempty"`
+	MySQLDatabase  string `json:"mysql_database,omitempty"`
+
+	// Deprecated: retained only to round-trip metadata written by the removed
+	// SQLite backend (backend="sqlite"); store selection rejects that backend.
+	SQLitePath string `json:"sqlite_path,omitempty"` // database file, relative to the beads dir (default beads.db)
+
 	// Project identity — unique ID generated at bd init time.
 	// Used to detect cross-project data leakage when a client connects
 	// to the wrong Dolt server (GH#2372).
 	ProjectID string `json:"project_id,omitempty"`
 
-	// GlobalDoltDatabase is the SQL database name for the project-agnostic
-	// global issue database in shared-server mode. Set during bd init when
-	// shared-server mode is active. Empty means no global database available.
 	GlobalDoltDatabase string `json:"global_dolt_database,omitempty"`
+	GlobalProjectID    string `json:"global_project_id,omitempty"`
 
 	// Stale closed issues check configuration
 	// 0 = disabled (default), positive = threshold in days
@@ -110,10 +123,6 @@ func Load(beadsDir string) (*Config, error) {
 func (c *Config) Save(beadsDir string) error {
 	configPath := ConfigPath(beadsDir)
 
-	// Strip absolute dolt_data_dir before saving — metadata.json is committed
-	// to git and propagates to other clones, but absolute paths are
-	// machine-specific and cause data-loss on other machines (GH#2251).
-	// Users should set absolute paths via BEADS_DOLT_DATA_DIR env var instead.
 	saved := *c
 	if filepath.IsAbs(saved.DoltDataDir) {
 		saved.DoltDataDir = ""
@@ -124,11 +133,40 @@ func (c *Config) Save(beadsDir string) error {
 		return fmt.Errorf("marshaling config: %w", err)
 	}
 
-	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+	// Write-temp-then-rename: a plain os.WriteFile truncates in place, so a
+	// concurrent Load can observe an empty or partial metadata.json and feed
+	// store selection a corrupt config. Rename within the same directory is
+	// atomic, so readers see either the old or the new file, never a torn one.
+	if err := writeFileAtomic(configPath, data, 0o600); err != nil {
 		return fmt.Errorf("writing config: %w", err)
 	}
 
 	return nil
+}
+
+// writeFileAtomic writes data to a temp file in path's directory and renames
+// it over path, so concurrent readers never observe a truncated or partial
+// file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck // no-op after successful rename
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func (c *Config) DatabasePath(beadsDir string) string {
@@ -172,7 +210,10 @@ func (c *Config) GetStaleClosedIssuesDays() int {
 
 // Backend constants
 const (
-	BackendDolt = "dolt"
+	BackendDolt     = "dolt"
+	BackendPostgres = "postgres"
+	BackendMySQL    = "mysql"
+	BackendSQLite   = "sqlite"
 )
 
 // BackendCapabilities describes behavioral constraints for a storage backend.
@@ -189,34 +230,65 @@ type BackendCapabilities struct {
 	SingleProcessOnly bool
 }
 
-// CapabilitiesForBackend returns capabilities for a backend string.
-// Dolt is the only supported backend. Returns SingleProcessOnly=true by default;
-// use Config.GetCapabilities() to properly handle server mode.
+// CapabilitiesForBackend returns capabilities for a backend string. Embedded Dolt
+// is single-process-only; use Config.GetCapabilities() to account for
+// Dolt server and proxied-server modes.
 func CapabilitiesForBackend(_ string) BackendCapabilities {
 	return BackendCapabilities{SingleProcessOnly: true}
 }
 
 // GetCapabilities returns the backend capabilities for this config.
 // Unlike CapabilitiesForBackend(string), this considers Dolt server mode
-// which supports multi-process access.
+// (and proxied-server mode) which support multi-process access.
 func (c *Config) GetCapabilities() BackendCapabilities {
 	backend := c.GetBackend()
-	if backend == BackendDolt && c.IsDoltServerMode() {
-		// Server mode supports multi-writer, so NOT single-process-only
+	if backend == BackendDolt && (c.IsDoltServerMode() || c.IsDoltProxiedServerMode()) {
 		return BackendCapabilities{SingleProcessOnly: false}
 	}
 	return CapabilitiesForBackend(backend)
 }
 
-// GetBackend returns the backend type. Always returns "dolt".
+// IsSupportedBackend reports whether backend selects an implementation shipped by
+// beads. The empty value is the legacy/default spelling of Dolt.
+func IsSupportedBackend(backend string) bool {
+	return backend == "" || backend == BackendDolt
+}
+
+// GetBackend returns the configured storage backend. PostgreSQL, MySQL, and
+// SQLite remain recognizable here so workspaces created by earlier builds can
+// fail loudly at store selection instead of silently falling back to an empty
+// Dolt database.
+// Empty and explicit Dolt retain the established Dolt behavior. GetBackend keeps
+// the historical Dolt fallback for unknown values, so storage-selection callers
+// must check IsSupportedBackend(c.Backend) before opening or creating storage.
 func (c *Config) GetBackend() string {
+	if c != nil {
+		switch c.Backend {
+		case BackendPostgres:
+			return BackendPostgres
+		case BackendMySQL:
+			return BackendMySQL
+		case BackendSQLite:
+			return BackendSQLite
+		}
+	}
 	return BackendDolt
+}
+
+// GetSQLitePath returns the SQLite database file path (relative to the beads dir, or
+// absolute). Empty means the default (beads.db).
+func (c *Config) GetSQLitePath() string {
+	if c == nil {
+		return ""
+	}
+	return c.SQLitePath
 }
 
 // Dolt mode constants
 const (
-	DoltModeEmbedded = "embedded"
-	DoltModeServer   = "server"
+	DoltModeEmbedded      = "embedded"
+	DoltModeServer        = "server"
+	DoltModeProxiedServer = "proxied-server"
 )
 
 // Default Dolt server settings
@@ -234,7 +306,8 @@ const (
 // Checks (in priority order):
 //  1. BEADS_DOLT_SERVER_MODE=1 env var
 //  2. BEADS_DOLT_SHARED_SERVER env var (shared-server implies server mode)
-//  3. dolt_mode field in metadata.json
+//  3. dolt_mode field in metadata.json (project-local, explicit)
+//  4. dolt.mode in config.yaml (user-global fallback, only when metadata.json has no mode)
 //
 // Runtime env vars take precedence over persisted metadata.json to prevent
 // stale dolt_mode=embedded from overriding active server intent (GH#2949).
@@ -250,7 +323,22 @@ func (c *Config) IsDoltServerMode() bool {
 	if v := os.Getenv("BEADS_DOLT_SHARED_SERVER"); v == "1" || strings.EqualFold(v, "true") {
 		return true
 	}
-	return strings.ToLower(c.DoltMode) == DoltModeServer
+	if c.DoltMode != "" {
+		// metadata.json has an explicit mode — respect it over config.yaml
+		return strings.ToLower(c.DoltMode) == DoltModeServer
+	}
+	// Fall back to config.yaml dolt.mode setting (no metadata.json mode set)
+	if mode := config.GetYamlConfig("dolt.mode"); strings.EqualFold(mode, "server") {
+		return true
+	}
+	return false
+}
+
+func (c *Config) IsDoltProxiedServerMode() bool {
+	if c.GetBackend() != BackendDolt {
+		return false
+	}
+	return strings.ToLower(c.DoltMode) == DoltModeProxiedServer
 }
 
 // GetDoltMode returns the Dolt connection mode, defaulting to server.
@@ -262,13 +350,20 @@ func (c *Config) GetDoltMode() string {
 }
 
 // GetDoltServerHost returns the Dolt server host.
-// Checks BEADS_DOLT_SERVER_HOST env var first, then config, then default.
+// Priority: BEADS_DOLT_SERVER_HOST env var > metadata.json dolt_server_host
+// > config.yaml / global config dolt.host > DefaultDoltServerHost.
+// The config.yaml layer mirrors the dolt.port fix (GH#2073) so a shared
+// team / user-level Dolt server can be configured once without per-clone
+// metadata.json edits.
 func (c *Config) GetDoltServerHost() string {
 	if h := os.Getenv("BEADS_DOLT_SERVER_HOST"); h != "" {
 		return h
 	}
 	if c.DoltServerHost != "" {
 		return c.DoltServerHost
+	}
+	if h := config.GetYamlConfig("dolt.host"); h != "" {
+		return h
 	}
 	return DefaultDoltServerHost
 }
@@ -298,6 +393,15 @@ func (c *Config) GetDoltServerPort() int {
 	return DefaultDoltServerPort
 }
 
+// GetDoltServerSocket returns the Dolt server Unix domain socket path.
+// Checks BEADS_DOLT_SERVER_SOCKET env var first, then config. Empty means use TCP.
+func (c *Config) GetDoltServerSocket() string {
+	if s := os.Getenv("BEADS_DOLT_SERVER_SOCKET"); s != "" {
+		return s
+	}
+	return c.DoltServerSocket
+}
+
 // GetDoltServerUser returns the Dolt server MySQL user.
 // Checks BEADS_DOLT_SERVER_USER env var first, then config, then default.
 func (c *Config) GetDoltServerUser() string {
@@ -308,6 +412,18 @@ func (c *Config) GetDoltServerUser() string {
 		return c.DoltServerUser
 	}
 	return DefaultDoltServerUser
+}
+
+// GetDoltCredentialCommand returns the server credential command:
+// BEADS_DOLT_CREDENTIAL_COMMAND. Empty means no command — the static
+// BEADS_DOLT_SERVER_USER / dolt_server_user path applies. The command's stdout is a
+// short-lived token (bare, or a {token,expirationTimestamp} / {access_token,expires_in}
+// envelope) presented as the connection username to an authenticating gateway server,
+// which verifies it and routes to the database. It is deliberately read from the
+// environment only, NOT metadata.json: a metadata-sourced command is arbitrary code run
+// on open, so persisting it waits on a workspace-trust gate.
+func (c *Config) GetDoltCredentialCommand() string {
+	return os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")
 }
 
 // GetDoltDatabase returns the Dolt SQL database name.
@@ -326,6 +442,10 @@ func (c *Config) GetDoltDatabase() string {
 // Returns empty string if no global database is configured.
 func (c *Config) GetGlobalDoltDatabase() string {
 	return c.GlobalDoltDatabase
+}
+
+func (c *Config) GetGlobalProjectID() string {
+	return c.GlobalProjectID
 }
 
 // GetDoltServerPassword returns the Dolt server password.

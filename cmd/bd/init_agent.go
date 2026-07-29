@@ -15,12 +15,13 @@ import (
 // agentFile is the target filename (e.g. "AGENTS.md" or "BEADS.md").
 // If templatePath is non-empty, the custom template file is used instead of the embedded default.
 // profile controls which template variant to render (full or minimal); defaults to minimal.
-func addAgentsInstructions(agentFile string, verbose bool, templatePath string, profile agents.Profile) {
+// opts controls conditional content (e.g. omitting bd dolt push when no remote is configured).
+func addAgentsInstructions(agentFile string, verbose bool, templatePath string, profile agents.Profile, opts agents.RenderOpts) {
 	if profile == "" {
 		profile = agents.ProfileMinimal
 	}
 
-	if err := updateAgentFile(agentFile, verbose, templatePath, profile); err != nil {
+	if err := updateAgentFile(agentFile, verbose, templatePath, profile, opts); err != nil {
 		// Non-fatal - continue with other files
 		if verbose {
 			fmt.Fprintf(os.Stderr, "Warning: failed to update %s: %v\n", agentFile, err)
@@ -33,7 +34,7 @@ func addAgentsInstructions(agentFile string, verbose bool, templatePath string, 
 // versioned format so that `bd init` never silently locks in stale sections.
 // If the file already has a full profile and a minimal profile is requested, the full
 // profile is preserved to avoid information loss.
-func updateAgentFile(filename string, verbose bool, templatePath string, profile agents.Profile) error {
+func updateAgentFile(filename string, verbose bool, templatePath string, profile agents.Profile, opts agents.RenderOpts) error {
 	// Check if file exists
 	//nolint:gosec // G304: filename validated by config.ValidateAgentsFile or defaulted to AGENTS.md
 	content, err := os.ReadFile(filename)
@@ -55,7 +56,7 @@ func updateAgentFile(filename string, verbose bool, templatePath string, profile
 		// EmbeddedDefault() ships with profile:full; swap to the requested profile
 		// (which defaults to minimal). Also handles legacy markers without profile metadata.
 		if strings.Contains(newContent, "BEGIN BEADS INTEGRATION") {
-			if replaced, changed, err := agents.ReplaceSection(newContent, profile); err == nil && changed {
+			if replaced, changed, err := agents.ReplaceSectionWithOpts(newContent, profile, opts); err == nil && changed {
 				newContent = replaced
 			}
 		}
@@ -88,7 +89,7 @@ func updateAgentFile(filename string, verbose bool, templatePath string, profile
 		}
 
 		// Update existing section to latest versioned format (upgrades legacy markers)
-		updated, changed, replaceErr := agents.ReplaceSection(contentStr, effectiveProfile)
+		updated, changed, replaceErr := agents.ReplaceSectionWithOpts(contentStr, effectiveProfile, opts)
 		if replaceErr != nil {
 			return fmt.Errorf("failed to update beads section in %s: %w", filename, replaceErr)
 		}
@@ -112,7 +113,7 @@ func updateAgentFile(filename string, verbose bool, templatePath string, profile
 		newContent += "\n"
 	}
 
-	newContent += "\n" + agents.RenderSection(profile)
+	newContent += "\n" + agents.RenderSectionWithOpts(profile, opts)
 
 	// #nosec G306 - markdown needs to be readable
 	if err := os.WriteFile(filename, []byte(newContent), 0644); err != nil {

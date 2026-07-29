@@ -3,9 +3,9 @@
 package embeddeddolt_test
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 
@@ -18,256 +18,71 @@ func TestSchemaAfterInit(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	dataDir := filepath.Join(beadsDir, "embeddeddolt")
 
-	// Initialize store — creates database and runs all migrations.
-	store, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
+	store, err := embeddeddolt.Open(ctx, beadsDir, "testdb", "main")
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
+	t.Cleanup(func() { store.Close() })
 
-	// Open a verification connection.
 	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
 	if err != nil {
-		store.Close()
 		t.Fatalf("OpenSQL: %v", err)
 	}
+	t.Cleanup(func() { _ = cleanup() })
 
-	// --- Verify tables ---
-
-	expectedTables := []string{
-		"issues",
-		"dependencies",
-		"labels",
-		"comments",
-		"events",
-		"config",
-		"metadata",
-		"child_counters",
-		"issue_snapshots",
-		"compaction_snapshots",
-		"repo_mtimes",
-		"routes",
-		"issue_counter",
-		"interactions",
-		"federation_peers",
-		"local_metadata",
-		"wisps",
-		"wisp_labels",
-		"wisp_dependencies",
-		"wisp_events",
-		"wisp_comments",
-		"schema_migrations",
+	// Verify D4v2 indexes exist on the issues table.
+	var ignoredName, createStmt string
+	if err := db.QueryRowContext(ctx, "SHOW CREATE TABLE `issues`").Scan(&ignoredName, &createStmt); err != nil {
+		t.Fatalf("SHOW CREATE TABLE issues: %v", err)
 	}
-
-	rows, err := db.QueryContext(ctx, "SHOW TABLES")
-	if err != nil {
-		t.Fatalf("SHOW TABLES: %v", err)
-	}
-
-	gotTables := map[string]bool{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatalf("scanning table name: %v", err)
-		}
-		gotTables[name] = true
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterating tables: %v", err)
-	}
-	rows.Close()
-
-	for _, want := range expectedTables {
-		if !gotTables[want] {
-			t.Errorf("missing table: %s", want)
+	for _, idx := range []string{"idx_issues_status_updated_at", "idx_issues_defer_until"} {
+		if !strings.Contains(createStmt, idx) {
+			t.Errorf("issues table missing index %q", idx)
 		}
 	}
-
-	// --- Spot-check key columns via SHOW CREATE TABLE ---
-
-	spotChecks := map[string][]string{
-		"issues": {
-			"defer_until", "due_at", "rig", "role_type", "agent_state",
-			"hook_bead", "role_bead", "await_type", "event_kind",
-			"idx_issues_status", "idx_issues_external_ref",
-		},
-		"dependencies": {
-			"thread_id", "metadata", "idx_dependencies_thread",
-			"idx_dependencies_depends_on_type", "fk_dep_issue",
-		},
-		"wisps": {
-			"defer_until", "due_at", "rig", "idx_wisps_status",
-		},
-		"wisp_dependencies": {
-			"thread_id", "metadata", "idx_wisp_dep_depends",
-			"idx_wisp_dep_type", "idx_wisp_dep_type_depends",
-		},
-	}
-
-	for table, checks := range spotChecks {
-		var createStmt string
-		row := db.QueryRowContext(ctx, "SHOW CREATE TABLE `"+table+"`")
-		var ignoredName string
-		if err := row.Scan(&ignoredName, &createStmt); err != nil {
-			t.Errorf("SHOW CREATE TABLE %s: %v", table, err)
-			continue
-		}
-		for _, check := range checks {
-			if !strings.Contains(createStmt, check) {
-				t.Errorf("table %s: expected %q in CREATE statement, not found", table, check)
-			}
-		}
-	}
-
-	// --- Verify views ---
-
-	for _, view := range []string{"ready_issues", "blocked_issues"} {
-		if _, err := db.ExecContext(ctx, "SELECT 1 FROM `"+view+"` LIMIT 0"); err != nil {
-			t.Errorf("view %s not queryable: %v", view, err)
-		}
-	}
-
-	// --- Verify default config ---
-
-	var configCount int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM config").Scan(&configCount); err != nil {
-		t.Fatalf("counting config rows: %v", err)
-	}
-	if configCount != 9 {
-		t.Errorf("config rows: got %d, want 9", configCount)
-	}
-
-	// --- Verify schema_migrations max version ---
 
 	var maxVersion int
 	if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion); err != nil {
-		t.Fatalf("reading max migration version: %v", err)
+		t.Fatalf("reading max schema_migrations version: %v", err)
 	}
-	if maxVersion != embeddeddolt.LatestVersion() {
-		t.Errorf("max migration version: got %d, want %d", maxVersion, embeddeddolt.LatestVersion())
-	}
-
-	// --- Log all tables for debugging ---
-
-	var tableList []string
-	for name := range gotTables {
-		tableList = append(tableList, name)
-	}
-	sort.Strings(tableList)
-	t.Logf("tables found: %s", strings.Join(tableList, ", "))
-
-	// --- Close first store and verification connection ---
-
-	cleanup()
-	store.Close()
-
-	// --- Verify idempotency: New on same dir succeeds ---
-
-	store2, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
-	if err != nil {
-		t.Fatalf("second New (idempotency): %v", err)
+	if want := embeddeddolt.LatestVersion(); maxVersion != want {
+		t.Errorf("schema_migrations max version: got %d, want %d", maxVersion, want)
 	}
 
-	db2, cleanup2, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
-	if err != nil {
-		store2.Close()
-		t.Fatalf("second OpenSQL: %v", err)
+	var maxIgnoredVersion int
+	if err := db.QueryRowContext(ctx, "SELECT MAX(version) FROM ignored_schema_migrations").Scan(&maxIgnoredVersion); err != nil {
+		t.Fatalf("reading max ignored_schema_migrations version: %v", err)
+	}
+	if want := embeddeddolt.LatestIgnoredVersion(); maxIgnoredVersion != want {
+		t.Errorf("ignored_schema_migrations max version: got %d, want %d", maxIgnoredVersion, want)
 	}
 
-	var migrationCount int
-	if err := db2.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&migrationCount); err != nil {
-		t.Fatalf("counting migrations: %v", err)
-	}
-	if migrationCount != embeddeddolt.LatestVersion() {
-		t.Errorf("migration count after second init: got %d, want %d", migrationCount, embeddeddolt.LatestVersion())
-	}
-
-	if err := db2.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion); err != nil {
-		t.Fatalf("reading max version after second init: %v", err)
-	}
-	if maxVersion != embeddeddolt.LatestVersion() {
-		t.Errorf("max version after second init: got %d, want %d", maxVersion, embeddeddolt.LatestVersion())
-	}
-
-	cleanup2()
-	store2.Close()
-}
-
-// TestBackfillCreatesWispTables simulates the server-to-embedded upgrade path
-// where core tables exist but schema_migrations is empty. The backfill must
-// actually execute migrations (not just mark them applied) so that dolt_ignore'd
-// wisp tables get created. Regression test for GH#2979.
-func TestBackfillCreatesWispTables(t *testing.T) {
-	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
-		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
-	}
-
-	ctx := t.Context()
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	dataDir := filepath.Join(beadsDir, "embeddeddolt")
-
-	// Step 1: Normal init — creates everything including wisp tables.
-	store, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-
-	// Step 2: Drop wisp tables and clear schema_migrations to simulate
-	// an upgrade from server-mode (core tables exist, no migration tracking,
-	// no wisp tables since they're dolt_ignore'd and weren't imported).
-	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
-	if err != nil {
-		store.Close()
-		t.Fatalf("OpenSQL: %v", err)
-	}
-	for _, stmt := range []string{
-		"DROP TABLE IF EXISTS wisp_comments",
-		"DROP TABLE IF EXISTS wisp_events",
-		"DROP TABLE IF EXISTS wisp_labels",
-		"DROP TABLE IF EXISTS wisp_dependencies",
-		"DROP TABLE IF EXISTS wisps",
-		"DELETE FROM schema_migrations",
+	// bd-2rd37: migration 0051 (and ignored/0010 for the wisp twins) drops the
+	// dormant DEFAULT (UUID()) on the aux-table primary keys, so an insert path
+	// that omits id fails loudly instead of silently minting a per-clone-random
+	// key (the #4259 failure class). dependencies.id is the original #4259
+	// table: its DEFAULT (UUID()) is dropped by 0050's prepared ALTER, which
+	// this assertion verifies actually took effect (bd-578h9.17). Scanning
+	// COLUMN_DEFAULT (rather than counting) also fails if the table or column
+	// is missing entirely.
+	for _, table := range []string{
+		"dependencies",
+		"events", "comments", "issue_snapshots", "compaction_snapshots",
+		"wisp_events", "wisp_comments", "wisp_dependencies",
 	} {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			t.Fatalf("setup: %s: %v", stmt, err)
+		var columnDefault sql.NullString
+		err := db.QueryRowContext(ctx, `
+			SELECT COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'id'
+		`, table).Scan(&columnDefault)
+		if err != nil {
+			t.Fatalf("reading %s.id default: %v", table, err)
 		}
-	}
-	cleanup()
-	store.Close()
-
-	// Step 3: Re-open. This triggers the backfill path (schema_migrations
-	// empty, issues table exists). The old code would mark all migrations
-	// as applied without executing them, leaving wisp tables missing.
-	store2, err := embeddeddolt.New(ctx, beadsDir, "testdb", "main")
-	if err != nil {
-		t.Fatalf("New after backfill: %v", err)
-	}
-
-	db2, cleanup2, err := embeddeddolt.OpenSQL(ctx, dataDir, "testdb", "main")
-	if err != nil {
-		store2.Close()
-		t.Fatalf("OpenSQL after backfill: %v", err)
-	}
-	defer func() { cleanup2(); store2.Close() }()
-
-	// Verify all wisp tables were created by the backfill.
-	for _, table := range []string{"wisps", "wisp_dependencies", "wisp_labels", "wisp_events", "wisp_comments"} {
-		var count int
-		if err := db2.QueryRowContext(ctx, "SELECT COUNT(*) FROM `"+table+"`").Scan(&count); err != nil {
-			t.Errorf("wisp table %s missing after backfill: %v", table, err)
+		if columnDefault.Valid {
+			t.Errorf("%s.id has DEFAULT %q, want none (migrations 0050/0051 / ignored 0010)", table, columnDefault.String)
 		}
-	}
-
-	// Verify schema_migrations is fully populated.
-	var maxVersion int
-	if err := db2.QueryRowContext(ctx, "SELECT MAX(version) FROM schema_migrations").Scan(&maxVersion); err != nil {
-		t.Fatalf("reading max version: %v", err)
-	}
-	if maxVersion != embeddeddolt.LatestVersion() {
-		t.Errorf("max migration version after backfill: got %d, want %d", maxVersion, embeddeddolt.LatestVersion())
 	}
 }

@@ -22,11 +22,11 @@ func bdRestore(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd restore %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd restore %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdRestoreFail runs "bd restore" expecting failure.
@@ -62,7 +62,7 @@ func simulateCompaction(t *testing.T, bd, dir, beadsDir, database string) string
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	for i := 0; i < 5; i++ {
-		store, err = embeddeddolt.New(ctx, beadsDir, database, "main")
+		store, err = embeddeddolt.Open(ctx, beadsDir, database, "main")
 		if err == nil {
 			break
 		}
@@ -181,7 +181,7 @@ func TestEmbeddedRestoreConcurrent(t *testing.T) {
 	var store *embeddeddolt.EmbeddedDoltStore
 	var err error
 	for i := 0; i < 5; i++ {
-		store, err = embeddeddolt.New(ctx, beadsDir, "rstcon", "main")
+		store, err = embeddeddolt.Open(ctx, beadsDir, "rstcon", "main")
 		if err == nil {
 			break
 		}

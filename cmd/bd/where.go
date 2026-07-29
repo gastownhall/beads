@@ -7,6 +7,10 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -31,23 +35,35 @@ Examples:
   bd where           # Show active beads location
   bd where --json    # Output in JSON format
 `,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("where")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		result := WhereResult{}
 
-		// Find the beads directory (this follows redirects)
-		beadsDir := beads.FindBeadsDir()
+		if selected := selectedNoDBBeadsDir(cmd); selected != "" {
+			prepareSelectedNoDBContext(selected)
+		}
+
+		beadsDir := resolveWhereBeadsDir(cmd)
 		if beadsDir == "" {
 			if jsonOutput {
-				outputJSON(map[string]string{
+				if jerr := outputJSON(map[string]string{
 					"error":   "no_beads_directory",
 					"message": activeWorkspaceNotFoundMessage(),
 					"hint":    whereDiagHint(),
-				})
-			} else {
-				fmt.Fprintln(os.Stderr, "Error: "+activeWorkspaceNotFoundMessage())
-				fmt.Fprintln(os.Stderr, "Hint: "+whereDiagHint())
+				}); jerr != nil {
+					return jerr
+				}
+				return SilentExit()
 			}
-			os.Exit(1)
+			return HandleErrorWithHint(activeWorkspaceNotFoundMessage(), whereDiagHint())
 		}
 
 		result.Path = beadsDir
@@ -60,40 +76,71 @@ Examples:
 		}
 
 		// Find the database path
-		dbPath := beads.FindDatabasePath()
+		dbPath := resolveWhereDatabasePath()
 		if dbPath != "" {
 			result.DatabasePath = dbPath
+		}
 
-			// Try to get the prefix from the database if we have a store
-			if store != nil {
-				ctx := rootCtx
-				if prefix, err := store.GetConfig(ctx, "issue_prefix"); err == nil && prefix != "" {
+		// Prefer the active workspace YAML when available. Avoid process-global
+		// config here because `bd where` may be reporting a workspace selected
+		// by BEADS_DB/BEADS_DIR rather than the caller's current repository.
+		if prefix := config.GetStringFromDir(beadsDir, "issue-prefix"); prefix != "" {
+			result.Prefix = prefix
+		} else if prefix := config.GetStringFromDir(beadsDir, "issue_prefix"); prefix != "" {
+			result.Prefix = prefix
+		} else if dbPath != "" && shouldReadWherePrefixFromStore(beadsDir) {
+			_ = withStorage(getRootContext(), nil, dbPath, func(currentStore storage.DoltStorage) error {
+				prefix, err := currentStore.GetConfig(getRootContext(), "issue_prefix")
+				if err == nil && prefix != "" {
 					result.Prefix = prefix
 				}
-			}
+				return nil
+			})
 		}
 
-		// If we don't have the prefix from DB, try to detect it from JSONL
-		if result.Prefix == "" {
-			result.Prefix = detectPrefixFromDir(beadsDir)
-		}
-
-		// Output results
 		if jsonOutput {
-			outputJSON(result)
-		} else {
-			fmt.Println(result.Path)
-			if result.RedirectedFrom != "" {
-				fmt.Printf("  (via redirect from %s)\n", result.RedirectedFrom)
-			}
-			if result.Prefix != "" {
-				fmt.Printf("  prefix: %s\n", result.Prefix)
-			}
-			if result.DatabasePath != "" {
-				fmt.Printf("  database: %s\n", result.DatabasePath)
-			}
+			return outputJSON(result)
 		}
+		fmt.Println(result.Path)
+		if result.RedirectedFrom != "" {
+			fmt.Printf("  (via redirect from %s)\n", result.RedirectedFrom)
+		}
+		if result.Prefix != "" {
+			fmt.Printf("  prefix: %s\n", result.Prefix)
+		}
+		if result.DatabasePath != "" {
+			fmt.Printf("  database: %s\n", result.DatabasePath)
+		}
+		return nil
 	},
+}
+
+func resolveWhereBeadsDir(cmd *cobra.Command) string {
+	if selected := selectedNoDBBeadsDir(cmd); selected != "" {
+		return selected
+	}
+
+	return beads.FindBeadsDir()
+}
+
+func resolveWhereDatabasePath() string {
+	return beads.FindDatabasePath()
+}
+
+func shouldReadWherePrefixFromStore(beadsDir string) bool {
+	if beadsDir == "" {
+		return false
+	}
+
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return true
+	}
+
+	// `bd where` should be able to report selected metadata without requiring
+	// a live Dolt server (or spawning the proxied-server daemon) just to
+	// recover issue_prefix.
+	return !cfg.IsDoltServerMode() && !cfg.IsDoltProxiedServerMode()
 }
 
 // findOriginalBeadsDir walks up from cwd looking for a .beads directory with a redirect file
@@ -109,14 +156,18 @@ func findOriginalBeadsDir() string {
 		cwd = resolved
 	}
 
-	// Check BEADS_DIR first
+	// Check BEADS_DIR first: if the env points at a .beads directory with a
+	// redirect file, that's the original. Fall through to the fs walk if
+	// BEADS_DIR is set but does not contain a redirect — bd's startup now
+	// rebinds BEADS_DIR to the resolved target (#3230) after following
+	// redirects, so an unconditional early-return here would hide every
+	// redirect from `bd where` output.
 	if envDir := os.Getenv("BEADS_DIR"); envDir != "" {
 		envDir = utils.CanonicalizePath(envDir)
 		redirectFile := filepath.Join(envDir, beads.RedirectFileName)
 		if _, err := os.Stat(redirectFile); err == nil {
 			return envDir
 		}
-		return ""
 	}
 
 	// Walk up directory tree looking for .beads with redirect
@@ -142,12 +193,6 @@ func findOriginalBeadsDir() string {
 		dir = parent
 	}
 
-	return ""
-}
-
-// detectPrefixFromDir tries to detect the issue prefix from files in the beads directory.
-// Returns empty string if prefix cannot be determined.
-func detectPrefixFromDir(_ string) string {
 	return ""
 }
 

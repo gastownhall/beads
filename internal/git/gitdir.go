@@ -308,6 +308,99 @@ func IsColocatedJJGit() bool {
 	return err == nil
 }
 
+// JJSecondaryWorkspaceRoot returns the secondary workspace root and true if
+// CWD is inside a jujutsu secondary workspace; otherwise ("", false).
+// Secondary workspaces have .jj/repo as a file (pointer to the primary's repo
+// directory) rather than a directory.
+func JJSecondaryWorkspaceRoot() (string, bool) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", false
+	}
+	return JJSecondaryWorkspaceRootFrom(cwd)
+}
+
+// JJSecondaryWorkspaceRootFrom is the path-aware variant of
+// JJSecondaryWorkspaceRoot: it resolves the jujutsu root starting from startDir
+// rather than the current working directory.
+func JJSecondaryWorkspaceRootFrom(startDir string) (string, bool) {
+	jjRoot, err := getJujutsuRootFrom(startDir)
+	if err != nil {
+		return "", false
+	}
+	info, err := os.Stat(filepath.Join(jjRoot, ".jj", "repo"))
+	if err != nil || info.IsDir() {
+		return "", false
+	}
+	return jjRoot, true
+}
+
+// IsJJSecondaryWorkspace returns true if CWD is inside a jujutsu secondary workspace.
+func IsJJSecondaryWorkspace() bool {
+	_, ok := JJSecondaryWorkspaceRoot()
+	return ok
+}
+
+// GetJJPrimaryWorkspaceRoot returns the root directory of the primary jujutsu
+// workspace when called from inside a secondary workspace. The secondary's
+// .jj/repo file contains a path (relative or absolute) to the primary's
+// .jj/repo directory; the primary workspace root is two levels above that.
+//
+// Returns an error if not in a jj secondary workspace or the path cannot be resolved.
+func GetJJPrimaryWorkspaceRoot() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get current directory: %w", err)
+	}
+	return GetJJPrimaryWorkspaceRootFrom(cwd)
+}
+
+// GetJJPrimaryWorkspaceRootFrom is the path-aware variant of
+// GetJJPrimaryWorkspaceRoot: it resolves the jujutsu root starting from startDir
+// rather than the current working directory.
+func GetJJPrimaryWorkspaceRootFrom(startDir string) (string, error) {
+	jjRoot, err := getJujutsuRootFrom(startDir)
+	if err != nil {
+		return "", err
+	}
+
+	// #nosec G304 -- .jj/repo path is within a jujutsu workspace we located by walking from cwd
+	content, err := os.ReadFile(filepath.Join(jjRoot, ".jj", "repo"))
+	if err != nil {
+		return "", fmt.Errorf("failed to read .jj/repo: %w", err)
+	}
+
+	target := strings.TrimSpace(string(content))
+	if target == "" {
+		return "", fmt.Errorf(".jj/repo is empty")
+	}
+
+	// .jj/repo content is relative to the .jj/ directory, or absolute.
+	var primaryRepoFile string
+	if filepath.IsAbs(target) {
+		primaryRepoFile = target
+	} else {
+		primaryRepoFile = filepath.Join(jjRoot, ".jj", target)
+	}
+
+	primaryRepoFile, err = filepath.Abs(primaryRepoFile)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve jj primary workspace path: %w", err)
+	}
+
+	// primaryRepoFile == <primary-root>/.jj/repo  →  root is Dir(Dir(that))
+	primaryRoot := filepath.Dir(filepath.Dir(primaryRepoFile))
+
+	if resolved, err := filepath.EvalSymlinks(primaryRoot); err == nil {
+		primaryRoot = resolved
+	}
+	if canonical := canonicalizeCase(primaryRoot); canonical != "" {
+		primaryRoot = canonical
+	}
+
+	return primaryRoot, nil
+}
+
 // GetJujutsuRoot returns the root directory of the jujutsu repository.
 // Returns empty string and error if not in a jujutsu repository.
 //
@@ -320,8 +413,19 @@ func GetJujutsuRoot() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to get current directory: %w", err)
 	}
+	return getJujutsuRootFrom(cwd)
+}
 
-	dir := cwd
+// getJujutsuRootFrom walks up from startDir to find the jujutsu root, applying
+// the same .git-boundary rule as GetJujutsuRoot. startDir is made absolute first
+// so that a relative input (e.g. ".") walks correctly rather than stalling at
+// filepath.Dir(".") == ".".
+func getJujutsuRootFrom(startDir string) (string, error) {
+	dir, err := filepath.Abs(startDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve start directory: %w", err)
+	}
+
 	for {
 		jjPath := filepath.Join(dir, ".jj")
 		if info, err := os.Stat(jjPath); err == nil && info.IsDir() {

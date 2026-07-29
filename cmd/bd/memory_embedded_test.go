@@ -18,11 +18,11 @@ func bdRemember(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd remember %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd remember %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdRememberFail runs "bd remember" expecting failure.
@@ -46,11 +46,11 @@ func bdRecall(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd recall %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd recall %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdRecallFail runs "bd recall" expecting failure.
@@ -74,11 +74,11 @@ func bdMemories(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd memories %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd memories %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdForget runs "bd forget" with the given args and returns stdout.
@@ -88,11 +88,11 @@ func bdForget(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd forget %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd forget %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdForgetFail runs "bd forget" expecting failure.
@@ -143,6 +143,52 @@ func TestEmbeddedMemory(t *testing.T) {
 		out := bdRecall(t, bd, dir, "overwrite-test")
 		if !strings.Contains(out, "second version") {
 			t.Errorf("expected 'second version' after overwrite: %s", out)
+		}
+	})
+
+	// Desire path: `bd remember <existing-key>` (treating remember as a getter) is a READ --
+	// it recalls the memory instead of overwriting it with its own key as content.
+	t.Run("remember_bare_existing_key_recalls", func(t *testing.T) {
+		bdRemember(t, bd, dir, "the real insight worth keeping", "--key", "guard-key")
+		// Fat-finger a "read": positional arg is the existing bare key. Succeeds as a recall.
+		out := bdRemember(t, bd, dir, "guard-key")
+		if !strings.Contains(out, "the real insight worth keeping") {
+			t.Errorf("expected bare existing key to recall the memory content, got: %s", out)
+		}
+		// The original content must be intact, not clobbered to "guard-key".
+		recalled := bdRecall(t, bd, dir, "guard-key")
+		if !strings.Contains(recalled, "the real insight worth keeping") {
+			t.Errorf("recall-instead-of-write must preserve original content, got: %s", recalled)
+		}
+	})
+
+	t.Run("remember_guard_bypass_with_explicit_key", func(t *testing.T) {
+		bdRemember(t, bd, dir, "original", "--key", "bypass-key")
+		// Explicit --key signals deliberate intent and bypasses the guard.
+		bdRemember(t, bd, dir, "bypass-key", "--key", "bypass-key")
+		out := bdRecall(t, bd, dir, "bypass-key")
+		if !strings.Contains(out, "bypass-key") {
+			t.Errorf("explicit --key should bypass guard and overwrite, got: %s", out)
+		}
+	})
+
+	t.Run("remember_bare_slug_without_memory_refuses", func(t *testing.T) {
+		// A bare slug naming NO existing memory is a mistyped read (or junk content) --
+		// refuse rather than silently creating a memory whose content is its own key.
+		out := bdRememberFail(t, bd, dir, "brand-new-slug-memory")
+		if !strings.Contains(out, "memories") {
+			t.Errorf("expected refusal to point at `bd memories`, got: %s", out)
+		}
+		// Nothing may have been stored.
+		bdRecallFail(t, bd, dir, "brand-new-slug-memory")
+	})
+
+	t.Run("remember_new_slug_with_explicit_key_stores", func(t *testing.T) {
+		// --key states write intent: slug-like content stores fine.
+		bdRemember(t, bd, dir, "brand-new-slug-memory", "--key", "brand-new-slug-memory")
+		out := bdRecall(t, bd, dir, "brand-new-slug-memory")
+		if !strings.Contains(out, "brand-new-slug-memory") {
+			t.Errorf("expected --key to store slug content, got: %s", out)
 		}
 	})
 
@@ -220,6 +266,15 @@ func TestEmbeddedMemoryConcurrent(t *testing.T) {
 	// flock contention, not export behavior. With export.auto=true
 	// (the default since GH#2973), 8 concurrent writers also trigger
 	// post-write read paths that race with in-flight commits.
+	//
+	// The underlying race is not flock-level (flock already serializes
+	// bd subprocesses) but engine-shutdown-level: Dolt's working-set
+	// persistence can lag behind flock release, so the next subprocess
+	// sometimes commits with a stale view and overwrites a prior forget.
+	// See GH#3260 for the investigation (PR #3269 was the CI probe).
+	// Fix would require synchronous flush on engine close or a long-lived
+	// engine per store; both are substantial work. Until then, this
+	// workaround keeps the test deterministic.
 	disableAutoExport := exec.Command(bd, "config", "set", "export.auto", "false")
 	disableAutoExport.Dir = dir
 	disableAutoExport.Env = bdEnv(dir)

@@ -149,3 +149,34 @@ func TestFixStaleMQFiles_NoDirectory(t *testing.T) {
 		t.Fatalf("FixStaleMQFiles should not fail when directory doesn't exist: %v", err)
 	}
 }
+
+func TestCheckAndFixStaleMQFiles_WorktreeFallback(t *testing.T) {
+	clearResolveBeadsDirCache()
+	t.Cleanup(clearResolveBeadsDirCache)
+
+	mainRepoDir, worktreeDir := setupWorktreeRepo(t)
+	mqDir := filepath.Join(mainRepoDir, ".beads", "mq")
+	if err := os.MkdirAll(mqDir, 0755); err != nil {
+		t.Fatalf("failed to create shared mq dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mqDir, "mr-abc123.json"), []byte(`{"id":"test"}`), 0644); err != nil {
+		t.Fatalf("failed to create shared mq file: %v", err)
+	}
+
+	check := CheckStaleMQFiles(worktreeDir)
+	if check.Status != StatusWarning {
+		t.Fatalf("expected warning from shared mq dir, got %q: %s", check.Status, check.Message)
+	}
+
+	if err := FixStaleMQFiles(worktreeDir); err != nil {
+		t.Fatalf("FixStaleMQFiles failed for shared mq dir: %v", err)
+	}
+	if _, err := os.Stat(mqDir); !os.IsNotExist(err) {
+		t.Fatalf("expected shared mq dir to be removed, stat err=%v", err)
+	}
+
+	check = CheckStaleMQFiles(worktreeDir)
+	if check.Status != StatusOK {
+		t.Fatalf("expected OK after removing shared mq dir, got %q: %s", check.Status, check.Message)
+	}
+}

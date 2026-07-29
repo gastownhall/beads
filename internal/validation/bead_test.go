@@ -219,9 +219,10 @@ func TestParseIssueType(t *testing.T) {
 		{"chore type", "chore", types.TypeChore, false, ""},
 		// Molecule is now a core type (used by swarm create)
 		{"molecule type", "molecule", types.TypeMolecule, false, ""},
-		// Orchestrator types require types.custom configuration (invalid without config)
+		// Gate is a core type (used by bd gate, formula gates — GH#3213)
+		{"gate type", "gate", types.TypeGate, false, ""},
+		// Remaining orchestrator types require types.custom configuration
 		{"merge-request type", "merge-request", types.TypeTask, true, "invalid issue type"},
-		{"gate type", "gate", types.TypeTask, true, "invalid issue type"},
 		{"event type", "event", types.TypeTask, true, "invalid issue type"},
 		{"message type", "message", types.TypeMessage, false, ""},
 
@@ -368,6 +369,11 @@ func TestValidateIDPrefixAllowed(t *testing.T) {
 		{"allowed with trailing dash", "gt-abc123", "hq", "gt-, hmc-", false, false},
 		{"empty allowed list", "gt-abc123", "hq", "", false, true},
 		{"single allowed prefix", "gt-abc123", "hq", "gt", false, false},
+
+		// DB prefix with trailing hyphen (GH#4208)
+		{"db prefix trailing hyphen", "v2-abc123", "v2-", "", false, false},
+		{"db prefix trailing hyphen with allowed", "v2-abc123", "v2-", "v2-", false, false},
+		{"db prefix only hyphen", "abc123", "-", "", false, false},
 
 		// Multi-hyphen allowed prefixes
 		{"multi-hyphen in allowed list", "my-cool-prefix-abc123", "hq", "my-cool-prefix,other", false, false},

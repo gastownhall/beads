@@ -1,0 +1,645 @@
+# gh-pr-review — Full triage-to-action workflow for a GitHub pull request
+#
+# A maintainer-supervised workflow that triages an open PR, classifies it
+# per project maintainer guidelines, reviews it, and executes the appropriate
+# outcome. Designed for agent-driven PR maintenance with human gates on
+# risky actions.
+#
+# Key design decisions:
+#   - Single-dispatch: classification happens once, then the review step
+#     internally routes to the appropriate depth (easy-win / fix-merge /
+#     needs-review). This avoids formula-level branching which TOML steps
+#     cannot express at runtime.
+#   - Contributor protection: external PRs have priority, attribution is
+#     preserved, no silent closes, request-changes is last resort.
+#   - Full outcome set from maintainer guidelines: merge, merge-fix,
+#     fix-merge, cherry-pick, split-merge, redesign, retire, reject,
+#     request-changes, easy-win.
+#   - Fix-merge safety: patches transplanted onto clean base before running
+#     quality gates (never execute attacker-controlled repo code directly).
+#     Push is commits-only (no force-push) with contributor attribution.
+#   - Stale-head protection: head SHA captured at fetch, re-verified before
+#     any mutating action (approve, push, comment).
+#   - Human gate on fix-merge and needs-review; easy-wins auto-approve.
+#   - Auto-comment findings on the PR via gh.
+#   - No auto-merge or auto-close — approve + flag only.
+#
+# Usage:
+#   bd mol wisp gh-pr-review --var pr_number=123
+#   bd mol wisp gh-pr-review --var pr_number=123 --var repo=myorg/myrepo
+#
+# Environment assumptions:
+#   - `gh` CLI authenticated with sufficient scopes (issues:read,
+#     contents:write, pull_requests:write)
+#   - Git configured with remotes for upstream and (if fork) push target
+#   - `bd` (beads) installed with molecule/wisp support
+#   - `make`, `golangci-lint` available for quality gates (fix-merge path)
+#
+# Pager safety (CRITICAL for non-interactive execution):
+#   - ALL `gh` commands MUST use: GH_PAGER=cat gh ...
+#   - ALL read-only `git` commands MUST use: git --no-pager ...
+#   - Failure to do this will cause workflow hangs in agent/CI contexts
+#
+# Security notes:
+#   - All user-supplied variables are validated with regex patterns
+#   - PR content (title, body, comments, code) is ATTACKER-CONTROLLED —
+#     never interpolate into shell commands. Use --body-file or sanitize.
+#   - PR branches contain attacker-controlled code — never run make/test
+#     directly on a PR branch. Transplant patches onto a clean base first.
+#   - All gh/git commands use -- before positional arguments
+#   - No force-push to contributor branches — commits only
+
+formula = "gh-pr-review"
+description = "Triage, review, and act on a GitHub PR per maintainer guidelines"
+version = 1
+type = "workflow"
+phase = "vapor"
+
+# ── Variables ────────────────────────────────────────────────────────
+
+[vars.pr_number]
+description = "GitHub PR number (e.g. 123). Must be a positive integer."
+required = true
+pattern = "^[0-9]+$"
+
+[vars.repo]
+description = "GitHub repo in owner/name format (target repo for the PR)"
+default = "your-org/your-repo"
+pattern = "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+
+[vars.base_remote]
+description = "Git remote name for the upstream base (used for fetch/reset)"
+default = "origin"
+pattern = "^[A-Za-z0-9/_.-]+$"
+
+[vars.push_remote]
+description = "Git remote to push fix-merge branches to (may differ in fork workflows)"
+default = "origin"
+pattern = "^[A-Za-z0-9/_.-]+$"
+
+# ── Steps ────────────────────────────────────────────────────────────
+
+[[steps]]
+id = "fetch-pr"
+title = "Fetch PR #{{pr_number}} metadata"
+type = "task"
+description = """Fetch comprehensive PR metadata needed for classification and review.
+
+PAGER SAFETY: Use GH_PAGER=cat for ALL gh commands in this workflow.
+
+1. Fetch the full PR metadata:
+   ```
+   GH_PAGER=cat gh pr view {{pr_number}} --repo {{repo}} --json \
+     number,title,body,author,labels,state,isDraft,mergeable,\
+     mergeStateStatus,headRefName,headRefOid,baseRefName,\
+     reviewDecision,reviews,comments,commits,files,additions,\
+     deletions,changedFiles,maintainerCanModify,\
+     headRepository,headRepositoryOwner,statusCheckRollup,url
+   ```
+
+2. Record these critical fields for later steps:
+   - **head SHA** (`headRefOid`) — used for stale-head protection
+   - **maintainerCanModify** — determines if fix-merge can push
+   - **isDraft** — affects classification (do NOT blanket-skip drafts)
+   - **author login** and **headRepositoryOwner** — determines external vs internal
+   - **statusCheckRollup** — CI status
+   - **mergeable** and **mergeStateStatus** — merge conflict detection
+   - **files** — list of changed files with additions/deletions
+
+3. Fetch linked issues (if any referenced in body/title via #NNN, Fixes #NNN, etc.):
+   ```
+   GH_PAGER=cat gh api "repos/{{repo}}/issues/{{pr_number}}/timeline" --paginate \
+     --jq '.[] | select(.event == "cross-referenced" or .event == "connected") | {event, source: .source.issue.html_url}'
+   ```
+
+4. Check for existing reviews and unresolved review threads:
+   ```
+   GH_PAGER=cat gh api "repos/{{repo}}/pulls/{{pr_number}}/reviews" \
+     --jq '.[] | {user: .user.login, state: .state, submitted_at: .submitted_at}'
+   ```
+
+5. Summarize the PR in structured form:
+   - PR title and number
+   - Author (login, association: member/contributor/external)
+   - State (open/closed/merged/draft)
+   - CI status (pass/fail/pending)
+   - Merge status (clean/conflicts/unknown)
+   - Diff stats (files changed, additions, deletions)
+   - Linked issues
+   - Existing reviews
+   - Head SHA (for stale-head checks)
+   - maintainerCanModify (boolean)"""
+acceptance = "PR metadata fetched, head SHA recorded, author association determined, CI/merge status captured, linked issues identified"
+
+[[steps]]
+id = "classify"
+title = "Classify PR #{{pr_number}}"
+needs = ["fetch-pr"]
+type = "task"
+description = """Classify the PR into a triage group per your maintainer guidelines.
+
+Using the metadata from fetch-pr, classify into ONE of:
+
+## Triage Groups
+
+### Easy-win
+The PR fits this group if ALL of:
+- Targeted bug fix, documentation update, dependency bot upgrade, OR trivially
+  correct small change
+- CI is green (all status checks pass)
+- Diff is focused — one concern, no piggybacking
+- No merge conflicts
+- No local tracker metadata files in the diff (for beads, this includes `.beads/`)
+- No generated or garbage files
+- Author is not on any ban list
+- No unresolved review threads requesting substantive changes
+- If behavioral change: tests are included
+
+Also classify as easy-win if:
+- PR is a draft that should be closed (abandoned, superseded, stale draft)
+
+### Fix-merge candidate
+The PR WOULD be an easy-win but has a simple, identifiable blocker:
+- Failed CI that appears fixable (test failure, lint issue, build error)
+- Needs rebase (merge conflicts with base branch)
+- Small implementation error (off-by-one, missing error check, wrong variable)
+- Missing test for a behavioral change (but the change itself is correct)
+
+CRITICAL: Fix-merge requires `maintainerCanModify` to be true. If false,
+downgrade to needs-review with a note about push access.
+
+Also check: does the head branch still exist? If the contributor deleted
+their fork or branch, fix-merge is impossible — downgrade to needs-review
+or retire.
+
+### Needs-review
+Everything else:
+- Complex changes spanning many files or subsystems
+- Architectural changes or new subsystems
+- Security-sensitive changes
+- Changes that are suspicious, unclear, or have unclear motivation
+- PRs where the fix-merge repair would be non-trivial
+- PRs with substantive unresolved review threads
+- PRs that might warrant cherry-pick, split-merge, or redesign outcomes
+
+## Additional classification notes
+
+- **Draft PRs**: Do NOT skip drafts before classification. Triage first:
+  - Abandoned/stale draft → classify for retire outcome
+  - Active draft with incomplete work → note as draft, classify normally
+  - Draft that's actually ready → classify normally
+- **Bot PRs** (dependabot, renovate): Usually easy-win if CI passes
+- **Large diffs** (>500 lines changed): Bias toward needs-review unless
+  it's clearly mechanical (rename, migration, generated code)
+
+Record:
+- Triage group (easy-win / fix-merge / needs-review)
+- Confidence level (high/medium/low)
+- Preliminary outcome recommendation from the full set:
+  easy-win, merge, merge-fix, fix-merge, cherry-pick, split-merge,
+  redesign, retire, reject, request-changes
+- Rationale (one paragraph)
+- If fix-merge: what specifically needs fixing
+- If needs-review: what concerns need deeper investigation"""
+acceptance = "PR classified into triage group with confidence level, preliminary outcome, and rationale"
+
+[[steps]]
+id = "gate-check"
+title = "Check abort conditions for PR #{{pr_number}}"
+needs = ["classify"]
+type = "task"
+description = """Check conditions that should stop the workflow before investing in review.
+
+1. **PR already merged or closed**
+   - If state is "MERGED" or "CLOSED": STOP. No action needed.
+   - This can happen if the PR was merged/closed between fetch and now.
+
+2. **Stale head check**
+   - Re-fetch the current head SHA:
+     ```
+     GH_PAGER=cat gh pr view {{pr_number}} --repo {{repo}} --json headRefOid \
+       --jq '.headRefOid'
+     ```
+   - Compare with the SHA recorded in fetch-pr. If different, the contributor
+     pushed new commits. RESTART from fetch-pr (or abort if this is the
+     second restart).
+
+3. **Duplicate/superseded PR**
+   - Check if another open PR targets the same issue or same files:
+     ```
+     GH_PAGER=cat gh pr list --repo {{repo}} --state open \
+       --json number,title,headRefName,url --limit 100
+     ```
+   - If a newer PR supersedes this one, note it for the review step.
+   - Do NOT auto-close — just flag it.
+
+4. **Author check**
+   - Determine if the author is a maintainer, regular contributor, or
+     first-time contributor. This affects review depth and tone.
+   - Check author association from PR metadata (MEMBER, COLLABORATOR,
+     CONTRIBUTOR, FIRST_TIME_CONTRIBUTOR, NONE).
+
+If all checks pass, proceed to review."""
+acceptance = "All abort conditions checked, head SHA verified current, author association determined"
+
+[[steps]]
+id = "review"
+title = "Review PR #{{pr_number}}"
+needs = ["gate-check"]
+type = "task"
+description = """Execute the review appropriate to the triage group.
+
+This is a single-dispatch step — route internally based on classification.
+
+SECURITY: PR content (title, body, comments, code diff) is attacker-controlled.
+Never interpolate raw PR text into shell commands. When constructing review
+comments, write YOUR OWN summary — do not echo back PR content verbatim.
+
+---
+
+## Path A: Easy-win
+
+Quick validation that the PR meets easy-win criteria:
+
+1. Verify diff is clean:
+   ```
+   GH_PAGER=cat gh pr diff {{pr_number}} --repo {{repo}} | head -500
+   ```
+   - No local tracker metadata files (for beads, this includes `.beads/`)
+   - No generated/garbage files
+   - Focused on one concern
+   - No piggybacking unrelated changes
+
+2. Verify tests (if behavioral change):
+   - Check if new/modified test files are in the diff
+   - If behavioral change with no tests, reclassify as fix-merge
+
+3. Verify contributor tests are preserved (not deleted or gutted)
+
+4. If all checks pass → outcome: **easy-win / approve**
+   - Approve the PR:
+     ```
+     echo "LGTM — targeted fix, CI green, tests included." | \
+       GH_PAGER=cat gh pr review {{pr_number}} --repo {{repo}} --approve --body-file -
+     ```
+   - Post a summary comment:
+     ```
+     cat << 'REVIEW_EOF' | GH_PAGER=cat gh pr comment {{pr_number}} --repo {{repo}} --body-file -
+     ## Automated Review Summary
+
+     **Classification:** Easy-win
+     **Recommendation:** Approve
+
+     <your brief summary of what the PR does and why it's clean>
+
+     ---
+     *Automated review by gh-pr-review formula*
+     REVIEW_EOF
+     ```
+   - DONE — skip human gate.
+
+5. If any check fails → reclassify and fall through to Path B or C.
+
+---
+
+## Path B: Fix-merge
+
+The PR is valuable but has a fixable blocker.
+
+### Pre-check: can we push?
+- Verify `maintainerCanModify` is true
+- Verify the head branch still exists:
+  ```
+  GH_PAGER=cat gh api "repos/{{repo}}/pulls/{{pr_number}}" \
+    --jq '.head.repo.full_name + ":" + .head.ref'
+  ```
+- If we cannot push, downgrade to needs-review with a note.
+
+### Worktree setup (transplant approach for safety)
+Create a clean worktree based on the upstream base, then apply the PR's
+changes as a patch. This avoids running attacker-controlled repo code
+(Makefile, scripts, hooks) directly from the PR branch.
+
+```
+REPO_ROOT=$(git rev-parse --show-toplevel)
+REPO_NAME=$(basename "$REPO_ROOT")
+WORKTREE_PATH="../${REPO_NAME}--pr-{{pr_number}}"
+
+# Validate path stays in expected parent
+EXPECTED_PARENT=$(dirname "$REPO_ROOT")
+CANONICAL_PATH=$(realpath --canonicalize-missing "$WORKTREE_PATH")
+if [[ "$CANONICAL_PATH" != "$EXPECTED_PARENT"/* ]]; then
+  echo "ERROR: worktree path escapes expected parent directory" >&2
+  exit 1
+fi
+
+# Create worktree from clean base
+git fetch -- {{base_remote}} main
+git worktree add -b review/pr-{{pr_number}} "$WORKTREE_PATH" {{base_remote}}/main
+cd "$WORKTREE_PATH"
+
+# Fetch the PR ref and apply as patch (transplant, not checkout)
+git fetch -- {{base_remote}} pull/{{pr_number}}/head:pr-{{pr_number}}-ref
+git diff {{base_remote}}/main...pr-{{pr_number}}-ref | git apply --3way
+```
+
+If the patch doesn't apply cleanly, note the conflicts and include them
+in the fix plan.
+
+### Make fixes
+Based on the classification, fix the identified blockers:
+- **Failed CI**: Fix the test/lint/build issue
+- **Needs rebase**: The transplant approach handles this inherently
+- **Small implementation error**: Fix the bug
+- **Missing tests**: Add the missing tests
+
+### Preserve contributor work
+- Do NOT delete or rewrite contributor tests unless they are actually wrong
+- Do NOT restructure the contributor's approach unless necessary for correctness
+- Keep changes minimal — fix the blocker, don't refactor
+
+### Run quality gates (on the clean-base transplant)
+```
+make test
+golangci-lint run ./...
+make build
+```
+
+### Commit with attribution
+```
+git add -A
+git commit -m "fix: <description of fix> (PR #{{pr_number}})
+
+Co-authored-by: <contributor-name> <<contributor-email>>
+Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+```
+
+IMPORTANT: NO force-push. Commits only. If the fix requires rewriting
+history, escalate to human.
+
+### Prepare push (but do NOT push yet — human gate first)
+Record:
+- What was fixed
+- Quality gate results
+- The diff between the PR's original state and the fixed state
+- The planned push command:
+  ```
+  git push -- <contributor-fork-remote> HEAD:<pr-branch-name>
+  ```
+
+→ Proceed to human gate.
+
+---
+
+## Path C: Needs-review
+
+Deep review requiring human judgment.
+
+1. Read the full diff carefully:
+   ```
+   GH_PAGER=cat gh pr diff {{pr_number}} --repo {{repo}}
+   ```
+
+2. Analyze each changed file:
+   - What does this change do?
+   - Is it correct?
+   - Are there edge cases or error handling gaps?
+   - Does it follow repo conventions (CONTRIBUTING.md)?
+   - Are there security implications?
+
+3. Check for common issues:
+   - Local tracker metadata files in diff (for beads, this includes `.beads/`)
+   - Generated or garbage files
+   - Piggybacking unrelated changes
+   - Missing tests for behavioral changes
+   - Deleted or gutted contributor tests
+   - Breaking changes without documentation
+   - Hard-coded values that should be configurable
+
+4. Assess against the full outcome set:
+   - **Merge**: Ready as-is, well-tested, broadly useful
+   - **Merge-fix**: Merge now, push follow-up fix to main afterward
+   - **Fix-merge**: Valuable but needs local fixes before merging
+   - **Cherry-pick**: Only some parts are worth keeping
+   - **Split-merge**: Multiple concerns that should be separate commits
+   - **Redesign**: Problem is real but solution needs rethinking
+   - **Retire**: Obsolete, superseded, or already fixed elsewhere
+   - **Reject**: Doesn't fit the project, too niche, or poor design
+   - **Request-changes**: LAST RESORT — only when maintainer/agents
+     genuinely cannot absorb, transform, or land the useful parts
+
+5. Write a detailed report:
+   - Summary of what the PR does
+   - Classification and recommended outcome
+   - File-by-file analysis (for significant changes)
+   - Risks and concerns
+   - What value can be preserved (even if rejecting/redesigning)
+   - Suggested next steps
+
+6. Post an initial review comment (findings, not decision):
+   ```
+   cat << 'REVIEW_EOF' | GH_PAGER=cat gh pr comment {{pr_number}} --repo {{repo}} --body-file -
+   ## Review Analysis
+
+   **Classification:** Needs review
+   **Preliminary recommendation:** <outcome>
+
+   ### Summary
+   <your analysis>
+
+   ### Findings
+   <file-by-file or concern-by-concern breakdown>
+
+   ### Recommendation
+   <what you recommend and why>
+
+   ---
+   *Automated review by gh-pr-review formula — awaiting maintainer decision*
+   REVIEW_EOF
+   ```
+
+→ Proceed to human gate."""
+acceptance = "Review completed for the appropriate path: easy-win approved, fix-merge fixes prepared, or needs-review report generated"
+
+[[steps]]
+id = "human-gate"
+title = "Maintainer decision for PR #{{pr_number}}"
+needs = ["review"]
+type = "human"
+description = """Present the review findings to the maintainer for decision.
+
+NOTE: This step is SKIPPED for easy-win PRs (they are auto-approved in
+the review step). It runs only for fix-merge and needs-review PRs.
+
+Present to the maintainer:
+
+### For fix-merge PRs:
+- Original PR summary
+- What was broken and what was fixed
+- Quality gate results (tests, lint, build)
+- The diff of fixes applied
+- The planned push command
+- Ask: proceed with push, or take a different action?
+
+### For needs-review PRs:
+- Full review report
+- Recommended outcome from the full set:
+  merge, merge-fix, fix-merge, cherry-pick, split-merge,
+  redesign, retire, reject, request-changes
+- Risk assessment
+- Ask: which outcome to execute?
+
+The maintainer will:
+- **Approve the recommendation**: Proceed to act step
+- **Choose a different outcome**: Provide the outcome and any notes
+- **Request more investigation**: Return to review step with guidance
+- **Abort**: Clean up and stop"""
+acceptance = "Maintainer provided a decision (outcome + any notes)"
+
+[[steps]]
+id = "act"
+title = "Execute outcome for PR #{{pr_number}}"
+needs = ["human-gate"]
+type = "task"
+description = """Execute the maintainer's chosen outcome.
+
+PAGER SAFETY: Use GH_PAGER=cat for ALL gh commands.
+
+STALE-HEAD CHECK: Before any mutating action, re-verify the head SHA:
+```
+CURRENT_SHA=$(GH_PAGER=cat gh pr view {{pr_number}} --repo {{repo}} --json headRefOid --jq '.headRefOid')
+```
+Compare with the SHA from fetch-pr. If changed, STOP and alert the
+maintainer — the PR has been updated since review.
+
+### Execute based on outcome:
+
+**Merge** (recommend merge, human does the actual merge):
+```
+echo "Reviewed and approved. Ready to merge." | \
+  GH_PAGER=cat gh pr review {{pr_number}} --repo {{repo}} --approve --body-file -
+```
+
+**Merge-fix** (approve now, note follow-up needed):
+```
+cat << 'BODY_EOF' | GH_PAGER=cat gh pr review {{pr_number}} --repo {{repo}} --approve --body-file -
+Approved. Minor follow-up fix will be pushed to main after merge.
+
+Follow-up items:
+<list from review>
+BODY_EOF
+```
+File a follow-up issue in your tracker for the post-merge fix.
+
+**Fix-merge** (push fixes, then approve):
+1. Re-verify head SHA matches (stale-head protection)
+2. Push the fix commits to the contributor's branch:
+   ```
+   git push -- <contributor-remote> HEAD:<pr-branch-name>
+   ```
+   IMPORTANT: No --force. Commits only. If push fails (permissions,
+   branch protection, branch deleted), fall back to posting the patch
+   as a review comment.
+3. Approve the PR:
+   ```
+   echo "Pushed fix commits with attribution. LGTM." | \
+     GH_PAGER=cat gh pr review {{pr_number}} --repo {{repo}} --approve --body-file -
+   ```
+
+**Cherry-pick** (extract valuable parts):
+- Post a comment explaining what will be cherry-picked and why
+- Note: actual cherry-pick is done manually by maintainer
+```
+cat << 'BODY_EOF' | GH_PAGER=cat gh pr comment {{pr_number}} --repo {{repo}} --body-file -
+Thank you for this PR! After review, we'd like to cherry-pick the
+following parts:
+
+<list of commits/files to keep>
+
+The remaining changes <reason for not including>.
+
+We'll land the accepted parts with attribution to your work.
+BODY_EOF
+```
+
+**Split-merge** (separate concerns):
+- Post a comment explaining the split plan
+- Note: actual split is done manually by maintainer
+
+**Redesign** (solve the problem differently):
+- Post a comment thanking the contributor, explaining the alternative approach,
+  and crediting their design/tests/bug-report
+```
+cat << 'BODY_EOF' | GH_PAGER=cat gh pr comment {{pr_number}} --repo {{repo}} --body-file -
+Thank you for identifying this issue and proposing a solution!
+
+After review, we think the underlying problem is best addressed with
+a different approach: <explanation>.
+
+We'll credit your design/tests/analysis in the replacement implementation.
+
+<what specifically will be preserved from this PR>
+BODY_EOF
+```
+
+**Retire** (obsolete/superseded):
+- Post a comment explaining what superseded the PR, with thanks
+- Do NOT close the PR (no auto-close) — just recommend closing
+
+**Reject** (doesn't fit):
+- Post a polite comment explaining why, suggesting alternatives
+- Do NOT close the PR — just recommend closing
+
+**Request-changes** (LAST RESORT):
+- Only if the maintainer explicitly chose this
+- Post specific, actionable feedback
+```
+cat << 'BODY_EOF' | GH_PAGER=cat gh pr review {{pr_number}} --repo {{repo}} --request-changes --body-file -
+<specific actionable feedback>
+BODY_EOF
+```
+
+For ALL outcomes:
+- Be explicit about what was accepted, rejected, or needs work
+- Preserve contributor attribution where applicable
+- Thank the contributor
+- Reference linked issues where relevant"""
+acceptance = "Chosen outcome executed: review posted, comments made, fixes pushed (if fix-merge), attribution preserved"
+
+[[steps]]
+id = "cleanup"
+title = "Clean up after PR #{{pr_number}} review"
+needs = ["act"]
+type = "task"
+description = """Remove any worktrees and temporary artifacts created during the workflow.
+
+WORKING DIRECTORY: Return to the main repo root for this step.
+
+1. Return to the main repo root:
+   ```
+   REPO_ROOT=$(git worktree list | head -1 | awk '{print $1}')
+   cd "$REPO_ROOT"
+   ```
+
+2. Remove the worktree if it was created (fix-merge path):
+   ```
+   REPO_NAME=$(basename "$REPO_ROOT")
+   WORKTREE_PATH="../${REPO_NAME}--pr-{{pr_number}}"
+   if [ -d "$WORKTREE_PATH" ]; then
+     git worktree remove "$WORKTREE_PATH" --force 2>/dev/null || true
+     git worktree prune
+   fi
+   ```
+
+3. Clean up any local branches created for the review:
+   ```
+   git branch -D review/pr-{{pr_number}} 2>/dev/null || true
+   git branch -D pr-{{pr_number}}-ref 2>/dev/null || true
+   ```
+
+4. This step is IDEMPOTENT — safe to run multiple times or after failures.
+   If the workflow aborted at any point after worktree creation, this step
+   should still be called to avoid leaking worktrees.
+
+5. Burn the wisp (the ephemeral tracking bead for this workflow run)."""
+acceptance = "Worktree removed (if created), temp branches deleted, wisp burned, no leaked artifacts"

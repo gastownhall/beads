@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/config"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -269,7 +272,48 @@ func TestDoltServerMode(t *testing.T) {
 		}
 	})
 
+	t.Run("GetDoltServerHost_config_yaml", func(t *testing.T) {
+		// Mirror of the dolt.port config.yaml fix (GH#2073) for host.
+		// Precedence: env > metadata.json > config.yaml > default.
+
+		// Ensure no host env var leaks into the test.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+
+		configDir := t.TempDir()
+		configYaml := filepath.Join(configDir, "config.yaml")
+		if err := os.WriteFile(configYaml,
+			[]byte("dolt.host: 100.64.0.1\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("BEADS_DIR", configDir)
+		if err := config.Initialize(); err != nil {
+			t.Fatalf("config.Initialize: %v", err)
+		}
+		t.Cleanup(config.ResetForTesting)
+
+		// config.yaml wins when metadata.json leaves host unset.
+		emptyCfg := &Config{}
+		if got := emptyCfg.GetDoltServerHost(); got != "100.64.0.1" {
+			t.Errorf("empty cfg + config.yaml: GetDoltServerHost() = %q, want 100.64.0.1", got)
+		}
+
+		// metadata.json wins over config.yaml when both set.
+		metaCfg := &Config{DoltServerHost: "192.168.1.100"}
+		if got := metaCfg.GetDoltServerHost(); got != "192.168.1.100" {
+			t.Errorf("metadata over config.yaml: GetDoltServerHost() = %q, want 192.168.1.100", got)
+		}
+
+		// env var wins over config.yaml.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "10.0.0.1")
+		if got := emptyCfg.GetDoltServerHost(); got != "10.0.0.1" {
+			t.Errorf("env over config.yaml: GetDoltServerHost() = %q, want 10.0.0.1", got)
+		}
+	})
+
 	t.Run("GetDoltServerPort", func(t *testing.T) {
+		// Clear port env vars so the table-driven configs are the source of truth.
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
 		tests := []struct {
 			name string
 			cfg  *Config
@@ -352,23 +396,290 @@ func TestIsDoltServerModeEnvVar(t *testing.T) {
 	})
 }
 
-// TestGetBackendAlwaysDolt tests that GetBackend always returns "dolt".
-func TestGetBackendAlwaysDolt(t *testing.T) {
-	tests := []struct {
+// TestDoltProxiedServerMode covers the IsDoltProxiedServerMode predicate and
+// the GetCapabilities branch that treats proxied-server as multi-process-safe
+// (the proxy daemon serializes writers).
+func TestDoltProxiedServerMode(t *testing.T) {
+	t.Run("IsDoltProxiedServerMode", func(t *testing.T) {
+		tests := []struct {
+			name string
+			cfg  *Config
+			want bool
+		}{
+			{
+				name: "empty backend",
+				cfg:  &Config{Backend: ""},
+				want: false,
+			},
+			{
+				name: "embedded mode",
+				cfg:  &Config{Backend: BackendDolt, DoltMode: DoltModeEmbedded},
+				want: false,
+			},
+			{
+				name: "server mode",
+				cfg:  &Config{Backend: BackendDolt, DoltMode: DoltModeServer},
+				want: false,
+			},
+			{
+				name: "proxied-server mode",
+				cfg:  &Config{Backend: BackendDolt, DoltMode: DoltModeProxiedServer},
+				want: true,
+			},
+			{
+				name: "proxied-server, mixed case",
+				cfg:  &Config{Backend: BackendDolt, DoltMode: "Proxied-Server"},
+				want: true,
+			},
+			{
+				name: "default (no DoltMode)",
+				cfg:  &Config{Backend: BackendDolt},
+				want: false,
+			},
+		}
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				if got := tc.cfg.IsDoltProxiedServerMode(); got != tc.want {
+					t.Errorf("IsDoltProxiedServerMode() = %v, want %v", got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("ServerAndProxiedAreMutuallyExclusive", func(t *testing.T) {
+		cfg := &Config{Backend: BackendDolt, DoltMode: DoltModeProxiedServer}
+		if cfg.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() should be false for proxied-server mode")
+		}
+		if !cfg.IsDoltProxiedServerMode() {
+			t.Error("IsDoltProxiedServerMode() should be true for proxied-server mode")
+		}
+	})
+
+	t.Run("GetCapabilities_ProxiedServerNotSingleProcess", func(t *testing.T) {
+		cfg := &Config{Backend: BackendDolt, DoltMode: DoltModeProxiedServer}
+		caps := cfg.GetCapabilities()
+		if caps.SingleProcessOnly {
+			t.Error("proxied-server should report SingleProcessOnly=false (proxy multiplexes writers)")
+		}
+	})
+
+	t.Run("GetDoltModePreservesProxiedValue", func(t *testing.T) {
+		cfg := &Config{Backend: BackendDolt, DoltMode: DoltModeProxiedServer}
+		if got := cfg.GetDoltMode(); got != DoltModeProxiedServer {
+			t.Errorf("GetDoltMode() = %q, want %q", got, DoltModeProxiedServer)
+		}
+	})
+
+	t.Run("RoundtripPersistsProxiedMode", func(t *testing.T) {
+		dir := t.TempDir()
+		original := &Config{
+			Database:     "dolt",
+			Backend:      BackendDolt,
+			DoltMode:     DoltModeProxiedServer,
+			DoltDatabase: "myproj",
+			ProjectID:    "abc-123",
+		}
+		if err := original.Save(dir); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		loaded, err := Load(dir)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if loaded == nil {
+			t.Fatal("Load returned nil")
+		}
+		if loaded.DoltMode != DoltModeProxiedServer {
+			t.Errorf("DoltMode = %q, want %q", loaded.DoltMode, DoltModeProxiedServer)
+		}
+		if !loaded.IsDoltProxiedServerMode() {
+			t.Error("IsDoltProxiedServerMode() = false after roundtrip")
+		}
+		if loaded.IsDoltServerMode() {
+			t.Error("IsDoltServerMode() = true after roundtrip; should be false")
+		}
+	})
+}
+
+func TestProxiedServerClientInfo_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("absent file returns nil", func(t *testing.T) {
+		got, err := LoadProxiedServerClientInfo(dir)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if got != nil {
+			t.Errorf("got %+v, want nil for absent file", got)
+		}
+	})
+
+	t.Run("absolute paths survive save/load", func(t *testing.T) {
+		want := &ProxiedServerClientInfo{
+			RootPath:   "/var/lib/beads/proxieddb",
+			ConfigPath: "/etc/dolt/server.yaml",
+			LogPath:    "/var/log/beads/server.log",
+		}
+		if err := SaveProxiedServerClientInfo(dir, want); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		got, err := LoadProxiedServerClientInfo(dir)
+		if err != nil || got == nil {
+			t.Fatalf("Load: %v got=%v", err, got)
+		}
+		if *got != *want {
+			t.Errorf("got %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("external section survives save/load", func(t *testing.T) {
+		sub := t.TempDir()
+		want := &ProxiedServerClientInfo{
+			External: &ExternalDoltConfig{
+				Host:            "db.internal",
+				Port:            3306,
+				TLSRequired:     true,
+				TLSCert:         "/etc/beads/client.pem",
+				TLSKey:          "/etc/beads/client.key",
+				KeepAlivePeriod: 45 * time.Second,
+			},
+		}
+		if err := SaveProxiedServerClientInfo(sub, want); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		got, err := LoadProxiedServerClientInfo(sub)
+		if err != nil || got == nil {
+			t.Fatalf("Load: %v got=%v", err, got)
+		}
+		if got.RootPath != "" || got.ConfigPath != "" || got.LogPath != "" {
+			t.Errorf("local fields leaked into external-only sidecar: %+v", got)
+		}
+		if got.External == nil {
+			t.Fatalf("External section dropped on round-trip")
+		}
+		if *got.External != *want.External {
+			t.Errorf("got %+v, want %+v", got.External, want.External)
+		}
+	})
+
+	t.Run("local fields and external section coexist", func(t *testing.T) {
+		sub := t.TempDir()
+		want := &ProxiedServerClientInfo{
+			RootPath: "/var/lib/beads/proxieddb",
+			External: &ExternalDoltConfig{Socket: "/var/run/dolt.sock"},
+		}
+		if err := SaveProxiedServerClientInfo(sub, want); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		got, err := LoadProxiedServerClientInfo(sub)
+		if err != nil || got == nil {
+			t.Fatalf("Load: %v got=%v", err, got)
+		}
+		if got.RootPath != want.RootPath {
+			t.Errorf("RootPath = %q, want %q", got.RootPath, want.RootPath)
+		}
+		if got.External == nil || got.External.Socket != "/var/run/dolt.sock" {
+			t.Errorf("External round-trip lost data: %+v", got.External)
+		}
+	})
+
+	t.Run("legacy sidecar without external section still loads", func(t *testing.T) {
+		sub := t.TempDir()
+		legacy := []byte(`{"root_path":"/var/lib/beads/proxieddb","config_path":"/etc/dolt/server.yaml","log_path":"/var/log/beads/server.log"}`)
+		if err := os.WriteFile(ProxiedServerClientInfoPath(sub), legacy, 0o600); err != nil {
+			t.Fatalf("seed legacy: %v", err)
+		}
+		got, err := LoadProxiedServerClientInfo(sub)
+		if err != nil || got == nil {
+			t.Fatalf("Load: %v got=%v", err, got)
+		}
+		if got.External != nil {
+			t.Errorf("External should be nil for legacy sidecar, got %+v", got.External)
+		}
+		if got.RootPath != "/var/lib/beads/proxieddb" {
+			t.Errorf("RootPath = %q, want /var/lib/beads/proxieddb", got.RootPath)
+		}
+	})
+}
+
+func TestProxiedServerClientInfo_ResolvedPaths(t *testing.T) {
+	beadsDir := "/home/user/project/.beads"
+
+	t.Run("nil receiver returns empty", func(t *testing.T) {
+		var info *ProxiedServerClientInfo
+		if got := info.ResolvedRootPath(beadsDir); got != "" {
+			t.Errorf("ResolvedRootPath = %q, want empty", got)
+		}
+	})
+
+	t.Run("absolute returned as-is", func(t *testing.T) {
+		info := &ProxiedServerClientInfo{RootPath: "/srv/abs"}
+		if got := info.ResolvedRootPath(beadsDir); got != "/srv/abs" {
+			t.Errorf("ResolvedRootPath = %q, want absolute as-is", got)
+		}
+	})
+
+	t.Run("relative joined with beadsDir", func(t *testing.T) {
+		info := &ProxiedServerClientInfo{RootPath: "alt-proxieddb"}
+		want := filepath.Join(beadsDir, "alt-proxieddb")
+		if got := info.ResolvedRootPath(beadsDir); got != want {
+			t.Errorf("ResolvedRootPath = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestGetBackendAllowlist verifies the metadata-routing semantics: current backends
+// and removed-backend tombstones remain recognizable, while empty or unknown values
+// retain the historical Dolt fallback. Store selection rejects the tombstones before
+// it can open an empty Dolt database.
+func TestGetBackendAllowlist(t *testing.T) {
+	fallsBackToDolt := []struct {
 		name string
 		cfg  *Config
 	}{
 		{name: "explicit dolt", cfg: &Config{Backend: BackendDolt}},
 		{name: "empty backend", cfg: &Config{Backend: ""}},
 		{name: "legacy config", cfg: &Config{}},
-		{name: "stale sqlite value", cfg: &Config{Backend: "sqlite"}},
-		{name: "unknown backend", cfg: &Config{Backend: "postgres"}},
+		{name: "unknown backend", cfg: &Config{Backend: "mystery"}},
+	}
+	for _, tt := range fallsBackToDolt {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.cfg.GetBackend(); got != BackendDolt {
+				t.Errorf("GetBackend() = %q, want %q", got, BackendDolt)
+			}
+		})
+	}
+
+	honored := []string{BackendPostgres, BackendMySQL, BackendSQLite}
+	for _, backend := range honored {
+		t.Run(backend+" honored", func(t *testing.T) {
+			cfg := &Config{Backend: backend}
+			if got := cfg.GetBackend(); got != backend {
+				t.Errorf("GetBackend() = %q, want %q", got, backend)
+			}
+		})
+	}
+}
+
+func TestSupportedBackendAllowlist(t *testing.T) {
+	tests := []struct {
+		name      string
+		backend   string
+		supported bool
+	}{
+		{name: "implicit dolt", backend: "", supported: true},
+		{name: "dolt", backend: BackendDolt, supported: true},
+		{name: "sqlite", backend: BackendSQLite, supported: false},
+		{name: "postgres", backend: BackendPostgres, supported: false},
+		{name: "mysql", backend: BackendMySQL, supported: false},
+		{name: "unknown", backend: "mystery", supported: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.cfg.GetBackend(); got != BackendDolt {
-				t.Errorf("GetBackend() = %q, want %q", got, BackendDolt)
+			if got := IsSupportedBackend(tt.backend); got != tt.supported {
+				t.Fatalf("IsSupportedBackend(%q) = %v, want %v", tt.backend, got, tt.supported)
 			}
 		})
 	}
@@ -431,6 +742,9 @@ func TestGetCapabilities(t *testing.T) {
 
 // TestDoltServerModeRoundtrip tests that server mode config survives save/load
 func TestDoltServerModeRoundtrip(t *testing.T) {
+	// Clear port env vars so saved/loaded port comes from config, not ambient env.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0750); err != nil {
@@ -576,6 +890,87 @@ func TestIsDoltServerMode_NoEnvRespectsMetadata(t *testing.T) {
 	cfg := &Config{Backend: BackendDolt, DoltMode: DoltModeEmbedded}
 	if cfg.IsDoltServerMode() {
 		t.Error("IsDoltServerMode() = true with no env overrides + embedded metadata, want false")
+	}
+}
+
+func TestIsDoltServerMode_ConfigYamlServer(t *testing.T) {
+	// Clear all env vars that affect server mode detection
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	// Set up a config.yaml with dolt.mode: server
+	configDir := t.TempDir()
+	configYaml := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configYaml,
+		[]byte("dolt.mode: server\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", configDir)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+
+	cfg := &Config{Backend: BackendDolt}
+	if !cfg.IsDoltServerMode() {
+		t.Error("IsDoltServerMode() = false with config.yaml dolt.mode: server, want true")
+	}
+}
+
+func TestIsDoltServerMode_ConfigYamlEmbedded(t *testing.T) {
+	// Clear all env vars that affect server mode detection
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	// Set up a config.yaml with dolt.mode: embedded
+	configDir := t.TempDir()
+	configYaml := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configYaml,
+		[]byte("dolt.mode: embedded\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", configDir)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+
+	cfg := &Config{Backend: BackendDolt}
+	if cfg.IsDoltServerMode() {
+		t.Error("IsDoltServerMode() = true with config.yaml dolt.mode: embedded, want false")
+	}
+}
+
+func TestIsDoltServerMode_MetadataEmbeddedNotOverriddenByConfigYaml(t *testing.T) {
+	// If metadata.json explicitly says embedded, config.yaml dolt.mode: server
+	// must NOT override it. Project-local metadata takes priority over
+	// user-global config.yaml.
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+
+	// config.yaml says server
+	configDir := t.TempDir()
+	configYaml := filepath.Join(configDir, "config.yaml")
+	if err := os.WriteFile(configYaml,
+		[]byte("dolt.mode: server\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", configDir)
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+
+	// metadata.json says embedded
+	cfg := &Config{Backend: BackendDolt, DoltMode: "embedded"}
+	if cfg.IsDoltServerMode() {
+		t.Error("IsDoltServerMode() = true, want false: metadata.json embedded should not be overridden by config.yaml server")
 	}
 }
 

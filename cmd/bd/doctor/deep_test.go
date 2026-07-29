@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -45,6 +46,26 @@ func TestRunDeepValidation_EmptyBeadsDir(t *testing.T) {
 	}
 }
 
+func TestRunDeepValidationSQLiteIsNotAMigrationWarning(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&configfile.Config{Backend: configfile.BackendSQLite, SQLitePath: "beads.db"}).Save(beadsDir); err != nil {
+		t.Fatalf("save SQLite config: %v", err)
+	}
+
+	result := RunDeepValidation(tmpDir)
+	if len(result.AllChecks) != 1 {
+		t.Fatalf("SQLite deep-validation result = %#v, want one N/A check", result)
+	}
+	check := result.AllChecks[0]
+	if check.Status != StatusWarning || !strings.Contains(check.Message, "sqlite") || check.Fix != "" {
+		t.Fatalf("SQLite deep-validation check = %#v, want non-Dolt N/A without migration fix", check)
+	}
+}
+
 // TestCheckParentConsistency_OrphanedDeps verifies detection of orphaned parent-child deps
 func TestCheckParentConsistency_OrphanedDeps(t *testing.T) {
 	store := newTestDoltStore(t, "bd")
@@ -62,12 +83,20 @@ func TestCheckParentConsistency_OrphanedDeps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Insert a parent-child dep pointing to non-existent parent via raw SQL
+	// Insert a parent-child dep pointing to non-existent parent via raw SQL.
+	// FK on depends_on_issue_id would normally block this; disable checks to
+	// simulate the schema-drift scenario the validator is designed to catch.
 	db := store.UnderlyingDB()
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
 	_, err := db.ExecContext(ctx,
-		"INSERT INTO dependencies (issue_id, depends_on_id, type, created_at, created_by) VALUES (?, ?, ?, NOW(), ?)",
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, NOW(), ?)",
 		"bd-1", "bd-missing", "parent-child", "test")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -129,6 +158,95 @@ func TestCheckEpicCompleteness_CompletedEpic(t *testing.T) {
 	}
 }
 
+func TestCheckEpicCompleteness_CountsWispChildren(t *testing.T) {
+	store := newTestDoltStore(t, "epic")
+	ctx := context.Background()
+
+	epic := &types.Issue{
+		ID:        "epic-wisp",
+		Title:     "Epic",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+		CreatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, epic, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	child := &types.Issue{
+		ID:        "epic-wisp.1",
+		Title:     "Wisp child",
+		Status:    types.StatusClosed,
+		IssueType: types.TypeTask,
+		ClosedAt:  ptrTime(time.Now()),
+		NoHistory: true,
+		CreatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	dep := &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: epic.ID,
+		Type:        types.DepParentChild,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkEpicCompleteness(store.UnderlyingDB())
+	if check.Status != StatusWarning {
+		t.Errorf("Status = %q, want %q", check.Status, StatusWarning)
+	}
+}
+
+func TestCheckEpicCompleteness_OpenWispChildPreventsCompletedEpic(t *testing.T) {
+	store := newTestDoltStore(t, "epic")
+	ctx := context.Background()
+
+	epic := &types.Issue{
+		ID:        "epic-open-wisp",
+		Title:     "Epic",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeEpic,
+		CreatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, epic, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	child := &types.Issue{
+		ID:        "epic-open-wisp.1",
+		Title:     "Open wisp child",
+		Status:    types.StatusOpen,
+		IssueType: types.TypeTask,
+		NoHistory: true,
+		CreatedAt: time.Now(),
+	}
+	if err := store.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	dep := &types.Dependency{
+		IssueID:     child.ID,
+		DependsOnID: epic.ID,
+		Type:        types.DepParentChild,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "test",
+	}
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	check := checkEpicCompleteness(store.UnderlyingDB())
+	if check.Status != StatusOK {
+		t.Errorf("Status = %q, want %q; detail=%s", check.Status, StatusOK, check.Detail)
+	}
+}
+
 // TestCheckMailThreadIntegrity_ValidThreads verifies valid thread references pass
 func TestCheckMailThreadIntegrity_ValidThreads(t *testing.T) {
 	store := newTestDoltStore(t, "thread")
@@ -160,7 +278,7 @@ func TestCheckMailThreadIntegrity_ValidThreads(t *testing.T) {
 	// Insert a dependency with valid thread_id via raw SQL (replies-to with thread_id)
 	db := store.UnderlyingDB()
 	_, err := db.ExecContext(ctx,
-		"INSERT INTO dependencies (issue_id, depends_on_id, type, thread_id, created_at, created_by) VALUES (?, ?, ?, ?, NOW(), ?)",
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, thread_id, created_at, created_by) VALUES (UUID(), ?, ?, ?, ?, NOW(), ?)",
 		"thread-reply", "thread-root", "replies-to", "thread-root", "test")
 	if err != nil {
 		t.Fatalf("Failed to insert thread dep: %v", err)

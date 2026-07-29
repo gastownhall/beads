@@ -161,7 +161,7 @@ func installGitHooks() error {
 				oldPath := hook.path + ".old"
 				if err := os.Rename(hook.path, oldPath); err != nil {
 					fmt.Fprintf(os.Stderr, "%s Failed to chain with existing %s hook: %v\n", ui.RenderWarn("⚠"), hook.name, err)
-					if !isEmbeddedMode() {
+					if usesSQLServer() {
 						fmt.Fprintf(os.Stderr, "You can resolve this with: %s\n", ui.RenderAccent("bd doctor --fix"))
 					}
 					continue
@@ -308,5 +308,5 @@ func printJJAliasInstructions() {
 	fmt.Printf("  %s\n", ui.RenderAccent("[aliases]"))
 	fmt.Printf("  %s\n", ui.RenderAccent(`push = ["util", "exec", "--", "sh", "-c", "bd dolt commit && bd dolt push && jj git push \"$@\"", ""]`))
 	fmt.Printf("\nThen use %s instead of %s\n\n", ui.RenderAccent("jj push"), ui.RenderAccent("jj git push"))
-	fmt.Printf("For more details, see: https://github.com/steveyegge/beads/blob/main/docs/GIT_INTEGRATION.md#branchless-workflows-jujutsu--jj\n\n")
+	fmt.Printf("For more details, see: https://github.com/gastownhall/beads/blob/main/docs/reference/git-integration.md#branchless-workflows-jujutsu--jj\n\n")
 }

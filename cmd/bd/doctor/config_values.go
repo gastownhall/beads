@@ -93,7 +93,7 @@ func formatConfigValuesResult(issues []string) DoctorCheck {
 
 // findConfigPath locates config.yaml in standard locations.
 func findConfigPath(repoPath string) string {
-	configPath := filepath.Join(repoPath, ".beads", "config.yaml")
+	configPath := filepath.Join(ResolveBeadsDirForRepo(repoPath), "config.yaml")
 	if _, err := os.Stat(configPath); err == nil {
 		return configPath
 	}
@@ -322,7 +322,7 @@ func expandPath(path string) string {
 func checkMetadataConfigValues(repoPath string) []string {
 	var issues []string
 
-	beadsDir := filepath.Join(repoPath, ".beads")
+	beadsDir := ResolveBeadsDirForRepo(repoPath)
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		issues = append(issues, fmt.Sprintf("metadata.json: failed to load: %v", err))
@@ -351,6 +351,21 @@ func checkMetadataConfigValues(repoPath string) []string {
 		}
 	}
 
+	// Validate dolt_database for embedded-mode compatibility (GH#3231).
+	// Hyphens and dots are allowed by server mode but rejected by the
+	// embedded Dolt engine because database names are interpolated into
+	// system variable identifiers (@@<db>_head_ref) where only
+	// [a-zA-Z_][a-zA-Z0-9_]* is valid.
+	if cfg.DoltDatabase != "" && !cfg.IsDoltServerMode() {
+		sanitized := strings.ReplaceAll(cfg.DoltDatabase, "-", "_")
+		sanitized = strings.ReplaceAll(sanitized, ".", "_")
+		if sanitized != cfg.DoltDatabase {
+			issues = append(issues, fmt.Sprintf(
+				"metadata.json dolt_database: %q contains characters invalid in embedded mode — "+
+					"replace with %q or set dolt_mode to \"server\" (GH#3231)", cfg.DoltDatabase, sanitized))
+		}
+	}
+
 	// Validate deletions_retention_days
 	if cfg.DeletionsRetentionDays < 0 {
 		issues = append(issues, fmt.Sprintf("metadata.json deletions_retention_days: %d is invalid (must be >= 0)", cfg.DeletionsRetentionDays))
@@ -363,7 +378,7 @@ func checkMetadataConfigValues(repoPath string) []string {
 func checkDatabaseConfigValues(repoPath string) []string {
 	var issues []string
 
-	beadsDir := filepath.Join(repoPath, ".beads")
+	beadsDir := ResolveBeadsDirForRepo(repoPath)
 	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
 		return issues // No .beads directory, nothing to check
 	}
@@ -391,7 +406,7 @@ func checkDatabaseConfigValues(repoPath string) []string {
 
 	// Open Dolt store in read-only mode
 	ctx := context.Background()
-	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
+	store, err := dolt.NewFromConfigWithCLIOptions(ctx, beadsDir, configValidationStoreOptions())
 	if err != nil {
 		issues = append(issues, fmt.Sprintf("database: failed to open Dolt store: %v", err))
 		return issues
@@ -399,6 +414,10 @@ func checkDatabaseConfigValues(repoPath string) []string {
 	defer func() { _ = store.Close() }()
 
 	return checkDatabaseConfigValuesWithStore(store)
+}
+
+func configValidationStoreOptions() *dolt.Config {
+	return &dolt.Config{ReadOnly: true, DisableAutoStart: true}
 }
 
 func checkDatabaseConfigValuesWithStore(store *dolt.DoltStore) []string {

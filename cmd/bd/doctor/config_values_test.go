@@ -2,9 +2,64 @@ package doctor
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
+
+func TestConfigValidationStoreOptionsAreStrictReadOnly(t *testing.T) {
+	cfg := configValidationStoreOptions()
+	if !cfg.ReadOnly {
+		t.Fatal("config validation store must be read-only")
+	}
+	if !cfg.DisableAutoStart {
+		t.Fatal("config validation store must disable auto-start")
+	}
+}
+
+func setupDoctorSharedWorktree(t *testing.T) (mainRepoDir, worktreeDir string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+	mainRepoDir = filepath.Join(tmpDir, "main-repo")
+	if err := os.MkdirAll(mainRepoDir, 0o755); err != nil {
+		t.Fatalf("failed to create main repo dir: %v", err)
+	}
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	run(mainRepoDir, "init")
+	run(mainRepoDir, "config", "user.email", "test@example.com")
+	run(mainRepoDir, "config", "user.name", "Test User")
+
+	readmePath := filepath.Join(mainRepoDir, "README.md")
+	if err := os.WriteFile(readmePath, []byte("# Test\n"), 0o644); err != nil {
+		t.Fatalf("failed to write README.md: %v", err)
+	}
+	run(mainRepoDir, "add", "README.md")
+	run(mainRepoDir, "commit", "-m", "Initial commit")
+
+	worktreeDir = filepath.Join(tmpDir, "worktree")
+	addWorktree := exec.Command("git", "worktree", "add", worktreeDir, "HEAD")
+	addWorktree.Dir = mainRepoDir
+	if out, err := addWorktree.CombinedOutput(); err != nil {
+		t.Fatalf("git worktree add failed: %v\n%s", err, out)
+	}
+	t.Cleanup(func() {
+		removeWorktree := exec.Command("git", "worktree", "remove", "--force", worktreeDir)
+		removeWorktree.Dir = mainRepoDir
+		_ = removeWorktree.Run()
+	})
+
+	return mainRepoDir, worktreeDir
+}
 
 func TestCheckConfigValues(t *testing.T) {
 	// Create a temporary directory for testing
@@ -81,6 +136,27 @@ func TestCheckConfigValues(t *testing.T) {
 	})
 }
 
+func TestCheckConfigValues_WorktreeFallbackUsesSharedConfig(t *testing.T) {
+	mainRepoDir, worktreeDir := setupDoctorSharedWorktree(t)
+	mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+	if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create main .beads dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mainBeadsDir, "config.yaml"), []byte("issue-prefix: \"123-invalid\"\n"), 0o644); err != nil {
+		t.Fatalf("failed to write config.yaml: %v", err)
+	}
+
+	clearResolveBeadsDirCache()
+
+	check := CheckConfigValues(worktreeDir)
+	if check.Status != "warning" {
+		t.Fatalf("expected warning status, got %s: %s", check.Status, check.Detail)
+	}
+	if check.Detail == "" || !contains(check.Detail, "issue-prefix") {
+		t.Fatalf("expected detail to mention issue-prefix, got: %s", check.Detail)
+	}
+}
+
 func TestCheckMetadataConfigValues(t *testing.T) {
 	// Create a temporary directory for testing
 	tmpDir := t.TempDir()
@@ -101,6 +177,96 @@ func TestCheckMetadataConfigValues(t *testing.T) {
 		issues := checkMetadataConfigValues(tmpDir)
 		if len(issues) > 0 {
 			t.Errorf("expected no issues, got: %v", issues)
+		}
+	})
+
+	// GH#3231: hyphenated dolt_database in embedded mode
+	t.Run("hyphenated dolt_database embedded mode", func(t *testing.T) {
+		metadataContent := `{
+  "database": "dolt",
+  "dolt_database": "my-cool-project",
+  "dolt_mode": "embedded"
+}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadataContent), 0644); err != nil {
+			t.Fatalf("failed to write metadata.json: %v", err)
+		}
+
+		issues := checkMetadataConfigValues(tmpDir)
+		found := false
+		for _, issue := range issues {
+			if contains(issue, "invalid in embedded") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected invalid-chars warning for embedded mode, got: %v", issues)
+		}
+	})
+
+	// GH#3231: dotted dolt_database in embedded mode
+	t.Run("dotted dolt_database embedded mode", func(t *testing.T) {
+		metadataContent := `{
+  "database": "dolt",
+  "dolt_database": "my.project",
+  "dolt_mode": "embedded"
+}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadataContent), 0644); err != nil {
+			t.Fatalf("failed to write metadata.json: %v", err)
+		}
+
+		issues := checkMetadataConfigValues(tmpDir)
+		found := false
+		for _, issue := range issues {
+			if contains(issue, "invalid in embedded") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected invalid-chars warning for dotted name in embedded mode, got: %v", issues)
+		}
+	})
+
+	// GH#3231: hyphenated dolt_database is OK in server mode
+	t.Run("hyphenated dolt_database server mode", func(t *testing.T) {
+		metadataContent := `{
+  "database": "dolt",
+  "dolt_database": "my-cool-project",
+  "dolt_mode": "server"
+}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadataContent), 0644); err != nil {
+			t.Fatalf("failed to write metadata.json: %v", err)
+		}
+
+		issues := checkMetadataConfigValues(tmpDir)
+		for _, issue := range issues {
+			if contains(issue, "invalid in embedded") {
+				t.Errorf("should not warn about invalid chars in server mode, got: %s", issue)
+			}
+		}
+	})
+
+	// GH#3231: no dolt_mode defaults to embedded, hyphens should warn
+	t.Run("hyphenated dolt_database default mode", func(t *testing.T) {
+		metadataContent := `{
+  "database": "dolt",
+  "dolt_database": "my-project"
+}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadataContent), 0644); err != nil {
+			t.Fatalf("failed to write metadata.json: %v", err)
+		}
+
+		issues := checkMetadataConfigValues(tmpDir)
+		found := false
+		for _, issue := range issues {
+			if contains(issue, "invalid in embedded") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected invalid-chars warning when dolt_mode is unset (defaults to embedded), got: %v", issues)
 		}
 	})
 
@@ -133,6 +299,30 @@ func TestCheckMetadataConfigValues(t *testing.T) {
 			t.Error("expected issues for path in database field")
 		}
 	})
+}
+
+func TestCheckMetadataConfigValues_WorktreeFallbackUsesSharedMetadata(t *testing.T) {
+	mainRepoDir, worktreeDir := setupDoctorSharedWorktree(t)
+	mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+	if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+		t.Fatalf("failed to create main .beads dir: %v", err)
+	}
+	metadataContent := `{
+  "database": "/path/to/beads.db"
+}`
+	if err := os.WriteFile(filepath.Join(mainBeadsDir, "metadata.json"), []byte(metadataContent), 0o644); err != nil {
+		t.Fatalf("failed to write metadata.json: %v", err)
+	}
+
+	clearResolveBeadsDirCache()
+
+	issues := checkMetadataConfigValues(worktreeDir)
+	if len(issues) == 0 {
+		t.Fatal("expected metadata validation issues from shared worktree metadata")
+	}
+	if !contains(issues[0], "should be a filename") {
+		t.Fatalf("expected shared metadata issue, got: %v", issues)
+	}
 }
 
 func contains(s, substr string) bool {
@@ -196,7 +386,7 @@ func TestExpandPath(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"tilde only", "~", homeDir},
+		{"tilde only", "~", filepath.Clean(homeDir)},
 		{"tilde path", "~/foo/bar", filepath.Join(homeDir, "foo/bar")},
 		{"no tilde", "/absolute/path", "/absolute/path"},
 		{"relative", "relative/path", "relative/path"},

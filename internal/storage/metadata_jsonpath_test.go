@@ -2,34 +2,24 @@ package storage
 
 import "testing"
 
-func TestJSONMetadataPathSimpleKey(t *testing.T) {
-	got := JSONMetadataPath("status")
-	want := "$.status"
-	if got != want {
-		t.Errorf("JSONMetadataPath(%q) = %q, want %q", "status", got, want)
+func TestJSONMetadataPath(t *testing.T) {
+	tests := []struct {
+		key  string
+		want string
+	}{
+		{"status", `$."status"`},
+		{"my_field", `$."my_field"`},
+		{"gc.routed_to", `$."gc.routed_to"`},
+		{"gc.scope.ref", `$."gc.scope.ref"`},
+		{"jira/sprint", `$."jira/sprint"`},
+		{`ke"y`, `$."ke\"y"`},
+		{`ke\y`, `$."ke\\y"`},
 	}
-}
-
-func TestJSONMetadataPathDottedKey(t *testing.T) {
-	got := JSONMetadataPath("gc.routed_to")
-	want := `$."gc.routed_to"`
-	if got != want {
-		t.Errorf("JSONMetadataPath(%q) = %q, want %q", "gc.routed_to", got, want)
-	}
-}
-
-func TestJSONMetadataPathMultipleDots(t *testing.T) {
-	got := JSONMetadataPath("gc.scope.ref")
-	want := `$."gc.scope.ref"`
-	if got != want {
-		t.Errorf("JSONMetadataPath(%q) = %q, want %q", "gc.scope.ref", got, want)
-	}
-}
-
-func TestJSONMetadataPathUnderscoredKey(t *testing.T) {
-	got := JSONMetadataPath("my_field")
-	want := "$.my_field"
-	if got != want {
-		t.Errorf("JSONMetadataPath(%q) = %q, want %q", "my_field", got, want)
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			if got := JSONMetadataPath(tt.key); got != tt.want {
+				t.Errorf("JSONMetadataPath(%q) = %q, want %q", tt.key, got, tt.want)
+			}
+		})
 	}
 }

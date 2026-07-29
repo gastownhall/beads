@@ -2,15 +2,18 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// TestUpdateIssueIDUpdatesWispTables verifies that renaming a regular issue
-// also updates cross-references in wisp_* auxiliary tables (wisp_dependencies,
-// wisp_events, wisp_labels, wisp_comments). (bd-8ykk)
-func TestUpdateIssueIDUpdatesWispTables(t *testing.T) {
+// TestUpdateIssueIDUpdatesWispDependencyTargets verifies that renaming a
+// regular issue also updates wisp_dependencies rows that target it. Wisp
+// auxiliary table source rows always belong to wisps and are covered by
+// TestUpdateIssueIDRenamesWisp.
+func TestUpdateIssueIDUpdatesWispDependencyTargets(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -47,52 +50,8 @@ func TestUpdateIssueIDUpdatesWispTables(t *testing.T) {
 		DependsOnID: "test-old1",
 		Type:        types.DepBlocks,
 	}
-	if err := store.addWispDependency(ctx, dep, "test"); err != nil {
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
 		t.Fatalf("failed to add wisp dependency: %v", err)
-	}
-
-	// Add wisp dependency: some other wisp has issue_id = old issue
-	wisp2 := &types.Issue{
-		ID:        "test-wisp-def",
-		Title:     "Another wisp",
-		Status:    types.StatusOpen,
-		Priority:  2,
-		IssueType: types.TypeTask,
-		Ephemeral: true,
-	}
-	if err := store.CreateIssue(ctx, wisp2, "test"); err != nil {
-		t.Fatalf("failed to create wisp2: %v", err)
-	}
-
-	// Add wisp_dependencies row where issue_id is the old ID
-	dep2 := &types.Dependency{
-		IssueID:     "test-old1",
-		DependsOnID: wisp2.ID,
-		Type:        types.DepBlocks,
-	}
-	if err := store.addWispDependency(ctx, dep2, "test"); err != nil {
-		t.Fatalf("failed to add wisp dependency 2: %v", err)
-	}
-
-	// Add a wisp label for the old issue ID
-	if err := store.AddLabel(ctx, "test-old1", "bug", "test"); err != nil {
-		t.Fatalf("failed to add wisp label: %v", err)
-	}
-
-	// Add a wisp event for the old issue ID (via direct SQL since there's no addWispEvent)
-	_, err := store.execContext(ctx, `
-		INSERT INTO wisp_events (issue_id, event_type, actor) VALUES (?, 'test_event', 'test')
-	`, "test-old1")
-	if err != nil {
-		t.Fatalf("failed to add wisp event: %v", err)
-	}
-
-	// Add a wisp comment for the old issue ID
-	_, err = store.execContext(ctx, `
-		INSERT INTO wisp_comments (issue_id, author, text) VALUES (?, 'test', 'test comment')
-	`, "test-old1")
-	if err != nil {
-		t.Fatalf("failed to add wisp comment: %v", err)
 	}
 
 	// Now rename the issue
@@ -101,31 +60,31 @@ func TestUpdateIssueIDUpdatesWispTables(t *testing.T) {
 		t.Fatalf("UpdateIssueID failed: %v", err)
 	}
 
-	// Verify wisp_dependencies.depends_on_id was updated
+	// Verify wisp_dependencies typed target columns were updated
 	var depCount int
-	err = store.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wisp_dependencies WHERE depends_on_id = ?`, newID).Scan(&depCount)
+	err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM wisp_dependencies WHERE COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?`, newID).Scan(&depCount)
 	if err != nil {
-		t.Fatalf("failed to query wisp_dependencies depends_on_id: %v", err)
+		t.Fatalf("failed to query wisp_dependencies target: %v", err)
 	}
 	if depCount != 1 {
-		t.Errorf("expected 1 wisp_dependencies row with depends_on_id=%q, got %d", newID, depCount)
+		t.Errorf("expected 1 wisp_dependencies row targeting %q, got %d", newID, depCount)
 	}
 
-	// Verify wisp_dependencies.issue_id was updated
+	// Verify wisp_dependencies.issue_id still points at the source wisp.
 	err = store.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?`, newID).Scan(&depCount)
+		`SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ?`, wisp.ID).Scan(&depCount)
 	if err != nil {
 		t.Fatalf("failed to query wisp_dependencies issue_id: %v", err)
 	}
 	if depCount != 1 {
-		t.Errorf("expected 1 wisp_dependencies row with issue_id=%q, got %d", newID, depCount)
+		t.Errorf("expected 1 wisp_dependencies row with issue_id=%q, got %d", wisp.ID, depCount)
 	}
 
 	// Verify old ID is gone from wisp_dependencies
 	var oldCount int
 	err = store.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ? OR depends_on_id = ?`,
+		`SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ? OR COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?`,
 		"test-old1", "test-old1").Scan(&oldCount)
 	if err != nil {
 		t.Fatalf("failed to query old wisp_dependencies: %v", err)
@@ -133,40 +92,390 @@ func TestUpdateIssueIDUpdatesWispTables(t *testing.T) {
 	if oldCount != 0 {
 		t.Errorf("expected 0 wisp_dependencies rows with old ID, got %d", oldCount)
 	}
+}
 
-	// Verify wisp_events was updated
-	// 2 rows: the manually-inserted event + the label_added event from addWispLabel
-	var eventCount int
-	err = store.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wisp_events WHERE issue_id = ?`, newID).Scan(&eventCount)
-	if err != nil {
-		t.Fatalf("failed to query wisp_events: %v", err)
+func TestUpdateIssueIDUpdatesPersistentDependencyTargets(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	source := &types.Issue{
+		ID:        "test-source1",
+		Title:     "Source issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
 	}
-	if eventCount != 2 {
-		t.Errorf("expected 2 wisp_events rows with issue_id=%q, got %d", newID, eventCount)
+	target := &types.Issue{
+		ID:        "test-target-old1",
+		Title:     "Target issue",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+	}
+	for _, issue := range []*types.Issue{source, target} {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue %q: %v", issue.ID, err)
+		}
 	}
 
-	// Verify wisp_labels was updated
-	var labelCount int
-	err = store.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ?`, newID).Scan(&labelCount)
-	if err != nil {
-		t.Fatalf("failed to query wisp_labels: %v", err)
+	dep := &types.Dependency{
+		IssueID:     source.ID,
+		DependsOnID: target.ID,
+		Type:        types.DepRelated,
+		Metadata:    `{"reason":"rename-regression"}`,
+		ThreadID:    "thread-rename-1",
 	}
-	if labelCount != 1 {
-		t.Errorf("expected 1 wisp_labels row with issue_id=%q, got %d", newID, labelCount)
+	if err := store.AddDependency(ctx, dep, "test"); err != nil {
+		t.Fatalf("failed to add dependency: %v", err)
 	}
 
-	// Verify wisp_comments was updated
-	var commentCount int
-	err = store.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM wisp_comments WHERE issue_id = ?`, newID).Scan(&commentCount)
+	before := readDependencyTargetRow(t, ctx, store, source.ID, target.ID)
+	newID := "test-target-new1"
+	if err := store.UpdateIssueID(ctx, target.ID, newID, target, "test"); err != nil {
+		t.Fatalf("UpdateIssueID failed: %v", err)
+	}
+
+	after := readDependencyTargetRow(t, ctx, store, source.ID, newID)
+	if after.dependsOnIssueID != newID {
+		t.Fatalf("depends_on_issue_id = %q, want %q", after.dependsOnIssueID, newID)
+	}
+	if after.dependsOnID != newID {
+		t.Fatalf("depends_on_id = %q, want %q", after.dependsOnID, newID)
+	}
+	if after.depType != string(dep.Type) {
+		t.Errorf("type = %q, want %q", after.depType, dep.Type)
+	}
+	if after.metadata != dep.Metadata {
+		t.Errorf("metadata = %q, want %q", after.metadata, dep.Metadata)
+	}
+	if after.threadID != dep.ThreadID {
+		t.Errorf("thread_id = %q, want %q", after.threadID, dep.ThreadID)
+	}
+	if after.createdBy != "test" {
+		t.Errorf("created_by = %q, want test", after.createdBy)
+	}
+	if after.createdAt != before.createdAt {
+		t.Errorf("created_at changed from %q to %q", before.createdAt, after.createdAt)
+	}
+
+	var oldCount int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?`,
+		source.ID, target.ID).Scan(&oldCount); err != nil {
+		t.Fatalf("failed to count old dependency target: %v", err)
+	}
+	if oldCount != 0 {
+		t.Fatalf("expected old dependency target to be gone, got %d row(s)", oldCount)
+	}
+
+	var rowCount int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dependencies WHERE issue_id = ?`,
+		source.ID).Scan(&rowCount); err != nil {
+		t.Fatalf("failed to count dependency rows: %v", err)
+	}
+	if rowCount != 1 {
+		t.Fatalf("expected dependency row count to stay 1, got %d", rowCount)
+	}
+}
+
+func TestUpdateIssueIDUpdatesWispTargetDependencyRows(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	persistentSource := &types.Issue{ID: "test-wisp-target-source", Title: "Persistent source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	wispSource := &types.Issue{ID: "test-wisp-target-wisp-source", Title: "Wisp source", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}
+	wispTarget := &types.Issue{ID: "test-wisp-target-old", Title: "Wisp target", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}
+	for _, issue := range []*types.Issue{persistentSource, wispSource, wispTarget} {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue %q: %v", issue.ID, err)
+		}
+	}
+
+	deps := []*types.Dependency{
+		{
+			IssueID:     persistentSource.ID,
+			DependsOnID: wispTarget.ID,
+			Type:        types.DepRelated,
+			Metadata:    `{"source":"persistent"}`,
+			ThreadID:    "thread-wisp-target-persistent",
+		},
+		{
+			IssueID:     wispSource.ID,
+			DependsOnID: wispTarget.ID,
+			Type:        types.DepBlocks,
+			Metadata:    `{"source":"wisp"}`,
+			ThreadID:    "thread-wisp-target-wisp",
+		},
+	}
+	for _, dep := range deps {
+		if err := store.AddDependency(ctx, dep, "test"); err != nil {
+			t.Fatalf("failed to add dependency %q -> %q: %v", dep.IssueID, dep.DependsOnID, err)
+		}
+	}
+
+	newID := "test-wisp-target-new"
+	wispTarget.ID = newID
+	if err := store.UpdateIssueID(ctx, "test-wisp-target-old", newID, wispTarget, "test"); err != nil {
+		t.Fatalf("UpdateIssueID failed: %v", err)
+	}
+
+	persistentRow := readWispTargetDependencyRow(t, ctx, store, "dependencies", persistentSource.ID, newID)
+	if persistentRow.dependsOnWispID != newID {
+		t.Fatalf("dependencies.depends_on_wisp_id = %q, want %q", persistentRow.dependsOnWispID, newID)
+	}
+	if persistentRow.metadata != deps[0].Metadata {
+		t.Errorf("dependencies.metadata = %q, want %q", persistentRow.metadata, deps[0].Metadata)
+	}
+	if persistentRow.threadID != deps[0].ThreadID {
+		t.Errorf("dependencies.thread_id = %q, want %q", persistentRow.threadID, deps[0].ThreadID)
+	}
+
+	wispRow := readWispTargetDependencyRow(t, ctx, store, "wisp_dependencies", wispSource.ID, newID)
+	if wispRow.dependsOnWispID != newID {
+		t.Fatalf("wisp_dependencies.depends_on_wisp_id = %q, want %q", wispRow.dependsOnWispID, newID)
+	}
+	if wispRow.metadata != deps[1].Metadata {
+		t.Errorf("wisp_dependencies.metadata = %q, want %q", wispRow.metadata, deps[1].Metadata)
+	}
+	if wispRow.threadID != deps[1].ThreadID {
+		t.Errorf("wisp_dependencies.thread_id = %q, want %q", wispRow.threadID, deps[1].ThreadID)
+	}
+
+	if oldCount := countOldWispTargetRows(t, ctx, store, "dependencies", "test-wisp-target-old"); oldCount != 0 {
+		t.Fatalf("expected old target rows in dependencies to be gone, got %d", oldCount)
+	}
+	if oldCount := countOldWispTargetRows(t, ctx, store, "wisp_dependencies", "test-wisp-target-old"); oldCount != 0 {
+		t.Fatalf("expected old target rows in wisp_dependencies to be gone, got %d", oldCount)
+	}
+}
+
+func TestUpdateIssueIDDependencyTargetsIgnoreNonIssueTargets(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	source := &types.Issue{ID: "test-ignore-source", Title: "Source issue", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	wispTarget := &types.Issue{ID: "test-ignore-wisp", Title: "Wisp target", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}
+	newIssueTarget := &types.Issue{ID: "test-ignore-new", Title: "New issue target", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	for _, issue := range []*types.Issue{source, wispTarget, newIssueTarget} {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue %q: %v", issue.ID, err)
+		}
+	}
+
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
+		VALUES (UUID(), ?, ?, ?, NOW(), ?, ?)
+	`, source.ID, wispTarget.ID, types.DepRelated, "test", "{}"); err != nil {
+		t.Fatalf("failed to seed wisp-target dependency: %v", err)
+	}
+
+	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatalf("failed to query wisp_comments: %v", err)
+		t.Fatalf("begin tx: %v", err)
 	}
-	if commentCount != 1 {
-		t.Errorf("expected 1 wisp_comments row with issue_id=%q, got %d", newID, commentCount)
+	if err := issueops.UpdateIssueIDInDependencyTargetsInTx(ctx, tx, wispTarget.ID, newIssueTarget.ID); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("UpdateIssueIDInDependencyTargetsInTx failed: %v", err)
 	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit tx: %v", err)
+	}
+
+	var dependsOnIssueID sql.NullString
+	var dependsOnWispID string
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT depends_on_issue_id, depends_on_wisp_id
+		FROM dependencies
+		WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?
+	`, source.ID, wispTarget.ID).Scan(&dependsOnIssueID, &dependsOnWispID); err != nil {
+		t.Fatalf("failed to read dependency target columns: %v", err)
+	}
+	if dependsOnIssueID.Valid {
+		t.Fatalf("depends_on_issue_id = %q, want NULL", dependsOnIssueID.String)
+	}
+	if dependsOnWispID != wispTarget.ID {
+		t.Fatalf("depends_on_wisp_id = %q, want %q", dependsOnWispID, wispTarget.ID)
+	}
+}
+
+func TestUpdateIssueIDDependencyTargetCollisionFails(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	source := &types.Issue{ID: "test-collision-source", Title: "Source issue", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	target := &types.Issue{ID: "test-collision-old", Title: "Target issue", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	for _, issue := range []*types.Issue{source, target} {
+		if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatalf("failed to create issue %q: %v", issue.ID, err)
+		}
+	}
+
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     source.ID,
+		DependsOnID: target.ID,
+		Type:        types.DepRelated,
+		Metadata:    `{"target":"issue"}`,
+	}, "test"); err != nil {
+		t.Fatalf("failed to add issue-target dependency: %v", err)
+	}
+
+	newID := "other-collision-new"
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID:     source.ID,
+		DependsOnID: newID,
+		Type:        types.DepRelated,
+		Metadata:    `{"target":"external"}`,
+	}, "test"); err != nil {
+		t.Fatalf("failed to add external dependency: %v", err)
+	}
+
+	if err := store.UpdateIssueID(ctx, target.ID, newID, target, "test"); err == nil {
+		t.Fatal("UpdateIssueID succeeded despite a colliding dependency target")
+	}
+
+	var issueCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, target.ID).Scan(&issueCount); err != nil {
+		t.Fatalf("failed to count old issue ID after failed rename: %v", err)
+	}
+	if issueCount != 1 {
+		t.Fatalf("expected failed rename to keep old issue ID, got %d row(s)", issueCount)
+	}
+
+	var depCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM dependencies WHERE issue_id = ?`, source.ID).Scan(&depCount); err != nil {
+		t.Fatalf("failed to count dependencies after failed rename: %v", err)
+	}
+	if depCount != 2 {
+		t.Fatalf("expected failed rename to preserve both dependency rows, got %d", depCount)
+	}
+
+	var oldTargetCount int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?`,
+		source.ID, target.ID).Scan(&oldTargetCount); err != nil {
+		t.Fatalf("failed to count old issue-target dependency: %v", err)
+	}
+	if oldTargetCount != 1 {
+		t.Fatalf("expected old issue-target dependency to remain, got %d", oldTargetCount)
+	}
+
+	var externalTargetCount int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_external = ?`,
+		source.ID, newID).Scan(&externalTargetCount); err != nil {
+		t.Fatalf("failed to count external dependency: %v", err)
+	}
+	if externalTargetCount != 1 {
+		t.Fatalf("expected external dependency to remain, got %d", externalTargetCount)
+	}
+}
+
+type dependencyTargetRow struct {
+	dependsOnIssueID string
+	dependsOnID      string
+	depType          string
+	metadata         string
+	threadID         string
+	createdBy        string
+	createdAt        string
+}
+
+func readDependencyTargetRow(t *testing.T, ctx context.Context, store *DoltStore, issueID, targetID string) dependencyTargetRow {
+	t.Helper()
+
+	var row dependencyTargetRow
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT depends_on_issue_id, COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id, type, metadata, thread_id, created_by, CAST(created_at AS CHAR)
+		FROM dependencies
+		WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?
+	`, issueID, targetID).Scan(
+		&row.dependsOnIssueID,
+		&row.dependsOnID,
+		&row.depType,
+		&row.metadata,
+		&row.threadID,
+		&row.createdBy,
+		&row.createdAt,
+	); err != nil {
+		t.Fatalf("failed to read dependency %s -> %s: %v", issueID, targetID, err)
+	}
+	return row
+}
+
+type wispTargetDependencyRow struct {
+	dependsOnIssueID sql.NullString
+	dependsOnWispID  string
+	dependsOnID      string
+	metadata         string
+	threadID         string
+}
+
+func readWispTargetDependencyRow(t *testing.T, ctx context.Context, store *DoltStore, table, issueID, targetID string) wispTargetDependencyRow {
+	t.Helper()
+
+	var query string
+	switch table {
+	case "dependencies":
+		query = `
+		SELECT depends_on_issue_id, depends_on_wisp_id, COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id, metadata, thread_id
+		FROM dependencies
+		WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?
+	`
+	case "wisp_dependencies":
+		query = `
+			SELECT depends_on_issue_id, depends_on_wisp_id, COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id, metadata, thread_id
+			FROM wisp_dependencies
+			WHERE issue_id = ? AND COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?
+		`
+	default:
+		t.Fatalf("unknown dependency table %q", table)
+	}
+
+	var row wispTargetDependencyRow
+	if err := store.db.QueryRowContext(ctx, query, issueID, targetID).Scan(
+		&row.dependsOnIssueID,
+		&row.dependsOnWispID,
+		&row.dependsOnID,
+		&row.metadata,
+		&row.threadID,
+	); err != nil {
+		t.Fatalf("failed to read dependency %s -> %s from %s: %v", issueID, targetID, table, err)
+	}
+	if row.dependsOnIssueID.Valid {
+		t.Fatalf("%s.depends_on_issue_id = %q, want NULL", table, row.dependsOnIssueID.String)
+	}
+	if row.dependsOnID != targetID {
+		t.Fatalf("%s.depends_on_id = %q, want %q", table, row.dependsOnID, targetID)
+	}
+	return row
+}
+
+func countOldWispTargetRows(t *testing.T, ctx context.Context, store *DoltStore, table, targetID string) int {
+	t.Helper()
+
+	var query string
+	switch table {
+	case "dependencies":
+		query = `SELECT COUNT(*) FROM dependencies WHERE COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?`
+	case "wisp_dependencies":
+		query = `SELECT COUNT(*) FROM wisp_dependencies WHERE COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?`
+	default:
+		t.Fatalf("unknown dependency table %q", table)
+	}
+	var count int
+	if err := store.db.QueryRowContext(ctx, query, targetID).Scan(&count); err != nil {
+		t.Fatalf("failed to count old target rows in %s: %v", table, err)
+	}
+	return count
 }
 
 // TestUpdateIssueIDRenamesWisp verifies that UpdateIssueID correctly renames

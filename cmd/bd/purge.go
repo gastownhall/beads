@@ -1,16 +1,51 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
+
+// purgeScope parameterizes the shared purge/prune implementation so both
+// commands can share filter plumbing, preview/dry-run/force semantics, and
+// messaging without copying 200 lines of boilerplate.
+type purgeScope struct {
+	// cmdName is the user-visible command name (e.g. "purge", "prune").
+	// Used in messages and the suggested `--force` hint.
+	cmdName string
+	// pastTense is the user-visible completed action (e.g. "purged", "pruned").
+	pastTense string
+	// countKey is the JSON key used for the actual deletion count.
+	countKey string
+	// dryRunCountKey is the JSON key used for the dry-run deletion count.
+	dryRunCountKey string
+	// subjectNoun describes what's being purged, in singular form
+	// (e.g. "closed ephemeral bead", "closed bead"). "(s)" is appended by
+	// the printer when multiple items are involved.
+	subjectNoun string
+	// ephemeralOnly restricts the filter to ephemeral beads when true.
+	// When false, restricts to non-ephemeral beads — the scopes are
+	// deliberately disjoint so `prune` never touches wisps that `purge`
+	// would handle, and vice versa.
+	ephemeralOnly bool
+	// requireFilter forces the user to pass --older-than or --pattern.
+	// Without this gate, `bd prune --force` would silently delete every
+	// closed non-ephemeral bead in the repo.
+	requireFilter bool
+	// ignoreReferences, when true, bypasses the reference-aware skip in prune.
+	// Always false for purge — ephemeral beads' references are themselves transient.
+	ignoreReferences bool
+}
 
 var purgeCmd = &cobra.Command{
 	Use:     "purge",
@@ -24,190 +59,412 @@ have no value once closed. This command removes them to reclaim storage.
 Deletes: issues, dependencies, labels, events, and comments for matching beads.
 Skips: pinned beads (protected).
 
+To delete closed non-ephemeral beads (regular tasks, features, bugs, etc.)
+use ` + "`bd prune`" + ` instead.
+
+For full Dolt storage reclaim after deleting many rows, follow with ` + "`bd flatten`" + `
+so history can be collapsed and old chunks can be garbage-collected.
+
 EXAMPLES:
   bd purge                           # Preview what would be purged
   bd purge --force                   # Delete all closed ephemeral beads
   bd purge --older-than 7d --force   # Only purge items closed 7+ days ago
   bd purge --pattern "*-wisp-*"      # Only purge matching ID pattern
   bd purge --dry-run                 # Detailed preview with stats`,
-	Run: func(cmd *cobra.Command, args []string) {
-		CheckReadonly("purge")
-
-		force, _ := cmd.Flags().GetBool("force")
-		dryRun, _ := cmd.Flags().GetBool("dry-run")
-		olderThan, _ := cmd.Flags().GetString("older-than")
-		pattern, _ := cmd.Flags().GetString("pattern")
-
-		if store == nil {
-			if err := ensureStoreActive(); err != nil {
-				FatalError("%v", err)
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("purge")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
 			}
+		}()
+
+		return runPurgeOrPrune(cmd, purgeScope{
+			cmdName:        "purge",
+			pastTense:      "purged",
+			countKey:       "purged_count",
+			dryRunCountKey: "purge_count",
+			subjectNoun:    "closed ephemeral bead",
+			ephemeralOnly:  true,
+			requireFilter:  false,
+		})
+	},
+}
+
+// buildReferencedSet scans every non-closed bead's description, notes, and
+// comments for literal occurrences of any candidate ID and returns the set of
+// candidate IDs that were found. Uses a Statuses filter (not ExcludeStatus)
+// to avoid the PG ExcludeStatus coverage gap (be-jdeief).
+func buildReferencedSet(ctx context.Context, st storage.DoltStorage, candidateIDs map[string]bool) (map[string]bool, error) {
+	if len(candidateIDs) == 0 {
+		return nil, nil
+	}
+	matcher := newCandidateIDMatcher(candidateIDs)
+
+	// Scan every non-done bead: built-in active statuses plus any configured
+	// custom statuses whose category is not "done". A repo can define custom
+	// statuses (status.custom) in active/wip/frozen categories; a bead in such
+	// a status that cites a closed bead must protect it from prune exactly like
+	// a built-in open bead does. Reading custom statuses is required, not
+	// best-effort: if we cannot enumerate them we must not under-scan and risk
+	// deleting a referenced bead, so the error propagates and aborts the prune.
+	notClosedStatuses := []types.Status{
+		types.StatusOpen,
+		types.StatusInProgress,
+		types.StatusBlocked,
+		types.StatusDeferred,
+		types.StatusPinned,
+		types.StatusHooked,
+	}
+	customStatuses, err := st.GetCustomStatusesDetailed(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("reading custom statuses for reference scan: %w", err)
+	}
+	for _, cs := range customStatuses {
+		if cs.Category != types.CategoryDone {
+			notClosedStatuses = append(notClosedStatuses, types.Status(cs.Name))
 		}
+	}
+	notClosed := types.IssueFilter{Statuses: notClosedStatuses}
+	openBeads, err := st.SearchIssues(ctx, "", notClosed)
+	if err != nil {
+		return nil, err
+	}
 
-		ctx := rootCtx
+	refSet := make(map[string]bool)
+	scanText := func(text string) {
+		matcher.findAll(text, refSet)
+	}
 
-		// Build filter: closed + ephemeral
-		statusClosed := types.StatusClosed
-		wispTrue := true
-		filter := types.IssueFilter{
-			Status:    &statusClosed,
-			Ephemeral: &wispTrue,
-		}
-
-		// Parse --older-than duration (e.g., "7d", "30d", "24h", or just "30" for days)
-		if olderThan != "" {
-			days, err := parseHumanDuration(olderThan)
-			if err != nil {
-				FatalError("invalid --older-than value %q: %v", olderThan, err)
-			}
-			cutoff := time.Now().AddDate(0, 0, -days)
-			filter.ClosedBefore = &cutoff
-		}
-
-		// Get matching issues
-		closedIssues, err := store.SearchIssues(ctx, "", filter)
+	for _, iss := range openBeads {
+		scanText(iss.Description)
+		scanText(iss.Notes)
+		comments, err := st.GetIssueComments(ctx, iss.ID)
 		if err != nil {
-			FatalError("listing issues: %v", err)
+			return nil, err
 		}
+		for _, c := range comments {
+			scanText(c.Text)
+		}
+	}
+	return refSet, nil
+}
 
-		// Filter by ID pattern if specified
-		if pattern != "" {
-			var matched []*types.Issue
-			for _, issue := range closedIssues {
-				if ok, _ := filepath.Match(pattern, issue.ID); ok {
-					matched = append(matched, issue)
-				}
+type candidateIDMatcher struct {
+	byFirstByte map[byte][]string
+}
+
+func newCandidateIDMatcher(candidateIDs map[string]bool) candidateIDMatcher {
+	byFirstByte := make(map[byte][]string)
+	for id := range candidateIDs {
+		if id == "" {
+			continue
+		}
+		byFirstByte[id[0]] = append(byFirstByte[id[0]], id)
+	}
+	for first := range byFirstByte {
+		ids := byFirstByte[first]
+		sort.Slice(ids, func(i, j int) bool {
+			if len(ids[i]) == len(ids[j]) {
+				return ids[i] < ids[j]
 			}
-			closedIssues = matched
-		}
+			return len(ids[i]) > len(ids[j])
+		})
+		byFirstByte[first] = ids
+	}
+	return candidateIDMatcher{byFirstByte: byFirstByte}
+}
 
-		// Filter out pinned beads
-		pinnedCount := 0
-		filtered := make([]*types.Issue, 0, len(closedIssues))
+func (m candidateIDMatcher) findAll(text string, found map[string]bool) {
+	for i := 0; i < len(text); i++ {
+		ids := m.byFirstByte[text[i]]
+		if len(ids) == 0 || !isWordBoundaryAt(text, i) {
+			continue
+		}
+		for _, id := range ids {
+			end := i + len(id)
+			if end <= len(text) && strings.HasPrefix(text[i:], id) && isWordBoundaryAt(text, end) {
+				found[id] = true
+				break
+			}
+		}
+	}
+}
+
+func isWordBoundaryAt(s string, idx int) bool {
+	var before, after byte
+	if idx > 0 {
+		before = s[idx-1]
+	}
+	if idx < len(s) {
+		after = s[idx]
+	}
+	return isASCIIWordByte(before) != isASCIIWordByte(after)
+}
+
+func isASCIIWordByte(b byte) bool {
+	return b == '_' ||
+		('0' <= b && b <= '9') ||
+		('A' <= b && b <= 'Z') ||
+		('a' <= b && b <= 'z')
+}
+
+// runPurgeOrPrune implements the shared delete-closed-beads flow used by
+// both `bd purge` (ephemeral scope) and `bd prune` (non-ephemeral scope).
+// The caller's scope controls the filter, messaging, and safety gate.
+func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
+	if usesProxiedServer() {
+		return runPurgeOrPruneProxied(cmd, scope)
+	}
+
+	CheckReadonly(scope.cmdName)
+
+	force, _ := cmd.Flags().GetBool("force")
+	dryRun, _ := cmd.Flags().GetBool("dry-run")
+	olderThan, _ := cmd.Flags().GetString("older-than")
+	pattern, _ := cmd.Flags().GetString("pattern")
+
+	if scope.requireFilter && olderThan == "" && pattern == "" {
+		return HandleErrorWithHint(
+			fmt.Sprintf("bd %s requires --older-than or --pattern", scope.cmdName),
+			"Protects against accidental bulk deletion. Use `--pattern '*'` to\n"+
+				"  include all closed beads in this scope, or `--older-than 1d`\n"+
+				"  / `--pattern '<glob>'` to narrow the deletion.")
+	}
+
+	if store == nil {
+		if err := ensureStoreActive(); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+	}
+
+	ctx := rootCtx
+
+	statusClosed := types.StatusClosed
+	ephemeralFlag := scope.ephemeralOnly
+	filter := types.IssueFilter{
+		Status:    &statusClosed,
+		Ephemeral: &ephemeralFlag,
+	}
+
+	var cutoff *time.Time
+	if olderThan != "" {
+		days, err := parseHumanDuration(olderThan)
+		if err != nil {
+			return HandleErrorRespectJSON("invalid --older-than value %q: %v", olderThan, err)
+		}
+		cutoffTime := time.Now().UTC().AddDate(0, 0, -days)
+		cutoff = &cutoffTime
+		filter.ClosedBefore = cutoff
+	}
+
+	closedIssues, err := store.SearchIssues(ctx, "", filter)
+	if err != nil {
+		return HandleErrorRespectJSON("listing issues: %v", err)
+	}
+
+	if pattern != "" {
+		var matched []*types.Issue
 		for _, issue := range closedIssues {
-			if issue.Pinned {
-				pinnedCount++
-				continue
+			if ok, _ := filepath.Match(pattern, issue.ID); ok {
+				matched = append(matched, issue)
 			}
-			filtered = append(filtered, issue)
 		}
-		closedIssues = filtered
+		closedIssues = matched
+	}
 
-		// Report
-		if len(closedIssues) == 0 {
-			if jsonOutput {
-				outputJSON(map[string]interface{}{
-					"purged_count": 0,
-					"message":      "No closed ephemeral beads to purge",
-				})
-			} else {
-				msg := "No closed ephemeral beads to purge"
-				if olderThan != "" {
-					msg += fmt.Sprintf(" (older than %s)", olderThan)
-				}
-				if pattern != "" {
-					msg += fmt.Sprintf(" (matching %q)", pattern)
-				}
-				fmt.Println(msg)
-			}
-			return
+	var safetyStats closedDeletionCandidateStats
+	closedIssues, safetyStats = filterClosedDeletionCandidates(closedIssues, cutoff)
+	pinnedCount := safetyStats.PinnedSkipped
+	warnClosedDeletionSafetySkips(safetyStats)
+
+	// Reference-aware skip (prune only): filter closed beads cited by open beads.
+	referencedCount := 0
+	var referencedSample []string
+	if scope.cmdName == "prune" && !scope.ignoreReferences {
+		candidateIDs := make(map[string]bool, len(closedIssues))
+		for _, iss := range closedIssues {
+			candidateIDs[iss.ID] = true
 		}
-
-		// Extract IDs
-		issueIDs := make([]string, len(closedIssues))
-		for i, issue := range closedIssues {
-			issueIDs[i] = issue.ID
-		}
-
-		// Dry-run: show stats preview
-		if dryRun {
-			result, err := store.DeleteIssues(ctx, issueIDs, false, false, true)
-			if jsonOutput {
-				stats := map[string]interface{}{
-					"dry_run":      true,
-					"purge_count":  len(issueIDs),
-					"dependencies": 0,
-					"labels":       0,
-					"events":       0,
-				}
-				if err == nil {
-					stats["dependencies"] = result.DependenciesCount
-					stats["labels"] = result.LabelsCount
-					stats["events"] = result.EventsCount
-				}
-				if pinnedCount > 0 {
-					stats["pinned_skipped"] = pinnedCount
-				}
-				outputJSON(stats)
-			} else {
-				fmt.Printf("Would purge %d closed ephemeral bead(s)\n", len(issueIDs))
-				if err == nil {
-					fmt.Printf("  Dependencies: %d\n", result.DependenciesCount)
-					fmt.Printf("  Labels:       %d\n", result.LabelsCount)
-					fmt.Printf("  Events:       %d\n", result.EventsCount)
-				}
-				if pinnedCount > 0 {
-					fmt.Printf("  Pinned (skipped): %d\n", pinnedCount)
-				}
-				fmt.Printf("\n(Dry-run mode — no changes made)\n")
-			}
-			return
-		}
-
-		// Preview mode (no --force)
-		if !force {
-			fmt.Printf("Found %d closed ephemeral bead(s) to purge\n", len(issueIDs))
-			if pinnedCount > 0 {
-				fmt.Printf("Skipping %d pinned bead(s)\n", pinnedCount)
-			}
-			hint := "bd purge --force"
-			if olderThan != "" {
-				hint += " --older-than " + olderThan
-			}
-			if pattern != "" {
-				hint += " --pattern " + pattern
-			}
-			FatalErrorWithHint(
-				fmt.Sprintf("would purge %d bead(s)", len(issueIDs)),
-				fmt.Sprintf("Use --force to confirm or --dry-run to preview.\n  %s", hint))
-		}
-
-		// Actually purge
-		result, err := store.DeleteIssues(ctx, issueIDs, false, true, false)
+		refSet, err := buildReferencedSet(ctx, store, candidateIDs)
 		if err != nil {
-			FatalError("purge failed: %v", err)
+			return HandleErrorRespectJSON("scanning open beads for references: %v", err)
 		}
+		nonReferenced := closedIssues[:0]
+		for _, iss := range closedIssues {
+			if refSet[iss.ID] {
+				referencedCount++
+				if len(referencedSample) < 100 {
+					referencedSample = append(referencedSample, iss.ID)
+				}
+			} else {
+				nonReferenced = append(nonReferenced, iss)
+			}
+		}
+		closedIssues = nonReferenced
+	}
 
-		commandDidWrite.Store(true)
-
+	if len(closedIssues) == 0 {
 		if jsonOutput {
 			stats := map[string]interface{}{
-				"purged_count": result.DeletedCount,
-				"dependencies": result.DependenciesCount,
-				"labels":       result.LabelsCount,
-				"events":       result.EventsCount,
+				scope.countKey: 0,
+				"message":      fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName),
+			}
+			if scope.cmdName == "prune" {
+				stats["referenced_skipped"] = referencedCount
+				stats["referenced_count"] = referencedCount
+				if len(referencedSample) > 0 {
+					stats["referenced_ids_sample"] = referencedSample
+				}
+			}
+			return outputJSON(stats)
+		}
+		msg := fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName)
+		if olderThan != "" {
+			msg += fmt.Sprintf(" (older than %s)", olderThan)
+		}
+		if pattern != "" {
+			msg += fmt.Sprintf(" (matching %q)", pattern)
+		}
+		fmt.Println(msg)
+		if referencedCount > 0 {
+			fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
+				"  (%d closed bead(s) protected by open-bead references — use --ignore-references to override)",
+				referencedCount)))
+		}
+		return nil
+	}
+
+	issueIDs := make([]string, len(closedIssues))
+	for i, issue := range closedIssues {
+		issueIDs[i] = issue.ID
+	}
+
+	if dryRun {
+		result, err := store.DeleteIssues(ctx, issueIDs, false, false, true)
+		if jsonOutput {
+			stats := map[string]interface{}{
+				"dry_run":            true,
+				scope.dryRunCountKey: len(issueIDs),
+				"dependencies":       0,
+				"labels":             0,
+				"events":             0,
+			}
+			if err == nil {
+				stats["dependencies"] = result.DependenciesCount
+				stats["labels"] = result.LabelsCount
+				stats["events"] = result.EventsCount
 			}
 			if pinnedCount > 0 {
 				stats["pinned_skipped"] = pinnedCount
 			}
-			outputJSON(stats)
-		} else {
-			fmt.Printf("%s Purged %d closed ephemeral bead(s)\n", ui.RenderPass("✓"), result.DeletedCount)
-			fmt.Printf("  Dependencies removed: %d\n", result.DependenciesCount)
-			fmt.Printf("  Labels removed:       %d\n", result.LabelsCount)
-			fmt.Printf("  Events removed:       %d\n", result.EventsCount)
-			if pinnedCount > 0 {
-				fmt.Printf("  Pinned (skipped):     %d\n", pinnedCount)
+			if scope.cmdName == "prune" {
+				stats["referenced_skipped"] = referencedCount
+				stats["referenced_count"] = referencedCount
+				if len(referencedSample) > 0 {
+					stats["referenced_ids_sample"] = referencedSample
+				}
 			}
+			return outputJSON(stats)
 		}
+		fmt.Printf("Would %s %d %s(s)\n", scope.cmdName, len(issueIDs), scope.subjectNoun)
+		if err == nil {
+			fmt.Printf("  Dependencies: %d\n", result.DependenciesCount)
+			fmt.Printf("  Labels:       %d\n", result.LabelsCount)
+			fmt.Printf("  Events:       %d\n", result.EventsCount)
+		}
+		if pinnedCount > 0 {
+			fmt.Printf("  Pinned (skipped): %d\n", pinnedCount)
+		}
+		if referencedCount > 0 {
+			fmt.Printf("  %s   %d\n", ui.MutedStyle.Render("Referenced (skipped):"), referencedCount)
+			sample := referencedSample
+			if len(sample) > 5 {
+				sample = sample[:5]
+			}
+			idStrs := make([]string, len(sample))
+			for i, id := range sample {
+				idStrs[i] = ui.IDStyle.Render(id)
+			}
+			suffix := ""
+			if referencedCount > 5 {
+				suffix = ui.MutedStyle.Render(", ...")
+			}
+			fmt.Printf("  %s %s%s\n", ui.MutedStyle.Render("Referenced IDs (sample):"), strings.Join(idStrs, ", "), suffix)
+		}
+		fmt.Printf("\n(Dry-run mode — no changes made)\n")
+		return nil
+	}
 
-		// Embedded mode: flush Dolt commit.
-		if isEmbeddedMode() && result.DeletedCount > 0 && store != nil {
-			if _, err := store.CommitPending(ctx, actor); err != nil {
-				FatalError("failed to commit: %v", err)
+	if !force {
+		fmt.Printf("Found %d %s(s) to %s\n", len(issueIDs), scope.subjectNoun, scope.cmdName)
+		if pinnedCount > 0 {
+			fmt.Printf("Skipping %d pinned bead(s)\n", pinnedCount)
+		}
+		if referencedCount > 0 {
+			fmt.Println(ui.MutedStyle.Render(fmt.Sprintf("Skipping %d referenced bead(s)", referencedCount)))
+		}
+		hint := fmt.Sprintf("bd %s --force", scope.cmdName)
+		if olderThan != "" {
+			hint += " --older-than " + olderThan
+		}
+		if pattern != "" {
+			hint += " --pattern " + pattern
+		}
+		return HandleErrorWithHint(
+			fmt.Sprintf("would %s %d bead(s)", scope.cmdName, len(issueIDs)),
+			fmt.Sprintf("Use --force to confirm or --dry-run to preview.\n  %s", hint))
+	}
+
+	result, err := store.DeleteIssues(ctx, issueIDs, false, true, false)
+	if err != nil {
+		return HandleErrorRespectJSON("%s failed: %v", scope.cmdName, err)
+	}
+
+	commandDidWrite.Store(true)
+	if result.DeletedCount > 0 {
+		commandMayEmptyJSONLExport.Store(true)
+	}
+
+	if jsonOutput {
+		stats := map[string]interface{}{
+			scope.countKey: result.DeletedCount,
+			"dependencies": result.DependenciesCount,
+			"labels":       result.LabelsCount,
+			"events":       result.EventsCount,
+		}
+		if pinnedCount > 0 {
+			stats["pinned_skipped"] = pinnedCount
+		}
+		if scope.cmdName == "prune" {
+			stats["referenced_skipped"] = referencedCount
+			stats["referenced_count"] = referencedCount
+			if len(referencedSample) > 0 {
+				stats["referenced_ids_sample"] = referencedSample
 			}
 		}
-	},
+		return outputJSON(stats)
+	}
+	fmt.Printf("%s %s %d %s(s)\n", ui.RenderPass("✓"), capitalize(scope.pastTense), result.DeletedCount, scope.subjectNoun)
+	fmt.Printf("  Dependencies removed: %d\n", result.DependenciesCount)
+	fmt.Printf("  Labels removed:       %d\n", result.LabelsCount)
+	fmt.Printf("  Events removed:       %d\n", result.EventsCount)
+	if pinnedCount > 0 {
+		fmt.Printf("  Pinned (skipped):     %d\n", pinnedCount)
+	}
+	if referencedCount > 0 {
+		fmt.Printf("  %s %d\n", ui.MutedStyle.Render("Referenced (skipped):"), referencedCount)
+	}
+	return nil
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // parseHumanDuration parses a human-friendly duration string into days.

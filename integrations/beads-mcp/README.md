@@ -1,6 +1,6 @@
 # beads-mcp
 
-MCP server for [beads](https://github.com/steveyegge/beads) issue tracker and agentic memory system.
+MCP server for [beads](https://github.com/gastownhall/beads) issue tracker and agentic memory system.
 Enables AI agents to manage tasks using bd CLI through Model Context Protocol.
 
 > **Note:** For environments with shell access (Claude Code, Cursor, Windsurf), the **CLI + hooks approach is recommended** over MCP. It uses ~1-2k tokens vs 10-50k for MCP schemas, resulting in lower compute cost and latency. See the [main README](../../README.md) for CLI setup.
@@ -36,7 +36,7 @@ Add to your Claude Desktop config:
 For development, clone the repository:
 
 ```bash
-git clone https://github.com/steveyegge/beads
+git clone https://github.com/gastownhall/beads
 cd beads/integrations/beads-mcp
 uv sync
 ```
@@ -218,6 +218,9 @@ await beads_ready_work(workspace_root="/Users/you/project-a")
 - `update` - Update issue (status, priority, design, notes, etc). Note: `status="closed"` or `status="open"` automatically route to `close` or `reopen` tools to respect approval workflows
 - `close` - Close completed issue
 - `dep` - Add dependency (blocks, related, parent-child, discovered-from)
+- `comment` - Add a durable, timestamped comment to an issue (a record of work/decisions)
+- `comments` - List all comments on an issue (`show` reports comment_count but not the bodies)
+- `note` - Append a note to an issue's notes field
 - `blocked` - Get blocked issues
 - `stats` - Get project statistics
 - `reopen` - Reopen a closed issue with optional reason
@@ -225,7 +228,7 @@ await beads_ready_work(workspace_root="/Users/you/project-a")
 
 ## Known Issues
 
-### ~~MCP Tools Not Loading in Claude Code~~ (Issue [#346](https://github.com/steveyegge/beads/issues/346)) - RESOLVED
+### ~~MCP Tools Not Loading in Claude Code~~ (Issue [#346](https://github.com/gastownhall/beads/issues/346)) - RESOLVED
 
 **Status:** ✅ Fixed in v0.24.0+
 
@@ -248,18 +251,30 @@ All MCP tools now load correctly in Claude Code with v0.24.0+.
 
 ## Development
 
+Baseline validation:
+```bash
+uv sync
+uv run pytest
+uv run python -m build
+```
+
+Integration tests require a current `bd` binary from this repository. In
+particular, `bd init --help` must include `--non-interactive`, `--skip-agents`,
+and `--skip-hooks`; older installed versions are skipped with a clear pytest
+message.
+
 Run MCP inspector:
 ```bash
 # inside beads-mcp dir
 uv run fastmcp dev src/beads_mcp/server.py
 ```
 
-Type checking:
+Type checking (source maintenance, not part of baseline validation yet):
 ```bash
 uv run mypy src/beads_mcp
 ```
 
-Linting and formatting:
+Linting and formatting (source maintenance, not part of baseline validation yet):
 ```bash
 uv run ruff check src/beads_mcp
 uv run ruff format src/beads_mcp

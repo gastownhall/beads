@@ -3,6 +3,7 @@ package utils
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -131,6 +132,51 @@ func ExtractIssuePrefixKnown(issueID string, knownPrefixes []string) string {
 
 	// No known prefix matched; fall back to heuristic
 	return ExtractIssuePrefix(issueID)
+}
+
+// NaturalCompareIDs compares two issue IDs with numeric-aware sorting.
+// Segments separated by "." or "-" are compared numerically when both
+// are pure digits, otherwise lexicographically. This ensures bd-E.4
+// sorts before bd-E.10 (GH#3477).
+func NaturalCompareIDs(a, b string) int {
+	sa := splitIDSegments(a)
+	sb := splitIDSegments(b)
+	for i := 0; i < len(sa) && i < len(sb); i++ {
+		if sa[i] == sb[i] {
+			continue
+		}
+		na, aErr := strconv.Atoi(sa[i])
+		nb, bErr := strconv.Atoi(sb[i])
+		if aErr == nil && bErr == nil {
+			if na != nb {
+				return na - nb
+			}
+			continue
+		}
+		if sa[i] < sb[i] {
+			return -1
+		}
+		return 1
+	}
+	return len(sa) - len(sb)
+}
+
+// splitIDSegments splits an ID into segments by "." and "-" separators.
+func splitIDSegments(id string) []string {
+	var segments []string
+	start := 0
+	for i, r := range id {
+		if r == '.' || r == '-' {
+			if i > start {
+				segments = append(segments, id[start:i])
+			}
+			start = i + 1
+		}
+	}
+	if start < len(id) {
+		segments = append(segments, id[start:])
+	}
+	return segments
 }
 
 // ExtractIssueNumber extracts the number from an issue ID like "bd-123" -> 123

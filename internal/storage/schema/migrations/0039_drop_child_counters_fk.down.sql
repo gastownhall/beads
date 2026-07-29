@@ -1,0 +1,3 @@
+-- Reverse migration 0039: not reversible. Recreating the FK on a DB where
+-- child_counters has rows referencing parent_ids that now live in wisps
+-- would reintroduce the violation. Intentional no-op.

@@ -34,6 +34,9 @@ var (
 //go:embed defaults/beads-section-minimal.md
 var beadsSectionMinimal string
 
+//go:embed defaults/beads-section-codex.md
+var beadsSectionCodex string
+
 // SectionMeta holds metadata parsed from a BEGIN BEADS INTEGRATION marker.
 type SectionMeta struct {
 	Version int
@@ -41,23 +44,62 @@ type SectionMeta struct {
 	Hash    string
 }
 
+// RenderOpts controls conditional content in rendered templates.
+type RenderOpts struct {
+	// HasRemote indicates whether a Dolt remote is configured.
+	// When false, "bd dolt push" is omitted from session-completion instructions.
+	HasRemote bool
+	// NoPush indicates the rig is declared local-only (no-push: true in config).
+	// When true, "bd dolt push" is omitted regardless of HasRemote.
+	NoPush bool
+}
+
+// DefaultRenderOpts returns opts that assume a remote is configured,
+// preserving backward-compatible behavior for callers that don't pass opts.
+func DefaultRenderOpts() RenderOpts {
+	return RenderOpts{HasRemote: true}
+}
+
 // RenderSection returns the beads integration section for the given profile,
 // wrapped in markers that include version, profile, and hash metadata for freshness detection.
+// Assumes a Dolt remote is configured (backward-compatible). Use RenderSectionWithOpts
+// to control conditional content.
 func RenderSection(profile Profile) string {
-	body := templateBody(profile)
+	return RenderSectionWithOpts(profile, DefaultRenderOpts())
+}
+
+// RenderSectionWithOpts renders the beads integration section with conditional content
+// controlled by opts. When opts.HasRemote is false, "bd dolt push" is omitted from
+// session-completion instructions.
+func RenderSectionWithOpts(profile Profile, opts RenderOpts) string {
+	body := templateBodyWithOpts(profile, opts)
 	hash := computeHash(body)
 	beginMarker := fmt.Sprintf("<!-- BEGIN BEADS INTEGRATION v:%d profile:%s hash:%s -->", MarkerVersion, profile, hash)
 	return beginMarker + "\n" + body + "\n<!-- END BEADS INTEGRATION -->\n"
 }
 
+// CodexSectionBody returns the setup-managed Codex guidance body without
+// Codex-specific markers.
+func CodexSectionBody() string {
+	return normalizeEmbeddedMarkdown(beadsSectionCodex)
+}
+
 // ReplaceSection replaces an existing beads integration section in content with a
 // freshly rendered section for the given profile. Returns the (possibly unchanged)
 // content, whether it was modified, and any error.
+// Assumes a Dolt remote is configured (backward-compatible). Use ReplaceSectionWithOpts
+// to control conditional content.
 //
 // Errors:
 //   - ErrNoSection: no BEGIN marker found (caller should append instead)
 //   - ErrMalformedMarkers: BEGIN exists but END is missing or appears before BEGIN
 func ReplaceSection(content string, profile Profile) (string, bool, error) {
+	return ReplaceSectionWithOpts(content, profile, DefaultRenderOpts())
+}
+
+// ReplaceSectionWithOpts replaces an existing beads integration section in content with a
+// freshly rendered section for the given profile and opts.
+func ReplaceSectionWithOpts(content string, profile Profile, opts RenderOpts) (string, bool, error) {
 	beginIdx := strings.Index(content, "<!-- BEGIN BEADS INTEGRATION")
 	if beginIdx == -1 {
 		return content, false, ErrNoSection
@@ -78,7 +120,7 @@ func ReplaceSection(content string, profile Profile) (string, bool, error) {
 		firstLine = firstLine[:nl]
 	}
 	meta := ParseMarker(firstLine)
-	if meta != nil && meta.Hash == CurrentHash(profile) && meta.Profile == profile {
+	if meta != nil && meta.Hash == CurrentHashWithOpts(profile, opts) && meta.Profile == profile {
 		return content, false, nil // already up to date
 	}
 
@@ -88,14 +130,20 @@ func ReplaceSection(content string, profile Profile) (string, bool, error) {
 		endOfEndMarker++
 	}
 
-	replaced := content[:beginIdx] + RenderSection(profile) + content[endOfEndMarker:]
+	replaced := content[:beginIdx] + RenderSectionWithOpts(profile, opts) + content[endOfEndMarker:]
 	return replaced, true, nil
 }
 
 // CurrentHash returns the hash of the current template body for a profile.
 // Callers can compare this against a parsed marker's hash to detect staleness.
+// Assumes a Dolt remote is configured (backward-compatible).
 func CurrentHash(profile Profile) string {
-	return computeHash(templateBody(profile))
+	return CurrentHashWithOpts(profile, DefaultRenderOpts())
+}
+
+// CurrentHashWithOpts returns the hash for a profile with the given render opts.
+func CurrentHashWithOpts(profile Profile, opts RenderOpts) string {
+	return computeHash(templateBodyWithOpts(profile, opts))
 }
 
 // ParseMarker parses a BEGIN BEADS INTEGRATION marker line and returns its metadata.
@@ -141,18 +189,57 @@ func ParseMarker(line string) *SectionMeta {
 }
 
 // templateBody returns the raw body content (without markers) for a profile.
+// Backward-compatible wrapper that assumes a Dolt remote is configured.
 func templateBody(profile Profile) string {
+	return templateBodyWithOpts(profile, DefaultRenderOpts())
+}
+
+// templateBodyWithOpts returns the raw body content (without markers) for a
+// profile, with conditional content controlled by opts.
+func templateBodyWithOpts(profile Profile, opts RenderOpts) string {
+	var body string
 	switch profile {
 	case ProfileMinimal:
-		return strings.TrimRight(beadsSectionMinimal, "\n")
+		body = normalizeEmbeddedMarkdown(beadsSectionMinimal)
 	default:
 		// Full profile uses the same body as the legacy beads-section.md
-		// Strip the existing markers from the embedded content
-		body := strings.TrimRight(beadsSection, "\n")
+		// Strip the existing markers from the embedded content. Normalize CRLF→LF
+		// first so a Windows-checkout build (where //go:embed picks up CRLF bytes
+		// from the working tree) still matches the LF-only prefix/suffix below.
+		// Without this, the legacy markers stay in the body and RenderSection
+		// wraps them again, producing doubled markers in the installed file (#3552).
+		body = strings.ReplaceAll(beadsSection, "\r\n", "\n")
+		body = strings.TrimRight(body, "\n")
 		body = strings.TrimPrefix(body, "<!-- BEGIN BEADS INTEGRATION -->\n")
 		body = strings.TrimSuffix(body, "\n<!-- END BEADS INTEGRATION -->")
-		return body
 	}
+
+	if !opts.HasRemote || opts.NoPush {
+		body = stripDoltPushReferences(body)
+	}
+
+	return body
+}
+
+func normalizeEmbeddedMarkdown(content string) string {
+	return strings.TrimRight(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+}
+
+// stripDoltPushReferences removes "bd dolt push" directives from the template body.
+// Strips the indented code-block line from session completion, and the
+// informational Auto-Sync bullet that references dolt push/pull.
+func stripDoltPushReferences(body string) string {
+	// Session completion code block: exactly "   bd dolt push\n" (3-space indent).
+	// Pad both ends with "\n" so a single anchored ReplaceAll handles the line
+	// whether it appears at the start, middle, or end of the body, without
+	// accidentally matching a 4-space indented variant via substring.
+	const pushLine = "   bd dolt push\n"
+	padded := "\n" + body + "\n"
+	padded = strings.ReplaceAll(padded, "\n"+pushLine, "\n")
+	body = padded[1 : len(padded)-1]
+	// Auto-Sync informational bullet (full profile only)
+	body = strings.ReplaceAll(body, "- Use `bd dolt push`/`bd dolt pull` for remote sync\n", "")
+	return body
 }
 
 // computeHash returns the first 8 hex chars of the SHA-256 of the body.

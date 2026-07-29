@@ -254,7 +254,7 @@ func countWispDependencyRows(t *testing.T, ctx context.Context, db *sql.DB, ids 
 	inClause, args := doltBuildSQLInClause(ids)
 	//nolint:gosec // G201: inClause contains only ? markers
 	query := fmt.Sprintf(
-		"SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id IN (%s) OR depends_on_id IN (%s)",
+		"SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id IN (%s) OR COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) IN (%s)",
 		inClause, inClause,
 	)
 	var count int

@@ -254,6 +254,7 @@ func TestCanonicalizePathCase(t *testing.T) {
 }
 
 func TestCanonicalizeIfRelative(t *testing.T) {
+	absInput := filepath.Join(t.TempDir(), "test", "path")
 	tests := []struct {
 		name     string
 		input    string
@@ -270,10 +271,10 @@ func TestCanonicalizeIfRelative(t *testing.T) {
 		},
 		{
 			name:  "absolute path returns unchanged",
-			input: "/tmp/test/path",
+			input: absInput,
 			validate: func(t *testing.T, result string) {
-				if result != "/tmp/test/path" {
-					t.Errorf("expected /tmp/test/path, got %q", result)
+				if result != absInput {
+					t.Errorf("expected %q, got %q", absInput, result)
 				}
 			},
 		},

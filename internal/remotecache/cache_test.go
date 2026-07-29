@@ -10,11 +10,34 @@ import (
 	"time"
 )
 
-// skipIfNoDolt skips the test if the dolt CLI is not installed.
+// skipIfNoDolt skips the test if the dolt CLI is not installed. Under
+// GitHub Actions the test fails instead — CI must install dolt.
+//
+// (Duplicated inline rather than importing testutil.RequireDoltBinary to avoid
+// an import cycle: testutil → doltutil → remotecache.)
 func skipIfNoDolt(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("dolt"); err != nil {
-		t.Skip("dolt CLI not found, skipping integration test")
+		if os.Getenv("GITHUB_ACTIONS") == "true" {
+			t.Fatalf("dolt binary missing under GITHUB_ACTIONS: %v — the CI workflow must install dolt", err)
+		}
+		t.Skipf("dolt CLI not found, skipping integration test: %v", err)
+	}
+}
+
+func TestDoltCloneArgs(t *testing.T) {
+	t.Setenv("DOLT_REMOTE_USER", "")
+	got := doltCloneArgs("https://example.com/repo", "/tmp/clone")
+	want := []string{"clone", "https://example.com/repo", "/tmp/clone"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("doltCloneArgs() = %q, want %q", got, want)
+	}
+
+	t.Setenv("DOLT_REMOTE_USER", "alice")
+	got = doltCloneArgs("https://example.com/repo", "/tmp/clone")
+	want = []string{"clone", "--user", "alice", "https://example.com/repo", "/tmp/clone"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("doltCloneArgs() = %q, want %q", got, want)
 	}
 }
 

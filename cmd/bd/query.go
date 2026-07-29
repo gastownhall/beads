@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/query"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -73,92 +74,115 @@ Examples:
   bd query "created>30d AND status!=closed"
   bd query "label=frontend OR label=backend"
   bd query "title=authentication AND priority=0"`,
-	Run: func(cmd *cobra.Command, args []string) {
-		// Get query from args
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("query")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			return runQueryProxiedServer(cmd, rootCtx, args)
+		}
+
 		if len(args) == 0 {
 			fmt.Fprintf(os.Stderr, "Error: query expression is required\n\n")
 			if err := cmd.Help(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
 			}
-			os.Exit(1)
+			return SilentExit()
 		}
 
 		queryStr := strings.Join(args, " ")
 
-		// Get option flags
 		limit, _ := cmd.Flags().GetInt("limit")
 		allFlag, _ := cmd.Flags().GetBool("all")
 		longFormat, _ := cmd.Flags().GetBool("long")
 		sortBy, _ := cmd.Flags().GetString("sort")
 		reverse, _ := cmd.Flags().GetBool("reverse")
 		parseOnly, _ := cmd.Flags().GetBool("parse-only")
+		offset, _ := cmd.Flags().GetInt("offset")
+		if offset < 0 {
+			return HandleErrorRespectJSON("--offset must be non-negative")
+		}
+		if offset > 0 {
+			return HandleErrorRespectJSON("--offset is only supported under --proxied-server")
+		}
 
-		// Parse the query
 		node, err := query.Parse(queryStr)
 		if err != nil {
-			FatalError("parsing query: %v", err)
+			return HandleErrorRespectJSON("parsing query: %v", err)
 		}
 
-		// If --parse-only, just show the parsed AST
 		if parseOnly {
 			fmt.Printf("Parsed query: %s\n", node.String())
-			return
+			return nil
 		}
 
-		// Evaluate the query to get filter and/or predicate
 		eval := query.NewEvaluator(time.Now())
 		result, err := eval.Evaluate(node)
 		if err != nil {
-			FatalError("evaluating query: %v", err)
+			return HandleErrorRespectJSON("evaluating query: %v", err)
 		}
 
-		// Apply limit if specified
 		if limit > 0 && !result.RequiresPredicate {
 			result.Filter.Limit = limit
 		}
 
-		// By default exclude closed issues unless --all is specified or query explicitly filters by status
 		if !allFlag && result.Filter.Status == nil && !hasExplicitStatusFilter(node) {
 			result.Filter.ExcludeStatus = append(result.Filter.ExcludeStatus, types.StatusClosed)
 		}
 
 		ctx := rootCtx
 
-		// Direct mode
 		if store == nil {
-			FatalError("no storage available")
+			return HandleErrorRespectJSON("no storage available")
 		}
 
-		// If we need predicate filtering, we may need to fetch more results
-		// to ensure we get enough after filtering
 		searchFilter := result.Filter
 		if result.RequiresPredicate && limit > 0 {
-			// Fetch more to account for predicate filtering
 			searchFilter.Limit = limit * 3
 			if searchFilter.Limit < 100 {
 				searchFilter.Limit = 100
 			}
 		}
 
-		issues, err := store.SearchIssues(ctx, "", searchFilter)
-		if err != nil {
-			FatalError("%v", err)
-		}
-
-		// Apply predicate filter if needed (for OR queries)
-		if result.RequiresPredicate && result.Predicate != nil {
-			// For predicate filtering, we need labels populated on issues
-			if store != nil {
-				issueIDs := make([]string, len(issues))
-				for i, issue := range issues {
-					issueIDs[i] = issue.ID
+		if jsonOutput {
+			iwc, err := store.SearchIssuesWithCounts(ctx, "", searchFilter)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+			if result.RequiresPredicate && result.Predicate != nil {
+				filtered := make([]*types.IssueWithCounts, 0, len(iwc))
+				for _, item := range iwc {
+					if item == nil || item.Issue == nil {
+						continue
+					}
+					if result.Predicate(item.Issue) {
+						filtered = append(filtered, item)
+					}
 				}
-				labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs) // Best effort: display gracefully degrades with empty data
-				for _, issue := range issues {
-					issue.Labels = labelsMap[issue.ID]
+				iwc = filtered
+				if limit > 0 && len(iwc) > limit {
+					iwc = iwc[:limit]
 				}
 			}
+			sortIssuesWithCounts(iwc, sortBy, reverse)
+			if iwc == nil {
+				iwc = []*types.IssueWithCounts{}
+			}
+			return outputJSON(iwc)
+		}
 
+		issues, err := store.SearchIssues(ctx, "", searchFilter)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+
+		if result.RequiresPredicate && result.Predicate != nil {
 			filtered := make([]*types.Issue, 0, len(issues))
 			for _, issue := range issues {
 				if result.Predicate(issue) {
@@ -166,65 +190,15 @@ Examples:
 				}
 			}
 			issues = filtered
-
-			// Apply limit after predicate filtering
 			if limit > 0 && len(issues) > limit {
 				issues = issues[:limit]
 			}
 		}
 
-		// Apply sorting
 		sortIssues(issues, sortBy, reverse)
 
-		// Output results
-		if jsonOutput {
-			// Get labels and dependency counts
-			if store != nil {
-				issueIDs := make([]string, len(issues))
-				for i, issue := range issues {
-					issueIDs[i] = issue.ID
-				}
-				labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)   // Best effort: display gracefully degrades with empty data
-				depCounts, _ := store.GetDependencyCounts(ctx, issueIDs)  // Best effort: display gracefully degrades with empty data
-				commentCounts, _ := store.GetCommentCounts(ctx, issueIDs) // Best effort: display gracefully degrades with empty data
-
-				for _, issue := range issues {
-					issue.Labels = labelsMap[issue.ID]
-				}
-
-				issuesWithCounts := make([]*types.IssueWithCounts, len(issues))
-				for i, issue := range issues {
-					counts := depCounts[issue.ID]
-					if counts == nil {
-						counts = &types.DependencyCounts{DependencyCount: 0, DependentCount: 0}
-					}
-					issuesWithCounts[i] = &types.IssueWithCounts{
-						Issue:           issue,
-						DependencyCount: counts.DependencyCount,
-						DependentCount:  counts.DependentCount,
-						CommentCount:    commentCounts[issue.ID],
-					}
-				}
-				outputJSON(issuesWithCounts)
-			} else {
-				outputJSON(issues)
-			}
-			return
-		}
-
-		// Load labels for display
-		if store != nil && !result.RequiresPredicate {
-			issueIDs := make([]string, len(issues))
-			for i, issue := range issues {
-				issueIDs[i] = issue.ID
-			}
-			labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs) // Best effort: display gracefully degrades with empty data
-			for _, issue := range issues {
-				issue.Labels = labelsMap[issue.ID]
-			}
-		}
-
 		outputQueryResults(issues, queryStr, longFormat)
+		return nil
 	},
 }
 
@@ -307,6 +281,7 @@ func formatQueryIssue(buf *strings.Builder, issue *types.Issue) {
 
 func init() {
 	queryCmd.Flags().IntP("limit", "n", 50, "Limit results (default: 50, 0 = unlimited)")
+	queryCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
 	queryCmd.Flags().BoolP("all", "a", false, "Include closed issues (default: exclude closed)")
 	queryCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")
 	queryCmd.Flags().String("sort", "", "Sort by field: priority, created, updated, closed, status, id, title, type, assignee")

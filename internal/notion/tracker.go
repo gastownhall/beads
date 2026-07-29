@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	itracker "github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
@@ -514,7 +515,24 @@ func (t *Tracker) upsertRemoteIssue(issue *itracker.TrackerIssue) {
 	}
 }
 
+// getConfig reads a config value from storage, falling back to env var.
+// For yaml-only keys, reads from config.yaml first to avoid leaking
+// secrets when pushing the Dolt database to remotes.
 func (t *Tracker) getConfig(ctx context.Context, key, envVar string) string {
+	// Secret keys are stored in config.yaml, not the Dolt database,
+	// to avoid leaking secrets when pushing to remotes.
+	if config.IsYamlOnlyKey(key) {
+		if val := config.GetString(key); strings.TrimSpace(val) != "" {
+			return strings.TrimSpace(val)
+		}
+		if envVar != "" {
+			if envVal := strings.TrimSpace(os.Getenv(envVar)); envVal != "" {
+				return envVal
+			}
+		}
+		return ""
+	}
+
 	if t.store != nil {
 		if value, err := t.store.GetConfig(ctx, key); err == nil && strings.TrimSpace(value) != "" {
 			return strings.TrimSpace(value)

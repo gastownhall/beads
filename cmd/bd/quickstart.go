@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -13,6 +14,13 @@ var quickstartCmd = &cobra.Command{
 	Short:   "Quick start guide for bd",
 	Long:    `Display a quick start guide showing common bd workflows and patterns.`,
 	Run: func(cmd *cobra.Command, args []string) {
+		evt := metrics.NewCommandEvent("quickstart")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		fmt.Printf("\n%s\n\n", ui.RenderBold("bd - Dependency-Aware Issue Tracker"))
 		fmt.Printf("Issues chained together like beads.\n\n")
 
@@ -72,10 +80,11 @@ var quickstartCmd = &cobra.Command{
 
 		fmt.Printf("%s\n", ui.RenderBold("SYNC"))
 		fmt.Printf("  Share issues with your team using Dolt remotes:\n")
-		fmt.Printf("    %s  Add remote\n", ui.RenderAccent("bd dolt remote add origin git+ssh://git@github.com/org/repo.git"))
+		fmt.Printf("    %s  Verify remote (bd init auto-wires git origin when present)\n", ui.RenderAccent("bd dolt remote list"))
+		fmt.Printf("    %s  Add remote if needed\n", ui.RenderAccent("bd dolt remote add origin git+ssh://git@github.com/org/repo.git"))
 		fmt.Printf("    %s              Push issues\n", ui.RenderAccent("bd dolt push"))
 		fmt.Printf("    %s              Pull from teammates\n", ui.RenderAccent("bd dolt pull"))
-		fmt.Printf("  Dolt handles sync natively with cell-level merge — no manual export needed\n\n")
+		fmt.Printf("  Dolt handles sync natively with cell-level merge; JSONL is export, not sync\n\n")
 
 		fmt.Printf("%s\n", ui.RenderBold("AGENT INTEGRATION"))
 		fmt.Printf("  bd is designed for AI-supervised workflows:\n")

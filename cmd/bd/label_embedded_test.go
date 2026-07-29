@@ -19,11 +19,25 @@ func bdLabel(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd label %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd label %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
+}
+
+func bdLabelJSONOutput(t *testing.T, bd, dir string, args ...string) string {
+	t.Helper()
+	fullArgs := append([]string{"label"}, args...)
+	cmd := exec.Command(bd, fullArgs...)
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd label %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+			strings.Join(args, " "), err, stdout.String(), stderr.String())
+	}
+	return stdout.String()
 }
 
 // bdLabelFail runs "bd label" expecting failure.
@@ -43,21 +57,14 @@ func bdLabelFail(t *testing.T, bd, dir string, args ...string) string {
 // bdLabelListJSON runs "bd label list --json" and returns parsed labels.
 func bdLabelListJSON(t *testing.T, bd, dir, issueID string) []string {
 	t.Helper()
-	cmd := exec.Command(bd, "label", "list", issueID, "--json")
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bd label list %s --json failed: %v\n%s", issueID, err, out)
-	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(bdLabelJSONOutput(t, bd, dir, "list", issueID, "--json"))
 	start := strings.Index(s, "[")
 	if start < 0 {
 		return nil
 	}
 	var labels []string
 	if err := json.Unmarshal([]byte(s[start:]), &labels); err != nil {
-		t.Fatalf("parse label list JSON: %v\n%s", err, s)
+		t.Fatalf("parse label list JSON: %v\nstdout: %s", err, s)
 	}
 	return labels
 }
@@ -65,21 +72,14 @@ func bdLabelListJSON(t *testing.T, bd, dir, issueID string) []string {
 // bdLabelListAllJSON runs "bd label list-all --json" and returns parsed results.
 func bdLabelListAllJSON(t *testing.T, bd, dir string) []map[string]interface{} {
 	t.Helper()
-	cmd := exec.Command(bd, "label", "list-all", "--json")
-	cmd.Dir = dir
-	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("bd label list-all --json failed: %v\n%s", err, out)
-	}
-	s := strings.TrimSpace(string(out))
+	s := strings.TrimSpace(bdLabelJSONOutput(t, bd, dir, "list-all", "--json"))
 	start := strings.Index(s, "[")
 	if start < 0 {
 		return nil
 	}
 	var results []map[string]interface{}
 	if err := json.Unmarshal([]byte(s[start:]), &results); err != nil {
-		t.Fatalf("parse label list-all JSON: %v\n%s", err, s)
+		t.Fatalf("parse label list-all JSON: %v\nstdout: %s", err, s)
 	}
 	return results
 }
@@ -134,15 +134,52 @@ func TestEmbeddedLabel(t *testing.T) {
 
 	t.Run("label_add_json", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Label JSON add", "--type", "task")
-		cmd := exec.Command(bd, "label", "add", issue.ID, "json-label", "--json")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("bd label add --json failed: %v\n%s", err, out)
+		s := strings.TrimSpace(bdLabelJSONOutput(t, bd, dir, "add", issue.ID, "json-label", "--json"))
+		start := strings.Index(s, "[")
+		if start < 0 {
+			t.Fatalf("no JSON array in output: %s", s)
 		}
-		if !json.Valid([]byte(strings.TrimSpace(string(out))[strings.Index(strings.TrimSpace(string(out)), "["):])) {
-			t.Errorf("expected valid JSON: %s", out)
+		if !json.Valid([]byte(s[start:])) {
+			t.Errorf("expected valid JSON: %s", s)
+		}
+	})
+
+	t.Run("label_add_comma_separated_multi", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Multi label add", "--type", "task")
+		out := bdLabel(t, bd, dir, "add", issue.ID, "multi-a,multi-b,multi-c")
+		if !strings.Contains(out, "Added") {
+			t.Errorf("expected 'Added' in output: %s", out)
+		}
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		labelSet := map[string]bool{}
+		for _, l := range labels {
+			labelSet[l] = true
+		}
+		for _, want := range []string{"multi-a", "multi-b", "multi-c"} {
+			if !labelSet[want] {
+				t.Errorf("expected %q in labels: %v", want, labels)
+			}
+		}
+	})
+
+	t.Run("label_remove_comma_separated_multi", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Multi label remove", "--type", "task",
+			"--label", "rm-a", "--label", "rm-b", "--label", "rm-keep")
+		bdLabel(t, bd, dir, "remove", issue.ID, "rm-a,rm-b")
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		for _, l := range labels {
+			if l == "rm-a" || l == "rm-b" {
+				t.Errorf("label %q should have been removed: %v", l, labels)
+			}
+		}
+		found := false
+		for _, l := range labels {
+			if l == "rm-keep" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected 'rm-keep' to survive: %v", labels)
 		}
 	})
 
@@ -194,14 +231,14 @@ func TestEmbeddedLabel(t *testing.T) {
 		cmd := exec.Command(bd, "label", "remove", issue.ID, "jsonrm", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd label remove --json failed: %v\n%s", err, out)
+			t.Fatalf("bd label remove --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(stdout.String())
 		start := strings.Index(s, "[")
 		if start < 0 {
-			t.Fatalf("no JSON array in output: %s", s)
+			t.Fatalf("no JSON array in output:\nstdout: %s\nstderr: %s", s, stderr.String())
 		}
 		if !json.Valid([]byte(s[start:])) {
 			t.Errorf("expected valid JSON: %s", s)
@@ -298,14 +335,7 @@ func TestEmbeddedLabel(t *testing.T) {
 		child := bdCreate(t, bd, dir, "JSON prop child", "--type", "task")
 		bdDepAdd(t, bd, dir, child.ID, parent.ID, "--type", "parent-child")
 
-		cmd := exec.Command(bd, "label", "propagate", parent.ID, "prop-json", "--json")
-		cmd.Dir = dir
-		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("bd label propagate --json failed: %v\n%s", err, out)
-		}
-		s := strings.TrimSpace(string(out))
+		s := strings.TrimSpace(bdLabelJSONOutput(t, bd, dir, "propagate", parent.ID, "prop-json", "--json"))
 		start := strings.Index(s, "[")
 		if start >= 0 && !json.Valid([]byte(s[start:])) {
 			t.Errorf("expected valid JSON: %s", s)
@@ -330,6 +360,33 @@ func TestEmbeddedLabel(t *testing.T) {
 	t.Run("label_add_reserved_provides", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Reserved label", "--type", "task")
 		bdLabelFail(t, bd, dir, "add", issue.ID, "provides:auth")
+	})
+
+	t.Run("label_add_reserved_provides_in_comma_list", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Reserved label in list", "--type", "task")
+		bdLabelFail(t, bd, dir, "add", issue.ID, "ok-label,provides:auth")
+	})
+
+	t.Run("label_add_unresolvable_id_fails", func(t *testing.T) {
+		bdLabelFail(t, bd, dir, "add", "tl-doesnotexist", "some-label")
+	})
+
+	t.Run("label_add_space_separated_labels_fails_loudly", func(t *testing.T) {
+		// Regression test for bd-vu5kv: "bd label add <id> a b c" used to
+		// treat a/b as unresolvable issue IDs, skip them with a stderr
+		// warning, and exit 0 having applied only "c". It must now fail
+		// hard, apply nothing, and hint at the comma-separated form.
+		issue := bdCreate(t, bd, dir, "Space separated labels", "--type", "task")
+		out := bdLabelFail(t, bd, dir, "add", issue.ID, "space-a", "space-b", "space-c")
+		if !strings.Contains(out, "comma-separated") {
+			t.Errorf("expected comma-separated hint in error output: %s", out)
+		}
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		for _, l := range labels {
+			if strings.HasPrefix(l, "space-") {
+				t.Errorf("no label should have been applied, found %q: %v", l, labels)
+			}
+		}
 	})
 }
 

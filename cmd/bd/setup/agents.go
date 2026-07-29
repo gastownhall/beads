@@ -10,7 +10,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/templates/agents"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 // readFileBytesImpl is used in tests; avoids import cycle.
@@ -34,6 +33,7 @@ type agentsEnv struct {
 	agentsPath string
 	stdout     io.Writer
 	stderr     io.Writer
+	skipped    *bool
 }
 
 type agentsIntegration struct {
@@ -50,6 +50,21 @@ func defaultAgentsEnv() agentsEnv {
 		stdout:     os.Stdout,
 		stderr:     os.Stderr,
 	}
+}
+
+// detectRenderOptsImpl checks whether a Dolt sync remote is configured and returns
+// appropriate RenderOpts. When no remote is configured, the rendered template
+// omits "bd dolt push" from session-completion instructions.
+// Exposed as a variable so tests can override.
+var detectRenderOptsImpl = func() agents.RenderOpts {
+	return agents.RenderOpts{
+		HasRemote: config.GetString("sync.remote") != "" || config.GetString("sync.git-remote") != "",
+		NoPush:    config.GetBool("no-push"),
+	}
+}
+
+func detectRenderOpts() agents.RenderOpts {
+	return detectRenderOptsImpl()
 }
 
 // containsBeadsMarker returns true if content contains a BEGIN BEADS INTEGRATION marker
@@ -74,23 +89,38 @@ func agentsFileName(path string) string {
 	return base
 }
 
+func (env agentsEnv) markSkipped() {
+	if env.skipped != nil {
+		*env.skipped = true
+	}
+}
+
 func installAgents(env agentsEnv, integration agentsIntegration) error {
 	_, _ = fmt.Fprintf(env.stdout, "Installing %s integration...\n", integration.name)
 	agentsFile := agentsFileName(env.agentsPath)
 
-	profile := resolveProfile(integration)
-
-	// Resolve symlinks so that e.g. CLAUDE.md -> AGENTS.md writes to the real target.
-	// This uses the existing atomicWriteFile path which also calls ResolveForWrite,
-	// but we need the resolved path here to read the current content from the right place.
-	resolvedPath, err := utils.ResolveForWrite(env.agentsPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(env.stderr, "Error: resolve path %s: %v\n", env.agentsPath, err)
+	// Never inject managed sections through symlinks. Following symlink targets
+	// can unexpectedly mutate other instruction files and, in some workflows,
+	// corrupt tracked symlink entries.
+	if info, err := os.Lstat(env.agentsPath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		target, readErr := os.Readlink(env.agentsPath)
+		targetHint := ""
+		if readErr == nil && target != "" {
+			targetHint = fmt.Sprintf(" to %s", target)
+		}
+		_, _ = fmt.Fprintf(env.stderr, "Warning: %s is a symlink%s; skipping managed section injection to preserve link mode/content. Update the target file directly, or replace the symlink with a regular file and re-run '%s'.\n", agentsFile, targetHint, integration.setupCommand)
+		env.markSkipped()
+		return nil
+	} else if err != nil && !os.IsNotExist(err) {
+		_, _ = fmt.Fprintf(env.stderr, "Error: failed to inspect %s: %v\n", env.agentsPath, err)
 		return err
 	}
 
+	profile := resolveProfile(integration)
+	opts := detectRenderOpts()
+
 	var currentContent string
-	data, err := os.ReadFile(resolvedPath) // #nosec G304 -- resolvedPath is derived from env.agentsPath via ResolveForWrite
+	data, err := os.ReadFile(env.agentsPath) // #nosec G304 -- env.agentsPath is trusted setup destination
 	if err == nil {
 		currentContent = string(data)
 	} else if !os.IsNotExist(err) {
@@ -109,11 +139,11 @@ func installAgents(env agentsEnv, integration agentsIntegration) error {
 		}
 	}
 
-	beadsSection := agents.RenderSection(profile)
+	beadsSection := agents.RenderSectionWithOpts(profile, opts)
 
 	if currentContent != "" {
 		if containsBeadsMarker(currentContent) {
-			newContent := updateBeadsSectionWithProfile(currentContent, profile)
+			newContent := updateBeadsSectionWithOpts(currentContent, profile, opts)
 			if err := atomicWriteFile(env.agentsPath, []byte(newContent)); err != nil {
 				_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
 				return err
@@ -128,7 +158,7 @@ func installAgents(env agentsEnv, integration agentsIntegration) error {
 			_, _ = fmt.Fprintf(env.stdout, "✓ Added beads section to existing %s\n", agentsFile)
 		}
 	} else {
-		newContent := createNewAgentsFileWithProfile(profile)
+		newContent := createNewAgentsFileWithOpts(profile, opts)
 		if err := atomicWriteFile(env.agentsPath, []byte(newContent)); err != nil {
 			_, _ = fmt.Fprintf(env.stderr, "Error: write %s: %v\n", env.agentsPath, err)
 			return err
@@ -187,7 +217,7 @@ func checkAgents(env agentsEnv, integration agentsIntegration) error {
 		checkProfile = agents.ProfileFull
 	}
 
-	currentHash := agents.CurrentHash(checkProfile)
+	currentHash := agents.CurrentHashWithOpts(checkProfile, detectRenderOpts())
 	if meta != nil && meta.Hash == currentHash && existingProf == checkProfile {
 		_, _ = fmt.Fprintf(env.stdout, "✓ %s integration installed: %s (current)\n", integration.name, env.agentsPath)
 		return nil
@@ -237,12 +267,13 @@ func updateBeadsSection(content string) string {
 // Delegates to the canonical agents.ReplaceSection. Returns an error string on
 // malformed markers (logged by callers) instead of silently appending.
 func updateBeadsSectionWithProfile(content string, profile agents.Profile) string {
-	replaced, _, err := agents.ReplaceSection(content, profile)
+	return updateBeadsSectionWithOpts(content, profile, agents.DefaultRenderOpts())
+}
+
+// updateBeadsSectionWithOpts replaces the beads section with the given profile and render opts.
+func updateBeadsSectionWithOpts(content string, profile agents.Profile, opts agents.RenderOpts) string {
+	replaced, _, err := agents.ReplaceSectionWithOpts(content, profile, opts)
 	if err != nil {
-		// ErrNoSection or ErrMalformedMarkers — return content unchanged.
-		// Callers check containsBeadsMarker() before calling, so ErrNoSection
-		// should not occur in practice. Malformed markers are preserved rather
-		// than silently appending a duplicate section.
 		return content
 	}
 	return replaced
@@ -311,7 +342,12 @@ func createNewAgentsFile() string {
 
 // createNewAgentsFileWithProfile creates a new AGENTS.md with the given profile.
 func createNewAgentsFileWithProfile(profile agents.Profile) string {
-	beadsSection := agents.RenderSection(profile)
+	return createNewAgentsFileWithOpts(profile, agents.DefaultRenderOpts())
+}
+
+// createNewAgentsFileWithOpts creates a new AGENTS.md with the given profile and render opts.
+func createNewAgentsFileWithOpts(profile agents.Profile, opts agents.RenderOpts) string {
+	beadsSection := agents.RenderSectionWithOpts(profile, opts)
 
 	return `# Project Instructions for AI Agents
 

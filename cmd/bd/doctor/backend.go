@@ -1,12 +1,10 @@
 package doctor
 
 import (
-	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -37,53 +35,13 @@ func ResolveBeadsDirForRepo(repoPath string) string {
 }
 
 func resolveBeadsDirForRepoUncached(repoPath string) string {
-	localBeadsDir := filepath.Join(repoPath, ".beads")
-	if info, err := os.Stat(localBeadsDir); err == nil && info.IsDir() {
-		return resolveBeadsDir(localBeadsDir)
-	}
+	return beads.ResolveBeadsDirForRepo(repoPath)
+}
 
-	if fallback := worktreeFallbackBeadsDir(repoPath); fallback != "" {
-		return resolveBeadsDir(fallback)
-	}
-
-	return resolveBeadsDir(localBeadsDir)
+func resolvedBeadsRepoRoot(repoPath string) string {
+	return filepath.Dir(ResolveBeadsDirForRepo(repoPath))
 }
 
 func clearResolveBeadsDirCache() {
 	resolveBeadsDirCache = sync.Map{}
-}
-
-func worktreeFallbackBeadsDir(repoPath string) string {
-	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir", "--git-common-dir")
-	output, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) < 2 {
-		return ""
-	}
-
-	gitDir := gitPathForRepo(repoPath, strings.TrimSpace(lines[0]))
-	commonDir := gitPathForRepo(repoPath, strings.TrimSpace(lines[1]))
-	if gitDir == "" || commonDir == "" || utils.PathsEqual(gitDir, commonDir) {
-		return ""
-	}
-
-	if filepath.Base(commonDir) == ".git" {
-		return filepath.Join(filepath.Dir(commonDir), ".beads")
-	}
-
-	return filepath.Join(commonDir, ".beads")
-}
-
-func gitPathForRepo(repoPath, path string) string {
-	if path == "" {
-		return ""
-	}
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(repoPath, path)
-	}
-	return utils.CanonicalizePath(path)
 }

@@ -56,7 +56,31 @@ func Initialize() error {
 		}
 	}
 
+	// Also check ~/.config/bd/config.yaml explicitly. On macOS,
+	// os.UserConfigDir() returns ~/Library/Application Support, not ~/.config.
+	// This ensures the documented path works on all platforms.
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		xdgPath := filepath.Join(homeDir, ".config", "bd", "config.yaml")
+		alreadyAdded := false
+		for _, existing := range configPaths {
+			if filepath.Clean(existing) == filepath.Clean(xdgPath) {
+				alreadyAdded = true
+				break
+			}
+		}
+		if !alreadyAdded {
+			if _, err := os.Stat(xdgPath); err == nil {
+				configPaths = append(configPaths, xdgPath)
+			}
+		}
+	}
+
 	// 1. Project: walk up from CWD to find .beads/config.yaml
+	beadsDirEnv := strings.TrimSpace(os.Getenv("BEADS_DIR"))
+	beadsEnvConfigPath := ""
+	if beadsDirEnv != "" {
+		beadsEnvConfigPath = filepath.Clean(filepath.Join(beadsDirEnv, "config.yaml"))
+	}
 	cwd, err := os.Getwd()
 	if err == nil {
 		// In the beads repo, `.beads/config.yaml` is tracked and may set non-default config values.
@@ -67,6 +91,7 @@ func Initialize() error {
 		// <module-root>/.beads/config.yaml (where module-root is the nearest parent containing go.mod).
 		ignoreRepoConfig := os.Getenv("BEADS_TEST_IGNORE_REPO_CONFIG") != ""
 		var moduleRoot string
+		ignoredRepoConfigPaths := map[string]bool{}
 		if ignoreRepoConfig {
 			// Find module root by walking up to go.mod.
 			for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
@@ -75,24 +100,50 @@ func Initialize() error {
 					break
 				}
 			}
+			if moduleRoot != "" {
+				ignoredRepoConfigPaths[filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))] = true
+			}
+			if fallbackPath := worktreeFallbackConfigPath(cwd); fallbackPath != "" {
+				ignoredRepoConfigPaths[filepath.Clean(fallbackPath)] = true
+			}
 		}
 
-		// Walk up parent directories to find .beads/config.yaml
-		for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-			beadsDir := filepath.Join(dir, ".beads")
-			p := filepath.Join(beadsDir, "config.yaml")
-			if _, err := os.Stat(p); err == nil {
-				if ignoreRepoConfig && moduleRoot != "" {
-					// Only ignore the repo-local config (moduleRoot/.beads/config.yaml).
-					wantIgnore := filepath.Clean(p) == filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))
-					if wantIgnore {
-						continue
-					}
-				}
-				configPaths = append(configPaths, p)
-				primaryConfigPath = p
-				break
+		tryProjectConfig := func(path string) bool {
+			if path == "" {
+				return false
 			}
+			if _, err := os.Stat(path); err != nil {
+				return false
+			}
+			if ignoreRepoConfig && ignoredRepoConfigPaths[filepath.Clean(path)] {
+				return false
+			}
+			configPaths = append(configPaths, path)
+			primaryConfigPath = path
+			return true
+		}
+
+		// Walk up parent directories to find .beads/config.yaml.
+		for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+			p := filepath.Join(dir, ".beads", "config.yaml")
+			if _, err := os.Stat(p); err == nil {
+				// When BEADS_DIR points at a different runtime workspace, do not
+				// merge the caller repo's config underneath it. That leaks caller
+				// settings like readonly/json/actor into explicit-target commands.
+				if beadsEnvConfigPath != "" && filepath.Clean(p) != beadsEnvConfigPath {
+					break
+				}
+				if tryProjectConfig(p) {
+					break
+				}
+			}
+		}
+
+		// Worktree/shared fallback: the active workspace may live outside the
+		// worktree tree, so the parent walk above won't find it.
+		if primaryConfigPath == "" && beadsEnvConfigPath == "" {
+			p := worktreeFallbackConfigPath(cwd)
+			_ = tryProjectConfig(p)
 		}
 	}
 
@@ -120,6 +171,7 @@ func Initialize() error {
 	// Set defaults for all flags
 	v.SetDefault("json", false)
 	v.SetDefault("events-export", false)
+	v.SetDefault("audit.enabled", false)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)
 	v.SetDefault("db", "")
@@ -128,6 +180,8 @@ func Initialize() error {
 	// Additional environment variables (not prefixed with BD_)
 	_ = v.BindEnv("identity", "BEADS_IDENTITY") // BindEnv only fails with zero args, which can't happen here
 	v.SetDefault("identity", "")
+	_ = v.BindEnv("node_id", "BEADS_NODE_ID", "BD_NODE_ID") // replica identity; see NodeID
+	v.SetDefault("node_id", "")
 
 	// Dolt configuration defaults
 	// Controls whether beads should automatically create Dolt commits after write commands.
@@ -143,13 +197,24 @@ func Initialize() error {
 	// Sync configuration defaults (bd-4u8)
 	v.SetDefault("sync.require_confirmation_on_mass_delete", false)
 
+	v.SetDefault("metrics.disabled", false)
+	v.SetDefault("metrics.endpoint", "https://gastownhall-eventsapi.com/mp/collect")
+
 	// Federation configuration (optional Dolt remote)
 	v.SetDefault("federation.remote", "")                          // e.g., dolthub://org/beads, gs://bucket/beads, s3://bucket/beads, az://account.blob.core.windows.net/container/beads
 	v.SetDefault("federation.sovereignty", "")                     // T1 | T2 | T3 | T4 (empty = no restriction)
 	v.SetDefault("federation.allowed-remote-patterns", []string{}) // glob patterns restricting allowed remote URLs (enterprise lockdown)
+	v.SetDefault("federation.exclude_types", []string{"wisp"})     // issue types excluded from federation push (privacy filter)
 
 	// Push configuration defaults
 	v.SetDefault("no-push", false)
+
+	// Agent profile configuration (gh#3423, follow-up to #4220)
+	// Explicit runtime knob for the policy profile (git/commit authority)
+	// documented in docs/getting-started/ide-setup.md. `bd prime` uses this to select its
+	// close-protocol wording. Values: conservative | minimal | team-maintainer.
+	// Invalid values fall back to "conservative" (see GetAgentProfile).
+	v.SetDefault("agent.profile", string(ProfileConservative))
 
 	// Create command defaults
 	v.SetDefault("create.require-description", false)
@@ -188,18 +253,25 @@ func Initialize() error {
 	v.SetDefault("backup.git-push", false)
 	v.SetDefault("backup.git-repo", "")
 
-	// Auto-export: write git-tracked JSONL after mutations for portability
-	// When no Dolt remote is configured, this is the primary way to share
-	// beads state (issues + memories) across machines via git.  Enabled by
-	// default so that viewers (bv) and git-based workflows see fresh data
-	// without extra configuration (GH#2973).
-	v.SetDefault("export.auto", true)
+	// Auto-export: optional JSONL export after mutations for viewers,
+	// interchange, and backup. It is not cross-machine sync; Dolt remotes are
+	// the source of truth for sync. Viewer integrations can opt in explicitly.
+	v.SetDefault("export.auto", false)
 	v.SetDefault("export.interval", "60s")
 	v.SetDefault("export.path", "issues.jsonl") // relative to .beads/; canonical name
-	v.SetDefault("export.git-add", true)
+	v.SetDefault("export.git-add", false)
+
+	// Auto-import: legacy compatibility fallback for projects that have not
+	// configured a Dolt remote yet. Hook code skips this path when sync.remote
+	// is configured because JSONL import is upsert-only, not reconciliation.
+	v.SetDefault("import.auto", true)
+	v.SetDefault("import.path", "issues.jsonl") // relative to .beads/; canonical import name
 
 	// AI configuration defaults
 	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")
+
+	// List command defaults
+	v.SetDefault("list.limit", 50)
 
 	// Output configuration (GH#1384)
 	// Controls title display in command feedback messages.
@@ -256,6 +328,63 @@ func Initialize() error {
 func ResetForTesting() {
 	v = nil
 	overriddenKeys = map[string]bool{}
+}
+
+func worktreeFallbackConfigPath(repoPath string) string {
+	gitDir, commonDir, ok := gitDirsForRepo(repoPath)
+	if !ok || samePath(gitDir, commonDir) {
+		return ""
+	}
+
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Join(filepath.Dir(commonDir), ".beads", "config.yaml")
+	}
+
+	return filepath.Join(commonDir, ".beads", "config.yaml")
+}
+
+func gitDirsForRepo(repoPath string) (gitDir, commonDir string, ok bool) {
+	cmd := exec.Command("git", "-C", repoPath, "rev-parse", "--git-dir", "--git-common-dir")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", "", false
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) < 2 {
+		return "", "", false
+	}
+
+	gitDir = gitPathForRepo(repoPath, strings.TrimSpace(lines[0]))
+	commonDir = gitPathForRepo(repoPath, strings.TrimSpace(lines[1]))
+	if gitDir == "" || commonDir == "" {
+		return "", "", false
+	}
+
+	return gitDir, commonDir, true
+}
+
+func gitPathForRepo(repoPath, path string) string {
+	if path == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(repoPath, path)
+	}
+
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+
+	return path
+}
+
+func samePath(left, right string) bool {
+	if left == "" || right == "" {
+		return left == right
+	}
+	return filepath.Clean(left) == filepath.Clean(right)
 }
 
 // ConfigSource represents where a configuration value came from
@@ -754,17 +883,53 @@ func GetIdentity(flagValue string) string {
 	return "unknown"
 }
 
+// NodeID returns the identity of THIS replica: the beads STORE that grants
+// and enforces leases here. A lease is enforceable exactly as far as that
+// store reaches, and the replica-aware reclaim guard
+// (issueops.ReclaimExpiredLeasesInTx) refuses to revert a lease some OTHER
+// node granted.
+//
+// It is read from BEADS_NODE_ID / BD_NODE_ID, or node_id in config.yaml, and
+// from nowhere else. It deliberately does NOT fall back to os.Hostname(),
+// because the hostname answers the wrong question — it names the client
+// PROCESS's machine, not the store:
+//
+//   - With a shared or remote dolt sql-server (BEADS_DOLT_SERVER_HOST, or any
+//     ServerModeExternal deployment — systemd, Docker, Hosted Dolt, a VPS),
+//     many hosts are clients of ONE store. There is no sync interval between
+//     them and no stale liveness view to defend against, but per-hostname
+//     identity would make a supervisor unable to reap any worker's lease —
+//     reclaim would return 0 forever and every dead worker's unit would sit
+//     in_progress permanently.
+//   - In a container the hostname is the container ID, regenerated on every
+//     run, so a replaced worker's own single-machine leases would look
+//     foreign to its successor.
+//   - On macOS/DHCP the transient hostname changes with the network.
+//
+// Each of those is a fail-CLOSED regression on a deployment that has no
+// federation at all, which is a far worse failure than the cross-replica
+// reclaim this guard exists to prevent. So the guard is armed only where an
+// operator has said, explicitly, that this store is one replica among
+// several. "" means "this deployment does not name its replicas" and is the
+// default: every consumer degrades to the pre-replica-aware behavior rather
+// than fail closed.
+func NodeID() string {
+	return strings.TrimSpace(GetString("node_id"))
+}
+
 // FederationConfig holds the federation (Dolt remote) configuration.
 type FederationConfig struct {
-	Remote      string      // dolthub://org/beads, gs://bucket/beads, s3://bucket/beads
-	Sovereignty Sovereignty // T1, T2, T3, T4
+	Remote       string      // dolthub://org/beads, gs://bucket/beads, s3://bucket/beads
+	Sovereignty  Sovereignty // T1, T2, T3, T4
+	ExcludeTypes []string    // issue types excluded from federation push (e.g. ["wisp"])
 }
 
 // GetFederationConfig returns the current federation configuration.
 func GetFederationConfig() FederationConfig {
 	return FederationConfig{
-		Remote:      GetString("federation.remote"),
-		Sovereignty: GetSovereignty(),
+		Remote:       GetString("federation.remote"),
+		Sovereignty:  GetSovereignty(),
+		ExcludeTypes: GetStringSlice("federation.exclude_types"),
 	}
 }
 
@@ -871,13 +1036,41 @@ func ValidateAgentsFile(filename string) error {
 	return nil
 }
 
-// getConfigList is a helper that retrieves a comma-separated list from config.yaml.
+// getConfigList retrieves a list-typed configuration value from config.yaml,
+// accepting either the YAML list form (e.g. `types: { custom: [step, wisp] }`)
+// or the legacy comma-separated string form (e.g.
+// `types.custom = "step,wisp"`). Entries are trimmed; empty entries are
+// dropped. The dual-form support is required for project-extension
+// types/statuses declared in .beads/config.yaml — see gastownhall/beads#4024.
 func getConfigList(key string) []string {
 	if v == nil {
 		debug.Logf("config: viper not initialized, returning nil for key %q", key)
 		return nil
 	}
 
+	// Try the YAML-list form first. Viper's GetStringSlice returns:
+	//   * []string for a YAML sequence value,
+	//   * []string{value} when the underlying value is a single string,
+	//   * nil/empty when the key is unset.
+	// Re-splitting each entry on comma covers the case where the entry is
+	// itself a comma-separated string (legacy form bound via GetStringSlice).
+	if slice := v.GetStringSlice(key); len(slice) > 0 {
+		result := make([]string, 0, len(slice))
+		for _, entry := range slice {
+			for _, p := range strings.Split(entry, ",") {
+				if trimmed := strings.TrimSpace(p); trimmed != "" {
+					result = append(result, trimmed)
+				}
+			}
+		}
+		if len(result) > 0 {
+			return result
+		}
+	}
+
+	// Fallback to direct string retrieval for the comma-separated form when
+	// GetStringSlice didn't surface a value (e.g. some viper builds short-
+	// circuit GetStringSlice for pure-string values).
 	value := v.GetString(key)
 	if value == "" {
 		return nil

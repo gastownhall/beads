@@ -24,11 +24,11 @@ func TestEmbeddedQuickstart(t *testing.T) {
 		cmd := exec.Command(bd, "quickstart")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
-		out, err := cmd.CombinedOutput()
+		stdout, stderr, err := runCommandBuffers(t, cmd)
 		if err != nil {
-			t.Fatalf("bd quickstart failed: %v\n%s", err, out)
+			t.Fatalf("bd quickstart failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
 		}
-		if len(strings.TrimSpace(string(out))) == 0 {
+		if len(strings.TrimSpace(stdout.String())) == 0 {
 			t.Error("expected non-empty quickstart output")
 		}
 	})

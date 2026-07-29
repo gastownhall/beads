@@ -67,7 +67,7 @@ func bdDiffJSON(t *testing.T, bd, dir string, args ...string) []map[string]inter
 // bd subprocess commands to acquire it.
 func getCommitHash(t *testing.T, beadsDir, database string) string {
 	t.Helper()
-	s, err := embeddeddolt.New(t.Context(), beadsDir, database, "main")
+	s, err := embeddeddolt.Open(t.Context(), beadsDir, database, "main")
 	if err != nil {
 		t.Fatalf("openStore for getCommitHash: %v", err)
 	}

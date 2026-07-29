@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -19,11 +20,11 @@ func bdBackup(t *testing.T, bd, dir string, args ...string) string {
 	cmd := exec.Command(bd, fullArgs...)
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
-	out, err := cmd.CombinedOutput()
+	stdout, stderr, err := runCommandBuffers(t, cmd)
 	if err != nil {
-		t.Fatalf("bd backup %s failed: %v\n%s", strings.Join(args, " "), err, out)
+		t.Fatalf("bd backup %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
-	return string(out)
+	return stdout.String()
 }
 
 // bdBackupFail runs "bd backup" expecting failure. Returns combined output.
@@ -69,6 +70,22 @@ func TestEmbeddedBackup(t *testing.T) {
 		out := bdBackup(t, bd, dir, "status")
 		if out == "" {
 			t.Error("expected non-empty status output")
+		}
+		if strings.Contains(out, "Database size: 0 B") {
+			t.Errorf("embedded backup status reported an empty database: %s", out)
+		}
+
+		jsonOut := bdBackup(t, bd, dir, "status", "--json")
+		var status struct {
+			DatabaseSize struct {
+				Bytes int64 `json:"bytes"`
+			} `json:"database_size"`
+		}
+		if err := json.Unmarshal([]byte(jsonOut), &status); err != nil {
+			t.Fatalf("parse backup status JSON: %v\noutput: %s", err, jsonOut)
+		}
+		if status.DatabaseSize.Bytes <= 0 {
+			t.Errorf("database_size.bytes = %d, want > 0; output: %s", status.DatabaseSize.Bytes, jsonOut)
 		}
 	})
 

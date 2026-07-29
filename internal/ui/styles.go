@@ -170,6 +170,7 @@ func initColors(isDark bool) {
 	ColorID = lipgloss.NoColor{} // standard text
 
 	// Command style - uses adaptive color for subtle contrast
+	// Light bg gets dark gray text; dark bg gets light gray text (Ayu theme)
 	CommandStyle = lipgloss.NewStyle().Foreground(
 		ld(lipgloss.Color("#5c6166"), lipgloss.Color("#bfbdb6")),
 	)

@@ -5,22 +5,60 @@
 
 set -euo pipefail
 
-# Only check staged Go files (Added, Copied, Modified)
+# Only check staged Go files (Added, Copied, Modified). No early exit here:
+# the beads section at the bottom must run for non-Go commits too.
 staged_go_files=$(git diff --cached --name-only --diff-filter=ACM -- '*.go')
-[ -z "$staged_go_files" ] && exit 0
+if [ -n "$staged_go_files" ]; then
+    # Use go run so golangci-lint is always built with the project's Go
+    # toolchain, avoiding version-mismatch panics from a stale global binary.
+    GOLANGCI_LINT="go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1"
 
-# Use go run so golangci-lint is always built with the project's Go
-# toolchain, avoiding version-mismatch panics from a stale global binary.
-GOLANGCI_LINT="go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1"
+    # Auto-format and re-stage
+    echo "$staged_go_files" | xargs gofmt -w
+    echo "$staged_go_files" | xargs git add
 
-# Auto-format and re-stage
-echo "$staged_go_files" | xargs gofmt -w
-echo "$staged_go_files" | xargs git add
+    # Lint changed code with auto-fix; block on remaining issues.
+    # CGO_ENABLED=0 avoids typecheck failures from CGO-only dependencies
+    # (e.g., dolthub/go-icu-regex) that require system headers not always present.
+    CGO_ENABLED=0 $GOLANGCI_LINT run --new-from-rev=HEAD --fix || exit 1
 
-# Lint changed code with auto-fix; block on remaining issues.
-# CGO_ENABLED=0 avoids typecheck failures from CGO-only dependencies
-# (e.g., dolthub/go-icu-regex) that require system headers not always present.
-CGO_ENABLED=0 $GOLANGCI_LINT run --new-from-rev=HEAD --fix || exit 1
+    # Re-stage any auto-fixes from the linter
+    echo "$staged_go_files" | xargs git add
+fi
 
-# Re-stage any auto-fixes from the linter
-echo "$staged_go_files" | xargs git add
+# The managed section below captures exit codes to tolerate timeouts and an
+# uninitialized bd database; set -e would abort before that handling runs.
+set +e
+
+# --- BEGIN BEADS INTEGRATION v1.1.0 ---
+# This section is managed by beads. Do not remove these markers.
+if command -v bd >/dev/null 2>&1; then
+  export BD_GIT_HOOK=1
+  _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
+  _bd_used_perl=0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$_bd_timeout" bd hooks run pre-commit "$@"
+    _bd_exit=$?
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$_bd_timeout" bd hooks run pre-commit "$@"
+    _bd_exit=$?
+  elif command -v perl >/dev/null 2>&1; then
+    _bd_used_perl=1
+    perl -e 'alarm shift; exec @ARGV' "$_bd_timeout" bd hooks run pre-commit "$@"
+    _bd_exit=$?
+  else
+    echo >&2 "beads: hook 'pre-commit' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT"
+    bd hooks run pre-commit "$@"
+    _bd_exit=$?
+  fi
+  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then
+    echo >&2 "beads: hook 'pre-commit' timed out after ${_bd_timeout}s — continuing without beads"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -eq 3 ]; then
+    echo >&2 "beads: database not initialized — skipping hook 'pre-commit'"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
+fi
+# --- END BEADS INTEGRATION v1.1.0 ---

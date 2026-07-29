@@ -14,7 +14,7 @@ A bash script demonstrating how an AI agent can use bd to manage tasks autonomou
 ## Prerequisites
 
 - bash 4.0+
-- bd installed: `go install github.com/steveyegge/beads/cmd/bd@latest`
+- bd installed: `curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash`
 - jq for JSON parsing: `brew install jq` (macOS) or `apt install jq` (Linux)
 - A beads database initialized: `bd init`
 

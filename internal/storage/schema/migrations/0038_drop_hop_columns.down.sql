@@ -1,0 +1,3 @@
+-- Reverse migration 0038: not reversible. The dropped columns were legacy
+-- HOP-specific fields that don't belong in beads; recreating them with no
+-- data would be misleading. Intentional no-op.

@@ -430,7 +430,7 @@ func checkProjectIdentityWithStore(store *dolt.DoltStore, cfg *configfile.Config
 				Status:   StatusError,
 				Message:  fmt.Sprintf("Project ID mismatch: metadata.json=%s, database=%s", cfg.ProjectID, dbID),
 				Detail:   "This may indicate cross-project data leakage (GH#2372)",
-				Fix:      "Run 'bd dolt status' to diagnose. Do NOT run 'bd init'",
+				Fix:      "Run 'bd doctor --fix' or 'bd bootstrap' to reconcile metadata.json with the authoritative database. If unexpected, run 'bd dolt status' first. Do NOT run 'bd init'",
 				Category: CategoryData,
 			}
 		}

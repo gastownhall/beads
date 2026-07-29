@@ -27,11 +27,11 @@ set -euo pipefail
 #
 # THE RELEASE MOLECULE
 #
-# The `beads-release` formula has 29 steps across 3 phases:
+# The `beads-release` formula defines the full release flow:
 #   Phase 1: Preflight → version bumps → git push (agent work)
 #   Gate:    Await CI completion (async, no polling)
 #   Phase 2: Verify GitHub/npm/PyPI releases (parallel)
-#   Phase 3: Local install → daemon restart
+#   Phase 3: Local install → stale Dolt orphan cleanup
 #
 # View the full formula:
 #   bd formula show beads-release
@@ -80,7 +80,7 @@ Examples:
   ./scripts/release.sh 0.50.0 --dry-run # Preview only
 
 After running this script:
-  1. The release molecule (wisp) is created with all 29 steps
+  1. The release molecule (wisp) is created with the configured formula steps
   2. Hook it to start working: bd hook <mol-id>
   3. Or assign to an agent: bd sling <agent> --mol <mol-id>
   4. Watch progress: bd activity --follow
@@ -116,21 +116,73 @@ fi
 # Strip 'v' prefix if present
 VERSION="${VERSION#v}"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "$REPO_ROOT"
+
+FORMULA_PATH="$REPO_ROOT/.beads/formulas/beads-release.formula.toml"
+
+bd_resolves_repo_formula() {
+    local -a candidate=("$@")
+    local formula_json
+    local formula_source
+
+    if ! formula_json=$("${candidate[@]}" formula show beads-release --json 2>/dev/null); then
+        return 1
+    fi
+    formula_source=$(printf "%s\n" "$formula_json" | sed -n 's/.*"source"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    [ "$formula_source" = "$FORMULA_PATH" ]
+}
+
+BD_FALLBACK_HINT=""
+if [ -n "${BD:-}" ]; then
+    if ! bd_resolves_repo_formula "$BD"; then
+        echo -e "${RED}BD is set but does not resolve the checked-in beads-release formula:${NC}"
+        echo "  BD=$BD"
+        echo "  Expected formula source: $FORMULA_PATH"
+        exit 1
+    fi
+    BD_CMD=("$BD")
+elif command -v bd >/dev/null 2>&1 && bd_resolves_repo_formula bd; then
+    BD_CMD=(bd)
+elif [ -x "$REPO_ROOT/bd" ] && bd_resolves_repo_formula "$REPO_ROOT/bd"; then
+    BD_CMD=("$REPO_ROOT/bd")
+else
+    BD_CMD=(go run -tags gms_pure_go ./cmd/bd)
+    BD_FALLBACK_HINT=" (falling back to go run; run make install for faster releases)"
+fi
+
 echo -e "${BLUE}╔═══════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║${NC}   ${GREEN}Beads Release v${VERSION}${NC}                                       ${BLUE}║${NC}"
 echo -e "${BLUE}║${NC}   Creating release molecule (not running a batch script)      ${BLUE}║${NC}"
 echo -e "${BLUE}╚═══════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+echo "Using bd: ${BD_CMD[*]}${BD_FALLBACK_HINT}"
 echo ""
 
 if [ "$DRY_RUN" = true ]; then
     echo -e "${YELLOW}DRY RUN - showing what would happen${NC}"
     echo ""
     echo "Would create release molecule with:"
-    echo "  bd mol wisp beads-release --var version=${VERSION}"
+    echo "  ${BD_CMD[*]} mol wisp beads-release --var version=${VERSION}"
     echo ""
-    echo "The molecule has 29 steps:"
-    bd formula show beads-release 2>/dev/null | grep -E "^   [├└]" | head -15
-    echo "   ... (14 more steps)"
+    if ! FORMULA_OUTPUT=$("${BD_CMD[@]}" formula show beads-release 2>&1); then
+        echo -e "${RED}Could not load beads-release formula:${NC}"
+        echo "$FORMULA_OUTPUT"
+        exit 1
+    fi
+    FORMULA_STEPS=$(printf "%s\n" "$FORMULA_OUTPUT" | grep -E "[├└]──" || true)
+    STEP_COUNT=$(printf "%s\n" "$FORMULA_STEPS" | sed '/^$/d' | wc -l | tr -d ' ')
+    if [ "$STEP_COUNT" -eq 0 ]; then
+        echo -e "${RED}Could not enumerate beads-release formula steps.${NC}"
+        echo "Run: ${BD_CMD[*]} formula show beads-release"
+        exit 1
+    fi
+    echo "The molecule has ${STEP_COUNT} steps:"
+    printf "%s\n" "$FORMULA_STEPS" | head -15
+    if [ "$STEP_COUNT" -gt 15 ]; then
+        echo "   ... ($((STEP_COUNT - 15)) more steps)"
+    fi
     echo ""
     echo -e "${BLUE}Why a molecule instead of a script?${NC}"
     echo "  • Each step is a ledger entry (your work history)"
@@ -147,7 +199,7 @@ echo -e "${YELLOW}Creating release molecule...${NC}"
 echo ""
 
 # Create the wisp and capture the output
-OUTPUT=$(bd mol wisp beads-release --var version="${VERSION}" 2>&1)
+OUTPUT=$("${BD_CMD[@]}" mol wisp beads-release --var version="${VERSION}" 2>&1)
 MOL_ID=$(echo "$OUTPUT" | grep -oE 'bd-wisp-[a-z0-9]+' | head -1)
 
 if [ -z "$MOL_ID" ]; then
@@ -160,7 +212,7 @@ echo -e "${GREEN}✓ Created release molecule: ${MOL_ID}${NC}"
 echo ""
 
 # Show the molecule
-bd show "$MOL_ID" 2>/dev/null | head -20
+"${BD_CMD[@]}" show "$MOL_ID" 2>/dev/null | head -20
 echo ""
 
 echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
@@ -169,16 +221,16 @@ echo ""
 echo "Next steps:"
 echo ""
 echo "  ${YELLOW}Option 1: Work on it yourself${NC}"
-echo "    bd hook ${MOL_ID}"
-echo "    # Then follow the steps in bd show ${MOL_ID}"
+echo "    ${BD_CMD[*]} hook ${MOL_ID}"
+echo "    # Then follow the steps in ${BD_CMD[*]} show ${MOL_ID}"
 echo ""
 echo "  ${YELLOW}Option 2: Assign to an agent${NC}"
-echo "    bd sling beads/agents/p1 --mol ${MOL_ID}"
+echo "    ${BD_CMD[*]} sling beads/agents/p1 --mol ${MOL_ID}"
 echo ""
 echo "  ${YELLOW}Watch progress:${NC}"
-echo "    bd activity --follow"
+echo "    ${BD_CMD[*]} activity --follow"
 echo ""
 echo "  ${YELLOW}See all steps:${NC}"
-echo "    bd mol steps ${MOL_ID}"
+echo "    ${BD_CMD[*]} mol steps ${MOL_ID}"
 echo ""
 echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"

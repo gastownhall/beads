@@ -26,15 +26,15 @@ var testSharedConn *sql.DB
 // on a dynamic port using the shared testutil helper. This prevents tests
 // from creating testdb_* databases on the production Dolt server.
 // Returns a cleanup function that stops the server and removes the container.
-//
-// Skipped when only embedded tests are requested (BEADS_TEST_EMBEDDED_DOLT=1
-// without the server test flag) — embedded tests use subprocess binaries and
-// don't need a Docker container.
 func startTestDoltServer() func() {
-	// Skip Docker container when only embedded tests are requested.
-	// Embedded tests build and run subprocess binaries; they don't need a server.
+	if os.Getenv("BEADS_TEST_PROXIED_LOCAL") == "1" {
+		return func() {}
+	}
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") == "1" {
 		return func() {}
+	}
+	if os.Getenv("BEADS_TEST_PROXIED_SERVER") == "1" {
+		return func() { testutil.TerminateDoltContainer() }
 	}
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
@@ -78,11 +78,10 @@ func startTestDoltServer() func() {
 func initCmdBDSharedSchema(port int) error {
 	ctx := context.Background()
 	cfg := &dolt.Config{
-		Path:         "/tmp/cmdbd-shared-init",
-		ServerHost:   "127.0.0.1",
-		ServerPort:   port,
-		Database:     testSharedDB,
-		MaxOpenConns: 1,
+		Path:       "/tmp/cmdbd-shared-init",
+		ServerHost: "127.0.0.1",
+		ServerPort: port,
+		Database:   testSharedDB,
 	}
 	store, err := dolt.New(ctx, cfg)
 	if err != nil {
@@ -104,6 +103,9 @@ func initCmdBDSharedSchema(port int) error {
 	}
 	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('--allow-empty', '-m', 'test: init shared schema')"); err != nil {
 		return fmt.Errorf("DOLT_COMMIT: %w", err)
+	}
+	if err := testutil.MaterializeLocalTableSchemasForBranchTests(ctx, db); err != nil {
+		return fmt.Errorf("materialize local table schemas: %w", err)
 	}
 
 	return nil

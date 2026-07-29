@@ -223,6 +223,6 @@ bd config set routing.default .  # Default to current repo
 
 ## See Also
 
-- [Multi-Repo Migration Guide](../../docs/MULTI_REPO_MIGRATION.md)
+- [Multi-Repo Migration Guide](../../docs/multi-agent/multi-repo-migration.md)
 - [Team Workflow Example](../team-workflow/)
 - [Protected Branch Setup](../protected-branch/)

@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -61,5 +62,31 @@ func TestDetectPendingMigrations_HooksBrokenMarkerIsCritical(t *testing.T) {
 	check := CheckPendingMigrations(tmpDir)
 	if check.Status != StatusError {
 		t.Fatalf("expected error status for broken marker migration, got %q", check.Status)
+	}
+}
+
+func TestDetectPendingMigrations_HooksWorktreeFallback(t *testing.T) {
+	clearResolveBeadsDirCache()
+	t.Cleanup(clearResolveBeadsDirCache)
+
+	mainRepoDir, worktreeDir := setupWorktreeRepo(t)
+	if err := os.MkdirAll(filepath.Join(mainRepoDir, ".beads"), 0755); err != nil {
+		t.Fatalf("failed to create shared .beads: %v", err)
+	}
+
+	_, hooksDir, err := resolveGitHooksDir(worktreeDir)
+	if err != nil {
+		t.Fatalf("resolveGitHooksDir failed: %v", err)
+	}
+
+	writeHookFile(t, filepath.Join(hooksDir, "pre-commit"), "#!/bin/sh\n# bd-shim v2\n# bd-hooks-version: 0.56.1\nexec bd hooks run pre-commit \"$@\"\n")
+	writeHookFile(t, filepath.Join(hooksDir, "pre-commit.old"), "#!/bin/sh\necho old\n")
+
+	pending := DetectPendingMigrations(worktreeDir)
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending migration from shared worktree, got %d", len(pending))
+	}
+	if pending[0].Name != "hooks" {
+		t.Fatalf("expected hooks migration, got %q", pending[0].Name)
 	}
 }

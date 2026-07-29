@@ -10,10 +10,11 @@ import (
 // ServerDSN holds connection parameters for building a MySQL DSN to a Dolt server.
 // All DSNs built with this struct set parseTime=true and multiStatements=true.
 type ServerDSN struct {
+	Socket   string // Unix domain socket path; when set, Net="unix" and Host/Port are ignored
 	Host     string
 	Port     int
 	User     string
-	Password string
+	Password string        //nolint:gosec // G117: MySQL DSN password field; required by the connection-string builder, not serialized as JSON
 	Database string        // optional; empty connects without selecting a database
 	Timeout  time.Duration // connect timeout; 0 defaults to 5s
 	TLS      bool
@@ -27,14 +28,34 @@ func (d ServerDSN) String() string {
 		timeout = 5 * time.Second
 	}
 
+	net := "tcp"
+	addr := fmt.Sprintf("%s:%d", d.Host, d.Port)
+	if d.Socket != "" {
+		net = "unix"
+		addr = d.Socket
+	}
+
 	cfg := mysql.Config{
-		User:                 d.User,
-		Passwd:               d.Password,
-		Net:                  "tcp",
-		Addr:                 fmt.Sprintf("%s:%d", d.Host, d.Port),
-		DBName:               d.Database,
-		ParseTime:            true,
-		MultiStatements:      true,
+		User:            d.User,
+		Passwd:          d.Password,
+		Net:             net,
+		Addr:            addr,
+		DBName:          d.Database,
+		ParseTime:       true,
+		MultiStatements: true,
+		// InterpolateParams renders bound parameters into the SQL client-side, so
+		// a parameterized query is a single round-trip instead of a server-side
+		// PREPARE + EXECUTE pair. Over a high-latency connection (e.g. a remote
+		// TLS-fronted Dolt server), a write that issues many parameterized
+		// statements — such as creating an issue and its labels, events, and
+		// dependencies inside one transaction — otherwise pays a full round-trip
+		// per statement for the prepare alone. The driver falls back to a
+		// server-side prepare (driver.ErrSkip) whenever it cannot safely
+		// interpolate an argument, so results never change; this only removes the
+		// extra round-trip when interpolation is safe. Independent of
+		// MultiStatements. The driver rejects it only with custom unsafe
+		// collations, which this DSN never sets.
+		InterpolateParams:    true,
 		Timeout:              timeout,
 		AllowNativePasswords: true,
 	}

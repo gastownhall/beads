@@ -53,6 +53,38 @@ func (s *DoltStore) ApplyCompaction(ctx context.Context, issueID string, tier in
 	})
 }
 
+// SnapshotIssue archives an issue's current text content before a destructive
+// compaction overwrites it. See issueops.SnapshotIssueInTx.
+func (s *DoltStore) SnapshotIssue(ctx context.Context, issueID string, tier int) error {
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		return issueops.SnapshotIssueInTx(ctx, tx, issueID, tier)
+	})
+}
+
+// GetCompactionSnapshot returns the most recent archived snapshot for an issue,
+// or (nil, nil) when none exists.
+func (s *DoltStore) GetCompactionSnapshot(ctx context.Context, issueID string) (*types.IssueSnapshot, error) {
+	var snap *types.IssueSnapshot
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		snap, err = issueops.GetLatestSnapshotInTx(ctx, tx, issueID)
+		return err
+	})
+	return snap, err
+}
+
+// RestoreFromSnapshot restores an issue's content from its most recent snapshot
+// and steps its compaction level back down. See issueops.RestoreFromSnapshotInTx.
+func (s *DoltStore) RestoreFromSnapshot(ctx context.Context, issueID string) (*types.IssueSnapshot, error) {
+	var snap *types.IssueSnapshot
+	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		snap, err = issueops.RestoreFromSnapshotInTx(ctx, tx, issueID)
+		return err
+	})
+	return snap, err
+}
+
 // GetTier1Candidates returns issues eligible for tier 1 compaction.
 func (s *DoltStore) GetTier1Candidates(ctx context.Context) ([]*types.CompactionCandidate, error) {
 	var result []*types.CompactionCandidate

@@ -23,7 +23,7 @@ if ! command -v bd &> /dev/null; then
   echo "❌ Error: bd command not found"
   echo
   echo "Install bd:"
-  echo "  curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash"
+  echo "  curl -fsSL https://raw.githubusercontent.com/gastownhall/beads/main/scripts/install.sh | bash"
   echo
   exit 1
 fi

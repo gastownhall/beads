@@ -3,30 +3,28 @@
 import asyncio
 import logging
 import os
-import subprocess
-import sys
+from contextlib import suppress
 from contextvars import ContextVar
 from functools import lru_cache
-from typing import Annotated, Any, TYPE_CHECKING
+from typing import Annotated, Any
 
-from .bd_client import create_bd_client, BdClientBase, BdError
-
-logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    from typing import List
+from .bd_client import BdClientBase, BdError, create_bd_client
 from .models import (
+    AddCommentParams,
     AddDependencyParams,
+    AddNoteParams,
     BlockedIssue,
     BlockedParams,
     ClaimIssueParams,
     CloseIssueParams,
+    Comment,
     CreateIssueParams,
     DependencyType,
     InitParams,
     Issue,
     IssueStatus,
     IssueType,
+    ListCommentsParams,
     ListIssuesParams,
     ReadyWorkParams,
     ReopenIssueParams,
@@ -34,9 +32,17 @@ from .models import (
     Stats,
     UpdateIssueParams,
 )
+from .workspace import (
+    get_git_workspace_roots as _get_git_workspace_roots,
+)
+from .workspace import (
+    resolve_workspace_root as _shared_resolve_workspace_root,
+)
+
+logger = logging.getLogger(__name__)
 
 # ContextVar for request-scoped workspace routing
-current_workspace: ContextVar[str | None] = ContextVar('workspace', default=None)
+current_workspace: ContextVar[str | None] = ContextVar("workspace", default=None)
 
 # Connection pool for per-project clients
 _connection_pool: dict[str, BdClientBase] = {}
@@ -52,13 +58,14 @@ DEFAULT_DEPENDENCY_TYPE: DependencyType = "blocks"
 
 def _register_client_for_cleanup(client: BdClientBase) -> None:
     """Register client with server cleanup system.
-    
+
     This ensures client connections are properly closed on server shutdown.
     Import is deferred to avoid circular dependency.
     """
     try:
         from . import server
-        if hasattr(server, '_registered_clients'):
+
+        if hasattr(server, "_registered_clients"):
             server._registered_clients.append(client)
     except (ImportError, AttributeError):
         # Server module not available or cleanup not initialized - that's ok
@@ -106,7 +113,7 @@ def _resolve_beads_redirect(beads_dir: str, workspace_root: str) -> str | None:
         return None
 
     try:
-        with open(redirect_path, 'r') as f:
+        with open(redirect_path) as f:
             redirect_target = f.read().strip()
 
         if not redirect_target:
@@ -154,12 +161,18 @@ def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
         current = os.path.abspath(start_dir or os.getcwd())
 
         # Resolve symlinks like Go CLI does
-        try:
+        with suppress(Exception):
             current = os.path.realpath(current)
-        except Exception:
-            pass
 
-        # Walk up directory tree
+        git_roots = _get_git_workspace_roots(current)
+        worktree_root = None
+        fallback_root = None
+        if git_roots is not None:
+            worktree_root, main_repo_root = git_roots
+            if main_repo_root != worktree_root:
+                fallback_root = main_repo_root
+
+        # Walk up directory tree, but do not cross the current repo/worktree boundary.
         while True:
             beads_dir = os.path.join(current, ".beads")
             if os.path.isdir(beads_dir):
@@ -177,7 +190,20 @@ def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
             parent = os.path.dirname(current)
             if parent == current:  # Reached filesystem root
                 break
+            if worktree_root is not None and current == worktree_root:
+                break
             current = parent
+
+        if fallback_root is not None:
+            beads_dir = os.path.join(fallback_root, ".beads")
+            if os.path.isdir(beads_dir):
+                redirected = _resolve_beads_redirect(beads_dir, fallback_root)
+                if redirected:
+                    logger.debug(f"Followed shared worktree fallback from {fallback_root} to {redirected}")
+                    return redirected
+
+                if _has_beads_project_files(beads_dir):
+                    return fallback_root
 
         return None
 
@@ -187,54 +213,31 @@ def _find_beads_db_in_tree(start_dir: str | None = None) -> str | None:
 
 
 def _resolve_workspace_root(path: str) -> str:
-    """Resolve workspace root to git repo root if inside a git repo.
-    
-    Args:
-        path: Directory path to resolve
-        
-    Returns:
-        Git repo root if inside git repo, otherwise the original path
-    """
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=path,
-            capture_output=True,
-            text=True,
-            check=False,
-            shell=sys.platform == "win32",
-            stdin=subprocess.DEVNULL,  # Prevent inheriting MCP's stdin
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception as e:
-        logger.debug(f"Git detection failed for {path}: {e}")
-        pass
-    
-    return os.path.abspath(path)
+    """Resolve workspace root to the repo that owns the active beads workspace."""
+    return _shared_resolve_workspace_root(path)
 
 
 @lru_cache(maxsize=128)
 def _canonicalize_path(path: str) -> str:
     """Canonicalize workspace path to handle symlinks and git repos.
-    
+
     This ensures that different paths pointing to the same project
     (e.g., via symlinks) use the same client connection.
-    
+
     Args:
         path: Workspace directory path
-        
+
     Returns:
         Canonical path (handles symlinks and submodules correctly)
     """
     # 1. Resolve symlinks
     real = os.path.realpath(path)
-    
+
     # 2. Check for local .beads directory (submodule edge case)
     # Submodules should use their own .beads, not the parent repo's
     if os.path.exists(os.path.join(real, ".beads")):
         return real
-    
+
     # 3. Try to find git toplevel
     # This ensures we connect to the right client for the git repo
     return _resolve_workspace_root(real)
@@ -242,17 +245,17 @@ def _canonicalize_path(path: str) -> str:
 
 async def _health_check_client(client: BdClientBase) -> bool:
     """Check if a client is healthy and responsive.
-    
+
     Args:
         client: Client to health check
-        
+
     Returns:
         True if client is healthy, False otherwise
     """
     # Only health check clients that support ping
-    if not hasattr(client, 'ping'):
+    if not hasattr(client, "ping"):
         return True
-    
+
     try:
         await client.ping()
         return True
@@ -276,40 +279,37 @@ async def _reconnect_client(canonical: str, max_retries: int = 3) -> BdClientBas
     """
     for attempt in range(max_retries):
         try:
-            client = create_bd_client(
-                working_dir=canonical
-            )
-            
+            client = create_bd_client(working_dir=canonical)
+
             # Verify new client works
             if await _health_check_client(client):
                 _register_client_for_cleanup(client)
                 return client
-                
+
         except Exception:
             if attempt < max_retries - 1:
                 # Exponential backoff: 0.1s, 0.2s, 0.4s
-                backoff = 0.1 * (2 ** attempt)
+                backoff = 0.1 * (2**attempt)
                 await asyncio.sleep(backoff)
             continue
-    
+
     raise BdError(
-        f"Failed to connect after {max_retries} attempts. "
-        "The bd client may be misconfigured or unresponsive."
+        f"Failed to connect after {max_retries} attempts. The bd client may be misconfigured or unresponsive."
     )
 
 
 async def _get_client() -> BdClientBase:
     """Get a BdClient instance for the current workspace.
-    
+
     Uses connection pool to manage per-project clients.
     Workspace is auto-detected using the same logic as CLI:
     1. current_workspace ContextVar (from workspace_root parameter)
     2. BEADS_WORKING_DIR environment variable
     3. Walk up from CWD looking for .beads/*.db
-    
+
     Performs health check before returning cached client.
     On failure, drops from pool and attempts reconnection with exponential backoff.
-    
+
     Performs version check on first connection to each workspace.
     Uses CLI client for all operations.
 
@@ -321,24 +321,24 @@ async def _get_client() -> BdClientBase:
     """
     # Determine workspace using standard search order (matches Go CLI)
     workspace = current_workspace.get() or os.environ.get("BEADS_WORKING_DIR")
-    
+
     # Auto-detect from CWD if not explicitly set (NEW!)
     if not workspace:
         workspace = _find_beads_db_in_tree()
         if workspace:
             logger.debug(f"Auto-detected workspace from CWD: {workspace}")
-    
+
     if not workspace:
         raise BdError(
             "No beads workspace found. Either:\n"
-            "  1. Call context(workspace_root=\"/path/to/project\"), OR\n"
+            '  1. Call context(workspace_root="/path/to/project"), OR\n'
             "  2. Run from a directory containing .beads/, OR\n"
             "  3. Set BEADS_WORKING_DIR environment variable"
         )
-    
+
     # Canonicalize path to handle symlinks and deduplicate connections
     canonical = _canonicalize_path(workspace)
-    
+
     # Thread-safe connection pool access
     async with _pool_lock:
         if canonical in _connection_pool:
@@ -349,25 +349,23 @@ async def _get_client() -> BdClientBase:
                 del _connection_pool[canonical]
                 if canonical in _version_checked:
                     _version_checked.remove(canonical)
-                
+
                 # Attempt reconnection with backoff
                 client = await _reconnect_client(canonical)
                 _connection_pool[canonical] = client
         else:
             # Create new client for this workspace
-            client = create_bd_client(
-                working_dir=canonical
-            )
-            
+            client = create_bd_client(working_dir=canonical)
+
             # Register for cleanup
             _register_client_for_cleanup(client)
-            
+
             # Add to pool
             _connection_pool[canonical] = client
-    
+
     # Check version once per workspace (only for CLI client)
     if canonical not in _version_checked:
-        if hasattr(client, '_check_version'):
+        if hasattr(client, "_check_version"):
             await client._check_version()
         _version_checked.add(canonical)
 
@@ -377,7 +375,9 @@ async def _get_client() -> BdClientBase:
 async def beads_ready_work(
     limit: Annotated[int, "Maximum number of issues to return (1-100)"] = 10,
     priority: Annotated[int | None, "Filter by priority (0-4, 0=highest)"] = None,
-    issue_type: Annotated[IssueType | None, "Filter by type (task, bug, feature, epic, chore, decision, merge-request, or custom)"] = None,
+    issue_type: Annotated[
+        IssueType | None, "Filter by type (task, bug, feature, epic, chore, decision, merge-request, or custom)"
+    ] = None,
     assignee: Annotated[str | None, "Filter by assignee"] = None,
     labels: Annotated[list[str] | None, "Filter by labels (AND: must have ALL)"] = None,
     labels_any: Annotated[list[str] | None, "Filter by labels (OR: must have at least one)"] = None,
@@ -408,9 +408,13 @@ async def beads_ready_work(
 
 
 async def beads_list_issues(
-    status: Annotated[IssueStatus | None, "Filter by status (open, in_progress, blocked, deferred, closed, or custom)"] = None,
+    status: Annotated[
+        IssueStatus | None, "Filter by status (open, in_progress, blocked, deferred, closed, or custom)"
+    ] = None,
     priority: Annotated[int | None, "Filter by priority (0-4, 0=highest)"] = None,
-    issue_type: Annotated[IssueType | None, "Filter by type (bug, feature, task, epic, chore, decision, or custom)"] = None,
+    issue_type: Annotated[
+        IssueType | None, "Filter by type (bug, feature, task, epic, chore, decision, or custom)"
+    ] = None,
     assignee: Annotated[str | None, "Filter by assignee"] = None,
     labels: Annotated[list[str] | None, "Filter by labels (AND: must have ALL)"] = None,
     labels_any: Annotated[list[str] | None, "Filter by labels (OR: must have at least one)"] = None,
@@ -454,7 +458,9 @@ async def beads_create_issue(
     acceptance: Annotated[str | None, "Acceptance criteria"] = None,
     external_ref: Annotated[str | None, "External reference (e.g., gh-9, jira-ABC)"] = None,
     priority: Annotated[int, "Priority (0-4, 0=highest)"] = 2,
-    issue_type: Annotated[IssueType, "Type: bug, feature, task, epic, chore, decision, or custom"] = DEFAULT_ISSUE_TYPE,
+    issue_type: Annotated[
+        IssueType, "Type: bug, feature, task, epic, chore, decision, or custom"
+    ] = DEFAULT_ISSUE_TYPE,
     assignee: Annotated[str | None, "Assignee username"] = None,
     labels: Annotated[list[str] | None, "List of labels"] = None,
     id: Annotated[str | None, "Explicit issue ID (e.g., bd-42)"] = None,
@@ -491,7 +497,9 @@ async def beads_create_issue(
 
 async def beads_update_issue(
     issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
-    status: Annotated[IssueStatus | None, "New status (open, in_progress, blocked, deferred, closed, or custom)"] = None,
+    status: Annotated[
+        IssueStatus | None, "New status (open, in_progress, blocked, deferred, closed, or custom)"
+    ] = None,
     priority: Annotated[int | None, "New priority (0-4)"] = None,
     assignee: Annotated[str | None, "New assignee"] = None,
     title: Annotated[str | None, "New title"] = None,
@@ -512,12 +520,12 @@ async def beads_update_issue(
         # Route to close tool to respect approval workflows
         reason = notes if notes else "Completed"
         return await beads_close_issue(issue_id=issue_id, reason=reason)
-    
+
     if status == "open":
         # Route to reopen tool to respect approval workflows
         reason = notes if notes else "Reopened"
         return await beads_reopen_issue(issue_ids=[issue_id], reason=reason)
-    
+
     # Normal attribute updates proceed as usual
     client = await _get_client()
     params = UpdateIssueParams(
@@ -611,6 +619,50 @@ async def beads_add_dependency(
         return f"Error: {str(e)}"
 
 
+async def beads_add_comment(
+    issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
+    text: Annotated[str, "Comment text — a human-readable summary of work done, decisions, or verification"],
+) -> str:
+    """Add a comment to an issue.
+
+    Leave a durable, timestamped record of what you did, decided, or verified so
+    humans don't have to read the agent transcript to know what happened. `show`
+    reports comment_count but not the bodies — use beads_list_comments to read them.
+
+    Prefer a comment over overwriting `notes`: comments accumulate as a per-turn
+    trail, whereas the notes field is a single value that gets replaced.
+    """
+    client = await _get_client()
+    params = AddCommentParams(issue_id=issue_id, text=text)
+    return await client.add_comment(params)
+
+
+async def beads_list_comments(
+    issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
+) -> list[Comment]:
+    """List all comments on an issue in chronological order.
+
+    `show` returns comment_count but not the comment bodies; use this to read them.
+    """
+    client = await _get_client()
+    params = ListCommentsParams(issue_id=issue_id)
+    return await client.list_comments(params)
+
+
+async def beads_add_note(
+    issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
+    text: Annotated[str, "Note text to append to the issue's notes field"],
+) -> str:
+    """Append a note to an issue's notes field (`bd note`).
+
+    Notes are a single running field on the issue. For a per-turn, timestamped
+    trail that multiple actors can follow, prefer beads_add_comment.
+    """
+    client = await _get_client()
+    params = AddNoteParams(issue_id=issue_id, text=text)
+    return await client.add_note(params)
+
+
 async def beads_quickstart() -> str:
     """Get bd quickstart guide.
 
@@ -646,13 +698,13 @@ async def beads_blocked(
 
 async def beads_inspect_migration() -> dict[str, Any]:
     """Get migration plan and database state for agent analysis.
-    
+
     AI agents should:
     1. Review registered_migrations to understand what will run
     2. Check warnings array for issues (missing config, version mismatch)
     3. Verify missing_config is empty before migrating
     4. Check invariants_to_check to understand safety guarantees
-    
+
     Returns migration plan, current db state, warnings, and invariants.
     """
     client = await _get_client()
@@ -661,7 +713,7 @@ async def beads_inspect_migration() -> dict[str, Any]:
 
 async def beads_get_schema_info() -> dict[str, Any]:
     """Get current database schema for inspection.
-    
+
     Returns tables, schema version, config, sample issue IDs, and detected prefix.
     Useful for verifying database state before migrations.
     """
@@ -673,10 +725,10 @@ async def beads_repair_deps(
     fix: Annotated[bool, "If True, automatically remove orphaned dependencies"] = False,
 ) -> dict[str, Any]:
     """Find and optionally fix orphaned dependency references.
-    
+
     Scans all issues for dependencies pointing to non-existent issues.
     Returns orphaned dependencies and optionally removes them with fix=True.
-    
+
     Returns dict with:
     - orphans_found: number of orphaned dependencies
     - orphans: list of orphaned dependency details
@@ -690,13 +742,13 @@ async def beads_detect_pollution(
     clean: Annotated[bool, "If True, delete detected test issues"] = False,
 ) -> dict[str, Any]:
     """Detect test issues that leaked into production database.
-    
+
     Detects test issues using pattern matching:
     - Titles starting with 'test', 'benchmark', 'sample', 'tmp', 'temp'
     - Sequential numbering (test-1, test-2, ...)
     - Generic descriptions or no description
     - Created in rapid succession
-    
+
     Returns dict with detected test issues and deleted count if clean=True.
     """
     client = await _get_client()
@@ -704,19 +756,21 @@ async def beads_detect_pollution(
 
 
 async def beads_validate(
-    checks: Annotated[str | None, "Comma-separated list of checks (orphans,duplicates,pollution,conflicts)"] = None,
+    checks: Annotated[
+        str | None, "Comma-separated list of checks (orphans,duplicates,pollution,conflicts)"
+    ] = None,
     fix_all: Annotated[bool, "If True, auto-fix all fixable issues"] = False,
 ) -> dict[str, Any]:
     """Run comprehensive database health checks.
-    
+
     Available checks:
     - orphans: Orphaned dependencies (references to deleted issues)
     - duplicates: Duplicate issues (identical content)
     - pollution: Test pollution (leaked test issues)
     - conflicts: Git merge conflicts in JSONL
-    
+
     If checks is None, runs all checks.
-    
+
     Returns dict with validation results for each check.
     """
     client = await _get_client()

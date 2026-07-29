@@ -3,6 +3,7 @@ package tracker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -21,6 +22,21 @@ import (
 // syncTracer is the OTel tracer for tracker sync spans.
 var syncTracer = otel.Tracer("github.com/steveyegge/beads/tracker")
 
+// rateLimitExhaustedError is implemented by tracker errors (e.g.
+// linear.ErrRateLimitExhausted) that signal the API quota floor has been
+// hit and the sync loop should abort immediately rather than cascade the
+// error across every remaining issue.
+type rateLimitExhaustedError interface {
+	RateLimitExhausted() bool
+}
+
+// isRateLimitExhausted reports whether err (or any error it wraps) signals
+// that the API rate-limit circuit breaker has tripped.
+func isRateLimitExhausted(err error) bool {
+	var rle rateLimitExhaustedError
+	return errors.As(err, &rle) && rle.RateLimitExhausted()
+}
+
 // PullHooks contains optional callbacks that customize pull (import) behavior.
 // Trackers opt into behaviors by setting the hooks they need.
 type PullHooks struct {
@@ -38,6 +54,12 @@ type PullHooks struct {
 	// Called on the raw TrackerIssue before conversion to beads format.
 	// If nil, all issues are imported.
 	ShouldImport func(issue *TrackerIssue) bool
+
+	// AfterConvert is called after the external issue has been converted to
+	// a beads issue, transformed, and assigned an ID, but before it is stored.
+	// Hooks may mutate the conversion, for example by adding dependencies that
+	// should be created after all pulled issues have been saved.
+	AfterConvert func(ctx context.Context, extIssue *TrackerIssue, conv *IssueConversion, ref string, existing *types.Issue, opts SyncOptions) error
 }
 
 // PushHooks contains optional callbacks that customize push (export) behavior.
@@ -138,7 +160,7 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 
 	// Phase 2: Pull
 	if opts.Pull {
-		pullStats, err := e.doPull(ctx, opts, allowPullOverwriteIDs)
+		pullStats, err := e.doPull(ctx, opts, allowPullOverwriteIDs, skipPushIDs)
 		if err != nil {
 			result.Success = false
 			result.Error = fmt.Sprintf("pull failed: %v", err)
@@ -184,9 +206,13 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		attribute.Int("sync.errors", result.Stats.Errors),
 	)
 
-	// Update last_sync timestamp
+	// Update last_sync timestamp. Dolt DATETIME columns round sub-second
+	// values, so rows this sync just wrote can carry updated_at values up
+	// to half a second in the future of wall clock. Record last_sync at
+	// the next whole second so the engine's own writes are never misread
+	// as local edits by the next pull's conflict guard.
 	if !opts.DryRun {
-		lastSync := time.Now().UTC().Format(time.RFC3339Nano)
+		lastSync := time.Now().UTC().Truncate(time.Second).Add(time.Second).Format(time.RFC3339Nano)
 		key := e.Tracker.ConfigPrefix() + ".last_sync"
 		if err := e.Store.SetLocalMetadata(ctx, key, lastSync); err != nil {
 			e.warn("Failed to update last_sync: %v", err)
@@ -194,7 +220,9 @@ func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error
 		result.LastSync = lastSync
 	}
 
-	result.Warnings = e.warnings
+	// Batch-push warnings were already appended above; e.warn-collected
+	// warnings join them rather than replacing them.
+	result.Warnings = append(result.Warnings, e.warnings...)
 	return result, nil
 }
 
@@ -265,7 +293,10 @@ func (e *Engine) DetectConflicts(ctx context.Context) ([]Conflict, error) {
 }
 
 // doPull imports issues from the external tracker into beads.
-func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs map[string]bool) (*PullStats, error) {
+// doPull imports tracker issues. IDs of issues it creates or updates are
+// added to pulledIDs so a bidirectional sync's push phase does not echo the
+// freshly pulled content straight back to the tracker.
+func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs, pulledIDs map[string]bool) (*PullStats, error) {
 	ctx, span := syncTracer.Start(ctx, "tracker.pull",
 		trace.WithAttributes(
 			attribute.String("sync.tracker", e.Tracker.DisplayName()),
@@ -316,6 +347,8 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		localByExternalIdentifier[identifier] = localIssue
 	}
 
+	prelinkedHydrateIDs := make(map[string]bool)
+
 	// Fetch issues from external tracker
 	var extIssues []TrackerIssue
 	if len(opts.IssueIDs) > 0 {
@@ -360,10 +393,20 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		if provider, ok := e.Tracker.(PullStatsProvider); ok {
 			stats.Queried, stats.Candidates = provider.LastPullStats()
 		}
+		hydrated, hydratedLocalIDs, err := e.fetchPrelinkedIssues(ctx, extIssues, localIssues, lastSync)
+		if err != nil {
+			return nil, fmt.Errorf("hydrating pre-linked %s issues: %w", e.Tracker.DisplayName(), err)
+		}
+		extIssues = append(extIssues, hydrated...)
+		stats.Candidates += len(hydrated)
+		for id := range hydratedLocalIDs {
+			prelinkedHydrateIDs[id] = true
+		}
 	}
 
 	mapper := e.Tracker.FieldMapper()
 	var pendingDeps []DependencyInfo
+	var dryRunIssues []*types.Issue
 
 	for _, extIssue := range extIssues {
 		// ShouldImport hook: filter before conversion
@@ -409,6 +452,35 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 
+		if existing != nil {
+			// Conflict-aware pull: skip updating issues that were locally
+			// modified since last sync. Conflict detection (Phase 2) will
+			// handle these per the configured resolution strategy.
+			// Without this guard, pull silently overwrites local changes
+			// before conflict detection can compare timestamps.
+			if lastSync != nil && existing.UpdatedAt.After(*lastSync) && !allowOverwriteIDs[existing.ID] && !prelinkedHydrateIDs[existing.ID] {
+				stats.Skipped++
+				continue
+			}
+		}
+
+		if e.PullHooks != nil && e.PullHooks.AfterConvert != nil {
+			if err := e.PullHooks.AfterConvert(ctx, &extIssue, conv, ref, existing, opts); err != nil {
+				e.warn("Failed to prepare %s: %v", extIssue.Identifier, err)
+				stats.Skipped++
+				continue
+			}
+		}
+
+		pendingDeps = appendFilteredDependencies(pendingDeps, conv.Dependencies, opts.DependencyTypes, opts.DependencySources)
+		if opts.DryRun {
+			dryRunIssue := *conv.Issue
+			if strings.TrimSpace(ref) != "" {
+				dryRunIssue.ExternalRef = strPtr(ref)
+			}
+			dryRunIssues = append(dryRunIssues, &dryRunIssue)
+		}
+
 		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
 			stats.Skipped++
 			continue
@@ -426,16 +498,6 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		}
 
 		if existing != nil {
-			// Conflict-aware pull: skip updating issues that were locally
-			// modified since last sync. Conflict detection (Phase 2) will
-			// handle these per the configured resolution strategy.
-			// Without this guard, pull silently overwrites local changes
-			// before conflict detection can compare timestamps.
-			if lastSync != nil && existing.UpdatedAt.After(*lastSync) && !allowOverwriteIDs[existing.ID] {
-				stats.Skipped++
-				continue
-			}
-
 			updates := buildPullIssueUpdates(existing, conv.Issue, ref)
 			if raw, ok := marshalTrackerMetadata(extIssue.Metadata); ok {
 				updates["metadata"] = raw
@@ -451,6 +513,9 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Updated++
+			if pulledIDs != nil {
+				pulledIDs[existing.ID] = true
+			}
 		} else {
 			// Create new issue
 			conv.Issue.ExternalRef = strPtr(ref)
@@ -462,13 +527,19 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				continue
 			}
 			stats.Created++
+			if pulledIDs != nil {
+				pulledIDs[conv.Issue.ID] = true
+			}
 		}
-
-		pendingDeps = append(pendingDeps, conv.Dependencies...)
 	}
 
 	// Create dependencies after all issues are imported
-	depErrors := e.createDependencies(ctx, pendingDeps)
+	depErrors := 0
+	if opts.DryRun {
+		depErrors = e.previewDependencies(ctx, pendingDeps, dryRunIssues)
+	} else {
+		depErrors = e.createDependencies(ctx, pendingDeps)
+	}
 	stats.Skipped += depErrors
 
 	span.SetAttributes(
@@ -527,6 +598,147 @@ func marshalTrackerMetadata(metadata interface{}) (json.RawMessage, bool) {
 		return nil, false
 	}
 	return json.RawMessage(raw), true
+}
+
+func appendFilteredDependencies(dst []DependencyInfo, deps []DependencyInfo, allowedTypes []types.DependencyType, allowedSources []DependencySource) []DependencyInfo {
+	if len(deps) == 0 {
+		return dst
+	}
+	if len(allowedTypes) == 0 && len(allowedSources) == 0 {
+		return append(dst, deps...)
+	}
+	allowed := make(map[string]struct{}, len(allowedTypes))
+	for _, depType := range allowedTypes {
+		allowed[string(depType)] = struct{}{}
+	}
+	allowedSourceSet := make(map[DependencySource]struct{}, len(allowedSources))
+	for _, source := range allowedSources {
+		allowedSourceSet[source] = struct{}{}
+	}
+	for _, dep := range deps {
+		if len(allowed) > 0 {
+			if _, ok := allowed[dep.Type]; !ok {
+				continue
+			}
+		}
+		if len(allowedSourceSet) > 0 {
+			if _, ok := allowedSourceSet[dep.Source]; !ok {
+				continue
+			}
+		}
+		dst = append(dst, dep)
+	}
+	return dst
+}
+
+func (e *Engine) fetchPrelinkedIssues(ctx context.Context, fetched []TrackerIssue, localIssues []*types.Issue, lastSync *time.Time) ([]TrackerIssue, map[string]bool, error) {
+	hydratedLocalIDs := make(map[string]bool)
+	if lastSync == nil {
+		return nil, hydratedLocalIDs, nil
+	}
+
+	seen := make(map[string]struct{}, len(fetched))
+	for _, issue := range fetched {
+		for _, id := range []string{
+			strings.TrimSpace(issue.Identifier),
+			strings.TrimSpace(e.Tracker.ExtractIdentifier(e.Tracker.BuildExternalRef(&issue))),
+		} {
+			if id != "" {
+				seen[id] = struct{}{}
+				seen[strings.ToLower(id)] = struct{}{}
+			}
+		}
+	}
+
+	var hydrated []TrackerIssue
+	for _, local := range localIssues {
+		if local == nil || local.ExternalRef == nil {
+			continue
+		}
+		ref := strings.TrimSpace(*local.ExternalRef)
+		if ref == "" || !e.Tracker.IsExternalRef(ref) {
+			continue
+		}
+		changedAfterLastSync, err := e.externalRefChangedAfter(ctx, local, ref, *lastSync)
+		if err != nil {
+			return hydrated, hydratedLocalIDs, fmt.Errorf("checking pre-linked local issue %s: %w", local.ID, err)
+		}
+		if !changedAfterLastSync {
+			continue
+		}
+		identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(ref))
+		if identifier == "" {
+			continue
+		}
+		if _, ok := seen[identifier]; ok {
+			continue
+		}
+		if _, ok := seen[strings.ToLower(identifier)]; ok {
+			continue
+		}
+
+		extIssue, err := e.Tracker.FetchIssue(ctx, identifier)
+		if err != nil {
+			return hydrated, hydratedLocalIDs, err
+		}
+		if extIssue == nil {
+			continue
+		}
+		hydrated = append(hydrated, *extIssue)
+		hydratedLocalIDs[local.ID] = true
+		seen[identifier] = struct{}{}
+		seen[strings.ToLower(identifier)] = struct{}{}
+	}
+	return hydrated, hydratedLocalIDs, nil
+}
+
+// externalRefChangedAfter reports whether local's external_ref differed
+// from currentRef as of lastSync. When the backing store can answer this
+// precisely (storage.ExternalRefHistoryQuerier — Dolt-shaped stores that
+// expose dolt_history_issues), it does; otherwise it falls back to a
+// coarser timestamp heuristic.
+//
+// The fast path is gated on the ExternalRefHistoryQuerier capability, not on
+// whether the store happens to expose a raw *sql.DB: some Dolt-shaped
+// backends (e.g. embeddeddolt.EmbeddedDoltStore) support the
+// dolt_history_issues query without a pooled *sql.DB, and a non-Dolt SQL
+// backend could expose *sql.DB without having that Dolt system table at
+// all. Gating on the capability keeps this correct in both directions.
+func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue, currentRef string, lastSync time.Time) (bool, error) {
+	if local == nil {
+		return false, nil
+	}
+	querier, ok := externalRefHistoryQuerier(e.Store)
+	if !ok {
+		return local.CreatedAt.After(lastSync) || local.UpdatedAt.After(lastSync), nil
+	}
+
+	previousRef, found, err := querier.PreviousExternalRef(ctx, local.ID, lastSync)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return true, nil
+	}
+	return strings.TrimSpace(previousRef) != strings.TrimSpace(currentRef), nil
+}
+
+// externalRefHistoryQuerier type-asserts store to storage.ExternalRefHistoryQuerier,
+// unwrapping storage decorators (HookFiringStore, telemetry.InstrumentedStorage,
+// etc.) first if needed. Decorators embed only the base storage.DoltStorage
+// interface for passthrough, so a direct assertion on a decorated store would
+// never see this optional capability even when the concrete store underneath
+// implements it — the same reason cmd/bd type-asserts through
+// storage.UnwrapStore for RawDBAccessor, StoreLocator, and friends.
+func externalRefHistoryQuerier(store storage.Storage) (storage.ExternalRefHistoryQuerier, bool) {
+	if q, ok := store.(storage.ExternalRefHistoryQuerier); ok {
+		return q, true
+	}
+	if dolt, ok := store.(storage.DoltStorage); ok {
+		q, ok := storage.UnwrapStore(dolt).(storage.ExternalRefHistoryQuerier)
+		return q, ok
+	}
+	return nil, false
 }
 
 func syncIssueLabels(ctx context.Context, tx storage.Transaction, issueID string, desired []string, actor string) error {
@@ -752,8 +964,15 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			// Create in external tracker
 			created, err := e.Tracker.CreateIssue(ctx, pushIssue)
 			if err != nil {
+				if isRateLimitExhausted(err) {
+					return stats, fmt.Errorf("sync aborted: %w", err)
+				}
 				e.warn("Failed to create %s in %s: %v", issue.ID, e.Tracker.DisplayName(), err)
 				stats.Errors++
+				if isRateLimitedErr(err) {
+					e.warnRateLimitAbort(err, len(issues)-stats.Created-stats.Updated-stats.Skipped-stats.Errors)
+					return stats, nil
+				}
 				continue
 			}
 
@@ -765,6 +984,12 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				stats.Errors++
 				// Note: issue WAS created externally, so we still count Created
 				// but also flag the error so the user knows the link is broken
+			}
+			// Surface any partial-success warnings from the create (e.g. a
+			// follow-up state change that failed) through the sync result so a
+			// degraded push is visible rather than silently swallowed.
+			for _, w := range created.Warnings {
+				e.warn("%s (%s)", w, issue.ID)
 			}
 			stats.Created++
 		} else if !opts.CreateOnly || forceIDs[issue.ID] {
@@ -778,6 +1003,9 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			// Check if update is needed
 			if !forceIDs[issue.ID] {
 				extIssue, err := e.Tracker.FetchIssue(ctx, extID)
+				if isRateLimitExhausted(err) {
+					return stats, fmt.Errorf("sync aborted: %w", err)
+				}
 				if err == nil && extIssue != nil {
 					// ContentEqual hook: content-hash dedup to skip unnecessary API calls
 					if e.PushHooks != nil && e.PushHooks.ContentEqual != nil {
@@ -793,8 +1021,15 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 			}
 
 			if _, err := e.Tracker.UpdateIssue(ctx, extID, pushIssue); err != nil {
+				if isRateLimitExhausted(err) {
+					return stats, fmt.Errorf("sync aborted: %w", err)
+				}
 				e.warn("Failed to update %s in %s: %v", issue.ID, e.Tracker.DisplayName(), err)
 				stats.Errors++
+				if isRateLimitedErr(err) {
+					e.warnRateLimitAbort(err, len(issues)-stats.Created-stats.Updated-stats.Skipped-stats.Errors)
+					return stats, nil
+				}
 				continue
 			}
 			stats.Updated++
@@ -952,15 +1187,21 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 		return 0
 	}
 
+	resolveIssue, err := e.dependencyIssueResolver(ctx, nil)
+	if err != nil {
+		e.warn("Failed to build dependency resolver: %v", err)
+		return len(deps)
+	}
+
 	errCount := 0
 	for _, dep := range deps {
-		fromIssue, err := e.Store.GetIssueByExternalRef(ctx, dep.FromExternalID)
+		fromIssue, err := resolveIssue(ctx, dep.FromExternalID)
 		if err != nil {
 			e.warn("Failed to resolve dependency source %s: %v", dep.FromExternalID, err)
 			errCount++
 			continue
 		}
-		toIssue, err := e.Store.GetIssueByExternalRef(ctx, dep.ToExternalID)
+		toIssue, err := resolveIssue(ctx, dep.ToExternalID)
 		if err != nil {
 			e.warn("Failed to resolve dependency target %s: %v", dep.ToExternalID, err)
 			errCount++
@@ -982,6 +1223,150 @@ func (e *Engine) createDependencies(ctx context.Context, deps []DependencyInfo) 
 		}
 	}
 	return errCount
+}
+
+func (e *Engine) previewDependencies(ctx context.Context, deps []DependencyInfo, dryRunIssues []*types.Issue) int {
+	if len(deps) == 0 {
+		return 0
+	}
+
+	resolveIssue, err := e.dependencyIssueResolver(ctx, dryRunIssues)
+	if err != nil {
+		e.warn("Failed to build dependency resolver: %v", err)
+		return len(deps)
+	}
+
+	wouldCreate := 0
+	pending := make(map[string]struct{}, len(deps))
+	for _, dep := range deps {
+		fromIssue, err := resolveIssue(ctx, dep.FromExternalID)
+		if err != nil {
+			e.warn("Failed to resolve dependency source %s: %v", dep.FromExternalID, err)
+			continue
+		}
+		toIssue, err := resolveIssue(ctx, dep.ToExternalID)
+		if err != nil {
+			e.warn("Failed to resolve dependency target %s: %v", dep.ToExternalID, err)
+			continue
+		}
+		if fromIssue == nil || toIssue == nil {
+			continue
+		}
+		if dependencyExists(ctx, e.Store, fromIssue.ID, toIssue.ID, types.DependencyType(dep.Type)) {
+			continue
+		}
+		key := pendingDependencyPreviewKey(fromIssue.ID, toIssue.ID, dep.Type)
+		if _, ok := pending[key]; ok {
+			continue
+		}
+		pending[key] = struct{}{}
+		fromDisplay := firstNonEmpty(fromIssue.ID, dep.FromExternalID)
+		toDisplay := firstNonEmpty(toIssue.ID, dep.ToExternalID)
+		e.msg("[dry-run] Would create dependency: %s -> %s (%s)", fromDisplay, toDisplay, dep.Type)
+		wouldCreate++
+	}
+	if wouldCreate > 0 {
+		e.msg("[dry-run] Would create %d dependencies", wouldCreate)
+	}
+	return 0
+}
+
+func pendingDependencyPreviewKey(fromID, toID, depType string) string {
+	return strings.Join([]string{
+		strings.TrimSpace(fromID),
+		strings.TrimSpace(toID),
+		strings.TrimSpace(depType),
+	}, "\x00")
+}
+
+func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*types.Issue) (func(context.Context, string) (*types.Issue, error), error) {
+	issues, searchErr := e.Store.SearchIssues(ctx, "", types.IssueFilter{})
+	if searchErr != nil {
+		return nil, searchErr
+	}
+	issues = append(issues, extraIssues...)
+
+	byExternal := make(map[string]*types.Issue, len(issues)*2)
+	for _, candidate := range issues {
+		if candidate == nil || candidate.ExternalRef == nil {
+			continue
+		}
+		ref := strings.TrimSpace(*candidate.ExternalRef)
+		if ref == "" {
+			continue
+		}
+		if _, exists := byExternal[ref]; !exists {
+			byExternal[ref] = candidate
+		}
+		if !e.Tracker.IsExternalRef(ref) {
+			continue
+		}
+		identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(ref))
+		if identifier != "" {
+			if _, exists := byExternal[identifier]; !exists {
+				byExternal[identifier] = candidate
+			}
+			lowerIdentifier := strings.ToLower(identifier)
+			if _, exists := byExternal[lowerIdentifier]; !exists {
+				byExternal[lowerIdentifier] = candidate
+			}
+		}
+	}
+
+	return func(ctx context.Context, externalID string) (*types.Issue, error) {
+		externalID = strings.TrimSpace(externalID)
+		if externalID == "" {
+			return nil, nil
+		}
+		if issue := byExternal[externalID]; issue != nil {
+			return issue, nil
+		}
+		if issue := byExternal[strings.ToLower(externalID)]; issue != nil {
+			return issue, nil
+		}
+		// Tracker refs come in URL variants (e.g. Linear URLs with and
+		// without the title slug); match on the extracted identifier the
+		// same way the index above was built.
+		if e.Tracker.IsExternalRef(externalID) {
+			if identifier := strings.TrimSpace(e.Tracker.ExtractIdentifier(externalID)); identifier != "" {
+				if issue := byExternal[identifier]; issue != nil {
+					return issue, nil
+				}
+				if issue := byExternal[strings.ToLower(identifier)]; issue != nil {
+					return issue, nil
+				}
+			}
+		}
+		if strings.Contains(externalID, "://") {
+			return e.Store.GetIssueByExternalRef(ctx, externalID)
+		}
+		return nil, nil
+	}, nil
+}
+
+func dependencyExists(ctx context.Context, store storage.Storage, issueID, dependsOnID string, depType types.DependencyType) bool {
+	if strings.TrimSpace(issueID) == "" || strings.TrimSpace(dependsOnID) == "" {
+		return false
+	}
+	records, err := store.GetDependenciesWithMetadata(ctx, issueID)
+	if err != nil {
+		return false
+	}
+	for _, record := range records {
+		if record.ID == dependsOnID && record.DependencyType == depType {
+			return true
+		}
+	}
+	return false
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // buildDescendantSet returns the set of issue IDs consisting of the given parent
@@ -1028,6 +1413,20 @@ func (e *Engine) shouldPushIssue(issue *types.Issue, opts SyncOptions) bool {
 
 	for _, t := range opts.ExcludeTypes {
 		if issue.IssueType == t {
+			return false
+		}
+	}
+
+	// ExcludeIDPrefix: case-sensitive prefix match on the bead ID. Filters
+	// workflow-artifact beads (e.g. "hw-mol-foo") from external sync without
+	// requiring them to share a type or label.
+	if opts.ExcludeIDPrefix != "" && strings.HasPrefix(issue.ID, opts.ExcludeIDPrefix) {
+		return false
+	}
+	// ExcludeIDPatterns: case-sensitive substring match anywhere in the ID.
+	// Union with ExcludeIDPrefix — matching either rule excludes the issue.
+	for _, p := range opts.ExcludeIDPatterns {
+		if p != "" && strings.Contains(issue.ID, p) {
 			return false
 		}
 	}

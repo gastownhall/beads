@@ -100,6 +100,8 @@ func TestSharedServerConcurrent(t *testing.T) {
 		"BEADS_DOLT_SERVER_PORT=" + strconv.Itoa(containerPort),
 		"BEADS_DOLT_AUTO_START=0",
 		"BEADS_TEST_MODE=1",
+		"BD_DISABLE_METRICS=1",
+		"BD_DISABLE_EVENT_FLUSH=1",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ASKPASS=",
 		"SSH_ASKPASS=",
@@ -613,7 +615,7 @@ func buildSharedServerTestBinary(t *testing.T) string {
 			sharedServerBuildErr = fmt.Errorf("getwd: %w", err)
 			return
 		}
-		buildDir, err := os.MkdirTemp("", "beads-shared-server-bd-*")
+		buildDir, err := testTempDir("beads-shared-server-bd-*")
 		if err != nil {
 			sharedServerBuildErr = fmt.Errorf("mkdirtemp: %w", err)
 			return

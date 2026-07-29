@@ -7,6 +7,16 @@ import (
 	"testing"
 )
 
+func TestExportSubprocessDirUsesProjectRoot(t *testing.T) {
+	repo := t.TempDir()
+	beadsDir := filepath.Join(repo, ".beads")
+
+	got := exportSubprocessDir(beadsDir)
+	if got != repo {
+		t.Fatalf("exportSubprocessDir(%q) = %q, want project root %q", beadsDir, got, repo)
+	}
+}
+
 // TestSanitizeHuskyHook_V8 verifies that husky v8's `_/husky.sh` source line
 // is stripped and replaced with a PATH export, so the hook runs standalone
 // without needing `.beads/hooks/_/husky.sh` to exist. (GH#3132)

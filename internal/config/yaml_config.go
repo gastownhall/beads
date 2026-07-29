@@ -4,11 +4,13 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // YamlOnlyKeys are configuration keys that must be stored in config.yaml
@@ -27,12 +29,17 @@ var YamlOnlyKeys = map[string]bool{
 	"db":       true,
 	"actor":    true,
 	"identity": true,
+	// Replica identity: config.NodeID() reads this through viper (yaml/env)
+	// only, so a DB-backed write would be silently unread — exactly the
+	// GH#536 class this map exists to prevent.
+	"node_id": true,
 
 	// Git settings
 	"git.author":      true,
 	"git.no-gpg-sign": true,
 	"no-push":         true,
 	"no-git-ops":      true, // Disable git ops in bd prime session close protocol (GH#593)
+	"agent.profile":   true, // Explicit policy profile for bd prime's close protocol (GH#3423)
 
 	// Sync settings
 	"sync.remote":     true, // Primary: any Dolt-compatible remote URL
@@ -47,6 +54,11 @@ var YamlOnlyKeys = map[string]bool{
 
 	// Create command settings
 	"create.require-description": true,
+
+	// Prime memory-injection caps (read at session start, possibly before
+	// the database is reachable, so they must live in yaml)
+	"prime.max-memories":     true,
+	"prime.max-memory-chars": true,
 
 	// Validation settings (bd-t7jq)
 	// Values: "warn" | "error" | "none"
@@ -63,16 +75,27 @@ var YamlOnlyKeys = map[string]bool{
 	"backup.git-push": true,
 	"backup.git-repo": true,
 
+	// Import settings
+	"import.auto": true,
+	"import.path": true,
+
 	// Dolt server settings
-	"dolt.idle-timeout":  true, // Idle auto-stop timeout (default "30m", "0" disables)
-	"dolt.shared-server": true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
-	"dolt.max-conns":     true, // Connection pool size override (default 10, GH#3140)
+	"dolt.shared-server":      true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
+	"dolt.max-conns":          true, // Connection pool size override (default 10, GH#3140)
+	"dolt.pool-read-timeout":  true, // Pool per-I/O read deadline override (default 10s, bd-vz0y9)
+	"dolt.pool-write-timeout": true, // Pool per-I/O write deadline override (default 10s, bd-vz0y9)
+	"dolt.debug":              true, // Debug-mode dolt sql-server: --loglevel=debug + --prof cpu
 
 	// Secrets: tokens and API keys must NOT be stored in the Dolt database
 	// because that data is pushed to remotes, triggering secret-scanning
 	// blocks on GitHub. Store them in local config.yaml instead.
-	"github.token":   true,
-	"linear.api_key": true,
+	"github.token":               true,
+	"linear.api_key":             true,
+	"linear.oauth_client_id":     true,
+	"linear.oauth_client_secret": true,
+	"jira.api_token":             true,
+	"gitlab.token":               true,
+	"ado.pat":                    true,
 }
 
 // IsYamlOnlyKey returns true if the given key should be stored in config.yaml
@@ -84,7 +107,7 @@ func IsYamlOnlyKey(key string) bool {
 	}
 
 	// Check prefix matches for nested keys
-	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation."}
+	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics.", "list.", "audit."}
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(key, prefix) {
 			return true
@@ -92,6 +115,87 @@ func IsYamlOnlyKey(key string) bool {
 	}
 
 	return false
+}
+
+// secretKeyPatterns are substrings that identify a yaml-only key as containing
+// sensitive material that should not be written to git-tracked files.
+var secretKeyPatterns = []string{"api_key", "api-key", "secret", "token", "password"}
+
+// IsSecretKey returns true if the given config key holds sensitive material
+// (API keys, tokens, passwords) that should not be committed to git.
+func IsSecretKey(key string) bool {
+	lower := strings.ToLower(key)
+	for _, pattern := range secretKeyPatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// isGitTracked returns true if the file at path is tracked by git
+// (i.e., has been git-added). Uses `git ls-files --error-unmatch`.
+func isGitTracked(path string) bool {
+	cmd := exec.Command("git", "ls-files", "--error-unmatch", path)
+	cmd.Dir = filepath.Dir(path)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run() == nil
+}
+
+var secretKeyEnvVarHints = map[string]string{ //nolint:gosec // Values are environment variable names, not credentials.
+	"ai.api_key":     "ANTHROPIC_API_KEY",
+	"github.token":   "GITHUB_TOKEN",
+	"linear.api_key": "LINEAR_API_KEY",
+}
+
+// secretKeyEnvVarHint returns a suggested environment variable name for a
+// secret config key, e.g. "linear.api_key" -> "LINEAR_API_KEY".
+func secretKeyEnvVarHint(key string) string {
+	if envVar, ok := secretKeyEnvVarHints[key]; ok {
+		return envVar
+	}
+	return "BD_" + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), ".", "_"))
+}
+
+// CheckSecretKeyGitSafety checks whether writing key to the project's
+// config.yaml would expose a secret in git history. Returns a descriptive
+// error with remediation steps if so; nil otherwise. Non-secret keys always
+// return nil.
+func CheckSecretKeyGitSafety(key string) error {
+	configPath, err := findProjectConfigYaml()
+	if err != nil {
+		return nil // can't resolve path; let the write fail with its own error
+	}
+	return checkSecretGitTracked(configPath, key)
+}
+
+func checkSecretGitTracked(configPath, key string) error {
+	if !IsYamlOnlyKey(key) {
+		return nil
+	}
+	if !IsSecretKey(key) {
+		return nil
+	}
+	if !isGitTracked(configPath) {
+		return nil
+	}
+	envVar := secretKeyEnvVarHint(key)
+	return fmt.Errorf(
+		"refusing to write secret key %q to git-tracked config file %s\n\n"+
+			"This would expose your secret in git history. Instead:\n"+
+			"  export %s=\"your-key-here\"    # add to ~/.secrets or ~/.zshrc\n\n"+
+			"Or move config.yaml out of git tracking:\n"+
+			"  git rm --cached %s\n"+
+			"  echo \"config.yaml\" >> %s/.gitignore\n\n"+
+			"To override this check (e.g., for testing):\n"+
+			"  bd config set --force-git-tracked %s \"value\"",
+		key, configPath,
+		envVar,
+		configPath,
+		filepath.Dir(configPath),
+		key,
+	)
 }
 
 // keyAliases maps alternative key names to their canonical yaml form.
@@ -121,6 +225,208 @@ func SetYamlConfig(key, value string) error {
 	if err != nil {
 		return err
 	}
+
+	return setYamlConfigAtPath(configPath, key, value)
+}
+
+// SetYamlConfigInDir sets a configuration value in the config.yaml located in
+// the provided beadsDir, bypassing CWD/worktree discovery. Use this when the
+// caller has already resolved the authoritative workspace and needs to avoid
+// local worktree stubs shadowing the real shared config location.
+func SetYamlConfigInDir(beadsDir, key, value string) error {
+	// Validate specific keys (GH#995)
+	if err := validateYamlConfigValue(key, value); err != nil {
+		return err
+	}
+
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	if _, err := os.Stat(configPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no config.yaml found in %s (run 'bd init' first)", beadsDir)
+		}
+		return fmt.Errorf("failed to stat config.yaml: %w", err)
+	}
+
+	return setYamlConfigAtPath(configPath, key, value)
+}
+
+var userGlobalKeyPrefixes = []string{"metrics."}
+
+// userGlobalExactKeys are per-MACHINE settings that must never be written to
+// the project .beads/config.yaml, which is a git-TRACKED file (see
+// cmd/bd/doctor/gitignore.go: nothing in .beads/.gitignore excludes it). A
+// committed value propagates one machine's answer to every clone that pulls
+// it, which for these keys is worse than having no value at all.
+//
+// node_id is the exemplar: it names the beads STORE that grants leases here,
+// and the reclaim guard (issueops.ReclaimExpiredLeasesInTx) compares it
+// against each lease's granted_node. Commit "node_id: mini" and every replica
+// reads "mini", so every comparison matches and the guard is simultaneously
+// fully ARMED and fully INERT — laptop reaps mini's leases exactly as if they
+// were local, which is the precise hazard the guard exists to close, now
+// happening while the operator believes they are protected. Routing the write
+// to ~/.config/bd/config.yaml keeps it per-machine; viper still merges that
+// file, so config.NodeID() reads it back.
+var userGlobalExactKeys = map[string]bool{"node_id": true}
+
+func IsUserGlobalKey(key string) bool {
+	if userGlobalExactKeys[key] {
+		return true
+	}
+	for _, prefix := range userGlobalKeyPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// readUserGlobalYamlValue reads a single dotted key from the user-global
+// config.yaml ONLY, never project or BEADS_DIR config. It accepts both the
+// nested form (metrics:\n  disabled: true) and the flat dotted form
+// (metrics.disabled: true). It returns the raw scalar string and whether the
+// key was present.
+//
+// Consent-bearing settings (metrics enablement and endpoint) are resolved
+// through this rather than merged viper so a repository's .beads/config.yaml can
+// never re-enable metrics for a user who opted out, nor redirect where metrics
+// are sent. See MetricsDisabledByUserConfig / UserMetricsEndpoint.
+func readUserGlobalYamlValue(key string) (string, bool) {
+	path := UserConfigYamlPath()
+	data, err := os.ReadFile(path) //nolint:gosec // path is the user-global config path from UserConfigYamlPath
+	if err != nil {
+		return "", false
+	}
+	var root map[string]interface{}
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return "", false
+	}
+	if raw, ok := root[key]; ok { // flat dotted form
+		return yamlScalarString(raw)
+	}
+	var node interface{} = root // nested form
+	for _, part := range strings.Split(key, ".") {
+		m, ok := node.(map[string]interface{})
+		if !ok {
+			return "", false
+		}
+		node, ok = m[part]
+		if !ok {
+			return "", false
+		}
+	}
+	return yamlScalarString(node)
+}
+
+func yamlScalarString(v interface{}) (string, bool) {
+	switch s := v.(type) {
+	case nil:
+		return "", false
+	case string:
+		return s, true
+	default:
+		return fmt.Sprintf("%v", s), true
+	}
+}
+
+// GetUserYamlConfig reads a single dotted key from the user-global config.yaml
+// ONLY, never project/BEADS_DIR config, returning "" if unset. It is the read
+// counterpart of SetUserYamlConfig/UnsetUserYamlConfig and the generic form of
+// the per-key consent helpers below. User-global keys (see IsUserGlobalKey —
+// currently metrics.*) must be read through this so `bd config get` reports the
+// value that actually governs runtime behavior, not the merged value a project's
+// .beads/config.yaml could shadow.
+func GetUserYamlConfig(key string) string {
+	raw, _ := readUserGlobalYamlValue(key)
+	return strings.TrimSpace(raw)
+}
+
+// MetricsDisabledByUserConfig reports whether the user-global config.yaml sets
+// metrics.disabled: true. Project/BEADS_DIR config is intentionally ignored so a
+// repository can never re-enable metrics for a user who opted out globally.
+// Absent or unparseable values read as "not disabled" (the default).
+func MetricsDisabledByUserConfig() bool {
+	raw, ok := readUserGlobalYamlValue("metrics.disabled")
+	if !ok {
+		return false
+	}
+	disabled, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return disabled
+}
+
+// UserMetricsEndpoint returns the metrics endpoint configured in the user-global
+// config.yaml, or "" if unset. Project/BEADS_DIR config is intentionally ignored
+// so a repository can never redirect a user's metrics endpoint. Callers fall
+// back to the built-in default when this is empty.
+func UserMetricsEndpoint() string {
+	raw, _ := readUserGlobalYamlValue("metrics.endpoint")
+	return strings.TrimSpace(raw)
+}
+
+// MetricsNoticeShownByUserConfig reports whether the user-global config.yaml
+// records that the first-run metrics disclosure was already shown. Like consent
+// and endpoint, it is resolved from the user-global config ONLY: a repository's
+// .beads/config.yaml must not be able to set metrics.notice_shown: true and
+// suppress the one-time disclosure for a user who has never actually seen it.
+// Absent or unparseable values read as "not shown" (the default).
+func MetricsNoticeShownByUserConfig() bool {
+	raw, ok := readUserGlobalYamlValue("metrics.notice_shown")
+	if !ok {
+		return false
+	}
+	shown, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return shown
+}
+
+func UnsetUserYamlConfig(key string) error {
+	configPath := UserConfigYamlPath()
+	normalizedKey := normalizeYamlKey(key)
+
+	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from UserConfigYamlPath
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read user config.yaml: %w", err)
+	}
+
+	newContent := commentOutYamlKey(string(content), normalizedKey)
+
+	// Preserve the owner-private 0600 posture every other user-global writer
+	// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
+	// rewriting at 0644 would relax this shared user config to world-readable.
+	if err := os.WriteFile(configPath, []byte(newContent), 0o600); err != nil { //nolint:gosec // configPath is from UserConfigYamlPath
+		return fmt.Errorf("failed to write user config.yaml: %w", err)
+	}
+
+	return nil
+}
+
+func SetUserYamlConfig(key, value string) error {
+	if err := validateYamlConfigValue(key, value); err != nil {
+		return err
+	}
+	configPath := UserConfigYamlPath()
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return fmt.Errorf("failed to create user config directory: %w", err)
+	}
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		if err := os.WriteFile(configPath, []byte{}, 0o600); err != nil {
+			return fmt.Errorf("failed to create user config.yaml: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("failed to stat user config.yaml: %w", err)
+	}
+	return setYamlConfigAtPath(configPath, key, value)
+}
+
+func setYamlConfigAtPath(configPath, key, value string) error {
 
 	// Normalize key to canonical yaml format
 	normalizedKey := normalizeYamlKey(key)
@@ -189,6 +495,10 @@ func UnsetYamlConfig(key string) error {
 // This keeps YAML-only config behavior aligned with runtime resolution when
 // BEADS_DIR points to an external runtime directory.
 func findProjectConfigYaml() (string, error) {
+	return findProjectConfigYamlWithFinder(findProjectBeadsDir)
+}
+
+func findProjectConfigYamlWithFinder(findBeadsDir func() string) (string, error) {
 	// Respect BEADS_DIR first when set.
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
 		configPath := filepath.Join(beadsDir, "config.yaml")
@@ -198,20 +508,84 @@ func findProjectConfigYaml() (string, error) {
 		return "", fmt.Errorf("no config.yaml found in BEADS_DIR (%s) (run 'bd init' first)", beadsDir)
 	}
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("failed to get working directory: %w", err)
+	if configPath := projectConfigPathFromLoadedState(); configPath != "" {
+		return configPath, nil
 	}
 
-	// Walk up parent directories to find .beads/config.yaml
-	for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		configPath := filepath.Join(dir, ".beads", "config.yaml")
-		if _, err := os.Stat(configPath); err == nil {
-			return configPath, nil
+	if findBeadsDir != nil {
+		if beadsDir := findBeadsDir(); beadsDir != "" {
+			configPath := filepath.Join(beadsDir, "config.yaml")
+			if _, err := os.Stat(configPath); err == nil {
+				return configPath, nil
+			}
 		}
 	}
 
 	return "", fmt.Errorf("no .beads/config.yaml found (run 'bd init' first)")
+}
+
+func projectConfigPathFromLoadedState() string {
+	configPath := ConfigFileUsed()
+	if configPath == "" {
+		return ""
+	}
+	if filepath.Base(configPath) != "config.yaml" {
+		return ""
+	}
+	if filepath.Base(filepath.Dir(configPath)) != ".beads" {
+		return ""
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		return ""
+	}
+	return configPath
+}
+
+// UserConfigYamlPath returns the platform-appropriate path for the
+// user-level config.yaml file. On Linux this is typically
+// ~/.config/bd/config.yaml; on macOS it checks ~/.config/bd/ first
+// (the documented cross-platform path) and falls back to
+// ~/Library/Application Support/bd/.
+func UserConfigYamlPath() string {
+	// Prefer ~/.config/bd/config.yaml — it's the documented path and
+	// works on all platforms after GH#3532.
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		xdgPath := filepath.Join(homeDir, ".config", "bd", "config.yaml")
+		if _, err := os.Stat(xdgPath); err == nil {
+			return xdgPath
+		}
+		// If it doesn't exist yet, still prefer it as the recommendation
+		// unless the os.UserConfigDir() path already has a file.
+		if configDir, err := os.UserConfigDir(); err == nil {
+			osPath := filepath.Join(configDir, "bd", "config.yaml")
+			if _, err := os.Stat(osPath); err == nil {
+				return osPath
+			}
+		}
+		return xdgPath // recommend the cross-platform path
+	}
+	return "~/.config/bd/config.yaml" // fallback display string
+}
+
+func findProjectBeadsDir() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+
+	for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		beadsDir := filepath.Join(dir, ".beads")
+		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
+			return beadsDir
+		}
+	}
+
+	configPath := worktreeFallbackConfigPath(cwd)
+	if configPath == "" {
+		return ""
+	}
+
+	return filepath.Dir(configPath)
 }
 
 // updateYamlKey updates a key in yaml content, handling commented-out keys.
@@ -220,7 +594,14 @@ func findProjectConfigYaml() (string, error) {
 //
 //nolint:unparam // error return kept for future validation
 func updateYamlKey(content, key, value string) (string, error) {
-	// Format the value appropriately
+	if strings.Contains(key, ".") {
+		if updated, ok, err := updateNestedYamlKey(content, key, value); err != nil {
+			return "", err
+		} else if ok {
+			return updated, nil
+		}
+	}
+
 	formattedValue := formatYamlValue(value)
 	newLine := fmt.Sprintf("%s: %s", key, formattedValue)
 
@@ -261,10 +642,111 @@ func updateYamlKey(content, key, value string) (string, error) {
 	return strings.Join(result, "\n"), nil
 }
 
-// commentOutYamlKey comments out a key in yaml content by prefixing the line with "# ".
-// If the key is already commented or not found, the content is returned unchanged.
+func updateNestedYamlKey(content, key, value string) (string, bool, error) {
+	parts := strings.Split(key, ".")
+	if len(parts) < 2 {
+		return "", false, nil
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(content), &root); err != nil {
+		return "", false, err
+	}
+	if len(root.Content) == 0 {
+		return "", false, nil
+	}
+	mapping := root.Content[0]
+	if mapping.Kind != yaml.MappingNode {
+		return "", false, nil
+	}
+
+	if findMappingChild(mapping, key) != -1 {
+		return "", false, nil
+	}
+
+	leaf, ok := findOrCreateNestedScalar(mapping, parts)
+	if !ok {
+		return "", false, nil
+	}
+
+	leaf.Kind = yaml.ScalarNode
+	leaf.Tag = ""
+	leaf.Style = scalarStyleFor(value)
+	leaf.Value = value
+
+	out, err := yaml.Marshal(&root)
+	if err != nil {
+		return "", false, err
+	}
+	return string(out), true, nil
+}
+
+func findOrCreateNestedScalar(mapping *yaml.Node, parts []string) (*yaml.Node, bool) {
+	current := mapping
+	for i, part := range parts {
+		if current.Kind != yaml.MappingNode {
+			return nil, false
+		}
+		idx := findMappingChild(current, part)
+		isLeaf := i == len(parts)-1
+		if idx == -1 {
+			keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: part}
+			var valNode *yaml.Node
+			if isLeaf {
+				valNode = &yaml.Node{Kind: yaml.ScalarNode}
+			} else {
+				valNode = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+			}
+			current.Content = append(current.Content, keyNode, valNode)
+			if isLeaf {
+				return valNode, true
+			}
+			current = valNode
+			continue
+		}
+		child := current.Content[idx+1]
+		if isLeaf {
+			return child, true
+		}
+		if child.Kind != yaml.MappingNode {
+			return nil, false
+		}
+		current = child
+	}
+	return nil, false
+}
+
+func findMappingChild(mapping *yaml.Node, name string) int {
+	for i := 0; i < len(mapping.Content); i += 2 {
+		k := mapping.Content[i]
+		if k.Kind == yaml.ScalarNode && k.Value == name {
+			return i
+		}
+	}
+	return -1
+}
+
+func scalarStyleFor(value string) yaml.Style {
+	if value == "" {
+		return yaml.DoubleQuotedStyle
+	}
+	if _, err := strconv.ParseBool(value); err == nil {
+		return 0
+	}
+	if _, err := strconv.ParseFloat(value, 64); err == nil {
+		return 0
+	}
+	switch value {
+	case "null", "Null", "NULL", "~", "yes", "no", "on", "off":
+		return yaml.DoubleQuotedStyle
+	}
+	if strings.ContainsAny(value, ":#\n\"'") || strings.HasPrefix(value, " ") || strings.HasSuffix(value, " ") {
+		return yaml.DoubleQuotedStyle
+	}
+	return 0
+}
+
 func commentOutYamlKey(content, key string) string {
-	// Match the key line (not already commented)
 	keyPattern := regexp.MustCompile(`^(\s*)` + regexp.QuoteMeta(key) + `\s*:`)
 
 	var result []string
@@ -338,21 +820,6 @@ func isDuration(s string) bool {
 	return isNumeric(s[:len(s)-1])
 }
 
-func needsQuoting(s string) bool {
-	// Quote if contains special YAML characters
-	special := []string{":", "#", "[", "]", "{", "}", ",", "&", "*", "!", "|", ">", "'", "\"", "%", "@", "`"}
-	for _, c := range special {
-		if strings.Contains(s, c) {
-			return true
-		}
-	}
-	// Quote if starts/ends with whitespace
-	if strings.TrimSpace(s) != s {
-		return true
-	}
-	return false
-}
-
 // validateYamlConfigValue validates a configuration value before setting.
 // Returns an error if the value is invalid for the given key.
 func validateYamlConfigValue(key, value string) error {
@@ -366,17 +833,36 @@ func validateYamlConfigValue(key, value string) error {
 		if depth < 1 {
 			return fmt.Errorf("hierarchy.max-depth must be at least 1, got %d", depth)
 		}
-	case "dolt.idle-timeout":
-		// "0" disables, otherwise must be a valid Go duration
-		if value != "0" {
-			if _, err := time.ParseDuration(value); err != nil {
-				return fmt.Errorf("dolt.idle-timeout must be a duration (e.g. \"30m\", \"1h\") or \"0\" to disable, got %q", value)
-			}
-		}
 	case "dolt.shared-server":
 		lower := strings.ToLower(value)
 		if lower != "true" && lower != "false" {
 			return fmt.Errorf("dolt.shared-server must be \"true\" or \"false\", got %q", value)
+		}
+	case "dolt.debug":
+		lower := strings.ToLower(value)
+		if lower != "true" && lower != "false" {
+			return fmt.Errorf("dolt.debug must be \"true\" or \"false\", got %q", value)
+		}
+	case "dolt.mode":
+		lower := strings.ToLower(value)
+		if lower != "server" && lower != "embedded" {
+			return fmt.Errorf("dolt.mode must be \"server\" or \"embedded\", got %q", value)
+		}
+	case "prime.max-memories":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("prime.max-memories must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+		if n < 0 {
+			return fmt.Errorf("prime.max-memories must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+	case "prime.max-memory-chars":
+		n, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("prime.max-memory-chars must be a non-negative integer (0 = unlimited), got %q", value)
+		}
+		if n < 0 {
+			return fmt.Errorf("prime.max-memory-chars must be a non-negative integer (0 = unlimited), got %q", value)
 		}
 	}
 	return nil

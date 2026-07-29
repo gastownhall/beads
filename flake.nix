@@ -9,6 +9,7 @@
     {
       self,
       nixpkgs,
+      ...
     }:
     let
       systems = [
@@ -18,23 +19,27 @@
         "x86_64-linux"
       ];
 
+      overlay = import ./overlay.nix self;
+
       forAllSystems =
         f:
         nixpkgs.lib.genAttrs systems (
           system:
-          f {
-            pkgs = import nixpkgs {
+          f (
+            import nixpkgs {
               inherit system;
-            };
-            inherit system self;
-          }
+              overlays = [ overlay ];
+            }
+          )
         );
-    in rec {
-      icu = nixpkgs.icu77;
-      packages = forAllSystems (args: import ./packages.nix (args // { inherit icu; }));
+    in
+    {
+      overlays.default = overlay;
 
-      apps = forAllSystems (
-        { self, system, ... }:
+      packages = forAllSystems (import ./packages.nix);
+
+      apps = nixpkgs.lib.genAttrs systems (
+        system:
         rec {
           bd = {
             type = "app";
@@ -45,16 +50,16 @@
       );
 
       devShells = forAllSystems (
-        { pkgs, ... }:
+        pkgs:
         {
           default = pkgs.mkShell {
             buildInputs = with pkgs; [
-              go
+              go_1_26
               git
               gopls
               gotools
               golangci-lint
-              sqlite
+              sqlite # sqlite3 CLI for the legacy pre-Dolt migration scripts (scripts/migrate-sqlite-to-current.sh, scripts/migration-test/)
             ];
             shellHook = ''
               echo "beads development shell"

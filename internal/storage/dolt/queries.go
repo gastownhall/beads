@@ -4,10 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"sort"
-	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -24,234 +21,62 @@ func (s *DoltStore) SearchIssues(ctx context.Context, query string, filter types
 	return result, err
 }
 
-// GetReadyWork returns issues that are ready to work on (not blocked).
-//
-// Blocking semantics are unified through computeBlockedIDs, which is the
-// canonical source of truth for both GetReadyWork and GetBlockedIssues.
-// The molecule subgraph analysis (analyzeMoleculeParallel) uses equivalent
-// logic scoped to an in-memory subgraph rather than the full database.
-func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Status filtering: default to open OR in_progress (matches memory storage)
-	var statusClause string
-	if filter.Status != "" {
-		statusClause = "status = ?"
-	} else {
-		statusClause = "status IN ('open', 'in_progress')"
-	}
-	whereClauses := []string{
-		statusClause,
-		"(pinned = 0 OR pinned IS NULL)", // Exclude pinned issues (context markers, not work)
-	}
-	if !filter.IncludeEphemeral {
-		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
-	}
-	args := []interface{}{}
-	if filter.Status != "" {
-		args = append(args, string(filter.Status))
-	}
-
-	if filter.Priority != nil {
-		whereClauses = append(whereClauses, "priority = ?")
-		args = append(args, *filter.Priority)
-	}
-	// Use subquery for type filter to prevent Dolt mergeJoinIter panic (see SearchIssues).
-	if filter.Type != "" {
-		whereClauses = append(whereClauses, "id IN (SELECT id FROM issues WHERE issue_type = ?)")
-		args = append(args, filter.Type)
-	} else {
-		// Exclude workflow/identity types from ready work by default.
-		// These are internal items, not actionable work for agents to claim:
-		// - merge-request: processed by automation
-		// - gate: async wait conditions
-		// - molecule: workflow containers
-		// - message: mail/communication items
-		// - agent: identity/state tracking beads
-		// - role: agent role definitions (reference metadata)
-		// - rig: rig identity beads (reference metadata)
-		excludeTypes := []string{"merge-request", "gate", "molecule", "message", "agent", "role", "rig"}
-		// Append caller-supplied exclusions (e.g., from --exclude-type flag).
-		for _, t := range filter.ExcludeTypes {
-			excludeTypes = append(excludeTypes, string(t))
-		}
-		placeholders := make([]string, len(excludeTypes))
-		for i, t := range excludeTypes {
-			placeholders[i] = "?"
-			args = append(args, t)
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT id FROM issues WHERE issue_type NOT IN (%s))", strings.Join(placeholders, ",")))
-	}
-	// Unassigned takes precedence over Assignee filter (matches memory storage)
-	if filter.Unassigned {
-		whereClauses = append(whereClauses, "(assignee IS NULL OR assignee = '')")
-	} else if filter.Assignee != nil {
-		whereClauses = append(whereClauses, "assignee = ?")
-		args = append(args, *filter.Assignee)
-	}
-	// Exclude future-deferred issues unless IncludeDeferred is set
-	if !filter.IncludeDeferred {
-		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= UTC_TIMESTAMP())")
-	}
-	// Exclude children of future-deferred parents (GH#1190)
-	// Pre-compute excluded IDs using separate single-table queries to avoid
-	// correlated cross-table JOIN subquery that triggers Dolt joinIter hangs.
-	if !filter.IncludeDeferred {
-		deferredChildIDs, dcErr := s.getChildrenOfDeferredParents(ctx)
-		if dcErr == nil && len(deferredChildIDs) > 0 {
-			// Batch the NOT IN clause to avoid oversized queries (GH#2179).
-			for start := 0; start < len(deferredChildIDs); start += queryBatchSize {
-				end := start + queryBatchSize
-				if end > len(deferredChildIDs) {
-					end = len(deferredChildIDs)
-				}
-				placeholders, batchArgs := doltBuildSQLInClause(deferredChildIDs[start:end])
-				args = append(args, batchArgs...)
-				whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
-			}
-		}
-	}
-	if len(filter.Labels) > 0 {
-		for _, label := range filter.Labels {
-			whereClauses = append(whereClauses, "id IN (SELECT issue_id FROM labels WHERE label = ?)")
-			args = append(args, label)
-		}
-	}
-	// Parent filtering: filter to children of specified parent (GH#2009)
-	// Explicit parent-child dependency takes precedence over dotted-ID prefix.
-	if filter.ParentID != nil {
-		parentID := *filter.ParentID
-		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))")
-		args = append(args, parentID, parentID)
-	}
-
-	// Molecule filtering: filter to direct children of the specified molecule.
-	if filter.MoleculeID != "" {
-		whereClauses = append(whereClauses, "(id IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child' AND depends_on_id = ?) OR (id LIKE CONCAT(?, '.%') AND id NOT IN (SELECT issue_id FROM dependencies WHERE type = 'parent-child')))")
-		args = append(args, filter.MoleculeID, filter.MoleculeID)
-	}
-
-	// Metadata existence check (GH#1406)
-	if filter.HasMetadataKey != "" {
-		if err := storage.ValidateMetadataKey(filter.HasMetadataKey); err != nil {
-			return nil, err
-		}
-		whereClauses = append(whereClauses, "JSON_EXTRACT(metadata, ?) IS NOT NULL")
-		args = append(args, storage.JSONMetadataPath(filter.HasMetadataKey))
-	}
-
-	// Metadata field equality filters (GH#1406)
-	if len(filter.MetadataFields) > 0 {
-		metaKeys := make([]string, 0, len(filter.MetadataFields))
-		for k := range filter.MetadataFields {
-			metaKeys = append(metaKeys, k)
-		}
-		sort.Strings(metaKeys)
-		for _, k := range metaKeys {
-			if err := storage.ValidateMetadataKey(k); err != nil {
-				return nil, err
-			}
-			whereClauses = append(whereClauses, "JSON_UNQUOTE(JSON_EXTRACT(metadata, ?)) = ?")
-			args = append(args, storage.JSONMetadataPath(k), filter.MetadataFields[k])
-		}
-	}
-
-	// Exclude blocked issues: pre-compute blocked set using separate single-table
-	// queries to avoid Dolt's joinIter panic (join_iters.go:192).
-	// Correlated EXISTS/NOT EXISTS subqueries across tables trigger the same panic.
-	// Skip wisp table scanning when ephemeral items aren't requested — no cross-table
-	// blocking deps exist, and skipping 16K+ wisps avoids query timeouts.
-	blockedIDs, err := s.computeBlockedIDs(ctx, filter.IncludeEphemeral)
-	if err == nil && len(blockedIDs) > 0 {
-		// Also exclude children of blocked parents (GH#1495):
-		// If a parent/epic is blocked, its children should not appear as ready work.
-		childrenOfBlocked, childErr := s.getChildrenOfIssues(ctx, blockedIDs)
-		if childErr == nil {
-			for _, childID := range childrenOfBlocked {
-				blockedIDs = append(blockedIDs, childID)
-			}
-		}
-
-		// Batch the NOT IN clause to avoid oversized queries (GH#2179).
-		for start := 0; start < len(blockedIDs); start += queryBatchSize {
-			end := start + queryBatchSize
-			if end > len(blockedIDs) {
-				end = len(blockedIDs)
-			}
-			batch := blockedIDs[start:end]
-			placeholders, batchArgs := doltBuildSQLInClause(batch)
-			args = append(args, batchArgs...)
-			whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
-		}
-	}
-
-	whereSQL := "WHERE " + strings.Join(whereClauses, " AND ")
-
-	limitSQL := ""
-	if filter.Limit > 0 {
-		limitSQL = fmt.Sprintf(" LIMIT %d", filter.Limit)
-	}
-
-	// Build ORDER BY clause based on SortPolicy
-	var orderBySQL string
-	switch filter.SortPolicy {
-	case types.SortPolicyOldest:
-		orderBySQL = "ORDER BY created_at ASC, id ASC"
-	case types.SortPolicyPriority:
-		orderBySQL = "ORDER BY priority ASC, created_at DESC, id ASC"
-	case types.SortPolicyHybrid, "": // hybrid is the default
-		// Recent issues (created within 48 hours) are sorted by priority;
-		// older issues are sorted by age (oldest first) to prevent starvation.
-		orderBySQL = `ORDER BY
-			CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 48 HOUR) THEN 0 ELSE 1 END ASC,
-			CASE WHEN created_at >= DATE_SUB(NOW(), INTERVAL 48 HOUR) THEN priority ELSE 999 END ASC,
-			created_at ASC, id ASC`
-	default:
-		orderBySQL = "ORDER BY priority ASC, created_at DESC, id ASC"
-	}
-
-	// nolint:gosec // G201: whereSQL contains column comparisons with ?, limitSQL is a safe integer
-	query := fmt.Sprintf(`
-		SELECT id FROM issues
-		%s
-		%s
-		%s
-	`, whereSQL, orderBySQL, limitSQL)
-
-	rows, err := s.queryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get ready work: %w", err)
-	}
-	defer rows.Close()
-
-	issues, err := s.scanIssueIDs(ctx, rows)
-	if err != nil {
-		return nil, err
-	}
-
-	// When IncludeEphemeral is set, also query the wisps table for ready work.
-	if filter.IncludeEphemeral {
-		wispFilter := types.IssueFilter{Limit: filter.Limit}
-		if filter.Status != "" {
-			s := filter.Status
-			wispFilter.Status = &s
-		}
-		wisps, wErr := s.searchWisps(ctx, "", wispFilter)
-		if wErr != nil && !isTableNotExistError(wErr) {
-			return nil, fmt.Errorf("search wisps (ready work): %w", wErr)
-		}
-		issues = append(issues, wisps...)
-	}
-
-	return issues, nil
+// SearchIssueIDs is the narrow-projection variant of SearchIssues; returns
+// only matching IDs.
+func (s *DoltStore) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	var result []string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchIssueIDsInTx(ctx, tx, query, filter)
+		return err
+	})
+	return result, err
 }
 
-// GetBlockedIssues returns issues that are blocked by other issues.
-// Uses separate single-table queries with Go-level filtering to avoid
-// correlated EXISTS subqueries that trigger Dolt's joinIter panic
-// (slice bounds out of range at join_iters.go:192).
-// Same fix pattern as GetStatistics blocked count (fc16065c, a4a21958).
+func (s *DoltStore) SearchIssuesWithCounts(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueWithCounts, error) {
+	var result []*types.IssueWithCounts
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.SearchIssuesWithCountsInTx(ctx, tx, query, filter)
+		return err
+	})
+	return result, err
+}
+
+func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
+	var result []*types.Issue
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetReadyWorkInTx(ctx, tx, filter)
+		return err
+	})
+	return result, err
+}
+
+func (s *DoltStore) GetReadyWorkWithCounts(ctx context.Context, filter types.WorkFilter) ([]*types.IssueWithCounts, error) {
+	var result []*types.IssueWithCounts
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetReadyWorkWithCountsInTx(ctx, tx, filter)
+		return err
+	})
+	return result, err
+}
+
+// CountReadyWork returns the total ready-work count for filter. It is identical
+// to len(GetReadyWorkWithCounts(filter with Limit=0)) but sizes the total with
+// cheap indexed COUNT(*)s instead of re-running the counts mega-query. Backs the
+// storage.ReadyWorkCounter capability.
+func (s *DoltStore) CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error) {
+	var n int
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		n, err = issueops.CountReadyWorkInTx(ctx, tx, filter)
+		return err
+	})
+	return n, err
+}
+
 func (s *DoltStore) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	var result []*types.BlockedIssue
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
@@ -295,88 +120,39 @@ func (s *DoltStore) GetStatistics(ctx context.Context) (*types.Statistics, error
 		return nil, fmt.Errorf("failed to get statistics: %w", err)
 	}
 
-	// Blocked count: reuse computeBlockedIDs which caches the result across
-	// GetReadyWork and GetStatistics calls within the same CLI invocation.
 	var blockedCount int
-	blockedIDs, err := s.computeBlockedIDs(ctx, true)
-	if err == nil {
-		blockedCount = len(blockedIDs)
+	if err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM issues
+			WHERE is_blocked = 1 AND status <> 'closed' AND status <> 'pinned'
+		`).Scan(&blockedCount)
+	}); err != nil {
+		return nil, fmt.Errorf("failed to count blocked issues: %w", err)
 	}
-	stats.BlockedIssues = blockedCount
+	stats.BlockedIssues = &blockedCount
 
-	// Ready count: compute without using the ready_issues view to avoid
-	// recursive CTE join that triggers the same Dolt panic.
-	// Ready = open, non-ephemeral, not blocked (directly or transitively).
-	stats.ReadyIssues = stats.OpenIssues - blockedCount
-	if stats.ReadyIssues < 0 {
-		stats.ReadyIssues = 0
+	ready := stats.OpenIssues - blockedCount
+	if ready < 0 {
+		ready = 0
 	}
+	stats.ReadyIssues = &ready
 
 	return stats, nil
 }
 
-// computeBlockedIDs returns the set of issue IDs that are blocked by active issues.
-// Uses separate single-table queries with Go-level filtering to avoid Dolt's
-// joinIter panic (slice bounds out of range at join_iters.go:192).
-// Results are cached per DoltStore lifetime and invalidated when dependencies
-// change (AddDependency, RemoveDependency).
-//
-// When includeWisps is false, only the issues/dependencies tables are scanned,
-// skipping the wisps/wisp_dependencies tables. This is safe when the caller only
-// needs blocked status for non-ephemeral issues (no cross-table blocking deps exist).
-// A cached result from includeWisps=true satisfies includeWisps=false requests.
-//
-// Caller must hold s.mu (at least RLock).
-func (s *DoltStore) computeBlockedIDs(ctx context.Context, includeWisps bool) ([]string, error) {
-	s.cacheMu.Lock()
-	// Cache hit: return if cached result covers the requested scope.
-	// A full (wisps-included) cache satisfies both modes.
-	if s.blockedIDsCached && (s.blockedIDsCacheIncludesWisps || !includeWisps) {
-		result := s.blockedIDsCache
-		s.cacheMu.Unlock()
-		return result, nil
-	}
-	s.cacheMu.Unlock()
-
-	var result []string
-	var blockedSet map[string]bool
+// GetStatisticsNoBlocked returns aggregate counts without the blocked-set traversal.
+// BlockedIssues and ReadyIssues are nil in the result (readiness needs the blocked
+// set). Use for bd stats --no-blocked fast path.
+func (s *DoltStore) GetStatisticsNoBlocked(ctx context.Context) (*types.Statistics, error) {
+	stats := &types.Statistics{}
 	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
-		var activeIDs map[string]bool
-		var err error
-		result, activeIDs, err = issueops.ComputeBlockedIDsInTx(ctx, tx, includeWisps)
-		if err != nil {
-			return err
-		}
-		blockedSet = make(map[string]bool, len(result))
-		for _, id := range result {
-			blockedSet[id] = true
-		}
-		_ = activeIDs // activeIDs not needed for cache
-		return nil
+		return issueops.ScanIssueCountsInTx(ctx, tx, stats)
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get statistics: %w", err)
 	}
-
-	s.cacheMu.Lock()
-	s.blockedIDsCache = result
-	s.blockedIDsCacheMap = blockedSet
-	s.blockedIDsCached = true
-	s.blockedIDsCacheIncludesWisps = includeWisps
-	s.cacheMu.Unlock()
-
-	return result, nil
-}
-
-// invalidateBlockedIDsCache clears the blocked IDs cache so the next call
-// to computeBlockedIDs will recompute from the database.
-func (s *DoltStore) invalidateBlockedIDsCache() {
-	s.cacheMu.Lock()
-	s.blockedIDsCached = false
-	s.blockedIDsCache = nil
-	s.blockedIDsCacheMap = nil
-	s.blockedIDsCacheIncludesWisps = false
-	s.cacheMu.Unlock()
+	// BlockedIssues stays nil; ReadyIssues not computable without blocked set.
+	return stats, nil
 }
 
 // getChildrenOfDeferredParents returns IDs of issues whose parent has a future
@@ -436,6 +212,16 @@ func (s *DoltStore) getChildrenWithParents(ctx context.Context, parentIDs []stri
 	return result, err
 }
 
+func (s *DoltStore) getDescendantIDs(ctx context.Context, rootID string) ([]string, error) {
+	var result []string
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDescendantIDsInTx(ctx, tx, rootID, 0)
+		return err
+	})
+	return result, err
+}
+
 // GetMoleculeProgress returns progress stats for a molecule
 func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) (*types.MoleculeProgressStats, error) {
 	stats := &types.MoleculeProgressStats{
@@ -445,9 +231,11 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 	// Route to correct table based on whether molecule is a wisp (bd-w2w)
 	issueTable := "issues"
 	depTable := "dependencies"
+	parentCol := "depends_on_issue_id"
 	if s.isActiveWisp(ctx, moleculeID) {
 		issueTable = "wisps"
 		depTable = "wisp_dependencies"
+		parentCol = "depends_on_wisp_id"
 	}
 
 	// Get molecule title
@@ -458,15 +246,12 @@ func (s *DoltStore) GetMoleculeProgress(ctx context.Context, moleculeID string) 
 		stats.MoleculeTitle = title.String
 	}
 
-	// Use separate single-table queries to avoid Dolt's joinIter panic
-	// (join_iters.go:192) which triggers on JOIN between issues and dependencies.
-
 	// Step 1: Get child issue IDs from dependencies table (single-table scan)
-	//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
+	//nolint:gosec // G201: depTable and parentCol are hardcoded
 	depRows, err := s.queryContext(ctx, fmt.Sprintf(`
 		SELECT issue_id FROM %s
-		WHERE depends_on_id = ? AND type = 'parent-child'
-	`, depTable), moleculeID)
+		WHERE %s = ? AND type = 'parent-child'
+	`, depTable, parentCol), moleculeID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get molecule children: %w", err)
 	}

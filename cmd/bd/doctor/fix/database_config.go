@@ -3,7 +3,6 @@ package fix
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -14,11 +13,10 @@ import (
 // the configured database name. Dolt backends store data on a server, so there
 // are no local .db files to reconcile.
 func DatabaseConfig(path string) error {
-	if err := validateBeadsWorkspace(path); err != nil {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
 		return err
 	}
-
-	beadsDir := filepath.Join(path, ".beads")
 
 	// Load existing config
 	cfg, err := configfile.Load(beadsDir)

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	lipgloss "charm.land/lipgloss/v2"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -148,6 +149,29 @@ func TestRenderClosedUtilities(t *testing.T) {
 
 	if got := RenderID("bd-5"); got != IDStyle.Render("bd-5") {
 		t.Fatalf("RenderID mismatch")
+	}
+}
+
+func TestDisableColors(t *testing.T) {
+	// Save and restore mutated globals so other tests are unaffected.
+	savedStyle := AccentStyle
+	savedColor := ColorAccent
+	t.Cleanup(func() {
+		AccentStyle = savedStyle
+		ColorAccent = savedColor
+	})
+
+	// Simulate a color-enabled init: a style carrying an explicit foreground.
+	ColorAccent = lipgloss.Color("#ff0000")
+	AccentStyle = lipgloss.NewStyle().Foreground(ColorAccent)
+
+	DisableColors()
+
+	if _, ok := ColorAccent.(lipgloss.NoColor); !ok {
+		t.Errorf("ColorAccent not reset to NoColor, got %T", ColorAccent)
+	}
+	if out := AccentStyle.Render("hello"); strings.ContainsRune(out, '\x1b') {
+		t.Errorf("AccentStyle still emits ANSI escape after DisableColors: %q", out)
 	}
 }
 

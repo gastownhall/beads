@@ -2,9 +2,28 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+
+	"github.com/steveyegge/beads/internal/metrics"
 )
+
+type exitError struct {
+	Code int
+}
+
+func (e *exitError) Error() string {
+	return fmt.Sprintf("exit code %d", e.Code)
+}
+
+func exitCodeFromError(err error) (int, bool) {
+	var ee *exitError
+	if errors.As(err, &ee) {
+		return ee.Code, true
+	}
+	return 0, false
+}
 
 func activeWorkspaceNotFoundError() string {
 	return "no active beads workspace found"
@@ -14,9 +33,6 @@ func activeWorkspaceNotFoundMessage() string {
 	return "No active beads workspace found."
 }
 
-// diagHint returns the appropriate diagnostic hint when the active beads
-// workspace cannot be resolved. In embedded mode, 'bd doctor' is not
-// available so the hint omits it.
 func diagHint() string {
 	return workspaceDiagHint(true)
 }
@@ -27,123 +43,97 @@ func whereDiagHint() string {
 
 func workspaceDiagHint(includeWhere bool) string {
 	if includeWhere {
-		if isEmbeddedMode() {
+		if !usesSQLServer() {
 			return "run 'bd where' to inspect the resolved workspace, or 'bd init' to create a new database"
 		}
 		return "run 'bd where' to inspect the resolved workspace, run 'bd doctor' to diagnose, or 'bd init' to create a new database"
 	}
-	if isEmbeddedMode() {
+	if !usesSQLServer() {
 		return "check BEADS_DIR/worktree setup, or run 'bd init' to create a new database"
 	}
 	return "check BEADS_DIR/worktree setup, run 'bd doctor' to diagnose, or run 'bd init' to create a new database"
 }
 
-// FatalError writes an error message to stderr and exits with code 1.
-// Use this for fatal errors that prevent the command from completing.
-//
-// Pattern A from ERROR_HANDLING.md:
-// - User input validation failures
-// - Critical preconditions not met
-// - Unrecoverable system errors
-//
-// Example:
-//
-//	if err := store.CreateIssue(ctx, issue, actor); err != nil {
-//	    FatalError("%v", err)
-//	}
-func FatalError(format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	if jsonOutput {
-		data, _ := json.MarshalIndent(map[string]string{"error": msg}, "", "  ")
-		fmt.Fprintln(os.Stderr, string(data))
-	} else {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
+func buildJSONError(message, hint string) interface{} {
+	inner := map[string]interface{}{
+		"error": message,
 	}
-	os.Exit(1)
+	if hint != "" {
+		inner["hint"] = hint
+	}
+	if jsonEnvelopeEnabled() {
+		return map[string]interface{}{
+			"schema_version": JSONSchemaVersion,
+			"data":           inner,
+		}
+	}
+	inner["schema_version"] = JSONSchemaVersion
+	return inner
 }
 
-// FatalErrorRespectJSON writes an error message and exits with code 1.
-// If --json flag is set, outputs structured JSON to stdout.
-// Otherwise, outputs plain text to stderr.
-//
-// Use this for errors in commands that support --json output.
-//
-// Example:
-//
-//	if err := store.GetIssue(ctx, id); err != nil {
-//	    FatalErrorRespectJSON("%v", err)
-//	}
-func FatalErrorRespectJSON(format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	if jsonOutput {
-		data, _ := json.MarshalIndent(map[string]string{"error": msg}, "", "  ") // json.MarshalIndent on simple maps does not fail in practice
-		fmt.Println(string(data))
-	} else {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", msg)
-	}
-	os.Exit(1)
+func jsonStderrError(message, hint string) {
+	encoder := json.NewEncoder(os.Stderr)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(buildJSONError(message, hint))
 }
 
-// FatalErrorWithHintRespectJSON writes an error message with a hint and exits.
-// If --json is set, emits structured JSON to stdout so callers can parse it.
-func FatalErrorWithHintRespectJSON(message, hint string) {
-	if jsonOutput {
-		outputJSON(map[string]string{"error": message, "hint": hint})
-	} else {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", message)
-		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
-	}
-	os.Exit(1)
+func jsonStdoutError(message, hint string) {
+	encoder := json.NewEncoder(os.Stdout)
+	encoder.SetIndent("", "  ")
+	_ = encoder.Encode(buildJSONError(message, hint))
 }
 
-// FatalErrorWithHint writes an error message with a hint to stderr and exits.
-// Use this when you can provide an actionable suggestion to fix the error.
-//
-// Example:
-//
-//	FatalErrorWithHint("database not found", "Run 'bd init' to create a database")
-func FatalErrorWithHint(message, hint string) {
+func HandleError(format string, args ...interface{}) error {
+	fmt.Fprintf(os.Stderr, "Error: "+format+"\n", args...)
+	return &exitError{Code: 1}
+}
+
+func HandleErrorRespectJSON(format string, args ...interface{}) error {
 	if jsonOutput {
-		data, _ := json.MarshalIndent(map[string]string{"error": message, "hint": hint}, "", "  ")
-		fmt.Fprintln(os.Stderr, string(data))
+		jsonStdoutError(fmt.Sprintf(format, args...), "")
+		return &exitError{Code: 1}
+	}
+	return HandleError(format, args...)
+}
+
+func HandleErrorWithHint(message, hint string) error {
+	if jsonOutput {
+		jsonStderrError(message, hint)
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", message) //nolint:gosec // G705: stderr, not a browser context
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)     //nolint:gosec // G705: stderr, not a browser context
+	}
+	return &exitError{Code: 1}
+}
+
+func HandleErrorWithHintRespectJSON(message, hint string) error {
+	if jsonOutput {
+		jsonStdoutError(message, hint)
 	} else {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", message)
 		fmt.Fprintf(os.Stderr, "Hint: %s\n", hint)
 	}
-	os.Exit(1)
+	return &exitError{Code: 1}
 }
 
-// WarnError writes a warning message to stderr and returns.
-// Use this for optional operations that enhance functionality but aren't required.
-//
-// Pattern B from ERROR_HANDLING.md:
-// - Metadata operations
-// - Cleanup operations
-// - Auxiliary features (git hooks, merge drivers)
-//
-// Example:
-//
-//	if err := createConfigYaml(beadsDir, false); err != nil {
-//	    WarnError("failed to create config.yaml: %v", err)
-//	}
+func SilentExit() error {
+	return &exitError{Code: 1}
+}
+
 func WarnError(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "Warning: "+format+"\n", args...)
 }
 
-// CheckReadonly exits with an error if readonly mode is enabled.
-// Call this at the start of write commands (create, update, close, delete, sync, etc.).
-// Used by worker sandboxes that should only read beads, not modify them.
-//
-// Example:
-//
-//	var createCmd = &cobra.Command{
-//	    Run: func(cmd *cobra.Command, args []string) {
-//	        CheckReadonly("create")
-//	        // ... rest of command
-//	    },
-//	}
+// CheckReadonly aborts the command when bd is running in read-only mode (the
+// worker-sandbox posture, see readonlyMode). It exits via os.Exit and so cannot
+// run the per-command deferred CloseEventAndAdd — a command blocked here records
+// no cli_command event of its own (it never actually ran). It does flush metrics
+// first, so events already queued earlier in this run are still written and
+// scheduled for upload rather than stranded until the next clean exit.
 func CheckReadonly(operation string) {
 	if readonlyMode {
-		FatalError("operation '%s' is not allowed in read-only mode", operation)
+		fmt.Fprintf(os.Stderr, "Error: operation '%s' is not allowed in read-only mode\n", operation)
+		metrics.CloseAndFlush()
+		os.Exit(1)
 	}
 }

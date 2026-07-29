@@ -84,12 +84,11 @@ func TestValidateBeadsWorkspace_EdgeCases(t *testing.T) {
 		}
 
 		err := validateBeadsWorkspace(dir)
-		// NOTE: Current implementation only checks if .beads exists via os.Stat,
-		// but doesn't verify it's a directory. This test documents current behavior.
-		// A future improvement could add IsDir() check.
 		if err == nil {
-			// Currently passes - implementation doesn't validate it's a directory
-			t.Log(".beads exists as file - validation passes (edge case)")
+			t.Fatal("expected error when .beads is a file")
+		}
+		if got := err.Error(); got != "not a beads workspace: .beads directory not found for "+dir {
+			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 
@@ -128,11 +127,11 @@ func TestValidateBeadsWorkspace_EdgeCases(t *testing.T) {
 		}
 
 		err := validateBeadsWorkspace(dir)
-		// NOTE: os.Stat follows symlinks, so if symlink points to a file,
-		// it just sees the file exists and returns no error.
-		// Current implementation doesn't verify it's a directory.
 		if err == nil {
-			t.Log(".beads symlink to file - validation passes (edge case)")
+			t.Fatal("expected error when .beads symlink points to a file")
+		}
+		if got := err.Error(); got != "not a beads workspace: .beads directory not found for "+dir {
+			t.Fatalf("unexpected error: %v", err)
 		}
 	})
 
@@ -170,6 +169,21 @@ func TestValidateBeadsWorkspace_EdgeCases(t *testing.T) {
 		relPath := filepath.Base(dir)
 		if err := validateBeadsWorkspace(relPath); err != nil {
 			t.Errorf("expected relative path to be valid, got: %v", err)
+		}
+	})
+
+	t.Run("shared worktree fallback", func(t *testing.T) {
+		mainRepoDir, worktreeDir := setupSharedWorktreeWorkspace(t)
+		mainBeadsDir := filepath.Join(mainRepoDir, ".beads")
+		if err := os.MkdirAll(mainBeadsDir, 0o755); err != nil {
+			t.Fatalf("failed to create main .beads dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(mainBeadsDir, "config.yaml"), []byte("json: true\n"), 0o644); err != nil {
+			t.Fatalf("failed to write config.yaml: %v", err)
+		}
+
+		if err := validateBeadsWorkspace(worktreeDir); err != nil {
+			t.Errorf("expected shared-worktree workspace to be valid, got: %v", err)
 		}
 	})
 }

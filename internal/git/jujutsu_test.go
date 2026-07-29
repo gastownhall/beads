@@ -6,6 +6,28 @@ import (
 	"testing"
 )
 
+// makeJJPrimaryWorkspace creates a minimal jj primary workspace directory.
+// The primary workspace has .jj/repo as a directory (not a file).
+func makeJJPrimaryWorkspace(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".jj", "repo"), 0750); err != nil {
+		t.Fatalf("failed to create primary .jj/repo directory: %v", err)
+	}
+}
+
+// makeJJSecondaryWorkspace creates a minimal jj secondary workspace directory.
+// The secondary workspace has .jj/repo as a file pointing to the primary's .jj/repo.
+// repoTarget is the path to write into the .jj/repo file (relative or absolute).
+func makeJJSecondaryWorkspace(t *testing.T, dir, repoTarget string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".jj"), 0750); err != nil {
+		t.Fatalf("failed to create secondary .jj directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".jj", "repo"), []byte(repoTarget+"\n"), 0640); err != nil {
+		t.Fatalf("failed to write .jj/repo file: %v", err)
+	}
+}
+
 func TestIsJujutsuRepo(t *testing.T) {
 	// Save original directory
 	origDir, err := os.Getwd()
@@ -19,9 +41,7 @@ func TestIsJujutsuRepo(t *testing.T) {
 
 	t.Run("not a jj repo", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to chdir: %v", err)
-		}
+		t.Chdir(tmpDir)
 		ResetCaches()
 
 		if IsJujutsuRepo() {
@@ -36,9 +56,7 @@ func TestIsJujutsuRepo(t *testing.T) {
 			t.Fatalf("Failed to create .jj directory: %v", err)
 		}
 
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to chdir: %v", err)
-		}
+		t.Chdir(tmpDir)
 		ResetCaches()
 
 		if !IsJujutsuRepo() {
@@ -57,9 +75,7 @@ func TestIsJujutsuRepo(t *testing.T) {
 			t.Fatalf("Failed to create subdirectory: %v", err)
 		}
 
-		if err := os.Chdir(subDir); err != nil {
-			t.Fatalf("Failed to chdir: %v", err)
-		}
+		t.Chdir(subDir)
 		ResetCaches()
 
 		if !IsJujutsuRepo() {
@@ -86,9 +102,7 @@ func TestIsColocatedJJGit(t *testing.T) {
 			t.Fatalf("Failed to create .jj directory: %v", err)
 		}
 
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to chdir: %v", err)
-		}
+		t.Chdir(tmpDir)
 		ResetCaches()
 
 		if IsColocatedJJGit() {
@@ -98,9 +112,7 @@ func TestIsColocatedJJGit(t *testing.T) {
 
 	t.Run("not a repo", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to chdir: %v", err)
-		}
+		t.Chdir(tmpDir)
 		ResetCaches()
 
 		if IsColocatedJJGit() {
@@ -122,9 +134,7 @@ func TestGetJujutsuRoot(t *testing.T) {
 
 	t.Run("not a jj repo", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to chdir: %v", err)
-		}
+		t.Chdir(tmpDir)
 		ResetCaches()
 
 		_, err := GetJujutsuRoot()
@@ -143,9 +153,7 @@ func TestGetJujutsuRoot(t *testing.T) {
 			t.Fatalf("Failed to create .jj directory: %v", err)
 		}
 
-		if err := os.Chdir(tmpDir); err != nil {
-			t.Fatalf("Failed to chdir: %v", err)
-		}
+		t.Chdir(tmpDir)
 		ResetCaches()
 
 		root, err := GetJujutsuRoot()
@@ -171,9 +179,7 @@ func TestGetJujutsuRoot(t *testing.T) {
 			t.Fatalf("Failed to create subdirectory: %v", err)
 		}
 
-		if err := os.Chdir(subDir); err != nil {
-			t.Fatalf("Failed to chdir: %v", err)
-		}
+		t.Chdir(subDir)
 		ResetCaches()
 
 		root, err := GetJujutsuRoot()
@@ -235,4 +241,124 @@ func TestGetJujutsuRootStopsAtGitBoundary(t *testing.T) {
 	if err == nil {
 		t.Errorf("Expected error: .git boundary should prevent walking to parent .jj, but got root: %q", root)
 	}
+}
+
+func TestIsJJSecondaryWorkspace(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current directory: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origDir)
+		ResetCaches()
+	}()
+
+	t.Run("primary workspace (repo is directory)", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+		makeJJPrimaryWorkspace(t, tmpDir)
+
+		t.Chdir(tmpDir)
+		ResetCaches()
+
+		if IsJJSecondaryWorkspace() {
+			t.Error("Expected IsJJSecondaryWorkspace() = false for primary workspace")
+		}
+	})
+
+	t.Run("secondary workspace (repo is file)", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+		primaryDir := filepath.Join(tmpDir, "primary")
+		secondaryDir := filepath.Join(tmpDir, "secondary")
+		makeJJPrimaryWorkspace(t, primaryDir)
+		makeJJSecondaryWorkspace(t, secondaryDir, filepath.Join(primaryDir, ".jj", "repo"))
+
+		t.Chdir(secondaryDir)
+		ResetCaches()
+
+		if !IsJJSecondaryWorkspace() {
+			t.Error("Expected IsJJSecondaryWorkspace() = true for secondary workspace")
+		}
+	})
+
+	t.Run("not a jj repo", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Chdir(tmpDir)
+		ResetCaches()
+
+		if IsJJSecondaryWorkspace() {
+			t.Error("Expected IsJJSecondaryWorkspace() = false for non-jj directory")
+		}
+	})
+}
+
+func TestGetJJPrimaryWorkspaceRoot(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Failed to get current directory: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(origDir)
+		ResetCaches()
+	}()
+
+	t.Run("secondary workspace with absolute path in repo file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+		primaryDir := filepath.Join(tmpDir, "primary")
+		secondaryDir := filepath.Join(tmpDir, "secondary")
+		makeJJPrimaryWorkspace(t, primaryDir)
+		// Write absolute path to primary's .jj/repo
+		makeJJSecondaryWorkspace(t, secondaryDir, filepath.Join(primaryDir, ".jj", "repo"))
+
+		t.Chdir(secondaryDir)
+		ResetCaches()
+
+		got, err := GetJJPrimaryWorkspaceRoot()
+		if err != nil {
+			t.Fatalf("GetJJPrimaryWorkspaceRoot() returned error: %v", err)
+		}
+		if got != primaryDir {
+			t.Errorf("Expected primary root %q, got %q", primaryDir, got)
+		}
+	})
+
+	t.Run("secondary workspace with relative path in repo file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+		primaryDir := filepath.Join(tmpDir, "primary")
+		secondaryDir := filepath.Join(tmpDir, "secondary")
+		makeJJPrimaryWorkspace(t, primaryDir)
+		// Write relative path: from secondary/.jj/ to primary/.jj/repo
+		// secondary/.jj/ -> ../../primary/.jj/repo
+		makeJJSecondaryWorkspace(t, secondaryDir, "../../primary/.jj/repo")
+
+		t.Chdir(secondaryDir)
+		ResetCaches()
+
+		got, err := GetJJPrimaryWorkspaceRoot()
+		if err != nil {
+			t.Fatalf("GetJJPrimaryWorkspaceRoot() returned error: %v", err)
+		}
+		if got != primaryDir {
+			t.Errorf("Expected primary root %q, got %q", primaryDir, got)
+		}
+	})
+
+	t.Run("primary workspace returns error", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+		makeJJPrimaryWorkspace(t, tmpDir)
+
+		t.Chdir(tmpDir)
+		ResetCaches()
+
+		// GetJJPrimaryWorkspaceRoot reads .jj/repo as a file; in a primary workspace
+		// .jj/repo is a directory, so ReadFile should fail.
+		_, err := GetJJPrimaryWorkspaceRoot()
+		if err == nil {
+			t.Error("Expected error from GetJJPrimaryWorkspaceRoot() in primary workspace")
+		}
+	})
 }

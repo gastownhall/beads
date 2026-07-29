@@ -46,8 +46,8 @@ func TestReadonlyModeBlocksWrites(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.operation, func(t *testing.T) {
-			// CheckReadonly calls FatalError which calls os.Exit
-			// We can't test that directly, but we can verify the logic
+			// CheckReadonly calls os.Exit when readonly, which we can't test
+			// directly, but we can verify the logic
 			if !readonlyMode {
 				t.Error("readonly mode should be enabled")
 			}
@@ -83,9 +83,9 @@ func TestCheckReadonlyReturnsEarlyWhenDisabled(t *testing.T) {
 	// Disable readonly mode
 	readonlyMode = false
 
-	// Capture that CheckReadonly doesn't call FatalError
-	// Since FatalError calls os.Exit, we verify by ensuring we don't panic/exit
-	// The function should just return early
+	// Capture that CheckReadonly doesn't exit when readonly mode is disabled.
+	// Since CheckReadonly calls os.Exit when enabled, we verify by ensuring we
+	// don't panic/exit; the function should just return early
 
 	// This test passes if it completes without calling os.Exit
 	// Since we can't easily mock os.Exit, we just verify the logic
@@ -130,7 +130,7 @@ func TestCheckReadonlyErrorMessage(t *testing.T) {
 	// The error message should mention the operation and readonly mode
 	expectedSubstrings := []string{"operation", "is not allowed", "read-only mode"}
 
-	// We can't easily test FatalError output, but we can verify the format
+	// We can't easily test the os.Exit output, but we can verify the format
 	// by checking what error message CheckReadonly would produce
 	operation := "test-operation"
 	expectedMsg := "operation 'test-operation' is not allowed in read-only mode"

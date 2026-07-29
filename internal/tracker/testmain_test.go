@@ -1,3 +1,5 @@
+//go:build cgo
+
 package tracker
 
 import (
@@ -26,6 +28,8 @@ func TestMain(m *testing.M) {
 
 func testMainInner(m *testing.M) int {
 	os.Setenv("BEADS_TEST_MODE", "1")
+	// AD-01 (be-c5p): allow tracker tests to connect to the test container.
+	os.Setenv("BEADS_TEST_SERVER", "1")
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
@@ -82,6 +86,9 @@ func initTrackerSharedSchema(port int) error {
 	}
 	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('--allow-empty', '-m', 'test: init shared schema')"); err != nil {
 		return fmt.Errorf("DOLT_COMMIT: %w", err)
+	}
+	if err := testutil.MaterializeLocalTableSchemasForBranchTests(ctx, db); err != nil {
+		return fmt.Errorf("materialize local table schemas: %w", err)
 	}
 
 	return nil

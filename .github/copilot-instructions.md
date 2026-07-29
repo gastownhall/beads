@@ -37,6 +37,11 @@
 ### Git Workflow
 - Install git hooks: `bd hooks install`
 - Use `bd dolt push` / `bd dolt pull` for remote sync
+- Before implementing related work, opening a PR, or merging/closing a PR, run:
+  `scripts/pr-preflight.sh --search "<topic>" --repo gastownhall/beads` or
+  `scripts/pr-preflight.sh <pr-number> --repo gastownhall/beads`
+- External contributor PRs have priority: build on them when possible, preserve
+  tests and attribution, and never close or replace them silently.
 
 ## Issue Tracking with bd
 
