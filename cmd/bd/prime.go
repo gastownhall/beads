@@ -350,17 +350,16 @@ var primeHasGitRemote = func() bool {
 }
 
 // gitCWDHasRemote reports whether the process CWD git repo has any remote.
-// Exported behavior for tests via the pure helper (no BEADS_DIR coupling).
+// Delegates to gitDirHasRemote so the production path and the test-driven
+// path share one implementation (no BEADS_DIR coupling).
 func gitCWDHasRemote() bool {
-	cmd := exec.Command("git", "remote")
-	out, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-	return len(strings.TrimSpace(string(out))) > 0
+	return gitDirHasRemote("")
 }
 
-// gitDirHasRemote is like gitCWDHasRemote but for an explicit working tree path.
+// gitDirHasRemote reports whether the git repo at dir has any remote
+// configured. dir == "" runs git in the process's current working directory
+// (this is what gitCWDHasRemote uses); a non-empty dir lets tests probe an
+// explicit fixture repo without chdir-ing the whole process.
 func gitDirHasRemote(dir string) bool {
 	cmd := exec.Command("git", "remote")
 	cmd.Dir = dir
