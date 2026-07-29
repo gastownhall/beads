@@ -677,9 +677,9 @@ func testCreateIssuesWithFullOptions(t *testing.T, f Factory) {
 
 // Batch-creating dotted hierarchical child IDs runs ReconcileChildCounters, which
 // emits `... ON DUPLICATE KEY UPDATE last_child = GREATEST(last_child, ?)` in the
-// child-counter upsert (issueops/create.go). That GREATEST path is reachable only
-// from batch create — the single-issue path never reconciles counters — so it was
-// dead in the rest of the suite, which is how a missing SQLite GREATEST translation
+// child-counter upsert (issueops/create.go). Both the batch and single-issue create
+// paths reach that GREATEST upsert (GH#4750), but this suite historically only
+// exercised it via batch create, which is how a missing SQLite GREATEST translation
 // (child creation aborted with "no such function: GREATEST") shipped green. This
 // scenario mints x-1, x-1.1, x-1.2 through the batch path and asserts every backend
 // both creates the children and reconciles the counter to the max direct child.

@@ -22,6 +22,15 @@ type BatchContext struct {
 	ConfigPrefix    string
 	AllowedPrefixes string
 	Opts            storage.BatchCreateOptions
+	// SkipChildCounterReconcile tells CreateIssueInTxWithResult to skip its
+	// per-issue ReconcileChildCounters call. CreateIssuesInTxWithResult sets
+	// this because it already runs one slice-wide ReconcileChildCounters over
+	// the whole accepted batch after the per-issue loop, which covers every
+	// issue the per-issue call would have handled; running it again per issue
+	// during a batch import was 3-4 redundant round trips per hierarchical
+	// issue for a result the caller discards. Singular creates leave this
+	// false so they keep reconciling immediately, per-issue.
+	SkipChildCounterReconcile bool
 }
 
 // NewBatchContext reads config from the database and returns a BatchContext.
@@ -170,7 +179,7 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 	// ReconcileChildCounters after CreateIssuesInTx; without this, explicit --id
 	// creates leave last_child behind the live suffix high-water mark and the
 	// next bd create --parent can recycle lower suffixes (GH#4750).
-	if isNew {
+	if isNew && !bc.SkipChildCounterReconcile {
 		if _, childNum, ok := ParseHierarchicalID(issue.ID); ok && childNum > 0 {
 			changedCounters, err := ReconcileChildCounters(ctx, tx, []*types.Issue{issue})
 			if err != nil {
@@ -247,6 +256,9 @@ func CreateIssuesInTxWithResult(ctx context.Context, tx DBTX, issues []*types.Is
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}
+	// This function already runs a slice-wide ReconcileChildCounters below,
+	// covering every accepted issue; skip the redundant per-issue reconcile.
+	bc.SkipChildCounterReconcile = true
 
 	result := CreateIssuesResult{}
 	accepted := issues[:0:0]
