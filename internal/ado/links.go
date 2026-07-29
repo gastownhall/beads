@@ -52,7 +52,8 @@ const discoveredFromComment = "beads:discovered-from"
 // Returns the dep type and whether the from/to should be swapped
 // (true for reverse link types that need direction normalization).
 // Hierarchy links use beads storage vocabulary "parent-child" (types.DepParentChild),
-// not the obsolete "parent" alias (GH#4961).
+// not the legacy "parent" type, which was only ever produced by the pre-fix
+// pull path and is stored backwards (GH#4961, PR #5129).
 //
 // beads stores parent-child deps child → parent: IssueID is the child,
 // DependsOnID is the parent (see types.go ready-item parent computation).
@@ -99,7 +100,7 @@ func hasDiscoveredFromAttribute(attributes map[string]interface{}) bool {
 
 // beadsDepToADORel maps a beads dependency type to an ADO relation type.
 // Accepts both "parent-child" (canonical storage type) and the obsolete
-// "parent" alias so older in-memory values still map to hierarchy (GH#4961).
+// The legacy "parent" type is intentionally not mapped here (GH#4961, PR #5129).
 //
 // A parent-child dep's desired set is built from the child's own outgoing
 // dependency row (IssueID=child, DependsOnID=parent — see
@@ -111,7 +112,14 @@ func beadsDepToADORel(depType string) string {
 	switch depType {
 	case "blocks":
 		return RelDependsOn
-	case "parent-child", "parent": // "parent" kept as alias only
+	// The "parent" alias is deliberately NOT accepted here. Rows of that type were
+	// only ever written by the pre-fix pull path, and both old branches stored them
+	// parent -> child — backwards relative to the convention this file now uses. Mapping
+	// them to RelParent would assert the child is the parent's parent and reparent real
+	// hierarchies (maphew, PR #5129). They fall through to RelRelated, i.e. inert, which
+	// is where they have effectively been all along. Retyping and reversing those legacy
+	// rows needs a migration with its own tests, tracked separately.
+	case "parent-child":
 		return RelParent
 	case "related":
 		return RelRelated

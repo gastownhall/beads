@@ -279,7 +279,10 @@ func TestBeadsDepToADORel(t *testing.T) {
 	}{
 		{"blocks", RelDependsOn},
 		{"parent-child", RelParent}, // canonical beads storage type; desired set is built child -> parent (GH#4961)
-		{"parent", RelParent},       // obsolete alias still accepted
+		// Legacy "parent" rows were written parent -> child by the pre-fix pull path,
+		// so mapping them to RelParent would reparent real hierarchies backwards.
+		// They must stay inert until a migration retypes and reverses them (PR #5129).
+		{"parent", RelRelated},
 		{"related", RelRelated},
 		{"discovered-from", RelRelated},
 		{"unknown", RelRelated}, // default
