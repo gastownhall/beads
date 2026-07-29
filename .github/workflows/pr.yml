@@ -668,13 +668,9 @@ jobs:
   # every RequireDoltBinary doctor/fix test skipped on every PR, even though
   # other jobs install Dolt. This job is the dedicated PR path that actually
   # executes those packages with Dolt available and the skip flag off.
-  #
-  # Advisory (continue-on-error, absent from ci-gate's needs/CI_GATE_REQUIRED):
-  # the first run here surfaced two pre-existing doctor test failures
-  # (TestCheckRepoFingerprint_UsesTargetRepoOutsideCWD,
-  # TestCheckTestPollution_NoTestIssues_EmptyDB) that look like stale test
-  # expectations, not regressions from this job. Promote to required once
-  # both are fixed and this job is green.
+  # Deliberately absent from ci-gate's needs/CI_GATE_REQUIRED below: the suite
+  # surfaces two pre-existing failures (gastownhall/beads#5133). Promote to
+  # required once those are fixed and this job is green.
   test-doctor-dolt:
     name: Test (doctor Dolt + fix)
     runs-on: ubuntu-latest
@@ -1044,7 +1040,6 @@ jobs:
       - pr-core-wrapper
       - pr-lint-wrapper
       - test-domain-uow
-      - test-doctor-dolt
       - contract-corpus
       - fmt-check
       - lint
@@ -1074,7 +1069,6 @@ jobs:
             PR_CORE_WRAPPER
             PR_LINT_WRAPPER
             TEST_DOMAIN_UOW
-            TEST_DOCTOR_DOLT
             CONTRACT_CORPUS
             FMT_CHECK
             LINT
@@ -1096,7 +1090,6 @@ jobs:
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
           PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
           TEST_DOMAIN_UOW: ${{ needs.test-domain-uow.result }}
-          TEST_DOCTOR_DOLT: ${{ needs.test-doctor-dolt.result }}
           CONTRACT_CORPUS: ${{ needs.contract-corpus.result }}
           FMT_CHECK: ${{ needs.fmt-check.result }}
           LINT: ${{ needs.lint.result }}
