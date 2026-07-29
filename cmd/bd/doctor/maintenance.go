@@ -128,8 +128,10 @@ func checkStaleClosedIssuesDB(db *sql.DB, thresholdDays int) DoctorCheck {
 	}
 }
 
-// CheckStaleMolecules detects complete-but-unclosed molecules.
-// A molecule is stale if all children are closed but the root is still open.
+// CheckStaleMolecules detects molecules whose children are all closed but
+// whose root issue is still open. Closes on children that redirect or
+// abandon the work (duplicate/wontfix/superseded/…) do not count as
+// completing, so a molecule with such a close is not reported here (GH#5026).
 func CheckStaleMolecules(path string) DoctorCheck {
 	_, beadsDir := getBackendAndBeadsDir(path)
 
