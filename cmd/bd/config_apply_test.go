@@ -1,8 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage"
 )
 
 func TestApplyHooksNoDrift(t *testing.T) {
@@ -124,6 +130,66 @@ func TestApplyServerDryRun(t *testing.T) {
 	// Without beads dir, should skip even in dry-run
 	if result.Status != applyStatusSkipped {
 		t.Errorf("expected status %q, got %q", applyStatusSkipped, result.Status)
+	}
+}
+
+func TestApplyServerSkipsWhenAutoStartDisabled(t *testing.T) {
+	tests := []struct {
+		name         string
+		autoStartEnv string
+		autoStartYML string
+	}{
+		{
+			name:         "environment disables auto-start",
+			autoStartEnv: "0",
+			autoStartYML: "true",
+		},
+		{
+			name:         "workspace config disables auto-start",
+			autoStartEnv: "",
+			autoStartYML: "false",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			beadsDir := filepath.Join(root, ".beads")
+			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+				t.Fatalf("create .beads: %v", err)
+			}
+			configYAML := "dolt:\n  shared-server: true\n  auto-start: " + tt.autoStartYML + "\n"
+			if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(configYAML), 0o600); err != nil {
+				t.Fatalf("write config.yaml: %v", err)
+			}
+			sharedDir := filepath.Join(root, "shared-server")
+			t.Setenv("BEADS_DIR", beadsDir)
+			t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+			t.Setenv("BEADS_DOLT_AUTO_START", tt.autoStartEnv)
+			initConfigForTest(t)
+
+			for _, dryRun := range []bool{false, true} {
+				name := "apply"
+				if dryRun {
+					name = "dry-run"
+				}
+				t.Run(name, func(t *testing.T) {
+					result := applyServer(true, dryRun)
+					if result.Status != applyStatusSkipped {
+						t.Fatalf("status = %q, want %q: %+v", result.Status, applyStatusSkipped, result)
+					}
+					if result.Action != "start" {
+						t.Fatalf("action = %q, want %q", result.Action, "start")
+					}
+					if !strings.Contains(result.Message, "auto-start is disabled") || !strings.Contains(result.Message, "externally managed") {
+						t.Fatalf("message does not explain skip policy: %q", result.Message)
+					}
+					if _, err := os.Stat(sharedDir); !os.IsNotExist(err) {
+						t.Fatalf("applyServer created shared server state despite disabled auto-start: %v", err)
+					}
+				})
+			}
+		})
 	}
 }
 
@@ -282,4 +348,69 @@ func TestPrintApplyResults(t *testing.T) {
 	defer func() { os.Stdout = old }()
 	printApplyResults(results)
 	printApplyResults(nil)
+}
+
+// fakeOriginRemoteEvidence simulates the two evidence sources
+// currentOriginRemoteURL consults: the SQL-visible dolt_remotes listing and
+// the on-disk .dolt/repo_state.json enumeration.
+type fakeOriginRemoteEvidence struct {
+	listed    []storage.RemoteInfo
+	listErr   error
+	persisted []storage.RemoteInfo
+}
+
+func (f *fakeOriginRemoteEvidence) ListRemotes(ctx context.Context) ([]storage.RemoteInfo, error) {
+	return f.listed, f.listErr
+}
+
+func (f *fakeOriginRemoteEvidence) PersistedRemoteInfos() []storage.RemoteInfo {
+	return f.persisted
+}
+
+// TestCurrentOriginRemoteURL pins the wy-6k7f7 evidence rule for
+// `bd config apply`: an empty dolt_remotes listing alone is not proof there
+// is no origin — a cold-started sql-server hides a persisted remote
+// (GH#2118), and blind-adding over it was the defect. The SQL listing wins
+// when populated; the persisted enumeration is the fallback; a failed
+// listing is an error, never evidence.
+func TestCurrentOriginRemoteURL(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("listing_wins_when_populated", func(t *testing.T) {
+		url, err := currentOriginRemoteURL(ctx, &fakeOriginRemoteEvidence{
+			listed:    []storage.RemoteInfo{{Name: "origin", URL: "https://sql.example/repo"}},
+			persisted: []storage.RemoteInfo{{Name: "origin", URL: "https://disk.example/repo"}},
+		})
+		if err != nil || url != "https://sql.example/repo" {
+			t.Fatalf("got (%q, %v), want the SQL-visible URL", url, err)
+		}
+	})
+
+	t.Run("cold_start_recovers_persisted_origin", func(t *testing.T) {
+		url, err := currentOriginRemoteURL(ctx, &fakeOriginRemoteEvidence{
+			persisted: []storage.RemoteInfo{{Name: "origin", URL: "https://disk.example/repo"}},
+		})
+		if err != nil || url != "https://disk.example/repo" {
+			t.Fatalf("got (%q, %v), want the persisted on-disk URL", url, err)
+		}
+	})
+
+	t.Run("no_evidence_means_no_origin", func(t *testing.T) {
+		url, err := currentOriginRemoteURL(ctx, &fakeOriginRemoteEvidence{
+			persisted: []storage.RemoteInfo{{Name: "peer-mini", URL: "https://disk.example/other"}},
+		})
+		if err != nil || url != "" {
+			t.Fatalf("got (%q, %v), want empty with no error", url, err)
+		}
+	})
+
+	t.Run("list_failure_is_an_error_not_evidence", func(t *testing.T) {
+		_, err := currentOriginRemoteURL(ctx, &fakeOriginRemoteEvidence{
+			listErr:   errors.New("connection refused"),
+			persisted: []storage.RemoteInfo{{Name: "origin", URL: "https://disk.example/repo"}},
+		})
+		if err == nil {
+			t.Fatal("a failed listing must surface as an error, not fall through to disk")
+		}
+	})
 }

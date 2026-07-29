@@ -39,6 +39,13 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 	if label == "" {
 		return fmt.Errorf("db: LabelSQLRepository.Insert: label must not be empty")
 	}
+	// Reject an over-length label before the INSERT IGNORE, which would otherwise
+	// silently truncate it to the VARCHAR(255) column. This is the proxied-server
+	// (uow) analog of issueops.AddLabelInTx's guard, so both write stacks return a
+	// typed ErrFieldTooLong instead of storing a label the caller never sent.
+	if err := types.CheckFieldLen("label", label); err != nil {
+		return err
+	}
 	table := pickLabelTable(opts.UseWispsTable)
 	//nolint:gosec // G201: table is one of two hardcoded constants
 	if _, err := r.runner.ExecContext(ctx,

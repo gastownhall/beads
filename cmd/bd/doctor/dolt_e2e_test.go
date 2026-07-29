@@ -57,6 +57,10 @@ func TestMain(m *testing.M) {
 
 func testMainInner(m *testing.M) int {
 	os.Setenv("BEADS_TEST_MODE", "1")
+	// AD-01 (be-c5p): doctor e2e tests connect to a per-package test server.
+	// The dolt.New database-name firewall requires this opt-in to allow
+	// doctor_pkg_shared and doctest_*-prefixed databases through.
+	os.Setenv("BEADS_TEST_SERVER", "1")
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
@@ -274,7 +278,7 @@ func runBDDoctor(t *testing.T, bdPath, path string) (e2eDoctorResult, string, er
 	return result, string(out), execErr
 }
 
-// TestE2E_DoctorSQLiteBackend was removed: SQLite backend no longer exists.
+// TestE2E_DoctorSQLiteBackend is covered by the backend-neutral doctor tests.
 // GetBackend() always returns "dolt" after the dolt-native cleanup (bd-yqpwy).
 
 // TestE2E_DoctorDoltBackendNoDB was removed: the embedded Dolt driver

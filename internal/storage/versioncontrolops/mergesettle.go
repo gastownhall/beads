@@ -46,6 +46,17 @@ const memoryConfigKeyPrefix = kvkeys.MemoryConfigKeyPrefix
 // rolling back, so the settle pass can repair it; SettleMerge's gates ensure
 // nothing unrepaired survives without an error.
 func MergeAndSettle(ctx context.Context, db DBConn, ref string) error {
+	return MergeAndSettleWithStrategy(ctx, db, ref, "")
+}
+
+// MergeAndSettleWithStrategy is MergeAndSettle with an operator escape hatch
+// (#4992 part 2): a conflict TryAutoResolveMergeConflicts declines is, when
+// strategy is non-empty, resolved with strategy ("ours" or "theirs") instead
+// of aborting the merge for the operator. strategy == "" is exactly
+// MergeAndSettle's behavior (a declined conflict aborts with
+// MergeConflictsError). Used by the embedded pull path's `--strategy` flag;
+// see SettleMerge for the resolution logic.
+func MergeAndSettleWithStrategy(ctx context.Context, db DBConn, ref, strategy string) error {
 	// Capture pre-merge cleanliness before anything runs: abortMerge's
 	// hard-reset fallback is only safe when nothing uncommitted predates
 	// the merge (bd-578h9.2).
@@ -63,7 +74,7 @@ func MergeAndSettle(ctx context.Context, db DBConn, ref string) error {
 		// DOLT_PULL swallows "Already up to date." internally; we do the same.
 		mergeErr = nil
 	}
-	return SettleMerge(ctx, db, mergeErr, preMergeClean)
+	return SettleMerge(ctx, db, mergeErr, preMergeClean, strategy)
 }
 
 // MergeConflictsError reports the conflicts a settle pass refused to
@@ -98,10 +109,14 @@ func (e *MergeConflictsError) Unwrap() error { return e.MergeErr }
 // the merge statement's own error; it is surfaced whenever nothing was
 // resolved or repaired. preMergeClean reports whether the working set was
 // clean before the merge ran; it gates abortMerge's hard-reset fallback.
-// The decision logic mirrors server-mode settleMergeInTx exactly; the abort
-// stands in for that path's transaction rollback, restoring the pre-merge
-// working set so a retry is possible.
-func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean bool) error {
+// strategy is the #4992 operator escape hatch: "" preserves the exact
+// MergeAndSettle behavior below (a declined conflict aborts with
+// MergeConflictsError); "ours" or "theirs" resolves whatever the auto-resolver
+// declined with that strategy instead of aborting. The decision logic mirrors
+// server-mode settleMergeInTx exactly; the abort stands in for that path's
+// transaction rollback, restoring the pre-merge working set so a retry is
+// possible.
+func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean bool, strategy string) error {
 	// Check for merge conflicts regardless of whether the merge errored.
 	// Some Dolt versions error on conflicts, others leave them in the working set.
 	resolved, resolveErr := TryAutoResolveMergeConflicts(ctx, db)
@@ -117,11 +132,35 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 	// them BEFORE the abort wipes merge state — a post-abort GetConflicts sees
 	// an empty set, which made PullFrom's conflict-reporting contract dead
 	// code. The resolver pre-screens every table before resolving any, so a
-	// declined resolve leaves dolt_conflicts fully intact here.
+	// declined resolve leaves dolt_conflicts fully intact here — and, when
+	// strategy is set, fully intact for the escape-hatch resolve below too.
+	strategyResolved := false
 	if !resolved {
 		if conflicts, err := GetConflicts(ctx, db); err == nil && len(conflicts) > 0 {
-			abortMerge(ctx, db, preMergeClean)
-			return &MergeConflictsError{Conflicts: conflicts, MergeErr: mergeErr}
+			if strategy == "" {
+				abortMerge(ctx, db, preMergeClean)
+				return &MergeConflictsError{Conflicts: conflicts, MergeErr: mergeErr}
+			}
+			// #4992 part 2: the operator asked for an escape hatch. Unlike
+			// TryAutoResolveMergeConflicts, no allowlist applies — every
+			// conflicted table (the resolver pre-screens ALL of them before
+			// resolving any, so `resolved == false` means none were touched)
+			// is resolved with the named strategy.
+			for _, c := range conflicts {
+				table := c.Field
+				if table == "" {
+					table = "issues"
+				}
+				if err := ResolveConflicts(ctx, db, table, strategy); err != nil {
+					abortMerge(ctx, db, preMergeClean)
+					return fmt.Errorf("resolve %s conflicts with '%s' strategy: %w", table, strategy, err)
+				}
+				if _, err := db.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
+					abortMerge(ctx, db, preMergeClean)
+					return fmt.Errorf("stage resolved %s: %w", table, err)
+				}
+			}
+			strategyResolved = true
 		}
 	}
 
@@ -129,6 +168,8 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 	// whose parent issue was deleted on the other clone). Unrepaired
 	// violations MUST NOT survive: with the force flag on, every statement
 	// autocommits, so the abort below is what keeps them out of the database.
+	// This also covers violations a strategy resolution left behind (e.g.
+	// --ours keeps a child row whose parent was deleted on the other side).
 	repairedViol, hadViol, violErr := TryRepairFKCascadeViolations(ctx, db)
 	if violErr != nil {
 		abortMerge(ctx, db, preMergeClean)
@@ -145,7 +186,7 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 		return fmt.Errorf("pull merge left constraint violations bd cannot auto-repair; inspect dolt_constraint_violations and resolve before retrying")
 	}
 
-	if mergeErr != nil && !resolved && !repairedViol {
+	if mergeErr != nil && !resolved && !strategyResolved && !repairedViol {
 		// Merge failed for a non-conflict reason, or conflicts include non-metadata tables.
 		abortMerge(ctx, db, preMergeClean)
 		return mergeErr
@@ -154,7 +195,8 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 	// Conclude the merge for resolved conflicts only now, after the FK repair:
 	// DOLT_COMMIT refuses a violated working set, so a merge carrying both
 	// classes could never settle when the resolver committed first (bd-578h9.14).
-	if resolved {
+	switch {
+	case resolved:
 		if err := CommitResolvedConflicts(ctx, db); err != nil {
 			abortMerge(ctx, db, preMergeClean)
 			if mergeErr != nil {
@@ -162,9 +204,126 @@ func SettleMerge(ctx context.Context, db DBConn, mergeErr error, preMergeClean b
 			}
 			return err
 		}
+	case strategyResolved:
+		msg := fmt.Sprintf("Resolve merge conflicts using '%s' strategy", strategy)
+		if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", msg); err != nil {
+			abortMerge(ctx, db, preMergeClean)
+			if mergeErr != nil {
+				return mergeErr
+			}
+			return fmt.Errorf("conflicts resolved but commit failed: %w", err)
+		}
 	}
 
 	return nil
+}
+
+// MergeWithStrategy merges ref into the current branch and, when the merge
+// produces conflicts, resolves EVERY conflicted table with the operator's
+// explicit strategy ("ours" or "theirs") instead of aborting for later
+// resolution. It backs `bd vc merge --strategy` (#4992): the flag existed
+// and was documented, but the merge ran as a bare `CALL DOLT_MERGE` inside an
+// implicit autocommit transaction, so Dolt rejected any real conflict with
+// Error 1105 ("@autocommit must be disabled ...") before the strategy could
+// ever be applied — the strategy path was dead code.
+//
+// Unlike TryAutoResolveMergeConflicts (which only resolves conflict classes
+// proven safe without operator input, e.g. GH#2466 metadata), no allowlist
+// applies here: the operator named the strategy, so every conflicted table is
+// resolved with it. FK cascade violations a resolution can leave behind
+// (bd-6dnrw.4) are still repaired — or refused — exactly like SettleMerge, so
+// a strategy-resolved merge can never silently commit a violated working set.
+//
+// db must be a single session (a pinned *sql.Conn, or a *sql.DB used
+// sequentially whose pool holds one connection) — see MergeAndSettle for why:
+// the conflict-tolerance flags set here are session state and must be visible
+// to the DOLT_MERGE and to every resolve/repair/commit statement that
+// follows. author formats "Name <email>"; strategy must be "ours" or
+// "theirs" (validated via ValidateConflictStrategy).
+//
+// Returns the conflicts the merge produced (empty for a clean merge) and any
+// error. A returned error means the merge was aborted and the working set
+// restored — nothing is left half-resolved.
+func MergeWithStrategy(ctx context.Context, db DBConn, ref, author, strategy string) ([]storage.Conflict, error) {
+	if err := ValidateConflictStrategy(strategy); err != nil {
+		return nil, err
+	}
+
+	// Capture pre-merge cleanliness before anything runs: abortMerge's
+	// hard-reset fallback is only safe when nothing uncommitted predates the
+	// merge (bd-578h9.2), same as MergeAndSettle.
+	preMergeClean := workingSetClean(ctx, db)
+
+	if _, err := db.ExecContext(ctx, "SET @@dolt_allow_commit_conflicts = 1"); err != nil {
+		return nil, fmt.Errorf("set dolt_allow_commit_conflicts: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, "SET @@dolt_force_transaction_commit = 1"); err != nil {
+		return nil, fmt.Errorf("set dolt_force_transaction_commit: %w", err)
+	}
+
+	_, mergeErr := db.ExecContext(ctx, "CALL DOLT_MERGE('--author', ?, ?)", author, ref)
+	if mergeErr != nil && strings.Contains(mergeErr.Error(), "up to date") {
+		mergeErr = nil
+	}
+
+	// Check for conflicts regardless of whether the merge statement itself
+	// errored: with the flags above set, a genuinely conflicted merge lands in
+	// the working set instead of erroring, but older Dolt behavior (or a
+	// conflict class the flags don't cover) may still report both.
+	conflicts, cErr := GetConflicts(ctx, db)
+	if cErr != nil {
+		abortMerge(ctx, db, preMergeClean)
+		if mergeErr != nil {
+			return nil, fmt.Errorf("merge branch %s: %w", ref, mergeErr)
+		}
+		return nil, fmt.Errorf("check merge conflicts for branch %s: %w", ref, cErr)
+	}
+
+	if len(conflicts) == 0 {
+		if mergeErr != nil {
+			// Not a conflict: some other merge failure (unknown branch, dirty
+			// working set, ...). Nothing to resolve — surface it as-is.
+			abortMerge(ctx, db, preMergeClean)
+			return nil, fmt.Errorf("merge branch %s: %w", ref, mergeErr)
+		}
+		return nil, nil
+	}
+
+	dirtyTables := make(map[string]bool, len(conflicts))
+	for _, c := range conflicts {
+		table := c.Field
+		if table == "" {
+			table = "issues"
+		}
+		if err := ResolveConflicts(ctx, db, table, strategy); err != nil {
+			abortMerge(ctx, db, preMergeClean)
+			return conflicts, fmt.Errorf("resolve %s conflicts: %w", table, err)
+		}
+		dirtyTables[table] = true
+	}
+
+	// bd-6dnrw.4 / #4992: a strategy resolution can leave FK cascade
+	// violations behind exactly like the auto-resolve path (e.g. --ours keeps
+	// a child row whose parent was deleted on the other side); repair them the
+	// same way so a strategy-resolved merge cannot silently commit a violated
+	// working set.
+	repaired, had, violErr := TryRepairFKCascadeViolations(ctx, db)
+	if violErr != nil {
+		abortMerge(ctx, db, preMergeClean)
+		return conflicts, violErr
+	}
+	if had && !repaired {
+		abortMerge(ctx, db, preMergeClean)
+		return conflicts, fmt.Errorf("conflicts resolved with '%s' strategy but merge left constraint violations bd cannot auto-repair; inspect dolt_constraint_violations and resolve before retrying", strategy)
+	}
+
+	if err := StageAndCommit(ctx, db, dirtyTables,
+		fmt.Sprintf("Resolve merge conflicts from %s using %s strategy", ref, strategy), author); err != nil {
+		abortMerge(ctx, db, preMergeClean)
+		return conflicts, fmt.Errorf("conflicts resolved but commit failed: %w", err)
+	}
+
+	return conflicts, nil
 }
 
 // abortMerge restores the pre-merge state after a settle pass refused the
@@ -195,7 +354,7 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 
 // TryAutoResolveMergeConflicts auto-resolves merge conflicts that are safe to
 // resolve without operator input, and returns (true, nil) only if ALL conflicts
-// were resolved. It handles four classes:
+// were resolved. It handles these classes:
 //
 //   - metadata: machine-local rows (e.g. dolt_auto_push_*) that routinely diverge
 //     across clones (GH#2466). Resolved with "theirs".
@@ -225,26 +384,33 @@ func workingSetClean(ctx context.Context, db DBConn) bool {
 //     value. A conflict touching ANY non-memory config key (issue_prefix above
 //     all) is a real semantic conflict and is left for the operator.
 //
-//   - issues: modify/modify conflicts where both sides updated the same issue
-//     are resolved row-wise by last-write-wins (updated_at) — whichever side
-//     has the strictly newer timestamp wins the whole row. add/add (no base
-//     row) and delete/modify are left for the operator, as are rows where both
-//     sides share the same updated_at (ambiguous). A row is only auto-resolved
-//     when the losing side's updated_at predates the merge base (equals the
-//     base row's updated_at): if the losing side also moved its updated_at past
-//     the base value, both sides made real edits since the last sync and LWW
-//     would silently drop the losing side's field-level changes, so the row is
-//     left for the operator. This eliminates the biggest manual wall in
-//     multi-clone sync: the issues-table conflicts that follow routine
-//     cross-clone pulls (GH#4698), while preserving the common case where one
-//     side's conflict is a migration artifact (the row was rewritten by a
-//     schema change but updated_at did not move) and the other side made the
-//     only real edit. bd is primarily single-user-multi-machine so concurrent
-//     same-issue edits since a shared merge base are rare.
+//   - issues: modify/modify conflicts are merged FIELD BY FIELD against the
+//     merge base (automerge.go). A cell only one side changed keeps that
+//     side's value, so disjoint edits both survive; a cell both sides changed
+//     to different values is settled last-write-wins by updated_at, which also
+//     merges updated_at itself to max(ours, theirs). This is the flagship of
+//     the federation asks: because beads stamps updated_at on every mutation,
+//     ANY two same-issue edits between syncs conflict on that cell even when
+//     the semantic fields are disjoint, so the conflict rate is far higher
+//     than the semantic-conflict rate. add/add (no base row), delete/modify
+//     (one side removed it), and a contested cell whose two sides carry equal
+//     or unparseable updated_at values are left for the operator.
+//
+//   - labels: set-union. The table is all key columns, so two sides adding
+//     DIFFERENT labels are disjoint rows dolt already unions and a conflict
+//     can only be the same (issue_id, label) on both sides — identical data,
+//     resolved by keeping it.
+//
+//   - comments/events: append-only union. Rows are insert-only and keyed by a
+//     per-machine-unique id, so creation is disjoint; a same-id conflict whose
+//     columns agree is the same append on both sides and is resolved by
+//     keeping it. A row missing on one side, or diverging columns in a
+//     supposedly immutable row, is left for the operator.
 //
 // Any conflict on another table, or an unresolvable dependencies,
-// schema_migrations, config, or issues conflict, returns (false, nil) so the
-// caller fails the pull and the operator resolves it.
+// schema_migrations, config, issues, labels, comments, or events conflict,
+// returns (false, nil) so the caller fails the pull and the operator resolves
+// it.
 //
 // The resolved tables are staged but NOT committed: the caller must run
 // CommitResolvedConflicts after the FK cascade repair, because DOLT_COMMIT
@@ -280,6 +446,8 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 	// Decide which conflicted tables are safe to auto-resolve. If any conflict is
 	// not safely resolvable, resolve nothing and let the pull fail.
 	var resolvable []string
+	var issuesPlan []issuesRowMerge
+	var unionPlans map[string][]unionRowKey
 	for _, c := range conflicts {
 		switch c.table {
 		case "metadata":
@@ -312,14 +480,28 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 			}
 			resolvable = append(resolvable, "config")
 		case "issues":
-			lwwSafe, err := issuesConflictsAreLWWSafe(ctx, db)
+			plan, mergeable, err := issuesConflictsAreFieldMergeable(ctx, db)
 			if err != nil {
 				return false, err
 			}
-			if !lwwSafe {
+			if !mergeable {
 				return false, nil
 			}
+			issuesPlan = plan
 			resolvable = append(resolvable, "issues")
+		case "labels", "comments", "events":
+			unionPlan, unionSafe, err := unionConflictsAreSafe(ctx, db, c.table)
+			if err != nil {
+				return false, err
+			}
+			if !unionSafe {
+				return false, nil
+			}
+			if unionPlans == nil {
+				unionPlans = make(map[string][]unionRowKey, len(conflicts))
+			}
+			unionPlans[c.table] = unionPlan
+			resolvable = append(resolvable, c.table)
 		default:
 			return false, nil
 		}
@@ -351,7 +533,14 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 				return false, fmt.Errorf("failed to resolve config conflicts: %w", err)
 			}
 		case "issues":
-			if err := resolveIssuesLWWConflicts(ctx, db); err != nil {
+			// Field-level three-way merge, not a table-level --ours/--theirs:
+			// a cell only one side changed keeps that side's value and only a
+			// genuinely contested cell falls to LWW (automerge.go).
+			if err := resolveIssuesFieldMerge(ctx, db, issuesPlan); err != nil {
+				return false, err
+			}
+		case "labels", "comments", "events":
+			if err := resolveUnionConflicts(ctx, db, table, unionPlans[table]); err != nil {
 				return false, err
 			}
 		default:
@@ -377,136 +566,8 @@ func TryAutoResolveMergeConflicts(ctx context.Context, db DBConn) (bool, error) 
 // cascade violation could never settle while the resolver committed first
 // (bd-578h9.14).
 func CommitResolvedConflicts(ctx context.Context, db DBConn) error {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts (GH#2466, #4259, GH#2474, GH#4698)')"); err != nil {
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'auto-resolve merge conflicts: metadata, dependencies, schema_migrations, config, issues (field-level three-way merge), labels/comments/events (union)')"); err != nil {
 		return fmt.Errorf("failed to commit resolved conflicts: %w", err)
-	}
-	return nil
-}
-
-// issuesConflictsAreLWWSafe reports whether every conflicted row in the issues
-// table is a modify/modify conflict (the row existed at the merge base and was
-// modified on both sides) with strictly different updated_at timestamps where
-// the losing side's timestamp predates the merge base — the only class safe to
-// auto-resolve by last-write-wins. add/add conflicts (no base row),
-// delete/modify conflicts (one side deleted), rows where both sides share the
-// same updated_at (ambiguous), and rows where the losing side's updated_at
-// moved past the base value (both sides made real edits since the last sync)
-// are left for the operator.
-func issuesConflictsAreLWWSafe(ctx context.Context, db DBConn) (bool, error) {
-	rows, err := db.QueryContext(ctx, `
-		SELECT base_id, our_id, their_id, base_updated_at, our_updated_at, their_updated_at
-		FROM dolt_conflicts_issues`)
-	if err != nil {
-		return false, fmt.Errorf("query issues conflicts: %w", err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var baseID, ourID, theirID sql.NullString
-		var baseUpdatedAt, ourUpdatedAt, theirUpdatedAt sql.NullTime
-		if err := rows.Scan(&baseID, &ourID, &theirID, &baseUpdatedAt, &ourUpdatedAt, &theirUpdatedAt); err != nil {
-			return false, fmt.Errorf("scan issues conflict: %w", err)
-		}
-		// One side deleted the row (delete/modify): leave for the operator.
-		if !ourID.Valid || !theirID.Valid {
-			return false, nil
-		}
-		// No base row means both sides added (add/add): leave for the operator.
-		if !baseID.Valid {
-			return false, nil
-		}
-		// Both timestamps must be present to compare.
-		if !ourUpdatedAt.Valid || !theirUpdatedAt.Valid {
-			return false, nil
-		}
-		// Equal timestamps are ambiguous: leave for the operator.
-		if ourUpdatedAt.Time.Equal(theirUpdatedAt.Time) {
-			return false, nil
-		}
-		// The base row exists (modify/modify was confirmed above), so its
-		// updated_at should always be valid (the column is NOT NULL). Guard
-		// defensively: if it is somehow absent we cannot evaluate the
-		// predates check, so leave the row for the operator.
-		if !baseUpdatedAt.Valid {
-			return false, nil
-		}
-		// The losing side (older updated_at) must not have edited the issue
-		// since the merge base. If its updated_at moved past the base value,
-		// both sides made real edits since the last sync and row-level LWW
-		// would silently drop the losing side's field-level changes — leave
-		// that concurrent-edit case for the operator (GH#4698 Risk).
-		losing := ourUpdatedAt.Time
-		if theirUpdatedAt.Time.Before(losing) {
-			losing = theirUpdatedAt.Time
-		}
-		if losing.After(baseUpdatedAt.Time) {
-			return false, nil
-		}
-	}
-	return true, rows.Err()
-}
-
-// resolveIssuesLWWConflicts resolves modify/modify issues-table conflicts
-// (validated by issuesConflictsAreLWWSafe) row-wise by last-write-wins: for
-// each conflicted row, whichever side has the strictly newer updated_at wins
-// the whole row. DOLT_CONFLICTS_RESOLVE is table-level (--ours/--theirs), so
-// per-row resolution uses Dolt's manual-resolution path: for rows where ours
-// wins, deleting the conflict row from dolt_conflicts_issues signals resolution
-// (the working set already holds our values); the remaining rows (theirs wins)
-// are then resolved with a single --theirs call.
-func resolveIssuesLWWConflicts(ctx context.Context, db DBConn) error {
-	rows, err := db.QueryContext(ctx, `
-		SELECT our_id, our_updated_at, their_updated_at
-		FROM dolt_conflicts_issues`)
-	if err != nil {
-		return fmt.Errorf("query issues conflicts for LWW: %w", err)
-	}
-
-	type oursWin struct {
-		id string
-	}
-	var oursWins []oursWin
-	theirsCount := 0
-	for rows.Next() {
-		var ourID sql.NullString
-		var ourUpdatedAt, theirUpdatedAt sql.NullTime
-		if err := rows.Scan(&ourID, &ourUpdatedAt, &theirUpdatedAt); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("scan issues conflict for LWW: %w", err)
-		}
-		if !ourID.Valid || !ourUpdatedAt.Valid || !theirUpdatedAt.Valid {
-			// issuesConflictsAreLWWSafe already screened these out; a row
-			// that slipped through must not be silently resolved.
-			_ = rows.Close()
-			return fmt.Errorf("unexpected invalid conflict row in dolt_conflicts_issues (safety check bypassed)")
-		}
-		if ourUpdatedAt.Time.After(theirUpdatedAt.Time) {
-			oursWins = append(oursWins, oursWin{id: ourID.String})
-		} else {
-			theirsCount++
-		}
-	}
-	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
-		return err
-	}
-
-	// For rows where ours wins: delete the conflict row. The working set
-	// already holds our values, so deleting the conflict entry signals
-	// resolution. Dolt applies this per-row using the primary key.
-	for _, w := range oursWins {
-		if _, err := db.ExecContext(ctx,
-			"DELETE FROM dolt_conflicts_issues WHERE our_id = ?", w.id); err != nil {
-			return fmt.Errorf("delete ours-wins conflict for issue %s: %w", w.id, err)
-		}
-	}
-
-	// For the remaining rows (theirs wins): resolve with --theirs. If there
-	// are none, skip the call — DOLT_CONFLICTS_RESOLVE on a conflict-free
-	// table is a no-op but skipping it avoids an unnecessary round-trip.
-	if theirsCount > 0 {
-		if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--theirs', 'issues')"); err != nil {
-			return fmt.Errorf("failed to resolve theirs-wins issues conflicts: %w", err)
-		}
 	}
 	return nil
 }

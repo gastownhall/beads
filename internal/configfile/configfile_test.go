@@ -629,10 +629,10 @@ func TestProxiedServerClientInfo_ResolvedPaths(t *testing.T) {
 	})
 }
 
-// TestGetBackendAllowlist verifies the allowlist semantics: the SQL backends
-// (postgres, mysql, sqlite) are honored; every other value (empty, legacy,
-// genuinely unknown) falls back to Dolt. This is the guard behind backend selection
-// — a typo in metadata.json must fail safe to Dolt, never to an unintended backend.
+// TestGetBackendAllowlist verifies the metadata-routing semantics: current backends
+// and removed-backend tombstones remain recognizable, while empty or unknown values
+// retain the historical Dolt fallback. Store selection rejects the tombstones before
+// it can open an empty Dolt database.
 func TestGetBackendAllowlist(t *testing.T) {
 	fallsBackToDolt := []struct {
 		name string
@@ -657,6 +657,29 @@ func TestGetBackendAllowlist(t *testing.T) {
 			cfg := &Config{Backend: backend}
 			if got := cfg.GetBackend(); got != backend {
 				t.Errorf("GetBackend() = %q, want %q", got, backend)
+			}
+		})
+	}
+}
+
+func TestSupportedBackendAllowlist(t *testing.T) {
+	tests := []struct {
+		name      string
+		backend   string
+		supported bool
+	}{
+		{name: "implicit dolt", backend: "", supported: true},
+		{name: "dolt", backend: BackendDolt, supported: true},
+		{name: "sqlite", backend: BackendSQLite, supported: false},
+		{name: "postgres", backend: BackendPostgres, supported: false},
+		{name: "mysql", backend: BackendMySQL, supported: false},
+		{name: "unknown", backend: "mystery", supported: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsSupportedBackend(tt.backend); got != tt.supported {
+				t.Fatalf("IsSupportedBackend(%q) = %v, want %v", tt.backend, got, tt.supported)
 			}
 		})
 	}

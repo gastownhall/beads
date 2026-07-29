@@ -1812,7 +1812,7 @@ func TestCheckProjectGitignore_AllPresent(t *testing.T) {
 		}
 	}()
 
-	content := "node_modules/\n.dolt/\n*.db\n.beads-credential-key\n.beads/proxieddb/\n"
+	content := "node_modules/\n.dolt/\n*.db\n.beads-credential-key\n.beads/proxieddb/\n*.gate.lock*\n"
 	if err := os.WriteFile(".gitignore", []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -2005,6 +2005,11 @@ func TestFixGitignore_FollowsRedirect(t *testing.T) {
 	if err := os.MkdirAll(rigBeads, 0750); err != nil {
 		t.Fatal(err)
 	}
+	// The redirect target must have a metadata.json or database for
+	// FollowRedirect to honor the redirect (gastownhall/beads#4692 guard).
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(`{"database":"beads.db"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create the local redirect-only .beads dir
 	localBeads := filepath.Join(tmpDir, ".beads")
@@ -2062,6 +2067,11 @@ func TestCheckGitignore_FollowsRedirect(t *testing.T) {
 	if err := os.MkdirAll(rigBeads, 0750); err != nil {
 		t.Fatal(err)
 	}
+	// The redirect target must have a metadata.json or database for
+	// FollowRedirect to honor the redirect (gastownhall/beads#4692 guard).
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(`{"database":"beads.db"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(rigBeads, ".gitignore"), []byte(GitignoreTemplate), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -2103,6 +2113,11 @@ func TestFixGitignore_RedirectRoundTrip(t *testing.T) {
 	// Set up rig with outdated .gitignore (missing required patterns)
 	rigBeads := filepath.Join(tmpDir, "mayor", "rig", ".beads")
 	if err := os.MkdirAll(rigBeads, 0750); err != nil {
+		t.Fatal(err)
+	}
+	// The redirect target must have a metadata.json or database for
+	// FollowRedirect to honor the redirect (gastownhall/beads#4692 guard).
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(`{"database":"beads.db"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	oldContent := "*.db\ndaemon.log\n"

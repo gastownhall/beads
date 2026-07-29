@@ -7,30 +7,10 @@ description: Generated reference for every bd command
 
 Generated from `bd help --docs-root`.
 
-This reference covers all 112 live top-level `bd` commands. Regenerate it with:
+This reference covers all 108 live top-level `bd` commands. Regenerate it with:
 
 ```bash
 ./scripts/generate-cli-docs.sh
-```
-
-## Global Flags
-
-These flags apply to all commands:
-
-```
-      --actor string              Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)
-      --db string                 Database path (default: auto-discover .beads/*.db)
-  -C, --directory string          Change to this directory before running the command (like git -C)
-      --dolt-auto-commit string   Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit
-      --global                    Use the global shared-server database (beads_global)
-      --ignore-schema-skew        Proceed despite forward schema drift (some queries may fail)
-      --json                      Output in JSON format
-      --no-color                  Disable color output (also: NO_COLOR=1 or CLICOLOR=0)
-      --profile                   Generate CPU profile for performance analysis
-  -q, --quiet                     Suppress non-essential output (errors only)
-      --readonly                  Read-only mode: block write operations (for worker sandboxes)
-      --sandbox                   Sandbox mode: disables Dolt auto-push
-  -v, --verbose                   Enable verbose/debug output
 ```
 
 ## Commands
@@ -77,7 +57,6 @@ These flags apply to all commands:
 - [`bd github`](/cli-reference/github)
 - [`bd gitlab`](/cli-reference/gitlab)
 - [`bd graph`](/cli-reference/graph)
-- [`bd heartbeat`](/cli-reference/heartbeat)
 - [`bd history`](/cli-reference/history)
 - [`bd hooks`](/cli-reference/hooks)
 - [`bd human`](/cli-reference/human)
@@ -97,7 +76,6 @@ These flags apply to all commands:
 - [`bd merge-slot`](/cli-reference/merge-slot)
 - [`bd metrics`](/cli-reference/metrics)
 - [`bd migrate`](/cli-reference/migrate)
-- [`bd migrate-personal`](/cli-reference/migrate-personal)
 - [`bd mol`](/cli-reference/mol)
 - [`bd note`](/cli-reference/note)
 - [`bd notion`](/cli-reference/notion)
@@ -115,7 +93,6 @@ These flags apply to all commands:
 - [`bd quickstart`](/cli-reference/quickstart)
 - [`bd ready`](/cli-reference/ready)
 - [`bd recall`](/cli-reference/recall)
-- [`bd reclaim`](/cli-reference/reclaim)
 - [`bd recompute-blocked`](/cli-reference/recompute-blocked)
 - [`bd remember`](/cli-reference/remember)
 - [`bd rename`](/cli-reference/rename)
@@ -139,7 +116,6 @@ These flags apply to all commands:
 - [`bd tag`](/cli-reference/tag)
 - [`bd todo`](/cli-reference/todo)
 - [`bd types`](/cli-reference/types)
-- [`bd unclaim`](/cli-reference/unclaim)
 - [`bd undefer`](/cli-reference/undefer)
 - [`bd update`](/cli-reference/update)
 - [`bd upgrade`](/cli-reference/upgrade)

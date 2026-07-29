@@ -18,11 +18,15 @@ import (
 )
 
 func NewDependencySQLRepository(runner Runner) domain.DependencySQLRepository {
-	return &dependencySQLRepositoryImpl{runner: runner}
+	return &dependencySQLRepositoryImpl{
+		runner: runner,
+		events: NewEventsSQLRepository(runner),
+	}
 }
 
 type dependencySQLRepositoryImpl struct {
 	runner Runner
+	events domain.EventsSQLRepository
 }
 
 var _ domain.DependencySQLRepository = (*dependencySQLRepositoryImpl)(nil)
@@ -67,7 +71,10 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		return errors.New("db: DependencySQLRepository.Insert: DependsOnID must not be empty")
 	}
 	if dep.IssueID == dep.DependsOnID {
-		return fmt.Errorf("db: DependencySQLRepository.Insert: %s cannot depend on itself", dep.IssueID)
+		// Lead with the sentinel so this defensive repo-layer guard renders like
+		// every other self-dep site ("cannot add self-dependency: X cannot depend
+		// on itself") instead of appending the sentinel text.
+		return fmt.Errorf("db: DependencySQLRepository.Insert: %w: %s cannot depend on itself", domain.ErrSelfDependency, dep.IssueID)
 	}
 
 	metadata := dep.Metadata
@@ -86,7 +93,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			return fmt.Errorf("db: DependencySQLRepository.Insert: cycle check: %w", err)
 		}
 		if cycle {
-			return fmt.Errorf("adding dependency would create a cycle")
+			return domain.ErrDependencyCycle
 		}
 	}
 	table := pickDepTable(opts.UseWispsTable)
@@ -137,6 +144,28 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		time.Now().UTC(), actor, metadata, dep.ThreadID,
 	); err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
+	}
+
+	// Record the dependency_added event on the source's event table, matching the
+	// embedded/issueops AddDependencyInTx path so the bd CLI and library callers
+	// observe the same history from either write plumbing. Reached only on the
+	// genuine new-edge path; the idempotent same-type refresh returned earlier.
+	// Gated on EmitEvent so only the explicit dep verbs emit: create-with-deps
+	// and reparent call Insert directly without it, so an implicit parent-child /
+	// --deps / waits-for edge produces no event. The embedded structural paths
+	// (createIssueWithDeps, reparent) match this by calling the plain,
+	// no-event AddDependency/tx.AddDependency, whose issueops.AddDependencyInTx
+	// EmitEvent gate is likewise unset — so both backends stay silent on implicit
+	// edges and emit only for the explicit bd dep add / bd link verbs.
+	if opts.EmitEvent {
+		if err := r.events.Record(ctx, domain.Event{
+			IssueID:  dep.IssueID,
+			Type:     types.EventDependencyAdded,
+			Actor:    actor,
+			NewValue: fmt.Sprintf("Added dependency: %s %s %s", dep.IssueID, dep.Type, dep.DependsOnID),
+		}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+			return fmt.Errorf("db: DependencySQLRepository.Insert: record dependency_added event: %w", err)
+		}
 	}
 
 	// is_blocked maintenance mirrors the classic AddDependencyInTx flow
@@ -248,6 +277,21 @@ func (r *dependencySQLRepositoryImpl) Delete(ctx context.Context, issueID, depen
 		issueID, dependsOnID,
 	); err != nil {
 		return domain.DepDeleteResult{}, fmt.Errorf("db: DependencySQLRepository.Delete: %s -> %s: %w", issueID, dependsOnID, err)
+	}
+
+	// The type lookup above returned Found:false when no edge existed, so reaching
+	// here means a row was deleted — record the dependency_removed event on the
+	// source's event table, matching the embedded/issueops RemoveDependencyInTx path.
+	// Gated on EmitEvent so only the explicit `bd dep remove` verb emits.
+	if opts.EmitEvent {
+		if err := r.events.Record(ctx, domain.Event{
+			IssueID:  issueID,
+			Type:     types.EventDependencyRemoved,
+			Actor:    actor,
+			NewValue: fmt.Sprintf("Removed dependency on %s", dependsOnID),
+		}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+			return domain.DepDeleteResult{}, fmt.Errorf("db: DependencySQLRepository.Delete: record dependency_removed event: %w", err)
+		}
 	}
 
 	dt := types.DependencyType(depType)

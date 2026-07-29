@@ -1,6 +1,6 @@
 ---
 title: "bd upgrade"
-description: "Check and manage bd version upgrades"
+description: "Commands for checking bd version upgrades and reviewing changes."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -17,7 +17,7 @@ The upgrade command helps you stay aware of bd version changes:
 Version tracking is automatic - bd updates metadata.json on every run.
 
 ```
-bd upgrade [command]
+bd upgrade [flags]
 ```
 
 ## bd upgrade ack

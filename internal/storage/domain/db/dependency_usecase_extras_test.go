@@ -22,6 +22,7 @@ func (s *testSuite) TestDependencyUseCase_Extras() {
 		s.Run("EmptySliceReturnsEmptyResult", s.ducAddBulkEmpty)
 		s.Run("NilDepReturnsError", s.ducAddBulkNilDep)
 		s.Run("EmptyIDsReturnError", s.ducAddBulkEmptyIDs)
+		s.Run("SelfEdgeReturnsSelfDependency", s.ducAddBulkSelfEdge)
 		s.Run("InsertsEdgesAndReturnsAdded", s.ducAddBulkInserts)
 		s.Run("RejectsHierarchyBlockingButAllowsSiblings", s.ducAddBulkHierarchyBlocking)
 		s.Run("PerEdgeCycleCheckBlocksCycleCreation", s.ducAddBulkPerEdgeCycle)
@@ -211,6 +212,13 @@ func (s *testSuite) ducAddBulkPerEdgeCycle() {
 		[]*types.Dependency{newDep("bd-duc-pec-b", "bd-duc-pec-a", types.DepBlocks)},
 		"tester", domain.BulkAddDepsOpts{})
 	s.Require().Error(err, "per-edge cycle check must block the new edge")
+	s.Require().ErrorIs(err, domain.ErrDependencyCycle,
+		"per-edge bulk cycle rejection must be typed so callers can errors.Is it")
+	// The proxied bulk CLI surfaces this message verbatim (HandleErrorRespectJSON
+	// "%v"), so typing it must keep the pre-taxonomy text byte-for-byte and must
+	// NOT append the sentinel string.
+	s.Equal("add deps[0]: adding bd-duc-pec-b -> bd-duc-pec-a would create a cycle", err.Error(),
+		"per-edge bulk cycle message must preserve its exact pre-taxonomy text")
 
 	var count int
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
@@ -236,7 +244,14 @@ func (s *testSuite) ducAddBulkFinalCycleCheck() {
 		[]*types.Dependency{newDep("bd-duc-fcc-b", "bd-duc-fcc-a", types.DepBlocks)},
 		"tester", domain.BulkAddDepsOpts{SkipPerEdgeCycleCheck: true})
 	s.Require().Error(err, "final whole-graph cycle check must fail the bulk add")
-	s.Contains(err.Error(), "cycle")
+	// The proxied bulk CLI surfaces this message verbatim (HandleErrorRespectJSON
+	// "%v"), so typing it must keep the pre-taxonomy text byte-for-byte and must
+	// NOT append the sentinel string.
+	s.Equal("add deps: dependency cycle would be created: bd-duc-fcc-b → bd-duc-fcc-a → bd-duc-fcc-b", err.Error(),
+		"final bulk cycle message must preserve its exact pre-taxonomy text")
+	s.Require().ErrorIs(err, domain.ErrDependencyCycle,
+		"final CycleThroughEdges rejection must be typed so callers can errors.Is it, "+
+			"including on the SkipPerEdgeCycleCheck path where it is the sole cycle guard")
 }
 
 func (s *testSuite) ducAddBulkSkipPerEdgeAcyclic() {
@@ -272,6 +287,46 @@ func (s *testSuite) ducAddBulkNonBlockingNoCheck() {
 		"tester", domain.BulkAddDepsOpts{})
 	s.Require().NoError(err)
 	s.Require().Len(res.Added, 1)
+}
+
+func (s *testSuite) ducAddBulkSelfEdge() {
+	// A self-edge (IssueID == DependsOnID) must be rejected as ErrSelfDependency
+	// for ALL dep types before any cycle probe — including the scheduling types
+	// that would otherwise trip HasCycle (default mode) or the final
+	// CycleThroughEdges gate (SkipPerEdgeCycleCheck mode) and be misreported as a
+	// cycle. The message is byte-identical to the single-edge and issueops
+	// self-dep sites so the proxied bulk CLI shows one consistent self-dep error.
+	s.seedIssueRow("bd-duc-self-a")
+	const wantMsg = "cannot add self-dependency: bd-duc-self-a cannot depend on itself"
+
+	for _, tc := range []struct {
+		name string
+		typ  types.DependencyType
+		opts domain.BulkAddDepsOpts
+	}{
+		{"DefaultBlocks", types.DepBlocks, domain.BulkAddDepsOpts{}},
+		{"SkipPerEdgeBlocks", types.DepBlocks, domain.BulkAddDepsOpts{SkipPerEdgeCycleCheck: true}},
+		{"NonSchedulingRelated", types.DepRelated, domain.BulkAddDepsOpts{}},
+	} {
+		_, err := s.depUseCase().AddDependencies(s.Ctx(),
+			[]*types.Dependency{newDep("bd-duc-self-a", "bd-duc-self-a", tc.typ)},
+			"tester", tc.opts)
+		s.Require().Error(err, "%s: self-edge must be rejected", tc.name)
+		s.Require().ErrorIs(err, domain.ErrSelfDependency,
+			"%s: self-edge must be typed ErrSelfDependency so callers can errors.Is it", tc.name)
+		s.Require().NotErrorIs(err, domain.ErrDependencyCycle,
+			"%s: a self-edge must NOT be classified as a dependency cycle", tc.name)
+		s.Equal(wantMsg, err.Error(),
+			"%s: self-dep message must match every other self-dep site byte-for-byte", tc.name)
+	}
+
+	// The guard fires before any insert, so nothing is written even on the
+	// SkipPerEdgeCycleCheck path where inserts otherwise precede the final gate.
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
+		"bd-duc-self-a", "bd-duc-self-a").Scan(&count))
+	s.Equal(0, count, "self-edge must not have been inserted")
 }
 
 // ---- AddWispDependencies ----

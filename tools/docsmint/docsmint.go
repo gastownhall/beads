@@ -22,15 +22,26 @@ var (
 
 // run post-processes the generic staging tree at <root>/build/cli-docs into
 // the committed Mintlify pages at <root>/docs/cli-reference and splices the
-// CLI Reference pages array in <root>/docs/docs.json.
+// CLI Reference pages array in <root>/docs/docs.json. When the generic tree
+// is absent but the pinned bd's legacy emitter wrote
+// <root>/website/docs/cli-reference (Docusaurus form, bd <= v1.1.0), those
+// pages are converted to the generic form first (see legacy.go).
 func run(root string) error {
 	staging := filepath.Join(root, "build", "cli-docs")
+	legacyStaging := filepath.Join(root, "website", "docs", "cli-reference")
 	target := filepath.Join(root, "docs", "cli-reference")
 	docsJSON := filepath.Join(root, "docs", "docs.json")
 
+	stagingDir := staging
+	legacy := false
 	entries, err := os.ReadDir(staging)
 	if err != nil {
-		return fmt.Errorf("reading staging tree %s (run `bd help --docs-root` first): %w", staging, err)
+		entries, err = os.ReadDir(legacyStaging)
+		if err != nil {
+			return fmt.Errorf("no staging tree at %s or %s (run `bd help --docs-root` first)", staging, legacyStaging)
+		}
+		stagingDir = legacyStaging
+		legacy = true
 	}
 
 	var pages []string
@@ -41,7 +52,7 @@ func run(root string) error {
 		pages = append(pages, entry.Name())
 	}
 	if len(pages) == 0 {
-		return fmt.Errorf("staging tree %s contains no markdown pages (run `bd help --docs-root` first)", staging)
+		return fmt.Errorf("staging tree %s contains no markdown pages (run `bd help --docs-root` first)", stagingDir)
 	}
 	sort.Strings(pages)
 
@@ -60,11 +71,22 @@ func run(root string) error {
 	for _, name := range pages {
 		// #nosec G304: name comes from os.ReadDir over the repo's own staging
 		// tree (filtered to *.md above), not from external input.
-		data, err := os.ReadFile(filepath.Join(staging, name))
+		data, err := os.ReadFile(filepath.Join(stagingDir, name))
 		if err != nil {
 			return err
 		}
-		out := transformPage(string(data))
+		generic := string(data)
+		if legacy {
+			if name == "index.md" {
+				generic, err = convertLegacyIndex(generic)
+			} else {
+				generic, err = convertLegacyPage(generic)
+			}
+			if err != nil {
+				return fmt.Errorf("converting legacy page %s: %w", name, err)
+			}
+		}
+		out := transformPage(generic)
 		// #nosec G306: generated repository Markdown should be readable like source files.
 		if err := os.WriteFile(filepath.Join(target, name), []byte(out), 0o644); err != nil {
 			return err

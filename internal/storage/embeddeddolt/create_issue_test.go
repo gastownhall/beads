@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -1265,6 +1266,14 @@ func TestCreateIssues(t *testing.T) {
 }
 
 func TestHookFiringStoreCreateIssuesFiresDependencyUpdatesFromEmbeddedStore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The hook runner on Windows executes hook files directly via CreateProcess,
+		// which has no shebang dispatch. The extensionless #!/bin/sh hook written by
+		// newEmbeddedHookStore cannot be executed as a shell script, so no payload is
+		// ever logged and the assertions fail. Same limitation already skipped in
+		// internal/hooks/hooks_test.go. See: https://github.com/gastownhall/beads/issues/3800
+		t.Skip("hook script execution not supported on Windows - see GH#3800")
+	}
 	t.Run("non_transactional", func(t *testing.T) {
 		te := newTestEnv(t, "hk")
 		ctx := t.Context()

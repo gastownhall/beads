@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -249,26 +250,7 @@ func (r *configSQLRepositoryImpl) GetAdaptiveIDConfig(ctx context.Context) (doma
 }
 
 func (r *configSQLRepositoryImpl) GetCustomStatuses(ctx context.Context) ([]types.CustomStatus, error) {
-	rows, err := r.runner.QueryContext(ctx, "SELECT name, category FROM custom_statuses ORDER BY name")
-	if err != nil {
-		return nil, fmt.Errorf("db: GetCustomStatuses: query custom_statuses: %w", err)
-	}
-	defer rows.Close()
-	var result []types.CustomStatus
-	for rows.Next() {
-		var name, category string
-		if err := rows.Scan(&name, &category); err != nil {
-			return nil, fmt.Errorf("db: GetCustomStatuses: scan: %w", err)
-		}
-		result = append(result, types.CustomStatus{
-			Name:     name,
-			Category: types.StatusCategory(category),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("db: GetCustomStatuses: read custom_statuses: %w", err)
-	}
-	return result, nil
+	return issueops.ResolveCustomStatusesDetailedInTx(ctx, r.runner)
 }
 
 func (r *configSQLRepositoryImpl) ListAllStatusNames(ctx context.Context) ([]string, error) {

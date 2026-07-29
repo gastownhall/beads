@@ -165,6 +165,28 @@ test and why (the test pyramid and tiering we follow), see
 - Add inline code comments for complex logic
 - Include examples in documentation
 
+## Storage filter conventions
+
+### `IssueFilter.MaxRows` opt-out rule (be-x42v)
+
+`types.IssueFilter` carries a defensive row cap (`MaxRows int`,
+`MaxRowsSource string`) that the storage layer enforces via
+`*issueops.ErrTooManyRows`. The cap is wired from `--max-rows` /
+`BEADS_MAX_ROWS` on user-facing commands listed in designer §4 of be-x42v
+(`bd list`, `bd ready`, `bd dep tree`, `bd find-duplicates`, `bd graph`,
+plus env-only on the doctor family).
+
+**Rule for new code that builds an `IssueFilter`:** if your call site is
+NOT on the designer's wired-up list, you **MUST** explicitly initialize
+`filter.MaxRows = 0` and `filter.MaxRowsSource = ""`. This makes the
+opt-out intentional in code review and survives future refactors that
+might otherwise let the env var leak into a sweep path that must not
+abort (export, gc, jira sync, migrate-issues, etc.).
+
+The opt-out test gates (be-x42v.4) enforce this for the
+export / migrate / jira / cleanup / gc paths today. New write-side or
+round-trip paths should pattern-match on those tests.
+
 ## Feature Requests and Bug Reports
 
 ### Reporting Bugs

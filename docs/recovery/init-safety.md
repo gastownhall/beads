@@ -220,10 +220,9 @@ bd doctor                  # sanity-check before publishing
 bd dolt push --force       # make the remote authoritative
 ```
 
-(`bd`'s migration gate may block here; run `bd migrate --force` on the
-canonical clone — that is exactly the designated-migrator case the gate is
-asking about. `BD_ALLOW_REMOTE_MIGRATE=1` is the env-var equivalent for
-scripted use.)
+(`bd`'s migration gate may block here; that is exactly the designated-migrator
+case the gate is asking about — follow the guidance it prints on the canonical
+clone.)
 
 ### 3. On EVERY other clone: save local-only work, re-clone, re-apply
 

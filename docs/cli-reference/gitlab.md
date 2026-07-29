@@ -1,6 +1,6 @@
 ---
 title: "bd gitlab"
-description: "GitLab integration commands"
+description: "Commands for syncing issues between beads and GitLab."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -17,7 +17,7 @@ Configuration can be set via 'bd config' or environment variables:
   gitlab.default_project_id / GITLAB_DEFAULT_PROJECT_ID - Project for creating issues in group mode
 
 ```
-bd gitlab [command]
+bd gitlab [flags]
 ```
 
 ## bd gitlab projects

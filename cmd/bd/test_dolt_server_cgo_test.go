@@ -27,11 +27,14 @@ var testSharedConn *sql.DB
 // from creating testdb_* databases on the production Dolt server.
 // Returns a cleanup function that stops the server and removes the container.
 func startTestDoltServer() func() {
+	if os.Getenv("BEADS_TEST_PROXIED_LOCAL") == "1" {
+		return func() {}
+	}
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") == "1" {
 		return func() {}
 	}
 	if os.Getenv("BEADS_TEST_PROXIED_SERVER") == "1" {
-		return func() {}
+		return func() { testutil.TerminateDoltContainer() }
 	}
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)

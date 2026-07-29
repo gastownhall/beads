@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"golang.org/x/term"
@@ -33,6 +34,41 @@ func defaultStderr() io.Writer {
 		return os.Stderr
 	}
 	return io.Discard
+}
+
+const largeRigThreshold = 10000
+
+// issueRowCounter returns the current issues-table row count, or an error if
+// the table is unreachable (fresh install → table doesn't exist yet). The
+// caller uses the error as the "no warning" signal. Variable so tests in this
+// package that exercise runMigrations against a non-DB mock can stub out the
+// query without panicking on QueryRowContext.
+var issueRowCounter = func(ctx context.Context, db DBConn) (int64, error) {
+	var n int64
+	err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&n)
+	return n, err
+}
+
+// emitLargeRigNotice writes the one-line large-rig warning to out when the
+// issues count exceeds largeRigThreshold. An error from the counter is
+// treated as "fresh install / table missing" and suppresses the warning —
+// see be-8ja for the UX rationale.
+func emitLargeRigNotice(out io.Writer, count int64, err error) {
+	if err != nil || count <= largeRigThreshold {
+		return
+	}
+	fmt.Fprintf(out, "Large rig detected (%d issues). This migration may take up to 90 seconds; do not interrupt.\n", count)
+}
+
+// humanMigrationName turns "0033_add_date_indexes.up.sql" into
+// "add_date_indexes" for the progress line.
+func humanMigrationName(filename string) string {
+	s := strings.TrimSuffix(filename, ".up.sql")
+	parts := strings.SplitN(s, "_", 2)
+	if len(parts) < 2 {
+		return s
+	}
+	return parts[1]
 }
 
 // DBConn is the minimal interface satisfied by *sql.DB, *sql.Tx, and *sql.Conn.
@@ -221,6 +257,7 @@ var (
 // re-asserts the full set idempotently at the top of every write-mode open.
 var doltIgnorePatterns = []string{
 	"ignored_schema_migrations",
+	"leases",
 	"local_metadata",
 	"repo_mtimes",
 	"wisp_%",
@@ -326,10 +363,10 @@ func migrationStateCurrent(ctx context.Context, db DBConn) (bool, error) {
 // migration path the seed must be committed before the first step so an
 // interrupted pass leaves a clean working set (#4566 self-heal contract).
 func commitSeededDoltIgnore(ctx context.Context, db DBConn) error {
-	if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('dolt_ignore')"); err != nil {
+	if err := drainCall(ctx, db, "CALL DOLT_ADD('dolt_ignore')"); err != nil {
 		return fmt.Errorf("staging seeded dolt_ignore patterns: %w", err)
 	}
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')"); err != nil {
+	if err := drainCall(ctx, db, "CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')"); err != nil {
 		return fmt.Errorf("committing seeded dolt_ignore patterns: %w", err)
 	}
 	return nil
@@ -380,6 +417,26 @@ func AllMigrationsSQL() string {
 			mainSource.cursorTable, f.version, hex.EncodeToString(sum[:]))
 	}
 	return b.String()
+}
+
+// MigrationSQL returns the frozen SQL content of a main-source migration
+// file by name (e.g. "0057_events_value_columns_idempotent_longtext.up.sql"),
+// read from the same embedded FS runMigrations applies in production
+// (see mainSource.files above). It exists for tests outside this package
+// (internal/storage/embeddeddolt's engine-based frozen-guard tests) that need
+// to execute the byte-exact frozen migration content through a real engine:
+// reading the file from disk by a package-relative path does not reliably
+// resolve across every CI execution context, while the embedded FS is always
+// available and is, in fact, higher-fidelity -- it is the literal bytes
+// runMigrations itself applies, not a copy that could drift from the build.
+// Read-only; callers cannot use it to mutate or bypass the frozen-file
+// hygiene guard (scripts/check-migration-hygiene.sh).
+func MigrationSQL(name string) (string, error) {
+	data, err := mainSource.files.ReadFile(mainSource.dir + "/" + name)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func parseVersion(name string) (int, error) {
@@ -594,7 +651,7 @@ func migrateUp(ctx context.Context, db DBConn) (int, error) {
 	if !staged {
 		return applied, nil
 	}
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', 'schema: apply migrations')"); err != nil {
+	if err := drainCall(ctx, db, "CALL DOLT_COMMIT('-m', 'schema: apply migrations')"); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
 			return applied, fmt.Errorf("committing migrations: %w", err)
 		}
@@ -656,7 +713,7 @@ func unstagePreExistingTables(ctx context.Context, db DBConn, tables map[string]
 		log.Printf("schema migration unstaging pre-existing staged tables: %s", strings.Join(staged, ", "))
 	}
 	for _, table := range staged {
-		if _, err := db.ExecContext(ctx, "CALL DOLT_RESET(?)", table); err != nil {
+		if err := drainCall(ctx, db, "CALL DOLT_RESET(?)", table); err != nil {
 			return fmt.Errorf("dolt reset %s: %w", table, err)
 		}
 	}
@@ -826,7 +883,7 @@ func stageSchemaTables(ctx context.Context, db DBConn, dirtyBefore map[string]di
 	sort.Strings(tables)
 
 	for _, table := range tables {
-		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('-f', ?)", table); err != nil {
+		if err := drainCall(ctx, db, "CALL DOLT_ADD('-f', ?)", table); err != nil {
 			return false, fmt.Errorf("dolt add %s: %w", table, err)
 		}
 	}
@@ -1145,6 +1202,71 @@ func migrationSQLTouchesTable(sqlText, table string) bool {
 	return false
 }
 
+// procedureCallRe matches a stored-procedure invocation (CALL ...) at a
+// statement boundary, case-insensitively. It decides whether a migration body
+// must have its result sets drained explicitly (see execMigrationBody).
+var procedureCallRe = regexp.MustCompile(`(?i)(?:^|;|\n)\s*CALL\s`)
+
+// drainCall runs a statement (or multi-statement body) that invokes a Dolt
+// stored procedure and fully consumes EVERY result set it returns, leaving the
+// pinned migration connection clean for the next command.
+//
+// Why this matters is an ERROR-PATH asymmetry in go-sql-driver/mysql, not a
+// happy-path gap: mysqlConn.exec (behind ExecContext) does end with
+// handleOk.discardResults(), so a CALL that succeeds is drained already. But
+// every failure before that line — readResultSetHeaderPacket, skipColumns,
+// skipRows — returns early, leaving whatever the server still has queued
+// unread on the wire. mysqlRows.Close() has no such exit: it skips unread rows
+// and discards remaining result sets unconditionally, which is why routing
+// through QueryContext + a deferred Close is drain-safe on both paths.
+//
+// That asymmetry is reachable here precisely because these call sites tolerate
+// an error and keep using the same pinned connection: a multi-statement body
+// like 0040 (four INSERT/CALL DOLT_COMMIT pairs) can fail on statement 4 with
+// more results queued behind it, and MigrateUp and commitMigrationStep both
+// swallow "nothing to commit" and carry on. The next command on that conn —
+// the version-record INSERT, a later DOLT_ADD, or RELEASE_LOCK — then dies on
+// the still-busy connection ("busy buffer" -> "driver: bad connection").
+//
+// This is the necessary half of the fix, not the sufficient half: a
+// load-induced transient (or a "nothing to commit" from a no-op commit) can
+// still surface mid-migration, and the init retry loop then re-runs the whole
+// migration. The frozen non-idempotent migrations (0040 bare-INSERTs its
+// dolt_nonlocal_tables rows, 0041 DELETEs then commits them) are made
+// replay-safe by pre-migration repairs keyed to their version, not by editing
+// their shipped SQL — see preMigrationRepair and migration_repairs.go.
+func drainCall(ctx context.Context, db DBConn, query string, args ...any) error {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for {
+		// Consume every row of the current result set. The values are
+		// irrelevant — a CALL's effect comes from its side effects, not from
+		// anything it returns — but reading them is what frees the connection
+		// buffer for the next command.
+		for rows.Next() { //nolint:revive // intentional drain, no body needed
+		}
+		if !rows.NextResultSet() {
+			break
+		}
+	}
+	return rows.Err()
+}
+
+// execMigrationBody applies one migration file's SQL on the pinned migration
+// connection. Bodies that invoke a stored procedure (today 0040 and 0041, both
+// CALL DOLT_COMMIT) are routed through drainCall so their result sets are
+// consumed; all other migrations keep the unchanged ExecContext path.
+func execMigrationBody(ctx context.Context, db DBConn, sqlText string) error {
+	if !procedureCallRe.MatchString(sqlText) {
+		_, err := db.ExecContext(ctx, sqlText)
+		return err
+	}
+	return drainCall(ctx, db, sqlText)
+}
+
 // migrate brings the source up to its latest version and returns the number of
 // numbered migrations applied plus whether it added the content_hash column to a
 // pre-existing cursor table. The column signal lets MigrateUp stage and commit
@@ -1201,6 +1323,23 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 	if upTo == 0 {
 		upTo = src.latest()
 	}
+
+	// One-shot large-rig notice, ahead of the migration loop below — gated to
+	// the main-source pass only. MigrateUp calls runMigrations once for
+	// mainSource and once for ignoredSource in the same pass; without this
+	// gate a large rig with pending migrations in both sources would print
+	// the warning twice (and issue the COUNT(*) query twice) despite the
+	// "one-shot" framing. Treats a missing issues table as "fresh install"
+	// and emits nothing — on a first-ever run there is no rig to warn about,
+	// and the COUNT(*) query would error on the missing table.
+	// issueRowCounter/emitLargeRigNotice predate this call site (be-8ja);
+	// this just threads them onto main's existing TTY-gated `stderr` writer
+	// instead of a second progressOut.
+	if src.cursorTable == mainSource.cursorTable {
+		rowCount, rowCountErr := issueRowCounter(ctx, db)
+		emitLargeRigNotice(stderr, rowCount, rowCountErr)
+	}
+
 	count := 0
 	for _, mf := range src.list() {
 		if mf.version <= minVersion || mf.version > upTo {
@@ -1210,13 +1349,21 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		if err != nil {
 			return count, fmt.Errorf("reading migration %s: %w", mf.name, err)
 		}
-		if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
-			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
-		}
 
-		// Snapshot the working set before the migration runs so the per-step
-		// commit can force-stage only the tables this migration newly dirties,
-		// leaving pre-existing writes to untouched tables in the working set.
+		// Snapshot the working set BEFORE the pre-migration repair runs, not
+		// just before the migration's own SQL. preMigrationRepair (below) can
+		// itself mutate synced tables (e.g. #4690's ensureDependenciesIDColumn
+		// ALTERs `dependencies`); snapshotting after it ran would misclassify
+		// that mutation as pre-existing dirt to exclude from this step's
+		// commit, so the repair would sit uncommitted in the working set while
+		// the cursor row for this version was already committed -- a killed
+		// process between this step and the pass's final commit would leave
+		// history claiming the version applied while the repaired table's
+		// change was never durably recorded, and the version-gated repair
+		// hook cannot re-run to fix it (its version is no longer pending).
+		// Snapshotting first makes repair-hook mutations count as this step's
+		// own newly-dirtied work, so they land in the same atomic commit as
+		// the migration and its cursor row.
 		var dirtyBeforeStep map[string]dirtyTableState
 		if commitEachStep {
 			dirtyBeforeStep, err = dirtyTables(ctx, db, true)
@@ -1225,8 +1372,13 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 			}
 		}
 
-		fmt.Fprintf(stderr, "migrating schema: %s\n", mf.name)
-		if _, err := db.ExecContext(ctx, string(data)); err != nil {
+		if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
+			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
+		}
+
+		fmt.Fprintf(stderr, "Applying migration %04d: %s…\n", mf.version, humanMigrationName(mf.name))
+		start := time.Now()
+		if err := execMigrationBody(ctx, db, string(data)); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
 		}
 		sum := sha256.Sum256(data)
@@ -1236,11 +1388,19 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		}
 		count++
 
+		// commitEachStep's DOLT_ADD/DOLT_COMMIT is the expensive, fallible
+		// part of this step on the production embedded path. The "done" line
+		// (and its timing) must land after that commit succeeds, not before
+		// it: printing "done" and then hitting a commit error would show an
+		// operator a false completion, and timing that stopped before the
+		// commit would understate the step's real cost. A failed commit
+		// returns before either print statement below runs.
 		if commitEachStep {
 			if err := commitMigrationStep(ctx, db, src.cursorTable, mf.name, dirtyBeforeStep); err != nil {
 				return count, fmt.Errorf("committing migration %s: %w", mf.name, err)
 			}
 		}
+		fmt.Fprintf(stderr, "  done (%.1fs)\n", time.Since(start).Seconds())
 
 		if migrateStepFaultHook != nil {
 			if err := migrateStepFaultHook(ctx, db, mf.version); err != nil {
@@ -1294,11 +1454,11 @@ func commitMigrationStep(ctx context.Context, db DBConn, cursorTable, migrationN
 	}
 	sort.Strings(tables)
 	for _, table := range tables {
-		if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('-f', ?)", table); err != nil {
+		if err := drainCall(ctx, db, "CALL DOLT_ADD('-f', ?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
 		}
 	}
-	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", "schema: apply migration "+migrationName); err != nil {
+	if err := drainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?)", "schema: apply migration "+migrationName); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
 			return fmt.Errorf("committing migration step: %w", err)
 		}

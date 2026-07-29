@@ -1,6 +1,6 @@
 ---
 title: "bd stale"
-description: "Show stale issues (not updated recently)"
+description: "Show issues that haven't been updated recently and may need attention."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

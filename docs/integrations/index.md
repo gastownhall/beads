@@ -27,6 +27,7 @@ bd setup --list
 | `gemini` | [Gemini CLI](/integrations/gemini) | Gemini hooks and `GEMINI.md` |
 | `junie` | [Junie](/integrations/junie) | `.junie/guidelines.md` and MCP config |
 | `kilocode` | [Kilo Code](/integrations/kilocode) | `.kilocode/rules/beads.md` |
+| `kiro` | [Kiro CLI](/integrations/kiro) | `.kiro/steering/beads.md` |
 | `mux` | [Mux](/integrations/mux) | `AGENTS.md`, optional `.mux/AGENTS.md`, and Mux hooks |
 | `opencode` | [OpenCode](/integrations/opencode) | `AGENTS.md` |
 | `windsurf` | [Windsurf](/integrations/windsurf) | `.windsurf/rules/beads.md` |
