@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -150,7 +151,7 @@ func TestRunInTransactionAlreadyClosedDoesNotCommitUnrelatedEvent(t *testing.T) 
 	const strayComment = "uncommitted stray event"
 	if _, err := store.db.ExecContext(ctx,
 		"INSERT INTO events (id, issue_id, event_type, actor, comment) VALUES (?, ?, ?, ?, ?)",
-		issueops.NewEventID(), issue.ID, types.EventCommented, "tester", strayComment,
+		uuid.Must(uuid.NewV7()).String(), issue.ID, types.EventCommented, "tester", strayComment,
 	); err != nil {
 		t.Fatalf("insert stray event: %v", err)
 	}

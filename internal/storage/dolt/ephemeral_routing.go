@@ -271,10 +271,7 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 		return fmt.Errorf("delete copied comments for demoted issue %s: %w", id, err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, issueops.NewEventID(), id, types.EventUpdated, actor, "", "demoted to wisp"); err != nil {
+	if err := issueops.RecordFullEventInTable(ctx, tx, "wisp_events", id, types.EventUpdated, actor, "", "demoted to wisp"); err != nil {
 		return fmt.Errorf("record demotion event for demoted issue %s: %w", id, err)
 	}
 

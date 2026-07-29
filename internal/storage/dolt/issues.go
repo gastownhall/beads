@@ -799,11 +799,7 @@ func doltBuildSQLInClause(ids []string) (string, []interface{}) {
 // =============================================================================
 
 func recordEvent(ctx context.Context, tx *sql.Tx, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
-	_, err := tx.ExecContext(ctx, `
-		INSERT INTO events (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, issueops.NewEventID(), issueID, eventType, actor, oldValue, newValue)
-	return wrapExecError("record event", err)
+	return wrapExecError("record event", issueops.RecordFullEventInTable(ctx, tx, "events", issueID, eventType, actor, oldValue, newValue))
 }
 
 // seedCounterFromExistingIssuesTx scans existing issues to find the highest numeric suffix
