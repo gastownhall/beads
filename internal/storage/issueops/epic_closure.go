@@ -3,24 +3,27 @@ package issueops
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// nonCompletingCloseKeywords mark closes that redirect or abandon work rather
-// than finish a deliverable. Children closed this way must not count toward
-// epic/molecule "complete" eligibility (GH#5026).
-var nonCompletingCloseKeywords = []string{
-	"duplicate",
-	"dup",
-	"wontfix",
-	"won't fix",
-	"wont fix",
-	"superseded",
-	"obsolete",
-	"not planned",
-}
+// nonCompletingCloseRegexp matches close reasons that redirect or abandon work
+// rather than finish a deliverable. Children closed this way must not count
+// toward epic/molecule "complete" eligibility (GH#5026).
+//
+// Matching is word-bounded (\b) rather than raw substring: close_reason is
+// free-form prose (types.Issue.CloseReason is a plain string; cmd/bd/close.go
+// only length-validates it), and a bare substring match false-positives on
+// ordinary English — "added dedup pass for event ingest" contains "dup", and
+// "removed obsolete migration shim" contains "obsolete", yet both describe
+// completed work. The bare "dup" keyword is dropped entirely: it was already
+// redundant with "duplicate"/"dupe" and only added false positives. Likewise
+// the bare adjective "obsolete" is dropped in favor of "obsoleted" — a task
+// closed because it was superseded/deprecated typically reads "obsoleted by
+// X", while "obsolete" alone is commonly just describing what was removed.
+var nonCompletingCloseRegexp = regexp.MustCompile(`(?i)\b(duplicate|dupe|wont ?fix|won't fix|superseded|obsoleted|not planned)\b`)
 
 // IsNonCompletingClose reports whether closeReason is a redirection/abandon
 // (duplicate, wontfix, superseded, …) rather than finished work. Empty reason
@@ -30,13 +33,7 @@ func IsNonCompletingClose(closeReason string) bool {
 	if strings.TrimSpace(closeReason) == "" {
 		return false
 	}
-	lower := strings.ToLower(closeReason)
-	for _, kw := range nonCompletingCloseKeywords {
-		if strings.Contains(lower, kw) {
-			return true
-		}
-	}
-	return false
+	return nonCompletingCloseRegexp.MatchString(closeReason)
 }
 
 // GetEpicsEligibleForClosureInTx returns open epics whose children are all closed
