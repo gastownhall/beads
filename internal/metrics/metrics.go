@@ -46,10 +46,11 @@ func Endpoint() string {
 // so this deliberately ignores BEADS_DIR and the resolved workspace, which is
 // what fixes GH#4807 on a fresh install where no workspace exists yet.
 func DataDir() (string, error) {
-	// UserConfigYamlPath returns a literal "~/..." display string when the home
-	// dir is unresolvable; joining that would make a directory named "~".
-	if _, err := os.UserHomeDir(); err != nil {
+	// os.UserHomeDir can return a non-absolute value (e.g. HOME=~) with no error, creating a literal "~" dir under cwd.
+	if home, err := os.UserHomeDir(); err != nil {
 		return "", fmt.Errorf("metrics: resolve home dir: %w", err)
+	} else if !filepath.IsAbs(home) {
+		return "", fmt.Errorf("metrics: resolve home dir: not absolute: %q", home)
 	}
 	return filepath.Join(filepath.Dir(config.UserConfigYamlPath()), "eventsData"), nil
 }
