@@ -998,6 +998,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd.claim_verify_lost_total` and `bd.claim_verify_recovered_total` count
   loud failures and converted outcomes.
 
+- **Single-issue `bd create --id P.N` no longer leaves `child_counters` stale**
+  (one root cause of [#4750](https://github.com/gastownhall/beads/issues/4750);
+  the issue stays open — three other drift paths remain). `CreateIssueInTxWithResult`
+  only reconciled `child_counters` when the batch path called
+  `ReconcileChildCounters`; an explicit hierarchical `--id` never advanced the
+  parent's `last_child` high-water mark. Once such children were later
+  archived out of `issues`, `GetNextChildIDTx` no longer saw them and could
+  re-mint an already-used suffix — an ID collision with an archived issue.
+  The single-issue path now calls `ReconcileChildCounters` too, and its
+  changed tables are merged into the result so the reconcile actually gets
+  staged for commit.
+
 ## [1.1.2] - 2026-07-26
 
 Hotfix release cut from v1.1.0. (There is no 1.1.1 release: its tag was cut
