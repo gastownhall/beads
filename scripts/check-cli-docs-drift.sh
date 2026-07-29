@@ -77,22 +77,27 @@ GEN_PATHSPECS=(
 
 print_fix_help() {
     echo ""
-    echo "To fix in any environment (build a canonical bd, then regenerate):"
-    echo "  CGO_ENABLED=0 go build -tags gms_pure_go -o ./bd-docs ./cmd/bd/"
-    echo "  ./scripts/generate-cli-docs.sh ./bd-docs"
-    echo "  rm ./bd-docs"
+    echo "To fix in any environment, regenerate with the pipeline's canonical bd"
+    echo "(built from the release pin in docs/cli-docs.pin when set, else from"
+    echo "this checkout, CGO_ENABLED=0 -tags gms_pure_go):"
+    echo "  ./scripts/generate-cli-docs.sh"
 }
 
 # Check out a commit into a scratch worktree and regenerate every generated
-# doc artifact there with the canonical pinned build.
+# doc artifact there with the canonical build: the release pin when that
+# commit has one, else a pure-Go build of the commit's own source.
 regen_worktree() {
     local sha="$1" dir="$2"
     git -C "$PROJECT_ROOT" worktree add --detach --quiet "$dir" "$sha"
     (
         cd "$dir"
-        CGO_ENABLED=0 go build -tags gms_pure_go -o "$dir/.docs-bd" ./cmd/bd/
-        ./scripts/generate-cli-docs.sh "$dir/.docs-bd" >/dev/null
-        rm -f "$dir/.docs-bd"
+        if [ -x scripts/resolve-docs-bd.sh ] && [ -n "$(scripts/resolve-docs-bd.sh)" ]; then
+            ./scripts/generate-cli-docs.sh >/dev/null
+        else
+            CGO_ENABLED=0 go build -tags gms_pure_go -o "$dir/.docs-bd" ./cmd/bd/
+            ./scripts/generate-cli-docs.sh "$dir/.docs-bd" >/dev/null
+            rm -f "$dir/.docs-bd"
+        fi
     )
 }
 

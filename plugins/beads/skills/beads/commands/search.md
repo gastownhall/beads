@@ -1,6 +1,6 @@
 ---
 description: Search issues by text query
-argument-hint: <query> [--status] [--label] [--assignee]
+argument-hint: "<query> [--status] [--label] [--assignee]"
 ---
 
 Search issues across title, description, and ID with a simple text query.

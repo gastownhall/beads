@@ -81,6 +81,7 @@ type listInput struct {
 	longFormat   bool
 	prettyFormat bool
 	flatFormat   bool
+	depsMode     string
 	watchMode    bool
 	noPager      bool
 	formatStr    string
@@ -208,14 +209,14 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	if s, _ := cmd.Flags().GetString("mol-type"); s != "" {
 		mt := types.MolType(s)
 		if !mt.IsValid() {
-			return in, HandleError("invalid mol-type %q (must be swarm, patrol, or work)", s)
+			return in, HandleError("invalid mol-type %q (must be %s)", s, types.ValidMolTypeNames())
 		}
 		in.molType = &mt
 	}
 	if s, _ := cmd.Flags().GetString("wisp-type"); s != "" {
 		wt := types.WispType(s)
 		if !wt.IsValid() {
-			return in, HandleError("invalid wisp-type %q (must be heartbeat, ping, patrol, gc_report, recovery, error, or escalation)", s)
+			return in, HandleError("invalid wisp-type %q (must be %s)", s, types.ValidWispTypeNames())
 		}
 		in.wispType = &wt
 	}
@@ -289,6 +290,28 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	}
 	in.noPager, _ = cmd.Flags().GetBool("no-pager")
 	in.readyFlag, _ = cmd.Flags().GetBool("ready")
+
+	in.depsMode, _ = cmd.Flags().GetString("deps")
+	if in.depsMode != "" {
+		if in.depsMode != "scheduling" && in.depsMode != "all" {
+			return in, HandleErrorRespectJSON("invalid --deps value %q (valid: scheduling, all)", in.depsMode)
+		}
+		// --deps annotates and orders the parent-child tree, so it is meaningful
+		// only in the tree view. Reject the non-tree output modes rather than
+		// accept the flag and silently ignore it, then imply the tree view so a
+		// bare `--deps` renders as intended (mirrors --watch implying --pretty).
+		switch {
+		case in.jsonOutput:
+			return in, HandleErrorRespectJSON("--deps is not supported with --json output")
+		case in.formatStr != "":
+			return in, HandleErrorRespectJSON("--deps is not supported with --format output")
+		case in.flatFormat:
+			return in, HandleErrorRespectJSON("--deps requires the tree view and cannot be combined with --flat")
+		case in.watchMode:
+			return in, HandleErrorRespectJSON("--deps is not supported with --watch")
+		}
+		in.prettyFormat = true
+	}
 
 	if in.sortBy != "" {
 		validSortFields := map[string]bool{

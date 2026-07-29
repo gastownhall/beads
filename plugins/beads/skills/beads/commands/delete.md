@@ -1,6 +1,6 @@
 ---
 description: Delete issues and clean up references
-argument-hint: [issue-ids...] [--force]
+argument-hint: "[issue-ids...] [--force]"
 ---
 
 Delete one or more issues and clean up all references.

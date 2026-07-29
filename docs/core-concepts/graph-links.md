@@ -43,10 +43,10 @@ bd show gt-a1b2 --thread
 Bidirectional "see also" links between related issues. Not blocking, not hierarchical - just related.
 
 **Created by:**
-- `bd relate <id1> <id2>` - Links both issues to each other
+- `bd dep relate <id1> <id2>` - Links both issues to each other
 
 **Removed by:**
-- `bd unrelate <id1> <id2>` - Removes link in both directions
+- `bd dep unrelate <id1> <id2>` - Removes link in both directions
 
 **Use cases:**
 - Cross-referencing related features
@@ -58,7 +58,7 @@ Bidirectional "see also" links between related issues. Not blocking, not hierarc
 
 ```bash
 # Link two related issues
-bd relate bd-auth bd-security
+bd dep relate bd-auth bd-security
 # Result: bd-auth.relates-to includes bd-security
 #         bd-security.relates-to includes bd-auth
 
@@ -67,16 +67,16 @@ bd show bd-auth
 # Shows: Related: bd-security
 
 # Remove the link
-bd unrelate bd-auth bd-security
+bd dep unrelate bd-auth bd-security
 ```
 
 **Multiple links:**
 An issue can have multiple relates-to links:
 
 ```bash
-bd relate bd-api bd-auth
-bd relate bd-api bd-docs
-bd relate bd-api bd-tests
+bd dep relate bd-api bd-auth
+bd dep relate bd-api bd-docs
+bd dep relate bd-api bd-tests
 # bd-api now relates to 3 issues
 ```
 
@@ -229,9 +229,9 @@ Returns all fields including graph links:
 Link related documentation:
 
 ```bash
-bd relate bd-api-ref bd-quickstart
-bd relate bd-api-ref bd-examples
-bd relate bd-quickstart bd-install
+bd dep relate bd-api-ref bd-quickstart
+bd dep relate bd-api-ref bd-examples
+bd dep relate bd-quickstart bd-install
 ```
 
 ### Bug Triage

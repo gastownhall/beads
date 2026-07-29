@@ -19,6 +19,8 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/steveyegge/beads/internal/procid"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
@@ -31,6 +33,15 @@ type ProxyOpts struct {
 	Port        int
 	IdleTimeout time.Duration
 	Server      server.DatabaseServer
+	// StopEpoch is the proxy stop epoch the spawning parent observed under
+	// proxy.lock before forking this proxy. ListenAndServe re-reads the
+	// epoch immediately before publishing proxy.pid and aborts if it has
+	// advanced, so a slow backend start cannot outlast a concurrent
+	// `bd dolt stop` and publish a running proxy after the stop returned.
+	// Empty means "no stop had ever run", which readStopEpoch also reports
+	// for a missing epoch file, so the zero value stays correct for direct
+	// (non-forked) callers such as tests.
+	StopEpoch string
 	// Stats is optional. When non-nil, the proxy records per-event counters
 	// against it; tests use Snapshot() to assert. Production code should
 	// leave this nil.
@@ -43,6 +54,7 @@ type proxyServer struct {
 	idleTimeout time.Duration
 	server      server.DatabaseServer
 	stats       *Stats
+	stopEpoch   string
 
 	logger      *log.Logger
 	listener    net.Listener
@@ -86,6 +98,7 @@ func NewProxyServer(opts ProxyOpts) *proxyServer {
 		idleTimeout: opts.IdleTimeout,
 		server:      opts.Server,
 		stats:       opts.Stats,
+		stopEpoch:   opts.StopEpoch,
 	}
 }
 
@@ -102,6 +115,9 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return fmt.Errorf("acquire %s: %w", LockFileName, err)
 	}
 	defer lock.Unlock()
+	if err := clearSpawnMarkerAfterLock(p.rootDir); err != nil {
+		return fmt.Errorf("clear proxy spawn marker: %w", err)
+	}
 
 	logPath := filepath.Join(p.rootDir, LogFileName)
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) // #nosec G304 -- logPath is derived from operator-supplied config, not untrusted request input
@@ -143,6 +159,30 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	p.listener = ln
 	defer func() { _ = ln.Close() }()
 	p.stats.IncListenAndServe()
+	dataPort, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		return fmt.Errorf("proxy: unexpected data listener address %T", ln.Addr())
+	}
+
+	if _, err := identity.WriteSecret(p.rootDir); err != nil {
+		return fmt.Errorf("write proxy secret: %w", err)
+	}
+
+	var identMu sync.RWMutex
+	identReply := identity.IdentReply{
+		Schema:   pidfile.SchemaV2,
+		Role:     pidfile.KindProxy,
+		DataPort: dataPort.Port,
+	}
+	control, err := startControl(p.rootDir, func() identity.IdentReply {
+		identMu.RLock()
+		defer identMu.RUnlock()
+		return identReply
+	})
+	if err != nil {
+		return fmt.Errorf("start control listener: %w", err)
+	}
+	defer func() { _ = control.Close() }()
 
 	p.stats.IncBackendStart()
 	if err := p.server.Start(ctx); err != nil {
@@ -154,11 +194,51 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		_ = stopBackendBounded(p.server)
 		return fmt.Errorf("database server not ready: %w", err)
 	}
+	birth, err := procid.Capture(os.Getpid())
+	if err != nil {
+		p.stats.IncBackendStop()
+		_ = stopBackendBounded(p.server)
+		return fmt.Errorf("capture proxy birth identity: %w", err)
+	}
+	rootID, err := identity.RootID(p.rootDir)
+	if err != nil {
+		p.stats.IncBackendStop()
+		_ = stopBackendBounded(p.server)
+		return fmt.Errorf("resolve proxy root identity: %w", err)
+	}
+	upstreamID := p.server.ID(ctx)
+	identMu.Lock()
+	identReply.RootID = rootID
+	identReply.UpstreamID = upstreamID
+	identReply.PID = os.Getpid()
+	identReply.Birth = string(birth)
+	identReply.ControlPort = control.Port()
+	identMu.Unlock()
+
+	// Last fence before publishing: the spawn marker was cleared when this
+	// process took proxy.lock, so a `bd dolt stop` that began during a slow
+	// backend start has no record of this attempt. It did advance the stop
+	// epoch first, so re-check it here and abort instead of publishing a
+	// running proxy after that stop returned.
+	if changed, err := stopEpochChanged(p.rootDir, p.stopEpoch); err != nil {
+		p.stats.IncBackendStop()
+		_ = stopBackendBounded(p.server)
+		return fmt.Errorf("re-check proxy stop epoch before publish: %w", err)
+	} else if changed {
+		p.stats.IncBackendStop()
+		_ = stopBackendBounded(p.server)
+		return fmt.Errorf("%w for %s: stop epoch advanced during startup", errStartInterrupted, p.rootDir)
+	}
 
 	if err := pidfile.Write(p.rootDir, PIDFileName, pidfile.PidFile{
-		Pid:        os.Getpid(),
-		Port:       p.port,
-		UpstreamID: p.server.ID(ctx),
+		Pid:         os.Getpid(),
+		Port:        dataPort.Port,
+		UpstreamID:  upstreamID,
+		Schema:      pidfile.SchemaV2,
+		Kind:        pidfile.KindProxy,
+		Birth:       string(birth),
+		RootID:      rootID,
+		ControlPort: control.Port(),
 	}); err != nil {
 		p.stats.IncBackendStop()
 		_ = stopBackendBounded(p.server)
@@ -170,6 +250,7 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	g.Go(func() error {
 		<-gctx.Done()
 		_ = p.listener.Close()
+		_ = control.Close()
 		return nil
 	})
 	g.Go(func() error { return p.idleWatcher(gctx) })

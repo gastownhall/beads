@@ -54,4 +54,13 @@ func TestUnclaimCommand_Flags(t *testing.T) {
 	if forceFlag.DefValue != "false" {
 		t.Errorf("expected force default value 'false', got %q", forceFlag.DefValue)
 	}
+
+	// The --if-assignee flag makes the release an atomic compare-and-swap.
+	ifAssigneeFlag := unclaimCmd.Flags().Lookup("if-assignee")
+	if ifAssigneeFlag == nil {
+		t.Fatal("if-assignee flag should be defined")
+	}
+	if ifAssigneeFlag.DefValue != "" {
+		t.Errorf("expected if-assignee default value '', got %q", ifAssigneeFlag.DefValue)
+	}
 }

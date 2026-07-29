@@ -72,7 +72,7 @@ func TestPrepareDoltCLITransferCommandAppliesCredentialsAndS3Env(t *testing.T) {
 	t.Setenv(awsResponseChecksumValidationEnv, "when_supported")
 	creds := &remoteCredentials{username: "user", password: "pass"}
 
-	cmd, cancel := prepareDoltCLITransferCommand(context.Background(), "/tmp/beads-cli", creds, true, "fetch", "peer")
+	cmd, _, cancel := prepareDoltCLITransferCommand(context.Background(), "/tmp/beads-cli", creds, true, "fetch", "peer")
 	defer cancel()
 
 	if cmd.Dir != "/tmp/beads-cli" {

@@ -1,6 +1,6 @@
 ---
 title: "bd set-state"
-description: "Set operational state (creates event + updates label)"
+description: "Atomically set operational state on an issue."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

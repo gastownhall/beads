@@ -1,6 +1,6 @@
 ---
 title: "bd repo"
-description: "Manage multiple repository configuration"
+description: "Configure and manage multiple repository support for multi-repo hydration."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}
@@ -28,7 +28,7 @@ Examples:
   bd repo sync                       # Sync from all configured repos
 
 ```
-bd repo [command]
+bd repo [flags]
 ```
 
 ## bd repo add

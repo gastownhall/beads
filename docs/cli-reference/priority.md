@@ -1,6 +1,6 @@
 ---
 title: "bd priority"
-description: "Set the priority of an issue"
+description: "Set the priority of an issue."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

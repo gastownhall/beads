@@ -1,6 +1,6 @@
 ---
 description: Log and label agent interactions (append-only JSONL)
-argument-hint: record|label
+argument-hint: "record|label"
 ---
 
 Append-only audit logging for agent interactions (prompts, responses, tool calls) in `.beads/interactions.jsonl`.
@@ -24,5 +24,4 @@ Each line is one event. Labeling is done by appending a new `"label"` event refe
 
 - Audit entries are **append-only** (no in-place edits).
 - `bd dolt push` includes `.beads/interactions.jsonl` in the commit allowlist.
-
 

@@ -14,11 +14,13 @@ import (
 )
 
 func TestProxiedServerDelete(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("delete_single_issue", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dsi")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dsi")
 		issue := bdProxiedCreate(t, bd, p.dir, "Delete me", "-t", "task")
 		bdProxiedDelete(t, bd, p.dir, issue.ID, "--force")
 		db := openProxiedDB(t, p)
@@ -26,7 +28,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_without_force_shows_preview", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dwf")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dwf")
 		issue := bdProxiedCreate(t, bd, p.dir, "Preview only", "-t", "task")
 
 		out := bdProxiedDelete(t, bd, p.dir, issue.ID)
@@ -39,7 +42,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_clears_aux_tables", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dcat")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dcat")
 		neighbor := bdProxiedCreate(t, bd, p.dir, "Neighbor", "-t", "task")
 		issue := bdProxiedCreate(t, bd, p.dir, "Aux cleanup", "-t", "task",
 			"--label", "alpha",
@@ -74,7 +78,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_json_returns_result_shape", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "djs")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "djs")
 		issue := bdProxiedCreate(t, bd, p.dir, "JSON shape", "-t", "task")
 
 		got := bdProxiedDeleteJSON(t, bd, p.dir, "--json", issue.ID, "--force")
@@ -97,7 +102,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_leaf_clears_outbound_dep_rows", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dlc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dlc")
 		a := bdProxiedCreate(t, bd, p.dir, "Survivor A", "-t", "task")
 		b := bdProxiedCreate(t, bd, p.dir, "Will be deleted", "-t", "task",
 			"--deps", "depends-on:"+a.ID)
@@ -120,7 +126,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_creates_dolt_commit", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ddc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ddc")
 		issue := bdProxiedCreate(t, bd, p.dir, "Dolt commit test", "-t", "task")
 
 		db := openProxiedDB(t, p)
@@ -144,7 +151,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_bulk_no_resurrection", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dbr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dbr")
 
 		const total = 20
 		const toDelete = 10
@@ -177,7 +185,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_nonexistent", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dne")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dne")
 		out := bdProxiedDeleteFail(t, bd, p.dir, "dne-doesnotexist", "--force")
 		if !strings.Contains(strings.ToLower(out), "not found") &&
 			!strings.Contains(strings.ToLower(out), "error") {
@@ -186,7 +195,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_batch", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dbt")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dbt")
 		a := bdProxiedCreate(t, bd, p.dir, "Batch 1", "-t", "task")
 		b := bdProxiedCreate(t, bd, p.dir, "Batch 2", "-t", "task")
 		c := bdProxiedCreate(t, bd, p.dir, "Batch 3", "-t", "task")
@@ -200,7 +210,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_force_cascades_dependents", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dfc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dfc")
 		parent := bdProxiedCreate(t, bd, p.dir, "Force parent", "-t", "task")
 		child := bdProxiedCreate(t, bd, p.dir, "Force child", "-t", "task",
 			"--deps", "depends-on:"+parent.ID)
@@ -213,7 +224,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_cleans_up_dependencies", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dcd")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dcd")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent", "-t", "task")
 		child := bdProxiedCreate(t, bd, p.dir, "Child", "-t", "task",
 			"--deps", "depends-on:"+parent.ID)
@@ -235,7 +247,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_always_cascades_dependents", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dac")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dac")
 		parent := bdProxiedCreate(t, bd, p.dir, "Parent", "-t", "epic")
 		child := bdProxiedCreate(t, bd, p.dir, "Child", "-t", "task",
 			"--parent", parent.ID)
@@ -248,7 +261,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_cascade_spans_all_dep_types", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dcs")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dcs")
 		a := bdProxiedCreate(t, bd, p.dir, "A", "-t", "task")
 		b := bdProxiedCreate(t, bd, p.dir, "B", "-t", "task",
 			"--deps", "depends-on:"+a.ID)
@@ -264,7 +278,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_json_counts_match_cascade", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "djc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "djc")
 		a := bdProxiedCreate(t, bd, p.dir, "Chain A", "-t", "task")
 		b := bdProxiedCreate(t, bd, p.dir, "Chain B", "-t", "task",
 			"--deps", "depends-on:"+a.ID)
@@ -288,7 +303,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_dry_run_does_not_mutate", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ddr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ddr")
 		issue := bdProxiedCreate(t, bd, p.dir, "Dry run target", "-t", "task")
 
 		got := bdProxiedDeleteJSON(t, bd, p.dir, "--json", issue.ID, "--dry-run")
@@ -301,7 +317,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_preview_lists_not_found", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dpn")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dpn")
 		issue := bdProxiedCreate(t, bd, p.dir, "Preview NotFound", "-t", "task")
 
 		out := bdProxiedDeleteFail(t, bd, p.dir, issue.ID, "dpn-bogus")
@@ -317,7 +334,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_preview_lists_connected", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dpc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dpc")
 		neighbor := bdProxiedCreate(t, bd, p.dir, "Preview neighbor", "-t", "task")
 		target := bdProxiedCreate(t, bd, p.dir, "Preview target", "-t", "task",
 			"--deps", "depends-on:"+neighbor.ID)
@@ -345,7 +363,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_rewrites_text_references", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "drt")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "drt")
 		neighbor := bdProxiedCreate(t, bd, p.dir, "Rewrite neighbor", "-t", "task")
 		target := bdProxiedCreate(t, bd, p.dir, "Rewrite target", "-t", "task",
 			"--deps", "depends-on:"+neighbor.ID)
@@ -369,7 +388,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_references_updated_count_reported", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dru")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dru")
 		neighbor := bdProxiedCreate(t, bd, p.dir, "Refs neighbor", "-t", "task")
 		target := bdProxiedCreate(t, bd, p.dir, "Refs target", "-t", "task",
 			"--deps", "depends-on:"+neighbor.ID)
@@ -387,7 +407,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_zero_aux_rows_after", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dza")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dza")
 		outbound := bdProxiedCreate(t, bd, p.dir, "Outbound dependee", "-t", "task")
 		issue := bdProxiedCreate(t, bd, p.dir, "Zero aux target", "-t", "task",
 			"--label", "alpha",
@@ -426,7 +447,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_from_file", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dff")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dff")
 		a := bdProxiedCreate(t, bd, p.dir, "From-file 1", "-t", "task")
 		b := bdProxiedCreate(t, bd, p.dir, "From-file 2", "-t", "task")
 		c := bdProxiedCreate(t, bd, p.dir, "From-file 3", "-t", "task")
@@ -446,7 +468,8 @@ func TestProxiedServerDelete(t *testing.T) {
 	})
 
 	t.Run("delete_cascade_flag_is_error", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dcn")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dcn")
 		issue := bdProxiedCreate(t, bd, p.dir, "Cascade flag", "-t", "task")
 
 		out := bdProxiedDeleteFail(t, bd, p.dir, issue.ID, "--force", "--cascade")
@@ -460,11 +483,13 @@ func TestProxiedServerDelete(t *testing.T) {
 }
 
 func TestProxiedServerDeleteWisp(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
 	t.Run("delete_mixed_wisp_and_issue_partition", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dmp")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dmp")
 		issue := bdProxiedCreate(t, bd, p.dir, "Regular target", "-t", "task")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp target", "--ephemeral")
 
@@ -479,7 +504,8 @@ func TestProxiedServerDeleteWisp(t *testing.T) {
 	})
 
 	t.Run("delete_wisp_clears_wisp_aux_tables", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dwc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dwc")
 		a := bdProxiedCreate(t, bd, p.dir, "Wisp aux A", "--ephemeral")
 		_ = bdProxiedCreate(t, bd, p.dir, "Wisp aux B", "--ephemeral",
 			"--deps", "depends-on:"+a.ID)
@@ -514,7 +540,8 @@ func TestProxiedServerDeleteWisp(t *testing.T) {
 	})
 
 	t.Run("delete_wisp_routes_to_wisps_table", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dwr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dwr")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp delete routing", "--ephemeral")
 
 		db := openProxiedDB(t, p)
@@ -535,7 +562,8 @@ func TestProxiedServerDeleteWisp(t *testing.T) {
 	})
 
 	t.Run("delete_wisp_batch", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dwb")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dwb")
 		a := bdProxiedCreate(t, bd, p.dir, "Wisp batch 1", "--ephemeral")
 		b := bdProxiedCreate(t, bd, p.dir, "Wisp batch 2", "--ephemeral")
 		c := bdProxiedCreate(t, bd, p.dir, "Wisp batch 3", "--ephemeral")
@@ -549,7 +577,8 @@ func TestProxiedServerDeleteWisp(t *testing.T) {
 	})
 
 	t.Run("delete_wisp_cascades_dependents", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dwc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dwc")
 		parent := bdProxiedCreate(t, bd, p.dir, "Wisp parent", "--ephemeral")
 		child := bdProxiedCreate(t, bd, p.dir, "Wisp child", "--ephemeral",
 			"--deps", "depends-on:"+parent.ID)
@@ -562,7 +591,8 @@ func TestProxiedServerDeleteWisp(t *testing.T) {
 	})
 
 	t.Run("delete_wisp_cascade_spans_all_dep_types", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dws")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dws")
 		a := bdProxiedCreate(t, bd, p.dir, "Wisp A", "--ephemeral")
 		b := bdProxiedCreate(t, bd, p.dir, "Wisp B", "--ephemeral",
 			"--deps", "depends-on:"+a.ID)
@@ -578,7 +608,8 @@ func TestProxiedServerDeleteWisp(t *testing.T) {
 	})
 
 	t.Run("delete_wisp_skips_dolt_commit", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dwdc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dwdc")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp commit skip", "--ephemeral")
 
 		db := openProxiedDB(t, p)
@@ -602,7 +633,8 @@ func TestProxiedServerDeleteWisp(t *testing.T) {
 	})
 
 	t.Run("delete_wisp_dry_run_does_not_mutate", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dwdr")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dwdr")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp dry-run target", "--ephemeral")
 
 		got := bdProxiedDeleteJSON(t, bd, p.dir, "--json", wisp.ID, "--dry-run")
@@ -615,7 +647,8 @@ func TestProxiedServerDeleteWisp(t *testing.T) {
 	})
 
 	t.Run("delete_wisp_rewrites_text_references", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dwrt")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dwrt")
 		neighbor := bdProxiedCreate(t, bd, p.dir, "Wisp neighbor", "--ephemeral")
 		target := bdProxiedCreate(t, bd, p.dir, "Wisp target", "--ephemeral",
 			"--deps", "depends-on:"+neighbor.ID)
@@ -639,7 +672,8 @@ func TestProxiedServerDeleteWisp(t *testing.T) {
 	})
 
 	t.Run("delete_wisp_nonexistent", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "dwn")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "dwn")
 		out := bdProxiedDeleteFail(t, bd, p.dir, "dwn-doesnotexist", "--force")
 		if !strings.Contains(strings.ToLower(out), "not found") {
 			t.Errorf("expected `not found` error for bogus wisp id, got: %s", out)
@@ -648,10 +682,11 @@ func TestProxiedServerDeleteWisp(t *testing.T) {
 }
 
 func TestProxiedServerDeleteConcurrent(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 	bd := buildEmbeddedBD(t)
 
-	p := bdProxiedInit(t, bd, "ddc")
+	p := newSharedProxiedProject(t, bd, "ddc")
 	issue := bdProxiedCreate(t, bd, p.dir, "Concurrent delete contest", "-t", "task")
 
 	const n = 5

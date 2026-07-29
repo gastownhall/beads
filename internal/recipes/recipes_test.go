@@ -10,7 +10,7 @@ import (
 
 func TestBuiltinRecipes(t *testing.T) {
 	// Ensure all expected built-in recipes exist
-	expected := []string{"cursor", "windsurf", "cody", "kilocode", "claude", "copilot", "gemini", "factory", "codex", "mux", "aider", "junie"}
+	expected := []string{"cursor", "windsurf", "cody", "kilocode", "kiro", "claude", "copilot", "gemini", "factory", "codex", "mux", "aider", "junie"}
 
 	for _, name := range expected {
 		recipe, ok := BuiltinRecipes[name]

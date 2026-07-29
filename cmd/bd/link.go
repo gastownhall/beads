@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -26,9 +27,6 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("link is not supported in proxied-server mode")
-		}
 		CheckReadonly("link")
 
 		evt := metrics.NewCommandEvent("link")
@@ -37,6 +35,10 @@ Examples:
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runLinkProxiedServer(cmd, rootCtx, args)
+		}
 
 		id1 := args[0]
 		id2 := args[1]
@@ -60,11 +62,11 @@ Examples:
 		}
 		defer toCleanup()
 
-		if isChildOf(fromID, toID) {
+		dt := types.DependencyType(depType)
+		if isDisallowedHierarchicalDependency(fromID, toID, dt) {
 			return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 		}
 
-		dt := types.DependencyType(depType)
 		if !dt.IsValid() {
 			return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
 		}
@@ -75,7 +77,7 @@ Examples:
 			Type:        dt,
 		}
 
-		if err := fromStore.AddDependency(ctx, dep, actor); err != nil {
+		if err := fromStore.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{EmitEvent: true}); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 

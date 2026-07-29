@@ -66,12 +66,14 @@ func bdProxiedCommentsJSON(t *testing.T, bd, dir string, args ...string) []*type
 }
 
 func TestProxiedServerComment(t *testing.T) {
-	requireProxiedServerEnv(t)
+	requireSharedProxiedServer(t)
+	t.Parallel()
 
 	bd := buildEmbeddedBD(t)
 
 	t.Run("comment_shorthand_then_list", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cm")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cm")
 		issue := bdProxiedCreate(t, bd, p.dir, "Needs a comment")
 
 		out := bdProxiedComment(t, bd, p.dir, issue.ID, "first thoughts")
@@ -86,7 +88,8 @@ func TestProxiedServerComment(t *testing.T) {
 	})
 
 	t.Run("comments_add_subcommand", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "ca")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ca")
 		issue := bdProxiedCreate(t, bd, p.dir, "Add via subcommand")
 
 		if _, _, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", issue.ID, "via add"); err != nil {
@@ -103,7 +106,8 @@ func TestProxiedServerComment(t *testing.T) {
 	})
 
 	t.Run("multiple_comments_ordered", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "mo")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "mo")
 		issue := bdProxiedCreate(t, bd, p.dir, "Multi comment")
 
 		bdProxiedComment(t, bd, p.dir, issue.ID, "one")
@@ -120,7 +124,8 @@ func TestProxiedServerComment(t *testing.T) {
 	})
 
 	t.Run("comment_json_output", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cj")
 		issue := bdProxiedCreate(t, bd, p.dir, "JSON comment")
 
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comment", "--json", issue.ID, "json body")
@@ -147,7 +152,8 @@ func TestProxiedServerComment(t *testing.T) {
 	})
 
 	t.Run("no_comments_message", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "nc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "nc")
 		issue := bdProxiedCreate(t, bd, p.dir, "Uncommented")
 
 		out := bdProxiedComments(t, bd, p.dir, issue.ID)
@@ -157,7 +163,8 @@ func TestProxiedServerComment(t *testing.T) {
 	})
 
 	t.Run("empty_text_fails", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "et")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "et")
 		issue := bdProxiedCreate(t, bd, p.dir, "Empty text")
 
 		out := bdProxiedCommentFail(t, bd, p.dir, issue.ID, "")
@@ -167,7 +174,8 @@ func TestProxiedServerComment(t *testing.T) {
 	})
 
 	t.Run("missing_issue_fails", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "mi")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "mi")
 		out := bdProxiedCommentFail(t, bd, p.dir, "mi-99999", "orphan comment")
 		if !strings.Contains(out, "not found") {
 			t.Errorf("expected not-found error, got:\n%s", out)
@@ -175,7 +183,8 @@ func TestProxiedServerComment(t *testing.T) {
 	})
 
 	t.Run("comments_add_json", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "aj")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "aj")
 		issue := bdProxiedCreate(t, bd, p.dir, "Add JSON")
 
 		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", issue.ID, "add json body", "--json")
@@ -199,7 +208,8 @@ func TestProxiedServerComment(t *testing.T) {
 	})
 
 	t.Run("comment_from_file", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "cf")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cf")
 		issue := bdProxiedCreate(t, bd, p.dir, "Comment from file")
 
 		file := filepath.Join(t.TempDir(), "body.txt")
@@ -219,7 +229,8 @@ func TestProxiedServerComment(t *testing.T) {
 	})
 
 	t.Run("comments_add_from_file", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "af")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "af")
 		issue := bdProxiedCreate(t, bd, p.dir, "Add from file")
 
 		file := filepath.Join(t.TempDir(), "note.txt")
@@ -238,7 +249,8 @@ func TestProxiedServerComment(t *testing.T) {
 	})
 
 	t.Run("comments_list_local_time", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "lt")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lt")
 		issue := bdProxiedCreate(t, bd, p.dir, "Local time")
 		bdProxiedComment(t, bd, p.dir, issue.ID, "timed comment")
 
@@ -249,7 +261,8 @@ func TestProxiedServerComment(t *testing.T) {
 	})
 
 	t.Run("comment_on_wisp_routes_to_wisp_comments", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "wc")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wc")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp target", "--ephemeral")
 
 		out := bdProxiedComment(t, bd, p.dir, wisp.ID, "wisp comment")
@@ -281,7 +294,8 @@ func TestProxiedServerComment(t *testing.T) {
 	})
 
 	t.Run("comments_add_on_wisp", func(t *testing.T) {
-		p := bdProxiedInit(t, bd, "wa")
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "wa")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp add target", "--ephemeral")
 
 		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", wisp.ID, "wisp via add"); err != nil {

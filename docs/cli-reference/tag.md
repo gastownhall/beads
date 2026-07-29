@@ -1,6 +1,6 @@
 ---
 title: "bd tag"
-description: "Add a label to an issue"
+description: "Add a label to an issue."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

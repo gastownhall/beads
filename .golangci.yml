@@ -158,6 +158,14 @@ linters:
         linters:
           - gosec
         text: "G705"
+      # G705: XSS via taint in CLI progress/warning/error output — every flagged
+      # sink is fmt.Fprint* to the terminal (os.Stderr or cobra's stdout/stderr
+      # writers), never a browser context (surfaced by the gosec bundled with
+      # golangci-lint v2.10)
+      - path: 'cmd/bd/(ado|doctor|errors|github|gitlab|hooks|jira|linear|main|notion|sync_push_pull)\.go'
+        linters:
+          - gosec
+        text: "G705"
       # errcheck: fmt.Fprintf errors are noise in CLI help text generation
       - path: 'cmd/bd/help_all\.go'
         linters:
@@ -174,11 +182,6 @@ linters:
         linters:
           - unparam
         text: 'reimportConflicts|resolveConflictsByTimestamp'
-      # unparam: readOnly param kept for API symmetry with fix/sqlite_open.go
-      - path: 'cmd/bd/doctor/sqlite_open\.go'
-        linters:
-          - unparam
-        text: 'readOnly'
       # unparam: childrenMap return computed for future parent-child display
       - path: 'cmd/bd/list\.go'
         linters:

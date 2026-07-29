@@ -1,6 +1,6 @@
 ---
 title: "bd count"
-description: "Count issues matching filters"
+description: "Count issues matching the specified filters."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

@@ -1,6 +1,6 @@
 ---
 title: "bd quickstart"
-description: "Quick start guide for bd"
+description: "Display a quick start guide showing common bd workflows and patterns."
 ---
 
 {/* AUTO-GENERATED: do not edit manually */}

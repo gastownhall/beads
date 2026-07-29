@@ -1,12 +1,21 @@
 package dberrors
 
 import (
+	"database/sql"
 	"errors"
 	"regexp"
 	"strings"
 
 	mysql "github.com/go-sql-driver/mysql"
 )
+
+// IsNoRows reports whether err is a "no rows in result set" error — a single-row
+// query (QueryRow/Scan) that matched nothing. Repository Get methods surface a
+// missing row as the bare sql.ErrNoRows; classifying it here lets callers detect
+// a missing row without importing database/sql into higher layers.
+func IsNoRows(err error) bool {
+	return errors.Is(err, sql.ErrNoRows)
+}
 
 var (
 	quotedTableMissingPattern   = regexp.MustCompile(`(?i)\btable\s+'[^']+'\s+(doesn't exist|does not exist)\b`)

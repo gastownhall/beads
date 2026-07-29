@@ -100,6 +100,16 @@ func ForcePush(ctx context.Context, db DBConn, remote, branch, user string) erro
 // user/auth contract; only the fetch step authenticates, since the merge step
 // is local.
 func Pull(ctx context.Context, db DBConn, remote, branch, user string) error {
+	return PullWithStrategy(ctx, db, remote, branch, user, "")
+}
+
+// PullWithStrategy is Pull with the #4992 part 2 operator escape hatch:
+// conflicts TryAutoResolveMergeConflicts declines are, when strategy is
+// non-empty, resolved with strategy ("ours" or "theirs") instead of aborting
+// the pull for the operator to resolve out-of-band. strategy == "" is exactly
+// Pull's behavior. See MergeAndSettleWithStrategy/SettleMerge for the
+// resolution logic.
+func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, strategy string) error {
 	if user != "" {
 		if _, err := db.ExecContext(ctx, "CALL DOLT_FETCH('--user', ?, ?, ?)", user, remote, branch); err != nil {
 			return fmt.Errorf("fetch from %s/%s: %w", remote, branch, err)
@@ -110,7 +120,7 @@ func Pull(ctx context.Context, db DBConn, remote, branch, user string) error {
 		}
 	}
 	trackingRef := remote + "/" + branch
-	if err := MergeAndSettle(ctx, db, trackingRef); err != nil {
+	if err := MergeAndSettleWithStrategy(ctx, db, trackingRef, strategy); err != nil {
 		return fmt.Errorf("merge %s: %w", trackingRef, err)
 	}
 	return nil
