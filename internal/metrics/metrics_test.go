@@ -52,6 +52,21 @@ func TestDataDirErrorsWithoutResolvableHome(t *testing.T) {
 	}
 }
 
+// TestDataDirErrorsOnNonAbsoluteHome guards HOME=~, which os.UserHomeDir()
+// returns unchanged with no error and would otherwise yield a relative path.
+func TestDataDirErrorsOnNonAbsoluteHome(t *testing.T) {
+	t.Setenv("HOME", "~")
+	t.Setenv("USERPROFILE", "~")
+
+	got, err := DataDir()
+	if err == nil {
+		t.Fatalf("DataDir() = %q, want error when the home dir is not absolute", got)
+	}
+	if got != "" {
+		t.Errorf("DataDir() returned path %q alongside its error, want empty", got)
+	}
+}
+
 func TestDataDirIgnoresBeadsDir(t *testing.T) {
 	isolateUserProfile(t)
 	want := wantDataDir(t)
