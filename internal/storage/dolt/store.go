@@ -2110,10 +2110,14 @@ const (
 	// commit with operator guidance so the pull never auto-commits unsafe
 	// config (GH#2455 + GH#2474).
 	configIncludeUserKVOnly
-	// configIncludeAll stages every dirty config row. Used only to conclude a
-	// merge whose conflicts the operator resolved explicitly (bd federation
-	// sync --strategy): that resolution is intentional, so a resolved
-	// issue_prefix (or any config row) must be committed, not dropped.
+	// configIncludeAll stages every dirty config row. Used by
+	// CommitMergeResolution to conclude a merge whose conflicts the operator
+	// resolved explicitly (bd federation sync --strategy), and by
+	// CommitWithConfig for the explicit operator commit paths (bd dolt commit
+	// / bd vc commit via CommitPending, plus bd config set / bd init / bd
+	// rename-prefix): in both cases the operator explicitly asked for this, so
+	// any dirty config row (issue_prefix included) must be committed, not
+	// dropped.
 	configIncludeAll
 )
 
@@ -2146,12 +2150,13 @@ func (s *DoltStore) Commit(ctx context.Context, message string) error {
 // configConflictsAreMemoryConvergent) — so widening the commit screen to the
 // whole kv. namespace cannot auto-resolve a genuine kv.* conflict; it only stops
 // generic `bd kv set` writes from wedging the pull. Config is staged explicitly
-// (via DOLT_ADD in commitWorkingSet) rather than through CommitWithConfig's
-// DOLT_COMMIT('-Am'), which was observed not to stage config reliably under the
-// server-mode stored-procedure path. Committing this clone's own kv.* rows as the
-// merge basis is the same explicit, user-initiated action CommitPending ('bd dolt
-// commit') already performs, so it does not widen the concurrent-writer race
-// GH#2455 guards against.
+// via per-table DOLT_ADD in commitWorkingSet — the same mechanism CommitWithConfig
+// now uses (GH#4934) — rather than a blanket DOLT_COMMIT('-Am'), which was
+// observed not to stage config reliably under the server-mode stored-procedure
+// path. Committing this clone's own kv.* rows as the merge basis is the same
+// explicit, user-initiated action CommitPending ('bd dolt commit') already
+// performs, so it does not widen the concurrent-writer race GH#2455 guards
+// against.
 func (s *DoltStore) commitBeforePull(ctx context.Context, message string) error {
 	return s.commitWorkingSet(ctx, message, configIncludeUserKVOnly)
 }
