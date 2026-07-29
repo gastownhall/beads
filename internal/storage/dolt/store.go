@@ -2419,10 +2419,14 @@ const (
 	// commit with operator guidance so the pull never auto-commits unsafe
 	// config (GH#2455 + GH#2474).
 	configIncludeUserKVOnly
-	// configIncludeAll stages every dirty config row. Used only to conclude a
-	// merge whose conflicts the operator resolved explicitly (bd federation
-	// sync --strategy): that resolution is intentional, so a resolved
-	// issue_prefix (or any config row) must be committed, not dropped.
+	// configIncludeAll stages every dirty config row. Used by
+	// CommitMergeResolution to conclude a merge whose conflicts the operator
+	// resolved explicitly (bd federation sync --strategy), and by
+	// CommitWithConfig for the explicit operator commit paths (bd dolt commit
+	// / bd vc commit via CommitPending, plus bd config set / bd init / bd
+	// rename-prefix): in both cases the operator explicitly asked for this, so
+	// any dirty config row (issue_prefix included) must be committed, not
+	// dropped.
 	configIncludeAll
 )
 
@@ -2455,12 +2459,13 @@ func (s *DoltStore) Commit(ctx context.Context, message string) error {
 // configConflictsAreMemoryConvergent) — so widening the commit screen to the
 // whole kv. namespace cannot auto-resolve a genuine kv.* conflict; it only stops
 // generic `bd kv set` writes from wedging the pull. Config is staged explicitly
-// (via DOLT_ADD in commitWorkingSet) rather than through CommitWithConfig's
-// DOLT_COMMIT('-Am'), which was observed not to stage config reliably under the
-// server-mode stored-procedure path. Committing this clone's own kv.* rows as the
-// merge basis is the same explicit, user-initiated action CommitPending ('bd dolt
-// commit') already performs, so it does not widen the concurrent-writer race
-// GH#2455 guards against.
+// via per-table DOLT_ADD in commitWorkingSet — the same mechanism CommitWithConfig
+// now uses (GH#4934) — rather than a blanket DOLT_COMMIT('-Am'), which was
+// observed not to stage config reliably under the server-mode stored-procedure
+// path. Committing this clone's own kv.* rows as the merge basis is the same
+// explicit, user-initiated action CommitPending ('bd dolt commit') already
+// performs, so it does not widen the concurrent-writer race GH#2455 guards
+// against.
 func (s *DoltStore) commitBeforePull(ctx context.Context, message string) error {
 	return s.commitWorkingSet(ctx, message, configIncludeUserKVOnly)
 }
@@ -2649,22 +2654,17 @@ func (s *DoltStore) assertDirtyConfigUserKVOnly(ctx context.Context, conn *sql.C
 
 // CommitWithConfig creates a Dolt commit that includes the config table.
 // Use this instead of Commit when the caller intentionally modified config
-// (e.g., CommitPending after 'bd config set', 'bd init', or 'bd rename-prefix').
-// GH#2455: Commit() excludes config to prevent sweeping up stale changes.
+// (e.g., CommitPending after 'bd config set', 'bd init', 'bd rename-prefix',
+// or the explicit operator path 'bd dolt commit' / 'bd vc commit').
+//
+// GH#2455: Commit() excludes config to prevent sweeping up stale changes into
+// unrelated auto-commits. Explicit operator commits use this method instead.
+//
+// GH#4934: Implemented via commitWorkingSet(configIncludeAll) with explicit
+// DOLT_ADD per dirty table (including config). DOLT_COMMIT('-Am') was observed
+// not to stage config reliably under the server-mode stored-procedure path.
 func (s *DoltStore) CommitWithConfig(ctx context.Context, message string) error {
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to acquire connection: %w", err)
-	}
-	defer conn.Close()
-
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
-		if isDoltNothingToCommit(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to commit: %w", err)
-	}
-	return nil
+	return s.commitWorkingSet(ctx, message, configIncludeAll)
 }
 
 // doltAddAndCommit stages the specified tables and commits on a pinned
