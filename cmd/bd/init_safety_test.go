@@ -19,6 +19,21 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 )
 
+// hermeticInitEnv sets sync.remote via BD_SYNC_REMOTE (viper AutomaticEnv,
+// config.go:165-169), stripped of inherited BD_*/BEADS_* vars and
+// HOME-isolated so ambient ~/.beads or ~/.config/bd config can't leak in.
+func hermeticInitEnv(homeDir string, extra ...string) []string {
+	var env []string
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "BD_") || strings.HasPrefix(e, "BEADS_") {
+			continue
+		}
+		env = append(env, e)
+	}
+	env = append(env, "HOME="+homeDir, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	return append(env, extra...)
+}
+
 // TestInitReinitLocalConfiguredRemoteWithoutDoltDataSucceeds is the
 // caller-level regression test for GH#4861: sync.remote (via BD_SYNC_REMOTE,
 // not --remote, to hit initSyncRemoteConfigured) has no refs/dolt/data, so
@@ -37,9 +52,11 @@ func TestInitReinitLocalConfiguredRemoteWithoutDoltDataSucceeds(t *testing.T) {
 	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
 	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
 
+	homeDir := t.TempDir() // must differ from workDir: metrics.go caches to $HOME/.beads
+
 	cmd := exec.Command(bdBin, "init", "--reinit-local", "--prefix", "cfg", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), "BD_SYNC_REMOTE="+bareDir)
+	cmd.Env = hermeticInitEnv(homeDir, "BD_SYNC_REMOTE="+bareDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -74,10 +91,11 @@ func TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses(t *testing.T) {
 	workDir := t.TempDir()
 	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
 	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+	homeDir := t.TempDir() // see collision note in the sibling test above
 
 	cmd := exec.Command(bdBin, "init", "--reinit-local", "--prefix", "cfg", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), "BD_SYNC_REMOTE="+bareDir)
+	cmd.Env = hermeticInitEnv(homeDir, "BD_SYNC_REMOTE="+bareDir)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	err := cmd.Run()
