@@ -19,24 +19,82 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 )
 
-// TestCheckRemoteSafety_ConfiguredRemoteWithoutDoltData pins GH#4861:
-// a configured sync.remote that does NOT advertise refs/dolt/data must be
-// treated as RemoteHasDoltData=false by the caller (after ls-remote probe).
-// With that input, --reinit-local must not refuse as "remote has history".
-func TestCheckRemoteSafety_ConfiguredRemoteWithoutDoltData(t *testing.T) {
-	got := CheckRemoteSafety(RemoteSafetyInput{
-		RemoteHasDoltData: false,
-		ReinitLocal:       true,
-	})
-	if got.Action != ActionNoRemoteData {
-		t.Fatalf("action = %v, want ActionNoRemoteData when probe found no refs/dolt/data", got.Action)
+// TestInitReinitLocalConfiguredRemoteWithoutDoltDataSucceeds is the
+// caller-level regression test for GH#4861: sync.remote (via BD_SYNC_REMOTE,
+// not --remote, to hit initSyncRemoteConfigured) has no refs/dolt/data, so
+// `bd init --reinit-local` must succeed rather than refuse. Supersedes
+// TestCheckRemoteSafety_ConfiguredRemoteWithoutDoltData, which called the
+// unmodified CheckRemoteSafety directly and tested nothing about this fix
+// (both its cases are already in TestCheckRemoteSafety_GuardMatrix).
+func TestInitReinitLocalConfiguredRemoteWithoutDoltDataSucceeds(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+	// bareDir has ordinary git plumbing but no refs/dolt/data (GH#4861 shape).
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+
+	cmd := exec.Command(bdBin, "init", "--reinit-local", "--prefix", "cfg", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "BD_SYNC_REMOTE="+bareDir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("bd init --reinit-local with a Dolt-data-free sync.remote failed: %v\nstderr:\n%s", err, stderr.String())
 	}
-	got = CheckRemoteSafety(RemoteSafetyInput{
-		RemoteHasDoltData: true,
-		ReinitLocal:       true,
-	})
-	if got.Action != ActionRefuseDivergence {
-		t.Fatalf("action = %v, want ActionRefuseDivergence when refs/dolt/data exists", got.Action)
+
+	beadsDir := filepath.Join(workDir, ".beads")
+	if _, err := os.Stat(beadsDir); err != nil {
+		t.Fatalf(".beads should have been created by a successful init: %v", err)
+	}
+}
+
+// TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses is the sibling case:
+// sync.remote (again via BD_SYNC_REMOTE, not --remote) points at a bare repo
+// that DOES have refs/dolt/data pushed to it. `bd init --reinit-local` must
+// still refuse with ExitRemoteDivergenceRefused (10) — this is the ADR-0002
+// invariant the GH#4861 fix must not weaken while closing the false positive.
+func TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses(t *testing.T) {
+	bdBin := buildBDForInitTests(t)
+
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	runGitForBootstrapTest(t, "", "init", "--bare", bareDir)
+
+	sourceDir := t.TempDir()
+	runGitForBootstrapTest(t, sourceDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.email", "test@test.com")
+	runGitForBootstrapTest(t, sourceDir, "config", "user.name", "Test User")
+	runGitForBootstrapTest(t, sourceDir, "commit", "--allow-empty", "-m", "init")
+	runGitForBootstrapTest(t, sourceDir, "remote", "add", "origin", bareDir)
+	runGitForBootstrapTest(t, sourceDir, "push", "origin", "HEAD:refs/dolt/data")
+
+	workDir := t.TempDir()
+	runGitForBootstrapTest(t, workDir, "init", "-b", "main")
+	runGitForBootstrapTest(t, workDir, "config", "core.hooksPath", ".git/hooks")
+
+	cmd := exec.Command(bdBin, "init", "--reinit-local", "--prefix", "cfg", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents")
+	cmd.Dir = workDir
+	cmd.Env = append(os.Environ(), "BD_SYNC_REMOTE="+bareDir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("bd init --reinit-local succeeded; expected refusal (sync.remote has Dolt history). stderr:\n%s", stderr.String())
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("non-exec-exit error: %v\nstderr:\n%s", err, stderr.String())
+	}
+	if code := exitErr.ExitCode(); code != ExitRemoteDivergenceRefused {
+		t.Errorf("exit code = %d, want %d (ExitRemoteDivergenceRefused)", code, ExitRemoteDivergenceRefused)
+	}
+
+	beadsDir := filepath.Join(workDir, ".beads")
+	if _, err := os.Stat(beadsDir); err == nil {
+		t.Errorf("refusal should not have created %s", beadsDir)
 	}
 }
 
