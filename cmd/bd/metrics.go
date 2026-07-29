@@ -248,11 +248,9 @@ func marshalIndentNoEscape(v any) ([]byte, error) {
 }
 
 // showQueuedEvents pretty-prints the real, locally-buffered event payloads from
-// metrics.DataDir() (~/.beads/eventsData by default, or $BEADS_DIR/eventsData
-// once the workspace is resolved; the same files the flusher reads before
-// sending), so the user sees exactly what would leave their machine. Safe to
-// call here because it runs from a command's RunE, after PersistentPreRunE has
-// already resolved the workspace. Returns how many event files were shown.
+// metrics.DataDir() (~/.config/bd/eventsData, the same machine-scoped queue the
+// flusher reads before sending), so the user sees exactly what would leave
+// their machine. Returns how many event files were shown.
 func showQueuedEvents(out interface{ Write([]byte) (int, error) }) int {
 	dir, err := metrics.DataDir()
 	if err != nil {
