@@ -74,6 +74,8 @@ func runPollutionCheck(_ string, clean bool, yes bool) error {
 				"score":      p.score,
 				"reasons":    p.reasons,
 				"created_at": p.issue.CreatedAt,
+				// cleanable marks issues in the high-confidence band that clean mode acts on.
+				"cleanable": p.score >= 0.9,
 			})
 		}
 

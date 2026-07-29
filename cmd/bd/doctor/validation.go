@@ -213,10 +213,7 @@ func CheckTestPollution(path string) DoctorCheck {
 	}
 	defer func() { _ = store.Close() }()
 
-	// Approximate gate aligned with detectTestPollution policy (GH#5025):
-	// open non-epics only; case-insensitive title match; stronger fixture patterns
-	// (not bare "test-*" prefixes used by real infra bugs). Full scoring with
-	// corroboration lives in `bd doctor --check=pollution`.
+	// Approximate gate aligned with detectTestPollution policy (GH#5025); full scoring lives in the doctor pollution check.
 	query := `
 		SELECT COUNT(*) FROM issues
 		WHERE status != 'closed'
