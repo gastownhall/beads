@@ -883,6 +883,17 @@ func ParseStorageClass(v string) (StorageClass, error) {
 	return s, nil
 }
 
+// Normalize maps the explicit versioned spelling to unset: the two are
+// semantically identical (C1.2) and the marker is omitted when versioned
+// (C2.4) — in storage cells and JSONL alike. Both insert stacks call this so
+// the database never persists the literal "versioned".
+func (s StorageClass) Normalize() StorageClass {
+	if s == StorageClassVersioned {
+		return ""
+	}
+	return s
+}
+
 // EffectiveStorageClass resolves the record's class per C1.2/C1.3: an
 // explicit declaration wins; otherwise wisp-plane records (Ephemeral or
 // NoHistory) are ephemeral and everything else is versioned.

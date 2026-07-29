@@ -657,7 +657,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, jsonMetadata(issue.Metadata),
-		issueops.FreshRowLock(), nullString(string(issue.StorageClass)),
+		issueops.FreshRowLock(), nullString(string(issue.StorageClass.Normalize())),
 	)
 	if err != nil {
 		return fmt.Errorf("db: insert into %s: %w", table, err)

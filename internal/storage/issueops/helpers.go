@@ -145,7 +145,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
-		freshRowLock(), NullString(string(issue.StorageClass)),
+		freshRowLock(), NullString(string(issue.StorageClass.Normalize())),
 	)
 	if err != nil {
 		return fmt.Errorf("insert issue into %s: %w", table, err)
