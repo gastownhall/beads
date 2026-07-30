@@ -545,6 +545,16 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
         run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
 
+      # The doctor/fix DB-backed suite spins its own Dolt container in
+      # TestMain. BEADS_FIX_REQUIRE_DOLT=1 turns a missing container into a
+      # hard failure so the suite can never silently skip in CI again
+      # (bd-nxt5e: it was dark for months); this job pulls the image above.
+      - name: Test doctor/fix (Dolt-backed, hard-require container)
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+          BEADS_FIX_REQUIRE_DOLT: "1"
+        run: go test -tags gms_pure_go -race -count=1 -v ./cmd/bd/doctor/fix/
+
   main-linux-integration-packages:
     name: Main Linux integration packages (${{ matrix.shard }}/6)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

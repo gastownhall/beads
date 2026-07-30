@@ -53,7 +53,7 @@ func TestDependencyKeys_RekeysAndRemovesLeftovers(t *testing.T) {
 		MaxOpenConns:    1,
 	})
 	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
+		t.Fatalf("dolt.New: %v", err)
 	}
 	defer func() { _ = store.Close() }()
 
