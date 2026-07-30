@@ -324,6 +324,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.CrossTableDuplicates(path, doctorVerbose)
 		case "Orphaned Dependencies":
 			err = fix.OrphanedDependencies(path, doctorVerbose)
+		case "Clone-Local FKs":
+			err = fix.CloneLocalFKEnforcement(path, doctorVerbose)
 		case "Dependency Keys":
 			err = fix.DependencyKeys(path, doctorVerbose)
 		case "Blocked State":

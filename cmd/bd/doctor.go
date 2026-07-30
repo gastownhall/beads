@@ -859,6 +859,11 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn
 
+	// Check 21b: Clone-local FKs severed by hard resets (bd-7bpkd)
+	cloneLocalFKCheck := convertDoctorCheck(doctor.CheckCloneLocalFKs(path))
+	result.Checks = append(result.Checks, cloneLocalFKCheck)
+	// Don't fail overall check for severed clone-local FKs, just warn
+
 	// Check 22a: Child→parent dependencies (anti-pattern)
 	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))
 	result.Checks = append(result.Checks, childParentDepsCheck)
