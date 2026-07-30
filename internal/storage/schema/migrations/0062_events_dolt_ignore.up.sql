@@ -64,7 +64,13 @@ INSERT IGNORE INTO __temp__events_flip (issue_id, event_type, actor, old_value, 
 -- DOLT_ADD is conditional on dolt_status actually showing a pending events
 -- change: on first run the drop of the tracked table is pending; on a replay
 -- the drop of the recreated (never-committed) table leaves no status row, and
--- an unconditional add of a table that exists nowhere would error. The commit
+-- an unconditional add of a table that exists nowhere would error. The add
+-- uses '-f' because plain DOLT_ADD of a dolt_ignore'd table is a silent no-op:
+-- on the normal path 'events' is not in dolt_ignore yet (Phase 3 adds it), but
+-- a database that already carries the pattern while events is still tracked at
+-- HEAD (branch-per-test databases materialize exactly that state; so would any
+-- out-of-band-seeded pattern) needs the force or the drop never commits and
+-- the recreate nets out to a permanently-dirty tracked table. The commit
 -- is a bare statement so the drain path picks it up; --skip-empty makes the
 -- replay a no-op instead of "nothing to commit" (the 0040/0041 lesson).
 --
@@ -81,7 +87,7 @@ INSERT IGNORE INTO __temp__events_flip (issue_id, event_type, actor, old_value, 
 DROP TABLE events;
 COMMIT;
 SET @flip_pending = (SELECT COUNT(*) FROM dolt_status WHERE table_name = 'events');
-SET @sql = IF(@flip_pending > 0, 'CALL DOLT_ADD(''events'')', 'SELECT 1');
+SET @sql = IF(@flip_pending > 0, 'CALL DOLT_ADD(''-f'', ''events'')', 'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 CALL DOLT_COMMIT('--skip-empty', '-m', 'schema: drop versioned events table for ignored-plane flip (bd-red8u)');
 
