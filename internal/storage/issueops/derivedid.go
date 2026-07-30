@@ -148,6 +148,50 @@ func InsertDerivedEvent(ctx context.Context, tx DBTX, table string, e AuxEvent) 
 	return nil
 }
 
+// NextLiveCommentTime returns the created_at to stamp on a comment being added
+// live (as opposed to imported), given the wall-clock instant the caller
+// observed. The result is always truncated to whole seconds — the created_at
+// column's DATETIME(0) precision — and is advanced to one second past the
+// issue's newest existing comment when that comment is at or after `now`.
+//
+// Why: comments read back in (created_at ASC, id ASC) order, created_at holds
+// whole seconds, and since bd-ri8bd a comment's id is a content digest rather
+// than a time-ordered UUIDv7. Two comments added to one issue inside the same
+// wall-clock second therefore tie on the primary sort key and then order by
+// hash — arbitrarily with respect to the order they were written. Keeping
+// (issue_id, created_at) unique on the live path is what restores insertion
+// order for the reader without putting ordering information into the id, which
+// content-derivation cannot carry.
+//
+// This deliberately does NOT apply to the import path: an import carries the
+// original timestamps and must not invent new ones. Same-second groups
+// therefore still occur (imports, seeded/legacy rows, independently created
+// rows on another replica), and the (created_at, id) keyset walk in
+// GetIssueCommentsPageInTx remains the mechanism that keeps those groups
+// consistent between paged and full reads.
+//
+// The cost is a bounded forward skew: a burst of N comments on one issue inside
+// one second reads back spanning N seconds. That is a smaller distortion than N
+// identical stamps in scrambled order, and it drains as wall-clock advances.
+//
+//nolint:gosec // G201: table is a hardcoded routing constant at every call site.
+func NextLiveCommentTime(ctx context.Context, tx DBTX, table, issueID string, now time.Time) (time.Time, error) {
+	now = now.UTC().Truncate(time.Second)
+	var latest sql.NullTime
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT MAX(created_at) FROM %s WHERE issue_id = ?`, table), issueID).Scan(&latest); err != nil {
+		return time.Time{}, fmt.Errorf("read newest comment time from %s: %w", table, err)
+	}
+	if !latest.Valid {
+		return now, nil
+	}
+	newest := latest.Time.UTC().Truncate(time.Second)
+	if newest.Before(now) {
+		return now, nil
+	}
+	return newest.Add(time.Second), nil
+}
+
 // InsertDerivedComment inserts a comment under its content-derived id, or
 // collapses onto an existing identical comment: a same-content row already in
 // table (any id — it may predate the derivation) is the same logical comment,

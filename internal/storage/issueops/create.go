@@ -693,7 +693,16 @@ func PersistComments(ctx context.Context, tx *sql.Tx, issue *types.Issue) (Creat
 	for _, comment := range issue.Comments {
 		createdAt := comment.CreatedAt
 		if createdAt.IsZero() {
-			createdAt = time.Now().UTC()
+			// No supplied timestamp: this is a live comment, so stamp it the
+			// same way AddIssueComment does — one second past the issue's
+			// newest comment when the clock second would collide. Otherwise
+			// several such comments in one create share a second and read back
+			// in content-digest order rather than the order they were listed.
+			stamped, err := NextLiveCommentTime(ctx, tx, commentTable, issue.ID, time.Now())
+			if err != nil {
+				return result, fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
+			}
+			createdAt = stamped
 		}
 		createdAtText := FormatAuxTime(createdAt)
 		if comment.ID == "" {

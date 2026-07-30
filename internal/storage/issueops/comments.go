@@ -223,15 +223,23 @@ func GetCommentCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (m
 // GetIssueCommentsPage cursor: an un-truncated sub-second CreatedAt would sort
 // after same-second rows stored at the truncated second and skip them on resume.
 //
+// It is also advanced past the issue's newest existing comment when that
+// truncation would otherwise collide — see nextLiveCommentTime.
+//
 //nolint:gosec // G201: table names come from hardcoded constants
 func AddIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string) (*types.Comment, error) {
-	return ImportIssueCommentInTx(ctx, tx, issueID, author, text, time.Now().UTC().Truncate(time.Second))
+	return addIssueCommentInTx(ctx, tx, issueID, author, text, time.Now().UTC().Truncate(time.Second), true)
 }
 
 // ImportIssueCommentInTx adds a comment preserving the original timestamp.
 //
 //nolint:gosec // G201: table names come from hardcoded constants
 func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+	return addIssueCommentInTx(ctx, tx, issueID, author, text, createdAt, false)
+}
+
+//nolint:gosec // G201: table names come from hardcoded constants
+func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time, live bool) (*types.Comment, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	issueTable, _, _, _ := WispTableRouting(isWisp)
 	commentTable := "comments"
@@ -247,6 +255,14 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 	}
 	if !exists {
 		return nil, fmt.Errorf("issue %s not found", issueID)
+	}
+
+	if live {
+		advanced, err := NextLiveCommentTime(ctx, tx, commentTable, issueID, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		createdAt = advanced
 	}
 
 	createdAtText := FormatAuxTime(createdAt)

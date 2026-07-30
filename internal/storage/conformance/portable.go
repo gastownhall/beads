@@ -38,6 +38,7 @@ func RunPortableMethods(t *testing.T, factory Factory) {
 	t.Run("FindWispDependentsRecursive", func(t *testing.T) { testFindWispDependentsRecursive(t, factory) })
 	t.Run("AddComment", func(t *testing.T) { testAddComment(t, factory) })
 	t.Run("ImportIssueComment", func(t *testing.T) { testImportIssueComment(t, factory) })
+	t.Run("AddIssueCommentBurstOrder", func(t *testing.T) { testAddIssueCommentBurstOrder(t, factory) })
 	t.Run("PromoteFromEphemeral", func(t *testing.T) { testPromoteFromEphemeral(t, factory) })
 	t.Run("UpdateIssueID", func(t *testing.T) { testUpdateIssueID(t, factory) })
 	t.Run("DeleteIssuesBySourceRepo", func(t *testing.T) { testDeleteIssuesBySourceRepo(t, factory) })
@@ -480,6 +481,58 @@ func testImportIssueComment(t *testing.T, f Factory) {
 	ordered, _ := s.GetIssueComments(c, "test-ic2")
 	if len(ordered) != 2 || ordered[0].Text != "first" || ordered[1].Text != "second" {
 		t.Errorf("comment order = %v, want [first second] by created_at ASC", commentTexts(ordered))
+	}
+}
+
+// testAddIssueCommentBurstOrder pins the ordering contract that content-derived
+// aux ids (bd-ri8bd) broke: comments read back in (created_at ASC, id ASC)
+// order, created_at holds whole seconds, and the id is now a content digest
+// rather than a time-ordered UUIDv7 — so without help, comments written
+// back-to-back inside one second come back in hash order. AddIssueComment fixes
+// that by advancing its stamp past the issue's newest comment
+// (issueops.NextLiveCommentTime); this test is the backend-visible contract.
+func testAddIssueCommentBurstOrder(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-order", Title: "T"}), "a"))
+
+	// A burst: fast enough to share a wall-clock second on any runner.
+	want := []string{"one", "two", "three", "four", "five"}
+	for _, text := range want {
+		if _, err := s.AddIssueComment(c, "test-order", "alice", text); err != nil {
+			t.Fatalf("AddIssueComment(%q): %v", text, err)
+		}
+	}
+	got, err := s.GetIssueComments(c, "test-order")
+	must(t, err)
+	if !slices.Equal(commentTexts(got), want) {
+		t.Errorf("burst comment order = %v, want %v", commentTexts(got), want)
+	}
+	// The stamps are what carry the order, so they must be strictly increasing.
+	for i := 1; i < len(got); i++ {
+		if !got[i].CreatedAt.After(got[i-1].CreatedAt) {
+			t.Errorf("comment %d created_at %v not after %v — same-second tie is back",
+				i, got[i].CreatedAt, got[i-1].CreatedAt)
+		}
+	}
+
+	// Timing-independent proof of the advance: seed a comment ahead of the
+	// clock, then a live add must land exactly one second past it rather than
+	// sorting in front of it.
+	ahead := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-order2", Title: "T2"}), "a"))
+	if _, err := s.ImportIssueComment(c, "test-order2", "a", "seeded", ahead); err != nil {
+		t.Fatal(err)
+	}
+	added, err := s.AddIssueComment(c, "test-order2", "a", "live")
+	must(t, err)
+	if !added.CreatedAt.Equal(ahead.Add(time.Second)) {
+		t.Errorf("live comment created_at = %v, want %v (one second past the newest comment)",
+			added.CreatedAt, ahead.Add(time.Second))
+	}
+	after, _ := s.GetIssueComments(c, "test-order2")
+	if got := commentTexts(after); !slices.Equal(got, []string{"seeded", "live"}) {
+		t.Errorf("comment order = %v, want [seeded live]", got)
 	}
 }
 
