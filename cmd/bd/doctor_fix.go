@@ -15,28 +15,36 @@ import (
 	"golang.org/x/term"
 )
 
-// previewFixes shows what would be fixed without applying changes
-func previewFixes(result doctorResult) {
-	gate := doctor.AssessSchemaFixGate(result.Path)
-	if gate.RefuseDoctorFix() {
-		fmt.Printf("\n%s Refusing --fix dry-run: %s\n", ui.RenderFail("✗"), gate.Reason)
-		return
+// collectFixableIssues returns actionable fixes split by whether applying them
+// can touch the database schema (GH#4993). A schema gate should withhold schema
+// writes, not refuse to repair a file mode.
+func collectFixableIssues(result doctorResult) (dbFixes, fsFixes []doctorCheck) {
+	for _, check := range result.Checks {
+		if check.Status != statusWarning && check.Status != statusError {
+			continue
+		}
+		if check.Fix == "" {
+			continue
+		}
+		if doctor.IsFilesystemOnlyFix(check.Name) {
+			fsFixes = append(fsFixes, check)
+		} else {
+			dbFixes = append(dbFixes, check)
+		}
 	}
-	if !gate.Safe && gate.Reason != "" {
+	return dbFixes, fsFixes
+}
+
+// previewFixes shows what would be fixed without applying changes. A dry run
+// writes nothing, so it is never refused on schema grounds; the gate decides
+// how each fix is labelled, not whether the preview runs.
+func previewFixes(result doctorResult, gate doctor.FixGate) {
+	if gate.Reason != "" {
 		fmt.Printf("\n%s Schema gate: %s\n", ui.RenderWarn("⚠"), gate.Reason)
 	}
 
-	// Collect all fixable issues
-	var fixableIssues []doctorCheck
-	for _, check := range result.Checks {
-		if (check.Status == statusWarning || check.Status == statusError) && check.Fix != "" {
-			c := check
-			c.Fix = doctor.SanitizeFixRecommendation(c.Fix, gate)
-			fixableIssues = append(fixableIssues, c)
-		}
-	}
-
-	if len(fixableIssues) == 0 {
+	dbFixes, fsFixes := collectFixableIssues(result)
+	if len(dbFixes)+len(fsFixes) == 0 {
 		fmt.Println("\n✓ No fixable issues found (dry-run)")
 		return
 	}
@@ -44,9 +52,10 @@ func previewFixes(result doctorResult) {
 	fmt.Println("\n[DRY-RUN] The following issues would be fixed with --fix:")
 	fmt.Println()
 
-	for i, issue := range fixableIssues {
-		// Show the issue details
-		fmt.Printf("  %d. %s\n", i+1, issue.Name)
+	n := 0
+	printIssue := func(issue doctorCheck, blocked bool) {
+		n++
+		fmt.Printf("  %d. %s\n", n, issue.Name)
 		if issue.Status == statusError {
 			fmt.Printf("     Status: %s\n", ui.RenderFail("ERROR"))
 		} else {
@@ -57,33 +66,54 @@ func previewFixes(result doctorResult) {
 			fmt.Printf("     Detail: %s\n", issue.Detail)
 		}
 		fmt.Printf("     Fix:    %s\n", issue.Fix)
+		if blocked {
+			fmt.Printf("     %s\n", ui.RenderWarn("Blocked by the schema gate — would be skipped"))
+		}
 		fmt.Println()
 	}
 
-	fmt.Printf("[DRY-RUN] Would attempt to fix %d issue(s)\n", len(fixableIssues))
-	if gate.Safe {
+	blockDB := !gate.AllowDBFix && gate.Reason != ""
+	for _, issue := range fsFixes {
+		printIssue(issue, !gate.AllowFSFix)
+	}
+	for _, issue := range dbFixes {
+		printIssue(issue, blockDB)
+	}
+
+	switch {
+	case blockDB && len(fsFixes) > 0:
+		fmt.Printf("[DRY-RUN] Would apply %d filesystem fix(es); %d database fix(es) are blocked by the schema gate\n",
+			len(fsFixes), len(dbFixes))
+		fmt.Println("Run 'bd doctor --fix' to apply the filesystem fixes; resolve the schema state to apply the rest")
+	case blockDB:
+		fmt.Printf("[DRY-RUN] All %d fix(es) are blocked by the schema gate\n", len(dbFixes))
+		fmt.Println("Resolve the schema state shown above before running 'bd doctor --fix'")
+	default:
+		fmt.Printf("[DRY-RUN] Would attempt to fix %d issue(s)\n", len(dbFixes)+len(fsFixes))
 		fmt.Println("Run 'bd doctor --fix' to apply these fixes")
-	} else {
-		fmt.Println("Schema gate active — re-check AssessSchemaFixGate before applying --fix")
 	}
 }
 
-func applyFixes(result doctorResult) {
-	// GH#4993: never apply --fix when the DB schema is ahead of this binary.
-	gate := doctor.AssessSchemaFixGate(result.Path)
-	if gate.RefuseDoctorFix() {
-		fmt.Printf("\n%s Refusing --fix: %s\n", ui.RenderFail("✗"), gate.Reason)
-		return
-	}
-	if !gate.Safe && gate.Reason != "" {
+func applyFixes(result doctorResult, gate doctor.FixGate) {
+	if gate.Reason != "" {
 		fmt.Printf("\n%s Schema gate: %s\n", ui.RenderWarn("⚠"), gate.Reason)
 	}
 
-	// Collect all fixable issues
+	dbFixes, fsFixes := collectFixableIssues(result)
+
+	// GH#4993: withhold only what the gate is about. Blocking filesystem-only
+	// fixes over schema skew leaves no way to repair a gitignore or file mode.
 	var fixableIssues []doctorCheck
-	for _, check := range result.Checks {
-		if (check.Status == statusWarning || check.Status == statusError) && check.Fix != "" {
-			fixableIssues = append(fixableIssues, check)
+	if gate.AllowFSFix {
+		fixableIssues = append(fixableIssues, fsFixes...)
+	}
+	if gate.AllowDBFix || gate.Reason == "" {
+		fixableIssues = append(fixableIssues, dbFixes...)
+	} else if len(dbFixes) > 0 {
+		fmt.Printf("\n%s Skipping %d database fix(es) — %s\n",
+			ui.RenderFail("✗"), len(dbFixes), gate.Reason)
+		for _, issue := range dbFixes {
+			fmt.Printf("    · %s\n", issue.Name)
 		}
 	}
 
