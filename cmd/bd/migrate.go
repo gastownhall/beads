@@ -300,6 +300,18 @@ func loadOrCreateConfig(beadsDir string) (*configfile.Config, error) {
 	return cfg, nil
 }
 
+// pathHashRepoIDStampNotice returns the propagation warning for replacing an
+// existing repository ID with a path-derived one, or "" when none applies
+// (no stored id, no change, or a remote-derived new id).
+func pathHashRepoIDStampNotice(oldRepoID, newRepoID string, source beads.RepoIDSource) string {
+	if oldRepoID == "" || oldRepoID == newRepoID || source != beads.RepoIDSourcePath {
+		return ""
+	}
+	return "Warning: stamping a path-hash repository ID (this checkout has no origin remote).\n" +
+		"It is local to this host but will propagate to every clone on the next sync.\n" +
+		"On a synced clone, keep the stored ID instead (see 'bd doctor').\n"
+}
+
 func handleUpdateRepoID(dryRun bool, autoYes bool) error {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
@@ -396,6 +408,15 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) error {
 		}
 	}
 
+	// bd-ek28z: --yes and --json skip the confirm block above, so scripted
+	// callers stamped a host-local path hash with no warning at all — the
+	// GH#4361 recurrence hole. Print the notice (not the prompt) on those
+	// paths too.
+	pathHashNotice := pathHashRepoIDStampNotice(oldRepoID, newRepoID, newRepoIDSource)
+	if pathHashNotice != "" && (autoYes || jsonOutput) {
+		fmt.Fprint(os.Stderr, pathHashNotice)
+	}
+
 	if err := store.SetMetadata(ctx, "repo_id", newRepoID); err != nil {
 		if jsonOutput {
 			if jerr := outputJSON(map[string]interface{}{
@@ -412,11 +433,16 @@ func handleUpdateRepoID(dryRun bool, autoYes bool) error {
 	commandDidWrite.Store(true)
 
 	if jsonOutput {
-		return outputJSON(map[string]interface{}{
-			"status":      "success",
-			"old_repo_id": oldDisplay,
-			"new_repo_id": truncateID(newRepoID, 8),
-		})
+		payload := map[string]interface{}{
+			"status":         "success",
+			"old_repo_id":    oldDisplay,
+			"new_repo_id":    truncateID(newRepoID, 8),
+			"repo_id_source": string(newRepoIDSource),
+		}
+		if pathHashNotice != "" {
+			payload["warning"] = "new repository ID is a path hash (no origin remote); it will propagate to every clone on the next sync"
+		}
+		return outputJSON(payload)
 	}
 	fmt.Printf("%s\n\n", ui.RenderPass("✓ Repository ID updated"))
 	fmt.Printf("  Old: %s\n", oldDisplay)
