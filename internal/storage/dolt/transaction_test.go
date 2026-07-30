@@ -258,14 +258,20 @@ func assertRecordedEventCount(ctx context.Context, t *testing.T, db *sql.DB, iss
 	}
 }
 
-// assertEventsNotCommitted pins the 0062 plane contract: the events table
-// must not exist in committed history, so the AS OF 'HEAD' probe has to fail.
+// assertEventsNotCommitted pins the 0062 plane contract: no events ROW ever
+// reaches committed history. On a production-shaped database the table itself
+// is absent at HEAD (the AS OF probe errors — the embedded contract tests
+// assert that stronger form), but the shared branch-per-test database
+// deliberately materializes an EMPTY events shell at HEAD so branches inherit
+// the schema (testutil.MaterializeLocalTableSchemasForBranchTests), so here
+// the probe may also succeed with zero rows. Any committed row is a
+// regression on both shapes.
 func assertEventsNotCommitted(ctx context.Context, t *testing.T, db *sql.DB) {
 	t.Helper()
 
 	var got int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events AS OF 'HEAD'").Scan(&got); err == nil {
-		t.Fatalf("events exists at HEAD with %d rows; want the table absent from committed history (dolt_ignored, 0062)", got)
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events AS OF 'HEAD'").Scan(&got); err == nil && got != 0 {
+		t.Fatalf("events has %d rows at HEAD; want none in committed history (dolt_ignored, 0062)", got)
 	}
 }
 

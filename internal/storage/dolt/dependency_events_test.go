@@ -95,17 +95,11 @@ func TestDependencyEventEmission(t *testing.T) {
 			t.Fatalf("dependency_added count = %d, want 1", recorded)
 		}
 		assertEventsNotCommitted(ctx, t, store.db)
-		// The ignored plane suppresses events from dolt_status entirely, so the
-		// commit path never sees it as dirty.
-		var dirtyEvents int
-		if err := store.db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM dolt_status WHERE table_name = 'events'",
-		).Scan(&dirtyEvents); err != nil {
-			t.Fatalf("query dolt_status for events: %v", err)
-		}
-		if dirtyEvents != 0 {
-			t.Fatalf("events table visible in dolt_status (count=%d); the ignored plane must suppress it", dirtyEvents)
-		}
+		// No dolt_status assertion here: on a production-shaped database the
+		// untracked ignored table never appears in dolt_status (the embedded
+		// contract tests pin that), but the shared branch-per-test database
+		// materializes events at HEAD, so working-set rows legitimately show
+		// as a modification there. Staging respects dolt_ignore either way.
 	})
 
 	t.Run("ExplicitRemoveEmitsDependencyRemoved", func(t *testing.T) {
