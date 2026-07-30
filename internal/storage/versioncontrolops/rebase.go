@@ -642,6 +642,23 @@ func resolveChildCountersToHighWater(ctx context.Context, db DBConn, report *sto
 	}
 
 	for _, cc := range conflicts {
+		// child_counters.parent_id carries an FK to issues(id) ON DELETE CASCADE, so
+		// a counter row cannot exist without its parent. A theirs-only conflict row
+		// whose parent this merge leaves deleted — our side deleted the parent, which
+		// cascaded our counter row away, while theirs bumped it — must stay deleted.
+		// Re-inserting it would violate the FK and abort the whole rebase, where the
+		// earlier UPDATE-only form correctly matched no rows. The canonical bulk
+		// create path guards the same hazard ("their auxiliary counter has no owner
+		// and must not be inserted", issueops/create.go). Skipping leaves the row to
+		// DOLT_CONFLICTS_RESOLVE('--ours') below, which keeps our deletion.
+		var parentExists int
+		switch err := db.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ?", cc.parent).Scan(&parentExists); {
+		case err == sql.ErrNoRows:
+			continue
+		case err != nil:
+			return fmt.Errorf("check child_counters conflict parent %s: %w", cc.parent, err)
+		}
+
 		trueMax, err := maxChildNumber(ctx, db, "", cc.parent)
 		if err != nil {
 			return err
