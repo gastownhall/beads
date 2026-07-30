@@ -101,7 +101,10 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		// retry can never converge (gastownhall/beads#5012).
 		fmt.Fprintf(stderr, "Discarding interrupted-bootstrap working set (%s) and re-running migrations…\n",
 			strings.Join(dirtyErr.Tables, ", "))
-		if _, resetErr := conn.ExecContext(ctx, "CALL DOLT_RESET('--hard')"); resetErr != nil {
+		// Drained, not Exec'd: the very next thing this path does is re-run the
+		// whole MigrateUp pass on this same pinned connection, so an
+		// undrained proc result set here would poison every statement of it.
+		if resetErr := DrainCall(ctx, conn, "CALL DOLT_RESET('--hard')"); resetErr != nil {
 			return applied, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
 		}
 		applied, err = MigrateUp(ctx, conn)

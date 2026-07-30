@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
@@ -243,5 +244,54 @@ func TestNewDoltStoreFromConfig_DottedDBName(t *testing.T) {
 	}
 	if reloaded.DoltDatabase != "my_project" {
 		t.Errorf("expected dolt_database %q, got %q", "my_project", reloaded.DoltDatabase)
+	}
+}
+
+// TestNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase covers Blocker 2
+// of the 2026-07-23 maintainer review on gastownhall/beads#4930: cfg.ReadOnly
+// alone (an ordinary classified-read command) must route through
+// OpenForReadOnlyCommand, which creates the embedded data directory on first
+// use — but cfg.ReadOnly combined with cfg.DisableAutoStart (the strict
+// --readonly signal) must route through the genuinely write-refusing
+// OpenReadOnly instead, which fails rather than create anything for a fresh
+// database.
+func TestNewDoltStore_StrictReadOnlyRefusesWritesOnFreshDatabase(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt tests")
+	}
+
+	// Strict --readonly: must fail on a fresh database and must not create
+	// the embeddeddolt data directory.
+	strictBeadsDir := t.TempDir()
+	strictDataDir := filepath.Join(strictBeadsDir, "embeddeddolt")
+	_, err := newDoltStore(t.Context(), &dolt.Config{
+		ReadOnly:         true,
+		DisableAutoStart: true,
+		BeadsDir:         strictBeadsDir,
+		Database:         "testdb",
+	})
+	if err == nil {
+		t.Fatal("newDoltStore(ReadOnly, DisableAutoStart) on a fresh database = nil error, want refusal")
+	}
+	if _, statErr := os.Stat(strictDataDir); !os.IsNotExist(statErr) {
+		t.Fatalf("strict read-only open created %s (stat error: %v)", strictDataDir, statErr)
+	}
+
+	// Ordinary classified read (ReadOnly without DisableAutoStart): must
+	// still succeed and initialize the embedded database on first use, per
+	// the #4259 remote-migrate-gate exemption this backend relies on.
+	classifiedBeadsDir := t.TempDir()
+	classifiedDataDir := filepath.Join(classifiedBeadsDir, "embeddeddolt")
+	store, err := newDoltStore(t.Context(), &dolt.Config{
+		ReadOnly: true,
+		BeadsDir: classifiedBeadsDir,
+		Database: "testdb",
+	})
+	if err != nil {
+		t.Fatalf("newDoltStore(ReadOnly) on a fresh database: %v", err)
+	}
+	defer store.Close()
+	if _, statErr := os.Stat(classifiedDataDir); statErr != nil {
+		t.Fatalf("classified-read open did not initialize %s: %v", classifiedDataDir, statErr)
 	}
 }

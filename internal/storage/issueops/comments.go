@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -250,12 +249,13 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 		return nil, fmt.Errorf("issue %s not found", issueID)
 	}
 
-	createdAt = createdAt.UTC()
-	id := uuid.Must(uuid.NewV7()).String()
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, author, text, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, commentTable), id, issueID, author, text, createdAt); err != nil {
+	createdAtText := FormatAuxTime(createdAt)
+	id, _, err := InsertDerivedComment(ctx, tx, commentTable, issueID, author, text, createdAtText)
+	if err != nil {
+		return nil, err
+	}
+	stored, err := ParseAuxTime(createdAtText)
+	if err != nil {
 		return nil, fmt.Errorf("add comment to %s: %w", commentTable, err)
 	}
 
@@ -264,7 +264,7 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 		IssueID:   issueID,
 		Author:    author,
 		Text:      text,
-		CreatedAt: createdAt,
+		CreatedAt: stored,
 	}, nil
 }
 
@@ -276,10 +276,12 @@ func AddCommentEventInTx(ctx context.Context, tx DBTX, issueID, actor, comment s
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	_, _, eventTable, _ := WispTableRouting(isWisp)
 
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?, ?)
-	`, eventTable), NewEventID(), issueID, types.EventCommented, actor, comment); err != nil {
+	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
+		IssueID:   issueID,
+		EventType: types.EventCommented,
+		Actor:     actor,
+		Comment:   str(comment),
+	}); err != nil {
 		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
 	}
 	return nil

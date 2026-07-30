@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -886,6 +887,309 @@ func TestValidateProxiedServerConfig(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, strings.ToLower(err.Error()), "parse")
 	})
+}
+
+func TestValidateManagedServerConfigPolicy(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(cfg *servercfg.YAMLConfig)
+		wantErr string // substring of the expected error; "" means accepted
+	}{
+		{name: "IPv4 loopback"},
+		{
+			name:   "IPv4 loopback range",
+			mutate: func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.HostStr = stringPtr("127.42.0.9") },
+		},
+		{
+			name:   "IPv6 loopback",
+			mutate: func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.HostStr = stringPtr("::1") },
+		},
+		{
+			name:   "IPv4-mapped IPv6 loopback",
+			mutate: func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.HostStr = stringPtr("::ffff:127.0.0.1") },
+		},
+		{
+			name:    "omitted host rejected",
+			mutate:  func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.HostStr = nil },
+			wantErr: "listener.host is omitted",
+		},
+		{
+			name:    "IPv4 wildcard",
+			mutate:  func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.HostStr = stringPtr("0.0.0.0") },
+			wantErr: "numeric loopback IP literal",
+		},
+		{
+			name:    "IPv6 wildcard",
+			mutate:  func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.HostStr = stringPtr("::") },
+			wantErr: "numeric loopback IP literal",
+		},
+		{
+			name:    "public IPv4",
+			mutate:  func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.HostStr = stringPtr("203.0.113.7") },
+			wantErr: "numeric loopback IP literal",
+		},
+		{
+			name:    "public IPv6",
+			mutate:  func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.HostStr = stringPtr("2001:db8::7") },
+			wantErr: "numeric loopback IP literal",
+		},
+		{
+			name:    "localhost hostname",
+			mutate:  func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.HostStr = stringPtr("localhost") },
+			wantErr: "numeric loopback IP literal",
+		},
+		{
+			name:    "other hostname",
+			mutate:  func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.HostStr = stringPtr("db.internal") },
+			wantErr: "numeric loopback IP literal",
+		},
+		{
+			name:    "garbage",
+			mutate:  func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.HostStr = stringPtr("not an address !") },
+			wantErr: "numeric loopback IP literal",
+		},
+		{
+			name:    "explicit empty binds wildcard",
+			mutate:  func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.HostStr = stringPtr("") },
+			wantErr: "numeric loopback IP literal",
+		},
+		{
+			name:    "unix socket rejected",
+			mutate:  func(cfg *servercfg.YAMLConfig) { cfg.ListenerConfig.Socket = stringPtr("/tmp/mysql.sock") },
+			wantErr: "listener.socket",
+		},
+		{
+			name: "empty socket means default socket, rejected",
+			mutate: func(cfg *servercfg.YAMLConfig) {
+				cfg.ListenerConfig.Socket = stringPtr("")
+			},
+			wantErr: "listener.socket",
+		},
+		{
+			name: "remotesapi port rejected",
+			mutate: func(cfg *servercfg.YAMLConfig) {
+				port := 8080
+				cfg.RemotesapiConfig.Port_ = &port
+			},
+			wantErr: "remotesapi.port",
+		},
+		{
+			name:    "cluster block rejected",
+			mutate:  func(cfg *servercfg.YAMLConfig) { cfg.ClusterCfg = &servercfg.ClusterYAMLConfig{} },
+			wantErr: "cluster block",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &servercfg.YAMLConfig{
+				ListenerConfig: servercfg.ListenerYAMLConfig{HostStr: stringPtr("127.0.0.1")},
+			}
+			if tt.mutate != nil {
+				tt.mutate(cfg)
+			}
+			err := validateManagedServerConfigPolicy(cfg)
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.Contains(t, err.Error(), "127.0.0.1")
+			assert.Contains(t, err.Error(), "--proxied-server-external-host")
+			assert.Contains(t, err.Error(), "--proxied-server-external-port")
+			assert.Contains(t, err.Error(), "--proxied-server-external-socket-path")
+			assert.NotContains(t, err.Error(), "--server-")
+		})
+	}
+}
+
+func TestManagedListenerPolicyEveryConfigPathAtInitAndRuntime(t *testing.T) {
+	type setupFn func(t *testing.T, beadsDir string) string
+	tests := []struct {
+		name  string
+		setup setupFn
+	}{
+		{
+			name: "environment custom",
+			setup: func(t *testing.T, beadsDir string) string {
+				path := writeListenerConfig(t, filepath.Join(t.TempDir(), "env.yaml"), "0.0.0.0", false, false)
+				t.Setenv("BEADS_PROXIED_SERVER_CONFIG", path)
+				return ""
+			},
+		},
+		{
+			name: "sidecar custom",
+			setup: func(t *testing.T, beadsDir string) string {
+				t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+				path := writeListenerConfig(t, filepath.Join(t.TempDir(), "sidecar.yaml"), "0.0.0.0", false, false)
+				writeProxiedClientInfo(t, beadsDir, &configfile.ProxiedServerClientInfo{ConfigPath: path})
+				return ""
+			},
+		},
+		{
+			name: "pre-marker default path",
+			setup: func(t *testing.T, beadsDir string) string {
+				t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+				path := proxiedServerConfigPath(beadsDir)
+				writeListenerConfig(t, path, "0.0.0.0", false, false)
+				return ""
+			},
+		},
+		{
+			name: "marker file hand edit",
+			setup: func(t *testing.T, beadsDir string) string {
+				t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+				path := proxiedServerConfigPath(beadsDir)
+				writeListenerConfig(t, path, "0.0.0.0", true, false)
+				return ""
+			},
+		},
+		{
+			name: "marker parse fallback with interpolation",
+			setup: func(t *testing.T, beadsDir string) string {
+				t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+				t.Setenv("BEADS_TEST_MANAGED_LISTENER_PORT", "54321")
+				path := proxiedServerConfigPath(beadsDir)
+				writeListenerConfig(t, path, "0.0.0.0", true, true)
+				return ""
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			beadsDir := t.TempDir()
+			explicitPath := tt.setup(t, beadsDir)
+
+			initErr := validateManagedProxiedServerConfigAtInit(beadsDir, explicitPath, "")
+			assertManagedListenerPolicyError(t, initErr)
+
+			_, runtimeErr := ensureProxiedServerConfig(beadsDir, true)
+			assertManagedListenerPolicyError(t, runtimeErr)
+		})
+	}
+}
+
+func TestManagedListenerPolicyLoopbackCustomConfigPassesInitAndRuntime(t *testing.T) {
+	t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+	beadsDir := t.TempDir()
+	path := writeListenerConfig(t, filepath.Join(t.TempDir(), "loopback.yaml"), "127.0.0.1", false, false)
+	writeProxiedClientInfo(t, beadsDir, &configfile.ProxiedServerClientInfo{ConfigPath: path})
+
+	require.NoError(t, validateManagedProxiedServerConfigAtInit(beadsDir, "", ""))
+	got, err := ensureProxiedServerConfig(beadsDir, true)
+	require.NoError(t, err)
+	assert.Equal(t, path, got)
+}
+
+// TestManagedListenerPolicyOmittedHostRejected pins the policy decision that
+// an omitted listener.host is NOT trusted: servercfg resolves it to
+// "localhost", which CheckForUnixSocket also treats as license to open the
+// shared-namespace default unix socket.
+func TestManagedListenerPolicyOmittedHostRejected(t *testing.T) {
+	t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+	beadsDir := t.TempDir()
+	path := filepath.Join(t.TempDir(), "omitted.yaml")
+	require.NoError(t, os.WriteFile(path, []byte("listener:\n  port: 54321\n"), 0o600))
+	writeProxiedClientInfo(t, beadsDir, &configfile.ProxiedServerClientInfo{ConfigPath: path})
+
+	initErr := validateManagedProxiedServerConfigAtInit(beadsDir, "", "")
+	require.Error(t, initErr)
+	assert.Contains(t, initErr.Error(), "listener.host is omitted")
+
+	_, runtimeErr := ensureProxiedServerConfig(beadsDir, true)
+	require.Error(t, runtimeErr)
+	assert.Contains(t, runtimeErr.Error(), "listener.host is omitted")
+}
+
+// TestManagedListenerPolicyMarkerInterpolatedHost pins the interpolation
+// contract: a marker config whose listener.host is a ${VAR} placeholder is
+// judged on what the placeholder expands to, not on the raw text.
+func TestManagedListenerPolicyMarkerInterpolatedHost(t *testing.T) {
+	writeInterpolatedHostConfig := func(t *testing.T, beadsDir string) string {
+		t.Helper()
+		path := proxiedServerConfigPath(beadsDir)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		body := managedProxiedServerConfigMarker +
+			"listener:\n  host: \"${BEADS_TEST_MANAGED_LISTENER_HOST}\"\n  port: 54321\n"
+		require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+		return path
+	}
+
+	t.Run("expands to loopback, accepted", func(t *testing.T) {
+		t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+		t.Setenv("BEADS_TEST_MANAGED_LISTENER_HOST", "127.0.0.1")
+		beadsDir := t.TempDir()
+		want := writeInterpolatedHostConfig(t, beadsDir)
+
+		got, err := ensureProxiedServerConfig(beadsDir, true)
+		require.NoError(t, err)
+		assert.Equal(t, want, got)
+	})
+
+	t.Run("expands to wildcard, rejected", func(t *testing.T) {
+		t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+		t.Setenv("BEADS_TEST_MANAGED_LISTENER_HOST", "0.0.0.0")
+		beadsDir := t.TempDir()
+		writeInterpolatedHostConfig(t, beadsDir)
+
+		_, err := ensureProxiedServerConfig(beadsDir, true)
+		assertManagedListenerPolicyError(t, err)
+	})
+}
+
+// TestManagedListenerPolicyRootPathFlagAtInit pins the F5c fix: at init time
+// the sidecar is not persisted yet, so the --proxied-server-root-path flag
+// value must be threaded into the validator explicitly for a pre-existing
+// config.yaml under that root to be policy-checked.
+func TestManagedListenerPolicyRootPathFlagAtInit(t *testing.T) {
+	t.Setenv("BEADS_PROXIED_SERVER_CONFIG", "")
+	t.Setenv("BEADS_PROXIED_SERVER_ROOT_PATH", "")
+	beadsDir := t.TempDir()
+	rootDir := t.TempDir()
+
+	t.Run("bad config under flagged root rejected", func(t *testing.T) {
+		writeListenerConfig(t, filepath.Join(rootDir, proxiedServerConfigName), "0.0.0.0", false, false)
+		err := validateManagedProxiedServerConfigAtInit(beadsDir, "", rootDir)
+		assertManagedListenerPolicyError(t, err)
+	})
+
+	t.Run("missing config under flagged root allowed", func(t *testing.T) {
+		emptyRoot := t.TempDir()
+		require.NoError(t, validateManagedProxiedServerConfigAtInit(beadsDir, "", emptyRoot))
+	})
+}
+
+func stringPtr(value string) *string {
+	return &value
+}
+
+func writeListenerConfig(t *testing.T, path, host string, marker, interpolatedPort bool) string {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	body := ""
+	if marker {
+		body = managedProxiedServerConfigMarker
+	}
+	port := "54321"
+	if interpolatedPort {
+		port = "${BEADS_TEST_MANAGED_LISTENER_PORT}"
+	}
+	body += fmt.Sprintf("listener:\n  host: %q\n  port: %s\n", host, port)
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+	return path
+}
+
+func assertManagedListenerPolicyError(t *testing.T, err error) {
+	t.Helper()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "numeric loopback IP literal")
+	assert.Contains(t, err.Error(), "127.0.0.1")
+	assert.Contains(t, err.Error(), "--proxied-server-external-host")
+	assert.Contains(t, err.Error(), "--proxied-server-external-port")
+	assert.Contains(t, err.Error(), "--proxied-server-external-socket-path")
+	assert.NotContains(t, err.Error(), "--server-")
 }
 
 // TestCheckExistingBeadsDataAt_ProxiedServerNoData asserts that a proxied

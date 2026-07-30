@@ -193,6 +193,72 @@ func TestProxiedServerReady(t *testing.T) {
 		}
 	})
 
+	t.Run("pagination_envelope_truncated", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rdpgt")
+		for i := 0; i < 4; i++ {
+			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Pag item %d", i), "--label", "rdpgt")
+		}
+		stdout, _, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, []string{"BD_JSON_ENVELOPE=1"},
+			"ready", "--json", "--limit", "2", "--label", "rdpgt")
+		if err != nil {
+			t.Fatalf("bd ready --json --limit 2 failed: %v\nstdout: %s", err, stdout)
+		}
+		var envelope struct {
+			Data       []*types.IssueWithCounts `json:"data"`
+			Pagination *PaginationMeta          `json:"pagination"`
+		}
+		s := strings.TrimSpace(stdout)
+		start := strings.Index(s, "{")
+		if start < 0 {
+			t.Fatalf("no JSON envelope object in stdout: %s", stdout)
+		}
+		if err := json.Unmarshal([]byte(s[start:]), &envelope); err != nil {
+			t.Fatalf("parse envelope JSON: %v\n%s", err, s[start:])
+		}
+		if len(envelope.Data) != 2 {
+			t.Fatalf("envelope.data length = %d, want 2", len(envelope.Data))
+		}
+		if envelope.Pagination == nil {
+			t.Fatal("missing 'pagination' key in truncated envelope")
+		}
+		if !envelope.Pagination.Truncated {
+			t.Error("pagination.truncated = false, want true")
+		}
+		if envelope.Pagination.Returned != 2 {
+			t.Errorf("pagination.returned = %d, want 2", envelope.Pagination.Returned)
+		}
+		// Total is unavailable on the proxied backend; omitempty must drop
+		// the key rather than emit a false "total": 0.
+		if strings.Contains(s[start:], `"total"`) {
+			t.Errorf("unexpected 'total' key in proxied pagination (unavailable on this backend): %s", s[start:])
+		}
+	})
+
+	t.Run("pagination_envelope_not_truncated", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rdpgn")
+		bdProxiedCreate(t, bd, p.dir, "Pag not truncated", "--label", "rdpgn")
+		stdout, _, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, []string{"BD_JSON_ENVELOPE=1"},
+			"ready", "--json", "--limit", "10", "--label", "rdpgn")
+		if err != nil {
+			t.Fatalf("bd ready --json --limit 10 failed: %v\nstdout: %s", err, stdout)
+		}
+		var envelope map[string]json.RawMessage
+		s := strings.TrimSpace(stdout)
+		start := strings.Index(s, "{")
+		if start < 0 {
+			t.Fatalf("no JSON envelope object in stdout: %s", stdout)
+		}
+		if err := json.Unmarshal([]byte(s[start:]), &envelope); err != nil {
+			t.Fatalf("parse envelope JSON: %v\n%s", err, s[start:])
+		}
+		// Parity with the direct route: no pagination key when not truncated.
+		if raw, ok := envelope["pagination"]; ok {
+			t.Errorf("unexpected 'pagination' key when not truncated: %s", raw)
+		}
+	})
+
 	t.Run("offset_with_large_finite_limit", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rdofflz")
@@ -449,8 +515,8 @@ func TestProxiedServerReady(t *testing.T) {
 		}
 
 		text, _ := bdProxiedReadyCapture(t, bd, p, "--gated")
-		if !strings.Contains(text, "No closed gates found") {
-			t.Errorf("expected 'No closed gates found' text, got: %s", text)
+		if !strings.Contains(text, "No molecules ready for gate-resume dispatch") {
+			t.Errorf("expected 'No molecules ready for gate-resume dispatch' text, got: %s", text)
 		}
 	})
 

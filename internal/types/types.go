@@ -122,6 +122,13 @@ type Issue struct {
 	Ephemeral bool     `json:"ephemeral,omitempty"`  // If true, not synced via git
 	NoHistory bool     `json:"no_history,omitempty"` // If true, stored in wisps table but NOT GC-eligible
 	WispType  WispType `json:"wisp_type,omitempty"`  // Classification for TTL-based compaction (gt-9br)
+
+	// StorageClass declares the record's history/replication contract
+	// (Protocol v0.1 §C, bd-7vb13). Empty means unset: effective class is
+	// ephemeral for wisp-plane records (Ephemeral/NoHistory), else versioned
+	// (C1.2) — see EffectiveStorageClass. Omitted from JSONL when versioned
+	// (C2.4). Set at create, immutable except via promotion (C1.3/C4).
+	StorageClass StorageClass `json:"storage_class,omitempty"`
 	// NOTE: RepliesTo, RelatesTo, DuplicateOf, SupersededBy moved to dependencies table
 	// per Decision 004 (Edge Schema Consolidation). Use dependency API instead.
 
@@ -153,6 +160,14 @@ type Issue struct {
 	Actor     string `json:"actor,omitempty"`      // Entity URI who caused this event
 	Target    string `json:"target,omitempty"`     // Entity URI or bead ID affected
 	Payload   string `json:"payload,omitempty"`    // Event-specific JSON data
+
+	// ===== Internal Hydration Flags (not serialized) =====
+	// IsLitePartial is set to true when this Issue was produced by a lite SELECT
+	// (see issueops.ScanIssueLiteFrom). When true, the heavy text columns
+	// (Description, Design, AcceptanceCriteria, Notes, Payload, Waiters) were not
+	// hydrated and remain zero-valued. Callers that need the full body must call
+	// store.GetIssue(ctx, id) to refetch. Internal-only — never on the wire.
+	IsLitePartial bool `json:"-"`
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.
@@ -317,6 +332,23 @@ func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
 	if i.Ephemeral && i.NoHistory {
 		return fmt.Errorf("ephemeral and no_history are mutually exclusive")
 	}
+	// Storage class must be a known value, and a declared class must agree
+	// with the wisp-plane flags: wisp-plane records are ephemeral-class by
+	// construction, and a durable class on one (or ephemeral class off one)
+	// would silently promise semantics the row's plane doesn't deliver
+	// (Protocol v0.1 §C1.3/C2.1).
+	if !i.StorageClass.IsValid() {
+		return fmt.Errorf("invalid storage class %q (must be %s)", i.StorageClass, ValidStorageClassNames())
+	}
+	if i.StorageClass != "" {
+		wispPlane := i.Ephemeral || i.NoHistory
+		if wispPlane && i.StorageClass != StorageClassEphemeral {
+			return fmt.Errorf("storage class %q conflicts with ephemeral/no_history (wisp-plane records are storage class ephemeral)", i.StorageClass)
+		}
+		if !wispPlane && i.StorageClass == StorageClassEphemeral {
+			return fmt.Errorf("storage class ephemeral requires the ephemeral flag (create with --ephemeral)")
+		}
+	}
 	// Bound the VARCHAR(255) assignment columns up front so callers get a typed
 	// ErrFieldTooLong rejection instead of a raw backend "data too long" error.
 	if err := CheckFieldLen("assignee", i.Assignee); err != nil {
@@ -412,13 +444,17 @@ const (
 	StatusHooked     Status = "hooked" // Work actively claimed by a worker
 )
 
+// AllStatuses lists the built-in issue statuses (excludes custom statuses). It
+// is the single source consulted by Status.IsValid and the `bd schema` enum, so
+// adding a status here surfaces it in both validation and the published schema.
+var AllStatuses = []Status{
+	StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred,
+	StatusClosed, StatusPinned, StatusHooked,
+}
+
 // IsValid checks if the status value is valid (built-in statuses only)
 func (s Status) IsValid() bool {
-	switch s {
-	case StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred, StatusClosed, StatusPinned, StatusHooked:
-		return true
-	}
-	return false
+	return slices.Contains(AllStatuses, s)
 }
 
 // IsValidWithCustom checks if the status is valid, including custom statuses.
@@ -629,16 +665,19 @@ const TypeEvent IssueType = "event"
 //   - event: set-state audit trail beads (GH#1356)
 // (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
+// AllIssueTypes lists the built-in issue types (excludes TypeEvent and custom
+// types, matching IssueType.IsValid). Single source for IsValid and the
+// `bd schema` enum.
+var AllIssueTypes = []IssueType{
+	TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision,
+	TypeMessage, TypeMolecule, TypeGate, TypeSpike, TypeStory, TypeMilestone,
+}
+
 // IsValid checks if the issue type is a core work type.
 // Core work types (bug, feature, task, epic, chore, decision, message, spike, story, milestone)
 // and internal types (molecule, gate) are built-in. Other types require types.custom configuration.
 func (t IssueType) IsValid() bool {
-	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision, TypeMessage, TypeMolecule,
-		TypeGate, TypeSpike, TypeStory, TypeMilestone:
-		return true
-	}
-	return false
+	return slices.Contains(AllIssueTypes, t)
 }
 
 // IsBuiltIn returns true for core work types and system-internal types
@@ -791,6 +830,84 @@ func ValidWispTypeNames() string {
 	return joinNamesWithOr(validWispTypes)
 }
 
+// StorageClass declares how a record's history and replication are priced
+// (Protocol v0.1 §C, bd-7vb13). The class is a semantic contract, not a table
+// or backend (C1.4): ephemeral happens to live in the dolt_ignore'd wisps
+// plane today, and unversioned's replication leg is tracked separately
+// (bd-1quyq) — the class marker must not imply either mechanism.
+type StorageClass string
+
+const (
+	// StorageClassVersioned is the default (C1.2): durable, replicated with
+	// history, mergeable. Serialized as the empty string — the storage_class
+	// field is omitted when versioned (C2.4), so every pre-v0.1 record is a
+	// valid versioned record unchanged.
+	StorageClassVersioned StorageClass = "versioned"
+	// StorageClassUnversioned is durable and interchanged with no revision-
+	// history promise: only current state is retained and replicated (C2.2).
+	StorageClassUnversioned StorageClass = "unversioned"
+	// StorageClassEphemeral is operational state that is never exported and
+	// never replicated (C2.1) — typically TTL-bounded, though not always:
+	// no-history rows are class-ephemeral yet TTL-exempt. The existing
+	// wisp/lease planes have this character.
+	StorageClassEphemeral StorageClass = "ephemeral"
+)
+
+// validStorageClasses is the canonical value list; IsValid,
+// ParseStorageClass, and ValidStorageClassNames all derive from it.
+var validStorageClasses = []StorageClass{
+	StorageClassVersioned, StorageClassUnversioned, StorageClassEphemeral,
+}
+
+// IsValid reports whether the storage class value is valid. Empty is valid
+// and means "unset": the effective class defaults per C1.2/C1.3.
+func (s StorageClass) IsValid() bool {
+	if s == "" {
+		return true
+	}
+	return slices.Contains(validStorageClasses, s)
+}
+
+// ValidStorageClassNames enumerates the accepted values for error messages.
+func ValidStorageClassNames() string {
+	return joinNamesWithOr(validStorageClasses)
+}
+
+// ParseStorageClass validates a user-supplied storage-class value (flag or
+// config). Empty is rejected here — callers that allow "unset" check for
+// empty before parsing.
+func ParseStorageClass(v string) (StorageClass, error) {
+	s := StorageClass(v)
+	if s == "" || !s.IsValid() {
+		return "", fmt.Errorf("invalid storage class %q (must be %s)", v, ValidStorageClassNames())
+	}
+	return s, nil
+}
+
+// Normalize maps the explicit versioned spelling to unset: the two are
+// semantically identical (C1.2) and the marker is omitted when versioned
+// (C2.4) — in storage cells and JSONL alike. Both insert stacks call this so
+// the database never persists the literal "versioned".
+func (s StorageClass) Normalize() StorageClass {
+	if s == StorageClassVersioned {
+		return ""
+	}
+	return s
+}
+
+// EffectiveStorageClass resolves the record's class per C1.2/C1.3: an
+// explicit declaration wins; otherwise wisp-plane records (Ephemeral or
+// NoHistory) are ephemeral and everything else is versioned.
+func (i *Issue) EffectiveStorageClass() StorageClass {
+	if i.StorageClass != "" {
+		return i.StorageClass
+	}
+	if i.Ephemeral || i.NoHistory {
+		return StorageClassEphemeral
+	}
+	return StorageClassVersioned
+}
+
 // joinNamesWithOr formats a value list as "a, b, or c" for error messages.
 func joinNamesWithOr[T ~string](names []T) string {
 	strs := make([]string, len(names))
@@ -934,6 +1051,19 @@ const (
 	DepDelegatedFrom DependencyType = "delegated-from" // Work delegated from parent; completion cascades up
 )
 
+// AllDependencyTypes lists the built-in dependency types, in declaration order.
+// Single source for the `bd schema` enum so the published schema enumerates
+// exactly the types bd recognizes.
+var AllDependencyTypes = []DependencyType{
+	DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor,
+	DepRelated, DepDiscoveredFrom,
+	DepRepliesTo, DepRelatesTo, DepDuplicates, DepSupersedes,
+	DepAuthoredBy, DepAssignedTo, DepApprovedBy, DepAttests,
+	DepTracks,
+	DepUntil, DepCausedBy, DepValidates,
+	DepDelegatedFrom,
+}
+
 // IsValid checks if the dependency type value is valid.
 // Accepts any non-empty string up to 50 characters.
 // Use IsWellKnown() to check if it's a built-in type.
@@ -984,6 +1114,16 @@ type WaitsForMeta struct {
 	// SpawnerID identifies which step/issue spawns the children to wait for.
 	// If empty, waits for all direct children of the depends_on_id issue.
 	SpawnerID string `json:"spawner_id,omitempty"`
+	// AlsoBlocks marks a waits-for edge that was collapsed from a redundant
+	// depends_on/needs blocks edge onto the same spawner (GH#3783): the
+	// caller skipped emitting a separate DepBlocks edge because it collided
+	// with this DepWaitsFor edge, so this edge must additionally carry
+	// classic blocking semantics — it blocks while the spawner itself is
+	// open, not only while the spawner has an open child. Omitted (and thus
+	// COALESCEd to false by readers) for a plain waits_for with no matching
+	// needs/depends_on entry, which must retain the original fanout-only
+	// semantics.
+	AlsoBlocks bool `json:"also_blocks,omitempty"`
 }
 
 // WaitsForGate constants
@@ -1041,6 +1181,32 @@ func NewGraphEdgeDependency(fromID, toID string, depType DependencyType, gate, s
 // cannot drift.
 func NewWaitsForDependency(issueID, spawnerID, gate string) (*Dependency, error) {
 	return NewGraphEdgeDependency(issueID, spawnerID, DepWaitsFor, gate, "", "", "", nil)
+}
+
+// NewWaitsForBlockingDependency builds a waits-for dependency that also
+// carries classic blocking semantics (GH#3783): set also_blocks in the
+// metadata so waitsForGateBlockedSQL additionally blocks while the spawner
+// itself is open, not only while it has an open parent-child child. Use this
+// instead of NewWaitsForDependency exactly when the caller is collapsing a
+// would-be DepBlocks edge (from needs/depends_on) into this waits-for edge
+// because the two would otherwise collide on the same (source, target) pair
+// — never for a plain waits_for with no matching needs/depends_on entry.
+func NewWaitsForBlockingDependency(issueID, spawnerID, gate string) (*Dependency, error) {
+	dep, err := NewWaitsForDependency(issueID, spawnerID, gate)
+	if err != nil {
+		return nil, err
+	}
+	var meta WaitsForMeta
+	if err := json.Unmarshal([]byte(dep.Metadata), &meta); err != nil {
+		return nil, fmt.Errorf("parsing waits-for metadata to set also_blocks: %w", err)
+	}
+	meta.AlsoBlocks = true
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("serializing waits-for also_blocks metadata: %w", err)
+	}
+	dep.Metadata = string(raw)
+	return dep, nil
 }
 
 // NewGraphNodeDependency builds the dependency record for a graph-plan node's
@@ -1552,6 +1718,21 @@ type IssueFilter struct {
 	// Expected values: "--max-rows", "BEADS_MAX_ROWS", or "" (library users
 	// who set MaxRows directly without source attribution).
 	MaxRowsSource string
+
+	// Lite, when true, switches the SELECT shape to issueops.IssueSelectColumnsLite,
+	// which omits heavy TEXT columns (description, design, acceptance_criteria, notes,
+	// payload, waiters). Returned issues carry IsLitePartial=true; their heavy fields
+	// are zero-valued. WHERE-clause filters that reference heavy columns
+	// (DescriptionContains, NotesContains, EmptyDescription) keep working — they
+	// reference columns in WHERE regardless of SELECT shape. Default false preserves
+	// today's behavior at every call site.
+	//
+	// Backend coverage: honored by the issueops-backed stores (Dolt, embedded
+	// Dolt). The proxied-server (domain/db) path does not check this field yet
+	// and always returns fully-hydrated issues with IsLitePartial=false —
+	// correct results, no lite optimization. Wiring Lite through domain/db is
+	// deferred to the CLI-wiring follow-up. See engdocs/EXTENDING.md.
+	Lite bool
 }
 
 // SortPolicy determines how ready work is ordered
@@ -1629,7 +1810,12 @@ func (f ReclaimFilter) IsEmpty() bool {
 
 // WorkFilter is used to filter ready work queries
 type WorkFilter struct {
-	Status        Status
+	Status Status
+	// Statuses filters to any of the given statuses (OR semantics) in a
+	// single query, so multi-status callers avoid one GetReadyWork round
+	// trip per status. Ignored when Status is set; when both are empty the
+	// legacy default of ('open', 'in_progress') applies.
+	Statuses      []Status
 	Type          string // Filter by issue type (task, bug, feature, epic, merge-request, etc.)
 	Priority      *int
 	Assignee      *string

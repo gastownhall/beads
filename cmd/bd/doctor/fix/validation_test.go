@@ -46,6 +46,12 @@ func newFixTestStore(t *testing.T, dir string, prefix string) *dolt.DoltStore {
 		t.Fatalf("Failed to create .beads: %v", err)
 	}
 
+	// project_id matched between metadata.json and the database so
+	// verifyFixTargetIdentity (mybd-2qegi) doesn't reject these fix calls as
+	// unverifiable targets. Mismatch/unverifiable-target cases get their own
+	// tests below.
+	projectID := configfile.GenerateProjectID()
+
 	// Write metadata.json so openAnyDB can connect to the same database
 	cfg := &configfile.Config{
 		Database:       "dolt",
@@ -53,6 +59,7 @@ func newFixTestStore(t *testing.T, dir string, prefix string) *dolt.DoltStore {
 		DoltServerHost: "127.0.0.1",
 		DoltServerPort: port,
 		DoltDatabase:   dbName,
+		ProjectID:      projectID,
 	}
 	if err := cfg.Save(beadsDir); err != nil {
 		t.Fatalf("Failed to write metadata.json: %v", err)
@@ -73,6 +80,10 @@ func newFixTestStore(t *testing.T, dir string, prefix string) *dolt.DoltStore {
 	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		store.Close()
 		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+	if err := store.SetMetadata(ctx, "_project_id", projectID); err != nil {
+		store.Close()
+		t.Fatalf("Failed to set _project_id metadata: %v", err)
 	}
 
 	t.Cleanup(func() {

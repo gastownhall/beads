@@ -34,6 +34,7 @@ import (
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	dbidentifier "github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/telemetry"
@@ -44,12 +45,13 @@ import (
 )
 
 var (
-	changeDir   string
-	dbPath      string
-	actor       string
-	store       storage.DoltStorage
-	uowProvider uow.UnitOfWorkProvider
-	jsonOutput  bool
+	changeDir    string
+	dbPath       string
+	databaseFlag string
+	actor        string
+	store        storage.DoltStorage
+	uowProvider  uow.UnitOfWorkProvider
+	jsonOutput   bool
 
 	// Signal-aware context for graceful cancellation
 	rootCtx    context.Context
@@ -85,7 +87,7 @@ var (
 	storeIsReadOnly   bool               // Track if store was opened read-only (for staleness checks)
 	ignoreSchemaSkew  bool               // Proceed despite forward schema drift
 	lockTimeout       = 30 * time.Second // Dolt open timeout (fixed default)
-	profileEnabled    bool
+	cpuProfileEnabled bool
 	profileFile       *os.File
 	traceFile         *os.File
 	memProfilePath    string
@@ -124,6 +126,28 @@ var (
 	commandSpan oteltrace.Span
 )
 
+// skipStoreAnnotation, when set to "1" on a command (or any of its ancestors),
+// makes bd skip database/store initialization for that command — the
+// annotation-based equivalent of listing the command name in noDbCommands. It
+// lets commands defined in other files or build-tagged variants opt out of the
+// store gate locally, without editing the central noDbCommands list.
+const skipStoreAnnotation = "bd:skip_store"
+
+// commandOptsOutOfStore reports whether cmd or any of its ancestors carries the
+// skipStoreAnnotation set to "1". The whole ancestor chain is walked, so
+// annotating a command exempts that command and every subcommand beneath it.
+// (This is broader than the noDbCommands list, which only matches a command
+// name or its direct parent — annotate deliberately, on the specific command
+// you want to skip the store.)
+func commandOptsOutOfStore(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.Annotations[skipStoreAnnotation] == "1" {
+			return true
+		}
+	}
+	return false
+}
+
 // readOnlyCommands lists commands that only read from the database.
 // These commands open the store in read-only mode. See GH#804.
 var readOnlyCommands = map[string]bool{
@@ -150,6 +174,37 @@ var readOnlyCommands = map[string]bool{
 func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
 }
+
+type rootStorePolicy struct {
+	readOnly         bool
+	disableAutoStart bool
+	runMaintenance   bool
+}
+
+// effectiveRootStorePolicy separates strict --readonly/config policy from
+// command classification. Classified reads retain their compatibility
+// maintenance and auto-start behavior; strict readonly is mutation-free.
+func effectiveRootStorePolicy(cmdName string, strictReadonly bool) rootStorePolicy {
+	return rootStorePolicy{
+		readOnly:         strictReadonly || isReadOnlyCommand(cmdName),
+		disableAutoStart: strictReadonly,
+		runMaintenance:   !strictReadonly,
+	}
+}
+
+// backendSupportsStrictReadonly reports whether the live backend path can open
+// without provisioning or lifecycle changes. Unsupported SQL backends are
+// rejected earlier by validateConfiguredBackend; proxied Dolt remains writable-only.
+func backendSupportsStrictReadonly(cfg *configfile.Config) bool {
+	return cfg == nil || !cfg.IsDoltProxiedServerMode()
+}
+
+var (
+	runPostRunAutoCommit = maybeAutoCommit
+	runPostRunAutoBackup = maybeAutoBackup
+	runPostRunAutoExport = maybeAutoExport
+	runPostRunAutoPush   = maybeAutoPush
+)
 
 // isWorkingSetReconcileCommand reports whether cmd's whole purpose is to
 // reconcile the Dolt working set: "bd dolt commit" or "bd vc commit". These
@@ -502,7 +557,7 @@ func refreshBoundCommandConfig(cmd *cobra.Command) {
 		readonlyMode = config.GetBool("readonly")
 	}
 	if !root.PersistentFlags().Changed("actor") {
-		actor = config.GetString("actor")
+		actor = resolveConfiguredActor()
 	}
 	if !root.PersistentFlags().Changed("dolt-auto-commit") {
 		doltAutoCommit = config.GetString("dolt.auto-commit")
@@ -536,6 +591,22 @@ func resolveCommandBeadsDir(dbPath string) string {
 	// No candidate matched — fall back to parent directory of the db path.
 	// This handles bootstrap/init where no metadata.json exists yet.
 	return filepath.Dir(dbPath)
+}
+
+// resolveConfiguredActor returns the actor implied by env/config when no
+// explicit --actor flag was passed, honoring the documented priority
+// BEADS_ACTOR > BD_ACTOR (deprecated) > config.yaml `actor`.
+//
+// viper's AutomaticEnv binds the deprecated BD_ACTOR to the "actor" key (env
+// prefix "BD"), and it is consulted ahead of any explicit binding — so
+// config.GetString("actor") alone returns BD_ACTOR's value even when
+// BEADS_ACTOR is also set, silently letting the deprecated alias win (GH#4645).
+// Check BEADS_ACTOR explicitly first so the primary override outranks it.
+func resolveConfiguredActor() string {
+	if beadsActor := os.Getenv("BEADS_ACTOR"); beadsActor != "" {
+		return beadsActor
+	}
+	return config.GetString("actor")
 }
 
 // getActorWithGit returns the actor for audit trails with git config fallback.
@@ -602,7 +673,8 @@ func init() {
 
 	// Register persistent flags
 	rootCmd.PersistentFlags().StringVarP(&changeDir, "directory", "C", "", "Change to this directory before running the command (like git -C)")
-	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: auto-discover .beads/*.db)")
+	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "Database path (default: auto-discover .beads/*.db). In proxied-server mode, a value that isn't an existing path is treated as a database name override (see --database)")
+	rootCmd.PersistentFlags().StringVar(&databaseFlag, "database", "", "Run against a different server database for this invocation, without changing the project's configured database (proxied-server mode only)")
 	rootCmd.PersistentFlags().StringVar(&actor, "actor", "", "Actor name for audit trail (default: $BEADS_ACTOR, git user.name, $USER)")
 	rootCmd.PersistentFlags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	rootCmd.PersistentFlags().String("format", "", "Output format (json). Alias for --json")
@@ -611,7 +683,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&readonlyMode, "readonly", false, "Read-only mode: block write operations (for worker sandboxes)")
 	rootCmd.PersistentFlags().BoolVar(&globalFlag, "global", false, "Use the global shared-server database (beads_global)")
 	rootCmd.PersistentFlags().StringVar(&doltAutoCommit, "dolt-auto-commit", "", "Dolt auto-commit policy (off|on|batch). 'on': commit after each write. 'batch': defer commits to bd dolt commit; uncommitted changes persist in the working set until then. SIGTERM/SIGHUP flush pending batch commits. Default: off. Override via config key dolt.auto-commit")
-	rootCmd.PersistentFlags().BoolVar(&profileEnabled, "profile", false, "Generate CPU profile for performance analysis")
+	rootCmd.PersistentFlags().BoolVar(&cpuProfileEnabled, "cpu-profile", false, "Generate CPU profile for performance analysis")
 	rootCmd.PersistentFlags().StringVar(&memProfilePath, "mem-profile", "", "Write heap profile to FILE on exit (also respects BEADS_MEM_PROFILE)")
 	rootCmd.PersistentFlags().BoolVarP(&verboseFlag, "verbose", "v", false, "Enable verbose/debug output")
 	rootCmd.PersistentFlags().BoolVarP(&quietFlag, "quiet", "q", false, "Suppress non-essential output (errors only)")
@@ -809,6 +881,18 @@ var rootCmd = &cobra.Command{
 				WasSet bool
 			}{readonlyMode, true}
 		}
+		var dbNameFromDBFlag string
+		if cmd.Name() != "init" && cmd.Root().PersistentFlags().Changed("db") && dbPath != "" &&
+			dbidentifier.ValidateIdentifier(dbPath) == nil {
+			if _, statErr := os.Stat(dbPath); statErr != nil {
+				if !os.IsNotExist(statErr) {
+					return HandleError("--db %q: %v", dbPath, statErr)
+				}
+				dbNameFromDBFlag = dbPath
+				dbPath = ""
+			}
+		}
+
 		if !cmd.Root().PersistentFlags().Changed("db") && dbPath == "" &&
 			os.Getenv("BEADS_DB") == "" && os.Getenv("BD_DB") == "" && os.Getenv("BEADS_DIR") == "" {
 			dbPath = config.GetString("db")
@@ -819,7 +903,7 @@ var rootCmd = &cobra.Command{
 			}{dbPath, true}
 		}
 		if !cmd.Root().PersistentFlags().Changed("actor") && actor == "" {
-			actor = config.GetString("actor")
+			actor = resolveConfiguredActor()
 		} else if cmd.Root().PersistentFlags().Changed("actor") {
 			flagOverrides["actor"] = struct {
 				Value  interface{}
@@ -852,6 +936,12 @@ var rootCmd = &cobra.Command{
 		// GH#1093: Check noDbCommands BEFORE expensive operations
 		// to avoid spawning git subprocesses for simple commands
 		// like "bd version" that don't need database access.
+		//
+		// A command can also opt out of store init by setting the
+		// skipStoreAnnotation on its Command literal instead of being listed
+		// here (see commandOptsOutOfStore) — useful for commands defined in
+		// other files or build-tagged variants that can't edit this list. The
+		// "doctor" command uses that seam and so is intentionally absent below.
 		noDbCommands := []string{
 			"__complete",       // Cobra's internal completion command (shell completions work without db)
 			"__completeNoDesc", // Cobra's completion without descriptions (used by fish)
@@ -861,7 +951,7 @@ var rootCmd = &cobra.Command{
 			"context", // reads config files directly, does not need DB open
 			"codex-hook",
 			"cursor-hook", // shells out to `bd prime`; never opens the store itself
-			"doctor",
+			// "doctor" opts out via skipStoreAnnotation on its Command literal.
 			"dolt", // bare "bd dolt" shows help only; subcommands handled below
 			"fish",
 			"formula", // parser-only subcommands; add a store-needed guard before adding DB-backed formula subcommands
@@ -927,6 +1017,15 @@ var rootCmd = &cobra.Command{
 			skipsStoreInit = true
 		}
 
+		// A command may also opt out of store init by declaring the
+		// bd:skip_store annotation (see commandOptsOutOfStore), instead of being
+		// added to the noDbCommands list above. Commands defined in other files
+		// or build-tagged variants use this to exempt themselves without editing
+		// the central list.
+		if commandOptsOutOfStore(cmd) {
+			skipsStoreInit = true
+		}
+
 		// One-time friendly heads-up about anonymous usage metrics. Placed after
 		// the config-derived json/quiet rebind and command classification above so
 		// it can read the real output mode and command identity — that is how it
@@ -961,7 +1060,7 @@ var rootCmd = &cobra.Command{
 		}
 
 		// Performance profiling setup
-		if profileEnabled {
+		if cpuProfileEnabled {
 			timestamp := time.Now().Format("20060102-150405")
 			if f, _ := os.Create(fmt.Sprintf("bd-profile-%s-%s.prof", cmd.Name(), timestamp)); f != nil {
 				profileFile = f
@@ -1090,6 +1189,9 @@ var rootCmd = &cobra.Command{
 		if backendErr := validateConfiguredBackend(cfg); backendErr != nil {
 			return HandleError("%v", backendErr)
 		}
+		if readonlyMode && !backendSupportsStrictReadonly(cfg) {
+			return HandleError("strict readonly is unavailable for dolt proxied-server backend; refusing to open a store that cannot guarantee mutation-free access")
+		}
 
 		// Set actor for audit trail
 		actor = getActorWithGit()
@@ -1098,14 +1200,18 @@ var rootCmd = &cobra.Command{
 			commandSpan.SetAttributes(attribute.String("bd.actor", actor))
 		}
 
-		// Track bd version changes
-		// Best-effort tracking - failures are silent
-		trackBdVersion()
+		policy := effectiveRootStorePolicy(cmd.Name(), readonlyMode)
+
+		// Track bd version changes unless strict readonly forbids repository mutation.
+		// Best-effort tracking - failures are silent.
+		if policy.runMaintenance {
+			trackBdVersion()
+		}
 
 		// Check if this is a read-only command (GH#804)
 		// Read-only commands open the store in read-only mode to avoid modifying
 		// the database (which breaks file watchers).
-		useReadOnly := isReadOnlyCommand(cmd.Name())
+		useReadOnly := policy.readOnly
 
 		// If the operator passed --force on `bd migrate` or `bd migrate schema`,
 		// set the programmatic gate override before both autoMigrateOnVersionBump
@@ -1127,7 +1233,9 @@ var rootCmd = &cobra.Command{
 		// and closes BEFORE the main store is opened. This ensures bd doctor and
 		// read-only commands see the correct version after a CLI upgrade.
 
-		autoMigrateOnVersionBump(beadsDir)
+		if policy.runMaintenance {
+			autoMigrateOnVersionBump(beadsDir)
+		}
 
 		// Initialize direct storage access
 		var err error
@@ -1136,9 +1244,10 @@ var rootCmd = &cobra.Command{
 		// on a different filesystem (e.g., ext4 for performance on WSL).
 		doltPath := doltserver.ResolveDoltDir(beadsDir)
 		doltCfg := &dolt.Config{
-			ReadOnly:    useReadOnly,
-			BeadsDir:    beadsDir,
-			LenientOpen: isWorkingSetReconcileCommand(cmd),
+			ReadOnly:         useReadOnly,
+			DisableAutoStart: policy.disableAutoStart,
+			BeadsDir:         beadsDir,
+			LenientOpen:      isWorkingSetReconcileCommand(cmd),
 		}
 
 		// Load config to get database name and server connection settings.
@@ -1248,10 +1357,26 @@ var rootCmd = &cobra.Command{
 		// other helper paths stay in lockstep with the main command path.
 		dolt.ApplyCLIAutoStart(beadsDir, doltCfg)
 
+		databaseOverride := databaseFlag
+		if dbNameFromDBFlag != "" {
+			if databaseOverride != "" && databaseOverride != dbNameFromDBFlag {
+				return HandleError("conflicting database selection: --db=%q vs --database=%q", dbNameFromDBFlag, databaseOverride)
+			}
+			databaseOverride = dbNameFromDBFlag
+		}
+		if databaseOverride != "" {
+			if !proxiedServerMode {
+				return HandleErrorRespectJSON("--database (or a --db value naming a database) is only supported in proxied-server mode")
+			}
+			if err := dbidentifier.ValidateIdentifier(databaseOverride); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+		}
+
 		// In proxied mode the CLI short-circuits to the uowProvider path and
 		// dispatches through the *_proxied_server.go duals.
 		if proxiedServerMode {
-			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir)
+			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride)
 			if err != nil {
 				return HandleError("failed to open uow provider: %v", err)
 			}
@@ -1391,58 +1516,60 @@ var rootCmd = &cobra.Command{
 				uowProvider = nil
 			}
 		} else {
-			// Dolt auto-commit: after a successful write command (and after final flush),
-			// create a Dolt commit so changes don't remain only in the working set.
-			if commandDidWrite.Load() && !commandDidExplicitDoltCommit {
-				if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: cmd.Name()}); err != nil {
-					return HandleError("dolt auto-commit failed: %v", err)
+			if effectiveRootStorePolicy(cmd.Name(), readonlyMode).runMaintenance {
+				// Dolt auto-commit: after a successful write command (and after final flush),
+				// create a Dolt commit so changes don't remain only in the working set.
+				if commandDidWrite.Load() && !commandDidExplicitDoltCommit {
+					if err := runPostRunAutoCommit(rootCtx, doltAutoCommitParams{Command: cmd.Name()}); err != nil {
+						return HandleError("dolt auto-commit failed: %v", err)
+					}
 				}
-			}
 
-			// Tip metadata auto-commit: if a tip was shown, create a separate Dolt commit for the
-			// tip_*_last_shown metadata updates. This may happen even for otherwise read-only commands.
-			if commandDidWriteTipMetadata && len(commandTipIDsShown) > 0 {
-				// Only applies when dolt auto-commit is enabled and backend is versioned (Dolt).
-				if mode, err := getDoltAutoCommitMode(); err != nil {
-					return HandleError("dolt tip auto-commit failed: %v", err)
-				} else if mode == doltAutoCommitOn {
-					// Apply tip metadata writes now (deferred in recordTipShown for Dolt).
-					for tipID := range commandTipIDsShown {
-						key := fmt.Sprintf("tip_%s_last_shown", tipID)
-						value := time.Now().Format(time.RFC3339)
-						if err := store.SetLocalMetadata(rootCtx, key, value); err != nil {
+				// Tip metadata auto-commit: if a tip was shown, create a separate Dolt commit for the
+				// tip_*_last_shown metadata updates. This may happen even for otherwise read-only commands.
+				if commandDidWriteTipMetadata && len(commandTipIDsShown) > 0 {
+					// Only applies when dolt auto-commit is enabled and backend is versioned (Dolt).
+					if mode, err := getDoltAutoCommitMode(); err != nil {
+						return HandleError("dolt tip auto-commit failed: %v", err)
+					} else if mode == doltAutoCommitOn {
+						// Apply tip metadata writes now (deferred in recordTipShown for Dolt).
+						for tipID := range commandTipIDsShown {
+							key := fmt.Sprintf("tip_%s_last_shown", tipID)
+							value := time.Now().Format(time.RFC3339)
+							if err := store.SetLocalMetadata(rootCtx, key, value); err != nil {
+								return HandleError("dolt tip auto-commit failed: %v", err)
+							}
+						}
+
+						ids := make([]string, 0, len(commandTipIDsShown))
+						for tipID := range commandTipIDsShown {
+							ids = append(ids, tipID)
+						}
+						msg := formatDoltAutoCommitMessage("tip", getActor(), ids)
+						if err := runPostRunAutoCommit(rootCtx, doltAutoCommitParams{Command: "tip", MessageOverride: msg}); err != nil {
 							return HandleError("dolt tip auto-commit failed: %v", err)
 						}
 					}
+				}
 
-					ids := make([]string, 0, len(commandTipIDsShown))
-					for tipID := range commandTipIDsShown {
-						ids = append(ids, tipID)
-					}
-					msg := formatDoltAutoCommitMessage("tip", getActor(), ids)
-					if err := maybeAutoCommit(rootCtx, doltAutoCommitParams{Command: "tip", MessageOverride: msg}); err != nil {
-						return HandleError("dolt tip auto-commit failed: %v", err)
+				// Auto-backup: sync a Dolt-native backup if enabled and due
+				runPostRunAutoBackup(rootCtx)
+
+				// Auto-export: write git-tracked JSONL for portability if enabled and due.
+				// Read-only commands must not perform post-run maintenance writes or emit
+				// sync guidance after machine-readable output.
+				if shouldRunPostCommandAutoExport(cmd) {
+					if err := runPostRunAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd)); err != nil {
+						return HandleError("%v", err)
 					}
 				}
-			}
 
-			// Auto-backup: sync a Dolt-native backup if enabled and due
-			maybeAutoBackup(rootCtx)
-
-			// Auto-export: write git-tracked JSONL for portability if enabled and due.
-			// Read-only commands must not perform post-run maintenance writes or emit
-			// sync guidance after machine-readable output.
-			if shouldRunPostCommandAutoExport(cmd) {
-				if err := maybeAutoExport(rootCtx, commandAllowsEmptyAutoExport(cmd)); err != nil {
-					return HandleError("%v", err)
+				// Auto-push: push to Dolt remote if enabled and due.
+				// Skip for read-only commands to avoid unnecessary network operations
+				// and metadata writes on commands like bd list/show/ready (GH#2191).
+				if !isReadOnlyCommand(cmd.Name()) {
+					runPostRunAutoPush(rootCtx)
 				}
-			}
-
-			// Auto-push: push to Dolt remote if enabled and due.
-			// Skip for read-only commands to avoid unnecessary network operations
-			// and metadata writes on commands like bd list/show/ready (GH#2191).
-			if !isReadOnlyCommand(cmd.Name()) {
-				maybeAutoPush(rootCtx)
 			}
 
 			// Signal that store is closing (prevents background flush from accessing closed store)

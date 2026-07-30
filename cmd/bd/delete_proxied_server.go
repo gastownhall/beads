@@ -18,6 +18,7 @@ type deleteInput struct {
 	force      bool
 	dryRun     bool
 	jsonOutput bool
+	quiet      bool
 }
 
 func gatherDeleteInput(cmd *cobra.Command, args []string) (*deleteInput, error) {
@@ -40,6 +41,7 @@ func gatherDeleteInput(cmd *cobra.Command, args []string) (*deleteInput, error) 
 	in.force, _ = cmd.Flags().GetBool("force")
 	in.dryRun, _ = cmd.Flags().GetBool("dry-run")
 	in.jsonOutput = jsonOutput
+	in.quiet = isQuiet()
 	return in, nil
 }
 
@@ -126,8 +128,14 @@ func runDeleteProxiedPreviewTx(ctx context.Context, in *deleteInput) error {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
+	return outputDeleteProxiedPreview(in, result)
+}
+
+// outputDeleteProxiedPreview is the proxied-server preview output boundary.
+// JSON takes precedence over quiet, but neither mode may serialize issue payloads.
+func outputDeleteProxiedPreview(in *deleteInput, result deletePreviewResult) error {
 	if in.jsonOutput {
-		_ = outputJSON(map[string]any{
+		return outputJSON(map[string]any{
 			"would_delete":         result.res.DeletedCount,
 			"dependencies_removed": result.res.DependenciesCount,
 			"labels_removed":       result.res.LabelsCount,
@@ -137,6 +145,8 @@ func runDeleteProxiedPreviewTx(ctx context.Context, in *deleteInput) error {
 			"connected":            sortedKeys(result.preview.ConnectedIssues),
 			"dry_run":              in.dryRun,
 		})
+	}
+	if in.quiet {
 		return nil
 	}
 	renderDeletePreview(in, result.preview, result.res)

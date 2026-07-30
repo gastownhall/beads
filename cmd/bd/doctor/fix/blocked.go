@@ -17,18 +17,28 @@ import (
 // Mirrors DependencyKeys: opens its own writable store, repairs in a
 // transaction, and stages only the table it touched so an unrelated dirty
 // working set is not swept under this commit.
+//
+// orderDoctorFixes (cmd/bd/doctor_fix.go) pins this fix to run LAST in a
+// `bd doctor --fix` pass, after every graph-mutating fix — so a stale/wrong
+// connection here would land a DOLT_COMMIT into another project's history
+// even when every earlier fix correctly aborted on the same mismatched
+// target (mybd-2qegi). guardFixTarget below is what stops that.
 func RecomputeBlocked(path string) error {
 	beadsDir, err := resolvedWorkspaceBeadsDir(path)
 	if err != nil {
 		return err
 	}
 
-	db, err := openDoltDB(beadsDir)
+	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
 		fmt.Printf("  Blocked-state fix skipped (%v)\n", err)
 		return nil
 	}
 	defer db.Close()
+
+	if skip, err := guardFixTarget("Blocked-state fix", db, beadsDir, cfg); skip {
+		return err
+	}
 
 	return repairBlockedState(context.Background(), db)
 }

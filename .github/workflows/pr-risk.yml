@@ -143,10 +143,15 @@ jobs:
           retention-days: 1
 
   test-embedded-storage:
-    name: Test (Embedded Dolt Storage)
+    name: Test (Embedded Dolt Storage ${{ matrix.shard }}/${{ strategy.job-total }})
     needs: [detect-ci-tier, build-embedded]
     if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -168,11 +173,12 @@ jobs:
         env:
           BEADS_TEST_EMBEDDED_DOLT: "1"
           BEADS_TEST_EMBEDDED_TEST_BINARY: /tmp/embeddeddolt-test
-        # Conformance runs in the dedicated test-embedded-conformance job; skip
-        # it here. The budget must cover every store-open re-running the full
-        # migration chain, which grows with each migration (bd-lrgn1 pushed a
-        # slow runner past the old 20m).
-        run: /tmp/embeddeddolt-test -test.v -test.count=1 -test.timeout=30m -test.skip '^TestConformance$'
+        # Manifest-driven shard of the storage suite (mirrors test-embedded-cmd
+        # / embedded-test-shard.sh). Conformance runs separately in the
+        # dedicated test-embedded-conformance job; embedded-storage-test-shard.sh
+        # excludes TestConformance from discovery, so it never lands in one of
+        # these shards.
+        run: bash .github/scripts/embedded-storage-test-shard.sh ${{ matrix.shard }} 5
 
   test-embedded-conformance:
     name: Test (Embedded Dolt Conformance - ${{ matrix.partition }})

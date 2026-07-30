@@ -21,40 +21,73 @@ type DBTX interface {
 
 const waitsForGateBlockedSQL = `
 		(
-		  EXISTS (
-		    SELECT 1 FROM dependencies cd JOIN issues child ON child.id = cd.issue_id
-		    WHERE cd.type = 'parent-child'
-		      AND ((d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id)
-		        OR (d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id))
-		      AND child.status <> 'closed' AND child.status <> 'pinned'
-		  )
-		  OR EXISTS (
-		    SELECT 1 FROM wisp_dependencies cd JOIN wisps child ON child.id = cd.issue_id
-		    WHERE cd.type = 'parent-child'
-		      AND ((d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id)
-		        OR (d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id))
-		      AND child.status <> 'closed' AND child.status <> 'pinned'
-		  )
-		)
-		AND NOT (
-		  -- COALESCE: metadata without a gate key (legacy '{}' rows) means the
-		  -- all-children default; a NULL here would poison the AND/NOT chain
-		  -- and unblock the gate as soon as any child closes.
-		  COALESCE(JSON_UNQUOTE(JSON_EXTRACT(d.metadata, '$.gate')), 'all-children') = 'any-children'
-		  AND (
+		  (
 		    EXISTS (
 		      SELECT 1 FROM dependencies cd JOIN issues child ON child.id = cd.issue_id
 		      WHERE cd.type = 'parent-child'
 		        AND ((d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id)
 		          OR (d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id))
-		        AND child.status = 'closed'
+		        AND child.status <> 'closed' AND child.status <> 'pinned'
 		    )
 		    OR EXISTS (
 		      SELECT 1 FROM wisp_dependencies cd JOIN wisps child ON child.id = cd.issue_id
 		      WHERE cd.type = 'parent-child'
 		        AND ((d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id)
 		          OR (d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id))
-		        AND child.status = 'closed'
+		        AND child.status <> 'closed' AND child.status <> 'pinned'
+		    )
+		  )
+		  AND NOT (
+		    -- COALESCE: metadata without a gate key (legacy '{}' rows) means the
+		    -- all-children default; a NULL here would poison the AND/NOT chain
+		    -- and unblock the gate as soon as any child closes.
+		    COALESCE(JSON_UNQUOTE(JSON_EXTRACT(d.metadata, '$.gate')), 'all-children') = 'any-children'
+		    AND (
+		      EXISTS (
+		        SELECT 1 FROM dependencies cd JOIN issues child ON child.id = cd.issue_id
+		        WHERE cd.type = 'parent-child'
+		          AND ((d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id)
+		            OR (d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id))
+		          AND child.status = 'closed'
+		      )
+		      OR EXISTS (
+		        SELECT 1 FROM wisp_dependencies cd JOIN wisps child ON child.id = cd.issue_id
+		        WHERE cd.type = 'parent-child'
+		          AND ((d.depends_on_issue_id IS NOT NULL AND cd.depends_on_issue_id = d.depends_on_issue_id)
+		            OR (d.depends_on_wisp_id IS NOT NULL AND cd.depends_on_wisp_id = d.depends_on_wisp_id))
+		          AND child.status = 'closed'
+		      )
+		    )
+		  )
+		)
+		OR (
+		  -- also_blocks (GH#3783/GH#3875): a waits-for edge collapsed from a
+		  -- redundant needs/depends_on blocks edge onto this same spawner
+		  -- (cmd/bd/cook.go collectDependencies) additionally carries classic
+		  -- blocking semantics — it must block while the spawner itself is
+		  -- open, not only while the spawner has an open parent-child child.
+		  -- This closes the pre-fanout window where the waiter could become
+		  -- ready before the spawner (and its fanout) ever completed. Legacy
+		  -- rows and plain (non-collapsed) waits-for edges lack the
+		  -- also_blocks key, so COALESCE defaults to 'false' and this branch
+		  -- is a no-op for them (zero behavior change).
+		  --
+		  -- This is a top-level OR, deliberately outside (and overriding) the
+		  -- any-children early-open carve-out above: a collapsed edge means
+		  -- the caller's needs/depends_on required the spawner itself to
+		  -- close, so an early-open child close must NOT unblock the waiter
+		  -- while the spawner remains open.
+		  COALESCE(JSON_UNQUOTE(JSON_EXTRACT(d.metadata, '$.also_blocks')), 'false') = 'true'
+		  AND (
+		    EXISTS (
+		      SELECT 1 FROM issues sp
+		      WHERE sp.id = d.depends_on_issue_id
+		        AND sp.status <> 'closed' AND sp.status <> 'pinned'
+		    )
+		    OR EXISTS (
+		      SELECT 1 FROM wisps sp
+		      WHERE sp.id = d.depends_on_wisp_id
+		        AND sp.status <> 'closed' AND sp.status <> 'pinned'
 		    )
 		  )
 		)
@@ -396,6 +429,14 @@ func AffectedByStatusChangeInTx(ctx context.Context, tx DBTX, id string) ([]stri
 	if err := loadWaitersWhoseSpawnerIsParentOfInTx(ctx, tx, id, false, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
 		return nil, nil, err
 	}
+	// id's own status just changed, and an also_blocks waits-for edge blocks
+	// while the spawner itself is open (pre-fanout window, GH#3783/GH#3875).
+	// A waiter with only a DepWaitsFor edge on id (no DepBlocks edge — the
+	// blocking semantics were collapsed into also_blocks) would otherwise
+	// never get recomputed when its spawner closes.
+	if err := loadWaitersOnSpawnerIDsInTx(ctx, tx, []string{id}, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
+		return nil, nil, err
+	}
 	return expandByParentChildDescendantsInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen)
 }
 
@@ -409,6 +450,12 @@ func AffectedByStatusChangeForWispInTx(ctx context.Context, tx DBTX, id string) 
 		return nil, nil, err
 	}
 	if err := loadWaitersWhoseSpawnerIsParentOfInTx(ctx, tx, id, true, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
+		return nil, nil, err
+	}
+	// See the issue-id sibling above: id's own status just changed, and a
+	// waiter that waits directly on this wisp id as spawner needs to be
+	// recomputed too.
+	if err := loadWaitersOnSpawnerIDsInTx(ctx, tx, []string{id}, &issueSeed, issueSeen, &wispSeed, wispSeen); err != nil {
 		return nil, nil, err
 	}
 	return expandByParentChildDescendantsInTx(ctx, tx, issueSeed, wispSeed, issueSeen, wispSeen)

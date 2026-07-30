@@ -53,6 +53,9 @@ BUILD_DIR := .
 GIT_BUILD := $(shell git rev-parse --short HEAD)
 ifeq ($(OS),Windows_NT)
 INSTALL_DIR := $(USERPROFILE)/.local/bin
+WINDOWS_MINGW_BIN ?= /c/ProgramData/mingw64/mingw64/bin
+WINDOWS_MINGW_GCC := $(WINDOWS_MINGW_BIN)/gcc.exe
+WINDOWS_CGO_BINS ?= $(WINDOWS_MINGW_BIN) /c/msys64/clangarm64/bin /c/msys64/ucrt64/bin /c/msys64/mingw64/bin /c/msys64/clang64/bin
 else
 INSTALL_DIR := $(HOME)/.local/bin
 endif
@@ -63,7 +66,9 @@ endif
 # Windows notes:
 #   - ICU is NOT required. go-icu-regex has a pure-Go fallback (regex_windows.go)
 #     and gms_pure_go tag tells go-mysql-server to use pure-Go regex too.
-#   - CGO_ENABLED=1 needs a C compiler (MinGW/MSYS2) but does NOT need ICU.
+#   - CGO_ENABLED=1 needs a GCC-compatible Windows CGO compiler but does NOT
+#     need ICU. Supported local toolchains include MinGW-w64/MSYS2 gcc and
+#     MSYS2 clang/LLVM targeting windows-gnu.
 export CGO_ENABLED := 1
 
 # When go.mod requires a newer Go version than the locally installed one,
@@ -87,7 +92,31 @@ REGRESSION_TIMEOUT ?= 20m
 build:
 	@echo "Building bd..."
 ifeq ($(OS),Windows_NT)
-	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd
+	@if [ -n "$$CC" ]; then \
+		echo "Using CC=$$CC"; \
+		go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+	elif command -v gcc >/dev/null 2>&1; then \
+		CC=gcc go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+	elif command -v clang >/dev/null 2>&1 && clang -dumpmachine 2>/dev/null | grep -qi 'windows.*gnu'; then \
+		CC=clang go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+	else \
+		for bin in $(WINDOWS_CGO_BINS); do \
+			if [ -x "$$bin/gcc.exe" ]; then \
+				echo "Using Windows CGO gcc from $$bin"; \
+				PATH="$$bin:$$PATH" CC=gcc go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+				exit $$?; \
+			fi; \
+			if [ -x "$$bin/clang.exe" ] && "$$bin/clang.exe" -dumpmachine 2>/dev/null | grep -qi 'windows.*gnu'; then \
+				echo "Using Windows CGO clang from $$bin"; \
+				PATH="$$bin:$$PATH" CC=clang go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+				exit $$?; \
+			fi; \
+		done; \
+		echo "ERROR: Windows CGO builds require a GCC-compatible compiler." >&2; \
+		echo "       Install MinGW-w64/MSYS2 gcc or MSYS2 clang/LLVM targeting windows-gnu." >&2; \
+		echo "       Put it on PATH, set CC, or set WINDOWS_CGO_BINS=/path/to/toolchain/bin." >&2; \
+		exit 1; \
+	fi
 else
 	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
 ifeq ($(shell uname),Darwin)
@@ -268,6 +297,11 @@ fmt:
 fmt-check:
 	@echo "Checking Go formatting..."
 	@UNFORMATTED=$$(gofmt -l .); \
+	status=$$?; \
+	if [ "$$status" -ne 0 ]; then \
+		echo "gofmt failed while checking formatting" >&2; \
+		exit "$$status"; \
+	fi; \
 	if [ -n "$$UNFORMATTED" ]; then \
 		echo "The following files are not properly formatted:"; \
 		echo "$$UNFORMATTED"; \

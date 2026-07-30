@@ -509,14 +509,94 @@ func configYamlPort(beadsDir string) int {
 	return cfg.Port()
 }
 
-// DefaultConfig returns config with sensible defaults.
-// Priority: env var > port file > config.yaml / global config > metadata.json.
-// Returns port 0 when no source provides a port, meaning Start() should
-// allocate an ephemeral port from the OS.
+// portSource is one step in the port-resolution precedence chain that
+// DefaultConfig walks. resolve reports (port, true) when this source has a
+// usable value; DefaultConfig stops at the first true.
+type portSource struct {
+	label   string
+	resolve func(beadsDir string) (int, bool)
+}
+
+// portSources is the single precedence chain for server-port resolution.
+// DefaultConfig consumes it behaviorally; PortSourceLabels exposes the same
+// slice's labels so callers like `bd dolt show-config` render the actual
+// chain instead of hand-copying it out of sync (GH#4511).
+var portSources = []portSource{
+	{
+		label: "Environment variable (BEADS_DOLT_SERVER_PORT)",
+		resolve: func(beadsDir string) (int, bool) {
+			p := os.Getenv("BEADS_DOLT_SERVER_PORT")
+			if p == "" {
+				return 0, false
+			}
+			port, err := strconv.Atoi(p)
+			return port, err == nil
+		},
+	},
+	{
+		// Gitignored, local-only. Elevated above the YAML sources to prevent
+		// git-tracked values from causing cross-project data leakage (GH#2372).
+		label: "Port file (.beads/dolt-server.port; shared-server dir in shared mode)",
+		resolve: func(beadsDir string) (int, bool) {
+			p := readPortFile(beadsDir)
+			return p, p > 0
+		},
+	},
+	{
+		label: "Dolt server config.yaml (listener.port, in the dolt data directory)",
+		resolve: func(beadsDir string) (int, bool) {
+			p := configYamlPort(beadsDir)
+			return p, p > 0
+		},
+	},
+	{
+		// ~/.config/bd/config.yaml or project config.yaml (GH#2073). Git-tracked,
+		// so it ranks below the port file above.
+		label: "Beads config.yaml / global config (dolt.port)",
+		resolve: func(beadsDir string) (int, bool) {
+			p := config.GetYamlConfig("dolt.port")
+			if p == "" {
+				return 0, false
+			}
+			port, err := strconv.Atoi(p)
+			return port, err == nil && port > 0
+		},
+	},
+	{
+		// Deprecated: git-tracked, propagates to all contributors, causing
+		// cross-project data leakage (GH#2372). Kept as a fallback so existing
+		// setups don't break silently.
+		label: "metadata.json dolt_server_port (deprecated fallback)",
+		resolve: func(beadsDir string) (int, bool) {
+			metaCfg, err := configfile.Load(beadsDir)
+			if err != nil || metaCfg == nil || metaCfg.DoltServerPort <= 0 {
+				return 0, false
+			}
+			fmt.Fprintf(os.Stderr, "Warning: dolt_server_port in metadata.json is deprecated (can cause cross-project data leakage).\n")
+			fmt.Fprintf(os.Stderr, "  The port file (.beads/dolt-server.port) is now the primary source.\n")
+			fmt.Fprintf(os.Stderr, "  Remove dolt_server_port from .beads/metadata.json to silence this warning.\n")
+			return metaCfg.DoltServerPort, true
+		},
+	},
+}
+
+// PortSourceLabels returns the operator-facing description of each step in
+// the port-resolution precedence chain, in priority order.
+func PortSourceLabels() []string {
+	labels := make([]string, len(portSources))
+	for i, s := range portSources {
+		labels[i] = s.label
+	}
+	return labels
+}
+
+// DefaultConfig returns config with sensible defaults. Port resolution walks
+// portSources in priority order (see PortSourceLabels) and returns port 0
+// when no source provides one, meaning Start() should allocate an ephemeral
+// port from the OS.
 //
-// The port file (dolt-server.port) is written by Start() with the actual port
-// the server is listening on. Consulting it here ensures that commands
-// connecting to an already-running server use the correct port.
+// The port file (dolt-server.port) is written by Start() with the actual
+// listening port, so already-running-server connections use the right port.
 func DefaultConfig(beadsDir string) *Config {
 	// In shared mode, use the shared server directory for port resolution
 	if IsSharedServerMode() {
@@ -531,51 +611,10 @@ func DefaultConfig(beadsDir string) *Config {
 		Mode:     ResolveServerMode(beadsDir),
 	}
 
-	// Check env var override first (used by tests and manual overrides)
-	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil {
+	for _, src := range portSources {
+		if port, ok := src.resolve(beadsDir); ok {
 			cfg.Port = port
-			return cfg
-		}
-	}
-
-	// Check the port file (gitignored, local-only) — this is the primary
-	// persistent source. Start() writes the actual listening port here.
-	// Elevated to top priority (after env var) to prevent git-tracked values
-	// from causing cross-project data leakage (GH#2372).
-	if p := readPortFile(beadsDir); 0 < p {
-		cfg.Port = p
-		return cfg
-	}
-
-	if p := configYamlPort(beadsDir); p > 0 {
-		cfg.Port = p
-		return cfg
-	}
-
-	// Check config.yaml / global config (~/.config/bd/config.yaml) (GH#2073)
-	// Note: project-level config.yaml dolt.port is git-tracked and could
-	// propagate to collaborators. Prefer the gitignored port file above.
-	if cfg.Port == 0 {
-		if p := config.GetYamlConfig("dolt.port"); p != "" {
-			if port, err := strconv.Atoi(p); err == nil && port > 0 {
-				cfg.Port = port
-			}
-		}
-	}
-
-	// Deprecated: metadata.json DoltServerPort is git-tracked and propagates
-	// to all contributors, causing cross-project data leakage (GH#2372).
-	// Emit a one-time warning but still use the value as a fallback so
-	// existing setups don't break silently.
-	if cfg.Port == 0 {
-		if metaCfg, err := configfile.Load(beadsDir); err == nil && metaCfg != nil {
-			if metaCfg.DoltServerPort > 0 {
-				fmt.Fprintf(os.Stderr, "Warning: dolt_server_port in metadata.json is deprecated (can cause cross-project data leakage).\n")
-				fmt.Fprintf(os.Stderr, "  The port file (.beads/dolt-server.port) is now the primary source.\n")
-				fmt.Fprintf(os.Stderr, "  Remove dolt_server_port from .beads/metadata.json to silence this warning.\n")
-				cfg.Port = metaCfg.DoltServerPort
-			}
+			break
 		}
 	}
 

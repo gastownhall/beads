@@ -222,12 +222,13 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if claimReady {
 			CheckReadonly("ready --claim")
 		} else {
-			routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
+			routedStore, routed, routingRule, err := openRoutedReadStore(ctx, activeStore)
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
 			if routed {
 				defer func() { _ = routedStore.Close() }()
+				printContributorRoutingNotice(ctx, activeStore, routingRule)
 				activeStore = routedStore
 			}
 		}
@@ -297,7 +298,15 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if results == nil {
 				results = []*types.IssueWithCounts{}
 			}
-			if jerr := outputJSON(results); jerr != nil {
+			var pag *PaginationMeta
+			if truncated {
+				pag = &PaginationMeta{
+					Returned:  len(results),
+					Total:     totalReady,
+					Truncated: true,
+				}
+			}
+			if jerr := outputJSONWithPagination(results, pag); jerr != nil {
 				return jerr
 			}
 			if truncated {

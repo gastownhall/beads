@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -130,13 +128,14 @@ func (r *commentSQLRepositoryImpl) Insert(ctx context.Context, issueID, author, 
 		return nil, fmt.Errorf("db: CommentSQLRepository.Insert: issue %s not found", issueID)
 	}
 
-	createdAt := time.Now().UTC()
-	id := uuid.Must(uuid.NewV7()).String()
+	createdAtText := issueops.NowAuxTime()
 	commentTable := pickCommentTable(opts.UseWispsTable)
-	//nolint:gosec // G201: commentTable is one of two hardcoded constants
-	if _, err := r.runner.ExecContext(ctx,
-		fmt.Sprintf("INSERT INTO %s (id, issue_id, author, text, created_at) VALUES (?, ?, ?, ?, ?)", commentTable),
-		id, issueID, author, text, createdAt); err != nil {
+	id, _, err := issueops.InsertDerivedComment(ctx, r.runner, commentTable, issueID, author, text, createdAtText)
+	if err != nil {
+		return nil, fmt.Errorf("db: CommentSQLRepository.Insert: %w", err)
+	}
+	createdAt, err := issueops.ParseAuxTime(createdAtText)
+	if err != nil {
 		return nil, fmt.Errorf("db: CommentSQLRepository.Insert: %w", err)
 	}
 

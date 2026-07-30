@@ -14,7 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
-func newProxiedServerUOWProvider(ctx context.Context, beadsDir string) (uow.UnitOfWorkProvider, error) {
+func newProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverride string) (uow.UnitOfWorkProvider, error) {
 	if beadsDir == "" {
 		return nil, fmt.Errorf("newProxiedServerUOWProvider: beadsDir must be set")
 	}
@@ -23,6 +23,9 @@ func newProxiedServerUOWProvider(ctx context.Context, beadsDir string) (uow.Unit
 	database := configfile.DefaultDoltDatabase
 	if persisted != nil {
 		database = persisted.GetDoltDatabase()
+	}
+	if databaseOverride != "" {
+		database = databaseOverride
 	}
 
 	info, _ := configfile.LoadProxiedServerClientInfo(beadsDir)

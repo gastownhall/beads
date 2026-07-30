@@ -159,6 +159,24 @@ func applyUpdateProxiedAttempt(ctx context.Context, id string, in *updateInput) 
 		return nil, &updateIDFailure{ID: id, Error: err.Error()}, false, nil
 	}
 
+	// bd-98s5c: an unguarded assignee update must not silently overwrite
+	// another actor's live claim. Skipped under --if-assignee: that CAS names
+	// the holder explicitly (park stays possible without --force). Also
+	// skipped under --claim: the claim CAS is itself the anti-steal gate (a
+	// foreign live claim fails it with the canonical "already claimed" copy),
+	// and an assignee edit that rides a WON claim only ever touches the
+	// actor's own fresh claim. The proxied-server path is where cross-actor
+	// collisions actually happen — every shared-dolt-server clone writes
+	// through here. A policy refusal: terminal per-issue failure, exit 1,
+	// never GuardMismatch/13.
+	if newAssignee, ok := in.fields["assignee"].(string); ok && in.ifAssignee == nil && !in.claim {
+		if err := validateIssueReassignable(id, current, actor, newAssignee,
+			uowClaimPoolAliases(ctx, uw), in.force); err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", err)
+			return nil, &updateIDFailure{ID: id, Error: err.Error()}, false, nil
+		}
+	}
+
 	spec := buildUpdateSpecForIssue(current, in)
 	notesOverwritten := replacesExistingNotes(current.Notes, in.fields)
 

@@ -217,8 +217,12 @@ func FixMissingDoltDatabase(path string) error {
 		return nil
 	}
 
-	// Connect to the server and probe for the correct database
-	db, err := openDoltDB(beadsDir)
+	// Connect to the server and probe for the correct database. No
+	// verifyFixTargetIdentity guard here: cfg.DoltDatabase is empty at this
+	// point (that's the condition that got us here), so there is no target
+	// database identity to verify yet — this call establishes it by probing
+	// schema across the server, it does not delete or mutate anything.
+	db, _, err := openDoltDB(beadsDir)
 	if err != nil {
 		fmt.Printf("  dolt_database fix skipped (server not reachable: %v)\n", err)
 		return nil

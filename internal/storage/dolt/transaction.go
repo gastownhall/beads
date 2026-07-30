@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -1071,19 +1070,18 @@ func (t *doltTransaction) ImportIssueComment(ctx context.Context, issueID, autho
 		table = "wisp_comments"
 	}
 
-	createdAt = createdAt.UTC()
-	id := uuid.Must(uuid.NewV7()).String()
-	//nolint:gosec // G201: table is hardcoded
-	_, err = t.txFor(table).ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, author, text, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, table), id, issueID, author, text, createdAt)
+	createdAtText := issueops.FormatAuxTime(createdAt)
+	id, _, err := issueops.InsertDerivedComment(ctx, t.txFor(table), table, issueID, author, text, createdAtText)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add comment: %w", err)
 	}
 	t.dirty.MarkDirty(table)
 
-	return &types.Comment{ID: id, IssueID: issueID, Author: author, Text: text, CreatedAt: createdAt}, nil
+	stored, err := issueops.ParseAuxTime(createdAtText)
+	if err != nil {
+		return nil, fmt.Errorf("failed to add comment: %w", err)
+	}
+	return &types.Comment{ID: id, IssueID: issueID, Author: author, Text: text, CreatedAt: stored}, nil
 }
 
 func (t *doltTransaction) GetIssueComments(ctx context.Context, issueID string) ([]*types.Comment, error) {
@@ -1121,11 +1119,12 @@ func (t *doltTransaction) AddComment(ctx context.Context, issueID, actor, commen
 		table = "wisp_events"
 	}
 
-	//nolint:gosec // G201: table is hardcoded
-	_, err := t.txFor(table).ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?, ?)
-	`, table), issueops.NewEventID(), issueID, types.EventCommented, actor, comment)
+	err := issueops.InsertDerivedEvent(ctx, t.txFor(table), table, issueops.AuxEvent{
+		IssueID:   issueID,
+		EventType: types.EventCommented,
+		Actor:     actor,
+		Comment:   sql.NullString{String: comment, Valid: true},
+	})
 	if err == nil {
 		t.dirty.MarkDirty(table)
 	}

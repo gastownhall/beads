@@ -204,6 +204,25 @@ jobs:
           path: ${{ runner.temp }}/cli-docs-freshness.patch
           if-no-files-found: ignore
 
+  check-doc-freshness-platforms:
+    name: Check doc freshness (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Exercise native date and Bash process boundary
+        run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestDocFreshness' ./scripts
+
   pr-preflight-platforms:
     name: PR preflight process (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -570,9 +589,11 @@ jobs:
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        env:
+          GOWORK: "off"
         with:
-          version: latest
-          args: --timeout=5m --build-tags=gms_pure_go
+          version: v2.10.1
+          args: --config=.golangci.yml --modules-download-mode=readonly --timeout=5m --build-tags=gms_pure_go
 
   windows-make-shell:
     name: Windows Make shell (${{ matrix.host }})
@@ -603,10 +624,23 @@ jobs:
       - name: Set up Cygwin GNU Make
         if: matrix.host == 'cygwin'
         id: cygwin
+        # cygwin-install-action downloads setup-x86_64.exe from cygwin.com. That
+        # download times out often enough to red the required check for a reason
+        # unrelated to the change under test. Treat a setup failure as a
+        # (non-blocking) warning: the smoke step below is gated on this step
+        # succeeding, so a genuine Cygwin Make regression still fails loudly,
+        # while a flaky installer download only skips the leg with a warning.
+        continue-on-error: true
         uses: cygwin/cygwin-install-action@3f0a3f9f988f7e96b8c18098ae05eaec175f5b52 # v6
         with:
           packages: git make
           add-to-path: 'false'
+
+      - name: Warn when Cygwin setup was skipped by a download failure
+        if: matrix.host == 'cygwin' && steps.cygwin.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::warning title=Cygwin Make-shell leg skipped::cygwin-install-action could not download the Cygwin installer (network flake); skipping the Cygwin-hosted Make smoke test. This is an infrastructure failure, not a code failure."
 
       - name: Exercise native Windows Make
         if: matrix.host == 'native'
@@ -703,7 +737,11 @@ jobs:
           make --no-print-directory -f "$profile/smoke.mk" windows-make-shell-smoke
 
       - name: Exercise Cygwin-hosted Make
-        if: matrix.host == 'cygwin'
+        # Only run when the Cygwin toolchain actually installed; a skipped install
+        # (download flake) leaves this leg un-exercised rather than failing on a
+        # missing bash. A real install success followed by a Make regression here
+        # still fails the job as before.
+        if: matrix.host == 'cygwin' && steps.cygwin.outcome == 'success'
         shell: pwsh
         env:
           CYGWIN_ROOT: ${{ steps.cygwin.outputs.root }}
@@ -767,6 +805,7 @@ jobs:
       - check-version-consistency
       - check-migration-hygiene
       - check-doc-flags
+      - check-doc-freshness-platforms
       - pr-preflight-platforms
       - check-no-beads-changes
       - detect-package-gates
@@ -795,6 +834,7 @@ jobs:
             CHECK_VERSION_CONSISTENCY
             CHECK_MIGRATION_HYGIENE
             CHECK_DOC_FLAGS
+            CHECK_DOC_FRESHNESS_PLATFORMS
             PR_PREFLIGHT_PLATFORMS
             CHECK_NO_BEADS_CHANGES
             DETECT_PACKAGE_GATES
@@ -815,6 +855,7 @@ jobs:
           CHECK_VERSION_CONSISTENCY: ${{ needs.check-version-consistency.result }}
           CHECK_MIGRATION_HYGIENE: ${{ needs.check-migration-hygiene.result }}
           CHECK_DOC_FLAGS: ${{ needs.check-doc-flags.result }}
+          CHECK_DOC_FRESHNESS_PLATFORMS: ${{ needs.check-doc-freshness-platforms.result }}
           PR_PREFLIGHT_PLATFORMS: ${{ needs.pr-preflight-platforms.result }}
           CHECK_NO_BEADS_CHANGES: ${{ needs.check-no-beads-changes.result }}
           DETECT_PACKAGE_GATES: ${{ needs.detect-package-gates.result }}

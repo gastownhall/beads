@@ -29,15 +29,16 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("mol last-activity is not supported in proxied-server mode")
-		}
 		evt := metrics.NewCommandEvent("mol-last-activity")
 		defer func() {
 			if c := metrics.Global(); c != nil {
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runMolLastActivityProxiedServer(rootCtx, args[0])
+		}
 
 		ctx := rootCtx
 

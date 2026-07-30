@@ -257,9 +257,44 @@ func TestSearchCountsSQLShape(t *testing.T) {
 		}
 	}
 
+	// Filter-before-join structure (predicate form): whereSQL is applied to the
+	// main table in a derived table that closes before the first aggregate LEFT
+	// JOIN. Locking this prevents a regression back to the filter-after-join
+	// shape that materialized every aggregate before pruning. "SELECT i.*" is
+	// the derived driver's marker — "FROM (" alone is ambiguous, since the
+	// reverse-blocker subquery also nests one.
+	driverEnd := strings.Index(sql, ") i")
+	firstJoin := strings.Index(sql, "LEFT JOIN")
+	if !strings.Contains(sql, "SELECT i.*") || driverEnd < 0 {
+		t.Fatalf("counts SQL must wrap the main table in a derived subquery; got:\n%s", sql)
+	}
+	if firstJoin < 0 || driverEnd > firstJoin {
+		t.Fatalf("derived driver must close before the first aggregate LEFT JOIN")
+	}
+	if idx := strings.Index(sql, "WHERE x = ?"); idx < 0 || idx > driverEnd {
+		t.Errorf("WHERE filter must appear inside the derived driver (before %q)", ") i")
+	}
+	// ORDER BY and LIMIT must stay AFTER the joins, and appear exactly once —
+	// the ready-work path passes a parameterized ORDER BY, so duplicating it
+	// would desync the placeholder/arg counts.
+	for _, outer := range []string{"ORDER BY y", "LIMIT 5"} {
+		if strings.Count(sql, outer) != 1 {
+			t.Errorf("%q must appear exactly once, got %d", outer, strings.Count(sql, outer))
+		}
+		if idx := strings.Index(sql, outer); idx < firstJoin {
+			t.Errorf("%q must appear after the aggregate joins", outer)
+		}
+	}
+
 	noWispDeps, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", false, true)
 	if strings.Contains(noWispDeps, "UNION ALL") {
 		t.Error("counts SQL must not union wisp reverse deps when probe says absent")
+	}
+	// An empty whereSQL keeps the plain driver: there is no predicate to push
+	// down, so the derived-table wrapper would be pure overhead for the
+	// unfiltered list/counts path.
+	if strings.Contains(noWispDeps, "SELECT i.*") {
+		t.Errorf("empty-where counts SQL must keep the plain driver, not a derived table:\n%s", noWispDeps)
 	}
 	if strings.Contains(noWispDeps, "JSON_ARRAYAGG(label)") {
 		t.Error("counts SQL must skip the labels join when skipLabels is set")
@@ -275,6 +310,12 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	if !strings.Contains(byIDs, "WHERE i.id IN (?,?)") {
 		t.Errorf("by-IDs counts SQL missing driver id filter:\n%s", byIDs)
 	}
+	// The by-IDs form keeps the plain "FROM wisps i" driver: its subqueries are
+	// already id-constrained, so there is no join-then-filter blowup to avoid and
+	// no reason to interpose a derived table.
+	if strings.Contains(byIDs, "SELECT i.*") {
+		t.Errorf("by-IDs counts SQL must keep the plain driver, not a derived table:\n%s", byIDs)
+	}
 	if strings.Contains(byIDs, "ORDER BY") || strings.Contains(byIDs, "LIMIT") {
 		t.Error("by-IDs counts SQL must not carry ORDER BY / LIMIT (order restored in Go)")
 	}
@@ -287,5 +328,62 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, true)
 	if len(idArgsNoLabels) != 6*2 {
 		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
+	}
+}
+
+func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		filter          types.WorkFilter
+		wantClause      string
+		rejectClause    string // must NOT appear in the WHERE; "" skips the check
+		wantLeadingArgs []any
+	}{
+		{
+			name:            "StatusesInClause",
+			filter:          types.WorkFilter{Statuses: []types.Status{"open", "blocked", "pinned"}},
+			wantClause:      "status IN (?,?,?)",
+			wantLeadingArgs: []any{"open", "blocked", "pinned"},
+		},
+		{
+			name:            "SingularStatusWinsOverStatuses",
+			filter:          types.WorkFilter{Status: "open", Statuses: []types.Status{"blocked", "pinned"}},
+			wantClause:      "status = ?",
+			rejectClause:    "status IN (?",
+			wantLeadingArgs: []any{"open"},
+		},
+		{
+			name:         "EmptyFilterLegacyDefault",
+			filter:       types.WorkFilter{},
+			wantClause:   "status IN ('open', 'in_progress')",
+			rejectClause: "status = ?",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			where, args, err := BuildReadyWorkWhere(tt.filter, IssuesFilterTables, ReadyWorkWhereInputs{})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !strings.Contains(where, tt.wantClause) {
+				t.Errorf("status clause %q missing.\n where = %s", tt.wantClause, where)
+			}
+			if tt.rejectClause != "" && strings.Contains(where, tt.rejectClause) {
+				t.Errorf("unexpected status clause %q present.\n where = %s", tt.rejectClause, where)
+			}
+			if len(args) < len(tt.wantLeadingArgs) {
+				t.Fatalf("args = %v, want at least the %d leading status args %v", args, len(tt.wantLeadingArgs), tt.wantLeadingArgs)
+			}
+			for i, want := range tt.wantLeadingArgs {
+				if args[i] != want {
+					t.Errorf("args[%d] = %v, want %v (status args must lead)", i, args[i], want)
+				}
+			}
+		})
 	}
 }

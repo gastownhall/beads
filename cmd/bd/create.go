@@ -26,12 +26,27 @@ import (
 	"github.com/steveyegge/beads/internal/validation"
 )
 
+// validateCreateArgs runs as cobra's Args validation, which executes before
+// PersistentPreRunE opens the store or runs migrations. It reuses
+// resolveTitle — the same shared validator gatherCreateInput calls for the
+// proxied-server create path — so a whitespace-only title (GH#4771) is
+// rejected identically for both backends, and before any invocation that is
+// guaranteed to fail wastes a store open/migration.
+func validateCreateArgs(cmd *cobra.Command, args []string) error {
+	markdownFile, _ := cmd.Flags().GetString("file")
+	graphFile, _ := cmd.Flags().GetString("graph")
+	titleFlag, _ := cmd.Flags().GetString("title")
+
+	_, err := resolveTitle(args, titleFlag, markdownFile, graphFile)
+	return err
+}
+
 var createCmd = &cobra.Command{
 	Use:           "create [title]",
 	GroupID:       "issues",
 	Aliases:       []string{"new"},
 	Short:         "Create a new issue (or batch from markdown/graph JSON)",
-	Args:          cobra.MinimumNArgs(0),
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateCreateArgs),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -65,6 +80,9 @@ var createCmd = &cobra.Command{
 			if dryRun {
 				return HandleError("--dry-run is not supported with --file flag")
 			}
+			if err := rejectSingleIssueFlagsForMarkdown(cmd); err != nil {
+				return err
+			}
 			return createIssuesFromMarkdown(cmd, file)
 		}
 
@@ -77,26 +95,16 @@ var createCmd = &cobra.Command{
 			if err := graphOpts.Validate(); err != nil {
 				return HandleError("invalid graph options: %v", err)
 			}
+			if err := rejectSingleIssueFlagsForGraph(cmd); err != nil {
+				return err
+			}
 			return createIssuesFromGraph(graphFile, graphDryRun, graphOpts)
 		}
 
 		titleFlag, _ := cmd.Flags().GetString("title")
-		var title string
-
-		if len(args) > 0 && titleFlag != "" {
-			if args[0] != titleFlag {
-				return HandleError("cannot specify different titles as both positional argument and --title flag\n  Positional: %q\n  --title:    %q", args[0], titleFlag)
-			}
-			title = args[0]
-		} else if len(args) > 0 {
-			if strings.HasPrefix(args[0], "-") {
-				return HandleError("title %q looks like a flag (starts with '-').\n  Run 'bd create --help' for available options.\n  To use this title anyway, pass it explicitly: bd create --title=%q", args[0], args[0])
-			}
-			title = args[0]
-		} else if titleFlag != "" {
-			title = titleFlag
-		} else {
-			return HandleError("title required (or use --file to create from markdown)")
+		title, err := resolveTitle(args, titleFlag, "", "")
+		if err != nil {
+			return err
 		}
 
 		// Get silent flag
@@ -116,9 +124,12 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		description, _, err := getDescriptionFlag(cmd)
+		description, descriptionChanged, err := getDescriptionFlag(cmd)
 		if err != nil {
 			return err
+		}
+		if err := validateDescriptionUpdate(cmd, description, descriptionChanged); err != nil {
+			return HandleError("%v", err)
 		}
 
 		skills, _ := cmd.Flags().GetString("skills")
@@ -184,6 +195,22 @@ var createCmd = &cobra.Command{
 		noHistory, _ := cmd.Flags().GetBool("no-history")
 		if wisp && noHistory {
 			return HandleError("--ephemeral and --no-history are mutually exclusive")
+		}
+		storageClassFlag, _ := cmd.Flags().GetString("storage-class")
+		storageClass, err := resolveStorageClass(storageClassFlag, types.IssueType(issueType).Normalize())
+		if err != nil {
+			return HandleError("%v", err)
+		}
+		// --storage-class ephemeral is the spelled-out spelling of --ephemeral
+		// (Protocol v0.1 C1.4: the wisp plane is today's ephemeral-class
+		// implementation). It routes to the wisp path exactly like the flag;
+		// the --no-history mutual exclusion above still applies.
+		if storageClass == types.StorageClassEphemeral {
+			if noHistory {
+				return HandleError("--storage-class ephemeral and --no-history are mutually exclusive")
+			}
+			wisp = true
+			storageClass = "" // wisp-plane rows derive ephemeral class (C1.2); no marker cell needed
 		}
 		molTypeStr, _ := cmd.Flags().GetString("mol-type")
 		var molType types.MolType
@@ -342,6 +369,7 @@ var createCmd = &cobra.Command{
 				EstimatedMinutes:   estimatedMinutes,
 				Ephemeral:          wisp,
 				NoHistory:          noHistory,
+				StorageClass:       storageClass,
 				CreatedBy:          getActorWithGit(),
 				Owner:              getOwner(),
 				Labels:             labels,
@@ -452,6 +480,18 @@ var createCmd = &cobra.Command{
 			return renderDryRun()
 		}
 
+		// Parse every requested dependency edge BEFORE reserving a child ID
+		// or creating anything so a malformed spec aborts with no burned
+		// child ID and no orphan issue behind it.
+		depSpecs, err := parseDepSpecs(deps)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate, cmd.Flags().Changed("waits-for-gate"))
+		if err != nil {
+			return HandleError("%v", err)
+		}
+
 		createCtx := rootCtx
 		if parentID != "" {
 			childID, err := store.GetNextChildID(rootCtx, parentID)
@@ -493,6 +533,7 @@ var createCmd = &cobra.Command{
 			EstimatedMinutes:   estimatedMinutes,
 			Ephemeral:          wisp,
 			NoHistory:          noHistory,
+			StorageClass:       storageClass,
 			CreatedBy:          getActorWithGit(),
 			Owner:              getOwner(),
 			Labels:             labels,
@@ -510,20 +551,11 @@ var createCmd = &cobra.Command{
 
 		ctx := createCtx
 
-		// Parse every requested dependency edge BEFORE creating anything so
-		// a malformed spec aborts with no orphan issue behind it.
-		depSpecs, err := parseDepSpecs(deps)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate)
-		if err != nil {
-			return HandleError("%v", err)
-		}
-
 		// If a discovered-from dependency is present, inherit source_repo
-		// from the referenced parent issue.
-		if dfParent := discoveredFromParent(deps); dfParent != "" {
+		// from the referenced parent issue. Reuse the already-parsed specs
+		// (not the raw --deps strings) so this can't drift from parseDepSpec's
+		// normalization rules.
+		if dfParent := discoveredFromParentSpec(depSpecs); dfParent != "" {
 			parentIssue, err := store.GetIssue(ctx, dfParent)
 			if err == nil && parentIssue.SourceRepo != "" {
 				issue.SourceRepo = parentIssue.SourceRepo
@@ -600,6 +632,7 @@ type createIssueParams struct {
 	EstimatedMinutes   *int
 	Ephemeral          bool
 	NoHistory          bool
+	StorageClass       types.StorageClass
 	CreatedBy          string
 	Owner              string
 	Labels             []string
@@ -613,6 +646,34 @@ type createIssueParams struct {
 	DueAt              *time.Time
 	DeferUntil         *time.Time
 	Metadata           json.RawMessage
+}
+
+// resolveStorageClass resolves the effective storage class at create time
+// (Protocol v0.1 C1.3): the explicit --storage-class flag wins; otherwise the
+// per-type config default storage-class.<type> applies; otherwise unset.
+// Versioned normalizes to unset — the class marker is omitted when versioned
+// (C2.4), and both spell identical semantics (C1.2). Values are validated
+// wherever they came from: a bad flag is a usage error, a bad config value is
+// a config bug and fails just as loudly.
+func resolveStorageClass(explicit string, issueType types.IssueType) (types.StorageClass, error) {
+	raw := explicit
+	if raw == "" {
+		raw = config.GetString("storage-class." + string(issueType))
+		if raw == "" {
+			return "", nil
+		}
+	}
+	class, err := types.ParseStorageClass(raw)
+	if err != nil {
+		if explicit == "" {
+			return "", fmt.Errorf("config storage-class.%s: %w", issueType, err)
+		}
+		return "", err
+	}
+	if class == types.StorageClassVersioned {
+		return "", nil
+	}
+	return class, nil
 }
 
 func buildCreateIssue(params createIssueParams) *types.Issue {
@@ -644,6 +705,7 @@ func buildCreateIssue(params createIssueParams) *types.Issue {
 		EstimatedMinutes:   params.EstimatedMinutes,
 		Ephemeral:          params.Ephemeral,
 		NoHistory:          params.NoHistory,
+		StorageClass:       params.StorageClass,
 		CreatedBy:          params.CreatedBy,
 		Owner:              params.Owner,
 		Labels:             append([]string(nil), params.Labels...),
@@ -762,7 +824,7 @@ func init() {
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
 	createCmd.Flags().String("parent", "", "Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')")
 	createCmd.Flags().Bool("no-inherit-labels", false, "Don't inherit labels from parent issue")
-	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
+	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies as 'type:id' or bare 'id'. Bare 'id', 'depends-on:id', and 'blocked-by:id' all make THIS issue depend on id; 'blocks:id' reverses direction (id depends on this issue). E.g. 'blocked-by:bd-20,discovered-from:bd-15'")
 	createCmd.Flags().String("waits-for", "", "Spawner issue ID to wait for (creates waits-for dependency for fanout gate)")
 	createCmd.Flags().String("waits-for-gate", "all-children", "Gate type: all-children (wait for all) or any-children (wait for first)")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
@@ -770,9 +832,11 @@ func init() {
 	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	createCmd.Flags().Bool("ephemeral", false, "Create as ephemeral (short-lived, subject to TTL compaction)")
 	createCmd.Flags().Bool("no-history", false, "Skip Dolt commit history without making GC-eligible (for permanent agent beads)")
+	createCmd.Flags().String("storage-class", "", "Storage class: versioned, unversioned, or ephemeral (default: storage-class.<type> config, else versioned)")
 	createCmd.Flags().String("mol-type", "", "Molecule type: swarm (multi-agent), patrol (recurring ops), work (default)")
 	createCmd.Flags().String("wisp-type", "", "Wisp type for TTL-based compaction: heartbeat, ping, patrol, gc_report, recovery, error, escalation")
 	createCmd.Flags().Bool("validate", false, "Validate description contains required sections for issue type")
+	createCmd.Flags().Bool("allow-empty-description", false, "Allow empty description input from stdin or file")
 	// Event-specific flags (only valid when --type=event)
 	createCmd.Flags().String("event-category", "", "Event category (e.g., patrol.muted, agent.started) (requires --type=event)")
 	createCmd.Flags().String("event-actor", "", "Entity URI who caused this event (requires --type=event)")

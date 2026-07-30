@@ -547,15 +547,12 @@ func readIssueAndResolveMergeOps(ctx context.Context, tx DBTX, id string, update
 }
 
 // RecordFullEventInTable records an event with both old and new values.
-//
-//nolint:gosec // G201: table is from WispTableRouting ("events" or "wisp_events")
 func RecordFullEventInTable(ctx context.Context, tx DBTX, table, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, table), NewEventID(), issueID, eventType, actor, oldValue, newValue)
-	if err != nil {
-		return fmt.Errorf("record event in %s: %w", table, err)
-	}
-	return nil
+	return InsertDerivedEvent(ctx, tx, table, AuxEvent{
+		IssueID:   issueID,
+		EventType: eventType,
+		Actor:     actor,
+		OldValue:  str(oldValue),
+		NewValue:  str(newValue),
+	})
 }

@@ -58,48 +58,6 @@ func blockedAfterMergeRecomputerFor(st storage.DoltStorage) (blockedAfterMergeRe
 	return rs, ok
 }
 
-// resolveMergeConflictsAndRecompute concludes a merge whose conflicts were
-// resolved with an explicit --strategy: applies the strategy to every
-// conflicted table, commits the resolution, and repairs is_blocked for the
-// rows the merge brought in. Factored out of vcMergeCmd's RunE so the
-// recompute call site — same helper + warn-not-skip contract as
-// conflicts.go's commitMergeResolution — is reachable by a test against a
-// fake store, without needing store.Merge to produce a live conflict (F4,
-// wy-9k58l).
-func resolveMergeConflictsAndRecompute(ctx context.Context, branchName string, conflicts []storage.Conflict, strategy, preHead string) error {
-	for _, conflict := range conflicts {
-		table := conflict.Field
-		if table == "" {
-			table = "issues"
-		}
-		if err := store.ResolveConflicts(ctx, table, strategy); err != nil {
-			return fmt.Errorf("failed to resolve conflicts: %w", err)
-		}
-	}
-	// Conclude the merge: an unresolved-then-resolved working set stays
-	// uncommitted otherwise, and the merged-in writes bypassed every
-	// is_blocked hook (bd-578h9.11). Use CommitMergeResolution, not Commit:
-	// server-mode Commit excludes config (GH#2455), so a resolved config
-	// conflict — routine now that kv.* user data syncs through config —
-	// would be silently dropped, leaving the merge unconcluded and
-	// re-wedging the next pull/sync (GH#2474).
-	if err := store.CommitMergeResolution(ctx, fmt.Sprintf("Resolve merge conflicts from %s using %s strategy", branchName, strategy)); err != nil {
-		return fmt.Errorf("conflicts resolved but commit failed: %w", err)
-	}
-	if rs, ok := blockedAfterMergeRecomputerFor(store); ok {
-		if err := rs.RecomputeBlockedAfterMerge(ctx, preHead); err != nil {
-			return fmt.Errorf("conflicts resolved but is_blocked recompute failed: %w", err)
-		}
-	} else {
-		// Never silent: a skipped recompute leaves 'bd ready' stale for
-		// every dependency edge the merge brought in, and the old `if ok`
-		// with no else is exactly how this went unnoticed for the whole
-		// life of the decorator chain.
-		fmt.Fprintf(os.Stderr, "Warning: storage backend %T cannot recompute is_blocked after a merge; 'bd ready' may be stale until 'bd recompute-blocked' runs\n", storage.UnwrapStore(store))
-	}
-	return nil
-}
-
 var vcMergeCmd = &cobra.Command{
 	Use:   "merge <branch>",
 	Short: "Merge a branch into the current branch",
@@ -129,21 +87,22 @@ Examples:
 		ctx := rootCtx
 		branchName := args[0]
 
-		// Pre-merge HEAD scopes the post-resolution is_blocked recompute
-		// (bd-578h9.11); empty degrades to a full-graph pass.
-		preHead, _ := store.GetCurrentCommit(ctx)
+		if vcMergeStrategy != "" {
+			// #4992: a bare CALL DOLT_MERGE under autocommit rejects any real
+			// conflict before --strategy could ever be applied. MergeWithStrategy
+			// runs the whole merge/resolve/repair/commit sequence on a pinned
+			// session with Dolt's conflict-tolerant flags set, so the strategy
+			// actually reaches DOLT_CONFLICTS_RESOLVE.
+			merger, ok := storage.UnwrapStore(store).(storage.StrategicMerger)
+			if !ok {
+				return HandleErrorRespectJSON("storage backend %T does not support --strategy merges", storage.UnwrapStore(store))
+			}
+			conflicts, err := merger.MergeWithStrategy(ctx, branchName, vcMergeStrategy)
+			if err != nil {
+				return HandleErrorRespectJSON("failed to merge branch: %v", err)
+			}
 
-		// Perform merge
-		conflicts, err := store.Merge(ctx, branchName)
-		if err != nil {
-			return HandleErrorRespectJSON("failed to merge branch: %v", err)
-		}
-
-		if len(conflicts) > 0 {
-			if vcMergeStrategy != "" {
-				if err := resolveMergeConflictsAndRecompute(ctx, branchName, conflicts, vcMergeStrategy, preHead); err != nil {
-					return HandleErrorRespectJSON("%v", err)
-				}
+			if len(conflicts) > 0 {
 				if jsonOutput {
 					return outputJSON(map[string]interface{}{
 						"merged":        branchName,
@@ -156,6 +115,27 @@ Examples:
 				return nil
 			}
 
+			if jsonOutput {
+				return outputJSON(map[string]interface{}{
+					"merged":    branchName,
+					"conflicts": 0,
+				})
+			}
+			fmt.Printf("Successfully merged %s\n", ui.RenderAccent(branchName))
+			return nil
+		}
+
+		// No --strategy: a real conflict makes store.Merge return an error —
+		// it still runs as a bare DOLT_MERGE under autocommit, which Dolt
+		// rejects on conflict (Error 1105), same as plain `dolt merge` with no
+		// further flags. versioncontrolops.Merge appends the --strategy escape
+		// hatch to that error's message.
+		conflicts, err := store.Merge(ctx, branchName)
+		if err != nil {
+			return HandleErrorRespectJSON("failed to merge branch: %v", err)
+		}
+
+		if len(conflicts) > 0 {
 			if jsonOutput {
 				return outputJSON(map[string]interface{}{
 					"merged":    branchName,

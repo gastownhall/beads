@@ -155,13 +155,13 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		toID = dependsOnArg
 	}
 
-	dt := types.DependencyType(depType)
+	dt := canonicalDependencyType(types.DependencyType(depType))
 	if isDisallowedHierarchicalDependency(fromID, toID, dt) {
 		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 	}
 
-	if !dt.IsValid() {
-		return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
+	if err := validateDependencyType(dt); err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if uowProvider == nil {
@@ -201,7 +201,7 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 			"status":        "added",
 			"issue_id":      fromID,
 			"depends_on_id": toID,
-			"type":          depType,
+			"type":          string(dt),
 		})
 		return nil
 	}
@@ -210,7 +210,7 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		ui.RenderPass("✓"),
 		formatFeedbackIDParen(fromID, res.fromTitle),
 		formatFeedbackIDParen(toID, res.toTitle),
-		depType)
+		dt)
 	return nil
 }
 

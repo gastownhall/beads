@@ -248,6 +248,37 @@ func TestCLI_Create(t *testing.T) {
 	}
 }
 
+// TestCLI_CreateActorPrecedence is a CLI-level regression test for GH#4645:
+// with both BEADS_ACTOR and the deprecated BD_ACTOR set, `bd create` must
+// stamp created_by with BEADS_ACTOR's value. Unlike TestResolveConfiguredActor
+// (which calls resolveConfiguredActor() directly), this drives the real
+// command through rootCmd.Execute() so it also covers the root
+// PersistentPreRunE / refreshBoundCommandConfig wiring that pre-populates the
+// global actor before create.go ever runs — reverting either call site would
+// leave TestResolveConfiguredActor green but this test red.
+func TestCLI_CreateActorPrecedence(t *testing.T) {
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
+	tmpDir := setupCLITestDB(t)
+	t.Setenv("BD_ACTOR", "from-bd-actor")
+	t.Setenv("BEADS_ACTOR", "from-beads-actor")
+
+	out := runBDInProcess(t, tmpDir, "create", "Actor precedence test", "-p", "1", "--json")
+
+	jsonStart := strings.Index(out, "{")
+	if jsonStart == -1 {
+		t.Fatalf("No JSON found in output: %s", out)
+	}
+	jsonOut := out[jsonStart:]
+
+	var result map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonOut), &result); err != nil {
+		t.Fatalf("Failed to parse JSON: %v\nOutput: %s", err, jsonOut)
+	}
+	if result["created_by"] != "from-beads-actor" {
+		t.Errorf("created_by = %v, want %q (BEADS_ACTOR must outrank deprecated BD_ACTOR)", result["created_by"], "from-beads-actor")
+	}
+}
+
 func TestCLI_List(t *testing.T) {
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
@@ -569,6 +600,44 @@ func TestCLI_DepAdd(t *testing.T) {
 	}
 }
 
+// TestCLI_DepAdd_TypeBlockedByAliasGates is the regression test for GH#5069:
+// `bd dep add A B --type blocked-by` used to store the literal custom type
+// "blocked-by" instead of normalizing it to the canonical "blocks" type, so
+// the dependency was displayed everywhere but silently never gated `bd
+// ready`/`bd blocked`. Assert the alias now gates exactly like the default
+// (canonical) type does.
+func TestCLI_DepAdd_TypeBlockedByAliasGates(t *testing.T) {
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
+	tmpDir := setupCLITestDB(t)
+
+	out1 := runBDInProcess(t, tmpDir, "create", "Blocker", "-p", "1", "--json")
+	out2 := runBDInProcess(t, tmpDir, "create", "Blocked", "-p", "1", "--json")
+
+	var issue1, issue2 map[string]interface{}
+	json.Unmarshal([]byte(out1), &issue1)
+	json.Unmarshal([]byte(out2), &issue2)
+
+	blockerID := issue1["id"].(string)
+	blockedID := issue2["id"].(string)
+
+	// blockedID depends on (is blocked by) blockerID, using the --type
+	// blocked-by alias rather than the default "blocks" type.
+	out := runBDInProcess(t, tmpDir, "dep", "add", blockedID, blockerID, "--type", "blocked-by")
+	if !strings.Contains(out, "Added dependency") {
+		t.Fatalf("Expected 'Added dependency', got: %s", out)
+	}
+
+	blockedOut := runBDInProcess(t, tmpDir, "blocked")
+	if !strings.Contains(blockedOut, "Blocked") {
+		t.Errorf("Expected 'Blocked' issue in `bd blocked` output after --type blocked-by dep, got: %s", blockedOut)
+	}
+
+	readyOut := runBDInProcess(t, tmpDir, "ready")
+	if strings.Contains(readyOut, "Blocked") {
+		t.Errorf("Expected blocked issue to be excluded from `bd ready` after --type blocked-by dep, got: %s", readyOut)
+	}
+}
+
 func TestCLI_DepRemove(t *testing.T) {
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
@@ -705,19 +774,20 @@ func init() {
 	if os.Getenv(worktreeRemoveHelperEnv) != "" {
 		return
 	}
-	// Use existing bd binary from repo root if available, otherwise build once
+	// Prebuilt fast path (scripts/test.sh and CI export this), else build
+	// once. No repo-root ./bd reuse: a stale checkout-root binary silently
+	// substitutes itself for the source under test (wy-4mtr0).
+	if prebuilt := os.Getenv("BEADS_TEST_BD_BINARY"); prebuilt != "" {
+		if abs, err := filepath.Abs(prebuilt); err == nil {
+			if _, statErr := os.Stat(abs); statErr == nil {
+				testBD = abs
+				return
+			}
+		}
+	}
 	bdBinary := "bd"
 	if runtime.GOOS == "windows" {
 		bdBinary = "bd.exe"
-	}
-
-	// Check if bd binary exists in repo root (../../bd from cmd/bd/)
-	repoRoot := filepath.Join("..", "..")
-	existingBD := filepath.Join(repoRoot, bdBinary)
-	if _, err := os.Stat(existingBD); err == nil {
-		// Use existing binary
-		testBD, _ = filepath.Abs(existingBD)
-		return
 	}
 
 	// Fall back to building once (for CI or fresh checkouts)
@@ -1158,6 +1228,62 @@ func TestCLI_CommentsListMisplacedSyntax(t *testing.T) {
 	}
 }
 
+// TestCLI_CommentsSwappedAddRejectedBeforeStoreOpen is a regression test for
+// GH#4642's should-fix: the swapped-order rejection (`bd comments <id> add
+// <text>`) must fire from commentsCmd's Args validator, before
+// PersistentPreRunE ever opens a store or runs a migration, and before
+// RunE's usesProxiedServer() dispatch — not from a check inside RunE that
+// only the local-store branch reaches. Using a directory with no .beads/ at
+// all proves the store was never touched: the old RunE-only check needed an
+// already-initialized store (PersistentPreRunE would have failed first with
+// "no beads database found"), so this would fail with the wrong error before
+// the fix.
+func TestCLI_CommentsSwappedAddRejectedBeforeStoreOpen(t *testing.T) {
+	noBeadsCwd := t.TempDir()
+	if _, err := os.Stat(filepath.Join(noBeadsCwd, ".beads")); err == nil {
+		t.Fatalf("test setup: %s unexpectedly has a .beads dir", noBeadsCwd)
+	}
+
+	stdout, stderr, err := runBDInProcessAllowError(t, noBeadsCwd, "comments", "bd-123", "add", "should not be stored")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for swapped-order add, got success:\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if strings.Contains(combined, "no beads database found") {
+		t.Fatalf("Args validation did not run before store open: got the pre-fix error.\nOutput:\n%s", combined)
+	}
+	if !strings.Contains(combined, "bd comments add") {
+		t.Errorf("expected hint pointing to `bd comments add`, got:\n%s", combined)
+	}
+}
+
+// TestCLI_CommentsSwappedAddRejectedInProxiedServerMode is the proxied-server
+// counterpart: forcing proxiedServerMode simulates the dispatch that GH#4642's
+// merge-base drift routes around a RunE-only check (main added
+// runCommentsProxiedServer after this fix branched, consuming only args[0]
+// and ignoring trailing `add <text>`). Because validateCommentsArgs runs in
+// Args — before RunE ever branches on usesProxiedServer() — the rejection
+// fires identically regardless of backend, without needing a real proxied
+// server.
+func TestCLI_CommentsSwappedAddRejectedInProxiedServerMode(t *testing.T) {
+	origProxied := proxiedServerMode
+	t.Cleanup(func() { proxiedServerMode = origProxied })
+	proxiedServerMode = true
+
+	tmpDir := setupCLITestDB(t)
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comments", "bd-123", "add", "should not be stored")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for swapped-order add in proxied-server mode, got success:\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if strings.Contains(combined, "not supported in proxied-server mode") {
+		t.Fatalf("Args validation did not run before the proxied dispatch: got RunE's proxied-mode stub error instead.\nOutput:\n%s", combined)
+	}
+	if !strings.Contains(combined, "bd comments add") {
+		t.Errorf("expected hint pointing to `bd comments add`, got:\n%s", combined)
+	}
+}
+
 // TestCLI_CommentsAddShortID tests that 'comments add' accepts short IDs (issue #1070)
 // Most bd commands accept short IDs (e.g., "5wbm") but comments add previously required
 // full IDs (e.g., "mike.vibe-coding-5wbm"). This test ensures short IDs work.
@@ -1330,6 +1456,76 @@ func TestCLI_CreateRejectsFlagLikeTitles(t *testing.T) {
 			t.Errorf("Expected title '--unusual-title' in output, got: %s", out)
 		}
 	})
+}
+
+// TestCLI_CreateRejectsEmptyTitle verifies that a whitespace-only title is
+// refused rather than silently creating a title-less bead (GH#4771). Such a
+// bead is functionally invisible in title-based views.
+func TestCLI_CreateRejectsEmptyTitle(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"FlagSpaces", []string{"create", "--title", "   ", "-p", "2"}},
+		{"FlagTab", []string{"create", "--title", "\t", "-p", "2"}},
+		{"PositionalSpaces", []string{"create", "   ", "-p", "2"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := setupCLITestDB(t)
+			stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, tc.args...)
+			if err == nil {
+				t.Fatalf("expected error for whitespace-only title, got success\nstdout: %s", stdout)
+			}
+			combined := stdout + stderr
+			if !strings.Contains(combined, "title cannot be empty") {
+				t.Errorf("expected 'title cannot be empty' error, got: %s", combined)
+			}
+		})
+	}
+}
+
+// TestCLI_CreateRejectsEmptyTitle_ProxiedServerMode is a proxied-server
+// regression for GH#4771. Before this fix, the whitespace-only guard lived
+// only in create's local-store RunE branch: gatherCreateInput/
+// runCreateProxiedServer (the path taken when usesProxiedServer() is true)
+// never re-checked, so proxied-mode create still minted a blank-titled bead.
+// The fix moved the check into resolveTitle, invoked from createCmd's Args
+// validator — which runs for every invocation regardless of backend, before
+// RunE ever branches on usesProxiedServer(). Setting proxiedServerMode here
+// exercises that dispatch without needing a real proxied server: Args
+// validation must reject before gatherCreateInput/runCreateProxiedServer (or
+// any store open) ever runs.
+func TestCLI_CreateRejectsEmptyTitle_ProxiedServerMode(t *testing.T) {
+	origProxied := proxiedServerMode
+	t.Cleanup(func() { proxiedServerMode = origProxied })
+	proxiedServerMode = true
+
+	// createCmd is a shared package-level *cobra.Command, so a --title value
+	// set by an earlier in-process test invocation (e.g. TestCLI_CreateRejectsEmptyTitle's
+	// own FlagTab case) survives on the FlagSet across rootCmd.Execute() calls.
+	// Reset it explicitly so this test's outcome doesn't depend on suite
+	// ordering — a pre-existing gap, not something this test should also fall
+	// victim to.
+	titleFlag := createCmd.Flags().Lookup("title")
+	origTitleValue := titleFlag.Value.String()
+	origTitleChanged := titleFlag.Changed
+	t.Cleanup(func() {
+		_ = titleFlag.Value.Set(origTitleValue)
+		titleFlag.Changed = origTitleChanged
+	})
+	_ = titleFlag.Value.Set("")
+	titleFlag.Changed = false
+
+	tmpDir := setupCLITestDB(t)
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "create", "   ", "-p", "2")
+	if err == nil {
+		t.Fatalf("expected error for whitespace-only title in proxied-server mode, got success\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "title cannot be empty") {
+		t.Errorf("expected 'title cannot be empty' error, got: %s", combined)
+	}
 }
 
 // TestCLI_CreateNoHistory tests that the --no-history CLI flag is wired through

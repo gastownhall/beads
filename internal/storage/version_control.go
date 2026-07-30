@@ -112,6 +112,43 @@ type MergeBlockerInspector interface {
 	GetMergeBlockers(ctx context.Context) (MergeBlockers, error)
 }
 
+// StrategicMerger is the optional companion to VersionControl.Merge for
+// `bd vc merge --strategy` (#4992): merging and resolving conflicts with an
+// explicit "ours"/"theirs" strategy in one call, on a pinned session with
+// Dolt's conflict-tolerant flags set, so real conflicts are resolved and
+// committed instead of rejecting the implicit autocommit transaction before
+// the strategy can ever be applied. Implemented by the Dolt-backed stores
+// only; callers must type-assert.
+type StrategicMerger interface {
+	// MergeWithStrategy merges branch into the current branch. If the merge
+	// produces conflicts, every conflicted table is resolved with strategy
+	// ("ours" or "theirs") and the resolution is committed; a clean merge
+	// commits normally. Returns the conflicts that were present (resolved) —
+	// empty for a clean merge — and any error. An error means the merge was
+	// aborted and the working set restored.
+	MergeWithStrategy(ctx context.Context, branch, strategy string) ([]Conflict, error)
+}
+
+// StrategicPuller is the optional companion to VersionControl's Pull/
+// PullRemote for `bd dolt pull --strategy` (#4992 part 2): when a pull's
+// merge hits conflicts the auto-resolver (TryAutoResolveMergeConflicts)
+// declines — the concurrent-edit narrowing from GH#4698, most commonly —
+// resolving them with an explicit "ours"/"theirs" strategy instead of
+// aborting for the operator to resolve with the raw dolt CLI. Implemented by
+// the embedded store, whose Pull path funnels through a single choke point
+// (versioncontrolops.MergeAndSettle) that a strategy passes through cleanly.
+// Server-mode DoltStore's pull routes through several transports (including
+// shelling out to the dolt CLI for git-protocol/credentialed/cloud-auth
+// remotes) with materially different conflict semantics per route, so it does
+// not implement this interface; callers must type-assert and report a clear
+// "not supported" error rather than silently ignoring --strategy.
+type StrategicPuller interface {
+	// PullWithStrategy is Pull with the operator escape hatch described above.
+	PullWithStrategy(ctx context.Context, strategy string) error
+	// PullRemoteWithStrategy is PullRemote with the same escape hatch.
+	PullRemoteWithStrategy(ctx context.Context, remote, strategy string) error
+}
+
 // VersionControl provides branch, commit, merge, and status operations.
 type VersionControl interface {
 	Branch(ctx context.Context, name string) error

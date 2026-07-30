@@ -90,6 +90,9 @@ Force: Delete and orphan dependents
 
 		if len(issueIDs) > 1 || cascade {
 			if err := deleteBatch(cmd, issueIDs, force, dryRun, cascade, jsonOutput, false); err != nil {
+				if _, ok := exitCodeFromError(err); ok {
+					return err
+				}
 				return HandleError("%v", err)
 			}
 			return nil
@@ -133,7 +136,23 @@ Force: Delete and orphan dependents
 		idPattern := `(^|[^A-Za-z0-9_-])(` + regexp.QuoteMeta(issueID) + `)($|[^A-Za-z0-9_-])`
 		re := regexp.MustCompile(idPattern)
 		replacementText := `$1[deleted:` + issueID + `]$3`
-		if !force {
+		if dryRun || !force {
+			var previewResult *types.DeleteIssuesResult
+			if dryRun {
+				previewResult, err = activeStore.DeleteIssues(ctx, []string{issueID}, false, force, true)
+				if err != nil {
+					if previewErr := outputDeletionPreview([]string{issueID}, map[string]*types.Issue{issueID: issue}, false, true, previewResult, err, jsonOutput); previewErr != nil {
+						return previewErr
+					}
+					if jsonOutput {
+						return outputJSONError(err, "")
+					}
+					return HandleError("previewing deletion: %v", err)
+				}
+			}
+			if jsonOutput || isQuiet() {
+				return outputDeletionPreview([]string{issueID}, map[string]*types.Issue{issueID: issue}, false, dryRun, previewResult, nil, jsonOutput)
+			}
 			fmt.Printf("\n%s\n", ui.RenderFail("⚠️  DELETE PREVIEW"))
 			fmt.Printf("\nIssue to delete:\n")
 			fmt.Printf("  %s: %s\n", issueID, issue.Title)
@@ -164,8 +183,17 @@ Force: Delete and orphan dependents
 					fmt.Printf("  (none have text references)\n")
 				}
 			}
-			fmt.Printf("\n%s\n", ui.RenderWarn("This operation cannot be undone!"))
-			fmt.Printf("To proceed, run: %s\n\n", ui.RenderWarn("bd delete "+issueID+" --force"))
+			if dryRun {
+				fmt.Printf("\nWould delete: %d issues\n", previewResult.DeletedCount)
+				fmt.Printf("Would remove: %d dependencies, %d labels, %d events\n", previewResult.DependenciesCount, previewResult.LabelsCount, previewResult.EventsCount)
+				if len(previewResult.OrphanedIssues) > 0 {
+					fmt.Printf("Would orphan: %d issues\n", len(previewResult.OrphanedIssues))
+				}
+				fmt.Printf("\n(Dry-run mode - no changes made)\n")
+			} else {
+				fmt.Printf("\n%s\n", ui.RenderWarn("This operation cannot be undone!"))
+				fmt.Printf("To proceed, run: %s\n\n", ui.RenderWarn("bd delete "+issueID+" --force"))
+			}
 			return nil
 		}
 		updatedIssueCount := 0
@@ -276,21 +304,20 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 		batchStore = routedStore
 	}
 	if dryRun || !force {
-		result, err := batchStore.DeleteIssues(ctx, issueIDs, cascade, false, true)
+		result, err := batchStore.DeleteIssues(ctx, issueIDs, cascade, force, true)
 		if err != nil {
-			showDeletionPreview(issueIDs, issues, cascade, err)
+			if previewErr := outputDeletionPreview(issueIDs, issues, cascade, dryRun, result, err, jsonOutput); previewErr != nil {
+				return previewErr
+			}
+			if jsonOutput {
+				return outputJSONError(err, "")
+			}
 			return err
 		}
-		showDeletionPreview(issueIDs, issues, cascade, nil)
-		fmt.Printf("\nWould delete: %d issues\n", result.DeletedCount)
-		fmt.Printf("Would remove: %d dependencies, %d labels, %d events\n",
-			result.DependenciesCount, result.LabelsCount, result.EventsCount)
-		if len(result.OrphanedIssues) > 0 {
-			fmt.Printf("Would orphan: %d issues\n", len(result.OrphanedIssues))
+		if previewErr := outputDeletionPreview(issueIDs, issues, cascade, dryRun, result, nil, jsonOutput); previewErr != nil {
+			return previewErr
 		}
-		if dryRun {
-			fmt.Printf("\n(Dry-run mode - no changes made)\n")
-		} else {
+		if !dryRun && !jsonOutput && !isQuiet() {
 			fmt.Printf("\n%s\n", ui.RenderWarn("This operation cannot be undone!"))
 			if cascade {
 				fmt.Printf("To proceed with cascade deletion, run: %s\n",
@@ -360,8 +387,32 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 	return nil
 }
 
-// showDeletionPreview shows what would be deleted
-func showDeletionPreview(issueIDs []string, issues map[string]*types.Issue, cascade bool, depError error) {
+// outputDeletionPreview renders a deletion preview without exposing issue payloads
+// in machine-readable or quiet output.
+func outputDeletionPreview(issueIDs []string, issues map[string]*types.Issue, cascade bool, dryRun bool, result *types.DeleteIssuesResult, depError error, jsonOutput bool) error {
+	if jsonOutput {
+		preview := map[string]interface{}{
+			"preview":   true,
+			"dry_run":   dryRun,
+			"issue_ids": issueIDs,
+			"cascade":   cascade,
+		}
+		if result != nil {
+			preview["would_delete"] = result.DeletedCount
+			preview["would_remove_dependencies"] = result.DependenciesCount
+			preview["would_remove_labels"] = result.LabelsCount
+			preview["would_remove_events"] = result.EventsCount
+			preview["would_orphan"] = len(result.OrphanedIssues)
+		}
+		if depError != nil {
+			preview["error"] = depError.Error()
+		}
+		return outputJSON(preview)
+	}
+	if isQuiet() {
+		return nil
+	}
+
 	fmt.Printf("\n%s\n", ui.RenderFail("⚠️  DELETE PREVIEW"))
 	fmt.Printf("\nIssues to delete (%d):\n", len(issueIDs))
 	for _, id := range issueIDs {
@@ -375,6 +426,18 @@ func showDeletionPreview(issueIDs []string, issues map[string]*types.Issue, casc
 	if depError != nil {
 		fmt.Printf("\n%s\n", ui.RenderFail(depError.Error()))
 	}
+	if result != nil {
+		fmt.Printf("\nWould delete: %d issues\n", result.DeletedCount)
+		fmt.Printf("Would remove: %d dependencies, %d labels, %d events\n",
+			result.DependenciesCount, result.LabelsCount, result.EventsCount)
+		if len(result.OrphanedIssues) > 0 {
+			fmt.Printf("Would orphan: %d issues\n", len(result.OrphanedIssues))
+		}
+		if dryRun {
+			fmt.Printf("\n(Dry-run mode - no changes made)\n")
+		}
+	}
+	return nil
 }
 
 // updateTextReferencesInIssues updates text references to deleted issues in pre-collected connected issues

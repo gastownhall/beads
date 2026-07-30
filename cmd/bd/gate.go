@@ -302,7 +302,8 @@ Examples:
   bd gate create --blocks bd-abc
   bd gate create --type=human --blocks bd-abc --reason="Need design review"
   bd gate create --type=timer --blocks bd-abc --timeout=2h
-  bd gate create --type=gh:pr --blocks bd-abc --await-id=42`,
+  bd gate create --type=gh:pr --blocks bd-abc --await-id=42
+  bd gate create --blocks bd-abc --title="Gate: awaiting owner sign-off"`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -323,6 +324,7 @@ Examples:
 		reason, _ := cmd.Flags().GetString("reason")
 		awaitID, _ := cmd.Flags().GetString("await-id")
 		timeoutStr, _ := cmd.Flags().GetString("timeout")
+		titleFlag, _ := cmd.Flags().GetString("title")
 
 		ctx := rootCtx
 
@@ -343,6 +345,9 @@ Examples:
 		title := fmt.Sprintf("Gate: %s", gateType)
 		if awaitID != "" {
 			title = fmt.Sprintf("Gate: %s %s", gateType, awaitID)
+		}
+		if titleFlag != "" {
+			title = titleFlag
 		}
 
 		desc := fmt.Sprintf("Ad-hoc gate blocking %s", targetIssue.ID)
@@ -1038,6 +1043,7 @@ func init() {
 	gateCreateCmd.Flags().StringP("reason", "r", "", "Reason for the gate")
 	gateCreateCmd.Flags().String("await-id", "", "Condition identifier (run ID, PR number, etc.)")
 	gateCreateCmd.Flags().String("timeout", "", "Timeout duration (e.g., 2h, 30m)")
+	gateCreateCmd.Flags().String("title", "", "Custom gate title (default: \"Gate: <type>\")")
 	_ = gateCreateCmd.MarkFlagRequired("blocks")
 
 	// Issue ID completions

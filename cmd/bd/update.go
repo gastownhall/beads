@@ -320,6 +320,9 @@ pointless).`,
 
 		// Get claim flag
 		claimFlag, _ := cmd.Flags().GetBool("claim")
+		// --force bypasses the live-claim reassign fence (bd-98s5c); mutually
+		// exclusive with --if-assignee at the flag-group level.
+		forceFlag, _ := cmd.Flags().GetBool("force")
 
 		if len(updates) == 0 && !claimFlag {
 			fmt.Println("No updates specified")
@@ -399,6 +402,26 @@ pointless).`,
 				recordFailure(id, err.Error())
 				closeIfUnmutated(result)
 				continue
+			}
+
+			// bd-98s5c: an unguarded assignee update must not silently
+			// overwrite another actor's live claim. Skipped under
+			// --if-assignee: that CAS names the holder explicitly, which is
+			// how sanctioned X→Y transfers (park) stay possible without
+			// --force. Also skipped under --claim: the claim CAS is itself
+			// the anti-steal gate (a foreign live claim fails it with the
+			// canonical "already claimed" copy before any field update runs),
+			// and an assignee edit that rides a WON claim only ever touches
+			// the actor's own fresh claim. A policy refusal, so it exits 1,
+			// not 13.
+			if newAssignee, ok := updates["assignee"].(string); ok && ifAssignee == nil && !claimFlag {
+				if err := validateIssueReassignable(id, issue, actor, newAssignee,
+					storeClaimPoolAliases(ctx, issueStore), forceFlag); err != nil {
+					fmt.Fprintf(os.Stderr, "%s\n", err)
+					recordFailure(id, err.Error())
+					closeIfUnmutated(result)
+					continue
+				}
 			}
 
 			// Handle claim operation atomically using compare-and-swap semantics
@@ -793,9 +816,17 @@ func init() {
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
 	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)")
+	// Live-claim reassign fence override (bd-98s5c)
+	updateCmd.Flags().Bool("force", false, "Allow -a/--assignee to overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim)")
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
 	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
+	// --force (unconditional bypass of the reassign fence) and --if-assignee
+	// (write only while a specific assignee still holds it) encode
+	// contradictory intent — same rationale as unclaim's pairing. Rejecting the
+	// combination stops a script that habitually passes --force from silently
+	// dropping its --if-assignee guard.
+	updateCmd.MarkFlagsMutuallyExclusive("force", "if-assignee")
 	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)")
 	// Time-based scheduling flags (GH#820)
 	// Examples:

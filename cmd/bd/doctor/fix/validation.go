@@ -28,12 +28,16 @@ func OrphanedDependencies(path string, verbose bool) error {
 		return err
 	}
 
-	db, err := openDoltDB(beadsDir)
+	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
 		fmt.Printf("  Orphaned dependencies fix skipped (%v)\n", err)
 		return nil
 	}
 	defer db.Close()
+
+	if skip, err := guardFixTarget("Orphaned dependencies fix", db, beadsDir, cfg); skip {
+		return err
+	}
 
 	// Find orphaned dependencies (exclude external: cross-rig tracking refs, #1593)
 	//nolint:gosec // G202: fixDependencyUnionSQL returns a fixed internal SELECT fragment.
@@ -122,12 +126,16 @@ func ChildParentDependencies(path string, verbose bool) error {
 		return err
 	}
 
-	db, err := openDoltDB(beadsDir)
+	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
 		fmt.Printf("  Child-parent dependencies fix skipped (%v)\n", err)
 		return nil
 	}
 	defer db.Close()
+
+	if skip, err := guardFixTarget("Child-parent dependencies fix", db, beadsDir, cfg); skip {
+		return err
+	}
 
 	// Find child→parent BLOCKING dependencies where issue_id starts with depends_on_id + "."
 	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
@@ -217,12 +225,16 @@ func CrossTableDuplicates(path string, verbose bool) error {
 		return err
 	}
 
-	db, err := openDoltDB(beadsDir)
+	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
 		fmt.Printf("  Cross-table duplicates fix skipped (%v)\n", err)
 		return nil
 	}
 	defer db.Close()
+
+	if skip, err := guardFixTarget("Cross-table duplicates fix", db, beadsDir, cfg); skip {
+		return err
+	}
 
 	// Find IDs present in both tables — the wisp copy is canonical.
 	rows, err := db.Query(`SELECT id FROM issues WHERE id IN (SELECT id FROM wisps)`)
@@ -291,7 +303,7 @@ func CountCrossTableDuplicates(path string) (int, error) {
 		return 0, err
 	}
 
-	db, err := openDoltDB(beadsDir)
+	db, _, err := openDoltDB(beadsDir)
 	if err != nil {
 		return 0, err
 	}
@@ -306,22 +318,25 @@ func CountCrossTableDuplicates(path string) (int, error) {
 
 // openDoltDB opens a Dolt database connection via MySQL protocol.
 // Delegates to openFixDB for DSN construction (timeout + password support).
-func openDoltDB(beadsDir string) (*sql.DB, error) {
+// Also returns the loaded config so callers that need it afterward (e.g. to
+// verify the connection's target identity) don't have to load it a second
+// time and risk it disagreeing with what was actually dialed.
+func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
-		return nil, fmt.Errorf("no database configuration found")
+		return nil, nil, fmt.Errorf("no database configuration found")
 	}
 
 	db, err := openFixDB(beadsDir, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("dolt server connection failed: %w", err)
+		return nil, nil, fmt.Errorf("dolt server connection failed: %w", err)
 	}
 
 	// Verify the connection actually works
 	if err := db.Ping(); err != nil {
 		_ = db.Close() // Best effort cleanup
-		return nil, fmt.Errorf("dolt server not reachable: %w", err)
+		return nil, nil, fmt.Errorf("dolt server not reachable: %w", err)
 	}
 
-	return db, nil
+	return db, cfg, nil
 }

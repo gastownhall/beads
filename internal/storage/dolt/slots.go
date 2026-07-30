@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
 // MergeMetadata merges a single key into an issue's metadata JSON atomically.
@@ -41,10 +42,10 @@ func (s *DoltStore) MergeMetadata(ctx context.Context, issueID, key string, valu
 		// UpdateIssueInTx, which also writes an EventUpdated row into events, so
 		// stage both tables before committing (mirrors CloseIssue).
 		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		commitMsg := fmt.Sprintf("bd: merge metadata %s.%s", issueID, key)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 			return fmt.Errorf("dolt commit: %w", err)
 		}
@@ -142,10 +143,10 @@ func (s *DoltStore) SlotClear(ctx context.Context, issueID, key, actor string) e
 		// so stage both before committing. A no-op clear writes nothing, which
 		// DOLT_COMMIT reports as nothing-to-commit (handled below).
 		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		commitMsg := fmt.Sprintf("bd: clear metadata %s.%s", issueID, key)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 			return fmt.Errorf("dolt commit: %w", err)
 		}

@@ -186,6 +186,35 @@ func TestEmbeddedOpenReadOnly_SkipsGateAndMigrations(t *testing.T) {
 	ro2.Close()
 }
 
+// TestEmbeddedOpenReadOnly_FreshDatabaseNoWrites covers the fresh-database
+// half of the strict --readonly hermeticity contract (gastownhall/beads#4930
+// maintainer review, 2026-07-23): OpenReadOnly against a beadsDir that has no
+// embeddeddolt/ data directory yet must fail rather than create one — unlike
+// Open/OpenForReadOnlyCommand, which create the data directory and initialize
+// the schema on first use.
+func TestEmbeddedOpenReadOnly_FreshDatabaseNoWrites(t *testing.T) {
+	ctx := t.Context()
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
+		t.Fatalf("beadsDir must not pre-exist: stat error = %v", err)
+	}
+
+	ro, err := embeddeddolt.OpenReadOnly(ctx, beadsDir, "testdb", "main")
+	if err == nil {
+		ro.Close()
+		t.Fatal("OpenReadOnly on a fresh (nonexistent) database = nil error, want refusal")
+	}
+
+	if _, statErr := os.Stat(dataDir); !os.IsNotExist(statErr) {
+		t.Fatalf("OpenReadOnly on a fresh database created %s (stat error: %v)", dataDir, statErr)
+	}
+	if _, statErr := os.Stat(beadsDir); !os.IsNotExist(statErr) {
+		t.Fatalf("OpenReadOnly on a fresh database created %s (stat error: %v)", beadsDir, statErr)
+	}
+}
+
 // TestEmbeddedOpenForReadOnlyCommand_LenientGate covers bd-578h9.5: a
 // read-only command's open of a behind, remote-backed embedded database must
 // not be bricked by the remote-migrate gate. The open succeeds WITHOUT

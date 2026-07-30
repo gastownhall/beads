@@ -11,6 +11,48 @@ import (
 	"github.com/steveyegge/beads/internal/uimd"
 )
 
+// validateCommentsArgs runs as cobra's Args validation for the parent
+// "comments" command, which executes before PersistentPreRunE opens the
+// store (or runs migrations) and before RunE's usesProxiedServer() dispatch.
+// The parent command only lists comments for a single issue, so any trailing
+// positional arg is a mistake — most commonly the swapped-order add,
+// `bd comments <id> add <text>`, which otherwise falls through, reads only
+// args[0], and silently drops the rest with exit 0 (GH#4642). Validating
+// here (rather than inside RunE, local-store-only) rejects the malformed
+// invocation identically for the direct and proxied-server paths, before
+// either one can open a store, run a migration, or hit the remote-migrate
+// gate for an invocation that is guaranteed to fail.
+func validateCommentsArgs(cmd *cobra.Command, args []string) error {
+	if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
+		return err
+	}
+	if len(args) <= 1 {
+		return nil
+	}
+
+	issueID := args[0]
+	if args[1] == "add" {
+		return HandleErrorRespectJSON(`"bd comments <issue-id> add ..." is not valid — the subcommand must come first.
+
+To add a comment, run:
+  bd comments add <issue-id> <text>
+
+Example:
+  bd comments add %s "your comment"
+
+See: bd comments --help`, issueID)
+	}
+	return HandleErrorRespectJSON(`"bd comments" takes a single issue id and lists its comments.
+
+To list comments:
+  bd comments <issue-id>
+
+To add a comment:
+  bd comments add <issue-id> <text>
+
+See: bd comments --help`)
+}
+
 var commentsCmd = &cobra.Command{
 	Use:     "comments [issue-id]",
 	GroupID: "issues",
@@ -29,7 +71,7 @@ Examples:
 
   # Add a comment from a file
   bd comments add bd-123 -f notes.txt`,
-	Args:          cobra.MinimumNArgs(1),
+	Args:          validateCommentsArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
