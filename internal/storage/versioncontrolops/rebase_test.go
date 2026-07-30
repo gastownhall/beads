@@ -9,7 +9,7 @@ import (
 
 // Mirrors the sqlmock convention in fastforward_test.go: exercise the guard
 // logic without a live embedded Dolt fixture. The real merge/renumber behaviour
-// is covered by the embedded integration test in internal/storage/dolt.
+// is covered by the embedded integration tests in internal/storage/embeddeddolt.
 
 func TestRebaseChildCollisionsRejectsInvalidRef(t *testing.T) {
 	db, mock, err := sqlmock.New()

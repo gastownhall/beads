@@ -307,8 +307,10 @@ func TestEmbeddedRebaseRemoteDominatesWispSubtree(t *testing.T) {
 	}
 	assertRebaseSettled(t, ctx, conn)
 
-	// Convergence/idempotency: a second rebase against the now-merged peer finds
-	// no collisions and renumbers nothing.
+	// Idempotency: a second rebase against the now-merged peer is a safe no-op. This
+	// is a weak invariant by construction — after the first merge, DOLT_MERGE_BASE
+	// ('HEAD', peer) is peer's own head, so HEAD∩peer∖base is empty and no collision
+	// can be detected — but it still pins that a re-run neither errors nor mutates.
 	report2, err := versioncontrolops.RebaseChildCollisions(ctx, conn, peer, false)
 	if err != nil {
 		t.Fatalf("second rebase (convergence): %v", err)
@@ -392,8 +394,12 @@ func TestEmbeddedRebaseRemoteDominatesHighWaterSlots(t *testing.T) {
 		t.Fatalf("commit delete: %v", err)
 	}
 	// A session wisp holds slot .74 — working-set only (wisps are dolt-ignored, so
-	// never committed), exactly as a live session would carry it. True high-water
-	// under P is now 74 (counter 73, wisp 74), above the live issues max of 72.
+	// never committed). This is a SYNTHETIC state: a wisp minted through the real
+	// path (GetNextChildIDTx under a durable parent) would bump child_counters to
+	// 74, and the counter read alone would then catch the slot. The counter is
+	// deliberately left at 73 here so the wisp slot is visible ONLY via the direct
+	// wisps-table scan — that is the cross-table guard this case exercises. True
+	// high-water under P is 74 (counter 73, wisp 74), above the live issues max 72.
 	insertRebaseWisp(t, ctx, conn, p+".74", "WispSibling")
 
 	report, err := versioncontrolops.RebaseChildCollisions(ctx, conn, peer, false)
@@ -443,5 +449,187 @@ func TestEmbeddedRebaseRemoteDominatesHighWaterSlots(t *testing.T) {
 	}
 	// The renumbered local .71's dependency edge rekeyed to its new id .75.
 	assertDepRekeyed(t, ctx, conn, p+".75", p)
+	assertRebaseSettled(t, ctx, conn)
+}
+
+// TestEmbeddedRebaseRemoteDominatesOrphanedCounterConflict pins the guard maphew
+// added in bd50374bf and explicitly left untested: a dolt_conflicts_child_counters
+// row whose parent this merge leaves deleted. The rebase settle walks every
+// conflicted counter row, not just the parents in the collision that triggered it,
+// so a second, unrelated parent Q rides along:
+//   - base has parent Q with counter=5;
+//   - our side (main) deletes Q — child_counters.parent_id -> issues(id) ON DELETE
+//     CASCADE (verified present on the embedded engine) drops our Q counter with it;
+//   - their side (peer) bumps Q's counter to 6, Q issue untouched;
+//   - the merge cleanly deletes Q (theirs unchanged) but leaves a theirs-only
+//     conflict on child_counters(Q): ours absent, theirs=6.
+//
+// resolveChildCountersToHighWater must SKIP that row — re-inserting child_counters(Q)
+// would violate fk_counter_parent (Q is gone) and hard-reset the entire rebase to
+// the backup tag. The guard skips it and DOLT_CONFLICTS_RESOLVE('--ours') keeps our
+// deletion. The P.71/.72 collision that triggers the rebase reconciles as normal.
+func TestEmbeddedRebaseRemoteDominatesOrphanedCounterConflict(t *testing.T) {
+	te := newTestEnv(t, "rborph")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+	p := "rbp-orph"
+	q := "rbq-orph"
+
+	// Base: the P collision scaffold plus an independent parent Q with counter=5.
+	insertRebaseIssue(t, ctx, conn, p, "Parent")
+	insertRebaseIssue(t, ctx, conn, p+".70", "Child70")
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO child_counters (parent_id, last_child) VALUES (?, 70)", p); err != nil {
+		t.Fatalf("seed P counter: %v", err)
+	}
+	insertRebaseIssue(t, ctx, conn, q, "OrphanParent")
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO child_counters (parent_id, last_child) VALUES (?, 5)", q); err != nil {
+		t.Fatalf("seed Q counter: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed base with P and Q')"); err != nil {
+		t.Fatalf("commit base: %v", err)
+	}
+
+	peer := "rebasepeer_" + p
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD')", peer); err != nil {
+		t.Fatalf("create peer branch: %v", err)
+	}
+
+	// Clone A (main): the P.71/.72/.73 collision, and DELETE Q (cascades its counter).
+	insertRebaseIssue(t, ctx, conn, p+".71", "Local71")
+	insertRebaseIssue(t, ctx, conn, p+".72", "Local72")
+	insertRebaseIssue(t, ctx, conn, p+".73", "Local73")
+	if _, err := conn.ExecContext(ctx,
+		"UPDATE child_counters SET last_child = 73 WHERE parent_id = ?", p); err != nil {
+		t.Fatalf("bump P counter on main: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "DELETE FROM issues WHERE id = ?", q); err != nil {
+		t.Fatalf("delete Q on main: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'clone A: P collision + delete Q')"); err != nil {
+		t.Fatalf("commit clone A: %v", err)
+	}
+
+	// Clone B (peer): P.71/.72 collision, and bump Q's counter (Q issue untouched).
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", peer); err != nil {
+		t.Fatalf("checkout peer: %v", err)
+	}
+	insertRebaseIssue(t, ctx, conn, p+".71", "Tom")
+	insertRebaseIssue(t, ctx, conn, p+".72", "Eugene")
+	if _, err := conn.ExecContext(ctx,
+		"UPDATE child_counters SET last_child = 6 WHERE parent_id = ?", q); err != nil {
+		t.Fatalf("bump Q counter on peer: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"UPDATE child_counters SET last_child = 72 WHERE parent_id = ?", p); err != nil {
+		t.Fatalf("bump P counter on peer: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'clone B: P collision + bump Q counter')"); err != nil {
+		t.Fatalf("commit clone B: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT('main')"); err != nil {
+		t.Fatalf("checkout main: %v", err)
+	}
+
+	// Without the orphan-skip guard this returns an FK error and hard-resets to the
+	// backup tag; with it, the rebase completes.
+	report, err := versioncontrolops.RebaseChildCollisions(ctx, conn, peer, false)
+	if err != nil {
+		t.Fatalf("rebase (remote-dominates, orphaned counter conflict): %v", err)
+	}
+
+	// Q stayed deleted and no counter row was resurrected for it (our deletion kept).
+	var qIssues int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", q).Scan(&qIssues); err != nil {
+		t.Fatalf("count Q issue: %v", err)
+	}
+	if qIssues != 0 {
+		t.Errorf("orphan parent %s re-appeared in issues (%d rows)", q, qIssues)
+	}
+	var qCounters int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM child_counters WHERE parent_id = ?", q).Scan(&qCounters); err != nil {
+		t.Fatalf("count Q counter: %v", err)
+	}
+	if qCounters != 0 {
+		t.Errorf("orphan counter row for deleted parent %s was resurrected (%d rows) — FK guard skipped?", q, qCounters)
+	}
+
+	// The P collision still reconciled normally alongside the skipped Q row.
+	if got := titleOf(t, ctx, conn, p+".71"); got != "Tom" {
+		t.Errorf("%s.71 = %q, want remote's \"Tom\"", p, got)
+	}
+	if got := titleOf(t, ctx, conn, p+".74"); got != "Local71" {
+		t.Errorf("%s.74 = %q, want renumbered \"Local71\"", p, got)
+	}
+	if len(report.Renumbered) != 2 {
+		t.Errorf("report.Renumbered has %d entries, want 2", len(report.Renumbered))
+	}
+	assertRebaseSettled(t, ctx, conn)
+}
+
+// TestEmbeddedRebaseRemoteDominatesDurableSubtreeCounter pins the durable
+// subtree-parent case: a colliding child that is ITSELF a parent with its own
+// child_counters row. Renaming local .71 -> .74 must carry both the durable
+// grandchild .71.1 -> .74.1 AND its counter row (parent_id .71 -> .74), or the
+// high-water reservation for the renamed subtree is lost and a later delete under
+// .74 could re-mint a slot a peer holds — the #4796 hazard one level down. The
+// rename routes through UpdateIssueIDInTx (a plain UPDATE of issues.id); the counter
+// follows because fk_counter_parent cascades the id change. This asserts that
+// behaviour holds rather than leaving the durable subtree-parent path uncovered
+// (the pre-existing wisp-subtree test only moves a wisp grandchild, never a counter).
+func TestEmbeddedRebaseRemoteDominatesDurableSubtreeCounter(t *testing.T) {
+	te := newTestEnv(t, "rbsub")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+	p := "rbp-sub"
+
+	peer := seedRebaseCollision(t, ctx, conn, p)
+
+	// Local .71 (which remote-dominates renumbers to .74) is itself a parent: a
+	// durable child .71.1 and a child_counters row keyed on .71.
+	insertRebaseIssue(t, ctx, conn, p+".71.1", "GrandChild")
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO child_counters (parent_id, last_child) VALUES (?, 1)", p+".71"); err != nil {
+		t.Fatalf("insert .71 counter: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"CALL DOLT_COMMIT('-Am', 'local: durable grandchild + counter under .71')"); err != nil {
+		t.Fatalf("commit grandchild: %v", err)
+	}
+
+	report, err := versioncontrolops.RebaseChildCollisions(ctx, conn, peer, false)
+	if err != nil {
+		t.Fatalf("rebase (remote-dominates, durable subtree counter): %v", err)
+	}
+	if len(report.Renumbered) != 2 {
+		t.Errorf("report.Renumbered has %d entries, want 2", len(report.Renumbered))
+	}
+
+	// The durable grandchild moved with its root .71 -> .74; nothing stranded at .71.1.
+	if got := titleOf(t, ctx, conn, p+".74.1"); got != "GrandChild" {
+		t.Errorf("%s.74.1 = %q, want grandchild moved with its renumbered root", p, got)
+	}
+	var stranded int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", p+".71.1").Scan(&stranded); err != nil {
+		t.Fatalf("count stranded grandchild: %v", err)
+	}
+	if stranded != 0 {
+		t.Errorf("grandchild stranded at %s.71.1 (%d rows) — subtree not carried with the renumbered root", p, stranded)
+	}
+
+	// The subtree-internal counter followed the rename: no orphan left at .71, a
+	// live counter now keyed on .74. This is what preserves the deleted-child
+	// high-water reservation for the renumbered subtree.
+	var orphanCounter int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM child_counters WHERE parent_id = ?", p+".71").Scan(&orphanCounter); err != nil {
+		t.Fatalf("count orphan .71 counter: %v", err)
+	}
+	if orphanCounter != 0 {
+		t.Errorf("child_counters left orphaned at %s.71 (%d rows) after the root was renumbered to .74", p, orphanCounter)
+	}
+	if got := lastChildOf(t, ctx, conn, p+".74"); got != 1 {
+		t.Errorf("child_counters for renumbered root %s.74 = %d, want 1 (migrated from .71)", p, got)
+	}
 	assertRebaseSettled(t, ctx, conn)
 }

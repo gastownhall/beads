@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -44,11 +45,11 @@ type txBeginner interface {
 // visible hierarchical number is derived dynamically from parentage. That is a
 // larger schema change tracked separately; this command unblocks sync today.
 //
-// content_hash is set NULL on every renumbered row. content_hash is used only
-// for compaction/dedup, never for merge, so a NULL is benign and converges on
-// the next compaction pass — the same choice the manual 2026-06-02 and
-// 2026-07-14 reconciles made. (Recomputing it would need the full issue row;
-// left as a follow-up.)
+// content_hash is left untouched on a renumbered row, and that is correct: the
+// canonical rename primitive rewrites id/title/description/design/acceptance/
+// notes but not content_hash, and Issue.ComputeContentHash excludes the id, so
+// changing only the id does not invalidate the stored hash. content_hash is used
+// only for compaction/dedup, never for merge, so nothing here depends on it.
 
 // rebaseCollision is one colliding child id and the parent it hangs under.
 type rebaseCollision struct {
@@ -141,13 +142,20 @@ func RebaseChildCollisions(ctx context.Context, db DBConn, remoteRef string, loc
 	// So first renumber the local colliding children to free ids and merge the
 	// remote in — the remote-dominates result: the remote's row sits at the
 	// contested id, the local row at the new id.
+	//
+	// Every error return from here carries `report` (never nil) so the caller can
+	// read report.BackupTag: the defer above has just restored the branch to it, and
+	// the CLI only prints the "restored to backup tag" reassurance when the report is
+	// non-nil. Returning nil would suppress that message exactly when a real restore
+	// happened (e.g. a commit-renumber failure after the renumber tx already
+	// committed rows into the working set).
 	renum, counters, err := renumberCollisions(ctx, db, collisions, []string{remoteRef, base})
 	if err != nil {
-		return nil, err
+		return report, err
 	}
 	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)",
 		fmt.Sprintf("rebase: renumber %d colliding child id(s) (%s) [#4796]", len(renum), direction)); err != nil {
-		return nil, fmt.Errorf("commit renumber: %w", err)
+		return report, fmt.Errorf("commit renumber: %w", err)
 	}
 	report.Renumbered = renum
 	for k, v := range counters {
@@ -459,7 +467,16 @@ func maxChildNumber(ctx context.Context, db DBConn, ref, parent string) (int, er
 	}
 
 	// Session-local side: present only on the working set, never AS OF, and
-	// optional on older schemas.
+	// optional on older schemas. Both callers pass a DURABLE parent, so in the
+	// normal case the wisps scan is defense-in-depth — a wisp child minted under a
+	// durable parent routes through GetNextChildIDTx, which bumps child_counters
+	// (read above), so the counter already reserves the slot. Scanning the wisps
+	// table directly still guards a wisp inserted out-of-band above that counter,
+	// where a durable renumber onto its slot would collide across tables with no PK
+	// conflict to catch it. The wisp_child_counters read only matters for a durable
+	// parent that once was a wisp and whose wisp_child_counters row outlived its
+	// promotion (cli_migrations deletes those rows, so a survivor is a migration
+	// edge, not a normal state); it is cheap belt-and-braces.
 	if ref == "" {
 		if wn, err := maxDirectChildInTable(ctx, db, "wisps", "", parent); err != nil {
 			if !dberrors.IsTableNotExist(err) {
@@ -504,7 +521,7 @@ func lastChildCounter(ctx context.Context, db DBConn, table, asOf, parent string
 	q := fmt.Sprintf("SELECT last_child FROM %s%s WHERE parent_id = ?", table, asOf)
 	var n int
 	switch err := db.QueryRowContext(ctx, q, parent).Scan(&n); {
-	case err == sql.ErrNoRows:
+	case errors.Is(err, sql.ErrNoRows):
 		return 0, nil
 	case err != nil:
 		return 0, fmt.Errorf("last_child for %s in %s%s: %w", parent, table, asOf, err)
@@ -653,7 +670,7 @@ func resolveChildCountersToHighWater(ctx context.Context, db DBConn, report *sto
 		// DOLT_CONFLICTS_RESOLVE('--ours') below, which keeps our deletion.
 		var parentExists int
 		switch err := db.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ?", cc.parent).Scan(&parentExists); {
-		case err == sql.ErrNoRows:
+		case errors.Is(err, sql.ErrNoRows):
 			continue
 		case err != nil:
 			return fmt.Errorf("check child_counters conflict parent %s: %w", cc.parent, err)
