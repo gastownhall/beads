@@ -1003,9 +1003,11 @@ A new feature
 			t.Fatalf("label count = %d, want 2", labelCount)
 		}
 
+		// events is dolt_ignored since 0062 (bd-red8u): audit rows are durable
+		// in the working set, never at HEAD.
 		var labelEventCount int
 		if err := db.QueryRowContext(t.Context(),
-			"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ?",
+			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 			id, types.EventLabelAdded).Scan(&labelEventCount); err != nil {
 			t.Fatalf("count label events: %v", err)
 		}

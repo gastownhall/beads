@@ -59,15 +59,23 @@ func TestCreateIssueCommitsInitialRelationalData(t *testing.T) {
 		t.Fatalf("committed comment count = %d, want 1", commentCount)
 	}
 
+	// events is dolt_ignored since migration 0062 (bd-red8u): the audit rows
+	// must be durable in the working set but never part of committed history.
 	var labelEventCount int
 	if err := store.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ?",
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		issue.ID, types.EventLabelAdded,
 	).Scan(&labelEventCount); err != nil {
-		t.Fatalf("count committed label events: %v", err)
+		t.Fatalf("count label events: %v", err)
 	}
 	if labelEventCount != 2 {
-		t.Fatalf("committed label_added event count = %d, want 2", labelEventCount)
+		t.Fatalf("label_added event count = %d, want 2", labelEventCount)
+	}
+	var committedEventCount int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM events AS OF 'HEAD'",
+	).Scan(&committedEventCount); err == nil {
+		t.Fatalf("events exists at HEAD with %d rows; want the table absent from committed history (dolt_ignored, 0062)", committedEventCount)
 	}
 
 	var dirtyRelationalTables int

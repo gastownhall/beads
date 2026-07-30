@@ -264,6 +264,22 @@ var doltIgnorePatterns = []string{
 	"wisps",
 }
 
+// versionGatedDoltIgnorePatterns are ignore patterns whose table was moved
+// onto the ignored plane by a specific main-lane migration, so re-asserting
+// them is only correct once the main cursor has reached that version. Seeding
+// them unconditionally would strand a pre-flip database whose migration pass
+// is refused (remote-migrate gate, dirty-table gate): the table would still
+// be tracked-and-versioned while the pattern suppressed all staging of it, so
+// its writes would silently stop being committed. The gate matters only for
+// the out-of-band heal path — on a normal upgrade the flip migration itself
+// registers the pattern in the same pass.
+var versionGatedDoltIgnorePatterns = []struct {
+	pattern        string
+	minMainVersion int
+}{
+	{"events", 62}, // 0062_events_dolt_ignore (bd-red8u)
+}
+
 // seedDoltIgnorePatterns idempotently asserts the canonical dolt_ignore
 // patterns and reports whether it actually changed anything. INSERT IGNORE
 // leaves existing rows untouched, so a healthy database sees no working-set
@@ -278,16 +294,38 @@ var doltIgnorePatterns = []string{
 // in one pass instead of riding along inside an unrelated later commit.
 func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
 	changed := false
-	for _, pattern := range doltIgnorePatterns {
+	seedOne := func(pattern string) error {
 		res, err := db.ExecContext(ctx, "INSERT IGNORE INTO dolt_ignore VALUES (?, true)", pattern)
 		if err != nil {
-			return changed, fmt.Errorf("seeding dolt_ignore pattern %q: %w", pattern, err)
+			return fmt.Errorf("seeding dolt_ignore pattern %q: %w", pattern, err)
 		}
 		// A RowsAffected error degrades to changed=false for that row: the
 		// seed then stays an uncommitted working-set diff swept up by the
 		// next commit, exactly the pre-scoped-commit behavior.
 		if n, raErr := res.RowsAffected(); raErr == nil && n > 0 {
 			changed = true
+		}
+		return nil
+	}
+	for _, pattern := range doltIgnorePatterns {
+		if err := seedOne(pattern); err != nil {
+			return changed, err
+		}
+	}
+	// Version-gated patterns seed only once the main cursor proves the flip
+	// migration applied. The cursor table may not exist yet (first-ever run,
+	// before mainSource.migrate bootstraps it): treat that as version 0 and
+	// skip — the flip migration registers its own pattern when it applies.
+	mainVersion, err := mainSource.currentVersion(ctx, db)
+	if err != nil {
+		mainVersion = 0
+	}
+	for _, gated := range versionGatedDoltIgnorePatterns {
+		if mainVersion < gated.minMainVersion {
+			continue
+		}
+		if err := seedOne(gated.pattern); err != nil {
+			return changed, err
 		}
 	}
 	return changed, nil
@@ -369,6 +407,17 @@ func AllMigrationsSQL() string {
 // hygiene guard (scripts/check-migration-hygiene.sh).
 func MigrationSQL(name string) (string, error) {
 	data, err := mainSource.files.ReadFile(mainSource.dir + "/" + name)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// IgnoredMigrationSQL is MigrationSQL's ignored-lane counterpart: the frozen
+// bytes of an ignored-source migration file (e.g. "0019_create_events.up.sql"),
+// for engine-based frozen-guard tests of clone-local DDL.
+func IgnoredMigrationSQL(name string) (string, error) {
+	data, err := ignoredSource.files.ReadFile(ignoredSource.dir + "/" + name)
 	if err != nil {
 		return "", err
 	}

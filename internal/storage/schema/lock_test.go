@@ -109,7 +109,7 @@ func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
 	}
 	defer db.Close()
 
-	expectIgnorePatternSeed(mock)
+	expectIgnorePatternSeed(mock, LatestVersion())
 	// migrationWorkNeeded: both cursors at latest, both content_hash columns
 	// present, no custom backfill pending -> no work, MigrateUp short-circuits.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
@@ -148,7 +148,7 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 	}
 	defer db.Close()
 
-	expectIgnorePatternSeedNoop(mock)
+	expectIgnorePatternSeedNoop(mock, LatestVersion())
 	// migrationWorkNeeded: no work, MigrateUp short-circuits.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
@@ -171,22 +171,33 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 
 // expectIgnorePatternSeed mocks the unconditional dolt_ignore pattern seed
 // MigrateUp runs before anything else, with every pattern actually inserted
-// (RowsAffected=1: an under-seeded database).
-func expectIgnorePatternSeed(mock sqlmock.Sqlmock) {
-	for _, pattern := range doltIgnorePatterns {
-		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
-			WithArgs(pattern).
-			WillReturnResult(sqlmock.NewResult(0, 1))
-	}
+// (RowsAffected=1: an under-seeded database). mainVersion is what the seed's
+// cursor probe reports; version-gated patterns (events, >= 0062) are only
+// expected when it qualifies them.
+func expectIgnorePatternSeed(mock sqlmock.Sqlmock, mainVersion int) {
+	expectIgnorePatternSeedRows(mock, mainVersion, 1)
 }
 
 // expectIgnorePatternSeedNoop mocks the seed on a healthy database: every
 // INSERT IGNORE hits an existing row (RowsAffected=0), nothing changes.
-func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock) {
+func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock, mainVersion int) {
+	expectIgnorePatternSeedRows(mock, mainVersion, 0)
+}
+
+func expectIgnorePatternSeedRows(mock sqlmock.Sqlmock, mainVersion int, rowsAffected int64) {
 	for _, pattern := range doltIgnorePatterns {
 		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
 			WithArgs(pattern).
-			WillReturnResult(sqlmock.NewResult(0, 0))
+			WillReturnResult(sqlmock.NewResult(0, rowsAffected))
+	}
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", mainVersion)
+	for _, gated := range versionGatedDoltIgnorePatterns {
+		if mainVersion < gated.minMainVersion {
+			continue
+		}
+		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+			WithArgs(gated.pattern).
+			WillReturnResult(sqlmock.NewResult(0, rowsAffected))
 	}
 }
 
@@ -196,7 +207,7 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	latest := LatestVersion()
 	latestIgnored := LatestIgnoredVersion()
 
-	expectIgnorePatternSeed(mock)
+	expectIgnorePatternSeed(mock, latest-1)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	expectDoltStatusRows(mock)
 	// The seed changed rows (expectIgnorePatternSeed reports RowsAffected=1),
@@ -234,8 +245,11 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	// Per-step commit (#4566) snapshots the working set before the migration
 	// runs so it can force-stage only the tables this step newly dirties.
 	expectDoltStatusRows(mock)
-	mock.ExpectExec("(?s).*").
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	// The pending (latest) migration is 0062_events_dolt_ignore, whose body
+	// contains a bare CALL DOLT_COMMIT — execMigrationBody routes such bodies
+	// through DrainCall (QueryContext), not ExecContext.
+	mock.ExpectQuery("(?s).*").
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO schema_migrations (version, content_hash) VALUES (?, ?)")).
 		WithArgs(latest, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -318,28 +332,28 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 
 	latest := LatestVersion()
 
-	expectIgnorePatternSeedNoop(mock)
+	expectIgnorePatternSeedNoop(mock, latest-2)
 	// migrationWorkNeeded: main cursor behind -> work needed (short-circuits).
 	// Two behind, not one: 0061 is a pure version anchor (SELECT 1, touches no
-	// table), so the guard shape needs 0060 — which alters `issues` — among
-	// the pending migrations.
+	// table), so the guard shape needs 0062 — which drops/recreates `events` —
+	// among the pending migrations.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-2)
-	// dirtyBeforeAll: `issues` dirty (working set only, not staged).
-	expectDoltStatusDirtyIssues(mock)
+	// dirtyBeforeAll: `events` dirty (working set only, not staged).
+	expectDoltStatusDirtyEvents(mock)
 	// Nothing staged -> no unstage exec; seed was a no-op -> no seed commit.
 	// committableDirtyTables re-reads dolt_status (ignored tables excluded).
-	expectDoltStatusDirtyIssues(mock)
+	expectDoltStatusDirtyEvents(mock)
 	// auxRekeyResumePending: no local_metadata table, no crashed rekey pass.
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
-	// pendingMigrationDirtyTables: cursor read, then pending 0060's SQL
-	// touches `issues` -> DirtyTablesError.
+	// pendingMigrationDirtyTables: cursor read, then pending 0062's SQL
+	// touches `events` -> DirtyTablesError.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-2)
 }
 
-func expectDoltStatusDirtyIssues(mock sqlmock.Sqlmock) {
+func expectDoltStatusDirtyEvents(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
-		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}).AddRow("issues", false))
+		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}).AddRow("events", false))
 }
 
 // TestMigrateUpWithLockDirtyGuardStaysFatalWithoutHeal pins the default
