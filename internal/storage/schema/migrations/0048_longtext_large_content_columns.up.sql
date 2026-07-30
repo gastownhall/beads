@@ -1,4 +1,4 @@
--- Migration 0046: Use LONGTEXT for large-content columns.
+-- Migration 0048: Use LONGTEXT for large-content columns.
 --
 -- issues/wisps: description, design, acceptance_criteria, notes, close_reason
 -- comments: text
