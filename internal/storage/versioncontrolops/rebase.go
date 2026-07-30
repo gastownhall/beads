@@ -128,10 +128,15 @@ func RebaseChildCollisions(ctx context.Context, db DBConn, remoteRef string, loc
 		}
 	}()
 
-	// Both directions run entirely on the LOCAL working branch. A checked-out
-	// remote ref cannot be used: the rename primitive touches the wisp_* tables,
-	// which are session-local working-set tables never committed to history, so
-	// they vanish the moment the working set is reset to a committed ref.
+	// Both directions run in place on the LOCAL working branch rather than by
+	// checking out the remote ref. The rename primitive rewrites the session-local
+	// wisp_* rows alongside the durable issues, and those wisps live only in this
+	// session's working set (they are dolt_ignored and never committed to history),
+	// so the reconcile stays in the working context that already holds them.
+	// (Not because a reset would drop them: DOLT_RESET '--hard' carries
+	// working-but-unstaged tables onto the target root, so the wisps survive it —
+	// the restore defer above relies on exactly that. The reason is to keep the
+	// rename operating on the live wisp-bearing working set, not to avoid losing it.)
 	//
 	// So first renumber the local colliding children to free ids and merge the
 	// remote in — the remote-dominates result: the remote's row sits at the
@@ -415,15 +420,24 @@ func swapRenumberedSubtrees(ctx context.Context, db DBConn, records []storage.Re
 	return tx.Commit()
 }
 
-// maxChildNumber returns the highest DIRECT child number under parent as seen
-// at ref (empty ref = the current working set). Mirrors the child-scan in
-// issueops.GetNextChildIDTx: direct children match "parent.%" but not
-// "parent.%.%".
+// maxChildNumber returns the high-water DIRECT child number under parent as seen
+// at ref (empty ref = the current working set): the greatest of the
+// child_counters.last_child mark and the highest direct child id actually
+// present (direct children match "parent.%" but not "parent.%.%"). It mirrors
+// the seed logic of issueops.GetNextChildIDTx — reading the counter, not just the
+// live rows — so the renumberer never re-mints a slot the counter has already
+// handed out. A deleted child leaves the counter high while lowering the live
+// max (#4796): a peer may still hold that slot, so it must stay reserved.
+//
+// On the working set (ref == "") it also spans the session-local wisps and
+// wisp_child_counters tables, so a wisp child under a durable parent reserves its
+// slot too — otherwise the renumberer could mint issues."parent.N" over an
+// existing wisps."parent.N" (different tables, so no PK collision fires, and wisp
+// routing then misdirects every later durable op on that id). Wisps are
+// session-local and absent at any committed ref, so they are scanned only on the
+// working set, never AS OF; a missing wisp table (older schema) degrades cleanly
+// to "durable only", matching subtreeIDs.
 func maxChildNumber(ctx context.Context, db DBConn, ref, parent string) (int, error) {
-	query := `
-		SELECT COALESCE(MAX(CAST(SUBSTRING_INDEX(id, '.', -1) AS UNSIGNED)), 0)
-		FROM issues%s
-		WHERE id LIKE CONCAT(?, '.%%') AND id NOT LIKE CONCAT(?, '.%%.%%')`
 	asOf := ""
 	if ref != "" {
 		if err := issueops.ValidateRef(ref); err != nil {
@@ -432,11 +446,68 @@ func maxChildNumber(ctx context.Context, db DBConn, ref, parent string) (int, er
 		//nolint:gosec // G201: ref validated above; AS OF requires a literal.
 		asOf = fmt.Sprintf(" AS OF '%s'", ref)
 	}
-	//nolint:gosec // G201: only the validated AS OF clause is interpolated; parent is a bind param.
-	q := fmt.Sprintf(query, asOf)
+
+	// Durable side: issues and child_counters exist at every ref.
+	n, err := maxDirectChildInTable(ctx, db, "issues", asOf, parent)
+	if err != nil {
+		return 0, err
+	}
+	if c, err := lastChildCounter(ctx, db, "child_counters", asOf, parent); err != nil {
+		return 0, err
+	} else if c > n {
+		n = c
+	}
+
+	// Session-local side: present only on the working set, never AS OF, and
+	// optional on older schemas.
+	if ref == "" {
+		if wn, err := maxDirectChildInTable(ctx, db, "wisps", "", parent); err != nil {
+			if !dberrors.IsTableNotExist(err) {
+				return 0, err
+			}
+		} else if wn > n {
+			n = wn
+		}
+		if wc, err := lastChildCounter(ctx, db, "wisp_child_counters", "", parent); err != nil {
+			if !dberrors.IsTableNotExist(err) {
+				return 0, err
+			}
+		} else if wc > n {
+			n = wc
+		}
+	}
+	return n, nil
+}
+
+// maxDirectChildInTable returns the highest direct-child number under parent
+// within one table, optionally AS OF a pre-validated ref clause. table is a
+// caller-fixed literal ("issues" or "wisps"); parent is a bind parameter.
+func maxDirectChildInTable(ctx context.Context, db DBConn, table, asOf, parent string) (int, error) {
+	//nolint:gosec // G201: table is a caller-fixed literal and asOf is a pre-validated AS OF clause; parent is a bind param.
+	q := fmt.Sprintf(`
+		SELECT COALESCE(MAX(CAST(SUBSTRING_INDEX(id, '.', -1) AS UNSIGNED)), 0)
+		FROM %s%s
+		WHERE id LIKE CONCAT(?, '.%%') AND id NOT LIKE CONCAT(?, '.%%.%%')`, table, asOf)
 	var n int
 	if err := db.QueryRowContext(ctx, q, parent, parent).Scan(&n); err != nil {
-		return 0, fmt.Errorf("max child number for %s%s: %w", parent, asOf, err)
+		return 0, fmt.Errorf("max child number for %s in %s%s: %w", parent, table, asOf, err)
+	}
+	return n, nil
+}
+
+// lastChildCounter reads the last_child high-water mark for parent from a counter
+// table (child_counters or wisp_child_counters), optionally AS OF a pre-validated
+// ref clause, returning 0 when the parent has no counter row. table is a
+// caller-fixed literal; parent is a bind parameter.
+func lastChildCounter(ctx context.Context, db DBConn, table, asOf, parent string) (int, error) {
+	//nolint:gosec // G201: table is a caller-fixed literal and asOf is a pre-validated AS OF clause; parent is a bind param.
+	q := fmt.Sprintf("SELECT last_child FROM %s%s WHERE parent_id = ?", table, asOf)
+	var n int
+	switch err := db.QueryRowContext(ctx, q, parent).Scan(&n); {
+	case err == sql.ErrNoRows:
+		return 0, nil
+	case err != nil:
+		return 0, fmt.Errorf("last_child for %s in %s%s: %w", parent, table, asOf, err)
 	}
 	return n, nil
 }
@@ -529,8 +600,16 @@ func mergeAndSettleRebase(ctx context.Context, db DBConn, winRef string, report 
 // second half of the mechanic: the merge clears the issues collision, but the
 // counter row is a both-changed conflict the standard settle never touches.
 func resolveChildCountersToHighWater(ctx context.Context, db DBConn, report *storage.RebaseReport) error {
-	rows, err := db.QueryContext(ctx,
-		"SELECT COALESCE(our_parent_id, their_parent_id, base_parent_id) FROM dolt_conflicts_child_counters")
+	// Pull each conflicted parent AND the three sides of its counter value. The
+	// working set (ours) alone is not enough: this runs before the conflict
+	// auto-resolve, so a theirs-only high-water lives only in the conflict row, and
+	// a side that deleted its highest child (or holds it as a session wisp) can
+	// carry a last_child the live issue rows no longer show. Folding our/their/base
+	// into the mark guarantees the counter only ever rises (#4796).
+	rows, err := db.QueryContext(ctx, `
+		SELECT COALESCE(our_parent_id, their_parent_id, base_parent_id),
+		       COALESCE(our_last_child, 0), COALESCE(their_last_child, 0), COALESCE(base_last_child, 0)
+		FROM dolt_conflicts_child_counters`)
 	if err != nil {
 		// No conflict on this table (or Dolt version without the system table):
 		// nothing to resolve here.
@@ -539,14 +618,18 @@ func resolveChildCountersToHighWater(ctx context.Context, db DBConn, report *sto
 		}
 		return fmt.Errorf("query child_counters conflicts: %w", err)
 	}
-	var parents []string
+	type counterConflict struct {
+		parent           string
+		our, their, base int
+	}
+	var conflicts []counterConflict
 	for rows.Next() {
-		var p string
-		if err := rows.Scan(&p); err != nil {
+		var cc counterConflict
+		if err := rows.Scan(&cc.parent, &cc.our, &cc.their, &cc.base); err != nil {
 			_ = rows.Close()
 			return fmt.Errorf("scan child_counters conflict: %w", err)
 		}
-		parents = append(parents, p)
+		conflicts = append(conflicts, cc)
 	}
 	if err := rows.Close(); err != nil {
 		return err
@@ -554,20 +637,31 @@ func resolveChildCountersToHighWater(ctx context.Context, db DBConn, report *sto
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if len(parents) == 0 {
+	if len(conflicts) == 0 {
 		return nil
 	}
 
-	for _, p := range parents {
-		trueMax, err := maxChildNumber(ctx, db, "", p)
+	for _, cc := range conflicts {
+		trueMax, err := maxChildNumber(ctx, db, "", cc.parent)
 		if err != nil {
 			return err
 		}
-		if _, err := db.ExecContext(ctx,
-			"UPDATE child_counters SET last_child = ? WHERE parent_id = ?", trueMax, p); err != nil {
-			return fmt.Errorf("set child_counters high-water for %s: %w", p, err)
+		hw := trueMax
+		for _, v := range []int{cc.our, cc.their, cc.base} {
+			if v > hw {
+				hw = v
+			}
 		}
-		report.CountersSet[p] = trueMax
+		// Upsert with GREATEST so the counter can only rise, never fall — and so a
+		// theirs-only conflict row (with no working-set counter to UPDATE) still
+		// lands. Mirrors the counter bump in renumberCollisions.
+		if _, err := db.ExecContext(ctx, `
+			INSERT INTO child_counters (parent_id, last_child) VALUES (?, ?)
+			ON DUPLICATE KEY UPDATE last_child = GREATEST(last_child, VALUES(last_child))`,
+			cc.parent, hw); err != nil {
+			return fmt.Errorf("set child_counters high-water for %s: %w", cc.parent, err)
+		}
+		report.CountersSet[cc.parent] = hw
 	}
 	if _, err := db.ExecContext(ctx, "CALL DOLT_CONFLICTS_RESOLVE('--ours', 'child_counters')"); err != nil {
 		return fmt.Errorf("resolve child_counters conflicts: %w", err)

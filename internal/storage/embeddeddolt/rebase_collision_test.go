@@ -360,3 +360,88 @@ func TestEmbeddedRebaseLocalDominates(t *testing.T) {
 	assertDepRekeyed(t, ctx, conn, p+".74", p)
 	assertRebaseSettled(t, ctx, conn)
 }
+
+// TestEmbeddedRebaseRemoteDominatesHighWaterSlots pins both #4844 round-3
+// blockers: the renumberer must seed free slots from a TRUE high-water mark, not
+// just the live issue rows. Under parent P the local side has consumed slots past
+// its live issues max in two ways an issues-only scan misses:
+//   - a DELETED child (.73): the live max drops to .72 but child_counters stays at
+//     73 — a peer may still hold .73, so the slot must not be re-minted;
+//   - a session WISP child (.74): it holds slot 74 in the wisps table, invisible to
+//     an issues scan, so a durable renumber onto .74 collides across tables with no
+//     PK conflict to catch it.
+//
+// So the true high-water is 74. Remote-dominates renumbers the local .71/.72
+// collisions; with the fix they land at .75/.76 (clear of the deleted .73 and the
+// wisp .74) and the counter never falls below the wisp high-water. Without the fix
+// they land on .73/.74 — reusing the deleted slot and colliding with the wisp.
+func TestEmbeddedRebaseRemoteDominatesHighWaterSlots(t *testing.T) {
+	te := newTestEnv(t, "rbhw")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+	p := "rbp-hw"
+
+	peer := seedRebaseCollision(t, ctx, conn, p)
+
+	// Local deletes its highest live child .73 (counter stays 73) and commits.
+	if _, err := conn.ExecContext(ctx, "DELETE FROM issues WHERE id = ?", p+".73"); err != nil {
+		t.Fatalf("delete local .73: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"CALL DOLT_COMMIT('-Am', 'local deletes highest child .73, counter stays 73')"); err != nil {
+		t.Fatalf("commit delete: %v", err)
+	}
+	// A session wisp holds slot .74 — working-set only (wisps are dolt-ignored, so
+	// never committed), exactly as a live session would carry it. True high-water
+	// under P is now 74 (counter 73, wisp 74), above the live issues max of 72.
+	insertRebaseWisp(t, ctx, conn, p+".74", "WispSibling")
+
+	report, err := versioncontrolops.RebaseChildCollisions(ctx, conn, peer, false)
+	if err != nil {
+		t.Fatalf("rebase (remote-dominates, high-water slots): %v", err)
+	}
+
+	// Remote's Tom/Eugene keep the contested .71/.72.
+	if got := titleOf(t, ctx, conn, p+".71"); got != "Tom" {
+		t.Errorf("%s.71 = %q, want remote's \"Tom\"", p, got)
+	}
+	if got := titleOf(t, ctx, conn, p+".72"); got != "Eugene" {
+		t.Errorf("%s.72 = %q, want remote's \"Eugene\"", p, got)
+	}
+	// The deleted slot .73 must not be re-minted as an issue (counter reserved it).
+	var at73 int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", p+".73").Scan(&at73); err != nil {
+		t.Fatalf("count issue .73: %v", err)
+	}
+	if at73 != 0 {
+		t.Errorf("%s.73 re-minted as an issue (%d rows) — the deleted slot's counter high-water was ignored", p, at73)
+	}
+	// The wisp still holds .74, and no durable issue was minted over its slot.
+	if !wispExists(t, ctx, conn, p+".74") {
+		t.Errorf("wisp %s.74 lost", p)
+	}
+	var issueAt74 int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", p+".74").Scan(&issueAt74); err != nil {
+		t.Fatalf("count issue .74: %v", err)
+	}
+	if issueAt74 != 0 {
+		t.Errorf("durable issue minted at %s.74 over the session wisp (cross-table collision)", p)
+	}
+	// Both local children renumbered above the true high-water.
+	if got := titleOf(t, ctx, conn, p+".75"); got != "Local71" {
+		t.Errorf("%s.75 = %q, want renumbered \"Local71\"", p, got)
+	}
+	if got := titleOf(t, ctx, conn, p+".76"); got != "Local72" {
+		t.Errorf("%s.76 = %q, want renumbered \"Local72\"", p, got)
+	}
+	// Counter sits at the new high-water and never fell below the wisp slot (74).
+	if got := lastChildOf(t, ctx, conn, p); got != 76 {
+		t.Errorf("child_counters last_child = %d, want 76 (high-water above deleted .73 and wisp .74)", got)
+	}
+	if len(report.Renumbered) != 2 {
+		t.Errorf("report.Renumbered has %d entries, want 2", len(report.Renumbered))
+	}
+	// The renumbered local .71's dependency edge rekeyed to its new id .75.
+	assertDepRekeyed(t, ctx, conn, p+".75", p)
+	assertRebaseSettled(t, ctx, conn)
+}
