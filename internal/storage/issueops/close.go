@@ -53,9 +53,25 @@ func CloseIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, reason,
 // so this guards against a concurrent lifecycle change — not against concurrent
 // label, dependency, rename, or is_blocked writes that leave row_lock untouched
 // (see the freshRowLock invariant in lease.go).
-func CloseIssueCheckedInTx(ctx context.Context, tx DBTX, id, reason, actor, session string, force bool, expectedVersion *int64) (*CloseResult, error) {
+//
+// expectedFence is the same shape of precondition against the ownership fence
+// (storage.ErrFenceMismatch, `bd close --if-fence`), and runs alongside the
+// version check for the same reasons — before the is_blocked guard, unaffected
+// by force. It is the narrower guard of the two: claim_fence moves only on
+// ownership transitions, so a holder's own content writes do not invalidate it
+// while a reclaim-and-reissue does. Because the guard reads the row's CURRENT
+// fence, an already-closed row still holds the fence it carried at close time:
+// re-closing it with the same fence stays the idempotent no-op the
+// Storage.CloseIssueChecked contract promises, and only a genuinely superseded
+// snapshot refuses.
+func CloseIssueCheckedInTx(ctx context.Context, tx DBTX, id, reason, actor, session string, force bool, expectedVersion, expectedFence *int64) (*CloseResult, error) {
 	if expectedVersion != nil {
 		if err := CheckVersionInTx(ctx, tx, id, *expectedVersion); err != nil {
+			return nil, err
+		}
+	}
+	if expectedFence != nil {
+		if err := CheckExpectedFieldsInTx(ctx, tx, id, nil, nil, expectedFence); err != nil {
 			return nil, err
 		}
 	}

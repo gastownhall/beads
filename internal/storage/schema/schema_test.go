@@ -1533,6 +1533,7 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		"ALTER TABLE schema_migrations DROP COLUMN applied_at",
 		"ALTER TABLE issues MODIFY COLUMN close_reason LONGTEXT DEFAULT ''",
 		"ALTER TABLE comments MODIFY COLUMN text LONGTEXT NOT NULL",
+		"ALTER TABLE issues ADD COLUMN claim_fence BIGINT NOT NULL DEFAULT 0",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("AllMigrationsSQL missing direct CLI DDL %q", want)
@@ -1587,6 +1588,7 @@ WHERE table_schema = DATABASE()
 	requireDoltColumnShape(t, dir, "wisps", "no_history", "tinyint(1)", "YES")
 	requireDoltColumnShape(t, dir, "wisps", "started_at", "datetime", "YES")
 	requireDoltColumnShape(t, dir, "wisps", "wisp_type", "varchar(32)", "YES")
+	requireDoltColumnShape(t, dir, "issues", "claim_fence", "bigint", "NO")
 }
 
 func runDoltCommand(t *testing.T, dir string, args ...string) {

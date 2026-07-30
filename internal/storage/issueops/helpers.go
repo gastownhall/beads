@@ -52,6 +52,13 @@ func TableRouting(issue *types.Issue) (issueTable, eventTable string) {
 // round-trip the JSONL interchange, wy-urlct). row_lock rides along because
 // any write that can change status/assignee must rewrite it to collide with a
 // concurrent reclaim/close on the same row (see freshRowLock in lease.go).
+//
+// claim_fence is deliberately NOT here: an incoming snapshot's fence must
+// never overwrite the stored one, because a snapshot older than the local row
+// would move the fence BACKWARD and re-validate ownership snapshots the local
+// transitions already retired. The imported value is used for fresh rows
+// only (the INSERT side); on an existing row the fence moves solely through
+// the assignee-change bump prepended by issueUpsertAssignments.
 var issueUpsertColumns = []string{
 	"content_hash", "title", "description", "design", "acceptance_criteria",
 	"notes", "status", "priority", "issue_type", "assignee",
@@ -73,7 +80,11 @@ var issueUpsertColumns = []string{
 // pre-check in InsertIssueIfNew, so their aux data (labels/comments/deps,
 // which never bump updated_at) still merges additively.
 func issueUpsertAssignments(table string, rejectStaleUpdate bool) string {
-	assignments := make([]string, 0, len(issueUpsertColumns))
+	assignments := make([]string, 0, len(issueUpsertColumns)+1)
+	// Ownership-fence discipline on import/sync (see fence.go): the fence
+	// fragment comes FIRST so its assignee/updated_at comparisons see
+	// pre-assignment values. row_lock below is what pairs with the bump.
+	assignments = append(assignments, UpsertFenceAssignments(table, rejectStaleUpdate))
 	for _, col := range issueUpsertColumns {
 		if rejectStaleUpdate {
 			// Qualify existing-row references with the table name so the target value
@@ -107,7 +118,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
 			due_at, defer_until, metadata,
-			row_lock, storage_class
+			row_lock, storage_class, claim_fence
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
@@ -118,7 +129,7 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?,
-			?, ?
+			?, ?, ?
 		)
 		ON DUPLICATE KEY UPDATE
 			%s
@@ -133,6 +144,12 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
 		freshRowLock(), NullString(string(issue.StorageClass.Normalize())),
+		// claim_fence rides fresh inserts so promote/demote table moves and
+		// import-new rows carry the ownership fence instead of resetting it to
+		// the column default; on the duplicate-key path the stored fence is
+		// governed solely by the assignee-change bump in
+		// issueUpsertAssignments, never overwritten by the incoming value.
+		issue.ClaimFence,
 	)
 	if err != nil {
 		return fmt.Errorf("insert issue into %s: %w", table, err)

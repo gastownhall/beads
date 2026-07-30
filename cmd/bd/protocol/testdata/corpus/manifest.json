@@ -49,15 +49,15 @@
     },
     "envelope/list": {
       "cmd": "bd list --all --json",
-      "sha256": "9a06f84b6522a6ecfeb9290c0f1af6a89ac1f6e8c4ccb4318cb167a384d5bb90"
+      "sha256": "f647cecdf720729aeba8894347bace3871b0d3d6cc9b0809ca1f45eeaa867546"
     },
     "envelope/ready": {
       "cmd": "bd ready --json",
-      "sha256": "9a06f84b6522a6ecfeb9290c0f1af6a89ac1f6e8c4ccb4318cb167a384d5bb90"
+      "sha256": "f647cecdf720729aeba8894347bace3871b0d3d6cc9b0809ca1f45eeaa867546"
     },
     "envelope/reopen": {
       "cmd": "bd reopen --json corpus-closed",
-      "sha256": "dfab601890c2bc3ad27ee8be7899daad96bb6f8af460616a7d531205de21aa7f"
+      "sha256": "f3a945ecba4c0798f229edc69b2c2b8a19622b4e2382cc98ce32191c0b5296fb"
     },
     "envelope/show": {
       "cmd": "bd show corpus-root --json",
@@ -117,15 +117,15 @@
     },
     "flat/list": {
       "cmd": "bd list --all --json",
-      "sha256": "6d7b3535591a4e85385a96cb02e220853d7e81f4212d4032d4567aa991418dae"
+      "sha256": "a1b09b5b133110d50621a7421c4a8d10ff4c12dcda938da36fe2218e349a954b"
     },
     "flat/ready": {
       "cmd": "bd ready --json",
-      "sha256": "6d7b3535591a4e85385a96cb02e220853d7e81f4212d4032d4567aa991418dae"
+      "sha256": "a1b09b5b133110d50621a7421c4a8d10ff4c12dcda938da36fe2218e349a954b"
     },
     "flat/reopen": {
       "cmd": "bd reopen --json corpus-closed",
-      "sha256": "c2eebbe621462c21665b17188029adb8a0700c99d7cf2907ea62868b57090136"
+      "sha256": "07dc87d2e9c8c0066bf157cefe3b8596071fb519a8e6f8204e7e7233f075165a"
     },
     "flat/show": {
       "cmd": "bd show corpus-root --json",

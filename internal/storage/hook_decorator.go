@@ -116,9 +116,11 @@ func (h *HookFiringStore) UpdateIssue(ctx context.Context, id string, updates ma
 	return nil
 }
 
-// UpdateIssueChecked applies the guarded update (optional ExpectedVersion CAS)
-// and fires on_update on success — mirroring UpdateIssue. A version mismatch
-// (ErrVersionMismatch) or any other error returns without firing.
+// UpdateIssueChecked applies the guarded update (optional ExpectedVersion CAS
+// plus the ExpectedAssignee/ExpectedStatus/ExpectedFence field guards) and
+// fires on_update on success — mirroring UpdateIssue. A guard mismatch
+// (ErrVersionMismatch/ErrAssigneeMismatch/ErrStatusMismatch/ErrFenceMismatch)
+// or any other error returns without firing.
 func (h *HookFiringStore) UpdateIssueChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts UpdateIssueOptions) error {
 	if err := h.inner.UpdateIssueChecked(ctx, id, updates, actor, opts); err != nil {
 		return err

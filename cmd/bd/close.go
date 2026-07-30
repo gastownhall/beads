@@ -32,7 +32,19 @@ create, update, show, or close operation).
 When closing multiple issues, provide one --reason for all IDs or repeat
 --reason once per ID. Reasons map positionally: the first --reason applies
 to the first ID, the second --reason to the second ID, regardless of where
-the flags appear in the command line.`,
+the flags appear in the command line.
+
+With --if-fence, each close is a compare-and-set on the issue's claim fence: a
+monotonic ownership token (claim_fence in bd show --json) that advances on
+every ownership transition — claim, release, reclaim, reassign, reopen — and on
+nothing else. Use it to stop a worker whose claim was reclaimed and re-issued
+from completing a bead it no longer owns; its own intervening content writes do
+not invalidate the guard. --force may be combined with it: --force bypasses
+only the is_blocked gate, never a guard you supplied.
+
+Exit codes: 0 when at least one issue settled as closed (a real close or an
+already-closed no-op); 13 when nothing settled and every attempted ID failed on
+a stale --if-fence guard; 1 otherwise.`,
 	Args:          cobra.MinimumNArgs(0),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -46,7 +58,20 @@ the flags appear in the command line.`,
 			}
 		}()
 
+		// Presence-selected and negative-rejecting; see ifFenceGuardFromFlags.
+		ifFence, fenceErr := ifFenceGuardFromFlags(cmd)
+		if fenceErr != nil {
+			return fenceErr
+		}
+
 		if usesProxiedServer() {
+			// The proxied close path carries no compare-and-set at all
+			// (domain.CloseIssueParams has no guard fields), so accepting the
+			// flag here would silently drop the guard. Refuse loudly instead —
+			// the unclaim --if-assignee precedent.
+			if ifFence != nil {
+				return HandleErrorRespectJSON("--if-fence is not supported in proxied-server mode")
+			}
 			return runCloseProxiedServer(cmd, rootCtx, args)
 		}
 
@@ -108,6 +133,7 @@ the flags appear in the command line.`,
 		closedIssues := []*types.Issue{}
 		closedCount := 0
 		alreadyClosed := 0
+		guardMismatches := 0
 		firstSettledID := ""
 
 		for i, id := range resolvedIDs {
@@ -148,11 +174,14 @@ the flags appear in the command line.`,
 			// Delegate the is_blocked guard to the engine (GH#962). CloseIssueChecked
 			// runs the guard and the close in ONE transaction, so there is no
 			// read-then-write TOCTOU window between the check and the close. --force
-			// bypasses the guard; ExpectedVersion is unused on this path.
+			// bypasses the is_blocked guard only; ExpectedFence (from --if-fence) is
+			// an orthogonal CAS it does not waive, and ExpectedVersion is unused on
+			// this path.
 			res, err := activeStore.CloseIssueChecked(ctx, id, actor, storage.CloseIssueOptions{
-				Reason:  reason,
-				Session: session,
-				Force:   force,
+				Reason:        reason,
+				Session:       session,
+				Force:         force,
+				ExpectedFence: ifFence,
 			})
 			if err != nil {
 				if errors.Is(err, storage.ErrCloseBlocked) {
@@ -161,6 +190,9 @@ the flags appear in the command line.`,
 					fmt.Fprintf(os.Stderr, "%v (use --force to override)\n", err)
 				} else {
 					fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
+				}
+				if isGuardMismatch(err) {
+					guardMismatches++
 				}
 				continue
 			}
@@ -376,6 +408,14 @@ the flags appear in the command line.`,
 
 		totalAttempted := len(resolvedIDs)
 		if totalAttempted > 0 && closedCount == 0 && alreadyClosed == 0 {
+			// Nothing settled. Mirror bd update's taxonomy: exit 13 only when
+			// EVERY attempted ID failed on a stale guard — nothing was written
+			// and retrying the same guard is pointless — and 1 for anything
+			// mixed in. Partial success never reaches here, so the shipped
+			// "some closed ⇒ exit 0" contract is untouched.
+			if guardMismatches == totalAttempted {
+				return &exitError{Code: ExitGuardMismatch}
+			}
 			return SilentExit()
 		}
 		return nil
@@ -392,6 +432,9 @@ func init() {
 	_ = closeCmd.Flags().MarkHidden("comment") // Hidden alias for agent/CLI ergonomics
 	closeCmd.Flags().String("reason-file", "", "Read close reason from file (use - for stdin)")
 	closeCmd.Flags().BoolP("force", "f", false, "Force close pinned issues or unsatisfied gates")
+	// Deliberately NOT exclusive with --force: --force bypasses only the
+	// is_blocked/gate refusals, and a supplied guard is never waived with it.
+	closeCmd.Flags().Int64("if-fence", 0, "Close only while the claim fence equals this value (monotonic ownership token from claim_fence in bd show --json; --if-fence 0 requires never-claimed); a mismatch closes nothing and exits 13 when it is the only failure")
 	closeCmd.Flags().Bool("continue", false, "Auto-advance to next step in molecule")
 	closeCmd.Flags().Bool("no-auto", false, "With --continue, show next step but don't claim it")
 	closeCmd.Flags().Bool("suggest-next", false, "Show newly unblocked issues after closing")

@@ -1,6 +1,7 @@
 {
   "data": [
     {
+      "claim_fence": 1,
       "created_at": "<TS>",
       "created_by": "protocol-test",
       "description": "deterministic corpus closeable",

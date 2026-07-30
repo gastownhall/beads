@@ -308,5 +308,6 @@ func buildUpdateSpecForIssue(current *types.Issue, in *updateInput) domain.Updat
 		Reparent:         in.reparent,
 		ExpectedAssignee: in.ifAssignee,
 		ExpectedStatus:   in.ifStatus,
+		ExpectedFence:    in.ifFence,
 	}
 }

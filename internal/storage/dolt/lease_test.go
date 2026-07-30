@@ -192,7 +192,7 @@ func TestUnclaimOwnershipAndLease(t *testing.T) {
 	// (a) Non-owner cannot release someone else's claim.
 	seedClaimedIssue(t, ctx, store, "unclaim-a", "alice", time.Hour)
 	before := readLeaseState(t, ctx, store, "unclaim-a")
-	if err := store.UnclaimIssue(ctx, "unclaim-a", "mallory", false); !errors.Is(err, storage.ErrNotOwner) {
+	if err := store.UnclaimIssue(ctx, "unclaim-a", "mallory", false, nil); !errors.Is(err, storage.ErrNotOwner) {
 		t.Fatalf("non-owner unclaim err = %v, want ErrNotOwner", err)
 	}
 	stillClaimed := readLeaseState(t, ctx, store, "unclaim-a")
@@ -205,7 +205,7 @@ func TestUnclaimOwnershipAndLease(t *testing.T) {
 
 	// (b) Owner releases: status → open, assignee cleared, lease columns
 	// cleared, row_lock rewritten.
-	if err := store.UnclaimIssue(ctx, "unclaim-a", "alice", false); err != nil {
+	if err := store.UnclaimIssue(ctx, "unclaim-a", "alice", false, nil); err != nil {
 		t.Fatalf("owner unclaim: %v", err)
 	}
 	released := readLeaseState(t, ctx, store, "unclaim-a")
@@ -232,7 +232,7 @@ func TestUnclaimOwnershipAndLease(t *testing.T) {
 
 	// (c) --force lets an admin/reaper release a claim held by someone else.
 	seedClaimedIssue(t, ctx, store, "unclaim-c", "alice", time.Hour)
-	if err := store.UnclaimIssue(ctx, "unclaim-c", "reaper", true); err != nil {
+	if err := store.UnclaimIssue(ctx, "unclaim-c", "reaper", true, nil); err != nil {
 		t.Fatalf("forced unclaim by non-owner: %v", err)
 	}
 	forced := readLeaseState(t, ctx, store, "unclaim-c")

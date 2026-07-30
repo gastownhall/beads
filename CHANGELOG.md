@@ -9,6 +9,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`claim_fence`: a monotonic claim fence on every claimable row**
+  ([#4697](https://github.com/gastownhall/beads/pull/4697)). A `BIGINT NOT NULL
+  DEFAULT 0` column on `issues` (migration 0062) and on `wisps` (ignored
+  migration 0019 — `wisps` is `dolt_ignored`, so fresh clones never execute the
+  synced track and the column has to ship on the ignored one, following the
+  `0013_add_wisp_row_lock` precedent). It advances only on ownership
+  transitions: claim; unclaim/release (including `--force` and the
+  `--if-assignee` CAS form); lease reclaim; an assignee change, through the
+  generic update path *or* an import/upsert that changes the stored owner; and
+  reopen (closed→open) through the reopen verb or the generic update path.
+  Content mutations never move it, and neither does close. One exception on the
+  import side is deliberate: the upsert bump keys on an assignee change alone,
+  so an import that flips a stored closed row back to open with the *same*
+  assignee does not bump, where the reopen verb does — import is convergence
+  toward a peer's snapshot, not an ownership verb performed here, and a routine
+  sync must not retire the `--if-fence` guards live workers hold on this
+  replica. Unlike the `RowVersion` token — random per write and deliberately
+  unreadable — the fence is deterministic and monotonic, so it rides
+  `bd show --json` and the JSONL interchange as `claim_fence` (with
+  `omitempty`, so a never-claimed issue exports byte-identically to before).
+  That readability is the whole point: a caller can snapshot the ownership
+  state it decided on and later prove that state is still current.
+
+  Two decisions here are not the obvious ones and are pinned by tests. The
+  claim compare-and-swap bumps **unconditionally** — a successful claim of an
+  open row *already assigned to the claiming actor* still advances the fence,
+  because two sessions of one user are two ownership holders and the arriving
+  session must be able to fence out whatever the earlier one snapshotted;
+  keying the bump on "did the assignee string change" would leave exactly that
+  case silently shared. (The idempotent same-actor re-claim of an already
+  `in_progress` row is a different path: `in_progress` is not a claimable
+  source status, so it never matches the CAS, writes nothing, and does not
+  bump.) And every statement that bumps the fence rewrites `row_lock` in the
+  same statement. A bare monotonic counter is precisely the write pattern Dolt
+  cell-merges silently — two concurrent N→N+1 bumps produce identical cell
+  values and therefore no conflict — so the paired random `row_lock` rewrite is
+  what forces racing ownership transitions to serialize into the 1213/1205
+  failure the retry loop replays. A source-scanning test
+  (`TestFenceBumpAlwaysPairsRowLock`) stops a later edit from dropping it.
+
+  `bd reclaim --json` reports the post-bump fence for each recovered issue
+  (`claim_fence` on every element of `reclaimed`), so a reaper's log names the
+  generation that fenced the dead worker out.
+
+- **`--if-fence`: the claim fence as a guard on `bd update`, `bd close` and
+  `bd unclaim`** ([#4697](https://github.com/gastownhall/beads/pull/4697)). The
+  fence becomes a guard by joining the surface bd already ships (`--if-assignee`
+  / `--if-status`, and the engine's `ExpectedVersion` row CAS) rather than
+  building a second one beside it: `ExpectedFence *int64` is a new field on
+  `UpdateIssueOptions` and `CloseIssueOptions`, `nil` meaning "no check" and a
+  pointer to `0` being the real "expected never claimed" assertion. There is no
+  parallel guard interface and no new exit code — a stale fence is
+  `storage.ErrFenceMismatch`, a sentinel sitting beside `ErrVersionMismatch` and
+  `ErrStatusMismatch`. Guards stay conjunctive: assignee, status, version and
+  fence are ANDed, every read shares the writing transaction, and a refusal
+  rolls that transaction back so nothing — not even the event row — is written.
+  What the fence adds over `--if-assignee` is that it survives the holder's own
+  content writes and still catches a release-and-re-claim by the *same*
+  assignee, which an assignee guard cannot see.
+
+  Exit codes follow the existing taxonomy rather than the fence's own
+  preferences: `bd update` and `bd close` exit **13** when every failed ID lost
+  on a stale guard and nothing was written, and 1 for anything mixed in (close
+  keeps its partial-success and already-closed exit-0 contracts intact).
+  `bd unclaim` deliberately does not adopt 13 — its shipped `--if-assignee`
+  contract is exit 1 for any failed release, and a fence miss is just another
+  failed release. A guard establishes **freshness, not authority**: on unclaim
+  the fence is an additional conjunct on both release forms and never a
+  substitute for either, so a stranger quoting the correct live fence still gets
+  `ErrNotOwner`, and `--force` — which waives the ownership check, not the
+  guard — never skips a supplied fence. In proxied-server mode `bd update`
+  threads the guard through to the re-read inside the unit of work's
+  transaction; `bd close` and `bd unclaim` have no compare-and-set on their
+  proxied paths at all, so `--if-fence` there is refused loudly rather than
+  silently dropped.
+
+  Library consumers get the guard through the existing `UpdateIssueChecked` /
+  `CloseIssueChecked` calls; out-of-tree `Storage` implementations that ignore
+  the new option field simply do not enforce it and should add support before
+  advertising fence semantics — the same caveat the `--if-assignee` guards
+  recorded. `UnclaimIssue` / `UnclaimIssueIfAssignee` did change signature; see
+  Changed.
+
+- **Opt out of automatic claim leases: `lease.auto` and `bd lease disarm`**
+  ([#4697](https://github.com/gastownhall/beads/pull/4697)). By default every
+  claim stamps a lease and a supervisor's `bd reclaim` recovers the work of
+  dead workers — the right default for a fleet with no other recovery
+  authority, and unchanged here. Deployments where an orchestrator already
+  holds its own liveness evidence can now turn stamping off, so a fleet that
+  does not heartbeat is never one stray `bd reclaim` away from mass-reverting
+  live work. `bd lease disarm` is the safe form of that flip: it sets the new
+  `lease.auto` config key to off and clears the lease rows of the claims
+  already holding one in a single transaction, then re-sweeps a bounded number
+  of times to catch claims whose transactions read `lease.auto` before the flip
+  committed (they touch disjoint rows, so nothing forces them to conflict).
+  Nothing is released — status, assignee and the claim fence (`claim_fence`)
+  are all untouched, because disarming is lease bookkeeping, not an ownership
+  transition. `bd config set lease.auto off` does the flip alone, without the
+  sweep.
+
+  With leases off, claims carry no lease row and are invisible to the reaper,
+  and `bd heartbeat` on such a claim returns the new `storage.ErrUnleased`
+  instead of arming one: heartbeat is strictly a renewal there, since arming a
+  lease as a side effect would silently re-create the very reclaim exposure the
+  disarm removes. A claim that still holds a lease row keeps renewing normally,
+  so disarming is a one-shot sweep rather than a standing rejection. Only an
+  explicitly falsy value (`off`, or anything `strconv.ParseBool` reads as false)
+  disarms; unset, `on`, and a typo all leave the shipped default armed.
+
 - **Replica-aware leases: `bd reclaim` no longer reverts a lease another
   replica granted** (wy-jpd3.7). A lease is only meaningful on the replica that
   granted it — the other machine's liveness view is stale by up to one sync
@@ -85,6 +194,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one.
 
 ### Changed
+
+- **`beads.Storage.UnclaimIssue` / `UnclaimIssueIfAssignee` gained an
+  `expectedFence *int64` parameter, and `beads.BulkIssueStore` gained
+  `DisarmAutoLeases`** ([#4697](https://github.com/gastownhall/beads/pull/4697)).
+  Callers that release without a fence guard pass `nil` (unchanged behavior);
+  any external type that *implements* either interface must update the two
+  unclaim signatures and add `DisarmAutoLeases(ctx) (int64, error)` to compile.
+  Decorators that embed the interface for passthrough are unaffected.
 
 - **`beads.BulkIssueStore.ReclaimExpiredLeases` gained a `types.ReclaimFilter`
   parameter** (wy-jpd3.3), threaded through the domain use-case/repository

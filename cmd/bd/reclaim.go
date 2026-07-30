@@ -63,6 +63,14 @@ or leave it unset. There is no hostname fallback — the hostname names the clie
 process's machine, not the store — so an unnamed deployment keeps the old,
 unguarded behavior instead of stranding its own work.
 
+reclaim only ever sees claims that carry a lease. Turning automatic leases off
+('bd lease disarm', config key lease.auto) stops new claims from arming one and
+sweeps away the rows already there, so on a disarmed store there is normally
+nothing to reap and recovery is the orchestrator's job. That sweep is one-shot,
+not a standing rejection: a JSONL import can restore a live lease that rode the
+interchange, and re-arming lease.auto starts stamping again. reclaim treats any
+lease it then finds exactly as it always has.
+
 Examples:
   bd reclaim                       # default grace window (2× the lease TTL)
   bd reclaim --older-than 10m      # reclaim leases expired >10m ago

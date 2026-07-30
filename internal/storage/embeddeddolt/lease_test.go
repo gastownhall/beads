@@ -205,3 +205,78 @@ func TestHeartbeatRejectsWispEmbedded(t *testing.T) {
 		t.Fatalf("wisp heartbeat err = %v, want ErrNotClaimable", err)
 	}
 }
+
+// TestEmbeddedDisarmAutoLeases mirrors the dolt-server disarm test on the
+// embedded backend, whose transaction plumbing (withConn plus a CLI-level
+// commit) is distinct from the server store's withRetryTx plus in-tx
+// DOLT_COMMIT, so the flip-and-sweep has to be exercised on both.
+func TestEmbeddedDisarmAutoLeases(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+
+	te := newTestEnv(t, "disarm")
+	ctx := t.Context()
+
+	seed := func(id string) {
+		t.Helper()
+		issue := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+		if err := te.store.CreateIssue(ctx, issue, "seeder"); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+
+	seed("ed-disarm")
+	if err := te.store.ClaimIssue(ctx, "ed-disarm", "alice"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+
+	n, err := te.store.DisarmAutoLeases(ctx)
+	if err != nil {
+		t.Fatalf("disarm: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("disarmed %d, want 1", n)
+	}
+	held, err := te.store.GetIssue(ctx, "ed-disarm")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if held.Status != types.StatusInProgress || held.Assignee != "alice" {
+		t.Errorf("disarm released the claim: status=%q assignee=%q", held.Status, held.Assignee)
+	}
+	if held.LeaseExpiresAt != nil {
+		t.Error("disarm left the lease armed")
+	}
+
+	// The flip persisted: a later claim stamps nothing, and a heartbeat on it
+	// is rejected rather than arming one.
+	seed("ed-disarm2")
+	if err := te.store.ClaimIssue(ctx, "ed-disarm2", "bob"); err != nil {
+		t.Fatalf("claim2: %v", err)
+	}
+	got, err := te.store.GetIssue(ctx, "ed-disarm2")
+	if err != nil {
+		t.Fatalf("get2: %v", err)
+	}
+	if got.LeaseExpiresAt != nil {
+		t.Error("post-disarm claim stamped a lease")
+	}
+	if err := te.store.HeartbeatIssue(ctx, "ed-disarm2", "bob"); !errors.Is(err, storage.ErrUnleased) {
+		t.Errorf("heartbeat on unleased claim: got %v, want ErrUnleased", err)
+	}
+
+	// Nothing left for the reaper, and a second disarm is a no-op.
+	reclaimed, err := te.store.ReclaimExpiredLeases(ctx, 0, types.ReclaimFilter{}, "reaper")
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	if len(reclaimed) != 0 {
+		t.Errorf("reclaim reaped %d post-disarm, want 0", len(reclaimed))
+	}
+	again, err := te.store.DisarmAutoLeases(ctx)
+	if err != nil {
+		t.Fatalf("second disarm: %v", err)
+	}
+	if again != 0 {
+		t.Errorf("second disarm cleared %d leases, want 0", again)
+	}
+}

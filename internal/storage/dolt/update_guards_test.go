@@ -166,6 +166,173 @@ func TestUpdateIssueCheckedFieldGuards(t *testing.T) {
 	})
 }
 
+// TestUpdateIssueCheckedFenceGuard exercises UpdateIssueOptions.ExpectedFence:
+// the ownership-generation compare-and-set behind `bd update --if-fence`. It is
+// the guard that survives the holder's own content writes (unlike
+// ExpectedVersion, whose row_lock moves on every write) and still catches a
+// reclaim-and-reissue to the SAME assignee (which --if-assignee cannot see).
+func TestUpdateIssueCheckedFenceGuard(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	get := func(t *testing.T, id string) *types.Issue {
+		t.Helper()
+		iss, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", id, err)
+		}
+		if iss == nil {
+			t.Fatalf("GetIssue(%s) returned nil issue", id)
+		}
+		return iss
+	}
+	sptr := func(v string) *string { return &v }
+	iptr := func(v int64) *int64 { return &v }
+
+	t.Run("matching fence applies", func(t *testing.T) {
+		createPerm(t, ctx, store, "uf-match")
+		if err := store.ClaimIssue(ctx, "uf-match", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		fence := get(t, "uf-match").ClaimFence
+		if err := store.UpdateIssueChecked(ctx, "uf-match",
+			map[string]interface{}{"notes": "still mine"}, "worker",
+			storage.UpdateIssueOptions{ExpectedFence: iptr(fence)}); err != nil {
+			t.Fatalf("guarded update with live fence err = %v, want nil", err)
+		}
+		if got := get(t, "uf-match").Notes; got != "still mine" {
+			t.Fatalf("notes = %q, want %q", got, "still mine")
+		}
+	})
+
+	t.Run("fence 0 is a real never-claimed assertion", func(t *testing.T) {
+		createPerm(t, ctx, store, "uf-zero")
+		if err := store.UpdateIssueChecked(ctx, "uf-zero",
+			map[string]interface{}{"notes": "pristine"}, "tester",
+			storage.UpdateIssueOptions{ExpectedFence: iptr(0)}); err != nil {
+			t.Fatalf("fence-0 guard on a never-claimed row err = %v, want nil", err)
+		}
+		if err := store.ClaimIssue(ctx, "uf-zero", "worker"); err != nil {
+			t.Fatalf("claim: %v", err)
+		}
+		err := store.UpdateIssueChecked(ctx, "uf-zero",
+			map[string]interface{}{"notes": "should-not-apply"}, "tester",
+			storage.UpdateIssueOptions{ExpectedFence: iptr(0)})
+		if !errors.Is(err, storage.ErrFenceMismatch) {
+			t.Fatalf("err = %v, want errors.Is(_, ErrFenceMismatch) once the row has been claimed", err)
+		}
+		if got := get(t, "uf-zero").Notes; got != "pristine" {
+			t.Fatalf("notes = %q after refused update, want unchanged %q", got, "pristine")
+		}
+	})
+
+	t.Run("stale fence refuses atomically", func(t *testing.T) {
+		createPerm(t, ctx, store, "uf-stale")
+		if err := store.ClaimIssue(ctx, "uf-stale", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		stale := get(t, "uf-stale").ClaimFence
+		// Ownership moves on: release + re-claim by the SAME actor. The assignee
+		// is identical afterwards, so only the fence can catch this.
+		if err := store.UnclaimIssue(ctx, "uf-stale", "worker", false, nil); err != nil {
+			t.Fatalf("unclaim: %v", err)
+		}
+		if err := store.ClaimIssue(ctx, "uf-stale", "worker"); err != nil {
+			t.Fatalf("re-claim: %v", err)
+		}
+		err := store.UpdateIssueChecked(ctx, "uf-stale",
+			map[string]interface{}{"notes": "should-not-apply", "priority": 1}, "worker",
+			storage.UpdateIssueOptions{ExpectedAssignee: sptr("worker"), ExpectedFence: iptr(stale)})
+		if !errors.Is(err, storage.ErrFenceMismatch) {
+			t.Fatalf("err = %v, want errors.Is(_, ErrFenceMismatch)", err)
+		}
+		iss := get(t, "uf-stale")
+		if iss.Notes == "should-not-apply" || iss.Priority == 1 {
+			t.Fatalf("refused update partially applied (notes=%q priority=%d); the tx must roll back", iss.Notes, iss.Priority)
+		}
+	})
+
+	t.Run("content writes do not invalidate the fence", func(t *testing.T) {
+		createPerm(t, ctx, store, "uf-content")
+		if err := store.ClaimIssue(ctx, "uf-content", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		fence := get(t, "uf-content").ClaimFence
+		version := get(t, "uf-content").RowVersion
+		if err := store.UpdateIssue(ctx, "uf-content",
+			map[string]interface{}{"title": "edited"}, "worker"); err != nil {
+			t.Fatalf("content update: %v", err)
+		}
+		if got := get(t, "uf-content").RowVersion; got == version {
+			t.Fatalf("RowVersion unchanged after a content write; the premise of this test is wrong")
+		}
+		if err := store.UpdateIssueChecked(ctx, "uf-content",
+			map[string]interface{}{"notes": "second write"}, "worker",
+			storage.UpdateIssueOptions{ExpectedFence: iptr(fence)}); err != nil {
+			t.Fatalf("fence guard err = %v after a content-only write, want nil (fence tracks ownership, not writes)", err)
+		}
+	})
+
+	t.Run("fence composes with assignee, status and version guards", func(t *testing.T) {
+		createPerm(t, ctx, store, "uf-compose")
+		if err := store.ClaimIssue(ctx, "uf-compose", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		iss := get(t, "uf-compose")
+		// Every guard holds: the update applies.
+		if err := store.UpdateIssueChecked(ctx, "uf-compose",
+			map[string]interface{}{"notes": "all-held"}, "worker",
+			storage.UpdateIssueOptions{
+				ExpectedVersion:  iptr(iss.RowVersion),
+				ExpectedAssignee: sptr("worker"),
+				ExpectedStatus:   sptr(string(types.StatusInProgress)),
+				ExpectedFence:    iptr(iss.ClaimFence),
+			}); err != nil {
+			t.Fatalf("all four guards held but err = %v, want nil", err)
+		}
+		if got := get(t, "uf-compose").Notes; got != "all-held" {
+			t.Fatalf("notes = %q, want %q", got, "all-held")
+		}
+		// Conjunction: assignee and status still hold, only the fence is stale.
+		cur := get(t, "uf-compose")
+		err := store.UpdateIssueChecked(ctx, "uf-compose",
+			map[string]interface{}{"notes": "should-not-apply"}, "worker",
+			storage.UpdateIssueOptions{
+				ExpectedAssignee: sptr("worker"),
+				ExpectedStatus:   sptr(string(types.StatusInProgress)),
+				ExpectedFence:    iptr(cur.ClaimFence + 1),
+			})
+		if !errors.Is(err, storage.ErrFenceMismatch) {
+			t.Fatalf("err = %v, want errors.Is(_, ErrFenceMismatch) when only the fence is stale", err)
+		}
+		if got := get(t, "uf-compose").Notes; got != "all-held" {
+			t.Fatalf("notes = %q after refused update, want unchanged", got)
+		}
+	})
+
+	t.Run("wisp fence guard routes to wisps table", func(t *testing.T) {
+		createWisp(t, ctx, store, "uf-wisp")
+		// A wisp starts unclaimed at fence 0; reading it at all requires the
+		// wisps route (an issues-table read for this id would miss and refuse).
+		if err := store.UpdateIssueChecked(ctx, "uf-wisp",
+			map[string]interface{}{"title": "wisp-fenced"}, "tester",
+			storage.UpdateIssueOptions{ExpectedFence: iptr(0)}); err != nil {
+			t.Fatalf("guarded wisp update err = %v, want nil", err)
+		}
+		err := store.UpdateIssueChecked(ctx, "uf-wisp",
+			map[string]interface{}{"title": "should-not-apply"}, "tester",
+			storage.UpdateIssueOptions{ExpectedFence: iptr(9)})
+		if !errors.Is(err, storage.ErrFenceMismatch) {
+			t.Fatalf("wisp err = %v, want errors.Is(_, ErrFenceMismatch)", err)
+		}
+		if got := get(t, "uf-wisp").Title; got != "wisp-fenced" {
+			t.Fatalf("wisp title = %q after refused update, want unchanged", got)
+		}
+	})
+}
+
 // TestGuardedReassignConcurrent races two guarded reassigns of the same row —
 // both conditioned on the same expected assignee — and requires exactly one
 // winner: the loser must observe the winner's write (via the shared-tx guard

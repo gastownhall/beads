@@ -63,4 +63,18 @@ func TestUnclaimCommand_Flags(t *testing.T) {
 	if ifAssigneeFlag.DefValue != "" {
 		t.Errorf("expected if-assignee default value '', got %q", ifAssigneeFlag.DefValue)
 	}
+
+	// The --if-fence flag pins the release to one ownership generation. Its
+	// zero default is inert only because presence is detected via Changed():
+	// `--if-fence 0` is a real "expected never claimed" assertion.
+	ifFenceFlag := unclaimCmd.Flags().Lookup("if-fence")
+	if ifFenceFlag == nil {
+		t.Fatal("if-fence flag should be defined")
+	}
+	if ifFenceFlag.DefValue != "0" {
+		t.Errorf("expected if-fence default value '0', got %q", ifFenceFlag.DefValue)
+	}
+	if ifFenceFlag.Value.Type() != "int64" {
+		t.Errorf("expected if-fence to be int64, got %q", ifFenceFlag.Value.Type())
+	}
 }

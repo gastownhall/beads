@@ -32,9 +32,10 @@ type updateInput struct {
 	clearDeferStatus bool
 	// bd-wsqvw conditional-update guards; non-nil only when the flag was
 	// explicitly passed (a pointer to "" is the real "expected unassigned"
-	// guard).
+	// guard, and a pointer to fence 0 the real "expected never claimed" one).
 	ifAssignee *string
 	ifStatus   *string
+	ifFence    *int64
 	// bd-98s5c: --force bypasses the live-claim reassign fence (mutually
 	// exclusive with --if-assignee at the flag-group level).
 	force bool
@@ -250,9 +251,9 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 
 	// bd-wsqvw conditional-update guards, mirroring the non-proxied path's
 	// updateGuardsFromFlags rules: Changed()-detected presence (so
-	// `--if-assignee ""` guards on unassigned), --if-status validated against
-	// the live status set, mutually exclusive with --claim, and requiring a
-	// field update to ride on.
+	// `--if-assignee ""` guards on unassigned and `--if-fence 0` on
+	// never-claimed), --if-status validated against the live status set,
+	// mutually exclusive with --claim, and requiring a field update to ride on.
 	if cmd.Flags().Changed("if-assignee") {
 		v, _ := cmd.Flags().GetString("if-assignee")
 		in.ifAssignee = &v
@@ -264,12 +265,17 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		}
 		in.ifStatus = &v
 	}
-	if in.ifAssignee != nil || in.ifStatus != nil {
+	ifFence, fenceErr := ifFenceGuardFromFlags(cmd)
+	if fenceErr != nil {
+		return nil, fenceErr
+	}
+	in.ifFence = ifFence
+	if in.ifAssignee != nil || in.ifStatus != nil || in.ifFence != nil {
 		if in.claim {
-			return nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)")
+			return nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status/--if-fence with --claim (--claim is already an atomic compare-and-set, and it bumps the claim fence a pre-claim --if-fence would name)")
 		}
 		if len(in.fields) == 0 && !in.hasAppendNotes && len(in.mergeMetadataIn) == 0 && len(in.setMetadata) == 0 && len(in.unsetMetadata) == 0 {
-			return nil, HandleErrorRespectJSON("--if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
+			return nil, HandleErrorRespectJSON("--if-assignee/--if-status/--if-fence require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
 		}
 	}
 	return in, nil

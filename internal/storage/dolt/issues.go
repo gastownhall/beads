@@ -258,7 +258,7 @@ func (s *DoltStore) UpdateIssueChecked(ctx context.Context, id string, updates m
 			if err := checkExpectedVersionInTx(ctx, tx, id, opts.ExpectedVersion); err != nil {
 				return err
 			}
-			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
+			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus, opts.ExpectedFence); err != nil {
 				return err
 			}
 			return s.demoteToWispInTx(ctx, tx, id, updates, actor)
@@ -269,7 +269,7 @@ func (s *DoltStore) UpdateIssueChecked(ctx context.Context, id string, updates m
 	// loses Dolt's optimistic commit-time merge (MySQL 1213/1205, guaranteed
 	// server-side rollback) is retried rather than surfaced as a hard failure.
 	// A precondition mismatch (storage.ErrVersionMismatch /
-	// ErrAssigneeMismatch / ErrStatusMismatch) is NOT a serialization error, so
+	// ErrAssigneeMismatch / ErrStatusMismatch / ErrFenceMismatch) is NOT a serialization error, so
 	// withRetryTx surfaces it permanently and the transaction rolls back — no
 	// update and no event are written (the atomic-refuse property). A
 	// concurrent write that commits DURING this tx collides on the row_lock cell
@@ -280,7 +280,7 @@ func (s *DoltStore) UpdateIssueChecked(ctx context.Context, id string, updates m
 			if err := checkExpectedVersionInTx(ctx, tx, id, opts.ExpectedVersion); err != nil {
 				return err
 			}
-			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
+			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus, opts.ExpectedFence); err != nil {
 				return err
 			}
 			if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
@@ -507,21 +507,67 @@ func (s *DoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Dur
 	return reclaimed, nil
 }
 
+// DisarmAutoLeases sets lease.auto=off and deletes the lease rows of the
+// claims already holding one, without releasing them. The flip and the first
+// sweep share one transaction, and bounded follow-up sweeps close the window
+// where a claim in flight across the flip arms a lease the first sweep never
+// saw — issueops.DisarmAutoLeasesWith owns that sequencing; this is only the
+// one-transaction closure it drives. Only the config flip is Dolt-versioned:
+// lease rows live in the ephemeral (dolt_ignored) leases table, so clearing
+// them mints no commit.
+func (s *DoltStore) DisarmAutoLeases(ctx context.Context) (int64, error) {
+	return issueops.DisarmAutoLeasesWith(func(flip bool) (int64, error) {
+		var swept int64
+		err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
+			swept = 0 // withRetryTx replays this closure; don't accumulate
+			if flip {
+				if err := issueops.DisarmLeaseConfigInTx(ctx, tx); err != nil {
+					return err
+				}
+			}
+			n, err := issueops.ClearArmedLeasesInTx(ctx, tx)
+			if err != nil {
+				return err
+			}
+			swept = n
+			if !flip {
+				return nil // lease-row deletes are ephemeral: nothing to version
+			}
+			// config is the one table here that is NOT dolt_ignore'd, so the
+			// best-effort ignore idiom the issue-table stagers use does not
+			// apply: a silently skipped failed ADD leaves config dirty and the
+			// flip uncommitted (see commitWorkingSet in store.go).
+			if _, err := tx.ExecContext(ctx, "CALL DOLT_ADD(?)", "config"); err != nil {
+				return fmt.Errorf("failed to stage config before commit: %w", err)
+			}
+			commitMsg := fmt.Sprintf("bd: disarm auto-leases (%d lease(s) cleared)", swept)
+			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
+				return fmt.Errorf("dolt commit: %w", err)
+			}
+			return nil
+		})
+		return swept, err
+	})
+}
+
 // UnclaimIssue atomically unclaims an issue by clearing the assignee, resetting
 // status to "open", deleting its lease row and rewriting row_lock. Records
 // an "unclaimed" event. Only the current assignee may release its own claim
-// unless force is set (admin/reaper override). Delegates SQL work to
+// unless force is set (admin/reaper override). A non-nil expectedFence pins the
+// release to that ownership generation (storage.ErrFenceMismatch otherwise) —
+// an additional conjunct that force does not waive. Delegates SQL work to
 // issueops.UnclaimIssueInTx; handles Dolt-specific concerns (DOLT_ADD/COMMIT).
 //
 // Wrapped in withRetryTx like the other claim-family writes so a concurrent
 // writer that loses Dolt's optimistic commit-time merge (1213/1205) is retried
 // rather than surfaced as a hard failure.
-func (s *DoltStore) UnclaimIssue(ctx context.Context, id string, actor string, force bool) error {
+func (s *DoltStore) UnclaimIssue(ctx context.Context, id string, actor string, force bool, expectedFence *int64) error {
 	// verify-by-re-read (bd-zccb9): a phantom unclaim leaves the caller
 	// believing the issue is released while it still holds the claim.
 	return s.verifiedClaimWrite(ctx, id, unclaimed(), func() error {
 		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-			if err := issueops.UnclaimIssueInTx(ctx, tx, id, actor, force); err != nil {
+			if err := issueops.UnclaimIssueInTx(ctx, tx, id, actor, force, expectedFence); err != nil {
 				return err
 			}
 
@@ -542,15 +588,17 @@ func (s *DoltStore) UnclaimIssue(ctx context.Context, id string, actor string, f
 // UnclaimIssueIfAssignee releases a claim only while the issue is still assigned
 // to expectedAssignee (compare-and-swap, the inverse of ClaimIssue). Returns
 // storage.ErrAssigneeMismatch, leaving the issue untouched, when the current
-// assignee differs. Delegates SQL work to issueops.UnclaimIssueIfAssigneeInTx;
-// handles Dolt-specific concerns (DOLT_ADD/COMMIT). Wrapped in withRetryTx like
-// UnclaimIssue so a concurrent writer that loses Dolt's optimistic commit-time
-// merge is retried rather than surfaced as a hard failure.
-func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error {
+// assignee differs, and storage.ErrFenceMismatch when a non-nil expectedFence
+// names a superseded ownership generation. Delegates SQL work to
+// issueops.UnclaimIssueIfAssigneeInTx; handles Dolt-specific concerns
+// (DOLT_ADD/COMMIT). Wrapped in withRetryTx like UnclaimIssue so a concurrent
+// writer that loses Dolt's optimistic commit-time merge is retried rather than
+// surfaced as a hard failure.
+func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string, expectedFence *int64) error {
 	// verify-by-re-read (bd-zccb9), same reasoning as UnclaimIssue.
 	return s.verifiedClaimWrite(ctx, id, unclaimed(), func() error {
 		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-			if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, tx, id, actor, expectedAssignee); err != nil {
+			if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, tx, id, actor, expectedAssignee, expectedFence); err != nil {
 				return err
 			}
 
@@ -630,9 +678,10 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 
 // CloseIssueChecked closes an issue but refuses with storage.ErrCloseBlocked
 // when it has a live direct blocker unless opts.Force is set, and — when
-// opts.ExpectedVersion is non-nil — with storage.ErrVersionMismatch when the
-// row's current RowVersion no longer matches (an orthogonal CAS that Force does
-// not bypass). Both checks and the close share one transaction, so they are
+// opts.ExpectedVersion / opts.ExpectedFence are non-nil — with
+// storage.ErrVersionMismatch / storage.ErrFenceMismatch when the row's current
+// RowVersion / ClaimFence no longer matches (orthogonal CAS guards that Force
+// does not bypass). All checks and the close share one transaction, so they are
 // atomic (no TOCTOU). Mirrors CloseIssue's Dolt-specific concerns (wisp routing,
 // DOLT_ADD/COMMIT).
 func (s *DoltStore) CloseIssueChecked(ctx context.Context, id string, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
@@ -650,7 +699,7 @@ func (s *DoltStore) CloseIssueChecked(ctx context.Context, id string, actor stri
 	// event are written (the atomic-refuse property).
 	var result storage.CloseIssueResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		res, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force, opts.ExpectedVersion)
+		res, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force, opts.ExpectedVersion, opts.ExpectedFence)
 		if err != nil {
 			return err
 		}

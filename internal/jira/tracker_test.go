@@ -754,9 +754,11 @@ func (s *configStore) MergeMetadata(_ context.Context, _, _ string, _ json.RawMe
 func (s *configStore) SlotGet(_ context.Context, _, _ string) (string, error) {
 	return "", nil
 }
-func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error                { return nil }
-func (s *configStore) UnclaimIssue(_ context.Context, _ string, _ string, _ bool) error { return nil }
-func (s *configStore) UnclaimIssueIfAssignee(_ context.Context, _ string, _ string, _ string) error {
+func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error { return nil }
+func (s *configStore) UnclaimIssue(_ context.Context, _ string, _ string, _ bool, _ *int64) error {
+	return nil
+}
+func (s *configStore) UnclaimIssueIfAssignee(_ context.Context, _ string, _ string, _ string, _ *int64) error {
 	return nil
 }
 

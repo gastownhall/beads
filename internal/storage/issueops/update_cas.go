@@ -9,11 +9,13 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-// CheckExpectedFieldsInTx reads the current assignee and status for id and
-// returns ErrAssigneeMismatch/ErrStatusMismatch (wrapped with actual vs
-// expected) when a non-nil guard differs — the semantic-field compare-and-swap
-// behind `bd update --if-assignee/--if-status` (bd-wsqvw). A non-nil pointer to
-// "" is a real guard meaning "expected unassigned"; nil disables that check.
+// CheckExpectedFieldsInTx reads the current assignee, status and ownership
+// fence for id and returns ErrAssigneeMismatch/ErrStatusMismatch/
+// ErrFenceMismatch (wrapped with actual vs expected) when a non-nil guard
+// differs — the semantic-field compare-and-swap behind `bd update
+// --if-assignee/--if-status/--if-fence` (bd-wsqvw). A non-nil pointer to "" is
+// a real guard meaning "expected unassigned", and a non-nil pointer to fence 0
+// is a real guard meaning "expected never claimed"; nil disables that check.
 // Routes to the issues or wisps table. Returns ErrNotFound when the row is
 // absent.
 //
@@ -25,8 +27,8 @@ import (
 // Together they close the read-then-write window.
 //
 //nolint:gosec // G201: table name comes from WispTableRouting (hardcoded constants)
-func CheckExpectedFieldsInTx(ctx context.Context, tx DBTX, id string, expectedAssignee, expectedStatus *string) error {
-	if expectedAssignee == nil && expectedStatus == nil {
+func CheckExpectedFieldsInTx(ctx context.Context, tx DBTX, id string, expectedAssignee, expectedStatus *string, expectedFence *int64) error {
+	if expectedAssignee == nil && expectedStatus == nil && expectedFence == nil {
 		return nil
 	}
 	isWisp := IsActiveWispInTx(ctx, tx, id)
@@ -34,9 +36,10 @@ func CheckExpectedFieldsInTx(ctx context.Context, tx DBTX, id string, expectedAs
 
 	var assignee sql.NullString
 	var status string
+	var fence int64
 	err := tx.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT assignee, status FROM %s WHERE id = ?", issueTable), id,
-	).Scan(&assignee, &status)
+		fmt.Sprintf("SELECT assignee, status, claim_fence FROM %s WHERE id = ?", issueTable), id,
+	).Scan(&assignee, &status, &fence)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 	}
@@ -48,6 +51,9 @@ func CheckExpectedFieldsInTx(ctx context.Context, tx DBTX, id string, expectedAs
 	}
 	if expectedStatus != nil && status != *expectedStatus {
 		return fmt.Errorf("%w: %s has status %q, expected %q", storage.ErrStatusMismatch, id, status, *expectedStatus)
+	}
+	if expectedFence != nil && fence != *expectedFence {
+		return fmt.Errorf("%w: %s has fence %d, expected %d", storage.ErrFenceMismatch, id, fence, *expectedFence)
 	}
 	return nil
 }

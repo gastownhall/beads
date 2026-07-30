@@ -60,6 +60,11 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// schema delta: create the ephemeral leases table, drop the issues/
 		// wisps lease columns 0054 added. row_lock stays (see the migration).
 		return cliMigration0055MoveLeasesToTable
+	case "0062_add_claim_fence.up.sql":
+		// Direct DDL for the same reason as 0054/0055. issues only — the
+		// wisps column ships on the ignored track (ignored/0019), which the
+		// CLI bundle does not carry.
+		return cliMigration0062AddClaimFence
 	default:
 		return sqlText
 	}
@@ -100,6 +105,8 @@ ALTER TABLE issues DROP COLUMN lease_expires_at;
 ALTER TABLE issues DROP COLUMN heartbeat_at;
 ALTER TABLE wisps DROP COLUMN lease_expires_at;
 ALTER TABLE wisps DROP COLUMN heartbeat_at;`
+
+const cliMigration0062AddClaimFence = `ALTER TABLE issues ADD COLUMN claim_fence BIGINT NOT NULL DEFAULT 0;`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');

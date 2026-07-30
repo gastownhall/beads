@@ -640,3 +640,286 @@ func TestCloseIssueCheckedVersionCAS(t *testing.T) {
 		}
 	})
 }
+
+// TestCloseIssueCheckedFenceCAS exercises CloseIssueOptions.ExpectedFence — the
+// ownership-generation guard behind `bd close --if-fence`. It closes the P2
+// "zombie completion" window: a worker whose lease was reclaimed and re-issued
+// must not be able to complete the bead with the snapshot it took before it was
+// evicted, even when the row came back to an assignee with the same name. The
+// guard runs before the is_blocked guard and Force bypasses neither, and — since
+// it is evaluated against the row's CURRENT fence — an already-closed row keeps
+// its idempotent Unchanged=true result for a caller quoting that same fence.
+func TestCloseIssueCheckedFenceCAS(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	getIssue := func(t *testing.T, id string) *types.Issue {
+		t.Helper()
+		iss, err := store.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", id, err)
+		}
+		if iss == nil {
+			t.Fatalf("GetIssue(%s) returned nil issue", id)
+		}
+		return iss
+	}
+	countClosed := func(t *testing.T, id string) int {
+		t.Helper()
+		events, err := store.GetEvents(ctx, id, 0)
+		if err != nil {
+			t.Fatalf("GetEvents(%s): %v", id, err)
+		}
+		n := 0
+		for _, e := range events {
+			if e.EventType == types.EventClosed {
+				n++
+			}
+		}
+		return n
+	}
+	ptr := func(v int64) *int64 { return &v }
+
+	t.Run("fresh fence closes", func(t *testing.T) {
+		createPerm(t, ctx, store, "fcas-fresh")
+		if err := store.ClaimIssue(ctx, "fcas-fresh", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		fence := getIssue(t, "fcas-fresh").ClaimFence
+		res, err := store.CloseIssueChecked(ctx, "fcas-fresh", "worker",
+			storage.CloseIssueOptions{Reason: "done", ExpectedFence: ptr(fence)})
+		if err != nil {
+			t.Fatalf("close with live fence err = %v, want nil", err)
+		}
+		if res.Unchanged {
+			t.Fatalf("res.Unchanged = true, want false (a real close)")
+		}
+		if got := getIssue(t, "fcas-fresh").Status; got != types.StatusClosed {
+			t.Fatalf("status = %q, want closed", got)
+		}
+	})
+
+	t.Run("stale fence refuses atomically", func(t *testing.T) {
+		createPerm(t, ctx, store, "fcas-zombie")
+		if err := store.ClaimIssue(ctx, "fcas-zombie", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		zombie := getIssue(t, "fcas-zombie").ClaimFence
+		// The claim is released and re-taken by the same-named actor: the
+		// zombie's assignee snapshot still matches, only the fence moved.
+		if err := store.UnclaimIssue(ctx, "fcas-zombie", "worker", false, nil); err != nil {
+			t.Fatalf("unclaim: %v", err)
+		}
+		if err := store.ClaimIssue(ctx, "fcas-zombie", "worker"); err != nil {
+			t.Fatalf("re-claim: %v", err)
+		}
+		res, err := store.CloseIssueChecked(ctx, "fcas-zombie", "worker",
+			storage.CloseIssueOptions{Reason: "stale completion", ExpectedFence: ptr(zombie)})
+		if !errors.Is(err, storage.ErrFenceMismatch) {
+			t.Fatalf("err = %v, want errors.Is(_, ErrFenceMismatch)", err)
+		}
+		if res.Unchanged {
+			t.Fatalf("res.Unchanged = true on mismatch, want false")
+		}
+		if got := getIssue(t, "fcas-zombie").Status; got == types.StatusClosed {
+			t.Fatalf("zombie close landed; the fence CAS did not abort the tx")
+		}
+		if n := countClosed(t, "fcas-zombie"); n != 0 {
+			t.Fatalf("closed event count = %d, want 0 (tx must have rolled back)", n)
+		}
+	})
+
+	t.Run("Force does not bypass the fence check", func(t *testing.T) {
+		createPerm(t, ctx, store, "fcas-force")
+		if err := store.ClaimIssue(ctx, "fcas-force", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		fence := getIssue(t, "fcas-force").ClaimFence
+		res, err := store.CloseIssueChecked(ctx, "fcas-force", "worker",
+			storage.CloseIssueOptions{Reason: "done", Force: true, ExpectedFence: ptr(fence + 1)})
+		if !errors.Is(err, storage.ErrFenceMismatch) {
+			t.Fatalf("err = %v, want errors.Is(_, ErrFenceMismatch) even with Force", err)
+		}
+		if res.Unchanged {
+			t.Fatalf("res.Unchanged = true on mismatch+Force, want false")
+		}
+		if got := getIssue(t, "fcas-force").Status; got == types.StatusClosed {
+			t.Fatalf("closed under Force despite a stale fence; the guard is not orthogonal to Force")
+		}
+	})
+
+	t.Run("already closed re-close with the same fence is idempotent", func(t *testing.T) {
+		createPerm(t, ctx, store, "fcas-idem")
+		if err := store.ClaimIssue(ctx, "fcas-idem", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		fence := getIssue(t, "fcas-idem").ClaimFence
+		if _, err := store.CloseIssueChecked(ctx, "fcas-idem", "worker",
+			storage.CloseIssueOptions{Reason: "done", ExpectedFence: ptr(fence)}); err != nil {
+			t.Fatalf("initial close err = %v, want nil", err)
+		}
+		// Close does not bump the fence, so the caller's snapshot is still
+		// current and the retry must reach the idempotent no-op rather than a
+		// spurious mismatch.
+		if got := getIssue(t, "fcas-idem").ClaimFence; got != fence {
+			t.Fatalf("claim_fence = %d after close, want %d (close is not an ownership transition)", got, fence)
+		}
+		res, err := store.CloseIssueChecked(ctx, "fcas-idem", "worker",
+			storage.CloseIssueOptions{Reason: "again", ExpectedFence: ptr(fence)})
+		if err != nil {
+			t.Fatalf("re-close with the same fence err = %v, want nil (guard passes, idempotent)", err)
+		}
+		if !res.Unchanged {
+			t.Fatalf("res.Unchanged = false, want true (already closed)")
+		}
+		if n := countClosed(t, "fcas-idem"); n != 1 {
+			t.Fatalf("closed event count = %d, want 1 (no second close)", n)
+		}
+	})
+
+	t.Run("already closed re-close with a stale fence still refuses", func(t *testing.T) {
+		createPerm(t, ctx, store, "fcas-idem-stale")
+		if err := store.ClaimIssue(ctx, "fcas-idem-stale", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		fence := getIssue(t, "fcas-idem-stale").ClaimFence
+		if _, err := store.CloseIssueChecked(ctx, "fcas-idem-stale", "worker",
+			storage.CloseIssueOptions{Reason: "done"}); err != nil {
+			t.Fatalf("initial close err = %v, want nil", err)
+		}
+		// The guard is checked against the row's current state, so idempotency
+		// is not a licence to skip it: a superseded snapshot is still refused.
+		res, err := store.CloseIssueChecked(ctx, "fcas-idem-stale", "worker",
+			storage.CloseIssueOptions{Reason: "again", ExpectedFence: ptr(fence + 1)})
+		if !errors.Is(err, storage.ErrFenceMismatch) {
+			t.Fatalf("err = %v, want errors.Is(_, ErrFenceMismatch) on an already-closed row", err)
+		}
+		if res.Unchanged {
+			t.Fatalf("res.Unchanged = true on mismatch, want false")
+		}
+		if n := countClosed(t, "fcas-idem-stale"); n != 1 {
+			t.Fatalf("closed event count = %d, want 1", n)
+		}
+	})
+
+	t.Run("nil ExpectedFence skips the check", func(t *testing.T) {
+		createPerm(t, ctx, store, "fcas-nil")
+		if err := store.ClaimIssue(ctx, "fcas-nil", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		res, err := store.CloseIssueChecked(ctx, "fcas-nil", "worker",
+			storage.CloseIssueOptions{Reason: "done", ExpectedFence: nil})
+		if err != nil {
+			t.Fatalf("nil ExpectedFence close err = %v, want nil (back-compat)", err)
+		}
+		if res.Unchanged {
+			t.Fatalf("res.Unchanged = true, want false (a real close)")
+		}
+	})
+
+	// closeWispChecked runs the same guard on the bare-tx wisp path: a stale
+	// fence must leave the wisp untouched via the deferred Rollback.
+	t.Run("wisp fence guard routes to wisps table", func(t *testing.T) {
+		createWisp(t, ctx, store, "fcas-wisp")
+		res, err := store.CloseIssueChecked(ctx, "fcas-wisp", "tester",
+			storage.CloseIssueOptions{Reason: "done", ExpectedFence: ptr(9)})
+		if !errors.Is(err, storage.ErrFenceMismatch) {
+			t.Fatalf("wisp err = %v, want errors.Is(_, ErrFenceMismatch)", err)
+		}
+		if res.Unchanged {
+			t.Fatalf("res.Unchanged = true on wisp mismatch, want false")
+		}
+		if got := getIssue(t, "fcas-wisp").Status; got == types.StatusClosed {
+			t.Fatalf("wisp closed after a refused guard; the wisp tx did not roll back")
+		}
+		// Fence 0 is the wisp's real, never-claimed generation.
+		if _, err := store.CloseIssueChecked(ctx, "fcas-wisp", "tester",
+			storage.CloseIssueOptions{Reason: "done", ExpectedFence: ptr(0)}); err != nil {
+			t.Fatalf("wisp close with fence 0 err = %v, want nil", err)
+		}
+		if got := getIssue(t, "fcas-wisp").Status; got != types.StatusClosed {
+			t.Fatalf("wisp status = %q, want closed", got)
+		}
+	})
+
+	// ExpectedVersion and ExpectedFence are independent preconditions on the
+	// same close, and CloseIssueCheckedInTx evaluates them in that order. The
+	// conjunction is the interesting case: either one alone failing must refuse
+	// the whole close, and only both holding may let it through. Without this,
+	// a fold that dropped one of the two checks would still pass every
+	// single-guard test above.
+	t.Run("version and fence conjoin", func(t *testing.T) {
+		rowVersion := func(t *testing.T, id string) int64 {
+			t.Helper()
+			return getIssue(t, id).RowVersion
+		}
+
+		// Stale version, live fence: the version check runs first and wins.
+		createPerm(t, ctx, store, "fcas-both-v")
+		if err := store.ClaimIssue(ctx, "fcas-both-v", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		res, err := store.CloseIssueChecked(ctx, "fcas-both-v", "worker", storage.CloseIssueOptions{
+			Reason:          "done",
+			ExpectedVersion: ptr(rowVersion(t, "fcas-both-v") + 1),
+			ExpectedFence:   ptr(getIssue(t, "fcas-both-v").ClaimFence),
+		})
+		if !errors.Is(err, storage.ErrVersionMismatch) {
+			t.Fatalf("stale version + live fence: err = %v, want errors.Is(_, ErrVersionMismatch)", err)
+		}
+		if res.Unchanged {
+			t.Fatalf("res.Unchanged = true on mismatch, want false")
+		}
+		if got := getIssue(t, "fcas-both-v").Status; got == types.StatusClosed {
+			t.Fatalf("closed despite a stale version conjunct")
+		}
+		if n := countClosed(t, "fcas-both-v"); n != 0 {
+			t.Fatalf("closed event count = %d, want 0 (tx must have rolled back)", n)
+		}
+
+		// Live version, stale fence: the fence conjunct refuses on its own.
+		createPerm(t, ctx, store, "fcas-both-f")
+		if err := store.ClaimIssue(ctx, "fcas-both-f", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		res, err = store.CloseIssueChecked(ctx, "fcas-both-f", "worker", storage.CloseIssueOptions{
+			Reason:          "done",
+			ExpectedVersion: ptr(rowVersion(t, "fcas-both-f")),
+			ExpectedFence:   ptr(getIssue(t, "fcas-both-f").ClaimFence + 1),
+		})
+		if !errors.Is(err, storage.ErrFenceMismatch) {
+			t.Fatalf("live version + stale fence: err = %v, want errors.Is(_, ErrFenceMismatch)", err)
+		}
+		if res.Unchanged {
+			t.Fatalf("res.Unchanged = true on mismatch, want false")
+		}
+		if got := getIssue(t, "fcas-both-f").Status; got == types.StatusClosed {
+			t.Fatalf("closed despite a stale fence conjunct")
+		}
+		if n := countClosed(t, "fcas-both-f"); n != 0 {
+			t.Fatalf("closed event count = %d, want 0 (tx must have rolled back)", n)
+		}
+
+		// Both live: the close lands.
+		createPerm(t, ctx, store, "fcas-both-ok")
+		if err := store.ClaimIssue(ctx, "fcas-both-ok", "worker"); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		res, err = store.CloseIssueChecked(ctx, "fcas-both-ok", "worker", storage.CloseIssueOptions{
+			Reason:          "done",
+			ExpectedVersion: ptr(rowVersion(t, "fcas-both-ok")),
+			ExpectedFence:   ptr(getIssue(t, "fcas-both-ok").ClaimFence),
+		})
+		if err != nil {
+			t.Fatalf("both guards live: err = %v, want nil", err)
+		}
+		if res.Unchanged {
+			t.Fatalf("res.Unchanged = true, want false (a real close)")
+		}
+		if got := getIssue(t, "fcas-both-ok").Status; got != types.StatusClosed {
+			t.Fatalf("status = %q, want closed", got)
+		}
+	})
+}

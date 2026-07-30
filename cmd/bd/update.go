@@ -35,9 +35,23 @@ fail, the remaining issues are still updated, every failed ID is reported on
 stderr, and the command exits nonzero.
 
 Exit codes: 1 for general failures; 13 when every failure is a stale
---if-assignee/--if-status guard (the precondition no longer held, nothing was
-written — another actor won the race, so retrying the same guard is
-pointless).`,
+--if-assignee/--if-status/--if-fence guard (the precondition no longer held,
+nothing was written — another actor won the race, so retrying the same guard is
+pointless).
+
+--if-fence guards on the claim fence: a monotonic ownership token (claim_fence
+in bd show --json) that advances on ownership transitions — claim, release,
+reclaim, reassign (including an import that changes the owner), reopen — and on
+no content write, so a holder's own edits never invalidate it.
+
+--if-fence does NOT sanction taking over another actor's live claim. A plain -a
+that would overwrite an in_progress claim held by someone else is refused
+(exit 1) whether or not you pass --if-fence. Naming the holder with
+--if-assignee is what makes that transfer explicit and lets it through; --force
+overrides the refusal outright, and is mutually exclusive with both guards.
+That refusal is the live-claim reassign fence — a policy check, a different
+thing from this flag, which is only a compare-and-set on the ownership
+generation you observed.`,
 	Args:          cobra.MinimumNArgs(0),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -333,7 +347,7 @@ pointless).`,
 		// status set as --status, mutually exclusive with --claim (which is
 		// its own compare-and-set), and only meaningful with a field update
 		// to ride on.
-		ifAssignee, ifStatus, err := updateGuardsFromFlags(cmd, claimFlag, updates)
+		ifAssignee, ifStatus, ifFence, err := updateGuardsFromFlags(cmd, claimFlag, updates)
 		if err != nil {
 			return err
 		}
@@ -462,9 +476,9 @@ pointless).`,
 				// mismatch error and MUST surface as a non-zero exit — never
 				// collapse it to success (finding #10).
 				var updateErr error
-				if ifAssignee != nil || ifStatus != nil {
+				if ifAssignee != nil || ifStatus != nil || ifFence != nil {
 					updateErr = issueStore.UpdateIssueChecked(ctx, result.ResolvedID, regularUpdates, actor,
-						storage.UpdateIssueOptions{ExpectedAssignee: ifAssignee, ExpectedStatus: ifStatus})
+						storage.UpdateIssueOptions{ExpectedAssignee: ifAssignee, ExpectedStatus: ifStatus, ExpectedFence: ifFence})
 				} else {
 					updateErr = issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor)
 				}
@@ -654,21 +668,24 @@ func warnNotesReplacement(id string) {
 	fmt.Fprintf(os.Stderr, "warning: %s: --notes replaced existing notes (use --append-notes to preserve history)\n", id) //nolint:gosec // G705: stderr, not a browser context
 }
 
-// ExitGuardMismatch is the exit code when a `bd update` run failed solely
-// because --if-assignee/--if-status guards did not match: the precondition no
-// longer held, nothing was written, and retrying is pointless — another actor
-// won the race. Scripts branch on it to tell "racer won, skip gracefully"
-// (13) from infra failure (1, retry/abort). Mixed batches — any failure that
-// is NOT a guard mismatch — exit 1, the conservative "something needs a
-// retry" verdict. The stderr line carries the machine-greppable sentinel
-// text ("assignee mismatch" / "status mismatch") either way.
+// ExitGuardMismatch is the exit code when a `bd update` or `bd close` run
+// failed solely because --if-assignee/--if-status/--if-fence guards did not
+// match: the precondition no longer held, nothing was written, and retrying is
+// pointless — another actor won the race. Scripts branch on it to tell "racer
+// won, skip gracefully" (13) from infra failure (1, retry/abort). Mixed
+// batches — any failure that is NOT a guard mismatch — exit 1, the
+// conservative "something needs a retry" verdict. The stderr line carries the
+// machine-greppable sentinel text ("assignee mismatch" / "status mismatch" /
+// "fence mismatch") either way.
 const ExitGuardMismatch = 13
 
-// isGuardMismatch reports whether err is a bd-wsqvw conditional-update guard
-// refusal (stale --if-assignee/--if-status), the failure class that exits
-// ExitGuardMismatch instead of 1.
+// isGuardMismatch reports whether err is a bd-wsqvw conditional-write guard
+// refusal (stale --if-assignee/--if-status/--if-fence), the failure class that
+// exits ExitGuardMismatch instead of 1.
 func isGuardMismatch(err error) bool {
-	return errors.Is(err, storage.ErrAssigneeMismatch) || errors.Is(err, storage.ErrStatusMismatch)
+	return errors.Is(err, storage.ErrAssigneeMismatch) ||
+		errors.Is(err, storage.ErrStatusMismatch) ||
+		errors.Is(err, storage.ErrFenceMismatch)
 }
 
 // updateIDFailure records one issue ID that could not be updated and why.
@@ -751,17 +768,43 @@ func toJSONValue(s string) json.RawMessage {
 	return storage.MetadataEditValue(s)
 }
 
+// ifFenceGuardFromFlags reads --if-fence with presence detected via Changed(),
+// so `--if-fence 0` is the real "expected never claimed" assertion rather than
+// "no guard". Shared by all four parse sites — bd update direct and proxied,
+// bd close, bd unclaim — so the rejection below and its wording cannot drift
+// between verbs.
+//
+// A negative fence can never match: claim_fence starts at 0 and only ever
+// increments, so `--if-fence -1` is a typo, not a guard that will legitimately
+// refuse. Letting it through would report it as a mismatch — exit 13 on update
+// and close, whose contract says "another actor won the race, retrying this
+// guard is pointless" — for a race the caller never entered. It is a usage
+// error: exit 1, like any other bad flag value, before any issue is touched.
+func ifFenceGuardFromFlags(cmd *cobra.Command) (*int64, error) {
+	if !cmd.Flags().Changed("if-fence") {
+		return nil, nil
+	}
+	v, _ := cmd.Flags().GetInt64("if-fence")
+	if v < 0 {
+		return nil, HandleErrorRespectJSON("--if-fence must be >= 0 (the claim fence starts at 0 and only increments, so a negative value can never match)")
+	}
+	return &v, nil
+}
+
 // updateGuardsFromFlags reads the bd-wsqvw conditional-update guards
-// (--if-assignee/--if-status) with presence detected via Changed(), so
-// `--if-assignee ""` is a real guard meaning "expected unassigned" rather than
+// (--if-assignee/--if-status/--if-fence) with presence detected via Changed(),
+// so `--if-assignee ""` is a real guard meaning "expected unassigned" and
+// `--if-fence 0` a real guard meaning "expected never claimed", rather than
 // "no guard" (the unclaim.go idiom). It rejects combining guards with --claim
 // (--claim is its own compare-and-set with claim-pool semantics; the guards
-// would silently duplicate or contradict it) and guards with no regular field
-// update to ride on (the CAS applies to the issues-row UPDATE; label and
-// parent edits run outside it and would not be guarded). An --if-status value
-// is validated against the same built-in + custom status set as --status, so a
-// typo fails fast instead of mismatching forever.
-func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[string]interface{}) (ifAssignee, ifStatus *string, err error) {
+// would silently duplicate or contradict it — and a fresh claim bumps the
+// claim fence, so a pre-claim --if-fence would conflict with the very claim it
+// rides on) and guards with no regular field update to ride on (the CAS applies
+// to the issues-row UPDATE; label and parent edits run outside it and would not
+// be guarded). An --if-status value is validated against the same built-in +
+// custom status set as --status, so a typo fails fast instead of mismatching
+// forever.
+func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[string]interface{}) (ifAssignee, ifStatus *string, ifFence *int64, err error) {
 	if cmd.Flags().Changed("if-assignee") {
 		v, _ := cmd.Flags().GetString("if-assignee")
 		ifAssignee = &v
@@ -775,15 +818,18 @@ func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[strin
 			}
 		}
 		if !types.Status(v).IsValidWithCustom(customStatuses) {
-			return nil, nil, HandleErrorRespectJSON("invalid --if-status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", v)
+			return nil, nil, nil, HandleErrorRespectJSON("invalid --if-status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", v)
 		}
 		ifStatus = &v
 	}
-	if ifAssignee == nil && ifStatus == nil {
-		return nil, nil, nil
+	if ifFence, err = ifFenceGuardFromFlags(cmd); err != nil {
+		return nil, nil, nil, err
+	}
+	if ifAssignee == nil && ifStatus == nil && ifFence == nil {
+		return nil, nil, nil, nil
 	}
 	if claimFlag {
-		return nil, nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status with --claim (--claim is already an atomic compare-and-set)")
+		return nil, nil, nil, HandleErrorRespectJSON("cannot combine --if-assignee/--if-status/--if-fence with --claim (--claim is already an atomic compare-and-set, and it bumps the claim fence a pre-claim --if-fence would name)")
 	}
 	hasFieldUpdate := false
 	for k := range updates {
@@ -794,9 +840,9 @@ func updateGuardsFromFlags(cmd *cobra.Command, claimFlag bool, updates map[strin
 		}
 	}
 	if !hasFieldUpdate {
-		return nil, nil, HandleErrorRespectJSON("--if-assignee/--if-status require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
+		return nil, nil, nil, HandleErrorRespectJSON("--if-assignee/--if-status/--if-fence require at least one field update (e.g. -a, -s); label and parent edits are not covered by the guard")
 	}
-	return ifAssignee, ifStatus, nil
+	return ifAssignee, ifStatus, ifFence, nil
 }
 
 func init() {
@@ -821,12 +867,15 @@ func init() {
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
 	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
+	updateCmd.Flags().Int64("if-fence", 0, "Apply the update only if the claim fence equals this value (monotonic ownership token from claim_fence in bd show --json; --if-fence 0 requires never-claimed); a mismatch writes nothing and exits 13. Requires a field update; cannot combine with --claim")
 	// --force (unconditional bypass of the reassign fence) and --if-assignee
 	// (write only while a specific assignee still holds it) encode
 	// contradictory intent — same rationale as unclaim's pairing. Rejecting the
 	// combination stops a script that habitually passes --force from silently
-	// dropping its --if-assignee guard.
+	// dropping its --if-assignee guard. --if-fence is held to the same rule so
+	// the guard family behaves uniformly on update.
 	updateCmd.MarkFlagsMutuallyExclusive("force", "if-assignee")
+	updateCmd.MarkFlagsMutuallyExclusive("force", "if-fence")
 	updateCmd.Flags().String("session", "", "Claude Code session ID for status=closed (or set CLAUDE_SESSION_ID env var)")
 	// Time-based scheduling flags (GH#820)
 	// Examples:

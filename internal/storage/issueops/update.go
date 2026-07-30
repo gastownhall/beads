@@ -298,6 +298,15 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// Clears stale leases only; arming is reserved for claim/heartbeat.
 	clearLease := ManageLeaseOnUpdate(oldIssue, updates)
 
+	// Ownership transitions through the generic update path bump the fence:
+	// an assignee change, or a reopen (closed→open) — the primary reopen path
+	// on the dolt/embedded stores, whose ReopenIssue delegates here. The
+	// bump⇒row_lock pairing invariant holds because row_lock is rewritten
+	// unconditionally just below.
+	if IsOwnershipTransition(oldIssue.Status, oldIssue.Assignee, updates) {
+		setClauses = append(setClauses, fenceBumpExpr)
+	}
+
 	// Rewrite row_lock on every update so a concurrent status/ownership
 	// mutation (reclaim/close) collides on this shared cell and is forced to
 	// conflict-and-retry rather than silently cell-merging two writes to

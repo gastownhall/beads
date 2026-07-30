@@ -43,6 +43,25 @@ func testClaim(t *testing.T, f Factory) {
 	}
 }
 
+// testClaimBumpsFence: a claim is an ownership transition, so it advances the
+// row's claim_fence off the never-claimed 0 and the value is readable back
+// through the normal hydration path (migration 0062 + ignored/0019). The
+// idempotent re-claim below is the case that does NOT bump.
+func testClaimBumpsFence(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "cl-fence-1", Title: "T", Status: types.StatusOpen}), "a"))
+	must(t, s.ClaimIssue(c, "cl-fence-1", "alice"))
+	got, err := s.GetIssue(c, "cl-fence-1")
+	must(t, err)
+	if got.ClaimFence == 0 {
+		t.Error("claim did not bump claim_fence off zero")
+	}
+	if got.Assignee != "alice" || got.Status != types.StatusInProgress {
+		t.Errorf("after claim: assignee=%q status=%q", got.Assignee, got.Status)
+	}
+}
+
 // testClaimIdempotent: re-claiming an in_progress issue by the SAME actor is a no-op
 // success (supports agent retry workflows).
 func testClaimIdempotent(t *testing.T, f Factory) {
@@ -279,7 +298,7 @@ func testUnclaimIfAssigneeMatch(t *testing.T, f Factory) {
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ur-1", Title: "T"}), "a"))
 	must(t, s.ClaimIssue(ctx(), "ur-1", "worker1"))
 
-	must(t, s.UnclaimIssueIfAssignee(ctx(), "ur-1", "releaser", "worker1"))
+	must(t, s.UnclaimIssueIfAssignee(ctx(), "ur-1", "releaser", "worker1", nil))
 	got, err := s.GetIssue(ctx(), "ur-1")
 	must(t, err)
 	if got.Assignee != "" {
@@ -289,7 +308,7 @@ func testUnclaimIfAssigneeMatch(t *testing.T, f Factory) {
 		t.Errorf("after conditional release: status = %q, want open", got.Status)
 	}
 
-	err = s.UnclaimIssueIfAssignee(ctx(), "ur-1", "releaser", "worker1")
+	err = s.UnclaimIssueIfAssignee(ctx(), "ur-1", "releaser", "worker1", nil)
 	if !errors.Is(err, storage.ErrAssigneeMismatch) {
 		t.Errorf("repeat conditional release: err = %v, want ErrAssigneeMismatch", err)
 	}
@@ -306,7 +325,7 @@ func testUnclaimIfAssigneeStale(t *testing.T, f Factory) {
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ur-2", Title: "T"}), "a"))
 	must(t, s.ClaimIssue(ctx(), "ur-2", "worker2"))
 
-	err := s.UnclaimIssueIfAssignee(ctx(), "ur-2", "releaser", "worker1")
+	err := s.UnclaimIssueIfAssignee(ctx(), "ur-2", "releaser", "worker1", nil)
 	if !errors.Is(err, storage.ErrAssigneeMismatch) {
 		t.Errorf("stale conditional release: err = %v, want ErrAssigneeMismatch", err)
 	}
@@ -326,5 +345,97 @@ func testUnclaimIfAssigneeStale(t *testing.T, f Factory) {
 		if e.EventType == types.EventType("unclaimed") {
 			t.Errorf("stale conditional release recorded an unclaimed event: %+v", e)
 		}
+	}
+}
+
+// testGuardedReleaseFenceConflict: a release pinned to an ownership generation
+// (UnclaimIssue/UnclaimIssueIfAssignee expectedFence) must refuse with
+// storage.ErrFenceMismatch once that generation has been retired, and succeed
+// against a freshly observed one. The intervening transition here is a release
+// and re-claim by the SAME actor: the assignee is identical afterwards, so this
+// is exactly the stomp window --if-assignee cannot see.
+func testGuardedReleaseFenceConflict(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	fptr := func(v int64) *int64 { return &v }
+
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "gf-1", Title: "T"}), "a"))
+	must(t, s.ClaimIssue(c, "gf-1", "worker1"))
+	snapshot, err := s.GetIssue(c, "gf-1")
+	must(t, err)
+
+	// Ownership moves on while the caller holds its snapshot.
+	must(t, s.UnclaimIssue(c, "gf-1", "worker1", false, nil))
+	must(t, s.ClaimIssue(c, "gf-1", "worker1"))
+
+	if err := s.UnclaimIssue(c, "gf-1", "worker1", false, fptr(snapshot.ClaimFence)); !errors.Is(err, storage.ErrFenceMismatch) {
+		t.Errorf("stale guarded release: err = %v, want ErrFenceMismatch", err)
+	}
+	live, err := s.GetIssue(c, "gf-1")
+	must(t, err)
+	if live.Assignee != "worker1" || live.Status != types.StatusInProgress {
+		t.Errorf("refused release disturbed the live claim: assignee=%q status=%q", live.Assignee, live.Status)
+	}
+
+	// A guard establishes freshness, not authority: the live fence does not let
+	// a non-owner release the claim.
+	if err := s.UnclaimIssue(c, "gf-1", "stranger", false, fptr(live.ClaimFence)); !errors.Is(err, storage.ErrNotOwner) {
+		t.Errorf("cross-actor release with a live fence: err = %v, want ErrNotOwner", err)
+	}
+
+	// Re-observed fence: both release forms accept it.
+	if err := s.UnclaimIssueIfAssignee(c, "gf-1", "supervisor", "worker1", fptr(live.ClaimFence)); err != nil {
+		t.Errorf("guarded conditional release with a fresh fence: %v", err)
+	}
+	got, err := s.GetIssue(c, "gf-1")
+	must(t, err)
+	if got.Assignee != "" || got.Status != types.StatusOpen {
+		t.Errorf("after guarded release: assignee=%q status=%q, want unassigned/open", got.Assignee, got.Status)
+	}
+	if got.ClaimFence != live.ClaimFence+1 {
+		t.Errorf("claim_fence = %d after release, want %d", got.ClaimFence, live.ClaimFence+1)
+	}
+}
+
+// testGuardedCloseFenceConflict: CloseIssueOptions.ExpectedFence stops a worker
+// whose claim was retired from completing the bead with its stale snapshot,
+// while a caller quoting the current fence closes — and can re-close
+// idempotently, since close is not an ownership transition and leaves the fence
+// where it was.
+func testGuardedCloseFenceConflict(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	fptr := func(v int64) *int64 { return &v }
+
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "gf-2", Title: "T"}), "a"))
+	must(t, s.ClaimIssue(c, "gf-2", "worker1"))
+	stale, err := s.GetIssue(c, "gf-2")
+	must(t, err)
+
+	must(t, s.UnclaimIssue(c, "gf-2", "worker1", false, nil))
+	must(t, s.ClaimIssue(c, "gf-2", "worker2"))
+
+	if _, err := s.CloseIssueChecked(c, "gf-2", "worker1",
+		storage.CloseIssueOptions{Reason: "stale completion", ExpectedFence: fptr(stale.ClaimFence)}); !errors.Is(err, storage.ErrFenceMismatch) {
+		t.Errorf("zombie close: err = %v, want ErrFenceMismatch", err)
+	}
+	live, err := s.GetIssue(c, "gf-2")
+	must(t, err)
+	if live.Status == types.StatusClosed {
+		t.Fatalf("zombie close landed; status = %q", live.Status)
+	}
+
+	res, err := s.CloseIssueChecked(c, "gf-2", "worker2",
+		storage.CloseIssueOptions{Reason: "done", ExpectedFence: fptr(live.ClaimFence)})
+	must(t, err)
+	if res.Unchanged {
+		t.Error("close with the live fence reported Unchanged, want a real close")
+	}
+
+	res, err = s.CloseIssueChecked(c, "gf-2", "worker2",
+		storage.CloseIssueOptions{Reason: "again", ExpectedFence: fptr(live.ClaimFence)})
+	must(t, err)
+	if !res.Unchanged {
+		t.Error("guarded re-close of an already-closed issue: Unchanged = false, want true")
 	}
 }

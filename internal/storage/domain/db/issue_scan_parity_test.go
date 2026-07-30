@@ -42,7 +42,7 @@ func TestScanIssue_StringTimestamps(t *testing.T) {
 	for i := range cols {
 		cols[i] = strings.TrimSpace(cols[i])
 	}
-	require.Len(t, cols, 51)
+	require.Len(t, cols, 52)
 
 	row := []driver.Value{
 		"bd-test.1", nil, "title", "desc", "", "", "", // id..notes
@@ -57,9 +57,10 @@ func TestScanIssue_StringTimestamps(t *testing.T) {
 		nil, nil, nil, // work_type, source_system, metadata
 		int64(12345),  // row_lock
 		nil,           // storage_class
+		int64(7),      // claim_fence
 		nil, nil, nil, // lease_expires_at, heartbeat_at, granted_node
 	}
-	require.Len(t, row, 51)
+	require.Len(t, row, 52)
 
 	mock.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows(cols).AddRow(row...))
 
@@ -74,4 +75,7 @@ func TestScanIssue_StringTimestamps(t *testing.T) {
 	assert.Equal(t, time.Date(2026, 6, 12, 10, 0, 1, 0, time.UTC), issue.UpdatedAt)
 	// row_lock hydrates into the opaque RowVersion token at its positional slot.
 	assert.Equal(t, int64(12345), issue.RowVersion)
+	// claim_fence sits immediately after it; a swap between the two adjacent
+	// BIGINTs would otherwise scan clean.
+	assert.Equal(t, int64(7), issue.ClaimFence)
 }

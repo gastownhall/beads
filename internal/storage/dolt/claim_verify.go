@@ -86,7 +86,10 @@ func unclaimed() claimPostcondition {
 // machinery: keep guarded coordination writes single-purpose (assignee/status
 // only), which is how the wheelhouse park/restore consumers use them.
 func guardedUpdatePostcondition(opts storage.UpdateIssueOptions, updates map[string]interface{}) (claimPostcondition, bool) {
-	if opts.ExpectedAssignee == nil && opts.ExpectedStatus == nil {
+	// ExpectedFence joins the trigger set: a fence-guarded coordination write
+	// is claim-family for the same reason, and the replay is equally safe
+	// because the fence is re-checked inside the replayed transaction.
+	if opts.ExpectedAssignee == nil && opts.ExpectedStatus == nil && opts.ExpectedFence == nil {
 		return claimPostcondition{}, false
 	}
 	newAssignee, setsAssignee := updates["assignee"].(string)

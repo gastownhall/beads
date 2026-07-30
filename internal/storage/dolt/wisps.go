@@ -202,9 +202,10 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 // updateWispChecked updates a wisp with the optional atomic preconditions of
 // UpdateIssueChecked, mirroring updateWisp but first enforcing — in the SAME
 // transaction — opts.ExpectedVersion (issueops.CheckVersionInTx →
-// storage.ErrVersionMismatch) and the opts.ExpectedAssignee/ExpectedStatus
-// field guards (issueops.CheckExpectedFieldsInTx → ErrAssigneeMismatch/
-// ErrStatusMismatch), so a stale precondition refuses before any write and the
+// storage.ErrVersionMismatch) and the opts.ExpectedAssignee/ExpectedStatus/
+// ExpectedFence field guards (issueops.CheckExpectedFieldsInTx →
+// ErrAssigneeMismatch/ErrStatusMismatch/ErrFenceMismatch), so a stale
+// precondition refuses before any write and the
 // deferred Rollback discards the transaction (a true compare-and-swap). Like
 // updateWisp it uses a bare BeginTx/Commit with no withRetryTx (consistent with
 // the rest of the wisp write path — do not add one here); wisps live in
@@ -221,7 +222,7 @@ func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates ma
 			return err
 		}
 	}
-	if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
+	if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus, opts.ExpectedFence); err != nil {
 		return err
 	}
 	if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
@@ -250,9 +251,10 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 
 // closeWispChecked closes a wisp with the is_blocked guard, mirroring closeWisp
 // but refusing with storage.ErrCloseBlocked when the wisp is still blocked
-// unless opts.Force is set — and, when opts.ExpectedVersion is non-nil, with
-// storage.ErrVersionMismatch when the row's RowVersion no longer matches (an
-// orthogonal CAS that Force does not bypass). The checks and the close share the
+// unless opts.Force is set — and, when opts.ExpectedVersion/opts.ExpectedFence
+// are non-nil, with storage.ErrVersionMismatch/storage.ErrFenceMismatch when the
+// row's RowVersion/ClaimFence no longer matches (orthogonal CAS guards that
+// Force does not bypass). The checks and the close share the
 // same transaction; wisps live in dolt_ignored tables, so there is no
 // DOLT_COMMIT. On any rejection the deferred Rollback discards the transaction —
 // no close or event is written.
@@ -271,7 +273,7 @@ func (s *DoltStore) closeWispChecked(ctx context.Context, id string, actor strin
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	res, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force, opts.ExpectedVersion)
+	res, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force, opts.ExpectedVersion, opts.ExpectedFence)
 	if err != nil {
 		return storage.CloseIssueResult{}, err
 	}

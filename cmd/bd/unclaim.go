@@ -34,14 +34,27 @@ specific worker's issue without ever clobbering someone else's live claim.
 --if-assignee requires a non-empty assignee and cannot be combined with --force
 (they encode contradictory intent).
 
+With --if-fence, the release additionally requires the issue's claim fence to
+still equal the given value. The claim fence is a monotonic ownership token
+(claim_fence in bd show --json) that advances on every ownership transition —
+claim, release, reclaim, reassign, reopen — so it names the exact generation of
+a claim rather than just its holder: a worker whose lease was reclaimed and
+re-issued to a fresh session of the SAME assignee is refused here, where
+--if-assignee would let it through. It composes with --if-assignee (both must
+hold) and, unlike --if-assignee, is allowed with --force — because --force
+waives only the ownership check, never a guard you supplied. A fence guard
+establishes freshness, not authority: it never authorizes releasing another
+actor's claim.
+
 Exit status: 0 when every issue was released; 1 when any release failed
-(including an --if-assignee mismatch).
+(including an --if-assignee or --if-fence mismatch).
 
 Examples:
   bd unclaim bd-123
   bd unclaim bd-123 --reason "Agent crashed"
   bd unclaim bd-123 bd-456
-  bd unclaim bd-123 --if-assignee worker-7   # only if still held by worker-7`,
+  bd unclaim bd-123 --if-assignee worker-7   # only if still held by worker-7
+  bd unclaim bd-123 --if-fence 4             # only if the claim is still generation 4`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		reason, _ := cmd.Flags().GetString("reason")
@@ -58,12 +71,21 @@ Examples:
 		if conditional && ifAssignee == "" {
 			return HandleErrorRespectJSON("--if-assignee requires a non-empty assignee; it releases the issue only while that assignee still holds it")
 		}
+		// --if-fence is likewise presence-selected, and negative-rejecting; see
+		// ifFenceGuardFromFlags.
+		ifFence, fenceErr := ifFenceGuardFromFlags(cmd)
+		if fenceErr != nil {
+			return fenceErr
+		}
 
 		CheckReadonly("unclaim")
 
 		if usesProxiedServer() {
 			if conditional {
 				return HandleErrorRespectJSON("--if-assignee is not supported in proxied-server mode")
+			}
+			if ifFence != nil {
+				return HandleErrorRespectJSON("--if-fence is not supported in proxied-server mode")
 			}
 			return runUnclaimProxiedServer(rootCtx, args, reason, force)
 		}
@@ -89,9 +111,9 @@ Examples:
 
 			var unclaimErr error
 			if conditional {
-				unclaimErr = issueStore.UnclaimIssueIfAssignee(ctx, fullID, actor, ifAssignee)
+				unclaimErr = issueStore.UnclaimIssueIfAssignee(ctx, fullID, actor, ifAssignee, ifFence)
 			} else {
-				unclaimErr = issueStore.UnclaimIssue(ctx, fullID, actor, force)
+				unclaimErr = issueStore.UnclaimIssue(ctx, fullID, actor, force, ifFence)
 			}
 			if unclaimErr != nil {
 				fmt.Fprintf(os.Stderr, "Error unclaiming %s: %v\n", fullID, unclaimErr)
@@ -146,6 +168,10 @@ func init() {
 	// habitually passes --force from silently dropping it when it also passes
 	// --if-assignee for one case.
 	unclaimCmd.MarkFlagsMutuallyExclusive("force", "if-assignee")
+	// --if-fence is deliberately NOT exclusive with --force: --force waives the
+	// ownership check, and a supplied guard is never waived with it. A reaper
+	// that forces a release can still pin it to the generation it observed.
+	unclaimCmd.Flags().Int64("if-fence", 0, "Only release while the claim fence still equals this value (monotonic ownership token from claim_fence in bd show --json; composes with --if-assignee and --force)")
 	unclaimCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(unclaimCmd)
 }

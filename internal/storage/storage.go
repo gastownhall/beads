@@ -35,6 +35,14 @@ var ErrNotOwner = errors.New("issue claimed by a different actor")
 // stale; the issue is left untouched.
 var ErrAssigneeMismatch = errors.New("assignee mismatch")
 
+// ErrUnleased is returned by HeartbeatIssue when the actor holds the claim it
+// is heartbeating but that claim carries no lease, on a store that disarmed
+// automatic stamping (lease.auto off — see bd lease disarm). Heartbeat is
+// strictly a renewal there: arming a lease on a deliberately unleased claim
+// would silently re-create the reclaim exposure disarming exists to remove.
+// The claim is untouched; the caller should stop heartbeating, not retry.
+var ErrUnleased = errors.New("issue has no lease")
+
 // ClaimedByFragment and NotClaimableStatusFragment are the exact message
 // fragments the claim path (issueops/claim.go) appends after the sentinel to
 // carry the conflicting assignee/status: ErrAlreadyClaimed is wrapped as
@@ -75,6 +83,15 @@ var ErrVersionMismatch = errors.New("version mismatch")
 // ErrAssigneeMismatch, shared with UnclaimIssueIfAssignee.
 var ErrStatusMismatch = errors.New("status mismatch")
 
+// ErrFenceMismatch is returned by a guarded op given an ExpectedFence that no
+// longer matches the row's current ClaimFence — the ownership generation the
+// caller snapshotted has been retired by a claim, release, reclaim, reassign or
+// reopen. The issue is left untouched. Unlike ErrVersionMismatch (row_lock,
+// which moves on every content write) this fires only on an ownership
+// transition, so it is the guard a worker uses to prove it is still the holder
+// it thought it was.
+var ErrFenceMismatch = errors.New("fence mismatch")
+
 // CommentPageCursor is the resume position for a keyset page of an issue's
 // comments: the (created_at, id) of the last comment already returned. The zero
 // value starts a walk from the beginning of the thread.
@@ -104,17 +121,26 @@ type Storage interface {
 	GetIssueByExternalRef(ctx context.Context, externalRef string) (*types.Issue, error)
 	GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error)
 	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
-	// UpdateIssueChecked applies the update like UpdateIssue, with an optional
-	// optimistic-concurrency precondition: see UpdateIssueOptions.ExpectedVersion.
-	// The version read and the update share one transaction (a true CAS).
+	// UpdateIssueChecked applies the update like UpdateIssue, with optional
+	// preconditions: see UpdateIssueOptions.ExpectedVersion/ExpectedAssignee/
+	// ExpectedStatus/ExpectedFence. Every guard read and the update share one
+	// transaction (a true CAS).
 	UpdateIssueChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts UpdateIssueOptions) error
 	ReopenIssue(ctx context.Context, id string, reason string, actor string) error
-	UnclaimIssue(ctx context.Context, id string, actor string, force bool) error
+	// UnclaimIssue releases a claim held by actor (or, with force, held by
+	// anyone). A non-nil expectedFence additionally pins the release to an
+	// ownership generation: the release proceeds only while the issue's current
+	// ClaimFence equals *expectedFence, else it refuses with ErrFenceMismatch
+	// and the issue is left untouched. The fence establishes freshness, not
+	// authority — it is conjunctive with the ownership check, never a
+	// substitute for it, and force does not skip it.
+	UnclaimIssue(ctx context.Context, id string, actor string, force bool, expectedFence *int64) error
 	// UnclaimIssueIfAssignee releases a claim only while the issue is still
 	// assigned to expectedAssignee (compare-and-swap, the inverse of
 	// ClaimIssue). Returns ErrAssigneeMismatch, leaving the issue untouched,
-	// when the current assignee differs.
-	UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error
+	// when the current assignee differs. A non-nil expectedFence adds the
+	// ownership-fence conjunct described on UnclaimIssue (ErrFenceMismatch).
+	UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string, expectedFence *int64) error
 	UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
 	// CloseIssueChecked closes an issue, but refuses with ErrCloseBlocked when
@@ -126,9 +152,10 @@ type Storage interface {
 	// (no TOCTOU). When opts.ExpectedVersion is non-nil it adds an orthogonal
 	// optimistic-concurrency precondition: the close proceeds only if the issue's
 	// current RowVersion still equals *opts.ExpectedVersion, else it refuses with
-	// ErrVersionMismatch atomically (Force does NOT bypass this check). Already-
-	// closed is an idempotent success with Unchanged=true; a missing issue returns
-	// ErrNotFound.
+	// ErrVersionMismatch atomically (Force does NOT bypass this check).
+	// opts.ExpectedFence is the same kind of precondition against the ownership
+	// fence (ErrFenceMismatch). Already-closed is an idempotent success with
+	// Unchanged=true; a missing issue returns ErrNotFound.
 	CloseIssueChecked(ctx context.Context, id string, actor string, opts CloseIssueOptions) (CloseIssueResult, error)
 	DeleteIssue(ctx context.Context, id string) error
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
@@ -320,6 +347,21 @@ type CloseIssueOptions struct {
 	// row_lock and are not caught here (see the freshRowLock invariant in
 	// internal/storage/issueops/lease.go).
 	ExpectedVersion *int64
+
+	// ExpectedFence, when non-nil, gates the close on the issue's ownership
+	// fence: the close proceeds only if the current ClaimFence equals
+	// *ExpectedFence, else it refuses with ErrFenceMismatch atomically. nil
+	// disables the check; a pointer to 0 is a real assertion ("never claimed").
+	// It is conjunctive with ExpectedVersion and with the is_blocked guard, and
+	// Force bypasses none of it.
+	//
+	// This is the "close only if I am still the holder I was" guard: unlike
+	// ExpectedVersion, claim_fence moves ONLY on ownership transitions (claim,
+	// release, reclaim, reassign, reopen), so intervening content writes by the
+	// same holder do not invalidate it. A worker whose lease was reclaimed and
+	// re-issued to someone else is refused here instead of completing a bead it
+	// no longer owns.
+	ExpectedFence *int64
 }
 
 // CloseIssueResult reports the outcome of CloseIssueChecked.
@@ -350,6 +392,22 @@ type UpdateIssueOptions struct {
 	// and refuses (the same invariant as ExpectedVersion).
 	ExpectedAssignee *string
 	ExpectedStatus   *string
+
+	// ExpectedFence is the ownership-fence guard (`bd update --if-fence`): when
+	// non-nil the update proceeds only if the issue's current ClaimFence equals
+	// *ExpectedFence, else it refuses atomically with ErrFenceMismatch naming
+	// the actual fence. nil disables the check; a pointer to 0 is a real
+	// assertion ("expected never claimed"). It joins the same conjunction as
+	// the assignee/status guards and ExpectedVersion, with the same
+	// one-transaction read-and-write guarantee.
+	//
+	// The fence is a distinct token from ExpectedVersion's row_lock: row_lock is
+	// rewritten by every content write, while claim_fence advances ONLY on
+	// ownership transitions (claim, release, reclaim, reassign, reopen). Guard
+	// on the fence to mean "the ownership generation I decided against is still
+	// current"; guard on the version to mean "nobody has touched the row at
+	// all".
+	ExpectedFence *int64
 }
 
 // MergeSlotStatus is returned by MergeSlotCheck and describes the current

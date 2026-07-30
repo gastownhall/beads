@@ -248,6 +248,15 @@ type UpdateSpec struct {
 	// whole-attempt retry re-checks the guards on the redo.
 	ExpectedAssignee *string
 	ExpectedStatus   *string
+
+	// ExpectedFence is the ownership-fence guard (`bd update --if-fence`),
+	// enforced by ApplyUpdate exactly like the two above: non-nil means the
+	// update applies only while the issue's ClaimFence still equals the
+	// expected value, else storage.ErrFenceMismatch and nothing is written. A
+	// pointer to 0 is a real assertion ("expected never claimed"). Unlike the
+	// assignee/status guards it survives the holder's own content writes —
+	// claim_fence moves only on ownership transitions.
+	ExpectedFence *int64
 }
 
 type IssueUseCase interface {
@@ -502,12 +511,12 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 	}
 
 	// bd-wsqvw field guards: refuse the whole spec atomically on a stale
-	// assignee/status. The read shares this unit of work's transaction, and
-	// every field update rewrites row_lock, so a writer that commits during
+	// assignee/status/fence. The read shares this unit of work's transaction,
+	// and every field update rewrites row_lock, so a writer that commits during
 	// the attempt collides at commit time and the caller's whole-attempt
 	// retry re-checks here on the redo — same CAS invariant as the store-level
 	// UpdateIssueChecked path.
-	if spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil {
+	if spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil || spec.ExpectedFence != nil {
 		var current *types.Issue
 		if useWisp {
 			current, err = u.GetWisp(ctx, id)
@@ -527,6 +536,10 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		if spec.ExpectedStatus != nil && string(current.Status) != *spec.ExpectedStatus {
 			return nil, fmt.Errorf("%w: %s has status %q, expected %q",
 				storage.ErrStatusMismatch, id, current.Status, *spec.ExpectedStatus)
+		}
+		if spec.ExpectedFence != nil && current.ClaimFence != *spec.ExpectedFence {
+			return nil, fmt.Errorf("%w: %s has fence %d, expected %d",
+				storage.ErrFenceMismatch, id, current.ClaimFence, *spec.ExpectedFence)
 		}
 	}
 

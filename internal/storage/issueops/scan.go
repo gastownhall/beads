@@ -23,13 +23,15 @@ const IssueSelectColumns = sqlbuild.IssueSelectColumns
 //
 // metadata is intentionally retained — it is small and read by routing.
 //
-// row_lock and the leases.* overlay (lease_expires_at, heartbeat_at,
-// granted_node; lease_expires_at/heartbeat_at added by migration 0054 after
-// this list was first written, see #4150; granted_node added by migration
-// 0016/wy-jpd3.7 for replica-aware leases) are also retained: all three are
-// small, non-TEXT columns that routing/claim code reads (optimistic
-// concurrency token, active-lease state, granting replica), not the
-// multi-KB bodies this split exists to skip. Any query selecting
+// row_lock, storage_class, claim_fence and the leases.* overlay
+// (lease_expires_at, heartbeat_at, granted_node; lease_expires_at/heartbeat_at
+// added by migration 0054 after this list was first written, see #4150;
+// granted_node added by migration 0016/wy-jpd3.7 for replica-aware leases;
+// storage_class by migration 0060; claim_fence by migration 0062) are also
+// retained: they are all small, non-TEXT columns that routing/claim code reads
+// (optimistic concurrency token, storage class, ownership fence, active-lease
+// state, granting replica), not the multi-KB bodies this
+// split exists to skip. Any query selecting
 // IssueSelectColumnsLite must include sqlbuild.LeaseJoin(table) in its FROM
 // clause, exactly as full hydration does (see issueLiteProjection in
 // search.go, joinLeases: true).
@@ -42,7 +44,7 @@ const IssueSelectColumnsLite = `id, content_hash, title,
 	       mol_type,
 	       event_kind, actor, target,
 	       due_at, defer_until,
-	       work_type, source_system, metadata, row_lock, storage_class,
+	       work_type, source_system, metadata, row_lock, storage_class, claim_fence,
 	       leases.lease_expires_at, leases.heartbeat_at, leases.granted_node`
 
 // HeavyDropList enumerates the columns omitted from IssueSelectColumnsLite.
@@ -91,6 +93,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var metadata sql.NullString
 	var rowLock sql.NullInt64       // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
 	var storageClass sql.NullString // storage_class column (migration 0060); NULL = unset, resolves per EffectiveStorageClass
+	var claimFence sql.NullInt64    // claim_fence column (migration 0062; NOT NULL DEFAULT 0), same defensive scan
 
 	dests := []any{
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
@@ -103,7 +106,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&molType,
 		&eventKind, &actor, &target, &payload,
 		&dueAt, &deferUntil,
-		&workType, &sourceSystem, &metadata, &rowLock, &storageClass,
+		&workType, &sourceSystem, &metadata, &rowLock, &storageClass, &claimFence,
 		&leaseExpiresAt, &heartbeatAt, &leaseGrantedNode,
 	}
 	dests = append(dests, extra...)
@@ -232,6 +235,9 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	if storageClass.Valid {
 		issue.StorageClass = types.StorageClass(storageClass.String)
 	}
+	// Ownership fence (migration 0062); 0 on rows never claimed since the
+	// column was added.
+	issue.ClaimFence = claimFence.Int64
 	// Lease columns (migration 0054); NULL when no active lease.
 	if leaseExpiresAt.Valid {
 		issue.LeaseExpiresAt = &leaseExpiresAt.Time
@@ -269,6 +275,7 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var metadata sql.NullString
 	var rowLock sql.NullInt64       // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
 	var storageClass sql.NullString // storage_class column (migration 0060); NULL = unset, resolves per EffectiveStorageClass
+	var claimFence sql.NullInt64    // claim_fence column (migration 0062; NOT NULL DEFAULT 0), same defensive scan
 
 	dests := []any{
 		&issue.ID, &contentHash, &issue.Title,
@@ -281,7 +288,7 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&molType,
 		&eventKind, &actor, &target,
 		&dueAt, &deferUntil,
-		&workType, &sourceSystem, &metadata, &rowLock, &storageClass,
+		&workType, &sourceSystem, &metadata, &rowLock, &storageClass, &claimFence,
 		&leaseExpiresAt, &heartbeatAt, &leaseGrantedNode,
 	}
 	dests = append(dests, extra...)
@@ -401,6 +408,9 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	if storageClass.Valid {
 		issue.StorageClass = types.StorageClass(storageClass.String)
 	}
+	// Ownership fence (migration 0062); 0 on rows never claimed since the
+	// column was added.
+	issue.ClaimFence = claimFence.Int64
 	// Lease columns (migration 0054); NULL when no active lease.
 	if leaseExpiresAt.Valid {
 		issue.LeaseExpiresAt = &leaseExpiresAt.Time

@@ -66,6 +66,32 @@ type Issue struct {
 	// granting replica.
 	LeaseGrantedNode string `json:"lease_granted_node,omitempty"`
 
+	// ===== Ownership fence (migration 0062 + ignored/0019) =====
+	// ClaimFence is a monotonic counter on the issues/wisps row, bumped only
+	// by OWNERSHIP TRANSITIONS: claim; unclaim/release (including --force and
+	// the --if-assignee CAS form); lease reclaim; an assignee change through
+	// the generic update path or an import/upsert; and reopen (closed->open)
+	// through the reopen verb or the generic update path. Content mutations
+	// never move it, and neither does close. Every successful claim CAS bumps
+	// — including a same-actor claim of an open row already assigned to that
+	// actor, which is what lets one session of a user fence out another
+	// session of the same user; the idempotent same-actor re-claim of an
+	// already in_progress row misses the CAS entirely and does not bump.
+	//
+	// One exception on the import side: the upsert bump keys on an assignee
+	// change alone, so an import that flips a stored closed row back to open
+	// with the SAME assignee does not bump, where the reopen verb does.
+	// Import is convergence toward a peer's snapshot, not an ownership verb,
+	// and the fence is a live-coordination token — a routine sync must not
+	// retire the guards live workers hold here. See
+	// internal/storage/issueops/fence.go for the canonical policy.
+	//
+	// Unlike RowVersion it is deterministic and monotonic, so it rides the
+	// JSONL interchange and bd show --json: a caller can snapshot the value
+	// it decided on and quote it back as a precondition. omitempty keeps
+	// never-claimed rows byte-identical to their pre-fence export.
+	ClaimFence int64 `json:"claim_fence,omitempty"`
+
 	// ===== Concurrency (Go-only; never serialized) =====
 	// RowVersion is an opaque optimistic-concurrency token for the library's own
 	// Go call sites: the issues/wisps row_lock cell, a random non-zero value the
@@ -76,12 +102,15 @@ type Issue struct {
 	// --json goldens and bd export round-trips; a Go consumer reads
 	// issue.RowVersion directly instead.
 	//
-	// Coverage is deliberately partial: it changes on claim/close/unclaim and the
-	// generic update path, but NOT on direct-UPDATE paths that rewrite text
-	// without touching row_lock (RestoreFromSnapshotInTx, the compaction
-	// text-truncation path). For a complete change-detection key, combine it with
-	// updated_at (which those paths DO bump), status, and the label set
-	// (label-only and reopen writes change those, not row_lock).
+	// Coverage is deliberately partial: it changes on claim/close/unclaim, on
+	// reopen, and on the generic update path, but NOT on direct-UPDATE paths that
+	// rewrite text without touching row_lock (RestoreFromSnapshotInTx, the
+	// compaction text-truncation path). Reopen joined that list with migration
+	// 0062: the reopen verb now rewrites row_lock because every claim_fence bump
+	// must pair with one (see ClaimFence above and issueops/fence.go). For a
+	// complete change-detection key, combine it with updated_at (which those
+	// paths DO bump), status, and the label set (label-only writes change those,
+	// not row_lock).
 	//
 	// 0 appears only on legacy rows backfilled by migration 0054 (DEFAULT 0) that
 	// have not been mutated since; any issue created by the current code path is
@@ -1770,6 +1799,12 @@ func (s SortPolicy) IsValid() bool {
 type ReclaimedLease struct {
 	ID            string `json:"id"`
 	PreviousOwner string `json:"previous_owner"`
+	// ClaimFence is the row's Issue.ClaimFence AFTER the reclaim's bump: the
+	// previous holder is fenced out, and a caller quoting an older fence
+	// conflicts. No omitempty: a reclaim always bumps, so the post-bump value
+	// is always ≥ 1 and the tag could never fire — and an operator reading the
+	// JSON should see the field on every reclaimed row, not infer it.
+	ClaimFence int64 `json:"claim_fence"`
 }
 
 // ReclaimFilter scopes which stale-lease issues bd reclaim may revert. The

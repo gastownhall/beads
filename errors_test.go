@@ -62,6 +62,35 @@ func TestUpdateIssueOptionsIsExported(t *testing.T) {
 	}
 }
 
+// TestReExportFenceMismatch proves beads.ErrFenceMismatch composes through
+// errors.Is when wrapped — how a guarded-write caller detects a retired
+// ownership generation without importing internal/storage — and that the
+// ExpectedFence guard field is reachable on both exported options aliases, with
+// nil ("no check") as the zero value so a fence of 0 stays a real assertion.
+// Alias IDENTITY is not re-asserted here: TestReExportedSentinelIdentity's
+// table carries the ErrFenceMismatch row.
+func TestReExportFenceMismatch(t *testing.T) {
+	t.Parallel()
+
+	wrapped := fmt.Errorf("x: %w", beads.ErrFenceMismatch)
+	if !errors.Is(wrapped, beads.ErrFenceMismatch) {
+		t.Errorf("errors.Is(wrapped, beads.ErrFenceMismatch) = false; err = %v", wrapped)
+	}
+
+	zero := int64(0)
+	upd := beads.UpdateIssueOptions{ExpectedFence: &zero}
+	if upd.ExpectedFence == nil || *upd.ExpectedFence != 0 {
+		t.Fatalf("ExpectedFence did not round-trip through beads.UpdateIssueOptions: %+v", upd)
+	}
+	cls := beads.CloseIssueOptions{ExpectedFence: &zero}
+	if cls.ExpectedFence == nil || *cls.ExpectedFence != 0 {
+		t.Fatalf("ExpectedFence did not round-trip through beads.CloseIssueOptions: %+v", cls)
+	}
+	if (beads.UpdateIssueOptions{}).ExpectedFence != nil || (beads.CloseIssueOptions{}).ExpectedFence != nil {
+		t.Fatal("zero-value options must have a nil ExpectedFence (no check), so &0 stays a real guard")
+	}
+}
+
 // TestReExportedSentinelIdentity proves each public sentinel is the SAME value
 // as the internal one it aliases, so errors.Is composes across the package
 // boundary without any bridging.
@@ -77,6 +106,7 @@ func TestReExportedSentinelIdentity(t *testing.T) {
 		{"ErrAlreadyClaimed", beads.ErrAlreadyClaimed, storage.ErrAlreadyClaimed},
 		{"ErrNotClaimable", beads.ErrNotClaimable, storage.ErrNotClaimable},
 		{"ErrVersionMismatch", beads.ErrVersionMismatch, storage.ErrVersionMismatch},
+		{"ErrFenceMismatch", beads.ErrFenceMismatch, storage.ErrFenceMismatch},
 		{"ErrSelfDependency", beads.ErrSelfDependency, domain.ErrSelfDependency},
 		{"ErrDependencyCycle", beads.ErrDependencyCycle, domain.ErrDependencyCycle},
 		{"ErrFieldTooLong", beads.ErrFieldTooLong, types.ErrFieldTooLong},

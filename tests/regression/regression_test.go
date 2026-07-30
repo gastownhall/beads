@@ -525,6 +525,11 @@ var versionSpecificFields = []string{
 	"_type", "deleted_at", "deleted_by", "delete_reason", "original_type",
 	"comment_count", "dependency_count", "dependent_count",
 	"epic_total_children", "epic_closed_children", "epic_closeable",
+	// claim_fence postdates the baseline: any scenario that transitions
+	// ownership (reopen, claim, release) exports a fence the baseline has no
+	// column for, so comparing it would diff the feature rather than a
+	// regression.
+	"claim_fence",
 }
 
 // normalizeJSONL parses JSONL, normalizes each issue, applies ID canonicalization,

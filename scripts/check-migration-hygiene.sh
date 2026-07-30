@@ -23,9 +23,15 @@
 #      exists on the base branch. New files only. Fix-forward with a new
 #      migration instead: applied migration content is content-hashed
 #      (PR 4270), so editing history creates cross-clone hash skew.
+#   D. Every migration file ADDED relative to the base carries a version
+#      strictly above the base branch's highest (per directory). The cursor is
+#      MAX(version), so a migration numbered at or below an already-applied
+#      version never runs on an upgraded store while fresh clones do apply it —
+#      failure class 3 reached by a different road. Reserving a number for a
+#      concurrent PR leaves a hole and is fine; LANDING under the ceiling is not.
 #
-# Check C compares against $BASE_SHA if set (CI passes the PR base), else
-# origin/main, else main; it is skipped with a warning when no base is
+# Checks C and D compare against $BASE_SHA if set (CI passes the PR base), else
+# origin/main, else main; they are skipped with a warning when no base is
 # resolvable (e.g. shallow clone without the base commit).
 
 set -euo pipefail
@@ -133,7 +139,7 @@ if [ -z "$base" ]; then
 fi
 
 if [ -z "$base" ] || ! merge_base=$(git merge-base "$base" HEAD 2>/dev/null); then
-  echo "WARN (frozen migrations) no usable base ref; skipping check C." >&2
+  echo "WARN (frozen migrations) no usable base ref; skipping checks C and D." >&2
 else
   # Diff merge-base against the working tree (no HEAD) so local uncommitted
   # edits are caught too; in CI the tree is clean so this equals the PR diff.
@@ -150,6 +156,43 @@ else
   Write a NEW migration with the next version number instead.
 EOF
   fi
+
+  # --- Check D: new migrations land above the base's highest version ---------
+  # Per directory, like check A: migrations/ and migrations/ignored/ are
+  # independent sequences with independent cursors.
+  for dir in "$MIG_DIR" "$MIG_DIR/ignored"; do
+    # Anchored so the parent directory's listing does not swallow ignored/.
+    pattern="^${dir}/[0-9][0-9]*_.*\.up\.sql$"
+    base_max=$(
+      git ls-tree -r --name-only "$merge_base" -- "$dir" 2>/dev/null \
+        | grep -E "$pattern" \
+        | sed "s|^${dir}/||; s/^\([0-9][0-9]*\)_.*/\1/" \
+        | sort -n | tail -1
+    )
+    [ -n "$base_max" ] || continue
+    added=$(
+      git diff --name-only --diff-filter=A "$merge_base" -- "$dir" 2>/dev/null \
+        | grep -E "$pattern" || true
+    )
+    [ -n "$added" ] || continue
+    while IFS= read -r f; do
+      v=$(sed 's|.*/||; s/^\([0-9][0-9]*\)_.*/\1/' <<< "$f")
+      # 10# forces base 10: an unpadded 0018 is not valid octal.
+      if [ "$((10#$v))" -le "$((10#$base_max))" ]; then
+        fail=1
+        echo "FAIL (non-monotonic version) $f:"
+        echo "  version $v is not above $base_max, the highest already on the base branch."
+        cat <<EOF
+  The migration cursor is MAX(version) (schema.pendingVersions applies a file
+  only when its version is strictly greater than the recorded maximum), so a
+  store that has already applied $base_max will NEVER run $v — while a fresh
+  clone applies it during initial migration. The two populations then report
+  the same schema_migrations version with different actual schemas, silently
+  and permanently. Renumber this migration above $base_max.
+EOF
+      fi
+    done <<< "$added"
+  done
 fi
 
 if [ "$fail" -ne 0 ]; then

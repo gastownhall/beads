@@ -1,5 +1,6 @@
 [
   {
+    "claim_fence": 1,
     "comment_count": 0,
     "created_at": "<TS>",
     "created_by": "protocol-test",

@@ -109,6 +109,7 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	table := pickIssueTable(opts.UseWispsTable)
 
 	_, statusChanging := updates["status"]
+	_, assigneeChanging := updates["assignee"]
 	mergeOps := issueops.HasMergeOps(updates)
 
 	// When the status changes we need the prior row to reproduce the embedded
@@ -119,8 +120,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	// all four use the same snapshot; the ErrNoRows contract is preserved.
 	// Merge operations (metadata edits, note appends) need the same read: they
 	// are resolved against the row as seen by THIS unit-of-work transaction.
+	// An assignee write needs it too: whether it is an ownership transition
+	// (and so bumps claim_fence) is decided against the stored assignee, and
+	// the embedded path reads the row unconditionally for the same reason.
 	var oldIssue *types.Issue
-	if statusChanging || mergeOps {
+	if statusChanging || assigneeChanging || mergeOps {
 		var err error
 		oldIssue, err = r.Get(ctx, id, opts)
 		if err != nil {
@@ -171,6 +175,15 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	if statusChanging {
 		setClauses, args = issueops.ManageClosedAt(oldIssue, updates, setClauses, args)
 		setClauses, args = issueops.ManageStartedAt(oldIssue, updates, setClauses, args)
+	}
+
+	// Ownership transitions bump the fence, paired with the row_lock rewrite
+	// below in the same statement — the proxied path shares issueops'
+	// transition predicate so the two dispatch layers cannot drift (see
+	// issueops/fence.go). oldIssue is populated whenever the update can be one
+	// (status or assignee write).
+	if oldIssue != nil && issueops.IsOwnershipTransition(oldIssue.Status, oldIssue.Assignee, updates) {
+		setClauses = append(setClauses, issueops.FenceBumpExpr)
 	}
 
 	// Rewrite row_lock on every generic update, mirroring the classic
@@ -275,6 +288,8 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 	// (uow) path leaves row_lock unchanged — open to the cell-merge bug the
 	// row_lock invariant guards against (see issueops/lease.go). The lease
 	// itself is granted into the ephemeral leases table below, after the CAS.
+	// The same statement bumps claim_fence: every landed claim CAS is an
+	// ownership transition (see issueops/fence.go).
 	rowLockClause, rowLockArgs := issueops.RowLockClause()
 
 	// Mirror the primary path's pool-aware predicate (bd-bguz6): aliases in
@@ -315,9 +330,9 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		//nolint:gosec // G201: table is one of two hardcoded constants
 		res, err = r.runner.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
+			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s, %s
 			WHERE id = ? AND (%s) AND (%s)
-		`, table, rowLockClause, statusPredicate, assigneePredicate), args...)
+		`, table, issueops.FenceBumpExpr, rowLockClause, statusPredicate, assigneePredicate), args...)
 	} else {
 		args := append([]any{actor, now}, rowLockArgs...)
 		args = append(args, id)
@@ -326,9 +341,9 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		//nolint:gosec // G201: table is one of two hardcoded constants
 		res, err = r.runner.ExecContext(ctx, fmt.Sprintf(`
 			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, %s
+			SET assignee = ?, status = 'in_progress', updated_at = ?, %s, %s
 			WHERE id = ? AND (%s) AND (%s)
-		`, table, rowLockClause, statusPredicate, assigneePredicate), args...)
+		`, table, issueops.FenceBumpExpr, rowLockClause, statusPredicate, assigneePredicate), args...)
 	}
 	if err != nil {
 		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: %w", id, err)
@@ -362,10 +377,11 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 	}
 
 	// Grant the lease in the ephemeral leases table, mirroring
-	// issueops.ClaimIssueInTx. Wisps are never leased. This dual must stay in
-	// lockstep with the primary path (see the row_lock comment above).
+	// issueops.ClaimIssueInTx. Wisps are never leased. Both paths go through
+	// ClaimLeaseUpsert so the lease.auto grant policy cannot drift between
+	// them (see the row_lock comment above for the same lockstep rule).
 	if !opts.UseWispsTable {
-		if err := issueops.UpsertLeaseInTx(ctx, r.runner, id, actor, now, issueops.LeaseTTL(ctx)); err != nil {
+		if err := issueops.ClaimLeaseUpsert(ctx, r.runner, id, actor, now); err != nil {
 			return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: %w", id, err)
 		}
 	}
@@ -603,6 +619,11 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 	// RowVersion CAS token is stale-zero on read — the backend-divergent break
 	// the RowVersion contract (types.Issue.RowVersion) forbids. The duplicate-key
 	// path rewrites it too so an upsert also advances the token.
+	//
+	// Fence discipline on the duplicate-key path (see issueops/fence.go): an
+	// upsert that changes the stored assignee is an ownership transition, so
+	// its assignment comes FIRST, before assignee is reassigned below. The
+	// incoming fence is used for fresh rows only.
 	_, err := runner.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -614,7 +635,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
 			due_at, defer_until, metadata,
-			row_lock, storage_class
+			row_lock, storage_class, claim_fence
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
@@ -625,9 +646,10 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?,
-			?, ?
+			?, ?, ?
 		)
 		ON DUPLICATE KEY UPDATE
+			%s,
 			content_hash = VALUES(content_hash),
 			title = VALUES(title),
 			description = VALUES(description),
@@ -647,7 +669,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			close_reason = VALUES(close_reason),
 			metadata = VALUES(metadata),
 			row_lock = VALUES(row_lock)
-	`, table),
+	`, table, issueops.UpsertFenceAssignments(table, false)),
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		string(issue.Status), issue.Priority, string(issue.IssueType), nullString(issue.Assignee), nullIntPtr(issue.EstimatedMinutes),
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, nullStringPtr(issue.ExternalRef), issue.SpecID,
@@ -657,7 +679,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, jsonMetadata(issue.Metadata),
-		issueops.FreshRowLock(), nullString(string(issue.StorageClass.Normalize())),
+		issueops.FreshRowLock(), nullString(string(issue.StorageClass.Normalize())), issue.ClaimFence,
 	)
 	if err != nil {
 		return fmt.Errorf("db: insert into %s: %w", table, err)
@@ -1010,7 +1032,9 @@ func (r *issueSQLRepositoryImpl) GetEpicsEligibleForClosure(ctx context.Context)
 }
 
 func (r *issueSQLRepositoryImpl) UnclaimIssue(ctx context.Context, id, actor string, force bool) error {
-	if err := issueops.UnclaimIssueInTx(ctx, r.runner, id, actor, force); err != nil {
+	// nil fence: `bd unclaim --if-fence` is refused in proxied-server mode
+	// rather than silently dropped, so no guard ever reaches this path.
+	if err := issueops.UnclaimIssueInTx(ctx, r.runner, id, actor, force, nil); err != nil {
 		return fmt.Errorf("db: IssueSQLRepository.UnclaimIssue: %w", err)
 	}
 	return nil

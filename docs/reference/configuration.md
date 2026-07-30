@@ -5,7 +5,7 @@ description: Complete reference for bd configuration across config.yaml and data
 
 Complete configuration reference for beads.
 
-Last reviewed: 2026-07-10
+Last reviewed: 2026-07-29
 
 Freshness source: `cmd/bd/main.go`, `cmd/bd/config.go`, and `internal/configfile/`.
 
@@ -279,6 +279,7 @@ These are written to the Dolt database by `bd config set` and have no env var ov
 | `min_hash_length`, `max_hash_length` | Adaptive ID bounds (defaults `3` and `8`) |
 | `max_collision_prob` | Hash ID collision tolerance (default `0.25`) |
 | `doctor.suppress.*` | Suppress specific `bd doctor` warnings by check slug (warnings only; errors always show) |
+| `lease.auto` | Whether a claim stamps a recovery lease (default on; see [below](#claim-leases)) |
 
 Issue prefix (`issue_prefix`) is **not** settable via `bd config set` — use `bd init --prefix`, `bd bootstrap`, or `bd rename-prefix`.
 
@@ -350,6 +351,21 @@ bd config set max_collision_prob "0.01"   # Stricter collision tolerance (defaul
 bd config set min_hash_length "5"         # Force minimum 5-char IDs (default 3)
 bd config set max_hash_length "8"         # Upper bound (default 8)
 ```
+
+### Claim Leases
+
+By default every claim takes a lease: the worker keeps it alive with `bd heartbeat`, and when the worker dies the lease goes stale and `bd reclaim` reverts the issue to ready. That is the right default for a fleet with no other recovery authority.
+
+Deployments where an orchestrator already tracks worker liveness can turn automatic stamping off, so a fleet that does not heartbeat is never one stray `bd reclaim` away from mass-reverting live work:
+
+```bash
+bd lease disarm                  # flip lease.auto off and clear the armed leases
+bd config set lease.auto on      # re-arm (existing claims stay unleased until re-claimed)
+```
+
+`bd lease disarm` is the safe form of the flip: it turns stamping off and clears the leases already granted in one transaction, so no in-flight claim is left reclaimable. `bd config set lease.auto off` does the flip only. Neither releases anything — status, assignee and the claim fence (`claim_fence`, the ownership token `--if-fence` guards on) are untouched.
+
+With leases off, claims carry no lease, `bd reclaim` finds nothing to reap, and `bd heartbeat` on an unleased claim is rejected instead of quietly arming one. The sweep is one-shot rather than a standing rejection: an import can restore a live lease that rode the JSONL interchange, and re-arming `lease.auto` starts stamping again — `bd reclaim` handles either normally.
 
 ## Sync and Federation
 

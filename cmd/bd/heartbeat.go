@@ -29,6 +29,11 @@ and no history, so any cadence comfortably below the TTL is fine. Leases are
 only enforceable on the node that granted them; cross-machine claim visibility
 rides the issue's status and assignee, which do commit.
 
+On a store that turned automatic leases off ('bd lease disarm', config key
+lease.auto), heartbeat is a renewal and nothing more: an unleased claim is
+rejected rather than quietly armed, since arming one would put the claim back
+in reach of 'bd reclaim'.
+
 Examples:
   bd heartbeat bd-123
   bd hb bd-123`,

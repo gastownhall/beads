@@ -231,7 +231,7 @@ func TestClaimUnclaimVerifiedEndToEnd(t *testing.T) {
 		t.Fatalf("idempotent re-claim: %v", err)
 	}
 
-	if err := s.UnclaimIssue(ctx, id, "alice", false); err != nil {
+	if err := s.UnclaimIssue(ctx, id, "alice", false, nil); err != nil {
 		t.Fatalf("unclaim: %v", err)
 	}
 	assignee, status, err = s.readClaimState(ctx, id)
