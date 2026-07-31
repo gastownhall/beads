@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"strings"
 	"testing"
 )
@@ -82,15 +81,32 @@ func TestCurrentAdoptPolicyHonorsEnvKillSwitch(t *testing.T) {
 	} {
 		t.Run("BD_NO_REMOTE_ADOPT="+tc.env, func(t *testing.T) {
 			t.Setenv("BD_NO_REMOTE_ADOPT", tc.env)
-			if got := currentAdoptPolicy(false, false, true).Disabled; got != tc.want {
+			if got := currentAdoptPolicy(false, false, true, false).Disabled; got != tc.want {
 				t.Errorf("Disabled = %v, want %v", got, tc.want)
 			}
 		})
 	}
 
 	t.Setenv("BD_NO_REMOTE_ADOPT", "")
-	if !currentAdoptPolicy(false, true, true).Disabled {
+	if !currentAdoptPolicy(false, true, true, false).Disabled {
 		t.Error("--no-adopt alone did not disable adoption")
+	}
+}
+
+// --json is a machine contract: even on a TTY (agent harnesses often allocate
+// one), the policy must be non-interactive so a JSON consumer never blocks on
+// a prompt it cannot see. The refusal error is the correct surface instead.
+func TestCurrentAdoptPolicyJSONModeIsNotInteractive(t *testing.T) {
+	t.Setenv("BD_NO_REMOTE_ADOPT", "")
+	p := currentAdoptPolicy(false, false, true, true)
+	if p.Interactive {
+		t.Fatal("jsonMode policy is Interactive; bd sync --json on a pty would hang on the consent prompt")
+	}
+	if decision, refusal := decideRemoteAdoption(p); decision != adoptRefuse || refusal != adoptRefusedNonInteractive {
+		t.Fatalf("jsonMode without --yes: decision = %v/%v, want refuse/non-interactive", decision, refusal)
+	}
+	if decision, _ := decideRemoteAdoption(currentAdoptPolicy(true, false, true, true)); decision != adoptProceed {
+		t.Fatal("jsonMode with --yes must still proceed")
 	}
 }
 
@@ -99,11 +115,23 @@ func TestCurrentAdoptPolicyHonorsEnvKillSwitch(t *testing.T) {
 // going. An error that omits the URL does not fix that half.
 func TestAdoptionRefusedErrorNamesTheURL(t *testing.T) {
 	const url = "git+ssh://git@github.com/someone/public-repo.git"
-	msg := adoptionRefusedError(url).Error()
-	for _, want := range []string{url, "--yes", "--no-adopt", "BD_NO_REMOTE_ADOPT"} {
+	msg := adoptionRefusedError(url, pushAdoptOptIn).Error()
+	for _, want := range []string{url, "bd dolt push --yes", "--no-adopt", "BD_NO_REMOTE_ADOPT"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("refusal message does not mention %q:\n%s", want, msg)
 		}
+	}
+}
+
+// The refusal must name the command the user actually ran: steering a sync
+// user into `bd dolt push --yes` would trade their pull away.
+func TestAdoptionRefusedErrorNamesTheCallersCommand(t *testing.T) {
+	msg := adoptionRefusedError("git+ssh://git@github.com/x/y.git", syncAdoptOptIn).Error()
+	if !strings.Contains(msg, "bd sync --yes") {
+		t.Errorf("sync-path refusal does not offer bd sync --yes:\n%s", msg)
+	}
+	if strings.Contains(msg, "bd dolt push --yes") {
+		t.Errorf("sync-path refusal steers the user to bd dolt push:\n%s", msg)
 	}
 }
 
@@ -152,7 +180,7 @@ func TestApplyAdoptionConsentGatesTheWrite(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("BD_NO_REMOTE_ADOPT", "")
-			proceed, err := applyAdoptionConsent(url, tc.policy)
+			proceed, err := applyAdoptionConsent(url, tc.policy, pushAdoptOptIn)
 			if proceed != tc.wantProceed {
 				t.Errorf("proceed = %v, want %v", proceed, tc.wantProceed)
 			}
@@ -170,12 +198,11 @@ func TestApplyAdoptionConsentGatesTheWrite(t *testing.T) {
 // pass. It must refuse, not adopt.
 func TestApplyAdoptionConsentZeroPolicyRefuses(t *testing.T) {
 	t.Setenv("BD_NO_REMOTE_ADOPT", "")
-	proceed, err := applyAdoptionConsent("git+ssh://git@github.com/x/y.git", adoptPolicy{})
+	proceed, err := applyAdoptionConsent("git+ssh://git@github.com/x/y.git", adoptPolicy{}, pushAdoptOptIn)
 	if proceed {
 		t.Fatal("zero-value policy proceeded with adoption")
 	}
 	if err == nil {
 		t.Fatal("zero-value policy refused silently; the user gets no explanation")
 	}
-	_ = errors.Is(err, nil)
 }

@@ -695,7 +695,7 @@ func init() {
 // real thing in dolt_test.go; letting it run for real from a runSyncCommand
 // unit test would mutate whatever repo the tests happen to be run from. The
 // production binding is pinned by TestSyncAdoptGitOriginIsWiredToAdoption.
-var syncAdoptGitOrigin func(context.Context, storage.DoltStorage, adoptPolicy) (bool, error) = adoptGitOriginRemoteForPush
+var syncAdoptGitOrigin func(context.Context, storage.DoltStorage, adoptPolicy, adoptOptIn) (bool, error) = adoptGitOriginRemoteForPush
 
 func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	if usesProxiedServer() {
@@ -759,7 +759,7 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 		// history to the same derived remote, so it cannot be the soft way in.
 		syncYes, _ := cmd.Flags().GetBool("yes")
 		syncNoAdopt, _ := cmd.Flags().GetBool("no-adopt")
-		adopted, adoptErr := syncAdoptGitOrigin(rootCtx, st, currentAdoptPolicy(syncYes, syncNoAdopt, stdinIsTerminal()))
+		adopted, adoptErr := syncAdoptGitOrigin(rootCtx, st, currentAdoptPolicy(syncYes, syncNoAdopt, stdinIsTerminal(), jsonOutput), syncAdoptOptIn)
 		if adoptErr != nil {
 			return HandleErrorRespectJSON("sync failed: adopting git origin as Dolt remote: %v", adoptErr)
 		}

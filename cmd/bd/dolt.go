@@ -413,7 +413,7 @@ func printNoRemoteGuidance() {
 // decideRemoteAdoption in dolt_remote_adopt.go and applied here, after the URL
 // is known and before anything is written: nothing below this point is
 // reachable without either --yes or an interactive confirmation.
-func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage, policy adoptPolicy) (bool, error) {
+func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage, policy adoptPolicy, optIn adoptOptIn) (bool, error) {
 	configured, err := hasConfiguredRemote(ctx, st)
 	if err != nil || configured {
 		return false, err
@@ -428,7 +428,7 @@ func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage, po
 	}
 	remoteURL := normalizeRemoteURL(originURL)
 
-	if proceed, err := applyAdoptionConsent(remoteURL, policy); err != nil || !proceed {
+	if proceed, err := applyAdoptionConsent(remoteURL, policy, optIn); err != nil || !proceed {
 		return false, err
 	}
 
@@ -481,7 +481,10 @@ var doltPushCmd = &cobra.Command{
 	Short:         "Push commits to Dolt remote",
 	Long: `Push local Dolt commits to the configured remote.
 
-Requires a Dolt remote to be configured in the database directory.
+Requires a Dolt remote to be configured in the database directory. With no
+remote configured, bd can adopt one derived from git origin — only with
+consent: interactively, or via --yes; --no-adopt or BD_NO_REMOTE_ADOPT=1
+disables adoption entirely.
 For Hosted Dolt, set DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD environment
 variables for authentication.
 
@@ -534,8 +537,8 @@ The remote must already exist (see 'bd dolt remote add').`,
 		}
 		assumeYes, _ := cmd.Flags().GetBool("yes")
 		noAdopt, _ := cmd.Flags().GetBool("no-adopt")
-		policy := currentAdoptPolicy(assumeYes, noAdopt, stdinIsTerminal())
-		if adopted, err := adoptGitOriginRemoteForPush(ctx, st, policy); err != nil {
+		policy := currentAdoptPolicy(assumeYes, noAdopt, stdinIsTerminal(), jsonOutput)
+		if adopted, err := adoptGitOriginRemoteForPush(ctx, st, policy, pushAdoptOptIn); err != nil {
 			return HandleError("%v", err)
 		} else if adopted {
 			fmt.Println("Configured Dolt remote origin from git origin.")

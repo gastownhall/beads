@@ -23,6 +23,22 @@ import (
 // right default for "proceed with the thing you asked for" and the wrong one
 // for this, which is why adoption does not reuse it.
 
+// adoptOptIn is the caller's identity for adoption messages: the command that
+// re-runs this operation with consent, and the verb the interactive question
+// uses. The sync path shares the whole adoption flow with push
+// (syncAdoptGitOrigin), and a refusal that steers a sync user into
+// `bd dolt push --yes` would trade their pull away — the opt-in must name the
+// command they actually ran.
+type adoptOptIn struct {
+	rerun  string // e.g. "bd dolt push --yes"
+	action string // completes "Adopt this remote and <action>?"
+}
+
+var (
+	pushAdoptOptIn = adoptOptIn{rerun: "bd dolt push --yes", action: "push"}
+	syncAdoptOptIn = adoptOptIn{rerun: "bd sync --yes", action: "sync"}
+)
+
 // adoptPolicy carries the caller's consent inputs for git-origin adoption.
 // It is a value, not global state, so the decision is testable without a TTY,
 // a store, or a repo to mutate.
@@ -80,11 +96,14 @@ func decideRemoteAdoption(p adoptPolicy) (adoptDecision, adoptRefusal) {
 
 // currentAdoptPolicy builds the policy from flags plus BD_NO_REMOTE_ADOPT.
 // stdinIsTerminal is injected so tests do not depend on how they were invoked.
-func currentAdoptPolicy(assumeYes, noAdopt, stdinIsTerminal bool) adoptPolicy {
+// jsonMode forces non-interactive even on a TTY: --json is a machine contract,
+// and a consent prompt inside it hangs whatever is parsing the stream (same
+// rule as validateHookMigrationApplyConsent — JSON callers opt in with --yes).
+func currentAdoptPolicy(assumeYes, noAdopt, stdinIsTerminal, jsonMode bool) adoptPolicy {
 	return adoptPolicy{
 		AssumeYes:   assumeYes,
 		Disabled:    noAdopt || envNoRemoteAdopt(),
-		Interactive: stdinIsTerminal,
+		Interactive: stdinIsTerminal && !jsonMode,
 	}
 }
 
@@ -101,7 +120,7 @@ func stdinIsTerminal() bool {
 // names the URL that would have been adopted, because "a remote was derived"
 // is useless without knowing which one — the reporter's whole complaint was
 // not knowing where the upload was going.
-func adoptionRefusedError(remoteURL string) error {
+func adoptionRefusedError(remoteURL string, optIn adoptOptIn) error {
 	return fmt.Errorf(`no Dolt remote is configured, and bd will not adopt one without consent.
 
   Derived from git origin: %s
@@ -109,10 +128,10 @@ func adoptionRefusedError(remoteURL string) error {
 This would publish your entire issue history to that remote. If it is what you
 want, opt in explicitly:
 
-  bd dolt push --yes                     # adopt the derived remote and push
+  %-38s # adopt the derived remote and %s
   bd dolt remote add origin <url>        # or name the remote yourself first
 
-To never adopt implicitly, pass --no-adopt or set BD_NO_REMOTE_ADOPT=1.`, remoteURL)
+To never adopt implicitly, pass --no-adopt or set BD_NO_REMOTE_ADOPT=1.`, remoteURL, optIn.rerun, optIn.action)
 }
 
 // applyAdoptionConsent is the gate as the push path uses it: given a derived
@@ -124,15 +143,15 @@ To never adopt implicitly, pass --no-adopt or set BD_NO_REMOTE_ADOPT=1.`, remote
 //
 // proceed=false with err=nil is the deliberate --no-adopt case: the caller
 // falls through to its ordinary no-remote handling rather than failing.
-func applyAdoptionConsent(remoteURL string, policy adoptPolicy) (bool, error) {
+func applyAdoptionConsent(remoteURL string, policy adoptPolicy, optIn adoptOptIn) (bool, error) {
 	switch decision, refusal := decideRemoteAdoption(policy); decision {
 	case adoptRefuse:
 		if refusal == adoptRefusedNonInteractive {
-			return false, adoptionRefusedError(remoteURL)
+			return false, adoptionRefusedError(remoteURL, optIn)
 		}
 		return false, nil
 	case adoptAsk:
-		if !confirmRemoteAdoption(remoteURL) {
+		if !confirmRemoteAdoption(remoteURL, optIn) {
 			return false, fmt.Errorf("remote adoption declined; nothing was written and nothing was pushed")
 		}
 		return true, nil
@@ -149,7 +168,7 @@ func applyAdoptionConsent(remoteURL string, policy adoptPolicy) (bool, error) {
 // the user's git identity in their repo, which is a surprise worth disclosing
 // before the fact rather than in a line printed after it happened (#5068
 // acceptance item 4).
-func confirmRemoteAdoption(remoteURL string) bool {
+func confirmRemoteAdoption(remoteURL string, optIn adoptOptIn) bool {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "No Dolt remote is configured for this rig.")
 	fmt.Fprintf(os.Stderr, "  Derived from git origin: %s\n", remoteURL)
@@ -160,7 +179,7 @@ func confirmRemoteAdoption(remoteURL string) bool {
 	fmt.Fprintln(os.Stderr, "  • commit that config change under your git identity")
 	fmt.Fprintln(os.Stderr, "  • upload your full issue history there")
 	fmt.Fprintln(os.Stderr, "")
-	fmt.Fprint(os.Stderr, "Adopt this remote and push? [y/N] ")
+	fmt.Fprintf(os.Stderr, "Adopt this remote and %s? [y/N] ", optIn.action)
 
 	reader := bufio.NewReader(os.Stdin)
 	line, _ := reader.ReadString('\n')
