@@ -4,10 +4,14 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/backends"
 )
 
 func validateConfiguredBackend(cfg *configfile.Config) error {
 	if cfg == nil {
+		return nil
+	}
+	if backends.Registered(cfg.Backend) {
 		return nil
 	}
 	switch cfg.Backend {
@@ -18,6 +22,15 @@ func validateConfiguredBackend(cfg *configfile.Config) error {
 	default:
 		return configfile.UnknownBackendError(cfg.Backend)
 	}
+}
+
+// registeredBackendWorkspaceIsBeadsDir reports whether metadata selects a
+// backend that has no separately discoverable local database.
+func registeredBackendWorkspaceIsBeadsDir(cfg *configfile.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	return backends.WorkspaceIsBeadsDir(cfg.GetBackend())
 }
 
 func requireDoltBackend(cfg *configfile.Config) error {

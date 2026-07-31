@@ -17,6 +17,8 @@ import (
 
 	"github.com/steveyegge/beads/internal/atomicfile"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/fdhygiene"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
@@ -509,6 +511,17 @@ func forkExecChild(rootDir string, opts OpenOpts, port int, stopEpoch string, lo
 	released = true
 	lock.Unlock()
 	beforeProxyChildStart()
+
+	// GH#4634: same hazard as the direct sql-server spawn, one hop further
+	// out. The proxy child is detached and long-lived, and it starts the
+	// sql-server itself, so a caller's non-CLOEXEC descriptor would otherwise
+	// be inherited twice over and pinned for the proxy's whole lifetime.
+	if leaked := fdhygiene.MarkInheritedCloexec(); len(leaked) > 0 {
+		// debug.Logf, not log.Printf: this fires in normal operation whenever
+		// the caller's environment leaves any fd open, and the parent's stderr
+		// may be parsed script output.
+		debug.Logf("dbproxy: marked %d inherited fd(s) close-on-exec before starting proxy child: %v", len(leaked), leaked)
+	}
 
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()

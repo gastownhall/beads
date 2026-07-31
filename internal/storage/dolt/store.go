@@ -230,6 +230,56 @@ func autoStartRelease(serverDir string) error {
 	return nil
 }
 
+// undoRejectedAutoStart cleans up the side effects of a speculative
+// auto-start that newServerMode's fail-closed checks (GH#4052) decided not
+// to use.
+//
+// It restores the port file to the pre-call snapshot: EnsureRunningDetailed
+// writes serverDir's port file with the new server's actual port before
+// either fail-closed check runs (Start()'s writePortFile, or the
+// adopt-existing-server path's EnsurePortFile), and that port file is the
+// second-highest-precedence port source. Left in place, it would let a
+// second, identical invocation resolve the port file instead of the
+// authoritative source that just failed, adopt the server we declined to
+// use, and silently succeed — permanently disarming the guard after exactly
+// one invocation.
+//
+// When we spawned the server ourselves (startedByUs), it also stops it: we
+// have decided not to use it, so leaving a stray dolt process running is an
+// unrequested side effect. When autoStartedDir is set, the server is
+// refcount-tracked (the test/test-database path via autoStartAcquire); that
+// path already stops the server once the refcount reaches zero, so
+// autoStartRelease is used instead of a direct Stop to avoid pulling the rug
+// out from under another store instance sharing the same auto-started
+// server. An adopted pre-existing server (startedByUs == false) is left
+// running — we didn't start it, so we don't stop it, but its port file
+// write must still be undone.
+//
+// Best-effort throughout: cleanup failures are reported on stderr but never
+// returned, so they cannot mask the caller's fail-closed error, which is the
+// one that matters.
+func undoRejectedAutoStart(serverDir string, startedByUs bool, autoStartedDir string, snap doltserver.PortFileSnapshot, snapErr error) {
+	if startedByUs {
+		if autoStartedDir != "" {
+			if err := autoStartRelease(autoStartedDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: failed to stop rejected auto-started dolt server: %v\n", err)
+			}
+		} else if err := doltserver.IgnoreNotRunning(stopRejectedAutoStartedServer(serverDir)); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to stop rejected auto-started dolt server: %v\n", err)
+		}
+	}
+	if snapErr != nil {
+		// The pre-call snapshot itself failed (e.g. a permissions error
+		// reading an existing file) — restoring a zero-value snapshot here
+		// could wrongly delete a port file we never actually read. Leave the
+		// port file alone rather than guess.
+		return
+	}
+	if err := doltserver.RestorePortFile(serverDir, snap); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to restore port file after rejected auto-start: %v\n", err)
+	}
+}
+
 // shouldStopAutoStartedServerOnClose reports whether an auto-started server
 // should be treated as test-owned cleanup state instead of a normal repo-local
 // server. In real repos, auto-start should behave like a persistent helper
@@ -327,6 +377,25 @@ type Config struct {
 	ServerUser     string // MySQL user (default: root)
 	ServerPassword string // MySQL password (default: empty, can be set via BEADS_DOLT_PASSWORD)
 	ServerTLS      bool   // Enable TLS for server connections (required for Hosted Dolt)
+
+	// ServerPortSource records which step of doltserver's port-resolution
+	// chain (or the env-var read in applyConfigDefaults) produced ServerPort.
+	// Zero value (doltserver.PortSourceUnset) when ServerPort was never
+	// resolved from a source (e.g. left 0, or set directly by a caller that
+	// bypassed applyConfigDefaults). Consulted by newServerMode's auto-start
+	// path to decide whether silently retargeting to a different port is
+	// safe (GH#4052).
+	ServerPortSource doltserver.PortSource
+
+	// ServerPortSharedServer mirrors doltserver.Config.PortSharedServer:
+	// true when ServerPort was resolved via shared-server mode
+	// (BEADS_DOLT_SHARED_SERVER=1). In shared-server mode, auto-start's
+	// EnsureRunningDetailed(resolvedBeadsDir) always spins up a repo-local
+	// server (a different database than the shared one), so a port change
+	// here is never a benign refresh regardless of ServerPortSource —
+	// consulted by newServerMode's auto-start path alongside
+	// ServerPortSource.IsAuthoritative() (GH#4052).
+	ServerPortSharedServer bool
 
 	// Remote auth for Hosted Dolt push/pull (optional)
 	// When set, Push/Pull use the --user flag and set DOLT_REMOTE_PASSWORD env var.
@@ -1222,6 +1291,11 @@ func applyConfigDefaults(cfg *Config) {
 	if envPort != "" {
 		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
 			cfg.ServerPort = p
+			// This env read happens before doltserver.DefaultConfig is
+			// consulted below, but it is the same authoritative source
+			// (BEADS_DOLT_SERVER_PORT / legacy BEADS_DOLT_PORT) — record it
+			// so the auto-start fail-closed check in newServerMode sees it.
+			cfg.ServerPortSource = doltserver.PortSourceEnv
 		}
 	}
 	// If env var didn't provide a port, consult the full resolution chain:
@@ -1237,6 +1311,8 @@ func applyConfigDefaults(cfg *Config) {
 		if resolveDir != "" {
 			if resolved := doltserver.DefaultConfig(resolveDir); resolved.Port > 0 {
 				cfg.ServerPort = resolved.Port
+				cfg.ServerPortSource = resolved.PortSource
+				cfg.ServerPortSharedServer = resolved.PortSharedServer
 			}
 		}
 	}
@@ -1428,6 +1504,19 @@ func resolveSocketTransport(socket, host string, port int, timeout time.Duration
 	return socket // both down (or no TCP port) — keep socket for the error path
 }
 
+// ensureRunningDetailed starts (or reuses) the repo-local auto-started dolt
+// sql-server. Declared as a var (not a plain call) so unit tests can stub
+// auto-start outcomes — including a retargeted port — without spawning a
+// real dolt sql-server process.
+var ensureRunningDetailed = doltserver.EnsureRunningDetailed
+
+// stopRejectedAutoStartedServer stops a repo-local dolt sql-server that
+// newServerMode's fail-closed checks (GH#4052) decided not to use. Declared
+// as a var (matching ensureRunningDetailed above) so unit tests can stub it
+// and assert whether it was invoked, without spawning or killing a real
+// dolt sql-server process.
+var stopRejectedAutoStartedServer = doltserver.Stop
+
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
 func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
@@ -1474,7 +1563,24 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		// to manage their own server lifecycle.
 		canAutoStart := serverOpenCanAutoStart(cfg)
 		if canAutoStart {
-			port, startedByUs, startErr := doltserver.EnsureRunningDetailed(resolvedBeadsDir)
+			// Snapshot the port file's exact pre-call state before letting
+			// EnsureRunningDetailed write to it. Start() (and the
+			// adopt-existing-server path) write serverDir's port file with
+			// the actual listening port *inside* EnsureRunningDetailed —
+			// before either fail-closed check below runs. Left in place, a
+			// fail-closed return here still leaves that new port findable
+			// via the port-file source (PortSourcePortFile, non-authoritative),
+			// so a second, identical invocation would resolve the port file
+			// instead of the authoritative source, adopt the server we just
+			// declined to use, and silently succeed — permanently disarming
+			// the guard after exactly one invocation (GH#4052 round 3). The
+			// fail-closed branches below restore this snapshot before
+			// returning so a retry re-triggers the same check.
+			portFileSnap, snapErr := doltserver.SnapshotPortFile(serverDir)
+			if snapErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not snapshot port file before auto-start: %v\n", snapErr)
+			}
+			port, startedByUs, startErr := ensureRunningDetailed(resolvedBeadsDir)
 			if startErr != nil {
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
 					"To start manually: bd dolt start\n"+
@@ -1491,6 +1597,60 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			// Update port — EnsureRunning allocates an ephemeral port
 			if port != cfg.ServerPort {
 				if cfg.ServerPort > 0 {
+					// A configured port is either an authoritative user
+					// assertion (env var, project/global config.yaml,
+					// metadata.json) or bd's own port-file bookkeeping
+					// (GH#4052). Silently retargeting an authoritative port
+					// can land the write on the wrong project's database
+					// (e.g. a shared-server host serving multiple repos);
+					// only bd's own bookkeeping is safe to replace without
+					// confirmation.
+					//
+					// Shared-server mode is a second, orthogonal reason to
+					// fail closed regardless of ServerPortSource: the
+					// configured port resolved from the *shared* server
+					// directory, but EnsureRunningDetailed(resolvedBeadsDir)
+					// above always auto-starts a *repo-local* server — a
+					// different database than the shared one. Retargeting
+					// there is never a benign port refresh; it means the
+					// shared server is down and bd just silently wrote
+					// somewhere else instead (GH#4052, "Shared-server mode:
+					// write commands report success when Dolt is
+					// unreachable").
+					if cfg.ServerPortSharedServer {
+						undoRejectedAutoStart(serverDir, startedByUs, autoStartedDir, portFileSnap, snapErr)
+						if breaker != nil {
+							breaker.RecordFailure()
+						}
+						return nil, fmt.Errorf(
+							"Shared Dolt server configured at port %d (source: %s) is unreachable; "+
+								"auto-start started a repo-local server on port %d instead, but bd will "+
+								"not silently write to it\n\n"+
+								"A repo-local server is a different database than the shared one, so "+
+								"using port %d here would silently write to the wrong database.\n\n"+
+								"To proceed:\n"+
+								"  - Restart the shared Dolt server: bd dolt start\n"+
+								"  - Or check why it stopped responding on port %d before retrying",
+							cfg.ServerPort, cfg.ServerPortSource, port, port, cfg.ServerPort)
+					}
+					if cfg.ServerPortSource.IsAuthoritative() {
+						undoRejectedAutoStart(serverDir, startedByUs, autoStartedDir, portFileSnap, snapErr)
+						if breaker != nil {
+							breaker.RecordFailure()
+						}
+						return nil, fmt.Errorf(
+							"Dolt server configured at port %d (source: %s) is unreachable; "+
+								"auto-start started a new server on port %d, but bd will not "+
+								"silently use a different port than the one you configured\n\n"+
+								"The configured port may be pointing at a shared-server host "+
+								"serving a different project's database; using port %d instead "+
+								"could silently write to the wrong database.\n\n"+
+								"To proceed:\n"+
+								"  - Start the configured server manually: bd dolt start\n"+
+								"  - Or remove/change the pinned port (env var, .beads/config.yaml "+
+								"dolt.port, or global config) if port %d is stale",
+							cfg.ServerPort, cfg.ServerPortSource, port, port, cfg.ServerPort)
+					}
 					fmt.Fprintf(os.Stderr, "Warning: Dolt server endpoint changed: port %d → %d (auto-start)\n", cfg.ServerPort, port)
 					fmt.Fprintf(os.Stderr, "  Previous port was unreachable. If other tools expect port %d, they may see stale data.\n", cfg.ServerPort)
 					fmt.Fprintf(os.Stderr, "  To pin a port: set dolt.port in .beads/config.yaml\n")
@@ -1548,7 +1708,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	}
 
 	// Server mode: connect via MySQL protocol to dolt sql-server
-	db, connStr, createdDatabase, err := openServerConnection(ctx, cfg)
+	db, connStr, dbFacts, err := openServerConnection(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1599,17 +1759,38 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	if err := schema.CheckForwardDrift(ctx, db); err != nil {
 		return nil, err
 	}
-	// A gateway server owns the schema: it provisions each project at its deployed bd
-	// version, so a client must never run migrations (DDL) against it. Treat it like
-	// ReadOnly for schema — the forward-drift guard above still protects a stale client
-	// binary.
-	if !cfg.ReadOnly && !cfg.Gateway {
-		if err := store.initSchema(ctx, createdDatabase); err != nil {
-			return nil, fmt.Errorf("failed to initialize schema: %w", err)
-		}
-	}
 
-	if !cfg.CreateIfMissing {
+	// Identity verification runs whenever we did not just create the database
+	// ourselves: the classic !CreateIfMissing "connect to an existing DB" path,
+	// and — critically — the CreateIfMissing:true "init" path when the target
+	// database turns out to already exist on the server. Without the latter,
+	// `bd init` against a shared server silently adopts a foreign project's
+	// existing database instead of failing, because CreateIfMissing:true used
+	// to skip the check unconditionally regardless of whether anything was
+	// actually created (GH#4637). A genuinely new database (dbAlreadyExisted
+	// == false) still skips verification: there is nothing to compare against
+	// yet, and the per-field soft-skips below already make this a no-op for a
+	// brand-new database in the !CreateIfMissing case too.
+	//
+	// This must run BEFORE store.initSchema below: initSchema runs migrations
+	// and Dolt commits against the database, so verifying first means a
+	// foreign existing database is rejected before bd writes anything into
+	// it, not after. On a database with no bd schema yet, GetMetadata errors
+	// and the verifier soft-skips, so this ordering does not change behavior
+	// for a genuinely fresh database.
+	//
+	// Gateway is effectively excluded from the alreadyExisted branch because
+	// openServerConnection never probes existence for it (see the Gateway
+	// branch below) and always returns alreadyExisted == false: gateway
+	// identity is not enforced here at all. That is deliberate, not an
+	// oversight — a hosted database's identity is server-authoritative, and
+	// cmd/bd/init.go already implements the correct reconciliation for it via
+	// resolveInitProjectID, adopting the server's _project_id onto a stale or
+	// missing local one on every init, including re-init, which relies on
+	// this open not hard-failing first. This gap is specific to Part A's
+	// server-existence check; it does not reopen the separate "foreign
+	// server, no bd database at all" gap tracked as Part B (mybd-y18b).
+	if !cfg.CreateIfMissing || dbFacts.alreadyExisted {
 		var verifyErr error
 		if cfg.Database == doltserver.GlobalDatabaseName {
 			verifyErr = store.verifyGlobalProjectIdentity(ctx, cfg.BeadsDir)
@@ -1618,6 +1799,16 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		}
 		if verifyErr != nil {
 			return nil, verifyErr
+		}
+	}
+
+	// A gateway server owns the schema: it provisions each project at its deployed bd
+	// version, so a client must never run migrations (DDL) against it. Treat it like
+	// ReadOnly for schema — the forward-drift guard above still protects a stale client
+	// binary.
+	if !cfg.ReadOnly && !cfg.Gateway {
+		if err := store.initSchema(ctx, dbFacts.created); err != nil {
+			return nil, fmt.Errorf("failed to initialize schema: %w", err)
 		}
 	}
 
@@ -1894,17 +2085,36 @@ func applyPoolLimits(db *sql.DB, cfg *Config) {
 	db.SetConnMaxIdleTime(idle)
 }
 
-// openServerConnection opens a connection to a dolt sql-server via MySQL
-// protocol. The returned bool reports whether THIS call created the target
-// database (see the bare-CREATE ownership arbitration below) — server-mode's
-// analog of the uow path's `created` signal (#5042), threaded through to
-// initSchema so only the proven creator arms schema.WithFreshBootstrapHeal.
-func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bool, error) {
+// serverConnFacts reports what openServerConnection established about the
+// target database while connecting. The two fields are deliberately NOT
+// inverses of each other: for a gateway database, existence is never probed,
+// so both are false — neither "we created it" nor "it was already there" is
+// proven, and each caller's gate must fail closed on its own terms.
+type serverConnFacts struct {
+	// created reports whether THIS call's bare CREATE DATABASE won the
+	// ownership arbitration and actually created the database — server-mode's
+	// analog of the uow path's `created` signal (#5042). Threaded through to
+	// initSchema so only the proven creator arms schema.WithFreshBootstrapHeal.
+	created bool
+
+	// alreadyExisted reports whether the database was proven to exist on the
+	// server before this call: either the SHOW DATABASES probe found it, or
+	// our CREATE DATABASE was refused with "database exists" (1007). Callers
+	// use it to decide whether project-identity verification applies even
+	// when CreateIfMissing is true (see the newServerMode gate around
+	// verifyProjectIdentity, GH#4637).
+	alreadyExisted bool
+}
+
+// openServerConnection connects to (and if needed creates) the target database
+// on a dolt sql-server via MySQL protocol. See serverConnFacts for what the
+// returned facts mean and why they are not a single bool.
+func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, serverConnFacts, error) {
 	connStr := buildServerDSN(cfg, cfg.Database)
 
 	db, err := sql.Open("mysql", connStr)
 	if err != nil {
-		return nil, "", false, fmt.Errorf("failed to open Dolt server connection: %w", err)
+		return nil, "", serverConnFacts{}, fmt.Errorf("failed to open Dolt server connection: %w", err)
 	}
 
 	// Configure the pool. *sql.DB is safe for concurrent use and manages its
@@ -1929,11 +2139,21 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 	// above would close the *sql.DB we just handed the caller.
 	if cfg.Gateway {
 		if err := db.PingContext(ctx); err != nil {
-			return nil, "", false, fmt.Errorf("failed to connect to gateway server %s:%d (database %q): %w",
+			return nil, "", serverConnFacts{}, fmt.Errorf("failed to connect to gateway server %s:%d (database %q): %w",
 				cfg.ServerHost, cfg.ServerPort, cfg.Database, err)
 		}
 		connReady = true
-		return db, connStr, false, nil
+		// Neither fact is established for a gateway database: we did not
+		// create it, and existence was never probed, so we cannot honestly
+		// report alreadyExisted either. The zero value is what the
+		// newServerMode caller relies on to skip its alreadyExisted-forced
+		// identity check for Gateway. That is intentional, not a leftover
+		// gap: gateway identity is reconciled (not enforced at open) by
+		// cmd/bd/init.go's resolveInitProjectID, which adopts the
+		// server-authoritative _project_id onto a stale or missing local one
+		// on every init, including re-init. It is also correct for `created`:
+		// an unproven creator must never arm fresh-bootstrap heal.
+		return db, connStr, serverConnFacts{}, nil
 	}
 
 	// Ensure database exists (may need to create it)
@@ -1941,13 +2161,13 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 	initConnStr := buildServerDSN(cfg, "")
 	initDB, err := sql.Open("mysql", initConnStr)
 	if err != nil {
-		return nil, "", false, fmt.Errorf("failed to open init connection: %w", err)
+		return nil, "", serverConnFacts{}, fmt.Errorf("failed to open init connection: %w", err)
 	}
 	defer func() { _ = initDB.Close() }()
 
 	// Validate database name to prevent SQL injection via backtick escaping
 	if err := ValidateDatabaseName(cfg.Database); err != nil {
-		return nil, "", false, fmt.Errorf("invalid database name %q: %w", cfg.Database, err)
+		return nil, "", serverConnFacts{}, fmt.Errorf("invalid database name %q: %w", cfg.Database, err)
 	}
 
 	// FIREWALL: Never create test databases on the production server.
@@ -1956,7 +2176,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 	// Production-port detection generalized via isProductionPort so non-3307
 	// production deployments are covered (AD-01).
 	if isTestDatabaseName(cfg.Database) && isProductionPort(cfg) {
-		return nil, "", false, fmt.Errorf(
+		return nil, "", serverConnFacts{}, fmt.Errorf(
 			"REFUSED: will not CREATE DATABASE %q on production port %d — "+
 				"this is a test database name on the production server (see DOLT-WAR-ROOM.md)",
 			cfg.Database, cfg.ServerPort)
@@ -1965,6 +2185,10 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 	// Check if the database already exists before deciding whether to create it.
 	// This prevents the shadow database bug: without CreateIfMissing, connecting
 	// to a server that lacks the expected database is an error (not silent creation).
+	// The result also feeds the caller's identity-verification gate: a
+	// CreateIfMissing:true init that lands on an already-existing database
+	// must still verify project identity (GH#4637) — only a database this
+	// call creates from scratch is exempt.
 	//
 	// Uses SHOW DATABASES + iterate for exact match instead of SHOW DATABASES LIKE,
 	// because LIKE treats _ and % as wildcards and Dolt does not support backslash
@@ -1972,7 +2196,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 	// match unrelated databases with LIKE.
 	dbExists, checkErr := databaseExistsOnServer(ctx, initDB, cfg.Database)
 	if checkErr != nil {
-		return nil, "", false, fmt.Errorf("failed to check if database %q exists on server %s:%d: %w",
+		return nil, "", serverConnFacts{}, fmt.Errorf("failed to check if database %q exists on server %s:%d: %w",
 			cfg.Database, cfg.ServerHost, cfg.ServerPort, checkErr)
 	}
 
@@ -1987,7 +2211,7 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 	created := false
 	if !dbExists {
 		if !cfg.CreateIfMissing {
-			return nil, "", false, databaseNotFoundError(cfg)
+			return nil, "", serverConnFacts{}, databaseNotFoundError(cfg)
 		}
 
 		// Bare CREATE DATABASE (no IF NOT EXISTS): the server arbitrates
@@ -2005,13 +2229,19 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 			if !strings.Contains(errLower, "database exists") && !strings.Contains(errLower, "1007") {
 				// Check for connection refused - server likely not running
 				if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
-					return nil, "", false, fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using an orchestrator",
+					return nil, "", serverConnFacts{}, fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gt dolt start    # If using an orchestrator",
 						cfg.ServerHost, cfg.ServerPort, err)
 				}
-				return nil, "", false, fmt.Errorf("failed to create database: %w", err)
+				return nil, "", serverConnFacts{}, fmt.Errorf("failed to create database: %w", err)
 			}
 			// Lost the create race (or a benign TOCTOU with the dbExists
-			// check above): not ours, heal stays off.
+			// check above): not ours, heal stays off. The refusal IS proof of
+			// existence, though — another process won the CREATE DATABASE
+			// race between our SHOW DATABASES probe and this call — so
+			// correct dbExists even though the probe reported false. The
+			// caller's identity-verification gate depends on this being
+			// accurate, not just on the initial probe.
+			dbExists = true
 		}
 	}
 
@@ -2033,11 +2263,11 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, bo
 		}
 		return nil
 	}, backoff.WithContext(bo, ctx)); err != nil {
-		return nil, "", false, fmt.Errorf("database %q not available after CREATE DATABASE: %w", cfg.Database, err)
+		return nil, "", serverConnFacts{}, fmt.Errorf("database %q not available after CREATE DATABASE: %w", cfg.Database, err)
 	}
 
 	connReady = true
-	return db, connStr, created, nil
+	return db, connStr, serverConnFacts{created: created, alreadyExisted: dbExists}, nil
 }
 
 // databaseExistsOnServer checks if a database with the exact given name exists

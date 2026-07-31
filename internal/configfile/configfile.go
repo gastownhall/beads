@@ -11,13 +11,14 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage/backendnames"
 )
 
 const ConfigFileName = "metadata.json"
 
 type Config struct {
 	Database string `json:"database"`
-	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default); legacy "postgres"/"mysql"/"sqlite" values are rejection tombstones. Read via GetBackend().
+	Backend  string `json:"backend,omitempty"` // Storage backend: "dolt" (default), a registered extension, or a legacy rejection tombstone. Read via GetBackend().
 
 	// Deletions configuration
 	DeletionsRetentionDays int `json:"deletions_retention_days,omitempty"` // 0 means use default (3 days)
@@ -249,19 +250,21 @@ func (c *Config) GetCapabilities() BackendCapabilities {
 	return CapabilitiesForBackend(backend)
 }
 
-// IsSupportedBackend reports whether backend selects an implementation shipped by
-// beads. The empty value is the legacy/default spelling of Dolt.
+// IsSupportedBackend reports whether backend selects Dolt or a backend
+// registered by this binary. The empty value is the legacy/default spelling
+// of Dolt. OSS registers no alternate backends.
 func IsSupportedBackend(backend string) bool {
-	return backend == "" || backend == BackendDolt
+	return backend == "" || backend == BackendDolt || backendnames.Has(backend)
 }
 
 // GetBackend returns the configured storage backend. PostgreSQL, MySQL, and
 // SQLite remain recognizable here so workspaces created by earlier builds can
 // fail loudly at store selection instead of silently falling back to an empty
 // Dolt database.
-// Empty and explicit Dolt retain the established Dolt behavior. GetBackend keeps
-// the historical Dolt fallback for unknown values, so storage-selection callers
-// must check IsSupportedBackend(c.Backend) before opening or creating storage.
+// Registered extension names are returned unchanged. Empty and explicit Dolt
+// retain the established Dolt behavior. GetBackend keeps the historical Dolt
+// fallback for unknown values, so storage-selection callers must check
+// IsSupportedBackend(c.Backend) before opening or creating storage.
 func (c *Config) GetBackend() string {
 	if c != nil {
 		switch c.Backend {
@@ -271,6 +274,9 @@ func (c *Config) GetBackend() string {
 			return BackendMySQL
 		case BackendSQLite:
 			return BackendSQLite
+		}
+		if backendnames.Has(c.Backend) {
+			return c.Backend
 		}
 	}
 	return BackendDolt

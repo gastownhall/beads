@@ -1281,7 +1281,10 @@ func TestAdoptGitOriginRemoteForPush_PersistedRemoteVetoesAdoption(t *testing.T)
 			if _, direct := persisted.(persistedRemoteProber); direct {
 				t.Fatalf("%T implements persistedRemoteProber directly; this test no longer exercises the peel", persisted)
 			}
-			adopted, err := adoptGitOriginRemoteForPush(ctx, persisted)
+			// AssumeYes deliberately: consent is granted, so the only thing
+			// that can stop adoption here is the persisted-remote veto. If the
+			// veto ever moves below the consent gate this still fails.
+			adopted, err := adoptGitOriginRemoteForPush(ctx, persisted, adoptPolicy{AssumeYes: true}, pushAdoptOptIn)
 			if err != nil {
 				t.Errorf("adoptGitOriginRemoteForPush returned error %v; a persisted remote is a no-op, not a failure", err)
 			}
@@ -1325,7 +1328,7 @@ func TestAdoptGitOriginRemoteForPush_PersistedRemoteVetoesAdoption(t *testing.T)
 			if _, err := hasConfiguredRemote(ctx, broken); !errors.Is(err, listErr) {
 				t.Errorf("hasConfiguredRemote swallowed a ListRemotes failure: err = %v", err)
 			}
-			if adopted, err := adoptGitOriginRemoteForPush(ctx, broken); adopted || !errors.Is(err, listErr) {
+			if adopted, err := adoptGitOriginRemoteForPush(ctx, broken, adoptPolicy{AssumeYes: true}, pushAdoptOptIn); adopted || !errors.Is(err, listErr) {
 				t.Errorf("adoptGitOriginRemoteForPush(list error) = (%v, %v), want (false, the list error)", adopted, err)
 			}
 		})

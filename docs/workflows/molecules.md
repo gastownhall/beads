@@ -53,6 +53,8 @@ bd dep add <implement-id> <design-id>   # implement needs design
 bd dep add <test-id> <implement-id>     # test needs implement
 ```
 
+If the epic carries a size/effort label, see [Labels](/core-concepts/labels) for keeping it off the steps.
+
 If an ad-hoc epic turns out to be worth repeating, extract a reusable formula
 from it with `bd mol distill <epic-id> <formula-name>`.
 

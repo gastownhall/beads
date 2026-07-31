@@ -123,6 +123,7 @@ func TestIgnoredPendingMigrationDirtyTablesDetectsWispDependencies(t *testing.T)
 
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM ignored_schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(2))
+	expectIgnoredSentinelProbes(mock, true)
 
 	touched, err := ignoredSource.pendingMigrationDirtyTables(context.Background(), db, map[string]dirtyTableState{
 		"wisp_dependencies": {},

@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -121,6 +122,9 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 	if err := validateConfiguredBackend(cfg); err != nil {
 		return nil, err
 	}
+	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
+		return backend.Open(ctx, beadsDir)
+	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
 		return nil, fmt.Errorf("proxy server store should be uow provider")
@@ -203,6 +207,9 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 	}
 	if err := validateConfiguredBackend(cfg); err != nil {
 		return nil, err
+	}
+	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
+		return backend.OpenReadOnly(ctx, beadsDir)
 	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider

@@ -14,17 +14,62 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
+// newProxiedServerUOWProvider opens the proxied-server provider and, in
+// team-server mode, asserts that the shared bts-managed database is serving
+// THIS workspace's project (gastownhall/beads: the proxied-path sibling of the
+// gateway's DoltStore.verifyProjectIdentity guard).
 func newProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverride string) (uow.UnitOfWorkProvider, error) {
+	return openProxiedServerUOWProvider(ctx, beadsDir, databaseOverride, assertWorkspaceIdentity)
+}
+
+// newProxiedServerUOWProviderAdopting skips that assertion. Only two callers
+// legitimately have no workspace identity to assert: `bd init --team-server`,
+// which ADOPTS the identity the shared database already carries (asserting the
+// locally-minted placeholder would reject every correct init), and server-wide
+// database maintenance, which is not scoped to one project's database.
+func newProxiedServerUOWProviderAdopting(ctx context.Context, beadsDir, databaseOverride string) (uow.UnitOfWorkProvider, error) {
+	return openProxiedServerUOWProvider(ctx, beadsDir, databaseOverride, adoptWorkspaceIdentity)
+}
+
+// identityPosture selects whether a proxied open asserts the workspace's
+// project identity against the database or adopts whatever it finds.
+type identityPosture bool
+
+const (
+	assertWorkspaceIdentity identityPosture = false
+	adoptWorkspaceIdentity  identityPosture = true
+)
+
+func openProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverride string, posture identityPosture) (uow.UnitOfWorkProvider, error) {
 	if beadsDir == "" {
 		return nil, fmt.Errorf("newProxiedServerUOWProvider: beadsDir must be set")
 	}
 
+	// NOTE: a load error is swallowed here (pre-existing behavior), which
+	// leaves persisted == nil and therefore silently falls back to the default
+	// database with teamServer=false. The identity assertion below inherits
+	// that: an unreadable metadata.json degrades to no assertion rather than a
+	// refusal. Tracked separately with the wider silent-fallback smell.
 	persisted, _ := configfile.Load(beadsDir)
 	database := configfile.DefaultDoltDatabase
 	var teamServer bool
+	var expectedProjectID string
 	if persisted != nil {
 		database = persisted.GetDoltDatabase()
 		teamServer = persisted.IsTeamServerManaged()
+		if posture == assertWorkspaceIdentity {
+			expectedProjectID = persisted.ProjectID
+			// An empty local identity would reach checkTeamServerIdentity as
+			// "nothing to assert" — indistinguishable from the adoption path,
+			// which would silently disable the guard. A team-server workspace
+			// always has an adopted ProjectID after a successful init, so an
+			// empty one here is a broken workspace, not a legacy one.
+			if teamServer && expectedProjectID == "" {
+				return nil, fmt.Errorf(
+					"newProxiedServerUOWProvider: this team-server workspace has no project identity in %s; re-run 'bd init --team-server' to adopt the identity provisioned in the shared database (it never writes to that database)",
+					configfile.ConfigFileName)
+			}
+		}
 	}
 	if databaseOverride != "" {
 		database = databaseOverride
@@ -38,10 +83,10 @@ func newProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverride
 		proxyIdleTimeout = info.IdleTimeout
 	}
 	if info != nil && info.External != nil {
-		return newExternalProxiedServerUOWProvider(ctx, beadsDir, database, info.External, proxyPort, proxyIdleTimeout, teamServer)
+		return newExternalProxiedServerUOWProvider(ctx, beadsDir, database, info.External, proxyPort, proxyIdleTimeout, teamServer, expectedProjectID)
 	}
 
-	return newManagedProxiedServerUOWProvider(ctx, beadsDir, database, proxyPort, proxyIdleTimeout, teamServer)
+	return newManagedProxiedServerUOWProvider(ctx, beadsDir, database, proxyPort, proxyIdleTimeout, teamServer, expectedProjectID)
 }
 
 func newExternalProxiedServerUOWProvider(
@@ -51,6 +96,7 @@ func newExternalProxiedServerUOWProvider(
 	proxyPort int,
 	proxyIdleTimeout time.Duration,
 	teamServer bool,
+	expectedProjectID string,
 ) (uow.UnitOfWorkProvider, error) {
 	rootPath, err := resolveProxiedServerRootPath(beadsDir)
 	if err != nil {
@@ -85,6 +131,7 @@ func newExternalProxiedServerUOWProvider(
 		proxyPort,
 		proxyIdleTimeout,
 		teamServer,
+		expectedProjectID,
 	)
 }
 
@@ -94,6 +141,7 @@ func newManagedProxiedServerUOWProvider(
 	proxyPort int,
 	proxyIdleTimeout time.Duration,
 	teamServer bool,
+	expectedProjectID string,
 ) (uow.UnitOfWorkProvider, error) {
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
@@ -142,5 +190,6 @@ func newManagedProxiedServerUOWProvider(
 		proxyPort,
 		proxyIdleTimeout,
 		teamServer,
+		expectedProjectID,
 	)
 }

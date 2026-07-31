@@ -371,6 +371,13 @@ func (g Gate) Acquire(ctx context.Context, mode Mode, opts Options) (*Handle, er
 	if g.path == "" {
 		return nil, errors.New("workspacegate: zero Gate; use ForWorkspace/ForPhysicalRoot")
 	}
+	// Tolerate a nil context rather than panicking on ctx.Err below: gate
+	// acquisition sits on CLI plumbing paths (cobra hooks, migrate helpers)
+	// that tests and embedders invoke directly without the process-level
+	// signal context, and a nil-deref here kills the whole test binary.
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("workspacegate: acquiring %s: %w", g.path, err)
 	}
@@ -505,6 +512,10 @@ func (m *MultiHandle) Release() error {
 // init lock, proxy locks, the dolt-server start lock, or schema GET_LOCK,
 // and release it after those.
 func AcquireAll(ctx context.Context, mode Mode, opts Options, gates ...Gate) (*MultiHandle, error) {
+	// See Acquire: nil contexts are normalized, not dereferenced.
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	uniq := make(map[string]Gate, len(gates))
 	for _, g := range gates {
 		if g.path == "" {

@@ -33,6 +33,7 @@ import (
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	dbidentifier "github.com/steveyegge/beads/internal/storage/domain/db"
 	"github.com/steveyegge/beads/internal/storage/schema"
@@ -776,7 +777,7 @@ var rootCmd = &cobra.Command{
 		// No subcommand - show help
 		_ = cmd.Help() // Help() always returns nil for cobra commands
 	},
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) (retErr error) {
 		applyNoColorFlag()
 
 		// Initialize CommandContext to hold runtime state (replaces scattered globals)
@@ -1091,12 +1092,13 @@ var rootCmd = &cobra.Command{
 		if dbPath == "" {
 			if bd := beads.FindBeadsDir(); bd != "" {
 				cfg, cfgErr := configfile.Load(bd)
-				if cfgErr != nil || cfg != nil && (cfg.IsDoltProxiedServerMode() || !configfile.IsSupportedBackend(cfg.Backend)) {
-					// Proxied-server and removed-backend workspaces may have no
-					// local Dolt database file. Invalid or unknown metadata likewise must
-					// reach config validation instead of becoming a generic "no database"
-					// result. metadata.json identifies the workspace so store selection can
-					// route or reject it explicitly.
+				if cfgErr != nil || cfg != nil && (cfg.IsDoltProxiedServerMode() ||
+					registeredBackendWorkspaceIsBeadsDir(cfg) ||
+					!configfile.IsSupportedBackend(cfg.Backend)) {
+					// Proxied-server, registered remote, and removed-backend
+					// workspaces may have no local Dolt database file. Invalid
+					// or unknown metadata likewise must reach config validation
+					// instead of becoming a generic "no database" result.
 					dbPath = bd
 				}
 			}
@@ -1174,6 +1176,30 @@ var rootCmd = &cobra.Command{
 		beadsDir := resolveCommandBeadsDir(dbPath)
 		prepareSelectedCommandContext(beadsDir, true)
 		refreshBoundCommandConfig(cmd)
+
+		// Workspace operation gate: every command that reaches this point
+		// will open the store (the skipsStoreInit early return is above),
+		// so take the workspace + physical-root gates now, in the final
+		// mode (SHARED for normal commands, EXCLUSIVE for bd backup
+		// restore — there is no upgrade path). See workspace_gate.go for
+		// the fail-open/fail-closed posture. The handle is released in
+		// PersistentPostRunE after store close; if this PreRunE fails
+		// later, cobra never runs PostRunE, so the deferred release below
+		// covers the PreRunE error paths after acquisition.
+		if err := acquireCommandWorkspaceGates(rootCtx, cmd, beadsDir); err != nil {
+			return err
+		}
+		defer func() {
+			if retErr != nil {
+				// Gate-outlives-store: a PreRunE failure AFTER the store
+				// opened (cobra will skip PostRunE) must close the
+				// store/provider before the gates drop, or maintenance
+				// could start against un-quiesced storage.
+				closeStoreBeforeGateRelease()
+				releaseWorkspaceGates()
+			}
+		}()
+
 		if _, err := getDoltAutoCommitMode(); err != nil {
 			return HandleError("%v", err)
 		}
@@ -1409,12 +1435,25 @@ var rootCmd = &cobra.Command{
 		// Removing them WILL cause unrecoverable data corruption and data loss.
 		// Dolt manages these files itself; external interference is never safe.
 
-		store, err = newDoltStore(rootCtx, doltCfg)
+		if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
+			if useReadOnly {
+				store, err = backend.OpenReadOnly(rootCtx, beadsDir)
+			} else {
+				store, err = backend.Open(rootCtx, beadsDir)
+			}
+		} else {
+			store, err = newDoltStore(rootCtx, doltCfg)
+		}
 
 		// Track final read-only state for staleness checks (GH#1089)
 		storeIsReadOnly = doltCfg.ReadOnly
 
 		if err != nil {
+			// A failed factory can return a typed-nil concrete pointer,
+			// which the interface assignment above makes non-nil; the
+			// gate-release cleanup would then call Close on a nil
+			// receiver and panic. No store was opened, so drop it.
+			store = nil
 			// Check for fresh clone scenario
 			if handleFreshCloneError(err) {
 				return SilentExit()
@@ -1470,10 +1509,13 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// Initialize hook runner
-		// dbPath is .beads/something.db, so workspace root is parent of .beads
-		if dbPath != "" {
-			beadsDir := filepath.Dir(dbPath)
+		// Initialize hook runner using the .beads directory resolved above via
+		// resolveCommandBeadsDir. Do not use filepath.Dir(dbPath): for a
+		// registered WorkspaceIsBeadsDir backend dbPath is the .beads directory
+		// itself, so filepath.Dir(dbPath) would load hooks from the repo root
+		// (<repo>/hooks) instead of .beads/hooks; custom dolt_data_dir layouts
+		// can likewise place the Dolt data outside .beads.
+		if beadsDir != "" {
 			hookRunner = hooks.NewRunner(filepath.Join(beadsDir, "hooks"))
 		}
 
@@ -1491,7 +1533,9 @@ var rootCmd = &cobra.Command{
 		// Templates are loaded after auto-import to ensure the database is up-to-date.
 		// Skip for import command to avoid conflicts during import operations.
 		if cmd.Name() != "import" && store != nil {
-			beadsDir := filepath.Dir(dbPath)
+			// Reuse the resolved .beads directory (see the hook runner note
+			// above) so a registered WorkspaceIsBeadsDir workspace loads
+			// .beads/molecules.jsonl rather than <repo>/molecules.jsonl.
 			loader := molecules.NewLoader(store)
 			if result, err := loader.LoadAll(rootCtx, beadsDir); err != nil {
 				debug.Logf("warning: failed to load molecules: %v", err)
@@ -1509,6 +1553,17 @@ var rootCmd = &cobra.Command{
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
 		defer restoreChangeDirSelection()
+		// Release the workspace/physical-root gates on EVERY exit from
+		// PostRunE — deferred so the early error returns below cannot leak
+		// the handle past the function. Ordering is enforced, not assumed:
+		// the success path closes uowProvider/store itself (and nils them),
+		// making the close call here a no-op; on the early error returns
+		// the store is still open, so it is closed HERE, before the gates
+		// drop — gates must always outlive the store.
+		defer func() {
+			closeStoreBeforeGateRelease()
+			releaseWorkspaceGates()
+		}()
 
 		if proxiedServerMode {
 			if uowProvider != nil {
@@ -1579,6 +1634,9 @@ var rootCmd = &cobra.Command{
 
 			if store != nil {
 				_ = store.Close() // Best effort cleanup
+				// Mark closed so the deferred gate-release cleanup above
+				// does not double-close it.
+				store = nil
 			}
 		}
 

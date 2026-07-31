@@ -475,9 +475,15 @@ func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]
 }
 
 // isExpectedProbeError returns true for errors that indicate the table/row
-// simply doesn't exist — safe to treat as "not present". Permission errors,
-// connection failures, and other unexpected errors should be propagated so
-// that reconciliation doesn't act on an incomplete inventory.
+// simply doesn't exist — or that this user cannot inspect that database —
+// safe to treat as "not present" when enumerating SHOW DATABASES.
+//
+// GH#4931: shared sql-servers often host non-beads databases the beads
+// user cannot read. Access denied on those peers must not abort bootstrap
+// / metadata reconciliation for the configured beads database.
+//
+// Hard connection failures (server down, auth to the catalog itself) still
+// surface via openServerCatalogDB / SHOW DATABASES, not this probe helper.
 func isExpectedProbeError(err error) bool {
 	if err == nil {
 		return true
@@ -494,7 +500,23 @@ func isExpectedProbeError(err error) bool {
 			return true
 		case 1054: // Unknown column
 			return true
+		case 1044: // Access denied for user to database
+			return true
+		case 1142: // Access denied for user to table
+			return true
+		case 1143: // Access denied for user to column
+			return true
+		case 1227: // Access denied (requires privilege)
+			return true
+		case 1105: // HY000 — Dolt often wraps access denied here (GH#4931)
+			if strings.Contains(strings.ToLower(mysqlErr.Message), "access denied") {
+				return true
+			}
 		}
+	}
+	// Driver / wrapper may not expose MySQLError; match the common message.
+	if strings.Contains(strings.ToLower(err.Error()), "access denied") {
+		return true
 	}
 	return false
 }

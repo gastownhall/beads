@@ -114,6 +114,7 @@ func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
 	// present, no custom backfill pending -> no work, MigrateUp short-circuits.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
 	expectContentHashColumnExists(mock)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
@@ -152,6 +153,7 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 	// migrationWorkNeeded: no work, MigrateUp short-circuits.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
 	expectContentHashColumnExists(mock)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
@@ -272,10 +274,15 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	// rekeyAuxRowIDs reads the ignored cursor to see whether its clone-local
 	// marker is pending; at latest it is not, so the re-key no-ops.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
+	expectIgnoredSentinelProbes(mock, true)
 	mock.ExpectExec("(?s)^CREATE TABLE IF NOT EXISTS ignored_schema_migrations").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectContentHashColumnExists(mock)
+	// The applier reads the ignored cursor through the guarded currentVersion
+	// (gh 5033), so a non-zero cursor is followed by the sentinel probes here
+	// too, not just in migrationWorkNeeded.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
+	expectIgnoredSentinelProbes(mock, true)
 	expectDoltStatusRows(mock)
 	expectDoltStatusRows(mock)
 	mock.ExpectQuery("(?s)SELECT t\\.TABLE_NAME\\s+FROM INFORMATION_SCHEMA\\.TABLES t").
@@ -440,5 +447,20 @@ func TestMigrateUpWithLockFreshBootstrapHealResetsAndRetries(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// expectIgnoredSentinelProbes mocks the INFORMATION_SCHEMA lookups
+// currentVersion issues to confirm a non-zero ignored cursor against the
+// schema it claims (gh 5033). They fire only for a non-zero cursor, in
+// ignoredSource.sentinelTables order.
+func expectIgnoredSentinelProbes(mock sqlmock.Sqlmock, present bool) {
+	count := 0
+	if present {
+		count = 1
+	}
+	for range ignoredSource.sentinelTables {
+		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
 	}
 }

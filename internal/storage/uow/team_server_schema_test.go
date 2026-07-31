@@ -154,3 +154,112 @@ func TestCheckTeamServerSchema_Ahead_EscapeHatchWarnsInsteadOfRefusing(t *testin
 		t.Errorf("stderr = %q, want a schema-skew warning", stderr)
 	}
 }
+
+func expectProjectIDQuery(mock sqlmock.Sqlmock, projectID string) {
+	mock.ExpectQuery("SELECT value FROM metadata WHERE .key. = \\?").
+		WithArgs("_project_id").
+		WillReturnRows(sqlmock.NewRows([]string{"value"}).AddRow(projectID))
+}
+
+// The negative control: a database provisioned for a different project must be
+// refused, not adopted. This is the whole point of the guard — on the proxied
+// path nothing else re-checks identity after init.
+func TestCheckTeamServerIdentity_ForeignProjectID_Refuses(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectProjectIDQuery(mock, "project-BBBB")
+
+	err := checkTeamServerIdentity(context.Background(), db, "beads_team", "project-AAAA")
+	if err == nil {
+		t.Fatal("checkTeamServerIdentity = nil, want refusal when the database serves a different project")
+	}
+	for _, want := range []string{"PROJECT IDENTITY MISMATCH", "project-AAAA", "project-BBBB", "beads_team"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q should contain %q", err, want)
+		}
+	}
+	if !strings.Contains(err.Error(), "bd init --team-server") {
+		t.Errorf("error %q should tell the user re-running init is safe", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+func TestCheckTeamServerIdentity_MatchingProjectID_OK(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectProjectIDQuery(mock, "project-AAAA")
+
+	if err := checkTeamServerIdentity(context.Background(), db, "beads_team", "project-AAAA"); err != nil {
+		t.Fatalf("checkTeamServerIdentity = %v, want nil when identities match", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+}
+
+// `bd init --team-server` adopts the provisioned identity, so it passes an
+// empty expectation. The check must then not query at all — asserting the
+// locally-minted placeholder would reject every correct init.
+func TestCheckTeamServerIdentity_AdoptionPath_SkipsWithoutQuerying(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+
+	if err := checkTeamServerIdentity(context.Background(), db, "beads_team", ""); err != nil {
+		t.Fatalf("checkTeamServerIdentity = %v, want nil on the adoption path", err)
+	}
+	// No ExpectQuery was registered; any query would be an unexpected call.
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("adoption path must not query the database: %v", err)
+	}
+}
+
+// A bts-managed database with no _project_id row is an invalid state, not a
+// legacy one: adoptTeamServerIdentity refuses to attach to such a database in
+// the first place. Soft-skipping it would let one deleted row disable the
+// guard for every client.
+func TestCheckTeamServerIdentity_DatabaseWithoutIdentity_Refuses(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	mock.ExpectQuery("SELECT value FROM metadata WHERE .key. = \\?").
+		WithArgs("_project_id").
+		WillReturnRows(sqlmock.NewRows([]string{"value"}))
+
+	err := checkTeamServerIdentity(context.Background(), db, "beads_team", "project-AAAA")
+	if err == nil {
+		t.Fatal("checkTeamServerIdentity = nil, want refusal for a database with no _project_id")
+	}
+	if !strings.Contains(err.Error(), "bts init") {
+		t.Errorf("error %q should point the operator at 'bts init'", err)
+	}
+}
+
+func TestCheckTeamServerIdentity_EmptyStoredIdentity_Refuses(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	expectProjectIDQuery(mock, "")
+
+	if err := checkTeamServerIdentity(context.Background(), db, "beads_team", "project-AAAA"); err == nil {
+		t.Fatal("checkTeamServerIdentity = nil, want refusal for an empty stored identity")
+	}
+}
+
+// Unlike the legacy-database cases above, a genuine read failure is surfaced:
+// checkTeamServerSchema has already proven the schema is present, so the
+// metadata table exists and an error here is a real fault.
+func TestCheckTeamServerIdentity_ReadError_Surfaces(t *testing.T) {
+	mock, db, closeDB := newVersionMockDB(t)
+	defer closeDB()
+	mock.ExpectQuery("SELECT value FROM metadata WHERE .key. = \\?").
+		WithArgs("_project_id").
+		WillReturnError(errors.New("Error 1105 (HY000): connection reset"))
+
+	err := checkTeamServerIdentity(context.Background(), db, "beads_team", "project-AAAA")
+	if err == nil {
+		t.Fatal("checkTeamServerIdentity = nil, want the read error surfaced")
+	}
+	if !strings.Contains(err.Error(), "beads_team") {
+		t.Errorf("error %q should name the database", err)
+	}
+}

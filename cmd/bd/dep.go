@@ -20,6 +20,26 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
+// exactDependencyTarget returns the depends_on_id of a raw dependency edge on
+// issueID that equals rawTarget exactly. Used by `bd dep remove` so a bare
+// slug that was stored verbatim (pre-GH#5005 create --deps bug) is removed
+// instead of being resolved to a different, fully-qualified good edge.
+func exactDependencyTarget(ctx context.Context, st storage.DependencyQueryStore, issueID, rawTarget string) (string, bool) {
+	if st == nil || rawTarget == "" {
+		return "", false
+	}
+	records, err := st.GetDependencyRecords(ctx, issueID)
+	if err != nil {
+		return "", false
+	}
+	for _, r := range records {
+		if r != nil && r.DependsOnID == rawTarget {
+			return rawTarget, true
+		}
+	}
+	return "", false
+}
+
 // resolveIDWithRouting resolves a partial issue ID using prefix-based routing.
 // It returns the resolved full ID and the store that contains the issue.
 // If the issue routes to a different database, a routed store is returned
@@ -959,6 +979,12 @@ var depRemoveCmd = &cobra.Command{
 			if err := validateExternalRef(toID); err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
+		} else if exact, ok := exactDependencyTarget(ctx, fromStore, fromID, args[1]); ok {
+			// Prefer an exact depends_on_id match against raw edge records
+			// before partial-ID resolution (GH#5005). Otherwise
+			// `bd dep remove X 8vezf` resolves to the qualified good edge and
+			// deletes it while leaving a dangling bare-id row behind.
+			toID = exact
 		} else {
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, args[1])

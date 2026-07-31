@@ -27,6 +27,11 @@ type doltSQLProvider struct {
 	// teamServer: schema is owned by beads-team-server (bts) — bd never
 	// creates the database or migrates, only verifies the schema version.
 	teamServer bool
+	// expectedProjectID is the calling workspace's project identity, asserted
+	// against the team-server database on open. Empty means "no assertion
+	// available" (bd init, which adopts; server-wide maintenance; a workspace
+	// predating project identity) and skips the check.
+	expectedProjectID string
 }
 
 var (
@@ -113,6 +118,14 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 				}
 				return backoff.Permanent(err)
 			}
+			// Identity is checked only after the schema check proves the
+			// metadata table exists at this binary's version.
+			if err := checkTeamServerIdentity(ctx, conn, database, p.expectedProjectID); err != nil {
+				if isSerializationError(err) {
+					return fmt.Errorf("uow: team-server identity check: %w", err)
+				}
+				return backoff.Permanent(err)
+			}
 			return nil
 		}
 		if created {
@@ -176,16 +189,17 @@ func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	return conn, nil
 }
 
-func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword, tlsConfigName string, teamServer bool) (UnitOfWorkProvider, error) {
+func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string) (UnitOfWorkProvider, error) {
 	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
 	}
 
 	initProvider := &doltSQLProvider{
-		defaultBranch: defaultBranch,
-		db:            initDB,
-		teamServer:    teamServer,
+		defaultBranch:     defaultBranch,
+		db:                initDB,
+		teamServer:        teamServer,
+		expectedProjectID: expectedProjectID,
 	}
 
 	if err := initProvider.initSchema(ctx, database); err != nil {
@@ -203,8 +217,9 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	}
 
 	return &doltSQLProvider{
-		defaultBranch: defaultBranch,
-		db:            dbConn,
-		teamServer:    teamServer,
+		defaultBranch:     defaultBranch,
+		db:                dbConn,
+		teamServer:        teamServer,
+		expectedProjectID: expectedProjectID,
 	}, nil
 }

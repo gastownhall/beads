@@ -24,6 +24,11 @@ import (
 // removed.
 func TestDependencyKeys_RekeysAndRemovesLeftovers(t *testing.T) {
 	testutil.RequireDoltBinary(t)
+	// The dolt binary being installed does not mean a server is listening:
+	// dolt.New below reaches the container via BEADS_DOLT_PORT, which
+	// TestMain only sets when it actually started one. Without this guard
+	// the test t.Fatals on 127.0.0.1:1 wherever Docker is unavailable.
+	requireFixDoltContainer(t)
 
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")

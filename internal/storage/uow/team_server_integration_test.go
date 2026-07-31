@@ -52,7 +52,7 @@ func newTeamServerHarness(t *testing.T) *teamServerHarness {
 	}
 }
 
-func (h *teamServerHarness) openProvider(ctx context.Context, database string, teamServer bool) (UnitOfWorkProvider, error) {
+func (h *teamServerHarness) openProvider(ctx context.Context, database string, teamServer bool, expectedProjectID string) (UnitOfWorkProvider, error) {
 	return NewExternalDoltServerUOWProvider(
 		ctx,
 		h.storeRootDir,
@@ -64,6 +64,7 @@ func (h *teamServerHarness) openProvider(ctx context.Context, database string, t
 		0,
 		0,
 		teamServer,
+		expectedProjectID,
 	)
 }
 
@@ -98,7 +99,7 @@ func TestTeamServerMode_Integration(t *testing.T) {
 	const database = "beads_ts"
 
 	t.Run("missing database refused with bts init", func(t *testing.T) {
-		p, err := h.openProvider(ctx, "beads_ts_missing", true)
+		p, err := h.openProvider(ctx, "beads_ts_missing", true, "")
 		require.Error(t, err)
 		assert.Nil(t, p)
 		assert.Contains(t, err.Error(), "bts init")
@@ -106,14 +107,14 @@ func TestTeamServerMode_Integration(t *testing.T) {
 
 	t.Run("existing empty database refused with bts init", func(t *testing.T) {
 		// The container pre-creates beads_test with no beads schema in it.
-		p, err := h.openProvider(ctx, "beads_test", true)
+		p, err := h.openProvider(ctx, "beads_test", true, "")
 		require.Error(t, err)
 		assert.Nil(t, p)
 		assert.Contains(t, err.Error(), "bts init")
 	})
 
 	// Provision the database the way bts would (a normal, migrating open).
-	provisioner, err := h.openProvider(ctx, database, false)
+	provisioner, err := h.openProvider(ctx, database, false, "")
 	require.NoError(t, err)
 	require.NoError(t, provisioner.Close(ctx))
 
@@ -122,7 +123,7 @@ func TestTeamServerMode_Integration(t *testing.T) {
 	require.Positive(t, before.maxVersion, "provisioning must have applied migrations")
 
 	t.Run("matching version opens and leaves schema_migrations untouched", func(t *testing.T) {
-		p, err := h.openProvider(ctx, database, true)
+		p, err := h.openProvider(ctx, database, true, "")
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = p.Close(ctx) })
 
@@ -133,6 +134,43 @@ func TestTeamServerMode_Integration(t *testing.T) {
 
 		assert.Equal(t, before, snapshotMigrations(t, ctx, direct),
 			"team-server open must not modify schema_migrations")
+	})
+
+	t.Run("project identity is verified on every open, not just at init", func(t *testing.T) {
+		// bts provisions the shared database with a project identity; bd
+		// adopts it at init and, before this guard existed, never looked at
+		// it again on the proxied path.
+		_, err := direct.ExecContext(ctx,
+			"REPLACE INTO metadata (`key`, value) VALUES (?, ?)", "_project_id", "project-owning-this-db")
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, err := direct.ExecContext(ctx, "DELETE FROM metadata WHERE `key` = ?", "_project_id")
+			require.NoError(t, err)
+		})
+
+		t.Run("matching workspace identity opens", func(t *testing.T) {
+			p, err := h.openProvider(ctx, database, true, "project-owning-this-db")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = p.Close(ctx) })
+		})
+
+		// The negative control: a workspace belonging to another project must
+		// be refused rather than silently served this database.
+		t.Run("foreign workspace identity is refused", func(t *testing.T) {
+			p, err := h.openProvider(ctx, database, true, "project-somewhere-else")
+			require.Error(t, err)
+			assert.Nil(t, p)
+			assert.Contains(t, err.Error(), "PROJECT IDENTITY MISMATCH")
+			assert.Contains(t, err.Error(), "project-somewhere-else")
+			assert.Contains(t, err.Error(), "project-owning-this-db")
+		})
+
+		// The adoption path (bd init --team-server) asserts nothing.
+		t.Run("adoption path still opens", func(t *testing.T) {
+			p, err := h.openProvider(ctx, database, true, "")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = p.Close(ctx) })
+		})
 	})
 
 	t.Run("behind database refused with bts migrate", func(t *testing.T) {
@@ -150,7 +188,7 @@ func TestTeamServerMode_Integration(t *testing.T) {
 		rolledBack := snapshotMigrations(t, ctx, direct)
 		require.Less(t, rolledBack.maxVersion, before.maxVersion)
 
-		p, err := h.openProvider(ctx, database, true)
+		p, err := h.openProvider(ctx, database, true, "")
 		require.Error(t, err)
 		assert.Nil(t, p)
 		assert.Contains(t, err.Error(), "bts migrate")

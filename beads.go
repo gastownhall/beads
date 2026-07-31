@@ -9,13 +9,20 @@ package beads
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workspacegate"
 )
 
 // Storage is the interface for beads storage operations
@@ -263,6 +270,117 @@ func OpenFromConfig(ctx context.Context, beadsDir string) (Storage, error) {
 	return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
 }
 
+// OpenGated is OpenFromConfig plus participation in the workspace
+// operation gate: it holds SHARED gates — the workspace gate and the
+// physical database-root gate(s) — for the storage's lifetime (released by
+// Close), so maintenance operations such as mode migration can DETECT
+// this consumer and refuse to run over it, instead of running blind. The
+// gate cannot force a holder out (there is no drain signal); it makes
+// cooperating consumers visible and excludes new ones. Both levels matter:
+// distinct workspaces can share one physical Dolt root, and a
+// workspace-only gate would let maintenance replace that root under a
+// consumer from another workspace. Library consumers that use the ungated
+// Open/OpenFromConfig are invisible to the gate, and gate-aware
+// maintenance operations refuse to proceed on workspaces they cannot
+// prove quiet — prefer OpenGated in long-lived embedders.
+//
+// The physical roots are the UNION of doltserver.ResolvePhysicalRoots
+// (the side-effect-free CLI-parity resolver: embedded engine's
+// embeddeddolt dir, shared-server dir, proxied-server client info) and
+// doltserver.LibraryOpenRootPath (the root the library open below —
+// which applies central-config defaults and is server-only — will
+// actually use), so the gated directory always includes the one this
+// store opens. A resolver failure is
+// deliberately not fatal here: the same failure will surface from the
+// storage open below with a better error, and the workspace gate alone
+// still covers the workspace-level maintenance conflicts. For a remote
+// server backend there is no local physical root and only the workspace
+// gate is taken.
+//
+// wait bounds how long to poll for the gates when a maintenance
+// operation holds one exclusively; zero means fail fast. A busy gate is
+// reported as ErrGateBusy (match with errors.Is).
+func OpenGated(ctx context.Context, beadsDir string, wait time.Duration) (Storage, error) {
+	wsGate, err := workspacegate.ForWorkspace(beadsDir)
+	if err != nil {
+		return nil, err
+	}
+	gates := []workspacegate.Gate{wsGate}
+
+	// Gate the UNION of the CLI-parity resolver roots and the root the
+	// library open path below will actually use (they differ: the library
+	// path is server-only and applies central-config defaults, so an
+	// embedded-metadata workspace still opens at DatabasePath). Over-gating
+	// an extra root under a SHARED hold is benign; under-gating is the bug.
+	// All gates go into the ONE AcquireAll — never nested.
+	var roots []string
+	if pr, rerr := doltserver.ResolvePhysicalRoots(beadsDir); rerr == nil {
+		roots = append(roots, pr.Roots...)
+	}
+	roots = append(roots, doltserver.LibraryOpenRootPath(beadsDir))
+	for _, root := range roots {
+		// A root whose PARENT does not exist yet cannot be gated
+		// (workspacegate requires the gate file's parent) and cannot
+		// be holding data either; skip it rather than fail the open.
+		if _, serr := os.Stat(filepath.Dir(root)); serr != nil {
+			continue
+		}
+		physGate, gErr := workspacegate.ForPhysicalRoot(root)
+		if gErr != nil {
+			return nil, gErr
+		}
+		gates = append(gates, physGate)
+	}
+
+	h, err := workspacegate.AcquireAll(ctx, workspacegate.Shared,
+		workspacegate.Options{Wait: wait}, gates...)
+	if err != nil {
+		return nil, err
+	}
+	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
+	if err != nil {
+		rerr := h.Release()
+		return nil, errors.Join(err, rerr)
+	}
+	return &gatedStorage{DoltStorage: st, gate: h}, nil
+}
+
+// gatedStorage ties shared gate handles to the storage lifetime: the
+// gates are held exactly as long as the store is open. Per the decorator
+// contract documented on AsIssueClaimer, it embeds storage.DoltStorage —
+// the full engine interface, not the narrow Storage — so every capability
+// assertion (RemoteStore, SyncStore, VersionControlReader, EventQuerier,
+// ...) keeps working when an embedder switches from OpenFromConfig to
+// OpenGated, and it exposes Unwrap for the cmd/bd optional interfaces
+// that genuinely need storage.UnwrapStore.
+type gatedStorage struct {
+	storage.DoltStorage
+	gate *workspacegate.MultiHandle
+}
+
+var _ storage.DoltStorage = (*gatedStorage)(nil)
+
+// Unwrap exposes the inner store for storage.UnwrapStore, matching
+// HookFiringStore's decorator shape.
+func (g *gatedStorage) Unwrap() storage.DoltStorage { return g.DoltStorage }
+
+// Close closes the store, then releases the gates — but only on a clean
+// close. A failed or timed-out close can leave in-flight queries against
+// the database, and releasing the gates then would let an exclusive
+// maintenance operation start against storage that has not quiesced; in
+// that case the flocks are deliberately left to die with the process.
+func (g *gatedStorage) Close() error {
+	if err := g.DoltStorage.Close(); err != nil {
+		// Say so out loud: a long-lived embedder that ignores this error
+		// would otherwise silently keep excluding exclusive maintenance
+		// for the rest of the process lifetime.
+		fmt.Fprintf(os.Stderr,
+			"warning: beads store close failed; workspace gates deliberately retained until process exit: %v\n", err)
+		return err
+	}
+	return g.gate.Release()
+}
+
 // FindDatabasePath finds the beads database in the current directory tree
 func FindDatabasePath() string {
 	return beads.FindDatabasePath()
@@ -381,6 +499,11 @@ var (
 	ErrSelfDependency  = domain.ErrSelfDependency
 	ErrDependencyCycle = domain.ErrDependencyCycle
 	ErrFieldTooLong    = types.ErrFieldTooLong
+	// ErrGateBusy is returned by OpenGated when a maintenance operation
+	// holds the workspace or physical-root gate exclusively and the wait
+	// budget ran out. Alias of the internal sentinel so errors.Is works
+	// across the package boundary.
+	ErrGateBusy = workspacegate.ErrBusy
 )
 
 // DependencyTypeConflictError is returned by AddDependency when an edge of a

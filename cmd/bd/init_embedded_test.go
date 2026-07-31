@@ -110,11 +110,20 @@ func envWithout(env []string, name string) []string {
 	return out
 }
 
+// isEmbeddedLockOutput recognizes every "another process holds the lock"
+// outcome for concurrent bd commands against the same embedded workspace:
+// the embedded Dolt flock's own messages, and the workspacegate EXCLUSIVE
+// contention message (workspacegate.ErrBusy = "workspace gate busy"). The
+// gate is acquired BEFORE the embedded flock is ever attempted, so a losing
+// concurrent `bd init` today reports gate contention rather than a flock
+// error — both are the same class of outcome from the caller's point of
+// view: another bd process holds the lock, retry later.
 func isEmbeddedLockOutput(out string) bool {
 	out = strings.ToLower(out)
 	return strings.Contains(out, "one writer at a time") ||
 		strings.Contains(out, "database is locked") ||
-		strings.Contains(out, "locked by another dolt process")
+		strings.Contains(out, "locked by another dolt process") ||
+		strings.Contains(out, "workspace gate busy")
 }
 
 func runCommandBuffers(t *testing.T, cmd *exec.Cmd) (stdout, stderr bytes.Buffer, err error) {
@@ -487,6 +496,42 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 	})
 
+	// The #5068 refusal, end to end. The subtests around it prove adoption
+	// still works with consent; this one proves it does not happen without.
+	t.Run("dolt_push_refuses_to_adopt_without_consent", func(t *testing.T) {
+		bareDir := filepath.Join(t.TempDir(), "no-consent.git")
+		runGitForBootstrapTest(t, "", "init", "--bare", "-b", "main", bareDir)
+		remoteURL := "file://" + bareDir
+
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		runGitForBootstrapTest(t, dir, "branch", "-M", "main")
+		runGitForBootstrapTest(t, dir, "commit", "--allow-empty", "-m", "init")
+		runBDInit(t, bd, dir, "--prefix", "noc", "--skip-hooks", "--skip-agents")
+		bdCreate(t, bd, dir, "No consent", "--type", "task")
+
+		runGitForBootstrapTest(t, dir, "remote", "add", "origin", remoteURL)
+		runGitForBootstrapTest(t, dir, "push", "-u", "origin", "main")
+
+		// No TTY and no --yes: bd must refuse rather than derive a remote and
+		// upload to it.
+		out := bdDoltFail(t, bd, dir, "push")
+		if !strings.Contains(out, remoteURL) {
+			t.Errorf("refusal did not name the remote it would have adopted; output:\n%s", out)
+		}
+
+		if list := bdDolt(t, bd, dir, "remote", "list"); strings.Contains(list, remoteURL) {
+			t.Errorf("refused push still added the remote; remote list:\n%s", list)
+		}
+		configYAML, readErr := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if readErr == nil && strings.Contains(string(configYAML), remoteURL) {
+			t.Errorf("refused push still persisted sync.remote; config.yaml:\n%s", configYAML)
+		}
+		if lsOut, lsErr := exec.Command("git", "ls-remote", remoteURL, "refs/dolt/data").Output(); lsErr == nil && len(strings.TrimSpace(string(lsOut))) != 0 {
+			t.Errorf("refused push still uploaded issue history: %s", lsOut)
+		}
+	})
+
 	t.Run("dolt_push_lazily_adopts_later_git_origin", func(t *testing.T) {
 		bareDir := filepath.Join(t.TempDir(), "later-origin.git")
 		runGitForBootstrapTest(t, "", "init", "--bare", "-b", "main", bareDir)
@@ -502,11 +547,16 @@ func TestEmbeddedInit(t *testing.T) {
 		runGitForBootstrapTest(t, dir, "remote", "add", "origin", remoteURL)
 		runGitForBootstrapTest(t, dir, "push", "-u", "origin", "main")
 
-		bdDolt(t, bd, dir, "push")
+		// --yes is the scripted consent for git-origin adoption (#5068). The
+		// capability this subtest covers is unchanged; only the consent is
+		// new, and a test process has no TTY so adoption now fails closed
+		// without it. The refusal itself is covered by
+		// dolt_push_refuses_to_adopt_without_consent below.
+		bdDolt(t, bd, dir, "push", "--yes")
 
 		out := bdDolt(t, bd, dir, "remote", "list")
 		if !strings.Contains(out, "origin") || !strings.Contains(out, remoteURL) {
-			t.Fatalf("bd dolt push should adopt later git origin %q; remote list:\n%s", remoteURL, out)
+			t.Fatalf("bd dolt push --yes should adopt later git origin %q; remote list:\n%s", remoteURL, out)
 		}
 
 		configYAML, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
@@ -548,7 +598,8 @@ func TestEmbeddedInit(t *testing.T) {
 		initGitRepoAt(t, ambientDir)
 		runGitForBootstrapTest(t, ambientDir, "remote", "add", "origin", ambientURL)
 
-		cmd := exec.Command(bd, "-C", targetDir, "dolt", "push")
+		// --yes: see the note in dolt_push_lazily_adopts_later_git_origin.
+		cmd := exec.Command(bd, "-C", targetDir, "dolt", "push", "--yes")
 		cmd.Dir = ambientDir
 		cmd.Env = bdEnv(ambientDir)
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -1863,8 +1914,14 @@ func TestEmbeddedInit(t *testing.T) {
 	})
 }
 
-// TestEmbeddedInitConcurrent verifies the exclusive flock prevents concurrent
-// writers. Exactly one process should succeed; the rest get the lock error.
+// TestEmbeddedInitConcurrent verifies concurrent `bd init` writers are
+// serialized rather than corrupting the workspace. The EXCLUSIVE workspace
+// gate (see acquireExclusiveWorkspaceGates in cmd/bd/init.go) is acquired
+// before the embedded Dolt flock is ever attempted, so contention here
+// normally surfaces as gate-busy output rather than a flock error; either is
+// classified by isEmbeddedLockOutput as the same "another process holds the
+// lock" outcome. At least one process must succeed and at least one must
+// see a lock/gate-busy outcome; unexpected errors still fail the test.
 func TestEmbeddedInitConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
@@ -1963,5 +2020,46 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 		if !strings.Contains(logOut, "schema: apply migrations") {
 			t.Errorf("missing 'schema: apply migrations' commit:\n%s", logOut)
 		}
+	}
+}
+
+// TestInitGateBusyClassifiedAsLockContention pins the fix for
+// TestEmbeddedInitConcurrent's regression: a losing concurrent `bd init`
+// that fails because another process holds the workspace gate EXCLUSIVELY
+// (rather than hitting the embedded Dolt flock, which the gate now
+// short-circuits before it is ever attempted) must still be classified as
+// lock contention by isEmbeddedLockOutput, not as an unexpected failure.
+// Deterministic and fast: it holds the gate in-process instead of racing
+// subprocesses against a wall-clock deadline, so unlike
+// TestEmbeddedInitConcurrent it does not depend on the winner's init being
+// slow enough to exhaust another process's wait budget.
+func TestInitGateBusyClassifiedAsLockContention(t *testing.T) {
+	resetGateTestEnv(t)
+	t.Cleanup(releaseWorkspaceGates)
+	beadsDir := newGateTestWorkspace(t)
+
+	oldWait := exclusiveGateWait
+	exclusiveGateWait = 10 * time.Millisecond
+	t.Cleanup(func() { exclusiveGateWait = oldWait })
+
+	// Simulate the winner: hold the workspace gate EXCLUSIVELY for the
+	// duration of its init, exactly as cmd/bd/init.go does.
+	winner, err := acquireExclusiveWorkspaceGates(context.Background(), beadsDir, "test winner init")
+	if err != nil {
+		t.Fatalf("winner acquisition: %v", err)
+	}
+	defer func() { _ = winner.Release() }()
+
+	// Simulate the loser: bd init's own acquisition call, and its own
+	// error-wrapping (cmd/bd/init.go: "bd init refuses to run over live bd
+	// activity on this workspace: %w").
+	_, gateErr := acquireExclusiveWorkspaceGates(context.Background(), beadsDir, "bd init")
+	if gateErr == nil {
+		t.Fatal("loser acquisition under a live exclusive holder must fail")
+	}
+	loserOutput := fmt.Errorf("bd init refuses to run over live bd activity on this workspace: %w", gateErr).Error()
+
+	if !isEmbeddedLockOutput(loserOutput) {
+		t.Fatalf("gate-busy loser output not classified as lock contention: %q", loserOutput)
 	}
 }

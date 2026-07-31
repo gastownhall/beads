@@ -225,6 +225,18 @@ type migrationSource struct {
 	files       embed.FS
 	dir         string
 	cursorTable string
+	// sentinelTables are tables this series is responsible for creating. A
+	// non-zero cursor is only believed while they all exist: the cursor is a
+	// claim about the schema, and a claim contradicted by the schema is worth
+	// less than no claim at all. See cursorContradictedBySchema.
+	//
+	// INVARIANT: no future migration in this series may DROP or RENAME a
+	// sentinel. Older binaries in the field check their own sentinel list
+	// against the live schema, so removing one would make every healthy newer
+	// database read as "contradicted" to them and re-run their whole series.
+	// TestSentinelTablesAreCreatedByTheSeries enforces the creating side only;
+	// the dropping side is this comment.
+	sentinelTables []string
 }
 
 var (
@@ -237,6 +249,11 @@ var (
 		files:       upIgnoredMigrations,
 		dir:         "migrations/ignored",
 		cursorTable: "ignored_schema_migrations",
+		// Created by ignored 0001 (the series' foundation) and required by
+		// the wisp write path. wisp_dependencies is the one gh 5033 reports
+		// missing; wisps is checked too so a partially materialized database
+		// is caught by whichever is absent.
+		sentinelTables: []string{"wisps", "wisp_dependencies"},
 	}
 )
 
@@ -1091,13 +1108,70 @@ func (m migrationSource) atLatest(ctx context.Context, db DBConn) bool {
 func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, error) {
 	var current int
 	err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM "+m.cursorTable).Scan(&current)
-	if err == nil || err == sql.ErrNoRows {
-		return current, nil
+	if err != nil && err != sql.ErrNoRows {
+		if dberrors.IsTableNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("reading %s version: %w", m.cursorTable, err)
 	}
-	if dberrors.IsTableNotExist(err) {
+	if current == 0 {
 		return 0, nil
 	}
-	return 0, fmt.Errorf("reading %s version: %w", m.cursorTable, err)
+	// A missing cursor TABLE already meant "nothing applied". A cursor whose
+	// tables are absent means the same thing and was previously believed
+	// (gh 5033, gh 4356): ignored_schema_migrations is itself dolt-ignored and
+	// clone-local, so a database materialized out of band — table-by-table
+	// copy, dump restore, or a clone that picked up the cursor rows without
+	// the clone-local tables they describe — arrives claiming at-latest with
+	// no wisps tables. atLatest() then short-circuits migrationWorkNeeded()
+	// and the series never re-runs, surfacing much later and much further away
+	// as "table not found: wisp_dependencies" on `bd close`.
+	contradicted, cerr := m.cursorContradictedBySchema(ctx, db)
+	if cerr != nil {
+		return 0, cerr
+	}
+	if contradicted {
+		return 0, nil
+	}
+	return current, nil
+}
+
+// cursorContradictedBySchema reports whether this series' cursor claims work
+// that the schema does not corroborate.
+//
+// Returning "cursor is 0" rather than an error is deliberate: the series is
+// written to be re-runnable against a database that already has some of it.
+// migrations/ignored/0001 builds each table as __temp__<name> and then
+// `RENAME TABLE __temp__x TO x` only when x does not already exist, DROPping
+// the temp otherwise; later migrations gate their ALTERs on
+// INFORMATION_SCHEMA lookups. So re-running the series repairs the missing
+// tables and leaves existing data untouched — which is why this can heal
+// rather than merely diagnose.
+func (m migrationSource) cursorContradictedBySchema(ctx context.Context, db DBConn) (bool, error) {
+	for _, table := range m.sentinelTables {
+		present, err := sentinelTableExists(ctx, db, table)
+		if err != nil {
+			return false, fmt.Errorf("checking %s sentinel table %s: %w", m.cursorTable, table, err)
+		}
+		if !present {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// sentinelTableExists is a function variable for the same reason
+// issueRowCounter is: it lets the cursor-reality tests exercise the real
+// decision without a live database.
+var sentinelTableExists = func(ctx context.Context, db DBConn, table string) (bool, error) {
+	var n int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
+		 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
+		table).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (m migrationSource) pendingVersions(ctx context.Context, db DBConn) ([]int, error) {
@@ -1261,9 +1335,15 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 		target = upTo
 	}
 
-	var current int
-	if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM "+m.cursorTable).Scan(&current); err != nil && err != sql.ErrNoRows {
-		return 0, columnAdded, fmt.Errorf("reading %s version: %w", m.cursorTable, err)
+	// The cursor is read through currentVersion, never raw: that is where the
+	// cursor-reality check lives (gh 5033). A raw read here would believe the
+	// contradicted cursor that migrationWorkNeeded just disbelieved — MigrateUp
+	// would decide "work needed" on every open, run the whole pass, and then
+	// apply nothing, leaving the missing tables missing and the pass to repeat
+	// forever. The heal only happens if the applier disbelieves the cursor too.
+	current, err := m.currentVersion(ctx, db)
+	if err != nil {
+		return 0, columnAdded, err
 	}
 
 	if current >= target {

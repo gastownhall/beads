@@ -203,18 +203,14 @@ func envOrAbsJoin(envName, beadsDir string) string {
 	return filepath.Join(beadsDir, p)
 }
 
+// resolveProxiedServerRootPath delegates to the exported implementation in
+// internal/doltserver so the workspace-gate resolver and the proxy plumbing
+// share one root derivation (env → client-info sidecar → default data dir)
+// and cannot drift. Note the shared implementation resolves the default via
+// the side-effect-free DoltDirPath — same path as proxiedServerRoot, but it
+// never mkdirs the shared-server tree just to answer "where is the root".
 func resolveProxiedServerRootPath(beadsDir string) (string, error) {
-	if p := envOrAbsJoin("BEADS_PROXIED_SERVER_ROOT_PATH", beadsDir); p != "" {
-		return p, nil
-	}
-	info, err := configfile.LoadProxiedServerClientInfo(beadsDir)
-	if err != nil {
-		return "", err
-	}
-	if p := info.ResolvedRootPath(beadsDir); p != "" {
-		return p, nil
-	}
-	return proxiedServerRoot(beadsDir), nil
+	return doltserver.ResolveProxiedServerRootPath(beadsDir)
 }
 
 func resolveProxiedServerConfigPath(beadsDir string) (path string, isCustom bool, err error) {

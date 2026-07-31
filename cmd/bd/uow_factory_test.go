@@ -28,7 +28,7 @@ func TestNewExternalProxiedServerUOWProvider_CreatesRootDir(t *testing.T) {
 	beadsDir := t.TempDir()
 	external := &configfile.ExternalDoltConfig{Host: "db.invalid"}
 
-	_, err := newExternalProxiedServerUOWProvider(context.Background(), beadsDir, "beads_test", external, 0, 0, false)
+	_, err := newExternalProxiedServerUOWProvider(context.Background(), beadsDir, "beads_test", external, 0, 0, false, "")
 	require.Error(t, err, "invalid external config must surface a validation error")
 
 	wantRoot := proxiedServerRoot(beadsDir)

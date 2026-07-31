@@ -141,6 +141,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd dolt push` and `bd sync` no longer adopt a Dolt remote derived from
+  git origin without consent** (#5068). On a rig with no Dolt remote
+  configured, both commands silently derived one from `git remote get-url
+  origin`, added it, persisted `sync.remote` into `.beads/config.yaml`,
+  committed that config change under the user's git identity, and uploaded the
+  full issue history — no prompt, no flag, no opt-out. A public git origin
+  therefore published the whole issue database on a command the user believed
+  targeted an already-configured remote.
+
+  Adoption is now a consent decision and fails closed. Interactively, bd shows
+  the derived URL and every side effect that follows a yes (including the
+  config commit made under your git identity) and defaults to **no**.
+  Non-interactively it refuses and exits non-zero, naming the URL it would have
+  adopted and the explicit opt-in. `--yes`/`-y` consents ahead of time for
+  scripted use; `--no-adopt` or `BD_NO_REMOTE_ADOPT=1` disables adoption
+  entirely and wins over `--yes`. Rigs with a remote already configured are
+  unaffected — that path was and remains a no-op.
+
+  Workspace resolution also moved below the gate: it calls
+  `prepareSelectedNoDBContext`, which mutates workspace state, and nothing may
+  mutate before consent is established.
+
 - **Proxied-server CI shard 1 flake: `TestProxiedServerCleanDatabases` ran a
   server-global destructive command against the shared test container**
   (p1-9lf, hazard tracked in p1-8dz). The test used the shared external Dolt
