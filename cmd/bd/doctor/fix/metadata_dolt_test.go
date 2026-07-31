@@ -20,6 +20,9 @@ import (
 func setupDoltWorkspace(t *testing.T) string {
 	t.Helper()
 	testutil.RequireDoltBinary(t)
+	// Binary present != server listening; see dep_keys_test.go. dolt.New
+	// below needs the container port TestMain publishes via BEADS_DOLT_PORT.
+	requireFixDoltContainer(t)
 
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
