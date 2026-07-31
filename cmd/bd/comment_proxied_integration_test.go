@@ -193,7 +193,7 @@ func TestProxiedServerComment(t *testing.T) {
 		p := newSharedProxiedProject(t, bd, "aj")
 		issue := bdProxiedCreate(t, bd, p.dir, "Add JSON")
 
-		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", issue.ID, "add json body", "--json")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", issue.ID, "add", "json", "body", "--json")
 		if err != nil {
 			t.Fatalf("comments add --json failed: %v\nstderr:\n%s", err, stderr)
 		}

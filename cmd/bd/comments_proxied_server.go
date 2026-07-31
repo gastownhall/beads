@@ -127,7 +127,7 @@ func runCommentsAddProxiedServer(cmd *cobra.Command, ctx context.Context, args [
 	} else if len(args) < 2 {
 		return HandleErrorRespectJSON("comment text required (use -f to read from file)")
 	} else {
-		commentText = args[1]
+		commentText = strings.Join(args[1:], " ")
 	}
 
 	if strings.TrimSpace(commentText) == "" {

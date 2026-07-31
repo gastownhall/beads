@@ -164,7 +164,7 @@ See: bd comments --help`)
 }
 
 var commentsAddCmd = &cobra.Command{
-	Use:   "add [issue-id] [text]",
+	Use:   "add [issue-id] [text...]",
 	Short: "Add a comment to an issue",
 	Long: `Add a comment to an issue.
 
@@ -203,7 +203,7 @@ Examples:
 		} else if len(args) < 2 {
 			return HandleErrorRespectJSON("comment text required (use -f to read from file)")
 		} else {
-			commentText = args[1]
+			commentText = strings.Join(args[1:], " ")
 		}
 
 		if strings.TrimSpace(commentText) == "" {
