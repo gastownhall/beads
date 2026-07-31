@@ -11,8 +11,11 @@ import (
 )
 
 // fdDirCandidates are the per-process fd directories, in preference order.
-// Linux exposes /proc/self/fd; darwin and the BSDs expose /dev/fd (on Linux
-// /dev/fd is a symlink to the same place, so listing it twice is harmless).
+// Linux exposes /proc/self/fd; darwin exposes /dev/fd (on Linux /dev/fd is a
+// symlink to the same place, so listing it twice is harmless). BSDs without
+// fdescfs mounted list only 0-2 under /dev/fd, which would make the scan a
+// silent no-op there — acceptable, since bd's supported platforms are
+// linux/darwin/windows.
 var fdDirCandidates = []string{"/proc/self/fd", "/dev/fd"}
 
 // maxScanFD bounds the brute-force fallback used when no fd directory is
