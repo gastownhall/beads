@@ -36,6 +36,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/fdhygiene"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -1163,6 +1164,12 @@ func Start(beadsDir string) (*State, error) {
 			cmd.SysProcAttr = procAttrDetached()
 			cmd.Env = os.Environ()
 
+			// GH#4634: the server outlives the caller, so any descriptor the
+			// caller left non-CLOEXEC (a shell `exec 9>lock`, a CI harness, an
+			// editor terminal) would be pinned by the server until it is
+			// restarted. os/exec does not close those; mark them first.
+			sanitizeInheritedFDs()
+
 			if startErr := cmd.Start(); startErr != nil {
 				lastErr = startErr
 				if !explicitPort {
@@ -1414,6 +1421,16 @@ func StopWithForce(beadsDir string, force bool) error {
 	}
 
 	return cleanupStateFiles(beadsDir)
+}
+
+// sanitizeInheritedFDs marks descriptors bd inherited but did not open
+// close-on-exec, so the detached sql-server does not pin them for its whole
+// lifetime (GH#4634). It is a free function rather than an inline call because
+// the spawn path shadows the debug package with a local `debug bool`.
+func sanitizeInheritedFDs() {
+	if leaked := fdhygiene.MarkInheritedCloexec(); len(leaked) > 0 {
+		debug.Logf("marked %d inherited fd(s) close-on-exec before starting dolt sql-server: %v", len(leaked), leaked)
+	}
 }
 
 // cleanupStateFiles removes all server state files (PID and port).
