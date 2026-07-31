@@ -1057,3 +1057,119 @@ func TestLooksLikePrefixedID(t *testing.T) {
 		})
 	}
 }
+
+// TestResolvePartialID_WispSubstringCollision is a regression test for gcy-g4o:
+// a real bead (gcy-oqf) and an ephemeral wisp (gcy-wisp-goqfo) coexist. When
+// the exact-ID fast path doesn't find the real bead (e.g. due to a cache lag),
+// the fuzzy fallback used to match gcy-wisp-goqfo because the hash "wisp-goqfo"
+// contains the substring "oqf". The fix uses last-segment prefix matching, so
+// "goqfo" (last segment of "wisp-goqfo") does NOT match prefix "oqf".
+func TestResolvePartialID_WispSubstringCollision(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	real := &types.Issue{
+		ID:        "gcy-oqf",
+		Title:     "Real bug bead",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeBug,
+	}
+	wisp := &types.Issue{
+		ID:        "gcy-wisp-goqfo",
+		Title:     "Order wisp",
+		Status:    types.StatusClosed,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+
+	if err := store.CreateIssue(ctx, real, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "gcy"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The real bead must be found — the wisp must not be returned just because
+	// its compound hash "wisp-goqfo" contains the substring "oqf".
+	result, err := ResolvePartialID(ctx, store, "gcy-oqf")
+	if err != nil {
+		t.Fatalf("ResolvePartialID(%q) unexpected error: %v", "gcy-oqf", err)
+	}
+	if result != "gcy-oqf" {
+		t.Errorf("ResolvePartialID(%q) = %q; want %q (wisp substring collision must not win)", "gcy-oqf", result, "gcy-oqf")
+	}
+}
+
+// TestResolvePartialID_WispLastSegment verifies that wisp IDs are still
+// resolvable by their last dash-segment (e.g. "t3st" finds "bd-wisp-t3st").
+func TestResolvePartialID_WispLastSegment(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	wisp := &types.Issue{
+		ID:        "bd-wisp-t3st",
+		Title:     "Test wisp",
+		Status:    types.StatusOpen,
+		Priority:  2,
+		IssueType: types.TypeTask,
+		Ephemeral: true,
+	}
+	if err := store.CreateIssue(ctx, wisp, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatal(err)
+	}
+
+	// "t3st" is the last segment of "wisp-t3st" and must resolve to the wisp.
+	result, err := ResolvePartialID(ctx, store, "t3st")
+	if err != nil {
+		t.Fatalf("ResolvePartialID(%q) unexpected error: %v", "t3st", err)
+	}
+	if result != "bd-wisp-t3st" {
+		t.Errorf("ResolvePartialID(%q) = %q; want %q", "t3st", result, "bd-wisp-t3st")
+	}
+}
+
+// TestResolvePartialID_BdNoFuzzy checks that BD_NO_FUZZY suppresses partial
+// resolution and returns an error for an input that doesn't exactly match.
+func TestResolvePartialID_BdNoFuzzy(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	issue := &types.Issue{
+		ID:        "bd-a3f8e9",
+		Title:     "Some issue",
+		Status:    types.StatusOpen,
+		Priority:  1,
+		IssueType: types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "bd"); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BD_NO_FUZZY", "1")
+
+	// Exact match must still work even with BD_NO_FUZZY set.
+	result, err := ResolvePartialID(ctx, store, "bd-a3f8e9")
+	if err != nil {
+		t.Errorf("ResolvePartialID exact under BD_NO_FUZZY unexpected error: %v", err)
+	}
+	if result != "bd-a3f8e9" {
+		t.Errorf("ResolvePartialID exact under BD_NO_FUZZY = %q; want %q", result, "bd-a3f8e9")
+	}
+
+	// Partial match must fail.
+	_, err = ResolvePartialID(ctx, store, "a3f8")
+	if err == nil {
+		t.Errorf("ResolvePartialID partial under BD_NO_FUZZY expected error, got nil")
+	}
+}

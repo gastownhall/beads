@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -49,6 +50,9 @@ func parseIssueID(input string, prefix string) string {
 // Returns an error if:
 // - No issue found matching the ID
 // - Multiple issues match (ambiguous prefix)
+//
+// Set BD_NO_FUZZY=1 in the environment to disable fuzzy/partial matching entirely.
+// When set, only exact-ID matches are returned; partial IDs produce an error.
 func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input string) (string, error) {
 	if store == nil {
 		return "", fmt.Errorf("cannot resolve issue ID %q: storage is nil", input)
@@ -61,6 +65,14 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 	exactFilter := types.IssueFilter{IDs: []string{input}}
 	if issues, err := store.SearchIssues(ctx, "", exactFilter); err == nil && len(issues) > 0 {
 		return issues[0].ID, nil
+	}
+
+	// BD_NO_FUZZY: when set, skip partial/fuzzy resolution and fail fast.
+	// This prevents silent wrong-bead resolution when the exact ID wasn't found
+	// (e.g. due to a transient cache lag). Callers that need strict lookups can
+	// set this env var or pass a pre-resolved full ID.
+	if os.Getenv("BD_NO_FUZZY") != "" {
+		return "", fmt.Errorf("no issue found matching %q (BD_NO_FUZZY is set; use the full ID)", input)
 	}
 
 	// Get the configured prefix
@@ -163,15 +175,22 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 		if issueHash == hashPart {
 			exactMatch = id
 			// Don't break - keep searching in case there's a full ID match
-		} else if strings.HasPrefix(issueHash, hashPart) {
+		} else if hashSegmentPrefixMatch(issueHash, hashPart) {
 			// Leading-prefix abbreviation (documented UX, e.g. "a3f8" -> "a3f8e9...").
-			// HasPrefix rather than Contains: reject interior-substring matches
-			// like "kt8" inside "j0kt8" (GH#4234).
+			// We compare the last dash-segment of issueHash against the last
+			// dash-segment of hashPart rather than a raw HasPrefix/Contains check.
+			// This handles compound hashes like "wisp-goqfo" correctly: the last
+			// segment is "goqfo", and searching for "oqf" compares against last
+			// segment "oqf" -- HasPrefix("goqfo", "oqf") is false, so the wisp is
+			// NOT spuriously returned, and interior-substring matches like "kt8"
+			// inside "j0kt8" are also rejected (GH#4234). Previously
+			// strings.Contains was used, which matched "goqfo" containing "oqf"
+			// and caused the wrong bead to be silently returned (gcy-g4o).
 			matches = append(matches, id)
 		}
 	}
 
-	// Prefer exact match over substring matches
+	// Prefer exact match over prefix matches
 	if exactMatch != "" {
 		return exactMatch, nil
 	}
@@ -201,7 +220,7 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 				wispHash := strings.TrimPrefix(wHash, "wisp-")
 				if wHash == hashPart || wispHash == hashPart {
 					exactMatch = wID
-				} else if strings.HasPrefix(wispHash, hashPart) {
+				} else if hashSegmentPrefixMatch(wispHash, hashPart) {
 					matches = append(matches, wID)
 				}
 			}
@@ -225,6 +244,32 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 	}
 
 	return matches[0], nil
+}
+
+// hashSegmentPrefixMatch reports whether issueHash is a prefix match for
+// hashPart using last-dash-segment semantics. It compares the trailing
+// segment of each (everything after the last '-') and returns true when the
+// issue's trailing segment starts with the query's trailing segment.
+//
+// Examples:
+//
+//	hashSegmentPrefixMatch("oqfe9",     "oqf")  → true   (direct prefix)
+//	hashSegmentPrefixMatch("wisp-goqfo","oqf")  → false  (goqfo doesn't start with oqf)
+//	hashSegmentPrefixMatch("wisp-t3st", "t3st") → true   (last seg "t3st" has prefix "t3st")
+//	hashSegmentPrefixMatch("wisp-t3st", "t3")   → true   (last seg "t3st" starts with "t3")
+func hashSegmentPrefixMatch(issueHash, hashPart string) bool {
+	issueSeg := lastDashSegment(issueHash)
+	querySeg := lastDashSegment(hashPart)
+	return strings.HasPrefix(issueSeg, querySeg)
+}
+
+// lastDashSegment returns the substring after the last '-' in s.
+// If s contains no '-', it returns s unchanged.
+func lastDashSegment(s string) string {
+	if idx := strings.LastIndex(s, "-"); idx >= 0 {
+		return s[idx+1:]
+	}
+	return s
 }
 
 func partialIDSearchPart(hashPart string) (string, bool) {
