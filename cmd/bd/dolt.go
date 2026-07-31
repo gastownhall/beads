@@ -408,20 +408,35 @@ func printNoRemoteGuidance() {
 // when the persisted remote and the git origin disagree — a Dolt remote
 // deliberately pointed elsewhere, or a renamed/redirected origin — the rig
 // starts pushing somewhere else on the strength of a stale listing (wy-82hc5).
-func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage) (bool, error) {
+//
+// Adoption requires consent (#5068). The policy is decided by
+// decideRemoteAdoption in dolt_remote_adopt.go and applied here, after the URL
+// is known and before anything is written: nothing below this point is
+// reachable without either --yes or an interactive confirmation.
+func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage, policy adoptPolicy) (bool, error) {
 	configured, err := hasConfiguredRemote(ctx, st)
 	if err != nil || configured {
 		return false, err
 	}
-	beadsDir := selectedDoltBeadsDir()
-	if beadsDir == "" {
-		return false, fmt.Errorf("no active beads workspace")
-	}
+	// Deriving the URL comes first and is read-only (`git remote get-url`).
+	// Workspace resolution is deliberately NOT done yet: selectedDoltBeadsDir
+	// calls prepareSelectedNoDBContext, which mutates process and on-disk
+	// workspace state, and nothing may mutate before consent is established.
 	originURL, err := gitOriginGetURLForActiveRepo(ctx)
 	if err != nil || originURL == "" {
 		return false, nil
 	}
 	remoteURL := normalizeRemoteURL(originURL)
+
+	if proceed, err := applyAdoptionConsent(remoteURL, policy); err != nil || !proceed {
+		return false, err
+	}
+
+	beadsDir := selectedDoltBeadsDir()
+	if beadsDir == "" {
+		return false, fmt.Errorf("no active beads workspace")
+	}
+
 	if err := st.AddRemote(ctx, "origin", remoteURL); err != nil {
 		return false, err
 	}
@@ -429,6 +444,7 @@ func adoptGitOriginRemoteForPush(ctx context.Context, st storage.DoltStorage) (b
 	if err := config.SetYamlConfigInDir(beadsDir, "sync.remote", remoteURL); err != nil {
 		return false, fmt.Errorf("failed to persist sync.remote to config.yaml: %w", err)
 	}
+	fmt.Fprintln(os.Stderr, "Committing .beads/config.yaml (sync.remote) under your git identity.")
 	commitBeadsConfigForActiveRepo(ctx, "bd: update sync.remote")
 	return true, nil
 }
@@ -516,8 +532,11 @@ The remote must already exist (see 'bd dolt remote add').`,
 			fmt.Println("Push complete.")
 			return nil
 		}
-		if adopted, err := adoptGitOriginRemoteForPush(ctx, st); err != nil {
-			return HandleError("failed to adopt git origin as Dolt remote: %v", err)
+		assumeYes, _ := cmd.Flags().GetBool("yes")
+		noAdopt, _ := cmd.Flags().GetBool("no-adopt")
+		policy := currentAdoptPolicy(assumeYes, noAdopt, stdinIsTerminal())
+		if adopted, err := adoptGitOriginRemoteForPush(ctx, st, policy); err != nil {
+			return HandleError("%v", err)
 		} else if adopted {
 			fmt.Println("Configured Dolt remote origin from git origin.")
 		}
@@ -1714,6 +1733,8 @@ func init() {
 	doltStopCmd.Flags().Bool("force", false, "Force stop (proxied recovery still requires a bd/dolt executable match)")
 	doltPushCmd.Flags().Bool("force", false, "Force push (overwrite remote changes)")
 	doltPushCmd.Flags().String("remote", "", "Push to a specific named remote instead of the default")
+	doltPushCmd.Flags().BoolP("yes", "y", false, "Consent to adopting a Dolt remote derived from git origin when none is configured")
+	doltPushCmd.Flags().Bool("no-adopt", false, "Never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1)")
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
 	doltPullCmd.Flags().String("strategy", "", "Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
