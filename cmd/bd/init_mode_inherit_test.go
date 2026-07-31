@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -135,4 +136,53 @@ func TestInitModeExplicitlyRequested(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestInheritWorkspaceDoltMode covers the decision the RunE inheritance block
+// applies — the composition a helper-only test suite would miss (#3885 review).
+// The proxied-server case is the load-bearing one: the proxied init path
+// dispatches on the explicit flag before the inheritance point, so "inherit"
+// there would build embedded data under proxied-server metadata. It must
+// refuse instead.
+func TestInheritWorkspaceDoltMode(t *testing.T) {
+	t.Run("server mode is inherited", func(t *testing.T) {
+		writeWorkspaceMode(t, configfile.DoltModeServer)
+		inheritServer, err := inheritWorkspaceDoltMode()
+		if err != nil {
+			t.Fatalf("inheritWorkspaceDoltMode() error: %v", err)
+		}
+		if !inheritServer {
+			t.Error("server-mode workspace was not inherited")
+		}
+	})
+
+	t.Run("embedded mode inherits nothing", func(t *testing.T) {
+		writeWorkspaceMode(t, configfile.DoltModeEmbedded)
+		inheritServer, err := inheritWorkspaceDoltMode()
+		if err != nil || inheritServer {
+			t.Errorf("embedded workspace: got (%v, %v), want (false, nil)", inheritServer, err)
+		}
+	})
+
+	t.Run("missing workspace inherits nothing", func(t *testing.T) {
+		t.Setenv("BEADS_DIR", filepath.Join(t.TempDir(), "nope", ".beads"))
+		inheritServer, err := inheritWorkspaceDoltMode()
+		if err != nil || inheritServer {
+			t.Errorf("missing workspace: got (%v, %v), want (false, nil)", inheritServer, err)
+		}
+	})
+
+	t.Run("proxied-server refuses rather than silently building embedded", func(t *testing.T) {
+		writeWorkspaceMode(t, configfile.DoltModeProxiedServer)
+		inheritServer, err := inheritWorkspaceDoltMode()
+		if inheritServer {
+			t.Fatal("proxied-server workspace was inherited as server mode")
+		}
+		if err == nil {
+			t.Fatal("proxied-server workspace did not refuse; a bare re-init would build embedded data under proxied-server metadata")
+		}
+		if !strings.Contains(err.Error(), "--proxied-server") {
+			t.Errorf("refusal does not tell the user how to proceed: %v", err)
+		}
+	})
 }

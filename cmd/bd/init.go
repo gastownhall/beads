@@ -552,8 +552,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// explicit --server/--shared-server/--proxied-server, the BEADS_DOLT_*
 		// env vars, and a global dolt.mode all still win.
 		if !initServerMode && !initModeExplicitlyRequested(cmd) {
-			switch existingWorkspaceDoltMode() {
-			case configfile.DoltModeServer:
+			inheritServer, inheritErr := inheritWorkspaceDoltMode()
+			if inheritErr != nil {
+				return inheritErr
+			}
+			if inheritServer {
 				initServerMode = true
 				serverMode = true
 				if cmdCtx != nil {
@@ -561,14 +564,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				}
 				if !quiet {
 					fmt.Fprintln(os.Stderr, "Preserving server mode from the existing .beads/metadata.json.")
-				}
-			case configfile.DoltModeProxiedServer:
-				proxiedServerMode = true
-				if cmdCtx != nil {
-					cmdCtx.ProxiedServerMode = true
-				}
-				if !quiet {
-					fmt.Fprintln(os.Stderr, "Preserving proxied-server mode from the existing .beads/metadata.json.")
 				}
 			}
 		}
@@ -2570,6 +2565,29 @@ func existingWorkspaceDoltMode() string {
 	// Matched case-insensitively by callers, mirroring configfile's own
 	// IsServerMode/IsProxiedServerMode comparisons.
 	return strings.ToLower(strings.TrimSpace(cfg.DoltMode))
+}
+
+// inheritWorkspaceDoltMode is the decision half of #3885's fix: what a bare
+// re-init adopts from the workspace it is re-initializing. It returns
+// inheritServer=true when the workspace records server mode.
+//
+// Proxied-server is deliberately an error, not an inheritance: the dedicated
+// proxied init path (runInitProxiedServer) dispatches on the explicit flag
+// BEFORE the inheritance point in RunE, so inheriting by mutating only the
+// process-mode globals would build the database embedded while metadata.json
+// kept claiming proxied-server — the exact silent mismatch inheritance exists
+// to prevent. The mode is experimental and dark-launched; a re-init of such a
+// workspace must name it explicitly so it routes through the real init path.
+func inheritWorkspaceDoltMode() (bool, error) {
+	switch existingWorkspaceDoltMode() {
+	case configfile.DoltModeServer:
+		return true, nil
+	case configfile.DoltModeProxiedServer:
+		return false, fmt.Errorf("this workspace is recorded as proxied-server in .beads/metadata.json; " +
+			"re-run with --proxied-server to keep it, or name another mode explicitly to change it")
+	default:
+		return false, nil
+	}
 }
 
 // initModeExplicitlyRequested reports whether this invocation names a
