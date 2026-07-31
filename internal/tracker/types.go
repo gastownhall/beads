@@ -146,6 +146,7 @@ type PullStats struct {
 	Errors      int
 	Incremental bool
 	SyncedSince string
+	Items       []SyncItemDetail `json:"-"`
 }
 
 // PushStats tracks push operation results.
@@ -155,7 +156,29 @@ type PushStats struct {
 	Skipped  int
 	Errors   int
 	Warnings []string
+	Items    []SyncItemDetail `json:"-"`
 }
+
+// SyncItemDetail records the outcome of a single issue during sync.
+// Used by the audit log to persist per-issue outcomes with before/after values.
+type SyncItemDetail struct {
+	BeadID       string            `json:"bead_id"`
+	ExternalID   string            `json:"external_id"`
+	Direction    string            `json:"direction"`
+	Outcome      string            `json:"outcome"`
+	DurationMs   int64             `json:"duration_ms,omitempty"`
+	BeforeValues map[string]string `json:"before_values,omitempty"`
+	AfterValues  map[string]string `json:"after_values,omitempty"`
+	ErrorMsg     string            `json:"error_msg,omitempty"`
+}
+
+// Sync item outcome constants.
+const (
+	OutcomeCreated = "created"
+	OutcomeUpdated = "updated"
+	OutcomeSkipped = "skipped"
+	OutcomeFailed  = "failed"
+)
 
 // BatchPushItem describes one local issue handled by a tracker batch push.
 type BatchPushItem struct {

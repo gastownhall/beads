@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
@@ -385,7 +387,12 @@ func runLinearSync(cmd *cobra.Command, args []string) error {
 		opts.ConflictResolution = tracker.ConflictTimestamp
 	}
 
+	syncStarted := time.Now().UTC()
 	result, err := engine.Sync(ctx, opts)
+
+	// Record sync history (best-effort, do not fail the sync on history write errors).
+	recordSyncHistory(ctx, syncStarted, opts, result, err)
+
 	if err != nil {
 		if jsonOutput {
 			if jerr := outputJSON(result); jerr != nil {
@@ -975,6 +982,59 @@ func runLinearTeams(cmd *cobra.Command, args []string) error {
 	fmt.Println("To configure:")
 	fmt.Println("  bd config set linear.team_id \"<ID>\"")
 	fmt.Println("  bd config set linear.team_ids \"<ID1>,<ID2>\"  # multiple teams")
+	return nil
+}
+
+// recordSyncHistory persists the sync result to the linear_sync_history tables.
+// Best-effort: errors are logged to stderr but do not fail the sync operation.
+func recordSyncHistory(ctx context.Context, started time.Time, opts tracker.SyncOptions, result *tracker.SyncResult, syncErr error) {
+	rawDB := getSyncHistoryDB()
+	if rawDB == nil {
+		return
+	}
+
+	direction := syncDirection(opts)
+	conflictRes := string(opts.ConflictResolution)
+	runID := uuid.New().String()
+
+	run := linear.BuildSyncRunFromResult(runID, started, direction, opts.DryRun, conflictRes, result)
+	if syncErr != nil && (result == nil || result.Error == "") {
+		run.ErrorMessage = syncErr.Error()
+	}
+
+	var items []linear.SyncItem
+	if result != nil {
+		items = linear.BuildSyncItemsFromResult(result)
+	}
+
+	histDB := linear.NewSyncHistoryDB(rawDB)
+	if err := histDB.RecordSyncRun(ctx, run, items); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to record sync history: %v\n", err)
+	}
+}
+
+func syncDirection(opts tracker.SyncOptions) string {
+	switch {
+	case opts.Pull && opts.Push:
+		return "both"
+	case opts.Pull:
+		return "pull"
+	case opts.Push:
+		return "push"
+	default:
+		return "both"
+	}
+}
+
+// getSyncHistoryDB returns a *sql.DB for writing sync history, or nil if unavailable.
+func getSyncHistoryDB() *sql.DB {
+	if store == nil {
+		return nil
+	}
+	unwrapped := storage.UnwrapStore(store)
+	if accessor, ok := unwrapped.(storage.RawDBAccessor); ok {
+		return accessor.UnderlyingDB()
+	}
 	return nil
 }
 
