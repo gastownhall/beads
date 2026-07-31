@@ -84,11 +84,12 @@ func (t *embeddedTransaction) CloseIssue(ctx context.Context, id string, reason 
 }
 
 func (t *embeddedTransaction) DeleteIssue(ctx context.Context, id string) error {
-	t.dirty.MarkDirty("issues")
-	t.dirty.MarkDirty("dependencies")
-	t.dirty.MarkDirty("labels")
-	t.dirty.MarkDirty("comments")
-	t.dirty.MarkDirty("events")
+	// Shared with the dolt path so the two cannot drift again; the hand-listed
+	// set here previously omitted child_counters and the snapshot tables, which
+	// the cascade also empties.
+	for _, cascaded := range issueops.DeleteCascadeTables(issueops.IsActiveWispInTx(ctx, t.tx, id)) {
+		t.dirty.MarkDirty(cascaded)
+	}
 	return issueops.DeleteIssueInTx(ctx, t.tx, id)
 }
 

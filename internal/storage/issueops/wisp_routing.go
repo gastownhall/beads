@@ -196,3 +196,40 @@ func WispTableRouting(isWisp bool) (issueTable, labelTable, eventTable, depTable
 	}
 	return "issues", "labels", "events", "dependencies"
 }
+
+// DeleteCascadeTables returns every table a DELETE of one issue (or wisp) row
+// removes rows from, including the deleted row's own table.
+//
+// The delete itself only ever issues `DELETE FROM issues|wisps WHERE id = ?`;
+// everything else goes through ON DELETE CASCADE foreign keys declared in the
+// migrations. Callers that track dirty tables for Dolt staging cannot see those
+// cascaded deletions — the SQL never names the tables — so they have to be
+// enumerated here, or the cascade rows are removed in the working set but left
+// out of the version commit (#4796 follow-up: doltTransaction.DeleteIssue
+// marked one table where embeddedTransaction.DeleteIssue marked five, and
+// neither covered the snapshot or counter tables).
+//
+// Dolt-ignored members (events, and the wisp_* set) are included rather than
+// filtered: DirtyTableTracker.MarkDirty already drops wisps/wisp_*, and
+// DOLT_ADD on an ignored table is a no-op returning status 0, so listing them
+// keeps this an honest description of the cascade instead of a description of
+// what happens to be stageable today.
+func DeleteCascadeTables(isWisp bool) []string {
+	if isWisp {
+		return []string{"wisps", "wisp_labels", "wisp_events", "wisp_dependencies"}
+	}
+	return []string{
+		"issues",
+		"dependencies",
+		"labels",
+		"comments",
+		"events",
+		"child_counters",
+		"issue_snapshots",
+		"compaction_snapshots",
+		// Cross-plane: wisp_dependencies.depends_on_issue_id points at
+		// issues(id) ON DELETE CASCADE, so deleting an ordinary issue also
+		// drops the wisp edges that depended on it.
+		"wisp_dependencies",
+	}
+}

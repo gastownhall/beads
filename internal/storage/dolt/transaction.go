@@ -678,14 +678,20 @@ func (t *doltTransaction) CloseIssue(ctx context.Context, id string, reason stri
 }
 
 func (t *doltTransaction) DeleteIssue(ctx context.Context, id string) error {
+	isWisp := t.isActiveWisp(ctx, id)
 	table := "issues"
-	if t.isActiveWisp(ctx, id) {
+	if isWisp {
 		table = "wisps"
 	}
 	if err := issueops.DeleteIssueInTx(ctx, t.txFor(table), id); err != nil {
 		return wrapExecError("delete issue in tx", err)
 	}
-	t.dirty.MarkDirty(table)
+	// Mark every table the ON DELETE CASCADE fans out to, not just the row's
+	// own table: the cascaded deletions are invisible to the SQL we issue, so
+	// staging only `issues` leaves them uncommitted in the working set.
+	for _, cascaded := range issueops.DeleteCascadeTables(isWisp) {
+		t.dirty.MarkDirty(cascaded)
+	}
 	return nil
 }
 
