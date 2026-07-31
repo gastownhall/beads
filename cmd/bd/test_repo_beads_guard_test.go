@@ -160,6 +160,26 @@ func testMainInner(m *testing.M) int {
 		}
 	}()
 
+	// Clear BD_BACKUP_ENABLED / BEADS_BACKUP_ENABLED (legacy alias) so tests
+	// asserting on backup.enabled's auto-detected default aren't overridden by
+	// whatever the invoking shell happens to export for real bd usage
+	// (be-yjp4z). Tests that need a specific value set it explicitly via
+	// t.Setenv.
+	origBackupEnabled := os.Getenv("BD_BACKUP_ENABLED")
+	os.Unsetenv("BD_BACKUP_ENABLED")
+	defer func() {
+		if origBackupEnabled != "" {
+			os.Setenv("BD_BACKUP_ENABLED", origBackupEnabled)
+		}
+	}()
+	origBeadsBackupEnabled := os.Getenv("BEADS_BACKUP_ENABLED")
+	os.Unsetenv("BEADS_BACKUP_ENABLED")
+	defer func() {
+		if origBeadsBackupEnabled != "" {
+			os.Setenv("BEADS_BACKUP_ENABLED", origBeadsBackupEnabled)
+		}
+	}()
+
 	// BD_BRANCH is no longer used (all writers operate on main with transactions).
 
 	// Start shared test Dolt server if the hook is registered (CGO builds).

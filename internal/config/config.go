@@ -137,6 +137,13 @@ func Initialize() error {
 					break
 				}
 			}
+			if ignoreRepoConfig && moduleRoot != "" && dir == moduleRoot {
+				// Don't walk above the test module root: anything further up is
+				// outside this repo entirely (e.g. an outer orchestration
+				// project's own unrelated .beads/config.yaml) and must never
+				// leak into a beads-under-test process (be-yjp4z).
+				break
+			}
 		}
 
 		// Worktree/shared fallback: the active workspace may live outside the
