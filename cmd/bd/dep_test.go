@@ -942,7 +942,7 @@ func TestRenderTreeExternalBlockerMarksRootBlocked(t *testing.T) {
 			Issue: types.Issue{ID: "BD-root", Title: "Root", Status: types.StatusOpen, Priority: 1},
 		},
 		{
-			Issue:          types.Issue{ID: "external:remote:payments", Title: "⏳ payments", Status: types.StatusBlocked},
+			Issue:          types.Issue{ID: "external:remote:payments", Title: "○ payments", Status: types.StatusOpen},
 			Depth:          1,
 			ParentID:       "BD-root",
 			EdgeFromParent: types.DepBlocks,

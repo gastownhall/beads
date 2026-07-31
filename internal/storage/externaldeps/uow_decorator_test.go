@@ -30,8 +30,9 @@ func (u *fakeUOW) DependencyUseCase() domain.DependencyUseCase { return u.deps }
 
 type fakeIssueUseCase struct {
 	domain.IssueUseCase
-	ready  []*types.Issue
-	closed []string
+	ready   []*types.Issue
+	blocked []*types.BlockedIssue
+	closed  []string
 }
 
 func (u *fakeIssueUseCase) GetIssue(_ context.Context, id string) (*types.Issue, error) {
@@ -41,6 +42,18 @@ func (u *fakeIssueUseCase) GetIssue(_ context.Context, id string) (*types.Issue,
 		}
 	}
 	return nil, nil
+}
+
+func (u *fakeIssueUseCase) GetIssuesByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
+	result := make([]*types.Issue, 0, len(ids))
+	for _, id := range ids {
+		if issue, err := u.GetIssue(ctx, id); err != nil {
+			return nil, err
+		} else if issue != nil {
+			result = append(result, issue)
+		}
+	}
+	return result, nil
 }
 
 func (u *fakeIssueUseCase) CloseIssueChecked(_ context.Context, id string, _ domain.CloseIssueParams, _ string, _ bool) (domain.CloseIssueResult, error) {
@@ -58,13 +71,26 @@ func (u *fakeIssueUseCase) GetReadyWork(_ context.Context, filter types.WorkFilt
 	return domain.SearchPage{Items: items}, nil
 }
 
+func (u *fakeIssueUseCase) GetBlockedIssues(_ context.Context, _ types.WorkFilter) ([]*types.BlockedIssue, error) {
+	return slices.Clone(u.blocked), nil
+}
+
 type fakeDependencyUseCase struct {
 	domain.DependencyUseCase
 	external map[string][]*types.Dependency
+	records  map[string][]*types.Dependency
 }
 
 func (u *fakeDependencyUseCase) GetExternalBlockingDependencyRecords(context.Context) (map[string][]*types.Dependency, error) {
 	return u.external, nil
+}
+
+func (u *fakeDependencyUseCase) GetIssueDependencyRecords(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	result := make(map[string][]*types.Dependency, len(ids))
+	for _, id := range ids {
+		result[id] = u.records[id]
+	}
+	return result, nil
 }
 
 func TestWrapUOWProviderFiltersProxiedReadyWork(t *testing.T) {
@@ -112,5 +138,34 @@ func TestWrapUOWProviderRefusesProxiedCheckedClose(t *testing.T) {
 	}
 	if len(issues.closed) != 0 {
 		t.Fatalf("inner close calls = %v, want none", issues.closed)
+	}
+}
+
+func TestWrapUOWProviderFiltersExternalBlockedWorkByParent(t *testing.T) {
+	parent, child := issue("be-parent"), issue("be-child")
+	inner := &fakeUOW{
+		issues: &fakeIssueUseCase{ready: []*types.Issue{child}},
+		deps: &fakeDependencyUseCase{
+			external: map[string][]*types.Dependency{
+				child.ID: {externalDep(child.ID, "external:remote:payments", types.DepBlocks)},
+			},
+			records: map[string][]*types.Dependency{
+				child.ID: {{IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepParentChild}},
+			},
+		},
+	}
+	provider := WrapUOWProvider(&fakeUOWProvider{uw: inner}, func(ProjectName) (string, bool) {
+		return "", false
+	}, nil)
+	uw, err := provider.NewUOW(t.Context())
+	if err != nil {
+		t.Fatalf("NewUOW: %v", err)
+	}
+	got, err := uw.IssueUseCase().GetBlockedIssues(t.Context(), types.WorkFilter{ParentID: &parent.ID})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != child.ID {
+		t.Fatalf("blocked issues = %v, want [%s]", got, child.ID)
 	}
 }

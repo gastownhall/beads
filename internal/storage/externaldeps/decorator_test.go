@@ -456,7 +456,7 @@ func TestGetDependencyTreeAddsResolvedExternalLeaf(t *testing.T) {
 		t.Fatalf("tree length = %d, want 2", len(tree))
 	}
 	leaf := tree[1]
-	if leaf.ID != ref || leaf.Status != types.StatusBlocked || leaf.ParentID != root.ID || leaf.EdgeFromParent != types.DepBlocks {
+	if leaf.ID != ref || leaf.Status != types.StatusOpen || leaf.ParentID != root.ID || leaf.EdgeFromParent != types.DepBlocks {
 		t.Fatalf("external leaf = %+v", leaf)
 	}
 
@@ -467,6 +467,29 @@ func TestGetDependencyTreeAddsResolvedExternalLeaf(t *testing.T) {
 	}
 	if tree[1].Status != types.StatusClosed {
 		t.Fatalf("shipped external status = %s, want closed", tree[1].Status)
+	}
+}
+
+func TestUnavailableProjectWarnsOnce(t *testing.T) {
+	a := issue("be-a")
+	ref := "external:remote:payments"
+	raw := &fakeStore{
+		ready: []*types.Issue{a},
+		deps: map[string][]*types.Dependency{
+			a.ID: {externalDep(a.ID, ref, types.DepBlocks)},
+		},
+	}
+	store := testStore(raw, &fakeStore{}, false)
+	var warnings []ProjectName
+	store.warnProject = func(project ProjectName) { warnings = append(warnings, project) }
+
+	for range 2 {
+		if _, err := store.GetReadyWork(t.Context(), types.WorkFilter{}); err != nil {
+			t.Fatalf("GetReadyWork: %v", err)
+		}
+	}
+	if !slices.Equal(warnings, []ProjectName{"remote"}) {
+		t.Fatalf("warnings = %v, want [remote]", warnings)
 	}
 }
 

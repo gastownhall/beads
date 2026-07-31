@@ -27,6 +27,9 @@ The decorator:
   closed issue labeled `provides:<capability>`;
 - treats malformed references, missing configuration, unavailable projects,
   and failed foreign reads as unsatisfied;
+- emits one stderr warning per unavailable foreign project per command. Foreign
+  projects in proxied-server mode are currently unsupported by the read-only
+  opener and therefore remain blocking;
 - filters ready and claim candidates, augments blocked output, and appends
   synthetic external leaves to dependency trees;
 - rejects `parent-child` external edges: hierarchy has no foreign lifecycle

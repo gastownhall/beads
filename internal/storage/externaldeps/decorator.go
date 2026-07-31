@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -17,6 +18,9 @@ type Store struct {
 	inner         storage.DoltStorage
 	locateProject ProjectLocator
 	openProject   StoreOpener
+	warnProject   func(ProjectName)
+	warnMu        sync.Mutex
+	warned        map[ProjectName]struct{}
 }
 
 // New constructs an external-capability-aware storage decorator.
@@ -26,11 +30,25 @@ func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject St
 		inner:         inner,
 		locateProject: locateProject,
 		openProject:   openProject,
+		warnProject:   defaultProjectWarning,
+		warned:        make(map[ProjectName]struct{}),
 	}
 }
 
 // Unwrap exposes the decorated store to storage.UnwrapStore.
 func (s *Store) Unwrap() storage.DoltStorage { return s.inner }
+
+func (s *Store) warnUnresolvedProject(project ProjectName) {
+	s.warnMu.Lock()
+	defer s.warnMu.Unlock()
+	if _, warned := s.warned[project]; warned {
+		return
+	}
+	s.warned[project] = struct{}{}
+	if s.warnProject != nil {
+		s.warnProject(project)
+	}
+}
 
 type blockingState struct {
 	refsByIssue map[string][]string
@@ -382,7 +400,7 @@ func (s *Store) appendTreeExternalReferences(ctx context.Context, tree []*types.
 				continue
 			}
 			ref := parseReference(dep.DependsOnID)
-			status := types.StatusBlocked
+			status := types.StatusOpen
 			title := "○ " + externalTitle(ref)
 			if satisfied[ref.raw] {
 				status = types.StatusClosed

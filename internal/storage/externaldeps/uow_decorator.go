@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"slices"
 	"sort"
-	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -150,6 +149,13 @@ func (u *issueUseCase) GetBlockedIssues(ctx context.Context, filter types.WorkFi
 			missing = append(missing, id)
 		}
 	}
+	parentDeps := make(map[string][]*types.Dependency)
+	if filter.ParentID != nil && len(missing) > 0 {
+		parentDeps, err = u.deps.GetIssueDependencyRecords(ctx, missing)
+		if err != nil {
+			return nil, fmt.Errorf("external dependencies: load blocked parent edges: %w", err)
+		}
+	}
 	issues, err := u.IssueUseCase.GetIssuesByIDs(ctx, missing)
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: load blocked sources: %w", err)
@@ -158,7 +164,7 @@ func (u *issueUseCase) GetBlockedIssues(ctx context.Context, filter types.WorkFi
 		if issue == nil || issue.Status == types.StatusClosed || issue.Status == types.StatusPinned {
 			continue
 		}
-		if filter.ParentID != nil && !strings.HasPrefix(issue.ID, *filter.ParentID+".") {
+		if !matchesParentFilter(issue.ID, filter.ParentID, parentDeps) {
 			continue
 		}
 		refs := slices.Clone(state.refsByIssue[issue.ID])

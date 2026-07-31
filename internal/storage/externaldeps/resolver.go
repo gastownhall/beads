@@ -3,6 +3,8 @@ package externaldeps
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -10,6 +12,10 @@ import (
 )
 
 const externalPrefix = "external:"
+
+func defaultProjectWarning(project ProjectName) {
+	fmt.Fprintf(os.Stderr, "Warning: external project %q is unavailable; its capability dependencies remain blocking\n", project)
+}
 
 // ProjectName is the configured name in external_projects.
 type ProjectName string
@@ -76,6 +82,7 @@ func (s *Store) resolveReferences(ctx context.Context, refs []reference) (map[st
 		}
 		path, ok := s.locateProject(project)
 		if !ok {
+			s.warnUnresolvedProject(project)
 			continue
 		}
 		foreign, err := s.openProject(ctx, path)
@@ -83,6 +90,7 @@ func (s *Store) resolveReferences(ctx context.Context, refs []reference) (map[st
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
+			s.warnUnresolvedProject(project)
 			continue
 		}
 
@@ -93,6 +101,7 @@ func (s *Store) resolveReferences(ctx context.Context, refs []reference) (map[st
 					_ = foreign.Close()
 					return nil, ctxErr
 				}
+				s.warnUnresolvedProject(project)
 				continue
 			}
 			satisfied := false
