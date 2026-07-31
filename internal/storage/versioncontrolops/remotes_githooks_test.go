@@ -54,6 +54,12 @@ func TestRemoteCallsDisableGitHooks(t *testing.T) {
 		{"Push with user", func(db DBConn) error { return Push(context.Background(), db, "origin", "main", "u") }},
 		{"ForcePush", func(db DBConn) error { return ForcePush(context.Background(), db, "origin", "main", "") }},
 		{"Fetch", func(db DBConn) error { return Fetch(context.Background(), db, "peer", "") }},
+		{"Clone", func(db DBConn) error {
+			return DoltClone(context.Background(), db, "https://example.com/r.git", "beads", "")
+		}},
+		{"Clone with user", func(db DBConn) error {
+			return DoltClone(context.Background(), db, "https://example.com/r.git", "beads", "u")
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

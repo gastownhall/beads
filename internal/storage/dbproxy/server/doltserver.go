@@ -22,6 +22,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
@@ -254,7 +255,11 @@ func (s *DoltServer) Start(ctx context.Context) error {
 		cmd.Stderr = s.logFile
 	}
 
-	cmd.Env = os.Environ()
+	// GH#4272: like the directly-managed sql-server spawn in
+	// internal/doltserver, the proxied server executes CALL DOLT_PUSH/FETCH
+	// in-process, so templated git hooks must be disabled in its environment.
+	cmd.Env = append(os.Environ(), githooksenv.ParametersEnv+"="+
+		githooksenv.AppendParameter(os.Getenv(githooksenv.ParametersEnv), githooksenv.NoHooksParam))
 
 	if err := cmd.Start(); err != nil {
 		s.eg, s.egCtx, s.cancel = nil, nil, nil
