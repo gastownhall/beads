@@ -278,7 +278,11 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	mock.ExpectExec("(?s)^CREATE TABLE IF NOT EXISTS ignored_schema_migrations").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectContentHashColumnExists(mock)
+	// The applier reads the ignored cursor through the guarded currentVersion
+	// (gh 5033), so a non-zero cursor is followed by the sentinel probes here
+	// too, not just in migrationWorkNeeded.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
+	expectIgnoredSentinelProbes(mock, true)
 	expectDoltStatusRows(mock)
 	expectDoltStatusRows(mock)
 	mock.ExpectQuery("(?s)SELECT t\\.TABLE_NAME\\s+FROM INFORMATION_SCHEMA\\.TABLES t").

@@ -178,3 +178,53 @@ func TestMigrationWorkNeededWhenWispTablesAbsent(t *testing.T) {
 		t.Fatalf("unmet expectations: %v", err)
 	}
 }
+
+// TestMigrateAppliesUnderContradictedCursor closes the loop the work-needed
+// test cannot: deciding "work needed" is worthless if the applier then
+// re-reads the cursor raw, believes it, and applies nothing — MigrateUp would
+// run its whole pass preamble on every store open, heal nothing, and repeat
+// forever. The applier must read through the same guarded currentVersion.
+//
+// The mock walks migrate() up to the first statement of ignored/0001 and fails
+// it with a distinctive error: reaching that statement at all proves the
+// contradicted cursor was disbelieved by the APPLIER (an at-latest raw read
+// would have returned "nothing to do" without touching migration SQL), and the
+// ordered expectations prove it happened via the sentinel probe.
+func TestMigrateAppliesUnderContradictedCursor(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	// migrate() preamble: cursor-table bootstrap, content_hash presence check.
+	mock.ExpectExec(regexp.QuoteMeta("CREATE TABLE IF NOT EXISTS ignored_schema_migrations")).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW COLUMNS FROM ignored_schema_migrations LIKE 'content_hash'")).
+		WillReturnRows(sqlmock.NewRows([]string{"Field", "Type", "Null", "Key", "Default", "Extra"}).
+			AddRow("content_hash", "char(64)", "YES", "", nil, ""))
+
+	// The guarded read: cursor claims at-latest, sentinel probe contradicts it.
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
+	mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+
+	// The proof: the applier reaches ignored/0001's SQL. Fail it distinctively
+	// rather than mocking the whole series.
+	boom := errors.New("stop here: the applier disbelieved the cursor")
+	mock.ExpectExec(".*").WillReturnError(boom)
+
+	_, _, err = ignoredSource.migrate(context.Background(), db, 0)
+	if err == nil {
+		t.Fatal("migrate returned nil with a contradicted at-latest cursor; the applier believed the raw cursor and healed nothing (gh 5033)")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("migrate failed for another reason before applying: %v", err)
+	}
+	if !strings.Contains(err.Error(), "0001") {
+		t.Errorf("failure not attributed to the first ignored migration: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}

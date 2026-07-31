@@ -229,6 +229,13 @@ type migrationSource struct {
 	// non-zero cursor is only believed while they all exist: the cursor is a
 	// claim about the schema, and a claim contradicted by the schema is worth
 	// less than no claim at all. See cursorContradictedBySchema.
+	//
+	// INVARIANT: no future migration in this series may DROP or RENAME a
+	// sentinel. Older binaries in the field check their own sentinel list
+	// against the live schema, so removing one would make every healthy newer
+	// database read as "contradicted" to them and re-run their whole series.
+	// TestSentinelTablesAreCreatedByTheSeries enforces the creating side only;
+	// the dropping side is this comment.
 	sentinelTables []string
 }
 
@@ -1328,9 +1335,15 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 		target = upTo
 	}
 
-	var current int
-	if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM "+m.cursorTable).Scan(&current); err != nil && err != sql.ErrNoRows {
-		return 0, columnAdded, fmt.Errorf("reading %s version: %w", m.cursorTable, err)
+	// The cursor is read through currentVersion, never raw: that is where the
+	// cursor-reality check lives (gh 5033). A raw read here would believe the
+	// contradicted cursor that migrationWorkNeeded just disbelieved — MigrateUp
+	// would decide "work needed" on every open, run the whole pass, and then
+	// apply nothing, leaving the missing tables missing and the pass to repeat
+	// forever. The heal only happens if the applier disbelieves the cursor too.
+	current, err := m.currentVersion(ctx, db)
+	if err != nil {
+		return 0, columnAdded, err
 	}
 
 	if current >= target {
