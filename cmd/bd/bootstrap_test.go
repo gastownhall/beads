@@ -13,7 +13,21 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
-func snapshotBootstrapEnv(t *testing.T) func() {
+// snapshotBootstrapEnv saves all BD_/BEADS_-prefixed env vars, clears them,
+// and registers a t.Cleanup to restore them. It restores via t.Cleanup
+// (rather than returning a function for the caller to defer) because
+// t.Cleanup callbacks only start running after the test function's own
+// regular defers have all completed. Tests using this helper commonly call
+// t.Setenv("BEADS_DIR", ...) / t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", ...)
+// afterward; t.Setenv captures its "restore to" value at call time, which
+// would be the already-wiped (absent) state. If this helper's own
+// restoration ran via a caller-deferred function, it would run before those
+// t.Setenv cleanups fire and its correct restoration would be clobbered by
+// them, permanently leaking the wipe forward into later tests in the same
+// binary. Registering via t.Cleanup here instead makes this the
+// first-registered (and thus, by t.Cleanup's LIFO order, last-run) cleanup,
+// so it always has the final word.
+func snapshotBootstrapEnv(t *testing.T) {
 	t.Helper()
 	saved := make(map[string]string)
 	for _, env := range os.Environ() {
@@ -24,7 +38,7 @@ func snapshotBootstrapEnv(t *testing.T) func() {
 			_ = os.Unsetenv(key)
 		}
 	}
-	return func() {
+	t.Cleanup(func() {
 		for _, env := range os.Environ() {
 			if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
 				parts := strings.SplitN(env, "=", 2)
@@ -34,7 +48,7 @@ func snapshotBootstrapEnv(t *testing.T) func() {
 		for key, val := range saved {
 			_ = os.Setenv(key, val)
 		}
-	}
+	})
 }
 
 func TestDetectBootstrapAction_NoneWhenDatabaseExists(t *testing.T) {
@@ -327,8 +341,7 @@ func TestDetectBootstrapAction_SyncWhenOriginHasDoltRef(t *testing.T) {
 }
 
 func TestDetectBootstrapAction_ExplicitSyncRemotePreservesRemotesAPIURL(t *testing.T) {
-	restore := snapshotBootstrapEnv(t)
-	defer restore()
+	snapshotBootstrapEnv(t)
 	config.ResetForTesting()
 	defer config.ResetForTesting()
 
@@ -372,8 +385,7 @@ func TestDetectBootstrapAction_ExplicitSyncRemotePreservesRemotesAPIURL(t *testi
 // exists, plan must be Action=none (validate/report), not Action=sync which
 // would DOLT_CLONE into the existing database and fail with Error 1007.
 func TestDetectBootstrapAction_ExistingEmbeddedDBWithSyncRemoteIsNoOp(t *testing.T) {
-	restore := snapshotBootstrapEnv(t)
-	defer restore()
+	snapshotBootstrapEnv(t)
 	config.ResetForTesting()
 	defer config.ResetForTesting()
 
@@ -1328,8 +1340,7 @@ func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
 }
 
 func TestFinalizeSyncedBootstrap_WorktreeStubDoesNotShadowTargetConfig(t *testing.T) {
-	restore := snapshotBootstrapEnv(t)
-	defer restore()
+	snapshotBootstrapEnv(t)
 
 	config.ResetForTesting()
 	defer config.ResetForTesting()
