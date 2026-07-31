@@ -538,6 +538,41 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			// Non-fatal - continue with defaults
 		}
 
+		// Re-init inherits the existing workspace's connection mode (#3885).
+		//
+		// This must be seeded HERE, with the other mode sources, not patched
+		// onto cfg.DoltMode where it is persisted further down: everything
+		// between the two points — which engine init opens, which database
+		// name rules apply, where the data lands — reads the process mode. A
+		// late fixup would write "server" into metadata.json describing a
+		// database that init had just built embedded, trading a silent
+		// downgrade for a silent mismatch.
+		//
+		// Only applies when this invocation names no mode of its own, so an
+		// explicit --server/--shared-server/--proxied-server, the BEADS_DOLT_*
+		// env vars, and a global dolt.mode all still win.
+		if !initServerMode && !initModeExplicitlyRequested(cmd) {
+			switch existingWorkspaceDoltMode() {
+			case configfile.DoltModeServer:
+				initServerMode = true
+				serverMode = true
+				if cmdCtx != nil {
+					cmdCtx.ServerMode = true
+				}
+				if !quiet {
+					fmt.Fprintln(os.Stderr, "Preserving server mode from the existing .beads/metadata.json.")
+				}
+			case configfile.DoltModeProxiedServer:
+				proxiedServerMode = true
+				if cmdCtx != nil {
+					cmdCtx.ProxiedServerMode = true
+				}
+				if !quiet {
+					fmt.Fprintln(os.Stderr, "Preserving proxied-server mode from the existing .beads/metadata.json.")
+				}
+			}
+		}
+
 		// config.yaml fallback for dolt.mode: if --server wasn't passed and
 		// env var didn't set it, check config.yaml for dolt.mode: server.
 		if !initServerMode {
@@ -1444,6 +1479,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				}
 
 				// Persist the connection mode matching this build.
+				priorMode := ""
+				if existingCfg != nil {
+					priorMode = strings.ToLower(strings.TrimSpace(existingCfg.DoltMode))
+				}
 				switch {
 				case usesProxiedServer():
 					cfg.DoltMode = configfile.DoltModeProxiedServer
@@ -1451,6 +1490,17 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					cfg.DoltMode = configfile.DoltModeServer
 				default:
 					cfg.DoltMode = configfile.DoltModeEmbedded
+				}
+				// A mode change on an existing workspace is never silent
+				// (#3885). By this point the inheritance above has already
+				// preserved the old mode unless something explicitly asked to
+				// change it, so reaching here with a different mode means the
+				// user asked — but they still get told, because the change
+				// rewrites where this project's data lives.
+				if priorMode != "" && priorMode != cfg.DoltMode && !quiet {
+					fmt.Fprintf(os.Stderr,
+						"Connection mode changed: %s -> %s (recorded in .beads/metadata.json).\n",
+						priorMode, cfg.DoltMode)
 				}
 
 				if !usesProxiedServer() {
@@ -2499,6 +2549,56 @@ func existingWorkspaceDBName() string {
 		return ""
 	}
 	return cfg.DoltDatabase
+}
+
+// existingWorkspaceDoltMode returns the connection mode recorded in the
+// already-initialized workspace's metadata.json, or "" if there is none.
+//
+// Like existingWorkspaceDBName it reads the raw field rather than a getter: a
+// getter that defaults to embedded would make "no recorded mode" and
+// "deliberately embedded" indistinguishable, and this value is used to decide
+// whether a re-init is about to change modes.
+func existingWorkspaceDoltMode() string {
+	beadsDir := resolveInitBeadsDir()
+	if beadsDir == "" {
+		return ""
+	}
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	// Matched case-insensitively by callers, mirroring configfile's own
+	// IsServerMode/IsProxiedServerMode comparisons.
+	return strings.ToLower(strings.TrimSpace(cfg.DoltMode))
+}
+
+// initModeExplicitlyRequested reports whether this invocation names a
+// connection mode of its own, as opposed to falling back to the build default.
+//
+// Only an explicit request may change an existing workspace's mode. Without
+// this distinction a bare `bd init --from-jsonl --reinit-local` on a
+// server-mode project runs embedded and rewrites dolt_mode to embedded, which
+// is #3885: the project comes back half-configured and the user is told
+// nothing.
+func initModeExplicitlyRequested(cmd *cobra.Command) bool {
+	for _, name := range []string{"server", "shared-server", "proxied-server"} {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
+			return true
+		}
+	}
+	for _, env := range []string{
+		"BEADS_DOLT_SERVER_MODE",
+		"BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_PROXIED_SERVER",
+	} {
+		if os.Getenv(env) != "" {
+			return true
+		}
+	}
+	// A global config.yaml `dolt.mode` is a deliberate statement about this
+	// machine, so it counts as explicit too — the seeding block above already
+	// treats it like --server.
+	return config.GetYamlConfig("dolt.mode") != ""
 }
 
 func checkExistingBeadsData(prefix string) error {
