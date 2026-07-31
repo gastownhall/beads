@@ -487,6 +487,42 @@ func TestEmbeddedInit(t *testing.T) {
 		}
 	})
 
+	// The #5068 refusal, end to end. The subtests around it prove adoption
+	// still works with consent; this one proves it does not happen without.
+	t.Run("dolt_push_refuses_to_adopt_without_consent", func(t *testing.T) {
+		bareDir := filepath.Join(t.TempDir(), "no-consent.git")
+		runGitForBootstrapTest(t, "", "init", "--bare", "-b", "main", bareDir)
+		remoteURL := "file://" + bareDir
+
+		dir := t.TempDir()
+		initGitRepoAt(t, dir)
+		runGitForBootstrapTest(t, dir, "branch", "-M", "main")
+		runGitForBootstrapTest(t, dir, "commit", "--allow-empty", "-m", "init")
+		runBDInit(t, bd, dir, "--prefix", "noc", "--skip-hooks", "--skip-agents")
+		bdCreate(t, bd, dir, "No consent", "--type", "task")
+
+		runGitForBootstrapTest(t, dir, "remote", "add", "origin", remoteURL)
+		runGitForBootstrapTest(t, dir, "push", "-u", "origin", "main")
+
+		// No TTY and no --yes: bd must refuse rather than derive a remote and
+		// upload to it.
+		out := bdDoltFail(t, bd, dir, "push")
+		if !strings.Contains(out, remoteURL) {
+			t.Errorf("refusal did not name the remote it would have adopted; output:\n%s", out)
+		}
+
+		if list := bdDolt(t, bd, dir, "remote", "list"); strings.Contains(list, remoteURL) {
+			t.Errorf("refused push still added the remote; remote list:\n%s", list)
+		}
+		configYAML, readErr := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
+		if readErr == nil && strings.Contains(string(configYAML), remoteURL) {
+			t.Errorf("refused push still persisted sync.remote; config.yaml:\n%s", configYAML)
+		}
+		if lsOut, lsErr := exec.Command("git", "ls-remote", remoteURL, "refs/dolt/data").Output(); lsErr == nil && len(strings.TrimSpace(string(lsOut))) != 0 {
+			t.Errorf("refused push still uploaded issue history: %s", lsOut)
+		}
+	})
+
 	t.Run("dolt_push_lazily_adopts_later_git_origin", func(t *testing.T) {
 		bareDir := filepath.Join(t.TempDir(), "later-origin.git")
 		runGitForBootstrapTest(t, "", "init", "--bare", "-b", "main", bareDir)
@@ -502,11 +538,16 @@ func TestEmbeddedInit(t *testing.T) {
 		runGitForBootstrapTest(t, dir, "remote", "add", "origin", remoteURL)
 		runGitForBootstrapTest(t, dir, "push", "-u", "origin", "main")
 
-		bdDolt(t, bd, dir, "push")
+		// --yes is the scripted consent for git-origin adoption (#5068). The
+		// capability this subtest covers is unchanged; only the consent is
+		// new, and a test process has no TTY so adoption now fails closed
+		// without it. The refusal itself is covered by
+		// dolt_push_refuses_to_adopt_without_consent below.
+		bdDolt(t, bd, dir, "push", "--yes")
 
 		out := bdDolt(t, bd, dir, "remote", "list")
 		if !strings.Contains(out, "origin") || !strings.Contains(out, remoteURL) {
-			t.Fatalf("bd dolt push should adopt later git origin %q; remote list:\n%s", remoteURL, out)
+			t.Fatalf("bd dolt push --yes should adopt later git origin %q; remote list:\n%s", remoteURL, out)
 		}
 
 		configYAML, err := os.ReadFile(filepath.Join(dir, ".beads", "config.yaml"))
@@ -548,7 +589,8 @@ func TestEmbeddedInit(t *testing.T) {
 		initGitRepoAt(t, ambientDir)
 		runGitForBootstrapTest(t, ambientDir, "remote", "add", "origin", ambientURL)
 
-		cmd := exec.Command(bd, "-C", targetDir, "dolt", "push")
+		// --yes: see the note in dolt_push_lazily_adopts_later_git_origin.
+		cmd := exec.Command(bd, "-C", targetDir, "dolt", "push", "--yes")
 		cmd.Dir = ambientDir
 		cmd.Env = bdEnv(ambientDir)
 		if out, err := cmd.CombinedOutput(); err != nil {
