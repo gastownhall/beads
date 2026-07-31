@@ -72,7 +72,7 @@ Remote server authentication (password + TLS) is NOT stored via 'bd dolt set'
   BEADS_CREDENTIALS_FILE    Optional path to credentials file
 
   Default credentials file: ~/.config/beads/credentials (Linux/macOS)
-                            %APPDATA%\\beads\\credentials (Windows)
+                            %APPDATA%\beads\credentials (Windows)
   Format (INI, section = host:port of the resolved connection):
     [127.0.0.1:3307]
     password = secret
