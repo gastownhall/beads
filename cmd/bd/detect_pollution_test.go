@@ -137,3 +137,19 @@ func TestDetectTestPollution_PrefixSequentialIDShortDescriptionScoresHigh(t *tes
 		t.Fatalf("score = %v, want >= 0.9 (high confidence)", got[0].score)
 	}
 }
+
+func TestDetectTestPollution_PrefixHashIDThinDescriptionAtBoundary(t *testing.T) {
+	// Prefixed title (0.4) + hash id + thin description (0.3) = 0.70 (GH#5137):
+	// flagged for review, but below the 0.9 band clean mode acts on.
+	issues := []*types.Issue{
+		mkPollutionIssue("dcr-a3f9", "test-driver.sh isolation broken — constants.sh clobbers env",
+			"Broke isolation", types.StatusOpen, types.TypeBug),
+	}
+	got := detectTestPollution(issues)
+	if len(got) != 1 {
+		t.Fatalf("expected boundary fixture to be flagged for review, got %d hits", len(got))
+	}
+	if got[0].score < 0.7 || got[0].score >= 0.9 {
+		t.Fatalf("score = %v, want exactly 0.70 (flagged, but below --clean's 0.9 high-confidence gate)", got[0].score)
+	}
+}

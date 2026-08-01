@@ -30,7 +30,8 @@ func isTestIssue(title string) bool {
 	return testPrefixPattern.MatchString(strings.ToLower(title))
 }
 
-// detectTestPollution scores candidates that look like leaked test fixtures (GH#5025); see the inline signal comments below for the corroboration policy.
+// detectTestPollution scores candidates that look like leaked test fixtures (GH#5025);
+// see the inline signal comments below for the corroboration policy.
 func detectTestPollution(issues []*types.Issue) []pollutionResult {
 	var results []pollutionResult
 	sequentialPattern := regexp.MustCompile(`^[a-z]+-\d+$`)
@@ -80,6 +81,7 @@ func detectTestPollution(issues []*types.Issue) []pollutionResult {
 		} else if len(desc) < 20 {
 			// Bump applies only with a test-prefixed title (GH#5137): counter-mode
 			// "prefix-N" IDs alone must not push a real issue over threshold.
+			// Deliberately clears 0.7 on prefix+thin alone; see the boundary test.
 			weight := 0.2
 			if hasPrefix {
 				weight = 0.3
