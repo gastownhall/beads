@@ -306,15 +306,16 @@ var _ storage.ExternalRefHistoryQuerier = (*DoltStore)(nil)
 
 // DoltStore implements the Storage interface using Dolt
 type DoltStore struct {
-	db            *sql.DB
-	dbPath        string       // Path to Dolt data directory (server root, e.g. .beads/dolt/)
-	beadsDir      string       // Path to .beads directory (parent of dbPath)
-	database      string       // Database name (subdirectory under dbPath)
-	closed        atomic.Bool  // Tracks whether Close() has been called
-	connStr       string       // Connection string for reconnection
-	mu            sync.RWMutex // Protects concurrent access
-	readOnly      bool         // True if opened in read-only mode
-	credentialKey []byte       // Random encryption key for federation credentials
+	db             *sql.DB
+	dbPath         string       // Path to Dolt data directory (server root, e.g. .beads/dolt/)
+	beadsDir       string       // Path to .beads directory (parent of dbPath)
+	database       string       // Database name (subdirectory under dbPath)
+	closed         atomic.Bool  // Tracks whether Close() has been called
+	connStr        string       // Connection string for reconnection
+	serverEndpoint string       // Exact endpoint bound to bootstrap reset authority
+	mu             sync.RWMutex // Protects concurrent access
+	readOnly       bool         // True if opened in read-only mode
+	credentialKey  []byte       // Random encryption key for federation credentials
 
 	// localActiveDatabaseDir is the exact active database directory when this
 	// store instance has authoritative local filesystem access. It is resolved
@@ -1743,6 +1744,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		database:               cfg.Database,
 		localActiveDatabaseDir: resolveLocalActiveDatabaseDir(cfg),
 		connStr:                connStr,
+		serverEndpoint:         serverEndpointIdentity(cfg),
 		breaker:                breaker,
 		committerName:          cfg.CommitterName,
 		committerEmail:         cfg.CommitterEmail,
@@ -1812,7 +1814,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// ReadOnly for schema — the forward-drift guard above still protects a stale client
 	// binary.
 	if !cfg.ReadOnly && !cfg.Gateway {
-		if err := store.initSchema(ctx, dbFacts.created); err != nil {
+		if err := store.initSchema(ctx, dbFacts.bootstrapHeal); err != nil {
 			return nil, fmt.Errorf("failed to initialize schema: %w", err)
 		}
 	}
@@ -2091,16 +2093,19 @@ func applyPoolLimits(db *sql.DB, cfg *Config) {
 }
 
 // serverConnFacts reports what openServerConnection established about the
-// target database while connecting. The two fields are deliberately NOT
-// inverses of each other: for a gateway database, existence is never probed,
-// so both are false — neither "we created it" nor "it was already there" is
-// proven, and each caller's gate must fail closed on its own terms.
+// target database while connecting. Creation and prior existence are
+// deliberately NOT inverses: for a gateway database, existence is never
+// probed, so neither is proven and each caller's gate fails closed.
 type serverConnFacts struct {
 	// created reports whether THIS call's bare CREATE DATABASE won the
-	// ownership arbitration and actually created the database — server-mode's
-	// analog of the uow path's `created` signal (#5042). Threaded through to
-	// initSchema so only the proven creator arms schema.WithFreshBootstrapHeal.
+	// ownership arbitration and actually created the database.
 	created bool
+
+	// bootstrapHeal carries one-shot reset authority bound to the exact
+	// endpoint, server UUID, database, and initial HEAD captured after this
+	// call created and successfully connected to a pristine database. A nil
+	// capability always fails closed.
+	bootstrapHeal *schema.FreshBootstrapHealCapability
 
 	// alreadyExisted reports whether the database was proven to exist on the
 	// server before this call: either the SHOW DATABASES probe found it, or
@@ -2271,8 +2276,37 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 		return nil, "", serverConnFacts{}, fmt.Errorf("database %q not available after CREATE DATABASE: %w", cfg.Database, err)
 	}
 
+	var bootstrapHeal *schema.FreshBootstrapHealCapability
+	if created {
+		conn, connErr := db.Conn(ctx)
+		if connErr != nil {
+			return nil, "", serverConnFacts{}, fmt.Errorf("capture fresh database identity: pin connection: %w", connErr)
+		}
+		bootstrapHeal, err = schema.CaptureFreshBootstrapHealCapability(
+			ctx, conn, serverEndpointIdentity(cfg), cfg.Database,
+		)
+		_ = conn.Close()
+		if err != nil {
+			return nil, "", serverConnFacts{}, fmt.Errorf("capture fresh database identity: %w", err)
+		}
+	}
+
 	connReady = true
-	return db, connStr, serverConnFacts{created: created, alreadyExisted: dbExists}, nil
+	return db, connStr, serverConnFacts{
+		created:        created,
+		bootstrapHeal:  bootstrapHeal,
+		alreadyExisted: dbExists,
+	}, nil
+}
+
+// serverEndpointIdentity returns the exact configured transport endpoint. It
+// is captured with fresh-bootstrap authority and must match the migration
+// connection's endpoint before that authority can be consumed.
+func serverEndpointIdentity(cfg *Config) string {
+	if cfg.ServerSocket != "" {
+		return "unix:" + cfg.ServerSocket
+	}
+	return "tcp:" + net.JoinHostPort(cfg.ServerHost, strconv.Itoa(cfg.ServerPort))
 }
 
 // databaseExistsOnServer checks if a database with the exact given name exists
@@ -2301,20 +2335,17 @@ func databaseExistsOnServer(ctx context.Context, db *sql.DB, name string) (bool,
 // applied versions in schema_migrations and backfills legacy config-driven
 // tables. Returns the number of migrations applied.
 func initSchemaOnDB(ctx context.Context, db *sql.DB) (int, error) {
-	return initSchemaOnDBOwnership(ctx, db, false)
+	return initSchemaOnDBWithBootstrapHeal(ctx, db, nil, "")
 }
 
-// initSchemaOnDBOwnership is initSchemaOnDB with the fresh-bootstrap
-// ownership signal for the #4566 dirty-table guard self-heal
-// (gastownhall/beads#5012), ported from the uow path's initSchema (#5042):
-// createdDatabase must be true only when the caller proved — via the
-// bare-CREATE-DATABASE ownership arbitration in openServerConnection — that
-// THIS process's open created the target database. On a database this init
-// created, dirty tables a retry finds can only be this same process's own
-// half-applied migration step (a session that died between a step's SQL and
-// its per-step Dolt commit), never pre-existing user data, so
-// schema.WithFreshBootstrapHeal is safe to arm.
-func initSchemaOnDBOwnership(ctx context.Context, db *sql.DB, createdDatabase bool) (int, error) {
+// initSchemaOnDBWithBootstrapHeal threads one-shot, incarnation-bound reset
+// authority into the migration lock. A nil capability always fails closed.
+func initSchemaOnDBWithBootstrapHeal(
+	ctx context.Context,
+	db *sql.DB,
+	bootstrapHeal *schema.FreshBootstrapHealCapability,
+	endpoint string,
+) (int, error) {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("schema: pin connection: %w", err)
@@ -2327,8 +2358,8 @@ func initSchemaOnDBOwnership(ctx context.Context, db *sql.DB, createdDatabase bo
 	}
 
 	var opts []schema.MigrateLockOption
-	if createdDatabase {
-		opts = append(opts, schema.WithFreshBootstrapHeal())
+	if bootstrapHeal != nil {
+		opts = append(opts, schema.WithFreshBootstrapHeal(bootstrapHeal, endpoint))
 	}
 	applied, err := schema.MigrateUpWithLock(ctx, conn, dbName, opts...)
 	if err != nil {
@@ -2348,17 +2379,18 @@ func initSchemaOnDBWithRetry(ctx context.Context, db *sql.DB) (int, error) {
 // retried with them instead of failing the open fast (bd-6dnrw.30); a
 // *schema.RemoteMigrateGateError refusal stays permanent.
 func initSchemaOnDBWithRetryAndGate(ctx context.Context, db *sql.DB, gate func(context.Context, *sql.DB) error) (int, error) {
-	return initSchemaOnDBWithRetryAndGateOwnership(ctx, db, gate, false)
+	return initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, db, gate, nil, "")
 }
 
-// initSchemaOnDBWithRetryAndGateOwnership is initSchemaOnDBWithRetryAndGate
-// with the fresh-bootstrap ownership signal (see initSchemaOnDBOwnership)
-// threaded to every retry attempt. createdDatabase is fixed for the whole
-// retry loop: unlike the uow path, where database creation is retried inside
-// the same loop that runs the migration, server mode creates the database
-// exactly once in openServerConnection, before this loop starts — so there is
-// no "re-assert on retry" case to port here.
-func initSchemaOnDBWithRetryAndGateOwnership(ctx context.Context, db *sql.DB, gate func(context.Context, *sql.DB) error, createdDatabase bool) (int, error) {
+// initSchemaOnDBWithRetryAndGateBootstrapHeal shares one capability across the
+// outer retry loop. Once consumed, no later retry can issue another reset.
+func initSchemaOnDBWithRetryAndGateBootstrapHeal(
+	ctx context.Context,
+	db *sql.DB,
+	gate func(context.Context, *sql.DB) error,
+	bootstrapHeal *schema.FreshBootstrapHealCapability,
+	endpoint string,
+) (int, error) {
 	// Schema initialization for server mode is idempotent. Retry transient
 	// Dolt startup/catalog races and contended migration-lock attempts so
 	// concurrent bd processes converge instead of failing one unlucky waiter.
@@ -2378,7 +2410,7 @@ func initSchemaOnDBWithRetryAndGateOwnership(ctx context.Context, db *sql.DB, ga
 			}
 		}
 		var schemaErr error
-		applied, schemaErr = initSchemaOnDBOwnership(ctx, db, createdDatabase)
+		applied, schemaErr = initSchemaOnDBWithBootstrapHeal(ctx, db, bootstrapHeal, endpoint)
 		if schemaErr != nil && isRetryableError(schemaErr) {
 			return schemaErr
 		}
@@ -2390,12 +2422,7 @@ func initSchemaOnDBWithRetryAndGateOwnership(ctx context.Context, db *sql.DB, ga
 	return applied, err
 }
 
-// initSchema runs pending schema migrations for a freshly opened store.
-// createdDatabase must be true only when this open's openServerConnection
-// call proved (via bare-CREATE ownership arbitration) that it created the
-// target database — see initSchemaOnDBOwnership for why that arms
-// schema.WithFreshBootstrapHeal (gastownhall/beads#5012, #5042).
-func (s *DoltStore) initSchema(ctx context.Context, createdDatabase bool) error {
+func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshBootstrapHealCapability) error {
 	// Schema migrations can run arbitrarily long (e.g. full-table recomputes
 	// such as the is_blocked backfill in migration 0047). The main connection
 	// pool sets a 10s ReadTimeout (see buildServerDSN); a slow migration over
@@ -2446,7 +2473,7 @@ func (s *DoltStore) initSchema(ctx context.Context, createdDatabase bool) error 
 	gate := func(ctx context.Context, db *sql.DB) error {
 		return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
 	}
-	_, err = initSchemaOnDBWithRetryAndGateOwnership(ctx, migDB, gate, createdDatabase)
+	_, err = initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, migDB, gate, bootstrapHeal, s.serverEndpoint)
 	return err
 }
 
