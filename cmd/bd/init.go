@@ -1762,11 +1762,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		}
 
 		// Auto-commit Dolt state so bd doctor doesn't warn about uncommitted
-		// changes and users don't need a separate "bd vc commit" step. Skipped in
-		// gateway mode: the shared server owns its own history and the credential
-		// may be read-only, so bd must not issue DOLT_ADD/DOLT_COMMIT against it.
+		// changes and users don't need a separate "bd vc commit" step. Init
+		// intentionally writes issue_prefix to config, while ordinary Commit
+		// excludes config to avoid sweeping unrelated stale values. Skip this in
+		// gateway mode: the shared server owns its history and the credential may
+		// be read-only, so bd must not issue DOLT_ADD/DOLT_COMMIT against it.
 		if shouldWriteInitStateToDB(doltCfg.Gateway) {
-			if err := store.Commit(ctx, "bd init"); err != nil {
+			if err := commitInitState(ctx, store); err != nil {
 				// Non-fatal: some setups (e.g. no tables yet) may have nothing to commit
 				if !strings.Contains(err.Error(), "nothing to commit") {
 					fmt.Fprintf(os.Stderr, "Warning: failed to commit initial state: %v\n", err)
@@ -2970,6 +2972,18 @@ func isEmptyRemoteCloneError(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "contains no dolt data")
+}
+
+type initStateCommitter interface {
+	CommitWithConfig(context.Context, string) error
+}
+
+// commitInitState commits the configuration init deliberately created as well
+// as the initial schema state. The ordinary Commit contract excludes config to
+// avoid sweeping unrelated stale values, so using it here leaves every fresh
+// database dirty immediately after a successful init.
+func commitInitState(ctx context.Context, store initStateCommitter) error {
+	return store.CommitWithConfig(ctx, "bd init")
 }
 
 // verifyMetadata writes a metadata field and verifies the write succeeded.
