@@ -42,13 +42,15 @@ cd "$REPO_ROOT" || exit 1
 source ./.buildflags || { echo "build-examples: cannot source .buildflags" >&2; exit 1; }
 
 # Bash 3.2 compatible (stock macOS ships 3.2, which has no `mapfile`), and no
-# GNU-only `xargs -r`. NUL-delimited so a path containing whitespace cannot be
-# split — `git ls-files | xargs -n1 dirname` turned "examples/has space/go.mod"
-# into two bogus entries.
+# GNU-only `xargs -r` or `sort -z` (BSD sort has no -z; a sort stage would have
+# emptied the pipeline on macOS — and `git ls-files` output is already sorted).
+# NUL-delimited so a path containing whitespace cannot be split —
+# `git ls-files | xargs -n1 dirname` turned "examples/has space/go.mod" into
+# two bogus entries.
 modules=()
 while IFS= read -r -d '' f; do
     modules+=("$(dirname "$f")")
-done < <(git ls-files -z 'examples/*/go.mod' | sort -z)
+done < <(git ls-files -z 'examples/*/go.mod')
 
 if [[ "${#modules[@]}" -eq 0 ]]; then
     # Not a pass. Either examples/ was restructured, or this is running outside
