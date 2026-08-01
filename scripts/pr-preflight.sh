@@ -317,12 +317,18 @@ if [[ "$base_red_count" -eq 0 && "$base_green_count" -gt 0 ]]; then
   # undetermined base the "while the base branch shows green" explanation
   # would contradict the warn printed just above.
   pr_gate_runs=$(gh run list --repo "$repo" --event pull_request --status completed \
-    --limit 60 --json conclusion,headBranch,workflowName,createdAt,url 2>/dev/null) || pr_gate_runs=""
+    --limit 60 --json conclusion,headBranch,workflowName,workflowDatabaseId,createdAt,url 2>/dev/null) || pr_gate_runs=""
   # gh can exit 0 with non-JSON (or empty) output; treat anything that is not
   # a JSON array the same as an empty sample rather than let jq abort under -e.
   jq -e 'type == "array"' >/dev/null 2>&1 <<<"${pr_gate_runs:-}" || pr_gate_runs='[]'
+  # Grouped by workflowDatabaseId (stable identity), not display name: two
+  # workflow files may share a legal name:, and org/ruleset runs can have no
+  # name at all. Known limitation, accepted for a warn-only supplemental
+  # detector: the sample is repo-wide, so runs from PRs targeting other base
+  # branches are mixed in — resolving each run's PR to filter by base would
+  # cost one API call per run.
   pr_gate_broken=$(jq '
-    [group_by(.workflowName)[]
+    [group_by(.workflowDatabaseId)[]
      | { workflow: (.[0].workflowName // "unknown"),
          decisive: [.[] | select(
            (.conclusion // "") == "success" or
