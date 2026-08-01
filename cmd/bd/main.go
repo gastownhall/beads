@@ -1886,13 +1886,22 @@ func flushBatchCommitOnShutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if err := st.Commit(ctx, "bd: flush pending changes on shutdown"); err != nil {
+	// CommitPending reports atomically whether a commit actually landed, so a
+	// clean shutdown stays quiet without spending the 5s flush budget on
+	// HEAD-reporting probes before the commit itself (and without racing a
+	// concurrent writer's HEAD movement the way a before/after compare would).
+	committed, err := st.CommitPending(ctx, getActorWithGit())
+	if err != nil {
 		if !isDoltNothingToCommit(err) {
 			fmt.Fprintf(os.Stderr, "\nWarning: failed to flush batch commit on shutdown: %v\n", err)
 		}
-	} else {
-		fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
+		return
 	}
+	if !committed {
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "\nFlushed pending batch commit on shutdown\n")
 }
 
 // validateWorkspaceIdentity checks that the project identity from metadata.json
