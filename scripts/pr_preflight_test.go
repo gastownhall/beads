@@ -375,6 +375,25 @@ func TestPRPreflightPRGateHealthSample(t *testing.T) {
 		}
 	})
 
+	t.Run("stays warn-only even under PR_PREFLIGHT_BLOCK_RED_BASE=1", func(t *testing.T) {
+		// The warn-only property is the load-bearing one: mybd's pr-babysit
+		// classifies any unrecognized [block] line as a genuine merge blocker
+		// and parks merge lanes on it, and it withholds the base-fix
+		// exception whenever a non-red-base block is present. This detector
+		// must therefore never escalate to a block, regardless of the
+		// red-base escalation env var.
+		run := runPRPreflightWithFakeGH(t, preflightFixture{prGateRunList: sixRunsThreeHeadsAllFailed, blockRedBase: "1"})
+		if run.err != nil {
+			t.Fatalf("expected warn-only exit even with PR_PREFLIGHT_BLOCK_RED_BASE=1, got error: %v\n%s", run.err, run.output)
+		}
+		if !strings.Contains(run.output, "[warn] PR gate workflow 'PR CI' appears broken") {
+			t.Fatalf("expected the broken-PR-gate warn to still fire:\n%s", run.output)
+		}
+		if strings.Contains(run.output, "[block] PR gate") {
+			t.Fatalf("PR-gate detector must never emit a [block] line:\n%s", run.output)
+		}
+	})
+
 	t.Run("one success in the workflow's sample stays silent", func(t *testing.T) {
 		mostlyFailedOneSuccess := strings.Replace(sixRunsThreeHeadsAllFailed, `"conclusion":"failure","headBranch":"branch-c","workflowName":"PR CI","createdAt":"2026-07-28T05:00:00Z"`, `"conclusion":"success","headBranch":"branch-c","workflowName":"PR CI","createdAt":"2026-07-28T05:00:00Z"`, 1)
 		run := runPRPreflightWithFakeGH(t, preflightFixture{prGateRunList: mostlyFailedOneSuccess})

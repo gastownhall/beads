@@ -327,7 +327,7 @@ if [[ "$base_red_count" -eq 0 ]]; then
      | select((.decisive | length) >= 5)
      | select((.decisive | map(.headBranch) | unique | length) >= 3)
      | select(all(.decisive[]; (.conclusion // "") | test("^(failure|timed_out|action_required|startup_failure)$")))
-    ] | .[0] // empty' <<<"$pr_gate_runs")
+    ] | .[0] // empty' <<<"$pr_gate_runs") || pr_gate_broken=""
   if [[ -n "$pr_gate_broken" ]]; then
     pr_gate_workflow=$(jq -r '.workflow' <<<"$pr_gate_broken")
     pr_gate_count=$(jq -r '.decisive | length' <<<"$pr_gate_broken")
