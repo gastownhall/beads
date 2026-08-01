@@ -72,16 +72,23 @@ jobs:
   # modules failed a plain `go build` on main with "updates to go.mod needed".
   # Examples are the first code a new user copies; this keeps them buildable.
   #
-  # Deliberately NOT in ci-gate's required list yet. Because of the `replace`
-  # directive, any root go.mod change that is not mirrored into the examples
-  # fails this job, so making it blocking imposes a "tidy the examples too"
-  # step on every dependency bump. That is a maintainer call about contributor
-  # friction, not something to decide in the PR that adds the check — the job
-  # is visible on the checks list either way. Promote it by adding
+  # Advisory on purpose (continue-on-error), and NOT in ci-gate's required list.
+  #
+  # Because of the `replace` directive, any root go.mod change that is not
+  # mirrored into the examples fails this job. Whether that should block a merge
+  # is a maintainer call about contributor friction, so this PR does not make it
+  # one. But "leave it out of ci-gate" is NOT the same as "non-blocking":
+  # pr-preflight and the pr-babysit merge patrol both gate on the raw
+  # statusCheckRollup, not on ci-gate membership, so a red job here would stall
+  # the merge lane repo-wide while claiming to be optional. continue-on-error is
+  # the only posture that is genuinely advisory.
+  #
+  # To promote it to a real gate: drop continue-on-error, then add
   # `build-examples` to ci-gate's `needs`, `CI_GATE_REQUIRED`, and its env map.
   build-examples:
     name: Build example modules
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -90,7 +97,7 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Build every module under examples/
+      - name: Type-check every module under examples/
         run: ./scripts/build-examples.sh
 
   # Fast check: every `go build|test|run|generate|install` invocation in
